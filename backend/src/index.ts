@@ -88,6 +88,17 @@ app.notFound((c) => {
 app.onError((err, c) => {
   console.error("Unhandled error:", err);
 
+  // Check if it's a validation error from zValidator
+  if (err.message.includes("Malformed") || err.message.includes("JSON")) {
+    return c.json(
+      {
+        error: "Bad Request",
+        message: "Invalid JSON in request body",
+      },
+      400
+    );
+  }
+
   // Don't expose internal error details in production
   const isDev = c.env.API_BASE_URL?.includes("dev") || c.env.API_BASE_URL?.includes("localhost");
 
