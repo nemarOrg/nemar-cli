@@ -348,3 +348,84 @@ describe("CLI Error Handling", () => {
     expect(stderr).toContain("missing required argument");
   });
 });
+
+describe("CLI Dataset Validate", () => {
+  const testDatasetDir = join(import.meta.dir, ".test-bids-dataset");
+
+  beforeAll(() => {
+    // Create minimal test BIDS dataset
+    mkdirSync(testDatasetDir, { recursive: true });
+    writeFileSync(
+      join(testDatasetDir, "dataset_description.json"),
+      JSON.stringify({
+        Name: "Test Dataset",
+        BIDSVersion: "1.9.0",
+        Authors: ["Test Author"],
+      })
+    );
+    writeFileSync(join(testDatasetDir, "README"), "# Test Dataset\n\nThis is a test.");
+  });
+
+  afterAll(() => {
+    // Cleanup test dataset
+    try {
+      rmSync(testDatasetDir, { recursive: true, force: true });
+    } catch {
+      // Ignore cleanup errors
+    }
+  });
+
+  test("nemar dataset validate --help shows options", async () => {
+    const { stdout, exitCode } = await runCli(["dataset", "validate", "--help"]);
+
+    expect(exitCode).toBe(0);
+    expect(stdout).toContain("Validate a BIDS dataset locally");
+    expect(stdout).toContain("--json");
+    expect(stdout).toContain("--config");
+    expect(stdout).toContain("--recursive");
+  });
+
+  test("nemar dataset validate --version-info shows validator version", async () => {
+    const { stdout, exitCode } = await runCli(["dataset", "validate", "--version-info"]);
+
+    expect(exitCode).toBe(0);
+    expect(stdout).toContain("BIDS Validator:");
+    expect(stdout).toContain("Deno:");
+  });
+
+  test("nemar dataset validate with valid dataset succeeds", async () => {
+    const { stdout, exitCode } = await runCli(["dataset", "validate", testDatasetDir]);
+
+    expect(exitCode).toBe(0);
+    expect(stdout).toContain("Dataset is valid BIDS");
+    expect(stdout).toContain("Summary:");
+  });
+
+  test("nemar dataset validate --json outputs JSON", async () => {
+    const { stdout, exitCode } = await runCli(["dataset", "validate", testDatasetDir, "--json"]);
+
+    expect(exitCode).toBe(0);
+    // Find the JSON object in the output (starts with { and ends with })
+    const jsonMatch = stdout.match(/\{[\s\S]*\}/);
+    expect(jsonMatch).not.toBeNull();
+    const result = JSON.parse(jsonMatch![0]);
+    expect(result.valid).toBe(true);
+    expect(Array.isArray(result.issues)).toBe(true);
+    expect(result.summary).toBeDefined();
+  });
+
+  test("nemar dataset validate with non-existent path fails", async () => {
+    const { stdout, exitCode } = await runCli(["dataset", "validate", "/nonexistent/path"]);
+
+    expect(exitCode).toBe(1);
+    expect(stdout).toContain("Path does not exist");
+  });
+
+  test("nemar dataset validate with non-BIDS directory fails", async () => {
+    const { stdout, exitCode } = await runCli(["dataset", "validate", "/tmp"]);
+
+    expect(exitCode).toBe(1);
+    expect(stdout).toContain("Not a valid BIDS dataset");
+    expect(stdout).toContain("dataset_description.json");
+  });
+});
