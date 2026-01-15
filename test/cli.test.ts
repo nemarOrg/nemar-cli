@@ -610,3 +610,145 @@ describe("CLI Admin Revert", () => {
     expect(stdout.toLowerCase()).toContain("not found");
   });
 });
+
+describe("CLI Dataset Collaborator Commands", () => {
+  describe("nemar dataset request-access", () => {
+    test("--help shows options", async () => {
+      const { stdout, exitCode } = await runCli(["dataset", "request-access", "--help"]);
+
+      expect(exitCode).toBe(0);
+      expect(stdout).toContain("Request collaborator access");
+      expect(stdout).toContain("dataset-id");
+    });
+
+    test("requires authentication", async () => {
+      const ctx = createTestContext();
+
+      const { stdout, exitCode } = await runCli(["dataset", "request-access", "nm000001"], ctx);
+
+      expect(stdout).toContain("Not authenticated");
+    });
+
+    test("non-existent dataset shows error", async () => {
+      const ctx = createTestContext();
+      setTestConfig(ctx, {
+        apiKey: TEST_CONFIG.userApiKey,
+        apiUrl: TEST_CONFIG.apiUrl,
+        username: "test-user",
+      });
+
+      const { stdout, exitCode } = await runCli(["dataset", "request-access", "nm999999"], ctx);
+
+      expect(stdout.toLowerCase()).toContain("not found");
+    });
+  });
+
+  describe("nemar dataset invite", () => {
+    test("--help shows options", async () => {
+      const { stdout, exitCode } = await runCli(["dataset", "invite", "--help"]);
+
+      expect(exitCode).toBe(0);
+      expect(stdout).toContain("Invite a user");
+      expect(stdout).toContain("username");
+      expect(stdout).toContain("dataset-id");
+    });
+
+    test("requires authentication", async () => {
+      const ctx = createTestContext();
+
+      const { stdout, exitCode } = await runCli(["dataset", "invite", "someuser", "nm000001"], ctx);
+
+      expect(stdout).toContain("Not authenticated");
+    });
+
+    test("non-admin non-owner cannot invite", async () => {
+      const ctx = createTestContext();
+      setTestConfig(ctx, {
+        apiKey: TEST_CONFIG.userApiKey,
+        apiUrl: TEST_CONFIG.apiUrl,
+        username: "test-user",
+      });
+
+      // Try to invite to a dataset test-user doesn't own
+      const { stdout, exitCode } = await runCli(["dataset", "invite", "someuser", "nm000001"], ctx);
+
+      // Either "not found" (if dataset doesn't exist) or "owner or admin" (if forbidden)
+      expect(
+        stdout.toLowerCase().includes("not found") ||
+        stdout.toLowerCase().includes("owner") ||
+        stdout.toLowerCase().includes("admin")
+      ).toBe(true);
+    });
+  });
+
+  describe("nemar dataset collaborators", () => {
+    test("--help shows options", async () => {
+      const { stdout, exitCode } = await runCli(["dataset", "collaborators", "--help"]);
+
+      expect(exitCode).toBe(0);
+      expect(stdout).toContain("List collaborators");
+      expect(stdout).toContain("dataset-id");
+      expect(stdout).toContain("--json");
+    });
+
+    test("requires authentication", async () => {
+      const ctx = createTestContext();
+
+      const { stdout, exitCode } = await runCli(["dataset", "collaborators", "nm000001"], ctx);
+
+      expect(stdout).toContain("Not authenticated");
+    });
+
+    test("non-admin non-owner cannot list collaborators", async () => {
+      const ctx = createTestContext();
+      setTestConfig(ctx, {
+        apiKey: TEST_CONFIG.userApiKey,
+        apiUrl: TEST_CONFIG.apiUrl,
+        username: "test-user",
+      });
+
+      // Try to list collaborators for a dataset test-user doesn't own
+      const { stdout, exitCode } = await runCli(["dataset", "collaborators", "nm000001"], ctx);
+
+      // Either "not found" or "owner or admin" forbidden
+      expect(
+        stdout.toLowerCase().includes("not found") ||
+        stdout.toLowerCase().includes("owner") ||
+        stdout.toLowerCase().includes("admin")
+      ).toBe(true);
+    });
+
+    test("admin can list collaborators with --json", async () => {
+      const ctx = createTestContext();
+      setTestConfig(ctx, {
+        apiKey: TEST_CONFIG.adminApiKey,
+        apiUrl: TEST_CONFIG.apiUrl,
+        username: "test-admin",
+      });
+
+      // First get a dataset that exists
+      const { stdout: listOut } = await runCli(["dataset", "list", "--json"], ctx);
+      let datasets: { dataset_id: string }[] = [];
+      try {
+        datasets = JSON.parse(listOut);
+      } catch {
+        return; // Skip if no datasets
+      }
+
+      if (datasets.length === 0) {
+        return;
+      }
+
+      const { stdout, exitCode } = await runCli(
+        ["dataset", "collaborators", datasets[0].dataset_id, "--json"],
+        ctx
+      );
+
+      expect(exitCode).toBe(0);
+      const result = JSON.parse(stdout);
+      expect(result.dataset_id).toBe(datasets[0].dataset_id);
+      expect(Array.isArray(result.collaborators)).toBe(true);
+      expect(typeof result.count).toBe("number");
+    });
+  });
+});

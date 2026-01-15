@@ -494,6 +494,182 @@ describe("DOI/Zenodo API", () => {
   });
 });
 
+describe("Dataset Collaborators API", () => {
+  describe("POST /datasets/:id/request-access", () => {
+    test("unauthenticated request returns 401", async () => {
+      const { status } = await testRequest("/datasets/nm000001/request-access", {
+        method: "POST",
+      });
+
+      expect(status).toBe(401);
+    });
+
+    test("non-existent dataset returns 404", async () => {
+      const { status, data } = await testRequest<{ error: string }>(
+        "/datasets/nm999999/request-access",
+        { method: "POST" },
+        TEST_CONFIG.userApiKey
+      );
+
+      expect(status).toBe(404);
+    });
+
+    test("invalid dataset ID format returns 400", async () => {
+      const { status } = await testRequest<{ error: string }>(
+        "/datasets/invalid-id/request-access",
+        { method: "POST" },
+        TEST_CONFIG.userApiKey
+      );
+
+      expect(status).toBe(400);
+    });
+  });
+
+  describe("POST /datasets/:id/invite", () => {
+    test("unauthenticated request returns 401", async () => {
+      const { status } = await testRequest("/datasets/nm000001/invite", {
+        method: "POST",
+        body: JSON.stringify({ username: "someone" }),
+      });
+
+      expect(status).toBe(401);
+    });
+
+    test("non-admin non-owner gets 403", async () => {
+      // First get a dataset that test-user doesn't own
+      const { data: datasetsList } = await testRequest<{
+        datasets: Array<{ dataset_id: string; owner_username: string }>;
+      }>("/datasets");
+
+      const otherDataset = datasetsList.datasets.find(
+        (d) => d.owner_username !== "test-user"
+      );
+
+      if (!otherDataset) {
+        // Skip if no suitable dataset exists
+        return;
+      }
+
+      const { status, data } = await testRequest<{ error: string }>(
+        `/datasets/${otherDataset.dataset_id}/invite`,
+        { method: "POST", body: JSON.stringify({ username: "someone" }) },
+        TEST_CONFIG.userApiKey
+      );
+
+      expect(status).toBe(403);
+      expect(data.error).toContain("owner or admin");
+    });
+
+    test("non-existent dataset returns 404", async () => {
+      const { status } = await testRequest<{ error: string }>(
+        "/datasets/nm999999/invite",
+        { method: "POST", body: JSON.stringify({ username: "test-user" }) },
+        TEST_CONFIG.adminApiKey
+      );
+
+      expect(status).toBe(404);
+    });
+
+    test("inviting non-existent user returns 404", async () => {
+      // First get any dataset
+      const { data: datasetsList } = await testRequest<{
+        datasets: Array<{ dataset_id: string }>;
+      }>("/datasets");
+
+      if (datasetsList.datasets.length === 0) {
+        return;
+      }
+
+      const { status, data } = await testRequest<{ error: string }>(
+        `/datasets/${datasetsList.datasets[0].dataset_id}/invite`,
+        { method: "POST", body: JSON.stringify({ username: "nonexistent-user-12345" }) },
+        TEST_CONFIG.adminApiKey
+      );
+
+      expect(status).toBe(404);
+      expect(data.error).toContain("not found");
+    });
+
+    test("missing username returns 400", async () => {
+      const { status } = await testRequest(
+        "/datasets/nm000001/invite",
+        { method: "POST", body: JSON.stringify({}) },
+        TEST_CONFIG.adminApiKey
+      );
+
+      expect(status).toBe(400);
+    });
+  });
+
+  describe("GET /datasets/:id/collaborators", () => {
+    test("unauthenticated request returns 401", async () => {
+      const { status } = await testRequest("/datasets/nm000001/collaborators");
+
+      expect(status).toBe(401);
+    });
+
+    test("non-admin non-owner gets 403", async () => {
+      // First get a dataset that test-user doesn't own
+      const { data: datasetsList } = await testRequest<{
+        datasets: Array<{ dataset_id: string; owner_username: string }>;
+      }>("/datasets");
+
+      const otherDataset = datasetsList.datasets.find(
+        (d) => d.owner_username !== "test-user"
+      );
+
+      if (!otherDataset) {
+        // Skip if no suitable dataset exists
+        return;
+      }
+
+      const { status, data } = await testRequest<{ error: string }>(
+        `/datasets/${otherDataset.dataset_id}/collaborators`,
+        {},
+        TEST_CONFIG.userApiKey
+      );
+
+      expect(status).toBe(403);
+      expect(data.error).toContain("owner or admin");
+    });
+
+    test("non-existent dataset returns 404", async () => {
+      const { status } = await testRequest<{ error: string }>(
+        "/datasets/nm999999/collaborators",
+        {},
+        TEST_CONFIG.adminApiKey
+      );
+
+      expect(status).toBe(404);
+    });
+
+    test("admin can list collaborators for any dataset", async () => {
+      const { data: datasetsList } = await testRequest<{
+        datasets: Array<{ dataset_id: string }>;
+      }>("/datasets");
+
+      if (datasetsList.datasets.length === 0) {
+        return;
+      }
+
+      const { status, data } = await testRequest<{
+        dataset_id: string;
+        collaborators: Array<{ username: string }>;
+        count: number;
+      }>(
+        `/datasets/${datasetsList.datasets[0].dataset_id}/collaborators`,
+        {},
+        TEST_CONFIG.adminApiKey
+      );
+
+      expect(status).toBe(200);
+      expect(data.dataset_id).toBe(datasetsList.datasets[0].dataset_id);
+      expect(Array.isArray(data.collaborators)).toBe(true);
+      expect(typeof data.count).toBe("number");
+    });
+  });
+});
+
 describe("Error Handling", () => {
   test("invalid JSON returns 400", async () => {
     const headers: Record<string, string> = { "Content-Type": "application/json" };
