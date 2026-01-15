@@ -58,12 +58,12 @@ async function request<T>(
     headers,
   });
 
-  const data = await response.json();
+  const data = (await response.json()) as Record<string, unknown>;
 
   if (!response.ok) {
     throw new ApiError(
       response.status,
-      data.error || data.message || "Request failed",
+      (data.error as string) || (data.message as string) || "Request failed",
       data.details
     );
   }
