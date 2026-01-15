@@ -25,9 +25,10 @@ authCommand
   .command("login")
   .description("Authenticate with your API key")
   .option("-k, --key <key>", "API key (or set NEMAR_API_KEY env variable)")
+  .option("-f, --force", "Skip confirmation if already logged in")
   .action(async (options) => {
     // Check for existing authentication
-    if (isAuthenticated()) {
+    if (isAuthenticated() && !options.force) {
       const config = getConfig();
       console.log(chalk.yellow(`Already logged in as ${config.username || "unknown"}`));
       const { confirm } = await inquirer.prompt([
