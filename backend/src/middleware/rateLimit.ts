@@ -23,6 +23,13 @@ type RateLimitContext = Context<{ Bindings: Bindings; Variables: Variables }>;
  * Uses Cloudflare KV with TTL for automatic expiration.
  */
 export async function rateLimiter(c: RateLimitContext, next: Next) {
+  // Check for test bypass header (for CI/CD and integration tests)
+  const testBypassToken = c.req.header("X-Test-Bypass");
+  if (testBypassToken && c.env.TEST_BYPASS_TOKEN && testBypassToken === c.env.TEST_BYPASS_TOKEN) {
+    await next();
+    return;
+  }
+
   const kv = c.env.RATE_LIMIT_KV;
 
   // Get client identifier (IP or authenticated user)

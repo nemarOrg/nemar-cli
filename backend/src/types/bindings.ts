@@ -19,6 +19,7 @@ export interface Bindings {
   AWS_ACCESS_KEY_ID: string;
   AWS_SECRET_ACCESS_KEY: string;
   RESEND_API_KEY: string;
+  TEST_BYPASS_TOKEN?: string; // Optional - for CI/CD rate limit bypass
 }
 
 /**
