@@ -5,10 +5,8 @@ export interface Bindings {
   // D1 Database
   DB: D1Database;
 
-  // KV for rate limiting
-  RATE_LIMIT_KV: KVNamespace;
-
   // Environment variables
+  ENVIRONMENT: "production" | "development";
   API_BASE_URL: string;
   FRONTEND_URL: string;
   AWS_REGION: string;

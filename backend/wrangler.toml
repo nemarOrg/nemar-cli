@@ -11,13 +11,12 @@ database_name = "nemar-db"
 database_id = "0a168b1a-1923-4436-9509-6e4a9b5bb7ae"
 migrations_dir = "src/db/migrations"
 
-# KV for rate limiting
-[[kv_namespaces]]
-binding = "RATE_LIMIT_KV"
-id = "9afb2679c6ea4ed4acd1a5916cf291d7"
+# Note: Rate limiting uses Cache API instead of KV to avoid daily operation limits
+# KV namespace 9afb2679c6ea4ed4acd1a5916cf291d7 is no longer used
 
 # Environment variables
 [vars]
+ENVIRONMENT = "production"
 API_BASE_URL = "https://api.nemar.org"
 FRONTEND_URL = "https://nemar.org"
 AWS_REGION = "us-east-2"
@@ -28,13 +27,26 @@ S3_BUCKET = "nemar"
 # - AWS_ACCESS_KEY_ID
 # - AWS_SECRET_ACCESS_KEY
 # - RESEND_API_KEY
+# - TEST_BYPASS_TOKEN
+# - ZENODO_API_KEY
+# - ZENODO_SANDBOX_API_KEY
 
 # Development environment
-[env.development]
+[env.dev]
 name = "nemar-api-dev"
-[env.development.vars]
-API_BASE_URL = "https://api-dev.nemar.org"
+[[env.dev.d1_databases]]
+binding = "DB"
+database_name = "nemar-db"
+database_id = "0a168b1a-1923-4436-9509-6e4a9b5bb7ae"
+migrations_dir = "src/db/migrations"
+
+[env.dev.vars]
+ENVIRONMENT = "development"
+API_BASE_URL = "https://nemar-api-dev.shirazi-10f.workers.dev"
 FRONTEND_URL = "http://localhost:3000"
+AWS_REGION = "us-east-2"
+S3_BUCKET = "nemar"
+# Note: Rate limiting is disabled in development
 
 # Note: D1 migrations are in src/db/migrations/
 # Run: wrangler d1 migrations apply nemar-db --remote

@@ -2,14 +2,14 @@ name: Tests
 
 on:
   push:
-    branches: [main]
+    branches: [main, dev]
     paths-ignore:
       - 'docs/**'
       - '*.md'
       - 'mkdocs.yml'
       - '.github/workflows/docs.yml'
   pull_request:
-    branches: [main]
+    branches: [main, dev]
     paths-ignore:
       - 'docs/**'
       - '*.md'
@@ -87,7 +87,7 @@ jobs:
       - name: Run CLI unit tests
         run: bun test test/cli.test.ts
 
-  # API integration tests - runs on backend or test changes
+  # API integration tests - uses dev environment (no rate limiting)
   api-test:
     runs-on: ubuntu-latest
     needs: changes
@@ -109,15 +109,15 @@ jobs:
       - name: Install dependencies
         run: bun install
 
-      - name: Run API tests
+      - name: Run API tests against dev environment
         env:
-          TEST_API_URL: https://nemar-api.shirazi-10f.workers.dev
+          # Use dev API - no rate limiting
+          TEST_API_URL: https://nemar-api-dev.shirazi-10f.workers.dev
           TEST_ADMIN_API_KEY: ${{ secrets.TEST_ADMIN_API_KEY }}
           TEST_USER_API_KEY: ${{ secrets.TEST_USER_API_KEY }}
-          TEST_BYPASS_TOKEN: ${{ secrets.TEST_BYPASS_TOKEN }}
         run: bun test test/api.test.ts
 
-  # E2E tests - only on main push with backend or test changes
+  # E2E tests - only on main push, uses dev environment
   e2e-test:
     runs-on: ubuntu-latest
     needs: changes
@@ -153,12 +153,12 @@ jobs:
       - name: Install dependencies
         run: bun install
 
-      - name: Run E2E tests
+      - name: Run E2E tests against dev environment
         env:
-          TEST_API_URL: https://nemar-api.shirazi-10f.workers.dev
+          # Use dev API - no rate limiting
+          TEST_API_URL: https://nemar-api-dev.shirazi-10f.workers.dev
           TEST_ADMIN_API_KEY: ${{ secrets.TEST_ADMIN_API_KEY }}
           TEST_USER_API_KEY: ${{ secrets.TEST_USER_API_KEY }}
-          TEST_BYPASS_TOKEN: ${{ secrets.TEST_BYPASS_TOKEN }}
           AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           GH_TOKEN: ${{ secrets.GH_TOKEN }}

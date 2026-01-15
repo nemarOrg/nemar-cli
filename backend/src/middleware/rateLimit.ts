@@ -1,7 +1,8 @@
 /**
- * Rate limiting middleware using Cloudflare KV
+ * Rate limiting middleware using Cloudflare Cache API
  *
- * Implements a simple sliding window rate limiter.
+ * Uses Cache API instead of KV to avoid daily operation limits.
+ * Cache API has no daily limits and is designed for this use case.
  */
 
 import type { Context, Next } from "hono";
@@ -20,17 +21,23 @@ type RateLimitContext = Context<{ Bindings: Bindings; Variables: Variables }>;
 /**
  * Rate limiting middleware
  *
- * Uses Cloudflare KV with TTL for automatic expiration.
+ * - Disabled in development environment
+ * - Uses Cache API in production (no KV daily limits)
+ * - Supports test bypass for CI/CD
  */
 export async function rateLimiter(c: RateLimitContext, next: Next) {
+  // Skip rate limiting in development
+  if (c.env.ENVIRONMENT === "development") {
+    await next();
+    return;
+  }
+
   // Check for test bypass header (for CI/CD and integration tests)
   const testBypassToken = c.req.header("X-Test-Bypass");
   if (testBypassToken && c.env.TEST_BYPASS_TOKEN && testBypassToken === c.env.TEST_BYPASS_TOKEN) {
     await next();
     return;
   }
-
-  const kv = c.env.RATE_LIMIT_KV;
 
   // Get client identifier (IP or authenticated user)
   const ip = c.req.header("CF-Connecting-IP") || c.req.header("X-Forwarded-For") || "unknown";
@@ -42,12 +49,19 @@ export async function rateLimiter(c: RateLimitContext, next: Next) {
 
   // Create rate limit key
   const keyPrefix = isAuthEndpoint ? "rl:auth:" : "rl:";
-  const key = `${keyPrefix}${ip}`;
+  const cacheKey = new Request(`https://rate-limit.internal/${keyPrefix}${ip}`);
 
   try {
-    // Get current count
-    const current = await kv.get(key);
-    const count = current ? parseInt(current, 10) : 0;
+    const cache = caches.default;
+
+    // Get current count from cache
+    const cached = await cache.match(cacheKey);
+    let count = 0;
+
+    if (cached) {
+      const data = await cached.json() as { count: number };
+      count = data.count;
+    }
 
     if (count >= maxRequests) {
       // Calculate retry-after (approximate)
@@ -69,17 +83,22 @@ export async function rateLimiter(c: RateLimitContext, next: Next) {
       );
     }
 
-    // Increment counter with TTL
-    await kv.put(key, (count + 1).toString(), {
-      expirationTtl: WINDOW_SIZE,
+    // Increment counter and store in cache with TTL
+    const newCount = count + 1;
+    const response = new Response(JSON.stringify({ count: newCount }), {
+      headers: {
+        "Content-Type": "application/json",
+        "Cache-Control": `max-age=${WINDOW_SIZE}`,
+      },
     });
+    await cache.put(cacheKey, response);
 
     // Add rate limit headers to response
     c.header("X-RateLimit-Limit", maxRequests.toString());
-    c.header("X-RateLimit-Remaining", (maxRequests - count - 1).toString());
+    c.header("X-RateLimit-Remaining", (maxRequests - newCount).toString());
   } catch (error) {
-    // If KV fails, log but don't block the request
-    console.error("Rate limit KV error:", error);
+    // If cache fails, log but don't block the request
+    console.error("Rate limit cache error:", error);
   }
 
   await next();
