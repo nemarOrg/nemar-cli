@@ -14,8 +14,22 @@ import { TEST_CONFIG, sleep } from "./setup";
 import { existsSync, unlinkSync, mkdirSync, writeFileSync, readFileSync, copyFileSync } from "fs";
 import { join } from "path";
 
-// Real config path (macOS)
-const CONFIG_DIR = join(process.env.HOME || "", "Library/Preferences/nemar-nodejs");
+// Cross-platform config path (matches Conf library behavior)
+function getConfigDir(): string {
+  const home = process.env.HOME || "";
+  if (process.platform === "darwin") {
+    // macOS: ~/Library/Preferences/nemar-nodejs/
+    return join(home, "Library/Preferences/nemar-nodejs");
+  } else if (process.platform === "win32") {
+    // Windows: %APPDATA%/nemar/
+    return join(process.env.APPDATA || "", "nemar");
+  } else {
+    // Linux: ~/.config/nemar/
+    return join(home, ".config/nemar");
+  }
+}
+
+const CONFIG_DIR = getConfigDir();
 const CONFIG_FILE = join(CONFIG_DIR, "config.json");
 const CONFIG_BACKUP = join(CONFIG_DIR, "config.json.backup");
 
