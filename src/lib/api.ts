@@ -250,6 +250,55 @@ export async function getDataset(datasetId: string): Promise<Dataset> {
   return request<Dataset>(`/datasets/${datasetId}`);
 }
 
+export interface CreateDatasetRequest {
+  name: string;
+  description?: string;
+}
+
+export interface CreateDatasetResponse {
+  message: string;
+  dataset: {
+    id: number;
+    dataset_id: string;
+    name: string;
+    description: string | null;
+    github_repo: string;
+    github_url: string;
+    ssh_url: string;
+    s3_prefix: string;
+  };
+}
+
+/**
+ * Create a new dataset (requires authentication)
+ * Returns dataset info including GitHub repo URL and S3 prefix
+ */
+export async function createDataset(data: CreateDatasetRequest): Promise<CreateDatasetResponse> {
+  return request<CreateDatasetResponse>("/datasets", {
+    method: "POST",
+    body: JSON.stringify(data),
+  }, true);
+}
+
+export interface FinalizeDatasetResponse {
+  message: string;
+  dataset: {
+    dataset_id: string;
+    status: string;
+    github_url: string;
+  };
+}
+
+/**
+ * Finalize a dataset after upload (requires authentication)
+ * Applies branch protection and marks dataset as published
+ */
+export async function finalizeDataset(datasetId: string): Promise<FinalizeDatasetResponse> {
+  return request<FinalizeDatasetResponse>(`/datasets/${datasetId}/finalize`, {
+    method: "POST",
+  }, true);
+}
+
 // ============================================================================
 // Health
 // ============================================================================

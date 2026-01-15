@@ -20,6 +20,7 @@ interface GitHubRepo {
   full_name: string;
   html_url: string;
   clone_url: string;
+  ssh_url: string;
 }
 
 /**
@@ -196,7 +197,7 @@ export async function createRepository(
       name,
       description,
       private: isPrivate,
-      auto_init: true, // Creates initial commit with README
+      auto_init: false, // We push the first commit from CLI
       has_issues: true,
       has_projects: false,
       has_wiki: false,

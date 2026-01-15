@@ -429,3 +429,41 @@ describe("CLI Dataset Validate", () => {
     expect(stdout).toContain("dataset_description.json");
   });
 });
+
+describe("CLI Dataset Upload", () => {
+  test("nemar dataset upload --help shows options", async () => {
+    const { stdout, exitCode } = await runCli(["dataset", "upload", "--help"]);
+
+    expect(exitCode).toBe(0);
+    expect(stdout).toContain("Upload a BIDS dataset to NEMAR");
+    expect(stdout).toContain("--name");
+    expect(stdout).toContain("--description");
+    expect(stdout).toContain("--skip-validation");
+    expect(stdout).toContain("--dry-run");
+    expect(stdout).toContain("--jobs");
+    expect(stdout).toContain("--yes");
+  });
+
+  test("nemar dataset upload requires authentication", async () => {
+    const ctx = createTestContext();
+
+    const { stdout, exitCode } = await runCli(["dataset", "upload", "/tmp/test"], ctx);
+
+    expect(stdout).toContain("Not authenticated");
+    expect(stdout).toContain("nemar auth login");
+  });
+
+  test("nemar dataset upload with non-existent path fails", async () => {
+    const ctx = createTestContext();
+    setTestConfig(ctx, {
+      apiKey: TEST_CONFIG.userApiKey,
+      apiUrl: TEST_CONFIG.apiUrl,
+      username: "test-user",
+    });
+
+    const { stdout, exitCode } = await runCli(["dataset", "upload", "/nonexistent/path"], ctx);
+
+    expect(exitCode).toBe(1);
+    expect(stdout).toContain("Path does not exist");
+  });
+});

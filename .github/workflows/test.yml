@@ -27,13 +27,57 @@ jobs:
       - name: Install dependencies
         run: bun install
 
-      - name: Run tests
+      - name: Run unit and API tests
         env:
           TEST_API_URL: https://nemar-api.shirazi-10f.workers.dev
           TEST_ADMIN_API_KEY: ${{ secrets.TEST_ADMIN_API_KEY }}
           TEST_USER_API_KEY: ${{ secrets.TEST_USER_API_KEY }}
           TEST_BYPASS_TOKEN: ${{ secrets.TEST_BYPASS_TOKEN }}
-        run: bun test
+        run: bun test test/api.test.ts test/cli.test.ts
 
       - name: Type check
         run: bun run tsc --noEmit
+
+  e2e-test:
+    runs-on: ubuntu-latest
+    # Only run E2E tests on main branch pushes (not PRs)
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Setup Deno
+        uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.x
+
+      - name: Install DataLad and git-annex
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y git-annex
+          pip install datalad
+
+      - name: Configure git
+        run: |
+          git config --global user.email "actions@github.com"
+          git config --global user.name "GitHub Actions"
+
+      - name: Install dependencies
+        run: bun install
+
+      - name: Run E2E tests
+        env:
+          TEST_API_URL: https://nemar-api.shirazi-10f.workers.dev
+          TEST_ADMIN_API_KEY: ${{ secrets.TEST_ADMIN_API_KEY }}
+          TEST_USER_API_KEY: ${{ secrets.TEST_USER_API_KEY }}
+          TEST_BYPASS_TOKEN: ${{ secrets.TEST_BYPASS_TOKEN }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+        run: bun test test/e2e-upload.test.ts
