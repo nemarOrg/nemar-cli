@@ -37,60 +37,60 @@ authRoutes.post("/signup", zValidator("json", signupSchema), async (c) => {
   const { username, email, password, github_username } = c.req.valid("json");
   const db = c.env.DB;
 
-  // Validate password strength
-  const passwordCheck = validatePasswordStrength(password);
-  if (!passwordCheck.valid) {
-    return c.json(
-      {
-        error: "Password does not meet requirements",
-        details: passwordCheck.errors,
-      },
-      400
-    );
-  }
-
-  // Check if username already exists
-  const existingUsername = await db
-    .prepare("SELECT id FROM users WHERE username = ?")
-    .bind(username)
-    .first();
-
-  if (existingUsername) {
-    return c.json({ error: "Username already taken" }, 409);
-  }
-
-  // Check if email already exists
-  const existingEmail = await db
-    .prepare("SELECT id FROM users WHERE email = ?")
-    .bind(email)
-    .first();
-
-  if (existingEmail) {
-    return c.json({ error: "Email already registered" }, 409);
-  }
-
-  // Validate GitHub username exists
-  const githubUser = await validateGitHubUsername(github_username, c.env.GITHUB_ADMIN_PAT);
-  if (!githubUser) {
-    return c.json(
-      {
-        error: "GitHub user not found",
-        message: `The GitHub username '${github_username}' does not exist`,
-      },
-      400
-    );
-  }
-
-  // Hash password
-  const passwordHash = await hashPassword(password);
-
-  // Generate verification token
-  const verificationToken = generateVerificationToken();
-  const verificationExpires = generateExpirationTimestamp(24); // 24 hours
-
-  // Insert user
   try {
-    await db
+    // Validate password strength
+        const passwordCheck = validatePasswordStrength(password);
+    if (!passwordCheck.valid) {
+      return c.json(
+        {
+          error: "Password does not meet requirements",
+          details: passwordCheck.errors,
+        },
+        400
+      );
+    }
+
+    // Check if username already exists
+        const existingUsername = await db
+      .prepare("SELECT id FROM users WHERE username = ?")
+      .bind(username)
+      .first();
+
+    if (existingUsername) {
+      return c.json({ error: "Username already taken" }, 409);
+    }
+
+    // Check if email already exists
+        const existingEmail = await db
+      .prepare("SELECT id FROM users WHERE email = ?")
+      .bind(email)
+      .first();
+
+    if (existingEmail) {
+      return c.json({ error: "Email already registered" }, 409);
+    }
+
+    // Validate GitHub username exists
+        const githubUser = await validateGitHubUsername(github_username, c.env.GITHUB_ADMIN_PAT);
+    if (!githubUser) {
+      return c.json(
+        {
+          error: "GitHub user not found",
+          message: `The GitHub username '${github_username}' does not exist`,
+        },
+        400
+      );
+    }
+
+    // Hash password
+        const passwordHash = await hashPassword(password);
+
+    // Generate verification token
+        const verificationToken = generateVerificationToken();
+    const verificationExpires = generateExpirationTimestamp(24); // 24 hours
+
+    // Insert user
+        await db
       .prepare(
         `
       INSERT INTO users (
@@ -101,44 +101,50 @@ authRoutes.post("/signup", zValidator("json", signupSchema), async (c) => {
       )
       .bind(username, email, passwordHash, github_username, verificationToken, verificationExpires)
       .run();
+
+    // Send verification email
+        const verificationUrl = `${c.env.API_BASE_URL}/auth/verify?token=${verificationToken}`;
+
+    try {
+      await sendVerificationEmail(email, username, verificationUrl, c.env.RESEND_API_KEY);
+    } catch (emailError) {
+      console.error("Failed to send verification email:", emailError);
+      // User created but email failed - they can request a new verification
+    }
+
+    // Log audit event
+        await db
+      .prepare(
+        `
+      INSERT INTO audit_log (action, resource_type, resource_id, details)
+      VALUES ('user_signup', 'user', ?, ?)
+    `
+      )
+      .bind(username, JSON.stringify({ email, github_username }))
+      .run();
+
+    return c.json(
+      {
+        message: "Registration successful",
+        next_steps: [
+          "Check your email for a verification link",
+          "Click the link to verify your email address",
+          "Wait for admin approval",
+          "Once approved, you will receive your API key",
+        ],
+      },
+      201
+    );
   } catch (error) {
-    console.error("Failed to insert user:", error);
-    return c.json({ error: "Failed to create account" }, 500);
+    console.error("Signup error:", error);
+    return c.json(
+      {
+        error: "Signup failed",
+        message: error instanceof Error ? error.message : "Unknown error",
+      },
+      500
+    );
   }
-
-  // Send verification email
-  const verificationUrl = `${c.env.API_BASE_URL}/auth/verify?token=${verificationToken}`;
-
-  try {
-    await sendVerificationEmail(email, username, verificationUrl, c.env.RESEND_API_KEY);
-  } catch (error) {
-    console.error("Failed to send verification email:", error);
-    // User created but email failed - they can request a new verification
-  }
-
-  // Log audit event
-  await db
-    .prepare(
-      `
-    INSERT INTO audit_log (action, resource_type, resource_id, details)
-    VALUES ('user_signup', 'user', ?, ?)
-  `
-    )
-    .bind(username, JSON.stringify({ email, github_username }))
-    .run();
-
-  return c.json(
-    {
-      message: "Registration successful",
-      next_steps: [
-        "Check your email for a verification link",
-        "Click the link to verify your email address",
-        "Wait for admin approval",
-        "Once approved, you will receive your API key",
-      ],
-    },
-    201
-  );
 });
 
 /**
