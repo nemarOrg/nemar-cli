@@ -237,7 +237,7 @@ describe("E2E Upload Tests", () => {
     });
 
     // Run upload with --dry-run
-    const { stdout, exitCode } = await runCli([
+    const { stdout, stderr, exitCode } = await runCli([
       "dataset",
       "upload",
       TEST_DIR,
@@ -245,8 +245,10 @@ describe("E2E Upload Tests", () => {
       "--skip-validation", // Skip validation to speed up test
     ]);
 
-    expect(stdout).toContain("Upload Plan:");
-    expect(stdout).toContain("Dry run mode");
+    // Check both stdout and stderr (ora spinner outputs to stderr)
+    const output = stdout + stderr;
+    expect(output).toContain("Upload Plan:");
+    expect(output).toContain("Dry run mode");
   });
 
   test("upload with missing prerequisites shows helpful errors", async () => {
@@ -293,7 +295,7 @@ describe("E2E Upload Tests", () => {
     expect(hasPrereqError).toBe(true);
   });
 
-  test("full upload flow (requires all prerequisites)", async () => {
+  test("full upload flow with dry-run (requires all prerequisites)", async () => {
     if (!allPrereqsMet) {
       console.log("   Skipping: Not all prerequisites met");
       return;
@@ -310,32 +312,31 @@ describe("E2E Upload Tests", () => {
       username: "test-user",
     });
 
-    // Run full upload
+    // Run upload with --dry-run to avoid creating real datasets
+    // This tests the full flow except the actual upload
     const { stdout, stderr, exitCode } = await runCli([
       "dataset",
       "upload",
       TEST_DIR,
       "--name",
-      "E2E-Test-" + Date.now(),
+      "E2E-Test-Dataset",
       "--description",
       "Automated E2E test dataset",
       "--skip-validation",
-      "-y",
+      "--dry-run",
       "-j",
-      "4", // Use fewer parallel streams for test
+      "4",
     ]);
 
     console.log("Upload stdout:", stdout);
     if (stderr) console.log("Upload stderr:", stderr);
 
-    // Verify success
-    expect(stdout).toContain("Prerequisites check passed");
-    expect(stdout).toContain("Dataset created");
-    expect(stdout).toContain("DataLad dataset initialized");
-    expect(stdout).toContain("S3 remote configured");
-    expect(stdout).toContain("GitHub remote configured");
-    expect(stdout).toContain("Upload complete");
-    expect(stdout).toContain("nm000"); // Dataset ID
+    // Verify dry-run success (stops before creating dataset)
+    const output = stdout + stderr;
+    expect(output).toContain("Prerequisites check passed");
+    expect(output).toContain("Upload Plan:");
+    expect(output).toContain("E2E-Test-Dataset");
+    expect(output).toContain("Dry run mode");
     expect(exitCode).toBe(0);
   });
 });
