@@ -1,0 +1,39 @@
+# NEMAR API - Cloudflare Workers Configuration
+name = "nemar-api"
+main = "src/index.ts"
+compatibility_date = "2024-12-01"
+compatibility_flags = ["nodejs_compat"]
+
+# D1 Database
+[[d1_databases]]
+binding = "DB"
+database_name = "nemar-db"
+database_id = "0a168b1a-1923-4436-9509-6e4a9b5bb7ae"
+
+# KV for rate limiting
+[[kv_namespaces]]
+binding = "RATE_LIMIT_KV"
+id = "9afb2679c6ea4ed4acd1a5916cf291d7"
+
+# Environment variables
+[vars]
+API_BASE_URL = "https://api.nemar.org"
+FRONTEND_URL = "https://nemar.org"
+AWS_REGION = "us-east-2"
+S3_BUCKET = "nemar"
+
+# Secrets (set via: wrangler secret put <NAME>)
+# - GITHUB_ADMIN_PAT
+# - AWS_ACCESS_KEY_ID
+# - AWS_SECRET_ACCESS_KEY
+# - RESEND_API_KEY
+
+# Development environment
+[env.development]
+name = "nemar-api-dev"
+[env.development.vars]
+API_BASE_URL = "https://api-dev.nemar.org"
+FRONTEND_URL = "http://localhost:3000"
+
+# Note: D1 migrations are in src/db/migrations/
+# Run: wrangler d1 migrations apply nemar-db --remote

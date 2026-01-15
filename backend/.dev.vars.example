@@ -1,0 +1,12 @@
+# Local development secrets
+# Copy this file to .dev.vars and fill in your values
+
+# GitHub Personal Access Token with org:admin scope
+GITHUB_ADMIN_PAT=ghp_your_token_here
+
+# AWS credentials for S3
+AWS_ACCESS_KEY_ID=your_access_key
+AWS_SECRET_ACCESS_KEY=your_secret_key
+
+# Resend API key for emails
+RESEND_API_KEY=re_your_key_here

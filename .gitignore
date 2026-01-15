@@ -27,6 +27,7 @@ coverage/
 CLAUDE.md
 .rules/
 .context/
+.serena/
 
 # Logs
 *.log

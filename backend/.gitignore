@@ -1,0 +1,23 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+.wrangler/
+
+# Environment files
+.env
+.env.local
+.dev.vars
+
+# Logs
+*.log
+
+# Local D1 database
+.wrangler/state/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
