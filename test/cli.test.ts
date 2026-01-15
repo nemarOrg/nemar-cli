@@ -11,10 +11,11 @@
 import { describe, test, expect, beforeAll, beforeEach, afterAll } from "bun:test";
 import { spawn } from "bun";
 import { TEST_CONFIG, sleep } from "./setup";
-import { existsSync, unlinkSync, mkdirSync, writeFileSync, readFileSync, copyFileSync } from "fs";
-import { join } from "path";
+import { existsSync, unlinkSync, mkdirSync, writeFileSync, readFileSync, copyFileSync, rmSync } from "fs";
+import { join, dirname } from "path";
 
 // Cross-platform config path (matches Conf library behavior)
+// Conf uses env-paths which respects XDG_CONFIG_HOME on Linux
 function getConfigDir(): string {
   const home = process.env.HOME || "";
   if (process.platform === "darwin") {
@@ -24,8 +25,9 @@ function getConfigDir(): string {
     // Windows: %APPDATA%/nemar/
     return join(process.env.APPDATA || "", "nemar");
   } else {
-    // Linux: ~/.config/nemar/
-    return join(home, ".config/nemar");
+    // Linux: $XDG_CONFIG_HOME/nemar/ or ~/.config/nemar/
+    const xdgConfig = process.env.XDG_CONFIG_HOME || join(home, ".config");
+    return join(xdgConfig, "nemar");
   }
 }
 
@@ -37,17 +39,47 @@ const CONFIG_BACKUP = join(CONFIG_DIR, "config.json.backup");
 console.log(`[DEBUG] Config directory: ${CONFIG_DIR}`);
 console.log(`[DEBUG] Config file: ${CONFIG_FILE}`);
 console.log(`[DEBUG] Platform: ${process.platform}`);
+console.log(`[DEBUG] HOME: ${process.env.HOME}`);
+console.log(`[DEBUG] XDG_CONFIG_HOME: ${process.env.XDG_CONFIG_HOME || "(not set)"}`);
 
-// Helper to run CLI commands
+// Get CLI's actual config path for comparison
+async function getCliConfigPath(): Promise<string> {
+  const proc = spawn({
+    cmd: ["bun", "run", "src/index.ts", "auth", "status", "--debug-config-path"],
+    cwd: join(import.meta.dir, ".."),
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  const stdout = await new Response(proc.stdout).text();
+  await proc.exited;
+  return stdout.trim();
+}
+
+// Unique test ID for each test run (for config isolation)
+let currentTestId = 0;
+function getTestConfigDir(): string {
+  const testDir = join(import.meta.dir, ".test-configs", `test-${currentTestId}`);
+  if (!existsSync(testDir)) {
+    mkdirSync(testDir, { recursive: true });
+  }
+  return testDir;
+}
+
+// Helper to run CLI commands with isolated config
 async function runCli(
   args: string[],
-  options: { env?: Record<string, string>; input?: string } = {}
+  options: { env?: Record<string, string>; input?: string; configDir?: string } = {}
 ): Promise<{ stdout: string; stderr: string; exitCode: number }> {
+  const configDir = options.configDir || getTestConfigDir();
+
   const proc = spawn({
     cmd: ["bun", "run", "src/index.ts", ...args],
     cwd: join(import.meta.dir, ".."),
     env: {
       ...process.env,
+      // Use XDG_CONFIG_HOME on Linux, or pass custom dir for macOS
+      XDG_CONFIG_HOME: configDir,
+      // For macOS, Conf uses different path - we'll handle this specially
       ...options.env,
     },
     stdin: options.input ? "pipe" : "ignore",
@@ -67,24 +99,34 @@ async function runCli(
   return { stdout, stderr, exitCode };
 }
 
-// Helper to set config
+// Helper to get current test's config file path
+function getTestConfigFile(): string {
+  const configDir = getTestConfigDir();
+  // On Linux with XDG_CONFIG_HOME, Conf uses <XDG>/nemar/config.json
+  return join(configDir, "nemar", "config.json");
+}
+
+// Helper to set config for current test
 function setTestConfig(config: Record<string, unknown>) {
-  if (!existsSync(CONFIG_DIR)) {
-    console.log(`[DEBUG] Creating config dir: ${CONFIG_DIR}`);
-    mkdirSync(CONFIG_DIR, { recursive: true });
+  const configFile = getTestConfigFile();
+  const configDir = dirname(configFile);
+  if (!existsSync(configDir)) {
+    console.log(`[DEBUG] Creating config dir: ${configDir}`);
+    mkdirSync(configDir, { recursive: true });
   }
-  console.log(`[DEBUG] Writing config to: ${CONFIG_FILE}`);
-  writeFileSync(CONFIG_FILE, JSON.stringify(config));
+  console.log(`[DEBUG] Writing config to: ${configFile}`);
+  writeFileSync(configFile, JSON.stringify(config));
   // Verify write
-  const exists = existsSync(CONFIG_FILE);
+  const exists = existsSync(configFile);
   console.log(`[DEBUG] Config file exists after write: ${exists}`);
 }
 
-// Helper to clear config
+// Helper to clear config for current test
 function clearTestConfig() {
-  if (existsSync(CONFIG_FILE)) {
-    console.log(`[DEBUG] Clearing config: ${CONFIG_FILE}`);
-    unlinkSync(CONFIG_FILE);
+  const configFile = getTestConfigFile();
+  if (existsSync(configFile)) {
+    console.log(`[DEBUG] Clearing config: ${configFile}`);
+    unlinkSync(configFile);
   }
 }
 
@@ -93,22 +135,29 @@ beforeAll(() => {
   if (existsSync(CONFIG_FILE)) {
     copyFileSync(CONFIG_FILE, CONFIG_BACKUP);
   }
-  // Clear config for clean test state
-  clearTestConfig();
 });
 
-// Clear config before each test for isolation + add delay for rate limiting
+// Each test gets a unique config directory (increment test ID)
 beforeEach(async () => {
-  clearTestConfig();
+  currentTestId++;
+  console.log(`[DEBUG] Starting test ${currentTestId}`);
   await sleep(300);
 });
 
-// Restore real config after all tests
+// Restore real config and cleanup test directories after all tests
 afterAll(() => {
-  clearTestConfig();
   if (existsSync(CONFIG_BACKUP)) {
     copyFileSync(CONFIG_BACKUP, CONFIG_FILE);
     unlinkSync(CONFIG_BACKUP);
+  }
+  // Cleanup test config directories
+  const testConfigsDir = join(import.meta.dir, ".test-configs");
+  if (existsSync(testConfigsDir)) {
+    try {
+      rmSync(testConfigsDir, { recursive: true, force: true });
+    } catch {
+      console.log("[DEBUG] Could not cleanup test configs dir");
+    }
   }
 });
 

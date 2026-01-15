@@ -23,6 +23,7 @@ test/.env.test
 # Testing
 coverage/
 *.lcov
+test/.test-configs/
 
 # Claude specific files
 CLAUDE.md
