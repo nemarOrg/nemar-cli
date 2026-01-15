@@ -153,7 +153,7 @@ nemar dataset upload /path/to/bids-dataset
 
   <p style="color: #666; font-size: 14px;">
     <strong>Need help?</strong><br>
-    Check out the documentation at <a href="https://nemar.org/docs" style="color: #2563eb;">nemar.org/docs</a>
+    Check out the documentation at <a href="https://nemar-cli.pages.dev" style="color: #2563eb;">nemar-cli.pages.dev</a>
   </p>
 
   <p style="color: #999; font-size: 12px; margin-top: 30px;">
@@ -179,7 +179,6 @@ export async function sendAdminNotificationEmail(
     github_username: string;
     description: string;
   },
-  adminPanelUrl: string,
   resendApiKey: string
 ): Promise<void> {
   const html = `
@@ -217,18 +216,15 @@ export async function sendAdminNotificationEmail(
   <div style="background-color: #f4f4f5; padding: 16px; border-radius: 8px; margin: 16px 0; white-space: pre-wrap;">${user.description}</div>
 
   <h2 style="color: #333; font-size: 18px; margin-top: 30px;">Action Required</h2>
-  <p>Review this user and approve or deny their access:</p>
+  <p>Review this user and approve or deny their access using the CLI:</p>
 
-  <p style="margin: 20px 0;">
-    <a href="${adminPanelUrl}"
-       style="background-color: #16a34a; color: white; padding: 12px 24px; text-decoration: none; border-radius: 6px; display: inline-block; margin-right: 10px;">
-      Review in Admin Panel
-    </a>
-  </p>
+  <div style="background: #f4f4f5; padding: 16px; border-radius: 8px; font-family: monospace; font-size: 14px; margin: 16px 0;">
+    <span style="color: #16a34a;">nemar admin approve</span> ${user.username}
+  </div>
 
   <p style="color: #666; font-size: 14px;">
-    Or use the CLI:<br>
-    <code style="background: #f4f4f5; padding: 2px 6px; border-radius: 4px;">nemar admin approve ${user.username}</code>
+    To see all pending users:<br>
+    <code style="background: #f4f4f5; padding: 2px 6px; border-radius: 4px;">nemar admin users --verified</code>
   </p>
 
   <hr style="border: none; border-top: 1px solid #eee; margin: 30px 0;">

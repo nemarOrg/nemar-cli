@@ -188,8 +188,32 @@ authRoutes.get("/verify", async (c) => {
   }
 
   if (user.status !== "pending") {
-    // Already verified or other status
-    return c.redirect(`${c.env.FRONTEND_URL}/signup/already-verified`);
+    // Already verified or other status - return HTML page directly
+    return c.html(`
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Already Verified - NEMAR</title>
+</head>
+<body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; line-height: 1.6; color: #333; max-width: 600px; margin: 0 auto; padding: 40px 20px; text-align: center;">
+  <div style="background: #2563eb; color: white; padding: 40px 20px; border-radius: 12px; margin-bottom: 30px;">
+    <h1 style="margin: 0 0 10px 0; font-size: 28px;">Already Verified</h1>
+    <p style="margin: 0; font-size: 18px; opacity: 0.9;">Your email has already been verified</p>
+  </div>
+
+  <div style="background: #f9fafb; padding: 30px; border-radius: 12px;">
+    <p>Your NEMAR account is ${user.status === "approved" ? "approved and ready to use" : "awaiting admin approval"}.</p>
+    ${user.status === "approved" ? "<p>Use <code style='background: #e5e7eb; padding: 2px 6px; border-radius: 4px;'>nemar auth login</code> to sign in with your API key.</p>" : "<p>You'll receive an email with your API key once approved.</p>"}
+  </div>
+
+  <p style="color: #9ca3af; font-size: 12px; margin-top: 40px;">
+    NEMAR - Neuroelectromagnetic Data Archive and Tools Resource
+  </p>
+</body>
+</html>
+    `);
   }
 
   // Check if token expired
@@ -238,8 +262,6 @@ authRoutes.get("/verify", async (c) => {
 
     if (adminUsers.results && adminUsers.results.length > 0) {
       const adminEmails = adminUsers.results.map((a) => a.email);
-      const adminPanelUrl = `${c.env.FRONTEND_URL}/admin/users?status=verified`;
-
       await sendAdminNotificationEmail(
         adminEmails,
         {
@@ -248,7 +270,6 @@ authRoutes.get("/verify", async (c) => {
           github_username: user.github_username,
           description: user.description || "No description provided",
         },
-        adminPanelUrl,
         c.env.RESEND_API_KEY
       );
     }
@@ -257,8 +278,51 @@ authRoutes.get("/verify", async (c) => {
     // Don't fail verification if admin notification fails
   }
 
-  // Redirect to frontend success page
-  return c.redirect(`${c.env.FRONTEND_URL}/signup/verified?username=${user.username}`);
+  // Return success page directly (no frontend dependency)
+  return c.html(`
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Email Verified - NEMAR</title>
+</head>
+<body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; line-height: 1.6; color: #333; max-width: 600px; margin: 0 auto; padding: 40px 20px; text-align: center;">
+  <div style="background: linear-gradient(135deg, #16a34a 0%, #22c55e 100%); color: white; padding: 40px 20px; border-radius: 12px; margin-bottom: 30px;">
+    <h1 style="margin: 0 0 10px 0; font-size: 28px;">Email Verified!</h1>
+    <p style="margin: 0; font-size: 18px; opacity: 0.9;">Welcome to NEMAR, ${user.username}</p>
+  </div>
+
+  <div style="background: #f9fafb; padding: 30px; border-radius: 12px; text-align: left;">
+    <h2 style="color: #333; font-size: 18px; margin: 0 0 20px 0;">What happens next?</h2>
+
+    <div style="margin-bottom: 20px;">
+      <div style="display: flex; align-items: flex-start; margin-bottom: 15px;">
+        <span style="background: #16a34a; color: white; border-radius: 50%; width: 24px; height: 24px; display: inline-flex; align-items: center; justify-content: center; margin-right: 12px; flex-shrink: 0; font-size: 12px;">✓</span>
+        <span><strong>Email verified</strong> - You've completed this step</span>
+      </div>
+      <div style="display: flex; align-items: flex-start; margin-bottom: 15px;">
+        <span style="background: #f59e0b; color: white; border-radius: 50%; width: 24px; height: 24px; display: inline-flex; align-items: center; justify-content: center; margin-right: 12px; flex-shrink: 0; font-size: 12px;">2</span>
+        <span><strong>Admin review</strong> - An admin will review your request</span>
+      </div>
+      <div style="display: flex; align-items: flex-start;">
+        <span style="background: #e5e7eb; color: #6b7280; border-radius: 50%; width: 24px; height: 24px; display: inline-flex; align-items: center; justify-content: center; margin-right: 12px; flex-shrink: 0; font-size: 12px;">3</span>
+        <span><strong>Get API key</strong> - Once approved, you'll receive your API key via email</span>
+      </div>
+    </div>
+  </div>
+
+  <p style="color: #6b7280; font-size: 14px; margin-top: 30px;">
+    You can close this page. We'll email you when your account is approved.
+  </p>
+
+  <p style="color: #9ca3af; font-size: 12px; margin-top: 40px;">
+    NEMAR - Neuroelectromagnetic Data Archive and Tools Resource<br>
+    <a href="https://nemar-cli.pages.dev" style="color: #9ca3af;">Documentation</a>
+  </p>
+</body>
+</html>
+  `);
 });
 
 // Login request schema
