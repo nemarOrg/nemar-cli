@@ -10,7 +10,7 @@ import { zValidator } from "@hono/zod-validator";
 import type { Bindings, Variables } from "../types/bindings";
 import { authMiddleware, optionalAuthMiddleware } from "../middleware/auth";
 import { generateDatasetId, isValidDatasetId } from "../services/datasetId";
-import { createRepository, addCollaborator, applyBranchProtection, enableAutoMerge } from "../services/github";
+import { createRepository, addCollaborator, applyBranchProtection, enableAutoMerge, deployWorkflows } from "../services/github";
 import { generateDatasetUploadUrls } from "../services/s3";
 
 export const datasetRoutes = new Hono<{ Bindings: Bindings; Variables: Variables }>();
@@ -296,7 +296,18 @@ datasetRoutes.post("/:id/finalize", authMiddleware, async (c) => {
     return c.json({ error: "Dataset is already published" }, 400);
   }
 
-  // Apply branch protection
+  // Deploy GitHub Actions workflows
+  try {
+    const workflowResult = await deployWorkflows(datasetId, c.env.GITHUB_ADMIN_PAT);
+    if (!workflowResult.success) {
+      console.error("Failed to deploy some workflows:", workflowResult.errors);
+    }
+  } catch (error) {
+    console.error("Failed to deploy workflows:", error);
+    // Continue anyway; not a fatal error
+  }
+
+  // Apply branch protection (requires workflows to be deployed first for status checks)
   try {
     await applyBranchProtection(datasetId, c.env.GITHUB_ADMIN_PAT);
   } catch (error) {

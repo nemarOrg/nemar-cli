@@ -214,6 +214,12 @@ export async function createRepository(
 
 /**
  * Apply branch protection rules to main branch
+ *
+ * Configuration:
+ * - Owner can self-merge (no external approval required)
+ * - BIDS validation and version check must pass
+ * - Admins can bypass if needed
+ * - No force pushes or deletions
  */
 export async function applyBranchProtection(repo: string, pat: string): Promise<boolean> {
   const response = await fetch(
@@ -228,11 +234,14 @@ export async function applyBranchProtection(repo: string, pat: string): Promise<
       },
       body: JSON.stringify({
         required_pull_request_reviews: {
-          required_approving_review_count: 1,
+          required_approving_review_count: 0, // Owner can self-merge
           dismiss_stale_reviews: true,
         },
-        enforce_admins: true,
-        required_status_checks: null,
+        enforce_admins: false, // Admins can bypass if needed
+        required_status_checks: {
+          strict: true,
+          contexts: ["bids-validation", "version-check"],
+        },
         restrictions: null,
         allow_force_pushes: false,
         allow_deletions: false,
@@ -261,4 +270,220 @@ export async function enableAutoMerge(repo: string, pat: string): Promise<boolea
   });
 
   return response.ok;
+}
+
+/**
+ * Create or update a file in a repository
+ */
+export async function createOrUpdateFile(
+  repo: string,
+  path: string,
+  content: string,
+  message: string,
+  pat: string
+): Promise<boolean> {
+  // First, try to get the file to see if it exists (need SHA for update)
+  let sha: string | undefined;
+  const getResponse = await fetch(
+    `${GITHUB_API}/repos/${ORG_NAME}/${repo}/contents/${path}`,
+    {
+      headers: {
+        Authorization: `Bearer ${pat}`,
+        Accept: "application/vnd.github.v3+json",
+        "User-Agent": "NEMAR-API",
+      },
+    }
+  );
+
+  if (getResponse.ok) {
+    const existing = await getResponse.json<{ sha: string }>();
+    sha = existing.sha;
+  }
+
+  // Create or update the file
+  const response = await fetch(
+    `${GITHUB_API}/repos/${ORG_NAME}/${repo}/contents/${path}`,
+    {
+      method: "PUT",
+      headers: {
+        Authorization: `Bearer ${pat}`,
+        Accept: "application/vnd.github.v3+json",
+        "User-Agent": "NEMAR-API",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        message,
+        content: btoa(content), // Base64 encode
+        ...(sha ? { sha } : {}),
+      }),
+    }
+  );
+
+  return response.ok || response.status === 201;
+}
+
+/**
+ * Deploy GitHub Actions workflow files to a dataset repository
+ */
+export async function deployWorkflows(repo: string, pat: string): Promise<{ success: boolean; errors: string[] }> {
+  const errors: string[] = [];
+
+  // BIDS Validation workflow
+  const bidsValidation = `name: BIDS Validation
+
+on:
+  pull_request:
+    branches: [main]
+
+jobs:
+  validate:
+    name: bids-validation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Deno
+        uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.x
+
+      - name: Run BIDS validator
+        run: |
+          deno run -A jsr:@bids/validator . --json > validation.json
+          cat validation.json
+
+      - name: Check validation result
+        run: |
+          if jq -e '.valid == false' validation.json > /dev/null; then
+            echo "::error::BIDS validation failed"
+            jq '.issues[] | select(.severity == "error")' validation.json
+            exit 1
+          fi
+          echo "BIDS validation passed"
+`;
+
+  // Version Check workflow
+  const versionCheck = `name: Version Check
+
+on:
+  pull_request:
+    branches: [main]
+
+jobs:
+  check-version:
+    name: version-check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check version bump
+        run: |
+          # Get version from PR branch
+          PR_VERSION=$(jq -r '.Version // "0.0.0"' dataset_description.json)
+
+          # Get version from main branch
+          git fetch origin main
+          git checkout origin/main -- dataset_description.json 2>/dev/null || echo '{}' > dataset_description.json
+          MAIN_VERSION=$(jq -r '.Version // "0.0.0"' dataset_description.json)
+
+          # Restore PR version
+          git checkout HEAD -- dataset_description.json
+
+          echo "Main version: $MAIN_VERSION"
+          echo "PR version: $PR_VERSION"
+
+          if [ "$PR_VERSION" == "$MAIN_VERSION" ]; then
+            echo "::error::Version not bumped. Update 'Version' field in dataset_description.json"
+            exit 1
+          fi
+
+          echo "Version check passed: $MAIN_VERSION -> $PR_VERSION"
+`;
+
+  // PR Merge Handler workflow
+  const prMerge = `name: PR Merge Handler
+
+on:
+  pull_request:
+    types: [closed]
+    branches: [main]
+
+jobs:
+  create-release:
+    name: Create Release
+    if: github.event.pull_request.merged == true
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Get version
+        id: version
+        run: |
+          VERSION=$(jq -r '.Version // "1.0.0"' dataset_description.json)
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "Version: $VERSION"
+
+      - name: Check if tag exists
+        id: check_tag
+        run: |
+          if git rev-parse "v\${{ steps.version.outputs.version }}" >/dev/null 2>&1; then
+            echo "exists=true" >> $GITHUB_OUTPUT
+          else
+            echo "exists=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Create tag and release
+        if: steps.check_tag.outputs.exists == 'false'
+        env:
+          GH_TOKEN: \${{ secrets.GITHUB_TOKEN }}
+        run: |
+          git config user.name "GitHub Actions"
+          git config user.email "actions@github.com"
+          git tag -a "v\${{ steps.version.outputs.version }}" -m "Release v\${{ steps.version.outputs.version }}"
+          git push origin "v\${{ steps.version.outputs.version }}"
+          gh release create "v\${{ steps.version.outputs.version }}" \\
+            --title "v\${{ steps.version.outputs.version }}" \\
+            --notes "Release from PR #\${{ github.event.pull_request.number }}
+
+Changes in this release:
+\${{ github.event.pull_request.body }}"
+
+  cleanup-staging:
+    name: Cleanup Staging
+    if: github.event.pull_request.merged == false
+    runs-on: ubuntu-latest
+    steps:
+      - name: Cleanup staging on PR close
+        env:
+          AWS_ACCESS_KEY_ID: \${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: \${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        run: |
+          STAGING_PREFIX="staging/pr-\${{ github.event.pull_request.number }}/"
+          echo "Cleaning up staging: s3://nemar/$STAGING_PREFIX"
+          aws s3 rm --recursive "s3://nemar/$STAGING_PREFIX" 2>/dev/null || true
+`;
+
+  // Deploy each workflow
+  const workflows = [
+    { path: ".github/workflows/bids-validation.yml", content: bidsValidation },
+    { path: ".github/workflows/version-check.yml", content: versionCheck },
+    { path: ".github/workflows/pr-merge.yml", content: prMerge },
+  ];
+
+  for (const workflow of workflows) {
+    const success = await createOrUpdateFile(
+      repo,
+      workflow.path,
+      workflow.content,
+      `Add ${workflow.path.split("/").pop()} workflow`,
+      pat
+    );
+    if (!success) {
+      errors.push(workflow.path);
+    }
+  }
+
+  return { success: errors.length === 0, errors };
 }
