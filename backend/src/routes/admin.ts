@@ -498,11 +498,15 @@ adminRoutes.post("/datasets/:id/doi/concept", zValidator("json", createConceptDo
       )
       .run();
 
+    // Generate the repo name for the setup command
+    const repoName = dataset.github_repo ? dataset.github_repo.split("/")[1] : datasetId;
+
     return c.json({
       message: "Concept DOI created successfully",
       concept_doi: conceptDoi,
       zenodo_id: deposition.id,
       zenodo_url: formatRecordUrl(deposition.id, body.sandbox),
+      setup_command: `gh secret set NEMAR_WEBHOOK_TOKEN --repo nemarDatasets/${repoName}`,
       warning: "DOI is pre-reserved but not yet published. It will become active on first version publish.",
     });
   } catch (error) {

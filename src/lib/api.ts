@@ -332,6 +332,7 @@ export interface CreateConceptDoiResponse {
   concept_doi: string;
   zenodo_id: number;
   zenodo_url: string;
+  setup_command: string;
   warning: string;
 }
 
