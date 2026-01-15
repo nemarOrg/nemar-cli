@@ -81,10 +81,20 @@ jobs:
         with:
           bun-version: latest
 
+      - name: Setup Deno
+        uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.x
+
       - name: Install dependencies
         run: bun install
 
       - name: Run CLI unit tests
+        env:
+          # Use dev API - no rate limiting
+          TEST_API_URL: https://nemar-api-dev.shirazi-10f.workers.dev
+          TEST_ADMIN_API_KEY: ${{ secrets.TEST_ADMIN_API_KEY }}
+          TEST_USER_API_KEY: ${{ secrets.TEST_USER_API_KEY }}
         run: bun test test/cli.test.ts
 
   # API integration tests - uses dev environment (no rate limiting)
