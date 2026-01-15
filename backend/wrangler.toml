@@ -4,6 +4,13 @@ main = "src/index.ts"
 compatibility_date = "2024-12-01"
 compatibility_flags = ["nodejs_compat"]
 
+# Route configuration for api.osc.earth/nemar/*
+# This intercepts /nemar/* while letting /osa/* pass through to origin (hedtools.ucsd.edu)
+routes = [
+  { pattern = "api.osc.earth/nemar", zone_id = "adce8c117d3373bda82d3aba2dfd5b13" },
+  { pattern = "api.osc.earth/nemar/*", zone_id = "adce8c117d3373bda82d3aba2dfd5b13" }
+]
+
 # D1 Database
 [[d1_databases]]
 binding = "DB"
@@ -17,7 +24,7 @@ migrations_dir = "src/db/migrations"
 # Environment variables
 [vars]
 ENVIRONMENT = "production"
-API_BASE_URL = "https://api.nemar.org"
+API_BASE_URL = "https://api.osc.earth/nemar"
 FRONTEND_URL = "https://nemar.org"
 AWS_REGION = "us-east-2"
 S3_BUCKET = "nemar"
@@ -43,7 +50,7 @@ migrations_dir = "src/db/migrations"
 [env.dev.vars]
 ENVIRONMENT = "development"
 API_BASE_URL = "https://nemar-api-dev.shirazi-10f.workers.dev"
-FRONTEND_URL = "http://localhost:3000"
+FRONTEND_URL = "https://nemar.org"
 AWS_REGION = "us-east-2"
 S3_BUCKET = "nemar"
 # Note: Rate limiting is disabled in development

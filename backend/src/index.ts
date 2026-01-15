@@ -2,6 +2,9 @@
  * NEMAR API - Cloudflare Workers Backend
  *
  * Handles user authentication, dataset management, and admin workflows.
+ *
+ * Production route: api.osc.earth/nemar/*
+ * Dev route: nemar-api-dev.shirazi-10f.workers.dev/*
  */
 
 import { Hono } from "hono";
@@ -17,20 +20,23 @@ import { datasetRoutes } from "./routes/datasets";
 import webhooks from "./routes/webhooks";
 import { rateLimiter } from "./middleware/rateLimit";
 
-// Create Hono app with typed bindings
-const app = new Hono<{ Bindings: Bindings; Variables: Variables }>();
+// Create the API app with all routes
+const api = new Hono<{ Bindings: Bindings; Variables: Variables }>();
 
 // Global middleware
-app.use("*", logger());
-app.use("*", secureHeaders());
-app.use(
+api.use("*", logger());
+api.use("*", secureHeaders());
+api.use(
   "*",
   cors({
     origin: (origin) => {
       // Allow localhost for development
       if (origin?.includes("localhost")) return origin;
-      // Allow nemar.org domains
+      // Allow nemar.org and osc.earth domains
       if (origin?.endsWith(".nemar.org") || origin === "https://nemar.org") {
+        return origin;
+      }
+      if (origin?.endsWith(".osc.earth") || origin === "https://osc.earth") {
         return origin;
       }
       return null;
@@ -42,10 +48,10 @@ app.use(
     maxAge: 86400,
   })
 );
-app.use("*", rateLimiter);
+api.use("*", rateLimiter);
 
 // Health check endpoint
-app.get("/health", (c) => {
+api.get("/health", (c) => {
   return c.json({
     status: "ok",
     timestamp: new Date().toISOString(),
@@ -54,11 +60,12 @@ app.get("/health", (c) => {
 });
 
 // API info endpoint
-app.get("/", (c) => {
+api.get("/", (c) => {
   return c.json({
     name: "NEMAR API",
     version: "0.1.0",
     description: "Backend API for NEMAR CLI",
+    base_url: c.env.API_BASE_URL,
     endpoints: {
       auth: "/auth/*",
       users: "/users/*",
@@ -70,14 +77,14 @@ app.get("/", (c) => {
 });
 
 // Mount route handlers
-app.route("/auth", authRoutes);
-app.route("/users", userRoutes);
-app.route("/admin", adminRoutes);
-app.route("/datasets", datasetRoutes);
-app.route("/webhooks", webhooks);
+api.route("/auth", authRoutes);
+api.route("/users", userRoutes);
+api.route("/admin", adminRoutes);
+api.route("/datasets", datasetRoutes);
+api.route("/webhooks", webhooks);
 
 // 404 handler
-app.notFound((c) => {
+api.notFound((c) => {
   return c.json(
     {
       error: "Not Found",
@@ -88,7 +95,7 @@ app.notFound((c) => {
 });
 
 // Global error handler
-app.onError((err, c) => {
+api.onError((err, c) => {
   console.error("Unhandled error:", err);
 
   // Check if it's a validation error from zValidator
@@ -113,5 +120,14 @@ app.onError((err, c) => {
     500
   );
 });
+
+// Create root app that mounts API at both /nemar (production) and / (dev)
+const app = new Hono<{ Bindings: Bindings; Variables: Variables }>();
+
+// Mount at /nemar for production (api.osc.earth/nemar/*)
+app.route("/nemar", api);
+
+// Also mount at root for dev environment and workers.dev domain
+app.route("/", api);
 
 export default app;

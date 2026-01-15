@@ -7,7 +7,7 @@
 
 import { getConfig } from "./config.js";
 
-const DEFAULT_API_URL = "https://nemar-api.shirazi-10f.workers.dev";
+const DEFAULT_API_URL = "https://api.osc.earth/nemar";
 
 /**
  * API error with status code and message

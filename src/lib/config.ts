@@ -12,7 +12,7 @@ import { z } from "zod";
 // Configuration schema
 const configSchema = z.object({
   apiKey: z.string().optional(),
-  apiUrl: z.string().url().default("https://nemar-api.shirazi-10f.workers.dev"),
+  apiUrl: z.string().url().default("https://api.osc.earth/nemar"),
   username: z.string().optional(),
   email: z.string().email().optional(),
   githubUsername: z.string().optional(), // Required for PR collaboration
@@ -26,7 +26,7 @@ const config = new Conf<Config>({
   projectName: "nemar",
   schema: {
     apiKey: { type: "string" },
-    apiUrl: { type: "string", default: "https://nemar-api.shirazi-10f.workers.dev" },
+    apiUrl: { type: "string", default: "https://api.osc.earth/nemar" },
     username: { type: "string" },
     email: { type: "string" },
     githubUsername: { type: "string" },
