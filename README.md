@@ -18,28 +18,35 @@ Command-line interface for [NEMAR](https://nemar.org) (Neuroelectromagnetic Data
 
 ## Installation
 
+Requires [Bun](https://bun.sh) runtime.
+
 ```bash
-# Using bun (recommended)
+# Install Bun (if not already installed)
+curl -fsSL https://bun.sh/install | bash
+
+# Install NEMAR CLI
 bun install -g nemar-cli
 
-# Or run directly
+# Or run directly without installing
 bunx nemar-cli
-
-# Or using npm
-npm install -g nemar-cli
 ```
 
 ### Prerequisites
 
-- [DataLad](https://www.datalad.org/) and git-annex for dataset operations
+For dataset operations:
+
+- [DataLad](https://www.datalad.org/) and git-annex
+- [Deno](https://deno.land/) (for BIDS validation)
 - GitHub account (for PR collaboration)
 
 ```bash
 # macOS
-brew install datalad git-annex
+brew install datalad git-annex deno
 
 # Ubuntu/Debian
-sudo apt install datalad git-annex
+sudo apt-get install git-annex
+pip install datalad
+curl -fsSL https://deno.land/install.sh | sh
 ```
 
 ## Quick Start

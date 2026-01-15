@@ -9,7 +9,7 @@
   },
   "scripts": {
     "dev": "bun run src/index.ts",
-    "build": "bun build src/index.ts --outdir dist --target node --minify",
+    "build": "bun build src/index.ts --outdir dist --target bun --minify",
     "test": "bun test",
     "lint": "biome check src/",
     "lint:fix": "biome check --fix src/",
@@ -38,10 +38,15 @@
   "bugs": {
     "url": "https://github.com/nemarDatasets/nemar-cli/issues"
   },
-  "homepage": "https://github.com/nemarDatasets/nemar-cli#readme",
+  "homepage": "https://nemar-cli.pages.dev",
   "engines": {
-    "node": ">=18.0.0"
+    "bun": ">=1.0.0"
   },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
   "dependencies": {
     "chalk": "^5.3.0",
     "commander": "^12.1.0",

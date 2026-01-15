@@ -2,12 +2,20 @@
 
 ## Prerequisites
 
-Before installing NEMAR CLI, ensure you have the following:
+NEMAR CLI requires **Bun** runtime (v1.0+).
 
-### Required
+### Install Bun
 
-- **Bun** (v1.0+) or **Node.js** (v18+)
-- **Git** (v2.20+)
+```bash
+# macOS, Linux, WSL
+curl -fsSL https://bun.sh/install | bash
+
+# Windows (PowerShell)
+powershell -c "irm bun.sh/install.ps1 | iex"
+
+# Homebrew
+brew install oven-sh/bun/bun
+```
 
 ### For Dataset Operations
 
@@ -17,16 +25,14 @@ Before installing NEMAR CLI, ensure you have the following:
 
 ## Install NEMAR CLI
 
-### Using Bun (Recommended)
+### Using Bun
 
 ```bash
+# Install globally
 bun install -g nemar-cli
-```
 
-### Using npm
-
-```bash
-npm install -g nemar-cli
+# Or run directly without installing
+bunx nemar-cli --help
 ```
 
 ### From Source
@@ -38,7 +44,7 @@ bun install
 bun link
 ```
 
-## Install Dependencies
+## Install Optional Dependencies
 
 ### macOS
 
@@ -54,7 +60,8 @@ conda install -c conda-forge datalad git-annex
 
 ```bash
 # Install git-annex
-sudo apt-get install git-annex
+sudo apt-get update
+sudo apt-get install -y git-annex
 
 # Install DataLad
 pip install datalad
@@ -79,11 +86,25 @@ pip install datalad
 # Check CLI version
 nemar --version
 
-# Check dependencies
+# Check Bun
+bun --version
+
+# Check optional dependencies (for dataset operations)
 git --version
 git-annex version
 datalad --version
 deno --version
+```
+
+## Troubleshooting
+
+### "command not found: nemar"
+
+Ensure Bun's bin directory is in your PATH:
+
+```bash
+# Add to ~/.bashrc or ~/.zshrc
+export PATH="$HOME/.bun/bin:$PATH"
 ```
 
 ## Next Steps
