@@ -35,25 +35,6 @@ const CONFIG_DIR = getConfigDir();
 const CONFIG_FILE = join(CONFIG_DIR, "config.json");
 const CONFIG_BACKUP = join(CONFIG_DIR, "config.json.backup");
 
-// Debug: Log config path on startup
-console.log(`[DEBUG] Config directory: ${CONFIG_DIR}`);
-console.log(`[DEBUG] Config file: ${CONFIG_FILE}`);
-console.log(`[DEBUG] Platform: ${process.platform}`);
-console.log(`[DEBUG] HOME: ${process.env.HOME}`);
-console.log(`[DEBUG] XDG_CONFIG_HOME: ${process.env.XDG_CONFIG_HOME || "(not set)"}`);
-
-// Get CLI's actual config path for comparison
-async function getCliConfigPath(): Promise<string> {
-  const proc = spawn({
-    cmd: ["bun", "run", "src/index.ts", "auth", "status", "--debug-config-path"],
-    cwd: join(import.meta.dir, ".."),
-    stdout: "pipe",
-    stderr: "pipe",
-  });
-  const stdout = await new Response(proc.stdout).text();
-  await proc.exited;
-  return stdout.trim();
-}
 
 // Test context - each test creates its own isolated config directory
 interface TestContext {
@@ -68,7 +49,6 @@ function createTestContext(): TestContext {
   mkdirSync(configDir, { recursive: true });
   // Conf stores config in <cwd>/config.json when cwd is set
   const configFile = join(configDir, "config.json");
-  console.log(`[DEBUG] Created test context: ${configDir}`);
   return { configDir, configFile };
 }
 
@@ -106,16 +86,12 @@ async function runCli(
 
 // Helper to set config for a test context
 function setTestConfig(ctx: TestContext, config: Record<string, unknown>) {
-  console.log(`[DEBUG] Writing config to: ${ctx.configFile}`);
   writeFileSync(ctx.configFile, JSON.stringify(config));
-  const exists = existsSync(ctx.configFile);
-  console.log(`[DEBUG] Config file exists after write: ${exists}`);
 }
 
 // Helper to clear config for a test context
 function clearTestConfig(ctx: TestContext) {
   if (existsSync(ctx.configFile)) {
-    console.log(`[DEBUG] Clearing config: ${ctx.configFile}`);
     unlinkSync(ctx.configFile);
   }
 }
