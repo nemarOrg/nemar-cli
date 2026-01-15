@@ -55,31 +55,36 @@ async function getCliConfigPath(): Promise<string> {
   return stdout.trim();
 }
 
-// Unique test ID for each test run (for config isolation)
-let currentTestId = 0;
-function getTestConfigDir(): string {
-  const testDir = join(import.meta.dir, ".test-configs", `test-${currentTestId}`);
-  if (!existsSync(testDir)) {
-    mkdirSync(testDir, { recursive: true });
-  }
-  return testDir;
+// Test context - each test creates its own isolated config directory
+interface TestContext {
+  configDir: string;
+  configFile: string;
+}
+
+// Create a unique test context with isolated config
+function createTestContext(): TestContext {
+  const uniqueId = `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+  const configDir = join(import.meta.dir, ".test-configs", uniqueId);
+  mkdirSync(configDir, { recursive: true });
+  // Conf stores config in <cwd>/config.json when cwd is set
+  const configFile = join(configDir, "config.json");
+  console.log(`[DEBUG] Created test context: ${configDir}`);
+  return { configDir, configFile };
 }
 
 // Helper to run CLI commands with isolated config
 async function runCli(
   args: string[],
-  options: { env?: Record<string, string>; input?: string; configDir?: string } = {}
+  ctx?: TestContext,
+  options: { env?: Record<string, string>; input?: string } = {}
 ): Promise<{ stdout: string; stderr: string; exitCode: number }> {
-  const configDir = options.configDir || getTestConfigDir();
-
   const proc = spawn({
     cmd: ["bun", "run", "src/index.ts", ...args],
     cwd: join(import.meta.dir, ".."),
     env: {
       ...process.env,
-      // Use XDG_CONFIG_HOME on Linux, or pass custom dir for macOS
-      XDG_CONFIG_HOME: configDir,
-      // For macOS, Conf uses different path - we'll handle this specially
+      // Use NEMAR_CONFIG_DIR for test isolation (cross-platform)
+      ...(ctx ? { NEMAR_CONFIG_DIR: ctx.configDir } : {}),
       ...options.env,
     },
     stdin: options.input ? "pipe" : "ignore",
@@ -99,34 +104,19 @@ async function runCli(
   return { stdout, stderr, exitCode };
 }
 
-// Helper to get current test's config file path
-function getTestConfigFile(): string {
-  const configDir = getTestConfigDir();
-  // On Linux with XDG_CONFIG_HOME, Conf uses <XDG>/nemar/config.json
-  return join(configDir, "nemar", "config.json");
-}
-
-// Helper to set config for current test
-function setTestConfig(config: Record<string, unknown>) {
-  const configFile = getTestConfigFile();
-  const configDir = dirname(configFile);
-  if (!existsSync(configDir)) {
-    console.log(`[DEBUG] Creating config dir: ${configDir}`);
-    mkdirSync(configDir, { recursive: true });
-  }
-  console.log(`[DEBUG] Writing config to: ${configFile}`);
-  writeFileSync(configFile, JSON.stringify(config));
-  // Verify write
-  const exists = existsSync(configFile);
+// Helper to set config for a test context
+function setTestConfig(ctx: TestContext, config: Record<string, unknown>) {
+  console.log(`[DEBUG] Writing config to: ${ctx.configFile}`);
+  writeFileSync(ctx.configFile, JSON.stringify(config));
+  const exists = existsSync(ctx.configFile);
   console.log(`[DEBUG] Config file exists after write: ${exists}`);
 }
 
-// Helper to clear config for current test
-function clearTestConfig() {
-  const configFile = getTestConfigFile();
-  if (existsSync(configFile)) {
-    console.log(`[DEBUG] Clearing config: ${configFile}`);
-    unlinkSync(configFile);
+// Helper to clear config for a test context
+function clearTestConfig(ctx: TestContext) {
+  if (existsSync(ctx.configFile)) {
+    console.log(`[DEBUG] Clearing config: ${ctx.configFile}`);
+    unlinkSync(ctx.configFile);
   }
 }
 
@@ -137,10 +127,8 @@ beforeAll(() => {
   }
 });
 
-// Each test gets a unique config directory (increment test ID)
+// Add delay between tests to avoid rate limiting
 beforeEach(async () => {
-  currentTestId++;
-  console.log(`[DEBUG] Starting test ${currentTestId}`);
   await sleep(300);
 });
 
@@ -211,16 +199,17 @@ describe("CLI Help", () => {
 describe("CLI Auth Commands", () => {
   describe("nemar auth status", () => {
     test("shows not authenticated when no credentials", async () => {
-      clearTestConfig();
+      const ctx = createTestContext();
 
-      const { stdout, exitCode } = await runCli(["auth", "status"]);
+      const { stdout, exitCode } = await runCli(["auth", "status"], ctx);
 
       expect(exitCode).toBe(0);
       expect(stdout).toContain("Not authenticated");
     });
 
     test("shows authenticated when credentials exist", async () => {
-      setTestConfig({
+      const ctx = createTestContext();
+      setTestConfig(ctx, {
         apiKey: TEST_CONFIG.adminApiKey,
         apiUrl: TEST_CONFIG.apiUrl,
         username: "test-admin",
@@ -228,7 +217,7 @@ describe("CLI Auth Commands", () => {
         githubUsername: "test-admin-gh",
       });
 
-      const { stdout, exitCode } = await runCli(["auth", "status"]);
+      const { stdout, exitCode } = await runCli(["auth", "status"], ctx);
 
       expect(exitCode).toBe(0);
       expect(stdout).toContain("Authenticated");
@@ -238,7 +227,7 @@ describe("CLI Auth Commands", () => {
 
   describe("nemar auth login", () => {
     test("login with valid API key via -k flag", async () => {
-      clearTestConfig();
+      const ctx = createTestContext();
 
       const { stdout, exitCode } = await runCli([
         "auth",
@@ -246,7 +235,7 @@ describe("CLI Auth Commands", () => {
         "-k",
         TEST_CONFIG.adminApiKey,
         "-f", // Force login even if already authenticated
-      ]);
+      ], ctx);
 
       expect(exitCode).toBe(0);
       expect(stdout).toContain("Welcome back");
@@ -254,7 +243,7 @@ describe("CLI Auth Commands", () => {
     });
 
     test("login with invalid API key shows error", async () => {
-      clearTestConfig();
+      const ctx = createTestContext();
 
       const { stdout, exitCode } = await runCli([
         "auth",
@@ -262,7 +251,7 @@ describe("CLI Auth Commands", () => {
         "-k",
         "invalid_key_that_is_definitely_wrong_12345",
         "-f",
-      ]);
+      ], ctx);
 
       expect(stdout).toContain("Check that your API key is correct");
     });
@@ -270,28 +259,29 @@ describe("CLI Auth Commands", () => {
 
   describe("nemar auth logout", () => {
     test("logout when not authenticated shows message", async () => {
-      clearTestConfig();
+      const ctx = createTestContext();
 
-      const { stdout, exitCode } = await runCli(["auth", "logout", "-f"]);
+      const { stdout, exitCode } = await runCli(["auth", "logout", "-f"], ctx);
 
       expect(exitCode).toBe(0);
       expect(stdout).toContain("Not currently authenticated");
     });
 
     test("logout when authenticated clears credentials", async () => {
-      setTestConfig({
+      const ctx = createTestContext();
+      setTestConfig(ctx, {
         apiKey: TEST_CONFIG.userApiKey,
         apiUrl: TEST_CONFIG.apiUrl,
         username: "test-user",
       });
 
-      const { stdout, exitCode } = await runCli(["auth", "logout", "-f"]);
+      const { stdout, exitCode } = await runCli(["auth", "logout", "-f"], ctx);
 
       expect(exitCode).toBe(0);
       expect(stdout).toContain("Logged out successfully");
 
       // Verify credentials are cleared
-      const { stdout: statusOut } = await runCli(["auth", "status"]);
+      const { stdout: statusOut } = await runCli(["auth", "status"], ctx);
       expect(statusOut).toContain("Not authenticated");
     });
   });
@@ -300,21 +290,22 @@ describe("CLI Auth Commands", () => {
 describe("CLI Admin Commands", () => {
   describe("nemar admin users", () => {
     test("requires authentication", async () => {
-      clearTestConfig();
+      const ctx = createTestContext();
 
-      const { stdout, exitCode } = await runCli(["admin", "users"]);
+      const { stdout, exitCode } = await runCli(["admin", "users"], ctx);
 
       expect(stdout).toContain("Not authenticated");
     });
 
     test("lists users when authenticated as admin", async () => {
-      setTestConfig({
+      const ctx = createTestContext();
+      setTestConfig(ctx, {
         apiKey: TEST_CONFIG.adminApiKey,
         apiUrl: TEST_CONFIG.apiUrl,
         username: "test-admin",
       });
 
-      const { stdout, exitCode } = await runCli(["admin", "users"]);
+      const { stdout, exitCode } = await runCli(["admin", "users"], ctx);
 
       expect(exitCode).toBe(0);
       expect(stdout).toContain("NEMAR Users");
@@ -322,25 +313,27 @@ describe("CLI Admin Commands", () => {
     });
 
     test("non-admin cannot list users", async () => {
-      setTestConfig({
+      const ctx = createTestContext();
+      setTestConfig(ctx, {
         apiKey: TEST_CONFIG.userApiKey,
         apiUrl: TEST_CONFIG.apiUrl,
         username: "test-user",
       });
 
-      const { stdout, exitCode } = await runCli(["admin", "users"]);
+      const { stdout, exitCode } = await runCli(["admin", "users"], ctx);
 
       expect(stdout).toContain("requires admin privileges");
     });
 
     test("lists users with --approved filter", async () => {
-      setTestConfig({
+      const ctx = createTestContext();
+      setTestConfig(ctx, {
         apiKey: TEST_CONFIG.adminApiKey,
         apiUrl: TEST_CONFIG.apiUrl,
         username: "test-admin",
       });
 
-      const { stdout, exitCode } = await runCli(["admin", "users", "--approved"]);
+      const { stdout, exitCode } = await runCli(["admin", "users", "--approved"], ctx);
 
       expect(exitCode).toBe(0);
       expect(stdout).toContain("test-admin");
@@ -348,13 +341,14 @@ describe("CLI Admin Commands", () => {
     });
 
     test("lists users with --verified filter", async () => {
-      setTestConfig({
+      const ctx = createTestContext();
+      setTestConfig(ctx, {
         apiKey: TEST_CONFIG.adminApiKey,
         apiUrl: TEST_CONFIG.apiUrl,
         username: "test-admin",
       });
 
-      const { stdout, exitCode } = await runCli(["admin", "users", "--verified"]);
+      const { stdout, exitCode } = await runCli(["admin", "users", "--verified"], ctx);
 
       expect(exitCode).toBe(0);
       // Should show test-verified user

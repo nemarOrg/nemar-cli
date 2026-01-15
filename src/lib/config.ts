@@ -21,7 +21,8 @@ const configSchema = z.object({
 export type Config = z.infer<typeof configSchema>;
 
 // Create configuration store
-const config = new Conf<Config>({
+// Support NEMAR_CONFIG_DIR env var for testing isolation
+const confOptions: ConstructorParameters<typeof Conf>[0] = {
   projectName: "nemar",
   schema: {
     apiKey: { type: "string" },
@@ -30,7 +31,14 @@ const config = new Conf<Config>({
     email: { type: "string" },
     githubUsername: { type: "string" },
   },
-});
+};
+
+// Allow custom config directory for testing
+if (process.env.NEMAR_CONFIG_DIR) {
+  confOptions.cwd = process.env.NEMAR_CONFIG_DIR;
+}
+
+const config = new Conf<Config>(confOptions);
 
 /**
  * Get the current configuration
