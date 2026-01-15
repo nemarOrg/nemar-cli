@@ -411,3 +411,63 @@ export interface DoiInfoResponse {
 export async function getDoiInfo(datasetId: string): Promise<DoiInfoResponse> {
   return request<DoiInfoResponse>(`/admin/datasets/${datasetId}/doi`, {}, true);
 }
+
+// ============================================================================
+// Dataset Access
+// ============================================================================
+
+export interface RequestAccessResponse {
+  message: string;
+  dataset_id: string;
+  github_repo: string;
+}
+
+/**
+ * Request collaborator access to a dataset (requires authentication)
+ * Auto-grants for public repos
+ */
+export async function requestDatasetAccess(datasetId: string): Promise<RequestAccessResponse> {
+  return request<RequestAccessResponse>(`/datasets/${datasetId}/request-access`, {
+    method: "POST",
+  }, true);
+}
+
+export interface InviteCollaboratorResponse {
+  message: string;
+  dataset_id: string;
+  invitee: string;
+}
+
+/**
+ * Invite a user as collaborator to a dataset (owner/admin only)
+ */
+export async function inviteCollaborator(
+  datasetId: string,
+  username: string
+): Promise<InviteCollaboratorResponse> {
+  return request<InviteCollaboratorResponse>(`/datasets/${datasetId}/invite`, {
+    method: "POST",
+    body: JSON.stringify({ username }),
+  }, true);
+}
+
+export interface Collaborator {
+  username: string;
+  github_username: string;
+  access_type: "requested" | "invited";
+  granted_at: string;
+  granted_by_username: string | null;
+}
+
+export interface ListCollaboratorsResponse {
+  dataset_id: string;
+  collaborators: Collaborator[];
+  count: number;
+}
+
+/**
+ * List collaborators for a dataset (owner/admin only)
+ */
+export async function listCollaborators(datasetId: string): Promise<ListCollaboratorsResponse> {
+  return request<ListCollaboratorsResponse>(`/datasets/${datasetId}/collaborators`, {}, true);
+}

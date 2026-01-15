@@ -2,12 +2,15 @@
  * Dataset management commands for NEMAR CLI
  *
  * Commands:
- * - nemar dataset validate   - Validate BIDS dataset locally
- * - nemar dataset upload     - Upload dataset to NEMAR
- * - nemar dataset download   - Download dataset from NEMAR
- * - nemar dataset status     - Check dataset status
- * - nemar dataset list       - List user's datasets
- * - nemar dataset version    - Create new version with DOI
+ * - nemar dataset validate        - Validate BIDS dataset locally
+ * - nemar dataset upload          - Upload dataset to NEMAR
+ * - nemar dataset download        - Download dataset from NEMAR
+ * - nemar dataset status          - Check dataset status
+ * - nemar dataset list            - List user's datasets
+ * - nemar dataset version         - Create new version with DOI
+ * - nemar dataset request-access  - Request access to a dataset
+ * - nemar dataset invite          - Invite user as collaborator
+ * - nemar dataset collaborators   - List dataset collaborators
  */
 
 import chalk from "chalk";
@@ -41,7 +44,16 @@ import {
   getDatasetData,
   getLocalDatasetInfo,
 } from "../lib/datalad.js";
-import { createDataset, finalizeDataset, getDataset, listDatasets, ApiError } from "../lib/api.js";
+import {
+  createDataset,
+  finalizeDataset,
+  getDataset,
+  listDatasets,
+  requestDatasetAccess,
+  inviteCollaborator,
+  listCollaborators,
+  ApiError,
+} from "../lib/api.js";
 
 export const datasetCommand = new Command("dataset")
   .description("Dataset management")
@@ -63,6 +75,8 @@ Examples:
   $ nemar dataset download nm000104              # Download a dataset
   $ nemar dataset list --mine                    # List your datasets
   $ nemar dataset status nm000104                # Check dataset status
+  $ nemar dataset request-access nm000104        # Request collaborator access
+  $ nemar dataset invite johndoe nm000104        # Invite user as collaborator
 
 Learn More:
   https://nemar-cli.pages.dev/commands/dataset/`
@@ -875,4 +889,172 @@ datasetCommand
     // 3. Create new version DOI on Zenodo
     // 4. Update dataset_description.json
     // 5. Create git tag and release
+  });
+
+// Request access command
+datasetCommand
+  .command("request-access")
+  .description("Request collaborator access to a dataset")
+  .argument("<dataset-id>", "Dataset ID (e.g., nm000104)")
+  .addHelpText(
+    "after",
+    `
+Description:
+  Request access to a NEMAR dataset to push data via git-annex.
+  Access is automatically granted for public repositories.
+
+  For metadata-only changes, you can fork and submit a PR without
+  requesting access.
+
+Requirements:
+  - NEMAR account (nemar auth login)
+  - Approved user status
+
+Examples:
+  $ nemar dataset request-access nm000104`
+  )
+  .action(async (datasetId) => {
+    if (!isAuthenticated()) {
+      console.log(chalk.red("Error: Not authenticated"));
+      console.log("Run 'nemar auth login' first");
+      process.exit(1);
+    }
+
+    const spinner = ora(`Requesting access to ${datasetId}...`).start();
+
+    try {
+      const result = await requestDatasetAccess(datasetId);
+      spinner.succeed(result.message);
+      console.log();
+      console.log(`  GitHub: https://github.com/${result.github_repo}`);
+      console.log();
+      console.log(chalk.gray("You can now push data to this dataset via git-annex."));
+    } catch (error) {
+      if (error instanceof ApiError) {
+        spinner.fail(error.message);
+      } else {
+        spinner.fail("Failed to request access");
+        console.log(chalk.red(`  ${(error as Error).message}`));
+      }
+      process.exit(1);
+    }
+  });
+
+// Invite collaborator command
+datasetCommand
+  .command("invite")
+  .description("Invite a user as collaborator to your dataset")
+  .argument("<username>", "Username to invite")
+  .argument("<dataset-id>", "Dataset ID (e.g., nm000104)")
+  .addHelpText(
+    "after",
+    `
+Description:
+  Invite a NEMAR user as a collaborator to your dataset.
+  Only dataset owners and admins can invite collaborators.
+
+  Works for both public and private repositories.
+
+Requirements:
+  - NEMAR account (nemar auth login)
+  - Dataset ownership or admin status
+
+Examples:
+  $ nemar dataset invite johndoe nm000104`
+  )
+  .action(async (username, datasetId) => {
+    if (!isAuthenticated()) {
+      console.log(chalk.red("Error: Not authenticated"));
+      console.log("Run 'nemar auth login' first");
+      process.exit(1);
+    }
+
+    const spinner = ora(`Inviting ${username} to ${datasetId}...`).start();
+
+    try {
+      const result = await inviteCollaborator(datasetId, username);
+      spinner.succeed(result.message);
+    } catch (error) {
+      if (error instanceof ApiError) {
+        spinner.fail(error.message);
+      } else {
+        spinner.fail("Failed to invite user");
+        console.log(chalk.red(`  ${(error as Error).message}`));
+      }
+      process.exit(1);
+    }
+  });
+
+// List collaborators command
+datasetCommand
+  .command("collaborators")
+  .description("List collaborators for a dataset")
+  .argument("<dataset-id>", "Dataset ID (e.g., nm000104)")
+  .option("--json", "Output as JSON for scripting")
+  .addHelpText(
+    "after",
+    `
+Description:
+  List all collaborators who have access to a dataset.
+  Only dataset owners and admins can view collaborators.
+
+Examples:
+  $ nemar dataset collaborators nm000104
+  $ nemar dataset collaborators nm000104 --json`
+  )
+  .action(async (datasetId, options) => {
+    if (!isAuthenticated()) {
+      console.log(chalk.red("Error: Not authenticated"));
+      console.log("Run 'nemar auth login' first");
+      process.exit(1);
+    }
+
+    const spinner = ora(`Fetching collaborators for ${datasetId}...`).start();
+
+    try {
+      const result = await listCollaborators(datasetId);
+      spinner.stop();
+
+      if (options.json) {
+        console.log(JSON.stringify(result, null, 2));
+        return;
+      }
+
+      console.log();
+      console.log(chalk.bold(`Collaborators for ${datasetId} (${result.count}):`));
+      console.log();
+
+      if (result.collaborators.length === 0) {
+        console.log(chalk.gray("  No collaborators yet."));
+        console.log();
+        console.log(chalk.gray("Invite users with: nemar dataset invite <username> " + datasetId));
+        return;
+      }
+
+      // Table header
+      const header = ["Username", "GitHub", "Access", "Granted"].join("  ");
+      console.log(chalk.gray("  " + header));
+      console.log(chalk.gray("  " + "-".repeat(header.length)));
+
+      for (const collab of result.collaborators) {
+        const grantedDate = new Date(collab.granted_at).toLocaleDateString();
+        const accessType = collab.access_type === "invited" ? "invited" : "requested";
+        const row = [
+          collab.username.padEnd(10),
+          ("@" + collab.github_username).padEnd(15),
+          accessType.padEnd(10),
+          grantedDate,
+        ].join("  ");
+        console.log("  " + row);
+      }
+      console.log();
+    } catch (error) {
+      if (error instanceof ApiError) {
+        spinner.fail(error.message);
+      } else {
+        spinner.fail("Failed to fetch collaborators");
+        console.log(chalk.red(`  ${(error as Error).message}`));
+      }
+      process.exit(1);
+    }
   });
