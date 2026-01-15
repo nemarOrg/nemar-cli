@@ -15,7 +15,10 @@
     "lint:fix": "biome check --fix src/",
     "format": "biome format --write src/",
     "typecheck": "tsc --noEmit",
-    "prepublishOnly": "bun run build"
+    "prepublishOnly": "bun run build",
+    "docs:generate": "bun run scripts/generate-docs.ts",
+    "docs:serve": "mkdocs serve",
+    "docs:build": "mkdocs build"
   },
   "keywords": [
     "nemar",

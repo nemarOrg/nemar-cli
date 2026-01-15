@@ -43,20 +43,63 @@ import {
 } from "../lib/datalad.js";
 import { createDataset, finalizeDataset, getDataset, listDatasets, ApiError } from "../lib/api.js";
 
-export const datasetCommand = new Command("dataset").description("Dataset management");
+export const datasetCommand = new Command("dataset")
+  .description("Dataset management")
+  .addHelpText(
+    "after",
+    `
+Description:
+  Manage BIDS datasets on NEMAR. Upload, download, validate, and version
+  neurophysiology datasets in Brain Imaging Data Structure (BIDS) format.
+
+Prerequisites:
+  - DataLad and git-annex (for upload/download)
+  - Deno runtime (for BIDS validation)
+  - NEMAR account (for upload)
+
+Examples:
+  $ nemar dataset validate ./my-dataset          # Validate locally
+  $ nemar dataset upload ./my-dataset            # Upload to NEMAR
+  $ nemar dataset download nm000104              # Download a dataset
+  $ nemar dataset list --mine                    # List your datasets
+  $ nemar dataset status nm000104                # Check dataset status
+
+Learn More:
+  https://nemar-cli.pages.dev/commands/dataset/`
+  );
 
 // Validate command
 datasetCommand
   .command("validate")
-  .description("Validate a BIDS dataset locally")
-  .argument("[path]", "Path to BIDS dataset directory")
+  .description("Validate a BIDS dataset locally using the official BIDS validator")
+  .argument("[path]", "Path to BIDS dataset directory", ".")
   .option("--ignore-warnings", "Only report errors, not warnings")
   .option("-c, --config <file>", "Validation config file (.bidsvalidatorrc)")
   .option("-r, --recursive", "Validate derivatives subdirectories")
   .option("--prune", "Skip sourcedata and derivatives for faster validation")
   .option("-v, --verbose", "Show verbose output")
-  .option("--json", "Output results as JSON")
-  .option("--version-info", "Show BIDS validator version")
+  .option("--json", "Output results as JSON (for scripting)")
+  .option("--version-info", "Show BIDS validator version info")
+  .addHelpText(
+    "after",
+    `
+Description:
+  Validates a BIDS dataset using the official BIDS validator (via Deno).
+  The validator checks dataset structure, file naming, and metadata.
+
+Requirements:
+  Deno runtime must be installed: https://deno.com
+
+Exit Codes:
+  0 - Dataset is valid
+  1 - Dataset has errors or validation failed
+
+Examples:
+  $ nemar dataset validate                       # Validate current directory
+  $ nemar dataset validate ./my-dataset          # Validate specific path
+  $ nemar dataset validate ./ds --prune          # Fast validation (skip derivatives)
+  $ nemar dataset validate ./ds --json > out.json`
+  )
   .action(async (datasetPath, options) => {
     // Show version info if requested
     if (options.versionInfo) {
@@ -159,8 +202,33 @@ datasetCommand
   .option("-d, --description <desc>", "Dataset description")
   .option("--skip-validation", "Skip BIDS validation (not recommended)")
   .option("--dry-run", "Show what would be uploaded without doing it")
-  .option("-j, --jobs <number>", "Parallel upload streams", "8")
+  .option("-j, --jobs <number>", "Parallel upload streams (default: 8)", "8")
   .option("-y, --yes", "Skip confirmation prompt")
+  .addHelpText(
+    "after",
+    `
+Description:
+  Upload a BIDS dataset to NEMAR. The dataset will be validated, assigned
+  a unique ID (nm000XXX), and stored on GitHub (metadata) and S3 (data files).
+
+Requirements:
+  - NEMAR account (nemar auth login)
+  - DataLad and git-annex installed
+  - GitHub SSH access configured
+  - AWS credentials in environment
+
+Process:
+  1. Validates BIDS format (unless --skip-validation)
+  2. Creates GitHub repository for metadata
+  3. Uploads large files to S3 in parallel
+  4. Enables PR-based versioning workflow
+
+Examples:
+  $ nemar dataset upload ./my-eeg-dataset
+  $ nemar dataset upload ./ds -n "My EEG Study" -d "64-channel EEG data"
+  $ nemar dataset upload ./ds --dry-run        # Preview without uploading
+  $ nemar dataset upload ./ds -j 16            # More parallel streams`
+  )
   .action(async (datasetPath, options) => {
     // Step 1: Check authentication
     if (!isAuthenticated()) {
@@ -448,9 +516,25 @@ datasetCommand
   .command("download")
   .description("Download a dataset from NEMAR")
   .argument("<dataset-id>", "Dataset ID (e.g., nm000104)")
-  .option("-o, --output <path>", "Output directory")
-  .option("-j, --jobs <number>", "Parallel download streams", "4")
-  .option("--no-data", "Download metadata only (no large files)")
+  .option("-o, --output <path>", "Output directory (default: ./<dataset-id>)")
+  .option("-j, --jobs <number>", "Parallel download streams (default: 4)", "4")
+  .option("--no-data", "Download metadata only (skip large data files)")
+  .addHelpText(
+    "after",
+    `
+Description:
+  Download a BIDS dataset from NEMAR. Uses DataLad/git-annex for efficient
+  data transfer with parallel streams.
+
+Requirements:
+  - DataLad and git-annex installed (no account needed)
+
+Examples:
+  $ nemar dataset download nm000104              # Download to ./nm000104
+  $ nemar dataset download nm000104 -o ./data    # Custom output directory
+  $ nemar dataset download nm000104 --no-data    # Metadata only (fast)
+  $ nemar dataset download nm000104 -j 8         # More parallel streams`
+  )
   .action(async (datasetId, options) => {
     // Step 1: Check prerequisites
     let spinner = ora("Checking prerequisites...").start();
@@ -573,7 +657,18 @@ datasetCommand
   .command("status")
   .description("Check status of a dataset")
   .argument("<dataset-id>", "Dataset ID (e.g., nm000104)")
-  .option("--json", "Output as JSON")
+  .option("--json", "Output as JSON for scripting")
+  .addHelpText(
+    "after",
+    `
+Description:
+  Show detailed information about a NEMAR dataset including owner,
+  creation date, GitHub repository, and DOI information.
+
+Examples:
+  $ nemar dataset status nm000104
+  $ nemar dataset status nm000104 --json | jq '.concept_doi'`
+  )
   .action(async (datasetId, options) => {
     const spinner = ora(`Fetching dataset info for ${datasetId}...`).start();
 
@@ -644,10 +739,23 @@ function colorizeStatus(status: string): string {
 // List command
 datasetCommand
   .command("list")
-  .description("List datasets")
+  .description("List available datasets on NEMAR")
   .option("--mine", "List only your datasets (requires authentication)")
-  .option("--json", "Output as JSON")
-  .option("--limit <n>", "Limit number of results", "50")
+  .option("--json", "Output as JSON for scripting")
+  .option("--limit <n>", "Limit number of results (default: 50)", "50")
+  .addHelpText(
+    "after",
+    `
+Description:
+  List BIDS datasets available on NEMAR. Use --mine to see only your
+  own datasets (requires authentication).
+
+Examples:
+  $ nemar dataset list                   # List all public datasets
+  $ nemar dataset list --mine            # List your datasets
+  $ nemar dataset list --json            # JSON output for scripting
+  $ nemar dataset list --limit 10        # Show only 10 datasets`
+  )
   .action(async (options) => {
     // If --mine, require authentication
     if (options.mine && !isAuthenticated()) {

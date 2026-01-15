@@ -29,9 +29,29 @@ import {
   checkDownloadPrerequisites,
 } from "../lib/datalad.js";
 
-export const adminCommand = new Command("admin").description(
-  "Admin commands (requires admin privileges)"
-);
+export const adminCommand = new Command("admin")
+  .description("Admin commands (requires admin privileges)")
+  .addHelpText(
+    "after",
+    `
+Description:
+  Administrative commands for managing NEMAR users and datasets.
+  These commands require admin privileges.
+
+User Management:
+  users    - List users and their status
+  approve  - Approve a pending user registration
+  revoke   - Revoke user access
+
+Dataset Management:
+  doi      - Create and manage DOIs for datasets
+  revert   - Revert dataset to previous version (via PR)
+
+Examples:
+  $ nemar admin users --verified         # List users awaiting approval
+  $ nemar admin approve john_doe         # Approve a user
+  $ nemar admin doi create nm000104      # Create concept DOI`
+  );
 
 /**
  * Check authentication and show error if not authenticated

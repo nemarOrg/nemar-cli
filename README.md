@@ -1,6 +1,11 @@
 # NEMAR CLI
 
+[![Documentation](https://img.shields.io/badge/docs-nemar--cli.pages.dev-blue)](https://nemar-cli.pages.dev)
+[![Tests](https://github.com/nemarDatasets/nemar-cli/actions/workflows/test.yml/badge.svg)](https://github.com/nemarDatasets/nemar-cli/actions/workflows/test.yml)
+
 Command-line interface for [NEMAR](https://nemar.org) (Neuroelectromagnetic Data Archive and Tools Resource) dataset management.
+
+**[Documentation](https://nemar-cli.pages.dev)** | [Quick Start](https://nemar-cli.pages.dev/getting-started/quickstart/) | [Commands](https://nemar-cli.pages.dev/commands/)
 
 ## Features
 
