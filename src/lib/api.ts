@@ -315,3 +315,79 @@ export interface HealthResponse {
 export async function checkHealth(): Promise<HealthResponse> {
   return request<HealthResponse>("/health");
 }
+
+// ============================================================================
+// DOI Management (Admin)
+// ============================================================================
+
+export interface CreateConceptDoiRequest {
+  title?: string;
+  description?: string;
+  authors?: Array<{ name: string; affiliation?: string }>;
+  sandbox?: boolean;
+}
+
+export interface CreateConceptDoiResponse {
+  message: string;
+  concept_doi: string;
+  zenodo_id: number;
+  zenodo_url: string;
+  warning: string;
+}
+
+/**
+ * Create concept DOI for a dataset (admin only)
+ */
+export async function createConceptDoi(
+  datasetId: string,
+  data: CreateConceptDoiRequest
+): Promise<CreateConceptDoiResponse> {
+  return request<CreateConceptDoiResponse>(`/admin/datasets/${datasetId}/doi/concept`, {
+    method: "POST",
+    body: JSON.stringify(data),
+  }, true);
+}
+
+export interface PublishVersionDoiRequest {
+  version: string;
+  release_url: string;
+  sandbox?: boolean;
+}
+
+export interface PublishVersionDoiResponse {
+  message: string;
+  version: string;
+  version_doi: string;
+  concept_doi: string;
+  zenodo_url: string;
+  warning: string;
+}
+
+/**
+ * Publish version DOI for a dataset (admin only)
+ */
+export async function publishVersionDoi(
+  datasetId: string,
+  data: PublishVersionDoiRequest
+): Promise<PublishVersionDoiResponse> {
+  return request<PublishVersionDoiResponse>(`/admin/datasets/${datasetId}/doi/publish`, {
+    method: "POST",
+    body: JSON.stringify(data),
+  }, true);
+}
+
+export interface DoiInfoResponse {
+  dataset_id: string;
+  name: string;
+  concept_doi: string | null;
+  latest_version_doi: string | null;
+  zenodo_concept_url: string | null;
+  zenodo_latest_version_url: string | null;
+}
+
+/**
+ * Get DOI info for a dataset (admin only)
+ */
+export async function getDoiInfo(datasetId: string): Promise<DoiInfoResponse> {
+  return request<DoiInfoResponse>(`/admin/datasets/${datasetId}/doi`, {}, true);
+}

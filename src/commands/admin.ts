@@ -18,7 +18,7 @@ import ora from "ora";
 import { existsSync } from "fs";
 import { join } from "path";
 import { isAuthenticated, getConfig } from "../lib/config.js";
-import { ApiError, approveUser, listUsers, revokeUser, getDataset } from "../lib/api.js";
+import { ApiError, approveUser, listUsers, revokeUser, getDataset, createConceptDoi, getDoiInfo } from "../lib/api.js";
 import {
   cloneDataset,
   listDatasetVersions,
@@ -241,20 +241,169 @@ doiCommand
   .argument("<dataset-id>", "Dataset ID (e.g., nm000104)")
   .option("--title <title>", "DOI title (defaults to dataset name)")
   .option("--description <desc>", "DOI description")
+  .option("--sandbox", "Use Zenodo sandbox for testing")
   .action(async (datasetId, options) => {
     if (!requireAuth()) return;
 
-    console.log(chalk.yellow("DOI creation not yet implemented"));
+    // Get dataset info
+    const spinner = ora("Fetching dataset info...").start();
+    let dataset;
+    try {
+      dataset = await getDataset(datasetId);
+      spinner.succeed(`Found dataset: ${dataset.name}`);
+    } catch (error) {
+      if (error instanceof ApiError) {
+        spinner.fail(error.message);
+        if (error.statusCode === 404) {
+          console.log(chalk.gray("  Dataset not found"));
+        }
+      } else {
+        spinner.fail("Failed to fetch dataset");
+      }
+      return;
+    }
+
+    // Check if already has concept DOI
+    try {
+      const doiInfo = await getDoiInfo(datasetId);
+      if (doiInfo.concept_doi) {
+        console.log(chalk.yellow("\nDataset already has a concept DOI:"));
+        console.log(`  Concept DOI: ${chalk.cyan(doiInfo.concept_doi)}`);
+        if (doiInfo.zenodo_concept_url) {
+          console.log(`  Zenodo URL:  ${doiInfo.zenodo_concept_url}`);
+        }
+        return;
+      }
+    } catch {
+      // No DOI info yet, continue
+    }
+
+    // Display summary
     console.log();
-    console.log(`Dataset: ${datasetId}`);
-    console.log(chalk.red("WARNING: DOIs are PERMANENT and cannot be deleted"));
+    console.log(chalk.cyan("Dataset Information:"));
+    console.log(`  ID:          ${dataset.dataset_id}`);
+    console.log(`  Name:        ${dataset.name}`);
+    if (dataset.github_repo) {
+      console.log(`  GitHub:      ${dataset.github_repo}`);
+    }
+    if (options.sandbox) {
+      console.log(`  Mode:        ${chalk.yellow("SANDBOX (test DOI)")}`);
+    }
     console.log();
-    console.log("This feature will:");
-    console.log("  1. Validate dataset passes BIDS");
-    console.log("  2. Pre-reserve DOI on Zenodo");
-    console.log("  3. Update dataset_description.json");
-    console.log("  4. Create initial release");
-    console.log("  5. Publish DOI");
+
+    // Confirmation
+    console.log(chalk.red("WARNING: DOIs are PERMANENT and cannot be deleted!"));
+    console.log(chalk.gray("The DOI will be pre-reserved but not published until the first version release."));
+    console.log();
+
+    const { confirm } = await inquirer.prompt([
+      {
+        type: "confirm",
+        name: "confirm",
+        message: options.sandbox
+          ? "Create test concept DOI on Zenodo sandbox?"
+          : "Create concept DOI on Zenodo?",
+        default: false,
+      },
+    ]);
+
+    if (!confirm) {
+      console.log(chalk.gray("Cancelled"));
+      return;
+    }
+
+    // Create concept DOI
+    const createSpinner = ora("Creating concept DOI on Zenodo...").start();
+
+    try {
+      const result = await createConceptDoi(datasetId, {
+        title: options.title,
+        description: options.description,
+        sandbox: options.sandbox,
+      });
+
+      createSpinner.succeed("Concept DOI created successfully");
+      console.log();
+      console.log(chalk.green("DOI Information:"));
+      console.log(`  Concept DOI: ${chalk.cyan(result.concept_doi)}`);
+      console.log(`  Zenodo URL:  ${result.zenodo_url}`);
+      console.log();
+      console.log(chalk.yellow("Next steps:"));
+      console.log("  1. The DOI is pre-reserved but not yet active");
+      console.log("  2. Update dataset_description.json with DatasetDOI field");
+      console.log("  3. Create a PR and merge it to trigger version DOI publication");
+      console.log();
+      if (options.sandbox) {
+        console.log(chalk.gray("Note: This is a sandbox DOI and will not resolve in production."));
+      }
+    } catch (error) {
+      if (error instanceof ApiError) {
+        createSpinner.fail(error.message);
+        if (error.statusCode === 403) {
+          console.log(chalk.gray("  This command requires admin privileges"));
+        }
+      } else {
+        createSpinner.fail("Failed to create concept DOI");
+        console.log(chalk.gray(`  ${error instanceof Error ? error.message : "Unknown error"}`));
+      }
+    }
+  });
+
+doiCommand
+  .command("info")
+  .description("Get DOI info for a dataset")
+  .argument("<dataset-id>", "Dataset ID (e.g., nm000104)")
+  .action(async (datasetId) => {
+    if (!requireAuth()) return;
+
+    const spinner = ora("Fetching DOI info...").start();
+
+    try {
+      const doiInfo = await getDoiInfo(datasetId);
+      spinner.stop();
+
+      console.log();
+      console.log(chalk.cyan(`DOI Information for ${datasetId}:`));
+      console.log(`  Dataset Name:    ${doiInfo.name}`);
+      console.log();
+
+      if (doiInfo.concept_doi) {
+        console.log(chalk.green("Concept DOI:"));
+        console.log(`  DOI:  ${doiInfo.concept_doi}`);
+        console.log(`  URL:  https://doi.org/${doiInfo.concept_doi}`);
+        if (doiInfo.zenodo_concept_url) {
+          console.log(`  Zenodo: ${doiInfo.zenodo_concept_url}`);
+        }
+      } else {
+        console.log(chalk.yellow("No concept DOI created yet"));
+        console.log(chalk.gray("  Use 'nemar admin doi create' to create one"));
+      }
+
+      console.log();
+
+      if (doiInfo.latest_version_doi) {
+        console.log(chalk.green("Latest Version DOI:"));
+        console.log(`  DOI:  ${doiInfo.latest_version_doi}`);
+        console.log(`  URL:  https://doi.org/${doiInfo.latest_version_doi}`);
+        if (doiInfo.zenodo_latest_version_url) {
+          console.log(`  Zenodo: ${doiInfo.zenodo_latest_version_url}`);
+        }
+      } else if (doiInfo.concept_doi) {
+        console.log(chalk.yellow("No version DOI published yet"));
+        console.log(chalk.gray("  Version DOIs are created automatically on PR merge"));
+      }
+    } catch (error) {
+      if (error instanceof ApiError) {
+        spinner.fail(error.message);
+        if (error.statusCode === 404) {
+          console.log(chalk.gray("  Dataset not found"));
+        } else if (error.statusCode === 403) {
+          console.log(chalk.gray("  This command requires admin privileges"));
+        }
+      } else {
+        spinner.fail("Failed to fetch DOI info");
+      }
+    }
   });
 
 adminCommand.addCommand(doiCommand);

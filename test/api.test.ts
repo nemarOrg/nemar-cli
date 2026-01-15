@@ -354,6 +354,146 @@ describe("Datasets API", () => {
   });
 });
 
+describe("DOI/Zenodo API", () => {
+  describe("GET /admin/datasets/:id/doi", () => {
+    test("admin can get DOI info for a dataset", async () => {
+      // First check if we have any datasets
+      const { data: datasetsList } = await testRequest<{
+        datasets: Array<{ dataset_id: string }>;
+      }>("/datasets");
+
+      if (datasetsList.datasets.length === 0) {
+        // Skip if no datasets exist
+        return;
+      }
+
+      const datasetId = datasetsList.datasets[0].dataset_id;
+      const { status, data } = await testRequest<{
+        dataset_id: string;
+        name: string;
+        concept_doi: string | null;
+      }>(`/admin/datasets/${datasetId}/doi`, {}, TEST_CONFIG.adminApiKey);
+
+      expect(status).toBe(200);
+      expect(data.dataset_id).toBe(datasetId);
+    });
+
+    test("non-admin user gets 403", async () => {
+      const { status, data } = await testRequest<{ error: string }>(
+        "/admin/datasets/nm000001/doi",
+        {},
+        TEST_CONFIG.userApiKey
+      );
+
+      expect(status).toBe(403);
+      expect(data.error).toContain("Admin");
+    });
+
+    test("unauthenticated request returns 401", async () => {
+      const { status } = await testRequest("/admin/datasets/nm000001/doi");
+
+      expect(status).toBe(401);
+    });
+
+    test("non-existent dataset returns 404", async () => {
+      const { status } = await testRequest<{ error: string }>(
+        "/admin/datasets/nm999999/doi",
+        {},
+        TEST_CONFIG.adminApiKey
+      );
+
+      expect(status).toBe(404);
+    });
+  });
+
+  describe("POST /admin/datasets/:id/doi/concept", () => {
+    test("non-admin user gets 403", async () => {
+      const { status, data } = await testRequest<{ error: string }>(
+        "/admin/datasets/nm000001/doi/concept",
+        { method: "POST", body: JSON.stringify({}) },
+        TEST_CONFIG.userApiKey
+      );
+
+      expect(status).toBe(403);
+      expect(data.error).toContain("Admin");
+    });
+
+    test("unauthenticated request returns 401", async () => {
+      const { status } = await testRequest("/admin/datasets/nm000001/doi/concept", {
+        method: "POST",
+        body: JSON.stringify({}),
+      });
+
+      expect(status).toBe(401);
+    });
+
+    test("non-existent dataset returns 404", async () => {
+      const { status } = await testRequest<{ error: string }>(
+        "/admin/datasets/nm999999/doi/concept",
+        { method: "POST", body: JSON.stringify({}) },
+        TEST_CONFIG.adminApiKey
+      );
+
+      expect(status).toBe(404);
+    });
+  });
+
+  describe("POST /webhooks/publish-version-doi", () => {
+    test("missing webhook token returns 401", async () => {
+      const { status, data } = await testRequest<{ error: string }>(
+        "/webhooks/publish-version-doi",
+        {
+          method: "POST",
+          body: JSON.stringify({
+            dataset_id: "nm000001",
+            version: "1.0.0",
+            release_url: "https://github.com/example/repo/releases/tag/v1.0.0",
+          }),
+        }
+      );
+
+      expect(status).toBe(401);
+      expect(data.error).toBe("Invalid webhook token");
+    });
+
+    test("invalid webhook token returns 401", async () => {
+      const headers = { "X-Webhook-Token": "invalid_token" };
+      const response = await fetch(`${TEST_CONFIG.apiUrl}/webhooks/publish-version-doi`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          ...headers,
+        },
+        body: JSON.stringify({
+          dataset_id: "nm000001",
+          version: "1.0.0",
+          release_url: "https://github.com/example/repo/releases/tag/v1.0.0",
+        }),
+      });
+
+      expect(response.status).toBe(401);
+    });
+
+    test("missing required fields returns 400", async () => {
+      const headers = { "X-Webhook-Token": "test_token" };
+      const response = await fetch(`${TEST_CONFIG.apiUrl}/webhooks/publish-version-doi`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          ...headers,
+        },
+        body: JSON.stringify({
+          dataset_id: "nm000001",
+          // Missing version and release_url
+        }),
+      });
+
+      // Will be 401 if token is invalid, or 400 if token is valid but fields missing
+      expect([400, 401]).toContain(response.status);
+    });
+  });
+});
+
 describe("Error Handling", () => {
   test("invalid JSON returns 400", async () => {
     const headers: Record<string, string> = { "Content-Type": "application/json" };

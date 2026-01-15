@@ -19,6 +19,9 @@ export interface Bindings {
   AWS_ACCESS_KEY_ID: string;
   AWS_SECRET_ACCESS_KEY: string;
   RESEND_API_KEY: string;
+  ZENODO_API_KEY: string;
+  ZENODO_SANDBOX_API_KEY?: string; // Optional - for sandbox testing
+  GITHUB_WEBHOOK_SECRET?: string; // Optional - for GitHub Actions webhook auth
   TEST_BYPASS_TOKEN?: string; // Optional - for CI/CD rate limit bypass
 }
 

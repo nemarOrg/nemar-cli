@@ -14,6 +14,7 @@ import { authRoutes } from "./routes/auth";
 import { userRoutes } from "./routes/users";
 import { adminRoutes } from "./routes/admin";
 import { datasetRoutes } from "./routes/datasets";
+import webhooks from "./routes/webhooks";
 import { rateLimiter } from "./middleware/rateLimit";
 
 // Create Hono app with typed bindings
@@ -63,6 +64,7 @@ app.get("/", (c) => {
       users: "/users/*",
       admin: "/admin/*",
       datasets: "/datasets/*",
+      webhooks: "/webhooks/*",
     },
   });
 });
@@ -72,6 +74,7 @@ app.route("/auth", authRoutes);
 app.route("/users", userRoutes);
 app.route("/admin", adminRoutes);
 app.route("/datasets", datasetRoutes);
+app.route("/webhooks", webhooks);
 
 // 404 handler
 app.notFound((c) => {

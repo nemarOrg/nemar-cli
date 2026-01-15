@@ -415,6 +415,9 @@ jobs:
     name: Create Release
     if: github.event.pull_request.merged == true
     runs-on: ubuntu-latest
+    outputs:
+      version: \${{ steps.version.outputs.version }}
+      release_created: \${{ steps.create_release.outputs.created }}
     steps:
       - uses: actions/checkout@v4
 
@@ -435,6 +438,7 @@ jobs:
           fi
 
       - name: Create tag and release
+        id: create_release
         if: steps.check_tag.outputs.exists == 'false'
         env:
           GH_TOKEN: \${{ secrets.GITHUB_TOKEN }}
@@ -449,6 +453,62 @@ jobs:
 
 Changes in this release:
 \${{ github.event.pull_request.body }}"
+          echo "created=true" >> $GITHUB_OUTPUT
+
+  publish-zenodo:
+    name: Publish Zenodo DOI
+    needs: create-release
+    if: needs.create-release.outputs.release_created == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Publish version DOI
+        env:
+          NEMAR_WEBHOOK_TOKEN: \${{ secrets.NEMAR_WEBHOOK_TOKEN }}
+        run: |
+          # Extract dataset ID from repo name (e.g., nm000104)
+          DATASET_ID="\${{ github.event.repository.name }}"
+          VERSION="\${{ needs.create-release.outputs.version }}"
+          RELEASE_URL="https://github.com/\${{ github.repository }}/releases/tag/v$VERSION"
+
+          echo "Publishing DOI for $DATASET_ID version $VERSION"
+
+          # Skip if webhook token not configured
+          if [ -z "$NEMAR_WEBHOOK_TOKEN" ]; then
+            echo "NEMAR_WEBHOOK_TOKEN not configured, skipping DOI publish"
+            exit 0
+          fi
+
+          # Call NEMAR API to publish version DOI
+          RESPONSE=$(curl -s -w "\\n%{http_code}" -X POST \\
+            "https://nemar-api.shirazi-10f.workers.dev/webhooks/publish-version-doi" \\
+            -H "Content-Type: application/json" \\
+            -H "X-Webhook-Token: $NEMAR_WEBHOOK_TOKEN" \\
+            -d "{
+              \\"dataset_id\\": \\"$DATASET_ID\\",
+              \\"version\\": \\"$VERSION\\",
+              \\"release_url\\": \\"$RELEASE_URL\\"
+            }")
+
+          HTTP_CODE=$(echo "$RESPONSE" | tail -1)
+          BODY=$(echo "$RESPONSE" | head -n -1)
+
+          echo "Response: $BODY"
+
+          if [ "$HTTP_CODE" -ge 400 ]; then
+            # Check if it was skipped (no concept DOI)
+            if echo "$BODY" | jq -e '.skipped == true' > /dev/null 2>&1; then
+              echo "Skipped: No concept DOI exists for this dataset"
+              exit 0
+            fi
+            echo "::error::Failed to publish DOI (HTTP $HTTP_CODE)"
+            exit 1
+          fi
+
+          # Show DOI info
+          DOI=$(echo "$BODY" | jq -r '.version_doi // empty')
+          if [ -n "$DOI" ]; then
+            echo "✓ Version DOI published: $DOI"
+          fi
 
   cleanup-staging:
     name: Cleanup Staging
