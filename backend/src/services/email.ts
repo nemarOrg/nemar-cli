@@ -6,7 +6,7 @@
 
 import { Resend } from "resend";
 
-const FROM_EMAIL = "NEMAR <noreply@nemar.org>";
+const FROM_EMAIL = "NEMAR <nemar@osc.earth>";
 
 /**
  * Send email verification link to new user
@@ -61,6 +61,7 @@ export async function sendVerificationEmail(
 
   <p style="color: #999; font-size: 12px; margin-top: 30px;">
     NEMAR - Neuroelectromagnetic Data Archive and Tools Resource<br>
+    Part of <a href="https://osc.earth" style="color: #999;">Open Science Collective</a><br>
     If you didn't create this account, you can safely ignore this email.
   </p>
 </body>
@@ -132,7 +133,8 @@ nemar dataset upload /path/to/bids-dataset
   </p>
 
   <p style="color: #999; font-size: 12px; margin-top: 30px;">
-    NEMAR - Neuroelectromagnetic Data Archive and Tools Resource
+    NEMAR - Neuroelectromagnetic Data Archive and Tools Resource<br>
+    Part of <a href="https://osc.earth" style="color: #999;">Open Science Collective</a>
   </p>
 </body>
 </html>
@@ -173,7 +175,8 @@ export async function sendRevocationEmail(
   <hr style="border: none; border-top: 1px solid #eee; margin: 30px 0;">
 
   <p style="color: #999; font-size: 12px;">
-    NEMAR - Neuroelectromagnetic Data Archive and Tools Resource
+    NEMAR - Neuroelectromagnetic Data Archive and Tools Resource<br>
+    Part of <a href="https://osc.earth" style="color: #999;">Open Science Collective</a>
   </p>
 </body>
 </html>
