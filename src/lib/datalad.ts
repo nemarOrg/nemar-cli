@@ -800,3 +800,208 @@ export async function getLocalDatasetInfo(
     return null;
   }
 }
+
+// =============================================================================
+// Revert Functions (Admin Only)
+// =============================================================================
+
+/**
+ * List available versions (tags) for a dataset
+ */
+export async function listDatasetVersions(
+  datasetPath: string
+): Promise<{ version: string; date: string; commit: string }[]> {
+  try {
+    const { stdout, exitCode } = await runCommand(
+      ["git", "tag", "-l", "--sort=-version:refname", "--format=%(refname:short)|%(creatordate:short)|%(objectname:short)"],
+      { cwd: datasetPath }
+    );
+
+    if (exitCode !== 0 || !stdout.trim()) {
+      return [];
+    }
+
+    return stdout.trim().split("\n").map((line) => {
+      const [version, date, commit] = line.split("|");
+      return { version, date, commit };
+    });
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Get the commit hash for a version tag
+ */
+export async function getVersionCommit(
+  datasetPath: string,
+  version: string
+): Promise<string | null> {
+  try {
+    const tag = version.startsWith("v") ? version : `v${version}`;
+    const { stdout, exitCode } = await runCommand(
+      ["git", "rev-parse", tag],
+      { cwd: datasetPath }
+    );
+
+    if (exitCode !== 0) {
+      return null;
+    }
+
+    return stdout.trim();
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Create a revert branch from the current state to a target version
+ */
+export async function createRevertBranch(
+  datasetPath: string,
+  targetVersion: string,
+  branchName: string
+): Promise<{ success: boolean; error?: string }> {
+  try {
+    // Create and checkout the revert branch
+    const { stderr: branchErr, exitCode: branchCode } = await runCommand(
+      ["git", "checkout", "-b", branchName],
+      { cwd: datasetPath }
+    );
+
+    if (branchCode !== 0) {
+      return { success: false, error: branchErr.trim() || "Failed to create branch" };
+    }
+
+    // Get the tag name
+    const tag = targetVersion.startsWith("v") ? targetVersion : `v${targetVersion}`;
+
+    // Checkout all files from the target version (except .git)
+    const { stderr: checkoutErr, exitCode: checkoutCode } = await runCommand(
+      ["git", "checkout", tag, "--", "."],
+      { cwd: datasetPath }
+    );
+
+    if (checkoutCode !== 0) {
+      return { success: false, error: checkoutErr.trim() || "Failed to checkout files from target version" };
+    }
+
+    return { success: true };
+  } catch (e) {
+    return { success: false, error: (e as Error).message };
+  }
+}
+
+/**
+ * Commit the revert changes
+ */
+export async function commitRevert(
+  datasetPath: string,
+  targetVersion: string,
+  message?: string
+): Promise<{ success: boolean; error?: string }> {
+  const commitMessage = message || `Revert to ${targetVersion}`;
+
+  try {
+    // Stage all changes
+    const { exitCode: addCode } = await runCommand(
+      ["git", "add", "-A"],
+      { cwd: datasetPath }
+    );
+
+    if (addCode !== 0) {
+      return { success: false, error: "Failed to stage changes" };
+    }
+
+    // Check if there are changes to commit
+    const { stdout: statusOut } = await runCommand(
+      ["git", "status", "--porcelain"],
+      { cwd: datasetPath }
+    );
+
+    if (!statusOut.trim()) {
+      return { success: false, error: "No changes to revert (already at target version)" };
+    }
+
+    // Commit
+    const { stderr: commitErr, exitCode: commitCode } = await runCommand(
+      ["git", "commit", "-m", commitMessage],
+      { cwd: datasetPath }
+    );
+
+    if (commitCode !== 0) {
+      return { success: false, error: commitErr.trim() || "Failed to commit" };
+    }
+
+    return { success: true };
+  } catch (e) {
+    return { success: false, error: (e as Error).message };
+  }
+}
+
+/**
+ * Push a branch to remote
+ */
+export async function pushBranch(
+  datasetPath: string,
+  branchName: string,
+  remoteName = "origin"
+): Promise<{ success: boolean; error?: string }> {
+  try {
+    const { stderr, exitCode } = await runCommand(
+      ["git", "push", "-u", remoteName, branchName],
+      { cwd: datasetPath }
+    );
+
+    if (exitCode !== 0) {
+      return { success: false, error: stderr.trim() || "Failed to push branch" };
+    }
+
+    return { success: true };
+  } catch (e) {
+    return { success: false, error: (e as Error).message };
+  }
+}
+
+/**
+ * Get current branch name
+ */
+export async function getCurrentBranch(datasetPath: string): Promise<string | null> {
+  try {
+    const { stdout, exitCode } = await runCommand(
+      ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+      { cwd: datasetPath }
+    );
+
+    if (exitCode !== 0) {
+      return null;
+    }
+
+    return stdout.trim();
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Switch to a branch
+ */
+export async function switchBranch(
+  datasetPath: string,
+  branchName: string
+): Promise<{ success: boolean; error?: string }> {
+  try {
+    const { stderr, exitCode } = await runCommand(
+      ["git", "checkout", branchName],
+      { cwd: datasetPath }
+    );
+
+    if (exitCode !== 0) {
+      return { success: false, error: stderr.trim() || "Failed to switch branch" };
+    }
+
+    return { success: true };
+  } catch (e) {
+    return { success: false, error: (e as Error).message };
+  }
+}

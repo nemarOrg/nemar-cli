@@ -7,6 +7,7 @@
  * - nemar admin users      - List users (pending, approved, all)
  * - nemar admin approve    - Approve a pending user
  * - nemar admin revoke     - Revoke user access
+ * - nemar admin revert     - Revert dataset to a previous version
  * - nemar admin doi create - Create concept DOI for dataset (not yet implemented)
  */
 
@@ -14,8 +15,19 @@ import chalk from "chalk";
 import { Command } from "commander";
 import inquirer from "inquirer";
 import ora from "ora";
+import { existsSync } from "fs";
+import { join } from "path";
 import { isAuthenticated, getConfig } from "../lib/config.js";
-import { ApiError, approveUser, listUsers, revokeUser } from "../lib/api.js";
+import { ApiError, approveUser, listUsers, revokeUser, getDataset } from "../lib/api.js";
+import {
+  cloneDataset,
+  listDatasetVersions,
+  getVersionCommit,
+  createRevertBranch,
+  commitRevert,
+  pushBranch,
+  checkDownloadPrerequisites,
+} from "../lib/datalad.js";
 
 export const adminCommand = new Command("admin").description(
   "Admin commands (requires admin privileges)"
@@ -246,3 +258,253 @@ doiCommand
   });
 
 adminCommand.addCommand(doiCommand);
+
+// ============================================================================
+// Revert (Admin Only)
+// ============================================================================
+
+adminCommand
+  .command("revert")
+  .description("Revert a dataset to a previous version (creates PR for review)")
+  .argument("<dataset-id>", "Dataset ID (e.g., nm000104)")
+  .argument("[version]", "Target version to revert to (e.g., 1.0.0)")
+  .option("--list", "List available versions without reverting")
+  .option("--force", "Direct push to main without PR (emergency only)")
+  .option("--message <msg>", "Custom revert commit message")
+  .option("--dir <path>", "Use existing local clone instead of cloning fresh")
+  .action(async (datasetId, targetVersion, options) => {
+    if (!requireAuth()) return;
+
+    // Verify prerequisites
+    const prereqs = await checkDownloadPrerequisites();
+    if (!prereqs.allPassed) {
+      console.log(chalk.red("Error: Missing prerequisites"));
+      for (const error of prereqs.errors) {
+        console.log(chalk.gray(`  - ${error}`));
+      }
+      return;
+    }
+
+    // Determine working directory
+    let workDir: string;
+    let needsClone = true;
+
+    if (options.dir) {
+      if (!existsSync(options.dir)) {
+        console.log(chalk.red(`Error: Directory not found: ${options.dir}`));
+        return;
+      }
+      workDir = options.dir;
+      needsClone = false;
+    } else {
+      workDir = join(process.cwd(), `${datasetId}-revert-${Date.now()}`);
+    }
+
+    // Get dataset info from API
+    const spinner = ora("Fetching dataset info...").start();
+    let dataset;
+    try {
+      dataset = await getDataset(datasetId);
+      spinner.succeed(`Found dataset: ${dataset.name}`);
+    } catch (error) {
+      if (error instanceof ApiError) {
+        spinner.fail(error.message);
+        if (error.statusCode === 404) {
+          console.log(chalk.gray("  Dataset not found"));
+        }
+      } else {
+        spinner.fail("Failed to fetch dataset");
+      }
+      return;
+    }
+
+    // Check if dataset has GitHub repo
+    if (!dataset.github_repo) {
+      console.log(chalk.red("Error: Dataset has no GitHub repository"));
+      return;
+    }
+
+    // Clone if needed
+    if (needsClone) {
+      const cloneSpinner = ora(`Cloning ${datasetId}...`).start();
+      const cloneUrl = `https://github.com/${dataset.github_repo}.git`;
+      const cloneResult = await cloneDataset(cloneUrl, workDir);
+      if (!cloneResult.success) {
+        cloneSpinner.fail(`Clone failed: ${cloneResult.error}`);
+        return;
+      }
+      cloneSpinner.succeed(`Cloned to ${workDir}`);
+    }
+
+    // List available versions
+    const versions = await listDatasetVersions(workDir);
+
+    if (versions.length === 0) {
+      console.log(chalk.yellow("No versions found for this dataset"));
+      console.log(chalk.gray("  Dataset may not have any tagged releases yet"));
+      return;
+    }
+
+    // If --list flag, just show versions and exit
+    if (options.list) {
+      console.log(`\n${chalk.cyan("Available Versions:")}\n`);
+      for (const v of versions) {
+        console.log(`  ${chalk.green(v.version)}  ${chalk.gray(v.date)}  ${chalk.gray(v.commit)}`);
+      }
+      return;
+    }
+
+    // If no version specified, prompt for selection
+    let selectedVersion = targetVersion;
+    if (!selectedVersion) {
+      console.log(`\n${chalk.cyan("Available Versions:")}\n`);
+      for (const v of versions) {
+        console.log(`  ${chalk.green(v.version)}  ${chalk.gray(v.date)}`);
+      }
+      console.log();
+
+      const { version } = await inquirer.prompt([
+        {
+          type: "list",
+          name: "version",
+          message: "Select version to revert to:",
+          choices: versions.map((v) => ({
+            name: `${v.version} (${v.date})`,
+            value: v.version,
+          })),
+        },
+      ]);
+      selectedVersion = version;
+    }
+
+    // Verify version exists
+    const commitHash = await getVersionCommit(workDir, selectedVersion);
+    if (!commitHash) {
+      console.log(chalk.red(`Error: Version ${selectedVersion} not found`));
+      console.log(chalk.gray("  Use --list to see available versions"));
+      return;
+    }
+
+    // Confirm revert action
+    console.log();
+    console.log(chalk.yellow("Revert Summary:"));
+    console.log(`  Dataset:        ${chalk.cyan(datasetId)}`);
+    console.log(`  Target version: ${chalk.green(selectedVersion)}`);
+    console.log(`  Commit:         ${chalk.gray(commitHash)}`);
+    if (options.force) {
+      console.log(`  Mode:           ${chalk.red("DIRECT PUSH (--force)")}`);
+    } else {
+      console.log(`  Mode:           ${chalk.green("Pull Request")}`);
+    }
+    console.log();
+
+    if (options.force) {
+      console.log(chalk.red("WARNING: --force will push directly to main without PR review!"));
+      console.log(chalk.red("This should only be used in emergencies."));
+      console.log();
+    }
+
+    const { confirm } = await inquirer.prompt([
+      {
+        type: "confirm",
+        name: "confirm",
+        message: options.force
+          ? `Directly push revert to ${selectedVersion}?`
+          : `Create PR to revert to ${selectedVersion}?`,
+        default: false,
+      },
+    ]);
+
+    if (!confirm) {
+      console.log(chalk.gray("Cancelled"));
+      return;
+    }
+
+    // Create revert branch
+    const branchName = `revert-to-${selectedVersion.replace(/\./g, "-")}-${Date.now()}`;
+    const branchSpinner = ora("Creating revert branch...").start();
+
+    const branchResult = await createRevertBranch(workDir, selectedVersion, branchName);
+    if (!branchResult.success) {
+      branchSpinner.fail(`Failed to create branch: ${branchResult.error}`);
+      return;
+    }
+    branchSpinner.succeed(`Created branch: ${branchName}`);
+
+    // Commit the revert
+    const commitSpinner = ora("Committing revert...").start();
+    const commitMessage = options.message || `Revert to version ${selectedVersion}`;
+
+    const commitResult = await commitRevert(workDir, selectedVersion, commitMessage);
+    if (!commitResult.success) {
+      commitSpinner.fail(`Failed to commit: ${commitResult.error}`);
+      return;
+    }
+    commitSpinner.succeed("Committed revert changes");
+
+    // Push branch
+    const pushSpinner = ora("Pushing branch...").start();
+    const pushResult = await pushBranch(workDir, branchName);
+    if (!pushResult.success) {
+      pushSpinner.fail(`Failed to push: ${pushResult.error}`);
+      return;
+    }
+    pushSpinner.succeed("Pushed branch to GitHub");
+
+    // Create PR (using gh CLI)
+    if (!options.force) {
+      const prSpinner = ora("Creating pull request...").start();
+      try {
+        const { spawn } = await import("child_process");
+        const prTitle = `Revert to version ${selectedVersion}`;
+        const prBody = `## Revert Request\n\nThis PR reverts the dataset to version ${selectedVersion}.\n\n**Reason:** Admin-initiated revert\n**Target version:** ${selectedVersion}\n**Original commit:** ${commitHash}`;
+
+        const pr = spawn("gh", [
+          "pr",
+          "create",
+          "--repo", dataset.github_repo,
+          "--head", branchName,
+          "--base", "main",
+          "--title", prTitle,
+          "--body", prBody,
+        ], { cwd: workDir });
+
+        let prUrl = "";
+        pr.stdout.on("data", (data) => {
+          prUrl += data.toString();
+        });
+
+        await new Promise<void>((resolve, reject) => {
+          pr.on("close", (code) => {
+            if (code === 0) resolve();
+            else reject(new Error(`gh pr create failed with code ${code}`));
+          });
+        });
+
+        prSpinner.succeed("Created pull request");
+        console.log();
+        console.log(`  ${chalk.cyan("PR URL:")} ${prUrl.trim()}`);
+        console.log();
+        console.log(chalk.green("Revert PR created successfully."));
+        console.log(chalk.gray("The PR will go through validation checks before it can be merged."));
+      } catch (prError) {
+        prSpinner.fail("Failed to create PR via gh CLI");
+        console.log(chalk.gray("  You may need to create the PR manually on GitHub"));
+        console.log(chalk.gray(`  Branch: ${branchName}`));
+      }
+    } else {
+      // Force mode: merge directly (emergency only)
+      console.log(chalk.yellow("Force mode: Merging directly to main..."));
+      // Note: We'd need to checkout main, merge, and push. For safety, just inform user.
+      console.log(chalk.red("Direct merge not implemented for safety."));
+      console.log(chalk.gray("To force-merge, manually merge the branch on GitHub:"));
+      console.log(chalk.gray(`  git checkout main && git merge ${branchName} && git push`));
+    }
+
+    // Cleanup info
+    if (needsClone) {
+      console.log();
+      console.log(chalk.gray(`Working directory: ${workDir}`));
+      console.log(chalk.gray("You can delete this directory after the PR is merged."));
+    }
+  });

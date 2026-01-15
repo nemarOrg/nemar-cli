@@ -573,3 +573,40 @@ describe("CLI Dataset List", () => {
     expect(stdout).toContain("Not authenticated");
   });
 });
+
+describe("CLI Admin Revert", () => {
+  test("nemar admin revert --help shows options", async () => {
+    const { stdout, exitCode } = await runCli(["admin", "revert", "--help"]);
+
+    expect(exitCode).toBe(0);
+    expect(stdout).toContain("Revert a dataset to a previous version");
+    expect(stdout).toContain("--list");
+    expect(stdout).toContain("--force");
+    expect(stdout).toContain("--message");
+    expect(stdout).toContain("--dir");
+    expect(stdout).toContain("<dataset-id>");
+    expect(stdout).toContain("[version]");
+  });
+
+  test("nemar admin revert without auth shows error", async () => {
+    const ctx = createTestContext();
+
+    const { stdout, exitCode } = await runCli(["admin", "revert", "nm000104"], ctx);
+
+    expect(stdout).toContain("Not authenticated");
+  });
+
+  test("nemar admin revert with nonexistent dataset shows error", async () => {
+    const ctx = createTestContext();
+    setTestConfig(ctx, {
+      apiKey: TEST_CONFIG.adminApiKey,
+      apiUrl: TEST_CONFIG.apiUrl,
+      username: "test-admin",
+    });
+
+    const { stdout, exitCode } = await runCli(["admin", "revert", "nm999999", "--list"], ctx);
+
+    // Should fail because dataset doesn't exist
+    expect(stdout.toLowerCase()).toContain("not found");
+  });
+});
