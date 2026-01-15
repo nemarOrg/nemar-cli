@@ -26,6 +26,7 @@ import {
 } from "../lib/bids-validator.js";
 import {
   checkPrerequisites,
+  checkDownloadPrerequisites,
   isDataladDataset,
   createDataladDataset,
   configureLargefiles,
@@ -36,8 +37,11 @@ import {
   pushToGitHub,
   getDatasetStats,
   formatBytes,
+  cloneDataset,
+  getDatasetData,
+  getLocalDatasetInfo,
 } from "../lib/datalad.js";
-import { createDataset, finalizeDataset, ApiError } from "../lib/api.js";
+import { createDataset, finalizeDataset, getDataset, listDatasets, ApiError } from "../lib/api.js";
 
 export const datasetCommand = new Command("dataset").description("Dataset management");
 
@@ -444,17 +448,124 @@ datasetCommand
   .command("download")
   .description("Download a dataset from NEMAR")
   .argument("<dataset-id>", "Dataset ID (e.g., nm000104)")
-  .option("-o, --output <path>", "Output directory", ".")
-  .option("--version <version>", "Specific version to download")
+  .option("-o, --output <path>", "Output directory")
+  .option("-j, --jobs <number>", "Parallel download streams", "4")
   .option("--no-data", "Download metadata only (no large files)")
   .action(async (datasetId, options) => {
-    console.log(chalk.yellow("Download command not yet implemented"));
-    console.log(`Would download dataset: ${datasetId}`);
-    console.log("Will use datalad clone and get");
-    // TODO: Implement download
-    // 1. Clone DataLad dataset from GitHub
-    // 2. Get data files from S3 (unless --no-data)
-    // 3. Report success
+    // Step 1: Check prerequisites
+    let spinner = ora("Checking prerequisites...").start();
+    const prereqs = await checkDownloadPrerequisites();
+
+    if (!prereqs.allPassed) {
+      spinner.fail("Prerequisites check failed");
+      console.log();
+      for (const error of prereqs.errors) {
+        console.log(chalk.red(`  - ${error}`));
+      }
+      process.exit(1);
+    }
+
+    spinner.succeed("Prerequisites check passed");
+    console.log(chalk.gray(`  DataLad ${prereqs.datalad.version}, git-annex ${prereqs.gitAnnex.version}`));
+    console.log();
+
+    // Step 2: Get dataset info from backend
+    spinner = ora(`Fetching dataset info for ${datasetId}...`).start();
+
+    let datasetInfo;
+    try {
+      datasetInfo = await getDataset(datasetId);
+      spinner.succeed(`Found dataset: ${datasetInfo.name}`);
+    } catch (error) {
+      spinner.fail("Dataset not found");
+      if (error instanceof ApiError) {
+        console.log(chalk.red(`  ${error.message}`));
+      } else {
+        console.log(chalk.red(`  ${(error as Error).message}`));
+      }
+      process.exit(1);
+    }
+
+    // Step 3: Check if dataset is accessible
+    if (!datasetInfo.github_repo) {
+      console.log(chalk.red("Error: Dataset repository not available"));
+      process.exit(1);
+    }
+
+    // Determine output path
+    const outputPath = options.output || datasetId;
+    const absoluteOutput = resolve(outputPath);
+
+    // Check if output already exists
+    if (existsSync(absoluteOutput)) {
+      console.log(chalk.red(`Error: Output path already exists: ${absoluteOutput}`));
+      console.log("Remove or rename the existing directory and try again.");
+      process.exit(1);
+    }
+
+    console.log();
+    console.log(chalk.bold("Download Plan:"));
+    console.log(`  Dataset: ${datasetInfo.name} (${datasetId})`);
+    console.log(`  Output: ${absoluteOutput}`);
+    console.log(`  Data files: ${options.data === false ? "metadata only" : "included"}`);
+    if (options.data !== false) {
+      console.log(`  Parallel jobs: ${options.jobs}`);
+    }
+    console.log();
+
+    // Step 4: Clone the dataset
+    const repoUrl = `https://github.com/${datasetInfo.github_repo}.git`;
+    spinner = ora("Cloning dataset from GitHub...").start();
+
+    const cloneResult = await cloneDataset(repoUrl, absoluteOutput);
+    if (!cloneResult.success) {
+      spinner.fail("Failed to clone dataset");
+      console.log(chalk.red(`  ${cloneResult.error}`));
+      process.exit(1);
+    }
+
+    spinner.succeed("Dataset cloned");
+
+    // Step 5: Get data files (unless --no-data)
+    if (options.data !== false) {
+      spinner = ora(`Downloading data files (${options.jobs} parallel streams)...`).start();
+
+      const getResult = await getDatasetData(absoluteOutput, {
+        jobs: parseInt(options.jobs, 10),
+      });
+
+      if (!getResult.success) {
+        spinner.fail("Failed to download data files");
+        console.log(chalk.red(`  ${getResult.error}`));
+        console.log(chalk.gray("The dataset was cloned but data files are not available locally."));
+        console.log(chalk.gray(`You can try again with: cd ${absoluteOutput} && datalad get .`));
+        process.exit(1);
+      }
+
+      spinner.succeed(`Data downloaded (${getResult.filesDownloaded || 0} files)`);
+    } else {
+      console.log(chalk.gray("Skipping data files (--no-data flag)"));
+    }
+
+    // Step 6: Show completion info
+    const localInfo = await getLocalDatasetInfo(absoluteOutput);
+
+    console.log();
+    console.log(chalk.green.bold("Download complete!"));
+    console.log();
+    console.log(`  Location: ${chalk.cyan(absoluteOutput)}`);
+    if (localInfo) {
+      console.log(`  Files: ${localInfo.files}`);
+      if (localInfo.size !== "unknown") {
+        console.log(`  Size: ${localInfo.size}`);
+      }
+      if (localInfo.missingFiles > 0) {
+        console.log(chalk.gray(`  Missing files: ${localInfo.missingFiles} (use 'datalad get' to download)`));
+      }
+    }
+    console.log();
+    console.log(chalk.gray("To get additional data:"));
+    console.log(chalk.gray(`  cd ${absoluteOutput} && datalad get <path>`));
   });
 
 // Status command
@@ -462,32 +573,175 @@ datasetCommand
   .command("status")
   .description("Check status of a dataset")
   .argument("<dataset-id>", "Dataset ID (e.g., nm000104)")
-  .action(async (datasetId) => {
-    console.log(chalk.yellow("Status command not yet implemented"));
-    console.log(`Would check status of: ${datasetId}`);
-    // TODO: Implement status check
-    // 1. Query backend for dataset info
-    // 2. Show: name, description, versions, DOI, size, etc.
+  .option("--json", "Output as JSON")
+  .action(async (datasetId, options) => {
+    const spinner = ora(`Fetching dataset info for ${datasetId}...`).start();
+
+    let datasetInfo;
+    try {
+      datasetInfo = await getDataset(datasetId);
+      spinner.stop();
+    } catch (error) {
+      spinner.fail("Dataset not found");
+      if (error instanceof ApiError) {
+        console.log(chalk.red(`  ${error.message}`));
+      } else {
+        console.log(chalk.red(`  ${(error as Error).message}`));
+      }
+      process.exit(1);
+    }
+
+    // JSON output
+    if (options.json) {
+      console.log(JSON.stringify(datasetInfo, null, 2));
+      return;
+    }
+
+    // Human-readable output
+    console.log();
+    console.log(chalk.bold(`Dataset: ${datasetInfo.dataset_id}`));
+    console.log();
+    console.log(`  Name:        ${datasetInfo.name}`);
+    console.log(`  Owner:       ${datasetInfo.owner_username}`);
+    console.log(`  Status:      ${colorizeStatus(datasetInfo.status)}`);
+    console.log(`  Created:     ${new Date(datasetInfo.created_at).toLocaleDateString()}`);
+
+    if (datasetInfo.description) {
+      console.log(`  Description: ${datasetInfo.description}`);
+    }
+
+    if (datasetInfo.github_repo) {
+      console.log(`  GitHub:      https://github.com/${datasetInfo.github_repo}`);
+    }
+
+    if (datasetInfo.concept_doi) {
+      console.log(`  DOI:         https://doi.org/${datasetInfo.concept_doi}`);
+    }
+
+    console.log();
+    console.log(chalk.gray("To download this dataset:"));
+    console.log(chalk.gray(`  nemar dataset download ${datasetId}`));
   });
+
+/**
+ * Colorize dataset status for display
+ */
+function colorizeStatus(status: string): string {
+  switch (status.toLowerCase()) {
+    case "published":
+      return chalk.green(status);
+    case "active":
+      return chalk.blue(status);
+    case "archived":
+      return chalk.gray(status);
+    case "pending":
+      return chalk.yellow(status);
+    default:
+      return status;
+  }
+}
 
 // List command
 datasetCommand
   .command("list")
-  .description("List your datasets")
-  .option("--all", "List all NEMAR datasets (not just yours)")
+  .description("List datasets")
+  .option("--mine", "List only your datasets (requires authentication)")
+  .option("--json", "Output as JSON")
+  .option("--limit <n>", "Limit number of results", "50")
   .action(async (options) => {
-    if (!options.all && !isAuthenticated()) {
+    // If --mine, require authentication
+    if (options.mine && !isAuthenticated()) {
       console.log(chalk.red("Error: Not authenticated"));
       console.log("Run 'nemar auth login' to see your datasets");
-      console.log("Or use --all to see all public datasets");
       process.exit(1);
     }
 
-    console.log(chalk.yellow("List command not yet implemented"));
-    console.log("Will query backend for datasets");
-    // TODO: Implement list
-    // 1. Query backend for user's datasets (or all)
-    // 2. Display in table format
+    const spinner = ora("Fetching datasets...").start();
+
+    let response;
+    try {
+      response = await listDatasets();
+      spinner.stop();
+    } catch (error) {
+      spinner.fail("Failed to fetch datasets");
+      if (error instanceof ApiError) {
+        console.log(chalk.red(`  ${error.message}`));
+      } else {
+        console.log(chalk.red(`  ${(error as Error).message}`));
+      }
+      process.exit(1);
+    }
+
+    let datasets = response.datasets;
+
+    // Filter by owner if --mine
+    if (options.mine) {
+      const config = getConfig();
+      const username = config.username;
+      datasets = datasets.filter((d) => d.owner_username === username);
+    }
+
+    // Limit results
+    const limit = parseInt(options.limit, 10);
+    if (datasets.length > limit) {
+      datasets = datasets.slice(0, limit);
+    }
+
+    // JSON output
+    if (options.json) {
+      console.log(JSON.stringify(datasets, null, 2));
+      return;
+    }
+
+    // No datasets found
+    if (datasets.length === 0) {
+      console.log();
+      if (options.mine) {
+        console.log(chalk.yellow("You don't have any datasets yet."));
+        console.log(chalk.gray("Create one with: nemar dataset upload <path>"));
+      } else {
+        console.log(chalk.yellow("No datasets found."));
+      }
+      return;
+    }
+
+    // Table output
+    console.log();
+    console.log(chalk.bold(`Datasets (${datasets.length}${response.count > datasets.length ? ` of ${response.count}` : ""}):`));
+    console.log();
+
+    // Calculate column widths
+    const idWidth = Math.max(10, ...datasets.map((d) => d.dataset_id.length));
+    const nameWidth = Math.min(30, Math.max(10, ...datasets.map((d) => d.name.length)));
+    const ownerWidth = Math.max(8, ...datasets.map((d) => d.owner_username.length));
+
+    // Header
+    const header = [
+      "ID".padEnd(idWidth),
+      "Name".padEnd(nameWidth),
+      "Owner".padEnd(ownerWidth),
+      "Status",
+    ].join("  ");
+    console.log(chalk.gray(header));
+    console.log(chalk.gray("-".repeat(header.length)));
+
+    // Rows
+    for (const dataset of datasets) {
+      const name = dataset.name.length > nameWidth
+        ? dataset.name.substring(0, nameWidth - 3) + "..."
+        : dataset.name;
+
+      const row = [
+        chalk.cyan(dataset.dataset_id.padEnd(idWidth)),
+        name.padEnd(nameWidth),
+        dataset.owner_username.padEnd(ownerWidth),
+        colorizeStatus(dataset.status),
+      ].join("  ");
+      console.log(row);
+    }
+
+    console.log();
+    console.log(chalk.gray("For details: nemar dataset status <dataset-id>"));
   });
 
 // Version command

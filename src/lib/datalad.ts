@@ -616,3 +616,187 @@ export function formatBytes(bytes: number): string {
   const i = Math.floor(Math.log(bytes) / Math.log(k));
   return `${parseFloat((bytes / Math.pow(k, i)).toFixed(2))} ${sizes[i]}`;
 }
+
+// =============================================================================
+// Download Functions
+// =============================================================================
+
+/**
+ * Prerequisites check result for download (simpler than upload)
+ */
+export interface DownloadPrerequisitesResult {
+  datalad: ToolVersion;
+  gitAnnex: ToolVersion;
+  allPassed: boolean;
+  errors: string[];
+}
+
+/**
+ * Check prerequisites for dataset download
+ * Simpler than upload - no AWS credentials or GitHub SSH needed
+ */
+export async function checkDownloadPrerequisites(): Promise<DownloadPrerequisitesResult> {
+  const [datalad, gitAnnex] = await Promise.all([
+    checkDataladInstalled(),
+    checkGitAnnexInstalled(),
+  ]);
+
+  const errors: string[] = [];
+
+  if (!datalad.installed) {
+    errors.push("DataLad is not installed. Install: pip install datalad");
+  } else if (datalad.compatible === false) {
+    errors.push(`DataLad version ${datalad.version} is too old. Required: >= ${datalad.minVersion}`);
+  }
+
+  if (!gitAnnex.installed) {
+    errors.push("git-annex is not installed. Install: brew install git-annex (macOS) or apt install git-annex (Linux)");
+  } else if (gitAnnex.compatible === false) {
+    errors.push(`git-annex version ${gitAnnex.version} is too old. Required: >= ${gitAnnex.minVersion}`);
+  }
+
+  return {
+    datalad,
+    gitAnnex,
+    allPassed: errors.length === 0,
+    errors,
+  };
+}
+
+/**
+ * Clone a DataLad dataset from GitHub
+ */
+export async function cloneDataset(
+  repoUrl: string,
+  outputPath: string
+): Promise<{ success: boolean; error?: string }> {
+  try {
+    const { stderr, exitCode } = await runCommand(
+      ["datalad", "clone", repoUrl, outputPath]
+    );
+
+    if (exitCode !== 0) {
+      return { success: false, error: stderr.trim() || "Failed to clone dataset" };
+    }
+
+    return { success: true };
+  } catch (e) {
+    return { success: false, error: (e as Error).message };
+  }
+}
+
+/**
+ * Get data files from remote (S3) for a cloned dataset
+ */
+export async function getDatasetData(
+  datasetPath: string,
+  options: {
+    jobs?: number;
+    paths?: string[]; // Specific paths to get, or all if empty
+  } = {}
+): Promise<{ success: boolean; error?: string; filesDownloaded?: number }> {
+  const jobs = options.jobs || 4;
+  const paths = options.paths && options.paths.length > 0 ? options.paths : ["."];
+
+  try {
+    const args = ["datalad", "get", "-J", jobs.toString(), ...paths];
+    const { stdout, stderr, exitCode } = await runCommand(args, { cwd: datasetPath });
+
+    if (exitCode !== 0) {
+      return { success: false, error: stderr.trim() || "Failed to get dataset data" };
+    }
+
+    // Count files downloaded from output
+    const getMatches = stdout.match(/get\(ok\):/g);
+    const filesDownloaded = getMatches ? getMatches.length : 0;
+
+    return { success: true, filesDownloaded };
+  } catch (e) {
+    return { success: false, error: (e as Error).message };
+  }
+}
+
+/**
+ * Local dataset info returned by getLocalDatasetInfo
+ */
+export interface LocalDatasetInfo {
+  files: number;
+  size: string;
+  sizeBytes: number;
+  annexedFiles: number;
+  presentFiles: number;
+  missingFiles: number;
+}
+
+/**
+ * Get information about a locally cloned dataset
+ */
+export async function getLocalDatasetInfo(
+  datasetPath: string
+): Promise<LocalDatasetInfo | null> {
+  if (!existsSync(datasetPath)) {
+    return null;
+  }
+
+  try {
+    const { stdout, exitCode } = await runCommand(
+      ["git", "annex", "info", "--json"],
+      { cwd: datasetPath }
+    );
+
+    if (exitCode === 0) {
+      const info = JSON.parse(stdout);
+
+      // Parse size string like "1.5 GB" to bytes
+      let sizeBytes = 0;
+      const sizeStr = info["local annex size"] || "0 bytes";
+      const sizeMatch = sizeStr.match(/([\d.]+)\s*(bytes?|KB|MB|GB|TB)/i);
+      if (sizeMatch) {
+        const num = parseFloat(sizeMatch[1]);
+        const unit = sizeMatch[2].toLowerCase();
+        const multipliers: Record<string, number> = {
+          byte: 1,
+          bytes: 1,
+          kb: 1024,
+          mb: 1024 * 1024,
+          gb: 1024 * 1024 * 1024,
+          tb: 1024 * 1024 * 1024 * 1024,
+        };
+        sizeBytes = num * (multipliers[unit] || 1);
+      }
+
+      const annexedFiles = info["annexed files in working tree"] || 0;
+      const presentFiles = info["local annex keys"] || 0;
+
+      return {
+        files: annexedFiles,
+        size: sizeStr,
+        sizeBytes,
+        annexedFiles,
+        presentFiles,
+        missingFiles: annexedFiles - presentFiles,
+      };
+    }
+  } catch {
+    // Not a git-annex repo or error parsing
+  }
+
+  // Fallback: just count files
+  try {
+    const { stdout } = await runCommand(
+      ["find", ".", "-type", "f", "-not", "-path", "./.git/*"],
+      { cwd: datasetPath }
+    );
+    const files = stdout.trim().split("\n").filter(Boolean).length;
+    return {
+      files,
+      size: "unknown",
+      sizeBytes: 0,
+      annexedFiles: 0,
+      presentFiles: files,
+      missingFiles: 0,
+    };
+  } catch {
+    return null;
+  }
+}

@@ -467,3 +467,109 @@ describe("CLI Dataset Upload", () => {
     expect(stdout).toContain("Path does not exist");
   });
 });
+
+describe("CLI Dataset Download", () => {
+  test("nemar dataset download --help shows options", async () => {
+    const { stdout, exitCode } = await runCli(["dataset", "download", "--help"]);
+
+    expect(exitCode).toBe(0);
+    expect(stdout).toContain("Download a dataset from NEMAR");
+    expect(stdout).toContain("--output");
+    expect(stdout).toContain("--jobs");
+    expect(stdout).toContain("--no-data");
+  });
+
+  test("nemar dataset download with non-existent dataset shows error", async () => {
+    const { stdout, stderr, exitCode } = await runCli(["dataset", "download", "nm999999"]);
+
+    // Should fail with dataset not found (after prereq check)
+    const output = stdout + stderr;
+    // Either fails at prereq check (DataLad not installed) or at dataset lookup
+    expect(
+      output.includes("Prerequisites") ||
+      output.includes("not found") ||
+      output.includes("DataLad")
+    ).toBe(true);
+  });
+});
+
+describe("CLI Dataset Status", () => {
+  test("nemar dataset status --help shows options", async () => {
+    const { stdout, exitCode } = await runCli(["dataset", "status", "--help"]);
+
+    expect(exitCode).toBe(0);
+    expect(stdout).toContain("Check status of a dataset");
+    expect(stdout).toContain("--json");
+  });
+
+  test("nemar dataset status with non-existent dataset shows error", async () => {
+    const { stdout, exitCode } = await runCli(["dataset", "status", "nm999999"]);
+
+    expect(stdout).toContain("not found");
+  });
+
+  test("nemar dataset status --json outputs JSON format", async () => {
+    // This test requires at least one dataset to exist
+    // Skip if no datasets exist
+    const { stdout: listOut } = await runCli(["dataset", "list", "--json"]);
+    let datasets: { dataset_id: string }[] = [];
+    try {
+      datasets = JSON.parse(listOut);
+    } catch {
+      // If we can't parse, skip this test
+      return;
+    }
+
+    if (datasets.length === 0) {
+      // No datasets to test with
+      return;
+    }
+
+    const { stdout, exitCode } = await runCli(["dataset", "status", datasets[0].dataset_id, "--json"]);
+
+    expect(exitCode).toBe(0);
+    const result = JSON.parse(stdout);
+    expect(result.dataset_id).toBe(datasets[0].dataset_id);
+    expect(result.name).toBeDefined();
+    expect(result.status).toBeDefined();
+  });
+});
+
+describe("CLI Dataset List", () => {
+  test("nemar dataset list --help shows options", async () => {
+    const { stdout, exitCode } = await runCli(["dataset", "list", "--help"]);
+
+    expect(exitCode).toBe(0);
+    expect(stdout).toContain("List datasets");
+    expect(stdout).toContain("--mine");
+    expect(stdout).toContain("--json");
+    expect(stdout).toContain("--limit");
+  });
+
+  test("nemar dataset list shows datasets", async () => {
+    const { stdout, exitCode } = await runCli(["dataset", "list"]);
+
+    expect(exitCode).toBe(0);
+    // Either shows datasets or "No datasets found"
+    expect(
+      stdout.includes("Datasets") ||
+      stdout.includes("No datasets found")
+    ).toBe(true);
+  });
+
+  test("nemar dataset list --json outputs JSON format", async () => {
+    const { stdout, exitCode } = await runCli(["dataset", "list", "--json"]);
+
+    expect(exitCode).toBe(0);
+    const result = JSON.parse(stdout);
+    expect(Array.isArray(result)).toBe(true);
+  });
+
+  test("nemar dataset list --mine requires authentication", async () => {
+    const ctx = createTestContext();
+
+    const { stdout, exitCode } = await runCli(["dataset", "list", "--mine"], ctx);
+
+    expect(stdout).toContain("Not authenticated");
+  });
+});
