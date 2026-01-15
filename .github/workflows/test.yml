@@ -1,0 +1,34 @@
+name: Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install dependencies
+        run: bun install
+
+      - name: Run tests
+        env:
+          TEST_API_URL: https://nemar-api.shirazi-10f.workers.dev
+          TEST_ADMIN_API_KEY: ${{ secrets.TEST_ADMIN_API_KEY }}
+          TEST_USER_API_KEY: ${{ secrets.TEST_USER_API_KEY }}
+          TEST_BYPASS_TOKEN: ${{ secrets.TEST_BYPASS_TOKEN }}
+        run: bun test
+
+      - name: Type check
+        run: bun run tsc --noEmit
