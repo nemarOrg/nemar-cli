@@ -1,12 +1,47 @@
 /**
- * Email service using Resend
+ * Email service using Resend API
  *
  * Handles verification emails and approval notifications.
+ * Uses fetch directly for better Cloudflare Workers compatibility.
  */
 
-import { Resend } from "resend";
-
 const FROM_EMAIL = "NEMAR <nemar@osc.earth>";
+const RESEND_API_URL = "https://api.resend.com/emails";
+
+interface ResendResponse {
+  id?: string;
+  error?: string;
+  message?: string;
+}
+
+/**
+ * Send email via Resend API
+ */
+async function sendEmail(
+  to: string,
+  subject: string,
+  html: string,
+  resendApiKey: string
+): Promise<void> {
+  const response = await fetch(RESEND_API_URL, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${resendApiKey}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      from: FROM_EMAIL,
+      to: [to],
+      subject,
+      html,
+    }),
+  });
+
+  if (!response.ok) {
+    const error: ResendResponse = await response.json();
+    throw new Error(`Failed to send email: ${error.message || response.statusText}`);
+  }
+}
 
 /**
  * Send email verification link to new user
@@ -17,13 +52,7 @@ export async function sendVerificationEmail(
   verificationUrl: string,
   resendApiKey: string
 ): Promise<void> {
-  const resend = new Resend(resendApiKey);
-
-  await resend.emails.send({
-    from: FROM_EMAIL,
-    to: [to],
-    subject: "Verify your NEMAR account",
-    html: `
+  const html = `
 <!DOCTYPE html>
 <html>
 <head>
@@ -66,8 +95,9 @@ export async function sendVerificationEmail(
   </p>
 </body>
 </html>
-    `,
-  });
+  `;
+
+  await sendEmail(to, "Verify your NEMAR account", html, resendApiKey);
 }
 
 /**
@@ -79,13 +109,7 @@ export async function sendApprovalEmail(
   apiKey: string,
   resendApiKey: string
 ): Promise<void> {
-  const resend = new Resend(resendApiKey);
-
-  await resend.emails.send({
-    from: FROM_EMAIL,
-    to: [to],
-    subject: "Your NEMAR account has been approved!",
-    html: `
+  const html = `
 <!DOCTYPE html>
 <html>
 <head>
@@ -138,8 +162,9 @@ nemar dataset upload /path/to/bids-dataset
   </p>
 </body>
 </html>
-    `,
-  });
+  `;
+
+  await sendEmail(to, "Your NEMAR account has been approved!", html, resendApiKey);
 }
 
 /**
@@ -150,13 +175,7 @@ export async function sendRevocationEmail(
   username: string,
   resendApiKey: string
 ): Promise<void> {
-  const resend = new Resend(resendApiKey);
-
-  await resend.emails.send({
-    from: FROM_EMAIL,
-    to: [to],
-    subject: "NEMAR account access revoked",
-    html: `
+  const html = `
 <!DOCTYPE html>
 <html>
 <head>
@@ -180,6 +199,7 @@ export async function sendRevocationEmail(
   </p>
 </body>
 </html>
-    `,
-  });
+  `;
+
+  await sendEmail(to, "NEMAR account access revoked", html, resendApiKey);
 }
