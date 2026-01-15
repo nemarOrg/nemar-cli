@@ -9,6 +9,7 @@ compatibility_flags = ["nodejs_compat"]
 binding = "DB"
 database_name = "nemar-db"
 database_id = "0a168b1a-1923-4436-9509-6e4a9b5bb7ae"
+migrations_dir = "src/db/migrations"
 
 # KV for rate limiting
 [[kv_namespaces]]
