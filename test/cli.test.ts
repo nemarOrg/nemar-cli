@@ -33,6 +33,11 @@ const CONFIG_DIR = getConfigDir();
 const CONFIG_FILE = join(CONFIG_DIR, "config.json");
 const CONFIG_BACKUP = join(CONFIG_DIR, "config.json.backup");
 
+// Debug: Log config path on startup
+console.log(`[DEBUG] Config directory: ${CONFIG_DIR}`);
+console.log(`[DEBUG] Config file: ${CONFIG_FILE}`);
+console.log(`[DEBUG] Platform: ${process.platform}`);
+
 // Helper to run CLI commands
 async function runCli(
   args: string[],
@@ -65,32 +70,42 @@ async function runCli(
 // Helper to set config
 function setTestConfig(config: Record<string, unknown>) {
   if (!existsSync(CONFIG_DIR)) {
+    console.log(`[DEBUG] Creating config dir: ${CONFIG_DIR}`);
     mkdirSync(CONFIG_DIR, { recursive: true });
   }
+  console.log(`[DEBUG] Writing config to: ${CONFIG_FILE}`);
   writeFileSync(CONFIG_FILE, JSON.stringify(config));
+  // Verify write
+  const exists = existsSync(CONFIG_FILE);
+  console.log(`[DEBUG] Config file exists after write: ${exists}`);
 }
 
 // Helper to clear config
 function clearTestConfig() {
   if (existsSync(CONFIG_FILE)) {
+    console.log(`[DEBUG] Clearing config: ${CONFIG_FILE}`);
     unlinkSync(CONFIG_FILE);
   }
 }
-
-// Add delay between tests to avoid rate limiting
-beforeEach(async () => {
-  await sleep(300);
-});
 
 // Backup real config before all tests
 beforeAll(() => {
   if (existsSync(CONFIG_FILE)) {
     copyFileSync(CONFIG_FILE, CONFIG_BACKUP);
   }
+  // Clear config for clean test state
+  clearTestConfig();
+});
+
+// Clear config before each test for isolation + add delay for rate limiting
+beforeEach(async () => {
+  clearTestConfig();
+  await sleep(300);
 });
 
 // Restore real config after all tests
 afterAll(() => {
+  clearTestConfig();
   if (existsSync(CONFIG_BACKUP)) {
     copyFileSync(CONFIG_BACKUP, CONFIG_FILE);
     unlinkSync(CONFIG_BACKUP);
