@@ -168,6 +168,95 @@ nemar dataset upload /path/to/bids-dataset
 }
 
 /**
+ * Notify admins that a user needs approval
+ * Called when a user verifies their email address
+ */
+export async function sendAdminNotificationEmail(
+  adminEmails: string[],
+  user: {
+    username: string;
+    email: string;
+    github_username: string;
+    description: string;
+  },
+  adminPanelUrl: string,
+  resendApiKey: string
+): Promise<void> {
+  const html = `
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+</head>
+<body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; line-height: 1.6; color: #333; max-width: 600px; margin: 0 auto; padding: 20px;">
+  <h1 style="color: #f59e0b;">New User Awaiting Approval</h1>
+
+  <p>A new user has verified their email and is waiting for admin approval to access NEMAR.</p>
+
+  <h2 style="color: #333; font-size: 18px; margin-top: 30px;">User Details</h2>
+
+  <table style="border-collapse: collapse; width: 100%; margin: 16px 0;">
+    <tr>
+      <td style="padding: 8px 12px; border: 1px solid #e5e7eb; background: #f9fafb; font-weight: bold;">Username</td>
+      <td style="padding: 8px 12px; border: 1px solid #e5e7eb;">${user.username}</td>
+    </tr>
+    <tr>
+      <td style="padding: 8px 12px; border: 1px solid #e5e7eb; background: #f9fafb; font-weight: bold;">Email</td>
+      <td style="padding: 8px 12px; border: 1px solid #e5e7eb;">${user.email}</td>
+    </tr>
+    <tr>
+      <td style="padding: 8px 12px; border: 1px solid #e5e7eb; background: #f9fafb; font-weight: bold;">GitHub</td>
+      <td style="padding: 8px 12px; border: 1px solid #e5e7eb;">
+        <a href="https://github.com/${user.github_username}" style="color: #2563eb;">${user.github_username}</a>
+      </td>
+    </tr>
+  </table>
+
+  <h2 style="color: #333; font-size: 18px; margin-top: 30px;">Reason for Access</h2>
+  <div style="background-color: #f4f4f5; padding: 16px; border-radius: 8px; margin: 16px 0; white-space: pre-wrap;">${user.description}</div>
+
+  <h2 style="color: #333; font-size: 18px; margin-top: 30px;">Action Required</h2>
+  <p>Review this user and approve or deny their access:</p>
+
+  <p style="margin: 20px 0;">
+    <a href="${adminPanelUrl}"
+       style="background-color: #16a34a; color: white; padding: 12px 24px; text-decoration: none; border-radius: 6px; display: inline-block; margin-right: 10px;">
+      Review in Admin Panel
+    </a>
+  </p>
+
+  <p style="color: #666; font-size: 14px;">
+    Or use the CLI:<br>
+    <code style="background: #f4f4f5; padding: 2px 6px; border-radius: 4px;">nemar admin approve ${user.username}</code>
+  </p>
+
+  <hr style="border: none; border-top: 1px solid #eee; margin: 30px 0;">
+
+  <p style="color: #999; font-size: 12px;">
+    NEMAR - Neuroelectromagnetic Data Archive and Tools Resource<br>
+    Part of <a href="https://osc.earth" style="color: #999;">Open Science Collective</a>
+  </p>
+</body>
+</html>
+  `;
+
+  // Send to all admins
+  for (const adminEmail of adminEmails) {
+    try {
+      await sendEmail(
+        adminEmail,
+        `[NEMAR] New user awaiting approval: ${user.username}`,
+        html,
+        resendApiKey
+      );
+    } catch (error) {
+      console.error(`Failed to send admin notification to ${adminEmail}:`, error);
+    }
+  }
+}
+
+/**
  * Send revocation notification
  */
 export async function sendRevocationEmail(

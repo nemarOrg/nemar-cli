@@ -183,6 +183,22 @@ authCommand
           return true;
         },
       },
+      {
+        type: "editor",
+        name: "description",
+        message: "Why do you need access to NEMAR? (Opens editor, min 20 chars):",
+        default: "I am requesting NEMAR access because:\n\n",
+        validate: (input) => {
+          const trimmed = input?.trim();
+          if (!trimmed || trimmed.length < 20) {
+            return "Please provide at least 20 characters describing why you need NEMAR access";
+          }
+          if (trimmed.length > 500) {
+            return "Description must be at most 500 characters";
+          }
+          return true;
+        },
+      },
     ]);
 
     // Register with backend
@@ -194,6 +210,7 @@ authCommand
         email: answers.email,
         password: answers.password,
         github_username: answers.github_username,
+        description: answers.description.trim(),
       });
 
       spinner.succeed("Account created");

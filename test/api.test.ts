@@ -91,6 +91,7 @@ describe("Authentication API", () => {
           email: "new@example.com",
           password: "TestPassword123!",
           github_username: "octocat",
+          description: "I need NEMAR access for testing and research purposes.",
         }),
       });
 
@@ -106,6 +107,7 @@ describe("Authentication API", () => {
           email: "test-user@nemar.test",
           password: "TestPassword123!",
           github_username: "octocat",
+          description: "I need NEMAR access for testing and research purposes.",
         }),
       });
 
@@ -121,6 +123,7 @@ describe("Authentication API", () => {
           email: "unique@example.com",
           password: "weak",
           github_username: "octocat",
+          description: "I need NEMAR access for testing and research purposes.",
         }),
       });
 
@@ -135,6 +138,36 @@ describe("Authentication API", () => {
           email: "not-an-email",
           password: "TestPassword123!",
           github_username: "octocat",
+          description: "I need NEMAR access for testing and research purposes.",
+        }),
+      });
+
+      expect(status).toBe(400);
+    });
+
+    test("signup with missing description returns 400", async () => {
+      const { status } = await testRequest("/auth/signup", {
+        method: "POST",
+        body: JSON.stringify({
+          username: "unique-test-user",
+          email: "unique@example.com",
+          password: "TestPassword123!",
+          github_username: "octocat",
+        }),
+      });
+
+      expect(status).toBe(400);
+    });
+
+    test("signup with short description returns 400", async () => {
+      const { status } = await testRequest("/auth/signup", {
+        method: "POST",
+        body: JSON.stringify({
+          username: "unique-test-user",
+          email: "unique@example.com",
+          password: "TestPassword123!",
+          github_username: "octocat",
+          description: "Too short",
         }),
       });
 

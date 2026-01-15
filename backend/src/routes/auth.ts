@@ -10,7 +10,7 @@ import { zValidator } from "@hono/zod-validator";
 import type { Bindings, Variables } from "../types/bindings";
 import { hashPassword, validatePasswordStrength } from "../services/password";
 import { generateVerificationToken, generateExpirationTimestamp } from "../services/token";
-import { sendVerificationEmail } from "../services/email";
+import { sendVerificationEmail, sendAdminNotificationEmail } from "../services/email";
 import { validateGitHubUsername } from "../services/github";
 
 export const authRoutes = new Hono<{ Bindings: Bindings; Variables: Variables }>();
@@ -28,13 +28,17 @@ const signupSchema = z.object({
     .string()
     .min(1, "GitHub username is required")
     .max(39, "GitHub username is too long"),
+  description: z
+    .string()
+    .min(20, "Please provide a brief description of why you need NEMAR access (at least 20 characters)")
+    .max(500, "Description must be at most 500 characters"),
 });
 
 /**
  * POST /auth/signup - Register a new user
  */
 authRoutes.post("/signup", zValidator("json", signupSchema), async (c) => {
-  const { username, email, password, github_username } = c.req.valid("json");
+  const { username, email, password, github_username, description } = c.req.valid("json");
   const db = c.env.DB;
 
   try {
@@ -94,12 +98,12 @@ authRoutes.post("/signup", zValidator("json", signupSchema), async (c) => {
       .prepare(
         `
       INSERT INTO users (
-        username, email, password_hash, github_username,
+        username, email, password_hash, github_username, description,
         verification_token, verification_expires_at
-      ) VALUES (?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?)
     `
       )
-      .bind(username, email, passwordHash, github_username, verificationToken, verificationExpires)
+      .bind(username, email, passwordHash, github_username, description, verificationToken, verificationExpires)
       .run();
 
     // Send verification email
@@ -120,7 +124,7 @@ authRoutes.post("/signup", zValidator("json", signupSchema), async (c) => {
       VALUES ('user_signup', 'user', ?, ?)
     `
       )
-      .bind(username, JSON.stringify({ email, github_username }))
+      .bind(username, JSON.stringify({ email, github_username, description }))
       .run();
 
     return c.json(
@@ -163,7 +167,7 @@ authRoutes.get("/verify", async (c) => {
   const user = await db
     .prepare(
       `
-    SELECT id, username, email, status, verification_expires_at
+    SELECT id, username, email, github_username, description, status, verification_expires_at
     FROM users
     WHERE verification_token = ?
   `
@@ -173,6 +177,8 @@ authRoutes.get("/verify", async (c) => {
       id: number;
       username: string;
       email: string;
+      github_username: string;
+      description: string | null;
       status: string;
       verification_expires_at: string;
     }>();
@@ -223,6 +229,33 @@ authRoutes.get("/verify", async (c) => {
     )
     .bind(user.id, user.username)
     .run();
+
+  // Notify all admins about the new user needing approval
+  try {
+    const adminUsers = await db
+      .prepare("SELECT email FROM users WHERE is_admin = 1")
+      .all<{ email: string }>();
+
+    if (adminUsers.results && adminUsers.results.length > 0) {
+      const adminEmails = adminUsers.results.map((a) => a.email);
+      const adminPanelUrl = `${c.env.FRONTEND_URL}/admin/users?status=verified`;
+
+      await sendAdminNotificationEmail(
+        adminEmails,
+        {
+          username: user.username,
+          email: user.email,
+          github_username: user.github_username,
+          description: user.description || "No description provided",
+        },
+        adminPanelUrl,
+        c.env.RESEND_API_KEY
+      );
+    }
+  } catch (emailError) {
+    console.error("Failed to send admin notification:", emailError);
+    // Don't fail verification if admin notification fails
+  }
 
   // Redirect to frontend success page
   return c.redirect(`${c.env.FRONTEND_URL}/signup/verified?username=${user.username}`);

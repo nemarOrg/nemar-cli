@@ -80,6 +80,7 @@ export interface SignupRequest {
   email: string;
   password: string;
   github_username: string;
+  description: string;
 }
 
 export interface SignupResponse {
