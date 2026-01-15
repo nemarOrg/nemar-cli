@@ -11,7 +11,7 @@ import type { Bindings, Variables } from "../types/bindings";
 import { authMiddleware, adminMiddleware } from "../middleware/auth";
 import { generateApiKey, hashApiKey } from "../services/token";
 import { sendApprovalEmail, sendRevocationEmail } from "../services/email";
-import { addCollaboratorToAllRepos, removeCollaboratorFromAllRepos } from "../services/github";
+import { removeCollaborator } from "../services/github";
 import {
   createDeposition,
   publishDeposition,
@@ -156,17 +156,8 @@ adminRoutes.post("/approve/:username", async (c) => {
     .bind(user.id, hashedKey, apiKeyPrefix)
     .run();
 
-  // Add user as collaborator to all existing repos
-  let reposAdded = 0;
-  let repoErrors: string[] = [];
-
-  try {
-    const result = await addCollaboratorToAllRepos(user.github_username, c.env.GITHUB_ADMIN_PAT);
-    reposAdded = result.count;
-    repoErrors = result.errors;
-  } catch (error) {
-    console.error("Failed to add collaborator to repos:", error);
-  }
+  // Note: We no longer auto-add users to all repos
+  // Users request access to specific datasets via `nemar dataset request-access`
 
   // Send approval email with API key
   try {
@@ -188,16 +179,18 @@ adminRoutes.post("/approve/:username", async (c) => {
       user.username,
       JSON.stringify({
         approved_by: adminUser.username,
-        repos_added: reposAdded,
-        repo_errors: repoErrors,
       })
     )
     .run();
 
   return c.json({
     message: `User ${username} has been approved`,
-    repos_added: reposAdded,
-    repo_errors: repoErrors.length > 0 ? repoErrors : undefined,
+    user: {
+      username: user.username,
+      email: user.email,
+      status: "approved",
+    },
+    api_key: apiKey,
   });
 });
 
@@ -260,15 +253,28 @@ adminRoutes.post("/revoke/:username", async (c) => {
     .bind(user.id)
     .run();
 
-  // Remove from all repos
-  let reposRemoved = 0;
+  // Remove from datasets they have access to (tracked in dataset_collaborators)
+  const collaborations = await db
+    .prepare("SELECT dc.id, d.github_repo FROM dataset_collaborators dc JOIN datasets d ON dc.dataset_id = d.id WHERE dc.user_id = ?")
+    .bind(user.id)
+    .all<{ id: number; github_repo: string | null }>();
 
-  try {
-    const result = await removeCollaboratorFromAllRepos(user.github_username, c.env.GITHUB_ADMIN_PAT);
-    reposRemoved = result.count;
-  } catch (error) {
-    console.error("Failed to remove collaborator from repos:", error);
+  let reposRemoved = 0;
+  for (const collab of collaborations.results || []) {
+    if (collab.github_repo) {
+      try {
+        // github_repo is "nemarDatasets/nm000001", extract just the repo name
+        const repoName = collab.github_repo.split("/")[1];
+        await removeCollaborator(repoName, user.github_username, c.env.GITHUB_ADMIN_PAT);
+        reposRemoved++;
+      } catch (error) {
+        console.error(`Failed to remove from ${collab.github_repo}:`, error);
+      }
+    }
   }
+
+  // Clear their collaborator records
+  await db.prepare("DELETE FROM dataset_collaborators WHERE user_id = ?").bind(user.id).run();
 
   // Send revocation email
   try {

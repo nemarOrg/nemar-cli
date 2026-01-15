@@ -145,8 +145,7 @@ adminCommand
     console.log(chalk.cyan(`\nApproving user: ${username}\n`));
     console.log("This will:");
     console.log("  1. Generate an API key for the user");
-    console.log("  2. Add them as a collaborator to dataset repos");
-    console.log("  3. Send them an email with their API key");
+    console.log("  2. Send them an email with their API key");
     console.log();
 
     const { confirm } = await inquirer.prompt([
@@ -212,7 +211,7 @@ adminCommand
     console.log(chalk.red(`\nRevoking access for: ${username}\n`));
     console.log(chalk.yellow("This will:"));
     console.log("  1. Invalidate all API keys for this user");
-    console.log("  2. Remove them as a collaborator from repos");
+    console.log("  2. Remove them from datasets they have access to");
     console.log("  3. Send them a notification email");
     console.log();
 
