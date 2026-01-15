@@ -53,12 +53,31 @@ async function request<T>(
     headers["Authorization"] = `Bearer ${config.apiKey}`;
   }
 
-  const response = await fetch(url, {
-    ...options,
-    headers,
-  });
+  let response: Response;
+  try {
+    response = await fetch(url, {
+      ...options,
+      headers,
+    });
+  } catch (fetchError) {
+    // Network error - DNS resolution, connection refused, etc.
+    throw new ApiError(
+      0,
+      `Network error: Could not connect to ${getApiUrl()}`,
+      { originalError: fetchError instanceof Error ? fetchError.message : String(fetchError) }
+    );
+  }
 
-  const data = (await response.json()) as Record<string, unknown>;
+  let data: Record<string, unknown>;
+  try {
+    data = (await response.json()) as Record<string, unknown>;
+  } catch {
+    // Response wasn't valid JSON
+    throw new ApiError(
+      response.status,
+      `Invalid response from server (status ${response.status})`,
+    );
+  }
 
   if (!response.ok) {
     throw new ApiError(

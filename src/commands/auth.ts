@@ -263,9 +263,15 @@ authCommand
             console.log(chalk.gray(`  - ${detail}`));
           });
         }
+        // Provide helpful hints for common errors
+        if (error.message.includes("already taken")) {
+          console.log(chalk.gray("  Try a different username"));
+        } else if (error.message.includes("already registered")) {
+          console.log(chalk.gray("  Use 'nemar auth resend-verification' if you need a new verification link"));
+        }
       } else {
         spinner.fail("Registration failed");
-        console.log(chalk.gray("  Check your internet connection and try again"));
+        console.log(chalk.gray(`  ${error instanceof Error ? error.message : "Unknown error"}`));
       }
     }
   });
@@ -384,8 +390,12 @@ authCommand
     } catch (error) {
       if (error instanceof ApiError) {
         spinner.fail(error.message);
+        if (error.statusCode === 0) {
+          console.log(chalk.gray("  Check your internet connection"));
+        }
       } else {
-        spinner.fail("Failed to send verification email");
+        spinner.fail(`Failed to send verification email: ${error instanceof Error ? error.message : "Unknown error"}`);
+        console.log(chalk.gray("  Check your internet connection"));
       }
     }
   });
