@@ -122,14 +122,15 @@ adminRoutes.post("/approve/:username", async (c) => {
     return c.json({ error: "User already approved" }, 409);
   }
 
-  if (user.status !== "verified") {
+  // Allow approval of verified users OR re-approval of revoked users
+  if (user.status !== "verified" && user.status !== "revoked") {
     return c.json(
       {
-        error: "User has not verified email",
+        error: "User is not eligible for approval",
         status: user.status,
         message: user.status === "pending" ? "User needs to verify their email first" : "User status is not eligible for approval",
       },
-      400
+      400,
     );
   }
 
