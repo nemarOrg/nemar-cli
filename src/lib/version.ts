@@ -1,6 +1,9 @@
 /**
  * Version information for NEMAR CLI
+ *
+ * Reads version from package.json at build time via Bun's JSON import.
  */
 
-// Read from package.json at build time
-export const version = "0.1.0";
+import packageJson from "../../package.json";
+
+export const version = packageJson.version;
