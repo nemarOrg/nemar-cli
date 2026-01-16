@@ -26,12 +26,13 @@ interface CreateAccessKeyResult {
 
 /**
  * Create an AWS client for IAM operations
+ * Note: IAM is a global service and always uses us-east-1 for signing
  */
 function createIamClient(config: IamConfig): AwsClient {
   return new AwsClient({
     accessKeyId: config.accessKeyId,
     secretAccessKey: config.secretAccessKey,
-    region: config.region,
+    region: "us-east-1", // IAM is global, always use us-east-1
     service: "iam",
   });
 }
