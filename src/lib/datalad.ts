@@ -249,7 +249,16 @@ export async function checkPrerequisites(): Promise<PrerequisitesResult> {
   const errors: string[] = [];
 
   if (!datalad.installed) {
-    errors.push("DataLad is not installed. Install: pip install datalad");
+    const platform = process.platform;
+    let installCmd: string;
+    if (platform === "darwin") {
+      installCmd = "brew install datalad (recommended) or pip install datalad";
+    } else if (platform === "linux") {
+      installCmd = "apt install datalad (Debian/Ubuntu) or pip install datalad";
+    } else {
+      installCmd = "pip install datalad";
+    }
+    errors.push(`DataLad is not installed. Install: ${installCmd}`);
   } else if (datalad.compatible === false) {
     errors.push(
       `DataLad version ${datalad.version} is too old. Required: >= ${datalad.minVersion}`,
@@ -257,9 +266,16 @@ export async function checkPrerequisites(): Promise<PrerequisitesResult> {
   }
 
   if (!gitAnnex.installed) {
-    errors.push(
-      "git-annex is not installed. Install: brew install git-annex (macOS) or apt install git-annex (Linux)",
-    );
+    const platform = process.platform;
+    let installCmd: string;
+    if (platform === "darwin") {
+      installCmd = "brew install git-annex";
+    } else if (platform === "linux") {
+      installCmd = "apt install git-annex (Debian/Ubuntu)";
+    } else {
+      installCmd = "See https://git-annex.branchable.com/install/";
+    }
+    errors.push(`git-annex is not installed. Install: ${installCmd}`);
   } else if (gitAnnex.compatible === false) {
     errors.push(
       `git-annex version ${gitAnnex.version} is too old. Required: >= ${gitAnnex.minVersion}`,
@@ -268,7 +284,7 @@ export async function checkPrerequisites(): Promise<PrerequisitesResult> {
 
   if (!githubSSH.accessible) {
     errors.push(
-      "GitHub SSH access not configured. Add your SSH key to GitHub: https://github.com/settings/keys",
+      "GitHub SSH access not configured. Run 'nemar auth setup-ssh' to configure automatically.",
     );
   }
 
