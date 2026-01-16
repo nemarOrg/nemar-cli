@@ -126,10 +126,17 @@ export async function createAccessKey(
  */
 export function generateS3PolicyDocument(bucket: string, prefixes: string[]): string {
   if (prefixes.length === 0) {
-    // Empty policy - no access
+    // Minimal policy with explicit deny - AWS requires at least one statement
     return JSON.stringify({
       Version: "2012-10-17",
-      Statement: [],
+      Statement: [
+        {
+          Sid: "DenyAllUntilDatasetCreated",
+          Effect: "Deny",
+          Action: "s3:*",
+          Resource: "*",
+        },
+      ],
     });
   }
 
