@@ -172,6 +172,44 @@ export async function getCurrentUser(): Promise<UserInfo> {
 }
 
 // ============================================================================
+// SSH Key Management
+// TODO: These functions are prepared for future backend-managed SSH key registration.
+// Currently, setup-ssh guides users to manually add keys to GitHub.
+// ============================================================================
+
+export interface RegisterSSHKeyResponse {
+  message: string;
+  key_id: number;
+  key_title: string;
+}
+
+/**
+ * Register an SSH public key with GitHub via the backend
+ * The backend uses the user's GitHub credentials to add the deploy key
+ *
+ * Note: Not yet used; users currently add keys manually via GitHub UI.
+ */
+export async function registerSSHKey(publicKey: string): Promise<RegisterSSHKeyResponse> {
+  return request<RegisterSSHKeyResponse>(
+    "/auth/ssh-key",
+    {
+      method: "POST",
+      body: JSON.stringify({ public_key: publicKey }),
+    },
+    true,
+  );
+}
+
+/**
+ * Check if user has an SSH key registered
+ *
+ * Note: Not yet used; users currently add keys manually via GitHub UI.
+ */
+export async function checkSSHKeyStatus(): Promise<{ registered: boolean; key_title?: string }> {
+  return request<{ registered: boolean; key_title?: string }>("/auth/ssh-key", {}, true);
+}
+
+// ============================================================================
 // Admin
 // ============================================================================
 

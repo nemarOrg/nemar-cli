@@ -236,6 +236,22 @@ export async function checkAWSCredentials(): Promise<{ configured: boolean; sour
 }
 
 /**
+ * Get platform-specific installation command for a tool
+ */
+function getInstallCommand(tool: "datalad" | "git-annex"): string {
+  const platform = process.platform;
+  if (tool === "datalad") {
+    if (platform === "darwin") return "brew install datalad (recommended) or pip install datalad";
+    if (platform === "linux") return "apt install datalad (Debian/Ubuntu) or pip install datalad";
+    return "pip install datalad";
+  }
+  // git-annex
+  if (platform === "darwin") return "brew install git-annex";
+  if (platform === "linux") return "apt install git-annex (Debian/Ubuntu)";
+  return "See https://git-annex.branchable.com/install/";
+}
+
+/**
  * Check all prerequisites for dataset upload
  * Note: AWS credentials are provided by the backend after dataset creation
  */
@@ -249,7 +265,7 @@ export async function checkPrerequisites(): Promise<PrerequisitesResult> {
   const errors: string[] = [];
 
   if (!datalad.installed) {
-    errors.push("DataLad is not installed. Install: pip install datalad");
+    errors.push(`DataLad is not installed. Install: ${getInstallCommand("datalad")}`);
   } else if (datalad.compatible === false) {
     errors.push(
       `DataLad version ${datalad.version} is too old. Required: >= ${datalad.minVersion}`,
@@ -257,9 +273,7 @@ export async function checkPrerequisites(): Promise<PrerequisitesResult> {
   }
 
   if (!gitAnnex.installed) {
-    errors.push(
-      "git-annex is not installed. Install: brew install git-annex (macOS) or apt install git-annex (Linux)",
-    );
+    errors.push(`git-annex is not installed. Install: ${getInstallCommand("git-annex")}`);
   } else if (gitAnnex.compatible === false) {
     errors.push(
       `git-annex version ${gitAnnex.version} is too old. Required: >= ${gitAnnex.minVersion}`,
@@ -268,7 +282,7 @@ export async function checkPrerequisites(): Promise<PrerequisitesResult> {
 
   if (!githubSSH.accessible) {
     errors.push(
-      "GitHub SSH access not configured. Add your SSH key to GitHub: https://github.com/settings/keys",
+      "GitHub SSH access not configured. Run 'nemar auth setup-ssh' to configure automatically.",
     );
   }
 

@@ -2,11 +2,12 @@
  * Authentication commands for NEMAR CLI
  *
  * Commands:
- * - nemar auth login    - Authenticate with API key
- * - nemar auth signup   - Register new account
- * - nemar auth status   - Check authentication status
- * - nemar auth whoami   - Alias for status (common pattern)
- * - nemar auth logout   - Clear stored credentials
+ * - nemar auth login     - Authenticate with API key
+ * - nemar auth signup    - Register new account
+ * - nemar auth status    - Check authentication status
+ * - nemar auth whoami    - Alias for status (common pattern)
+ * - nemar auth logout    - Clear stored credentials
+ * - nemar auth setup-ssh - Configure SSH for GitHub access
  *
  * Note: The two-prong structure (nemar auth <cmd>) follows CLI best practices
  * for discoverability and organization. Root-level shortcuts (nemar login,
@@ -25,6 +26,14 @@ import {
   isAuthenticated,
   setConfig,
 } from "../lib/config.js";
+import {
+  configureSSHForGitHub,
+  generateSSHKey,
+  getSSHKeyPaths,
+  nemarSSHKeyExists,
+  readPublicKey,
+  testGitHubSSH,
+} from "../lib/ssh.js";
 
 export const authCommand = new Command("auth").description("Authentication management").addHelpText(
   "after",
@@ -91,6 +100,11 @@ export async function loginAction(options: { key?: string; force?: boolean }): P
   }
 
   // Validate with backend
+  if (!apiKey) {
+    console.log(chalk.red("No API key provided"));
+    return;
+  }
+
   const spinner = ora("Validating API key...").start();
 
   try {
@@ -279,9 +293,7 @@ export async function signupAction(): Promise<void> {
         console.log(chalk.gray("  Try a different username"));
       } else if (error.message.includes("already registered")) {
         console.log(
-          chalk.gray(
-            "  Use 'nemar auth resend-verification' if you need a new verification link",
-          ),
+          chalk.gray("  Use 'nemar auth resend-verification' if you need a new verification link"),
         );
       }
     } else {
@@ -291,10 +303,7 @@ export async function signupAction(): Promise<void> {
   }
 }
 
-authCommand
-  .command("signup")
-  .description("Register for a new NEMAR account")
-  .action(signupAction);
+authCommand.command("signup").description("Register for a new NEMAR account").action(signupAction);
 
 // ============================================================================
 // Status / Whoami
@@ -434,3 +443,136 @@ authCommand
       }
     }
   });
+
+// ============================================================================
+// Setup SSH
+// ============================================================================
+
+/** Exported setup-ssh action handler for use in root-level shortcuts */
+export async function setupSSHAction(options: { force?: boolean }): Promise<void> {
+  // Check authentication
+  if (!isAuthenticated()) {
+    console.log(chalk.yellow("Not authenticated"));
+    console.log();
+    console.log("  Run 'nemar auth login' first to authenticate");
+    return;
+  }
+
+  const config = getConfig();
+
+  // Test if SSH already works
+  if (!options.force) {
+    const spinner = ora("Checking existing SSH access...").start();
+    const sshTest = await testGitHubSSH();
+
+    if (sshTest.success) {
+      spinner.succeed("SSH access to GitHub already configured");
+      if (sshTest.username) {
+        console.log(`  GitHub user: ${chalk.cyan(sshTest.username)}`);
+      }
+      console.log();
+      console.log(chalk.gray("Use --force to regenerate SSH key anyway"));
+      return;
+    }
+    spinner.info("SSH access to GitHub not configured");
+  }
+
+  console.log();
+  console.log(chalk.cyan("Setting up SSH access for GitHub"));
+  console.log(chalk.gray("This will generate a dedicated SSH key for NEMAR uploads\n"));
+
+  // Step 1: Generate SSH key
+  let publicKey: string | null = null;
+  const paths = getSSHKeyPaths();
+
+  if (nemarSSHKeyExists() && !options.force) {
+    console.log(chalk.gray(`  Using existing key: ${paths.privateKey}`));
+    publicKey = readPublicKey();
+  } else {
+    const spinner = ora("Generating SSH key...").start();
+    const keyResult = await generateSSHKey(config.email || "nemar-user");
+
+    if (!keyResult.success) {
+      spinner.fail("Failed to generate SSH key");
+      console.log(chalk.gray(`  ${keyResult.error}`));
+      return;
+    }
+
+    spinner.succeed("SSH key generated");
+    console.log(chalk.gray(`  Private key: ${paths.privateKey}`));
+    console.log(chalk.gray(`  Public key: ${paths.publicKey}`));
+    publicKey = keyResult.publicKey || null;
+  }
+
+  if (!publicKey) {
+    console.log(chalk.red("Could not read public key"));
+    return;
+  }
+
+  // Step 2: Configure SSH
+  const configSpinner = ora("Configuring SSH...").start();
+  const configResult = configureSSHForGitHub();
+
+  if (!configResult.success) {
+    configSpinner.fail("Failed to configure SSH");
+    console.log(chalk.gray(`  ${configResult.error}`));
+    return;
+  }
+  configSpinner.succeed("SSH configured for GitHub");
+
+  // Step 3: Check if key is already registered with GitHub
+  console.log();
+  const verifySpinner = ora("Testing SSH connection to GitHub...").start();
+
+  const verifyResult = await testGitHubSSH();
+
+  if (verifyResult.success) {
+    verifySpinner.succeed("SSH connection verified");
+    if (verifyResult.username) {
+      console.log(`  GitHub user: ${chalk.cyan(verifyResult.username)}`);
+    }
+    console.log();
+    console.log(chalk.green("SSH setup complete! You can now upload datasets."));
+    return;
+  }
+
+  verifySpinner.info("SSH key generated but not yet added to GitHub");
+
+  // Step 4: Show instructions to add key to GitHub
+  console.log();
+  console.log(chalk.yellow("To complete setup, add this SSH key to your GitHub account:"));
+  console.log();
+  console.log(chalk.cyan(`  ${publicKey}`));
+  console.log();
+  console.log("Steps:");
+  console.log("  1. Copy the key above");
+  console.log(`  2. Go to: ${chalk.underline("https://github.com/settings/ssh/new")}`);
+  console.log(`  3. Title: ${chalk.gray("NEMAR CLI")}`);
+  console.log("  4. Paste the key and click 'Add SSH key'");
+  console.log();
+  console.log(chalk.gray("After adding the key, run 'nemar auth setup-ssh' again to verify."));
+}
+
+authCommand
+  .command("setup-ssh")
+  .description("Configure SSH access for GitHub (auto-generates key)")
+  .option("-f, --force", "Regenerate SSH key even if one exists")
+  .addHelpText(
+    "after",
+    `
+Description:
+  Automatically configures SSH access for GitHub, which is required
+  for uploading datasets. This command will:
+
+  1. Generate a dedicated Ed25519 SSH key for NEMAR (~/.ssh/nemar_ed25519)
+  2. Configure SSH to use this key for GitHub
+  3. Register the key with your GitHub account (via NEMAR backend)
+
+  This is a one-time setup. After running this command, you can upload
+  datasets without any manual SSH configuration.
+
+Examples:
+  $ nemar auth setup-ssh          # Set up SSH access
+  $ nemar auth setup-ssh --force  # Regenerate key even if exists`,
+  )
+  .action(setupSSHAction);
