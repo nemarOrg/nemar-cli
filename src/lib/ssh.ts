@@ -25,15 +25,6 @@ export interface SSHKeyResult {
   error?: string;
 }
 
-/** Result of SSH setup */
-export interface SSHSetupResult {
-  success: boolean;
-  publicKey?: string;
-  keyGenerated: boolean;
-  configUpdated: boolean;
-  error?: string;
-}
-
 /**
  * Get paths for NEMAR SSH key files
  */
@@ -63,7 +54,11 @@ export async function generateSSHKey(email: string): Promise<SSHKeyResult> {
 
   // Ensure .ssh directory exists with correct permissions
   if (!existsSync(paths.sshDir)) {
-    mkdirSync(paths.sshDir, { mode: 0o700 });
+    try {
+      mkdirSync(paths.sshDir, { mode: 0o700 });
+    } catch (error) {
+      return { success: false, error: `Cannot create ~/.ssh directory: ${(error as Error).message}` };
+    }
   }
 
   // Check if key already exists
@@ -72,8 +67,8 @@ export async function generateSSHKey(email: string): Promise<SSHKeyResult> {
     try {
       const publicKey = readFileSync(paths.publicKey, "utf-8").trim();
       return { success: true, publicKey };
-    } catch {
-      return { success: false, error: "NEMAR SSH key exists but cannot read public key" };
+    } catch (error) {
+      return { success: false, error: `NEMAR SSH key exists but cannot read public key: ${(error as Error).message}` };
     }
   }
 
@@ -148,7 +143,11 @@ export function configureSSHForGitHub(): { success: boolean; error?: string } {
 
   // Ensure .ssh directory exists
   if (!existsSync(paths.sshDir)) {
-    mkdirSync(paths.sshDir, { mode: 0o700 });
+    try {
+      mkdirSync(paths.sshDir, { mode: 0o700 });
+    } catch (error) {
+      return { success: false, error: `Cannot create ~/.ssh directory: ${(error as Error).message}` };
+    }
   }
 
   // Check if already configured
@@ -178,46 +177,6 @@ Host github.com
   } catch (error) {
     return { success: false, error: `Failed to update SSH config: ${(error as Error).message}` };
   }
-}
-
-/**
- * Full SSH setup: generate key and configure SSH
- */
-export async function setupSSH(email: string): Promise<SSHSetupResult> {
-  let keyGenerated = false;
-  let configUpdated = false;
-
-  // Generate key if needed
-  const keyResult = await generateSSHKey(email);
-  if (!keyResult.success) {
-    return {
-      success: false,
-      keyGenerated: false,
-      configUpdated: false,
-      error: keyResult.error,
-    };
-  }
-  keyGenerated = !nemarSSHKeyExists(); // Was it newly generated?
-
-  // Configure SSH
-  const configResult = configureSSHForGitHub();
-  if (!configResult.success) {
-    return {
-      success: false,
-      publicKey: keyResult.publicKey,
-      keyGenerated,
-      configUpdated: false,
-      error: configResult.error,
-    };
-  }
-  configUpdated = !hasSSHConfigEntry(); // Was it newly configured?
-
-  return {
-    success: true,
-    publicKey: keyResult.publicKey,
-    keyGenerated,
-    configUpdated,
-  };
 }
 
 /**
