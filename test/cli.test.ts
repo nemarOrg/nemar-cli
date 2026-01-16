@@ -604,10 +604,13 @@ describe("CLI Admin Revert", () => {
       username: "test-admin",
     });
 
-    const { stdout, exitCode } = await runCli(["admin", "revert", "nm999999", "--list"], ctx);
+    const { stdout, stderr, exitCode } = await runCli(["admin", "revert", "nm999999", "--list"], ctx);
 
-    // Should fail because dataset doesn't exist
-    expect(stdout.toLowerCase()).toContain("not found");
+    // Should fail; either "not found" (if prereqs met) or "missing prerequisites" (in CI)
+    const output = (stdout + stderr).toLowerCase();
+    expect(
+      output.includes("not found") || output.includes("prerequisites")
+    ).toBe(true);
   });
 });
 
