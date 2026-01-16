@@ -44,6 +44,7 @@ const createDatasetSchema = z.object({
   name: z.string().min(1, "Name is required").max(200),
   description: z.string().optional(),
   files: z.array(fileSchema).optional(),
+  sandbox: z.boolean().optional(), // If true, creates sandbox dataset (xx000XXX)
 });
 
 /**
@@ -53,9 +54,24 @@ const createDatasetSchema = z.object({
  * Uses per-user AWS credentials for scoped S3 access.
  */
 datasetRoutes.post("/", authMiddleware, zValidator("json", createDatasetSchema), async (c) => {
-  const { name, description, files } = c.req.valid("json");
+  const { name, description, files, sandbox } = c.req.valid("json");
   const user = c.get("user");
   const db = c.env.DB;
+
+  // Check if non-sandbox upload requires sandbox training
+  if (!sandbox) {
+    const userStatus = await db
+      .prepare("SELECT sandbox_completed FROM users WHERE id = ?")
+      .bind(user.id)
+      .first<{ sandbox_completed: number }>();
+
+    if (!userStatus?.sandbox_completed) {
+      return c.json({
+        error: "Sandbox training required",
+        message: "You must complete sandbox training before uploading real datasets. Run 'nemar sandbox' to complete training.",
+      }, 403);
+    }
+  }
 
   // Get user's AWS credentials
   const userCreds = await db
@@ -91,8 +107,8 @@ datasetRoutes.post("/", authMiddleware, zValidator("json", createDatasetSchema),
     return c.json({ error: "Failed to access S3 credentials" }, 500);
   }
 
-  // Generate dataset ID
-  const datasetId = await generateDatasetId(db);
+  // Generate dataset ID (xx000XXX for sandbox, nm000XXX for regular)
+  const datasetId = await generateDatasetId(db, !!sandbox);
 
   // Create GitHub repository
   let githubRepo;
@@ -200,11 +216,11 @@ datasetRoutes.post("/", authMiddleware, zValidator("json", createDatasetSchema),
   await db
     .prepare(
       `
-    INSERT INTO datasets (dataset_id, name, description, owner_user_id, github_repo)
-    VALUES (?, ?, ?, ?, ?)
+    INSERT INTO datasets (dataset_id, name, description, owner_user_id, github_repo, is_sandbox)
+    VALUES (?, ?, ?, ?, ?, ?)
   `
     )
-    .bind(datasetId, name, description || null, user.id, githubRepo.full_name)
+    .bind(datasetId, name, description || null, user.id, githubRepo.full_name, sandbox ? 1 : 0)
     .run();
 
   // Audit log

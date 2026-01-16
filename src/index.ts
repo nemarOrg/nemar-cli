@@ -20,6 +20,7 @@ import {
   statusAction,
 } from "./commands/auth.js";
 import { datasetCommand } from "./commands/dataset.js";
+import { sandboxCommand } from "./commands/sandbox.js";
 import { version } from "./lib/version.js";
 
 const program = new Command();
@@ -54,6 +55,7 @@ Support:
 // Register command groups
 program.addCommand(authCommand);
 program.addCommand(datasetCommand);
+program.addCommand(sandboxCommand);
 program.addCommand(adminCommand);
 
 // ============================================================================
