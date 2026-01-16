@@ -629,6 +629,216 @@ export function formatBytes(bytes: number): string {
 }
 
 // =============================================================================
+// Presigned URL Upload Functions
+// =============================================================================
+
+export interface PresignedUploadProgress {
+  file: string;
+  uploaded: number;
+  total: number;
+  status: "pending" | "uploading" | "completed" | "failed";
+  error?: string;
+}
+
+/**
+ * Upload a single file to S3 using a presigned URL
+ */
+export async function uploadFileWithPresignedUrl(
+  filePath: string,
+  presignedUrl: string,
+  onProgress?: (uploaded: number, total: number) => void,
+): Promise<{ success: boolean; error?: string }> {
+  try {
+    const fileContent = await Bun.file(filePath).arrayBuffer();
+    const fileSize = fileContent.byteLength;
+
+    // Use fetch to upload - presigned URLs use simple PUT
+    const response = await fetch(presignedUrl, {
+      method: "PUT",
+      body: fileContent,
+      headers: {
+        "Content-Length": fileSize.toString(),
+      },
+    });
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      return { success: false, error: `Upload failed: ${response.status} ${errorText}` };
+    }
+
+    onProgress?.(fileSize, fileSize);
+    return { success: true };
+  } catch (error) {
+    return { success: false, error: (error as Error).message };
+  }
+}
+
+/**
+ * Upload multiple files using presigned URLs with parallel execution
+ */
+export async function uploadFilesWithPresignedUrls(
+  basePath: string,
+  uploadUrls: Record<string, string>,
+  options: {
+    jobs?: number;
+    onProgress?: (progress: PresignedUploadProgress) => void;
+  } = {},
+): Promise<{ success: boolean; uploaded: number; failed: string[]; error?: string }> {
+  const jobs = options.jobs || 4;
+  const files = Object.entries(uploadUrls);
+  const failed: string[] = [];
+  let uploaded = 0;
+
+  // Process files in batches
+  for (let i = 0; i < files.length; i += jobs) {
+    const batch = files.slice(i, i + jobs);
+    const results = await Promise.all(
+      batch.map(async ([relativePath, presignedUrl]) => {
+        const fullPath = join(basePath, relativePath);
+
+        options.onProgress?.({
+          file: relativePath,
+          uploaded: 0,
+          total: 0,
+          status: "uploading",
+        });
+
+        const result = await uploadFileWithPresignedUrl(fullPath, presignedUrl);
+
+        if (result.success) {
+          uploaded++;
+          options.onProgress?.({
+            file: relativePath,
+            uploaded: 1,
+            total: 1,
+            status: "completed",
+          });
+        } else {
+          failed.push(relativePath);
+          options.onProgress?.({
+            file: relativePath,
+            uploaded: 0,
+            total: 1,
+            status: "failed",
+            error: result.error,
+          });
+        }
+
+        return { path: relativePath, ...result };
+      }),
+    );
+  }
+
+  return {
+    success: failed.length === 0,
+    uploaded,
+    failed,
+    error: failed.length > 0 ? `${failed.length} files failed to upload` : undefined,
+  };
+}
+
+/**
+ * Register a URL with git-annex for a file
+ * This allows git-annex to track files uploaded via presigned URLs
+ */
+export async function registerUrlWithGitAnnex(
+  repoPath: string,
+  relativePath: string,
+  url: string,
+): Promise<{ success: boolean; error?: string }> {
+  try {
+    // First, add the file to git-annex if not already tracked
+    const addResult = await runCommand(["git", "annex", "add", relativePath], {
+      cwd: repoPath,
+    });
+
+    if (addResult.exitCode !== 0) {
+      // File might already be tracked, that's OK
+    }
+
+    // Get the key for the file
+    const keyResult = await runCommand(
+      ["git", "annex", "lookupkey", relativePath],
+      { cwd: repoPath },
+    );
+
+    if (keyResult.exitCode !== 0 || !keyResult.stdout.trim()) {
+      return { success: false, error: `Could not get git-annex key for ${relativePath}` };
+    }
+
+    const key = keyResult.stdout.trim();
+
+    // Register the URL with the key
+    const registerResult = await runCommand(
+      ["git", "annex", "registerurl", key, url],
+      { cwd: repoPath },
+    );
+
+    if (registerResult.exitCode !== 0) {
+      return { success: false, error: `Failed to register URL: ${registerResult.stderr}` };
+    }
+
+    return { success: true };
+  } catch (error) {
+    return { success: false, error: (error as Error).message };
+  }
+}
+
+/**
+ * Register multiple URLs with git-annex
+ */
+export async function registerUrlsWithGitAnnex(
+  repoPath: string,
+  fileUrls: Record<string, string>,
+  onProgress?: (file: string, success: boolean) => void,
+): Promise<{ success: boolean; registered: number; failed: string[] }> {
+  let registered = 0;
+  const failed: string[] = [];
+
+  for (const [relativePath, url] of Object.entries(fileUrls)) {
+    const result = await registerUrlWithGitAnnex(repoPath, relativePath, url);
+    if (result.success) {
+      registered++;
+      onProgress?.(relativePath, true);
+    } else {
+      failed.push(relativePath);
+      onProgress?.(relativePath, false);
+    }
+  }
+
+  return {
+    success: failed.length === 0,
+    registered,
+    failed,
+  };
+}
+
+/**
+ * Configure git-annex web remote for tracking S3 URLs
+ * This allows git-annex to use the registered URLs for downloads
+ */
+export async function configureWebRemote(
+  repoPath: string,
+): Promise<{ success: boolean; error?: string }> {
+  try {
+    // Check if web remote already exists
+    const checkResult = await runCommand(
+      ["git", "annex", "enableremote", "web"],
+      { cwd: repoPath },
+    );
+
+    // Web remote is built-in to git-annex, should always work
+    if (checkResult.exitCode !== 0 && !checkResult.stderr.includes("already exists")) {
+      return { success: false, error: `Failed to enable web remote: ${checkResult.stderr}` };
+    }
+
+    return { success: true };
+  } catch (error) {
+    return { success: false, error: (error as Error).message };
+  }
+}
+
+// =============================================================================
 // Download Functions
 // =============================================================================
 
