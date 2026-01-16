@@ -540,7 +540,7 @@ describe("CLI Dataset List", () => {
     const { stdout, exitCode } = await runCli(["dataset", "list", "--help"]);
 
     expect(exitCode).toBe(0);
-    expect(stdout).toContain("List datasets");
+    expect(stdout).toContain("List available datasets");
     expect(stdout).toContain("--mine");
     expect(stdout).toContain("--json");
     expect(stdout).toContain("--limit");
@@ -637,9 +637,11 @@ describe("CLI Dataset Collaborator Commands", () => {
         username: "test-user",
       });
 
-      const { stdout, exitCode } = await runCli(["dataset", "request-access", "nm999999"], ctx);
+      const { stdout, stderr, exitCode } = await runCli(["dataset", "request-access", "nm999999"], ctx);
 
-      expect(stdout.toLowerCase()).toContain("not found");
+      // Spinner output goes to stderr in non-TTY mode
+      const output = (stdout + stderr).toLowerCase();
+      expect(output).toContain("not found");
     });
   });
 
@@ -670,13 +672,15 @@ describe("CLI Dataset Collaborator Commands", () => {
       });
 
       // Try to invite to a dataset test-user doesn't own
-      const { stdout, exitCode } = await runCli(["dataset", "invite", "someuser", "nm000001"], ctx);
+      const { stdout, stderr, exitCode } = await runCli(["dataset", "invite", "someuser", "nm000001"], ctx);
 
+      // Spinner output goes to stderr in non-TTY mode
+      const output = (stdout + stderr).toLowerCase();
       // Either "not found" (if dataset doesn't exist) or "owner or admin" (if forbidden)
       expect(
-        stdout.toLowerCase().includes("not found") ||
-        stdout.toLowerCase().includes("owner") ||
-        stdout.toLowerCase().includes("admin")
+        output.includes("not found") ||
+        output.includes("owner") ||
+        output.includes("admin")
       ).toBe(true);
     });
   });
@@ -708,13 +712,15 @@ describe("CLI Dataset Collaborator Commands", () => {
       });
 
       // Try to list collaborators for a dataset test-user doesn't own
-      const { stdout, exitCode } = await runCli(["dataset", "collaborators", "nm000001"], ctx);
+      const { stdout, stderr, exitCode } = await runCli(["dataset", "collaborators", "nm000001"], ctx);
 
+      // Spinner output goes to stderr in non-TTY mode
+      const output = (stdout + stderr).toLowerCase();
       // Either "not found" or "owner or admin" forbidden
       expect(
-        stdout.toLowerCase().includes("not found") ||
-        stdout.toLowerCase().includes("owner") ||
-        stdout.toLowerCase().includes("admin")
+        output.includes("not found") ||
+        output.includes("owner") ||
+        output.includes("admin")
       ).toBe(true);
     });
 

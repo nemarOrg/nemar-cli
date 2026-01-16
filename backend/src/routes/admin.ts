@@ -113,7 +113,7 @@ adminRoutes.post("/approve/:username", async (c) => {
   }
 
   if (user.status === "approved") {
-    return c.json({ error: "User already approved" }, 400);
+    return c.json({ error: "User already approved" }, 409);
   }
 
   if (user.status !== "verified") {
@@ -160,8 +160,10 @@ adminRoutes.post("/approve/:username", async (c) => {
   // Users request access to specific datasets via `nemar dataset request-access`
 
   // Send approval email with API key
+  let emailSent = false;
   try {
     await sendApprovalEmail(user.email, user.username, apiKey, c.env.RESEND_API_KEY);
+    emailSent = true;
   } catch (error) {
     console.error("Failed to send approval email:", error);
   }
@@ -179,6 +181,7 @@ adminRoutes.post("/approve/:username", async (c) => {
       user.username,
       JSON.stringify({
         approved_by: adminUser.username,
+        email_sent: emailSent,
       })
     )
     .run();
@@ -191,6 +194,7 @@ adminRoutes.post("/approve/:username", async (c) => {
       status: "approved",
     },
     api_key: apiKey,
+    email_sent: emailSent,
   });
 });
 
@@ -224,7 +228,7 @@ adminRoutes.post("/revoke/:username", async (c) => {
   }
 
   if (user.status === "revoked") {
-    return c.json({ error: "User already revoked" }, 400);
+    return c.json({ error: "User already revoked" }, 409);
   }
 
   // Revoke all tokens
@@ -260,15 +264,23 @@ adminRoutes.post("/revoke/:username", async (c) => {
     .all<{ id: number; github_repo: string | null }>();
 
   let reposRemoved = 0;
+  const failedRemovals: string[] = [];
   for (const collab of collaborations.results || []) {
     if (collab.github_repo) {
+      // Extract repo name with defensive check
+      const parts = collab.github_repo.split("/");
+      if (parts.length !== 2 || !parts[1]) {
+        console.error(`Invalid github_repo format: ${collab.github_repo}`);
+        failedRemovals.push(collab.github_repo);
+        continue;
+      }
+      const repoName = parts[1];
       try {
-        // github_repo is "nemarDatasets/nm000001", extract just the repo name
-        const repoName = collab.github_repo.split("/")[1];
         await removeCollaborator(repoName, user.github_username, c.env.GITHUB_ADMIN_PAT);
         reposRemoved++;
       } catch (error) {
         console.error(`Failed to remove from ${collab.github_repo}:`, error);
+        failedRemovals.push(collab.github_repo);
       }
     }
   }
@@ -277,8 +289,10 @@ adminRoutes.post("/revoke/:username", async (c) => {
   await db.prepare("DELETE FROM dataset_collaborators WHERE user_id = ?").bind(user.id).run();
 
   // Send revocation email
+  let emailSent = false;
   try {
     await sendRevocationEmail(user.email, user.username, c.env.RESEND_API_KEY);
+    emailSent = true;
   } catch (error) {
     console.error("Failed to send revocation email:", error);
   }
@@ -297,6 +311,8 @@ adminRoutes.post("/revoke/:username", async (c) => {
       JSON.stringify({
         revoked_by: adminUser.username,
         repos_removed: reposRemoved,
+        failed_removals: failedRemovals,
+        email_sent: emailSent,
       })
     )
     .run();
@@ -304,6 +320,8 @@ adminRoutes.post("/revoke/:username", async (c) => {
   return c.json({
     message: `User ${username} access has been revoked`,
     repos_removed: reposRemoved,
+    failed_removals: failedRemovals.length > 0 ? failedRemovals : undefined,
+    email_sent: emailSent,
   });
 });
 

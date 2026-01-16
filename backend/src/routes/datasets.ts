@@ -15,6 +15,21 @@ import { generateDatasetUploadUrls } from "../services/s3";
 
 export const datasetRoutes = new Hono<{ Bindings: Bindings; Variables: Variables }>();
 
+/**
+ * Extract repository name from github_repo format "org/repo"
+ * Returns null if format is invalid
+ */
+function extractRepoName(githubRepo: string): string | null {
+  if (!githubRepo || !githubRepo.includes("/")) {
+    return null;
+  }
+  const parts = githubRepo.split("/");
+  if (parts.length !== 2 || !parts[1]) {
+    return null;
+  }
+  return parts[1];
+}
+
 // File schema for upload requests
 const fileSchema = z.object({
   path: z.string(),
@@ -373,16 +388,22 @@ datasetRoutes.post("/:id/request-access", authMiddleware, async (c) => {
     .first();
 
   if (existing) {
-    return c.json({ error: "You already have access to this dataset" }, 400);
+    return c.json({ error: "You already have access to this dataset" }, 409);
   }
 
   // Check if user is the owner
   if (dataset.owner_user_id === user.id) {
-    return c.json({ error: "You are the owner of this dataset" }, 400);
+    return c.json({ error: "You are the owner of this dataset" }, 409);
+  }
+
+  // Extract repo name with defensive check
+  const repoName = extractRepoName(dataset.github_repo);
+  if (!repoName) {
+    console.error(`Invalid github_repo format: ${dataset.github_repo}`);
+    return c.json({ error: "Dataset has invalid GitHub repository configuration" }, 500);
   }
 
   // Add as collaborator on GitHub
-  const repoName = dataset.github_repo.split("/")[1];
   try {
     await addCollaborator(repoName, user.github_username, "push", c.env.GITHUB_ADMIN_PAT);
   } catch (error) {
@@ -391,20 +412,26 @@ datasetRoutes.post("/:id/request-access", authMiddleware, async (c) => {
   }
 
   // Record in our database
-  await db
-    .prepare(
-      "INSERT INTO dataset_collaborators (dataset_id, user_id, access_type) VALUES (?, ?, 'requested')"
-    )
-    .bind(dataset.id, user.id)
-    .run();
+  try {
+    await db
+      .prepare(
+        "INSERT INTO dataset_collaborators (dataset_id, user_id, access_type) VALUES (?, ?, 'requested')"
+      )
+      .bind(dataset.id, user.id)
+      .run();
 
-  // Audit log
-  await db
-    .prepare(
-      "INSERT INTO audit_log (user_id, action, resource_type, resource_id, details) VALUES (?, 'dataset_access_granted', 'dataset', ?, ?)"
-    )
-    .bind(user.id, datasetId, JSON.stringify({ access_type: "requested" }))
-    .run();
+    // Audit log
+    await db
+      .prepare(
+        "INSERT INTO audit_log (user_id, action, resource_type, resource_id, details) VALUES (?, 'dataset_access_granted', 'dataset', ?, ?)"
+      )
+      .bind(user.id, datasetId, JSON.stringify({ access_type: "requested" }))
+      .run();
+  } catch (dbError) {
+    // GitHub succeeded but DB failed - log error but don't fail the request
+    // User has access on GitHub; DB record can be reconciled later
+    console.error("Failed to record collaborator in database:", dbError);
+  }
 
   return c.json({
     message: `Access granted to ${dataset.name}`,
@@ -468,16 +495,22 @@ datasetRoutes.post("/:id/invite", authMiddleware, zValidator("json", inviteSchem
     .first();
 
   if (existing) {
-    return c.json({ error: `User '${username}' already has access to this dataset` }, 400);
+    return c.json({ error: `User '${username}' already has access to this dataset` }, 409);
   }
 
   // Check if invitee is the owner
   if (dataset.owner_user_id === invitee.id) {
-    return c.json({ error: `User '${username}' is the owner of this dataset` }, 400);
+    return c.json({ error: `User '${username}' is the owner of this dataset` }, 409);
+  }
+
+  // Extract repo name with defensive check
+  const repoName = extractRepoName(dataset.github_repo);
+  if (!repoName) {
+    console.error(`Invalid github_repo format: ${dataset.github_repo}`);
+    return c.json({ error: "Dataset has invalid GitHub repository configuration" }, 500);
   }
 
   // Add as collaborator on GitHub
-  const repoName = dataset.github_repo.split("/")[1];
   try {
     await addCollaborator(repoName, invitee.github_username, "push", c.env.GITHUB_ADMIN_PAT);
   } catch (error) {
@@ -486,20 +519,26 @@ datasetRoutes.post("/:id/invite", authMiddleware, zValidator("json", inviteSchem
   }
 
   // Record in our database
-  await db
-    .prepare(
-      "INSERT INTO dataset_collaborators (dataset_id, user_id, granted_by, access_type) VALUES (?, ?, ?, 'invited')"
-    )
-    .bind(dataset.id, invitee.id, currentUser.id)
-    .run();
+  try {
+    await db
+      .prepare(
+        "INSERT INTO dataset_collaborators (dataset_id, user_id, granted_by, access_type) VALUES (?, ?, ?, 'invited')"
+      )
+      .bind(dataset.id, invitee.id, currentUser.id)
+      .run();
 
-  // Audit log
-  await db
-    .prepare(
-      "INSERT INTO audit_log (user_id, action, resource_type, resource_id, details) VALUES (?, 'dataset_access_granted', 'dataset', ?, ?)"
-    )
-    .bind(currentUser.id, datasetId, JSON.stringify({ invitee: username, access_type: "invited" }))
-    .run();
+    // Audit log
+    await db
+      .prepare(
+        "INSERT INTO audit_log (user_id, action, resource_type, resource_id, details) VALUES (?, 'dataset_access_granted', 'dataset', ?, ?)"
+      )
+      .bind(currentUser.id, datasetId, JSON.stringify({ invitee: username, access_type: "invited" }))
+      .run();
+  } catch (dbError) {
+    // GitHub succeeded but DB failed - log error but don't fail the request
+    // User has access on GitHub; DB record can be reconciled later
+    console.error("Failed to record collaborator in database:", dbError);
+  }
 
   return c.json({
     message: `User '${username}' invited to ${dataset.name}`,
