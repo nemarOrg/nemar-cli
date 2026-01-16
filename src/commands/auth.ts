@@ -12,14 +12,18 @@ import chalk from "chalk";
 import { Command } from "commander";
 import inquirer from "inquirer";
 import ora from "ora";
-import { clearConfig, getConfig, getConfigPath, isAuthenticated, setConfig } from "../lib/config.js";
 import { ApiError, getCurrentUser, login, resendVerification, signup } from "../lib/api.js";
+import {
+  clearConfig,
+  getConfig,
+  getConfigPath,
+  isAuthenticated,
+  setConfig,
+} from "../lib/config.js";
 
-export const authCommand = new Command("auth")
-  .description("Authentication management")
-  .addHelpText(
-    "after",
-    `
+export const authCommand = new Command("auth").description("Authentication management").addHelpText(
+  "after",
+  `
 Description:
   Manage your NEMAR account authentication. New users must register, verify
   their email, and be approved by an admin before they can upload datasets.
@@ -35,8 +39,8 @@ Examples:
   $ nemar auth login                     # Interactive login
   $ nemar auth login -k <api-key>        # Login with API key
   $ nemar auth status --refresh          # Check authentication status
-  $ nemar auth logout                    # Clear credentials`
-  );
+  $ nemar auth logout                    # Clear credentials`,
+);
 
 // ============================================================================
 // Login
@@ -56,7 +60,7 @@ Environment Variables:
 Examples:
   $ nemar auth login                     # Interactive prompt
   $ nemar auth login -k nemar_abc123...  # Provide key directly
-  $ NEMAR_API_KEY=nemar_abc... nemar auth login`
+  $ NEMAR_API_KEY=nemar_abc... nemar auth login`,
   )
   .action(async (options) => {
     // Check for existing authentication
@@ -267,7 +271,11 @@ authCommand
         if (error.message.includes("already taken")) {
           console.log(chalk.gray("  Try a different username"));
         } else if (error.message.includes("already registered")) {
-          console.log(chalk.gray("  Use 'nemar auth resend-verification' if you need a new verification link"));
+          console.log(
+            chalk.gray(
+              "  Use 'nemar auth resend-verification' if you need a new verification link",
+            ),
+          );
         }
       } else {
         spinner.fail("Registration failed");
@@ -394,7 +402,9 @@ authCommand
           console.log(chalk.gray("  Check your internet connection"));
         }
       } else {
-        spinner.fail(`Failed to send verification email: ${error instanceof Error ? error.message : "Unknown error"}`);
+        spinner.fail(
+          `Failed to send verification email: ${error instanceof Error ? error.message : "Unknown error"}`,
+        );
         console.log(chalk.gray("  Check your internet connection"));
       }
     }

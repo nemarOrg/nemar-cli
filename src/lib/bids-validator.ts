@@ -120,7 +120,7 @@ export async function getValidatorVersion(): Promise<string | null> {
  */
 export async function validateBidsDataset(
   datasetPath: string,
-  options: ValidateOptions = {}
+  options: ValidateOptions = {},
 ): Promise<BidsValidationResult> {
   // Build command arguments
   const args = ["run", "-ERWN", "jsr:@bids/validator", datasetPath, "--json"];
@@ -158,7 +158,7 @@ export async function validateBidsDataset(
     throw new Error(
       stderr.includes("error:")
         ? stderr.split("\n").find((l) => l.includes("error:")) || "Validation failed"
-        : `Validation failed with exit code ${exitCode}`
+        : `Validation failed with exit code ${exitCode}`,
     );
   }
 
@@ -205,7 +205,9 @@ export function formatValidationResult(result: BidsValidationResult, color = tru
   if (result.valid) {
     lines.push(color ? "\x1b[32m✓ Dataset is valid BIDS\x1b[0m" : "✓ Dataset is valid BIDS");
   } else {
-    lines.push(color ? "\x1b[31m✗ Dataset has validation errors\x1b[0m" : "✗ Dataset has validation errors");
+    lines.push(
+      color ? "\x1b[31m✗ Dataset has validation errors\x1b[0m" : "✗ Dataset has validation errors",
+    );
   }
   lines.push("");
 
@@ -271,5 +273,5 @@ function formatBytes(bytes: number): string {
   const k = 1024;
   const sizes = ["B", "KB", "MB", "GB", "TB"];
   const i = Math.floor(Math.log(bytes) / Math.log(k));
-  return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + " " + sizes[i];
+  return `${Number.parseFloat((bytes / k ** i).toFixed(2))} ${sizes[i]}`;
 }

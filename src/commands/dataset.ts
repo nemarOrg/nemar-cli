@@ -13,53 +13,53 @@
  * - nemar dataset collaborators   - List dataset collaborators
  */
 
+import { existsSync, readFileSync } from "node:fs";
+import { basename, resolve } from "node:path";
 import chalk from "chalk";
 import { Command } from "commander";
-import ora from "ora";
 import inquirer from "inquirer";
-import { existsSync, readFileSync } from "fs";
-import { resolve, basename } from "path";
-import { isAuthenticated, getConfig } from "../lib/config.js";
+import ora from "ora";
 import {
-  checkDenoInstalled,
-  getValidatorVersion,
-  validateBidsDataset,
-  formatValidationResult,
-  type BidsValidationResult,
-} from "../lib/bids-validator.js";
-import {
-  checkPrerequisites,
-  checkDownloadPrerequisites,
-  isDataladDataset,
-  createDataladDataset,
-  configureLargefiles,
-  configureS3Remote,
-  configureGitHubRemote,
-  saveDataset,
-  pushToS3,
-  pushToGitHub,
-  getDatasetStats,
-  formatBytes,
-  cloneDataset,
-  getDatasetData,
-  getLocalDatasetInfo,
-} from "../lib/datalad.js";
-import {
+  ApiError,
+  type Dataset,
+  type DatasetsListResponse,
   createDataset,
   finalizeDataset,
   getDataset,
-  listDatasets,
-  requestDatasetAccess,
   inviteCollaborator,
   listCollaborators,
-  ApiError,
+  listDatasets,
+  requestDatasetAccess,
 } from "../lib/api.js";
+import {
+  type BidsValidationResult,
+  checkDenoInstalled,
+  formatValidationResult,
+  getValidatorVersion,
+  validateBidsDataset,
+} from "../lib/bids-validator.js";
+import { getConfig, isAuthenticated } from "../lib/config.js";
+import {
+  checkDownloadPrerequisites,
+  checkPrerequisites,
+  cloneDataset,
+  configureGitHubRemote,
+  configureLargefiles,
+  configureS3Remote,
+  createDataladDataset,
+  formatBytes,
+  getDatasetData,
+  getDatasetStats,
+  getLocalDatasetInfo,
+  isDataladDataset,
+  pushToGitHub,
+  pushToS3,
+  saveDataset,
+} from "../lib/datalad.js";
 
-export const datasetCommand = new Command("dataset")
-  .description("Dataset management")
-  .addHelpText(
-    "after",
-    `
+export const datasetCommand = new Command("dataset").description("Dataset management").addHelpText(
+  "after",
+  `
 Description:
   Manage BIDS datasets on NEMAR. Upload, download, validate, and version
   neurophysiology datasets in Brain Imaging Data Structure (BIDS) format.
@@ -79,8 +79,8 @@ Examples:
   $ nemar dataset invite johndoe nm000104        # Invite user as collaborator
 
 Learn More:
-  https://nemar-cli.pages.dev/commands/dataset/`
-  );
+  https://nemar-cli.pages.dev/commands/dataset/`,
+);
 
 // Validate command
 datasetCommand
@@ -112,7 +112,7 @@ Examples:
   $ nemar dataset validate                       # Validate current directory
   $ nemar dataset validate ./my-dataset          # Validate specific path
   $ nemar dataset validate ./ds --prune          # Fast validation (skip derivatives)
-  $ nemar dataset validate ./ds --json > out.json`
+  $ nemar dataset validate ./ds --json > out.json`,
   )
   .action(async (datasetPath, options) => {
     // Show version info if requested
@@ -169,7 +169,7 @@ Examples:
     const descPath = resolve(absolutePath, "dataset_description.json");
     if (!existsSync(descPath)) {
       console.log(chalk.red("Error: Not a valid BIDS dataset"));
-      console.log(`Missing required file: dataset_description.json`);
+      console.log("Missing required file: dataset_description.json");
       console.log(`Path: ${absolutePath}`);
       process.exit(1);
     }
@@ -241,7 +241,7 @@ Examples:
   $ nemar dataset upload ./my-eeg-dataset
   $ nemar dataset upload ./ds -n "My EEG Study" -d "64-channel EEG data"
   $ nemar dataset upload ./ds --dry-run        # Preview without uploading
-  $ nemar dataset upload ./ds -j 16            # More parallel streams`
+  $ nemar dataset upload ./ds -j 16            # More parallel streams`,
   )
   .action(async (datasetPath, options) => {
     // Step 1: Check authentication
@@ -272,7 +272,9 @@ Examples:
     }
 
     spinner.succeed("Prerequisites check passed");
-    console.log(chalk.gray(`  DataLad ${prereqs.datalad.version}, git-annex ${prereqs.gitAnnex.version}`));
+    console.log(
+      chalk.gray(`  DataLad ${prereqs.datalad.version}, git-annex ${prereqs.gitAnnex.version}`),
+    );
     if (prereqs.githubSSH.username) {
       console.log(chalk.gray(`  GitHub SSH: ${prereqs.githubSSH.username}`));
     }
@@ -421,7 +423,9 @@ Examples:
 
     if (!awsAccessKeyId || !awsSecretAccessKey) {
       spinner.fail("AWS credentials not found in environment");
-      console.log(chalk.red("Set AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY environment variables"));
+      console.log(
+        chalk.red("Set AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY environment variables"),
+      );
       process.exit(1);
     }
 
@@ -437,7 +441,7 @@ Examples:
       {
         accessKeyId: awsAccessKeyId,
         secretAccessKey: awsSecretAccessKey,
-      }
+      },
     );
 
     if (!s3Result.success) {
@@ -488,7 +492,7 @@ Examples:
     spinner = ora(`Uploading data to S3 (${options.jobs} parallel streams)...`).start();
 
     const s3PushResult = await pushToS3(absolutePath, "nemar-s3", {
-      jobs: parseInt(options.jobs, 10),
+      jobs: Number.parseInt(options.jobs, 10),
       credentials: {
         accessKeyId: awsAccessKeyId,
         secretAccessKey: awsSecretAccessKey,
@@ -547,7 +551,7 @@ Examples:
   $ nemar dataset download nm000104              # Download to ./nm000104
   $ nemar dataset download nm000104 -o ./data    # Custom output directory
   $ nemar dataset download nm000104 --no-data    # Metadata only (fast)
-  $ nemar dataset download nm000104 -j 8         # More parallel streams`
+  $ nemar dataset download nm000104 -j 8         # More parallel streams`,
   )
   .action(async (datasetId, options) => {
     // Step 1: Check prerequisites
@@ -564,13 +568,15 @@ Examples:
     }
 
     spinner.succeed("Prerequisites check passed");
-    console.log(chalk.gray(`  DataLad ${prereqs.datalad.version}, git-annex ${prereqs.gitAnnex.version}`));
+    console.log(
+      chalk.gray(`  DataLad ${prereqs.datalad.version}, git-annex ${prereqs.gitAnnex.version}`),
+    );
     console.log();
 
     // Step 2: Get dataset info from backend
     spinner = ora(`Fetching dataset info for ${datasetId}...`).start();
 
-    let datasetInfo;
+    let datasetInfo: Dataset;
     try {
       datasetInfo = await getDataset(datasetId);
       spinner.succeed(`Found dataset: ${datasetInfo.name}`);
@@ -629,7 +635,7 @@ Examples:
       spinner = ora(`Downloading data files (${options.jobs} parallel streams)...`).start();
 
       const getResult = await getDatasetData(absoluteOutput, {
-        jobs: parseInt(options.jobs, 10),
+        jobs: Number.parseInt(options.jobs, 10),
       });
 
       if (!getResult.success) {
@@ -658,7 +664,9 @@ Examples:
         console.log(`  Size: ${localInfo.size}`);
       }
       if (localInfo.missingFiles > 0) {
-        console.log(chalk.gray(`  Missing files: ${localInfo.missingFiles} (use 'datalad get' to download)`));
+        console.log(
+          chalk.gray(`  Missing files: ${localInfo.missingFiles} (use 'datalad get' to download)`),
+        );
       }
     }
     console.log();
@@ -681,12 +689,12 @@ Description:
 
 Examples:
   $ nemar dataset status nm000104
-  $ nemar dataset status nm000104 --json | jq '.concept_doi'`
+  $ nemar dataset status nm000104 --json | jq '.concept_doi'`,
   )
   .action(async (datasetId, options) => {
     const spinner = ora(`Fetching dataset info for ${datasetId}...`).start();
 
-    let datasetInfo;
+    let datasetInfo: Dataset;
     try {
       datasetInfo = await getDataset(datasetId);
       spinner.stop();
@@ -768,7 +776,7 @@ Examples:
   $ nemar dataset list                   # List all public datasets
   $ nemar dataset list --mine            # List your datasets
   $ nemar dataset list --json            # JSON output for scripting
-  $ nemar dataset list --limit 10        # Show only 10 datasets`
+  $ nemar dataset list --limit 10        # Show only 10 datasets`,
   )
   .action(async (options) => {
     // If --mine, require authentication
@@ -780,7 +788,7 @@ Examples:
 
     const spinner = ora("Fetching datasets...").start();
 
-    let response;
+    let response: DatasetsListResponse;
     try {
       response = await listDatasets();
       spinner.stop();
@@ -804,7 +812,7 @@ Examples:
     }
 
     // Limit results
-    const limit = parseInt(options.limit, 10);
+    const limit = Number.parseInt(options.limit, 10);
     if (datasets.length > limit) {
       datasets = datasets.slice(0, limit);
     }
@@ -829,7 +837,11 @@ Examples:
 
     // Table output
     console.log();
-    console.log(chalk.bold(`Datasets (${datasets.length}${response.count > datasets.length ? ` of ${response.count}` : ""}):`));
+    console.log(
+      chalk.bold(
+        `Datasets (${datasets.length}${response.count > datasets.length ? ` of ${response.count}` : ""}):`,
+      ),
+    );
     console.log();
 
     // Calculate column widths
@@ -849,9 +861,10 @@ Examples:
 
     // Rows
     for (const dataset of datasets) {
-      const name = dataset.name.length > nameWidth
-        ? dataset.name.substring(0, nameWidth - 3) + "..."
-        : dataset.name;
+      const name =
+        dataset.name.length > nameWidth
+          ? `${dataset.name.substring(0, nameWidth - 3)}...`
+          : dataset.name;
 
       const row = [
         chalk.cyan(dataset.dataset_id.padEnd(idWidth)),
@@ -911,7 +924,7 @@ Requirements:
   - Approved user status
 
 Examples:
-  $ nemar dataset request-access nm000104`
+  $ nemar dataset request-access nm000104`,
   )
   .action(async (datasetId) => {
     if (!isAuthenticated()) {
@@ -960,7 +973,7 @@ Requirements:
   - Dataset ownership or admin status
 
 Examples:
-  $ nemar dataset invite johndoe nm000104`
+  $ nemar dataset invite johndoe nm000104`,
   )
   .action(async (username, datasetId) => {
     if (!isAuthenticated()) {
@@ -1000,7 +1013,7 @@ Description:
 
 Examples:
   $ nemar dataset collaborators nm000104
-  $ nemar dataset collaborators nm000104 --json`
+  $ nemar dataset collaborators nm000104 --json`,
   )
   .action(async (datasetId, options) => {
     if (!isAuthenticated()) {
@@ -1027,25 +1040,25 @@ Examples:
       if (result.collaborators.length === 0) {
         console.log(chalk.gray("  No collaborators yet."));
         console.log();
-        console.log(chalk.gray("Invite users with: nemar dataset invite <username> " + datasetId));
+        console.log(chalk.gray(`Invite users with: nemar dataset invite <username> ${datasetId}`));
         return;
       }
 
       // Table header
       const header = ["Username", "GitHub", "Access", "Granted"].join("  ");
-      console.log(chalk.gray("  " + header));
-      console.log(chalk.gray("  " + "-".repeat(header.length)));
+      console.log(chalk.gray(`  ${header}`));
+      console.log(chalk.gray(`  ${"-".repeat(header.length)}`));
 
       for (const collab of result.collaborators) {
         const grantedDate = new Date(collab.granted_at).toLocaleDateString();
         const accessType = collab.access_type === "invited" ? "invited" : "requested";
         const row = [
           collab.username.padEnd(10),
-          ("@" + collab.github_username).padEnd(15),
+          `@${collab.github_username}`.padEnd(15),
           accessType.padEnd(10),
           grantedDate,
         ].join("  ");
-        console.log("  " + row);
+        console.log(`  ${row}`);
       }
       console.log();
     } catch (error) {

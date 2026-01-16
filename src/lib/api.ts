@@ -16,7 +16,7 @@ export class ApiError extends Error {
   constructor(
     public statusCode: number,
     message: string,
-    public details?: unknown
+    public details?: unknown,
   ) {
     super(message);
     this.name = "ApiError";
@@ -37,7 +37,7 @@ function getApiUrl(): string {
 async function request<T>(
   path: string,
   options: RequestInit = {},
-  authenticated = false
+  authenticated = false,
 ): Promise<T> {
   const url = `${getApiUrl()}${path}`;
   const headers: Record<string, string> = {
@@ -50,7 +50,7 @@ async function request<T>(
     if (!config.apiKey) {
       throw new ApiError(401, "Not authenticated. Run 'nemar auth login' first.");
     }
-    headers["Authorization"] = `Bearer ${config.apiKey}`;
+    headers.Authorization = `Bearer ${config.apiKey}`;
   }
 
   let response: Response;
@@ -61,11 +61,9 @@ async function request<T>(
     });
   } catch (fetchError) {
     // Network error - DNS resolution, connection refused, etc.
-    throw new ApiError(
-      0,
-      `Network error: Could not connect to ${getApiUrl()}`,
-      { originalError: fetchError instanceof Error ? fetchError.message : String(fetchError) }
-    );
+    throw new ApiError(0, `Network error: Could not connect to ${getApiUrl()}`, {
+      originalError: fetchError instanceof Error ? fetchError.message : String(fetchError),
+    });
   }
 
   let data: Record<string, unknown>;
@@ -73,17 +71,14 @@ async function request<T>(
     data = (await response.json()) as Record<string, unknown>;
   } catch {
     // Response wasn't valid JSON
-    throw new ApiError(
-      response.status,
-      `Invalid response from server (status ${response.status})`,
-    );
+    throw new ApiError(response.status, `Invalid response from server (status ${response.status})`);
   }
 
   if (!response.ok) {
     throw new ApiError(
       response.status,
       (data.error as string) || (data.message as string) || "Request failed",
-      data.details
+      data.details,
     );
   }
 
@@ -220,18 +215,26 @@ export interface ApproveResponse {
  * Approve a pending user (admin only)
  */
 export async function approveUser(username: string): Promise<ApproveResponse> {
-  return request<ApproveResponse>(`/admin/approve/${username}`, {
-    method: "POST",
-  }, true);
+  return request<ApproveResponse>(
+    `/admin/approve/${username}`,
+    {
+      method: "POST",
+    },
+    true,
+  );
 }
 
 /**
  * Revoke a user's access (admin only)
  */
 export async function revokeUser(username: string): Promise<{ message: string }> {
-  return request<{ message: string }>(`/admin/revoke/${username}`, {
-    method: "POST",
-  }, true);
+  return request<{ message: string }>(
+    `/admin/revoke/${username}`,
+    {
+      method: "POST",
+    },
+    true,
+  );
 }
 
 // ============================================================================
@@ -262,11 +265,16 @@ export async function listDatasets(): Promise<DatasetsListResponse> {
   return request<DatasetsListResponse>("/datasets");
 }
 
+interface GetDatasetResponse {
+  dataset: Dataset;
+}
+
 /**
  * Get a single dataset by ID
  */
 export async function getDataset(datasetId: string): Promise<Dataset> {
-  return request<Dataset>(`/datasets/${datasetId}`);
+  const response = await request<GetDatasetResponse>(`/datasets/${datasetId}`);
+  return response.dataset;
 }
 
 export interface CreateDatasetRequest {
@@ -293,10 +301,14 @@ export interface CreateDatasetResponse {
  * Returns dataset info including GitHub repo URL and S3 prefix
  */
 export async function createDataset(data: CreateDatasetRequest): Promise<CreateDatasetResponse> {
-  return request<CreateDatasetResponse>("/datasets", {
-    method: "POST",
-    body: JSON.stringify(data),
-  }, true);
+  return request<CreateDatasetResponse>(
+    "/datasets",
+    {
+      method: "POST",
+      body: JSON.stringify(data),
+    },
+    true,
+  );
 }
 
 export interface FinalizeDatasetResponse {
@@ -313,9 +325,13 @@ export interface FinalizeDatasetResponse {
  * Applies branch protection and marks dataset as published
  */
 export async function finalizeDataset(datasetId: string): Promise<FinalizeDatasetResponse> {
-  return request<FinalizeDatasetResponse>(`/datasets/${datasetId}/finalize`, {
-    method: "POST",
-  }, true);
+  return request<FinalizeDatasetResponse>(
+    `/datasets/${datasetId}/finalize`,
+    {
+      method: "POST",
+    },
+    true,
+  );
 }
 
 // ============================================================================
@@ -360,12 +376,16 @@ export interface CreateConceptDoiResponse {
  */
 export async function createConceptDoi(
   datasetId: string,
-  data: CreateConceptDoiRequest
+  data: CreateConceptDoiRequest,
 ): Promise<CreateConceptDoiResponse> {
-  return request<CreateConceptDoiResponse>(`/admin/datasets/${datasetId}/doi/concept`, {
-    method: "POST",
-    body: JSON.stringify(data),
-  }, true);
+  return request<CreateConceptDoiResponse>(
+    `/admin/datasets/${datasetId}/doi/concept`,
+    {
+      method: "POST",
+      body: JSON.stringify(data),
+    },
+    true,
+  );
 }
 
 export interface PublishVersionDoiRequest {
@@ -388,12 +408,16 @@ export interface PublishVersionDoiResponse {
  */
 export async function publishVersionDoi(
   datasetId: string,
-  data: PublishVersionDoiRequest
+  data: PublishVersionDoiRequest,
 ): Promise<PublishVersionDoiResponse> {
-  return request<PublishVersionDoiResponse>(`/admin/datasets/${datasetId}/doi/publish`, {
-    method: "POST",
-    body: JSON.stringify(data),
-  }, true);
+  return request<PublishVersionDoiResponse>(
+    `/admin/datasets/${datasetId}/doi/publish`,
+    {
+      method: "POST",
+      body: JSON.stringify(data),
+    },
+    true,
+  );
 }
 
 export interface DoiInfoResponse {
@@ -427,9 +451,13 @@ export interface RequestAccessResponse {
  * Auto-grants for public repos
  */
 export async function requestDatasetAccess(datasetId: string): Promise<RequestAccessResponse> {
-  return request<RequestAccessResponse>(`/datasets/${datasetId}/request-access`, {
-    method: "POST",
-  }, true);
+  return request<RequestAccessResponse>(
+    `/datasets/${datasetId}/request-access`,
+    {
+      method: "POST",
+    },
+    true,
+  );
 }
 
 export interface InviteCollaboratorResponse {
@@ -443,12 +471,16 @@ export interface InviteCollaboratorResponse {
  */
 export async function inviteCollaborator(
   datasetId: string,
-  username: string
+  username: string,
 ): Promise<InviteCollaboratorResponse> {
-  return request<InviteCollaboratorResponse>(`/datasets/${datasetId}/invite`, {
-    method: "POST",
-    body: JSON.stringify({ username }),
-  }, true);
+  return request<InviteCollaboratorResponse>(
+    `/datasets/${datasetId}/invite`,
+    {
+      method: "POST",
+      body: JSON.stringify({ username }),
+    },
+    true,
+  );
 }
 
 export interface Collaborator {

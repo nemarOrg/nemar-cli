@@ -11,22 +11,31 @@
  * - nemar admin doi create - Create concept DOI for dataset (not yet implemented)
  */
 
+import { existsSync } from "node:fs";
+import { join } from "node:path";
 import chalk from "chalk";
 import { Command } from "commander";
 import inquirer from "inquirer";
 import ora from "ora";
-import { existsSync } from "fs";
-import { join } from "path";
-import { isAuthenticated, getConfig } from "../lib/config.js";
-import { ApiError, approveUser, listUsers, revokeUser, getDataset, createConceptDoi, getDoiInfo } from "../lib/api.js";
 import {
-  cloneDataset,
-  listDatasetVersions,
-  getVersionCommit,
-  createRevertBranch,
-  commitRevert,
-  pushBranch,
+  ApiError,
+  type Dataset,
+  approveUser,
+  createConceptDoi,
+  getDataset,
+  getDoiInfo,
+  listUsers,
+  revokeUser,
+} from "../lib/api.js";
+import { getConfig, isAuthenticated } from "../lib/config.js";
+import {
   checkDownloadPrerequisites,
+  cloneDataset,
+  commitRevert,
+  createRevertBranch,
+  getVersionCommit,
+  listDatasetVersions,
+  pushBranch,
 } from "../lib/datalad.js";
 
 export const adminCommand = new Command("admin")
@@ -50,7 +59,7 @@ Dataset Management:
 Examples:
   $ nemar admin users --verified         # List users awaiting approval
   $ nemar admin approve john_doe         # Approve a user
-  $ nemar admin doi create nm000104      # Create concept DOI`
+  $ nemar admin doi create nm000104      # Create concept DOI`,
   );
 
 /**
@@ -101,12 +110,13 @@ adminCommand
 
       // Display users in a clean format
       for (const user of result.users) {
-        const statusColor = {
-          pending: chalk.gray,
-          verified: chalk.yellow,
-          approved: chalk.green,
-          revoked: chalk.red,
-        }[user.status] || chalk.white;
+        const statusColor =
+          {
+            pending: chalk.gray,
+            verified: chalk.yellow,
+            approved: chalk.green,
+            revoked: chalk.red,
+          }[user.status] || chalk.white;
 
         const adminBadge = user.is_admin ? chalk.magenta(" [admin]") : "";
         const verifiedBadge = user.email_verified ? "" : chalk.gray(" (unverified)");
@@ -266,7 +276,7 @@ doiCommand
 
     // Get dataset info
     const spinner = ora("Fetching dataset info...").start();
-    let dataset;
+    let dataset: Dataset;
     try {
       dataset = await getDataset(datasetId);
       spinner.succeed(`Found dataset: ${dataset.name}`);
@@ -312,7 +322,9 @@ doiCommand
 
     // Confirmation
     console.log(chalk.red("WARNING: DOIs are PERMANENT and cannot be deleted!"));
-    console.log(chalk.gray("The DOI will be pre-reserved but not published until the first version release."));
+    console.log(
+      chalk.gray("The DOI will be pre-reserved but not published until the first version release."),
+    );
     console.log();
 
     const { confirm } = await inquirer.prompt([
@@ -474,7 +486,7 @@ adminCommand
 
     // Get dataset info from API
     const spinner = ora("Fetching dataset info...").start();
-    let dataset;
+    let dataset: Dataset;
     try {
       dataset = await getDataset(datasetId);
       spinner.succeed(`Found dataset: ${dataset.name}`);
@@ -627,19 +639,28 @@ adminCommand
     if (!options.force) {
       const prSpinner = ora("Creating pull request...").start();
       try {
-        const { spawn } = await import("child_process");
+        const { spawn } = await import("node:child_process");
         const prTitle = `Revert to version ${selectedVersion}`;
         const prBody = `## Revert Request\n\nThis PR reverts the dataset to version ${selectedVersion}.\n\n**Reason:** Admin-initiated revert\n**Target version:** ${selectedVersion}\n**Original commit:** ${commitHash}`;
 
-        const pr = spawn("gh", [
-          "pr",
-          "create",
-          "--repo", dataset.github_repo,
-          "--head", branchName,
-          "--base", "main",
-          "--title", prTitle,
-          "--body", prBody,
-        ], { cwd: workDir });
+        const pr = spawn(
+          "gh",
+          [
+            "pr",
+            "create",
+            "--repo",
+            dataset.github_repo,
+            "--head",
+            branchName,
+            "--base",
+            "main",
+            "--title",
+            prTitle,
+            "--body",
+            prBody,
+          ],
+          { cwd: workDir },
+        );
 
         let prUrl = "";
         pr.stdout.on("data", (data) => {
@@ -658,7 +679,9 @@ adminCommand
         console.log(`  ${chalk.cyan("PR URL:")} ${prUrl.trim()}`);
         console.log();
         console.log(chalk.green("Revert PR created successfully."));
-        console.log(chalk.gray("The PR will go through validation checks before it can be merged."));
+        console.log(
+          chalk.gray("The PR will go through validation checks before it can be merged."),
+        );
       } catch (prError) {
         prSpinner.fail("Failed to create PR via gh CLI");
         console.log(chalk.gray("  You may need to create the PR manually on GitHub"));
