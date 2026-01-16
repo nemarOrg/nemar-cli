@@ -19,10 +19,15 @@ Options:
   -h, --help      display help for command
 
 Commands:
-  auth            Authentication management
-  dataset         Dataset management
-  admin           Admin commands (requires admin privileges)
-  help [command]  display help for command
+  auth              Authentication management
+  dataset           Dataset management
+  admin             Admin commands (requires admin privileges)
+  login [options]   Authenticate with your API key (shortcut for 'auth login')
+  logout [options]  Clear stored credentials (shortcut for 'auth logout')
+  signup            Register for a new account (shortcut for 'auth signup')
+  register          Register for a new account (alias for signup)
+  whoami [options]  Show current user (shortcut for 'auth status')
+  help [command]    display help for command
 
 Examples:
   $ nemar auth login              # Authenticate with your API key
@@ -44,3 +49,15 @@ Support:
 | [auth](auth.md) | Authentication and account management |
 | [dataset](dataset.md) | Dataset management operations |
 | [admin](admin.md) | Administrative operations (admin only) |
+
+## Shortcuts
+
+Root-level shortcuts are provided for convenience. The canonical commands remain under the command groups above.
+
+| Shortcut | Equivalent | Description |
+|----------|------------|-------------|
+| `nemar login` | `nemar auth login` | Authenticate with your API key |
+| `nemar logout` | `nemar auth logout` | Clear stored credentials |
+| `nemar signup` | `nemar auth signup` | Register for a new account |
+| `nemar register` | `nemar auth signup` | Alias for signup |
+| `nemar whoami` | `nemar auth status` | Show current user |

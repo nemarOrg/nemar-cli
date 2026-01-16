@@ -16,6 +16,7 @@ Commands:
   login [options]      Authenticate with your NEMAR API key
   signup               Register for a new NEMAR account
   status [options]     Check current authentication status
+  whoami [options]     Show current user (alias for status)
   logout [options]     Clear stored credentials
   resend-verification  Resend email verification link
   help [command]       display help for command
@@ -35,6 +36,7 @@ Examples:
   $ nemar auth login                     # Interactive login
   $ nemar auth login -k <api-key>        # Login with API key
   $ nemar auth status --refresh          # Check authentication status
+  $ nemar auth whoami                    # Alias for status
   $ nemar auth logout                    # Clear credentials
 ```
 
@@ -78,6 +80,20 @@ Options:
 Usage: nemar auth status [options]
 
 Check current authentication status
+
+Options:
+  --refresh   Refresh user info from server
+  -h, --help  display help for command
+```
+
+### auth whoami
+
+Alias for `auth status`. Shows the current authenticated user.
+
+```bash
+Usage: nemar auth whoami [options]
+
+Show current user (alias for status)
 
 Options:
   --refresh   Refresh user info from server
