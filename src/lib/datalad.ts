@@ -5,7 +5,7 @@
  * Requires DataLad >= 0.19.0 and git-annex >= 10.0 to be installed.
  */
 
-import { existsSync } from "node:fs";
+import { existsSync, statSync } from "node:fs";
 import { basename, join } from "node:path";
 import { spawn } from "bun";
 
@@ -757,10 +757,9 @@ export async function registerUrlWithGitAnnex(
     }
 
     // Get the key for the file
-    const keyResult = await runCommand(
-      ["git", "annex", "lookupkey", relativePath],
-      { cwd: repoPath },
-    );
+    const keyResult = await runCommand(["git", "annex", "lookupkey", relativePath], {
+      cwd: repoPath,
+    });
 
     if (keyResult.exitCode !== 0 || !keyResult.stdout.trim()) {
       return { success: false, error: `Could not get git-annex key for ${relativePath}` };
@@ -769,10 +768,9 @@ export async function registerUrlWithGitAnnex(
     const key = keyResult.stdout.trim();
 
     // Register the URL with the key
-    const registerResult = await runCommand(
-      ["git", "annex", "registerurl", key, url],
-      { cwd: repoPath },
-    );
+    const registerResult = await runCommand(["git", "annex", "registerurl", key, url], {
+      cwd: repoPath,
+    });
 
     if (registerResult.exitCode !== 0) {
       return { success: false, error: `Failed to register URL: ${registerResult.stderr}` };
@@ -822,10 +820,9 @@ export async function configureWebRemote(
 ): Promise<{ success: boolean; error?: string }> {
   try {
     // Check if web remote already exists
-    const checkResult = await runCommand(
-      ["git", "annex", "enableremote", "web"],
-      { cwd: repoPath },
-    );
+    const checkResult = await runCommand(["git", "annex", "enableremote", "web"], {
+      cwd: repoPath,
+    });
 
     // Web remote is built-in to git-annex, should always work
     if (checkResult.exitCode !== 0 && !checkResult.stderr.includes("already exists")) {
@@ -1227,4 +1224,117 @@ export async function switchBranch(
   } catch (e) {
     return { success: false, error: (e as Error).message };
   }
+}
+
+// =============================================================================
+// File Manifest Collection
+// =============================================================================
+
+/**
+ * File info for upload manifest
+ */
+export interface DatasetFileInfo {
+  path: string;
+  size: number;
+  type: "metadata" | "data";
+}
+
+/**
+ * Threshold for classifying files as data (100KB)
+ */
+const DATA_FILE_THRESHOLD = 100 * 1024;
+
+/**
+ * File extensions that are always classified as data files
+ */
+const DATA_FILE_EXTENSIONS = new Set([
+  ".edf",
+  ".bdf",
+  ".eeg",
+  ".vhdr",
+  ".vmrk",
+  ".set",
+  ".fdt",
+  ".cnt",
+  ".mff",
+  ".fif",
+  ".nii",
+  ".nii.gz",
+  ".mat",
+  ".bin",
+]);
+
+/**
+ * Collect file manifest for a dataset
+ * Classifies files as "data" (large binary files) or "metadata" (JSON, TSV, small files)
+ */
+export async function collectFileManifest(datasetPath: string): Promise<{
+  files: DatasetFileInfo[];
+  totalSize: number;
+  dataFiles: number;
+  metadataFiles: number;
+}> {
+  const files: DatasetFileInfo[] = [];
+  let totalSize = 0;
+  let dataFiles = 0;
+  let metadataFiles = 0;
+
+  // Use find to get all files (excluding .git and .datalad)
+  const { stdout, exitCode } = await runCommand(
+    [
+      "find",
+      ".",
+      "-type",
+      "f",
+      "-not",
+      "-path",
+      "./.git/*",
+      "-not",
+      "-path",
+      "./.datalad/*",
+      "-not",
+      "-name",
+      ".gitattributes",
+    ],
+    { cwd: datasetPath },
+  );
+
+  if (exitCode !== 0) {
+    return { files, totalSize, dataFiles, metadataFiles };
+  }
+
+  const filePaths = stdout.trim().split("\n").filter(Boolean);
+
+  for (const filePath of filePaths) {
+    // Clean up path (remove leading ./)
+    const relativePath = filePath.startsWith("./") ? filePath.slice(2) : filePath;
+    const absolutePath = join(datasetPath, relativePath);
+
+    try {
+      const stats = statSync(absolutePath);
+      const size = stats.size;
+      totalSize += size;
+
+      // Classify file type
+      const ext = relativePath.toLowerCase().match(/\.[^.]+$/)?.[0] || "";
+      const isDataFile = DATA_FILE_EXTENSIONS.has(ext) || size > DATA_FILE_THRESHOLD;
+      const fileType: "metadata" | "data" = isDataFile ? "data" : "metadata";
+
+      if (isDataFile) {
+        dataFiles++;
+      } else {
+        metadataFiles++;
+      }
+
+      files.push({
+        path: relativePath,
+        size,
+        type: fileType,
+      });
+    } catch {
+      // Skip files we can't stat
+    }
+  }
+
+  return { files, totalSize, dataFiles, metadataFiles };
 }

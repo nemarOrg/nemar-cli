@@ -295,7 +295,7 @@ adminRoutes.post("/revoke/:username", async (c) => {
     return c.json({ error: "User already revoked" }, 409);
   }
 
-  // Revoke IAM access if configured
+  // Revoke IAM access if configured - SECURITY CRITICAL
   let iamRevoked = false;
   if (user.aws_iam_username && user.aws_access_key_id_encrypted && c.env.ENCRYPTION_KEY) {
     try {
@@ -307,12 +307,22 @@ adminRoutes.post("/revoke/:username", async (c) => {
           region: c.env.AWS_REGION,
         },
         user.aws_iam_username,
-        accessKeyId
+        accessKeyId,
       );
       iamRevoked = true;
     } catch (error) {
-      console.error("Failed to revoke IAM access:", error);
-      // Continue with revocation even if IAM cleanup fails
+      // SECURITY: IAM revocation failure is critical - user's S3 credentials may still work
+      console.error("SECURITY WARNING: Failed to revoke IAM access for", user.username, error);
+      return c.json(
+        {
+          error: "Failed to revoke IAM access - user credentials may still be active",
+          details: error instanceof Error ? error.message : "Unknown error",
+          security_warning: "User's S3 access keys may still be functional. Manual AWS cleanup required.",
+          aws_iam_username: user.aws_iam_username,
+          action_required: `Manually delete IAM user '${user.aws_iam_username}' in AWS console or retry revocation`,
+        },
+        500,
+      );
     }
   }
 
