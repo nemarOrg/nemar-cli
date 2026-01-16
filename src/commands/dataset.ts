@@ -43,18 +43,18 @@ import {
   checkDownloadPrerequisites,
   checkPrerequisites,
   cloneDataset,
+  collectFileManifest,
   configureGitHubRemote,
   configureLargefiles,
-  configureS3Remote,
   createDataladDataset,
   formatBytes,
   getDatasetData,
-  getDatasetStats,
   getLocalDatasetInfo,
   isDataladDataset,
   pushToGitHub,
-  pushToS3,
+  registerUrlsWithGitAnnex,
   saveDataset,
+  uploadFilesWithPresignedUrls,
 } from "../lib/datalad.js";
 
 export const datasetCommand = new Command("dataset").description("Dataset management").addHelpText(
@@ -229,7 +229,6 @@ Requirements:
   - NEMAR account (nemar auth login)
   - DataLad and git-annex installed
   - GitHub SSH access configured
-  - AWS credentials in environment
 
 Process:
   1. Validates BIDS format (unless --skip-validation)
@@ -319,17 +318,22 @@ Examples:
       console.log();
     }
 
-    // Step 4: Get dataset info and show upload plan
+    // Step 4: Collect file manifest and show upload plan
+    spinner = ora("Analyzing dataset files...").start();
     const datasetName = options.name || basename(absolutePath);
-    const stats = await getDatasetStats(absolutePath);
+    const manifest = await collectFileManifest(absolutePath);
+    spinner.succeed(
+      `Found ${manifest.files.length} files (${manifest.dataFiles} data, ${manifest.metadataFiles} metadata)`,
+    );
 
+    console.log();
     console.log(chalk.bold("Upload Plan:"));
     console.log(`  Name: ${datasetName}`);
     console.log(`  Path: ${absolutePath}`);
-    console.log(`  Files: ${stats.totalFiles}`);
-    if (stats.totalSize > 0) {
-      console.log(`  Size: ${formatBytes(stats.totalSize)}`);
-    }
+    console.log(`  Files: ${manifest.files.length}`);
+    console.log(`  Size: ${formatBytes(manifest.totalSize)}`);
+    console.log(`  Data files: ${manifest.dataFiles} (will be uploaded to S3)`);
+    console.log(`  Metadata files: ${manifest.metadataFiles} (will be stored in git)`);
     console.log(`  Parallel jobs: ${options.jobs}`);
     console.log();
 
@@ -358,20 +362,30 @@ Examples:
 
     console.log();
 
-    // Step 6: Create dataset in backend
+    // Step 6: Create dataset in backend with file manifest
     spinner = ora("Creating dataset in NEMAR...").start();
+
+    // Only request presigned URLs for data files
+    const dataFiles = manifest.files.filter((f) => f.type === "data");
 
     let datasetInfo: {
       dataset_id: string;
       ssh_url: string;
       s3_prefix: string;
       github_url: string;
+      upload_urls: Record<string, string>;
+      s3_config: {
+        bucket: string;
+        region: string;
+        public_url: string;
+      };
     };
 
     try {
       const response = await createDataset({
         name: datasetName,
         description: options.description,
+        files: dataFiles.map((f) => ({ path: f.path, size: f.size, type: f.type })),
       });
 
       datasetInfo = {
@@ -379,6 +393,8 @@ Examples:
         ssh_url: response.dataset.ssh_url,
         s3_prefix: response.dataset.s3_prefix,
         github_url: response.dataset.github_url,
+        upload_urls: response.upload_urls || {},
+        s3_config: response.s3_config,
       };
 
       spinner.succeed(`Dataset created: ${datasetInfo.dataset_id}`);
@@ -414,45 +430,7 @@ Examples:
 
     spinner.succeed("DataLad dataset initialized");
 
-    // Step 8: Configure S3 remote
-    spinner = ora("Configuring S3 remote...").start();
-
-    // Get AWS credentials from environment or aws configure
-    const awsAccessKeyId = process.env.AWS_ACCESS_KEY_ID;
-    const awsSecretAccessKey = process.env.AWS_SECRET_ACCESS_KEY;
-
-    if (!awsAccessKeyId || !awsSecretAccessKey) {
-      spinner.fail("AWS credentials not found in environment");
-      console.log(
-        chalk.red("Set AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY environment variables"),
-      );
-      process.exit(1);
-    }
-
-    const s3Result = await configureS3Remote(
-      absolutePath,
-      {
-        name: "nemar-s3",
-        bucket: "nemar",
-        prefix: datasetInfo.s3_prefix,
-        region: "us-east-2",
-        publicUrl: "https://nemar.s3.us-east-2.amazonaws.com",
-      },
-      {
-        accessKeyId: awsAccessKeyId,
-        secretAccessKey: awsSecretAccessKey,
-      },
-    );
-
-    if (!s3Result.success) {
-      spinner.fail("Failed to configure S3 remote");
-      console.log(chalk.red(`  ${s3Result.error}`));
-      process.exit(1);
-    }
-
-    spinner.succeed("S3 remote configured");
-
-    // Step 9: Configure GitHub remote
+    // Step 8: Configure GitHub remote
     spinner = ora("Configuring GitHub remote...").start();
 
     const githubResult = await configureGitHubRemote(absolutePath, datasetInfo.ssh_url);
@@ -464,7 +442,64 @@ Examples:
 
     spinner.succeed("GitHub remote configured");
 
-    // Step 10: Save dataset changes
+    // Step 9: Upload data files to S3 using presigned URLs
+    const uploadUrlCount = Object.keys(datasetInfo.upload_urls).length;
+    if (uploadUrlCount > 0) {
+      spinner = ora(`Uploading ${uploadUrlCount} data files to S3...`).start();
+
+      let uploadedCount = 0;
+      const totalFiles = uploadUrlCount;
+      const uploadResult = await uploadFilesWithPresignedUrls(
+        absolutePath,
+        datasetInfo.upload_urls,
+        {
+          jobs: Number.parseInt(options.jobs, 10),
+          onProgress: (progress) => {
+            if (progress.status === "completed") {
+              uploadedCount++;
+              spinner.text = `Uploading data files to S3... (${uploadedCount}/${totalFiles})`;
+            }
+          },
+        },
+      );
+
+      if (!uploadResult.success) {
+        spinner.fail(`Failed to upload some files (${uploadResult.failed.length} failed)`);
+        for (const failed of uploadResult.failed.slice(0, 5)) {
+          console.log(chalk.red(`  - ${failed}`));
+        }
+        if (uploadResult.failed.length > 5) {
+          console.log(chalk.red(`  ... and ${uploadResult.failed.length - 5} more`));
+        }
+        process.exit(1);
+      }
+
+      spinner.succeed(`Uploaded ${uploadResult.uploaded} data files to S3`);
+
+      // Step 10: Register S3 URLs with git-annex
+      spinner = ora("Registering file URLs with git-annex...").start();
+
+      // Build public URLs for each uploaded file
+      const { s3_config, s3_prefix } = {
+        s3_config: datasetInfo.s3_config,
+        s3_prefix: datasetInfo.s3_prefix,
+      };
+      const fileUrls: Record<string, string> = {};
+      for (const filePath of Object.keys(datasetInfo.upload_urls)) {
+        fileUrls[filePath] = `${s3_config.public_url}/${s3_prefix}/${filePath}`;
+      }
+
+      const registerResult = await registerUrlsWithGitAnnex(absolutePath, fileUrls);
+      if (!registerResult.success) {
+        spinner.warn(`Some URLs could not be registered (${registerResult.failed.length} failed)`);
+      } else {
+        spinner.succeed(`Registered ${registerResult.registered} file URLs with git-annex`);
+      }
+    } else {
+      console.log(chalk.gray("No data files to upload to S3"));
+    }
+
+    // Step 11: Save dataset changes
     spinner = ora("Saving dataset changes...").start();
 
     const saveResult = await saveDataset(absolutePath, "Initial NEMAR dataset upload");
@@ -476,7 +511,7 @@ Examples:
 
     spinner.succeed("Dataset changes saved");
 
-    // Step 11: Push metadata to GitHub
+    // Step 12: Push metadata to GitHub
     spinner = ora("Pushing metadata to GitHub...").start();
 
     const githubPushResult = await pushToGitHub(absolutePath);
@@ -487,25 +522,6 @@ Examples:
     }
 
     spinner.succeed("Metadata pushed to GitHub");
-
-    // Step 12: Push data to S3
-    spinner = ora(`Uploading data to S3 (${options.jobs} parallel streams)...`).start();
-
-    const s3PushResult = await pushToS3(absolutePath, "nemar-s3", {
-      jobs: Number.parseInt(options.jobs, 10),
-      credentials: {
-        accessKeyId: awsAccessKeyId,
-        secretAccessKey: awsSecretAccessKey,
-      },
-    });
-
-    if (!s3PushResult.success) {
-      spinner.fail("Failed to upload data to S3");
-      console.log(chalk.red(`  ${s3PushResult.error}`));
-      process.exit(1);
-    }
-
-    spinner.succeed(`Data uploaded to S3 (${s3PushResult.filesUploaded || 0} files)`);
 
     // Step 13: Finalize dataset
     spinner = ora("Finalizing dataset...").start();

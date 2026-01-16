@@ -5,7 +5,7 @@
  * Requires DataLad >= 0.19.0 and git-annex >= 10.0 to be installed.
  */
 
-import { existsSync } from "node:fs";
+import { existsSync, statSync } from "node:fs";
 import { basename, join } from "node:path";
 import { spawn } from "bun";
 
@@ -21,12 +21,12 @@ export interface ToolVersion {
 
 /**
  * Prerequisites check result
+ * Note: AWS credentials are now provided by the backend, not required locally
  */
 export interface PrerequisitesResult {
   datalad: ToolVersion;
   gitAnnex: ToolVersion;
   githubSSH: { accessible: boolean; username?: string };
-  awsCredentials: { configured: boolean; source?: string };
   allPassed: boolean;
   errors: string[];
 }
@@ -237,13 +237,13 @@ export async function checkAWSCredentials(): Promise<{ configured: boolean; sour
 
 /**
  * Check all prerequisites for dataset upload
+ * Note: AWS credentials are provided by the backend after dataset creation
  */
 export async function checkPrerequisites(): Promise<PrerequisitesResult> {
-  const [datalad, gitAnnex, githubSSH, awsCredentials] = await Promise.all([
+  const [datalad, gitAnnex, githubSSH] = await Promise.all([
     checkDataladInstalled(),
     checkGitAnnexInstalled(),
     checkGitHubSSH(),
-    checkAWSCredentials(),
   ]);
 
   const errors: string[] = [];
@@ -272,17 +272,10 @@ export async function checkPrerequisites(): Promise<PrerequisitesResult> {
     );
   }
 
-  if (!awsCredentials.configured) {
-    errors.push(
-      "AWS credentials not found. Set AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY environment variables",
-    );
-  }
-
   return {
     datalad,
     gitAnnex,
     githubSSH,
-    awsCredentials,
     allPassed: errors.length === 0,
     errors,
   };
@@ -633,6 +626,213 @@ export function formatBytes(bytes: number): string {
   const sizes = ["B", "KB", "MB", "GB", "TB"];
   const i = Math.floor(Math.log(bytes) / Math.log(k));
   return `${Number.parseFloat((bytes / k ** i).toFixed(2))} ${sizes[i]}`;
+}
+
+// =============================================================================
+// Presigned URL Upload Functions
+// =============================================================================
+
+export interface PresignedUploadProgress {
+  file: string;
+  uploaded: number;
+  total: number;
+  status: "pending" | "uploading" | "completed" | "failed";
+  error?: string;
+}
+
+/**
+ * Upload a single file to S3 using a presigned URL
+ */
+export async function uploadFileWithPresignedUrl(
+  filePath: string,
+  presignedUrl: string,
+  onProgress?: (uploaded: number, total: number) => void,
+): Promise<{ success: boolean; error?: string }> {
+  try {
+    const fileContent = await Bun.file(filePath).arrayBuffer();
+    const fileSize = fileContent.byteLength;
+
+    // Use fetch to upload - presigned URLs use simple PUT
+    const response = await fetch(presignedUrl, {
+      method: "PUT",
+      body: fileContent,
+      headers: {
+        "Content-Length": fileSize.toString(),
+      },
+    });
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      return { success: false, error: `Upload failed: ${response.status} ${errorText}` };
+    }
+
+    onProgress?.(fileSize, fileSize);
+    return { success: true };
+  } catch (error) {
+    return { success: false, error: (error as Error).message };
+  }
+}
+
+/**
+ * Upload multiple files using presigned URLs with parallel execution
+ */
+export async function uploadFilesWithPresignedUrls(
+  basePath: string,
+  uploadUrls: Record<string, string>,
+  options: {
+    jobs?: number;
+    onProgress?: (progress: PresignedUploadProgress) => void;
+  } = {},
+): Promise<{ success: boolean; uploaded: number; failed: string[]; error?: string }> {
+  const jobs = options.jobs || 4;
+  const files = Object.entries(uploadUrls);
+  const failed: string[] = [];
+  let uploaded = 0;
+
+  // Process files in batches
+  for (let i = 0; i < files.length; i += jobs) {
+    const batch = files.slice(i, i + jobs);
+    const results = await Promise.all(
+      batch.map(async ([relativePath, presignedUrl]) => {
+        const fullPath = join(basePath, relativePath);
+
+        options.onProgress?.({
+          file: relativePath,
+          uploaded: 0,
+          total: 0,
+          status: "uploading",
+        });
+
+        const result = await uploadFileWithPresignedUrl(fullPath, presignedUrl);
+
+        if (result.success) {
+          uploaded++;
+          options.onProgress?.({
+            file: relativePath,
+            uploaded: 1,
+            total: 1,
+            status: "completed",
+          });
+        } else {
+          failed.push(relativePath);
+          options.onProgress?.({
+            file: relativePath,
+            uploaded: 0,
+            total: 1,
+            status: "failed",
+            error: result.error,
+          });
+        }
+
+        return { path: relativePath, ...result };
+      }),
+    );
+  }
+
+  return {
+    success: failed.length === 0,
+    uploaded,
+    failed,
+    error: failed.length > 0 ? `${failed.length} files failed to upload` : undefined,
+  };
+}
+
+/**
+ * Register a URL with git-annex for a file
+ * This allows git-annex to track files uploaded via presigned URLs
+ */
+export async function registerUrlWithGitAnnex(
+  repoPath: string,
+  relativePath: string,
+  url: string,
+): Promise<{ success: boolean; error?: string }> {
+  try {
+    // First, add the file to git-annex if not already tracked
+    const addResult = await runCommand(["git", "annex", "add", relativePath], {
+      cwd: repoPath,
+    });
+
+    if (addResult.exitCode !== 0) {
+      // File might already be tracked, that's OK
+    }
+
+    // Get the key for the file
+    const keyResult = await runCommand(["git", "annex", "lookupkey", relativePath], {
+      cwd: repoPath,
+    });
+
+    if (keyResult.exitCode !== 0 || !keyResult.stdout.trim()) {
+      return { success: false, error: `Could not get git-annex key for ${relativePath}` };
+    }
+
+    const key = keyResult.stdout.trim();
+
+    // Register the URL with the key
+    const registerResult = await runCommand(["git", "annex", "registerurl", key, url], {
+      cwd: repoPath,
+    });
+
+    if (registerResult.exitCode !== 0) {
+      return { success: false, error: `Failed to register URL: ${registerResult.stderr}` };
+    }
+
+    return { success: true };
+  } catch (error) {
+    return { success: false, error: (error as Error).message };
+  }
+}
+
+/**
+ * Register multiple URLs with git-annex
+ */
+export async function registerUrlsWithGitAnnex(
+  repoPath: string,
+  fileUrls: Record<string, string>,
+  onProgress?: (file: string, success: boolean) => void,
+): Promise<{ success: boolean; registered: number; failed: string[] }> {
+  let registered = 0;
+  const failed: string[] = [];
+
+  for (const [relativePath, url] of Object.entries(fileUrls)) {
+    const result = await registerUrlWithGitAnnex(repoPath, relativePath, url);
+    if (result.success) {
+      registered++;
+      onProgress?.(relativePath, true);
+    } else {
+      failed.push(relativePath);
+      onProgress?.(relativePath, false);
+    }
+  }
+
+  return {
+    success: failed.length === 0,
+    registered,
+    failed,
+  };
+}
+
+/**
+ * Configure git-annex web remote for tracking S3 URLs
+ * This allows git-annex to use the registered URLs for downloads
+ */
+export async function configureWebRemote(
+  repoPath: string,
+): Promise<{ success: boolean; error?: string }> {
+  try {
+    // Check if web remote already exists
+    const checkResult = await runCommand(["git", "annex", "enableremote", "web"], {
+      cwd: repoPath,
+    });
+
+    // Web remote is built-in to git-annex, should always work
+    if (checkResult.exitCode !== 0 && !checkResult.stderr.includes("already exists")) {
+      return { success: false, error: `Failed to enable web remote: ${checkResult.stderr}` };
+    }
+
+    return { success: true };
+  } catch (error) {
+    return { success: false, error: (error as Error).message };
+  }
 }
 
 // =============================================================================
@@ -1024,4 +1224,117 @@ export async function switchBranch(
   } catch (e) {
     return { success: false, error: (e as Error).message };
   }
+}
+
+// =============================================================================
+// File Manifest Collection
+// =============================================================================
+
+/**
+ * File info for upload manifest
+ */
+export interface DatasetFileInfo {
+  path: string;
+  size: number;
+  type: "metadata" | "data";
+}
+
+/**
+ * Threshold for classifying files as data (100KB)
+ */
+const DATA_FILE_THRESHOLD = 100 * 1024;
+
+/**
+ * File extensions that are always classified as data files
+ */
+const DATA_FILE_EXTENSIONS = new Set([
+  ".edf",
+  ".bdf",
+  ".eeg",
+  ".vhdr",
+  ".vmrk",
+  ".set",
+  ".fdt",
+  ".cnt",
+  ".mff",
+  ".fif",
+  ".nii",
+  ".nii.gz",
+  ".mat",
+  ".bin",
+]);
+
+/**
+ * Collect file manifest for a dataset
+ * Classifies files as "data" (large binary files) or "metadata" (JSON, TSV, small files)
+ */
+export async function collectFileManifest(datasetPath: string): Promise<{
+  files: DatasetFileInfo[];
+  totalSize: number;
+  dataFiles: number;
+  metadataFiles: number;
+}> {
+  const files: DatasetFileInfo[] = [];
+  let totalSize = 0;
+  let dataFiles = 0;
+  let metadataFiles = 0;
+
+  // Use find to get all files (excluding .git and .datalad)
+  const { stdout, exitCode } = await runCommand(
+    [
+      "find",
+      ".",
+      "-type",
+      "f",
+      "-not",
+      "-path",
+      "./.git/*",
+      "-not",
+      "-path",
+      "./.datalad/*",
+      "-not",
+      "-name",
+      ".gitattributes",
+    ],
+    { cwd: datasetPath },
+  );
+
+  if (exitCode !== 0) {
+    return { files, totalSize, dataFiles, metadataFiles };
+  }
+
+  const filePaths = stdout.trim().split("\n").filter(Boolean);
+
+  for (const filePath of filePaths) {
+    // Clean up path (remove leading ./)
+    const relativePath = filePath.startsWith("./") ? filePath.slice(2) : filePath;
+    const absolutePath = join(datasetPath, relativePath);
+
+    try {
+      const stats = statSync(absolutePath);
+      const size = stats.size;
+      totalSize += size;
+
+      // Classify file type
+      const ext = relativePath.toLowerCase().match(/\.[^.]+$/)?.[0] || "";
+      const isDataFile = DATA_FILE_EXTENSIONS.has(ext) || size > DATA_FILE_THRESHOLD;
+      const fileType: "metadata" | "data" = isDataFile ? "data" : "metadata";
+
+      if (isDataFile) {
+        dataFiles++;
+      } else {
+        metadataFiles++;
+      }
+
+      files.push({
+        path: relativePath,
+        size,
+        type: fileType,
+      });
+    } catch {
+      // Skip files we can't stat
+    }
+  }
+
+  return { files, totalSize, dataFiles, metadataFiles };
 }

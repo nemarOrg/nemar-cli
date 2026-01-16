@@ -12,6 +12,12 @@ import { authMiddleware, adminMiddleware } from "../middleware/auth";
 import { generateApiKey, hashApiKey } from "../services/token";
 import { sendApprovalEmail, sendRevocationEmail } from "../services/email";
 import { removeCollaborator } from "../services/github";
+import { encrypt, decrypt } from "../services/encryption";
+import {
+  setupUserIamAccess,
+  revokeUserIamAccess,
+  generateIamUsername,
+} from "../services/iam";
 import {
   createDeposition,
   publishDeposition,
@@ -131,6 +137,53 @@ adminRoutes.post("/approve/:username", async (c) => {
   const { apiKey, apiKeyPrefix } = generateApiKey();
   const hashedKey = await hashApiKey(apiKey);
 
+  // Create per-user IAM credentials for S3 access
+  let iamSetupSuccess = false;
+  let iamUsername = "";
+  try {
+    // Check if encryption key is configured
+    if (!c.env.ENCRYPTION_KEY) {
+      throw new Error("ENCRYPTION_KEY not configured");
+    }
+
+    // Setup IAM user with access keys
+    const iamResult = await setupUserIamAccess(
+      {
+        accessKeyId: c.env.AWS_ACCESS_KEY_ID,
+        secretAccessKey: c.env.AWS_SECRET_ACCESS_KEY,
+        region: c.env.AWS_REGION,
+      },
+      c.env.S3_BUCKET,
+      user.username
+    );
+
+    iamUsername = iamResult.iamUsername;
+
+    // Encrypt and store credentials
+    const encryptedAccessKeyId = await encrypt(iamResult.accessKeyId, c.env.ENCRYPTION_KEY);
+    const encryptedSecretAccessKey = await encrypt(iamResult.secretAccessKey, c.env.ENCRYPTION_KEY);
+
+    // Update user with IAM credentials
+    await db
+      .prepare(
+        `
+      UPDATE users
+      SET aws_iam_username = ?,
+          aws_access_key_id_encrypted = ?,
+          aws_secret_access_key_encrypted = ?
+      WHERE id = ?
+    `
+      )
+      .bind(iamUsername, encryptedAccessKeyId, encryptedSecretAccessKey, user.id)
+      .run();
+
+    iamSetupSuccess = true;
+  } catch (error) {
+    console.error("Failed to setup IAM access for user:", error);
+    // Continue with approval even if IAM setup fails
+    // Admin can manually set up IAM later
+  }
+
   // Update user status
   await db
     .prepare(
@@ -182,6 +235,8 @@ adminRoutes.post("/approve/:username", async (c) => {
       JSON.stringify({
         approved_by: adminUser.username,
         email_sent: emailSent,
+        iam_setup: iamSetupSuccess,
+        iam_username: iamUsername || null,
       })
     )
     .run();
@@ -195,6 +250,9 @@ adminRoutes.post("/approve/:username", async (c) => {
     },
     api_key: apiKey,
     email_sent: emailSent,
+    iam_setup: iamSetupSuccess,
+    iam_username: iamUsername || undefined,
+    warning: !iamSetupSuccess ? "IAM setup failed. User will not be able to upload datasets until IAM is configured manually." : undefined,
   });
 });
 
@@ -211,9 +269,13 @@ adminRoutes.post("/revoke/:username", async (c) => {
     return c.json({ error: "Cannot revoke your own access" }, 400);
   }
 
-  // Find user
+  // Find user (include IAM credentials for revocation)
   const user = await db
-    .prepare("SELECT id, username, email, github_username, status FROM users WHERE username = ?")
+    .prepare(`
+      SELECT id, username, email, github_username, status,
+             aws_iam_username, aws_access_key_id_encrypted
+      FROM users WHERE username = ?
+    `)
     .bind(username)
     .first<{
       id: number;
@@ -221,6 +283,8 @@ adminRoutes.post("/revoke/:username", async (c) => {
       email: string;
       github_username: string;
       status: string;
+      aws_iam_username: string | null;
+      aws_access_key_id_encrypted: string | null;
     }>();
 
   if (!user) {
@@ -230,6 +294,49 @@ adminRoutes.post("/revoke/:username", async (c) => {
   if (user.status === "revoked") {
     return c.json({ error: "User already revoked" }, 409);
   }
+
+  // Revoke IAM access if configured - SECURITY CRITICAL
+  let iamRevoked = false;
+  if (user.aws_iam_username && user.aws_access_key_id_encrypted && c.env.ENCRYPTION_KEY) {
+    try {
+      const accessKeyId = await decrypt(user.aws_access_key_id_encrypted, c.env.ENCRYPTION_KEY);
+      await revokeUserIamAccess(
+        {
+          accessKeyId: c.env.AWS_ACCESS_KEY_ID,
+          secretAccessKey: c.env.AWS_SECRET_ACCESS_KEY,
+          region: c.env.AWS_REGION,
+        },
+        user.aws_iam_username,
+        accessKeyId,
+      );
+      iamRevoked = true;
+    } catch (error) {
+      // SECURITY: IAM revocation failure is critical - user's S3 credentials may still work
+      console.error("SECURITY WARNING: Failed to revoke IAM access for", user.username, error);
+      return c.json(
+        {
+          error: "Failed to revoke IAM access - user credentials may still be active",
+          details: error instanceof Error ? error.message : "Unknown error",
+          security_warning: "User's S3 access keys may still be functional. Manual AWS cleanup required.",
+          aws_iam_username: user.aws_iam_username,
+          action_required: `Manually delete IAM user '${user.aws_iam_username}' in AWS console or retry revocation`,
+        },
+        500,
+      );
+    }
+  }
+
+  // Clear IAM credentials from database
+  await db
+    .prepare(`
+      UPDATE users
+      SET aws_iam_username = NULL,
+          aws_access_key_id_encrypted = NULL,
+          aws_secret_access_key_encrypted = NULL
+      WHERE id = ?
+    `)
+    .bind(user.id)
+    .run();
 
   // Revoke all tokens
   await db
@@ -297,6 +404,9 @@ adminRoutes.post("/revoke/:username", async (c) => {
     console.error("Failed to send revocation email:", error);
   }
 
+  // Clear S3 permissions
+  await db.prepare("DELETE FROM user_s3_permissions WHERE user_id = ?").bind(user.id).run();
+
   // Audit log
   await db
     .prepare(
@@ -313,6 +423,7 @@ adminRoutes.post("/revoke/:username", async (c) => {
         repos_removed: reposRemoved,
         failed_removals: failedRemovals,
         email_sent: emailSent,
+        iam_revoked: iamRevoked,
       })
     )
     .run();
@@ -322,6 +433,7 @@ adminRoutes.post("/revoke/:username", async (c) => {
     repos_removed: reposRemoved,
     failed_removals: failedRemovals.length > 0 ? failedRemovals : undefined,
     email_sent: emailSent,
+    iam_revoked: iamRevoked,
   });
 });
 

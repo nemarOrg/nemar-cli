@@ -277,9 +277,16 @@ export async function getDataset(datasetId: string): Promise<Dataset> {
   return response.dataset;
 }
 
+export interface FileInfo {
+  path: string;
+  size: number;
+  type: "metadata" | "data";
+}
+
 export interface CreateDatasetRequest {
   name: string;
   description?: string;
+  files?: FileInfo[];
 }
 
 export interface CreateDatasetResponse {
@@ -293,6 +300,14 @@ export interface CreateDatasetResponse {
     github_url: string;
     ssh_url: string;
     s3_prefix: string;
+  };
+  // Presigned URLs for file uploads (keyed by relative file path)
+  upload_urls?: Record<string, string>;
+  // S3 configuration for constructing public URLs
+  s3_config: {
+    bucket: string;
+    region: string;
+    public_url: string;
   };
 }
 
@@ -329,6 +344,28 @@ export async function finalizeDataset(datasetId: string): Promise<FinalizeDatase
     `/datasets/${datasetId}/finalize`,
     {
       method: "POST",
+    },
+    true,
+  );
+}
+
+export interface UploadUrlsResponse {
+  upload_urls: Record<string, string>;
+}
+
+/**
+ * Request presigned upload URLs for files (requires authentication)
+ * Used for uploading additional files to an existing dataset
+ */
+export async function requestUploadUrls(
+  datasetId: string,
+  files: string[],
+): Promise<UploadUrlsResponse> {
+  return request<UploadUrlsResponse>(
+    `/datasets/${datasetId}/upload-urls`,
+    {
+      method: "POST",
+      body: JSON.stringify({ files }),
     },
     true,
   );
