@@ -12,6 +12,8 @@ import { authMiddleware, optionalAuthMiddleware } from "../middleware/auth";
 import { generateDatasetId, isValidDatasetId } from "../services/datasetId";
 import { createRepository, addCollaborator, applyBranchProtection, enableAutoMerge, deployWorkflows } from "../services/github";
 import { generateDatasetUploadUrls } from "../services/s3";
+import { decrypt } from "../services/encryption";
+import { grantDatasetAccess } from "../services/iam";
 
 export const datasetRoutes = new Hono<{ Bindings: Bindings; Variables: Variables }>();
 
@@ -48,11 +50,46 @@ const createDatasetSchema = z.object({
  * POST /datasets - Create a new dataset
  *
  * Creates GitHub repo, assigns dataset ID, and returns presigned URLs for upload.
+ * Uses per-user AWS credentials for scoped S3 access.
  */
 datasetRoutes.post("/", authMiddleware, zValidator("json", createDatasetSchema), async (c) => {
   const { name, description, files } = c.req.valid("json");
   const user = c.get("user");
   const db = c.env.DB;
+
+  // Get user's AWS credentials
+  const userCreds = await db
+    .prepare(`
+      SELECT aws_iam_username, aws_access_key_id_encrypted, aws_secret_access_key_encrypted
+      FROM users WHERE id = ?
+    `)
+    .bind(user.id)
+    .first<{
+      aws_iam_username: string | null;
+      aws_access_key_id_encrypted: string | null;
+      aws_secret_access_key_encrypted: string | null;
+    }>();
+
+  if (!userCreds?.aws_access_key_id_encrypted || !userCreds?.aws_secret_access_key_encrypted) {
+    return c.json({
+      error: "S3 access not configured for your account",
+      message: "Please contact an administrator to set up your S3 credentials.",
+    }, 403);
+  }
+
+  // Decrypt user's AWS credentials
+  let userAccessKeyId: string;
+  let userSecretAccessKey: string;
+  try {
+    if (!c.env.ENCRYPTION_KEY) {
+      throw new Error("ENCRYPTION_KEY not configured");
+    }
+    userAccessKeyId = await decrypt(userCreds.aws_access_key_id_encrypted, c.env.ENCRYPTION_KEY);
+    userSecretAccessKey = await decrypt(userCreds.aws_secret_access_key_encrypted, c.env.ENCRYPTION_KEY);
+  } catch (error) {
+    console.error("Failed to decrypt user credentials:", error);
+    return c.json({ error: "Failed to access S3 credentials" }, 500);
+  }
 
   // Generate dataset ID
   const datasetId = await generateDatasetId(db);
@@ -78,13 +115,47 @@ datasetRoutes.post("/", authMiddleware, zValidator("json", createDatasetSchema),
     console.error("Failed to add owner as collaborator:", error);
   }
 
-  // Note: We no longer auto-add all approved users as collaborators
-  // Users request access to specific datasets via `nemar dataset request-access`
+  // Update user's IAM policy to include this dataset prefix
+  if (userCreds.aws_iam_username) {
+    try {
+      // Get user's current prefixes
+      const currentPermissions = await db
+        .prepare("SELECT s3_prefix FROM user_s3_permissions WHERE user_id = ?")
+        .bind(user.id)
+        .all<{ s3_prefix: string }>();
+
+      const currentPrefixes = currentPermissions.results?.map((p) => p.s3_prefix) || [];
+
+      // Update IAM policy to include new dataset
+      await grantDatasetAccess(
+        {
+          accessKeyId: c.env.AWS_ACCESS_KEY_ID,
+          secretAccessKey: c.env.AWS_SECRET_ACCESS_KEY,
+          region: c.env.AWS_REGION,
+        },
+        c.env.S3_BUCKET,
+        userCreds.aws_iam_username,
+        currentPrefixes,
+        datasetId
+      );
+
+      // Record the permission in database
+      await db
+        .prepare(`
+          INSERT INTO user_s3_permissions (user_id, s3_prefix, permission, granted_by)
+          VALUES (?, ?, 'read_write', ?)
+        `)
+        .bind(user.id, datasetId, user.id)
+        .run();
+    } catch (error) {
+      console.error("Failed to update IAM policy:", error);
+      // Continue anyway; admin can fix manually
+    }
+  }
 
   // NOTE: Branch protection is applied in the finalize endpoint after initial upload
-  // We don't apply it here because the repo needs content before protection can be set
 
-  // Generate presigned URLs for data files
+  // Generate presigned URLs for data files using user's credentials
   let uploadUrls: Record<string, string> = {};
   if (files && files.length > 0) {
     const dataFiles = files.filter((f) => f.type === "data").map((f) => f.path);
@@ -93,8 +164,8 @@ datasetRoutes.post("/", authMiddleware, zValidator("json", createDatasetSchema),
         {
           bucket: c.env.S3_BUCKET,
           region: c.env.AWS_REGION,
-          accessKeyId: c.env.AWS_ACCESS_KEY_ID,
-          secretAccessKey: c.env.AWS_SECRET_ACCESS_KEY,
+          accessKeyId: userAccessKeyId,
+          secretAccessKey: userSecretAccessKey,
         },
         datasetId,
         dataFiles
@@ -124,6 +195,8 @@ datasetRoutes.post("/", authMiddleware, zValidator("json", createDatasetSchema),
     .bind(user.id, datasetId, JSON.stringify({ name, file_count: files?.length || 0 }))
     .run();
 
+  // Note: We no longer return AWS credentials to the CLI
+  // The CLI will use the presigned URLs for upload
   return c.json(
     {
       message: "Dataset created successfully",
@@ -138,13 +211,10 @@ datasetRoutes.post("/", authMiddleware, zValidator("json", createDatasetSchema),
         s3_prefix: datasetId,
       },
       upload_urls: uploadUrls,
-      // AWS credentials for git-annex S3 remote
-      // These are scoped by S3 bucket policy to the nemar bucket
-      aws_credentials: {
-        accessKeyId: c.env.AWS_ACCESS_KEY_ID,
-        secretAccessKey: c.env.AWS_SECRET_ACCESS_KEY,
-        region: c.env.AWS_REGION,
+      s3_config: {
         bucket: c.env.S3_BUCKET,
+        region: c.env.AWS_REGION,
+        public_url: `https://${c.env.S3_BUCKET}.s3.${c.env.AWS_REGION}.amazonaws.com`,
       },
     },
     201

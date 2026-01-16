@@ -21,6 +21,7 @@ export interface Bindings {
   ZENODO_SANDBOX_API_KEY?: string; // Optional - for sandbox testing
   GITHUB_WEBHOOK_SECRET?: string; // Optional - for GitHub Actions webhook auth
   TEST_BYPASS_TOKEN?: string; // Optional - for CI/CD rate limit bypass
+  ENCRYPTION_KEY?: string; // For encrypting stored credentials
 }
 
 /**
