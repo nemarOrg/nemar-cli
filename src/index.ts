@@ -20,7 +20,7 @@ program
     `CLI for NEMAR (Neuroelectromagnetic Data Archive and Tools Resource)
 
 NEMAR is a curated repository for neurophysiology data in BIDS format.
-This CLI provides tools for uploading, downloading, and managing datasets.`
+This CLI provides tools for uploading, downloading, and managing datasets.`,
   )
   .version(version, "-v, --version", "Output the current version")
   .option("--no-color", "Disable colored output")
@@ -38,7 +38,7 @@ Documentation:
   https://nemar-cli.pages.dev
 
 Support:
-  https://github.com/nemarDatasets/nemar-cli/issues`
+  https://github.com/nemarDatasets/nemar-cli/issues`,
   );
 
 // Register command groups

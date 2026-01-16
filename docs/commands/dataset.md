@@ -19,6 +19,9 @@ Commands:
   status [options] <dataset-id>             Check status of a dataset
   list [options]                            List available datasets on NEMAR
   version [options] <dataset-id> <version>  Create a new version of a dataset with DOI
+  request-access <dataset-id>               Request collaborator access to a dataset
+  invite <username> <dataset-id>            Invite a user as collaborator to your dataset
+  collaborators [options] <dataset-id>      List collaborators for a dataset
   help [command]                            display help for command
 
 Description:
@@ -36,6 +39,8 @@ Examples:
   $ nemar dataset download nm000104              # Download a dataset
   $ nemar dataset list --mine                    # List your datasets
   $ nemar dataset status nm000104                # Check dataset status
+  $ nemar dataset request-access nm000104        # Request collaborator access
+  $ nemar dataset invite johndoe nm000104        # Invite user as collaborator
 
 Learn More:
   https://nemar-cli.pages.dev/commands/dataset/
@@ -214,5 +219,84 @@ Arguments:
 Options:
   -m, --message <msg>  Version description
   -h, --help           display help for command
+```
+
+### dataset request-access
+
+```bash
+Usage: nemar dataset request-access [options] <dataset-id>
+
+Request collaborator access to a dataset
+
+Arguments:
+  dataset-id  Dataset ID (e.g., nm000104)
+
+Options:
+  -h, --help  display help for command
+
+Description:
+  Request access to a NEMAR dataset to push data via git-annex.
+  Access is automatically granted for public repositories.
+
+  For metadata-only changes, you can fork and submit a PR without
+  requesting access.
+
+Requirements:
+  - NEMAR account (nemar auth login)
+  - Approved user status
+
+Examples:
+  $ nemar dataset request-access nm000104
+```
+
+### dataset invite
+
+```bash
+Usage: nemar dataset invite [options] <username> <dataset-id>
+
+Invite a user as collaborator to your dataset
+
+Arguments:
+  username    Username to invite
+  dataset-id  Dataset ID (e.g., nm000104)
+
+Options:
+  -h, --help  display help for command
+
+Description:
+  Invite a NEMAR user as a collaborator to your dataset.
+  Only dataset owners and admins can invite collaborators.
+
+  Works for both public and private repositories.
+
+Requirements:
+  - NEMAR account (nemar auth login)
+  - Dataset ownership or admin status
+
+Examples:
+  $ nemar dataset invite johndoe nm000104
+```
+
+### dataset collaborators
+
+```bash
+Usage: nemar dataset collaborators [options] <dataset-id>
+
+List collaborators for a dataset
+
+Arguments:
+  dataset-id  Dataset ID (e.g., nm000104)
+
+Options:
+  --json      Output as JSON for scripting
+  -h, --help  display help for command
+
+Description:
+  List all collaborators who have access to a dataset.
+  Only dataset owners and admins can view collaborators.
+
+Examples:
+  $ nemar dataset collaborators nm000104
+  $ nemar dataset collaborators nm000104 --json
 ```
 

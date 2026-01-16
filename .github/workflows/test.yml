@@ -16,6 +16,11 @@ on:
       - 'mkdocs.yml'
       - '.github/workflows/docs.yml'
 
+# Permissions needed for dorny/paths-filter to access PR files
+permissions:
+  contents: read
+  pull-requests: read
+
 # Cancel in-progress runs on new push
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}

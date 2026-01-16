@@ -5,9 +5,9 @@
  * Requires DataLad >= 0.19.0 and git-annex >= 10.0 to be installed.
  */
 
+import { existsSync } from "node:fs";
+import { basename, join } from "node:path";
 import { spawn } from "bun";
-import { existsSync } from "fs";
-import { join, basename } from "path";
 
 /**
  * Version info for a tool
@@ -63,7 +63,7 @@ async function runCommand(
     cwd?: string;
     env?: Record<string, string>;
     timeout?: number;
-  } = {}
+  } = {},
 ): Promise<{ stdout: string; stderr: string; exitCode: number }> {
   const proc = spawn({
     cmd,
@@ -87,12 +87,10 @@ async function runCommand(
  * Parse version string like "10.20241202" or "0.19.6"
  */
 function parseVersion(versionStr: string): number[] {
-  return versionStr
-    .split(".")
-    .map((part) => {
-      const num = parseInt(part.replace(/[^0-9]/g, ""), 10);
-      return isNaN(num) ? 0 : num;
-    });
+  return versionStr.split(".").map((part) => {
+    const num = Number.parseInt(part.replace(/[^0-9]/g, ""), 10);
+    return Number.isNaN(num) ? 0 : num;
+  });
 }
 
 /**
@@ -170,7 +168,11 @@ export async function checkGitAnnexInstalled(): Promise<ToolVersion> {
 /**
  * Check SSH access to GitHub
  */
-export async function checkGitHubSSH(): Promise<{ accessible: boolean; username?: string; useHttps?: boolean }> {
+export async function checkGitHubSSH(): Promise<{
+  accessible: boolean;
+  username?: string;
+  useHttps?: boolean;
+}> {
   // If GH_TOKEN is set, we can use HTTPS instead of SSH (for CI)
   if (process.env.GH_TOKEN) {
     return { accessible: true, username: "token-auth", useHttps: true };
@@ -178,8 +180,16 @@ export async function checkGitHubSSH(): Promise<{ accessible: boolean; username?
 
   try {
     const { stdout, stderr, exitCode } = await runCommand(
-      ["ssh", "-T", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=accept-new", "git@github.com"],
-      { timeout: 10000 }
+      [
+        "ssh",
+        "-T",
+        "-o",
+        "BatchMode=yes",
+        "-o",
+        "StrictHostKeyChecking=accept-new",
+        "git@github.com",
+      ],
+      { timeout: 10000 },
     );
 
     // GitHub returns exit code 1 even on success, but message indicates auth
@@ -241,21 +251,31 @@ export async function checkPrerequisites(): Promise<PrerequisitesResult> {
   if (!datalad.installed) {
     errors.push("DataLad is not installed. Install: pip install datalad");
   } else if (datalad.compatible === false) {
-    errors.push(`DataLad version ${datalad.version} is too old. Required: >= ${datalad.minVersion}`);
+    errors.push(
+      `DataLad version ${datalad.version} is too old. Required: >= ${datalad.minVersion}`,
+    );
   }
 
   if (!gitAnnex.installed) {
-    errors.push("git-annex is not installed. Install: brew install git-annex (macOS) or apt install git-annex (Linux)");
+    errors.push(
+      "git-annex is not installed. Install: brew install git-annex (macOS) or apt install git-annex (Linux)",
+    );
   } else if (gitAnnex.compatible === false) {
-    errors.push(`git-annex version ${gitAnnex.version} is too old. Required: >= ${gitAnnex.minVersion}`);
+    errors.push(
+      `git-annex version ${gitAnnex.version} is too old. Required: >= ${gitAnnex.minVersion}`,
+    );
   }
 
   if (!githubSSH.accessible) {
-    errors.push("GitHub SSH access not configured. Add your SSH key to GitHub: https://github.com/settings/keys");
+    errors.push(
+      "GitHub SSH access not configured. Add your SSH key to GitHub: https://github.com/settings/keys",
+    );
   }
 
   if (!awsCredentials.configured) {
-    errors.push("AWS credentials not found. Set AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY environment variables");
+    errors.push(
+      "AWS credentials not found. Set AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY environment variables",
+    );
   }
 
   return {
@@ -291,7 +311,7 @@ export async function isDataladDataset(path: string): Promise<boolean> {
  */
 export async function createDataladDataset(
   path: string,
-  options: { force?: boolean } = {}
+  options: { force?: boolean } = {},
 ): Promise<{ success: boolean; error?: string }> {
   // Check if already a dataset
   if (!options.force && (await isDataladDataset(path))) {
@@ -317,7 +337,7 @@ export async function createDataladDataset(
  */
 export async function configureLargefiles(
   path: string,
-  pattern?: string
+  pattern?: string,
 ): Promise<{ success: boolean; error?: string }> {
   // Default pattern for EEG/MEG data files
   const defaultPattern =
@@ -328,7 +348,7 @@ export async function configureLargefiles(
   try {
     const { stderr, exitCode } = await runCommand(
       ["git", "annex", "config", "--set", "annex.largefiles", largefilesPattern],
-      { cwd: path }
+      { cwd: path },
     );
 
     if (exitCode !== 0) {
@@ -347,7 +367,7 @@ export async function configureLargefiles(
 export async function configureS3Remote(
   path: string,
   config: S3RemoteConfig,
-  credentials: { accessKeyId: string; secretAccessKey: string }
+  credentials: { accessKeyId: string; secretAccessKey: string },
 ): Promise<{ success: boolean; error?: string }> {
   const args = [
     "git",
@@ -408,7 +428,7 @@ export async function configureS3Remote(
 export async function configureGitHubRemote(
   path: string,
   repoUrl: string,
-  remoteName = "origin"
+  remoteName = "origin",
 ): Promise<{ success: boolean; error?: string }> {
   // Convert SSH URL to HTTPS with token if GH_TOKEN is available
   let finalUrl = repoUrl;
@@ -428,7 +448,7 @@ export async function configureGitHubRemote(
       // Remote exists, update it
       const { stderr, exitCode } = await runCommand(
         ["git", "remote", "set-url", remoteName, finalUrl],
-        { cwd: path }
+        { cwd: path },
       );
 
       if (exitCode !== 0) {
@@ -438,7 +458,7 @@ export async function configureGitHubRemote(
       // Remote doesn't exist, add it
       const { stderr, exitCode } = await runCommand(
         ["git", "remote", "add", remoteName, finalUrl],
-        { cwd: path }
+        { cwd: path },
       );
 
       if (exitCode !== 0) {
@@ -449,10 +469,9 @@ export async function configureGitHubRemote(
     return { success: true };
   } catch {
     // Remote doesn't exist, add it
-    const { stderr, exitCode } = await runCommand(
-      ["git", "remote", "add", remoteName, finalUrl],
-      { cwd: path }
-    );
+    const { stderr, exitCode } = await runCommand(["git", "remote", "add", remoteName, finalUrl], {
+      cwd: path,
+    });
 
     if (exitCode !== 0) {
       return { success: false, error: stderr.trim() };
@@ -467,13 +486,12 @@ export async function configureGitHubRemote(
  */
 export async function saveDataset(
   path: string,
-  message: string
+  message: string,
 ): Promise<{ success: boolean; error?: string }> {
   try {
-    const { stderr, exitCode } = await runCommand(
-      ["datalad", "save", "-m", message],
-      { cwd: path }
-    );
+    const { stderr, exitCode } = await runCommand(["datalad", "save", "-m", message], {
+      cwd: path,
+    });
 
     if (exitCode !== 0) {
       // Check if there's nothing to save
@@ -499,7 +517,7 @@ export async function pushToS3(
     jobs?: number;
     credentials: { accessKeyId: string; secretAccessKey: string };
     onProgress?: (progress: UploadProgress) => void;
-  }
+  },
 ): Promise<{ success: boolean; error?: string; filesUploaded?: number }> {
   const jobs = options.jobs || 8;
 
@@ -513,7 +531,7 @@ export async function pushToS3(
           AWS_ACCESS_KEY_ID: options.credentials.accessKeyId,
           AWS_SECRET_ACCESS_KEY: options.credentials.secretAccessKey,
         },
-      }
+      },
     );
 
     if (exitCode !== 0) {
@@ -536,13 +554,13 @@ export async function pushToS3(
 export async function pushToGitHub(
   path: string,
   remoteName = "origin",
-  branch = "main"
+  branch = "main",
 ): Promise<{ success: boolean; error?: string }> {
   try {
     // Push main branch
     const { stderr: mainStderr, exitCode: mainExitCode } = await runCommand(
       ["git", "push", "-u", remoteName, branch],
-      { cwd: path }
+      { cwd: path },
     );
 
     if (mainExitCode !== 0) {
@@ -552,7 +570,7 @@ export async function pushToGitHub(
     // Push git-annex branch (critical for cloning)
     const { stderr: annexStderr, exitCode: annexExitCode } = await runCommand(
       ["git", "push", remoteName, "git-annex"],
-      { cwd: path }
+      { cwd: path },
     );
 
     if (annexExitCode !== 0) {
@@ -569,9 +587,7 @@ export async function pushToGitHub(
 /**
  * Get dataset file statistics
  */
-export async function getDatasetStats(
-  path: string
-): Promise<{
+export async function getDatasetStats(path: string): Promise<{
   totalFiles: number;
   totalSize: number;
   annexedFiles: number;
@@ -579,7 +595,9 @@ export async function getDatasetStats(
 }> {
   try {
     // Use git annex info for statistics
-    const { stdout, exitCode } = await runCommand(["git", "annex", "info", "--json"], { cwd: path });
+    const { stdout, exitCode } = await runCommand(["git", "annex", "info", "--json"], {
+      cwd: path,
+    });
 
     if (exitCode === 0) {
       const info = JSON.parse(stdout);
@@ -614,7 +632,7 @@ export function formatBytes(bytes: number): string {
   const k = 1024;
   const sizes = ["B", "KB", "MB", "GB", "TB"];
   const i = Math.floor(Math.log(bytes) / Math.log(k));
-  return `${parseFloat((bytes / Math.pow(k, i)).toFixed(2))} ${sizes[i]}`;
+  return `${Number.parseFloat((bytes / k ** i).toFixed(2))} ${sizes[i]}`;
 }
 
 // =============================================================================
@@ -646,13 +664,19 @@ export async function checkDownloadPrerequisites(): Promise<DownloadPrerequisite
   if (!datalad.installed) {
     errors.push("DataLad is not installed. Install: pip install datalad");
   } else if (datalad.compatible === false) {
-    errors.push(`DataLad version ${datalad.version} is too old. Required: >= ${datalad.minVersion}`);
+    errors.push(
+      `DataLad version ${datalad.version} is too old. Required: >= ${datalad.minVersion}`,
+    );
   }
 
   if (!gitAnnex.installed) {
-    errors.push("git-annex is not installed. Install: brew install git-annex (macOS) or apt install git-annex (Linux)");
+    errors.push(
+      "git-annex is not installed. Install: brew install git-annex (macOS) or apt install git-annex (Linux)",
+    );
   } else if (gitAnnex.compatible === false) {
-    errors.push(`git-annex version ${gitAnnex.version} is too old. Required: >= ${gitAnnex.minVersion}`);
+    errors.push(
+      `git-annex version ${gitAnnex.version} is too old. Required: >= ${gitAnnex.minVersion}`,
+    );
   }
 
   return {
@@ -668,12 +692,10 @@ export async function checkDownloadPrerequisites(): Promise<DownloadPrerequisite
  */
 export async function cloneDataset(
   repoUrl: string,
-  outputPath: string
+  outputPath: string,
 ): Promise<{ success: boolean; error?: string }> {
   try {
-    const { stderr, exitCode } = await runCommand(
-      ["datalad", "clone", repoUrl, outputPath]
-    );
+    const { stderr, exitCode } = await runCommand(["datalad", "clone", repoUrl, outputPath]);
 
     if (exitCode !== 0) {
       return { success: false, error: stderr.trim() || "Failed to clone dataset" };
@@ -693,7 +715,7 @@ export async function getDatasetData(
   options: {
     jobs?: number;
     paths?: string[]; // Specific paths to get, or all if empty
-  } = {}
+  } = {},
 ): Promise<{ success: boolean; error?: string; filesDownloaded?: number }> {
   const jobs = options.jobs || 4;
   const paths = options.paths && options.paths.length > 0 ? options.paths : ["."];
@@ -731,18 +753,15 @@ export interface LocalDatasetInfo {
 /**
  * Get information about a locally cloned dataset
  */
-export async function getLocalDatasetInfo(
-  datasetPath: string
-): Promise<LocalDatasetInfo | null> {
+export async function getLocalDatasetInfo(datasetPath: string): Promise<LocalDatasetInfo | null> {
   if (!existsSync(datasetPath)) {
     return null;
   }
 
   try {
-    const { stdout, exitCode } = await runCommand(
-      ["git", "annex", "info", "--json"],
-      { cwd: datasetPath }
-    );
+    const { stdout, exitCode } = await runCommand(["git", "annex", "info", "--json"], {
+      cwd: datasetPath,
+    });
 
     if (exitCode === 0) {
       const info = JSON.parse(stdout);
@@ -752,7 +771,7 @@ export async function getLocalDatasetInfo(
       const sizeStr = info["local annex size"] || "0 bytes";
       const sizeMatch = sizeStr.match(/([\d.]+)\s*(bytes?|KB|MB|GB|TB)/i);
       if (sizeMatch) {
-        const num = parseFloat(sizeMatch[1]);
+        const num = Number.parseFloat(sizeMatch[1]);
         const unit = sizeMatch[2].toLowerCase();
         const multipliers: Record<string, number> = {
           byte: 1,
@@ -783,10 +802,9 @@ export async function getLocalDatasetInfo(
 
   // Fallback: just count files
   try {
-    const { stdout } = await runCommand(
-      ["find", ".", "-type", "f", "-not", "-path", "./.git/*"],
-      { cwd: datasetPath }
-    );
+    const { stdout } = await runCommand(["find", ".", "-type", "f", "-not", "-path", "./.git/*"], {
+      cwd: datasetPath,
+    });
     const files = stdout.trim().split("\n").filter(Boolean).length;
     return {
       files,
@@ -809,22 +827,31 @@ export async function getLocalDatasetInfo(
  * List available versions (tags) for a dataset
  */
 export async function listDatasetVersions(
-  datasetPath: string
+  datasetPath: string,
 ): Promise<{ version: string; date: string; commit: string }[]> {
   try {
     const { stdout, exitCode } = await runCommand(
-      ["git", "tag", "-l", "--sort=-version:refname", "--format=%(refname:short)|%(creatordate:short)|%(objectname:short)"],
-      { cwd: datasetPath }
+      [
+        "git",
+        "tag",
+        "-l",
+        "--sort=-version:refname",
+        "--format=%(refname:short)|%(creatordate:short)|%(objectname:short)",
+      ],
+      { cwd: datasetPath },
     );
 
     if (exitCode !== 0 || !stdout.trim()) {
       return [];
     }
 
-    return stdout.trim().split("\n").map((line) => {
-      const [version, date, commit] = line.split("|");
-      return { version, date, commit };
-    });
+    return stdout
+      .trim()
+      .split("\n")
+      .map((line) => {
+        const [version, date, commit] = line.split("|");
+        return { version, date, commit };
+      });
   } catch {
     return [];
   }
@@ -835,14 +862,11 @@ export async function listDatasetVersions(
  */
 export async function getVersionCommit(
   datasetPath: string,
-  version: string
+  version: string,
 ): Promise<string | null> {
   try {
     const tag = version.startsWith("v") ? version : `v${version}`;
-    const { stdout, exitCode } = await runCommand(
-      ["git", "rev-parse", tag],
-      { cwd: datasetPath }
-    );
+    const { stdout, exitCode } = await runCommand(["git", "rev-parse", tag], { cwd: datasetPath });
 
     if (exitCode !== 0) {
       return null;
@@ -860,13 +884,13 @@ export async function getVersionCommit(
 export async function createRevertBranch(
   datasetPath: string,
   targetVersion: string,
-  branchName: string
+  branchName: string,
 ): Promise<{ success: boolean; error?: string }> {
   try {
     // Create and checkout the revert branch
     const { stderr: branchErr, exitCode: branchCode } = await runCommand(
       ["git", "checkout", "-b", branchName],
-      { cwd: datasetPath }
+      { cwd: datasetPath },
     );
 
     if (branchCode !== 0) {
@@ -879,11 +903,14 @@ export async function createRevertBranch(
     // Checkout all files from the target version (except .git)
     const { stderr: checkoutErr, exitCode: checkoutCode } = await runCommand(
       ["git", "checkout", tag, "--", "."],
-      { cwd: datasetPath }
+      { cwd: datasetPath },
     );
 
     if (checkoutCode !== 0) {
-      return { success: false, error: checkoutErr.trim() || "Failed to checkout files from target version" };
+      return {
+        success: false,
+        error: checkoutErr.trim() || "Failed to checkout files from target version",
+      };
     }
 
     return { success: true };
@@ -898,26 +925,22 @@ export async function createRevertBranch(
 export async function commitRevert(
   datasetPath: string,
   targetVersion: string,
-  message?: string
+  message?: string,
 ): Promise<{ success: boolean; error?: string }> {
   const commitMessage = message || `Revert to ${targetVersion}`;
 
   try {
     // Stage all changes
-    const { exitCode: addCode } = await runCommand(
-      ["git", "add", "-A"],
-      { cwd: datasetPath }
-    );
+    const { exitCode: addCode } = await runCommand(["git", "add", "-A"], { cwd: datasetPath });
 
     if (addCode !== 0) {
       return { success: false, error: "Failed to stage changes" };
     }
 
     // Check if there are changes to commit
-    const { stdout: statusOut } = await runCommand(
-      ["git", "status", "--porcelain"],
-      { cwd: datasetPath }
-    );
+    const { stdout: statusOut } = await runCommand(["git", "status", "--porcelain"], {
+      cwd: datasetPath,
+    });
 
     if (!statusOut.trim()) {
       return { success: false, error: "No changes to revert (already at target version)" };
@@ -926,7 +949,7 @@ export async function commitRevert(
     // Commit
     const { stderr: commitErr, exitCode: commitCode } = await runCommand(
       ["git", "commit", "-m", commitMessage],
-      { cwd: datasetPath }
+      { cwd: datasetPath },
     );
 
     if (commitCode !== 0) {
@@ -945,13 +968,12 @@ export async function commitRevert(
 export async function pushBranch(
   datasetPath: string,
   branchName: string,
-  remoteName = "origin"
+  remoteName = "origin",
 ): Promise<{ success: boolean; error?: string }> {
   try {
-    const { stderr, exitCode } = await runCommand(
-      ["git", "push", "-u", remoteName, branchName],
-      { cwd: datasetPath }
-    );
+    const { stderr, exitCode } = await runCommand(["git", "push", "-u", remoteName, branchName], {
+      cwd: datasetPath,
+    });
 
     if (exitCode !== 0) {
       return { success: false, error: stderr.trim() || "Failed to push branch" };
@@ -968,10 +990,9 @@ export async function pushBranch(
  */
 export async function getCurrentBranch(datasetPath: string): Promise<string | null> {
   try {
-    const { stdout, exitCode } = await runCommand(
-      ["git", "rev-parse", "--abbrev-ref", "HEAD"],
-      { cwd: datasetPath }
-    );
+    const { stdout, exitCode } = await runCommand(["git", "rev-parse", "--abbrev-ref", "HEAD"], {
+      cwd: datasetPath,
+    });
 
     if (exitCode !== 0) {
       return null;
@@ -988,13 +1009,12 @@ export async function getCurrentBranch(datasetPath: string): Promise<string | nu
  */
 export async function switchBranch(
   datasetPath: string,
-  branchName: string
+  branchName: string,
 ): Promise<{ success: boolean; error?: string }> {
   try {
-    const { stderr, exitCode } = await runCommand(
-      ["git", "checkout", branchName],
-      { cwd: datasetPath }
-    );
+    const { stderr, exitCode } = await runCommand(["git", "checkout", branchName], {
+      cwd: datasetPath,
+    });
 
     if (exitCode !== 0) {
       return { success: false, error: stderr.trim() || "Failed to switch branch" };
