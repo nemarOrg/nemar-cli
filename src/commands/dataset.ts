@@ -229,7 +229,6 @@ Requirements:
   - NEMAR account (nemar auth login)
   - DataLad and git-annex installed
   - GitHub SSH access configured
-  - AWS credentials in environment
 
 Process:
   1. Validates BIDS format (unless --skip-validation)
@@ -366,6 +365,12 @@ Examples:
       ssh_url: string;
       s3_prefix: string;
       github_url: string;
+      aws_credentials: {
+        accessKeyId: string;
+        secretAccessKey: string;
+        region: string;
+        bucket: string;
+      };
     };
 
     try {
@@ -379,6 +384,7 @@ Examples:
         ssh_url: response.dataset.ssh_url,
         s3_prefix: response.dataset.s3_prefix,
         github_url: response.dataset.github_url,
+        aws_credentials: response.aws_credentials,
       };
 
       spinner.succeed(`Dataset created: ${datasetInfo.dataset_id}`);
@@ -414,33 +420,22 @@ Examples:
 
     spinner.succeed("DataLad dataset initialized");
 
-    // Step 8: Configure S3 remote
+    // Step 8: Configure S3 remote (using credentials from backend)
     spinner = ora("Configuring S3 remote...").start();
 
-    // Get AWS credentials from environment or aws configure
-    const awsAccessKeyId = process.env.AWS_ACCESS_KEY_ID;
-    const awsSecretAccessKey = process.env.AWS_SECRET_ACCESS_KEY;
-
-    if (!awsAccessKeyId || !awsSecretAccessKey) {
-      spinner.fail("AWS credentials not found in environment");
-      console.log(
-        chalk.red("Set AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY environment variables"),
-      );
-      process.exit(1);
-    }
-
+    const { aws_credentials } = datasetInfo;
     const s3Result = await configureS3Remote(
       absolutePath,
       {
         name: "nemar-s3",
-        bucket: "nemar",
+        bucket: aws_credentials.bucket,
         prefix: datasetInfo.s3_prefix,
-        region: "us-east-2",
-        publicUrl: "https://nemar.s3.us-east-2.amazonaws.com",
+        region: aws_credentials.region,
+        publicUrl: `https://${aws_credentials.bucket}.s3.${aws_credentials.region}.amazonaws.com`,
       },
       {
-        accessKeyId: awsAccessKeyId,
-        secretAccessKey: awsSecretAccessKey,
+        accessKeyId: aws_credentials.accessKeyId,
+        secretAccessKey: aws_credentials.secretAccessKey,
       },
     );
 
@@ -494,8 +489,8 @@ Examples:
     const s3PushResult = await pushToS3(absolutePath, "nemar-s3", {
       jobs: Number.parseInt(options.jobs, 10),
       credentials: {
-        accessKeyId: awsAccessKeyId,
-        secretAccessKey: awsSecretAccessKey,
+        accessKeyId: aws_credentials.accessKeyId,
+        secretAccessKey: aws_credentials.secretAccessKey,
       },
     });
 

@@ -21,12 +21,12 @@ export interface ToolVersion {
 
 /**
  * Prerequisites check result
+ * Note: AWS credentials are now provided by the backend, not required locally
  */
 export interface PrerequisitesResult {
   datalad: ToolVersion;
   gitAnnex: ToolVersion;
   githubSSH: { accessible: boolean; username?: string };
-  awsCredentials: { configured: boolean; source?: string };
   allPassed: boolean;
   errors: string[];
 }
@@ -237,13 +237,13 @@ export async function checkAWSCredentials(): Promise<{ configured: boolean; sour
 
 /**
  * Check all prerequisites for dataset upload
+ * Note: AWS credentials are provided by the backend after dataset creation
  */
 export async function checkPrerequisites(): Promise<PrerequisitesResult> {
-  const [datalad, gitAnnex, githubSSH, awsCredentials] = await Promise.all([
+  const [datalad, gitAnnex, githubSSH] = await Promise.all([
     checkDataladInstalled(),
     checkGitAnnexInstalled(),
     checkGitHubSSH(),
-    checkAWSCredentials(),
   ]);
 
   const errors: string[] = [];
@@ -272,17 +272,10 @@ export async function checkPrerequisites(): Promise<PrerequisitesResult> {
     );
   }
 
-  if (!awsCredentials.configured) {
-    errors.push(
-      "AWS credentials not found. Set AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY environment variables",
-    );
-  }
-
   return {
     datalad,
     gitAnnex,
     githubSSH,
-    awsCredentials,
     allPassed: errors.length === 0,
     errors,
   };

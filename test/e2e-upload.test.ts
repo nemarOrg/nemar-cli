@@ -3,9 +3,10 @@
  *
  * These tests require real infrastructure:
  * - DataLad and git-annex installed
- * - AWS credentials (AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY)
  * - GitHub SSH access configured
  * - Valid NEMAR API key
+ *
+ * Note: AWS credentials are now provided by the backend, not required locally.
  *
  * Tests will skip gracefully if prerequisites are not met.
  *
@@ -26,7 +27,6 @@ interface Prerequisites {
   datalad: boolean;
   gitAnnex: boolean;
   githubSSH: boolean;
-  awsCredentials: boolean;
   apiKey: boolean;
 }
 
@@ -35,7 +35,6 @@ async function checkPrerequisites(): Promise<Prerequisites> {
     datalad: false,
     gitAnnex: false,
     githubSSH: false,
-    awsCredentials: false,
     apiKey: false,
   };
 
@@ -68,9 +67,6 @@ async function checkPrerequisites(): Promise<Prerequisites> {
       results.githubSSH = stderr.includes("successfully authenticated");
     } catch {}
   }
-
-  // Check AWS credentials
-  results.awsCredentials = !!(process.env.AWS_ACCESS_KEY_ID && process.env.AWS_SECRET_ACCESS_KEY);
 
   // Check API key
   results.apiKey = !!TEST_CONFIG.userApiKey;
@@ -191,14 +187,13 @@ describe("E2E Upload Tests", () => {
 
   beforeAll(async () => {
     prereqs = await checkPrerequisites();
-    allPrereqsMet = prereqs.datalad && prereqs.gitAnnex && prereqs.githubSSH && prereqs.awsCredentials && prereqs.apiKey;
+    allPrereqsMet = prereqs.datalad && prereqs.gitAnnex && prereqs.githubSSH && prereqs.apiKey;
 
     if (!allPrereqsMet) {
       console.log("\n⚠️  E2E Upload tests will be skipped due to missing prerequisites:");
       if (!prereqs.datalad) console.log("   - DataLad not installed");
       if (!prereqs.gitAnnex) console.log("   - git-annex not installed");
       if (!prereqs.githubSSH) console.log("   - GitHub SSH not configured");
-      if (!prereqs.awsCredentials) console.log("   - AWS credentials not set");
       if (!prereqs.apiKey) console.log("   - API key not configured");
       console.log("");
     }
@@ -216,7 +211,6 @@ describe("E2E Upload Tests", () => {
     expect(typeof prereqs.datalad).toBe("boolean");
     expect(typeof prereqs.gitAnnex).toBe("boolean");
     expect(typeof prereqs.githubSSH).toBe("boolean");
-    expect(typeof prereqs.awsCredentials).toBe("boolean");
     expect(typeof prereqs.apiKey).toBe("boolean");
   });
 

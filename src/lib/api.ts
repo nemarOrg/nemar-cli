@@ -294,6 +294,13 @@ export interface CreateDatasetResponse {
     ssh_url: string;
     s3_prefix: string;
   };
+  // AWS credentials for git-annex S3 remote (provided by backend)
+  aws_credentials: {
+    accessKeyId: string;
+    secretAccessKey: string;
+    region: string;
+    bucket: string;
+  };
 }
 
 /**

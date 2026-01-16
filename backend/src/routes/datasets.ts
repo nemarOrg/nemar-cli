@@ -138,6 +138,14 @@ datasetRoutes.post("/", authMiddleware, zValidator("json", createDatasetSchema),
         s3_prefix: datasetId,
       },
       upload_urls: uploadUrls,
+      // AWS credentials for git-annex S3 remote
+      // These are scoped by S3 bucket policy to the nemar bucket
+      aws_credentials: {
+        accessKeyId: c.env.AWS_ACCESS_KEY_ID,
+        secretAccessKey: c.env.AWS_SECRET_ACCESS_KEY,
+        region: c.env.AWS_REGION,
+        bucket: c.env.S3_BUCKET,
+      },
     },
     201
   );
