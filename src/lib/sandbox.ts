@@ -220,10 +220,24 @@ export function generateRandomEdfFile(outputPath: string, sizeKb = 500): void {
 /**
  * Clean up a sandbox dataset directory
  *
+ * Uses chmod to fix git-annex restricted permissions before removal.
+ *
  * @param datasetPath - Path to the sandbox dataset to remove
  */
 export function cleanupSandboxDataset(datasetPath: string): void {
-  rmSync(datasetPath, { recursive: true, force: true });
+  const { execSync } = require("node:child_process");
+  try {
+    // Git-annex creates files with restricted permissions; fix before removal
+    execSync(`chmod -R u+w "${datasetPath}" 2>/dev/null || true`, { stdio: "ignore" });
+    rmSync(datasetPath, { recursive: true, force: true });
+  } catch {
+    // If Node.js rmSync fails, fall back to shell rm -rf
+    try {
+      execSync(`rm -rf "${datasetPath}"`, { stdio: "ignore" });
+    } catch {
+      // Best effort cleanup; ignore errors
+    }
+  }
 }
 
 /**

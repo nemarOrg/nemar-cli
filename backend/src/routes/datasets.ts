@@ -465,78 +465,83 @@ datasetRoutes.post("/:id/finalize", authMiddleware, async (c) => {
   const user = c.get("user");
   const db = c.env.DB;
 
-  // Verify dataset exists and user is owner
-  const dataset = await db
-    .prepare("SELECT owner_user_id, github_repo, status FROM datasets WHERE dataset_id = ?")
-    .bind(datasetId)
-    .first<{ owner_user_id: number; github_repo: string; status: string }>();
-
-  if (!dataset) {
-    return c.json({ error: "Dataset not found" }, 404);
-  }
-
-  if (dataset.owner_user_id !== user.id && !user.is_admin) {
-    return c.json({ error: "Only dataset owner can finalize upload" }, 403);
-  }
-
-  if (dataset.status === "published") {
-    return c.json({ error: "Dataset is already published" }, 400);
-  }
-
-  // Deploy GitHub Actions workflows
   try {
-    const workflowResult = await deployWorkflows(datasetId, c.env.GITHUB_ADMIN_PAT);
-    if (!workflowResult.success) {
-      console.error("Failed to deploy some workflows:", workflowResult.errors);
+    // Verify dataset exists and user is owner
+    const dataset = await db
+      .prepare("SELECT owner_user_id, github_repo, status FROM datasets WHERE dataset_id = ?")
+      .bind(datasetId)
+      .first<{ owner_user_id: number; github_repo: string; status: string }>();
+
+    if (!dataset) {
+      return c.json({ error: "Dataset not found" }, 404);
     }
+
+    if (dataset.owner_user_id !== user.id && !user.is_admin) {
+      return c.json({ error: "Only dataset owner can finalize upload" }, 403);
+    }
+
+    if (dataset.status === "published") {
+      return c.json({ error: "Dataset is already published" }, 400);
+    }
+
+    // Deploy GitHub Actions workflows
+    try {
+      const workflowResult = await deployWorkflows(datasetId, c.env.GITHUB_ADMIN_PAT);
+      if (!workflowResult.success) {
+        console.error("Failed to deploy some workflows:", workflowResult.errors);
+      }
+    } catch (error) {
+      console.error("Failed to deploy workflows:", error);
+      // Continue anyway; not a fatal error
+    }
+
+    // Apply branch protection (requires workflows to be deployed first for status checks)
+    try {
+      await applyBranchProtection(datasetId, c.env.GITHUB_ADMIN_PAT);
+    } catch (error) {
+      console.error("Failed to apply branch protection:", error);
+      // Continue anyway; not a fatal error
+    }
+
+    // Enable auto-merge
+    try {
+      await enableAutoMerge(datasetId, c.env.GITHUB_ADMIN_PAT);
+    } catch (error) {
+      console.error("Failed to enable auto-merge:", error);
+      // Continue anyway; not a fatal error
+    }
+
+    // Update dataset status
+    await db
+      .prepare("UPDATE datasets SET status = 'published', updated_at = CURRENT_TIMESTAMP WHERE dataset_id = ?")
+      .bind(datasetId)
+      .run();
+
+    // Audit log
+    await db
+      .prepare(
+        `
+      INSERT INTO audit_log (user_id, action, resource_type, resource_id, details)
+      VALUES (?, 'dataset_published', 'dataset', ?, ?)
+    `
+      )
+      .bind(user.id, datasetId, JSON.stringify({ status: "published" }))
+      .run();
+
+    const githubUrl = `https://github.com/${dataset.github_repo}`;
+
+    return c.json({
+      message: "Dataset published successfully",
+      dataset: {
+        dataset_id: datasetId,
+        status: "published",
+        github_url: githubUrl,
+      },
+    });
   } catch (error) {
-    console.error("Failed to deploy workflows:", error);
-    // Continue anyway; not a fatal error
+    console.error("Error finalizing dataset:", error);
+    return c.json({ error: "Failed to finalize dataset" }, 500);
   }
-
-  // Apply branch protection (requires workflows to be deployed first for status checks)
-  try {
-    await applyBranchProtection(datasetId, c.env.GITHUB_ADMIN_PAT);
-  } catch (error) {
-    console.error("Failed to apply branch protection:", error);
-    // Continue anyway; not a fatal error
-  }
-
-  // Enable auto-merge
-  try {
-    await enableAutoMerge(datasetId, c.env.GITHUB_ADMIN_PAT);
-  } catch (error) {
-    console.error("Failed to enable auto-merge:", error);
-    // Continue anyway; not a fatal error
-  }
-
-  // Update dataset status
-  await db
-    .prepare("UPDATE datasets SET status = 'published', updated_at = CURRENT_TIMESTAMP WHERE dataset_id = ?")
-    .bind(datasetId)
-    .run();
-
-  // Audit log
-  await db
-    .prepare(
-      `
-    INSERT INTO audit_log (user_id, action, resource_type, resource_id, details)
-    VALUES (?, 'dataset_published', 'dataset', ?, ?)
-  `
-    )
-    .bind(user.id, datasetId, JSON.stringify({ status: "published" }))
-    .run();
-
-  const githubUrl = `https://github.com/${dataset.github_repo}`;
-
-  return c.json({
-    message: "Dataset published successfully",
-    dataset: {
-      dataset_id: datasetId,
-      status: "published",
-      github_url: githubUrl,
-    },
-  });
 });
 
 /**
