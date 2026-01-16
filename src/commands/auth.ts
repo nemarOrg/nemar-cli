@@ -27,12 +27,12 @@ import {
   setConfig,
 } from "../lib/config.js";
 import {
-  generateSSHKey,
   configureSSHForGitHub,
+  generateSSHKey,
+  getSSHKeyPaths,
   nemarSSHKeyExists,
   readPublicKey,
   testGitHubSSH,
-  getSSHKeyPaths,
 } from "../lib/ssh.js";
 
 export const authCommand = new Command("auth").description("Authentication management").addHelpText(
@@ -100,6 +100,11 @@ export async function loginAction(options: { key?: string; force?: boolean }): P
   }
 
   // Validate with backend
+  if (!apiKey) {
+    console.log(chalk.red("No API key provided"));
+    return;
+  }
+
   const spinner = ora("Validating API key...").start();
 
   try {
@@ -288,9 +293,7 @@ export async function signupAction(): Promise<void> {
         console.log(chalk.gray("  Try a different username"));
       } else if (error.message.includes("already registered")) {
         console.log(
-          chalk.gray(
-            "  Use 'nemar auth resend-verification' if you need a new verification link",
-          ),
+          chalk.gray("  Use 'nemar auth resend-verification' if you need a new verification link"),
         );
       }
     } else {
@@ -300,10 +303,7 @@ export async function signupAction(): Promise<void> {
   }
 }
 
-authCommand
-  .command("signup")
-  .description("Register for a new NEMAR account")
-  .action(signupAction);
+authCommand.command("signup").description("Register for a new NEMAR account").action(signupAction);
 
 // ============================================================================
 // Status / Whoami
@@ -542,12 +542,12 @@ export async function setupSSHAction(options: { force?: boolean }): Promise<void
   console.log();
   console.log(chalk.yellow("To complete setup, add this SSH key to your GitHub account:"));
   console.log();
-  console.log(chalk.cyan("  " + publicKey));
+  console.log(chalk.cyan(`  ${publicKey}`));
   console.log();
   console.log("Steps:");
   console.log("  1. Copy the key above");
-  console.log("  2. Go to: " + chalk.underline("https://github.com/settings/ssh/new"));
-  console.log("  3. Title: " + chalk.gray("NEMAR CLI"));
+  console.log(`  2. Go to: ${chalk.underline("https://github.com/settings/ssh/new")}`);
+  console.log(`  3. Title: ${chalk.gray("NEMAR CLI")}`);
   console.log("  4. Paste the key and click 'Add SSH key'");
   console.log();
   console.log(chalk.gray("After adding the key, run 'nemar auth setup-ssh' again to verify."));

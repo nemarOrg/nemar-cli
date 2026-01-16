@@ -238,9 +238,7 @@ export async function checkAWSCredentials(): Promise<{ configured: boolean; sour
 /**
  * Get platform-specific installation command for a tool
  */
-function getInstallCommand(
-  tool: "datalad" | "git-annex",
-): string {
+function getInstallCommand(tool: "datalad" | "git-annex"): string {
   const platform = process.platform;
   if (tool === "datalad") {
     if (platform === "darwin") return "brew install datalad (recommended) or pip install datalad";

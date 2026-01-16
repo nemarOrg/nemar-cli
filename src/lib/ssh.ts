@@ -5,7 +5,7 @@
  * Creates a dedicated NEMAR SSH key to avoid modifying user's existing SSH setup.
  */
 
-import { existsSync, mkdirSync, readFileSync, writeFileSync, appendFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { spawn } from "bun";
@@ -57,7 +57,10 @@ export async function generateSSHKey(email: string): Promise<SSHKeyResult> {
     try {
       mkdirSync(paths.sshDir, { mode: 0o700 });
     } catch (error) {
-      return { success: false, error: `Cannot create ~/.ssh directory: ${(error as Error).message}` };
+      return {
+        success: false,
+        error: `Cannot create ~/.ssh directory: ${(error as Error).message}`,
+      };
     }
   }
 
@@ -68,7 +71,10 @@ export async function generateSSHKey(email: string): Promise<SSHKeyResult> {
       const publicKey = readFileSync(paths.publicKey, "utf-8").trim();
       return { success: true, publicKey };
     } catch (error) {
-      return { success: false, error: `NEMAR SSH key exists but cannot read public key: ${(error as Error).message}` };
+      return {
+        success: false,
+        error: `NEMAR SSH key exists but cannot read public key: ${(error as Error).message}`,
+      };
     }
   }
 
@@ -77,10 +83,14 @@ export async function generateSSHKey(email: string): Promise<SSHKeyResult> {
     const proc = spawn({
       cmd: [
         "ssh-keygen",
-        "-t", "ed25519",
-        "-f", paths.privateKey,
-        "-N", "", // Empty passphrase for automation
-        "-C", `nemar-cli-${email}`,
+        "-t",
+        "ed25519",
+        "-f",
+        paths.privateKey,
+        "-N",
+        "", // Empty passphrase for automation
+        "-C",
+        `nemar-cli-${email}`,
       ],
       stdout: "pipe",
       stderr: "pipe",
@@ -127,8 +137,10 @@ export function hasSSHConfigEntry(): boolean {
   try {
     const config = readFileSync(paths.configFile, "utf-8");
     // Check if there's a Host github.com entry using our key
-    return config.includes("IdentityFile ~/.ssh/nemar_ed25519") ||
-           config.includes(`IdentityFile ${paths.privateKey}`);
+    return (
+      config.includes("IdentityFile ~/.ssh/nemar_ed25519") ||
+      config.includes(`IdentityFile ${paths.privateKey}`)
+    );
   } catch {
     return false;
   }
@@ -146,7 +158,10 @@ export function configureSSHForGitHub(): { success: boolean; error?: string } {
     try {
       mkdirSync(paths.sshDir, { mode: 0o700 });
     } catch (error) {
-      return { success: false, error: `Cannot create ~/.ssh directory: ${(error as Error).message}` };
+      return {
+        success: false,
+        error: `Cannot create ~/.ssh directory: ${(error as Error).message}`,
+      };
     }
   }
 
@@ -171,7 +186,7 @@ Host github.com
       appendFileSync(paths.configFile, configEntry);
     } else {
       // Create new config file
-      writeFileSync(paths.configFile, configEntry.trim() + "\n", { mode: 0o600 });
+      writeFileSync(paths.configFile, `${configEntry.trim()}\n`, { mode: 0o600 });
     }
     return { success: true };
   } catch (error) {
@@ -192,9 +207,12 @@ export async function testGitHubSSH(): Promise<{
       cmd: [
         "ssh",
         "-T",
-        "-o", "BatchMode=yes",
-        "-o", "StrictHostKeyChecking=accept-new",
-        "-o", "ConnectTimeout=10",
+        "-o",
+        "BatchMode=yes",
+        "-o",
+        "StrictHostKeyChecking=accept-new",
+        "-o",
+        "ConnectTimeout=10",
         "git@github.com",
       ],
       stdout: "pipe",
