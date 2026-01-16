@@ -141,6 +141,7 @@ adminRoutes.post("/approve/:username", async (c) => {
   // Create per-user IAM credentials for S3 access
   let iamSetupSuccess = false;
   let iamUsername = "";
+  let iamSetupError = "";
   try {
     // Check if encryption key is configured
     if (!c.env.ENCRYPTION_KEY) {
@@ -155,7 +156,7 @@ adminRoutes.post("/approve/:username", async (c) => {
         region: c.env.AWS_REGION,
       },
       c.env.S3_BUCKET,
-      user.username
+      user.username,
     );
 
     iamUsername = iamResult.iamUsername;
@@ -173,7 +174,7 @@ adminRoutes.post("/approve/:username", async (c) => {
           aws_access_key_id_encrypted = ?,
           aws_secret_access_key_encrypted = ?
       WHERE id = ?
-    `
+    `,
       )
       .bind(iamUsername, encryptedAccessKeyId, encryptedSecretAccessKey, user.id)
       .run();
@@ -181,6 +182,7 @@ adminRoutes.post("/approve/:username", async (c) => {
     iamSetupSuccess = true;
   } catch (error) {
     console.error("Failed to setup IAM access for user:", error);
+    iamSetupError = error instanceof Error ? error.message : "Unknown error";
     // Continue with approval even if IAM setup fails
     // Admin can manually set up IAM later
   }
@@ -253,7 +255,10 @@ adminRoutes.post("/approve/:username", async (c) => {
     email_sent: emailSent,
     iam_setup: iamSetupSuccess,
     iam_username: iamUsername || undefined,
-    warning: !iamSetupSuccess ? "IAM setup failed. User will not be able to upload datasets until IAM is configured manually." : undefined,
+    iam_error: iamSetupError || undefined,
+    warning: !iamSetupSuccess
+      ? `IAM setup failed: ${iamSetupError}. User will not be able to upload datasets until IAM is configured manually.`
+      : undefined,
   });
 });
 
