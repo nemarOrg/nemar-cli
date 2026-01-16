@@ -180,11 +180,25 @@ adminCommand
       console.log();
       console.log(`  Email: ${result.user.email}`);
       console.log(`  Status: ${chalk.green(result.user.status)}`);
+
+      // Show IAM setup status
+      if (result.iam_setup === true) {
+        console.log(`  S3 Access: ${chalk.green("configured")}`);
+      } else if (result.iam_setup === false) {
+        console.log(`  S3 Access: ${chalk.red("NOT configured")}`);
+      }
+
       console.log();
       console.log(chalk.yellow("API Key (shown once):"));
       console.log(chalk.gray(`  ${result.api_key}`));
       console.log();
       console.log(chalk.gray("The user has also been emailed their API key"));
+
+      // Show warning if IAM setup failed
+      if (result.warning) {
+        console.log();
+        console.log(chalk.yellow(`Warning: ${result.warning}`));
+      }
     } catch (error) {
       if (error instanceof ApiError) {
         spinner.fail(error.message);

@@ -209,6 +209,9 @@ export interface ApproveResponse {
     status: string;
   };
   api_key: string;
+  iam_setup?: boolean;
+  iam_username?: string;
+  warning?: string;
 }
 
 /**
