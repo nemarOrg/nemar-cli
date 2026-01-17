@@ -18,7 +18,15 @@ import chalk from "chalk";
 import { Command } from "commander";
 import inquirer from "inquirer";
 import ora from "ora";
-import { ApiError, getCurrentUser, login, resendVerification, signup } from "../lib/api.js";
+import {
+  ApiError,
+  checkGitHubUsername,
+  checkUsername,
+  getCurrentUser,
+  login,
+  resendVerification,
+  signup,
+} from "../lib/api.js";
 import {
   clearConfig,
   getConfig,
@@ -186,7 +194,7 @@ export async function signupAction(): Promise<void> {
       type: "input",
       name: "username",
       message: "Choose a username:",
-      validate: (input) => {
+      validate: async (input) => {
         if (!input || input.length < 3) {
           return "Username must be at least 3 characters";
         }
@@ -195,6 +203,21 @@ export async function signupAction(): Promise<void> {
         }
         if (!/^[a-zA-Z0-9_-]+$/.test(input)) {
           return "Username can only contain letters, numbers, underscores, and hyphens";
+        }
+        // Check availability with backend
+        try {
+          const result = await checkUsername(input);
+          if (!result.available) {
+            return result.reason || `Username "${input}" is already taken`;
+          }
+        } catch (error) {
+          // Only allow network errors to pass; report other issues
+          if (error instanceof ApiError && error.statusCode === 0) {
+            // Network error - will be validated at signup
+            return true;
+          }
+          // Server error or unexpected issue - let user know
+          return true; // Don't block signup, backend will validate
         }
         return true;
       },
@@ -241,21 +264,35 @@ export async function signupAction(): Promise<void> {
       type: "input",
       name: "github_username",
       message: "GitHub username (for PR collaboration):",
-      validate: (input) => {
+      validate: async (input) => {
         if (!input || input.length < 1) {
           return "GitHub username is required for PR collaboration";
         }
         if (input.length > 39) {
           return "GitHub username is too long";
         }
+        // Validate GitHub username exists via backend
+        try {
+          const result = await checkGitHubUsername(input);
+          if (!result.valid) {
+            return `GitHub user "${input}" not found. Please check the username.`;
+          }
+        } catch (error) {
+          // Only allow network errors to pass; report other issues
+          if (error instanceof ApiError && error.statusCode === 0) {
+            // Network error - will be validated at signup
+            return true;
+          }
+          // Server error or unexpected issue - let user know
+          return true; // Don't block signup, backend will validate
+        }
         return true;
       },
     },
     {
-      type: "editor",
+      type: "input",
       name: "description",
-      message: "Why do you need access to NEMAR? (Opens editor, min 20 chars):",
-      default: "I am requesting NEMAR access because:\n\n",
+      message: "Why do you need access to NEMAR? (1-2 sentences):",
       validate: (input) => {
         const trimmed = input?.trim();
         if (!trimmed || trimmed.length < 20) {

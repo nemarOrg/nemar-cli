@@ -15,6 +15,57 @@ import { validateGitHubUsername } from "../services/github";
 
 export const authRoutes = new Hono<{ Bindings: Bindings; Variables: Variables }>();
 
+/**
+ * GET /auth/check-username - Check if username is available
+ */
+authRoutes.get("/check-username", async (c) => {
+  const username = c.req.query("username")?.trim();
+
+  if (!username) {
+    return c.json({ error: "Username required" }, 400);
+  }
+
+  // Validate format
+  if (username.length < 3 || username.length > 30) {
+    return c.json({ available: false, reason: "Username must be 3-30 characters" });
+  }
+  if (!/^[a-zA-Z0-9_-]+$/.test(username)) {
+    return c.json({ available: false, reason: "Username can only contain letters, numbers, underscores, and hyphens" });
+  }
+
+  try {
+    const db = c.env.DB;
+    const existing = await db
+      .prepare("SELECT id FROM users WHERE username = ? COLLATE NOCASE")
+      .bind(username)
+      .first();
+
+    return c.json({ available: !existing });
+  } catch (error) {
+    console.error("Database error in check-username:", error);
+    return c.json({ error: "Unable to check username availability" }, 503);
+  }
+});
+
+/**
+ * GET /auth/check-github - Check if GitHub username exists
+ */
+authRoutes.get("/check-github", async (c) => {
+  const username = c.req.query("username")?.trim();
+
+  if (!username) {
+    return c.json({ error: "GitHub username required" }, 400);
+  }
+
+  try {
+    const githubUser = await validateGitHubUsername(username, c.env.GITHUB_ADMIN_PAT);
+    return c.json({ valid: !!githubUser, username: githubUser?.login });
+  } catch (error) {
+    console.error("GitHub API error in check-github:", error);
+    return c.json({ error: "Unable to verify GitHub username" }, 503);
+  }
+});
+
 // Signup request schema
 const signupSchema = z.object({
   username: z

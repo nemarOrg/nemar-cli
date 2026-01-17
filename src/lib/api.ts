@@ -89,6 +89,38 @@ async function request<T>(
 // Authentication
 // ============================================================================
 
+// ============================================================================
+// Pre-signup validation
+// ============================================================================
+
+export interface CheckUsernameResponse {
+  available: boolean;
+  reason?: string;
+}
+
+/**
+ * Check if a username is available
+ */
+export async function checkUsername(username: string): Promise<CheckUsernameResponse> {
+  return request<CheckUsernameResponse>(
+    `/auth/check-username?username=${encodeURIComponent(username)}`,
+  );
+}
+
+export interface CheckGitHubResponse {
+  valid: boolean;
+  username?: string;
+}
+
+/**
+ * Check if a GitHub username exists
+ */
+export async function checkGitHubUsername(username: string): Promise<CheckGitHubResponse> {
+  return request<CheckGitHubResponse>(
+    `/auth/check-github?username=${encodeURIComponent(username)}`,
+  );
+}
+
 export interface SignupRequest {
   username: string;
   email: string;
