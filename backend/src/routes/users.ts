@@ -20,14 +20,17 @@ userRoutes.get("/me", async (c) => {
   const user = c.get("user");
   const db = c.env.DB;
 
-  // Get additional user details
+  // Get additional user details including sandbox status
   const userDetails = await db
     .prepare(
       `
     SELECT
       created_at,
       approved_at,
-      (SELECT COUNT(*) FROM datasets WHERE owner_user_id = ?) as dataset_count
+      sandbox_completed,
+      sandbox_completed_at,
+      sandbox_dataset_id,
+      (SELECT COUNT(*) FROM datasets WHERE owner_user_id = ? AND is_sandbox = 0) as dataset_count
     FROM users
     WHERE id = ?
   `
@@ -36,6 +39,9 @@ userRoutes.get("/me", async (c) => {
     .first<{
       created_at: string;
       approved_at: string;
+      sandbox_completed: number;
+      sandbox_completed_at: string | null;
+      sandbox_dataset_id: string | null;
       dataset_count: number;
     }>();
 
@@ -67,6 +73,9 @@ userRoutes.get("/me", async (c) => {
       created_at: userDetails?.created_at,
       approved_at: userDetails?.approved_at,
       dataset_count: userDetails?.dataset_count || 0,
+      sandbox_completed: !!userDetails?.sandbox_completed,
+      sandbox_completed_at: userDetails?.sandbox_completed_at,
+      sandbox_dataset_id: userDetails?.sandbox_dataset_id,
     },
     token: tokenInfo
       ? {

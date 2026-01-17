@@ -44,7 +44,11 @@ const createDatasetSchema = z.object({
   name: z.string().min(1, "Name is required").max(200),
   description: z.string().optional(),
   files: z.array(fileSchema).optional(),
+  sandbox: z.boolean().optional(), // If true, creates sandbox dataset (xx000XXX)
 });
+
+// Sandbox file size limit: 10MB total
+const SANDBOX_MAX_TOTAL_SIZE = 10 * 1024 * 1024;
 
 /**
  * POST /datasets - Create a new dataset
@@ -53,9 +57,39 @@ const createDatasetSchema = z.object({
  * Uses per-user AWS credentials for scoped S3 access.
  */
 datasetRoutes.post("/", authMiddleware, zValidator("json", createDatasetSchema), async (c) => {
-  const { name, description, files } = c.req.valid("json");
+  const { name, description, files, sandbox } = c.req.valid("json");
   const user = c.get("user");
   const db = c.env.DB;
+
+  // Check if non-sandbox upload requires sandbox training
+  if (!sandbox) {
+    const userStatus = await db
+      .prepare("SELECT sandbox_completed FROM users WHERE id = ?")
+      .bind(user.id)
+      .first<{ sandbox_completed: number }>();
+
+    if (!userStatus?.sandbox_completed) {
+      return c.json({
+        error: "Sandbox training required",
+        message: "You must complete sandbox training before uploading real datasets. Run 'nemar sandbox' to complete training.",
+      }, 403);
+    }
+  }
+
+  // Validate sandbox file size limit
+  if (sandbox && files && files.length > 0) {
+    const totalSize = files.reduce((sum, f) => sum + f.size, 0);
+    if (totalSize > SANDBOX_MAX_TOTAL_SIZE) {
+      const sizeMB = (totalSize / (1024 * 1024)).toFixed(2);
+      const limitMB = (SANDBOX_MAX_TOTAL_SIZE / (1024 * 1024)).toFixed(0);
+      return c.json({
+        error: "Sandbox file size limit exceeded",
+        message: `Sandbox datasets are limited to ${limitMB}MB total. Your dataset is ${sizeMB}MB. Sandbox is for testing the workflow, not storing real data.`,
+        total_size: totalSize,
+        limit: SANDBOX_MAX_TOTAL_SIZE,
+      }, 400);
+    }
+  }
 
   // Get user's AWS credentials
   const userCreds = await db
@@ -91,8 +125,8 @@ datasetRoutes.post("/", authMiddleware, zValidator("json", createDatasetSchema),
     return c.json({ error: "Failed to access S3 credentials" }, 500);
   }
 
-  // Generate dataset ID
-  const datasetId = await generateDatasetId(db);
+  // Generate dataset ID (xx000XXX for sandbox, nm000XXX for regular)
+  const datasetId = await generateDatasetId(db, !!sandbox);
 
   // Create GitHub repository
   let githubRepo;
@@ -100,7 +134,7 @@ datasetRoutes.post("/", authMiddleware, zValidator("json", createDatasetSchema),
     githubRepo = await createRepository(
       datasetId,
       `${name} - NEMAR Dataset`,
-      false, // Public for collaboration
+      true, // Private - owner added as collaborator
       c.env.GITHUB_ADMIN_PAT
     );
   } catch (error) {
@@ -200,11 +234,11 @@ datasetRoutes.post("/", authMiddleware, zValidator("json", createDatasetSchema),
   await db
     .prepare(
       `
-    INSERT INTO datasets (dataset_id, name, description, owner_user_id, github_repo)
-    VALUES (?, ?, ?, ?, ?)
+    INSERT INTO datasets (dataset_id, name, description, owner_user_id, github_repo, is_sandbox)
+    VALUES (?, ?, ?, ?, ?, ?)
   `
     )
-    .bind(datasetId, name, description || null, user.id, githubRepo.full_name)
+    .bind(datasetId, name, description || null, user.id, githubRepo.full_name, sandbox ? 1 : 0)
     .run();
 
   // Audit log
@@ -280,6 +314,10 @@ datasetRoutes.get("/", optionalAuthMiddleware, async (c) => {
     }
     query += " AND d.owner_user_id = ?";
     params.push(user.id);
+    // User can see their own sandbox datasets
+  } else {
+    // Public listings should not include sandbox datasets
+    query += " AND (d.is_sandbox = 0 OR d.is_sandbox IS NULL)";
   }
 
   query += " ORDER BY d.created_at DESC LIMIT ? OFFSET ?";
@@ -449,78 +487,93 @@ datasetRoutes.post("/:id/finalize", authMiddleware, async (c) => {
   const user = c.get("user");
   const db = c.env.DB;
 
-  // Verify dataset exists and user is owner
-  const dataset = await db
-    .prepare("SELECT owner_user_id, github_repo, status FROM datasets WHERE dataset_id = ?")
-    .bind(datasetId)
-    .first<{ owner_user_id: number; github_repo: string; status: string }>();
-
-  if (!dataset) {
-    return c.json({ error: "Dataset not found" }, 404);
-  }
-
-  if (dataset.owner_user_id !== user.id && !user.is_admin) {
-    return c.json({ error: "Only dataset owner can finalize upload" }, 403);
-  }
-
-  if (dataset.status === "published") {
-    return c.json({ error: "Dataset is already published" }, 400);
-  }
-
-  // Deploy GitHub Actions workflows
   try {
-    const workflowResult = await deployWorkflows(datasetId, c.env.GITHUB_ADMIN_PAT);
-    if (!workflowResult.success) {
-      console.error("Failed to deploy some workflows:", workflowResult.errors);
+    // Verify dataset exists and user is owner
+    const dataset = await db
+      .prepare("SELECT owner_user_id, github_repo, status FROM datasets WHERE dataset_id = ?")
+      .bind(datasetId)
+      .first<{ owner_user_id: number; github_repo: string; status: string }>();
+
+    if (!dataset) {
+      return c.json({ error: "Dataset not found" }, 404);
     }
-  } catch (error) {
-    console.error("Failed to deploy workflows:", error);
-    // Continue anyway; not a fatal error
-  }
 
-  // Apply branch protection (requires workflows to be deployed first for status checks)
-  try {
-    await applyBranchProtection(datasetId, c.env.GITHUB_ADMIN_PAT);
-  } catch (error) {
-    console.error("Failed to apply branch protection:", error);
-    // Continue anyway; not a fatal error
-  }
+    if (dataset.owner_user_id !== user.id && !user.is_admin) {
+      return c.json({ error: "Only dataset owner can finalize upload" }, 403);
+    }
 
-  // Enable auto-merge
-  try {
-    await enableAutoMerge(datasetId, c.env.GITHUB_ADMIN_PAT);
-  } catch (error) {
-    console.error("Failed to enable auto-merge:", error);
-    // Continue anyway; not a fatal error
-  }
+    // Note: We could track finalization state separately if needed
+    // For now, finalize is idempotent - can be called multiple times
 
-  // Update dataset status
-  await db
-    .prepare("UPDATE datasets SET status = 'published', updated_at = CURRENT_TIMESTAMP WHERE dataset_id = ?")
-    .bind(datasetId)
-    .run();
+    // Track warnings for non-fatal operations
+    const warnings: string[] = [];
 
-  // Audit log
-  await db
-    .prepare(
+    // Deploy GitHub Actions workflows
+    try {
+      const workflowResult = await deployWorkflows(datasetId, c.env.GITHUB_ADMIN_PAT);
+      if (!workflowResult.success) {
+        console.error("Failed to deploy some workflows:", workflowResult.errors);
+        warnings.push("Some GitHub workflows could not be deployed; PR-based uploads may not work correctly");
+      }
+    } catch (error) {
+      console.error("Failed to deploy workflows:", error);
+      warnings.push("GitHub workflow deployment failed");
+    }
+
+    // Apply branch protection (requires workflows to be deployed first for status checks)
+    try {
+      await applyBranchProtection(datasetId, c.env.GITHUB_ADMIN_PAT);
+    } catch (error) {
+      console.error("Failed to apply branch protection:", error);
+      warnings.push("Branch protection could not be applied; direct pushes to main may be possible");
+    }
+
+    // Enable auto-merge
+    try {
+      await enableAutoMerge(datasetId, c.env.GITHUB_ADMIN_PAT);
+    } catch (error) {
+      console.error("Failed to enable auto-merge:", error);
+      warnings.push("Auto-merge could not be enabled; PRs will need manual merging");
+    }
+
+    // Update dataset timestamp (status remains 'active' per schema constraint)
+    await db
+      .prepare("UPDATE datasets SET updated_at = CURRENT_TIMESTAMP WHERE dataset_id = ?")
+      .bind(datasetId)
+      .run();
+
+    // Audit log (non-fatal; don't fail the operation if this fails)
+    try {
+      await db
+        .prepare(
+          `
+        INSERT INTO audit_log (user_id, action, resource_type, resource_id, details)
+        VALUES (?, 'dataset_finalized', 'dataset', ?, ?)
       `
-    INSERT INTO audit_log (user_id, action, resource_type, resource_id, details)
-    VALUES (?, 'dataset_published', 'dataset', ?, ?)
-  `
-    )
-    .bind(user.id, datasetId, JSON.stringify({ status: "published" }))
-    .run();
+        )
+        .bind(user.id, datasetId, JSON.stringify({ finalized: true, warnings }))
+        .run();
+    } catch (auditError) {
+      console.error(`Failed to write audit log for dataset ${datasetId} finalization:`, auditError);
+      // Continue; audit log failure should not fail the operation
+    }
 
-  const githubUrl = `https://github.com/${dataset.github_repo}`;
+    const githubUrl = `https://github.com/${dataset.github_repo}`;
 
-  return c.json({
-    message: "Dataset published successfully",
-    dataset: {
-      dataset_id: datasetId,
-      status: "published",
-      github_url: githubUrl,
-    },
-  });
+    return c.json({
+      message: warnings.length > 0 ? "Dataset finalized with warnings" : "Dataset finalized successfully",
+      warnings: warnings.length > 0 ? warnings : undefined,
+      dataset: {
+        dataset_id: datasetId,
+        status: "active",
+        github_url: githubUrl,
+      },
+    });
+  } catch (error) {
+    console.error("Error finalizing dataset:", error);
+    const errorMessage = error instanceof Error ? error.message : "Unknown error";
+    return c.json({ error: "Failed to finalize dataset", details: errorMessage }, 500);
+  }
 });
 
 /**

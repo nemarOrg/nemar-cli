@@ -352,7 +352,9 @@ authRoutes.post("/login", zValidator("json", loginSchema), async (c) => {
       u.email,
       u.github_username,
       u.status,
-      u.is_admin
+      u.is_admin,
+      u.sandbox_completed,
+      u.sandbox_dataset_id
     FROM tokens t
     JOIN users u ON t.user_id = u.id
     WHERE t.api_key_hash = ?
@@ -369,6 +371,8 @@ authRoutes.post("/login", zValidator("json", loginSchema), async (c) => {
       github_username: string;
       status: string;
       is_admin: number;
+      sandbox_completed: number;
+      sandbox_dataset_id: string | null;
     }>();
 
   if (!result) {
@@ -398,6 +402,8 @@ authRoutes.post("/login", zValidator("json", loginSchema), async (c) => {
       email: result.email,
       github_username: result.github_username,
       is_admin: result.is_admin === 1,
+      sandbox_completed: result.sandbox_completed === 1,
+      sandbox_dataset_id: result.sandbox_dataset_id,
     },
   });
 });

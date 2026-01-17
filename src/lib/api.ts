@@ -123,6 +123,8 @@ export interface LoginResponse {
     email: string;
     github_username: string;
     is_admin: boolean;
+    sandbox_completed: boolean;
+    sandbox_dataset_id?: string;
   };
 }
 
@@ -162,6 +164,8 @@ export interface UserInfo {
   status: string;
   is_admin: boolean;
   created_at: string;
+  sandbox_completed: boolean;
+  sandbox_dataset_id?: string;
 }
 
 /**
@@ -278,6 +282,25 @@ export async function revokeUser(username: string): Promise<{ message: string }>
   );
 }
 
+export interface RegenerateIamResponse {
+  message: string;
+  user: {
+    username: string;
+    iam_username: string;
+  };
+  datasets_restored: number;
+}
+
+export async function regenerateUserIam(username: string): Promise<RegenerateIamResponse> {
+  return request<RegenerateIamResponse>(
+    `/admin/regenerate-iam/${username}`,
+    {
+      method: "POST",
+    },
+    true,
+  );
+}
+
 // ============================================================================
 // Datasets
 // ============================================================================
@@ -328,6 +351,7 @@ export interface CreateDatasetRequest {
   name: string;
   description?: string;
   files?: FileInfo[];
+  sandbox?: boolean; // If true, creates sandbox dataset with xx000xxx ID
 }
 
 export interface CreateDatasetResponse {
@@ -580,4 +604,56 @@ export interface ListCollaboratorsResponse {
  */
 export async function listCollaborators(datasetId: string): Promise<ListCollaboratorsResponse> {
   return request<ListCollaboratorsResponse>(`/datasets/${datasetId}/collaborators`, {}, true);
+}
+
+// ============================================================================
+// Sandbox Training
+// ============================================================================
+
+export interface SandboxCompleteResponse {
+  message: string;
+  sandbox_completed: boolean;
+  sandbox_dataset_id: string;
+}
+
+/**
+ * Mark sandbox training as complete (called after successful sandbox upload)
+ */
+export async function completeSandbox(datasetId: string): Promise<SandboxCompleteResponse> {
+  return request<SandboxCompleteResponse>(
+    "/sandbox/complete",
+    {
+      method: "POST",
+      body: JSON.stringify({ dataset_id: datasetId }),
+    },
+    true,
+  );
+}
+
+/**
+ * Reset sandbox training status (for testing or re-training)
+ */
+export async function resetSandbox(): Promise<{ message: string }> {
+  return request<{ message: string }>(
+    "/sandbox/reset",
+    {
+      method: "POST",
+    },
+    true,
+  );
+}
+
+/**
+ * Get sandbox training status
+ */
+export async function getSandboxStatus(): Promise<{
+  sandbox_completed: boolean;
+  sandbox_dataset_id?: string;
+  sandbox_completed_at?: string;
+}> {
+  return request<{
+    sandbox_completed: boolean;
+    sandbox_dataset_id?: string;
+    sandbox_completed_at?: string;
+  }>("/sandbox/status", {}, true);
 }

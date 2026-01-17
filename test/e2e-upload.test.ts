@@ -10,6 +10,12 @@
  *
  * Tests will skip gracefully if prerequisites are not met.
  *
+ * Environment variables:
+ * - TEST_SANDBOX_DATASET_ID: Target a specific sandbox dataset (xx prefix) for upload tests
+ *                            If not set, tests use --dry-run mode only
+ * - TEST_CREATE_SANDBOX: Set to "true" to create new sandbox datasets during tests
+ *                        (safer than creating real nm-prefix datasets)
+ *
  * Run with: bun test test/e2e-upload.test.ts
  */
 
@@ -22,6 +28,10 @@ import { TEST_CONFIG } from "./setup";
 // Test dataset directory
 const TEST_DIR = "/tmp/test-bids-upload";
 const TEST_CONFIG_DIR = join(import.meta.dir, ".e2e-config");
+
+// Environment configuration for sandbox testing
+const TEST_SANDBOX_DATASET_ID = process.env.TEST_SANDBOX_DATASET_ID; // e.g., "xx000001"
+const TEST_CREATE_SANDBOX = process.env.TEST_CREATE_SANDBOX === "true";
 
 interface Prerequisites {
   datalad: boolean;
@@ -223,11 +233,12 @@ describe("E2E Upload Tests", () => {
     // Create test dataset
     createTestBidsDataset(TEST_DIR);
 
-    // Set up auth config
+    // Set up auth config (sandboxCompleted: true to test upload flow)
     setTestConfig({
       apiKey: TEST_CONFIG.userApiKey,
       apiUrl: TEST_CONFIG.apiUrl,
       username: "test-user",
+      sandboxCompleted: true,
     });
 
     // Run upload with --dry-run
@@ -261,11 +272,12 @@ describe("E2E Upload Tests", () => {
     // Create test dataset
     createTestBidsDataset(TEST_DIR);
 
-    // Set up auth config
+    // Set up auth config (sandboxCompleted: true to reach prereq check)
     setTestConfig({
       apiKey: TEST_CONFIG.userApiKey,
       apiUrl: TEST_CONFIG.apiUrl,
       username: "test-user",
+      sandboxCompleted: true,
     });
 
     // Run upload - should show prereq errors for missing items
@@ -299,11 +311,12 @@ describe("E2E Upload Tests", () => {
     cleanup();
     createTestBidsDataset(TEST_DIR);
 
-    // Set up auth config with real credentials
+    // Set up auth config with real credentials (sandboxCompleted: true to test upload flow)
     setTestConfig({
       apiKey: TEST_CONFIG.userApiKey,
       apiUrl: TEST_CONFIG.apiUrl,
       username: "test-user",
+      sandboxCompleted: true,
     });
 
     // Run upload with --dry-run to avoid creating real datasets
@@ -331,6 +344,46 @@ describe("E2E Upload Tests", () => {
     expect(output).toContain("Upload Plan:");
     expect(output).toContain("E2E-Test-Dataset");
     expect(output).toContain("Dry run mode");
+    expect(exitCode).toBe(0);
+  });
+
+  test("sandbox upload creates dataset with xx prefix (requires TEST_CREATE_SANDBOX=true)", async () => {
+    if (!allPrereqsMet) {
+      console.log("   Skipping: Not all prerequisites met");
+      return;
+    }
+
+    if (!TEST_CREATE_SANDBOX) {
+      console.log("   Skipping: TEST_CREATE_SANDBOX not set (set to 'true' to run actual sandbox uploads)");
+      return;
+    }
+
+    // Create fresh test dataset
+    cleanup();
+    createTestBidsDataset(TEST_DIR);
+
+    // Set up auth config - sandboxCompleted can be false since we're creating a sandbox dataset
+    setTestConfig({
+      apiKey: TEST_CONFIG.userApiKey,
+      apiUrl: TEST_CONFIG.apiUrl,
+      username: "test-user",
+      sandboxCompleted: false, // Sandbox creation doesn't require prior sandbox completion
+    });
+
+    // Run sandbox training which creates a sandbox dataset
+    const { stdout, stderr, exitCode } = await runCli([
+      "sandbox",
+      "--yes", // Skip confirmation
+    ]);
+
+    console.log("Sandbox stdout:", stdout);
+    if (stderr) console.log("Sandbox stderr:", stderr);
+
+    // Verify sandbox completed
+    const output = stdout + stderr;
+    expect(output).toContain("Sandbox training complete");
+    // Sandbox datasets should have xx prefix
+    expect(output).toMatch(/xx\d{6}/);
     expect(exitCode).toBe(0);
   });
 });
