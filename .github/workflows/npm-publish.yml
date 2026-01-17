@@ -133,7 +133,7 @@ jobs:
 
       - name: Publish to npm
         if: steps.version.outputs.skip_publish == 'false'
-        run: npm publish --tag ${{ steps.version.outputs.tag }} --provenance --access public
+        run: npm publish --tag ${{ steps.version.outputs.tag }} --provenance --access public --loglevel verbose 2>&1 || (cat ~/.npm/_logs/*.log && exit 1)
 
       - name: Skip publish notice
         if: steps.version.outputs.skip_publish == 'true'
