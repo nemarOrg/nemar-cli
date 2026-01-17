@@ -1,9 +1,17 @@
 name: Publish to npm
 
+# Handles both tag-based releases and branch-based pre-releases:
+# - Tags (v*): Stable releases with version from tag
+# - dev branch: dev tag with build number
+# - feature branches: feature-{pr-number} or feature-{sha} tag
+
 on:
   push:
     tags:
       - 'v*'
+    branches:
+      - dev
+      - 'feature/**'
 
 jobs:
   publish:
@@ -12,6 +20,8 @@ jobs:
     permissions:
       contents: read
       id-token: write  # Required for OIDC authentication
+      pull-requests: read  # To find associated PR number for feature branches
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -33,25 +43,75 @@ jobs:
           node-version: '20'
           registry-url: 'https://registry.npmjs.org'
 
-      - name: Determine npm tag
-        id: npm-tag
+      - name: Determine version and tag
+        id: version
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          VERSION="${GITHUB_REF#refs/tags/v}"
-          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          # Check if this is a tag push or branch push
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            # Tag-based release
+            VERSION="${GITHUB_REF#refs/tags/v}"
+            echo "version=$VERSION" >> $GITHUB_OUTPUT
+            echo "is_tag=true" >> $GITHUB_OUTPUT
 
-          # Check if pre-release (contains -)
-          if [[ "$VERSION" == *-* ]]; then
-            # Extract pre-release type (dev, alpha, beta, rc)
-            PRERELEASE="${VERSION#*-}"
-            PRERELEASE_TYPE="${PRERELEASE%%.*}"
-            echo "tag=$PRERELEASE_TYPE" >> $GITHUB_OUTPUT
-            echo "Pre-release version: $VERSION (tag: $PRERELEASE_TYPE)"
+            # Check if pre-release (contains -)
+            if [[ "$VERSION" == *-* ]]; then
+              PRERELEASE="${VERSION#*-}"
+              PRERELEASE_TYPE="${PRERELEASE%%.*}"
+              echo "tag=$PRERELEASE_TYPE" >> $GITHUB_OUTPUT
+              echo "Tag release: $VERSION (tag: $PRERELEASE_TYPE)"
+            else
+              echo "tag=latest" >> $GITHUB_OUTPUT
+              echo "Stable release: $VERSION (tag: latest)"
+            fi
           else
-            echo "tag=latest" >> $GITHUB_OUTPUT
-            echo "Stable release: $VERSION (tag: latest)"
+            # Branch-based pre-release
+            BRANCH="${GITHUB_REF#refs/heads/}"
+            BASE_VERSION=$(jq -r '.version' package.json)
+            # Strip any existing pre-release suffix
+            BASE_VERSION="${BASE_VERSION%%-*}"
+            RUN_NUMBER="${GITHUB_RUN_NUMBER}"
+            SHORT_SHA="${GITHUB_SHA:0:7}"
+
+            echo "branch=$BRANCH" >> $GITHUB_OUTPUT
+            echo "is_tag=false" >> $GITHUB_OUTPUT
+
+            if [ "$BRANCH" = "dev" ]; then
+              VERSION="${BASE_VERSION}-dev.${RUN_NUMBER}"
+              TAG="dev"
+              echo "Dev branch: $VERSION (tag: $TAG)"
+            else
+              # Feature branch: try to find associated PR number
+              PR_NUMBER=""
+
+              # Check if branch name contains a number
+              if [[ "$BRANCH" =~ [0-9]+ ]]; then
+                PR_NUMBER=$(echo "$BRANCH" | grep -oE '[0-9]+' | head -1)
+              fi
+
+              # If no number in branch name, try to find open PR
+              if [ -z "$PR_NUMBER" ]; then
+                PR_NUMBER=$(gh pr list --head "$BRANCH" --state open --json number --jq '.[0].number // empty' 2>/dev/null || true)
+              fi
+
+              if [ -n "$PR_NUMBER" ]; then
+                VERSION="${BASE_VERSION}-feature.${PR_NUMBER}.${RUN_NUMBER}"
+                TAG="feature-${PR_NUMBER}"
+                echo "Feature branch with PR #$PR_NUMBER: $VERSION (tag: $TAG)"
+              else
+                VERSION="${BASE_VERSION}-feature.${SHORT_SHA}.${RUN_NUMBER}"
+                TAG="feature-${SHORT_SHA}"
+                echo "Feature branch (no PR): $VERSION (tag: $TAG)"
+              fi
+            fi
+
+            echo "version=$VERSION" >> $GITHUB_OUTPUT
+            echo "tag=$TAG" >> $GITHUB_OUTPUT
           fi
 
-      - name: Verify version matches
+      - name: Verify version matches (tag releases only)
+        if: steps.version.outputs.is_tag == 'true'
         run: |
           PACKAGE_VERSION=$(jq -r '.version' package.json)
           TAG_VERSION="${GITHUB_REF#refs/tags/v}"
@@ -63,24 +123,39 @@ jobs:
 
           echo "Version verified: $PACKAGE_VERSION"
 
+      - name: Update package.json version (branch releases only)
+        if: steps.version.outputs.is_tag == 'false'
+        run: |
+          jq --arg v "${{ steps.version.outputs.version }}" '.version = $v' package.json > package.json.tmp
+          mv package.json.tmp package.json
+          echo "Updated package.json to version ${{ steps.version.outputs.version }}"
+
+      - name: Rebuild with new version (branch releases only)
+        if: steps.version.outputs.is_tag == 'false'
+        run: bun run build
+
       - name: Publish to npm
-        run: npm publish --tag ${{ steps.npm-tag.outputs.tag }} --provenance --access public
-        # No NODE_AUTH_TOKEN needed - uses OIDC trusted publishing
+        run: npm publish --tag ${{ steps.version.outputs.tag }} --provenance --access public
 
       - name: Summary
         run: |
           echo "## Published to npm" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "- **Version:** ${{ steps.npm-tag.outputs.version }}" >> $GITHUB_STEP_SUMMARY
-          echo "- **Tag:** ${{ steps.npm-tag.outputs.tag }}" >> $GITHUB_STEP_SUMMARY
+          if [ "${{ steps.version.outputs.is_tag }}" = "true" ]; then
+            echo "- **Type:** Tag release" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "- **Type:** Branch release (${{ steps.version.outputs.branch }})" >> $GITHUB_STEP_SUMMARY
+          fi
+          echo "- **Version:** ${{ steps.version.outputs.version }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Tag:** ${{ steps.version.outputs.tag }}" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "Install with:" >> $GITHUB_STEP_SUMMARY
-          if [ "${{ steps.npm-tag.outputs.tag }}" = "latest" ]; then
+          if [ "${{ steps.version.outputs.tag }}" = "latest" ]; then
             echo "\`\`\`bash" >> $GITHUB_STEP_SUMMARY
             echo "npm install -g nemar-cli" >> $GITHUB_STEP_SUMMARY
             echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
           else
             echo "\`\`\`bash" >> $GITHUB_STEP_SUMMARY
-            echo "npm install -g nemar-cli@${{ steps.npm-tag.outputs.tag }}" >> $GITHUB_STEP_SUMMARY
+            echo "npm install -g nemar-cli@${{ steps.version.outputs.tag }}" >> $GITHUB_STEP_SUMMARY
             echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
           fi
