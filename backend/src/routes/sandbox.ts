@@ -17,7 +17,11 @@ sandboxRoutes.use("*", authMiddleware);
 
 // Validation schemas
 const completeSchema = z.object({
-  dataset_id: z.string().min(1, "dataset_id is required"),
+  // Sandbox dataset IDs must match format: xx followed by 6 digits
+  dataset_id: z
+    .string()
+    .min(1, "dataset_id is required")
+    .regex(/^xx\d{6}$/, "Invalid sandbox dataset ID format (expected xx000000)"),
 });
 
 /**

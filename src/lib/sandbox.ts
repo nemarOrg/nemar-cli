@@ -230,12 +230,18 @@ export function cleanupSandboxDataset(datasetPath: string): void {
     // Git-annex creates files with restricted permissions; fix before removal
     execSync(`chmod -R u+w "${datasetPath}" 2>/dev/null || true`, { stdio: "ignore" });
     rmSync(datasetPath, { recursive: true, force: true });
-  } catch {
+  } catch (error) {
     // If Node.js rmSync fails, fall back to shell rm -rf
     try {
       execSync(`rm -rf "${datasetPath}"`, { stdio: "ignore" });
-    } catch {
-      // Best effort cleanup; ignore errors
+    } catch (fallbackError) {
+      // Log warning so user knows cleanup failed
+      console.warn(
+        `Warning: Could not remove sandbox directory ${datasetPath}: ${
+          fallbackError instanceof Error ? fallbackError.message : String(fallbackError)
+        }`,
+      );
+      console.warn("You may need to manually remove this directory.");
     }
   }
 }
@@ -258,8 +264,12 @@ export function getSandboxDatasetSize(paths: SandboxDatasetPaths): number {
   for (const file of files) {
     try {
       totalSize += statSync(file).size;
-    } catch {
-      // File doesn't exist, skip
+    } catch (error) {
+      // Only ignore ENOENT (file not found); other errors indicate problems
+      const nodeError = error as NodeJS.ErrnoException;
+      if (nodeError.code !== "ENOENT") {
+        console.warn(`Warning: Could not stat ${file}: ${nodeError.message}`);
+      }
     }
   }
 

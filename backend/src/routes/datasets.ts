@@ -296,6 +296,10 @@ datasetRoutes.get("/", optionalAuthMiddleware, async (c) => {
     }
     query += " AND d.owner_user_id = ?";
     params.push(user.id);
+    // User can see their own sandbox datasets
+  } else {
+    // Public listings should not include sandbox datasets
+    query += " AND (d.is_sandbox = 0 OR d.is_sandbox IS NULL)";
   }
 
   query += " ORDER BY d.created_at DESC LIMIT ? OFFSET ?";
@@ -483,15 +487,19 @@ datasetRoutes.post("/:id/finalize", authMiddleware, async (c) => {
     // Note: We could track finalization state separately if needed
     // For now, finalize is idempotent - can be called multiple times
 
+    // Track warnings for non-fatal operations
+    const warnings: string[] = [];
+
     // Deploy GitHub Actions workflows
     try {
       const workflowResult = await deployWorkflows(datasetId, c.env.GITHUB_ADMIN_PAT);
       if (!workflowResult.success) {
         console.error("Failed to deploy some workflows:", workflowResult.errors);
+        warnings.push("Some GitHub workflows could not be deployed; PR-based uploads may not work correctly");
       }
     } catch (error) {
       console.error("Failed to deploy workflows:", error);
-      // Continue anyway; not a fatal error
+      warnings.push("GitHub workflow deployment failed");
     }
 
     // Apply branch protection (requires workflows to be deployed first for status checks)
@@ -499,7 +507,7 @@ datasetRoutes.post("/:id/finalize", authMiddleware, async (c) => {
       await applyBranchProtection(datasetId, c.env.GITHUB_ADMIN_PAT);
     } catch (error) {
       console.error("Failed to apply branch protection:", error);
-      // Continue anyway; not a fatal error
+      warnings.push("Branch protection could not be applied; direct pushes to main may be possible");
     }
 
     // Enable auto-merge
@@ -507,7 +515,7 @@ datasetRoutes.post("/:id/finalize", authMiddleware, async (c) => {
       await enableAutoMerge(datasetId, c.env.GITHUB_ADMIN_PAT);
     } catch (error) {
       console.error("Failed to enable auto-merge:", error);
-      // Continue anyway; not a fatal error
+      warnings.push("Auto-merge could not be enabled; PRs will need manual merging");
     }
 
     // Update dataset timestamp (status remains 'active' per schema constraint)
@@ -516,21 +524,27 @@ datasetRoutes.post("/:id/finalize", authMiddleware, async (c) => {
       .bind(datasetId)
       .run();
 
-    // Audit log
-    await db
-      .prepare(
-        `
-      INSERT INTO audit_log (user_id, action, resource_type, resource_id, details)
-      VALUES (?, 'dataset_finalized', 'dataset', ?, ?)
-    `
-      )
-      .bind(user.id, datasetId, JSON.stringify({ finalized: true }))
-      .run();
+    // Audit log (non-fatal; don't fail the operation if this fails)
+    try {
+      await db
+        .prepare(
+          `
+        INSERT INTO audit_log (user_id, action, resource_type, resource_id, details)
+        VALUES (?, 'dataset_finalized', 'dataset', ?, ?)
+      `
+        )
+        .bind(user.id, datasetId, JSON.stringify({ finalized: true, warnings }))
+        .run();
+    } catch (auditError) {
+      console.error(`Failed to write audit log for dataset ${datasetId} finalization:`, auditError);
+      // Continue; audit log failure should not fail the operation
+    }
 
     const githubUrl = `https://github.com/${dataset.github_repo}`;
 
     return c.json({
-      message: "Dataset finalized successfully",
+      message: warnings.length > 0 ? "Dataset finalized with warnings" : "Dataset finalized successfully",
+      warnings: warnings.length > 0 ? warnings : undefined,
       dataset: {
         dataset_id: datasetId,
         status: "active",

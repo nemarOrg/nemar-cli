@@ -212,16 +212,20 @@ async function sandboxAction(): Promise<void> {
       });
 
       if (result.failed.length > 0) {
-        uploadSpinner.warn(`Upload completed with ${result.failed.length} failures`);
+        uploadSpinner.fail(`Upload failed for ${result.failed.length} file(s)`);
         for (const failedFile of result.failed) {
           console.log(chalk.red(`    Failed: ${failedFile}`));
         }
         if (result.error) {
           console.log(chalk.red(`    Error: ${result.error}`));
         }
-      } else {
-        uploadSpinner.succeed(`Uploaded ${result.uploaded} file(s)`);
+        console.log();
+        console.log(chalk.yellow("Sandbox training aborted due to upload failures."));
+        console.log(chalk.gray("Please check your network connection and try again."));
+        cleanupSandboxDataset(datasetPath);
+        return;
       }
+      uploadSpinner.succeed(`Uploaded ${result.uploaded} file(s)`);
     } catch (error) {
       uploadSpinner.fail("Upload failed");
       console.log(chalk.red(`  ${error instanceof Error ? error.message : "Unknown error"}`));
@@ -240,12 +244,17 @@ async function sandboxAction(): Promise<void> {
 
       const registerResult = await registerUrlsWithGitAnnex(datasetPath, fileUrls);
       if (!registerResult.success) {
-        registerSpinner.warn(
-          `Some URLs could not be registered (${registerResult.failed.length} failed)`,
-        );
-      } else {
-        registerSpinner.succeed(`Registered ${registerResult.registered} file URLs`);
+        registerSpinner.fail(`URL registration failed for ${registerResult.failed.length} file(s)`);
+        for (const failedFile of registerResult.failed) {
+          console.log(chalk.red(`    Failed: ${failedFile}`));
+        }
+        console.log();
+        console.log(chalk.yellow("Sandbox training aborted due to URL registration failures."));
+        console.log(chalk.gray("This may indicate a git-annex configuration issue."));
+        cleanupSandboxDataset(datasetPath);
+        return;
       }
+      registerSpinner.succeed(`Registered ${registerResult.registered} file URLs`);
     } catch (error) {
       registerSpinner.fail("Failed to register URLs");
       console.log(chalk.red(`  ${error instanceof Error ? error.message : "Unknown error"}`));
