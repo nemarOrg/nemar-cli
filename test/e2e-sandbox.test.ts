@@ -173,6 +173,10 @@ describe("E2E Sandbox Tests", () => {
       const result = runCli(["dataset", "validate", sampleDatasetDir]);
       // A minimal BIDS dataset (just description + README) should pass validation
       // It may have warnings about empty dataset, but should exit 0
+      if (result.exitCode !== 0) {
+        console.log("Validation failed with stdout:", result.stdout);
+        console.log("Validation failed with stderr:", result.stderr);
+      }
       expect(result.exitCode).toBe(0);
     });
 
@@ -199,6 +203,10 @@ describe("E2E Sandbox Tests", () => {
 
     test.skipIf(shouldSkip)("nemar dataset list --mine shows user datasets", () => {
       const result = runCli(["dataset", "list", "--mine"]);
+      if (result.exitCode !== 0) {
+        console.log("List --mine failed with stdout:", result.stdout);
+        console.log("List --mine failed with stderr:", result.stderr);
+      }
       expect(result.exitCode).toBe(0);
     });
   });

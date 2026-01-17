@@ -149,20 +149,37 @@ jobs:
         with:
           bun-version: latest
 
-      - name: Determine npm tag
+      - name: Setup Deno
+        uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.x
+
+      - name: Determine npm tag and wait for publish
         id: npm-tag
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          # Check if there's a PR-specific npm package
           PR_NUMBER="${{ github.event.pull_request.number }}"
-          if npm view nemar-cli@PR${PR_NUMBER} version 2>/dev/null; then
-            echo "tag=PR${PR_NUMBER}" >> $GITHUB_OUTPUT
-            echo "Using PR-specific package: nemar-cli@PR${PR_NUMBER}"
-          else
-            echo "tag=dev" >> $GITHUB_OUTPUT
-            echo "Using dev package: nemar-cli@dev"
-          fi
+          COMMIT_SHA="${{ github.event.pull_request.head.sha }}"
+          SHORT_SHA="${COMMIT_SHA:0:7}"
+
+          echo "Looking for PR${PR_NUMBER} package with commit ${SHORT_SHA}..."
+
+          # Wait for npm-publish workflow to complete with matching version
+          for i in {1..30}; do
+            VERSION=$(npm view nemar-cli@PR${PR_NUMBER} version 2>/dev/null || echo "")
+            if [[ "$VERSION" == *"$SHORT_SHA"* ]]; then
+              echo "Found matching version: $VERSION"
+              echo "tag=PR${PR_NUMBER}" >> $GITHUB_OUTPUT
+              exit 0
+            fi
+            echo "Attempt $i: version=$VERSION (waiting for $SHORT_SHA)..."
+            sleep 10
+          done
+
+          # Fallback to dev if PR version not found after 5 minutes
+          echo "PR-specific package not found, using dev"
+          echo "tag=dev" >> $GITHUB_OUTPUT
 
       - name: Install CLI from npm
         run: |
