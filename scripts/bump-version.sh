@@ -143,6 +143,9 @@ if ! bun run build > /dev/null 2>&1; then
   exit 1
 fi
 
+# Ensure built file is executable
+chmod +x dist/index.js
+
 # Verify version is correct in build
 if ! BUILD_VERSION=$(./dist/index.js --version 2>&1); then
   echo "Error: Failed to run built CLI"
