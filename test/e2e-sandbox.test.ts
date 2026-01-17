@@ -21,7 +21,8 @@ const TEST_API_URL = process.env.TEST_API_URL || "https://nemar-api-dev.shirazi-
 const TEST_USER_API_KEY = process.env.TEST_USER_API_KEY;
 const NPM_TAG = process.env.NPM_TAG || "dev";
 const TEST_DIR = join(tmpdir(), `nemar-e2e-${Date.now()}`);
-const CONFIG_DIR = join(TEST_DIR, ".config", "nemar-cli");
+// Conf library uses projectName "nemar", so config is at XDG_CONFIG_HOME/nemar/
+const CONFIG_DIR = join(TEST_DIR, ".config", "nemar");
 
 // Skip if no API key
 const shouldSkip = !TEST_USER_API_KEY;
@@ -62,10 +63,12 @@ function setupTestConfig(): void {
   mkdirSync(CONFIG_DIR, { recursive: true });
 
   // Write test config
+  // Note: Field names must match src/lib/config.ts schema
   const config = {
-    apiToken: TEST_USER_API_KEY,
+    apiKey: TEST_USER_API_KEY,
     apiUrl: TEST_API_URL,
     sandboxCompleted: true, // Skip sandbox requirement for tests
+    username: "testuser", // Needed for --mine filter
   };
 
   writeFileSync(join(CONFIG_DIR, "config.json"), JSON.stringify(config, null, 2));
@@ -137,10 +140,12 @@ describe("E2E Sandbox Tests", () => {
     beforeAll(() => {
       if (shouldSkip) return;
 
-      // Create a minimal BIDS dataset for validation
+      // Create a minimal valid BIDS dataset for validation
+      // Note: A minimal valid BIDS dataset only needs dataset_description.json and README
+      // Adding subjects with sidecars but no data files will cause validation to fail
       mkdirSync(sampleDatasetDir, { recursive: true });
 
-      // dataset_description.json
+      // dataset_description.json - required
       writeFileSync(
         join(sampleDatasetDir, "dataset_description.json"),
         JSON.stringify(
@@ -154,41 +159,20 @@ describe("E2E Sandbox Tests", () => {
         )
       );
 
-      // README
-      writeFileSync(join(sampleDatasetDir, "README"), "Test dataset for E2E testing");
+      // README - required by BIDS
+      writeFileSync(join(sampleDatasetDir, "README"), "Test dataset for E2E testing\n\nThis is a minimal BIDS dataset.");
 
-      // CHANGES
+      // CHANGES - optional but common
       writeFileSync(join(sampleDatasetDir, "CHANGES"), "1.0.0 - Initial release");
 
-      // participants.tsv
-      writeFileSync(join(sampleDatasetDir, "participants.tsv"), "participant_id\nsub-01");
-
-      // Create subject directory with minimal EEG data
-      const subDir = join(sampleDatasetDir, "sub-01", "eeg");
-      mkdirSync(subDir, { recursive: true });
-
-      // Create minimal _eeg.json sidecar
-      writeFileSync(
-        join(subDir, "sub-01_task-rest_eeg.json"),
-        JSON.stringify(
-          {
-            TaskName: "rest",
-            SamplingFrequency: 256,
-            PowerLineFrequency: 60,
-            EEGReference: "Cz",
-          },
-          null,
-          2
-        )
-      );
-
-      // Create minimal _channels.tsv
-      writeFileSync(join(subDir, "sub-01_task-rest_channels.tsv"), "name\ttype\tunits\nFp1\tEEG\tuV");
+      // Note: We intentionally don't add subject directories with partial data
+      // because sidecar files without corresponding data files fail validation
     });
 
     test.skipIf(shouldSkip)("nemar dataset validate works on valid BIDS dataset", () => {
       const result = runCli(["dataset", "validate", sampleDatasetDir]);
-      // Validation might have warnings but should not fail
+      // A minimal BIDS dataset (just description + README) should pass validation
+      // It may have warnings about empty dataset, but should exit 0
       expect(result.exitCode).toBe(0);
     });
 
