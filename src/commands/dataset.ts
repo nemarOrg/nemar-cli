@@ -38,7 +38,7 @@ import {
   getValidatorVersion,
   validateBidsDataset,
 } from "../lib/bids-validator.js";
-import { getConfig, isAuthenticated } from "../lib/config.js";
+import { getConfig, isAuthenticated, isSandboxCompleted } from "../lib/config.js";
 import {
   checkDownloadPrerequisites,
   checkPrerequisites,
@@ -247,6 +247,18 @@ Examples:
     if (!isAuthenticated()) {
       console.log(chalk.red("Error: Not authenticated"));
       console.log("Run 'nemar auth login' first");
+      process.exit(1);
+    }
+
+    // Step 1b: Check sandbox training
+    if (!isSandboxCompleted()) {
+      console.log(chalk.yellow("Sandbox training required"));
+      console.log();
+      console.log("You must complete sandbox training before uploading real datasets.");
+      console.log("This verifies your setup and familiarizes you with the workflow.");
+      console.log();
+      console.log("Run sandbox training with:");
+      console.log(chalk.cyan("  nemar sandbox"));
       process.exit(1);
     }
 

@@ -1,6 +1,6 @@
 {
   "name": "nemar-cli",
-  "version": "0.2.2",
+  "version": "0.2.8-dev",
   "description": "CLI for NEMAR (Neuroelectromagnetic Data Archive and Tools Resource) dataset management",
   "type": "module",
   "main": "dist/index.js",
@@ -9,7 +9,7 @@
   },
   "scripts": {
     "dev": "bun run src/index.ts",
-    "build": "bun build src/index.ts --outdir dist --target bun --minify && sed -i '' '1s|#!/usr/bin/env node|#!/usr/bin/env bun|' dist/index.js",
+    "build": "bun build src/index.ts --outdir dist --target bun --minify && sed '1s|#!/usr/bin/env node|#!/usr/bin/env bun|' dist/index.js > dist/index.js.tmp && mv dist/index.js.tmp dist/index.js",
     "test": "bun test",
     "lint": "biome check src/",
     "lint:fix": "biome check --fix src/",

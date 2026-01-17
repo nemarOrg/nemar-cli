@@ -1,22 +1,38 @@
 #!/bin/bash
 # Version bump script for nemar-cli
 #
+# Supports semver with pre-release suffixes (dev, alpha, beta, rc)
+#
 # Usage:
-#   ./scripts/bump-version.sh patch    # 0.2.2 -> 0.2.3
-#   ./scripts/bump-version.sh minor    # 0.2.2 -> 0.3.0
-#   ./scripts/bump-version.sh major    # 0.2.2 -> 1.0.0
-#   ./scripts/bump-version.sh 1.0.0    # Set explicit version
+#   ./scripts/bump-version.sh patch         # 0.2.7-dev -> 0.2.8, 0.2.7 -> 0.2.8
+#   ./scripts/bump-version.sh minor         # 0.2.7 -> 0.3.0
+#   ./scripts/bump-version.sh major         # 0.2.7 -> 1.0.0
+#   ./scripts/bump-version.sh dev           # 0.2.7 -> 0.2.8-dev, 0.2.7-dev -> 0.2.8-dev
+#   ./scripts/bump-version.sh alpha         # 0.2.7 -> 0.2.8-alpha
+#   ./scripts/bump-version.sh beta          # 0.2.7-alpha -> 0.2.7-beta
+#   ./scripts/bump-version.sh rc            # 0.2.7-beta -> 0.2.7-rc
+#   ./scripts/bump-version.sh 1.0.0         # Set explicit version
+#   ./scripts/bump-version.sh 1.0.0-dev     # Set explicit version with suffix
 
 set -euo pipefail
 
 if [ -z "${1:-}" ]; then
-  echo "Usage: $0 <patch|minor|major|version>"
+  echo "Usage: $0 <patch|minor|major|dev|alpha|beta|rc|version>"
   echo ""
-  echo "Examples:"
-  echo "  $0 patch    # Bump patch version"
-  echo "  $0 minor    # Bump minor version"
-  echo "  $0 major    # Bump major version"
-  echo "  $0 1.0.0    # Set explicit version"
+  echo "Semver bumps (strips pre-release suffix):"
+  echo "  $0 patch    # 0.2.7-dev -> 0.2.8"
+  echo "  $0 minor    # 0.2.7 -> 0.3.0"
+  echo "  $0 major    # 0.2.7 -> 1.0.0"
+  echo ""
+  echo "Pre-release bumps (adds/changes suffix, bumps patch if needed):"
+  echo "  $0 dev      # 0.2.7 -> 0.2.8-dev, 0.2.7-dev -> 0.2.8-dev"
+  echo "  $0 alpha    # 0.2.7 -> 0.2.8-alpha"
+  echo "  $0 beta     # 0.2.7-alpha -> 0.2.7-beta (same base if pre-release)"
+  echo "  $0 rc       # 0.2.7-beta -> 0.2.7-rc"
+  echo ""
+  echo "Explicit version:"
+  echo "  $0 1.0.0        # Set to 1.0.0"
+  echo "  $0 1.0.0-dev    # Set to 1.0.0-dev"
   exit 1
 fi
 
@@ -42,21 +58,75 @@ if [ -z "$CURRENT_VERSION" ] || [ "$CURRENT_VERSION" = "null" ]; then
 fi
 echo "Current version: $CURRENT_VERSION"
 
-# Calculate new version
-if [[ "$VERSION_TYPE" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-  # Explicit version provided
-  NEW_VERSION="$VERSION_TYPE"
-elif [ "$VERSION_TYPE" = "patch" ] || [ "$VERSION_TYPE" = "minor" ] || [ "$VERSION_TYPE" = "major" ]; then
-  # Parse current version and calculate new one
-  IFS='.' read -r major minor patch <<< "$CURRENT_VERSION"
-  case "$VERSION_TYPE" in
-    patch) NEW_VERSION="$major.$minor.$((patch + 1))" ;;
-    minor) NEW_VERSION="$major.$((minor + 1)).0" ;;
-    major) NEW_VERSION="$((major + 1)).0.0" ;;
+# Parse current version into components
+# Handles: 0.2.7, 0.2.7-dev, 0.2.7-alpha.1, etc.
+BASE_VERSION="${CURRENT_VERSION%%-*}"  # Strip everything after first -
+PRERELEASE=""
+if [[ "$CURRENT_VERSION" == *-* ]]; then
+  PRERELEASE="${CURRENT_VERSION#*-}"   # Get everything after first -
+fi
+
+IFS='.' read -r MAJOR MINOR PATCH <<< "$BASE_VERSION"
+
+# Calculate new version based on type
+calculate_new_version() {
+  local type="$1"
+
+  case "$type" in
+    patch)
+      # Bump patch, strip pre-release
+      if [ -n "$PRERELEASE" ]; then
+        # If pre-release, just release current base version
+        echo "$MAJOR.$MINOR.$PATCH"
+      else
+        echo "$MAJOR.$MINOR.$((PATCH + 1))"
+      fi
+      ;;
+    minor)
+      # Bump minor, reset patch, strip pre-release
+      echo "$MAJOR.$((MINOR + 1)).0"
+      ;;
+    major)
+      # Bump major, reset minor/patch, strip pre-release
+      echo "$((MAJOR + 1)).0.0"
+      ;;
+    dev|alpha|beta|rc)
+      # Pre-release: bump patch if releasing from stable, keep base if already pre-release
+      if [ -n "$PRERELEASE" ]; then
+        # Already a pre-release - change suffix, bump patch for dev
+        if [ "$type" = "dev" ]; then
+          echo "$MAJOR.$MINOR.$((PATCH + 1))-$type"
+        else
+          # For alpha/beta/rc progression, keep same base version
+          echo "$MAJOR.$MINOR.$PATCH-$type"
+        fi
+      else
+        # From stable - bump patch and add suffix
+        echo "$MAJOR.$MINOR.$((PATCH + 1))-$type"
+      fi
+      ;;
+    *)
+      # Check if it's an explicit version (with or without pre-release)
+      if [[ "$type" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.]+)?$ ]]; then
+        echo "$type"
+      else
+        echo ""
+      fi
+      ;;
   esac
-else
-  echo "Error: Invalid version type. Use patch, minor, major, or explicit version (e.g., 1.0.0)"
+}
+
+NEW_VERSION=$(calculate_new_version "$VERSION_TYPE")
+
+if [ -z "$NEW_VERSION" ]; then
+  echo "Error: Invalid version type '$VERSION_TYPE'"
+  echo "Use: patch, minor, major, dev, alpha, beta, rc, or explicit version (e.g., 1.0.0 or 1.0.0-dev)"
   exit 1
+fi
+
+if [ "$NEW_VERSION" = "$CURRENT_VERSION" ]; then
+  echo "Warning: Version unchanged ($NEW_VERSION)"
+  exit 0
 fi
 
 echo "New version: $NEW_VERSION"
@@ -64,31 +134,29 @@ echo "New version: $NEW_VERSION"
 # Update package.json using jq
 jq --arg v "$NEW_VERSION" '.version = $v' package.json > package.json.tmp && mv package.json.tmp package.json
 
-# Build to verify everything works (show errors if build fails)
+# Build to verify everything works
 echo "Building..."
-if ! bun run build > /dev/null; then
-  echo "Error: Build failed. See errors above."
+if ! bun run build > /dev/null 2>&1; then
+  echo "Error: Build failed"
+  # Restore original version
+  jq --arg v "$CURRENT_VERSION" '.version = $v' package.json > package.json.tmp && mv package.json.tmp package.json
   exit 1
 fi
 
-# Verify version is correct in build (show errors if CLI fails to run)
+# Verify version is correct in build
 if ! BUILD_VERSION=$(./dist/index.js --version 2>&1); then
-  echo "Error: Failed to run built CLI. Output:"
-  echo "$BUILD_VERSION"
+  echo "Error: Failed to run built CLI"
+  jq --arg v "$CURRENT_VERSION" '.version = $v' package.json > package.json.tmp && mv package.json.tmp package.json
   exit 1
 fi
 
 if [ "$BUILD_VERSION" != "$NEW_VERSION" ]; then
-  echo "Error: Build version ($BUILD_VERSION) doesn't match expected version ($NEW_VERSION)"
+  echo "Error: Build version ($BUILD_VERSION) doesn't match expected ($NEW_VERSION)"
+  jq --arg v "$CURRENT_VERSION" '.version = $v' package.json > package.json.tmp && mv package.json.tmp package.json
   exit 1
 fi
 
-echo "Build verified: version $BUILD_VERSION"
-
-# Check for other staged changes
-if ! git diff --cached --quiet -- ':!package.json' 2>/dev/null; then
-  echo "Warning: Other files are staged. Only package.json will be committed."
-fi
+echo "Build verified: $BUILD_VERSION"
 
 # Stage and commit
 git add package.json
@@ -103,6 +171,12 @@ echo ""
 echo "Version bumped to $NEW_VERSION"
 echo ""
 echo "Next steps:"
-echo "  1. Push: git push"
-echo "  2. CI will automatically create a git tag v$NEW_VERSION"
-echo "  3. Publish to npm: npm publish --access public --otp=<code>"
+echo "  1. Push to trigger CI: git push"
+echo "  2. Merge to main - CI will auto-tag and publish to npm"
+echo ""
+echo "Or publish manually:"
+if [[ "$NEW_VERSION" == *-* ]]; then
+  echo "  npm publish --tag dev --otp=<code>"
+else
+  echo "  npm publish --otp=<code>"
+fi

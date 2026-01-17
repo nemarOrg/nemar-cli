@@ -223,11 +223,12 @@ describe("E2E Upload Tests", () => {
     // Create test dataset
     createTestBidsDataset(TEST_DIR);
 
-    // Set up auth config
+    // Set up auth config (sandboxCompleted: true to test upload flow)
     setTestConfig({
       apiKey: TEST_CONFIG.userApiKey,
       apiUrl: TEST_CONFIG.apiUrl,
       username: "test-user",
+      sandboxCompleted: true,
     });
 
     // Run upload with --dry-run
@@ -261,11 +262,12 @@ describe("E2E Upload Tests", () => {
     // Create test dataset
     createTestBidsDataset(TEST_DIR);
 
-    // Set up auth config
+    // Set up auth config (sandboxCompleted: true to reach prereq check)
     setTestConfig({
       apiKey: TEST_CONFIG.userApiKey,
       apiUrl: TEST_CONFIG.apiUrl,
       username: "test-user",
+      sandboxCompleted: true,
     });
 
     // Run upload - should show prereq errors for missing items
@@ -299,11 +301,12 @@ describe("E2E Upload Tests", () => {
     cleanup();
     createTestBidsDataset(TEST_DIR);
 
-    // Set up auth config with real credentials
+    // Set up auth config with real credentials (sandboxCompleted: true to test upload flow)
     setTestConfig({
       apiKey: TEST_CONFIG.userApiKey,
       apiUrl: TEST_CONFIG.apiUrl,
       username: "test-user",
+      sandboxCompleted: true,
     });
 
     // Run upload with --dry-run to avoid creating real datasets

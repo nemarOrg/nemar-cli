@@ -16,6 +16,8 @@ const configSchema = z.object({
   username: z.string().optional(),
   email: z.string().email().optional(),
   githubUsername: z.string().optional(), // Required for PR collaboration
+  sandboxCompleted: z.boolean().optional(), // True after completing sandbox training
+  sandboxDatasetId: z.string().optional(), // Dataset ID from sandbox training (xx000xxx)
 });
 
 export type Config = z.infer<typeof configSchema>;
@@ -30,6 +32,8 @@ const config = new Conf<Config>({
     username: { type: "string" },
     email: { type: "string" },
     githubUsername: { type: "string" },
+    sandboxCompleted: { type: "boolean" },
+    sandboxDatasetId: { type: "string" },
   },
   // Allow custom config directory for testing
   ...(process.env.NEMAR_CONFIG_DIR ? { cwd: process.env.NEMAR_CONFIG_DIR } : {}),
@@ -45,7 +49,16 @@ export function getConfig(): Config {
     username: config.get("username"),
     email: config.get("email"),
     githubUsername: config.get("githubUsername"),
+    sandboxCompleted: config.get("sandboxCompleted"),
+    sandboxDatasetId: config.get("sandboxDatasetId"),
   };
+}
+
+/**
+ * Check if user has completed sandbox training
+ */
+export function isSandboxCompleted(): boolean {
+  return !!config.get("sandboxCompleted");
 }
 
 /**

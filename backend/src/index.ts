@@ -17,6 +17,7 @@ import { authRoutes } from "./routes/auth";
 import { userRoutes } from "./routes/users";
 import { adminRoutes } from "./routes/admin";
 import { datasetRoutes } from "./routes/datasets";
+import { sandboxRoutes } from "./routes/sandbox";
 import webhooks from "./routes/webhooks";
 import { rateLimiter } from "./middleware/rateLimit";
 
@@ -71,6 +72,7 @@ api.get("/", (c) => {
       users: "/users/*",
       admin: "/admin/*",
       datasets: "/datasets/*",
+      sandbox: "/sandbox/*",
       webhooks: "/webhooks/*",
     },
   });
@@ -81,6 +83,7 @@ api.route("/auth", authRoutes);
 api.route("/users", userRoutes);
 api.route("/admin", adminRoutes);
 api.route("/datasets", datasetRoutes);
+api.route("/sandbox", sandboxRoutes);
 api.route("/webhooks", webhooks);
 
 // 404 handler

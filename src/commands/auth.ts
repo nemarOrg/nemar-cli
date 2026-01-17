@@ -120,12 +120,23 @@ export async function loginAction(options: { key?: string; force?: boolean }): P
     setConfig("username", result.user.username);
     setConfig("email", result.user.email);
     setConfig("githubUsername", result.user.github_username);
+    setConfig("sandboxCompleted", result.user.sandbox_completed);
+    if (result.user.sandbox_dataset_id) {
+      setConfig("sandboxDatasetId", result.user.sandbox_dataset_id);
+    }
 
     spinner.succeed("Login successful");
     console.log();
     console.log(`  Welcome back, ${chalk.cyan(result.user.username)}!`);
     if (result.user.is_admin) {
       console.log(`  ${chalk.magenta("Admin access enabled")}`);
+    }
+
+    // Show sandbox training status
+    if (!result.user.sandbox_completed) {
+      console.log();
+      console.log(chalk.yellow("  Note: Sandbox training required before uploading datasets"));
+      console.log(chalk.gray("  Run 'nemar sandbox' to complete training"));
     }
   } catch (error) {
     if (error instanceof ApiError) {

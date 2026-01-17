@@ -47,19 +47,16 @@ export async function generatePresignedPutUrls(
 
   for (const file of files) {
     const key = `${prefix}/${file}`;
-    const url = `https://${bucket}.s3.${region}.amazonaws.com/${key}`;
+    // Include X-Amz-Expires in URL BEFORE signing so it's part of the signature
+    const url = `https://${bucket}.s3.${region}.amazonaws.com/${key}?X-Amz-Expires=${expiresIn}`;
 
-    // Create presigned PUT URL
+    // Create presigned PUT URL with expiration included in signature
     const signedRequest = await aws.sign(url, {
       method: "PUT",
       aws: { signQuery: true },
     });
 
-    // Add expiration to the signed URL
-    const signedUrl = new URL(signedRequest.url);
-    signedUrl.searchParams.set("X-Amz-Expires", expiresIn.toString());
-
-    urls[file] = signedUrl.toString();
+    urls[file] = signedRequest.url;
   }
 
   return urls;
@@ -76,17 +73,15 @@ export async function generatePresignedGetUrl(
   const { bucket, region } = options;
   const aws = createS3Client(options);
 
-  const url = `https://${bucket}.s3.${region}.amazonaws.com/${key}`;
+  // Include X-Amz-Expires in URL BEFORE signing
+  const url = `https://${bucket}.s3.${region}.amazonaws.com/${key}?X-Amz-Expires=${expiresIn}`;
 
   const signedRequest = await aws.sign(url, {
     method: "GET",
     aws: { signQuery: true },
   });
 
-  const signedUrl = new URL(signedRequest.url);
-  signedUrl.searchParams.set("X-Amz-Expires", expiresIn.toString());
-
-  return signedUrl.toString();
+  return signedRequest.url;
 }
 
 /**

@@ -1,0 +1,219 @@
+name: Publish to npm
+
+# Handles both tag-based releases and branch-based pre-releases:
+# - Tags (v*): Stable releases with version from tag
+# - dev branch: dev tag with build number
+# - feature branches: PR{number} tag with SHA in version (only if PR exists)
+
+on:
+  push:
+    tags:
+      - 'v*'
+    branches:
+      - dev
+      - 'feature/**'
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    environment: npm
+    permissions:
+      contents: read
+      id-token: write  # Required for OIDC authentication
+      pull-requests: write  # To find PR and post install comment
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install dependencies
+        run: bun install
+
+      - name: Build
+        run: bun run build
+
+      - name: Setup Node.js for npm publish
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Upgrade npm for OIDC support
+        run: |
+          npm install -g npm@latest
+          echo "npm version: $(npm --version)"
+
+      - name: Determine version and tag
+        id: version
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # Check if this is a tag push or branch push
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            # Tag-based release
+            VERSION="${GITHUB_REF#refs/tags/v}"
+            echo "version=$VERSION" >> $GITHUB_OUTPUT
+            echo "is_tag=true" >> $GITHUB_OUTPUT
+            echo "skip_publish=false" >> $GITHUB_OUTPUT
+
+            # Check if pre-release (contains -)
+            if [[ "$VERSION" == *-* ]]; then
+              PRERELEASE="${VERSION#*-}"
+              PRERELEASE_TYPE="${PRERELEASE%%.*}"
+              echo "tag=$PRERELEASE_TYPE" >> $GITHUB_OUTPUT
+              echo "Tag release: $VERSION (tag: $PRERELEASE_TYPE)"
+            else
+              echo "tag=latest" >> $GITHUB_OUTPUT
+              echo "Stable release: $VERSION (tag: latest)"
+            fi
+          else
+            # Branch-based pre-release
+            BRANCH="${GITHUB_REF#refs/heads/}"
+            BASE_VERSION=$(jq -r '.version' package.json)
+            # Strip any existing pre-release suffix
+            BASE_VERSION="${BASE_VERSION%%-*}"
+            RUN_NUMBER="${GITHUB_RUN_NUMBER}"
+            SHORT_SHA="${GITHUB_SHA:0:7}"
+
+            echo "branch=$BRANCH" >> $GITHUB_OUTPUT
+            echo "is_tag=false" >> $GITHUB_OUTPUT
+
+            if [ "$BRANCH" = "dev" ]; then
+              VERSION="${BASE_VERSION}-dev.${RUN_NUMBER}"
+              TAG="dev"
+              echo "skip_publish=false" >> $GITHUB_OUTPUT
+              echo "Dev branch: $VERSION (tag: $TAG)"
+            else
+              # Feature branch: find associated PR number (required for publishing)
+              PR_NUMBER=$(gh pr list --head "$BRANCH" --state open --json number --jq '.[0].number // empty' 2>/dev/null || true)
+
+              if [ -n "$PR_NUMBER" ]; then
+                # PR exists: use PR number for tag, SHA for version (enables installing latest commit)
+                VERSION="${BASE_VERSION}-PR${PR_NUMBER}.${SHORT_SHA}"
+                TAG="PR${PR_NUMBER}"
+                echo "skip_publish=false" >> $GITHUB_OUTPUT
+                echo "pr_number=$PR_NUMBER" >> $GITHUB_OUTPUT
+                echo "Feature branch with PR #$PR_NUMBER: $VERSION (tag: $TAG)"
+              else
+                # No PR: skip publishing
+                VERSION="${BASE_VERSION}-dev.${SHORT_SHA}"
+                TAG="dev-${SHORT_SHA}"
+                echo "skip_publish=true" >> $GITHUB_OUTPUT
+                echo "::notice::Feature branch has no associated PR. Skipping npm publish."
+                echo "Feature branch (no PR): skipping publish"
+              fi
+            fi
+
+            echo "version=$VERSION" >> $GITHUB_OUTPUT
+            echo "tag=$TAG" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Verify version matches (tag releases only)
+        if: steps.version.outputs.is_tag == 'true'
+        run: |
+          PACKAGE_VERSION=$(jq -r '.version' package.json)
+          TAG_VERSION="${GITHUB_REF#refs/tags/v}"
+
+          if [ "$PACKAGE_VERSION" != "$TAG_VERSION" ]; then
+            echo "::error::Version mismatch: package.json has $PACKAGE_VERSION but tag is v$TAG_VERSION"
+            exit 1
+          fi
+
+          echo "Version verified: $PACKAGE_VERSION"
+
+      - name: Update package.json version (branch releases only)
+        if: steps.version.outputs.is_tag == 'false' && steps.version.outputs.skip_publish == 'false'
+        run: |
+          jq --arg v "${{ steps.version.outputs.version }}" '.version = $v' package.json > package.json.tmp
+          mv package.json.tmp package.json
+          echo "Updated package.json to version ${{ steps.version.outputs.version }}"
+
+      - name: Rebuild with new version (branch releases only)
+        if: steps.version.outputs.is_tag == 'false' && steps.version.outputs.skip_publish == 'false'
+        run: bun run build
+
+      - name: Publish to npm
+        if: steps.version.outputs.skip_publish == 'false'
+        # Note: --provenance requires public repos; using OIDC auth without provenance for private repo
+        run: npm publish --tag ${{ steps.version.outputs.tag }} --access public
+
+      - name: Comment on PR with install instructions
+        if: steps.version.outputs.skip_publish == 'false' && steps.version.outputs.pr_number != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          PR_NUMBER="${{ steps.version.outputs.pr_number }}"
+          TAG="${{ steps.version.outputs.tag }}"
+          VERSION="${{ steps.version.outputs.version }}"
+          SHORT_SHA="${GITHUB_SHA:0:7}"
+          MARKER="<!-- npm-preview-bot -->"
+
+          COMMENT_BODY="${MARKER}
+          ## 📦 Package Preview
+
+          Your package is ready to test!
+
+          \`\`\`bash
+          bun install -g nemar-cli@${TAG}
+          \`\`\`
+
+          **Version:** \`${VERSION}\`
+          **Commit:** \`${SHORT_SHA}\`
+
+          ---
+          <sub>🤖 Updated on each push.</sub>"
+
+          # Find existing comment with our marker
+          COMMENT_ID=$(gh api "/repos/${{ github.repository }}/issues/${PR_NUMBER}/comments" \
+            --jq ".[] | select(.body | contains(\"${MARKER}\")) | .id" | head -1)
+
+          if [ -n "$COMMENT_ID" ]; then
+            # Update existing comment
+            gh api --method PATCH "/repos/${{ github.repository }}/issues/comments/${COMMENT_ID}" \
+              -f body="$COMMENT_BODY"
+            echo "Updated existing PR comment (ID: $COMMENT_ID)"
+          else
+            # Create new comment
+            gh pr comment "$PR_NUMBER" --body "$COMMENT_BODY"
+            echo "Created new PR comment"
+          fi
+
+      - name: Skip publish notice
+        if: steps.version.outputs.skip_publish == 'true'
+        run: |
+          echo "::notice::Skipping npm publish: feature branch has no associated PR"
+          echo "Create a PR for this branch to enable npm publishing"
+
+      - name: Summary
+        run: |
+          if [ "${{ steps.version.outputs.skip_publish }}" = "true" ]; then
+            echo "## npm publish skipped" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "Feature branch has no associated PR. Create a PR to enable npm publishing." >> $GITHUB_STEP_SUMMARY
+          else
+            echo "## Published to npm" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            if [ "${{ steps.version.outputs.is_tag }}" = "true" ]; then
+              echo "- **Type:** Tag release" >> $GITHUB_STEP_SUMMARY
+            else
+              echo "- **Type:** Branch release (${{ steps.version.outputs.branch }})" >> $GITHUB_STEP_SUMMARY
+            fi
+            echo "- **Version:** ${{ steps.version.outputs.version }}" >> $GITHUB_STEP_SUMMARY
+            echo "- **Tag:** ${{ steps.version.outputs.tag }}" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "Install with:" >> $GITHUB_STEP_SUMMARY
+            if [ "${{ steps.version.outputs.tag }}" = "latest" ]; then
+              echo "\`\`\`bash" >> $GITHUB_STEP_SUMMARY
+              echo "npm install -g nemar-cli" >> $GITHUB_STEP_SUMMARY
+              echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+            else
+              echo "\`\`\`bash" >> $GITHUB_STEP_SUMMARY
+              echo "npm install -g nemar-cli@${{ steps.version.outputs.tag }}" >> $GITHUB_STEP_SUMMARY
+              echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+            fi
+          fi
