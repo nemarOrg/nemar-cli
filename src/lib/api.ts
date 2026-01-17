@@ -282,6 +282,24 @@ export async function revokeUser(username: string): Promise<{ message: string }>
   );
 }
 
+export interface RegenerateIamResponse {
+  message: string;
+  user: {
+    username: string;
+    iam_username: string;
+  };
+}
+
+export async function regenerateUserIam(username: string): Promise<RegenerateIamResponse> {
+  return request<RegenerateIamResponse>(
+    `/admin/regenerate-iam/${username}`,
+    {
+      method: "POST",
+    },
+    true,
+  );
+}
+
 // ============================================================================
 // Datasets
 // ============================================================================
