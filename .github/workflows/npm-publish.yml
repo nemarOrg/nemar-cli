@@ -154,13 +154,11 @@ jobs:
           MARKER="<!-- npm-preview-bot -->"
 
           COMMENT_BODY="${MARKER}
-          ## 📦 npm Package Preview
+          ## 📦 Package Preview
 
           Your package is ready to test!
 
           \`\`\`bash
-          npm install -g nemar-cli@${TAG}
-          # or
           bun install -g nemar-cli@${TAG}
           \`\`\`
 
@@ -168,7 +166,7 @@ jobs:
           **Commit:** \`${SHORT_SHA}\`
 
           ---
-          <sub>🤖 This comment is automatically updated on each push.</sub>"
+          <sub>🤖 Updated on each push.</sub>"
 
           # Find existing comment with our marker
           COMMENT_ID=$(gh api "/repos/${{ github.repository }}/issues/${PR_NUMBER}/comments" \
