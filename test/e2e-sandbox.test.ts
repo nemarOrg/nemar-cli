@@ -36,6 +36,8 @@ function runCli(args: string[], options: { cwd?: string; env?: Record<string, st
     ...process.env,
     HOME: TEST_DIR,
     XDG_CONFIG_HOME: join(TEST_DIR, ".config"),
+    // Use NEMAR_CONFIG_DIR for direct config path override (from src/lib/config.ts)
+    NEMAR_CONFIG_DIR: CONFIG_DIR,
     NEMAR_API_URL: TEST_API_URL,
     ...options.env,
   };
