@@ -1,0 +1,86 @@
+name: Publish to npm
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install dependencies
+        run: bun install
+
+      - name: Build
+        run: bun run build
+
+      - name: Setup Node.js for npm publish
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Determine npm tag
+        id: npm-tag
+        run: |
+          VERSION="${GITHUB_REF#refs/tags/v}"
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+
+          # Check if pre-release (contains -)
+          if [[ "$VERSION" == *-* ]]; then
+            # Extract pre-release type (dev, alpha, beta, rc)
+            PRERELEASE="${VERSION#*-}"
+            PRERELEASE_TYPE="${PRERELEASE%%.*}"
+            echo "tag=$PRERELEASE_TYPE" >> $GITHUB_OUTPUT
+            echo "Pre-release version: $VERSION (tag: $PRERELEASE_TYPE)"
+          else
+            echo "tag=latest" >> $GITHUB_OUTPUT
+            echo "Stable release: $VERSION (tag: latest)"
+          fi
+
+      - name: Verify version matches
+        run: |
+          PACKAGE_VERSION=$(jq -r '.version' package.json)
+          TAG_VERSION="${GITHUB_REF#refs/tags/v}"
+
+          if [ "$PACKAGE_VERSION" != "$TAG_VERSION" ]; then
+            echo "::error::Version mismatch: package.json has $PACKAGE_VERSION but tag is v$TAG_VERSION"
+            exit 1
+          fi
+
+          echo "Version verified: $PACKAGE_VERSION"
+
+      - name: Publish to npm
+        run: npm publish --tag ${{ steps.npm-tag.outputs.tag }} --provenance --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Summary
+        run: |
+          echo "## Published to npm" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "- **Version:** ${{ steps.npm-tag.outputs.version }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Tag:** ${{ steps.npm-tag.outputs.tag }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Install with:" >> $GITHUB_STEP_SUMMARY
+          if [ "${{ steps.npm-tag.outputs.tag }}" = "latest" ]; then
+            echo "\`\`\`bash" >> $GITHUB_STEP_SUMMARY
+            echo "npm install -g nemar-cli" >> $GITHUB_STEP_SUMMARY
+            echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "\`\`\`bash" >> $GITHUB_STEP_SUMMARY
+            echo "npm install -g nemar-cli@${{ steps.npm-tag.outputs.tag }}" >> $GITHUB_STEP_SUMMARY
+            echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+          fi
