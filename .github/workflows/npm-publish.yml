@@ -16,7 +16,7 @@ on:
 jobs:
   publish:
     runs-on: ubuntu-latest
-    environment: npm  # Must match npm trusted publisher config
+    environment: npm
     permissions:
       contents: read
       id-token: write  # Required for OIDC authentication
@@ -40,8 +40,13 @@ jobs:
       - name: Setup Node.js for npm publish
         uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '22'
           registry-url: 'https://registry.npmjs.org'
+
+      - name: Upgrade npm for OIDC support
+        run: |
+          npm install -g npm@latest
+          echo "npm version: $(npm --version)"
 
       - name: Determine version and tag
         id: version
@@ -133,7 +138,8 @@ jobs:
 
       - name: Publish to npm
         if: steps.version.outputs.skip_publish == 'false'
-        run: npm publish --tag ${{ steps.version.outputs.tag }} --provenance --access public
+        # Note: --provenance requires public repos; using OIDC auth without provenance for private repo
+        run: npm publish --tag ${{ steps.version.outputs.tag }} --access public
 
       - name: Skip publish notice
         if: steps.version.outputs.skip_publish == 'true'
