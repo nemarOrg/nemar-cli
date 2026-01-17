@@ -47,6 +47,9 @@ const createDatasetSchema = z.object({
   sandbox: z.boolean().optional(), // If true, creates sandbox dataset (xx000XXX)
 });
 
+// Sandbox file size limit: 10MB total
+const SANDBOX_MAX_TOTAL_SIZE = 10 * 1024 * 1024;
+
 /**
  * POST /datasets - Create a new dataset
  *
@@ -70,6 +73,21 @@ datasetRoutes.post("/", authMiddleware, zValidator("json", createDatasetSchema),
         error: "Sandbox training required",
         message: "You must complete sandbox training before uploading real datasets. Run 'nemar sandbox' to complete training.",
       }, 403);
+    }
+  }
+
+  // Validate sandbox file size limit
+  if (sandbox && files && files.length > 0) {
+    const totalSize = files.reduce((sum, f) => sum + f.size, 0);
+    if (totalSize > SANDBOX_MAX_TOTAL_SIZE) {
+      const sizeMB = (totalSize / (1024 * 1024)).toFixed(2);
+      const limitMB = (SANDBOX_MAX_TOTAL_SIZE / (1024 * 1024)).toFixed(0);
+      return c.json({
+        error: "Sandbox file size limit exceeded",
+        message: `Sandbox datasets are limited to ${limitMB}MB total. Your dataset is ${sizeMB}MB. Sandbox is for testing the workflow, not storing real data.`,
+        total_size: totalSize,
+        limit: SANDBOX_MAX_TOTAL_SIZE,
+      }, 400);
     }
   }
 

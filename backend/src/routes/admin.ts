@@ -444,6 +444,162 @@ adminRoutes.post("/revoke/:username", async (c) => {
 });
 
 /**
+ * POST /admin/regenerate-iam/:username - Regenerate IAM credentials for a user
+ * Useful when IAM setup failed during approval or credentials need to be rotated
+ * Also restores access to all existing datasets the user owns
+ */
+adminRoutes.post("/regenerate-iam/:username", async (c) => {
+  const username = c.req.param("username");
+  const db = c.env.DB;
+  const adminUser = c.get("user");
+
+  // Find user
+  const user = await db
+    .prepare(
+      `SELECT id, username, email, status, aws_iam_username, aws_access_key_id_encrypted
+       FROM users WHERE username = ?`
+    )
+    .bind(username)
+    .first<{
+      id: number;
+      username: string;
+      email: string;
+      status: string;
+      aws_iam_username: string | null;
+      aws_access_key_id_encrypted: string | null;
+    }>();
+
+  if (!user) {
+    return c.json({ error: "User not found" }, 404);
+  }
+
+  if (user.status !== "approved") {
+    return c.json({ error: "User must be approved to have IAM credentials" }, 400);
+  }
+
+  // Check if encryption key is configured
+  if (!c.env.ENCRYPTION_KEY) {
+    return c.json({ error: "ENCRYPTION_KEY not configured" }, 500);
+  }
+
+  // Get user's existing datasets to restore access
+  const datasets = await db
+    .prepare("SELECT dataset_id FROM datasets WHERE owner_user_id = ?")
+    .bind(user.id)
+    .all<{ dataset_id: string }>();
+
+  const datasetPrefixes = datasets.results.map((d) => `datasets/${d.dataset_id}`);
+
+  // Revoke old IAM credentials if they exist (but don't delete the user - we'll reuse it)
+  if (user.aws_iam_username && user.aws_access_key_id_encrypted) {
+    try {
+      const oldAccessKeyId = await decrypt(user.aws_access_key_id_encrypted, c.env.ENCRYPTION_KEY);
+      // Only delete the old access key, not the entire IAM user
+      const { deleteAccessKey } = await import("../services/iam");
+      await deleteAccessKey(
+        {
+          accessKeyId: c.env.AWS_ACCESS_KEY_ID,
+          secretAccessKey: c.env.AWS_SECRET_ACCESS_KEY,
+          region: c.env.AWS_REGION,
+        },
+        user.aws_iam_username,
+        oldAccessKeyId
+      );
+    } catch (error) {
+      console.warn("Failed to revoke old access key:", error);
+      // Continue anyway - we'll create new ones
+    }
+  }
+
+  // Create new IAM credentials
+  try {
+    const { createIamUser, createAccessKey, putUserPolicy, generateS3PolicyDocument, generateIamUsername } =
+      await import("../services/iam");
+
+    const iamUsername = generateIamUsername(user.username);
+
+    // Create or get existing IAM user
+    await createIamUser(
+      {
+        accessKeyId: c.env.AWS_ACCESS_KEY_ID,
+        secretAccessKey: c.env.AWS_SECRET_ACCESS_KEY,
+        region: c.env.AWS_REGION,
+      },
+      user.username
+    );
+
+    // Create new access keys
+    const { accessKeyId, secretAccessKey } = await createAccessKey(
+      {
+        accessKeyId: c.env.AWS_ACCESS_KEY_ID,
+        secretAccessKey: c.env.AWS_SECRET_ACCESS_KEY,
+        region: c.env.AWS_REGION,
+      },
+      iamUsername
+    );
+
+    // Restore policy with access to all user's datasets
+    const policyDocument = generateS3PolicyDocument(c.env.S3_BUCKET, datasetPrefixes);
+    await putUserPolicy(
+      {
+        accessKeyId: c.env.AWS_ACCESS_KEY_ID,
+        secretAccessKey: c.env.AWS_SECRET_ACCESS_KEY,
+        region: c.env.AWS_REGION,
+      },
+      iamUsername,
+      "nemar-s3-access",
+      policyDocument
+    );
+
+    // Encrypt and store credentials
+    const encryptedAccessKeyId = await encrypt(accessKeyId, c.env.ENCRYPTION_KEY);
+    const encryptedSecretAccessKey = await encrypt(secretAccessKey, c.env.ENCRYPTION_KEY);
+
+    // Update user with new IAM credentials
+    await db
+      .prepare(
+        `UPDATE users
+         SET aws_iam_username = ?,
+             aws_access_key_id_encrypted = ?,
+             aws_secret_access_key_encrypted = ?
+         WHERE id = ?`
+      )
+      .bind(iamUsername, encryptedAccessKeyId, encryptedSecretAccessKey, user.id)
+      .run();
+
+    // Log the action
+    await db
+      .prepare("INSERT INTO audit_log (user_id, action, entity_type, entity_id, details) VALUES (?, ?, ?, ?, ?)")
+      .bind(
+        adminUser.id,
+        "iam_regenerated",
+        "user",
+        user.id,
+        JSON.stringify({ username: user.username, datasets_restored: datasetPrefixes.length })
+      )
+      .run();
+
+    return c.json({
+      message: "IAM credentials regenerated successfully",
+      user: {
+        username: user.username,
+        iam_username: iamUsername,
+      },
+      datasets_restored: datasetPrefixes.length,
+    });
+  } catch (error) {
+    console.error("Failed to regenerate IAM credentials:", error);
+    return c.json(
+      {
+        error: "Failed to create IAM credentials",
+        details: error instanceof Error ? error.message : "Unknown error",
+      },
+      500
+    );
+  }
+});
+
+/**
  * GET /admin/stats - Get system statistics
  */
 adminRoutes.get("/stats", async (c) => {
@@ -547,10 +703,23 @@ adminRoutes.post("/datasets/:id/doi/concept", zValidator("json", createConceptDo
       concept_doi: string | null;
       zenodo_concept_id: string | null;
       owner_username: string;
+      is_sandbox: number | null;
     }>();
 
   if (!dataset) {
     return c.json({ error: "Dataset not found" }, 404);
+  }
+
+  // Block DOI creation for sandbox datasets
+  if (dataset.is_sandbox || dataset.dataset_id.startsWith("xx")) {
+    return c.json(
+      {
+        error: "Cannot create DOI for sandbox datasets",
+        message: "Sandbox datasets are for testing only. DOIs are permanent and should only be created for real datasets.",
+        dataset_id: dataset.dataset_id,
+      },
+      400
+    );
   }
 
   if (dataset.concept_doi) {
@@ -701,10 +870,23 @@ adminRoutes.post("/datasets/:id/doi/publish", zValidator("json", publishVersionD
       zenodo_concept_id: string | null;
       zenodo_latest_version_id: string | null;
       owner_username: string;
+      is_sandbox: number | null;
     }>();
 
   if (!dataset) {
     return c.json({ error: "Dataset not found" }, 404);
+  }
+
+  // Block DOI publishing for sandbox datasets
+  if (dataset.is_sandbox || dataset.dataset_id.startsWith("xx")) {
+    return c.json(
+      {
+        error: "Cannot publish DOI for sandbox datasets",
+        message: "Sandbox datasets are for testing only. DOIs are permanent and should only be created for real datasets.",
+        dataset_id: dataset.dataset_id,
+      },
+      400
+    );
   }
 
   if (!dataset.concept_doi || !dataset.zenodo_concept_id) {
