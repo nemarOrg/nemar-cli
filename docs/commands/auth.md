@@ -19,6 +19,7 @@ Commands:
   whoami [options]     Show current user (alias for status)
   logout [options]     Clear stored credentials
   resend-verification  Resend email verification link
+  setup-ssh [options]  Configure SSH access for GitHub (auto-generates key)
   help [command]       display help for command
 
 Description:
@@ -86,20 +87,6 @@ Options:
   -h, --help  display help for command
 ```
 
-### auth whoami
-
-Alias for `auth status`. Shows the current authenticated user.
-
-```bash
-Usage: nemar auth whoami [options]
-
-Show current user (alias for status)
-
-Options:
-  --refresh   Refresh user info from server
-  -h, --help  display help for command
-```
-
 ### auth logout
 
 ```bash
@@ -121,5 +108,32 @@ Resend email verification link
 
 Options:
   -h, --help  display help for command
+```
+
+### auth setup-ssh
+
+```bash
+Usage: nemar auth setup-ssh [options]
+
+Configure SSH access for GitHub (auto-generates key)
+
+Options:
+  -f, --force  Regenerate SSH key even if one exists
+  -h, --help   display help for command
+
+Description:
+  Automatically configures SSH access for GitHub, which is required
+  for uploading datasets. This command will:
+
+  1. Generate a dedicated Ed25519 SSH key for NEMAR (~/.ssh/nemar_ed25519)
+  2. Configure SSH to use this key for GitHub
+  3. Register the key with your GitHub account (via NEMAR backend)
+
+  This is a one-time setup. After running this command, you can upload
+  datasets without any manual SSH configuration.
+
+Examples:
+  $ nemar auth setup-ssh          # Set up SSH access
+  $ nemar auth setup-ssh --force  # Regenerate key even if exists
 ```
 
