@@ -703,10 +703,23 @@ adminRoutes.post("/datasets/:id/doi/concept", zValidator("json", createConceptDo
       concept_doi: string | null;
       zenodo_concept_id: string | null;
       owner_username: string;
+      is_sandbox: number | null;
     }>();
 
   if (!dataset) {
     return c.json({ error: "Dataset not found" }, 404);
+  }
+
+  // Block DOI creation for sandbox datasets
+  if (dataset.is_sandbox || dataset.dataset_id.startsWith("xx")) {
+    return c.json(
+      {
+        error: "Cannot create DOI for sandbox datasets",
+        message: "Sandbox datasets are for testing only. DOIs are permanent and should only be created for real datasets.",
+        dataset_id: dataset.dataset_id,
+      },
+      400
+    );
   }
 
   if (dataset.concept_doi) {
@@ -857,10 +870,23 @@ adminRoutes.post("/datasets/:id/doi/publish", zValidator("json", publishVersionD
       zenodo_concept_id: string | null;
       zenodo_latest_version_id: string | null;
       owner_username: string;
+      is_sandbox: number | null;
     }>();
 
   if (!dataset) {
     return c.json({ error: "Dataset not found" }, 404);
+  }
+
+  // Block DOI publishing for sandbox datasets
+  if (dataset.is_sandbox || dataset.dataset_id.startsWith("xx")) {
+    return c.json(
+      {
+        error: "Cannot publish DOI for sandbox datasets",
+        message: "Sandbox datasets are for testing only. DOIs are permanent and should only be created for real datasets.",
+        dataset_id: dataset.dataset_id,
+      },
+      400
+    );
   }
 
   if (!dataset.concept_doi || !dataset.zenodo_concept_id) {
