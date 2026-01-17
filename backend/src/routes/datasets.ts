@@ -116,7 +116,7 @@ datasetRoutes.post("/", authMiddleware, zValidator("json", createDatasetSchema),
     githubRepo = await createRepository(
       datasetId,
       `${name} - NEMAR Dataset`,
-      false, // Public for collaboration
+      true, // Private - owner added as collaborator
       c.env.GITHUB_ADMIN_PAT
     );
   } catch (error) {
