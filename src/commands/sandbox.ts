@@ -210,6 +210,12 @@ async function sandboxAction(): Promise<void> {
 
       if (result.failed.length > 0) {
         uploadSpinner.warn(`Upload completed with ${result.failed.length} failures`);
+        for (const failedFile of result.failed) {
+          console.log(chalk.red(`    Failed: ${failedFile}`));
+        }
+        if (result.error) {
+          console.log(chalk.red(`    Error: ${result.error}`));
+        }
       } else {
         uploadSpinner.succeed(`Uploaded ${result.uploaded} file(s)`);
       }
