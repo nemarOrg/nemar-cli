@@ -144,26 +144,46 @@ jobs:
 
       - name: Comment on PR with install instructions
         if: steps.version.outputs.skip_publish == 'false' && steps.version.outputs.pr_number != ''
-        uses: peter-evans/create-or-update-comment@v4
-        with:
-          issue-number: ${{ steps.version.outputs.pr_number }}
-          body: |
-            ## 📦 npm Package Preview
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          PR_NUMBER="${{ steps.version.outputs.pr_number }}"
+          TAG="${{ steps.version.outputs.tag }}"
+          VERSION="${{ steps.version.outputs.version }}"
+          SHORT_SHA="${GITHUB_SHA:0:7}"
+          MARKER="<!-- npm-preview-bot -->"
 
-            Your package is ready to test!
+          COMMENT_BODY="${MARKER}
+          ## 📦 npm Package Preview
 
-            ```bash
-            npm install -g nemar-cli@${{ steps.version.outputs.tag }}
-            # or
-            bun install -g nemar-cli@${{ steps.version.outputs.tag }}
-            ```
+          Your package is ready to test!
 
-            **Version:** `${{ steps.version.outputs.version }}`
-            **Commit:** `${{ github.sha }}`
+          \`\`\`bash
+          npm install -g nemar-cli@${TAG}
+          # or
+          bun install -g nemar-cli@${TAG}
+          \`\`\`
 
-            ---
-            <sub>🤖 This comment is automatically updated on each push to this PR.</sub>
-          comment-tag: npm-preview
+          **Version:** \`${VERSION}\`
+          **Commit:** \`${SHORT_SHA}\`
+
+          ---
+          <sub>🤖 This comment is automatically updated on each push.</sub>"
+
+          # Find existing comment with our marker
+          COMMENT_ID=$(gh api "/repos/${{ github.repository }}/issues/${PR_NUMBER}/comments" \
+            --jq ".[] | select(.body | contains(\"${MARKER}\")) | .id" | head -1)
+
+          if [ -n "$COMMENT_ID" ]; then
+            # Update existing comment
+            gh api --method PATCH "/repos/${{ github.repository }}/issues/comments/${COMMENT_ID}" \
+              -f body="$COMMENT_BODY"
+            echo "Updated existing PR comment (ID: $COMMENT_ID)"
+          else
+            # Create new comment
+            gh pr comment "$PR_NUMBER" --body "$COMMENT_BODY"
+            echo "Created new PR comment"
+          fi
 
       - name: Skip publish notice
         if: steps.version.outputs.skip_publish == 'true'
