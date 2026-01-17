@@ -16,7 +16,7 @@ on:
 jobs:
   publish:
     runs-on: ubuntu-latest
-    environment: npm  # Uses OIDC trusted publishing - no token needed
+    # environment: npm  # Temporarily disabled to test OIDC without environment
     permissions:
       contents: read
       id-token: write  # Required for OIDC authentication
