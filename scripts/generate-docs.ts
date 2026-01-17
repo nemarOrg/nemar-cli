@@ -19,15 +19,19 @@ const CLI_PATH = join(import.meta.dir, "..", "src", "index.ts");
 const commands = {
   auth: {
     description: "Authentication and account management",
-    subcommands: ["login", "signup", "status", "logout", "resend-verification"],
+    subcommands: ["login", "signup", "status", "logout", "resend-verification", "setup-ssh"],
   },
   dataset: {
     description: "Dataset management operations",
     subcommands: ["validate", "upload", "download", "status", "list", "version"],
   },
+  sandbox: {
+    description: "Sandbox training (required before uploading)",
+    subcommands: ["status", "reset"],
+  },
   admin: {
     description: "Administrative operations (requires admin privileges)",
-    subcommands: ["users", "approve", "reject", "revoke", "doi"],
+    subcommands: ["users", "approve", "revoke", "regenerate-iam", "doi", "revert"],
   },
 };
 
@@ -89,6 +93,7 @@ function generateMainDoc(): string {
   doc += `|---------|-------------|\n`;
   doc += `| [auth](auth.md) | Authentication and account management |\n`;
   doc += `| [dataset](dataset.md) | Dataset management operations |\n`;
+  doc += `| [sandbox](sandbox.md) | Sandbox training (required before uploading) |\n`;
   doc += `| [admin](admin.md) | Administrative operations (admin only) |\n`;
 
   return doc;

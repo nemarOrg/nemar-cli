@@ -4,11 +4,13 @@
  * These commands require admin privileges.
  *
  * Commands:
- * - nemar admin users      - List users (pending, approved, all)
- * - nemar admin approve    - Approve a pending user
- * - nemar admin revoke     - Revoke user access
- * - nemar admin revert     - Revert dataset to a previous version
- * - nemar admin doi create - Create concept DOI for dataset (not yet implemented)
+ * - nemar admin users          - List users (pending, approved, all)
+ * - nemar admin approve        - Approve a pending user
+ * - nemar admin revoke         - Revoke user access
+ * - nemar admin regenerate-iam - Regenerate AWS credentials for a user
+ * - nemar admin revert         - Revert dataset to a previous version
+ * - nemar admin doi create     - Create concept DOI for dataset
+ * - nemar admin doi info       - Get DOI info for dataset
  */
 
 import { existsSync } from "node:fs";
@@ -25,6 +27,7 @@ import {
   getDataset,
   getDoiInfo,
   listUsers,
+  regenerateUserIam,
   revokeUser,
 } from "../lib/api.js";
 import { getConfig, isAuthenticated } from "../lib/config.js";
@@ -48,18 +51,20 @@ Description:
   These commands require admin privileges.
 
 User Management:
-  users    - List users and their status
-  approve  - Approve a pending user registration
-  revoke   - Revoke user access
+  users          - List users and their status
+  approve        - Approve a pending user registration
+  revoke         - Revoke user access
+  regenerate-iam - Regenerate AWS credentials for a user
 
 Dataset Management:
   doi      - Create and manage DOIs for datasets
   revert   - Revert dataset to previous version (via PR)
 
 Examples:
-  $ nemar admin users --verified         # List users awaiting approval
-  $ nemar admin approve john_doe         # Approve a user
-  $ nemar admin doi create nm000104      # Create concept DOI`,
+  $ nemar admin users --verified           # List users awaiting approval
+  $ nemar admin approve john_doe           # Approve a user
+  $ nemar admin regenerate-iam john_doe    # Regenerate AWS credentials
+  $ nemar admin doi create nm000104        # Create concept DOI`,
   );
 
 /**
@@ -268,6 +273,65 @@ adminCommand
         }
       } else {
         spinner.fail("Failed to revoke user");
+      }
+    }
+  });
+
+// ============================================================================
+// Regenerate IAM
+// ============================================================================
+
+adminCommand
+  .command("regenerate-iam")
+  .description("Regenerate AWS IAM credentials for a user")
+  .argument("<username>", "Username to regenerate credentials for")
+  .action(async (username) => {
+    if (!requireAuth()) return;
+
+    // Confirmation with warning
+    console.log(chalk.yellow(`\nRegenerate IAM credentials for: ${username}\n`));
+    console.log("This will:");
+    console.log("  1. Create new AWS IAM access keys for the user");
+    console.log("  2. Invalidate any existing access keys");
+    console.log("  3. Restore S3 access to their datasets");
+    console.log();
+    console.log(chalk.gray("Use this if a user's credentials were compromised or lost."));
+    console.log();
+
+    const { confirm } = await inquirer.prompt([
+      {
+        type: "confirm",
+        name: "confirm",
+        message: `Regenerate IAM credentials for ${username}?`,
+        default: false,
+      },
+    ]);
+
+    if (!confirm) {
+      console.log(chalk.gray("Cancelled"));
+      return;
+    }
+
+    const spinner = ora(`Regenerating IAM credentials for ${username}...`).start();
+
+    try {
+      const result = await regenerateUserIam(username);
+      spinner.succeed(`Regenerated IAM credentials for ${username}`);
+      console.log();
+      console.log(`  IAM Username: ${chalk.cyan(result.user.iam_username)}`);
+      console.log(`  Datasets restored: ${chalk.green(result.datasets_restored)}`);
+      console.log();
+      console.log(chalk.gray("The user can now upload to their datasets again."));
+    } catch (error) {
+      if (error instanceof ApiError) {
+        spinner.fail(error.message);
+        if (error.statusCode === 403) {
+          console.log(chalk.gray("  This command requires admin privileges"));
+        } else if (error.statusCode === 404) {
+          console.log(chalk.gray("  User not found or not approved"));
+        }
+      } else {
+        spinner.fail("Failed to regenerate IAM credentials");
       }
     }
   });
