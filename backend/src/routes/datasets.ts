@@ -480,9 +480,8 @@ datasetRoutes.post("/:id/finalize", authMiddleware, async (c) => {
       return c.json({ error: "Only dataset owner can finalize upload" }, 403);
     }
 
-    if (dataset.status === "published") {
-      return c.json({ error: "Dataset is already published" }, 400);
-    }
+    // Note: We could track finalization state separately if needed
+    // For now, finalize is idempotent - can be called multiple times
 
     // Deploy GitHub Actions workflows
     try {
@@ -511,9 +510,9 @@ datasetRoutes.post("/:id/finalize", authMiddleware, async (c) => {
       // Continue anyway; not a fatal error
     }
 
-    // Update dataset status
+    // Update dataset timestamp (status remains 'active' per schema constraint)
     await db
-      .prepare("UPDATE datasets SET status = 'published', updated_at = CURRENT_TIMESTAMP WHERE dataset_id = ?")
+      .prepare("UPDATE datasets SET updated_at = CURRENT_TIMESTAMP WHERE dataset_id = ?")
       .bind(datasetId)
       .run();
 
@@ -522,25 +521,26 @@ datasetRoutes.post("/:id/finalize", authMiddleware, async (c) => {
       .prepare(
         `
       INSERT INTO audit_log (user_id, action, resource_type, resource_id, details)
-      VALUES (?, 'dataset_published', 'dataset', ?, ?)
+      VALUES (?, 'dataset_finalized', 'dataset', ?, ?)
     `
       )
-      .bind(user.id, datasetId, JSON.stringify({ status: "published" }))
+      .bind(user.id, datasetId, JSON.stringify({ finalized: true }))
       .run();
 
     const githubUrl = `https://github.com/${dataset.github_repo}`;
 
     return c.json({
-      message: "Dataset published successfully",
+      message: "Dataset finalized successfully",
       dataset: {
         dataset_id: datasetId,
-        status: "published",
+        status: "active",
         github_url: githubUrl,
       },
     });
   } catch (error) {
     console.error("Error finalizing dataset:", error);
-    return c.json({ error: "Failed to finalize dataset" }, 500);
+    const errorMessage = error instanceof Error ? error.message : "Unknown error";
+    return c.json({ error: "Failed to finalize dataset", details: errorMessage }, 500);
   }
 });
 
