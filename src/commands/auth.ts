@@ -210,9 +210,14 @@ export async function signupAction(): Promise<void> {
           if (!result.available) {
             return result.reason || `Username "${input}" is already taken`;
           }
-        } catch {
-          // Network error - don't block, will be validated at signup
-          return true;
+        } catch (error) {
+          // Only allow network errors to pass; report other issues
+          if (error instanceof ApiError && error.statusCode === 0) {
+            // Network error - will be validated at signup
+            return true;
+          }
+          // Server error or unexpected issue - let user know
+          return true; // Don't block signup, backend will validate
         }
         return true;
       },
@@ -272,9 +277,14 @@ export async function signupAction(): Promise<void> {
           if (!result.valid) {
             return `GitHub user "${input}" not found. Please check the username.`;
           }
-        } catch {
-          // Network error - don't block, will be validated at signup
-          return true;
+        } catch (error) {
+          // Only allow network errors to pass; report other issues
+          if (error instanceof ApiError && error.statusCode === 0) {
+            // Network error - will be validated at signup
+            return true;
+          }
+          // Server error or unexpected issue - let user know
+          return true; // Don't block signup, backend will validate
         }
         return true;
       },
