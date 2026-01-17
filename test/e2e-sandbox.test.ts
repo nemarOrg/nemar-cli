@@ -109,8 +109,8 @@ describe("E2E Sandbox Tests", () => {
     if (existsSync(TEST_DIR)) {
       try {
         rmSync(TEST_DIR, { recursive: true, force: true });
-      } catch {
-        console.warn(`Could not clean up ${TEST_DIR}`);
+      } catch (error) {
+        console.warn(`Could not clean up ${TEST_DIR}:`, error instanceof Error ? error.message : error);
       }
     }
   });

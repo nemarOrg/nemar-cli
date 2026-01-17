@@ -178,7 +178,7 @@ jobs:
           done
 
           # Fallback to dev if PR version not found after 5 minutes
-          echo "PR-specific package not found, using dev"
+          echo "::warning::PR-specific package PR${PR_NUMBER} with commit ${SHORT_SHA} not found after 5 minutes. Falling back to 'dev' tag. E2E tests may not be testing actual PR changes!"
           echo "tag=dev" >> $GITHUB_OUTPUT
 
       - name: Install CLI from npm

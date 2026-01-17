@@ -288,6 +288,7 @@ export interface RegenerateIamResponse {
     username: string;
     iam_username: string;
   };
+  datasets_restored: number;
 }
 
 export async function regenerateUserIam(username: string): Promise<RegenerateIamResponse> {
