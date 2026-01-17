@@ -40,8 +40,13 @@ jobs:
       - name: Setup Node.js for npm publish
         uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '22'
           registry-url: 'https://registry.npmjs.org'
+
+      - name: Upgrade npm for OIDC support
+        run: |
+          npm install -g npm@latest
+          echo "npm version: $(npm --version)"
 
       - name: Determine version and tag
         id: version
@@ -133,7 +138,7 @@ jobs:
 
       - name: Publish to npm
         if: steps.version.outputs.skip_publish == 'false'
-        run: npm publish --tag ${{ steps.version.outputs.tag }} --provenance --access public --loglevel verbose 2>&1 || (cat ~/.npm/_logs/*.log && exit 1)
+        run: npm publish --tag ${{ steps.version.outputs.tag }} --provenance --access public
 
       - name: Skip publish notice
         if: steps.version.outputs.skip_publish == 'true'
