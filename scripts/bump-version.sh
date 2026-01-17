@@ -171,9 +171,12 @@ echo ""
 echo "Version bumped to $NEW_VERSION"
 echo ""
 echo "Next steps:"
-echo "  1. Push: git push"
+echo "  1. Push to trigger CI: git push"
+echo "  2. Merge to main - CI will auto-tag and publish to npm"
+echo ""
+echo "Or publish manually:"
 if [[ "$NEW_VERSION" == *-* ]]; then
-  echo "  2. Publish pre-release: npm publish --tag dev --otp=<code>"
+  echo "  npm publish --tag dev --otp=<code>"
 else
-  echo "  2. Publish release: npm publish --otp=<code>"
+  echo "  npm publish --otp=<code>"
 fi
