@@ -453,12 +453,29 @@ describe("CLI Dataset Upload", () => {
     expect(stdout).toContain("nemar auth login");
   });
 
+  test("nemar dataset upload requires sandbox completion", async () => {
+    const ctx = createTestContext();
+    setTestConfig(ctx, {
+      apiKey: TEST_CONFIG.userApiKey,
+      apiUrl: TEST_CONFIG.apiUrl,
+      username: "test-user",
+      sandboxCompleted: false,
+    });
+
+    const { stdout, exitCode } = await runCli(["dataset", "upload", "/tmp/test"], ctx);
+
+    expect(exitCode).toBe(1);
+    expect(stdout).toContain("Sandbox training required");
+    expect(stdout).toContain("nemar sandbox");
+  });
+
   test("nemar dataset upload with non-existent path fails", async () => {
     const ctx = createTestContext();
     setTestConfig(ctx, {
       apiKey: TEST_CONFIG.userApiKey,
       apiUrl: TEST_CONFIG.apiUrl,
       username: "test-user",
+      sandboxCompleted: true, // Skip sandbox check to test path validation
     });
 
     const { stdout, exitCode } = await runCli(["dataset", "upload", "/nonexistent/path"], ctx);
