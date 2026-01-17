@@ -3,7 +3,7 @@ name: Publish to npm
 # Handles both tag-based releases and branch-based pre-releases:
 # - Tags (v*): Stable releases with version from tag
 # - dev branch: dev tag with build number
-# - feature branches: feature-{pr-number} or feature-{sha} tag
+# - feature branches: feature-{pr-number} tag with SHA in version (only if PR exists)
 
 on:
   push:
@@ -54,6 +54,7 @@ jobs:
             VERSION="${GITHUB_REF#refs/tags/v}"
             echo "version=$VERSION" >> $GITHUB_OUTPUT
             echo "is_tag=true" >> $GITHUB_OUTPUT
+            echo "skip_publish=false" >> $GITHUB_OUTPUT
 
             # Check if pre-release (contains -)
             if [[ "$VERSION" == *-* ]]; then
@@ -80,29 +81,25 @@ jobs:
             if [ "$BRANCH" = "dev" ]; then
               VERSION="${BASE_VERSION}-dev.${RUN_NUMBER}"
               TAG="dev"
+              echo "skip_publish=false" >> $GITHUB_OUTPUT
               echo "Dev branch: $VERSION (tag: $TAG)"
             else
-              # Feature branch: try to find associated PR number
-              PR_NUMBER=""
-
-              # Check if branch name contains a number
-              if [[ "$BRANCH" =~ [0-9]+ ]]; then
-                PR_NUMBER=$(echo "$BRANCH" | grep -oE '[0-9]+' | head -1)
-              fi
-
-              # If no number in branch name, try to find open PR
-              if [ -z "$PR_NUMBER" ]; then
-                PR_NUMBER=$(gh pr list --head "$BRANCH" --state open --json number --jq '.[0].number // empty' 2>/dev/null || true)
-              fi
+              # Feature branch: find associated PR number (required for publishing)
+              PR_NUMBER=$(gh pr list --head "$BRANCH" --state open --json number --jq '.[0].number // empty' 2>/dev/null || true)
 
               if [ -n "$PR_NUMBER" ]; then
-                VERSION="${BASE_VERSION}-feature.${PR_NUMBER}.${RUN_NUMBER}"
+                # PR exists: use PR number for tag, SHA for version (enables installing latest commit)
+                VERSION="${BASE_VERSION}-feature.${PR_NUMBER}.${SHORT_SHA}"
                 TAG="feature-${PR_NUMBER}"
+                echo "skip_publish=false" >> $GITHUB_OUTPUT
                 echo "Feature branch with PR #$PR_NUMBER: $VERSION (tag: $TAG)"
               else
-                VERSION="${BASE_VERSION}-feature.${SHORT_SHA}.${RUN_NUMBER}"
-                TAG="feature-${SHORT_SHA}"
-                echo "Feature branch (no PR): $VERSION (tag: $TAG)"
+                # No PR: skip publishing
+                VERSION="${BASE_VERSION}-feature.${SHORT_SHA}"
+                TAG="feature-none"
+                echo "skip_publish=true" >> $GITHUB_OUTPUT
+                echo "::notice::Feature branch has no associated PR. Skipping npm publish."
+                echo "Feature branch (no PR): skipping publish"
               fi
             fi
 
@@ -124,38 +121,51 @@ jobs:
           echo "Version verified: $PACKAGE_VERSION"
 
       - name: Update package.json version (branch releases only)
-        if: steps.version.outputs.is_tag == 'false'
+        if: steps.version.outputs.is_tag == 'false' && steps.version.outputs.skip_publish == 'false'
         run: |
           jq --arg v "${{ steps.version.outputs.version }}" '.version = $v' package.json > package.json.tmp
           mv package.json.tmp package.json
           echo "Updated package.json to version ${{ steps.version.outputs.version }}"
 
       - name: Rebuild with new version (branch releases only)
-        if: steps.version.outputs.is_tag == 'false'
+        if: steps.version.outputs.is_tag == 'false' && steps.version.outputs.skip_publish == 'false'
         run: bun run build
 
       - name: Publish to npm
+        if: steps.version.outputs.skip_publish == 'false'
         run: npm publish --tag ${{ steps.version.outputs.tag }} --provenance --access public
+
+      - name: Skip publish notice
+        if: steps.version.outputs.skip_publish == 'true'
+        run: |
+          echo "::notice::Skipping npm publish: feature branch has no associated PR"
+          echo "Create a PR for this branch to enable npm publishing"
 
       - name: Summary
         run: |
-          echo "## Published to npm" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          if [ "${{ steps.version.outputs.is_tag }}" = "true" ]; then
-            echo "- **Type:** Tag release" >> $GITHUB_STEP_SUMMARY
+          if [ "${{ steps.version.outputs.skip_publish }}" = "true" ]; then
+            echo "## npm publish skipped" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "Feature branch has no associated PR. Create a PR to enable npm publishing." >> $GITHUB_STEP_SUMMARY
           else
-            echo "- **Type:** Branch release (${{ steps.version.outputs.branch }})" >> $GITHUB_STEP_SUMMARY
-          fi
-          echo "- **Version:** ${{ steps.version.outputs.version }}" >> $GITHUB_STEP_SUMMARY
-          echo "- **Tag:** ${{ steps.version.outputs.tag }}" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "Install with:" >> $GITHUB_STEP_SUMMARY
-          if [ "${{ steps.version.outputs.tag }}" = "latest" ]; then
-            echo "\`\`\`bash" >> $GITHUB_STEP_SUMMARY
-            echo "npm install -g nemar-cli" >> $GITHUB_STEP_SUMMARY
-            echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
-          else
-            echo "\`\`\`bash" >> $GITHUB_STEP_SUMMARY
-            echo "npm install -g nemar-cli@${{ steps.version.outputs.tag }}" >> $GITHUB_STEP_SUMMARY
-            echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+            echo "## Published to npm" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            if [ "${{ steps.version.outputs.is_tag }}" = "true" ]; then
+              echo "- **Type:** Tag release" >> $GITHUB_STEP_SUMMARY
+            else
+              echo "- **Type:** Branch release (${{ steps.version.outputs.branch }})" >> $GITHUB_STEP_SUMMARY
+            fi
+            echo "- **Version:** ${{ steps.version.outputs.version }}" >> $GITHUB_STEP_SUMMARY
+            echo "- **Tag:** ${{ steps.version.outputs.tag }}" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "Install with:" >> $GITHUB_STEP_SUMMARY
+            if [ "${{ steps.version.outputs.tag }}" = "latest" ]; then
+              echo "\`\`\`bash" >> $GITHUB_STEP_SUMMARY
+              echo "npm install -g nemar-cli" >> $GITHUB_STEP_SUMMARY
+              echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+            else
+              echo "\`\`\`bash" >> $GITHUB_STEP_SUMMARY
+              echo "npm install -g nemar-cli@${{ steps.version.outputs.tag }}" >> $GITHUB_STEP_SUMMARY
+              echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+            fi
           fi
