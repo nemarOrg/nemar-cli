@@ -3,7 +3,7 @@ name: Publish to npm
 # Handles both tag-based releases and branch-based pre-releases:
 # - Tags (v*): Stable releases with version from tag
 # - dev branch: dev tag with build number
-# - feature branches: feature-{pr-number} tag with SHA in version (only if PR exists)
+# - feature branches: PR{number} tag with SHA in version (only if PR exists)
 
 on:
   push:
@@ -20,7 +20,7 @@ jobs:
     permissions:
       contents: read
       id-token: write  # Required for OIDC authentication
-      pull-requests: read  # To find associated PR number for feature branches
+      pull-requests: write  # To find PR and post install comment
 
     steps:
       - name: Checkout code
@@ -94,14 +94,15 @@ jobs:
 
               if [ -n "$PR_NUMBER" ]; then
                 # PR exists: use PR number for tag, SHA for version (enables installing latest commit)
-                VERSION="${BASE_VERSION}-feature.${PR_NUMBER}.${SHORT_SHA}"
-                TAG="feature-${PR_NUMBER}"
+                VERSION="${BASE_VERSION}-PR${PR_NUMBER}.${SHORT_SHA}"
+                TAG="PR${PR_NUMBER}"
                 echo "skip_publish=false" >> $GITHUB_OUTPUT
+                echo "pr_number=$PR_NUMBER" >> $GITHUB_OUTPUT
                 echo "Feature branch with PR #$PR_NUMBER: $VERSION (tag: $TAG)"
               else
                 # No PR: skip publishing
-                VERSION="${BASE_VERSION}-feature.${SHORT_SHA}"
-                TAG="feature-none"
+                VERSION="${BASE_VERSION}-dev.${SHORT_SHA}"
+                TAG="dev-${SHORT_SHA}"
                 echo "skip_publish=true" >> $GITHUB_OUTPUT
                 echo "::notice::Feature branch has no associated PR. Skipping npm publish."
                 echo "Feature branch (no PR): skipping publish"
@@ -140,6 +141,29 @@ jobs:
         if: steps.version.outputs.skip_publish == 'false'
         # Note: --provenance requires public repos; using OIDC auth without provenance for private repo
         run: npm publish --tag ${{ steps.version.outputs.tag }} --access public
+
+      - name: Comment on PR with install instructions
+        if: steps.version.outputs.skip_publish == 'false' && steps.version.outputs.pr_number != ''
+        uses: peter-evans/create-or-update-comment@v4
+        with:
+          issue-number: ${{ steps.version.outputs.pr_number }}
+          body: |
+            ## 📦 npm Package Preview
+
+            Your package is ready to test!
+
+            ```bash
+            npm install -g nemar-cli@${{ steps.version.outputs.tag }}
+            # or
+            bun install -g nemar-cli@${{ steps.version.outputs.tag }}
+            ```
+
+            **Version:** `${{ steps.version.outputs.version }}`
+            **Commit:** `${{ github.sha }}`
+
+            ---
+            <sub>🤖 This comment is automatically updated on each push to this PR.</sub>
+          comment-tag: npm-preview
 
       - name: Skip publish notice
         if: steps.version.outputs.skip_publish == 'true'
