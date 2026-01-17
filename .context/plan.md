@@ -1,0 +1,468 @@
+# NEMAR CLI Development Plan
+
+## Project Overview
+**Goal:** Build a comprehensive CLI for NEMAR (Neuroelectromagnetic Data Archive and Tools Resource) dataset management; similar to OpenNeuro CLI but with **PR-mandatory versioning**, enhanced authentication, admin workflows, and DataLad/S3 integration
+**Stack:** TypeScript, Bun, Commander.js, Cloudflare Workers/D1, DataLad, AWS S3, GitHub API
+
+### Key Differentiators from OpenNeuro
+1. **PR-Mandatory**: All changes require pull requests (main branch protected)
+2. **Collaborative**: Any user can propose changes to any public dataset
+3. **Staged Data**: Data PRs use temporary S3 staging before merge
+4. **Serial IDs**: Centrally managed dataset IDs (nm000XXX)
+
+### Architecture Documents
+- `.context/access_control.md` - Granular GitHub/S3 access control
+- `.context/pr_architecture.md` - PR-mandatory workflow design
+- `.context/dataset_workflow.md` - Dataset ID management and PR flow
+
+---
+
+## Phase 1: Foundation [COMPLETED]
+**Status:** Done
+**Description:** Project scaffolding and basic CLI structure
+
+### Completed Tasks
+- [x] Initialize project structure with vibe-rules templates
+- [x] Set up TypeScript project with Bun
+- [x] Create package.json with CLI entry point for bunx
+- [x] Configure TypeScript and linting (biome)
+- [x] Set up basic CLI framework with commander.js
+- [x] Create initial command structure skeleton (auth, dataset, admin)
+- [x] Add .gitignore and project documentation
+- [x] Create CLAUDE.md with project context
+- [x] Set up .context/ and .rules/ directories
+
+### Artifacts
+- `src/index.ts` - Main CLI entry point
+- `src/commands/auth.ts` - Authentication command stubs
+- `src/commands/dataset.ts` - Dataset command stubs
+- `src/commands/admin.ts` - Admin command stubs
+- `src/lib/config.ts` - Configuration management
+
+---
+
+## Phase 2: Backend Infrastructure [COMPLETED]
+**Status:** Done
+**Description:** Cloudflare Workers backend with D1 database for user and token management
+
+### Deployment Info
+- **URL:** https://nemar-api.shirazi-10f.workers.dev
+- **Database:** D1 `nemar-db` (0a168b1a-1923-4436-9509-6e4a9b5bb7ae)
+- **Rate Limit KV:** 9afb2679c6ea4ed4acd1a5916cf291d7
+- **Email:** Resend via nemar@osc.earth
+
+### Completed Tasks
+- [x] Create Cloudflare Workers project structure (`backend/`)
+- [x] Design and implement D1 database schema (users, tokens, datasets, id_sequence, audit_log)
+- [x] Implement user registration endpoint (POST /auth/signup)
+- [x] Set up email verification system (Resend API, nemar@osc.earth sender)
+- [x] Create API key generation logic (SHA-256 hashed, prefix stored)
+- [x] Implement authentication middleware (Bearer token validation)
+- [x] Add admin endpoints (list users, approve, revoke)
+- [x] Add dataset endpoints (create, list, get)
+- [x] Implement rate limiting middleware (KV-based)
+- [x] Deploy to Cloudflare Workers
+- [x] Create admin user (yahya)
+- [x] Set all secrets (GITHUB_ADMIN_PAT, AWS credentials, RESEND_API_KEY)
+- [x] Add description field to signup (reason for needing NEMAR access)
+- [x] Add admin notification email when user verifies email and needs approval
+- [x] Add rate limit bypass for CI/CD testing (X-Test-Bypass header)
+
+### API Endpoints Implemented
+| Method | Path | Auth | Description |
+|--------|------|------|-------------|
+| POST | /auth/signup | None | Register new user |
+| GET | /auth/verify | None | Email verification link |
+| POST | /auth/login | None | Validate API key |
+| POST | /auth/resend-verification | None | Resend verification email |
+| GET | /users/me | User | Get current user info |
+| GET | /admin/users | Admin | List users (filter by status) |
+| POST | /admin/approve/:username | Admin | Approve user, generate token |
+| POST | /admin/revoke/:username | Admin | Revoke user access |
+| POST | /datasets | User | Create dataset |
+| GET | /datasets | Public | List datasets |
+| GET | /datasets/:id | Public | Get dataset info |
+
+### Artifacts
+- `backend/src/index.ts` - Hono app entry point
+- `backend/src/routes/auth.ts` - Authentication routes
+- `backend/src/routes/admin.ts` - Admin routes
+- `backend/src/routes/datasets.ts` - Dataset routes
+- `backend/src/routes/users.ts` - User routes
+- `backend/src/middleware/auth.ts` - API key validation
+- `backend/src/middleware/rateLimit.ts` - Rate limiting
+- `backend/src/services/email.ts` - Resend email (fetch-based)
+- `backend/src/services/password.ts` - bcrypt hashing
+- `backend/src/services/token.ts` - API key generation
+- `backend/src/services/github.ts` - GitHub collaborator management
+- `backend/src/services/s3.ts` - S3 presigned URLs
+- `backend/src/db/migrations/0001_initial.sql` - Database schema
+- `backend/.dev.vars` - Local development secrets (gitignored)
+
+---
+
+## Phase 3: Authentication System (CLI) [COMPLETED]
+**Status:** Done
+**Description:** CLI authentication commands that connect to backend
+
+### Completed Tasks
+- [x] Implement `nemar auth login` with API key validation (interactive + `-k` flag)
+- [x] Implement `nemar auth signup` with interactive prompts
+- [x] Add description field to signup (why user needs NEMAR access)
+- [x] Add environment variable support (NEMAR_API_KEY)
+- [x] Implement `nemar auth status` with backend query (`--refresh` flag)
+- [x] Implement `nemar auth logout` with confirmation
+- [x] Implement `nemar auth resend-verification` for failed verifications
+- [x] Cross-platform config storage (Conf library with NEMAR_CONFIG_DIR override)
+- [x] Write CLI integration tests (18 tests passing)
+- [x] Write API integration tests (31 tests passing)
+
+### Test Infrastructure
+- **Total Tests:** 49 (31 API + 18 CLI)
+- **CI/CD:** GitHub Actions workflow (`.github/workflows/test.yml`)
+- **Rate Limit Bypass:** X-Test-Bypass header for CI testing
+- **Test Isolation:** Each test uses unique config directory
+
+### Artifacts
+- `src/commands/auth.ts` - All auth commands
+- `src/lib/api.ts` - Backend API client
+- `src/lib/config.ts` - Cross-platform config management
+- `test/api.test.ts` - API integration tests
+- `test/cli.test.ts` - CLI integration tests
+- `test/setup.ts` - Test utilities and configuration
+
+---
+
+## Phase 4: BIDS Validation [COMPLETED]
+**Status:** Done
+**Description:** BIDS validation via Deno subprocess, always using latest validator
+
+### Implementation Notes
+- Uses Deno subprocess (`deno run jsr:@bids/validator`) for validation
+- Always pulls latest validator from JSR (currently v2.2.7)
+- Requires Deno runtime (provides install instructions if missing)
+- Parses JSON output from validator for structured results
+
+### Completed Tasks
+- [x] Research bids-validator integration options (JSR package via Deno)
+- [x] Implement `nemar dataset validate` command
+- [x] Add validation configuration file support (`--config`)
+- [x] Create clear error/warning output with colors
+- [x] Add `--json` output flag for programmatic use
+- [x] Add `--recursive` flag for derivatives validation
+- [x] Add `--prune` flag for faster validation
+- [x] Add `--version-info` to show validator version
+- [x] Write 6 validation tests (55 total tests)
+
+### Command Options
+```bash
+nemar dataset validate <path>
+  --ignore-warnings    Only report errors, not warnings
+  -c, --config <file>  Validation config file (.bidsvalidatorrc)
+  -r, --recursive      Validate derivatives subdirectories
+  --prune              Skip sourcedata and derivatives for faster validation
+  -v, --verbose        Show verbose output
+  --json               Output results as JSON
+  --version-info       Show BIDS validator version
+```
+
+### Artifacts
+- `src/lib/bids-validator.ts` - Deno subprocess wrapper
+- `src/commands/dataset.ts` - Validate command implementation
+
+---
+
+## Phase 5: Dataset Upload [COMPLETED]
+**Status:** Done
+**Description:** Implement dataset upload workflow with DataLad, S3, and GitHub
+
+### Implementation Notes
+- Uses SSH for GitHub uploads (better performance for large datasets)
+- Parallel upload processing with 8 streams by default (`-j/--jobs` flag)
+- Prerequisites check: DataLad, git-annex, GitHub SSH, AWS credentials
+- Largefiles pattern configured BEFORE adding files (critical)
+- Branch protection applied after initial upload via finalize endpoint
+
+### Completed Tasks
+- [x] Create DataLad service (`src/lib/datalad.ts`)
+- [x] Check tool installation (DataLad, git-annex, GitHub SSH, AWS)
+- [x] Create DataLad dataset from BIDS directory
+- [x] Configure git-annex largefiles pattern
+- [x] Add S3 special remote configuration with signature v4
+- [x] Create GitHub repository automation (via backend)
+- [x] Parallel upload to S3 (`git annex copy --to -J 8`)
+- [x] Push git-annex branch (critical for cloning)
+- [x] Implement `nemar dataset upload` command with all options
+- [x] Add POST /datasets/:id/finalize endpoint
+- [x] Write 3 integration tests for upload command
+
+### Command Options
+```bash
+nemar dataset upload <path>
+  -n, --name <name>           # Dataset name (default: directory name)
+  -d, --description <desc>    # Dataset description
+  --skip-validation           # Skip BIDS validation (not recommended)
+  --dry-run                   # Show what would be uploaded
+  -j, --jobs <number>         # Parallel upload streams (default: 8)
+  -y, --yes                   # Skip confirmation prompt
+```
+
+### Artifacts
+- `src/lib/datalad.ts` - DataLad/git-annex service
+- `src/commands/dataset.ts` - Upload command implementation
+- `src/lib/api.ts` - createDataset, finalizeDataset methods
+- `backend/src/routes/datasets.ts` - finalize endpoint
+
+### Dependencies
+- DataLad >= 0.19.0 and git-annex >= 10.0 installed
+- GitHub SSH access configured
+- Backend provides AWS credentials (users don't need local AWS config)
+
+---
+
+## Phase 6: Dataset Download and Status [COMPLETED]
+**Status:** Done
+**Description:** Implement dataset download and status checking
+
+### Implementation Notes
+- Download requires fewer prerequisites than upload (no AWS credentials, no GitHub SSH)
+- Uses DataLad clone + get for seamless data retrieval from S3
+- Status and list commands query the backend API
+
+### Completed Tasks
+- [x] Implement `nemar dataset download` command with parallel data fetching
+- [x] Add `--no-data` option for metadata-only download
+- [x] Add `-j/--jobs` option for parallel download streams (default: 4)
+- [x] Implement `nemar dataset status` command with `--json` output
+- [x] Implement `nemar dataset list` command with `--mine` and `--json` options
+- [x] Add checkDownloadPrerequisites() for simpler prereq check
+- [x] Write 10 CLI tests for download/status/list commands
+
+### Command Options
+```bash
+nemar dataset download <dataset-id>
+  -o, --output <path>    # Output directory (default: ./<dataset-id>)
+  -j, --jobs <number>    # Parallel download streams (default: 4)
+  --no-data              # Download metadata only (no large files)
+
+nemar dataset status <dataset-id>
+  --json                 # Output as JSON
+
+nemar dataset list
+  --mine                 # List only your datasets (requires auth)
+  --json                 # Output as JSON
+  --limit <n>            # Limit number of results (default: 50)
+```
+
+### Artifacts
+- `src/lib/datalad.ts` - Added cloneDataset, getDatasetData, getLocalDatasetInfo
+- `src/commands/dataset.ts` - Download, status, list command implementations
+- `test/cli.test.ts` - 10 new tests for download/status/list
+
+---
+
+## Phase 7: Pull Request Workflow [COMPLETED]
+**Status:** Done
+**Description:** PR-mandatory versioning system with owner self-merge capability
+
+### Key Design Decision
+Owner can merge their own PRs (no external approval required), but BIDS validation and version checks must pass. This provides audit trail and quality gates without blocking owner autonomy.
+
+### Implementation Notes
+- **GitHub as source of truth** - No separate database tables for PRs
+- **GitHub Actions** handle all automation (validation, version check, releases)
+- **S3 versioning enabled** - Safety net for data recovery
+- **Simplified workflow** - Users can use GitHub UI directly
+
+### Completed Tasks
+- [x] Update branch protection: `required_approving_review_count: 0` (owner self-merge)
+- [x] Add required status checks: `bids-validation`, `version-check`
+- [x] Set `enforce_admins: false` (admins can bypass if needed)
+- [x] Create `deployWorkflows()` function in github.ts
+- [x] Create workflow templates:
+  - `bids-validation.yml` - BIDS validation on PR
+  - `version-check.yml` - Ensure version bumped in dataset_description.json
+  - `pr-merge.yml` - Create tag/release on merge, cleanup staging on close
+- [x] Integrate workflow deployment into finalize endpoint
+
+### GitHub Actions Workflows
+Each dataset repository gets 3 workflows deployed on finalize:
+
+1. **bids-validation.yml** - Runs BIDS validator via Deno on every PR
+2. **version-check.yml** - Ensures Version field is incremented
+3. **pr-merge.yml** - On merge: creates git tag and GitHub release; on close: cleans up staging
+
+### Branch Protection Rules
+```yaml
+required_pull_request_reviews:
+  required_approving_review_count: 0
+  dismiss_stale_reviews: true
+enforce_admins: false
+required_status_checks:
+  strict: true
+  contexts: ["bids-validation", "version-check"]
+allow_force_pushes: false
+allow_deletions: false
+```
+
+### Artifacts
+- `backend/src/services/github.ts` - deployWorkflows(), createOrUpdateFile(), updated applyBranchProtection()
+- `backend/src/routes/datasets.ts` - Workflow deployment in finalize endpoint
+
+### How It Works
+1. User uploads dataset → finalize deploys workflows and protection
+2. User clones, creates branch, makes changes, opens PR
+3. GitHub Actions run bids-validation and version-check
+4. If both pass, owner can merge their own PR
+5. On merge: pr-merge.yml creates tag and release automatically
+
+---
+
+## Phase 8: DOI Management [COMPLETED]
+**Status:** Done
+**Description:** Zenodo integration for DOI creation and versioning
+
+### Implementation Notes
+- **Concept DOI:** Created by admin only via `nemar admin doi create`
+- **Version DOI:** Created automatically on GitHub release (PR merge workflow)
+- DOIs are PERMANENT and cannot be deleted (Zenodo limitation)
+- Sandbox mode supported via `--sandbox` flag for testing
+- Webhook endpoint for GitHub Actions to publish version DOIs
+
+### Completed Tasks
+- [x] Implement Zenodo API client (`backend/src/services/zenodo.ts`)
+- [x] Add database migration for zenodo columns (`zenodo_concept_id`, `zenodo_latest_version_id`)
+- [x] Create `nemar admin doi create` command with confirmation prompt
+- [x] Create `nemar admin doi info` command
+- [x] Add admin endpoints: GET/POST `/admin/datasets/:id/doi`
+- [x] Add webhook endpoint: POST `/webhooks/publish-version-doi`
+- [x] Update pr-merge workflow to auto-publish version DOIs
+- [x] Add tests for DOI endpoints (84 total tests)
+
+### Command Options
+```bash
+nemar admin doi create <dataset-id>
+  --title <title>      # DOI title (default: dataset name)
+  --sandbox            # Use Zenodo sandbox for testing
+
+nemar admin doi info <dataset-id>
+  --json               # Output as JSON
+```
+
+### API Endpoints
+| Method | Path | Auth | Description |
+|--------|------|------|-------------|
+| GET | /admin/datasets/:id/doi | Admin | Get DOI info |
+| POST | /admin/datasets/:id/doi/concept | Admin | Create concept DOI |
+| POST | /admin/datasets/:id/doi/publish | Admin | Publish version DOI |
+| POST | /webhooks/publish-version-doi | Webhook | GitHub Actions webhook |
+
+### Artifacts
+- `backend/src/services/zenodo.ts` - Zenodo API client
+- `backend/src/routes/webhooks.ts` - GitHub Actions webhook route
+- `backend/src/db/migrations/0002_zenodo.sql` - Database migration
+- `src/commands/admin.ts` - DOI CLI commands
+
+### Required Secrets
+- `ZENODO_API_KEY` - Production Zenodo API token
+- `ZENODO_SANDBOX_API_KEY` - Sandbox Zenodo API token (optional)
+- `GITHUB_WEBHOOK_SECRET` - Webhook auth for GitHub Actions
+- `NEMAR_WEBHOOK_TOKEN` - Repository secret for each dataset repo
+
+---
+
+## Phase 9: Admin Commands [COMPLETED]
+**Status:** Done
+**Description:** Admin functionality for user and dataset management
+
+### Completed Tasks
+- [x] Implement `nemar admin users` command (list users with filters: `--pending`, `--verified`, `--approved`, `--revoked`)
+- [x] Implement `nemar admin approve <username>` command
+- [x] Implement `nemar admin revoke <username>` command
+- [x] Add credential cascade (token revocation on user revoke)
+- [x] Admin notification emails when users need approval
+- [x] Write tests for admin commands
+
+### Artifacts
+- `src/commands/admin.ts` - Admin CLI commands
+- `backend/src/routes/admin.ts` - Admin API endpoints
+- Tests in `test/api.test.ts` and `test/cli.test.ts`
+
+---
+
+## Phase 10: Polish and Release
+**Status:** In Progress
+**Description:** Documentation, testing, CI/CD, and npm publishing
+
+### Completed Tasks
+- [x] Create README with architecture diagrams and command reference
+- [x] Set up GitHub Actions CI/CD (`.github/workflows/test.yml`)
+- [x] Write integration tests (49 tests passing)
+
+### Remaining Tasks
+- [ ] Add test coverage reporting and reach 90% target (Issue #1)
+- [ ] Add shell completion scripts (bash, zsh, fish)
+- [ ] Publish to npm
+- [ ] Create release notes
+
+### Related Issues
+- GitHub Issue #1: Test coverage tracking and 90% target
+
+---
+
+## Architecture Decisions
+
+### Authentication Flow
+1. `nemar auth signup` -> collect credentials -> send to backend
+2. Backend sends verification email
+3. User clicks verification link
+4. Admin receives notification; uses `nemar admin approve <user>`
+5. Backend generates: API token, GitHub PAT, S3 credentials
+6. User receives email with instructions
+
+### Token Hierarchy
+- API Token (master) -> links to:
+  - GitHub PAT (for nemarDatasets org access)
+  - S3 credentials (scoped to user's datasets)
+- Revoking API token invalidates all linked credentials
+
+### Storage Strategy
+- **GitHub:** Metadata, git history, releases (via DataLad)
+- **S3:** Binary data files (EDF, BDF, etc.)
+- **Zenodo:** DOI registration and archived releases
+- **Cloudflare D1:** User accounts, tokens, dataset metadata
+
+### Permissions Model
+- **Users:** Create datasets, version existing datasets (after concept DOI)
+- **Admins:** Approve users, create concept DOIs, revoke access, delete datasets
+- **System:** Cannot delete repositories; versioning on S3
+
+---
+
+## Success Criteria
+- [x] User can sign up and get approved (backend + CLI complete)
+- [x] Admin gets notified when users need approval
+- [x] CLI authentication works (login, signup, status, logout)
+- [x] Admin commands work (users, approve, revoke)
+- [x] CI/CD pipeline with 84 passing tests
+- [x] BIDS validation catches issues before upload (via Deno subprocess)
+- [x] Dataset upload completes with progress feedback (parallel S3 upload)
+- [ ] All operations work offline-first where possible
+- [ ] CLI installable via `bunx nemar-cli` or `bun install -g nemar-cli`
+- [ ] Test coverage reaches 90% target
+
+---
+
+## Open Questions
+- ~~Cloudflare D1 vs. other database options?~~ **Resolved: Using D1**
+- ~~GitHub App vs. PAT for organization access?~~ **Resolved: Using PAT (GITHUB_ADMIN_PAT)**
+- ~~How to handle large dataset resumption?~~ **Resolved: git-annex handles resumption natively**
+- Version control strategy for S3 (S3 versioning vs. DataLad)?
+
+---
+
+## Notes
+- Reference existing tools in ~/Documents/git/EMG-2-BIDS/tools/
+- Follow OpenNeuro CLI patterns where applicable
+- DataLad/git-annex expertise available in existing publish scripts
+- Each phase should be planned in detail using plan mode before implementation

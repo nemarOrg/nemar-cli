@@ -25,11 +25,6 @@ coverage/
 *.lcov
 test/.test-configs/
 
-# Claude specific files
-CLAUDE.md
-.rules/
-.context/
-.serena/
 
 # Logs
 *.log
