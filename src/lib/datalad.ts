@@ -728,7 +728,7 @@ export async function uploadFilesWithPresignedUrls(
             status: "completed",
           });
         } else {
-          failed.push(relativePath);
+          failed.push(`${relativePath}: ${result.error || "Unknown error"}`);
           options.onProgress?.({
             file: relativePath,
             uploaded: 0,
