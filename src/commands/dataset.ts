@@ -324,26 +324,30 @@ Examples:
         console.log();
         console.log("Learn more: https://docs.deno.com/runtime/getting_started/installation/");
         console.log();
-        console.log(chalk.gray("To skip validation (not recommended): nemar dataset upload --skip-validation"));
+        console.log(
+          chalk.gray(
+            "To skip validation (not recommended): nemar dataset upload --skip-validation",
+          ),
+        );
         process.exit(1);
       }
       try {
-          const result = await validateBidsDataset(absolutePath, { prune: true });
-          if (!result.valid) {
-            spinner.fail("Dataset has validation errors");
-            console.log();
-            console.log(formatValidationResult(result));
-            console.log();
-            console.log(chalk.yellow("Fix the errors above before uploading."));
-            console.log(chalk.gray("Or use --skip-validation to upload anyway (not recommended)."));
-            process.exit(1);
-          }
-          spinner.succeed(`Dataset is valid BIDS (${result.warningCount} warnings)`);
-        } catch (error) {
-          spinner.fail("Validation failed");
-          console.log(chalk.red((error as Error).message));
+        const result = await validateBidsDataset(absolutePath, { prune: true });
+        if (!result.valid) {
+          spinner.fail("Dataset has validation errors");
+          console.log();
+          console.log(formatValidationResult(result));
+          console.log();
+          console.log(chalk.yellow("Fix the errors above before uploading."));
+          console.log(chalk.gray("Or use --skip-validation to upload anyway (not recommended)."));
           process.exit(1);
         }
+        spinner.succeed(`Dataset is valid BIDS (${result.warningCount} warnings)`);
+      } catch (error) {
+        spinner.fail("Validation failed");
+        console.log(chalk.red((error as Error).message));
+        process.exit(1);
+      }
       console.log();
     }
 
