@@ -349,6 +349,46 @@ export async function createDataladDataset(
 }
 
 /**
+ * Ensure git-annex is initialized in the dataset
+ * Safe to call multiple times - will not fail if already initialized
+ */
+export async function ensureGitAnnexInitialized(
+  path: string,
+): Promise<{ success: boolean; error?: string }> {
+  try {
+    // Check if git-annex is initialized by trying to run a git-annex command
+    const { exitCode: infoExitCode, stderr: infoStderr } = await runCommand(
+      ["git", "annex", "info"],
+      { cwd: path },
+    );
+
+    // If info works, git-annex is already initialized
+    if (infoExitCode === 0) {
+      return { success: true };
+    }
+
+    // If info fails with "First run" error, need to initialize
+    if (infoStderr.includes("First run: git-annex init")) {
+      const { stderr: initStderr, exitCode: initExitCode } = await runCommand(
+        ["git", "annex", "init"],
+        { cwd: path },
+      );
+
+      if (initExitCode !== 0) {
+        return { success: false, error: initStderr.trim() || "Failed to initialize git-annex" };
+      }
+
+      return { success: true };
+    }
+
+    // Some other error
+    return { success: false, error: infoStderr.trim() || "Failed to check git-annex status" };
+  } catch (e) {
+    return { success: false, error: (e as Error).message };
+  }
+}
+
+/**
  * Configure largefiles pattern for git-annex
  * Must be called BEFORE adding files to the dataset
  */

@@ -47,6 +47,7 @@ import {
   configureGitHubRemote,
   configureLargefiles,
   createDataladDataset,
+  ensureGitAnnexInitialized,
   formatBytes,
   getDatasetData,
   getLocalDatasetInfo,
@@ -452,6 +453,14 @@ Examples:
         console.log(chalk.red(`  ${createResult.error}`));
         process.exit(1);
       }
+    }
+
+    // Ensure git-annex is initialized (handles both new and existing datasets)
+    const gitAnnexResult = await ensureGitAnnexInitialized(absolutePath);
+    if (!gitAnnexResult.success) {
+      spinner.fail("Failed to initialize git-annex");
+      console.log(chalk.red(`  ${gitAnnexResult.error}`));
+      process.exit(1);
     }
 
     // Configure largefiles pattern
