@@ -320,9 +320,17 @@ adminCommand
       console.log();
       console.log(`  IAM Username: ${chalk.cyan(result.user.iam_username)}`);
       if (result.user.is_admin) {
-        console.log(`  Admin:   ${chalk.magenta("yes (full bucket access)")}`);
+        console.log(`  Admin: ${chalk.magenta("yes (full bucket access)")}`);
       }
       console.log(`  Datasets restored: ${chalk.green(result.datasets_restored)}`);
+
+      // Show warning if old key revocation failed (security concern)
+      if (result.warning) {
+        console.log();
+        console.log(chalk.yellow(`  Warning: ${result.warning}`));
+        console.log(chalk.gray("  Please verify old credentials are revoked in AWS console."));
+      }
+
       console.log();
       console.log(chalk.gray("The user can now upload to their datasets again."));
     } catch (error) {
@@ -335,6 +343,8 @@ adminCommand
         }
       } else {
         spinner.fail("Failed to regenerate IAM credentials");
+        const errorMessage = error instanceof Error ? error.message : String(error);
+        console.log(chalk.gray(`  Error details: ${errorMessage}`));
       }
     }
   });

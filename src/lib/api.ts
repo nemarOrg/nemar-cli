@@ -319,9 +319,16 @@ export interface RegenerateIamResponse {
   user: {
     username: string;
     iam_username: string;
+    /** True if user has admin privileges and received full bucket access */
     is_admin?: boolean;
   };
+  /**
+   * Number of dataset prefixes restored for regular users,
+   * or "all (full bucket access)" for admins
+   */
   datasets_restored: number | string;
+  /** Warning if old key revocation failed (security concern) */
+  warning?: string;
 }
 
 export async function regenerateUserIam(username: string): Promise<RegenerateIamResponse> {
