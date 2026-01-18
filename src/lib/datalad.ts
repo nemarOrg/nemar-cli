@@ -482,18 +482,104 @@ export async function configureS3Remote(
 /**
  * Configure GitHub remote using SSH or HTTPS (with token)
  */
+/**
+ * Check if SSH config has nemar-github host configured
+ * Returns instructions if not configured
+ */
+/**
+ * Check if SSH config has nemar-{username}-github host configured
+ * Returns instructions if not configured
+ */
+export async function checkNemarGitHubSshConfig(
+  githubUsername: string,
+): Promise<{ configured: boolean; instructions?: string; sshHost?: string }> {
+  const sshHost = `nemar-${githubUsername}-github`;
+  const sshConfigPath = join(process.env.HOME || "~", ".ssh", "config");
+
+  // Check if SSH config exists and has the custom host
+  try {
+    if (!existsSync(sshConfigPath)) {
+      return {
+        configured: false,
+        sshHost,
+        instructions: getNemarSshConfigInstructions(githubUsername, sshHost),
+      };
+    }
+
+    const configContent = await Bun.file(sshConfigPath).text();
+
+    // Check if custom host is configured
+    if (!configContent.includes(`Host ${sshHost}`)) {
+      return {
+        configured: false,
+        sshHost,
+        instructions: getNemarSshConfigInstructions(githubUsername, sshHost),
+      };
+    }
+
+    return { configured: true, sshHost };
+  } catch (e) {
+    return {
+      configured: false,
+      sshHost,
+      instructions: getNemarSshConfigInstructions(githubUsername, sshHost),
+    };
+  }
+}
+
+/**
+ * Generate SSH config instructions for NEMAR GitHub access
+ */
+/**
+ * Generate SSH config instructions for NEMAR GitHub access
+ */
+function getNemarSshConfigInstructions(githubUsername: string, sshHost: string): string {
+  return `
+SSH Configuration Required for NEMAR GitHub Access
+
+Add this to your ~/.ssh/config file:
+
+Host ${sshHost}
+  HostName github.com
+  User git
+  IdentityFile ~/.ssh/id_rsa
+  IdentitiesOnly yes
+
+Replace ~/.ssh/id_rsa with the path to your SSH key for GitHub account: @${githubUsername}
+
+This allows NEMAR to use the correct SSH key and GitHub account, even if you have 
+multiple GitHub accounts configured on your machine.
+
+After adding the config, test it with:
+  ssh -T git@${sshHost}
+
+It should respond with: "Hi ${githubUsername}! You've successfully authenticated..."
+`;
+}
+
 export async function configureGitHubRemote(
   path: string,
   repoUrl: string,
+  githubUsername?: string,
   remoteName = "origin",
 ): Promise<{ success: boolean; error?: string }> {
-  // Convert SSH URL to HTTPS with token if GH_TOKEN is available
+  // Transform GitHub SSH URL to use custom host for NEMAR
+  // This allows users to configure different SSH keys per GitHub account
+  // git@github.com:org/repo.git -> git@nemar-{username}-github:org/repo.git
   let finalUrl = repoUrl;
+
   if (process.env.GH_TOKEN && repoUrl.startsWith("git@github.com:")) {
-    // Convert git@github.com:org/repo.git to https://token@github.com/org/repo.git
+    // CI/CD: Convert to HTTPS with token
     const match = repoUrl.match(/git@github\.com:(.+)/);
     if (match) {
       finalUrl = `https://${process.env.GH_TOKEN}@github.com/${match[1]}`;
+    }
+  } else if (repoUrl.startsWith("git@github.com:") && githubUsername) {
+    // Local: Use custom SSH host for NEMAR with username
+    const sshHost = `nemar-${githubUsername}-github`;
+    const match = repoUrl.match(/git@github\.com:(.+)/);
+    if (match) {
+      finalUrl = `git@${sshHost}:${match[1]}`;
     }
   }
 
@@ -524,17 +610,8 @@ export async function configureGitHubRemote(
     }
 
     return { success: true };
-  } catch {
-    // Remote doesn't exist, add it
-    const { stderr, exitCode } = await runCommand(["git", "remote", "add", remoteName, finalUrl], {
-      cwd: path,
-    });
-
-    if (exitCode !== 0) {
-      return { success: false, error: stderr.trim() };
-    }
-
-    return { success: true };
+  } catch (e) {
+    return { success: false, error: (e as Error).message };
   }
 }
 

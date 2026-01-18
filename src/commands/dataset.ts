@@ -41,6 +41,7 @@ import {
 import { getConfig, isAuthenticated, isSandboxCompleted } from "../lib/config.js";
 import {
   checkDownloadPrerequisites,
+  checkNemarGitHubSshConfig,
   checkPrerequisites,
   cloneDataset,
   collectFileManifest,
@@ -472,10 +473,28 @@ Examples:
 
     spinner.succeed("DataLad dataset initialized");
 
-    // Step 8: Configure GitHub remote
+    // Step 8: Check SSH configuration for NEMAR GitHub access
+    const sshCheck = await checkNemarGitHubSshConfig(config.githubUsername);
+    if (!sshCheck.configured && sshCheck.instructions) {
+      console.log();
+      console.log(chalk.yellow("⚠ SSH Configuration Recommended"));
+      console.log(chalk.gray(sshCheck.instructions));
+      console.log(
+        chalk.yellow(
+          "Continuing without custom SSH config (may fail if you have multiple GitHub accounts)...",
+        ),
+      );
+      console.log();
+    }
+
+    // Step 9: Configure GitHub remote
     spinner = ora("Configuring GitHub remote...").start();
 
-    const githubResult = await configureGitHubRemote(absolutePath, datasetInfo.ssh_url);
+    const githubResult = await configureGitHubRemote(
+      absolutePath,
+      datasetInfo.ssh_url,
+      config.githubUsername,
+    );
     if (!githubResult.success) {
       spinner.fail("Failed to configure GitHub remote");
       console.log(chalk.red(`  ${githubResult.error}`));
