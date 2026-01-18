@@ -178,98 +178,6 @@ function setTestConfig(config: Record<string, unknown>) {
   writeFileSync(join(TEST_CONFIG_DIR, "config.json"), JSON.stringify(config));
 }
 
-
-  // Tests for PR #33 fixes
-  test("upload fails when Deno not installed without --skip-validation", async () => {
-    if (!allPrereqsMet) {
-      console.log("   Skipping: Not all prerequisites met");
-      return;
-    }
-
-    // Create test dataset
-    cleanup();
-    createTestBidsDataset(TEST_DIR);
-    setTestConfig({
-      apiKey: TEST_CONFIG.userApiKey,
-      apiUrl: TEST_CONFIG.apiUrl,
-      username: "test-user",
-      sandboxCompleted: true,
-    });
-
-    // Temporarily hide Deno by modifying PATH
-    const originalPath = process.env.PATH;
-    const minimalPath = "/usr/bin:/bin"; // PATH without Deno
-
-    try {
-      const { stdout, stderr, exitCode } = await runCli(
-        ["dataset", "upload", TEST_DIR, "--dry-run", "-y"],
-        { env: { ...process.env, PATH: minimalPath } }
-      );
-
-      const output = stdout + stderr;
-
-      // Should fail with exit code 1
-      expect(exitCode).toBe(1);
-
-      // Should contain error about Deno being required
-      expect(output).toContain("Deno is required for BIDS validation");
-
-      // Should show installation instructions
-      expect(output).toContain("brew install deno");
-      expect(output).toContain("curl -fsSL https://deno.land/install.sh");
-
-      // Should mention skip-validation option
-      expect(output).toContain("--skip-validation");
-    } finally {
-      // Restore PATH
-      process.env.PATH = originalPath;
-    }
-  });
-
-  test("createDataladDataset initializes git-annex on existing directory", async () => {
-    if (!allPrereqsMet) {
-      console.log("   Skipping: Not all prerequisites met");
-      return;
-    }
-
-    const testDir = "/tmp/test-gitannex-init";
-    
-    try {
-      // Create directory with existing files (reproduces issue #32)
-      mkdirSync(testDir, { recursive: true });
-      writeFileSync(join(testDir, "README.md"), "Test file");
-      writeFileSync(join(testDir, "data.txt"), "Some data");
-
-      // Import createDataladDataset and configureLargefiles
-      const { createDataladDataset, configureLargefiles } = await import("../src/lib/datalad.js");
-
-      // Call createDataladDataset (should run git annex init)
-      const result = await createDataladDataset(testDir);
-
-      expect(result.success).toBe(true);
-      expect(result.error).toBeUndefined();
-
-      // Verify git-annex is actually initialized (can run annex commands)
-      const proc = spawn({
-        cmd: ["git", "annex", "version"],
-        cwd: testDir,
-        stdout: "pipe",
-        stderr: "pipe",
-      });
-      const exitCode = await proc.exited;
-      expect(exitCode).toBe(0);
-
-      // Verify subsequent configureLargefiles works (this failed in issue #32)
-      const configResult = await configureLargefiles(testDir);
-      expect(configResult.success).toBe(true);
-    } finally {
-      // Cleanup
-      if (existsSync(testDir)) {
-        rmSync(testDir, { recursive: true, force: true });
-      }
-    }
-  });
-
 function cleanup() {
   try {
     if (existsSync(TEST_DIR)) {
@@ -477,5 +385,96 @@ describe("E2E Upload Tests", () => {
     // Sandbox datasets should have xx prefix
     expect(output).toMatch(/xx\d{6}/);
     expect(exitCode).toBe(0);
+  });
+
+  // Tests for PR #33 fixes
+  test("upload fails when Deno not installed without --skip-validation", async () => {
+    if (!allPrereqsMet) {
+      console.log("   Skipping: Not all prerequisites met");
+      return;
+    }
+
+    // Create test dataset
+    cleanup();
+    createTestBidsDataset(TEST_DIR);
+    setTestConfig({
+      apiKey: TEST_CONFIG.userApiKey,
+      apiUrl: TEST_CONFIG.apiUrl,
+      username: "test-user",
+      sandboxCompleted: true,
+    });
+
+    // Temporarily hide Deno by modifying PATH
+    const originalPath = process.env.PATH;
+    const minimalPath = "/usr/bin:/bin"; // PATH without Deno
+
+    try {
+      const { stdout, stderr, exitCode } = await runCli(
+        ["dataset", "upload", TEST_DIR, "--dry-run", "-y"],
+        { env: { ...process.env, PATH: minimalPath } }
+      );
+
+      const output = stdout + stderr;
+
+      // Should fail with exit code 1
+      expect(exitCode).toBe(1);
+
+      // Should contain error about Deno being required
+      expect(output).toContain("Deno is required for BIDS validation");
+
+      // Should show installation instructions
+      expect(output).toContain("brew install deno");
+      expect(output).toContain("curl -fsSL https://deno.land/install.sh");
+
+      // Should mention skip-validation option
+      expect(output).toContain("--skip-validation");
+    } finally {
+      // Restore PATH
+      process.env.PATH = originalPath;
+    }
+  });
+
+  test("createDataladDataset initializes git-annex on existing directory", async () => {
+    if (!allPrereqsMet) {
+      console.log("   Skipping: Not all prerequisites met");
+      return;
+    }
+
+    const testDir = "/tmp/test-gitannex-init";
+    
+    try {
+      // Create directory with existing files (reproduces issue #32)
+      mkdirSync(testDir, { recursive: true });
+      writeFileSync(join(testDir, "README.md"), "Test file");
+      writeFileSync(join(testDir, "data.txt"), "Some data");
+
+      // Import createDataladDataset and configureLargefiles
+      const { createDataladDataset, configureLargefiles } = await import("../src/lib/datalad.js");
+
+      // Call createDataladDataset (should run git annex init)
+      const result = await createDataladDataset(testDir);
+
+      expect(result.success).toBe(true);
+      expect(result.error).toBeUndefined();
+
+      // Verify git-annex is actually initialized (can run annex commands)
+      const proc = spawn({
+        cmd: ["git", "annex", "version"],
+        cwd: testDir,
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      const exitCode = await proc.exited;
+      expect(exitCode).toBe(0);
+
+      // Verify subsequent configureLargefiles works (this failed in issue #32)
+      const configResult = await configureLargefiles(testDir);
+      expect(configResult.success).toBe(true);
+    } finally {
+      // Cleanup
+      if (existsSync(testDir)) {
+        rmSync(testDir, { recursive: true, force: true });
+      }
+    }
   });
 });
