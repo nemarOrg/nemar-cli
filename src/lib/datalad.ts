@@ -213,6 +213,32 @@ export async function checkGitHubSSH(): Promise<{
 }
 
 /**
+ * Check if Deno is installed (required for BIDS validation)
+ */
+export async function checkDenoInstalled(): Promise<ToolVersion> {
+  // No specific minimum version required, but check if installed
+  try {
+    const { stdout, exitCode } = await runCommand(["deno", "--version"]);
+
+    if (exitCode !== 0) {
+      return { installed: false };
+    }
+
+    // Output is like "deno 1.40.0" or multi-line with deno, v8, typescript versions
+    const match = stdout.match(/deno\s+(\d+\.\d+\.\d+)/);
+    const version = match ? match[1] : undefined;
+
+    return {
+      installed: true,
+      version,
+      compatible: true, // Any version is compatible
+    };
+  } catch {
+    return { installed: false };
+  }
+}
+
+/**
  * Check if AWS credentials are configured
  */
 export async function checkAWSCredentials(): Promise<{ configured: boolean; source?: string }> {
@@ -330,6 +356,16 @@ export async function createDataladDataset(
 
     if (exitCode !== 0) {
       return { success: false, error: stderr.trim() || "Failed to create DataLad dataset" };
+    }
+
+    // Explicitly initialize git-annex (required when dataset is created in existing directory)
+    const { stderr: initStderr, exitCode: initExitCode } = await runCommand(
+      ["git", "annex", "init"],
+      { cwd: path },
+    );
+
+    if (initExitCode !== 0) {
+      return { success: false, error: initStderr.trim() || "Failed to initialize git-annex" };
     }
 
     return { success: true };
