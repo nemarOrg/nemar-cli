@@ -327,8 +327,7 @@ Examples:
         console.log(chalk.gray("To skip validation (not recommended): nemar dataset upload --skip-validation"));
         process.exit(1);
       }
-      {
-        try {
+      try {
           const result = await validateBidsDataset(absolutePath, { prune: true });
           if (!result.valid) {
             spinner.fail("Dataset has validation errors");
@@ -345,7 +344,6 @@ Examples:
           console.log(chalk.red((error as Error).message));
           process.exit(1);
         }
-      }
       console.log();
     }
 
