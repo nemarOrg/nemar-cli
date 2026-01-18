@@ -456,7 +456,7 @@ adminRoutes.post("/regenerate-iam/:username", async (c) => {
   // Find user
   const user = await db
     .prepare(
-      `SELECT id, username, email, status, aws_iam_username, aws_access_key_id_encrypted
+      `SELECT id, username, email, status, is_admin, aws_iam_username, aws_access_key_id_encrypted
        FROM users WHERE username = ?`
     )
     .bind(username)
@@ -465,6 +465,7 @@ adminRoutes.post("/regenerate-iam/:username", async (c) => {
       username: string;
       email: string;
       status: string;
+      is_admin: number;
       aws_iam_username: string | null;
       aws_access_key_id_encrypted: string | null;
     }>();
@@ -513,7 +514,7 @@ adminRoutes.post("/regenerate-iam/:username", async (c) => {
 
   // Create new IAM credentials
   try {
-    const { createIamUser, createAccessKey, putUserPolicy, generateS3PolicyDocument, generateIamUsername } =
+    const { createIamUser, createAccessKey, putUserPolicy, generateS3PolicyDocument, generateAdminS3PolicyDocument, generateIamUsername } =
       await import("../services/iam");
 
     const iamUsername = generateIamUsername(user.username);
@@ -538,8 +539,10 @@ adminRoutes.post("/regenerate-iam/:username", async (c) => {
       iamUsername
     );
 
-    // Restore policy with access to all user's datasets
-    const policyDocument = generateS3PolicyDocument(c.env.S3_BUCKET, datasetPrefixes);
+    // Restore policy: admins get full bucket access, regular users get their datasets only
+    const policyDocument = user.is_admin
+      ? generateAdminS3PolicyDocument(c.env.S3_BUCKET)
+      : generateS3PolicyDocument(c.env.S3_BUCKET, datasetPrefixes);
     await putUserPolicy(
       {
         accessKeyId: c.env.AWS_ACCESS_KEY_ID,
@@ -569,13 +572,18 @@ adminRoutes.post("/regenerate-iam/:username", async (c) => {
 
     // Log the action
     await db
-      .prepare("INSERT INTO audit_log (user_id, action, entity_type, entity_id, details) VALUES (?, ?, ?, ?, ?)")
+      .prepare("INSERT INTO audit_log (user_id, action, resource_type, resource_id, details) VALUES (?, ?, ?, ?, ?)")
       .bind(
         adminUser.id,
         "iam_regenerated",
         "user",
-        user.id,
-        JSON.stringify({ username: user.username, datasets_restored: datasetPrefixes.length })
+        user.username,
+        JSON.stringify({
+          username: user.username,
+          is_admin: !!user.is_admin,
+          full_bucket_access: !!user.is_admin,
+          datasets_restored: user.is_admin ? "all (admin)" : datasetPrefixes.length,
+        })
       )
       .run();
 
@@ -584,8 +592,9 @@ adminRoutes.post("/regenerate-iam/:username", async (c) => {
       user: {
         username: user.username,
         iam_username: iamUsername,
+        is_admin: !!user.is_admin,
       },
-      datasets_restored: datasetPrefixes.length,
+      datasets_restored: user.is_admin ? "all (full bucket access)" : datasetPrefixes.length,
     });
   } catch (error) {
     console.error("Failed to regenerate IAM credentials:", error);

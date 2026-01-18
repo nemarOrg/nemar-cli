@@ -122,6 +122,34 @@ export async function createAccessKey(
 }
 
 /**
+ * Generate S3 policy document for admin users with full bucket access
+ */
+export function generateAdminS3PolicyDocument(bucket: string): string {
+  return JSON.stringify({
+    Version: "2012-10-17",
+    Statement: [
+      {
+        Sid: "AllowListBucket",
+        Effect: "Allow",
+        Action: ["s3:ListBucket"],
+        Resource: `arn:aws:s3:::${bucket}`,
+      },
+      {
+        Sid: "AllowFullBucketAccess",
+        Effect: "Allow",
+        Action: [
+          "s3:GetObject",
+          "s3:PutObject",
+          "s3:DeleteObject",
+          "s3:GetObjectVersion",
+        ],
+        Resource: `arn:aws:s3:::${bucket}/*`,
+      },
+    ],
+  });
+}
+
+/**
  * Generate S3 policy document for a user's dataset prefixes
  */
 export function generateS3PolicyDocument(bucket: string, prefixes: string[]): string {

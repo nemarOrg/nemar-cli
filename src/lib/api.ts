@@ -319,8 +319,9 @@ export interface RegenerateIamResponse {
   user: {
     username: string;
     iam_username: string;
+    is_admin?: boolean;
   };
-  datasets_restored: number;
+  datasets_restored: number | string;
 }
 
 export async function regenerateUserIam(username: string): Promise<RegenerateIamResponse> {

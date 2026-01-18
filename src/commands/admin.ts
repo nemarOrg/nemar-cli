@@ -319,6 +319,9 @@ adminCommand
       spinner.succeed(`Regenerated IAM credentials for ${username}`);
       console.log();
       console.log(`  IAM Username: ${chalk.cyan(result.user.iam_username)}`);
+      if (result.user.is_admin) {
+        console.log(`  Admin:   ${chalk.magenta("yes (full bucket access)")}`);
+      }
       console.log(`  Datasets restored: ${chalk.green(result.datasets_restored)}`);
       console.log();
       console.log(chalk.gray("The user can now upload to their datasets again."));
