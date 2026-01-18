@@ -285,7 +285,8 @@ adminCommand
   .command("regenerate-iam")
   .description("Regenerate AWS IAM credentials for a user")
   .argument("<username>", "Username to regenerate credentials for")
-  .action(async (username) => {
+  .option("--yes", "Skip confirmation prompt")
+  .action(async (username, options) => {
     if (!requireAuth()) return;
 
     // Confirmation with warning
@@ -298,14 +299,18 @@ adminCommand
     console.log(chalk.gray("Use this if a user's credentials were compromised or lost."));
     console.log();
 
-    const { confirm } = await inquirer.prompt([
-      {
-        type: "confirm",
-        name: "confirm",
-        message: `Regenerate IAM credentials for ${username}?`,
-        default: false,
-      },
-    ]);
+    let confirm = options.yes;
+    if (!confirm) {
+      const answers = await inquirer.prompt([
+        {
+          type: "confirm",
+          name: "confirm",
+          message: `Regenerate IAM credentials for ${username}?`,
+          default: false,
+        },
+      ]);
+      confirm = answers.confirm;
+    }
 
     if (!confirm) {
       console.log(chalk.gray("Cancelled"));
