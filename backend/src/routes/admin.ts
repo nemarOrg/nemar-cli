@@ -489,7 +489,7 @@ adminRoutes.post("/regenerate-iam/:username", async (c) => {
     .bind(user.id)
     .all<{ dataset_id: string }>();
 
-  const datasetPrefixes = datasets.results.map((d) => `datasets/${d.dataset_id}`);
+  const datasetPrefixes = datasets.results.map((d) => d.dataset_id);
 
   // Track warning if old key revocation fails (security concern)
   let oldKeyRevocationWarning: string | undefined;
