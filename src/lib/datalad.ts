@@ -332,6 +332,16 @@ export async function createDataladDataset(
       return { success: false, error: stderr.trim() || "Failed to create DataLad dataset" };
     }
 
+    // Explicitly initialize git-annex (required when dataset is created in existing directory)
+    const { stderr: initStderr, exitCode: initExitCode } = await runCommand(
+      ["git", "annex", "init"],
+      { cwd: path },
+    );
+
+    if (initExitCode !== 0) {
+      return { success: false, error: initStderr.trim() || "Failed to initialize git-annex" };
+    }
+
     return { success: true };
   } catch (e) {
     return { success: false, error: (e as Error).message };

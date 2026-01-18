@@ -306,26 +306,47 @@ Examples:
       // Check Deno for validation
       const deno = await checkDenoInstalled();
       if (!deno.installed) {
-        spinner.warn("Skipping validation (Deno not installed)");
-        console.log(chalk.gray("Install Deno to enable BIDS validation: https://deno.com"));
-      } else {
-        try {
-          const result = await validateBidsDataset(absolutePath, { prune: true });
-          if (!result.valid) {
-            spinner.fail("Dataset has validation errors");
-            console.log();
-            console.log(formatValidationResult(result));
-            console.log();
-            console.log(chalk.yellow("Fix the errors above before uploading."));
-            console.log(chalk.gray("Or use --skip-validation to upload anyway (not recommended)."));
-            process.exit(1);
-          }
-          spinner.succeed(`Dataset is valid BIDS (${result.warningCount} warnings)`);
-        } catch (error) {
-          spinner.fail("Validation failed");
-          console.log(chalk.red((error as Error).message));
+        spinner.fail("Deno is required for BIDS validation");
+        console.log();
+        console.log(chalk.red("Error: Deno is not installed"));
+        console.log();
+        console.log("The BIDS validator requires Deno runtime to run.");
+        console.log("Install Deno with one of these commands:");
+        console.log();
+        console.log(chalk.cyan("  # macOS/Linux (curl)"));
+        console.log("  curl -fsSL https://deno.land/install.sh | sh");
+        console.log();
+        console.log(chalk.cyan("  # macOS (Homebrew)"));
+        console.log("  brew install deno");
+        console.log();
+        console.log(chalk.cyan("  # Windows (PowerShell)"));
+        console.log("  irm https://deno.land/install.ps1 | iex");
+        console.log();
+        console.log("Learn more: https://docs.deno.com/runtime/getting_started/installation/");
+        console.log();
+        console.log(
+          chalk.gray(
+            "To skip validation (not recommended): nemar dataset upload --skip-validation",
+          ),
+        );
+        process.exit(1);
+      }
+      try {
+        const result = await validateBidsDataset(absolutePath, { prune: true });
+        if (!result.valid) {
+          spinner.fail("Dataset has validation errors");
+          console.log();
+          console.log(formatValidationResult(result));
+          console.log();
+          console.log(chalk.yellow("Fix the errors above before uploading."));
+          console.log(chalk.gray("Or use --skip-validation to upload anyway (not recommended)."));
           process.exit(1);
         }
+        spinner.succeed(`Dataset is valid BIDS (${result.warningCount} warnings)`);
+      } catch (error) {
+        spinner.fail("Validation failed");
+        console.log(chalk.red((error as Error).message));
+        process.exit(1);
       }
       console.log();
     }
