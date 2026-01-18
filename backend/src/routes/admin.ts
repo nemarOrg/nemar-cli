@@ -456,7 +456,7 @@ adminRoutes.post("/regenerate-iam/:username", async (c) => {
   // Find user
   const user = await db
     .prepare(
-      `SELECT id, username, email, status, aws_iam_username, aws_access_key_id_encrypted
+      `SELECT id, username, email, status, is_admin, aws_iam_username, aws_access_key_id_encrypted
        FROM users WHERE username = ?`
     )
     .bind(username)
@@ -465,6 +465,7 @@ adminRoutes.post("/regenerate-iam/:username", async (c) => {
       username: string;
       email: string;
       status: string;
+      is_admin: number;
       aws_iam_username: string | null;
       aws_access_key_id_encrypted: string | null;
     }>();
@@ -490,6 +491,9 @@ adminRoutes.post("/regenerate-iam/:username", async (c) => {
 
   const datasetPrefixes = datasets.results.map((d) => `datasets/${d.dataset_id}`);
 
+  // Track warning if old key revocation fails (security concern)
+  let oldKeyRevocationWarning: string | undefined;
+
   // Revoke old IAM credentials if they exist (but don't delete the user - we'll reuse it)
   if (user.aws_iam_username && user.aws_access_key_id_encrypted) {
     try {
@@ -506,86 +510,102 @@ adminRoutes.post("/regenerate-iam/:username", async (c) => {
         oldAccessKeyId
       );
     } catch (error) {
-      console.warn("Failed to revoke old access key:", error);
-      // Continue anyway - we'll create new ones
+      console.error("Failed to revoke old access key:", error);
+      oldKeyRevocationWarning = `Old access key may still be active: ${error instanceof Error ? error.message : "Unknown error"}`;
     }
   }
 
   // Create new IAM credentials
+  const isAdmin = Boolean(user.is_admin);
+  const awsConfig = {
+    accessKeyId: c.env.AWS_ACCESS_KEY_ID,
+    secretAccessKey: c.env.AWS_SECRET_ACCESS_KEY,
+    region: c.env.AWS_REGION,
+  };
+
   try {
-    const { createIamUser, createAccessKey, putUserPolicy, generateS3PolicyDocument, generateIamUsername } =
-      await import("../services/iam");
+    const {
+      createIamUser,
+      createAccessKey,
+      putUserPolicy,
+      generateS3PolicyDocument,
+      generateAdminS3PolicyDocument,
+      generateIamUsername,
+      deleteAccessKey,
+    } = await import("../services/iam");
 
     const iamUsername = generateIamUsername(user.username);
 
     // Create or get existing IAM user
-    await createIamUser(
-      {
-        accessKeyId: c.env.AWS_ACCESS_KEY_ID,
-        secretAccessKey: c.env.AWS_SECRET_ACCESS_KEY,
-        region: c.env.AWS_REGION,
-      },
-      user.username
-    );
+    await createIamUser(awsConfig, user.username);
 
     // Create new access keys
-    const { accessKeyId, secretAccessKey } = await createAccessKey(
-      {
-        accessKeyId: c.env.AWS_ACCESS_KEY_ID,
-        secretAccessKey: c.env.AWS_SECRET_ACCESS_KEY,
-        region: c.env.AWS_REGION,
-      },
-      iamUsername
-    );
+    const { accessKeyId, secretAccessKey } = await createAccessKey(awsConfig, iamUsername);
 
-    // Restore policy with access to all user's datasets
-    const policyDocument = generateS3PolicyDocument(c.env.S3_BUCKET, datasetPrefixes);
-    await putUserPolicy(
-      {
-        accessKeyId: c.env.AWS_ACCESS_KEY_ID,
-        secretAccessKey: c.env.AWS_SECRET_ACCESS_KEY,
-        region: c.env.AWS_REGION,
-      },
-      iamUsername,
-      "nemar-s3-access",
-      policyDocument
-    );
+    // Restore policy: admins get full bucket access, regular users get their datasets only
+    const policyDocument = isAdmin
+      ? generateAdminS3PolicyDocument(c.env.S3_BUCKET)
+      : generateS3PolicyDocument(c.env.S3_BUCKET, datasetPrefixes);
+    await putUserPolicy(awsConfig, iamUsername, "nemar-s3-access", policyDocument);
 
     // Encrypt and store credentials
     const encryptedAccessKeyId = await encrypt(accessKeyId, c.env.ENCRYPTION_KEY);
     const encryptedSecretAccessKey = await encrypt(secretAccessKey, c.env.ENCRYPTION_KEY);
 
-    // Update user with new IAM credentials
-    await db
-      .prepare(
-        `UPDATE users
-         SET aws_iam_username = ?,
-             aws_access_key_id_encrypted = ?,
-             aws_secret_access_key_encrypted = ?
-         WHERE id = ?`
-      )
-      .bind(iamUsername, encryptedAccessKeyId, encryptedSecretAccessKey, user.id)
-      .run();
+    // Update user with new IAM credentials - cleanup AWS if this fails
+    try {
+      await db
+        .prepare(
+          `UPDATE users
+           SET aws_iam_username = ?,
+               aws_access_key_id_encrypted = ?,
+               aws_secret_access_key_encrypted = ?
+           WHERE id = ?`
+        )
+        .bind(iamUsername, encryptedAccessKeyId, encryptedSecretAccessKey, user.id)
+        .run();
+    } catch (dbError) {
+      // Cleanup orphaned AWS credentials
+      console.error("Database update failed, cleaning up AWS credentials:", dbError);
+      try {
+        await deleteAccessKey(awsConfig, iamUsername, accessKeyId);
+      } catch (cleanupError) {
+        console.error("Failed to cleanup AWS credentials after DB failure:", cleanupError);
+      }
+      throw dbError;
+    }
 
-    // Log the action
-    await db
-      .prepare("INSERT INTO audit_log (user_id, action, entity_type, entity_id, details) VALUES (?, ?, ?, ?, ?)")
-      .bind(
-        adminUser.id,
-        "iam_regenerated",
-        "user",
-        user.id,
-        JSON.stringify({ username: user.username, datasets_restored: datasetPrefixes.length })
-      )
-      .run();
+    // Log the action (non-blocking - credentials already created)
+    const datasetsRestoredCount = isAdmin ? "all" : datasetPrefixes.length;
+    try {
+      await db
+        .prepare("INSERT INTO audit_log (user_id, action, resource_type, resource_id, details) VALUES (?, ?, ?, ?, ?)")
+        .bind(
+          adminUser.id,
+          "iam_regenerated",
+          "user",
+          user.username,
+          JSON.stringify({
+            username: user.username,
+            is_admin: isAdmin,
+            datasets_restored: datasetsRestoredCount,
+          })
+        )
+        .run();
+    } catch (auditError) {
+      console.error("Failed to write audit log for IAM regeneration:", auditError);
+      // Do not fail the request - the credential regeneration succeeded
+    }
 
     return c.json({
       message: "IAM credentials regenerated successfully",
       user: {
         username: user.username,
         iam_username: iamUsername,
+        is_admin: isAdmin,
       },
-      datasets_restored: datasetPrefixes.length,
+      datasets_restored: isAdmin ? "all (full bucket access)" : datasetPrefixes.length,
+      warning: oldKeyRevocationWarning,
     });
   } catch (error) {
     console.error("Failed to regenerate IAM credentials:", error);

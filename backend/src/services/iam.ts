@@ -2,11 +2,22 @@
  * AWS IAM Service using aws4fetch
  *
  * Manages per-user IAM users and policies for scoped S3 access.
- * Each NEMAR user gets their own IAM user with an inline policy
- * that grants access only to their dataset prefixes.
+ * Regular users get an inline policy granting access only to their dataset prefixes.
+ * Admin users receive a broader policy with read/write/delete access to all objects in the bucket.
  */
 
 import { AwsClient } from "aws4fetch";
+
+/**
+ * S3 object-level actions granted to users for dataset management.
+ * Does not include bucket management permissions (versioning, policies, etc.)
+ */
+const S3_DATASET_ACTIONS = [
+  "s3:GetObject",
+  "s3:PutObject",
+  "s3:DeleteObject",
+  "s3:GetObjectVersion",
+] as const;
 
 interface IamConfig {
   accessKeyId: string;
@@ -122,6 +133,44 @@ export async function createAccessKey(
 }
 
 /**
+ * Generate S3 policy document for admin users with bucket-wide object access.
+ *
+ * Allows admins to:
+ * - List all objects in the bucket
+ * - Read, write, delete any object
+ * - Access object versions
+ *
+ * Does NOT grant bucket management permissions (versioning config, policies, etc.)
+ *
+ * @param bucket - The S3 bucket name (without arn prefix)
+ * @returns JSON-stringified IAM policy document ready for putUserPolicy
+ * @throws Error if bucket name is empty
+ */
+export function generateAdminS3PolicyDocument(bucket: string): string {
+  if (!bucket || bucket.trim() === "") {
+    throw new Error("Bucket name is required for S3 policy generation");
+  }
+
+  return JSON.stringify({
+    Version: "2012-10-17",
+    Statement: [
+      {
+        Sid: "AllowListBucket",
+        Effect: "Allow",
+        Action: ["s3:ListBucket"],
+        Resource: `arn:aws:s3:::${bucket}`,
+      },
+      {
+        Sid: "AllowFullBucketAccess",
+        Effect: "Allow",
+        Action: [...S3_DATASET_ACTIONS],
+        Resource: `arn:aws:s3:::${bucket}/*`,
+      },
+    ],
+  });
+}
+
+/**
  * Generate S3 policy document for a user's dataset prefixes
  */
 export function generateS3PolicyDocument(bucket: string, prefixes: string[]): string {
@@ -162,12 +211,7 @@ export function generateS3PolicyDocument(bucket: string, prefixes: string[]): st
       {
         Sid: "AllowReadWriteDatasetPrefixes",
         Effect: "Allow",
-        Action: [
-          "s3:GetObject",
-          "s3:PutObject",
-          "s3:DeleteObject",
-          "s3:GetObjectVersion",
-        ],
+        Action: [...S3_DATASET_ACTIONS],
         Resource: resources,
       },
     ],
