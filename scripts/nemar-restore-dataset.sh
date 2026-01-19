@@ -55,8 +55,9 @@ set -euo pipefail  # Exit on error, undefined vars, pipe failures
 ARCHIVE_DIR="${ARCHIVE_DIR:-/tmp/restore}"
 WORK_BASE_DIR="${WORK_BASE_DIR:-${ARCHIVE_DIR}/restore_work}"
 
-# GitHub organization
+# GitHub organization and SSH configuration
 GITHUB_ORG="${GITHUB_ORG:-nemarDatasets}"
+SSH_HOST="${SSH_HOST:-github.com}"
 
 # Git committer identity (NEMAR Restore Agent)
 GIT_COMMITTER_NAME="NEMAR Restore"
@@ -115,6 +116,41 @@ command_exists() {
     command -v "$1" >/dev/null 2>&1
 }
 
+################################################################################
+# Cleanup Handler
+################################################################################
+
+# Global variable to track if GitHub repo was created
+CREATED_GITHUB_REPO=""
+
+# Cleanup function called on error
+cleanup_on_failure() {
+    local exit_code=$?
+
+    # Only cleanup if script failed (non-zero exit) and repo was created
+    if [ $exit_code -ne 0 ] && [ -n "$CREATED_GITHUB_REPO" ]; then
+        log_warning "Script failed with exit code ${exit_code}"
+        log_warning "Cleaning up partially created GitHub repository..."
+
+        # Attempt to delete the GitHub repository
+        if gh repo delete "${GITHUB_ORG}/${CREATED_GITHUB_REPO}" --yes 2>/dev/null; then
+            log_info "Cleaned up repository: ${GITHUB_ORG}/${CREATED_GITHUB_REPO}"
+        else
+            log_warning "Could not automatically delete repository: ${GITHUB_ORG}/${CREATED_GITHUB_REPO}"
+            log_warning "Manual cleanup may be required"
+        fi
+
+        CREATED_GITHUB_REPO=""
+    fi
+}
+
+# Set trap to call cleanup on script exit
+trap cleanup_on_failure EXIT
+
+################################################################################
+# Prerequisites Check
+################################################################################
+
 # Verify prerequisites
 check_prerequisites() {
     log_info "Checking prerequisites..."
@@ -161,6 +197,47 @@ restore_dataset() {
     local dataset_name=$3
     local zenodo_doi=$4
     local datalad_id=$5
+
+    # ========================================================================
+    # INPUT VALIDATION (Security: Prevent command injection and bad inputs)
+    # ========================================================================
+
+    # Validate dataset_id format (nmXXXXXX)
+    if [[ ! "$dataset_id" =~ ^nm[0-9]{6}$ ]]; then
+        log_error "Invalid dataset_id format: '$dataset_id'"
+        log_error "Expected format: nmXXXXXX (e.g., nm000105)"
+        return 1
+    fi
+
+    # Validate version format (vX.X.X)
+    if [[ ! "$version" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9]+)?$ ]]; then
+        log_error "Invalid version format: '$version'"
+        log_error "Expected format: vX.X.X (e.g., v1.0.0 or v1.0.0-beta)"
+        return 1
+    fi
+
+    # Validate dataset_name (no shell metacharacters)
+    if [[ "$dataset_name" =~ [\;\&\|\$\`\(\)\\] ]]; then
+        log_error "Invalid dataset_name: '$dataset_name'"
+        log_error "Dataset name cannot contain shell metacharacters: ; & | \$ \` ( ) \\"
+        return 1
+    fi
+
+    # Validate Zenodo DOI format (10.5281/zenodo.XXXXXXX)
+    if [[ ! "$zenodo_doi" =~ ^10\.5281/zenodo\.[0-9]+$ ]]; then
+        log_error "Invalid Zenodo DOI format: '$zenodo_doi'"
+        log_error "Expected format: 10.5281/zenodo.XXXXXXX"
+        return 1
+    fi
+
+    # Validate DataLad ID (UUID format)
+    if [[ ! "$datalad_id" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]]; then
+        log_error "Invalid DataLad ID format: '$datalad_id'"
+        log_error "Expected format: UUID (e.g., f9028a54-3d7e-4af0-994f-19dc40de6a0a)"
+        return 1
+    fi
+
+    log_info "Input validation passed"
 
     # Derived variables
     local work_dir="${WORK_BASE_DIR}/${dataset_id}"
@@ -356,7 +433,8 @@ Date: $(date -u +"%Y-%m-%d %H:%M:%S UTC")"
     local registered_count=0
 
     # Register URLs for all annexed data files
-    git annex find --include='*.bdf' --include='*.edf' --include='*.set' | while read -r file; do
+    # Use process substitution to avoid subshell variable scope issue
+    while read -r file; do
         local key
         key=$(git annex lookupkey "$file")
         if [ -n "$key" ]; then
@@ -364,9 +442,9 @@ Date: $(date -u +"%Y-%m-%d %H:%M:%S UTC")"
                 ((registered_count++)) || true
             fi
         fi
-    done
+    done < <(git annex find --include='*.bdf' --include='*.edf' --include='*.set')
 
-    log_success "S3 URLs registered for annexed files"
+    log_success "S3 URLs registered for ${registered_count} annexed files"
 
     #---------------------------------------------------------------------------
     # Step 8: Verify S3 URL Registration
@@ -430,8 +508,11 @@ Date: $(date -u +"%Y-%m-%d %H:%M:%S UTC")"
         --private \
         --description "NEMAR Dataset ${dataset_id}: ${dataset_name} (Restored from Zenodo)" 2>&1; then
         log_success "GitHub repository created"
+        # Track repo for cleanup if later steps fail
+        CREATED_GITHUB_REPO="${dataset_id}"
     else
         log_warning "Repository may already exist"
+        # If repo already exists, don't track for cleanup
     fi
 
     #---------------------------------------------------------------------------
@@ -439,7 +520,7 @@ Date: $(date -u +"%Y-%m-%d %H:%M:%S UTC")"
     #---------------------------------------------------------------------------
     print_step 11 13 "Configuring GitHub Remote"
 
-    local remote_url="git@nemar-neuromechanist-github:${GITHUB_ORG}/${dataset_id}.git"
+    local remote_url="git@${SSH_HOST}:${GITHUB_ORG}/${dataset_id}.git"
 
     log_info "Setting remote: ${remote_url}"
 
@@ -455,11 +536,15 @@ Date: $(date -u +"%Y-%m-%d %H:%M:%S UTC")"
     #---------------------------------------------------------------------------
     print_step 12 13 "Pushing to GitHub"
 
-    log_info "Pushing main branch..."
-    if git push -u origin main 2>&1 || git push -u origin master 2>&1; then
-        log_success "Main branch pushed"
+    # Detect current branch name
+    local branch_name
+    branch_name=$(git branch --show-current)
+    log_info "Pushing ${branch_name} branch..."
+
+    if git push -u origin "${branch_name}" 2>&1; then
+        log_success "${branch_name} branch pushed"
     else
-        log_error "Failed to push main branch"
+        log_error "Failed to push ${branch_name} branch"
         return 5
     fi
 
@@ -511,6 +596,9 @@ Date: $(date -u +"%Y-%m-%d %H:%M:%S UTC")"
     echo "################################################################"
     echo
 
+    # Clear cleanup tracking (restoration succeeded)
+    CREATED_GITHUB_REPO=""
+
     return 0
 }
 
@@ -533,6 +621,8 @@ main() {
         echo "  ARCHIVE_DIR               - Directory with Zenodo archives (default: /tmp/restore)"
         echo "  WORK_BASE_DIR             - Working directory (default: \$ARCHIVE_DIR/restore_work)"
         echo "  GITHUB_ORG                - GitHub organization (default: nemarDatasets)"
+        echo "  SSH_HOST                  - SSH host for GitHub (default: github.com)"
+        echo "                              Set to custom SSH alias if using multi-account SSH config"
         return 1
     fi
 

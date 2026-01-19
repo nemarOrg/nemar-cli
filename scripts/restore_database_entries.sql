@@ -7,6 +7,10 @@
 -- Recovery: Datasets restored from Zenodo archives to GitHub
 --
 -- IMPORTANT: Run this AFTER verifying GitHub repositories are restored
+--
+-- IDEMPOTENCY: This script is idempotent and can be run multiple times.
+--              - Dataset entries use INSERT OR REPLACE (safe to re-run)
+--              - Audit log entries use INSERT (creates new entry each time)
 -- ============================================================================
 
 -- Verify owner exists (yahya@osc.earth, user_id=2)
@@ -17,7 +21,7 @@
 -- ============================================================================
 
 -- nm000103: HBN-EEG NC v1.0.0
-INSERT INTO datasets (
+INSERT OR REPLACE INTO datasets (
   dataset_id,
   name,
   description,
@@ -46,7 +50,7 @@ INSERT INTO datasets (
 );
 
 -- nm000104: emg2qwerty v1.1.0
-INSERT INTO datasets (
+INSERT OR REPLACE INTO datasets (
   dataset_id,
   name,
   description,
@@ -75,7 +79,7 @@ INSERT INTO datasets (
 );
 
 -- nm000105: discrete_gestures v1.1.0
-INSERT INTO datasets (
+INSERT OR REPLACE INTO datasets (
   dataset_id,
   name,
   description,
@@ -104,7 +108,7 @@ INSERT INTO datasets (
 );
 
 -- nm000106: handwriting v1.1.0
-INSERT INTO datasets (
+INSERT OR REPLACE INTO datasets (
   dataset_id,
   name,
   description,
@@ -133,7 +137,7 @@ INSERT INTO datasets (
 );
 
 -- nm000107: wrist v1.1.0
-INSERT INTO datasets (
+INSERT OR REPLACE INTO datasets (
   dataset_id,
   name,
   description,
@@ -166,6 +170,7 @@ INSERT INTO datasets (
 -- ============================================================================
 
 -- Log the restoration action
+-- Note: Using INSERT (not INSERT OR REPLACE) to track each restoration attempt
 INSERT INTO audit_log (
   user_id,
   action,

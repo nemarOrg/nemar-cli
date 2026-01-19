@@ -13,6 +13,38 @@
 
 **TIME IS CRITICAL** - Follow these steps immediately:
 
+### STEP 0: EMERGENCY SETUP (2-5 minutes)
+
+**If this is your first time responding to an emergency**, setup the environment:
+
+```bash
+# 1. Create restore directory
+mkdir -p /tmp/restore && cd /tmp/restore
+
+# 2. Download restoration files from GitHub
+curl -L "https://raw.githubusercontent.com/nemarDatasets/nemar-cli/main/scripts/nemar-restore-dataset.sh" -o nemar-restore-dataset.sh
+curl -L "https://raw.githubusercontent.com/nemarDatasets/nemar-cli/main/scripts/restore_database_entries.sql" -o restore_database_entries.sql
+curl -L "https://raw.githubusercontent.com/nemarDatasets/nemar-cli/main/docs/disaster-recovery/DISASTER_RECOVERY.md" -o DISASTER_RECOVERY.md
+chmod +x nemar-restore-dataset.sh
+
+# 3. Verify tools are installed
+command -v git && echo "✓ git" || echo "✗ git - install with: brew install git"
+command -v git-annex && echo "✓ git-annex" || echo "✗ git-annex - install with: brew install git-annex"
+command -v gh && echo "✓ gh CLI" || echo "✗ gh CLI - install with: brew install gh"
+command -v aws && echo "✓ aws CLI" || echo "✗ aws CLI - install with: brew install awscli"
+command -v wrangler && echo "✓ wrangler" || echo "✗ wrangler - install with: npm install -g wrangler"
+
+# 4. Authenticate to services
+gh auth status || gh auth login
+wrangler whoami || wrangler login
+```
+
+**Expected time:** 2 minutes if tools installed, 15-30 minutes if tools must be installed
+
+**Proceed to STEP 1 once setup is complete.**
+
+---
+
 ### STEP 1: ASSESS DAMAGE (5 minutes)
 
 ```bash
@@ -62,12 +94,25 @@ Zenodo archives are our backup. Find concept DOIs from nemarDatasets profile:
 gh repo view nemarDatasets/.github --web
 
 # Download archives for each missing dataset
+# IMPORTANT: Visit each Zenodo record page to find the exact filename and latest version
+# Example: https://zenodo.org/records/17613958 → click Files section → copy download link
+
 cd /tmp/restore
-for doi in 17306881 17613953 17613958 17613961 17613963; do
-  # Find latest version from Zenodo page
-  # Download: https://zenodo.org/records/{doi}/files/{dataset_id}-v{version}.zip?download=1
-  curl -L "https://zenodo.org/records/${doi}/files/..." -o "nm00010X-vX.X.X.zip"
-done
+
+# nm000103 (HBN-EEG NC v1.0.0)
+curl -L "https://zenodo.org/records/17306881/files/nm000103-v1.0.0.zip?download=1" -o "nm000103-v1.0.0.zip"
+
+# nm000104 (emg2qwerty v1.1.0)
+curl -L "https://zenodo.org/records/17613953/files/nm000104-v1.1.0.zip?download=1" -o "nm000104-v1.1.0.zip"
+
+# nm000105 (discrete_gestures v1.1.0)
+curl -L "https://zenodo.org/records/17613958/files/nm000105-v1.1.0.zip?download=1" -o "nm000105-v1.1.0.zip"
+
+# nm000106 (handwriting v1.1.0)
+curl -L "https://zenodo.org/records/17613961/files/nm000106-v1.1.0.zip?download=1" -o "nm000106-v1.1.0.zip"
+
+# nm000107 (wrist v1.1.0)
+curl -L "https://zenodo.org/records/17613963/files/nm000107-v1.1.0.zip?download=1" -o "nm000107-v1.1.0.zip"
 ```
 
 **Dataset → Zenodo Mapping:**
@@ -251,10 +296,16 @@ All datasets verified functional.
 ### Essential Credentials
 
 **Store in 1Password:**
-- AWS Access Key ID: `AKIASZJLRMPHWL33WDUL`
-- AWS Secret Access Key: `[retrieve from 1Password]`
+- AWS Access Key ID: `<retrieve from 1Password: NEMAR Production vault>`
+- AWS Secret Access Key: `<retrieve from 1Password: NEMAR Production vault>`
 - GitHub SSH: `~/.ssh/config` → `nemar-neuromechanist-github`
 - Wrangler auth: `wrangler login`
+
+**1Password Details:**
+- Vault: "NEMAR Production"
+- Item: "AWS S3 NEMAR Bucket - nemar-neuromechanist"
+- Retrieve: `op item get "AWS S3 NEMAR Bucket" --vault "NEMAR Production" --field "access key id"`
+- Retrieve: `op item get "AWS S3 NEMAR Bucket" --vault "NEMAR Production" --field "secret access key"`
 
 ### Essential Files
 
@@ -280,113 +331,22 @@ All datasets verified functional.
 
 ---
 
-## ⚠️ PREVENTION - FAIL-SAFES TO IMPLEMENT
+## ⚠️ PREVENTION NOTE
 
-### Backend Deletion Fail-Safes (CRITICAL - Must Implement)
+**Dataset deletion is not yet implemented** in the NEMAR CLI or backend. The incident on 2026-01-18 occurred through direct GitHub repository deletion and database manipulation, not through normal NEMAR operations.
 
-**File:** `backend/src/routes/datasets.ts`
+### Future Fail-Safes
 
-```typescript
-// BEFORE allowing deletion, check:
+Backend and CLI fail-safes to prevent accidental deletion are specified in:
+- **[FUTURE_FAIL_SAFES.md](./FUTURE_FAIL_SAFES.md)** - Detailed specifications for deletion protection
+- **Issue #35** - Two-tier admin permissions and deletion fail-safes (not yet implemented)
 
-// 1. CHECK: Does dataset have a concept DOI?
-if (dataset.concept_doi || dataset.latest_version_doi) {
-  throw new Error(
-    `Cannot delete dataset ${dataset.dataset_id}: has DOI(s). ` +
-    `Datasets with DOIs are preserved on Zenodo and cannot be deleted. ` +
-    `Contact owner (yahya@osc.earth) if deletion is absolutely necessary.`
-  );
-}
-
-// 2. CHECK: Is dataset public/published?
-if (dataset.status === 'published' || dataset.visibility === 'public') {
-  throw new Error(
-    `Cannot delete published/public dataset ${dataset.dataset_id}. ` +
-    `Published datasets must remain available. ` +
-    `Contact owner (yahya@osc.earth) if deletion is absolutely necessary.`
-  );
-}
-
-// 3. CHECK: Two-tier admin permissions
-if (dataset.owner_user_id !== requesting_user_id) {
-  if (!requesting_user_is_owner) {  // Only owner can delete others' datasets
-    throw new Error(
-      `Cannot delete dataset ${dataset.dataset_id}: ` +
-      `Only the owner (yahya@osc.earth) can delete datasets created by other users.`
-    );
-  }
-}
-
-// 4. REQUIRE: Explicit confirmation
-if (!request.body.confirm_deletion || request.body.confirmation_text !== dataset.dataset_id) {
-  throw new Error(
-    `Deletion requires explicit confirmation. ` +
-    `Set confirm_deletion=true and confirmation_text='${dataset.dataset_id}'`
-  );
-}
-
-// 5. AUDIT LOG: Record deletion attempt
-await logAuditEvent({
-  user_id: requesting_user_id,
-  action: 'dataset_delete_attempt',
-  resource_type: 'dataset',
-  resource_id: dataset.dataset_id,
-  details: JSON.stringify({
-    has_doi: !!dataset.concept_doi,
-    status: dataset.status,
-    owner: dataset.owner_user_id
-  })
-});
-```
-
-### CLI Deletion Fail-Safes
-
-**File:** `src/commands/dataset.ts`
-
-```typescript
-// DELETE command must:
-
-// 1. Show warning about DOI datasets
-if (datasetInfo.conceptDoi) {
-  console.error(chalk.red('⚠️  WARNING: This dataset has a DOI!'));
-  console.error(chalk.yellow(`   Concept DOI: ${datasetInfo.conceptDoi}`));
-  console.error(chalk.yellow('   Datasets with DOIs are preserved on Zenodo.'));
-  console.error(chalk.yellow('   Deletion is strongly discouraged.'));
-  console.error('');
-}
-
-// 2. Require typing dataset ID to confirm
-const confirmation = await prompt({
-  type: 'text',
-  name: 'confirm',
-  message: `Type the dataset ID '${datasetId}' to confirm deletion:`
-});
-
-if (confirmation.confirm !== datasetId) {
-  console.error(chalk.red('Deletion cancelled: confirmation did not match'));
-  process.exit(1);
-}
-
-// 3. Show what will be deleted
-console.log(chalk.yellow('\nThe following will be deleted:'));
-console.log(chalk.yellow(`  • GitHub repository: nemarDatasets/${datasetId}`));
-console.log(chalk.yellow(`  • Database entry`));
-console.log(chalk.yellow(`  • S3 bucket: s3://nemar/${datasetId}/`));
-console.log('');
-
-// 4. Final confirmation
-const finalConfirm = await prompt({
-  type: 'confirm',
-  name: 'final',
-  message: 'Are you ABSOLUTELY SURE?',
-  initial: false
-});
-
-if (!finalConfirm.final) {
-  console.error(chalk.green('Deletion cancelled'));
-  process.exit(0);
-}
-```
+**Key protections to be implemented:**
+1. Prevent deletion of datasets with DOIs
+2. Prevent deletion of published/public datasets
+3. Two-tier admin permissions (nemarAdmin vs Owner)
+4. Require explicit confirmation (user must type dataset ID)
+5. Audit log all deletion attempts
 
 ---
 

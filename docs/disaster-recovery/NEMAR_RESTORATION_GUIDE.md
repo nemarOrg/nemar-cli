@@ -69,10 +69,10 @@ echo "All tools installed ✓"
 
 ### Required Credentials
 
-1. **AWS Credentials** - For S3 access verification
+1. **AWS Credentials** - For S3 access verification (retrieve from 1Password)
    ```bash
-   export AWS_ACCESS_KEY_ID="your-key-id"
-   export AWS_SECRET_ACCESS_KEY="your-secret-key"
+   export AWS_ACCESS_KEY_ID="<from-1password>"
+   export AWS_SECRET_ACCESS_KEY="<from-1password>"
    ```
 
 2. **GitHub Authentication** - For repository creation
@@ -148,9 +148,9 @@ GitHub Repository: nemarDatasets/{dataset_id}
 ### Single Dataset Restoration
 
 ```bash
-# 1. Set AWS credentials
-export AWS_ACCESS_KEY_ID="AKIASZJLRMPHWL33WDUL"
-export AWS_SECRET_ACCESS_KEY="your-secret-key"
+# 1. Set AWS credentials (retrieve from 1Password)
+export AWS_ACCESS_KEY_ID="<from-1password>"
+export AWS_SECRET_ACCESS_KEY="<from-1password>"
 
 # 2. Make script executable
 chmod +x /tmp/restore/nemar-restore-dataset.sh
@@ -170,9 +170,9 @@ chmod +x /tmp/restore/nemar-restore-dataset.sh
 ### Batch Restoration (All 5 Datasets)
 
 ```bash
-# Use the batch script
-export AWS_ACCESS_KEY_ID="your-key"
-export AWS_SECRET_ACCESS_KEY="your-secret"
+# Use the batch script (retrieve credentials from 1Password)
+export AWS_ACCESS_KEY_ID="<from-1password>"
+export AWS_SECRET_ACCESS_KEY="<from-1password>"
 
 /tmp/restore/restore_all_datasets.sh
 ```
@@ -209,7 +209,7 @@ test -f dataset_description.json && echo "✓ Valid BIDS dataset"
 # Initialize repository
 git init
 git config user.name "NEMAR Restore"
-git config user.email "restore@nemar.org"
+git config user.email "nemarRestore@osc.earth"
 
 # Initialize git-annex
 git annex init "nm000105-restored"
@@ -576,7 +576,7 @@ Using a dedicated identity for restoration commits:
 
 **Commit Signature:**
 ```
-Author: NEMAR Restore <restore@nemar.org>
+Author: NEMAR Restore <nemarRestore@osc.earth>
 Date:   Sat Jan 18 18:30:00 2026 +0000
 
     Restore nm000105 from Zenodo archive
