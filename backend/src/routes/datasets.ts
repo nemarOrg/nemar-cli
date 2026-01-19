@@ -91,10 +91,10 @@ datasetRoutes.post("/", authMiddleware, zValidator("json", createDatasetSchema),
     }
   }
 
-  // Get user's AWS credentials
+  // Get user's AWS credentials and admin status
   const userCreds = await db
     .prepare(`
-      SELECT aws_iam_username, aws_access_key_id_encrypted, aws_secret_access_key_encrypted
+      SELECT aws_iam_username, aws_access_key_id_encrypted, aws_secret_access_key_encrypted, is_admin
       FROM users WHERE id = ?
     `)
     .bind(user.id)
@@ -102,6 +102,7 @@ datasetRoutes.post("/", authMiddleware, zValidator("json", createDatasetSchema),
       aws_iam_username: string | null;
       aws_access_key_id_encrypted: string | null;
       aws_secret_access_key_encrypted: string | null;
+      is_admin: number;
     }>();
 
   if (!userCreds?.aws_access_key_id_encrypted || !userCreds?.aws_secret_access_key_encrypted) {
@@ -150,7 +151,8 @@ datasetRoutes.post("/", authMiddleware, zValidator("json", createDatasetSchema),
   }
 
   // Update user's IAM policy to include this dataset prefix
-  if (userCreds.aws_iam_username) {
+  // Skip for admins - they already have full bucket access
+  if (userCreds.aws_iam_username && !userCreds.is_admin) {
     try {
       // Get user's current prefixes
       const currentPermissions = await db

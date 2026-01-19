@@ -41,12 +41,14 @@ import {
 import { getConfig, isAuthenticated, isSandboxCompleted } from "../lib/config.js";
 import {
   checkDownloadPrerequisites,
+  checkNemarGitHubSshConfig,
   checkPrerequisites,
   cloneDataset,
   collectFileManifest,
   configureGitHubRemote,
   configureLargefiles,
   createDataladDataset,
+  ensureGitAnnexInitialized,
   formatBytes,
   getDatasetData,
   getLocalDatasetInfo,
@@ -243,6 +245,9 @@ Examples:
   $ nemar dataset upload ./ds -j 16            # More parallel streams`,
   )
   .action(async (datasetPath, options) => {
+    // Get config for GitHub username
+    const config = getConfig();
+
     // Step 1: Check authentication
     if (!isAuthenticated()) {
       console.log(chalk.red("Error: Not authenticated"));
@@ -306,26 +311,47 @@ Examples:
       // Check Deno for validation
       const deno = await checkDenoInstalled();
       if (!deno.installed) {
-        spinner.warn("Skipping validation (Deno not installed)");
-        console.log(chalk.gray("Install Deno to enable BIDS validation: https://deno.com"));
-      } else {
-        try {
-          const result = await validateBidsDataset(absolutePath, { prune: true });
-          if (!result.valid) {
-            spinner.fail("Dataset has validation errors");
-            console.log();
-            console.log(formatValidationResult(result));
-            console.log();
-            console.log(chalk.yellow("Fix the errors above before uploading."));
-            console.log(chalk.gray("Or use --skip-validation to upload anyway (not recommended)."));
-            process.exit(1);
-          }
-          spinner.succeed(`Dataset is valid BIDS (${result.warningCount} warnings)`);
-        } catch (error) {
-          spinner.fail("Validation failed");
-          console.log(chalk.red((error as Error).message));
+        spinner.fail("Deno is required for BIDS validation");
+        console.log();
+        console.log(chalk.red("Error: Deno is not installed"));
+        console.log();
+        console.log("The BIDS validator requires Deno runtime to run.");
+        console.log("Install Deno with one of these commands:");
+        console.log();
+        console.log(chalk.cyan("  # macOS/Linux (curl)"));
+        console.log("  curl -fsSL https://deno.land/install.sh | sh");
+        console.log();
+        console.log(chalk.cyan("  # macOS (Homebrew)"));
+        console.log("  brew install deno");
+        console.log();
+        console.log(chalk.cyan("  # Windows (PowerShell)"));
+        console.log("  irm https://deno.land/install.ps1 | iex");
+        console.log();
+        console.log("Learn more: https://docs.deno.com/runtime/getting_started/installation/");
+        console.log();
+        console.log(
+          chalk.gray(
+            "To skip validation (not recommended): nemar dataset upload --skip-validation",
+          ),
+        );
+        process.exit(1);
+      }
+      try {
+        const result = await validateBidsDataset(absolutePath, { prune: true });
+        if (!result.valid) {
+          spinner.fail("Dataset has validation errors");
+          console.log();
+          console.log(formatValidationResult(result));
+          console.log();
+          console.log(chalk.yellow("Fix the errors above before uploading."));
+          console.log(chalk.gray("Or use --skip-validation to upload anyway (not recommended)."));
           process.exit(1);
         }
+        spinner.succeed(`Dataset is valid BIDS (${result.warningCount} warnings)`);
+      } catch (error) {
+        spinner.fail("Validation failed");
+        console.log(chalk.red((error as Error).message));
+        process.exit(1);
       }
       console.log();
     }
@@ -433,6 +459,14 @@ Examples:
       }
     }
 
+    // Ensure git-annex is initialized (handles both new and existing datasets)
+    const gitAnnexResult = await ensureGitAnnexInitialized(absolutePath);
+    if (!gitAnnexResult.success) {
+      spinner.fail("Failed to initialize git-annex");
+      console.log(chalk.red(`  ${gitAnnexResult.error}`));
+      process.exit(1);
+    }
+
     // Configure largefiles pattern
     const largefilesResult = await configureLargefiles(absolutePath);
     if (!largefilesResult.success) {
@@ -442,10 +476,14 @@ Examples:
 
     spinner.succeed("DataLad dataset initialized");
 
-    // Step 8: Configure GitHub remote
+    // Step 8: Configure GitHub remote (auto-detects best auth method)
     spinner = ora("Configuring GitHub remote...").start();
 
-    const githubResult = await configureGitHubRemote(absolutePath, datasetInfo.ssh_url);
+    const githubResult = await configureGitHubRemote(
+      absolutePath,
+      datasetInfo.ssh_url,
+      config.githubUsername,
+    );
     if (!githubResult.success) {
       spinner.fail("Failed to configure GitHub remote");
       console.log(chalk.red(`  ${githubResult.error}`));

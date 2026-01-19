@@ -17,11 +17,13 @@ export interface ToolVersion {
   version?: string;
   minVersion?: string;
   compatible?: boolean;
+  error?: string;
 }
 
 /**
  * Prerequisites check result
- * Note: AWS credentials are now provided by the backend, not required locally
+ * Note: AWS credentials are provided by the backend API (not from local ~/.aws/config)
+ * and passed to DataLad operations during upload
  */
 export interface PrerequisitesResult {
   datalad: ToolVersion;
@@ -116,15 +118,21 @@ export async function checkDataladInstalled(): Promise<ToolVersion> {
   const minVersion = "0.19.0";
 
   try {
-    const { stdout, exitCode } = await runCommand(["datalad", "--version"]);
+    const { stdout, exitCode, stderr } = await runCommand(["datalad", "--version"]);
 
     if (exitCode !== 0) {
-      return { installed: false, minVersion };
+      console.warn("datalad --version returned non-zero exit code:", exitCode);
+      console.warn("stderr:", stderr);
+      return { installed: false, minVersion, error: `Version check failed: ${stderr.trim()}` };
     }
 
     // Output is like "datalad 0.19.6" or just version number
     const match = stdout.match(/(\d+\.\d+\.\d+)/);
     const version = match ? match[1] : undefined;
+
+    if (!version) {
+      console.warn("Could not parse datalad version from output:", stdout);
+    }
 
     return {
       installed: true,
@@ -132,8 +140,18 @@ export async function checkDataladInstalled(): Promise<ToolVersion> {
       minVersion,
       compatible: version ? isVersionCompatible(version, minVersion) : undefined,
     };
-  } catch {
-    return { installed: false, minVersion };
+  } catch (error) {
+    const errorMsg = error instanceof Error ? error.message : String(error);
+
+    // Differentiate between "not installed" and other errors
+    if (errorMsg.includes("ENOENT") || errorMsg.includes("not found")) {
+      console.info("DataLad not found in PATH");
+      return { installed: false, minVersion };
+    }
+
+    // Other errors are concerning - log them
+    console.error("Error checking DataLad installation:", errorMsg);
+    return { installed: false, minVersion, error: errorMsg };
   }
 }
 
@@ -144,15 +162,21 @@ export async function checkGitAnnexInstalled(): Promise<ToolVersion> {
   const minVersion = "10.0";
 
   try {
-    const { stdout, exitCode } = await runCommand(["git-annex", "version"]);
+    const { stdout, exitCode, stderr } = await runCommand(["git-annex", "version"]);
 
     if (exitCode !== 0) {
-      return { installed: false, minVersion };
+      console.warn("git-annex version returned non-zero exit code:", exitCode);
+      console.warn("stderr:", stderr);
+      return { installed: false, minVersion, error: `Version check failed: ${stderr.trim()}` };
     }
 
     // Output is like "git-annex version: 10.20241202"
     const match = stdout.match(/version:\s*(\d+\.\d+)/);
     const version = match ? match[1] : undefined;
+
+    if (!version) {
+      console.warn("Could not parse git-annex version from output:", stdout);
+    }
 
     return {
       installed: true,
@@ -160,8 +184,18 @@ export async function checkGitAnnexInstalled(): Promise<ToolVersion> {
       minVersion,
       compatible: version ? isVersionCompatible(version, minVersion) : undefined,
     };
-  } catch {
-    return { installed: false, minVersion };
+  } catch (error) {
+    const errorMsg = error instanceof Error ? error.message : String(error);
+
+    // Differentiate between "not installed" and other errors
+    if (errorMsg.includes("ENOENT") || errorMsg.includes("not found")) {
+      console.info("git-annex not found in PATH");
+      return { installed: false, minVersion };
+    }
+
+    // Other errors are concerning - log them
+    console.error("Error checking git-annex installation:", errorMsg);
+    return { installed: false, minVersion, error: errorMsg };
   }
 }
 
@@ -207,7 +241,16 @@ export async function checkGitHubSSH(): Promise<{
 
     // Exit code 1 with "Hi" message is success
     return { accessible: output.includes("successfully authenticated") };
-  } catch {
+  } catch (error) {
+    const errorMsg = error instanceof Error ? error.message : String(error);
+
+    // Differentiate between SSH not installed vs other errors
+    if (errorMsg.includes("ENOENT") || errorMsg.includes("not found")) {
+      console.info("SSH command not found");
+    } else {
+      console.error("Error checking GitHub SSH access:", errorMsg);
+    }
+
     return { accessible: false };
   }
 }
@@ -228,8 +271,15 @@ export async function checkAWSCredentials(): Promise<{ configured: boolean; sour
     if (exitCode === 0 && stdout.trim()) {
       return { configured: true, source: "aws-cli" };
     }
-  } catch {
-    // AWS CLI not installed or not configured
+  } catch (error) {
+    const errorMsg = error instanceof Error ? error.message : String(error);
+
+    // Differentiate between AWS CLI not installed vs other errors
+    if (errorMsg.includes("ENOENT") || errorMsg.includes("not found")) {
+      console.info("AWS CLI not found in PATH");
+    } else {
+      console.error("Error checking AWS credentials:", errorMsg);
+    }
   }
 
   return { configured: false };
@@ -308,7 +358,14 @@ export async function isDataladDataset(path: string): Promise<boolean> {
   try {
     const { exitCode } = await runCommand(["datalad", "status"], { cwd: path });
     return exitCode === 0;
-  } catch {
+  } catch (error) {
+    const errorMsg = error instanceof Error ? error.message : String(error);
+
+    // Log unexpected errors (datalad command failures other than "not a dataset")
+    if (!errorMsg.includes("ENOENT") && !errorMsg.includes("not found")) {
+      console.error(`Error checking if ${path} is a DataLad dataset:`, errorMsg);
+    }
+
     return false;
   }
 }
@@ -332,7 +389,57 @@ export async function createDataladDataset(
       return { success: false, error: stderr.trim() || "Failed to create DataLad dataset" };
     }
 
+    // Explicitly initialize git-annex (required when dataset is created in existing directory)
+    const { stderr: initStderr, exitCode: initExitCode } = await runCommand(
+      ["git", "annex", "init"],
+      { cwd: path },
+    );
+
+    if (initExitCode !== 0) {
+      return { success: false, error: initStderr.trim() || "Failed to initialize git-annex" };
+    }
+
     return { success: true };
+  } catch (e) {
+    return { success: false, error: (e as Error).message };
+  }
+}
+
+/**
+ * Ensure git-annex is initialized in the dataset
+ * Safe to call multiple times - will not fail if already initialized
+ */
+export async function ensureGitAnnexInitialized(
+  path: string,
+): Promise<{ success: boolean; error?: string }> {
+  try {
+    // Check if git-annex is initialized by trying to run a git-annex command
+    const { exitCode: infoExitCode, stderr: infoStderr } = await runCommand(
+      ["git", "annex", "info"],
+      { cwd: path },
+    );
+
+    // If info works, git-annex is already initialized
+    if (infoExitCode === 0) {
+      return { success: true };
+    }
+
+    // If info fails with "First run" error, need to initialize
+    if (infoStderr.includes("First run: git-annex init")) {
+      const { stderr: initStderr, exitCode: initExitCode } = await runCommand(
+        ["git", "annex", "init"],
+        { cwd: path },
+      );
+
+      if (initExitCode !== 0) {
+        return { success: false, error: initStderr.trim() || "Failed to initialize git-annex" };
+      }
+
+      return { success: true };
+    }
+
+    // Some other error
+    return { success: false, error: infoStderr.trim() || "Failed to check git-annex status" };
   } catch (e) {
     return { success: false, error: (e as Error).message };
   }
@@ -430,20 +537,217 @@ export async function configureS3Remote(
 }
 
 /**
- * Configure GitHub remote using SSH or HTTPS (with token)
+ * Check if SSH config has nemar-{username}-github host configured
+ * Returns instructions if not configured
  */
+export async function checkNemarGitHubSshConfig(
+  githubUsername: string,
+): Promise<{ configured: boolean; instructions?: string; sshHost?: string }> {
+  const sshHost = `nemar-${githubUsername}-github`;
+  const sshConfigPath = join(process.env.HOME || "~", ".ssh", "config");
+
+  // Check if SSH config exists and has the custom host
+  try {
+    if (!existsSync(sshConfigPath)) {
+      return {
+        configured: false,
+        sshHost,
+        instructions: getNemarSshConfigInstructions(githubUsername, sshHost),
+      };
+    }
+
+    const configContent = await Bun.file(sshConfigPath).text();
+
+    // Check if custom host is configured
+    if (!configContent.includes(`Host ${sshHost}`)) {
+      return {
+        configured: false,
+        sshHost,
+        instructions: getNemarSshConfigInstructions(githubUsername, sshHost),
+      };
+    }
+
+    return { configured: true, sshHost };
+  } catch (e) {
+    return {
+      configured: false,
+      sshHost,
+      instructions: getNemarSshConfigInstructions(githubUsername, sshHost),
+    };
+  }
+}
+
+/**
+ * Generate SSH config instructions for NEMAR GitHub access
+ */
+function getNemarSshConfigInstructions(githubUsername: string, sshHost: string): string {
+  return `
+SSH Configuration Required for NEMAR GitHub Access
+
+Add this to your ~/.ssh/config file:
+
+Host ${sshHost}
+  HostName github.com
+  User git
+  IdentityFile ~/.ssh/id_rsa
+  IdentitiesOnly yes
+
+Replace ~/.ssh/id_rsa with the path to your SSH key for GitHub account: @${githubUsername}
+
+This allows NEMAR to use the correct SSH key and GitHub account, even if you have 
+multiple GitHub accounts configured on your machine.
+
+After adding the config, test it with:
+  ssh -T git@${sshHost}
+
+It should respond with: "Hi ${githubUsername}! You've successfully authenticated..."
+`;
+}
+
+/**
+ * Test if custom SSH host is configured and working
+ *
+ * Note: SSH test to GitHub returns exit code 1 even on success (GitHub's PTY restriction)
+ * We check stderr for "successfully authenticated" message to confirm it works
+ */
+async function testCustomSshHost(sshHost: string): Promise<{ works: boolean; error?: string }> {
+  try {
+    const { exitCode, stderr, stdout } = await runCommand([
+      "ssh",
+      "-T",
+      "-o",
+      "BatchMode=yes",
+      "-o",
+      "ConnectTimeout=5",
+      `git@${sshHost}`,
+    ]);
+
+    // SSH test succeeds with exit code 1 and "successfully authenticated" message
+    const works = stderr.includes("successfully authenticated");
+
+    if (!works) {
+      // Log the actual SSH error for debugging
+      console.error(`SSH test failed for ${sshHost}:`, {
+        exitCode,
+        stderr: stderr.trim(),
+        stdout: stdout.trim(),
+      });
+    }
+
+    return { works, error: works ? undefined : stderr.trim() };
+  } catch (error) {
+    const errorMsg = error instanceof Error ? error.message : String(error);
+    console.error(`SSH test exception for ${sshHost}:`, errorMsg);
+    return { works: false, error: errorMsg };
+  }
+}
+
+/**
+ * Get GitHub token from gh CLI
+ */
+async function getGitHubToken(): Promise<{ token: string | null; error?: string }> {
+  try {
+    const { stdout, exitCode, stderr } = await runCommand(["gh", "auth", "token"]);
+
+    if (exitCode !== 0) {
+      console.warn("gh CLI returned non-zero exit code:", exitCode);
+      console.warn("stderr:", stderr);
+      return { token: null, error: `gh auth token failed: ${stderr.trim() || "unknown error"}` };
+    }
+
+    if (!stdout.trim()) {
+      console.warn("gh auth token returned empty output");
+      return { token: null, error: "gh CLI returned empty token" };
+    }
+
+    return { token: stdout.trim() };
+  } catch (error) {
+    const errorMsg = error instanceof Error ? error.message : String(error);
+    console.error("Failed to get GitHub token from gh CLI:", errorMsg);
+
+    // Provide specific guidance based on error
+    if (errorMsg.includes("ENOENT") || errorMsg.includes("not found")) {
+      return { token: null, error: "gh CLI not installed (command not found)" };
+    }
+
+    return { token: null, error: `gh CLI error: ${errorMsg}` };
+  }
+}
+
 export async function configureGitHubRemote(
   path: string,
   repoUrl: string,
+  githubUsername?: string,
   remoteName = "origin",
 ): Promise<{ success: boolean; error?: string }> {
-  // Convert SSH URL to HTTPS with token if GH_TOKEN is available
+  // Transform GitHub SSH URL based on environment and configuration
+  // Priority: CI token > Custom SSH (multi-account) > HTTPS with gh token > Fallback
   let finalUrl = repoUrl;
+
+  // CI/CD: Use HTTPS with GH_TOKEN
   if (process.env.GH_TOKEN && repoUrl.startsWith("git@github.com:")) {
-    // Convert git@github.com:org/repo.git to https://token@github.com/org/repo.git
     const match = repoUrl.match(/git@github\.com:(.+)/);
     if (match) {
       finalUrl = `https://${process.env.GH_TOKEN}@github.com/${match[1]}`;
+    }
+  }
+  // Local: Try custom SSH host first, then fallback to HTTPS with gh token
+  else if (repoUrl.startsWith("git@github.com:") && githubUsername) {
+    const sshHost = `nemar-${githubUsername}-github`;
+    const match = repoUrl.match(/git@github\.com:(.+)/);
+
+    if (match) {
+      const repoPath = match[1];
+
+      // Test if custom SSH host is configured and working
+      const sshResult = await testCustomSshHost(sshHost);
+
+      if (sshResult.works) {
+        // Use custom SSH host for multi-account support
+        finalUrl = `git@${sshHost}:${repoPath}`;
+      } else {
+        // SSH failed - try to use HTTPS with gh token as fallback
+        console.warn(
+          `Custom SSH host ${sshHost} not working: ${sshResult.error || "unknown error"}`,
+        );
+        console.warn("Falling back to HTTPS authentication with gh CLI token...");
+
+        const ghTokenResult = await getGitHubToken();
+
+        if (ghTokenResult.token) {
+          // Use HTTPS with token authentication
+          finalUrl = `https://${ghTokenResult.token}@github.com/${repoPath}`;
+        } else {
+          // No custom SSH and no gh token - show helpful error with both failures
+          return {
+            success: false,
+            error: `GitHub authentication not configured.
+
+Custom SSH host failed:
+  ${sshResult.error || "SSH test failed"}
+
+gh CLI fallback failed:
+  ${ghTokenResult.error || "Could not get token"}
+
+Fix one of these issues:
+  1. Configure custom SSH host (recommended for multiple GitHub accounts):
+     Add to ~/.ssh/config:
+
+     Host ${sshHost}
+       HostName github.com
+       User git
+       IdentityFile ~/.ssh/id_rsa
+       IdentitiesOnly yes
+
+     Test with: ssh -T git@${sshHost}
+
+  2. Install and authenticate gh CLI (automatic fallback):
+     gh auth login
+
+Choose option 2 for quick setup, or option 1 if you have multiple GitHub accounts.`,
+          };
+        }
+      }
     }
   }
 
@@ -474,17 +778,8 @@ export async function configureGitHubRemote(
     }
 
     return { success: true };
-  } catch {
-    // Remote doesn't exist, add it
-    const { stderr, exitCode } = await runCommand(["git", "remote", "add", remoteName, finalUrl], {
-      cwd: path,
-    });
-
-    if (exitCode !== 0) {
-      return { success: false, error: stderr.trim() };
-    }
-
-    return { success: true };
+  } catch (e) {
+    return { success: false, error: (e as Error).message };
   }
 }
 
@@ -615,8 +910,11 @@ export async function getDatasetStats(path: string): Promise<{
         annexedSize: info["local annex size"] || 0,
       };
     }
-  } catch {
-    // Fall back to manual counting
+  } catch (error) {
+    const errorMsg = error instanceof Error ? error.message : String(error);
+
+    // Log the error before falling back
+    console.warn("git annex info failed, falling back to manual counting:", errorMsg);
   }
 
   // Fallback: count files manually
@@ -728,7 +1026,7 @@ export async function uploadFilesWithPresignedUrls(
             status: "completed",
           });
         } else {
-          failed.push(relativePath);
+          failed.push(`${relativePath}: ${result.error || "Unknown error"}`);
           options.onProgress?.({
             file: relativePath,
             uploaded: 0,
