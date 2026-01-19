@@ -14,7 +14,7 @@ echo "Installing new version..."
 npm install -g .
 
 echo "Manually updating global file (npm install doesn't update it)..."
-GLOBAL_PATH="/Users/yahya/.bun/install/global/node_modules/nemar-cli/dist/index.js"
+GLOBAL_PATH="$HOME/.bun/install/global/node_modules/nemar-cli/dist/index.js"
 cp -f dist/index.js "$GLOBAL_PATH"
 
 echo "Verifying installation..."

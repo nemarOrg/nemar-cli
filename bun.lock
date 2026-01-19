@@ -9,7 +9,6 @@
         "commander": "^12.1.0",
         "conf": "^13.0.1",
         "inquirer": "^9.2.15",
-        "nemar-cli": "^0.3.2",
         "ora": "^8.0.1",
         "zod": "^3.23.8",
       },
@@ -141,8 +140,6 @@
     "mimic-function": ["mimic-function@5.0.1", "", {}, "sha512-VP79XUPxV2CigYP3jWwAUFSku2aKqBH7uTAapFWCBqutsbmDo96KY5o8uh6U+/YSIn5OxJnXp73beVkpqMIGhA=="],
 
     "mute-stream": ["mute-stream@1.0.0", "", {}, "sha512-avsJQhyd+680gKXyG/sQc0nXaC6rBkPOfyHYcFb9+hdkqQkR9bdnkJ0AMZhke0oesPqIO+mFFJ+IdBc7mst4IA=="],
-
-    "nemar-cli": ["nemar-cli@0.3.2", "", { "dependencies": { "chalk": "^5.3.0", "commander": "^12.1.0", "conf": "^13.0.1", "inquirer": "^9.2.15", "ora": "^8.0.1", "zod": "^3.23.8" }, "bin": { "nemar": "dist/index.js" } }, "sha512-m0IxWeS3kJAMK/ZjcARyHGrjQGifOCrz0WK8Hr/pRfmp/QBxNZXw6HRAJxewdiNZ1Tsk6+Zpb6dV9WZY++/PQQ=="],
 
     "onetime": ["onetime@7.0.0", "", { "dependencies": { "mimic-function": "^5.0.0" } }, "sha512-VXJjc87FScF88uafS3JllDgvAm+c/Slfz06lorj2uAY34rlUu0Nt+v8wreiImcrgAjjIHp1rXpTDlLOGw29WwQ=="],
 
