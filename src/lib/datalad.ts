@@ -557,29 +557,102 @@ It should respond with: "Hi ${githubUsername}! You've successfully authenticated
 `;
 }
 
+/**
+ * Test if custom SSH host is configured and working
+ */
+async function testCustomSshHost(sshHost: string): Promise<boolean> {
+  try {
+    const { exitCode, stderr } = await runCommand([
+      "ssh",
+      "-T",
+      "-o",
+      "BatchMode=yes",
+      "-o",
+      "ConnectTimeout=5",
+      `git@${sshHost}`,
+    ]);
+
+    // SSH test succeeds with exit code 1 and "successfully authenticated" message
+    return stderr.includes("successfully authenticated");
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Get GitHub token from gh CLI
+ */
+async function getGitHubToken(): Promise<string | null> {
+  try {
+    const { stdout, exitCode } = await runCommand(["gh", "auth", "token"]);
+    if (exitCode === 0 && stdout.trim()) {
+      return stdout.trim();
+    }
+  } catch {}
+  return null;
+}
+
 export async function configureGitHubRemote(
   path: string,
   repoUrl: string,
   githubUsername?: string,
   remoteName = "origin",
 ): Promise<{ success: boolean; error?: string }> {
-  // Transform GitHub SSH URL to use custom host for NEMAR
-  // This allows users to configure different SSH keys per GitHub account
-  // git@github.com:org/repo.git -> git@nemar-{username}-github:org/repo.git
+  // Transform GitHub SSH URL based on environment and configuration
+  // Priority: CI token > Custom SSH (multi-account) > HTTPS with gh token > Fallback
   let finalUrl = repoUrl;
 
+  // CI/CD: Use HTTPS with GH_TOKEN
   if (process.env.GH_TOKEN && repoUrl.startsWith("git@github.com:")) {
-    // CI/CD: Convert to HTTPS with token
     const match = repoUrl.match(/git@github\.com:(.+)/);
     if (match) {
       finalUrl = `https://${process.env.GH_TOKEN}@github.com/${match[1]}`;
     }
-  } else if (repoUrl.startsWith("git@github.com:") && githubUsername) {
-    // Local: Use custom SSH host for NEMAR with username
+  }
+  // Local: Try custom SSH host first, then fallback to HTTPS with gh token
+  else if (repoUrl.startsWith("git@github.com:") && githubUsername) {
     const sshHost = `nemar-${githubUsername}-github`;
     const match = repoUrl.match(/git@github\.com:(.+)/);
+
     if (match) {
-      finalUrl = `git@${sshHost}:${match[1]}`;
+      const repoPath = match[1];
+
+      // Test if custom SSH host is configured and working
+      const sshWorks = await testCustomSshHost(sshHost);
+
+      if (sshWorks) {
+        // Use custom SSH host for multi-account support
+        finalUrl = `git@${sshHost}:${repoPath}`;
+      } else {
+        // Fallback to HTTPS with gh CLI token
+        const ghToken = await getGitHubToken();
+
+        if (ghToken) {
+          // Use HTTPS with token authentication
+          finalUrl = `https://${ghToken}@github.com/${repoPath}`;
+        } else {
+          // No custom SSH and no gh token - show helpful error
+          return {
+            success: false,
+            error: `GitHub authentication not configured. Either:
+  1. Configure custom SSH host (recommended for multiple GitHub accounts):
+     Add to ~/.ssh/config:
+     
+     Host ${sshHost}
+       HostName github.com
+       User git
+       IdentityFile ~/.ssh/id_rsa
+       IdentitiesOnly yes
+     
+     Test with: ssh -T git@${sshHost}
+  
+  2. Authenticate with gh CLI (automatic fallback):
+     gh auth login
+     
+Choose option 2 for quick setup, or option 1 if you have multiple GitHub accounts.`,
+          };
+        }
+      }
     }
   }
 

@@ -245,6 +245,9 @@ Examples:
   $ nemar dataset upload ./ds -j 16            # More parallel streams`,
   )
   .action(async (datasetPath, options) => {
+    // Get config for GitHub username
+    const config = getConfig();
+
     // Step 1: Check authentication
     if (!isAuthenticated()) {
       console.log(chalk.red("Error: Not authenticated"));
@@ -473,21 +476,7 @@ Examples:
 
     spinner.succeed("DataLad dataset initialized");
 
-    // Step 8: Check SSH configuration for NEMAR GitHub access
-    const sshCheck = await checkNemarGitHubSshConfig(config.githubUsername);
-    if (!sshCheck.configured && sshCheck.instructions) {
-      console.log();
-      console.log(chalk.yellow("⚠ SSH Configuration Recommended"));
-      console.log(chalk.gray(sshCheck.instructions));
-      console.log(
-        chalk.yellow(
-          "Continuing without custom SSH config (may fail if you have multiple GitHub accounts)...",
-        ),
-      );
-      console.log();
-    }
-
-    // Step 9: Configure GitHub remote
+    // Step 8: Configure GitHub remote (auto-detects best auth method)
     spinner = ora("Configuring GitHub remote...").start();
 
     const githubResult = await configureGitHubRemote(
