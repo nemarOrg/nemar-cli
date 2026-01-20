@@ -31,6 +31,23 @@ bun run src/index.ts
 bun build src/index.ts --outdir dist --target node
 ```
 
+## Test Machines
+For development and testing, two machines are used with different NEMAR accounts:
+
+| Machine | SSH Alias | NEMAR User | Role |
+|---------|-----------|------------|------|
+| yahyas-mcm | `ssh mcm` | yahya | Admin |
+| yahyas-mba | `ssh mba` | cool-vibers | Regular user |
+
+**Important:** On both machines, `nemar` CLI requires an interactive zsh shell:
+```bash
+# From mcm, run commands on mba:
+ssh mba "zsh -i -c 'nemar sandbox'"
+
+# From mba, run commands on mcm:
+ssh mcm "zsh -i -c 'nemar admin users'"
+```
+
 ## Development Workflow
 1. **Check context:** Review .context/plan.md for current tasks
 2. **Branch:** `git checkout -b feature/short-description`

@@ -159,7 +159,8 @@ async function sandboxAction(): Promise<void> {
     console.log(chalk.gray(`  GitHub: ${response.dataset.github_url}`));
 
     // Wait for IAM policy propagation (AWS is eventually consistent)
-    await new Promise((resolve) => setTimeout(resolve, 3000));
+    // This initial wait helps reduce retry attempts during upload
+    await new Promise((resolve) => setTimeout(resolve, 10000));
   } catch (error) {
     apiSpinner.fail("Failed to create sandbox dataset");
     if (error instanceof ApiError) {

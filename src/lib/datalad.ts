@@ -954,32 +954,56 @@ export interface PresignedUploadProgress {
 
 /**
  * Upload a single file to S3 using a presigned URL
+ *
+ * Includes retry logic to handle IAM eventual consistency delays.
+ * AWS IAM policy changes can take time to propagate globally, so 403 errors
+ * immediately after policy updates are retried with increasing delays.
  */
 export async function uploadFileWithPresignedUrl(
   filePath: string,
   presignedUrl: string,
   onProgress?: (uploaded: number, total: number) => void,
+  options?: { maxRetries?: number; initialDelayMs?: number },
 ): Promise<{ success: boolean; error?: string }> {
+  const maxRetries = options?.maxRetries ?? 4;
+  const initialDelayMs = options?.initialDelayMs ?? 10000; // 10 seconds
+
   try {
     const fileContent = await Bun.file(filePath).arrayBuffer();
     const fileSize = fileContent.byteLength;
 
-    // Use fetch to upload - presigned URLs use simple PUT
-    const response = await fetch(presignedUrl, {
-      method: "PUT",
-      body: fileContent,
-      headers: {
-        "Content-Length": fileSize.toString(),
-      },
-    });
+    let lastError = "";
 
-    if (!response.ok) {
+    for (let attempt = 0; attempt <= maxRetries; attempt++) {
+      // Use fetch to upload - presigned URLs use simple PUT
+      const response = await fetch(presignedUrl, {
+        method: "PUT",
+        body: fileContent,
+        headers: {
+          "Content-Length": fileSize.toString(),
+        },
+      });
+
+      if (response.ok) {
+        onProgress?.(fileSize, fileSize);
+        return { success: true };
+      }
+
       const errorText = await response.text();
-      return { success: false, error: `Upload failed: ${response.status} ${errorText}` };
+      lastError = `Upload failed: ${response.status} ${errorText}`;
+
+      // Only retry on 403 AccessDenied (likely IAM propagation delay)
+      const isIamError = response.status === 403 && errorText.includes("AccessDenied");
+      if (!isIamError || attempt === maxRetries) {
+        return { success: false, error: lastError };
+      }
+
+      // Wait before retry: 10s, 15s, 20s, 25s (quadratic-ish growth)
+      const delayMs = initialDelayMs + attempt * 5000;
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
     }
 
-    onProgress?.(fileSize, fileSize);
-    return { success: true };
+    return { success: false, error: lastError };
   } catch (error) {
     return { success: false, error: (error as Error).message };
   }

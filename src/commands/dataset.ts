@@ -436,6 +436,10 @@ Examples:
       };
 
       spinner.succeed(`Dataset created: ${datasetInfo.dataset_id}`);
+
+      // Wait for IAM policy propagation (AWS is eventually consistent)
+      // This initial wait helps reduce retry attempts during upload
+      await new Promise((resolve) => setTimeout(resolve, 10000));
     } catch (error) {
       spinner.fail("Failed to create dataset");
       if (error instanceof ApiError) {
