@@ -30,6 +30,7 @@ import {
   registerUrlsWithGitAnnex,
   saveDataset,
   uploadFilesWithPresignedUrls,
+  verifyGitHubAuth,
 } from "../lib/datalad.js";
 import {
   cleanupSandboxDataset,
@@ -105,6 +106,41 @@ async function sandboxAction(): Promise<void> {
     return;
   }
   prereqSpinner.succeed("All prerequisites met");
+
+  // Step 3b: Verify gh CLI authentication
+  const ghSpinner = ora("Verifying GitHub CLI authentication...").start();
+  const ghAuth = await verifyGitHubAuth(config.githubUsername);
+
+  if (!ghAuth.authenticated) {
+    ghSpinner.fail("GitHub CLI not authenticated");
+    console.log(chalk.red(`  ${ghAuth.error}`));
+    console.log();
+    console.log("GitHub CLI is required for sandbox training. Install and authenticate:");
+    console.log(chalk.cyan("  brew install gh       # or visit https://cli.github.com/"));
+    console.log(chalk.cyan("  gh auth login"));
+    return;
+  }
+
+  if (config.githubUsername && !ghAuth.matches) {
+    ghSpinner.warn("GitHub CLI user mismatch");
+    console.log(chalk.yellow(`  ${ghAuth.error}`));
+    console.log();
+    console.log(
+      "Your gh CLI is authenticated as a different GitHub account than your NEMAR account.",
+    );
+    console.log("This may cause issues with repository access. To fix:");
+    console.log(chalk.cyan(`  gh auth login    # Login as ${config.githubUsername}`));
+    console.log();
+    console.log(
+      chalk.yellow(
+        "WARNING: If upload fails with permission errors, this mismatch is the likely cause.",
+      ),
+    );
+    console.log();
+    // Continue with warning; don't block
+  } else {
+    ghSpinner.succeed(`GitHub CLI authenticated as ${ghAuth.username}`);
+  }
 
   // Step 4: Generate sandbox dataset
   console.log();
@@ -270,7 +306,10 @@ async function sandboxAction(): Promise<void> {
   const pushSpinner = ora("Saving and pushing...").start();
 
   try {
-    await saveDataset(datasetPath, "Initial sandbox training upload");
+    // Use NEMAR user identity for commit authorship
+    const author =
+      config.username && config.email ? { name: config.username, email: config.email } : undefined;
+    await saveDataset(datasetPath, "Initial sandbox training upload", author);
     await pushToGitHub(datasetPath);
     pushSpinner.succeed("Pushed to GitHub");
   } catch (error) {
