@@ -57,6 +57,7 @@ import {
   registerUrlsWithGitAnnex,
   saveDataset,
   uploadFilesWithPresignedUrls,
+  verifyGitHubAuth,
 } from "../lib/datalad.js";
 
 export const datasetCommand = new Command("dataset").description("Dataset management").addHelpText(
@@ -295,6 +296,35 @@ Examples:
       console.log(chalk.gray(`  GitHub SSH: ${prereqs.githubSSH.username}`));
     }
     console.log();
+
+    // Step 2b: Verify gh CLI authentication
+    spinner = ora("Verifying GitHub CLI authentication...").start();
+    const ghAuth = await verifyGitHubAuth(config.githubUsername);
+
+    if (!ghAuth.authenticated) {
+      spinner.fail("GitHub CLI not authenticated");
+      console.log(chalk.red(`  ${ghAuth.error}`));
+      console.log();
+      console.log("GitHub CLI is required for dataset uploads. Install and authenticate:");
+      console.log(chalk.cyan("  brew install gh       # or visit https://cli.github.com/"));
+      console.log(chalk.cyan("  gh auth login"));
+      process.exit(1);
+    }
+
+    if (config.githubUsername && !ghAuth.matches) {
+      spinner.warn("GitHub CLI user mismatch");
+      console.log(chalk.yellow(`  ${ghAuth.error}`));
+      console.log();
+      console.log(
+        "Your gh CLI is authenticated as a different GitHub account than your NEMAR account.",
+      );
+      console.log("This may cause issues with repository access. To fix:");
+      console.log(chalk.cyan(`  gh auth login    # Login as ${config.githubUsername}`));
+      console.log();
+      // Continue with warning; don't block (user may have valid reason)
+    } else {
+      spinner.succeed(`GitHub CLI authenticated as ${ghAuth.username}`);
+    }
 
     // Step 3: BIDS Validation (unless skipped)
     if (!options.skipValidation) {
@@ -556,7 +586,10 @@ Examples:
     // Step 11: Save dataset changes
     spinner = ora("Saving dataset changes...").start();
 
-    const saveResult = await saveDataset(absolutePath, "Initial NEMAR dataset upload");
+    // Use NEMAR user identity for commit authorship
+    const author =
+      config.username && config.email ? { name: config.username, email: config.email } : undefined;
+    const saveResult = await saveDataset(absolutePath, "Initial NEMAR dataset upload", author);
     if (!saveResult.success) {
       spinner.fail("Failed to save dataset");
       console.log(chalk.red(`  ${saveResult.error}`));

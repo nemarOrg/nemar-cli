@@ -674,6 +674,80 @@ async function getGitHubToken(): Promise<{ token: string | null; error?: string 
   }
 }
 
+/**
+ * Verify that the gh CLI is authenticated as the expected GitHub user.
+ * This is important because GitHub operations (accepting invitations, pushing)
+ * must be done as the correct user.
+ *
+ * @param expectedUsername - The GitHub username the user should be authenticated as
+ * @returns Verification result with the actual authenticated username if available
+ */
+export async function verifyGitHubAuth(expectedUsername?: string): Promise<{
+  authenticated: boolean;
+  username?: string;
+  matches?: boolean;
+  error?: string;
+}> {
+  try {
+    // Check if gh CLI is authenticated and get the current user
+    const { stdout, exitCode, stderr } = await runCommand(["gh", "api", "user", "--jq", ".login"]);
+
+    if (exitCode !== 0) {
+      // Check for specific error cases
+      if (stderr.includes("not logged in") || stderr.includes("auth login")) {
+        return {
+          authenticated: false,
+          error: "gh CLI not authenticated. Run 'gh auth login' to authenticate.",
+        };
+      }
+      return {
+        authenticated: false,
+        error: `gh CLI error: ${stderr.trim() || "unknown error"}`,
+      };
+    }
+
+    const actualUsername = stdout.trim();
+    if (!actualUsername) {
+      return {
+        authenticated: false,
+        error: "gh CLI returned empty username",
+      };
+    }
+
+    // If expected username provided, check if it matches
+    if (expectedUsername) {
+      const matches = actualUsername.toLowerCase() === expectedUsername.toLowerCase();
+      return {
+        authenticated: true,
+        username: actualUsername,
+        matches,
+        error: matches
+          ? undefined
+          : `gh CLI authenticated as '${actualUsername}', expected '${expectedUsername}'`,
+      };
+    }
+
+    return {
+      authenticated: true,
+      username: actualUsername,
+    };
+  } catch (error) {
+    const errorMsg = error instanceof Error ? error.message : String(error);
+
+    if (errorMsg.includes("ENOENT") || errorMsg.includes("not found")) {
+      return {
+        authenticated: false,
+        error: "gh CLI not installed. Install from https://cli.github.com/",
+      };
+    }
+
+    return {
+      authenticated: false,
+      error: `Failed to verify gh CLI: ${errorMsg}`,
+    };
+  }
+}
+
 export async function configureGitHubRemote(
   path: string,
   repoUrl: string,
@@ -785,14 +859,28 @@ Choose option 2 for quick setup, or option 1 if you have multiple GitHub account
 
 /**
  * Save all changes to the DataLad dataset
+ *
+ * If author info is provided, sets GIT_AUTHOR_NAME and GIT_AUTHOR_EMAIL
+ * to ensure commits are attributed to the correct NEMAR user.
  */
 export async function saveDataset(
   path: string,
   message: string,
+  author?: { name: string; email: string },
 ): Promise<{ success: boolean; error?: string }> {
   try {
+    // Build environment with optional author override
+    const env: Record<string, string> = {};
+    if (author) {
+      env.GIT_AUTHOR_NAME = author.name;
+      env.GIT_AUTHOR_EMAIL = author.email;
+      env.GIT_COMMITTER_NAME = author.name;
+      env.GIT_COMMITTER_EMAIL = author.email;
+    }
+
     const { stderr, exitCode } = await runCommand(["datalad", "save", "-m", message], {
       cwd: path,
+      ...(Object.keys(env).length > 0 ? { env } : {}),
     });
 
     if (exitCode !== 0) {
