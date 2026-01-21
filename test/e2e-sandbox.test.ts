@@ -171,16 +171,20 @@ describe("E2E Sandbox Tests", () => {
       // because sidecar files without corresponding data files fail validation
     });
 
-    test.skipIf(shouldSkip)("nemar dataset validate works on valid BIDS dataset", () => {
-      const result = runCli(["dataset", "validate", sampleDatasetDir]);
-      // A minimal BIDS dataset (just description + README) should pass validation
-      // It may have warnings about empty dataset, but should exit 0
-      if (result.exitCode !== 0) {
-        console.log("Validation failed with stdout:", result.stdout);
-        console.log("Validation failed with stderr:", result.stderr);
-      }
-      expect(result.exitCode).toBe(0);
-    });
+    test.skipIf(shouldSkip)(
+      "nemar dataset validate works on valid BIDS dataset",
+      () => {
+        const result = runCli(["dataset", "validate", sampleDatasetDir]);
+        // A minimal BIDS dataset (just description + README) should pass validation
+        // It may have warnings about empty dataset, but should exit 0
+        if (result.exitCode !== 0) {
+          console.log("Validation failed with stdout:", result.stdout);
+          console.log("Validation failed with stderr:", result.stderr);
+        }
+        expect(result.exitCode).toBe(0);
+      },
+      { timeout: 60000 }, // BIDS validation via Deno may need to download validator on first run
+    );
 
     test.skipIf(shouldSkip)("nemar dataset validate fails on invalid path", () => {
       const result = runCli(["dataset", "validate", "/nonexistent/path"]);
