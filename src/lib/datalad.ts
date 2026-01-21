@@ -748,6 +748,104 @@ export async function verifyGitHubAuth(expectedUsername?: string): Promise<{
   }
 }
 
+/**
+ * Accept a pending GitHub repository invitation.
+ *
+ * After a dataset is created, the backend invites the user as a collaborator.
+ * This function finds and accepts that invitation so the user can push without
+ * manually accepting in the browser.
+ *
+ * @param repoFullName - The full repository name (e.g., "nemarDatasets/nm000123")
+ * @returns Result indicating whether invitation was accepted
+ */
+export async function acceptGitHubInvitation(repoFullName: string): Promise<{
+  accepted: boolean;
+  error?: string;
+  alreadyCollaborator?: boolean;
+}> {
+  try {
+    // List pending invitations for the current user
+    const { stdout, exitCode, stderr } = await runCommand([
+      "gh",
+      "api",
+      "/user/repository_invitations",
+      "--jq",
+      `.[] | select(.repository.full_name == "${repoFullName}") | .id`,
+    ]);
+
+    if (exitCode !== 0) {
+      // Check for auth errors
+      if (stderr.includes("not logged in") || stderr.includes("auth login")) {
+        return {
+          accepted: false,
+          error: "gh CLI not authenticated. Run 'gh auth login' to authenticate.",
+        };
+      }
+      return {
+        accepted: false,
+        error: `Failed to list invitations: ${stderr.trim() || "unknown error"}`,
+      };
+    }
+
+    const invitationId = stdout.trim();
+
+    // No invitation found - user might already be a collaborator
+    if (!invitationId) {
+      // Check if user already has access to the repo
+      const { exitCode: checkExitCode } = await runCommand([
+        "gh",
+        "api",
+        `/repos/${repoFullName}`,
+        "--silent",
+      ]);
+
+      if (checkExitCode === 0) {
+        return {
+          accepted: true,
+          alreadyCollaborator: true,
+        };
+      }
+
+      return {
+        accepted: false,
+        error: `No pending invitation found for ${repoFullName}. Check your GitHub notifications.`,
+      };
+    }
+
+    // Accept the invitation
+    const { exitCode: acceptExitCode, stderr: acceptStderr } = await runCommand([
+      "gh",
+      "api",
+      "--method",
+      "PATCH",
+      `/user/repository_invitations/${invitationId}`,
+    ]);
+
+    if (acceptExitCode !== 0) {
+      return {
+        accepted: false,
+        error: `Failed to accept invitation: ${acceptStderr.trim() || "unknown error"}`,
+      };
+    }
+
+    return { accepted: true };
+  } catch (error) {
+    const errorMsg = error instanceof Error ? error.message : String(error);
+
+    if (errorMsg.includes("ENOENT") || errorMsg.includes("not found")) {
+      return {
+        accepted: false,
+        error: "gh CLI not installed. Install from https://cli.github.com/",
+      };
+    }
+
+    return {
+      accepted: false,
+      error: `Failed to accept invitation: ${errorMsg}`,
+    };
+  }
+}
+
 export async function configureGitHubRemote(
   path: string,
   repoUrl: string,
