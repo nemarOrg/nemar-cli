@@ -27,6 +27,14 @@ import {
   setConfig,
 } from "../lib/config.js";
 import {
+  type ConfirmOptions,
+  NO_DESCRIPTION,
+  NO_OPTION,
+  YES_DESCRIPTION,
+  YES_OPTION,
+  confirm,
+} from "../lib/confirm.js";
+import {
   acceptGitHubInvitation,
   checkPrerequisites,
   configureGitHubRemote,
@@ -462,36 +470,29 @@ sandboxCommand
 sandboxCommand
   .command("reset")
   .description("Reset sandbox training status for re-training")
-  .option("-f, --force", "Skip confirmation prompt")
-  .action(async (options: { force?: boolean }) => {
+  .option(YES_OPTION, YES_DESCRIPTION)
+  .option(NO_OPTION, NO_DESCRIPTION)
+  .action(async (options: ConfirmOptions) => {
     if (!isAuthenticated()) {
       console.log(chalk.red("Not authenticated"));
       console.log(chalk.gray("Run 'nemar auth login' first"));
       return;
     }
 
-    const config = getConfig();
-    if (!config.sandboxCompleted) {
+    const localConfig = getConfig();
+    if (!localConfig.sandboxCompleted) {
       console.log(chalk.yellow("Sandbox training not yet completed"));
       console.log(chalk.gray("Nothing to reset"));
       return;
     }
 
-    if (!options.force) {
-      const inquirer = (await import("inquirer")).default;
-      const { confirm } = await inquirer.prompt([
-        {
-          type: "confirm",
-          name: "confirm",
-          message: "Reset sandbox training status? You will need to complete training again.",
-          default: false,
-        },
-      ]);
-
-      if (!confirm) {
-        console.log(chalk.gray("Cancelled"));
-        return;
-      }
+    const result = await confirm(
+      "Reset sandbox training status? You will need to complete training again.",
+      options,
+    );
+    if (result !== "confirmed") {
+      console.log(chalk.gray(result === "declined" ? "Skipped" : "Cancelled"));
+      return;
     }
 
     const spinner = ora("Resetting sandbox status...").start();

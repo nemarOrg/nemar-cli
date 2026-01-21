@@ -35,6 +35,14 @@ import {
   setConfig,
 } from "../lib/config.js";
 import {
+  type ConfirmOptions,
+  NO_DESCRIPTION,
+  NO_OPTION,
+  YES_DESCRIPTION,
+  YES_OPTION,
+  confirm,
+} from "../lib/confirm.js";
+import {
   configureSSHForGitHub,
   generateSSHKey,
   getSSHKeyPaths,
@@ -70,20 +78,13 @@ Examples:
 // ============================================================================
 
 /** Exported login action handler for use in root-level shortcuts */
-export async function loginAction(options: { key?: string; force?: boolean }): Promise<void> {
+export async function loginAction(options: { key?: string } & ConfirmOptions): Promise<void> {
   // Check for existing authentication
-  if (isAuthenticated() && !options.force) {
+  if (isAuthenticated()) {
     const config = getConfig();
     console.log(chalk.yellow(`Already logged in as ${config.username || "unknown"}`));
-    const { confirm } = await inquirer.prompt([
-      {
-        type: "confirm",
-        name: "confirm",
-        message: "Do you want to log in with a different account?",
-        default: false,
-      },
-    ]);
-    if (!confirm) return;
+    const result = await confirm("Do you want to log in with a different account?", options);
+    if (result !== "confirmed") return;
   }
 
   // Get API key from options, environment, or prompt
@@ -165,7 +166,8 @@ authCommand
   .command("login")
   .description("Authenticate with your NEMAR API key")
   .option("-k, --key <key>", "API key (alternative: set NEMAR_API_KEY env var)")
-  .option("-f, --force", "Skip confirmation if already logged in")
+  .option(YES_OPTION, YES_DESCRIPTION)
+  .option(NO_OPTION, NO_DESCRIPTION)
   .addHelpText(
     "after",
     `
@@ -420,25 +422,15 @@ authCommand
 // ============================================================================
 
 /** Exported logout action handler for use in root-level shortcuts */
-export async function logoutAction(options: { force?: boolean }): Promise<void> {
+export async function logoutAction(options: ConfirmOptions): Promise<void> {
   if (!isAuthenticated()) {
     console.log(chalk.yellow("Not currently authenticated"));
     return;
   }
 
   const config = getConfig();
-
-  if (!options.force) {
-    const { confirm } = await inquirer.prompt([
-      {
-        type: "confirm",
-        name: "confirm",
-        message: `Log out ${config.username || "current user"}?`,
-        default: false,
-      },
-    ]);
-    if (!confirm) return;
-  }
+  const result = await confirm(`Log out ${config.username || "current user"}?`, options);
+  if (result !== "confirmed") return;
 
   clearConfig();
   console.log(chalk.green("Logged out successfully"));
@@ -447,7 +439,8 @@ export async function logoutAction(options: { force?: boolean }): Promise<void> 
 authCommand
   .command("logout")
   .description("Clear stored credentials")
-  .option("-f, --force", "Skip confirmation prompt")
+  .option(YES_OPTION, YES_DESCRIPTION)
+  .option(NO_OPTION, NO_DESCRIPTION)
   .action(logoutAction);
 
 // ============================================================================
