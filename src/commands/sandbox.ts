@@ -39,14 +39,14 @@ import {
   checkPrerequisites,
   configureGitHubRemote,
   configureLargefiles,
-  createDataladDataset,
   formatBytes,
+  initDataset,
   pushToGitHub,
   registerUrlsWithGitAnnex,
   saveDataset,
   uploadFilesWithPresignedUrls,
   verifyGitHubAuth,
-} from "../lib/datalad.js";
+} from "../lib/git-annex.js";
 import {
   cleanupSandboxDataset,
   generateSandboxDataset,
@@ -63,7 +63,7 @@ Description:
   workflow. You must complete sandbox training before uploading real datasets.
 
   The training creates a placeholder BIDS dataset (~500KB) and uploads it to
-  the sandbox environment, testing your DataLad, git-annex, and SSH setup.
+  the sandbox environment, testing your git-annex and SSH setup.
 
 Examples:
   $ nemar sandbox           # Run sandbox training
@@ -105,7 +105,7 @@ async function sandboxAction(): Promise<void> {
 
   // Step 3: Check prerequisites
   console.log(chalk.bold("Step 1/6: Checking prerequisites..."));
-  const prereqSpinner = ora("Checking DataLad, git-annex, and SSH...").start();
+  const prereqSpinner = ora("Checking git-annex and SSH...").start();
 
   const prereqs = await checkPrerequisites();
   if (!prereqs.allPassed) {
@@ -260,17 +260,17 @@ async function sandboxAction(): Promise<void> {
     // Continue anyway - user can accept manually
   }
 
-  // Step 6: Initialize DataLad and configure remotes
+  // Step 6: Initialize git-annex and configure remotes
   console.log();
   console.log(chalk.bold("Step 4/6: Initializing repository..."));
-  const initSpinner = ora("Setting up DataLad and git-annex...").start();
+  const initSpinner = ora("Setting up git-annex...").start();
 
   // Use NEMAR user identity for all commits (including initial dataset creation)
   const author =
     config.username && config.email ? { name: config.username, email: config.email } : undefined;
 
   try {
-    await createDataladDataset(datasetPath, { author });
+    await initDataset(datasetPath, { author });
     await configureLargefiles(datasetPath);
     await configureGitHubRemote(datasetPath, sshUrl);
     initSpinner.succeed("Repository initialized");

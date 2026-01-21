@@ -1,12 +1,12 @@
 /**
- * DataLad Service
+ * Git-Annex Service
  *
- * Manages DataLad/git-annex operations for dataset upload.
- * Requires DataLad >= 0.19.0 and git-annex >= 10.0 to be installed.
+ * Manages git-annex operations for dataset upload and download.
+ * Requires git-annex >= 10.0 to be installed.
  */
 
 import { existsSync, statSync } from "node:fs";
-import { basename, join } from "node:path";
+import { join } from "node:path";
 import { spawn } from "bun";
 
 /**
@@ -23,10 +23,9 @@ export interface ToolVersion {
 /**
  * Prerequisites check result
  * Note: AWS credentials are provided by the backend API (not from local ~/.aws/config)
- * and passed to DataLad operations during upload
+ * and passed to git-annex operations during upload
  */
 export interface PrerequisitesResult {
-  datalad: ToolVersion;
   gitAnnex: ToolVersion;
   githubSSH: { accessible: boolean; username?: string };
   allPassed: boolean;
@@ -109,50 +108,6 @@ function isVersionCompatible(actual: string, required: string): boolean {
     if (a < r) return false;
   }
   return true;
-}
-
-/**
- * Check if DataLad is installed and compatible
- */
-export async function checkDataladInstalled(): Promise<ToolVersion> {
-  const minVersion = "0.19.0";
-
-  try {
-    const { stdout, exitCode, stderr } = await runCommand(["datalad", "--version"]);
-
-    if (exitCode !== 0) {
-      console.warn("datalad --version returned non-zero exit code:", exitCode);
-      console.warn("stderr:", stderr);
-      return { installed: false, minVersion, error: `Version check failed: ${stderr.trim()}` };
-    }
-
-    // Output is like "datalad 0.19.6" or just version number
-    const match = stdout.match(/(\d+\.\d+\.\d+)/);
-    const version = match ? match[1] : undefined;
-
-    if (!version) {
-      console.warn("Could not parse datalad version from output:", stdout);
-    }
-
-    return {
-      installed: true,
-      version,
-      minVersion,
-      compatible: version ? isVersionCompatible(version, minVersion) : undefined,
-    };
-  } catch (error) {
-    const errorMsg = error instanceof Error ? error.message : String(error);
-
-    // Differentiate between "not installed" and other errors
-    if (errorMsg.includes("ENOENT") || errorMsg.includes("not found")) {
-      console.info("DataLad not found in PATH");
-      return { installed: false, minVersion };
-    }
-
-    // Other errors are concerning - log them
-    console.error("Error checking DataLad installation:", errorMsg);
-    return { installed: false, minVersion, error: errorMsg };
-  }
 }
 
 /**
@@ -286,16 +241,10 @@ export async function checkAWSCredentials(): Promise<{ configured: boolean; sour
 }
 
 /**
- * Get platform-specific installation command for a tool
+ * Get platform-specific installation command for git-annex
  */
-function getInstallCommand(tool: "datalad" | "git-annex"): string {
+function getGitAnnexInstallCommand(): string {
   const platform = process.platform;
-  if (tool === "datalad") {
-    if (platform === "darwin") return "brew install datalad (recommended) or pip install datalad";
-    if (platform === "linux") return "apt install datalad (Debian/Ubuntu) or pip install datalad";
-    return "pip install datalad";
-  }
-  // git-annex
   if (platform === "darwin") return "brew install git-annex";
   if (platform === "linux") return "apt install git-annex (Debian/Ubuntu)";
   return "See https://git-annex.branchable.com/install/";
@@ -306,24 +255,12 @@ function getInstallCommand(tool: "datalad" | "git-annex"): string {
  * Note: AWS credentials are provided by the backend after dataset creation
  */
 export async function checkPrerequisites(): Promise<PrerequisitesResult> {
-  const [datalad, gitAnnex, githubSSH] = await Promise.all([
-    checkDataladInstalled(),
-    checkGitAnnexInstalled(),
-    checkGitHubSSH(),
-  ]);
+  const [gitAnnex, githubSSH] = await Promise.all([checkGitAnnexInstalled(), checkGitHubSSH()]);
 
   const errors: string[] = [];
 
-  if (!datalad.installed) {
-    errors.push(`DataLad is not installed. Install: ${getInstallCommand("datalad")}`);
-  } else if (datalad.compatible === false) {
-    errors.push(
-      `DataLad version ${datalad.version} is too old. Required: >= ${datalad.minVersion}`,
-    );
-  }
-
   if (!gitAnnex.installed) {
-    errors.push(`git-annex is not installed. Install: ${getInstallCommand("git-annex")}`);
+    errors.push(`git-annex is not installed. Install: ${getGitAnnexInstallCommand()}`);
   } else if (gitAnnex.compatible === false) {
     errors.push(
       `git-annex version ${gitAnnex.version} is too old. Required: >= ${gitAnnex.minVersion}`,
@@ -337,7 +274,6 @@ export async function checkPrerequisites(): Promise<PrerequisitesResult> {
   }
 
   return {
-    datalad,
     gitAnnex,
     githubSSH,
     allPassed: errors.length === 0,
@@ -346,24 +282,24 @@ export async function checkPrerequisites(): Promise<PrerequisitesResult> {
 }
 
 /**
- * Check if a directory is already a DataLad dataset
+ * Check if a directory is already a git-annex dataset
  */
-export async function isDataladDataset(path: string): Promise<boolean> {
-  // Check for .datalad directory
-  if (existsSync(join(path, ".datalad"))) {
-    return true;
+export async function isGitAnnexDataset(path: string): Promise<boolean> {
+  // Check for .git directory first
+  if (!existsSync(join(path, ".git"))) {
+    return false;
   }
 
-  // Also check with datalad status
+  // Check if git-annex is initialized
   try {
-    const { exitCode } = await runCommand(["datalad", "status"], { cwd: path });
+    const { exitCode } = await runCommand(["git", "annex", "info"], { cwd: path });
     return exitCode === 0;
   } catch (error) {
     const errorMsg = error instanceof Error ? error.message : String(error);
 
-    // Log unexpected errors (datalad command failures other than "not a dataset")
+    // Log unexpected errors
     if (!errorMsg.includes("ENOENT") && !errorMsg.includes("not found")) {
-      console.error(`Error checking if ${path} is a DataLad dataset:`, errorMsg);
+      console.error(`Error checking if ${path} is a git-annex dataset:`, errorMsg);
     }
 
     return false;
@@ -371,17 +307,17 @@ export async function isDataladDataset(path: string): Promise<boolean> {
 }
 
 /**
- * Initialize a DataLad dataset
+ * Initialize a git-annex dataset
  *
  * If author info is provided, sets GIT_AUTHOR_NAME and GIT_AUTHOR_EMAIL
  * to ensure the initial commit is attributed to the correct NEMAR user.
  */
-export async function createDataladDataset(
+export async function initDataset(
   path: string,
   options: { force?: boolean; author?: { name: string; email: string } } = {},
 ): Promise<{ success: boolean; error?: string }> {
   // Check if already a dataset
-  if (!options.force && (await isDataladDataset(path))) {
+  if (!options.force && (await isGitAnnexDataset(path))) {
     return { success: true }; // Already initialized
   }
 
@@ -395,15 +331,16 @@ export async function createDataladDataset(
       env.GIT_COMMITTER_EMAIL = options.author.email;
     }
 
-    const { stderr, exitCode } = await runCommand(["datalad", "create", "--force", path], {
+    // Initialize git repository
+    const { stderr: gitStderr, exitCode: gitExitCode } = await runCommand(["git", "init", path], {
       ...(Object.keys(env).length > 0 ? { env } : {}),
     });
 
-    if (exitCode !== 0) {
-      return { success: false, error: stderr.trim() || "Failed to create DataLad dataset" };
+    if (gitExitCode !== 0) {
+      return { success: false, error: gitStderr.trim() || "Failed to initialize git repository" };
     }
 
-    // Explicitly initialize git-annex (required when dataset is created in existing directory)
+    // Initialize git-annex
     const { stderr: initStderr, exitCode: initExitCode } = await runCommand(
       ["git", "annex", "init"],
       {
@@ -995,7 +932,7 @@ Choose option 2 for quick setup, or option 1 if you have multiple GitHub account
 }
 
 /**
- * Save all changes to the DataLad dataset
+ * Save all changes to the dataset
  *
  * If author info is provided, sets GIT_AUTHOR_NAME and GIT_AUTHOR_EMAIL
  * to ensure commits are attributed to the correct NEMAR user.
@@ -1015,17 +952,49 @@ export async function saveDataset(
       env.GIT_COMMITTER_EMAIL = author.email;
     }
 
-    const { stderr, exitCode } = await runCommand(["datalad", "save", "-m", message], {
+    // Stage all changes with git add
+    const { stderr: addStderr, exitCode: addExitCode } = await runCommand(["git", "add", "-A"], {
       cwd: path,
       ...(Object.keys(env).length > 0 ? { env } : {}),
     });
 
-    if (exitCode !== 0) {
-      // Check if there's nothing to save
-      if (stderr.includes("nothing to save") || stderr.includes("no changes")) {
+    if (addExitCode !== 0) {
+      return { success: false, error: addStderr.trim() || "Failed to stage changes" };
+    }
+
+    // Check if there are changes to commit
+    const {
+      stdout: statusOut,
+      exitCode: statusExitCode,
+      stderr: statusStderr,
+    } = await runCommand(["git", "status", "--porcelain"], {
+      cwd: path,
+    });
+
+    if (statusExitCode !== 0) {
+      return { success: false, error: statusStderr.trim() || "Failed to check git status" };
+    }
+
+    if (!statusOut.trim()) {
+      // Nothing to commit
+      return { success: true };
+    }
+
+    // Commit the changes
+    const { stderr: commitStderr, exitCode: commitExitCode } = await runCommand(
+      ["git", "commit", "-m", message],
+      {
+        cwd: path,
+        ...(Object.keys(env).length > 0 ? { env } : {}),
+      },
+    );
+
+    if (commitExitCode !== 0) {
+      // Check if there's nothing to commit
+      if (commitStderr.includes("nothing to commit")) {
         return { success: true };
       }
-      return { success: false, error: stderr.trim() || "Failed to save dataset" };
+      return { success: false, error: commitStderr.trim() || "Failed to commit changes" };
     }
 
     return { success: true };
@@ -1082,7 +1051,7 @@ export async function pushToGitHub(
   path: string,
   remoteName = "origin",
   branch?: string,
-): Promise<{ success: boolean; error?: string }> {
+): Promise<{ success: boolean; error?: string; warning?: string }> {
   try {
     // Detect current branch if not specified
     let branchToPush = branch;
@@ -1131,8 +1100,11 @@ export async function pushToGitHub(
     );
 
     if (annexExitCode !== 0) {
-      // Not a fatal error, but log it
-      console.warn("Warning: Could not push git-annex branch:", annexStderr.trim());
+      // Not a fatal error, but return warning so callers can inform users
+      return {
+        success: true,
+        warning: `Main branch pushed, but git-annex branch failed: ${annexStderr.trim()}. Clone operations may have issues.`,
+      };
     }
 
     return { success: true };
@@ -1283,7 +1255,7 @@ export async function uploadFilesWithPresignedUrls(
   // Process files in batches
   for (let i = 0; i < files.length; i += jobs) {
     const batch = files.slice(i, i + jobs);
-    const results = await Promise.all(
+    await Promise.all(
       batch.map(async ([relativePath, presignedUrl]) => {
         const fullPath = join(basePath, relativePath);
 
@@ -1314,8 +1286,6 @@ export async function uploadFilesWithPresignedUrls(
             error: result.error,
           });
         }
-
-        return { path: relativePath, ...result };
       }),
     );
   }
@@ -1434,7 +1404,6 @@ export async function configureWebRemote(
  * Prerequisites check result for download (simpler than upload)
  */
 export interface DownloadPrerequisitesResult {
-  datalad: ToolVersion;
   gitAnnex: ToolVersion;
   allPassed: boolean;
   errors: string[];
@@ -1445,25 +1414,12 @@ export interface DownloadPrerequisitesResult {
  * Simpler than upload - no AWS credentials or GitHub SSH needed
  */
 export async function checkDownloadPrerequisites(): Promise<DownloadPrerequisitesResult> {
-  const [datalad, gitAnnex] = await Promise.all([
-    checkDataladInstalled(),
-    checkGitAnnexInstalled(),
-  ]);
+  const gitAnnex = await checkGitAnnexInstalled();
 
   const errors: string[] = [];
 
-  if (!datalad.installed) {
-    errors.push("DataLad is not installed. Install: pip install datalad");
-  } else if (datalad.compatible === false) {
-    errors.push(
-      `DataLad version ${datalad.version} is too old. Required: >= ${datalad.minVersion}`,
-    );
-  }
-
   if (!gitAnnex.installed) {
-    errors.push(
-      "git-annex is not installed. Install: brew install git-annex (macOS) or apt install git-annex (Linux)",
-    );
+    errors.push(`git-annex is not installed. Install: ${getGitAnnexInstallCommand()}`);
   } else if (gitAnnex.compatible === false) {
     errors.push(
       `git-annex version ${gitAnnex.version} is too old. Required: >= ${gitAnnex.minVersion}`,
@@ -1471,7 +1427,6 @@ export async function checkDownloadPrerequisites(): Promise<DownloadPrerequisite
   }
 
   return {
-    datalad,
     gitAnnex,
     allPassed: errors.length === 0,
     errors,
@@ -1479,17 +1434,45 @@ export async function checkDownloadPrerequisites(): Promise<DownloadPrerequisite
 }
 
 /**
- * Clone a DataLad dataset from GitHub
+ * Clone a dataset from GitHub
  */
 export async function cloneDataset(
   repoUrl: string,
   outputPath: string,
 ): Promise<{ success: boolean; error?: string }> {
   try {
-    const { stderr, exitCode } = await runCommand(["datalad", "clone", repoUrl, outputPath]);
+    // Clone with git
+    const { stderr: cloneStderr, exitCode: cloneExitCode } = await runCommand([
+      "git",
+      "clone",
+      repoUrl,
+      outputPath,
+    ]);
 
-    if (exitCode !== 0) {
-      return { success: false, error: stderr.trim() || "Failed to clone dataset" };
+    if (cloneExitCode !== 0) {
+      return { success: false, error: cloneStderr.trim() || "Failed to clone dataset" };
+    }
+
+    // Initialize git-annex in the cloned repo
+    const { stderr: initStderr, exitCode: initExitCode } = await runCommand(
+      ["git", "annex", "init"],
+      { cwd: outputPath },
+    );
+
+    if (initExitCode !== 0) {
+      // Verify git-annex is actually initialized despite the error
+      const { exitCode: checkCode } = await runCommand(["git", "annex", "info"], {
+        cwd: outputPath,
+      });
+
+      if (checkCode !== 0) {
+        return {
+          success: false,
+          error: `Cloned repository but git-annex initialization failed: ${initStderr.trim()}`,
+        };
+      }
+      // Already initialized, non-fatal
+      console.warn("git annex init returned non-zero but annex is initialized");
     }
 
     return { success: true };
@@ -1512,15 +1495,15 @@ export async function getDatasetData(
   const paths = options.paths && options.paths.length > 0 ? options.paths : ["."];
 
   try {
-    const args = ["datalad", "get", "-J", jobs.toString(), ...paths];
+    const args = ["git", "annex", "get", "-J", jobs.toString(), ...paths];
     const { stdout, stderr, exitCode } = await runCommand(args, { cwd: datasetPath });
 
     if (exitCode !== 0) {
       return { success: false, error: stderr.trim() || "Failed to get dataset data" };
     }
 
-    // Count files downloaded from output
-    const getMatches = stdout.match(/get\(ok\):/g);
+    // Count files downloaded from output (git annex get outputs lines like "get file ok")
+    const getMatches = stdout.match(/^get .+ ok$/gm);
     const filesDownloaded = getMatches ? getMatches.length : 0;
 
     return { success: true, filesDownloaded };
@@ -1587,8 +1570,9 @@ export async function getLocalDatasetInfo(datasetPath: string): Promise<LocalDat
         missingFiles: annexedFiles - presentFiles,
       };
     }
-  } catch {
-    // Not a git-annex repo or error parsing
+  } catch (error) {
+    const errorMsg = error instanceof Error ? error.message : String(error);
+    console.warn(`Failed to get git-annex info for ${datasetPath}: ${errorMsg}`);
   }
 
   // Fallback: just count files
@@ -1605,7 +1589,9 @@ export async function getLocalDatasetInfo(datasetPath: string): Promise<LocalDat
       presentFiles: files,
       missingFiles: 0,
     };
-  } catch {
+  } catch (error) {
+    const errorMsg = error instanceof Error ? error.message : String(error);
+    console.warn(`Failed to count files in ${datasetPath}: ${errorMsg}`);
     return null;
   }
 }
@@ -1870,23 +1856,9 @@ export async function collectFileManifest(datasetPath: string): Promise<{
   let dataFiles = 0;
   let metadataFiles = 0;
 
-  // Use find to get all files (excluding .git and .datalad)
+  // Use find to get all files (excluding .git)
   const { stdout, exitCode } = await runCommand(
-    [
-      "find",
-      ".",
-      "-type",
-      "f",
-      "-not",
-      "-path",
-      "./.git/*",
-      "-not",
-      "-path",
-      "./.datalad/*",
-      "-not",
-      "-name",
-      ".gitattributes",
-    ],
+    ["find", ".", "-type", "f", "-not", "-path", "./.git/*", "-not", "-name", ".gitattributes"],
     { cwd: datasetPath },
   );
 
@@ -1929,3 +1901,17 @@ export async function collectFileManifest(datasetPath: string): Promise<{
 
   return { files, totalSize, dataFiles, metadataFiles };
 }
+
+// =============================================================================
+// Backward-compatible aliases (to be removed in future versions)
+// =============================================================================
+
+/**
+ * @deprecated Use initDataset instead. Will be removed in v1.0.0.
+ */
+export const createDataladDataset = initDataset;
+
+/**
+ * @deprecated Use isGitAnnexDataset instead. Will be removed in v1.0.0.
+ */
+export const isDataladDataset = isGitAnnexDataset;

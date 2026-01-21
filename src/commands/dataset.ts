@@ -41,6 +41,12 @@ import {
 import { getConfig, isAuthenticated, isSandboxCompleted } from "../lib/config.js";
 import { type ConfirmOptions, YES_DESCRIPTION, YES_OPTION, confirm } from "../lib/confirm.js";
 import {
+  type LocalDatasetConfig,
+  readLocalConfig,
+  updateLastUpload,
+  writeLocalConfig,
+} from "../lib/dataset-config.js";
+import {
   acceptGitHubInvitation,
   checkDownloadPrerequisites,
   checkNemarGitHubSshConfig,
@@ -49,24 +55,18 @@ import {
   collectFileManifest,
   configureGitHubRemote,
   configureLargefiles,
-  createDataladDataset,
   ensureGitAnnexInitialized,
   formatBytes,
   getDatasetData,
   getLocalDatasetInfo,
-  isDataladDataset,
+  initDataset,
+  isGitAnnexDataset,
   pushToGitHub,
   registerUrlsWithGitAnnex,
   saveDataset,
   uploadFilesWithPresignedUrls,
   verifyGitHubAuth,
-} from "../lib/datalad.js";
-import {
-  type LocalDatasetConfig,
-  readLocalConfig,
-  updateLastUpload,
-  writeLocalConfig,
-} from "../lib/dataset-config.js";
+} from "../lib/git-annex.js";
 
 export const datasetCommand = new Command("dataset").description("Dataset management").addHelpText(
   "after",
@@ -76,7 +76,7 @@ Description:
   neurophysiology datasets in Brain Imaging Data Structure (BIDS) format.
 
 Prerequisites:
-  - DataLad and git-annex (for upload/download)
+  - git-annex (for upload/download)
   - Deno runtime (for BIDS validation)
   - NEMAR account (for upload)
 
@@ -239,7 +239,7 @@ Description:
 
 Requirements:
   - NEMAR account (nemar auth login)
-  - DataLad and git-annex installed
+  - git-annex installed
   - GitHub SSH access configured
 
 Process:
@@ -298,9 +298,7 @@ Examples:
     }
 
     spinner.succeed("Prerequisites check passed");
-    console.log(
-      chalk.gray(`  DataLad ${prereqs.datalad.version}, git-annex ${prereqs.gitAnnex.version}`),
-    );
+    console.log(chalk.gray(`  git-annex ${prereqs.gitAnnex.version}`));
     if (prereqs.githubSSH.username) {
       console.log(chalk.gray(`  GitHub SSH: ${prereqs.githubSSH.username}`));
     }
@@ -589,18 +587,18 @@ Examples:
       // Continue anyway - user can accept manually
     }
 
-    // Step 7: Initialize DataLad dataset
-    spinner = ora("Initializing DataLad dataset...").start();
+    // Step 7: Initialize git-annex dataset
+    spinner = ora("Initializing git-annex dataset...").start();
 
     // Use NEMAR user identity for all commits (including initial dataset creation)
     const author =
       config.username && config.email ? { name: config.username, email: config.email } : undefined;
 
-    const isExistingDataset = await isDataladDataset(absolutePath);
+    const isExistingDataset = await isGitAnnexDataset(absolutePath);
     if (!isExistingDataset) {
-      const createResult = await createDataladDataset(absolutePath, { author });
+      const createResult = await initDataset(absolutePath, { author });
       if (!createResult.success) {
-        spinner.fail("Failed to initialize DataLad dataset");
+        spinner.fail("Failed to initialize git-annex dataset");
         console.log(chalk.red(`  ${createResult.error}`));
         process.exit(1);
       }
@@ -621,7 +619,7 @@ Examples:
       console.log(chalk.gray(`  ${largefilesResult.error}`));
     }
 
-    spinner.succeed("DataLad dataset initialized");
+    spinner.succeed("git-annex dataset initialized");
 
     // Step 8: Configure GitHub remote (auto-detects best auth method)
     spinner = ora("Configuring GitHub remote...").start();
@@ -734,7 +732,7 @@ Examples:
     console.log(`  GitHub: ${chalk.cyan(datasetInfo.github_url)}`);
     console.log();
     console.log(chalk.gray("To clone this dataset:"));
-    console.log(chalk.gray(`  datalad clone ${datasetInfo.ssh_url}`));
+    console.log(chalk.gray(`  git clone ${datasetInfo.ssh_url}`));
   });
 
 // Download command
@@ -749,11 +747,11 @@ datasetCommand
     "after",
     `
 Description:
-  Download a BIDS dataset from NEMAR. Uses DataLad/git-annex for efficient
+  Download a BIDS dataset from NEMAR. Uses git-annex for efficient
   data transfer with parallel streams.
 
 Requirements:
-  - DataLad and git-annex installed (no account needed)
+  - git-annex installed (no account needed)
 
 Examples:
   $ nemar dataset download nm000104              # Download to ./nm000104
@@ -776,9 +774,7 @@ Examples:
     }
 
     spinner.succeed("Prerequisites check passed");
-    console.log(
-      chalk.gray(`  DataLad ${prereqs.datalad.version}, git-annex ${prereqs.gitAnnex.version}`),
-    );
+    console.log(chalk.gray(`  git-annex ${prereqs.gitAnnex.version}`));
     console.log();
 
     // Step 2: Get dataset info from backend
@@ -850,7 +846,7 @@ Examples:
         spinner.fail("Failed to download data files");
         console.log(chalk.red(`  ${getResult.error}`));
         console.log(chalk.gray("The dataset was cloned but data files are not available locally."));
-        console.log(chalk.gray(`You can try again with: cd ${absoluteOutput} && datalad get .`));
+        console.log(chalk.gray(`You can try again with: cd ${absoluteOutput} && git annex get .`));
         process.exit(1);
       }
 
@@ -873,13 +869,15 @@ Examples:
       }
       if (localInfo.missingFiles > 0) {
         console.log(
-          chalk.gray(`  Missing files: ${localInfo.missingFiles} (use 'datalad get' to download)`),
+          chalk.gray(
+            `  Missing files: ${localInfo.missingFiles} (use 'git annex get' to download)`,
+          ),
         );
       }
     }
     console.log();
     console.log(chalk.gray("To get additional data:"));
-    console.log(chalk.gray(`  cd ${absoluteOutput} && datalad get <path>`));
+    console.log(chalk.gray(`  cd ${absoluteOutput} && git annex get <path>`));
   });
 
 // Status command
