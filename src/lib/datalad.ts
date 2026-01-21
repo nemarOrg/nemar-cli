@@ -372,10 +372,13 @@ export async function isDataladDataset(path: string): Promise<boolean> {
 
 /**
  * Initialize a DataLad dataset
+ *
+ * If author info is provided, sets GIT_AUTHOR_NAME and GIT_AUTHOR_EMAIL
+ * to ensure the initial commit is attributed to the correct NEMAR user.
  */
 export async function createDataladDataset(
   path: string,
-  options: { force?: boolean } = {},
+  options: { force?: boolean; author?: { name: string; email: string } } = {},
 ): Promise<{ success: boolean; error?: string }> {
   // Check if already a dataset
   if (!options.force && (await isDataladDataset(path))) {
@@ -383,7 +386,18 @@ export async function createDataladDataset(
   }
 
   try {
-    const { stderr, exitCode } = await runCommand(["datalad", "create", "--force", path]);
+    // Build environment with optional author override
+    const env: Record<string, string> = {};
+    if (options.author) {
+      env.GIT_AUTHOR_NAME = options.author.name;
+      env.GIT_AUTHOR_EMAIL = options.author.email;
+      env.GIT_COMMITTER_NAME = options.author.name;
+      env.GIT_COMMITTER_EMAIL = options.author.email;
+    }
+
+    const { stderr, exitCode } = await runCommand(["datalad", "create", "--force", path], {
+      ...(Object.keys(env).length > 0 ? { env } : {}),
+    });
 
     if (exitCode !== 0) {
       return { success: false, error: stderr.trim() || "Failed to create DataLad dataset" };
@@ -392,7 +406,10 @@ export async function createDataladDataset(
     // Explicitly initialize git-annex (required when dataset is created in existing directory)
     const { stderr: initStderr, exitCode: initExitCode } = await runCommand(
       ["git", "annex", "init"],
-      { cwd: path },
+      {
+        cwd: path,
+        ...(Object.keys(env).length > 0 ? { env } : {}),
+      },
     );
 
     if (initExitCode !== 0) {

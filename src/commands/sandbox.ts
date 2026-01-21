@@ -251,8 +251,12 @@ async function sandboxAction(): Promise<void> {
   console.log(chalk.bold("Step 4/6: Initializing repository..."));
   const initSpinner = ora("Setting up DataLad and git-annex...").start();
 
+  // Use NEMAR user identity for all commits (including initial dataset creation)
+  const author =
+    config.username && config.email ? { name: config.username, email: config.email } : undefined;
+
   try {
-    await createDataladDataset(datasetPath);
+    await createDataladDataset(datasetPath, { author });
     await configureLargefiles(datasetPath);
     await configureGitHubRemote(datasetPath, sshUrl);
     initSpinner.succeed("Repository initialized");
@@ -344,9 +348,6 @@ async function sandboxAction(): Promise<void> {
   const pushSpinner = ora("Saving and pushing...").start();
 
   try {
-    // Use NEMAR user identity for commit authorship
-    const author =
-      config.username && config.email ? { name: config.username, email: config.email } : undefined;
     await saveDataset(datasetPath, "Initial sandbox training upload", author);
     await pushToGitHub(datasetPath);
     pushSpinner.succeed("Pushed to GitHub");
