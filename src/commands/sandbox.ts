@@ -19,8 +19,23 @@ import {
   getSandboxStatus,
   resetSandbox,
 } from "../lib/api.js";
-import { getConfig, isAuthenticated, isSandboxCompleted, setConfig } from "../lib/config.js";
 import {
+  deleteConfig,
+  getConfig,
+  isAuthenticated,
+  isSandboxCompleted,
+  setConfig,
+} from "../lib/config.js";
+import {
+  type ConfirmOptions,
+  NO_DESCRIPTION,
+  NO_OPTION,
+  YES_DESCRIPTION,
+  YES_OPTION,
+  confirm,
+} from "../lib/confirm.js";
+import {
+  acceptGitHubInvitation,
   checkPrerequisites,
   configureGitHubRemote,
   configureLargefiles,
@@ -30,6 +45,7 @@ import {
   registerUrlsWithGitAnnex,
   saveDataset,
   uploadFilesWithPresignedUrls,
+  verifyGitHubAuth,
 } from "../lib/datalad.js";
 import {
   cleanupSandboxDataset,
@@ -106,6 +122,41 @@ async function sandboxAction(): Promise<void> {
   }
   prereqSpinner.succeed("All prerequisites met");
 
+  // Step 3b: Verify gh CLI authentication
+  const ghSpinner = ora("Verifying GitHub CLI authentication...").start();
+  const ghAuth = await verifyGitHubAuth(config.githubUsername);
+
+  if (!ghAuth.authenticated) {
+    ghSpinner.fail("GitHub CLI not authenticated");
+    console.log(chalk.red(`  ${ghAuth.error}`));
+    console.log();
+    console.log("GitHub CLI is required for sandbox training. Install and authenticate:");
+    console.log(chalk.cyan("  brew install gh       # or visit https://cli.github.com/"));
+    console.log(chalk.cyan("  gh auth login"));
+    return;
+  }
+
+  if (config.githubUsername && !ghAuth.matches) {
+    ghSpinner.warn("GitHub CLI user mismatch");
+    console.log(chalk.yellow(`  ${ghAuth.error}`));
+    console.log();
+    console.log(
+      "Your gh CLI is authenticated as a different GitHub account than your NEMAR account.",
+    );
+    console.log("This may cause issues with repository access. To fix:");
+    console.log(chalk.cyan(`  gh auth login    # Login as ${config.githubUsername}`));
+    console.log();
+    console.log(
+      chalk.yellow(
+        "WARNING: If upload fails with permission errors, this mismatch is the likely cause.",
+      ),
+    );
+    console.log();
+    // Continue with warning; don't block
+  } else {
+    ghSpinner.succeed(`GitHub CLI authenticated as ${ghAuth.username}`);
+  }
+
   // Step 4: Generate sandbox dataset
   console.log();
   console.log(chalk.bold("Step 2/6: Generating test dataset..."));
@@ -131,6 +182,7 @@ async function sandboxAction(): Promise<void> {
 
   let datasetId: string;
   let sshUrl: string;
+  let githubUrl: string;
   let s3Config: { bucket: string; region: string; public_url: string };
   let s3Prefix: string;
   let uploadUrls: Record<string, string>;
@@ -151,15 +203,17 @@ async function sandboxAction(): Promise<void> {
 
     datasetId = response.dataset.dataset_id;
     sshUrl = response.dataset.ssh_url;
+    githubUrl = response.dataset.github_url;
     s3Config = response.s3_config;
     s3Prefix = response.dataset.s3_prefix;
     uploadUrls = response.upload_urls || {};
 
     apiSpinner.succeed(`Sandbox dataset created: ${chalk.cyan(datasetId)}`);
-    console.log(chalk.gray(`  GitHub: ${response.dataset.github_url}`));
+    console.log(chalk.gray(`  GitHub: ${githubUrl}`));
 
     // Wait for IAM policy propagation (AWS is eventually consistent)
-    await new Promise((resolve) => setTimeout(resolve, 3000));
+    // This initial wait helps reduce retry attempts during upload
+    await new Promise((resolve) => setTimeout(resolve, 10000));
   } catch (error) {
     apiSpinner.fail("Failed to create sandbox dataset");
     if (error instanceof ApiError) {
@@ -171,13 +225,52 @@ async function sandboxAction(): Promise<void> {
     return;
   }
 
+  // Step 5b: Accept GitHub invitation
+  const inviteSpinner = ora("Accepting GitHub repository invitation...").start();
+
+  // Extract repo full name from github_url (e.g., "https://github.com/nemarDatasets/xx000123")
+  // Validate URL format: must be a valid GitHub URL with owner/repo pattern
+  const repoMatch = githubUrl?.match(/github\.com\/([a-zA-Z0-9_.-]+\/[a-zA-Z0-9_.-]+)/);
+  const repoFullName = repoMatch ? repoMatch[1].replace(/\.git$/, "") : null;
+
+  if (!repoFullName) {
+    inviteSpinner.fail("Invalid GitHub repository URL from backend");
+    console.log(chalk.red(`  Received: ${githubUrl || "(empty)"}`));
+    console.log(chalk.red("  Expected format: https://github.com/owner/repo"));
+    console.log();
+    console.log("This may indicate a backend issue. Please contact support.");
+    cleanupSandboxDataset(datasetPath);
+    return;
+  }
+
+  const inviteResult = await acceptGitHubInvitation(repoFullName);
+  if (inviteResult.accepted) {
+    if (inviteResult.alreadyCollaborator) {
+      inviteSpinner.succeed("Already a collaborator on this repository");
+    } else {
+      inviteSpinner.succeed("GitHub invitation accepted");
+    }
+  } else {
+    inviteSpinner.warn("Could not auto-accept invitation");
+    console.log(chalk.yellow(`  ${inviteResult.error}`));
+    console.log();
+    console.log("You may need to accept the invitation manually:");
+    console.log(chalk.cyan(`  https://github.com/${repoFullName}/invitations`));
+    console.log();
+    // Continue anyway - user can accept manually
+  }
+
   // Step 6: Initialize DataLad and configure remotes
   console.log();
   console.log(chalk.bold("Step 4/6: Initializing repository..."));
   const initSpinner = ora("Setting up DataLad and git-annex...").start();
 
+  // Use NEMAR user identity for all commits (including initial dataset creation)
+  const author =
+    config.username && config.email ? { name: config.username, email: config.email } : undefined;
+
   try {
-    await createDataladDataset(datasetPath);
+    await createDataladDataset(datasetPath, { author });
     await configureLargefiles(datasetPath);
     await configureGitHubRemote(datasetPath, sshUrl);
     initSpinner.succeed("Repository initialized");
@@ -269,7 +362,7 @@ async function sandboxAction(): Promise<void> {
   const pushSpinner = ora("Saving and pushing...").start();
 
   try {
-    await saveDataset(datasetPath, "Initial sandbox training upload");
+    await saveDataset(datasetPath, "Initial sandbox training upload", author);
     await pushToGitHub(datasetPath);
     pushSpinner.succeed("Pushed to GitHub");
   } catch (error) {
@@ -377,36 +470,29 @@ sandboxCommand
 sandboxCommand
   .command("reset")
   .description("Reset sandbox training status for re-training")
-  .option("-f, --force", "Skip confirmation prompt")
-  .action(async (options: { force?: boolean }) => {
+  .option(YES_OPTION, YES_DESCRIPTION)
+  .option(NO_OPTION, NO_DESCRIPTION)
+  .action(async (options: ConfirmOptions) => {
     if (!isAuthenticated()) {
       console.log(chalk.red("Not authenticated"));
       console.log(chalk.gray("Run 'nemar auth login' first"));
       return;
     }
 
-    const config = getConfig();
-    if (!config.sandboxCompleted) {
+    const localConfig = getConfig();
+    if (!localConfig.sandboxCompleted) {
       console.log(chalk.yellow("Sandbox training not yet completed"));
       console.log(chalk.gray("Nothing to reset"));
       return;
     }
 
-    if (!options.force) {
-      const inquirer = (await import("inquirer")).default;
-      const { confirm } = await inquirer.prompt([
-        {
-          type: "confirm",
-          name: "confirm",
-          message: "Reset sandbox training status? You will need to complete training again.",
-          default: false,
-        },
-      ]);
-
-      if (!confirm) {
-        console.log(chalk.gray("Cancelled"));
-        return;
-      }
+    const result = await confirm(
+      "Reset sandbox training status? You will need to complete training again.",
+      options,
+    );
+    if (result !== "confirmed") {
+      console.log(chalk.gray(result === "declined" ? "Skipped" : "Cancelled"));
+      return;
     }
 
     const spinner = ora("Resetting sandbox status...").start();
@@ -415,8 +501,8 @@ sandboxCommand
       await resetSandbox();
 
       // Clear local config
-      setConfig("sandboxCompleted", false);
-      setConfig("sandboxDatasetId", undefined);
+      deleteConfig("sandboxCompleted");
+      deleteConfig("sandboxDatasetId");
 
       spinner.succeed("Sandbox status reset");
       console.log();

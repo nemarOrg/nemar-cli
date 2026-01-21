@@ -12,6 +12,9 @@ This document contains workflows that have been **tested and validated** through
 3. [GitHub Actions S3 Copy on PR Merge](#3-github-actions-s3-copy-on-pr-merge)
 4. [Full E2E PR Workflow](#4-full-e2e-pr-workflow)
 5. [Git-Annex in GitHub Actions](#5-git-annex-in-github-actions)
+6. [IAM Eventual Consistency Fix](#6-iam-eventual-consistency-fix)
+7. [GitHub Invitation Auto-Accept](#7-github-invitation-auto-accept)
+8. [Commit Authorship for NEMAR Users](#8-commit-authorship-for-nemar-users)
 
 ---
 
@@ -812,6 +815,178 @@ This ensures git-annex location tracking stays accurate across the entire workfl
 
 ---
 
+## 6. IAM Eventual Consistency Fix
+
+**Validated:** 2026-01-20
+**Issue:** S3 uploads failing with 403 AccessDenied immediately after IAM policy updates
+**Purpose:** Handle AWS IAM eventual consistency during dataset creation and upload.
+
+### Problem
+
+When a new dataset is created, the backend updates the user's IAM policy to grant access to the new S3 prefix. However, AWS IAM is eventually consistent, meaning policy changes can take several seconds to propagate globally. This causes 403 AccessDenied errors when the CLI immediately tries to upload files.
+
+### Key Insight
+
+**Admin users don't hit this issue** because they have `AllowFullBucketAccess` (access to `nemar/*`). Regular users have prefix-scoped policies that are updated per-dataset, triggering the eventual consistency delay.
+
+### Solution Implemented
+
+1. **Initial wait after dataset creation:** 10 seconds (in `sandbox.ts` and `dataset.ts`)
+2. **Retry logic for 403 errors:** 4 retries with progressive delays (10s, 15s, 20s, 25s)
+3. **Total max wait:** ~70 seconds for IAM propagation
+
+### Validated Code
+
+In `src/lib/datalad.ts`, the `uploadFileWithPresignedUrl` function:
+```typescript
+// Only retry on 403 AccessDenied (likely IAM propagation delay)
+const isIamError = response.status === 403 && errorText.includes("AccessDenied");
+if (!isIamError || attempt === maxRetries) {
+  return { success: false, error: lastError };
+}
+
+// Wait before retry: 10s, 15s, 20s, 25s
+const delayMs = initialDelayMs + attempt * 5000;
+await new Promise((resolve) => setTimeout(resolve, delayMs));
+```
+
+### Test Results
+
+| Test | Result | Notes |
+|------|--------|-------|
+| Admin upload (yahya) | ✓ Pass | No retries needed (full bucket access) |
+| Regular user upload (cool-vibers) | ✓ Pass | With retry logic, succeeds after 1-2 retries |
+| Sandbox training on MBA | ✓ Pass | Full workflow completes successfully |
+
+### Architecture Implications
+
+- **No backend changes needed:** Client-side retry handles the delay
+- **Transparent to users:** Spinner shows progress, no manual intervention
+- **Graceful degradation:** If IAM truly fails, error message shows after max retries
+
+---
+
+## 7. GitHub Invitation Auto-Accept
+
+**Validated:** 2026-01-20
+**Issue:** Users added as collaborators must manually accept GitHub invitation before pushing
+**Purpose:** Automate invitation acceptance via CLI during upload workflow.
+
+### Problem
+
+When a dataset is created, the backend creates a private GitHub repo and invites the user as a collaborator. The user must accept the invitation before they can push. This adds friction and a potential failure point.
+
+### Key Insight
+
+**GitHub invitations can be accepted via API** using the GitHub CLI:
+```bash
+# List pending invitations (as the invited user)
+gh api /user/repository_invitations
+
+# Accept specific invitation by ID
+gh api --method PATCH /user/repository_invitations/{invitation_id}
+```
+
+### Validated Commands
+
+```bash
+# List all pending invitations
+gh api /user/repository_invitations --jq '.[] | {id, repo: .repository.full_name}'
+
+# Accept a specific invitation
+gh api --method PATCH /user/repository_invitations/123456789
+
+# Combined: find and accept invitation for a specific repo
+INVITATION_ID=$(gh api /user/repository_invitations --jq '.[] | select(.repository.full_name == "nemarDatasets/xx000018") | .id')
+gh api --method PATCH /user/repository_invitations/$INVITATION_ID
+```
+
+### Test Results
+
+| Test | Result | Notes |
+|------|--------|-------|
+| List invitations via API | ✓ Pass | Returns JSON array of pending invitations |
+| Accept invitation via API | ✓ Pass | Returns 204 No Content on success |
+| Push after acceptance | ✓ Pass | User can push to repo |
+
+### Gotchas and Warnings
+
+1. **gh CLI must be authenticated as the invited user**
+   - The invitation is for the NEMAR user's GitHub account
+   - If `gh` is authenticated as a different account, it won't see the invitation
+
+2. **macOS keyring not accessible via SSH**
+   - `gh auth status` may fail via SSH due to keyring access
+   - Test invitation acceptance locally or use token-based auth
+
+3. **Invitation acceptance provides natural IAM delay**
+   - The time user takes to accept gives IAM policies time to propagate
+   - Useful side effect for the eventual consistency issue
+
+### Architecture Implications
+
+- **CLI should auto-accept invitations:** After dataset creation, CLI should find and accept the invitation
+- **Requires user's GitHub token:** The user must have authenticated `gh` CLI or provide token
+- **Fallback:** If auto-accept fails, prompt user to accept manually via GitHub UI
+
+### Implementation Notes (Issue #41)
+
+To implement in CLI:
+1. After dataset creation, list invitations for the current user
+2. Find invitation matching the newly created repo
+3. Accept via PATCH API call
+4. Proceed with git push
+
+---
+
+## 8. Commit Authorship for NEMAR Users
+
+**Validated:** 2026-01-20
+**Issue:** Commits authored as admin instead of the uploading user
+**Purpose:** Ensure commits are attributed to the correct NEMAR user.
+
+### Problem
+
+Git commits use the identity from local `git config user.name` and `user.email`. If a machine is configured with the admin's identity, all commits will be attributed to the admin regardless of who is uploading the dataset.
+
+### Key Insight
+
+**Git commit authorship is independent of push authentication.** The `--author` flag can override the configured identity:
+```bash
+git commit --author="username <registered-email>" -m "message"
+```
+
+### Solution
+
+Use the NEMAR user's registered email in the commit author:
+```bash
+# In datalad.ts saveDataset function:
+git commit --author="${username} <${email}>" -m "Initial dataset upload"
+```
+
+### Test Results
+
+| Test | Result | Notes |
+|------|--------|-------|
+| Commit with --author flag | ✓ Works | Author overrides git config |
+| Push with different gh auth | ✓ Works | Push uses gh CLI auth, commit uses --author |
+| GitHub shows correct author | ✓ Works | Commit attributed to specified email |
+
+### Architecture Implications
+
+- **CLI needs user email:** Must fetch from backend or config during upload
+- **Backend should return email:** Include user's registered email in API responses
+- **Consistent attribution:** All dataset commits should use NEMAR user identity
+
+### Implementation Notes (Issue #41)
+
+1. Fetch user's registered email from backend (or cache in local config)
+2. Pass to `saveDataset()` function
+3. Use `--author` flag in git commit commands
+4. Consider also setting `GIT_AUTHOR_NAME` and `GIT_AUTHOR_EMAIL` environment variables
+
+---
+
 ## Template for New Validated Workflows
 
 ```markdown
@@ -842,4 +1017,4 @@ This ensures git-annex location tracking stays accurate across the entire workfl
 
 ---
 
-*Last updated: 2026-01-14 (Prototypes 1, 2, 3, 4 & 5 validated)*
+*Last updated: 2026-01-20 (Added workflows 6, 7, 8 from S3 upload debugging)*

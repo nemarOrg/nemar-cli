@@ -210,7 +210,7 @@ describe("CLI Auth Commands", () => {
         "login",
         "-k",
         TEST_CONFIG.adminApiKey,
-        "-f", // Force login even if already authenticated
+        "-y", // Skip confirmation even if already authenticated
       ], ctx);
 
       expect(exitCode).toBe(0);
@@ -226,7 +226,7 @@ describe("CLI Auth Commands", () => {
         "login",
         "-k",
         "invalid_key_that_is_definitely_wrong_12345",
-        "-f",
+        "-y",
       ], ctx);
 
       expect(stdout).toContain("Check that your API key is correct");
@@ -237,7 +237,7 @@ describe("CLI Auth Commands", () => {
     test("logout when not authenticated shows message", async () => {
       const ctx = createTestContext();
 
-      const { stdout, exitCode } = await runCli(["auth", "logout", "-f"], ctx);
+      const { stdout, exitCode } = await runCli(["auth", "logout", "-y"], ctx);
 
       expect(exitCode).toBe(0);
       expect(stdout).toContain("Not currently authenticated");
@@ -251,7 +251,7 @@ describe("CLI Auth Commands", () => {
         username: "test-user",
       });
 
-      const { stdout, exitCode } = await runCli(["auth", "logout", "-f"], ctx);
+      const { stdout, exitCode } = await runCli(["auth", "logout", "-y"], ctx);
 
       expect(exitCode).toBe(0);
       expect(stdout).toContain("Logged out successfully");

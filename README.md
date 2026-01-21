@@ -10,7 +10,13 @@ Command-line interface for [NEMAR](https://nemar.org) (Neuroelectromagnetic Data
 ## Features
 
 - **Dataset Management**: Upload, download, validate, and version BIDS datasets
-- **PR-Based Versioning**: All changes require pull requests (main branch protected)
+- **Resume Uploads**: Failed uploads can be resumed; CLI stores state in `.nemar/config.json`
+- **Smart Authentication**: Verifies GitHub CLI authentication matches NEMAR user
+- **Auto-Accept Invitations**: Automatically accepts GitHub collaboration invitations
+- **IAM Retry Logic**: Handles AWS IAM eventual consistency with automatic retries
+- **Commit Authorship**: Commits attributed to your NEMAR user identity
+- **Private First**: New datasets are private; branch protection applied only on DOI creation
+- **PR-Based Updates**: After DOI, all changes require pull requests
 - **Collaborative**: Any NEMAR user can contribute to any dataset
 - **BIDS Validation**: Automatic validation before upload and on PRs
 - **DOI Integration**: Zenodo DOI creation for dataset versioning
@@ -37,17 +43,24 @@ For dataset operations:
 
 - [DataLad](https://www.datalad.org/) and git-annex
 - [Deno](https://deno.land/) (for BIDS validation)
-- GitHub account (for PR collaboration)
+- [GitHub CLI](https://cli.github.com/) (`gh`) - authenticated as your NEMAR user
+- SSH key registered with GitHub
 
 ```bash
 # macOS
-brew install datalad git-annex deno
+brew install datalad git-annex deno gh
 
 # Ubuntu/Debian
 sudo apt-get install git-annex
 pip install datalad
 curl -fsSL https://deno.land/install.sh | sh
+# Install gh: https://github.com/cli/cli/blob/trunk/docs/install_linux.md
+
+# Authenticate GitHub CLI (required for upload)
+gh auth login
 ```
+
+**Important:** The GitHub account authenticated with `gh` must match your NEMAR username. The CLI verifies this before upload.
 
 ## Quick Start
 
@@ -131,15 +144,40 @@ sequenceDiagram
 
     U->>CLI: nemar dataset upload /path
     CLI->>CLI: Validate BIDS locally
+    CLI->>GH: Verify gh CLI authentication
     CLI->>API: POST /datasets/create
     API->>API: Assign dataset ID (nm000XXX)
+    API->>API: Create IAM credentials
     API->>GH: Create repo (Admin PAT)
     API->>GH: Add user as collaborator
-    API->>GH: Set branch protection
     API-->>CLI: Dataset ID + presigned URLs
-    CLI->>S3: Upload data files
+    CLI->>GH: Auto-accept invitation (gh API)
+    CLI->>CLI: Wait for IAM propagation
+    CLI->>S3: Upload data files (with retry)
+    CLI->>GH: Commit with user identity
     CLI->>GH: Push via DataLad
     CLI-->>U: Success! URLs provided
+```
+
+**Note:** Branch protection is NOT applied during initial upload. Private datasets allow direct pushes to main. Protection is applied when creating a DOI (permanent record).
+
+### Resume Failed Uploads
+
+If an upload fails (network issues, S3 errors), you can resume:
+
+```bash
+# Just run upload again - CLI detects existing dataset
+nemar dataset upload /path/to/dataset
+```
+
+The CLI stores dataset metadata in `.nemar/config.json` within your dataset directory. On resume:
+1. Detects existing dataset ID from local config
+2. Requests fresh presigned URLs from backend
+3. Re-uploads files (git-annex handles duplicates)
+
+To start fresh (new dataset ID), remove the config:
+```bash
+rm -rf /path/to/dataset/.nemar
 ```
 
 ### Pull Request Workflow (Contributing to Dataset)
@@ -280,11 +318,13 @@ nemar admin doi create <dataset-id>        # Create concept DOI
 
 ### Key Principles
 
-1. **PR-Mandatory**: Main branch is protected; all changes require PRs
-2. **Collaborative**: Any NEMAR user can create PRs on any dataset
-3. **Owner Approval**: Only dataset owner (or admin) can merge PRs
-4. **No Deletion**: Users cannot delete repositories or S3 data
-5. **Audit Trail**: All changes tracked via PR history
+1. **Private First**: New datasets are private; owners can push directly to main
+2. **Protection on DOI**: Branch protection applied when creating a DOI (permanent record)
+3. **PR-Based Updates**: After DOI creation, all changes require pull requests
+4. **Collaborative**: Any NEMAR user can create PRs on any dataset
+5. **Owner Approval**: Only dataset owner (or admin) can merge PRs
+6. **No Deletion**: Users cannot delete repositories or S3 data
+7. **Audit Trail**: All changes tracked via PR history
 
 ## Storage Architecture
 
@@ -316,6 +356,76 @@ NEMAR_API_KEY          # API key (alternative to login)
 NEMAR_API_URL          # Custom API endpoint (default: https://api.nemar.org)
 NEMAR_NO_COLOR         # Disable colored output
 ```
+
+## Troubleshooting
+
+### Upload Issues
+
+**"GitHub CLI not authenticated" or "gh CLI username mismatch"**
+```bash
+# Login to GitHub CLI with your NEMAR account
+gh auth login
+# Verify the authenticated username matches your NEMAR username
+gh auth status
+```
+The CLI verifies `gh` is authenticated as your NEMAR user to prevent permission issues.
+
+**"S3 upload failed" or "AccessDenied (403)"**
+- AWS IAM policy changes take 10-30 seconds to propagate globally
+- The CLI has built-in retry logic (4 retries with progressive delays)
+- If retries fail, wait 30 seconds and run upload again
+- Admin users don't hit this issue (full bucket access)
+
+**"Failed to accept GitHub invitation"**
+- The CLI auto-accepts repo invitations, but `gh` must be authenticated as the invited user
+- Manually accept at: https://github.com/nemarDatasets/[dataset-id]/invitations
+- Then re-run the upload command
+
+**"Failed to push to GitHub"**
+- Check SSH configuration for multiple GitHub accounts
+- If you have multiple GitHub accounts, configure SSH host aliases:
+  ```bash
+  # ~/.ssh/config
+  Host github-nemar
+    HostName github.com
+    User git
+    IdentityFile ~/.ssh/id_nemar
+  ```
+- See `nemar auth status` for SSH setup instructions
+
+**"Dataset already exists" / Resume Upload**
+- The CLI stores dataset metadata in `.nemar/config.json`
+- To **resume**: just run `nemar dataset upload` again
+- To **start fresh** with new dataset ID: `rm -rf /path/to/dataset/.nemar`
+
+**Upload completes but commits show wrong author**
+- Commits use your NEMAR user identity (username and registered email)
+- Ensure your NEMAR account has correct email registered
+- Check with `nemar auth status`
+
+### Authentication Issues
+
+**"API key invalid"**
+```bash
+nemar auth logout
+nemar auth login
+```
+
+**"Account pending approval"**
+- Admin must approve your account after signup
+- Contact your NEMAR administrator
+
+### Branch Protection
+
+**"Cannot push directly to main"**
+- If your dataset has a DOI, branch protection is enabled
+- All changes require pull requests after DOI creation
+- Private datasets without DOI allow direct pushes
+
+**"Branch protection not applied after upload"**
+- This is expected for new private datasets
+- Protection is applied when admin creates a DOI (`nemar admin doi create`)
+- Allows owners to freely modify their private workspace
 
 ## Development
 

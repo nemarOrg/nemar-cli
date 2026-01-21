@@ -372,10 +372,13 @@ export async function isDataladDataset(path: string): Promise<boolean> {
 
 /**
  * Initialize a DataLad dataset
+ *
+ * If author info is provided, sets GIT_AUTHOR_NAME and GIT_AUTHOR_EMAIL
+ * to ensure the initial commit is attributed to the correct NEMAR user.
  */
 export async function createDataladDataset(
   path: string,
-  options: { force?: boolean } = {},
+  options: { force?: boolean; author?: { name: string; email: string } } = {},
 ): Promise<{ success: boolean; error?: string }> {
   // Check if already a dataset
   if (!options.force && (await isDataladDataset(path))) {
@@ -383,7 +386,18 @@ export async function createDataladDataset(
   }
 
   try {
-    const { stderr, exitCode } = await runCommand(["datalad", "create", "--force", path]);
+    // Build environment with optional author override
+    const env: Record<string, string> = {};
+    if (options.author) {
+      env.GIT_AUTHOR_NAME = options.author.name;
+      env.GIT_AUTHOR_EMAIL = options.author.email;
+      env.GIT_COMMITTER_NAME = options.author.name;
+      env.GIT_COMMITTER_EMAIL = options.author.email;
+    }
+
+    const { stderr, exitCode } = await runCommand(["datalad", "create", "--force", path], {
+      ...(Object.keys(env).length > 0 ? { env } : {}),
+    });
 
     if (exitCode !== 0) {
       return { success: false, error: stderr.trim() || "Failed to create DataLad dataset" };
@@ -392,7 +406,10 @@ export async function createDataladDataset(
     // Explicitly initialize git-annex (required when dataset is created in existing directory)
     const { stderr: initStderr, exitCode: initExitCode } = await runCommand(
       ["git", "annex", "init"],
-      { cwd: path },
+      {
+        cwd: path,
+        ...(Object.keys(env).length > 0 ? { env } : {}),
+      },
     );
 
     if (initExitCode !== 0) {
@@ -569,6 +586,8 @@ export async function checkNemarGitHubSshConfig(
 
     return { configured: true, sshHost };
   } catch (e) {
+    const errorMsg = e instanceof Error ? e.message : String(e);
+    console.warn(`Could not read SSH config at ${sshConfigPath}:`, errorMsg);
     return {
       configured: false,
       sshHost,
@@ -672,6 +691,198 @@ async function getGitHubToken(): Promise<{ token: string | null; error?: string 
 
     return { token: null, error: `gh CLI error: ${errorMsg}` };
   }
+}
+
+/**
+ * Verify that the gh CLI is authenticated as the expected GitHub user.
+ * This is important because GitHub operations (accepting invitations, pushing)
+ * must be done as the correct user.
+ *
+ * @param expectedUsername - The GitHub username the user should be authenticated as
+ * @returns Verification result with the actual authenticated username if available
+ */
+export async function verifyGitHubAuth(expectedUsername?: string): Promise<{
+  authenticated: boolean;
+  username?: string;
+  matches?: boolean;
+  error?: string;
+}> {
+  try {
+    // Check if gh CLI is authenticated and get the current user
+    const { stdout, exitCode, stderr } = await runCommand(["gh", "api", "user", "--jq", ".login"]);
+
+    if (exitCode !== 0) {
+      // Check for specific error cases
+      if (stderr.includes("not logged in") || stderr.includes("auth login")) {
+        return {
+          authenticated: false,
+          error: "gh CLI not authenticated. Run 'gh auth login' to authenticate.",
+        };
+      }
+      return {
+        authenticated: false,
+        error: `gh CLI error: ${stderr.trim() || "unknown error"}`,
+      };
+    }
+
+    const actualUsername = stdout.trim();
+    if (!actualUsername) {
+      return {
+        authenticated: false,
+        error: "gh CLI returned empty username",
+      };
+    }
+
+    // If expected username provided, check if it matches
+    if (expectedUsername) {
+      const matches = actualUsername.toLowerCase() === expectedUsername.toLowerCase();
+      return {
+        authenticated: true,
+        username: actualUsername,
+        matches,
+        error: matches
+          ? undefined
+          : `gh CLI authenticated as '${actualUsername}', expected '${expectedUsername}'`,
+      };
+    }
+
+    return {
+      authenticated: true,
+      username: actualUsername,
+    };
+  } catch (error) {
+    const errorMsg = error instanceof Error ? error.message : String(error);
+
+    if (errorMsg.includes("ENOENT") || errorMsg.includes("not found")) {
+      return {
+        authenticated: false,
+        error: "gh CLI not installed. Install from https://cli.github.com/",
+      };
+    }
+
+    return {
+      authenticated: false,
+      error: `Failed to verify gh CLI: ${errorMsg}`,
+    };
+  }
+}
+
+/**
+ * Accept a pending GitHub repository invitation.
+ *
+ * After a dataset is created, the backend invites the user as a collaborator.
+ * This function finds and accepts that invitation so the user can push without
+ * manually accepting in the browser.
+ *
+ * @param repoFullName - The full repository name (e.g., "nemarDatasets/nm000123")
+ * @returns Result indicating whether invitation was accepted
+ */
+export async function acceptGitHubInvitation(repoFullName: string): Promise<{
+  accepted: boolean;
+  error?: string;
+  alreadyCollaborator?: boolean;
+}> {
+  // Validate repository name format to prevent injection
+  if (!/^[a-zA-Z0-9_.-]+\/[a-zA-Z0-9_.-]+$/.test(repoFullName)) {
+    return {
+      accepted: false,
+      error: `Invalid repository format: ${repoFullName}`,
+    };
+  }
+
+  // List pending invitations for the current user
+  // Note: We fetch all invitations and filter in JS to avoid jq injection
+  const { stdout, exitCode, stderr } = await runCommand([
+    "gh",
+    "api",
+    "/user/repository_invitations",
+  ]);
+
+  if (exitCode !== 0) {
+    // Check for specific error cases
+    if (stderr.includes("not logged in") || stderr.includes("auth login")) {
+      return {
+        accepted: false,
+        error: "gh CLI not authenticated. Run 'gh auth login' to authenticate.",
+      };
+    }
+    if (stderr.includes("API rate limit") || stderr.includes("403")) {
+      return {
+        accepted: false,
+        error: "GitHub API rate limit exceeded. Please try again in a few minutes.",
+      };
+    }
+    if (stderr.includes("ENOENT") || stderr.includes("not found")) {
+      return {
+        accepted: false,
+        error: "gh CLI not installed. Install from https://cli.github.com/",
+      };
+    }
+    return {
+      accepted: false,
+      error: `Failed to list invitations: ${stderr.trim() || "unknown error"}`,
+    };
+  }
+
+  // Parse invitations and find the one for our repo
+  let invitationId: number | null = null;
+  try {
+    const invitations = JSON.parse(stdout || "[]") as Array<{
+      id: number;
+      repository: { full_name: string };
+    }>;
+    const invitation = invitations.find((inv) => inv.repository.full_name === repoFullName);
+    invitationId = invitation?.id ?? null;
+  } catch (error) {
+    const errorMsg = error instanceof Error ? error.message : String(error);
+    console.error("Failed to parse GitHub invitations response:", errorMsg);
+    console.error("  Raw response (first 500 chars):", (stdout || "").slice(0, 500));
+    return {
+      accepted: false,
+      error: `Failed to parse GitHub API response: ${errorMsg}`,
+    };
+  }
+
+  // No invitation found - user might already be a collaborator
+  if (!invitationId) {
+    // Check if user already has access to the repo
+    const { exitCode: checkExitCode } = await runCommand([
+      "gh",
+      "api",
+      `/repos/${repoFullName}`,
+      "--silent",
+    ]);
+
+    if (checkExitCode === 0) {
+      return {
+        accepted: true,
+        alreadyCollaborator: true,
+      };
+    }
+
+    return {
+      accepted: false,
+      error: `No pending invitation found for ${repoFullName}. You may need to accept it manually via GitHub.`,
+    };
+  }
+
+  // Accept the invitation
+  const { exitCode: acceptExitCode, stderr: acceptStderr } = await runCommand([
+    "gh",
+    "api",
+    "--method",
+    "PATCH",
+    `/user/repository_invitations/${invitationId}`,
+  ]);
+
+  if (acceptExitCode !== 0) {
+    return {
+      accepted: false,
+      error: `Failed to accept invitation: ${acceptStderr.trim() || "unknown error"}`,
+    };
+  }
+
+  return { accepted: true };
 }
 
 export async function configureGitHubRemote(
@@ -785,14 +996,28 @@ Choose option 2 for quick setup, or option 1 if you have multiple GitHub account
 
 /**
  * Save all changes to the DataLad dataset
+ *
+ * If author info is provided, sets GIT_AUTHOR_NAME and GIT_AUTHOR_EMAIL
+ * to ensure commits are attributed to the correct NEMAR user.
  */
 export async function saveDataset(
   path: string,
   message: string,
+  author?: { name: string; email: string },
 ): Promise<{ success: boolean; error?: string }> {
   try {
+    // Build environment with optional author override
+    const env: Record<string, string> = {};
+    if (author) {
+      env.GIT_AUTHOR_NAME = author.name;
+      env.GIT_AUTHOR_EMAIL = author.email;
+      env.GIT_COMMITTER_NAME = author.name;
+      env.GIT_COMMITTER_EMAIL = author.email;
+    }
+
     const { stderr, exitCode } = await runCommand(["datalad", "save", "-m", message], {
       cwd: path,
+      ...(Object.keys(env).length > 0 ? { env } : {}),
     });
 
     if (exitCode !== 0) {
@@ -856,12 +1081,42 @@ export async function pushToS3(
 export async function pushToGitHub(
   path: string,
   remoteName = "origin",
-  branch = "main",
+  branch?: string,
 ): Promise<{ success: boolean; error?: string }> {
   try {
-    // Push main branch
+    // Detect current branch if not specified
+    let branchToPush = branch;
+    if (!branchToPush) {
+      const currentBranch = await getCurrentBranch(path);
+      if (!currentBranch || currentBranch === "HEAD") {
+        // Check if there are any commits
+        const { exitCode: logExitCode } = await runCommand(["git", "log", "-1", "--oneline"], {
+          cwd: path,
+        });
+
+        if (logExitCode !== 0) {
+          return {
+            success: false,
+            error:
+              "No commits found. The repository may not have been initialized correctly, " +
+              "or no changes were saved before pushing.",
+          };
+        }
+
+        // In detached HEAD state with commits, we can push using HEAD:main
+        if (currentBranch === "HEAD") {
+          branchToPush = "HEAD:main";
+        } else {
+          return { success: false, error: "Could not detect current branch" };
+        }
+      } else {
+        branchToPush = currentBranch;
+      }
+    }
+
+    // Push current branch
     const { stderr: mainStderr, exitCode: mainExitCode } = await runCommand(
-      ["git", "push", "-u", remoteName, branch],
+      ["git", "push", "-u", remoteName, branchToPush],
       { cwd: path },
     );
 
@@ -954,32 +1209,56 @@ export interface PresignedUploadProgress {
 
 /**
  * Upload a single file to S3 using a presigned URL
+ *
+ * Includes retry logic to handle IAM eventual consistency delays.
+ * AWS IAM policy changes can take time to propagate globally, so 403 errors
+ * immediately after policy updates are retried with increasing delays.
  */
 export async function uploadFileWithPresignedUrl(
   filePath: string,
   presignedUrl: string,
   onProgress?: (uploaded: number, total: number) => void,
+  options?: { maxRetries?: number; initialDelayMs?: number },
 ): Promise<{ success: boolean; error?: string }> {
+  const maxRetries = options?.maxRetries ?? 4;
+  const initialDelayMs = options?.initialDelayMs ?? 10000; // 10 seconds
+
   try {
     const fileContent = await Bun.file(filePath).arrayBuffer();
     const fileSize = fileContent.byteLength;
 
-    // Use fetch to upload - presigned URLs use simple PUT
-    const response = await fetch(presignedUrl, {
-      method: "PUT",
-      body: fileContent,
-      headers: {
-        "Content-Length": fileSize.toString(),
-      },
-    });
+    let lastError = "";
 
-    if (!response.ok) {
+    for (let attempt = 0; attempt <= maxRetries; attempt++) {
+      // Use fetch to upload - presigned URLs use simple PUT
+      const response = await fetch(presignedUrl, {
+        method: "PUT",
+        body: fileContent,
+        headers: {
+          "Content-Length": fileSize.toString(),
+        },
+      });
+
+      if (response.ok) {
+        onProgress?.(fileSize, fileSize);
+        return { success: true };
+      }
+
       const errorText = await response.text();
-      return { success: false, error: `Upload failed: ${response.status} ${errorText}` };
+      lastError = `Upload failed: ${response.status} ${errorText}`;
+
+      // Only retry on 403 AccessDenied (likely IAM propagation delay)
+      const isIamError = response.status === 403 && errorText.includes("AccessDenied");
+      if (!isIamError || attempt === maxRetries) {
+        return { success: false, error: lastError };
+      }
+
+      // Wait before retry: 10s, 15s, 20s, 25s (quadratic-ish growth)
+      const delayMs = initialDelayMs + attempt * 5000;
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
     }
 
-    onProgress?.(fileSize, fileSize);
-    return { success: true };
+    return { success: false, error: lastError };
   } catch (error) {
     return { success: false, error: (error as Error).message };
   }

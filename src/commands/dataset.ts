@@ -24,12 +24,12 @@ import {
   type Dataset,
   type DatasetsListResponse,
   createDataset,
-  finalizeDataset,
   getDataset,
   inviteCollaborator,
   listCollaborators,
   listDatasets,
   requestDatasetAccess,
+  requestUploadUrls,
 } from "../lib/api.js";
 import {
   type BidsValidationResult,
@@ -39,7 +39,9 @@ import {
   validateBidsDataset,
 } from "../lib/bids-validator.js";
 import { getConfig, isAuthenticated, isSandboxCompleted } from "../lib/config.js";
+import { type ConfirmOptions, YES_DESCRIPTION, YES_OPTION, confirm } from "../lib/confirm.js";
 import {
+  acceptGitHubInvitation,
   checkDownloadPrerequisites,
   checkNemarGitHubSshConfig,
   checkPrerequisites,
@@ -57,7 +59,14 @@ import {
   registerUrlsWithGitAnnex,
   saveDataset,
   uploadFilesWithPresignedUrls,
+  verifyGitHubAuth,
 } from "../lib/datalad.js";
+import {
+  type LocalDatasetConfig,
+  readLocalConfig,
+  updateLastUpload,
+  writeLocalConfig,
+} from "../lib/dataset-config.js";
 
 export const datasetCommand = new Command("dataset").description("Dataset management").addHelpText(
   "after",
@@ -219,7 +228,8 @@ datasetCommand
   .option("--skip-validation", "Skip BIDS validation (not recommended)")
   .option("--dry-run", "Show what would be uploaded without doing it")
   .option("-j, --jobs <number>", "Parallel upload streams (default: 8)", "8")
-  .option("-y, --yes", "Skip confirmation prompt")
+  .option(YES_OPTION, YES_DESCRIPTION)
+  .option("--no", "Skip confirmation and decline")
   .addHelpText(
     "after",
     `
@@ -296,6 +306,41 @@ Examples:
     }
     console.log();
 
+    // Step 2b: Verify gh CLI authentication
+    spinner = ora("Verifying GitHub CLI authentication...").start();
+    const ghAuth = await verifyGitHubAuth(config.githubUsername);
+
+    if (!ghAuth.authenticated) {
+      spinner.fail("GitHub CLI not authenticated");
+      console.log(chalk.red(`  ${ghAuth.error}`));
+      console.log();
+      console.log("GitHub CLI is required for dataset uploads. Install and authenticate:");
+      console.log(chalk.cyan("  brew install gh       # or visit https://cli.github.com/"));
+      console.log(chalk.cyan("  gh auth login"));
+      process.exit(1);
+    }
+
+    if (config.githubUsername && !ghAuth.matches) {
+      spinner.warn("GitHub CLI user mismatch");
+      console.log(chalk.yellow(`  ${ghAuth.error}`));
+      console.log();
+      console.log(
+        "Your gh CLI is authenticated as a different GitHub account than your NEMAR account.",
+      );
+      console.log("This may cause issues with repository access. To fix:");
+      console.log(chalk.cyan(`  gh auth login    # Login as ${config.githubUsername}`));
+      console.log();
+      console.log(
+        chalk.yellow(
+          "WARNING: If upload fails with permission errors, this mismatch is the likely cause.",
+        ),
+      );
+      console.log();
+      // Continue with warning; don't block (user may have valid reason)
+    } else {
+      spinner.succeed(`GitHub CLI authenticated as ${ghAuth.username}`);
+    }
+
     // Step 3: BIDS Validation (unless skipped)
     if (!options.skipValidation) {
       spinner = ora("Validating BIDS dataset...").start();
@@ -364,8 +409,17 @@ Examples:
       `Found ${manifest.files.length} files (${manifest.dataFiles} data, ${manifest.metadataFiles} metadata)`,
     );
 
+    // Check for existing local config (resume scenario)
+    const existingConfig = readLocalConfig(absolutePath);
+
     console.log();
-    console.log(chalk.bold("Upload Plan:"));
+    if (existingConfig) {
+      console.log(chalk.bold.yellow("Resume Upload:"));
+      console.log(`  Dataset ID: ${chalk.cyan(existingConfig.dataset_id)}`);
+      console.log(`  Last attempt: ${existingConfig.last_upload_at || existingConfig.created_at}`);
+    } else {
+      console.log(chalk.bold("Upload Plan:"));
+    }
     console.log(`  Name: ${datasetName}`);
     console.log(`  Path: ${absolutePath}`);
     console.log(`  Files: ${manifest.files.length}`);
@@ -382,26 +436,17 @@ Examples:
     }
 
     // Step 5: Confirm with user
-    if (!options.yes) {
-      const { confirmed } = await inquirer.prompt([
-        {
-          type: "confirm",
-          name: "confirmed",
-          message: "Proceed with upload?",
-          default: true,
-        },
-      ]);
-
-      if (!confirmed) {
-        console.log("Upload cancelled.");
-        return;
-      }
+    const confirmResult = await confirm(
+      "Proceed with upload?",
+      { yes: options.yes, no: options.no },
+      true,
+    );
+    if (confirmResult !== "confirmed") {
+      console.log(confirmResult === "declined" ? "Upload skipped." : "Upload cancelled.");
+      return;
     }
 
     console.log();
-
-    // Step 6: Create dataset in backend with file manifest
-    spinner = ora("Creating dataset in NEMAR...").start();
 
     // Only request presigned URLs for data files
     const dataFiles = manifest.files.filter((f) => f.type === "data");
@@ -419,39 +464,141 @@ Examples:
       };
     };
 
-    try {
-      const response = await createDataset({
-        name: datasetName,
-        description: options.description,
-        files: dataFiles.map((f) => ({ path: f.path, size: f.size, type: f.type })),
-      });
+    // Check if this is a resume (existing local config was read above)
+    const isResume = existingConfig !== null;
 
-      datasetInfo = {
-        dataset_id: response.dataset.dataset_id,
-        ssh_url: response.dataset.ssh_url,
-        s3_prefix: response.dataset.s3_prefix,
-        github_url: response.dataset.github_url,
-        upload_urls: response.upload_urls || {},
-        s3_config: response.s3_config,
-      };
+    if (isResume) {
+      // Step 6: Resume existing dataset upload
+      spinner = ora(`Resuming upload for ${existingConfig.dataset_id}...`).start();
 
-      spinner.succeed(`Dataset created: ${datasetInfo.dataset_id}`);
-    } catch (error) {
-      spinner.fail("Failed to create dataset");
-      if (error instanceof ApiError) {
-        console.log(chalk.red(`  ${error.message}`));
-      } else {
-        console.log(chalk.red(`  ${(error as Error).message}`));
+      try {
+        // Verify dataset still exists on backend (throws ApiError if not found)
+        await getDataset(existingConfig.dataset_id);
+
+        // Request fresh presigned URLs for data files
+        const uploadResponse = await requestUploadUrls(
+          existingConfig.dataset_id,
+          dataFiles.map((f) => f.path),
+        );
+
+        datasetInfo = {
+          dataset_id: existingConfig.dataset_id,
+          ssh_url: existingConfig.ssh_url,
+          s3_prefix: existingConfig.s3_prefix,
+          github_url: existingConfig.github_url,
+          upload_urls: uploadResponse.upload_urls,
+          s3_config: existingConfig.s3_config,
+        };
+
+        spinner.succeed(`Resuming upload: ${datasetInfo.dataset_id}`);
+      } catch (error) {
+        spinner.fail("Failed to resume upload");
+        if (error instanceof ApiError) {
+          console.log(chalk.red(`  ${error.message}`));
+          if (error.statusCode === 404) {
+            console.log(
+              chalk.yellow("  The dataset may have been deleted. Try uploading as a new dataset."),
+            );
+            console.log(chalk.gray(`  Remove ${absolutePath}/.nemar to start fresh.`));
+          }
+        } else {
+          console.log(chalk.red(`  ${(error as Error).message}`));
+        }
+        process.exit(1);
       }
+    } else {
+      // Step 6: Create new dataset in backend with file manifest
+      spinner = ora("Creating dataset in NEMAR...").start();
+
+      try {
+        const response = await createDataset({
+          name: datasetName,
+          description: options.description,
+          files: dataFiles.map((f) => ({ path: f.path, size: f.size, type: f.type })),
+        });
+
+        datasetInfo = {
+          dataset_id: response.dataset.dataset_id,
+          ssh_url: response.dataset.ssh_url,
+          s3_prefix: response.dataset.s3_prefix,
+          github_url: response.dataset.github_url,
+          upload_urls: response.upload_urls || {},
+          s3_config: response.s3_config,
+        };
+
+        // Save local config for potential resume
+        const localConfig: LocalDatasetConfig = {
+          dataset_id: datasetInfo.dataset_id,
+          github_url: datasetInfo.github_url,
+          ssh_url: datasetInfo.ssh_url,
+          s3_prefix: datasetInfo.s3_prefix,
+          s3_config: datasetInfo.s3_config,
+          created_at: new Date().toISOString(),
+        };
+        writeLocalConfig(absolutePath, localConfig);
+
+        spinner.succeed(`Dataset created: ${datasetInfo.dataset_id}`);
+
+        // Wait for IAM policy propagation (AWS is eventually consistent)
+        // This initial wait helps reduce retry attempts during upload
+        await new Promise((resolve) => setTimeout(resolve, 10000));
+      } catch (error) {
+        spinner.fail("Failed to create dataset");
+        if (error instanceof ApiError) {
+          console.log(chalk.red(`  ${error.message}`));
+        } else {
+          console.log(chalk.red(`  ${(error as Error).message}`));
+        }
+        process.exit(1);
+      }
+    }
+
+    // Step 6b: Accept GitHub invitation
+    spinner = ora("Accepting GitHub repository invitation...").start();
+
+    // Extract repo full name from github_url (e.g., "https://github.com/nemarDatasets/nm000123")
+    // Validate URL format: must be a valid GitHub URL with owner/repo pattern
+    const repoMatch = datasetInfo.github_url?.match(
+      /github\.com\/([a-zA-Z0-9_.-]+\/[a-zA-Z0-9_.-]+)/,
+    );
+    const repoFullName = repoMatch ? repoMatch[1].replace(/\.git$/, "") : null;
+
+    if (!repoFullName) {
+      spinner.fail("Invalid GitHub repository URL from backend");
+      console.log(chalk.red(`  Received: ${datasetInfo.github_url || "(empty)"}`));
+      console.log(chalk.red("  Expected format: https://github.com/owner/repo"));
+      console.log();
+      console.log("This may indicate a backend issue. Please contact support.");
       process.exit(1);
+    }
+
+    const inviteResult = await acceptGitHubInvitation(repoFullName);
+    if (inviteResult.accepted) {
+      if (inviteResult.alreadyCollaborator) {
+        spinner.succeed("Already a collaborator on this repository");
+      } else {
+        spinner.succeed("GitHub invitation accepted");
+      }
+    } else {
+      spinner.warn("Could not auto-accept invitation");
+      console.log(chalk.yellow(`  ${inviteResult.error}`));
+      console.log();
+      console.log("You may need to accept the invitation manually:");
+      console.log(chalk.cyan(`  https://github.com/${repoFullName}/invitations`));
+      console.log();
+      // Continue anyway - user can accept manually
     }
 
     // Step 7: Initialize DataLad dataset
     spinner = ora("Initializing DataLad dataset...").start();
 
+    // Use NEMAR user identity for all commits (including initial dataset creation)
+    const author =
+      config.username && config.email ? { name: config.username, email: config.email } : undefined;
+
     const isExistingDataset = await isDataladDataset(absolutePath);
     if (!isExistingDataset) {
-      const createResult = await createDataladDataset(absolutePath);
+      const createResult = await createDataladDataset(absolutePath, { author });
       if (!createResult.success) {
         spinner.fail("Failed to initialize DataLad dataset");
         console.log(chalk.red(`  ${createResult.error}`));
@@ -552,7 +699,7 @@ Examples:
     // Step 11: Save dataset changes
     spinner = ora("Saving dataset changes...").start();
 
-    const saveResult = await saveDataset(absolutePath, "Initial NEMAR dataset upload");
+    const saveResult = await saveDataset(absolutePath, "Initial NEMAR dataset upload", author);
     if (!saveResult.success) {
       spinner.fail("Failed to save dataset");
       console.log(chalk.red(`  ${saveResult.error}`));
@@ -573,18 +720,13 @@ Examples:
 
     spinner.succeed("Metadata pushed to GitHub");
 
-    // Step 13: Finalize dataset
-    spinner = ora("Finalizing dataset...").start();
+    // Note: Branch protection is NOT applied here for private datasets.
+    // Protection is applied when creating a DOI (admin doi create) or making public.
 
-    try {
-      await finalizeDataset(datasetInfo.dataset_id);
-      spinner.succeed("Dataset finalized");
-    } catch (error) {
-      spinner.warn("Could not finalize dataset (branch protection may need manual setup)");
-      console.log(chalk.gray(`  ${(error as Error).message}`));
-    }
+    // Step 13: Success!
+    // Update last upload timestamp in local config
+    updateLastUpload(absolutePath);
 
-    // Step 14: Success!
     console.log();
     console.log(chalk.green.bold("Upload complete!"));
     console.log();
