@@ -131,6 +131,12 @@ async function sandboxAction(): Promise<void> {
     console.log("This may cause issues with repository access. To fix:");
     console.log(chalk.cyan(`  gh auth login    # Login as ${config.githubUsername}`));
     console.log();
+    console.log(
+      chalk.yellow(
+        "WARNING: If upload fails with permission errors, this mismatch is the likely cause.",
+      ),
+    );
+    console.log();
     // Continue with warning; don't block
   } else {
     ghSpinner.succeed(`GitHub CLI authenticated as ${ghAuth.username}`);
