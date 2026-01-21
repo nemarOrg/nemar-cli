@@ -63,7 +63,6 @@ import {
 } from "../lib/datalad.js";
 import {
   type LocalDatasetConfig,
-  hasLocalConfig,
   readLocalConfig,
   updateLastUpload,
   writeLocalConfig,
@@ -410,13 +409,13 @@ Examples:
     );
 
     // Check for existing local config (resume scenario)
-    const previousConfig = readLocalConfig(absolutePath);
+    const existingConfig = readLocalConfig(absolutePath);
 
     console.log();
-    if (previousConfig) {
+    if (existingConfig) {
       console.log(chalk.bold.yellow("Resume Upload:"));
-      console.log(`  Dataset ID: ${chalk.cyan(previousConfig.dataset_id)}`);
-      console.log(`  Last attempt: ${previousConfig.last_upload_at || previousConfig.created_at}`);
+      console.log(`  Dataset ID: ${chalk.cyan(existingConfig.dataset_id)}`);
+      console.log(`  Last attempt: ${existingConfig.last_upload_at || existingConfig.created_at}`);
     } else {
       console.log(chalk.bold("Upload Plan:"));
     }
@@ -470,8 +469,7 @@ Examples:
       };
     };
 
-    // Check if this is a resume (existing local config)
-    const existingConfig = readLocalConfig(absolutePath);
+    // Check if this is a resume (existing local config was read above)
     const isResume = existingConfig !== null;
 
     if (isResume) {
@@ -479,11 +477,8 @@ Examples:
       spinner = ora(`Resuming upload for ${existingConfig.dataset_id}...`).start();
 
       try {
-        // Verify dataset still exists on backend
-        const dataset = await getDataset(existingConfig.dataset_id);
-        if (!dataset) {
-          throw new Error("Dataset no longer exists on backend");
-        }
+        // Verify dataset still exists on backend (throws ApiError if not found)
+        await getDataset(existingConfig.dataset_id);
 
         // Request fresh presigned URLs for data files
         const uploadResponse = await requestUploadUrls(
@@ -505,7 +500,7 @@ Examples:
         spinner.fail("Failed to resume upload");
         if (error instanceof ApiError) {
           console.log(chalk.red(`  ${error.message}`));
-          if (error.message.includes("not found") || error.message.includes("404")) {
+          if (error.statusCode === 404) {
             console.log(
               chalk.yellow("  The dataset may have been deleted. Try uploading as a new dataset."),
             );

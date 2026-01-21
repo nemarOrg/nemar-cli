@@ -47,7 +47,27 @@ export function hasLocalConfig(datasetPath: string): boolean {
 }
 
 /**
+ * Validate that parsed JSON has required LocalDatasetConfig fields
+ */
+function isValidConfig(config: unknown): config is LocalDatasetConfig {
+  if (!config || typeof config !== "object") return false;
+  const c = config as Record<string, unknown>;
+  return (
+    typeof c.dataset_id === "string" &&
+    c.dataset_id.length > 0 &&
+    typeof c.github_url === "string" &&
+    typeof c.ssh_url === "string" &&
+    typeof c.s3_prefix === "string" &&
+    typeof c.s3_config === "object" &&
+    c.s3_config !== null &&
+    typeof c.created_at === "string"
+  );
+}
+
+/**
  * Read local dataset configuration
+ *
+ * @returns The parsed config, or null if file doesn't exist or is invalid
  */
 export function readLocalConfig(datasetPath: string): LocalDatasetConfig | null {
   const configPath = getConfigPath(datasetPath);
@@ -57,40 +77,61 @@ export function readLocalConfig(datasetPath: string): LocalDatasetConfig | null 
 
   try {
     const content = readFileSync(configPath, "utf-8");
-    return JSON.parse(content) as LocalDatasetConfig;
-  } catch {
+    const parsed = JSON.parse(content);
+
+    if (!isValidConfig(parsed)) {
+      console.error(`Warning: Local config at ${configPath} is invalid or corrupted`);
+      console.error(`  Delete it to start fresh: rm -rf ${getConfigDir(datasetPath)}`);
+      return null;
+    }
+
+    return parsed;
+  } catch (error) {
+    // File exists but can't be read/parsed - log warning
+    const message = error instanceof Error ? error.message : String(error);
+    console.error(`Warning: Could not read local config at ${configPath}`);
+    console.error(`  Error: ${message}`);
     return null;
   }
 }
 
 /**
  * Write local dataset configuration
+ *
+ * Creates the .nemar directory if it doesn't exist.
+ * Logs warning on failure but does not throw.
  */
-export function writeLocalConfig(datasetPath: string, config: LocalDatasetConfig): void {
+export function writeLocalConfig(datasetPath: string, config: LocalDatasetConfig): boolean {
   const configDir = getConfigDir(datasetPath);
-  if (!existsSync(configDir)) {
-    mkdirSync(configDir, { recursive: true });
-  }
-
   const configPath = getConfigPath(datasetPath);
-  writeFileSync(configPath, JSON.stringify(config, null, 2));
+
+  try {
+    if (!existsSync(configDir)) {
+      mkdirSync(configDir, { recursive: true });
+    }
+    writeFileSync(configPath, JSON.stringify(config, null, 2));
+    return true;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.error(`Warning: Could not save local config to ${configPath}`);
+    console.error(`  Error: ${message}`);
+    console.error("  Resume capability will not be available for this dataset.");
+    return false;
+  }
 }
 
 /**
  * Update the last upload timestamp
+ *
+ * Does nothing if no local config exists (logs note).
  */
-export function updateLastUpload(datasetPath: string): void {
+export function updateLastUpload(datasetPath: string): boolean {
   const config = readLocalConfig(datasetPath);
-  if (config) {
-    config.last_upload_at = new Date().toISOString();
-    writeLocalConfig(datasetPath, config);
+  if (!config) {
+    // Config may not exist if write failed earlier - this is expected
+    return false;
   }
-}
 
-/**
- * Get the dataset ID from local config
- */
-export function getLocalDatasetId(datasetPath: string): string | null {
-  const config = readLocalConfig(datasetPath);
-  return config?.dataset_id ?? null;
+  config.last_upload_at = new Date().toISOString();
+  return writeLocalConfig(datasetPath, config);
 }
