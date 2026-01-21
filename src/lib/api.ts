@@ -433,6 +433,7 @@ export async function createDataset(data: CreateDatasetRequest): Promise<CreateD
 
 export interface FinalizeDatasetResponse {
   message: string;
+  warnings?: string[];
   dataset: {
     dataset_id: string;
     status: string;
