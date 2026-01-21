@@ -49,7 +49,7 @@ import {
   getVersionCommit,
   listDatasetVersions,
   pushBranch,
-} from "../lib/datalad.js";
+} from "../lib/git-annex.js";
 
 export const adminCommand = new Command("admin")
   .description("Admin commands (requires admin privileges)")
