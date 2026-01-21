@@ -117,6 +117,14 @@ Commands:
   help [command]                 display help for command
 ```
 
+**Note on Branch Protection:**
+When creating a concept DOI (`admin doi create`), branch protection is automatically applied to the dataset repository. This is because:
+- DOI = permanent record that should not be accidentally modified
+- Before DOI: Private datasets allow direct pushes (owner's workspace)
+- After DOI: All changes require pull requests
+
+This ensures that once a dataset has a DOI, it cannot be accidentally overwritten.
+
 ### admin revert
 
 ```bash
