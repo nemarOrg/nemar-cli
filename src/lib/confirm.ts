@@ -56,16 +56,33 @@ export async function confirm(
   }
 
   // Interactive prompt
-  const { confirmed } = await inquirer.prompt([
-    {
-      type: "confirm",
-      name: "confirmed",
-      message,
-      default: defaultValue,
-    },
-  ]);
+  try {
+    const { confirmed } = await inquirer.prompt([
+      {
+        type: "confirm",
+        name: "confirmed",
+        message,
+        default: defaultValue,
+      },
+    ]);
 
-  return confirmed ? "confirmed" : "cancelled";
+    return confirmed ? "confirmed" : "cancelled";
+  } catch (error) {
+    const errorMsg = error instanceof Error ? error.message : String(error);
+    // Handle non-interactive terminals or user interruption
+    if (
+      errorMsg.includes("closed") ||
+      errorMsg.includes("TTY") ||
+      errorMsg.includes("SIGINT") ||
+      errorMsg.includes("readline")
+    ) {
+      console.error("Interactive prompt unavailable (non-interactive terminal or interrupted)");
+      console.error("  Use --yes or --no flags for non-interactive mode");
+    } else {
+      console.error("Prompt error:", errorMsg);
+    }
+    return "cancelled";
+  }
 }
 
 /**
@@ -107,21 +124,38 @@ export async function confirmWithInput(
   }
 
   // Interactive prompt with validation
-  const { input } = await inquirer.prompt([
-    {
-      type: "input",
-      name: "input",
-      message,
-      validate: (value) => {
-        if (value !== expectedValue) {
-          return `Input does not match. Expected: ${expectedValue}`;
-        }
-        return true;
+  try {
+    const { input } = await inquirer.prompt([
+      {
+        type: "input",
+        name: "input",
+        message,
+        validate: (value) => {
+          if (value !== expectedValue) {
+            return `Input does not match. Expected: ${expectedValue}`;
+          }
+          return true;
+        },
       },
-    },
-  ]);
+    ]);
 
-  return input === expectedValue ? "confirmed" : "cancelled";
+    return input === expectedValue ? "confirmed" : "cancelled";
+  } catch (error) {
+    const errorMsg = error instanceof Error ? error.message : String(error);
+    // Handle non-interactive terminals or user interruption
+    if (
+      errorMsg.includes("closed") ||
+      errorMsg.includes("TTY") ||
+      errorMsg.includes("SIGINT") ||
+      errorMsg.includes("readline")
+    ) {
+      console.error("Interactive prompt unavailable (non-interactive terminal or interrupted)");
+      console.error("  Use --yes or --no flags for non-interactive mode");
+    } else {
+      console.error("Prompt error:", errorMsg);
+    }
+    return "cancelled";
+  }
 }
 
 /**

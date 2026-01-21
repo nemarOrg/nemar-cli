@@ -586,6 +586,8 @@ export async function checkNemarGitHubSshConfig(
 
     return { configured: true, sshHost };
   } catch (e) {
+    const errorMsg = e instanceof Error ? e.message : String(e);
+    console.warn(`Could not read SSH config at ${sshConfigPath}:`, errorMsg);
     return {
       configured: false,
       sshHost,
@@ -780,6 +782,14 @@ export async function acceptGitHubInvitation(repoFullName: string): Promise<{
   error?: string;
   alreadyCollaborator?: boolean;
 }> {
+  // Validate repository name format to prevent injection
+  if (!/^[a-zA-Z0-9_.-]+\/[a-zA-Z0-9_.-]+$/.test(repoFullName)) {
+    return {
+      accepted: false,
+      error: `Invalid repository format: ${repoFullName}`,
+    };
+  }
+
   // List pending invitations for the current user
   // Note: We fetch all invitations and filter in JS to avoid jq injection
   const { stdout, exitCode, stderr } = await runCommand([
@@ -823,10 +833,13 @@ export async function acceptGitHubInvitation(repoFullName: string): Promise<{
     }>;
     const invitation = invitations.find((inv) => inv.repository.full_name === repoFullName);
     invitationId = invitation?.id ?? null;
-  } catch {
+  } catch (error) {
+    const errorMsg = error instanceof Error ? error.message : String(error);
+    console.error("Failed to parse GitHub invitations response:", errorMsg);
+    console.error("  Raw response (first 500 chars):", (stdout || "").slice(0, 500));
     return {
       accepted: false,
-      error: "Failed to parse GitHub API response",
+      error: `Failed to parse GitHub API response: ${errorMsg}`,
     };
   }
 
@@ -1090,9 +1103,15 @@ export async function pushToGitHub(
           };
         }
 
-        return { success: false, error: "Could not detect current branch" };
+        // In detached HEAD state with commits, we can push using HEAD:main
+        if (currentBranch === "HEAD") {
+          branchToPush = "HEAD:main";
+        } else {
+          return { success: false, error: "Could not detect current branch" };
+        }
+      } else {
+        branchToPush = currentBranch;
       }
-      branchToPush = currentBranch;
     }
 
     // Push current branch
