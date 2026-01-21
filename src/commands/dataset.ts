@@ -596,9 +596,13 @@ Examples:
     // Step 7: Initialize DataLad dataset
     spinner = ora("Initializing DataLad dataset...").start();
 
+    // Use NEMAR user identity for all commits (including initial dataset creation)
+    const author =
+      config.username && config.email ? { name: config.username, email: config.email } : undefined;
+
     const isExistingDataset = await isDataladDataset(absolutePath);
     if (!isExistingDataset) {
-      const createResult = await createDataladDataset(absolutePath);
+      const createResult = await createDataladDataset(absolutePath, { author });
       if (!createResult.success) {
         spinner.fail("Failed to initialize DataLad dataset");
         console.log(chalk.red(`  ${createResult.error}`));
@@ -699,9 +703,6 @@ Examples:
     // Step 11: Save dataset changes
     spinner = ora("Saving dataset changes...").start();
 
-    // Use NEMAR user identity for commit authorship
-    const author =
-      config.username && config.email ? { name: config.username, email: config.email } : undefined;
     const saveResult = await saveDataset(absolutePath, "Initial NEMAR dataset upload", author);
     if (!saveResult.success) {
       spinner.fail("Failed to save dataset");
