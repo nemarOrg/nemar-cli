@@ -215,29 +215,35 @@ async function sandboxAction(): Promise<void> {
   const inviteSpinner = ora("Accepting GitHub repository invitation...").start();
 
   // Extract repo full name from github_url (e.g., "https://github.com/nemarDatasets/xx000123")
-  const repoMatch = githubUrl.match(/github\.com\/([^/]+\/[^/]+)/);
+  // Validate URL format: must be a valid GitHub URL with owner/repo pattern
+  const repoMatch = githubUrl?.match(/github\.com\/([a-zA-Z0-9_.-]+\/[a-zA-Z0-9_.-]+)/);
   const repoFullName = repoMatch ? repoMatch[1].replace(/\.git$/, "") : null;
 
-  if (repoFullName) {
-    const inviteResult = await acceptGitHubInvitation(repoFullName);
-    if (inviteResult.accepted) {
-      if (inviteResult.alreadyCollaborator) {
-        inviteSpinner.succeed("Already a collaborator on this repository");
-      } else {
-        inviteSpinner.succeed("GitHub invitation accepted");
-      }
+  if (!repoFullName) {
+    inviteSpinner.fail("Invalid GitHub repository URL from backend");
+    console.log(chalk.red(`  Received: ${githubUrl || "(empty)"}`));
+    console.log(chalk.red("  Expected format: https://github.com/owner/repo"));
+    console.log();
+    console.log("This may indicate a backend issue. Please contact support.");
+    cleanupSandboxDataset(datasetPath);
+    return;
+  }
+
+  const inviteResult = await acceptGitHubInvitation(repoFullName);
+  if (inviteResult.accepted) {
+    if (inviteResult.alreadyCollaborator) {
+      inviteSpinner.succeed("Already a collaborator on this repository");
     } else {
-      inviteSpinner.warn("Could not auto-accept invitation");
-      console.log(chalk.yellow(`  ${inviteResult.error}`));
-      console.log();
-      console.log("You may need to accept the invitation manually:");
-      console.log(chalk.cyan(`  https://github.com/${repoFullName}/invitations`));
-      console.log();
-      // Continue anyway - user can accept manually
+      inviteSpinner.succeed("GitHub invitation accepted");
     }
   } else {
-    inviteSpinner.warn("Could not parse repository URL");
-    // Continue anyway
+    inviteSpinner.warn("Could not auto-accept invitation");
+    console.log(chalk.yellow(`  ${inviteResult.error}`));
+    console.log();
+    console.log("You may need to accept the invitation manually:");
+    console.log(chalk.cyan(`  https://github.com/${repoFullName}/invitations`));
+    console.log();
+    // Continue anyway - user can accept manually
   }
 
   // Step 6: Initialize DataLad and configure remotes
