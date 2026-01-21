@@ -39,6 +39,7 @@ import {
   validateBidsDataset,
 } from "../lib/bids-validator.js";
 import { getConfig, isAuthenticated, isSandboxCompleted } from "../lib/config.js";
+import { type ConfirmOptions, YES_DESCRIPTION, YES_OPTION, confirm } from "../lib/confirm.js";
 import {
   acceptGitHubInvitation,
   checkDownloadPrerequisites,
@@ -227,7 +228,8 @@ datasetCommand
   .option("--skip-validation", "Skip BIDS validation (not recommended)")
   .option("--dry-run", "Show what would be uploaded without doing it")
   .option("-j, --jobs <number>", "Parallel upload streams (default: 8)", "8")
-  .option("-y, --yes", "Skip confirmation prompt")
+  .option(YES_OPTION, YES_DESCRIPTION)
+  .option("--no", "Skip confirmation and decline")
   .addHelpText(
     "after",
     `
@@ -434,20 +436,14 @@ Examples:
     }
 
     // Step 5: Confirm with user
-    if (!options.yes) {
-      const { confirmed } = await inquirer.prompt([
-        {
-          type: "confirm",
-          name: "confirmed",
-          message: "Proceed with upload?",
-          default: true,
-        },
-      ]);
-
-      if (!confirmed) {
-        console.log("Upload cancelled.");
-        return;
-      }
+    const confirmResult = await confirm(
+      "Proceed with upload?",
+      { yes: options.yes, no: options.no },
+      true,
+    );
+    if (confirmResult !== "confirmed") {
+      console.log(confirmResult === "declined" ? "Upload skipped." : "Upload cancelled.");
+      return;
     }
 
     console.log();
