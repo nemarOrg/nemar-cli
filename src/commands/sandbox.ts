@@ -19,7 +19,13 @@ import {
   getSandboxStatus,
   resetSandbox,
 } from "../lib/api.js";
-import { getConfig, isAuthenticated, isSandboxCompleted, setConfig } from "../lib/config.js";
+import {
+  deleteConfig,
+  getConfig,
+  isAuthenticated,
+  isSandboxCompleted,
+  setConfig,
+} from "../lib/config.js";
 import {
   acceptGitHubInvitation,
   checkPrerequisites,
@@ -494,8 +500,8 @@ sandboxCommand
       await resetSandbox();
 
       // Clear local config
-      setConfig("sandboxCompleted", false);
-      setConfig("sandboxDatasetId", undefined);
+      deleteConfig("sandboxCompleted");
+      deleteConfig("sandboxDatasetId");
 
       spinner.succeed("Sandbox status reset");
       console.log();

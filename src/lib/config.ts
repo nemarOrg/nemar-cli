@@ -69,6 +69,13 @@ export function setConfig<K extends keyof Config>(key: K, value: Config[K]): voi
 }
 
 /**
+ * Delete a configuration value
+ */
+export function deleteConfig<K extends keyof Config>(key: K): void {
+  config.delete(key);
+}
+
+/**
  * Clear all configuration (logout)
  */
 export function clearConfig(): void {
