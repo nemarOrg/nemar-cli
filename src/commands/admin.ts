@@ -302,9 +302,9 @@ adminCommand
     console.log(chalk.gray("Use this if a user's credentials were compromised or lost."));
     console.log();
 
-    const result = await confirm(`Regenerate IAM credentials for ${username}?`, options);
-    if (result !== "confirmed") {
-      console.log(chalk.gray(result === "declined" ? "Skipped" : "Cancelled"));
+    const confirmResult = await confirm(`Regenerate IAM credentials for ${username}?`, options);
+    if (confirmResult !== "confirmed") {
+      console.log(chalk.gray(confirmResult === "declined" ? "Skipped" : "Cancelled"));
       return;
     }
 
