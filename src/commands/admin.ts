@@ -24,6 +24,7 @@ import {
   type Dataset,
   approveUser,
   createConceptDoi,
+  finalizeDataset,
   getDataset,
   getDoiInfo,
   listUsers,
@@ -450,6 +451,22 @@ doiCommand
       });
 
       createSpinner.succeed("Concept DOI created successfully");
+
+      // Apply branch protection now that dataset has a DOI (permanent record)
+      const protectionSpinner = ora("Applying branch protection...").start();
+      try {
+        await finalizeDataset(datasetId);
+        protectionSpinner.succeed("Branch protection applied");
+      } catch (protectionError) {
+        protectionSpinner.warn("Could not apply branch protection");
+        console.log(
+          chalk.gray(
+            `  ${protectionError instanceof Error ? protectionError.message : "Unknown error"}`,
+          ),
+        );
+        console.log(chalk.gray("  You may need to configure this manually on GitHub."));
+      }
+
       console.log();
       console.log(chalk.green("DOI Information:"));
       console.log(`  Concept DOI: ${chalk.cyan(result.concept_doi)}`);

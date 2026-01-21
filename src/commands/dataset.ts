@@ -24,7 +24,6 @@ import {
   type Dataset,
   type DatasetsListResponse,
   createDataset,
-  finalizeDataset,
   getDataset,
   inviteCollaborator,
   listCollaborators,
@@ -724,18 +723,10 @@ Examples:
 
     spinner.succeed("Metadata pushed to GitHub");
 
-    // Step 13: Finalize dataset
-    spinner = ora("Finalizing dataset...").start();
+    // Note: Branch protection is NOT applied here for private datasets.
+    // Protection is applied when creating a DOI (admin doi create) or making public.
 
-    try {
-      await finalizeDataset(datasetInfo.dataset_id);
-      spinner.succeed("Dataset finalized");
-    } catch (error) {
-      spinner.warn("Could not finalize dataset (branch protection may need manual setup)");
-      console.log(chalk.gray(`  ${(error as Error).message}`));
-    }
-
-    // Step 14: Success!
+    // Step 13: Success!
     // Update last upload timestamp in local config
     updateLastUpload(absolutePath);
 
