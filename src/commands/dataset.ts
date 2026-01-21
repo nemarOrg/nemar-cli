@@ -30,6 +30,7 @@ import {
   listCollaborators,
   listDatasets,
   requestDatasetAccess,
+  requestUploadUrls,
 } from "../lib/api.js";
 import {
   type BidsValidationResult,
@@ -60,6 +61,12 @@ import {
   uploadFilesWithPresignedUrls,
   verifyGitHubAuth,
 } from "../lib/datalad.js";
+import {
+  type LocalDatasetConfig,
+  readLocalConfig,
+  updateLastUpload,
+  writeLocalConfig,
+} from "../lib/dataset-config.js";
 
 export const datasetCommand = new Command("dataset").description("Dataset management").addHelpText(
   "after",
@@ -401,8 +408,17 @@ Examples:
       `Found ${manifest.files.length} files (${manifest.dataFiles} data, ${manifest.metadataFiles} metadata)`,
     );
 
+    // Check for existing local config (resume scenario)
+    const existingConfig = readLocalConfig(absolutePath);
+
     console.log();
-    console.log(chalk.bold("Upload Plan:"));
+    if (existingConfig) {
+      console.log(chalk.bold.yellow("Resume Upload:"));
+      console.log(`  Dataset ID: ${chalk.cyan(existingConfig.dataset_id)}`);
+      console.log(`  Last attempt: ${existingConfig.last_upload_at || existingConfig.created_at}`);
+    } else {
+      console.log(chalk.bold("Upload Plan:"));
+    }
     console.log(`  Name: ${datasetName}`);
     console.log(`  Path: ${absolutePath}`);
     console.log(`  Files: ${manifest.files.length}`);
@@ -437,9 +453,6 @@ Examples:
 
     console.log();
 
-    // Step 6: Create dataset in backend with file manifest
-    spinner = ora("Creating dataset in NEMAR...").start();
-
     // Only request presigned URLs for data files
     const dataFiles = manifest.files.filter((f) => f.type === "data");
 
@@ -456,35 +469,93 @@ Examples:
       };
     };
 
-    try {
-      const response = await createDataset({
-        name: datasetName,
-        description: options.description,
-        files: dataFiles.map((f) => ({ path: f.path, size: f.size, type: f.type })),
-      });
+    // Check if this is a resume (existing local config was read above)
+    const isResume = existingConfig !== null;
 
-      datasetInfo = {
-        dataset_id: response.dataset.dataset_id,
-        ssh_url: response.dataset.ssh_url,
-        s3_prefix: response.dataset.s3_prefix,
-        github_url: response.dataset.github_url,
-        upload_urls: response.upload_urls || {},
-        s3_config: response.s3_config,
-      };
+    if (isResume) {
+      // Step 6: Resume existing dataset upload
+      spinner = ora(`Resuming upload for ${existingConfig.dataset_id}...`).start();
 
-      spinner.succeed(`Dataset created: ${datasetInfo.dataset_id}`);
+      try {
+        // Verify dataset still exists on backend (throws ApiError if not found)
+        await getDataset(existingConfig.dataset_id);
 
-      // Wait for IAM policy propagation (AWS is eventually consistent)
-      // This initial wait helps reduce retry attempts during upload
-      await new Promise((resolve) => setTimeout(resolve, 10000));
-    } catch (error) {
-      spinner.fail("Failed to create dataset");
-      if (error instanceof ApiError) {
-        console.log(chalk.red(`  ${error.message}`));
-      } else {
-        console.log(chalk.red(`  ${(error as Error).message}`));
+        // Request fresh presigned URLs for data files
+        const uploadResponse = await requestUploadUrls(
+          existingConfig.dataset_id,
+          dataFiles.map((f) => f.path),
+        );
+
+        datasetInfo = {
+          dataset_id: existingConfig.dataset_id,
+          ssh_url: existingConfig.ssh_url,
+          s3_prefix: existingConfig.s3_prefix,
+          github_url: existingConfig.github_url,
+          upload_urls: uploadResponse.upload_urls,
+          s3_config: existingConfig.s3_config,
+        };
+
+        spinner.succeed(`Resuming upload: ${datasetInfo.dataset_id}`);
+      } catch (error) {
+        spinner.fail("Failed to resume upload");
+        if (error instanceof ApiError) {
+          console.log(chalk.red(`  ${error.message}`));
+          if (error.statusCode === 404) {
+            console.log(
+              chalk.yellow("  The dataset may have been deleted. Try uploading as a new dataset."),
+            );
+            console.log(chalk.gray(`  Remove ${absolutePath}/.nemar to start fresh.`));
+          }
+        } else {
+          console.log(chalk.red(`  ${(error as Error).message}`));
+        }
+        process.exit(1);
       }
-      process.exit(1);
+    } else {
+      // Step 6: Create new dataset in backend with file manifest
+      spinner = ora("Creating dataset in NEMAR...").start();
+
+      try {
+        const response = await createDataset({
+          name: datasetName,
+          description: options.description,
+          files: dataFiles.map((f) => ({ path: f.path, size: f.size, type: f.type })),
+        });
+
+        datasetInfo = {
+          dataset_id: response.dataset.dataset_id,
+          ssh_url: response.dataset.ssh_url,
+          s3_prefix: response.dataset.s3_prefix,
+          github_url: response.dataset.github_url,
+          upload_urls: response.upload_urls || {},
+          s3_config: response.s3_config,
+        };
+
+        // Save local config for potential resume
+        const localConfig: LocalDatasetConfig = {
+          dataset_id: datasetInfo.dataset_id,
+          github_url: datasetInfo.github_url,
+          ssh_url: datasetInfo.ssh_url,
+          s3_prefix: datasetInfo.s3_prefix,
+          s3_config: datasetInfo.s3_config,
+          created_at: new Date().toISOString(),
+        };
+        writeLocalConfig(absolutePath, localConfig);
+
+        spinner.succeed(`Dataset created: ${datasetInfo.dataset_id}`);
+
+        // Wait for IAM policy propagation (AWS is eventually consistent)
+        // This initial wait helps reduce retry attempts during upload
+        await new Promise((resolve) => setTimeout(resolve, 10000));
+      } catch (error) {
+        spinner.fail("Failed to create dataset");
+        if (error instanceof ApiError) {
+          console.log(chalk.red(`  ${error.message}`));
+        } else {
+          console.log(chalk.red(`  ${(error as Error).message}`));
+        }
+        process.exit(1);
+      }
     }
 
     // Step 6b: Accept GitHub invitation
@@ -665,6 +736,9 @@ Examples:
     }
 
     // Step 14: Success!
+    // Update last upload timestamp in local config
+    updateLastUpload(absolutePath);
+
     console.log();
     console.log(chalk.green.bold("Upload complete!"));
     console.log();
