@@ -21,6 +21,7 @@ import {
 } from "../lib/api.js";
 import { getConfig, isAuthenticated, isSandboxCompleted, setConfig } from "../lib/config.js";
 import {
+  acceptGitHubInvitation,
   checkPrerequisites,
   configureGitHubRemote,
   configureLargefiles,
@@ -167,6 +168,7 @@ async function sandboxAction(): Promise<void> {
 
   let datasetId: string;
   let sshUrl: string;
+  let githubUrl: string;
   let s3Config: { bucket: string; region: string; public_url: string };
   let s3Prefix: string;
   let uploadUrls: Record<string, string>;
@@ -187,12 +189,13 @@ async function sandboxAction(): Promise<void> {
 
     datasetId = response.dataset.dataset_id;
     sshUrl = response.dataset.ssh_url;
+    githubUrl = response.dataset.github_url;
     s3Config = response.s3_config;
     s3Prefix = response.dataset.s3_prefix;
     uploadUrls = response.upload_urls || {};
 
     apiSpinner.succeed(`Sandbox dataset created: ${chalk.cyan(datasetId)}`);
-    console.log(chalk.gray(`  GitHub: ${response.dataset.github_url}`));
+    console.log(chalk.gray(`  GitHub: ${githubUrl}`));
 
     // Wait for IAM policy propagation (AWS is eventually consistent)
     // This initial wait helps reduce retry attempts during upload
@@ -206,6 +209,41 @@ async function sandboxAction(): Promise<void> {
     }
     cleanupSandboxDataset(datasetPath);
     return;
+  }
+
+  // Step 5b: Accept GitHub invitation
+  const inviteSpinner = ora("Accepting GitHub repository invitation...").start();
+
+  // Extract repo full name from github_url (e.g., "https://github.com/nemarDatasets/xx000123")
+  // Validate URL format: must be a valid GitHub URL with owner/repo pattern
+  const repoMatch = githubUrl?.match(/github\.com\/([a-zA-Z0-9_.-]+\/[a-zA-Z0-9_.-]+)/);
+  const repoFullName = repoMatch ? repoMatch[1].replace(/\.git$/, "") : null;
+
+  if (!repoFullName) {
+    inviteSpinner.fail("Invalid GitHub repository URL from backend");
+    console.log(chalk.red(`  Received: ${githubUrl || "(empty)"}`));
+    console.log(chalk.red("  Expected format: https://github.com/owner/repo"));
+    console.log();
+    console.log("This may indicate a backend issue. Please contact support.");
+    cleanupSandboxDataset(datasetPath);
+    return;
+  }
+
+  const inviteResult = await acceptGitHubInvitation(repoFullName);
+  if (inviteResult.accepted) {
+    if (inviteResult.alreadyCollaborator) {
+      inviteSpinner.succeed("Already a collaborator on this repository");
+    } else {
+      inviteSpinner.succeed("GitHub invitation accepted");
+    }
+  } else {
+    inviteSpinner.warn("Could not auto-accept invitation");
+    console.log(chalk.yellow(`  ${inviteResult.error}`));
+    console.log();
+    console.log("You may need to accept the invitation manually:");
+    console.log(chalk.cyan(`  https://github.com/${repoFullName}/invitations`));
+    console.log();
+    // Continue anyway - user can accept manually
   }
 
   // Step 6: Initialize DataLad and configure remotes

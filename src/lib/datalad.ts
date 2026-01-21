@@ -748,6 +748,113 @@ export async function verifyGitHubAuth(expectedUsername?: string): Promise<{
   }
 }
 
+/**
+ * Accept a pending GitHub repository invitation.
+ *
+ * After a dataset is created, the backend invites the user as a collaborator.
+ * This function finds and accepts that invitation so the user can push without
+ * manually accepting in the browser.
+ *
+ * @param repoFullName - The full repository name (e.g., "nemarDatasets/nm000123")
+ * @returns Result indicating whether invitation was accepted
+ */
+export async function acceptGitHubInvitation(repoFullName: string): Promise<{
+  accepted: boolean;
+  error?: string;
+  alreadyCollaborator?: boolean;
+}> {
+  // List pending invitations for the current user
+  // Note: We fetch all invitations and filter in JS to avoid jq injection
+  const { stdout, exitCode, stderr } = await runCommand([
+    "gh",
+    "api",
+    "/user/repository_invitations",
+  ]);
+
+  if (exitCode !== 0) {
+    // Check for specific error cases
+    if (stderr.includes("not logged in") || stderr.includes("auth login")) {
+      return {
+        accepted: false,
+        error: "gh CLI not authenticated. Run 'gh auth login' to authenticate.",
+      };
+    }
+    if (stderr.includes("API rate limit") || stderr.includes("403")) {
+      return {
+        accepted: false,
+        error: "GitHub API rate limit exceeded. Please try again in a few minutes.",
+      };
+    }
+    if (stderr.includes("ENOENT") || stderr.includes("not found")) {
+      return {
+        accepted: false,
+        error: "gh CLI not installed. Install from https://cli.github.com/",
+      };
+    }
+    return {
+      accepted: false,
+      error: `Failed to list invitations: ${stderr.trim() || "unknown error"}`,
+    };
+  }
+
+  // Parse invitations and find the one for our repo
+  let invitationId: number | null = null;
+  try {
+    const invitations = JSON.parse(stdout || "[]") as Array<{
+      id: number;
+      repository: { full_name: string };
+    }>;
+    const invitation = invitations.find((inv) => inv.repository.full_name === repoFullName);
+    invitationId = invitation?.id ?? null;
+  } catch {
+    return {
+      accepted: false,
+      error: "Failed to parse GitHub API response",
+    };
+  }
+
+  // No invitation found - user might already be a collaborator
+  if (!invitationId) {
+    // Check if user already has access to the repo
+    const { exitCode: checkExitCode } = await runCommand([
+      "gh",
+      "api",
+      `/repos/${repoFullName}`,
+      "--silent",
+    ]);
+
+    if (checkExitCode === 0) {
+      return {
+        accepted: true,
+        alreadyCollaborator: true,
+      };
+    }
+
+    return {
+      accepted: false,
+      error: `No pending invitation found for ${repoFullName}. You may need to accept it manually via GitHub.`,
+    };
+  }
+
+  // Accept the invitation
+  const { exitCode: acceptExitCode, stderr: acceptStderr } = await runCommand([
+    "gh",
+    "api",
+    "--method",
+    "PATCH",
+    `/user/repository_invitations/${invitationId}`,
+  ]);
+
+  if (acceptExitCode !== 0) {
+    return {
+      accepted: false,
+      error: `Failed to accept invitation: ${acceptStderr.trim() || "unknown error"}`,
+    };
+  }
+
+  return { accepted: true };
+}
+
 export async function configureGitHubRemote(
   path: string,
   repoUrl: string,

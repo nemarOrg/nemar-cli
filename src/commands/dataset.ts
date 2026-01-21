@@ -40,6 +40,7 @@ import {
 } from "../lib/bids-validator.js";
 import { getConfig, isAuthenticated, isSandboxCompleted } from "../lib/config.js";
 import {
+  acceptGitHubInvitation,
   checkDownloadPrerequisites,
   checkNemarGitHubSshConfig,
   checkPrerequisites,
@@ -484,6 +485,42 @@ Examples:
         console.log(chalk.red(`  ${(error as Error).message}`));
       }
       process.exit(1);
+    }
+
+    // Step 6b: Accept GitHub invitation
+    spinner = ora("Accepting GitHub repository invitation...").start();
+
+    // Extract repo full name from github_url (e.g., "https://github.com/nemarDatasets/nm000123")
+    // Validate URL format: must be a valid GitHub URL with owner/repo pattern
+    const repoMatch = datasetInfo.github_url?.match(
+      /github\.com\/([a-zA-Z0-9_.-]+\/[a-zA-Z0-9_.-]+)/,
+    );
+    const repoFullName = repoMatch ? repoMatch[1].replace(/\.git$/, "") : null;
+
+    if (!repoFullName) {
+      spinner.fail("Invalid GitHub repository URL from backend");
+      console.log(chalk.red(`  Received: ${datasetInfo.github_url || "(empty)"}`));
+      console.log(chalk.red("  Expected format: https://github.com/owner/repo"));
+      console.log();
+      console.log("This may indicate a backend issue. Please contact support.");
+      process.exit(1);
+    }
+
+    const inviteResult = await acceptGitHubInvitation(repoFullName);
+    if (inviteResult.accepted) {
+      if (inviteResult.alreadyCollaborator) {
+        spinner.succeed("Already a collaborator on this repository");
+      } else {
+        spinner.succeed("GitHub invitation accepted");
+      }
+    } else {
+      spinner.warn("Could not auto-accept invitation");
+      console.log(chalk.yellow(`  ${inviteResult.error}`));
+      console.log();
+      console.log("You may need to accept the invitation manually:");
+      console.log(chalk.cyan(`  https://github.com/${repoFullName}/invitations`));
+      console.log();
+      // Continue anyway - user can accept manually
     }
 
     // Step 7: Initialize DataLad dataset
