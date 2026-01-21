@@ -1068,12 +1068,36 @@ export async function pushToS3(
 export async function pushToGitHub(
   path: string,
   remoteName = "origin",
-  branch = "main",
+  branch?: string,
 ): Promise<{ success: boolean; error?: string }> {
   try {
-    // Push main branch
+    // Detect current branch if not specified
+    let branchToPush = branch;
+    if (!branchToPush) {
+      const currentBranch = await getCurrentBranch(path);
+      if (!currentBranch || currentBranch === "HEAD") {
+        // Check if there are any commits
+        const { exitCode: logExitCode } = await runCommand(["git", "log", "-1", "--oneline"], {
+          cwd: path,
+        });
+
+        if (logExitCode !== 0) {
+          return {
+            success: false,
+            error:
+              "No commits found. The repository may not have been initialized correctly, " +
+              "or no changes were saved before pushing.",
+          };
+        }
+
+        return { success: false, error: "Could not detect current branch" };
+      }
+      branchToPush = currentBranch;
+    }
+
+    // Push current branch
     const { stderr: mainStderr, exitCode: mainExitCode } = await runCommand(
-      ["git", "push", "-u", remoteName, branch],
+      ["git", "push", "-u", remoteName, branchToPush],
       { cwd: path },
     );
 
