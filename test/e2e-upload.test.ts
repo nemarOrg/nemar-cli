@@ -2,7 +2,7 @@
  * E2E Upload Tests
  *
  * These tests require real infrastructure:
- * - DataLad and git-annex installed
+ * - git-annex installed
  * - GitHub SSH access configured
  * - Valid NEMAR API key
  *
@@ -34,7 +34,6 @@ const TEST_SANDBOX_DATASET_ID = process.env.TEST_SANDBOX_DATASET_ID; // e.g., "x
 const TEST_CREATE_SANDBOX = process.env.TEST_CREATE_SANDBOX === "true";
 
 interface Prerequisites {
-  datalad: boolean;
   gitAnnex: boolean;
   githubSSH: boolean;
   apiKey: boolean;
@@ -42,18 +41,10 @@ interface Prerequisites {
 
 async function checkPrerequisites(): Promise<Prerequisites> {
   const results: Prerequisites = {
-    datalad: false,
     gitAnnex: false,
     githubSSH: false,
     apiKey: false,
   };
-
-  // Check DataLad
-  try {
-    const proc = spawn({ cmd: ["datalad", "--version"], stdout: "pipe", stderr: "pipe" });
-    await proc.exited;
-    results.datalad = true;
-  } catch {}
 
   // Check git-annex
   try {
@@ -197,11 +188,10 @@ describe("E2E Upload Tests", () => {
 
   beforeAll(async () => {
     prereqs = await checkPrerequisites();
-    allPrereqsMet = prereqs.datalad && prereqs.gitAnnex && prereqs.githubSSH && prereqs.apiKey;
+    allPrereqsMet = prereqs.gitAnnex && prereqs.githubSSH && prereqs.apiKey;
 
     if (!allPrereqsMet) {
       console.log("\n⚠️  E2E Upload tests will be skipped due to missing prerequisites:");
-      if (!prereqs.datalad) console.log("   - DataLad not installed");
       if (!prereqs.gitAnnex) console.log("   - git-annex not installed");
       if (!prereqs.githubSSH) console.log("   - GitHub SSH not configured");
       if (!prereqs.apiKey) console.log("   - API key not configured");
@@ -218,7 +208,6 @@ describe("E2E Upload Tests", () => {
 
   test("prerequisites check reports correct status", async () => {
     // This test always runs to verify our prereq checking works
-    expect(typeof prereqs.datalad).toBe("boolean");
     expect(typeof prereqs.gitAnnex).toBe("boolean");
     expect(typeof prereqs.githubSSH).toBe("boolean");
     expect(typeof prereqs.apiKey).toBe("boolean");
@@ -263,9 +252,9 @@ describe("E2E Upload Tests", () => {
       return;
     }
 
-    // Need at least datalad and gitannex for the prereqs check to run
-    if (!prereqs.datalad || !prereqs.gitAnnex) {
-      console.log("   Skipping: Need DataLad/git-annex to test prereq error messages");
+    // Need at least git-annex for the prereqs check to run
+    if (!prereqs.gitAnnex) {
+      console.log("   Skipping: Need git-annex to test prereq error messages");
       return;
     }
 
@@ -295,7 +284,6 @@ describe("E2E Upload Tests", () => {
     const hasPrereqError =
       stdout.includes("GitHub SSH") ||
       stdout.includes("AWS") ||
-      stdout.includes("DataLad") ||
       stdout.includes("git-annex") ||
       stdout.includes("Prerequisites");
     expect(hasPrereqError).toBe(true);
@@ -434,25 +422,25 @@ describe("E2E Upload Tests", () => {
     }
   });
 
-  test("createDataladDataset initializes git-annex on existing directory", async () => {
+  test("initDataset initializes git-annex on existing directory", async () => {
     if (!allPrereqsMet) {
       console.log("   Skipping: Not all prerequisites met");
       return;
     }
 
     const testDir = "/tmp/test-gitannex-init";
-    
+
     try {
       // Create directory with existing files (reproduces issue #32)
       mkdirSync(testDir, { recursive: true });
       writeFileSync(join(testDir, "README.md"), "Test file");
       writeFileSync(join(testDir, "data.txt"), "Some data");
 
-      // Import createDataladDataset and configureLargefiles
-      const { createDataladDataset, configureLargefiles } = await import("../src/lib/datalad.js");
+      // Import initDataset and configureLargefiles
+      const { initDataset, configureLargefiles } = await import("../src/lib/git-annex.js");
 
-      // Call createDataladDataset (should run git annex init)
-      const result = await createDataladDataset(testDir);
+      // Call initDataset (should run git annex init)
+      const result = await initDataset(testDir);
 
       expect(result.success).toBe(true);
       expect(result.error).toBeUndefined();
