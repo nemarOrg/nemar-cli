@@ -112,13 +112,30 @@ Description:
 Requirements:
   - NEMAR account (nemar auth login)
   - DataLad and git-annex installed
+  - GitHub CLI (gh) authenticated as your NEMAR user
   - GitHub SSH access configured
 
 Process:
   1. Validates BIDS format (unless --skip-validation)
-  2. Creates GitHub repository for metadata
-  3. Uploads large files to S3 in parallel
-  4. Enables PR-based versioning workflow
+  2. Verifies GitHub CLI authentication matches NEMAR user
+  3. Creates GitHub repository for metadata
+  4. Auto-accepts GitHub collaboration invitation
+  5. Uploads large files to S3 in parallel (with retry logic)
+  6. Commits with your NEMAR user identity
+  7. Pushes to GitHub
+
+Resume Capability:
+  If upload fails (network issues, S3 errors), just run the command again.
+  The CLI stores dataset metadata in .nemar/config.json and will resume
+  from where it left off, requesting fresh presigned URLs.
+
+  To start fresh with a new dataset ID:
+  $ rm -rf /path/to/dataset/.nemar
+
+Branch Protection:
+  New datasets are private and have no branch protection. Owners can push
+  directly to main. Branch protection is applied when creating a DOI
+  (permanent record) via 'nemar admin doi create'.
 
 Examples:
   $ nemar dataset upload ./my-eeg-dataset
