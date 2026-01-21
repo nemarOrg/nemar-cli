@@ -41,6 +41,12 @@ import {
 import { getConfig, isAuthenticated, isSandboxCompleted } from "../lib/config.js";
 import { type ConfirmOptions, YES_DESCRIPTION, YES_OPTION, confirm } from "../lib/confirm.js";
 import {
+  type LocalDatasetConfig,
+  readLocalConfig,
+  updateLastUpload,
+  writeLocalConfig,
+} from "../lib/dataset-config.js";
+import {
   acceptGitHubInvitation,
   checkDownloadPrerequisites,
   checkNemarGitHubSshConfig,
@@ -61,12 +67,6 @@ import {
   uploadFilesWithPresignedUrls,
   verifyGitHubAuth,
 } from "../lib/git-annex.js";
-import {
-  type LocalDatasetConfig,
-  readLocalConfig,
-  updateLastUpload,
-  writeLocalConfig,
-} from "../lib/dataset-config.js";
 
 export const datasetCommand = new Command("dataset").description("Dataset management").addHelpText(
   "after",
@@ -869,7 +869,9 @@ Examples:
       }
       if (localInfo.missingFiles > 0) {
         console.log(
-          chalk.gray(`  Missing files: ${localInfo.missingFiles} (use 'git annex get' to download)`),
+          chalk.gray(
+            `  Missing files: ${localInfo.missingFiles} (use 'git annex get' to download)`,
+          ),
         );
       }
     }

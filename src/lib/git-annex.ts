@@ -6,7 +6,7 @@
  */
 
 import { existsSync, statSync } from "node:fs";
-import { basename, join } from "node:path";
+import { join } from "node:path";
 import { spawn } from "bun";
 
 /**
@@ -255,10 +255,7 @@ function getGitAnnexInstallCommand(): string {
  * Note: AWS credentials are provided by the backend after dataset creation
  */
 export async function checkPrerequisites(): Promise<PrerequisitesResult> {
-  const [gitAnnex, githubSSH] = await Promise.all([
-    checkGitAnnexInstalled(),
-    checkGitHubSSH(),
-  ]);
+  const [gitAnnex, githubSSH] = await Promise.all([checkGitAnnexInstalled(), checkGitHubSSH()]);
 
   const errors: string[] = [];
 
@@ -966,9 +963,17 @@ export async function saveDataset(
     }
 
     // Check if there are changes to commit
-    const { stdout: statusOut } = await runCommand(["git", "status", "--porcelain"], {
+    const {
+      stdout: statusOut,
+      exitCode: statusExitCode,
+      stderr: statusStderr,
+    } = await runCommand(["git", "status", "--porcelain"], {
       cwd: path,
     });
+
+    if (statusExitCode !== 0) {
+      return { success: false, error: statusStderr.trim() || "Failed to check git status" };
+    }
 
     if (!statusOut.trim()) {
       // Nothing to commit
@@ -1046,7 +1051,7 @@ export async function pushToGitHub(
   path: string,
   remoteName = "origin",
   branch?: string,
-): Promise<{ success: boolean; error?: string }> {
+): Promise<{ success: boolean; error?: string; warning?: string }> {
   try {
     // Detect current branch if not specified
     let branchToPush = branch;
@@ -1095,8 +1100,11 @@ export async function pushToGitHub(
     );
 
     if (annexExitCode !== 0) {
-      // Not a fatal error, but log it
-      console.warn("Warning: Could not push git-annex branch:", annexStderr.trim());
+      // Not a fatal error, but return warning so callers can inform users
+      return {
+        success: true,
+        warning: `Main branch pushed, but git-annex branch failed: ${annexStderr.trim()}. Clone operations may have issues.`,
+      };
     }
 
     return { success: true };
@@ -1247,7 +1255,7 @@ export async function uploadFilesWithPresignedUrls(
   // Process files in batches
   for (let i = 0; i < files.length; i += jobs) {
     const batch = files.slice(i, i + jobs);
-    const results = await Promise.all(
+    await Promise.all(
       batch.map(async ([relativePath, presignedUrl]) => {
         const fullPath = join(basePath, relativePath);
 
@@ -1278,8 +1286,6 @@ export async function uploadFilesWithPresignedUrls(
             error: result.error,
           });
         }
-
-        return { path: relativePath, ...result };
       }),
     );
   }
@@ -1454,8 +1460,19 @@ export async function cloneDataset(
     );
 
     if (initExitCode !== 0) {
-      // Not fatal; git-annex might already be initialized
-      console.warn("git annex init warning:", initStderr.trim());
+      // Verify git-annex is actually initialized despite the error
+      const { exitCode: checkCode } = await runCommand(["git", "annex", "info"], {
+        cwd: outputPath,
+      });
+
+      if (checkCode !== 0) {
+        return {
+          success: false,
+          error: `Cloned repository but git-annex initialization failed: ${initStderr.trim()}`,
+        };
+      }
+      // Already initialized, non-fatal
+      console.warn("git annex init returned non-zero but annex is initialized");
     }
 
     return { success: true };
@@ -1553,8 +1570,9 @@ export async function getLocalDatasetInfo(datasetPath: string): Promise<LocalDat
         missingFiles: annexedFiles - presentFiles,
       };
     }
-  } catch {
-    // Not a git-annex repo or error parsing
+  } catch (error) {
+    const errorMsg = error instanceof Error ? error.message : String(error);
+    console.warn(`Failed to get git-annex info for ${datasetPath}: ${errorMsg}`);
   }
 
   // Fallback: just count files
@@ -1571,7 +1589,9 @@ export async function getLocalDatasetInfo(datasetPath: string): Promise<LocalDat
       presentFiles: files,
       missingFiles: 0,
     };
-  } catch {
+  } catch (error) {
+    const errorMsg = error instanceof Error ? error.message : String(error);
+    console.warn(`Failed to count files in ${datasetPath}: ${errorMsg}`);
     return null;
   }
 }
@@ -1836,23 +1856,9 @@ export async function collectFileManifest(datasetPath: string): Promise<{
   let dataFiles = 0;
   let metadataFiles = 0;
 
-  // Use find to get all files (excluding .git and .datalad)
+  // Use find to get all files (excluding .git)
   const { stdout, exitCode } = await runCommand(
-    [
-      "find",
-      ".",
-      "-type",
-      "f",
-      "-not",
-      "-path",
-      "./.git/*",
-      "-not",
-      "-path",
-      "./.datalad/*",
-      "-not",
-      "-name",
-      ".gitattributes",
-    ],
+    ["find", ".", "-type", "f", "-not", "-path", "./.git/*", "-not", "-name", ".gitattributes"],
     { cwd: datasetPath },
   );
 
@@ -1901,11 +1907,11 @@ export async function collectFileManifest(datasetPath: string): Promise<{
 // =============================================================================
 
 /**
- * @deprecated Use initDataset instead
+ * @deprecated Use initDataset instead. Will be removed in v1.0.0.
  */
 export const createDataladDataset = initDataset;
 
 /**
- * @deprecated Use isGitAnnexDataset instead
+ * @deprecated Use isGitAnnexDataset instead. Will be removed in v1.0.0.
  */
 export const isDataladDataset = isGitAnnexDataset;
