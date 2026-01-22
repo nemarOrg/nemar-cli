@@ -1015,7 +1015,7 @@ export async function pushToS3(
     onProgress?: (progress: UploadProgress) => void;
   },
 ): Promise<{ success: boolean; error?: string; filesUploaded?: number }> {
-  const jobs = options.jobs || 8;
+  const jobs = options.jobs || 4;
 
   try {
     // Use git annex copy for data transfer
@@ -1219,14 +1219,27 @@ export async function uploadFileWithPresignedUrl(
       const errorText = await response.text();
       lastError = `Upload failed: ${response.status} ${errorText}`;
 
-      // Only retry on 403 AccessDenied (likely IAM propagation delay)
+      // Retry on 403 AccessDenied (IAM propagation delay) or 503 SlowDown (rate limiting)
       const isIamError = response.status === 403 && errorText.includes("AccessDenied");
-      if (!isIamError || attempt === maxRetries) {
+      const isRateLimited = response.status === 503 && errorText.includes("SlowDown");
+      const isRetryable = isIamError || isRateLimited;
+
+      if (!isRetryable || attempt === maxRetries) {
         return { success: false, error: lastError };
       }
 
-      // Wait before retry: 10s, 15s, 20s, 25s (quadratic-ish growth)
-      const delayMs = initialDelayMs + attempt * 5000;
+      // Backoff: 4s, 10s, 20s, 30s for rate limiting; 10s, 15s, 20s, 25s for IAM
+      const rateLimitDelays = [4000, 10000, 20000, 30000];
+      const delayMs = isRateLimited
+        ? rateLimitDelays[attempt] ?? 30000
+        : initialDelayMs + attempt * 5000;
+
+      if (isRateLimited) {
+        console.warn(
+          `S3 rate limit hit, retrying in ${delayMs / 1000}s (attempt ${attempt + 1}/${maxRetries})...`,
+        );
+      }
+
       await new Promise((resolve) => setTimeout(resolve, delayMs));
     }
 

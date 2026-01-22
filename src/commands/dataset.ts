@@ -227,7 +227,7 @@ datasetCommand
   .option("-d, --description <desc>", "Dataset description")
   .option("--skip-validation", "Skip BIDS validation (not recommended)")
   .option("--dry-run", "Show what would be uploaded without doing it")
-  .option("-j, --jobs <number>", "Parallel upload streams (default: 8)", "8")
+  .option("-j, --jobs <number>", "Parallel upload streams (default: 4)", "4")
   .option(YES_OPTION, YES_DESCRIPTION)
   .option("--no", "Skip confirmation and decline")
   .addHelpText(
