@@ -498,7 +498,7 @@ export async function configureS3Remote(
  */
 async function testGitHubSsh(): Promise<{ works: boolean; error?: string }> {
   try {
-    const { stderr } = await runCommand([
+    const { exitCode, stderr } = await runCommand([
       "ssh",
       "-T",
       "-o",
@@ -509,9 +509,16 @@ async function testGitHubSsh(): Promise<{ works: boolean; error?: string }> {
     ]);
 
     const works = stderr.includes("successfully authenticated");
+    if (!works) {
+      console.warn("SSH test to github.com failed:", {
+        exitCode,
+        stderr: stderr.trim().slice(0, 200),
+      });
+    }
     return { works, error: works ? undefined : stderr.trim() };
   } catch (error) {
     const errorMsg = error instanceof Error ? error.message : String(error);
+    console.warn("SSH test exception:", errorMsg);
     return { works: false, error: errorMsg };
   }
 }
@@ -751,34 +758,27 @@ export async function configureGitHubRemote(
 
   // CI/CD: Use HTTPS with GH_TOKEN
   if (process.env.GH_TOKEN && repoUrl.startsWith("git@github.com:")) {
-    const match = repoUrl.match(/git@github\.com:(.+)/);
-    if (match) {
-      finalUrl = `https://${process.env.GH_TOKEN}@github.com/${match[1]}`;
-    }
+    const repoPath = repoUrl.replace("git@github.com:", "");
+    finalUrl = `https://${process.env.GH_TOKEN}@github.com/${repoPath}`;
   }
   // Local: Try standard SSH first, then fallback to HTTPS with gh token
   else if (repoUrl.startsWith("git@github.com:")) {
-    const match = repoUrl.match(/git@github\.com:(.+)/);
+    const repoPath = repoUrl.replace("git@github.com:", "");
+    const sshResult = await testGitHubSsh();
 
-    if (match) {
-      const repoPath = match[1];
-      const sshResult = await testGitHubSsh();
+    if (sshResult.works) {
+      finalUrl = repoUrl;
+    } else {
+      console.warn("GitHub SSH not available, falling back to HTTPS with gh CLI token...");
 
-      if (sshResult.works) {
-        // Standard SSH works, use URL as-is
-        finalUrl = repoUrl;
+      const ghTokenResult = await getGitHubToken();
+
+      if (ghTokenResult.token) {
+        finalUrl = `https://${ghTokenResult.token}@github.com/${repoPath}`;
       } else {
-        // SSH failed, fall back to HTTPS with gh token
-        console.warn("GitHub SSH not available, falling back to HTTPS with gh CLI token...");
-
-        const ghTokenResult = await getGitHubToken();
-
-        if (ghTokenResult.token) {
-          finalUrl = `https://${ghTokenResult.token}@github.com/${repoPath}`;
-        } else {
-          return {
-            success: false,
-            error: `GitHub authentication not configured.
+        return {
+          success: false,
+          error: `GitHub authentication not configured.
 
 SSH failed: ${sshResult.error || "could not connect"}
 gh CLI failed: ${ghTokenResult.error || "could not get token"}
@@ -791,8 +791,7 @@ Fix one of these:
 
   2. Install and authenticate gh CLI:
      gh auth login`,
-          };
-        }
+        };
       }
     }
   }
@@ -1080,9 +1079,9 @@ export interface PresignedUploadProgress {
 /**
  * Upload a single file to S3 using a presigned URL
  *
- * Includes retry logic to handle IAM eventual consistency delays.
- * AWS IAM policy changes can take time to propagate globally, so 403 errors
- * immediately after policy updates are retried with increasing delays.
+ * Includes retry logic for transient errors:
+ * - 403 AccessDenied: IAM eventual consistency delays after policy updates
+ * - 503 SlowDown: S3 rate limiting when too many concurrent requests hit the bucket
  */
 export async function uploadFileWithPresignedUrl(
   filePath: string,
@@ -1126,15 +1125,18 @@ export async function uploadFileWithPresignedUrl(
         return { success: false, error: lastError };
       }
 
-      // Backoff: 4s, 10s, 20s, 30s for rate limiting; 10s, 15s, 20s, 25s for IAM
-      const rateLimitDelays = [4000, 10000, 20000, 30000];
+      // Exponential backoff for rate limiting (4s, 8s, 16s, 30s cap); linear for IAM (10s, 15s, 20s, 25s)
       const delayMs = isRateLimited
-        ? rateLimitDelays[attempt] ?? 30000
+        ? Math.min(4000 * 2 ** attempt, 30000)
         : initialDelayMs + attempt * 5000;
 
       if (isRateLimited) {
         console.warn(
           `S3 rate limit hit, retrying in ${delayMs / 1000}s (attempt ${attempt + 1}/${maxRetries})...`,
+        );
+      } else if (isIamError) {
+        console.warn(
+          `Waiting for S3 permissions to propagate, retrying in ${delayMs / 1000}s (attempt ${attempt + 1}/${maxRetries})...`,
         );
       }
 

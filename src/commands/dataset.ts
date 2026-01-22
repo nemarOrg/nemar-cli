@@ -623,10 +623,7 @@ Examples:
     // Step 8: Configure GitHub remote (auto-detects best auth method)
     spinner = ora("Configuring GitHub remote...").start();
 
-    const githubResult = await configureGitHubRemote(
-      absolutePath,
-      datasetInfo.ssh_url,
-    );
+    const githubResult = await configureGitHubRemote(absolutePath, datasetInfo.ssh_url);
     if (!githubResult.success) {
       spinner.fail("Failed to configure GitHub remote");
       console.log(chalk.red(`  ${githubResult.error}`));
