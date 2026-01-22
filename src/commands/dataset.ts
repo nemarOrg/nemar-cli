@@ -49,7 +49,6 @@ import {
 import {
   acceptGitHubInvitation,
   checkDownloadPrerequisites,
-  checkNemarGitHubSshConfig,
   checkPrerequisites,
   cloneDataset,
   collectFileManifest,
@@ -627,7 +626,6 @@ Examples:
     const githubResult = await configureGitHubRemote(
       absolutePath,
       datasetInfo.ssh_url,
-      config.githubUsername,
     );
     if (!githubResult.success) {
       spinner.fail("Failed to configure GitHub remote");

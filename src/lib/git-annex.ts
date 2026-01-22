@@ -491,109 +491,27 @@ export async function configureS3Remote(
 }
 
 /**
- * Check if SSH config has nemar-{username}-github host configured
- * Returns instructions if not configured
- */
-export async function checkNemarGitHubSshConfig(
-  githubUsername: string,
-): Promise<{ configured: boolean; instructions?: string; sshHost?: string }> {
-  const sshHost = `nemar-${githubUsername}-github`;
-  const sshConfigPath = join(process.env.HOME || "~", ".ssh", "config");
-
-  // Check if SSH config exists and has the custom host
-  try {
-    if (!existsSync(sshConfigPath)) {
-      return {
-        configured: false,
-        sshHost,
-        instructions: getNemarSshConfigInstructions(githubUsername, sshHost),
-      };
-    }
-
-    const configContent = await Bun.file(sshConfigPath).text();
-
-    // Check if custom host is configured
-    if (!configContent.includes(`Host ${sshHost}`)) {
-      return {
-        configured: false,
-        sshHost,
-        instructions: getNemarSshConfigInstructions(githubUsername, sshHost),
-      };
-    }
-
-    return { configured: true, sshHost };
-  } catch (e) {
-    const errorMsg = e instanceof Error ? e.message : String(e);
-    console.warn(`Could not read SSH config at ${sshConfigPath}:`, errorMsg);
-    return {
-      configured: false,
-      sshHost,
-      instructions: getNemarSshConfigInstructions(githubUsername, sshHost),
-    };
-  }
-}
-
-/**
- * Generate SSH config instructions for NEMAR GitHub access
- */
-function getNemarSshConfigInstructions(githubUsername: string, sshHost: string): string {
-  return `
-SSH Configuration Required for NEMAR GitHub Access
-
-Add this to your ~/.ssh/config file:
-
-Host ${sshHost}
-  HostName github.com
-  User git
-  IdentityFile ~/.ssh/id_rsa
-  IdentitiesOnly yes
-
-Replace ~/.ssh/id_rsa with the path to your SSH key for GitHub account: @${githubUsername}
-
-This allows NEMAR to use the correct SSH key and GitHub account, even if you have 
-multiple GitHub accounts configured on your machine.
-
-After adding the config, test it with:
-  ssh -T git@${sshHost}
-
-It should respond with: "Hi ${githubUsername}! You've successfully authenticated..."
-`;
-}
-
-/**
- * Test if custom SSH host is configured and working
+ * Test if GitHub SSH access is configured and working
  *
  * Note: SSH test to GitHub returns exit code 1 even on success (GitHub's PTY restriction)
  * We check stderr for "successfully authenticated" message to confirm it works
  */
-async function testCustomSshHost(sshHost: string): Promise<{ works: boolean; error?: string }> {
+async function testGitHubSsh(): Promise<{ works: boolean; error?: string }> {
   try {
-    const { exitCode, stderr, stdout } = await runCommand([
+    const { stderr } = await runCommand([
       "ssh",
       "-T",
       "-o",
       "BatchMode=yes",
       "-o",
       "ConnectTimeout=5",
-      `git@${sshHost}`,
+      "git@github.com",
     ]);
 
-    // SSH test succeeds with exit code 1 and "successfully authenticated" message
     const works = stderr.includes("successfully authenticated");
-
-    if (!works) {
-      // Log the actual SSH error for debugging
-      console.error(`SSH test failed for ${sshHost}:`, {
-        exitCode,
-        stderr: stderr.trim(),
-        stdout: stdout.trim(),
-      });
-    }
-
     return { works, error: works ? undefined : stderr.trim() };
   } catch (error) {
     const errorMsg = error instanceof Error ? error.message : String(error);
-    console.error(`SSH test exception for ${sshHost}:`, errorMsg);
     return { works: false, error: errorMsg };
   }
 }
@@ -825,11 +743,10 @@ export async function acceptGitHubInvitation(repoFullName: string): Promise<{
 export async function configureGitHubRemote(
   path: string,
   repoUrl: string,
-  githubUsername?: string,
   remoteName = "origin",
 ): Promise<{ success: boolean; error?: string }> {
   // Transform GitHub SSH URL based on environment and configuration
-  // Priority: CI token > Custom SSH (multi-account) > HTTPS with gh token > Fallback
+  // Priority: CI token > SSH > HTTPS with gh token
   let finalUrl = repoUrl;
 
   // CI/CD: Use HTTPS with GH_TOKEN
@@ -839,60 +756,41 @@ export async function configureGitHubRemote(
       finalUrl = `https://${process.env.GH_TOKEN}@github.com/${match[1]}`;
     }
   }
-  // Local: Try custom SSH host first, then fallback to HTTPS with gh token
-  else if (repoUrl.startsWith("git@github.com:") && githubUsername) {
-    const sshHost = `nemar-${githubUsername}-github`;
+  // Local: Try standard SSH first, then fallback to HTTPS with gh token
+  else if (repoUrl.startsWith("git@github.com:")) {
     const match = repoUrl.match(/git@github\.com:(.+)/);
 
     if (match) {
       const repoPath = match[1];
-
-      // Test if custom SSH host is configured and working
-      const sshResult = await testCustomSshHost(sshHost);
+      const sshResult = await testGitHubSsh();
 
       if (sshResult.works) {
-        // Use custom SSH host for multi-account support
-        finalUrl = `git@${sshHost}:${repoPath}`;
+        // Standard SSH works, use URL as-is
+        finalUrl = repoUrl;
       } else {
-        // SSH failed - try to use HTTPS with gh token as fallback
-        console.warn(
-          `Custom SSH host ${sshHost} not working: ${sshResult.error || "unknown error"}`,
-        );
-        console.warn("Falling back to HTTPS authentication with gh CLI token...");
+        // SSH failed, fall back to HTTPS with gh token
+        console.warn("GitHub SSH not available, falling back to HTTPS with gh CLI token...");
 
         const ghTokenResult = await getGitHubToken();
 
         if (ghTokenResult.token) {
-          // Use HTTPS with token authentication
           finalUrl = `https://${ghTokenResult.token}@github.com/${repoPath}`;
         } else {
-          // No custom SSH and no gh token - show helpful error with both failures
           return {
             success: false,
             error: `GitHub authentication not configured.
 
-Custom SSH host failed:
-  ${sshResult.error || "SSH test failed"}
+SSH failed: ${sshResult.error || "could not connect"}
+gh CLI failed: ${ghTokenResult.error || "could not get token"}
 
-gh CLI fallback failed:
-  ${ghTokenResult.error || "Could not get token"}
+Fix one of these:
+  1. Configure SSH for GitHub:
+     ssh-keygen -t ed25519 -C "your@email.com"
+     Add the public key to https://github.com/settings/keys
+     Test with: ssh -T git@github.com
 
-Fix one of these issues:
-  1. Configure custom SSH host (recommended for multiple GitHub accounts):
-     Add to ~/.ssh/config:
-
-     Host ${sshHost}
-       HostName github.com
-       User git
-       IdentityFile ~/.ssh/id_rsa
-       IdentitiesOnly yes
-
-     Test with: ssh -T git@${sshHost}
-
-  2. Install and authenticate gh CLI (automatic fallback):
-     gh auth login
-
-Choose option 2 for quick setup, or option 1 if you have multiple GitHub accounts.`,
+  2. Install and authenticate gh CLI:
+     gh auth login`,
           };
         }
       }
