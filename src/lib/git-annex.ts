@@ -167,18 +167,17 @@ export async function checkGitHubSSH(): Promise<{
   }
 
   try {
-    const { stdout, stderr, exitCode } = await runCommand(
-      [
-        "ssh",
-        "-T",
-        "-o",
-        "BatchMode=yes",
-        "-o",
-        "StrictHostKeyChecking=accept-new",
-        "git@github.com",
-      ],
-      { timeout: 10000 },
-    );
+    const { stdout, stderr, exitCode } = await runCommand([
+      "ssh",
+      "-T",
+      "-o",
+      "BatchMode=yes",
+      "-o",
+      "StrictHostKeyChecking=accept-new",
+      "-o",
+      "ConnectTimeout=10",
+      "git@github.com",
+    ]);
 
     // GitHub returns exit code 1 even on success, but message indicates auth
     const output = stdout + stderr;
