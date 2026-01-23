@@ -390,7 +390,11 @@ describe("E2E Upload Tests", () => {
       await denoCheck.exited;
       console.log("   Skipping: Deno is installed (test requires Deno to be absent)");
       return;
-    } catch {
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      if (!msg.includes("ENOENT") && !msg.includes("not found")) {
+        throw e;
+      }
       // Deno not installed - proceed with test
     }
 

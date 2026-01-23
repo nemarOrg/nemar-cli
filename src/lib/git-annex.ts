@@ -63,7 +63,6 @@ async function runCommand(
   options: {
     cwd?: string;
     env?: Record<string, string>;
-    timeout?: number;
   } = {},
 ): Promise<{ stdout: string; stderr: string; exitCode: number }> {
   const proc = spawn({
@@ -168,18 +167,17 @@ export async function checkGitHubSSH(): Promise<{
   }
 
   try {
-    const { stdout, stderr, exitCode } = await runCommand(
-      [
-        "ssh",
-        "-T",
-        "-o",
-        "BatchMode=yes",
-        "-o",
-        "StrictHostKeyChecking=accept-new",
-        "git@github.com",
-      ],
-      { timeout: 10000 },
-    );
+    const { stdout, stderr, exitCode } = await runCommand([
+      "ssh",
+      "-T",
+      "-o",
+      "BatchMode=yes",
+      "-o",
+      "StrictHostKeyChecking=accept-new",
+      "-o",
+      "ConnectTimeout=10",
+      "git@github.com",
+    ]);
 
     // GitHub returns exit code 1 even on success, but message indicates auth
     const output = stdout + stderr;
@@ -491,109 +489,34 @@ export async function configureS3Remote(
 }
 
 /**
- * Check if SSH config has nemar-{username}-github host configured
- * Returns instructions if not configured
- */
-export async function checkNemarGitHubSshConfig(
-  githubUsername: string,
-): Promise<{ configured: boolean; instructions?: string; sshHost?: string }> {
-  const sshHost = `nemar-${githubUsername}-github`;
-  const sshConfigPath = join(process.env.HOME || "~", ".ssh", "config");
-
-  // Check if SSH config exists and has the custom host
-  try {
-    if (!existsSync(sshConfigPath)) {
-      return {
-        configured: false,
-        sshHost,
-        instructions: getNemarSshConfigInstructions(githubUsername, sshHost),
-      };
-    }
-
-    const configContent = await Bun.file(sshConfigPath).text();
-
-    // Check if custom host is configured
-    if (!configContent.includes(`Host ${sshHost}`)) {
-      return {
-        configured: false,
-        sshHost,
-        instructions: getNemarSshConfigInstructions(githubUsername, sshHost),
-      };
-    }
-
-    return { configured: true, sshHost };
-  } catch (e) {
-    const errorMsg = e instanceof Error ? e.message : String(e);
-    console.warn(`Could not read SSH config at ${sshConfigPath}:`, errorMsg);
-    return {
-      configured: false,
-      sshHost,
-      instructions: getNemarSshConfigInstructions(githubUsername, sshHost),
-    };
-  }
-}
-
-/**
- * Generate SSH config instructions for NEMAR GitHub access
- */
-function getNemarSshConfigInstructions(githubUsername: string, sshHost: string): string {
-  return `
-SSH Configuration Required for NEMAR GitHub Access
-
-Add this to your ~/.ssh/config file:
-
-Host ${sshHost}
-  HostName github.com
-  User git
-  IdentityFile ~/.ssh/id_rsa
-  IdentitiesOnly yes
-
-Replace ~/.ssh/id_rsa with the path to your SSH key for GitHub account: @${githubUsername}
-
-This allows NEMAR to use the correct SSH key and GitHub account, even if you have 
-multiple GitHub accounts configured on your machine.
-
-After adding the config, test it with:
-  ssh -T git@${sshHost}
-
-It should respond with: "Hi ${githubUsername}! You've successfully authenticated..."
-`;
-}
-
-/**
- * Test if custom SSH host is configured and working
+ * Test if GitHub SSH access is configured and working
  *
  * Note: SSH test to GitHub returns exit code 1 even on success (GitHub's PTY restriction)
  * We check stderr for "successfully authenticated" message to confirm it works
  */
-async function testCustomSshHost(sshHost: string): Promise<{ works: boolean; error?: string }> {
+async function testGitHubSsh(): Promise<{ works: boolean; error?: string }> {
   try {
-    const { exitCode, stderr, stdout } = await runCommand([
+    const { exitCode, stderr } = await runCommand([
       "ssh",
       "-T",
       "-o",
       "BatchMode=yes",
       "-o",
       "ConnectTimeout=5",
-      `git@${sshHost}`,
+      "git@github.com",
     ]);
 
-    // SSH test succeeds with exit code 1 and "successfully authenticated" message
     const works = stderr.includes("successfully authenticated");
-
     if (!works) {
-      // Log the actual SSH error for debugging
-      console.error(`SSH test failed for ${sshHost}:`, {
+      console.warn("SSH test to github.com failed:", {
         exitCode,
-        stderr: stderr.trim(),
-        stdout: stdout.trim(),
+        stderr: stderr.trim().slice(0, 500),
       });
     }
-
-    return { works, error: works ? undefined : stderr.trim() };
+    return { works, error: works ? undefined : stderr.trim().slice(0, 500) };
   } catch (error) {
     const errorMsg = error instanceof Error ? error.message : String(error);
-    console.error(`SSH test exception for ${sshHost}:`, errorMsg);
+    console.warn("SSH test exception:", errorMsg);
     return { works: false, error: errorMsg };
   }
 }
@@ -825,76 +748,59 @@ export async function acceptGitHubInvitation(repoFullName: string): Promise<{
 export async function configureGitHubRemote(
   path: string,
   repoUrl: string,
-  githubUsername?: string,
   remoteName = "origin",
 ): Promise<{ success: boolean; error?: string }> {
   // Transform GitHub SSH URL based on environment and configuration
-  // Priority: CI token > Custom SSH (multi-account) > HTTPS with gh token > Fallback
+  // Priority: CI token > SSH > HTTPS with gh token
   let finalUrl = repoUrl;
 
   // CI/CD: Use HTTPS with GH_TOKEN
   if (process.env.GH_TOKEN && repoUrl.startsWith("git@github.com:")) {
-    const match = repoUrl.match(/git@github\.com:(.+)/);
-    if (match) {
-      finalUrl = `https://${process.env.GH_TOKEN}@github.com/${match[1]}`;
+    const token = process.env.GH_TOKEN.trim();
+    if (!token || /\s/.test(token)) {
+      return {
+        success: false,
+        error:
+          "GH_TOKEN environment variable is set but appears malformed (empty or contains whitespace)",
+      };
     }
+    const repoPath = repoUrl.replace("git@github.com:", "");
+    finalUrl = `https://${token}@github.com/${repoPath}`;
   }
-  // Local: Try custom SSH host first, then fallback to HTTPS with gh token
-  else if (repoUrl.startsWith("git@github.com:") && githubUsername) {
-    const sshHost = `nemar-${githubUsername}-github`;
-    const match = repoUrl.match(/git@github\.com:(.+)/);
+  // Local: Try standard SSH first, then fallback to HTTPS with gh token
+  else if (repoUrl.startsWith("git@github.com:")) {
+    const repoPath = repoUrl.replace("git@github.com:", "");
+    const sshResult = await testGitHubSsh();
 
-    if (match) {
-      const repoPath = match[1];
+    if (sshResult.works) {
+      finalUrl = repoUrl;
+    } else {
+      console.warn("GitHub SSH not available, falling back to HTTPS with gh CLI token...");
 
-      // Test if custom SSH host is configured and working
-      const sshResult = await testCustomSshHost(sshHost);
+      const ghTokenResult = await getGitHubToken();
 
-      if (sshResult.works) {
-        // Use custom SSH host for multi-account support
-        finalUrl = `git@${sshHost}:${repoPath}`;
-      } else {
-        // SSH failed - try to use HTTPS with gh token as fallback
+      if (ghTokenResult.token) {
+        finalUrl = `https://${ghTokenResult.token}@github.com/${repoPath}`;
         console.warn(
-          `Custom SSH host ${sshHost} not working: ${sshResult.error || "unknown error"}`,
+          "Note: using HTTPS with gh CLI token. If the token expires, re-run 'gh auth login'.",
         );
-        console.warn("Falling back to HTTPS authentication with gh CLI token...");
+      } else {
+        return {
+          success: false,
+          error: `GitHub authentication not configured.
 
-        const ghTokenResult = await getGitHubToken();
+SSH failed: ${sshResult.error || "could not connect"}
+gh CLI failed: ${ghTokenResult.error || "could not get token"}
 
-        if (ghTokenResult.token) {
-          // Use HTTPS with token authentication
-          finalUrl = `https://${ghTokenResult.token}@github.com/${repoPath}`;
-        } else {
-          // No custom SSH and no gh token - show helpful error with both failures
-          return {
-            success: false,
-            error: `GitHub authentication not configured.
+Fix one of these:
+  1. Configure SSH for GitHub:
+     ssh-keygen -t ed25519 -C "your@email.com"
+     Add the public key to https://github.com/settings/keys
+     Test with: ssh -T git@github.com
 
-Custom SSH host failed:
-  ${sshResult.error || "SSH test failed"}
-
-gh CLI fallback failed:
-  ${ghTokenResult.error || "Could not get token"}
-
-Fix one of these issues:
-  1. Configure custom SSH host (recommended for multiple GitHub accounts):
-     Add to ~/.ssh/config:
-
-     Host ${sshHost}
-       HostName github.com
-       User git
-       IdentityFile ~/.ssh/id_rsa
-       IdentitiesOnly yes
-
-     Test with: ssh -T git@${sshHost}
-
-  2. Install and authenticate gh CLI (automatic fallback):
-     gh auth login
-
-Choose option 2 for quick setup, or option 1 if you have multiple GitHub accounts.`,
-          };
-        }
+  2. Install and authenticate gh CLI:
+     gh auth login`,
+        };
       }
     }
   }
@@ -1015,7 +921,7 @@ export async function pushToS3(
     onProgress?: (progress: UploadProgress) => void;
   },
 ): Promise<{ success: boolean; error?: string; filesUploaded?: number }> {
-  const jobs = options.jobs || 8;
+  const jobs = options.jobs || 4;
 
   try {
     // Use git annex copy for data transfer
@@ -1182,9 +1088,9 @@ export interface PresignedUploadProgress {
 /**
  * Upload a single file to S3 using a presigned URL
  *
- * Includes retry logic to handle IAM eventual consistency delays.
- * AWS IAM policy changes can take time to propagate globally, so 403 errors
- * immediately after policy updates are retried with increasing delays.
+ * Includes retry logic for transient errors:
+ * - 403 AccessDenied: IAM eventual consistency delays after policy updates
+ * - 503 SlowDown: S3 rate limiting when too many concurrent requests hit the bucket
  */
 export async function uploadFileWithPresignedUrl(
   filePath: string,
@@ -1219,20 +1125,40 @@ export async function uploadFileWithPresignedUrl(
       const errorText = await response.text();
       lastError = `Upload failed: ${response.status} ${errorText}`;
 
-      // Only retry on 403 AccessDenied (likely IAM propagation delay)
+      // Retry on 403 AccessDenied (IAM propagation delay) or 503 SlowDown (rate limiting)
       const isIamError = response.status === 403 && errorText.includes("AccessDenied");
-      if (!isIamError || attempt === maxRetries) {
+      const isRateLimited = response.status === 503 && errorText.includes("SlowDown");
+      const isRetryable = isIamError || isRateLimited;
+
+      if (!isRetryable || attempt === maxRetries) {
+        if (isRetryable && attempt === maxRetries) {
+          console.warn(`Upload failed after ${maxRetries} retries: ${filePath}`);
+        }
         return { success: false, error: lastError };
       }
 
-      // Wait before retry: 10s, 15s, 20s, 25s (quadratic-ish growth)
-      const delayMs = initialDelayMs + attempt * 5000;
+      // Exponential backoff for rate limiting (4s, 8s, 16s, 30s cap); linear for IAM (10s, 15s, 20s, 25s)
+      const delayMs = isRateLimited
+        ? Math.min(4000 * 2 ** attempt, 30000)
+        : initialDelayMs + attempt * 5000;
+
+      if (isRateLimited) {
+        console.warn(
+          `S3 rate limit hit, retrying in ${delayMs / 1000}s (attempt ${attempt + 1}/${maxRetries})...`,
+        );
+      } else if (isIamError) {
+        console.warn(
+          `Waiting for S3 permissions to propagate, retrying in ${delayMs / 1000}s (attempt ${attempt + 1}/${maxRetries})...`,
+        );
+      }
+
       await new Promise((resolve) => setTimeout(resolve, delayMs));
     }
 
     return { success: false, error: lastError };
   } catch (error) {
-    return { success: false, error: (error as Error).message };
+    const errorMsg = error instanceof Error ? error.message : String(error);
+    return { success: false, error: `Failed to upload ${filePath}: ${errorMsg}` };
   }
 }
 
