@@ -63,7 +63,6 @@ async function runCommand(
   options: {
     cwd?: string;
     env?: Record<string, string>;
-    timeout?: number;
   } = {},
 ): Promise<{ stdout: string; stderr: string; exitCode: number }> {
   const proc = spawn({
@@ -512,10 +511,10 @@ async function testGitHubSsh(): Promise<{ works: boolean; error?: string }> {
     if (!works) {
       console.warn("SSH test to github.com failed:", {
         exitCode,
-        stderr: stderr.trim().slice(0, 200),
+        stderr: stderr.trim().slice(0, 500),
       });
     }
-    return { works, error: works ? undefined : stderr.trim() };
+    return { works, error: works ? undefined : stderr.trim().slice(0, 500) };
   } catch (error) {
     const errorMsg = error instanceof Error ? error.message : String(error);
     console.warn("SSH test exception:", errorMsg);
@@ -758,8 +757,16 @@ export async function configureGitHubRemote(
 
   // CI/CD: Use HTTPS with GH_TOKEN
   if (process.env.GH_TOKEN && repoUrl.startsWith("git@github.com:")) {
+    const token = process.env.GH_TOKEN.trim();
+    if (!token || /\s/.test(token)) {
+      return {
+        success: false,
+        error:
+          "GH_TOKEN environment variable is set but appears malformed (empty or contains whitespace)",
+      };
+    }
     const repoPath = repoUrl.replace("git@github.com:", "");
-    finalUrl = `https://${process.env.GH_TOKEN}@github.com/${repoPath}`;
+    finalUrl = `https://${token}@github.com/${repoPath}`;
   }
   // Local: Try standard SSH first, then fallback to HTTPS with gh token
   else if (repoUrl.startsWith("git@github.com:")) {
@@ -775,6 +782,9 @@ export async function configureGitHubRemote(
 
       if (ghTokenResult.token) {
         finalUrl = `https://${ghTokenResult.token}@github.com/${repoPath}`;
+        console.warn(
+          "Note: using HTTPS with gh CLI token. If the token expires, re-run 'gh auth login'.",
+        );
       } else {
         return {
           success: false,
@@ -1122,6 +1132,9 @@ export async function uploadFileWithPresignedUrl(
       const isRetryable = isIamError || isRateLimited;
 
       if (!isRetryable || attempt === maxRetries) {
+        if (isRetryable && attempt === maxRetries) {
+          console.warn(`Upload failed after ${maxRetries} retries: ${filePath}`);
+        }
         return { success: false, error: lastError };
       }
 
@@ -1145,7 +1158,8 @@ export async function uploadFileWithPresignedUrl(
 
     return { success: false, error: lastError };
   } catch (error) {
-    return { success: false, error: (error as Error).message };
+    const errorMsg = error instanceof Error ? error.message : String(error);
+    return { success: false, error: `Failed to upload ${filePath}: ${errorMsg}` };
   }
 }
 
