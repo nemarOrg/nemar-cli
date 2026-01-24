@@ -1439,6 +1439,151 @@ export async function getDatasetData(
 }
 
 /**
+ * Drop local copies of annexed files (keeps remote copies intact).
+ * Git-annex verifies remote copies exist before dropping.
+ */
+export async function dropFiles(
+  datasetPath: string,
+  paths?: string[],
+): Promise<{ success: boolean; error?: string; dropped: number; kept: string[] }> {
+  const targets = paths && paths.length > 0 ? paths : ["."];
+
+  try {
+    const args = ["git", "annex", "drop", ...targets];
+    const { stdout, stderr, exitCode } = await runCommand(args, { cwd: datasetPath });
+
+    if (exitCode !== 0) {
+      // git-annex drop returns non-zero if some files couldn't be dropped
+      // (e.g., no remote copies). Parse output for details.
+      const kept: string[] = [];
+      for (const line of stderr.split("\n")) {
+        const match = line.match(/^drop (.+) \(unsafe\)/);
+        if (match) kept.push(match[1]);
+      }
+      const dropMatches = stdout.match(/^drop .+ ok$/gm);
+      const dropped = dropMatches ? dropMatches.length : 0;
+      return { success: dropped > 0, error: stderr.trim(), dropped, kept };
+    }
+
+    const dropMatches = stdout.match(/^drop .+ ok$/gm);
+    const dropped = dropMatches ? dropMatches.length : 0;
+    return { success: true, dropped, kept: [] };
+  } catch (e) {
+    return { success: false, error: (e as Error).message, dropped: 0, kept: [] };
+  }
+}
+
+/**
+ * Get names of S3-type git-annex special remotes configured in a dataset.
+ * Parses `git annex info` output to find remotes of type S3.
+ */
+export async function getAnnexS3Remotes(datasetPath: string): Promise<string[]> {
+  try {
+    const { stdout, exitCode } = await runCommand(["git", "annex", "info"], { cwd: datasetPath });
+    if (exitCode !== 0) return [];
+
+    const remotes: string[] = [];
+    const lines = stdout.split("\n");
+    let inRemoteSection = false;
+
+    for (const line of lines) {
+      if (line.match(/^\s*(trusted|semitrusted|untrusted) repositories:/)) {
+        inRemoteSection = true;
+        continue;
+      }
+      if (
+        inRemoteSection &&
+        line.match(/^\s*\S/) &&
+        !line.startsWith("\t") &&
+        !line.startsWith(" ")
+      ) {
+        inRemoteSection = false;
+      }
+      // Remote lines look like: "\t12345678-... -- [s3]" or similar
+      // We need to check remote type separately
+    }
+
+    // More reliable: parse git-annex info --json for each remote
+    // But simpler: list remotes from git annex info and check their type
+    const { stdout: remoteList, exitCode: listCode } = await runCommand(
+      ["git", "config", "--get-regexp", "^remote\\..*\\.annex-s3"],
+      { cwd: datasetPath },
+    );
+
+    if (listCode === 0 && remoteList.trim()) {
+      for (const line of remoteList.trim().split("\n")) {
+        const match = line.match(/^remote\.(.+?)\.annex-/);
+        if (match) remotes.push(match[1]);
+      }
+    }
+
+    if (remotes.length > 0) return [...new Set(remotes)];
+
+    // Fallback: check for known S3 remote patterns via git annex info
+    const { stdout: infoJson, exitCode: jsonCode } = await runCommand(
+      ["git", "annex", "info", "--json"],
+      { cwd: datasetPath },
+    );
+
+    if (jsonCode === 0 && infoJson.trim()) {
+      try {
+        const info = JSON.parse(infoJson);
+        const repos = [
+          ...(info["trusted repositories"] || []),
+          ...(info["semitrusted repositories"] || []),
+          ...(info["untrusted repositories"] || []),
+        ];
+        for (const repo of repos) {
+          if (repo.description?.includes("[")) {
+            const nameMatch = repo.description.match(/\[(.+?)\]/);
+            if (nameMatch) {
+              const name = nameMatch[1];
+              // Check if this remote is S3 type
+              const { stdout: typeOut } = await runCommand(
+                ["git", "config", `remote.${name}.annex-s3`],
+                { cwd: datasetPath },
+              );
+              if (typeOut.trim()) remotes.push(name);
+            }
+          }
+        }
+      } catch {
+        // JSON parse failed, skip
+      }
+    }
+
+    return [...new Set(remotes)];
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Copy annexed content to a remote. Inherits environment credentials (AWS_ACCESS_KEY_ID, etc.).
+ * Suitable for push operations where the user has configured their own credentials.
+ */
+export async function copyToAnnexRemote(
+  datasetPath: string,
+  remoteName: string,
+  jobs = 4,
+): Promise<{ success: boolean; error?: string; filesCopied: number }> {
+  try {
+    const args = ["git", "annex", "copy", "--to", remoteName, "-J", jobs.toString(), "."];
+    const { stdout, stderr, exitCode } = await runCommand(args, { cwd: datasetPath });
+
+    if (exitCode !== 0) {
+      return { success: false, error: stderr.trim() || "Failed to copy to remote", filesCopied: 0 };
+    }
+
+    const copyMatches = stdout.match(/^copy .+ ok$/gm);
+    const filesCopied = copyMatches ? copyMatches.length : 0;
+    return { success: true, filesCopied };
+  } catch (e) {
+    return { success: false, error: (e as Error).message, filesCopied: 0 };
+  }
+}
+
+/**
  * Local dataset info returned by getLocalDatasetInfo
  */
 export interface LocalDatasetInfo {
