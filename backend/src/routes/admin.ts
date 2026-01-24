@@ -23,7 +23,8 @@ import {
   setRepoVisibility,
 } from "../services/github";
 import { generateIamUsername, revokeUserIamAccess, setupUserIamAccess } from "../services/iam";
-import { applyObjectLock } from "../services/s3";
+import { generateManifest } from "../services/manifest";
+import { applyObjectLock, uploadManifest } from "../services/s3";
 import { generateApiKey, hashApiKey } from "../services/token";
 import {
   type ZenodoDeposition,
@@ -1434,8 +1435,9 @@ adminRoutes.post("/publish/:id/deny", zValidator("json", denySchema), async (c) 
  * 1. ci_check - Verify CI exists and is passing (deploy if missing)
  * 2. repo_public - Make repository public
  * 3. doi_create - Create concept DOI if not exists
- * 4. s3_lock - Apply S3 Object Lock (Governance mode)
- * 5. notify_user - Send publication confirmation email
+ * 4. tag_protect - Apply tag protection rules (prevent version tag deletion)
+ * 5. s3_lock - Apply S3 Object Lock (Governance mode)
+ * 6. notify_user - Send publication confirmation email
  *
  * Body: { resume?: boolean } - if true, skip already-completed steps
  */
@@ -1462,7 +1464,14 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
   }
 
   const stepsCompleted: string[] = resume ? JSON.parse(request.steps_completed || "[]") : [];
-  const allSteps = ["ci_check", "repo_public", "doi_create", "s3_lock", "notify_user"];
+  const allSteps = [
+    "ci_check",
+    "repo_public",
+    "doi_create",
+    "tag_protect",
+    "s3_lock",
+    "notify_user",
+  ];
   const stepsToRun = allSteps.filter((s) => !stepsCompleted.includes(s));
 
   if (stepsToRun.length === 0) {
@@ -1682,7 +1691,43 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
     }
   }
 
-  // Step 4: S3 Object Lock
+  // Step 4: Tag protection
+  if (stepsToRun.includes("tag_protect")) {
+    try {
+      await db
+        .prepare(
+          "UPDATE publication_requests SET current_step = 'tag_protect', updated_at = datetime('now') WHERE id = ?",
+        )
+        .bind(requestId)
+        .run();
+
+      const { applyTagProtection } = await import("../services/github");
+      const tagProtected = await applyTagProtection(repoName, pat);
+
+      if (!tagProtected) {
+        await updateProgress("tag_protect", "Failed to apply tag protection rules");
+        return c.json(
+          {
+            error: "Tag protection failed",
+            step: "tag_protect",
+            steps_completed: completed,
+          },
+          500,
+        );
+      }
+
+      await updateProgress("tag_protect");
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      await updateProgress("tag_protect", msg);
+      return c.json(
+        { error: `Tag protection failed: ${msg}`, step: "tag_protect", steps_completed: completed },
+        500,
+      );
+    }
+  }
+
+  // Step 5: S3 Object Lock
   if (stepsToRun.includes("s3_lock")) {
     try {
       await db
@@ -1727,7 +1772,7 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
     }
   }
 
-  // Step 5: Notify user
+  // Step 6: Notify user
   if (stepsToRun.includes("notify_user")) {
     try {
       await db
@@ -1834,5 +1879,74 @@ adminRoutes.post("/datasets/:id/s3-lock", async (c) => {
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     return c.json({ error: `S3 lock failed: ${msg}` }, 500);
+  }
+});
+
+// ============================================================================
+// Manifest Generation
+// ============================================================================
+
+/**
+ * POST /admin/datasets/:id/manifest/:version - Generate or regenerate a version manifest
+ *
+ * Traverses the git tree at the given version tag and generates a JSON manifest
+ * mapping file paths to their S3 annex keys.
+ */
+adminRoutes.post("/datasets/:id/manifest/:version", async (c) => {
+  const datasetId = c.req.param("id");
+  const version = c.req.param("version");
+  const db = c.env.DB;
+
+  const dataset = await db
+    .prepare("SELECT dataset_id, github_repo, concept_doi FROM datasets WHERE dataset_id = ?")
+    .bind(datasetId)
+    .first<{ dataset_id: string; github_repo: string | null; concept_doi: string | null }>();
+
+  if (!dataset) {
+    return c.json({ error: "Dataset not found" }, 404);
+  }
+
+  if (!dataset.github_repo) {
+    return c.json({ error: "Dataset has no GitHub repository" }, 400);
+  }
+
+  const repoName = dataset.github_repo.split("/")[1];
+  if (!repoName) {
+    return c.json({ error: "Invalid repository format" }, 500);
+  }
+
+  const pat = c.env.GITHUB_ADMIN_PAT;
+
+  try {
+    const manifest = await generateManifest(
+      repoName,
+      version,
+      pat,
+      datasetId,
+      null, // version DOI not known at generation time from admin
+      dataset.concept_doi,
+    );
+
+    await uploadManifest(
+      {
+        bucket: c.env.S3_BUCKET,
+        region: c.env.AWS_REGION,
+        accessKeyId: c.env.AWS_ACCESS_KEY_ID,
+        secretAccessKey: c.env.AWS_SECRET_ACCESS_KEY,
+      },
+      datasetId,
+      version,
+      JSON.stringify(manifest, null, 2),
+    );
+
+    return c.json({
+      message: "Manifest generated and uploaded",
+      dataset_id: datasetId,
+      version: manifest.version,
+      files_count: Object.keys(manifest.files).length,
+    });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return c.json({ error: `Manifest generation failed: ${msg}` }, 500);
   }
 });

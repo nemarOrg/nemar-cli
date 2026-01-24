@@ -6,6 +6,8 @@
  */
 
 import { Hono } from "hono";
+import { generateManifest } from "../services/manifest.js";
+import { uploadManifest } from "../services/s3.js";
 import * as zenodo from "../services/zenodo.js";
 import type { Bindings } from "../types/bindings.js";
 
@@ -52,6 +54,7 @@ webhooks.post("/publish-version-doi", async (c) => {
       dataset_id: string;
       name: string;
       description: string | null;
+      github_repo: string | null;
       concept_doi: string | null;
       zenodo_concept_id: string | null;
     }>();
@@ -128,12 +131,51 @@ webhooks.post("/publish-version-doi", async (c) => {
 
     const baseUrl = sandbox ? "https://sandbox.zenodo.org" : "https://zenodo.org";
 
+    // Generate and upload version manifest
+    let manifestGenerated = false;
+    if (dataset.github_repo) {
+      try {
+        const repoName = dataset.github_repo.split("/")[1];
+        if (repoName) {
+          const pat = c.env.GITHUB_ADMIN_PAT;
+          const manifest = await generateManifest(
+            repoName,
+            version,
+            pat,
+            dataset_id,
+            published.doi,
+            dataset.concept_doi,
+          );
+
+          await uploadManifest(
+            {
+              bucket: c.env.S3_BUCKET,
+              region: c.env.AWS_REGION,
+              accessKeyId: c.env.AWS_ACCESS_KEY_ID,
+              secretAccessKey: c.env.AWS_SECRET_ACCESS_KEY,
+            },
+            dataset_id,
+            version,
+            JSON.stringify(manifest, null, 2),
+          );
+          manifestGenerated = true;
+        }
+      } catch (manifestError) {
+        // Non-fatal: DOI was published, manifest can be regenerated later
+        console.error(
+          `[webhook] Manifest generation failed for ${dataset_id}@${version}:`,
+          manifestError,
+        );
+      }
+    }
+
     return c.json({
       message: "Version DOI published successfully",
       version: version,
       version_doi: published.doi,
       concept_doi: dataset.concept_doi,
       zenodo_url: `${baseUrl}/records/${published.id}`,
+      manifest_generated: manifestGenerated,
     });
   } catch (error) {
     console.error("Zenodo publish error:", error);
