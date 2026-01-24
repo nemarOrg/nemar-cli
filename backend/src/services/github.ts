@@ -323,6 +323,85 @@ export async function createOrUpdateFile(
 }
 
 /**
+ * Set repository visibility (public or private)
+ */
+export async function setRepoVisibility(
+  repo: string,
+  isPrivate: boolean,
+  pat: string
+): Promise<boolean> {
+  const response = await fetch(`${GITHUB_API}/repos/${ORG_NAME}/${repo}`, {
+    method: "PATCH",
+    headers: {
+      Authorization: `Bearer ${pat}`,
+      Accept: "application/vnd.github.v3+json",
+      "User-Agent": "NEMAR-API",
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ private: isPrivate }),
+  });
+
+  return response.ok;
+}
+
+interface WorkflowRun {
+  id: number;
+  status: string;
+  conclusion: string | null;
+  created_at: string;
+  html_url: string;
+}
+
+/**
+ * Check if a workflow file exists in a repository
+ */
+export async function checkWorkflowExists(
+  repo: string,
+  workflowPath: string,
+  pat: string
+): Promise<boolean> {
+  const response = await fetch(
+    `${GITHUB_API}/repos/${ORG_NAME}/${repo}/contents/${workflowPath}`,
+    {
+      headers: {
+        Authorization: `Bearer ${pat}`,
+        Accept: "application/vnd.github.v3+json",
+        "User-Agent": "NEMAR-API",
+      },
+    }
+  );
+
+  return response.ok;
+}
+
+/**
+ * Get the latest workflow runs for a specific workflow file
+ */
+export async function getWorkflowRuns(
+  repo: string,
+  workflowFile: string,
+  pat: string
+): Promise<WorkflowRun[]> {
+  const response = await fetch(
+    `${GITHUB_API}/repos/${ORG_NAME}/${repo}/actions/workflows/${workflowFile}/runs?per_page=5`,
+    {
+      headers: {
+        Authorization: `Bearer ${pat}`,
+        Accept: "application/vnd.github.v3+json",
+        "User-Agent": "NEMAR-API",
+      },
+    }
+  );
+
+  if (!response.ok) {
+    return [];
+  }
+
+  const data = await response.json<{ workflow_runs: WorkflowRun[] }>();
+  return data.workflow_runs || [];
+}
+
+/**
  * Deploy GitHub Actions workflow files to a dataset repository
  */
 export async function deployWorkflows(repo: string, pat: string): Promise<{ success: boolean; errors: string[] }> {

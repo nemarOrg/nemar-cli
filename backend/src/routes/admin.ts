@@ -11,7 +11,13 @@ import type { Bindings, Variables } from "../types/bindings";
 import { authMiddleware, adminMiddleware } from "../middleware/auth";
 import { generateApiKey, hashApiKey } from "../services/token";
 import { sendApprovalEmail, sendRevocationEmail } from "../services/email";
-import { removeCollaborator } from "../services/github";
+import {
+  removeCollaborator,
+  setRepoVisibility,
+  checkWorkflowExists,
+  getWorkflowRuns,
+  deployWorkflows,
+} from "../services/github";
 import { encrypt, decrypt } from "../services/encryption";
 import {
   setupUserIamAccess,
@@ -1076,5 +1082,193 @@ adminRoutes.get("/datasets/:id/doi", async (c) => {
     zenodo_latest_version_url: dataset.zenodo_latest_version_id
       ? formatRecordUrl(parseInt(dataset.zenodo_latest_version_id))
       : null,
+  });
+});
+
+// ============================================================================
+// Repository Visibility
+// ============================================================================
+
+const visibilitySchema = z.object({
+  visibility: z.enum(["public", "private"]),
+});
+
+/**
+ * PATCH /admin/datasets/:id/visibility - Change repository visibility
+ */
+adminRoutes.patch("/datasets/:id/visibility", zValidator("json", visibilitySchema), async (c) => {
+  const datasetId = c.req.param("id");
+  const { visibility } = c.req.valid("json");
+  const db = c.env.DB;
+  const adminUser = c.get("user");
+
+  const dataset = await db
+    .prepare("SELECT dataset_id, github_repo FROM datasets WHERE dataset_id = ?")
+    .bind(datasetId)
+    .first<{ dataset_id: string; github_repo: string | null }>();
+
+  if (!dataset) {
+    return c.json({ error: "Dataset not found" }, 404);
+  }
+
+  if (!dataset.github_repo) {
+    return c.json({ error: "Dataset has no GitHub repository" }, 400);
+  }
+
+  const repoName = dataset.github_repo.split("/")[1];
+  if (!repoName) {
+    return c.json({ error: "Invalid repository format" }, 500);
+  }
+
+  const isPrivate = visibility === "private";
+  const success = await setRepoVisibility(repoName, isPrivate, c.env.GITHUB_ADMIN_PAT);
+
+  if (!success) {
+    return c.json({ error: `Failed to set repository to ${visibility}` }, 500);
+  }
+
+  await db
+    .prepare("INSERT INTO audit_log (user_id, action, resource_type, resource_id, details) VALUES (?, ?, ?, ?, ?)")
+    .bind(
+      adminUser.id,
+      "repo_visibility_changed",
+      "dataset",
+      datasetId,
+      JSON.stringify({ visibility, changed_by: adminUser.username })
+    )
+    .run();
+
+  return c.json({
+    message: `Repository visibility set to ${visibility}`,
+    dataset_id: datasetId,
+    visibility,
+  });
+});
+
+// ============================================================================
+// CI Management
+// ============================================================================
+
+/**
+ * GET /admin/datasets/:id/ci - Check CI workflow status
+ */
+adminRoutes.get("/datasets/:id/ci", async (c) => {
+  const datasetId = c.req.param("id");
+  const db = c.env.DB;
+
+  const dataset = await db
+    .prepare("SELECT dataset_id, github_repo FROM datasets WHERE dataset_id = ?")
+    .bind(datasetId)
+    .first<{ dataset_id: string; github_repo: string | null }>();
+
+  if (!dataset) {
+    return c.json({ error: "Dataset not found" }, 404);
+  }
+
+  if (!dataset.github_repo) {
+    return c.json({ error: "Dataset has no GitHub repository" }, 400);
+  }
+
+  const repoName = dataset.github_repo.split("/")[1];
+  if (!repoName) {
+    return c.json({ error: "Invalid repository format" }, 500);
+  }
+
+  const pat = c.env.GITHUB_ADMIN_PAT;
+
+  const bidsWorkflowExists = await checkWorkflowExists(
+    repoName,
+    ".github/workflows/bids-validation.yml",
+    pat
+  );
+
+  const versionCheckExists = await checkWorkflowExists(
+    repoName,
+    ".github/workflows/version-check.yml",
+    pat
+  );
+
+  let latestRunStatus = "unknown";
+  let latestRunUrl: string | null = null;
+
+  if (bidsWorkflowExists) {
+    const runs = await getWorkflowRuns(repoName, "bids-validation.yml", pat);
+    if (runs.length > 0) {
+      const latest = runs[0];
+      latestRunStatus = latest.conclusion || latest.status;
+      latestRunUrl = latest.html_url;
+    } else {
+      latestRunStatus = "no_runs";
+    }
+  }
+
+  return c.json({
+    dataset_id: datasetId,
+    bids_validation: {
+      present: bidsWorkflowExists,
+      status: bidsWorkflowExists ? latestRunStatus : "missing",
+      url: latestRunUrl,
+    },
+    version_check: {
+      present: versionCheckExists,
+    },
+  });
+});
+
+/**
+ * POST /admin/datasets/:id/ci - Deploy CI workflows to repository
+ */
+adminRoutes.post("/datasets/:id/ci", async (c) => {
+  const datasetId = c.req.param("id");
+  const db = c.env.DB;
+  const adminUser = c.get("user");
+
+  const dataset = await db
+    .prepare("SELECT dataset_id, github_repo FROM datasets WHERE dataset_id = ?")
+    .bind(datasetId)
+    .first<{ dataset_id: string; github_repo: string | null }>();
+
+  if (!dataset) {
+    return c.json({ error: "Dataset not found" }, 404);
+  }
+
+  if (!dataset.github_repo) {
+    return c.json({ error: "Dataset has no GitHub repository" }, 400);
+  }
+
+  const repoName = dataset.github_repo.split("/")[1];
+  if (!repoName) {
+    return c.json({ error: "Invalid repository format" }, 500);
+  }
+
+  const result = await deployWorkflows(repoName, c.env.GITHUB_ADMIN_PAT);
+
+  if (!result.success) {
+    return c.json({
+      error: "Failed to deploy some workflows",
+      deployed: 3 - result.errors.length,
+      failed: result.errors,
+    }, 500);
+  }
+
+  await db
+    .prepare("INSERT INTO audit_log (user_id, action, resource_type, resource_id, details) VALUES (?, ?, ?, ?, ?)")
+    .bind(
+      adminUser.id,
+      "ci_workflows_deployed",
+      "dataset",
+      datasetId,
+      JSON.stringify({ deployed_by: adminUser.username })
+    )
+    .run();
+
+  return c.json({
+    message: "CI workflows deployed successfully",
+    dataset_id: datasetId,
+    workflows_deployed: [
+      "bids-validation.yml",
+      "version-check.yml",
+      "pr-merge.yml",
+    ],
   });
 });

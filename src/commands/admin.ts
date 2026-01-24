@@ -4,13 +4,14 @@
  * These commands require admin privileges.
  *
  * Commands:
- * - nemar admin users          - List users (pending, approved, all)
- * - nemar admin approve        - Approve a pending user
- * - nemar admin revoke         - Revoke user access
- * - nemar admin regenerate-iam - Regenerate AWS credentials for a user
- * - nemar admin revert         - Revert dataset to a previous version
- * - nemar admin doi create     - Create concept DOI for dataset
- * - nemar admin doi info       - Get DOI info for dataset
+ * - nemar admin users              - List users (pending, approved, all)
+ * - nemar admin approve            - Approve a pending user
+ * - nemar admin revoke             - Revoke user access
+ * - nemar admin s3 regenerate-iam  - Regenerate AWS credentials for a user
+ * - nemar admin repo public/private - Change repository visibility
+ * - nemar admin ci check/add       - Manage CI workflows
+ * - nemar admin doi create/info    - DOI management
+ * - nemar admin revert             - Revert dataset to a previous version
  */
 
 import { existsSync } from "node:fs";
@@ -22,9 +23,12 @@ import ora from "ora";
 import {
   ApiError,
   type Dataset,
+  addCi,
   approveUser,
+  changeVisibility,
   createConceptDoi,
   finalizeDataset,
+  getCiStatus,
   getDataset,
   getDoiInfo,
   listUsers,
@@ -64,16 +68,20 @@ User Management:
   users          - List users and their status
   approve        - Approve a pending user registration
   revoke         - Revoke user access
-  regenerate-iam - Regenerate AWS credentials for a user
 
 Dataset Management:
+  repo     - Manage repository visibility (public/private)
+  ci       - Manage CI workflows (check status, deploy)
+  s3       - S3/IAM credential management
   doi      - Create and manage DOIs for datasets
   revert   - Revert dataset to previous version (via PR)
 
 Examples:
   $ nemar admin users --verified           # List users awaiting approval
   $ nemar admin approve john_doe           # Approve a user
-  $ nemar admin regenerate-iam john_doe    # Regenerate AWS credentials
+  $ nemar admin repo public nm000104       # Make dataset repo public
+  $ nemar admin ci check nm000104          # Check CI status
+  $ nemar admin s3 regenerate-iam john_doe # Regenerate AWS credentials
   $ nemar admin doi create nm000104        # Create concept DOI`,
   );
 
@@ -280,70 +288,275 @@ adminCommand
   });
 
 // ============================================================================
-// Regenerate IAM
+// S3 / IAM Management
 // ============================================================================
 
-adminCommand
+const s3Command = new Command("s3").description("S3 and IAM credential management");
+
+s3Command
   .command("regenerate-iam")
   .description("Regenerate AWS IAM credentials for a user")
   .argument("<username>", "Username to regenerate credentials for")
   .option(YES_OPTION, YES_DESCRIPTION)
   .option(NO_OPTION, NO_DESCRIPTION)
-  .action(async (username, options: ConfirmOptions) => {
+  .action(regenerateIamAction);
+
+adminCommand.addCommand(s3Command);
+
+// Hidden alias for backward compatibility
+adminCommand
+  .command("regenerate-iam", { hidden: true })
+  .argument("<username>")
+  .option(YES_OPTION, YES_DESCRIPTION)
+  .option(NO_OPTION, NO_DESCRIPTION)
+  .action(regenerateIamAction);
+
+async function regenerateIamAction(username: string, options: ConfirmOptions) {
+  if (!requireAuth()) return;
+
+  console.log(chalk.yellow(`\nRegenerate IAM credentials for: ${username}\n`));
+  console.log("This will:");
+  console.log("  1. Create new AWS IAM access keys for the user");
+  console.log("  2. Invalidate any existing access keys");
+  console.log("  3. Restore S3 access to their datasets");
+  console.log();
+  console.log(chalk.gray("Use this if a user's credentials were compromised or lost."));
+  console.log();
+
+  const confirmResult = await confirm(`Regenerate IAM credentials for ${username}?`, options);
+  if (confirmResult !== "confirmed") {
+    console.log(chalk.gray(confirmResult === "declined" ? "Skipped" : "Cancelled"));
+    return;
+  }
+
+  const spinner = ora(`Regenerating IAM credentials for ${username}...`).start();
+
+  try {
+    const result = await regenerateUserIam(username);
+    spinner.succeed(`Regenerated IAM credentials for ${username}`);
+    console.log();
+    console.log(`  IAM Username: ${chalk.cyan(result.user.iam_username)}`);
+    if (result.user.is_admin) {
+      console.log(`  Admin: ${chalk.magenta("yes (full bucket access)")}`);
+    }
+    console.log(`  Datasets restored: ${chalk.green(result.datasets_restored)}`);
+
+    if (result.warning) {
+      console.log();
+      console.log(chalk.yellow(`  Warning: ${result.warning}`));
+      console.log(chalk.gray("  Please verify old credentials are revoked in AWS console."));
+    }
+
+    console.log();
+    console.log(chalk.gray("The user can now upload to their datasets again."));
+  } catch (error) {
+    if (error instanceof ApiError) {
+      spinner.fail(error.message);
+      if (error.statusCode === 403) {
+        console.log(chalk.gray("  This command requires admin privileges"));
+      } else if (error.statusCode === 404) {
+        console.log(chalk.gray("  User not found or not approved"));
+      }
+    } else {
+      spinner.fail("Failed to regenerate IAM credentials");
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      console.log(chalk.gray(`  Error details: ${errorMessage}`));
+    }
+  }
+}
+
+// ============================================================================
+// Repository Management
+// ============================================================================
+
+const repoCommand = new Command("repo").description("Repository visibility management");
+
+repoCommand
+  .command("public")
+  .description("Make a dataset repository public")
+  .argument("<dataset-id>", "Dataset ID (e.g., nm000104)")
+  .option(YES_OPTION, YES_DESCRIPTION)
+  .option(NO_OPTION, NO_DESCRIPTION)
+  .action(async (datasetId, options: ConfirmOptions) => {
     if (!requireAuth()) return;
 
-    // Confirmation with warning
-    console.log(chalk.yellow(`\nRegenerate IAM credentials for: ${username}\n`));
-    console.log("This will:");
-    console.log("  1. Create new AWS IAM access keys for the user");
-    console.log("  2. Invalidate any existing access keys");
-    console.log("  3. Restore S3 access to their datasets");
-    console.log();
-    console.log(chalk.gray("Use this if a user's credentials were compromised or lost."));
+    console.log(chalk.cyan(`\nMaking repository public: ${datasetId}\n`));
+    console.log(chalk.yellow("Warning: This will make the dataset visible to everyone."));
     console.log();
 
-    const confirmResult = await confirm(`Regenerate IAM credentials for ${username}?`, options);
+    const confirmResult = await confirm(`Make ${datasetId} public?`, options);
     if (confirmResult !== "confirmed") {
       console.log(chalk.gray(confirmResult === "declined" ? "Skipped" : "Cancelled"));
       return;
     }
 
-    const spinner = ora(`Regenerating IAM credentials for ${username}...`).start();
-
+    const spinner = ora(`Setting ${datasetId} to public...`).start();
     try {
-      const result = await regenerateUserIam(username);
-      spinner.succeed(`Regenerated IAM credentials for ${username}`);
-      console.log();
-      console.log(`  IAM Username: ${chalk.cyan(result.user.iam_username)}`);
-      if (result.user.is_admin) {
-        console.log(`  Admin: ${chalk.magenta("yes (full bucket access)")}`);
-      }
-      console.log(`  Datasets restored: ${chalk.green(result.datasets_restored)}`);
-
-      // Show warning if old key revocation failed (security concern)
-      if (result.warning) {
-        console.log();
-        console.log(chalk.yellow(`  Warning: ${result.warning}`));
-        console.log(chalk.gray("  Please verify old credentials are revoked in AWS console."));
-      }
-
-      console.log();
-      console.log(chalk.gray("The user can now upload to their datasets again."));
+      await changeVisibility(datasetId, "public");
+      spinner.succeed(`Repository ${datasetId} is now public`);
     } catch (error) {
       if (error instanceof ApiError) {
         spinner.fail(error.message);
         if (error.statusCode === 403) {
           console.log(chalk.gray("  This command requires admin privileges"));
         } else if (error.statusCode === 404) {
-          console.log(chalk.gray("  User not found or not approved"));
+          console.log(chalk.gray("  Dataset not found"));
         }
       } else {
-        spinner.fail("Failed to regenerate IAM credentials");
-        const errorMessage = error instanceof Error ? error.message : String(error);
-        console.log(chalk.gray(`  Error details: ${errorMessage}`));
+        spinner.fail("Failed to change visibility");
       }
     }
   });
+
+repoCommand
+  .command("private")
+  .description("Make a dataset repository private")
+  .argument("<dataset-id>", "Dataset ID (e.g., nm000104)")
+  .option(YES_OPTION, YES_DESCRIPTION)
+  .option(NO_OPTION, NO_DESCRIPTION)
+  .action(async (datasetId, options: ConfirmOptions) => {
+    if (!requireAuth()) return;
+
+    console.log(chalk.yellow(`\nMaking repository private: ${datasetId}\n`));
+    console.log("This will restrict access to collaborators only.");
+    console.log();
+
+    const confirmResult = await confirm(`Make ${datasetId} private?`, options);
+    if (confirmResult !== "confirmed") {
+      console.log(chalk.gray(confirmResult === "declined" ? "Skipped" : "Cancelled"));
+      return;
+    }
+
+    const spinner = ora(`Setting ${datasetId} to private...`).start();
+    try {
+      await changeVisibility(datasetId, "private");
+      spinner.succeed(`Repository ${datasetId} is now private`);
+    } catch (error) {
+      if (error instanceof ApiError) {
+        spinner.fail(error.message);
+        if (error.statusCode === 403) {
+          console.log(chalk.gray("  This command requires admin privileges"));
+        } else if (error.statusCode === 404) {
+          console.log(chalk.gray("  Dataset not found"));
+        }
+      } else {
+        spinner.fail("Failed to change visibility");
+      }
+    }
+  });
+
+adminCommand.addCommand(repoCommand);
+
+// ============================================================================
+// CI Management
+// ============================================================================
+
+const ciCommand = new Command("ci").description("CI workflow management");
+
+ciCommand
+  .command("check")
+  .description("Check CI workflow status for a dataset")
+  .argument("<dataset-id>", "Dataset ID (e.g., nm000104)")
+  .action(async (datasetId) => {
+    if (!requireAuth()) return;
+
+    const spinner = ora(`Checking CI status for ${datasetId}...`).start();
+
+    try {
+      const result = await getCiStatus(datasetId);
+      spinner.stop();
+
+      console.log(`\n${chalk.cyan("CI Status:")} ${datasetId}\n`);
+
+      // BIDS Validation
+      const bidsPresent = result.bids_validation.present;
+      const bidsIcon = bidsPresent ? chalk.green("[x]") : chalk.red("[ ]");
+      console.log(`  ${bidsIcon} BIDS Validation`);
+      if (bidsPresent) {
+        const statusColor =
+          result.bids_validation.status === "success"
+            ? chalk.green
+            : result.bids_validation.status === "failure"
+              ? chalk.red
+              : chalk.yellow;
+        console.log(`      Status: ${statusColor(result.bids_validation.status)}`);
+        if (result.bids_validation.url) {
+          console.log(`      URL:    ${chalk.gray(result.bids_validation.url)}`);
+        }
+      } else {
+        console.log(`      ${chalk.gray("Not deployed. Use 'nemar admin ci add' to deploy.")}`);
+      }
+
+      // Version Check
+      const versionPresent = result.version_check.present;
+      const versionIcon = versionPresent ? chalk.green("[x]") : chalk.red("[ ]");
+      console.log(`  ${versionIcon} Version Check`);
+      if (!versionPresent) {
+        console.log(`      ${chalk.gray("Not deployed. Use 'nemar admin ci add' to deploy.")}`);
+      }
+
+      console.log();
+    } catch (error) {
+      if (error instanceof ApiError) {
+        spinner.fail(error.message);
+        if (error.statusCode === 403) {
+          console.log(chalk.gray("  This command requires admin privileges"));
+        } else if (error.statusCode === 404) {
+          console.log(chalk.gray("  Dataset not found"));
+        }
+      } else {
+        spinner.fail("Failed to check CI status");
+      }
+    }
+  });
+
+ciCommand
+  .command("add")
+  .description("Deploy CI workflows to a dataset repository")
+  .argument("<dataset-id>", "Dataset ID (e.g., nm000104)")
+  .option(YES_OPTION, YES_DESCRIPTION)
+  .option(NO_OPTION, NO_DESCRIPTION)
+  .action(async (datasetId, options: ConfirmOptions) => {
+    if (!requireAuth()) return;
+
+    console.log(chalk.cyan(`\nDeploy CI workflows to: ${datasetId}\n`));
+    console.log("This will add the following workflows:");
+    console.log("  1. BIDS Validation (runs on PRs)");
+    console.log("  2. Version Check (ensures version bump on PRs)");
+    console.log("  3. PR Merge Handler (creates releases, publishes DOIs)");
+    console.log();
+
+    const confirmResult = await confirm(`Deploy CI workflows to ${datasetId}?`, options);
+    if (confirmResult !== "confirmed") {
+      console.log(chalk.gray(confirmResult === "declined" ? "Skipped" : "Cancelled"));
+      return;
+    }
+
+    const spinner = ora(`Deploying CI workflows to ${datasetId}...`).start();
+
+    try {
+      const result = await addCi(datasetId);
+      spinner.succeed("CI workflows deployed");
+      console.log();
+      for (const workflow of result.workflows_deployed) {
+        console.log(`  ${chalk.green("[x]")} ${workflow}`);
+      }
+      console.log();
+    } catch (error) {
+      if (error instanceof ApiError) {
+        spinner.fail(error.message);
+        if (error.statusCode === 403) {
+          console.log(chalk.gray("  This command requires admin privileges"));
+        } else if (error.statusCode === 404) {
+          console.log(chalk.gray("  Dataset not found"));
+        }
+      } else {
+        spinner.fail("Failed to deploy CI workflows");
+      }
+    }
+  });
+
+adminCommand.addCommand(ciCommand);
 
 // ============================================================================
 // DOI (placeholder for future implementation)

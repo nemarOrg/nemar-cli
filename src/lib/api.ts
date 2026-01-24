@@ -342,6 +342,73 @@ export async function regenerateUserIam(username: string): Promise<RegenerateIam
 }
 
 // ============================================================================
+// Admin - Repository Management
+// ============================================================================
+
+export interface VisibilityResponse {
+  message: string;
+  dataset_id: string;
+  visibility: "public" | "private";
+}
+
+/**
+ * Change dataset repository visibility (admin only)
+ */
+export async function changeVisibility(
+  datasetId: string,
+  visibility: "public" | "private",
+): Promise<VisibilityResponse> {
+  return request<VisibilityResponse>(
+    `/admin/datasets/${datasetId}/visibility`,
+    {
+      method: "PATCH",
+      body: JSON.stringify({ visibility }),
+    },
+    true,
+  );
+}
+
+// ============================================================================
+// Admin - CI Management
+// ============================================================================
+
+export interface CiStatusResponse {
+  dataset_id: string;
+  bids_validation: {
+    present: boolean;
+    status: string;
+    url: string | null;
+  };
+  version_check: {
+    present: boolean;
+  };
+}
+
+/**
+ * Get CI workflow status for a dataset (admin only)
+ */
+export async function getCiStatus(datasetId: string): Promise<CiStatusResponse> {
+  return request<CiStatusResponse>(`/admin/datasets/${datasetId}/ci`, {}, true);
+}
+
+export interface AddCiResponse {
+  message: string;
+  dataset_id: string;
+  workflows_deployed: string[];
+}
+
+/**
+ * Deploy CI workflows to a dataset repository (admin only)
+ */
+export async function addCi(datasetId: string): Promise<AddCiResponse> {
+  return request<AddCiResponse>(
+    `/admin/datasets/${datasetId}/ci`,
+    { method: "POST" },
+    true,
+  );
+}
+
+// ============================================================================
 // Datasets
 // ============================================================================
 
