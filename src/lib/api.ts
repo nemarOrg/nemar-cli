@@ -761,3 +761,121 @@ export async function getSandboxStatus(): Promise<{
     sandbox_completed_at?: string;
   }>("/sandbox/status", {}, true);
 }
+
+// ============================================================================
+// Publication Workflow
+// ============================================================================
+
+export interface PublishStatusResponse {
+  dataset_id: string;
+  status: string;
+  requested_at?: string;
+  requested_by?: string;
+  approved_at?: string | null;
+  denied_at?: string | null;
+  denied_reason?: string | null;
+  steps_completed?: string[];
+  current_step?: string | null;
+  last_error?: string | null;
+  updated_at?: string;
+  message?: string;
+}
+
+export interface PublishRequestsResponse {
+  requests: Array<{
+    id: number;
+    dataset_id: string;
+    status: string;
+    requested_at: string;
+    requested_by_username: string;
+    requested_by_email: string;
+    steps_completed: string[];
+    current_step: string | null;
+    last_error: string | null;
+  }>;
+  count: number;
+}
+
+export interface PublishApproveResponse {
+  message: string;
+  dataset_id: string;
+  status?: string;
+  steps_completed?: string[];
+  error?: string;
+  step?: string;
+}
+
+/**
+ * Request publication of a dataset (user)
+ */
+export async function requestPublication(
+  datasetId: string,
+): Promise<{ message: string; dataset_id: string; status: string }> {
+  return request<{ message: string; dataset_id: string; status: string }>(
+    `/datasets/${datasetId}/publish/request`,
+    { method: "POST" },
+    true,
+  );
+}
+
+/**
+ * Get publication status (user)
+ */
+export async function getPublishStatus(datasetId: string): Promise<PublishStatusResponse> {
+  return request<PublishStatusResponse>(`/datasets/${datasetId}/publish/status`, {}, true);
+}
+
+/**
+ * Resend publication notification (user)
+ */
+export async function resendPublishNotification(datasetId: string): Promise<{ message: string }> {
+  return request<{ message: string }>(
+    `/datasets/${datasetId}/publish/resend`,
+    { method: "POST" },
+    true,
+  );
+}
+
+/**
+ * List publication requests (admin)
+ */
+export async function listPublishRequests(status?: string): Promise<PublishRequestsResponse> {
+  const query = status ? `?status=${status}` : "";
+  return request<PublishRequestsResponse>(`/admin/publish/requests${query}`, {}, true);
+}
+
+/**
+ * Deny publication request (admin)
+ */
+export async function denyPublication(
+  datasetId: string,
+  reason: string,
+): Promise<{ message: string }> {
+  return request<{ message: string }>(
+    `/admin/publish/${datasetId}/deny`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ reason }),
+    },
+    true,
+  );
+}
+
+/**
+ * Approve publication request (admin) - runs orchestrator
+ */
+export async function approvePublication(
+  datasetId: string,
+  resume = false,
+): Promise<PublishApproveResponse> {
+  return request<PublishApproveResponse>(
+    `/admin/publish/${datasetId}/approve`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ resume }),
+    },
+    true,
+  );
+}

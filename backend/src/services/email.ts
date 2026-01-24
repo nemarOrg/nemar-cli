@@ -288,3 +288,157 @@ export async function sendRevocationEmail(
 
   await sendEmail(to, "NEMAR account access revoked", html, resendApiKey);
 }
+
+/**
+ * Notify admins that a user has requested publication of a dataset
+ */
+export async function sendPublicationRequestEmail(
+  adminEmails: string[],
+  datasetId: string,
+  username: string,
+  resendApiKey: string,
+): Promise<void> {
+  const html = `
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+</head>
+<body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; line-height: 1.6; color: #333; max-width: 600px; margin: 0 auto; padding: 20px;">
+  <h1 style="color: #2563eb;">Publication Request</h1>
+
+  <p>User <strong>${username}</strong> has requested publication of dataset <strong>${datasetId}</strong>.</p>
+
+  <h2 style="color: #333; font-size: 18px; margin-top: 30px;">Action Required</h2>
+  <p>Review the dataset and approve or deny the request:</p>
+
+  <div style="background: #f4f4f5; padding: 16px; border-radius: 8px; font-family: monospace; font-size: 14px; margin: 16px 0;">
+    <span style="color: #16a34a;">nemar admin publish approve</span> ${datasetId}<br>
+    <span style="color: #dc2626;">nemar admin publish deny</span> ${datasetId} --reason "..."
+  </div>
+
+  <p style="color: #666; font-size: 14px;">
+    To see all pending requests:<br>
+    <code style="background: #f4f4f5; padding: 2px 6px; border-radius: 4px;">nemar admin publish list</code>
+  </p>
+
+  <hr style="border: none; border-top: 1px solid #eee; margin: 30px 0;">
+  <p style="color: #999; font-size: 12px;">
+    NEMAR - Neuroelectromagnetic Data Archive and Tools Resource<br>
+    Part of <a href="https://osc.earth" style="color: #999;">Open Science Collective</a>
+  </p>
+</body>
+</html>
+  `;
+
+  for (const adminEmail of adminEmails) {
+    try {
+      await sendEmail(
+        adminEmail,
+        `[NEMAR] Publication request: ${datasetId} by ${username}`,
+        html,
+        resendApiKey,
+      );
+    } catch (error) {
+      console.error(`Failed to send publication request email to ${adminEmail}:`, error);
+    }
+  }
+}
+
+/**
+ * Notify user that their publication request was denied
+ */
+export async function sendPublicationDeniedEmail(
+  to: string,
+  username: string,
+  datasetId: string,
+  reason: string,
+  resendApiKey: string,
+): Promise<void> {
+  const html = `
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+</head>
+<body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; line-height: 1.6; color: #333; max-width: 600px; margin: 0 auto; padding: 20px;">
+  <h1 style="color: #f59e0b;">Publication Request Denied</h1>
+
+  <p>Hello ${username},</p>
+
+  <p>Your publication request for dataset <strong>${datasetId}</strong> has been reviewed and denied.</p>
+
+  <h2 style="color: #333; font-size: 18px; margin-top: 30px;">Reason</h2>
+  <div style="background-color: #fef3c7; padding: 16px; border-radius: 8px; margin: 16px 0; border-left: 4px solid #f59e0b;">
+    ${reason}
+  </div>
+
+  <p>You can address the issues and submit a new request:</p>
+  <div style="background: #f4f4f5; padding: 16px; border-radius: 8px; font-family: monospace; font-size: 14px; margin: 16px 0;">
+    nemar dataset publish request ${datasetId}
+  </div>
+
+  <hr style="border: none; border-top: 1px solid #eee; margin: 30px 0;">
+  <p style="color: #999; font-size: 12px;">
+    NEMAR - Neuroelectromagnetic Data Archive and Tools Resource<br>
+    Part of <a href="https://osc.earth" style="color: #999;">Open Science Collective</a>
+  </p>
+</body>
+</html>
+  `;
+
+  await sendEmail(to, `Publication request denied: ${datasetId}`, html, resendApiKey);
+}
+
+/**
+ * Notify user that their dataset has been published
+ */
+export async function sendPublicationApprovedEmail(
+  to: string,
+  username: string,
+  datasetId: string,
+  doi: string | null,
+  resendApiKey: string,
+): Promise<void> {
+  const doiSection = doi
+    ? `<h2 style="color: #333; font-size: 18px; margin-top: 30px;">DOI</h2>
+       <p>Your dataset has been assigned the following DOI:</p>
+       <div style="background-color: #f4f4f5; padding: 16px; border-radius: 8px; font-family: monospace; font-size: 14px; margin: 16px 0;">
+         <a href="https://doi.org/${doi}" style="color: #2563eb;">${doi}</a>
+       </div>`
+    : "";
+
+  const html = `
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+</head>
+<body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; line-height: 1.6; color: #333; max-width: 600px; margin: 0 auto; padding: 20px;">
+  <h1 style="color: #16a34a;">Dataset Published!</h1>
+
+  <p>Hello ${username},</p>
+
+  <p>Your dataset <strong>${datasetId}</strong> has been published and is now publicly available.</p>
+
+  ${doiSection}
+
+  <p>You can check the status of your dataset:</p>
+  <div style="background: #f4f4f5; padding: 16px; border-radius: 8px; font-family: monospace; font-size: 14px; margin: 16px 0;">
+    nemar dataset publish status ${datasetId}
+  </div>
+
+  <hr style="border: none; border-top: 1px solid #eee; margin: 30px 0;">
+  <p style="color: #999; font-size: 12px;">
+    NEMAR - Neuroelectromagnetic Data Archive and Tools Resource<br>
+    Part of <a href="https://osc.earth" style="color: #999;">Open Science Collective</a>
+  </p>
+</body>
+</html>
+  `;
+
+  await sendEmail(to, `Dataset published: ${datasetId}`, html, resendApiKey);
+}

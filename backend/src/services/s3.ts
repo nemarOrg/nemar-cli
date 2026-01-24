@@ -121,3 +121,100 @@ export async function generateDatasetUploadUrls(
     expiresIn: 3600,
   });
 }
+
+/**
+ * List all object keys under a given prefix
+ */
+export async function listObjectKeys(
+  options: PresignedUrlOptions,
+  prefix: string,
+): Promise<string[]> {
+  const { bucket, region } = options;
+  const aws = createS3Client(options);
+  const keys: string[] = [];
+  let continuationToken: string | undefined;
+
+  do {
+    const params = new URLSearchParams({
+      "list-type": "2",
+      prefix,
+      ...(continuationToken ? { "continuation-token": continuationToken } : {}),
+    });
+
+    const url = `https://${bucket}.s3.${region}.amazonaws.com/?${params.toString()}`;
+    const response = await aws.sign(url, { method: "GET" });
+    const res = await fetch(response);
+
+    if (!res.ok) {
+      throw new Error(`Failed to list objects: HTTP ${res.status}`);
+    }
+
+    const xml = await res.text();
+
+    // Parse keys from XML response
+    const keyMatches = xml.matchAll(/<Key>([^<]+)<\/Key>/g);
+    for (const match of keyMatches) {
+      keys.push(match[1]);
+    }
+
+    // Check for continuation
+    const truncated = xml.includes("<IsTruncated>true</IsTruncated>");
+    if (truncated) {
+      const tokenMatch = xml.match(/<NextContinuationToken>([^<]+)<\/NextContinuationToken>/);
+      continuationToken = tokenMatch?.[1];
+    } else {
+      continuationToken = undefined;
+    }
+  } while (continuationToken);
+
+  return keys;
+}
+
+/**
+ * Apply S3 Object Lock (Governance mode) to all objects under a dataset prefix.
+ * Uses a 100-year retention period to effectively make objects immutable.
+ */
+export async function applyObjectLock(
+  options: PresignedUrlOptions,
+  datasetId: string,
+): Promise<{ locked: number; failed: string[] }> {
+  const { bucket, region } = options;
+  const aws = createS3Client(options);
+
+  const keys = await listObjectKeys(options, `${datasetId}/`);
+  const failed: string[] = [];
+  let locked = 0;
+
+  // Retention date: 100 years from now
+  const retainUntil = new Date();
+  retainUntil.setFullYear(retainUntil.getFullYear() + 100);
+  const retainUntilStr = retainUntil.toISOString();
+
+  for (const key of keys) {
+    const retentionXml = `<?xml version="1.0" encoding="UTF-8"?>
+<Retention xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+  <Mode>GOVERNANCE</Mode>
+  <RetainUntilDate>${retainUntilStr}</RetainUntilDate>
+</Retention>`;
+
+    const url = `https://${bucket}.s3.${region}.amazonaws.com/${encodeURIComponent(key)}?retention`;
+    try {
+      const signed = await aws.sign(url, {
+        method: "PUT",
+        headers: { "Content-Type": "application/xml" },
+        body: retentionXml,
+      });
+
+      const res = await fetch(signed);
+      if (res.ok) {
+        locked++;
+      } else {
+        failed.push(key);
+      }
+    } catch {
+      failed.push(key);
+    }
+  }
+
+  return { locked, failed };
+}

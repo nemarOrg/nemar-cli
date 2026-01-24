@@ -9,6 +9,7 @@ import { Hono } from "hono";
 import { z } from "zod";
 import { authMiddleware, optionalAuthMiddleware } from "../middleware/auth";
 import { generateDatasetId, isValidDatasetId } from "../services/datasetId";
+import { sendPublicationRequestEmail } from "../services/email";
 import { decrypt } from "../services/encryption";
 import {
   type GitHubRepo,
@@ -863,5 +864,210 @@ datasetRoutes.get("/:id/collaborators", authMiddleware, async (c) => {
     dataset_id: datasetId,
     collaborators: collaborators.results,
     count: collaborators.results.length,
+  });
+});
+
+// ============================================================================
+// Publication Workflow (User-facing)
+// ============================================================================
+
+/**
+ * POST /datasets/:id/publish/request - Request publication of a dataset
+ */
+datasetRoutes.post("/:id/publish/request", authMiddleware, async (c) => {
+  const datasetId = c.req.param("id");
+  const currentUser = c.get("user");
+  const db = c.env.DB;
+
+  const dataset = await db
+    .prepare("SELECT id, dataset_id, owner_user_id, is_sandbox FROM datasets WHERE dataset_id = ?")
+    .bind(datasetId)
+    .first<{ id: number; dataset_id: string; owner_user_id: number; is_sandbox: number | null }>();
+
+  if (!dataset) {
+    return c.json({ error: "Dataset not found" }, 404);
+  }
+
+  if (dataset.owner_user_id !== currentUser.id && !currentUser.is_admin) {
+    return c.json({ error: "Only the dataset owner can request publication" }, 403);
+  }
+
+  if (dataset.is_sandbox || dataset.dataset_id.startsWith("xx")) {
+    return c.json({ error: "Cannot publish sandbox datasets" }, 400);
+  }
+
+  // Check for existing active request
+  const existing = await db
+    .prepare(
+      "SELECT id, status FROM publication_requests WHERE dataset_id = ? AND status IN ('requested', 'approving') ORDER BY requested_at DESC LIMIT 1",
+    )
+    .bind(datasetId)
+    .first<{ id: number; status: string }>();
+
+  if (existing) {
+    return c.json(
+      {
+        error: "A publication request already exists",
+        status: existing.status,
+        message:
+          existing.status === "approving"
+            ? "Publication is in progress"
+            : "Use 'resend' to remind admins",
+      },
+      409,
+    );
+  }
+
+  // Create publication request
+  await db
+    .prepare("INSERT INTO publication_requests (dataset_id, requested_by) VALUES (?, ?)")
+    .bind(datasetId, currentUser.id)
+    .run();
+
+  // Notify admins
+  try {
+    const admins = await db
+      .prepare("SELECT email FROM users WHERE is_admin = 1")
+      .all<{ email: string }>();
+
+    const adminEmails = admins.results.map((a) => a.email);
+    if (adminEmails.length > 0) {
+      await sendPublicationRequestEmail(
+        adminEmails,
+        datasetId,
+        currentUser.username,
+        c.env.RESEND_API_KEY,
+      );
+    }
+  } catch (emailError) {
+    console.error("Failed to send publication request notification:", emailError);
+  }
+
+  return c.json({
+    message: "Publication request submitted",
+    dataset_id: datasetId,
+    status: "requested",
+  });
+});
+
+/**
+ * GET /datasets/:id/publish/status - Get publication status
+ */
+datasetRoutes.get("/:id/publish/status", authMiddleware, async (c) => {
+  const datasetId = c.req.param("id");
+  const currentUser = c.get("user");
+  const db = c.env.DB;
+
+  const dataset = await db
+    .prepare("SELECT id, owner_user_id FROM datasets WHERE dataset_id = ?")
+    .bind(datasetId)
+    .first<{ id: number; owner_user_id: number }>();
+
+  if (!dataset) {
+    return c.json({ error: "Dataset not found" }, 404);
+  }
+
+  if (dataset.owner_user_id !== currentUser.id && !currentUser.is_admin) {
+    return c.json({ error: "Only the dataset owner or admin can view publication status" }, 403);
+  }
+
+  const request = await db
+    .prepare(
+      `SELECT pr.*, u.username as requested_by_username
+       FROM publication_requests pr
+       JOIN users u ON pr.requested_by = u.id
+       WHERE pr.dataset_id = ?
+       ORDER BY pr.requested_at DESC
+       LIMIT 1`,
+    )
+    .bind(datasetId)
+    .first<{
+      id: number;
+      dataset_id: string;
+      status: string;
+      requested_at: string;
+      requested_by_username: string;
+      approved_at: string | null;
+      denied_at: string | null;
+      denied_reason: string | null;
+      steps_completed: string;
+      current_step: string | null;
+      last_error: string | null;
+      updated_at: string;
+    }>();
+
+  if (!request) {
+    return c.json({
+      dataset_id: datasetId,
+      status: "none",
+      message: "No publication request found",
+    });
+  }
+
+  return c.json({
+    dataset_id: datasetId,
+    status: request.status,
+    requested_at: request.requested_at,
+    requested_by: request.requested_by_username,
+    approved_at: request.approved_at,
+    denied_at: request.denied_at,
+    denied_reason: request.denied_reason,
+    steps_completed: JSON.parse(request.steps_completed || "[]"),
+    current_step: request.current_step,
+    last_error: request.last_error,
+    updated_at: request.updated_at,
+  });
+});
+
+/**
+ * POST /datasets/:id/publish/resend - Resend publication request notification
+ */
+datasetRoutes.post("/:id/publish/resend", authMiddleware, async (c) => {
+  const datasetId = c.req.param("id");
+  const currentUser = c.get("user");
+  const db = c.env.DB;
+
+  const dataset = await db
+    .prepare("SELECT id, owner_user_id FROM datasets WHERE dataset_id = ?")
+    .bind(datasetId)
+    .first<{ id: number; owner_user_id: number }>();
+
+  if (!dataset) {
+    return c.json({ error: "Dataset not found" }, 404);
+  }
+
+  if (dataset.owner_user_id !== currentUser.id && !currentUser.is_admin) {
+    return c.json({ error: "Only the dataset owner can resend notifications" }, 403);
+  }
+
+  const request = await db
+    .prepare(
+      "SELECT id, status FROM publication_requests WHERE dataset_id = ? AND status = 'requested' ORDER BY requested_at DESC LIMIT 1",
+    )
+    .bind(datasetId)
+    .first<{ id: number; status: string }>();
+
+  if (!request) {
+    return c.json({ error: "No pending publication request found" }, 404);
+  }
+
+  // Resend notification to admins
+  const admins = await db
+    .prepare("SELECT email FROM users WHERE is_admin = 1")
+    .all<{ email: string }>();
+
+  const adminEmails = admins.results.map((a) => a.email);
+  if (adminEmails.length > 0) {
+    await sendPublicationRequestEmail(
+      adminEmails,
+      datasetId,
+      currentUser.username,
+      c.env.RESEND_API_KEY,
+    );
+  }
+
+  return c.json({
+    message: "Notification resent to admins",
+    dataset_id: datasetId,
   });
 });

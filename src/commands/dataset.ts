@@ -25,11 +25,14 @@ import {
   type DatasetsListResponse,
   createDataset,
   getDataset,
+  getPublishStatus,
   inviteCollaborator,
   listCollaborators,
   listDatasets,
   requestDatasetAccess,
+  requestPublication,
   requestUploadUrls,
+  resendPublishNotification,
 } from "../lib/api.js";
 import {
   type BidsValidationResult,
@@ -1272,3 +1275,157 @@ Examples:
       process.exit(1);
     }
   });
+
+// ============================================================================
+// Publication Workflow
+// ============================================================================
+
+const publishCommand = new Command("publish").description("Publication workflow management");
+
+publishCommand
+  .command("request")
+  .description("Request publication of a dataset")
+  .argument("<dataset-id>", "Dataset ID (e.g., nm000104)")
+  .action(async (datasetId) => {
+    if (!isAuthenticated()) {
+      console.log(chalk.red("Error: Not authenticated"));
+      console.log("Run 'nemar auth login' first");
+      process.exit(1);
+    }
+
+    const spinner = ora(`Requesting publication for ${datasetId}...`).start();
+
+    try {
+      const result = await requestPublication(datasetId);
+      spinner.succeed(result.message);
+      console.log(
+        chalk.gray(
+          "\n  Admins have been notified. Use 'nemar dataset publish status' to check progress.",
+        ),
+      );
+    } catch (error) {
+      if (error instanceof ApiError) {
+        spinner.fail(error.message);
+        console.log(chalk.gray(`  ${error.message}`));
+        if (error.statusCode === 409) {
+          console.log(chalk.gray("  Use 'nemar dataset publish resend' to remind admins."));
+        } else if (error.statusCode === 403) {
+          console.log(chalk.gray("  Only the dataset owner can request publication."));
+        }
+      } else {
+        spinner.fail("Failed to request publication");
+        const msg = error instanceof Error ? error.message : String(error);
+        console.log(chalk.gray(`  Error details: ${msg}`));
+      }
+    }
+  });
+
+publishCommand
+  .command("status")
+  .description("Check publication status of a dataset")
+  .argument("<dataset-id>", "Dataset ID (e.g., nm000104)")
+  .action(async (datasetId) => {
+    if (!isAuthenticated()) {
+      console.log(chalk.red("Error: Not authenticated"));
+      console.log("Run 'nemar auth login' first");
+      process.exit(1);
+    }
+
+    const spinner = ora(`Checking publication status for ${datasetId}...`).start();
+
+    try {
+      const result = await getPublishStatus(datasetId);
+      spinner.stop();
+
+      console.log(`\n${chalk.cyan("Publication Status:")} ${datasetId}\n`);
+
+      const statusColor =
+        result.status === "published"
+          ? chalk.green
+          : result.status === "denied"
+            ? chalk.red
+            : result.status === "approving"
+              ? chalk.yellow
+              : chalk.gray;
+
+      console.log(`  Status: ${statusColor(result.status)}`);
+
+      if (result.requested_at) {
+        console.log(`  Requested: ${chalk.gray(result.requested_at)}`);
+      }
+      if (result.requested_by) {
+        console.log(`  Requested by: ${chalk.gray(result.requested_by)}`);
+      }
+
+      if (result.status === "denied" && result.denied_reason) {
+        console.log(`\n  ${chalk.red("Reason:")} ${result.denied_reason}`);
+      }
+
+      if (result.status === "approving") {
+        const steps = ["ci_check", "repo_public", "doi_create", "s3_lock", "notify_user"];
+        const completed = result.steps_completed || [];
+        console.log("\n  Steps:");
+        for (const step of steps) {
+          const done = completed.includes(step);
+          const isCurrent = result.current_step === step;
+          const icon = done
+            ? chalk.green("[x]")
+            : isCurrent
+              ? chalk.yellow("[>]")
+              : chalk.gray("[ ]");
+          const label = step.replace(/_/g, " ");
+          console.log(
+            `    ${icon} ${label}${isCurrent && result.last_error ? chalk.red(` (error: ${result.last_error})`) : ""}`,
+          );
+        }
+      }
+
+      if (result.status === "published" && result.approved_at) {
+        console.log(`  Published: ${chalk.gray(result.approved_at)}`);
+      }
+
+      console.log();
+    } catch (error) {
+      if (error instanceof ApiError) {
+        spinner.fail(error.message);
+        console.log(chalk.gray(`  ${error.message}`));
+      } else {
+        spinner.fail("Failed to check publication status");
+        const msg = error instanceof Error ? error.message : String(error);
+        console.log(chalk.gray(`  Error details: ${msg}`));
+      }
+    }
+  });
+
+publishCommand
+  .command("resend")
+  .description("Resend publication request notification to admins")
+  .argument("<dataset-id>", "Dataset ID (e.g., nm000104)")
+  .action(async (datasetId) => {
+    if (!isAuthenticated()) {
+      console.log(chalk.red("Error: Not authenticated"));
+      console.log("Run 'nemar auth login' first");
+      process.exit(1);
+    }
+
+    const spinner = ora(`Resending notification for ${datasetId}...`).start();
+
+    try {
+      const result = await resendPublishNotification(datasetId);
+      spinner.succeed(result.message);
+    } catch (error) {
+      if (error instanceof ApiError) {
+        spinner.fail(error.message);
+        console.log(chalk.gray(`  ${error.message}`));
+        if (error.statusCode === 404) {
+          console.log(chalk.gray("  Publication request not found for this dataset."));
+        }
+      } else {
+        spinner.fail("Failed to resend notification");
+        const msg = error instanceof Error ? error.message : String(error);
+        console.log(chalk.gray(`  Error details: ${msg}`));
+      }
+    }
+  });
+
+datasetCommand.addCommand(publishCommand);
