@@ -642,3 +642,123 @@ Changes in this release:
 
   return { success: errors.length === 0, errors };
 }
+
+// ============================================================================
+// Git Tree and Blob API (for manifest generation)
+// ============================================================================
+
+export interface TreeEntry {
+  path: string;
+  mode: string;
+  type: "blob" | "tree";
+  sha: string;
+  size?: number;
+}
+
+/**
+ * Get the recursive git tree at a given ref (tag, branch, or commit SHA).
+ * Returns all entries (blobs and trees) in the repository at that ref.
+ */
+export async function getTreeAtRef(repo: string, ref: string, pat: string): Promise<TreeEntry[]> {
+  // First resolve the ref to a commit SHA
+  const refResponse = await fetch(`${GITHUB_API}/repos/${ORG_NAME}/${repo}/commits/${ref}`, {
+    headers: {
+      Authorization: `Bearer ${pat}`,
+      Accept: "application/vnd.github.v3+json",
+      "User-Agent": "NEMAR-API",
+    },
+  });
+
+  if (!refResponse.ok) {
+    throw new Error(`Failed to resolve ref '${ref}': HTTP ${refResponse.status}`);
+  }
+
+  const commit = await refResponse.json<{ sha: string; commit: { tree: { sha: string } } }>();
+  const treeSha = commit.commit.tree.sha;
+
+  // Get the tree recursively
+  const treeResponse = await fetch(
+    `${GITHUB_API}/repos/${ORG_NAME}/${repo}/git/trees/${treeSha}?recursive=1`,
+    {
+      headers: {
+        Authorization: `Bearer ${pat}`,
+        Accept: "application/vnd.github.v3+json",
+        "User-Agent": "NEMAR-API",
+      },
+    },
+  );
+
+  if (!treeResponse.ok) {
+    throw new Error(`Failed to get tree: HTTP ${treeResponse.status}`);
+  }
+
+  const tree = await treeResponse.json<{ tree: TreeEntry[]; truncated: boolean }>();
+  if (tree.truncated) {
+    console.warn(`[manifest] Tree for ${repo}@${ref} was truncated (very large repo)`);
+  }
+
+  return tree.tree.filter((entry) => entry.type === "blob");
+}
+
+/**
+ * Get the content of a blob by SHA. Returns the decoded text content.
+ * Uses the blob API to get base64-encoded content.
+ */
+export async function getBlobContent(repo: string, blobSha: string, pat: string): Promise<string> {
+  const response = await fetch(`${GITHUB_API}/repos/${ORG_NAME}/${repo}/git/blobs/${blobSha}`, {
+    headers: {
+      Authorization: `Bearer ${pat}`,
+      Accept: "application/vnd.github.v3+json",
+      "User-Agent": "NEMAR-API",
+    },
+  });
+
+  if (!response.ok) {
+    throw new Error(`Failed to get blob ${blobSha}: HTTP ${response.status}`);
+  }
+
+  const blob = await response.json<{ content: string; encoding: string }>();
+  if (blob.encoding === "base64") {
+    return atob(blob.content.replace(/\n/g, ""));
+  }
+  return blob.content;
+}
+
+// ============================================================================
+// Tag Protection
+// ============================================================================
+
+/**
+ * Apply tag protection rules to prevent deletion of version tags.
+ * Protects tags matching the pattern "v*" (semver version tags).
+ */
+export async function applyTagProtection(repo: string, pat: string): Promise<boolean> {
+  const response = await fetch(`${GITHUB_API}/repos/${ORG_NAME}/${repo}/rulesets`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${pat}`,
+      Accept: "application/vnd.github.v3+json",
+      "User-Agent": "NEMAR-API",
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      name: "Protect version tags",
+      target: "tag",
+      enforcement: "active",
+      conditions: {
+        ref_name: {
+          include: ["refs/tags/v*"],
+          exclude: [],
+        },
+      },
+      rules: [{ type: "deletion" }, { type: "update" }],
+    }),
+  });
+
+  if (response.ok || response.status === 201) return true;
+  // 422 means rule already exists
+  if (response.status === 422) return true;
+
+  console.error(`[tag-protection] Failed for ${repo}: HTTP ${response.status}`);
+  return false;
+}

@@ -22,7 +22,7 @@ import {
   getWorkflowRuns,
 } from "../services/github";
 import { grantDatasetAccess } from "../services/iam";
-import { generateDatasetUploadUrls } from "../services/s3";
+import { generateDatasetUploadUrls, getManifest, listManifests } from "../services/s3";
 import type { Bindings, Variables } from "../types/bindings";
 
 export const datasetRoutes = new Hono<{ Bindings: Bindings; Variables: Variables }>();
@@ -1163,4 +1163,87 @@ datasetRoutes.get("/:id/ci/status", authMiddleware, async (c) => {
       url: latestRunUrl,
     },
   });
+});
+
+// ============================================================================
+// Version Manifests
+// ============================================================================
+
+/**
+ * GET /datasets/:id/manifest - List available version manifests
+ */
+datasetRoutes.get("/:id/manifest", optionalAuthMiddleware, async (c) => {
+  const datasetId = c.req.param("id");
+  const db = c.env.DB;
+
+  const dataset = await db
+    .prepare("SELECT dataset_id, visibility, owner_user_id FROM datasets WHERE dataset_id = ?")
+    .bind(datasetId)
+    .first<{ dataset_id: string; visibility: string; owner_user_id: number }>();
+
+  if (!dataset) {
+    return c.json({ error: "Dataset not found" }, 404);
+  }
+
+  // Public datasets: anyone can view manifests
+  // Private datasets: only owner/admin
+  if (dataset.visibility !== "public") {
+    const user = c.get("user");
+    if (!user || (!user.is_admin && user.id !== dataset.owner_user_id)) {
+      return c.json({ error: "Access denied" }, 403);
+    }
+  }
+
+  const s3Options = {
+    bucket: c.env.S3_BUCKET,
+    region: c.env.AWS_REGION,
+    accessKeyId: c.env.AWS_ACCESS_KEY_ID,
+    secretAccessKey: c.env.AWS_SECRET_ACCESS_KEY,
+  };
+
+  const versions = await listManifests(s3Options, datasetId);
+
+  return c.json({
+    dataset_id: datasetId,
+    versions,
+  });
+});
+
+/**
+ * GET /datasets/:id/manifest/:version - Get a specific version manifest
+ */
+datasetRoutes.get("/:id/manifest/:version", optionalAuthMiddleware, async (c) => {
+  const datasetId = c.req.param("id");
+  const version = c.req.param("version");
+  const db = c.env.DB;
+
+  const dataset = await db
+    .prepare("SELECT dataset_id, visibility, owner_user_id FROM datasets WHERE dataset_id = ?")
+    .bind(datasetId)
+    .first<{ dataset_id: string; visibility: string; owner_user_id: number }>();
+
+  if (!dataset) {
+    return c.json({ error: "Dataset not found" }, 404);
+  }
+
+  if (dataset.visibility !== "public") {
+    const user = c.get("user");
+    if (!user || (!user.is_admin && user.id !== dataset.owner_user_id)) {
+      return c.json({ error: "Access denied" }, 403);
+    }
+  }
+
+  const s3Options = {
+    bucket: c.env.S3_BUCKET,
+    region: c.env.AWS_REGION,
+    accessKeyId: c.env.AWS_ACCESS_KEY_ID,
+    secretAccessKey: c.env.AWS_SECRET_ACCESS_KEY,
+  };
+
+  const manifestJson = await getManifest(s3Options, datasetId, version);
+  if (!manifestJson) {
+    return c.json({ error: "Manifest not found for this version" }, 404);
+  }
+
+  return c.json(JSON.parse(manifestJson));
 });

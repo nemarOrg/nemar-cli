@@ -27,11 +27,13 @@ import {
   addCi,
   createDataset,
   getDataset,
+  getManifest,
   getPublishStatus,
   getUserCiStatus,
   inviteCollaborator,
   listCollaborators,
   listDatasets,
+  listManifestVersions,
   requestDatasetAccess,
   requestPublication,
   requestUploadUrls,
@@ -1893,3 +1895,127 @@ Examples:
       process.exit(1);
     }
   });
+
+// Manifest command
+datasetCommand
+  .command("manifest")
+  .description("View version manifests for a dataset")
+  .argument("[version]", "Version to view (lists available if omitted)")
+  .option("-d, --dataset <id>", "Dataset ID (auto-detected from git remote if omitted)")
+  .option("--json", "Output raw JSON")
+  .addHelpText(
+    "after",
+    `
+Description:
+  View version manifests that map file paths to S3 annex keys.
+  Manifests are generated when a version DOI is published.
+
+  When run inside a dataset directory, the dataset ID is auto-detected.
+
+Examples:
+  $ nemar dataset manifest                    # List available versions
+  $ nemar dataset manifest v1.0.0             # View specific version
+  $ nemar dataset manifest v1.0.0 --json      # Raw JSON output
+  $ nemar dataset manifest -d nm000104        # Explicit dataset ID`,
+  )
+  .action(async (version, options) => {
+    if (!isAuthenticated()) {
+      console.log(chalk.red("Error: Not authenticated"));
+      console.log("Run 'nemar auth login' first");
+      process.exit(1);
+    }
+
+    // Resolve dataset ID
+    let datasetId = options.dataset;
+    if (!datasetId) {
+      const cwd = process.cwd();
+      if (await isGitAnnexDataset(cwd)) {
+        datasetId = await getDatasetIdFromRemote(cwd);
+      }
+      if (!datasetId) {
+        console.log(chalk.red("Error: Could not detect dataset ID"));
+        console.log(chalk.gray("Provide dataset ID: nemar dataset manifest -d <id>"));
+        process.exit(1);
+      }
+    }
+
+    const spinner = ora("Fetching manifest info...").start();
+
+    try {
+      if (!version) {
+        // List available versions
+        const result = await listManifestVersions(datasetId);
+        spinner.stop();
+
+        console.log(chalk.bold(`Manifests: ${datasetId}`));
+        console.log();
+
+        if (result.versions.length === 0) {
+          console.log(chalk.gray("  No manifests available yet."));
+          console.log(chalk.gray("  Manifests are generated when a version DOI is published."));
+        } else {
+          for (const v of result.versions) {
+            console.log(`  ${chalk.cyan(v)}`);
+          }
+        }
+        console.log();
+      } else {
+        // Get specific manifest
+        const manifest = await getManifest(datasetId, version);
+        spinner.stop();
+
+        if (options.json) {
+          console.log(JSON.stringify(manifest, null, 2));
+        } else {
+          console.log(chalk.bold(`Manifest: ${datasetId} ${manifest.version}`));
+          if (manifest.doi) {
+            console.log(`  DOI: ${chalk.cyan(manifest.doi)}`);
+          }
+          if (manifest.concept_doi) {
+            console.log(`  Concept DOI: ${chalk.gray(manifest.concept_doi)}`);
+          }
+          console.log(`  Created: ${manifest.created}`);
+          console.log();
+
+          const fileEntries = Object.entries(manifest.files);
+          const annexed = fileEntries.filter(([, f]) => !f.key.startsWith("git:"));
+          const gitFiles = fileEntries.filter(([, f]) => f.key.startsWith("git:"));
+
+          if (annexed.length > 0) {
+            console.log(chalk.bold(`  Annexed files (${annexed.length}):`));
+            for (const [path, file] of annexed) {
+              const sizeStr = formatSize(file.size);
+              console.log(`    ${path} ${chalk.gray(`(${sizeStr})`)}`);
+            }
+          }
+
+          if (gitFiles.length > 0) {
+            console.log();
+            console.log(chalk.bold(`  Metadata files (${gitFiles.length}):`));
+            for (const [path, file] of gitFiles) {
+              const sizeStr = formatSize(file.size);
+              console.log(`    ${path} ${chalk.gray(`(${sizeStr})`)}`);
+            }
+          }
+          console.log();
+        }
+      }
+    } catch (error) {
+      if (error instanceof ApiError) {
+        spinner.fail(error.message);
+      } else {
+        spinner.fail("Failed to fetch manifest");
+        const msg = error instanceof Error ? error.message : String(error);
+        console.log(chalk.gray(`  ${msg}`));
+      }
+      process.exit(1);
+    }
+  });
+
+function formatSize(bytes: number): string {
+  if (bytes === 0) return "0 B";
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  const i = Math.floor(Math.log(bytes) / Math.log(1024));
+  const size = bytes / 1024 ** i;
+  return `${size.toFixed(i > 0 ? 1 : 0)} ${units[i]}`;
+}

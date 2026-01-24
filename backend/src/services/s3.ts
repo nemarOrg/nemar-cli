@@ -171,6 +171,80 @@ export async function listObjectKeys(
 }
 
 /**
+ * Upload a JSON manifest to S3 at the dataset's manifest path.
+ * Stored at: <datasetId>/manifests/v<version>.json
+ */
+export async function uploadManifest(
+  options: PresignedUrlOptions,
+  datasetId: string,
+  version: string,
+  manifestJson: string,
+): Promise<void> {
+  const { bucket, region } = options;
+  const aws = createS3Client(options);
+  const versionTag = version.startsWith("v") ? version : `v${version}`;
+  const key = `${datasetId}/manifests/${versionTag}.json`;
+  const encodedKey = key.split("/").map(encodeURIComponent).join("/");
+  const url = `https://${bucket}.s3.${region}.amazonaws.com/${encodedKey}`;
+
+  const signed = await aws.sign(url, {
+    method: "PUT",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: manifestJson,
+  });
+
+  const response = await fetch(signed);
+  if (!response.ok) {
+    throw new Error(`Failed to upload manifest: HTTP ${response.status}`);
+  }
+}
+
+/**
+ * Get a manifest from S3. Returns null if not found.
+ */
+export async function getManifest(
+  options: PresignedUrlOptions,
+  datasetId: string,
+  version: string,
+): Promise<string | null> {
+  const { bucket, region } = options;
+  const aws = createS3Client(options);
+  const versionTag = version.startsWith("v") ? version : `v${version}`;
+  const key = `${datasetId}/manifests/${versionTag}.json`;
+  const encodedKey = key.split("/").map(encodeURIComponent).join("/");
+  const url = `https://${bucket}.s3.${region}.amazonaws.com/${encodedKey}`;
+
+  const signed = await aws.sign(url, { method: "GET" });
+  const response = await fetch(signed);
+
+  if (response.status === 404 || response.status === 403) return null;
+  if (!response.ok) {
+    throw new Error(`Failed to get manifest: HTTP ${response.status}`);
+  }
+
+  return response.text();
+}
+
+/**
+ * List available manifest versions for a dataset.
+ */
+export async function listManifests(
+  options: PresignedUrlOptions,
+  datasetId: string,
+): Promise<string[]> {
+  const keys = await listObjectKeys(options, `${datasetId}/manifests/`);
+  return keys
+    .filter((k) => k.endsWith(".json"))
+    .map((k) => {
+      const filename = k.split("/").pop() ?? "";
+      return filename.replace(".json", "");
+    })
+    .sort();
+}
+
+/**
  * Apply S3 Object Lock (Governance mode) to all objects under a dataset prefix.
  * Uses a 100-year retention period to effectively make objects immutable.
  */

@@ -421,6 +421,44 @@ export async function getUserCiStatus(datasetId: string): Promise<UserCiStatusRe
 }
 
 // ============================================================================
+// Manifests
+// ============================================================================
+
+export interface ManifestFile {
+  key: string;
+  size: number;
+  checksum: string;
+}
+
+export interface VersionManifest {
+  dataset_id: string;
+  version: string;
+  doi: string | null;
+  concept_doi: string | null;
+  created: string;
+  files: Record<string, ManifestFile>;
+}
+
+export interface ManifestListResponse {
+  dataset_id: string;
+  versions: string[];
+}
+
+/**
+ * List available version manifests for a dataset
+ */
+export async function listManifestVersions(datasetId: string): Promise<ManifestListResponse> {
+  return request<ManifestListResponse>(`/datasets/${datasetId}/manifest`, {}, true);
+}
+
+/**
+ * Get a specific version manifest for a dataset
+ */
+export async function getManifest(datasetId: string, version: string): Promise<VersionManifest> {
+  return request<VersionManifest>(`/datasets/${datasetId}/manifest/${version}`, {}, true);
+}
+
+// ============================================================================
 // Datasets
 // ============================================================================
 
