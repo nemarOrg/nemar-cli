@@ -1042,14 +1042,27 @@ datasetRoutes.post("/:id/publish/resend", authMiddleware, async (c) => {
 
   const request = await db
     .prepare(
-      "SELECT id, status FROM publication_requests WHERE dataset_id = ? AND status = 'requested' ORDER BY requested_at DESC LIMIT 1",
+      "SELECT id, status, updated_at FROM publication_requests WHERE dataset_id = ? AND status = 'requested' ORDER BY requested_at DESC LIMIT 1",
     )
     .bind(datasetId)
-    .first<{ id: number; status: string }>();
+    .first<{ id: number; status: string; updated_at: string }>();
 
   if (!request) {
     return c.json({ error: "No pending publication request found" }, 404);
   }
+
+  // Rate limit: 30 minutes between resends
+  const lastUpdate = new Date(request.updated_at).getTime();
+  const cooldownMs = 30 * 60 * 1000;
+  if (Date.now() - lastUpdate < cooldownMs) {
+    return c.json({ error: "Please wait before resending (30 min cooldown)" }, 429);
+  }
+
+  // Update timestamp for rate limiting
+  await db
+    .prepare("UPDATE publication_requests SET updated_at = datetime('now') WHERE id = ?")
+    .bind(request.id)
+    .run();
 
   // Resend notification to admins
   const admins = await db

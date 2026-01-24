@@ -1371,7 +1371,7 @@ adminRoutes.get("/publish/requests", async (c) => {
  * POST /admin/publish/:id/deny - Deny a publication request
  */
 const denySchema = z.object({
-  reason: z.string().min(1, "Reason is required"),
+  reason: z.string().min(1, "Reason is required").max(2000, "Reason too long"),
 });
 
 adminRoutes.post("/publish/:id/deny", zValidator("json", denySchema), async (c) => {
@@ -1551,23 +1551,22 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
         await deployWorkflows(repoName, pat);
       }
 
-      // Check latest run status
-      if (bidsExists) {
-        const runs = await getWorkflowRuns(repoName, "bids-validation.yml", pat);
-        if (runs.length > 0) {
-          const latest = runs[0];
-          if (latest.conclusion === "failure") {
-            await updateProgress("ci_check", "BIDS validation CI is failing");
-            return c.json(
-              {
-                error: "CI check failed: BIDS validation is failing",
-                dataset_id: datasetId,
-                step: "ci_check",
-                steps_completed: completed,
-              },
-              422,
-            );
-          }
+      // Check latest run status (if workflow existed, verify it passes)
+      // Freshly deployed workflows have no runs yet, which is acceptable
+      const runs = await getWorkflowRuns(repoName, "bids-validation.yml", pat);
+      if (runs.length > 0) {
+        const latest = runs[0];
+        if (latest.conclusion === "failure") {
+          await updateProgress("ci_check", "BIDS validation CI is failing");
+          return c.json(
+            {
+              error: "CI check failed: BIDS validation is failing",
+              dataset_id: datasetId,
+              step: "ci_check",
+              steps_completed: completed,
+            },
+            422,
+          );
         }
       }
 

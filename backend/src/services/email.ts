@@ -290,6 +290,18 @@ export async function sendRevocationEmail(
 }
 
 /**
+ * Escape HTML special characters to prevent XSS in email templates
+ */
+function escapeHtml(str: string): string {
+  return str
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#039;");
+}
+
+/**
  * Notify admins that a user has requested publication of a dataset
  */
 export async function sendPublicationRequestEmail(
@@ -308,14 +320,14 @@ export async function sendPublicationRequestEmail(
 <body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; line-height: 1.6; color: #333; max-width: 600px; margin: 0 auto; padding: 20px;">
   <h1 style="color: #2563eb;">Publication Request</h1>
 
-  <p>User <strong>${username}</strong> has requested publication of dataset <strong>${datasetId}</strong>.</p>
+  <p>User <strong>${escapeHtml(username)}</strong> has requested publication of dataset <strong>${escapeHtml(datasetId)}</strong>.</p>
 
   <h2 style="color: #333; font-size: 18px; margin-top: 30px;">Action Required</h2>
   <p>Review the dataset and approve or deny the request:</p>
 
   <div style="background: #f4f4f5; padding: 16px; border-radius: 8px; font-family: monospace; font-size: 14px; margin: 16px 0;">
-    <span style="color: #16a34a;">nemar admin publish approve</span> ${datasetId}<br>
-    <span style="color: #dc2626;">nemar admin publish deny</span> ${datasetId} --reason "..."
+    <span style="color: #16a34a;">nemar admin publish approve</span> ${escapeHtml(datasetId)}<br>
+    <span style="color: #dc2626;">nemar admin publish deny</span> ${escapeHtml(datasetId)} --reason "..."
   </div>
 
   <p style="color: #666; font-size: 14px;">
@@ -366,18 +378,18 @@ export async function sendPublicationDeniedEmail(
 <body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; line-height: 1.6; color: #333; max-width: 600px; margin: 0 auto; padding: 20px;">
   <h1 style="color: #f59e0b;">Publication Request Denied</h1>
 
-  <p>Hello ${username},</p>
+  <p>Hello ${escapeHtml(username)},</p>
 
-  <p>Your publication request for dataset <strong>${datasetId}</strong> has been reviewed and denied.</p>
+  <p>Your publication request for dataset <strong>${escapeHtml(datasetId)}</strong> has been reviewed and denied.</p>
 
   <h2 style="color: #333; font-size: 18px; margin-top: 30px;">Reason</h2>
   <div style="background-color: #fef3c7; padding: 16px; border-radius: 8px; margin: 16px 0; border-left: 4px solid #f59e0b;">
-    ${reason}
+    ${escapeHtml(reason)}
   </div>
 
   <p>You can address the issues and submit a new request:</p>
   <div style="background: #f4f4f5; padding: 16px; border-radius: 8px; font-family: monospace; font-size: 14px; margin: 16px 0;">
-    nemar dataset publish request ${datasetId}
+    nemar dataset publish request ${escapeHtml(datasetId)}
   </div>
 
   <hr style="border: none; border-top: 1px solid #eee; margin: 30px 0;">
@@ -402,11 +414,12 @@ export async function sendPublicationApprovedEmail(
   doi: string | null,
   resendApiKey: string,
 ): Promise<void> {
+  const safeDoi = doi ? escapeHtml(doi) : "";
   const doiSection = doi
     ? `<h2 style="color: #333; font-size: 18px; margin-top: 30px;">DOI</h2>
        <p>Your dataset has been assigned the following DOI:</p>
        <div style="background-color: #f4f4f5; padding: 16px; border-radius: 8px; font-family: monospace; font-size: 14px; margin: 16px 0;">
-         <a href="https://doi.org/${doi}" style="color: #2563eb;">${doi}</a>
+         <a href="https://doi.org/${safeDoi}" style="color: #2563eb;">${safeDoi}</a>
        </div>`
     : "";
 
@@ -420,15 +433,15 @@ export async function sendPublicationApprovedEmail(
 <body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; line-height: 1.6; color: #333; max-width: 600px; margin: 0 auto; padding: 20px;">
   <h1 style="color: #16a34a;">Dataset Published!</h1>
 
-  <p>Hello ${username},</p>
+  <p>Hello ${escapeHtml(username)},</p>
 
-  <p>Your dataset <strong>${datasetId}</strong> has been published and is now publicly available.</p>
+  <p>Your dataset <strong>${escapeHtml(datasetId)}</strong> has been published and is now publicly available.</p>
 
   ${doiSection}
 
   <p>You can check the status of your dataset:</p>
   <div style="background: #f4f4f5; padding: 16px; border-radius: 8px; font-family: monospace; font-size: 14px; margin: 16px 0;">
-    nemar dataset publish status ${datasetId}
+    nemar dataset publish status ${escapeHtml(datasetId)}
   </div>
 
   <hr style="border: none; border-top: 1px solid #eee; margin: 30px 0;">

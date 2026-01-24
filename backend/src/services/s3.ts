@@ -190,18 +190,28 @@ export async function applyObjectLock(
   retainUntil.setFullYear(retainUntil.getFullYear() + 100);
   const retainUntilStr = retainUntil.toISOString();
 
-  for (const key of keys) {
-    const retentionXml = `<?xml version="1.0" encoding="UTF-8"?>
+  const retentionXml = `<?xml version="1.0" encoding="UTF-8"?>
 <Retention xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
   <Mode>GOVERNANCE</Mode>
   <RetainUntilDate>${retainUntilStr}</RetainUntilDate>
 </Retention>`;
 
-    const url = `https://${bucket}.s3.${region}.amazonaws.com/${encodeURIComponent(key)}?retention`;
+  // Compute Content-MD5 (required by S3 PutObjectRetention)
+  const bodyBytes = new TextEncoder().encode(retentionXml);
+  const md5Digest = await crypto.subtle.digest("MD5", bodyBytes);
+  const contentMd5 = btoa(String.fromCharCode(...new Uint8Array(md5Digest)));
+
+  for (const key of keys) {
+    // Encode each path segment individually, preserving "/" separators
+    const encodedKey = key.split("/").map(encodeURIComponent).join("/");
+    const url = `https://${bucket}.s3.${region}.amazonaws.com/${encodedKey}?retention`;
     try {
       const signed = await aws.sign(url, {
         method: "PUT",
-        headers: { "Content-Type": "application/xml" },
+        headers: {
+          "Content-Type": "application/xml",
+          "Content-MD5": contentMd5,
+        },
         body: retentionXml,
       });
 
