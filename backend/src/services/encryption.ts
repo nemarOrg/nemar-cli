@@ -105,17 +105,12 @@ export async function decrypt(encrypted: string, encryptionKey: string): Promise
   try {
     combined = Uint8Array.from(atob(encrypted), (c) => c.charCodeAt(0));
   } catch (error) {
-    throw new EncryptionError(
-      "decrypt: invalid base64 encoding in encrypted data",
-      error,
-    );
+    throw new EncryptionError("decrypt: invalid base64 encoding in encrypted data", error);
   }
 
   // Minimum length: 16 (salt) + 12 (iv) + 1 (ciphertext) = 29 bytes
   if (combined.length < 29) {
-    throw new EncryptionError(
-      "decrypt: encrypted data is too short - possibly corrupted",
-    );
+    throw new EncryptionError("decrypt: encrypted data is too short - possibly corrupted");
   }
 
   // Extract salt, IV, and ciphertext

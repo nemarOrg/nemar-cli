@@ -5,8 +5,8 @@
  * Requires test users to be set up in the database.
  */
 
-import { describe, test, expect, beforeAll, beforeEach } from "bun:test";
-import { TEST_CONFIG, testRequest, sleep } from "./setup";
+import { beforeAll, beforeEach, describe, expect, test } from "bun:test";
+import { TEST_CONFIG, sleep, testRequest } from "./setup";
 
 // Add delay between tests to avoid rate limiting
 beforeEach(async () => {
@@ -260,7 +260,7 @@ describe("Admin API", () => {
       const { status, data } = await testRequest<{ error: string }>(
         "/admin/users",
         {},
-        TEST_CONFIG.userApiKey
+        TEST_CONFIG.userApiKey,
       );
 
       expect(status).toBe(403);
@@ -279,7 +279,7 @@ describe("Admin API", () => {
       const { status, data } = await testRequest<{ error: string }>(
         "/admin/approve/nonexistent-user",
         { method: "POST" },
-        TEST_CONFIG.adminApiKey
+        TEST_CONFIG.adminApiKey,
       );
 
       expect(status).toBe(404);
@@ -289,7 +289,7 @@ describe("Admin API", () => {
       const { status, data } = await testRequest<{ error: string }>(
         "/admin/approve/test-user",
         { method: "POST" },
-        TEST_CONFIG.adminApiKey
+        TEST_CONFIG.adminApiKey,
       );
 
       expect(status).toBe(409); // Conflict: already approved
@@ -300,7 +300,7 @@ describe("Admin API", () => {
       const { status } = await testRequest(
         "/admin/approve/test-verified",
         { method: "POST" },
-        TEST_CONFIG.userApiKey
+        TEST_CONFIG.userApiKey,
       );
 
       expect(status).toBe(403);
@@ -312,7 +312,7 @@ describe("Admin API", () => {
       const { status } = await testRequest<{ error: string }>(
         "/admin/revoke/nonexistent-user",
         { method: "POST" },
-        TEST_CONFIG.adminApiKey
+        TEST_CONFIG.adminApiKey,
       );
 
       expect(status).toBe(404);
@@ -322,7 +322,7 @@ describe("Admin API", () => {
       const { status } = await testRequest(
         "/admin/revoke/test-user",
         { method: "POST" },
-        TEST_CONFIG.userApiKey
+        TEST_CONFIG.userApiKey,
       );
 
       expect(status).toBe(403);
@@ -381,7 +381,7 @@ describe("DOI/Zenodo API", () => {
       const { status, data } = await testRequest<{ error: string }>(
         "/admin/datasets/nm000001/doi",
         {},
-        TEST_CONFIG.userApiKey
+        TEST_CONFIG.userApiKey,
       );
 
       expect(status).toBe(403);
@@ -398,7 +398,7 @@ describe("DOI/Zenodo API", () => {
       const { status } = await testRequest<{ error: string }>(
         "/admin/datasets/nm999999/doi",
         {},
-        TEST_CONFIG.adminApiKey
+        TEST_CONFIG.adminApiKey,
       );
 
       expect(status).toBe(404);
@@ -410,7 +410,7 @@ describe("DOI/Zenodo API", () => {
       const { status, data } = await testRequest<{ error: string }>(
         "/admin/datasets/nm000001/doi/concept",
         { method: "POST", body: JSON.stringify({}) },
-        TEST_CONFIG.userApiKey
+        TEST_CONFIG.userApiKey,
       );
 
       expect(status).toBe(403);
@@ -430,7 +430,7 @@ describe("DOI/Zenodo API", () => {
       const { status } = await testRequest<{ error: string }>(
         "/admin/datasets/nm999999/doi/concept",
         { method: "POST", body: JSON.stringify({}) },
-        TEST_CONFIG.adminApiKey
+        TEST_CONFIG.adminApiKey,
       );
 
       expect(status).toBe(404);
@@ -439,17 +439,14 @@ describe("DOI/Zenodo API", () => {
 
   describe("POST /webhooks/publish-version-doi", () => {
     test("missing webhook token returns 401 or 500", async () => {
-      const { status } = await testRequest<{ error: string }>(
-        "/webhooks/publish-version-doi",
-        {
-          method: "POST",
-          body: JSON.stringify({
-            dataset_id: "nm000001",
-            version: "1.0.0",
-            release_url: "https://github.com/example/repo/releases/tag/v1.0.0",
-          }),
-        }
-      );
+      const { status } = await testRequest<{ error: string }>("/webhooks/publish-version-doi", {
+        method: "POST",
+        body: JSON.stringify({
+          dataset_id: "nm000001",
+          version: "1.0.0",
+          release_url: "https://github.com/example/repo/releases/tag/v1.0.0",
+        }),
+      });
 
       // Returns 401 if token validation works, or 500 if webhook token secret not configured
       expect([401, 500]).toContain(status);
@@ -508,7 +505,7 @@ describe("Dataset Collaborators API", () => {
       const { status, data } = await testRequest<{ error: string }>(
         "/datasets/nm999999/request-access",
         { method: "POST" },
-        TEST_CONFIG.userApiKey
+        TEST_CONFIG.userApiKey,
       );
 
       expect(status).toBe(404);
@@ -518,7 +515,7 @@ describe("Dataset Collaborators API", () => {
       const { status } = await testRequest<{ error: string }>(
         "/datasets/invalid-id/request-access",
         { method: "POST" },
-        TEST_CONFIG.userApiKey
+        TEST_CONFIG.userApiKey,
       );
 
       // Invalid ID format results in 404 since no dataset matches
@@ -542,9 +539,7 @@ describe("Dataset Collaborators API", () => {
         datasets: Array<{ dataset_id: string; owner_username: string }>;
       }>("/datasets");
 
-      const otherDataset = datasetsList.datasets.find(
-        (d) => d.owner_username !== "test-user"
-      );
+      const otherDataset = datasetsList.datasets.find((d) => d.owner_username !== "test-user");
 
       if (!otherDataset) {
         // Skip if no suitable dataset exists
@@ -554,7 +549,7 @@ describe("Dataset Collaborators API", () => {
       const { status, data } = await testRequest<{ error: string }>(
         `/datasets/${otherDataset.dataset_id}/invite`,
         { method: "POST", body: JSON.stringify({ username: "someone" }) },
-        TEST_CONFIG.userApiKey
+        TEST_CONFIG.userApiKey,
       );
 
       expect(status).toBe(403);
@@ -565,7 +560,7 @@ describe("Dataset Collaborators API", () => {
       const { status } = await testRequest<{ error: string }>(
         "/datasets/nm999999/invite",
         { method: "POST", body: JSON.stringify({ username: "test-user" }) },
-        TEST_CONFIG.adminApiKey
+        TEST_CONFIG.adminApiKey,
       );
 
       expect(status).toBe(404);
@@ -584,7 +579,7 @@ describe("Dataset Collaborators API", () => {
       const { status, data } = await testRequest<{ error: string }>(
         `/datasets/${datasetsList.datasets[0].dataset_id}/invite`,
         { method: "POST", body: JSON.stringify({ username: "nonexistent-user-12345" }) },
-        TEST_CONFIG.adminApiKey
+        TEST_CONFIG.adminApiKey,
       );
 
       expect(status).toBe(404);
@@ -595,7 +590,7 @@ describe("Dataset Collaborators API", () => {
       const { status } = await testRequest(
         "/datasets/nm000001/invite",
         { method: "POST", body: JSON.stringify({}) },
-        TEST_CONFIG.adminApiKey
+        TEST_CONFIG.adminApiKey,
       );
 
       expect(status).toBe(400);
@@ -615,9 +610,7 @@ describe("Dataset Collaborators API", () => {
         datasets: Array<{ dataset_id: string; owner_username: string }>;
       }>("/datasets");
 
-      const otherDataset = datasetsList.datasets.find(
-        (d) => d.owner_username !== "test-user"
-      );
+      const otherDataset = datasetsList.datasets.find((d) => d.owner_username !== "test-user");
 
       if (!otherDataset) {
         // Skip if no suitable dataset exists
@@ -627,7 +620,7 @@ describe("Dataset Collaborators API", () => {
       const { status, data } = await testRequest<{ error: string }>(
         `/datasets/${otherDataset.dataset_id}/collaborators`,
         {},
-        TEST_CONFIG.userApiKey
+        TEST_CONFIG.userApiKey,
       );
 
       expect(status).toBe(403);
@@ -638,7 +631,7 @@ describe("Dataset Collaborators API", () => {
       const { status } = await testRequest<{ error: string }>(
         "/datasets/nm999999/collaborators",
         {},
-        TEST_CONFIG.adminApiKey
+        TEST_CONFIG.adminApiKey,
       );
 
       expect(status).toBe(404);
@@ -660,7 +653,7 @@ describe("Dataset Collaborators API", () => {
       }>(
         `/datasets/${datasetsList.datasets[0].dataset_id}/collaborators`,
         {},
-        TEST_CONFIG.adminApiKey
+        TEST_CONFIG.adminApiKey,
       );
 
       expect(status).toBe(200);

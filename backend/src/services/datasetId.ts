@@ -25,7 +25,7 @@ export async function generateDatasetId(db: D1Database, sandbox = false): Promis
     SET next_number = next_number + 1
     WHERE prefix = ?
     RETURNING next_number - 1 as current_number
-  `
+  `,
     )
     .bind(prefix)
     .first<{ current_number: number }>();

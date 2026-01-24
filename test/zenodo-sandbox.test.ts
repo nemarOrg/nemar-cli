@@ -8,8 +8,8 @@
  * Only run when you need to verify Zenodo integration is working.
  */
 
-import { describe, test, expect, beforeAll } from "bun:test";
-import { TEST_CONFIG, testRequest, sleep } from "./setup";
+import { beforeAll, describe, expect, test } from "bun:test";
+import { TEST_CONFIG, sleep, testRequest } from "./setup";
 
 // Only run these tests when explicitly enabled
 const SHOULD_RUN = process.env.RUN_ZENODO_TESTS === "true";
@@ -21,7 +21,9 @@ describe("Zenodo Sandbox Integration", () => {
   beforeAll(() => {
     if (!SHOULD_RUN) {
       console.log("\n⚠️  Zenodo sandbox tests are SKIPPED by default.");
-      console.log("   To run: RUN_ZENODO_TESTS=true TEST_DATASET_ID=nm000xxx bun test test/zenodo-sandbox.test.ts\n");
+      console.log(
+        "   To run: RUN_ZENODO_TESTS=true TEST_DATASET_ID=nm000xxx bun test test/zenodo-sandbox.test.ts\n",
+      );
     }
   });
 
@@ -58,7 +60,7 @@ describe("Zenodo Sandbox Integration", () => {
             sandbox: true,
           }),
         },
-        TEST_CONFIG.adminApiKey
+        TEST_CONFIG.adminApiKey,
       );
 
       // Could be 200 (success) or 400 (already has DOI)
@@ -135,7 +137,7 @@ describe("Zenodo Sandbox Integration", () => {
       });
 
       expect(response.status).toBe(401);
-      const data = await response.json() as { error: string };
+      const data = (await response.json()) as { error: string };
       expect(data.error).toBe("Invalid webhook token");
       console.log("   ✓ Webhook correctly rejects invalid token");
     });

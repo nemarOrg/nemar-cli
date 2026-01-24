@@ -37,7 +37,7 @@ function createS3Client(options: PresignedUrlOptions): AwsClient {
  */
 export async function generatePresignedPutUrls(
   options: PresignedUrlOptions,
-  params: GenerateUrlsParams
+  params: GenerateUrlsParams,
 ): Promise<Record<string, string>> {
   const { bucket, region } = options;
   const { prefix, files, expiresIn = 3600 } = params;
@@ -68,7 +68,7 @@ export async function generatePresignedPutUrls(
 export async function generatePresignedGetUrl(
   options: PresignedUrlOptions,
   key: string,
-  expiresIn: number = 3600
+  expiresIn = 3600,
 ): Promise<string> {
   const { bucket, region } = options;
   const aws = createS3Client(options);
@@ -91,7 +91,7 @@ export async function generateStagingUrls(
   options: PresignedUrlOptions,
   prNumber: number,
   datasetId: string,
-  files: string[]
+  files: string[],
 ): Promise<{
   uploadUrls: Record<string, string>;
   stagingPrefix: string;
@@ -113,7 +113,7 @@ export async function generateStagingUrls(
 export async function generateDatasetUploadUrls(
   options: PresignedUrlOptions,
   datasetId: string,
-  files: string[]
+  files: string[],
 ): Promise<Record<string, string>> {
   return generatePresignedPutUrls(options, {
     prefix: datasetId,
