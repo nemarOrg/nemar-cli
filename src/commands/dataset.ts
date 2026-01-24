@@ -1472,8 +1472,9 @@ Examples:
     let repoUrl: string;
     try {
       const dataset = await getDataset(datasetId);
-      if (!dataset.github_repo) {
-        spinner.fail("Dataset has no GitHub repository");
+      if (!dataset.github_repo || !/^[a-zA-Z0-9_.-]+\/[a-zA-Z0-9_.-]+$/.test(dataset.github_repo)) {
+        spinner.fail("Dataset has no valid GitHub repository");
+        console.log(chalk.red(`  Received: ${dataset.github_repo || "(empty)"}`));
         process.exit(1);
       }
       repoUrl = `https://github.com/${dataset.github_repo}.git`;
@@ -1535,8 +1536,13 @@ Examples:
       process.exit(1);
     }
 
-    const paths = files.length > 0 ? files : undefined;
     const jobs = Number.parseInt(options.jobs, 10);
+    if (Number.isNaN(jobs) || jobs < 1) {
+      console.log(chalk.red("Error: --jobs must be a positive integer"));
+      process.exit(1);
+    }
+
+    const paths = files.length > 0 ? files : undefined;
     const desc = paths ? `Getting ${paths.length} path(s)...` : "Getting all data files...";
     const spinner = ora(desc).start();
 
@@ -1547,7 +1553,11 @@ Examples:
       process.exit(1);
     }
 
-    spinner.succeed(`Downloaded ${result.filesDownloaded || 0} file(s)`);
+    if (result.filesDownloaded === 0) {
+      spinner.succeed("All data files already present");
+    } else {
+      spinner.succeed(`Downloaded ${result.filesDownloaded} file(s)`);
+    }
   });
 
 // Save command
@@ -1637,17 +1647,27 @@ Examples:
       const s3Remotes = await getAnnexS3Remotes(cwd);
       if (s3Remotes.length > 0) {
         const remoteName = s3Remotes[0];
+        if (s3Remotes.length > 1) {
+          console.log(
+            chalk.gray(`  Multiple S3 remotes: ${s3Remotes.join(", ")}. Using: ${remoteName}`),
+          );
+        }
         const jobs = Number.parseInt(options.jobs, 10);
+        if (Number.isNaN(jobs) || jobs < 1) {
+          console.log(chalk.red("Error: --jobs must be a positive integer"));
+          process.exit(1);
+        }
         spinner = ora(`Copying data to S3 (${remoteName})...`).start();
 
         const s3Result = await copyToAnnexRemote(cwd, remoteName, jobs);
         if (!s3Result.success) {
-          spinner.warn("S3 push failed (git changes were pushed)");
-          console.log(chalk.yellow(`  ${s3Result.error}`));
+          spinner.fail("S3 push failed");
+          console.log(chalk.red(`  ${s3Result.error}`));
           console.log(chalk.gray("  Ensure AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY are set."));
-        } else {
-          spinner.succeed(`Copied ${s3Result.filesCopied} file(s) to S3`);
+          console.log(chalk.gray("  Git changes were pushed successfully."));
+          process.exit(1);
         }
+        spinner.succeed(`Copied ${s3Result.filesCopied} file(s) to S3`);
       } else {
         console.log(chalk.gray("  No S3 remote configured; skipping data push."));
       }
@@ -1701,6 +1721,10 @@ Examples:
       if (result.kept.length > 5) {
         console.log(chalk.yellow(`  ... and ${result.kept.length - 5} more`));
       }
+      if (result.error) {
+        console.log(chalk.gray(`  ${result.error}`));
+      }
+      process.exit(1);
     } else {
       spinner.succeed(`Dropped ${result.dropped} file(s)`);
     }
