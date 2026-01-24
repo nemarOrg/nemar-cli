@@ -57,8 +57,12 @@ import {
   collectFileManifest,
   configureGitHubRemote,
   configureLargefiles,
+  copyToAnnexRemote,
+  dropFiles,
   ensureGitAnnexInitialized,
   formatBytes,
+  getAnnexS3Remotes,
+  getCurrentBranch,
   getDatasetData,
   getLocalDatasetInfo,
   initDataset,
@@ -1429,3 +1433,299 @@ publishCommand
   });
 
 datasetCommand.addCommand(publishCommand);
+
+// Clone command
+datasetCommand
+  .command("clone")
+  .description("Clone a dataset from NEMAR")
+  .argument("<dataset-id>", "Dataset ID (e.g., nm000104)")
+  .option("-o, --output <path>", "Output directory (default: ./<dataset-id>)")
+  .addHelpText(
+    "after",
+    `
+Description:
+  Clone a NEMAR dataset repository with git-annex initialized.
+  Data files are not downloaded; use 'nemar dataset get' afterward.
+
+Requirements:
+  - git-annex installed
+
+Examples:
+  $ nemar dataset clone nm000104
+  $ nemar dataset clone nm000104 -o ./my-dataset`,
+  )
+  .action(async (datasetId, options) => {
+    let spinner = ora("Checking prerequisites...").start();
+    const prereqs = await checkDownloadPrerequisites();
+
+    if (!prereqs.allPassed) {
+      spinner.fail("Prerequisites check failed");
+      for (const error of prereqs.errors) {
+        console.log(chalk.red(`  - ${error}`));
+      }
+      process.exit(1);
+    }
+    spinner.succeed("Prerequisites OK");
+
+    // Resolve dataset ID to repo URL
+    spinner = ora(`Resolving dataset ${datasetId}...`).start();
+    let repoUrl: string;
+    try {
+      const dataset = await getDataset(datasetId);
+      if (!dataset.github_repo || !/^[a-zA-Z0-9_.-]+\/[a-zA-Z0-9_.-]+$/.test(dataset.github_repo)) {
+        spinner.fail("Dataset has no valid GitHub repository");
+        console.log(chalk.red(`  Received: ${dataset.github_repo || "(empty)"}`));
+        process.exit(1);
+      }
+      repoUrl = `https://github.com/${dataset.github_repo}.git`;
+      spinner.succeed(`Found: ${dataset.name}`);
+    } catch (error) {
+      spinner.fail("Dataset not found");
+      const msg = error instanceof Error ? error.message : String(error);
+      console.log(chalk.red(`  ${msg}`));
+      process.exit(1);
+    }
+
+    const outputPath = resolve(options.output || datasetId);
+    if (existsSync(outputPath)) {
+      console.log(chalk.red(`Error: Path already exists: ${outputPath}`));
+      process.exit(1);
+    }
+
+    spinner = ora("Cloning dataset...").start();
+    const result = await cloneDataset(repoUrl, outputPath);
+    if (!result.success) {
+      spinner.fail("Clone failed");
+      console.log(chalk.red(`  ${result.error}`));
+      process.exit(1);
+    }
+
+    spinner.succeed("Dataset cloned");
+    console.log();
+    console.log(`  Location: ${chalk.cyan(outputPath)}`);
+    console.log();
+    console.log(chalk.gray("Data files are not downloaded yet. To get them:"));
+    console.log(chalk.gray(`  cd ${outputPath}`));
+    console.log(chalk.gray("  nemar dataset get"));
+  });
+
+// Get command
+datasetCommand
+  .command("get")
+  .description("Download annexed data files for the current dataset")
+  .argument("[files...]", "Specific files/paths to get (default: all)")
+  .option("-j, --jobs <number>", "Parallel download streams", "4")
+  .addHelpText(
+    "after",
+    `
+Description:
+  Download data files from the remote for a cloned dataset.
+  Must be run inside a git-annex dataset directory.
+
+Examples:
+  $ nemar dataset get                    # Get all files
+  $ nemar dataset get sub-01/eeg/        # Get specific directory
+  $ nemar dataset get *.edf -j 8         # Get EDF files with 8 streams`,
+  )
+  .action(async (files, options) => {
+    const cwd = process.cwd();
+
+    if (!(await isGitAnnexDataset(cwd))) {
+      console.log(chalk.red("Error: Not inside a git-annex dataset directory"));
+      console.log(chalk.gray("Use 'nemar dataset clone <id>' first, then cd into the dataset."));
+      process.exit(1);
+    }
+
+    const jobs = Number.parseInt(options.jobs, 10);
+    if (Number.isNaN(jobs) || jobs < 1) {
+      console.log(chalk.red("Error: --jobs must be a positive integer"));
+      process.exit(1);
+    }
+
+    const paths = files.length > 0 ? files : undefined;
+    const desc = paths ? `Getting ${paths.length} path(s)...` : "Getting all data files...";
+    const spinner = ora(desc).start();
+
+    const result = await getDatasetData(cwd, { jobs, paths });
+    if (!result.success) {
+      spinner.fail("Failed to get data");
+      console.log(chalk.red(`  ${result.error}`));
+      process.exit(1);
+    }
+
+    if (result.filesDownloaded === 0) {
+      spinner.succeed("All data files already present");
+    } else {
+      spinner.succeed(`Downloaded ${result.filesDownloaded} file(s)`);
+    }
+  });
+
+// Save command
+datasetCommand
+  .command("save")
+  .description("Stage and commit changes in the current dataset")
+  .option("-m, --message <msg>", "Commit message", "Save changes")
+  .addHelpText(
+    "after",
+    `
+Description:
+  Stage all changes (git add -A) and commit them. Large files are
+  automatically handled by git-annex based on the dataset's largefiles config.
+
+Examples:
+  $ nemar dataset save
+  $ nemar dataset save -m "Add new EEG recordings"`,
+  )
+  .action(async (options) => {
+    const cwd = process.cwd();
+
+    if (!(await isGitAnnexDataset(cwd))) {
+      console.log(chalk.red("Error: Not inside a git-annex dataset directory"));
+      process.exit(1);
+    }
+
+    const spinner = ora("Saving changes...").start();
+    const result = await saveDataset(cwd, options.message);
+
+    if (!result.success) {
+      spinner.fail("Save failed");
+      console.log(chalk.red(`  ${result.error}`));
+      process.exit(1);
+    }
+
+    spinner.succeed("Changes saved");
+  });
+
+// Push command
+datasetCommand
+  .command("push")
+  .description("Push commits and data to remotes")
+  .option("-j, --jobs <number>", "Parallel upload streams for S3", "4")
+  .option("--no-s3", "Skip pushing data to S3 remote")
+  .addHelpText(
+    "after",
+    `
+Description:
+  Push git commits to GitHub (main + git-annex branches) and optionally
+  copy annexed data to the S3 remote.
+
+  S3 push requires AWS credentials in environment (AWS_ACCESS_KEY_ID,
+  AWS_SECRET_ACCESS_KEY).
+
+Examples:
+  $ nemar dataset push
+  $ nemar dataset push --no-s3      # Git only, skip S3
+  $ nemar dataset push -j 8         # More parallel S3 streams`,
+  )
+  .action(async (options) => {
+    const cwd = process.cwd();
+
+    if (!(await isGitAnnexDataset(cwd))) {
+      console.log(chalk.red("Error: Not inside a git-annex dataset directory"));
+      process.exit(1);
+    }
+
+    // Push git to GitHub
+    let spinner = ora("Pushing to GitHub...").start();
+    const gitResult = await pushToGitHub(cwd);
+
+    if (!gitResult.success) {
+      spinner.fail("Git push failed");
+      console.log(chalk.red(`  ${gitResult.error}`));
+      process.exit(1);
+    }
+
+    if (gitResult.warning) {
+      spinner.warn("Git pushed with warning");
+      console.log(chalk.yellow(`  ${gitResult.warning}`));
+    } else {
+      spinner.succeed("Pushed to GitHub");
+    }
+
+    // Push annex content to S3 (if enabled and remote exists)
+    if (options.s3 !== false) {
+      const s3Remotes = await getAnnexS3Remotes(cwd);
+      if (s3Remotes.length > 0) {
+        const remoteName = s3Remotes[0];
+        if (s3Remotes.length > 1) {
+          console.log(
+            chalk.gray(`  Multiple S3 remotes: ${s3Remotes.join(", ")}. Using: ${remoteName}`),
+          );
+        }
+        const jobs = Number.parseInt(options.jobs, 10);
+        if (Number.isNaN(jobs) || jobs < 1) {
+          console.log(chalk.red("Error: --jobs must be a positive integer"));
+          process.exit(1);
+        }
+        spinner = ora(`Copying data to S3 (${remoteName})...`).start();
+
+        const s3Result = await copyToAnnexRemote(cwd, remoteName, jobs);
+        if (!s3Result.success) {
+          spinner.fail("S3 push failed");
+          console.log(chalk.red(`  ${s3Result.error}`));
+          console.log(chalk.gray("  Ensure AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY are set."));
+          console.log(chalk.gray("  Git changes were pushed successfully."));
+          process.exit(1);
+        }
+        spinner.succeed(`Copied ${s3Result.filesCopied} file(s) to S3`);
+      } else {
+        console.log(chalk.gray("  No S3 remote configured; skipping data push."));
+      }
+    }
+  });
+
+// Drop command
+datasetCommand
+  .command("drop")
+  .description("Free local copies of annexed files (keeps remote copies)")
+  .argument("[files...]", "Specific files to drop (default: all)")
+  .addHelpText(
+    "after",
+    `
+Description:
+  Remove local copies of annexed data files. Git-annex verifies that
+  remote copies exist before dropping. Use 'nemar dataset get' to
+  re-download later.
+
+Examples:
+  $ nemar dataset drop                   # Drop all local data
+  $ nemar dataset drop sub-01/eeg/       # Drop specific directory
+  $ nemar dataset drop *.edf             # Drop EDF files`,
+  )
+  .action(async (files) => {
+    const cwd = process.cwd();
+
+    if (!(await isGitAnnexDataset(cwd))) {
+      console.log(chalk.red("Error: Not inside a git-annex dataset directory"));
+      process.exit(1);
+    }
+
+    const paths = files.length > 0 ? files : undefined;
+    const desc = paths ? `Dropping ${paths.length} path(s)...` : "Dropping all local data...";
+    const spinner = ora(desc).start();
+
+    const result = await dropFiles(cwd, paths);
+    if (!result.success && result.dropped === 0) {
+      spinner.fail("Drop failed");
+      console.log(chalk.red(`  ${result.error}`));
+      process.exit(1);
+    }
+
+    if (result.kept.length > 0) {
+      spinner.warn(
+        `Dropped ${result.dropped} file(s), ${result.kept.length} kept (no remote copy)`,
+      );
+      for (const f of result.kept.slice(0, 5)) {
+        console.log(chalk.yellow(`  kept: ${f}`));
+      }
+      if (result.kept.length > 5) {
+        console.log(chalk.yellow(`  ... and ${result.kept.length - 5} more`));
+      }
+      if (result.error) {
+        console.log(chalk.gray(`  ${result.error}`));
+      }
+      process.exit(1);
+    } else {
+      spinner.succeed(`Dropped ${result.dropped} file(s)`);
+    }
+  });
