@@ -6,8 +6,8 @@
  */
 
 import { Hono } from "hono";
-import type { Bindings } from "../types/bindings.js";
 import * as zenodo from "../services/zenodo.js";
+import type { Bindings } from "../types/bindings.js";
 
 const webhooks = new Hono<{ Bindings: Bindings }>();
 
@@ -45,16 +45,16 @@ webhooks.post("/publish-version-doi", async (c) => {
   const { dataset_id, version, release_url, sandbox = false } = body;
 
   // Get dataset from database
-  const dataset = await c.env.DB.prepare(
-    "SELECT * FROM datasets WHERE dataset_id = ?"
-  ).bind(dataset_id).first<{
-    id: number;
-    dataset_id: string;
-    name: string;
-    description: string | null;
-    concept_doi: string | null;
-    zenodo_concept_id: string | null;
-  }>();
+  const dataset = await c.env.DB.prepare("SELECT * FROM datasets WHERE dataset_id = ?")
+    .bind(dataset_id)
+    .first<{
+      id: number;
+      dataset_id: string;
+      name: string;
+      description: string | null;
+      concept_doi: string | null;
+      zenodo_concept_id: string | null;
+    }>();
 
   if (!dataset) {
     return c.json({ error: "Dataset not found" }, 404);
@@ -62,16 +62,17 @@ webhooks.post("/publish-version-doi", async (c) => {
 
   // Check if concept DOI exists
   if (!dataset.concept_doi || !dataset.zenodo_concept_id) {
-    return c.json({
-      error: "No concept DOI exists for this dataset. Admin must create concept DOI first.",
-      skipped: true
-    }, 200); // Return 200 so workflow doesn't fail
+    return c.json(
+      {
+        error: "No concept DOI exists for this dataset. Admin must create concept DOI first.",
+        skipped: true,
+      },
+      200,
+    ); // Return 200 so workflow doesn't fail
   }
 
   // Get the appropriate Zenodo API key
-  const zenodoToken = sandbox
-    ? c.env.ZENODO_SANDBOX_API_KEY
-    : c.env.ZENODO_API_KEY;
+  const zenodoToken = sandbox ? c.env.ZENODO_SANDBOX_API_KEY : c.env.ZENODO_API_KEY;
 
   if (!zenodoToken) {
     return c.json({ error: `Zenodo ${sandbox ? "sandbox " : ""}API key not configured` }, 500);
@@ -79,7 +80,7 @@ webhooks.post("/publish-version-doi", async (c) => {
 
   try {
     // Create a new version from the concept deposition
-    const conceptId = parseInt(dataset.zenodo_concept_id);
+    const conceptId = Number.parseInt(dataset.zenodo_concept_id);
     const newVersion = await zenodo.createNewVersion(conceptId, zenodoToken, sandbox);
 
     // Verify we have a bucket URL for upload
@@ -103,7 +104,7 @@ webhooks.post("/publish-version-doi", async (c) => {
       zipFilename,
       new Uint8Array(zipBuffer),
       zenodoToken,
-      sandbox
+      sandbox,
     );
 
     // Update metadata for the new version
@@ -121,9 +122,9 @@ webhooks.post("/publish-version-doi", async (c) => {
     const published = await zenodo.publishDeposition(newVersion.id, zenodoToken, sandbox);
 
     // Update database with new version info
-    await c.env.DB.prepare(
-      "UPDATE datasets SET zenodo_latest_version_id = ? WHERE id = ?"
-    ).bind(published.id.toString(), dataset.id).run();
+    await c.env.DB.prepare("UPDATE datasets SET zenodo_latest_version_id = ? WHERE id = ?")
+      .bind(published.id.toString(), dataset.id)
+      .run();
 
     const baseUrl = sandbox ? "https://sandbox.zenodo.org" : "https://zenodo.org";
 
@@ -136,10 +137,13 @@ webhooks.post("/publish-version-doi", async (c) => {
     });
   } catch (error) {
     console.error("Zenodo publish error:", error);
-    return c.json({
-      error: "Failed to publish version DOI",
-      details: error instanceof Error ? error.message : "Unknown error"
-    }, 500);
+    return c.json(
+      {
+        error: "Failed to publish version DOI",
+        details: error instanceof Error ? error.message : "Unknown error",
+      },
+      500,
+    );
   }
 });
 

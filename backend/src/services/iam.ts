@@ -60,7 +60,7 @@ export function generateIamUsername(nemarUsername: string): string {
  */
 export async function createIamUser(
   config: IamConfig,
-  nemarUsername: string
+  nemarUsername: string,
 ): Promise<CreateUserResult> {
   const aws = createIamClient(config);
   const iamUsername = generateIamUsername(nemarUsername);
@@ -97,7 +97,7 @@ export async function createIamUser(
  */
 export async function createAccessKey(
   config: IamConfig,
-  iamUsername: string
+  iamUsername: string,
 ): Promise<CreateAccessKeyResult> {
   const aws = createIamClient(config);
 
@@ -225,7 +225,7 @@ export async function putUserPolicy(
   config: IamConfig,
   iamUsername: string,
   policyName: string,
-  policyDocument: string
+  policyDocument: string,
 ): Promise<void> {
   const aws = createIamClient(config);
 
@@ -253,7 +253,7 @@ export async function putUserPolicy(
 export async function deleteAccessKey(
   config: IamConfig,
   iamUsername: string,
-  accessKeyId: string
+  accessKeyId: string,
 ): Promise<void> {
   const aws = createIamClient(config);
 
@@ -283,7 +283,7 @@ export async function deleteAccessKey(
 export async function deleteUserPolicy(
   config: IamConfig,
   iamUsername: string,
-  policyName: string
+  policyName: string,
 ): Promise<void> {
   const aws = createIamClient(config);
 
@@ -341,7 +341,7 @@ export async function deleteIamUser(config: IamConfig, iamUsername: string): Pro
 export async function setupUserIamAccess(
   config: IamConfig,
   bucket: string,
-  nemarUsername: string
+  nemarUsername: string,
 ): Promise<{ iamUsername: string; accessKeyId: string; secretAccessKey: string }> {
   // Create IAM user
   const { username: iamUsername } = await createIamUser(config, nemarUsername);
@@ -364,7 +364,7 @@ export async function grantDatasetAccess(
   bucket: string,
   iamUsername: string,
   currentPrefixes: string[],
-  newPrefix: string
+  newPrefix: string,
 ): Promise<string[]> {
   const allPrefixes = [...new Set([...currentPrefixes, newPrefix])];
   const policyDocument = generateS3PolicyDocument(bucket, allPrefixes);
@@ -378,7 +378,7 @@ export async function grantDatasetAccess(
 export async function revokeUserIamAccess(
   config: IamConfig,
   iamUsername: string,
-  accessKeyId: string
+  accessKeyId: string,
 ): Promise<void> {
   // Delete access key first
   await deleteAccessKey(config, iamUsername, accessKeyId);

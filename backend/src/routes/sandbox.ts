@@ -4,11 +4,11 @@
  * Handles sandbox training status, completion, and reset.
  */
 
+import { zValidator } from "@hono/zod-validator";
 import { Hono } from "hono";
 import { z } from "zod";
-import { zValidator } from "@hono/zod-validator";
-import type { Bindings, Variables } from "../types/bindings";
 import { authMiddleware } from "../middleware/auth";
+import type { Bindings, Variables } from "../types/bindings";
 
 export const sandboxRoutes = new Hono<{ Bindings: Bindings; Variables: Variables }>();
 
@@ -38,7 +38,7 @@ sandboxRoutes.get("/status", async (c) => {
       SELECT sandbox_completed, sandbox_completed_at, sandbox_dataset_id
       FROM users
       WHERE id = ?
-    `
+    `,
       )
       .bind(user.id)
       .first<{
@@ -74,7 +74,7 @@ sandboxRoutes.post("/complete", zValidator("json", completeSchema), async (c) =>
       SELECT id, is_sandbox, owner_user_id
       FROM datasets
       WHERE dataset_id = ?
-    `
+    `,
       )
       .bind(dataset_id)
       .first<{ id: number; is_sandbox: number; owner_user_id: number }>();
@@ -100,7 +100,7 @@ sandboxRoutes.post("/complete", zValidator("json", completeSchema), async (c) =>
           sandbox_completed_at = datetime('now'),
           sandbox_dataset_id = ?
       WHERE id = ?
-    `
+    `,
       )
       .bind(dataset_id, user.id)
       .run();
@@ -133,7 +133,7 @@ sandboxRoutes.post("/reset", async (c) => {
           sandbox_completed_at = NULL,
           sandbox_dataset_id = NULL
       WHERE id = ?
-    `
+    `,
       )
       .bind(user.id)
       .run();

@@ -5,8 +5,8 @@
  */
 
 import type { Context, Next } from "hono";
-import type { Bindings, Variables, AuthUser } from "../types/bindings";
 import { hashApiKey } from "../services/token";
+import type { AuthUser, Bindings, Variables } from "../types/bindings";
 
 type AuthContext = Context<{ Bindings: Bindings; Variables: Variables }>;
 
@@ -52,7 +52,7 @@ export async function authMiddleware(c: AuthContext, next: Next) {
     WHERE t.api_key_hash = ?
       AND t.revoked_at IS NULL
       AND (t.expires_at IS NULL OR t.expires_at > datetime('now'))
-  `
+  `,
   )
     .bind(hashedKey)
     .first<{
@@ -79,7 +79,7 @@ export async function authMiddleware(c: AuthContext, next: Next) {
             ? "Your account is awaiting admin approval"
             : "Your account access has been revoked",
       },
-      403
+      403,
     );
   }
 
@@ -154,7 +154,7 @@ export async function optionalAuthMiddleware(c: AuthContext, next: Next) {
     WHERE t.api_key_hash = ?
       AND t.revoked_at IS NULL
       AND u.status = 'approved'
-  `
+  `,
   )
     .bind(hashedKey)
     .first<{

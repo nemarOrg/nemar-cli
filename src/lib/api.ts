@@ -401,11 +401,7 @@ export interface AddCiResponse {
  * Deploy CI workflows to a dataset repository (admin only)
  */
 export async function addCi(datasetId: string): Promise<AddCiResponse> {
-  return request<AddCiResponse>(
-    `/admin/datasets/${datasetId}/ci`,
-    { method: "POST" },
-    true,
-  );
+  return request<AddCiResponse>(`/admin/datasets/${datasetId}/ci`, { method: "POST" }, true);
 }
 
 // ============================================================================

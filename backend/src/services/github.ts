@@ -14,7 +14,7 @@ interface GitHubUser {
   name: string | null;
 }
 
-interface GitHubRepo {
+export interface GitHubRepo {
   id: number;
   name: string;
   full_name: string;

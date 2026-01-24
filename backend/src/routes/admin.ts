@@ -20,6 +20,7 @@ import {
 import { generateIamUsername, revokeUserIamAccess, setupUserIamAccess } from "../services/iam";
 import { generateApiKey, hashApiKey } from "../services/token";
 import {
+  type ZenodoDeposition,
   type ZenodoMetadata,
   createDeposition,
   createNewVersion,
@@ -957,7 +958,7 @@ adminRoutes.post(
         body.sandbox,
       );
 
-      let versionDeposition;
+      let versionDeposition: ZenodoDeposition;
 
       if (!conceptDeposition.submitted) {
         // First version - use the concept deposition directly

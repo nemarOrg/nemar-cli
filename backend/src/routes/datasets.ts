@@ -4,16 +4,23 @@
  * Handles dataset creation, listing, and metadata.
  */
 
+import { zValidator } from "@hono/zod-validator";
 import { Hono } from "hono";
 import { z } from "zod";
-import { zValidator } from "@hono/zod-validator";
-import type { Bindings, Variables } from "../types/bindings";
 import { authMiddleware, optionalAuthMiddleware } from "../middleware/auth";
 import { generateDatasetId, isValidDatasetId } from "../services/datasetId";
-import { createRepository, addCollaborator, applyBranchProtection, enableAutoMerge, deployWorkflows } from "../services/github";
-import { generateDatasetUploadUrls } from "../services/s3";
 import { decrypt } from "../services/encryption";
+import {
+  type GitHubRepo,
+  addCollaborator,
+  applyBranchProtection,
+  createRepository,
+  deployWorkflows,
+  enableAutoMerge,
+} from "../services/github";
 import { grantDatasetAccess } from "../services/iam";
+import { generateDatasetUploadUrls } from "../services/s3";
+import type { Bindings, Variables } from "../types/bindings";
 
 export const datasetRoutes = new Hono<{ Bindings: Bindings; Variables: Variables }>();
 
@@ -69,10 +76,14 @@ datasetRoutes.post("/", authMiddleware, zValidator("json", createDatasetSchema),
       .first<{ sandbox_completed: number }>();
 
     if (!userStatus?.sandbox_completed) {
-      return c.json({
-        error: "Sandbox training required",
-        message: "You must complete sandbox training before uploading real datasets. Run 'nemar sandbox' to complete training.",
-      }, 403);
+      return c.json(
+        {
+          error: "Sandbox training required",
+          message:
+            "You must complete sandbox training before uploading real datasets. Run 'nemar sandbox' to complete training.",
+        },
+        403,
+      );
     }
   }
 
@@ -82,12 +93,15 @@ datasetRoutes.post("/", authMiddleware, zValidator("json", createDatasetSchema),
     if (totalSize > SANDBOX_MAX_TOTAL_SIZE) {
       const sizeMB = (totalSize / (1024 * 1024)).toFixed(2);
       const limitMB = (SANDBOX_MAX_TOTAL_SIZE / (1024 * 1024)).toFixed(0);
-      return c.json({
-        error: "Sandbox file size limit exceeded",
-        message: `Sandbox datasets are limited to ${limitMB}MB total. Your dataset is ${sizeMB}MB. Sandbox is for testing the workflow, not storing real data.`,
-        total_size: totalSize,
-        limit: SANDBOX_MAX_TOTAL_SIZE,
-      }, 400);
+      return c.json(
+        {
+          error: "Sandbox file size limit exceeded",
+          message: `Sandbox datasets are limited to ${limitMB}MB total. Your dataset is ${sizeMB}MB. Sandbox is for testing the workflow, not storing real data.`,
+          total_size: totalSize,
+          limit: SANDBOX_MAX_TOTAL_SIZE,
+        },
+        400,
+      );
     }
   }
 
@@ -106,10 +120,13 @@ datasetRoutes.post("/", authMiddleware, zValidator("json", createDatasetSchema),
     }>();
 
   if (!userCreds?.aws_access_key_id_encrypted || !userCreds?.aws_secret_access_key_encrypted) {
-    return c.json({
-      error: "S3 access not configured for your account",
-      message: "Please contact an administrator to set up your S3 credentials.",
-    }, 403);
+    return c.json(
+      {
+        error: "S3 access not configured for your account",
+        message: "Please contact an administrator to set up your S3 credentials.",
+      },
+      403,
+    );
   }
 
   // Decrypt user's AWS credentials
@@ -120,7 +137,10 @@ datasetRoutes.post("/", authMiddleware, zValidator("json", createDatasetSchema),
       throw new Error("ENCRYPTION_KEY not configured");
     }
     userAccessKeyId = await decrypt(userCreds.aws_access_key_id_encrypted, c.env.ENCRYPTION_KEY);
-    userSecretAccessKey = await decrypt(userCreds.aws_secret_access_key_encrypted, c.env.ENCRYPTION_KEY);
+    userSecretAccessKey = await decrypt(
+      userCreds.aws_secret_access_key_encrypted,
+      c.env.ENCRYPTION_KEY,
+    );
   } catch (error) {
     console.error("Failed to decrypt user credentials:", error);
     return c.json({ error: "Failed to access S3 credentials" }, 500);
@@ -130,13 +150,13 @@ datasetRoutes.post("/", authMiddleware, zValidator("json", createDatasetSchema),
   const datasetId = await generateDatasetId(db, !!sandbox);
 
   // Create GitHub repository
-  let githubRepo;
+  let githubRepo: GitHubRepo;
   try {
     githubRepo = await createRepository(
       datasetId,
       `${name} - NEMAR Dataset`,
       true, // Private - owner added as collaborator
-      c.env.GITHUB_ADMIN_PAT
+      c.env.GITHUB_ADMIN_PAT,
     );
   } catch (error) {
     console.error("Failed to create GitHub repo:", error);
@@ -238,7 +258,7 @@ datasetRoutes.post("/", authMiddleware, zValidator("json", createDatasetSchema),
       `
     INSERT INTO datasets (dataset_id, name, description, owner_user_id, github_repo, is_sandbox)
     VALUES (?, ?, ?, ?, ?, ?)
-  `
+  `,
     )
     .bind(datasetId, name, description || null, user.id, githubRepo.full_name, sandbox ? 1 : 0)
     .run();
@@ -249,7 +269,7 @@ datasetRoutes.post("/", authMiddleware, zValidator("json", createDatasetSchema),
       `
     INSERT INTO audit_log (user_id, action, resource_type, resource_id, details)
     VALUES (?, 'dataset_created', 'dataset', ?, ?)
-  `
+  `,
     )
     .bind(user.id, datasetId, JSON.stringify({ name, file_count: files?.length || 0 }))
     .run();
@@ -276,7 +296,7 @@ datasetRoutes.post("/", authMiddleware, zValidator("json", createDatasetSchema),
         public_url: `https://${c.env.S3_BUCKET}.s3.${c.env.AWS_REGION}.amazonaws.com`,
       },
     },
-    201
+    201,
   );
 });
 
@@ -288,8 +308,8 @@ datasetRoutes.post("/", authMiddleware, zValidator("json", createDatasetSchema),
 datasetRoutes.get("/", optionalAuthMiddleware, async (c) => {
   const mine = c.req.query("mine") === "true";
   const status = c.req.query("status") || "active";
-  const limit = parseInt(c.req.query("limit") || "50", 10);
-  const offset = parseInt(c.req.query("offset") || "0", 10);
+  const limit = Number.parseInt(c.req.query("limit") || "50", 10);
+  const offset = Number.parseInt(c.req.query("offset") || "0", 10);
   const user = c.get("user");
   const db = c.env.DB;
 
@@ -325,7 +345,10 @@ datasetRoutes.get("/", optionalAuthMiddleware, async (c) => {
   query += " ORDER BY d.created_at DESC LIMIT ? OFFSET ?";
   params.push(limit, offset);
 
-  const datasets = await db.prepare(query).bind(...params).all();
+  const datasets = await db
+    .prepare(query)
+    .bind(...params)
+    .all();
 
   return c.json({
     datasets: datasets.results,
@@ -354,7 +377,7 @@ datasetRoutes.get("/:id", optionalAuthMiddleware, async (c) => {
     FROM datasets d
     JOIN users u ON d.owner_user_id = u.id
     WHERE d.dataset_id = ?
-  `
+  `,
     )
     .bind(datasetId)
     .first();
@@ -403,7 +426,10 @@ datasetRoutes.post(
         .first();
 
       if (!isCollaborator) {
-        return c.json({ error: "Only dataset owner or collaborators can request upload URLs" }, 403);
+        return c.json(
+          { error: "Only dataset owner or collaborators can request upload URLs" },
+          403,
+        );
       }
     }
 
@@ -456,7 +482,10 @@ datasetRoutes.post(
     let userSecretAccessKey: string;
     try {
       userAccessKeyId = await decrypt(userCreds.aws_access_key_id_encrypted, c.env.ENCRYPTION_KEY);
-      userSecretAccessKey = await decrypt(userCreds.aws_secret_access_key_encrypted, c.env.ENCRYPTION_KEY);
+      userSecretAccessKey = await decrypt(
+        userCreds.aws_secret_access_key_encrypted,
+        c.env.ENCRYPTION_KEY,
+      );
     } catch (error) {
       console.error("Failed to decrypt user credentials:", error);
       return c.json({ error: "Failed to access your S3 credentials" }, 500);
@@ -515,7 +544,9 @@ datasetRoutes.post("/:id/finalize", authMiddleware, async (c) => {
       const workflowResult = await deployWorkflows(datasetId, c.env.GITHUB_ADMIN_PAT);
       if (!workflowResult.success) {
         console.error("Failed to deploy some workflows:", workflowResult.errors);
-        warnings.push("Some GitHub workflows could not be deployed; PR-based uploads may not work correctly");
+        warnings.push(
+          "Some GitHub workflows could not be deployed; PR-based uploads may not work correctly",
+        );
       }
     } catch (error) {
       console.error("Failed to deploy workflows:", error);
@@ -527,7 +558,9 @@ datasetRoutes.post("/:id/finalize", authMiddleware, async (c) => {
       await applyBranchProtection(datasetId, c.env.GITHUB_ADMIN_PAT);
     } catch (error) {
       console.error("Failed to apply branch protection:", error);
-      warnings.push("Branch protection could not be applied; direct pushes to main may be possible");
+      warnings.push(
+        "Branch protection could not be applied; direct pushes to main may be possible",
+      );
     }
 
     // Enable auto-merge
@@ -551,7 +584,7 @@ datasetRoutes.post("/:id/finalize", authMiddleware, async (c) => {
           `
         INSERT INTO audit_log (user_id, action, resource_type, resource_id, details)
         VALUES (?, 'dataset_finalized', 'dataset', ?, ?)
-      `
+      `,
         )
         .bind(user.id, datasetId, JSON.stringify({ finalized: true, warnings }))
         .run();
@@ -563,7 +596,8 @@ datasetRoutes.post("/:id/finalize", authMiddleware, async (c) => {
     const githubUrl = `https://github.com/${dataset.github_repo}`;
 
     return c.json({
-      message: warnings.length > 0 ? "Dataset finalized with warnings" : "Dataset finalized successfully",
+      message:
+        warnings.length > 0 ? "Dataset finalized with warnings" : "Dataset finalized successfully",
       warnings: warnings.length > 0 ? warnings : undefined,
       dataset: {
         dataset_id: datasetId,
@@ -591,9 +625,17 @@ datasetRoutes.post("/:id/request-access", authMiddleware, async (c) => {
 
   // Get dataset info
   const dataset = await db
-    .prepare("SELECT id, dataset_id, name, github_repo, owner_user_id FROM datasets WHERE dataset_id = ?")
+    .prepare(
+      "SELECT id, dataset_id, name, github_repo, owner_user_id FROM datasets WHERE dataset_id = ?",
+    )
     .bind(datasetId)
-    .first<{ id: number; dataset_id: string; name: string; github_repo: string | null; owner_user_id: number }>();
+    .first<{
+      id: number;
+      dataset_id: string;
+      name: string;
+      github_repo: string | null;
+      owner_user_id: number;
+    }>();
 
   if (!dataset) {
     return c.json({ error: "Dataset not found" }, 404);
@@ -637,7 +679,7 @@ datasetRoutes.post("/:id/request-access", authMiddleware, async (c) => {
   try {
     await db
       .prepare(
-        "INSERT INTO dataset_collaborators (dataset_id, user_id, access_type) VALUES (?, ?, 'requested')"
+        "INSERT INTO dataset_collaborators (dataset_id, user_id, access_type) VALUES (?, ?, 'requested')",
       )
       .bind(dataset.id, user.id)
       .run();
@@ -645,7 +687,7 @@ datasetRoutes.post("/:id/request-access", authMiddleware, async (c) => {
     // Audit log
     await db
       .prepare(
-        "INSERT INTO audit_log (user_id, action, resource_type, resource_id, details) VALUES (?, 'dataset_access_granted', 'dataset', ?, ?)"
+        "INSERT INTO audit_log (user_id, action, resource_type, resource_id, details) VALUES (?, 'dataset_access_granted', 'dataset', ?, ?)",
       )
       .bind(user.id, datasetId, JSON.stringify({ access_type: "requested" }))
       .run();
@@ -679,9 +721,17 @@ datasetRoutes.post("/:id/invite", authMiddleware, zValidator("json", inviteSchem
 
   // Get dataset info
   const dataset = await db
-    .prepare("SELECT id, dataset_id, name, github_repo, owner_user_id FROM datasets WHERE dataset_id = ?")
+    .prepare(
+      "SELECT id, dataset_id, name, github_repo, owner_user_id FROM datasets WHERE dataset_id = ?",
+    )
     .bind(datasetId)
-    .first<{ id: number; dataset_id: string; name: string; github_repo: string | null; owner_user_id: number }>();
+    .first<{
+      id: number;
+      dataset_id: string;
+      name: string;
+      github_repo: string | null;
+      owner_user_id: number;
+    }>();
 
   if (!dataset) {
     return c.json({ error: "Dataset not found" }, 404);
@@ -744,7 +794,7 @@ datasetRoutes.post("/:id/invite", authMiddleware, zValidator("json", inviteSchem
   try {
     await db
       .prepare(
-        "INSERT INTO dataset_collaborators (dataset_id, user_id, granted_by, access_type) VALUES (?, ?, ?, 'invited')"
+        "INSERT INTO dataset_collaborators (dataset_id, user_id, granted_by, access_type) VALUES (?, ?, ?, 'invited')",
       )
       .bind(dataset.id, invitee.id, currentUser.id)
       .run();
@@ -752,9 +802,13 @@ datasetRoutes.post("/:id/invite", authMiddleware, zValidator("json", inviteSchem
     // Audit log
     await db
       .prepare(
-        "INSERT INTO audit_log (user_id, action, resource_type, resource_id, details) VALUES (?, 'dataset_access_granted', 'dataset', ?, ?)"
+        "INSERT INTO audit_log (user_id, action, resource_type, resource_id, details) VALUES (?, 'dataset_access_granted', 'dataset', ?, ?)",
       )
-      .bind(currentUser.id, datasetId, JSON.stringify({ invitee: username, access_type: "invited" }))
+      .bind(
+        currentUser.id,
+        datasetId,
+        JSON.stringify({ invitee: username, access_type: "invited" }),
+      )
       .run();
   } catch (dbError) {
     // GitHub succeeded but DB failed - log error but don't fail the request
@@ -800,7 +854,7 @@ datasetRoutes.get("/:id/collaborators", authMiddleware, async (c) => {
        JOIN users u ON dc.user_id = u.id
        LEFT JOIN users g ON dc.granted_by = g.id
        WHERE dc.dataset_id = ?
-       ORDER BY dc.granted_at DESC`
+       ORDER BY dc.granted_at DESC`,
     )
     .bind(dataset.id)
     .all();

@@ -59,7 +59,7 @@ export async function rateLimiter(c: RateLimitContext, next: Next) {
     let count = 0;
 
     if (cached) {
-      const data = await cached.json() as { count: number };
+      const data = (await cached.json()) as { count: number };
       count = data.count;
     }
 
@@ -79,7 +79,7 @@ export async function rateLimiter(c: RateLimitContext, next: Next) {
           "X-RateLimit-Limit": maxRequests.toString(),
           "X-RateLimit-Remaining": "0",
           "X-RateLimit-Reset": (Math.floor(Date.now() / 1000) + retryAfter).toString(),
-        }
+        },
       );
     }
 

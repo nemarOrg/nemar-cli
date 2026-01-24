@@ -4,14 +4,14 @@
  * Handles user registration, email verification, and login.
  */
 
+import { zValidator } from "@hono/zod-validator";
 import { Hono } from "hono";
 import { z } from "zod";
-import { zValidator } from "@hono/zod-validator";
-import type { Bindings, Variables } from "../types/bindings";
-import { hashPassword, validatePasswordStrength } from "../services/password";
-import { generateVerificationToken, generateExpirationTimestamp } from "../services/token";
-import { sendVerificationEmail, sendAdminNotificationEmail } from "../services/email";
+import { sendAdminNotificationEmail, sendVerificationEmail } from "../services/email";
 import { validateGitHubUsername } from "../services/github";
+import { hashPassword, validatePasswordStrength } from "../services/password";
+import { generateExpirationTimestamp, generateVerificationToken } from "../services/token";
+import type { Bindings, Variables } from "../types/bindings";
 
 export const authRoutes = new Hono<{ Bindings: Bindings; Variables: Variables }>();
 
@@ -30,7 +30,10 @@ authRoutes.get("/check-username", async (c) => {
     return c.json({ available: false, reason: "Username must be 3-30 characters" });
   }
   if (!/^[a-zA-Z0-9_-]+$/.test(username)) {
-    return c.json({ available: false, reason: "Username can only contain letters, numbers, underscores, and hyphens" });
+    return c.json({
+      available: false,
+      reason: "Username can only contain letters, numbers, underscores, and hyphens",
+    });
   }
 
   try {
@@ -72,7 +75,10 @@ const signupSchema = z.object({
     .string()
     .min(3, "Username must be at least 3 characters")
     .max(30, "Username must be at most 30 characters")
-    .regex(/^[a-zA-Z0-9_-]+$/, "Username can only contain letters, numbers, underscores, and hyphens"),
+    .regex(
+      /^[a-zA-Z0-9_-]+$/,
+      "Username can only contain letters, numbers, underscores, and hyphens",
+    ),
   email: z.string().email("Invalid email address"),
   password: z.string().min(12, "Password must be at least 12 characters").max(128),
   github_username: z
@@ -81,7 +87,10 @@ const signupSchema = z.object({
     .max(39, "GitHub username is too long"),
   description: z
     .string()
-    .min(20, "Please provide a brief description of why you need NEMAR access (at least 20 characters)")
+    .min(
+      20,
+      "Please provide a brief description of why you need NEMAR access (at least 20 characters)",
+    )
     .max(500, "Description must be at most 500 characters"),
 });
 
@@ -94,19 +103,19 @@ authRoutes.post("/signup", zValidator("json", signupSchema), async (c) => {
 
   try {
     // Validate password strength
-        const passwordCheck = validatePasswordStrength(password);
+    const passwordCheck = validatePasswordStrength(password);
     if (!passwordCheck.valid) {
       return c.json(
         {
           error: "Password does not meet requirements",
           details: passwordCheck.errors,
         },
-        400
+        400,
       );
     }
 
     // Check if username already exists
-        const existingUsername = await db
+    const existingUsername = await db
       .prepare("SELECT id FROM users WHERE username = ?")
       .bind(username)
       .first();
@@ -116,7 +125,7 @@ authRoutes.post("/signup", zValidator("json", signupSchema), async (c) => {
     }
 
     // Check if email already exists
-        const existingEmail = await db
+    const existingEmail = await db
       .prepare("SELECT id FROM users WHERE email = ?")
       .bind(email)
       .first();
@@ -126,39 +135,47 @@ authRoutes.post("/signup", zValidator("json", signupSchema), async (c) => {
     }
 
     // Validate GitHub username exists
-        const githubUser = await validateGitHubUsername(github_username, c.env.GITHUB_ADMIN_PAT);
+    const githubUser = await validateGitHubUsername(github_username, c.env.GITHUB_ADMIN_PAT);
     if (!githubUser) {
       return c.json(
         {
           error: "GitHub user not found",
           message: `The GitHub username '${github_username}' does not exist`,
         },
-        400
+        400,
       );
     }
 
     // Hash password
-        const passwordHash = await hashPassword(password);
+    const passwordHash = await hashPassword(password);
 
     // Generate verification token
-        const verificationToken = generateVerificationToken();
+    const verificationToken = generateVerificationToken();
     const verificationExpires = generateExpirationTimestamp(24); // 24 hours
 
     // Insert user
-        await db
+    await db
       .prepare(
         `
       INSERT INTO users (
         username, email, password_hash, github_username, description,
         verification_token, verification_expires_at
       ) VALUES (?, ?, ?, ?, ?, ?, ?)
-    `
+    `,
       )
-      .bind(username, email, passwordHash, github_username, description, verificationToken, verificationExpires)
+      .bind(
+        username,
+        email,
+        passwordHash,
+        github_username,
+        description,
+        verificationToken,
+        verificationExpires,
+      )
       .run();
 
     // Send verification email
-        const verificationUrl = `${c.env.API_BASE_URL}/auth/verify?token=${verificationToken}`;
+    const verificationUrl = `${c.env.API_BASE_URL}/auth/verify?token=${verificationToken}`;
 
     try {
       await sendVerificationEmail(email, username, verificationUrl, c.env.RESEND_API_KEY);
@@ -168,12 +185,12 @@ authRoutes.post("/signup", zValidator("json", signupSchema), async (c) => {
     }
 
     // Log audit event
-        await db
+    await db
       .prepare(
         `
       INSERT INTO audit_log (action, resource_type, resource_id, details)
       VALUES ('user_signup', 'user', ?, ?)
-    `
+    `,
       )
       .bind(username, JSON.stringify({ email, github_username, description }))
       .run();
@@ -188,7 +205,7 @@ authRoutes.post("/signup", zValidator("json", signupSchema), async (c) => {
           "Once approved, you will receive your API key",
         ],
       },
-      201
+      201,
     );
   } catch (error) {
     console.error("Signup error:", error);
@@ -197,7 +214,7 @@ authRoutes.post("/signup", zValidator("json", signupSchema), async (c) => {
         error: "Signup failed",
         message: error instanceof Error ? error.message : "Unknown error",
       },
-      500
+      500,
     );
   }
 });
@@ -221,7 +238,7 @@ authRoutes.get("/verify", async (c) => {
     SELECT id, username, email, github_username, description, status, verification_expires_at
     FROM users
     WHERE verification_token = ?
-  `
+  `,
     )
     .bind(token)
     .first<{
@@ -275,7 +292,7 @@ authRoutes.get("/verify", async (c) => {
         error: "Verification token has expired",
         message: "Please request a new verification email",
       },
-      400
+      400,
     );
   }
 
@@ -289,7 +306,7 @@ authRoutes.get("/verify", async (c) => {
         verification_token = NULL,
         updated_at = datetime('now')
     WHERE id = ?
-  `
+  `,
     )
     .bind(user.id)
     .run();
@@ -300,7 +317,7 @@ authRoutes.get("/verify", async (c) => {
       `
     INSERT INTO audit_log (user_id, action, resource_type, resource_id)
     VALUES (?, 'email_verified', 'user', ?)
-  `
+  `,
     )
     .bind(user.id, user.username)
     .run();
@@ -321,7 +338,7 @@ authRoutes.get("/verify", async (c) => {
           github_username: user.github_username,
           description: user.description || "No description provided",
         },
-        c.env.RESEND_API_KEY
+        c.env.RESEND_API_KEY,
       );
     }
   } catch (emailError) {
@@ -411,7 +428,7 @@ authRoutes.post("/login", zValidator("json", loginSchema), async (c) => {
     WHERE t.api_key_hash = ?
       AND t.revoked_at IS NULL
       AND (t.expires_at IS NULL OR t.expires_at > datetime('now'))
-  `
+  `,
     )
     .bind(hashedKey)
     .first<{
@@ -436,7 +453,7 @@ authRoutes.post("/login", zValidator("json", loginSchema), async (c) => {
         error: "Account not approved",
         status: result.status,
       },
-      403
+      403,
     );
   }
 
@@ -478,7 +495,9 @@ authRoutes.post("/resend-verification", zValidator("json", resendSchema), async 
 
   if (!user) {
     // Don't reveal if email exists
-    return c.json({ message: "If an account exists with this email, a verification link will be sent" });
+    return c.json({
+      message: "If an account exists with this email, a verification link will be sent",
+    });
   }
 
   if (user.status !== "pending") {
@@ -498,7 +517,7 @@ authRoutes.post("/resend-verification", zValidator("json", resendSchema), async 
         verification_expires_at = ?,
         updated_at = datetime('now')
     WHERE id = ?
-  `
+  `,
     )
     .bind(verificationToken, verificationExpires, user.id)
     .run();

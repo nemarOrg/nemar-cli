@@ -21,7 +21,7 @@ async function sendEmail(
   to: string,
   subject: string,
   html: string,
-  resendApiKey: string
+  resendApiKey: string,
 ): Promise<void> {
   const response = await fetch(RESEND_API_URL, {
     method: "POST",
@@ -50,7 +50,7 @@ export async function sendVerificationEmail(
   to: string,
   username: string,
   verificationUrl: string,
-  resendApiKey: string
+  resendApiKey: string,
 ): Promise<void> {
   const html = `
 <!DOCTYPE html>
@@ -107,7 +107,7 @@ export async function sendApprovalEmail(
   to: string,
   username: string,
   apiKey: string,
-  resendApiKey: string
+  resendApiKey: string,
 ): Promise<void> {
   const html = `
 <!DOCTYPE html>
@@ -179,7 +179,7 @@ export async function sendAdminNotificationEmail(
     github_username: string;
     description: string;
   },
-  resendApiKey: string
+  resendApiKey: string,
 ): Promise<void> {
   const html = `
 <!DOCTYPE html>
@@ -244,7 +244,7 @@ export async function sendAdminNotificationEmail(
         adminEmail,
         `[NEMAR] New user awaiting approval: ${user.username}`,
         html,
-        resendApiKey
+        resendApiKey,
       );
     } catch (error) {
       console.error(`Failed to send admin notification to ${adminEmail}:`, error);
@@ -258,7 +258,7 @@ export async function sendAdminNotificationEmail(
 export async function sendRevocationEmail(
   to: string,
   username: string,
-  resendApiKey: string
+  resendApiKey: string,
 ): Promise<void> {
   const html = `
 <!DOCTYPE html>
