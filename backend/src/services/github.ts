@@ -28,7 +28,7 @@ interface GitHubRepo {
  */
 export async function validateGitHubUsername(
   username: string,
-  pat: string
+  pat: string,
 ): Promise<GitHubUser | null> {
   const response = await fetch(`${GITHUB_API}/users/${username}`, {
     headers: {
@@ -53,16 +53,13 @@ export async function listOrgRepos(pat: string): Promise<GitHubRepo[]> {
   let page = 1;
 
   while (true) {
-    const response = await fetch(
-      `${GITHUB_API}/orgs/${ORG_NAME}/repos?per_page=100&page=${page}`,
-      {
-        headers: {
-          Authorization: `Bearer ${pat}`,
-          Accept: "application/vnd.github.v3+json",
-          "User-Agent": "NEMAR-API",
-        },
-      }
-    );
+    const response = await fetch(`${GITHUB_API}/orgs/${ORG_NAME}/repos?per_page=100&page=${page}`, {
+      headers: {
+        Authorization: `Bearer ${pat}`,
+        Accept: "application/vnd.github.v3+json",
+        "User-Agent": "NEMAR-API",
+      },
+    });
 
     if (!response.ok) {
       throw new Error(`Failed to list repos: ${response.status}`);
@@ -85,7 +82,7 @@ export async function addCollaborator(
   repo: string,
   username: string,
   permission: "pull" | "push" | "maintain" | "admin",
-  pat: string
+  pat: string,
 ): Promise<boolean> {
   const response = await fetch(
     `${GITHUB_API}/repos/${ORG_NAME}/${repo}/collaborators/${username}`,
@@ -98,7 +95,7 @@ export async function addCollaborator(
         "Content-Type": "application/json",
       },
       body: JSON.stringify({ permission }),
-    }
+    },
   );
 
   return response.ok || response.status === 204;
@@ -110,7 +107,7 @@ export async function addCollaborator(
 export async function removeCollaborator(
   repo: string,
   username: string,
-  pat: string
+  pat: string,
 ): Promise<boolean> {
   const response = await fetch(
     `${GITHUB_API}/repos/${ORG_NAME}/${repo}/collaborators/${username}`,
@@ -121,7 +118,7 @@ export async function removeCollaborator(
         Accept: "application/vnd.github.v3+json",
         "User-Agent": "NEMAR-API",
       },
-    }
+    },
   );
 
   return response.ok || response.status === 204;
@@ -132,7 +129,7 @@ export async function removeCollaborator(
  */
 export async function addCollaboratorToAllRepos(
   username: string,
-  pat: string
+  pat: string,
 ): Promise<{ count: number; errors: string[] }> {
   const repos = await listOrgRepos(pat);
   const errors: string[] = [];
@@ -158,7 +155,7 @@ export async function addCollaboratorToAllRepos(
  */
 export async function removeCollaboratorFromAllRepos(
   username: string,
-  pat: string
+  pat: string,
 ): Promise<{ count: number; errors: string[] }> {
   const repos = await listOrgRepos(pat);
   const errors: string[] = [];
@@ -183,7 +180,7 @@ export async function createRepository(
   name: string,
   description: string,
   isPrivate: boolean,
-  pat: string
+  pat: string,
 ): Promise<GitHubRepo> {
   const response = await fetch(`${GITHUB_API}/orgs/${ORG_NAME}/repos`, {
     method: "POST",
@@ -222,32 +219,29 @@ export async function createRepository(
  * - No force pushes or deletions
  */
 export async function applyBranchProtection(repo: string, pat: string): Promise<boolean> {
-  const response = await fetch(
-    `${GITHUB_API}/repos/${ORG_NAME}/${repo}/branches/main/protection`,
-    {
-      method: "PUT",
-      headers: {
-        Authorization: `Bearer ${pat}`,
-        Accept: "application/vnd.github.v3+json",
-        "User-Agent": "NEMAR-API",
-        "Content-Type": "application/json",
+  const response = await fetch(`${GITHUB_API}/repos/${ORG_NAME}/${repo}/branches/main/protection`, {
+    method: "PUT",
+    headers: {
+      Authorization: `Bearer ${pat}`,
+      Accept: "application/vnd.github.v3+json",
+      "User-Agent": "NEMAR-API",
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      required_pull_request_reviews: {
+        required_approving_review_count: 0, // Owner can self-merge
+        dismiss_stale_reviews: true,
       },
-      body: JSON.stringify({
-        required_pull_request_reviews: {
-          required_approving_review_count: 0, // Owner can self-merge
-          dismiss_stale_reviews: true,
-        },
-        enforce_admins: false, // Admins can bypass if needed
-        required_status_checks: {
-          strict: true,
-          contexts: ["bids-validation", "version-check"],
-        },
-        restrictions: null,
-        allow_force_pushes: false,
-        allow_deletions: false,
-      }),
-    }
-  );
+      enforce_admins: false, // Admins can bypass if needed
+      required_status_checks: {
+        strict: true,
+        contexts: ["bids-validation", "version-check"],
+      },
+      restrictions: null,
+      allow_force_pushes: false,
+      allow_deletions: false,
+    }),
+  });
 
   return response.ok;
 }
@@ -280,20 +274,17 @@ export async function createOrUpdateFile(
   path: string,
   content: string,
   message: string,
-  pat: string
+  pat: string,
 ): Promise<boolean> {
   // First, try to get the file to see if it exists (need SHA for update)
   let sha: string | undefined;
-  const getResponse = await fetch(
-    `${GITHUB_API}/repos/${ORG_NAME}/${repo}/contents/${path}`,
-    {
-      headers: {
-        Authorization: `Bearer ${pat}`,
-        Accept: "application/vnd.github.v3+json",
-        "User-Agent": "NEMAR-API",
-      },
-    }
-  );
+  const getResponse = await fetch(`${GITHUB_API}/repos/${ORG_NAME}/${repo}/contents/${path}`, {
+    headers: {
+      Authorization: `Bearer ${pat}`,
+      Accept: "application/vnd.github.v3+json",
+      "User-Agent": "NEMAR-API",
+    },
+  });
 
   if (getResponse.ok) {
     const existing = await getResponse.json<{ sha: string }>();
@@ -301,23 +292,20 @@ export async function createOrUpdateFile(
   }
 
   // Create or update the file
-  const response = await fetch(
-    `${GITHUB_API}/repos/${ORG_NAME}/${repo}/contents/${path}`,
-    {
-      method: "PUT",
-      headers: {
-        Authorization: `Bearer ${pat}`,
-        Accept: "application/vnd.github.v3+json",
-        "User-Agent": "NEMAR-API",
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        message,
-        content: btoa(content), // Base64 encode
-        ...(sha ? { sha } : {}),
-      }),
-    }
-  );
+  const response = await fetch(`${GITHUB_API}/repos/${ORG_NAME}/${repo}/contents/${path}`, {
+    method: "PUT",
+    headers: {
+      Authorization: `Bearer ${pat}`,
+      Accept: "application/vnd.github.v3+json",
+      "User-Agent": "NEMAR-API",
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      message,
+      content: btoa(content), // Base64 encode
+      ...(sha ? { sha } : {}),
+    }),
+  });
 
   return response.ok || response.status === 201;
 }
@@ -328,20 +316,30 @@ export async function createOrUpdateFile(
 export async function setRepoVisibility(
   repo: string,
   isPrivate: boolean,
-  pat: string
-): Promise<boolean> {
-  const response = await fetch(`${GITHUB_API}/repos/${ORG_NAME}/${repo}`, {
-    method: "PATCH",
-    headers: {
-      Authorization: `Bearer ${pat}`,
-      Accept: "application/vnd.github.v3+json",
-      "User-Agent": "NEMAR-API",
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({ private: isPrivate }),
-  });
+  pat: string,
+): Promise<{ ok: boolean; status: number; error?: string }> {
+  let response: Response;
+  try {
+    response = await fetch(`${GITHUB_API}/repos/${ORG_NAME}/${repo}`, {
+      method: "PATCH",
+      headers: {
+        Authorization: `Bearer ${pat}`,
+        Accept: "application/vnd.github.v3+json",
+        "User-Agent": "NEMAR-API",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ private: isPrivate }),
+    });
+  } catch (fetchError) {
+    const msg = fetchError instanceof Error ? fetchError.message : String(fetchError);
+    return { ok: false, status: 0, error: `Network error: ${msg}` };
+  }
 
-  return response.ok;
+  if (!response.ok) {
+    const body = await response.text().catch(() => "");
+    return { ok: false, status: response.status, error: body || `HTTP ${response.status}` };
+  }
+  return { ok: true, status: response.status };
 }
 
 interface WorkflowRun {
@@ -353,58 +351,74 @@ interface WorkflowRun {
 }
 
 /**
- * Check if a workflow file exists in a repository
+ * Check if a workflow file exists in a repository.
+ * Returns true if file exists, false if 404, throws on other errors.
  */
 export async function checkWorkflowExists(
   repo: string,
   workflowPath: string,
-  pat: string
+  pat: string,
 ): Promise<boolean> {
-  const response = await fetch(
-    `${GITHUB_API}/repos/${ORG_NAME}/${repo}/contents/${workflowPath}`,
-    {
+  let response: Response;
+  try {
+    response = await fetch(`${GITHUB_API}/repos/${ORG_NAME}/${repo}/contents/${workflowPath}`, {
       headers: {
         Authorization: `Bearer ${pat}`,
         Accept: "application/vnd.github.v3+json",
         "User-Agent": "NEMAR-API",
       },
-    }
-  );
+    });
+  } catch (fetchError) {
+    const msg = fetchError instanceof Error ? fetchError.message : String(fetchError);
+    throw new Error(`Network error checking workflow: ${msg}`);
+  }
 
-  return response.ok;
+  if (response.ok) return true;
+  if (response.status === 404) return false;
+  throw new Error(`GitHub API error (${response.status}) checking workflow: ${workflowPath}`);
 }
 
 /**
- * Get the latest workflow runs for a specific workflow file
+ * Get the latest workflow runs for a specific workflow file.
+ * Throws on API errors; returns empty array only when no runs exist.
  */
 export async function getWorkflowRuns(
   repo: string,
   workflowFile: string,
-  pat: string
+  pat: string,
 ): Promise<WorkflowRun[]> {
-  const response = await fetch(
-    `${GITHUB_API}/repos/${ORG_NAME}/${repo}/actions/workflows/${workflowFile}/runs?per_page=5`,
-    {
-      headers: {
-        Authorization: `Bearer ${pat}`,
-        Accept: "application/vnd.github.v3+json",
-        "User-Agent": "NEMAR-API",
+  let response: Response;
+  try {
+    response = await fetch(
+      `${GITHUB_API}/repos/${ORG_NAME}/${repo}/actions/workflows/${workflowFile}/runs?per_page=5`,
+      {
+        headers: {
+          Authorization: `Bearer ${pat}`,
+          Accept: "application/vnd.github.v3+json",
+          "User-Agent": "NEMAR-API",
+        },
       },
-    }
-  );
+    );
+  } catch (fetchError) {
+    const msg = fetchError instanceof Error ? fetchError.message : String(fetchError);
+    throw new Error(`Network error fetching workflow runs: ${msg}`);
+  }
 
   if (!response.ok) {
-    return [];
+    throw new Error(`GitHub API error (${response.status}) fetching runs for ${workflowFile}`);
   }
 
   const data = await response.json<{ workflow_runs: WorkflowRun[] }>();
-  return data.workflow_runs || [];
+  return data.workflow_runs ?? [];
 }
 
 /**
  * Deploy GitHub Actions workflow files to a dataset repository
  */
-export async function deployWorkflows(repo: string, pat: string): Promise<{ success: boolean; errors: string[] }> {
+export async function deployWorkflows(
+  repo: string,
+  pat: string,
+): Promise<{ success: boolean; errors: string[] }> {
   const errors: string[] = [];
 
   // BIDS Validation workflow
@@ -617,7 +631,7 @@ Changes in this release:
       workflow.path,
       workflow.content,
       `Add ${workflow.path.split("/").pop()} workflow`,
-      pat
+      pat,
     );
     if (!success) {
       errors.push(workflow.path);

@@ -404,6 +404,8 @@ repoCommand
         }
       } else {
         spinner.fail("Failed to change visibility");
+        const msg = error instanceof Error ? error.message : String(error);
+        console.log(chalk.gray(`  Error details: ${msg}`));
       }
     }
   });
@@ -441,6 +443,8 @@ repoCommand
         }
       } else {
         spinner.fail("Failed to change visibility");
+        const msg = error instanceof Error ? error.message : String(error);
+        console.log(chalk.gray(`  Error details: ${msg}`));
       }
     }
   });
@@ -506,6 +510,8 @@ ciCommand
         }
       } else {
         spinner.fail("Failed to check CI status");
+        const msg = error instanceof Error ? error.message : String(error);
+        console.log(chalk.gray(`  Error details: ${msg}`));
       }
     }
   });
@@ -552,6 +558,8 @@ ciCommand
         }
       } else {
         spinner.fail("Failed to deploy CI workflows");
+        const msg = error instanceof Error ? error.message : String(error);
+        console.log(chalk.gray(`  Error details: ${msg}`));
       }
     }
   });
