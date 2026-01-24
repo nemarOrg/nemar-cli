@@ -729,8 +729,18 @@ Examples:
     try {
       await addCi(datasetInfo.dataset_id);
       spinner.succeed("BIDS validation CI configured");
-    } catch {
-      spinner.warn("Could not configure CI (can be added later with 'nemar admin ci add')");
+    } catch (error) {
+      if (error instanceof ApiError && error.statusCode === 403) {
+        spinner.info("CI workflow will be configured by an admin");
+      } else {
+        const msg = error instanceof Error ? error.message : String(error);
+        spinner.warn(`Could not configure CI: ${msg}`);
+        console.log(
+          chalk.gray(
+            `  An admin can add it later with: nemar admin ci add ${datasetInfo.dataset_id}`,
+          ),
+        );
+      }
     }
 
     // Note: Branch protection is NOT applied here for private datasets.
@@ -1695,7 +1705,12 @@ Examples:
     // Create PR if --pr flag is set
     if (options.pr) {
       const branch = await getCurrentBranch(cwd);
-      if (!branch || branch === "main" || branch === "master") {
+      if (!branch) {
+        console.log(chalk.red("  Could not determine current branch"));
+        console.log(chalk.gray("  Ensure you are inside a valid git repository."));
+        process.exit(1);
+      }
+      if (branch === "main" || branch === "master") {
         console.log(chalk.yellow("  Skipping PR: already on main branch"));
       } else {
         spinner = ora("Creating pull request...").start();
@@ -1711,26 +1726,38 @@ Examples:
           prArgs.push("--body", "");
         }
 
-        const proc = spawn({
-          cmd: prArgs,
-          cwd,
-          env: process.env,
-          stdout: "pipe",
-          stderr: "pipe",
-        });
-        const prStdout = await new Response(proc.stdout).text();
-        const prStderr = await new Response(proc.stderr).text();
-        const prExit = await proc.exited;
+        try {
+          const proc = spawn({
+            cmd: prArgs,
+            cwd,
+            env: process.env,
+            stdout: "pipe",
+            stderr: "pipe",
+          });
+          const prStdout = await new Response(proc.stdout).text();
+          const prStderr = await new Response(proc.stderr).text();
+          const prExit = await proc.exited;
 
-        if (prExit !== 0) {
+          if (prExit !== 0) {
+            spinner.fail("Failed to create pull request");
+            console.log(chalk.red(`  ${prStderr.trim() || prStdout.trim()}`));
+            process.exit(1);
+          }
+
+          const prUrl = prStdout.trim();
+          spinner.succeed("Pull request created");
+          console.log(`  ${chalk.cyan(prUrl)}`);
+        } catch (spawnError) {
           spinner.fail("Failed to create pull request");
-          console.log(chalk.red(`  ${prStderr.trim() || prStdout.trim()}`));
+          const msg = spawnError instanceof Error ? spawnError.message : String(spawnError);
+          if (msg.includes("ENOENT") || msg.includes("not found")) {
+            console.log(chalk.red("  'gh' CLI is not installed or not in PATH"));
+            console.log(chalk.gray("  Install it: https://cli.github.com/"));
+          } else {
+            console.log(chalk.red(`  ${msg}`));
+          }
           process.exit(1);
         }
-
-        const prUrl = prStdout.trim();
-        spinner.succeed("Pull request created");
-        console.log(`  ${chalk.cyan(prUrl)}`);
       }
     }
   });
@@ -1858,7 +1885,6 @@ Examples:
     } catch (error) {
       if (error instanceof ApiError) {
         spinner.fail(error.message);
-        console.log(chalk.gray(`  ${error.message}`));
       } else {
         spinner.fail("Failed to check CI status");
         const msg = error instanceof Error ? error.message : String(error);

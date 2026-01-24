@@ -1099,7 +1099,12 @@ datasetRoutes.get("/:id/ci/status", authMiddleware, async (c) => {
   const currentUser = c.get("user");
 
   const dataset = await db
-    .prepare("SELECT dataset_id, github_repo, owner_username FROM datasets WHERE dataset_id = ?")
+    .prepare(
+      `SELECT d.dataset_id, d.github_repo, u.username as owner_username
+       FROM datasets d
+       JOIN users u ON d.owner_user_id = u.id
+       WHERE d.dataset_id = ?`,
+    )
     .bind(datasetId)
     .first<{ dataset_id: string; github_repo: string | null; owner_username: string }>();
 
@@ -1146,6 +1151,7 @@ datasetRoutes.get("/:id/ci/status", authMiddleware, async (c) => {
     }
   } catch (githubError) {
     const msg = githubError instanceof Error ? githubError.message : String(githubError);
+    console.error(`[ci/status] GitHub API error for ${datasetId} (repo: ${repoName}):`, msg);
     return c.json({ error: `GitHub API error: ${msg}` }, 502);
   }
 

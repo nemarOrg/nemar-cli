@@ -417,7 +417,7 @@ export interface UserCiStatusResponse {
  * Get CI workflow status for a dataset (user-accessible, owner or admin)
  */
 export async function getUserCiStatus(datasetId: string): Promise<UserCiStatusResponse> {
-  return request<UserCiStatusResponse>(`/datasets/${datasetId}/ci/status`);
+  return request<UserCiStatusResponse>(`/datasets/${datasetId}/ci/status`, {}, true);
 }
 
 // ============================================================================
