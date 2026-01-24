@@ -302,7 +302,9 @@ export async function createOrUpdateFile(
     },
     body: JSON.stringify({
       message,
-      content: btoa(content), // Base64 encode
+      content: btoa(
+        Array.from(new TextEncoder().encode(content), (b) => String.fromCharCode(b)).join(""),
+      ),
       ...(sha ? { sha } : {}),
     }),
   });
@@ -600,7 +602,7 @@ Changes in this release:
           # Show DOI info
           DOI=$(echo "$BODY" | jq -r '.version_doi // empty')
           if [ -n "$DOI" ]; then
-            echo "✓ Version DOI published: $DOI"
+            echo "Version DOI published: $DOI"
           fi
 
   cleanup-staging:

@@ -8,7 +8,12 @@ import { zValidator } from "@hono/zod-validator";
 import { Hono } from "hono";
 import { z } from "zod";
 import { adminMiddleware, authMiddleware } from "../middleware/auth";
-import { sendApprovalEmail, sendRevocationEmail } from "../services/email";
+import {
+  sendApprovalEmail,
+  sendPublicationApprovedEmail,
+  sendPublicationDeniedEmail,
+  sendRevocationEmail,
+} from "../services/email";
 import { decrypt, encrypt } from "../services/encryption";
 import {
   checkWorkflowExists,
@@ -18,6 +23,7 @@ import {
   setRepoVisibility,
 } from "../services/github";
 import { generateIamUsername, revokeUserIamAccess, setupUserIamAccess } from "../services/iam";
+import { applyObjectLock } from "../services/s3";
 import { generateApiKey, hashApiKey } from "../services/token";
 import {
   type ZenodoDeposition,
@@ -1310,4 +1316,522 @@ adminRoutes.post("/datasets/:id/ci", async (c) => {
     dataset_id: datasetId,
     workflows_deployed: WORKFLOW_FILES,
   });
+});
+
+// ============================================================================
+// Publication Workflow (Admin)
+// ============================================================================
+
+/**
+ * GET /admin/publish/requests - List publication requests
+ */
+adminRoutes.get("/publish/requests", async (c) => {
+  const db = c.env.DB;
+  const status = c.req.query("status");
+
+  let query = `
+    SELECT pr.*, u.username as requested_by_username, u.email as requested_by_email
+    FROM publication_requests pr
+    JOIN users u ON pr.requested_by = u.id
+  `;
+  const params: string[] = [];
+
+  if (status) {
+    query += " WHERE pr.status = ?";
+    params.push(status);
+  }
+
+  query += " ORDER BY pr.requested_at DESC";
+
+  const requests = await db
+    .prepare(query)
+    .bind(...params)
+    .all<{
+      id: number;
+      dataset_id: string;
+      status: string;
+      requested_at: string;
+      requested_by_username: string;
+      requested_by_email: string;
+      steps_completed: string;
+      current_step: string | null;
+      last_error: string | null;
+    }>();
+
+  return c.json({
+    requests: requests.results.map((r) => ({
+      ...r,
+      steps_completed: JSON.parse(r.steps_completed || "[]"),
+    })),
+    count: requests.results.length,
+  });
+});
+
+/**
+ * POST /admin/publish/:id/deny - Deny a publication request
+ */
+const denySchema = z.object({
+  reason: z.string().min(1, "Reason is required").max(2000, "Reason too long"),
+});
+
+adminRoutes.post("/publish/:id/deny", zValidator("json", denySchema), async (c) => {
+  const datasetId = c.req.param("id");
+  const { reason } = c.req.valid("json");
+  const adminUser = c.get("user");
+  const db = c.env.DB;
+
+  const request = await db
+    .prepare(
+      "SELECT id, status, requested_by FROM publication_requests WHERE dataset_id = ? AND status IN ('requested', 'approving') ORDER BY requested_at DESC LIMIT 1",
+    )
+    .bind(datasetId)
+    .first<{ id: number; status: string; requested_by: number }>();
+
+  if (!request) {
+    return c.json({ error: "No active publication request found" }, 404);
+  }
+
+  await db
+    .prepare(
+      `UPDATE publication_requests
+       SET status = 'denied', denied_at = datetime('now'), denied_by = ?, denied_reason = ?, updated_at = datetime('now')
+       WHERE id = ?`,
+    )
+    .bind(adminUser.id, reason, request.id)
+    .run();
+
+  // Notify the requesting user
+  try {
+    const user = await db
+      .prepare("SELECT username, email FROM users WHERE id = ?")
+      .bind(request.requested_by)
+      .first<{ username: string; email: string }>();
+
+    if (user) {
+      await sendPublicationDeniedEmail(
+        user.email,
+        user.username,
+        datasetId,
+        reason,
+        c.env.RESEND_API_KEY,
+      );
+    }
+  } catch (emailError) {
+    console.error("Failed to send denial email:", emailError);
+  }
+
+  return c.json({
+    message: "Publication request denied",
+    dataset_id: datasetId,
+    reason,
+  });
+});
+
+/**
+ * POST /admin/publish/:id/approve - Approve and run publication orchestrator
+ *
+ * Steps:
+ * 1. ci_check - Verify CI exists and is passing (deploy if missing)
+ * 2. repo_public - Make repository public
+ * 3. doi_create - Create concept DOI if not exists
+ * 4. s3_lock - Apply S3 Object Lock (Governance mode)
+ * 5. notify_user - Send publication confirmation email
+ *
+ * Body: { resume?: boolean } - if true, skip already-completed steps
+ */
+const approveSchema = z.object({
+  resume: z.boolean().optional().default(false),
+});
+
+adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), async (c) => {
+  const datasetId = c.req.param("id");
+  const { resume } = c.req.valid("json");
+  const adminUser = c.get("user");
+  const db = c.env.DB;
+
+  // Find the publication request
+  const request = await db
+    .prepare(
+      "SELECT id, status, steps_completed FROM publication_requests WHERE dataset_id = ? AND status IN ('requested', 'approving') ORDER BY requested_at DESC LIMIT 1",
+    )
+    .bind(datasetId)
+    .first<{ id: number; status: string; steps_completed: string }>();
+
+  if (!request) {
+    return c.json({ error: "No active publication request found" }, 404);
+  }
+
+  const stepsCompleted: string[] = resume ? JSON.parse(request.steps_completed || "[]") : [];
+  const allSteps = ["ci_check", "repo_public", "doi_create", "s3_lock", "notify_user"];
+  const stepsToRun = allSteps.filter((s) => !stepsCompleted.includes(s));
+
+  if (stepsToRun.length === 0) {
+    return c.json({
+      message: "All steps already completed",
+      dataset_id: datasetId,
+      status: "published",
+    });
+  }
+
+  // Mark as approving
+  await db
+    .prepare(
+      "UPDATE publication_requests SET status = 'approving', approved_by = ?, updated_at = datetime('now') WHERE id = ?",
+    )
+    .bind(adminUser.id, request.id)
+    .run();
+
+  // Get dataset info
+  const dataset = await db
+    .prepare(
+      `SELECT d.*, u.username as owner_username, u.email as owner_email
+       FROM datasets d
+       JOIN users u ON d.owner_user_id = u.id
+       WHERE d.dataset_id = ?`,
+    )
+    .bind(datasetId)
+    .first<{
+      id: number;
+      dataset_id: string;
+      name: string;
+      github_repo: string | null;
+      concept_doi: string | null;
+      zenodo_concept_id: string | null;
+      owner_username: string;
+      owner_email: string;
+    }>();
+
+  if (!dataset) {
+    return c.json({ error: "Dataset not found" }, 404);
+  }
+
+  if (!dataset.github_repo) {
+    return c.json({ error: "Dataset has no GitHub repository" }, 400);
+  }
+
+  const repoName = dataset.github_repo.split("/")[1];
+  if (!repoName) {
+    return c.json({ error: "Invalid repository format" }, 500);
+  }
+
+  const pat = c.env.GITHUB_ADMIN_PAT;
+  const completed: string[] = [...stepsCompleted];
+
+  // Helper to update progress in D1
+  async function updateProgress(step: string, error?: string) {
+    if (!error) {
+      completed.push(step);
+    }
+    await db
+      .prepare(
+        `UPDATE publication_requests
+         SET steps_completed = ?, current_step = ?, last_error = ?, updated_at = datetime('now')
+         WHERE id = ?`,
+      )
+      .bind(JSON.stringify(completed), error ? step : null, error || null, request.id)
+      .run();
+  }
+
+  // Step 1: CI Check
+  if (stepsToRun.includes("ci_check")) {
+    try {
+      await db
+        .prepare(
+          "UPDATE publication_requests SET current_step = 'ci_check', updated_at = datetime('now') WHERE id = ?",
+        )
+        .bind(request.id)
+        .run();
+
+      const bidsExists = await checkWorkflowExists(
+        repoName,
+        ".github/workflows/bids-validation.yml",
+        pat,
+      );
+      if (!bidsExists) {
+        await deployWorkflows(repoName, pat);
+      }
+
+      // Check latest run status (if workflow existed, verify it passes)
+      // Freshly deployed workflows have no runs yet, which is acceptable
+      const runs = await getWorkflowRuns(repoName, "bids-validation.yml", pat);
+      if (runs.length > 0) {
+        const latest = runs[0];
+        if (latest.conclusion === "failure") {
+          await updateProgress("ci_check", "BIDS validation CI is failing");
+          return c.json(
+            {
+              error: "CI check failed: BIDS validation is failing",
+              dataset_id: datasetId,
+              step: "ci_check",
+              steps_completed: completed,
+            },
+            422,
+          );
+        }
+      }
+
+      await updateProgress("ci_check");
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      await updateProgress("ci_check", msg);
+      return c.json(
+        { error: `CI check failed: ${msg}`, step: "ci_check", steps_completed: completed },
+        500,
+      );
+    }
+  }
+
+  // Step 2: Make repo public
+  if (stepsToRun.includes("repo_public")) {
+    try {
+      await db
+        .prepare(
+          "UPDATE publication_requests SET current_step = 'repo_public', updated_at = datetime('now') WHERE id = ?",
+        )
+        .bind(request.id)
+        .run();
+
+      const result = await setRepoVisibility(repoName, false, pat);
+      if (!result.ok) {
+        await updateProgress("repo_public", `Failed to make repo public: ${result.error}`);
+        return c.json(
+          {
+            error: `Failed to make repo public: ${result.error}`,
+            step: "repo_public",
+            steps_completed: completed,
+          },
+          500,
+        );
+      }
+
+      await updateProgress("repo_public");
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      await updateProgress("repo_public", msg);
+      return c.json(
+        { error: `repo_public failed: ${msg}`, step: "repo_public", steps_completed: completed },
+        500,
+      );
+    }
+  }
+
+  // Step 3: Create concept DOI (if not exists)
+  if (stepsToRun.includes("doi_create")) {
+    try {
+      await db
+        .prepare(
+          "UPDATE publication_requests SET current_step = 'doi_create', updated_at = datetime('now') WHERE id = ?",
+        )
+        .bind(request.id)
+        .run();
+
+      if (!dataset.concept_doi) {
+        const { createDeposition: createDep, getPrereservedDoi: getDoi } = await import(
+          "../services/zenodo"
+        );
+        const zenodoToken = c.env.ZENODO_API_KEY;
+        if (!zenodoToken) {
+          await updateProgress("doi_create", "Zenodo API key not configured");
+          return c.json(
+            {
+              error: "Zenodo API key not configured",
+              step: "doi_create",
+              steps_completed: completed,
+            },
+            500,
+          );
+        }
+
+        const metadata = {
+          title: `${dataset.name} - BIDS Dataset`,
+          description: `BIDS-formatted dataset: ${dataset.name}`,
+          creators: [{ name: dataset.owner_username }],
+          keywords: ["BIDS", "neuroscience", "neuroimaging", "NEMAR"],
+          license: "cc-by-nc-4.0",
+          related_identifiers: [
+            {
+              identifier: `https://github.com/${dataset.github_repo}`,
+              relation: "isSupplementTo",
+              resource_type: "dataset",
+            },
+          ],
+        };
+
+        const deposition = await createDep(metadata, zenodoToken, false);
+        const conceptDoi = getDoi(deposition);
+
+        if (conceptDoi) {
+          await db
+            .prepare(
+              "UPDATE datasets SET concept_doi = ?, zenodo_concept_id = ?, updated_at = datetime('now') WHERE dataset_id = ?",
+            )
+            .bind(conceptDoi, deposition.id.toString(), datasetId)
+            .run();
+        }
+      }
+
+      await updateProgress("doi_create");
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      await updateProgress("doi_create", msg);
+      return c.json(
+        { error: `DOI creation failed: ${msg}`, step: "doi_create", steps_completed: completed },
+        500,
+      );
+    }
+  }
+
+  // Step 4: S3 Object Lock
+  if (stepsToRun.includes("s3_lock")) {
+    try {
+      await db
+        .prepare(
+          "UPDATE publication_requests SET current_step = 's3_lock', updated_at = datetime('now') WHERE id = ?",
+        )
+        .bind(request.id)
+        .run();
+
+      const lockResult = await applyObjectLock(
+        {
+          bucket: c.env.S3_BUCKET,
+          region: c.env.AWS_REGION,
+          accessKeyId: c.env.AWS_ACCESS_KEY_ID,
+          secretAccessKey: c.env.AWS_SECRET_ACCESS_KEY,
+        },
+        datasetId,
+      );
+
+      if (lockResult.failed.length > 0) {
+        const msg = `${lockResult.locked} locked, ${lockResult.failed.length} failed`;
+        await updateProgress("s3_lock", msg);
+        return c.json(
+          {
+            error: `S3 lock partially failed: ${msg}`,
+            step: "s3_lock",
+            steps_completed: completed,
+            details: lockResult,
+          },
+          500,
+        );
+      }
+
+      await updateProgress("s3_lock");
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      await updateProgress("s3_lock", msg);
+      return c.json(
+        { error: `S3 lock failed: ${msg}`, step: "s3_lock", steps_completed: completed },
+        500,
+      );
+    }
+  }
+
+  // Step 5: Notify user
+  if (stepsToRun.includes("notify_user")) {
+    try {
+      await db
+        .prepare(
+          "UPDATE publication_requests SET current_step = 'notify_user', updated_at = datetime('now') WHERE id = ?",
+        )
+        .bind(request.id)
+        .run();
+
+      // Re-read DOI in case it was just created
+      const updatedDataset = await db
+        .prepare("SELECT concept_doi FROM datasets WHERE dataset_id = ?")
+        .bind(datasetId)
+        .first<{ concept_doi: string | null }>();
+
+      await sendPublicationApprovedEmail(
+        dataset.owner_email,
+        dataset.owner_username,
+        datasetId,
+        updatedDataset?.concept_doi || null,
+        c.env.RESEND_API_KEY,
+      );
+
+      await updateProgress("notify_user");
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      await updateProgress("notify_user", msg);
+      return c.json(
+        { error: `Notification failed: ${msg}`, step: "notify_user", steps_completed: completed },
+        500,
+      );
+    }
+  }
+
+  // Mark as published
+  await db
+    .prepare(
+      `UPDATE publication_requests
+       SET status = 'published', approved_at = datetime('now'), current_step = NULL, last_error = NULL, updated_at = datetime('now')
+       WHERE id = ?`,
+    )
+    .bind(request.id)
+    .run();
+
+  // Audit log
+  try {
+    await db
+      .prepare(
+        "INSERT INTO audit_log (user_id, action, resource_type, resource_id, details) VALUES (?, ?, ?, ?, ?)",
+      )
+      .bind(
+        adminUser.id,
+        "dataset_published",
+        "dataset",
+        datasetId,
+        JSON.stringify({ approved_by: adminUser.username, steps: allSteps }),
+      )
+      .run();
+  } catch (auditError) {
+    console.error("Audit log write failed for publication:", auditError);
+  }
+
+  return c.json({
+    message: "Dataset published successfully",
+    dataset_id: datasetId,
+    status: "published",
+    steps_completed: allSteps,
+  });
+});
+
+/**
+ * POST /admin/datasets/:id/s3-lock - Apply S3 Object Lock to dataset
+ */
+adminRoutes.post("/datasets/:id/s3-lock", async (c) => {
+  const datasetId = c.req.param("id");
+  const db = c.env.DB;
+
+  const dataset = await db
+    .prepare("SELECT dataset_id FROM datasets WHERE dataset_id = ?")
+    .bind(datasetId)
+    .first<{ dataset_id: string }>();
+
+  if (!dataset) {
+    return c.json({ error: "Dataset not found" }, 404);
+  }
+
+  try {
+    const result = await applyObjectLock(
+      {
+        bucket: c.env.S3_BUCKET,
+        region: c.env.AWS_REGION,
+        accessKeyId: c.env.AWS_ACCESS_KEY_ID,
+        secretAccessKey: c.env.AWS_SECRET_ACCESS_KEY,
+      },
+      datasetId,
+    );
+
+    return c.json({
+      message: result.failed.length === 0 ? "All objects locked" : "Some objects failed to lock",
+      dataset_id: datasetId,
+      locked: result.locked,
+      failed: result.failed,
+    });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return c.json({ error: `S3 lock failed: ${msg}` }, 500);
+  }
 });

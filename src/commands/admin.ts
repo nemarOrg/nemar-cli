@@ -11,6 +11,7 @@
  * - nemar admin repo public/private - Change repository visibility
  * - nemar admin ci check/add       - Manage CI workflows
  * - nemar admin doi create/info    - DOI management
+ * - nemar admin publish list/deny/approve - Publication workflow
  * - nemar admin revert             - Revert dataset to a previous version
  */
 
@@ -24,13 +25,16 @@ import {
   ApiError,
   type Dataset,
   addCi,
+  approvePublication,
   approveUser,
   changeVisibility,
   createConceptDoi,
+  denyPublication,
   finalizeDataset,
   getCiStatus,
   getDataset,
   getDoiInfo,
+  listPublishRequests,
   listUsers,
   regenerateUserIam,
   revokeUser,
@@ -786,6 +790,172 @@ doiCommand
   });
 
 adminCommand.addCommand(doiCommand);
+
+// ============================================================================
+// Publication Workflow (Admin)
+// ============================================================================
+
+const publishCommand = new Command("publish").description("Publication workflow management");
+
+publishCommand
+  .command("list")
+  .description("List publication requests")
+  .option("-s, --status <status>", "Filter by status (requested, approving, published, denied)")
+  .action(async (options: { status?: string }) => {
+    if (!requireAuth()) return;
+
+    const spinner = ora("Fetching publication requests...").start();
+
+    try {
+      const result = await listPublishRequests(options.status);
+      spinner.stop();
+
+      if (result.requests.length === 0) {
+        console.log(chalk.gray("\n  No publication requests found.\n"));
+        return;
+      }
+
+      console.log(`\n${chalk.cyan("Publication Requests")} (${result.count})\n`);
+
+      for (const req of result.requests) {
+        const statusColor =
+          req.status === "published"
+            ? chalk.green
+            : req.status === "denied"
+              ? chalk.red
+              : req.status === "approving"
+                ? chalk.yellow
+                : chalk.white;
+
+        console.log(
+          `  ${chalk.bold(req.dataset_id)}  ${statusColor(req.status)}  by ${req.requested_by_username}  ${chalk.gray(req.requested_at)}`,
+        );
+        if (req.current_step && req.status === "approving") {
+          console.log(
+            `    ${chalk.yellow(">")} ${req.current_step.replace(/_/g, " ")}${req.last_error ? chalk.red(` (${req.last_error})`) : ""}`,
+          );
+        }
+      }
+      console.log();
+    } catch (error) {
+      if (error instanceof ApiError) {
+        spinner.fail(error.message);
+        console.log(chalk.gray(`  ${error.message}`));
+        if (error.statusCode === 403) {
+          console.log(chalk.gray("  This command requires admin privileges"));
+        }
+      } else {
+        spinner.fail("Failed to list publication requests");
+        const msg = error instanceof Error ? error.message : String(error);
+        console.log(chalk.gray(`  Error details: ${msg}`));
+      }
+    }
+  });
+
+publishCommand
+  .command("deny")
+  .description("Deny a publication request")
+  .argument("<dataset-id>", "Dataset ID")
+  .option("-r, --reason <reason>", "Reason for denial")
+  .option(YES_OPTION, YES_DESCRIPTION)
+  .option(NO_OPTION, NO_DESCRIPTION)
+  .action(async (datasetId, options: ConfirmOptions & { reason?: string }) => {
+    if (!requireAuth()) return;
+
+    let reason = options.reason;
+    if (!reason) {
+      const { inputReason } = await inquirer.prompt([
+        { type: "input", name: "inputReason", message: "Reason for denial:" },
+      ]);
+      reason = inputReason;
+    }
+
+    if (!reason) {
+      console.log(chalk.red("Reason is required"));
+      return;
+    }
+
+    const confirmResult = await confirm(`Deny publication of ${datasetId}?`, options);
+    if (confirmResult !== "confirmed") {
+      console.log(chalk.gray(confirmResult === "declined" ? "Skipped" : "Cancelled"));
+      return;
+    }
+
+    const spinner = ora(`Denying publication for ${datasetId}...`).start();
+
+    try {
+      await denyPublication(datasetId, reason);
+      spinner.succeed(`Publication denied for ${datasetId}`);
+      console.log(chalk.gray("  User has been notified."));
+    } catch (error) {
+      if (error instanceof ApiError) {
+        spinner.fail(error.message);
+        console.log(chalk.gray(`  ${error.message}`));
+      } else {
+        spinner.fail("Failed to deny publication");
+        const msg = error instanceof Error ? error.message : String(error);
+        console.log(chalk.gray(`  Error details: ${msg}`));
+      }
+    }
+  });
+
+publishCommand
+  .command("approve")
+  .description("Approve and publish a dataset (runs orchestrator)")
+  .argument("<dataset-id>", "Dataset ID")
+  .option("--resume", "Resume from last failed step")
+  .option(YES_OPTION, YES_DESCRIPTION)
+  .option(NO_OPTION, NO_DESCRIPTION)
+  .action(async (datasetId, options: ConfirmOptions & { resume?: boolean }) => {
+    if (!requireAuth()) return;
+
+    const action = options.resume
+      ? `Resume publication of ${datasetId}`
+      : `Approve and publish ${datasetId}`;
+    console.log(chalk.cyan(`\n${action}\n`));
+    console.log("This will run the following steps:");
+    console.log("  1. Check CI (deploy if missing, verify passing)");
+    console.log("  2. Make repository public");
+    console.log("  3. Create concept DOI (if needed)");
+    console.log("  4. Apply S3 Object Lock");
+    console.log("  5. Notify user");
+    console.log();
+
+    const confirmResult = await confirm(`${action}?`, options);
+    if (confirmResult !== "confirmed") {
+      console.log(chalk.gray(confirmResult === "declined" ? "Skipped" : "Cancelled"));
+      return;
+    }
+
+    const spinner = ora("Running publication workflow...").start();
+
+    try {
+      const result = await approvePublication(datasetId, !!options.resume);
+      spinner.succeed(result.message);
+
+      if (result.steps_completed) {
+        console.log();
+        for (const step of result.steps_completed) {
+          console.log(`  ${chalk.green("[x]")} ${step.replace(/_/g, " ")}`);
+        }
+        console.log();
+      }
+    } catch (error) {
+      if (error instanceof ApiError) {
+        spinner.fail(error.message);
+        console.log(chalk.gray(`  ${error.message}`));
+        if (error.statusCode === 422) {
+          console.log(chalk.yellow("  Fix the CI issues and retry with --resume"));
+        }
+      } else {
+        spinner.fail("Failed to approve publication");
+        const msg = error instanceof Error ? error.message : String(error);
+        console.log(chalk.gray(`  Error details: ${msg}`));
+      }
+    }
+  });
+
+adminCommand.addCommand(publishCommand);
 
 // ============================================================================
 // Revert (Admin Only)
