@@ -1177,9 +1177,9 @@ datasetRoutes.get("/:id/manifest", optionalAuthMiddleware, async (c) => {
   const db = c.env.DB;
 
   const dataset = await db
-    .prepare("SELECT dataset_id, visibility FROM datasets WHERE dataset_id = ?")
+    .prepare("SELECT dataset_id, visibility, owner_user_id FROM datasets WHERE dataset_id = ?")
     .bind(datasetId)
-    .first<{ dataset_id: string; visibility: string }>();
+    .first<{ dataset_id: string; visibility: string; owner_user_id: number }>();
 
   if (!dataset) {
     return c.json({ error: "Dataset not found" }, 404);
@@ -1189,7 +1189,7 @@ datasetRoutes.get("/:id/manifest", optionalAuthMiddleware, async (c) => {
   // Private datasets: only owner/admin
   if (dataset.visibility !== "public") {
     const user = c.get("user");
-    if (!user || (!user.is_admin && user.username !== dataset.dataset_id)) {
+    if (!user || (!user.is_admin && user.id !== dataset.owner_user_id)) {
       return c.json({ error: "Access denied" }, 403);
     }
   }
@@ -1218,9 +1218,9 @@ datasetRoutes.get("/:id/manifest/:version", optionalAuthMiddleware, async (c) =>
   const db = c.env.DB;
 
   const dataset = await db
-    .prepare("SELECT dataset_id, visibility FROM datasets WHERE dataset_id = ?")
+    .prepare("SELECT dataset_id, visibility, owner_user_id FROM datasets WHERE dataset_id = ?")
     .bind(datasetId)
-    .first<{ dataset_id: string; visibility: string }>();
+    .first<{ dataset_id: string; visibility: string; owner_user_id: number }>();
 
   if (!dataset) {
     return c.json({ error: "Dataset not found" }, 404);
@@ -1228,7 +1228,7 @@ datasetRoutes.get("/:id/manifest/:version", optionalAuthMiddleware, async (c) =>
 
   if (dataset.visibility !== "public") {
     const user = c.get("user");
-    if (!user || (!user.is_admin && user.username !== dataset.dataset_id)) {
+    if (!user || (!user.is_admin && user.id !== dataset.owner_user_id)) {
       return c.json({ error: "Access denied" }, 403);
     }
   }

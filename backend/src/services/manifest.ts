@@ -59,12 +59,22 @@ export function extractSizeFromKey(key: string): number {
 }
 
 /**
+ * Extract the hash algorithm prefix from an annex key.
+ * Key format: SHA256E-s12345--abc123.ext
+ * Returns lowercase algorithm name (e.g., "sha256", "md5").
+ */
+export function extractHashAlgorithm(key: string): string {
+  const match = key.match(/^([A-Z0-9]+?)E?-s/);
+  return match ? match[1].toLowerCase() : "sha256";
+}
+
+/**
  * Extract the hash/checksum from an annex key.
  * Key format: SHA256E-s12345--abc123def456.ext
  * The hash is between -- and the last .ext
  */
 export function extractChecksumFromKey(key: string): string {
-  const match = key.match(/--([a-f0-9]+)/);
+  const match = key.match(/--([a-fA-F0-9]+)/);
   return match ? match[1] : "";
 }
 
@@ -107,7 +117,7 @@ export async function generateManifest(
       files[entry.path] = {
         key,
         size: extractSizeFromKey(key),
-        checksum: `sha256:${extractChecksumFromKey(key)}`,
+        checksum: `${extractHashAlgorithm(key)}:${extractChecksumFromKey(key)}`,
       };
     }
   }

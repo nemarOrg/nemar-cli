@@ -24,7 +24,7 @@ import {
 } from "../services/github";
 import { generateIamUsername, revokeUserIamAccess, setupUserIamAccess } from "../services/iam";
 import { generateManifest } from "../services/manifest";
-import { applyObjectLock, uploadManifest } from "../services/s3";
+import { applyObjectLock, getManifest, uploadManifest } from "../services/s3";
 import { generateApiKey, hashApiKey } from "../services/token";
 import {
   type ZenodoDeposition,
@@ -1434,8 +1434,8 @@ adminRoutes.post("/publish/:id/deny", zValidator("json", denySchema), async (c) 
  * Steps:
  * 1. ci_check - Verify CI exists and is passing (deploy if missing)
  * 2. repo_public - Make repository public
- * 3. doi_create - Create concept DOI if not exists
- * 4. tag_protect - Apply tag protection rules (prevent version tag deletion)
+ * 3. tag_protect - Apply tag protection rules (prevent version tag deletion)
+ * 4. doi_create - Create concept DOI if not exists
  * 5. s3_lock - Apply S3 Object Lock (Governance mode)
  * 6. notify_user - Send publication confirmation email
  *
@@ -1467,8 +1467,8 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
   const allSteps = [
     "ci_check",
     "repo_public",
-    "doi_create",
     "tag_protect",
+    "doi_create",
     "s3_lock",
     "notify_user",
   ];
@@ -1625,7 +1625,43 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
     }
   }
 
-  // Step 3: Create concept DOI (if not exists)
+  // Step 3: Tag protection (before DOI to prevent tag manipulation)
+  if (stepsToRun.includes("tag_protect")) {
+    try {
+      await db
+        .prepare(
+          "UPDATE publication_requests SET current_step = 'tag_protect', updated_at = datetime('now') WHERE id = ?",
+        )
+        .bind(requestId)
+        .run();
+
+      const { applyTagProtection } = await import("../services/github");
+      const tagProtected = await applyTagProtection(repoName, pat);
+
+      if (!tagProtected) {
+        await updateProgress("tag_protect", "Failed to apply tag protection rules");
+        return c.json(
+          {
+            error: "Tag protection failed",
+            step: "tag_protect",
+            steps_completed: completed,
+          },
+          500,
+        );
+      }
+
+      await updateProgress("tag_protect");
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      await updateProgress("tag_protect", msg);
+      return c.json(
+        { error: `Tag protection failed: ${msg}`, step: "tag_protect", steps_completed: completed },
+        500,
+      );
+    }
+  }
+
+  // Step 4: Create concept DOI (if not exists)
   if (stepsToRun.includes("doi_create")) {
     try {
       await db
@@ -1686,42 +1722,6 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
       await updateProgress("doi_create", msg);
       return c.json(
         { error: `DOI creation failed: ${msg}`, step: "doi_create", steps_completed: completed },
-        500,
-      );
-    }
-  }
-
-  // Step 4: Tag protection
-  if (stepsToRun.includes("tag_protect")) {
-    try {
-      await db
-        .prepare(
-          "UPDATE publication_requests SET current_step = 'tag_protect', updated_at = datetime('now') WHERE id = ?",
-        )
-        .bind(requestId)
-        .run();
-
-      const { applyTagProtection } = await import("../services/github");
-      const tagProtected = await applyTagProtection(repoName, pat);
-
-      if (!tagProtected) {
-        await updateProgress("tag_protect", "Failed to apply tag protection rules");
-        return c.json(
-          {
-            error: "Tag protection failed",
-            step: "tag_protect",
-            steps_completed: completed,
-          },
-          500,
-        );
-      }
-
-      await updateProgress("tag_protect");
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      await updateProgress("tag_protect", msg);
-      return c.json(
-        { error: `Tag protection failed: ${msg}`, step: "tag_protect", steps_completed: completed },
         500,
       );
     }
@@ -1897,6 +1897,9 @@ adminRoutes.post("/datasets/:id/manifest/:version", async (c) => {
   const version = c.req.param("version");
   const db = c.env.DB;
 
+  // Accept optional DOI in request body
+  const body = await c.req.json<{ doi?: string }>().catch(() => ({}));
+
   const dataset = await db
     .prepare("SELECT dataset_id, github_repo, concept_doi FROM datasets WHERE dataset_id = ?")
     .bind(datasetId)
@@ -1917,13 +1920,29 @@ adminRoutes.post("/datasets/:id/manifest/:version", async (c) => {
 
   const pat = c.env.GITHUB_ADMIN_PAT;
 
+  // Resolve version DOI: use provided value, or try existing manifest
+  let versionDoi: string | null = body.doi ?? null;
+  if (!versionDoi) {
+    const s3Options = {
+      bucket: c.env.S3_BUCKET,
+      region: c.env.AWS_REGION,
+      accessKeyId: c.env.AWS_ACCESS_KEY_ID,
+      secretAccessKey: c.env.AWS_SECRET_ACCESS_KEY,
+    };
+    const existing = await getManifest(s3Options, datasetId, version);
+    if (existing) {
+      const parsed = JSON.parse(existing) as { doi?: string | null };
+      versionDoi = parsed.doi ?? null;
+    }
+  }
+
   try {
     const manifest = await generateManifest(
       repoName,
       version,
       pat,
       datasetId,
-      null, // version DOI not known at generation time from admin
+      versionDoi,
       dataset.concept_doi,
     );
 

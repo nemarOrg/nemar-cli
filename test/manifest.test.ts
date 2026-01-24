@@ -90,6 +90,7 @@ describe("manifest - annex pointer parsing", () => {
     parseAnnexPointer,
     extractSizeFromKey,
     extractChecksumFromKey,
+    extractHashAlgorithm,
   } = require("../backend/src/services/manifest");
 
   test("parseAnnexPointer handles standard pointer format", () => {
@@ -130,9 +131,29 @@ describe("manifest - annex pointer parsing", () => {
     expect(extractChecksumFromKey("MD5E-s100--fedcba.txt")).toBe("fedcba");
   });
 
+  test("extractChecksumFromKey handles uppercase hex", () => {
+    expect(extractChecksumFromKey("SHA256E-s100--ABCDEF012345.dat")).toBe("ABCDEF012345");
+    expect(extractChecksumFromKey("SHA256E-s100--aAbBcC.dat")).toBe("aAbBcC");
+  });
+
   test("extractChecksumFromKey returns empty for invalid keys", () => {
     expect(extractChecksumFromKey("invalid")).toBe("");
     expect(extractChecksumFromKey("")).toBe("");
+  });
+
+  test("extractHashAlgorithm extracts algorithm from key", () => {
+    expect(extractHashAlgorithm("SHA256E-s12345--abc123.edf")).toBe("sha256");
+    expect(extractHashAlgorithm("MD5E-s100--fedcba.txt")).toBe("md5");
+    expect(extractHashAlgorithm("SHA512E-s999--hash.bin")).toBe("sha512");
+  });
+
+  test("extractHashAlgorithm handles non-extension backends", () => {
+    expect(extractHashAlgorithm("SHA256-s100--abc123")).toBe("sha256");
+  });
+
+  test("extractHashAlgorithm defaults to sha256 for invalid keys", () => {
+    expect(extractHashAlgorithm("invalid")).toBe("sha256");
+    expect(extractHashAlgorithm("")).toBe("sha256");
   });
 });
 
