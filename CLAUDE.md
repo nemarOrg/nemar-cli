@@ -1,5 +1,11 @@
 # NEMAR CLI - Development Instructions
 
+## CRITICAL: Live Datasets
+
+**nm000103-nm000107 are LIVE datasets.** Do NOT modify their visibility, S3 data, DOIs, or repo settings during development/testing. They are kept private during dev for maximum control but contain real data.
+
+For E2E testing, use disposable test dataset `nm099999` (already registered in D1 and GitHub). Note: `xx`-prefix datasets are blocked from publishing (sandbox check).
+
 ## Project Overview
 **Purpose:** Command-line interface for NEMAR (Neuroelectromagnetic Data Archive and Tools Resource) dataset management
 **Tech Stack:** TypeScript, Bun, Commander.js, DataLad integration
