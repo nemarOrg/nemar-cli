@@ -15,6 +15,7 @@
 
 import { existsSync, readFileSync } from "node:fs";
 import { basename, resolve } from "node:path";
+import { spawn } from "bun";
 import chalk from "chalk";
 import { Command } from "commander";
 import inquirer from "inquirer";
@@ -23,9 +24,11 @@ import {
   ApiError,
   type Dataset,
   type DatasetsListResponse,
+  addCi,
   createDataset,
   getDataset,
   getPublishStatus,
+  getUserCiStatus,
   inviteCollaborator,
   listCollaborators,
   listDatasets,
@@ -64,6 +67,7 @@ import {
   getAnnexS3Remotes,
   getCurrentBranch,
   getDatasetData,
+  getDatasetIdFromRemote,
   getLocalDatasetInfo,
   initDataset,
   isGitAnnexDataset,
@@ -719,6 +723,25 @@ Examples:
     }
 
     spinner.succeed("Metadata pushed to GitHub");
+
+    // Step 12b: Deploy BIDS validation CI
+    spinner = ora("Setting up BIDS validation CI...").start();
+    try {
+      await addCi(datasetInfo.dataset_id);
+      spinner.succeed("BIDS validation CI configured");
+    } catch (error) {
+      if (error instanceof ApiError && error.statusCode === 403) {
+        spinner.info("CI workflow will be configured by an admin");
+      } else {
+        const msg = error instanceof Error ? error.message : String(error);
+        spinner.warn(`Could not configure CI: ${msg}`);
+        console.log(
+          chalk.gray(
+            `  An admin can add it later with: nemar admin ci add ${datasetInfo.dataset_id}`,
+          ),
+        );
+      }
+    }
 
     // Note: Branch protection is NOT applied here for private datasets.
     // Protection is applied when creating a DOI (admin doi create) or making public.
@@ -1602,6 +1625,9 @@ datasetCommand
   .description("Push commits and data to remotes")
   .option("-j, --jobs <number>", "Parallel upload streams for S3", "4")
   .option("--no-s3", "Skip pushing data to S3 remote")
+  .option("--pr", "Create a pull request after pushing")
+  .option("-t, --title <title>", "Pull request title (with --pr)")
+  .option("-b, --body <body>", "Pull request body (with --pr)")
   .addHelpText(
     "after",
     `
@@ -1609,13 +1635,16 @@ Description:
   Push git commits to GitHub (main + git-annex branches) and optionally
   copy annexed data to the S3 remote.
 
+  With --pr, creates a pull request after pushing the current branch.
+
   S3 push requires AWS credentials in environment (AWS_ACCESS_KEY_ID,
   AWS_SECRET_ACCESS_KEY).
 
 Examples:
   $ nemar dataset push
   $ nemar dataset push --no-s3      # Git only, skip S3
-  $ nemar dataset push -j 8         # More parallel S3 streams`,
+  $ nemar dataset push -j 8         # More parallel S3 streams
+  $ nemar dataset push --pr -t "Add new recordings"`,
   )
   .action(async (options) => {
     const cwd = process.cwd();
@@ -1670,6 +1699,65 @@ Examples:
         spinner.succeed(`Copied ${s3Result.filesCopied} file(s) to S3`);
       } else {
         console.log(chalk.gray("  No S3 remote configured; skipping data push."));
+      }
+    }
+
+    // Create PR if --pr flag is set
+    if (options.pr) {
+      const branch = await getCurrentBranch(cwd);
+      if (!branch) {
+        console.log(chalk.red("  Could not determine current branch"));
+        console.log(chalk.gray("  Ensure you are inside a valid git repository."));
+        process.exit(1);
+      }
+      if (branch === "main" || branch === "master") {
+        console.log(chalk.yellow("  Skipping PR: already on main branch"));
+      } else {
+        spinner = ora("Creating pull request...").start();
+        const prArgs = ["gh", "pr", "create"];
+        if (options.title) {
+          prArgs.push("--title", options.title);
+        } else {
+          prArgs.push("--title", `Update from branch ${branch}`);
+        }
+        if (options.body) {
+          prArgs.push("--body", options.body);
+        } else {
+          prArgs.push("--body", "");
+        }
+
+        try {
+          const proc = spawn({
+            cmd: prArgs,
+            cwd,
+            env: process.env,
+            stdout: "pipe",
+            stderr: "pipe",
+          });
+          const prStdout = await new Response(proc.stdout).text();
+          const prStderr = await new Response(proc.stderr).text();
+          const prExit = await proc.exited;
+
+          if (prExit !== 0) {
+            spinner.fail("Failed to create pull request");
+            console.log(chalk.red(`  ${prStderr.trim() || prStdout.trim()}`));
+            process.exit(1);
+          }
+
+          const prUrl = prStdout.trim();
+          spinner.succeed("Pull request created");
+          console.log(`  ${chalk.cyan(prUrl)}`);
+        } catch (spawnError) {
+          spinner.fail("Failed to create pull request");
+          const msg = spawnError instanceof Error ? spawnError.message : String(spawnError);
+          if (msg.includes("ENOENT") || msg.includes("not found")) {
+            console.log(chalk.red("  'gh' CLI is not installed or not in PATH"));
+            console.log(chalk.gray("  Install it: https://cli.github.com/"));
+          } else {
+            console.log(chalk.red(`  ${msg}`));
+          }
+          process.exit(1);
+        }
       }
     }
   });
@@ -1727,5 +1815,81 @@ Examples:
       process.exit(1);
     } else {
       spinner.succeed(`Dropped ${result.dropped} file(s)`);
+    }
+  });
+
+// CI command
+datasetCommand
+  .command("ci")
+  .description("Check BIDS validation CI status for the current dataset")
+  .argument("[dataset-id]", "Dataset ID (auto-detected from git remote if omitted)")
+  .addHelpText(
+    "after",
+    `
+Description:
+  Show the status of the BIDS validation CI workflow for a dataset.
+  When run inside a cloned dataset, the dataset ID is auto-detected
+  from the git remote URL.
+
+Examples:
+  $ nemar dataset ci              # Auto-detect from CWD
+  $ nemar dataset ci nm000104     # Explicit dataset ID`,
+  )
+  .action(async (datasetId) => {
+    if (!isAuthenticated()) {
+      console.log(chalk.red("Error: Not authenticated"));
+      console.log("Run 'nemar auth login' first");
+      process.exit(1);
+    }
+
+    // Resolve dataset ID
+    let resolvedId = datasetId;
+    if (!resolvedId) {
+      const cwd = process.cwd();
+      if (await isGitAnnexDataset(cwd)) {
+        resolvedId = await getDatasetIdFromRemote(cwd);
+      }
+      if (!resolvedId) {
+        console.log(chalk.red("Error: Could not detect dataset ID from current directory"));
+        console.log(chalk.gray("Provide dataset ID explicitly: nemar dataset ci <id>"));
+        process.exit(1);
+      }
+    }
+
+    const spinner = ora(`Checking CI status for ${resolvedId}...`).start();
+
+    try {
+      const result = await getUserCiStatus(resolvedId);
+      spinner.stop();
+
+      console.log(chalk.bold(`CI Status: ${resolvedId}`));
+      console.log();
+
+      const { bids_validation } = result;
+      if (!bids_validation.present) {
+        console.log(`  BIDS Validation: ${chalk.gray("not configured")}`);
+        console.log(chalk.gray(`  Ask an admin to run: nemar admin ci add ${resolvedId}`));
+      } else {
+        const statusColor =
+          bids_validation.status === "success"
+            ? chalk.green
+            : bids_validation.status === "failure"
+              ? chalk.red
+              : chalk.yellow;
+        console.log(`  BIDS Validation: ${statusColor(bids_validation.status)}`);
+        if (bids_validation.url) {
+          console.log(`  Latest run: ${chalk.cyan(bids_validation.url)}`);
+        }
+      }
+      console.log();
+    } catch (error) {
+      if (error instanceof ApiError) {
+        spinner.fail(error.message);
+      } else {
+        spinner.fail("Failed to check CI status");
+        const msg = error instanceof Error ? error.message : String(error);
+        console.log(chalk.gray(`  ${msg}`));
+      }
+      process.exit(1);
     }
   });

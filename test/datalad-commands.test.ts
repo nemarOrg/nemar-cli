@@ -235,10 +235,7 @@ describe("datalad commands - save in real repo", () => {
     writeFileSync(join(repoDir, "data.txt"), "some data content\n");
 
     // Run save
-    const { exitCode } = await runCli(
-      ["dataset", "save", "-m", "Add data file"],
-      { cwd: repoDir },
-    );
+    const { exitCode } = await runCli(["dataset", "save", "-m", "Add data file"], { cwd: repoDir });
     expect(exitCode).toBe(0);
 
     // Verify commit exists in git log

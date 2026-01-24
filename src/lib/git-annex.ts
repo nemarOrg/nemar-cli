@@ -1851,6 +1851,29 @@ export async function getCurrentBranch(datasetPath: string): Promise<string | nu
 }
 
 /**
+ * Detect the dataset ID from the git remote URL of the current directory.
+ * Parses the origin remote URL to extract the repository name (e.g., nm000104).
+ */
+export async function getDatasetIdFromRemote(datasetPath: string): Promise<string | null> {
+  try {
+    const { stdout, exitCode } = await runCommand(["git", "remote", "get-url", "origin"], {
+      cwd: datasetPath,
+    });
+
+    if (exitCode !== 0 || !stdout.trim()) return null;
+
+    const url = stdout.trim();
+    // Match patterns: https://github.com/org/repo.git, git@github.com:org/repo.git
+    const match = url.match(/[/:]([^/]+?)(?:\.git)?$/);
+    if (!match) return null;
+
+    return match[1];
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Switch to a branch
  */
 export async function switchBranch(
