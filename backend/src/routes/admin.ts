@@ -1516,6 +1516,7 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
 
   const pat = c.env.GITHUB_ADMIN_PAT;
   const completed: string[] = [...stepsCompleted];
+  const requestId = request.id;
 
   // Helper to update progress in D1
   async function updateProgress(step: string, error?: string) {
@@ -1528,7 +1529,7 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
          SET steps_completed = ?, current_step = ?, last_error = ?, updated_at = datetime('now')
          WHERE id = ?`,
       )
-      .bind(JSON.stringify(completed), error ? step : null, error || null, request.id)
+      .bind(JSON.stringify(completed), error ? step : null, error || null, requestId)
       .run();
   }
 

@@ -404,6 +404,22 @@ export async function addCi(datasetId: string): Promise<AddCiResponse> {
   return request<AddCiResponse>(`/admin/datasets/${datasetId}/ci`, { method: "POST" }, true);
 }
 
+export interface UserCiStatusResponse {
+  dataset_id: string;
+  bids_validation: {
+    present: boolean;
+    status: string;
+    url: string | null;
+  };
+}
+
+/**
+ * Get CI workflow status for a dataset (user-accessible, owner or admin)
+ */
+export async function getUserCiStatus(datasetId: string): Promise<UserCiStatusResponse> {
+  return request<UserCiStatusResponse>(`/datasets/${datasetId}/ci/status`);
+}
+
 // ============================================================================
 // Datasets
 // ============================================================================

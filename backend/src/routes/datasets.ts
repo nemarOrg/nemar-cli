@@ -15,9 +15,11 @@ import {
   type GitHubRepo,
   addCollaborator,
   applyBranchProtection,
+  checkWorkflowExists,
   createRepository,
   deployWorkflows,
   enableAutoMerge,
+  getWorkflowRuns,
 } from "../services/github";
 import { grantDatasetAccess } from "../services/iam";
 import { generateDatasetUploadUrls } from "../services/s3";
@@ -1082,5 +1084,77 @@ datasetRoutes.post("/:id/publish/resend", authMiddleware, async (c) => {
   return c.json({
     message: "Notification resent to admins",
     dataset_id: datasetId,
+  });
+});
+
+/**
+ * GET /datasets/:id/ci/status - Check CI status for a dataset (user-accessible)
+ *
+ * Returns CI workflow presence and latest run status.
+ * Authenticated users can check any dataset they own or collaborate on.
+ */
+datasetRoutes.get("/:id/ci/status", authMiddleware, async (c) => {
+  const datasetId = c.req.param("id");
+  const db = c.env.DB;
+  const currentUser = c.get("user");
+
+  const dataset = await db
+    .prepare("SELECT dataset_id, github_repo, owner_username FROM datasets WHERE dataset_id = ?")
+    .bind(datasetId)
+    .first<{ dataset_id: string; github_repo: string | null; owner_username: string }>();
+
+  if (!dataset) {
+    return c.json({ error: "Dataset not found" }, 404);
+  }
+
+  // Check ownership or admin status
+  if (dataset.owner_username !== currentUser.username && !currentUser.is_admin) {
+    return c.json({ error: "Access denied" }, 403);
+  }
+
+  if (!dataset.github_repo) {
+    return c.json({ error: "Dataset has no GitHub repository" }, 400);
+  }
+
+  const repoName = extractRepoName(dataset.github_repo);
+  if (!repoName) {
+    return c.json({ error: "Invalid repository format" }, 500);
+  }
+
+  const pat = c.env.GITHUB_ADMIN_PAT;
+
+  let bidsWorkflowExists = false;
+  let latestRunStatus = "unknown";
+  let latestRunUrl: string | null = null;
+
+  try {
+    bidsWorkflowExists = await checkWorkflowExists(
+      repoName,
+      ".github/workflows/bids-validation.yml",
+      pat,
+    );
+
+    if (bidsWorkflowExists) {
+      const runs = await getWorkflowRuns(repoName, "bids-validation.yml", pat);
+      if (runs.length > 0) {
+        const latest = runs[0];
+        latestRunStatus = latest.conclusion || latest.status;
+        latestRunUrl = latest.html_url;
+      } else {
+        latestRunStatus = "no_runs";
+      }
+    }
+  } catch (githubError) {
+    const msg = githubError instanceof Error ? githubError.message : String(githubError);
+    return c.json({ error: `GitHub API error: ${msg}` }, 502);
+  }
+
+  return c.json({
+    dataset_id: datasetId,
+    bids_validation: {
+      present: bidsWorkflowExists,
+      status: bidsWorkflowExists ? latestRunStatus : "missing",
+      url: latestRunUrl,
+    },
   });
 });
