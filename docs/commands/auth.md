@@ -52,7 +52,8 @@ Authenticate with your NEMAR API key
 
 Options:
   -k, --key <key>  API key (alternative: set NEMAR_API_KEY env var)
-  -f, --force      Skip confirmation if already logged in
+  -y, --yes        Skip confirmation and proceed
+  -n, --no         Skip confirmation and decline
   -h, --help       display help for command
 
 Environment Variables:
@@ -95,8 +96,9 @@ Usage: nemar auth logout [options]
 Clear stored credentials
 
 Options:
-  -f, --force  Skip confirmation prompt
-  -h, --help   display help for command
+  -y, --yes   Skip confirmation and proceed
+  -n, --no    Skip confirmation and decline
+  -h, --help  display help for command
 ```
 
 ### auth resend-verification

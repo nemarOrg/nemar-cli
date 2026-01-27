@@ -14,10 +14,13 @@ Options:
 
 Commands:
   users [options]                          List NEMAR users
-  approve <username>                       Approve a pending user
-  revoke <username>                        Revoke user access
-  regenerate-iam <username>                Regenerate AWS IAM credentials for a user
+  approve [options] <username>             Approve a pending user
+  revoke [options] <username>              Revoke user access
+  s3                                       S3 and IAM credential management
+  repo                                     Repository visibility management
+  ci                                       CI workflow management
   doi                                      DOI management
+  publish                                  Publication workflow management
   revert [options] <dataset-id> [version]  Revert a dataset to a previous version (creates PR for review)
   help [command]                           display help for command
 
@@ -29,16 +32,20 @@ User Management:
   users          - List users and their status
   approve        - Approve a pending user registration
   revoke         - Revoke user access
-  regenerate-iam - Regenerate AWS credentials for a user
 
 Dataset Management:
+  repo     - Manage repository visibility (public/private)
+  ci       - Manage CI workflows (check status, deploy)
+  s3       - S3/IAM credential management
   doi      - Create and manage DOIs for datasets
   revert   - Revert dataset to previous version (via PR)
 
 Examples:
   $ nemar admin users --verified           # List users awaiting approval
   $ nemar admin approve john_doe           # Approve a user
-  $ nemar admin regenerate-iam john_doe    # Regenerate AWS credentials
+  $ nemar admin repo public nm000104       # Make dataset repo public
+  $ nemar admin ci check nm000104          # Check CI status
+  $ nemar admin s3 regenerate-iam john_doe # Regenerate AWS credentials
   $ nemar admin doi create nm000104        # Create concept DOI
 ```
 
@@ -70,6 +77,8 @@ Arguments:
   username    Username to approve
 
 Options:
+  -y, --yes   Skip confirmation and proceed
+  -n, --no    Skip confirmation and decline
   -h, --help  display help for command
 ```
 
@@ -84,6 +93,8 @@ Arguments:
   username    Username to revoke
 
 Options:
+  -y, --yes   Skip confirmation and proceed
+  -n, --no    Skip confirmation and decline
   -h, --help  display help for command
 ```
 
@@ -92,12 +103,9 @@ Options:
 ```bash
 Usage: nemar admin regenerate-iam [options] <username>
 
-Regenerate AWS IAM credentials for a user
-
-Arguments:
-  username    Username to regenerate credentials for
-
 Options:
+  -y, --yes   Skip confirmation and proceed
+  -n, --no    Skip confirmation and decline
   -h, --help  display help for command
 ```
 
@@ -117,14 +125,6 @@ Commands:
   help [command]                 display help for command
 ```
 
-**Note on Branch Protection:**
-When creating a concept DOI (`admin doi create`), branch protection is automatically applied to the dataset repository. This is because:
-- DOI = permanent record that should not be accidentally modified
-- Before DOI: Private datasets allow direct pushes (owner's workspace)
-- After DOI: All changes require pull requests
-
-This ensures that once a dataset has a DOI, it cannot be accidentally overwritten.
-
 ### admin revert
 
 ```bash
@@ -141,6 +141,55 @@ Options:
   --force          Direct push to main without PR (emergency only)
   --message <msg>  Custom revert commit message
   --dir <path>     Use existing local clone instead of cloning fresh
+  -y, --yes        Skip confirmation and proceed
+  -n, --no         Skip confirmation and decline
   -h, --help       display help for command
+```
+
+### admin publish list
+
+```bash
+Usage: nemar admin publish list [options]
+
+List publication requests
+
+Options:
+  -s, --status <status>  Filter by status (requested, approving, published,
+                         denied)
+  -h, --help             display help for command
+```
+
+### admin publish approve
+
+```bash
+Usage: nemar admin publish approve [options] <dataset-id>
+
+Approve and publish a dataset (runs orchestrator)
+
+Arguments:
+  dataset-id  Dataset ID
+
+Options:
+  --resume    Resume from last failed step
+  -y, --yes   Skip confirmation and proceed
+  -n, --no    Skip confirmation and decline
+  -h, --help  display help for command
+```
+
+### admin publish deny
+
+```bash
+Usage: nemar admin publish deny [options] <dataset-id>
+
+Deny a publication request
+
+Arguments:
+  dataset-id             Dataset ID
+
+Options:
+  -r, --reason <reason>  Reason for denial
+  -y, --yes              Skip confirmation and proceed
+  -n, --no               Skip confirmation and decline
+  -h, --help             display help for command
 ```
 

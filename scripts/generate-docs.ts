@@ -23,7 +23,17 @@ const commands = {
   },
   dataset: {
     description: "Dataset management operations",
-    subcommands: ["validate", "upload", "download", "status", "list", "version"],
+    subcommands: [
+      "validate",
+      "upload",
+      "download",
+      "status",
+      "list",
+      "version",
+      "publish request",
+      "publish status",
+      "publish resend",
+    ],
   },
   sandbox: {
     description: "Sandbox training (required before uploading)",
@@ -31,7 +41,17 @@ const commands = {
   },
   admin: {
     description: "Administrative operations (requires admin privileges)",
-    subcommands: ["users", "approve", "revoke", "regenerate-iam", "doi", "revert"],
+    subcommands: [
+      "users",
+      "approve",
+      "revoke",
+      "regenerate-iam",
+      "doi",
+      "revert",
+      "publish list",
+      "publish approve",
+      "publish deny",
+    ],
   },
 };
 

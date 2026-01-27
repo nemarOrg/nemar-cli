@@ -298,13 +298,36 @@ nemar dataset pr update <pr-id>            # Push updates to PR
 nemar dataset pr close <pr-id>             # Close PR without merging
 ```
 
+### Publication Workflow
+
+```bash
+# User: Request publication
+nemar dataset publish request <dataset-id> # Submit publication request
+nemar dataset publish status <dataset-id>  # Check publication status
+nemar dataset publish resend <dataset-id>  # Resend admin notification
+
+# Admin: Manage publication requests
+nemar admin publish list                   # List all publication requests
+nemar admin publish list --pending         # List pending requests only
+nemar admin publish approve <dataset-id>   # Approve and publish dataset
+nemar admin publish deny <dataset-id>      # Deny publication request
+```
+
 ### Admin Commands
 
 ```bash
+# User management
 nemar admin users                          # List all users
 nemar admin users --pending                # List pending approvals
 nemar admin approve <username>             # Approve user
 nemar admin revoke <username>              # Revoke user access
+
+# Dataset publication
+nemar admin publish list                   # List publication requests
+nemar admin publish approve <dataset-id>   # Approve and publish dataset
+nemar admin publish deny <dataset-id>      # Deny publication request
+
+# DOI management
 nemar admin doi create <dataset-id>        # Create concept DOI
 ```
 
