@@ -801,6 +801,25 @@ publishCommand
   .command("list")
   .description("List publication requests")
   .option("-s, --status <status>", "Filter by status (requested, approving, published, denied)")
+  .addHelpText(
+    "after",
+    `
+Description:
+  List all publication requests from users, with optional filtering by status.
+  Shows dataset ID, status, requesting user, and current progress.
+
+Filter Options:
+  requested  - Pending requests awaiting admin action
+  approving  - Currently being processed by orchestrator
+  published  - Successfully published datasets
+  denied     - Denied requests with reasons
+
+Examples:
+  $ nemar admin publish list                # All requests
+  $ nemar admin publish list --status requested   # Pending only
+  $ nemar admin publish list --status approving   # In progress
+  $ nemar admin publish list --status denied      # View denied`,
+  )
   .action(async (options: { status?: string }) => {
     if (!requireAuth()) return;
 
@@ -859,6 +878,26 @@ publishCommand
   .option("-r, --reason <reason>", "Reason for denial")
   .option(YES_OPTION, YES_DESCRIPTION)
   .option(NO_OPTION, NO_DESCRIPTION)
+  .addHelpText(
+    "after",
+    `
+Description:
+  Deny a user's publication request with a specific reason.
+  The user will receive an email notification with your reason.
+
+  A clear, actionable reason helps users understand what to fix
+  before resubmitting their publication request.
+
+Requirements:
+  - Must provide a reason for denial
+  - Reason will be sent to the user via email
+  - User can fix issues and submit a new request
+
+Examples:
+  $ nemar admin publish deny nm000104 --reason "BIDS validation failing"
+  $ nemar admin publish deny nm000104 -r "Dataset incomplete - missing subjects"
+  $ nemar admin publish deny nm000104    # Prompts for reason interactively`,
+  )
   .action(async (datasetId, options: ConfirmOptions & { reason?: string }) => {
     if (!requireAuth()) return;
 
@@ -906,6 +945,42 @@ publishCommand
   .option("--resume", "Resume from last failed step")
   .option(YES_OPTION, YES_DESCRIPTION)
   .option(NO_OPTION, NO_DESCRIPTION)
+  .addHelpText(
+    "after",
+    `
+Description:
+  Approve a publication request and run the automated 6-step orchestrator
+  to make the dataset publicly accessible with a permanent DOI.
+
+  WARNING: This action is PERMANENT. Published datasets cannot be unpublished.
+  Once a DOI is assigned, it is permanent and cannot be deleted.
+
+Orchestrator Steps:
+  1. CI Check        - Verify BIDS validation passes, deploy workflows if missing
+  2. Make Public     - Change GitHub repository visibility to public
+  3. Tag Protection  - Enable tag protection rules (prevents version manipulation)
+  4. Create DOI      - Assign permanent Zenodo concept DOI (if not exists)
+  5. S3 Lock         - Enable S3 Object Lock (prevents data deletion)
+  6. Notify User     - Send publication confirmation email to dataset owner
+
+Resume Capability:
+  If a step fails, the orchestrator saves progress. Use --resume to retry
+  from the failed step without re-running successful steps.
+
+  The orchestrator is idempotent - safe to run multiple times. Completed
+  steps are automatically skipped.
+
+Examples:
+  $ nemar admin publish approve nm000104         # Run full orchestrator
+  $ nemar admin publish approve nm000104 --resume  # Resume from failed step
+  $ nemar admin publish approve nm000104 --yes   # Skip confirmation
+
+After Approval:
+  - User receives email with DOI and public dataset link
+  - Dataset is publicly visible on GitHub
+  - Tags are protected (prevents version manipulation)
+  - Data is protected by S3 Object Lock`,
+  )
   .action(async (datasetId, options: ConfirmOptions & { resume?: boolean }) => {
     if (!requireAuth()) return;
 
@@ -916,9 +991,10 @@ publishCommand
     console.log("This will run the following steps:");
     console.log("  1. Check CI (deploy if missing, verify passing)");
     console.log("  2. Make repository public");
-    console.log("  3. Create concept DOI (if needed)");
-    console.log("  4. Apply S3 Object Lock");
-    console.log("  5. Notify user");
+    console.log("  3. Enable tag protection (prevents version manipulation)");
+    console.log("  4. Create concept DOI (if needed)");
+    console.log("  5. Apply S3 Object Lock");
+    console.log("  6. Notify user");
     console.log();
 
     const confirmResult = await confirm(`${action}?`, options);
