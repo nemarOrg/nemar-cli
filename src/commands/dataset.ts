@@ -1011,6 +1011,7 @@ Visibility Rules:
   Without --mine:
     - Shows only public datasets (visible to everyone)
     - Does not show private datasets, even your own
+    - Exception: Admins see ALL datasets for oversight
 
   With --mine:
     - Shows all YOUR datasets (both private and public)
@@ -1049,6 +1050,9 @@ Examples:
     let datasets = response.datasets;
 
     // Filter by owner if --mine
+    // NOTE: Backend already filters by owner when mine=true is passed,
+    // but we apply client-side filter as defense-in-depth in case backend
+    // behavior changes or for backward compatibility with older backends.
     if (options.mine) {
       const config = getConfig();
       const username = config.username;

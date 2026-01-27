@@ -308,10 +308,11 @@ datasetRoutes.post("/", authMiddleware, zValidator("json", createDatasetSchema),
  *
  * Visibility rules:
  * - --mine flag: show only the authenticated user's datasets (private + public + sandbox)
- * - No --mine flag:
+ * - No --mine flag (public catalog):
+ *   - Sandbox datasets are ALWAYS excluded (sandbox is for testing workflow only)
  *   - Unauthenticated: public datasets only
  *   - Authenticated non-admin: public datasets only
- *   - Admin: all datasets (public + private from all users)
+ *   - Admin: all datasets (public + private from all users, excluding sandbox)
  */
 datasetRoutes.get("/", optionalAuthMiddleware, async (c) => {
   const mine = c.req.query("mine") === "true";
@@ -349,7 +350,7 @@ datasetRoutes.get("/", optionalAuthMiddleware, async (c) => {
     // User can see their own datasets regardless of visibility (including sandbox)
   } else {
     // Public catalog view
-    // Exclude sandbox datasets from public listings
+    // Exclude sandbox datasets from public listings (sandbox is for testing workflow only)
     query += " AND (d.is_sandbox = 0 OR d.is_sandbox IS NULL)";
 
     // Filter by visibility based on user permissions
@@ -367,22 +368,51 @@ datasetRoutes.get("/", optionalAuthMiddleware, async (c) => {
   query += " ORDER BY d.created_at DESC LIMIT ? OFFSET ?";
   params.push(limit, offset);
 
-  const datasets = await db
-    .prepare(query)
-    .bind(...params)
-    .all();
+  let queryResult;
+  try {
+    queryResult = await db
+      .prepare(query)
+      .bind(...params)
+      .all();
+  } catch (dbError) {
+    const msg = dbError instanceof Error ? dbError.message : String(dbError);
+    console.error("Failed to query datasets:", msg, "Query params:", params);
+    return c.json(
+      {
+        error: "Failed to retrieve datasets",
+        details: msg,
+      },
+      500,
+    );
+  }
+
+  if (!queryResult || !queryResult.results) {
+    console.error("Database query returned invalid result structure for datasets list");
+    return c.json(
+      {
+        error: "Database query failed",
+        details: "Query did not return expected result structure",
+      },
+      500,
+    );
+  }
 
   return c.json({
-    datasets: datasets.results,
-    count: datasets.results.length,
+    datasets: queryResult.results,
+    count: queryResult.results.length,
   });
 });
 
 /**
  * GET /datasets/:id - Get dataset details
+ *
+ * Visibility rules:
+ * - Public datasets: accessible to everyone
+ * - Private datasets: only accessible to owner or admin
  */
 datasetRoutes.get("/:id", optionalAuthMiddleware, async (c) => {
   const datasetId = c.req.param("id");
+  const user = c.get("user");
   const db = c.env.DB;
 
   if (!isValidDatasetId(datasetId)) {
@@ -406,6 +436,14 @@ datasetRoutes.get("/:id", optionalAuthMiddleware, async (c) => {
 
   if (!dataset) {
     return c.json({ error: "Dataset not found" }, 404);
+  }
+
+  // Enforce visibility restrictions for private datasets
+  if (dataset.visibility !== "public") {
+    if (!user || (!user.is_admin && user.id !== dataset.owner_user_id)) {
+      // Return 404 instead of 403 to avoid leaking dataset existence
+      return c.json({ error: "Dataset not found" }, 404);
+    }
   }
 
   return c.json({ dataset });

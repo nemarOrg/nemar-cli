@@ -468,7 +468,20 @@ export interface Dataset {
   name: string;
   description: string | null;
   owner_username: string;
-  status: string;
+  /**
+   * Lifecycle state of the dataset.
+   * - active: Dataset is operational
+   * - archived: Dataset is read-only, preserved for historical reference
+   * - deleted: Dataset is soft-deleted, invisible to users
+   */
+  status: "active" | "archived" | "deleted";
+  /**
+   * Access control state.
+   * - private: Only owner and admins can view (default for new datasets)
+   * - public: Visible to all users, accessible via public catalog
+   *
+   * Independent from status: datasets can be active+private, archived+public, etc.
+   */
   visibility: "public" | "private";
   github_repo: string | null;
   concept_doi: string | null;
@@ -481,10 +494,31 @@ export interface DatasetsListResponse {
 }
 
 /**
+ * Validate dataset object has correct status and visibility values
+ * Throws error if validation fails
+ */
+export function validateDataset(data: unknown): Dataset {
+  const d = data as Dataset;
+
+  if (!["active", "archived", "deleted"].includes(d.status)) {
+    throw new Error(`Invalid dataset status: ${d.status}`);
+  }
+
+  if (!["public", "private"].includes(d.visibility)) {
+    throw new Error(`Invalid dataset visibility: ${d.visibility}`);
+  }
+
+  return d;
+}
+
+/**
  * List datasets
  */
 export async function listDatasets(): Promise<DatasetsListResponse> {
-  return request<DatasetsListResponse>("/datasets");
+  const response = await request<DatasetsListResponse>("/datasets");
+  // Validate each dataset in the response
+  response.datasets = response.datasets.map(validateDataset);
+  return response;
 }
 
 interface GetDatasetResponse {
