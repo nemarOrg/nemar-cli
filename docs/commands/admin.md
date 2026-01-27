@@ -192,7 +192,7 @@ Options:
   -h, --help  display help for command
 
 Description:
-  Approve a publication request and run the automated 5-step orchestrator
+  Approve a publication request and run the automated 6-step orchestrator
   to make the dataset publicly accessible with a permanent DOI.
 
   WARNING: This action is PERMANENT. Published datasets cannot be unpublished.
@@ -204,6 +204,7 @@ Orchestrator Steps:
   3. Tag Protection  - Enable tag protection rules (prevents version manipulation)
   4. Create DOI      - Assign permanent Zenodo concept DOI (if not exists)
   5. S3 Lock         - Enable S3 Object Lock (prevents data deletion)
+  6. Notify User     - Send publication confirmation email to dataset owner
 
 Resume Capability:
   If a step fails, the orchestrator saves progress. Use --resume to retry
@@ -220,7 +221,7 @@ Examples:
 After Approval:
   - User receives email with DOI and public dataset link
   - Dataset is publicly visible on GitHub
-  - All future changes require pull requests
+  - Tags are protected (prevents version manipulation)
   - Data is protected by S3 Object Lock
 ```
 

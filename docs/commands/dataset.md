@@ -249,7 +249,7 @@ Description:
   Once approved, your dataset will:
   - Become publicly visible on GitHub
   - Receive a permanent DOI via Zenodo
-  - Be protected by branch protection (all changes require PRs)
+  - Have tag protection enabled (prevents version manipulation)
   - Have S3 Object Lock enabled (prevents data deletion)
 
   You can only have one active publication request per dataset.
@@ -291,10 +291,10 @@ Steps in Approval Process:
   3. Tag protection  - Prevent version manipulation
   4. Create DOI      - Assign permanent Zenodo DOI
   5. S3 lock         - Enable Object Lock for data preservation
+  6. Notify user     - Send publication confirmation email
 
 Examples:
   $ nemar dataset publish status nm000104
-  $ nemar dataset publish status nm000104 --json
 ```
 
 ### dataset publish resend

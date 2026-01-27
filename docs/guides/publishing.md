@@ -71,7 +71,6 @@ Once approved, you'll receive an email containing:
 
 Your dataset is now:
 - Publicly visible on GitHub
-- Protected by branch protection (all changes require PRs)
 - Protected by tag protection (versions cannot be modified)
 - Backed by permanent S3 storage with Object Lock
 - Citable with a permanent DOI
@@ -125,7 +124,7 @@ nemar admin publish approve nm000104 --yes
 
 ### The Publication Orchestrator
 
-When you approve a request, an automated 5-step orchestrator runs:
+When you approve a request, an automated 6-step orchestrator runs:
 
 #### Step 1: CI Check
 **Purpose:** Verify BIDS validation passes
@@ -188,6 +187,22 @@ When you approve a request, an automated 5-step orchestrator runs:
 - AWS API error
 - Object Lock already enabled (not an error, step is skipped)
 
+#### Step 6: Notify User
+**Purpose:** Send publication confirmation email
+
+**Actions:**
+- Send email to dataset owner with:
+  - Confirmation that dataset is now published
+  - Permanent DOI for citation
+  - Link to public dataset page
+  - Citation information
+
+**Possible failure:**
+- Email service error
+- **Resolution:** Email may fail but publication is complete; user can check status manually
+
+**Note:** This is the final step. Once completed, the publication request status changes to "published".
+
 ### Resuming Failed Publications
 
 If a step fails, you can resume from the failed step:
@@ -210,7 +225,7 @@ nemar admin publish approve nm000104
 # Fix the issue (e.g., remove conflicting GitHub rules)
 # Then resume
 nemar admin publish approve nm000104 --resume
-# Skips steps 1-2, retries from step 3
+# Skips completed steps 1-2, retries step 3, then continues with 4-6
 ```
 
 ### Denying Publication
@@ -341,7 +356,7 @@ A: Once approved, the orchestrator takes 1-2 minutes to complete all 5 steps. Ad
 A: No. Once published, a dataset is permanently public. The DOI is permanent and cannot be deleted.
 
 **Q: Can I update a published dataset?**
-A: Yes, via pull requests. All changes require PR approval from the dataset owner.
+A: Yes. Dataset owners can update their datasets via direct pushes or pull requests.
 
 **Q: What if I need to publish urgently?**
 A: Contact NEMAR admins directly. Publication requests are processed in order received.
