@@ -319,12 +319,17 @@ adminRoutes.post("/revoke/:username", async (c) => {
   }
 
   // Revoke IAM access if configured - SECURITY CRITICAL
+  // Uses owner credentials to forcefully delete ALL access keys
   let iamRevoked = false;
   let iamRevocationError: string | null = null;
+  let iamRevocationSteps: string[] = [];
+
   if (user.aws_iam_username && user.aws_access_key_id_encrypted && c.env.ENCRYPTION_KEY) {
     try {
       const accessKeyId = await decrypt(user.aws_access_key_id_encrypted, c.env.ENCRYPTION_KEY);
-      await revokeUserIamAccess(
+
+      // Use aggressive cleanup with owner credentials
+      const result = await revokeUserIamAccess(
         {
           accessKeyId: c.env.AWS_ACCESS_KEY_ID,
           secretAccessKey: c.env.AWS_SECRET_ACCESS_KEY,
@@ -333,15 +338,52 @@ adminRoutes.post("/revoke/:username", async (c) => {
         user.aws_iam_username,
         accessKeyId,
       );
-      iamRevoked = true;
+
+      iamRevoked = result.success;
+      iamRevocationSteps = result.steps;
+
+      if (result.errors.length > 0) {
+        // Partial failure - some steps succeeded, some failed
+        iamRevocationError = result.errors.join("; ");
+        console.error(
+          "IAM revocation partial failure for",
+          user.username,
+          "\nErrors:",
+          result.errors,
+          "\nSteps:",
+          result.steps,
+        );
+
+        // Track partial failures for follow-up
+        try {
+          await db
+            .prepare(
+              `INSERT INTO iam_revocation_failures (user_id, username, iam_username, error_message, created_at)
+               VALUES (?, ?, ?, ?, datetime('now'))`,
+            )
+            .bind(user.id, user.username, user.aws_iam_username, iamRevocationError)
+            .run();
+        } catch {
+          console.error("Could not track IAM failure in database");
+        }
+      } else {
+        // Complete success
+        console.log(
+          `IAM revocation succeeded for ${user.username}:\n${result.steps.join("\n")}`,
+        );
+      }
     } catch (error) {
-      // CRITICAL SECURITY: Log IAM revocation failure but continue with partial revocation
+      // Complete failure - couldn't even start cleanup
       const errorMessage = error instanceof Error ? error.message : "Unknown error";
-      console.error("CRITICAL SECURITY: Failed to revoke IAM access for", user.username, errorMessage);
+      console.error(
+        "CRITICAL SECURITY: Failed to revoke IAM access for",
+        user.username,
+        errorMessage,
+      );
 
       iamRevocationError = errorMessage;
 
-      // Track IAM revocation failure for follow-up (best effort - don't fail if table doesn't exist)
+      // Track complete failures
       try {
         await db
           .prepare(
@@ -351,13 +393,8 @@ adminRoutes.post("/revoke/:username", async (c) => {
           .bind(user.id, user.username, user.aws_iam_username, errorMessage)
           .run();
       } catch {
-        // Table might not exist yet - log to console
-        console.error(
-          "Could not track IAM failure in database. Consider creating iam_revocation_failures table.",
-        );
+        console.error("Could not track IAM failure in database");
       }
-
-      // Continue with partial revocation instead of failing completely
     }
   }
 
@@ -468,30 +505,46 @@ adminRoutes.post("/revoke/:username", async (c) => {
     )
     .run();
 
-  // If IAM revocation failed, return warning with actionable guidance
+  // If IAM revocation had errors, return warning with detailed steps
   if (iamRevocationError) {
     return c.json(
       {
-        warning: "User revoked with IAM cleanup failure",
-        message:
-          "User's API tokens and database access have been revoked, but S3 credentials may still be active",
+        warning: iamRevoked
+          ? "User revoked with partial IAM cleanup"
+          : "User revoked with IAM cleanup failure",
+        message: iamRevoked
+          ? "User's API tokens revoked. Some IAM cleanup steps failed but S3 access keys were deleted."
+          : "User's API tokens and database access revoked, but S3 credentials may still be active",
         user: {
           username: user.username,
           status: finalStatus,
         },
-        iam_error: iamRevocationError,
-        aws_iam_username: user.aws_iam_username,
-        action_required: [
-          `1. Manually delete IAM user '${user.aws_iam_username}' in AWS console`,
-          "2. Or use AWS CLI: aws iam delete-access-key --user-name <username> --access-key-id <key>",
-          "3. Then delete IAM user: aws iam delete-user --user-name <username>",
-          `4. Update user status: UPDATE users SET status = 'revoked' WHERE username = '${user.username}'`,
-        ],
-        security_impact: "User can still upload/download S3 data until manual cleanup completes",
+        iam_cleanup: {
+          success: iamRevoked,
+          errors: iamRevocationError,
+          steps_attempted: iamRevocationSteps,
+          aws_iam_username: user.aws_iam_username,
+        },
+        action_required: iamRevoked
+          ? [
+              "Review IAM cleanup steps above",
+              `Check AWS console for user '${user.aws_iam_username}'`,
+              "Verify no orphaned resources remain",
+            ]
+          : [
+              `1. Manually delete IAM user '${user.aws_iam_username}' in AWS console`,
+              "2. Or use AWS CLI: aws iam list-access-keys --user-name <username>",
+              "3. Delete each key: aws iam delete-access-key --user-name <username> --access-key-id <key>",
+              "4. Delete user: aws iam delete-user --user-name <username>",
+              `5. Update user status: UPDATE users SET status = 'revoked' WHERE username = '${user.username}'`,
+            ],
+        security_impact: iamRevoked
+          ? "Most IAM resources cleaned up. Review steps for any remaining items."
+          : "User can still upload/download S3 data until manual cleanup completes",
         repos_removed: reposRemoved,
         failed_removals: failedRemovals.length > 0 ? failedRemovals : undefined,
         email_sent: emailSent,
-        iam_revoked: false,
+        iam_revoked: iamRevoked,
       },
       207, // 207 Multi-Status: partial success
     );
