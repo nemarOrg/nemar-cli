@@ -306,7 +306,12 @@ datasetRoutes.post("/", authMiddleware, zValidator("json", createDatasetSchema),
 /**
  * GET /datasets - List datasets
  *
- * Public endpoint with optional auth for filtering to own datasets.
+ * Visibility rules:
+ * - --mine flag: show only the authenticated user's datasets (private + public + sandbox)
+ * - No --mine flag:
+ *   - Unauthenticated: public datasets only
+ *   - Authenticated non-admin: public datasets only
+ *   - Admin: all datasets (public + private from all users)
  */
 datasetRoutes.get("/", optionalAuthMiddleware, async (c) => {
   const mine = c.req.query("mine") === "true";
@@ -322,6 +327,7 @@ datasetRoutes.get("/", optionalAuthMiddleware, async (c) => {
       d.name,
       d.description,
       d.status,
+      d.visibility,
       d.github_repo,
       d.concept_doi,
       d.created_at,
@@ -334,15 +340,28 @@ datasetRoutes.get("/", optionalAuthMiddleware, async (c) => {
   const params: (string | number)[] = [status];
 
   if (mine) {
+    // User wants to see only their own datasets
     if (!user) {
       return c.json({ error: "Authentication required to view your datasets" }, 401);
     }
     query += " AND d.owner_user_id = ?";
     params.push(user.id);
-    // User can see their own sandbox datasets
+    // User can see their own datasets regardless of visibility (including sandbox)
   } else {
-    // Public listings should not include sandbox datasets
+    // Public catalog view
+    // Exclude sandbox datasets from public listings
     query += " AND (d.is_sandbox = 0 OR d.is_sandbox IS NULL)";
+
+    // Filter by visibility based on user permissions
+    if (!user) {
+      // Unauthenticated: public datasets only
+      query += " AND d.visibility = 'public'";
+    } else if (!user.is_admin) {
+      // Authenticated non-admin: public datasets only
+      // (use --mine to see your own private datasets)
+      query += " AND d.visibility = 'public'";
+    }
+    // Admin: show all datasets (no additional filter)
   }
 
   query += " ORDER BY d.created_at DESC LIMIT ? OFFSET ?";

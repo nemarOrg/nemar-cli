@@ -58,7 +58,7 @@ CREATE TABLE IF NOT EXISTS datasets (
   description TEXT,
   owner_user_id INTEGER NOT NULL,
 
-  -- Status
+  -- Status: lifecycle state
   status TEXT NOT NULL DEFAULT 'active'
     CHECK (status IN ('active', 'archived', 'deleted')),
 

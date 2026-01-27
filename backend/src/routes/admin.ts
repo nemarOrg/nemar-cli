@@ -1154,6 +1154,12 @@ adminRoutes.patch("/datasets/:id/visibility", zValidator("json", visibilitySchem
     return c.json({ error: `Failed to set repository to ${visibility}: ${result.error}` }, 500);
   }
 
+  // Update dataset visibility in database to match GitHub repo
+  await db
+    .prepare("UPDATE datasets SET visibility = ? WHERE dataset_id = ?")
+    .bind(visibility, datasetId)
+    .run();
+
   try {
     await db
       .prepare(
@@ -1613,6 +1619,12 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
           500,
         );
       }
+
+      // Update dataset visibility in database to match GitHub repo visibility
+      await db
+        .prepare("UPDATE datasets SET visibility = 'public' WHERE dataset_id = ?")
+        .bind(datasetId)
+        .run();
 
       await updateProgress("repo_public");
     } catch (err) {

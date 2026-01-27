@@ -469,6 +469,7 @@ export interface Dataset {
   description: string | null;
   owner_username: string;
   status: string;
+  visibility: "public" | "private";
   github_repo: string | null;
   concept_doi: string | null;
   created_at: string;
