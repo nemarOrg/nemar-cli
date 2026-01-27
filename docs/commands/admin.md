@@ -157,6 +157,22 @@ Options:
   -s, --status <status>  Filter by status (requested, approving, published,
                          denied)
   -h, --help             display help for command
+
+Description:
+  List all publication requests from users, with optional filtering by status.
+  Shows dataset ID, status, requesting user, and current progress.
+
+Filter Options:
+  requested  - Pending requests awaiting admin action
+  approving  - Currently being processed by orchestrator
+  published  - Successfully published datasets
+  denied     - Denied requests with reasons
+
+Examples:
+  $ nemar admin publish list                # All requests
+  $ nemar admin publish list --status requested   # Pending only
+  $ nemar admin publish list --status approving   # In progress
+  $ nemar admin publish list --status denied      # View denied
 ```
 
 ### admin publish approve
@@ -174,6 +190,38 @@ Options:
   -y, --yes   Skip confirmation and proceed
   -n, --no    Skip confirmation and decline
   -h, --help  display help for command
+
+Description:
+  Approve a publication request and run the automated 5-step orchestrator
+  to make the dataset publicly accessible with a permanent DOI.
+
+  WARNING: This action is PERMANENT. Published datasets cannot be unpublished.
+  Once a DOI is assigned, it is permanent and cannot be deleted.
+
+Orchestrator Steps:
+  1. CI Check        - Verify BIDS validation passes, deploy workflows if missing
+  2. Make Public     - Change GitHub repository visibility to public
+  3. Tag Protection  - Enable tag protection rules (prevents version manipulation)
+  4. Create DOI      - Assign permanent Zenodo concept DOI (if not exists)
+  5. S3 Lock         - Enable S3 Object Lock (prevents data deletion)
+
+Resume Capability:
+  If a step fails, the orchestrator saves progress. Use --resume to retry
+  from the failed step without re-running successful steps.
+
+  The orchestrator is idempotent - safe to run multiple times. Completed
+  steps are automatically skipped.
+
+Examples:
+  $ nemar admin publish approve nm000104         # Run full orchestrator
+  $ nemar admin publish approve nm000104 --resume  # Resume from failed step
+  $ nemar admin publish approve nm000104 --yes   # Skip confirmation
+
+After Approval:
+  - User receives email with DOI and public dataset link
+  - Dataset is publicly visible on GitHub
+  - All future changes require pull requests
+  - Data is protected by S3 Object Lock
 ```
 
 ### admin publish deny
@@ -191,5 +239,22 @@ Options:
   -y, --yes              Skip confirmation and proceed
   -n, --no               Skip confirmation and decline
   -h, --help             display help for command
+
+Description:
+  Deny a user's publication request with a specific reason.
+  The user will receive an email notification with your reason.
+
+  A clear, actionable reason helps users understand what to fix
+  before resubmitting their publication request.
+
+Requirements:
+  - Must provide a reason for denial
+  - Reason will be sent to the user via email
+  - User can fix issues and submit a new request
+
+Examples:
+  $ nemar admin publish deny nm000104 --reason "BIDS validation failing"
+  $ nemar admin publish deny nm000104 -r "Dataset incomplete - missing subjects"
+  $ nemar admin publish deny nm000104    # Prompts for reason interactively
 ```
 

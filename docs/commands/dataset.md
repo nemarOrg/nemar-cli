@@ -241,6 +241,25 @@ Arguments:
 
 Options:
   -h, --help  display help for command
+
+Description:
+  Submit a publication request to make your private dataset publicly accessible.
+  NEMAR admins will be notified and can approve or deny your request.
+
+  Once approved, your dataset will:
+  - Become publicly visible on GitHub
+  - Receive a permanent DOI via Zenodo
+  - Be protected by branch protection (all changes require PRs)
+  - Have S3 Object Lock enabled (prevents data deletion)
+
+  You can only have one active publication request per dataset.
+
+Status Flow:
+  requested → approving → published (or denied)
+
+Examples:
+  $ nemar dataset publish request nm000104
+  $ nemar dataset publish status nm000104     # Check request status
 ```
 
 ### dataset publish status
@@ -255,6 +274,27 @@ Arguments:
 
 Options:
   -h, --help  display help for command
+
+Description:
+  Check the status of your publication request and see progress through
+  the approval workflow.
+
+Possible Statuses:
+  requested  - Waiting for admin review
+  approving  - Admin is running the publication process
+  published  - Dataset is now public with DOI
+  denied     - Request was denied (includes reason)
+
+Steps in Approval Process:
+  1. CI check        - Verify BIDS validation passes
+  2. Make public     - Change repository visibility
+  3. Tag protection  - Prevent version manipulation
+  4. Create DOI      - Assign permanent Zenodo DOI
+  5. S3 lock         - Enable Object Lock for data preservation
+
+Examples:
+  $ nemar dataset publish status nm000104
+  $ nemar dataset publish status nm000104 --json
 ```
 
 ### dataset publish resend
@@ -269,5 +309,20 @@ Arguments:
 
 Options:
   -h, --help  display help for command
+
+Description:
+  Resend the publication request notification email to all NEMAR admins.
+  Use this if admins haven't responded to your original request.
+
+  This does NOT create a duplicate request - it only sends a reminder
+  email for your existing publication request.
+
+When to Use:
+  - Admins haven't responded after several days
+  - You want to remind admins about your pending request
+  - Your request status is still "requested"
+
+Examples:
+  $ nemar dataset publish resend nm000104
 ```
 
