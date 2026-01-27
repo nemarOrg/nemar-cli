@@ -17,7 +17,7 @@ Commands:
   upload [options] <path>                   Upload a BIDS dataset to NEMAR
   download [options] <dataset-id>           Download a dataset from NEMAR
   status [options] <dataset-id>             Check status of a dataset
-  list [options]                            List available datasets on NEMAR
+  list [options]                            List publicly available datasets on NEMAR
   version [options] <dataset-id> <version>  Create a new version of a dataset with DOI
   request-access <dataset-id>               Request collaborator access to a dataset
   invite <username> <dataset-id>            Invite a user as collaborator to your dataset
@@ -194,21 +194,33 @@ Examples:
 ```bash
 Usage: nemar dataset list [options]
 
-List available datasets on NEMAR
+List publicly available datasets on NEMAR
 
 Options:
-  --mine       List only your datasets (requires authentication)
+  --mine       List only your datasets (both private and public)
   --json       Output as JSON for scripting
   --limit <n>  Limit number of results (default: 50) (default: "50")
   -h, --help   display help for command
 
 Description:
-  List BIDS datasets available on NEMAR. Use --mine to see only your
-  own datasets (requires authentication).
+  By default, lists only PUBLIC datasets on NEMAR that anyone can access.
+
+  To see your own datasets (including private ones), use the --mine flag.
+  This requires authentication.
+
+Visibility Rules:
+  Without --mine:
+    - Shows only public datasets (visible to everyone)
+    - Does not show private datasets, even your own
+    - Exception: Admins see ALL datasets for oversight
+
+  With --mine:
+    - Shows all YOUR datasets (both private and public)
+    - Requires authentication (nemar auth login)
 
 Examples:
-  $ nemar dataset list                   # List all public datasets
-  $ nemar dataset list --mine            # List your datasets
+  $ nemar dataset list                   # List public datasets only
+  $ nemar dataset list --mine            # List YOUR datasets (private + public)
   $ nemar dataset list --json            # JSON output for scripting
   $ nemar dataset list --limit 10        # Show only 10 datasets
 ```
