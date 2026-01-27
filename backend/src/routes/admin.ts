@@ -1154,6 +1154,81 @@ adminRoutes.patch("/datasets/:id/visibility", zValidator("json", visibilitySchem
     return c.json({ error: `Failed to set repository to ${visibility}: ${result.error}` }, 500);
   }
 
+  // Update dataset visibility in database to match GitHub repo
+  let dbUpdateResult;
+  try {
+    dbUpdateResult = await db
+      .prepare("UPDATE datasets SET visibility = ? WHERE dataset_id = ?")
+      .bind(visibility, datasetId)
+      .run();
+
+    if (!dbUpdateResult.success || dbUpdateResult.meta.changes === 0) {
+      const errorDetails =
+        dbUpdateResult.meta.changes === 0 ? "Dataset not found in database" : "Database update did not succeed";
+
+      console.error(
+        `CRITICAL: Failed to update database visibility for ${datasetId}. GitHub is now ${visibility} but database is out of sync.`,
+      );
+
+      // Try to revert GitHub repo visibility
+      const revertResult = await setRepoVisibility(repoName, !isPrivate, c.env.GITHUB_ADMIN_PAT);
+      if (revertResult.ok) {
+        return c.json(
+          {
+            error: "Database update failed, reverted GitHub repository to original state",
+            details: errorDetails,
+            dataset_id: datasetId,
+          },
+          500,
+        );
+      }
+      return c.json(
+        {
+          error: "CRITICAL: Database update failed AND repository revert failed",
+          details: errorDetails,
+          dataset_id: datasetId,
+          github_visibility: visibility,
+          database_visibility: visibility === "public" ? "private" : "public",
+          revert_error: revertResult.error,
+          action_required: `Manually update database: UPDATE datasets SET visibility = '${visibility}' WHERE dataset_id = '${datasetId}'`,
+        },
+        500,
+      );
+    }
+  } catch (dbError) {
+    const msg = dbError instanceof Error ? dbError.message : String(dbError);
+    console.error(`CRITICAL: Exception updating database visibility for ${datasetId}:`, msg);
+
+    // Try to revert GitHub repo visibility
+    const revertResult = await setRepoVisibility(repoName, !isPrivate, c.env.GITHUB_ADMIN_PAT);
+    if (revertResult.ok) {
+      return c.json(
+        {
+          error: "Database update failed, reverted GitHub repository to original state",
+          details: msg,
+          dataset_id: datasetId,
+        },
+        500,
+      );
+    }
+    return c.json(
+      {
+        error: "CRITICAL: Database update failed AND repository revert failed",
+        details: msg,
+        dataset_id: datasetId,
+        github_visibility: visibility,
+        database_visibility: visibility === "public" ? "private" : "public",
+        revert_error: revertResult.error,
+        action_required: `Manually update database: UPDATE datasets SET visibility = '${visibility}' WHERE dataset_id = '${datasetId}'`,
+      },
+      500,
+    );
+  }
+
+  // Audit log (non-fatal but warn user if fails)
+  let auditLogFailed = false;
+  let auditLogError: string | undefined;
+
   try {
     await db
       .prepare(
@@ -1168,13 +1243,18 @@ adminRoutes.patch("/datasets/:id/visibility", zValidator("json", visibilitySchem
       )
       .run();
   } catch (auditError) {
-    console.error("Audit log write failed for visibility change:", auditError);
+    auditLogFailed = true;
+    auditLogError = auditError instanceof Error ? auditError.message : String(auditError);
+    console.error("AUDIT LOG FAILURE: Visibility change for dataset", datasetId, "was not logged:", auditLogError);
   }
 
   return c.json({
     message: `Repository visibility set to ${visibility}`,
     dataset_id: datasetId,
     visibility,
+    warning: auditLogFailed
+      ? `Audit log write failed: ${auditLogError}. Operation succeeded but was not logged for compliance.`
+      : undefined,
   });
 });
 
@@ -1614,6 +1694,41 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
         );
       }
 
+      // Update dataset visibility in database to match GitHub repo visibility
+      let dbUpdateResult;
+      try {
+        dbUpdateResult = await db
+          .prepare("UPDATE datasets SET visibility = 'public' WHERE dataset_id = ?")
+          .bind(datasetId)
+          .run();
+
+        if (!dbUpdateResult.success) {
+          throw new Error("Database update did not succeed");
+        }
+
+        if (dbUpdateResult.meta.changes === 0) {
+          throw new Error("Dataset not found in database");
+        }
+      } catch (dbError) {
+        const msg = dbError instanceof Error ? dbError.message : String(dbError);
+        console.error(
+          `CRITICAL: Failed to update database visibility for ${datasetId} after making repo public:`,
+          msg,
+        );
+        await updateProgress("repo_public", `Database visibility update failed: ${msg}`);
+        return c.json(
+          {
+            error: "Critical: Database update failed after making repository public",
+            details: msg,
+            dataset_id: datasetId,
+            github_visibility: "public",
+            database_visibility: "private (update failed)",
+            action_required: `Manually update database: UPDATE datasets SET visibility = 'public' WHERE dataset_id = '${datasetId}'`,
+          },
+          500,
+        );
+      }
+
       await updateProgress("repo_public");
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
@@ -1818,6 +1933,10 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
     .run();
 
   // Audit log
+  // Audit log (non-fatal but warn user if fails)
+  let auditLogFailed = false;
+  let auditLogError: string | undefined;
+
   try {
     await db
       .prepare(
@@ -1832,7 +1951,9 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
       )
       .run();
   } catch (auditError) {
-    console.error("Audit log write failed for publication:", auditError);
+    auditLogFailed = true;
+    auditLogError = auditError instanceof Error ? auditError.message : String(auditError);
+    console.error("AUDIT LOG FAILURE: Dataset publication for", datasetId, "was not logged:", auditLogError);
   }
 
   return c.json({
@@ -1840,6 +1961,9 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
     dataset_id: datasetId,
     status: "published",
     steps_completed: allSteps,
+    warning: auditLogFailed
+      ? `Audit log write failed: ${auditLogError}. Publication succeeded but was not logged for compliance.`
+      : undefined,
   });
 });
 

@@ -994,20 +994,32 @@ function colorizeStatus(status: string): string {
 // List command
 datasetCommand
   .command("list")
-  .description("List available datasets on NEMAR")
-  .option("--mine", "List only your datasets (requires authentication)")
+  .description("List publicly available datasets on NEMAR")
+  .option("--mine", "List only your datasets (both private and public)")
   .option("--json", "Output as JSON for scripting")
   .option("--limit <n>", "Limit number of results (default: 50)", "50")
   .addHelpText(
     "after",
     `
 Description:
-  List BIDS datasets available on NEMAR. Use --mine to see only your
-  own datasets (requires authentication).
+  By default, lists only PUBLIC datasets on NEMAR that anyone can access.
+
+  To see your own datasets (including private ones), use the --mine flag.
+  This requires authentication.
+
+Visibility Rules:
+  Without --mine:
+    - Shows only public datasets (visible to everyone)
+    - Does not show private datasets, even your own
+    - Exception: Admins see ALL datasets for oversight
+
+  With --mine:
+    - Shows all YOUR datasets (both private and public)
+    - Requires authentication (nemar auth login)
 
 Examples:
-  $ nemar dataset list                   # List all public datasets
-  $ nemar dataset list --mine            # List your datasets
+  $ nemar dataset list                   # List public datasets only
+  $ nemar dataset list --mine            # List YOUR datasets (private + public)
   $ nemar dataset list --json            # JSON output for scripting
   $ nemar dataset list --limit 10        # Show only 10 datasets`,
   )
@@ -1038,6 +1050,9 @@ Examples:
     let datasets = response.datasets;
 
     // Filter by owner if --mine
+    // NOTE: Backend already filters by owner when mine=true is passed,
+    // but we apply client-side filter as defense-in-depth in case backend
+    // behavior changes or for backward compatibility with older backends.
     if (options.mine) {
       const config = getConfig();
       const username = config.username;
