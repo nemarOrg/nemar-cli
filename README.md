@@ -372,12 +372,71 @@ graph TB
     REL -->|Archive| DOI
 ```
 
+## Testing
+
+### Running Tests
+
+```bash
+# All tests
+bun test
+
+# Specific test file
+bun test test/cli.test.ts
+bun test test/api.test.ts
+```
+
+### Zenodo Sandbox Tests
+
+DOI workflows can be tested using Zenodo's sandbox environment without affecting production:
+
+```bash
+# Run Zenodo sandbox tests (requires configuration)
+RUN_ZENODO_TESTS=true TEST_DATASET_ID=nm099999 bun test test/zenodo-sandbox.test.ts
+```
+
+**Setup requirements:**
+1. Create account on [sandbox.zenodo.org](https://sandbox.zenodo.org)
+2. Generate API token with `deposit:write` scope
+3. Add to `test/.env.test`:
+   ```bash
+   ZENODO_SANDBOX_API_KEY=your_sandbox_token
+   RUN_ZENODO_TESTS=true
+   TEST_DATASET_ID=nm099999
+   ```
+
+**Test coverage:**
+- Concept DOI creation and retrieval
+- Version DOI publishing workflows
+- Metadata updates (title, keywords, related identifiers)
+- Error handling (401, 404, 400 responses)
+- Rate limiting and request throttling
+- Deposition lifecycle (create → upload → publish)
+- File uploads with checksum verification
+
+See [docs/development/zenodo-testing.md](docs/development/zenodo-testing.md) for comprehensive guide.
+
 ## Environment Variables
+
+### CLI Usage
 
 ```bash
 NEMAR_API_KEY          # API key (alternative to login)
 NEMAR_API_URL          # Custom API endpoint (default: https://api.nemar.org)
 NEMAR_NO_COLOR         # Disable colored output
+```
+
+### Testing
+
+```bash
+# Required for Zenodo sandbox tests
+ZENODO_SANDBOX_API_KEY # Sandbox Zenodo API token
+RUN_ZENODO_TESTS       # Enable Zenodo tests (set to "true")
+TEST_DATASET_ID        # Test dataset ID (default: nm099999)
+
+# API testing
+TEST_API_URL           # Test API endpoint (dev environment)
+TEST_ADMIN_API_KEY     # Admin API key for tests
+TEST_USER_API_KEY      # User API key for tests
 ```
 
 ## Troubleshooting

@@ -767,6 +767,21 @@ adminRoutes.post(
       );
     }
 
+    // SAFETY: Block production DOI creation in non-production environments
+    const environment = c.env.ENVIRONMENT || "development";
+    if (!body.sandbox && environment !== "production") {
+      return c.json(
+        {
+          error: "Production DOI creation blocked in non-production environment",
+          message:
+            "Cannot create production DOIs in development or test environments. Use --sandbox flag for testing, or deploy to production.",
+          environment,
+          dataset_id: dataset.dataset_id,
+        },
+        400,
+      );
+    }
+
     if (dataset.concept_doi) {
       return c.json(
         {
