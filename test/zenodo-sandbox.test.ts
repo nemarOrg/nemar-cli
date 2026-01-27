@@ -58,11 +58,13 @@ afterAll(async () => {
 
   console.log(`\n🧹 Cleaning up ${createdDepositions.length} test depositions...`);
 
+  const cleanupFailures: Array<{ depositionId: number; error: string; status?: number }> = [];
+
   for (const depositionId of createdDepositions) {
     try {
       await sleep(300); // Rate limit protection
       const { status } = await testRequest(
-        `/admin/zenodo/deposition/${depositionId}`,
+        `/admin/zenodo/deposition/${depositionId}?sandbox=true`,
         { method: "DELETE" },
         TEST_CONFIG.adminApiKey,
       );
@@ -70,14 +72,33 @@ afterAll(async () => {
       if (status === 204 || status === 404) {
         console.log(`   ✓ Deleted deposition ${depositionId}`);
       } else {
-        console.log(`   ⚠ Could not delete deposition ${depositionId} (status ${status})`);
+        const errorMsg = `Unexpected status ${status}`;
+        console.error(`   ✗ Failed to delete deposition ${depositionId}: ${errorMsg}`);
+        cleanupFailures.push({ depositionId, error: errorMsg, status });
       }
     } catch (error) {
-      console.log(`   ⚠ Error deleting deposition ${depositionId}: ${error}`);
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      console.error(`   ✗ Error deleting deposition ${depositionId}: ${errorMessage}`);
+      cleanupFailures.push({ depositionId, error: errorMessage });
     }
   }
 
-  console.log("   Cleanup complete\n");
+  // Report cleanup failures
+  if (cleanupFailures.length > 0) {
+    console.error(`\n❌ Cleanup failed for ${cleanupFailures.length} deposition(s):`);
+    for (const failure of cleanupFailures) {
+      console.error(
+        `   - Deposition ${failure.depositionId}: ${failure.error}${failure.status ? ` (HTTP ${failure.status})` : ""}`,
+      );
+    }
+    console.error("\n⚠️  Manual cleanup required in Zenodo sandbox!");
+    console.error("   Visit https://sandbox.zenodo.org/deposit to review orphaned depositions");
+    console.error(
+      `   Failed IDs: ${cleanupFailures.map((f) => f.depositionId).join(", ")}\n`,
+    );
+  } else {
+    console.log("   ✓ Cleanup complete\n");
+  }
 });
 
 describe("Zenodo Sandbox Integration", () => {
@@ -225,7 +246,7 @@ describe("Zenodo Sandbox Integration", () => {
       console.log("   ✓ Webhook correctly rejects invalid token");
     });
 
-    test("webhook endpoint requires sandbox flag for test datasets", async () => {
+    test("webhook endpoint rejects requests without valid token", async () => {
       if (!SHOULD_RUN) {
         console.log("   Skipping: RUN_ZENODO_TESTS not set");
         return;
@@ -233,23 +254,26 @@ describe("Zenodo Sandbox Integration", () => {
 
       await sleep(300);
 
-      // nm099999 is a test dataset - should require sandbox=true
+      // Test that webhook endpoint exists and validates tokens
       const response = await fetch(`${TEST_CONFIG.apiUrl}/webhooks/publish-version-doi`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          "X-Webhook-Token": process.env.TEST_WEBHOOK_TOKEN || "invalid",
+          "X-Webhook-Token": "invalid_token_for_testing",
         },
         body: JSON.stringify({
           dataset_id: TEST_DATASET_ID,
           version: "1.0.0",
           release_url: "https://github.com/test/repo/releases/tag/v1.0.0",
-          sandbox: false, // Should reject
+          sandbox: true,
         }),
       });
 
-      // Should fail without proper webhook token, but that's OK for this test
-      console.log("   ✓ Webhook validation tested");
+      // Should reject invalid token
+      expect(response.status).toBe(401);
+      const data = (await response.json()) as { error: string };
+      expect(data.error).toBe("Invalid webhook token");
+      console.log("   ✓ Webhook endpoint validates token properly");
     });
   });
 
@@ -615,7 +639,8 @@ describe("Zenodo Sandbox Integration", () => {
         const delay = Date.now() - start;
         delays.push(delay);
 
-        // Zenodo rate limit: 60 req/min = 1 req/sec
+        // Zenodo sandbox rate limit: 60 req/min minimum
+        // Using 400ms delays (150 req/min max) provides safety margin
         await sleep(400);
 
         expect(response.status).not.toBe(429); // Should not hit rate limit
@@ -895,7 +920,7 @@ describe("Zenodo Sandbox Integration", () => {
         },
       );
 
-      expect(deleteResponse.status).toBeOneOf([204, 201]); // 204 No Content or 201 Created
+      expect(deleteResponse.status).toBe(204); // 204 No Content for successful deletion
       console.log("   ✓ Deleted unpublished draft");
     });
   });

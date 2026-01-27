@@ -31,6 +31,7 @@ import {
   type ZenodoMetadata,
   createDeposition,
   createNewVersion,
+  deleteDeposition,
   downloadFile,
   formatRecordUrl,
   getDeposition,
@@ -319,6 +320,7 @@ adminRoutes.post("/revoke/:username", async (c) => {
 
   // Revoke IAM access if configured - SECURITY CRITICAL
   let iamRevoked = false;
+  let iamRevocationError: string | null = null;
   if (user.aws_iam_username && user.aws_access_key_id_encrypted && c.env.ENCRYPTION_KEY) {
     try {
       const accessKeyId = await decrypt(user.aws_access_key_id_encrypted, c.env.ENCRYPTION_KEY);
@@ -333,23 +335,33 @@ adminRoutes.post("/revoke/:username", async (c) => {
       );
       iamRevoked = true;
     } catch (error) {
-      // SECURITY: IAM revocation failure is critical - user's S3 credentials may still work
-      console.error("SECURITY WARNING: Failed to revoke IAM access for", user.username, error);
-      return c.json(
-        {
-          error: "Failed to revoke IAM access - user credentials may still be active",
-          details: error instanceof Error ? error.message : "Unknown error",
-          security_warning:
-            "User's S3 access keys may still be functional. Manual AWS cleanup required.",
-          aws_iam_username: user.aws_iam_username,
-          action_required: `Manually delete IAM user '${user.aws_iam_username}' in AWS console or retry revocation`,
-        },
-        500,
-      );
+      // CRITICAL SECURITY: Log IAM revocation failure but continue with partial revocation
+      const errorMessage = error instanceof Error ? error.message : "Unknown error";
+      console.error("CRITICAL SECURITY: Failed to revoke IAM access for", user.username, errorMessage);
+
+      iamRevocationError = errorMessage;
+
+      // Track IAM revocation failure for follow-up (best effort - don't fail if table doesn't exist)
+      try {
+        await db
+          .prepare(
+            `INSERT INTO iam_revocation_failures (user_id, username, iam_username, error_message, created_at)
+             VALUES (?, ?, ?, ?, datetime('now'))`,
+          )
+          .bind(user.id, user.username, user.aws_iam_username, errorMessage)
+          .run();
+      } catch {
+        // Table might not exist yet - log to console
+        console.error(
+          "Could not track IAM failure in database. Consider creating iam_revocation_failures table.",
+        );
+      }
+
+      // Continue with partial revocation instead of failing completely
     }
   }
 
-  // Clear IAM credentials from database
+  // Clear IAM credentials from database (even if revocation failed)
   await db
     .prepare(`
       UPDATE users
@@ -374,17 +386,20 @@ adminRoutes.post("/revoke/:username", async (c) => {
     .run();
 
   // Update user status
+  // If IAM revocation failed, mark as revoked_iam_pending for manual cleanup
+  const finalStatus = iamRevoked || !user.aws_iam_username ? "revoked" : "revoked_iam_pending";
+
   await db
     .prepare(
       `
     UPDATE users
-    SET status = 'revoked',
+    SET status = ?,
         revoked_at = datetime('now'),
         updated_at = datetime('now')
     WHERE id = ?
   `,
     )
-    .bind(user.id)
+    .bind(finalStatus, user.id)
     .run();
 
   // Remove from datasets they have access to (tracked in dataset_collaborators)
@@ -453,8 +468,42 @@ adminRoutes.post("/revoke/:username", async (c) => {
     )
     .run();
 
+  // If IAM revocation failed, return warning with actionable guidance
+  if (iamRevocationError) {
+    return c.json(
+      {
+        warning: "User revoked with IAM cleanup failure",
+        message:
+          "User's API tokens and database access have been revoked, but S3 credentials may still be active",
+        user: {
+          username: user.username,
+          status: finalStatus,
+        },
+        iam_error: iamRevocationError,
+        aws_iam_username: user.aws_iam_username,
+        action_required: [
+          `1. Manually delete IAM user '${user.aws_iam_username}' in AWS console`,
+          "2. Or use AWS CLI: aws iam delete-access-key --user-name <username> --access-key-id <key>",
+          "3. Then delete IAM user: aws iam delete-user --user-name <username>",
+          `4. Update user status: UPDATE users SET status = 'revoked' WHERE username = '${user.username}'`,
+        ],
+        security_impact: "User can still upload/download S3 data until manual cleanup completes",
+        repos_removed: reposRemoved,
+        failed_removals: failedRemovals.length > 0 ? failedRemovals : undefined,
+        email_sent: emailSent,
+        iam_revoked: false,
+      },
+      207, // 207 Multi-Status: partial success
+    );
+  }
+
+  // Full revocation succeeded
   return c.json({
-    message: `User ${username} access has been revoked`,
+    message: `User ${username} access has been fully revoked`,
+    user: {
+      username: user.username,
+      status: finalStatus,
+    },
     repos_removed: reposRemoved,
     failed_removals: failedRemovals.length > 0 ? failedRemovals : undefined,
     email_sent: emailSent,
@@ -768,14 +817,47 @@ adminRoutes.post(
     }
 
     // SAFETY: Block production DOI creation in non-production environments
-    const environment = c.env.ENVIRONMENT || "development";
-    if (!body.sandbox && environment !== "production") {
+    // Production DOIs create permanent records in DataCite registry and consume DOI quota.
+    // Development/staging should only use sandbox to avoid polluting production registry.
+    const environment = c.env.ENVIRONMENT;
+
+    // FAIL CLOSED: If environment is not explicitly set, reject production DOIs
+    if (!environment) {
+      console.error("SECURITY: ENVIRONMENT variable not configured - blocking production DOI");
+      return c.json(
+        {
+          error: "Server misconfiguration: ENVIRONMENT variable not set",
+          message: "Cannot create production DOIs without explicit environment configuration",
+          action_required: "Set ENVIRONMENT variable to 'production' in production environment",
+        },
+        500,
+      );
+    }
+
+    // Normalize and validate environment
+    const normalizedEnv = environment.toLowerCase().trim();
+    const validEnvironments = ["production", "development", "staging", "test"];
+
+    if (!validEnvironments.includes(normalizedEnv)) {
+      console.error(`SECURITY: Invalid ENVIRONMENT value: ${environment}`);
+      return c.json(
+        {
+          error: "Server misconfiguration: Invalid ENVIRONMENT value",
+          message: `ENVIRONMENT must be one of: ${validEnvironments.join(", ")}`,
+          current_value: environment,
+        },
+        500,
+      );
+    }
+
+    // Block production DOI in non-production
+    if (!body.sandbox && normalizedEnv !== "production") {
       return c.json(
         {
           error: "Production DOI creation blocked in non-production environment",
           message:
             "Cannot create production DOIs in development or test environments. Use --sandbox flag for testing, or deploy to production.",
-          environment,
+          environment: normalizedEnv,
           dataset_id: dataset.dataset_id,
         },
         400,
@@ -1125,6 +1207,48 @@ adminRoutes.get("/datasets/:id/doi", async (c) => {
       ? formatRecordUrl(Number.parseInt(dataset.zenodo_latest_version_id))
       : null,
   });
+});
+
+/**
+ * DELETE /admin/zenodo/deposition/:id - Delete unpublished Zenodo deposition
+ *
+ * Used by tests to cleanup unpublished depositions in sandbox.
+ * WARNING: Only works for unpublished depositions. Published DOIs cannot be deleted.
+ */
+adminRoutes.delete("/zenodo/deposition/:id", async (c) => {
+  const depositionId = Number.parseInt(c.req.param("id"));
+  const sandbox = c.req.query("sandbox") === "true";
+
+  // Get appropriate token
+  const zenodoToken = sandbox ? c.env.ZENODO_SANDBOX_API_KEY : c.env.ZENODO_API_KEY;
+
+  if (!zenodoToken) {
+    return c.json(
+      {
+        error: "Zenodo API token not configured",
+        message: sandbox ? "ZENODO_SANDBOX_API_KEY not set" : "ZENODO_API_KEY not set",
+      },
+      500,
+    );
+  }
+
+  try {
+    await deleteDeposition(depositionId, zenodoToken, sandbox);
+    return c.json({}, 204);
+  } catch (error) {
+    const errorMessage = error instanceof Error ? error.message : "Unknown error";
+    console.error(`Failed to delete Zenodo deposition ${depositionId}:`, errorMessage);
+
+    return c.json(
+      {
+        error: "Failed to delete deposition",
+        message: errorMessage,
+        deposition_id: depositionId,
+        sandbox,
+      },
+      500,
+    );
+  }
 });
 
 // ============================================================================

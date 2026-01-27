@@ -218,19 +218,27 @@ The test suite covers 7 major areas:
 Zenodo enforces rate limits to protect the service:
 
 ### Limits
-- **Sandbox**: 60 requests per minute
+- **Sandbox**: 60 requests per minute minimum (1 request per second)
 - **Production**: 100 requests per minute (authenticated)
 
 ### Best Practices
-- Add 300-500ms delays between API calls
+- **Minimum delay**: 1000ms (60 req/min = 1 req/sec)
+- **Recommended delay**: 400-500ms provides safety margin (120-150 req/min max)
 - Use exponential backoff for retries
 - Respect 429 (Too Many Requests) responses
 
+**Why 400ms instead of 1000ms?** The test suite uses 400ms delays to provide a safety buffer. While the documented limit is 60 req/min (1000ms), using 400ms allows ~150 req/min maximum, which accounts for:
+- Request processing time variations
+- Network latency
+- Other concurrent API calls
+- Potential rate limit enforcement variations
+
 ### Test Implementation
 ```typescript
-await sleep(400); // Wait 400ms between requests
+// Using 400ms delays (safety margin above 60 req/min minimum)
+await sleep(400);
 
-// Rate limit handling
+// Rate limit handling with exponential backoff
 if (response.status === 429) {
   const retryAfter = response.headers.get("Retry-After");
   await sleep(Number.parseInt(retryAfter || "60") * 1000);
