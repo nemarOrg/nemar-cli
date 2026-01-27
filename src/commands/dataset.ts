@@ -1437,7 +1437,14 @@ Examples:
       }
 
       if (result.status === "approving") {
-        const steps = ["ci_check", "repo_public", "tag_protect", "doi_create", "s3_lock", "notify_user"];
+        const steps = [
+          "ci_check",
+          "repo_public",
+          "tag_protect",
+          "doi_create",
+          "s3_lock",
+          "notify_user",
+        ];
         const completed = result.steps_completed || [];
         console.log("\n  Steps:");
         for (const step of steps) {
