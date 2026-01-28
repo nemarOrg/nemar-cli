@@ -116,6 +116,13 @@ export async function createDeposition(
     }
   }
 
+  // Check content type even for successful responses
+  const contentType = response.headers.get("content-type");
+  if (!contentType?.includes("application/json")) {
+    const text = await response.text();
+    throw new Error(`Zenodo returned non-JSON response (${contentType}): ${text.substring(0, 200)}`);
+  }
+
   return response.json() as Promise<ZenodoDeposition>;
 }
 
@@ -153,6 +160,12 @@ export async function uploadFile(
     }
   }
 
+  const contentType = response.headers.get("content-type");
+  if (!contentType?.includes("application/json")) {
+    const text = await response.text();
+    throw new Error(`Zenodo returned non-JSON response (${contentType}): ${text.substring(0, 200)}`);
+  }
+
   return response.json() as Promise<{ checksum: string; filename: string; filesize: number }>;
 }
 
@@ -177,8 +190,20 @@ export async function publishDeposition(
   });
 
   if (!response.ok) {
-    const error = (await response.json()) as ZenodoError;
-    throw new Error(`Zenodo publish error: ${error.message || response.statusText}`);
+    const contentType = response.headers.get("content-type");
+    if (contentType?.includes("application/json")) {
+      const error = (await response.json()) as ZenodoError;
+      throw new Error(`Zenodo publish error: ${error.message || response.statusText}`);
+    } else {
+      const text = await response.text();
+      throw new Error(`Zenodo publish error (${response.status}): ${text.substring(0, 200)}`);
+    }
+  }
+
+  const contentType = response.headers.get("content-type");
+  if (!contentType?.includes("application/json")) {
+    const text = await response.text();
+    throw new Error(`Zenodo returned non-JSON response (${contentType}): ${text.substring(0, 200)}`);
   }
 
   return response.json() as Promise<ZenodoDeposition>;
@@ -209,6 +234,12 @@ export async function getDeposition(
       const text = await response.text();
       throw new Error(`Zenodo API error (${response.status}): ${text.substring(0, 200)}`);
     }
+  }
+
+  const contentType = response.headers.get("content-type");
+  if (!contentType?.includes("application/json")) {
+    const text = await response.text();
+    throw new Error(`Zenodo returned non-JSON response (${contentType}): ${text.substring(0, 200)}`);
   }
 
   return response.json() as Promise<ZenodoDeposition>;
@@ -285,8 +316,20 @@ export async function updateDepositionMetadata(
   });
 
   if (!response.ok) {
-    const error = (await response.json()) as ZenodoError;
-    throw new Error(`Zenodo update error: ${error.message || response.statusText}`);
+    const contentType = response.headers.get("content-type");
+    if (contentType?.includes("application/json")) {
+      const error = (await response.json()) as ZenodoError;
+      throw new Error(`Zenodo update error: ${error.message || response.statusText}`);
+    } else {
+      const text = await response.text();
+      throw new Error(`Zenodo update error (${response.status}): ${text.substring(0, 200)}`);
+    }
+  }
+
+  const contentType = response.headers.get("content-type");
+  if (!contentType?.includes("application/json")) {
+    const text = await response.text();
+    throw new Error(`Zenodo returned non-JSON response (${contentType}): ${text.substring(0, 200)}`);
   }
 
   return response.json() as Promise<ZenodoDeposition>;
