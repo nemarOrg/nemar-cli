@@ -1291,7 +1291,7 @@ adminRoutes.delete("/zenodo/deposition/:id", async (c) => {
 
   try {
     await deleteDeposition(depositionId, zenodoToken, sandbox);
-    return c.json({}, 204);
+    return c.body(null, 204);
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : "Unknown error";
     console.error(`Failed to delete Zenodo deposition ${depositionId}:`, errorMessage);
@@ -2241,7 +2241,7 @@ adminRoutes.post("/datasets/:id/manifest/:version", async (c) => {
   const pat = c.env.GITHUB_ADMIN_PAT;
 
   // Resolve version DOI: use provided value, or try existing manifest
-  let versionDoi: string | null = body.doi ?? null;
+  let versionDoi: string | null = 'doi' in body ? (body.doi ?? null) : null;
   if (!versionDoi) {
     const s3Options = {
       bucket: c.env.S3_BUCKET,

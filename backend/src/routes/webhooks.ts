@@ -141,7 +141,7 @@ webhooks.post("/publish-version-doi", async (c) => {
             version,
             pat,
             dataset_id,
-            published.doi,
+            published.doi ?? null,
             dataset.concept_doi,
           );
 
