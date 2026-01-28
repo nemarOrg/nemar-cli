@@ -23,13 +23,18 @@ export class ApiError extends Error {
   }
 }
 
+const IS_DEV_BUILD = DEFAULT_API_URL.includes("workers.dev");
+
 /**
- * Get the API base URL from config or default
+ * Get the API base URL from config or default.
+ * Dev builds (injected URL) always use the dev backend regardless of stored config.
  */
 function getApiUrl(): string {
-  // Allow TEST_API_URL environment variable to override for testing
   if (process.env.TEST_API_URL) {
     return process.env.TEST_API_URL;
+  }
+  if (IS_DEV_BUILD) {
+    return DEFAULT_API_URL;
   }
   const config = getConfig();
   return config.apiUrl || DEFAULT_API_URL;
