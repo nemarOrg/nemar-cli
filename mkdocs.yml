@@ -72,6 +72,8 @@ nav:
       - Configuration: reference/configuration.md
       - Environment Variables: reference/environment.md
       - API: reference/api.md
+  - Development:
+      - Zenodo Testing: development/zenodo-testing.md
 
 extra:
   social:

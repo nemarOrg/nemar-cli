@@ -109,20 +109,37 @@ Options:
   -h, --help  display help for command
 ```
 
-### admin doi
+### admin doi create
 
 ```bash
-Usage: nemar admin doi [options] [command]
+Usage: nemar admin doi create [options] <dataset-id>
 
-DOI management
+Create concept DOI for a dataset
+
+Arguments:
+  dataset-id            Dataset ID (e.g., nm000104)
 
 Options:
-  -h, --help                     display help for command
+  --title <title>       DOI title (defaults to dataset name)
+  --description <desc>  DOI description
+  --sandbox             Use Zenodo sandbox for testing
+  -y, --yes             Skip confirmation and proceed
+  -n, --no              Skip confirmation and decline
+  -h, --help            display help for command
+```
 
-Commands:
-  create [options] <dataset-id>  Create concept DOI for a dataset
-  info <dataset-id>              Get DOI info for a dataset
-  help [command]                 display help for command
+### admin doi info
+
+```bash
+Usage: nemar admin doi info [options] <dataset-id>
+
+Get DOI info for a dataset
+
+Arguments:
+  dataset-id  Dataset ID (e.g., nm000104)
+
+Options:
+  -h, --help  display help for command
 ```
 
 ### admin revert

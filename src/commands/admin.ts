@@ -638,6 +638,19 @@ doiCommand
       }
       console.log();
 
+      // Enhanced sandbox warning
+      if (options.sandbox) {
+        console.log(chalk.yellow("━".repeat(60)));
+        console.log(chalk.yellow.bold("                 SANDBOX MODE ENABLED"));
+        console.log(chalk.yellow("━".repeat(60)));
+        console.log(chalk.yellow("  • Using Zenodo sandbox (sandbox.zenodo.org)"));
+        console.log(chalk.yellow("  • DOI will NOT be indexed by DataCite"));
+        console.log(chalk.yellow("  • DOI will NOT resolve in production"));
+        console.log(chalk.yellow("  • Use this for testing workflows only"));
+        console.log(chalk.yellow("━".repeat(60)));
+        console.log();
+      }
+
       // Confirmation
       console.log(chalk.red("WARNING: DOIs are PERMANENT and cannot be deleted!"));
       console.log(
@@ -648,8 +661,8 @@ doiCommand
       console.log();
 
       const confirmMessage = options.sandbox
-        ? "Create test concept DOI on Zenodo sandbox?"
-        : "Create concept DOI on Zenodo?";
+        ? "Create TEST concept DOI on Zenodo SANDBOX?"
+        : "Create PERMANENT concept DOI on Zenodo PRODUCTION?";
       const result = await confirm(confirmMessage, options);
       if (result !== "confirmed") {
         console.log(chalk.gray(result === "declined" ? "Skipped" : "Cancelled"));
@@ -756,6 +769,17 @@ doiCommand
         console.log(`  URL:  https://doi.org/${doiInfo.concept_doi}`);
         if (doiInfo.zenodo_concept_url) {
           console.log(`  Zenodo: ${doiInfo.zenodo_concept_url}`);
+
+          // Detect and warn about sandbox DOIs
+          if (doiInfo.zenodo_concept_url.includes("sandbox.zenodo.org")) {
+            console.log();
+            console.log(chalk.yellow("Mode: SANDBOX (test DOI)"));
+            console.log(
+              chalk.yellow(
+                "  This DOI is not indexed by DataCite and will not resolve in production",
+              ),
+            );
+          }
         }
       } else {
         console.log(chalk.yellow("No concept DOI created yet"));
