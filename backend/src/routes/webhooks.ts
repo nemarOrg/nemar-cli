@@ -24,11 +24,9 @@ webhooks.post("/publish-version-doi", async (c) => {
   const token = c.req.header("X-Webhook-Token");
   const expectedToken = c.env.GITHUB_WEBHOOK_SECRET;
 
-  if (!expectedToken) {
-    return c.json({ error: "Webhook not configured" }, 500);
-  }
-
-  if (!token || token !== expectedToken) {
+  // If webhook secret not configured OR token doesn't match, reject as unauthorized
+  // Treat missing secret as "no valid token exists" for better security
+  if (!expectedToken || !token || token !== expectedToken) {
     return c.json({ error: "Invalid webhook token" }, 401);
   }
 

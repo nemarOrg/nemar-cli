@@ -869,54 +869,7 @@ adminRoutes.post(
       );
     }
 
-    // SAFETY: Block production DOI creation in non-production environments
-    // Production DOIs create permanent records in DataCite registry and consume DOI quota.
-    // Development/staging should only use sandbox to avoid polluting production registry.
-    const environment = c.env.ENVIRONMENT;
-
-    // FAIL CLOSED: If environment is not explicitly set, reject production DOIs
-    if (!environment) {
-      console.error("SECURITY: ENVIRONMENT variable not configured - blocking production DOI");
-      return c.json(
-        {
-          error: "Server misconfiguration: ENVIRONMENT variable not set",
-          message: "Cannot create production DOIs without explicit environment configuration",
-          action_required: "Set ENVIRONMENT variable to 'production' in production environment",
-        },
-        500,
-      );
-    }
-
-    // Normalize and validate environment
-    const normalizedEnv = environment.toLowerCase().trim();
-    const validEnvironments = ["production", "development", "staging", "test"];
-
-    if (!validEnvironments.includes(normalizedEnv)) {
-      console.error(`SECURITY: Invalid ENVIRONMENT value: ${environment}`);
-      return c.json(
-        {
-          error: "Server misconfiguration: Invalid ENVIRONMENT value",
-          message: `ENVIRONMENT must be one of: ${validEnvironments.join(", ")}`,
-          current_value: environment,
-        },
-        500,
-      );
-    }
-
-    // Block production DOI in non-production
-    if (!body.sandbox && normalizedEnv !== "production") {
-      return c.json(
-        {
-          error: "Production DOI creation blocked in non-production environment",
-          message:
-            "Cannot create production DOIs in development or test environments. Use --sandbox flag for testing, or deploy to production.",
-          environment: normalizedEnv,
-          dataset_id: dataset.dataset_id,
-        },
-        400,
-      );
-    }
-
+    // Check if dataset already has a DOI (before environment checks for clearer errors)
     if (dataset.concept_doi) {
       return c.json(
         {
@@ -928,6 +881,57 @@ adminRoutes.post(
         },
         400,
       );
+    }
+
+    // SAFETY: Block production DOI creation in non-production environments
+    // Production DOIs create permanent records in DataCite registry and consume DOI quota.
+    // Development/staging should only use sandbox to avoid polluting production registry.
+    // Only check environment for production DOI requests (skip for sandbox)
+    if (!body.sandbox) {
+      const environment = c.env.ENVIRONMENT;
+
+      // FAIL CLOSED: If environment is not explicitly set, reject production DOIs
+      if (!environment) {
+        console.error("SECURITY: ENVIRONMENT variable not configured - blocking production DOI");
+        return c.json(
+          {
+            error: "Server misconfiguration: ENVIRONMENT variable not set",
+            message: "Cannot create production DOIs without explicit environment configuration",
+            action_required: "Set ENVIRONMENT variable to 'production' in production environment",
+          },
+          500,
+        );
+      }
+
+      // Normalize and validate environment
+      const normalizedEnv = environment.toLowerCase().trim();
+      const validEnvironments = ["production", "development", "staging", "test"];
+
+      if (!validEnvironments.includes(normalizedEnv)) {
+        console.error(`SECURITY: Invalid ENVIRONMENT value: ${environment}`);
+        return c.json(
+          {
+            error: "Server misconfiguration: Invalid ENVIRONMENT value",
+            message: `ENVIRONMENT must be one of: ${validEnvironments.join(", ")}`,
+            current_value: environment,
+          },
+          500,
+        );
+      }
+
+      // Block production DOI in non-production
+      if (normalizedEnv !== "production") {
+        return c.json(
+          {
+            error: "Production DOI creation blocked in non-production environment",
+            message:
+              "Cannot create production DOIs in development or test environments. Use --sandbox flag for testing, or deploy to production.",
+            environment: normalizedEnv,
+            dataset_id: dataset.dataset_id,
+          },
+          400,
+        );
+      }
     }
 
     // Prepare metadata
