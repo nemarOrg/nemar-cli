@@ -896,6 +896,8 @@ export interface PublishApproveResponse {
   steps_completed?: string[];
   error?: string;
   step?: string;
+  hasMore?: boolean;
+  s3_lock_offset?: number;
 }
 
 /**
@@ -963,15 +965,29 @@ export async function approvePublication(
   resume = false,
   sandbox = false,
 ): Promise<PublishApproveResponse> {
-  return request<PublishApproveResponse>(
-    `/admin/publish/${datasetId}/approve`,
-    {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ resume, sandbox }),
-    },
-    true,
-  );
+  let s3_lock_offset: number | undefined;
+  let result: PublishApproveResponse;
+
+  // Loop to handle S3 lock pagination (CF Workers subrequest limit)
+  do {
+    result = await request<PublishApproveResponse>(
+      `/admin/publish/${datasetId}/approve`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ resume, sandbox, s3_lock_offset }),
+      },
+      true,
+    );
+
+    if (result.hasMore && result.s3_lock_offset !== undefined) {
+      s3_lock_offset = result.s3_lock_offset;
+    } else {
+      break;
+    }
+  } while (result.hasMore);
+
+  return result;
 }
 
 export interface S3LockResponse {
@@ -980,10 +996,33 @@ export interface S3LockResponse {
   locked: number;
   total: number;
   failed: string[];
+  hasMore: boolean;
+  offset: number;
 }
 
-export async function applyS3Lock(datasetId: string): Promise<S3LockResponse> {
-  return request<S3LockResponse>(`/admin/datasets/${datasetId}/s3-lock`, {
-    method: "POST",
-  }, true);
+export async function applyS3Lock(datasetId: string): Promise<{ locked: number; total: number; failed: string[] }> {
+  let offset = 0;
+  let totalLocked = 0;
+  const allFailed: string[] = [];
+  let total = 0;
+
+  do {
+    const result = await request<S3LockResponse>(`/admin/datasets/${datasetId}/s3-lock`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ offset }),
+    }, true);
+
+    totalLocked += result.locked;
+    allFailed.push(...result.failed);
+    total = result.total;
+
+    if (result.hasMore) {
+      offset += 40;
+    } else {
+      break;
+    }
+  } while (true);
+
+  return { locked: totalLocked, total, failed: allFailed };
 }

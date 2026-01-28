@@ -1721,11 +1721,13 @@ adminRoutes.post("/publish/:id/deny", zValidator("json", denySchema), async (c) 
 const approveSchema = z.object({
   resume: z.boolean().optional().default(false),
   sandbox: z.boolean().optional().default(false),
+  s3_lock_offset: z.number().optional(),
 });
 
 adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), async (c) => {
   const datasetId = c.req.param("id");
   const { resume, sandbox } = c.req.valid("json");
+  const body = c.req.valid("json");
   const adminUser = c.get("user");
   const db = c.env.DB;
 
@@ -2084,7 +2086,7 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
     }
   }
 
-  // Step 5: S3 Object Lock (batched to stay within CF Workers subrequest limits)
+  // Step 5: S3 Object Lock (single batch per request due to CF Workers subrequest limits)
   if (stepsToRun.includes("s3_lock")) {
     try {
       await db
@@ -2094,38 +2096,40 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
         .bind(request.id)
         .run();
 
-      const s3Options = {
-        bucket: c.env.S3_BUCKET,
-        region: c.env.AWS_REGION,
-        accessKeyId: c.env.AWS_ACCESS_KEY_ID,
-        secretAccessKey: c.env.AWS_SECRET_ACCESS_KEY,
-      };
+      const lockResult = await applyObjectLock(
+        {
+          bucket: c.env.S3_BUCKET,
+          region: c.env.AWS_REGION,
+          accessKeyId: c.env.AWS_ACCESS_KEY_ID,
+          secretAccessKey: c.env.AWS_SECRET_ACCESS_KEY,
+        },
+        datasetId,
+        body.s3_lock_offset || 0,
+      );
 
-      let totalLocked = 0;
-      const allFailed: string[] = [];
-      let offset = 0;
-      let hasMore = true;
-
-      while (hasMore) {
-        const lockResult = await applyObjectLock(s3Options, datasetId, offset);
-        totalLocked += lockResult.locked;
-        allFailed.push(...lockResult.failed);
-        hasMore = lockResult.hasMore;
-        offset += 40;
-      }
-
-      if (allFailed.length > 0) {
-        const msg = `${totalLocked} locked, ${allFailed.length} failed`;
+      if (lockResult.failed.length > 0) {
+        const msg = `${lockResult.locked} locked, ${lockResult.failed.length} failed`;
         await updateProgress("s3_lock", msg);
         return c.json(
           {
             error: `S3 lock partially failed: ${msg}`,
             step: "s3_lock",
             steps_completed: completed,
-            details: { locked: totalLocked, failed: allFailed },
+            details: lockResult,
           },
           500,
         );
+      }
+
+      if (lockResult.hasMore) {
+        // More objects to lock - return progress with next offset
+        return c.json({
+          message: `S3 lock in progress: ${lockResult.locked} locked, ${lockResult.total} total`,
+          step: "s3_lock",
+          steps_completed: completed,
+          s3_lock_offset: (body.s3_lock_offset || 0) + 40,
+          hasMore: true,
+        });
       }
 
       await updateProgress("s3_lock");
@@ -2225,6 +2229,8 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
 adminRoutes.post("/datasets/:id/s3-lock", async (c) => {
   const datasetId = c.req.param("id");
   const db = c.env.DB;
+  const body = await c.req.json().catch(() => ({})) as { offset?: number };
+  const offset = body.offset || 0;
 
   const dataset = await db
     .prepare("SELECT dataset_id FROM datasets WHERE dataset_id = ?")
@@ -2236,34 +2242,25 @@ adminRoutes.post("/datasets/:id/s3-lock", async (c) => {
   }
 
   try {
-    const s3Options = {
-      bucket: c.env.S3_BUCKET,
-      region: c.env.AWS_REGION,
-      accessKeyId: c.env.AWS_ACCESS_KEY_ID,
-      secretAccessKey: c.env.AWS_SECRET_ACCESS_KEY,
-    };
-
-    let totalLocked = 0;
-    const allFailed: string[] = [];
-    let offset = 0;
-    let hasMore = true;
-    let total = 0;
-
-    while (hasMore) {
-      const result = await applyObjectLock(s3Options, datasetId, offset);
-      totalLocked += result.locked;
-      allFailed.push(...result.failed);
-      hasMore = result.hasMore;
-      total = result.total;
-      offset += 40;
-    }
+    const result = await applyObjectLock(
+      {
+        bucket: c.env.S3_BUCKET,
+        region: c.env.AWS_REGION,
+        accessKeyId: c.env.AWS_ACCESS_KEY_ID,
+        secretAccessKey: c.env.AWS_SECRET_ACCESS_KEY,
+      },
+      datasetId,
+      offset,
+    );
 
     return c.json({
-      message: allFailed.length === 0 ? "All objects locked" : "Some objects failed to lock",
+      message: result.failed.length === 0 ? "Batch locked" : "Some objects failed",
       dataset_id: datasetId,
-      locked: totalLocked,
-      total,
-      failed: allFailed,
+      locked: result.locked,
+      total: result.total,
+      failed: result.failed,
+      hasMore: result.hasMore,
+      offset,
     });
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
