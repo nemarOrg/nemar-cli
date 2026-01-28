@@ -973,3 +973,17 @@ export async function approvePublication(
     true,
   );
 }
+
+export interface S3LockResponse {
+  message: string;
+  dataset_id: string;
+  locked: number;
+  total: number;
+  failed: string[];
+}
+
+export async function applyS3Lock(datasetId: string): Promise<S3LockResponse> {
+  return request<S3LockResponse>(`/admin/datasets/${datasetId}/s3-lock`, {
+    method: "POST",
+  }, true);
+}

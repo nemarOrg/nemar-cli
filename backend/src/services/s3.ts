@@ -247,15 +247,21 @@ export async function listManifests(
 /**
  * Apply S3 Object Lock (Governance mode) to all objects under a dataset prefix.
  * Uses a 100-year retention period to effectively make objects immutable.
+ *
+ * Processes objects in batches of `batchSize` to stay within Cloudflare Workers
+ * subrequest limits. Returns `hasMore` if there are remaining objects to lock.
  */
 export async function applyObjectLock(
   options: PresignedUrlOptions,
   datasetId: string,
-): Promise<{ locked: number; failed: string[] }> {
+  offset = 0,
+  batchSize = 40,
+): Promise<{ locked: number; failed: string[]; total: number; hasMore: boolean }> {
   const { bucket, region } = options;
   const aws = createS3Client(options);
 
   const keys = await listObjectKeys(options, `${datasetId}/`);
+  const batch = keys.slice(offset, offset + batchSize);
   const failed: string[] = [];
   let locked = 0;
 
@@ -275,7 +281,7 @@ export async function applyObjectLock(
   const md5Digest = await crypto.subtle.digest("MD5", bodyBytes);
   const contentMd5 = btoa(String.fromCharCode(...new Uint8Array(md5Digest)));
 
-  for (const key of keys) {
+  for (const key of batch) {
     // Encode each path segment individually, preserving "/" separators
     const encodedKey = key.split("/").map(encodeURIComponent).join("/");
     const url = `https://${bucket}.s3.${region}.amazonaws.com/${encodedKey}?retention`;
@@ -290,10 +296,8 @@ export async function applyObjectLock(
       });
 
       const res = await fetch(signed);
-      if (res.ok) {
-        locked++;
-      } else if (res.status === 403) {
-        // 403 on PutObjectRetention means object is already locked
+      if (res.ok || res.status === 403) {
+        // 200: newly locked; 403: already locked (object protected)
         locked++;
       } else {
         failed.push(key);
@@ -303,5 +307,5 @@ export async function applyObjectLock(
     }
   }
 
-  return { locked, failed };
+  return { locked, failed, total: keys.length, hasMore: offset + batchSize < keys.length };
 }

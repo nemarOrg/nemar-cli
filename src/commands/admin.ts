@@ -36,6 +36,7 @@ import {
   getDoiInfo,
   listPublishRequests,
   listUsers,
+  applyS3Lock,
   regenerateUserIam,
   revokeUser,
 } from "../lib/api.js";
@@ -304,6 +305,54 @@ s3Command
   .option(YES_OPTION, YES_DESCRIPTION)
   .option(NO_OPTION, NO_DESCRIPTION)
   .action(regenerateIamAction);
+
+s3Command
+  .command("lock")
+  .description("Apply S3 Object Lock (Governance mode) to a dataset")
+  .argument("<dataset-id>", "Dataset ID to lock")
+  .option(YES_OPTION, YES_DESCRIPTION)
+  .option(NO_OPTION, NO_DESCRIPTION)
+  .action(async (datasetId: string, options: ConfirmOptions) => {
+    if (!requireAuth()) return;
+
+    console.log(chalk.cyan(`\nApply S3 Object Lock to ${datasetId}\n`));
+    console.log("This will:");
+    console.log("  • Set GOVERNANCE mode Object Lock on all objects");
+    console.log("  • Retention period: 100 years");
+    console.log("  • Objects cannot be deleted or modified without bypass");
+    console.log();
+
+    const confirmResult = await confirm(
+      `Apply S3 Object Lock to ${datasetId}?`,
+      options,
+    );
+    if (confirmResult !== "confirmed") {
+      console.log(chalk.gray(confirmResult === "declined" ? "Skipped" : "Cancelled"));
+      return;
+    }
+
+    const spinner = ora("Applying S3 Object Lock...").start();
+
+    try {
+      const result = await applyS3Lock(datasetId);
+      if (result.failed.length > 0) {
+        spinner.fail(`Partial lock: ${result.locked}/${result.total} locked, ${result.failed.length} failed`);
+        console.log(chalk.yellow("\nFailed objects:"));
+        for (const key of result.failed.slice(0, 10)) {
+          console.log(`  • ${key}`);
+        }
+        if (result.failed.length > 10) {
+          console.log(`  ... and ${result.failed.length - 10} more`);
+        }
+      } else {
+        spinner.succeed(`All ${result.locked} objects locked successfully`);
+      }
+    } catch (error) {
+      spinner.fail("S3 lock failed");
+      const msg = error instanceof Error ? error.message : String(error);
+      console.log(chalk.gray(`  ${msg}`));
+    }
+  });
 
 adminCommand.addCommand(s3Command);
 
