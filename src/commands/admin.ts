@@ -1029,6 +1029,7 @@ After Approval:
       console.log(chalk.yellow("━".repeat(60)));
       console.log(chalk.yellow("  • DOI will be created on sandbox.zenodo.org"));
       console.log(chalk.yellow("  • DOI will NOT be indexed by DataCite"));
+      console.log(chalk.yellow("  • DOI will NOT resolve in production"));
       console.log(chalk.yellow("  • Use this for testing workflows only"));
       console.log(chalk.yellow("━".repeat(60)));
       console.log();

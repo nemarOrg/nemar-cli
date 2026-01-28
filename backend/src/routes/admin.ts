@@ -1791,6 +1791,18 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
     return c.json({ error: "Dataset not found" }, 404);
   }
 
+  // Block publication of sandbox datasets
+  if (dataset.dataset_id.startsWith("xx")) {
+    return c.json(
+      {
+        error: "Cannot publish sandbox datasets",
+        message: "Sandbox datasets (xx-prefix) are for testing only and cannot be published.",
+        dataset_id: datasetId,
+      },
+      400,
+    );
+  }
+
   if (!dataset.github_repo) {
     return c.json({ error: "Dataset has no GitHub repository" }, 400);
   }
@@ -1984,15 +1996,47 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
         .run();
 
       if (!dataset.concept_doi) {
+        // SAFETY: Block production DOI creation in non-production environments
+        if (!sandbox) {
+          const environment = c.env.ENVIRONMENT;
+          if (!environment) {
+            await updateProgress("doi_create", "ENVIRONMENT variable not configured");
+            return c.json(
+              {
+                error: "Server misconfiguration: ENVIRONMENT variable not set",
+                message: "Cannot create production DOIs without explicit environment configuration. Use --sandbox for testing.",
+                step: "doi_create",
+                steps_completed: completed,
+              },
+              500,
+            );
+          }
+          const normalizedEnv = environment.toLowerCase().trim();
+          if (normalizedEnv !== "production") {
+            await updateProgress("doi_create", "Production DOI blocked in non-production");
+            return c.json(
+              {
+                error: "Production DOI creation blocked in non-production environment",
+                message: "Use --sandbox flag for testing, or deploy to production.",
+                environment: normalizedEnv,
+                step: "doi_create",
+                steps_completed: completed,
+              },
+              400,
+            );
+          }
+        }
+
         const { createDeposition: createDep, getPrereservedDoi: getDoi } = await import(
           "../services/zenodo"
         );
         const zenodoToken = sandbox ? c.env.ZENODO_SANDBOX_API_KEY : c.env.ZENODO_API_KEY;
         if (!zenodoToken) {
-          await updateProgress("doi_create", `Zenodo ${sandbox ? "sandbox " : ""}API key not configured`);
+          const errorMsg = sandbox ? "Zenodo sandbox API key not configured" : "Zenodo API key not configured";
+          await updateProgress("doi_create", errorMsg);
           return c.json(
             {
-              error: `Zenodo ${sandbox ? "sandbox " : ""}API key not configured`,
+              error: errorMsg,
               step: "doi_create",
               steps_completed: completed,
             },
