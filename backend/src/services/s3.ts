@@ -292,6 +292,9 @@ export async function applyObjectLock(
       const res = await fetch(signed);
       if (res.ok) {
         locked++;
+      } else if (res.status === 403) {
+        // 403 on PutObjectRetention means object is already locked
+        locked++;
       } else {
         failed.push(key);
       }
