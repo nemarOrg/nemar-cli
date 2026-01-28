@@ -149,7 +149,13 @@ jobs:
       - name: Publish to npm
         if: steps.version.outputs.skip_publish == 'false'
         # Note: --provenance requires public repos; using OIDC auth without provenance for private repo
-        run: npm publish --tag ${{ steps.version.outputs.tag }} --access public
+        # Use --ignore-scripts for dev to preserve URL injection (skip prepublishOnly rebuild)
+        run: |
+          if [ "${{ steps.version.outputs.branch }}" = "dev" ]; then
+            npm publish --tag ${{ steps.version.outputs.tag }} --access public --ignore-scripts
+          else
+            npm publish --tag ${{ steps.version.outputs.tag }} --access public
+          fi
 
       - name: Comment on PR with install instructions
         if: steps.version.outputs.skip_publish == 'false' && steps.version.outputs.pr_number != ''
