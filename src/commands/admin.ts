@@ -1017,7 +1017,11 @@ After Approval:
     console.log("  1. Check CI (deploy if missing, verify passing)");
     console.log("  2. Make repository public");
     console.log("  3. Enable tag protection (prevents version manipulation)");
-    console.log(options.sandbox ? "  4. Create concept DOI (SANDBOX - for testing)" : "  4. Create concept DOI (if needed)");
+    console.log(
+      options.sandbox
+        ? "  4. Create concept DOI (SANDBOX - for testing)"
+        : "  4. Create concept DOI (if needed)",
+    );
     console.log("  5. Apply S3 Object Lock");
     console.log("  6. Notify user");
     console.log();
