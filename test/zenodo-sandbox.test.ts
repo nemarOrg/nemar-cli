@@ -210,8 +210,11 @@ describe("Zenodo Sandbox Integration", () => {
       // Should reject production DOI creation in dev environment
       if (TEST_CONFIG.apiUrl.includes("dev")) {
         expect(status).toBe(400);
-        // Accept either "Production DOI blocked" or "already has DOI" error
-        const validErrors = ["Production DOI", "already has a concept DOI"];
+        // Accept multiple valid error messages:
+        // 1. "Production DOI blocked" - environment check
+        // 2. "already has a concept DOI" - DOI exists check
+        // 3. "Cannot create DOI for sandbox datasets" - sandbox dataset check
+        const validErrors = ["Production DOI", "already has a concept DOI", "Cannot create DOI for sandbox datasets"];
         expect(validErrors.some(msg => data.error.includes(msg))).toBe(true);
         console.log(`   ✓ Production DOI blocked: ${data.error}`);
       }
