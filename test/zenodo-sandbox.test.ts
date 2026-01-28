@@ -484,7 +484,7 @@ describe("Zenodo Sandbox Integration", () => {
   });
 
   describe("Error Handling (Sandbox)", () => {
-    test("rejects invalid API token (401)", async () => {
+    test("rejects invalid API token", async () => {
       if (!SHOULD_RUN) {
         console.log("   Skipping: RUN_ZENODO_TESTS not set");
         return;
@@ -498,8 +498,9 @@ describe("Zenodo Sandbox Integration", () => {
         },
       });
 
-      expect(response.status).toBe(401);
-      console.log("   ✓ Invalid token rejected with 401");
+      // Zenodo returns 401 or 403 for invalid tokens
+      expect([401, 403]).toContain(response.status);
+      console.log(`   ✓ Invalid token rejected with ${response.status}`);
     });
 
     test("rejects invalid deposition ID (404)", async () => {
