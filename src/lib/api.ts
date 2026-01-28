@@ -27,6 +27,10 @@ export class ApiError extends Error {
  * Get the API base URL from config or default
  */
 function getApiUrl(): string {
+  // Allow TEST_API_URL environment variable to override for testing
+  if (process.env.TEST_API_URL) {
+    return process.env.TEST_API_URL;
+  }
   const config = getConfig();
   return config.apiUrl || DEFAULT_API_URL;
 }

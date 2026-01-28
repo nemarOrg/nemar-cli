@@ -259,11 +259,11 @@ datasetRoutes.post("/", authMiddleware, zValidator("json", createDatasetSchema),
   await db
     .prepare(
       `
-    INSERT INTO datasets (dataset_id, name, description, owner_user_id, github_repo, is_sandbox)
-    VALUES (?, ?, ?, ?, ?, ?)
+    INSERT INTO datasets (dataset_id, name, description, owner_user_id, github_repo, is_sandbox, visibility)
+    VALUES (?, ?, ?, ?, ?, ?, ?)
   `,
     )
-    .bind(datasetId, name, description || null, user.id, githubRepo.full_name, sandbox ? 1 : 0)
+    .bind(datasetId, name, description || null, user.id, githubRepo.full_name, sandbox ? 1 : 0, 'private')
     .run();
 
   // Audit log

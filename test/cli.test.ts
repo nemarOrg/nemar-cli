@@ -569,15 +569,19 @@ describe("CLI Dataset List", () => {
     const { stdout, exitCode } = await runCli(["dataset", "list", "--help"]);
 
     expect(exitCode).toBe(0);
-    expect(stdout).toContain("List available datasets");
+    expect(stdout).toContain("List publicly available datasets");
     expect(stdout).toContain("--mine");
     expect(stdout).toContain("--json");
     expect(stdout).toContain("--limit");
   });
 
   test("nemar dataset list shows datasets", async () => {
-    const { stdout, exitCode } = await runCli(["dataset", "list"]);
+    const { stdout, stderr, exitCode } = await runCli(["dataset", "list"]);
 
+    if (exitCode !== 0) {
+      console.log("STDOUT:", stdout);
+      console.log("STDERR:", stderr);
+    }
     expect(exitCode).toBe(0);
     // Either shows datasets or "No datasets found"
     expect(stdout.includes("Datasets") || stdout.includes("No datasets found")).toBe(true);
