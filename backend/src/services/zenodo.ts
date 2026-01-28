@@ -106,8 +106,14 @@ export async function createDeposition(
   });
 
   if (!response.ok) {
-    const error = (await response.json()) as ZenodoError;
-    throw new Error(`Zenodo API error: ${error.message || response.statusText}`);
+    const contentType = response.headers.get("content-type");
+    if (contentType?.includes("application/json")) {
+      const error = (await response.json()) as ZenodoError;
+      throw new Error(`Zenodo API error: ${error.message || response.statusText}`);
+    } else {
+      const text = await response.text();
+      throw new Error(`Zenodo API error (${response.status}): ${text.substring(0, 200)}`);
+    }
   }
 
   return response.json() as Promise<ZenodoDeposition>;
@@ -137,8 +143,14 @@ export async function uploadFile(
   });
 
   if (!response.ok) {
-    const error = (await response.json()) as ZenodoError;
-    throw new Error(`Zenodo upload error: ${error.message || response.statusText}`);
+    const contentType = response.headers.get("content-type");
+    if (contentType?.includes("application/json")) {
+      const error = (await response.json()) as ZenodoError;
+      throw new Error(`Zenodo upload error: ${error.message || response.statusText}`);
+    } else {
+      const text = await response.text();
+      throw new Error(`Zenodo upload error (${response.status}): ${text.substring(0, 200)}`);
+    }
   }
 
   return response.json() as Promise<{ checksum: string; filename: string; filesize: number }>;
@@ -189,8 +201,14 @@ export async function getDeposition(
   });
 
   if (!response.ok) {
-    const error = (await response.json()) as ZenodoError;
-    throw new Error(`Zenodo API error: ${error.message || response.statusText}`);
+    const contentType = response.headers.get("content-type");
+    if (contentType?.includes("application/json")) {
+      const error = (await response.json()) as ZenodoError;
+      throw new Error(`Zenodo API error: ${error.message || response.statusText}`);
+    } else {
+      const text = await response.text();
+      throw new Error(`Zenodo API error (${response.status}): ${text.substring(0, 200)}`);
+    }
   }
 
   return response.json() as Promise<ZenodoDeposition>;
