@@ -983,11 +983,12 @@ adminRoutes.post(
       UPDATE datasets
       SET concept_doi = ?,
           zenodo_concept_id = ?,
+          is_sandbox = ?,
           updated_at = datetime('now')
       WHERE dataset_id = ?
     `,
         )
-        .bind(conceptDoi, deposition.id.toString(), datasetId)
+        .bind(conceptDoi, deposition.id.toString(), body.sandbox ? 1 : 0, datasetId)
         .run();
 
       // Audit log
@@ -2065,9 +2066,9 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
         if (conceptDoi) {
           await db
             .prepare(
-              "UPDATE datasets SET concept_doi = ?, zenodo_concept_id = ?, updated_at = datetime('now') WHERE dataset_id = ?",
+              "UPDATE datasets SET concept_doi = ?, zenodo_concept_id = ?, is_sandbox = ?, updated_at = datetime('now') WHERE dataset_id = ?",
             )
-            .bind(conceptDoi, deposition.id.toString(), datasetId)
+            .bind(conceptDoi, deposition.id.toString(), sandbox ? 1 : 0, datasetId)
             .run();
         }
       }
