@@ -957,13 +957,14 @@ export async function denyPublication(
 export async function approvePublication(
   datasetId: string,
   resume = false,
+  sandbox = false,
 ): Promise<PublishApproveResponse> {
   return request<PublishApproveResponse>(
     `/admin/publish/${datasetId}/approve`,
     {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ resume }),
+      body: JSON.stringify({ resume, sandbox }),
     },
     true,
   );

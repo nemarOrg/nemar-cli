@@ -967,6 +967,7 @@ publishCommand
   .description("Approve and publish a dataset (runs orchestrator)")
   .argument("<dataset-id>", "Dataset ID")
   .option("--resume", "Resume from last failed step")
+  .option("--sandbox", "Use Zenodo sandbox for testing")
   .option(YES_OPTION, YES_DESCRIPTION)
   .option(NO_OPTION, NO_DESCRIPTION)
   .addHelpText(
@@ -1005,7 +1006,7 @@ After Approval:
   - Tags are protected (prevents version manipulation)
   - Data is protected by S3 Object Lock`,
   )
-  .action(async (datasetId, options: ConfirmOptions & { resume?: boolean }) => {
+  .action(async (datasetId, options: ConfirmOptions & { resume?: boolean; sandbox?: boolean }) => {
     if (!requireAuth()) return;
 
     const action = options.resume
@@ -1016,10 +1017,22 @@ After Approval:
     console.log("  1. Check CI (deploy if missing, verify passing)");
     console.log("  2. Make repository public");
     console.log("  3. Enable tag protection (prevents version manipulation)");
-    console.log("  4. Create concept DOI (if needed)");
+    console.log(options.sandbox ? "  4. Create concept DOI (SANDBOX - for testing)" : "  4. Create concept DOI (if needed)");
     console.log("  5. Apply S3 Object Lock");
     console.log("  6. Notify user");
     console.log();
+
+    // Sandbox warning
+    if (options.sandbox) {
+      console.log(chalk.yellow("━".repeat(60)));
+      console.log(chalk.yellow.bold("                 SANDBOX MODE ENABLED"));
+      console.log(chalk.yellow("━".repeat(60)));
+      console.log(chalk.yellow("  • DOI will be created on sandbox.zenodo.org"));
+      console.log(chalk.yellow("  • DOI will NOT be indexed by DataCite"));
+      console.log(chalk.yellow("  • Use this for testing workflows only"));
+      console.log(chalk.yellow("━".repeat(60)));
+      console.log();
+    }
 
     const confirmResult = await confirm(`${action}?`, options);
     if (confirmResult !== "confirmed") {
@@ -1030,7 +1043,7 @@ After Approval:
     const spinner = ora("Running publication workflow...").start();
 
     try {
-      const result = await approvePublication(datasetId, !!options.resume);
+      const result = await approvePublication(datasetId, !!options.resume, !!options.sandbox);
       spinner.succeed(result.message);
 
       if (result.steps_completed) {

@@ -1719,11 +1719,12 @@ adminRoutes.post("/publish/:id/deny", zValidator("json", denySchema), async (c) 
  */
 const approveSchema = z.object({
   resume: z.boolean().optional().default(false),
+  sandbox: z.boolean().optional().default(false),
 });
 
 adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), async (c) => {
   const datasetId = c.req.param("id");
-  const { resume } = c.req.valid("json");
+  const { resume, sandbox } = c.req.valid("json");
   const adminUser = c.get("user");
   const db = c.env.DB;
 
@@ -1986,12 +1987,12 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
         const { createDeposition: createDep, getPrereservedDoi: getDoi } = await import(
           "../services/zenodo"
         );
-        const zenodoToken = c.env.ZENODO_API_KEY;
+        const zenodoToken = sandbox ? c.env.ZENODO_SANDBOX_API_KEY : c.env.ZENODO_API_KEY;
         if (!zenodoToken) {
-          await updateProgress("doi_create", "Zenodo API key not configured");
+          await updateProgress("doi_create", `Zenodo ${sandbox ? "sandbox " : ""}API key not configured`);
           return c.json(
             {
-              error: "Zenodo API key not configured",
+              error: `Zenodo ${sandbox ? "sandbox " : ""}API key not configured`,
               step: "doi_create",
               steps_completed: completed,
             },
@@ -2014,7 +2015,7 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
           ],
         };
 
-        const deposition = await createDep(metadata, zenodoToken, false);
+        const deposition = await createDep(metadata, zenodoToken, sandbox);
         const conceptDoi = getDoi(deposition);
 
         if (conceptDoi) {
