@@ -764,7 +764,37 @@ export async function applyTagProtection(repo: string, pat: string): Promise<boo
 }
 
 /**
- * Create a git tag on a repository
+ * Get the latest commit SHA on a branch.
+ *
+ * @param repo Repository name (e.g., "nm000123")
+ * @param branch Branch name (e.g., "main")
+ * @param pat GitHub PAT
+ * @returns 40-character commit SHA
+ * @throws {Error} If the branch ref cannot be resolved
+ */
+export async function getMainBranchSha(repo: string, branch: string, pat: string): Promise<string> {
+  const response = await fetch(`${GITHUB_API}/repos/${ORG_NAME}/${repo}/git/ref/heads/${branch}`, {
+    headers: {
+      Authorization: `Bearer ${pat}`,
+      Accept: "application/vnd.github.v3+json",
+      "User-Agent": "NEMAR-API",
+    },
+  });
+
+  if (!response.ok) {
+    const error = await response.text();
+    throw new Error(`Failed to get ${branch} branch ref: ${error}`);
+  }
+
+  const refData = (await response.json()) as { object: { sha: string } };
+  if (!refData.object?.sha) {
+    throw new Error(`Unexpected response format for ${branch} branch ref`);
+  }
+  return refData.object.sha;
+}
+
+/**
+ * Create a git tag on a repository.
  *
  * @param repo Repository name (e.g., "nm000123")
  * @param tag Tag name (e.g., "v1.0.0")
@@ -772,6 +802,7 @@ export async function applyTagProtection(repo: string, pat: string): Promise<boo
  * @param message Tag message/annotation
  * @param pat GitHub PAT
  * @returns Tag SHA if successful
+ * @throws {Error} If tag object or reference creation fails
  */
 export async function createTag(
   repo: string,
@@ -820,6 +851,10 @@ export async function createTag(
   });
 
   if (!refResponse.ok) {
+    // 422 means the tag reference already exists; treat as success for idempotent re-runs
+    if (refResponse.status === 422) {
+      return tagData.sha;
+    }
     const error = await refResponse.text();
     throw new Error(`Failed to create tag reference: ${error}`);
   }
@@ -828,7 +863,7 @@ export async function createTag(
 }
 
 /**
- * Create a GitHub release from a tag
+ * Create a GitHub release from a tag.
  *
  * @param repo Repository name (e.g., "nm000123")
  * @param tag Tag name (e.g., "v1.0.0")
@@ -836,6 +871,7 @@ export async function createTag(
  * @param body Release notes/description
  * @param pat GitHub PAT
  * @returns Release ID if successful
+ * @throws {Error} If release creation fails (except for already-existing releases)
  */
 export async function createRelease(
   repo: string,
@@ -862,6 +898,20 @@ export async function createRelease(
   });
 
   if (!response.ok) {
+    // 422 means release already exists for this tag; fetch the existing one
+    if (response.status === 422) {
+      const existing = await fetch(`${GITHUB_API}/repos/${ORG_NAME}/${repo}/releases/tags/${tag}`, {
+        headers: {
+          Authorization: `Bearer ${pat}`,
+          Accept: "application/vnd.github.v3+json",
+          "User-Agent": "NEMAR-API",
+        },
+      });
+      if (existing.ok) {
+        const existingData = (await existing.json()) as { id: number };
+        return existingData.id;
+      }
+    }
     const error = await response.text();
     throw new Error(`Failed to create release: ${error}`);
   }
@@ -871,19 +921,21 @@ export async function createRelease(
 }
 
 /**
- * Download the GitHub-generated source archive (zipball) for a release
+ * Download a repository source archive (zipball) at a given git ref.
+ * Uses the repository archive endpoint, not the releases API.
  *
  * @param repo Repository name (e.g., "nm000123")
- * @param tag Tag name (e.g., "v1.0.0")
+ * @param ref Git ref to archive (tag, branch, or SHA; e.g., "v1.0.0")
  * @param pat GitHub PAT
  * @returns ArrayBuffer containing the zip file
+ * @throws {Error} If download fails or archive exceeds 100MB
  */
 export async function downloadReleaseArchive(
   repo: string,
-  tag: string,
+  ref: string,
   pat: string,
 ): Promise<ArrayBuffer> {
-  const response = await fetch(`${GITHUB_API}/repos/${ORG_NAME}/${repo}/zipball/${tag}`, {
+  const response = await fetch(`${GITHUB_API}/repos/${ORG_NAME}/${repo}/zipball/${ref}`, {
     method: "GET",
     headers: {
       Authorization: `Bearer ${pat}`,
@@ -894,7 +946,19 @@ export async function downloadReleaseArchive(
 
   if (!response.ok) {
     const error = await response.text();
-    throw new Error(`Failed to download release archive: ${error}`);
+    throw new Error(`Failed to download archive for ${ref}: ${error}`);
+  }
+
+  // Validate content-type to catch HTML error pages returned with 200
+  const contentType = response.headers.get("content-type") || "";
+  if (contentType.includes("text/html")) {
+    throw new Error(`Expected zip archive but received HTML response for ${ref}`);
+  }
+
+  // Guard against exceeding CF Worker memory limits (128MB)
+  const contentLength = response.headers.get("content-length");
+  if (contentLength && Number.parseInt(contentLength, 10) > 100 * 1024 * 1024) {
+    throw new Error(`Archive for ${ref} exceeds 100MB (${contentLength} bytes); too large for Worker environment`);
   }
 
   return response.arrayBuffer();

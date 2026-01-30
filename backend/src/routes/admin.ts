@@ -17,7 +17,14 @@ import {
 import { decrypt, encrypt } from "../services/encryption";
 import {
   checkWorkflowExists,
+  createOrUpdateFile,
+  createRelease,
+  createTag,
   deployWorkflows,
+  downloadReleaseArchive,
+  getBlobContent,
+  getMainBranchSha,
+  getTreeAtRef,
   getWorkflowRuns,
   removeCollaborator,
   setRepoVisibility,
@@ -41,8 +48,23 @@ import {
 } from "../services/zenodo";
 import type { Bindings, Variables } from "../types/bindings";
 
-const GITHUB_API = "https://api.github.com";
-const ORG_NAME = "nemarDatasets";
+/**
+ * Valid publication workflow step names.
+ * Steps execute in this order; completed steps are skipped on resume.
+ */
+type PublicationStep =
+  | "ci_check"
+  | "repo_public"
+  | "tag_protect"
+  | "doi_create"
+  | "update_metadata"
+  | "update_readme"
+  | "create_tag"
+  | "create_release"
+  | "upload_to_zenodo"
+  | "publish_doi"
+  | "s3_lock"
+  | "notify_user";
 
 export const adminRoutes = new Hono<{ Bindings: Bindings; Variables: Variables }>();
 
@@ -1746,21 +1768,21 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
     return c.json({ error: "No active publication request found" }, 404);
   }
 
-  const stepsCompleted: string[] = resume ? JSON.parse(request.steps_completed || "[]") : [];
-  const allSteps = [
+  const stepsCompleted: PublicationStep[] = resume ? JSON.parse(request.steps_completed || "[]") : [];
+  const allSteps: readonly PublicationStep[] = [
     "ci_check",
     "repo_public",
     "tag_protect",
     "doi_create",
-    "update_metadata",  // Update dataset_description.json with DOI
-    "update_readme",    // Update README.md with DOI badge
-    "create_tag",       // Create git tag for version
-    "create_release",   // Create GitHub release
-    "upload_to_zenodo", // Upload release archive to Zenodo
-    "publish_doi",      // Publish DOI (permanent!)
+    "update_metadata",
+    "update_readme",
+    "create_tag",
+    "create_release",
+    "upload_to_zenodo",
+    "publish_doi",      // Permanent and irreversible!
     "s3_lock",
     "notify_user",
-  ];
+  ] as const;
   const stepsToRun = allSteps.filter((s) => !stepsCompleted.includes(s));
 
   if (stepsToRun.length === 0) {
@@ -1825,22 +1847,27 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
   }
 
   const pat = c.env.GITHUB_ADMIN_PAT;
-  const completed: string[] = [...stepsCompleted];
+  const completed: PublicationStep[] = [...stepsCompleted];
   const requestId = request.id;
 
-  // Helper to update progress in D1
-  async function updateProgress(step: string, error?: string) {
+  // Helper to update progress in D1. Catches its own errors to avoid
+  // masking the original failure when called inside catch blocks.
+  async function updateProgress(step: PublicationStep, error?: string) {
     if (!error) {
       completed.push(step);
     }
-    await db
-      .prepare(
-        `UPDATE publication_requests
-         SET steps_completed = ?, current_step = ?, last_error = ?, updated_at = datetime('now')
-         WHERE id = ?`,
-      )
-      .bind(JSON.stringify(completed), error ? step : null, error || null, requestId)
-      .run();
+    try {
+      await db
+        .prepare(
+          `UPDATE publication_requests
+           SET steps_completed = ?, current_step = ?, last_error = ?, updated_at = datetime('now')
+           WHERE id = ?`,
+        )
+        .bind(JSON.stringify(completed), error ? step : null, error || null, requestId)
+        .run();
+    } catch (dbErr) {
+      console.error(`[publish] CRITICAL: Failed to update progress for step ${step}, dataset ${datasetId}:`, dbErr);
+    }
   }
 
   // Step 1: CI Check
@@ -2095,6 +2122,83 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
     }
   }
 
+  // --- Helper: read dataset_description.json from repo ---
+  async function readDatasetDescription(stepName: PublicationStep): Promise<Record<string, unknown> | Response> {
+    const tree = await getTreeAtRef(repoName, "main", pat);
+    const descFile = tree.find((f) => f.path === "dataset_description.json");
+    if (!descFile) {
+      await updateProgress(stepName, "dataset_description.json not found in repo");
+      return c.json(
+        { error: "dataset_description.json not found in repository", step: stepName, steps_completed: completed },
+        500,
+      );
+    }
+    const content = await getBlobContent(repoName, descFile.sha, pat);
+    try {
+      return JSON.parse(content) as Record<string, unknown>;
+    } catch (parseErr) {
+      const parseMsg = `dataset_description.json contains invalid JSON: ${parseErr instanceof Error ? parseErr.message : String(parseErr)}`;
+      console.error(`[publish] ${parseMsg} for ${repoName}. Content starts with: ${content.substring(0, 200)}`);
+      await updateProgress(stepName, parseMsg);
+      return c.json({ error: parseMsg, step: stepName, steps_completed: completed }, 500);
+    }
+  }
+
+  // --- Helper: get concept DOI from database ---
+  async function getConceptDoi(stepName: PublicationStep): Promise<string | Response> {
+    const row = await db
+      .prepare("SELECT concept_doi FROM datasets WHERE dataset_id = ?")
+      .bind(datasetId)
+      .first<{ concept_doi: string | null }>();
+    if (!row?.concept_doi) {
+      await updateProgress(stepName, "No concept DOI found");
+      return c.json({ error: `Cannot run ${stepName}: no concept DOI found`, step: stepName, steps_completed: completed }, 500);
+    }
+    return row.concept_doi;
+  }
+
+  // --- Helper: get Zenodo config from database ---
+  async function getZenodoConfig(stepName: PublicationStep): Promise<{ depositionId: number; token: string; isSandbox: boolean } | Response> {
+    const row = await db
+      .prepare("SELECT zenodo_concept_id, is_sandbox FROM datasets WHERE dataset_id = ?")
+      .bind(datasetId)
+      .first<{ zenodo_concept_id: string | null; is_sandbox: number | null }>();
+    if (!row?.zenodo_concept_id) {
+      await updateProgress(stepName, "No Zenodo deposition found");
+      return c.json({ error: "No Zenodo deposition ID found", step: stepName, steps_completed: completed }, 500);
+    }
+    const depositionId = Number.parseInt(row.zenodo_concept_id, 10);
+    if (Number.isNaN(depositionId)) {
+      const msg = `Invalid Zenodo deposition ID: ${row.zenodo_concept_id}`;
+      console.error(`[publish] ${msg} for dataset ${datasetId}`);
+      await updateProgress(stepName, msg);
+      return c.json({ error: msg, step: stepName, steps_completed: completed }, 500);
+    }
+    const isSandbox = row.is_sandbox === 1;
+    const token = isSandbox ? c.env.ZENODO_SANDBOX_API_KEY : c.env.ZENODO_API_KEY;
+    if (!token) {
+      const msg = isSandbox ? "Zenodo sandbox API key not configured" : "Zenodo API key not configured";
+      await updateProgress(stepName, msg);
+      return c.json({ error: msg, step: stepName, steps_completed: completed }, 500);
+    }
+    return { depositionId, token, isSandbox };
+  }
+
+  // --- Helper: get version and tag from dataset_description.json ---
+  async function getVersionTag(stepName: PublicationStep): Promise<{ version: string; tag: string; datasetDesc: Record<string, unknown> } | Response> {
+    const result = await readDatasetDescription(stepName);
+    if (result instanceof Response) return result;
+    const datasetDesc = result;
+    if (!datasetDesc.Version) {
+      const msg = "dataset_description.json has no Version field; cannot create version tag for permanent DOI record";
+      console.warn(`[publish] ${msg} for ${repoName}`);
+      await updateProgress(stepName, msg);
+      return c.json({ error: msg, step: stepName, steps_completed: completed }, 500);
+    }
+    const version = String(datasetDesc.Version);
+    return { version, tag: `v${version}`, datasetDesc };
+  }
+
   // Step: update_metadata - Update dataset_description.json with DOI
   if (stepsToRun.includes("update_metadata")) {
     try {
@@ -2105,51 +2209,17 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
         .bind(request.id)
         .run();
 
-      // Re-read dataset to get latest concept_doi
-      const updatedDataset = await db
-        .prepare("SELECT concept_doi FROM datasets WHERE dataset_id = ?")
-        .bind(datasetId)
-        .first<{ concept_doi: string | null }>();
+      // Get concept DOI (set by the doi_create step above)
+      const doiResult = await getConceptDoi("update_metadata");
+      if (doiResult instanceof Response) return doiResult;
+      const conceptDoi = doiResult;
 
-      if (!updatedDataset?.concept_doi) {
-        await updateProgress("update_metadata", "No concept DOI found");
-        return c.json(
-          {
-            error: "Cannot update metadata: no concept DOI found",
-            step: "update_metadata",
-            steps_completed: completed,
-          },
-          500,
-        );
-      }
+      const descResult = await readDatasetDescription("update_metadata");
+      if (descResult instanceof Response) return descResult;
+      const datasetDesc = descResult;
 
-      const conceptDoi = updatedDataset.concept_doi;
-
-      // Get current dataset_description.json from main branch
-      const { getTreeAtRef, getBlobContent, createOrUpdateFile } = await import("../services/github");
-      const tree = await getTreeAtRef(repoName, "main", pat);
-      const descFile = tree.find((f) => f.path === "dataset_description.json");
-
-      if (!descFile) {
-        await updateProgress("update_metadata", "dataset_description.json not found in repo");
-        return c.json(
-          {
-            error: "dataset_description.json not found in repository",
-            step: "update_metadata",
-            steps_completed: completed,
-          },
-          500,
-        );
-      }
-
-      // Get current content
-      const currentContent = await getBlobContent(repoName, descFile.sha, pat);
-      const datasetDesc = JSON.parse(currentContent);
-
-      // Update DatasetDOI field
       datasetDesc.DatasetDOI = conceptDoi;
 
-      // Commit updated file
       await createOrUpdateFile(
         repoName,
         "dataset_description.json",
@@ -2161,13 +2231,10 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
       await updateProgress("update_metadata");
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
+      console.error(`[publish] update_metadata failed for dataset ${datasetId}:`, err);
       await updateProgress("update_metadata", msg);
       return c.json(
-        {
-          error: `Metadata update failed: ${msg}`,
-          step: "update_metadata",
-          steps_completed: completed,
-        },
+        { error: `Metadata update failed: ${msg}`, step: "update_metadata", steps_completed: completed },
         500,
       );
     }
@@ -2183,45 +2250,28 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
         .bind(request.id)
         .run();
 
-      // Re-read dataset to get latest concept_doi
-      const updatedDataset = await db
-        .prepare("SELECT concept_doi FROM datasets WHERE dataset_id = ?")
-        .bind(datasetId)
-        .first<{ concept_doi: string | null }>();
-
-      if (!updatedDataset?.concept_doi) {
-        await updateProgress("update_readme", "No concept DOI found");
-        return c.json(
-          {
-            error: "Cannot update README: no concept DOI found",
-            step: "update_readme",
-            steps_completed: completed,
-          },
-          500,
-        );
-      }
-
-      const conceptDoi = updatedDataset.concept_doi;
+      const doiResult = await getConceptDoi("update_readme");
+      if (doiResult instanceof Response) return doiResult;
+      const conceptDoi = doiResult;
       const doiUrl = `https://doi.org/${conceptDoi}`;
       const doiBadge = `[![DOI](https://zenodo.org/badge/DOI/${conceptDoi}.svg)](${doiUrl})`;
 
-      // Get current README.md from main branch
-      const { getTreeAtRef, getBlobContent, createOrUpdateFile } = await import("../services/github");
       const tree = await getTreeAtRef(repoName, "main", pat);
       const readmeFile = tree.find((f) => f.path === "README.md");
 
       let readmeContent = "";
       if (readmeFile) {
         readmeContent = await getBlobContent(repoName, readmeFile.sha, pat);
+      } else {
+        console.warn(`[publish] No README.md found in ${repoName}; creating one with DOI badge`);
       }
 
-      // Add DOI badge if not present
+      // Add DOI badge if no Zenodo badge exists yet.
+      // Note: does not update an existing badge if the DOI changed.
       if (!readmeContent.includes("zenodo.org/badge/DOI")) {
-        // Add badge at the top of README
         readmeContent = `${doiBadge}\n\n${readmeContent}`;
       }
 
-      // Commit updated file
       await createOrUpdateFile(
         repoName,
         "README.md",
@@ -2233,6 +2283,7 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
       await updateProgress("update_readme");
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
+      console.error(`[publish] update_readme failed for dataset ${datasetId}:`, err);
       await updateProgress("update_readme", msg);
       return c.json(
         { error: `README update failed: ${msg}`, step: "update_readme", steps_completed: completed },
@@ -2251,45 +2302,12 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
         .bind(request.id)
         .run();
 
-      // Get version from dataset_description.json
-      const { getTreeAtRef, getBlobContent, createTag } = await import("../services/github");
-      const tree = await getTreeAtRef(repoName, "main", pat);
-      const descFile = tree.find((f) => f.path === "dataset_description.json");
+      const vtResult = await getVersionTag("create_tag");
+      if (vtResult instanceof Response) return vtResult;
+      const { tag, datasetDesc } = vtResult;
 
-      if (!descFile) {
-        await updateProgress("create_tag", "dataset_description.json not found");
-        return c.json(
-          {
-            error: "dataset_description.json not found",
-            step: "create_tag",
-            steps_completed: completed,
-          },
-          500,
-        );
-      }
+      const commitSha = await getMainBranchSha(repoName, "main", pat);
 
-      const currentContent = await getBlobContent(repoName, descFile.sha, pat);
-      const datasetDesc = JSON.parse(currentContent);
-      const version = datasetDesc.Version || "1.0.0";
-      const tag = `v${version}`;
-
-      // Get latest commit SHA on main branch
-      const refResponse = await fetch(`${GITHUB_API}/repos/${ORG_NAME}/${repoName}/git/ref/heads/main`, {
-        headers: {
-          Authorization: `Bearer ${pat}`,
-          Accept: "application/vnd.github.v3+json",
-          "User-Agent": "NEMAR-API",
-        },
-      });
-
-      if (!refResponse.ok) {
-        throw new Error("Failed to get main branch ref");
-      }
-
-      const refData = (await refResponse.json()) as { object: { sha: string } };
-      const commitSha = refData.object.sha;
-
-      // Create annotated tag
       await createTag(
         repoName,
         tag,
@@ -2301,6 +2319,7 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
       await updateProgress("create_tag");
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
+      console.error(`[publish] create_tag failed for dataset ${datasetId}:`, err);
       await updateProgress("create_tag", msg);
       return c.json(
         { error: `Tag creation failed: ${msg}`, step: "create_tag", steps_completed: completed },
@@ -2319,30 +2338,11 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
         .bind(request.id)
         .run();
 
-      // Get version and DOI
-      const { getTreeAtRef, getBlobContent, createRelease } = await import("../services/github");
-      const tree = await getTreeAtRef(repoName, "main", pat);
-      const descFile = tree.find((f) => f.path === "dataset_description.json");
+      const vtResult = await getVersionTag("create_release");
+      if (vtResult instanceof Response) return vtResult;
+      const { version, tag, datasetDesc } = vtResult;
 
-      if (!descFile) {
-        await updateProgress("create_release", "dataset_description.json not found");
-        return c.json(
-          {
-            error: "dataset_description.json not found",
-            step: "create_release",
-            steps_completed: completed,
-          },
-          500,
-        );
-      }
-
-      const currentContent = await getBlobContent(repoName, descFile.sha, pat);
-      const datasetDesc = JSON.parse(currentContent);
-      const version = datasetDesc.Version || "1.0.0";
-      const tag = `v${version}`;
       const doiInfo = datasetDesc.DatasetDOI ? `DOI: ${datasetDesc.DatasetDOI}` : "";
-
-      // Create release
       const releaseBody = `# ${dataset.name} - Version ${version}\n\n${doiInfo}\n\nBIDS-formatted dataset published via NEMAR.`;
 
       await createRelease(
@@ -2356,13 +2356,10 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
       await updateProgress("create_release");
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
+      console.error(`[publish] create_release failed for dataset ${datasetId}:`, err);
       await updateProgress("create_release", msg);
       return c.json(
-        {
-          error: `Release creation failed: ${msg}`,
-          step: "create_release",
-          steps_completed: completed,
-        },
+        { error: `Release creation failed: ${msg}`, step: "create_release", steps_completed: completed },
         500,
       );
     }
@@ -2378,109 +2375,42 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
         .bind(request.id)
         .run();
 
-      // Get version for tag
-      const { getTreeAtRef, getBlobContent, downloadReleaseArchive } = await import("../services/github");
-      const tree = await getTreeAtRef(repoName, "main", pat);
-      const descFile = tree.find((f) => f.path === "dataset_description.json");
+      const vtResult = await getVersionTag("upload_to_zenodo");
+      if (vtResult instanceof Response) return vtResult;
+      const { tag } = vtResult;
 
-      if (!descFile) {
-        await updateProgress("upload_to_zenodo", "dataset_description.json not found");
-        return c.json(
-          {
-            error: "dataset_description.json not found",
-            step: "upload_to_zenodo",
-            steps_completed: completed,
-          },
-          500,
-        );
-      }
-
-      const currentContent = await getBlobContent(repoName, descFile.sha, pat);
-      const datasetDesc = JSON.parse(currentContent);
-      const version = datasetDesc.Version || "1.0.0";
-      const tag = `v${version}`;
-
-      // Download GitHub release archive
       const archiveData = await downloadReleaseArchive(repoName, tag, pat);
 
-      // Get Zenodo deposition ID
-      const zenodoDataset = await db
-        .prepare("SELECT zenodo_concept_id, is_sandbox FROM datasets WHERE dataset_id = ?")
-        .bind(datasetId)
-        .first<{ zenodo_concept_id: string | null; is_sandbox: number | null }>();
+      const zenodoResult = await getZenodoConfig("upload_to_zenodo");
+      if (zenodoResult instanceof Response) return zenodoResult;
+      const { depositionId, token: zenodoToken, isSandbox } = zenodoResult;
 
-      if (!zenodoDataset?.zenodo_concept_id) {
-        await updateProgress("upload_to_zenodo", "No Zenodo deposition found");
-        return c.json(
-          {
-            error: "No Zenodo deposition ID found",
-            step: "upload_to_zenodo",
-            steps_completed: completed,
-          },
-          500,
-        );
-      }
-
-      const isSandbox = zenodoDataset.is_sandbox === 1;
-      const zenodoToken = isSandbox ? c.env.ZENODO_SANDBOX_API_KEY : c.env.ZENODO_API_KEY;
-
-      if (!zenodoToken) {
-        const errorMsg = isSandbox ? "Zenodo sandbox API key not configured" : "Zenodo API key not configured";
-        await updateProgress("upload_to_zenodo", errorMsg);
-        return c.json(
-          {
-            error: errorMsg,
-            step: "upload_to_zenodo",
-            steps_completed: completed,
-          },
-          500,
-        );
-      }
-
-      // Get deposition to access bucket URL
-      const { uploadFile, getDeposition } = await import("../services/zenodo");
-      const depositionId = Number.parseInt(zenodoDataset.zenodo_concept_id, 10);
       const deposition = await getDeposition(depositionId, zenodoToken, isSandbox);
 
       if (!deposition.links.bucket) {
         await updateProgress("upload_to_zenodo", "No bucket URL in deposition");
         return c.json(
-          {
-            error: "Zenodo deposition has no bucket URL",
-            step: "upload_to_zenodo",
-            steps_completed: completed,
-          },
+          { error: "Zenodo deposition has no bucket URL", step: "upload_to_zenodo", steps_completed: completed },
           500,
         );
       }
 
       const filename = `${datasetId}-${tag}.zip`;
-
-      await uploadFile(
-        depositionId,
-        deposition.links.bucket,
-        filename,
-        archiveData,
-        zenodoToken,
-        isSandbox,
-      );
+      await uploadFile(depositionId, deposition.links.bucket, filename, archiveData, zenodoToken, isSandbox);
 
       await updateProgress("upload_to_zenodo");
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
+      console.error(`[publish] upload_to_zenodo failed for dataset ${datasetId}:`, err);
       await updateProgress("upload_to_zenodo", msg);
       return c.json(
-        {
-          error: `Zenodo upload failed: ${msg}`,
-          step: "upload_to_zenodo",
-          steps_completed: completed,
-        },
+        { error: `Zenodo upload failed: ${msg}`, step: "upload_to_zenodo", steps_completed: completed },
         500,
       );
     }
   }
 
-  // Step: publish_doi - Publish DOI (permanent!)
+  // Step: publish_doi - Publish DOI (permanent and irreversible!)
   if (stepsToRun.includes("publish_doi")) {
     try {
       await db
@@ -2490,66 +2420,49 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
         .bind(request.id)
         .run();
 
-      // Get Zenodo deposition ID
-      const zenodoDataset = await db
-        .prepare("SELECT zenodo_concept_id, is_sandbox FROM datasets WHERE dataset_id = ?")
-        .bind(datasetId)
-        .first<{ zenodo_concept_id: string | null; is_sandbox: number | null }>();
+      const zenodoResult = await getZenodoConfig("publish_doi");
+      if (zenodoResult instanceof Response) return zenodoResult;
+      const { depositionId, token: zenodoToken, isSandbox } = zenodoResult;
 
-      if (!zenodoDataset?.zenodo_concept_id) {
-        await updateProgress("publish_doi", "No Zenodo deposition found");
-        return c.json(
-          {
-            error: "No Zenodo deposition ID found",
-            step: "publish_doi",
-            steps_completed: completed,
-          },
-          500,
-        );
-      }
+      // This is irreversible: once published, the DOI is permanent
+      const published = await publishDeposition(depositionId, zenodoToken, isSandbox);
 
-      const isSandbox = zenodoDataset.is_sandbox === 1;
-      const zenodoToken = isSandbox ? c.env.ZENODO_SANDBOX_API_KEY : c.env.ZENODO_API_KEY;
-
-      if (!zenodoToken) {
-        const errorMsg = isSandbox ? "Zenodo sandbox API key not configured" : "Zenodo API key not configured";
-        await updateProgress("publish_doi", errorMsg);
-        return c.json(
-          {
-            error: errorMsg,
-            step: "publish_doi",
-            steps_completed: completed,
-          },
-          500,
-        );
-      }
-
-      // Publish the deposition
-      const { publishDeposition } = await import("../services/zenodo");
-      const published = await publishDeposition(
-        Number.parseInt(zenodoDataset.zenodo_concept_id, 10),
-        zenodoToken,
-        isSandbox,
-      );
-
-      // Update database with published DOI
+      // After publish, Zenodo confirms the concept DOI; update the database record.
+      // The DB update is in its own try/catch because the DOI is already published at
+      // this point; a DB failure must not be reported as "DOI publication failed."
       if (published.doi) {
-        await db
-          .prepare("UPDATE datasets SET concept_doi = ?, updated_at = datetime('now') WHERE dataset_id = ?")
-          .bind(published.doi, datasetId)
-          .run();
+        try {
+          await db
+            .prepare("UPDATE datasets SET concept_doi = ?, updated_at = datetime('now') WHERE dataset_id = ?")
+            .bind(published.doi, datasetId)
+            .run();
+        } catch (dbErr) {
+          console.error(
+            `[publish] CRITICAL: DOI published on Zenodo (${published.doi}) but database update failed for ${datasetId}:`,
+            dbErr,
+          );
+          await updateProgress("publish_doi", `DOI published (${published.doi}) but DB update failed; manual correction required`);
+          return c.json(
+            {
+              error: `DOI was published successfully (${published.doi}) but database update failed. Manual database correction required.`,
+              published_doi: published.doi,
+              step: "publish_doi",
+              steps_completed: completed,
+            },
+            500,
+          );
+        }
+      } else {
+        console.error(`[publish] Zenodo publish returned no DOI for dataset ${datasetId}; response:`, published);
       }
 
       await updateProgress("publish_doi");
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
+      console.error(`[publish] publish_doi failed for dataset ${datasetId}:`, err);
       await updateProgress("publish_doi", msg);
       return c.json(
-        {
-          error: `DOI publication failed: ${msg}`,
-          step: "publish_doi",
-          steps_completed: completed,
-        },
+        { error: `DOI publication failed: ${msg}`, step: "publish_doi", steps_completed: completed },
         500,
       );
     }
