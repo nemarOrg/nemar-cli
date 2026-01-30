@@ -762,3 +762,204 @@ export async function applyTagProtection(repo: string, pat: string): Promise<boo
   console.error(`[tag-protection] Failed for ${repo}: HTTP ${response.status}`);
   return false;
 }
+
+/**
+ * Get the latest commit SHA on a branch.
+ *
+ * @param repo Repository name (e.g., "nm000123")
+ * @param branch Branch name (e.g., "main")
+ * @param pat GitHub PAT
+ * @returns 40-character commit SHA
+ * @throws {Error} If the branch ref cannot be resolved
+ */
+export async function getMainBranchSha(repo: string, branch: string, pat: string): Promise<string> {
+  const response = await fetch(`${GITHUB_API}/repos/${ORG_NAME}/${repo}/git/ref/heads/${branch}`, {
+    headers: {
+      Authorization: `Bearer ${pat}`,
+      Accept: "application/vnd.github.v3+json",
+      "User-Agent": "NEMAR-API",
+    },
+  });
+
+  if (!response.ok) {
+    const error = await response.text();
+    throw new Error(`Failed to get ${branch} branch ref: ${error}`);
+  }
+
+  const refData = (await response.json()) as { object: { sha: string } };
+  if (!refData.object?.sha) {
+    throw new Error(`Unexpected response format for ${branch} branch ref`);
+  }
+  return refData.object.sha;
+}
+
+/**
+ * Create a git tag on a repository.
+ *
+ * @param repo Repository name (e.g., "nm000123")
+ * @param tag Tag name (e.g., "v1.0.0")
+ * @param sha Commit SHA to tag
+ * @param message Tag message/annotation
+ * @param pat GitHub PAT
+ * @returns Tag SHA if successful
+ * @throws {Error} If tag object or reference creation fails
+ */
+export async function createTag(
+  repo: string,
+  tag: string,
+  sha: string,
+  message: string,
+  pat: string,
+): Promise<string> {
+  // First, create an annotated tag object
+  const tagResponse = await fetch(`${GITHUB_API}/repos/${ORG_NAME}/${repo}/git/tags`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${pat}`,
+      Accept: "application/vnd.github.v3+json",
+      "User-Agent": "NEMAR-API",
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      tag,
+      message,
+      object: sha,
+      type: "commit",
+    }),
+  });
+
+  if (!tagResponse.ok) {
+    const error = await tagResponse.text();
+    throw new Error(`Failed to create tag object: ${error}`);
+  }
+
+  const tagData = (await tagResponse.json()) as { sha: string };
+
+  // Then, create a reference to the tag
+  const refResponse = await fetch(`${GITHUB_API}/repos/${ORG_NAME}/${repo}/git/refs`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${pat}`,
+      Accept: "application/vnd.github.v3+json",
+      "User-Agent": "NEMAR-API",
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      ref: `refs/tags/${tag}`,
+      sha: tagData.sha,
+    }),
+  });
+
+  if (!refResponse.ok) {
+    // 422 means the tag reference already exists; treat as success for idempotent re-runs
+    if (refResponse.status === 422) {
+      return tagData.sha;
+    }
+    const error = await refResponse.text();
+    throw new Error(`Failed to create tag reference: ${error}`);
+  }
+
+  return tagData.sha;
+}
+
+/**
+ * Create a GitHub release from a tag.
+ *
+ * @param repo Repository name (e.g., "nm000123")
+ * @param tag Tag name (e.g., "v1.0.0")
+ * @param name Release name (e.g., "Dataset v1.0.0")
+ * @param body Release notes/description
+ * @param pat GitHub PAT
+ * @returns Release ID if successful
+ * @throws {Error} If release creation fails (except for already-existing releases)
+ */
+export async function createRelease(
+  repo: string,
+  tag: string,
+  name: string,
+  body: string,
+  pat: string,
+): Promise<number> {
+  const response = await fetch(`${GITHUB_API}/repos/${ORG_NAME}/${repo}/releases`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${pat}`,
+      Accept: "application/vnd.github.v3+json",
+      "User-Agent": "NEMAR-API",
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      tag_name: tag,
+      name,
+      body,
+      draft: false,
+      prerelease: false,
+    }),
+  });
+
+  if (!response.ok) {
+    // 422 means release already exists for this tag; fetch the existing one
+    if (response.status === 422) {
+      const existing = await fetch(`${GITHUB_API}/repos/${ORG_NAME}/${repo}/releases/tags/${tag}`, {
+        headers: {
+          Authorization: `Bearer ${pat}`,
+          Accept: "application/vnd.github.v3+json",
+          "User-Agent": "NEMAR-API",
+        },
+      });
+      if (existing.ok) {
+        const existingData = (await existing.json()) as { id: number };
+        return existingData.id;
+      }
+    }
+    const error = await response.text();
+    throw new Error(`Failed to create release: ${error}`);
+  }
+
+  const releaseData = (await response.json()) as { id: number };
+  return releaseData.id;
+}
+
+/**
+ * Download a repository source archive (zipball) at a given git ref.
+ * Uses the repository archive endpoint, not the releases API.
+ *
+ * @param repo Repository name (e.g., "nm000123")
+ * @param ref Git ref to archive (tag, branch, or SHA; e.g., "v1.0.0")
+ * @param pat GitHub PAT
+ * @returns ArrayBuffer containing the zip file
+ * @throws {Error} If download fails or archive exceeds 100MB
+ */
+export async function downloadReleaseArchive(
+  repo: string,
+  ref: string,
+  pat: string,
+): Promise<ArrayBuffer> {
+  const response = await fetch(`${GITHUB_API}/repos/${ORG_NAME}/${repo}/zipball/${ref}`, {
+    method: "GET",
+    headers: {
+      Authorization: `Bearer ${pat}`,
+      Accept: "application/vnd.github.v3+json",
+      "User-Agent": "NEMAR-API",
+    },
+  });
+
+  if (!response.ok) {
+    const error = await response.text();
+    throw new Error(`Failed to download archive for ${ref}: ${error}`);
+  }
+
+  // Validate content-type to catch HTML error pages returned with 200
+  const contentType = response.headers.get("content-type") || "";
+  if (contentType.includes("text/html")) {
+    throw new Error(`Expected zip archive but received HTML response for ${ref}`);
+  }
+
+  // Guard against exceeding CF Worker memory limits (128MB)
+  const contentLength = response.headers.get("content-length");
+  if (contentLength && Number.parseInt(contentLength, 10) > 100 * 1024 * 1024) {
+    throw new Error(`Archive for ${ref} exceeds 100MB (${contentLength} bytes); too large for Worker environment`);
+  }
+
+  return response.arrayBuffer();
+}
