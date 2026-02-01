@@ -172,7 +172,7 @@ Examples:
       const arg = rawArgs[i];
       if (arg.startsWith("--")) {
         const flagName = arg.slice(2);
-        const normalizedName = flagName.replace(/-([a-z])/g, (_, char) => char.toUpperCase());
+        const normalizedName = flagName.replace(/-([a-z])/g, (_: string, char: string) => char.toUpperCase());
 
         // Skip if already in options (known option)
         if (options[normalizedName] !== undefined) {
@@ -181,7 +181,7 @@ Examples:
 
         // Check if this is a --no-* flag
         if (flagName.startsWith("no-")) {
-          const baseName = flagName.slice(3).replace(/-([a-z])/g, (_, char) => char.toUpperCase());
+          const baseName = flagName.slice(3).replace(/-([a-z])/g, (_: string, char: string) => char.toUpperCase());
           options[baseName] = false;
         } else {
           // Check if next arg is the value or if it's a boolean flag

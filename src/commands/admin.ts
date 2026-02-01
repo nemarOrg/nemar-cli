@@ -1367,7 +1367,7 @@ adminCommand
           );
         } catch (_prError) {
           prSpinner.fail("Failed to create PR via gh CLI");
-          const errorMsg = prError instanceof Error ? prError.message : String(prError);
+          const errorMsg = _prError instanceof Error ? _prError.message : String(_prError);
           console.error(chalk.red(`  Error: ${errorMsg}`));
 
           if (errorMsg.includes("not found") || errorMsg.includes("command not found")) {

@@ -248,8 +248,8 @@ export async function validateBidsDataset(
     );
   }
 
-  const stdout = await new Response(proc.stdout).text();
-  const stderr = await new Response(proc.stderr).text();
+  const stdout = await new Response(proc.stdout as ReadableStream).text();
+  const stderr = await new Response(proc.stderr as ReadableStream).text();
   const exitCode = await proc.exited;
 
   // Always log stderr if present (warnings, deprecations, etc.)
