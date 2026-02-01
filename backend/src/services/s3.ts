@@ -20,6 +20,19 @@ interface GenerateUrlsParams {
   expiresIn?: number; // seconds, default 3600 (1 hour)
 }
 
+interface S3PolicyStatement {
+  Sid?: string;
+  Effect: string;
+  Principal: string | { [key: string]: string | string[] };
+  Action: string | string[];
+  Resource: string | string[];
+}
+
+interface S3BucketPolicy {
+  Version: string;
+  Statement: S3PolicyStatement[];
+}
+
 /**
  * Create an AWS client for S3 operations
  */
@@ -308,4 +321,164 @@ export async function applyObjectLock(
   }
 
   return { locked, failed, total: keys.length, hasMore: offset + batchSize < keys.length };
+}
+
+/**
+ * Get the current S3 bucket policy
+ * Returns null if no policy is set
+ */
+export async function getBucketPolicy(
+  options: PresignedUrlOptions,
+): Promise<S3BucketPolicy | null> {
+  const { bucket, region } = options;
+  const aws = createS3Client(options);
+  const url = `https://${bucket}.s3.${region}.amazonaws.com/?policy`;
+
+  const signed = await aws.sign(url, { method: "GET" });
+  const response = await fetch(signed);
+
+  if (response.status === 404) {
+    return null; // No policy set
+  }
+
+  if (!response.ok) {
+    throw new Error(`Failed to get bucket policy: HTTP ${response.status}`);
+  }
+
+  const policyText = await response.text();
+  return JSON.parse(policyText);
+}
+
+/**
+ * Add a public read statement to the bucket policy for a specific dataset
+ *
+ * This allows anyone to download files from the dataset prefix without authentication.
+ * Creates a new statement with unique Sid for the dataset.
+ *
+ * Note: S3 bucket policies have a 20KB size limit (~100 datasets max)
+ */
+export async function addPublicReadPolicy(
+  options: PresignedUrlOptions,
+  datasetId: string,
+): Promise<void> {
+  const { bucket, region } = options;
+  const aws = createS3Client(options);
+
+  // Fetch current policy or create new one
+  let policy = await getBucketPolicy(options);
+  if (!policy) {
+    policy = {
+      Version: "2012-10-17",
+      Statement: [],
+    };
+  }
+
+  const sid = `PublicReadDataset_${datasetId}`;
+
+  // Check if statement already exists (idempotent)
+  const existingIndex = policy.Statement.findIndex(
+    (s: { Sid?: string }) => s.Sid === sid,
+  );
+
+  if (existingIndex >= 0) {
+    // Already exists, no change needed
+    return;
+  }
+
+  // Add new public read statement
+  const newStatement = {
+    Sid: sid,
+    Effect: "Allow",
+    Principal: "*",
+    Action: "s3:GetObject",
+    Resource: `arn:aws:s3:::${bucket}/${datasetId}/*`,
+  };
+
+  policy.Statement.push(newStatement);
+
+  // Put updated policy
+  const policyJson = JSON.stringify(policy);
+  const url = `https://${bucket}.s3.${region}.amazonaws.com/?policy`;
+
+  const signed = await aws.sign(url, {
+    method: "PUT",
+    body: policyJson,
+    headers: {
+      "Content-Type": "application/json",
+    },
+  });
+
+  const response = await fetch(signed);
+  if (!response.ok) {
+    const errorText = await response.text();
+    throw new Error(`Failed to update bucket policy: HTTP ${response.status} - ${errorText}`);
+  }
+}
+
+/**
+ * Remove public read statement from the bucket policy for a specific dataset
+ *
+ * This reverts a dataset to private by removing its public access statement.
+ * Idempotent: returns successfully if statement doesn't exist.
+ */
+export async function removePublicReadPolicy(
+  options: PresignedUrlOptions,
+  datasetId: string,
+): Promise<void> {
+  const { bucket, region } = options;
+  const aws = createS3Client(options);
+
+  // Fetch current policy
+  const policy = await getBucketPolicy(options);
+  if (!policy) {
+    // No policy exists, nothing to remove
+    return;
+  }
+
+  const sid = `PublicReadDataset_${datasetId}`;
+
+  // Filter out the statement for this dataset
+  const originalLength = policy.Statement.length;
+  policy.Statement = policy.Statement.filter(
+    (s: { Sid?: string }) => s.Sid !== sid,
+  );
+
+  // If no statement was removed, return early (idempotent)
+  if (policy.Statement.length === originalLength) {
+    return;
+  }
+
+  // Put updated policy
+  const policyJson = JSON.stringify(policy);
+  const url = `https://${bucket}.s3.${region}.amazonaws.com/?policy`;
+
+  const signed = await aws.sign(url, {
+    method: "PUT",
+    body: policyJson,
+    headers: {
+      "Content-Type": "application/json",
+    },
+  });
+
+  const response = await fetch(signed);
+  if (!response.ok) {
+    const errorText = await response.text();
+    throw new Error(`Failed to update bucket policy: HTTP ${response.status} - ${errorText}`);
+  }
+}
+
+/**
+ * Check if a dataset has public read access in the bucket policy
+ */
+export async function hasPublicRead(
+  options: PresignedUrlOptions,
+  datasetId: string,
+): Promise<boolean> {
+  const policy = await getBucketPolicy(options);
+  if (!policy) {
+    return false;
+  }
+
+  const sid = `PublicReadDataset_${datasetId}`;
+  return policy.Statement.some((s: { Sid?: string }) => s.Sid === sid);
 }

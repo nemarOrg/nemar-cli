@@ -167,11 +167,7 @@ export async function checkGitHubSSH(): Promise<{
   }
 
   try {
-    const {
-      stdout,
-      stderr,
-      exitCode: _exitCode,
-    } = await runCommand([
+    const { stdout, stderr } = await runCommand([
       "ssh",
       "-T",
       "-o",
@@ -1492,13 +1488,12 @@ export async function getAnnexS3Remotes(datasetPath: string): Promise<string[]> 
   const remotes: string[] = [];
 
   // Primary: check git config for S3-configured remotes
-  const {
-    stdout: remoteList,
-    exitCode: listCode,
-    stderr: _stderr,
-  } = await runCommand(["git", "config", "--get-regexp", "^remote\\..*\\.annex-s3"], {
-    cwd: datasetPath,
-  });
+  const { stdout: remoteList, exitCode: listCode } = await runCommand(
+    ["git", "config", "--get-regexp", "^remote\\..*\\.annex-s3"],
+    {
+      cwd: datasetPath,
+    },
+  );
 
   if (listCode === 0 && remoteList.trim()) {
     for (const line of remoteList.trim().split("\n")) {

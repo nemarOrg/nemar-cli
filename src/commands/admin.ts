@@ -37,6 +37,7 @@ import {
   getDoiInfo,
   listPublishRequests,
   listUsers,
+  publishDataset,
   regenerateUserIam,
   revokeUser,
 } from "../lib/api.js";
@@ -1364,7 +1365,7 @@ adminCommand
           console.log(
             chalk.gray("The PR will go through validation checks before it can be merged."),
           );
-        } catch (prError) {
+        } catch (_prError) {
           prSpinner.fail("Failed to create PR via gh CLI");
           const errorMsg = prError instanceof Error ? prError.message : String(prError);
           console.error(chalk.red(`  Error: ${errorMsg}`));
@@ -1398,3 +1399,129 @@ adminCommand
       }
     },
   );
+
+// ============================================================================
+// Make Public (One-Way Publish)
+// ============================================================================
+
+adminCommand
+  .command("make-public")
+  .description("Publish a dataset (make repository and data public) - PERMANENT")
+  .argument("<dataset-id>", "Dataset ID (e.g., nm000104)")
+  .addHelpText(
+    "after",
+    `
+Description:
+  Publish a dataset by making both the GitHub repository and S3 data publicly accessible.
+
+  ${chalk.yellow("⚠️  WARNING: This operation is PERMANENT and IRREVERSIBLE")}
+
+  Once published:
+  - GitHub repository will be publicly visible
+  - S3 data files will be publicly downloadable
+  - git-annex will use public URLs for downloads
+
+  Publishing cannot be undone because:
+  - Data may be cached, indexed, or linked externally
+  - Unpublishing would create broken links
+  - Aligns with DOI permanence principles
+
+  Use this when:
+  - Dataset has been reviewed and validated
+  - Ready for public release and citation
+  - Associated with a DOI (concept or version)
+
+Requirements:
+  - Dataset must not be a sandbox dataset
+  - Dataset must have a GitHub repository
+  - Must be dataset owner or admin
+
+Examples:
+  $ nemar admin make-public nm000104
+
+  This will prompt for confirmation by requiring you to type
+  the dataset ID to confirm the permanent action.
+`,
+  )
+  .action(async (datasetIdArg: string) => {
+    if (!requireAuth()) return;
+
+    const datasetId = datasetIdArg.trim();
+
+    // Fetch dataset details first
+    let dataset: Dataset;
+    try {
+      dataset = await getDataset(datasetId);
+    } catch (error) {
+      if (error instanceof ApiError && error.statusCode === 404) {
+        console.error(chalk.red(`Dataset '${datasetId}' not found`));
+      } else {
+        console.error(
+          chalk.red(
+            `Failed to fetch dataset: ${error instanceof Error ? error.message : String(error)}`,
+          ),
+        );
+      }
+      process.exit(1);
+    }
+
+    // Show warning and dataset info
+    console.log(chalk.yellow("\n⚠️  WARNING: Publishing is PERMANENT and IRREVERSIBLE\n"));
+    console.log("This will:");
+    console.log("  1. Make the GitHub repository PUBLIC");
+    console.log("  2. Allow public S3 access to all dataset files");
+    console.log("  3. Update git-annex configuration for web access\n");
+    console.log(`Dataset: ${chalk.cyan(dataset.dataset_id)} - ${dataset.name}`);
+    if (dataset.owner_username) {
+      console.log(`Owner: ${dataset.owner_username}`);
+    }
+    if (dataset.github_repo) {
+      console.log(`Repository: ${dataset.github_repo}`);
+    }
+    console.log();
+
+    // Require typing dataset ID to confirm
+    const confirmation = await inquirer.prompt([
+      {
+        type: "input",
+        name: "datasetId",
+        message: `Type '${datasetId}' to confirm:`,
+        validate: (input: string) => {
+          if (input.trim() === datasetId) {
+            return true;
+          }
+          return `Please type exactly '${datasetId}' to confirm`;
+        },
+      },
+    ]);
+
+    if (confirmation.datasetId !== datasetId) {
+      console.log(chalk.gray("Cancelled."));
+      process.exit(0);
+    }
+
+    const spinner = ora("Publishing dataset...").start();
+
+    try {
+      const result = await publishDataset(datasetId);
+      spinner.succeed(chalk.green("Dataset published successfully"));
+      console.log(`\nGitHub: ${chalk.cyan(result.github_url)}`);
+      console.log(`S3: ${chalk.cyan(result.s3_url)}`);
+    } catch (error) {
+      spinner.fail(chalk.red("Failed to publish dataset"));
+      if (error instanceof ApiError) {
+        console.error(chalk.red(`\n${error.message}`));
+        if (error.details) {
+          console.error(chalk.gray(JSON.stringify(error.details, null, 2)));
+        }
+        if (error.statusCode === 403) {
+          console.log(chalk.gray("  You must be the dataset owner or an admin to publish"));
+        } else if (error.statusCode === 400 && error.message.includes("sandbox")) {
+          console.log(chalk.gray("  Sandbox datasets cannot be published"));
+        }
+      } else {
+        console.error(chalk.red(`\n${error instanceof Error ? error.message : String(error)}`));
+      }
+      process.exit(1);
+    }
+  });

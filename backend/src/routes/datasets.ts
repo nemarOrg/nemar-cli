@@ -20,9 +20,16 @@ import {
   deployWorkflows,
   enableAutoMerge,
   getWorkflowRuns,
+  setRepoVisibility,
 } from "../services/github";
 import { grantDatasetAccess } from "../services/iam";
-import { generateDatasetUploadUrls, getManifest, listManifests } from "../services/s3";
+import {
+  addPublicReadPolicy,
+  generateDatasetUploadUrls,
+  getManifest,
+  listManifests,
+  removePublicReadPolicy,
+} from "../services/s3";
 import type { Bindings, Variables } from "../types/bindings";
 
 export const datasetRoutes = new Hono<{ Bindings: Bindings; Variables: Variables }>();
@@ -1303,4 +1310,220 @@ datasetRoutes.get("/:id/manifest/:version", optionalAuthMiddleware, async (c) =>
   }
 
   return c.json(JSON.parse(manifestJson));
+});
+
+/**
+ * POST /datasets/:id/publish - Publish a dataset (make public)
+ *
+ * Authorization: Owner or admin only
+ * One-way operation: Cannot unpublish
+ *
+ * Effects:
+ * 1. Changes GitHub repo from private to public
+ * 2. Updates S3 bucket policy for public read
+ * 3. Sets visibility='public' in database
+ * 4. Logs action in audit_log
+ */
+datasetRoutes.post("/:id/publish", authMiddleware, async (c) => {
+  const datasetId = c.req.param("id");
+  const user = c.get("user");
+  const db = c.env.DB;
+
+  // Validate dataset ID format
+  if (!isValidDatasetId(datasetId)) {
+    return c.json({ error: "Invalid dataset ID" }, 400);
+  }
+
+  // Fetch dataset with ownership check
+  const dataset = await db
+    .prepare(`
+      SELECT id, dataset_id, name, owner_user_id, github_repo, visibility, is_sandbox
+      FROM datasets
+      WHERE dataset_id = ? AND status = 'active'
+    `)
+    .bind(datasetId)
+    .first<{
+      id: number;
+      dataset_id: string;
+      name: string;
+      owner_user_id: number;
+      github_repo: string | null;
+      visibility: string;
+      is_sandbox: number;
+    }>();
+
+  if (!dataset) {
+    return c.json({ error: "Dataset not found" }, 404);
+  }
+
+  // Authorization: owner or admin
+  if (dataset.owner_user_id !== user.id && !user.is_admin) {
+    return c.json({ error: "Forbidden: Only dataset owner or admin can publish" }, 403);
+  }
+
+  // Prevent publishing sandbox datasets
+  if (dataset.is_sandbox) {
+    return c.json(
+      {
+        error: "Cannot publish sandbox datasets",
+        message: "Sandbox datasets are for training only and cannot be made public",
+      },
+      400,
+    );
+  }
+
+  // Already public (idempotent)
+  if (dataset.visibility === "public") {
+    return c.json(
+      {
+        message: "Dataset is already public",
+        dataset_id: datasetId,
+      },
+      200,
+    );
+  }
+
+  // Validate GitHub repo exists
+  if (!dataset.github_repo) {
+    return c.json(
+      {
+        error: "Dataset has no GitHub repository",
+        message: "Cannot publish a dataset without a repository",
+      },
+      400,
+    );
+  }
+
+  // Extract repo name from full name (e.g., "nemarDatasets/nm000104" -> "nm000104")
+  const repoName = dataset.github_repo.split("/")[1];
+  if (!repoName) {
+    return c.json({ error: "Invalid GitHub repository format" }, 500);
+  }
+
+  // Step 1: Update GitHub repository visibility
+  const ghResult = await setRepoVisibility(repoName, false, c.env.GITHUB_ADMIN_PAT);
+  if (!ghResult.ok) {
+    console.error(`GitHub visibility update failed for ${datasetId}:`, ghResult.error);
+    return c.json(
+      {
+        error: "Failed to update GitHub repository visibility",
+        details: ghResult.error,
+        dataset_id: datasetId,
+      },
+      500,
+    );
+  }
+
+  // Step 2: Update S3 bucket policy for public read
+  try {
+    await addPublicReadPolicy(
+      {
+        bucket: c.env.S3_BUCKET,
+        region: c.env.AWS_REGION,
+        accessKeyId: c.env.AWS_ACCESS_KEY_ID,
+        secretAccessKey: c.env.AWS_SECRET_ACCESS_KEY,
+      },
+      datasetId,
+    );
+  } catch (s3Error) {
+    const s3Msg = s3Error instanceof Error ? s3Error.message : String(s3Error);
+    console.error(`S3 policy update failed for ${datasetId}:`, s3Msg);
+
+    // Revert GitHub to private on S3 failure
+    const revertResult = await setRepoVisibility(repoName, true, c.env.GITHUB_ADMIN_PAT);
+    if (revertResult.ok) {
+      return c.json(
+        {
+          error: "Failed to update S3 bucket policy, reverted GitHub repository to private",
+          details: s3Msg,
+          dataset_id: datasetId,
+        },
+        500,
+      );
+    }
+
+    return c.json(
+      {
+        error: "CRITICAL: S3 policy update failed AND GitHub revert failed",
+        details: s3Msg,
+        dataset_id: datasetId,
+        github_visibility: "public",
+        s3_public: false,
+        revert_error: revertResult.error,
+        action_required: `Manually revert GitHub repo to private OR manually add S3 public read policy for ${datasetId}`,
+      },
+      500,
+    );
+  }
+
+  // Step 3: Update database
+  try {
+    await db
+      .prepare("UPDATE datasets SET visibility = 'public', updated_at = datetime('now') WHERE id = ?")
+      .bind(dataset.id)
+      .run();
+  } catch (dbError) {
+    const dbMsg = dbError instanceof Error ? dbError.message : String(dbError);
+    console.error(`Database update failed for ${datasetId}:`, dbMsg);
+
+    // Revert both GitHub and S3 on database failure
+    const ghRevertResult = await setRepoVisibility(repoName, true, c.env.GITHUB_ADMIN_PAT);
+
+    let s3Reverted = false;
+    try {
+      await removePublicReadPolicy(
+        {
+          bucket: c.env.S3_BUCKET,
+          region: c.env.AWS_REGION,
+          accessKeyId: c.env.AWS_ACCESS_KEY_ID,
+          secretAccessKey: c.env.AWS_SECRET_ACCESS_KEY,
+        },
+        datasetId,
+      );
+      s3Reverted = true;
+    } catch (s3RevertError) {
+      console.error(`S3 policy revert failed for ${datasetId}:`, s3RevertError);
+    }
+
+    return c.json(
+      {
+        error: "CRITICAL: Database update failed, attempted rollback",
+        details: dbMsg,
+        dataset_id: datasetId,
+        github_reverted: ghRevertResult.ok,
+        s3_reverted: s3Reverted,
+        action_required:
+          ghRevertResult.ok && s3Reverted
+            ? "Rollback successful, but database update failed. Contact administrator."
+            : `Manually revert: ${!ghRevertResult.ok ? "GitHub repo to private" : ""} ${!s3Reverted ? "Remove S3 public read policy" : ""}`.trim(),
+      },
+      500,
+    );
+  }
+
+  // Step 4: Audit log
+  await db
+    .prepare(`
+      INSERT INTO audit_log (user_id, action, resource_type, resource_id, details)
+      VALUES (?, ?, ?, ?, ?)
+    `)
+    .bind(
+      user.id,
+      "dataset_publish",
+      "dataset",
+      datasetId,
+      JSON.stringify({
+        dataset_name: dataset.name,
+        github_repo: dataset.github_repo,
+      }),
+    )
+    .run();
+
+  return c.json({
+    success: true,
+    message: "Dataset published successfully",
+    dataset_id: datasetId,
+    github_url: `https://github.com/${dataset.github_repo}`,
+    s3_url: `https://${c.env.S3_BUCKET}.s3.${c.env.AWS_REGION}.amazonaws.com/${datasetId}/`,
+  });
 });
