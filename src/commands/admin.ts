@@ -23,13 +23,13 @@ import inquirer from "inquirer";
 import ora from "ora";
 import {
   ApiError,
+  type Dataset,
   addCi,
   applyS3Lock,
   approvePublication,
   approveUser,
   changeVisibility,
   createConceptDoi,
-  type Dataset,
   denyPublication,
   finalizeDataset,
   getCiStatus,
@@ -44,12 +44,12 @@ import {
 import { getConfig, isAuthenticated } from "../lib/config.js";
 import {
   type ConfirmOptions,
-  confirm,
-  confirmWithInput,
   NO_DESCRIPTION,
   NO_OPTION,
   YES_DESCRIPTION,
   YES_OPTION,
+  confirm,
+  confirmWithInput,
 } from "../lib/confirm.js";
 import {
   checkDownloadPrerequisites,
