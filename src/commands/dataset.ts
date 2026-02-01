@@ -131,21 +131,25 @@ Requirements:
 Common Options:
   -c, --config <file>         Validation config file (.bidsvalidatorrc)
   -r, --recursive             Validate derivatives subdirectories
-  -p, --prune                 Skip sourcedata and derivatives
+  --prune                     Skip sourcedata and derivatives
   -v, --verbose               Show verbose output
   --ignore-warnings           Only report errors, not warnings
   --json                      Output results as JSON
 
 Additional BIDS Validator Flags (pass-through):
-  --format <format>           Output format: text, json, json_pp (default: text)
-  -s, --schema <URL-or-tag>   Specify schema version to use
-  --max-rows <nrows>          Max rows to validate in TSVs (default: 1000)
-  --ignore-nifti-headers      Disregard NIfTI header content
-  --debug <level>             Enable debug output (ERROR, WARN, INFO, DEBUG)
-  --dataset-types <types>     Permitted types: raw, derivative, study
-  --blacklist-modalities <m>  Error on specified modalities (mri, eeg, meg, etc)
-  -o, --outfile <file>        File to write validation results to
-  --color, --no-color         Enable/disable color output
+  --format <format>               Output format: text, json, json_pp
+  -s, --schema <URL-or-tag>       Specify schema version to use
+  --maxRows <nrows>               Max rows to validate in TSVs (default: 1000)
+                                  Use 0 for headers only, -1 for all rows
+  --ignoreNiftiHeaders            Disregard NIfTI header content
+  --debug <level>                 Enable debug output (NOTSET, DEBUG, INFO,
+                                  WARN, ERROR, CRITICAL; default: ERROR)
+  --datasetTypes <types>          Permitted types: raw, derivative, study
+  --blacklistModalities <m>       Error on specified modalities (mri, eeg, meg, etc)
+  -o, --outfile <file>            File to write validation results to
+  --color, --no-color             Enable/disable color output
+
+Note: Pass-through flags use camelCase (e.g., --maxRows not --max-rows)
 
 Exit Codes:
   0 - Dataset is valid
@@ -156,9 +160,9 @@ Examples:
   $ nemar dataset validate ./my-dataset          # Validate specific path
   $ nemar dataset validate ./ds --prune          # Fast validation (skip derivatives)
   $ nemar dataset validate ./ds --json > out.json
-  $ nemar dataset validate ./ds --format json_pp # Pretty JSON output
   $ nemar dataset validate ./ds --debug INFO     # Enable debug logging
-  $ nemar dataset validate ./ds --max-rows 0     # Validate headers only`,
+  $ nemar dataset validate ./ds --maxRows 0      # Validate headers only
+  $ nemar dataset validate ./ds --ignoreNiftiHeaders  # Skip NIfTI header validation`,
   )
   .action(async (datasetPath, options, command) => {
     // Show version info if requested
@@ -225,27 +229,9 @@ Examples:
 
     let result: BidsValidationResult;
     try {
-      // Collect all options including unknown pass-through flags
-      // Filter out our internal options (versionInfo, json) and collect the rest
-      const validatorOptions: Record<string, unknown> = {
-        config: options.config,
-        ignoreWarnings: options.ignoreWarnings,
-        recursive: options.recursive,
-        prune: options.prune,
-        verbose: options.verbose,
-      };
-
-      // Pass through any additional options from the command
-      // Commander stores unknown options directly in the options object
-      const knownCliOptions = new Set([
-        "config",
-        "ignoreWarnings",
-        "recursive",
-        "prune",
-        "verbose",
-        "json",
-        "versionInfo",
-      ]);
+      // Pass all options to validator except CLI-specific flags
+      const knownCliOptions = new Set(["json", "versionInfo"]);
+      const validatorOptions: Record<string, unknown> = {};
 
       for (const [key, value] of Object.entries(options)) {
         if (!knownCliOptions.has(key)) {

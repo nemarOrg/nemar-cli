@@ -127,6 +127,15 @@ export async function validateBidsDataset(
   // Build command arguments
   const args = ["run", "-ERWN", "jsr:@bids/validator", datasetPath, "--json"];
 
+  // Validate that --format flag doesn't conflict with hardcoded --json
+  if (options.format && options.format !== "json") {
+    throw new Error(
+      `Conflicting flags: CLI always uses --json for internal parsing.\n` +
+      `The --format flag with value "${options.format}" is not compatible.\n` +
+      `To get pretty JSON output, use: nemar dataset validate --json | jq`,
+    );
+  }
+
   // Known options with explicit handling
   const knownOptions = new Set([
     "config",
@@ -134,6 +143,7 @@ export async function validateBidsDataset(
     "recursive",
     "prune",
     "verbose",
+    "format", // Add to known options since we validate it above
   ]);
 
   if (options.config) {
@@ -152,29 +162,29 @@ export async function validateBidsDataset(
     args.push("--verbose");
   }
 
-  // Pass through any additional options
+  // Pass through additional options
   for (const [key, value] of Object.entries(options)) {
-    if (knownOptions.has(key)) {
-      continue; // Already handled above
+    if (knownOptions.has(key) || value === undefined || value === null) {
+      continue;
     }
 
-    // Convert camelCase to kebab-case for CLI flags
     const flagName = key.replace(/([A-Z])/g, "-$1").toLowerCase();
 
     if (typeof value === "boolean") {
-      // Boolean flags: --flag or --no-flag
       if (value) {
         args.push(`--${flagName}`);
       }
-    } else if (Array.isArray(value)) {
-      // Array flags: --flag value1 --flag value2 (for multi-value options)
+      continue;
+    }
+
+    if (Array.isArray(value)) {
       for (const item of value) {
         args.push(`--${flagName}`, String(item));
       }
-    } else if (value !== undefined && value !== null) {
-      // Value flags: --flag value
-      args.push(`--${flagName}`, String(value));
+      continue;
     }
+
+    args.push(`--${flagName}`, String(value));
   }
 
   // Run validator
@@ -188,9 +198,13 @@ export async function validateBidsDataset(
   const stderr = await new Response(proc.stderr).text();
   const exitCode = await proc.exited;
 
-  // Handle errors
+  // Always log stderr if present (warnings, deprecations, etc.)
+  if (stderr.trim()) {
+    console.error(`[BIDS Validator]: ${stderr.trim()}`);
+  }
+
+  // Handle fatal errors (no JSON output produced)
   if (exitCode !== 0 && !stdout.trim()) {
-    // Real error (not just validation failures)
     throw new Error(
       stderr.includes("error:")
         ? stderr.split("\n").find((l) => l.includes("error:")) || "Validation failed"
