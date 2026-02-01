@@ -390,7 +390,11 @@ export interface PublishDatasetResponse {
  * This is a one-way operation that cannot be undone
  */
 export async function publishDataset(datasetId: string): Promise<PublishDatasetResponse> {
-  return request<PublishDatasetResponse>(`/datasets/${datasetId}/publish`, { method: "POST" }, true);
+  return request<PublishDatasetResponse>(
+    `/datasets/${datasetId}/publish`,
+    { method: "POST" },
+    true,
+  );
 }
 
 // ============================================================================
@@ -1021,29 +1025,35 @@ export interface S3LockResponse {
   offset: number;
 }
 
-export async function applyS3Lock(datasetId: string): Promise<{ locked: number; total: number; failed: string[] }> {
+export async function applyS3Lock(
+  datasetId: string,
+): Promise<{ locked: number; total: number; failed: string[] }> {
   let offset = 0;
   let totalLocked = 0;
   const allFailed: string[] = [];
   let total = 0;
+  let hasMore = true;
 
-  do {
-    const result = await request<S3LockResponse>(`/admin/datasets/${datasetId}/s3-lock`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ offset }),
-    }, true);
+  while (hasMore) {
+    const result = await request<S3LockResponse>(
+      `/admin/datasets/${datasetId}/s3-lock`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ offset }),
+      },
+      true,
+    );
 
     totalLocked += result.locked;
     allFailed.push(...result.failed);
     total = result.total;
+    hasMore = result.hasMore;
 
-    if (result.hasMore) {
+    if (hasMore) {
       offset += 40;
-    } else {
-      break;
     }
-  } while (true);
+  }
 
   return { locked: totalLocked, total, failed: allFailed };
 }

@@ -36,11 +36,11 @@ import {
 } from "../lib/config.js";
 import {
   type ConfirmOptions,
+  confirm,
   NO_DESCRIPTION,
   NO_OPTION,
   YES_DESCRIPTION,
   YES_OPTION,
-  confirm,
 } from "../lib/confirm.js";
 import {
   configureSSHForGitHub,

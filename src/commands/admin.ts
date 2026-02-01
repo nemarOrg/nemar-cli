@@ -23,12 +23,13 @@ import inquirer from "inquirer";
 import ora from "ora";
 import {
   ApiError,
-  type Dataset,
   addCi,
+  applyS3Lock,
   approvePublication,
   approveUser,
   changeVisibility,
   createConceptDoi,
+  type Dataset,
   denyPublication,
   finalizeDataset,
   getCiStatus,
@@ -36,7 +37,6 @@ import {
   getDoiInfo,
   listPublishRequests,
   listUsers,
-  applyS3Lock,
   publishDataset,
   regenerateUserIam,
   revokeUser,
@@ -44,12 +44,12 @@ import {
 import { getConfig, isAuthenticated } from "../lib/config.js";
 import {
   type ConfirmOptions,
+  confirm,
+  confirmWithInput,
   NO_DESCRIPTION,
   NO_OPTION,
   YES_DESCRIPTION,
   YES_OPTION,
-  confirm,
-  confirmWithInput,
 } from "../lib/confirm.js";
 import {
   checkDownloadPrerequisites,
@@ -323,10 +323,7 @@ s3Command
     console.log("  • Objects cannot be deleted or modified without bypass");
     console.log();
 
-    const confirmResult = await confirm(
-      `Apply S3 Object Lock to ${datasetId}?`,
-      options,
-    );
+    const confirmResult = await confirm(`Apply S3 Object Lock to ${datasetId}?`, options);
     if (confirmResult !== "confirmed") {
       console.log(chalk.gray(confirmResult === "declined" ? "Skipped" : "Cancelled"));
       return;
@@ -337,7 +334,9 @@ s3Command
     try {
       const result = await applyS3Lock(datasetId);
       if (result.failed.length > 0) {
-        spinner.fail(`Partial lock: ${result.locked}/${result.total} locked, ${result.failed.length} failed`);
+        spinner.fail(
+          `Partial lock: ${result.locked}/${result.total} locked, ${result.failed.length} failed`,
+        );
         console.log(chalk.yellow("\nFailed objects:"));
         for (const key of result.failed.slice(0, 10)) {
           console.log(`  • ${key}`);
@@ -1366,7 +1365,7 @@ adminCommand
           console.log(
             chalk.gray("The PR will go through validation checks before it can be merged."),
           );
-        } catch (prError) {
+        } catch (_prError) {
           prSpinner.fail("Failed to create PR via gh CLI");
           console.log(chalk.gray("  You may need to create the PR manually on GitHub"));
           console.log(chalk.gray(`  Branch: ${branchName}`));
@@ -1446,7 +1445,9 @@ Examples:
         console.error(chalk.red(`Dataset '${datasetId}' not found`));
       } else {
         console.error(
-          chalk.red(`Failed to fetch dataset: ${error instanceof Error ? error.message : String(error)}`),
+          chalk.red(
+            `Failed to fetch dataset: ${error instanceof Error ? error.message : String(error)}`,
+          ),
         );
       }
       process.exit(1);
