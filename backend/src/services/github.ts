@@ -266,36 +266,6 @@ export async function enableAutoMerge(repo: string, pat: string): Promise<boolea
   return response.ok;
 }
 
-/**
- * Update repository visibility (private <-> public)
- *
- * @param repo - Repository name (just the name, e.g., "nm000104")
- * @param isPrivate - true for private, false for public
- * @param pat - GitHub PAT with repo admin permissions
- */
-export async function updateRepositoryVisibility(
-  repo: string,
-  isPrivate: boolean,
-  pat: string,
-): Promise<void> {
-  const response = await fetch(`${GITHUB_API}/repos/${ORG_NAME}/${repo}`, {
-    method: "PATCH",
-    headers: {
-      Authorization: `Bearer ${pat}`,
-      Accept: "application/vnd.github.v3+json",
-      "User-Agent": "NEMAR-API",
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      private: isPrivate,
-    }),
-  });
-
-  if (!response.ok) {
-    const error = await response.text();
-    throw new Error(`Failed to update repository visibility: HTTP ${response.status} - ${error}`);
-  }
-}
 
 /**
  * Create or update a file in a repository

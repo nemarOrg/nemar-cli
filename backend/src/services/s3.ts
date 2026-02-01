@@ -403,6 +403,58 @@ export async function addPublicReadPolicy(
 }
 
 /**
+ * Remove public read statement from the bucket policy for a specific dataset
+ *
+ * This reverts a dataset to private by removing its public access statement.
+ * Idempotent: returns successfully if statement doesn't exist.
+ */
+export async function removePublicReadPolicy(
+  options: PresignedUrlOptions,
+  datasetId: string,
+): Promise<void> {
+  const { bucket, region } = options;
+  const aws = createS3Client(options);
+
+  // Fetch current policy
+  const policy = await getBucketPolicy(options);
+  if (!policy) {
+    // No policy exists, nothing to remove
+    return;
+  }
+
+  const sid = `PublicReadDataset_${datasetId}`;
+
+  // Filter out the statement for this dataset
+  const originalLength = policy.Statement.length;
+  policy.Statement = policy.Statement.filter(
+    (s: { Sid?: string }) => s.Sid !== sid,
+  );
+
+  // If no statement was removed, return early (idempotent)
+  if (policy.Statement.length === originalLength) {
+    return;
+  }
+
+  // Put updated policy
+  const policyJson = JSON.stringify(policy);
+  const url = `https://${bucket}.s3.${region}.amazonaws.com/?policy`;
+
+  const signed = await aws.sign(url, {
+    method: "PUT",
+    body: policyJson,
+    headers: {
+      "Content-Type": "application/json",
+    },
+  });
+
+  const response = await fetch(signed);
+  if (!response.ok) {
+    const errorText = await response.text();
+    throw new Error(`Failed to update bucket policy: HTTP ${response.status} - ${errorText}`);
+  }
+}
+
+/**
  * Check if a dataset has public read access in the bucket policy
  */
 export async function hasPublicRead(

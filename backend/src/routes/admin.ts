@@ -24,7 +24,13 @@ import {
 } from "../services/github";
 import { generateIamUsername, revokeUserIamAccess, setupUserIamAccess } from "../services/iam";
 import { generateManifest } from "../services/manifest";
-import { addPublicReadPolicy, applyObjectLock, getManifest, uploadManifest } from "../services/s3";
+import {
+  addPublicReadPolicy,
+  applyObjectLock,
+  getManifest,
+  removePublicReadPolicy,
+  uploadManifest,
+} from "../services/s3";
 import { generateApiKey, hashApiKey } from "../services/token";
 import {
   type ZenodoDeposition,
@@ -1351,9 +1357,9 @@ adminRoutes.patch("/datasets/:id/visibility", zValidator("json", visibilitySchem
     return c.json({ error: `Failed to set repository to ${visibility}: ${result.error}` }, 500);
   }
 
-  // Update S3 bucket policy if making public
-  if (visibility === "public") {
-    try {
+  // Update S3 bucket policy based on visibility
+  try {
+    if (visibility === "public") {
       await addPublicReadPolicy(
         {
           bucket: c.env.S3_BUCKET,
@@ -1363,34 +1369,45 @@ adminRoutes.patch("/datasets/:id/visibility", zValidator("json", visibilitySchem
         },
         datasetId,
       );
-    } catch (s3Error) {
-      const s3Msg = s3Error instanceof Error ? s3Error.message : String(s3Error);
-      console.error(`WARNING: Failed to update S3 policy for ${datasetId}:`, s3Msg);
-      // GitHub is public but S3 policy failed - revert GitHub
-      const revertResult = await setRepoVisibility(repoName, true, c.env.GITHUB_ADMIN_PAT);
-      if (revertResult.ok) {
-        return c.json(
-          {
-            error: "Failed to update S3 bucket policy, reverted GitHub repository to private",
-            details: s3Msg,
-            dataset_id: datasetId,
-          },
-          500,
-        );
-      }
+    } else {
+      // Remove public read access when reverting to private
+      await removePublicReadPolicy(
+        {
+          bucket: c.env.S3_BUCKET,
+          region: c.env.AWS_REGION,
+          accessKeyId: c.env.AWS_ACCESS_KEY_ID,
+          secretAccessKey: c.env.AWS_SECRET_ACCESS_KEY,
+        },
+        datasetId,
+      );
+    }
+  } catch (s3Error) {
+    const s3Msg = s3Error instanceof Error ? s3Error.message : String(s3Error);
+    console.error(`WARNING: Failed to update S3 policy for ${datasetId}:`, s3Msg);
+    // GitHub visibility changed but S3 policy failed - revert GitHub
+    const revertResult = await setRepoVisibility(repoName, !isPrivate, c.env.GITHUB_ADMIN_PAT);
+    if (revertResult.ok) {
       return c.json(
         {
-          error: "CRITICAL: S3 policy update failed AND GitHub revert failed",
+          error: `Failed to update S3 bucket policy, reverted GitHub repository to ${isPrivate ? "public" : "private"}`,
           details: s3Msg,
           dataset_id: datasetId,
-          github_visibility: "public",
-          s3_public: false,
-          revert_error: revertResult.error,
-          action_required: `Manually revert GitHub repo to private OR manually add S3 public read policy for ${datasetId}`,
         },
         500,
       );
     }
+    return c.json(
+      {
+        error: "CRITICAL: S3 policy update failed AND GitHub revert failed",
+        details: s3Msg,
+        dataset_id: datasetId,
+        github_visibility: visibility,
+        s3_public: visibility === "private",
+        revert_error: revertResult.error,
+        action_required: `Manually revert GitHub repo to ${isPrivate ? "public" : "private"} OR manually ${visibility === "public" ? "add" : "remove"} S3 public read policy for ${datasetId}`,
+      },
+      500,
+    );
   }
 
   // Update dataset visibility in database to match GitHub repo
