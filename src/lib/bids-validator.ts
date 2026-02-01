@@ -161,28 +161,50 @@ export async function validateBidsDataset(
   }
 
   // Pass through additional options
+  const passThroughFlags: string[] = [];
   for (const [key, value] of Object.entries(options)) {
     if (knownOptions.has(key) || value === undefined || value === null) {
       continue;
     }
 
+    passThroughFlags.push(key);
     const flagName = key.replace(/([A-Z])/g, "-$1").toLowerCase();
 
     if (typeof value === "boolean") {
       if (value) {
         args.push(`--${flagName}`);
+      } else {
+        // Explicitly reject --no-* flags since BIDS validator behavior is undefined
+        throw new Error(
+          `Boolean flag --no-${flagName} (from option '${key}: false') is not supported.\nThe BIDS validator only accepts positive boolean flags.\nRemove this flag or set ${key} to true.`,
+        );
       }
       continue;
     }
 
     if (Array.isArray(value)) {
       for (const item of value) {
+        if (typeof item !== "string" && typeof item !== "number" && typeof item !== "boolean") {
+          throw new Error(
+            `Invalid value for flag --${flagName}: array contains non-primitive value (${typeof item}).\nArray values must be strings, numbers, or booleans.`,
+          );
+        }
         args.push(`--${flagName}`, String(item));
       }
       continue;
     }
 
     args.push(`--${flagName}`, String(value));
+  }
+
+  // Log pass-through flags for debugging
+  if (passThroughFlags.length > 0 && options.verbose) {
+    console.log(`[DEBUG] Passing unknown flags to validator: ${passThroughFlags.join(", ")}`);
+  }
+
+  // Log full command in verbose mode
+  if (options.verbose) {
+    console.log(`[DEBUG] Running: deno ${args.join(" ")}`);
   }
 
   // Run validator
@@ -203,10 +225,15 @@ export async function validateBidsDataset(
 
   // Handle fatal errors (no JSON output produced)
   if (exitCode !== 0 && !stdout.trim()) {
+    const errorLine = stderr.includes("error:")
+      ? stderr.split("\n").find((l) => l.includes("error:"))
+      : null;
     throw new Error(
-      stderr.includes("error:")
-        ? stderr.split("\n").find((l) => l.includes("error:")) || "Validation failed"
-        : `Validation failed with exit code ${exitCode}`,
+      `BIDS validation failed with exit code ${exitCode}.\n${errorLine ? `Error: ${errorLine}\n` : ""}${
+        passThroughFlags.length > 0
+          ? `Note: Using pass-through flags: ${passThroughFlags.join(", ")}\n`
+          : ""
+      }Run with --verbose for more details.`,
     );
   }
 
@@ -221,8 +248,10 @@ export async function validateBidsDataset(
 
   try {
     result = JSON.parse(stdout);
-  } catch {
-    throw new Error(`Failed to parse validator output: ${stdout.slice(0, 200)}`);
+  } catch (parseError) {
+    throw new Error(
+      `Failed to parse BIDS validator output as JSON.\nThis may be caused by incompatible flags or validator errors.\nParse error: ${(parseError as Error).message}\nOutput (first 500 chars): ${stdout.slice(0, 500)}`,
+    );
   }
 
   const issues = result.issues.issues || [];
