@@ -116,6 +116,7 @@ datasetCommand
   .option("-v, --verbose", "Show verbose output")
   .option("--json", "Output results as JSON (for scripting)")
   .option("--version-info", "Show BIDS validator version info")
+  .allowUnknownOption()
   .addHelpText(
     "after",
     `
@@ -126,6 +127,30 @@ Description:
 Requirements:
   Deno runtime must be installed: https://deno.com
 
+Common Options:
+  -c, --config <file>         Validation config file (.bidsvalidatorrc)
+  -r, --recursive             Validate derivatives subdirectories
+  --prune                     Skip sourcedata and derivatives
+  -v, --verbose               Show verbose output
+  --ignore-warnings           Only report errors, not warnings
+  --json                      Output results as JSON
+
+Additional BIDS Validator Flags (pass-through):
+  --format <format>               Output format: text, json, json_pp
+  -s, --schema <URL-or-tag>       Specify schema version to use
+  --maxRows <nrows>               Max rows to validate in TSVs (default: 1000)
+                                  Use 0 for headers only, -1 for all rows
+  --ignoreNiftiHeaders            Disregard NIfTI header content
+  --debug <level>                 Enable debug output (NOTSET, DEBUG, INFO,
+                                  WARN, ERROR, CRITICAL; default: ERROR)
+  --datasetTypes <types>          Permitted types: raw, derivative, study
+  --blacklistModalities <m>       Error on specified modalities (mri, eeg, meg, etc)
+  -o, --outfile <file>            File to write validation results to
+  --color                         Enable color output
+
+Note: You can use either format (--maxRows or --max-rows); both are accepted.
+      Unknown flags are passed through to the BIDS validator for validation.
+
 Exit Codes:
   0 - Dataset is valid
   1 - Dataset has errors or validation failed
@@ -134,9 +159,50 @@ Examples:
   $ nemar dataset validate                       # Validate current directory
   $ nemar dataset validate ./my-dataset          # Validate specific path
   $ nemar dataset validate ./ds --prune          # Fast validation (skip derivatives)
-  $ nemar dataset validate ./ds --json > out.json`,
+  $ nemar dataset validate ./ds --json > out.json
+  $ nemar dataset validate ./ds --debug INFO     # Enable debug logging
+  $ nemar dataset validate ./ds --maxRows 0      # Validate headers only
+  $ nemar dataset validate ./ds --ignoreNiftiHeaders  # Skip NIfTI header validation`,
   )
-  .action(async (datasetPath, options) => {
+  .action(async (datasetPath, options, command) => {
+    // Parse unknown options from command's raw args
+    // Commander.js's .allowUnknownOption() doesn't parse them into opts()
+    // command.args only contains positional arguments, use process.argv for full args
+    const commandName = "validate";
+    const commandIndex = process.argv.indexOf(commandName);
+    const rawArgs = commandIndex >= 0 ? process.argv.slice(commandIndex + 1) : [];
+    for (let i = 0; i < rawArgs.length; i++) {
+      const arg = rawArgs[i];
+      if (arg.startsWith("--")) {
+        const flagName = arg.slice(2);
+        const normalizedName = flagName.replace(/-([a-z])/g, (_: string, char: string) =>
+          char.toUpperCase(),
+        );
+
+        // Skip if already in options (known option)
+        if (options[normalizedName] !== undefined) {
+          continue;
+        }
+
+        // Check if this is a --no-* flag
+        if (flagName.startsWith("no-")) {
+          const baseName = flagName
+            .slice(3)
+            .replace(/-([a-z])/g, (_: string, char: string) => char.toUpperCase());
+          options[baseName] = false;
+        } else {
+          // Check if next arg is the value or if it's a boolean flag
+          if (i + 1 < rawArgs.length && !rawArgs[i + 1].startsWith("-")) {
+            options[normalizedName] = rawArgs[i + 1];
+            i++; // Skip the value in next iteration
+          } else {
+            // Boolean flag
+            options[normalizedName] = true;
+          }
+        }
+      }
+    }
+
     // Show version info if requested
     if (options.versionInfo) {
       const deno = await checkDenoInstalled();
@@ -201,13 +267,17 @@ Examples:
 
     let result: BidsValidationResult;
     try {
-      result = await validateBidsDataset(absolutePath, {
-        config: options.config,
-        ignoreWarnings: options.ignoreWarnings,
-        recursive: options.recursive,
-        prune: options.prune,
-        verbose: options.verbose,
-      });
+      // Pass all options to validator except CLI-specific flags
+      const knownCliOptions = new Set(["json", "versionInfo"]);
+      const validatorOptions: Record<string, unknown> = {};
+
+      for (const [key, value] of Object.entries(options)) {
+        if (!knownCliOptions.has(key)) {
+          validatorOptions[key] = value;
+        }
+      }
+
+      result = await validateBidsDataset(absolutePath, validatorOptions);
       spinner.succeed("Validation complete");
       console.log();
     } catch (error) {

@@ -429,11 +429,148 @@ describe("CLI Dataset Validate", () => {
   });
 
   test("nemar dataset validate with non-BIDS directory fails", async () => {
-    const { stdout, exitCode } = await runCli(["dataset", "validate", "/tmp"]);
+    const { stdout, exitCode} = await runCli(["dataset", "validate", "/tmp"]);
 
     expect(exitCode).toBe(1);
     expect(stdout).toContain("Not a valid BIDS dataset");
     expect(stdout).toContain("dataset_description.json");
+  });
+
+  test("nemar dataset validate accepts pass-through flags (camelCase)", async () => {
+    // Create a minimal valid BIDS dataset
+    const testDir = "/tmp/test-bids-passthrough";
+    const { existsSync, mkdirSync, writeFileSync, rmSync } = await import("node:fs");
+
+    if (existsSync(testDir)) {
+      rmSync(testDir, { recursive: true, force: true });
+    }
+    mkdirSync(testDir, { recursive: true });
+    writeFileSync(
+      `${testDir}/dataset_description.json`,
+      JSON.stringify({ Name: "Test Dataset", BIDSVersion: "1.6.0" }),
+    );
+
+    try {
+      // Test that maxRows (camelCase) is accepted
+      const { stdout, exitCode } = await runCli(["dataset", "validate", testDir, "--maxRows", "0"]);
+
+      // Should succeed (even if there are warnings about empty dataset)
+      expect(exitCode).toBe(0);
+      expect(stdout).toContain("Dataset is valid BIDS");
+    } finally {
+      if (existsSync(testDir)) {
+        rmSync(testDir, { recursive: true, force: true });
+      }
+    }
+  });
+
+  test("nemar dataset validate accepts pass-through flags (kebab-case)", async () => {
+    // Commander.js normalizes --max-rows to maxRows
+    const testDir = "/tmp/test-bids-passthrough-kebab";
+    const { existsSync, mkdirSync, writeFileSync, rmSync } = await import("node:fs");
+
+    if (existsSync(testDir)) {
+      rmSync(testDir, { recursive: true, force: true });
+    }
+    mkdirSync(testDir, { recursive: true });
+    writeFileSync(
+      `${testDir}/dataset_description.json`,
+      JSON.stringify({ Name: "Test Dataset", BIDSVersion: "1.6.0" }),
+    );
+
+    try {
+      // Test that --max-rows (kebab-case) is also accepted by Commander.js
+      const { stdout, exitCode } = await runCli(["dataset", "validate", testDir, "--max-rows", "0"]);
+
+      expect(exitCode).toBe(0);
+      expect(stdout).toContain("Dataset is valid BIDS");
+    } finally {
+      if (existsSync(testDir)) {
+        rmSync(testDir, { recursive: true, force: true });
+      }
+    }
+  });
+
+  test("nemar dataset validate passes unknown flags to validator (which errors)", async () => {
+    const testDir = "/tmp/test-bids-unknown-flag";
+    const { existsSync, mkdirSync, writeFileSync, rmSync } = await import("node:fs");
+
+    if (existsSync(testDir)) {
+      rmSync(testDir, { recursive: true, force: true });
+    }
+    mkdirSync(testDir, { recursive: true });
+    writeFileSync(
+      `${testDir}/dataset_description.json`,
+      JSON.stringify({ Name: "Test Dataset", BIDSVersion: "1.6.0" }),
+    );
+
+    try {
+      // Test that unknown flags are passed through and validator rejects them
+      const { stdout, stderr, exitCode } = await runCli(["dataset", "validate", testDir, "--unknownFlag", "value"]);
+
+      expect(exitCode).toBe(1);
+      // BIDS validator will error about unknown option
+      const output = stdout + stderr;
+      expect(output).toContain("Unknown option");
+    } finally {
+      if (existsSync(testDir)) {
+        rmSync(testDir, { recursive: true, force: true });
+      }
+    }
+  });
+
+  test("nemar dataset validate rejects --no-* boolean flags", async () => {
+    const testDir = "/tmp/test-bids-no-flag";
+    const { existsSync, mkdirSync, writeFileSync, rmSync } = await import("node:fs");
+
+    if (existsSync(testDir)) {
+      rmSync(testDir, { recursive: true, force: true });
+    }
+    mkdirSync(testDir, { recursive: true });
+    writeFileSync(
+      `${testDir}/dataset_description.json`,
+      JSON.stringify({ Name: "Test Dataset", BIDSVersion: "1.6.0" }),
+    );
+
+    try {
+      // Test that --no-color (boolean false) is rejected
+      const { stdout, exitCode } = await runCli(["dataset", "validate", testDir, "--no-color"]);
+
+      expect(exitCode).toBe(1);
+      expect(stdout).toContain("Boolean flag");
+      expect(stdout).toContain("not supported");
+    } finally {
+      if (existsSync(testDir)) {
+        rmSync(testDir, { recursive: true, force: true });
+      }
+    }
+  });
+
+  test("nemar dataset validate --format conflicts with --json", async () => {
+    const testDir = "/tmp/test-bids-format-conflict";
+    const { existsSync, mkdirSync, writeFileSync, rmSync } = await import("node:fs");
+
+    if (existsSync(testDir)) {
+      rmSync(testDir, { recursive: true, force: true });
+    }
+    mkdirSync(testDir, { recursive: true });
+    writeFileSync(
+      `${testDir}/dataset_description.json`,
+      JSON.stringify({ Name: "Test Dataset", BIDSVersion: "1.6.0" }),
+    );
+
+    try {
+      // Test that --format text conflicts with internal --json
+      const { stdout, exitCode } = await runCli(["dataset", "validate", testDir, "--format", "text"]);
+
+      expect(exitCode).toBe(1);
+      expect(stdout).toContain("Conflicting flags");
+      expect(stdout).toContain("--json");
+    } finally {
+      if (existsSync(testDir)) {
+        rmSync(testDir, { recursive: true, force: true });
+      }
+    }
   });
 });
 
