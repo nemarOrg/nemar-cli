@@ -20,6 +20,19 @@ interface GenerateUrlsParams {
   expiresIn?: number; // seconds, default 3600 (1 hour)
 }
 
+interface S3PolicyStatement {
+  Sid?: string;
+  Effect: string;
+  Principal: string | { [key: string]: string | string[] };
+  Action: string | string[];
+  Resource: string | string[];
+}
+
+interface S3BucketPolicy {
+  Version: string;
+  Statement: S3PolicyStatement[];
+}
+
 /**
  * Create an AWS client for S3 operations
  */
@@ -316,7 +329,7 @@ export async function applyObjectLock(
  */
 export async function getBucketPolicy(
   options: PresignedUrlOptions,
-): Promise<{ Version: string; Statement: unknown[] } | null> {
+): Promise<S3BucketPolicy | null> {
   const { bucket, region } = options;
   const aws = createS3Client(options);
   const url = `https://${bucket}.s3.${region}.amazonaws.com/?policy`;
