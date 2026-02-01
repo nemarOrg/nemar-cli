@@ -15,17 +15,10 @@ import {
   completeSandbox,
   createDataset,
   finalizeDataset,
-  getCurrentUser,
   getSandboxStatus,
   resetSandbox,
 } from "../lib/api.js";
-import {
-  deleteConfig,
-  getConfig,
-  isAuthenticated,
-  isSandboxCompleted,
-  setConfig,
-} from "../lib/config.js";
+import { deleteConfig, getConfig, isAuthenticated, setConfig } from "../lib/config.js";
 import {
   type ConfirmOptions,
   NO_DESCRIPTION,

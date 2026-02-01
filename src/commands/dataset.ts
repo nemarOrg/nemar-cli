@@ -13,12 +13,11 @@
  * - nemar dataset collaborators   - List dataset collaborators
  */
 
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync } from "node:fs";
 import { basename, resolve } from "node:path";
 import { spawn } from "bun";
 import chalk from "chalk";
 import { Command } from "commander";
-import inquirer from "inquirer";
 import ora from "ora";
 import {
   ApiError,
@@ -47,7 +46,7 @@ import {
   validateBidsDataset,
 } from "../lib/bids-validator.js";
 import { getConfig, isAuthenticated, isSandboxCompleted } from "../lib/config.js";
-import { type ConfirmOptions, YES_DESCRIPTION, YES_OPTION, confirm } from "../lib/confirm.js";
+import { YES_DESCRIPTION, YES_OPTION, confirm } from "../lib/confirm.js";
 import {
   type LocalDatasetConfig,
   readLocalConfig,
@@ -1134,7 +1133,7 @@ datasetCommand
   .argument("<dataset-id>", "Dataset ID (e.g., nm000104)")
   .argument("<version>", "Version tag (e.g., v1.1.0)")
   .option("-m, --message <msg>", "Version description")
-  .action(async (datasetId, version, options) => {
+  .action(async (datasetId, version, _options) => {
     if (!isAuthenticated()) {
       console.log(chalk.red("Error: Not authenticated"));
       console.log("Run 'nemar auth login' first");

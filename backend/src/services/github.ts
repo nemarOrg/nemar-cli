@@ -266,6 +266,7 @@ export async function enableAutoMerge(repo: string, pat: string): Promise<boolea
   return response.ok;
 }
 
+
 /**
  * Create or update a file in a repository
  */

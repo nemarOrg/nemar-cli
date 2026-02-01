@@ -179,7 +179,7 @@ export function generateRandomEdfFile(outputPath: string, sizeKb = 500): void {
   const channelNames = ["Fp1", "Fp2", "C3", "C4"];
 
   // Write signal header fields (each field is numChannels * fieldSize)
-  const fieldSize = 16;
+  const _fieldSize = 16;
   const fields = [
     { offset: 0, size: 16, values: channelNames }, // Label
     { offset: 16 * numChannels, size: 80, values: Array(numChannels).fill("EEG electrode") }, // Transducer
@@ -230,7 +230,7 @@ export function cleanupSandboxDataset(datasetPath: string): void {
     // Git-annex creates files with restricted permissions; fix before removal
     execSync(`chmod -R u+w "${datasetPath}" 2>/dev/null || true`, { stdio: "ignore" });
     rmSync(datasetPath, { recursive: true, force: true });
-  } catch (error) {
+  } catch (_error) {
     // If Node.js rmSync fails, fall back to shell rm -rf
     try {
       execSync(`rm -rf "${datasetPath}"`, { stdio: "ignore" });
