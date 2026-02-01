@@ -20,9 +20,16 @@ import {
   deployWorkflows,
   enableAutoMerge,
   getWorkflowRuns,
+  updateRepositoryVisibility,
 } from "../services/github";
 import { grantDatasetAccess } from "../services/iam";
-import { generateDatasetUploadUrls, getManifest, listManifests } from "../services/s3";
+import {
+  addPublicReadPolicy,
+  generateDatasetUploadUrls,
+  getManifest,
+  hasPublicRead,
+  listManifests,
+} from "../services/s3";
 import type { Bindings, Variables } from "../types/bindings";
 
 export const datasetRoutes = new Hono<{ Bindings: Bindings; Variables: Variables }>();
@@ -1303,4 +1310,150 @@ datasetRoutes.get("/:id/manifest/:version", optionalAuthMiddleware, async (c) =>
   }
 
   return c.json(JSON.parse(manifestJson));
+});
+
+/**
+ * POST /datasets/:id/publish - Publish a dataset (make public)
+ *
+ * Authorization: Owner or admin only
+ * One-way operation: Cannot unpublish
+ *
+ * Effects:
+ * 1. Changes GitHub repo from private to public
+ * 2. Updates S3 bucket policy for public read
+ * 3. Sets visibility='public' in database
+ * 4. Logs action in audit_log
+ */
+datasetRoutes.post("/:id/publish", authMiddleware, async (c) => {
+  const datasetId = c.req.param("id");
+  const user = c.get("user");
+  const db = c.env.DB;
+
+  // Validate dataset ID format
+  if (!isValidDatasetId(datasetId)) {
+    return c.json({ error: "Invalid dataset ID" }, 400);
+  }
+
+  // Fetch dataset with ownership check
+  const dataset = await db
+    .prepare(`
+      SELECT id, dataset_id, name, owner_user_id, github_repo, visibility, is_sandbox
+      FROM datasets
+      WHERE dataset_id = ? AND status = 'active'
+    `)
+    .bind(datasetId)
+    .first<{
+      id: number;
+      dataset_id: string;
+      name: string;
+      owner_user_id: number;
+      github_repo: string | null;
+      visibility: string;
+      is_sandbox: number;
+    }>();
+
+  if (!dataset) {
+    return c.json({ error: "Dataset not found" }, 404);
+  }
+
+  // Authorization: owner or admin
+  if (dataset.owner_user_id !== user.id && !user.is_admin) {
+    return c.json({ error: "Forbidden: Only dataset owner or admin can publish" }, 403);
+  }
+
+  // Prevent publishing sandbox datasets
+  if (dataset.is_sandbox) {
+    return c.json(
+      {
+        error: "Cannot publish sandbox datasets",
+        message: "Sandbox datasets are for training only and cannot be made public",
+      },
+      400,
+    );
+  }
+
+  // Already public (idempotent)
+  if (dataset.visibility === "public") {
+    return c.json(
+      {
+        message: "Dataset is already public",
+        dataset_id: datasetId,
+      },
+      200,
+    );
+  }
+
+  // Validate GitHub repo exists
+  if (!dataset.github_repo) {
+    return c.json(
+      {
+        error: "Dataset has no GitHub repository",
+        message: "Cannot publish a dataset without a repository",
+      },
+      400,
+    );
+  }
+
+  // Extract repo name from full name (e.g., "nemarDatasets/nm000104" -> "nm000104")
+  const repoName = dataset.github_repo.split("/").pop();
+  if (!repoName) {
+    return c.json({ error: "Invalid GitHub repository format" }, 500);
+  }
+
+  try {
+    // Step 1: Update GitHub repository visibility
+    await updateRepositoryVisibility(repoName, false, c.env.GITHUB_ADMIN_PAT);
+
+    // Step 2: Update S3 bucket policy for public read
+    await addPublicReadPolicy(
+      {
+        bucket: c.env.S3_BUCKET,
+        region: c.env.AWS_REGION,
+        accessKeyId: c.env.AWS_ACCESS_KEY_ID,
+        secretAccessKey: c.env.AWS_SECRET_ACCESS_KEY,
+      },
+      datasetId,
+    );
+
+    // Step 3: Update database
+    await db
+      .prepare("UPDATE datasets SET visibility = 'public', updated_at = datetime('now') WHERE id = ?")
+      .bind(dataset.id)
+      .run();
+
+    // Step 4: Audit log
+    await db
+      .prepare(`
+        INSERT INTO audit_log (user_id, action, resource_type, resource_id, details)
+        VALUES (?, ?, ?, ?, ?)
+      `)
+      .bind(
+        user.id,
+        "dataset_publish",
+        "dataset",
+        datasetId,
+        JSON.stringify({
+          dataset_name: dataset.name,
+          github_repo: dataset.github_repo,
+        }),
+      )
+      .run();
+
+    return c.json({
+      success: true,
+      message: "Dataset published successfully",
+      dataset_id: datasetId,
+      github_url: `https://github.com/${dataset.github_repo}`,
+      s3_url: `https://${c.env.S3_BUCKET}.s3.${c.env.AWS_REGION}.amazonaws.com/${datasetId}/`,
+    });
+  } catch (error) {
+    console.error("Failed to publish dataset:", error);
+    return c.json(
+      {
+        error: "Failed to publish dataset",
+        details: error instanceof Error ? error.message : String(error),
+      },
+      500,
+    );
+  }
 });

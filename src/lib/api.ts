@@ -377,6 +377,22 @@ export async function changeVisibility(
   );
 }
 
+export interface PublishDatasetResponse {
+  success: boolean;
+  message: string;
+  dataset_id: string;
+  github_url: string;
+  s3_url: string;
+}
+
+/**
+ * Publish a dataset (make public) - owner or admin
+ * This is a one-way operation that cannot be undone
+ */
+export async function publishDataset(datasetId: string): Promise<PublishDatasetResponse> {
+  return request<PublishDatasetResponse>(`/datasets/${datasetId}/publish`, { method: "POST" }, true);
+}
+
 // ============================================================================
 // Admin - CI Management
 // ============================================================================

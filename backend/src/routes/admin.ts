@@ -24,7 +24,7 @@ import {
 } from "../services/github";
 import { generateIamUsername, revokeUserIamAccess, setupUserIamAccess } from "../services/iam";
 import { generateManifest } from "../services/manifest";
-import { applyObjectLock, getManifest, uploadManifest } from "../services/s3";
+import { addPublicReadPolicy, applyObjectLock, getManifest, uploadManifest } from "../services/s3";
 import { generateApiKey, hashApiKey } from "../services/token";
 import {
   type ZenodoDeposition,
@@ -1349,6 +1349,48 @@ adminRoutes.patch("/datasets/:id/visibility", zValidator("json", visibilitySchem
 
   if (!result.ok) {
     return c.json({ error: `Failed to set repository to ${visibility}: ${result.error}` }, 500);
+  }
+
+  // Update S3 bucket policy if making public
+  if (visibility === "public") {
+    try {
+      await addPublicReadPolicy(
+        {
+          bucket: c.env.S3_BUCKET,
+          region: c.env.AWS_REGION,
+          accessKeyId: c.env.AWS_ACCESS_KEY_ID,
+          secretAccessKey: c.env.AWS_SECRET_ACCESS_KEY,
+        },
+        datasetId,
+      );
+    } catch (s3Error) {
+      const s3Msg = s3Error instanceof Error ? s3Error.message : String(s3Error);
+      console.error(`WARNING: Failed to update S3 policy for ${datasetId}:`, s3Msg);
+      // GitHub is public but S3 policy failed - revert GitHub
+      const revertResult = await setRepoVisibility(repoName, true, c.env.GITHUB_ADMIN_PAT);
+      if (revertResult.ok) {
+        return c.json(
+          {
+            error: "Failed to update S3 bucket policy, reverted GitHub repository to private",
+            details: s3Msg,
+            dataset_id: datasetId,
+          },
+          500,
+        );
+      }
+      return c.json(
+        {
+          error: "CRITICAL: S3 policy update failed AND GitHub revert failed",
+          details: s3Msg,
+          dataset_id: datasetId,
+          github_visibility: "public",
+          s3_public: false,
+          revert_error: revertResult.error,
+          action_required: `Manually revert GitHub repo to private OR manually add S3 public read policy for ${datasetId}`,
+        },
+        500,
+      );
+    }
   }
 
   // Update dataset visibility in database to match GitHub repo
