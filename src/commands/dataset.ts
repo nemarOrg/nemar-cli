@@ -21,10 +21,10 @@ import { Command } from "commander";
 import ora from "ora";
 import {
   ApiError,
-  addCi,
-  createDataset,
   type Dataset,
   type DatasetsListResponse,
+  addCi,
+  createDataset,
   getDataset,
   getManifest,
   getPublishStatus,
@@ -46,7 +46,7 @@ import {
   validateBidsDataset,
 } from "../lib/bids-validator.js";
 import { getConfig, isAuthenticated, isSandboxCompleted } from "../lib/config.js";
-import { confirm, YES_DESCRIPTION, YES_OPTION } from "../lib/confirm.js";
+import { YES_DESCRIPTION, YES_OPTION, confirm } from "../lib/confirm.js";
 import {
   type LocalDatasetConfig,
   readLocalConfig,
