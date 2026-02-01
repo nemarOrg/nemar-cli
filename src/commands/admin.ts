@@ -1364,8 +1364,20 @@ adminCommand
           console.log(
             chalk.gray("The PR will go through validation checks before it can be merged."),
           );
-        } catch (_prError) {
+        } catch (prError) {
           prSpinner.fail("Failed to create PR via gh CLI");
+          const errorMsg = prError instanceof Error ? prError.message : String(prError);
+          console.error(chalk.red(`  Error: ${errorMsg}`));
+
+          if (errorMsg.includes("not found") || errorMsg.includes("command not found")) {
+            console.log(chalk.yellow("  Possible causes:"));
+            console.log("    • GitHub CLI (gh) not installed or not in PATH");
+            console.log("    • Run: brew install gh  (or see https://cli.github.com)");
+          } else if (errorMsg.includes("auth") || errorMsg.includes("401")) {
+            console.log(chalk.yellow("  GitHub authentication failed."));
+            console.log("    • Run: gh auth login");
+          }
+
           console.log(chalk.gray("  You may need to create the PR manually on GitHub"));
           console.log(chalk.gray(`  Branch: ${branchName}`));
         }

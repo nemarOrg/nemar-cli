@@ -161,13 +161,18 @@ export async function validateBidsDataset(
   }
 
   // Pass through additional options
+  // Note: Commander.js normalizes both --max-rows and --maxRows to maxRows in options object
+  // We convert to kebab-case (--max-rows) as required by the BIDS validator
+  // Unknown flags are passed through and validated by the BIDS validator itself
   const passThroughFlags: string[] = [];
+
   for (const [key, value] of Object.entries(options)) {
     if (knownOptions.has(key) || value === undefined || value === null) {
       continue;
     }
 
     passThroughFlags.push(key);
+    // Convert camelCase to kebab-case for BIDS validator
     const flagName = key.replace(/([A-Z])/g, "-$1").toLowerCase();
 
     if (typeof value === "boolean") {

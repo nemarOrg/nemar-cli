@@ -146,9 +146,10 @@ Additional BIDS Validator Flags (pass-through):
   --datasetTypes <types>          Permitted types: raw, derivative, study
   --blacklistModalities <m>       Error on specified modalities (mri, eeg, meg, etc)
   -o, --outfile <file>            File to write validation results to
-  --color, --no-color             Enable/disable color output
+  --color                         Enable color output
 
-Note: Pass-through flags use camelCase (e.g., --maxRows not --max-rows)
+Note: You can use either format (--maxRows or --max-rows); both are accepted.
+      Unknown flags are passed through to the BIDS validator for validation.
 
 Exit Codes:
   0 - Dataset is valid
@@ -163,7 +164,38 @@ Examples:
   $ nemar dataset validate ./ds --maxRows 0      # Validate headers only
   $ nemar dataset validate ./ds --ignoreNiftiHeaders  # Skip NIfTI header validation`,
   )
-  .action(async (datasetPath, options, _command) => {
+  .action(async (datasetPath, options, command) => {
+    // Parse unknown options from command's raw args
+    // Commander.js's .allowUnknownOption() doesn't parse them into opts()
+    const rawArgs = command.args.slice(1); // Skip the datasetPath argument
+    for (let i = 0; i < rawArgs.length; i++) {
+      const arg = rawArgs[i];
+      if (arg.startsWith("--")) {
+        const flagName = arg.slice(2);
+        const normalizedName = flagName.replace(/-([a-z])/g, (_, char) => char.toUpperCase());
+
+        // Skip if already in options (known option)
+        if (options[normalizedName] !== undefined) {
+          continue;
+        }
+
+        // Check if this is a --no-* flag
+        if (flagName.startsWith("no-")) {
+          const baseName = flagName.slice(3).replace(/-([a-z])/g, (_, char) => char.toUpperCase());
+          options[baseName] = false;
+        } else {
+          // Check if next arg is the value or if it's a boolean flag
+          if (i + 1 < rawArgs.length && !rawArgs[i + 1].startsWith("-")) {
+            options[normalizedName] = rawArgs[i + 1];
+            i++; // Skip the value in next iteration
+          } else {
+            // Boolean flag
+            options[normalizedName] = true;
+          }
+        }
+      }
+    }
+
     // Show version info if requested
     if (options.versionInfo) {
       const deno = await checkDenoInstalled();
