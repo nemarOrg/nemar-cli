@@ -117,6 +117,7 @@ datasetCommand
   .option("-v, --verbose", "Show verbose output")
   .option("--json", "Output results as JSON (for scripting)")
   .option("--version-info", "Show BIDS validator version info")
+  .allowUnknownOption()
   .addHelpText(
     "after",
     `
@@ -127,6 +128,25 @@ Description:
 Requirements:
   Deno runtime must be installed: https://deno.com
 
+Common Options:
+  -c, --config <file>         Validation config file (.bidsvalidatorrc)
+  -r, --recursive             Validate derivatives subdirectories
+  -p, --prune                 Skip sourcedata and derivatives
+  -v, --verbose               Show verbose output
+  --ignore-warnings           Only report errors, not warnings
+  --json                      Output results as JSON
+
+Additional BIDS Validator Flags (pass-through):
+  --format <format>           Output format: text, json, json_pp (default: text)
+  -s, --schema <URL-or-tag>   Specify schema version to use
+  --max-rows <nrows>          Max rows to validate in TSVs (default: 1000)
+  --ignore-nifti-headers      Disregard NIfTI header content
+  --debug <level>             Enable debug output (ERROR, WARN, INFO, DEBUG)
+  --dataset-types <types>     Permitted types: raw, derivative, study
+  --blacklist-modalities <m>  Error on specified modalities (mri, eeg, meg, etc)
+  -o, --outfile <file>        File to write validation results to
+  --color, --no-color         Enable/disable color output
+
 Exit Codes:
   0 - Dataset is valid
   1 - Dataset has errors or validation failed
@@ -135,9 +155,12 @@ Examples:
   $ nemar dataset validate                       # Validate current directory
   $ nemar dataset validate ./my-dataset          # Validate specific path
   $ nemar dataset validate ./ds --prune          # Fast validation (skip derivatives)
-  $ nemar dataset validate ./ds --json > out.json`,
+  $ nemar dataset validate ./ds --json > out.json
+  $ nemar dataset validate ./ds --format json_pp # Pretty JSON output
+  $ nemar dataset validate ./ds --debug INFO     # Enable debug logging
+  $ nemar dataset validate ./ds --max-rows 0     # Validate headers only`,
   )
-  .action(async (datasetPath, options) => {
+  .action(async (datasetPath, options, command) => {
     // Show version info if requested
     if (options.versionInfo) {
       const deno = await checkDenoInstalled();
@@ -202,13 +225,35 @@ Examples:
 
     let result: BidsValidationResult;
     try {
-      result = await validateBidsDataset(absolutePath, {
+      // Collect all options including unknown pass-through flags
+      // Filter out our internal options (versionInfo, json) and collect the rest
+      const validatorOptions: Record<string, unknown> = {
         config: options.config,
         ignoreWarnings: options.ignoreWarnings,
         recursive: options.recursive,
         prune: options.prune,
         verbose: options.verbose,
-      });
+      };
+
+      // Pass through any additional options from the command
+      // Commander stores unknown options directly in the options object
+      const knownCliOptions = new Set([
+        "config",
+        "ignoreWarnings",
+        "recursive",
+        "prune",
+        "verbose",
+        "json",
+        "versionInfo",
+      ]);
+
+      for (const [key, value] of Object.entries(options)) {
+        if (!knownCliOptions.has(key)) {
+          validatorOptions[key] = value;
+        }
+      }
+
+      result = await validateBidsDataset(absolutePath, validatorOptions);
       spinner.succeed("Validation complete");
       console.log();
     } catch (error) {

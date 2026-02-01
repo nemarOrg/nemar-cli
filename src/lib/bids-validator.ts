@@ -63,6 +63,8 @@ export interface ValidateOptions {
   prune?: boolean;
   /** Verbose output */
   verbose?: boolean;
+  /** Any additional pass-through options for the BIDS validator */
+  [key: string]: unknown;
 }
 
 /**
@@ -125,6 +127,15 @@ export async function validateBidsDataset(
   // Build command arguments
   const args = ["run", "-ERWN", "jsr:@bids/validator", datasetPath, "--json"];
 
+  // Known options with explicit handling
+  const knownOptions = new Set([
+    "config",
+    "ignoreWarnings",
+    "recursive",
+    "prune",
+    "verbose",
+  ]);
+
   if (options.config) {
     args.push("--config", options.config);
   }
@@ -139,6 +150,31 @@ export async function validateBidsDataset(
   }
   if (options.verbose) {
     args.push("--verbose");
+  }
+
+  // Pass through any additional options
+  for (const [key, value] of Object.entries(options)) {
+    if (knownOptions.has(key)) {
+      continue; // Already handled above
+    }
+
+    // Convert camelCase to kebab-case for CLI flags
+    const flagName = key.replace(/([A-Z])/g, "-$1").toLowerCase();
+
+    if (typeof value === "boolean") {
+      // Boolean flags: --flag or --no-flag
+      if (value) {
+        args.push(`--${flagName}`);
+      }
+    } else if (Array.isArray(value)) {
+      // Array flags: --flag value1 --flag value2 (for multi-value options)
+      for (const item of value) {
+        args.push(`--${flagName}`, String(item));
+      }
+    } else if (value !== undefined && value !== null) {
+      // Value flags: --flag value
+      args.push(`--${flagName}`, String(value));
+    }
   }
 
   // Run validator
