@@ -188,6 +188,14 @@ export async function validateBidsDataset(
     }
 
     if (Array.isArray(value)) {
+      // Validate array is not empty
+      if (value.length === 0) {
+        throw new Error(
+          `Empty array for flag --${flagName}.\nRemove this flag or provide at least one value.`,
+        );
+      }
+
+      // Validate array items are primitives
       for (const item of value) {
         if (typeof item !== "string" && typeof item !== "number" && typeof item !== "boolean") {
           throw new Error(
@@ -204,7 +212,7 @@ export async function validateBidsDataset(
 
   // Log pass-through flags for debugging
   if (passThroughFlags.length > 0 && options.verbose) {
-    console.log(`[DEBUG] Passing unknown flags to validator: ${passThroughFlags.join(", ")}`);
+    console.log(`[DEBUG] Pass-through flags: ${passThroughFlags.join(", ")}`);
   }
 
   // Log full command in verbose mode
@@ -212,12 +220,33 @@ export async function validateBidsDataset(
     console.log(`[DEBUG] Running: deno ${args.join(" ")}`);
   }
 
-  // Run validator
-  const proc = spawn({
-    cmd: ["deno", ...args],
-    stdout: "pipe",
-    stderr: "pipe",
-  });
+  // Run validator with error handling for spawn failures
+  let proc: ReturnType<typeof spawn>;
+  try {
+    proc = spawn({
+      cmd: ["deno", ...args],
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+  } catch (spawnError) {
+    const errorMsg = spawnError instanceof Error ? spawnError.message : String(spawnError);
+
+    if (errorMsg.includes("ENOENT")) {
+      throw new Error(
+        `Cannot execute 'deno' command.\nDeno may have been uninstalled or PATH changed.\nRun: nemar dataset validate --version-info\nOriginal error: ${errorMsg}`,
+      );
+    }
+
+    if (errorMsg.includes("EACCES")) {
+      throw new Error(
+        `Permission denied executing Deno.\nCheck that deno binary has execute permissions.\nOriginal error: ${errorMsg}`,
+      );
+    }
+
+    throw new Error(
+      `Failed to spawn BIDS validator process.\nError: ${errorMsg}\nCommand: deno ${args.join(" ")}`,
+    );
+  }
 
   const stdout = await new Response(proc.stdout).text();
   const stderr = await new Response(proc.stderr).text();
