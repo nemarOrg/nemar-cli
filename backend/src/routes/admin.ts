@@ -1426,27 +1426,59 @@ adminRoutes.patch("/datasets/:id/visibility", zValidator("json", visibilitySchem
         `CRITICAL: Failed to update database visibility for ${datasetId}. GitHub is now ${visibility} but database is out of sync.`,
       );
 
-      // Try to revert GitHub repo visibility
-      const revertResult = await setRepoVisibility(repoName, !isPrivate, c.env.GITHUB_ADMIN_PAT);
-      if (revertResult.ok) {
+      // Revert both GitHub and S3 changes
+      const ghRevertResult = await setRepoVisibility(repoName, !isPrivate, c.env.GITHUB_ADMIN_PAT);
+
+      let s3Reverted = false;
+      try {
+        if (visibility === "public") {
+          await removePublicReadPolicy(
+            {
+              bucket: c.env.S3_BUCKET,
+              region: c.env.AWS_REGION,
+              accessKeyId: c.env.AWS_ACCESS_KEY_ID,
+              secretAccessKey: c.env.AWS_SECRET_ACCESS_KEY,
+            },
+            datasetId,
+          );
+        } else {
+          await addPublicReadPolicy(
+            {
+              bucket: c.env.S3_BUCKET,
+              region: c.env.AWS_REGION,
+              accessKeyId: c.env.AWS_ACCESS_KEY_ID,
+              secretAccessKey: c.env.AWS_SECRET_ACCESS_KEY,
+            },
+            datasetId,
+          );
+        }
+        s3Reverted = true;
+      } catch (s3RevertError) {
+        console.error(`S3 policy revert failed for ${datasetId}:`, s3RevertError);
+      }
+
+      if (ghRevertResult.ok && s3Reverted) {
         return c.json(
           {
-            error: "Database update failed, reverted GitHub repository to original state",
+            error: "Database update failed, reverted GitHub and S3 to original state",
             details: errorDetails,
             dataset_id: datasetId,
           },
           500,
         );
       }
+
       return c.json(
         {
-          error: "CRITICAL: Database update failed AND repository revert failed",
+          error: "CRITICAL: Database update failed AND rollback incomplete",
           details: errorDetails,
           dataset_id: datasetId,
           github_visibility: visibility,
+          github_reverted: ghRevertResult.ok,
+          s3_reverted: s3Reverted,
           database_visibility: visibility === "public" ? "private" : "public",
-          revert_error: revertResult.error,
-          action_required: `Manually update database: UPDATE datasets SET visibility = '${visibility}' WHERE dataset_id = '${datasetId}'`,
+          revert_error: ghRevertResult.ok ? undefined : ghRevertResult.error,
+          action_required: `Manually fix: ${!ghRevertResult.ok ? `revert GitHub to ${!isPrivate ? "public" : "private"}` : ""} ${!s3Reverted ? `revert S3 policy for ${datasetId}` : ""} update database SET visibility = '${visibility}' WHERE dataset_id = '${datasetId}'`.trim(),
         },
         500,
       );
@@ -1455,27 +1487,59 @@ adminRoutes.patch("/datasets/:id/visibility", zValidator("json", visibilitySchem
     const msg = dbError instanceof Error ? dbError.message : String(dbError);
     console.error(`CRITICAL: Exception updating database visibility for ${datasetId}:`, msg);
 
-    // Try to revert GitHub repo visibility
-    const revertResult = await setRepoVisibility(repoName, !isPrivate, c.env.GITHUB_ADMIN_PAT);
-    if (revertResult.ok) {
+    // Revert both GitHub and S3 changes
+    const ghRevertResult = await setRepoVisibility(repoName, !isPrivate, c.env.GITHUB_ADMIN_PAT);
+
+    let s3Reverted = false;
+    try {
+      if (visibility === "public") {
+        await removePublicReadPolicy(
+          {
+            bucket: c.env.S3_BUCKET,
+            region: c.env.AWS_REGION,
+            accessKeyId: c.env.AWS_ACCESS_KEY_ID,
+            secretAccessKey: c.env.AWS_SECRET_ACCESS_KEY,
+          },
+          datasetId,
+        );
+      } else {
+        await addPublicReadPolicy(
+          {
+            bucket: c.env.S3_BUCKET,
+            region: c.env.AWS_REGION,
+            accessKeyId: c.env.AWS_ACCESS_KEY_ID,
+            secretAccessKey: c.env.AWS_SECRET_ACCESS_KEY,
+          },
+          datasetId,
+        );
+      }
+      s3Reverted = true;
+    } catch (s3RevertError) {
+      console.error(`S3 policy revert failed for ${datasetId}:`, s3RevertError);
+    }
+
+    if (ghRevertResult.ok && s3Reverted) {
       return c.json(
         {
-          error: "Database update failed, reverted GitHub repository to original state",
+          error: "Database update exception, reverted GitHub and S3 to original state",
           details: msg,
           dataset_id: datasetId,
         },
         500,
       );
     }
+
     return c.json(
       {
-        error: "CRITICAL: Database update failed AND repository revert failed",
+        error: "CRITICAL: Database update failed AND rollback incomplete",
         details: msg,
         dataset_id: datasetId,
         github_visibility: visibility,
+        github_reverted: ghRevertResult.ok,
+        s3_reverted: s3Reverted,
         database_visibility: visibility === "public" ? "private" : "public",
-        revert_error: revertResult.error,
-        action_required: `Manually update database: UPDATE datasets SET visibility = '${visibility}' WHERE dataset_id = '${datasetId}'`,
+        revert_error: ghRevertResult.ok ? undefined : ghRevertResult.error,
+        action_required: `Manually fix: ${!ghRevertResult.ok ? `revert GitHub to ${!isPrivate ? "public" : "private"}` : ""} ${!s3Reverted ? `revert S3 policy for ${datasetId}` : ""} update database SET visibility = '${visibility}' WHERE dataset_id = '${datasetId}'`.trim(),
       },
       500,
     );
