@@ -1005,29 +1005,35 @@ export interface S3LockResponse {
   offset: number;
 }
 
-export async function applyS3Lock(datasetId: string): Promise<{ locked: number; total: number; failed: string[] }> {
+export async function applyS3Lock(
+  datasetId: string,
+): Promise<{ locked: number; total: number; failed: string[] }> {
   let offset = 0;
   let totalLocked = 0;
   const allFailed: string[] = [];
   let total = 0;
+  let hasMore = true;
 
   do {
-    const result = await request<S3LockResponse>(`/admin/datasets/${datasetId}/s3-lock`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ offset }),
-    }, true);
+    const result = await request<S3LockResponse>(
+      `/admin/datasets/${datasetId}/s3-lock`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ offset }),
+      },
+      true,
+    );
 
     totalLocked += result.locked;
     allFailed.push(...result.failed);
     total = result.total;
+    hasMore = result.hasMore;
 
-    if (result.hasMore) {
+    if (hasMore) {
       offset += 40;
-    } else {
-      break;
     }
-  } while (true);
+  } while (hasMore);
 
   return { locked: totalLocked, total, failed: allFailed };
 }

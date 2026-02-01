@@ -131,8 +131,8 @@ export async function validateBidsDataset(
   if (options.format && options.format !== "json") {
     throw new Error(
       `Conflicting flags: CLI always uses --json for internal parsing.\n` +
-      `The --format flag with value "${options.format}" is not compatible.\n` +
-      `To get pretty JSON output, use: nemar dataset validate --json | jq`,
+        `The --format flag with value "${options.format}" is not compatible.\n` +
+        `To get pretty JSON output, use: nemar dataset validate --json | jq`,
     );
   }
 

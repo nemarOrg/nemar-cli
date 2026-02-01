@@ -13,19 +13,18 @@
  * - nemar dataset collaborators   - List dataset collaborators
  */
 
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync } from "node:fs";
 import { basename, resolve } from "node:path";
 import { spawn } from "bun";
 import chalk from "chalk";
 import { Command } from "commander";
-import inquirer from "inquirer";
 import ora from "ora";
 import {
   ApiError,
-  type Dataset,
-  type DatasetsListResponse,
   addCi,
   createDataset,
+  type Dataset,
+  type DatasetsListResponse,
   getDataset,
   getManifest,
   getPublishStatus,
@@ -47,7 +46,7 @@ import {
   validateBidsDataset,
 } from "../lib/bids-validator.js";
 import { getConfig, isAuthenticated, isSandboxCompleted } from "../lib/config.js";
-import { type ConfirmOptions, YES_DESCRIPTION, YES_OPTION, confirm } from "../lib/confirm.js";
+import { confirm, YES_DESCRIPTION, YES_OPTION } from "../lib/confirm.js";
 import {
   type LocalDatasetConfig,
   readLocalConfig,
@@ -164,7 +163,7 @@ Examples:
   $ nemar dataset validate ./ds --maxRows 0      # Validate headers only
   $ nemar dataset validate ./ds --ignoreNiftiHeaders  # Skip NIfTI header validation`,
   )
-  .action(async (datasetPath, options, command) => {
+  .action(async (datasetPath, options, _command) => {
     // Show version info if requested
     if (options.versionInfo) {
       const deno = await checkDenoInstalled();
@@ -1165,7 +1164,7 @@ datasetCommand
   .argument("<dataset-id>", "Dataset ID (e.g., nm000104)")
   .argument("<version>", "Version tag (e.g., v1.1.0)")
   .option("-m, --message <msg>", "Version description")
-  .action(async (datasetId, version, options) => {
+  .action(async (datasetId, version, _options) => {
     if (!isAuthenticated()) {
       console.log(chalk.red("Error: Not authenticated"));
       console.log("Run 'nemar auth login' first");

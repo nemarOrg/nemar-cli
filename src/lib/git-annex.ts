@@ -167,7 +167,11 @@ export async function checkGitHubSSH(): Promise<{
   }
 
   try {
-    const { stdout, stderr, exitCode } = await runCommand([
+    const {
+      stdout,
+      stderr,
+      exitCode: _exitCode,
+    } = await runCommand([
       "ssh",
       "-T",
       "-o",
@@ -1491,7 +1495,7 @@ export async function getAnnexS3Remotes(datasetPath: string): Promise<string[]> 
   const {
     stdout: remoteList,
     exitCode: listCode,
-    stderr,
+    stderr: _stderr,
   } = await runCommand(["git", "config", "--get-regexp", "^remote\\..*\\.annex-s3"], {
     cwd: datasetPath,
   });
