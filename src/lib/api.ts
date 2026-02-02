@@ -547,7 +547,7 @@ export function validateDataset(data: unknown): Dataset {
  * List datasets
  */
 export async function listDatasets(): Promise<DatasetsListResponse> {
-  const response = await request<DatasetsListResponse>("/datasets");
+  const response = await request<DatasetsListResponse>("/datasets", {}, true);
   // Validate each dataset in the response
   response.datasets = response.datasets.map(validateDataset);
   return response;
@@ -561,8 +561,8 @@ interface GetDatasetResponse {
  * Get a single dataset by ID
  */
 export async function getDataset(datasetId: string): Promise<Dataset> {
-  const response = await request<GetDatasetResponse>(`/datasets/${datasetId}`);
-  return response.dataset;
+  const response = await request<GetDatasetResponse>(`/datasets/${datasetId}`, {}, true);
+  return validateDataset(response.dataset);
 }
 
 export interface FileInfo {

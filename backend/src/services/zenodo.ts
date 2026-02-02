@@ -116,14 +116,16 @@ export async function createDeposition(
     }
   }
 
-  // Check content type even for successful responses
-  const contentType = response.headers.get("content-type");
-  if (!contentType?.includes("application/json")) {
-    const text = await response.text();
-    throw new Error(`Zenodo returned non-JSON response (${contentType}): ${text.substring(0, 200)}`);
+  // Parse response body safely - Zenodo may return HTML even with JSON content-type
+  const text = await response.text();
+  try {
+    return JSON.parse(text) as ZenodoDeposition;
+  } catch {
+    const contentType = response.headers.get("content-type");
+    throw new Error(
+      `Zenodo returned invalid JSON (status ${response.status}, content-type: ${contentType}): ${text.substring(0, 300)}`,
+    );
   }
-
-  return response.json() as Promise<ZenodoDeposition>;
 }
 
 /**
