@@ -194,7 +194,7 @@ datasetCommand
     }
 
     // Collect extra args (unknown flags passed through to bids-validator)
-    const extraArgs = collectPassthroughArgs(options);
+    const extraArgs = collectPassthroughArgs();
 
     // Run validation with spinner, then show native output
     const spinner = ora("Validating BIDS dataset...").start();
@@ -210,17 +210,10 @@ datasetCommand
         extraArgs,
       });
 
-      // Determine validity from exit code (0 = valid, 1 = has errors)
-      if (exitCode === 0) {
-        spinner.succeed("Validation complete");
-      } else if (stdout.trim()) {
-        // Has output but non-zero exit = validation errors found
-        spinner.succeed("Validation complete");
-      } else {
-        // No output + non-zero exit = real failure
+      // No output + non-zero exit = real failure (e.g. deno error)
+      if (!stdout.trim() && exitCode !== 0) {
         spinner.fail("Validation failed");
         if (stderr.trim()) {
-          // Filter out deno noise (npm warnings, etc.)
           const relevantStderr = stderr
             .split("\n")
             .filter((l) => !l.includes("Ignored build scripts"))
@@ -233,7 +226,9 @@ datasetCommand
         process.exit(1);
       }
 
-      // Print the native validator output (text or JSON)
+      // Has output: validation ran (exit 0 = valid, exit 1 = errors found)
+      spinner.succeed("Validation complete");
+
       if (stdout.trim()) {
         console.log(stdout);
       }
@@ -250,7 +245,7 @@ datasetCommand
  * Extract unknown/passthrough args from process.argv for the validate command.
  * Commander.js's .allowUnknownOption() prevents errors but doesn't parse them.
  */
-function collectPassthroughArgs(knownOptions: Record<string, unknown>): string[] {
+function collectPassthroughArgs(): string[] {
   const knownFlags = new Set([
     "--ignore-warnings",
     "--config",

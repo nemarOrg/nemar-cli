@@ -112,18 +112,17 @@ export async function getValidatorVersion(): Promise<string | null> {
 }
 
 /**
- * Validate a BIDS dataset (JSON mode, for programmatic use by upload command).
- *
- * @param datasetPath - Path to the BIDS dataset directory
- * @param options - Validation options
- * @returns Validation result with issues and summary
+ * Build the deno + bids-validator argument list from common options.
  */
-export async function validateBidsDataset(
+function buildValidatorArgs(
   datasetPath: string,
-  options: ValidateOptions = {},
-): Promise<BidsValidationResult> {
-  const args = ["run", "-ERWN", "jsr:@bids/validator", datasetPath, "--json"];
+  options: ValidateOptions & { json?: boolean; extraArgs?: string[] } = {},
+): string[] {
+  const args = ["run", "-ERWN", "jsr:@bids/validator", datasetPath];
 
+  if (options.json) {
+    args.push("--json");
+  }
   if (options.config) {
     args.push("--config", options.config);
   }
@@ -139,6 +138,25 @@ export async function validateBidsDataset(
   if (options.verbose) {
     args.push("--verbose");
   }
+  if (options.extraArgs?.length) {
+    args.push(...options.extraArgs);
+  }
+
+  return args;
+}
+
+/**
+ * Validate a BIDS dataset (JSON mode, for programmatic use by upload command).
+ *
+ * @param datasetPath - Path to the BIDS dataset directory
+ * @param options - Validation options
+ * @returns Validation result with issues and summary
+ */
+export async function validateBidsDataset(
+  datasetPath: string,
+  options: ValidateOptions = {},
+): Promise<BidsValidationResult> {
+  const args = buildValidatorArgs(datasetPath, { ...options, json: true });
 
   const proc = spawn({
     cmd: ["deno", ...args],
@@ -196,29 +214,7 @@ export async function runBidsValidatorDirect(
   datasetPath: string,
   options: ValidateOptions & { json?: boolean; extraArgs?: string[] } = {},
 ): Promise<{ stdout: string; stderr: string; exitCode: number }> {
-  const args = ["run", "-ERWN", "jsr:@bids/validator", datasetPath];
-
-  if (options.json) {
-    args.push("--json");
-  }
-  if (options.config) {
-    args.push("--config", options.config);
-  }
-  if (options.ignoreWarnings) {
-    args.push("--ignoreWarnings");
-  }
-  if (options.recursive) {
-    args.push("--recursive");
-  }
-  if (options.prune) {
-    args.push("--prune");
-  }
-  if (options.verbose) {
-    args.push("--verbose");
-  }
-  if (options.extraArgs?.length) {
-    args.push(...options.extraArgs);
-  }
+  const args = buildValidatorArgs(datasetPath, options);
 
   const proc = spawn({
     cmd: ["deno", ...args],
@@ -226,8 +222,8 @@ export async function runBidsValidatorDirect(
     stderr: "pipe",
   });
 
-  const stdout = await new Response(proc.stdout as ReadableStream).text();
-  const stderr = await new Response(proc.stderr as ReadableStream).text();
+  const stdout = await new Response(proc.stdout).text();
+  const stderr = await new Response(proc.stderr).text();
   const exitCode = await proc.exited;
 
   return { stdout, stderr, exitCode };
