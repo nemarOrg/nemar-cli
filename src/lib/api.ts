@@ -46,7 +46,7 @@ function getApiUrl(): string {
 async function request<T>(
   path: string,
   options: RequestInit = {},
-  authenticated = false,
+  authenticated: boolean | "optional" = false,
 ): Promise<T> {
   const url = `${getApiUrl()}${path}`;
   const headers: Record<string, string> = {
@@ -56,10 +56,12 @@ async function request<T>(
 
   if (authenticated) {
     const config = getConfig();
-    if (!config.apiKey) {
+    if (!config.apiKey && authenticated === true) {
       throw new ApiError(401, "Not authenticated. Run 'nemar auth login' first.");
     }
-    headers.Authorization = `Bearer ${config.apiKey}`;
+    if (config.apiKey) {
+      headers.Authorization = `Bearer ${config.apiKey}`;
+    }
   }
 
   let response: Response;
@@ -548,7 +550,11 @@ export function validateDataset(data: unknown): Dataset {
  */
 export async function listDatasets(mine = false): Promise<DatasetsListResponse> {
   const query = mine ? "?mine=true" : "";
-  const response = await request<DatasetsListResponse>(`/datasets${query}`, {}, true);
+  const response = await request<DatasetsListResponse>(
+    `/datasets${query}`,
+    {},
+    mine ? true : "optional",
+  );
   // Validate each dataset in the response
   response.datasets = response.datasets.map(validateDataset);
   return response;
@@ -562,7 +568,7 @@ interface GetDatasetResponse {
  * Get a single dataset by ID
  */
 export async function getDataset(datasetId: string): Promise<Dataset> {
-  const response = await request<GetDatasetResponse>(`/datasets/${datasetId}`, {}, true);
+  const response = await request<GetDatasetResponse>(`/datasets/${datasetId}`, {}, "optional");
   return validateDataset(response.dataset);
 }
 
