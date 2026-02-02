@@ -1157,12 +1157,14 @@ Examples:
     const idWidth = Math.max(10, ...datasets.map((d) => d.dataset_id.length));
     const nameWidth = Math.min(30, Math.max(10, ...datasets.map((d) => d.name.length)));
     const ownerWidth = Math.max(8, ...datasets.map((d) => d.owner_username.length));
+    const visWidth = 10;
 
     // Header
     const header = [
       "ID".padEnd(idWidth),
       "Name".padEnd(nameWidth),
       "Owner".padEnd(ownerWidth),
+      "Visibility".padEnd(visWidth),
       "Status",
     ].join("  ");
     console.log(chalk.gray(header));
@@ -1175,10 +1177,15 @@ Examples:
           ? `${dataset.name.substring(0, nameWidth - 3)}...`
           : dataset.name;
 
+      const visLabel = dataset.visibility === "public"
+        ? chalk.green("public")
+        : chalk.yellow("private");
+
       const row = [
         chalk.cyan(dataset.dataset_id.padEnd(idWidth)),
         name.padEnd(nameWidth),
         dataset.owner_username.padEnd(ownerWidth),
+        visLabel.padEnd(visWidth + (visLabel.length - dataset.visibility.length)),
         colorizeStatus(dataset.status),
       ].join("  ");
       console.log(row);

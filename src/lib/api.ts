@@ -533,7 +533,10 @@ export function validateDataset(data: unknown): Dataset {
     throw new Error(`Invalid dataset status: ${d.status}`);
   }
 
-  if (!["public", "private"].includes(d.visibility)) {
+  // Default to private if visibility not set (older records missing column)
+  if (!d.visibility) {
+    d.visibility = "private";
+  } else if (!["public", "private"].includes(d.visibility)) {
     throw new Error(`Invalid dataset visibility: ${d.visibility}`);
   }
 
