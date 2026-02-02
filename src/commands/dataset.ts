@@ -108,9 +108,7 @@ Learn More:
 // Validate command
 datasetCommand
   .command("validate")
-  .description(
-    "Validate a BIDS dataset using the official BIDS validator (requires Deno)",
-  )
+  .description("Validate a BIDS dataset using the official BIDS validator (requires Deno)")
   .argument("[path]", "Path to BIDS dataset directory", ".")
   .option("--ignore-warnings", "Only report errors, not warnings")
   .option("-c, --config <file>", "Validation config file (.bidsvalidatorrc)")
@@ -1177,9 +1175,8 @@ Examples:
           ? `${dataset.name.substring(0, nameWidth - 3)}...`
           : dataset.name;
 
-      const visLabel = dataset.visibility === "public"
-        ? chalk.green("public")
-        : chalk.yellow("private");
+      const visLabel =
+        dataset.visibility === "public" ? chalk.green("public") : chalk.yellow("private");
 
       const row = [
         chalk.cyan(dataset.dataset_id.padEnd(idWidth)),
