@@ -2069,7 +2069,7 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
       let dbUpdateResult;
       try {
         dbUpdateResult = await db
-          .prepare("UPDATE datasets SET visibility = 'public' WHERE dataset_id = ?")
+          .prepare("UPDATE datasets SET visibility = 'public', updated_at = datetime('now') WHERE dataset_id = ?")
           .bind(datasetId)
           .run();
 
@@ -2079,6 +2079,19 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
 
         if (dbUpdateResult.meta.changes === 0) {
           throw new Error("Dataset not found in database");
+        }
+
+        // Verify the write persisted (read-after-write check)
+        const verify = await db
+          .prepare("SELECT visibility FROM datasets WHERE dataset_id = ?")
+          .bind(datasetId)
+          .first<{ visibility: string }>();
+
+        if (!verify || verify.visibility !== "public") {
+          console.error(
+            `[publish] CRITICAL: Visibility read-after-write mismatch for ${datasetId}: expected 'public', got '${verify?.visibility}'`,
+          );
+          throw new Error(`Read-after-write verification failed: visibility is '${verify?.visibility}' instead of 'public'`);
         }
       } catch (dbError) {
         const msg = dbError instanceof Error ? dbError.message : String(dbError);
@@ -2691,6 +2704,22 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
         500,
       );
     }
+  }
+
+  // Final consistency check: ensure dataset visibility matches GitHub state
+  const finalCheck = await db
+    .prepare("SELECT visibility FROM datasets WHERE dataset_id = ?")
+    .bind(datasetId)
+    .first<{ visibility: string }>();
+
+  if (finalCheck && finalCheck.visibility !== "public") {
+    console.warn(
+      `[publish] Consistency fix: dataset ${datasetId} visibility was '${finalCheck.visibility}' at end of publish, correcting to 'public'`,
+    );
+    await db
+      .prepare("UPDATE datasets SET visibility = 'public', updated_at = datetime('now') WHERE dataset_id = ?")
+      .bind(datasetId)
+      .run();
   }
 
   // Mark as published
