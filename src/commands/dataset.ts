@@ -1096,7 +1096,7 @@ Examples:
 
     let response: DatasetsListResponse;
     try {
-      response = await listDatasets();
+      response = await listDatasets(!!options.mine);
       spinner.stop();
     } catch (error) {
       spinner.fail("Failed to fetch datasets");

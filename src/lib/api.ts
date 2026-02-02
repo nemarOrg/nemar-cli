@@ -546,8 +546,9 @@ export function validateDataset(data: unknown): Dataset {
 /**
  * List datasets
  */
-export async function listDatasets(): Promise<DatasetsListResponse> {
-  const response = await request<DatasetsListResponse>("/datasets", {}, true);
+export async function listDatasets(mine = false): Promise<DatasetsListResponse> {
+  const query = mine ? "?mine=true" : "";
+  const response = await request<DatasetsListResponse>(`/datasets${query}`, {}, true);
   // Validate each dataset in the response
   response.datasets = response.datasets.map(validateDataset);
   return response;

@@ -2380,13 +2380,23 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
       const doiBadge = `[![DOI](https://zenodo.org/badge/DOI/${conceptDoi}.svg)](${doiUrl})`;
 
       const tree = await getTreeAtRef(repoName, "main", pat);
-      const readmeFile = tree.find((f) => f.path === "README.md");
+      // Look for existing README in any format: README.md, README.rst, README.txt, README
+      const readmeCandidates = ["README.md", "README.rst", "README.txt", "README"];
+      let existingReadme: { path: string; sha: string } | undefined;
+      for (const candidate of readmeCandidates) {
+        const found = tree.find((f) => f.path === candidate);
+        if (found) {
+          existingReadme = found;
+          break;
+        }
+      }
 
       let readmeContent = "";
-      if (readmeFile) {
-        readmeContent = await getBlobContent(repoName, readmeFile.sha, pat);
+      const readmePath = existingReadme?.path || "README.md";
+      if (existingReadme) {
+        readmeContent = await getBlobContent(repoName, existingReadme.sha, pat);
       } else {
-        console.warn(`[publish] No README.md found in ${repoName}; creating one with DOI badge`);
+        console.warn(`[publish] No README found in ${repoName}; creating README.md with DOI badge`);
       }
 
       // Add DOI badge if no Zenodo badge exists yet.
@@ -2397,7 +2407,7 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
 
       await createOrUpdateFile(
         repoName,
-        "README.md",
+        readmePath,
         readmeContent,
         `Add DOI badge: ${conceptDoi}`,
         pat,
