@@ -8,7 +8,11 @@
  * The config is backed up and restored after tests.
  */
 
-import { afterAll, beforeAll, beforeEach, describe, expect, test } from "bun:test";
+import { afterAll, beforeAll, beforeEach, describe, expect, setDefaultTimeout, test } from "bun:test";
+
+// CLI tests spawn subprocesses that make network calls to Cloudflare Workers;
+// CI runners may experience cold starts and higher latency
+setDefaultTimeout(30000);
 import {
   copyFileSync,
   existsSync,
