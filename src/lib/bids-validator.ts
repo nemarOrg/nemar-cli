@@ -63,8 +63,6 @@ export interface ValidateOptions {
   prune?: boolean;
   /** Verbose output */
   verbose?: boolean;
-  /** Any additional pass-through options for the BIDS validator */
-  [key: string]: unknown;
 }
 
 /**
@@ -114,36 +112,17 @@ export async function getValidatorVersion(): Promise<string | null> {
 }
 
 /**
- * Validate a BIDS dataset
- *
- * @param datasetPath - Path to the BIDS dataset directory
- * @param options - Validation options
- * @returns Validation result with issues and summary
+ * Build the deno + bids-validator argument list from common options.
  */
-export async function validateBidsDataset(
+function buildValidatorArgs(
   datasetPath: string,
-  options: ValidateOptions = {},
-): Promise<BidsValidationResult> {
-  // Build command arguments
-  const args = ["run", "-ERWN", "jsr:@bids/validator", datasetPath, "--json"];
+  options: ValidateOptions & { json?: boolean; extraArgs?: string[] } = {},
+): string[] {
+  const args = ["run", "-ERWN", "jsr:@bids/validator", datasetPath];
 
-  // Validate that --format flag doesn't conflict with hardcoded --json
-  if (options.format && options.format !== "json") {
-    throw new Error(
-      `Conflicting flags: CLI always uses --json for internal parsing.\nThe --format flag with value "${options.format}" is not compatible.\nTo get pretty JSON output, use: nemar dataset validate --json | jq`,
-    );
+  if (options.json) {
+    args.push("--json");
   }
-
-  // Known options with explicit handling
-  const knownOptions = new Set([
-    "config",
-    "ignoreWarnings",
-    "recursive",
-    "prune",
-    "verbose",
-    "format", // Add to known options since we validate it above
-  ]);
-
   if (options.config) {
     args.push("--config", options.config);
   }
@@ -159,115 +138,42 @@ export async function validateBidsDataset(
   if (options.verbose) {
     args.push("--verbose");
   }
-
-  // Pass through additional options
-  // Note: Commander.js normalizes both --max-rows and --maxRows to maxRows in options object
-  // We convert to kebab-case (--max-rows) as required by the BIDS validator
-  // Unknown flags are passed through and validated by the BIDS validator itself
-  const passThroughFlags: string[] = [];
-
-  for (const [key, value] of Object.entries(options)) {
-    if (knownOptions.has(key) || value === undefined || value === null) {
-      continue;
-    }
-
-    passThroughFlags.push(key);
-    // Convert camelCase to kebab-case for BIDS validator
-    const flagName = key.replace(/([A-Z])/g, "-$1").toLowerCase();
-
-    if (typeof value === "boolean") {
-      if (value) {
-        args.push(`--${flagName}`);
-      } else {
-        // Explicitly reject --no-* flags since BIDS validator behavior is undefined
-        throw new Error(
-          `Boolean flag --no-${flagName} (from option '${key}: false') is not supported.\nThe BIDS validator only accepts positive boolean flags.\nRemove this flag or set ${key} to true.`,
-        );
-      }
-      continue;
-    }
-
-    if (Array.isArray(value)) {
-      // Validate array is not empty
-      if (value.length === 0) {
-        throw new Error(
-          `Empty array for flag --${flagName}.\nRemove this flag or provide at least one value.`,
-        );
-      }
-
-      // Validate array items are primitives
-      for (const item of value) {
-        if (typeof item !== "string" && typeof item !== "number" && typeof item !== "boolean") {
-          throw new Error(
-            `Invalid value for flag --${flagName}: array contains non-primitive value (${typeof item}).\nArray values must be strings, numbers, or booleans.`,
-          );
-        }
-        args.push(`--${flagName}`, String(item));
-      }
-      continue;
-    }
-
-    args.push(`--${flagName}`, String(value));
+  if (options.extraArgs?.length) {
+    args.push(...options.extraArgs);
   }
 
-  // Log pass-through flags for debugging
-  if (passThroughFlags.length > 0 && options.verbose) {
-    console.log(`[DEBUG] Pass-through flags: ${passThroughFlags.join(", ")}`);
-  }
+  return args;
+}
 
-  // Log full command in verbose mode
-  if (options.verbose) {
-    console.log(`[DEBUG] Running: deno ${args.join(" ")}`);
-  }
+/**
+ * Validate a BIDS dataset (JSON mode, for programmatic use by upload command).
+ *
+ * @param datasetPath - Path to the BIDS dataset directory
+ * @param options - Validation options
+ * @returns Validation result with issues and summary
+ */
+export async function validateBidsDataset(
+  datasetPath: string,
+  options: ValidateOptions = {},
+): Promise<BidsValidationResult> {
+  const args = buildValidatorArgs(datasetPath, { ...options, json: true });
 
-  // Run validator with error handling for spawn failures
-  let proc: ReturnType<typeof spawn>;
-  try {
-    proc = spawn({
-      cmd: ["deno", ...args],
-      stdout: "pipe",
-      stderr: "pipe",
-    });
-  } catch (spawnError) {
-    const errorMsg = spawnError instanceof Error ? spawnError.message : String(spawnError);
+  const proc = spawn({
+    cmd: ["deno", ...args],
+    stdout: "pipe",
+    stderr: "pipe",
+  });
 
-    if (errorMsg.includes("ENOENT")) {
-      throw new Error(
-        `Cannot execute 'deno' command.\nDeno may have been uninstalled or PATH changed.\nRun: nemar dataset validate --version-info\nOriginal error: ${errorMsg}`,
-      );
-    }
-
-    if (errorMsg.includes("EACCES")) {
-      throw new Error(
-        `Permission denied executing Deno.\nCheck that deno binary has execute permissions.\nOriginal error: ${errorMsg}`,
-      );
-    }
-
-    throw new Error(
-      `Failed to spawn BIDS validator process.\nError: ${errorMsg}\nCommand: deno ${args.join(" ")}`,
-    );
-  }
-
-  const stdout = await new Response(proc.stdout as ReadableStream).text();
-  const stderr = await new Response(proc.stderr as ReadableStream).text();
+  const stdout = await new Response(proc.stdout).text();
+  const stderr = await new Response(proc.stderr).text();
   const exitCode = await proc.exited;
 
-  // Always log stderr if present (warnings, deprecations, etc.)
-  if (stderr.trim()) {
-    console.error(`[BIDS Validator]: ${stderr.trim()}`);
-  }
-
-  // Handle fatal errors (no JSON output produced)
+  // Handle errors
   if (exitCode !== 0 && !stdout.trim()) {
-    const errorLine = stderr.includes("error:")
-      ? stderr.split("\n").find((l) => l.includes("error:"))
-      : null;
     throw new Error(
-      `BIDS validation failed with exit code ${exitCode}.\n${errorLine ? `Error: ${errorLine}\n` : ""}${
-        passThroughFlags.length > 0
-          ? `Note: Using pass-through flags: ${passThroughFlags.join(", ")}\n`
-          : ""
-      }Run with --verbose for more details.`,
+      stderr.includes("error:")
+        ? stderr.split("\n").find((l) => l.includes("error:")) || "Validation failed"
+        : `Validation failed with exit code ${exitCode}`,
     );
   }
 
@@ -282,10 +188,8 @@ export async function validateBidsDataset(
 
   try {
     result = JSON.parse(stdout);
-  } catch (parseError) {
-    throw new Error(
-      `Failed to parse BIDS validator output as JSON.\nThis may be caused by incompatible flags or validator errors.\nParse error: ${(parseError as Error).message}\nOutput (first 500 chars): ${stdout.slice(0, 500)}`,
-    );
+  } catch {
+    throw new Error(`Failed to parse validator output: ${stdout.slice(0, 200)}`);
   }
 
   const issues = result.issues.issues || [];
@@ -300,6 +204,29 @@ export async function validateBidsDataset(
     errorCount,
     warningCount,
   };
+}
+
+/**
+ * Run the BIDS validator directly, returning raw stdout/stderr and exit code.
+ * Used by the validate command for native text output passthrough.
+ */
+export async function runBidsValidatorDirect(
+  datasetPath: string,
+  options: ValidateOptions & { json?: boolean; extraArgs?: string[] } = {},
+): Promise<{ stdout: string; stderr: string; exitCode: number }> {
+  const args = buildValidatorArgs(datasetPath, options);
+
+  const proc = spawn({
+    cmd: ["deno", ...args],
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+
+  const stdout = await new Response(proc.stdout).text();
+  const stderr = await new Response(proc.stderr).text();
+  const exitCode = await proc.exited;
+
+  return { stdout, stderr, exitCode };
 }
 
 /**

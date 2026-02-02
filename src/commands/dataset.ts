@@ -43,6 +43,7 @@ import {
   checkDenoInstalled,
   formatValidationResult,
   getValidatorVersion,
+  runBidsValidatorDirect,
   validateBidsDataset,
 } from "../lib/bids-validator.js";
 import { getConfig, isAuthenticated, isSandboxCompleted } from "../lib/config.js";
@@ -107,7 +108,9 @@ Learn More:
 // Validate command
 datasetCommand
   .command("validate")
-  .description("Validate a BIDS dataset locally using the official BIDS validator")
+  .description(
+    "Validate a BIDS dataset using the official BIDS validator (requires Deno)",
+  )
   .argument("[path]", "Path to BIDS dataset directory", ".")
   .option("--ignore-warnings", "Only report errors, not warnings")
   .option("-c, --config <file>", "Validation config file (.bidsvalidatorrc)")
@@ -120,89 +123,17 @@ datasetCommand
   .addHelpText(
     "after",
     `
-Description:
-  Validates a BIDS dataset using the official BIDS validator (via Deno).
-  The validator checks dataset structure, file naming, and metadata.
+  Extra flags after known options are passed through to the BIDS validator.
+  See all validator flags: deno run jsr:@bids/validator --help
 
-Requirements:
-  Deno runtime must be installed: https://deno.com
-
-Common Options:
-  -c, --config <file>         Validation config file (.bidsvalidatorrc)
-  -r, --recursive             Validate derivatives subdirectories
-  --prune                     Skip sourcedata and derivatives
-  -v, --verbose               Show verbose output
-  --ignore-warnings           Only report errors, not warnings
-  --json                      Output results as JSON
-
-Additional BIDS Validator Flags (pass-through):
-  --format <format>               Output format: text, json, json_pp
-  -s, --schema <URL-or-tag>       Specify schema version to use
-  --maxRows <nrows>               Max rows to validate in TSVs (default: 1000)
-                                  Use 0 for headers only, -1 for all rows
-  --ignoreNiftiHeaders            Disregard NIfTI header content
-  --debug <level>                 Enable debug output (NOTSET, DEBUG, INFO,
-                                  WARN, ERROR, CRITICAL; default: ERROR)
-  --datasetTypes <types>          Permitted types: raw, derivative, study
-  --blacklistModalities <m>       Error on specified modalities (mri, eeg, meg, etc)
-  -o, --outfile <file>            File to write validation results to
-  --color                         Enable color output
-
-Note: You can use either format (--maxRows or --max-rows); both are accepted.
-      Unknown flags are passed through to the BIDS validator for validation.
-
-Exit Codes:
-  0 - Dataset is valid
-  1 - Dataset has errors or validation failed
-
-Examples:
-  $ nemar dataset validate                       # Validate current directory
-  $ nemar dataset validate ./my-dataset          # Validate specific path
-  $ nemar dataset validate ./ds --prune          # Fast validation (skip derivatives)
-  $ nemar dataset validate ./ds --json > out.json
-  $ nemar dataset validate ./ds --debug INFO     # Enable debug logging
-  $ nemar dataset validate ./ds --maxRows 0      # Validate headers only
-  $ nemar dataset validate ./ds --ignoreNiftiHeaders  # Skip NIfTI header validation`,
+  Examples:
+    $ nemar dataset validate                            # Validate current directory
+    $ nemar dataset validate ./ds --prune               # Skip derivatives
+    $ nemar dataset validate ./ds --json > out.json     # JSON for scripting
+    $ nemar dataset validate ./ds --ignoreNiftiHeaders  # Pass-through flag
+    $ nemar dataset validate ./ds --max-rows 0           # Headers only`,
   )
-  .action(async (datasetPath, options, command) => {
-    // Parse unknown options from command's raw args
-    // Commander.js's .allowUnknownOption() doesn't parse them into opts()
-    // command.args only contains positional arguments, use process.argv for full args
-    const commandName = "validate";
-    const commandIndex = process.argv.indexOf(commandName);
-    const rawArgs = commandIndex >= 0 ? process.argv.slice(commandIndex + 1) : [];
-    for (let i = 0; i < rawArgs.length; i++) {
-      const arg = rawArgs[i];
-      if (arg.startsWith("--")) {
-        const flagName = arg.slice(2);
-        const normalizedName = flagName.replace(/-([a-z])/g, (_: string, char: string) =>
-          char.toUpperCase(),
-        );
-
-        // Skip if already in options (known option)
-        if (options[normalizedName] !== undefined) {
-          continue;
-        }
-
-        // Check if this is a --no-* flag
-        if (flagName.startsWith("no-")) {
-          const baseName = flagName
-            .slice(3)
-            .replace(/-([a-z])/g, (_: string, char: string) => char.toUpperCase());
-          options[baseName] = false;
-        } else {
-          // Check if next arg is the value or if it's a boolean flag
-          if (i + 1 < rawArgs.length && !rawArgs[i + 1].startsWith("-")) {
-            options[normalizedName] = rawArgs[i + 1];
-            i++; // Skip the value in next iteration
-          } else {
-            // Boolean flag
-            options[normalizedName] = true;
-          }
-        }
-      }
-    }
-
+  .action(async (datasetPath, options) => {
     // Show version info if requested
     if (options.versionInfo) {
       const deno = await checkDenoInstalled();
@@ -262,42 +193,103 @@ Examples:
       process.exit(1);
     }
 
-    // Run validation
+    // Collect extra args (unknown flags passed through to bids-validator)
+    const extraArgs = collectPassthroughArgs();
+
+    // Run validation with spinner, then show native output
     const spinner = ora("Validating BIDS dataset...").start();
 
-    let result: BidsValidationResult;
     try {
-      // Pass all options to validator except CLI-specific flags
-      const knownCliOptions = new Set(["json", "versionInfo"]);
-      const validatorOptions: Record<string, unknown> = {};
+      const { stdout, stderr, exitCode } = await runBidsValidatorDirect(absolutePath, {
+        config: options.config,
+        ignoreWarnings: options.ignoreWarnings,
+        recursive: options.recursive,
+        prune: options.prune,
+        verbose: options.verbose,
+        json: options.json,
+        extraArgs,
+      });
 
-      for (const [key, value] of Object.entries(options)) {
-        if (!knownCliOptions.has(key)) {
-          validatorOptions[key] = value;
+      // No output + non-zero exit = real failure (e.g. deno error)
+      if (!stdout.trim() && exitCode !== 0) {
+        spinner.fail("Validation failed");
+        if (stderr.trim()) {
+          const relevantStderr = stderr
+            .split("\n")
+            .filter((l) => !l.includes("Ignored build scripts"))
+            .join("\n")
+            .trim();
+          if (relevantStderr) {
+            console.error(relevantStderr);
+          }
         }
+        process.exit(1);
       }
 
-      result = await validateBidsDataset(absolutePath, validatorOptions);
+      // Has output: validation ran (exit 0 = valid, exit 1 = errors found)
       spinner.succeed("Validation complete");
-      console.log();
+
+      if (stdout.trim()) {
+        console.log(stdout);
+      }
+
+      process.exit(exitCode);
     } catch (error) {
       spinner.fail("Validation failed");
       console.log(chalk.red((error as Error).message));
       process.exit(1);
     }
-
-    // Output results
-    if (options.json) {
-      console.log(JSON.stringify(result, null, 2));
-    } else {
-      console.log(formatValidationResult(result));
-    }
-
-    // Exit with error code if invalid
-    if (!result.valid) {
-      process.exit(1);
-    }
   });
+
+/**
+ * Extract unknown/passthrough args from process.argv for the validate command.
+ * Commander.js's .allowUnknownOption() prevents errors but doesn't parse them.
+ */
+function collectPassthroughArgs(): string[] {
+  const knownFlags = new Set([
+    "--ignore-warnings",
+    "--config",
+    "-c",
+    "--recursive",
+    "-r",
+    "--prune",
+    "--verbose",
+    "-v",
+    "--json",
+    "--version-info",
+    "--help",
+    "-h",
+  ]);
+
+  const extra: string[] = [];
+  const commandIndex = process.argv.indexOf("validate");
+  if (commandIndex < 0) return extra;
+
+  const rawArgs = process.argv.slice(commandIndex + 1);
+  for (let i = 0; i < rawArgs.length; i++) {
+    const arg = rawArgs[i];
+
+    // Skip the dataset path argument (first non-flag arg)
+    if (!arg.startsWith("-")) continue;
+
+    // Skip known flags
+    if (knownFlags.has(arg)) {
+      // If it's --config / -c, skip the next arg too (its value)
+      if (arg === "--config" || arg === "-c") i++;
+      continue;
+    }
+
+    // Pass through unknown flags and their values
+    extra.push(arg);
+    // If next arg looks like a value (not a flag), include it
+    if (i + 1 < rawArgs.length && !rawArgs[i + 1].startsWith("-")) {
+      extra.push(rawArgs[i + 1]);
+      i++;
+    }
+  }
+
+  return extra;
+}
 
 // Upload command
 datasetCommand
