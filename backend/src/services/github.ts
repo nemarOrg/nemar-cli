@@ -631,7 +631,21 @@ jobs:
   archive:
     name: Generate Dataset Archive
     runs-on: ubuntu-latest
+    env:
+      DATASET_ID: \${{ github.event.client_payload.dataset_id }}
+      VERSION: \${{ github.event.client_payload.version }}
     steps:
+      - name: Validate inputs
+        run: |
+          if [ -z "\$DATASET_ID" ]; then
+            echo "::error::Missing dataset_id in client_payload"
+            exit 1
+          fi
+          if [ -z "\$VERSION" ]; then
+            echo "::error::Missing version in client_payload"
+            exit 1
+          fi
+
       - uses: actions/checkout@v4
         with:
           ref: v\${{ github.event.client_payload.version }}
@@ -649,18 +663,23 @@ jobs:
           AWS_ACCESS_KEY_ID: \${{ secrets.AWS_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: \${{ secrets.AWS_SECRET_ACCESS_KEY }}
         run: |
-          DATASET_ID="\${{ github.event.client_payload.dataset_id }}"
           git annex init "archive-worker"
-          git annex enableremote nemar-s3 || true
-          git annex get . || echo "Some files could not be retrieved"
+          git annex enableremote nemar-s3
+          git annex get .
+
+      - name: Verify all files retrieved
+        run: |
+          MISSING=\$(git annex find --not --in here 2>/dev/null | wc -l)
+          if [ "\$MISSING" -gt 0 ]; then
+            echo "::error::\$MISSING files could not be retrieved from S3"
+            git annex find --not --in here
+            exit 1
+          fi
 
       - name: Create archive
         run: |
-          DATASET_ID="\${{ github.event.client_payload.dataset_id }}"
-          VERSION="\${{ github.event.client_payload.version }}"
-          # Zip everything except .git directory
           zip -r "/tmp/\${DATASET_ID}-v\${VERSION}.zip" . -x ".git/*"
-          echo "Archive size: $(du -h /tmp/\${DATASET_ID}-v\${VERSION}.zip | cut -f1)"
+          echo "Archive size: \$(du -h /tmp/\${DATASET_ID}-v\${VERSION}.zip | cut -f1)"
 
       - name: Upload to S3
         env:
@@ -668,8 +687,6 @@ jobs:
           AWS_SECRET_ACCESS_KEY: \${{ secrets.AWS_SECRET_ACCESS_KEY }}
           AWS_DEFAULT_REGION: us-east-2
         run: |
-          DATASET_ID="\${{ github.event.client_payload.dataset_id }}"
-          VERSION="\${{ github.event.client_payload.version }}"
           aws s3 cp "/tmp/\${DATASET_ID}-v\${VERSION}.zip" \\
             "s3://nemar/\${DATASET_ID}/archives/v\${VERSION}.zip"
           echo "Uploaded archive to s3://nemar/\${DATASET_ID}/archives/v\${VERSION}.zip"
@@ -701,7 +718,9 @@ jobs:
 
 /**
  * Trigger archive generation via repository_dispatch event.
- * The generate-archive workflow runs asynchronously in GitHub Actions.
+ * Sends dataset_id and version in the client_payload. The generate-archive
+ * workflow checks out the version tag, retrieves git-annex data, creates a zip,
+ * and uploads to S3 at {datasetId}/archives/v{version}.zip.
  */
 export async function triggerArchiveGeneration(
   repo: string,
@@ -726,7 +745,7 @@ export async function triggerArchiveGeneration(
     }),
   });
 
-  if (!response.ok && response.status !== 204) {
+  if (!response.ok) {
     const error = await response.text();
     throw new Error(`Failed to trigger archive generation: HTTP ${response.status} - ${error}`);
   }

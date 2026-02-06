@@ -449,7 +449,7 @@ BIDS CI integration, and versioning architecture.
 ### Phase 5: Versioning, Tags, Manifests [IN PROGRESS]
 **Closes:** #56
 - [ ] Version manifest generation (JSON: files -> S3 annex keys)
-- [ ] Upload manifests to S3 at `manifests/v*.json`
+- [ ] Upload manifests to S3 at `version/v*.json`
 - [ ] GitHub tag protection rules for dataset repos
 - [ ] `nemar admin s3 lock` command (already implemented in backend)
 - [ ] Integrate manifest generation into DOI/publish workflow

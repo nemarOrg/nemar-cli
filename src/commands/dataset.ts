@@ -742,10 +742,7 @@ Examples:
       spinner = ora("Registering file URLs with git-annex...").start();
 
       // Build public URLs for each uploaded file
-      const { s3_config, s3_prefix } = {
-        s3_config: datasetInfo.s3_config,
-        s3_prefix: datasetInfo.s3_prefix,
-      };
+      const { s3_config, s3_prefix } = datasetInfo;
       const fileUrls: Record<string, string> = {};
       for (const filePath of Object.keys(datasetInfo.upload_urls)) {
         fileUrls[filePath] = `${s3_config.public_url}/${s3_prefix}/objects/${filePath}`;

@@ -1,8 +1,9 @@
 /**
- * S3 Presigned URL service using aws4fetch
+ * S3 service using aws4fetch
  *
- * Generates presigned URLs for uploading data files to S3.
- * Uses aws4fetch which is compatible with Cloudflare Workers.
+ * Handles presigned URL generation (upload/download), version manifests,
+ * S3 Object Lock, bucket policy management, and archive download URLs.
+ * Uses aws4fetch for Cloudflare Workers compatibility.
  */
 
 import { AwsClient } from "aws4fetch";
@@ -242,6 +243,7 @@ export async function getManifest(
 
 /**
  * List available manifest versions for a dataset.
+ * Reads from the version/ prefix under the dataset's S3 directory.
  */
 export async function listManifests(
   options: PresignedUrlOptions,
@@ -258,8 +260,10 @@ export async function listManifests(
 }
 
 /**
- * Apply S3 Object Lock (Governance mode) to all objects under a dataset prefix.
- * Uses a 100-year retention period to effectively make objects immutable.
+ * Apply S3 Object Lock (Governance mode) to all objects under a dataset's
+ * objects/ prefix. Uses a 100-year retention period to effectively make
+ * data blobs immutable. Manifests (version/) and archives (archives/) are
+ * excluded so they can be updated or regenerated if needed.
  *
  * Processes objects in batches of `batchSize` to stay within Cloudflare Workers
  * subrequest limits. Returns `hasMore` if there are remaining objects to lock.
@@ -273,7 +277,7 @@ export async function applyObjectLock(
   const { bucket, region } = options;
   const aws = createS3Client(options);
 
-  const keys = await listObjectKeys(options, `${datasetId}/`);
+  const keys = await listObjectKeys(options, `${datasetId}/objects/`);
   const batch = keys.slice(offset, offset + batchSize);
   const failed: string[] = [];
   let locked = 0;

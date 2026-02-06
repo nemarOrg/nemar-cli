@@ -1866,13 +1866,19 @@ adminRoutes.post("/publish/:id/deny", zValidator("json", denySchema), async (c) 
  * POST /admin/publish/:id/approve - Approve and run publication orchestrator
  *
  * Steps:
- * 1. ci_check - Verify CI exists and is passing (deploy if missing)
- * 2. repo_public - Make repository public
- * 3. tag_protect - Apply tag protection rules (prevent version tag deletion)
- * 4. doi_create - Create concept DOI if not exists
- * 5. s3_lock - Apply S3 Object Lock (Governance mode)
- * 6. generate_archive - Trigger archive zip generation (async, non-blocking)
- * 7. notify_user - Send publication confirmation email
+ *  1. ci_check - Verify CI exists and is passing (deploy if missing)
+ *  2. repo_public - Make repository public
+ *  3. tag_protect - Apply tag protection rules (prevent version tag deletion)
+ *  4. doi_create - Create concept DOI if not exists
+ *  5. update_metadata - Update dataset_description.json with DOI
+ *  6. update_readme - Generate/update README with dataset info
+ *  7. create_tag - Create git tag for the version
+ *  8. create_release - Create GitHub release from tag
+ *  9. upload_to_zenodo - Upload release archive to Zenodo
+ * 10. publish_doi - Publish the Zenodo DOI (permanent and irreversible!)
+ * 11. s3_lock - Apply S3 Object Lock (Governance mode)
+ * 12. generate_archive - Trigger archive zip generation (async, non-blocking)
+ * 13. notify_user - Send publication confirmation email
  *
  * Body: { resume?: boolean } - if true, skip already-completed steps
  */
@@ -2763,10 +2769,13 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
         .run();
 
       const vtResult = await getVersionTag("generate_archive");
-      if (!(vtResult instanceof Response)) {
+      if (vtResult instanceof Response) {
+        console.warn(`[publish] Could not get version tag for archive generation of ${datasetId}`);
+        await updateProgress("generate_archive", "Could not resolve version tag");
+      } else {
         await triggerArchiveGeneration(repoName, datasetId, vtResult.version, pat);
+        await updateProgress("generate_archive");
       }
-      await updateProgress("generate_archive");
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       // Archive generation is non-critical; log warning but continue
@@ -2775,7 +2784,7 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
     }
   }
 
-  // Step 6: Notify user
+  // Step 13: Notify user
   if (stepsToRun.includes("notify_user")) {
     try {
       await db
