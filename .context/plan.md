@@ -46,7 +46,7 @@
 **Description:** Cloudflare Workers backend with D1 database for user and token management
 
 ### Deployment Info
-- **URL:** https://nemar-api.shirazi-10f.workers.dev
+- **URL:** https://api.osc.earth/nemar
 - **Database:** D1 `nemar-db` (0a168b1a-1923-4436-9509-6e4a9b5bb7ae)
 - **Rate Limit KV:** 9afb2679c6ea4ed4acd1a5916cf291d7
 - **Email:** Resend via nemar@osc.earth

@@ -28,6 +28,7 @@ import {
   getWorkflowRuns,
   removeCollaborator,
   setRepoVisibility,
+  triggerArchiveGeneration,
 } from "../services/github";
 import { generateIamUsername, revokeUserIamAccess, setupUserIamAccess } from "../services/iam";
 import { generateManifest } from "../services/manifest";
@@ -70,6 +71,7 @@ type PublicationStep =
   | "upload_to_zenodo"
   | "publish_doi"
   | "s3_lock"
+  | "generate_archive"
   | "notify_user";
 
 export const adminRoutes = new Hono<{ Bindings: Bindings; Variables: Variables }>();
@@ -399,9 +401,7 @@ adminRoutes.post("/revoke/:username", async (c) => {
         }
       } else {
         // Complete success
-        console.log(
-          `IAM revocation succeeded for ${user.username}:\n${result.steps.join("\n")}`,
-        );
+        console.log(`IAM revocation succeeded for ${user.username}:\n${result.steps.join("\n")}`);
       }
     } catch (error) {
       // Complete failure - couldn't even start cleanup
@@ -1445,7 +1445,9 @@ adminRoutes.patch("/datasets/:id/visibility", zValidator("json", visibilitySchem
 
     if (!dbUpdateResult.success || dbUpdateResult.meta.changes === 0) {
       const errorDetails =
-        dbUpdateResult.meta.changes === 0 ? "Dataset not found in database" : "Database update did not succeed";
+        dbUpdateResult.meta.changes === 0
+          ? "Dataset not found in database"
+          : "Database update did not succeed";
 
       console.error(
         `CRITICAL: Failed to update database visibility for ${datasetId}. GitHub is now ${visibility} but database is out of sync.`,
@@ -1503,7 +1505,8 @@ adminRoutes.patch("/datasets/:id/visibility", zValidator("json", visibilitySchem
           s3_reverted: s3Reverted,
           database_visibility: visibility === "public" ? "private" : "public",
           revert_error: ghRevertResult.ok ? undefined : ghRevertResult.error,
-          action_required: `Manually fix: ${!ghRevertResult.ok ? `revert GitHub to ${!isPrivate ? "public" : "private"}` : ""} ${!s3Reverted ? `revert S3 policy for ${datasetId}` : ""} update database SET visibility = '${visibility}' WHERE dataset_id = '${datasetId}'`.trim(),
+          action_required:
+            `Manually fix: ${!ghRevertResult.ok ? `revert GitHub to ${!isPrivate ? "public" : "private"}` : ""} ${!s3Reverted ? `revert S3 policy for ${datasetId}` : ""} update database SET visibility = '${visibility}' WHERE dataset_id = '${datasetId}'`.trim(),
         },
         500,
       );
@@ -1564,7 +1567,8 @@ adminRoutes.patch("/datasets/:id/visibility", zValidator("json", visibilitySchem
         s3_reverted: s3Reverted,
         database_visibility: visibility === "public" ? "private" : "public",
         revert_error: ghRevertResult.ok ? undefined : ghRevertResult.error,
-        action_required: `Manually fix: ${!ghRevertResult.ok ? `revert GitHub to ${!isPrivate ? "public" : "private"}` : ""} ${!s3Reverted ? `revert S3 policy for ${datasetId}` : ""} update database SET visibility = '${visibility}' WHERE dataset_id = '${datasetId}'`.trim(),
+        action_required:
+          `Manually fix: ${!ghRevertResult.ok ? `revert GitHub to ${!isPrivate ? "public" : "private"}` : ""} ${!s3Reverted ? `revert S3 policy for ${datasetId}` : ""} update database SET visibility = '${visibility}' WHERE dataset_id = '${datasetId}'`.trim(),
       },
       500,
     );
@@ -1590,7 +1594,12 @@ adminRoutes.patch("/datasets/:id/visibility", zValidator("json", visibilitySchem
   } catch (auditError) {
     auditLogFailed = true;
     auditLogError = auditError instanceof Error ? auditError.message : String(auditError);
-    console.error("AUDIT LOG FAILURE: Visibility change for dataset", datasetId, "was not logged:", auditLogError);
+    console.error(
+      "AUDIT LOG FAILURE: Visibility change for dataset",
+      datasetId,
+      "was not logged:",
+      auditLogError,
+    );
   }
 
   return c.json({
@@ -1862,7 +1871,8 @@ adminRoutes.post("/publish/:id/deny", zValidator("json", denySchema), async (c) 
  * 3. tag_protect - Apply tag protection rules (prevent version tag deletion)
  * 4. doi_create - Create concept DOI if not exists
  * 5. s3_lock - Apply S3 Object Lock (Governance mode)
- * 6. notify_user - Send publication confirmation email
+ * 6. generate_archive - Trigger archive zip generation (async, non-blocking)
+ * 7. notify_user - Send publication confirmation email
  *
  * Body: { resume?: boolean } - if true, skip already-completed steps
  */
@@ -1891,7 +1901,9 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
     return c.json({ error: "No active publication request found" }, 404);
   }
 
-  const stepsCompleted: PublicationStep[] = resume ? JSON.parse(request.steps_completed || "[]") : [];
+  const stepsCompleted: PublicationStep[] = resume
+    ? JSON.parse(request.steps_completed || "[]")
+    : [];
   const allSteps: readonly PublicationStep[] = [
     "ci_check",
     "repo_public",
@@ -1902,8 +1914,9 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
     "create_tag",
     "create_release",
     "upload_to_zenodo",
-    "publish_doi",      // Permanent and irreversible!
+    "publish_doi", // Permanent and irreversible!
     "s3_lock",
+    "generate_archive",
     "notify_user",
   ] as const;
   const stepsToRun = allSteps.filter((s) => !stepsCompleted.includes(s));
@@ -1989,7 +2002,10 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
         .bind(JSON.stringify(completed), error ? step : null, error || null, requestId)
         .run();
     } catch (dbErr) {
-      console.error(`[publish] CRITICAL: Failed to update progress for step ${step}, dataset ${datasetId}:`, dbErr);
+      console.error(
+        `[publish] CRITICAL: Failed to update progress for step ${step}, dataset ${datasetId}:`,
+        dbErr,
+      );
     }
   }
 
@@ -2069,7 +2085,9 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
       let dbUpdateResult;
       try {
         dbUpdateResult = await db
-          .prepare("UPDATE datasets SET visibility = 'public', updated_at = datetime('now') WHERE dataset_id = ?")
+          .prepare(
+            "UPDATE datasets SET visibility = 'public', updated_at = datetime('now') WHERE dataset_id = ?",
+          )
           .bind(datasetId)
           .run();
 
@@ -2091,7 +2109,9 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
           console.error(
             `[publish] CRITICAL: Visibility read-after-write mismatch for ${datasetId}: expected 'public', got '${verify?.visibility}'`,
           );
-          throw new Error(`Read-after-write verification failed: visibility is '${verify?.visibility}' instead of 'public'`);
+          throw new Error(
+            `Read-after-write verification failed: visibility is '${verify?.visibility}' instead of 'public'`,
+          );
         }
       } catch (dbError) {
         const msg = dbError instanceof Error ? dbError.message : String(dbError);
@@ -2179,7 +2199,8 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
             return c.json(
               {
                 error: "Server misconfiguration: ENVIRONMENT variable not set",
-                message: "Cannot create production DOIs without explicit environment configuration. Use --sandbox for testing.",
+                message:
+                  "Cannot create production DOIs without explicit environment configuration. Use --sandbox for testing.",
                 step: "doi_create",
                 steps_completed: completed,
               },
@@ -2207,7 +2228,9 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
         );
         const zenodoToken = sandbox ? c.env.ZENODO_SANDBOX_API_KEY : c.env.ZENODO_API_KEY;
         if (!zenodoToken) {
-          const errorMsg = sandbox ? "Zenodo sandbox API key not configured" : "Zenodo API key not configured";
+          const errorMsg = sandbox
+            ? "Zenodo sandbox API key not configured"
+            : "Zenodo API key not configured";
           await updateProgress("doi_create", errorMsg);
           return c.json(
             {
@@ -2259,13 +2282,19 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
   }
 
   // --- Helper: read dataset_description.json from repo ---
-  async function readDatasetDescription(stepName: PublicationStep): Promise<Record<string, unknown> | Response> {
+  async function readDatasetDescription(
+    stepName: PublicationStep,
+  ): Promise<Record<string, unknown> | Response> {
     const tree = await getTreeAtRef(repoName, "main", pat);
     const descFile = tree.find((f) => f.path === "dataset_description.json");
     if (!descFile) {
       await updateProgress(stepName, "dataset_description.json not found in repo");
       return c.json(
-        { error: "dataset_description.json not found in repository", step: stepName, steps_completed: completed },
+        {
+          error: "dataset_description.json not found in repository",
+          step: stepName,
+          steps_completed: completed,
+        },
         500,
       );
     }
@@ -2274,7 +2303,9 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
       return JSON.parse(content) as Record<string, unknown>;
     } catch (parseErr) {
       const parseMsg = `dataset_description.json contains invalid JSON: ${parseErr instanceof Error ? parseErr.message : String(parseErr)}`;
-      console.error(`[publish] ${parseMsg} for ${repoName}. Content starts with: ${content.substring(0, 200)}`);
+      console.error(
+        `[publish] ${parseMsg} for ${repoName}. Content starts with: ${content.substring(0, 200)}`,
+      );
       await updateProgress(stepName, parseMsg);
       return c.json({ error: parseMsg, step: stepName, steps_completed: completed }, 500);
     }
@@ -2288,20 +2319,32 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
       .first<{ concept_doi: string | null }>();
     if (!row?.concept_doi) {
       await updateProgress(stepName, "No concept DOI found");
-      return c.json({ error: `Cannot run ${stepName}: no concept DOI found`, step: stepName, steps_completed: completed }, 500);
+      return c.json(
+        {
+          error: `Cannot run ${stepName}: no concept DOI found`,
+          step: stepName,
+          steps_completed: completed,
+        },
+        500,
+      );
     }
     return row.concept_doi;
   }
 
   // --- Helper: get Zenodo config from database ---
-  async function getZenodoConfig(stepName: PublicationStep): Promise<{ depositionId: number; token: string; isSandbox: boolean } | Response> {
+  async function getZenodoConfig(
+    stepName: PublicationStep,
+  ): Promise<{ depositionId: number; token: string; isSandbox: boolean } | Response> {
     const row = await db
       .prepare("SELECT zenodo_concept_id, is_sandbox FROM datasets WHERE dataset_id = ?")
       .bind(datasetId)
       .first<{ zenodo_concept_id: string | null; is_sandbox: number | null }>();
     if (!row?.zenodo_concept_id) {
       await updateProgress(stepName, "No Zenodo deposition found");
-      return c.json({ error: "No Zenodo deposition ID found", step: stepName, steps_completed: completed }, 500);
+      return c.json(
+        { error: "No Zenodo deposition ID found", step: stepName, steps_completed: completed },
+        500,
+      );
     }
     const depositionId = Number.parseInt(row.zenodo_concept_id, 10);
     if (Number.isNaN(depositionId)) {
@@ -2313,7 +2356,9 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
     const isSandbox = row.is_sandbox === 1;
     const token = isSandbox ? c.env.ZENODO_SANDBOX_API_KEY : c.env.ZENODO_API_KEY;
     if (!token) {
-      const msg = isSandbox ? "Zenodo sandbox API key not configured" : "Zenodo API key not configured";
+      const msg = isSandbox
+        ? "Zenodo sandbox API key not configured"
+        : "Zenodo API key not configured";
       await updateProgress(stepName, msg);
       return c.json({ error: msg, step: stepName, steps_completed: completed }, 500);
     }
@@ -2321,12 +2366,15 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
   }
 
   // --- Helper: get version and tag from dataset_description.json ---
-  async function getVersionTag(stepName: PublicationStep): Promise<{ version: string; tag: string; datasetDesc: Record<string, unknown> } | Response> {
+  async function getVersionTag(
+    stepName: PublicationStep,
+  ): Promise<{ version: string; tag: string; datasetDesc: Record<string, unknown> } | Response> {
     const result = await readDatasetDescription(stepName);
     if (result instanceof Response) return result;
     const datasetDesc = result;
     if (!datasetDesc.Version) {
-      const msg = "dataset_description.json has no Version field; cannot create version tag for permanent DOI record";
+      const msg =
+        "dataset_description.json has no Version field; cannot create version tag for permanent DOI record";
       console.warn(`[publish] ${msg} for ${repoName}`);
       await updateProgress(stepName, msg);
       return c.json({ error: msg, step: stepName, steps_completed: completed }, 500);
@@ -2370,7 +2418,11 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
       console.error(`[publish] update_metadata failed for dataset ${datasetId}:`, err);
       await updateProgress("update_metadata", msg);
       return c.json(
-        { error: `Metadata update failed: ${msg}`, step: "update_metadata", steps_completed: completed },
+        {
+          error: `Metadata update failed: ${msg}`,
+          step: "update_metadata",
+          steps_completed: completed,
+        },
         500,
       );
     }
@@ -2432,7 +2484,11 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
       console.error(`[publish] update_readme failed for dataset ${datasetId}:`, err);
       await updateProgress("update_readme", msg);
       return c.json(
-        { error: `README update failed: ${msg}`, step: "update_readme", steps_completed: completed },
+        {
+          error: `README update failed: ${msg}`,
+          step: "update_readme",
+          steps_completed: completed,
+        },
         500,
       );
     }
@@ -2491,13 +2547,7 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
       const doiInfo = datasetDesc.DatasetDOI ? `DOI: ${datasetDesc.DatasetDOI}` : "";
       const releaseBody = `# ${dataset.name} - Version ${version}\n\n${doiInfo}\n\nBIDS-formatted dataset published via NEMAR.`;
 
-      await createRelease(
-        repoName,
-        tag,
-        `${dataset.name} ${tag}`,
-        releaseBody,
-        pat,
-      );
+      await createRelease(repoName, tag, `${dataset.name} ${tag}`, releaseBody, pat);
 
       await updateProgress("create_release");
     } catch (err) {
@@ -2505,7 +2555,11 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
       console.error(`[publish] create_release failed for dataset ${datasetId}:`, err);
       await updateProgress("create_release", msg);
       return c.json(
-        { error: `Release creation failed: ${msg}`, step: "create_release", steps_completed: completed },
+        {
+          error: `Release creation failed: ${msg}`,
+          step: "create_release",
+          steps_completed: completed,
+        },
         500,
       );
     }
@@ -2536,13 +2590,24 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
       if (!deposition.links.bucket) {
         await updateProgress("upload_to_zenodo", "No bucket URL in deposition");
         return c.json(
-          { error: "Zenodo deposition has no bucket URL", step: "upload_to_zenodo", steps_completed: completed },
+          {
+            error: "Zenodo deposition has no bucket URL",
+            step: "upload_to_zenodo",
+            steps_completed: completed,
+          },
           500,
         );
       }
 
       const filename = `${datasetId}-${tag}.zip`;
-      await uploadFile(depositionId, deposition.links.bucket, filename, archiveData, zenodoToken, isSandbox);
+      await uploadFile(
+        depositionId,
+        deposition.links.bucket,
+        filename,
+        archiveData,
+        zenodoToken,
+        isSandbox,
+      );
 
       await updateProgress("upload_to_zenodo");
     } catch (err) {
@@ -2550,7 +2615,11 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
       console.error(`[publish] upload_to_zenodo failed for dataset ${datasetId}:`, err);
       await updateProgress("upload_to_zenodo", msg);
       return c.json(
-        { error: `Zenodo upload failed: ${msg}`, step: "upload_to_zenodo", steps_completed: completed },
+        {
+          error: `Zenodo upload failed: ${msg}`,
+          step: "upload_to_zenodo",
+          steps_completed: completed,
+        },
         500,
       );
     }
@@ -2579,7 +2648,9 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
       if (published.doi) {
         try {
           await db
-            .prepare("UPDATE datasets SET concept_doi = ?, updated_at = datetime('now') WHERE dataset_id = ?")
+            .prepare(
+              "UPDATE datasets SET concept_doi = ?, updated_at = datetime('now') WHERE dataset_id = ?",
+            )
             .bind(published.doi, datasetId)
             .run();
         } catch (dbErr) {
@@ -2587,7 +2658,10 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
             `[publish] CRITICAL: DOI published on Zenodo (${published.doi}) but database update failed for ${datasetId}:`,
             dbErr,
           );
-          await updateProgress("publish_doi", `DOI published (${published.doi}) but DB update failed; manual correction required`);
+          await updateProgress(
+            "publish_doi",
+            `DOI published (${published.doi}) but DB update failed; manual correction required`,
+          );
           return c.json(
             {
               error: `DOI was published successfully (${published.doi}) but database update failed. Manual database correction required.`,
@@ -2599,7 +2673,10 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
           );
         }
       } else {
-        console.error(`[publish] Zenodo publish returned no DOI for dataset ${datasetId}; response:`, published);
+        console.error(
+          `[publish] Zenodo publish returned no DOI for dataset ${datasetId}; response:`,
+          published,
+        );
       }
 
       await updateProgress("publish_doi");
@@ -2608,7 +2685,11 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
       console.error(`[publish] publish_doi failed for dataset ${datasetId}:`, err);
       await updateProgress("publish_doi", msg);
       return c.json(
-        { error: `DOI publication failed: ${msg}`, step: "publish_doi", steps_completed: completed },
+        {
+          error: `DOI publication failed: ${msg}`,
+          step: "publish_doi",
+          steps_completed: completed,
+        },
         500,
       );
     }
@@ -2671,6 +2752,29 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
     }
   }
 
+  // Step: Generate archive (async via GitHub Actions; non-blocking)
+  if (stepsToRun.includes("generate_archive")) {
+    try {
+      await db
+        .prepare(
+          "UPDATE publication_requests SET current_step = 'generate_archive', updated_at = datetime('now') WHERE id = ?",
+        )
+        .bind(request.id)
+        .run();
+
+      const vtResult = await getVersionTag("generate_archive");
+      if (!(vtResult instanceof Response)) {
+        await triggerArchiveGeneration(repoName, datasetId, vtResult.version, pat);
+      }
+      await updateProgress("generate_archive");
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      // Archive generation is non-critical; log warning but continue
+      console.warn(`[publish] Archive generation trigger failed for ${datasetId}: ${msg}`);
+      await updateProgress("generate_archive", msg);
+    }
+  }
+
   // Step 6: Notify user
   if (stepsToRun.includes("notify_user")) {
     try {
@@ -2717,7 +2821,9 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
       `[publish] Consistency fix: dataset ${datasetId} visibility was '${finalCheck.visibility}' at end of publish, correcting to 'public'`,
     );
     await db
-      .prepare("UPDATE datasets SET visibility = 'public', updated_at = datetime('now') WHERE dataset_id = ?")
+      .prepare(
+        "UPDATE datasets SET visibility = 'public', updated_at = datetime('now') WHERE dataset_id = ?",
+      )
       .bind(datasetId)
       .run();
   }
@@ -2753,7 +2859,12 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
   } catch (auditError) {
     auditLogFailed = true;
     auditLogError = auditError instanceof Error ? auditError.message : String(auditError);
-    console.error("AUDIT LOG FAILURE: Dataset publication for", datasetId, "was not logged:", auditLogError);
+    console.error(
+      "AUDIT LOG FAILURE: Dataset publication for",
+      datasetId,
+      "was not logged:",
+      auditLogError,
+    );
   }
 
   return c.json({
@@ -2773,7 +2884,7 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
 adminRoutes.post("/datasets/:id/s3-lock", async (c) => {
   const datasetId = c.req.param("id");
   const db = c.env.DB;
-  const body = await c.req.json().catch(() => ({})) as { offset?: number };
+  const body = (await c.req.json().catch(() => ({}))) as { offset?: number };
   const offset = body.offset || 0;
 
   const dataset = await db
@@ -2851,7 +2962,7 @@ adminRoutes.post("/datasets/:id/manifest/:version", async (c) => {
   const pat = c.env.GITHUB_ADMIN_PAT;
 
   // Resolve version DOI: use provided value, or try existing manifest
-  let versionDoi: string | null = 'doi' in body ? (body.doi ?? null) : null;
+  let versionDoi: string | null = "doi" in body ? (body.doi ?? null) : null;
   if (!versionDoi) {
     const s3Options = {
       bucket: c.env.S3_BUCKET,

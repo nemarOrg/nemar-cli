@@ -748,7 +748,7 @@ Examples:
       };
       const fileUrls: Record<string, string> = {};
       for (const filePath of Object.keys(datasetInfo.upload_urls)) {
-        fileUrls[filePath] = `${s3_config.public_url}/${s3_prefix}/${filePath}`;
+        fileUrls[filePath] = `${s3_config.public_url}/${s3_prefix}/objects/${filePath}`;
       }
 
       const registerResult = await registerUrlsWithGitAnnex(absolutePath, fileUrls);

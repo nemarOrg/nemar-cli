@@ -13,6 +13,20 @@ For E2E testing, use disposable test dataset `nm099999` (already registered in D
 
 ## Architecture Overview
 
+### Backend Infrastructure
+- **API URL:** `https://api.osc.earth/nemar` (production)
+- **Platform:** Cloudflare Workers + D1 (SQLite)
+- **Note:** Old `nemar-api.shirazi-10f.workers.dev` URL is disabled
+
+### S3 Bucket Structure
+```
+s3://nemar/{datasetId}/
+    objects/                     # git-annex content-addressed blobs
+    version/                     # version manifests (v1.0.0.json)
+    archives/                    # downloadable zip snapshots (v1.0.0.zip)
+s3://nemar/staging/pr-{n}/{datasetId}/objects/   # PR staging area
+```
+
 ### Core Components
 1. **Authentication System** - User registration, API tokens, admin approval workflow
 2. **Dataset Management** - BIDS validation, DataLad integration, upload/download

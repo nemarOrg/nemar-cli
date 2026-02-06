@@ -109,7 +109,7 @@ export async function generateStagingUrls(
   uploadUrls: Record<string, string>;
   stagingPrefix: string;
 }> {
-  const stagingPrefix = `staging/pr-${prNumber}/${datasetId}`;
+  const stagingPrefix = `staging/pr-${prNumber}/${datasetId}/objects`;
 
   const uploadUrls = await generatePresignedPutUrls(options, {
     prefix: stagingPrefix,
@@ -129,7 +129,7 @@ export async function generateDatasetUploadUrls(
   files: string[],
 ): Promise<Record<string, string>> {
   return generatePresignedPutUrls(options, {
-    prefix: datasetId,
+    prefix: `${datasetId}/objects`,
     files,
     expiresIn: 3600,
   });
@@ -184,8 +184,8 @@ export async function listObjectKeys(
 }
 
 /**
- * Upload a JSON manifest to S3 at the dataset's manifest path.
- * Stored at: <datasetId>/manifests/v<version>.json
+ * Upload a JSON manifest to S3 at the dataset's version path.
+ * Stored at: <datasetId>/version/v<version>.json
  */
 export async function uploadManifest(
   options: PresignedUrlOptions,
@@ -196,7 +196,7 @@ export async function uploadManifest(
   const { bucket, region } = options;
   const aws = createS3Client(options);
   const versionTag = version.startsWith("v") ? version : `v${version}`;
-  const key = `${datasetId}/manifests/${versionTag}.json`;
+  const key = `${datasetId}/version/${versionTag}.json`;
   const encodedKey = key.split("/").map(encodeURIComponent).join("/");
   const url = `https://${bucket}.s3.${region}.amazonaws.com/${encodedKey}`;
 
@@ -225,7 +225,7 @@ export async function getManifest(
   const { bucket, region } = options;
   const aws = createS3Client(options);
   const versionTag = version.startsWith("v") ? version : `v${version}`;
-  const key = `${datasetId}/manifests/${versionTag}.json`;
+  const key = `${datasetId}/version/${versionTag}.json`;
   const encodedKey = key.split("/").map(encodeURIComponent).join("/");
   const url = `https://${bucket}.s3.${region}.amazonaws.com/${encodedKey}`;
 
@@ -247,7 +247,7 @@ export async function listManifests(
   options: PresignedUrlOptions,
   datasetId: string,
 ): Promise<string[]> {
-  const keys = await listObjectKeys(options, `${datasetId}/manifests/`);
+  const keys = await listObjectKeys(options, `${datasetId}/version/`);
   return keys
     .filter((k) => k.endsWith(".json"))
     .map((k) => {
@@ -376,9 +376,7 @@ export async function addPublicReadPolicy(
   const sid = `PublicReadDataset_${datasetId}`;
 
   // Check if statement already exists (idempotent)
-  const existingIndex = policy.Statement.findIndex(
-    (s: { Sid?: string }) => s.Sid === sid,
-  );
+  const existingIndex = policy.Statement.findIndex((s: { Sid?: string }) => s.Sid === sid);
 
   if (existingIndex >= 0) {
     // Already exists, no change needed
@@ -439,9 +437,7 @@ export async function removePublicReadPolicy(
 
   // Filter out the statement for this dataset
   const originalLength = policy.Statement.length;
-  policy.Statement = policy.Statement.filter(
-    (s: { Sid?: string }) => s.Sid !== sid,
-  );
+  policy.Statement = policy.Statement.filter((s: { Sid?: string }) => s.Sid !== sid);
 
   // If no statement was removed, return early (idempotent)
   if (policy.Statement.length === originalLength) {
@@ -481,4 +477,19 @@ export async function hasPublicRead(
 
   const sid = `PublicReadDataset_${datasetId}`;
   return policy.Statement.some((s: { Sid?: string }) => s.Sid === sid);
+}
+
+/**
+ * Get a presigned GET URL for downloading a dataset archive.
+ * Archives are stored at: <datasetId>/archives/v<version>.zip
+ */
+export async function getArchiveUrl(
+  options: PresignedUrlOptions,
+  datasetId: string,
+  version: string,
+  expiresIn = 3600,
+): Promise<string> {
+  const versionTag = version.startsWith("v") ? version : `v${version}`;
+  const key = `${datasetId}/archives/${versionTag}.zip`;
+  return generatePresignedGetUrl(options, key, expiresIn);
 }

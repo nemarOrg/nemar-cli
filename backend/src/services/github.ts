@@ -266,7 +266,6 @@ export async function enableAutoMerge(repo: string, pat: string): Promise<boolea
   return response.ok;
 }
 
-
 /**
  * Create or update a file in a repository
  */
@@ -576,7 +575,7 @@ Changes in this release:
 
           # Call NEMAR API to publish version DOI
           RESPONSE=$(curl -s -w "\\n%{http_code}" -X POST \\
-            "https://nemar-api.shirazi-10f.workers.dev/webhooks/publish-version-doi" \\
+            "https://api.osc.earth/nemar/webhooks/publish-version-doi" \\
             -H "Content-Type: application/json" \\
             -H "X-Webhook-Token: $NEMAR_WEBHOOK_TOKEN" \\
             -d "{
@@ -621,11 +620,67 @@ Changes in this release:
           aws s3 rm --recursive "s3://nemar/$STAGING_PREFIX" 2>/dev/null || true
 `;
 
+  // Generate Archive workflow (triggered via repository_dispatch)
+  const generateArchive = `name: Generate Archive
+
+on:
+  repository_dispatch:
+    types: [generate-archive]
+
+jobs:
+  archive:
+    name: Generate Dataset Archive
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: v\${{ github.event.client_payload.version }}
+
+      - name: Install git-annex
+        run: sudo apt-get update && sudo apt-get install -y git-annex
+
+      - name: Configure git
+        run: |
+          git config --global user.email "actions@github.com"
+          git config --global user.name "GitHub Actions"
+
+      - name: Configure S3 remote and get data
+        env:
+          AWS_ACCESS_KEY_ID: \${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: \${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        run: |
+          DATASET_ID="\${{ github.event.client_payload.dataset_id }}"
+          git annex init "archive-worker"
+          git annex enableremote nemar-s3 || true
+          git annex get . || echo "Some files could not be retrieved"
+
+      - name: Create archive
+        run: |
+          DATASET_ID="\${{ github.event.client_payload.dataset_id }}"
+          VERSION="\${{ github.event.client_payload.version }}"
+          # Zip everything except .git directory
+          zip -r "/tmp/\${DATASET_ID}-v\${VERSION}.zip" . -x ".git/*"
+          echo "Archive size: $(du -h /tmp/\${DATASET_ID}-v\${VERSION}.zip | cut -f1)"
+
+      - name: Upload to S3
+        env:
+          AWS_ACCESS_KEY_ID: \${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: \${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: us-east-2
+        run: |
+          DATASET_ID="\${{ github.event.client_payload.dataset_id }}"
+          VERSION="\${{ github.event.client_payload.version }}"
+          aws s3 cp "/tmp/\${DATASET_ID}-v\${VERSION}.zip" \\
+            "s3://nemar/\${DATASET_ID}/archives/v\${VERSION}.zip"
+          echo "Uploaded archive to s3://nemar/\${DATASET_ID}/archives/v\${VERSION}.zip"
+`;
+
   // Deploy each workflow
   const workflows = [
     { path: ".github/workflows/bids-validation.yml", content: bidsValidation },
     { path: ".github/workflows/version-check.yml", content: versionCheck },
     { path: ".github/workflows/pr-merge.yml", content: prMerge },
+    { path: ".github/workflows/generate-archive.yml", content: generateArchive },
   ];
 
   for (const workflow of workflows) {
@@ -642,6 +697,39 @@ Changes in this release:
   }
 
   return { success: errors.length === 0, errors };
+}
+
+/**
+ * Trigger archive generation via repository_dispatch event.
+ * The generate-archive workflow runs asynchronously in GitHub Actions.
+ */
+export async function triggerArchiveGeneration(
+  repo: string,
+  datasetId: string,
+  version: string,
+  pat: string,
+): Promise<void> {
+  const response = await fetch(`${GITHUB_API}/repos/${ORG_NAME}/${repo}/dispatches`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${pat}`,
+      Accept: "application/vnd.github.v3+json",
+      "User-Agent": "NEMAR-API",
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      event_type: "generate-archive",
+      client_payload: {
+        dataset_id: datasetId,
+        version,
+      },
+    }),
+  });
+
+  if (!response.ok && response.status !== 204) {
+    const error = await response.text();
+    throw new Error(`Failed to trigger archive generation: HTTP ${response.status} - ${error}`);
+  }
 }
 
 // ============================================================================
@@ -959,7 +1047,9 @@ export async function downloadReleaseArchive(
   // Guard against exceeding CF Worker memory limits (128MB)
   const contentLength = response.headers.get("content-length");
   if (contentLength && Number.parseInt(contentLength, 10) > 100 * 1024 * 1024) {
-    throw new Error(`Archive for ${ref} exceeds 100MB (${contentLength} bytes); too large for Worker environment`);
+    throw new Error(
+      `Archive for ${ref} exceeds 100MB (${contentLength} bytes); too large for Worker environment`,
+    );
   }
 
   return response.arrayBuffer();
