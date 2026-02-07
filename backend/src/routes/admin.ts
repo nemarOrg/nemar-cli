@@ -2176,6 +2176,7 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
       await updateProgress("s3_public_read");
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
+      console.error(`[publish] S3 public read policy failed for ${datasetId}:`, err);
       await updateProgress("s3_public_read", msg);
       return c.json(
         {
@@ -2224,7 +2225,7 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
     }
   }
 
-  // Step 4: Create concept DOI (if not exists)
+  // Step 5: Create concept DOI (if not exists)
   if (stepsToRun.includes("doi_create")) {
     try {
       await db
@@ -2739,7 +2740,7 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
     }
   }
 
-  // Step 5: S3 Object Lock (single batch per request due to CF Workers subrequest limits)
+  // Step 12: S3 Object Lock (single batch per request due to CF Workers subrequest limits)
   if (stepsToRun.includes("s3_lock")) {
     try {
       await db
@@ -2811,7 +2812,9 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
         console.warn(`[publish] Could not get version tag for archive generation of ${datasetId}`);
         await updateProgress("generate_archive", "Could not resolve version tag");
       } else {
-        await triggerArchiveGeneration(repoName, datasetId, vtResult.version, pat);
+        await triggerArchiveGeneration(repoName, datasetId, vtResult.version, pat, {
+          public: true,
+        });
         await updateProgress("generate_archive");
       }
     } catch (err) {
@@ -2822,7 +2825,7 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
     }
   }
 
-  // Step 13: Notify user
+  // Step 14: Notify user
   if (stepsToRun.includes("notify_user")) {
     try {
       await db
