@@ -690,6 +690,19 @@ jobs:
           aws s3 cp "/tmp/\${DATASET_ID}-v\${VERSION}.zip" \\
             "s3://nemar/\${DATASET_ID}/archives/v\${VERSION}.zip"
           echo "Uploaded archive to s3://nemar/\${DATASET_ID}/archives/v\${VERSION}.zip"
+
+      - name: Mark S3 remote as public for credential-free downloads
+        env:
+          AWS_ACCESS_KEY_ID: \${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: \${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        run: |
+          git annex enableremote nemar-s3 public=yes
+          echo "S3 remote marked as public"
+
+      - name: Push git-annex branch
+        run: |
+          git push origin git-annex
+          echo "git-annex branch pushed; clones will discover public remote config"
 `;
 
   // Deploy each workflow
