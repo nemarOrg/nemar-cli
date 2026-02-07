@@ -46,7 +46,7 @@
 **Description:** Cloudflare Workers backend with D1 database for user and token management
 
 ### Deployment Info
-- **URL:** https://nemar-api.shirazi-10f.workers.dev
+- **URL:** https://api.osc.earth/nemar
 - **Database:** D1 `nemar-db` (0a168b1a-1923-4436-9509-6e4a9b5bb7ae)
 - **Rate Limit KV:** 9afb2679c6ea4ed4acd1a5916cf291d7
 - **Email:** Resend via nemar@osc.earth
@@ -449,7 +449,7 @@ BIDS CI integration, and versioning architecture.
 ### Phase 5: Versioning, Tags, Manifests [IN PROGRESS]
 **Closes:** #56
 - [ ] Version manifest generation (JSON: files -> S3 annex keys)
-- [ ] Upload manifests to S3 at `manifests/v*.json`
+- [ ] Upload manifests to S3 at `version/v*.json`
 - [ ] GitHub tag protection rules for dataset repos
 - [ ] `nemar admin s3 lock` command (already implemented in backend)
 - [ ] Integrate manifest generation into DOI/publish workflow

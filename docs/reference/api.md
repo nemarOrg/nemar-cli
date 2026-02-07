@@ -5,7 +5,7 @@ NEMAR CLI communicates with the NEMAR API. This reference is for advanced users.
 ## Base URL
 
 ```
-https://nemar-api.shirazi-10f.workers.dev
+https://api.osc.earth/nemar
 ```
 
 ## Authentication

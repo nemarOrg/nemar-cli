@@ -325,7 +325,7 @@ async function sandboxAction(): Promise<void> {
       // Construct full S3 URLs for each file
       const fileUrls: Record<string, string> = {};
       for (const filePath of Object.keys(uploadUrls)) {
-        fileUrls[filePath] = `${s3Config.public_url}/${s3Prefix}/${filePath}`;
+        fileUrls[filePath] = `${s3Config.public_url}/${s3Prefix}/objects/${filePath}`;
       }
 
       const registerResult = await registerUrlsWithGitAnnex(datasetPath, fileUrls);
