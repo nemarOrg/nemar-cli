@@ -649,6 +649,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: v\${{ github.event.client_payload.version }}
+          fetch-depth: 0
 
       - name: Install git-annex
         run: sudo apt-get update && sudo apt-get install -y git-annex
@@ -690,6 +691,16 @@ jobs:
           aws s3 cp "/tmp/\${DATASET_ID}-v\${VERSION}.zip" \\
             "s3://nemar/\${DATASET_ID}/archives/v\${VERSION}.zip"
           echo "Uploaded archive to s3://nemar/\${DATASET_ID}/archives/v\${VERSION}.zip"
+
+      - name: Mark S3 remote as public for credential-free downloads
+        if: github.event.client_payload.public == true
+        env:
+          AWS_ACCESS_KEY_ID: \${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: \${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        run: |
+          git annex enableremote nemar-s3 public=yes
+          git push origin git-annex
+          echo "S3 remote marked as public; git-annex branch pushed"
 `;
 
   // Deploy each workflow
@@ -727,6 +738,7 @@ export async function triggerArchiveGeneration(
   datasetId: string,
   version: string,
   pat: string,
+  options?: { public?: boolean },
 ): Promise<void> {
   const response = await fetch(`${GITHUB_API}/repos/${ORG_NAME}/${repo}/dispatches`, {
     method: "POST",
@@ -741,6 +753,7 @@ export async function triggerArchiveGeneration(
       client_payload: {
         dataset_id: datasetId,
         version,
+        public: options?.public ?? false,
       },
     }),
   });

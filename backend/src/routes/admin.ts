@@ -62,6 +62,7 @@ import type { Bindings, Variables } from "../types/bindings";
 type PublicationStep =
   | "ci_check"
   | "repo_public"
+  | "s3_public_read"
   | "tag_protect"
   | "doi_create"
   | "update_metadata"
@@ -1868,17 +1869,18 @@ adminRoutes.post("/publish/:id/deny", zValidator("json", denySchema), async (c) 
  * Steps:
  *  1. ci_check - Verify CI exists and is passing (deploy if missing)
  *  2. repo_public - Make repository public
- *  3. tag_protect - Apply tag protection rules (prevent version tag deletion)
- *  4. doi_create - Create concept DOI if not exists
- *  5. update_metadata - Update dataset_description.json with DOI
- *  6. update_readme - Generate/update README with dataset info
- *  7. create_tag - Create git tag for the version
- *  8. create_release - Create GitHub release from tag
- *  9. upload_to_zenodo - Upload release archive to Zenodo
- * 10. publish_doi - Publish the Zenodo DOI (permanent and irreversible!)
- * 11. s3_lock - Apply S3 Object Lock (Governance mode)
- * 12. generate_archive - Trigger archive zip generation (async, non-blocking)
- * 13. notify_user - Send publication confirmation email
+ *  3. s3_public_read - Add public read S3 bucket policy for dataset
+ *  4. tag_protect - Apply tag protection rules (prevent version tag deletion)
+ *  5. doi_create - Create concept DOI if not exists
+ *  6. update_metadata - Update dataset_description.json with DOI
+ *  7. update_readme - Generate/update README with dataset info
+ *  8. create_tag - Create git tag for the version
+ *  9. create_release - Create GitHub release from tag
+ * 10. upload_to_zenodo - Upload release archive to Zenodo
+ * 11. publish_doi - Publish the Zenodo DOI (permanent and irreversible!)
+ * 12. s3_lock - Apply S3 Object Lock (Governance mode)
+ * 13. generate_archive - Trigger archive zip generation (async, non-blocking)
+ * 14. notify_user - Send publication confirmation email
  *
  * Body: { resume?: boolean } - if true, skip already-completed steps
  */
@@ -1913,6 +1915,7 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
   const allSteps: readonly PublicationStep[] = [
     "ci_check",
     "repo_public",
+    "s3_public_read",
     "tag_protect",
     "doi_create",
     "update_metadata",
@@ -2150,7 +2153,43 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
     }
   }
 
-  // Step 3: Tag protection (before DOI to prevent tag manipulation)
+  // Step 3: Add S3 public read bucket policy
+  if (stepsToRun.includes("s3_public_read")) {
+    try {
+      await db
+        .prepare(
+          "UPDATE publication_requests SET current_step = 's3_public_read', updated_at = datetime('now') WHERE id = ?",
+        )
+        .bind(request.id)
+        .run();
+
+      await addPublicReadPolicy(
+        {
+          bucket: c.env.S3_BUCKET,
+          region: c.env.AWS_REGION,
+          accessKeyId: c.env.AWS_ACCESS_KEY_ID,
+          secretAccessKey: c.env.AWS_SECRET_ACCESS_KEY,
+        },
+        datasetId,
+      );
+
+      await updateProgress("s3_public_read");
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error(`[publish] S3 public read policy failed for ${datasetId}:`, err);
+      await updateProgress("s3_public_read", msg);
+      return c.json(
+        {
+          error: `S3 public read policy failed: ${msg}`,
+          step: "s3_public_read",
+          steps_completed: completed,
+        },
+        500,
+      );
+    }
+  }
+
+  // Step 4: Tag protection (before DOI to prevent tag manipulation)
   if (stepsToRun.includes("tag_protect")) {
     try {
       await db
@@ -2186,7 +2225,7 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
     }
   }
 
-  // Step 4: Create concept DOI (if not exists)
+  // Step 5: Create concept DOI (if not exists)
   if (stepsToRun.includes("doi_create")) {
     try {
       await db
@@ -2701,7 +2740,7 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
     }
   }
 
-  // Step 5: S3 Object Lock (single batch per request due to CF Workers subrequest limits)
+  // Step 12: S3 Object Lock (single batch per request due to CF Workers subrequest limits)
   if (stepsToRun.includes("s3_lock")) {
     try {
       await db
@@ -2773,7 +2812,9 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
         console.warn(`[publish] Could not get version tag for archive generation of ${datasetId}`);
         await updateProgress("generate_archive", "Could not resolve version tag");
       } else {
-        await triggerArchiveGeneration(repoName, datasetId, vtResult.version, pat);
+        await triggerArchiveGeneration(repoName, datasetId, vtResult.version, pat, {
+          public: true,
+        });
         await updateProgress("generate_archive");
       }
     } catch (err) {
@@ -2784,7 +2825,7 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
     }
   }
 
-  // Step 13: Notify user
+  // Step 14: Notify user
   if (stepsToRun.includes("notify_user")) {
     try {
       await db
