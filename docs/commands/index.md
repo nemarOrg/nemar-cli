@@ -40,7 +40,7 @@ Documentation:
   https://nemar-cli.pages.dev
 
 Support:
-  https://github.com/nemarDatasets/nemar-cli/issues
+  https://github.com/nemarOrg/nemar-cli/issues
 ```
 
 ## Command Groups

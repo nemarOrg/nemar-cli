@@ -3,7 +3,7 @@
  * NEMAR CLI - Command-line interface for NEMAR dataset management
  *
  * NEMAR: Neuroelectromagnetic Data Archive and Tools Resource
- * https://github.com/nemarDatasets
+ * https://github.com/nemarOrg
  *
  * Note: The canonical commands use a two-prong structure (e.g., nemar auth login)
  * following CLI best practices for discoverability. Root-level shortcuts
@@ -49,7 +49,7 @@ Documentation:
   https://nemar-cli.pages.dev
 
 Support:
-  https://github.com/nemarDatasets/nemar-cli/issues`,
+  https://github.com/nemarOrg/nemar-cli/issues`,
   );
 
 // Register command groups

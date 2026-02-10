@@ -165,7 +165,7 @@ nemar dataset upload ./my-dataset --name "My EEG Dataset"
 
 ## Support
 
-- [GitHub Issues](https://github.com/nemarDatasets/nemar-cli/issues) - Report bugs or request features
+- [GitHub Issues](https://github.com/nemarOrg/nemar-cli/issues) - Report bugs or request features
 - [NEMAR Website](https://nemar.org) - Learn more about NEMAR
 `;
 }
@@ -211,7 +211,7 @@ bunx nemar-cli --help
 ### From Source
 
 \`\`\`bash
-git clone https://github.com/nemarDatasets/nemar-cli.git
+git clone https://github.com/nemarOrg/nemar-cli.git
 cd nemar-cli
 bun install
 bun link

@@ -1,7 +1,7 @@
 # NEMAR CLI
 
 [![Documentation](https://img.shields.io/badge/docs-nemar--cli.pages.dev-blue)](https://nemar-cli.pages.dev)
-[![Tests](https://github.com/nemarDatasets/nemar-cli/actions/workflows/test.yml/badge.svg)](https://github.com/nemarDatasets/nemar-cli/actions/workflows/test.yml)
+[![Tests](https://github.com/nemarOrg/nemar-cli/actions/workflows/test.yml/badge.svg)](https://github.com/nemarOrg/nemar-cli/actions/workflows/test.yml)
 
 Command-line interface for [NEMAR](https://nemar.org) (Neuroelectromagnetic Data Archive and Tools Resource) dataset management.
 
@@ -513,7 +513,7 @@ nemar auth login
 
 ```bash
 # Clone repository
-git clone https://github.com/nemarDatasets/nemar-cli.git
+git clone https://github.com/nemarOrg/nemar-cli.git
 cd nemar-cli
 
 # Install dependencies

@@ -9,7 +9,7 @@ For E2E testing, use disposable test dataset `nm099999` (already registered in D
 ## Project Overview
 **Purpose:** Command-line interface for NEMAR (Neuroelectromagnetic Data Archive and Tools Resource) dataset management
 **Tech Stack:** TypeScript, Bun, Commander.js, DataLad integration
-**Repository:** https://github.com/nemarDatasets
+**Repository:** https://github.com/nemarOrg/nemar-cli
 
 ## Architecture Overview
 
