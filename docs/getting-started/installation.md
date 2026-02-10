@@ -38,7 +38,7 @@ bunx nemar-cli --help
 ### From Source
 
 ```bash
-git clone https://github.com/nemarDatasets/nemar-cli.git
+git clone https://github.com/nemarOrg/nemar-cli.git
 cd nemar-cli
 bun install
 bun link

@@ -22,9 +22,9 @@
 mkdir -p /tmp/restore && cd /tmp/restore
 
 # 2. Download restoration files from GitHub
-curl -L "https://raw.githubusercontent.com/nemarDatasets/nemar-cli/main/scripts/nemar-restore-dataset.sh" -o nemar-restore-dataset.sh
-curl -L "https://raw.githubusercontent.com/nemarDatasets/nemar-cli/main/scripts/restore_database_entries.sql" -o restore_database_entries.sql
-curl -L "https://raw.githubusercontent.com/nemarDatasets/nemar-cli/main/docs/disaster-recovery/DISASTER_RECOVERY.md" -o DISASTER_RECOVERY.md
+curl -L "https://raw.githubusercontent.com/nemarOrg/nemar-cli/main/scripts/nemar-restore-dataset.sh" -o nemar-restore-dataset.sh
+curl -L "https://raw.githubusercontent.com/nemarOrg/nemar-cli/main/scripts/restore_database_entries.sql" -o restore_database_entries.sql
+curl -L "https://raw.githubusercontent.com/nemarOrg/nemar-cli/main/docs/disaster-recovery/DISASTER_RECOVERY.md" -o DISASTER_RECOVERY.md
 chmod +x nemar-restore-dataset.sh
 
 # 3. Verify tools are installed
@@ -238,7 +238,7 @@ ls -lh sub-000/ses-000/emg/sub-000_ses-000_task-discretegestures_emg.bdf
 
 ```bash
 # Create GitHub issue documenting the incident
-gh issue create --repo nemarDatasets/nemar-cli \
+gh issue create --repo nemarOrg/nemar-cli \
   --title "Dataset Restoration: nm000103-nm000107 - $(date +%Y-%m-%d)" \
   --body "## Incident
 
