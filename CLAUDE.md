@@ -11,6 +11,12 @@ For E2E testing, use disposable test dataset `nm099999` (already registered in D
 **Tech Stack:** TypeScript, Bun, Commander.js, DataLad integration
 **Repository:** https://github.com/nemarOrg/nemar-cli
 
+### GitHub Organization Structure
+- **nemarOrg** - Tooling and infrastructure repos (nemar-cli, nemar-tools, nemar-metadata, neuroschema)
+- **nemarDatasets** - Dataset repos only (nm000103, nm000104, etc.)
+
+The backend code (`ORG_NAME = "nemarDatasets"` in `backend/src/services/github.ts`) and publishing scripts intentionally target `nemarDatasets` because that is where dataset repos live. Do not change these to `nemarOrg`.
+
 ## Architecture Overview
 
 ### Backend Infrastructure

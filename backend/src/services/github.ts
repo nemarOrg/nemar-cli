@@ -6,6 +6,7 @@
  */
 
 const GITHUB_API = "https://api.github.com";
+// Dataset repos (nm000XXX) live in nemarDatasets org; tooling repos live in nemarOrg
 const ORG_NAME = "nemarDatasets";
 
 interface GitHubUser {
