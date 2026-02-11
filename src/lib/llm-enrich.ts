@@ -5,6 +5,18 @@
  * for populating DataCite DOI records. Runs CLI-side (not in Cloudflare Workers).
  */
 
+// DataCite relation types (mirrors VALID_RELATION_TYPES in backend/src/services/datacite.ts)
+const VALID_RELATION_TYPES_CLI = new Set([
+  "IsCitedBy", "Cites", "IsSupplementTo", "IsSupplementedBy",
+  "IsContinuedBy", "Continues", "IsDescribedBy", "Describes",
+  "HasMetadata", "IsMetadataFor", "HasVersion", "IsVersionOf",
+  "IsNewVersionOf", "IsPreviousVersionOf", "IsPartOf", "HasPart",
+  "IsReferencedBy", "References", "IsDocumentedBy", "Documents",
+  "IsCompiledBy", "Compiles", "IsVariantFormOf", "IsOriginalFormOf",
+  "IsIdenticalTo", "IsCollectedBy", "Collects", "IsRequiredBy",
+  "Requires", "IsObsoletedBy", "Obsoletes",
+]);
+
 export interface LlmEnrichmentResult {
   description?: string;
   methodsDescription?: string;
@@ -34,7 +46,7 @@ Rules:
 - methodsDescription: Only include if methods/acquisition details are described.
 - keywords: 3-8 domain-specific terms. Include modality (EEG, MEG, etc.) if applicable.
 - fundingReferences: Parse funding strings into structured format. Common funders: NIH, NSF, ERC, DFG.
-- relatedDois: Only include actual DOIs (10.XXXX/...). Valid relationType values:
+- relatedDois: Only include actual DOIs (10.XXXX/...). Common relationType values (see DataCite schema for full list):
   IsCitedBy, Cites, IsSupplementTo, IsSupplementedBy, References, IsReferencedBy,
   IsDescribedBy, Describes, IsVersionOf, HasVersion, IsPartOf, HasPart
 - Omit any field where you have no information. Return {} if nothing can be extracted.
@@ -140,7 +152,11 @@ export function validateLlmResult(raw: Record<string, unknown>): LlmEnrichmentRe
       (f): f is { funderName: string; awardNumber?: string; awardTitle?: string } => {
         if (!f || typeof f !== "object") return false;
         const obj = f as Record<string, unknown>;
-        return typeof obj.funderName === "string";
+        return (
+          typeof obj.funderName === "string" &&
+          (obj.awardNumber === undefined || typeof obj.awardNumber === "string") &&
+          (obj.awardTitle === undefined || typeof obj.awardTitle === "string")
+        );
       },
     );
     if (funds.length > 0) result.fundingReferences = funds;
@@ -155,7 +171,8 @@ export function validateLlmResult(raw: Record<string, unknown>): LlmEnrichmentRe
         return (
           typeof obj.doi === "string" &&
           doiPattern.test(obj.doi) &&
-          typeof obj.relationType === "string"
+          typeof obj.relationType === "string" &&
+          VALID_RELATION_TYPES_CLI.has(obj.relationType as string)
         );
       },
     );

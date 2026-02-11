@@ -1452,6 +1452,7 @@ adminRoutes.post(
     try {
       const updateOptions: { status?: "public" | "unavailable"; dataciteXml?: string; target?: string } = {};
       let metadataRefreshed = false;
+      const warnings: string[] = [];
 
       // Refresh metadata from BIDS
       if (body.refresh_metadata) {
@@ -1503,6 +1504,7 @@ adminRoutes.post(
             }
           } catch (nemarErr) {
             console.error("Failed to parse nemar_metadata.json:", nemarErr);
+            warnings.push(`nemar_metadata.json enrichment skipped: ${nemarErr instanceof Error ? nemarErr.message : String(nemarErr)}`);
           }
         }
 
@@ -1538,6 +1540,7 @@ adminRoutes.post(
         status: updated.status,
         doi_url: `https://doi.org/${extractDoi(dataset.ezid_identifier)}`,
         metadata_refreshed: metadataRefreshed,
+        ...(warnings.length > 0 ? { warnings } : {}),
       });
     } catch (error) {
       console.error("Failed to update DOI:", error);
@@ -1556,7 +1559,7 @@ adminRoutes.post(
  * POST /admin/datasets/:id/enrichment - Submit rich metadata enrichment
  *
  * Accepts NemarMetadata JSON, commits nemar_metadata.json to the dataset repo,
- * ensures .bidsignore includes it, caches in D1, and optionally refreshes DOI metadata.
+ * ensures .bidsignore includes it, and caches in D1.
  */
 const enrichmentSchema = z.object({
   version: z.literal("1.0"),
@@ -1707,8 +1710,8 @@ adminRoutes.get("/datasets/:id/files", async (c) => {
     const extensions = [...new Set(
       files
         .map((f) => {
-          const ext = f.path.split(".").pop();
-          return ext ? `.${ext}` : null;
+          const lastDot = f.path.lastIndexOf(".");
+          return lastDot > 0 ? f.path.slice(lastDot) : null;
         })
         .filter((e): e is string => e !== null),
     )].sort();

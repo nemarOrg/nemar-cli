@@ -33,17 +33,7 @@ export type DateType =
   | "Accepted" | "Available" | "Collected" | "Copyrighted" | "Created"
   | "Issued" | "Other" | "Submitted" | "Updated" | "Valid" | "Withdrawn";
 
-export type RelationType =
-  | "IsCitedBy" | "Cites" | "IsSupplementTo" | "IsSupplementedBy"
-  | "IsContinuedBy" | "Continues" | "IsDescribedBy" | "Describes"
-  | "HasMetadata" | "IsMetadataFor" | "HasVersion" | "IsVersionOf"
-  | "IsNewVersionOf" | "IsPreviousVersionOf" | "IsPartOf" | "HasPart"
-  | "IsReferencedBy" | "References" | "IsDocumentedBy" | "Documents"
-  | "IsCompiledBy" | "Compiles" | "IsVariantFormOf" | "IsOriginalFormOf"
-  | "IsIdenticalTo" | "IsCollectedBy" | "Collects" | "IsRequiredBy"
-  | "Requires" | "IsObsoletedBy" | "Obsoletes";
-
-const VALID_RELATION_TYPES = new Set<string>([
+const VALID_RELATION_TYPES = [
   "IsCitedBy", "Cites", "IsSupplementTo", "IsSupplementedBy",
   "IsContinuedBy", "Continues", "IsDescribedBy", "Describes",
   "HasMetadata", "IsMetadataFor", "HasVersion", "IsVersionOf",
@@ -52,10 +42,14 @@ const VALID_RELATION_TYPES = new Set<string>([
   "IsCompiledBy", "Compiles", "IsVariantFormOf", "IsOriginalFormOf",
   "IsIdenticalTo", "IsCollectedBy", "Collects", "IsRequiredBy",
   "Requires", "IsObsoletedBy", "Obsoletes",
-]);
+] as const;
+
+export type RelationType = (typeof VALID_RELATION_TYPES)[number];
+
+const RELATION_TYPE_SET = new Set<string>(VALID_RELATION_TYPES);
 
 export function isValidRelationType(value: string): value is RelationType {
-  return VALID_RELATION_TYPES.has(value);
+  return RELATION_TYPE_SET.has(value);
 }
 
 export type DescriptionType =
@@ -191,12 +185,17 @@ export interface NemarMetadata {
 
 /**
  * Parse raw JSON into a validated NemarMetadata object.
+ * Returns null for non-object input or unrecognized versions.
  * Ignores unknown fields; returns partial data for partially valid input.
  */
 export function parseNemarMetadata(raw: unknown): NemarMetadata | null {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
 
   const obj = raw as Record<string, unknown>;
+
+  // Reject unrecognized versions (future-proofing)
+  if (obj.version !== undefined && obj.version !== "1.0") return null;
+
   const result: NemarMetadata = { version: "1.0" };
 
   // Authors
@@ -220,11 +219,18 @@ export function parseNemarMetadata(raw: unknown): NemarMetadata | null {
     if (kw.length > 0) result.keywords = kw;
   }
 
-  // Related DOIs
+  // Related DOIs (validate relationType at parse time)
   if (Array.isArray(obj.relatedDois)) {
     const rels = obj.relatedDois.filter(
-      (r): r is { doi: string; relationType: string } =>
-        !!r && typeof r === "object" && typeof (r as Record<string, unknown>).doi === "string" && typeof (r as Record<string, unknown>).relationType === "string",
+      (r): r is { doi: string; relationType: string } => {
+        if (!r || typeof r !== "object") return false;
+        const entry = r as Record<string, unknown>;
+        return (
+          typeof entry.doi === "string" &&
+          typeof entry.relationType === "string" &&
+          isValidRelationType(entry.relationType as string)
+        );
+      },
     );
     if (rels.length > 0) result.relatedDois = rels;
   }
@@ -265,8 +271,11 @@ export function parseNemarMetadata(raw: unknown): NemarMetadata | null {
 
 /**
  * Convert NemarMetadata to DataCiteEnrichment for use with bidsToDataCite.
- * Merges with an existing enrichment (e.g., from auto-ORCID injection),
- * with NemarMetadata taking precedence for author data.
+ * Merges with an existing enrichment (e.g., from auto-ORCID injection).
+ * Merge semantics: authors merged (NemarMetadata overrides per-key),
+ * keywords merged and deduplicated, funding merged and deduplicated,
+ * related DOIs merged and deduplicated by doi+relationType,
+ * description/methods/sizes/formats overwritten by NemarMetadata.
  */
 export function nemarMetadataToEnrichment(
   nemarMeta: NemarMetadata,
@@ -289,26 +298,42 @@ export function nemarMetadataToEnrichment(
     enrichment.keywords = merged;
   }
 
-  // Related DOIs
+  // Related DOIs: merge and deduplicate by doi+relationType
   if (nemarMeta.relatedDois) {
-    enrichment.relatedDois = [
-      ...(enrichment.relatedDois || []),
-      ...nemarMeta.relatedDois
-        .filter((r) => isValidRelationType(r.relationType))
-        .map((r) => ({
-          doi: r.doi,
-          relationType: r.relationType as RelationType,
-        })),
-    ];
+    const existing = enrichment.relatedDois || [];
+    const seen = new Set(existing.map((r) => `${r.doi}|${r.relationType}`));
+    const newRels = nemarMeta.relatedDois
+      .filter((r) => isValidRelationType(r.relationType))
+      .map((r) => ({
+        doi: r.doi,
+        relationType: r.relationType as RelationType,
+      }))
+      .filter((r) => {
+        const key = `${r.doi}|${r.relationType}`;
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      });
+    enrichment.relatedDois = [...existing, ...newRels];
   }
 
-  // Funding
+  // Funding: merge and deduplicate by funderName+awardNumber
   if (nemarMeta.fundingReferences) {
-    enrichment.fundingInfo = nemarMeta.fundingReferences.map((f) => ({
-      funderName: f.funderName,
-      awardNumber: f.awardNumber,
-      awardTitle: f.awardTitle,
-    }));
+    const existing = enrichment.fundingInfo || [];
+    const seen = new Set(existing.map((f) => `${f.funderName}|${f.awardNumber || ""}`));
+    const newFunds = nemarMeta.fundingReferences
+      .map((f) => ({
+        funderName: f.funderName,
+        awardNumber: f.awardNumber,
+        awardTitle: f.awardTitle,
+      }))
+      .filter((f) => {
+        const key = `${f.funderName}|${f.awardNumber || ""}`;
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      });
+    enrichment.fundingInfo = [...existing, ...newFunds];
   }
 
   // Description

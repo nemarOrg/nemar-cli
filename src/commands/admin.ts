@@ -977,12 +977,14 @@ doiCommand
 
       // Get DOI info
       let doiInfo;
+      let doiFetchFailed = false;
       try {
         doiInfo = await getDoiInfo(datasetId);
       } catch (doiErr) {
         if (doiErr instanceof ApiError && doiErr.statusCode === 404) {
           // No DOI exists yet
         } else {
+          doiFetchFailed = true;
           console.log(
             chalk.yellow(
               `  Warning: Could not fetch DOI info: ${errorDetail(doiErr)}`,
@@ -995,16 +997,11 @@ doiCommand
         console.log(`  DOI: ${chalk.cyan(doiInfo.concept_doi)}`);
       }
 
-      // Get existing BIDS metadata (from the backend, we use the files endpoint to detect authors)
-      // For now we'll build enrichment interactively
       const enrichment: NemarMetadataPayload = { version: "1.0" };
 
       // --- Author ORCIDs ---
       console.log();
       console.log(chalk.cyan("--- Author ORCIDs ---"));
-
-      // We need author list from BIDS; fetch via dataset files endpoint to find dataset_description.json
-      // For simplicity, we ask admin to provide/confirm author info
       const { updateAuthors } = await inquirer.prompt([
         {
           type: "confirm",
@@ -1092,7 +1089,11 @@ doiCommand
                 const descContent = await fetchGitHubFileContent(repoName, "dataset_description.json");
                 let bidsDesc: Record<string, unknown> = {};
                 if (descContent) {
-                  try { bidsDesc = JSON.parse(descContent) as Record<string, unknown>; } catch { /* ignore */ }
+                  try {
+                  bidsDesc = JSON.parse(descContent) as Record<string, unknown>;
+                } catch {
+                  console.log(chalk.yellow("  Warning: Could not parse dataset_description.json; LLM will use README only"));
+                }
                 }
 
                 const llmResult = await enrichFromReadme(readmeContent, bidsDesc, apiKey);
@@ -1176,6 +1177,10 @@ doiCommand
         }
 
         // Refresh DOI metadata if the dataset has an EZID DOI
+        // Re-attempt DOI info fetch if it failed earlier (transient error)
+        if (!doiInfo && doiFetchFailed) {
+          try { doiInfo = await getDoiInfo(datasetId); } catch { /* still unavailable */ }
+        }
         if (doiInfo?.ezid_identifier) {
           const refreshSpinner = ora("Refreshing DOI metadata...").start();
           try {
@@ -1183,12 +1188,10 @@ doiCommand
             refreshSpinner.succeed("DOI metadata refreshed");
           } catch (error) {
             refreshSpinner.warn("Could not refresh DOI metadata");
-            console.log(
-              chalk.gray(
-                `  ${errorDetail(error)}`,
-              ),
-            );
+            console.log(chalk.gray(`  ${errorDetail(error)}`));
           }
+        } else if (doiFetchFailed) {
+          console.log(chalk.yellow("  DOI refresh skipped: could not verify DOI exists. Run 'nemar admin doi update --refresh' manually."));
         }
       } catch (error) {
         if (error instanceof ApiError) {

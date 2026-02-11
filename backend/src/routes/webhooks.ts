@@ -130,6 +130,7 @@ async function handleEzidVersionDoi(
     const repoName = dataset.github_repo.split("/")[1];
     let bidsDescription: Record<string, unknown> = { Name: dataset.name };
     let bidsMetadataWarning: string | undefined;
+    let enrichmentWarning: string | undefined;
     let tree: Awaited<ReturnType<typeof getTreeAtRef>> = [];
     if (repoName) {
       try {
@@ -161,7 +162,8 @@ async function handleEzidVersionDoi(
           }
         }
       } catch (nemarErr) {
-        console.error("[webhook] Failed to parse nemar_metadata.json:", nemarErr);
+        enrichmentWarning = `nemar_metadata.json enrichment skipped: ${nemarErr instanceof Error ? nemarErr.message : String(nemarErr)}`;
+        console.error("[webhook]", enrichmentWarning);
       }
     }
 
@@ -257,6 +259,7 @@ async function handleEzidVersionDoi(
       doi_url: `https://doi.org/${result.doi}`,
       manifest_generated: manifestGenerated,
       ...(bidsMetadataWarning && { bids_metadata_warning: bidsMetadataWarning }),
+      ...(enrichmentWarning && { enrichment_warning: enrichmentWarning }),
       ...(dbError && { db_error: dbError }),
       ...(manifestErrorMsg && { manifest_error: manifestErrorMsg }),
       ...(result.warnings && { doi_warnings: result.warnings }),

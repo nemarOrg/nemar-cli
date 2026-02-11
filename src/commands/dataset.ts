@@ -567,7 +567,11 @@ Examples:
             console.log();
           }
         } catch (orcidErr) {
-          console.log(chalk.yellow(`  Could not collect ORCIDs: ${errorDetail(orcidErr)}`));
+          if (orcidErr instanceof ApiError) {
+            console.log(chalk.yellow(`  Could not fetch profile: ${orcidErr.message}`));
+          } else {
+            console.log(chalk.yellow(`  Could not collect ORCIDs: ${errorDetail(orcidErr)}`));
+          }
           console.log(chalk.gray("  Continuing without author enrichment."));
         }
       }
@@ -854,23 +858,29 @@ Examples:
     }
 
     // Step 10b: Write nemar_metadata.json if ORCID data was collected
+    // (picked up by saveDataset in Step 11 via git add -A)
     if (coAuthorEnrichment) {
-      const nemarMetaPath = resolve(absolutePath, "nemar_metadata.json");
-      writeFileSync(nemarMetaPath, JSON.stringify(coAuthorEnrichment, null, 2));
+      try {
+        const nemarMetaPath = resolve(absolutePath, "nemar_metadata.json");
+        writeFileSync(nemarMetaPath, JSON.stringify(coAuthorEnrichment, null, 2));
 
-      // Ensure .bidsignore includes nemar_metadata.json
-      const bidsignorePath = resolve(absolutePath, ".bidsignore");
-      let bidsignoreContent = "";
-      if (existsSync(bidsignorePath)) {
-        bidsignoreContent = readFileSync(bidsignorePath, "utf-8");
+        // Ensure .bidsignore includes nemar_metadata.json
+        const bidsignorePath = resolve(absolutePath, ".bidsignore");
+        let bidsignoreContent = "";
+        if (existsSync(bidsignorePath)) {
+          bidsignoreContent = readFileSync(bidsignorePath, "utf-8");
+        }
+        if (!bidsignoreContent.includes("nemar_metadata.json")) {
+          const newContent = bidsignoreContent
+            ? `${bidsignoreContent.trimEnd()}\nnemar_metadata.json\n`
+            : "nemar_metadata.json\n";
+          writeFileSync(bidsignorePath, newContent);
+        }
+        console.log(chalk.gray("  Saved nemar_metadata.json with author ORCIDs"));
+      } catch (writeErr) {
+        console.log(chalk.yellow(`  Warning: Could not save nemar_metadata.json: ${errorDetail(writeErr)}`));
+        console.log(chalk.gray("  Upload will continue without author enrichment."));
       }
-      if (!bidsignoreContent.includes("nemar_metadata.json")) {
-        const newContent = bidsignoreContent
-          ? `${bidsignoreContent.trimEnd()}\nnemar_metadata.json\n`
-          : "nemar_metadata.json\n";
-        writeFileSync(bidsignorePath, newContent);
-      }
-      console.log(chalk.gray("  Saved nemar_metadata.json with author ORCIDs"));
     }
 
     // Step 11: Save dataset changes
