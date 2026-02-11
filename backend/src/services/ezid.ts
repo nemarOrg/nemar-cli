@@ -32,21 +32,29 @@ interface EzidMintOptionsBase {
 }
 
 /** dataciteXml and dataciteFields are mutually exclusive. */
-export type EzidMintOptions = EzidMintOptionsBase & (
-  | { dataciteXml: string; dataciteFields?: never }
-  | {
-    /** Simple ANVL datacite fields (used when dataciteXml is not provided) */
-    dataciteFields: {
-      creator: string;
-      title: string;
-      publisher: string;
-      publicationyear: string;
-      resourcetype: string;
-    };
-    dataciteXml?: never;
-  }
-  | { dataciteXml?: never; dataciteFields?: never }
-);
+export type EzidMintOptions = EzidMintOptionsBase &
+  (
+    | { dataciteXml: string; dataciteFields?: never }
+    | {
+        /** Simple ANVL datacite fields (used when dataciteXml is not provided) */
+        dataciteFields: {
+          creator: string;
+          title: string;
+          publisher: string;
+          publicationyear: string;
+          resourcetype: string;
+        };
+        dataciteXml?: never;
+      }
+    | { dataciteXml?: never; dataciteFields?: never }
+  );
+
+export interface EzidCreateOptions {
+  status?: EzidStatus;
+  target?: string;
+  profile?: string;
+  dataciteXml?: string;
+}
 
 export interface EzidUpdateOptions {
   status?: EzidStatus;
@@ -81,10 +89,7 @@ export interface EzidIdentifier {
  * Encodes: % -> %25, \n -> %0A, \r -> %0D
  */
 export function percentEncode(value: string): string {
-  return value
-    .replace(/%/g, "%25")
-    .replace(/\n/g, "%0A")
-    .replace(/\r/g, "%0D");
+  return value.replace(/%/g, "%25").replace(/\n/g, "%0A").replace(/\r/g, "%0D");
 }
 
 /**
@@ -95,9 +100,11 @@ export function percentDecode(value: string): string {
   try {
     return decodeURIComponent(value);
   } catch {
-    // Fall back to byte-level decoding if not valid percent-encoded UTF-8
+    console.warn(
+      `[ezid] percentDecode: decodeURIComponent failed for value (length=${value.length}), using byte-level fallback`,
+    );
     return value.replace(/%([0-9A-Fa-f]{2})/g, (_, hex) =>
-      String.fromCharCode(parseInt(hex, 16)),
+      String.fromCharCode(Number.parseInt(hex, 16)),
     );
   }
 }
@@ -129,7 +136,7 @@ export function decodeAnvl(body: string): { status: string; fields: Record<strin
       const keys = Object.keys(fields);
       const lastKey = keys[keys.length - 1];
       if (lastKey) {
-        fields[lastKey] += "\n" + percentDecode(line.trim());
+        fields[lastKey] += `\n${percentDecode(line.trim())}`;
       }
       continue;
     }
@@ -180,7 +187,7 @@ async function ezidRequest(
     response = await fetch(`${EZID_BASE_URL}${path}`, {
       method,
       headers,
-      body: body !== undefined ? body : undefined,
+      body,
     });
   } catch (error) {
     throw new Error(
@@ -188,7 +195,14 @@ async function ezidRequest(
     );
   }
 
-  const responseBody = await response.text();
+  let responseBody: string;
+  try {
+    responseBody = await response.text();
+  } catch (error) {
+    throw new Error(
+      `EZID response body read failed (${method} ${path}, status ${response.status}): ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
 
   // Guard against non-ANVL error responses (HTML error pages, proxy errors)
   if (!response.ok && !responseBody.startsWith("error: ")) {
@@ -211,7 +225,10 @@ function parseStatusLine(body: string): { success: boolean; message: string } {
   return { success: false, message: `Unexpected EZID response: "${firstLine.substring(0, 100)}"` };
 }
 
-function parseEzidStatus(rawStatus: string | undefined): { status: EzidStatus; unavailableReason?: string } {
+function parseEzidStatus(rawStatus: string | undefined): {
+  status: EzidStatus;
+  unavailableReason?: string;
+} {
   if (!rawStatus) return { status: "reserved" };
   if (rawStatus === "reserved" || rawStatus === "public") return { status: rawStatus };
   if (rawStatus.startsWith("unavailable")) {
@@ -219,6 +236,7 @@ function parseEzidStatus(rawStatus: string | undefined): { status: EzidStatus; u
     const reason = pipeIdx !== -1 ? rawStatus.substring(pipeIdx + 3) : undefined;
     return { status: "unavailable", unavailableReason: reason };
   }
+  console.warn(`[ezid] Unknown EZID status: "${rawStatus}"`);
   return { status: rawStatus as EzidStatus };
 }
 
@@ -233,8 +251,8 @@ function parseIdentifier(anvlBody: string): EzidIdentifier {
     unavailableReason,
     target: fields._target || "",
     profile: fields._profile || "datacite",
-    created: parseInt(fields._created || "0", 10),
-    updated: parseInt(fields._updated || "0", 10),
+    created: Number.parseInt(fields._created || "0", 10),
+    updated: Number.parseInt(fields._updated || "0", 10),
     owner: fields._owner || "",
     ownergroup: fields._ownergroup || "",
     dataciteXml: fields.datacite || undefined,
@@ -296,6 +314,39 @@ export async function mintIdentifier(
 }
 
 /**
+ * Create an identifier with an exact, caller-specified DOI.
+ * Uses PUT /id/{identifier} instead of POST /shoulder/{shoulder}.
+ * Throws if the identifier already exists.
+ */
+export async function createIdentifier(
+  auth: EzidAuth,
+  identifier: string,
+  options: EzidCreateOptions,
+): Promise<EzidIdentifier> {
+  const anvlPairs: Record<string, string> = {};
+
+  if (options.target) {
+    anvlPairs._target = options.target;
+  }
+  anvlPairs._status = options.status || "reserved";
+  anvlPairs._profile = options.profile || "datacite";
+
+  if (options.dataciteXml) {
+    anvlPairs.datacite = options.dataciteXml;
+  }
+
+  const body = encodeAnvl(anvlPairs);
+  const response = await ezidRequest("PUT", `/id/${identifier}`, auth, body);
+
+  const parsed = parseStatusLine(response.body);
+  if (!parsed.success) {
+    throw new Error(`EZID create error: ${parsed.message}`);
+  }
+
+  return getIdentifier(auth, identifier);
+}
+
+/**
  * Get an identifier's metadata.
  * Does not require authentication for public identifiers.
  */
@@ -349,10 +400,7 @@ export async function updateIdentifier(
  * Delete a reserved identifier.
  * Only reserved (unpublished) identifiers can be deleted.
  */
-export async function deleteIdentifier(
-  auth: EzidAuth,
-  identifier: string,
-): Promise<void> {
+export async function deleteIdentifier(auth: EzidAuth, identifier: string): Promise<void> {
   const response = await ezidRequest("DELETE", `/id/${identifier}`, auth);
 
   const parsed = parseStatusLine(response.body);

@@ -5,13 +5,15 @@
  * provider parsing, and DataCite version relation enrichment.
  */
 
-import { describe, test, expect } from "bun:test";
+import { describe, expect, test } from "bun:test";
 import { bidsToDataCite, buildDataCiteXml } from "../backend/src/services/datacite";
 import {
+  buildConceptIdentifier,
   buildOrcidEnrichment,
-  parseDoiProvider,
+  buildVersionIdentifier,
   createConceptDoi,
   createEzidVersionDoi,
+  parseDoiProvider,
 } from "../backend/src/services/doi";
 
 describe("ORCID validation", () => {
@@ -87,20 +89,13 @@ describe("buildOrcidEnrichment", () => {
   });
 
   test("returns empty enrichment when no ORCID provided", () => {
-    const enrichment = buildOrcidEnrichment(
-      { Name: "Test", Authors: ["Doe, Jane"] },
-      "jane",
-    );
+    const enrichment = buildOrcidEnrichment({ Name: "Test", Authors: ["Doe, Jane"] }, "jane");
 
     expect(enrichment).toEqual({});
   });
 
   test("returns empty enrichment when no BIDS description", () => {
-    const enrichment = buildOrcidEnrichment(
-      undefined,
-      "jane",
-      "0000-0002-1825-0097",
-    );
+    const enrichment = buildOrcidEnrichment(undefined, "jane", "0000-0002-1825-0097");
 
     expect(enrichment).toEqual({});
   });
@@ -116,11 +111,7 @@ describe("buildOrcidEnrichment", () => {
   });
 
   test("returns empty enrichment when no authors in BIDS", () => {
-    const enrichment = buildOrcidEnrichment(
-      { Name: "Test" },
-      "jane",
-      "0000-0002-1825-0097",
-    );
+    const enrichment = buildOrcidEnrichment({ Name: "Test" }, "jane", "0000-0002-1825-0097");
 
     expect(enrichment).toEqual({});
   });
@@ -185,11 +176,10 @@ describe("ORCID auto-injection into DataCite creators", () => {
   });
 
   test("handles no enrichment gracefully", () => {
-    const metadata = bidsToDataCite(
-      "nm000104",
-      "10.82901/NEMAR.test",
-      { Name: "Test", Authors: ["Doe, Jane"] },
-    );
+    const metadata = bidsToDataCite("nm000104", "10.82901/NEMAR.test", {
+      Name: "Test",
+      Authors: ["Doe, Jane"],
+    });
 
     expect(metadata.creators[0].orcid).toBeUndefined();
   });
@@ -274,8 +264,7 @@ describe("DOI provider dispatch functions", () => {
     ).rejects.not.toThrow("EZID credentials not configured");
   });
 
-  test("sandbox without sandbox creds falls through to production creds", async () => {
-    // No sandbox creds, but production creds present: should not throw credential error
+  test("sandbox without sandbox creds throws sandbox credential error", async () => {
     await expect(
       createConceptDoi(
         {
@@ -291,10 +280,10 @@ describe("DOI provider dispatch functions", () => {
           ZENODO_API_KEY: "",
         },
       ),
-    ).rejects.not.toThrow("EZID credentials not configured");
+    ).rejects.toThrow("EZID sandbox credentials not configured");
   });
 
-  test("sandbox without any creds throws credential error", async () => {
+  test("sandbox without any creds throws sandbox credential error", async () => {
     await expect(
       createConceptDoi(
         {
@@ -310,7 +299,7 @@ describe("DOI provider dispatch functions", () => {
           ZENODO_API_KEY: "",
         },
       ),
-    ).rejects.toThrow("EZID credentials not configured");
+    ).rejects.toThrow("EZID sandbox credentials not configured");
   });
 
   test("Zenodo sandbox rejects missing sandbox API key", async () => {
@@ -348,6 +337,46 @@ describe("signup schema ORCID field", () => {
   });
 });
 
+describe("buildConceptIdentifier", () => {
+  test("builds production concept identifier", () => {
+    expect(buildConceptIdentifier("nm000104")).toBe("doi:10.82901/NEMAR.NM000104");
+  });
+
+  test("builds sandbox concept identifier", () => {
+    expect(buildConceptIdentifier("nm099999", true)).toBe("doi:10.5072/FK2NM099999");
+  });
+
+  test("uppercases dataset ID", () => {
+    expect(buildConceptIdentifier("nm000104")).toBe("doi:10.82901/NEMAR.NM000104");
+  });
+
+  test("handles already uppercase input", () => {
+    expect(buildConceptIdentifier("NM000104")).toBe("doi:10.82901/NEMAR.NM000104");
+  });
+});
+
+describe("buildVersionIdentifier", () => {
+  test("builds production version identifier", () => {
+    expect(buildVersionIdentifier("nm000104", "1.0.0")).toBe("doi:10.82901/NEMAR.NM000104.V1.0.0");
+  });
+
+  test("builds sandbox version identifier", () => {
+    expect(buildVersionIdentifier("nm099999", "1.0.0", true)).toBe(
+      "doi:10.5072/FK2NM099999.V1.0.0",
+    );
+  });
+
+  test("uppercases version string", () => {
+    expect(buildVersionIdentifier("nm000104", "2.1.0")).toBe("doi:10.82901/NEMAR.NM000104.V2.1.0");
+  });
+
+  test("handles pre-release versions", () => {
+    expect(buildVersionIdentifier("nm000104", "1.0.0-beta")).toBe(
+      "doi:10.82901/NEMAR.NM000104.V1.0.0-BETA",
+    );
+  });
+});
+
 describe("DataCite enrichment with version relations", () => {
   test("IsVersionOf relation is included in metadata", () => {
     const metadata = bidsToDataCite(
@@ -355,16 +384,12 @@ describe("DataCite enrichment with version relations", () => {
       "10.82901/NEMAR.version1",
       { Name: "Test", Authors: ["Doe, Jane"] },
       {
-        relatedDois: [
-          { doi: "10.82901/NEMAR.concept", relationType: "IsVersionOf" },
-        ],
+        relatedDois: [{ doi: "10.82901/NEMAR.concept", relationType: "IsVersionOf" }],
       },
     );
 
     expect(metadata.relatedIdentifiers).toBeDefined();
-    const versionRel = metadata.relatedIdentifiers?.find(
-      (r) => r.relationType === "IsVersionOf",
-    );
+    const versionRel = metadata.relatedIdentifiers?.find((r) => r.relationType === "IsVersionOf");
     expect(versionRel).toBeDefined();
     expect(versionRel?.identifier).toBe("10.82901/NEMAR.concept");
   });
@@ -375,9 +400,7 @@ describe("DataCite enrichment with version relations", () => {
       "10.82901/NEMAR.concept",
       { Name: "Test", Authors: ["Doe, Jane"] },
       {
-        relatedDois: [
-          { doi: "10.82901/NEMAR.v1", relationType: "HasVersion" },
-        ],
+        relatedDois: [{ doi: "10.82901/NEMAR.v1", relationType: "HasVersion" }],
       },
     );
 

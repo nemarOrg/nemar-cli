@@ -14,35 +14,36 @@
  */
 
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { sleep } from "./setup";
 import {
-  checkStatus,
-  mintIdentifier,
-  getIdentifier,
-  updateIdentifier,
-  deleteIdentifier,
-  makePublic,
-  makeUnavailable,
-  encodeAnvl,
-  decodeAnvl,
-  percentEncode,
-  percentDecode,
-  getDoiUrl,
-  extractDoi,
-  isTestShoulder,
-  TEST_SHOULDER,
-  PRODUCTION_SHOULDER,
-  EZID_BASE_URL,
-  type EzidAuth,
-} from "../backend/src/services/ezid";
-import {
-  buildDataCiteXml,
+  type DataCiteMetadata,
   bidsToDataCite,
-  parseAuthorName,
+  buildDataCiteXml,
   mapLicense,
   mapModalityToResourceType,
-  type DataCiteMetadata,
+  parseAuthorName,
 } from "../backend/src/services/datacite";
+import {
+  EZID_BASE_URL,
+  type EzidAuth,
+  PRODUCTION_SHOULDER,
+  TEST_SHOULDER,
+  checkStatus,
+  createIdentifier,
+  decodeAnvl,
+  deleteIdentifier,
+  encodeAnvl,
+  extractDoi,
+  getDoiUrl,
+  getIdentifier,
+  isTestShoulder,
+  makePublic,
+  makeUnavailable,
+  mintIdentifier,
+  percentDecode,
+  percentEncode,
+  updateIdentifier,
+} from "../backend/src/services/ezid";
+import { sleep } from "./setup";
 
 // Only run these tests when explicitly enabled
 const SHOULD_RUN = process.env.RUN_EZID_TESTS === "true";
@@ -63,9 +64,7 @@ const createdIdentifiers: string[] = [];
 beforeAll(() => {
   if (!SHOULD_RUN) {
     console.log("\n  EZID sandbox tests are SKIPPED by default.");
-    console.log(
-      "   To run: RUN_EZID_TESTS=true bun test test/ezid-sandbox.test.ts\n",
-    );
+    console.log("   To run: RUN_EZID_TESTS=true bun test test/ezid-sandbox.test.ts\n");
     return;
   }
 
@@ -186,41 +185,52 @@ describe.skipIf(!SHOULD_RUN)("EZID Sandbox Integration", { timeout: 30000 }, () 
         resourceTypeGeneral: "Dataset",
         resourceTypeSpecific: "EEG Dataset",
         subjects: ["EEG", "electroencephalography", "BIDS", "neuroscience"],
-        contributors: [{
-          name: "NEMAR (Neuroelectromagnetic Data Archive and Tools Resource)",
-          contributorType: "HostingInstitution",
-          nameType: "Organizational",
-        }],
+        contributors: [
+          {
+            name: "NEMAR (Neuroelectromagnetic Data Archive and Tools Resource)",
+            contributorType: "HostingInstitution",
+            nameType: "Organizational",
+          },
+        ],
         dates: [
           { date: "2026-02-10", dateType: "Created" },
           { date: "2024-01-01/2025-12-31", dateType: "Collected" },
         ],
-        relatedIdentifiers: [{
-          identifier: "10.1234/example.paper.2024",
-          relatedIdentifierType: "DOI",
-          relationType: "IsSupplementTo",
-        }],
-        descriptions: [{
-          description: "A test EEG dataset with full DataCite metadata, demonstrating all 20 fields.",
-          descriptionType: "Abstract",
-        }],
+        relatedIdentifiers: [
+          {
+            identifier: "10.1234/example.paper.2024",
+            relatedIdentifierType: "DOI",
+            relationType: "IsSupplementTo",
+          },
+        ],
+        descriptions: [
+          {
+            description:
+              "A test EEG dataset with full DataCite metadata, demonstrating all 20 fields.",
+            descriptionType: "Abstract",
+          },
+        ],
         language: "en",
         alternateIdentifiers: [{ identifier: TEST_DATASET_ID, type: "NEMAR" }],
         sizes: ["500 MB", "30 subjects", "64 channels"],
         formats: ["application/x-edf", "application/json", "text/tab-separated-values"],
         version: "1.0.0",
-        rights: [{
-          rights: "Creative Commons Attribution 4.0 International",
-          rightsURI: "https://creativecommons.org/licenses/by/4.0/",
-          rightsIdentifier: "CC-BY-4.0",
-          rightsIdentifierScheme: "SPDX",
-        }],
-        fundingReferences: [{
-          funderName: "National Institutes of Health",
-          funderIdentifier: "https://doi.org/10.13039/100000002",
-          funderIdentifierType: "Crossref Funder ID",
-          awardNumber: "R01-NS12345",
-        }],
+        rights: [
+          {
+            rights: "Creative Commons Attribution 4.0 International",
+            rightsURI: "https://creativecommons.org/licenses/by/4.0/",
+            rightsIdentifier: "CC-BY-4.0",
+            rightsIdentifierScheme: "SPDX",
+          },
+        ],
+        fundingReferences: [
+          {
+            funderName: "National Institutes of Health",
+            funderIdentifier: "https://doi.org/10.13039/100000002",
+            funderIdentifierType: "Crossref Funder ID",
+            awardNumber: "R01-NS12345",
+          },
+        ],
       };
 
       const xml = buildDataCiteXml(metadata);
@@ -354,7 +364,12 @@ describe.skipIf(!SHOULD_RUN)("EZID Sandbox Integration", { timeout: 30000 }, () 
       const metadata: DataCiteMetadata = {
         identifier: doi,
         creators: [
-          { name: "Test, User", givenName: "User", familyName: "Test", orcid: "0000-0000-0000-0001" },
+          {
+            name: "Test, User",
+            givenName: "User",
+            familyName: "Test",
+            orcid: "0000-0000-0000-0001",
+          },
         ],
         titles: ["After Update - Rich Metadata"],
         publisher: "NEMAR (Neuroelectromagnetic Data Archive and Tools Resource)",
@@ -364,12 +379,14 @@ describe.skipIf(!SHOULD_RUN)("EZID Sandbox Integration", { timeout: 30000 }, () 
         subjects: ["EEG", "test"],
         language: "en",
         version: "2.0.0",
-        rights: [{
-          rights: "CC BY 4.0",
-          rightsURI: "https://creativecommons.org/licenses/by/4.0/",
-          rightsIdentifier: "CC-BY-4.0",
-          rightsIdentifierScheme: "SPDX",
-        }],
+        rights: [
+          {
+            rights: "CC BY 4.0",
+            rightsURI: "https://creativecommons.org/licenses/by/4.0/",
+            rightsIdentifier: "CC-BY-4.0",
+            rightsIdentifierScheme: "SPDX",
+          },
+        ],
       };
 
       const xml = buildDataCiteXml(metadata);
@@ -542,20 +559,13 @@ describe.skipIf(!SHOULD_RUN)("EZID Sandbox Integration", { timeout: 30000 }, () 
       const bidsDescription = {
         Name: "Healthy Brain Network (HBN) EEG - Release 1",
         BIDSVersion: "1.9.0",
-        Authors: [
-          "Shirazi, Seyed Yahya",
-          "Franco, Alexandre",
-          "Delorme, Arnaud",
-          "Makeig, Scott",
-        ],
+        Authors: ["Shirazi, Seyed Yahya", "Franco, Alexandre", "Delorme, Arnaud", "Makeig, Scott"],
         License: "CC-BY-4.0",
         DatasetType: "raw",
         Version: "1.0.1",
         HowToAcknowledge: "Please cite the associated paper.",
         Funding: ["NIH R01-NS12345"],
-        ReferencesAndLinks: [
-          "10.18112/openneuro.ds005505.v1.0.1",
-        ],
+        ReferencesAndLinks: ["10.18112/openneuro.ds005505.v1.0.1"],
       };
 
       const enrichment = {
@@ -572,18 +582,12 @@ describe.skipIf(!SHOULD_RUN)("EZID Sandbox Integration", { timeout: 30000 }, () 
           },
         },
         keywords: ["EEG", "pediatric", "resting state", "brain development"],
-        relatedDois: [
-          { doi: "10.1038/sdata.2017.181", relationType: "IsSupplementTo" as const },
-        ],
-        description: "A large-scale pediatric EEG dataset from the Healthy Brain Network initiative.",
+        relatedDois: [{ doi: "10.1038/sdata.2017.181", relationType: "IsSupplementTo" as const }],
+        description:
+          "A large-scale pediatric EEG dataset from the Healthy Brain Network initiative.",
       };
 
-      const metadata = bidsToDataCite(
-        TEST_DATASET_ID,
-        "(:tba)",
-        bidsDescription,
-        enrichment,
-      );
+      const metadata = bidsToDataCite(TEST_DATASET_ID, "(:tba)", bidsDescription, enrichment);
 
       const xml = buildDataCiteXml(metadata);
 
@@ -611,6 +615,77 @@ describe.skipIf(!SHOULD_RUN)("EZID Sandbox Integration", { timeout: 30000 }, () 
     });
   });
 
+  describe("Deterministic DOI Creation (Sandbox)", () => {
+    const deterministicId = `${TEST_SHOULDER}${TEST_DATASET_ID.toUpperCase()}`;
+
+    test("can create DOI with exact identifier", async () => {
+      await sleep(500);
+
+      const metadata = bidsToDataCite(TEST_DATASET_ID, extractDoi(deterministicId), {
+        Name: "Deterministic Test",
+      });
+      const xml = buildDataCiteXml(metadata);
+
+      const created = await createIdentifier(EZID_TEST_AUTH, deterministicId, {
+        status: "reserved",
+        target: `https://nemar.org/dataexplorer/detail?dataset_id=${TEST_DATASET_ID}`,
+        dataciteXml: xml,
+      });
+
+      createdIdentifiers.push(created.identifier);
+
+      expect(created.identifier).toBe(deterministicId);
+      expect(created.status).toBe("reserved");
+      console.log(`   [x] Created deterministic DOI: ${created.identifier}`);
+    });
+
+    test("collision returns clear error", async () => {
+      await sleep(500);
+
+      // The previous test already created this identifier
+      try {
+        await createIdentifier(EZID_TEST_AUTH, deterministicId, {
+          status: "reserved",
+          target: "https://nemar.org/collision-test",
+        });
+        expect(true).toBe(false);
+      } catch (error) {
+        expect((error as Error).message).toContain("already exists");
+        console.log("   [x] Collision correctly returns 'already exists' error");
+      }
+    });
+
+    test("can create version DOI with deterministic name", async () => {
+      await sleep(500);
+
+      const versionId = `${TEST_SHOULDER}${TEST_DATASET_ID.toUpperCase()}.V1.0.0`;
+      const doi = extractDoi(versionId);
+
+      const metadata = bidsToDataCite(
+        TEST_DATASET_ID,
+        doi,
+        { Name: "Deterministic Version Test" },
+        {
+          relatedDois: [{ doi: extractDoi(deterministicId), relationType: "IsVersionOf" }],
+        },
+      );
+      const xml = buildDataCiteXml(metadata);
+
+      const created = await createIdentifier(EZID_TEST_AUTH, versionId, {
+        status: "reserved",
+        target: `https://github.com/nemarDatasets/${TEST_DATASET_ID}/releases/tag/v1.0.0`,
+        dataciteXml: xml,
+      });
+
+      createdIdentifiers.push(created.identifier);
+
+      expect(created.identifier).toBe(versionId);
+      expect(created.status).toBe("reserved");
+      expect(created.dataciteXml).toContain("IsVersionOf");
+      console.log(`   [x] Created version DOI: ${created.identifier}`);
+    });
+  });
+
   describe("Error Handling (Sandbox)", () => {
     test("rejects invalid credentials", async () => {
       await sleep(300);
@@ -635,7 +710,7 @@ describe.skipIf(!SHOULD_RUN)("EZID Sandbox Integration", { timeout: 30000 }, () 
         expect(true).toBe(false);
       } catch (error) {
         expect((error as Error).message).toContain("EZID");
-        console.log(`   [x] Invalid credentials rejected`);
+        console.log("   [x] Invalid credentials rejected");
       }
     });
 

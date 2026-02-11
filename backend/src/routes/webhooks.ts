@@ -39,12 +39,12 @@ webhooks.post("/publish-version-doi", async (c) => {
   }
 
   // Parse request body
-  const body = await c.req.json<{
-    dataset_id: string;
-    version: string;
-    release_url: string;
-    sandbox?: boolean;
-  }>();
+  let body: { dataset_id: string; version: string; release_url: string; sandbox?: boolean };
+  try {
+    body = await c.req.json();
+  } catch {
+    return c.json({ error: "Invalid JSON in request body" }, 400);
+  }
 
   if (!body.dataset_id || !body.version || !body.release_url) {
     return c.json({ error: "Missing required fields: dataset_id, version, release_url" }, 400);
@@ -128,6 +128,7 @@ async function handleEzidVersionDoi(
     // Read BIDS metadata from the repo
     const repoName = dataset.github_repo.split("/")[1];
     let bidsDescription: Record<string, unknown> = { Name: dataset.name };
+    let bidsMetadataWarning: string | undefined;
     if (repoName) {
       try {
         const tree = await getTreeAtRef(repoName, "main", c.env.GITHUB_ADMIN_PAT);
@@ -140,7 +141,8 @@ async function handleEzidVersionDoi(
           }
         }
       } catch (bidsError) {
-        console.warn("[webhook] Could not read BIDS metadata:", bidsError);
+        bidsMetadataWarning = `BIDS metadata unavailable: ${bidsError instanceof Error ? bidsError.message : String(bidsError)}. DOI minted with minimal metadata.`;
+        console.error("[webhook]", bidsMetadataWarning);
       }
     }
 
@@ -170,19 +172,25 @@ async function handleEzidVersionDoi(
       },
     );
 
-    // Update database with version DOI
-    await c.env.DB.prepare(
-      "UPDATE datasets SET latest_version_doi = ?, updated_at = datetime('now') WHERE id = ?",
-    )
-      .bind(result.doi, dataset.id)
-      .run();
+    // DOI is now public and permanent. DB and manifest failures below are
+    // non-fatal but must be surfaced in the response for operator awareness.
+    let dbError: string | undefined;
+    try {
+      await c.env.DB.prepare(
+        "UPDATE datasets SET latest_version_doi = ?, updated_at = datetime('now') WHERE id = ?",
+      )
+        .bind(result.doi, dataset.id)
+        .run();
 
-    // Record in version history for HasVersion relation tracking
-    await c.env.DB.prepare(
-      "INSERT OR IGNORE INTO dataset_versions (dataset_id, version, doi, provider) VALUES (?, ?, ?, 'ezid')",
-    )
-      .bind(dataset.dataset_id, version, result.doi)
-      .run();
+      await c.env.DB.prepare(
+        "INSERT OR IGNORE INTO dataset_versions (dataset_id, version, doi, provider) VALUES (?, ?, ?, 'ezid')",
+      )
+        .bind(dataset.dataset_id, version, result.doi)
+        .run();
+    } catch (err) {
+      dbError = err instanceof Error ? err.message : String(err);
+      console.error(`[webhook] DOI ${result.doi} is PUBLIC but DB update failed:`, err);
+    }
 
     // Generate and upload version manifest
     let manifestGenerated = false;
@@ -228,7 +236,10 @@ async function handleEzidVersionDoi(
       provider: "ezid",
       doi_url: `https://doi.org/${result.doi}`,
       manifest_generated: manifestGenerated,
+      ...(bidsMetadataWarning && { bids_metadata_warning: bidsMetadataWarning }),
+      ...(dbError && { db_error: dbError }),
       ...(manifestErrorMsg && { manifest_error: manifestErrorMsg }),
+      ...(result.warnings && { doi_warnings: result.warnings }),
     });
   } catch (error) {
     console.error("EZID version DOI error:", error);
@@ -318,21 +329,29 @@ async function handleZenodoVersionDoi(
     // Publish the new version
     const published = await zenodo.publishDeposition(newVersion.id, zenodoToken, sandbox);
 
-    // Update database with new version info
-    await c.env.DB.prepare("UPDATE datasets SET zenodo_latest_version_id = ? WHERE id = ?")
-      .bind(published.id.toString(), dataset.id)
-      .run();
-
-    // Record in version history
-    if (published.doi) {
-      await c.env.DB.prepare(
-        "INSERT OR IGNORE INTO dataset_versions (dataset_id, version, doi, provider) VALUES (?, ?, ?, 'zenodo')",
-      )
-        .bind(dataset.dataset_id, version, published.doi)
-        .run();
-    }
-
+    // DOI is now published and permanent. DB and manifest failures below are
+    // non-fatal but must be surfaced in the response for operator awareness.
     const baseUrl = sandbox ? "https://sandbox.zenodo.org" : "https://zenodo.org";
+    let dbError: string | undefined;
+    try {
+      await c.env.DB.prepare("UPDATE datasets SET zenodo_latest_version_id = ? WHERE id = ?")
+        .bind(published.id.toString(), dataset.id)
+        .run();
+
+      if (published.doi) {
+        await c.env.DB.prepare(
+          "INSERT OR IGNORE INTO dataset_versions (dataset_id, version, doi, provider) VALUES (?, ?, ?, 'zenodo')",
+        )
+          .bind(dataset.dataset_id, version, published.doi)
+          .run();
+      }
+    } catch (err) {
+      dbError = err instanceof Error ? err.message : String(err);
+      console.error(
+        `[webhook] Zenodo DOI ${published.doi} is PUBLISHED but DB update failed:`,
+        err,
+      );
+    }
 
     // Generate and upload version manifest
     let manifestGenerated = false;
@@ -365,7 +384,6 @@ async function handleZenodoVersionDoi(
           manifestGenerated = true;
         }
       } catch (manifestErr) {
-        // Non-fatal: DOI was published, manifest can be regenerated later
         manifestErrorMsg = manifestErr instanceof Error ? manifestErr.message : String(manifestErr);
         console.error(
           `[webhook] Manifest generation failed for ${dataset.dataset_id}@${version}:`,
@@ -382,6 +400,7 @@ async function handleZenodoVersionDoi(
       provider: "zenodo",
       zenodo_url: `${baseUrl}/records/${published.id}`,
       manifest_generated: manifestGenerated,
+      ...(dbError && { db_error: dbError }),
       ...(manifestErrorMsg && { manifest_error: manifestErrorMsg }),
     });
   } catch (error) {
