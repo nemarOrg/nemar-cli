@@ -1581,12 +1581,20 @@ Possible Statuses:
   denied     - Request was denied (includes reason)
 
 Steps in Approval Process:
-  1. CI check        - Verify BIDS validation passes
-  2. Make public     - Change repository visibility
-  3. Tag protection  - Prevent version manipulation
-  4. Create DOI      - Assign permanent Zenodo DOI
-  5. S3 lock         - Enable Object Lock for data preservation
-  6. Notify user     - Send publication confirmation email
+   1. CI check          - Verify BIDS validation passes
+   2. Make public       - Change repository visibility
+   3. S3 public read    - Grant public read access to S3 data
+   4. Tag protection    - Prevent version manipulation
+   5. Create DOI        - Create concept DOI (EZID/Zenodo)
+   6. Update metadata   - Update from BIDS description
+   7. Update README     - Add DOI badge and citation
+   8. Create tag        - Create version tag
+   9. Create release    - Create GitHub release
+  10. Upload to Zenodo  - Upload archive (if Zenodo provider)
+  11. Publish DOI       - Make DOI public (permanent)
+  12. S3 lock           - Enable Object Lock for data preservation
+  13. Generate archive  - Create downloadable zip
+  14. Notify user       - Send publication confirmation email
 
 Examples:
   $ nemar dataset publish status nm000104`,
@@ -1606,14 +1614,12 @@ Examples:
 
       console.log(`\n${chalk.cyan("Publication Status:")} ${datasetId}\n`);
 
-      const statusColor =
-        result.status === "published"
-          ? chalk.green
-          : result.status === "denied"
-            ? chalk.red
-            : result.status === "approving"
-              ? chalk.yellow
-              : chalk.gray;
+      const statusColors: Record<string, typeof chalk.green> = {
+        published: chalk.green,
+        denied: chalk.red,
+        approving: chalk.yellow,
+      };
+      const statusColor = statusColors[result.status] || chalk.gray;
 
       console.log(`  Status: ${statusColor(result.status)}`);
 
@@ -1632,9 +1638,17 @@ Examples:
         const steps = [
           "ci_check",
           "repo_public",
+          "s3_public_read",
           "tag_protect",
           "doi_create",
+          "update_metadata",
+          "update_readme",
+          "create_tag",
+          "create_release",
+          "upload_to_zenodo",
+          "publish_doi",
           "s3_lock",
+          "generate_archive",
           "notify_user",
         ];
         const completed = result.steps_completed || [];

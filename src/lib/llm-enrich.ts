@@ -137,10 +137,11 @@ export function validateLlmResult(raw: Record<string, unknown>): LlmEnrichmentRe
 
   if (Array.isArray(raw.fundingReferences)) {
     const funds = raw.fundingReferences.filter(
-      (f): f is { funderName: string; awardNumber?: string; awardTitle?: string } =>
-        !!f &&
-        typeof f === "object" &&
-        typeof (f as Record<string, unknown>).funderName === "string",
+      (f): f is { funderName: string; awardNumber?: string; awardTitle?: string } => {
+        if (!f || typeof f !== "object") return false;
+        const obj = f as Record<string, unknown>;
+        return typeof obj.funderName === "string";
+      },
     );
     if (funds.length > 0) result.fundingReferences = funds;
   }
@@ -148,12 +149,15 @@ export function validateLlmResult(raw: Record<string, unknown>): LlmEnrichmentRe
   if (Array.isArray(raw.relatedDois)) {
     const doiPattern = /^10\.\d{4,}\/.+$/;
     const rels = raw.relatedDois.filter(
-      (r): r is { doi: string; relationType: string } =>
-        !!r &&
-        typeof r === "object" &&
-        typeof (r as Record<string, unknown>).doi === "string" &&
-        doiPattern.test((r as Record<string, unknown>).doi as string) &&
-        typeof (r as Record<string, unknown>).relationType === "string",
+      (r): r is { doi: string; relationType: string } => {
+        if (!r || typeof r !== "object") return false;
+        const obj = r as Record<string, unknown>;
+        return (
+          typeof obj.doi === "string" &&
+          doiPattern.test(obj.doi) &&
+          typeof obj.relationType === "string"
+        );
+      },
     );
     if (rels.length > 0) result.relatedDois = rels;
   }

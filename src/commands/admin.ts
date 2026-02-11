@@ -66,6 +66,28 @@ import {
   pushBranch,
 } from "../lib/git-annex.js";
 
+/** Handle common error patterns in admin CLI commands */
+function handleCommandError(
+  error: unknown,
+  spinner: ReturnType<typeof ora>,
+  defaultMsg: string,
+  hints?: Record<number, string>,
+): void {
+  if (error instanceof ApiError) {
+    spinner.fail(error.message);
+    const hint = hints?.[error.statusCode];
+    if (hint) {
+      console.log(chalk.gray(`  ${hint}`));
+    } else if (error.statusCode === 403) {
+      console.log(chalk.gray("  This command requires admin privileges"));
+    }
+  } else {
+    spinner.fail(defaultMsg);
+    const msg = error instanceof Error ? error.message : String(error);
+    console.log(chalk.gray(`  Error details: ${msg}`));
+  }
+}
+
 export const adminCommand = new Command("admin")
   .description("Admin commands (requires admin privileges)")
   .addHelpText(
@@ -163,14 +185,7 @@ adminCommand
         console.log();
       }
     } catch (error) {
-      if (error instanceof ApiError) {
-        spinner.fail(error.message);
-        if (error.statusCode === 403) {
-          console.log(chalk.gray("  This command requires admin privileges"));
-        }
-      } else {
-        spinner.fail("Failed to fetch users");
-      }
+      handleCommandError(error, spinner, "Failed to fetch users");
     }
   });
 
@@ -228,16 +243,9 @@ adminCommand
         console.log(chalk.yellow(`Warning: ${result.warning}`));
       }
     } catch (error) {
-      if (error instanceof ApiError) {
-        spinner.fail(error.message);
-        if (error.statusCode === 403) {
-          console.log(chalk.gray("  This command requires admin privileges"));
-        } else if (error.statusCode === 404) {
-          console.log(chalk.gray("  User not found or not in 'verified' status"));
-        }
-      } else {
-        spinner.fail("Failed to approve user");
-      }
+      handleCommandError(error, spinner, "Failed to approve user", {
+        404: "User not found or not in 'verified' status",
+      });
     }
   });
 
@@ -285,16 +293,9 @@ adminCommand
       await revokeUser(username);
       spinner.succeed(`Revoked access for ${username}`);
     } catch (error) {
-      if (error instanceof ApiError) {
-        spinner.fail(error.message);
-        if (error.statusCode === 403) {
-          console.log(chalk.gray("  This command requires admin privileges"));
-        } else if (error.statusCode === 404) {
-          console.log(chalk.gray("  User not found"));
-        }
-      } else {
-        spinner.fail("Failed to revoke user");
-      }
+      handleCommandError(error, spinner, "Failed to revoke user", {
+        404: "User not found",
+      });
     }
   });
 
@@ -408,18 +409,9 @@ async function regenerateIamAction(username: string, options: ConfirmOptions) {
     console.log();
     console.log(chalk.gray("The user can now upload to their datasets again."));
   } catch (error) {
-    if (error instanceof ApiError) {
-      spinner.fail(error.message);
-      if (error.statusCode === 403) {
-        console.log(chalk.gray("  This command requires admin privileges"));
-      } else if (error.statusCode === 404) {
-        console.log(chalk.gray("  User not found or not approved"));
-      }
-    } else {
-      spinner.fail("Failed to regenerate IAM credentials");
-      const errorMessage = error instanceof Error ? error.message : String(error);
-      console.log(chalk.gray(`  Error details: ${errorMessage}`));
-    }
+    handleCommandError(error, spinner, "Failed to regenerate IAM credentials", {
+      404: "User not found or not approved",
+    });
   }
 }
 
@@ -453,18 +445,9 @@ repoCommand
       await changeVisibility(datasetId, "public");
       spinner.succeed(`Repository ${datasetId} is now public`);
     } catch (error) {
-      if (error instanceof ApiError) {
-        spinner.fail(error.message);
-        if (error.statusCode === 403) {
-          console.log(chalk.gray("  This command requires admin privileges"));
-        } else if (error.statusCode === 404) {
-          console.log(chalk.gray("  Dataset not found"));
-        }
-      } else {
-        spinner.fail("Failed to change visibility");
-        const msg = error instanceof Error ? error.message : String(error);
-        console.log(chalk.gray(`  Error details: ${msg}`));
-      }
+      handleCommandError(error, spinner, "Failed to change visibility", {
+        404: "Dataset not found",
+      });
     }
   });
 
@@ -492,18 +475,9 @@ repoCommand
       await changeVisibility(datasetId, "private");
       spinner.succeed(`Repository ${datasetId} is now private`);
     } catch (error) {
-      if (error instanceof ApiError) {
-        spinner.fail(error.message);
-        if (error.statusCode === 403) {
-          console.log(chalk.gray("  This command requires admin privileges"));
-        } else if (error.statusCode === 404) {
-          console.log(chalk.gray("  Dataset not found"));
-        }
-      } else {
-        spinner.fail("Failed to change visibility");
-        const msg = error instanceof Error ? error.message : String(error);
-        console.log(chalk.gray(`  Error details: ${msg}`));
-      }
+      handleCommandError(error, spinner, "Failed to change visibility", {
+        404: "Dataset not found",
+      });
     }
   });
 
@@ -559,18 +533,9 @@ ciCommand
 
       console.log();
     } catch (error) {
-      if (error instanceof ApiError) {
-        spinner.fail(error.message);
-        if (error.statusCode === 403) {
-          console.log(chalk.gray("  This command requires admin privileges"));
-        } else if (error.statusCode === 404) {
-          console.log(chalk.gray("  Dataset not found"));
-        }
-      } else {
-        spinner.fail("Failed to check CI status");
-        const msg = error instanceof Error ? error.message : String(error);
-        console.log(chalk.gray(`  Error details: ${msg}`));
-      }
+      handleCommandError(error, spinner, "Failed to check CI status", {
+        404: "Dataset not found",
+      });
     }
   });
 
@@ -607,18 +572,9 @@ ciCommand
       }
       console.log();
     } catch (error) {
-      if (error instanceof ApiError) {
-        spinner.fail(error.message);
-        if (error.statusCode === 403) {
-          console.log(chalk.gray("  This command requires admin privileges"));
-        } else if (error.statusCode === 404) {
-          console.log(chalk.gray("  Dataset not found"));
-        }
-      } else {
-        spinner.fail("Failed to deploy CI workflows");
-        const msg = error instanceof Error ? error.message : String(error);
-        console.log(chalk.gray(`  Error details: ${msg}`));
-      }
+      handleCommandError(error, spinner, "Failed to deploy CI workflows", {
+        404: "Dataset not found",
+      });
     }
   });
 
@@ -1421,19 +1377,27 @@ publishCommand
     "after",
     `
 Description:
-  Approve a publication request and run the automated 6-step orchestrator
+  Approve a publication request and run the automated 14-step orchestrator
   to make the dataset publicly accessible with a permanent DOI.
 
   WARNING: This action is PERMANENT. Published datasets cannot be unpublished.
   Once a DOI is assigned, it is permanent and cannot be deleted.
 
 Orchestrator Steps:
-  1. CI Check        - Verify BIDS validation passes, deploy workflows if missing
-  2. Make Public     - Change GitHub repository visibility to public
-  3. Tag Protection  - Enable tag protection rules (prevents version manipulation)
-  4. Create DOI      - Assign permanent Zenodo concept DOI (if not exists)
-  5. S3 Lock         - Enable S3 Object Lock (prevents data deletion)
-  6. Notify User     - Send publication confirmation email to dataset owner
+   1. CI Check          - Verify BIDS validation passes, deploy workflows if missing
+   2. Make Public       - Change GitHub repository visibility to public
+   3. S3 Public Read    - Grant public read access to S3 data
+   4. Tag Protection    - Enable tag protection rules
+   5. Create DOI        - Create concept DOI via EZID (or Zenodo if configured)
+   6. Update Metadata   - Update dataset metadata from BIDS description
+   7. Update README     - Add DOI badge and citation info to README
+   8. Create Tag        - Create version tag (e.g., v1.0.0)
+   9. Create Release    - Create GitHub release from tag
+  10. Upload to Zenodo  - Upload dataset archive to Zenodo (if Zenodo provider)
+  11. Publish DOI       - Make DOI public and findable (permanent, irreversible)
+  12. S3 Lock           - Enable S3 Object Lock (prevents data deletion)
+  13. Generate Archive  - Create downloadable zip archive
+  14. Notify User       - Send publication confirmation email
 
 Resume Capability:
   If a step fails, the orchestrator saves progress. Use --resume to retry
@@ -1460,17 +1424,19 @@ After Approval:
       ? `Resume publication of ${datasetId}`
       : `Approve and publish ${datasetId}`;
     console.log(chalk.cyan(`\n${action}\n`));
-    console.log("This will run the following steps:");
-    console.log("  1. Check CI (deploy if missing, verify passing)");
-    console.log("  2. Make repository public");
-    console.log("  3. Enable tag protection (prevents version manipulation)");
+    console.log("This will run the following 14-step orchestrator:");
+    console.log("   1. Check CI             7. Update README");
+    console.log("   2. Make repo public      8. Create version tag");
+    console.log("   3. S3 public read        9. Create GitHub release");
+    console.log("   4. Tag protection       10. Upload to Zenodo");
     console.log(
       options.sandbox
-        ? "  4. Create concept DOI (SANDBOX - for testing)"
-        : "  4. Create concept DOI (if needed)",
+        ? "   5. Create DOI (SANDBOX) 11. Publish DOI (irreversible)"
+        : "   5. Create DOI           11. Publish DOI (irreversible)",
     );
-    console.log("  5. Apply S3 Object Lock");
-    console.log("  6. Notify user");
+    console.log("   6. Update metadata      12. S3 Object Lock");
+    console.log("                           13. Generate archive");
+    console.log("                           14. Notify user");
     console.log();
 
     // Sandbox warning
