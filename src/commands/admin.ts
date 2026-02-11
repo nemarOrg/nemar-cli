@@ -1284,17 +1284,7 @@ Examples:
       }
       console.log();
     } catch (error) {
-      if (error instanceof ApiError) {
-        spinner.fail(error.message);
-        console.log(chalk.gray(`  ${error.message}`));
-        if (error.statusCode === 403) {
-          console.log(chalk.gray("  This command requires admin privileges"));
-        }
-      } else {
-        spinner.fail("Failed to list publication requests");
-        const msg = error instanceof Error ? error.message : String(error);
-        console.log(chalk.gray(`  Error details: ${msg}`));
-      }
+      handleCommandError(error, spinner, "Failed to list publication requests");
     }
   });
 
@@ -1354,14 +1344,7 @@ Examples:
       spinner.succeed(`Publication denied for ${datasetId}`);
       console.log(chalk.gray("  User has been notified."));
     } catch (error) {
-      if (error instanceof ApiError) {
-        spinner.fail(error.message);
-        console.log(chalk.gray(`  ${error.message}`));
-      } else {
-        spinner.fail("Failed to deny publication");
-        const msg = error instanceof Error ? error.message : String(error);
-        console.log(chalk.gray(`  Error details: ${msg}`));
-      }
+      handleCommandError(error, spinner, "Failed to deny publication");
     }
   });
 
@@ -1472,17 +1455,9 @@ After Approval:
         console.log();
       }
     } catch (error) {
-      if (error instanceof ApiError) {
-        spinner.fail(error.message);
-        console.log(chalk.gray(`  ${error.message}`));
-        if (error.statusCode === 422) {
-          console.log(chalk.yellow("  Fix the CI issues and retry with --resume"));
-        }
-      } else {
-        spinner.fail("Failed to approve publication");
-        const msg = error instanceof Error ? error.message : String(error);
-        console.log(chalk.gray(`  Error details: ${msg}`));
-      }
+      handleCommandError(error, spinner, "Failed to approve publication", {
+        422: "Fix the CI issues and retry with --resume",
+      });
     }
   });
 

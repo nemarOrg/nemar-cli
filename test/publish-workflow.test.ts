@@ -252,15 +252,17 @@ describe("publish workflow - admin operations", () => {
       username: "test-admin",
     });
 
-    const { stdout } = await runCli(
+    const { stdout, stderr } = await runCli(
       ["admin", "publish", "deny", "nm999999", "-r", "test reason", "-y"],
       ctx,
     );
     // Backend returns "No active publication request found" or generic 404
+    // Error message appears in stderr (via ora spinner.fail) or stdout
+    const output = stdout + stderr;
     expect(
-      stdout.includes("not found") ||
-        stdout.includes("No active publication request") ||
-        stdout.includes("404"),
+      output.includes("not found") ||
+        output.includes("No active publication request") ||
+        output.includes("404"),
     ).toBe(true);
   });
 
@@ -274,11 +276,13 @@ describe("publish workflow - admin operations", () => {
       username: "test-admin",
     });
 
-    const { stdout } = await runCli(["admin", "publish", "approve", "nm999999", "-y"], ctx);
+    const { stdout, stderr } = await runCli(["admin", "publish", "approve", "nm999999", "-y"], ctx);
+    // Error message appears in stderr (via ora spinner.fail) or stdout
+    const output = stdout + stderr;
     expect(
-      stdout.includes("not found") ||
-        stdout.includes("No active publication request") ||
-        stdout.includes("404"),
+      output.includes("not found") ||
+        output.includes("No active publication request") ||
+        output.includes("404"),
     ).toBe(true);
   });
 
