@@ -38,9 +38,13 @@ export function parseDoiProvider(
 export type { EzidStatus };
 
 /** Discriminated union: EZID has a lifecycle (reserved/public/unavailable) while Zenodo concept depositions remain "draft" until published. */
-export type DoiResult =
+export type DoiResult = (
   | { doi: string; provider: "ezid"; providerRecordId: string; status: EzidStatus }
-  | { doi: string; provider: "zenodo"; providerRecordId: string; status: "draft" };
+  | { doi: string; provider: "zenodo"; providerRecordId: string; status: "draft" }
+) & {
+  /** Non-fatal warnings (e.g., concept DOI update failed after version was published) */
+  warnings?: string[];
+};
 
 export interface CreateConceptDoiOptions {
   provider: DoiProvider;
@@ -294,6 +298,7 @@ export async function createEzidVersionDoi(
   // Update the concept DOI's XML to include HasVersion relation.
   // Non-fatal: the version DOI is already public at this point, so we log but
   // do not throw if the concept update fails.
+  const warnings: string[] = [];
   try {
     // Include all version DOIs (existing + new) so we don't overwrite previous HasVersion relations
     const allVersionDois = [
@@ -315,10 +320,9 @@ export async function createEzidVersionDoi(
     const conceptXml = buildDataCiteXml(conceptMetadata);
     await updateIdentifier(auth, opts.conceptIdentifier, { dataciteXml: conceptXml });
   } catch (conceptUpdateError) {
-    console.error(
-      `[doi] Version DOI ${doi} is public but concept DOI update failed:`,
-      conceptUpdateError,
-    );
+    const msg = `Version DOI ${doi} is public but concept DOI update failed: ${conceptUpdateError instanceof Error ? conceptUpdateError.message : String(conceptUpdateError)}`;
+    console.error(`[doi] ${msg}`);
+    warnings.push(msg);
   }
 
   return {
@@ -326,5 +330,6 @@ export async function createEzidVersionDoi(
     provider: "ezid",
     providerRecordId: fullIdentifier,
     status: "public",
+    ...(warnings.length > 0 && { warnings }),
   };
 }

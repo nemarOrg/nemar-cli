@@ -100,7 +100,9 @@ export function percentDecode(value: string): string {
   try {
     return decodeURIComponent(value);
   } catch {
-    // Fall back to byte-level decoding if not valid percent-encoded UTF-8
+    console.warn(
+      `[ezid] percentDecode: decodeURIComponent failed for value (length=${value.length}), using byte-level fallback`,
+    );
     return value.replace(/%([0-9A-Fa-f]{2})/g, (_, hex) =>
       String.fromCharCode(Number.parseInt(hex, 16)),
     );
@@ -193,7 +195,14 @@ async function ezidRequest(
     );
   }
 
-  const responseBody = await response.text();
+  let responseBody: string;
+  try {
+    responseBody = await response.text();
+  } catch (error) {
+    throw new Error(
+      `EZID response body read failed (${method} ${path}, status ${response.status}): ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
 
   // Guard against non-ANVL error responses (HTML error pages, proxy errors)
   if (!response.ok && !responseBody.startsWith("error: ")) {
@@ -227,6 +236,7 @@ function parseEzidStatus(rawStatus: string | undefined): {
     const reason = pipeIdx !== -1 ? rawStatus.substring(pipeIdx + 3) : undefined;
     return { status: "unavailable", unavailableReason: reason };
   }
+  console.warn(`[ezid] Unknown EZID status: "${rawStatus}"`);
   return { status: rawStatus as EzidStatus };
 }
 
