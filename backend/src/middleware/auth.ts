@@ -45,6 +45,7 @@ export async function authMiddleware(c: AuthContext, next: Next) {
       u.email,
       u.github_username,
       u.is_admin,
+      u.orcid,
       u.status,
       t.id as token_id
     FROM tokens t
@@ -61,6 +62,7 @@ export async function authMiddleware(c: AuthContext, next: Next) {
       email: string;
       github_username: string;
       is_admin: number;
+      orcid: string | null;
       status: string;
       token_id: number;
     }>();
@@ -95,6 +97,7 @@ export async function authMiddleware(c: AuthContext, next: Next) {
     email: result.email,
     github_username: result.github_username,
     is_admin: result.is_admin === 1,
+    orcid: result.orcid || undefined,
   };
 
   c.set("user", user);
@@ -148,6 +151,7 @@ export async function optionalAuthMiddleware(c: AuthContext, next: Next) {
       u.email,
       u.github_username,
       u.is_admin,
+      u.orcid,
       u.status
     FROM tokens t
     JOIN users u ON t.user_id = u.id
@@ -163,6 +167,7 @@ export async function optionalAuthMiddleware(c: AuthContext, next: Next) {
       email: string;
       github_username: string;
       is_admin: number;
+      orcid: string | null;
       status: string;
     }>();
 
@@ -173,6 +178,7 @@ export async function optionalAuthMiddleware(c: AuthContext, next: Next) {
       email: result.email,
       github_username: result.github_username,
       is_admin: result.is_admin === 1,
+      orcid: result.orcid || undefined,
     });
   }
 

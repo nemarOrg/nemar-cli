@@ -53,6 +53,8 @@ import {
   publishDeposition,
   uploadFile,
 } from "../services/zenodo";
+import { type DoiProvider, type DoiResult, createConceptDoi as dispatchCreateConceptDoi } from "../services/doi";
+import { extractDoi, getDoiUrl } from "../services/ezid";
 import type { Bindings, Variables } from "../types/bindings";
 
 /**
@@ -850,6 +852,7 @@ const createConceptDoiSchema = z.object({
     )
     .optional(),
   sandbox: z.boolean().optional().default(false),
+  provider: z.enum(["ezid", "zenodo"]).optional().default("ezid"),
 });
 
 adminRoutes.post(
@@ -865,7 +868,7 @@ adminRoutes.post(
     const dataset = await db
       .prepare(
         `
-    SELECT d.*, u.username as owner_username
+    SELECT d.*, u.username as owner_username, u.orcid as owner_orcid
     FROM datasets d
     JOIN users u ON d.owner_user_id = u.id
     WHERE d.dataset_id = ?
@@ -880,7 +883,11 @@ adminRoutes.post(
         github_repo: string | null;
         concept_doi: string | null;
         zenodo_concept_id: string | null;
+        ezid_identifier: string | null;
+        ezid_status: string | null;
+        doi_provider: string | null;
         owner_username: string;
+        owner_orcid: string | null;
         is_sandbox: number | null;
       }>();
 
@@ -966,62 +973,87 @@ adminRoutes.post(
       }
     }
 
-    // Prepare metadata
-    const metadata: ZenodoMetadata = {
-      title: body.title || `${dataset.name} - BIDS Dataset`,
-      description:
-        body.description || dataset.description || `BIDS-formatted dataset: ${dataset.name}`,
-      creators: body.authors || [{ name: dataset.owner_username }],
-      keywords: ["BIDS", "neuroscience", "neuroimaging", "NEMAR"],
-      license: "cc-by-nc-4.0",
-      related_identifiers: dataset.github_repo
-        ? [
-            {
-              identifier: `https://github.com/${dataset.github_repo}`,
-              relation: "isSupplementTo",
-              resource_type: "dataset",
-            },
-          ]
-        : undefined,
-    };
-
-    // Get the appropriate Zenodo API key
-    const zenodoToken = body.sandbox ? c.env.ZENODO_SANDBOX_API_KEY : c.env.ZENODO_API_KEY;
-
-    if (!zenodoToken) {
-      return c.json(
-        {
-          error: body.sandbox
-            ? "Zenodo sandbox API key not configured"
-            : "Zenodo API key not configured",
-        },
-        500,
-      );
+    // Read BIDS metadata from GitHub repo for richer DOI metadata
+    let bidsDescription: Record<string, unknown> | undefined;
+    if (dataset.github_repo) {
+      try {
+        const repoName = dataset.github_repo.split("/")[1];
+        if (repoName) {
+          const tree = await getTreeAtRef(repoName, "main", c.env.GITHUB_ADMIN_PAT);
+          const descFile = tree.find((f) => f.path === "dataset_description.json");
+          if (descFile) {
+            const content = await getBlobContent(repoName, descFile.sha, c.env.GITHUB_ADMIN_PAT);
+            bidsDescription = JSON.parse(content) as Record<string, unknown>;
+          }
+        }
+      } catch (bidsError) {
+        console.warn("[doi] Could not read BIDS metadata from repo:", bidsError);
+      }
     }
 
-    try {
-      // Create deposition on Zenodo (pre-reserve DOI)
-      const deposition = await createDeposition(metadata, zenodoToken, body.sandbox);
+    const provider = body.provider as "ezid" | "zenodo";
 
-      const conceptDoi = getPrereservedDoi(deposition);
-      if (!conceptDoi) {
-        throw new Error("Zenodo did not return a pre-reserved DOI");
-      }
+    try {
+      const result = await dispatchCreateConceptDoi(
+        {
+          provider,
+          datasetId,
+          datasetName: body.title || dataset.name,
+          datasetDescription:
+            body.description || dataset.description,
+          githubRepo: dataset.github_repo,
+          bidsDescription,
+          uploaderOrcid: dataset.owner_orcid || undefined,
+          uploaderName: dataset.owner_username,
+          sandbox: body.sandbox,
+        },
+        {
+          EZID_USERNAME: c.env.EZID_USERNAME,
+          EZID_PASSWORD: c.env.EZID_PASSWORD,
+          ZENODO_API_KEY: c.env.ZENODO_API_KEY,
+          ZENODO_SANDBOX_API_KEY: c.env.ZENODO_SANDBOX_API_KEY,
+        },
+      );
 
       // Update dataset with DOI info
-      await db
-        .prepare(
-          `
-      UPDATE datasets
-      SET concept_doi = ?,
-          zenodo_concept_id = ?,
-          is_sandbox = ?,
-          updated_at = datetime('now')
-      WHERE dataset_id = ?
-    `,
-        )
-        .bind(conceptDoi, deposition.id.toString(), body.sandbox ? 1 : 0, datasetId)
-        .run();
+      if (provider === "ezid") {
+        await db
+          .prepare(
+            `
+        UPDATE datasets
+        SET concept_doi = ?,
+            ezid_identifier = ?,
+            ezid_status = ?,
+            doi_provider = 'ezid',
+            is_sandbox = ?,
+            updated_at = datetime('now')
+        WHERE dataset_id = ?
+      `,
+          )
+          .bind(
+            result.doi,
+            result.providerRecordId,
+            result.status,
+            body.sandbox ? 1 : 0,
+            datasetId,
+          )
+          .run();
+      } else {
+        await db
+          .prepare(
+            `
+        UPDATE datasets
+        SET concept_doi = ?,
+            zenodo_concept_id = ?,
+            doi_provider = 'zenodo',
+            is_sandbox = ?,
+            updated_at = datetime('now')
+        WHERE dataset_id = ?
+      `,
+          )
+          .bind(result.doi, result.providerRecordId, body.sandbox ? 1 : 0, datasetId)
+          .run();
+      }
 
       // Audit log
       await db
@@ -1035,8 +1067,9 @@ adminRoutes.post(
           adminUser.id,
           datasetId,
           JSON.stringify({
-            concept_doi: conceptDoi,
-            zenodo_id: deposition.id,
+            concept_doi: result.doi,
+            provider,
+            provider_record_id: result.providerRecordId,
             sandbox: body.sandbox,
           }),
         )
@@ -1045,15 +1078,28 @@ adminRoutes.post(
       // Generate the repo name for the setup command
       const repoName = dataset.github_repo ? dataset.github_repo.split("/")[1] : datasetId;
 
-      return c.json({
+      // Build response based on provider
+      const response: Record<string, unknown> = {
         message: "Concept DOI created successfully",
-        concept_doi: conceptDoi,
-        zenodo_id: deposition.id,
-        zenodo_url: formatRecordUrl(deposition.id, body.sandbox),
+        concept_doi: result.doi,
+        provider,
         setup_command: `gh secret set NEMAR_WEBHOOK_TOKEN --repo nemarDatasets/${repoName}`,
         warning:
           "DOI is pre-reserved but not yet published. It will become active on first version publish.",
-      });
+      };
+
+      if (provider === "ezid") {
+        response.ezid_identifier = result.providerRecordId;
+        response.doi_url = `https://doi.org/${result.doi}`;
+      } else {
+        response.zenodo_id = Number.parseInt(result.providerRecordId);
+        response.zenodo_url = formatRecordUrl(
+          Number.parseInt(result.providerRecordId),
+          body.sandbox,
+        );
+      }
+
+      return c.json(response);
     } catch (error) {
       console.error("Failed to create concept DOI:", error);
       return c.json(
@@ -1266,7 +1312,9 @@ adminRoutes.get("/datasets/:id/doi", async (c) => {
   const dataset = await db
     .prepare(
       `
-    SELECT dataset_id, name, concept_doi, latest_version_doi, zenodo_concept_id, zenodo_latest_version_id
+    SELECT dataset_id, name, concept_doi, latest_version_doi,
+           zenodo_concept_id, zenodo_latest_version_id,
+           ezid_identifier, ezid_status, doi_provider
     FROM datasets
     WHERE dataset_id = ?
   `,
@@ -1279,6 +1327,9 @@ adminRoutes.get("/datasets/:id/doi", async (c) => {
       latest_version_doi: string | null;
       zenodo_concept_id: string | null;
       zenodo_latest_version_id: string | null;
+      ezid_identifier: string | null;
+      ezid_status: string | null;
+      doi_provider: string | null;
     }>();
 
   if (!dataset) {
@@ -1290,14 +1341,153 @@ adminRoutes.get("/datasets/:id/doi", async (c) => {
     name: dataset.name,
     concept_doi: dataset.concept_doi,
     latest_version_doi: dataset.latest_version_doi,
+    doi_provider: dataset.doi_provider || "zenodo",
     zenodo_concept_url: dataset.zenodo_concept_id
       ? formatRecordUrl(Number.parseInt(dataset.zenodo_concept_id))
       : null,
     zenodo_latest_version_url: dataset.zenodo_latest_version_id
       ? formatRecordUrl(Number.parseInt(dataset.zenodo_latest_version_id))
       : null,
+    ezid_identifier: dataset.ezid_identifier,
+    ezid_status: dataset.ezid_status,
+    doi_url: dataset.concept_doi ? `https://doi.org/${dataset.concept_doi}` : null,
   });
 });
+
+/**
+ * POST /admin/datasets/:id/doi/update - Update EZID DOI metadata or status
+ *
+ * Allows updating metadata (re-generate DataCite XML from BIDS) or
+ * changing status (reserved -> public).
+ */
+const updateDoiSchema = z.object({
+  status: z.enum(["public", "unavailable"]).optional(),
+  refresh_metadata: z.boolean().optional().default(false),
+});
+
+adminRoutes.post(
+  "/datasets/:id/doi/update",
+  zValidator("json", updateDoiSchema),
+  async (c) => {
+    const datasetId = c.req.param("id");
+    const body = c.req.valid("json");
+    const db = c.env.DB;
+
+    const dataset = await db
+      .prepare(
+        `
+      SELECT d.dataset_id, d.concept_doi, d.ezid_identifier, d.ezid_status,
+             d.doi_provider, d.github_repo, d.name, d.is_sandbox,
+             u.username as owner_username, u.orcid as owner_orcid
+      FROM datasets d
+      JOIN users u ON d.owner_user_id = u.id
+      WHERE d.dataset_id = ?
+    `,
+      )
+      .bind(datasetId)
+      .first<{
+        dataset_id: string;
+        concept_doi: string | null;
+        ezid_identifier: string | null;
+        ezid_status: string | null;
+        doi_provider: string | null;
+        github_repo: string | null;
+        name: string;
+        is_sandbox: number | null;
+        owner_username: string;
+        owner_orcid: string | null;
+      }>();
+
+    if (!dataset) {
+      return c.json({ error: "Dataset not found" }, 404);
+    }
+
+    if (dataset.doi_provider !== "ezid" || !dataset.ezid_identifier) {
+      return c.json(
+        { error: "DOI update is only supported for EZID-managed DOIs" },
+        400,
+      );
+    }
+
+    const { updateIdentifier: ezidUpdate } = await import("../services/ezid");
+    const auth = { username: c.env.EZID_USERNAME, password: c.env.EZID_PASSWORD };
+
+    try {
+      const updateOptions: { status?: "public" | "unavailable"; dataciteXml?: string; target?: string } = {};
+
+      // Refresh metadata from BIDS
+      if (body.refresh_metadata && dataset.github_repo) {
+        const repoName = dataset.github_repo.split("/")[1];
+        if (repoName) {
+          const tree = await getTreeAtRef(repoName, "main", c.env.GITHUB_ADMIN_PAT);
+          const descFile = tree.find((f) => f.path === "dataset_description.json");
+          if (descFile) {
+            const content = await getBlobContent(repoName, descFile.sha, c.env.GITHUB_ADMIN_PAT);
+            const bidsDesc = JSON.parse(content) as Record<string, unknown>;
+            const { bidsToDataCite, buildDataCiteXml } = await import("../services/datacite");
+            const doi = extractDoi(dataset.ezid_identifier);
+            const enrichment: Record<string, unknown> = {};
+            if (dataset.owner_orcid) {
+              const authors = bidsDesc.Authors;
+              const authorList = Array.isArray(authors)
+                ? authors.filter((a): a is string => typeof a === "string")
+                : [];
+              if (authorList.length > 0) {
+                const authorEnrichment: Record<string, { orcid: string }> = {};
+                for (const author of authorList) {
+                  if (author.toLowerCase().includes(dataset.owner_username.toLowerCase())) {
+                    authorEnrichment[author] = { orcid: dataset.owner_orcid };
+                    break;
+                  }
+                }
+                (enrichment as { authors: Record<string, { orcid: string }> }).authors = authorEnrichment;
+              }
+            }
+            const metadata = bidsToDataCite(datasetId, doi, bidsDesc, enrichment as import("../services/datacite").DataCiteEnrichment);
+            updateOptions.dataciteXml = buildDataCiteXml(metadata);
+          }
+        }
+      }
+
+      // Change status
+      if (body.status) {
+        if (body.status === "public" && dataset.ezid_status === "reserved") {
+          const target = dataset.github_repo
+            ? `https://github.com/${dataset.github_repo}`
+            : `https://nemar.org/dataexplorer/detail?dataset_id=${datasetId}`;
+          updateOptions.status = "public";
+          updateOptions.target = target;
+        } else if (body.status === "unavailable") {
+          updateOptions.status = "unavailable";
+        }
+      }
+
+      const updated = await ezidUpdate(auth, dataset.ezid_identifier, updateOptions);
+
+      // Update DB
+      await db
+        .prepare("UPDATE datasets SET ezid_status = ?, updated_at = datetime('now') WHERE dataset_id = ?")
+        .bind(updated.status, datasetId)
+        .run();
+
+      return c.json({
+        message: "DOI updated successfully",
+        ezid_identifier: dataset.ezid_identifier,
+        status: updated.status,
+        doi_url: `https://doi.org/${extractDoi(dataset.ezid_identifier)}`,
+      });
+    } catch (error) {
+      console.error("Failed to update DOI:", error);
+      return c.json(
+        {
+          error: "Failed to update DOI",
+          details: error instanceof Error ? error.message : "Unknown error",
+        },
+        500,
+      );
+    }
+  },
+);
 
 /**
  * DELETE /admin/zenodo/deposition/:id - Delete unpublished Zenodo deposition
@@ -1949,7 +2139,7 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
   // Get dataset info
   const dataset = await db
     .prepare(
-      `SELECT d.*, u.username as owner_username, u.email as owner_email
+      `SELECT d.*, u.username as owner_username, u.email as owner_email, u.orcid as owner_orcid
        FROM datasets d
        JOIN users u ON d.owner_user_id = u.id
        WHERE d.dataset_id = ?`,
@@ -1959,11 +2149,16 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
       id: number;
       dataset_id: string;
       name: string;
+      description: string | null;
       github_repo: string | null;
       concept_doi: string | null;
       zenodo_concept_id: string | null;
+      ezid_identifier: string | null;
+      ezid_status: string | null;
+      doi_provider: string | null;
       owner_username: string;
       owner_email: string;
+      owner_orcid: string | null;
     }>();
 
   if (!dataset) {
@@ -2268,49 +2463,51 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
           }
         }
 
-        const { createDeposition: createDep, getPrereservedDoi: getDoi } = await import(
-          "../services/zenodo"
-        );
-        const zenodoToken = sandbox ? c.env.ZENODO_SANDBOX_API_KEY : c.env.ZENODO_API_KEY;
-        if (!zenodoToken) {
-          const errorMsg = sandbox
-            ? "Zenodo sandbox API key not configured"
-            : "Zenodo API key not configured";
-          await updateProgress("doi_create", errorMsg);
-          return c.json(
-            {
-              error: errorMsg,
-              step: "doi_create",
-              steps_completed: completed,
-            },
-            500,
-          );
+        // Determine provider: use dataset's setting or default to ezid
+        const provider = (dataset.doi_provider as "ezid" | "zenodo") || "ezid";
+
+        // Read BIDS metadata for richer DOI records
+        let bidsDesc: Record<string, unknown> | undefined;
+        if (repoName) {
+          const descResult = await readDatasetDescription("doi_create");
+          if (descResult instanceof Response) return descResult;
+          bidsDesc = descResult;
         }
 
-        const metadata = {
-          title: `${dataset.name} - BIDS Dataset`,
-          description: `BIDS-formatted dataset: ${dataset.name}`,
-          creators: [{ name: dataset.owner_username }],
-          keywords: ["BIDS", "neuroscience", "neuroimaging", "NEMAR"],
-          license: "cc-by-nc-4.0",
-          related_identifiers: [
-            {
-              identifier: `https://github.com/${dataset.github_repo}`,
-              relation: "isSupplementTo",
-              resource_type: "dataset",
-            },
-          ],
-        };
+        const { createConceptDoi: doiDispatch } = await import("../services/doi");
+        const doiResult = await doiDispatch(
+          {
+            provider,
+            datasetId,
+            datasetName: dataset.name,
+            datasetDescription: dataset.description,
+            githubRepo: dataset.github_repo,
+            bidsDescription: bidsDesc,
+            uploaderOrcid: dataset.owner_orcid || undefined,
+            uploaderName: dataset.owner_username,
+            sandbox,
+          },
+          {
+            EZID_USERNAME: c.env.EZID_USERNAME,
+            EZID_PASSWORD: c.env.EZID_PASSWORD,
+            ZENODO_API_KEY: c.env.ZENODO_API_KEY,
+            ZENODO_SANDBOX_API_KEY: c.env.ZENODO_SANDBOX_API_KEY,
+          },
+        );
 
-        const deposition = await createDep(metadata, zenodoToken, sandbox);
-        const conceptDoi = getDoi(deposition);
-
-        if (conceptDoi) {
+        if (provider === "ezid") {
           await db
             .prepare(
-              "UPDATE datasets SET concept_doi = ?, zenodo_concept_id = ?, is_sandbox = ?, updated_at = datetime('now') WHERE dataset_id = ?",
+              "UPDATE datasets SET concept_doi = ?, ezid_identifier = ?, ezid_status = ?, doi_provider = 'ezid', is_sandbox = ?, updated_at = datetime('now') WHERE dataset_id = ?",
             )
-            .bind(conceptDoi, deposition.id.toString(), sandbox ? 1 : 0, datasetId)
+            .bind(doiResult.doi, doiResult.providerRecordId, doiResult.status, sandbox ? 1 : 0, datasetId)
+            .run();
+        } else {
+          await db
+            .prepare(
+              "UPDATE datasets SET concept_doi = ?, zenodo_concept_id = ?, doi_provider = 'zenodo', is_sandbox = ?, updated_at = datetime('now') WHERE dataset_id = ?",
+            )
+            .bind(doiResult.doi, doiResult.providerRecordId, sandbox ? 1 : 0, datasetId)
             .run();
         }
       }

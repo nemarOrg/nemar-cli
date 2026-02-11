@@ -40,6 +40,7 @@ import {
   publishDataset,
   regenerateUserIam,
   revokeUser,
+  updateDoi,
 } from "../lib/api.js";
 import { getConfig, isAuthenticated } from "../lib/config.js";
 import {
@@ -631,13 +632,14 @@ doiCommand
   .argument("<dataset-id>", "Dataset ID (e.g., nm000104)")
   .option("--title <title>", "DOI title (defaults to dataset name)")
   .option("--description <desc>", "DOI description")
-  .option("--sandbox", "Use Zenodo sandbox for testing")
+  .option("--provider <provider>", "DOI provider: ezid (default) or zenodo", "ezid")
+  .option("--sandbox", "Use sandbox/test DOI")
   .option(YES_OPTION, YES_DESCRIPTION)
   .option(NO_OPTION, NO_DESCRIPTION)
   .action(
     async (
       datasetId,
-      options: { title?: string; description?: string; sandbox?: boolean } & ConfirmOptions,
+      options: { title?: string; description?: string; provider?: string; sandbox?: boolean } & ConfirmOptions,
     ) => {
       if (!requireAuth()) return;
 
@@ -688,11 +690,18 @@ doiCommand
       console.log();
 
       // Enhanced sandbox warning
+      const provider = (options.provider === "zenodo" ? "zenodo" : "ezid") as "ezid" | "zenodo";
+
       if (options.sandbox) {
         console.log(chalk.yellow("━".repeat(60)));
         console.log(chalk.yellow.bold("                 SANDBOX MODE ENABLED"));
         console.log(chalk.yellow("━".repeat(60)));
-        console.log(chalk.yellow("  • Using Zenodo sandbox (sandbox.zenodo.org)"));
+        if (provider === "zenodo") {
+          console.log(chalk.yellow("  • Using Zenodo sandbox (sandbox.zenodo.org)"));
+        } else {
+          console.log(chalk.yellow("  • Using EZID test shoulder (doi:10.5072/FK2)"));
+          console.log(chalk.yellow("  • Test DOIs auto-delete after 2 weeks"));
+        }
         console.log(chalk.yellow("  • DOI will NOT be indexed by DataCite"));
         console.log(chalk.yellow("  • DOI will NOT resolve in production"));
         console.log(chalk.yellow("  • Use this for testing workflows only"));
@@ -707,11 +716,12 @@ doiCommand
           "The DOI will be pre-reserved but not published until the first version release.",
         ),
       );
+      console.log(`  Provider: ${chalk.cyan(provider.toUpperCase())}`);
       console.log();
 
       const confirmMessage = options.sandbox
-        ? "Create TEST concept DOI on Zenodo SANDBOX?"
-        : "Create PERMANENT concept DOI on Zenodo PRODUCTION?";
+        ? `Create TEST concept DOI via ${provider.toUpperCase()} SANDBOX?`
+        : `Create PERMANENT concept DOI via ${provider.toUpperCase()} PRODUCTION?`;
       const result = await confirm(confirmMessage, options);
       if (result !== "confirmed") {
         console.log(chalk.gray(result === "declined" ? "Skipped" : "Cancelled"));
@@ -719,13 +729,14 @@ doiCommand
       }
 
       // Create concept DOI
-      const createSpinner = ora("Creating concept DOI on Zenodo...").start();
+      const createSpinner = ora(`Creating concept DOI via ${provider.toUpperCase()}...`).start();
 
       try {
         const result = await createConceptDoi(datasetId, {
           title: options.title,
           description: options.description,
           sandbox: options.sandbox,
+          provider,
         });
 
         createSpinner.succeed("Concept DOI created successfully");
@@ -764,7 +775,16 @@ doiCommand
         console.log();
         console.log(chalk.green("DOI Information:"));
         console.log(`  Concept DOI: ${chalk.cyan(result.concept_doi)}`);
-        console.log(`  Zenodo URL:  ${result.zenodo_url}`);
+        console.log(`  Provider:    ${result.provider?.toUpperCase() || "ZENODO"}`);
+        if (result.zenodo_url) {
+          console.log(`  Zenodo URL:  ${result.zenodo_url}`);
+        }
+        if (result.doi_url) {
+          console.log(`  DOI URL:     ${result.doi_url}`);
+        }
+        if (result.ezid_identifier) {
+          console.log(`  EZID ID:     ${result.ezid_identifier}`);
+        }
         console.log();
 
         console.log(chalk.yellow("Next steps:"));
@@ -814,10 +834,22 @@ doiCommand
 
       if (doiInfo.concept_doi) {
         console.log(chalk.green("Concept DOI:"));
-        console.log(`  DOI:  ${doiInfo.concept_doi}`);
-        console.log(`  URL:  https://doi.org/${doiInfo.concept_doi}`);
+        console.log(`  DOI:      ${doiInfo.concept_doi}`);
+        console.log(`  URL:      https://doi.org/${doiInfo.concept_doi}`);
+        console.log(`  Provider: ${(doiInfo.doi_provider || "zenodo").toUpperCase()}`);
+
+        if (doiInfo.doi_provider === "ezid") {
+          if (doiInfo.ezid_identifier) {
+            console.log(`  EZID ID:  ${doiInfo.ezid_identifier}`);
+          }
+          if (doiInfo.ezid_status) {
+            const statusColor = doiInfo.ezid_status === "public" ? chalk.green : chalk.yellow;
+            console.log(`  Status:   ${statusColor(doiInfo.ezid_status)}`);
+          }
+        }
+
         if (doiInfo.zenodo_concept_url) {
-          console.log(`  Zenodo: ${doiInfo.zenodo_concept_url}`);
+          console.log(`  Zenodo:   ${doiInfo.zenodo_concept_url}`);
 
           // Detect and warn about sandbox DOIs
           if (doiInfo.zenodo_concept_url.includes("sandbox.zenodo.org")) {
@@ -861,6 +893,68 @@ doiCommand
       }
     }
   });
+
+doiCommand
+  .command("update")
+  .description("Update EZID DOI metadata or status")
+  .argument("<dataset-id>", "Dataset ID (e.g., nm000104)")
+  .option("--make-public", "Transition DOI from reserved to public (permanent)")
+  .option("--refresh", "Refresh metadata from BIDS dataset_description.json")
+  .option(YES_OPTION, YES_DESCRIPTION)
+  .option(NO_OPTION, NO_DESCRIPTION)
+  .action(
+    async (
+      datasetId: string,
+      options: { makePublic?: boolean; refresh?: boolean } & ConfirmOptions,
+    ) => {
+      if (!requireAuth()) return;
+
+      if (!options.makePublic && !options.refresh) {
+        console.log(chalk.yellow("No action specified. Use --make-public and/or --refresh."));
+        return;
+      }
+
+      if (options.makePublic) {
+        console.log(chalk.red("WARNING: Making a DOI public is PERMANENT!"));
+        console.log(chalk.gray("  The DOI will be findable in DataCite and cannot be reverted."));
+        console.log();
+
+        const confirmResult = await confirm(
+          `Make DOI for ${datasetId} PUBLIC and permanent?`,
+          options,
+        );
+        if (confirmResult !== "confirmed") {
+          console.log(chalk.gray(confirmResult === "declined" ? "Skipped" : "Cancelled"));
+          return;
+        }
+      }
+
+      const spinner = ora("Updating DOI...").start();
+
+      try {
+        const result = await updateDoi(datasetId, {
+          status: options.makePublic ? "public" : undefined,
+          refresh_metadata: options.refresh,
+        });
+
+        spinner.succeed("DOI updated successfully");
+        console.log();
+        console.log(`  EZID ID: ${chalk.cyan(result.ezid_identifier)}`);
+        console.log(`  Status:  ${result.status === "public" ? chalk.green(result.status) : chalk.yellow(result.status)}`);
+        console.log(`  URL:     ${result.doi_url}`);
+      } catch (error) {
+        if (error instanceof ApiError) {
+          spinner.fail(error.message);
+          if (error.statusCode === 400) {
+            console.log(chalk.gray("  DOI update is only supported for EZID-managed DOIs"));
+          }
+        } else {
+          spinner.fail("Failed to update DOI");
+          console.log(chalk.gray(`  ${error instanceof Error ? error.message : "Unknown error"}`));
+        }
+      }
+    },
+  );
 
 adminCommand.addCommand(doiCommand);
 

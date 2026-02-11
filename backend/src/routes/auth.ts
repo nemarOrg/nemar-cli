@@ -92,13 +92,17 @@ const signupSchema = z.object({
       "Please provide a brief description of why you need NEMAR access (at least 20 characters)",
     )
     .max(500, "Description must be at most 500 characters"),
+  orcid: z
+    .string()
+    .regex(/^\d{4}-\d{4}-\d{4}-\d{3}[\dX]$/, "ORCID must be in format 0000-0000-0000-000X")
+    .optional(),
 });
 
 /**
  * POST /auth/signup - Register a new user
  */
 authRoutes.post("/signup", zValidator("json", signupSchema), async (c) => {
-  const { username, email, password, github_username, description } = c.req.valid("json");
+  const { username, email, password, github_username, description, orcid } = c.req.valid("json");
   const db = c.env.DB;
 
   try {
@@ -159,8 +163,8 @@ authRoutes.post("/signup", zValidator("json", signupSchema), async (c) => {
         `
       INSERT INTO users (
         username, email, password_hash, github_username, description,
-        verification_token, verification_expires_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?)
+        verification_token, verification_expires_at, orcid
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
     `,
       )
       .bind(
@@ -171,6 +175,7 @@ authRoutes.post("/signup", zValidator("json", signupSchema), async (c) => {
         description,
         verificationToken,
         verificationExpires,
+        orcid || null,
       )
       .run();
 
