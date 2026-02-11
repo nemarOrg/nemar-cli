@@ -9,12 +9,31 @@ import { Hono } from "hono";
 import { z } from "zod";
 import { adminMiddleware, authMiddleware } from "../middleware/auth";
 import {
+  bidsToDataCite,
+  buildDataCiteXml,
+  nemarMetadataToEnrichment,
+  parseNemarMetadata,
+} from "../services/datacite";
+import {
+  type DoiProvider,
+  type DoiResult,
+  buildOrcidEnrichment,
+  createConceptDoi as dispatchCreateConceptDoi,
+  parseDoiProvider,
+  resolveEzidAuth,
+} from "../services/doi";
+import {
   sendApprovalEmail,
   sendPublicationApprovedEmail,
   sendPublicationDeniedEmail,
   sendRevocationEmail,
 } from "../services/email";
 import { decrypt, encrypt } from "../services/encryption";
+import {
+  type EzidAuth,
+  extractDoi,
+  updateIdentifier as ezidUpdateIdentifier,
+} from "../services/ezid";
 import {
   checkWorkflowExists,
   createOrUpdateFile,
@@ -32,6 +51,7 @@ import {
 } from "../services/github";
 import { generateIamUsername, revokeUserIamAccess, setupUserIamAccess } from "../services/iam";
 import { generateManifest } from "../services/manifest";
+import { errorMessage, extractRepoName, readBidsDescription } from "../services/repo-metadata";
 import {
   addPublicReadPolicy,
   applyObjectLock,
@@ -53,9 +73,6 @@ import {
   publishDeposition,
   uploadFile,
 } from "../services/zenodo";
-import { bidsToDataCite, buildDataCiteXml, nemarMetadataToEnrichment, parseNemarMetadata } from "../services/datacite";
-import { type DoiProvider, type DoiResult, buildOrcidEnrichment, createConceptDoi as dispatchCreateConceptDoi, parseDoiProvider, resolveEzidAuth } from "../services/doi";
-import { extractDoi, updateIdentifier as ezidUpdateIdentifier } from "../services/ezid";
 import type { Bindings, Variables } from "../types/bindings";
 
 /**
@@ -245,7 +262,7 @@ adminRoutes.post("/approve/:username", async (c) => {
     iamSetupSuccess = true;
   } catch (error) {
     console.error("Failed to setup IAM access for user:", error);
-    iamSetupError = error instanceof Error ? error.message : "Unknown error";
+    iamSetupError = errorMessage(error);
     // Continue with approval even if IAM setup fails
     // Admin can manually set up IAM later
   }
@@ -418,14 +435,10 @@ adminRoutes.post("/revoke/:username", async (c) => {
       }
     } catch (error) {
       // Complete failure - couldn't even start cleanup
-      const errorMessage = error instanceof Error ? error.message : "Unknown error";
-      console.error(
-        "CRITICAL SECURITY: Failed to revoke IAM access for",
-        user.username,
-        errorMessage,
-      );
+      const errMsg = errorMessage(error);
+      console.error("CRITICAL SECURITY: Failed to revoke IAM access for", user.username, errMsg);
 
-      iamRevocationError = errorMessage;
+      iamRevocationError = errMsg;
 
       // Track complete failures
       try {
@@ -434,7 +447,7 @@ adminRoutes.post("/revoke/:username", async (c) => {
             `INSERT INTO iam_revocation_failures (user_id, username, iam_username, error_message, created_at)
              VALUES (?, ?, ?, ?, datetime('now'))`,
           )
-          .bind(user.id, user.username, user.aws_iam_username, errorMessage)
+          .bind(user.id, user.username, user.aws_iam_username, errMsg)
           .run();
       } catch {
         console.error("Could not track IAM failure in database");
@@ -676,7 +689,7 @@ adminRoutes.post("/regenerate-iam/:username", async (c) => {
       );
     } catch (error) {
       console.error("Failed to revoke old access key:", error);
-      oldKeyRevocationWarning = `Old access key may still be active: ${error instanceof Error ? error.message : "Unknown error"}`;
+      oldKeyRevocationWarning = `Old access key may still be active: ${errorMessage(error)}`;
     }
   }
 
@@ -779,7 +792,7 @@ adminRoutes.post("/regenerate-iam/:username", async (c) => {
     return c.json(
       {
         error: "Failed to create IAM credentials",
-        details: error instanceof Error ? error.message : "Unknown error",
+        details: errorMessage(error),
       },
       500,
     );
@@ -987,25 +1000,14 @@ adminRoutes.post(
     let bidsDescription: Record<string, unknown> | undefined;
     let bidsMetadataWarning: string | undefined;
     if (dataset.github_repo) {
-      try {
-        const repoName = dataset.github_repo.split("/")[1];
-        if (repoName) {
-          const tree = await getTreeAtRef(repoName, "main", c.env.GITHUB_ADMIN_PAT);
-          const descFile = tree.find((f) => f.path === "dataset_description.json");
-          if (descFile) {
-            const content = await getBlobContent(repoName, descFile.sha, c.env.GITHUB_ADMIN_PAT);
-            const parsed = JSON.parse(content);
-            if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
-              bidsDescription = parsed as Record<string, unknown>;
-            } else {
-              bidsMetadataWarning = "dataset_description.json is not a JSON object; using fallback metadata";
-              console.warn("[doi]", bidsMetadataWarning);
-            }
-          }
+      const repoName = extractRepoName(dataset.github_repo);
+      if (repoName) {
+        const bidsResult = await readBidsDescription(repoName, c.env.GITHUB_ADMIN_PAT);
+        bidsDescription = bidsResult.bidsDescription;
+        if (bidsResult.warning) {
+          bidsMetadataWarning = bidsResult.warning;
+          console.warn("[doi]", bidsMetadataWarning);
         }
-      } catch (bidsError) {
-        bidsMetadataWarning = `Could not read BIDS metadata: ${bidsError instanceof Error ? bidsError.message : String(bidsError)}`;
-        console.warn("[doi]", bidsMetadataWarning);
       }
     }
 
@@ -1017,8 +1019,7 @@ adminRoutes.post(
           provider,
           datasetId,
           datasetName: body.title || dataset.name,
-          datasetDescription:
-            body.description || dataset.description,
+          datasetDescription: body.description || dataset.description,
           githubRepo: dataset.github_repo,
           bidsDescription,
           uploaderOrcid: dataset.owner_orcid || undefined,
@@ -1050,13 +1051,7 @@ adminRoutes.post(
         WHERE dataset_id = ?
       `,
           )
-          .bind(
-            result.doi,
-            result.providerRecordId,
-            result.status,
-            body.sandbox ? 1 : 0,
-            datasetId,
-          )
+          .bind(result.doi, result.providerRecordId, result.status, body.sandbox ? 1 : 0, datasetId)
           .run();
       } else {
         await db
@@ -1129,7 +1124,7 @@ adminRoutes.post(
       return c.json(
         {
           error: "Failed to create concept DOI",
-          details: error instanceof Error ? error.message : "Unknown error",
+          details: errorMessage(error),
         },
         500,
       );
@@ -1140,8 +1135,8 @@ adminRoutes.post(
 /**
  * POST /admin/datasets/:id/doi/publish - Publish a version DOI
  *
- * This is typically called by GitHub Actions on PR merge.
- * It creates a new version DOI under the concept DOI.
+ * Admin endpoint to manually publish a version DOI.
+ * For automated publishing, see the webhook in webhooks.ts.
  */
 const publishVersionDoiSchema = z.object({
   version: z.string(),
@@ -1229,7 +1224,7 @@ adminRoutes.post(
         versionDeposition = conceptDeposition;
 
         // Update metadata with version
-        // Note: We'd typically update metadata here, but for simplicity we'll proceed
+        // Metadata is already set from concept creation; version-specific fields updated below
       } else {
         // Create a new version
         versionDeposition = await createNewVersion(
@@ -1318,7 +1313,7 @@ adminRoutes.post(
       return c.json(
         {
           error: "Failed to publish version DOI",
-          details: error instanceof Error ? error.message : "Unknown error",
+          details: errorMessage(error),
         },
         500,
       );
@@ -1389,17 +1384,14 @@ const updateDoiSchema = z.object({
   refresh_metadata: z.boolean().optional().default(false),
 });
 
-adminRoutes.post(
-  "/datasets/:id/doi/update",
-  zValidator("json", updateDoiSchema),
-  async (c) => {
-    const datasetId = c.req.param("id");
-    const body = c.req.valid("json");
-    const db = c.env.DB;
+adminRoutes.post("/datasets/:id/doi/update", zValidator("json", updateDoiSchema), async (c) => {
+  const datasetId = c.req.param("id");
+  const body = c.req.valid("json");
+  const db = c.env.DB;
 
-    const dataset = await db
-      .prepare(
-        `
+  const dataset = await db
+    .prepare(
+      `
       SELECT d.dataset_id, d.concept_doi, d.ezid_identifier, d.ezid_status,
              d.doi_provider, d.github_repo, d.name, d.is_sandbox,
              u.username as owner_username, u.orcid as owner_orcid
@@ -1407,153 +1399,156 @@ adminRoutes.post(
       JOIN users u ON d.owner_user_id = u.id
       WHERE d.dataset_id = ?
     `,
-      )
-      .bind(datasetId)
-      .first<{
-        dataset_id: string;
-        concept_doi: string | null;
-        ezid_identifier: string | null;
-        ezid_status: string | null;
-        doi_provider: string | null;
-        github_repo: string | null;
-        name: string;
-        is_sandbox: number | null;
-        owner_username: string;
-        owner_orcid: string | null;
-      }>();
+    )
+    .bind(datasetId)
+    .first<{
+      dataset_id: string;
+      concept_doi: string | null;
+      ezid_identifier: string | null;
+      ezid_status: string | null;
+      doi_provider: string | null;
+      github_repo: string | null;
+      name: string;
+      is_sandbox: number | null;
+      owner_username: string;
+      owner_orcid: string | null;
+    }>();
 
-    if (!dataset) {
-      return c.json({ error: "Dataset not found" }, 404);
-    }
+  if (!dataset) {
+    return c.json({ error: "Dataset not found" }, 404);
+  }
 
-    if (dataset.doi_provider !== "ezid" || !dataset.ezid_identifier) {
-      return c.json(
-        { error: "DOI update is only supported for EZID-managed DOIs" },
-        400,
-      );
-    }
+  if (dataset.doi_provider !== "ezid" || !dataset.ezid_identifier) {
+    return c.json({ error: "DOI update is only supported for EZID-managed DOIs" }, 400);
+  }
 
-    const isSandbox = !!dataset.is_sandbox;
-    let auth;
-    try {
-      auth = resolveEzidAuth(
-        {
-          EZID_USERNAME: c.env.EZID_USERNAME,
-          EZID_PASSWORD: c.env.EZID_PASSWORD,
-          EZID_SANDBOX_USERNAME: c.env.EZID_SANDBOX_USERNAME,
-          EZID_SANDBOX_PASSWORD: c.env.EZID_SANDBOX_PASSWORD,
-        },
-        isSandbox,
-      );
-    } catch {
-      return c.json({ error: "EZID credentials not configured" }, 500);
-    }
+  const isSandbox = !!dataset.is_sandbox;
+  let auth: EzidAuth;
+  try {
+    auth = resolveEzidAuth(
+      {
+        EZID_USERNAME: c.env.EZID_USERNAME,
+        EZID_PASSWORD: c.env.EZID_PASSWORD,
+        EZID_SANDBOX_USERNAME: c.env.EZID_SANDBOX_USERNAME,
+        EZID_SANDBOX_PASSWORD: c.env.EZID_SANDBOX_PASSWORD,
+      },
+      isSandbox,
+    );
+  } catch (err) {
+    console.error("[admin] EZID auth failed:", err);
+    return c.json({ error: "EZID credentials not configured" }, 500);
+  }
 
-    try {
-      const updateOptions: { status?: "public" | "unavailable"; dataciteXml?: string; target?: string } = {};
-      let metadataRefreshed = false;
-      const warnings: string[] = [];
+  try {
+    const updateOptions: {
+      status?: "public" | "unavailable";
+      dataciteXml?: string;
+      target?: string;
+    } = {};
+    let metadataRefreshed = false;
+    const warnings: string[] = [];
 
-      // Refresh metadata from BIDS
-      if (body.refresh_metadata) {
-        if (!dataset.github_repo) {
-          return c.json(
-            { error: "Cannot refresh metadata: dataset has no GitHub repository" },
-            400,
-          );
-        }
-        const repoName = dataset.github_repo.split("/")[1];
-        if (!repoName) {
-          return c.json(
-            { error: "Cannot refresh metadata: invalid github_repo format" },
-            400,
-          );
-        }
-        const tree = await getTreeAtRef(repoName, "main", c.env.GITHUB_ADMIN_PAT);
-        const descFile = tree.find((f) => f.path === "dataset_description.json");
-        if (!descFile) {
-          return c.json(
-            { error: "Cannot refresh metadata: dataset_description.json not found in repo" },
-            400,
-          );
-        }
-        const content = await getBlobContent(repoName, descFile.sha, c.env.GITHUB_ADMIN_PAT);
-        const parsed = JSON.parse(content);
-        if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-          return c.json(
-            { error: "Cannot refresh metadata: dataset_description.json is not a valid JSON object" },
-            400,
-          );
-        }
-        const bidsDesc = parsed as Record<string, unknown>;
-        const doi = extractDoi(dataset.ezid_identifier);
-        let enrichment = buildOrcidEnrichment(
-          bidsDesc,
-          dataset.owner_username,
-          dataset.owner_orcid || undefined,
+    // Refresh metadata from BIDS
+    if (body.refresh_metadata) {
+      if (!dataset.github_repo) {
+        return c.json({ error: "Cannot refresh metadata: dataset has no GitHub repository" }, 400);
+      }
+      const repoName = dataset.github_repo.split("/")[1];
+      if (!repoName) {
+        return c.json({ error: "Cannot refresh metadata: invalid github_repo format" }, 400);
+      }
+      const tree = await getTreeAtRef(repoName, "main", c.env.GITHUB_ADMIN_PAT);
+      const descFile = tree.find((f) => f.path === "dataset_description.json");
+      if (!descFile) {
+        return c.json(
+          { error: "Cannot refresh metadata: dataset_description.json not found in repo" },
+          400,
         );
-
-        // Read nemar_metadata.json for rich enrichment
-        const nemarMetaFile = tree.find((f) => f.path === "nemar_metadata.json");
-        if (nemarMetaFile) {
-          try {
-            const nemarContent = await getBlobContent(repoName, nemarMetaFile.sha, c.env.GITHUB_ADMIN_PAT);
-            const nemarParsed = parseNemarMetadata(JSON.parse(nemarContent));
-            if (nemarParsed) {
-              enrichment = nemarMetadataToEnrichment(nemarParsed, enrichment);
-            }
-          } catch (nemarErr) {
-            console.error("Failed to parse nemar_metadata.json:", nemarErr);
-            warnings.push(`nemar_metadata.json enrichment skipped: ${nemarErr instanceof Error ? nemarErr.message : String(nemarErr)}`);
-          }
-        }
-
-        const metadata = bidsToDataCite(datasetId, doi, bidsDesc, enrichment);
-        updateOptions.dataciteXml = buildDataCiteXml(metadata);
-        metadataRefreshed = true;
       }
-
-      // Change status
-      if (body.status) {
-        if (body.status === "public" && dataset.ezid_status === "reserved") {
-          const target = dataset.github_repo
-            ? `https://github.com/${dataset.github_repo}`
-            : `https://nemar.org/dataexplorer/detail?dataset_id=${datasetId}`;
-          updateOptions.status = "public";
-          updateOptions.target = target;
-        } else if (body.status === "unavailable") {
-          updateOptions.status = "unavailable";
-        }
+      const content = await getBlobContent(repoName, descFile.sha, c.env.GITHUB_ADMIN_PAT);
+      const parsed = JSON.parse(content);
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+        return c.json(
+          { error: "Cannot refresh metadata: dataset_description.json is not a valid JSON object" },
+          400,
+        );
       }
-
-      const updated = await ezidUpdateIdentifier(auth, dataset.ezid_identifier, updateOptions);
-
-      // Update DB
-      await db
-        .prepare("UPDATE datasets SET ezid_status = ?, updated_at = datetime('now') WHERE dataset_id = ?")
-        .bind(updated.status, datasetId)
-        .run();
-
-      return c.json({
-        message: "DOI updated successfully",
-        ezid_identifier: dataset.ezid_identifier,
-        status: updated.status,
-        doi_url: `https://doi.org/${extractDoi(dataset.ezid_identifier)}`,
-        metadata_refreshed: metadataRefreshed,
-        ...(warnings.length > 0 ? { warnings } : {}),
-      });
-    } catch (error) {
-      console.error("Failed to update DOI:", error);
-      return c.json(
-        {
-          error: "Failed to update DOI",
-          details: error instanceof Error ? error.message : "Unknown error",
-        },
-        500,
+      const bidsDesc = parsed as Record<string, unknown>;
+      const doi = extractDoi(dataset.ezid_identifier);
+      let enrichment = buildOrcidEnrichment(
+        bidsDesc,
+        dataset.owner_username,
+        dataset.owner_orcid || undefined,
       );
+
+      // Read nemar_metadata.json for rich enrichment
+      const nemarMetaFile = tree.find((f) => f.path === "nemar_metadata.json");
+      if (nemarMetaFile) {
+        try {
+          const nemarContent = await getBlobContent(
+            repoName,
+            nemarMetaFile.sha,
+            c.env.GITHUB_ADMIN_PAT,
+          );
+          const nemarParsed = parseNemarMetadata(JSON.parse(nemarContent));
+          if (nemarParsed) {
+            enrichment = nemarMetadataToEnrichment(nemarParsed, enrichment);
+          }
+        } catch (nemarErr) {
+          console.error("Failed to parse nemar_metadata.json:", nemarErr);
+          warnings.push(
+            `nemar_metadata.json enrichment skipped: ${nemarErr instanceof Error ? nemarErr.message : String(nemarErr)}`,
+          );
+        }
+      }
+
+      const metadata = bidsToDataCite(datasetId, doi, bidsDesc, enrichment);
+      updateOptions.dataciteXml = buildDataCiteXml(metadata);
+      metadataRefreshed = true;
     }
-  },
-);
+
+    // Change status
+    if (body.status) {
+      if (body.status === "public" && dataset.ezid_status === "reserved") {
+        const target = dataset.github_repo
+          ? `https://github.com/${dataset.github_repo}`
+          : `https://nemar.org/dataexplorer/detail?dataset_id=${datasetId}`;
+        updateOptions.status = "public";
+        updateOptions.target = target;
+      } else if (body.status === "unavailable") {
+        updateOptions.status = "unavailable";
+      }
+    }
+
+    const updated = await ezidUpdateIdentifier(auth, dataset.ezid_identifier, updateOptions);
+
+    // Update DB
+    await db
+      .prepare(
+        "UPDATE datasets SET ezid_status = ?, updated_at = datetime('now') WHERE dataset_id = ?",
+      )
+      .bind(updated.status, datasetId)
+      .run();
+
+    return c.json({
+      message: "DOI updated successfully",
+      ezid_identifier: dataset.ezid_identifier,
+      status: updated.status,
+      doi_url: `https://doi.org/${extractDoi(dataset.ezid_identifier)}`,
+      metadata_refreshed: metadataRefreshed,
+      ...(warnings.length > 0 ? { warnings } : {}),
+    });
+  } catch (error) {
+    console.error("Failed to update DOI:", error);
+    return c.json(
+      {
+        error: "Failed to update DOI",
+        details: errorMessage(error),
+      },
+      500,
+    );
+  }
+});
 
 /**
  * POST /admin/datasets/:id/enrichment - Submit rich metadata enrichment
@@ -1563,119 +1558,127 @@ adminRoutes.post(
  */
 const enrichmentSchema = z.object({
   version: z.literal("1.0"),
-  authors: z.record(z.object({
-    orcid: z.string().optional(),
-    affiliation: z.string().optional(),
-  })).optional(),
+  authors: z
+    .record(
+      z.object({
+        orcid: z.string().optional(),
+        affiliation: z.string().optional(),
+      }),
+    )
+    .optional(),
   keywords: z.array(z.string()).optional(),
-  relatedDois: z.array(z.object({
-    doi: z.string(),
-    relationType: z.string(),
-  })).optional(),
-  fundingReferences: z.array(z.object({
-    funderName: z.string(),
-    awardNumber: z.string().optional(),
-    awardTitle: z.string().optional(),
-  })).optional(),
+  relatedDois: z
+    .array(
+      z.object({
+        doi: z.string(),
+        relationType: z.string(),
+      }),
+    )
+    .optional(),
+  fundingReferences: z
+    .array(
+      z.object({
+        funderName: z.string(),
+        awardNumber: z.string().optional(),
+        awardTitle: z.string().optional(),
+      }),
+    )
+    .optional(),
   description: z.string().optional(),
   methodsDescription: z.string().optional(),
   sizes: z.array(z.string()).optional(),
   formats: z.array(z.string()).optional(),
 });
 
-adminRoutes.post(
-  "/datasets/:id/enrichment",
-  zValidator("json", enrichmentSchema),
-  async (c) => {
-    const datasetId = c.req.param("id");
-    const body = c.req.valid("json");
-    const db = c.env.DB;
+adminRoutes.post("/datasets/:id/enrichment", zValidator("json", enrichmentSchema), async (c) => {
+  const datasetId = c.req.param("id");
+  const body = c.req.valid("json");
+  const db = c.env.DB;
 
-    const dataset = await db
-      .prepare(
-        "SELECT dataset_id, github_repo, ezid_identifier, doi_provider, is_sandbox FROM datasets WHERE dataset_id = ?",
-      )
-      .bind(datasetId)
-      .first<{
-        dataset_id: string;
-        github_repo: string | null;
-        ezid_identifier: string | null;
-        doi_provider: string | null;
-        is_sandbox: number | null;
-      }>();
+  const dataset = await db
+    .prepare(
+      "SELECT dataset_id, github_repo, ezid_identifier, doi_provider, is_sandbox FROM datasets WHERE dataset_id = ?",
+    )
+    .bind(datasetId)
+    .first<{
+      dataset_id: string;
+      github_repo: string | null;
+      ezid_identifier: string | null;
+      doi_provider: string | null;
+      is_sandbox: number | null;
+    }>();
 
-    if (!dataset) {
-      return c.json({ error: "Dataset not found" }, 404);
+  if (!dataset) {
+    return c.json({ error: "Dataset not found" }, 404);
+  }
+
+  if (!dataset.github_repo) {
+    return c.json({ error: "Dataset has no GitHub repository" }, 400);
+  }
+
+  const repoName = dataset.github_repo.split("/")[1];
+  if (!repoName) {
+    return c.json({ error: "Invalid github_repo format" }, 400);
+  }
+
+  const pat = c.env.GITHUB_ADMIN_PAT;
+  const metadataContent = JSON.stringify(body, null, 2);
+
+  try {
+    // Commit nemar_metadata.json to the repo
+    await createOrUpdateFile(
+      repoName,
+      "nemar_metadata.json",
+      metadataContent,
+      "Update NEMAR metadata enrichment",
+      pat,
+    );
+
+    // Ensure .bidsignore includes nemar_metadata.json
+    const tree = await getTreeAtRef(repoName, "main", pat);
+    const bidsignoreFile = tree.find((f) => f.path === ".bidsignore");
+    let bidsignoreContent = "";
+    if (bidsignoreFile) {
+      bidsignoreContent = await getBlobContent(repoName, bidsignoreFile.sha, pat);
     }
-
-    if (!dataset.github_repo) {
-      return c.json({ error: "Dataset has no GitHub repository" }, 400);
-    }
-
-    const repoName = dataset.github_repo.split("/")[1];
-    if (!repoName) {
-      return c.json({ error: "Invalid github_repo format" }, 400);
-    }
-
-    const pat = c.env.GITHUB_ADMIN_PAT;
-    const metadataContent = JSON.stringify(body, null, 2);
-
-    try {
-      // Commit nemar_metadata.json to the repo
+    if (!bidsignoreContent.includes("nemar_metadata.json")) {
+      const newContent = bidsignoreContent
+        ? `${bidsignoreContent.trimEnd()}\nnemar_metadata.json\n`
+        : "nemar_metadata.json\n";
       await createOrUpdateFile(
         repoName,
-        "nemar_metadata.json",
-        metadataContent,
-        "Update NEMAR metadata enrichment",
+        ".bidsignore",
+        newContent,
+        "Add nemar_metadata.json to .bidsignore",
         pat,
       );
-
-      // Ensure .bidsignore includes nemar_metadata.json
-      const tree = await getTreeAtRef(repoName, "main", pat);
-      const bidsignoreFile = tree.find((f) => f.path === ".bidsignore");
-      let bidsignoreContent = "";
-      if (bidsignoreFile) {
-        bidsignoreContent = await getBlobContent(repoName, bidsignoreFile.sha, pat);
-      }
-      if (!bidsignoreContent.includes("nemar_metadata.json")) {
-        const newContent = bidsignoreContent
-          ? `${bidsignoreContent.trimEnd()}\nnemar_metadata.json\n`
-          : "nemar_metadata.json\n";
-        await createOrUpdateFile(
-          repoName,
-          ".bidsignore",
-          newContent,
-          "Add nemar_metadata.json to .bidsignore",
-          pat,
-        );
-      }
-
-      // Cache in D1
-      await db
-        .prepare(
-          "UPDATE datasets SET enrichment_json = ?, enrichment_updated_at = datetime('now'), updated_at = datetime('now') WHERE dataset_id = ?",
-        )
-        .bind(metadataContent, datasetId)
-        .run();
-
-      return c.json({
-        message: "Enrichment saved",
-        dataset_id: datasetId,
-        committed: true,
-        bidsignore_updated: !bidsignoreContent.includes("nemar_metadata.json"),
-      });
-    } catch (error) {
-      console.error("Failed to save enrichment:", error);
-      return c.json(
-        {
-          error: "Failed to save enrichment",
-          details: error instanceof Error ? error.message : "Unknown error",
-        },
-        500,
-      );
     }
-  },
-);
+
+    // Cache in D1
+    await db
+      .prepare(
+        "UPDATE datasets SET enrichment_json = ?, enrichment_updated_at = datetime('now'), updated_at = datetime('now') WHERE dataset_id = ?",
+      )
+      .bind(metadataContent, datasetId)
+      .run();
+
+    return c.json({
+      message: "Enrichment saved",
+      dataset_id: datasetId,
+      committed: true,
+      bidsignore_updated: !bidsignoreContent.includes("nemar_metadata.json"),
+    });
+  } catch (error) {
+    console.error("Failed to save enrichment:", error);
+    return c.json(
+      {
+        error: "Failed to save enrichment",
+        details: errorMessage(error),
+      },
+      500,
+    );
+  }
+});
 
 /**
  * GET /admin/datasets/:id/files - Get dataset file listing with sizes
@@ -1707,14 +1710,16 @@ adminRoutes.get("/datasets/:id/files", async (c) => {
       .map((f) => ({ path: f.path, size: f.size || 0 }));
 
     const totalSize = files.reduce((sum, f) => sum + f.size, 0);
-    const extensions = [...new Set(
-      files
-        .map((f) => {
-          const lastDot = f.path.lastIndexOf(".");
-          return lastDot > 0 ? f.path.slice(lastDot) : null;
-        })
-        .filter((e): e is string => e !== null),
-    )].sort();
+    const extensions = [
+      ...new Set(
+        files
+          .map((f) => {
+            const lastDot = f.path.lastIndexOf(".");
+            return lastDot > 0 ? f.path.slice(lastDot) : null;
+          })
+          .filter((e): e is string => e !== null),
+      ),
+    ].sort();
 
     return c.json({
       dataset_id: datasetId,
@@ -1728,7 +1733,7 @@ adminRoutes.get("/datasets/:id/files", async (c) => {
     return c.json(
       {
         error: "Failed to fetch file listing",
-        details: error instanceof Error ? error.message : "Unknown error",
+        details: errorMessage(error),
       },
       500,
     );
@@ -1762,13 +1767,13 @@ adminRoutes.delete("/zenodo/deposition/:id", async (c) => {
     await deleteDeposition(depositionId, zenodoToken, sandbox);
     return c.body(null, 204);
   } catch (error) {
-    const errorMessage = error instanceof Error ? error.message : "Unknown error";
-    console.error(`Failed to delete Zenodo deposition ${depositionId}:`, errorMessage);
+    const errMsg = errorMessage(error);
+    console.error(`Failed to delete Zenodo deposition ${depositionId}:`, errMsg);
 
     return c.json(
       {
         error: "Failed to delete deposition",
-        message: errorMessage,
+        message: errMsg,
         deposition_id: depositionId,
         sandbox,
       },
@@ -1822,16 +1827,10 @@ adminRoutes.patch("/datasets/:id/visibility", zValidator("json", visibilitySchem
   // Update S3 bucket policy based on visibility
   try {
     if (visibility === "public") {
-      await addPublicReadPolicy(
-        getS3Config(c.env),
-        datasetId,
-      );
+      await addPublicReadPolicy(getS3Config(c.env), datasetId);
     } else {
       // Remove public read access when reverting to private
-      await removePublicReadPolicy(
-        getS3Config(c.env),
-        datasetId,
-      );
+      await removePublicReadPolicy(getS3Config(c.env), datasetId);
     }
   } catch (s3Error) {
     const s3Msg = s3Error instanceof Error ? s3Error.message : String(s3Error);
@@ -1908,7 +1907,7 @@ adminRoutes.patch("/datasets/:id/visibility", zValidator("json", visibilitySchem
   }
 
   // Update dataset visibility in database to match GitHub repo
-  let dbUpdateResult;
+  let dbUpdateResult: D1Result;
   try {
     dbUpdateResult = await db
       .prepare("UPDATE datasets SET visibility = ? WHERE dataset_id = ?")
@@ -2431,7 +2430,7 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
 
       await updateProgress("ci_check");
     } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
+      const msg = errorMessage(err);
       await updateProgress("ci_check", msg);
       return c.json(
         { error: `CI check failed: ${msg}`, step: "ci_check", steps_completed: completed },
@@ -2459,7 +2458,7 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
       }
 
       // Update dataset visibility in database to match GitHub repo visibility
-      let dbUpdateResult;
+      let dbUpdateResult: D1Result;
       try {
         dbUpdateResult = await db
           .prepare(
@@ -2512,7 +2511,7 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
 
       await updateProgress("repo_public");
     } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
+      const msg = errorMessage(err);
       await updateProgress("repo_public", msg);
       return c.json(
         { error: `repo_public failed: ${msg}`, step: "repo_public", steps_completed: completed },
@@ -2526,14 +2525,11 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
     try {
       await startStep("s3_public_read");
 
-      await addPublicReadPolicy(
-        getS3Config(c.env),
-        datasetId,
-      );
+      await addPublicReadPolicy(getS3Config(c.env), datasetId);
 
       await updateProgress("s3_public_read");
     } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
+      const msg = errorMessage(err);
       console.error(`[publish] S3 public read policy failed for ${datasetId}:`, err);
       await updateProgress("s3_public_read", msg);
       return c.json(
@@ -2569,7 +2565,7 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
 
       await updateProgress("tag_protect");
     } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
+      const msg = errorMessage(err);
       await updateProgress("tag_protect", msg);
       return c.json(
         { error: `Tag protection failed: ${msg}`, step: "tag_protect", steps_completed: completed },
@@ -2655,7 +2651,13 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
             .prepare(
               "UPDATE datasets SET concept_doi = ?, ezid_identifier = ?, ezid_status = ?, doi_provider = 'ezid', is_sandbox = ?, updated_at = datetime('now') WHERE dataset_id = ?",
             )
-            .bind(doiResult.doi, doiResult.providerRecordId, doiResult.status, sandbox ? 1 : 0, datasetId)
+            .bind(
+              doiResult.doi,
+              doiResult.providerRecordId,
+              doiResult.status,
+              sandbox ? 1 : 0,
+              datasetId,
+            )
             .run();
         } else {
           await db
@@ -2669,7 +2671,7 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
 
       await updateProgress("doi_create");
     } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
+      const msg = errorMessage(err);
       await updateProgress("doi_create", msg);
       return c.json(
         { error: `DOI creation failed: ${msg}`, step: "doi_create", steps_completed: completed },
@@ -2806,7 +2808,7 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
 
       await updateProgress("update_metadata");
     } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
+      const msg = errorMessage(err);
       console.error(`[publish] update_metadata failed for dataset ${datasetId}:`, err);
       await updateProgress("update_metadata", msg);
       return c.json(
@@ -2829,7 +2831,11 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
       if (doiResult instanceof Response) return doiResult;
       const conceptDoi = doiResult;
       const doiUrl = `https://doi.org/${conceptDoi}`;
-      const doiBadge = `[![DOI](https://zenodo.org/badge/DOI/${conceptDoi}.svg)](${doiUrl})`;
+      const badgeImg =
+        provider === "zenodo"
+          ? `https://zenodo.org/badge/DOI/${conceptDoi}.svg`
+          : `https://img.shields.io/badge/DOI-${encodeURIComponent(conceptDoi)}-blue`;
+      const doiBadge = `[![DOI](${badgeImg})](${doiUrl})`;
 
       const tree = await getTreeAtRef(repoName, "main", pat);
       // Look for existing README in any format: README.md, README.rst, README.txt, README
@@ -2851,9 +2857,11 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
         console.warn(`[publish] No README found in ${repoName}; creating README.md with DOI badge`);
       }
 
-      // Add DOI badge if no Zenodo badge exists yet.
-      // Note: does not update an existing badge if the DOI changed.
-      if (!readmeContent.includes("zenodo.org/badge/DOI")) {
+      // Add DOI badge if no DOI badge exists yet.
+      const hasBadge =
+        readmeContent.includes("zenodo.org/badge/DOI") ||
+        readmeContent.includes("img.shields.io/badge/DOI");
+      if (!hasBadge) {
         readmeContent = `${doiBadge}\n\n${readmeContent}`;
       }
 
@@ -2867,7 +2875,7 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
 
       await updateProgress("update_readme");
     } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
+      const msg = errorMessage(err);
       console.error(`[publish] update_readme failed for dataset ${datasetId}:`, err);
       await updateProgress("update_readme", msg);
       return c.json(
@@ -2902,7 +2910,7 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
 
       await updateProgress("create_tag");
     } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
+      const msg = errorMessage(err);
       console.error(`[publish] create_tag failed for dataset ${datasetId}:`, err);
       await updateProgress("create_tag", msg);
       return c.json(
@@ -2928,7 +2936,7 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
 
       await updateProgress("create_release");
     } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
+      const msg = errorMessage(err);
       console.error(`[publish] create_release failed for dataset ${datasetId}:`, err);
       await updateProgress("create_release", msg);
       return c.json(
@@ -2983,7 +2991,7 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
 
       await updateProgress("upload_to_zenodo");
     } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
+      const msg = errorMessage(err);
       console.error(`[publish] upload_to_zenodo failed for dataset ${datasetId}:`, err);
       await updateProgress("upload_to_zenodo", msg);
       return c.json(
@@ -3048,7 +3056,7 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
 
       await updateProgress("publish_doi");
     } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
+      const msg = errorMessage(err);
       console.error(`[publish] publish_doi failed for dataset ${datasetId}:`, err);
       await updateProgress("publish_doi", msg);
       return c.json(
@@ -3100,7 +3108,7 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
 
       await updateProgress("s3_lock");
     } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
+      const msg = errorMessage(err);
       await updateProgress("s3_lock", msg);
       return c.json(
         { error: `S3 lock failed: ${msg}`, step: "s3_lock", steps_completed: completed },
@@ -3125,7 +3133,7 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
         await updateProgress("generate_archive");
       }
     } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
+      const msg = errorMessage(err);
       // Archive generation is non-critical; log warning but continue
       console.warn(`[publish] Archive generation trigger failed for ${datasetId}: ${msg}`);
       await updateProgress("generate_archive", msg);
@@ -3153,7 +3161,7 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
 
       await updateProgress("notify_user");
     } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
+      const msg = errorMessage(err);
       await updateProgress("notify_user", msg);
       return c.json(
         { error: `Notification failed: ${msg}`, step: "notify_user", steps_completed: completed },
@@ -3248,11 +3256,7 @@ adminRoutes.post("/datasets/:id/s3-lock", async (c) => {
   }
 
   try {
-    const result = await applyObjectLock(
-      getS3Config(c.env),
-      datasetId,
-      offset,
-    );
+    const result = await applyObjectLock(getS3Config(c.env), datasetId, offset);
 
     return c.json({
       message: result.failed.length === 0 ? "Batch locked" : "Some objects failed",
@@ -3264,7 +3268,7 @@ adminRoutes.post("/datasets/:id/s3-lock", async (c) => {
       offset,
     });
   } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
+    const msg = errorMessage(err);
     return c.json({ error: `S3 lock failed: ${msg}` }, 500);
   }
 });
@@ -3328,12 +3332,7 @@ adminRoutes.post("/datasets/:id/manifest/:version", async (c) => {
       dataset.concept_doi,
     );
 
-    await uploadManifest(
-      getS3Config(c.env),
-      datasetId,
-      version,
-      JSON.stringify(manifest, null, 2),
-    );
+    await uploadManifest(getS3Config(c.env), datasetId, version, JSON.stringify(manifest, null, 2));
 
     return c.json({
       message: "Manifest generated and uploaded",
@@ -3342,7 +3341,7 @@ adminRoutes.post("/datasets/:id/manifest/:version", async (c) => {
       files_count: Object.keys(manifest.files).length,
     });
   } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
+    const msg = errorMessage(err);
     return c.json({ error: `Manifest generation failed: ${msg}` }, 500);
   }
 });

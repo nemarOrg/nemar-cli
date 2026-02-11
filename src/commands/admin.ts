@@ -657,8 +657,9 @@ doiCommand
           }
           return;
         }
-      } catch {
-        // No DOI info yet, continue
+      } catch (err) {
+        // DOI info unavailable (e.g., dataset has no DOI yet); continue to creation
+        if (process.env.DEBUG) console.error("[debug] DOI info fetch:", err);
       }
 
       // Display summary
@@ -1174,8 +1175,8 @@ doiCommand
         if (!doiInfo && doiFetchFailed) {
           try {
             doiInfo = await getDoiInfo(datasetId);
-          } catch {
-            /* still unavailable */
+          } catch (err) {
+            if (process.env.DEBUG) console.error("[debug] DOI info re-fetch:", err);
           }
         }
         if (doiInfo?.ezid_identifier) {

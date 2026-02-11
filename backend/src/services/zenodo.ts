@@ -165,7 +165,9 @@ export async function uploadFile(
   const contentType = response.headers.get("content-type");
   if (!contentType?.includes("application/json")) {
     const text = await response.text();
-    throw new Error(`Zenodo returned non-JSON response (${contentType}): ${text.substring(0, 200)}`);
+    throw new Error(
+      `Zenodo returned non-JSON response (${contentType}): ${text.substring(0, 200)}`,
+    );
   }
 
   return response.json() as Promise<{ checksum: string; filename: string; filesize: number }>;
@@ -205,7 +207,9 @@ export async function publishDeposition(
   const contentType = response.headers.get("content-type");
   if (!contentType?.includes("application/json")) {
     const text = await response.text();
-    throw new Error(`Zenodo returned non-JSON response (${contentType}): ${text.substring(0, 200)}`);
+    throw new Error(
+      `Zenodo returned non-JSON response (${contentType}): ${text.substring(0, 200)}`,
+    );
   }
 
   return response.json() as Promise<ZenodoDeposition>;
@@ -241,7 +245,9 @@ export async function getDeposition(
   const contentType = response.headers.get("content-type");
   if (!contentType?.includes("application/json")) {
     const text = await response.text();
-    throw new Error(`Zenodo returned non-JSON response (${contentType}): ${text.substring(0, 200)}`);
+    throw new Error(
+      `Zenodo returned non-JSON response (${contentType}): ${text.substring(0, 200)}`,
+    );
   }
 
   return response.json() as Promise<ZenodoDeposition>;
@@ -331,7 +337,9 @@ export async function updateDepositionMetadata(
   const contentType = response.headers.get("content-type");
   if (!contentType?.includes("application/json")) {
     const text = await response.text();
-    throw new Error(`Zenodo returned non-JSON response (${contentType}): ${text.substring(0, 200)}`);
+    throw new Error(
+      `Zenodo returned non-JSON response (${contentType}): ${text.substring(0, 200)}`,
+    );
   }
 
   return response.json() as Promise<ZenodoDeposition>;

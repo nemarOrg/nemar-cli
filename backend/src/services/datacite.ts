@@ -2,7 +2,8 @@
  * DataCite XML builder
  *
  * Generates DataCite kernel-4 XML metadata for NEMAR datasets.
- * Maps BIDS dataset_description.json fields to all 20 DataCite properties.
+ * Maps BIDS dataset_description.json fields to 19 of 20 DataCite properties
+ * (RelatedItems excluded as it duplicates RelatedIdentifiers for our use case).
  *
  * Designed to produce maximally populated scholarly records, unlike
  * OpenNeuro/Zenodo which leave most optional fields empty.
@@ -13,35 +14,103 @@
 // ---------------------------------------------------------------------------
 
 export type ResourceTypeGeneral =
-  | "Audiovisual" | "Book" | "BookChapter" | "Collection"
-  | "ComputationalNotebook" | "ConferencePaper" | "ConferenceProceeding"
-  | "DataPaper" | "Dataset" | "Dissertation" | "Event" | "Image"
-  | "InteractiveResource" | "Journal" | "JournalArticle" | "Model"
-  | "OutputManagementPlan" | "PeerReview" | "PhysicalObject" | "Preprint"
-  | "Report" | "Service" | "Software" | "Sound" | "Standard" | "Text"
-  | "Workflow" | "Other";
+  | "Audiovisual"
+  | "Book"
+  | "BookChapter"
+  | "Collection"
+  | "ComputationalNotebook"
+  | "ConferencePaper"
+  | "ConferenceProceeding"
+  | "DataPaper"
+  | "Dataset"
+  | "Dissertation"
+  | "Event"
+  | "Image"
+  | "InteractiveResource"
+  | "Journal"
+  | "JournalArticle"
+  | "Model"
+  | "OutputManagementPlan"
+  | "PeerReview"
+  | "PhysicalObject"
+  | "Preprint"
+  | "Report"
+  | "Service"
+  | "Software"
+  | "Sound"
+  | "Standard"
+  | "Text"
+  | "Workflow"
+  | "Other";
 
 export type ContributorType =
-  | "ContactPerson" | "DataCollector" | "DataCurator" | "DataManager"
-  | "Distributor" | "Editor" | "HostingInstitution" | "Producer"
-  | "ProjectLeader" | "ProjectManager" | "ProjectMember"
-  | "RegistrationAgency" | "RegistrationAuthority" | "RelatedPerson"
-  | "Researcher" | "ResearchGroup" | "RightsHolder" | "Sponsor"
-  | "Supervisor" | "WorkPackageLeader" | "Other";
+  | "ContactPerson"
+  | "DataCollector"
+  | "DataCurator"
+  | "DataManager"
+  | "Distributor"
+  | "Editor"
+  | "HostingInstitution"
+  | "Producer"
+  | "ProjectLeader"
+  | "ProjectManager"
+  | "ProjectMember"
+  | "RegistrationAgency"
+  | "RegistrationAuthority"
+  | "RelatedPerson"
+  | "Researcher"
+  | "ResearchGroup"
+  | "RightsHolder"
+  | "Sponsor"
+  | "Supervisor"
+  | "WorkPackageLeader"
+  | "Other";
 
 export type DateType =
-  | "Accepted" | "Available" | "Collected" | "Copyrighted" | "Created"
-  | "Issued" | "Other" | "Submitted" | "Updated" | "Valid" | "Withdrawn";
+  | "Accepted"
+  | "Available"
+  | "Collected"
+  | "Copyrighted"
+  | "Created"
+  | "Issued"
+  | "Other"
+  | "Submitted"
+  | "Updated"
+  | "Valid"
+  | "Withdrawn";
 
 const VALID_RELATION_TYPES = [
-  "IsCitedBy", "Cites", "IsSupplementTo", "IsSupplementedBy",
-  "IsContinuedBy", "Continues", "IsDescribedBy", "Describes",
-  "HasMetadata", "IsMetadataFor", "HasVersion", "IsVersionOf",
-  "IsNewVersionOf", "IsPreviousVersionOf", "IsPartOf", "HasPart",
-  "IsReferencedBy", "References", "IsDocumentedBy", "Documents",
-  "IsCompiledBy", "Compiles", "IsVariantFormOf", "IsOriginalFormOf",
-  "IsIdenticalTo", "IsCollectedBy", "Collects", "IsRequiredBy",
-  "Requires", "IsObsoletedBy", "Obsoletes",
+  "IsCitedBy",
+  "Cites",
+  "IsSupplementTo",
+  "IsSupplementedBy",
+  "IsContinuedBy",
+  "Continues",
+  "IsDescribedBy",
+  "Describes",
+  "HasMetadata",
+  "IsMetadataFor",
+  "HasVersion",
+  "IsVersionOf",
+  "IsNewVersionOf",
+  "IsPreviousVersionOf",
+  "IsPartOf",
+  "HasPart",
+  "IsReferencedBy",
+  "References",
+  "IsDocumentedBy",
+  "Documents",
+  "IsCompiledBy",
+  "Compiles",
+  "IsVariantFormOf",
+  "IsOriginalFormOf",
+  "IsIdenticalTo",
+  "IsCollectedBy",
+  "Collects",
+  "IsRequiredBy",
+  "Requires",
+  "IsObsoletedBy",
+  "Obsoletes",
 ] as const;
 
 export type RelationType = (typeof VALID_RELATION_TYPES)[number];
@@ -53,8 +122,12 @@ export function isValidRelationType(value: string): value is RelationType {
 }
 
 export type DescriptionType =
-  | "Abstract" | "Methods" | "SeriesInformation" | "TableOfContents"
-  | "TechnicalInfo" | "Other";
+  | "Abstract"
+  | "Methods"
+  | "SeriesInformation"
+  | "TableOfContents"
+  | "TechnicalInfo"
+  | "Other";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -221,17 +294,15 @@ export function parseNemarMetadata(raw: unknown): NemarMetadata | null {
 
   // Related DOIs (validate relationType at parse time)
   if (Array.isArray(obj.relatedDois)) {
-    const rels = obj.relatedDois.filter(
-      (r): r is { doi: string; relationType: string } => {
-        if (!r || typeof r !== "object") return false;
-        const entry = r as Record<string, unknown>;
-        return (
-          typeof entry.doi === "string" &&
-          typeof entry.relationType === "string" &&
-          isValidRelationType(entry.relationType as string)
-        );
-      },
-    );
+    const rels = obj.relatedDois.filter((r): r is { doi: string; relationType: string } => {
+      if (!r || typeof r !== "object") return false;
+      const entry = r as Record<string, unknown>;
+      return (
+        typeof entry.doi === "string" &&
+        typeof entry.relationType === "string" &&
+        isValidRelationType(entry.relationType as string)
+      );
+    });
     if (rels.length > 0) result.relatedDois = rels;
   }
 
@@ -239,7 +310,9 @@ export function parseNemarMetadata(raw: unknown): NemarMetadata | null {
   if (Array.isArray(obj.fundingReferences)) {
     const funds = obj.fundingReferences.filter(
       (f): f is { funderName: string; awardNumber?: string; awardTitle?: string } =>
-        !!f && typeof f === "object" && typeof (f as Record<string, unknown>).funderName === "string",
+        !!f &&
+        typeof f === "object" &&
+        typeof (f as Record<string, unknown>).funderName === "string",
     );
     if (funds.length > 0) result.fundingReferences = funds;
   }
@@ -362,7 +435,7 @@ function escapeXml(str: string): string {
 
 function buildCreatorXml(creator: DataCiteCreator): string {
   const nameType = creator.nameType || "Personal";
-  let xml = `    <creator>\n`;
+  let xml = "    <creator>\n";
   xml += `      <creatorName nameType="${nameType}">${escapeXml(creator.name)}</creatorName>\n`;
 
   if (creator.givenName) {
@@ -381,7 +454,7 @@ function buildCreatorXml(creator: DataCiteCreator): string {
     xml += `      <affiliation${rorAttr}>${escapeXml(creator.affiliation)}</affiliation>\n`;
   }
 
-  xml += `    </creator>`;
+  xml += "    </creator>";
   return xml;
 }
 
@@ -392,7 +465,7 @@ function buildContributorXml(contributor: DataCiteContributor): string {
   if (contributor.affiliation) {
     xml += `      <affiliation>${escapeXml(contributor.affiliation)}</affiliation>\n`;
   }
-  xml += `    </contributor>`;
+  xml += "    </contributor>";
   return xml;
 }
 
@@ -421,7 +494,9 @@ export function buildDataCiteXml(metadata: DataCiteMetadata): string {
   const lines: string[] = [];
 
   lines.push('<?xml version="1.0" encoding="UTF-8"?>');
-  lines.push('<resource xmlns="http://datacite.org/schema/kernel-4" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://datacite.org/schema/kernel-4 http://schema.datacite.org/meta/kernel-4/metadata.xsd">');
+  lines.push(
+    '<resource xmlns="http://datacite.org/schema/kernel-4" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://datacite.org/schema/kernel-4 http://schema.datacite.org/meta/kernel-4/metadata.xsd">',
+  );
 
   // 1. Identifier
   lines.push(`  <identifier identifierType="DOI">${escapeXml(metadata.identifier)}</identifier>`);
@@ -480,13 +555,17 @@ export function buildDataCiteXml(metadata: DataCiteMetadata): string {
 
   // 10. ResourceType
   const specificType = metadata.resourceTypeSpecific || metadata.resourceTypeGeneral;
-  lines.push(`  <resourceType resourceTypeGeneral="${escapeXml(metadata.resourceTypeGeneral)}">${escapeXml(specificType)}</resourceType>`);
+  lines.push(
+    `  <resourceType resourceTypeGeneral="${escapeXml(metadata.resourceTypeGeneral)}">${escapeXml(specificType)}</resourceType>`,
+  );
 
   // 11. AlternateIdentifiers
   if (metadata.alternateIdentifiers && metadata.alternateIdentifiers.length > 0) {
     lines.push("  <alternateIdentifiers>");
     for (const alt of metadata.alternateIdentifiers) {
-      lines.push(`    <alternateIdentifier alternateIdentifierType="${escapeXml(alt.type)}">${escapeXml(alt.identifier)}</alternateIdentifier>`);
+      lines.push(
+        `    <alternateIdentifier alternateIdentifierType="${escapeXml(alt.type)}">${escapeXml(alt.identifier)}</alternateIdentifier>`,
+      );
     }
     lines.push("  </alternateIdentifiers>");
   }
@@ -495,7 +574,9 @@ export function buildDataCiteXml(metadata: DataCiteMetadata): string {
   if (metadata.relatedIdentifiers && metadata.relatedIdentifiers.length > 0) {
     lines.push("  <relatedIdentifiers>");
     for (const rel of metadata.relatedIdentifiers) {
-      lines.push(`    <relatedIdentifier relatedIdentifierType="${escapeXml(rel.relatedIdentifierType)}" relationType="${escapeXml(rel.relationType)}">${escapeXml(rel.identifier)}</relatedIdentifier>`);
+      lines.push(
+        `    <relatedIdentifier relatedIdentifierType="${escapeXml(rel.relatedIdentifierType)}" relationType="${escapeXml(rel.relationType)}">${escapeXml(rel.identifier)}</relatedIdentifier>`,
+      );
     }
     lines.push("  </relatedIdentifiers>");
   }
@@ -544,7 +625,9 @@ export function buildDataCiteXml(metadata: DataCiteMetadata): string {
   if (metadata.descriptions && metadata.descriptions.length > 0) {
     lines.push("  <descriptions>");
     for (const desc of metadata.descriptions) {
-      lines.push(`    <description descriptionType="${escapeXml(desc.descriptionType)}">${escapeXml(desc.description)}</description>`);
+      lines.push(
+        `    <description descriptionType="${escapeXml(desc.descriptionType)}">${escapeXml(desc.description)}</description>`,
+      );
     }
     lines.push("  </descriptions>");
   }
@@ -553,9 +636,9 @@ export function buildDataCiteXml(metadata: DataCiteMetadata): string {
   if (metadata.geoLocations && metadata.geoLocations.length > 0) {
     lines.push("  <geoLocations>");
     for (const loc of metadata.geoLocations) {
-      lines.push(`    <geoLocation>`);
+      lines.push("    <geoLocation>");
       lines.push(`      <geoLocationPlace>${escapeXml(loc)}</geoLocationPlace>`);
-      lines.push(`    </geoLocation>`);
+      lines.push("    </geoLocation>");
     }
     lines.push("  </geoLocations>");
   }
@@ -570,7 +653,9 @@ export function buildDataCiteXml(metadata: DataCiteMetadata): string {
         const typeAttr = fund.funderIdentifierType
           ? ` funderIdentifierType="${escapeXml(fund.funderIdentifierType)}"`
           : "";
-        lines.push(`      <funderIdentifier${typeAttr}>${escapeXml(fund.funderIdentifier)}</funderIdentifier>`);
+        lines.push(
+          `      <funderIdentifier${typeAttr}>${escapeXml(fund.funderIdentifier)}</funderIdentifier>`,
+        );
       }
       if (fund.awardNumber) {
         lines.push(`      <awardNumber>${escapeXml(fund.awardNumber)}</awardNumber>`);
@@ -610,7 +695,11 @@ export interface BidsDatasetDescription {
 /**
  * Parse a "Last, First" author string into structured name parts.
  */
-export function parseAuthorName(author: string): { name: string; givenName?: string; familyName?: string } {
+export function parseAuthorName(author: string): {
+  name: string;
+  givenName?: string;
+  familyName?: string;
+} {
   const parts = author.split(",").map((s) => s.trim());
   if (parts.length >= 2) {
     return {
@@ -631,14 +720,46 @@ export function mapLicense(license: string | undefined): DataCiteRights | null {
 
   const normalized = license.toUpperCase().replace(/\s+/g, "-").replace(/--+/g, "-");
   const licenseMap: Record<string, { rights: string; uri: string; spdx: string }> = {
-    "CC-BY-4.0": { rights: "Creative Commons Attribution 4.0 International", uri: "https://creativecommons.org/licenses/by/4.0/", spdx: "CC-BY-4.0" },
-    "CC-BY-NC-4.0": { rights: "Creative Commons Attribution-NonCommercial 4.0 International", uri: "https://creativecommons.org/licenses/by-nc/4.0/", spdx: "CC-BY-NC-4.0" },
-    "CC-BY-SA-4.0": { rights: "Creative Commons Attribution-ShareAlike 4.0 International", uri: "https://creativecommons.org/licenses/by-sa/4.0/", spdx: "CC-BY-SA-4.0" },
-    "CC-BY-NC-SA-4.0": { rights: "Creative Commons Attribution-NonCommercial-ShareAlike 4.0 International", uri: "https://creativecommons.org/licenses/by-nc-sa/4.0/", spdx: "CC-BY-NC-SA-4.0" },
-    "CC0-1.0": { rights: "CC0 1.0 Universal", uri: "https://creativecommons.org/publicdomain/zero/1.0/", spdx: "CC0-1.0" },
-    CC0: { rights: "CC0 1.0 Universal", uri: "https://creativecommons.org/publicdomain/zero/1.0/", spdx: "CC0-1.0" },
-    "PDDL-1.0": { rights: "Open Data Commons Public Domain Dedication and License", uri: "https://opendatacommons.org/licenses/pddl/1-0/", spdx: "PDDL-1.0" },
-    PDDL: { rights: "Open Data Commons Public Domain Dedication and License", uri: "https://opendatacommons.org/licenses/pddl/1-0/", spdx: "PDDL-1.0" },
+    "CC-BY-4.0": {
+      rights: "Creative Commons Attribution 4.0 International",
+      uri: "https://creativecommons.org/licenses/by/4.0/",
+      spdx: "CC-BY-4.0",
+    },
+    "CC-BY-NC-4.0": {
+      rights: "Creative Commons Attribution-NonCommercial 4.0 International",
+      uri: "https://creativecommons.org/licenses/by-nc/4.0/",
+      spdx: "CC-BY-NC-4.0",
+    },
+    "CC-BY-SA-4.0": {
+      rights: "Creative Commons Attribution-ShareAlike 4.0 International",
+      uri: "https://creativecommons.org/licenses/by-sa/4.0/",
+      spdx: "CC-BY-SA-4.0",
+    },
+    "CC-BY-NC-SA-4.0": {
+      rights: "Creative Commons Attribution-NonCommercial-ShareAlike 4.0 International",
+      uri: "https://creativecommons.org/licenses/by-nc-sa/4.0/",
+      spdx: "CC-BY-NC-SA-4.0",
+    },
+    "CC0-1.0": {
+      rights: "CC0 1.0 Universal",
+      uri: "https://creativecommons.org/publicdomain/zero/1.0/",
+      spdx: "CC0-1.0",
+    },
+    CC0: {
+      rights: "CC0 1.0 Universal",
+      uri: "https://creativecommons.org/publicdomain/zero/1.0/",
+      spdx: "CC0-1.0",
+    },
+    "PDDL-1.0": {
+      rights: "Open Data Commons Public Domain Dedication and License",
+      uri: "https://opendatacommons.org/licenses/pddl/1-0/",
+      spdx: "PDDL-1.0",
+    },
+    PDDL: {
+      rights: "Open Data Commons Public Domain Dedication and License",
+      uri: "https://opendatacommons.org/licenses/pddl/1-0/",
+      spdx: "PDDL-1.0",
+    },
   };
 
   const match = licenseMap[normalized];
@@ -771,7 +892,9 @@ export function bidsToDataCite(
   }
   // BIDS ReferencesAndLinks
   const rawRefs = bidsDescription.ReferencesAndLinks;
-  const refs = Array.isArray(rawRefs) ? rawRefs.filter((r): r is string => typeof r === "string") : [];
+  const refs = Array.isArray(rawRefs)
+    ? rawRefs.filter((r): r is string => typeof r === "string")
+    : [];
   for (const ref of refs) {
     if (ref.match(/^10\.\d{4,}/)) {
       relatedIdentifiers.push({
@@ -815,7 +938,9 @@ export function bidsToDataCite(
     fundingReferences.push(...enrichment.fundingInfo);
   } else {
     const rawFunding = bidsDescription.Funding;
-    const funding = Array.isArray(rawFunding) ? rawFunding.filter((f): f is string => typeof f === "string") : [];
+    const funding = Array.isArray(rawFunding)
+      ? rawFunding.filter((f): f is string => typeof f === "string")
+      : [];
     for (const f of funding) {
       fundingReferences.push({ funderName: f });
     }

@@ -270,7 +270,15 @@ datasetRoutes.post("/", authMiddleware, zValidator("json", createDatasetSchema),
     VALUES (?, ?, ?, ?, ?, ?, ?)
   `,
     )
-    .bind(datasetId, name, description || null, user.id, githubRepo.full_name, sandbox ? 1 : 0, 'private')
+    .bind(
+      datasetId,
+      name,
+      description || null,
+      user.id,
+      githubRepo.full_name,
+      sandbox ? 1 : 0,
+      "private",
+    )
     .run();
 
   // Audit log
@@ -1459,7 +1467,9 @@ datasetRoutes.post("/:id/publish", authMiddleware, async (c) => {
   // Step 3: Update database
   try {
     await db
-      .prepare("UPDATE datasets SET visibility = 'public', updated_at = datetime('now') WHERE id = ?")
+      .prepare(
+        "UPDATE datasets SET visibility = 'public', updated_at = datetime('now') WHERE id = ?",
+      )
       .bind(dataset.id)
       .run();
   } catch (dbError) {

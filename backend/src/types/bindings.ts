@@ -6,7 +6,7 @@ export interface Bindings {
   DB: D1Database;
 
   // Environment variables
-  ENVIRONMENT: "production" | "development";
+  ENVIRONMENT: "production" | "development" | "staging" | "test";
   API_BASE_URL: string;
   FRONTEND_URL: string;
   AWS_REGION: string;

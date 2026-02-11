@@ -7,11 +7,10 @@
 
 import type { Context } from "hono";
 import { Hono } from "hono";
-import { nemarMetadataToEnrichment, parseNemarMetadata } from "../services/datacite.js";
 import { createEzidVersionDoi, parseDoiProvider } from "../services/doi.js";
 import { extractDoi } from "../services/ezid.js";
-import { getBlobContent, getTreeAtRef } from "../services/github.js";
 import { generateManifest } from "../services/manifest.js";
+import { errorMessage, extractRepoName, readRepoMetadata } from "../services/repo-metadata.js";
 import { uploadManifest } from "../services/s3.js";
 import * as zenodo from "../services/zenodo.js";
 import type { Bindings } from "../types/bindings.js";
@@ -144,50 +143,23 @@ async function handleEzidVersionDoi(
     return c.json({ error: "Dataset has no GitHub repository" }, 400);
   }
 
-  try {
-    // Read BIDS metadata from the repo
-    const repoName = dataset.github_repo.split("/")[1];
-    let bidsDescription: Record<string, unknown> = { Name: dataset.name };
-    let bidsMetadataWarning: string | undefined;
-    let enrichmentWarning: string | undefined;
-    let tree: Awaited<ReturnType<typeof getTreeAtRef>> = [];
-    if (repoName) {
-      try {
-        tree = await getTreeAtRef(repoName, "main", c.env.GITHUB_ADMIN_PAT);
-        const descFile = tree.find((f) => f.path === "dataset_description.json");
-        if (descFile) {
-          const content = await getBlobContent(repoName, descFile.sha, c.env.GITHUB_ADMIN_PAT);
-          const parsed = JSON.parse(content);
-          if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
-            bidsDescription = parsed as Record<string, unknown>;
-          }
-        }
-      } catch (bidsError) {
-        bidsMetadataWarning = `BIDS metadata unavailable: ${bidsError instanceof Error ? bidsError.message : String(bidsError)}. DOI minted with minimal metadata.`;
-        console.error("[webhook]", bidsMetadataWarning);
-      }
-    }
+  const repoName = extractRepoName(dataset.github_repo);
+  if (!repoName) {
+    return c.json({ error: "Invalid github_repo format" }, 400);
+  }
 
-    // Read nemar_metadata.json for rich enrichment
-    let enrichment = undefined;
-    if (repoName && tree.length > 0) {
-      try {
-        const nemarMetaFile = tree.find((f) => f.path === "nemar_metadata.json");
-        if (nemarMetaFile) {
-          const nemarContent = await getBlobContent(
-            repoName,
-            nemarMetaFile.sha,
-            c.env.GITHUB_ADMIN_PAT,
-          );
-          const nemarParsed = parseNemarMetadata(JSON.parse(nemarContent));
-          if (nemarParsed) {
-            enrichment = nemarMetadataToEnrichment(nemarParsed);
-          }
-        }
-      } catch (nemarErr) {
-        enrichmentWarning = `nemar_metadata.json enrichment skipped: ${nemarErr instanceof Error ? nemarErr.message : String(nemarErr)}`;
-        console.error("[webhook]", enrichmentWarning);
-      }
+  try {
+    // Read BIDS + NEMAR metadata from the release tag (not main)
+    const repoMeta = await readRepoMetadata(
+      repoName,
+      c.env.GITHUB_ADMIN_PAT,
+      undefined,
+      dataset.name,
+      `v${version}`,
+    );
+    const { bidsDescription, enrichment } = repoMeta;
+    for (const w of repoMeta.warnings) {
+      console.error("[webhook]", w);
     }
 
     // Query all existing version DOIs so concept DOI keeps all HasVersion relations
@@ -233,44 +205,41 @@ async function handleEzidVersionDoi(
         .bind(dataset.dataset_id, version, result.doi)
         .run();
     } catch (err) {
-      dbError = err instanceof Error ? err.message : String(err);
+      dbError = errorMessage(err);
       console.error(`[webhook] DOI ${result.doi} is PUBLIC but DB update failed:`, err);
     }
 
     // Generate and upload version manifest
     let manifestGenerated = false;
     let manifestErrorMsg: string | undefined;
-    if (repoName) {
-      try {
-        const pat = c.env.GITHUB_ADMIN_PAT;
-        const manifest = await generateManifest(
-          repoName,
-          version,
-          pat,
-          dataset.dataset_id,
-          result.doi,
-          dataset.concept_doi,
-        );
+    try {
+      const manifest = await generateManifest(
+        repoName,
+        version,
+        c.env.GITHUB_ADMIN_PAT,
+        dataset.dataset_id,
+        result.doi,
+        dataset.concept_doi,
+      );
 
-        await uploadManifest(
-          {
-            bucket: c.env.S3_BUCKET,
-            region: c.env.AWS_REGION,
-            accessKeyId: c.env.AWS_ACCESS_KEY_ID,
-            secretAccessKey: c.env.AWS_SECRET_ACCESS_KEY,
-          },
-          dataset.dataset_id,
-          version,
-          JSON.stringify(manifest, null, 2),
-        );
-        manifestGenerated = true;
-      } catch (manifestErr) {
-        manifestErrorMsg = manifestErr instanceof Error ? manifestErr.message : String(manifestErr);
-        console.error(
-          `[webhook] Manifest generation failed for ${dataset.dataset_id}@${version}:`,
-          manifestErr,
-        );
-      }
+      await uploadManifest(
+        {
+          bucket: c.env.S3_BUCKET,
+          region: c.env.AWS_REGION,
+          accessKeyId: c.env.AWS_ACCESS_KEY_ID,
+          secretAccessKey: c.env.AWS_SECRET_ACCESS_KEY,
+        },
+        dataset.dataset_id,
+        version,
+        JSON.stringify(manifest, null, 2),
+      );
+      manifestGenerated = true;
+    } catch (manifestErr) {
+      manifestErrorMsg = errorMessage(manifestErr);
+      console.error(
+        `[webhook] Manifest generation failed for ${dataset.dataset_id}@${version}:`,
+        manifestErr,
+      );
     }
 
     return c.json({
@@ -281,8 +250,7 @@ async function handleEzidVersionDoi(
       provider: "ezid",
       doi_url: `https://doi.org/${result.doi}`,
       manifest_generated: manifestGenerated,
-      ...(bidsMetadataWarning && { bids_metadata_warning: bidsMetadataWarning }),
-      ...(enrichmentWarning && { enrichment_warning: enrichmentWarning }),
+      ...(repoMeta.warnings.length > 0 && { metadata_warnings: repoMeta.warnings }),
       ...(dbError && { db_error: dbError }),
       ...(manifestErrorMsg && { manifest_error: manifestErrorMsg }),
       ...(result.warnings && { doi_warnings: result.warnings }),
@@ -292,7 +260,7 @@ async function handleEzidVersionDoi(
     return c.json(
       {
         error: "Failed to publish version DOI via EZID",
-        details: error instanceof Error ? error.message : "Unknown error",
+        details: errorMessage(error),
       },
       500,
     );
@@ -392,7 +360,7 @@ async function handleZenodoVersionDoi(
           .run();
       }
     } catch (err) {
-      dbError = err instanceof Error ? err.message : String(err);
+      dbError = errorMessage(err);
       console.error(
         `[webhook] Zenodo DOI ${published.doi} is PUBLISHED but DB update failed:`,
         err,
@@ -402,35 +370,32 @@ async function handleZenodoVersionDoi(
     // Generate and upload version manifest
     let manifestGenerated = false;
     let manifestErrorMsg: string | undefined;
-    if (dataset.github_repo) {
+    const zenodoRepoName = dataset.github_repo ? extractRepoName(dataset.github_repo) : null;
+    if (zenodoRepoName) {
       try {
-        const repoName = dataset.github_repo.split("/")[1];
-        if (repoName) {
-          const pat = c.env.GITHUB_ADMIN_PAT;
-          const manifest = await generateManifest(
-            repoName,
-            version,
-            pat,
-            dataset.dataset_id,
-            published.doi ?? null,
-            dataset.concept_doi,
-          );
+        const manifest = await generateManifest(
+          zenodoRepoName,
+          version,
+          c.env.GITHUB_ADMIN_PAT,
+          dataset.dataset_id,
+          published.doi ?? null,
+          dataset.concept_doi,
+        );
 
-          await uploadManifest(
-            {
-              bucket: c.env.S3_BUCKET,
-              region: c.env.AWS_REGION,
-              accessKeyId: c.env.AWS_ACCESS_KEY_ID,
-              secretAccessKey: c.env.AWS_SECRET_ACCESS_KEY,
-            },
-            dataset.dataset_id,
-            version,
-            JSON.stringify(manifest, null, 2),
-          );
-          manifestGenerated = true;
-        }
+        await uploadManifest(
+          {
+            bucket: c.env.S3_BUCKET,
+            region: c.env.AWS_REGION,
+            accessKeyId: c.env.AWS_ACCESS_KEY_ID,
+            secretAccessKey: c.env.AWS_SECRET_ACCESS_KEY,
+          },
+          dataset.dataset_id,
+          version,
+          JSON.stringify(manifest, null, 2),
+        );
+        manifestGenerated = true;
       } catch (manifestErr) {
-        manifestErrorMsg = manifestErr instanceof Error ? manifestErr.message : String(manifestErr);
+        manifestErrorMsg = errorMessage(manifestErr);
         console.error(
           `[webhook] Manifest generation failed for ${dataset.dataset_id}@${version}:`,
           manifestErr,
@@ -454,7 +419,7 @@ async function handleZenodoVersionDoi(
     return c.json(
       {
         error: "Failed to publish version DOI",
-        details: error instanceof Error ? error.message : "Unknown error",
+        details: errorMessage(error),
       },
       500,
     );

@@ -236,8 +236,8 @@ function parseEzidStatus(rawStatus: string | undefined): {
     const reason = pipeIdx !== -1 ? rawStatus.substring(pipeIdx + 3) : undefined;
     return { status: "unavailable", unavailableReason: reason };
   }
-  console.warn(`[ezid] Unknown EZID status: "${rawStatus}"`);
-  return { status: rawStatus as EzidStatus };
+  console.warn(`[ezid] Unknown EZID status: "${rawStatus}", treating as reserved`);
+  return { status: "reserved" };
 }
 
 function parseIdentifier(anvlBody: string): EzidIdentifier {
