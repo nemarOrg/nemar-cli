@@ -13,18 +13,21 @@
  * - nemar dataset collaborators   - List dataset collaborators
  */
 
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { basename, resolve } from "node:path";
 import { spawn } from "bun";
 import chalk from "chalk";
 import { Command } from "commander";
+import inquirer from "inquirer";
 import ora from "ora";
 import {
   ApiError,
   type Dataset,
   type DatasetsListResponse,
+  type NemarMetadataPayload,
   addCi,
   createDataset,
+  getCurrentUser,
   getDataset,
   getManifest,
   getPublishStatus,
@@ -297,6 +300,7 @@ datasetCommand
   .option("-n, --name <name>", "Dataset name (defaults to directory name)")
   .option("-d, --description <desc>", "Dataset description")
   .option("--skip-validation", "Skip BIDS validation (not recommended)")
+  .option("--skip-orcid", "Skip co-author ORCID collection")
   .option("--dry-run", "Show what would be uploaded without doing it")
   .option("-j, --jobs <number>", "Parallel upload streams (default: 4)", "4")
   .option(YES_OPTION, YES_DESCRIPTION)
@@ -477,6 +481,91 @@ Examples:
     spinner.succeed(
       `Found ${manifest.files.length} files (${manifest.dataFiles} data, ${manifest.metadataFiles} metadata)`,
     );
+
+    // Step 4b: Collect co-author ORCIDs
+    const orcidRegex = /^\d{4}-\d{4}-\d{4}-\d{3}[\dX]$/;
+    let coAuthorEnrichment: NemarMetadataPayload | undefined;
+
+    if (!options.skipOrcid && process.stdin.isTTY) {
+      const descPath = resolve(absolutePath, "dataset_description.json");
+      if (existsSync(descPath)) {
+        try {
+          const descContent = JSON.parse(readFileSync(descPath, "utf-8")) as Record<string, unknown>;
+          const rawAuthors = descContent.Authors;
+          const authorList = Array.isArray(rawAuthors)
+            ? rawAuthors.filter((a): a is string => typeof a === "string")
+            : [];
+
+          if (authorList.length > 0) {
+            // Get uploader's ORCID from profile
+            let uploaderOrcid: string | undefined;
+            let uploaderUsername: string | undefined;
+            try {
+              const user = await getCurrentUser();
+              uploaderOrcid = user.orcid || undefined;
+              uploaderUsername = user.username;
+            } catch {
+              // Not critical; continue without
+            }
+
+            console.log();
+            console.log(chalk.cyan("Authors found:"), authorList.join(" | "));
+
+            // Auto-match uploader ORCID
+            const authors: Record<string, { orcid?: string; affiliation?: string }> = {};
+            let uploaderMatchedAuthor: string | undefined;
+            if (uploaderOrcid && uploaderUsername) {
+              const lowerName = uploaderUsername.toLowerCase();
+              const match = authorList.find((a) => a.toLowerCase().includes(lowerName));
+              if (match) {
+                authors[match] = { orcid: uploaderOrcid };
+                uploaderMatchedAuthor = match;
+                console.log(
+                  `  Your ORCID (from profile): ${chalk.green(uploaderOrcid)} (matched to "${match}")`,
+                );
+              }
+            }
+
+            // Prompt for each co-author's ORCID
+            for (const author of authorList) {
+              if (author === uploaderMatchedAuthor) continue;
+
+              const { orcid } = await inquirer.prompt([
+                {
+                  type: "input",
+                  name: "orcid",
+                  message: `ORCID for "${author}" (Enter to skip):`,
+                  validate: (input: string) => {
+                    if (!input) return true;
+                    return orcidRegex.test(input) || "Invalid ORCID format (XXXX-XXXX-XXXX-XXXX)";
+                  },
+                },
+              ]);
+
+              if (orcid) {
+                const entry: { orcid: string; affiliation?: string } = { orcid };
+                const { affiliation } = await inquirer.prompt([
+                  {
+                    type: "input",
+                    name: "affiliation",
+                    message: `  Affiliation for "${author}" (optional):`,
+                  },
+                ]);
+                if (affiliation) entry.affiliation = affiliation;
+                authors[author] = entry;
+              }
+            }
+
+            if (Object.keys(authors).length > 0) {
+              coAuthorEnrichment = { version: "1.0", authors };
+            }
+            console.log();
+          }
+        } catch {
+          // Non-critical; continue without ORCID collection
+        }
+      }
+    }
 
     // Check for existing local config (resume scenario)
     const existingConfig = readLocalConfig(absolutePath);
@@ -756,6 +845,26 @@ Examples:
       }
     } else {
       console.log(chalk.gray("No data files to upload to S3"));
+    }
+
+    // Step 10b: Write nemar_metadata.json if ORCID data was collected
+    if (coAuthorEnrichment) {
+      const nemarMetaPath = resolve(absolutePath, "nemar_metadata.json");
+      writeFileSync(nemarMetaPath, JSON.stringify(coAuthorEnrichment, null, 2));
+
+      // Ensure .bidsignore includes nemar_metadata.json
+      const bidsignorePath = resolve(absolutePath, ".bidsignore");
+      let bidsignoreContent = "";
+      if (existsSync(bidsignorePath)) {
+        bidsignoreContent = readFileSync(bidsignorePath, "utf-8");
+      }
+      if (!bidsignoreContent.includes("nemar_metadata.json")) {
+        const newContent = bidsignoreContent
+          ? `${bidsignoreContent.trimEnd()}\nnemar_metadata.json\n`
+          : "nemar_metadata.json\n";
+        writeFileSync(bidsignorePath, newContent);
+      }
+      console.log(chalk.gray("  Saved nemar_metadata.json with author ORCIDs"));
     }
 
     // Step 11: Save dataset changes
