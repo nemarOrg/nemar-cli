@@ -9,20 +9,17 @@ import type { BidsDatasetDescription, DataCiteEnrichment } from "./datacite";
 import { bidsToDataCite, buildDataCiteXml } from "./datacite";
 import {
   type EzidAuth,
+  type EzidIdentifier,
   type EzidStatus,
   PRODUCTION_SHOULDER,
   TEST_SHOULDER,
   createIdentifier,
   extractDoi,
+  getIdentifier,
   makePublic,
   updateIdentifier,
 } from "./ezid";
-import {
-  type ZenodoMetadata,
-  createDeposition,
-  formatRecordUrl,
-  getPrereservedDoi,
-} from "./zenodo";
+import { type ZenodoMetadata, createDeposition, getPrereservedDoi } from "./zenodo";
 
 export type DoiProvider = "ezid" | "zenodo";
 
@@ -123,10 +120,13 @@ export function resolveEzidAuth(env: EzidEnv, sandbox?: boolean): EzidAuth {
   return { username: env.EZID_USERNAME, password: env.EZID_PASSWORD };
 }
 
+function resolveShoulder(sandbox?: boolean): string {
+  return sandbox ? TEST_SHOULDER : PRODUCTION_SHOULDER;
+}
+
 /** Build deterministic concept DOI identifier from dataset ID. */
 export function buildConceptIdentifier(datasetId: string, sandbox?: boolean): string {
-  const prefix = sandbox ? TEST_SHOULDER : PRODUCTION_SHOULDER;
-  return `${prefix}${datasetId.toUpperCase()}`;
+  return `${resolveShoulder(sandbox)}${datasetId.toUpperCase()}`;
 }
 
 /** Build deterministic version DOI identifier from dataset ID and version. */
@@ -135,8 +135,7 @@ export function buildVersionIdentifier(
   version: string,
   sandbox?: boolean,
 ): string {
-  const prefix = sandbox ? TEST_SHOULDER : PRODUCTION_SHOULDER;
-  return `${prefix}${datasetId.toUpperCase()}.V${version.toUpperCase()}`;
+  return `${resolveShoulder(sandbox)}${datasetId.toUpperCase()}.V${version.toUpperCase()}`;
 }
 
 async function createEzidConceptDoi(
@@ -167,11 +166,21 @@ async function createEzidConceptDoi(
     ? `https://github.com/${options.githubRepo}`
     : `https://nemar.org/dataexplorer/detail?dataset_id=${options.datasetId}`;
 
-  const identifier = await createIdentifier(auth, fullIdentifier, {
-    status: "reserved",
-    target,
-    dataciteXml,
-  });
+  let identifier: EzidIdentifier;
+  try {
+    identifier = await createIdentifier(auth, fullIdentifier, {
+      status: "reserved",
+      target,
+      dataciteXml,
+    });
+  } catch (error) {
+    // Idempotency: if admin retries after a timeout, the DOI may already exist
+    if (error instanceof Error && error.message.includes("already exists")) {
+      identifier = await getIdentifier(auth, fullIdentifier);
+    } else {
+      throw error;
+    }
+  }
 
   return {
     doi,
@@ -265,14 +274,14 @@ export async function createEzidVersionDoi(
 
   const releaseUrl = `https://github.com/${opts.githubRepo}/releases/tag/v${opts.version}`;
 
-  await createIdentifier(auth, fullIdentifier, {
+  const identifier = await createIdentifier(auth, fullIdentifier, {
     status: "reserved",
     target: releaseUrl,
     dataciteXml,
   });
 
   // Make the version DOI public
-  await makePublic(auth, fullIdentifier, releaseUrl);
+  await makePublic(auth, identifier.identifier, releaseUrl);
 
   // Update the concept DOI's XML to include HasVersion relation.
   // Non-fatal: the version DOI is already public at this point, so we log but

@@ -185,7 +185,7 @@ async function ezidRequest(
     response = await fetch(`${EZID_BASE_URL}${path}`, {
       method,
       headers,
-      body: body !== undefined ? body : undefined,
+      body,
     });
   } catch (error) {
     throw new Error(
