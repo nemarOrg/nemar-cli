@@ -25,8 +25,10 @@ import {
   type Dataset,
   type DatasetsListResponse,
   type NemarMetadataPayload,
+  ORCID_REGEX,
   addCi,
   createDataset,
+  errorDetail,
   getCurrentUser,
   getDataset,
   getManifest,
@@ -483,7 +485,6 @@ Examples:
     );
 
     // Step 4b: Collect co-author ORCIDs
-    const orcidRegex = /^\d{4}-\d{4}-\d{4}-\d{3}[\dX]$/;
     let coAuthorEnrichment: NemarMetadataPayload | undefined;
 
     if (!options.skipOrcid && process.stdin.isTTY) {
@@ -507,7 +508,7 @@ Examples:
             } catch (userErr) {
               console.log(
                 chalk.gray(
-                  `  Could not fetch profile: ${userErr instanceof Error ? userErr.message : String(userErr)}`,
+                  `  Could not fetch profile: ${errorDetail(userErr)}`,
                 ),
               );
             }
@@ -541,7 +542,7 @@ Examples:
                   message: `ORCID for "${author}" (Enter to skip):`,
                   validate: (input: string) => {
                     if (!input) return true;
-                    return orcidRegex.test(input) || "Invalid ORCID format (XXXX-XXXX-XXXX-XXXX)";
+                    return ORCID_REGEX.test(input) || "Invalid ORCID format (XXXX-XXXX-XXXX-XXXX)";
                   },
                 },
               ]);
@@ -566,8 +567,7 @@ Examples:
             console.log();
           }
         } catch (orcidErr) {
-          const msg = orcidErr instanceof Error ? orcidErr.message : String(orcidErr);
-          console.log(chalk.yellow(`  Could not collect ORCIDs: ${msg}`));
+          console.log(chalk.yellow(`  Could not collect ORCIDs: ${errorDetail(orcidErr)}`));
           console.log(chalk.gray("  Continuing without author enrichment."));
         }
       }

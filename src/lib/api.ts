@@ -9,6 +9,15 @@ import { getConfig } from "./config.js";
 
 const DEFAULT_API_URL = "https://api.osc.earth/nemar";
 
+/** ORCID identifier format: XXXX-XXXX-XXXX-XXXX (last char may be X) */
+export const ORCID_REGEX = /^\d{4}-\d{4}-\d{4}-\d{3}[\dX]$/;
+
+/** Extract a human-readable message from an unknown error value. */
+export function errorDetail(error: unknown): string {
+  if (error instanceof Error) return error.message;
+  return String(error);
+}
+
 /**
  * API error with status code and message
  */

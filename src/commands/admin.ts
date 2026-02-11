@@ -25,6 +25,7 @@ import {
   ApiError,
   type Dataset,
   type NemarMetadataPayload,
+  ORCID_REGEX,
   addCi,
   applyS3Lock,
   approvePublication,
@@ -32,6 +33,7 @@ import {
   changeVisibility,
   createConceptDoi,
   denyPublication,
+  errorDetail,
   finalizeDataset,
   getCiStatus,
   getDataset,
@@ -83,9 +85,29 @@ function handleCommandError(
     }
   } else {
     spinner.fail(defaultMsg);
-    const msg = error instanceof Error ? error.message : String(error);
-    console.log(chalk.gray(`  Error details: ${msg}`));
+    console.log(chalk.gray(`  Error details: ${errorDetail(error)}`));
   }
+}
+
+/**
+ * Fetch a file from a GitHub repo via the gh CLI, returning its decoded content.
+ * Uses the /readme endpoint for READMEs, /contents/{path} for other files.
+ * Returns null if the file does not exist or the command fails.
+ */
+async function fetchGitHubFileContent(repoName: string, path: string): Promise<string | null> {
+  const { spawn: bunSpawn } = await import("bun");
+  const endpoint = path === "README"
+    ? `repos/${repoName}/readme`
+    : `repos/${repoName}/contents/${path}`;
+  const proc = bunSpawn({
+    cmd: ["gh", "api", endpoint, "--jq", ".content"],
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  const base64Content = await new Response(proc.stdout).text();
+  const exitCode = await proc.exited;
+  if (exitCode !== 0 || !base64Content.trim()) return null;
+  return Buffer.from(base64Content.trim(), "base64").toString("utf-8");
 }
 
 export const adminCommand = new Command("admin")
@@ -355,8 +377,7 @@ s3Command
       }
     } catch (error) {
       spinner.fail("S3 lock failed");
-      const msg = error instanceof Error ? error.message : String(error);
-      console.log(chalk.gray(`  ${msg}`));
+      console.log(chalk.gray(`  ${errorDetail(error)}`));
     }
   });
 
@@ -773,7 +794,7 @@ doiCommand
           }
         } else {
           createSpinner.fail("Failed to create concept DOI");
-          console.log(chalk.gray(`  ${error instanceof Error ? error.message : "Unknown error"}`));
+          console.log(chalk.gray(`  ${errorDetail(error)}`));
         }
       }
     },
@@ -917,7 +938,7 @@ doiCommand
           }
         } else {
           spinner.fail("Failed to update DOI");
-          console.log(chalk.gray(`  ${error instanceof Error ? error.message : "Unknown error"}`));
+          console.log(chalk.gray(`  ${errorDetail(error)}`));
         }
       }
     },
@@ -964,7 +985,7 @@ doiCommand
         } else {
           console.log(
             chalk.yellow(
-              `  Warning: Could not fetch DOI info: ${doiErr instanceof Error ? doiErr.message : String(doiErr)}`,
+              `  Warning: Could not fetch DOI info: ${errorDetail(doiErr)}`,
             ),
           );
         }
@@ -994,7 +1015,6 @@ doiCommand
       ]);
 
       if (updateAuthors) {
-        const orcidRegex = /^\d{4}-\d{4}-\d{4}-\d{3}[\dX]$/;
         const authors: Record<string, { orcid?: string; affiliation?: string }> = {};
 
         let addMore = true;
@@ -1015,7 +1035,7 @@ doiCommand
               message: `ORCID for "${authorName}" (Enter to skip):`,
               validate: (input: string) => {
                 if (!input) return true;
-                return orcidRegex.test(input) || "Invalid ORCID format (XXXX-XXXX-XXXX-XXXX)";
+                return ORCID_REGEX.test(input) || "Invalid ORCID format (XXXX-XXXX-XXXX-XXXX)";
               },
             },
           ]);
@@ -1059,47 +1079,20 @@ doiCommand
         } else {
           const llmSpinner = ora("Analyzing README and dataset metadata...").start();
           try {
-            // Dynamic import to avoid loading on backend (CLI-side only)
             const { enrichFromReadme } = await import("../lib/llm-enrich.js");
 
-            // We don't have direct README access here, so fetch via gh CLI
             const repoName = dataset.github_repo;
-            if (repoName) {
-              const { spawn: bunSpawn } = await import("bun");
-              const proc = bunSpawn({
-                cmd: ["gh", "api", `repos/${repoName}/readme`, "--jq", ".content"],
-                stdout: "pipe",
-                stderr: "pipe",
-              });
-              const readmeBase64 = await new Response(proc.stdout).text();
-              const exitCode = await proc.exited;
-
-              if (exitCode === 0 && readmeBase64.trim()) {
-                const readmeContent = Buffer.from(readmeBase64.trim(), "base64").toString("utf-8");
-
-                // Also get BIDS description
-                const descProc = bunSpawn({
-                  cmd: [
-                    "gh",
-                    "api",
-                    `repos/${repoName}/contents/dataset_description.json`,
-                    "--jq",
-                    ".content",
-                  ],
-                  stdout: "pipe",
-                  stderr: "pipe",
-                });
-                const descBase64 = await new Response(descProc.stdout).text();
-                const descExitCode = await descProc.exited;
+            if (!repoName) {
+              llmSpinner.warn("No GitHub repository configured for this dataset");
+            } else {
+              const readmeContent = await fetchGitHubFileContent(repoName, "README");
+              if (!readmeContent) {
+                llmSpinner.warn("Could not fetch README from repository");
+              } else {
+                const descContent = await fetchGitHubFileContent(repoName, "dataset_description.json");
                 let bidsDesc: Record<string, unknown> = {};
-                if (descExitCode === 0 && descBase64.trim()) {
-                  try {
-                    bidsDesc = JSON.parse(
-                      Buffer.from(descBase64.trim(), "base64").toString("utf-8"),
-                    ) as Record<string, unknown>;
-                  } catch {
-                    // ignore parse error
-                  }
+                if (descContent) {
+                  try { bidsDesc = JSON.parse(descContent) as Record<string, unknown>; } catch { /* ignore */ }
                 }
 
                 const llmResult = await enrichFromReadme(readmeContent, bidsDesc, apiKey);
@@ -1128,17 +1121,11 @@ doiCommand
                   );
                   enrichment.relatedDois = llmResult.relatedDois;
                 }
-              } else {
-                llmSpinner.warn("Could not fetch README from repository");
               }
-            } else {
-              llmSpinner.warn("No GitHub repository configured for this dataset");
             }
           } catch (error) {
             llmSpinner.fail("LLM enrichment failed");
-            console.log(
-              chalk.gray(`  ${error instanceof Error ? error.message : "Unknown error"}`),
-            );
+            console.log(chalk.gray(`  ${errorDetail(error)}`));
           }
         }
       }
@@ -1158,7 +1145,7 @@ doiCommand
       } catch (error) {
         statsSpinner.warn("Could not compute dataset stats");
         console.log(
-          chalk.gray(`  ${error instanceof Error ? error.message : "Unknown error"}`),
+          chalk.gray(`  ${errorDetail(error)}`),
         );
       }
 
@@ -1198,7 +1185,7 @@ doiCommand
             refreshSpinner.warn("Could not refresh DOI metadata");
             console.log(
               chalk.gray(
-                `  ${error instanceof Error ? error.message : "Unknown error"}`,
+                `  ${errorDetail(error)}`,
               ),
             );
           }
@@ -1209,7 +1196,7 @@ doiCommand
         } else {
           submitSpinner.fail("Failed to save enrichment");
           console.log(
-            chalk.gray(`  ${error instanceof Error ? error.message : "Unknown error"}`),
+            chalk.gray(`  ${errorDetail(error)}`),
           );
         }
       }
