@@ -33,15 +33,24 @@ export type DateType =
   | "Accepted" | "Available" | "Collected" | "Copyrighted" | "Created"
   | "Issued" | "Other" | "Submitted" | "Updated" | "Valid" | "Withdrawn";
 
-export type RelationType =
-  | "IsCitedBy" | "Cites" | "IsSupplementTo" | "IsSupplementedBy"
-  | "IsContinuedBy" | "Continues" | "IsDescribedBy" | "Describes"
-  | "HasMetadata" | "IsMetadataFor" | "HasVersion" | "IsVersionOf"
-  | "IsNewVersionOf" | "IsPreviousVersionOf" | "IsPartOf" | "HasPart"
-  | "IsReferencedBy" | "References" | "IsDocumentedBy" | "Documents"
-  | "IsCompiledBy" | "Compiles" | "IsVariantFormOf" | "IsOriginalFormOf"
-  | "IsIdenticalTo" | "IsCollectedBy" | "Collects" | "IsRequiredBy"
-  | "Requires" | "IsObsoletedBy" | "Obsoletes";
+const VALID_RELATION_TYPES = [
+  "IsCitedBy", "Cites", "IsSupplementTo", "IsSupplementedBy",
+  "IsContinuedBy", "Continues", "IsDescribedBy", "Describes",
+  "HasMetadata", "IsMetadataFor", "HasVersion", "IsVersionOf",
+  "IsNewVersionOf", "IsPreviousVersionOf", "IsPartOf", "HasPart",
+  "IsReferencedBy", "References", "IsDocumentedBy", "Documents",
+  "IsCompiledBy", "Compiles", "IsVariantFormOf", "IsOriginalFormOf",
+  "IsIdenticalTo", "IsCollectedBy", "Collects", "IsRequiredBy",
+  "Requires", "IsObsoletedBy", "Obsoletes",
+] as const;
+
+export type RelationType = (typeof VALID_RELATION_TYPES)[number];
+
+const RELATION_TYPE_SET = new Set<string>(VALID_RELATION_TYPES);
+
+export function isValidRelationType(value: string): value is RelationType {
+  return RELATION_TYPE_SET.has(value);
+}
 
 export type DescriptionType =
   | "Abstract" | "Methods" | "SeriesInformation" | "TableOfContents"
@@ -146,6 +155,196 @@ export interface DataCiteEnrichment {
   methodsDescription?: string;
   collectionDates?: string; // ISO 8601 date range
   geoLocation?: string;
+  sizes?: string[];
+  formats?: string[];
+}
+
+// ---------------------------------------------------------------------------
+// NemarMetadata: canonical enrichment file format (nemar_metadata.json)
+// ---------------------------------------------------------------------------
+
+/**
+ * Schema for nemar_metadata.json, the canonical enrichment file
+ * stored in each dataset repo alongside dataset_description.json.
+ */
+export interface NemarMetadata {
+  version: "1.0";
+  authors?: Record<string, { orcid?: string; affiliation?: string }>;
+  keywords?: string[];
+  relatedDois?: Array<{ doi: string; relationType: string }>;
+  fundingReferences?: Array<{
+    funderName: string;
+    awardNumber?: string;
+    awardTitle?: string;
+  }>;
+  description?: string;
+  methodsDescription?: string;
+  sizes?: string[];
+  formats?: string[];
+}
+
+/**
+ * Parse raw JSON into a validated NemarMetadata object.
+ * Returns null for non-object input or unrecognized versions.
+ * Ignores unknown fields; returns partial data for partially valid input.
+ */
+export function parseNemarMetadata(raw: unknown): NemarMetadata | null {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+
+  const obj = raw as Record<string, unknown>;
+
+  // Reject unrecognized versions (future-proofing)
+  if (obj.version !== undefined && obj.version !== "1.0") return null;
+
+  const result: NemarMetadata = { version: "1.0" };
+
+  // Authors
+  if (obj.authors && typeof obj.authors === "object" && !Array.isArray(obj.authors)) {
+    const authors: Record<string, { orcid?: string; affiliation?: string }> = {};
+    for (const [name, val] of Object.entries(obj.authors as Record<string, unknown>)) {
+      if (val && typeof val === "object" && !Array.isArray(val)) {
+        const entry = val as Record<string, unknown>;
+        const parsed: { orcid?: string; affiliation?: string } = {};
+        if (typeof entry.orcid === "string") parsed.orcid = entry.orcid;
+        if (typeof entry.affiliation === "string") parsed.affiliation = entry.affiliation;
+        if (parsed.orcid || parsed.affiliation) authors[name] = parsed;
+      }
+    }
+    if (Object.keys(authors).length > 0) result.authors = authors;
+  }
+
+  // Keywords
+  if (Array.isArray(obj.keywords)) {
+    const kw = obj.keywords.filter((k): k is string => typeof k === "string");
+    if (kw.length > 0) result.keywords = kw;
+  }
+
+  // Related DOIs (validate relationType at parse time)
+  if (Array.isArray(obj.relatedDois)) {
+    const rels = obj.relatedDois.filter(
+      (r): r is { doi: string; relationType: string } => {
+        if (!r || typeof r !== "object") return false;
+        const entry = r as Record<string, unknown>;
+        return (
+          typeof entry.doi === "string" &&
+          typeof entry.relationType === "string" &&
+          isValidRelationType(entry.relationType as string)
+        );
+      },
+    );
+    if (rels.length > 0) result.relatedDois = rels;
+  }
+
+  // Funding references
+  if (Array.isArray(obj.fundingReferences)) {
+    const funds = obj.fundingReferences.filter(
+      (f): f is { funderName: string; awardNumber?: string; awardTitle?: string } =>
+        !!f && typeof f === "object" && typeof (f as Record<string, unknown>).funderName === "string",
+    );
+    if (funds.length > 0) result.fundingReferences = funds;
+  }
+
+  // Description
+  if (typeof obj.description === "string" && obj.description) {
+    result.description = obj.description;
+  }
+
+  // Methods description
+  if (typeof obj.methodsDescription === "string" && obj.methodsDescription) {
+    result.methodsDescription = obj.methodsDescription;
+  }
+
+  // Sizes
+  if (Array.isArray(obj.sizes)) {
+    const sizes = obj.sizes.filter((s): s is string => typeof s === "string");
+    if (sizes.length > 0) result.sizes = sizes;
+  }
+
+  // Formats
+  if (Array.isArray(obj.formats)) {
+    const formats = obj.formats.filter((f): f is string => typeof f === "string");
+    if (formats.length > 0) result.formats = formats;
+  }
+
+  return result;
+}
+
+/**
+ * Convert NemarMetadata to DataCiteEnrichment for use with bidsToDataCite.
+ * Merges with an existing enrichment (e.g., from auto-ORCID injection).
+ * Merge semantics: authors merged (NemarMetadata overrides per-key),
+ * keywords merged and deduplicated, funding merged and deduplicated,
+ * related DOIs merged and deduplicated by doi+relationType,
+ * description/methods/sizes/formats overwritten by NemarMetadata.
+ */
+export function nemarMetadataToEnrichment(
+  nemarMeta: NemarMetadata,
+  base?: DataCiteEnrichment,
+): DataCiteEnrichment {
+  const enrichment: DataCiteEnrichment = { ...base };
+
+  // Authors: NemarMetadata authors override base
+  if (nemarMeta.authors) {
+    enrichment.authors = { ...enrichment.authors, ...nemarMeta.authors };
+  }
+
+  // Keywords: merge, deduplicate
+  if (nemarMeta.keywords) {
+    const existing = enrichment.keywords || [];
+    const merged = [...existing];
+    for (const kw of nemarMeta.keywords) {
+      if (!merged.includes(kw)) merged.push(kw);
+    }
+    enrichment.keywords = merged;
+  }
+
+  // Related DOIs: merge and deduplicate by doi+relationType
+  if (nemarMeta.relatedDois) {
+    const existing = enrichment.relatedDois || [];
+    const seen = new Set(existing.map((r) => `${r.doi}|${r.relationType}`));
+    const newRels = nemarMeta.relatedDois
+      .filter((r) => isValidRelationType(r.relationType))
+      .map((r) => ({
+        doi: r.doi,
+        relationType: r.relationType as RelationType,
+      }))
+      .filter((r) => {
+        const key = `${r.doi}|${r.relationType}`;
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      });
+    enrichment.relatedDois = [...existing, ...newRels];
+  }
+
+  // Funding: merge and deduplicate by funderName+awardNumber
+  if (nemarMeta.fundingReferences) {
+    const existing = enrichment.fundingInfo || [];
+    const seen = new Set(existing.map((f) => `${f.funderName}|${f.awardNumber || ""}`));
+    const newFunds = nemarMeta.fundingReferences
+      .map((f) => ({
+        funderName: f.funderName,
+        awardNumber: f.awardNumber,
+        awardTitle: f.awardTitle,
+      }))
+      .filter((f) => {
+        const key = `${f.funderName}|${f.awardNumber || ""}`;
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      });
+    enrichment.fundingInfo = [...existing, ...newFunds];
+  }
+
+  // Description
+  if (nemarMeta.description) enrichment.description = nemarMeta.description;
+  if (nemarMeta.methodsDescription) enrichment.methodsDescription = nemarMeta.methodsDescription;
+
+  // Sizes and formats
+  if (nemarMeta.sizes) enrichment.sizes = nemarMeta.sizes;
+  if (nemarMeta.formats) enrichment.formats = nemarMeta.formats;
+
+  return enrichment;
 }
 
 // ---------------------------------------------------------------------------
@@ -644,8 +843,8 @@ export function bidsToDataCite(
     geoLocations: geoLocations.length > 0 ? geoLocations : undefined,
     language: "en",
     alternateIdentifiers,
-    sizes: undefined, // Set by caller with actual dataset stats
-    formats: undefined, // Set by caller based on file types
+    sizes: enrichment?.sizes,
+    formats: enrichment?.formats,
     version,
     rights: rights ? [rights] : undefined,
     fundingReferences: fundingReferences.length > 0 ? fundingReferences : undefined,

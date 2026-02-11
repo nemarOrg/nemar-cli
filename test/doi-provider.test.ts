@@ -6,7 +6,14 @@
  */
 
 import { describe, expect, test } from "bun:test";
-import { bidsToDataCite, buildDataCiteXml } from "../backend/src/services/datacite";
+import {
+  bidsToDataCite,
+  buildDataCiteXml,
+  isValidRelationType,
+  nemarMetadataToEnrichment,
+  parseNemarMetadata,
+} from "../backend/src/services/datacite";
+import { enrichFromReadme, validateLlmResult } from "../src/lib/llm-enrich";
 import {
   buildConceptIdentifier,
   buildOrcidEnrichment,
@@ -431,5 +438,427 @@ describe("DataCite enrichment with version relations", () => {
     // Count HasVersion occurrences
     const hasVersionCount = (xml.match(/HasVersion/g) || []).length;
     expect(hasVersionCount).toBe(3);
+  });
+});
+
+describe("parseNemarMetadata", () => {
+  test("parses valid full metadata", () => {
+    const result = parseNemarMetadata({
+      version: "1.0",
+      authors: {
+        "Shirazi, Yahya": { orcid: "0000-0002-1825-0097", affiliation: "UC San Diego" },
+        "Smith, John": { orcid: "0000-0001-5109-390X" },
+      },
+      keywords: ["EEG", "motor imagery", "BCI"],
+      relatedDois: [{ doi: "10.1234/paper", relationType: "IsSupplementTo" }],
+      fundingReferences: [
+        { funderName: "NIH", awardNumber: "R01-MH123456", awardTitle: "Neural mechanisms" },
+      ],
+      description: "A test dataset",
+      methodsDescription: "EEG was recorded",
+      sizes: ["2.4 GB (142 files)"],
+      formats: [".edf", ".tsv", ".json"],
+    });
+
+    expect(result).not.toBeNull();
+    expect(result!.authors?.["Shirazi, Yahya"]?.orcid).toBe("0000-0002-1825-0097");
+    expect(result!.authors?.["Shirazi, Yahya"]?.affiliation).toBe("UC San Diego");
+    expect(result!.keywords).toEqual(["EEG", "motor imagery", "BCI"]);
+    expect(result!.relatedDois).toHaveLength(1);
+    expect(result!.fundingReferences).toHaveLength(1);
+    expect(result!.description).toBe("A test dataset");
+    expect(result!.sizes).toEqual(["2.4 GB (142 files)"]);
+    expect(result!.formats).toEqual([".edf", ".tsv", ".json"]);
+  });
+
+  test("parses partial metadata", () => {
+    const result = parseNemarMetadata({
+      version: "1.0",
+      keywords: ["EEG"],
+    });
+
+    expect(result).not.toBeNull();
+    expect(result!.keywords).toEqual(["EEG"]);
+    expect(result!.authors).toBeUndefined();
+    expect(result!.description).toBeUndefined();
+  });
+
+  test("returns result for empty object", () => {
+    const result = parseNemarMetadata({});
+    expect(result).not.toBeNull();
+    expect(result!.version).toBe("1.0");
+  });
+
+  test("returns null for null input", () => {
+    expect(parseNemarMetadata(null)).toBeNull();
+  });
+
+  test("returns null for array input", () => {
+    expect(parseNemarMetadata([])).toBeNull();
+  });
+
+  test("returns null for string input", () => {
+    expect(parseNemarMetadata("not an object")).toBeNull();
+  });
+
+  test("ignores invalid author entries", () => {
+    const result = parseNemarMetadata({
+      authors: {
+        "Valid, Author": { orcid: "0000-0002-1825-0097" },
+        "Invalid, Entry": "not an object",
+        "Empty, Entry": {},
+      },
+    });
+
+    expect(result!.authors).toBeDefined();
+    expect(Object.keys(result!.authors!)).toEqual(["Valid, Author"]);
+  });
+
+  test("filters non-string keywords", () => {
+    const result = parseNemarMetadata({
+      keywords: ["valid", 123, null, "also valid"],
+    });
+
+    expect(result!.keywords).toEqual(["valid", "also valid"]);
+  });
+
+  test("rejects unrecognized version", () => {
+    const result = parseNemarMetadata({ version: "2.0", description: "test" });
+    expect(result).toBeNull();
+  });
+
+  test("accepts missing version (defaults to 1.0)", () => {
+    const result = parseNemarMetadata({ description: "test" });
+    expect(result).not.toBeNull();
+    expect(result!.version).toBe("1.0");
+  });
+
+  test("filters relatedDois with invalid relationType at parse time", () => {
+    const result = parseNemarMetadata({
+      relatedDois: [
+        { doi: "10.1234/valid", relationType: "IsSupplementTo" },
+        { doi: "10.1234/invalid", relationType: "NotARelationType" },
+        { doi: "10.1234/missing-type" },
+        { doi: "10.1234/number-type", relationType: 42 },
+      ],
+    });
+    expect(result!.relatedDois).toHaveLength(1);
+    expect(result!.relatedDois![0].doi).toBe("10.1234/valid");
+  });
+
+  test("filters relatedDois missing required fields", () => {
+    const result = parseNemarMetadata({
+      relatedDois: [
+        { doi: "10.1234/valid", relationType: "Cites" },
+        { relationType: "Cites" },
+        { doi: "10.1234/no-type" },
+        null,
+        "string",
+      ],
+    });
+    expect(result!.relatedDois).toHaveLength(1);
+  });
+
+  test("filters fundingReferences missing funderName", () => {
+    const result = parseNemarMetadata({
+      fundingReferences: [
+        { funderName: "NIH", awardNumber: "R01" },
+        { funderName: "NSF" },
+        { awardNumber: "orphan" },
+        null,
+      ],
+    });
+    expect(result!.fundingReferences).toHaveLength(2);
+    expect(result!.fundingReferences![0].funderName).toBe("NIH");
+    expect(result!.fundingReferences![1].funderName).toBe("NSF");
+  });
+});
+
+describe("nemarMetadataToEnrichment", () => {
+  test("converts full NemarMetadata to enrichment", () => {
+    const nemarMeta = parseNemarMetadata({
+      version: "1.0",
+      authors: { "Doe, Jane": { orcid: "0000-0001-5109-390X", affiliation: "MIT" } },
+      keywords: ["EEG"],
+      description: "A dataset",
+      sizes: ["1 GB"],
+      formats: [".edf"],
+    })!;
+
+    const enrichment = nemarMetadataToEnrichment(nemarMeta);
+    expect(enrichment.authors?.["Doe, Jane"]?.orcid).toBe("0000-0001-5109-390X");
+    expect(enrichment.keywords).toEqual(["EEG"]);
+    expect(enrichment.description).toBe("A dataset");
+    expect(enrichment.sizes).toEqual(["1 GB"]);
+    expect(enrichment.formats).toEqual([".edf"]);
+  });
+
+  test("merges with base enrichment, NemarMetadata takes precedence for authors", () => {
+    const base = {
+      authors: {
+        "Shirazi, Yahya": { orcid: "0000-0002-1825-0097" },
+        "Old, Author": { orcid: "0000-0000-0000-0001" },
+      },
+      keywords: ["neuroscience"],
+    };
+
+    const nemarMeta = parseNemarMetadata({
+      version: "1.0",
+      authors: {
+        "Shirazi, Yahya": { orcid: "0000-0002-1825-0097", affiliation: "UCSD" },
+      },
+      keywords: ["EEG"],
+    })!;
+
+    const enrichment = nemarMetadataToEnrichment(nemarMeta, base);
+
+    // Base author preserved
+    expect(enrichment.authors?.["Old, Author"]?.orcid).toBe("0000-0000-0000-0001");
+    // NemarMetadata author overrides (adds affiliation)
+    expect(enrichment.authors?.["Shirazi, Yahya"]?.affiliation).toBe("UCSD");
+    // Keywords merged and deduplicated
+    expect(enrichment.keywords).toContain("neuroscience");
+    expect(enrichment.keywords).toContain("EEG");
+  });
+
+  test("deduplicates keywords on merge", () => {
+    const base = { keywords: ["EEG", "BIDS"] };
+    const nemarMeta = parseNemarMetadata({ keywords: ["EEG", "motor imagery"] })!;
+    const enrichment = nemarMetadataToEnrichment(nemarMeta, base);
+    expect(enrichment.keywords).toEqual(["EEG", "BIDS", "motor imagery"]);
+  });
+
+  test("merges funding references instead of overwriting", () => {
+    const base = {
+      fundingInfo: [{ funderName: "NIH", awardNumber: "R01-MH111" }],
+    };
+    const nemarMeta = parseNemarMetadata({
+      fundingReferences: [
+        { funderName: "NSF", awardNumber: "BCS-222" },
+        { funderName: "NIH", awardNumber: "R01-MH111" },
+      ],
+    })!;
+    const enrichment = nemarMetadataToEnrichment(nemarMeta, base);
+    expect(enrichment.fundingInfo).toHaveLength(2);
+    expect(enrichment.fundingInfo![0].funderName).toBe("NIH");
+    expect(enrichment.fundingInfo![1].funderName).toBe("NSF");
+  });
+
+  test("deduplicates related DOIs on merge", () => {
+    const base = {
+      relatedDois: [{ doi: "10.1234/paper", relationType: "IsSupplementTo" as const }],
+    };
+    const nemarMeta = parseNemarMetadata({
+      relatedDois: [
+        { doi: "10.1234/paper", relationType: "IsSupplementTo" },
+        { doi: "10.1234/new", relationType: "Cites" },
+      ],
+    })!;
+    const enrichment = nemarMetadataToEnrichment(nemarMeta, base);
+    expect(enrichment.relatedDois).toHaveLength(2);
+    expect(enrichment.relatedDois!.map((r) => r.doi)).toEqual(["10.1234/paper", "10.1234/new"]);
+  });
+
+  test("funding conversion maps field names correctly", () => {
+    const nemarMeta = parseNemarMetadata({
+      fundingReferences: [
+        { funderName: "ERC", awardNumber: "ERC-2023", awardTitle: "Brain Dynamics" },
+      ],
+    })!;
+    const enrichment = nemarMetadataToEnrichment(nemarMeta);
+    expect(enrichment.fundingInfo).toHaveLength(1);
+    expect(enrichment.fundingInfo![0]).toEqual({
+      funderName: "ERC",
+      awardNumber: "ERC-2023",
+      awardTitle: "Brain Dynamics",
+    });
+  });
+
+  test("passes description and methodsDescription through", () => {
+    const nemarMeta = parseNemarMetadata({
+      description: "New description",
+      methodsDescription: "EEG at 256Hz",
+    })!;
+    const base = { description: "Old description" };
+    const enrichment = nemarMetadataToEnrichment(nemarMeta, base);
+    expect(enrichment.description).toBe("New description");
+    expect(enrichment.methodsDescription).toBe("EEG at 256Hz");
+  });
+});
+
+describe("sizes and formats in DataCite XML", () => {
+  test("sizes appear in XML when provided via enrichment", () => {
+    const metadata = bidsToDataCite(
+      "nm000104",
+      "10.82901/NEMAR.test",
+      { Name: "Test", Authors: ["Doe, Jane"] },
+      { sizes: ["2.4 GB (142 files)"], formats: [".edf", ".tsv", ".json"] },
+    );
+
+    const xml = buildDataCiteXml(metadata);
+    expect(xml).toContain("<sizes>");
+    expect(xml).toContain("2.4 GB (142 files)");
+    expect(xml).toContain("<formats>");
+    expect(xml).toContain(".edf");
+    expect(xml).toContain(".tsv");
+  });
+
+  test("no sizes/formats in XML when not provided", () => {
+    const metadata = bidsToDataCite("nm000104", "10.82901/NEMAR.test", {
+      Name: "Test",
+      Authors: ["Doe, Jane"],
+    });
+
+    const xml = buildDataCiteXml(metadata);
+    expect(xml).not.toContain("<sizes>");
+    expect(xml).not.toContain("<formats>");
+  });
+});
+
+describe("enrichment keywords merged with auto-keywords", () => {
+  test("enrichment keywords appear alongside auto-generated subjects", () => {
+    const metadata = bidsToDataCite(
+      "nm000104",
+      "10.82901/NEMAR.test",
+      { Name: "Test", Authors: ["Doe, Jane"], DatasetType: "eeg" },
+      { keywords: ["motor imagery", "BCI"] },
+    );
+
+    // Auto-generated: EEG, BIDS, neuroscience
+    expect(metadata.subjects).toContain("motor imagery");
+    expect(metadata.subjects).toContain("BCI");
+    expect(metadata.subjects).toContain("EEG");
+    expect(metadata.subjects).toContain("BIDS");
+    expect(metadata.subjects).toContain("neuroscience");
+  });
+});
+
+describe("validateLlmResult", () => {
+  test("valid full response", () => {
+    const result = validateLlmResult({
+      description: "A test dataset",
+      methodsDescription: "EEG recorded at 256Hz",
+      keywords: ["EEG", "motor imagery"],
+      fundingReferences: [{ funderName: "NIH", awardNumber: "R01-MH123" }],
+      relatedDois: [{ doi: "10.1234/test", relationType: "IsSupplementTo" }],
+    });
+    expect(result.description).toBe("A test dataset");
+    expect(result.methodsDescription).toBe("EEG recorded at 256Hz");
+    expect(result.keywords).toEqual(["EEG", "motor imagery"]);
+    expect(result.fundingReferences).toHaveLength(1);
+    expect(result.relatedDois).toHaveLength(1);
+  });
+
+  test("rejects DOIs that don't match pattern", () => {
+    const result = validateLlmResult({
+      relatedDois: [
+        { doi: "10.1234/valid", relationType: "Cites" },
+        { doi: "not-a-doi", relationType: "Cites" },
+        { doi: "10.12/short-prefix", relationType: "Cites" },
+      ],
+    });
+    expect(result.relatedDois).toHaveLength(1);
+    expect(result.relatedDois![0].doi).toBe("10.1234/valid");
+  });
+
+  test("filters invalid funding references", () => {
+    const result = validateLlmResult({
+      fundingReferences: [
+        { funderName: "NIH", awardNumber: "R01" },
+        { notFunderName: "bad" },
+        null,
+        "string",
+      ],
+    });
+    expect(result.fundingReferences).toHaveLength(1);
+    expect(result.fundingReferences![0].funderName).toBe("NIH");
+  });
+
+  test("empty object returns empty result", () => {
+    const result = validateLlmResult({});
+    expect(result).toEqual({});
+  });
+
+  test("non-string description ignored", () => {
+    const result = validateLlmResult({ description: 123 });
+    expect(result.description).toBeUndefined();
+  });
+
+  test("filters invalid relation types", () => {
+    const result = validateLlmResult({
+      relatedDois: [
+        { doi: "10.1234/valid", relationType: "IsSupplementTo" },
+        { doi: "10.1234/bad-type", relationType: "NotARelationType" },
+        { doi: "10.1234/case-sensitive", relationType: "issupplementto" },
+      ],
+    });
+    expect(result.relatedDois).toHaveLength(1);
+    expect(result.relatedDois![0].doi).toBe("10.1234/valid");
+  });
+
+  test("filters funding with non-string awardNumber", () => {
+    const result = validateLlmResult({
+      fundingReferences: [
+        { funderName: "NIH", awardNumber: "R01" },
+        { funderName: "NSF", awardNumber: 42 },
+      ],
+    });
+    expect(result.fundingReferences).toHaveLength(1);
+    expect(result.fundingReferences![0].funderName).toBe("NIH");
+  });
+});
+
+describe("isValidRelationType", () => {
+  test("valid relation types accepted", () => {
+    expect(isValidRelationType("IsSupplementTo")).toBe(true);
+    expect(isValidRelationType("Cites")).toBe(true);
+    expect(isValidRelationType("HasVersion")).toBe(true);
+  });
+
+  test("invalid relation types rejected", () => {
+    expect(isValidRelationType("banana")).toBe(false);
+    expect(isValidRelationType("")).toBe(false);
+    expect(isValidRelationType("issupplementto")).toBe(false);
+  });
+});
+
+describe("relation type validation pipeline", () => {
+  test("invalid relationType filtered at parse time by parseNemarMetadata", () => {
+    const parsed = parseNemarMetadata({
+      relatedDois: [
+        { doi: "10.1234/valid", relationType: "IsSupplementTo" },
+        { doi: "10.1234/invalid", relationType: "NotARelationType" },
+      ],
+    });
+    // parseNemarMetadata now filters invalid relation types
+    expect(parsed!.relatedDois).toHaveLength(1);
+    expect(parsed!.relatedDois![0].doi).toBe("10.1234/valid");
+  });
+
+  test("nemarMetadataToEnrichment still filters if invalid types sneak through", () => {
+    // Simulate a NemarMetadata with an invalid type (e.g., from old file format)
+    const enrichment = nemarMetadataToEnrichment({
+      version: "1.0",
+      relatedDois: [
+        { doi: "10.1234/valid", relationType: "IsSupplementTo" },
+        { doi: "10.1234/invalid", relationType: "NotARelationType" },
+      ],
+    });
+    expect(enrichment.relatedDois).toHaveLength(1);
+    expect(enrichment.relatedDois![0].doi).toBe("10.1234/valid");
+  });
+});
+
+describe("enrichFromReadme", () => {
+  test("returns empty object when no API key is provided", async () => {
+    // Ensure env var is not set
+    const oldKey = process.env.OPENROUTER_API_KEY;
+    delete process.env.OPENROUTER_API_KEY;
+    try {
+      const result = await enrichFromReadme("# Test README", { Name: "Test" });
+      expect(result).toEqual({});
+    } finally {
+      if (oldKey) process.env.OPENROUTER_API_KEY = oldKey;
+    }
   });
 });

@@ -24,6 +24,8 @@ import ora from "ora";
 import {
   ApiError,
   type Dataset,
+  type NemarMetadataPayload,
+  ORCID_REGEX,
   addCi,
   applyS3Lock,
   approvePublication,
@@ -31,15 +33,18 @@ import {
   changeVisibility,
   createConceptDoi,
   denyPublication,
+  errorDetail,
   finalizeDataset,
   getCiStatus,
   getDataset,
+  getDatasetFiles,
   getDoiInfo,
   listPublishRequests,
   listUsers,
   publishDataset,
   regenerateUserIam,
   revokeUser,
+  submitEnrichment,
   updateDoi,
 } from "../lib/api.js";
 import { getConfig, isAuthenticated } from "../lib/config.js";
@@ -57,10 +62,52 @@ import {
   cloneDataset,
   commitRevert,
   createRevertBranch,
+  formatBytes,
   getVersionCommit,
   listDatasetVersions,
   pushBranch,
 } from "../lib/git-annex.js";
+
+/** Handle common error patterns in admin CLI commands */
+function handleCommandError(
+  error: unknown,
+  spinner: ReturnType<typeof ora>,
+  defaultMsg: string,
+  hints?: Record<number, string>,
+): void {
+  if (error instanceof ApiError) {
+    spinner.fail(error.message);
+    const hint = hints?.[error.statusCode];
+    if (hint) {
+      console.log(chalk.gray(`  ${hint}`));
+    } else if (error.statusCode === 403) {
+      console.log(chalk.gray("  This command requires admin privileges"));
+    }
+  } else {
+    spinner.fail(defaultMsg);
+    console.log(chalk.gray(`  Error details: ${errorDetail(error)}`));
+  }
+}
+
+/**
+ * Fetch a file from a GitHub repo via the gh CLI, returning its decoded content.
+ * Uses the /readme endpoint for READMEs, /contents/{path} for other files.
+ * Returns null if the file does not exist or the command fails.
+ */
+async function fetchGitHubFileContent(repoName: string, path: string): Promise<string | null> {
+  const { spawn: bunSpawn } = await import("bun");
+  const endpoint =
+    path === "README" ? `repos/${repoName}/readme` : `repos/${repoName}/contents/${path}`;
+  const proc = bunSpawn({
+    cmd: ["gh", "api", endpoint, "--jq", ".content"],
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  const base64Content = await new Response(proc.stdout).text();
+  const exitCode = await proc.exited;
+  if (exitCode !== 0 || !base64Content.trim()) return null;
+  return Buffer.from(base64Content.trim(), "base64").toString("utf-8");
+}
 
 export const adminCommand = new Command("admin")
   .description("Admin commands (requires admin privileges)")
@@ -159,14 +206,7 @@ adminCommand
         console.log();
       }
     } catch (error) {
-      if (error instanceof ApiError) {
-        spinner.fail(error.message);
-        if (error.statusCode === 403) {
-          console.log(chalk.gray("  This command requires admin privileges"));
-        }
-      } else {
-        spinner.fail("Failed to fetch users");
-      }
+      handleCommandError(error, spinner, "Failed to fetch users");
     }
   });
 
@@ -224,16 +264,9 @@ adminCommand
         console.log(chalk.yellow(`Warning: ${result.warning}`));
       }
     } catch (error) {
-      if (error instanceof ApiError) {
-        spinner.fail(error.message);
-        if (error.statusCode === 403) {
-          console.log(chalk.gray("  This command requires admin privileges"));
-        } else if (error.statusCode === 404) {
-          console.log(chalk.gray("  User not found or not in 'verified' status"));
-        }
-      } else {
-        spinner.fail("Failed to approve user");
-      }
+      handleCommandError(error, spinner, "Failed to approve user", {
+        404: "User not found or not in 'verified' status",
+      });
     }
   });
 
@@ -281,16 +314,9 @@ adminCommand
       await revokeUser(username);
       spinner.succeed(`Revoked access for ${username}`);
     } catch (error) {
-      if (error instanceof ApiError) {
-        spinner.fail(error.message);
-        if (error.statusCode === 403) {
-          console.log(chalk.gray("  This command requires admin privileges"));
-        } else if (error.statusCode === 404) {
-          console.log(chalk.gray("  User not found"));
-        }
-      } else {
-        spinner.fail("Failed to revoke user");
-      }
+      handleCommandError(error, spinner, "Failed to revoke user", {
+        404: "User not found",
+      });
     }
   });
 
@@ -350,8 +376,7 @@ s3Command
       }
     } catch (error) {
       spinner.fail("S3 lock failed");
-      const msg = error instanceof Error ? error.message : String(error);
-      console.log(chalk.gray(`  ${msg}`));
+      console.log(chalk.gray(`  ${errorDetail(error)}`));
     }
   });
 
@@ -404,18 +429,9 @@ async function regenerateIamAction(username: string, options: ConfirmOptions) {
     console.log();
     console.log(chalk.gray("The user can now upload to their datasets again."));
   } catch (error) {
-    if (error instanceof ApiError) {
-      spinner.fail(error.message);
-      if (error.statusCode === 403) {
-        console.log(chalk.gray("  This command requires admin privileges"));
-      } else if (error.statusCode === 404) {
-        console.log(chalk.gray("  User not found or not approved"));
-      }
-    } else {
-      spinner.fail("Failed to regenerate IAM credentials");
-      const errorMessage = error instanceof Error ? error.message : String(error);
-      console.log(chalk.gray(`  Error details: ${errorMessage}`));
-    }
+    handleCommandError(error, spinner, "Failed to regenerate IAM credentials", {
+      404: "User not found or not approved",
+    });
   }
 }
 
@@ -449,18 +465,9 @@ repoCommand
       await changeVisibility(datasetId, "public");
       spinner.succeed(`Repository ${datasetId} is now public`);
     } catch (error) {
-      if (error instanceof ApiError) {
-        spinner.fail(error.message);
-        if (error.statusCode === 403) {
-          console.log(chalk.gray("  This command requires admin privileges"));
-        } else if (error.statusCode === 404) {
-          console.log(chalk.gray("  Dataset not found"));
-        }
-      } else {
-        spinner.fail("Failed to change visibility");
-        const msg = error instanceof Error ? error.message : String(error);
-        console.log(chalk.gray(`  Error details: ${msg}`));
-      }
+      handleCommandError(error, spinner, "Failed to change visibility", {
+        404: "Dataset not found",
+      });
     }
   });
 
@@ -488,18 +495,9 @@ repoCommand
       await changeVisibility(datasetId, "private");
       spinner.succeed(`Repository ${datasetId} is now private`);
     } catch (error) {
-      if (error instanceof ApiError) {
-        spinner.fail(error.message);
-        if (error.statusCode === 403) {
-          console.log(chalk.gray("  This command requires admin privileges"));
-        } else if (error.statusCode === 404) {
-          console.log(chalk.gray("  Dataset not found"));
-        }
-      } else {
-        spinner.fail("Failed to change visibility");
-        const msg = error instanceof Error ? error.message : String(error);
-        console.log(chalk.gray(`  Error details: ${msg}`));
-      }
+      handleCommandError(error, spinner, "Failed to change visibility", {
+        404: "Dataset not found",
+      });
     }
   });
 
@@ -555,18 +553,9 @@ ciCommand
 
       console.log();
     } catch (error) {
-      if (error instanceof ApiError) {
-        spinner.fail(error.message);
-        if (error.statusCode === 403) {
-          console.log(chalk.gray("  This command requires admin privileges"));
-        } else if (error.statusCode === 404) {
-          console.log(chalk.gray("  Dataset not found"));
-        }
-      } else {
-        spinner.fail("Failed to check CI status");
-        const msg = error instanceof Error ? error.message : String(error);
-        console.log(chalk.gray(`  Error details: ${msg}`));
-      }
+      handleCommandError(error, spinner, "Failed to check CI status", {
+        404: "Dataset not found",
+      });
     }
   });
 
@@ -603,25 +592,16 @@ ciCommand
       }
       console.log();
     } catch (error) {
-      if (error instanceof ApiError) {
-        spinner.fail(error.message);
-        if (error.statusCode === 403) {
-          console.log(chalk.gray("  This command requires admin privileges"));
-        } else if (error.statusCode === 404) {
-          console.log(chalk.gray("  Dataset not found"));
-        }
-      } else {
-        spinner.fail("Failed to deploy CI workflows");
-        const msg = error instanceof Error ? error.message : String(error);
-        console.log(chalk.gray(`  Error details: ${msg}`));
-      }
+      handleCommandError(error, spinner, "Failed to deploy CI workflows", {
+        404: "Dataset not found",
+      });
     }
   });
 
 adminCommand.addCommand(ciCommand);
 
 // ============================================================================
-// DOI (placeholder for future implementation)
+// DOI Management
 // ============================================================================
 
 const doiCommand = new Command("doi").description("DOI management");
@@ -813,7 +793,7 @@ doiCommand
           }
         } else {
           createSpinner.fail("Failed to create concept DOI");
-          console.log(chalk.gray(`  ${error instanceof Error ? error.message : "Unknown error"}`));
+          console.log(chalk.gray(`  ${errorDetail(error)}`));
         }
       }
     },
@@ -957,7 +937,269 @@ doiCommand
           }
         } else {
           spinner.fail("Failed to update DOI");
-          console.log(chalk.gray(`  ${error instanceof Error ? error.message : "Unknown error"}`));
+          console.log(chalk.gray(`  ${errorDetail(error)}`));
+        }
+      }
+    },
+  );
+
+doiCommand
+  .command("enrich")
+  .description("Enrich DOI metadata with ORCIDs, descriptions, funding, and more")
+  .argument("<dataset-id>", "Dataset ID (e.g., nm000104)")
+  .option("--no-llm", "Skip LLM-based enrichment from README")
+  .option("--sandbox", "Use sandbox DOI")
+  .option(YES_OPTION, YES_DESCRIPTION)
+  .option(NO_OPTION, NO_DESCRIPTION)
+  .action(
+    async (datasetId: string, options: { llm?: boolean; sandbox?: boolean } & ConfirmOptions) => {
+      if (!requireAuth()) return;
+
+      const spinner = ora("Fetching dataset and existing enrichment...").start();
+
+      // Get dataset info
+      let dataset: Dataset;
+      try {
+        dataset = await getDataset(datasetId);
+        spinner.succeed(`Dataset: ${dataset.name}`);
+      } catch (error) {
+        if (error instanceof ApiError) {
+          spinner.fail(error.message);
+        } else {
+          spinner.fail("Failed to fetch dataset");
+        }
+        return;
+      }
+
+      // Get DOI info
+      let doiInfo: Awaited<ReturnType<typeof getDoiInfo>> | undefined;
+      let doiFetchFailed = false;
+      try {
+        doiInfo = await getDoiInfo(datasetId);
+      } catch (doiErr) {
+        if (doiErr instanceof ApiError && doiErr.statusCode === 404) {
+          // No DOI exists yet
+        } else {
+          doiFetchFailed = true;
+          console.log(chalk.yellow(`  Warning: Could not fetch DOI info: ${errorDetail(doiErr)}`));
+        }
+      }
+
+      if (doiInfo?.concept_doi) {
+        console.log(`  DOI: ${chalk.cyan(doiInfo.concept_doi)}`);
+      }
+
+      const enrichment: NemarMetadataPayload = { version: "1.0" };
+
+      // --- Author ORCIDs ---
+      console.log();
+      console.log(chalk.cyan("--- Author ORCIDs ---"));
+      const { updateAuthors } = await inquirer.prompt([
+        {
+          type: "confirm",
+          name: "updateAuthors",
+          message: "Update author ORCIDs?",
+          default: false,
+        },
+      ]);
+
+      if (updateAuthors) {
+        const authors: Record<string, { orcid?: string; affiliation?: string }> = {};
+
+        let addMore = true;
+        while (addMore) {
+          const { authorName } = await inquirer.prompt([
+            {
+              type: "input",
+              name: "authorName",
+              message: 'Author name (as in BIDS, e.g., "Shirazi, Yahya"):',
+            },
+          ]);
+          if (!authorName) break;
+
+          const { orcid } = await inquirer.prompt([
+            {
+              type: "input",
+              name: "orcid",
+              message: `ORCID for "${authorName}" (Enter to skip):`,
+              validate: (input: string) => {
+                if (!input) return true;
+                return ORCID_REGEX.test(input) || "Invalid ORCID format (XXXX-XXXX-XXXX-XXXX)";
+              },
+            },
+          ]);
+
+          const entry: { orcid?: string; affiliation?: string } = {};
+          if (orcid) entry.orcid = orcid;
+
+          const { affiliation } = await inquirer.prompt([
+            {
+              type: "input",
+              name: "affiliation",
+              message: `Affiliation for "${authorName}" (optional):`,
+            },
+          ]);
+          if (affiliation) entry.affiliation = affiliation;
+
+          if (entry.orcid || entry.affiliation) {
+            authors[authorName] = entry;
+          }
+
+          const { more } = await inquirer.prompt([
+            { type: "confirm", name: "more", message: "Add another author?", default: true },
+          ]);
+          addMore = more;
+        }
+
+        if (Object.keys(authors).length > 0) {
+          enrichment.authors = authors;
+        }
+      }
+
+      // --- LLM Enrichment ---
+      if (options.llm !== false) {
+        console.log();
+        console.log(chalk.cyan("--- Generating enrichment from README ---"));
+
+        const apiKey = process.env.OPENROUTER_API_KEY;
+        if (!apiKey) {
+          console.log(chalk.yellow("  OPENROUTER_API_KEY not set; skipping LLM enrichment"));
+          console.log(chalk.gray("  Set it in your environment to enable LLM-based enrichment"));
+        } else {
+          const llmSpinner = ora("Analyzing README and dataset metadata...").start();
+          try {
+            const { enrichFromReadme } = await import("../lib/llm-enrich.js");
+
+            const repoName = dataset.github_repo;
+            if (!repoName) {
+              llmSpinner.warn("No GitHub repository configured for this dataset");
+            } else {
+              const readmeContent = await fetchGitHubFileContent(repoName, "README");
+              if (!readmeContent) {
+                llmSpinner.warn("Could not fetch README from repository");
+              } else {
+                const descContent = await fetchGitHubFileContent(
+                  repoName,
+                  "dataset_description.json",
+                );
+                let bidsDesc: Record<string, unknown> = {};
+                if (descContent) {
+                  try {
+                    bidsDesc = JSON.parse(descContent) as Record<string, unknown>;
+                  } catch {
+                    console.log(
+                      chalk.yellow(
+                        "  Warning: Could not parse dataset_description.json; LLM will use README only",
+                      ),
+                    );
+                  }
+                }
+
+                const llmResult = await enrichFromReadme(readmeContent, bidsDesc, apiKey);
+                llmSpinner.succeed("LLM enrichment complete");
+
+                if (llmResult.description) {
+                  console.log(`  Description: ${llmResult.description.slice(0, 100)}...`);
+                  enrichment.description = llmResult.description;
+                }
+                if (llmResult.methodsDescription) {
+                  enrichment.methodsDescription = llmResult.methodsDescription;
+                }
+                if (llmResult.keywords && llmResult.keywords.length > 0) {
+                  console.log(`  Keywords: ${llmResult.keywords.join(", ")}`);
+                  enrichment.keywords = llmResult.keywords;
+                }
+                if (llmResult.fundingReferences && llmResult.fundingReferences.length > 0) {
+                  console.log(
+                    `  Funding: ${llmResult.fundingReferences.map((f) => `${f.funderName} ${f.awardNumber || ""}`).join(", ")}`,
+                  );
+                  enrichment.fundingReferences = llmResult.fundingReferences;
+                }
+                if (llmResult.relatedDois && llmResult.relatedDois.length > 0) {
+                  console.log(
+                    `  Related DOIs: ${llmResult.relatedDois.map((r) => `${r.doi} (${r.relationType})`).join(", ")}`,
+                  );
+                  enrichment.relatedDois = llmResult.relatedDois;
+                }
+              }
+            }
+          } catch (error) {
+            llmSpinner.fail("LLM enrichment failed");
+            console.log(chalk.gray(`  ${errorDetail(error)}`));
+          }
+        }
+      }
+
+      // --- Dataset stats (sizes/formats) ---
+      console.log();
+      console.log(chalk.cyan("--- Dataset stats ---"));
+      const statsSpinner = ora("Computing dataset sizes and formats...").start();
+      try {
+        const filesInfo = await getDatasetFiles(datasetId);
+        const totalSizeStr = formatBytes(filesInfo.total_size);
+        enrichment.sizes = [`${totalSizeStr} (${filesInfo.file_count} files)`];
+        enrichment.formats = filesInfo.extensions;
+        statsSpinner.succeed(
+          `Sizes: ${totalSizeStr} (${filesInfo.file_count} files), Formats: ${filesInfo.extensions.join(", ")}`,
+        );
+      } catch (error) {
+        statsSpinner.warn("Could not compute dataset stats");
+        console.log(chalk.gray(`  ${errorDetail(error)}`));
+      }
+
+      // --- Review ---
+      console.log();
+      console.log(chalk.cyan("--- Review ---"));
+      console.log(JSON.stringify(enrichment, null, 2));
+      console.log();
+
+      const confirmResult = await confirm("Commit to repo and refresh DOI?", options, true);
+      if (confirmResult !== "confirmed") {
+        console.log(chalk.gray(confirmResult === "declined" ? "Skipped" : "Cancelled"));
+        return;
+      }
+
+      // Submit enrichment
+      const submitSpinner = ora("Saving enrichment...").start();
+      try {
+        const result = await submitEnrichment(datasetId, enrichment);
+        submitSpinner.succeed(result.message);
+
+        if (result.bidsignore_updated) {
+          console.log(chalk.gray("  .bidsignore updated to include nemar_metadata.json"));
+        }
+
+        // Refresh DOI metadata if the dataset has an EZID DOI
+        // Re-attempt DOI info fetch if it failed earlier (transient error)
+        if (!doiInfo && doiFetchFailed) {
+          try {
+            doiInfo = await getDoiInfo(datasetId);
+          } catch {
+            /* still unavailable */
+          }
+        }
+        if (doiInfo?.ezid_identifier) {
+          const refreshSpinner = ora("Refreshing DOI metadata...").start();
+          try {
+            await updateDoi(datasetId, { refresh_metadata: true });
+            refreshSpinner.succeed("DOI metadata refreshed");
+          } catch (error) {
+            refreshSpinner.warn("Could not refresh DOI metadata");
+            console.log(chalk.gray(`  ${errorDetail(error)}`));
+          }
+        } else if (doiFetchFailed) {
+          console.log(
+            chalk.yellow(
+              "  DOI refresh skipped: could not verify DOI exists. Run 'nemar admin doi update --refresh' manually.",
+            ),
+          );
+        }
+      } catch (error) {
+        if (error instanceof ApiError) {
+          submitSpinner.fail(error.message);
+        } else {
+          submitSpinner.fail("Failed to save enrichment");
+          console.log(chalk.gray(`  ${errorDetail(error)}`));
         }
       }
     },
@@ -1031,17 +1273,7 @@ Examples:
       }
       console.log();
     } catch (error) {
-      if (error instanceof ApiError) {
-        spinner.fail(error.message);
-        console.log(chalk.gray(`  ${error.message}`));
-        if (error.statusCode === 403) {
-          console.log(chalk.gray("  This command requires admin privileges"));
-        }
-      } else {
-        spinner.fail("Failed to list publication requests");
-        const msg = error instanceof Error ? error.message : String(error);
-        console.log(chalk.gray(`  Error details: ${msg}`));
-      }
+      handleCommandError(error, spinner, "Failed to list publication requests");
     }
   });
 
@@ -1101,14 +1333,7 @@ Examples:
       spinner.succeed(`Publication denied for ${datasetId}`);
       console.log(chalk.gray("  User has been notified."));
     } catch (error) {
-      if (error instanceof ApiError) {
-        spinner.fail(error.message);
-        console.log(chalk.gray(`  ${error.message}`));
-      } else {
-        spinner.fail("Failed to deny publication");
-        const msg = error instanceof Error ? error.message : String(error);
-        console.log(chalk.gray(`  Error details: ${msg}`));
-      }
+      handleCommandError(error, spinner, "Failed to deny publication");
     }
   });
 
@@ -1124,19 +1349,27 @@ publishCommand
     "after",
     `
 Description:
-  Approve a publication request and run the automated 6-step orchestrator
+  Approve a publication request and run the automated 14-step orchestrator
   to make the dataset publicly accessible with a permanent DOI.
 
   WARNING: This action is PERMANENT. Published datasets cannot be unpublished.
   Once a DOI is assigned, it is permanent and cannot be deleted.
 
 Orchestrator Steps:
-  1. CI Check        - Verify BIDS validation passes, deploy workflows if missing
-  2. Make Public     - Change GitHub repository visibility to public
-  3. Tag Protection  - Enable tag protection rules (prevents version manipulation)
-  4. Create DOI      - Assign permanent Zenodo concept DOI (if not exists)
-  5. S3 Lock         - Enable S3 Object Lock (prevents data deletion)
-  6. Notify User     - Send publication confirmation email to dataset owner
+   1. CI Check          - Verify BIDS validation passes, deploy workflows if missing
+   2. Make Public       - Change GitHub repository visibility to public
+   3. S3 Public Read    - Grant public read access to S3 data
+   4. Tag Protection    - Enable tag protection rules
+   5. Create DOI        - Create concept DOI via EZID (or Zenodo if configured)
+   6. Update Metadata   - Update dataset metadata from BIDS description
+   7. Update README     - Add DOI badge and citation info to README
+   8. Create Tag        - Create version tag (e.g., v1.0.0)
+   9. Create Release    - Create GitHub release from tag
+  10. Upload to Zenodo  - Upload dataset archive to Zenodo (if Zenodo provider)
+  11. Publish DOI       - Make DOI public and findable (permanent, irreversible)
+  12. S3 Lock           - Enable S3 Object Lock (prevents data deletion)
+  13. Generate Archive  - Create downloadable zip archive
+  14. Notify User       - Send publication confirmation email
 
 Resume Capability:
   If a step fails, the orchestrator saves progress. Use --resume to retry
@@ -1163,17 +1396,19 @@ After Approval:
       ? `Resume publication of ${datasetId}`
       : `Approve and publish ${datasetId}`;
     console.log(chalk.cyan(`\n${action}\n`));
-    console.log("This will run the following steps:");
-    console.log("  1. Check CI (deploy if missing, verify passing)");
-    console.log("  2. Make repository public");
-    console.log("  3. Enable tag protection (prevents version manipulation)");
+    console.log("This will run the following 14-step orchestrator:");
+    console.log("   1. Check CI             7. Update README");
+    console.log("   2. Make repo public      8. Create version tag");
+    console.log("   3. S3 public read        9. Create GitHub release");
+    console.log("   4. Tag protection       10. Upload to Zenodo");
     console.log(
       options.sandbox
-        ? "  4. Create concept DOI (SANDBOX - for testing)"
-        : "  4. Create concept DOI (if needed)",
+        ? "   5. Create DOI (SANDBOX) 11. Publish DOI (irreversible)"
+        : "   5. Create DOI           11. Publish DOI (irreversible)",
     );
-    console.log("  5. Apply S3 Object Lock");
-    console.log("  6. Notify user");
+    console.log("   6. Update metadata      12. S3 Object Lock");
+    console.log("                           13. Generate archive");
+    console.log("                           14. Notify user");
     console.log();
 
     // Sandbox warning
@@ -1209,17 +1444,9 @@ After Approval:
         console.log();
       }
     } catch (error) {
-      if (error instanceof ApiError) {
-        spinner.fail(error.message);
-        console.log(chalk.gray(`  ${error.message}`));
-        if (error.statusCode === 422) {
-          console.log(chalk.yellow("  Fix the CI issues and retry with --resume"));
-        }
-      } else {
-        spinner.fail("Failed to approve publication");
-        const msg = error instanceof Error ? error.message : String(error);
-        console.log(chalk.gray(`  Error details: ${msg}`));
-      }
+      handleCommandError(error, spinner, "Failed to approve publication", {
+        422: "Fix the CI issues and retry with --resume",
+      });
     }
   });
 

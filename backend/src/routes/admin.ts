@@ -53,7 +53,7 @@ import {
   publishDeposition,
   uploadFile,
 } from "../services/zenodo";
-import { bidsToDataCite, buildDataCiteXml } from "../services/datacite";
+import { bidsToDataCite, buildDataCiteXml, nemarMetadataToEnrichment, parseNemarMetadata } from "../services/datacite";
 import { type DoiProvider, type DoiResult, buildOrcidEnrichment, createConceptDoi as dispatchCreateConceptDoi, parseDoiProvider, resolveEzidAuth } from "../services/doi";
 import { extractDoi, updateIdentifier as ezidUpdateIdentifier } from "../services/ezid";
 import type { Bindings, Variables } from "../types/bindings";
@@ -79,6 +79,15 @@ type PublicationStep =
   | "notify_user";
 
 export const adminRoutes = new Hono<{ Bindings: Bindings; Variables: Variables }>();
+
+function getS3Config(env: Bindings) {
+  return {
+    bucket: env.S3_BUCKET,
+    region: env.AWS_REGION,
+    accessKeyId: env.AWS_ACCESS_KEY_ID,
+    secretAccessKey: env.AWS_SECRET_ACCESS_KEY,
+  };
+}
 
 // All admin routes require authentication and admin role
 adminRoutes.use("*", authMiddleware);
@@ -1443,6 +1452,7 @@ adminRoutes.post(
     try {
       const updateOptions: { status?: "public" | "unavailable"; dataciteXml?: string; target?: string } = {};
       let metadataRefreshed = false;
+      const warnings: string[] = [];
 
       // Refresh metadata from BIDS
       if (body.refresh_metadata) {
@@ -1477,11 +1487,27 @@ adminRoutes.post(
         }
         const bidsDesc = parsed as Record<string, unknown>;
         const doi = extractDoi(dataset.ezid_identifier);
-        const enrichment = buildOrcidEnrichment(
+        let enrichment = buildOrcidEnrichment(
           bidsDesc,
           dataset.owner_username,
           dataset.owner_orcid || undefined,
         );
+
+        // Read nemar_metadata.json for rich enrichment
+        const nemarMetaFile = tree.find((f) => f.path === "nemar_metadata.json");
+        if (nemarMetaFile) {
+          try {
+            const nemarContent = await getBlobContent(repoName, nemarMetaFile.sha, c.env.GITHUB_ADMIN_PAT);
+            const nemarParsed = parseNemarMetadata(JSON.parse(nemarContent));
+            if (nemarParsed) {
+              enrichment = nemarMetadataToEnrichment(nemarParsed, enrichment);
+            }
+          } catch (nemarErr) {
+            console.error("Failed to parse nemar_metadata.json:", nemarErr);
+            warnings.push(`nemar_metadata.json enrichment skipped: ${nemarErr instanceof Error ? nemarErr.message : String(nemarErr)}`);
+          }
+        }
+
         const metadata = bidsToDataCite(datasetId, doi, bidsDesc, enrichment);
         updateOptions.dataciteXml = buildDataCiteXml(metadata);
         metadataRefreshed = true;
@@ -1514,6 +1540,7 @@ adminRoutes.post(
         status: updated.status,
         doi_url: `https://doi.org/${extractDoi(dataset.ezid_identifier)}`,
         metadata_refreshed: metadataRefreshed,
+        ...(warnings.length > 0 ? { warnings } : {}),
       });
     } catch (error) {
       console.error("Failed to update DOI:", error);
@@ -1527,6 +1554,186 @@ adminRoutes.post(
     }
   },
 );
+
+/**
+ * POST /admin/datasets/:id/enrichment - Submit rich metadata enrichment
+ *
+ * Accepts NemarMetadata JSON, commits nemar_metadata.json to the dataset repo,
+ * ensures .bidsignore includes it, and caches in D1.
+ */
+const enrichmentSchema = z.object({
+  version: z.literal("1.0"),
+  authors: z.record(z.object({
+    orcid: z.string().optional(),
+    affiliation: z.string().optional(),
+  })).optional(),
+  keywords: z.array(z.string()).optional(),
+  relatedDois: z.array(z.object({
+    doi: z.string(),
+    relationType: z.string(),
+  })).optional(),
+  fundingReferences: z.array(z.object({
+    funderName: z.string(),
+    awardNumber: z.string().optional(),
+    awardTitle: z.string().optional(),
+  })).optional(),
+  description: z.string().optional(),
+  methodsDescription: z.string().optional(),
+  sizes: z.array(z.string()).optional(),
+  formats: z.array(z.string()).optional(),
+});
+
+adminRoutes.post(
+  "/datasets/:id/enrichment",
+  zValidator("json", enrichmentSchema),
+  async (c) => {
+    const datasetId = c.req.param("id");
+    const body = c.req.valid("json");
+    const db = c.env.DB;
+
+    const dataset = await db
+      .prepare(
+        "SELECT dataset_id, github_repo, ezid_identifier, doi_provider, is_sandbox FROM datasets WHERE dataset_id = ?",
+      )
+      .bind(datasetId)
+      .first<{
+        dataset_id: string;
+        github_repo: string | null;
+        ezid_identifier: string | null;
+        doi_provider: string | null;
+        is_sandbox: number | null;
+      }>();
+
+    if (!dataset) {
+      return c.json({ error: "Dataset not found" }, 404);
+    }
+
+    if (!dataset.github_repo) {
+      return c.json({ error: "Dataset has no GitHub repository" }, 400);
+    }
+
+    const repoName = dataset.github_repo.split("/")[1];
+    if (!repoName) {
+      return c.json({ error: "Invalid github_repo format" }, 400);
+    }
+
+    const pat = c.env.GITHUB_ADMIN_PAT;
+    const metadataContent = JSON.stringify(body, null, 2);
+
+    try {
+      // Commit nemar_metadata.json to the repo
+      await createOrUpdateFile(
+        repoName,
+        "nemar_metadata.json",
+        metadataContent,
+        "Update NEMAR metadata enrichment",
+        pat,
+      );
+
+      // Ensure .bidsignore includes nemar_metadata.json
+      const tree = await getTreeAtRef(repoName, "main", pat);
+      const bidsignoreFile = tree.find((f) => f.path === ".bidsignore");
+      let bidsignoreContent = "";
+      if (bidsignoreFile) {
+        bidsignoreContent = await getBlobContent(repoName, bidsignoreFile.sha, pat);
+      }
+      if (!bidsignoreContent.includes("nemar_metadata.json")) {
+        const newContent = bidsignoreContent
+          ? `${bidsignoreContent.trimEnd()}\nnemar_metadata.json\n`
+          : "nemar_metadata.json\n";
+        await createOrUpdateFile(
+          repoName,
+          ".bidsignore",
+          newContent,
+          "Add nemar_metadata.json to .bidsignore",
+          pat,
+        );
+      }
+
+      // Cache in D1
+      await db
+        .prepare(
+          "UPDATE datasets SET enrichment_json = ?, enrichment_updated_at = datetime('now'), updated_at = datetime('now') WHERE dataset_id = ?",
+        )
+        .bind(metadataContent, datasetId)
+        .run();
+
+      return c.json({
+        message: "Enrichment saved",
+        dataset_id: datasetId,
+        committed: true,
+        bidsignore_updated: !bidsignoreContent.includes("nemar_metadata.json"),
+      });
+    } catch (error) {
+      console.error("Failed to save enrichment:", error);
+      return c.json(
+        {
+          error: "Failed to save enrichment",
+          details: error instanceof Error ? error.message : "Unknown error",
+        },
+        500,
+      );
+    }
+  },
+);
+
+/**
+ * GET /admin/datasets/:id/files - Get dataset file listing with sizes
+ *
+ * Returns file listing from the GitHub repo tree for computing sizes and formats.
+ */
+adminRoutes.get("/datasets/:id/files", async (c) => {
+  const datasetId = c.req.param("id");
+  const db = c.env.DB;
+
+  const dataset = await db
+    .prepare("SELECT github_repo FROM datasets WHERE dataset_id = ?")
+    .bind(datasetId)
+    .first<{ github_repo: string | null }>();
+
+  if (!dataset?.github_repo) {
+    return c.json({ error: "Dataset not found or has no GitHub repository" }, 404);
+  }
+
+  const repoName = dataset.github_repo.split("/")[1];
+  if (!repoName) {
+    return c.json({ error: "Invalid github_repo format" }, 400);
+  }
+
+  try {
+    const tree = await getTreeAtRef(repoName, "main", c.env.GITHUB_ADMIN_PAT);
+    const files = tree
+      .filter((f) => f.type === "blob")
+      .map((f) => ({ path: f.path, size: f.size || 0 }));
+
+    const totalSize = files.reduce((sum, f) => sum + f.size, 0);
+    const extensions = [...new Set(
+      files
+        .map((f) => {
+          const lastDot = f.path.lastIndexOf(".");
+          return lastDot > 0 ? f.path.slice(lastDot) : null;
+        })
+        .filter((e): e is string => e !== null),
+    )].sort();
+
+    return c.json({
+      dataset_id: datasetId,
+      file_count: files.length,
+      total_size: totalSize,
+      extensions,
+      files,
+    });
+  } catch (error) {
+    console.error("Failed to fetch file listing:", error);
+    return c.json(
+      {
+        error: "Failed to fetch file listing",
+        details: error instanceof Error ? error.message : "Unknown error",
+      },
+      500,
+    );
+  }
+});
 
 /**
  * DELETE /admin/zenodo/deposition/:id - Delete unpublished Zenodo deposition
@@ -1616,23 +1823,13 @@ adminRoutes.patch("/datasets/:id/visibility", zValidator("json", visibilitySchem
   try {
     if (visibility === "public") {
       await addPublicReadPolicy(
-        {
-          bucket: c.env.S3_BUCKET,
-          region: c.env.AWS_REGION,
-          accessKeyId: c.env.AWS_ACCESS_KEY_ID,
-          secretAccessKey: c.env.AWS_SECRET_ACCESS_KEY,
-        },
+        getS3Config(c.env),
         datasetId,
       );
     } else {
       // Remove public read access when reverting to private
       await removePublicReadPolicy(
-        {
-          bucket: c.env.S3_BUCKET,
-          region: c.env.AWS_REGION,
-          accessKeyId: c.env.AWS_ACCESS_KEY_ID,
-          secretAccessKey: c.env.AWS_SECRET_ACCESS_KEY,
-        },
+        getS3Config(c.env),
         datasetId,
       );
     }
@@ -1665,6 +1862,51 @@ adminRoutes.patch("/datasets/:id/visibility", zValidator("json", visibilitySchem
     );
   }
 
+  // Helper to revert GitHub + S3 visibility changes on DB failure
+  async function revertVisibilityChanges(errorDetails: string): Promise<Response> {
+    const ghRevertResult = await setRepoVisibility(repoName, !isPrivate, c.env.GITHUB_ADMIN_PAT);
+
+    let s3Reverted = false;
+    try {
+      const s3Opts = getS3Config(c.env);
+      if (visibility === "public") {
+        await removePublicReadPolicy(s3Opts, datasetId);
+      } else {
+        await addPublicReadPolicy(s3Opts, datasetId);
+      }
+      s3Reverted = true;
+    } catch (s3RevertError) {
+      console.error(`S3 policy revert failed for ${datasetId}:`, s3RevertError);
+    }
+
+    if (ghRevertResult.ok && s3Reverted) {
+      return c.json(
+        {
+          error: "Database update failed, reverted GitHub and S3 to original state",
+          details: errorDetails,
+          dataset_id: datasetId,
+        },
+        500,
+      );
+    }
+
+    return c.json(
+      {
+        error: "CRITICAL: Database update failed AND rollback incomplete",
+        details: errorDetails,
+        dataset_id: datasetId,
+        github_visibility: visibility,
+        github_reverted: ghRevertResult.ok,
+        s3_reverted: s3Reverted,
+        database_visibility: visibility === "public" ? "private" : "public",
+        revert_error: ghRevertResult.ok ? undefined : ghRevertResult.error,
+        action_required:
+          `Manually fix: ${!ghRevertResult.ok ? `revert GitHub to ${!isPrivate ? "public" : "private"}` : ""} ${!s3Reverted ? `revert S3 policy for ${datasetId}` : ""} update database SET visibility = '${visibility}' WHERE dataset_id = '${datasetId}'`.trim(),
+      },
+      500,
+    );
+  }
+
   // Update dataset visibility in database to match GitHub repo
   let dbUpdateResult;
   try {
@@ -1683,125 +1925,13 @@ adminRoutes.patch("/datasets/:id/visibility", zValidator("json", visibilitySchem
         `CRITICAL: Failed to update database visibility for ${datasetId}. GitHub is now ${visibility} but database is out of sync.`,
       );
 
-      // Revert both GitHub and S3 changes
-      const ghRevertResult = await setRepoVisibility(repoName, !isPrivate, c.env.GITHUB_ADMIN_PAT);
-
-      let s3Reverted = false;
-      try {
-        if (visibility === "public") {
-          await removePublicReadPolicy(
-            {
-              bucket: c.env.S3_BUCKET,
-              region: c.env.AWS_REGION,
-              accessKeyId: c.env.AWS_ACCESS_KEY_ID,
-              secretAccessKey: c.env.AWS_SECRET_ACCESS_KEY,
-            },
-            datasetId,
-          );
-        } else {
-          await addPublicReadPolicy(
-            {
-              bucket: c.env.S3_BUCKET,
-              region: c.env.AWS_REGION,
-              accessKeyId: c.env.AWS_ACCESS_KEY_ID,
-              secretAccessKey: c.env.AWS_SECRET_ACCESS_KEY,
-            },
-            datasetId,
-          );
-        }
-        s3Reverted = true;
-      } catch (s3RevertError) {
-        console.error(`S3 policy revert failed for ${datasetId}:`, s3RevertError);
-      }
-
-      if (ghRevertResult.ok && s3Reverted) {
-        return c.json(
-          {
-            error: "Database update failed, reverted GitHub and S3 to original state",
-            details: errorDetails,
-            dataset_id: datasetId,
-          },
-          500,
-        );
-      }
-
-      return c.json(
-        {
-          error: "CRITICAL: Database update failed AND rollback incomplete",
-          details: errorDetails,
-          dataset_id: datasetId,
-          github_visibility: visibility,
-          github_reverted: ghRevertResult.ok,
-          s3_reverted: s3Reverted,
-          database_visibility: visibility === "public" ? "private" : "public",
-          revert_error: ghRevertResult.ok ? undefined : ghRevertResult.error,
-          action_required:
-            `Manually fix: ${!ghRevertResult.ok ? `revert GitHub to ${!isPrivate ? "public" : "private"}` : ""} ${!s3Reverted ? `revert S3 policy for ${datasetId}` : ""} update database SET visibility = '${visibility}' WHERE dataset_id = '${datasetId}'`.trim(),
-        },
-        500,
-      );
+      return revertVisibilityChanges(errorDetails);
     }
   } catch (dbError) {
     const msg = dbError instanceof Error ? dbError.message : String(dbError);
     console.error(`CRITICAL: Exception updating database visibility for ${datasetId}:`, msg);
 
-    // Revert both GitHub and S3 changes
-    const ghRevertResult = await setRepoVisibility(repoName, !isPrivate, c.env.GITHUB_ADMIN_PAT);
-
-    let s3Reverted = false;
-    try {
-      if (visibility === "public") {
-        await removePublicReadPolicy(
-          {
-            bucket: c.env.S3_BUCKET,
-            region: c.env.AWS_REGION,
-            accessKeyId: c.env.AWS_ACCESS_KEY_ID,
-            secretAccessKey: c.env.AWS_SECRET_ACCESS_KEY,
-          },
-          datasetId,
-        );
-      } else {
-        await addPublicReadPolicy(
-          {
-            bucket: c.env.S3_BUCKET,
-            region: c.env.AWS_REGION,
-            accessKeyId: c.env.AWS_ACCESS_KEY_ID,
-            secretAccessKey: c.env.AWS_SECRET_ACCESS_KEY,
-          },
-          datasetId,
-        );
-      }
-      s3Reverted = true;
-    } catch (s3RevertError) {
-      console.error(`S3 policy revert failed for ${datasetId}:`, s3RevertError);
-    }
-
-    if (ghRevertResult.ok && s3Reverted) {
-      return c.json(
-        {
-          error: "Database update exception, reverted GitHub and S3 to original state",
-          details: msg,
-          dataset_id: datasetId,
-        },
-        500,
-      );
-    }
-
-    return c.json(
-      {
-        error: "CRITICAL: Database update failed AND rollback incomplete",
-        details: msg,
-        dataset_id: datasetId,
-        github_visibility: visibility,
-        github_reverted: ghRevertResult.ok,
-        s3_reverted: s3Reverted,
-        database_visibility: visibility === "public" ? "private" : "public",
-        revert_error: ghRevertResult.ok ? undefined : ghRevertResult.error,
-        action_required:
-          `Manually fix: ${!ghRevertResult.ok ? `revert GitHub to ${!isPrivate ? "public" : "private"}` : ""} ${!s3Reverted ? `revert S3 policy for ${datasetId}` : ""} update database SET visibility = '${visibility}' WHERE dataset_id = '${datasetId}'`.trim(),
-      },
-      500,
-    );
+    return revertVisibilityChanges(msg);
   }
 
   // Audit log (non-fatal but warn user if fails)
@@ -2229,6 +2359,20 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
   const completed: PublicationStep[] = [...stepsCompleted];
   const requestId = request.id;
 
+  // Helper to set current step before execution. Non-fatal on failure.
+  async function startStep(step: PublicationStep) {
+    try {
+      await db
+        .prepare(
+          "UPDATE publication_requests SET current_step = ?, updated_at = datetime('now') WHERE id = ?",
+        )
+        .bind(step, requestId)
+        .run();
+    } catch (dbErr) {
+      console.error(`[publish] Failed to set current_step to ${step}:`, dbErr);
+    }
+  }
+
   // Helper to update progress in D1. Catches its own errors to avoid
   // masking the original failure when called inside catch blocks.
   async function updateProgress(step: PublicationStep, error?: string) {
@@ -2255,12 +2399,7 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
   // Step 1: CI Check
   if (stepsToRun.includes("ci_check")) {
     try {
-      await db
-        .prepare(
-          "UPDATE publication_requests SET current_step = 'ci_check', updated_at = datetime('now') WHERE id = ?",
-        )
-        .bind(request.id)
-        .run();
+      await startStep("ci_check");
 
       const bidsExists = await checkWorkflowExists(
         repoName,
@@ -2304,12 +2443,7 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
   // Step 2: Make repo public
   if (stepsToRun.includes("repo_public")) {
     try {
-      await db
-        .prepare(
-          "UPDATE publication_requests SET current_step = 'repo_public', updated_at = datetime('now') WHERE id = ?",
-        )
-        .bind(request.id)
-        .run();
+      await startStep("repo_public");
 
       const result = await setRepoVisibility(repoName, false, pat);
       if (!result.ok) {
@@ -2390,20 +2524,10 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
   // Step 3: Add S3 public read bucket policy
   if (stepsToRun.includes("s3_public_read")) {
     try {
-      await db
-        .prepare(
-          "UPDATE publication_requests SET current_step = 's3_public_read', updated_at = datetime('now') WHERE id = ?",
-        )
-        .bind(request.id)
-        .run();
+      await startStep("s3_public_read");
 
       await addPublicReadPolicy(
-        {
-          bucket: c.env.S3_BUCKET,
-          region: c.env.AWS_REGION,
-          accessKeyId: c.env.AWS_ACCESS_KEY_ID,
-          secretAccessKey: c.env.AWS_SECRET_ACCESS_KEY,
-        },
+        getS3Config(c.env),
         datasetId,
       );
 
@@ -2426,12 +2550,7 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
   // Step 4: Tag protection (before DOI to prevent tag manipulation)
   if (stepsToRun.includes("tag_protect")) {
     try {
-      await db
-        .prepare(
-          "UPDATE publication_requests SET current_step = 'tag_protect', updated_at = datetime('now') WHERE id = ?",
-        )
-        .bind(requestId)
-        .run();
+      await startStep("tag_protect");
 
       const { applyTagProtection } = await import("../services/github");
       const tagProtected = await applyTagProtection(repoName, pat);
@@ -2462,12 +2581,7 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
   // Step 5: Create concept DOI (if not exists)
   if (stepsToRun.includes("doi_create")) {
     try {
-      await db
-        .prepare(
-          "UPDATE publication_requests SET current_step = 'doi_create', updated_at = datetime('now') WHERE id = ?",
-        )
-        .bind(request.id)
-        .run();
+      await startStep("doi_create");
 
       if (!dataset.concept_doi) {
         // SAFETY: Block production DOI creation in non-production environments
@@ -2669,12 +2783,7 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
   // Step: update_metadata - Update dataset_description.json with DOI
   if (stepsToRun.includes("update_metadata")) {
     try {
-      await db
-        .prepare(
-          "UPDATE publication_requests SET current_step = 'update_metadata', updated_at = datetime('now') WHERE id = ?",
-        )
-        .bind(request.id)
-        .run();
+      await startStep("update_metadata");
 
       // Get concept DOI (set by the doi_create step above)
       const doiResult = await getConceptDoi("update_metadata");
@@ -2714,12 +2823,7 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
   // Step: update_readme - Update README.md with DOI badge
   if (stepsToRun.includes("update_readme")) {
     try {
-      await db
-        .prepare(
-          "UPDATE publication_requests SET current_step = 'update_readme', updated_at = datetime('now') WHERE id = ?",
-        )
-        .bind(request.id)
-        .run();
+      await startStep("update_readme");
 
       const doiResult = await getConceptDoi("update_readme");
       if (doiResult instanceof Response) return doiResult;
@@ -2780,12 +2884,7 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
   // Step: create_tag - Create git tag for version
   if (stepsToRun.includes("create_tag")) {
     try {
-      await db
-        .prepare(
-          "UPDATE publication_requests SET current_step = 'create_tag', updated_at = datetime('now') WHERE id = ?",
-        )
-        .bind(request.id)
-        .run();
+      await startStep("create_tag");
 
       const vtResult = await getVersionTag("create_tag");
       if (vtResult instanceof Response) return vtResult;
@@ -2816,12 +2915,7 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
   // Step: create_release - Create GitHub release
   if (stepsToRun.includes("create_release")) {
     try {
-      await db
-        .prepare(
-          "UPDATE publication_requests SET current_step = 'create_release', updated_at = datetime('now') WHERE id = ?",
-        )
-        .bind(request.id)
-        .run();
+      await startStep("create_release");
 
       const vtResult = await getVersionTag("create_release");
       if (vtResult instanceof Response) return vtResult;
@@ -2851,12 +2945,7 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
   // Step: upload_to_zenodo - Upload release archive to Zenodo
   if (stepsToRun.includes("upload_to_zenodo")) {
     try {
-      await db
-        .prepare(
-          "UPDATE publication_requests SET current_step = 'upload_to_zenodo', updated_at = datetime('now') WHERE id = ?",
-        )
-        .bind(request.id)
-        .run();
+      await startStep("upload_to_zenodo");
 
       const vtResult = await getVersionTag("upload_to_zenodo");
       if (vtResult instanceof Response) return vtResult;
@@ -2911,12 +3000,7 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
   // Step: publish_doi - Publish DOI (permanent and irreversible!)
   if (stepsToRun.includes("publish_doi")) {
     try {
-      await db
-        .prepare(
-          "UPDATE publication_requests SET current_step = 'publish_doi', updated_at = datetime('now') WHERE id = ?",
-        )
-        .bind(request.id)
-        .run();
+      await startStep("publish_doi");
 
       const zenodoResult = await getZenodoConfig("publish_doi");
       if (zenodoResult instanceof Response) return zenodoResult;
@@ -2981,20 +3065,10 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
   // Step 12: S3 Object Lock (single batch per request due to CF Workers subrequest limits)
   if (stepsToRun.includes("s3_lock")) {
     try {
-      await db
-        .prepare(
-          "UPDATE publication_requests SET current_step = 's3_lock', updated_at = datetime('now') WHERE id = ?",
-        )
-        .bind(request.id)
-        .run();
+      await startStep("s3_lock");
 
       const lockResult = await applyObjectLock(
-        {
-          bucket: c.env.S3_BUCKET,
-          region: c.env.AWS_REGION,
-          accessKeyId: c.env.AWS_ACCESS_KEY_ID,
-          secretAccessKey: c.env.AWS_SECRET_ACCESS_KEY,
-        },
+        getS3Config(c.env),
         datasetId,
         body.s3_lock_offset || 0,
       );
@@ -3038,12 +3112,7 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
   // Step: Generate archive (async via GitHub Actions; non-blocking)
   if (stepsToRun.includes("generate_archive")) {
     try {
-      await db
-        .prepare(
-          "UPDATE publication_requests SET current_step = 'generate_archive', updated_at = datetime('now') WHERE id = ?",
-        )
-        .bind(request.id)
-        .run();
+      await startStep("generate_archive");
 
       const vtResult = await getVersionTag("generate_archive");
       if (vtResult instanceof Response) {
@@ -3066,12 +3135,7 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
   // Step 14: Notify user
   if (stepsToRun.includes("notify_user")) {
     try {
-      await db
-        .prepare(
-          "UPDATE publication_requests SET current_step = 'notify_user', updated_at = datetime('now') WHERE id = ?",
-        )
-        .bind(request.id)
-        .run();
+      await startStep("notify_user");
 
       // Re-read DOI in case it was just created
       const updatedDataset = await db
@@ -3126,7 +3190,6 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
     .bind(request.id)
     .run();
 
-  // Audit log
   // Audit log (non-fatal but warn user if fails)
   let auditLogFailed = false;
   let auditLogError: string | undefined;
@@ -3186,12 +3249,7 @@ adminRoutes.post("/datasets/:id/s3-lock", async (c) => {
 
   try {
     const result = await applyObjectLock(
-      {
-        bucket: c.env.S3_BUCKET,
-        region: c.env.AWS_REGION,
-        accessKeyId: c.env.AWS_ACCESS_KEY_ID,
-        secretAccessKey: c.env.AWS_SECRET_ACCESS_KEY,
-      },
+      getS3Config(c.env),
       datasetId,
       offset,
     );
@@ -3252,12 +3310,7 @@ adminRoutes.post("/datasets/:id/manifest/:version", async (c) => {
   // Resolve version DOI: use provided value, or try existing manifest
   let versionDoi: string | null = "doi" in body ? (body.doi ?? null) : null;
   if (!versionDoi) {
-    const s3Options = {
-      bucket: c.env.S3_BUCKET,
-      region: c.env.AWS_REGION,
-      accessKeyId: c.env.AWS_ACCESS_KEY_ID,
-      secretAccessKey: c.env.AWS_SECRET_ACCESS_KEY,
-    };
+    const s3Options = getS3Config(c.env);
     const existing = await getManifest(s3Options, datasetId, version);
     if (existing) {
       const parsed = JSON.parse(existing) as { doi?: string | null };
@@ -3276,12 +3329,7 @@ adminRoutes.post("/datasets/:id/manifest/:version", async (c) => {
     );
 
     await uploadManifest(
-      {
-        bucket: c.env.S3_BUCKET,
-        region: c.env.AWS_REGION,
-        accessKeyId: c.env.AWS_ACCESS_KEY_ID,
-        secretAccessKey: c.env.AWS_SECRET_ACCESS_KEY,
-      },
+      getS3Config(c.env),
       datasetId,
       version,
       JSON.stringify(manifest, null, 2),
