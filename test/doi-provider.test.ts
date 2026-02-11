@@ -862,3 +862,50 @@ describe("enrichFromReadme", () => {
     }
   });
 });
+
+describe("Version format validation", () => {
+  const SEMVER_REGEX = /^\d+\.\d+\.\d+$/;
+  const stripVersionPrefix = (version: string): string => version.replace(/^[vV]/, "");
+
+  test("accepts stable semver versions", () => {
+    expect(SEMVER_REGEX.test("1.0.0")).toBe(true);
+    expect(SEMVER_REGEX.test("2.1.3")).toBe(true);
+    expect(SEMVER_REGEX.test("10.20.30")).toBe(true);
+    expect(SEMVER_REGEX.test("0.1.0")).toBe(true);
+    expect(SEMVER_REGEX.test("0.0.1")).toBe(true);
+  });
+
+  test("rejects pre-release versions", () => {
+    expect(SEMVER_REGEX.test("1.0.0-beta")).toBe(false);
+    expect(SEMVER_REGEX.test("1.0.0-alpha.1")).toBe(false);
+    expect(SEMVER_REGEX.test("1.0.0-rc.1")).toBe(false);
+    expect(SEMVER_REGEX.test("1.0.0-dev")).toBe(false);
+  });
+
+  test("rejects build metadata", () => {
+    expect(SEMVER_REGEX.test("1.0.0+build123")).toBe(false);
+    expect(SEMVER_REGEX.test("1.0.0-beta+build123")).toBe(false);
+  });
+
+  test("rejects non-semver strings", () => {
+    expect(SEMVER_REGEX.test("banana")).toBe(false);
+    expect(SEMVER_REGEX.test("1.0")).toBe(false);
+    expect(SEMVER_REGEX.test("v1.0.0")).toBe(false);
+    expect(SEMVER_REGEX.test("")).toBe(false);
+  });
+
+  test("v-prefix stripping normalizes correctly", () => {
+    expect(stripVersionPrefix("v1.0.0")).toBe("1.0.0");
+    expect(stripVersionPrefix("V1.0.0")).toBe("1.0.0");
+    expect(stripVersionPrefix("1.0.0")).toBe("1.0.0");
+    expect(stripVersionPrefix("v")).toBe("");
+  });
+
+  test("buildVersionIdentifier with v-prefix input produces double-v", () => {
+    // This documents why webhook validation must strip the v-prefix BEFORE
+    // passing to buildVersionIdentifier
+    expect(buildVersionIdentifier("nm000104", "v1.0.0")).toBe(
+      "doi:10.82901/NEMAR.NM000104.VV1.0.0",
+    );
+  });
+});
