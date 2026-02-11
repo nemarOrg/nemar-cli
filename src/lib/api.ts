@@ -1077,6 +1077,79 @@ export interface S3LockResponse {
   offset: number;
 }
 
+// ============================================================================
+// Enrichment
+// ============================================================================
+
+export interface NemarMetadataPayload {
+  version: "1.0";
+  authors?: Record<string, { orcid?: string; affiliation?: string }>;
+  keywords?: string[];
+  relatedDois?: Array<{ doi: string; relationType: string }>;
+  fundingReferences?: Array<{
+    funderName: string;
+    awardNumber?: string;
+    awardTitle?: string;
+  }>;
+  description?: string;
+  methodsDescription?: string;
+  sizes?: string[];
+  formats?: string[];
+}
+
+export interface SubmitEnrichmentResponse {
+  message: string;
+  dataset_id: string;
+  committed: boolean;
+  bidsignore_updated: boolean;
+}
+
+/**
+ * Submit metadata enrichment for a dataset (admin only)
+ * Commits nemar_metadata.json to the dataset repo and caches in D1.
+ */
+export async function submitEnrichment(
+  datasetId: string,
+  metadata: NemarMetadataPayload,
+): Promise<SubmitEnrichmentResponse> {
+  return request<SubmitEnrichmentResponse>(
+    `/admin/datasets/${datasetId}/enrichment`,
+    {
+      method: "POST",
+      body: JSON.stringify(metadata),
+    },
+    true,
+  );
+}
+
+export interface DatasetFileInfo {
+  path: string;
+  size: number;
+}
+
+export interface DatasetFilesResponse {
+  dataset_id: string;
+  file_count: number;
+  total_size: number;
+  extensions: string[];
+  files: DatasetFileInfo[];
+}
+
+/**
+ * Get dataset file listing with sizes (admin only)
+ */
+export async function getDatasetFiles(datasetId: string): Promise<DatasetFilesResponse> {
+  return request<DatasetFilesResponse>(
+    `/admin/datasets/${datasetId}/files`,
+    {},
+    true,
+  );
+}
+
+// ============================================================================
+// S3 Management
+// ============================================================================
+
 export async function applyS3Lock(
   datasetId: string,
 ): Promise<{ locked: number; total: number; failed: string[] }> {

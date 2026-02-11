@@ -146,6 +146,163 @@ export interface DataCiteEnrichment {
   methodsDescription?: string;
   collectionDates?: string; // ISO 8601 date range
   geoLocation?: string;
+  sizes?: string[];
+  formats?: string[];
+}
+
+// ---------------------------------------------------------------------------
+// NemarMetadata: canonical enrichment file format (nemar_metadata.json)
+// ---------------------------------------------------------------------------
+
+/**
+ * Schema for nemar_metadata.json, the canonical enrichment file
+ * stored in each dataset repo alongside dataset_description.json.
+ */
+export interface NemarMetadata {
+  version: "1.0";
+  authors?: Record<string, { orcid?: string; affiliation?: string }>;
+  keywords?: string[];
+  relatedDois?: Array<{ doi: string; relationType: string }>;
+  fundingReferences?: Array<{
+    funderName: string;
+    awardNumber?: string;
+    awardTitle?: string;
+  }>;
+  description?: string;
+  methodsDescription?: string;
+  sizes?: string[];
+  formats?: string[];
+}
+
+/**
+ * Parse raw JSON into a validated NemarMetadata object.
+ * Ignores unknown fields; returns partial data for partially valid input.
+ */
+export function parseNemarMetadata(raw: unknown): NemarMetadata | null {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+
+  const obj = raw as Record<string, unknown>;
+  const result: NemarMetadata = { version: "1.0" };
+
+  // Authors
+  if (obj.authors && typeof obj.authors === "object" && !Array.isArray(obj.authors)) {
+    const authors: Record<string, { orcid?: string; affiliation?: string }> = {};
+    for (const [name, val] of Object.entries(obj.authors as Record<string, unknown>)) {
+      if (val && typeof val === "object" && !Array.isArray(val)) {
+        const entry = val as Record<string, unknown>;
+        const parsed: { orcid?: string; affiliation?: string } = {};
+        if (typeof entry.orcid === "string") parsed.orcid = entry.orcid;
+        if (typeof entry.affiliation === "string") parsed.affiliation = entry.affiliation;
+        if (parsed.orcid || parsed.affiliation) authors[name] = parsed;
+      }
+    }
+    if (Object.keys(authors).length > 0) result.authors = authors;
+  }
+
+  // Keywords
+  if (Array.isArray(obj.keywords)) {
+    const kw = obj.keywords.filter((k): k is string => typeof k === "string");
+    if (kw.length > 0) result.keywords = kw;
+  }
+
+  // Related DOIs
+  if (Array.isArray(obj.relatedDois)) {
+    const rels = obj.relatedDois.filter(
+      (r): r is { doi: string; relationType: string } =>
+        !!r && typeof r === "object" && typeof (r as Record<string, unknown>).doi === "string" && typeof (r as Record<string, unknown>).relationType === "string",
+    );
+    if (rels.length > 0) result.relatedDois = rels;
+  }
+
+  // Funding references
+  if (Array.isArray(obj.fundingReferences)) {
+    const funds = obj.fundingReferences.filter(
+      (f): f is { funderName: string; awardNumber?: string; awardTitle?: string } =>
+        !!f && typeof f === "object" && typeof (f as Record<string, unknown>).funderName === "string",
+    );
+    if (funds.length > 0) result.fundingReferences = funds;
+  }
+
+  // Description
+  if (typeof obj.description === "string" && obj.description) {
+    result.description = obj.description;
+  }
+
+  // Methods description
+  if (typeof obj.methodsDescription === "string" && obj.methodsDescription) {
+    result.methodsDescription = obj.methodsDescription;
+  }
+
+  // Sizes
+  if (Array.isArray(obj.sizes)) {
+    const sizes = obj.sizes.filter((s): s is string => typeof s === "string");
+    if (sizes.length > 0) result.sizes = sizes;
+  }
+
+  // Formats
+  if (Array.isArray(obj.formats)) {
+    const formats = obj.formats.filter((f): f is string => typeof f === "string");
+    if (formats.length > 0) result.formats = formats;
+  }
+
+  return result;
+}
+
+/**
+ * Convert NemarMetadata to DataCiteEnrichment for use with bidsToDataCite.
+ * Merges with an existing enrichment (e.g., from auto-ORCID injection),
+ * with NemarMetadata taking precedence for author data.
+ */
+export function nemarMetadataToEnrichment(
+  nemarMeta: NemarMetadata,
+  base?: DataCiteEnrichment,
+): DataCiteEnrichment {
+  const enrichment: DataCiteEnrichment = { ...base };
+
+  // Authors: NemarMetadata authors override base
+  if (nemarMeta.authors) {
+    enrichment.authors = { ...enrichment.authors, ...nemarMeta.authors };
+  }
+
+  // Keywords: merge, deduplicate
+  if (nemarMeta.keywords) {
+    const existing = enrichment.keywords || [];
+    const merged = [...existing];
+    for (const kw of nemarMeta.keywords) {
+      if (!merged.includes(kw)) merged.push(kw);
+    }
+    enrichment.keywords = merged;
+  }
+
+  // Related DOIs
+  if (nemarMeta.relatedDois) {
+    enrichment.relatedDois = [
+      ...(enrichment.relatedDois || []),
+      ...nemarMeta.relatedDois.map((r) => ({
+        doi: r.doi,
+        relationType: r.relationType as RelationType,
+      })),
+    ];
+  }
+
+  // Funding
+  if (nemarMeta.fundingReferences) {
+    enrichment.fundingInfo = nemarMeta.fundingReferences.map((f) => ({
+      funderName: f.funderName,
+      awardNumber: f.awardNumber,
+      awardTitle: f.awardTitle,
+    }));
+  }
+
+  // Description
+  if (nemarMeta.description) enrichment.description = nemarMeta.description;
+  if (nemarMeta.methodsDescription) enrichment.methodsDescription = nemarMeta.methodsDescription;
+
+  // Sizes and formats
+  if (nemarMeta.sizes) enrichment.sizes = nemarMeta.sizes;
+  if (nemarMeta.formats) enrichment.formats = nemarMeta.formats;
+
+  return enrichment;
 }
 
 // ---------------------------------------------------------------------------
@@ -644,8 +801,8 @@ export function bidsToDataCite(
     geoLocations: geoLocations.length > 0 ? geoLocations : undefined,
     language: "en",
     alternateIdentifiers,
-    sizes: undefined, // Set by caller with actual dataset stats
-    formats: undefined, // Set by caller based on file types
+    sizes: enrichment?.sizes,
+    formats: enrichment?.formats,
     version,
     rights: rights ? [rights] : undefined,
     fundingReferences: fundingReferences.length > 0 ? fundingReferences : undefined,

@@ -24,6 +24,7 @@ import ora from "ora";
 import {
   ApiError,
   type Dataset,
+  type NemarMetadataPayload,
   addCi,
   applyS3Lock,
   approvePublication,
@@ -34,12 +35,14 @@ import {
   finalizeDataset,
   getCiStatus,
   getDataset,
+  getDatasetFiles,
   getDoiInfo,
   listPublishRequests,
   listUsers,
   publishDataset,
   regenerateUserIam,
   revokeUser,
+  submitEnrichment,
   updateDoi,
 } from "../lib/api.js";
 import { getConfig, isAuthenticated } from "../lib/config.js";
@@ -963,6 +966,291 @@ doiCommand
     },
   );
 
+doiCommand
+  .command("enrich")
+  .description("Enrich DOI metadata with ORCIDs, descriptions, funding, and more")
+  .argument("<dataset-id>", "Dataset ID (e.g., nm000104)")
+  .option("--no-llm", "Skip LLM-based enrichment from README")
+  .option("--sandbox", "Use sandbox DOI")
+  .option(YES_OPTION, YES_DESCRIPTION)
+  .option(NO_OPTION, NO_DESCRIPTION)
+  .action(
+    async (
+      datasetId: string,
+      options: { llm?: boolean; sandbox?: boolean } & ConfirmOptions,
+    ) => {
+      if (!requireAuth()) return;
+
+      const spinner = ora("Fetching dataset and existing enrichment...").start();
+
+      // Get dataset info
+      let dataset: Dataset;
+      try {
+        dataset = await getDataset(datasetId);
+        spinner.succeed(`Dataset: ${dataset.name}`);
+      } catch (error) {
+        if (error instanceof ApiError) {
+          spinner.fail(error.message);
+        } else {
+          spinner.fail("Failed to fetch dataset");
+        }
+        return;
+      }
+
+      // Get DOI info
+      let doiInfo;
+      try {
+        doiInfo = await getDoiInfo(datasetId);
+      } catch {
+        // No DOI info
+      }
+
+      if (doiInfo?.concept_doi) {
+        console.log(`  DOI: ${chalk.cyan(doiInfo.concept_doi)}`);
+      }
+
+      // Get existing BIDS metadata (from the backend, we use the files endpoint to detect authors)
+      // For now we'll build enrichment interactively
+      const enrichment: NemarMetadataPayload = { version: "1.0" };
+
+      // --- Author ORCIDs ---
+      console.log();
+      console.log(chalk.cyan("--- Author ORCIDs ---"));
+
+      // We need author list from BIDS; fetch via dataset files endpoint to find dataset_description.json
+      // For simplicity, we ask admin to provide/confirm author info
+      const { updateAuthors } = await inquirer.prompt([
+        {
+          type: "confirm",
+          name: "updateAuthors",
+          message: "Update author ORCIDs?",
+          default: false,
+        },
+      ]);
+
+      if (updateAuthors) {
+        const orcidRegex = /^\d{4}-\d{4}-\d{4}-\d{3}[\dX]$/;
+        const authors: Record<string, { orcid?: string; affiliation?: string }> = {};
+
+        let addMore = true;
+        while (addMore) {
+          const { authorName } = await inquirer.prompt([
+            {
+              type: "input",
+              name: "authorName",
+              message: 'Author name (as in BIDS, e.g., "Shirazi, Yahya"):',
+            },
+          ]);
+          if (!authorName) break;
+
+          const { orcid } = await inquirer.prompt([
+            {
+              type: "input",
+              name: "orcid",
+              message: `ORCID for "${authorName}" (Enter to skip):`,
+              validate: (input: string) => {
+                if (!input) return true;
+                return orcidRegex.test(input) || "Invalid ORCID format (XXXX-XXXX-XXXX-XXXX)";
+              },
+            },
+          ]);
+
+          const entry: { orcid?: string; affiliation?: string } = {};
+          if (orcid) entry.orcid = orcid;
+
+          const { affiliation } = await inquirer.prompt([
+            {
+              type: "input",
+              name: "affiliation",
+              message: `Affiliation for "${authorName}" (optional):`,
+            },
+          ]);
+          if (affiliation) entry.affiliation = affiliation;
+
+          if (entry.orcid || entry.affiliation) {
+            authors[authorName] = entry;
+          }
+
+          const { more } = await inquirer.prompt([
+            { type: "confirm", name: "more", message: "Add another author?", default: true },
+          ]);
+          addMore = more;
+        }
+
+        if (Object.keys(authors).length > 0) {
+          enrichment.authors = authors;
+        }
+      }
+
+      // --- LLM Enrichment ---
+      if (options.llm !== false) {
+        console.log();
+        console.log(chalk.cyan("--- Generating enrichment from README ---"));
+
+        const apiKey = process.env.OPENROUTER_API_KEY;
+        if (!apiKey) {
+          console.log(chalk.yellow("  OPENROUTER_API_KEY not set; skipping LLM enrichment"));
+          console.log(chalk.gray("  Set it in your environment to enable LLM-based enrichment"));
+        } else {
+          const llmSpinner = ora("Analyzing README and dataset metadata...").start();
+          try {
+            // Dynamic import to avoid loading on backend (CLI-side only)
+            const { enrichFromReadme } = await import("../lib/llm-enrich.js");
+
+            // We don't have direct README access here, so fetch via gh CLI
+            const repoName = dataset.github_repo;
+            if (repoName) {
+              const { spawn: bunSpawn } = await import("bun");
+              const proc = bunSpawn({
+                cmd: ["gh", "api", `repos/${repoName}/readme`, "--jq", ".content"],
+                stdout: "pipe",
+                stderr: "pipe",
+              });
+              const readmeBase64 = await new Response(proc.stdout).text();
+              const exitCode = await proc.exited;
+
+              if (exitCode === 0 && readmeBase64.trim()) {
+                const readmeContent = Buffer.from(readmeBase64.trim(), "base64").toString("utf-8");
+
+                // Also get BIDS description
+                const descProc = bunSpawn({
+                  cmd: [
+                    "gh",
+                    "api",
+                    `repos/${repoName}/contents/dataset_description.json`,
+                    "--jq",
+                    ".content",
+                  ],
+                  stdout: "pipe",
+                  stderr: "pipe",
+                });
+                const descBase64 = await new Response(descProc.stdout).text();
+                const descExitCode = await descProc.exited;
+                let bidsDesc: Record<string, unknown> = {};
+                if (descExitCode === 0 && descBase64.trim()) {
+                  try {
+                    bidsDesc = JSON.parse(
+                      Buffer.from(descBase64.trim(), "base64").toString("utf-8"),
+                    ) as Record<string, unknown>;
+                  } catch {
+                    // ignore parse error
+                  }
+                }
+
+                const llmResult = await enrichFromReadme(readmeContent, bidsDesc, apiKey);
+                llmSpinner.succeed("LLM enrichment complete");
+
+                if (llmResult.description) {
+                  console.log(`  Description: ${llmResult.description.slice(0, 100)}...`);
+                  enrichment.description = llmResult.description;
+                }
+                if (llmResult.methodsDescription) {
+                  enrichment.methodsDescription = llmResult.methodsDescription;
+                }
+                if (llmResult.keywords && llmResult.keywords.length > 0) {
+                  console.log(`  Keywords: ${llmResult.keywords.join(", ")}`);
+                  enrichment.keywords = llmResult.keywords;
+                }
+                if (llmResult.fundingReferences && llmResult.fundingReferences.length > 0) {
+                  console.log(
+                    `  Funding: ${llmResult.fundingReferences.map((f) => `${f.funderName} ${f.awardNumber || ""}`).join(", ")}`,
+                  );
+                  enrichment.fundingReferences = llmResult.fundingReferences;
+                }
+                if (llmResult.relatedDois && llmResult.relatedDois.length > 0) {
+                  console.log(
+                    `  Related DOIs: ${llmResult.relatedDois.map((r) => `${r.doi} (${r.relationType})`).join(", ")}`,
+                  );
+                  enrichment.relatedDois = llmResult.relatedDois;
+                }
+              } else {
+                llmSpinner.warn("Could not fetch README from repository");
+              }
+            } else {
+              llmSpinner.warn("No GitHub repository configured for this dataset");
+            }
+          } catch (error) {
+            llmSpinner.fail("LLM enrichment failed");
+            console.log(
+              chalk.gray(`  ${error instanceof Error ? error.message : "Unknown error"}`),
+            );
+          }
+        }
+      }
+
+      // --- Dataset stats (sizes/formats) ---
+      console.log();
+      console.log(chalk.cyan("--- Dataset stats ---"));
+      const statsSpinner = ora("Computing dataset sizes and formats...").start();
+      try {
+        const filesInfo = await getDatasetFiles(datasetId);
+        const totalSizeStr = formatDatasetSize(filesInfo.total_size);
+        enrichment.sizes = [`${totalSizeStr} (${filesInfo.file_count} files)`];
+        enrichment.formats = filesInfo.extensions;
+        statsSpinner.succeed(
+          `Sizes: ${totalSizeStr} (${filesInfo.file_count} files), Formats: ${filesInfo.extensions.join(", ")}`,
+        );
+      } catch (error) {
+        statsSpinner.warn("Could not compute dataset stats");
+        console.log(
+          chalk.gray(`  ${error instanceof Error ? error.message : "Unknown error"}`),
+        );
+      }
+
+      // --- Review ---
+      console.log();
+      console.log(chalk.cyan("--- Review ---"));
+      console.log(JSON.stringify(enrichment, null, 2));
+      console.log();
+
+      const confirmResult = await confirm(
+        "Commit to repo and refresh DOI?",
+        options,
+        true,
+      );
+      if (confirmResult !== "confirmed") {
+        console.log(chalk.gray(confirmResult === "declined" ? "Skipped" : "Cancelled"));
+        return;
+      }
+
+      // Submit enrichment
+      const submitSpinner = ora("Saving enrichment...").start();
+      try {
+        const result = await submitEnrichment(datasetId, enrichment);
+        submitSpinner.succeed(result.message);
+
+        if (result.bidsignore_updated) {
+          console.log(chalk.gray("  .bidsignore updated to include nemar_metadata.json"));
+        }
+
+        // Refresh DOI metadata if the dataset has an EZID DOI
+        if (doiInfo?.ezid_identifier) {
+          const refreshSpinner = ora("Refreshing DOI metadata...").start();
+          try {
+            await updateDoi(datasetId, { refresh_metadata: true });
+            refreshSpinner.succeed("DOI metadata refreshed");
+          } catch (error) {
+            refreshSpinner.warn("Could not refresh DOI metadata");
+            console.log(
+              chalk.gray(
+                `  ${error instanceof Error ? error.message : "Unknown error"}`,
+              ),
+            );
+          }
+        }
+      } catch (error) {
+        if (error instanceof ApiError) {
+          submitSpinner.fail(error.message);
+        } else {
+          submitSpinner.fail("Failed to save enrichment");
+          console.log(
+            chalk.gray(`  ${error instanceof Error ? error.message : "Unknown error"}`),
+          );
+        }
+      }
+    },
+  );
+
 adminCommand.addCommand(doiCommand);
 
 // ============================================================================
@@ -1626,3 +1914,11 @@ Examples:
       process.exit(1);
     }
   });
+
+function formatDatasetSize(bytes: number): string {
+  if (bytes === 0) return "0 B";
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  const i = Math.floor(Math.log(bytes) / Math.log(1024));
+  const size = bytes / 1024 ** i;
+  return `${size.toFixed(i > 0 ? 1 : 0)} ${units[i]}`;
+}

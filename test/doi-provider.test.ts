@@ -6,7 +6,12 @@
  */
 
 import { describe, expect, test } from "bun:test";
-import { bidsToDataCite, buildDataCiteXml } from "../backend/src/services/datacite";
+import {
+  bidsToDataCite,
+  buildDataCiteXml,
+  nemarMetadataToEnrichment,
+  parseNemarMetadata,
+} from "../backend/src/services/datacite";
 import {
   buildConceptIdentifier,
   buildOrcidEnrichment,
@@ -431,5 +436,189 @@ describe("DataCite enrichment with version relations", () => {
     // Count HasVersion occurrences
     const hasVersionCount = (xml.match(/HasVersion/g) || []).length;
     expect(hasVersionCount).toBe(3);
+  });
+});
+
+describe("parseNemarMetadata", () => {
+  test("parses valid full metadata", () => {
+    const result = parseNemarMetadata({
+      version: "1.0",
+      authors: {
+        "Shirazi, Yahya": { orcid: "0000-0002-1825-0097", affiliation: "UC San Diego" },
+        "Smith, John": { orcid: "0000-0001-5109-390X" },
+      },
+      keywords: ["EEG", "motor imagery", "BCI"],
+      relatedDois: [{ doi: "10.1234/paper", relationType: "IsSupplementTo" }],
+      fundingReferences: [
+        { funderName: "NIH", awardNumber: "R01-MH123456", awardTitle: "Neural mechanisms" },
+      ],
+      description: "A test dataset",
+      methodsDescription: "EEG was recorded",
+      sizes: ["2.4 GB (142 files)"],
+      formats: [".edf", ".tsv", ".json"],
+    });
+
+    expect(result).not.toBeNull();
+    expect(result!.authors?.["Shirazi, Yahya"]?.orcid).toBe("0000-0002-1825-0097");
+    expect(result!.authors?.["Shirazi, Yahya"]?.affiliation).toBe("UC San Diego");
+    expect(result!.keywords).toEqual(["EEG", "motor imagery", "BCI"]);
+    expect(result!.relatedDois).toHaveLength(1);
+    expect(result!.fundingReferences).toHaveLength(1);
+    expect(result!.description).toBe("A test dataset");
+    expect(result!.sizes).toEqual(["2.4 GB (142 files)"]);
+    expect(result!.formats).toEqual([".edf", ".tsv", ".json"]);
+  });
+
+  test("parses partial metadata", () => {
+    const result = parseNemarMetadata({
+      version: "1.0",
+      keywords: ["EEG"],
+    });
+
+    expect(result).not.toBeNull();
+    expect(result!.keywords).toEqual(["EEG"]);
+    expect(result!.authors).toBeUndefined();
+    expect(result!.description).toBeUndefined();
+  });
+
+  test("returns result for empty object", () => {
+    const result = parseNemarMetadata({});
+    expect(result).not.toBeNull();
+    expect(result!.version).toBe("1.0");
+  });
+
+  test("returns null for null input", () => {
+    expect(parseNemarMetadata(null)).toBeNull();
+  });
+
+  test("returns null for array input", () => {
+    expect(parseNemarMetadata([])).toBeNull();
+  });
+
+  test("returns null for string input", () => {
+    expect(parseNemarMetadata("not an object")).toBeNull();
+  });
+
+  test("ignores invalid author entries", () => {
+    const result = parseNemarMetadata({
+      authors: {
+        "Valid, Author": { orcid: "0000-0002-1825-0097" },
+        "Invalid, Entry": "not an object",
+        "Empty, Entry": {},
+      },
+    });
+
+    expect(result!.authors).toBeDefined();
+    expect(Object.keys(result!.authors!)).toEqual(["Valid, Author"]);
+  });
+
+  test("filters non-string keywords", () => {
+    const result = parseNemarMetadata({
+      keywords: ["valid", 123, null, "also valid"],
+    });
+
+    expect(result!.keywords).toEqual(["valid", "also valid"]);
+  });
+});
+
+describe("nemarMetadataToEnrichment", () => {
+  test("converts full NemarMetadata to enrichment", () => {
+    const nemarMeta = parseNemarMetadata({
+      version: "1.0",
+      authors: { "Doe, Jane": { orcid: "0000-0001-5109-390X", affiliation: "MIT" } },
+      keywords: ["EEG"],
+      description: "A dataset",
+      sizes: ["1 GB"],
+      formats: [".edf"],
+    })!;
+
+    const enrichment = nemarMetadataToEnrichment(nemarMeta);
+    expect(enrichment.authors?.["Doe, Jane"]?.orcid).toBe("0000-0001-5109-390X");
+    expect(enrichment.keywords).toEqual(["EEG"]);
+    expect(enrichment.description).toBe("A dataset");
+    expect(enrichment.sizes).toEqual(["1 GB"]);
+    expect(enrichment.formats).toEqual([".edf"]);
+  });
+
+  test("merges with base enrichment, NemarMetadata takes precedence for authors", () => {
+    const base = {
+      authors: {
+        "Shirazi, Yahya": { orcid: "0000-0002-1825-0097" },
+        "Old, Author": { orcid: "0000-0000-0000-0001" },
+      },
+      keywords: ["neuroscience"],
+    };
+
+    const nemarMeta = parseNemarMetadata({
+      version: "1.0",
+      authors: {
+        "Shirazi, Yahya": { orcid: "0000-0002-1825-0097", affiliation: "UCSD" },
+      },
+      keywords: ["EEG"],
+    })!;
+
+    const enrichment = nemarMetadataToEnrichment(nemarMeta, base);
+
+    // Base author preserved
+    expect(enrichment.authors?.["Old, Author"]?.orcid).toBe("0000-0000-0000-0001");
+    // NemarMetadata author overrides (adds affiliation)
+    expect(enrichment.authors?.["Shirazi, Yahya"]?.affiliation).toBe("UCSD");
+    // Keywords merged and deduplicated
+    expect(enrichment.keywords).toContain("neuroscience");
+    expect(enrichment.keywords).toContain("EEG");
+  });
+
+  test("deduplicates keywords on merge", () => {
+    const base = { keywords: ["EEG", "BIDS"] };
+    const nemarMeta = parseNemarMetadata({ keywords: ["EEG", "motor imagery"] })!;
+    const enrichment = nemarMetadataToEnrichment(nemarMeta, base);
+    expect(enrichment.keywords).toEqual(["EEG", "BIDS", "motor imagery"]);
+  });
+});
+
+describe("sizes and formats in DataCite XML", () => {
+  test("sizes appear in XML when provided via enrichment", () => {
+    const metadata = bidsToDataCite(
+      "nm000104",
+      "10.82901/NEMAR.test",
+      { Name: "Test", Authors: ["Doe, Jane"] },
+      { sizes: ["2.4 GB (142 files)"], formats: [".edf", ".tsv", ".json"] },
+    );
+
+    const xml = buildDataCiteXml(metadata);
+    expect(xml).toContain("<sizes>");
+    expect(xml).toContain("2.4 GB (142 files)");
+    expect(xml).toContain("<formats>");
+    expect(xml).toContain(".edf");
+    expect(xml).toContain(".tsv");
+  });
+
+  test("no sizes/formats in XML when not provided", () => {
+    const metadata = bidsToDataCite("nm000104", "10.82901/NEMAR.test", {
+      Name: "Test",
+      Authors: ["Doe, Jane"],
+    });
+
+    const xml = buildDataCiteXml(metadata);
+    expect(xml).not.toContain("<sizes>");
+    expect(xml).not.toContain("<formats>");
+  });
+});
+
+describe("enrichment keywords merged with auto-keywords", () => {
+  test("enrichment keywords appear alongside auto-generated subjects", () => {
+    const metadata = bidsToDataCite(
+      "nm000104",
+      "10.82901/NEMAR.test",
+      { Name: "Test", Authors: ["Doe, Jane"], DatasetType: "eeg" },
+      { keywords: ["motor imagery", "BCI"] },
+    );
+
+    // Auto-generated: EEG, BIDS, neuroscience
+    expect(metadata.subjects).toContain("motor imagery");
+    expect(metadata.subjects).toContain("BCI");
+    expect(metadata.subjects).toContain("EEG");
+    expect(metadata.subjects).toContain("BIDS");
+    expect(metadata.subjects).toContain("neuroscience");
   });
 });

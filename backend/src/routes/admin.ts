@@ -53,7 +53,7 @@ import {
   publishDeposition,
   uploadFile,
 } from "../services/zenodo";
-import { bidsToDataCite, buildDataCiteXml } from "../services/datacite";
+import { bidsToDataCite, buildDataCiteXml, nemarMetadataToEnrichment, parseNemarMetadata } from "../services/datacite";
 import { type DoiProvider, type DoiResult, buildOrcidEnrichment, createConceptDoi as dispatchCreateConceptDoi, parseDoiProvider, resolveEzidAuth } from "../services/doi";
 import { extractDoi, updateIdentifier as ezidUpdateIdentifier } from "../services/ezid";
 import type { Bindings, Variables } from "../types/bindings";
@@ -1477,11 +1477,26 @@ adminRoutes.post(
         }
         const bidsDesc = parsed as Record<string, unknown>;
         const doi = extractDoi(dataset.ezid_identifier);
-        const enrichment = buildOrcidEnrichment(
+        let enrichment = buildOrcidEnrichment(
           bidsDesc,
           dataset.owner_username,
           dataset.owner_orcid || undefined,
         );
+
+        // Read nemar_metadata.json for rich enrichment
+        const nemarMetaFile = tree.find((f) => f.path === "nemar_metadata.json");
+        if (nemarMetaFile) {
+          try {
+            const nemarContent = await getBlobContent(repoName, nemarMetaFile.sha, c.env.GITHUB_ADMIN_PAT);
+            const nemarParsed = parseNemarMetadata(JSON.parse(nemarContent));
+            if (nemarParsed) {
+              enrichment = nemarMetadataToEnrichment(nemarParsed, enrichment);
+            }
+          } catch (nemarErr) {
+            console.error("Failed to parse nemar_metadata.json:", nemarErr);
+          }
+        }
+
         const metadata = bidsToDataCite(datasetId, doi, bidsDesc, enrichment);
         updateOptions.dataciteXml = buildDataCiteXml(metadata);
         metadataRefreshed = true;
@@ -1527,6 +1542,185 @@ adminRoutes.post(
     }
   },
 );
+
+/**
+ * POST /admin/datasets/:id/enrichment - Submit rich metadata enrichment
+ *
+ * Accepts NemarMetadata JSON, commits nemar_metadata.json to the dataset repo,
+ * ensures .bidsignore includes it, caches in D1, and optionally refreshes DOI metadata.
+ */
+const enrichmentSchema = z.object({
+  version: z.literal("1.0"),
+  authors: z.record(z.object({
+    orcid: z.string().optional(),
+    affiliation: z.string().optional(),
+  })).optional(),
+  keywords: z.array(z.string()).optional(),
+  relatedDois: z.array(z.object({
+    doi: z.string(),
+    relationType: z.string(),
+  })).optional(),
+  fundingReferences: z.array(z.object({
+    funderName: z.string(),
+    awardNumber: z.string().optional(),
+    awardTitle: z.string().optional(),
+  })).optional(),
+  description: z.string().optional(),
+  methodsDescription: z.string().optional(),
+  sizes: z.array(z.string()).optional(),
+  formats: z.array(z.string()).optional(),
+});
+
+adminRoutes.post(
+  "/datasets/:id/enrichment",
+  zValidator("json", enrichmentSchema),
+  async (c) => {
+    const datasetId = c.req.param("id");
+    const body = c.req.valid("json");
+    const db = c.env.DB;
+
+    const dataset = await db
+      .prepare(
+        "SELECT dataset_id, github_repo, ezid_identifier, doi_provider, is_sandbox FROM datasets WHERE dataset_id = ?",
+      )
+      .bind(datasetId)
+      .first<{
+        dataset_id: string;
+        github_repo: string | null;
+        ezid_identifier: string | null;
+        doi_provider: string | null;
+        is_sandbox: number | null;
+      }>();
+
+    if (!dataset) {
+      return c.json({ error: "Dataset not found" }, 404);
+    }
+
+    if (!dataset.github_repo) {
+      return c.json({ error: "Dataset has no GitHub repository" }, 400);
+    }
+
+    const repoName = dataset.github_repo.split("/")[1];
+    if (!repoName) {
+      return c.json({ error: "Invalid github_repo format" }, 400);
+    }
+
+    const pat = c.env.GITHUB_ADMIN_PAT;
+    const metadataContent = JSON.stringify(body, null, 2);
+
+    try {
+      // Commit nemar_metadata.json to the repo
+      await createOrUpdateFile(
+        repoName,
+        "nemar_metadata.json",
+        metadataContent,
+        "Update NEMAR metadata enrichment",
+        pat,
+      );
+
+      // Ensure .bidsignore includes nemar_metadata.json
+      const tree = await getTreeAtRef(repoName, "main", pat);
+      const bidsignoreFile = tree.find((f) => f.path === ".bidsignore");
+      let bidsignoreContent = "";
+      if (bidsignoreFile) {
+        bidsignoreContent = await getBlobContent(repoName, bidsignoreFile.sha, pat);
+      }
+      if (!bidsignoreContent.includes("nemar_metadata.json")) {
+        const newContent = bidsignoreContent
+          ? `${bidsignoreContent.trimEnd()}\nnemar_metadata.json\n`
+          : "nemar_metadata.json\n";
+        await createOrUpdateFile(
+          repoName,
+          ".bidsignore",
+          newContent,
+          "Add nemar_metadata.json to .bidsignore",
+          pat,
+        );
+      }
+
+      // Cache in D1
+      await db
+        .prepare(
+          "UPDATE datasets SET enrichment_json = ?, enrichment_updated_at = datetime('now'), updated_at = datetime('now') WHERE dataset_id = ?",
+        )
+        .bind(metadataContent, datasetId)
+        .run();
+
+      return c.json({
+        message: "Enrichment saved",
+        dataset_id: datasetId,
+        committed: true,
+        bidsignore_updated: !bidsignoreContent.includes("nemar_metadata.json"),
+      });
+    } catch (error) {
+      console.error("Failed to save enrichment:", error);
+      return c.json(
+        {
+          error: "Failed to save enrichment",
+          details: error instanceof Error ? error.message : "Unknown error",
+        },
+        500,
+      );
+    }
+  },
+);
+
+/**
+ * GET /admin/datasets/:id/files - Get dataset file listing with sizes
+ *
+ * Returns file listing from the GitHub repo tree for computing sizes and formats.
+ */
+adminRoutes.get("/datasets/:id/files", async (c) => {
+  const datasetId = c.req.param("id");
+  const db = c.env.DB;
+
+  const dataset = await db
+    .prepare("SELECT github_repo FROM datasets WHERE dataset_id = ?")
+    .bind(datasetId)
+    .first<{ github_repo: string | null }>();
+
+  if (!dataset?.github_repo) {
+    return c.json({ error: "Dataset not found or has no GitHub repository" }, 404);
+  }
+
+  const repoName = dataset.github_repo.split("/")[1];
+  if (!repoName) {
+    return c.json({ error: "Invalid github_repo format" }, 400);
+  }
+
+  try {
+    const tree = await getTreeAtRef(repoName, "main", c.env.GITHUB_ADMIN_PAT);
+    const files = tree
+      .filter((f) => f.type === "blob")
+      .map((f) => ({ path: f.path, size: f.size || 0 }));
+
+    const totalSize = files.reduce((sum, f) => sum + f.size, 0);
+    const extensions = [...new Set(
+      files
+        .map((f) => {
+          const ext = f.path.split(".").pop();
+          return ext ? `.${ext}` : null;
+        })
+        .filter((e): e is string => e !== null),
+    )].sort();
+
+    return c.json({
+      dataset_id: datasetId,
+      file_count: files.length,
+      total_size: totalSize,
+      extensions,
+      files,
+    });
+  } catch (error) {
+    return c.json(
+      {
+        error: "Failed to fetch file listing",
+        details: error instanceof Error ? error.message : "Unknown error",
+      },
+      500,
+    );
+  }
+});
 
 /**
  * DELETE /admin/zenodo/deposition/:id - Delete unpublished Zenodo deposition

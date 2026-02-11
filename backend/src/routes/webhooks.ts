@@ -7,6 +7,7 @@
 
 import type { Context } from "hono";
 import { Hono } from "hono";
+import { nemarMetadataToEnrichment, parseNemarMetadata } from "../services/datacite.js";
 import { createEzidVersionDoi, parseDoiProvider } from "../services/doi.js";
 import { extractDoi } from "../services/ezid.js";
 import { getBlobContent, getTreeAtRef } from "../services/github.js";
@@ -129,9 +130,10 @@ async function handleEzidVersionDoi(
     const repoName = dataset.github_repo.split("/")[1];
     let bidsDescription: Record<string, unknown> = { Name: dataset.name };
     let bidsMetadataWarning: string | undefined;
+    let tree: Awaited<ReturnType<typeof getTreeAtRef>> = [];
     if (repoName) {
       try {
-        const tree = await getTreeAtRef(repoName, "main", c.env.GITHUB_ADMIN_PAT);
+        tree = await getTreeAtRef(repoName, "main", c.env.GITHUB_ADMIN_PAT);
         const descFile = tree.find((f) => f.path === "dataset_description.json");
         if (descFile) {
           const content = await getBlobContent(repoName, descFile.sha, c.env.GITHUB_ADMIN_PAT);
@@ -143,6 +145,23 @@ async function handleEzidVersionDoi(
       } catch (bidsError) {
         bidsMetadataWarning = `BIDS metadata unavailable: ${bidsError instanceof Error ? bidsError.message : String(bidsError)}. DOI minted with minimal metadata.`;
         console.error("[webhook]", bidsMetadataWarning);
+      }
+    }
+
+    // Read nemar_metadata.json for rich enrichment
+    let enrichment = undefined;
+    if (repoName && tree.length > 0) {
+      try {
+        const nemarMetaFile = tree.find((f) => f.path === "nemar_metadata.json");
+        if (nemarMetaFile) {
+          const nemarContent = await getBlobContent(repoName, nemarMetaFile.sha, c.env.GITHUB_ADMIN_PAT);
+          const nemarParsed = parseNemarMetadata(JSON.parse(nemarContent));
+          if (nemarParsed) {
+            enrichment = nemarMetadataToEnrichment(nemarParsed);
+          }
+        }
+      } catch (nemarErr) {
+        console.error("[webhook] Failed to parse nemar_metadata.json:", nemarErr);
       }
     }
 
@@ -169,6 +188,7 @@ async function handleEzidVersionDoi(
         githubRepo: dataset.github_repo,
         sandbox,
         existingVersionDois,
+        enrichment,
       },
     );
 
