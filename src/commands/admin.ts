@@ -639,7 +639,12 @@ doiCommand
   .action(
     async (
       datasetId,
-      options: { title?: string; description?: string; provider?: string; sandbox?: boolean } & ConfirmOptions,
+      options: {
+        title?: string;
+        description?: string;
+        provider?: string;
+        sandbox?: boolean;
+      } & ConfirmOptions,
     ) => {
       if (!requireAuth()) return;
 
@@ -940,7 +945,9 @@ doiCommand
         spinner.succeed("DOI updated successfully");
         console.log();
         console.log(`  EZID ID: ${chalk.cyan(result.ezid_identifier)}`);
-        console.log(`  Status:  ${result.status === "public" ? chalk.green(result.status) : chalk.yellow(result.status)}`);
+        console.log(
+          `  Status:  ${result.status === "public" ? chalk.green(result.status) : chalk.yellow(result.status)}`,
+        );
         console.log(`  URL:     ${result.doi_url}`);
       } catch (error) {
         if (error instanceof ApiError) {

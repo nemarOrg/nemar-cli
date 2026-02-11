@@ -7,12 +7,12 @@
 
 import type { Context } from "hono";
 import { Hono } from "hono";
+import { createEzidVersionDoi, parseDoiProvider } from "../services/doi.js";
+import { extractDoi } from "../services/ezid.js";
+import { getBlobContent, getTreeAtRef } from "../services/github.js";
 import { generateManifest } from "../services/manifest.js";
 import { uploadManifest } from "../services/s3.js";
 import * as zenodo from "../services/zenodo.js";
-import { createEzidVersionDoi, parseDoiProvider } from "../services/doi.js";
-import { getBlobContent, getTreeAtRef } from "../services/github.js";
-import { extractDoi } from "../services/ezid.js";
 import type { Bindings } from "../types/bindings.js";
 
 type WebhookContext = Context<{ Bindings: Bindings }>;
