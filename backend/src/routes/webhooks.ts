@@ -83,7 +83,8 @@ webhooks.post("/publish-version-doi", async (c) => {
     ); // Return 200 so workflow doesn't fail
   }
 
-  const provider = (dataset.doi_provider as "ezid" | "zenodo") || "zenodo";
+  // Fallback to "ezid" (matches DB default and admin route defaults)
+  const provider = (dataset.doi_provider as "ezid" | "zenodo") || "ezid";
 
   // Route to appropriate provider
   if (provider === "ezid") {
@@ -134,7 +135,10 @@ async function handleEzidVersionDoi(
         const descFile = tree.find((f) => f.path === "dataset_description.json");
         if (descFile) {
           const content = await getBlobContent(repoName, descFile.sha, c.env.GITHUB_ADMIN_PAT);
-          bidsDescription = JSON.parse(content) as Record<string, unknown>;
+          const parsed = JSON.parse(content);
+          if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+            bidsDescription = parsed as Record<string, unknown>;
+          }
         }
       } catch (bidsError) {
         console.warn("[webhook] Could not read BIDS metadata:", bidsError);

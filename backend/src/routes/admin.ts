@@ -53,8 +53,9 @@ import {
   publishDeposition,
   uploadFile,
 } from "../services/zenodo";
-import { type DoiProvider, type DoiResult, createConceptDoi as dispatchCreateConceptDoi } from "../services/doi";
-import { extractDoi, getDoiUrl } from "../services/ezid";
+import { bidsToDataCite, buildDataCiteXml } from "../services/datacite";
+import { type DoiProvider, type DoiResult, buildOrcidEnrichment, createConceptDoi as dispatchCreateConceptDoi } from "../services/doi";
+import { extractDoi, updateIdentifier as ezidUpdateIdentifier } from "../services/ezid";
 import type { Bindings, Variables } from "../types/bindings";
 
 /**
@@ -837,8 +838,8 @@ adminRoutes.get("/audit", async (c) => {
  * POST /admin/datasets/:id/doi/concept - Create concept DOI for a dataset
  *
  * WARNING: DOIs are PERMANENT and cannot be deleted.
- * This creates a pre-reserved DOI on Zenodo without publishing it.
- * The DOI becomes active when published.
+ * Creates a pre-reserved DOI via the specified provider (EZID by default, Zenodo as fallback).
+ * The DOI is reserved but not published until the first version release.
  */
 const createConceptDoiSchema = z.object({
   title: z.string().optional(),
@@ -975,6 +976,7 @@ adminRoutes.post(
 
     // Read BIDS metadata from GitHub repo for richer DOI metadata
     let bidsDescription: Record<string, unknown> | undefined;
+    let bidsMetadataWarning: string | undefined;
     if (dataset.github_repo) {
       try {
         const repoName = dataset.github_repo.split("/")[1];
@@ -983,15 +985,22 @@ adminRoutes.post(
           const descFile = tree.find((f) => f.path === "dataset_description.json");
           if (descFile) {
             const content = await getBlobContent(repoName, descFile.sha, c.env.GITHUB_ADMIN_PAT);
-            bidsDescription = JSON.parse(content) as Record<string, unknown>;
+            const parsed = JSON.parse(content);
+            if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+              bidsDescription = parsed as Record<string, unknown>;
+            } else {
+              bidsMetadataWarning = "dataset_description.json is not a JSON object; using fallback metadata";
+              console.warn("[doi]", bidsMetadataWarning);
+            }
           }
         }
       } catch (bidsError) {
-        console.warn("[doi] Could not read BIDS metadata from repo:", bidsError);
+        bidsMetadataWarning = `Could not read BIDS metadata: ${bidsError instanceof Error ? bidsError.message : String(bidsError)}`;
+        console.warn("[doi]", bidsMetadataWarning);
       }
     }
 
-    const provider = body.provider as "ezid" | "zenodo";
+    const provider = body.provider;
 
     try {
       const result = await dispatchCreateConceptDoi(
@@ -1088,15 +1097,19 @@ adminRoutes.post(
           "DOI is pre-reserved but not yet published. It will become active on first version publish.",
       };
 
+      if (bidsMetadataWarning) {
+        response.metadata_warning = bidsMetadataWarning;
+      }
+
       if (provider === "ezid") {
         response.ezid_identifier = result.providerRecordId;
         response.doi_url = `https://doi.org/${result.doi}`;
       } else {
-        response.zenodo_id = Number.parseInt(result.providerRecordId);
-        response.zenodo_url = formatRecordUrl(
-          Number.parseInt(result.providerRecordId),
-          body.sandbox,
-        );
+        const zenodoId = Number.parseInt(result.providerRecordId);
+        if (!Number.isNaN(zenodoId)) {
+          response.zenodo_id = zenodoId;
+          response.zenodo_url = formatRecordUrl(zenodoId, body.sandbox);
+        }
       }
 
       return c.json(response);
@@ -1409,7 +1422,6 @@ adminRoutes.post(
       );
     }
 
-    const { updateIdentifier: ezidUpdate } = await import("../services/ezid");
     const auth = { username: c.env.EZID_USERNAME, password: c.env.EZID_PASSWORD };
 
     try {
@@ -1424,26 +1436,13 @@ adminRoutes.post(
           if (descFile) {
             const content = await getBlobContent(repoName, descFile.sha, c.env.GITHUB_ADMIN_PAT);
             const bidsDesc = JSON.parse(content) as Record<string, unknown>;
-            const { bidsToDataCite, buildDataCiteXml } = await import("../services/datacite");
             const doi = extractDoi(dataset.ezid_identifier);
-            const enrichment: Record<string, unknown> = {};
-            if (dataset.owner_orcid) {
-              const authors = bidsDesc.Authors;
-              const authorList = Array.isArray(authors)
-                ? authors.filter((a): a is string => typeof a === "string")
-                : [];
-              if (authorList.length > 0) {
-                const authorEnrichment: Record<string, { orcid: string }> = {};
-                for (const author of authorList) {
-                  if (author.toLowerCase().includes(dataset.owner_username.toLowerCase())) {
-                    authorEnrichment[author] = { orcid: dataset.owner_orcid };
-                    break;
-                  }
-                }
-                (enrichment as { authors: Record<string, { orcid: string }> }).authors = authorEnrichment;
-              }
-            }
-            const metadata = bidsToDataCite(datasetId, doi, bidsDesc, enrichment as import("../services/datacite").DataCiteEnrichment);
+            const enrichment = buildOrcidEnrichment(
+              bidsDesc,
+              dataset.owner_username,
+              dataset.owner_orcid || undefined,
+            );
+            const metadata = bidsToDataCite(datasetId, doi, bidsDesc, enrichment);
             updateOptions.dataciteXml = buildDataCiteXml(metadata);
           }
         }
@@ -1462,7 +1461,7 @@ adminRoutes.post(
         }
       }
 
-      const updated = await ezidUpdate(auth, dataset.ezid_identifier, updateOptions);
+      const updated = await ezidUpdateIdentifier(auth, dataset.ezid_identifier, updateOptions);
 
       // Update DB
       await db

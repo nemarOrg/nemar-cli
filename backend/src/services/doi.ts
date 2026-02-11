@@ -12,7 +12,6 @@ import {
   PRODUCTION_SHOULDER,
   TEST_SHOULDER,
   extractDoi,
-  getDoiUrl,
   makePublic,
   mintIdentifier,
   updateIdentifier,
@@ -61,9 +60,40 @@ export interface ZenodoEnv {
 }
 
 /**
+ * Build DataCite enrichment with ORCID matched to a BIDS author entry.
+ * Matches the uploader name against the BIDS Authors list (case-insensitive substring).
+ */
+export function buildOrcidEnrichment(
+  bidsDescription?: BidsDatasetDescription | Record<string, unknown>,
+  uploaderName?: string,
+  uploaderOrcid?: string,
+): DataCiteEnrichment {
+  if (!uploaderOrcid || !bidsDescription || !uploaderName) {
+    return {};
+  }
+
+  const authors = bidsDescription.Authors;
+  const authorList: string[] = Array.isArray(authors)
+    ? authors.filter((a): a is string => typeof a === "string")
+    : [];
+
+  const enrichment: DataCiteEnrichment = {};
+  const uploaderLower = uploaderName.toLowerCase();
+
+  for (const author of authorList) {
+    if (author.toLowerCase().includes(uploaderLower)) {
+      enrichment.authors = { [author]: { orcid: uploaderOrcid } };
+      break;
+    }
+  }
+
+  return enrichment;
+}
+
+/**
  * Create a concept DOI via the specified provider.
  *
- * For EZID: reads BIDS metadata, builds DataCite XML, mints reserved identifier.
+ * For EZID: builds DataCite XML from provided BIDS metadata, mints reserved identifier.
  * For Zenodo: creates a deposition with pre-reserved DOI.
  */
 export async function createConceptDoi(
@@ -80,6 +110,10 @@ async function createEzidConceptDoi(
   options: CreateConceptDoiOptions,
   env: EzidEnv,
 ): Promise<DoiResult> {
+  if (!env.EZID_USERNAME || !env.EZID_PASSWORD) {
+    throw new Error("EZID credentials not configured. Set EZID_USERNAME and EZID_PASSWORD secrets.");
+  }
+
   const auth: EzidAuth = {
     username: env.EZID_USERNAME,
     password: env.EZID_PASSWORD,
@@ -87,27 +121,11 @@ async function createEzidConceptDoi(
 
   const shoulder = options.sandbox ? TEST_SHOULDER : PRODUCTION_SHOULDER;
 
-  // Build enrichment with uploader ORCID
-  const enrichment: DataCiteEnrichment = {};
-  if (options.uploaderOrcid && options.bidsDescription) {
-    const authors = options.bidsDescription.Authors;
-    const authorList: string[] = Array.isArray(authors)
-      ? authors.filter((a): a is string => typeof a === "string")
-      : [];
-
-    // If the uploader appears in the author list, attach their ORCID
-    // Otherwise, we add it as a general enrichment
-    if (authorList.length > 0) {
-      enrichment.authors = {};
-      // Try to match uploader name to an author entry
-      for (const author of authorList) {
-        if (author.toLowerCase().includes(options.uploaderName.toLowerCase())) {
-          enrichment.authors[author] = { orcid: options.uploaderOrcid };
-          break;
-        }
-      }
-    }
-  }
+  const enrichment: DataCiteEnrichment = buildOrcidEnrichment(
+    options.bidsDescription,
+    options.uploaderName,
+    options.uploaderOrcid,
+  );
 
   if (options.datasetDescription) {
     enrichment.description = options.datasetDescription;
@@ -203,6 +221,10 @@ export async function createEzidVersionDoi(
     enrichment?: DataCiteEnrichment;
   },
 ): Promise<DoiResult> {
+  if (!env.EZID_USERNAME || !env.EZID_PASSWORD) {
+    throw new Error("EZID credentials not configured. Set EZID_USERNAME and EZID_PASSWORD secrets.");
+  }
+
   const auth: EzidAuth = {
     username: env.EZID_USERNAME,
     password: env.EZID_PASSWORD,
@@ -250,14 +272,22 @@ export async function createEzidVersionDoi(
   // Make the version DOI public
   await makePublic(auth, identifier.identifier, releaseUrl);
 
-  // Update the concept DOI's XML to include HasVersion relation
-  const conceptBids = opts.bidsDescription;
-  const conceptEnrichment: DataCiteEnrichment = {
-    relatedDois: [{ doi: actualDoi, relationType: "HasVersion" }],
-  };
-  const conceptMetadata = bidsToDataCite(opts.datasetId, conceptDoi, conceptBids, conceptEnrichment);
-  const conceptXml = buildDataCiteXml(conceptMetadata);
-  await updateIdentifier(auth, opts.conceptIdentifier, { dataciteXml: conceptXml });
+  // Update the concept DOI's XML to include HasVersion relation.
+  // Non-fatal: the version DOI is already public at this point, so we log but
+  // do not throw if the concept update fails.
+  try {
+    const conceptEnrichment: DataCiteEnrichment = {
+      relatedDois: [{ doi: actualDoi, relationType: "HasVersion" }],
+    };
+    const conceptMetadata = bidsToDataCite(opts.datasetId, conceptDoi, opts.bidsDescription, conceptEnrichment);
+    const conceptXml = buildDataCiteXml(conceptMetadata);
+    await updateIdentifier(auth, opts.conceptIdentifier, { dataciteXml: conceptXml });
+  } catch (conceptUpdateError) {
+    console.error(
+      `[doi] Version DOI ${actualDoi} is public but concept DOI update failed:`,
+      conceptUpdateError,
+    );
+  }
 
   return {
     doi: actualDoi,
