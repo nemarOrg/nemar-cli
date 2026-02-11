@@ -1149,11 +1149,7 @@ export interface DatasetFilesResponse {
  * Get dataset file listing with sizes (admin only)
  */
 export async function getDatasetFiles(datasetId: string): Promise<DatasetFilesResponse> {
-  return request<DatasetFilesResponse>(
-    `/admin/datasets/${datasetId}/files`,
-    {},
-    true,
-  );
+  return request<DatasetFilesResponse>(`/admin/datasets/${datasetId}/files`, {}, true);
 }
 
 // ============================================================================

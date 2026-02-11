@@ -491,7 +491,10 @@ Examples:
       const descPath = resolve(absolutePath, "dataset_description.json");
       if (existsSync(descPath)) {
         try {
-          const descContent = JSON.parse(readFileSync(descPath, "utf-8")) as Record<string, unknown>;
+          const descContent = JSON.parse(readFileSync(descPath, "utf-8")) as Record<
+            string,
+            unknown
+          >;
           const rawAuthors = descContent.Authors;
           const authorList = Array.isArray(rawAuthors)
             ? rawAuthors.filter((a): a is string => typeof a === "string")
@@ -506,11 +509,7 @@ Examples:
               uploaderOrcid = user.orcid || undefined;
               uploaderUsername = user.username;
             } catch (userErr) {
-              console.log(
-                chalk.gray(
-                  `  Could not fetch profile: ${errorDetail(userErr)}`,
-                ),
-              );
+              console.log(chalk.gray(`  Could not fetch profile: ${errorDetail(userErr)}`));
             }
 
             console.log();
@@ -878,7 +877,9 @@ Examples:
         }
         console.log(chalk.gray("  Saved nemar_metadata.json with author ORCIDs"));
       } catch (writeErr) {
-        console.log(chalk.yellow(`  Warning: Could not save nemar_metadata.json: ${errorDetail(writeErr)}`));
+        console.log(
+          chalk.yellow(`  Warning: Could not save nemar_metadata.json: ${errorDetail(writeErr)}`),
+        );
         console.log(chalk.gray("  Upload will continue without author enrichment."));
       }
     }

@@ -96,9 +96,8 @@ function handleCommandError(
  */
 async function fetchGitHubFileContent(repoName: string, path: string): Promise<string | null> {
   const { spawn: bunSpawn } = await import("bun");
-  const endpoint = path === "README"
-    ? `repos/${repoName}/readme`
-    : `repos/${repoName}/contents/${path}`;
+  const endpoint =
+    path === "README" ? `repos/${repoName}/readme` : `repos/${repoName}/contents/${path}`;
   const proc = bunSpawn({
     cmd: ["gh", "api", endpoint, "--jq", ".content"],
     stdout: "pipe",
@@ -953,10 +952,7 @@ doiCommand
   .option(YES_OPTION, YES_DESCRIPTION)
   .option(NO_OPTION, NO_DESCRIPTION)
   .action(
-    async (
-      datasetId: string,
-      options: { llm?: boolean; sandbox?: boolean } & ConfirmOptions,
-    ) => {
+    async (datasetId: string, options: { llm?: boolean; sandbox?: boolean } & ConfirmOptions) => {
       if (!requireAuth()) return;
 
       const spinner = ora("Fetching dataset and existing enrichment...").start();
@@ -976,7 +972,7 @@ doiCommand
       }
 
       // Get DOI info
-      let doiInfo;
+      let doiInfo: Awaited<ReturnType<typeof getDoiInfo>> | undefined;
       let doiFetchFailed = false;
       try {
         doiInfo = await getDoiInfo(datasetId);
@@ -985,11 +981,7 @@ doiCommand
           // No DOI exists yet
         } else {
           doiFetchFailed = true;
-          console.log(
-            chalk.yellow(
-              `  Warning: Could not fetch DOI info: ${errorDetail(doiErr)}`,
-            ),
-          );
+          console.log(chalk.yellow(`  Warning: Could not fetch DOI info: ${errorDetail(doiErr)}`));
         }
       }
 
@@ -1086,14 +1078,21 @@ doiCommand
               if (!readmeContent) {
                 llmSpinner.warn("Could not fetch README from repository");
               } else {
-                const descContent = await fetchGitHubFileContent(repoName, "dataset_description.json");
+                const descContent = await fetchGitHubFileContent(
+                  repoName,
+                  "dataset_description.json",
+                );
                 let bidsDesc: Record<string, unknown> = {};
                 if (descContent) {
                   try {
-                  bidsDesc = JSON.parse(descContent) as Record<string, unknown>;
-                } catch {
-                  console.log(chalk.yellow("  Warning: Could not parse dataset_description.json; LLM will use README only"));
-                }
+                    bidsDesc = JSON.parse(descContent) as Record<string, unknown>;
+                  } catch {
+                    console.log(
+                      chalk.yellow(
+                        "  Warning: Could not parse dataset_description.json; LLM will use README only",
+                      ),
+                    );
+                  }
                 }
 
                 const llmResult = await enrichFromReadme(readmeContent, bidsDesc, apiKey);
@@ -1145,9 +1144,7 @@ doiCommand
         );
       } catch (error) {
         statsSpinner.warn("Could not compute dataset stats");
-        console.log(
-          chalk.gray(`  ${errorDetail(error)}`),
-        );
+        console.log(chalk.gray(`  ${errorDetail(error)}`));
       }
 
       // --- Review ---
@@ -1156,11 +1153,7 @@ doiCommand
       console.log(JSON.stringify(enrichment, null, 2));
       console.log();
 
-      const confirmResult = await confirm(
-        "Commit to repo and refresh DOI?",
-        options,
-        true,
-      );
+      const confirmResult = await confirm("Commit to repo and refresh DOI?", options, true);
       if (confirmResult !== "confirmed") {
         console.log(chalk.gray(confirmResult === "declined" ? "Skipped" : "Cancelled"));
         return;
@@ -1179,7 +1172,11 @@ doiCommand
         // Refresh DOI metadata if the dataset has an EZID DOI
         // Re-attempt DOI info fetch if it failed earlier (transient error)
         if (!doiInfo && doiFetchFailed) {
-          try { doiInfo = await getDoiInfo(datasetId); } catch { /* still unavailable */ }
+          try {
+            doiInfo = await getDoiInfo(datasetId);
+          } catch {
+            /* still unavailable */
+          }
         }
         if (doiInfo?.ezid_identifier) {
           const refreshSpinner = ora("Refreshing DOI metadata...").start();
@@ -1191,16 +1188,18 @@ doiCommand
             console.log(chalk.gray(`  ${errorDetail(error)}`));
           }
         } else if (doiFetchFailed) {
-          console.log(chalk.yellow("  DOI refresh skipped: could not verify DOI exists. Run 'nemar admin doi update --refresh' manually."));
+          console.log(
+            chalk.yellow(
+              "  DOI refresh skipped: could not verify DOI exists. Run 'nemar admin doi update --refresh' manually.",
+            ),
+          );
         }
       } catch (error) {
         if (error instanceof ApiError) {
           submitSpinner.fail(error.message);
         } else {
           submitSpinner.fail("Failed to save enrichment");
-          console.log(
-            chalk.gray(`  ${errorDetail(error)}`),
-          );
+          console.log(chalk.gray(`  ${errorDetail(error)}`));
         }
       }
     },

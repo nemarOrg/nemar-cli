@@ -7,14 +7,37 @@
 
 // DataCite relation types (mirrors VALID_RELATION_TYPES in backend/src/services/datacite.ts)
 const VALID_RELATION_TYPES_CLI = new Set([
-  "IsCitedBy", "Cites", "IsSupplementTo", "IsSupplementedBy",
-  "IsContinuedBy", "Continues", "IsDescribedBy", "Describes",
-  "HasMetadata", "IsMetadataFor", "HasVersion", "IsVersionOf",
-  "IsNewVersionOf", "IsPreviousVersionOf", "IsPartOf", "HasPart",
-  "IsReferencedBy", "References", "IsDocumentedBy", "Documents",
-  "IsCompiledBy", "Compiles", "IsVariantFormOf", "IsOriginalFormOf",
-  "IsIdenticalTo", "IsCollectedBy", "Collects", "IsRequiredBy",
-  "Requires", "IsObsoletedBy", "Obsoletes",
+  "IsCitedBy",
+  "Cites",
+  "IsSupplementTo",
+  "IsSupplementedBy",
+  "IsContinuedBy",
+  "Continues",
+  "IsDescribedBy",
+  "Describes",
+  "HasMetadata",
+  "IsMetadataFor",
+  "HasVersion",
+  "IsVersionOf",
+  "IsNewVersionOf",
+  "IsPreviousVersionOf",
+  "IsPartOf",
+  "HasPart",
+  "IsReferencedBy",
+  "References",
+  "IsDocumentedBy",
+  "Documents",
+  "IsCompiledBy",
+  "Compiles",
+  "IsVariantFormOf",
+  "IsOriginalFormOf",
+  "IsIdenticalTo",
+  "IsCollectedBy",
+  "Collects",
+  "IsRequiredBy",
+  "Requires",
+  "IsObsoletedBy",
+  "Obsoletes",
 ]);
 
 export interface LlmEnrichmentResult {
@@ -164,18 +187,16 @@ export function validateLlmResult(raw: Record<string, unknown>): LlmEnrichmentRe
 
   if (Array.isArray(raw.relatedDois)) {
     const doiPattern = /^10\.\d{4,}\/.+$/;
-    const rels = raw.relatedDois.filter(
-      (r): r is { doi: string; relationType: string } => {
-        if (!r || typeof r !== "object") return false;
-        const obj = r as Record<string, unknown>;
-        return (
-          typeof obj.doi === "string" &&
-          doiPattern.test(obj.doi) &&
-          typeof obj.relationType === "string" &&
-          VALID_RELATION_TYPES_CLI.has(obj.relationType as string)
-        );
-      },
-    );
+    const rels = raw.relatedDois.filter((r): r is { doi: string; relationType: string } => {
+      if (!r || typeof r !== "object") return false;
+      const obj = r as Record<string, unknown>;
+      return (
+        typeof obj.doi === "string" &&
+        doiPattern.test(obj.doi) &&
+        typeof obj.relationType === "string" &&
+        VALID_RELATION_TYPES_CLI.has(obj.relationType as string)
+      );
+    });
     if (rels.length > 0) result.relatedDois = rels;
   }
 
