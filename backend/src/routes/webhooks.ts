@@ -10,7 +10,7 @@ import { Hono } from "hono";
 import { generateManifest } from "../services/manifest.js";
 import { uploadManifest } from "../services/s3.js";
 import * as zenodo from "../services/zenodo.js";
-import { createEzidVersionDoi } from "../services/doi.js";
+import { createEzidVersionDoi, parseDoiProvider } from "../services/doi.js";
 import { getBlobContent, getTreeAtRef } from "../services/github.js";
 import { extractDoi } from "../services/ezid.js";
 import type { Bindings } from "../types/bindings.js";
@@ -83,8 +83,7 @@ webhooks.post("/publish-version-doi", async (c) => {
     ); // Return 200 so workflow doesn't fail
   }
 
-  // Fallback to "ezid" (matches DB default and admin route defaults)
-  const provider = (dataset.doi_provider as "ezid" | "zenodo") || "ezid";
+  const provider = parseDoiProvider(dataset.doi_provider);
 
   // Route to appropriate provider
   if (provider === "ezid") {
@@ -145,6 +144,14 @@ async function handleEzidVersionDoi(
       }
     }
 
+    // Query all existing version DOIs so concept DOI keeps all HasVersion relations
+    const versionRows = await c.env.DB.prepare(
+      "SELECT doi FROM dataset_versions WHERE dataset_id = ?",
+    )
+      .bind(dataset.dataset_id)
+      .all<{ doi: string }>();
+    const existingVersionDois = versionRows.results.map((r) => r.doi);
+
     const result = await createEzidVersionDoi(
       { EZID_USERNAME: c.env.EZID_USERNAME, EZID_PASSWORD: c.env.EZID_PASSWORD },
       {
@@ -154,6 +161,7 @@ async function handleEzidVersionDoi(
         bidsDescription,
         githubRepo: dataset.github_repo,
         sandbox,
+        existingVersionDois,
       },
     );
 
@@ -164,8 +172,16 @@ async function handleEzidVersionDoi(
       .bind(result.doi, dataset.id)
       .run();
 
+    // Record in version history for HasVersion relation tracking
+    await c.env.DB.prepare(
+      "INSERT OR IGNORE INTO dataset_versions (dataset_id, version, doi, provider) VALUES (?, ?, ?, 'ezid')",
+    )
+      .bind(dataset.dataset_id, version, result.doi)
+      .run();
+
     // Generate and upload version manifest
     let manifestGenerated = false;
+    let manifestErrorMsg: string | undefined;
     if (repoName) {
       try {
         const pat = c.env.GITHUB_ADMIN_PAT;
@@ -190,10 +206,11 @@ async function handleEzidVersionDoi(
           JSON.stringify(manifest, null, 2),
         );
         manifestGenerated = true;
-      } catch (manifestError) {
+      } catch (manifestErr) {
+        manifestErrorMsg = manifestErr instanceof Error ? manifestErr.message : String(manifestErr);
         console.error(
           `[webhook] Manifest generation failed for ${dataset.dataset_id}@${version}:`,
-          manifestError,
+          manifestErr,
         );
       }
     }
@@ -206,6 +223,7 @@ async function handleEzidVersionDoi(
       provider: "ezid",
       doi_url: `https://doi.org/${result.doi}`,
       manifest_generated: manifestGenerated,
+      ...(manifestErrorMsg && { manifest_error: manifestErrorMsg }),
     });
   } catch (error) {
     console.error("EZID version DOI error:", error);
@@ -300,10 +318,20 @@ async function handleZenodoVersionDoi(
       .bind(published.id.toString(), dataset.id)
       .run();
 
+    // Record in version history
+    if (published.doi) {
+      await c.env.DB.prepare(
+        "INSERT OR IGNORE INTO dataset_versions (dataset_id, version, doi, provider) VALUES (?, ?, ?, 'zenodo')",
+      )
+        .bind(dataset.dataset_id, version, published.doi)
+        .run();
+    }
+
     const baseUrl = sandbox ? "https://sandbox.zenodo.org" : "https://zenodo.org";
 
     // Generate and upload version manifest
     let manifestGenerated = false;
+    let manifestErrorMsg: string | undefined;
     if (dataset.github_repo) {
       try {
         const repoName = dataset.github_repo.split("/")[1];
@@ -331,11 +359,12 @@ async function handleZenodoVersionDoi(
           );
           manifestGenerated = true;
         }
-      } catch (manifestError) {
+      } catch (manifestErr) {
         // Non-fatal: DOI was published, manifest can be regenerated later
+        manifestErrorMsg = manifestErr instanceof Error ? manifestErr.message : String(manifestErr);
         console.error(
           `[webhook] Manifest generation failed for ${dataset.dataset_id}@${version}:`,
-          manifestError,
+          manifestErr,
         );
       }
     }
@@ -348,6 +377,7 @@ async function handleZenodoVersionDoi(
       provider: "zenodo",
       zenodo_url: `${baseUrl}/records/${published.id}`,
       manifest_generated: manifestGenerated,
+      ...(manifestErrorMsg && { manifest_error: manifestErrorMsg }),
     });
   } catch (error) {
     console.error("Zenodo publish error:", error);

@@ -775,15 +775,15 @@ doiCommand
         console.log();
         console.log(chalk.green("DOI Information:"));
         console.log(`  Concept DOI: ${chalk.cyan(result.concept_doi)}`);
-        console.log(`  Provider:    ${result.provider?.toUpperCase() || "ZENODO"}`);
-        if (result.zenodo_url) {
+        console.log(`  Provider:    ${result.provider.toUpperCase()}`);
+        if (result.provider === "ezid") {
+          console.log(`  DOI URL:     ${result.doi_url}`);
+          console.log(`  EZID ID:     ${result.ezid_identifier}`);
+        } else {
           console.log(`  Zenodo URL:  ${result.zenodo_url}`);
         }
-        if (result.doi_url) {
-          console.log(`  DOI URL:     ${result.doi_url}`);
-        }
-        if (result.ezid_identifier) {
-          console.log(`  EZID ID:     ${result.ezid_identifier}`);
+        if (result.metadata_warning) {
+          console.log(chalk.yellow(`  Warning:     ${result.metadata_warning}`));
         }
         console.log();
 

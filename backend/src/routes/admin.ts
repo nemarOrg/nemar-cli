@@ -54,7 +54,7 @@ import {
   uploadFile,
 } from "../services/zenodo";
 import { bidsToDataCite, buildDataCiteXml } from "../services/datacite";
-import { type DoiProvider, type DoiResult, buildOrcidEnrichment, createConceptDoi as dispatchCreateConceptDoi } from "../services/doi";
+import { type DoiProvider, type DoiResult, buildOrcidEnrichment, createConceptDoi as dispatchCreateConceptDoi, parseDoiProvider } from "../services/doi";
 import { extractDoi, updateIdentifier as ezidUpdateIdentifier } from "../services/ezid";
 import type { Bindings, Variables } from "../types/bindings";
 
@@ -1371,7 +1371,7 @@ adminRoutes.get("/datasets/:id/doi", async (c) => {
  * POST /admin/datasets/:id/doi/update - Update EZID DOI metadata or status
  *
  * Allows updating metadata (re-generate DataCite XML from BIDS) or
- * changing status (reserved -> public).
+ * changing status (reserved -> public, or public -> unavailable).
  */
 const updateDoiSchema = z.object({
   status: z.enum(["public", "unavailable"]).optional(),
@@ -1422,30 +1422,57 @@ adminRoutes.post(
       );
     }
 
+    if (!c.env.EZID_USERNAME || !c.env.EZID_PASSWORD) {
+      return c.json({ error: "EZID credentials not configured" }, 500);
+    }
+
     const auth = { username: c.env.EZID_USERNAME, password: c.env.EZID_PASSWORD };
 
     try {
       const updateOptions: { status?: "public" | "unavailable"; dataciteXml?: string; target?: string } = {};
+      let metadataRefreshed = false;
 
       // Refresh metadata from BIDS
-      if (body.refresh_metadata && dataset.github_repo) {
-        const repoName = dataset.github_repo.split("/")[1];
-        if (repoName) {
-          const tree = await getTreeAtRef(repoName, "main", c.env.GITHUB_ADMIN_PAT);
-          const descFile = tree.find((f) => f.path === "dataset_description.json");
-          if (descFile) {
-            const content = await getBlobContent(repoName, descFile.sha, c.env.GITHUB_ADMIN_PAT);
-            const bidsDesc = JSON.parse(content) as Record<string, unknown>;
-            const doi = extractDoi(dataset.ezid_identifier);
-            const enrichment = buildOrcidEnrichment(
-              bidsDesc,
-              dataset.owner_username,
-              dataset.owner_orcid || undefined,
-            );
-            const metadata = bidsToDataCite(datasetId, doi, bidsDesc, enrichment);
-            updateOptions.dataciteXml = buildDataCiteXml(metadata);
-          }
+      if (body.refresh_metadata) {
+        if (!dataset.github_repo) {
+          return c.json(
+            { error: "Cannot refresh metadata: dataset has no GitHub repository" },
+            400,
+          );
         }
+        const repoName = dataset.github_repo.split("/")[1];
+        if (!repoName) {
+          return c.json(
+            { error: "Cannot refresh metadata: invalid github_repo format" },
+            400,
+          );
+        }
+        const tree = await getTreeAtRef(repoName, "main", c.env.GITHUB_ADMIN_PAT);
+        const descFile = tree.find((f) => f.path === "dataset_description.json");
+        if (!descFile) {
+          return c.json(
+            { error: "Cannot refresh metadata: dataset_description.json not found in repo" },
+            400,
+          );
+        }
+        const content = await getBlobContent(repoName, descFile.sha, c.env.GITHUB_ADMIN_PAT);
+        const parsed = JSON.parse(content);
+        if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+          return c.json(
+            { error: "Cannot refresh metadata: dataset_description.json is not a valid JSON object" },
+            400,
+          );
+        }
+        const bidsDesc = parsed as Record<string, unknown>;
+        const doi = extractDoi(dataset.ezid_identifier);
+        const enrichment = buildOrcidEnrichment(
+          bidsDesc,
+          dataset.owner_username,
+          dataset.owner_orcid || undefined,
+        );
+        const metadata = bidsToDataCite(datasetId, doi, bidsDesc, enrichment);
+        updateOptions.dataciteXml = buildDataCiteXml(metadata);
+        metadataRefreshed = true;
       }
 
       // Change status
@@ -1474,6 +1501,7 @@ adminRoutes.post(
         ezid_identifier: dataset.ezid_identifier,
         status: updated.status,
         doi_url: `https://doi.org/${extractDoi(dataset.ezid_identifier)}`,
+        metadata_refreshed: metadataRefreshed,
       });
     } catch (error) {
       console.error("Failed to update DOI:", error);
@@ -2463,7 +2491,7 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
         }
 
         // Determine provider: use dataset's setting or default to ezid
-        const provider = (dataset.doi_provider as "ezid" | "zenodo") || "ezid";
+        const provider = parseDoiProvider(dataset.doi_provider);
 
         // Read BIDS metadata for richer DOI records
         let bidsDesc: Record<string, unknown> | undefined;

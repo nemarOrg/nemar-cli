@@ -699,19 +699,19 @@ export interface CreateConceptDoiRequest {
   provider?: "ezid" | "zenodo";
 }
 
-export interface CreateConceptDoiResponse {
+interface CreateConceptDoiResponseBase {
   message: string;
   concept_doi: string;
-  provider: "ezid" | "zenodo";
-  // Zenodo fields
-  zenodo_id?: number;
-  zenodo_url?: string;
-  // EZID fields
-  ezid_identifier?: string;
-  doi_url?: string;
   setup_command: string;
   warning: string;
+  metadata_warning?: string;
 }
+
+export type CreateConceptDoiResponse = CreateConceptDoiResponseBase &
+  (
+    | { provider: "ezid"; ezid_identifier: string; doi_url: string }
+    | { provider: "zenodo"; zenodo_id: number; zenodo_url: string }
+  );
 
 /**
  * Create concept DOI for a dataset (admin only)
@@ -771,7 +771,7 @@ export interface DoiInfoResponse {
   zenodo_concept_url: string | null;
   zenodo_latest_version_url: string | null;
   ezid_identifier: string | null;
-  ezid_status: string | null;
+  ezid_status: "reserved" | "public" | "unavailable" | null;
   doi_url: string | null;
 }
 
@@ -790,8 +790,9 @@ export interface UpdateDoiRequest {
 export interface UpdateDoiResponse {
   message: string;
   ezid_identifier: string;
-  status: string;
+  status: "reserved" | "public" | "unavailable";
   doi_url: string;
+  metadata_refreshed: boolean;
 }
 
 /**

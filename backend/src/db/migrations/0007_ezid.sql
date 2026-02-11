@@ -14,3 +14,15 @@ UPDATE datasets SET doi_provider = 'zenodo' WHERE zenodo_concept_id IS NOT NULL;
 
 -- Index for EZID identifier lookups
 CREATE INDEX idx_datasets_ezid ON datasets(ezid_identifier);
+
+-- Track all version DOIs (not just latest) for HasVersion relation integrity
+CREATE TABLE IF NOT EXISTS dataset_versions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  dataset_id TEXT NOT NULL REFERENCES datasets(dataset_id),
+  version TEXT NOT NULL,
+  doi TEXT NOT NULL,
+  provider TEXT NOT NULL DEFAULT 'ezid',
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE(dataset_id, version)
+);
+CREATE INDEX idx_dataset_versions_dataset ON dataset_versions(dataset_id);

@@ -9,6 +9,7 @@ import type { BidsDatasetDescription, DataCiteEnrichment } from "./datacite";
 import { bidsToDataCite, buildDataCiteXml } from "./datacite";
 import {
   type EzidAuth,
+  type EzidStatus,
   PRODUCTION_SHOULDER,
   TEST_SHOULDER,
   extractDoi,
@@ -25,14 +26,18 @@ import {
 
 export type DoiProvider = "ezid" | "zenodo";
 
-export interface DoiResult {
-  doi: string;
-  provider: DoiProvider;
-  /** Provider-specific record ID (EZID identifier or Zenodo deposition ID) */
-  providerRecordId: string;
-  /** EZID status or "draft" for Zenodo */
-  status: string;
+/** Parse and validate a doi_provider value from the database. */
+export function parseDoiProvider(raw: string | null | undefined, fallback: DoiProvider = "ezid"): DoiProvider {
+  if (raw === "ezid" || raw === "zenodo") return raw;
+  return fallback;
 }
+
+export type { EzidStatus };
+
+/** Discriminated union: provider determines which status values are valid */
+export type DoiResult =
+  | { doi: string; provider: "ezid"; providerRecordId: string; status: EzidStatus }
+  | { doi: string; provider: "zenodo"; providerRecordId: string; status: "draft" };
 
 export interface CreateConceptDoiOptions {
   provider: DoiProvider;
@@ -207,7 +212,9 @@ async function createZenodoConceptDoi(
 
 /**
  * Create a version DOI via EZID.
- * Mints a new DOI with IsVersionOf relation to the concept DOI.
+ * Mints a new DOI with IsVersionOf relation to the concept DOI,
+ * immediately makes it public, and updates the concept DOI to
+ * include HasVersion back-references to all versions.
  */
 export async function createEzidVersionDoi(
   env: EzidEnv,
@@ -219,6 +226,8 @@ export async function createEzidVersionDoi(
     githubRepo: string;
     sandbox?: boolean;
     enrichment?: DataCiteEnrichment;
+    /** Previously published version DOIs to preserve in concept HasVersion relations */
+    existingVersionDois?: string[];
   },
 ): Promise<DoiResult> {
   if (!env.EZID_USERNAME || !env.EZID_PASSWORD) {
@@ -276,8 +285,16 @@ export async function createEzidVersionDoi(
   // Non-fatal: the version DOI is already public at this point, so we log but
   // do not throw if the concept update fails.
   try {
+    // Include all version DOIs (existing + new) so we don't overwrite previous HasVersion relations
+    const allVersionDois = [
+      ...(opts.existingVersionDois || []).map((doi) => ({
+        doi,
+        relationType: "HasVersion" as const,
+      })),
+      { doi: actualDoi, relationType: "HasVersion" as const },
+    ];
     const conceptEnrichment: DataCiteEnrichment = {
-      relatedDois: [{ doi: actualDoi, relationType: "HasVersion" }],
+      relatedDois: allVersionDois,
     };
     const conceptMetadata = bidsToDataCite(opts.datasetId, conceptDoi, opts.bidsDescription, conceptEnrichment);
     const conceptXml = buildDataCiteXml(conceptMetadata);
