@@ -105,14 +105,21 @@ ${truncatedReadme}`;
   const jsonMatch = content.match(/```(?:json)?\s*([\s\S]*?)```/) || [null, content];
   const jsonStr = (jsonMatch[1] || content).trim();
 
-  const parsed = JSON.parse(jsonStr) as Record<string, unknown>;
+  let parsed: Record<string, unknown>;
+  try {
+    parsed = JSON.parse(jsonStr) as Record<string, unknown>;
+  } catch (parseErr) {
+    throw new Error(
+      `LLM returned invalid JSON: ${parseErr instanceof Error ? parseErr.message : String(parseErr)}`,
+    );
+  }
   return validateLlmResult(parsed);
 }
 
 /**
  * Validate and clean the LLM response to match the expected schema.
  */
-function validateLlmResult(raw: Record<string, unknown>): LlmEnrichmentResult {
+export function validateLlmResult(raw: Record<string, unknown>): LlmEnrichmentResult {
   const result: LlmEnrichmentResult = {};
 
   if (typeof raw.description === "string" && raw.description) {

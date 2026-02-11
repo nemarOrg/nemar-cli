@@ -60,6 +60,7 @@ import {
   cloneDataset,
   commitRevert,
   createRevertBranch,
+  formatBytes,
   getVersionCommit,
   listDatasetVersions,
   pushBranch,
@@ -624,7 +625,7 @@ ciCommand
 adminCommand.addCommand(ciCommand);
 
 // ============================================================================
-// DOI (placeholder for future implementation)
+// DOI Management
 // ============================================================================
 
 const doiCommand = new Command("doi").description("DOI management");
@@ -1001,8 +1002,16 @@ doiCommand
       let doiInfo;
       try {
         doiInfo = await getDoiInfo(datasetId);
-      } catch {
-        // No DOI info
+      } catch (doiErr) {
+        if (doiErr instanceof ApiError && doiErr.statusCode === 404) {
+          // No DOI exists yet
+        } else {
+          console.log(
+            chalk.yellow(
+              `  Warning: Could not fetch DOI info: ${doiErr instanceof Error ? doiErr.message : String(doiErr)}`,
+            ),
+          );
+        }
       }
 
       if (doiInfo?.concept_doi) {
@@ -1184,7 +1193,7 @@ doiCommand
       const statsSpinner = ora("Computing dataset sizes and formats...").start();
       try {
         const filesInfo = await getDatasetFiles(datasetId);
-        const totalSizeStr = formatDatasetSize(filesInfo.total_size);
+        const totalSizeStr = formatBytes(filesInfo.total_size);
         enrichment.sizes = [`${totalSizeStr} (${filesInfo.file_count} files)`];
         enrichment.formats = filesInfo.extensions;
         statsSpinner.succeed(
@@ -1914,11 +1923,3 @@ Examples:
       process.exit(1);
     }
   });
-
-function formatDatasetSize(bytes: number): string {
-  if (bytes === 0) return "0 B";
-  const units = ["B", "KB", "MB", "GB", "TB"];
-  const i = Math.floor(Math.log(bytes) / Math.log(1024));
-  const size = bytes / 1024 ** i;
-  return `${size.toFixed(i > 0 ? 1 : 0)} ${units[i]}`;
-}

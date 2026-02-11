@@ -1081,6 +1081,7 @@ export interface S3LockResponse {
 // Enrichment
 // ============================================================================
 
+/** Must match NemarMetadata in backend/src/services/datacite.ts */
 export interface NemarMetadataPayload {
   version: "1.0";
   authors?: Record<string, { orcid?: string; affiliation?: string }>;

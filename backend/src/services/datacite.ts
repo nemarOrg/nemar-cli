@@ -43,6 +43,21 @@ export type RelationType =
   | "IsIdenticalTo" | "IsCollectedBy" | "Collects" | "IsRequiredBy"
   | "Requires" | "IsObsoletedBy" | "Obsoletes";
 
+const VALID_RELATION_TYPES = new Set<string>([
+  "IsCitedBy", "Cites", "IsSupplementTo", "IsSupplementedBy",
+  "IsContinuedBy", "Continues", "IsDescribedBy", "Describes",
+  "HasMetadata", "IsMetadataFor", "HasVersion", "IsVersionOf",
+  "IsNewVersionOf", "IsPreviousVersionOf", "IsPartOf", "HasPart",
+  "IsReferencedBy", "References", "IsDocumentedBy", "Documents",
+  "IsCompiledBy", "Compiles", "IsVariantFormOf", "IsOriginalFormOf",
+  "IsIdenticalTo", "IsCollectedBy", "Collects", "IsRequiredBy",
+  "Requires", "IsObsoletedBy", "Obsoletes",
+]);
+
+export function isValidRelationType(value: string): value is RelationType {
+  return VALID_RELATION_TYPES.has(value);
+}
+
 export type DescriptionType =
   | "Abstract" | "Methods" | "SeriesInformation" | "TableOfContents"
   | "TechnicalInfo" | "Other";
@@ -278,10 +293,12 @@ export function nemarMetadataToEnrichment(
   if (nemarMeta.relatedDois) {
     enrichment.relatedDois = [
       ...(enrichment.relatedDois || []),
-      ...nemarMeta.relatedDois.map((r) => ({
-        doi: r.doi,
-        relationType: r.relationType as RelationType,
-      })),
+      ...nemarMeta.relatedDois
+        .filter((r) => isValidRelationType(r.relationType))
+        .map((r) => ({
+          doi: r.doi,
+          relationType: r.relationType as RelationType,
+        })),
     ];
   }
 

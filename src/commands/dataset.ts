@@ -504,8 +504,12 @@ Examples:
               const user = await getCurrentUser();
               uploaderOrcid = user.orcid || undefined;
               uploaderUsername = user.username;
-            } catch {
-              // Not critical; continue without
+            } catch (userErr) {
+              console.log(
+                chalk.gray(
+                  `  Could not fetch profile: ${userErr instanceof Error ? userErr.message : String(userErr)}`,
+                ),
+              );
             }
 
             console.log();
@@ -561,8 +565,10 @@ Examples:
             }
             console.log();
           }
-        } catch {
-          // Non-critical; continue without ORCID collection
+        } catch (orcidErr) {
+          const msg = orcidErr instanceof Error ? orcidErr.message : String(orcidErr);
+          console.log(chalk.yellow(`  Could not collect ORCIDs: ${msg}`));
+          console.log(chalk.gray("  Continuing without author enrichment."));
         }
       }
     }
