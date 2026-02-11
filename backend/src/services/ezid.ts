@@ -24,21 +24,29 @@ export interface EzidAuth {
   password: string;
 }
 
-export interface EzidMintOptions {
+interface EzidMintOptionsBase {
   shoulder: string;
   status?: EzidStatus;
   target?: string;
   profile?: string;
-  dataciteXml?: string;
-  /** Simple ANVL datacite fields (used when dataciteXml is not provided) */
-  dataciteFields?: {
-    creator: string;
-    title: string;
-    publisher: string;
-    publicationyear: string;
-    resourcetype: string;
-  };
 }
+
+/** dataciteXml and dataciteFields are mutually exclusive. */
+export type EzidMintOptions = EzidMintOptionsBase & (
+  | { dataciteXml: string; dataciteFields?: never }
+  | {
+    /** Simple ANVL datacite fields (used when dataciteXml is not provided) */
+    dataciteFields: {
+      creator: string;
+      title: string;
+      publisher: string;
+      publicationyear: string;
+      resourcetype: string;
+    };
+    dataciteXml?: never;
+  }
+  | { dataciteXml?: never; dataciteFields?: never }
+);
 
 export interface EzidUpdateOptions {
   status?: EzidStatus;
@@ -49,9 +57,13 @@ export interface EzidUpdateOptions {
 export interface EzidIdentifier {
   identifier: string;
   status: EzidStatus;
+  /** Reason string when status is "unavailable" (from "unavailable | reason") */
+  unavailableReason?: string;
   target: string;
   profile: string;
+  /** Unix epoch seconds */
   created: number;
+  /** Unix epoch seconds */
   updated: number;
   owner: string;
   ownergroup: string;
@@ -77,11 +89,17 @@ export function percentEncode(value: string): string {
 
 /**
  * Percent-decode an ANVL value.
+ * Uses decodeURIComponent for proper multi-byte UTF-8 handling.
  */
 export function percentDecode(value: string): string {
-  return value.replace(/%([0-9A-Fa-f]{2})/g, (_, hex) =>
-    String.fromCharCode(parseInt(hex, 16)),
-  );
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    // Fall back to byte-level decoding if not valid percent-encoded UTF-8
+    return value.replace(/%([0-9A-Fa-f]{2})/g, (_, hex) =>
+      String.fromCharCode(parseInt(hex, 16)),
+    );
+  }
 }
 
 /**
@@ -108,7 +126,8 @@ export function decodeAnvl(body: string): { status: string; fields: Record<strin
 
     // Continuation lines start with whitespace
     if (/^\s/.test(line) && i > 1) {
-      const lastKey = Object.keys(fields).pop();
+      const keys = Object.keys(fields);
+      const lastKey = keys[keys.length - 1];
       if (lastKey) {
         fields[lastKey] += "\n" + percentDecode(line.trim());
       }
@@ -131,6 +150,9 @@ export function decodeAnvl(body: string): { status: string; fields: Record<strin
 // ---------------------------------------------------------------------------
 
 function basicAuthHeader(auth: EzidAuth): string {
+  if (!auth.username || !auth.password) {
+    throw new Error("EZID auth: username and password must not be empty");
+  }
   const encoded = btoa(`${auth.username}:${auth.password}`);
   return `Basic ${encoded}`;
 }
@@ -153,13 +175,28 @@ async function ezidRequest(
     headers["Content-Type"] = "text/plain; charset=UTF-8";
   }
 
-  const response = await fetch(`${EZID_BASE_URL}${path}`, {
-    method,
-    headers,
-    body: body || undefined,
-  });
+  let response: Response;
+  try {
+    response = await fetch(`${EZID_BASE_URL}${path}`, {
+      method,
+      headers,
+      body: body !== undefined ? body : undefined,
+    });
+  } catch (error) {
+    throw new Error(
+      `EZID request failed (${method} ${path}): ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
 
   const responseBody = await response.text();
+
+  // Guard against non-ANVL error responses (HTML error pages, proxy errors)
+  if (!response.ok && !responseBody.startsWith("error: ")) {
+    throw new Error(
+      `EZID HTTP error (${response.status} ${response.statusText}): ${responseBody.substring(0, 200)}`,
+    );
+  }
+
   return { status: response.status, body: responseBody };
 }
 
@@ -171,16 +208,29 @@ function parseStatusLine(body: string): { success: boolean; message: string } {
   if (firstLine.startsWith("error: ")) {
     return { success: false, message: firstLine.substring(7) };
   }
-  return { success: false, message: firstLine };
+  return { success: false, message: `Unexpected EZID response: "${firstLine.substring(0, 100)}"` };
+}
+
+function parseEzidStatus(rawStatus: string | undefined): { status: EzidStatus; unavailableReason?: string } {
+  if (!rawStatus) return { status: "reserved" };
+  if (rawStatus === "reserved" || rawStatus === "public") return { status: rawStatus };
+  if (rawStatus.startsWith("unavailable")) {
+    const pipeIdx = rawStatus.indexOf(" | ");
+    const reason = pipeIdx !== -1 ? rawStatus.substring(pipeIdx + 3) : undefined;
+    return { status: "unavailable", unavailableReason: reason };
+  }
+  return { status: rawStatus as EzidStatus };
 }
 
 function parseIdentifier(anvlBody: string): EzidIdentifier {
   const { status, fields } = decodeAnvl(anvlBody);
   const parsed = parseStatusLine(status);
+  const { status: ezidStatus, unavailableReason } = parseEzidStatus(fields._status);
 
   return {
     identifier: parsed.message,
-    status: (fields._status || "reserved") as EzidStatus,
+    status: ezidStatus,
+    unavailableReason,
     target: fields._target || "",
     profile: fields._profile || "datacite",
     created: parseInt(fields._created || "0", 10),
@@ -329,6 +379,10 @@ export async function makePublic(
 /**
  * Mark a public identifier as unavailable (tombstone).
  * The DOI still exists but resolves to a tombstone page.
+ *
+ * Note: This bypasses updateIdentifier because the EZID API requires
+ * the status value "unavailable | <reason>" which is not representable
+ * as an EzidStatus literal.
  */
 export async function makeUnavailable(
   auth: EzidAuth,
@@ -355,9 +409,7 @@ export async function makeUnavailable(
  * Get the DOI resolver URL for an identifier.
  */
 export function getDoiUrl(identifier: string): string {
-  // Strip "doi:" prefix if present
-  const doi = identifier.startsWith("doi:") ? identifier.substring(4) : identifier;
-  return `https://doi.org/${doi}`;
+  return `https://doi.org/${extractDoi(identifier)}`;
 }
 
 /**

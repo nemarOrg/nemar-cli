@@ -45,6 +45,24 @@ describe("ANVL encoding", () => {
     expect(percentDecode("return%0Dhere")).toBe("return\rhere");
   });
 
+  test("percentDecode handles combined encodings", () => {
+    expect(percentDecode("a%25b%0Ac%0Dd")).toBe("a%b\nc\rd");
+  });
+
+  test("percentDecode handles multi-byte UTF-8", () => {
+    // e-acute encoded as UTF-8 percent-encoded
+    expect(percentDecode("%C3%A9")).toBe("\u00e9");
+    // CJK character
+    expect(percentDecode("%E4%B8%AD")).toBe("\u4e2d");
+  });
+
+  test("percentEncode/percentDecode roundtrip", () => {
+    const values = ["hello%world\nnew\rline", "plain text", "100% done\n"];
+    for (const v of values) {
+      expect(percentDecode(percentEncode(v))).toBe(v);
+    }
+  });
+
   test("encodeAnvl formats key-value pairs", () => {
     const result = encodeAnvl({
       _target: "https://example.com",
@@ -53,12 +71,55 @@ describe("ANVL encoding", () => {
     expect(result).toBe("_target: https://example.com\n_status: reserved");
   });
 
+  test("encodeAnvl preserves colons in values", () => {
+    const result = encodeAnvl({ _target: "https://nemar.org:8080/path" });
+    expect(result).toBe("_target: https://nemar.org:8080/path");
+    expect(result).not.toContain("%3A");
+  });
+
   test("decodeAnvl parses response", () => {
     const body = "success: doi:10.5072/FK2TEST\n_target: https%3A//example.com\n_status: reserved";
     const { status, fields } = decodeAnvl(body);
     expect(status).toBe("success: doi:10.5072/FK2TEST");
     expect(fields._target).toBe("https://example.com");
     expect(fields._status).toBe("reserved");
+  });
+
+  test("decodeAnvl handles continuation lines", () => {
+    const body = [
+      "success: doi:10.5072/FK2TEST",
+      "datacite: <?xml version=\"1.0\"?>",
+      " <resource>",
+      " <title>Test</title>",
+      " </resource>",
+      "_status: reserved",
+    ].join("\n");
+
+    const { fields } = decodeAnvl(body);
+    expect(fields.datacite).toContain("<?xml");
+    expect(fields.datacite).toContain("<title>Test</title>");
+    expect(fields.datacite).toContain("</resource>");
+    expect(fields._status).toBe("reserved");
+  });
+
+  test("decodeAnvl handles empty body", () => {
+    const { status, fields } = decodeAnvl("");
+    expect(status).toBe("");
+    expect(Object.keys(fields)).toHaveLength(0);
+  });
+
+  test("decodeAnvl handles status-only body", () => {
+    const { status, fields } = decodeAnvl("success: ok");
+    expect(status).toBe("success: ok");
+    expect(Object.keys(fields)).toHaveLength(0);
+  });
+
+  test("decodeAnvl skips lines without colon-space delimiter", () => {
+    const body = "success: test\n_status: reserved\nmalformed_line\n_target: http://x";
+    const { fields } = decodeAnvl(body);
+    expect(fields._status).toBe("reserved");
+    expect(fields._target).toBe("http://x");
+    expect(Object.keys(fields)).toHaveLength(2);
   });
 });
 

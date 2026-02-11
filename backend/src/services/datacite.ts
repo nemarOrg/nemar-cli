@@ -9,6 +9,45 @@
  */
 
 // ---------------------------------------------------------------------------
+// DataCite controlled vocabularies (kernel-4 schema)
+// ---------------------------------------------------------------------------
+
+export type ResourceTypeGeneral =
+  | "Audiovisual" | "Book" | "BookChapter" | "Collection"
+  | "ComputationalNotebook" | "ConferencePaper" | "ConferenceProceeding"
+  | "DataPaper" | "Dataset" | "Dissertation" | "Event" | "Image"
+  | "InteractiveResource" | "Journal" | "JournalArticle" | "Model"
+  | "OutputManagementPlan" | "PeerReview" | "PhysicalObject" | "Preprint"
+  | "Report" | "Service" | "Software" | "Sound" | "Standard" | "Text"
+  | "Workflow" | "Other";
+
+export type ContributorType =
+  | "ContactPerson" | "DataCollector" | "DataCurator" | "DataManager"
+  | "Distributor" | "Editor" | "HostingInstitution" | "Producer"
+  | "ProjectLeader" | "ProjectManager" | "ProjectMember"
+  | "RegistrationAgency" | "RegistrationAuthority" | "RelatedPerson"
+  | "Researcher" | "ResearchGroup" | "RightsHolder" | "Sponsor"
+  | "Supervisor" | "WorkPackageLeader" | "Other";
+
+export type DateType =
+  | "Accepted" | "Available" | "Collected" | "Copyrighted" | "Created"
+  | "Issued" | "Other" | "Submitted" | "Updated" | "Valid" | "Withdrawn";
+
+export type RelationType =
+  | "IsCitedBy" | "Cites" | "IsSupplementTo" | "IsSupplementedBy"
+  | "IsContinuedBy" | "Continues" | "IsDescribedBy" | "Describes"
+  | "HasMetadata" | "IsMetadataFor" | "HasVersion" | "IsVersionOf"
+  | "IsNewVersionOf" | "IsPreviousVersionOf" | "IsPartOf" | "HasPart"
+  | "IsReferencedBy" | "References" | "IsDocumentedBy" | "Documents"
+  | "IsCompiledBy" | "Compiles" | "IsVariantFormOf" | "IsOriginalFormOf"
+  | "IsIdenticalTo" | "IsCollectedBy" | "Collects" | "IsRequiredBy"
+  | "Requires" | "IsObsoletedBy" | "Obsoletes";
+
+export type DescriptionType =
+  | "Abstract" | "Methods" | "SeriesInformation" | "TableOfContents"
+  | "TechnicalInfo" | "Other";
+
+// ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
 
@@ -24,20 +63,20 @@ export interface DataCiteCreator {
 
 export interface DataCiteContributor {
   name: string;
-  contributorType: string;
+  contributorType: ContributorType;
   nameType?: "Personal" | "Organizational";
   affiliation?: string;
 }
 
 export interface DataCiteDate {
   date: string; // ISO 8601 date or range (YYYY-MM-DD or YYYY-MM-DD/YYYY-MM-DD)
-  dateType: string;
+  dateType: DateType;
 }
 
 export interface DataCiteRelatedIdentifier {
   identifier: string;
   relatedIdentifierType: "DOI" | "URL" | "ARK" | "arXiv" | "PMID";
-  relationType: string;
+  relationType: RelationType;
 }
 
 export interface DataCiteRights {
@@ -49,7 +88,7 @@ export interface DataCiteRights {
 
 export interface DataCiteDescription {
   description: string;
-  descriptionType: "Abstract" | "Methods" | "SeriesInformation" | "TableOfContents" | "TechnicalInfo" | "Other";
+  descriptionType: DescriptionType;
 }
 
 export interface DataCiteFundingReference {
@@ -67,7 +106,7 @@ export interface DataCiteMetadata {
   titles: string[];
   publisher: string;
   publicationYear: number;
-  resourceTypeGeneral: string;
+  resourceTypeGeneral: ResourceTypeGeneral;
   resourceTypeSpecific?: string;
 
   // Recommended
@@ -91,12 +130,17 @@ export interface DataCiteMetadata {
 /**
  * Extended metadata not available from BIDS, provided by user enrichment.
  */
+export interface AuthorEnrichment {
+  orcid?: string;
+  affiliation?: string;
+  ror?: string; // ROR identifier for the affiliation
+}
+
 export interface DataCiteEnrichment {
-  orcids?: Record<string, string>; // author name -> ORCID
-  affiliations?: Record<string, string>; // author name -> affiliation
-  rors?: Record<string, string>; // affiliation -> ROR
+  /** Per-author metadata, keyed by author name as it appears in BIDS Authors. */
+  authors?: Record<string, AuthorEnrichment>;
   keywords?: string[];
-  relatedDois?: Array<{ doi: string; relationType?: string }>;
+  relatedDois?: Array<{ doi: string; relationType?: RelationType }>;
   fundingInfo?: DataCiteFundingReference[];
   description?: string;
   methodsDescription?: string;
@@ -155,8 +199,26 @@ function buildContributorXml(contributor: DataCiteContributor): string {
 
 /**
  * Build a complete DataCite kernel-4 XML document from metadata.
+ * Validates mandatory fields before generating XML.
  */
 export function buildDataCiteXml(metadata: DataCiteMetadata): string {
+  // Validate mandatory DataCite fields
+  if (!metadata.identifier) {
+    throw new Error("DataCite XML: identifier is required");
+  }
+  if (!metadata.creators || metadata.creators.length === 0) {
+    throw new Error("DataCite XML: at least one creator is required");
+  }
+  if (!metadata.titles || metadata.titles.length === 0) {
+    throw new Error("DataCite XML: at least one title is required");
+  }
+  if (!metadata.publisher) {
+    throw new Error("DataCite XML: publisher is required");
+  }
+  if (!Number.isFinite(metadata.publicationYear)) {
+    throw new Error("DataCite XML: publicationYear must be a valid number");
+  }
+
   const lines: string[] = [];
 
   lines.push('<?xml version="1.0" encoding="UTF-8"?>');
@@ -330,8 +392,21 @@ export function buildDataCiteXml(metadata: DataCiteMetadata): string {
 }
 
 // ---------------------------------------------------------------------------
-// BIDS to DataCite mapping
+// BIDS types and mapping
 // ---------------------------------------------------------------------------
+
+/** Fields from BIDS dataset_description.json used for DataCite mapping. */
+export interface BidsDatasetDescription {
+  Name?: string;
+  Authors?: string[];
+  License?: string;
+  Version?: string;
+  DatasetType?: string;
+  BIDSVersion?: string;
+  HowToAcknowledge?: string;
+  ReferencesAndLinks?: string[];
+  Funding?: string[];
+}
 
 /**
  * Parse a "Last, First" author string into structured name parts.
@@ -404,31 +479,38 @@ export function mapModalityToResourceType(modality: string | string[] | undefine
 /**
  * Convert BIDS dataset_description.json and optional enrichment data
  * into a full DataCiteMetadata object.
+ *
+ * Accepts either a typed BidsDatasetDescription or Record<string, unknown>
+ * for flexibility with raw JSON.
  */
 export function bidsToDataCite(
   datasetId: string,
   doi: string,
-  bidsDescription: Record<string, unknown>,
+  bidsDescription: BidsDatasetDescription | Record<string, unknown>,
   enrichment?: DataCiteEnrichment,
 ): DataCiteMetadata {
+  // Safely coerce fields from potentially untyped input
+  const rawAuthors = bidsDescription.Authors;
+  const authorList: string[] = Array.isArray(rawAuthors)
+    ? rawAuthors.filter((a): a is string => typeof a === "string")
+    : typeof rawAuthors === "string"
+      ? [rawAuthors]
+      : [];
+
   // Parse creators from BIDS Authors
-  const authors = (bidsDescription.Authors as string[]) || [];
-  const creators: DataCiteCreator[] = authors.map((author) => {
+  const creators: DataCiteCreator[] = authorList.map((author) => {
     const parsed = parseAuthorName(author);
     const creator: DataCiteCreator = {
       name: parsed.name,
       givenName: parsed.givenName,
       familyName: parsed.familyName,
     };
-    // Apply enrichment
-    if (enrichment?.orcids?.[author]) {
-      creator.orcid = enrichment.orcids[author];
-    }
-    if (enrichment?.affiliations?.[author]) {
-      creator.affiliation = enrichment.affiliations[author];
-      if (enrichment.rors?.[creator.affiliation]) {
-        creator.ror = enrichment.rors[creator.affiliation];
-      }
+    // Apply per-author enrichment
+    const authorData = enrichment?.authors?.[author];
+    if (authorData) {
+      if (authorData.orcid) creator.orcid = authorData.orcid;
+      if (authorData.affiliation) creator.affiliation = authorData.affiliation;
+      if (authorData.ror) creator.ror = authorData.ror;
     }
     return creator;
   });
@@ -439,17 +521,21 @@ export function bidsToDataCite(
   }
 
   // Titles
-  const title = (bidsDescription.Name as string) || datasetId;
+  const rawName = bidsDescription.Name;
+  const title = (typeof rawName === "string" ? rawName : undefined) || datasetId;
 
   // License
-  const licenseStr = bidsDescription.License as string | undefined;
+  const rawLicense = bidsDescription.License;
+  const licenseStr = typeof rawLicense === "string" ? rawLicense : undefined;
   const rights = mapLicense(licenseStr);
 
   // Version
-  const version = bidsDescription.Version as string | undefined;
+  const rawVersion = bidsDescription.Version;
+  const version = typeof rawVersion === "string" ? rawVersion : undefined;
 
   // Modality-specific resource type
-  const modality = bidsDescription.DatasetType as string | undefined;
+  const rawModality = bidsDescription.DatasetType;
+  const modality = typeof rawModality === "string" ? rawModality : undefined;
   const resourceTypeSpecific = mapModalityToResourceType(modality);
 
   // Dates
@@ -468,11 +554,9 @@ export function bidsToDataCite(
   if (enrichment?.methodsDescription) {
     descriptions.push({ description: enrichment.methodsDescription, descriptionType: "Methods" });
   }
-  if (bidsDescription.HowToAcknowledge) {
-    descriptions.push({
-      description: bidsDescription.HowToAcknowledge as string,
-      descriptionType: "Other",
-    });
+  const rawAck = bidsDescription.HowToAcknowledge;
+  if (typeof rawAck === "string" && rawAck) {
+    descriptions.push({ description: rawAck, descriptionType: "Other" });
   }
 
   // Related identifiers
@@ -487,28 +571,24 @@ export function bidsToDataCite(
     }
   }
   // BIDS ReferencesAndLinks
-  const refs = bidsDescription.ReferencesAndLinks as string[] | undefined;
-  if (refs) {
-    for (const ref of refs) {
-      if (ref.match(/^10\.\d{4,}/)) {
-        relatedIdentifiers.push({
-          identifier: ref,
-          relatedIdentifierType: "DOI",
-          relationType: "References",
-        });
-      }
+  const rawRefs = bidsDescription.ReferencesAndLinks;
+  const refs = Array.isArray(rawRefs) ? rawRefs.filter((r): r is string => typeof r === "string") : [];
+  for (const ref of refs) {
+    if (ref.match(/^10\.\d{4,}/)) {
+      relatedIdentifiers.push({
+        identifier: ref,
+        relatedIdentifierType: "DOI",
+        relationType: "References",
+      });
     }
   }
 
   // Subjects/keywords
-  const subjects: string[] = enrichment?.keywords || [];
+  const subjects: string[] = enrichment?.keywords ? [...enrichment.keywords] : [];
   // Add modality-based subjects
   if (modality) {
-    const mod = Array.isArray(modality) ? modality : [modality];
-    for (const m of mod) {
-      if (!subjects.includes(m.toUpperCase())) {
-        subjects.push(m.toUpperCase());
-      }
+    if (!subjects.includes(modality.toUpperCase())) {
+      subjects.push(modality.toUpperCase());
     }
   }
   if (!subjects.includes("BIDS")) {
@@ -534,8 +614,9 @@ export function bidsToDataCite(
   const fundingReferences: DataCiteFundingReference[] = [];
   if (enrichment?.fundingInfo) {
     fundingReferences.push(...enrichment.fundingInfo);
-  } else if (bidsDescription.Funding) {
-    const funding = bidsDescription.Funding as string[];
+  } else {
+    const rawFunding = bidsDescription.Funding;
+    const funding = Array.isArray(rawFunding) ? rawFunding.filter((f): f is string => typeof f === "string") : [];
     for (const f of funding) {
       fundingReferences.push({ funderName: f });
     }

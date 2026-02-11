@@ -12,6 +12,7 @@ import {
   mapLicense,
   mapModalityToResourceType,
   type DataCiteMetadata,
+  type DataCiteCreator,
 } from "../backend/src/services/datacite";
 
 describe("parseAuthorName", () => {
@@ -51,6 +52,17 @@ describe("mapLicense", () => {
   test("maps CC0", () => {
     const result = mapLicense("CC0");
     expect(result?.rightsIdentifier).toBe("CC0-1.0");
+  });
+
+  test("maps PDDL", () => {
+    const result = mapLicense("PDDL");
+    expect(result?.rightsIdentifier).toBe("PDDL-1.0");
+    expect(result?.rightsURI).toContain("opendatacommons.org");
+  });
+
+  test("maps PDDL-1.0", () => {
+    const result = mapLicense("PDDL-1.0");
+    expect(result?.rightsIdentifier).toBe("PDDL-1.0");
   });
 
   test("returns free text for unknown license", () => {
@@ -207,6 +219,72 @@ describe("buildDataCiteXml", () => {
     expect(xml).toContain("O&apos;Brien &amp; Associates");
     expect(xml).toContain("&lt;special&gt;");
   });
+
+  test("escapes double quotes in attribute values", () => {
+    const metadata: DataCiteMetadata = {
+      identifier: "10.82901/NEMAR.DQ",
+      creators: [{ name: 'Test "Quoted" Name' }],
+      titles: ["Test"],
+      publisher: "NEMAR",
+      publicationYear: 2026,
+      resourceTypeGeneral: "Dataset",
+    };
+
+    const xml = buildDataCiteXml(metadata);
+    expect(xml).toContain("Test &quot;Quoted&quot; Name");
+  });
+
+  test("throws on missing identifier", () => {
+    expect(() =>
+      buildDataCiteXml({
+        identifier: "",
+        creators: [{ name: "Test" }],
+        titles: ["Test"],
+        publisher: "NEMAR",
+        publicationYear: 2026,
+        resourceTypeGeneral: "Dataset",
+      }),
+    ).toThrow("identifier is required");
+  });
+
+  test("throws on empty creators", () => {
+    expect(() =>
+      buildDataCiteXml({
+        identifier: "10.82901/NEMAR.X",
+        creators: [],
+        titles: ["Test"],
+        publisher: "NEMAR",
+        publicationYear: 2026,
+        resourceTypeGeneral: "Dataset",
+      }),
+    ).toThrow("at least one creator");
+  });
+
+  test("throws on empty titles", () => {
+    expect(() =>
+      buildDataCiteXml({
+        identifier: "10.82901/NEMAR.X",
+        creators: [{ name: "Test" }],
+        titles: [],
+        publisher: "NEMAR",
+        publicationYear: 2026,
+        resourceTypeGeneral: "Dataset",
+      }),
+    ).toThrow("at least one title");
+  });
+
+  test("throws on invalid publicationYear", () => {
+    expect(() =>
+      buildDataCiteXml({
+        identifier: "10.82901/NEMAR.X",
+        creators: [{ name: "Test" }],
+        titles: ["Test"],
+        publisher: "NEMAR",
+        publicationYear: NaN,
+        resourceTypeGeneral: "Dataset",
+      }),
+    ).toThrow("publicationYear must be a valid number");
+  });
 });
 
 describe("bidsToDataCite", () => {
@@ -239,8 +317,9 @@ describe("bidsToDataCite", () => {
     };
 
     const enrichment = {
-      orcids: { "Shirazi, Yahya": "0000-0001-2345-6789" },
-      affiliations: { "Shirazi, Yahya": "UCSD" },
+      authors: {
+        "Shirazi, Yahya": { orcid: "0000-0001-2345-6789", affiliation: "UCSD" },
+      },
       keywords: ["EEG", "motor imagery"],
       relatedDois: [{ doi: "10.1234/paper" }],
       description: "A test EEG dataset",
@@ -278,6 +357,41 @@ describe("bidsToDataCite", () => {
 
     expect(metadata.creators).toHaveLength(1);
     expect(metadata.creators[0].name).toBe("(:unav)");
+  });
+
+  test("maps BIDS Funding to fundingReferences without enrichment", () => {
+    const bids = {
+      Name: "Test",
+      Authors: ["Doe, John"],
+      Funding: ["NIH R01-NS12345", "NSF BCS-9876543"],
+    };
+
+    const metadata = bidsToDataCite("nm000103", "10.82901/NEMAR.ABC", bids);
+
+    expect(metadata.fundingReferences).toHaveLength(2);
+    expect(metadata.fundingReferences?.[0]?.funderName).toBe("NIH R01-NS12345");
+    expect(metadata.fundingReferences?.[1]?.funderName).toBe("NSF BCS-9876543");
+  });
+
+  test("prefers enrichment fundingInfo over BIDS Funding", () => {
+    const bids = {
+      Name: "Test",
+      Authors: ["Doe, John"],
+      Funding: ["NIH R01-NS12345"],
+    };
+
+    const enrichment = {
+      fundingInfo: [{
+        funderName: "National Institutes of Health",
+        awardNumber: "R01-NS12345",
+      }],
+    };
+
+    const metadata = bidsToDataCite("nm000103", "10.82901/NEMAR.ABC", bids, enrichment);
+
+    expect(metadata.fundingReferences).toHaveLength(1);
+    expect(metadata.fundingReferences?.[0]?.funderName).toBe("National Institutes of Health");
+    expect(metadata.fundingReferences?.[0]?.awardNumber).toBe("R01-NS12345");
   });
 
   test("parses BIDS ReferencesAndLinks as DOIs", () => {

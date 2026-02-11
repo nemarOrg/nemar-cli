@@ -111,25 +111,15 @@ afterAll(async () => {
   console.log("   [x] Cleanup complete\n");
 });
 
-describe("EZID Sandbox Integration", { timeout: 30000 }, () => {
+describe.skipIf(!SHOULD_RUN)("EZID Sandbox Integration", { timeout: 30000 }, () => {
   describe("Server Connectivity", () => {
     test("EZID server is up", async () => {
-      if (!SHOULD_RUN) {
-        console.log("   Skipping: RUN_EZID_TESTS not set");
-        return;
-      }
-
       const up = await checkStatus();
       expect(up).toBe(true);
       console.log("   [x] EZID server is up");
     });
 
     test("can authenticate with test account", async () => {
-      if (!SHOULD_RUN) {
-        console.log("   Skipping: RUN_EZID_TESTS not set");
-        return;
-      }
-
       await sleep(300);
 
       const response = await fetch(`${EZID_BASE_URL}/login`, {
@@ -146,11 +136,6 @@ describe("EZID Sandbox Integration", { timeout: 30000 }, () => {
 
   describe("Concept DOI Creation (Sandbox)", () => {
     test("can mint reserved DOI on test shoulder", async () => {
-      if (!SHOULD_RUN) {
-        console.log("   Skipping: RUN_EZID_TESTS not set");
-        return;
-      }
-
       await sleep(500);
 
       const minted = await mintIdentifier(EZID_TEST_AUTH, {
@@ -174,11 +159,6 @@ describe("EZID Sandbox Integration", { timeout: 30000 }, () => {
     });
 
     test("can mint DOI with full DataCite XML", async () => {
-      if (!SHOULD_RUN) {
-        console.log("   Skipping: RUN_EZID_TESTS not set");
-        return;
-      }
-
       await sleep(500);
 
       // Build rich DataCite XML using our builder
@@ -267,11 +247,6 @@ describe("EZID Sandbox Integration", { timeout: 30000 }, () => {
     });
 
     test("blocks production shoulder in test", async () => {
-      if (!SHOULD_RUN) {
-        console.log("   Skipping: RUN_EZID_TESTS not set");
-        return;
-      }
-
       // Verify the safety check works
       expect(isTestShoulder(TEST_SHOULDER)).toBe(true);
       expect(isTestShoulder(PRODUCTION_SHOULDER)).toBe(false);
@@ -281,11 +256,6 @@ describe("EZID Sandbox Integration", { timeout: 30000 }, () => {
 
   describe("DOI Info Retrieval (Sandbox)", () => {
     test("can retrieve minted DOI metadata", async () => {
-      if (!SHOULD_RUN) {
-        console.log("   Skipping: RUN_EZID_TESTS not set");
-        return;
-      }
-
       await sleep(500);
 
       // Mint a DOI first
@@ -319,11 +289,6 @@ describe("EZID Sandbox Integration", { timeout: 30000 }, () => {
     });
 
     test("returns proper error for non-existent DOI", async () => {
-      if (!SHOULD_RUN) {
-        console.log("   Skipping: RUN_EZID_TESTS not set");
-        return;
-      }
-
       await sleep(300);
 
       try {
@@ -339,11 +304,6 @@ describe("EZID Sandbox Integration", { timeout: 30000 }, () => {
 
   describe("Metadata Updates (Sandbox)", () => {
     test("can update target URL", async () => {
-      if (!SHOULD_RUN) {
-        console.log("   Skipping: RUN_EZID_TESTS not set");
-        return;
-      }
-
       await sleep(500);
 
       const minted = await mintIdentifier(EZID_TEST_AUTH, {
@@ -371,11 +331,6 @@ describe("EZID Sandbox Integration", { timeout: 30000 }, () => {
     });
 
     test("can update DataCite XML metadata", async () => {
-      if (!SHOULD_RUN) {
-        console.log("   Skipping: RUN_EZID_TESTS not set");
-        return;
-      }
-
       await sleep(500);
 
       // Mint with basic metadata
@@ -429,11 +384,6 @@ describe("EZID Sandbox Integration", { timeout: 30000 }, () => {
     });
 
     test("can add related identifiers (paper DOIs)", async () => {
-      if (!SHOULD_RUN) {
-        console.log("   Skipping: RUN_EZID_TESTS not set");
-        return;
-      }
-
       await sleep(500);
 
       const minted = await mintIdentifier(EZID_TEST_AUTH, {
@@ -487,11 +437,6 @@ describe("EZID Sandbox Integration", { timeout: 30000 }, () => {
 
   describe("DOI Status Transitions (Sandbox)", () => {
     test("can transition reserved -> public (PERMANENT)", async () => {
-      if (!SHOULD_RUN) {
-        console.log("   Skipping: RUN_EZID_TESTS not set");
-        return;
-      }
-
       await sleep(500);
 
       const minted = await mintIdentifier(EZID_TEST_AUTH, {
@@ -524,11 +469,6 @@ describe("EZID Sandbox Integration", { timeout: 30000 }, () => {
     });
 
     test("can transition public -> unavailable (tombstone)", async () => {
-      if (!SHOULD_RUN) {
-        console.log("   Skipping: RUN_EZID_TESTS not set");
-        return;
-      }
-
       await sleep(500);
 
       // Mint and make public
@@ -562,11 +502,6 @@ describe("EZID Sandbox Integration", { timeout: 30000 }, () => {
     }, 30000);
 
     test("cannot delete public DOI", async () => {
-      if (!SHOULD_RUN) {
-        console.log("   Skipping: RUN_EZID_TESTS not set");
-        return;
-      }
-
       await sleep(500);
 
       // Mint and make public
@@ -593,7 +528,7 @@ describe("EZID Sandbox Integration", { timeout: 30000 }, () => {
         // Should not reach here
         expect(true).toBe(false);
       } catch (error) {
-        expect((error as Error).message).toContain("error");
+        expect((error as Error).message).toContain("EZID delete error");
         console.log("   [x] Public DOI correctly cannot be deleted");
       }
     }, 30000);
@@ -601,11 +536,6 @@ describe("EZID Sandbox Integration", { timeout: 30000 }, () => {
 
   describe("BIDS to DataCite Mapping (Sandbox)", () => {
     test("maps real BIDS metadata to DataCite and mints DOI", async () => {
-      if (!SHOULD_RUN) {
-        console.log("   Skipping: RUN_EZID_TESTS not set");
-        return;
-      }
-
       await sleep(500);
 
       // Simulate a real BIDS dataset_description.json
@@ -629,17 +559,21 @@ describe("EZID Sandbox Integration", { timeout: 30000 }, () => {
       };
 
       const enrichment = {
-        orcids: {
-          "Shirazi, Seyed Yahya": "0000-0001-2345-6789",
-        },
-        affiliations: {
-          "Shirazi, Seyed Yahya": "University of California, San Diego",
-          "Delorme, Arnaud": "University of California, San Diego",
-          "Makeig, Scott": "University of California, San Diego",
+        authors: {
+          "Shirazi, Seyed Yahya": {
+            orcid: "0000-0001-2345-6789",
+            affiliation: "University of California, San Diego",
+          },
+          "Delorme, Arnaud": {
+            affiliation: "University of California, San Diego",
+          },
+          "Makeig, Scott": {
+            affiliation: "University of California, San Diego",
+          },
         },
         keywords: ["EEG", "pediatric", "resting state", "brain development"],
         relatedDois: [
-          { doi: "10.1038/sdata.2017.181", relationType: "IsSupplementTo" },
+          { doi: "10.1038/sdata.2017.181", relationType: "IsSupplementTo" as const },
         ],
         description: "A large-scale pediatric EEG dataset from the Healthy Brain Network initiative.",
       };
@@ -679,11 +613,6 @@ describe("EZID Sandbox Integration", { timeout: 30000 }, () => {
 
   describe("Error Handling (Sandbox)", () => {
     test("rejects invalid credentials", async () => {
-      if (!SHOULD_RUN) {
-        console.log("   Skipping: RUN_EZID_TESTS not set");
-        return;
-      }
-
       await sleep(300);
 
       const badAuth: EzidAuth = {
@@ -705,17 +634,12 @@ describe("EZID Sandbox Integration", { timeout: 30000 }, () => {
         });
         expect(true).toBe(false);
       } catch (error) {
-        expect((error as Error).message).toContain("error");
+        expect((error as Error).message).toContain("EZID");
         console.log(`   [x] Invalid credentials rejected`);
       }
     });
 
     test("rejects invalid metadata in DataCite XML", async () => {
-      if (!SHOULD_RUN) {
-        console.log("   Skipping: RUN_EZID_TESTS not set");
-        return;
-      }
-
       await sleep(300);
 
       // Malformed XML should be rejected by EZID
@@ -727,7 +651,7 @@ describe("EZID Sandbox Integration", { timeout: 30000 }, () => {
         });
         expect(true).toBe(false);
       } catch (error) {
-        expect((error as Error).message).toContain("error");
+        expect((error as Error).message).toContain("EZID mint error");
         console.log("   [x] Invalid DataCite XML rejected");
       }
     });
@@ -735,11 +659,6 @@ describe("EZID Sandbox Integration", { timeout: 30000 }, () => {
 
   describe("Deposition Lifecycle (Sandbox)", () => {
     test("full lifecycle: mint -> update -> make public -> update metadata", async () => {
-      if (!SHOULD_RUN) {
-        console.log("   Skipping: RUN_EZID_TESTS not set");
-        return;
-      }
-
       await sleep(500);
 
       // 1. Mint with basic metadata
