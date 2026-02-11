@@ -264,8 +264,7 @@ describe("DOI provider dispatch functions", () => {
     ).rejects.not.toThrow("EZID credentials not configured");
   });
 
-  test("sandbox without sandbox creds falls through to production creds", async () => {
-    // No sandbox creds, but production creds present: should not throw credential error
+  test("sandbox without sandbox creds throws sandbox credential error", async () => {
     await expect(
       createConceptDoi(
         {
@@ -281,10 +280,10 @@ describe("DOI provider dispatch functions", () => {
           ZENODO_API_KEY: "",
         },
       ),
-    ).rejects.not.toThrow("EZID credentials not configured");
+    ).rejects.toThrow("EZID sandbox credentials not configured");
   });
 
-  test("sandbox without any creds throws credential error", async () => {
+  test("sandbox without any creds throws sandbox credential error", async () => {
     await expect(
       createConceptDoi(
         {
@@ -300,7 +299,7 @@ describe("DOI provider dispatch functions", () => {
           ZENODO_API_KEY: "",
         },
       ),
-    ).rejects.toThrow("EZID credentials not configured");
+    ).rejects.toThrow("EZID sandbox credentials not configured");
   });
 
   test("Zenodo sandbox rejects missing sandbox API key", async () => {

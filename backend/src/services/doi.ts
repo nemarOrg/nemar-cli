@@ -29,6 +29,9 @@ export function parseDoiProvider(
   fallback: DoiProvider = "ezid",
 ): DoiProvider {
   if (raw === "ezid" || raw === "zenodo") return raw;
+  if (raw != null) {
+    console.error(`[doi] Unknown doi_provider "${raw}", falling back to "${fallback}"`);
+  }
   return fallback;
 }
 
@@ -107,9 +110,14 @@ export async function createConceptDoi(
   return createZenodoConceptDoi(options, env);
 }
 
-/** Resolve EZID credentials based on sandbox flag. Prefers sandbox credentials when available; falls through to production credentials if sandbox credentials are missing. */
+/** Resolve EZID credentials based on sandbox flag. Throws if the requested credentials are missing. */
 export function resolveEzidAuth(env: EzidEnv, sandbox?: boolean): EzidAuth {
-  if (sandbox && env.EZID_SANDBOX_USERNAME && env.EZID_SANDBOX_PASSWORD) {
+  if (sandbox) {
+    if (!env.EZID_SANDBOX_USERNAME || !env.EZID_SANDBOX_PASSWORD) {
+      throw new Error(
+        "EZID sandbox credentials not configured. Set EZID_SANDBOX_USERNAME and EZID_SANDBOX_PASSWORD.",
+      );
+    }
     return { username: env.EZID_SANDBOX_USERNAME, password: env.EZID_SANDBOX_PASSWORD };
   }
   if (!env.EZID_USERNAME || !env.EZID_PASSWORD) {
