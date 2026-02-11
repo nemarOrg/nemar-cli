@@ -19,8 +19,10 @@ export interface Bindings {
   RESEND_API_KEY: string;
   ZENODO_API_KEY: string;
   ZENODO_SANDBOX_API_KEY?: string; // Optional - for sandbox testing
-  EZID_USERNAME: string; // EZID DOI service credentials
+  EZID_USERNAME: string; // EZID DOI service credentials (production)
   EZID_PASSWORD: string;
+  EZID_SANDBOX_USERNAME?: string; // EZID test account (for --sandbox)
+  EZID_SANDBOX_PASSWORD?: string;
   GITHUB_WEBHOOK_SECRET?: string; // Optional - for GitHub Actions webhook auth
   TEST_BYPASS_TOKEN?: string; // Optional - for CI/CD rate limit bypass
   ENCRYPTION_KEY?: string; // For encrypting stored credentials

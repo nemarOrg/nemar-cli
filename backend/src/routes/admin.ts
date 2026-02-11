@@ -1019,6 +1019,8 @@ adminRoutes.post(
         {
           EZID_USERNAME: c.env.EZID_USERNAME,
           EZID_PASSWORD: c.env.EZID_PASSWORD,
+          EZID_SANDBOX_USERNAME: c.env.EZID_SANDBOX_USERNAME,
+          EZID_SANDBOX_PASSWORD: c.env.EZID_SANDBOX_PASSWORD,
           ZENODO_API_KEY: c.env.ZENODO_API_KEY,
           ZENODO_SANDBOX_API_KEY: c.env.ZENODO_SANDBOX_API_KEY,
         },
@@ -1422,11 +1424,14 @@ adminRoutes.post(
       );
     }
 
-    if (!c.env.EZID_USERNAME || !c.env.EZID_PASSWORD) {
+    const isSandbox = !!dataset.is_sandbox;
+    const auth = isSandbox && c.env.EZID_SANDBOX_USERNAME && c.env.EZID_SANDBOX_PASSWORD
+      ? { username: c.env.EZID_SANDBOX_USERNAME, password: c.env.EZID_SANDBOX_PASSWORD }
+      : { username: c.env.EZID_USERNAME, password: c.env.EZID_PASSWORD };
+
+    if (!auth.username || !auth.password) {
       return c.json({ error: "EZID credentials not configured" }, 500);
     }
-
-    const auth = { username: c.env.EZID_USERNAME, password: c.env.EZID_PASSWORD };
 
     try {
       const updateOptions: { status?: "public" | "unavailable"; dataciteXml?: string; target?: string } = {};

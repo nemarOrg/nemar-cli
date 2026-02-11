@@ -153,7 +153,12 @@ async function handleEzidVersionDoi(
     const existingVersionDois = versionRows.results.map((r) => r.doi);
 
     const result = await createEzidVersionDoi(
-      { EZID_USERNAME: c.env.EZID_USERNAME, EZID_PASSWORD: c.env.EZID_PASSWORD },
+      {
+        EZID_USERNAME: c.env.EZID_USERNAME,
+        EZID_PASSWORD: c.env.EZID_PASSWORD,
+        EZID_SANDBOX_USERNAME: c.env.EZID_SANDBOX_USERNAME,
+        EZID_SANDBOX_PASSWORD: c.env.EZID_SANDBOX_PASSWORD,
+      },
       {
         datasetId: dataset.dataset_id,
         conceptIdentifier: dataset.ezid_identifier,

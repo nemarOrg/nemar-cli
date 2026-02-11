@@ -57,6 +57,8 @@ export interface CreateConceptDoiOptions {
 export interface EzidEnv {
   EZID_USERNAME: string;
   EZID_PASSWORD: string;
+  EZID_SANDBOX_USERNAME?: string;
+  EZID_SANDBOX_PASSWORD?: string;
 }
 
 export interface ZenodoEnv {
@@ -111,19 +113,22 @@ export async function createConceptDoi(
   return createZenodoConceptDoi(options, env);
 }
 
+/** Resolve EZID credentials based on sandbox flag. Sandbox uses test account if available. */
+function resolveEzidAuth(env: EzidEnv, sandbox?: boolean): EzidAuth {
+  if (sandbox && env.EZID_SANDBOX_USERNAME && env.EZID_SANDBOX_PASSWORD) {
+    return { username: env.EZID_SANDBOX_USERNAME, password: env.EZID_SANDBOX_PASSWORD };
+  }
+  if (!env.EZID_USERNAME || !env.EZID_PASSWORD) {
+    throw new Error("EZID credentials not configured. Set EZID_USERNAME and EZID_PASSWORD secrets.");
+  }
+  return { username: env.EZID_USERNAME, password: env.EZID_PASSWORD };
+}
+
 async function createEzidConceptDoi(
   options: CreateConceptDoiOptions,
   env: EzidEnv,
 ): Promise<DoiResult> {
-  if (!env.EZID_USERNAME || !env.EZID_PASSWORD) {
-    throw new Error("EZID credentials not configured. Set EZID_USERNAME and EZID_PASSWORD secrets.");
-  }
-
-  const auth: EzidAuth = {
-    username: env.EZID_USERNAME,
-    password: env.EZID_PASSWORD,
-  };
-
+  const auth = resolveEzidAuth(env, options.sandbox);
   const shoulder = options.sandbox ? TEST_SHOULDER : PRODUCTION_SHOULDER;
 
   const enrichment: DataCiteEnrichment = buildOrcidEnrichment(
@@ -230,14 +235,7 @@ export async function createEzidVersionDoi(
     existingVersionDois?: string[];
   },
 ): Promise<DoiResult> {
-  if (!env.EZID_USERNAME || !env.EZID_PASSWORD) {
-    throw new Error("EZID credentials not configured. Set EZID_USERNAME and EZID_PASSWORD secrets.");
-  }
-
-  const auth: EzidAuth = {
-    username: env.EZID_USERNAME,
-    password: env.EZID_PASSWORD,
-  };
+  const auth = resolveEzidAuth(env, opts.sandbox);
 
   const shoulder = opts.sandbox ? TEST_SHOULDER : PRODUCTION_SHOULDER;
   const conceptDoi = extractDoi(opts.conceptIdentifier);
