@@ -138,6 +138,7 @@ export interface SignupRequest {
   password: string;
   github_username: string;
   description: string;
+  orcid?: string;
 }
 
 export interface SignupResponse {
@@ -204,6 +205,7 @@ export interface UserInfo {
   username: string;
   email: string;
   github_username: string;
+  orcid?: string | null;
   status: string;
   is_admin: boolean;
   created_at: string;
@@ -694,16 +696,22 @@ export interface CreateConceptDoiRequest {
   description?: string;
   authors?: Array<{ name: string; affiliation?: string }>;
   sandbox?: boolean;
+  provider?: "ezid" | "zenodo";
 }
 
-export interface CreateConceptDoiResponse {
+interface CreateConceptDoiResponseBase {
   message: string;
   concept_doi: string;
-  zenodo_id: number;
-  zenodo_url: string;
   setup_command: string;
   warning: string;
+  metadata_warning?: string;
 }
+
+export type CreateConceptDoiResponse = CreateConceptDoiResponseBase &
+  (
+    | { provider: "ezid"; ezid_identifier: string; doi_url: string }
+    | { provider: "zenodo"; zenodo_id: number; zenodo_url: string }
+  );
 
 /**
  * Create concept DOI for a dataset (admin only)
@@ -759,8 +767,12 @@ export interface DoiInfoResponse {
   name: string;
   concept_doi: string | null;
   latest_version_doi: string | null;
+  doi_provider: "ezid" | "zenodo";
   zenodo_concept_url: string | null;
   zenodo_latest_version_url: string | null;
+  ezid_identifier: string | null;
+  ezid_status: "reserved" | "public" | "unavailable" | null;
+  doi_url: string | null;
 }
 
 /**
@@ -768,6 +780,36 @@ export interface DoiInfoResponse {
  */
 export async function getDoiInfo(datasetId: string): Promise<DoiInfoResponse> {
   return request<DoiInfoResponse>(`/admin/datasets/${datasetId}/doi`, {}, true);
+}
+
+export interface UpdateDoiRequest {
+  status?: "public" | "unavailable";
+  refresh_metadata?: boolean;
+}
+
+export interface UpdateDoiResponse {
+  message: string;
+  ezid_identifier: string;
+  status: "reserved" | "public" | "unavailable";
+  doi_url: string;
+  metadata_refreshed: boolean;
+}
+
+/**
+ * Update EZID DOI metadata or status (admin only)
+ */
+export async function updateDoi(
+  datasetId: string,
+  data: UpdateDoiRequest,
+): Promise<UpdateDoiResponse> {
+  return request<UpdateDoiResponse>(
+    `/admin/datasets/${datasetId}/doi/update`,
+    {
+      method: "POST",
+      body: JSON.stringify(data),
+    },
+    true,
+  );
 }
 
 // ============================================================================

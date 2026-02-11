@@ -293,6 +293,18 @@ export async function signupAction(): Promise<void> {
     },
     {
       type: "input",
+      name: "orcid",
+      message: "ORCID iD (optional, e.g. 0000-0002-1825-0097):",
+      validate: (input) => {
+        if (!input || input.trim() === "") return true;
+        if (!/^\d{4}-\d{4}-\d{4}-\d{3}[\dX]$/.test(input.trim())) {
+          return "ORCID must be in format 0000-0000-0000-000X";
+        }
+        return true;
+      },
+    },
+    {
+      type: "input",
       name: "description",
       message: "Why do you need access to NEMAR? (1-2 sentences):",
       validate: (input) => {
@@ -318,6 +330,7 @@ export async function signupAction(): Promise<void> {
       password: answers.password,
       github_username: answers.github_username,
       description: answers.description.trim(),
+      orcid: answers.orcid?.trim() || undefined,
     });
 
     spinner.succeed("Account created");
