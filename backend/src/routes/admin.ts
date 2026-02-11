@@ -1712,6 +1712,7 @@ adminRoutes.get("/datasets/:id/files", async (c) => {
       files,
     });
   } catch (error) {
+    console.error("Failed to fetch file listing:", error);
     return c.json(
       {
         error: "Failed to fetch file listing",

@@ -9,9 +9,11 @@ import { describe, expect, test } from "bun:test";
 import {
   bidsToDataCite,
   buildDataCiteXml,
+  isValidRelationType,
   nemarMetadataToEnrichment,
   parseNemarMetadata,
 } from "../backend/src/services/datacite";
+import { validateLlmResult } from "../src/lib/llm-enrich";
 import {
   buildConceptIdentifier,
   buildOrcidEnrichment,
@@ -620,5 +622,85 @@ describe("enrichment keywords merged with auto-keywords", () => {
     expect(metadata.subjects).toContain("EEG");
     expect(metadata.subjects).toContain("BIDS");
     expect(metadata.subjects).toContain("neuroscience");
+  });
+});
+
+describe("validateLlmResult", () => {
+  test("valid full response", () => {
+    const result = validateLlmResult({
+      description: "A test dataset",
+      methodsDescription: "EEG recorded at 256Hz",
+      keywords: ["EEG", "motor imagery"],
+      fundingReferences: [{ funderName: "NIH", awardNumber: "R01-MH123" }],
+      relatedDois: [{ doi: "10.1234/test", relationType: "IsSupplementTo" }],
+    });
+    expect(result.description).toBe("A test dataset");
+    expect(result.methodsDescription).toBe("EEG recorded at 256Hz");
+    expect(result.keywords).toEqual(["EEG", "motor imagery"]);
+    expect(result.fundingReferences).toHaveLength(1);
+    expect(result.relatedDois).toHaveLength(1);
+  });
+
+  test("rejects DOIs that don't match pattern", () => {
+    const result = validateLlmResult({
+      relatedDois: [
+        { doi: "10.1234/valid", relationType: "Cites" },
+        { doi: "not-a-doi", relationType: "Cites" },
+        { doi: "10.12/short-prefix", relationType: "Cites" },
+      ],
+    });
+    expect(result.relatedDois).toHaveLength(1);
+    expect(result.relatedDois![0].doi).toBe("10.1234/valid");
+  });
+
+  test("filters invalid funding references", () => {
+    const result = validateLlmResult({
+      fundingReferences: [
+        { funderName: "NIH", awardNumber: "R01" },
+        { notFunderName: "bad" },
+        null,
+        "string",
+      ],
+    });
+    expect(result.fundingReferences).toHaveLength(1);
+    expect(result.fundingReferences![0].funderName).toBe("NIH");
+  });
+
+  test("empty object returns empty result", () => {
+    const result = validateLlmResult({});
+    expect(result).toEqual({});
+  });
+
+  test("non-string description ignored", () => {
+    const result = validateLlmResult({ description: 123 });
+    expect(result.description).toBeUndefined();
+  });
+});
+
+describe("isValidRelationType", () => {
+  test("valid relation types accepted", () => {
+    expect(isValidRelationType("IsSupplementTo")).toBe(true);
+    expect(isValidRelationType("Cites")).toBe(true);
+    expect(isValidRelationType("HasVersion")).toBe(true);
+  });
+
+  test("invalid relation types rejected", () => {
+    expect(isValidRelationType("banana")).toBe(false);
+    expect(isValidRelationType("")).toBe(false);
+    expect(isValidRelationType("issupplementto")).toBe(false);
+  });
+});
+
+describe("nemarMetadataToEnrichment filters invalid relation types", () => {
+  test("invalid relationType filtered out during conversion", () => {
+    const enrichment = nemarMetadataToEnrichment({
+      version: "1.0",
+      relatedDois: [
+        { doi: "10.1234/valid", relationType: "IsSupplementTo" },
+        { doi: "10.1234/invalid", relationType: "NotARelationType" },
+      ],
+    });
+    expect(enrichment.relatedDois).toHaveLength(1);
+    expect(enrichment.relatedDois![0].doi).toBe("10.1234/valid");
   });
 });
