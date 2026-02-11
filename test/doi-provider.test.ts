@@ -251,6 +251,86 @@ describe("DOI provider dispatch functions", () => {
       ),
     ).rejects.toThrow("EZID credentials not configured");
   });
+
+  test("sandbox with sandbox creds does not throw credential error", async () => {
+    // Should get past credential check and fail at network level (mintIdentifier)
+    await expect(
+      createConceptDoi(
+        {
+          provider: "ezid",
+          datasetId: "nm099999",
+          datasetName: "Test",
+          uploaderName: "testuser",
+          sandbox: true,
+        },
+        {
+          EZID_USERNAME: "",
+          EZID_PASSWORD: "",
+          EZID_SANDBOX_USERNAME: "apitest",
+          EZID_SANDBOX_PASSWORD: "testpass",
+          ZENODO_API_KEY: "",
+        },
+      ),
+    ).rejects.not.toThrow("EZID credentials not configured");
+  });
+
+  test("sandbox without sandbox creds falls through to production creds", async () => {
+    // No sandbox creds, but production creds present: should not throw credential error
+    await expect(
+      createConceptDoi(
+        {
+          provider: "ezid",
+          datasetId: "nm099999",
+          datasetName: "Test",
+          uploaderName: "testuser",
+          sandbox: true,
+        },
+        {
+          EZID_USERNAME: "produser",
+          EZID_PASSWORD: "prodpass",
+          ZENODO_API_KEY: "",
+        },
+      ),
+    ).rejects.not.toThrow("EZID credentials not configured");
+  });
+
+  test("sandbox without any creds throws credential error", async () => {
+    await expect(
+      createConceptDoi(
+        {
+          provider: "ezid",
+          datasetId: "nm099999",
+          datasetName: "Test",
+          uploaderName: "testuser",
+          sandbox: true,
+        },
+        {
+          EZID_USERNAME: "",
+          EZID_PASSWORD: "",
+          ZENODO_API_KEY: "",
+        },
+      ),
+    ).rejects.toThrow("EZID credentials not configured");
+  });
+
+  test("Zenodo sandbox rejects missing sandbox API key", async () => {
+    await expect(
+      createConceptDoi(
+        {
+          provider: "zenodo",
+          datasetId: "nm099999",
+          datasetName: "Test",
+          uploaderName: "testuser",
+          sandbox: true,
+        },
+        {
+          EZID_USERNAME: "",
+          EZID_PASSWORD: "",
+          ZENODO_API_KEY: "prod-key",
+        },
+      ),
+    ).rejects.toThrow("Zenodo sandbox API key not configured");
+  });
 });
 
 describe("signup schema ORCID field", () => {

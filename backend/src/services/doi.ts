@@ -34,7 +34,7 @@ export function parseDoiProvider(raw: string | null | undefined, fallback: DoiPr
 
 export type { EzidStatus };
 
-/** Discriminated union: provider determines which status values are valid */
+/** Discriminated union: EZID has a lifecycle (reserved/public/unavailable) while Zenodo concept depositions remain "draft" until published. */
 export type DoiResult =
   | { doi: string; provider: "ezid"; providerRecordId: string; status: EzidStatus }
   | { doi: string; provider: "zenodo"; providerRecordId: string; status: "draft" };
@@ -49,7 +49,7 @@ export interface CreateConceptDoiOptions {
   bidsDescription?: BidsDatasetDescription | Record<string, unknown>;
   /** Uploader's ORCID for auto-injection into creators */
   uploaderOrcid?: string;
-  /** Uploader's name (used as fallback creator) */
+  /** Uploader's name (used for ORCID matching against BIDS authors, and as Zenodo creator) */
   uploaderName: string;
   sandbox?: boolean;
 }
@@ -80,21 +80,15 @@ export function buildOrcidEnrichment(
   }
 
   const authors = bidsDescription.Authors;
-  const authorList: string[] = Array.isArray(authors)
-    ? authors.filter((a): a is string => typeof a === "string")
-    : [];
+  if (!Array.isArray(authors)) return {};
 
-  const enrichment: DataCiteEnrichment = {};
+  const authorList = authors.filter((a): a is string => typeof a === "string");
   const uploaderLower = uploaderName.toLowerCase();
 
-  for (const author of authorList) {
-    if (author.toLowerCase().includes(uploaderLower)) {
-      enrichment.authors = { [author]: { orcid: uploaderOrcid } };
-      break;
-    }
-  }
+  const matched = authorList.find((a) => a.toLowerCase().includes(uploaderLower));
+  if (!matched) return {};
 
-  return enrichment;
+  return { authors: { [matched]: { orcid: uploaderOrcid } } };
 }
 
 /**
@@ -113,8 +107,8 @@ export async function createConceptDoi(
   return createZenodoConceptDoi(options, env);
 }
 
-/** Resolve EZID credentials based on sandbox flag. Sandbox uses test account if available. */
-function resolveEzidAuth(env: EzidEnv, sandbox?: boolean): EzidAuth {
+/** Resolve EZID credentials based on sandbox flag. Prefers sandbox credentials when available; falls through to production credentials if sandbox credentials are missing. */
+export function resolveEzidAuth(env: EzidEnv, sandbox?: boolean): EzidAuth {
   if (sandbox && env.EZID_SANDBOX_USERNAME && env.EZID_SANDBOX_PASSWORD) {
     return { username: env.EZID_SANDBOX_USERNAME, password: env.EZID_SANDBOX_PASSWORD };
   }

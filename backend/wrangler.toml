@@ -39,6 +39,8 @@ S3_BUCKET = "nemar"
 # - ZENODO_SANDBOX_API_KEY
 # - EZID_USERNAME
 # - EZID_PASSWORD
+# - EZID_SANDBOX_USERNAME
+# - EZID_SANDBOX_PASSWORD
 
 # Development environment
 [env.dev]

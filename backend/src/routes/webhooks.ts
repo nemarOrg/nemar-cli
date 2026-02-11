@@ -93,7 +93,7 @@ webhooks.post("/publish-version-doi", async (c) => {
 });
 
 /**
- * Handle EZID version DOI creation
+ * Handle EZID version DOI creation: reads BIDS metadata, mints DOI, updates DB, and generates version manifest.
  */
 async function handleEzidVersionDoi(
   c: WebhookContext,
@@ -243,7 +243,7 @@ async function handleEzidVersionDoi(
 }
 
 /**
- * Handle Zenodo version DOI creation (existing flow)
+ * Handle Zenodo version DOI creation: downloads release, uploads to Zenodo, publishes, and generates version manifest.
  */
 async function handleZenodoVersionDoi(
   c: WebhookContext,
@@ -376,7 +376,7 @@ async function handleZenodoVersionDoi(
 
     return c.json({
       message: "Version DOI published successfully",
-      version: version,
+      version,
       version_doi: published.doi,
       concept_doi: dataset.concept_doi,
       provider: "zenodo",

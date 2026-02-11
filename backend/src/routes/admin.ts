@@ -54,7 +54,7 @@ import {
   uploadFile,
 } from "../services/zenodo";
 import { bidsToDataCite, buildDataCiteXml } from "../services/datacite";
-import { type DoiProvider, type DoiResult, buildOrcidEnrichment, createConceptDoi as dispatchCreateConceptDoi, parseDoiProvider } from "../services/doi";
+import { type DoiProvider, type DoiResult, buildOrcidEnrichment, createConceptDoi as dispatchCreateConceptDoi, parseDoiProvider, resolveEzidAuth } from "../services/doi";
 import { extractDoi, updateIdentifier as ezidUpdateIdentifier } from "../services/ezid";
 import type { Bindings, Variables } from "../types/bindings";
 
@@ -837,8 +837,8 @@ adminRoutes.get("/audit", async (c) => {
 /**
  * POST /admin/datasets/:id/doi/concept - Create concept DOI for a dataset
  *
- * WARNING: DOIs are PERMANENT and cannot be deleted.
- * Creates a pre-reserved DOI via the specified provider (EZID by default, Zenodo as fallback).
+ * WARNING: Public DOIs are PERMANENT and cannot be deleted. Reserved DOIs can be deleted before being made public.
+ * Creates a pre-reserved DOI via the specified provider (EZID by default, or Zenodo if explicitly requested).
  * The DOI is reserved but not published until the first version release.
  */
 const createConceptDoiSchema = z.object({
@@ -1425,11 +1425,18 @@ adminRoutes.post(
     }
 
     const isSandbox = !!dataset.is_sandbox;
-    const auth = isSandbox && c.env.EZID_SANDBOX_USERNAME && c.env.EZID_SANDBOX_PASSWORD
-      ? { username: c.env.EZID_SANDBOX_USERNAME, password: c.env.EZID_SANDBOX_PASSWORD }
-      : { username: c.env.EZID_USERNAME, password: c.env.EZID_PASSWORD };
-
-    if (!auth.username || !auth.password) {
+    let auth;
+    try {
+      auth = resolveEzidAuth(
+        {
+          EZID_USERNAME: c.env.EZID_USERNAME,
+          EZID_PASSWORD: c.env.EZID_PASSWORD,
+          EZID_SANDBOX_USERNAME: c.env.EZID_SANDBOX_USERNAME,
+          EZID_SANDBOX_PASSWORD: c.env.EZID_SANDBOX_PASSWORD,
+        },
+        isSandbox,
+      );
+    } catch {
       return c.json({ error: "EZID credentials not configured" }, 500);
     }
 
@@ -2522,6 +2529,8 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
           {
             EZID_USERNAME: c.env.EZID_USERNAME,
             EZID_PASSWORD: c.env.EZID_PASSWORD,
+            EZID_SANDBOX_USERNAME: c.env.EZID_SANDBOX_USERNAME,
+            EZID_SANDBOX_PASSWORD: c.env.EZID_SANDBOX_PASSWORD,
             ZENODO_API_KEY: c.env.ZENODO_API_KEY,
             ZENODO_SANDBOX_API_KEY: c.env.ZENODO_SANDBOX_API_KEY,
           },
