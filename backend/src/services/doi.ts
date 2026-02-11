@@ -12,9 +12,9 @@ import {
   type EzidStatus,
   PRODUCTION_SHOULDER,
   TEST_SHOULDER,
+  createIdentifier,
   extractDoi,
   makePublic,
-  mintIdentifier,
   updateIdentifier,
 } from "./ezid";
 import {
@@ -27,7 +27,10 @@ import {
 export type DoiProvider = "ezid" | "zenodo";
 
 /** Parse and validate a doi_provider value from the database. */
-export function parseDoiProvider(raw: string | null | undefined, fallback: DoiProvider = "ezid"): DoiProvider {
+export function parseDoiProvider(
+  raw: string | null | undefined,
+  fallback: DoiProvider = "ezid",
+): DoiProvider {
   if (raw === "ezid" || raw === "zenodo") return raw;
   return fallback;
 }
@@ -113,9 +116,27 @@ export function resolveEzidAuth(env: EzidEnv, sandbox?: boolean): EzidAuth {
     return { username: env.EZID_SANDBOX_USERNAME, password: env.EZID_SANDBOX_PASSWORD };
   }
   if (!env.EZID_USERNAME || !env.EZID_PASSWORD) {
-    throw new Error("EZID credentials not configured. Set EZID_USERNAME and EZID_PASSWORD secrets.");
+    throw new Error(
+      "EZID credentials not configured. Set EZID_USERNAME and EZID_PASSWORD secrets.",
+    );
   }
   return { username: env.EZID_USERNAME, password: env.EZID_PASSWORD };
+}
+
+/** Build deterministic concept DOI identifier from dataset ID. */
+export function buildConceptIdentifier(datasetId: string, sandbox?: boolean): string {
+  const prefix = sandbox ? TEST_SHOULDER : PRODUCTION_SHOULDER;
+  return `${prefix}${datasetId.toUpperCase()}`;
+}
+
+/** Build deterministic version DOI identifier from dataset ID and version. */
+export function buildVersionIdentifier(
+  datasetId: string,
+  version: string,
+  sandbox?: boolean,
+): string {
+  const prefix = sandbox ? TEST_SHOULDER : PRODUCTION_SHOULDER;
+  return `${prefix}${datasetId.toUpperCase()}.V${version.toUpperCase()}`;
 }
 
 async function createEzidConceptDoi(
@@ -123,7 +144,6 @@ async function createEzidConceptDoi(
   env: EzidEnv,
 ): Promise<DoiResult> {
   const auth = resolveEzidAuth(env, options.sandbox);
-  const shoulder = options.sandbox ? TEST_SHOULDER : PRODUCTION_SHOULDER;
 
   const enrichment: DataCiteEnrichment = buildOrcidEnrichment(
     options.bidsDescription,
@@ -135,32 +155,26 @@ async function createEzidConceptDoi(
     enrichment.description = options.datasetDescription;
   }
 
-  // Use a placeholder DOI for initial XML (will be replaced after mint)
-  const placeholderDoi = "10.0000/placeholder";
-  const bids = options.bidsDescription || { Name: options.datasetName };
-  const metadata = bidsToDataCite(options.datasetId, placeholderDoi, bids, enrichment);
+  // Deterministic DOI: doi:10.82901/NEMAR.NM000104
+  const fullIdentifier = buildConceptIdentifier(options.datasetId, options.sandbox);
+  const doi = extractDoi(fullIdentifier);
 
-  // Mint the identifier
+  const bids = options.bidsDescription || { Name: options.datasetName };
+  const metadata = bidsToDataCite(options.datasetId, doi, bids, enrichment);
   const dataciteXml = buildDataCiteXml(metadata);
+
   const target = options.githubRepo
     ? `https://github.com/${options.githubRepo}`
     : `https://nemar.org/dataexplorer/detail?dataset_id=${options.datasetId}`;
 
-  const identifier = await mintIdentifier(auth, {
-    shoulder,
+  const identifier = await createIdentifier(auth, fullIdentifier, {
     status: "reserved",
     target,
     dataciteXml,
   });
 
-  // Update the XML with the actual DOI
-  const actualDoi = extractDoi(identifier.identifier);
-  const updatedMetadata = bidsToDataCite(options.datasetId, actualDoi, bids, enrichment);
-  const updatedXml = buildDataCiteXml(updatedMetadata);
-  await updateIdentifier(auth, identifier.identifier, { dataciteXml: updatedXml });
-
   return {
-    doi: actualDoi,
+    doi,
     provider: "ezid",
     providerRecordId: identifier.identifier,
     status: identifier.status,
@@ -230,8 +244,6 @@ export async function createEzidVersionDoi(
   },
 ): Promise<DoiResult> {
   const auth = resolveEzidAuth(env, opts.sandbox);
-
-  const shoulder = opts.sandbox ? TEST_SHOULDER : PRODUCTION_SHOULDER;
   const conceptDoi = extractDoi(opts.conceptIdentifier);
 
   // Build enrichment with version relation
@@ -243,35 +255,24 @@ export async function createEzidVersionDoi(
     ],
   };
 
-  // Use placeholder, then update after mint
-  const placeholderDoi = "10.0000/placeholder";
-  const metadata = bidsToDataCite(opts.datasetId, placeholderDoi, opts.bidsDescription, enrichment);
-  metadata.version = opts.version;
+  // Deterministic DOI: doi:10.82901/NEMAR.NM000104.V1.0.0
+  const fullIdentifier = buildVersionIdentifier(opts.datasetId, opts.version, opts.sandbox);
+  const doi = extractDoi(fullIdentifier);
 
+  const metadata = bidsToDataCite(opts.datasetId, doi, opts.bidsDescription, enrichment);
+  metadata.version = opts.version;
   const dataciteXml = buildDataCiteXml(metadata);
+
   const releaseUrl = `https://github.com/${opts.githubRepo}/releases/tag/v${opts.version}`;
 
-  const identifier = await mintIdentifier(auth, {
-    shoulder,
+  await createIdentifier(auth, fullIdentifier, {
     status: "reserved",
     target: releaseUrl,
     dataciteXml,
   });
 
-  // Update XML with actual DOI
-  const actualDoi = extractDoi(identifier.identifier);
-  const updatedMetadata = bidsToDataCite(
-    opts.datasetId,
-    actualDoi,
-    opts.bidsDescription,
-    enrichment,
-  );
-  updatedMetadata.version = opts.version;
-  const updatedXml = buildDataCiteXml(updatedMetadata);
-  await updateIdentifier(auth, identifier.identifier, { dataciteXml: updatedXml });
-
   // Make the version DOI public
-  await makePublic(auth, identifier.identifier, releaseUrl);
+  await makePublic(auth, fullIdentifier, releaseUrl);
 
   // Update the concept DOI's XML to include HasVersion relation.
   // Non-fatal: the version DOI is already public at this point, so we log but
@@ -279,29 +280,34 @@ export async function createEzidVersionDoi(
   try {
     // Include all version DOIs (existing + new) so we don't overwrite previous HasVersion relations
     const allVersionDois = [
-      ...(opts.existingVersionDois || []).map((doi) => ({
-        doi,
+      ...(opts.existingVersionDois || []).map((d) => ({
+        doi: d,
         relationType: "HasVersion" as const,
       })),
-      { doi: actualDoi, relationType: "HasVersion" as const },
+      { doi, relationType: "HasVersion" as const },
     ];
     const conceptEnrichment: DataCiteEnrichment = {
       relatedDois: allVersionDois,
     };
-    const conceptMetadata = bidsToDataCite(opts.datasetId, conceptDoi, opts.bidsDescription, conceptEnrichment);
+    const conceptMetadata = bidsToDataCite(
+      opts.datasetId,
+      conceptDoi,
+      opts.bidsDescription,
+      conceptEnrichment,
+    );
     const conceptXml = buildDataCiteXml(conceptMetadata);
     await updateIdentifier(auth, opts.conceptIdentifier, { dataciteXml: conceptXml });
   } catch (conceptUpdateError) {
     console.error(
-      `[doi] Version DOI ${actualDoi} is public but concept DOI update failed:`,
+      `[doi] Version DOI ${doi} is public but concept DOI update failed:`,
       conceptUpdateError,
     );
   }
 
   return {
-    doi: actualDoi,
+    doi,
     provider: "ezid",
-    providerRecordId: identifier.identifier,
+    providerRecordId: fullIdentifier,
     status: "public",
   };
 }
