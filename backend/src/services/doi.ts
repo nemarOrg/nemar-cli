@@ -286,11 +286,27 @@ export async function createEzidVersionDoi(
 
   const releaseUrl = `https://github.com/${opts.githubRepo}/releases/tag/v${opts.version}`;
 
-  const identifier = await createIdentifier(auth, fullIdentifier, {
-    status: "reserved",
-    target: releaseUrl,
-    dataciteXml,
-  });
+  let identifier: EzidIdentifier;
+  try {
+    identifier = await createIdentifier(auth, fullIdentifier, {
+      status: "reserved",
+      target: releaseUrl,
+      dataciteXml,
+    });
+  } catch (error) {
+    // Idempotency: if webhook retries after a timeout, the DOI may already exist
+    if (!(error instanceof Error && error.message.includes("already exists"))) {
+      throw error;
+    }
+    // Fetch existing identifier and return early
+    identifier = await getIdentifier(auth, fullIdentifier);
+    return {
+      doi,
+      provider: "ezid",
+      providerRecordId: identifier.identifier,
+      status: identifier.status,
+    };
+  }
 
   // Make the version DOI public
   await makePublic(auth, identifier.identifier, releaseUrl);

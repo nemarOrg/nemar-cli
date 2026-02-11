@@ -51,7 +51,26 @@ webhooks.post("/publish-version-doi", async (c) => {
     return c.json({ error: "Missing required fields: dataset_id, version, release_url" }, 400);
   }
 
-  const { dataset_id, version, release_url, sandbox = false } = body;
+  const { dataset_id, version: rawVersion, release_url, sandbox = false } = body;
+
+  // Normalize version: strip leading "v" or "V" prefix if present
+  const version = rawVersion.replace(/^[vV]/, "");
+
+  // Validate semver format: only stable versions get permanent DOIs.
+  // Pre-release versions (beta, rc, dev) are transient and must not receive
+  // permanent identifiers.
+  if (!/^\d+\.\d+\.\d+$/.test(version)) {
+    console.info(
+      `[webhook] Skipping DOI for ${dataset_id} version "${rawVersion}": not a stable semver`,
+    );
+    return c.json(
+      {
+        error: `Invalid version format: "${rawVersion}". Only stable semver versions (e.g., 1.0.0) are supported for DOI minting.`,
+        skipped: true,
+      },
+      200,
+    );
+  }
 
   // Get dataset from database
   const dataset = await c.env.DB.prepare("SELECT * FROM datasets WHERE dataset_id = ?")
@@ -155,7 +174,11 @@ async function handleEzidVersionDoi(
       try {
         const nemarMetaFile = tree.find((f) => f.path === "nemar_metadata.json");
         if (nemarMetaFile) {
-          const nemarContent = await getBlobContent(repoName, nemarMetaFile.sha, c.env.GITHUB_ADMIN_PAT);
+          const nemarContent = await getBlobContent(
+            repoName,
+            nemarMetaFile.sha,
+            c.env.GITHUB_ADMIN_PAT,
+          );
           const nemarParsed = parseNemarMetadata(JSON.parse(nemarContent));
           if (nemarParsed) {
             enrichment = nemarMetadataToEnrichment(nemarParsed);
