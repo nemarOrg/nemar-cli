@@ -605,6 +605,30 @@ export async function getDataset(datasetId: string): Promise<Dataset> {
   return validateDataset(response.dataset);
 }
 
+// ============================================================================
+// Version History
+// ============================================================================
+
+export interface VersionInfo {
+  version: string;
+  doi: string;
+  provider: "ezid" | "zenodo";
+  created_at: string;
+}
+
+export interface VersionHistoryResponse {
+  dataset_id: string;
+  current_version: string;
+  versions: VersionInfo[];
+}
+
+/**
+ * Get version history for a dataset (requires auth)
+ */
+export async function getVersionHistory(datasetId: string): Promise<VersionHistoryResponse> {
+  return request<VersionHistoryResponse>(`/datasets/${datasetId}/versions`, {}, true);
+}
+
 export interface FileInfo {
   path: string;
   size: number;

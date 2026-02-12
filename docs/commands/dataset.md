@@ -18,7 +18,8 @@ Commands:
   download [options] <dataset-id>           Download a dataset from NEMAR
   status [options] <dataset-id>             Check status of a dataset
   list [options]                            List publicly available datasets on NEMAR
-  version [options] <dataset-id> <version>  Create a new version of a dataset with DOI
+  release [options] <dataset-id>             Create a version bump PR for a dataset
+  update [options] [path]                    Push local changes to a dataset via PR
   request-access <dataset-id>               Request collaborator access to a dataset
   invite <username> <dataset-id>            Invite a user as collaborator to your dataset
   collaborators [options] <dataset-id>      List collaborators for a dataset
@@ -225,20 +226,126 @@ Examples:
   $ nemar dataset list --limit 10        # Show only 10 datasets
 ```
 
-### dataset version
+### dataset release
 
 ```bash
-Usage: nemar dataset version [options] <dataset-id> <version>
+Usage: nemar dataset release [options] <dataset-id>
 
-Create a new version of a dataset with DOI
+Create a version bump PR for a dataset
 
 Arguments:
-  dataset-id           Dataset ID (e.g., nm000104)
-  version              Version tag (e.g., v1.1.0)
+  dataset-id            Dataset ID (e.g., nm000104)
 
 Options:
-  -m, --message <msg>  Version description
-  -h, --help           display help for command
+  --type <type>         Bump type: patch, minor, or major
+  --version <version>   Explicit version (e.g., 2.0.0)
+  --dir <path>          Use existing local clone instead of cloning
+  --monitor             Watch CI checks and offer to merge
+  -y, --yes             Skip confirmation and proceed
+  -h, --help            display help for command
+
+Description:
+  Create a pull request that bumps the dataset version in
+  dataset_description.json. The PR triggers CI checks (BIDS validation,
+  version check). On merge, GitHub Actions tags the release and
+  publishes a version DOI (if a concept DOI exists).
+
+Process:
+  1. Fetches current version from the dataset
+  2. Prompts for bump type (or uses --type/--version)
+  3. Clones the dataset repo (or uses --dir)
+  4. Creates a release/vX.Y.Z branch
+  5. Updates dataset_description.json with the new version
+  6. Pushes and creates a PR via gh CLI
+
+What Happens on PR Merge:
+  - GitHub Actions creates a git tag (vX.Y.Z)
+  - A GitHub Release is published
+  - If a concept DOI exists, a version DOI is minted via EZID
+
+Examples:
+  # Interactive prompt for version bump type
+  $ nemar dataset release nm000104
+
+  # Bump patch version (1.0.0 -> 1.0.1) non-interactively
+  $ nemar dataset release nm000104 --type patch -y
+
+  # Bump minor version (1.0.0 -> 1.1.0)
+  $ nemar dataset release nm000104 --type minor
+
+  # Set an explicit version
+  $ nemar dataset release nm000104 --version 2.0.0
+
+  # Use an existing local clone
+  $ nemar dataset release nm000104 --dir ./nm000104
+
+  # Release and watch CI, merge when ready
+  $ nemar dataset release nm000104 --type patch --monitor -y
+```
+
+### dataset update
+
+```bash
+Usage: nemar dataset update [options] [path]
+
+Push local changes to a dataset via PR
+
+Arguments:
+  path                  Path to local dataset clone (default: current directory)
+
+Options:
+  --bump <type>         Version bump type: patch, minor, or major (default: "patch")
+  --branch <name>       Custom branch name
+  -m, --message <msg>   Commit message
+  --monitor             Watch CI checks and offer to merge
+  -y, --yes             Skip confirmation and proceed
+  -h, --help            display help for command
+
+Description:
+  Push local changes (metadata or data files) to a dataset via a pull
+  request. Automatically bumps the version, commits, pushes, and creates
+  a PR. For data files (annexed), copies them to S3 via git-annex.
+
+  Run this from inside a dataset clone, or pass the path as an argument.
+
+Process:
+  1. Detects dataset ID from git remote
+  2. Categorizes changes into metadata and data files
+  3. Creates an update branch
+  4. Bumps the version in dataset_description.json
+  5. Commits all changes
+  6. If data files exist, uploads to S3 via git-annex
+  7. Pushes and creates a PR via gh CLI
+
+Examples:
+  # Update from current directory (patch bump)
+  $ cd nm000104
+  $ nemar dataset update
+
+  # Update with a specific path and minor bump
+  $ nemar dataset update ./nm000104 --bump minor
+
+  # Update with custom commit message
+  $ nemar dataset update -m "Add new subjects data"
+
+  # Update with custom branch name
+  $ nemar dataset update --branch fix/participant-ages -m "Fix participant ages"
+
+  # Non-interactive with monitoring
+  $ nemar dataset update --bump patch -m "Update events files" --monitor -y
+
+Typical Workflow:
+  1. Clone or get the dataset
+     $ nemar dataset clone nm000104
+     $ cd nm000104
+     $ nemar dataset get .
+
+  2. Make changes to files (add subjects, fix metadata, etc.)
+
+  3. Push changes via PR
+     $ nemar dataset update -m "Add new EEG recordings"
+
+  4. Wait for CI to pass, then merge the PR on GitHub
 ```
 
 ### dataset publish request
