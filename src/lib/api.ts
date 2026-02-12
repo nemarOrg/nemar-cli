@@ -9,6 +9,15 @@ import { getConfig } from "./config.js";
 
 const DEFAULT_API_URL = "https://api.osc.earth/nemar";
 
+/** ORCID identifier format: XXXX-XXXX-XXXX-XXXX (last char may be X) */
+export const ORCID_REGEX = /^\d{4}-\d{4}-\d{4}-\d{3}[\dX]$/;
+
+/** Extract a human-readable message from an unknown error value. */
+export function errorDetail(error: unknown): string {
+  if (error instanceof Error) return error.message;
+  return String(error);
+}
+
 /**
  * API error with status code and message
  */
@@ -23,10 +32,19 @@ export class ApiError extends Error {
   }
 }
 
+const IS_DEV_BUILD = DEFAULT_API_URL.includes("workers.dev");
+
 /**
- * Get the API base URL from config or default
+ * Get the API base URL from config or default.
+ * Dev builds (injected URL) always use the dev backend regardless of stored config.
  */
 function getApiUrl(): string {
+  if (process.env.TEST_API_URL) {
+    return process.env.TEST_API_URL;
+  }
+  if (IS_DEV_BUILD) {
+    return DEFAULT_API_URL;
+  }
   const config = getConfig();
   return config.apiUrl || DEFAULT_API_URL;
 }
@@ -37,7 +55,7 @@ function getApiUrl(): string {
 async function request<T>(
   path: string,
   options: RequestInit = {},
-  authenticated = false,
+  authenticated: boolean | "optional" = false,
 ): Promise<T> {
   const url = `${getApiUrl()}${path}`;
   const headers: Record<string, string> = {
@@ -47,10 +65,12 @@ async function request<T>(
 
   if (authenticated) {
     const config = getConfig();
-    if (!config.apiKey) {
+    if (!config.apiKey && authenticated === true) {
       throw new ApiError(401, "Not authenticated. Run 'nemar auth login' first.");
     }
-    headers.Authorization = `Bearer ${config.apiKey}`;
+    if (config.apiKey) {
+      headers.Authorization = `Bearer ${config.apiKey}`;
+    }
   }
 
   let response: Response;
@@ -127,6 +147,7 @@ export interface SignupRequest {
   password: string;
   github_username: string;
   description: string;
+  orcid?: string;
 }
 
 export interface SignupResponse {
@@ -193,6 +214,7 @@ export interface UserInfo {
   username: string;
   email: string;
   github_username: string;
+  orcid?: string | null;
   status: string;
   is_admin: boolean;
   created_at: string;
@@ -342,6 +364,143 @@ export async function regenerateUserIam(username: string): Promise<RegenerateIam
 }
 
 // ============================================================================
+// Admin - Repository Management
+// ============================================================================
+
+export interface VisibilityResponse {
+  message: string;
+  dataset_id: string;
+  visibility: "public" | "private";
+}
+
+/**
+ * Change dataset repository visibility (admin only)
+ */
+export async function changeVisibility(
+  datasetId: string,
+  visibility: "public" | "private",
+): Promise<VisibilityResponse> {
+  return request<VisibilityResponse>(
+    `/admin/datasets/${datasetId}/visibility`,
+    {
+      method: "PATCH",
+      body: JSON.stringify({ visibility }),
+    },
+    true,
+  );
+}
+
+export interface PublishDatasetResponse {
+  success: boolean;
+  message: string;
+  dataset_id: string;
+  github_url: string;
+  s3_url: string;
+}
+
+/**
+ * Publish a dataset (make public) - owner or admin
+ * This is a one-way operation that cannot be undone
+ */
+export async function publishDataset(datasetId: string): Promise<PublishDatasetResponse> {
+  return request<PublishDatasetResponse>(
+    `/datasets/${datasetId}/publish`,
+    { method: "POST" },
+    true,
+  );
+}
+
+// ============================================================================
+// Admin - CI Management
+// ============================================================================
+
+export interface CiStatusResponse {
+  dataset_id: string;
+  bids_validation: {
+    present: boolean;
+    status: string;
+    url: string | null;
+  };
+  version_check: {
+    present: boolean;
+  };
+}
+
+/**
+ * Get CI workflow status for a dataset (admin only)
+ */
+export async function getCiStatus(datasetId: string): Promise<CiStatusResponse> {
+  return request<CiStatusResponse>(`/admin/datasets/${datasetId}/ci`, {}, true);
+}
+
+export interface AddCiResponse {
+  message: string;
+  dataset_id: string;
+  workflows_deployed: string[];
+}
+
+/**
+ * Deploy CI workflows to a dataset repository (admin only)
+ */
+export async function addCi(datasetId: string): Promise<AddCiResponse> {
+  return request<AddCiResponse>(`/admin/datasets/${datasetId}/ci`, { method: "POST" }, true);
+}
+
+export interface UserCiStatusResponse {
+  dataset_id: string;
+  bids_validation: {
+    present: boolean;
+    status: string;
+    url: string | null;
+  };
+}
+
+/**
+ * Get CI workflow status for a dataset (user-accessible, owner or admin)
+ */
+export async function getUserCiStatus(datasetId: string): Promise<UserCiStatusResponse> {
+  return request<UserCiStatusResponse>(`/datasets/${datasetId}/ci/status`, {}, true);
+}
+
+// ============================================================================
+// Manifests
+// ============================================================================
+
+export interface ManifestFile {
+  key: string;
+  size: number;
+  checksum: string;
+}
+
+export interface VersionManifest {
+  dataset_id: string;
+  version: string;
+  doi: string | null;
+  concept_doi: string | null;
+  created: string;
+  files: Record<string, ManifestFile>;
+}
+
+export interface ManifestListResponse {
+  dataset_id: string;
+  versions: string[];
+}
+
+/**
+ * List available version manifests for a dataset
+ */
+export async function listManifestVersions(datasetId: string): Promise<ManifestListResponse> {
+  return request<ManifestListResponse>(`/datasets/${datasetId}/manifest`, {}, true);
+}
+
+/**
+ * Get a specific version manifest for a dataset
+ */
+export async function getManifest(datasetId: string, version: string): Promise<VersionManifest> {
+  return request<VersionManifest>(`/datasets/${datasetId}/manifest/${version}`, {}, true);
+}
+
+// ============================================================================
 // Datasets
 // ============================================================================
 
@@ -351,7 +510,21 @@ export interface Dataset {
   name: string;
   description: string | null;
   owner_username: string;
-  status: string;
+  /**
+   * Lifecycle state of the dataset.
+   * - active: Dataset is operational
+   * - archived: Dataset is read-only, preserved for historical reference
+   * - deleted: Dataset is soft-deleted, invisible to users
+   */
+  status: "active" | "archived" | "deleted";
+  /**
+   * Access control state.
+   * - private: Only owner and admins can view (default for new datasets)
+   * - public: Visible to all users, accessible via public catalog
+   *
+   * Independent from status: datasets can be active+private, archived+public, etc.
+   */
+  visibility: "public" | "private";
   github_repo: string | null;
   concept_doi: string | null;
   created_at: string;
@@ -363,10 +536,39 @@ export interface DatasetsListResponse {
 }
 
 /**
+ * Validate dataset object has correct status and visibility values
+ * Throws error if validation fails
+ */
+export function validateDataset(data: unknown): Dataset {
+  const d = data as Dataset;
+
+  if (!["active", "archived", "deleted"].includes(d.status)) {
+    throw new Error(`Invalid dataset status: ${d.status}`);
+  }
+
+  // Default to private if visibility not set (older records missing column)
+  if (!d.visibility) {
+    d.visibility = "private";
+  } else if (!["public", "private"].includes(d.visibility)) {
+    throw new Error(`Invalid dataset visibility: ${d.visibility}`);
+  }
+
+  return d;
+}
+
+/**
  * List datasets
  */
-export async function listDatasets(): Promise<DatasetsListResponse> {
-  return request<DatasetsListResponse>("/datasets");
+export async function listDatasets(mine = false): Promise<DatasetsListResponse> {
+  const query = mine ? "?mine=true" : "";
+  const response = await request<DatasetsListResponse>(
+    `/datasets${query}`,
+    {},
+    mine ? true : "optional",
+  );
+  // Validate each dataset in the response
+  response.datasets = response.datasets.map(validateDataset);
+  return response;
 }
 
 interface GetDatasetResponse {
@@ -377,8 +579,8 @@ interface GetDatasetResponse {
  * Get a single dataset by ID
  */
 export async function getDataset(datasetId: string): Promise<Dataset> {
-  const response = await request<GetDatasetResponse>(`/datasets/${datasetId}`);
-  return response.dataset;
+  const response = await request<GetDatasetResponse>(`/datasets/${datasetId}`, {}, "optional");
+  return validateDataset(response.dataset);
 }
 
 export interface FileInfo {
@@ -503,16 +705,22 @@ export interface CreateConceptDoiRequest {
   description?: string;
   authors?: Array<{ name: string; affiliation?: string }>;
   sandbox?: boolean;
+  provider?: "ezid" | "zenodo";
 }
 
-export interface CreateConceptDoiResponse {
+interface CreateConceptDoiResponseBase {
   message: string;
   concept_doi: string;
-  zenodo_id: number;
-  zenodo_url: string;
   setup_command: string;
   warning: string;
+  metadata_warning?: string;
 }
+
+export type CreateConceptDoiResponse = CreateConceptDoiResponseBase &
+  (
+    | { provider: "ezid"; ezid_identifier: string; doi_url: string }
+    | { provider: "zenodo"; zenodo_id: number; zenodo_url: string }
+  );
 
 /**
  * Create concept DOI for a dataset (admin only)
@@ -568,8 +776,12 @@ export interface DoiInfoResponse {
   name: string;
   concept_doi: string | null;
   latest_version_doi: string | null;
+  doi_provider: "ezid" | "zenodo";
   zenodo_concept_url: string | null;
   zenodo_latest_version_url: string | null;
+  ezid_identifier: string | null;
+  ezid_status: "reserved" | "public" | "unavailable" | null;
+  doi_url: string | null;
 }
 
 /**
@@ -577,6 +789,36 @@ export interface DoiInfoResponse {
  */
 export async function getDoiInfo(datasetId: string): Promise<DoiInfoResponse> {
   return request<DoiInfoResponse>(`/admin/datasets/${datasetId}/doi`, {}, true);
+}
+
+export interface UpdateDoiRequest {
+  status?: "public" | "unavailable";
+  refresh_metadata?: boolean;
+}
+
+export interface UpdateDoiResponse {
+  message: string;
+  ezid_identifier: string;
+  status: "reserved" | "public" | "unavailable";
+  doi_url: string;
+  metadata_refreshed: boolean;
+}
+
+/**
+ * Update EZID DOI metadata or status (admin only)
+ */
+export async function updateDoi(
+  datasetId: string,
+  data: UpdateDoiRequest,
+): Promise<UpdateDoiResponse> {
+  return request<UpdateDoiResponse>(
+    `/admin/datasets/${datasetId}/doi/update`,
+    {
+      method: "POST",
+      body: JSON.stringify(data),
+    },
+    true,
+  );
 }
 
 // ============================================================================
@@ -697,4 +939,238 @@ export async function getSandboxStatus(): Promise<{
     sandbox_dataset_id?: string;
     sandbox_completed_at?: string;
   }>("/sandbox/status", {}, true);
+}
+
+// ============================================================================
+// Publication Workflow
+// ============================================================================
+
+export interface PublishStatusResponse {
+  dataset_id: string;
+  status: string;
+  requested_at?: string;
+  requested_by?: string;
+  approved_at?: string | null;
+  denied_at?: string | null;
+  denied_reason?: string | null;
+  steps_completed?: string[];
+  current_step?: string | null;
+  last_error?: string | null;
+  updated_at?: string;
+  message?: string;
+}
+
+export interface PublishRequestsResponse {
+  requests: Array<{
+    id: number;
+    dataset_id: string;
+    status: string;
+    requested_at: string;
+    requested_by_username: string;
+    requested_by_email: string;
+    steps_completed: string[];
+    current_step: string | null;
+    last_error: string | null;
+  }>;
+  count: number;
+}
+
+export interface PublishApproveResponse {
+  message: string;
+  dataset_id: string;
+  status?: string;
+  steps_completed?: string[];
+  error?: string;
+  step?: string;
+  hasMore?: boolean;
+  s3_lock_offset?: number;
+}
+
+/**
+ * Request publication of a dataset (user)
+ */
+export async function requestPublication(
+  datasetId: string,
+): Promise<{ message: string; dataset_id: string; status: string }> {
+  return request<{ message: string; dataset_id: string; status: string }>(
+    `/datasets/${datasetId}/publish/request`,
+    { method: "POST" },
+    true,
+  );
+}
+
+/**
+ * Get publication status (user)
+ */
+export async function getPublishStatus(datasetId: string): Promise<PublishStatusResponse> {
+  return request<PublishStatusResponse>(`/datasets/${datasetId}/publish/status`, {}, true);
+}
+
+/**
+ * Resend publication notification (user)
+ */
+export async function resendPublishNotification(datasetId: string): Promise<{ message: string }> {
+  return request<{ message: string }>(
+    `/datasets/${datasetId}/publish/resend`,
+    { method: "POST" },
+    true,
+  );
+}
+
+/**
+ * List publication requests (admin)
+ */
+export async function listPublishRequests(status?: string): Promise<PublishRequestsResponse> {
+  const query = status ? `?status=${status}` : "";
+  return request<PublishRequestsResponse>(`/admin/publish/requests${query}`, {}, true);
+}
+
+/**
+ * Deny publication request (admin)
+ */
+export async function denyPublication(
+  datasetId: string,
+  reason: string,
+): Promise<{ message: string }> {
+  return request<{ message: string }>(
+    `/admin/publish/${datasetId}/deny`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ reason }),
+    },
+    true,
+  );
+}
+
+/**
+ * Approve publication request (admin) - runs orchestrator
+ */
+export async function approvePublication(
+  datasetId: string,
+  resume = false,
+  sandbox = false,
+): Promise<PublishApproveResponse> {
+  let s3_lock_offset: number | undefined;
+  let result: PublishApproveResponse;
+
+  // Loop to handle S3 lock pagination (CF Workers subrequest limit)
+  do {
+    result = await request<PublishApproveResponse>(
+      `/admin/publish/${datasetId}/approve`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ resume, sandbox, s3_lock_offset }),
+      },
+      true,
+    );
+
+    if (result.hasMore && result.s3_lock_offset !== undefined) {
+      s3_lock_offset = result.s3_lock_offset;
+    } else {
+      break;
+    }
+  } while (result.hasMore);
+
+  return result;
+}
+
+export interface S3LockResponse {
+  message: string;
+  dataset_id: string;
+  locked: number;
+  total: number;
+  failed: string[];
+  hasMore: boolean;
+  offset: number;
+}
+
+// ============================================================================
+// Enrichment
+// ============================================================================
+
+import type { NemarMetadata } from "../../shared/datacite-constants.js";
+export type NemarMetadataPayload = NemarMetadata;
+
+export interface SubmitEnrichmentResponse {
+  message: string;
+  dataset_id: string;
+  committed: boolean;
+  bidsignore_updated: boolean;
+}
+
+/**
+ * Submit metadata enrichment for a dataset (admin only)
+ * Commits nemar_metadata.json to the dataset repo and caches in D1.
+ */
+export async function submitEnrichment(
+  datasetId: string,
+  metadata: NemarMetadataPayload,
+): Promise<SubmitEnrichmentResponse> {
+  return request<SubmitEnrichmentResponse>(
+    `/admin/datasets/${datasetId}/enrichment`,
+    {
+      method: "POST",
+      body: JSON.stringify(metadata),
+    },
+    true,
+  );
+}
+
+export interface DatasetFileInfo {
+  path: string;
+  size: number;
+}
+
+export interface DatasetFilesResponse {
+  dataset_id: string;
+  file_count: number;
+  total_size: number;
+  extensions: string[];
+  files: DatasetFileInfo[];
+}
+
+/**
+ * Get dataset file listing with sizes (admin only)
+ */
+export async function getDatasetFiles(datasetId: string): Promise<DatasetFilesResponse> {
+  return request<DatasetFilesResponse>(`/admin/datasets/${datasetId}/files`, {}, true);
+}
+
+// ============================================================================
+// S3 Management
+// ============================================================================
+
+export async function applyS3Lock(
+  datasetId: string,
+): Promise<{ locked: number; total: number; failed: string[] }> {
+  let offset = 0;
+  let totalLocked = 0;
+  const allFailed: string[] = [];
+  let total = 0;
+  let hasMore = true;
+
+  while (hasMore) {
+    const result = await request<S3LockResponse>(
+      `/admin/datasets/${datasetId}/s3-lock`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ offset }),
+      },
+      true,
+    );
+
+    totalLocked += result.locked;
+    allFailed.push(...result.failed);
+    total = result.total;
+    hasMore = result.hasMore;
+
+    if (hasMore) {
+      offset += 40;
+    }
+  }
+
+  return { locked: totalLocked, total, failed: allFailed };
 }

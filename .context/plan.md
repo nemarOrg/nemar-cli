@@ -46,7 +46,7 @@
 **Description:** Cloudflare Workers backend with D1 database for user and token management
 
 ### Deployment Info
-- **URL:** https://nemar-api.shirazi-10f.workers.dev
+- **URL:** https://api.osc.earth/nemar
 - **Database:** D1 `nemar-db` (0a168b1a-1923-4436-9509-6e4a9b5bb7ae)
 - **Rate Limit KV:** 9afb2679c6ea4ed4acd1a5916cf291d7
 - **Email:** Resend via nemar@osc.earth
@@ -407,6 +407,57 @@ nemar admin doi info <dataset-id>
 
 ### Related Issues
 - GitHub Issue #1: Test coverage tracking and 90% target
+
+---
+
+## Sprint: Issues #51, #56, #58, #68 (Jan 2026)
+
+Cross-cutting sprint implementing DataLad-like commands, publication workflow,
+BIDS CI integration, and versioning architecture.
+
+### Phase 1: Admin Command Restructuring [COMPLETED]
+**PR:** #69 | **Closes:** #68 Phase 1
+- Restructured admin commands into subgroups: `admin s3`, `admin repo`, `admin ci`
+- Added `admin ci add/check`, `admin repo public/private`
+- Moved `regenerate-iam` under `admin s3`
+
+### Phase 2: Publication Workflow [COMPLETED]
+**PR:** #70 | **Closes:** #68 Phase 2+3
+- D1 schema: `publication_requests` table with step tracking
+- User commands: `dataset publish request/status/resend`
+- Admin commands: `admin publish list/approve/deny`
+- 5-step orchestrator with `--resume` support
+- Email notifications at each stage
+
+### Phase 3: DataLad-like Commands [COMPLETED]
+**PR:** #73 | **Closes:** #58
+- `dataset clone <id>` - Clone dataset repo
+- `dataset get [files]` - Download annexed files
+- `dataset save [-m msg]` - Stage + commit changes
+- `dataset push` - Push to GitHub + S3
+- `dataset drop [files]` - Remove local copies
+- Pure git-annex (no DataLad dependency)
+
+### Phase 4: BIDS CI at Upload + PR Workflow [COMPLETED]
+**PR:** #74 | **Closes:** #51, #68 Phase 4
+- Auto-deploy BIDS CI workflow after upload finalization
+- `push --pr --title --body` for PR creation from CLI
+- `dataset ci [id]` command with auto-detection from git remote
+- User-accessible `GET /datasets/:id/ci/status` endpoint
+- E2E validated with nm099999
+
+### Phase 5: Versioning, Tags, Manifests [IN PROGRESS]
+**Closes:** #56
+- [ ] Version manifest generation (JSON: files -> S3 annex keys)
+- [ ] Upload manifests to S3 at `version/v*.json`
+- [ ] GitHub tag protection rules for dataset repos
+- [ ] `nemar admin s3 lock` command (already implemented in backend)
+- [ ] Integrate manifest generation into DOI/publish workflow
+- [ ] CLI command to view/compare manifests
+
+**Key insight:** Git-annex content-addressed storage + git tags already provides
+versioning. Manifests add web-frontend access without git clone. S3 Object Lock
+(already implemented) prevents deletion of DOI-referenced data.
 
 ---
 

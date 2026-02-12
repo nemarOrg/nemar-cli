@@ -236,9 +236,9 @@ Future automation could:
 
 ## References
 
-- [NEMAR CLI Repository](https://github.com/nemarDatasets/nemar-cli)
-- [Issue #35: Two-tier admin permissions](https://github.com/nemarDatasets/nemar-cli/issues/35)
-- [Issue #37: Dataset restoration](https://github.com/nemarDatasets/nemar-cli/issues/37)
+- [NEMAR CLI Repository](https://github.com/nemarOrg/nemar-cli)
+- [Issue #35: Two-tier admin permissions](https://github.com/nemarOrg/nemar-cli/issues/35)
+- [Issue #37: Dataset restoration](https://github.com/nemarOrg/nemar-cli/issues/37)
 
 ---
 

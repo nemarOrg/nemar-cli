@@ -4,16 +4,33 @@
  * Handles dataset creation, listing, and metadata.
  */
 
+import { zValidator } from "@hono/zod-validator";
 import { Hono } from "hono";
 import { z } from "zod";
-import { zValidator } from "@hono/zod-validator";
-import type { Bindings, Variables } from "../types/bindings";
 import { authMiddleware, optionalAuthMiddleware } from "../middleware/auth";
 import { generateDatasetId, isValidDatasetId } from "../services/datasetId";
-import { createRepository, addCollaborator, applyBranchProtection, enableAutoMerge, deployWorkflows } from "../services/github";
-import { generateDatasetUploadUrls } from "../services/s3";
+import { sendPublicationRequestEmail } from "../services/email";
 import { decrypt } from "../services/encryption";
+import {
+  type GitHubRepo,
+  addCollaborator,
+  applyBranchProtection,
+  checkWorkflowExists,
+  createRepository,
+  deployWorkflows,
+  enableAutoMerge,
+  getWorkflowRuns,
+  setRepoVisibility,
+} from "../services/github";
 import { grantDatasetAccess } from "../services/iam";
+import {
+  addPublicReadPolicy,
+  generateDatasetUploadUrls,
+  getManifest,
+  listManifests,
+  removePublicReadPolicy,
+} from "../services/s3";
+import type { Bindings, Variables } from "../types/bindings";
 
 export const datasetRoutes = new Hono<{ Bindings: Bindings; Variables: Variables }>();
 
@@ -69,10 +86,14 @@ datasetRoutes.post("/", authMiddleware, zValidator("json", createDatasetSchema),
       .first<{ sandbox_completed: number }>();
 
     if (!userStatus?.sandbox_completed) {
-      return c.json({
-        error: "Sandbox training required",
-        message: "You must complete sandbox training before uploading real datasets. Run 'nemar sandbox' to complete training.",
-      }, 403);
+      return c.json(
+        {
+          error: "Sandbox training required",
+          message:
+            "You must complete sandbox training before uploading real datasets. Run 'nemar sandbox' to complete training.",
+        },
+        403,
+      );
     }
   }
 
@@ -82,12 +103,15 @@ datasetRoutes.post("/", authMiddleware, zValidator("json", createDatasetSchema),
     if (totalSize > SANDBOX_MAX_TOTAL_SIZE) {
       const sizeMB = (totalSize / (1024 * 1024)).toFixed(2);
       const limitMB = (SANDBOX_MAX_TOTAL_SIZE / (1024 * 1024)).toFixed(0);
-      return c.json({
-        error: "Sandbox file size limit exceeded",
-        message: `Sandbox datasets are limited to ${limitMB}MB total. Your dataset is ${sizeMB}MB. Sandbox is for testing the workflow, not storing real data.`,
-        total_size: totalSize,
-        limit: SANDBOX_MAX_TOTAL_SIZE,
-      }, 400);
+      return c.json(
+        {
+          error: "Sandbox file size limit exceeded",
+          message: `Sandbox datasets are limited to ${limitMB}MB total. Your dataset is ${sizeMB}MB. Sandbox is for testing the workflow, not storing real data.`,
+          total_size: totalSize,
+          limit: SANDBOX_MAX_TOTAL_SIZE,
+        },
+        400,
+      );
     }
   }
 
@@ -106,10 +130,13 @@ datasetRoutes.post("/", authMiddleware, zValidator("json", createDatasetSchema),
     }>();
 
   if (!userCreds?.aws_access_key_id_encrypted || !userCreds?.aws_secret_access_key_encrypted) {
-    return c.json({
-      error: "S3 access not configured for your account",
-      message: "Please contact an administrator to set up your S3 credentials.",
-    }, 403);
+    return c.json(
+      {
+        error: "S3 access not configured for your account",
+        message: "Please contact an administrator to set up your S3 credentials.",
+      },
+      403,
+    );
   }
 
   // Decrypt user's AWS credentials
@@ -120,7 +147,10 @@ datasetRoutes.post("/", authMiddleware, zValidator("json", createDatasetSchema),
       throw new Error("ENCRYPTION_KEY not configured");
     }
     userAccessKeyId = await decrypt(userCreds.aws_access_key_id_encrypted, c.env.ENCRYPTION_KEY);
-    userSecretAccessKey = await decrypt(userCreds.aws_secret_access_key_encrypted, c.env.ENCRYPTION_KEY);
+    userSecretAccessKey = await decrypt(
+      userCreds.aws_secret_access_key_encrypted,
+      c.env.ENCRYPTION_KEY,
+    );
   } catch (error) {
     console.error("Failed to decrypt user credentials:", error);
     return c.json({ error: "Failed to access S3 credentials" }, 500);
@@ -130,13 +160,13 @@ datasetRoutes.post("/", authMiddleware, zValidator("json", createDatasetSchema),
   const datasetId = await generateDatasetId(db, !!sandbox);
 
   // Create GitHub repository
-  let githubRepo;
+  let githubRepo: GitHubRepo;
   try {
     githubRepo = await createRepository(
       datasetId,
       `${name} - NEMAR Dataset`,
       true, // Private - owner added as collaborator
-      c.env.GITHUB_ADMIN_PAT
+      c.env.GITHUB_ADMIN_PAT,
     );
   } catch (error) {
     console.error("Failed to create GitHub repo:", error);
@@ -236,11 +266,19 @@ datasetRoutes.post("/", authMiddleware, zValidator("json", createDatasetSchema),
   await db
     .prepare(
       `
-    INSERT INTO datasets (dataset_id, name, description, owner_user_id, github_repo, is_sandbox)
-    VALUES (?, ?, ?, ?, ?, ?)
-  `
+    INSERT INTO datasets (dataset_id, name, description, owner_user_id, github_repo, is_sandbox, visibility)
+    VALUES (?, ?, ?, ?, ?, ?, ?)
+  `,
     )
-    .bind(datasetId, name, description || null, user.id, githubRepo.full_name, sandbox ? 1 : 0)
+    .bind(
+      datasetId,
+      name,
+      description || null,
+      user.id,
+      githubRepo.full_name,
+      sandbox ? 1 : 0,
+      "private",
+    )
     .run();
 
   // Audit log
@@ -249,7 +287,7 @@ datasetRoutes.post("/", authMiddleware, zValidator("json", createDatasetSchema),
       `
     INSERT INTO audit_log (user_id, action, resource_type, resource_id, details)
     VALUES (?, 'dataset_created', 'dataset', ?, ?)
-  `
+  `,
     )
     .bind(user.id, datasetId, JSON.stringify({ name, file_count: files?.length || 0 }))
     .run();
@@ -276,20 +314,26 @@ datasetRoutes.post("/", authMiddleware, zValidator("json", createDatasetSchema),
         public_url: `https://${c.env.S3_BUCKET}.s3.${c.env.AWS_REGION}.amazonaws.com`,
       },
     },
-    201
+    201,
   );
 });
 
 /**
  * GET /datasets - List datasets
  *
- * Public endpoint with optional auth for filtering to own datasets.
+ * Visibility rules:
+ * - --mine flag: show only the authenticated user's datasets (private + public + sandbox)
+ * - No --mine flag (public catalog):
+ *   - Sandbox datasets are ALWAYS excluded (sandbox is for testing workflow only)
+ *   - Unauthenticated: public datasets only
+ *   - Authenticated non-admin: public datasets only
+ *   - Admin: all datasets (public + private from all users, excluding sandbox)
  */
 datasetRoutes.get("/", optionalAuthMiddleware, async (c) => {
   const mine = c.req.query("mine") === "true";
   const status = c.req.query("status") || "active";
-  const limit = parseInt(c.req.query("limit") || "50", 10);
-  const offset = parseInt(c.req.query("offset") || "0", 10);
+  const limit = Number.parseInt(c.req.query("limit") || "50", 10);
+  const offset = Number.parseInt(c.req.query("offset") || "0", 10);
   const user = c.get("user");
   const db = c.env.DB;
 
@@ -299,6 +343,7 @@ datasetRoutes.get("/", optionalAuthMiddleware, async (c) => {
       d.name,
       d.description,
       d.status,
+      d.visibility,
       d.github_repo,
       d.concept_doi,
       d.created_at,
@@ -311,33 +356,78 @@ datasetRoutes.get("/", optionalAuthMiddleware, async (c) => {
   const params: (string | number)[] = [status];
 
   if (mine) {
+    // User wants to see only their own datasets
     if (!user) {
       return c.json({ error: "Authentication required to view your datasets" }, 401);
     }
     query += " AND d.owner_user_id = ?";
     params.push(user.id);
-    // User can see their own sandbox datasets
+    // User can see their own datasets regardless of visibility (including sandbox)
   } else {
-    // Public listings should not include sandbox datasets
+    // Public catalog view
+    // Exclude sandbox datasets from public listings (sandbox is for testing workflow only)
     query += " AND (d.is_sandbox = 0 OR d.is_sandbox IS NULL)";
+
+    // Filter by visibility based on user permissions
+    if (!user) {
+      // Unauthenticated: public datasets only
+      query += " AND d.visibility = 'public'";
+    } else if (!user.is_admin) {
+      // Authenticated non-admin: public datasets only
+      // (use --mine to see your own private datasets)
+      query += " AND d.visibility = 'public'";
+    }
+    // Admin: show all datasets (no additional filter)
   }
 
   query += " ORDER BY d.created_at DESC LIMIT ? OFFSET ?";
   params.push(limit, offset);
 
-  const datasets = await db.prepare(query).bind(...params).all();
+  let queryResult;
+  try {
+    queryResult = await db
+      .prepare(query)
+      .bind(...params)
+      .all();
+  } catch (dbError) {
+    const msg = dbError instanceof Error ? dbError.message : String(dbError);
+    console.error("Failed to query datasets:", msg, "Query params:", params);
+    return c.json(
+      {
+        error: "Failed to retrieve datasets",
+        details: msg,
+      },
+      500,
+    );
+  }
+
+  if (!queryResult || !queryResult.results) {
+    console.error("Database query returned invalid result structure for datasets list");
+    return c.json(
+      {
+        error: "Database query failed",
+        details: "Query did not return expected result structure",
+      },
+      500,
+    );
+  }
 
   return c.json({
-    datasets: datasets.results,
-    count: datasets.results.length,
+    datasets: queryResult.results,
+    count: queryResult.results.length,
   });
 });
 
 /**
  * GET /datasets/:id - Get dataset details
+ *
+ * Visibility rules:
+ * - Public datasets: accessible to everyone
+ * - Private datasets: only accessible to owner or admin
  */
 datasetRoutes.get("/:id", optionalAuthMiddleware, async (c) => {
   const datasetId = c.req.param("id");
+  const user = c.get("user");
   const db = c.env.DB;
 
   if (!isValidDatasetId(datasetId)) {
@@ -354,13 +444,21 @@ datasetRoutes.get("/:id", optionalAuthMiddleware, async (c) => {
     FROM datasets d
     JOIN users u ON d.owner_user_id = u.id
     WHERE d.dataset_id = ?
-  `
+  `,
     )
     .bind(datasetId)
     .first();
 
   if (!dataset) {
     return c.json({ error: "Dataset not found" }, 404);
+  }
+
+  // Enforce visibility restrictions for private datasets
+  if (dataset.visibility !== "public") {
+    if (!user || (!user.is_admin && user.id !== dataset.owner_user_id)) {
+      // Return 404 instead of 403 to avoid leaking dataset existence
+      return c.json({ error: "Dataset not found" }, 404);
+    }
   }
 
   return c.json({ dataset });
@@ -403,7 +501,10 @@ datasetRoutes.post(
         .first();
 
       if (!isCollaborator) {
-        return c.json({ error: "Only dataset owner or collaborators can request upload URLs" }, 403);
+        return c.json(
+          { error: "Only dataset owner or collaborators can request upload URLs" },
+          403,
+        );
       }
     }
 
@@ -456,7 +557,10 @@ datasetRoutes.post(
     let userSecretAccessKey: string;
     try {
       userAccessKeyId = await decrypt(userCreds.aws_access_key_id_encrypted, c.env.ENCRYPTION_KEY);
-      userSecretAccessKey = await decrypt(userCreds.aws_secret_access_key_encrypted, c.env.ENCRYPTION_KEY);
+      userSecretAccessKey = await decrypt(
+        userCreds.aws_secret_access_key_encrypted,
+        c.env.ENCRYPTION_KEY,
+      );
     } catch (error) {
       console.error("Failed to decrypt user credentials:", error);
       return c.json({ error: "Failed to access your S3 credentials" }, 500);
@@ -515,7 +619,9 @@ datasetRoutes.post("/:id/finalize", authMiddleware, async (c) => {
       const workflowResult = await deployWorkflows(datasetId, c.env.GITHUB_ADMIN_PAT);
       if (!workflowResult.success) {
         console.error("Failed to deploy some workflows:", workflowResult.errors);
-        warnings.push("Some GitHub workflows could not be deployed; PR-based uploads may not work correctly");
+        warnings.push(
+          "Some GitHub workflows could not be deployed; PR-based uploads may not work correctly",
+        );
       }
     } catch (error) {
       console.error("Failed to deploy workflows:", error);
@@ -527,7 +633,9 @@ datasetRoutes.post("/:id/finalize", authMiddleware, async (c) => {
       await applyBranchProtection(datasetId, c.env.GITHUB_ADMIN_PAT);
     } catch (error) {
       console.error("Failed to apply branch protection:", error);
-      warnings.push("Branch protection could not be applied; direct pushes to main may be possible");
+      warnings.push(
+        "Branch protection could not be applied; direct pushes to main may be possible",
+      );
     }
 
     // Enable auto-merge
@@ -551,7 +659,7 @@ datasetRoutes.post("/:id/finalize", authMiddleware, async (c) => {
           `
         INSERT INTO audit_log (user_id, action, resource_type, resource_id, details)
         VALUES (?, 'dataset_finalized', 'dataset', ?, ?)
-      `
+      `,
         )
         .bind(user.id, datasetId, JSON.stringify({ finalized: true, warnings }))
         .run();
@@ -563,7 +671,8 @@ datasetRoutes.post("/:id/finalize", authMiddleware, async (c) => {
     const githubUrl = `https://github.com/${dataset.github_repo}`;
 
     return c.json({
-      message: warnings.length > 0 ? "Dataset finalized with warnings" : "Dataset finalized successfully",
+      message:
+        warnings.length > 0 ? "Dataset finalized with warnings" : "Dataset finalized successfully",
       warnings: warnings.length > 0 ? warnings : undefined,
       dataset: {
         dataset_id: datasetId,
@@ -591,9 +700,17 @@ datasetRoutes.post("/:id/request-access", authMiddleware, async (c) => {
 
   // Get dataset info
   const dataset = await db
-    .prepare("SELECT id, dataset_id, name, github_repo, owner_user_id FROM datasets WHERE dataset_id = ?")
+    .prepare(
+      "SELECT id, dataset_id, name, github_repo, owner_user_id FROM datasets WHERE dataset_id = ?",
+    )
     .bind(datasetId)
-    .first<{ id: number; dataset_id: string; name: string; github_repo: string | null; owner_user_id: number }>();
+    .first<{
+      id: number;
+      dataset_id: string;
+      name: string;
+      github_repo: string | null;
+      owner_user_id: number;
+    }>();
 
   if (!dataset) {
     return c.json({ error: "Dataset not found" }, 404);
@@ -637,7 +754,7 @@ datasetRoutes.post("/:id/request-access", authMiddleware, async (c) => {
   try {
     await db
       .prepare(
-        "INSERT INTO dataset_collaborators (dataset_id, user_id, access_type) VALUES (?, ?, 'requested')"
+        "INSERT INTO dataset_collaborators (dataset_id, user_id, access_type) VALUES (?, ?, 'requested')",
       )
       .bind(dataset.id, user.id)
       .run();
@@ -645,7 +762,7 @@ datasetRoutes.post("/:id/request-access", authMiddleware, async (c) => {
     // Audit log
     await db
       .prepare(
-        "INSERT INTO audit_log (user_id, action, resource_type, resource_id, details) VALUES (?, 'dataset_access_granted', 'dataset', ?, ?)"
+        "INSERT INTO audit_log (user_id, action, resource_type, resource_id, details) VALUES (?, 'dataset_access_granted', 'dataset', ?, ?)",
       )
       .bind(user.id, datasetId, JSON.stringify({ access_type: "requested" }))
       .run();
@@ -679,9 +796,17 @@ datasetRoutes.post("/:id/invite", authMiddleware, zValidator("json", inviteSchem
 
   // Get dataset info
   const dataset = await db
-    .prepare("SELECT id, dataset_id, name, github_repo, owner_user_id FROM datasets WHERE dataset_id = ?")
+    .prepare(
+      "SELECT id, dataset_id, name, github_repo, owner_user_id FROM datasets WHERE dataset_id = ?",
+    )
     .bind(datasetId)
-    .first<{ id: number; dataset_id: string; name: string; github_repo: string | null; owner_user_id: number }>();
+    .first<{
+      id: number;
+      dataset_id: string;
+      name: string;
+      github_repo: string | null;
+      owner_user_id: number;
+    }>();
 
   if (!dataset) {
     return c.json({ error: "Dataset not found" }, 404);
@@ -744,7 +869,7 @@ datasetRoutes.post("/:id/invite", authMiddleware, zValidator("json", inviteSchem
   try {
     await db
       .prepare(
-        "INSERT INTO dataset_collaborators (dataset_id, user_id, granted_by, access_type) VALUES (?, ?, ?, 'invited')"
+        "INSERT INTO dataset_collaborators (dataset_id, user_id, granted_by, access_type) VALUES (?, ?, ?, 'invited')",
       )
       .bind(dataset.id, invitee.id, currentUser.id)
       .run();
@@ -752,9 +877,13 @@ datasetRoutes.post("/:id/invite", authMiddleware, zValidator("json", inviteSchem
     // Audit log
     await db
       .prepare(
-        "INSERT INTO audit_log (user_id, action, resource_type, resource_id, details) VALUES (?, 'dataset_access_granted', 'dataset', ?, ?)"
+        "INSERT INTO audit_log (user_id, action, resource_type, resource_id, details) VALUES (?, 'dataset_access_granted', 'dataset', ?, ?)",
       )
-      .bind(currentUser.id, datasetId, JSON.stringify({ invitee: username, access_type: "invited" }))
+      .bind(
+        currentUser.id,
+        datasetId,
+        JSON.stringify({ invitee: username, access_type: "invited" }),
+      )
       .run();
   } catch (dbError) {
     // GitHub succeeded but DB failed - log error but don't fail the request
@@ -800,7 +929,7 @@ datasetRoutes.get("/:id/collaborators", authMiddleware, async (c) => {
        JOIN users u ON dc.user_id = u.id
        LEFT JOIN users g ON dc.granted_by = g.id
        WHERE dc.dataset_id = ?
-       ORDER BY dc.granted_at DESC`
+       ORDER BY dc.granted_at DESC`,
     )
     .bind(dataset.id)
     .all();
@@ -809,5 +938,602 @@ datasetRoutes.get("/:id/collaborators", authMiddleware, async (c) => {
     dataset_id: datasetId,
     collaborators: collaborators.results,
     count: collaborators.results.length,
+  });
+});
+
+// ============================================================================
+// Publication Workflow (User-facing)
+// ============================================================================
+
+/**
+ * POST /datasets/:id/publish/request - Request publication of a dataset
+ */
+datasetRoutes.post("/:id/publish/request", authMiddleware, async (c) => {
+  const datasetId = c.req.param("id");
+  const currentUser = c.get("user");
+  const db = c.env.DB;
+
+  const dataset = await db
+    .prepare("SELECT id, dataset_id, owner_user_id, is_sandbox FROM datasets WHERE dataset_id = ?")
+    .bind(datasetId)
+    .first<{ id: number; dataset_id: string; owner_user_id: number; is_sandbox: number | null }>();
+
+  if (!dataset) {
+    return c.json({ error: "Dataset not found" }, 404);
+  }
+
+  if (dataset.owner_user_id !== currentUser.id && !currentUser.is_admin) {
+    return c.json({ error: "Only the dataset owner can request publication" }, 403);
+  }
+
+  if (dataset.is_sandbox || dataset.dataset_id.startsWith("xx")) {
+    return c.json({ error: "Cannot publish sandbox datasets" }, 400);
+  }
+
+  // Check for existing active request
+  const existing = await db
+    .prepare(
+      "SELECT id, status FROM publication_requests WHERE dataset_id = ? AND status IN ('requested', 'approving') ORDER BY requested_at DESC LIMIT 1",
+    )
+    .bind(datasetId)
+    .first<{ id: number; status: string }>();
+
+  if (existing) {
+    return c.json(
+      {
+        error: "A publication request already exists",
+        status: existing.status,
+        message:
+          existing.status === "approving"
+            ? "Publication is in progress"
+            : "Use 'resend' to remind admins",
+      },
+      409,
+    );
+  }
+
+  // Create publication request
+  await db
+    .prepare("INSERT INTO publication_requests (dataset_id, requested_by) VALUES (?, ?)")
+    .bind(datasetId, currentUser.id)
+    .run();
+
+  // Notify admins
+  try {
+    const admins = await db
+      .prepare("SELECT email FROM users WHERE is_admin = 1")
+      .all<{ email: string }>();
+
+    const adminEmails = admins.results.map((a) => a.email);
+    if (adminEmails.length > 0) {
+      await sendPublicationRequestEmail(
+        adminEmails,
+        datasetId,
+        currentUser.username,
+        c.env.RESEND_API_KEY,
+      );
+    }
+  } catch (emailError) {
+    console.error("Failed to send publication request notification:", emailError);
+  }
+
+  return c.json({
+    message: "Publication request submitted",
+    dataset_id: datasetId,
+    status: "requested",
+  });
+});
+
+/**
+ * GET /datasets/:id/publish/status - Get publication status
+ */
+datasetRoutes.get("/:id/publish/status", authMiddleware, async (c) => {
+  const datasetId = c.req.param("id");
+  const currentUser = c.get("user");
+  const db = c.env.DB;
+
+  const dataset = await db
+    .prepare("SELECT id, owner_user_id FROM datasets WHERE dataset_id = ?")
+    .bind(datasetId)
+    .first<{ id: number; owner_user_id: number }>();
+
+  if (!dataset) {
+    return c.json({ error: "Dataset not found" }, 404);
+  }
+
+  if (dataset.owner_user_id !== currentUser.id && !currentUser.is_admin) {
+    return c.json({ error: "Only the dataset owner or admin can view publication status" }, 403);
+  }
+
+  const request = await db
+    .prepare(
+      `SELECT pr.*, u.username as requested_by_username
+       FROM publication_requests pr
+       JOIN users u ON pr.requested_by = u.id
+       WHERE pr.dataset_id = ?
+       ORDER BY pr.requested_at DESC
+       LIMIT 1`,
+    )
+    .bind(datasetId)
+    .first<{
+      id: number;
+      dataset_id: string;
+      status: string;
+      requested_at: string;
+      requested_by_username: string;
+      approved_at: string | null;
+      denied_at: string | null;
+      denied_reason: string | null;
+      steps_completed: string;
+      current_step: string | null;
+      last_error: string | null;
+      updated_at: string;
+    }>();
+
+  if (!request) {
+    return c.json({
+      dataset_id: datasetId,
+      status: "none",
+      message: "No publication request found",
+    });
+  }
+
+  return c.json({
+    dataset_id: datasetId,
+    status: request.status,
+    requested_at: request.requested_at,
+    requested_by: request.requested_by_username,
+    approved_at: request.approved_at,
+    denied_at: request.denied_at,
+    denied_reason: request.denied_reason,
+    steps_completed: JSON.parse(request.steps_completed || "[]"),
+    current_step: request.current_step,
+    last_error: request.last_error,
+    updated_at: request.updated_at,
+  });
+});
+
+/**
+ * POST /datasets/:id/publish/resend - Resend publication request notification
+ */
+datasetRoutes.post("/:id/publish/resend", authMiddleware, async (c) => {
+  const datasetId = c.req.param("id");
+  const currentUser = c.get("user");
+  const db = c.env.DB;
+
+  const dataset = await db
+    .prepare("SELECT id, owner_user_id FROM datasets WHERE dataset_id = ?")
+    .bind(datasetId)
+    .first<{ id: number; owner_user_id: number }>();
+
+  if (!dataset) {
+    return c.json({ error: "Dataset not found" }, 404);
+  }
+
+  if (dataset.owner_user_id !== currentUser.id && !currentUser.is_admin) {
+    return c.json({ error: "Only the dataset owner can resend notifications" }, 403);
+  }
+
+  const request = await db
+    .prepare(
+      "SELECT id, status, updated_at FROM publication_requests WHERE dataset_id = ? AND status = 'requested' ORDER BY requested_at DESC LIMIT 1",
+    )
+    .bind(datasetId)
+    .first<{ id: number; status: string; updated_at: string }>();
+
+  if (!request) {
+    return c.json({ error: "No pending publication request found" }, 404);
+  }
+
+  // Rate limit: 30 minutes between resends
+  const lastUpdate = new Date(request.updated_at).getTime();
+  const cooldownMs = 30 * 60 * 1000;
+  if (Date.now() - lastUpdate < cooldownMs) {
+    return c.json({ error: "Please wait before resending (30 min cooldown)" }, 429);
+  }
+
+  // Update timestamp for rate limiting
+  await db
+    .prepare("UPDATE publication_requests SET updated_at = datetime('now') WHERE id = ?")
+    .bind(request.id)
+    .run();
+
+  // Resend notification to admins
+  const admins = await db
+    .prepare("SELECT email FROM users WHERE is_admin = 1")
+    .all<{ email: string }>();
+
+  const adminEmails = admins.results.map((a) => a.email);
+  if (adminEmails.length > 0) {
+    await sendPublicationRequestEmail(
+      adminEmails,
+      datasetId,
+      currentUser.username,
+      c.env.RESEND_API_KEY,
+    );
+  }
+
+  return c.json({
+    message: "Notification resent to admins",
+    dataset_id: datasetId,
+  });
+});
+
+/**
+ * GET /datasets/:id/ci/status - Check CI status for a dataset (user-accessible)
+ *
+ * Returns CI workflow presence and latest run status.
+ * Authenticated users can check any dataset they own or collaborate on.
+ */
+datasetRoutes.get("/:id/ci/status", authMiddleware, async (c) => {
+  const datasetId = c.req.param("id");
+  const db = c.env.DB;
+  const currentUser = c.get("user");
+
+  const dataset = await db
+    .prepare(
+      `SELECT d.dataset_id, d.github_repo, u.username as owner_username
+       FROM datasets d
+       JOIN users u ON d.owner_user_id = u.id
+       WHERE d.dataset_id = ?`,
+    )
+    .bind(datasetId)
+    .first<{ dataset_id: string; github_repo: string | null; owner_username: string }>();
+
+  if (!dataset) {
+    return c.json({ error: "Dataset not found" }, 404);
+  }
+
+  // Check ownership or admin status
+  if (dataset.owner_username !== currentUser.username && !currentUser.is_admin) {
+    return c.json({ error: "Access denied" }, 403);
+  }
+
+  if (!dataset.github_repo) {
+    return c.json({ error: "Dataset has no GitHub repository" }, 400);
+  }
+
+  const repoName = extractRepoName(dataset.github_repo);
+  if (!repoName) {
+    return c.json({ error: "Invalid repository format" }, 500);
+  }
+
+  const pat = c.env.GITHUB_ADMIN_PAT;
+
+  let bidsWorkflowExists = false;
+  let latestRunStatus = "unknown";
+  let latestRunUrl: string | null = null;
+
+  try {
+    bidsWorkflowExists = await checkWorkflowExists(
+      repoName,
+      ".github/workflows/bids-validation.yml",
+      pat,
+    );
+
+    if (bidsWorkflowExists) {
+      const runs = await getWorkflowRuns(repoName, "bids-validation.yml", pat);
+      if (runs.length > 0) {
+        const latest = runs[0];
+        latestRunStatus = latest.conclusion || latest.status;
+        latestRunUrl = latest.html_url;
+      } else {
+        latestRunStatus = "no_runs";
+      }
+    }
+  } catch (githubError) {
+    const msg = githubError instanceof Error ? githubError.message : String(githubError);
+    console.error(`[ci/status] GitHub API error for ${datasetId} (repo: ${repoName}):`, msg);
+    return c.json({ error: `GitHub API error: ${msg}` }, 502);
+  }
+
+  return c.json({
+    dataset_id: datasetId,
+    bids_validation: {
+      present: bidsWorkflowExists,
+      status: bidsWorkflowExists ? latestRunStatus : "missing",
+      url: latestRunUrl,
+    },
+  });
+});
+
+// ============================================================================
+// Version Manifests
+// ============================================================================
+
+/**
+ * GET /datasets/:id/manifest - List available version manifests
+ */
+datasetRoutes.get("/:id/manifest", optionalAuthMiddleware, async (c) => {
+  const datasetId = c.req.param("id");
+  const db = c.env.DB;
+
+  const dataset = await db
+    .prepare("SELECT dataset_id, visibility, owner_user_id FROM datasets WHERE dataset_id = ?")
+    .bind(datasetId)
+    .first<{ dataset_id: string; visibility: string; owner_user_id: number }>();
+
+  if (!dataset) {
+    return c.json({ error: "Dataset not found" }, 404);
+  }
+
+  // Public datasets: anyone can view manifests
+  // Private datasets: only owner/admin
+  if (dataset.visibility !== "public") {
+    const user = c.get("user");
+    if (!user || (!user.is_admin && user.id !== dataset.owner_user_id)) {
+      return c.json({ error: "Access denied" }, 403);
+    }
+  }
+
+  const s3Options = {
+    bucket: c.env.S3_BUCKET,
+    region: c.env.AWS_REGION,
+    accessKeyId: c.env.AWS_ACCESS_KEY_ID,
+    secretAccessKey: c.env.AWS_SECRET_ACCESS_KEY,
+  };
+
+  const versions = await listManifests(s3Options, datasetId);
+
+  return c.json({
+    dataset_id: datasetId,
+    versions,
+  });
+});
+
+/**
+ * GET /datasets/:id/manifest/:version - Get a specific version manifest
+ */
+datasetRoutes.get("/:id/manifest/:version", optionalAuthMiddleware, async (c) => {
+  const datasetId = c.req.param("id");
+  const version = c.req.param("version");
+  const db = c.env.DB;
+
+  const dataset = await db
+    .prepare("SELECT dataset_id, visibility, owner_user_id FROM datasets WHERE dataset_id = ?")
+    .bind(datasetId)
+    .first<{ dataset_id: string; visibility: string; owner_user_id: number }>();
+
+  if (!dataset) {
+    return c.json({ error: "Dataset not found" }, 404);
+  }
+
+  if (dataset.visibility !== "public") {
+    const user = c.get("user");
+    if (!user || (!user.is_admin && user.id !== dataset.owner_user_id)) {
+      return c.json({ error: "Access denied" }, 403);
+    }
+  }
+
+  const s3Options = {
+    bucket: c.env.S3_BUCKET,
+    region: c.env.AWS_REGION,
+    accessKeyId: c.env.AWS_ACCESS_KEY_ID,
+    secretAccessKey: c.env.AWS_SECRET_ACCESS_KEY,
+  };
+
+  const manifestJson = await getManifest(s3Options, datasetId, version);
+  if (!manifestJson) {
+    return c.json({ error: "Manifest not found for this version" }, 404);
+  }
+
+  return c.json(JSON.parse(manifestJson));
+});
+
+/**
+ * POST /datasets/:id/publish - Publish a dataset (make public)
+ *
+ * Authorization: Owner or admin only
+ * One-way operation: Cannot unpublish
+ *
+ * Effects:
+ * 1. Changes GitHub repo from private to public
+ * 2. Updates S3 bucket policy for public read
+ * 3. Sets visibility='public' in database
+ * 4. Logs action in audit_log
+ */
+datasetRoutes.post("/:id/publish", authMiddleware, async (c) => {
+  const datasetId = c.req.param("id");
+  const user = c.get("user");
+  const db = c.env.DB;
+
+  // Validate dataset ID format
+  if (!isValidDatasetId(datasetId)) {
+    return c.json({ error: "Invalid dataset ID" }, 400);
+  }
+
+  // Fetch dataset with ownership check
+  const dataset = await db
+    .prepare(`
+      SELECT id, dataset_id, name, owner_user_id, github_repo, visibility, is_sandbox
+      FROM datasets
+      WHERE dataset_id = ? AND status = 'active'
+    `)
+    .bind(datasetId)
+    .first<{
+      id: number;
+      dataset_id: string;
+      name: string;
+      owner_user_id: number;
+      github_repo: string | null;
+      visibility: string;
+      is_sandbox: number;
+    }>();
+
+  if (!dataset) {
+    return c.json({ error: "Dataset not found" }, 404);
+  }
+
+  // Authorization: owner or admin
+  if (dataset.owner_user_id !== user.id && !user.is_admin) {
+    return c.json({ error: "Forbidden: Only dataset owner or admin can publish" }, 403);
+  }
+
+  // Prevent publishing sandbox datasets
+  if (dataset.is_sandbox) {
+    return c.json(
+      {
+        error: "Cannot publish sandbox datasets",
+        message: "Sandbox datasets are for training only and cannot be made public",
+      },
+      400,
+    );
+  }
+
+  // Already public (idempotent)
+  if (dataset.visibility === "public") {
+    return c.json(
+      {
+        message: "Dataset is already public",
+        dataset_id: datasetId,
+      },
+      200,
+    );
+  }
+
+  // Validate GitHub repo exists
+  if (!dataset.github_repo) {
+    return c.json(
+      {
+        error: "Dataset has no GitHub repository",
+        message: "Cannot publish a dataset without a repository",
+      },
+      400,
+    );
+  }
+
+  // Extract repo name from full name (e.g., "nemarDatasets/nm000104" -> "nm000104")
+  const repoName = dataset.github_repo.split("/")[1];
+  if (!repoName) {
+    return c.json({ error: "Invalid GitHub repository format" }, 500);
+  }
+
+  // Step 1: Update GitHub repository visibility
+  const ghResult = await setRepoVisibility(repoName, false, c.env.GITHUB_ADMIN_PAT);
+  if (!ghResult.ok) {
+    console.error(`GitHub visibility update failed for ${datasetId}:`, ghResult.error);
+    return c.json(
+      {
+        error: "Failed to update GitHub repository visibility",
+        details: ghResult.error,
+        dataset_id: datasetId,
+      },
+      500,
+    );
+  }
+
+  // Step 2: Update S3 bucket policy for public read
+  try {
+    await addPublicReadPolicy(
+      {
+        bucket: c.env.S3_BUCKET,
+        region: c.env.AWS_REGION,
+        accessKeyId: c.env.AWS_ACCESS_KEY_ID,
+        secretAccessKey: c.env.AWS_SECRET_ACCESS_KEY,
+      },
+      datasetId,
+    );
+  } catch (s3Error) {
+    const s3Msg = s3Error instanceof Error ? s3Error.message : String(s3Error);
+    console.error(`S3 policy update failed for ${datasetId}:`, s3Msg);
+
+    // Revert GitHub to private on S3 failure
+    const revertResult = await setRepoVisibility(repoName, true, c.env.GITHUB_ADMIN_PAT);
+    if (revertResult.ok) {
+      return c.json(
+        {
+          error: "Failed to update S3 bucket policy, reverted GitHub repository to private",
+          details: s3Msg,
+          dataset_id: datasetId,
+        },
+        500,
+      );
+    }
+
+    return c.json(
+      {
+        error: "CRITICAL: S3 policy update failed AND GitHub revert failed",
+        details: s3Msg,
+        dataset_id: datasetId,
+        github_visibility: "public",
+        s3_public: false,
+        revert_error: revertResult.error,
+        action_required: `Manually revert GitHub repo to private OR manually add S3 public read policy for ${datasetId}`,
+      },
+      500,
+    );
+  }
+
+  // Step 3: Update database
+  try {
+    await db
+      .prepare(
+        "UPDATE datasets SET visibility = 'public', updated_at = datetime('now') WHERE id = ?",
+      )
+      .bind(dataset.id)
+      .run();
+  } catch (dbError) {
+    const dbMsg = dbError instanceof Error ? dbError.message : String(dbError);
+    console.error(`Database update failed for ${datasetId}:`, dbMsg);
+
+    // Revert both GitHub and S3 on database failure
+    const ghRevertResult = await setRepoVisibility(repoName, true, c.env.GITHUB_ADMIN_PAT);
+
+    let s3Reverted = false;
+    try {
+      await removePublicReadPolicy(
+        {
+          bucket: c.env.S3_BUCKET,
+          region: c.env.AWS_REGION,
+          accessKeyId: c.env.AWS_ACCESS_KEY_ID,
+          secretAccessKey: c.env.AWS_SECRET_ACCESS_KEY,
+        },
+        datasetId,
+      );
+      s3Reverted = true;
+    } catch (s3RevertError) {
+      console.error(`S3 policy revert failed for ${datasetId}:`, s3RevertError);
+    }
+
+    return c.json(
+      {
+        error: "CRITICAL: Database update failed, attempted rollback",
+        details: dbMsg,
+        dataset_id: datasetId,
+        github_reverted: ghRevertResult.ok,
+        s3_reverted: s3Reverted,
+        action_required:
+          ghRevertResult.ok && s3Reverted
+            ? "Rollback successful, but database update failed. Contact administrator."
+            : `Manually revert: ${!ghRevertResult.ok ? "GitHub repo to private" : ""} ${!s3Reverted ? "Remove S3 public read policy" : ""}`.trim(),
+      },
+      500,
+    );
+  }
+
+  // Step 4: Audit log
+  await db
+    .prepare(`
+      INSERT INTO audit_log (user_id, action, resource_type, resource_id, details)
+      VALUES (?, ?, ?, ?, ?)
+    `)
+    .bind(
+      user.id,
+      "dataset_publish",
+      "dataset",
+      datasetId,
+      JSON.stringify({
+        dataset_name: dataset.name,
+        github_repo: dataset.github_repo,
+      }),
+    )
+    .run();
+
+  return c.json({
+    success: true,
+    message: "Dataset published successfully",
+    dataset_id: datasetId,
+    github_url: `https://github.com/${dataset.github_repo}`,
+    s3_url: `https://${c.env.S3_BUCKET}.s3.${c.env.AWS_REGION}.amazonaws.com/${datasetId}/`,
   });
 });

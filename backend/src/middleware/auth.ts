@@ -5,8 +5,8 @@
  */
 
 import type { Context, Next } from "hono";
-import type { Bindings, Variables, AuthUser } from "../types/bindings";
 import { hashApiKey } from "../services/token";
+import type { AuthUser, Bindings, Variables } from "../types/bindings";
 
 type AuthContext = Context<{ Bindings: Bindings; Variables: Variables }>;
 
@@ -45,6 +45,7 @@ export async function authMiddleware(c: AuthContext, next: Next) {
       u.email,
       u.github_username,
       u.is_admin,
+      u.orcid,
       u.status,
       t.id as token_id
     FROM tokens t
@@ -52,7 +53,7 @@ export async function authMiddleware(c: AuthContext, next: Next) {
     WHERE t.api_key_hash = ?
       AND t.revoked_at IS NULL
       AND (t.expires_at IS NULL OR t.expires_at > datetime('now'))
-  `
+  `,
   )
     .bind(hashedKey)
     .first<{
@@ -61,6 +62,7 @@ export async function authMiddleware(c: AuthContext, next: Next) {
       email: string;
       github_username: string;
       is_admin: number;
+      orcid: string | null;
       status: string;
       token_id: number;
     }>();
@@ -79,7 +81,7 @@ export async function authMiddleware(c: AuthContext, next: Next) {
             ? "Your account is awaiting admin approval"
             : "Your account access has been revoked",
       },
-      403
+      403,
     );
   }
 
@@ -95,6 +97,7 @@ export async function authMiddleware(c: AuthContext, next: Next) {
     email: result.email,
     github_username: result.github_username,
     is_admin: result.is_admin === 1,
+    orcid: result.orcid || undefined,
   };
 
   c.set("user", user);
@@ -148,13 +151,14 @@ export async function optionalAuthMiddleware(c: AuthContext, next: Next) {
       u.email,
       u.github_username,
       u.is_admin,
+      u.orcid,
       u.status
     FROM tokens t
     JOIN users u ON t.user_id = u.id
     WHERE t.api_key_hash = ?
       AND t.revoked_at IS NULL
       AND u.status = 'approved'
-  `
+  `,
   )
     .bind(hashedKey)
     .first<{
@@ -163,6 +167,7 @@ export async function optionalAuthMiddleware(c: AuthContext, next: Next) {
       email: string;
       github_username: string;
       is_admin: number;
+      orcid: string | null;
       status: string;
     }>();
 
@@ -173,6 +178,7 @@ export async function optionalAuthMiddleware(c: AuthContext, next: Next) {
       email: result.email,
       github_username: result.github_username,
       is_admin: result.is_admin === 1,
+      orcid: result.orcid || undefined,
     });
   }
 

@@ -15,17 +15,10 @@ import {
   completeSandbox,
   createDataset,
   finalizeDataset,
-  getCurrentUser,
   getSandboxStatus,
   resetSandbox,
 } from "../lib/api.js";
-import {
-  deleteConfig,
-  getConfig,
-  isAuthenticated,
-  isSandboxCompleted,
-  setConfig,
-} from "../lib/config.js";
+import { deleteConfig, getConfig, isAuthenticated, setConfig } from "../lib/config.js";
 import {
   type ConfirmOptions,
   NO_DESCRIPTION,
@@ -332,7 +325,7 @@ async function sandboxAction(): Promise<void> {
       // Construct full S3 URLs for each file
       const fileUrls: Record<string, string> = {};
       for (const filePath of Object.keys(uploadUrls)) {
-        fileUrls[filePath] = `${s3Config.public_url}/${s3Prefix}/${filePath}`;
+        fileUrls[filePath] = `${s3Config.public_url}/${s3Prefix}/objects/${filePath}`;
       }
 
       const registerResult = await registerUrlsWithGitAnnex(datasetPath, fileUrls);

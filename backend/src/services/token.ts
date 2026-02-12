@@ -56,7 +56,7 @@ export function generateVerificationToken(): string {
 /**
  * Generate expiration timestamp (default: 24 hours from now)
  */
-export function generateExpirationTimestamp(hoursFromNow: number = 24): string {
+export function generateExpirationTimestamp(hoursFromNow = 24): string {
   const expiresAt = new Date(Date.now() + hoursFromNow * 60 * 60 * 1000);
   return expiresAt.toISOString();
 }

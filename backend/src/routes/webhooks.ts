@@ -5,9 +5,17 @@
  * and authenticated via a shared secret token.
  */
 
+import type { Context } from "hono";
 import { Hono } from "hono";
-import type { Bindings } from "../types/bindings.js";
+import { createEzidVersionDoi, parseDoiProvider } from "../services/doi.js";
+import { extractDoi } from "../services/ezid.js";
+import { generateManifest } from "../services/manifest.js";
+import { errorMessage, extractRepoName, readRepoMetadata } from "../services/repo-metadata.js";
+import { uploadManifest } from "../services/s3.js";
 import * as zenodo from "../services/zenodo.js";
+import type { Bindings } from "../types/bindings.js";
+
+type WebhookContext = Context<{ Bindings: Bindings }>;
 
 const webhooks = new Hono<{ Bindings: Bindings }>();
 
@@ -16,70 +24,285 @@ const webhooks = new Hono<{ Bindings: Bindings }>();
  *
  * Called by GitHub Actions when a new release is created.
  * Requires X-Webhook-Token header matching GITHUB_WEBHOOK_SECRET.
+ *
+ * Routes to EZID or Zenodo based on dataset's doi_provider setting.
  */
 webhooks.post("/publish-version-doi", async (c) => {
   // Validate webhook token
   const token = c.req.header("X-Webhook-Token");
   const expectedToken = c.env.GITHUB_WEBHOOK_SECRET;
 
-  if (!expectedToken) {
-    return c.json({ error: "Webhook not configured" }, 500);
-  }
-
-  if (!token || token !== expectedToken) {
+  // If webhook secret not configured OR token doesn't match, reject as unauthorized
+  // Treat missing secret as "no valid token exists" for better security
+  if (!expectedToken || !token || token !== expectedToken) {
     return c.json({ error: "Invalid webhook token" }, 401);
   }
 
   // Parse request body
-  const body = await c.req.json<{
-    dataset_id: string;
-    version: string;
-    release_url: string;
-    sandbox?: boolean;
-  }>();
+  let body: { dataset_id: string; version: string; release_url: string; sandbox?: boolean };
+  try {
+    body = await c.req.json();
+  } catch {
+    return c.json({ error: "Invalid JSON in request body" }, 400);
+  }
 
   if (!body.dataset_id || !body.version || !body.release_url) {
     return c.json({ error: "Missing required fields: dataset_id, version, release_url" }, 400);
   }
 
-  const { dataset_id, version, release_url, sandbox = false } = body;
+  const { dataset_id, version: rawVersion, release_url, sandbox = false } = body;
+
+  // Normalize version: strip leading "v" or "V" prefix if present
+  const version = rawVersion.replace(/^[vV]/, "");
+
+  // Validate semver format: only stable versions get permanent DOIs.
+  // Pre-release versions (beta, rc, dev) are transient and must not receive
+  // permanent identifiers.
+  if (!/^\d+\.\d+\.\d+$/.test(version)) {
+    console.info(
+      `[webhook] Skipping DOI for ${dataset_id} version "${rawVersion}": not a stable semver`,
+    );
+    return c.json(
+      {
+        error: `Invalid version format: "${rawVersion}". Only stable semver versions (e.g., 1.0.0) are supported for DOI minting.`,
+        skipped: true,
+      },
+      200,
+    );
+  }
 
   // Get dataset from database
-  const dataset = await c.env.DB.prepare(
-    "SELECT * FROM datasets WHERE dataset_id = ?"
-  ).bind(dataset_id).first<{
-    id: number;
-    dataset_id: string;
-    name: string;
-    description: string | null;
-    concept_doi: string | null;
-    zenodo_concept_id: string | null;
-  }>();
+  const dataset = await c.env.DB.prepare("SELECT * FROM datasets WHERE dataset_id = ?")
+    .bind(dataset_id)
+    .first<{
+      id: number;
+      dataset_id: string;
+      name: string;
+      description: string | null;
+      github_repo: string | null;
+      concept_doi: string | null;
+      zenodo_concept_id: string | null;
+      ezid_identifier: string | null;
+      ezid_status: string | null;
+      doi_provider: string | null;
+    }>();
 
   if (!dataset) {
     return c.json({ error: "Dataset not found" }, 404);
   }
 
   // Check if concept DOI exists
-  if (!dataset.concept_doi || !dataset.zenodo_concept_id) {
-    return c.json({
-      error: "No concept DOI exists for this dataset. Admin must create concept DOI first.",
-      skipped: true
-    }, 200); // Return 200 so workflow doesn't fail
+  if (!dataset.concept_doi) {
+    return c.json(
+      {
+        error: "No concept DOI exists for this dataset. Admin must create concept DOI first.",
+        skipped: true,
+      },
+      200,
+    ); // Return 200 so workflow doesn't fail
   }
 
-  // Get the appropriate Zenodo API key
-  const zenodoToken = sandbox
-    ? c.env.ZENODO_SANDBOX_API_KEY
-    : c.env.ZENODO_API_KEY;
+  const provider = parseDoiProvider(dataset.doi_provider);
 
+  // Route to appropriate provider
+  if (provider === "ezid") {
+    return handleEzidVersionDoi(c, dataset, version, release_url, sandbox);
+  }
+  return handleZenodoVersionDoi(c, dataset, version, release_url, sandbox);
+});
+
+/**
+ * Handle EZID version DOI creation: reads BIDS metadata, mints DOI, updates DB, and generates version manifest.
+ */
+async function handleEzidVersionDoi(
+  c: WebhookContext,
+  dataset: {
+    id: number;
+    dataset_id: string;
+    name: string;
+    description: string | null;
+    github_repo: string | null;
+    concept_doi: string | null;
+    ezid_identifier: string | null;
+  },
+  version: string,
+  _releaseUrl: string,
+  sandbox: boolean,
+) {
+  if (!dataset.ezid_identifier) {
+    return c.json(
+      {
+        error: "No EZID identifier found for this dataset.",
+        skipped: true,
+      },
+      200,
+    );
+  }
+
+  if (!dataset.github_repo) {
+    return c.json({ error: "Dataset has no GitHub repository" }, 400);
+  }
+
+  const repoName = extractRepoName(dataset.github_repo);
+  if (!repoName) {
+    return c.json({ error: "Invalid github_repo format" }, 400);
+  }
+
+  try {
+    // Read BIDS + NEMAR metadata from the release tag (not main)
+    const repoMeta = await readRepoMetadata(
+      repoName,
+      c.env.GITHUB_ADMIN_PAT,
+      undefined,
+      dataset.name,
+      `v${version}`,
+    );
+    const { bidsDescription, enrichment } = repoMeta;
+    for (const w of repoMeta.warnings) {
+      console.error("[webhook]", w);
+    }
+
+    // Query all existing version DOIs so concept DOI keeps all HasVersion relations
+    const versionRows = await c.env.DB.prepare(
+      "SELECT doi FROM dataset_versions WHERE dataset_id = ?",
+    )
+      .bind(dataset.dataset_id)
+      .all<{ doi: string }>();
+    const existingVersionDois = versionRows.results.map((r) => r.doi);
+
+    const result = await createEzidVersionDoi(
+      {
+        EZID_USERNAME: c.env.EZID_USERNAME,
+        EZID_PASSWORD: c.env.EZID_PASSWORD,
+        EZID_SANDBOX_USERNAME: c.env.EZID_SANDBOX_USERNAME,
+        EZID_SANDBOX_PASSWORD: c.env.EZID_SANDBOX_PASSWORD,
+      },
+      {
+        datasetId: dataset.dataset_id,
+        conceptIdentifier: dataset.ezid_identifier,
+        version,
+        bidsDescription,
+        githubRepo: dataset.github_repo,
+        sandbox,
+        existingVersionDois,
+        enrichment,
+      },
+    );
+
+    // DOI is now public and permanent. DB and manifest failures below are
+    // non-fatal but must be surfaced in the response for operator awareness.
+    let dbError: string | undefined;
+    try {
+      await c.env.DB.prepare(
+        "UPDATE datasets SET latest_version_doi = ?, updated_at = datetime('now') WHERE id = ?",
+      )
+        .bind(result.doi, dataset.id)
+        .run();
+
+      await c.env.DB.prepare(
+        "INSERT OR IGNORE INTO dataset_versions (dataset_id, version, doi, provider) VALUES (?, ?, ?, 'ezid')",
+      )
+        .bind(dataset.dataset_id, version, result.doi)
+        .run();
+    } catch (err) {
+      dbError = errorMessage(err);
+      console.error(`[webhook] DOI ${result.doi} is PUBLIC but DB update failed:`, err);
+    }
+
+    // Generate and upload version manifest
+    let manifestGenerated = false;
+    let manifestErrorMsg: string | undefined;
+    try {
+      const manifest = await generateManifest(
+        repoName,
+        version,
+        c.env.GITHUB_ADMIN_PAT,
+        dataset.dataset_id,
+        result.doi,
+        dataset.concept_doi,
+      );
+
+      await uploadManifest(
+        {
+          bucket: c.env.S3_BUCKET,
+          region: c.env.AWS_REGION,
+          accessKeyId: c.env.AWS_ACCESS_KEY_ID,
+          secretAccessKey: c.env.AWS_SECRET_ACCESS_KEY,
+        },
+        dataset.dataset_id,
+        version,
+        JSON.stringify(manifest, null, 2),
+      );
+      manifestGenerated = true;
+    } catch (manifestErr) {
+      manifestErrorMsg = errorMessage(manifestErr);
+      console.error(
+        `[webhook] Manifest generation failed for ${dataset.dataset_id}@${version}:`,
+        manifestErr,
+      );
+    }
+
+    return c.json({
+      message: "Version DOI published successfully",
+      version,
+      version_doi: result.doi,
+      concept_doi: dataset.concept_doi,
+      provider: "ezid",
+      doi_url: `https://doi.org/${result.doi}`,
+      manifest_generated: manifestGenerated,
+      ...(repoMeta.warnings.length > 0 && { metadata_warnings: repoMeta.warnings }),
+      ...(dbError && { db_error: dbError }),
+      ...(manifestErrorMsg && { manifest_error: manifestErrorMsg }),
+      ...(result.warnings && { doi_warnings: result.warnings }),
+    });
+  } catch (error) {
+    console.error("EZID version DOI error:", error);
+    return c.json(
+      {
+        error: "Failed to publish version DOI via EZID",
+        details: errorMessage(error),
+      },
+      500,
+    );
+  }
+}
+
+/**
+ * Handle Zenodo version DOI creation: downloads release, uploads to Zenodo, publishes, and generates version manifest.
+ */
+async function handleZenodoVersionDoi(
+  c: WebhookContext,
+  dataset: {
+    id: number;
+    dataset_id: string;
+    name: string;
+    description: string | null;
+    github_repo: string | null;
+    concept_doi: string | null;
+    zenodo_concept_id: string | null;
+  },
+  version: string,
+  release_url: string,
+  sandbox: boolean,
+) {
+  if (!dataset.zenodo_concept_id) {
+    return c.json(
+      {
+        error: "No Zenodo concept ID found. Cannot create version DOI.",
+        skipped: true,
+      },
+      200,
+    );
+  }
+
+  const zenodoToken = sandbox ? c.env.ZENODO_SANDBOX_API_KEY : c.env.ZENODO_API_KEY;
   if (!zenodoToken) {
     return c.json({ error: `Zenodo ${sandbox ? "sandbox " : ""}API key not configured` }, 500);
   }
 
   try {
     // Create a new version from the concept deposition
-    const conceptId = parseInt(dataset.zenodo_concept_id);
+    const conceptId = Number.parseInt(dataset.zenodo_concept_id);
     const newVersion = await zenodo.createNewVersion(conceptId, zenodoToken, sandbox);
 
     // Verify we have a bucket URL for upload
@@ -94,7 +317,7 @@ webhooks.post("/publish-version-doi", async (c) => {
       throw new Error(`Failed to download release: ${zipResponse.status}`);
     }
     const zipBuffer = await zipResponse.arrayBuffer();
-    const zipFilename = `${dataset_id}-${version}.zip`;
+    const zipFilename = `${dataset.dataset_id}-${version}.zip`;
 
     // Upload the file to Zenodo
     await zenodo.uploadFile(
@@ -103,7 +326,7 @@ webhooks.post("/publish-version-doi", async (c) => {
       zipFilename,
       new Uint8Array(zipBuffer),
       zenodoToken,
-      sandbox
+      sandbox,
     );
 
     // Update metadata for the new version
@@ -120,27 +343,87 @@ webhooks.post("/publish-version-doi", async (c) => {
     // Publish the new version
     const published = await zenodo.publishDeposition(newVersion.id, zenodoToken, sandbox);
 
-    // Update database with new version info
-    await c.env.DB.prepare(
-      "UPDATE datasets SET zenodo_latest_version_id = ? WHERE id = ?"
-    ).bind(published.id.toString(), dataset.id).run();
-
+    // DOI is now published and permanent. DB and manifest failures below are
+    // non-fatal but must be surfaced in the response for operator awareness.
     const baseUrl = sandbox ? "https://sandbox.zenodo.org" : "https://zenodo.org";
+    let dbError: string | undefined;
+    try {
+      await c.env.DB.prepare("UPDATE datasets SET zenodo_latest_version_id = ? WHERE id = ?")
+        .bind(published.id.toString(), dataset.id)
+        .run();
+
+      if (published.doi) {
+        await c.env.DB.prepare(
+          "INSERT OR IGNORE INTO dataset_versions (dataset_id, version, doi, provider) VALUES (?, ?, ?, 'zenodo')",
+        )
+          .bind(dataset.dataset_id, version, published.doi)
+          .run();
+      }
+    } catch (err) {
+      dbError = errorMessage(err);
+      console.error(
+        `[webhook] Zenodo DOI ${published.doi} is PUBLISHED but DB update failed:`,
+        err,
+      );
+    }
+
+    // Generate and upload version manifest
+    let manifestGenerated = false;
+    let manifestErrorMsg: string | undefined;
+    const zenodoRepoName = dataset.github_repo ? extractRepoName(dataset.github_repo) : null;
+    if (zenodoRepoName) {
+      try {
+        const manifest = await generateManifest(
+          zenodoRepoName,
+          version,
+          c.env.GITHUB_ADMIN_PAT,
+          dataset.dataset_id,
+          published.doi ?? null,
+          dataset.concept_doi,
+        );
+
+        await uploadManifest(
+          {
+            bucket: c.env.S3_BUCKET,
+            region: c.env.AWS_REGION,
+            accessKeyId: c.env.AWS_ACCESS_KEY_ID,
+            secretAccessKey: c.env.AWS_SECRET_ACCESS_KEY,
+          },
+          dataset.dataset_id,
+          version,
+          JSON.stringify(manifest, null, 2),
+        );
+        manifestGenerated = true;
+      } catch (manifestErr) {
+        manifestErrorMsg = errorMessage(manifestErr);
+        console.error(
+          `[webhook] Manifest generation failed for ${dataset.dataset_id}@${version}:`,
+          manifestErr,
+        );
+      }
+    }
 
     return c.json({
       message: "Version DOI published successfully",
-      version: version,
+      version,
       version_doi: published.doi,
       concept_doi: dataset.concept_doi,
+      provider: "zenodo",
       zenodo_url: `${baseUrl}/records/${published.id}`,
+      manifest_generated: manifestGenerated,
+      ...(dbError && { db_error: dbError }),
+      ...(manifestErrorMsg && { manifest_error: manifestErrorMsg }),
     });
   } catch (error) {
     console.error("Zenodo publish error:", error);
-    return c.json({
-      error: "Failed to publish version DOI",
-      details: error instanceof Error ? error.message : "Unknown error"
-    }, 500);
+    return c.json(
+      {
+        error: "Failed to publish version DOI",
+        details: errorMessage(error),
+      },
+      500,
+    );
   }
-});
+}
 
 export default webhooks;

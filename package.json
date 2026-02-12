@@ -1,6 +1,6 @@
 {
   "name": "nemar-cli",
-  "version": "0.3.7",
+  "version": "0.4.0",
   "description": "CLI for NEMAR (Neuroelectromagnetic Data Archive and Tools Resource) dataset management",
   "type": "module",
   "main": "dist/index.js",
@@ -33,10 +33,10 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/nemarDatasets/nemar-cli.git"
+    "url": "git+https://github.com/nemarOrg/nemar-cli.git"
   },
   "bugs": {
-    "url": "https://github.com/nemarDatasets/nemar-cli/issues"
+    "url": "https://github.com/nemarOrg/nemar-cli/issues"
   },
   "homepage": "https://nemar-cli.pages.dev",
   "engines": {
@@ -56,7 +56,7 @@
     "zod": "^3.23.8"
   },
   "devDependencies": {
-    "@biomejs/biome": "^1.9.4",
+    "@biomejs/biome": "1.9.4",
     "@types/bcryptjs": "^3.0.0",
     "@types/bun": "latest",
     "@types/inquirer": "^9.0.7",

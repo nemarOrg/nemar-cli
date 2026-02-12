@@ -167,7 +167,7 @@ export async function checkGitHubSSH(): Promise<{
   }
 
   try {
-    const { stdout, stderr, exitCode } = await runCommand([
+    const { stdout, stderr } = await runCommand([
       "ssh",
       "-T",
       "-o",
@@ -1439,6 +1439,148 @@ export async function getDatasetData(
 }
 
 /**
+ * Drop local copies of annexed files (keeps remote copies intact).
+ * Git-annex verifies remote copies exist before dropping.
+ */
+export async function dropFiles(
+  datasetPath: string,
+  paths?: string[],
+): Promise<{ success: boolean; error?: string; dropped: number; kept: string[] }> {
+  const targets = paths && paths.length > 0 ? paths : ["."];
+
+  try {
+    const args = ["git", "annex", "drop", ...targets];
+    const { stdout, stderr, exitCode } = await runCommand(args, { cwd: datasetPath });
+
+    if (exitCode !== 0) {
+      // git-annex drop returns non-zero if some files couldn't be dropped
+      // (e.g., no remote copies). Parse output for details.
+      const kept: string[] = [];
+      for (const line of stderr.split("\n")) {
+        const match = line.match(/^drop (.+) \(unsafe\)/);
+        if (match) kept.push(match[1]);
+      }
+      const dropMatches = stdout.match(/^drop .+ ok$/gm);
+      const dropped = dropMatches ? dropMatches.length : 0;
+      return { success: false, error: stderr.trim(), dropped, kept };
+    }
+
+    const dropMatches = stdout.match(/^drop .+ ok$/gm);
+    const dropped = dropMatches ? dropMatches.length : 0;
+    return { success: true, dropped, kept: [] };
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    return { success: false, error: msg || "Unknown error during drop", dropped: 0, kept: [] };
+  }
+}
+
+/**
+ * Valid remote name pattern (alphanumeric, dash, underscore, dot).
+ */
+const VALID_REMOTE_NAME = /^[a-zA-Z0-9._-]+$/;
+
+/**
+ * Get names of S3-type git-annex special remotes configured in a dataset.
+ * Uses git config to detect remotes with S3-related configuration.
+ * Returns empty array if no S3 remotes found or detection fails.
+ */
+export async function getAnnexS3Remotes(datasetPath: string): Promise<string[]> {
+  const remotes: string[] = [];
+
+  // Primary: check git config for S3-configured remotes
+  const { stdout: remoteList, exitCode: listCode } = await runCommand(
+    ["git", "config", "--get-regexp", "^remote\\..*\\.annex-s3"],
+    {
+      cwd: datasetPath,
+    },
+  );
+
+  if (listCode === 0 && remoteList.trim()) {
+    for (const line of remoteList.trim().split("\n")) {
+      const match = line.match(/^remote\.(.+?)\.annex-/);
+      if (match && VALID_REMOTE_NAME.test(match[1])) {
+        remotes.push(match[1]);
+      }
+    }
+  }
+
+  if (remotes.length > 0) return [...new Set(remotes)];
+
+  // Fallback: parse git-annex info --json for remote descriptions
+  const {
+    stdout: infoJson,
+    exitCode: jsonCode,
+    stderr: infoStderr,
+  } = await runCommand(["git", "annex", "info", "--json"], { cwd: datasetPath });
+
+  if (jsonCode !== 0) {
+    if (infoStderr.trim()) {
+      console.error(`git annex info failed: ${infoStderr.trim()}`);
+    }
+    return [];
+  }
+
+  if (!infoJson.trim()) return [];
+
+  let info: Record<string, unknown>;
+  try {
+    info = JSON.parse(infoJson);
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    console.error(`Failed to parse git-annex info JSON: ${msg}`);
+    return [];
+  }
+
+  const repos = [
+    ...(Array.isArray(info["trusted repositories"]) ? info["trusted repositories"] : []),
+    ...(Array.isArray(info["semitrusted repositories"]) ? info["semitrusted repositories"] : []),
+    ...(Array.isArray(info["untrusted repositories"]) ? info["untrusted repositories"] : []),
+  ];
+
+  for (const repo of repos) {
+    if (!repo?.description?.includes("[")) continue;
+    const nameMatch = repo.description.match(/\[(.+?)\]/);
+    if (!nameMatch) continue;
+
+    const name = nameMatch[1];
+    if (!VALID_REMOTE_NAME.test(name)) continue;
+
+    const { stdout: typeOut } = await runCommand(["git", "config", `remote.${name}.annex-s3`], {
+      cwd: datasetPath,
+    });
+    if (typeOut.trim()) remotes.push(name);
+  }
+
+  return [...new Set(remotes)];
+}
+
+/**
+ * Copy annexed content to a remote. Inherits environment credentials (AWS_ACCESS_KEY_ID, etc.).
+ * Suitable for push operations where the user has configured their own credentials.
+ */
+export async function copyToAnnexRemote(
+  datasetPath: string,
+  remoteName: string,
+  jobs = 4,
+): Promise<{ success: boolean; error?: string; filesCopied: number }> {
+  try {
+    const args = ["git", "annex", "copy", "--to", remoteName, "-J", jobs.toString(), "."];
+    const { stdout, stderr, exitCode } = await runCommand(args, { cwd: datasetPath });
+
+    if (exitCode !== 0) {
+      return { success: false, error: stderr.trim() || "Failed to copy to remote", filesCopied: 0 };
+    }
+
+    const copyMatches = stdout.match(/^copy .+ ok$/gm);
+    const filesCopied = copyMatches ? copyMatches.length : 0;
+    return { success: true, filesCopied };
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    return { success: false, error: msg || "Unknown error during copy", filesCopied: 0 };
+  }
+}
+
+/**
  * Local dataset info returned by getLocalDatasetInfo
  */
 export interface LocalDatasetInfo {
@@ -1702,6 +1844,29 @@ export async function getCurrentBranch(datasetPath: string): Promise<string | nu
     }
 
     return stdout.trim();
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Detect the dataset ID from the git remote URL of the current directory.
+ * Parses the origin remote URL to extract the repository name (e.g., nm000104).
+ */
+export async function getDatasetIdFromRemote(datasetPath: string): Promise<string | null> {
+  try {
+    const { stdout, exitCode } = await runCommand(["git", "remote", "get-url", "origin"], {
+      cwd: datasetPath,
+    });
+
+    if (exitCode !== 0 || !stdout.trim()) return null;
+
+    const url = stdout.trim();
+    // Match patterns: https://github.com/org/repo.git, git@github.com:org/repo.git
+    const match = url.match(/[/:]([^/]+?)(?:\.git)?$/);
+    if (!match) return null;
+
+    return match[1];
   } catch {
     return null;
   }

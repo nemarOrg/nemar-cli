@@ -8,11 +8,23 @@
  * The config is backed up and restored after tests.
  */
 
-import { describe, test, expect, beforeAll, beforeEach, afterAll } from "bun:test";
+import { afterAll, beforeAll, beforeEach, describe, expect, setDefaultTimeout, test } from "bun:test";
+
+// CLI tests spawn subprocesses that make network calls to Cloudflare Workers;
+// CI runners may experience cold starts and higher latency
+setDefaultTimeout(30000);
+import {
+  copyFileSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  rmSync,
+  unlinkSync,
+  writeFileSync,
+} from "node:fs";
+import { dirname, join } from "node:path";
 import { spawn } from "bun";
 import { TEST_CONFIG, sleep } from "./setup";
-import { existsSync, unlinkSync, mkdirSync, writeFileSync, readFileSync, copyFileSync, rmSync } from "fs";
-import { join, dirname } from "path";
 
 // Cross-platform config path (matches Conf library behavior)
 // Conf uses env-paths which respects XDG_CONFIG_HOME on Linux
@@ -21,20 +33,19 @@ function getConfigDir(): string {
   if (process.platform === "darwin") {
     // macOS: ~/Library/Preferences/nemar-nodejs/
     return join(home, "Library/Preferences/nemar-nodejs");
-  } else if (process.platform === "win32") {
+  }
+  if (process.platform === "win32") {
     // Windows: %APPDATA%/nemar/
     return join(process.env.APPDATA || "", "nemar");
-  } else {
-    // Linux: $XDG_CONFIG_HOME/nemar/ or ~/.config/nemar/
-    const xdgConfig = process.env.XDG_CONFIG_HOME || join(home, ".config");
-    return join(xdgConfig, "nemar");
   }
+  // Linux: $XDG_CONFIG_HOME/nemar/ or ~/.config/nemar/
+  const xdgConfig = process.env.XDG_CONFIG_HOME || join(home, ".config");
+  return join(xdgConfig, "nemar");
 }
 
 const CONFIG_DIR = getConfigDir();
 const CONFIG_FILE = join(CONFIG_DIR, "config.json");
 const CONFIG_BACKUP = join(CONFIG_DIR, "config.json.backup");
-
 
 // Test context - each test creates its own isolated config directory
 interface TestContext {
@@ -56,7 +67,7 @@ function createTestContext(): TestContext {
 async function runCli(
   args: string[],
   ctx?: TestContext,
-  options: { env?: Record<string, string>; input?: string } = {}
+  options: { env?: Record<string, string>; input?: string } = {},
 ): Promise<{ stdout: string; stderr: string; exitCode: number }> {
   const proc = spawn({
     cmd: ["bun", "run", "src/index.ts", ...args],
@@ -205,13 +216,16 @@ describe("CLI Auth Commands", () => {
     test("login with valid API key via -k flag", async () => {
       const ctx = createTestContext();
 
-      const { stdout, exitCode } = await runCli([
-        "auth",
-        "login",
-        "-k",
-        TEST_CONFIG.adminApiKey,
-        "-y", // Skip confirmation even if already authenticated
-      ], ctx);
+      const { stdout, exitCode } = await runCli(
+        [
+          "auth",
+          "login",
+          "-k",
+          TEST_CONFIG.adminApiKey,
+          "-y", // Skip confirmation even if already authenticated
+        ],
+        ctx,
+      );
 
       expect(exitCode).toBe(0);
       expect(stdout).toContain("Welcome back");
@@ -221,13 +235,10 @@ describe("CLI Auth Commands", () => {
     test("login with invalid API key shows error", async () => {
       const ctx = createTestContext();
 
-      const { stdout, exitCode } = await runCli([
-        "auth",
-        "login",
-        "-k",
-        "invalid_key_that_is_definitely_wrong_12345",
-        "-y",
-      ], ctx);
+      const { stdout, exitCode } = await runCli(
+        ["auth", "login", "-k", "invalid_key_that_is_definitely_wrong_12345", "-y"],
+        ctx,
+      );
 
       expect(stdout).toContain("Check that your API key is correct");
     });
@@ -361,7 +372,7 @@ describe("CLI Dataset Validate", () => {
         Name: "Test Dataset",
         BIDSVersion: "1.9.0",
         Authors: ["Test Author"],
-      })
+      }),
     );
     writeFileSync(join(testDatasetDir, "README"), "# Test Dataset\n\nThis is a test.");
   });
@@ -379,10 +390,11 @@ describe("CLI Dataset Validate", () => {
     const { stdout, exitCode } = await runCli(["dataset", "validate", "--help"]);
 
     expect(exitCode).toBe(0);
-    expect(stdout).toContain("Validate a BIDS dataset locally");
+    expect(stdout).toContain("Validate a BIDS dataset");
     expect(stdout).toContain("--json");
     expect(stdout).toContain("--config");
     expect(stdout).toContain("--recursive");
+    expect(stdout).toContain("passed through to the BIDS validator");
   });
 
   test("nemar dataset validate --version-info shows validator version", async () => {
@@ -397,7 +409,7 @@ describe("CLI Dataset Validate", () => {
     const { stdout, exitCode } = await runCli(["dataset", "validate", testDatasetDir]);
 
     expect(exitCode).toBe(0);
-    expect(stdout).toContain("Dataset is valid BIDS");
+    // Native bids-validator text output includes a Summary table
     expect(stdout).toContain("Summary:");
   });
 
@@ -405,12 +417,11 @@ describe("CLI Dataset Validate", () => {
     const { stdout, exitCode } = await runCli(["dataset", "validate", testDatasetDir, "--json"]);
 
     expect(exitCode).toBe(0);
-    // Find the JSON object in the output (starts with { and ends with })
+    // Raw bids-validator JSON output has { issues: { issues: [...] }, summary: {...} }
     const jsonMatch = stdout.match(/\{[\s\S]*\}/);
     expect(jsonMatch).not.toBeNull();
     const result = JSON.parse(jsonMatch![0]);
-    expect(result.valid).toBe(true);
-    expect(Array.isArray(result.issues)).toBe(true);
+    expect(result.issues).toBeDefined();
     expect(result.summary).toBeDefined();
   });
 
@@ -422,11 +433,63 @@ describe("CLI Dataset Validate", () => {
   });
 
   test("nemar dataset validate with non-BIDS directory fails", async () => {
-    const { stdout, exitCode } = await runCli(["dataset", "validate", "/tmp"]);
+    const { stdout, exitCode} = await runCli(["dataset", "validate", "/tmp"]);
 
     expect(exitCode).toBe(1);
     expect(stdout).toContain("Not a valid BIDS dataset");
     expect(stdout).toContain("dataset_description.json");
+  });
+
+  test("nemar dataset validate accepts pass-through flags", async () => {
+    const testDir = "/tmp/test-bids-passthrough";
+    const { existsSync, mkdirSync, writeFileSync, rmSync } = await import("node:fs");
+
+    if (existsSync(testDir)) {
+      rmSync(testDir, { recursive: true, force: true });
+    }
+    mkdirSync(testDir, { recursive: true });
+    writeFileSync(
+      `${testDir}/dataset_description.json`,
+      JSON.stringify({ Name: "Test Dataset", BIDSVersion: "1.6.0" }),
+    );
+
+    try {
+      // --max-rows is a valid bids-validator flag passed through directly
+      const { stdout, exitCode } = await runCli(["dataset", "validate", testDir, "--max-rows", "0"]);
+
+      expect(exitCode).toBe(0);
+      expect(stdout).toContain("Summary:");
+    } finally {
+      if (existsSync(testDir)) {
+        rmSync(testDir, { recursive: true, force: true });
+      }
+    }
+  });
+
+  test("nemar dataset validate passes unknown flags to validator", async () => {
+    const testDir = "/tmp/test-bids-unknown-flag";
+    const { existsSync, mkdirSync, writeFileSync, rmSync } = await import("node:fs");
+
+    if (existsSync(testDir)) {
+      rmSync(testDir, { recursive: true, force: true });
+    }
+    mkdirSync(testDir, { recursive: true });
+    writeFileSync(
+      `${testDir}/dataset_description.json`,
+      JSON.stringify({ Name: "Test Dataset", BIDSVersion: "1.6.0" }),
+    );
+
+    try {
+      // Unknown flags are passed through; deno/bids-validator will reject them
+      const { stdout, stderr, exitCode } = await runCli(["dataset", "validate", testDir, "--unknownFlag", "value"]);
+
+      // Validator exits with non-zero for unknown options
+      expect(exitCode).not.toBe(0);
+    } finally {
+      if (existsSync(testDir)) {
+        rmSync(testDir, { recursive: true, force: true });
+      }
+    }
   });
 });
 
@@ -504,8 +567,8 @@ describe("CLI Dataset Download", () => {
     // Either fails at prereq check (DataLad not installed) or at dataset lookup
     expect(
       output.includes("Prerequisites") ||
-      output.includes("not found") ||
-      output.includes("DataLad")
+        output.includes("not found") ||
+        output.includes("DataLad"),
     ).toBe(true);
   });
 });
@@ -542,7 +605,12 @@ describe("CLI Dataset Status", () => {
       return;
     }
 
-    const { stdout, exitCode } = await runCli(["dataset", "status", datasets[0].dataset_id, "--json"]);
+    const { stdout, exitCode } = await runCli([
+      "dataset",
+      "status",
+      datasets[0].dataset_id,
+      "--json",
+    ]);
 
     expect(exitCode).toBe(0);
     const result = JSON.parse(stdout);
@@ -557,21 +625,22 @@ describe("CLI Dataset List", () => {
     const { stdout, exitCode } = await runCli(["dataset", "list", "--help"]);
 
     expect(exitCode).toBe(0);
-    expect(stdout).toContain("List available datasets");
+    expect(stdout).toContain("List publicly available datasets");
     expect(stdout).toContain("--mine");
     expect(stdout).toContain("--json");
     expect(stdout).toContain("--limit");
   });
 
   test("nemar dataset list shows datasets", async () => {
-    const { stdout, exitCode } = await runCli(["dataset", "list"]);
+    const { stdout, stderr, exitCode } = await runCli(["dataset", "list"]);
 
+    if (exitCode !== 0) {
+      console.log("STDOUT:", stdout);
+      console.log("STDERR:", stderr);
+    }
     expect(exitCode).toBe(0);
     // Either shows datasets or "No datasets found"
-    expect(
-      stdout.includes("Datasets") ||
-      stdout.includes("No datasets found")
-    ).toBe(true);
+    expect(stdout.includes("Datasets") || stdout.includes("No datasets found")).toBe(true);
   });
 
   test("nemar dataset list --json outputs JSON format", async () => {
@@ -621,13 +690,14 @@ describe("CLI Admin Revert", () => {
       username: "test-admin",
     });
 
-    const { stdout, stderr, exitCode } = await runCli(["admin", "revert", "nm999999", "--list"], ctx);
+    const { stdout, stderr, exitCode } = await runCli(
+      ["admin", "revert", "nm999999", "--list"],
+      ctx,
+    );
 
     // Should fail; either "not found" (if prereqs met) or "missing prerequisites" (in CI)
     const output = (stdout + stderr).toLowerCase();
-    expect(
-      output.includes("not found") || output.includes("prerequisites")
-    ).toBe(true);
+    expect(output.includes("not found") || output.includes("prerequisites")).toBe(true);
   });
 });
 
@@ -657,7 +727,10 @@ describe("CLI Dataset Collaborator Commands", () => {
         username: "test-user",
       });
 
-      const { stdout, stderr, exitCode } = await runCli(["dataset", "request-access", "nm999999"], ctx);
+      const { stdout, stderr, exitCode } = await runCli(
+        ["dataset", "request-access", "nm999999"],
+        ctx,
+      );
 
       // Spinner output goes to stderr in non-TTY mode
       const output = (stdout + stderr).toLowerCase();
@@ -692,15 +765,16 @@ describe("CLI Dataset Collaborator Commands", () => {
       });
 
       // Try to invite to a dataset test-user doesn't own
-      const { stdout, stderr, exitCode } = await runCli(["dataset", "invite", "someuser", "nm000001"], ctx);
+      const { stdout, stderr, exitCode } = await runCli(
+        ["dataset", "invite", "someuser", "nm000001"],
+        ctx,
+      );
 
       // Spinner output goes to stderr in non-TTY mode
       const output = (stdout + stderr).toLowerCase();
       // Either "not found" (if dataset doesn't exist) or "owner or admin" (if forbidden)
       expect(
-        output.includes("not found") ||
-        output.includes("owner") ||
-        output.includes("admin")
+        output.includes("not found") || output.includes("owner") || output.includes("admin"),
       ).toBe(true);
     });
   });
@@ -732,15 +806,16 @@ describe("CLI Dataset Collaborator Commands", () => {
       });
 
       // Try to list collaborators for a dataset test-user doesn't own
-      const { stdout, stderr, exitCode } = await runCli(["dataset", "collaborators", "nm000001"], ctx);
+      const { stdout, stderr, exitCode } = await runCli(
+        ["dataset", "collaborators", "nm000001"],
+        ctx,
+      );
 
       // Spinner output goes to stderr in non-TTY mode
       const output = (stdout + stderr).toLowerCase();
       // Either "not found" or "owner or admin" forbidden
       expect(
-        output.includes("not found") ||
-        output.includes("owner") ||
-        output.includes("admin")
+        output.includes("not found") || output.includes("owner") || output.includes("admin"),
       ).toBe(true);
     });
 
@@ -767,7 +842,7 @@ describe("CLI Dataset Collaborator Commands", () => {
 
       const { stdout, exitCode } = await runCli(
         ["dataset", "collaborators", datasets[0].dataset_id, "--json"],
-        ctx
+        ctx,
       );
 
       expect(exitCode).toBe(0);

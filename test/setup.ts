@@ -4,8 +4,8 @@
  * Loads test environment and provides test utilities.
  */
 
-import { readFileSync, existsSync } from "fs";
-import { join } from "path";
+import { existsSync, readFileSync } from "node:fs";
+import { join } from "node:path";
 
 // Load test environment variables
 const envPath = join(import.meta.dir, ".env.test");
@@ -25,7 +25,7 @@ if (existsSync(envPath)) {
 
 // Test configuration
 export const TEST_CONFIG = {
-  apiUrl: process.env.TEST_API_URL || "https://nemar-api.shirazi-10f.workers.dev",
+  apiUrl: process.env.TEST_API_URL || "https://api.osc.earth/nemar",
   password: process.env.TEST_PASSWORD || "TestPassword123!",
   adminApiKey: process.env.TEST_ADMIN_API_KEY || "",
   userApiKey: process.env.TEST_USER_API_KEY || "",
@@ -44,7 +44,7 @@ if (!TEST_CONFIG.adminApiKey || !TEST_CONFIG.userApiKey) {
 export async function testRequest<T>(
   path: string,
   options: RequestInit = {},
-  apiKey?: string
+  apiKey?: string,
 ): Promise<{ status: number; data: T }> {
   const url = `${TEST_CONFIG.apiUrl}${path}`;
   const headers: Record<string, string> = {
@@ -58,7 +58,7 @@ export async function testRequest<T>(
   }
 
   if (apiKey) {
-    headers["Authorization"] = `Bearer ${apiKey}`;
+    headers.Authorization = `Bearer ${apiKey}`;
   }
 
   const response = await fetch(url, {
@@ -66,7 +66,7 @@ export async function testRequest<T>(
     headers,
   });
 
-  const data = await response.json() as T;
+  const data = (await response.json()) as T;
   return { status: response.status, data };
 }
 
@@ -101,7 +101,7 @@ const MIN_REQUEST_INTERVAL = 100; // 100ms between requests
 export async function rateLimitedRequest<T>(
   path: string,
   options: RequestInit = {},
-  apiKey?: string
+  apiKey?: string,
 ): Promise<{ status: number; data: T }> {
   const now = Date.now();
   const timeSinceLastRequest = now - lastRequestTime;

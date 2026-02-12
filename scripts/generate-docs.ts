@@ -23,7 +23,17 @@ const commands = {
   },
   dataset: {
     description: "Dataset management operations",
-    subcommands: ["validate", "upload", "download", "status", "list", "version"],
+    subcommands: [
+      "validate",
+      "upload",
+      "download",
+      "status",
+      "list",
+      "version",
+      "publish request",
+      "publish status",
+      "publish resend",
+    ],
   },
   sandbox: {
     description: "Sandbox training (required before uploading)",
@@ -31,7 +41,18 @@ const commands = {
   },
   admin: {
     description: "Administrative operations (requires admin privileges)",
-    subcommands: ["users", "approve", "revoke", "regenerate-iam", "doi", "revert"],
+    subcommands: [
+      "users",
+      "approve",
+      "revoke",
+      "regenerate-iam",
+      "doi create",
+      "doi info",
+      "revert",
+      "publish list",
+      "publish approve",
+      "publish deny",
+    ],
   },
 };
 
@@ -144,7 +165,7 @@ nemar dataset upload ./my-dataset --name "My EEG Dataset"
 
 ## Support
 
-- [GitHub Issues](https://github.com/nemarDatasets/nemar-cli/issues) - Report bugs or request features
+- [GitHub Issues](https://github.com/nemarOrg/nemar-cli/issues) - Report bugs or request features
 - [NEMAR Website](https://nemar.org) - Learn more about NEMAR
 `;
 }
@@ -190,7 +211,7 @@ bunx nemar-cli --help
 ### From Source
 
 \`\`\`bash
-git clone https://github.com/nemarDatasets/nemar-cli.git
+git clone https://github.com/nemarOrg/nemar-cli.git
 cd nemar-cli
 bun install
 bun link
@@ -953,7 +974,7 @@ NEMAR CLI communicates with the NEMAR API. This reference is for advanced users.
 ## Base URL
 
 \`\`\`
-https://nemar-api.shirazi-10f.workers.dev
+https://api.osc.earth/nemar
 \`\`\`
 
 ## Authentication

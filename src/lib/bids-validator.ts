@@ -112,19 +112,17 @@ export async function getValidatorVersion(): Promise<string | null> {
 }
 
 /**
- * Validate a BIDS dataset
- *
- * @param datasetPath - Path to the BIDS dataset directory
- * @param options - Validation options
- * @returns Validation result with issues and summary
+ * Build the deno + bids-validator argument list from common options.
  */
-export async function validateBidsDataset(
+function buildValidatorArgs(
   datasetPath: string,
-  options: ValidateOptions = {},
-): Promise<BidsValidationResult> {
-  // Build command arguments
-  const args = ["run", "-ERWN", "jsr:@bids/validator", datasetPath, "--json"];
+  options: ValidateOptions & { json?: boolean; extraArgs?: string[] } = {},
+): string[] {
+  const args = ["run", "-ERWN", "jsr:@bids/validator", datasetPath];
 
+  if (options.json) {
+    args.push("--json");
+  }
   if (options.config) {
     args.push("--config", options.config);
   }
@@ -140,8 +138,26 @@ export async function validateBidsDataset(
   if (options.verbose) {
     args.push("--verbose");
   }
+  if (options.extraArgs?.length) {
+    args.push(...options.extraArgs);
+  }
 
-  // Run validator
+  return args;
+}
+
+/**
+ * Validate a BIDS dataset (JSON mode, for programmatic use by upload command).
+ *
+ * @param datasetPath - Path to the BIDS dataset directory
+ * @param options - Validation options
+ * @returns Validation result with issues and summary
+ */
+export async function validateBidsDataset(
+  datasetPath: string,
+  options: ValidateOptions = {},
+): Promise<BidsValidationResult> {
+  const args = buildValidatorArgs(datasetPath, { ...options, json: true });
+
   const proc = spawn({
     cmd: ["deno", ...args],
     stdout: "pipe",
@@ -154,7 +170,6 @@ export async function validateBidsDataset(
 
   // Handle errors
   if (exitCode !== 0 && !stdout.trim()) {
-    // Real error (not just validation failures)
     throw new Error(
       stderr.includes("error:")
         ? stderr.split("\n").find((l) => l.includes("error:")) || "Validation failed"
@@ -189,6 +204,29 @@ export async function validateBidsDataset(
     errorCount,
     warningCount,
   };
+}
+
+/**
+ * Run the BIDS validator directly, returning raw stdout/stderr and exit code.
+ * Used by the validate command for native text output passthrough.
+ */
+export async function runBidsValidatorDirect(
+  datasetPath: string,
+  options: ValidateOptions & { json?: boolean; extraArgs?: string[] } = {},
+): Promise<{ stdout: string; stderr: string; exitCode: number }> {
+  const args = buildValidatorArgs(datasetPath, options);
+
+  const proc = spawn({
+    cmd: ["deno", ...args],
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+
+  const stdout = await new Response(proc.stdout).text();
+  const stderr = await new Response(proc.stderr).text();
+  const exitCode = await proc.exited;
+
+  return { stdout, stderr, exitCode };
 }
 
 /**

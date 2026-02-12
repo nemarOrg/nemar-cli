@@ -37,11 +37,16 @@ S3_BUCKET = "nemar"
 # - TEST_BYPASS_TOKEN
 # - ZENODO_API_KEY
 # - ZENODO_SANDBOX_API_KEY
+# - EZID_USERNAME
+# - EZID_PASSWORD
+# - EZID_SANDBOX_USERNAME
+# - EZID_SANDBOX_PASSWORD
 
 # Development environment
 [env.dev]
 name = "nemar-api-dev"
 workers_dev = true
+routes = []  # Disable custom routes for dev environment
 [[env.dev.d1_databases]]
 binding = "DB"
 database_name = "nemar-db"

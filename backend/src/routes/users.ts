@@ -5,8 +5,8 @@
  */
 
 import { Hono } from "hono";
-import type { Bindings, Variables } from "../types/bindings";
 import { authMiddleware } from "../middleware/auth";
+import type { Bindings, Variables } from "../types/bindings";
 
 export const userRoutes = new Hono<{ Bindings: Bindings; Variables: Variables }>();
 
@@ -33,7 +33,7 @@ userRoutes.get("/me", async (c) => {
       (SELECT COUNT(*) FROM datasets WHERE owner_user_id = ? AND is_sandbox = 0) as dataset_count
     FROM users
     WHERE id = ?
-  `
+  `,
     )
     .bind(user.id, user.id)
     .first<{
@@ -54,7 +54,7 @@ userRoutes.get("/me", async (c) => {
     WHERE user_id = ? AND revoked_at IS NULL
     ORDER BY created_at DESC
     LIMIT 1
-  `
+  `,
     )
     .bind(user.id)
     .first<{
@@ -70,6 +70,7 @@ userRoutes.get("/me", async (c) => {
       email: user.email,
       github_username: user.github_username,
       is_admin: user.is_admin,
+      orcid: user.orcid || null,
       created_at: userDetails?.created_at,
       approved_at: userDetails?.approved_at,
       dataset_count: userDetails?.dataset_count || 0,
@@ -109,7 +110,7 @@ userRoutes.get("/me/datasets", async (c) => {
     FROM datasets
     WHERE owner_user_id = ?
     ORDER BY created_at DESC
-  `
+  `,
     )
     .bind(user.id)
     .all();

@@ -12,14 +12,14 @@ import { cors } from "hono/cors";
 import { logger } from "hono/logger";
 import { secureHeaders } from "hono/secure-headers";
 
-import type { Bindings, Variables } from "./types/bindings";
-import { authRoutes } from "./routes/auth";
-import { userRoutes } from "./routes/users";
+import { rateLimiter } from "./middleware/rateLimit";
 import { adminRoutes } from "./routes/admin";
+import { authRoutes } from "./routes/auth";
 import { datasetRoutes } from "./routes/datasets";
 import { sandboxRoutes } from "./routes/sandbox";
+import { userRoutes } from "./routes/users";
 import webhooks from "./routes/webhooks";
-import { rateLimiter } from "./middleware/rateLimit";
+import type { Bindings, Variables } from "./types/bindings";
 
 // Create the API app with all routes
 const api = new Hono<{ Bindings: Bindings; Variables: Variables }>();
@@ -47,7 +47,7 @@ api.use(
     exposeHeaders: ["X-Request-Id"],
     credentials: true,
     maxAge: 86400,
-  })
+  }),
 );
 api.use("*", rateLimiter);
 
@@ -93,7 +93,7 @@ api.notFound((c) => {
       error: "Not Found",
       message: `Route ${c.req.method} ${c.req.path} not found`,
     },
-    404
+    404,
   );
 });
 
@@ -108,7 +108,7 @@ api.onError((err, c) => {
         error: "Bad Request",
         message: "Invalid JSON in request body",
       },
-      400
+      400,
     );
   }
 
@@ -120,7 +120,7 @@ api.onError((err, c) => {
       error: "Internal Server Error",
       message: isDev ? err.message : "An unexpected error occurred",
     },
-    500
+    500,
   );
 });
 

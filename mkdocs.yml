@@ -1,8 +1,8 @@
 site_name: NEMAR CLI
 site_description: Command-line interface for NEMAR dataset management
 site_url: https://nemar-cli.pages.dev
-repo_url: https://github.com/nemarDatasets/nemar-cli
-repo_name: nemarDatasets/nemar-cli
+repo_url: https://github.com/nemarOrg/nemar-cli
+repo_name: nemarOrg/nemar-cli
 
 theme:
   name: material
@@ -72,8 +72,10 @@ nav:
       - Configuration: reference/configuration.md
       - Environment Variables: reference/environment.md
       - API: reference/api.md
+  - Development:
+      - Zenodo Testing: development/zenodo-testing.md
 
 extra:
   social:
     - icon: fontawesome/brands/github
-      link: https://github.com/nemarDatasets
+      link: https://github.com/nemarOrg

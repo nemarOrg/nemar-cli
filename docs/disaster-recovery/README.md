@@ -144,9 +144,9 @@ Test the recovery procedure every 3 months:
 
 ## 🔗 Related Issues
 
-- [Issue #37](https://github.com/nemarDatasets/nemar-cli/issues/37) - Dataset restoration incident and procedures
-- [Issue #35](https://github.com/nemarDatasets/nemar-cli/issues/35) - Backend fail-safes for dataset deletion
-- [Issue #34](https://github.com/nemarDatasets/nemar-cli/issues/34) - Add --yes flags for non-interactive mode
+- [Issue #37](https://github.com/nemarOrg/nemar-cli/issues/37) - Dataset restoration incident and procedures
+- [Issue #35](https://github.com/nemarOrg/nemar-cli/issues/35) - Backend fail-safes for dataset deletion
+- [Issue #34](https://github.com/nemarOrg/nemar-cli/issues/34) - Add --yes flags for non-interactive mode
 
 ---
 

@@ -10,11 +10,11 @@
  * - NPM_TAG: npm tag to install (e.g., PR24, dev, latest)
  */
 
-import { describe, test, expect, beforeAll, afterAll } from "bun:test";
-import { execSync, spawn } from "child_process";
-import { existsSync, mkdirSync, rmSync, writeFileSync, readFileSync } from "fs";
-import { join } from "path";
-import { tmpdir } from "os";
+import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { execSync, spawn } from "node:child_process";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 // Test configuration
 const TEST_API_URL = process.env.TEST_API_URL || "https://nemar-api-dev.shirazi-10f.workers.dev";
@@ -27,7 +27,10 @@ const CONFIG_DIR = join(TEST_DIR, ".config", "nemar");
 // Skip if no API key
 const shouldSkip = !TEST_USER_API_KEY;
 
-function runCli(args: string[], options: { cwd?: string; env?: Record<string, string> } = {}): {
+function runCli(
+  args: string[],
+  options: { cwd?: string; env?: Record<string, string> } = {},
+): {
   stdout: string;
   stderr: string;
   exitCode: number;
@@ -110,7 +113,10 @@ describe("E2E Sandbox Tests", () => {
       try {
         rmSync(TEST_DIR, { recursive: true, force: true });
       } catch (error) {
-        console.warn(`Could not clean up ${TEST_DIR}:`, error instanceof Error ? error.message : error);
+        console.warn(
+          `Could not clean up ${TEST_DIR}:`,
+          error instanceof Error ? error.message : error,
+        );
       }
     }
   });
@@ -157,12 +163,15 @@ describe("E2E Sandbox Tests", () => {
             DatasetType: "raw",
           },
           null,
-          2
-        )
+          2,
+        ),
       );
 
       // README - required by BIDS
-      writeFileSync(join(sampleDatasetDir, "README"), "Test dataset for E2E testing\n\nThis is a minimal BIDS dataset.");
+      writeFileSync(
+        join(sampleDatasetDir, "README"),
+        "Test dataset for E2E testing\n\nThis is a minimal BIDS dataset.",
+      );
 
       // CHANGES - optional but common
       writeFileSync(join(sampleDatasetDir, "CHANGES"), "1.0.0 - Initial release");

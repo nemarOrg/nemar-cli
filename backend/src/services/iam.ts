@@ -60,7 +60,7 @@ export function generateIamUsername(nemarUsername: string): string {
  */
 export async function createIamUser(
   config: IamConfig,
-  nemarUsername: string
+  nemarUsername: string,
 ): Promise<CreateUserResult> {
   const aws = createIamClient(config);
   const iamUsername = generateIamUsername(nemarUsername);
@@ -97,7 +97,7 @@ export async function createIamUser(
  */
 export async function createAccessKey(
   config: IamConfig,
-  iamUsername: string
+  iamUsername: string,
 ): Promise<CreateAccessKeyResult> {
   const aws = createIamClient(config);
 
@@ -225,7 +225,7 @@ export async function putUserPolicy(
   config: IamConfig,
   iamUsername: string,
   policyName: string,
-  policyDocument: string
+  policyDocument: string,
 ): Promise<void> {
   const aws = createIamClient(config);
 
@@ -253,7 +253,7 @@ export async function putUserPolicy(
 export async function deleteAccessKey(
   config: IamConfig,
   iamUsername: string,
-  accessKeyId: string
+  accessKeyId: string,
 ): Promise<void> {
   const aws = createIamClient(config);
 
@@ -283,7 +283,7 @@ export async function deleteAccessKey(
 export async function deleteUserPolicy(
   config: IamConfig,
   iamUsername: string,
-  policyName: string
+  policyName: string,
 ): Promise<void> {
   const aws = createIamClient(config);
 
@@ -341,7 +341,7 @@ export async function deleteIamUser(config: IamConfig, iamUsername: string): Pro
 export async function setupUserIamAccess(
   config: IamConfig,
   bucket: string,
-  nemarUsername: string
+  nemarUsername: string,
 ): Promise<{ iamUsername: string; accessKeyId: string; secretAccessKey: string }> {
   // Create IAM user
   const { username: iamUsername } = await createIamUser(config, nemarUsername);
@@ -364,7 +364,7 @@ export async function grantDatasetAccess(
   bucket: string,
   iamUsername: string,
   currentPrefixes: string[],
-  newPrefix: string
+  newPrefix: string,
 ): Promise<string[]> {
   const allPrefixes = [...new Set([...currentPrefixes, newPrefix])];
   const policyDocument = generateS3PolicyDocument(bucket, allPrefixes);
@@ -373,19 +373,121 @@ export async function grantDatasetAccess(
 }
 
 /**
- * Revoke all IAM access for a user
+ * List all access keys for an IAM user
+ */
+async function listAccessKeys(config: IamConfig, iamUsername: string): Promise<string[]> {
+  const aws = createIamClient(config);
+
+  const params = new URLSearchParams({
+    Action: "ListAccessKeys",
+    UserName: iamUsername,
+    Version: "2010-05-08",
+  });
+
+  const response = await aws.fetch(`https://iam.amazonaws.com/?${params.toString()}`, {
+    method: "POST",
+  });
+
+  if (!response.ok) {
+    const text = await response.text();
+    // If user doesn't exist, return empty array
+    if (text.includes("NoSuchEntity")) {
+      return [];
+    }
+    throw new Error(`Failed to list access keys: ${text}`);
+  }
+
+  const text = await response.text();
+
+  // Parse access key IDs from XML response
+  const accessKeyIds: string[] = [];
+  const regex = /<AccessKeyId>([^<]+)<\/AccessKeyId>/g;
+  let match: RegExpExecArray | null;
+
+  while ((match = regex.exec(text)) !== null) {
+    accessKeyIds.push(match[1]);
+  }
+
+  return accessKeyIds;
+}
+
+/**
+ * Revoke all IAM access for a user (AGGRESSIVE - uses owner credentials)
+ *
+ * This function uses owner-level credentials to forcefully clean up ALL IAM resources
+ * for a user. It continues on errors and returns detailed results about what succeeded/failed.
+ *
+ * Steps:
+ * 1. List ALL access keys (user might have created extras)
+ * 2. Delete ALL access keys found
+ * 3. Delete user policy
+ * 4. Delete IAM user
+ *
+ * @returns Object with success status and detailed error information
  */
 export async function revokeUserIamAccess(
   config: IamConfig,
   iamUsername: string,
-  accessKeyId: string
-): Promise<void> {
-  // Delete access key first
-  await deleteAccessKey(config, iamUsername, accessKeyId);
+  accessKeyId: string,
+): Promise<{ success: boolean; errors: string[]; steps: string[] }> {
+  const errors: string[] = [];
+  const steps: string[] = [];
 
-  // Delete policy
-  await deleteUserPolicy(config, iamUsername, "nemar-s3-access");
+  // Step 1: List all access keys (not just the one we stored)
+  let allAccessKeyIds: string[] = [];
+  try {
+    allAccessKeyIds = await listAccessKeys(config, iamUsername);
+    steps.push(`Found ${allAccessKeyIds.length} access key(s) for ${iamUsername}`);
 
-  // Delete user
-  await deleteIamUser(config, iamUsername);
+    // Make sure we include the one we know about (in case list fails partially)
+    if (accessKeyId && !allAccessKeyIds.includes(accessKeyId)) {
+      allAccessKeyIds.push(accessKeyId);
+      steps.push(`Added known access key ${accessKeyId} to deletion list`);
+    }
+  } catch (error) {
+    const errorMsg = error instanceof Error ? error.message : String(error);
+    errors.push(`Failed to list access keys: ${errorMsg}`);
+    steps.push("Proceeding with known access key only");
+    // Fallback to the one we know about
+    allAccessKeyIds = [accessKeyId];
+  }
+
+  // Step 2: Delete ALL access keys (force removal of S3 access)
+  let keysDeleted = 0;
+  for (const keyId of allAccessKeyIds) {
+    try {
+      await deleteAccessKey(config, iamUsername, keyId);
+      keysDeleted++;
+      steps.push(`✓ Deleted access key ${keyId}`);
+    } catch (error) {
+      const errorMsg = error instanceof Error ? error.message : String(error);
+      errors.push(`Failed to delete access key ${keyId}: ${errorMsg}`);
+      steps.push(`✗ Failed to delete access key ${keyId}`);
+    }
+  }
+
+  // Step 3: Delete user policy (remove S3 permissions)
+  try {
+    await deleteUserPolicy(config, iamUsername, "nemar-s3-access");
+    steps.push("✓ Deleted user policy");
+  } catch (error) {
+    const errorMsg = error instanceof Error ? error.message : String(error);
+    errors.push(`Failed to delete user policy: ${errorMsg}`);
+    steps.push("✗ Failed to delete user policy");
+  }
+
+  // Step 4: Delete IAM user (complete cleanup)
+  try {
+    await deleteIamUser(config, iamUsername);
+    steps.push("✓ Deleted IAM user");
+  } catch (error) {
+    const errorMsg = error instanceof Error ? error.message : String(error);
+    errors.push(`Failed to delete IAM user: ${errorMsg}`);
+    steps.push("✗ Failed to delete IAM user");
+  }
+
+  // Success if we deleted at least one access key (most critical for security)
+  const success = keysDeleted > 0 || errors.length === 0;
+
+  return { success, errors, steps };
 }

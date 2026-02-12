@@ -19,10 +19,10 @@
  * Run with: bun test test/e2e-upload.test.ts
  */
 
-import { describe, test, expect, beforeAll, afterAll } from "bun:test";
+import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import { spawn } from "bun";
-import { mkdirSync, writeFileSync, rmSync, existsSync } from "fs";
-import { join } from "path";
 import { TEST_CONFIG } from "./setup";
 
 // Test dataset directory
@@ -91,12 +91,15 @@ function createTestBidsDataset(path: string) {
         License: "CC0",
       },
       null,
-      2
-    )
+      2,
+    ),
   );
 
   // README (required)
-  writeFileSync(join(path, "README"), "# E2E Test Dataset\n\nThis is a test dataset for E2E testing.\n");
+  writeFileSync(
+    join(path, "README"),
+    "# E2E Test Dataset\n\nThis is a test dataset for E2E testing.\n",
+  );
 
   // participants.tsv
   writeFileSync(join(path, "participants.tsv"), "participant_id\tage\tsex\nsub-01\t25\tM\n");
@@ -111,8 +114,8 @@ function createTestBidsDataset(path: string) {
         sex: { Description: "Sex" },
       },
       null,
-      2
-    )
+      2,
+    ),
   );
 
   // Create a small test EEG file (just some bytes for testing)
@@ -129,20 +132,20 @@ function createTestBidsDataset(path: string) {
         EEGReference: "average",
       },
       null,
-      2
-    )
+      2,
+    ),
   );
 
   // Channels TSV
   writeFileSync(
     join(path, "sub-01", "eeg", "sub-01_task-rest_channels.tsv"),
-    "name\ttype\tunits\nFp1\tEEG\tuV\nFp2\tEEG\tuV\n"
+    "name\ttype\tunits\nFp1\tEEG\tuV\nFp2\tEEG\tuV\n",
   );
 }
 
 async function runCli(
   args: string[],
-  options: { env?: Record<string, string> } = {}
+  options: { env?: Record<string, string> } = {},
 ): Promise<{ stdout: string; stderr: string; exitCode: number }> {
   const proc = spawn({
     cmd: ["bun", "run", "src/index.ts", ...args],
@@ -342,7 +345,9 @@ describe("E2E Upload Tests", () => {
     }
 
     if (!TEST_CREATE_SANDBOX) {
-      console.log("   Skipping: TEST_CREATE_SANDBOX not set (set to 'true' to run actual sandbox uploads)");
+      console.log(
+        "   Skipping: TEST_CREATE_SANDBOX not set (set to 'true' to run actual sandbox uploads)",
+      );
       return;
     }
 

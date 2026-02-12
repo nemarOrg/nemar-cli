@@ -17,11 +17,19 @@ Commands:
   upload [options] <path>                   Upload a BIDS dataset to NEMAR
   download [options] <dataset-id>           Download a dataset from NEMAR
   status [options] <dataset-id>             Check status of a dataset
-  list [options]                            List available datasets on NEMAR
+  list [options]                            List publicly available datasets on NEMAR
   version [options] <dataset-id> <version>  Create a new version of a dataset with DOI
   request-access <dataset-id>               Request collaborator access to a dataset
   invite <username> <dataset-id>            Invite a user as collaborator to your dataset
   collaborators [options] <dataset-id>      List collaborators for a dataset
+  publish                                   Publication workflow management
+  clone [options] <dataset-id>              Clone a dataset from NEMAR
+  get [options] [files...]                  Download annexed data files for the current dataset
+  save [options]                            Stage and commit changes in the current dataset
+  push [options]                            Push commits and data to remotes
+  drop [files...]                           Free local copies of annexed files (keeps remote copies)
+  ci [dataset-id]                           Check BIDS validation CI status for the current dataset
+  manifest [options] [version]              View version manifests for a dataset
   help [command]                            display help for command
 
 Description:
@@ -29,7 +37,7 @@ Description:
   neurophysiology datasets in Brain Imaging Data Structure (BIDS) format.
 
 Prerequisites:
-  - DataLad and git-annex (for upload/download)
+  - git-annex (for upload/download)
   - Deno runtime (for BIDS validation)
   - NEMAR account (for upload)
 
@@ -101,8 +109,9 @@ Options:
   -d, --description <desc>  Dataset description
   --skip-validation         Skip BIDS validation (not recommended)
   --dry-run                 Show what would be uploaded without doing it
-  -j, --jobs <number>       Parallel upload streams (default: 8) (default: "8")
-  -y, --yes                 Skip confirmation prompt
+  -j, --jobs <number>       Parallel upload streams (default: 4) (default: "4")
+  -y, --yes                 Skip confirmation and proceed
+  --no                      Skip confirmation and decline
   -h, --help                display help for command
 
 Description:
@@ -111,31 +120,14 @@ Description:
 
 Requirements:
   - NEMAR account (nemar auth login)
-  - DataLad and git-annex installed
-  - GitHub CLI (gh) authenticated as your NEMAR user
+  - git-annex installed
   - GitHub SSH access configured
 
 Process:
   1. Validates BIDS format (unless --skip-validation)
-  2. Verifies GitHub CLI authentication matches NEMAR user
-  3. Creates GitHub repository for metadata
-  4. Auto-accepts GitHub collaboration invitation
-  5. Uploads large files to S3 in parallel (with retry logic)
-  6. Commits with your NEMAR user identity
-  7. Pushes to GitHub
-
-Resume Capability:
-  If upload fails (network issues, S3 errors), just run the command again.
-  The CLI stores dataset metadata in .nemar/config.json and will resume
-  from where it left off, requesting fresh presigned URLs.
-
-  To start fresh with a new dataset ID:
-  $ rm -rf /path/to/dataset/.nemar
-
-Branch Protection:
-  New datasets are private and have no branch protection. Owners can push
-  directly to main. Branch protection is applied when creating a DOI
-  (permanent record) via 'nemar admin doi create'.
+  2. Creates GitHub repository for metadata
+  3. Uploads large files to S3 in parallel
+  4. Enables PR-based versioning workflow
 
 Examples:
   $ nemar dataset upload ./my-eeg-dataset
@@ -161,11 +153,11 @@ Options:
   -h, --help           display help for command
 
 Description:
-  Download a BIDS dataset from NEMAR. Uses DataLad/git-annex for efficient
+  Download a BIDS dataset from NEMAR. Uses git-annex for efficient
   data transfer with parallel streams.
 
 Requirements:
-  - DataLad and git-annex installed (no account needed)
+  - git-annex installed (no account needed)
 
 Examples:
   $ nemar dataset download nm000104              # Download to ./nm000104
@@ -202,21 +194,33 @@ Examples:
 ```bash
 Usage: nemar dataset list [options]
 
-List available datasets on NEMAR
+List publicly available datasets on NEMAR
 
 Options:
-  --mine       List only your datasets (requires authentication)
+  --mine       List only your datasets (both private and public)
   --json       Output as JSON for scripting
   --limit <n>  Limit number of results (default: 50) (default: "50")
   -h, --help   display help for command
 
 Description:
-  List BIDS datasets available on NEMAR. Use --mine to see only your
-  own datasets (requires authentication).
+  By default, lists only PUBLIC datasets on NEMAR that anyone can access.
+
+  To see your own datasets (including private ones), use the --mine flag.
+  This requires authentication.
+
+Visibility Rules:
+  Without --mine:
+    - Shows only public datasets (visible to everyone)
+    - Does not show private datasets, even your own
+    - Exception: Admins see ALL datasets for oversight
+
+  With --mine:
+    - Shows all YOUR datasets (both private and public)
+    - Requires authentication (nemar auth login)
 
 Examples:
-  $ nemar dataset list                   # List all public datasets
-  $ nemar dataset list --mine            # List your datasets
+  $ nemar dataset list                   # List public datasets only
+  $ nemar dataset list --mine            # List YOUR datasets (private + public)
   $ nemar dataset list --json            # JSON output for scripting
   $ nemar dataset list --limit 10        # Show only 10 datasets
 ```
@@ -235,5 +239,102 @@ Arguments:
 Options:
   -m, --message <msg>  Version description
   -h, --help           display help for command
+```
+
+### dataset publish request
+
+```bash
+Usage: nemar dataset publish request [options] <dataset-id>
+
+Request publication of a dataset
+
+Arguments:
+  dataset-id  Dataset ID (e.g., nm000104)
+
+Options:
+  -h, --help  display help for command
+
+Description:
+  Submit a publication request to make your private dataset publicly accessible.
+  NEMAR admins will be notified and can approve or deny your request.
+
+  Once approved, your dataset will:
+  - Become publicly visible on GitHub
+  - Receive a permanent DOI via Zenodo
+  - Have tag protection enabled (prevents version manipulation)
+  - Have S3 Object Lock enabled (prevents data deletion)
+
+  You can only have one active publication request per dataset.
+
+Status Flow:
+  requested → approving → published (or denied)
+
+Examples:
+  $ nemar dataset publish request nm000104
+  $ nemar dataset publish status nm000104     # Check request status
+```
+
+### dataset publish status
+
+```bash
+Usage: nemar dataset publish status [options] <dataset-id>
+
+Check publication status of a dataset
+
+Arguments:
+  dataset-id  Dataset ID (e.g., nm000104)
+
+Options:
+  -h, --help  display help for command
+
+Description:
+  Check the status of your publication request and see progress through
+  the approval workflow.
+
+Possible Statuses:
+  requested  - Waiting for admin review
+  approving  - Admin is running the publication process
+  published  - Dataset is now public with DOI
+  denied     - Request was denied (includes reason)
+
+Steps in Approval Process:
+  1. CI check        - Verify BIDS validation passes
+  2. Make public     - Change repository visibility
+  3. Tag protection  - Prevent version manipulation
+  4. Create DOI      - Assign permanent Zenodo DOI
+  5. S3 lock         - Enable Object Lock for data preservation
+  6. Notify user     - Send publication confirmation email
+
+Examples:
+  $ nemar dataset publish status nm000104
+```
+
+### dataset publish resend
+
+```bash
+Usage: nemar dataset publish resend [options] <dataset-id>
+
+Resend publication request notification to admins
+
+Arguments:
+  dataset-id  Dataset ID (e.g., nm000104)
+
+Options:
+  -h, --help  display help for command
+
+Description:
+  Resend the publication request notification email to all NEMAR admins.
+  Use this if admins haven't responded to your original request.
+
+  This does NOT create a duplicate request - it only sends a reminder
+  email for your existing publication request.
+
+When to Use:
+  - Admins haven't responded after several days
+  - You want to remind admins about your pending request
+  - Your request status is still "requested"
+
+Examples:
+  $ nemar dataset publish resend nm000104
 ```
 

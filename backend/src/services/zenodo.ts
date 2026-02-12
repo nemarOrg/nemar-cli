@@ -79,7 +79,7 @@ function getApiUrl(sandbox: boolean): string {
 export async function createDeposition(
   metadata: ZenodoMetadata,
   token: string,
-  sandbox = false
+  sandbox = false,
 ): Promise<ZenodoDeposition> {
   const apiUrl = getApiUrl(sandbox);
 
@@ -106,11 +106,26 @@ export async function createDeposition(
   });
 
   if (!response.ok) {
-    const error = await response.json() as ZenodoError;
-    throw new Error(`Zenodo API error: ${error.message || response.statusText}`);
+    const contentType = response.headers.get("content-type");
+    if (contentType?.includes("application/json")) {
+      const error = (await response.json()) as ZenodoError;
+      throw new Error(`Zenodo API error: ${error.message || response.statusText}`);
+    } else {
+      const text = await response.text();
+      throw new Error(`Zenodo API error (${response.status}): ${text.substring(0, 200)}`);
+    }
   }
 
-  return response.json() as Promise<ZenodoDeposition>;
+  // Parse response body safely - Zenodo may return HTML even with JSON content-type
+  const text = await response.text();
+  try {
+    return JSON.parse(text) as ZenodoDeposition;
+  } catch {
+    const contentType = response.headers.get("content-type");
+    throw new Error(
+      `Zenodo returned invalid JSON (status ${response.status}, content-type: ${contentType}): ${text.substring(0, 300)}`,
+    );
+  }
 }
 
 /**
@@ -125,7 +140,7 @@ export async function uploadFile(
   filename: string,
   fileContent: ArrayBuffer | Uint8Array,
   token: string,
-  sandbox = false
+  sandbox = false,
 ): Promise<{ checksum: string; filename: string; filesize: number }> {
   const response = await fetch(`${bucketUrl}/${filename}`, {
     method: "PUT",
@@ -137,8 +152,22 @@ export async function uploadFile(
   });
 
   if (!response.ok) {
-    const error = await response.json() as ZenodoError;
-    throw new Error(`Zenodo upload error: ${error.message || response.statusText}`);
+    const contentType = response.headers.get("content-type");
+    if (contentType?.includes("application/json")) {
+      const error = (await response.json()) as ZenodoError;
+      throw new Error(`Zenodo upload error: ${error.message || response.statusText}`);
+    } else {
+      const text = await response.text();
+      throw new Error(`Zenodo upload error (${response.status}): ${text.substring(0, 200)}`);
+    }
+  }
+
+  const contentType = response.headers.get("content-type");
+  if (!contentType?.includes("application/json")) {
+    const text = await response.text();
+    throw new Error(
+      `Zenodo returned non-JSON response (${contentType}): ${text.substring(0, 200)}`,
+    );
   }
 
   return response.json() as Promise<{ checksum: string; filename: string; filesize: number }>;
@@ -153,7 +182,7 @@ export async function uploadFile(
 export async function publishDeposition(
   depositionId: number,
   token: string,
-  sandbox = false
+  sandbox = false,
 ): Promise<ZenodoDeposition> {
   const apiUrl = getApiUrl(sandbox);
 
@@ -165,8 +194,22 @@ export async function publishDeposition(
   });
 
   if (!response.ok) {
-    const error = await response.json() as ZenodoError;
-    throw new Error(`Zenodo publish error: ${error.message || response.statusText}`);
+    const contentType = response.headers.get("content-type");
+    if (contentType?.includes("application/json")) {
+      const error = (await response.json()) as ZenodoError;
+      throw new Error(`Zenodo publish error: ${error.message || response.statusText}`);
+    } else {
+      const text = await response.text();
+      throw new Error(`Zenodo publish error (${response.status}): ${text.substring(0, 200)}`);
+    }
+  }
+
+  const contentType = response.headers.get("content-type");
+  if (!contentType?.includes("application/json")) {
+    const text = await response.text();
+    throw new Error(
+      `Zenodo returned non-JSON response (${contentType}): ${text.substring(0, 200)}`,
+    );
   }
 
   return response.json() as Promise<ZenodoDeposition>;
@@ -178,7 +221,7 @@ export async function publishDeposition(
 export async function getDeposition(
   depositionId: number,
   token: string,
-  sandbox = false
+  sandbox = false,
 ): Promise<ZenodoDeposition> {
   const apiUrl = getApiUrl(sandbox);
 
@@ -189,8 +232,22 @@ export async function getDeposition(
   });
 
   if (!response.ok) {
-    const error = await response.json() as ZenodoError;
-    throw new Error(`Zenodo API error: ${error.message || response.statusText}`);
+    const contentType = response.headers.get("content-type");
+    if (contentType?.includes("application/json")) {
+      const error = (await response.json()) as ZenodoError;
+      throw new Error(`Zenodo API error: ${error.message || response.statusText}`);
+    } else {
+      const text = await response.text();
+      throw new Error(`Zenodo API error (${response.status}): ${text.substring(0, 200)}`);
+    }
+  }
+
+  const contentType = response.headers.get("content-type");
+  if (!contentType?.includes("application/json")) {
+    const text = await response.text();
+    throw new Error(
+      `Zenodo returned non-JSON response (${contentType}): ${text.substring(0, 200)}`,
+    );
   }
 
   return response.json() as Promise<ZenodoDeposition>;
@@ -205,7 +262,7 @@ export async function getDeposition(
 export async function createNewVersion(
   depositionId: number,
   token: string,
-  sandbox = false
+  sandbox = false,
 ): Promise<ZenodoDeposition> {
   const apiUrl = getApiUrl(sandbox);
 
@@ -217,12 +274,12 @@ export async function createNewVersion(
   });
 
   if (!response.ok) {
-    const error = await response.json() as ZenodoError;
+    const error = (await response.json()) as ZenodoError;
     throw new Error(`Zenodo new version error: ${error.message || response.statusText}`);
   }
 
   // The response contains the draft URL for the new version
-  const result = await response.json() as ZenodoDeposition;
+  const result = (await response.json()) as ZenodoDeposition;
 
   // We need to get the actual new draft deposition
   // The 'links.latest_draft' contains the URL to the new draft
@@ -248,7 +305,7 @@ export async function updateDepositionMetadata(
   depositionId: number,
   metadata: Partial<ZenodoMetadata>,
   token: string,
-  sandbox = false
+  sandbox = false,
 ): Promise<ZenodoDeposition> {
   const apiUrl = getApiUrl(sandbox);
 
@@ -267,8 +324,22 @@ export async function updateDepositionMetadata(
   });
 
   if (!response.ok) {
-    const error = await response.json() as ZenodoError;
-    throw new Error(`Zenodo update error: ${error.message || response.statusText}`);
+    const contentType = response.headers.get("content-type");
+    if (contentType?.includes("application/json")) {
+      const error = (await response.json()) as ZenodoError;
+      throw new Error(`Zenodo update error: ${error.message || response.statusText}`);
+    } else {
+      const text = await response.text();
+      throw new Error(`Zenodo update error (${response.status}): ${text.substring(0, 200)}`);
+    }
+  }
+
+  const contentType = response.headers.get("content-type");
+  if (!contentType?.includes("application/json")) {
+    const text = await response.text();
+    throw new Error(
+      `Zenodo returned non-JSON response (${contentType}): ${text.substring(0, 200)}`,
+    );
   }
 
   return response.json() as Promise<ZenodoDeposition>;
@@ -280,7 +351,7 @@ export async function updateDepositionMetadata(
 export async function deleteDeposition(
   depositionId: number,
   token: string,
-  sandbox = false
+  sandbox = false,
 ): Promise<void> {
   const apiUrl = getApiUrl(sandbox);
 
@@ -292,7 +363,7 @@ export async function deleteDeposition(
   });
 
   if (!response.ok && response.status !== 204) {
-    const error = await response.json() as ZenodoError;
+    const error = (await response.json()) as ZenodoError;
     throw new Error(`Zenodo delete error: ${error.message || response.statusText}`);
   }
 }

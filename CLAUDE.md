@@ -1,11 +1,37 @@
 # NEMAR CLI - Development Instructions
 
+## CRITICAL: Live Datasets
+
+**nm000103-nm000107 are LIVE datasets.** Do NOT modify their visibility, S3 data, DOIs, or repo settings during development/testing. They are kept private during dev for maximum control but contain real data.
+
+For E2E testing, use disposable test dataset `nm099999` (already registered in D1 and GitHub). Note: `xx`-prefix datasets are blocked from publishing (sandbox check).
+
 ## Project Overview
 **Purpose:** Command-line interface for NEMAR (Neuroelectromagnetic Data Archive and Tools Resource) dataset management
 **Tech Stack:** TypeScript, Bun, Commander.js, DataLad integration
-**Repository:** https://github.com/nemarDatasets
+**Repository:** https://github.com/nemarOrg/nemar-cli
+
+### GitHub Organization Structure
+- **nemarOrg** - Tooling and infrastructure repos (nemar-cli, nemar-tools, nemar-metadata, neuroschema)
+- **nemarDatasets** - Dataset repos only (nm000103, nm000104, etc.)
+
+The backend code (`ORG_NAME = "nemarDatasets"` in `backend/src/services/github.ts`) and publishing scripts intentionally target `nemarDatasets` because that is where dataset repos live. Do not change these to `nemarOrg`.
 
 ## Architecture Overview
+
+### Backend Infrastructure
+- **API URL:** `https://api.osc.earth/nemar` (production)
+- **Platform:** Cloudflare Workers + D1 (SQLite)
+- **Note:** Old `nemar-api.shirazi-10f.workers.dev` URL is disabled
+
+### S3 Bucket Structure
+```
+s3://nemar/{datasetId}/
+    objects/                     # git-annex content-addressed blobs
+    version/                     # version manifests (v1.0.0.json)
+    archives/                    # downloadable zip snapshots (v1.0.0.zip)
+s3://nemar/staging/pr-{n}/{datasetId}/objects/   # PR staging area
+```
 
 ### Core Components
 1. **Authentication System** - User registration, API tokens, admin approval workflow

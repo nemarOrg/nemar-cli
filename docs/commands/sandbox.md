@@ -21,7 +21,7 @@ Description:
   workflow. You must complete sandbox training before uploading real datasets.
 
   The training creates a placeholder BIDS dataset (~500KB) and uploads it to
-  the sandbox environment, testing your DataLad, git-annex, and SSH setup.
+  the sandbox environment, testing your git-annex and SSH setup.
 
 Examples:
   $ nemar sandbox           # Run sandbox training
@@ -52,7 +52,8 @@ Usage: nemar sandbox reset [options]
 Reset sandbox training status for re-training
 
 Options:
-  -f, --force  Skip confirmation prompt
-  -h, --help   display help for command
+  -y, --yes   Skip confirmation and proceed
+  -n, --no    Skip confirmation and decline
+  -h, --help  display help for command
 ```
 
