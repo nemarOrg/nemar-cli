@@ -95,20 +95,32 @@ nemar dataset update
 
 ## What CI Checks Run on PRs
 
-When a PR is created against `main`, GitHub Actions runs:
+When a PR is created against `main`, GitHub Actions runs two workflows:
 
-1. **BIDS Validation** - Validates the dataset structure
-2. **Version Check** - Ensures `dataset_description.json` has a bumped version
+1. **BIDS Validation** (`bids-validation.yml`) - Runs the BIDS validator (Deno-based) on the dataset. Output is written to `.nemar/validation.json`. Warnings are tolerated; only errors cause failure.
+2. **Version Check** (`version-check.yml`) - Ensures `dataset_description.json` has a version that is higher than the latest git tag. Prevents merging without a version bump.
 
-Both must pass before the PR can be merged.
+Both must pass before the PR can be merged. These workflows are automatically deployed by the publish orchestrator and by `nemar dataset release`.
 
 ## What Happens on PR Merge
 
-When a PR is merged to `main`:
+When a PR is merged to `main`, the `pr-merge.yml` workflow fires and performs:
 
-1. **Tag and Release** - Creates `vX.Y.Z` tag and GitHub Release
-2. **Version DOI** - If a concept DOI exists, mints a version DOI via EZID
-3. **Staging Cleanup** - Removes any S3 staging data for the branch
+1. **Tag and Release** - Reads the version from `dataset_description.json`, creates a `vX.Y.Z` git tag and GitHub Release
+2. **Webhook** - Calls the backend's `/webhooks/publish-version-doi` endpoint with the dataset ID, version, and release URL
+3. **Version DOI** - If a concept DOI exists, the backend mints a version DOI via EZID (or Zenodo). For EZID, the DOI pattern is `<concept_doi>.V<version>`.
+4. **Zenodo Backup** - For EZID-provider datasets, creates/updates a Zenodo draft deposition with the release archive (never published, serves as backup)
+5. **Version Manifest** - Generates a manifest (file listing with checksums) and uploads to `s3://nemar/<dataset_id>/version/v<version>.json`
+
+The webhook token (`NEMAR_WEBHOOK_TOKEN`) is configured as an organization-level secret on nemarDatasets; no per-repo setup is needed.
+
+## The `.nemar/` Directory
+
+All NEMAR-generated files are stored under `.nemar/` in the dataset repository. This directory is excluded from BIDS validation via `.bidsignore`. Current contents:
+
+- `.nemar/validation.json` - BIDS validation output from CI
+
+The `.bidsignore` file automatically includes `.nemar/` and `nemar_metadata.json` entries. These are added during dataset upload.
 
 ## Prerequisites
 

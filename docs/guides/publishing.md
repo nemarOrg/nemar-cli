@@ -64,15 +64,16 @@ This sends a reminder email to all admins without creating a duplicate request.
 
 Once approved, you'll receive an email containing:
 
-- ✅ Confirmation that your dataset is now public
-- ✅ Your permanent DOI (e.g., `10.5281/zenodo.12345`)
-- ✅ Link to the public dataset page
-- ✅ Citation information
+- Confirmation that your dataset is now public
+- Your permanent DOI (e.g., `10.82901/NEMAR.nm000104`)
+- Link to the public dataset page
+- Citation information
 
 Your dataset is now:
 - Publicly visible on GitHub
 - Protected by tag protection (versions cannot be modified)
 - Backed by permanent S3 storage with Object Lock
+- Archived on Zenodo (draft backup)
 - Citable with a permanent DOI
 
 ## Admin Perspective
@@ -110,12 +111,24 @@ nemar admin publish approve nm000104
 The CLI will show you:
 - Dataset information
 - Requesting user
-- What will happen (5 orchestrator steps)
+- What will happen (14 orchestrator steps)
 
 You can:
 - Press `y` to proceed
 - Press `n` to cancel
 - Use `--yes` flag to skip confirmation
+
+**Provider selection:**
+```bash
+# EZID (default)
+nemar admin publish approve nm000104
+
+# Zenodo
+nemar admin publish approve nm000104 --provider zenodo
+
+# EZID sandbox (for testing)
+nemar admin publish approve nm000104 --sandbox
+```
 
 **Non-interactive mode:**
 ```bash
@@ -124,84 +137,59 @@ nemar admin publish approve nm000104 --yes
 
 ### The Publication Orchestrator
 
-When you approve a request, an automated 6-step orchestrator runs:
+When you approve a request, an automated 14-step orchestrator runs. Steps are idempotent and can be resumed if interrupted. The DOI provider (EZID or Zenodo) is specified via `--provider` flag or defaults to EZID.
 
-#### Step 1: CI Check
-**Purpose:** Verify BIDS validation passes
+#### Step 1: `ci_check` - CI Verification
+Checks if BIDS validation and version-check workflows exist on the repo. Deploys them if missing. Verifies the latest CI run passes (if any runs exist).
 
-**Actions:**
-- Check if BIDS validation workflow exists
-- Deploy workflows if missing
-- Verify latest CI run passes (if any runs exist)
+#### Step 2: `repo_public` - Make Repository Public
+Changes GitHub repository visibility from private to public. Updates the database visibility record.
 
-**Possible failure:**
-- BIDS validation is failing
-- **Resolution:** User needs to fix validation issues first
+#### Step 3: `s3_public_read` - S3 Public Read Access
+Applies an S3 bucket policy granting public read access to the dataset's objects. This enables anonymous downloads via git-annex web remote URLs.
 
-#### Step 2: Make Repository Public
-**Purpose:** Make the dataset publicly accessible
+#### Step 4: `tag_protect` - Tag Protection
+Enables tag protection rules on the repository, preventing deletion or modification of version tags. Ensures DOI integrity since DOIs reference specific tags.
 
-**Actions:**
-- Change GitHub repository visibility from private to public
-- Dataset becomes visible at `github.com/nemarDatasets/<repo>`
+#### Step 5: `doi_create` - Create Concept DOI
+Creates the concept (parent) DOI. Routes to the configured provider:
+- **EZID:** Calls EZID API with DataCite kernel-4 XML metadata. DOI pattern: `10.82901/NEMAR.<dataset_id>` (production) or `10.5072/FK2<dataset_id>` (sandbox).
+- **Zenodo:** Creates a Zenodo deposition and pre-reserves a concept DOI.
 
-**Possible failure:**
-- GitHub API error
-- **Resolution:** Check GitHub admin token permissions
+Skipped if a concept DOI already exists.
 
-#### Step 3: Tag Protection
-**Purpose:** Prevent version manipulation
+#### Step 6: `update_metadata` - Update dataset_description.json
+Reads BIDS metadata from the repo, enriches it with DOI information, and commits an updated `dataset_description.json` back to the repo.
 
-**Actions:**
-- Enable tag protection rules on the repository
-- Prevents deletion or modification of version tags
-- Ensures DOI integrity (DOIs reference specific tags)
+#### Step 7: `update_readme` - Update README
+Generates or updates the dataset README with DOI badge, citation info, and dataset description.
 
-**Possible failure:**
-- GitHub API error
-- Repository already has conflicting rules
+#### Step 8: `create_tag` - Create Version Tag
+Creates a `v1.0.0` git tag on the repo's main branch if no tags exist yet.
 
-#### Step 4: Create Concept DOI
-**Purpose:** Assign permanent DOI
+#### Step 9: `create_release` - Create GitHub Release
+Creates a GitHub Release from the version tag.
 
-**Actions:**
-- Create Zenodo deposition (if no concept DOI exists)
-- Pre-reserve concept DOI
-- Link DOI to dataset in database
+#### Step 10: `upload_to_zenodo` - Upload Archive to Zenodo
+Downloads the release archive from GitHub and uploads it to Zenodo.
+- **Zenodo provider:** Uploads to the primary Zenodo deposition.
+- **EZID provider:** Creates a Zenodo **draft** deposition as a backup archive (never published). This provides a secondary archival copy of the data.
 
-**Possible failure:**
-- Zenodo API error
-- Dataset already has concept DOI (not an error, step is skipped)
+#### Step 11: `publish_doi` - Publish DOI
+Makes the DOI publicly resolvable:
+- **EZID:** Changes identifier status from "reserved" to "public" via `ezidMakePublic()`.
+- **Zenodo:** Publishes the Zenodo deposition, which activates the DOI.
 
-**Note:** This creates the **concept DOI** (parent DOI). Version DOIs are created automatically when users create new versions via git tags.
+After this step, the DOI is permanent and cannot be undone.
 
-#### Step 5: S3 Object Lock
-**Purpose:** Prevent data deletion
+#### Step 12: `s3_lock` - S3 Object Lock
+Applies S3 Object Lock (governance mode) to all dataset objects, preventing accidental deletion. Lock duration: 10 years.
 
-**Actions:**
-- Enable S3 Object Lock on dataset bucket
-- Ensures data referenced by DOI cannot be deleted
-- Compliance mode (even admins cannot delete)
+#### Step 13: `generate_archive` - Generate Version Manifest
+Generates a version manifest (file listing with sizes and checksums) and uploads it to `s3://nemar/<dataset_id>/version/v1.0.0.json`.
 
-**Possible failure:**
-- AWS API error
-- Object Lock already enabled (not an error, step is skipped)
-
-#### Step 6: Notify User
-**Purpose:** Send publication confirmation email
-
-**Actions:**
-- Send email to dataset owner with:
-  - Confirmation that dataset is now published
-  - Permanent DOI for citation
-  - Link to public dataset page
-  - Citation information
-
-**Possible failure:**
-- Email service error
-- **Resolution:** Email may fail but publication is complete; user can check status manually
-
-**Note:** This is the final step. Once completed, the publication request status changes to "published".
+#### Step 14: `notify_user` - Send Notification Email
+Sends a publication confirmation email to the dataset owner with the DOI and citation information. This is the final step; the publication request status changes to "published".
 
 ### Resuming Failed Publications
 
@@ -218,14 +206,14 @@ nemar admin publish approve nm000104 --resume
 
 **Example scenario:**
 ```bash
-# First attempt fails at step 3
+# First attempt fails at step 4 (tag_protect)
 nemar admin publish approve nm000104
 # Error: Tag protection failed
 
 # Fix the issue (e.g., remove conflicting GitHub rules)
 # Then resume
 nemar admin publish approve nm000104 --resume
-# Skips completed steps 1-2, retries step 3, then continues with 4-6
+# Skips completed steps 1-3, retries step 4, then continues with 5-14
 ```
 
 ### Denying Publication
@@ -295,37 +283,28 @@ nemar admin publish deny nm000104 --reason "BIDS validation failing - please fix
 
 ### Admin Issues
 
-**Problem:** Approval fails at "CI Check" step
+**Problem:** Approval fails at `ci_check`
 - **Cause:** BIDS validation is failing
 - **Solution:** User needs to fix validation issues first. Deny request with clear reason.
 
-**Problem:** Approval fails at "Make Repository Public" step
+**Problem:** Approval fails at `repo_public`
 - **Cause:** GitHub API error or permissions issue
+- **Solution:** Check `GITHUB_ADMIN_PAT` is valid with `repo` and `admin:org` scopes. Retry with `--resume`.
+
+**Problem:** Approval fails at `doi_create`
+- **Cause:** DOI provider API error
 - **Solution:**
-  - Check `GITHUB_ADMIN_PAT` is valid
-  - Verify token has `repo` and `admin:org` scopes
+  - EZID: Check `EZID_USERNAME`/`EZID_PASSWORD` are valid
+  - Zenodo: Check `ZENODO_API_KEY` is valid
   - Retry with `--resume`
 
-**Problem:** Approval fails at "Tag Protection" step
-- **Cause:** Conflicting tag protection rules
-- **Solution:**
-  - Check GitHub repository settings
-  - Remove conflicting rules manually
-  - Retry with `--resume`
+**Problem:** Approval fails at `publish_doi`
+- **Cause:** DOI publication failed (EZID status change or Zenodo publish)
+- **Solution:** Check provider API status. DOI may already be in the correct state. Retry with `--resume`.
 
-**Problem:** Approval fails at "Create Concept DOI" step
-- **Cause:** Zenodo API error
-- **Solution:**
-  - Check `ZENODO_API_KEY` is valid
-  - Verify Zenodo service is operational
-  - Retry with `--resume`
-
-**Problem:** Approval fails at "S3 Object Lock" step
+**Problem:** Approval fails at `s3_lock`
 - **Cause:** AWS API error or permissions issue
-- **Solution:**
-  - Check AWS credentials are valid
-  - Verify S3 bucket exists
-  - Retry with `--resume`
+- **Solution:** Check AWS credentials are valid. Verify S3 bucket exists. Retry with `--resume`.
 
 **Problem:** Want to re-run entire orchestrator
 - **Cause:** Need fresh start (not resume)
@@ -350,7 +329,7 @@ nemar admin publish deny nm000104 --reason "BIDS validation failing - please fix
 ## FAQ
 
 **Q: How long does publication take?**
-A: Once approved, the orchestrator takes 1-2 minutes to complete all 5 steps. Admin review time varies.
+A: Once approved, the orchestrator takes 1-2 minutes to complete all 14 steps. Admin review time varies.
 
 **Q: Can I unpublish a dataset?**
 A: No. Once published, a dataset is permanently public. The DOI is permanent and cannot be deleted.
@@ -367,12 +346,43 @@ A: Only one active request per dataset. Previous requests must be completed (app
 **Q: What happens if orchestrator is interrupted?**
 A: Use `--resume` to continue from the last successful step. The system tracks progress automatically.
 
+## DOI Providers
+
+NEMAR supports two DOI providers:
+
+### EZID (Default)
+- Production DOIs: `10.82901/NEMAR.<dataset_id>` (e.g., `10.82901/NEMAR.nm000104`)
+- Version DOIs: `10.82901/NEMAR.nm000104.V1.0.1`
+- Sandbox DOIs: `10.5072/FK2<dataset_id>` (auto-deleted after 2 weeks)
+- Metadata format: DataCite kernel-4 XML
+- DOI lifecycle: reserved -> public (irreversible)
+
+### Zenodo
+- DOIs are assigned by Zenodo (e.g., `10.5281/zenodo.12345`)
+- Each version gets its own Zenodo deposition
+- Sandbox available at `sandbox.zenodo.org`
+
+### Zenodo Backup for EZID Datasets
+When using EZID as the primary DOI provider, the system automatically creates a Zenodo draft deposition as a backup archive. This draft is never published but provides a secondary copy of the dataset archive. The Zenodo deposition ID is stored in the database and updated with each new version.
+
+## Organization-Level Secrets
+
+The following secrets are configured at the nemarDatasets organization level (inherited by all dataset repos):
+
+- `NEMAR_WEBHOOK_TOKEN` - Authenticates webhook calls from GitHub Actions to the backend
+- `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` - For S3 operations in workflows
+
+No per-repo secret setup is needed when creating new datasets.
+
 ## Related Commands
 
 - `nemar dataset upload` - Upload a new dataset
 - `nemar dataset validate` - Validate BIDS compliance
-- `nemar admin doi create` - Create concept DOI (admin only)
-- `nemar dataset push --pr` - Create PR for updates after publication
+- `nemar dataset release` - Create a version bump PR
+- `nemar dataset update` - Push changes via PR
+- `nemar admin publish approve` - Approve publication request (admin)
+- `nemar admin doi create` - Create concept DOI standalone (admin)
+- `nemar admin doi info` - View DOI information (admin)
 
 ## See Also
 
