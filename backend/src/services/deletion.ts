@@ -87,23 +87,16 @@ export async function deleteDatasetCascade(
     }
   }
 
-  // Step 3: Delete D1 records
+  // Step 3: Delete D1 records (batched for atomicity)
   try {
-    const versionsResult = await db
-      .prepare("DELETE FROM dataset_versions WHERE dataset_id = ?")
-      .bind(datasetId)
-      .run();
-    steps.d1.versionsDeleted = versionsResult.meta.changes ?? 0;
+    const batchResults = await db.batch([
+      db.prepare("DELETE FROM dataset_versions WHERE dataset_id = ?").bind(datasetId),
+      db.prepare("DELETE FROM publication_requests WHERE dataset_id = ?").bind(datasetId),
+      db.prepare("DELETE FROM datasets WHERE dataset_id = ?").bind(datasetId),
+    ]);
 
-    const pubResult = await db
-      .prepare("DELETE FROM publication_requests WHERE dataset_id = ?")
-      .bind(datasetId)
-      .run();
-    steps.d1.pubRequestsDeleted = pubResult.meta.changes ?? 0;
-
-    // Delete dataset record (cascades to dataset_collaborators via FK)
-    await db.prepare("DELETE FROM datasets WHERE dataset_id = ?").bind(datasetId).run();
-
+    steps.d1.versionsDeleted = batchResults[0].meta.changes ?? 0;
+    steps.d1.pubRequestsDeleted = batchResults[1].meta.changes ?? 0;
     steps.d1.success = true;
   } catch (err) {
     steps.d1.error = err instanceof Error ? err.message : String(err);

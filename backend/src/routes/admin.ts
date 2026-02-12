@@ -3566,7 +3566,6 @@ adminRoutes.delete("/datasets/:id", zValidator("json", deleteDatasetSchema), asy
 
   // Perform cascade deletion
   const result = await deleteDatasetCascade(db, c.env, datasetId, {
-    skipS3: hasDoiOrPublished && !force,
     bypassGovernance: force,
   });
 

@@ -144,12 +144,14 @@ app.route("/", api);
 async function scheduledCleanup(env: Bindings): Promise<void> {
   const db = env.DB;
   const results: Array<{ dataset_id: string; success: boolean; error?: string }> = [];
+  const MAX_DELETIONS_PER_RUN = 10;
 
   // 1. Sandbox datasets older than 14 days
   const sandboxRows = await db
     .prepare(
-      "SELECT dataset_id FROM datasets WHERE dataset_id LIKE 'xx%' AND created_at < datetime('now', '-14 days') AND status = 'active'",
+      "SELECT dataset_id FROM datasets WHERE dataset_id LIKE 'xx%' AND created_at < datetime('now', '-14 days') AND status = 'active' LIMIT ?",
     )
+    .bind(MAX_DELETIONS_PER_RUN)
     .all<{ dataset_id: string }>();
 
   for (const row of sandboxRows.results) {
@@ -166,22 +168,26 @@ async function scheduledCleanup(env: Bindings): Promise<void> {
   }
 
   // 2. Stale nm datasets: unpublished, no DOI, inactive for 90 days
-  const staleRows = await db
-    .prepare(
-      "SELECT dataset_id FROM datasets WHERE dataset_id LIKE 'nm%' AND COALESCE(last_activity_at, created_at) < datetime('now', '-90 days') AND status = 'active' AND concept_doi IS NULL AND visibility = 'private'",
-    )
-    .all<{ dataset_id: string }>();
+  const remaining = MAX_DELETIONS_PER_RUN - results.length;
+  if (remaining > 0) {
+    const staleRows = await db
+      .prepare(
+        "SELECT dataset_id FROM datasets WHERE dataset_id LIKE 'nm%' AND COALESCE(last_activity_at, created_at) < datetime('now', '-90 days') AND status = 'active' AND concept_doi IS NULL AND visibility = 'private' LIMIT ?",
+      )
+      .bind(remaining)
+      .all<{ dataset_id: string }>();
 
-  for (const row of staleRows.results) {
-    try {
-      const result = await deleteDatasetCascade(db, env, row.dataset_id, {});
-      results.push({ dataset_id: row.dataset_id, success: result.deleted });
-    } catch (err) {
-      results.push({
-        dataset_id: row.dataset_id,
-        success: false,
-        error: err instanceof Error ? err.message : String(err),
-      });
+    for (const row of staleRows.results) {
+      try {
+        const result = await deleteDatasetCascade(db, env, row.dataset_id, {});
+        results.push({ dataset_id: row.dataset_id, success: result.deleted });
+      } catch (err) {
+        results.push({
+          dataset_id: row.dataset_id,
+          success: false,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
     }
   }
 
