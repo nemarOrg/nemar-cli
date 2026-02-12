@@ -39,7 +39,7 @@ webhooks.post("/publish-version-doi", async (c) => {
   }
 
   // Parse request body
-  let body: { dataset_id: string; version: string; release_url: string; sandbox?: boolean };
+  let body: { dataset_id: string; version: string; release_url: string };
   try {
     body = await c.req.json();
   } catch {
@@ -50,7 +50,7 @@ webhooks.post("/publish-version-doi", async (c) => {
     return c.json({ error: "Missing required fields: dataset_id, version, release_url" }, 400);
   }
 
-  const { dataset_id, version: rawVersion, release_url, sandbox = false } = body;
+  const { dataset_id, version: rawVersion, release_url } = body;
 
   // Normalize version: strip leading "v" or "V" prefix if present
   const version = rawVersion.replace(/^[vV]/, "");
@@ -103,6 +103,12 @@ webhooks.post("/publish-version-doi", async (c) => {
   }
 
   const provider = parseDoiProvider(dataset.doi_provider);
+
+  // Auto-detect sandbox from EZID identifier prefix (10.5072 = EZID sandbox shoulder)
+  const sandbox =
+    provider === "ezid" && dataset.ezid_identifier
+      ? dataset.ezid_identifier.includes("10.5072")
+      : false;
 
   // Route to appropriate provider
   if (provider === "ezid") {
