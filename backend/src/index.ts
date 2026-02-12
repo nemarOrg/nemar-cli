@@ -136,10 +136,10 @@ app.route("/", api);
 
 /**
  * Scheduled cleanup handler (Cloudflare Workers cron trigger).
- * Runs daily at 3 AM UTC.
+ * Runs daily at 3 AM UTC (production only, see wrangler.toml [triggers]).
  *
  * - Sandbox (xx) datasets: delete after 14 days
- * - Stale nm datasets: delete unpublished, no-DOI datasets inactive for 90 days
+ * - Stale nm datasets: private, no DOI, no active pub requests, inactive for 90 days
  */
 async function scheduledCleanup(env: Bindings): Promise<void> {
   const db = env.DB;

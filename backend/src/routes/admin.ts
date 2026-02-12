@@ -3497,8 +3497,8 @@ const deleteDatasetSchema = z.object({
  * DELETE /admin/datasets/:id - Delete a dataset and all associated resources
  *
  * Permission:
- * - Unpublished datasets (no DOI): admin or owner
- * - Published datasets (with DOI): owner only, requires force=true
+ * - Unpublished datasets (no DOI, private): admin or owner
+ * - Published datasets (with DOI or public visibility): owner only, requires force=true
  */
 adminRoutes.delete("/datasets/:id", async (c) => {
   const datasetId = c.req.param("id");
