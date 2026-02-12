@@ -69,6 +69,7 @@ userRoutes.get("/me", async (c) => {
       username: user.username,
       email: user.email,
       github_username: user.github_username,
+      role: user.role,
       is_admin: user.is_admin,
       orcid: user.orcid || null,
       created_at: userDetails?.created_at,
