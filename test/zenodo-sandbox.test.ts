@@ -122,7 +122,6 @@ describe("Zenodo Sandbox Integration", () => {
         concept_doi: string;
         zenodo_id: number;
         zenodo_url: string;
-        setup_command: string;
         warning: string;
         error?: string;
       }>(
@@ -144,7 +143,6 @@ describe("Zenodo Sandbox Integration", () => {
         expect(data.concept_doi).toMatch(/^10\.\d+\/zenodo\.\d+$/);
         expect(data.zenodo_id).toBeGreaterThan(0);
         expect(data.zenodo_url).toContain("sandbox.zenodo.org");
-        expect(data.setup_command).toContain("gh secret set");
       } else if (status === 400 && data.error?.includes("already has")) {
         console.log("   ✓ Dataset already has concept DOI (expected on re-run)");
         expect(data.error).toContain("already has a concept DOI");

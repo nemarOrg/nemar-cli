@@ -757,7 +757,6 @@ export interface CreateConceptDoiRequest {
 interface CreateConceptDoiResponseBase {
   message: string;
   concept_doi: string;
-  setup_command: string;
   warning: string;
   metadata_warning?: string;
 }

@@ -835,12 +835,8 @@ doiCommand
         console.log();
 
         console.log(chalk.yellow("Next steps:"));
-        console.log("  1. Set up automatic DOI publishing by running:");
-        console.log(chalk.gray(`     ${result.setup_command}`));
-        console.log("     (paste the webhook token when prompted)");
-        console.log();
-        console.log("  2. Update dataset_description.json with DatasetDOI field");
-        console.log("  3. Create a PR and merge it to trigger version DOI publication");
+        console.log("  1. Update dataset_description.json with DatasetDOI field");
+        console.log("  2. Create a PR and merge it to trigger version DOI publication");
         console.log();
         if (options.sandbox) {
           console.log(

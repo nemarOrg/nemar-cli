@@ -1229,15 +1229,11 @@ adminRoutes.post(
         )
         .run();
 
-      // Generate the repo name for the setup command
-      const repoName = dataset.github_repo ? dataset.github_repo.split("/")[1] : datasetId;
-
       // Build response based on provider
       const response: Record<string, unknown> = {
         message: "Concept DOI created successfully",
         concept_doi: result.doi,
         provider,
-        setup_command: `gh secret set NEMAR_WEBHOOK_TOKEN --repo nemarDatasets/${repoName}`,
         warning:
           "DOI is pre-reserved but not yet published. It will become active on first version publish.",
       };
