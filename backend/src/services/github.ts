@@ -473,17 +473,23 @@ jobs:
 
       - name: Run BIDS validator
         run: |
-          deno run -A jsr:@bids/validator . --json > validation.json
+          deno run -A jsr:@bids/validator . --json > validation.json || true
           cat validation.json
 
       - name: Check validation result
         run: |
-          if jq -e '.valid == false' validation.json > /dev/null; then
-            echo "::error::BIDS validation failed"
-            jq '.issues[] | select(.severity == "error")' validation.json
+          if [ ! -f validation.json ] || ! jq empty validation.json 2>/dev/null; then
+            echo "::error::BIDS validator failed to produce valid output"
             exit 1
           fi
-          echo "BIDS validation passed"
+          ERRORS=$(jq '[.issues.issues[] | select(.severity == "error")] | length' validation.json)
+          if [ "$ERRORS" -gt 0 ]; then
+            echo "::error::BIDS validation found $ERRORS error(s)"
+            jq '.issues.issues[] | select(.severity == "error")' validation.json
+            exit 1
+          fi
+          WARNINGS=$(jq '[.issues.issues[] | select(.severity == "warning")] | length' validation.json)
+          echo "BIDS validation passed ($WARNINGS warning(s))"
 `;
 
   // Version Check workflow
