@@ -1972,7 +1972,11 @@ adminCommand
 
       spinner.start("Deleting dataset...");
       const result = await deleteDataset(datasetId, options.force ?? false);
-      spinner.succeed("Dataset deleted");
+      if (result.warnings.length > 0) {
+        spinner.warn("Dataset deleted with warnings");
+      } else {
+        spinner.succeed("Dataset deleted");
+      }
 
       // Summary
       console.log(chalk.bold("\nDeletion summary:"));

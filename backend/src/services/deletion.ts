@@ -105,7 +105,8 @@ export async function deleteDatasetCascade(
 
   return {
     datasetId,
-    deleted: steps.d1.success,
+    deleted:
+      steps.d1.success && steps.github.success && (options.skipS3 || steps.s3.failed.length === 0),
     steps,
     warnings,
   };

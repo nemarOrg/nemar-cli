@@ -3569,23 +3569,28 @@ adminRoutes.delete("/datasets/:id", zValidator("json", deleteDatasetSchema), asy
     bypassGovernance: force,
   });
 
-  // Audit log
-  await db
-    .prepare("INSERT INTO audit_log (action, user_id, details) VALUES (?, ?, ?)")
-    .bind(
-      "dataset_deleted",
-      requestingUser.id,
-      JSON.stringify({
-        dataset_id: datasetId,
-        dataset_name: dataset.name,
-        owner_user_id: dataset.owner_user_id,
-        had_doi: dataset.concept_doi !== null,
-        force,
-        steps: result.steps,
-        warnings: result.warnings,
-      }),
-    )
-    .run();
+  // Audit log (best-effort; don't fail the response if audit write fails)
+  try {
+    await db
+      .prepare("INSERT INTO audit_log (action, user_id, details) VALUES (?, ?, ?)")
+      .bind(
+        "dataset_deleted",
+        requestingUser.id,
+        JSON.stringify({
+          dataset_id: datasetId,
+          dataset_name: dataset.name,
+          owner_user_id: dataset.owner_user_id,
+          had_doi: dataset.concept_doi !== null,
+          force,
+          steps: result.steps,
+          warnings: result.warnings,
+        }),
+      )
+      .run();
+  } catch (err) {
+    console.error("Failed to write deletion audit log:", err);
+    result.warnings.push("Audit log write failed");
+  }
 
   return c.json(result);
 });

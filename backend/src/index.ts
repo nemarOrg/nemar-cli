@@ -147,37 +147,15 @@ async function scheduledCleanup(env: Bindings): Promise<void> {
   const MAX_DELETIONS_PER_RUN = 10;
 
   // 1. Sandbox datasets older than 14 days
-  const sandboxRows = await db
-    .prepare(
-      "SELECT dataset_id FROM datasets WHERE dataset_id LIKE 'xx%' AND created_at < datetime('now', '-14 days') AND status = 'active' LIMIT ?",
-    )
-    .bind(MAX_DELETIONS_PER_RUN)
-    .all<{ dataset_id: string }>();
-
-  for (const row of sandboxRows.results) {
-    try {
-      const result = await deleteDatasetCascade(db, env, row.dataset_id, {});
-      results.push({ dataset_id: row.dataset_id, success: result.deleted });
-    } catch (err) {
-      results.push({
-        dataset_id: row.dataset_id,
-        success: false,
-        error: err instanceof Error ? err.message : String(err),
-      });
-    }
-  }
-
-  // 2. Stale nm datasets: unpublished, no DOI, inactive for 90 days
-  const remaining = MAX_DELETIONS_PER_RUN - results.length;
-  if (remaining > 0) {
-    const staleRows = await db
+  try {
+    const sandboxRows = await db
       .prepare(
-        "SELECT dataset_id FROM datasets WHERE dataset_id LIKE 'nm%' AND COALESCE(last_activity_at, created_at) < datetime('now', '-90 days') AND status = 'active' AND concept_doi IS NULL AND visibility = 'private' LIMIT ?",
+        "SELECT dataset_id FROM datasets WHERE dataset_id LIKE 'xx%' AND created_at < datetime('now', '-14 days') AND status = 'active' LIMIT ?",
       )
-      .bind(remaining)
+      .bind(MAX_DELETIONS_PER_RUN)
       .all<{ dataset_id: string }>();
 
-    for (const row of staleRows.results) {
+    for (const row of sandboxRows.results) {
       try {
         const result = await deleteDatasetCascade(db, env, row.dataset_id, {});
         results.push({ dataset_id: row.dataset_id, success: result.deleted });
@@ -189,18 +167,50 @@ async function scheduledCleanup(env: Bindings): Promise<void> {
         });
       }
     }
+  } catch (err) {
+    console.error("Scheduled cleanup: sandbox query failed:", err);
+  }
+
+  // 2. Stale nm datasets: unpublished, no DOI, inactive for 90 days
+  const remaining = MAX_DELETIONS_PER_RUN - results.length;
+  if (remaining > 0) {
+    try {
+      const staleRows = await db
+        .prepare(
+          "SELECT dataset_id FROM datasets WHERE dataset_id LIKE 'nm%' AND COALESCE(last_activity_at, created_at) < datetime('now', '-90 days') AND status = 'active' AND concept_doi IS NULL AND visibility = 'private' LIMIT ?",
+        )
+        .bind(remaining)
+        .all<{ dataset_id: string }>();
+
+      for (const row of staleRows.results) {
+        try {
+          const result = await deleteDatasetCascade(db, env, row.dataset_id, {});
+          results.push({ dataset_id: row.dataset_id, success: result.deleted });
+        } catch (err) {
+          results.push({
+            dataset_id: row.dataset_id,
+            success: false,
+            error: err instanceof Error ? err.message : String(err),
+          });
+        }
+      }
+    } catch (err) {
+      console.error("Scheduled cleanup: stale datasets query failed:", err);
+    }
   }
 
   // Log summary to audit_log
-  if (results.length > 0) {
-    const deleted = results.filter((r) => r.success).length;
-    const failed = results.filter((r) => !r.success).length;
+  const deleted = results.filter((r) => r.success).length;
+  const failed = results.filter((r) => !r.success).length;
+  try {
     await db
       .prepare("INSERT INTO audit_log (action, details) VALUES (?, ?)")
       .bind("scheduled_cleanup", JSON.stringify({ deleted, failed, datasets: results }))
       .run();
-    console.log(`Scheduled cleanup: ${deleted} deleted, ${failed} failed`);
+  } catch (err) {
+    console.error("Scheduled cleanup: failed to write audit log:", err);
   }
+  console.log(`Scheduled cleanup: ${deleted} deleted, ${failed} failed`);
 }
 
 export default {
