@@ -635,11 +635,11 @@ Changes in this release:
           fi
 
   cleanup-staging:
-    name: Cleanup Staging
+    name: Cleanup Staging (runs on merge or close)
     if: always()
     runs-on: ubuntu-latest
     steps:
-      - name: Cleanup staging on PR close
+      - name: Remove staging data for this PR/branch
         env:
           AWS_ACCESS_KEY_ID: \${{ secrets.AWS_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: \${{ secrets.AWS_SECRET_ACCESS_KEY }}

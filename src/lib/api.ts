@@ -612,7 +612,7 @@ export async function getDataset(datasetId: string): Promise<Dataset> {
 export interface VersionInfo {
   version: string;
   doi: string;
-  provider: string;
+  provider: "ezid" | "zenodo";
   created_at: string;
 }
 

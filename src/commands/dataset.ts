@@ -1397,8 +1397,8 @@ Examples:
         process.exit(1);
       }
 
-      // Fetch version history
-      let currentVersion = "1.0.0";
+      // Fetch version history (required for correct version bumping)
+      let currentVersion: string;
       try {
         const history = await getVersionHistory(datasetId);
         currentVersion = history.current_version;
@@ -1414,9 +1414,9 @@ Examples:
         }
       } catch (err) {
         const detail = err instanceof ApiError ? `${err.statusCode}: ${err.message}` : String(err);
-        console.log(
-          chalk.gray(`  Could not fetch version history (${detail}), using default 1.0.0`),
-        );
+        console.log(chalk.red(`Error: Could not fetch version history (${detail})`));
+        console.log("  Cannot determine current version. Ensure the backend is reachable.");
+        process.exit(1);
       }
 
       // Determine new version
@@ -1550,7 +1550,13 @@ Examples:
         process.exit(1);
       }
 
-      const descContent = JSON.parse(readFileSync(descPath, "utf-8"));
+      let descContent: Record<string, unknown>;
+      try {
+        descContent = JSON.parse(readFileSync(descPath, "utf-8"));
+      } catch {
+        console.log(chalk.red("Error: dataset_description.json contains invalid JSON"));
+        process.exit(1);
+      }
       descContent.Version = newVersion;
       writeFileSync(descPath, `${JSON.stringify(descContent, null, 2)}\n`);
 
@@ -1646,7 +1652,6 @@ Examples:
         console.log(chalk.gray("Monitoring CI checks..."));
         console.log(chalk.gray("  Press Ctrl+C to stop monitoring"));
 
-        const repoName = dataset.github_repo.split("/")[1];
         let attempts = 0;
         const maxAttempts = 60; // 10 minutes at 10s intervals
 
@@ -1810,7 +1815,10 @@ Examples:
         stderr: "pipe",
       });
       const statusOutput = (await new Response(statusProc.stdout).text()).trim();
-      await statusProc.exited;
+      if ((await statusProc.exited) !== 0) {
+        console.log(chalk.red("Error: Failed to check git status"));
+        process.exit(1);
+      }
 
       if (!statusOutput) {
         console.log(chalk.yellow("No changes detected."));
@@ -1824,7 +1832,7 @@ Examples:
       const metadataFiles: string[] = [];
       for (const line of lines) {
         const filePath = line.substring(3).trim();
-        // Annexed file extensions or large files
+        // Common neuroimaging data file extensions (typically git-annex managed)
         if (/\.(edf|bdf|set|fdt|nwb|eeg|vhdr|vmrk|cnt|mff|gz)$/i.test(filePath)) {
           dataFiles.push(filePath);
         } else {
@@ -1872,16 +1880,29 @@ Examples:
         process.exit(1);
       }
 
-      // Get current version and bump
-      let currentVersion = "1.0.0";
+      // Get current version (required for correct version bumping)
+      let currentVersion: string;
+      const versionDescPath = join(workDir, "dataset_description.json");
+      if (!existsSync(versionDescPath)) {
+        console.log(chalk.red("Error: dataset_description.json not found"));
+        console.log("  This file is required for BIDS datasets.");
+        process.exit(1);
+      }
       try {
-        const descPath = join(workDir, "dataset_description.json");
-        if (existsSync(descPath)) {
-          const desc = JSON.parse(readFileSync(descPath, "utf-8"));
-          if (desc.Version) currentVersion = desc.Version;
+        const desc = JSON.parse(readFileSync(versionDescPath, "utf-8"));
+        if (typeof desc.Version !== "string" || !desc.Version) {
+          console.log(chalk.red("Error: No Version field in dataset_description.json"));
+          console.log('  Set the Version field before updating (e.g., "Version": "1.0.0").');
+          process.exit(1);
         }
+        currentVersion = desc.Version;
       } catch (err) {
-        console.log(chalk.gray(`  Could not read version from dataset_description.json: ${err}`));
+        if (err instanceof SyntaxError) {
+          console.log(chalk.red("Error: dataset_description.json contains invalid JSON"));
+        } else {
+          console.log(chalk.red(`Error: Could not read dataset_description.json: ${err}`));
+        }
+        process.exit(1);
       }
 
       const bumpType = options.bump as "patch" | "minor" | "major";
@@ -1922,13 +1943,17 @@ Examples:
       }
       branchSpinner.succeed(`Created branch: ${branchName}`);
 
-      // Bump version in dataset_description.json
+      // Bump version in dataset_description.json (already validated above)
       const descPath = join(workDir, "dataset_description.json");
-      if (existsSync(descPath)) {
-        const descContent = JSON.parse(readFileSync(descPath, "utf-8"));
-        descContent.Version = newVersion;
-        writeFileSync(descPath, `${JSON.stringify(descContent, null, 2)}\n`);
+      let descContent: Record<string, unknown>;
+      try {
+        descContent = JSON.parse(readFileSync(descPath, "utf-8"));
+      } catch {
+        console.log(chalk.red("Error: dataset_description.json contains invalid JSON"));
+        process.exit(1);
       }
+      descContent.Version = newVersion;
+      writeFileSync(descPath, `${JSON.stringify(descContent, null, 2)}\n`);
 
       // Stage all changes and commit
       const commitSpinner = ora("Committing changes...").start();
@@ -2065,7 +2090,7 @@ Examples:
         console.log(chalk.gray("Monitoring CI checks..."));
 
         let attempts = 0;
-        const maxAttempts = 60;
+        const maxAttempts = 60; // 10 minutes at 10s intervals
 
         while (attempts < maxAttempts) {
           await new Promise((r) => setTimeout(r, 10000));
