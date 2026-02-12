@@ -31,7 +31,7 @@ export interface Bindings {
 /** User roles in hierarchical order: owner > admin > member */
 export type UserRole = "owner" | "admin" | "member";
 
-export const ROLE_HIERARCHY: Record<UserRole, number> = { owner: 3, admin: 2, member: 1 };
+export const ROLE_HIERARCHY: Readonly<Record<UserRole, number>> = Object.freeze({ owner: 3, admin: 2, member: 1 });
 
 /** Check if userRole meets or exceeds the minimum required role */
 export function hasRole(userRole: UserRole, minimumRole: UserRole): boolean {
