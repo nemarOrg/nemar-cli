@@ -19,6 +19,7 @@ import {
   createRepository,
   deployWorkflows,
   enableAutoMerge,
+  getFileContent,
   getWorkflowRuns,
   setRepoVisibility,
 } from "../services/github";
@@ -1317,6 +1318,85 @@ datasetRoutes.get("/:id/manifest/:version", optionalAuthMiddleware, async (c) =>
   }
 
   return c.json(JSON.parse(manifestJson));
+});
+
+/**
+ * GET /datasets/:id/versions - Get version history for a dataset
+ *
+ * Returns the current version from dataset_description.json and all
+ * recorded version DOIs from the dataset_versions table.
+ *
+ * Authorization: Owner, collaborator, or admin
+ */
+datasetRoutes.get("/:id/versions", authMiddleware, async (c) => {
+  const datasetId = c.req.param("id");
+  const user = c.get("user");
+  const db = c.env.DB;
+
+  const dataset = await db
+    .prepare("SELECT id, dataset_id, owner_user_id, github_repo FROM datasets WHERE dataset_id = ?")
+    .bind(datasetId)
+    .first<{
+      id: number;
+      dataset_id: string;
+      owner_user_id: number;
+      github_repo: string | null;
+    }>();
+
+  if (!dataset) {
+    return c.json({ error: "Dataset not found" }, 404);
+  }
+
+  // Check access: owner, admin, or collaborator
+  if (!hasRole(user.role, "admin") && user.id !== dataset.owner_user_id) {
+    const collabResult = await db
+      .prepare(
+        `SELECT 1 FROM dataset_collaborators
+         WHERE dataset_id = ? AND user_id = ? AND status = 'active'`,
+      )
+      .bind(dataset.id, user.id)
+      .first();
+    if (!collabResult) {
+      return c.json({ error: "Access denied" }, 403);
+    }
+  }
+
+  // Get current version from dataset_description.json via GitHub
+  let currentVersion = "1.0.0";
+  if (dataset.github_repo) {
+    const repoName = extractRepoName(dataset.github_repo);
+    if (repoName) {
+      try {
+        const content = await getFileContent(
+          repoName,
+          "dataset_description.json",
+          c.env.GITHUB_ADMIN_PAT,
+        );
+        if (content) {
+          const desc = JSON.parse(content);
+          if (typeof desc.Version === "string") {
+            currentVersion = desc.Version;
+          }
+        }
+      } catch {
+        // Fall back to default if file can't be read
+      }
+    }
+  }
+
+  // Get version DOIs from database
+  const versions = await db
+    .prepare(
+      "SELECT version, doi, provider, created_at FROM dataset_versions WHERE dataset_id = ? ORDER BY created_at DESC",
+    )
+    .bind(datasetId)
+    .all<{ version: string; doi: string; provider: string; created_at: string }>();
+
+  return c.json({
+    dataset_id: datasetId,
+    current_version: currentVersion,
+    versions: versions.results ?? [],
+  });
 });
 
 /**

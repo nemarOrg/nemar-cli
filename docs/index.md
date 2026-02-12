@@ -40,6 +40,14 @@ nemar dataset upload ./my-dataset --name "My EEG Dataset"
 2. [Quick Start](getting-started/quickstart.md) - Get up and running in minutes
 3. [Authentication](getting-started/authentication.md) - Set up your account
 
+## Guides
+
+- [Uploading](guides/uploading.md) - Upload datasets to NEMAR
+- [Downloading](guides/downloading.md) - Download datasets from NEMAR
+- [Validation](guides/validation.md) - Validate BIDS datasets
+- [Versioning](guides/versioning.md) - Version bumps and dataset updates via PR
+- [Publishing](guides/publishing.md) - Publish datasets with DOIs
+
 ## Support
 
 - [GitHub Issues](https://github.com/nemarOrg/nemar-cli/issues) - Report bugs or request features

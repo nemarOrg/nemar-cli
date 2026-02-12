@@ -636,7 +636,7 @@ Changes in this release:
 
   cleanup-staging:
     name: Cleanup Staging
-    if: github.event.pull_request.merged == false
+    if: always()
     runs-on: ubuntu-latest
     steps:
       - name: Cleanup staging on PR close
@@ -644,9 +644,12 @@ Changes in this release:
           AWS_ACCESS_KEY_ID: \${{ secrets.AWS_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: \${{ secrets.AWS_SECRET_ACCESS_KEY }}
         run: |
-          STAGING_PREFIX="staging/pr-\${{ github.event.pull_request.number }}/"
-          echo "Cleaning up staging: s3://nemar/$STAGING_PREFIX"
-          aws s3 rm --recursive "s3://nemar/$STAGING_PREFIX" 2>/dev/null || true
+          DATASET_ID="\${{ github.event.repository.name }}"
+          BRANCH="\${{ github.event.pull_request.head.ref }}"
+          # Clean up branch-based staging
+          aws s3 rm --recursive "s3://nemar/staging/\${DATASET_ID}/\${BRANCH}/" 2>/dev/null || true
+          # Clean up legacy PR-number-based staging
+          aws s3 rm --recursive "s3://nemar/staging/pr-\${{ github.event.pull_request.number }}/" 2>/dev/null || true
 `;
 
   // Generate Archive workflow (triggered via repository_dispatch)
@@ -877,6 +880,44 @@ export async function getBlobContent(repo: string, blobSha: string, pat: string)
     return new TextDecoder().decode(bytes);
   }
   return blob.content;
+}
+
+/**
+ * Get the text content of a file from a repo via the Contents API.
+ * Returns null if the file does not exist.
+ */
+export async function getFileContent(
+  repo: string,
+  filePath: string,
+  pat: string,
+  ref = "main",
+): Promise<string | null> {
+  const response = await fetch(
+    `${GITHUB_API}/repos/${ORG_NAME}/${repo}/contents/${filePath}?ref=${ref}`,
+    {
+      headers: {
+        Authorization: `Bearer ${pat}`,
+        Accept: "application/vnd.github.v3+json",
+        "User-Agent": "NEMAR-API",
+      },
+    },
+  );
+
+  if (response.status === 404) return null;
+  if (!response.ok) {
+    throw new Error(`Failed to get ${filePath} from ${repo}: HTTP ${response.status}`);
+  }
+
+  const data = await response.json<{ content: string; encoding: string }>();
+  if (data.encoding === "base64") {
+    const binary = atob(data.content.replace(/\n/g, ""));
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i++) {
+      bytes[i] = binary.charCodeAt(i);
+    }
+    return new TextDecoder().decode(bytes);
+  }
+  return data.content;
 }
 
 // ============================================================================
