@@ -1553,8 +1553,12 @@ Examples:
       let descContent: Record<string, unknown>;
       try {
         descContent = JSON.parse(readFileSync(descPath, "utf-8"));
-      } catch {
-        console.log(chalk.red("Error: dataset_description.json contains invalid JSON"));
+      } catch (err) {
+        if (err instanceof SyntaxError) {
+          console.log(chalk.red("Error: dataset_description.json contains invalid JSON"));
+        } else {
+          console.log(chalk.red(`Error: Could not read dataset_description.json: ${err}`));
+        }
         process.exit(1);
       }
       descContent.Version = newVersion;
@@ -1948,8 +1952,12 @@ Examples:
       let descContent: Record<string, unknown>;
       try {
         descContent = JSON.parse(readFileSync(descPath, "utf-8"));
-      } catch {
-        console.log(chalk.red("Error: dataset_description.json contains invalid JSON"));
+      } catch (err) {
+        if (err instanceof SyntaxError) {
+          console.log(chalk.red("Error: dataset_description.json contains invalid JSON"));
+        } else {
+          console.log(chalk.red(`Error: Could not read dataset_description.json: ${err}`));
+        }
         process.exit(1);
       }
       descContent.Version = newVersion;
