@@ -473,22 +473,24 @@ jobs:
 
       - name: Run BIDS validator
         run: |
-          deno run -A jsr:@bids/validator . --json > /tmp/validation.json || true
-          cat /tmp/validation.json
+          mkdir -p .nemar
+          grep -qxF '.nemar/' .bidsignore 2>/dev/null || echo '.nemar/' >> .bidsignore
+          deno run -A jsr:@bids/validator . --json > .nemar/validation.json || true
+          cat .nemar/validation.json
 
       - name: Check validation result
         run: |
-          if [ ! -f /tmp/validation.json ] || ! jq empty /tmp/validation.json 2>/dev/null; then
+          if [ ! -f .nemar/validation.json ] || ! jq empty .nemar/validation.json 2>/dev/null; then
             echo "::error::BIDS validator failed to produce valid output"
             exit 1
           fi
-          ERRORS=$(jq '[.issues.issues[] | select(.severity == "error")] | length' /tmp/validation.json)
+          ERRORS=$(jq '[.issues.issues[] | select(.severity == "error")] | length' .nemar/validation.json)
           if [ "$ERRORS" -gt 0 ]; then
             echo "::error::BIDS validation found $ERRORS error(s)"
-            jq '.issues.issues[] | select(.severity == "error")' /tmp/validation.json
+            jq '.issues.issues[] | select(.severity == "error")' .nemar/validation.json
             exit 1
           fi
-          WARNINGS=$(jq '[.issues.issues[] | select(.severity == "warning")] | length' /tmp/validation.json)
+          WARNINGS=$(jq '[.issues.issues[] | select(.severity == "warning")] | length' .nemar/validation.json)
           echo "BIDS validation passed ($WARNINGS warning(s))"
 `;
 

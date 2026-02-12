@@ -871,16 +871,18 @@ Examples:
         const nemarMetaPath = resolve(absolutePath, "nemar_metadata.json");
         writeFileSync(nemarMetaPath, JSON.stringify(coAuthorEnrichment, null, 2));
 
-        // Ensure .bidsignore includes nemar_metadata.json
+        // Ensure .bidsignore includes NEMAR-specific paths
         const bidsignorePath = resolve(absolutePath, ".bidsignore");
         let bidsignoreContent = "";
         if (existsSync(bidsignorePath)) {
           bidsignoreContent = readFileSync(bidsignorePath, "utf-8");
         }
-        if (!bidsignoreContent.includes("nemar_metadata.json")) {
+        const entriesToIgnore = ["nemar_metadata.json", ".nemar/"];
+        const missing = entriesToIgnore.filter((e) => !bidsignoreContent.includes(e));
+        if (missing.length > 0) {
           const newContent = bidsignoreContent
-            ? `${bidsignoreContent.trimEnd()}\nnemar_metadata.json\n`
-            : "nemar_metadata.json\n";
+            ? `${bidsignoreContent.trimEnd()}\n${missing.join("\n")}\n`
+            : `${missing.join("\n")}\n`;
           writeFileSync(bidsignorePath, newContent);
         }
         console.log(chalk.gray("  Saved nemar_metadata.json with author ORCIDs"));
