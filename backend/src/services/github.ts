@@ -691,20 +691,17 @@ jobs:
           git config --global user.email "actions@github.com"
           git config --global user.name "GitHub Actions"
 
-      - name: Configure S3 remote and get data
-        env:
-          AWS_ACCESS_KEY_ID: \${{ secrets.AWS_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: \${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      - name: Fetch git-annex branch and get data
         run: |
+          git fetch origin git-annex:git-annex
           git annex init "archive-worker"
-          git annex enableremote nemar-s3
           git annex get .
 
       - name: Verify all files retrieved
         run: |
           MISSING=\$(git annex find --not --in here 2>/dev/null | wc -l)
           if [ "\$MISSING" -gt 0 ]; then
-            echo "::error::\$MISSING files could not be retrieved from S3"
+            echo "::error::\$MISSING files could not be retrieved"
             git annex find --not --in here
             exit 1
           fi
@@ -723,16 +720,6 @@ jobs:
           aws s3 cp "/tmp/\${DATASET_ID}-v\${VERSION}.zip" \\
             "s3://nemar/\${DATASET_ID}/archives/v\${VERSION}.zip"
           echo "Uploaded archive to s3://nemar/\${DATASET_ID}/archives/v\${VERSION}.zip"
-
-      - name: Mark S3 remote as public for credential-free downloads
-        if: github.event.client_payload.public == true
-        env:
-          AWS_ACCESS_KEY_ID: \${{ secrets.AWS_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: \${{ secrets.AWS_SECRET_ACCESS_KEY }}
-        run: |
-          git annex enableremote nemar-s3 public=yes
-          git push origin git-annex
-          echo "S3 remote marked as public; git-annex branch pushed"
 `;
 
   // Deploy each workflow

@@ -914,7 +914,12 @@ Examples:
       process.exit(1);
     }
 
-    spinner.succeed("Metadata pushed to GitHub");
+    if (githubPushResult.warning) {
+      spinner.warn("Metadata pushed to GitHub (with warning)");
+      console.log(chalk.yellow(`  ${githubPushResult.warning}`));
+    } else {
+      spinner.succeed("Metadata pushed to GitHub");
+    }
 
     // Step 12b: Deploy BIDS validation CI
     spinner = ora("Setting up BIDS validation CI...").start();
