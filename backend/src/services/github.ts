@@ -2,7 +2,7 @@
  * GitHub API service
  *
  * Handles GitHub operations: validating usernames, managing collaborators,
- * creating repositories, and applying branch protection.
+ * creating/deleting repositories, and applying branch protection.
  */
 
 const GITHUB_API = "https://api.github.com";
@@ -208,6 +208,34 @@ export async function createRepository(
   }
 
   return response.json();
+}
+
+/**
+ * Delete a repository from the nemarDatasets organization.
+ * Idempotent: returns true if the repo was deleted or did not exist.
+ * Requires a PAT with `delete_repo` scope.
+ */
+export async function deleteRepository(repo: string, pat: string): Promise<boolean> {
+  if (!repo || repo.includes("/") || repo.includes("..")) {
+    throw new Error(`Invalid repository name: "${repo}"`);
+  }
+
+  const response = await fetch(`${GITHUB_API}/repos/${ORG_NAME}/${repo}`, {
+    method: "DELETE",
+    headers: {
+      Authorization: `Bearer ${pat}`,
+      Accept: "application/vnd.github.v3+json",
+      "User-Agent": "NEMAR-API",
+    },
+  });
+
+  // 204 = deleted, 404 = already gone (both are success)
+  if (response.status === 204 || response.status === 404) {
+    return true;
+  }
+
+  const error = await response.text();
+  throw new Error(`Failed to delete repo ${repo}: HTTP ${response.status} - ${error}`);
 }
 
 /**
