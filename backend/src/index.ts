@@ -143,8 +143,33 @@ app.route("/", api);
  */
 async function scheduledCleanup(env: Bindings): Promise<void> {
   const db = env.DB;
-  const results: Array<{ dataset_id: string; success: boolean; error?: string }> = [];
+  const results: Array<{
+    dataset_id: string;
+    success: boolean;
+    error?: string;
+    warnings?: string[];
+  }> = [];
   const MAX_DELETIONS_PER_RUN = 10;
+
+  /** Delete each dataset in `rows`, pushing outcomes into `results`. */
+  async function deleteRows(rows: Array<{ dataset_id: string }>): Promise<void> {
+    for (const row of rows) {
+      try {
+        const result = await deleteDatasetCascade(db, env, row.dataset_id, {});
+        results.push({
+          dataset_id: row.dataset_id,
+          success: result.deleted,
+          warnings: result.warnings.length > 0 ? result.warnings : undefined,
+        });
+      } catch (err) {
+        results.push({
+          dataset_id: row.dataset_id,
+          success: false,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+  }
 
   // 1. Sandbox datasets older than 14 days
   try {
@@ -155,18 +180,7 @@ async function scheduledCleanup(env: Bindings): Promise<void> {
       .bind(MAX_DELETIONS_PER_RUN)
       .all<{ dataset_id: string }>();
 
-    for (const row of sandboxRows.results) {
-      try {
-        const result = await deleteDatasetCascade(db, env, row.dataset_id, {});
-        results.push({ dataset_id: row.dataset_id, success: result.deleted });
-      } catch (err) {
-        results.push({
-          dataset_id: row.dataset_id,
-          success: false,
-          error: err instanceof Error ? err.message : String(err),
-        });
-      }
-    }
+    await deleteRows(sandboxRows.results);
   } catch (err) {
     console.error("Scheduled cleanup: sandbox query failed:", err);
   }
@@ -177,23 +191,12 @@ async function scheduledCleanup(env: Bindings): Promise<void> {
     try {
       const staleRows = await db
         .prepare(
-          "SELECT dataset_id FROM datasets WHERE dataset_id LIKE 'nm%' AND COALESCE(last_activity_at, created_at) < datetime('now', '-90 days') AND status = 'active' AND concept_doi IS NULL AND visibility = 'private' LIMIT ?",
+          "SELECT dataset_id FROM datasets WHERE dataset_id LIKE 'nm%' AND COALESCE(last_activity_at, created_at) < datetime('now', '-90 days') AND status = 'active' AND concept_doi IS NULL AND visibility = 'private' AND dataset_id NOT IN (SELECT dataset_id FROM publication_requests WHERE status NOT IN ('published', 'denied')) LIMIT ?",
         )
         .bind(remaining)
         .all<{ dataset_id: string }>();
 
-      for (const row of staleRows.results) {
-        try {
-          const result = await deleteDatasetCascade(db, env, row.dataset_id, {});
-          results.push({ dataset_id: row.dataset_id, success: result.deleted });
-        } catch (err) {
-          results.push({
-            dataset_id: row.dataset_id,
-            success: false,
-            error: err instanceof Error ? err.message : String(err),
-          });
-        }
-      }
+      await deleteRows(staleRows.results);
     } catch (err) {
       console.error("Scheduled cleanup: stale datasets query failed:", err);
     }

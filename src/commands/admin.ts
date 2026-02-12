@@ -1926,10 +1926,7 @@ adminCommand
   .argument("<dataset-id>", "Dataset ID (e.g., nm000108)")
   .option("--force", "Force deletion of published datasets with DOIs (owner only)")
   .action(async (datasetId: string, options: { force?: boolean }) => {
-    if (!isAuthenticated()) {
-      console.log(chalk.red("Not authenticated. Run: nemar auth login"));
-      process.exit(1);
-    }
+    if (!requireAuth()) return;
 
     const spinner = ora("Looking up dataset...").start();
 
@@ -1942,9 +1939,6 @@ adminCommand
       console.log(`  Visibility: ${dataset.visibility}`);
       if (dataset.concept_doi) {
         console.log(`  DOI: ${dataset.concept_doi}`);
-      }
-
-      if (dataset.concept_doi) {
         console.log(
           chalk.yellow("\n  WARNING: This dataset has a DOI. Only the NEMAR owner can delete it."),
         );
@@ -1972,7 +1966,9 @@ adminCommand
 
       spinner.start("Deleting dataset...");
       const result = await deleteDataset(datasetId, options.force ?? false);
-      if (result.warnings.length > 0) {
+      if (!result.deleted) {
+        spinner.fail("Dataset deletion incomplete");
+      } else if (result.warnings.length > 0) {
         spinner.warn("Dataset deleted with warnings");
       } else {
         spinner.succeed("Dataset deleted");
@@ -1986,9 +1982,11 @@ adminCommand
       if (result.steps.s3.skipped) {
         console.log(`  S3 objects: ${chalk.yellow("skipped (published dataset)")}`);
       } else {
-        console.log(
-          `  S3 objects: ${chalk.green(`${result.steps.s3.deleted} deleted`)}${result.steps.s3.failed.length > 0 ? chalk.red(`, ${result.steps.s3.failed.length} failed`) : ""}`,
-        );
+        let s3Summary = chalk.green(`${result.steps.s3.deleted} deleted`);
+        if (result.steps.s3.failed.length > 0) {
+          s3Summary += chalk.red(`, ${result.steps.s3.failed.length} failed`);
+        }
+        console.log(`  S3 objects: ${s3Summary}`);
       }
       console.log(
         `  Database: ${result.steps.d1.success ? chalk.green("cleaned up") : chalk.red("failed")}`,

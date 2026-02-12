@@ -3500,10 +3500,21 @@ const deleteDatasetSchema = z.object({
  * - Unpublished datasets (no DOI): admin or owner
  * - Published datasets (with DOI): owner only, requires force=true
  */
-adminRoutes.delete("/datasets/:id", zValidator("json", deleteDatasetSchema), async (c) => {
+adminRoutes.delete("/datasets/:id", async (c) => {
   const datasetId = c.req.param("id");
-  const { force } = c.req.valid("json");
   const requestingUser = c.get("user");
+
+  // Parse optional JSON body (DELETE requests may have no body)
+  let force = false;
+  try {
+    const body = await c.req.json();
+    const parsed = deleteDatasetSchema.safeParse(body);
+    if (parsed.success) {
+      force = parsed.data.force;
+    }
+  } catch {
+    // No body or invalid JSON: default force=false
+  }
   const db = c.env.DB;
 
   // Look up dataset
@@ -3550,7 +3561,7 @@ adminRoutes.delete("/datasets/:id", zValidator("json", deleteDatasetSchema), asy
   // Check for active publication requests
   const activePubReq = await db
     .prepare(
-      "SELECT COUNT(*) as count FROM publication_requests WHERE dataset_id = ? AND status NOT IN ('completed', 'denied')",
+      "SELECT COUNT(*) as count FROM publication_requests WHERE dataset_id = ? AND status NOT IN ('published', 'denied')",
     )
     .bind(datasetId)
     .first<{ count: number }>();
@@ -3592,5 +3603,5 @@ adminRoutes.delete("/datasets/:id", zValidator("json", deleteDatasetSchema), asy
     result.warnings.push("Audit log write failed");
   }
 
-  return c.json(result);
+  return c.json(result, result.deleted ? 200 : 207);
 });

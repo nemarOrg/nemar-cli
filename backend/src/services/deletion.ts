@@ -30,8 +30,8 @@ export interface DeletionResult {
  * Steps:
  * 1. Delete GitHub repository (idempotent, continues on 404)
  * 2. Delete S3 objects (unless skipS3 is set)
- * 3. Delete D1 records (dataset_versions, publication_requests, datasets)
- *    dataset_collaborators auto-cascade via FK
+ * 3. Delete D1 records (dataset_versions, publication_requests,
+ *    dataset_collaborators, datasets) in a single atomic batch
  */
 export async function deleteDatasetCascade(
   db: D1Database,
@@ -92,6 +92,11 @@ export async function deleteDatasetCascade(
     const batchResults = await db.batch([
       db.prepare("DELETE FROM dataset_versions WHERE dataset_id = ?").bind(datasetId),
       db.prepare("DELETE FROM publication_requests WHERE dataset_id = ?").bind(datasetId),
+      db
+        .prepare(
+          "DELETE FROM dataset_collaborators WHERE dataset_id IN (SELECT id FROM datasets WHERE dataset_id = ?)",
+        )
+        .bind(datasetId),
       db.prepare("DELETE FROM datasets WHERE dataset_id = ?").bind(datasetId),
     ]);
 
