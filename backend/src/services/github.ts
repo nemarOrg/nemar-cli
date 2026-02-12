@@ -542,6 +542,9 @@ on:
     types: [closed]
     branches: [main]
 
+permissions:
+  contents: write
+
 jobs:
   create-release:
     name: Create Release
