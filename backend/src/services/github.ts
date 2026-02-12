@@ -909,6 +909,9 @@ export async function getFileContent(
   }
 
   const data = await response.json<{ content: string; encoding: string }>();
+  if (!data.content) {
+    throw new Error(`No content field in GitHub response for ${filePath} in ${repo}`);
+  }
   if (data.encoding === "base64") {
     const binary = atob(data.content.replace(/\n/g, ""));
     const bytes = new Uint8Array(binary.length);

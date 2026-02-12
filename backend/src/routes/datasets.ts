@@ -1350,10 +1350,7 @@ datasetRoutes.get("/:id/versions", authMiddleware, async (c) => {
   // Check access: owner, admin, or collaborator
   if (!hasRole(user.role, "admin") && user.id !== dataset.owner_user_id) {
     const collabResult = await db
-      .prepare(
-        `SELECT 1 FROM dataset_collaborators
-         WHERE dataset_id = ? AND user_id = ? AND status = 'active'`,
-      )
+      .prepare("SELECT 1 FROM dataset_collaborators WHERE dataset_id = ? AND user_id = ?")
       .bind(dataset.id, user.id)
       .first();
     if (!collabResult) {
@@ -1378,8 +1375,8 @@ datasetRoutes.get("/:id/versions", authMiddleware, async (c) => {
             currentVersion = desc.Version;
           }
         }
-      } catch {
-        // Fall back to default if file can't be read
+      } catch (err) {
+        console.error(`[versions] Failed to read version for ${datasetId}:`, err);
       }
     }
   }

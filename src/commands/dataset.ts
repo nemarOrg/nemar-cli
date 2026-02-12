@@ -1412,8 +1412,11 @@ Examples:
             console.log(chalk.gray(`    ... and ${history.versions.length - 3} more`));
           }
         }
-      } catch {
-        console.log(chalk.gray("  Could not fetch version history, using default 1.0.0"));
+      } catch (err) {
+        const detail = err instanceof ApiError ? `${err.statusCode}: ${err.message}` : String(err);
+        console.log(
+          chalk.gray(`  Could not fetch version history (${detail}), using default 1.0.0`),
+        );
       }
 
       // Determine new version
@@ -1559,7 +1562,11 @@ Examples:
         stdout: "pipe",
         stderr: "pipe",
       });
-      await addProc.exited;
+      if ((await addProc.exited) !== 0) {
+        const stderr = await new Response(addProc.stderr).text();
+        commitSpinner.fail(`Failed to stage changes: ${stderr.trim()}`);
+        process.exit(1);
+      }
 
       const commitProc = spawn({
         cmd: ["git", "commit", "-m", `Bump version to ${newVersion}`],
@@ -1584,6 +1591,7 @@ Examples:
       pushSpinner.succeed("Pushed branch");
 
       // Create PR via gh CLI
+      let prCreated = false;
       const prSpinner = ora("Creating pull request...").start();
       try {
         const prTitle = `Release v${newVersion}`;
@@ -1616,6 +1624,7 @@ Examples:
           throw new Error(stderr.trim() || "gh pr create failed");
         }
 
+        prCreated = true;
         prSpinner.succeed("Created pull request");
         console.log();
         console.log(`  ${chalk.cyan("PR:")} ${prUrl}`);
@@ -1631,8 +1640,8 @@ Examples:
         console.log(chalk.gray(`  Branch ${branchName} has been pushed. Create the PR manually.`));
       }
 
-      // Monitor mode
-      if (options.monitor) {
+      // Monitor mode (only if PR was created successfully)
+      if (options.monitor && prCreated) {
         console.log();
         console.log(chalk.gray("Monitoring CI checks..."));
         console.log(chalk.gray("  Press Ctrl+C to stop monitoring"));
@@ -1871,8 +1880,8 @@ Examples:
           const desc = JSON.parse(readFileSync(descPath, "utf-8"));
           if (desc.Version) currentVersion = desc.Version;
         }
-      } catch {
-        // Use default
+      } catch (err) {
+        console.log(chalk.gray(`  Could not read version from dataset_description.json: ${err}`));
       }
 
       const bumpType = options.bump as "patch" | "minor" | "major";
@@ -1929,7 +1938,11 @@ Examples:
         stdout: "pipe",
         stderr: "pipe",
       });
-      await addProc.exited;
+      if ((await addProc.exited) !== 0) {
+        const stderr = await new Response(addProc.stderr).text();
+        commitSpinner.fail(`Failed to stage changes: ${stderr.trim()}`);
+        process.exit(1);
+      }
 
       const commitMsg = options.message || `Update ${datasetId} to ${newVersion}`;
       const commitProc = spawn({
@@ -1999,6 +2012,7 @@ Examples:
       pushSpinner.succeed("Pushed branch");
 
       // Create PR via gh CLI
+      let prCreated = false;
       const prSpinner = ora("Creating pull request...").start();
       try {
         const prTitle = options.message
@@ -2034,6 +2048,7 @@ Examples:
           throw new Error(stderr.trim() || "gh pr create failed");
         }
 
+        prCreated = true;
         prSpinner.succeed("Created pull request");
         console.log();
         console.log(`  ${chalk.cyan("PR:")} ${prUrl}`);
@@ -2044,8 +2059,8 @@ Examples:
         console.log(chalk.gray(`  Branch ${branchName} has been pushed. Create the PR manually.`));
       }
 
-      // Monitor mode (same pattern as release)
-      if (options.monitor) {
+      // Monitor mode (only if PR was created successfully)
+      if (options.monitor && prCreated) {
         console.log();
         console.log(chalk.gray("Monitoring CI checks..."));
 
