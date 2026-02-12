@@ -5,40 +5,7 @@
  * for populating DataCite DOI records. Runs CLI-side (not in Cloudflare Workers).
  */
 
-// DataCite relation types (mirrors VALID_RELATION_TYPES in backend/src/services/datacite.ts)
-const VALID_RELATION_TYPES_CLI = new Set([
-  "IsCitedBy",
-  "Cites",
-  "IsSupplementTo",
-  "IsSupplementedBy",
-  "IsContinuedBy",
-  "Continues",
-  "IsDescribedBy",
-  "Describes",
-  "HasMetadata",
-  "IsMetadataFor",
-  "HasVersion",
-  "IsVersionOf",
-  "IsNewVersionOf",
-  "IsPreviousVersionOf",
-  "IsPartOf",
-  "HasPart",
-  "IsReferencedBy",
-  "References",
-  "IsDocumentedBy",
-  "Documents",
-  "IsCompiledBy",
-  "Compiles",
-  "IsVariantFormOf",
-  "IsOriginalFormOf",
-  "IsIdenticalTo",
-  "IsCollectedBy",
-  "Collects",
-  "IsRequiredBy",
-  "Requires",
-  "IsObsoletedBy",
-  "Obsoletes",
-]);
+import { isValidRelationType } from "../../shared/datacite-constants.js";
 
 export interface LlmEnrichmentResult {
   description?: string;
@@ -194,7 +161,7 @@ export function validateLlmResult(raw: Record<string, unknown>): LlmEnrichmentRe
         typeof obj.doi === "string" &&
         doiPattern.test(obj.doi) &&
         typeof obj.relationType === "string" &&
-        VALID_RELATION_TYPES_CLI.has(obj.relationType as string)
+        isValidRelationType(obj.relationType as string)
       );
     });
     if (rels.length > 0) result.relatedDois = rels;

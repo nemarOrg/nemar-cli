@@ -7,6 +7,7 @@
  */
 
 import { AwsClient } from "aws4fetch";
+import { isValidDatasetId } from "./datasetId.js";
 
 interface PresignedUrlOptions {
   bucket: string;
@@ -268,18 +269,23 @@ export async function listManifests(
  * Processes objects in batches of `batchSize` to stay within Cloudflare Workers
  * subrequest limits. Returns `hasMore` if there are remaining objects to lock.
  */
+export interface ObjectLockFailure {
+  key: string;
+  error: string;
+}
+
 export async function applyObjectLock(
   options: PresignedUrlOptions,
   datasetId: string,
   offset = 0,
   batchSize = 40,
-): Promise<{ locked: number; failed: string[]; total: number; hasMore: boolean }> {
+): Promise<{ locked: number; failed: ObjectLockFailure[]; total: number; hasMore: boolean }> {
   const { bucket, region } = options;
   const aws = createS3Client(options);
 
   const keys = await listObjectKeys(options, `${datasetId}/objects/`);
   const batch = keys.slice(offset, offset + batchSize);
-  const failed: string[] = [];
+  const failed: ObjectLockFailure[] = [];
   let locked = 0;
 
   // Retention date: 100 years from now
@@ -317,10 +323,11 @@ export async function applyObjectLock(
         // 200: newly locked; 403: already locked (object protected)
         locked++;
       } else {
-        failed.push(key);
+        const errorText = await res.text().catch(() => "");
+        failed.push({ key, error: `HTTP ${res.status}: ${errorText}`.trim() });
       }
-    } catch {
-      failed.push(key);
+    } catch (err) {
+      failed.push({ key, error: err instanceof Error ? err.message : String(err) });
     }
   }
 
@@ -365,6 +372,9 @@ export async function addPublicReadPolicy(
   options: PresignedUrlOptions,
   datasetId: string,
 ): Promise<void> {
+  if (!isValidDatasetId(datasetId)) {
+    throw new Error(`Invalid dataset ID for bucket policy: "${datasetId}"`);
+  }
   const { bucket, region } = options;
   const aws = createS3Client(options);
 
@@ -427,6 +437,9 @@ export async function removePublicReadPolicy(
   options: PresignedUrlOptions,
   datasetId: string,
 ): Promise<void> {
+  if (!isValidDatasetId(datasetId)) {
+    throw new Error(`Invalid dataset ID for bucket policy: "${datasetId}"`);
+  }
   const { bucket, region } = options;
   const aws = createS3Client(options);
 

@@ -1090,22 +1090,7 @@ export interface S3LockResponse {
 // Enrichment
 // ============================================================================
 
-/** Must match NemarMetadata in backend/src/services/datacite.ts */
-export interface NemarMetadataPayload {
-  version: "1.0";
-  authors?: Record<string, { orcid?: string; affiliation?: string }>;
-  keywords?: string[];
-  relatedDois?: Array<{ doi: string; relationType: string }>;
-  fundingReferences?: Array<{
-    funderName: string;
-    awardNumber?: string;
-    awardTitle?: string;
-  }>;
-  description?: string;
-  methodsDescription?: string;
-  sizes?: string[];
-  formats?: string[];
-}
+export type { NemarMetadata as NemarMetadataPayload } from "../../shared/datacite-constants.js";
 
 export interface SubmitEnrichmentResponse {
   message: string;

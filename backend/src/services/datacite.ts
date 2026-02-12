@@ -9,6 +9,15 @@
  * OpenNeuro/Zenodo which leave most optional fields empty.
  */
 
+import {
+  type NemarMetadata,
+  type RelationType,
+  VALID_RELATION_TYPES,
+  isValidRelationType,
+} from "../../../shared/datacite-constants.js";
+
+export { type NemarMetadata, type RelationType, VALID_RELATION_TYPES, isValidRelationType };
+
 // ---------------------------------------------------------------------------
 // DataCite controlled vocabularies (kernel-4 schema)
 // ---------------------------------------------------------------------------
@@ -79,47 +88,8 @@ export type DateType =
   | "Valid"
   | "Withdrawn";
 
-const VALID_RELATION_TYPES = [
-  "IsCitedBy",
-  "Cites",
-  "IsSupplementTo",
-  "IsSupplementedBy",
-  "IsContinuedBy",
-  "Continues",
-  "IsDescribedBy",
-  "Describes",
-  "HasMetadata",
-  "IsMetadataFor",
-  "HasVersion",
-  "IsVersionOf",
-  "IsNewVersionOf",
-  "IsPreviousVersionOf",
-  "IsPartOf",
-  "HasPart",
-  "IsReferencedBy",
-  "References",
-  "IsDocumentedBy",
-  "Documents",
-  "IsCompiledBy",
-  "Compiles",
-  "IsVariantFormOf",
-  "IsOriginalFormOf",
-  "IsIdenticalTo",
-  "IsCollectedBy",
-  "Collects",
-  "IsRequiredBy",
-  "Requires",
-  "IsObsoletedBy",
-  "Obsoletes",
-] as const;
-
-export type RelationType = (typeof VALID_RELATION_TYPES)[number];
-
-const RELATION_TYPE_SET = new Set<string>(VALID_RELATION_TYPES);
-
-export function isValidRelationType(value: string): value is RelationType {
-  return RELATION_TYPE_SET.has(value);
-}
+// RelationType, VALID_RELATION_TYPES, and isValidRelationType are re-exported
+// from shared/datacite-constants.ts above.
 
 export type DescriptionType =
   | "Abstract"
@@ -236,25 +206,7 @@ export interface DataCiteEnrichment {
 // NemarMetadata: canonical enrichment file format (nemar_metadata.json)
 // ---------------------------------------------------------------------------
 
-/**
- * Schema for nemar_metadata.json, the canonical enrichment file
- * stored in each dataset repo alongside dataset_description.json.
- */
-export interface NemarMetadata {
-  version: "1.0";
-  authors?: Record<string, { orcid?: string; affiliation?: string }>;
-  keywords?: string[];
-  relatedDois?: Array<{ doi: string; relationType: string }>;
-  fundingReferences?: Array<{
-    funderName: string;
-    awardNumber?: string;
-    awardTitle?: string;
-  }>;
-  description?: string;
-  methodsDescription?: string;
-  sizes?: string[];
-  formats?: string[];
-}
+// NemarMetadata is re-exported from shared/datacite-constants.ts above.
 
 /**
  * Parse raw JSON into a validated NemarMetadata object.

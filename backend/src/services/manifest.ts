@@ -108,17 +108,27 @@ export async function generateManifest(
 
   const files: Record<string, ManifestFile> = {};
 
-  // Resolve each candidate to check if it's an annex pointer
-  for (const entry of pointerCandidates) {
-    const content = await getBlobContent(repo, entry.sha, pat);
-    const key = parseAnnexPointer(content);
-
-    if (key) {
-      files[entry.path] = {
-        key,
-        size: extractSizeFromKey(key),
-        checksum: `${extractHashAlgorithm(key)}:${extractChecksumFromKey(key)}`,
-      };
+  // Resolve annex pointer candidates in parallel batches to avoid
+  // sequential N+1 GitHub API calls (Cloudflare Workers have a
+  // subrequest limit, so we cap concurrency)
+  const CONCURRENCY = 10;
+  for (let i = 0; i < pointerCandidates.length; i += CONCURRENCY) {
+    const batch = pointerCandidates.slice(i, i + CONCURRENCY);
+    const results = await Promise.all(
+      batch.map(async (entry) => {
+        const content = await getBlobContent(repo, entry.sha, pat);
+        const key = parseAnnexPointer(content);
+        return { entry, key };
+      }),
+    );
+    for (const { entry, key } of results) {
+      if (key) {
+        files[entry.path] = {
+          key,
+          size: extractSizeFromKey(key),
+          checksum: `${extractHashAlgorithm(key)}:${extractChecksumFromKey(key)}`,
+        };
+      }
     }
   }
 

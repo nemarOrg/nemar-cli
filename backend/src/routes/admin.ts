@@ -3263,7 +3263,7 @@ adminRoutes.post("/datasets/:id/s3-lock", async (c) => {
       dataset_id: datasetId,
       locked: result.locked,
       total: result.total,
-      failed: result.failed,
+      failed: result.failed.map((f) => ({ key: f.key, error: f.error })),
       hasMore: result.hasMore,
       offset,
     });
