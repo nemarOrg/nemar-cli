@@ -31,16 +31,37 @@ export interface Bindings {
 /** User roles in hierarchical order: owner > admin > member */
 export type UserRole = "owner" | "admin" | "member";
 
-const ROLE_HIERARCHY: Record<UserRole, number> = { owner: 3, admin: 2, member: 1 };
+export const ROLE_HIERARCHY: Record<UserRole, number> = { owner: 3, admin: 2, member: 1 };
 
 /** Check if userRole meets or exceeds the minimum required role */
 export function hasRole(userRole: UserRole, minimumRole: UserRole): boolean {
   return ROLE_HIERARCHY[userRole] >= ROLE_HIERARCHY[minimumRole];
 }
 
+/** Check if changing from oldRole to newRole is a demotion */
+export function isDemotion(oldRole: UserRole, newRole: UserRole): boolean {
+  return ROLE_HIERARCHY[newRole] < ROLE_HIERARCHY[oldRole];
+}
+
 /** Validate that a string is a valid UserRole */
 export function isValidRole(value: string): value is UserRole {
   return value === "owner" || value === "admin" || value === "member";
+}
+
+/**
+ * Validate and coerce a DB role value to UserRole.
+ * Logs a warning if null (migration not applied), rejects invalid values.
+ */
+export function parseRole(value: string | null | undefined, username?: string): UserRole | null {
+  if (value === null || value === undefined) {
+    console.warn(`User ${username ?? "unknown"} has null role -- migration 0009 may not be applied. Defaulting to "member".`);
+    return "member";
+  }
+  if (!isValidRole(value)) {
+    console.error(`User ${username ?? "unknown"} has invalid role value: "${value}"`);
+    return null;
+  }
+  return value;
 }
 
 /**
@@ -52,8 +73,6 @@ export interface AuthUser {
   email: string;
   github_username: string;
   role: UserRole;
-  /** @deprecated Use role instead. Computed as role !== 'member'. */
-  is_admin: boolean;
   orcid?: string;
 }
 

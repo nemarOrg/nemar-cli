@@ -338,6 +338,8 @@ adminCommand
   .argument("<role>", "New role: owner, admin, or member")
   .option("-y, --yes", "Skip confirmation prompt")
   .action(async (username: string, role: string, options: { yes?: boolean }) => {
+    if (!requireAuth()) return;
+
     if (!["owner", "admin", "member"].includes(role)) {
       console.error(chalk.red(`Invalid role '${role}'. Must be: owner, admin, or member`));
       process.exit(1);
@@ -364,7 +366,9 @@ adminCommand
       const result = await changeUserRole(username, role as "owner" | "admin" | "member");
       spinner.succeed(result.message);
       if (result.tokens_revoked !== undefined && result.tokens_revoked > 0) {
-        console.log(chalk.yellow(`  ${result.tokens_revoked} token(s) revoked (user must re-login)`));
+        console.log(
+          chalk.yellow(`  ${result.tokens_revoked} token(s) revoked (user must re-login)`),
+        );
       }
     } catch (error) {
       handleCommandError(error, spinner, "Failed to change role", {
@@ -471,7 +475,7 @@ async function regenerateIamAction(username: string, options: ConfirmOptions) {
     spinner.succeed(`Regenerated IAM credentials for ${username}`);
     console.log();
     console.log(`  IAM Username: ${chalk.cyan(result.user.iam_username)}`);
-    if (result.user.is_admin) {
+    if (result.user.role === "admin" || result.user.role === "owner") {
       console.log(`  Access: ${chalk.magenta("full bucket access (admin/owner)")}`);
     }
     console.log(`  Datasets restored: ${chalk.green(result.datasets_restored)}`);

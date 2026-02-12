@@ -475,7 +475,6 @@ authRoutes.post("/login", zValidator("json", loginSchema), async (c) => {
       email: result.email,
       github_username: result.github_username,
       role: result.role || "member",
-      is_admin: result.role === "owner" || result.role === "admin",
       sandbox_completed: result.sandbox_completed === 1,
       sandbox_dataset_id: result.sandbox_dataset_id,
     },

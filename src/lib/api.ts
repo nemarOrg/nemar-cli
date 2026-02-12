@@ -176,7 +176,6 @@ export interface LoginResponse {
     email: string;
     github_username: string;
     role: "owner" | "admin" | "member";
-    is_admin: boolean;
     sandbox_completed: boolean;
     sandbox_dataset_id?: string;
   };
@@ -218,7 +217,6 @@ export interface UserInfo {
   orcid?: string | null;
   status: string;
   role: "owner" | "admin" | "member";
-  is_admin: boolean;
   created_at: string;
   sandbox_completed: boolean;
   sandbox_dataset_id?: string;
@@ -280,7 +278,6 @@ export interface UserListItem {
   github_username: string;
   status: string;
   email_verified: number;
-  is_admin: number;
   role: string;
   created_at: string;
   approved_at: string | null;
@@ -367,8 +364,7 @@ export interface RegenerateIamResponse {
   user: {
     username: string;
     iam_username: string;
-    /** True if user has admin privileges and received full bucket access */
-    is_admin?: boolean;
+    role: string;
   };
   /**
    * Number of dataset prefixes restored for regular users,

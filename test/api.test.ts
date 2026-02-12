@@ -34,7 +34,7 @@ describe("Authentication API", () => {
     test("valid admin API key returns user info with admin role", async () => {
       const { status, data } = await testRequest<{
         valid: boolean;
-        user: { username: string; role: string; is_admin: boolean };
+        user: { username: string; role: string };
       }>("/auth/login", {
         method: "POST",
         body: JSON.stringify({ api_key: TEST_CONFIG.adminApiKey }),
@@ -44,13 +44,12 @@ describe("Authentication API", () => {
       expect(data.valid).toBe(true);
       expect(data.user.username).toBe("test-admin");
       expect(data.user.role).toBe("admin");
-      expect(data.user.is_admin).toBe(true);
     });
 
     test("valid user API key returns user info with member role", async () => {
       const { status, data } = await testRequest<{
         valid: boolean;
-        user: { username: string; role: string; is_admin: boolean };
+        user: { username: string; role: string };
       }>("/auth/login", {
         method: "POST",
         body: JSON.stringify({ api_key: TEST_CONFIG.userApiKey }),
@@ -60,7 +59,6 @@ describe("Authentication API", () => {
       expect(data.valid).toBe(true);
       expect(data.user.username).toBe("test-user");
       expect(data.user.role).toBe("member");
-      expect(data.user.is_admin).toBe(false);
     });
 
     test("invalid API key returns 401", async () => {
@@ -203,25 +201,23 @@ describe("User API", () => {
   describe("GET /users/me", () => {
     test("authenticated user can get their info", async () => {
       const { status, data } = await testRequest<{
-        user: { username: string; email: string; role: string; is_admin: boolean };
+        user: { username: string; email: string; role: string };
       }>("/users/me", {}, TEST_CONFIG.userApiKey);
 
       expect(status).toBe(200);
       expect(data.user.username).toBe("test-user");
       expect(data.user.email).toBe("test-user@nemar.test");
       expect(data.user.role).toBe("member");
-      expect(data.user.is_admin).toBe(false);
     });
 
     test("admin user can get their info with role", async () => {
       const { status, data } = await testRequest<{
-        user: { username: string; role: string; is_admin: boolean };
+        user: { username: string; role: string };
       }>("/users/me", {}, TEST_CONFIG.adminApiKey);
 
       expect(status).toBe(200);
       expect(data.user.username).toBe("test-admin");
       expect(data.user.role).toBe("admin");
-      expect(data.user.is_admin).toBe(true);
     });
 
     test("unauthenticated request returns 401", async () => {

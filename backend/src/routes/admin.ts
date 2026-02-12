@@ -120,7 +120,7 @@ adminRoutes.get("/users", async (c) => {
   let query = `
     SELECT
       id, username, email, github_username, status,
-      email_verified, is_admin, role, created_at, approved_at, revoked_at
+      email_verified, role, created_at, approved_at, revoked_at
     FROM users
   `;
   const params: string[] = [];
@@ -171,8 +171,6 @@ adminRoutes.get("/users/:username", async (c) => {
   return c.json({ user });
 });
 
-const ROLE_HIERARCHY: Record<string, number> = { owner: 3, admin: 2, member: 1 };
-
 const roleChangeSchema = z.object({
   role: z.enum(["owner", "admin", "member"]),
 });
@@ -209,7 +207,10 @@ adminRoutes.post(
       return c.json({ error: "User must be approved before role changes" }, 400);
     }
 
-    const oldRole = (target.role || "member") as UserRole;
+    const oldRole = parseRole(target.role, target.username);
+    if (oldRole === null) {
+      return c.json({ error: "Target user has invalid role configuration" }, 500);
+    }
 
     if (oldRole === newRole) {
       return c.json({ error: `User already has role '${newRole}'` }, 409);
@@ -225,50 +226,67 @@ adminRoutes.post(
       }
     }
 
-    // Update role (and sync is_admin for backward compatibility)
-    const isAdmin = newRole === "owner" || newRole === "admin" ? 1 : 0;
+    // Update role
     await db
-      .prepare("UPDATE users SET role = ?, is_admin = ?, updated_at = datetime('now') WHERE id = ?")
-      .bind(newRole, isAdmin, target.id)
+      .prepare("UPDATE users SET role = ?, updated_at = datetime('now') WHERE id = ?")
+      .bind(newRole, target.id)
       .run();
 
     // On demotion, revoke tokens to force re-authentication
-    const isDemotion = ROLE_HIERARCHY[newRole] < ROLE_HIERARCHY[oldRole];
+    const demoted = isDemotion(oldRole, newRole);
     let tokensRevoked = 0;
-    if (isDemotion) {
-      const result = await db
-        .prepare(
-          "UPDATE tokens SET revoked_at = datetime('now') WHERE user_id = ? AND revoked_at IS NULL",
-        )
-        .bind(target.id)
-        .run();
-      tokensRevoked = result.meta.changes ?? 0;
+    let tokenRevocationFailed = false;
+    if (demoted) {
+      try {
+        const result = await db
+          .prepare(
+            "UPDATE tokens SET revoked_at = datetime('now') WHERE user_id = ? AND revoked_at IS NULL",
+          )
+          .bind(target.id)
+          .run();
+        tokensRevoked = result.meta.changes ?? 0;
+      } catch (error) {
+        console.error(`SECURITY: Failed to revoke tokens for demoted user ${username}:`, error);
+        tokenRevocationFailed = true;
+      }
     }
 
-    // Audit log
-    await db
-      .prepare(
-        "INSERT INTO audit_log (user_id, action, resource_type, resource_id, details) VALUES (?, ?, ?, ?, ?)",
-      )
-      .bind(
-        requestingUser.id,
-        "role_changed",
-        "user",
-        username,
-        JSON.stringify({
-          changed_by: requestingUser.username,
-          old_role: oldRole,
-          new_role: newRole,
-          tokens_revoked: tokensRevoked,
-        }),
-      )
-      .run();
+    // Audit log (non-blocking)
+    try {
+      await db
+        .prepare(
+          "INSERT INTO audit_log (user_id, action, resource_type, resource_id, details) VALUES (?, ?, ?, ?, ?)",
+        )
+        .bind(
+          requestingUser.id,
+          "role_changed",
+          "user",
+          username,
+          JSON.stringify({
+            changed_by: requestingUser.username,
+            old_role: oldRole,
+            new_role: newRole,
+            tokens_revoked: tokensRevoked,
+            token_revocation_failed: tokenRevocationFailed,
+          }),
+        )
+        .run();
+    } catch (error) {
+      console.error(`Failed to write audit log for role change ${username} ${oldRole}->${newRole}:`, error);
+    }
 
-    return c.json({
+    const response: Record<string, unknown> = {
       message: `User ${username} role changed from '${oldRole}' to '${newRole}'`,
       user: { username, role: newRole },
-      tokens_revoked: isDemotion ? tokensRevoked : undefined,
-    });
+    };
+    if (demoted) {
+      response.tokens_revoked = tokensRevoked;
+    }
+    if (tokenRevocationFailed) {
+      response.warning = "Token revocation failed. User may retain elevated session. Manually revoke tokens.";
+    }
+
+    return c.json(response);
   },
 );
 
@@ -456,10 +474,10 @@ adminRoutes.post("/revoke/:username", async (c) => {
     return c.json({ error: "Cannot revoke your own access" }, 400);
   }
 
-  // Find user (include IAM credentials for revocation)
+  // Find user (include IAM credentials and role for revocation)
   const user = await db
     .prepare(`
-      SELECT id, username, email, github_username, status,
+      SELECT id, username, email, github_username, status, role,
              aws_iam_username, aws_access_key_id_encrypted
       FROM users WHERE username = ?
     `)
@@ -470,6 +488,7 @@ adminRoutes.post("/revoke/:username", async (c) => {
       email: string;
       github_username: string;
       status: string;
+      role: string | null;
       aws_iam_username: string | null;
       aws_access_key_id_encrypted: string | null;
     }>();
@@ -480,6 +499,11 @@ adminRoutes.post("/revoke/:username", async (c) => {
 
   if (user.status === "revoked") {
     return c.json({ error: "User already revoked" }, 409);
+  }
+
+  // Only owners can revoke other owners
+  if ((user.role === "owner") && adminUser.role !== "owner") {
+    return c.json({ error: "Only owners can revoke other owners" }, 403);
   }
 
   // Revoke IAM access if configured - SECURITY CRITICAL
@@ -795,7 +819,7 @@ adminRoutes.post("/regenerate-iam/:username", async (c) => {
   }
 
   // Create new IAM credentials
-  const isAdmin = user.role === "owner" || user.role === "admin";
+  const hasAdminAccess = hasRole((user.role || "member") as UserRole, "admin");
   const awsConfig = {
     accessKeyId: c.env.AWS_ACCESS_KEY_ID,
     secretAccessKey: c.env.AWS_SECRET_ACCESS_KEY,
@@ -822,7 +846,7 @@ adminRoutes.post("/regenerate-iam/:username", async (c) => {
     const { accessKeyId, secretAccessKey } = await createAccessKey(awsConfig, iamUsername);
 
     // Restore policy: admins get full bucket access, regular users get their datasets only
-    const policyDocument = isAdmin
+    const policyDocument = hasAdminAccess
       ? generateAdminS3PolicyDocument(c.env.S3_BUCKET)
       : generateS3PolicyDocument(c.env.S3_BUCKET, datasetPrefixes);
     await putUserPolicy(awsConfig, iamUsername, "nemar-s3-access", policyDocument);
@@ -855,7 +879,7 @@ adminRoutes.post("/regenerate-iam/:username", async (c) => {
     }
 
     // Log the action (non-blocking - credentials already created)
-    const datasetsRestoredCount = isAdmin ? "all" : datasetPrefixes.length;
+    const datasetsRestoredCount = hasAdminAccess ? "all" : datasetPrefixes.length;
     try {
       await db
         .prepare(
@@ -868,7 +892,7 @@ adminRoutes.post("/regenerate-iam/:username", async (c) => {
           user.username,
           JSON.stringify({
             username: user.username,
-            is_admin: isAdmin,
+            role: user.role || "member",
             datasets_restored: datasetsRestoredCount,
           }),
         )
@@ -883,9 +907,9 @@ adminRoutes.post("/regenerate-iam/:username", async (c) => {
       user: {
         username: user.username,
         iam_username: iamUsername,
-        is_admin: isAdmin,
+        role: user.role || "member",
       },
-      datasets_restored: isAdmin ? "all (full bucket access)" : datasetPrefixes.length,
+      datasets_restored: hasAdminAccess ? "all (full bucket access)" : datasetPrefixes.length,
       warning: oldKeyRevocationWarning,
     });
   } catch (error) {

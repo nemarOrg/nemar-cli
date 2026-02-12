@@ -23,7 +23,6 @@ const TEST_USERS = [
     email: "test-owner@nemar.test",
     github_username: "test-owner-gh",
     status: "approved",
-    is_admin: 1,
     role: "owner",
     email_verified: 1,
   },
@@ -32,7 +31,6 @@ const TEST_USERS = [
     email: "test-admin@nemar.test",
     github_username: "test-admin-gh",
     status: "approved",
-    is_admin: 1,
     role: "admin",
     email_verified: 1,
   },
@@ -41,7 +39,6 @@ const TEST_USERS = [
     email: "test-user@nemar.test",
     github_username: "test-user-gh",
     status: "approved",
-    is_admin: 0,
     role: "member",
     email_verified: 1,
   },
@@ -50,7 +47,6 @@ const TEST_USERS = [
     email: "test-pending@nemar.test",
     github_username: "test-pending-gh",
     status: "pending",
-    is_admin: 0,
     role: "member",
     email_verified: 0,
   },
@@ -59,7 +55,6 @@ const TEST_USERS = [
     email: "test-verified@nemar.test",
     github_username: "test-verified-gh",
     status: "verified",
-    is_admin: 0,
     role: "member",
     email_verified: 1,
   },
@@ -68,7 +63,6 @@ const TEST_USERS = [
     email: "test-revoked@nemar.test",
     github_username: "test-revoked-gh",
     status: "revoked",
-    is_admin: 0,
     role: "member",
     email_verified: 1,
   },
@@ -113,8 +107,8 @@ async function main() {
     const approvedAt = user.status === "approved" ? ", datetime('now')" : ", NULL";
     const revokedAt = user.status === "revoked" ? ", datetime('now')" : ", NULL";
 
-    console.log(`INSERT INTO users (username, email, password_hash, github_username, status, is_admin, role, email_verified, approved_at, revoked_at)`);
-    console.log(`VALUES ('${user.username}', '${user.email}', '${passwordHash}', '${user.github_username}', '${user.status}', ${user.is_admin}, '${user.role}', ${user.email_verified}${approvedAt}${revokedAt});`);
+    console.log(`INSERT INTO users (username, email, password_hash, github_username, status, role, email_verified, approved_at, revoked_at)`);
+    console.log(`VALUES ('${user.username}', '${user.email}', '${passwordHash}', '${user.github_username}', '${user.status}', '${user.role}', ${user.email_verified}${approvedAt}${revokedAt});`);
     console.log();
   }
 

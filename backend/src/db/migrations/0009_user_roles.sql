@@ -1,5 +1,5 @@
 -- Add role column for hierarchical access control (owner > admin > member)
--- Replaces binary is_admin flag; is_admin kept for backward compatibility
+-- Replaces binary is_admin flag (dropped in 0010_drop_is_admin.sql)
 ALTER TABLE users ADD COLUMN role TEXT DEFAULT 'member';
 
 -- Migrate existing admins

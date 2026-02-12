@@ -6,7 +6,7 @@
 
 import type { Context, Next } from "hono";
 import { hashApiKey } from "../services/token";
-import { type AuthUser, type Bindings, type UserRole, type Variables, hasRole } from "../types/bindings";
+import { type AuthUser, type Bindings, type Variables, hasRole, parseRole } from "../types/bindings";
 
 type AuthContext = Context<{ Bindings: Bindings; Variables: Variables }>;
 
@@ -85,20 +85,24 @@ export async function authMiddleware(c: AuthContext, next: Next) {
     );
   }
 
+  // Validate role from DB
+  const role = parseRole(result.role, result.username);
+  if (role === null) {
+    return c.json({ error: "Account configuration error. Contact an administrator." }, 500);
+  }
+
   // Update last_used_at for the token
   await c.env.DB.prepare("UPDATE tokens SET last_used_at = datetime('now') WHERE id = ?")
     .bind(result.token_id)
     .run();
 
   // Set user in context
-  const role = (result.role || "member") as UserRole;
   const user: AuthUser = {
     id: result.id,
     username: result.username,
     email: result.email,
     github_username: result.github_username,
     role,
-    is_admin: role !== "member",
     orcid: result.orcid || undefined,
   };
 
@@ -193,16 +197,17 @@ export async function optionalAuthMiddleware(c: AuthContext, next: Next) {
     }>();
 
   if (result) {
-    const role = (result.role || "member") as UserRole;
-    c.set("user", {
-      id: result.id,
-      username: result.username,
-      email: result.email,
-      github_username: result.github_username,
-      role,
-      is_admin: role !== "member",
-      orcid: result.orcid || undefined,
-    });
+    const role = parseRole(result.role, result.username);
+    if (role !== null) {
+      c.set("user", {
+        id: result.id,
+        username: result.username,
+        email: result.email,
+        github_username: result.github_username,
+        role,
+        orcid: result.orcid || undefined,
+      });
+    }
   }
 
   await next();
