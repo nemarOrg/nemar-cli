@@ -7,6 +7,7 @@
  * - nemar admin users              - List users (pending, approved, all)
  * - nemar admin approve            - Approve a pending user
  * - nemar admin revoke             - Revoke user access
+ * - nemar admin role               - Change a user's role (owner only)
  * - nemar admin s3 regenerate-iam  - Regenerate AWS credentials for a user
  * - nemar admin repo public/private - Change repository visibility
  * - nemar admin ci check/add       - Manage CI workflows
@@ -30,6 +31,7 @@ import {
   applyS3Lock,
   approvePublication,
   approveUser,
+  changeUserRole,
   changeVisibility,
   createConceptDoi,
   denyPublication,
@@ -195,10 +197,15 @@ adminCommand
             revoked: chalk.red,
           }[user.status] || chalk.white;
 
-        const adminBadge = user.is_admin ? chalk.magenta(" [admin]") : "";
+        const roleBadge =
+          user.role === "owner"
+            ? chalk.red(" [owner]")
+            : user.role === "admin"
+              ? chalk.magenta(" [admin]")
+              : "";
         const verifiedBadge = user.email_verified ? "" : chalk.gray(" (unverified)");
 
-        console.log(`  ${chalk.cyan(user.username)}${adminBadge}`);
+        console.log(`  ${chalk.cyan(user.username)}${roleBadge}`);
         console.log(`    Email:   ${user.email}${verifiedBadge}`);
         console.log(`    GitHub:  @${user.github_username}`);
         console.log(`    Status:  ${statusColor(user.status)}`);
@@ -321,6 +328,59 @@ adminCommand
   });
 
 // ============================================================================
+// Role Management (Owner Only)
+// ============================================================================
+
+adminCommand
+  .command("role")
+  .description("Change a user's role (owner only)")
+  .argument("<username>", "Username to change role for")
+  .argument("<role>", "New role: owner, admin, or member")
+  .option("-y, --yes", "Skip confirmation prompt")
+  .action(async (username: string, role: string, options: { yes?: boolean }) => {
+    if (!requireAuth()) return;
+
+    if (!["owner", "admin", "member"].includes(role)) {
+      console.error(chalk.red(`Invalid role '${role}'. Must be: owner, admin, or member`));
+      process.exit(1);
+    }
+
+    if (!options.yes) {
+      const { confirmed } = await inquirer.prompt([
+        {
+          type: "confirm",
+          name: "confirmed",
+          message: `Change ${username}'s role to '${role}'?`,
+          default: false,
+        },
+      ]);
+      if (!confirmed) {
+        console.log(chalk.gray("Cancelled"));
+        return;
+      }
+    }
+
+    const spinner = ora(`Changing ${username}'s role to '${role}'...`).start();
+
+    try {
+      const result = await changeUserRole(username, role as "owner" | "admin" | "member");
+      spinner.succeed(result.message);
+      if (result.tokens_revoked !== undefined && result.tokens_revoked > 0) {
+        console.log(
+          chalk.yellow(`  ${result.tokens_revoked} token(s) revoked (user must re-login)`),
+        );
+      }
+    } catch (error) {
+      handleCommandError(error, spinner, "Failed to change role", {
+        400: "Invalid request (check if you are an owner)",
+        403: "Owner access required",
+        404: "User not found",
+        409: "User already has that role",
+      });
+    }
+  });
+
+// ============================================================================
 // S3 / IAM Management
 // ============================================================================
 
@@ -415,8 +475,8 @@ async function regenerateIamAction(username: string, options: ConfirmOptions) {
     spinner.succeed(`Regenerated IAM credentials for ${username}`);
     console.log();
     console.log(`  IAM Username: ${chalk.cyan(result.user.iam_username)}`);
-    if (result.user.is_admin) {
-      console.log(`  Admin: ${chalk.magenta("yes (full bucket access)")}`);
+    if (result.user.role === "admin" || result.user.role === "owner") {
+      console.log(`  Access: ${chalk.magenta("full bucket access (admin/owner)")}`);
     }
     console.log(`  Datasets restored: ${chalk.green(result.datasets_restored)}`);
 

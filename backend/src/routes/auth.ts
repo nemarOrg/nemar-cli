@@ -330,7 +330,7 @@ authRoutes.get("/verify", async (c) => {
   // Notify all admins about the new user needing approval
   try {
     const adminUsers = await db
-      .prepare("SELECT email FROM users WHERE is_admin = 1")
+      .prepare("SELECT email FROM users WHERE role IN ('owner', 'admin') AND status = 'approved'")
       .all<{ email: string }>();
 
     if (adminUsers.results && adminUsers.results.length > 0) {
@@ -425,7 +425,7 @@ authRoutes.post("/login", zValidator("json", loginSchema), async (c) => {
       u.email,
       u.github_username,
       u.status,
-      u.is_admin,
+      u.role,
       u.sandbox_completed,
       u.sandbox_dataset_id
     FROM tokens t
@@ -443,7 +443,7 @@ authRoutes.post("/login", zValidator("json", loginSchema), async (c) => {
       email: string;
       github_username: string;
       status: string;
-      is_admin: number;
+      role: string | null;
       sandbox_completed: number;
       sandbox_dataset_id: string | null;
     }>();
@@ -474,7 +474,7 @@ authRoutes.post("/login", zValidator("json", loginSchema), async (c) => {
       username: result.username,
       email: result.email,
       github_username: result.github_username,
-      is_admin: result.is_admin === 1,
+      role: result.role || "member",
       sandbox_completed: result.sandbox_completed === 1,
       sandbox_dataset_id: result.sandbox_dataset_id,
     },

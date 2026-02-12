@@ -175,7 +175,7 @@ export interface LoginResponse {
     username: string;
     email: string;
     github_username: string;
-    is_admin: boolean;
+    role: "owner" | "admin" | "member";
     sandbox_completed: boolean;
     sandbox_dataset_id?: string;
   };
@@ -216,7 +216,7 @@ export interface UserInfo {
   github_username: string;
   orcid?: string | null;
   status: string;
-  is_admin: boolean;
+  role: "owner" | "admin" | "member";
   created_at: string;
   sandbox_completed: boolean;
   sandbox_dataset_id?: string;
@@ -278,7 +278,7 @@ export interface UserListItem {
   github_username: string;
   status: string;
   email_verified: number;
-  is_admin: number;
+  role: string;
   created_at: string;
   approved_at: string | null;
   revoked_at: string | null;
@@ -336,13 +336,35 @@ export async function revokeUser(username: string): Promise<{ message: string }>
   );
 }
 
+export interface ChangeRoleResponse {
+  message: string;
+  user: { username: string; role: string };
+  tokens_revoked?: number;
+}
+
+/**
+ * Change a user's role (owner only)
+ */
+export async function changeUserRole(
+  username: string,
+  role: "owner" | "admin" | "member",
+): Promise<ChangeRoleResponse> {
+  return request<ChangeRoleResponse>(
+    `/admin/users/${username}/role`,
+    {
+      method: "POST",
+      body: JSON.stringify({ role }),
+    },
+    true,
+  );
+}
+
 export interface RegenerateIamResponse {
   message: string;
   user: {
     username: string;
     iam_username: string;
-    /** True if user has admin privileges and received full bucket access */
-    is_admin?: boolean;
+    role: string;
   };
   /**
    * Number of dataset prefixes restored for regular users,

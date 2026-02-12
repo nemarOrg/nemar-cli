@@ -6,7 +6,7 @@
 
 import type { Context, Next } from "hono";
 import { hashApiKey } from "../services/token";
-import type { AuthUser, Bindings, Variables } from "../types/bindings";
+import { type AuthUser, type Bindings, type Variables, hasRole, parseRole } from "../types/bindings";
 
 type AuthContext = Context<{ Bindings: Bindings; Variables: Variables }>;
 
@@ -44,7 +44,7 @@ export async function authMiddleware(c: AuthContext, next: Next) {
       u.username,
       u.email,
       u.github_username,
-      u.is_admin,
+      u.role,
       u.orcid,
       u.status,
       t.id as token_id
@@ -61,7 +61,7 @@ export async function authMiddleware(c: AuthContext, next: Next) {
       username: string;
       email: string;
       github_username: string;
-      is_admin: number;
+      role: string | null;
       orcid: string | null;
       status: string;
       token_id: number;
@@ -85,6 +85,12 @@ export async function authMiddleware(c: AuthContext, next: Next) {
     );
   }
 
+  // Validate role from DB
+  const role = parseRole(result.role, result.username);
+  if (role === null) {
+    return c.json({ error: "Account configuration error. Contact an administrator." }, 500);
+  }
+
   // Update last_used_at for the token
   await c.env.DB.prepare("UPDATE tokens SET last_used_at = datetime('now') WHERE id = ?")
     .bind(result.token_id)
@@ -96,7 +102,7 @@ export async function authMiddleware(c: AuthContext, next: Next) {
     username: result.username,
     email: result.email,
     github_username: result.github_username,
-    is_admin: result.is_admin === 1,
+    role,
     orcid: result.orcid || undefined,
   };
 
@@ -117,8 +123,27 @@ export async function adminMiddleware(c: AuthContext, next: Next) {
     return c.json({ error: "Authentication required" }, 401);
   }
 
-  if (!user.is_admin) {
+  if (!hasRole(user.role, "admin")) {
     return c.json({ error: "Admin access required" }, 403);
+  }
+
+  await next();
+}
+
+/**
+ * Middleware to require owner role
+ *
+ * Must be used after authMiddleware
+ */
+export async function ownerMiddleware(c: AuthContext, next: Next) {
+  const user = c.get("user");
+
+  if (!user) {
+    return c.json({ error: "Authentication required" }, 401);
+  }
+
+  if (user.role !== "owner") {
+    return c.json({ error: "Owner access required" }, 403);
   }
 
   await next();
@@ -150,7 +175,7 @@ export async function optionalAuthMiddleware(c: AuthContext, next: Next) {
       u.username,
       u.email,
       u.github_username,
-      u.is_admin,
+      u.role,
       u.orcid,
       u.status
     FROM tokens t
@@ -166,20 +191,23 @@ export async function optionalAuthMiddleware(c: AuthContext, next: Next) {
       username: string;
       email: string;
       github_username: string;
-      is_admin: number;
+      role: string | null;
       orcid: string | null;
       status: string;
     }>();
 
   if (result) {
-    c.set("user", {
-      id: result.id,
-      username: result.username,
-      email: result.email,
-      github_username: result.github_username,
-      is_admin: result.is_admin === 1,
-      orcid: result.orcid || undefined,
-    });
+    const role = parseRole(result.role, result.username);
+    if (role !== null) {
+      c.set("user", {
+        id: result.id,
+        username: result.username,
+        email: result.email,
+        github_username: result.github_username,
+        role,
+        orcid: result.orcid || undefined,
+      });
+    }
   }
 
   await next();

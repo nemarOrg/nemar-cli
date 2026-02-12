@@ -137,7 +137,9 @@ export async function loginAction(options: { key?: string } & ConfirmOptions): P
     spinner.succeed("Login successful");
     console.log();
     console.log(`  Welcome back, ${chalk.cyan(result.user.username)}!`);
-    if (result.user.is_admin) {
+    if (result.user.role === "owner") {
+      console.log(`  ${chalk.red("Owner access enabled")}`);
+    } else if (result.user.role === "admin") {
       console.log(`  ${chalk.magenta("Admin access enabled")}`);
     }
 
@@ -386,6 +388,7 @@ export async function statusAction(options: { refresh?: boolean }): Promise<void
   }
 
   // If refresh requested, fetch latest from server
+  let userRole: string | undefined;
   if (options.refresh) {
     const spinner = ora("Fetching user info...").start();
     try {
@@ -393,6 +396,7 @@ export async function statusAction(options: { refresh?: boolean }): Promise<void
       setConfig("username", user.username);
       setConfig("email", user.email);
       setConfig("githubUsername", user.github_username);
+      userRole = user.role;
       spinner.stop();
     } catch (error) {
       spinner.fail("Could not refresh user info");
@@ -413,6 +417,15 @@ export async function statusAction(options: { refresh?: boolean }): Promise<void
   }
   if (config.githubUsername) {
     console.log(`  GitHub:   @${config.githubUsername}`);
+  }
+  if (userRole) {
+    const roleDisplay =
+      userRole === "owner"
+        ? chalk.red("Owner")
+        : userRole === "admin"
+          ? chalk.magenta("Admin")
+          : chalk.white("Member");
+    console.log(`  Role:     ${roleDisplay}`);
   }
   console.log(`  Config:   ${chalk.gray(getConfigPath())}`);
 }
