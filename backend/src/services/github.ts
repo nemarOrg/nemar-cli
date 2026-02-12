@@ -574,17 +574,22 @@ jobs:
         if: steps.check_tag.outputs.exists == 'false'
         env:
           GH_TOKEN: \${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: \${{ github.event.pull_request.number }}
+          PR_BODY: \${{ github.event.pull_request.body }}
         run: |
           git config user.name "GitHub Actions"
           git config user.email "actions@github.com"
-          git tag -a "v\${{ steps.version.outputs.version }}" -m "Release v\${{ steps.version.outputs.version }}"
-          git push origin "v\${{ steps.version.outputs.version }}"
-          gh release create "v\${{ steps.version.outputs.version }}" \\
-            --title "v\${{ steps.version.outputs.version }}" \\
-            --notes "Release from PR #\${{ github.event.pull_request.number }}
+          VERSION="\${{ steps.version.outputs.version }}"
+          git tag -a "v$VERSION" -m "Release v$VERSION"
+          git push origin "v$VERSION"
+          NOTES="Release from PR #$PR_NUMBER"
+          if [ -n "$PR_BODY" ]; then
+            NOTES="$NOTES
 
 Changes in this release:
-\${{ github.event.pull_request.body }}"
+$PR_BODY"
+          fi
+          gh release create "v$VERSION" --title "v$VERSION" --notes "$NOTES"
           echo "created=true" >> $GITHUB_OUTPUT
 
   publish-zenodo:
