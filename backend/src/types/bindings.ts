@@ -28,6 +28,21 @@ export interface Bindings {
   ENCRYPTION_KEY?: string; // For encrypting stored credentials
 }
 
+/** User roles in hierarchical order: owner > admin > member */
+export type UserRole = "owner" | "admin" | "member";
+
+const ROLE_HIERARCHY: Record<UserRole, number> = { owner: 3, admin: 2, member: 1 };
+
+/** Check if userRole meets or exceeds the minimum required role */
+export function hasRole(userRole: UserRole, minimumRole: UserRole): boolean {
+  return ROLE_HIERARCHY[userRole] >= ROLE_HIERARCHY[minimumRole];
+}
+
+/** Validate that a string is a valid UserRole */
+export function isValidRole(value: string): value is UserRole {
+  return value === "owner" || value === "admin" || value === "member";
+}
+
 /**
  * User object set by auth middleware
  */
@@ -36,6 +51,8 @@ export interface AuthUser {
   username: string;
   email: string;
   github_username: string;
+  role: UserRole;
+  /** @deprecated Use role instead. Computed as role !== 'member'. */
   is_admin: boolean;
   orcid?: string;
 }
