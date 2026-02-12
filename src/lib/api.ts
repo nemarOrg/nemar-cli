@@ -1196,3 +1196,33 @@ export async function applyS3Lock(
 
   return { locked: totalLocked, total, failed: allFailed };
 }
+
+// ---------------------------------------------------------------------------
+// Dataset deletion
+// ---------------------------------------------------------------------------
+
+export interface DeleteDatasetResponse {
+  datasetId: string;
+  deleted: boolean;
+  steps: {
+    github: { success: boolean; error?: string };
+    s3: { deleted: number; failed: Array<{ key: string; error: string }>; skipped?: boolean };
+    d1: { success: boolean; versionsDeleted: number; pubRequestsDeleted: number; error?: string };
+  };
+  warnings: string[];
+}
+
+export async function deleteDataset(
+  datasetId: string,
+  force = false,
+): Promise<DeleteDatasetResponse> {
+  return request<DeleteDatasetResponse>(
+    `/admin/datasets/${datasetId}`,
+    {
+      method: "DELETE",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ force }),
+    },
+    true,
+  );
+}
