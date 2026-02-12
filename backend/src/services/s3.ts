@@ -301,8 +301,7 @@ export async function applyObjectLock(
 
   // Compute Content-MD5 (required by S3 PutObjectRetention)
   const bodyBytes = new TextEncoder().encode(retentionXml);
-  const md5Digest = await crypto.subtle.digest("MD5", bodyBytes);
-  const contentMd5 = btoa(String.fromCharCode(...new Uint8Array(md5Digest)));
+  const contentMd5 = await computeMd5Base64(bodyBytes);
 
   for (const key of batch) {
     // Encode each path segment individually, preserving "/" separators
@@ -572,35 +571,69 @@ export async function deleteObjects(
       headers["x-amz-bypass-governance-retention"] = "true";
     }
 
-    const signed = await aws.sign(url, {
-      method: "POST",
-      headers,
-      body: deleteXml,
-    });
+    try {
+      const signed = await aws.sign(url, {
+        method: "POST",
+        headers,
+        body: deleteXml,
+      });
 
-    const res = await fetch(signed);
-    if (!res.ok) {
-      const errorText = await res.text().catch(() => "");
-      // All keys in this batch failed
-      for (const key of batch) {
-        result.failed.push({ key, error: `HTTP ${res.status}: ${errorText}`.trim() });
+      const res = await fetch(signed);
+      if (!res.ok) {
+        const errorText = await res.text().catch(() => "");
+        for (const key of batch) {
+          result.failed.push({ key, error: `HTTP ${res.status}: ${errorText}`.trim() });
+        }
+        continue;
       }
-      continue;
-    }
 
-    const xml = await res.text();
+      const xml = await res.text();
 
-    // Count successful deletions
-    const deletedMatches = xml.matchAll(/<Deleted>\s*<Key>([^<]+)<\/Key>/g);
-    for (const _ of deletedMatches) {
-      result.deleted++;
-    }
+      // Verify this is a valid DeleteResult response
+      if (!xml.includes("<DeleteResult")) {
+        for (const key of batch) {
+          result.failed.push({ key, error: "Unexpected S3 response: missing DeleteResult" });
+        }
+        continue;
+      }
 
-    // Collect failures
-    const errorPattern =
-      /<Error>\s*<Key>([^<]+)<\/Key>\s*<Code>([^<]+)<\/Code>\s*<Message>([^<]*)<\/Message>/g;
-    for (const match of xml.matchAll(errorPattern)) {
-      result.failed.push({ key: match[1], error: `${match[2]}: ${match[3]}` });
+      // Count successful deletions
+      let batchDeleted = 0;
+      const deletedMatches = xml.matchAll(/<Deleted>\s*<Key>([^<]+)<\/Key>/g);
+      for (const _ of deletedMatches) {
+        batchDeleted++;
+      }
+
+      // Collect failures (handle any element order within <Error>)
+      let batchFailed = 0;
+      const errorBlocks = xml.matchAll(/<Error>([\s\S]*?)<\/Error>/g);
+      for (const block of errorBlocks) {
+        const inner = block[1];
+        const keyMatch = inner.match(/<Key>([^<]+)<\/Key>/);
+        const codeMatch = inner.match(/<Code>([^<]+)<\/Code>/);
+        const msgMatch = inner.match(/<Message>([^<]*)<\/Message>/);
+        result.failed.push({
+          key: keyMatch?.[1] ?? "unknown",
+          error: `${codeMatch?.[1] ?? "UnknownError"}: ${msgMatch?.[1] ?? ""}`,
+        });
+        batchFailed++;
+      }
+
+      // Validate that parsed results account for all keys in batch
+      const accounted = batchDeleted + batchFailed;
+      if (accounted < batch.length) {
+        const missing = batch.length - accounted;
+        result.failed.push({
+          key: `(${missing} unaccounted keys in batch starting at index ${i})`,
+          error: "XML parsing gap: S3 response did not account for all keys",
+        });
+      }
+
+      result.deleted += batchDeleted;
+    } catch (err) {
+      for (const key of batch) {
+        result.failed.push({ key, error: err instanceof Error ? err.message : String(err) });
+      }
     }
   }
 
@@ -628,12 +661,19 @@ export async function deleteDatasetObjects(
   const aggregate: DeleteResult = { deleted: 0, failed: [] };
 
   for (const prefix of prefixes) {
-    const keys = await listObjectKeys(options, prefix);
-    if (keys.length === 0) continue;
+    try {
+      const keys = await listObjectKeys(options, prefix);
+      if (keys.length === 0) continue;
 
-    const result = await deleteObjects(options, keys, bypassGovernance);
-    aggregate.deleted += result.deleted;
-    aggregate.failed.push(...result.failed);
+      const result = await deleteObjects(options, keys, bypassGovernance);
+      aggregate.deleted += result.deleted;
+      aggregate.failed.push(...result.failed);
+    } catch (err) {
+      aggregate.failed.push({
+        key: prefix,
+        error: `Failed to process prefix: ${err instanceof Error ? err.message : String(err)}`,
+      });
+    }
   }
 
   return aggregate;
@@ -650,6 +690,9 @@ export async function deleteStagingObjects(
 ): Promise<DeleteResult> {
   if (!isValidDatasetId(datasetId)) {
     throw new Error(`Invalid dataset ID for staging cleanup: "${datasetId}"`);
+  }
+  if (!Number.isInteger(prNumber) || prNumber < 1) {
+    throw new Error(`Invalid PR number for staging cleanup: ${prNumber}`);
   }
 
   const prefix = `staging/pr-${prNumber}/${datasetId}/`;

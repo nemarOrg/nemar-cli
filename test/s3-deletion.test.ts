@@ -196,6 +196,19 @@ describeS3("S3 deletion - deleteStagingObjects", () => {
       "Invalid dataset ID for staging cleanup",
     );
   });
+
+  test("throws for invalid PR number", async () => {
+    const s3Opts = requireS3Options();
+    await expect(deleteStagingObjects(s3Opts, 0, TEST_DATASET)).rejects.toThrow(
+      "Invalid PR number for staging cleanup",
+    );
+    await expect(deleteStagingObjects(s3Opts, -1, TEST_DATASET)).rejects.toThrow(
+      "Invalid PR number for staging cleanup",
+    );
+    await expect(deleteStagingObjects(s3Opts, 1.5, TEST_DATASET)).rejects.toThrow(
+      "Invalid PR number for staging cleanup",
+    );
+  });
 });
 
 // Cleanup: remove any leftover test objects
