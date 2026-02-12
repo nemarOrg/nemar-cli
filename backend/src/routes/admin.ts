@@ -2831,8 +2831,9 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
       if (doiResult instanceof Response) return doiResult;
       const conceptDoi = doiResult;
       const doiUrl = `https://doi.org/${conceptDoi}`;
+      const doiProvider = parseDoiProvider(dataset.doi_provider);
       const badgeImg =
-        provider === "zenodo"
+        doiProvider === "zenodo"
           ? `https://zenodo.org/badge/DOI/${conceptDoi}.svg`
           : `https://img.shields.io/badge/DOI-${encodeURIComponent(conceptDoi)}-blue`;
       const doiBadge = `[![DOI](${badgeImg})](${doiUrl})`;

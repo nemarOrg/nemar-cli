@@ -1090,7 +1090,8 @@ export interface S3LockResponse {
 // Enrichment
 // ============================================================================
 
-export type { NemarMetadata as NemarMetadataPayload } from "../../shared/datacite-constants.js";
+import type { NemarMetadata } from "../../shared/datacite-constants.js";
+export type NemarMetadataPayload = NemarMetadata;
 
 export interface SubmitEnrichmentResponse {
   message: string;
