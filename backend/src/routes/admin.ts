@@ -3169,7 +3169,7 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
           );
         }
 
-        const auth = resolveEzidAuth(c.env, !!dataset.is_sandbox);
+        const auth = resolveEzidAuth(c.env, sandbox || !!dataset.is_sandbox);
         const target = `https://github.com/nemarDatasets/${datasetId}`;
         await ezidMakePublic(auth, dataset.ezid_identifier, target);
 
