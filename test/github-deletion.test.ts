@@ -18,6 +18,24 @@ function getGitHubPat(): string | null {
 const pat = getGitHubPat();
 const describeGH = pat ? describe : describe.skip;
 
+describe("GitHub deletion - input validation", () => {
+  test("throws for repo name containing slash", async () => {
+    await expect(deleteRepository("nemarOrg/nemar-cli", "ghp_fake")).rejects.toThrow(
+      "Invalid repository name",
+    );
+  });
+
+  test("throws for repo name containing ..", async () => {
+    await expect(deleteRepository("../escape", "ghp_fake")).rejects.toThrow(
+      "Invalid repository name",
+    );
+  });
+
+  test("throws for empty repo name", async () => {
+    await expect(deleteRepository("", "ghp_fake")).rejects.toThrow("Invalid repository name");
+  });
+});
+
 describeGH("GitHub deletion - deleteRepository", () => {
   test("returns true for non-existent repo (idempotent)", async () => {
     const result = await deleteRepository("xx-nonexistent-test-repo-99999", pat as string);
