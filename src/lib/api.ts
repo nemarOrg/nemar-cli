@@ -175,6 +175,7 @@ export interface LoginResponse {
     username: string;
     email: string;
     github_username: string;
+    role: "owner" | "admin" | "member";
     is_admin: boolean;
     sandbox_completed: boolean;
     sandbox_dataset_id?: string;
@@ -216,6 +217,7 @@ export interface UserInfo {
   github_username: string;
   orcid?: string | null;
   status: string;
+  role: "owner" | "admin" | "member";
   is_admin: boolean;
   created_at: string;
   sandbox_completed: boolean;
@@ -279,6 +281,7 @@ export interface UserListItem {
   status: string;
   email_verified: number;
   is_admin: number;
+  role: string;
   created_at: string;
   approved_at: string | null;
   revoked_at: string | null;
@@ -331,6 +334,29 @@ export async function revokeUser(username: string): Promise<{ message: string }>
     `/admin/revoke/${username}`,
     {
       method: "POST",
+    },
+    true,
+  );
+}
+
+export interface ChangeRoleResponse {
+  message: string;
+  user: { username: string; role: string };
+  tokens_revoked?: number;
+}
+
+/**
+ * Change a user's role (owner only)
+ */
+export async function changeUserRole(
+  username: string,
+  role: "owner" | "admin" | "member",
+): Promise<ChangeRoleResponse> {
+  return request<ChangeRoleResponse>(
+    `/admin/users/${username}/role`,
+    {
+      method: "POST",
+      body: JSON.stringify({ role }),
     },
     true,
   );
