@@ -216,6 +216,10 @@ export async function createRepository(
  * Requires a PAT with `delete_repo` scope.
  */
 export async function deleteRepository(repo: string, pat: string): Promise<boolean> {
+  if (!repo || repo.includes("/") || repo.includes("..")) {
+    throw new Error(`Invalid repository name: "${repo}"`);
+  }
+
   const response = await fetch(`${GITHUB_API}/repos/${ORG_NAME}/${repo}`, {
     method: "DELETE",
     headers: {
@@ -226,7 +230,7 @@ export async function deleteRepository(repo: string, pat: string): Promise<boole
   });
 
   // 204 = deleted, 404 = already gone (both are success)
-  if (response.ok || response.status === 204 || response.status === 404) {
+  if (response.status === 204 || response.status === 404) {
     return true;
   }
 

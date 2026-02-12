@@ -25,8 +25,8 @@ describeGH("GitHub deletion - deleteRepository", () => {
   });
 
   test("throws for invalid PAT", async () => {
-    await expect(deleteRepository("xx000001", "ghp_invalid_token_12345")).rejects.toThrow(
-      "Failed to delete repo",
-    );
+    await expect(
+      deleteRepository("xx-nonexistent-test-repo-99999", "ghp_invalid_token_12345"),
+    ).rejects.toThrow("Failed to delete repo");
   });
 });
