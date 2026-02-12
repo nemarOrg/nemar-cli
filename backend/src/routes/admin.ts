@@ -33,6 +33,7 @@ import { decrypt, encrypt } from "../services/encryption";
 import {
   type EzidAuth,
   extractDoi,
+  makePublic as ezidMakePublic,
   updateIdentifier as ezidUpdateIdentifier,
 } from "../services/ezid";
 import {
@@ -2462,6 +2463,7 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
       ezid_identifier: string | null;
       ezid_status: string | null;
       doi_provider: string | null;
+      is_sandbox: number | null;
       owner_username: string;
       owner_email: string;
       owner_orcid: string | null;
@@ -3089,58 +3091,64 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
     }
   }
 
-  // Step: upload_to_zenodo - Upload release archive to Zenodo
+  // Step: upload_to_zenodo - Upload release archive to Zenodo (Zenodo provider only)
   if (stepsToRun.includes("upload_to_zenodo")) {
-    try {
-      await startStep("upload_to_zenodo");
+    const provider = parseDoiProvider(dataset.doi_provider);
+    if (provider === "ezid") {
+      // EZID DOIs don't use Zenodo for archive hosting; skip this step
+      await updateProgress("upload_to_zenodo");
+    } else {
+      try {
+        await startStep("upload_to_zenodo");
 
-      const vtResult = await getVersionTag("upload_to_zenodo");
-      if (vtResult instanceof Response) return vtResult;
-      const { tag } = vtResult;
+        const vtResult = await getVersionTag("upload_to_zenodo");
+        if (vtResult instanceof Response) return vtResult;
+        const { tag } = vtResult;
 
-      const archiveData = await downloadReleaseArchive(repoName, tag, pat);
+        const archiveData = await downloadReleaseArchive(repoName, tag, pat);
 
-      const zenodoResult = await getZenodoConfig("upload_to_zenodo");
-      if (zenodoResult instanceof Response) return zenodoResult;
-      const { depositionId, token: zenodoToken, isSandbox } = zenodoResult;
+        const zenodoResult = await getZenodoConfig("upload_to_zenodo");
+        if (zenodoResult instanceof Response) return zenodoResult;
+        const { depositionId, token: zenodoToken, isSandbox } = zenodoResult;
 
-      const deposition = await getDeposition(depositionId, zenodoToken, isSandbox);
+        const deposition = await getDeposition(depositionId, zenodoToken, isSandbox);
 
-      if (!deposition.links.bucket) {
-        await updateProgress("upload_to_zenodo", "No bucket URL in deposition");
+        if (!deposition.links.bucket) {
+          await updateProgress("upload_to_zenodo", "No bucket URL in deposition");
+          return c.json(
+            {
+              error: "Zenodo deposition has no bucket URL",
+              step: "upload_to_zenodo",
+              steps_completed: completed,
+            },
+            500,
+          );
+        }
+
+        const filename = `${datasetId}-${tag}.zip`;
+        await uploadFile(
+          depositionId,
+          deposition.links.bucket,
+          filename,
+          archiveData,
+          zenodoToken,
+          isSandbox,
+        );
+
+        await updateProgress("upload_to_zenodo");
+      } catch (err) {
+        const msg = errorMessage(err);
+        console.error(`[publish] upload_to_zenodo failed for dataset ${datasetId}:`, err);
+        await updateProgress("upload_to_zenodo", msg);
         return c.json(
           {
-            error: "Zenodo deposition has no bucket URL",
+            error: `Zenodo upload failed: ${msg}`,
             step: "upload_to_zenodo",
             steps_completed: completed,
           },
           500,
         );
       }
-
-      const filename = `${datasetId}-${tag}.zip`;
-      await uploadFile(
-        depositionId,
-        deposition.links.bucket,
-        filename,
-        archiveData,
-        zenodoToken,
-        isSandbox,
-      );
-
-      await updateProgress("upload_to_zenodo");
-    } catch (err) {
-      const msg = errorMessage(err);
-      console.error(`[publish] upload_to_zenodo failed for dataset ${datasetId}:`, err);
-      await updateProgress("upload_to_zenodo", msg);
-      return c.json(
-        {
-          error: `Zenodo upload failed: ${msg}`,
-          step: "upload_to_zenodo",
-          steps_completed: completed,
-        },
-        500,
-      );
     }
   }
 
@@ -3149,48 +3157,78 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
     try {
       await startStep("publish_doi");
 
-      const zenodoResult = await getZenodoConfig("publish_doi");
-      if (zenodoResult instanceof Response) return zenodoResult;
-      const { depositionId, token: zenodoToken, isSandbox } = zenodoResult;
+      const provider = parseDoiProvider(dataset.doi_provider);
 
-      // This is irreversible: once published, the DOI is permanent
-      const published = await publishDeposition(depositionId, zenodoToken, isSandbox);
-
-      // After publish, Zenodo confirms the concept DOI; update the database record.
-      // The DB update is in its own try/catch because the DOI is already published at
-      // this point; a DB failure must not be reported as "DOI publication failed."
-      if (published.doi) {
-        try {
-          await db
-            .prepare(
-              "UPDATE datasets SET concept_doi = ?, updated_at = datetime('now') WHERE dataset_id = ?",
-            )
-            .bind(published.doi, datasetId)
-            .run();
-        } catch (dbErr) {
-          console.error(
-            `[publish] CRITICAL: DOI published on Zenodo (${published.doi}) but database update failed for ${datasetId}:`,
-            dbErr,
-          );
-          await updateProgress(
-            "publish_doi",
-            `DOI published (${published.doi}) but DB update failed; manual correction required`,
-          );
+      if (provider === "ezid") {
+        // EZID: transition the reserved DOI to public status
+        if (!dataset.ezid_identifier) {
+          await updateProgress("publish_doi", "No EZID identifier found");
           return c.json(
-            {
-              error: `DOI was published successfully (${published.doi}) but database update failed. Manual database correction required.`,
-              published_doi: published.doi,
-              step: "publish_doi",
-              steps_completed: completed,
-            },
+            { error: "No EZID identifier found for dataset", step: "publish_doi", steps_completed: completed },
             500,
           );
         }
+
+        const auth = resolveEzidAuth(c.env, !!dataset.is_sandbox);
+        const target = `https://github.com/nemarDatasets/${datasetId}`;
+        await ezidMakePublic(auth, dataset.ezid_identifier, target);
+
+        // Update EZID status in D1
+        try {
+          await db
+            .prepare("UPDATE datasets SET ezid_status = 'public', updated_at = datetime('now') WHERE dataset_id = ?")
+            .bind(datasetId)
+            .run();
+        } catch (dbErr) {
+          console.error(
+            `[publish] CRITICAL: EZID DOI published but database update failed for ${datasetId}:`,
+            dbErr,
+          );
+        }
       } else {
-        console.error(
-          `[publish] Zenodo publish returned no DOI for dataset ${datasetId}; response:`,
-          published,
-        );
+        // Zenodo: publish the deposition (irreversible)
+        const zenodoResult = await getZenodoConfig("publish_doi");
+        if (zenodoResult instanceof Response) return zenodoResult;
+        const { depositionId, token: zenodoToken, isSandbox } = zenodoResult;
+
+        const published = await publishDeposition(depositionId, zenodoToken, isSandbox);
+
+        // After publish, Zenodo confirms the concept DOI; update the database record.
+        // The DB update is in its own try/catch because the DOI is already published at
+        // this point; a DB failure must not be reported as "DOI publication failed."
+        if (published.doi) {
+          try {
+            await db
+              .prepare(
+                "UPDATE datasets SET concept_doi = ?, updated_at = datetime('now') WHERE dataset_id = ?",
+              )
+              .bind(published.doi, datasetId)
+              .run();
+          } catch (dbErr) {
+            console.error(
+              `[publish] CRITICAL: DOI published on Zenodo (${published.doi}) but database update failed for ${datasetId}:`,
+              dbErr,
+            );
+            await updateProgress(
+              "publish_doi",
+              `DOI published (${published.doi}) but DB update failed; manual correction required`,
+            );
+            return c.json(
+              {
+                error: `DOI was published successfully (${published.doi}) but database update failed. Manual database correction required.`,
+                published_doi: published.doi,
+                step: "publish_doi",
+                steps_completed: completed,
+              },
+              500,
+            );
+          }
+        } else {
+          console.error(
+            `[publish] Zenodo publish returned no DOI for dataset ${datasetId}; response:`,
+            published,
+          );
+        }
       }
 
       await updateProgress("publish_doi");
