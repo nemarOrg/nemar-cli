@@ -11,6 +11,10 @@ routes = [
   { pattern = "api.osc.earth/nemar/*", zone_id = "adce8c117d3373bda82d3aba2dfd5b13" }
 ]
 
+# Scheduled cleanup: daily at 3 AM UTC
+[triggers]
+crons = ["0 3 * * *"]
+
 # D1 Database
 [[d1_databases]]
 binding = "DB"

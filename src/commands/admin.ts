@@ -34,6 +34,7 @@ import {
   changeUserRole,
   changeVisibility,
   createConceptDoi,
+  deleteDataset,
   denyPublication,
   errorDetail,
   finalizeDataset,
@@ -1911,6 +1912,104 @@ Examples:
       } else {
         console.error(chalk.red(`\n${error instanceof Error ? error.message : String(error)}`));
       }
+      process.exit(1);
+    }
+  });
+
+// ============================================================================
+// Delete Dataset (Admin/Owner Only)
+// ============================================================================
+
+adminCommand
+  .command("delete-dataset")
+  .description("Delete a dataset and all associated resources (GitHub, S3, D1)")
+  .argument("<dataset-id>", "Dataset ID (e.g., nm000108)")
+  .option("--force", "Force deletion of published datasets with DOIs (owner only)")
+  .action(async (datasetId: string, options: { force?: boolean }) => {
+    if (!isAuthenticated()) {
+      console.log(chalk.red("Not authenticated. Run: nemar auth login"));
+      process.exit(1);
+    }
+
+    const spinner = ora("Looking up dataset...").start();
+
+    try {
+      const dataset = await getDataset(datasetId);
+      spinner.stop();
+
+      console.log(chalk.bold(`\nDataset: ${dataset.dataset_id}`));
+      console.log(`  Name: ${dataset.name || "(unnamed)"}`);
+      console.log(`  Visibility: ${dataset.visibility}`);
+      if (dataset.concept_doi) {
+        console.log(`  DOI: ${dataset.concept_doi}`);
+      }
+
+      if (dataset.concept_doi) {
+        console.log(
+          chalk.yellow("\n  WARNING: This dataset has a DOI. Only the NEMAR owner can delete it."),
+        );
+        if (!options.force) {
+          console.log(chalk.gray("  Use --force to confirm deletion of published datasets."));
+          process.exit(1);
+        }
+      }
+
+      const { proceed } = await inquirer.prompt([
+        {
+          type: "confirm",
+          name: "proceed",
+          message: chalk.red(
+            `Delete dataset ${datasetId}? This will remove the GitHub repo, S3 data, and all database records. This cannot be undone.`,
+          ),
+          default: false,
+        },
+      ]);
+
+      if (!proceed) {
+        console.log(chalk.gray("Cancelled."));
+        return;
+      }
+
+      spinner.start("Deleting dataset...");
+      const result = await deleteDataset(datasetId, options.force ?? false);
+      spinner.succeed("Dataset deleted");
+
+      // Summary
+      console.log(chalk.bold("\nDeletion summary:"));
+      console.log(
+        `  GitHub repo: ${result.steps.github.success ? chalk.green("deleted") : chalk.red("failed")}`,
+      );
+      if (result.steps.s3.skipped) {
+        console.log(`  S3 objects: ${chalk.yellow("skipped (published dataset)")}`);
+      } else {
+        console.log(
+          `  S3 objects: ${chalk.green(`${result.steps.s3.deleted} deleted`)}${result.steps.s3.failed.length > 0 ? chalk.red(`, ${result.steps.s3.failed.length} failed`) : ""}`,
+        );
+      }
+      console.log(
+        `  Database: ${result.steps.d1.success ? chalk.green("cleaned up") : chalk.red("failed")}`,
+      );
+      if (result.steps.d1.versionsDeleted > 0) {
+        console.log(chalk.gray(`    ${result.steps.d1.versionsDeleted} version records removed`));
+      }
+      if (result.steps.d1.pubRequestsDeleted > 0) {
+        console.log(
+          chalk.gray(`    ${result.steps.d1.pubRequestsDeleted} publication requests removed`),
+        );
+      }
+
+      if (result.warnings.length > 0) {
+        console.log(chalk.yellow("\nWarnings:"));
+        for (const w of result.warnings) {
+          console.log(chalk.yellow(`  - ${w}`));
+        }
+      }
+    } catch (error) {
+      handleCommandError(error, spinner, "Failed to delete dataset", {
+        403: "Published datasets can only be deleted by the NEMAR owner",
+        404: "Dataset not found",
+        409: "Cannot delete dataset with active publication requests",
+      });
       process.exit(1);
     }
   });

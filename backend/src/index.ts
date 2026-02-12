@@ -19,6 +19,7 @@ import { datasetRoutes } from "./routes/datasets";
 import { sandboxRoutes } from "./routes/sandbox";
 import { userRoutes } from "./routes/users";
 import webhooks from "./routes/webhooks";
+import { deleteDatasetCascade } from "./services/deletion";
 import type { Bindings, Variables } from "./types/bindings";
 
 // Create the API app with all routes
@@ -133,4 +134,72 @@ app.route("/nemar", api);
 // Also mount at root for dev environment and workers.dev domain
 app.route("/", api);
 
-export default app;
+/**
+ * Scheduled cleanup handler (Cloudflare Workers cron trigger).
+ * Runs daily at 3 AM UTC.
+ *
+ * - Sandbox (xx) datasets: delete after 14 days
+ * - Stale nm datasets: delete unpublished, no-DOI datasets inactive for 90 days
+ */
+async function scheduledCleanup(env: Bindings): Promise<void> {
+  const db = env.DB;
+  const results: Array<{ dataset_id: string; success: boolean; error?: string }> = [];
+
+  // 1. Sandbox datasets older than 14 days
+  const sandboxRows = await db
+    .prepare(
+      "SELECT dataset_id FROM datasets WHERE dataset_id LIKE 'xx%' AND created_at < datetime('now', '-14 days') AND status = 'active'",
+    )
+    .all<{ dataset_id: string }>();
+
+  for (const row of sandboxRows.results) {
+    try {
+      const result = await deleteDatasetCascade(db, env, row.dataset_id, {});
+      results.push({ dataset_id: row.dataset_id, success: result.deleted });
+    } catch (err) {
+      results.push({
+        dataset_id: row.dataset_id,
+        success: false,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  // 2. Stale nm datasets: unpublished, no DOI, inactive for 90 days
+  const staleRows = await db
+    .prepare(
+      "SELECT dataset_id FROM datasets WHERE dataset_id LIKE 'nm%' AND COALESCE(last_activity_at, created_at) < datetime('now', '-90 days') AND status = 'active' AND concept_doi IS NULL AND visibility = 'private'",
+    )
+    .all<{ dataset_id: string }>();
+
+  for (const row of staleRows.results) {
+    try {
+      const result = await deleteDatasetCascade(db, env, row.dataset_id, {});
+      results.push({ dataset_id: row.dataset_id, success: result.deleted });
+    } catch (err) {
+      results.push({
+        dataset_id: row.dataset_id,
+        success: false,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  // Log summary to audit_log
+  if (results.length > 0) {
+    const deleted = results.filter((r) => r.success).length;
+    const failed = results.filter((r) => !r.success).length;
+    await db
+      .prepare("INSERT INTO audit_log (action, details) VALUES (?, ?)")
+      .bind("scheduled_cleanup", JSON.stringify({ deleted, failed, datasets: results }))
+      .run();
+    console.log(`Scheduled cleanup: ${deleted} deleted, ${failed} failed`);
+  }
+}
+
+export default {
+  fetch: app.fetch,
+  async scheduled(event: ScheduledEvent, env: Bindings, ctx: ExecutionContext) {
+    ctx.waitUntil(scheduledCleanup(env));
+  },
+};

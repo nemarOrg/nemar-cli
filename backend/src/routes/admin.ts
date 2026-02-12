@@ -14,6 +14,7 @@ import {
   nemarMetadataToEnrichment,
   parseNemarMetadata,
 } from "../services/datacite";
+import { deleteDatasetCascade } from "../services/deletion";
 import {
   type DoiProvider,
   type DoiResult,
@@ -73,7 +74,15 @@ import {
   publishDeposition,
   uploadFile,
 } from "../services/zenodo";
-import { type Bindings, type UserRole, type Variables, hasRole, isDemotion, isValidRole, parseRole } from "../types/bindings";
+import {
+  type Bindings,
+  type UserRole,
+  type Variables,
+  hasRole,
+  isDemotion,
+  isValidRole,
+  parseRole,
+} from "../types/bindings";
 
 /**
  * Valid publication workflow step names.
@@ -272,7 +281,10 @@ adminRoutes.post(
         )
         .run();
     } catch (error) {
-      console.error(`Failed to write audit log for role change ${username} ${oldRole}->${newRole}:`, error);
+      console.error(
+        `Failed to write audit log for role change ${username} ${oldRole}->${newRole}:`,
+        error,
+      );
     }
 
     const response: Record<string, unknown> = {
@@ -283,7 +295,8 @@ adminRoutes.post(
       response.tokens_revoked = tokensRevoked;
     }
     if (tokenRevocationFailed) {
-      response.warning = "Token revocation failed. User may retain elevated session. Manually revoke tokens.";
+      response.warning =
+        "Token revocation failed. User may retain elevated session. Manually revoke tokens.";
     }
 
     return c.json(response);
@@ -502,7 +515,7 @@ adminRoutes.post("/revoke/:username", async (c) => {
   }
 
   // Only owners can revoke other owners
-  if ((user.role === "owner") && adminUser.role !== "owner") {
+  if (user.role === "owner" && adminUser.role !== "owner") {
     return c.json({ error: "Only owners can revoke other owners" }, 403);
   }
 
@@ -3470,4 +3483,110 @@ adminRoutes.post("/datasets/:id/manifest/:version", async (c) => {
     const msg = errorMessage(err);
     return c.json({ error: `Manifest generation failed: ${msg}` }, 500);
   }
+});
+
+// ---------------------------------------------------------------------------
+// Dataset deletion
+// ---------------------------------------------------------------------------
+
+const deleteDatasetSchema = z.object({
+  force: z.boolean().optional().default(false),
+});
+
+/**
+ * DELETE /admin/datasets/:id - Delete a dataset and all associated resources
+ *
+ * Permission:
+ * - Unpublished datasets (no DOI): admin or owner
+ * - Published datasets (with DOI): owner only, requires force=true
+ */
+adminRoutes.delete("/datasets/:id", zValidator("json", deleteDatasetSchema), async (c) => {
+  const datasetId = c.req.param("id");
+  const { force } = c.req.valid("json");
+  const requestingUser = c.get("user");
+  const db = c.env.DB;
+
+  // Look up dataset
+  const dataset = await db
+    .prepare("SELECT * FROM datasets WHERE dataset_id = ?")
+    .bind(datasetId)
+    .first<{
+      id: number;
+      dataset_id: string;
+      name: string;
+      owner_user_id: number;
+      status: string;
+      visibility: string;
+      concept_doi: string | null;
+      latest_version_doi: string | null;
+    }>();
+
+  if (!dataset) {
+    return c.json({ error: "Dataset not found" }, 404);
+  }
+
+  // Permission check: published datasets require owner role
+  const hasDoiOrPublished = dataset.concept_doi !== null || dataset.visibility === "public";
+  if (hasDoiOrPublished) {
+    if (!hasRole(requestingUser.role, "owner")) {
+      return c.json(
+        { error: "Published datasets with DOIs can only be deleted by the NEMAR owner" },
+        403,
+      );
+    }
+    if (!force) {
+      return c.json(
+        {
+          error: "This dataset has a DOI or is published. Set force=true to confirm deletion.",
+          dataset_id: datasetId,
+          concept_doi: dataset.concept_doi,
+          visibility: dataset.visibility,
+        },
+        400,
+      );
+    }
+  }
+
+  // Check for active publication requests
+  const activePubReq = await db
+    .prepare(
+      "SELECT COUNT(*) as count FROM publication_requests WHERE dataset_id = ? AND status NOT IN ('completed', 'denied')",
+    )
+    .bind(datasetId)
+    .first<{ count: number }>();
+
+  if (activePubReq && activePubReq.count > 0) {
+    return c.json(
+      {
+        error: `Cannot delete dataset with ${activePubReq.count} active publication request(s). Deny or complete them first.`,
+      },
+      409,
+    );
+  }
+
+  // Perform cascade deletion
+  const result = await deleteDatasetCascade(db, c.env, datasetId, {
+    skipS3: hasDoiOrPublished && !force,
+    bypassGovernance: force,
+  });
+
+  // Audit log
+  await db
+    .prepare("INSERT INTO audit_log (action, user_id, details) VALUES (?, ?, ?)")
+    .bind(
+      "dataset_deleted",
+      requestingUser.id,
+      JSON.stringify({
+        dataset_id: datasetId,
+        dataset_name: dataset.name,
+        owner_user_id: dataset.owner_user_id,
+        had_doi: dataset.concept_doi !== null,
+        force,
+        steps: result.steps,
+        warnings: result.warnings,
+      }),
+    )
+    .run();
+
+  return c.json(result);
 });
