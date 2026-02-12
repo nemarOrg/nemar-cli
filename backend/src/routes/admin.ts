@@ -7,7 +7,7 @@
 import { zValidator } from "@hono/zod-validator";
 import { Hono } from "hono";
 import { z } from "zod";
-import { adminMiddleware, authMiddleware } from "../middleware/auth";
+import { adminMiddleware, authMiddleware, ownerMiddleware } from "../middleware/auth";
 import {
   bidsToDataCite,
   buildDataCiteXml,
@@ -73,7 +73,7 @@ import {
   publishDeposition,
   uploadFile,
 } from "../services/zenodo";
-import type { Bindings, Variables } from "../types/bindings";
+import { type Bindings, type UserRole, type Variables, hasRole, isDemotion, isValidRole, parseRole } from "../types/bindings";
 
 /**
  * Valid publication workflow step names.
@@ -120,7 +120,7 @@ adminRoutes.get("/users", async (c) => {
   let query = `
     SELECT
       id, username, email, github_username, status,
-      email_verified, is_admin, created_at, approved_at, revoked_at
+      email_verified, is_admin, role, created_at, approved_at, revoked_at
     FROM users
   `;
   const params: string[] = [];
@@ -170,6 +170,107 @@ adminRoutes.get("/users/:username", async (c) => {
 
   return c.json({ user });
 });
+
+const ROLE_HIERARCHY: Record<string, number> = { owner: 3, admin: 2, member: 1 };
+
+const roleChangeSchema = z.object({
+  role: z.enum(["owner", "admin", "member"]),
+});
+
+/**
+ * POST /admin/users/:username/role - Change a user's role (owner-only)
+ */
+adminRoutes.post(
+  "/users/:username/role",
+  ownerMiddleware,
+  zValidator("json", roleChangeSchema),
+  async (c) => {
+    const username = c.req.param("username");
+    const { role: newRole } = c.req.valid("json");
+    const db = c.env.DB;
+    const requestingUser = c.get("user");
+
+    // Cannot change own role (prevents owner self-demotion lockout)
+    if (requestingUser.username === username) {
+      return c.json({ error: "Cannot change your own role" }, 400);
+    }
+
+    // Find target user
+    const target = await db
+      .prepare("SELECT id, username, role, status FROM users WHERE username = ?")
+      .bind(username)
+      .first<{ id: number; username: string; role: string | null; status: string }>();
+
+    if (!target) {
+      return c.json({ error: "User not found" }, 404);
+    }
+
+    if (target.status !== "approved") {
+      return c.json({ error: "User must be approved before role changes" }, 400);
+    }
+
+    const oldRole = (target.role || "member") as UserRole;
+
+    if (oldRole === newRole) {
+      return c.json({ error: `User already has role '${newRole}'` }, 409);
+    }
+
+    // Protect against removing the last owner
+    if (oldRole === "owner" && newRole !== "owner") {
+      const ownerCount = await db
+        .prepare("SELECT COUNT(*) as count FROM users WHERE role = 'owner' AND status = 'approved'")
+        .first<{ count: number }>();
+      if (ownerCount && ownerCount.count <= 1) {
+        return c.json({ error: "Cannot remove the last owner" }, 400);
+      }
+    }
+
+    // Update role (and sync is_admin for backward compatibility)
+    const isAdmin = newRole === "owner" || newRole === "admin" ? 1 : 0;
+    await db
+      .prepare("UPDATE users SET role = ?, is_admin = ?, updated_at = datetime('now') WHERE id = ?")
+      .bind(newRole, isAdmin, target.id)
+      .run();
+
+    // On demotion, revoke tokens to force re-authentication
+    const isDemotion = ROLE_HIERARCHY[newRole] < ROLE_HIERARCHY[oldRole];
+    let tokensRevoked = 0;
+    if (isDemotion) {
+      const result = await db
+        .prepare(
+          "UPDATE tokens SET revoked_at = datetime('now') WHERE user_id = ? AND revoked_at IS NULL",
+        )
+        .bind(target.id)
+        .run();
+      tokensRevoked = result.meta.changes ?? 0;
+    }
+
+    // Audit log
+    await db
+      .prepare(
+        "INSERT INTO audit_log (user_id, action, resource_type, resource_id, details) VALUES (?, ?, ?, ?, ?)",
+      )
+      .bind(
+        requestingUser.id,
+        "role_changed",
+        "user",
+        username,
+        JSON.stringify({
+          changed_by: requestingUser.username,
+          old_role: oldRole,
+          new_role: newRole,
+          tokens_revoked: tokensRevoked,
+        }),
+      )
+      .run();
+
+    return c.json({
+      message: `User ${username} role changed from '${oldRole}' to '${newRole}'`,
+      user: { username, role: newRole },
+      tokens_revoked: isDemotion ? tokensRevoked : undefined,
+    });
+  },
+);
 
 /**
  * POST /admin/approve/:username - Approve a user and generate API token
@@ -634,7 +735,7 @@ adminRoutes.post("/regenerate-iam/:username", async (c) => {
   // Find user
   const user = await db
     .prepare(
-      `SELECT id, username, email, status, is_admin, aws_iam_username, aws_access_key_id_encrypted
+      `SELECT id, username, email, status, role, aws_iam_username, aws_access_key_id_encrypted
        FROM users WHERE username = ?`,
     )
     .bind(username)
@@ -643,7 +744,7 @@ adminRoutes.post("/regenerate-iam/:username", async (c) => {
       username: string;
       email: string;
       status: string;
-      is_admin: number;
+      role: string | null;
       aws_iam_username: string | null;
       aws_access_key_id_encrypted: string | null;
     }>();
@@ -694,7 +795,7 @@ adminRoutes.post("/regenerate-iam/:username", async (c) => {
   }
 
   // Create new IAM credentials
-  const isAdmin = Boolean(user.is_admin);
+  const isAdmin = user.role === "owner" || user.role === "admin";
   const awsConfig = {
     accessKeyId: c.env.AWS_ACCESS_KEY_ID,
     secretAccessKey: c.env.AWS_SECRET_ACCESS_KEY,
