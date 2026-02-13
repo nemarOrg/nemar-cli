@@ -270,6 +270,7 @@ datasetCommand
         verbose: options.verbose,
         json: options.json,
         extraArgs,
+        forceReload,
       });
 
       // No output + non-zero exit = real failure (e.g. deno error)

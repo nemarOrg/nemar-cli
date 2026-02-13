@@ -109,7 +109,9 @@ export function isValidatorCacheStale(): boolean {
       process.env.DENO_DIR ||
       (platform === "darwin"
         ? join(homedir(), "Library", "Caches", "deno")
-        : join(homedir(), ".cache", "deno"));
+        : platform === "win32"
+          ? join(process.env.LOCALAPPDATA || join(homedir(), "AppData", "Local"), "deno")
+          : join(homedir(), ".cache", "deno"));
 
     const registryDir = join(denoDir, "deps");
     if (!existsSync(registryDir)) return true;
