@@ -101,12 +101,12 @@ export async function sendVerificationEmail(
 }
 
 /**
- * Send approval notification with API key
+ * Send approval notification (without API key for security).
+ * Instructs user to retrieve their key via CLI.
  */
-export async function sendApprovalEmail(
+export async function sendKeyReadyEmail(
   to: string,
   username: string,
-  apiKey: string,
   resendApiKey: string,
 ): Promise<void> {
   const html = `
@@ -121,32 +121,19 @@ export async function sendApprovalEmail(
 
   <p>Your NEMAR account has been approved. You can now upload and manage datasets.</p>
 
-  <h2 style="color: #333; font-size: 18px; margin-top: 30px;">Your API Key</h2>
+  <h2 style="color: #333; font-size: 18px; margin-top: 30px;">Retrieve Your API Key</h2>
 
-  <p>Use this key with the NEMAR CLI to authenticate:</p>
-
-  <div style="background-color: #f4f4f5; padding: 16px; border-radius: 8px; font-family: monospace; font-size: 14px; word-break: break-all; margin: 16px 0;">
-    ${apiKey}
-  </div>
-
-  <p style="color: #dc2626; font-weight: bold;">
-    Important: This key is shown only once. Store it securely.
-  </p>
-
-  <h2 style="color: #333; font-size: 18px; margin-top: 30px;">Getting Started</h2>
+  <p>For security, your API key is not sent via email. Use the CLI to retrieve it:</p>
 
   <div style="background-color: #f4f4f5; padding: 16px; border-radius: 8px; font-family: monospace; font-size: 13px; white-space: pre-line;">
 # Install NEMAR CLI
 bunx nemar-cli
 
-# Login with your API key
+# Retrieve your API key (requires your email and password)
+nemar auth retrieve-key
+
+# Then login with the key
 nemar auth login
-
-# Check your authentication status
-nemar auth status
-
-# Upload your first dataset
-nemar dataset upload /path/to/bids-dataset
   </div>
 
   <hr style="border: none; border-top: 1px solid #eee; margin: 30px 0;">
@@ -165,6 +152,60 @@ nemar dataset upload /path/to/bids-dataset
   `;
 
   await sendEmail(to, "Your NEMAR account has been approved!", html, resendApiKey);
+}
+
+/**
+ * Send key regeneration verification email
+ */
+export async function sendKeyRegenerationVerificationEmail(
+  to: string,
+  username: string,
+  confirmUrl: string,
+  resendApiKey: string,
+): Promise<void> {
+  const html = `
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+</head>
+<body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; line-height: 1.6; color: #333; max-width: 600px; margin: 0 auto; padding: 20px;">
+  <h1 style="color: #f59e0b;">API Key Regeneration Request</h1>
+
+  <p>Hello ${username},</p>
+
+  <p>You requested a new API key for your NEMAR account. Click the button below to confirm and generate a new key.</p>
+
+  <p style="color: #dc2626; font-weight: bold; font-size: 14px;">
+    This will revoke your current API key. You will need to login again with the new key.
+  </p>
+
+  <p style="text-align: center; margin: 30px 0;">
+    <a href="${confirmUrl}"
+       style="background-color: #f59e0b; color: white; padding: 12px 24px; text-decoration: none; border-radius: 6px; display: inline-block; font-weight: bold;">
+      Generate New API Key
+    </a>
+  </p>
+
+  <p style="color: #666; font-size: 14px;">
+    Or copy and paste this link into your browser:<br>
+    <a href="${confirmUrl}" style="color: #2563eb; word-break: break-all;">${confirmUrl}</a>
+  </p>
+
+  <p style="color: #666; font-size: 14px;">This link expires in 1 hour. If you did not request this, you can safely ignore this email.</p>
+
+  <hr style="border: none; border-top: 1px solid #eee; margin: 30px 0;">
+
+  <p style="color: #999; font-size: 12px; margin-top: 30px;">
+    NEMAR - Neuroelectromagnetic Data Archive and Tools Resource<br>
+    Part of <a href="https://osc.earth" style="color: #999;">Open Science Collective</a>
+  </p>
+</body>
+</html>
+  `;
+
+  await sendEmail(to, "NEMAR API Key Regeneration", html, resendApiKey);
 }
 
 /**

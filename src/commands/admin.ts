@@ -234,8 +234,8 @@ adminCommand
     // Confirmation
     console.log(chalk.cyan(`\nApproving user: ${username}\n`));
     console.log("This will:");
-    console.log("  1. Generate an API key for the user");
-    console.log("  2. Send them an email with their API key");
+    console.log("  1. Set up S3 access for the user");
+    console.log("  2. Notify them to retrieve their API key via CLI");
     console.log();
 
     const result = await confirm(`Approve ${username}?`, options, true);
@@ -261,10 +261,7 @@ adminCommand
       }
 
       console.log();
-      console.log(chalk.yellow("API Key (shown once):"));
-      console.log(chalk.gray(`  ${result.api_key}`));
-      console.log();
-      console.log(chalk.gray("The user has also been emailed their API key"));
+      console.log(chalk.green("User notified to retrieve their API key via 'nemar auth retrieve-key'"));
 
       // Show warning if IAM setup failed
       if (result.warning) {
