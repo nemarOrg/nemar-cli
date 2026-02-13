@@ -51,7 +51,9 @@ import {
   checkDenoInstalled,
   formatValidationResult,
   getValidatorVersion,
+  isValidatorCacheStale,
   runBidsValidatorDirect,
+  updateValidatorCache,
   validateBidsDataset,
 } from "../lib/bids-validator.js";
 import { getConfig, isAuthenticated, isSandboxCompleted } from "../lib/config.js";
@@ -130,6 +132,7 @@ datasetCommand
   .option("-v, --verbose", "Show verbose output")
   .option("--json", "Output results as JSON (for scripting)")
   .option("--version-info", "Show BIDS validator version info")
+  .option("--update", "Force update the BIDS validator to the latest version")
   .allowUnknownOption()
   .addHelpText(
     "after",
@@ -145,6 +148,39 @@ datasetCommand
     $ nemar dataset validate ./ds --max-rows 0           # Headers only`,
   )
   .action(async (datasetPath, options) => {
+    // Handle --update: force-refresh the validator cache
+    if (options.update) {
+      const deno = await checkDenoInstalled();
+      if (!deno.installed) {
+        console.log(chalk.red("Deno is not installed"));
+        console.log("Install Deno: https://deno.com");
+        process.exit(1);
+      }
+
+      const oldVersion = await getValidatorVersion();
+      const spinner = ora("Updating BIDS validator to latest version...").start();
+      const newVersion = await updateValidatorCache();
+
+      if (!newVersion) {
+        spinner.fail("Failed to update BIDS validator");
+        process.exit(1);
+      }
+
+      if (oldVersion && oldVersion !== newVersion) {
+        spinner.succeed(`BIDS validator updated: ${oldVersion} -> ${newVersion}`);
+      } else {
+        spinner.succeed(`BIDS validator is up to date (v${newVersion})`);
+      }
+
+      // If no dataset path given, just update and exit
+      if (!datasetPath || datasetPath === ".") {
+        const cwd = process.cwd();
+        if (!existsSync(resolve(cwd, "dataset_description.json"))) {
+          return;
+        }
+      }
+    }
+
     // Show version info if requested
     if (options.versionInfo) {
       const deno = await checkDenoInstalled();
@@ -154,8 +190,11 @@ datasetCommand
         process.exit(1);
       }
 
+      const stale = isValidatorCacheStale();
       const version = await getValidatorVersion();
-      console.log(`BIDS Validator: ${version || "unknown"}`);
+      console.log(
+        `BIDS Validator: ${version || "unknown"}${stale ? chalk.yellow(" (cache may be stale, run --update to refresh)") : ""}`,
+      );
       console.log(`Deno: ${deno.version || "unknown"}`);
       return;
     }
@@ -186,6 +225,18 @@ datasetCommand
       console.log();
       console.log("Learn more: https://docs.deno.com/runtime/getting_started/installation/");
       process.exit(1);
+    }
+
+    // Auto-refresh stale cache (>7 days old)
+    const forceReload = !!options.update;
+    if (!forceReload && isValidatorCacheStale()) {
+      const refreshSpinner = ora("Checking for BIDS validator updates...").start();
+      const newVersion = await updateValidatorCache();
+      if (newVersion) {
+        refreshSpinner.succeed(`BIDS validator updated to v${newVersion}`);
+      } else {
+        refreshSpinner.info("Could not check for validator updates, using cached version");
+      }
     }
 
     // Resolve and check path
@@ -219,6 +270,7 @@ datasetCommand
         verbose: options.verbose,
         json: options.json,
         extraArgs,
+        forceReload,
       });
 
       // No output + non-zero exit = real failure (e.g. deno error)
