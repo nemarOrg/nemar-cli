@@ -60,14 +60,14 @@ export async function sendVerificationEmail(
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
 </head>
 <body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; line-height: 1.6; color: #333; max-width: 600px; margin: 0 auto; padding: 20px;">
-  <h1 style="color: #2563eb;">Welcome to NEMAR, ${username}!</h1>
+  <h1 style="color: #2563eb;">Welcome to NEMAR, ${escapeHtml(username)}!</h1>
 
   <p>Thank you for signing up for NEMAR (Neuroelectromagnetic Data Archive and Tools Resource).</p>
 
   <p>Please verify your email address by clicking the button below:</p>
 
   <p style="text-align: center; margin: 30px 0;">
-    <a href="${verificationUrl}"
+    <a href="${escapeHtml(verificationUrl)}"
        style="background-color: #2563eb; color: white; padding: 12px 24px; text-decoration: none; border-radius: 6px; display: inline-block;">
       Verify Email Address
     </a>
@@ -75,7 +75,7 @@ export async function sendVerificationEmail(
 
   <p style="color: #666; font-size: 14px;">
     Or copy and paste this link into your browser:<br>
-    <a href="${verificationUrl}" style="color: #2563eb; word-break: break-all;">${verificationUrl}</a>
+    <a href="${escapeHtml(verificationUrl)}" style="color: #2563eb; word-break: break-all;">${escapeHtml(verificationUrl)}</a>
   </p>
 
   <p style="color: #666; font-size: 14px;">This link expires in 24 hours.</p>
@@ -117,7 +117,7 @@ export async function sendKeyReadyEmail(
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
 </head>
 <body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; line-height: 1.6; color: #333; max-width: 600px; margin: 0 auto; padding: 20px;">
-  <h1 style="color: #16a34a;">Congratulations, ${username}!</h1>
+  <h1 style="color: #16a34a;">Congratulations, ${escapeHtml(username)}!</h1>
 
   <p>Your NEMAR account has been approved. You can now upload and manage datasets.</p>
 
@@ -173,7 +173,7 @@ export async function sendKeyRegenerationVerificationEmail(
 <body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; line-height: 1.6; color: #333; max-width: 600px; margin: 0 auto; padding: 20px;">
   <h1 style="color: #f59e0b;">API Key Regeneration Request</h1>
 
-  <p>Hello ${username},</p>
+  <p>Hello ${escapeHtml(username)},</p>
 
   <p>You requested a new API key for your NEMAR account. Click the button below to confirm and generate a new key.</p>
 
@@ -182,7 +182,7 @@ export async function sendKeyRegenerationVerificationEmail(
   </p>
 
   <p style="text-align: center; margin: 30px 0;">
-    <a href="${confirmUrl}"
+    <a href="${escapeHtml(confirmUrl)}"
        style="background-color: #f59e0b; color: white; padding: 12px 24px; text-decoration: none; border-radius: 6px; display: inline-block; font-weight: bold;">
       Generate New API Key
     </a>
@@ -190,7 +190,7 @@ export async function sendKeyRegenerationVerificationEmail(
 
   <p style="color: #666; font-size: 14px;">
     Or copy and paste this link into your browser:<br>
-    <a href="${confirmUrl}" style="color: #2563eb; word-break: break-all;">${confirmUrl}</a>
+    <a href="${escapeHtml(confirmUrl)}" style="color: #2563eb; word-break: break-all;">${escapeHtml(confirmUrl)}</a>
   </p>
 
   <p style="color: #666; font-size: 14px;">This link expires in 1 hour. If you did not request this, you can safely ignore this email.</p>
@@ -239,22 +239,22 @@ export async function sendAdminNotificationEmail(
   <table style="border-collapse: collapse; width: 100%; margin: 16px 0;">
     <tr>
       <td style="padding: 8px 12px; border: 1px solid #e5e7eb; background: #f9fafb; font-weight: bold;">Username</td>
-      <td style="padding: 8px 12px; border: 1px solid #e5e7eb;">${user.username}</td>
+      <td style="padding: 8px 12px; border: 1px solid #e5e7eb;">${escapeHtml(user.username)}</td>
     </tr>
     <tr>
       <td style="padding: 8px 12px; border: 1px solid #e5e7eb; background: #f9fafb; font-weight: bold;">Email</td>
-      <td style="padding: 8px 12px; border: 1px solid #e5e7eb;">${user.email}</td>
+      <td style="padding: 8px 12px; border: 1px solid #e5e7eb;">${escapeHtml(user.email)}</td>
     </tr>
     <tr>
       <td style="padding: 8px 12px; border: 1px solid #e5e7eb; background: #f9fafb; font-weight: bold;">GitHub</td>
       <td style="padding: 8px 12px; border: 1px solid #e5e7eb;">
-        <a href="https://github.com/${user.github_username}" style="color: #2563eb;">${user.github_username}</a>
+        <a href="https://github.com/${escapeHtml(user.github_username)}" style="color: #2563eb;">${escapeHtml(user.github_username)}</a>
       </td>
     </tr>
   </table>
 
   <h2 style="color: #333; font-size: 18px; margin-top: 30px;">Reason for Access</h2>
-  <div style="background-color: #f4f4f5; padding: 16px; border-radius: 8px; margin: 16px 0; white-space: pre-wrap;">${user.description}</div>
+  <div style="background-color: #f4f4f5; padding: 16px; border-radius: 8px; margin: 16px 0; white-space: pre-wrap;">${escapeHtml(user.description)}</div>
 
   <h2 style="color: #333; font-size: 18px; margin-top: 30px;">Action Required</h2>
   <p>Review this user and approve or deny their access using the CLI:</p>
@@ -311,7 +311,7 @@ export async function sendRevocationEmail(
 <body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; line-height: 1.6; color: #333; max-width: 600px; margin: 0 auto; padding: 20px;">
   <h1 style="color: #dc2626;">Account Access Revoked</h1>
 
-  <p>Hello ${username},</p>
+  <p>Hello ${escapeHtml(username)},</p>
 
   <p>Your NEMAR account access has been revoked by an administrator.</p>
 

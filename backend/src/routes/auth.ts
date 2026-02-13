@@ -23,6 +23,16 @@ import {
 } from "../services/token";
 import type { Bindings, Variables } from "../types/bindings";
 
+/** Escape HTML special characters to prevent XSS in inline HTML responses */
+function escapeHtml(str: string): string {
+  return str
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#039;");
+}
+
 export const authRoutes = new Hono<{ Bindings: Bindings; Variables: Variables }>();
 
 /**
@@ -373,7 +383,7 @@ authRoutes.get("/verify", async (c) => {
 <body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; line-height: 1.6; color: #333; max-width: 600px; margin: 0 auto; padding: 40px 20px; text-align: center;">
   <div style="background: linear-gradient(135deg, #16a34a 0%, #22c55e 100%); color: white; padding: 40px 20px; border-radius: 12px; margin-bottom: 30px;">
     <h1 style="margin: 0 0 10px 0; font-size: 28px;">Email Verified!</h1>
-    <p style="margin: 0; font-size: 18px; opacity: 0.9;">Welcome to NEMAR, ${user.username}</p>
+    <p style="margin: 0; font-size: 18px; opacity: 0.9;">Welcome to NEMAR, ${escapeHtml(user.username)}</p>
   </div>
 
   <div style="background: #f9fafb; padding: 30px; border-radius: 12px; text-align: left;">
