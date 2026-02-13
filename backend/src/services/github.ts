@@ -829,6 +829,7 @@ jobs:
 
             var annexed = 0;
             var regular = 0;
+            var skipped = 0;
 
             for (var i = 0; i < files.length; i++) {
               var rel = files[i].rel;
@@ -837,12 +838,21 @@ jobs:
 
               if (annexKey) {
                 var url = S3_BASE + "/" + DATASET_ID + "/objects/" + encodeURIComponent(annexKey);
-                var stream = await fetchUrl(url);
-                archive.append(stream, { name: rel });
-                await new Promise(function (r) {
-                  archive.once("entry", r);
-                });
-                annexed++;
+                try {
+                  var stream = await fetchUrl(url);
+                  archive.append(stream, { name: rel });
+                  await new Promise(function (r) {
+                    archive.once("entry", r);
+                  });
+                  annexed++;
+                } catch (fetchErr) {
+                  skipped++;
+                  if (skipped <= 5) {
+                    console.warn("  Skipping " + rel + ": " + fetchErr.message);
+                  } else if (skipped === 6) {
+                    console.warn("  (suppressing further skip warnings)");
+                  }
+                }
               } else {
                 archive.append(fs.createReadStream(full), { name: rel });
                 await new Promise(function (r) {
@@ -851,16 +861,19 @@ jobs:
                 regular++;
               }
 
-              if ((annexed + regular) % 100 === 0) {
-                console.log("  Progress: " + (annexed + regular) + "/" + files.length);
+              if ((annexed + regular + skipped) % 100 === 0) {
+                console.log("  Progress: " + (annexed + regular + skipped) + "/" + files.length);
               }
             }
 
             await archive.finalize();
             await upload.done();
 
-            console.log("Archive complete: " + annexed + " annexed + " + regular + " regular files");
+            console.log("Archive complete: " + annexed + " annexed + " + regular + " regular + " + skipped + " skipped");
             console.log("Uploaded to s3://" + BUCKET + "/" + s3Key);
+            if (skipped > 0) {
+              console.warn("WARNING: " + skipped + " annexed files were not found in S3");
+            }
           }
 
           main().catch(function (err) {
@@ -874,6 +887,7 @@ jobs:
           AWS_ACCESS_KEY_ID: \${{ secrets.AWS_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: \${{ secrets.AWS_SECRET_ACCESS_KEY }}
           AWS_DEFAULT_REGION: us-east-2
+          NODE_PATH: \${{ github.workspace }}/node_modules
         run: node /tmp/stream-archive.js
 `;
 
