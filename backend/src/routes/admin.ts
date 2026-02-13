@@ -125,6 +125,7 @@ adminRoutes.use("*", adminMiddleware);
  */
 adminRoutes.get("/users", async (c) => {
   const status = c.req.query("status"); // pending, verified, approved, revoked
+  const role = c.req.query("role"); // owner, admin, member
   const db = c.env.DB;
 
   let query = `
@@ -133,11 +134,24 @@ adminRoutes.get("/users", async (c) => {
       email_verified, role, created_at, approved_at, revoked_at
     FROM users
   `;
+  const conditions: string[] = [];
   const params: string[] = [];
 
   if (status) {
-    query += " WHERE status = ?";
+    conditions.push("status = ?");
     params.push(status);
+  }
+  if (role) {
+    if (role === "member") {
+      conditions.push("(role = 'member' OR role IS NULL)");
+    } else {
+      conditions.push("role = ?");
+      params.push(role);
+    }
+  }
+
+  if (conditions.length > 0) {
+    query += ` WHERE ${conditions.join(" AND ")}`;
   }
 
   query += " ORDER BY created_at DESC";
