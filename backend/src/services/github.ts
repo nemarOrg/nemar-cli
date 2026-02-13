@@ -809,6 +809,18 @@ jobs:
             var passThrough = new PassThrough();
             archive.pipe(passThrough);
 
+            archive.on("warning", function (err) {
+              console.warn("Archive warning:", err.message);
+            });
+            archive.on("error", function (err) {
+              console.error("Archive error:", err.message);
+              process.exit(1);
+            });
+            passThrough.on("error", function (err) {
+              console.error("Stream error:", err.message);
+              process.exit(1);
+            });
+
             var s3 = new S3Client({ region: REGION });
             var s3Key = DATASET_ID + "/archives/v" + VERSION + ".zip";
 
@@ -837,7 +849,8 @@ jobs:
               var annexKey = resolveAnnexKey(full);
 
               if (annexKey) {
-                var url = S3_BASE + "/" + DATASET_ID + "/objects/" + encodeURIComponent(annexKey);
+                var encodedPath = rel.split("/").map(encodeURIComponent).join("/");
+                var url = S3_BASE + "/" + DATASET_ID + "/objects/" + encodedPath;
                 try {
                   var stream = await fetchUrl(url);
                   archive.append(stream, { name: rel });
