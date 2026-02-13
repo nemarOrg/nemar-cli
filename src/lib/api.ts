@@ -317,8 +317,14 @@ export interface UsersListResponse {
 /**
  * List users (admin only)
  */
-export async function listUsers(status?: string): Promise<UsersListResponse> {
-  const query = status ? `?status=${status}` : "";
+export async function listUsers(
+  status?: string,
+  role?: string,
+): Promise<UsersListResponse> {
+  const params = new URLSearchParams();
+  if (status) params.set("status", status);
+  if (role) params.set("role", role);
+  const query = params.toString() ? `?${params.toString()}` : "";
   return request<UsersListResponse>(`/admin/users${query}`, {}, true);
 }
 

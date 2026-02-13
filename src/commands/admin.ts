@@ -125,6 +125,7 @@ User Management:
   users          - List users and their status
   approve        - Approve a pending user registration
   revoke         - Revoke user access
+  role           - Change a user's role (owner only: owner > admin > member)
 
 Dataset Management:
   repo     - Manage repository visibility (public/private)
@@ -135,7 +136,9 @@ Dataset Management:
 
 Examples:
   $ nemar admin users --verified           # List users awaiting approval
+  $ nemar admin users --role admin         # List all admins
   $ nemar admin approve john_doe           # Approve a user
+  $ nemar admin role john_doe admin        # Promote user to admin (owner only)
   $ nemar admin repo public nm000104       # Make dataset repo public
   $ nemar admin ci check nm000104          # Check CI status
   $ nemar admin s3 regenerate-iam john_doe # Regenerate AWS credentials
@@ -165,6 +168,17 @@ adminCommand
   .option("--verified", "Show only verified (awaiting approval)")
   .option("--approved", "Show only approved users")
   .option("--revoked", "Show only revoked users")
+  .option("--role <role>", "Filter by role: owner, admin, or member")
+  .addHelpText(
+    "after",
+    `
+Examples:
+  $ nemar admin users                    # List all users
+  $ nemar admin users --verified         # Users awaiting approval
+  $ nemar admin users --role admin       # List all admins
+  $ nemar admin users --role owner       # List all owners
+  $ nemar admin users --approved --role member  # Approved regular users`,
+  )
   .action(async (options) => {
     if (!requireAuth()) return;
 
@@ -175,18 +189,29 @@ adminCommand
     else if (options.approved) status = "approved";
     else if (options.revoked) status = "revoked";
 
+    // Validate role filter
+    const role: string | undefined = options.role;
+    if (role && !["owner", "admin", "member"].includes(role)) {
+      console.error(chalk.red(`Invalid role '${role}'. Must be: owner, admin, or member`));
+      process.exit(1);
+    }
+
     const spinner = ora("Fetching users...").start();
 
     try {
-      const result = await listUsers(status);
+      const result = await listUsers(status, role);
       spinner.stop();
 
       if (result.users.length === 0) {
-        console.log(chalk.yellow("No users found"));
+        const filters = [status, role].filter(Boolean).join(", ");
+        console.log(chalk.yellow(`No users found${filters ? ` (filter: ${filters})` : ""}`));
         return;
       }
 
-      console.log(`\n${chalk.cyan("NEMAR Users")} (${result.count} total)\n`);
+      const filterLabel = [status, role ? `role=${role}` : ""].filter(Boolean).join(", ");
+      console.log(
+        `\n${chalk.cyan("NEMAR Users")} (${result.count} total${filterLabel ? `, filter: ${filterLabel}` : ""})\n`,
+      );
 
       // Display users in a clean format
       for (const user of result.users) {
@@ -198,12 +223,13 @@ adminCommand
             revoked: chalk.red,
           }[user.status] || chalk.white;
 
+        const userRole = user.role || "member";
         const roleBadge =
-          user.role === "owner"
+          userRole === "owner"
             ? chalk.red(" [owner]")
-            : user.role === "admin"
+            : userRole === "admin"
               ? chalk.magenta(" [admin]")
-              : "";
+              : chalk.gray(" [member]");
         const verifiedBadge = user.email_verified ? "" : chalk.gray(" (unverified)");
 
         console.log(`  ${chalk.cyan(user.username)}${roleBadge}`);
@@ -335,6 +361,25 @@ adminCommand
   .argument("<username>", "Username to change role for")
   .argument("<role>", "New role: owner, admin, or member")
   .option("-y, --yes", "Skip confirmation prompt")
+  .addHelpText(
+    "after",
+    `
+Permission Model:
+  owner  - Full access: can manage users, roles, datasets, DOIs, and system settings
+  admin  - Can approve/revoke users, manage datasets and DOIs
+  member - Can upload and manage their own datasets only
+
+Rules:
+  - Only owners can change roles
+  - You cannot change your own role (prevents self-lockout)
+  - The last owner cannot be demoted (prevents total lockout)
+  - Demoting a user revokes their tokens (they must re-login)
+
+Examples:
+  $ nemar admin role john_doe admin        # Promote to admin
+  $ nemar admin role john_doe member       # Demote to member
+  $ nemar admin role jane_doe owner -y     # Promote to owner (skip confirm)`,
+  )
   .action(async (username: string, role: string, options: { yes?: boolean }) => {
     if (!requireAuth()) return;
 
