@@ -213,10 +213,7 @@ export interface RetrieveKeyResponse {
   error?: string;
 }
 
-export async function retrieveKey(
-  email: string,
-  password: string,
-): Promise<RetrieveKeyResponse> {
+export async function retrieveKey(email: string, password: string): Promise<RetrieveKeyResponse> {
   return request<RetrieveKeyResponse>("/auth/retrieve-key", {
     method: "POST",
     body: JSON.stringify({ email, password }),
@@ -317,10 +314,7 @@ export interface UsersListResponse {
 /**
  * List users (admin only)
  */
-export async function listUsers(
-  status?: string,
-  role?: string,
-): Promise<UsersListResponse> {
+export async function listUsers(status?: string, role?: string): Promise<UsersListResponse> {
   const params = new URLSearchParams();
   if (status) params.set("status", status);
   if (role) params.set("role", role);
