@@ -726,7 +726,11 @@ jobs:
           node-version: "20"
 
       - name: Install streaming dependencies
-        run: npm install --no-save archiver @aws-sdk/client-s3 @aws-sdk/lib-storage
+        run: |
+          mkdir -p /tmp/archive-deps
+          cd /tmp/archive-deps
+          npm init -y > /dev/null
+          npm install --no-save archiver @aws-sdk/client-s3 @aws-sdk/lib-storage
 
       - name: Write archive script
         run: |
@@ -790,7 +794,7 @@ jobs:
             var entries = fs.readdirSync(dir, { withFileTypes: true });
             for (var i = 0; i < entries.length; i++) {
               var entry = entries[i];
-              if (entry.name === ".git" || entry.name === ".github") continue;
+              if (entry.name === ".git" || entry.name === ".github" || entry.name === "node_modules") continue;
               var rel = base ? base + "/" + entry.name : entry.name;
               var full = path.join(dir, entry.name);
               if (entry.isDirectory()) {
@@ -900,7 +904,7 @@ jobs:
           AWS_ACCESS_KEY_ID: \${{ secrets.AWS_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: \${{ secrets.AWS_SECRET_ACCESS_KEY }}
           AWS_DEFAULT_REGION: us-east-2
-          NODE_PATH: \${{ github.workspace }}/node_modules
+          NODE_PATH: /tmp/archive-deps/node_modules
         run: node /tmp/stream-archive.js
 `;
 
