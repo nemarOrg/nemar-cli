@@ -142,6 +142,9 @@ adminRoutes.get("/users", async (c) => {
     params.push(status);
   }
   if (role) {
+    if (!["owner", "admin", "member"].includes(role)) {
+      return c.json({ error: "Invalid role. Must be: owner, admin, or member" }, 400);
+    }
     if (role === "member") {
       conditions.push("(role = 'member' OR role IS NULL)");
     } else {
