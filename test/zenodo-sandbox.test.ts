@@ -16,8 +16,9 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { TEST_CONFIG, sleep, testRequest } from "./setup";
 
-// Only run these tests when explicitly enabled
-const SHOULD_RUN = process.env.RUN_ZENODO_TESTS === "true";
+// Only run these tests when explicitly enabled AND API key is available
+const SHOULD_RUN =
+  process.env.RUN_ZENODO_TESTS === "true" && !!process.env.ZENODO_SANDBOX_API_KEY;
 
 // We need a dataset to test with - use disposable test dataset
 const TEST_DATASET_ID = process.env.TEST_DATASET_ID || "nm099999";
@@ -31,9 +32,9 @@ const createdDepositions: number[] = [];
 // Safety check: detect if production token is accidentally used
 beforeAll(() => {
   if (!SHOULD_RUN) {
-    console.log("\n⚠️  Zenodo sandbox tests are SKIPPED by default.");
+    console.log("\n  Zenodo sandbox tests are SKIPPED by default.");
     console.log(
-      "   To run: RUN_ZENODO_TESTS=true TEST_DATASET_ID=nm099999 bun test test/zenodo-sandbox.test.ts\n",
+      "   To run: RUN_ZENODO_TESTS=true ZENODO_SANDBOX_API_KEY=<key> bun test test/zenodo-sandbox.test.ts\n",
     );
     return;
   }
