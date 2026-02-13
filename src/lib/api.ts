@@ -205,6 +205,31 @@ export async function resendVerification(email: string): Promise<{ message: stri
   });
 }
 
+export interface RetrieveKeyResponse {
+  message: string;
+  api_key?: string;
+  api_key_prefix?: string;
+  note?: string;
+  error?: string;
+}
+
+export async function retrieveKey(
+  email: string,
+  password: string,
+): Promise<RetrieveKeyResponse> {
+  return request<RetrieveKeyResponse>("/auth/retrieve-key", {
+    method: "POST",
+    body: JSON.stringify({ email, password }),
+  });
+}
+
+export async function requestKeyRegeneration(email: string): Promise<{ message: string }> {
+  return request<{ message: string }>("/auth/request-key-regeneration", {
+    method: "POST",
+    body: JSON.stringify({ email }),
+  });
+}
+
 // ============================================================================
 // User
 // ============================================================================

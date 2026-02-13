@@ -24,7 +24,7 @@ import {
   resolveEzidAuth,
 } from "../services/doi";
 import {
-  sendApprovalEmail,
+  sendKeyReadyEmail,
   sendPublicationApprovedEmail,
   sendPublicationDeniedEmail,
   sendRevocationEmail,
@@ -431,7 +431,7 @@ adminRoutes.post("/approve/:username", async (c) => {
   // Send approval email with API key
   let emailSent = false;
   try {
-    await sendApprovalEmail(user.email, user.username, apiKey, c.env.RESEND_API_KEY);
+    await sendKeyReadyEmail(user.email, user.username, c.env.RESEND_API_KEY);
     emailSent = true;
   } catch (error) {
     console.error("Failed to send approval email:", error);

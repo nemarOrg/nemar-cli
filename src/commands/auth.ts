@@ -24,7 +24,9 @@ import {
   checkUsername,
   getCurrentUser,
   login,
+  requestKeyRegeneration,
   resendVerification,
+  retrieveKey,
   signup,
 } from "../lib/api.js";
 import {
@@ -59,15 +61,18 @@ Description:
   their email, and be approved by an admin before they can upload datasets.
 
 Workflow:
-  1. nemar auth signup     - Register a new account
-  2. Verify your email     - Click the link in the verification email
-  3. Wait for approval     - Admin will review your request
-  4. nemar auth login      - Log in with your API key (sent after approval)
+  1. nemar auth signup         - Register a new account
+  2. Verify your email         - Click the link in the verification email
+  3. Wait for approval         - Admin will review your request
+  4. nemar auth retrieve-key   - Retrieve your API key (requires password)
+  5. nemar auth login           - Log in with your API key
 
 Examples:
   $ nemar auth signup                    # Start registration
+  $ nemar auth retrieve-key             # Get your API key after approval
   $ nemar auth login                     # Interactive login
   $ nemar auth login -k <api-key>        # Login with API key
+  $ nemar auth regenerate-key           # Get a new API key (revokes old)
   $ nemar auth status --refresh          # Check authentication status
   $ nemar auth whoami                    # Alias for status
   $ nemar auth logout                    # Clear credentials`,
@@ -344,7 +349,7 @@ export async function signupAction(): Promise<void> {
       console.log(`  ${i + 1}. ${step}`);
     });
     console.log();
-    console.log(chalk.gray("Once approved, use 'nemar auth login' with your API key"));
+    console.log(chalk.gray("Once approved, use 'nemar auth retrieve-key' to get your API key"));
   } catch (error) {
     if (error instanceof ApiError) {
       spinner.fail(error.message);
@@ -643,3 +648,149 @@ Examples:
   $ nemar auth setup-ssh --force  # Regenerate key even if exists`,
   )
   .action(setupSSHAction);
+
+// ============================================================================
+// Retrieve Key (after approval)
+// ============================================================================
+
+authCommand
+  .command("retrieve-key")
+  .description("Retrieve your API key after account approval (requires email and password)")
+  .addHelpText(
+    "after",
+    `
+Description:
+  After an admin approves your account, use this command to securely
+  retrieve your API key. You will need the email and password you used
+  during signup.
+
+  API keys are not sent via email for security. This is the only way
+  to obtain your key.
+
+Examples:
+  $ nemar auth retrieve-key`,
+  )
+  .action(async () => {
+    const answers = await inquirer.prompt([
+      {
+        type: "input",
+        name: "email",
+        message: "Email address:",
+        validate: (input) => {
+          if (!input || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(input)) {
+            return "Please enter a valid email address";
+          }
+          return true;
+        },
+      },
+      {
+        type: "password",
+        name: "password",
+        message: "Password:",
+        mask: "*",
+        validate: (input) => {
+          if (!input) return "Password is required";
+          return true;
+        },
+      },
+    ]);
+
+    const spinner = ora("Retrieving API key...").start();
+
+    try {
+      const result = await retrieveKey(answers.email, answers.password);
+
+      if (result.api_key) {
+        spinner.succeed("API key retrieved");
+        console.log();
+        console.log(chalk.yellow("Your API Key (store this securely):"));
+        console.log(chalk.gray(`  ${result.api_key}`));
+        console.log();
+        console.log("Next step:");
+        console.log(`  Run ${chalk.cyan("nemar auth login")} and paste your API key`);
+      } else if (result.api_key_prefix) {
+        spinner.info("API key already issued");
+        console.log();
+        console.log(`  Key prefix: ${chalk.gray(result.api_key_prefix)}`);
+        console.log();
+        console.log("  If you lost your API key, regenerate it:");
+        console.log(`  ${chalk.cyan("nemar auth regenerate-key")}`);
+      } else {
+        spinner.succeed(result.message);
+      }
+    } catch (error) {
+      if (error instanceof ApiError) {
+        spinner.fail(error.message);
+        if (error.statusCode === 401) {
+          console.log(chalk.gray("  Check your email and password"));
+        } else if (error.statusCode === 403) {
+          console.log(chalk.gray("  Your account may not be approved yet"));
+        }
+      } else {
+        spinner.fail("Failed to retrieve API key");
+        console.log(chalk.gray("  Check your internet connection"));
+      }
+    }
+  });
+
+// ============================================================================
+// Regenerate Key
+// ============================================================================
+
+authCommand
+  .command("regenerate-key")
+  .description("Request a new API key (revokes current key, requires email verification)")
+  .addHelpText(
+    "after",
+    `
+Description:
+  If you lost your API key or it was compromised, use this command to
+  request a new one. A verification email will be sent to confirm the
+  request. Clicking the link will:
+
+  1. Revoke your current API key
+  2. Generate a new API key (shown in the browser)
+  3. You will need to login again with the new key
+
+Examples:
+  $ nemar auth regenerate-key`,
+  )
+  .action(async () => {
+    console.log(chalk.yellow("API Key Regeneration"));
+    console.log(chalk.gray("This will revoke your current key and generate a new one\n"));
+
+    const { email } = await inquirer.prompt([
+      {
+        type: "input",
+        name: "email",
+        message: "Email address associated with your account:",
+        validate: (input) => {
+          if (!input || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(input)) {
+            return "Please enter a valid email address";
+          }
+          return true;
+        },
+      },
+    ]);
+
+    const spinner = ora("Sending verification email...").start();
+
+    try {
+      const result = await requestKeyRegeneration(email);
+      spinner.succeed("Verification email sent");
+      console.log();
+      console.log("Next steps:");
+      console.log("  1. Check your email for a verification link");
+      console.log("  2. Click the link to generate your new API key");
+      console.log("  3. Copy the new key and run 'nemar auth login'");
+      console.log();
+      console.log(chalk.gray("The link expires in 1 hour"));
+    } catch (error) {
+      if (error instanceof ApiError) {
+        spinner.fail(error.message);
+      } else {
+        spinner.fail("Failed to send verification email");
+        console.log(chalk.gray("  Check your internet connection"));
+      }
+    }
+  });
