@@ -26,6 +26,9 @@ Authorization: Bearer nemar_your_api_key
 | POST | /auth/signup | Register new user |
 | GET | /auth/me | Get current user |
 | POST | /auth/resend-verification | Resend email verification |
+| POST | /auth/retrieve-key | Retrieve API key (email + password) |
+| POST | /auth/request-key-regeneration | Request key regeneration |
+| GET | /auth/confirm-key-regeneration | Confirm key regeneration |
 
 ### Datasets
 

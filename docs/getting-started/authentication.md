@@ -7,7 +7,8 @@ NEMAR uses API key authentication with an admin approval workflow.
 1. **Sign up** - Create an account with your details
 2. **Verify email** - Click the link in the verification email
 3. **Wait for approval** - Admin reviews your request
-4. **Log in** - Use your API key to authenticate
+4. **Retrieve API key** - Use `nemar auth retrieve-key` with your email and password
+5. **Log in** - Use your API key to authenticate
 
 ## Creating an Account
 
@@ -81,4 +82,10 @@ Your API key is linked to:
 - Your GitHub Personal Access Token (for repository operations)
 - Your S3 credentials (for data upload/download)
 
-If you suspect your key is compromised, contact an admin immediately.
+If you suspect your key is compromised, regenerate it immediately:
+
+```bash
+nemar auth regenerate-key
+```
+
+This sends a verification email and revokes the old key upon confirmation.
