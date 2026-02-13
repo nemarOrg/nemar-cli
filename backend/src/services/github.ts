@@ -373,6 +373,35 @@ export async function setRepoVisibility(
   return { ok: true, status: response.status };
 }
 
+export async function setRepoDescription(
+  repo: string,
+  description: string,
+  pat: string,
+): Promise<{ ok: boolean; status: number; error?: string }> {
+  let response: Response;
+  try {
+    response = await fetch(`${GITHUB_API}/repos/${ORG_NAME}/${repo}`, {
+      method: "PATCH",
+      headers: {
+        Authorization: `Bearer ${pat}`,
+        Accept: "application/vnd.github.v3+json",
+        "User-Agent": "NEMAR-API",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ description }),
+    });
+  } catch (fetchError) {
+    const msg = fetchError instanceof Error ? fetchError.message : String(fetchError);
+    return { ok: false, status: 0, error: `Network error: ${msg}` };
+  }
+
+  if (!response.ok) {
+    const body = await response.text().catch(() => "");
+    return { ok: false, status: response.status, error: body || `HTTP ${response.status}` };
+  }
+  return { ok: true, status: response.status };
+}
+
 interface WorkflowRun {
   id: number;
   status: string;

@@ -124,14 +124,14 @@ describe("ANVL encoding", () => {
 });
 
 describe("utility functions", () => {
-  test("getDoiUrl formats DOI URL", () => {
-    expect(getDoiUrl("doi:10.82901/NEMAR.ABC123")).toBe("https://doi.org/10.82901/NEMAR.ABC123");
-    expect(getDoiUrl("10.82901/NEMAR.ABC123")).toBe("https://doi.org/10.82901/NEMAR.ABC123");
+  test("getDoiUrl formats DOI URL in lowercase", () => {
+    expect(getDoiUrl("doi:10.82901/NEMAR.ABC123")).toBe("https://doi.org/10.82901/nemar.abc123");
+    expect(getDoiUrl("10.82901/NEMAR.ABC123")).toBe("https://doi.org/10.82901/nemar.abc123");
   });
 
-  test("extractDoi strips doi: prefix", () => {
-    expect(extractDoi("doi:10.82901/NEMAR.ABC123")).toBe("10.82901/NEMAR.ABC123");
-    expect(extractDoi("10.82901/NEMAR.ABC123")).toBe("10.82901/NEMAR.ABC123");
+  test("extractDoi strips doi: prefix and lowercases", () => {
+    expect(extractDoi("doi:10.82901/NEMAR.ABC123")).toBe("10.82901/nemar.abc123");
+    expect(extractDoi("10.82901/NEMAR.ABC123")).toBe("10.82901/nemar.abc123");
   });
 
   test("isTestShoulder identifies test shoulders", () => {

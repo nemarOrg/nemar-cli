@@ -3010,6 +3010,17 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
         pat,
       );
 
+      // Update GitHub repo description with dataset name and DOI
+      const { setRepoDescription } = await import("../services/github.js");
+      const descResult = await setRepoDescription(
+        repoName,
+        `${dataset.name} - DOI: ${conceptDoi}`,
+        pat,
+      );
+      if (!descResult.ok) {
+        console.warn(`[publish] Failed to set repo description (non-fatal): ${descResult.error}`);
+      }
+
       await updateProgress("update_readme");
     } catch (err) {
       const msg = errorMessage(err);
