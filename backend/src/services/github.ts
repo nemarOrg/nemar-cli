@@ -690,6 +690,8 @@ jobs:
 `;
 
   // Generate Archive workflow (triggered via repository_dispatch)
+  // Streams files directly from S3 into a zip and uploads via multipart,
+  // so disk usage is constant regardless of dataset size.
   const generateArchive = `name: Generate Archive
 
 on:
@@ -718,45 +720,161 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: v\${{ github.event.client_payload.version }}
-          fetch-depth: 0
 
-      - name: Install git-annex
-        run: sudo apt-get update && sudo apt-get install -y git-annex
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
 
-      - name: Configure git
+      - name: Install streaming dependencies
+        run: npm install --no-save archiver @aws-sdk/client-s3 @aws-sdk/lib-storage
+
+      - name: Write archive script
         run: |
-          git config --global user.email "actions@github.com"
-          git config --global user.name "GitHub Actions"
+          cat > /tmp/stream-archive.js << 'ARCHIVE_SCRIPT'
+          var fs = require("fs");
+          var path = require("path");
+          var S3Client = require("@aws-sdk/client-s3").S3Client;
+          var Upload = require("@aws-sdk/lib-storage").Upload;
+          var archiver = require("archiver");
+          var PassThrough = require("stream").PassThrough;
+          var https = require("https");
+          var http = require("http");
 
-      - name: Fetch git-annex branch and get data
-        run: |
-          git fetch origin git-annex:git-annex
-          git annex init "archive-worker"
-          git annex get .
+          var DATASET_ID = process.env.DATASET_ID;
+          var VERSION = process.env.VERSION;
+          var BUCKET = "nemar";
+          var REGION = process.env.AWS_DEFAULT_REGION || "us-east-2";
+          var S3_BASE = "https://" + BUCKET + ".s3." + REGION + ".amazonaws.com";
 
-      - name: Verify all files retrieved
-        run: |
-          MISSING=\$(git annex find --not --in here 2>/dev/null | wc -l)
-          if [ "\$MISSING" -gt 0 ]; then
-            echo "::error::\$MISSING files could not be retrieved"
-            git annex find --not --in here
-            exit 1
-          fi
+          function resolveAnnexKey(filePath) {
+            try {
+              var stat = fs.lstatSync(filePath);
+              if (stat.isSymbolicLink()) {
+                var target = fs.readlinkSync(filePath);
+                var m = target.match(/([^\\/]+)\\/\\1$/);
+                if (m) return m[1];
+                var m2 = target.match(/\\/annex\\/objects\\/(.+)$/);
+                if (m2) return m2[1];
+              } else if (stat.isFile() && stat.size < 500 && stat.size > 20) {
+                var content = fs.readFileSync(filePath, "utf8").trim();
+                var m3 = content.match(/^\\/annex\\/objects\\/(.+)$/);
+                if (m3) return m3[1];
+              }
+            } catch (e) {}
+            return null;
+          }
 
-      - name: Create archive
-        run: |
-          zip -r "/tmp/\${DATASET_ID}-v\${VERSION}.zip" . -x ".git/*"
-          echo "Archive size: \$(du -h /tmp/\${DATASET_ID}-v\${VERSION}.zip | cut -f1)"
+          function fetchUrl(url) {
+            return new Promise(function (resolve, reject) {
+              var mod = url.indexOf("https") === 0 ? https : http;
+              mod
+                .get(url, function (res) {
+                  if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+                    fetchUrl(res.headers.location).then(resolve).catch(reject);
+                    return;
+                  }
+                  if (res.statusCode !== 200) {
+                    res.resume();
+                    reject(new Error("HTTP " + res.statusCode + " for " + url));
+                    return;
+                  }
+                  resolve(res);
+                })
+                .on("error", reject);
+            });
+          }
 
-      - name: Upload to S3
+          function walkDir(dir, base) {
+            base = base || "";
+            var result = [];
+            var entries = fs.readdirSync(dir, { withFileTypes: true });
+            for (var i = 0; i < entries.length; i++) {
+              var entry = entries[i];
+              if (entry.name === ".git" || entry.name === ".github") continue;
+              var rel = base ? base + "/" + entry.name : entry.name;
+              var full = path.join(dir, entry.name);
+              if (entry.isDirectory()) {
+                result = result.concat(walkDir(full, rel));
+              } else {
+                result.push({ rel: rel, full: full });
+              }
+            }
+            return result;
+          }
+
+          async function main() {
+            console.log("Streaming archive for " + DATASET_ID + " v" + VERSION);
+
+            var archive = archiver("zip", { zlib: { level: 1 } });
+            var passThrough = new PassThrough();
+            archive.pipe(passThrough);
+
+            var s3 = new S3Client({ region: REGION });
+            var s3Key = DATASET_ID + "/archives/v" + VERSION + ".zip";
+
+            var upload = new Upload({
+              client: s3,
+              params: {
+                Bucket: BUCKET,
+                Key: s3Key,
+                Body: passThrough,
+                ContentType: "application/zip",
+              },
+              queueSize: 4,
+              partSize: 10 * 1024 * 1024,
+            });
+
+            var files = walkDir(".");
+            console.log("Found " + files.length + " files");
+
+            var annexed = 0;
+            var regular = 0;
+
+            for (var i = 0; i < files.length; i++) {
+              var rel = files[i].rel;
+              var full = files[i].full;
+              var annexKey = resolveAnnexKey(full);
+
+              if (annexKey) {
+                var url = S3_BASE + "/" + DATASET_ID + "/objects/" + encodeURIComponent(annexKey);
+                var stream = await fetchUrl(url);
+                archive.append(stream, { name: rel });
+                await new Promise(function (r) {
+                  archive.once("entry", r);
+                });
+                annexed++;
+              } else {
+                archive.append(fs.createReadStream(full), { name: rel });
+                await new Promise(function (r) {
+                  archive.once("entry", r);
+                });
+                regular++;
+              }
+
+              if ((annexed + regular) % 100 === 0) {
+                console.log("  Progress: " + (annexed + regular) + "/" + files.length);
+              }
+            }
+
+            await archive.finalize();
+            await upload.done();
+
+            console.log("Archive complete: " + annexed + " annexed + " + regular + " regular files");
+            console.log("Uploaded to s3://" + BUCKET + "/" + s3Key);
+          }
+
+          main().catch(function (err) {
+            console.error("Fatal:", err);
+            process.exit(1);
+          });
+          ARCHIVE_SCRIPT
+
+      - name: Stream archive to S3
         env:
           AWS_ACCESS_KEY_ID: \${{ secrets.AWS_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: \${{ secrets.AWS_SECRET_ACCESS_KEY }}
           AWS_DEFAULT_REGION: us-east-2
-        run: |
-          aws s3 cp "/tmp/\${DATASET_ID}-v\${VERSION}.zip" \\
-            "s3://nemar/\${DATASET_ID}/archives/v\${VERSION}.zip"
-          echo "Uploaded archive to s3://nemar/\${DATASET_ID}/archives/v\${VERSION}.zip"
+        run: node /tmp/stream-archive.js
 `;
 
   // Deploy each workflow
