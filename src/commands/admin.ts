@@ -287,7 +287,9 @@ adminCommand
       }
 
       console.log();
-      console.log(chalk.green("User notified to retrieve their API key via 'nemar auth retrieve-key'"));
+      console.log(
+        chalk.green("User notified to retrieve their API key via 'nemar auth retrieve-key'"),
+      );
 
       // Show warning if IAM setup failed
       if (result.warning) {
