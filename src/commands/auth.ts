@@ -475,26 +475,13 @@ authCommand
 /** Try to switch the gh CLI to the matching GitHub account (best-effort) */
 async function switchGitHubAuth(githubUsername: string): Promise<void> {
   try {
-    const { spawn, which } = await import("bun");
-    // Resolve full path; gh may be in a PATH segment only set up in shell profiles
-    let ghPath = which("gh");
+    // Use Bun globals directly; dynamic import("bun") gets mangled by bun build --minify
+    const ghPath = Bun.which("gh");
     if (!ghPath) {
-      // Fallback: ask the user's login shell to resolve it
-      const shell = process.env.SHELL || "/bin/sh";
-      const lookup = spawn({
-        cmd: [shell, "-ilc", "which gh"],
-        stdout: "pipe",
-        stderr: "pipe",
-      });
-      const resolved = (await new Response(lookup.stdout).text()).trim();
-      await lookup.exited;
-      if (!resolved || resolved.includes("not found")) {
-        console.log(chalk.gray("  GitHub CLI (gh) not found in PATH, skipping"));
-        return;
-      }
-      ghPath = resolved;
+      console.log(chalk.gray("  GitHub CLI (gh) not found in PATH, skipping"));
+      return;
     }
-    const proc = spawn({
+    const proc = Bun.spawn({
       cmd: [ghPath, "auth", "switch", "--user", githubUsername],
       stdout: "pipe",
       stderr: "pipe",
