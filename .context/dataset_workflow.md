@@ -31,24 +31,20 @@ CREATE TABLE dataset_registry (
   FOREIGN KEY (owner_user_id) REFERENCES users(id)
 );
 
--- Sequence table for ID generation
-CREATE TABLE id_sequence (
-  prefix TEXT PRIMARY KEY,              -- 'nm'
-  next_number INTEGER DEFAULT 100       -- starts at nm000100
-);
 ```
 
-**ID Generation Flow:**
+**ID Generation Flow (gap-reuse):**
 ```
 1. User: nemar dataset upload /path/to/bids --name "My Dataset"
-2. Backend:
-   - BEGIN TRANSACTION
-   - SELECT next_number FROM id_sequence WHERE prefix = 'nm'
-   - UPDATE id_sequence SET next_number = next_number + 1
-   - dataset_id = 'nm' + padStart(next_number, 6, '0')  -- nm000108
-   - INSERT INTO dataset_registry (dataset_id, name, ...)
-   - COMMIT
+2. Backend (see backend/src/services/datasetId.ts):
+   - Find lowest unused number by checking gaps in the datasets table
+   - Candidates: start number (108 for nm) + each existing_number+1
+   - Pick MIN(candidate) not already in datasets table
+   - INSERT claiming row with dataset_id, retry on UNIQUE conflict
 3. Return: dataset_id to CLI
+
+Note: Deleted dataset IDs are reused. The old id_sequence table
+is no longer used; gap-finding queries the datasets table directly.
 ```
 
 ---

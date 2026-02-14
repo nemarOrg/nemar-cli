@@ -156,8 +156,33 @@ datasetRoutes.post("/", authMiddleware, zValidator("json", createDatasetSchema),
     return c.json({ error: "Failed to access S3 credentials" }, 500);
   }
 
-  // Generate dataset ID (xx000XXX for sandbox, nm000XXX for regular)
-  const datasetId = await generateDatasetId(db, !!sandbox);
+  // Generate dataset ID (xx000XXX for sandbox, nm000XXX for regular).
+  // There is a TOCTOU gap between ID generation (SELECT) and the INSERT
+  // below. The UNIQUE constraint on datasets.dataset_id prevents duplicates;
+  // we retry on conflict to handle the rare concurrent-creation case.
+  let datasetId: string;
+  const MAX_ID_RETRIES = 3;
+  for (let attempt = 0; ; attempt++) {
+    datasetId = await generateDatasetId(db, !!sandbox);
+    try {
+      // Claim the ID early with a minimal INSERT to close the TOCTOU gap
+      await db
+        .prepare(
+          `INSERT INTO datasets (dataset_id, name, description, owner_user_id, github_repo, is_sandbox, visibility)
+           VALUES (?, ?, ?, ?, '', ?, 'private')`,
+        )
+        .bind(datasetId, name, description || null, user.id, sandbox ? 1 : 0)
+        .run();
+      break; // ID claimed successfully
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (attempt < MAX_ID_RETRIES - 1 && msg.includes("UNIQUE constraint failed")) {
+        continue; // Retry with a new ID
+      }
+      console.error("Failed to reserve dataset ID:", err);
+      return c.json({ error: "Failed to reserve dataset ID" }, 500);
+    }
+  }
 
   // Create GitHub repository
   let githubRepo: GitHubRepo;
@@ -170,6 +195,8 @@ datasetRoutes.post("/", authMiddleware, zValidator("json", createDatasetSchema),
     );
   } catch (error) {
     console.error("Failed to create GitHub repo:", error);
+    // Clean up the claimed dataset row
+    await db.prepare("DELETE FROM datasets WHERE dataset_id = ?").bind(datasetId).run();
     return c.json({ error: "Failed to create GitHub repository" }, 500);
   }
 
@@ -262,23 +289,10 @@ datasetRoutes.post("/", authMiddleware, zValidator("json", createDatasetSchema),
     }
   }
 
-  // Insert dataset record
+  // Update the claimed dataset record with the GitHub repo info
   await db
-    .prepare(
-      `
-    INSERT INTO datasets (dataset_id, name, description, owner_user_id, github_repo, is_sandbox, visibility)
-    VALUES (?, ?, ?, ?, ?, ?, ?)
-  `,
-    )
-    .bind(
-      datasetId,
-      name,
-      description || null,
-      user.id,
-      githubRepo.full_name,
-      sandbox ? 1 : 0,
-      "private",
-    )
+    .prepare("UPDATE datasets SET github_repo = ? WHERE dataset_id = ?")
+    .bind(githubRepo.full_name, datasetId)
     .run();
 
   // Audit log

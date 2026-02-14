@@ -22,6 +22,7 @@ import {
 } from "./commands/auth.js";
 import { datasetCommand } from "./commands/dataset.js";
 import { sandboxCommand } from "./commands/sandbox.js";
+import { NO_DESCRIPTION, NO_OPTION, YES_DESCRIPTION, YES_OPTION } from "./lib/confirm.js";
 import { version } from "./lib/version.js";
 
 const program = new Command();
@@ -69,13 +70,16 @@ program
   .command("login")
   .description("Authenticate with your API key (shortcut for 'auth login')")
   .option("-k, --key <key>", "API key (alternative: set NEMAR_API_KEY env var)")
-  .option("-f, --force", "Skip confirmation if already logged in")
+  .option(YES_OPTION, YES_DESCRIPTION)
+  .option(NO_OPTION, NO_DESCRIPTION)
   .action(loginAction);
 
 program
   .command("logout")
-  .description("Clear stored credentials (shortcut for 'auth logout')")
-  .option("-f, --force", "Skip confirmation prompt")
+  .description("Remove the active account (shortcut for 'auth logout')")
+  .option(YES_OPTION, YES_DESCRIPTION)
+  .option(NO_OPTION, NO_DESCRIPTION)
+  .option("--all", "Remove all stored accounts")
   .action(logoutAction);
 
 program

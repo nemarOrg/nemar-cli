@@ -20,10 +20,12 @@
 import Conf from "conf";
 import { z } from "zod";
 
+const DEFAULT_API_URL = "https://api.osc.earth/nemar";
+
 // Per-account configuration schema
 const accountSchema = z.object({
   apiKey: z.string().optional(),
-  apiUrl: z.string().url().default("https://api.osc.earth/nemar"),
+  apiUrl: z.string().url().default(DEFAULT_API_URL),
   username: z.string().optional(),
   email: z.string().email().optional(),
   githubUsername: z.string().optional(),
@@ -41,11 +43,12 @@ export interface AccountInfo {
   active: boolean;
 }
 
-// Full store schema (accounts map + activeAccount + legacy flat fields)
+// Full store schema. Legacy flat fields are kept so migrateConfig() can read
+// pre-multi-account configs and convert them to the accounts structure.
 interface StoreSchema {
   activeAccount?: string;
   accounts?: Record<string, Config>;
-  // Legacy flat fields (pre-migration)
+  // Legacy flat fields (read by migrateConfig, not used at runtime)
   apiKey?: string;
   apiUrl?: string;
   username?: string;
@@ -62,13 +65,14 @@ const config = new Conf<StoreSchema>({
     activeAccount: { type: "string" },
     accounts: { type: "object" },
     apiKey: { type: "string" },
-    apiUrl: { type: "string", default: "https://api.osc.earth/nemar" },
+    apiUrl: { type: "string", default: DEFAULT_API_URL },
     username: { type: "string" },
     email: { type: "string" },
     githubUsername: { type: "string" },
     sandboxCompleted: { type: "boolean" },
     sandboxDatasetId: { type: "string" },
   },
+  // Support NEMAR_CONFIG_DIR env var for test isolation
   ...(process.env.NEMAR_CONFIG_DIR ? { cwd: process.env.NEMAR_CONFIG_DIR } : {}),
 });
 
@@ -84,7 +88,7 @@ const ACCOUNT_FIELDS: (keyof Config)[] = [
 
 /**
  * Migrate legacy flat config to multi-account structure.
- * Called automatically on first access. Safe to call multiple times.
+ * Called automatically on module load. Safe to call multiple times.
  */
 export function migrateConfig(): void {
   // Already migrated if accounts exists and has entries
@@ -110,8 +114,8 @@ export function migrateConfig(): void {
 
     // Atomic write: replace entire store at once
     config.store = { activeAccount: accountName, accounts: { [accountName]: account } };
-  } catch {
-    // Migration failed; leave legacy fields intact so the CLI still works
+  } catch (error) {
+    console.error("Config migration failed (legacy config preserved):", error);
   }
 }
 
@@ -136,12 +140,10 @@ function getAccountsMap(): Record<string, Config> {
  * Get the current (active account) configuration
  */
 export function getConfig(): Config {
+  const defaultConfig: Config = { apiUrl: DEFAULT_API_URL };
   const active = getActiveAccountName();
-  if (!active) {
-    return { apiUrl: "https://api.osc.earth/nemar" };
-  }
-  const accounts = getAccountsMap();
-  return accounts[active] || { apiUrl: "https://api.osc.earth/nemar" };
+  if (!active) return defaultConfig;
+  return getAccountsMap()[active] || defaultConfig;
 }
 
 /**
@@ -155,22 +157,15 @@ export function isSandboxCompleted(): boolean {
  * Set a configuration value on the active account
  */
 export function setConfig<K extends keyof Config>(key: K, value: Config[K]): void {
-  const active = getActiveAccountName();
-  if (!active) {
-    // No active account yet; create a temporary one
-    const accounts = getAccountsMap();
-    const name = "default";
-    accounts[name] = { ...(accounts[name] || {}), [key]: value };
-    config.set("accounts", accounts);
-    config.set("activeAccount", name);
-    return;
-  }
+  const name = getActiveAccountName() || "default";
   const accounts = getAccountsMap();
-  if (!accounts[active]) {
-    accounts[active] = { apiUrl: "https://api.osc.earth/nemar" };
+
+  if (!accounts[name]) {
+    accounts[name] = { apiUrl: DEFAULT_API_URL };
   }
-  (accounts[active] as Record<string, unknown>)[key] = value;
-  config.set("accounts", accounts);
+  (accounts[name] as Record<string, unknown>)[key] = value;
+
+  config.store = { ...config.store, accounts, activeAccount: name };
 }
 
 /**
@@ -202,8 +197,7 @@ export function clearConfig(): void {
 
   const remaining = Object.keys(accounts);
   if (remaining.length > 0) {
-    config.set("accounts", accounts);
-    config.set("activeAccount", remaining[0]);
+    config.store = { ...config.store, accounts, activeAccount: remaining[0] };
   } else {
     config.clear();
   }
@@ -251,8 +245,7 @@ export function getAccounts(): AccountInfo[] {
 export function storeAccount(username: string, accountConfig: Config): void {
   const accounts = getAccountsMap();
   accounts[username] = accountConfig;
-  config.set("accounts", accounts);
-  config.set("activeAccount", username);
+  config.store = { ...config.store, accounts, activeAccount: username };
 }
 
 /**
@@ -264,14 +257,14 @@ export function switchAccount(identifier: string): Config | null {
 
   // Try direct key match first (NEMAR username)
   if (accounts[identifier]) {
-    config.set("activeAccount", identifier);
+    config.store = { ...config.store, activeAccount: identifier };
     return accounts[identifier];
   }
 
   // Try matching by GitHub username
   for (const [key, acct] of Object.entries(accounts)) {
     if (acct.githubUsername === identifier) {
-      config.set("activeAccount", key);
+      config.store = { ...config.store, activeAccount: key };
       return acct;
     }
   }

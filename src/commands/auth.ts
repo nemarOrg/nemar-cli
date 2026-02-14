@@ -392,10 +392,7 @@ authCommand.command("signup").description("Register for a new NEMAR account").ac
 
 /** Exported status action handler for use in root-level shortcuts (whoami) */
 export async function statusAction(options: { refresh?: boolean }): Promise<void> {
-  const authenticated = isAuthenticated();
-  const cfg = getConfig();
-
-  if (!authenticated) {
+  if (!isAuthenticated()) {
     console.log(chalk.yellow("Not authenticated"));
     console.log();
     console.log("  Run 'nemar auth login' to authenticate");
@@ -421,6 +418,9 @@ export async function statusAction(options: { refresh?: boolean }): Promise<void
       }
     }
   }
+
+  // Re-read config after potential refresh to show up-to-date values
+  const cfg = getConfig();
 
   // Display active account status
   console.log(chalk.green("Authenticated"));
@@ -501,8 +501,9 @@ async function switchGitHubAuth(githubUsername: string): Promise<void> {
         console.log(chalk.gray(`  GitHub CLI switch failed: ${msg || `exit code ${exitCode}`}`));
       }
     }
-  } catch {
-    console.log(chalk.gray("  GitHub CLI (gh) not available, skipping"));
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : String(error);
+    console.log(chalk.gray(`  GitHub CLI switch skipped: ${msg}`));
   }
 }
 
@@ -800,10 +801,10 @@ Description:
 
   1. Generate a dedicated Ed25519 SSH key for NEMAR (~/.ssh/nemar_ed25519)
   2. Configure SSH to use this key for GitHub
-  3. Register the key with your GitHub account (via NEMAR backend)
+  3. Verify the connection (prompts you to add the key to GitHub if needed)
 
-  This is a one-time setup. After running this command, you can upload
-  datasets without any manual SSH configuration.
+  This is a one-time setup. After running this command and adding the key
+  to GitHub, you can upload datasets.
 
 Examples:
   $ nemar auth setup-ssh          # Set up SSH access

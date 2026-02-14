@@ -828,45 +828,50 @@ adminRoutes.post("/regenerate-iam/:username", async (c) => {
   // Track warning if old key revocation fails (security concern)
   let oldKeyRevocationWarning: string | undefined;
 
-  // Revoke ALL existing access keys for the IAM user (handles cases where
-  // D1 credentials can't be decrypted, e.g. after ENCRYPTION_KEY rotation)
-  if (user.aws_iam_username) {
-    const { deleteAccessKey, listAccessKeys } = await import("../services/iam");
-    const awsAdminConfig = {
-      accessKeyId: c.env.AWS_ACCESS_KEY_ID,
-      secretAccessKey: c.env.AWS_SECRET_ACCESS_KEY,
-      region: c.env.AWS_REGION,
-    };
-    try {
-      const existingKeys = await listAccessKeys(awsAdminConfig, user.aws_iam_username);
-      for (const keyId of existingKeys) {
-        await deleteAccessKey(awsAdminConfig, user.aws_iam_username, keyId);
-      }
-    } catch (error) {
-      console.error("Failed to revoke old access keys:", error);
-      oldKeyRevocationWarning = `Old access keys may still be active: ${errorMessage(error)}`;
-    }
-  }
-
-  // Create new IAM credentials
-  const hasAdminAccess = hasRole((user.role || "member") as UserRole, "admin");
   const awsConfig = {
     accessKeyId: c.env.AWS_ACCESS_KEY_ID,
     secretAccessKey: c.env.AWS_SECRET_ACCESS_KEY,
     region: c.env.AWS_REGION,
   };
 
-  try {
-    const {
-      createIamUser,
-      createAccessKey,
-      putUserPolicy,
-      generateS3PolicyDocument,
-      generateAdminS3PolicyDocument,
-      generateIamUsername,
-      deleteAccessKey,
-    } = await import("../services/iam");
+  const {
+    createIamUser,
+    createAccessKey,
+    deleteAccessKey,
+    listAccessKeys,
+    putUserPolicy,
+    generateS3PolicyDocument,
+    generateAdminS3PolicyDocument,
+    generateIamUsername,
+  } = await import("../services/iam");
 
+  // Revoke ALL existing access keys for the IAM user (handles cases where
+  // D1 credentials can't be decrypted, e.g. after ENCRYPTION_KEY rotation)
+  if (user.aws_iam_username) {
+    try {
+      const existingKeys = await listAccessKeys(awsConfig, user.aws_iam_username);
+      const failedKeys: string[] = [];
+      for (const keyId of existingKeys) {
+        try {
+          await deleteAccessKey(awsConfig, user.aws_iam_username, keyId);
+        } catch (error) {
+          console.error(`Failed to revoke access key ${keyId}:`, error);
+          failedKeys.push(keyId);
+        }
+      }
+      if (failedKeys.length > 0) {
+        oldKeyRevocationWarning = `${failedKeys.length} old access key(s) may still be active`;
+      }
+    } catch (error) {
+      console.error("Failed to list access keys:", error);
+      oldKeyRevocationWarning = `Could not list existing access keys: ${errorMessage(error)}`;
+    }
+  }
+
+  // Create new IAM credentials
+  const hasAdminAccess = hasRole((user.role || "member") as UserRole, "admin");
+
+  try {
     const iamUsername = generateIamUsername(user.username);
 
     // Create or get existing IAM user
