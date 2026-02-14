@@ -750,6 +750,40 @@ export async function requestUploadUrls(
   );
 }
 
+export interface UploadCredentialsResponse {
+  credentials: {
+    access_key_id: string;
+    secret_access_key: string;
+    session_token: string;
+    expiration: string;
+  };
+  s3: {
+    bucket: string;
+    region: string;
+    prefix: string;
+  };
+}
+
+/**
+ * Request temporary STS credentials for direct S3 upload via AWS CLI.
+ * Throws on failure; callers should fall back to presigned URLs.
+ */
+export async function requestUploadCredentials(
+  datasetId: string,
+  durationSeconds?: number,
+): Promise<UploadCredentialsResponse> {
+  return request<UploadCredentialsResponse>(
+    `/datasets/${datasetId}/upload-credentials`,
+    {
+      method: "POST",
+      body: JSON.stringify({
+        duration_seconds: durationSeconds,
+      }),
+    },
+    true,
+  );
+}
+
 // ============================================================================
 // Health
 // ============================================================================

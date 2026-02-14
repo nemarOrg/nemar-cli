@@ -43,9 +43,11 @@ import {
   listManifestVersions,
   requestDatasetAccess,
   requestPublication,
+  requestUploadCredentials,
   requestUploadUrls,
   resendPublishNotification,
 } from "../lib/api.js";
+import { isAwsCliAvailable, uploadWithAwsCli } from "../lib/aws-cli.js";
 import {
   type BidsValidationResult,
   checkDenoInstalled,
@@ -1071,7 +1073,7 @@ Examples:
 
     spinner.succeed("GitHub remote configured");
 
-    // Step 9: Upload data files to S3 using presigned URLs
+    // Step 9: Upload data files to S3
     // Initialize progress tracking if not already present
     if (!uploadProgress) {
       uploadProgress = initUploadProgress(absolutePath, datasetInfo.dataset_id, dataFiles);
@@ -1093,39 +1095,97 @@ Examples:
     const activeProgress = uploadProgress;
     if (!isStepCompleted(activeProgress, "s3_upload")) {
       if (filesToUpload.length > 0) {
-        spinner = ora(`Uploading ${filesToUpload.length} data files to S3...`).start();
+        // Try AWS CLI path for faster uploads (connection pooling, multipart)
+        const awsCliAvailable = await isAwsCliAvailable();
+        let awsCliSucceeded = false;
 
-        // Use initial presigned URLs from creation (if any), then request adaptively
-        const initialUrls =
-          Object.keys(datasetInfo.upload_urls).length > 0 ? datasetInfo.upload_urls : undefined;
-
-        const uploadResult = await uploadWithAdaptiveBatching({
-          datasetId: datasetInfo.dataset_id,
-          basePath: absolutePath,
-          filesToUpload,
-          initialUrls,
-          jobs: Number.parseInt(options.jobs, 10),
-          progress: activeProgress,
-          progressPath: absolutePath,
-          spinner,
-        });
-
-        if (uploadResult.failed.length > 0) {
-          writeUploadProgress(absolutePath, uploadProgress);
-          spinner.fail(`Failed to upload some files (${uploadResult.failed.length} failed)`);
-          for (const failed of uploadResult.failed.slice(0, 5)) {
-            console.log(chalk.red(`  - ${failed}`));
+        if (awsCliAvailable) {
+          spinner = ora("Requesting upload credentials...").start();
+          let creds: Awaited<ReturnType<typeof requestUploadCredentials>> | null = null;
+          try {
+            creds = await requestUploadCredentials(datasetInfo.dataset_id);
+            spinner.succeed("Upload credentials received (2h expiry)");
+          } catch (credError) {
+            spinner.warn(
+              `Could not get upload credentials: ${errorDetail(credError)}. Falling back to presigned URLs.`,
+            );
           }
-          if (uploadResult.failed.length > 5) {
-            console.log(chalk.red(`  ... and ${uploadResult.failed.length - 5} more`));
+
+          if (creds) {
+            const dataFilePaths = filesToUpload.map((f) => f.path);
+            spinner = ora(`Uploading ${filesToUpload.length} data files via AWS CLI...`).start();
+            try {
+              const cliResult = await uploadWithAwsCli({
+                credentials: creds.credentials,
+                bucket: creds.s3.bucket,
+                region: creds.s3.region,
+                prefix: creds.s3.prefix,
+                datasetPath: absolutePath,
+                dataFiles: dataFilePaths,
+                onProgress: (uploaded) => {
+                  spinner.text = `Uploading data files via AWS CLI... (${uploaded}/${filesToUpload.length})`;
+                },
+              });
+
+              if (cliResult.success) {
+                for (const file of filesToUpload) {
+                  markFileUploaded(activeProgress, file.path);
+                }
+                writeUploadProgress(absolutePath, uploadProgress);
+                spinner.succeed(`Uploaded ${cliResult.uploaded} data files to S3`);
+                awsCliSucceeded = true;
+              } else {
+                spinner.fail(`AWS CLI upload failed (${cliResult.failed.length} failed)`);
+                if (cliResult.error) {
+                  console.log(chalk.red(`  ${cliResult.error}`));
+                }
+                console.log(chalk.yellow("Falling back to presigned URLs..."));
+              }
+            } catch (uploadError) {
+              spinner.warn(
+                `AWS CLI upload failed: ${errorDetail(uploadError)}. Falling back to presigned URLs.`,
+              );
+            }
           }
-          console.log();
-          console.log(chalk.yellow("Re-run the same command to resume uploading remaining files."));
-          console.log(chalk.gray("Use --restart to clear progress and re-upload all files."));
-          process.exit(1);
         }
 
-        spinner.succeed(`Uploaded ${uploadResult.uploaded} data files to S3`);
+        if (!awsCliSucceeded) {
+          spinner = ora(`Uploading ${filesToUpload.length} data files to S3...`).start();
+
+          // Use initial presigned URLs from creation (if any), then request adaptively
+          const initialUrls =
+            Object.keys(datasetInfo.upload_urls).length > 0 ? datasetInfo.upload_urls : undefined;
+
+          const uploadResult = await uploadWithAdaptiveBatching({
+            datasetId: datasetInfo.dataset_id,
+            basePath: absolutePath,
+            filesToUpload,
+            initialUrls,
+            jobs: Number.parseInt(options.jobs, 10),
+            progress: activeProgress,
+            progressPath: absolutePath,
+            spinner,
+          });
+
+          if (uploadResult.failed.length > 0) {
+            writeUploadProgress(absolutePath, uploadProgress);
+            spinner.fail(`Failed to upload some files (${uploadResult.failed.length} failed)`);
+            for (const failed of uploadResult.failed.slice(0, 5)) {
+              console.log(chalk.red(`  - ${failed}`));
+            }
+            if (uploadResult.failed.length > 5) {
+              console.log(chalk.red(`  ... and ${uploadResult.failed.length - 5} more`));
+            }
+            console.log();
+            console.log(
+              chalk.yellow("Re-run the same command to resume uploading remaining files."),
+            );
+            console.log(chalk.gray("Use --restart to clear progress and re-upload all files."));
+            process.exit(1);
+          }
+
+          spinner.succeed(`Uploaded ${uploadResult.uploaded} data files to S3`);
+        }
       } else {
         // Verify all data files are uploaded before marking complete
         const summary = getProgressSummary(uploadProgress);

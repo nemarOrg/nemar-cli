@@ -31,6 +31,7 @@ import {
   listManifests,
   removePublicReadPolicy,
 } from "../services/s3";
+import { generateUploadPolicy, getFederationToken } from "../services/sts";
 import { type Bindings, type Variables, hasRole } from "../types/bindings";
 
 export const datasetRoutes = new Hono<{ Bindings: Bindings; Variables: Variables }>();
@@ -596,6 +597,124 @@ datasetRoutes.post(
     );
 
     return c.json({ upload_urls: uploadUrls });
+  },
+);
+
+// Schema for upload credentials request
+const uploadCredentialsSchema = z.object({
+  duration_seconds: z.number().int().min(900).max(7200).optional(),
+});
+
+/**
+ * POST /datasets/:id/upload-credentials - Get temporary S3 credentials
+ *
+ * Returns STS temporary credentials scoped to PutObject on the dataset's
+ * objects/ prefix. Intended for use with `aws s3 sync` for faster uploads
+ * than presigned URLs.
+ */
+datasetRoutes.post(
+  "/:id/upload-credentials",
+  authMiddleware,
+  zValidator("json", uploadCredentialsSchema),
+  async (c) => {
+    const datasetId = c.req.param("id");
+    const { duration_seconds } = c.req.valid("json");
+    const user = c.get("user");
+    const db = c.env.DB;
+
+    if (!isValidDatasetId(datasetId)) {
+      return c.json({ error: "Invalid dataset ID format" }, 400);
+    }
+
+    // Verify dataset exists and user is owner or collaborator
+    const dataset = await db
+      .prepare("SELECT owner_user_id FROM datasets WHERE dataset_id = ?")
+      .bind(datasetId)
+      .first<{ owner_user_id: number }>();
+
+    if (!dataset) {
+      return c.json({ error: "Dataset not found" }, 404);
+    }
+
+    if (dataset.owner_user_id !== user.id && !hasRole(user.role, "admin")) {
+      const isCollaborator = await db
+        .prepare(
+          "SELECT 1 FROM dataset_collaborators dc JOIN datasets d ON dc.dataset_id = d.id WHERE d.dataset_id = ? AND dc.user_id = ?",
+        )
+        .bind(datasetId, user.id)
+        .first();
+
+      if (!isCollaborator) {
+        return c.json(
+          { error: "Only dataset owner or collaborators can request upload credentials" },
+          403,
+        );
+      }
+    }
+
+    // Non-admin users need explicit S3 permission for this prefix
+    if (!hasRole(user.role, "admin")) {
+      const hasPermission = await db
+        .prepare("SELECT 1 FROM user_s3_permissions WHERE user_id = ? AND s3_prefix = ?")
+        .bind(user.id, datasetId)
+        .first();
+
+      if (!hasPermission) {
+        return c.json(
+          {
+            error: "You do not have S3 upload permission for this dataset",
+            message: "Request access to this dataset first",
+          },
+          403,
+        );
+      }
+    }
+
+    // Update last_activity_at to prevent staleness cleanup
+    await db
+      .prepare("UPDATE datasets SET last_activity_at = datetime('now') WHERE dataset_id = ?")
+      .bind(datasetId)
+      .run();
+
+    const policy = generateUploadPolicy(c.env.S3_BUCKET, datasetId);
+
+    // Sanitize federation token name ([\w+=,.@-]{2,32})
+    const tokenName = `upload-${datasetId}`.replace(/[^\w=,.@-]/g, "").slice(0, 32);
+    if (tokenName.length < 2) {
+      return c.json({ error: `Cannot generate token name from dataset ID: ${datasetId}` }, 400);
+    }
+
+    try {
+      const token = await getFederationToken(
+        {
+          accessKeyId: c.env.AWS_ACCESS_KEY_ID,
+          secretAccessKey: c.env.AWS_SECRET_ACCESS_KEY,
+          region: c.env.AWS_REGION,
+        },
+        {
+          name: tokenName,
+          policy,
+          durationSeconds: duration_seconds ?? 7200,
+        },
+      );
+
+      return c.json({
+        credentials: {
+          access_key_id: token.accessKeyId,
+          secret_access_key: token.secretAccessKey,
+          session_token: token.sessionToken,
+          expiration: token.expiration,
+        },
+        s3: {
+          bucket: c.env.S3_BUCKET,
+          region: c.env.AWS_REGION,
+          prefix: `${datasetId}/objects`,
+        },
+      });
+    } catch (error) {
+      console.error("Failed to generate upload credentials:", error);
+      return c.json({ error: "Failed to generate upload credentials" }, 502);
+    }
   },
 );
 
