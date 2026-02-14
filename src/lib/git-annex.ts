@@ -351,6 +351,20 @@ export async function initDataset(
       return { success: false, error: initStderr.trim() || "Failed to initialize git-annex" };
     }
 
+    // Use unlocked mode so data files remain as regular files (not symlinks)
+    const { exitCode: adjustExitCode } = await runCommand(
+      ["git", "annex", "adjust", "--unlock"],
+      {
+        cwd: path,
+        ...(Object.keys(env).length > 0 ? { env } : {}),
+      },
+    );
+
+    if (adjustExitCode !== 0) {
+      // Non-fatal: locked mode still works, just uses symlinks
+      console.warn("Could not switch to unlocked mode; data files will be symlinks");
+    }
+
     return { success: true };
   } catch (e) {
     return { success: false, error: (e as Error).message };
@@ -1999,13 +2013,19 @@ export async function collectFileManifest(datasetPath: string): Promise<{
   let dataFiles = 0;
   let metadataFiles = 0;
 
-  // Use find to get all files (excluding .git, .nemar, and .gitattributes)
+  // Use find to get all files and symlinks (excluding .git, .nemar, and .gitattributes)
+  // Git-annex replaces data files with symlinks to .git/annex/objects/
   const { stdout, exitCode } = await runCommand(
     [
       "find",
       ".",
+      "(",
       "-type",
       "f",
+      "-o",
+      "-type",
+      "l",
+      ")",
       "-not",
       "-path",
       "./.git/*",
