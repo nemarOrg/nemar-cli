@@ -94,6 +94,7 @@ import {
   verifyGitHubAuth,
 } from "../lib/git-annex.js";
 import { bumpVersion, isValidStableVersion, parseVersion } from "../lib/semver.js";
+import type { UploadProgress } from "../lib/upload-progress.js";
 import {
   clearUploadProgress,
   getFilesNeedingUpload,
@@ -104,7 +105,6 @@ import {
   markFileUploaded,
   markStepCompleted,
   readUploadProgress,
-  type UploadProgress,
   writeUploadProgress,
 } from "../lib/upload-progress.js";
 
@@ -558,10 +558,19 @@ Examples:
       `Found ${manifest.files.length} files (${manifest.dataFiles} data, ${manifest.metadataFiles} metadata)`,
     );
 
-    // Step 4b: Collect co-author ORCIDs
+    // Step 4b: Collect co-author ORCIDs (skip if nemar_metadata.json already exists from prior run)
     let coAuthorEnrichment: NemarMetadataPayload | undefined;
+    const existingNemarMeta = resolve(absolutePath, "nemar_metadata.json");
+    if (existsSync(existingNemarMeta)) {
+      try {
+        coAuthorEnrichment = JSON.parse(readFileSync(existingNemarMeta, "utf-8"));
+        console.log(chalk.gray("  Using existing nemar_metadata.json (author ORCIDs from prior run)"));
+      } catch {
+        // File exists but is unreadable; will re-collect below
+      }
+    }
 
-    if (!options.skipOrcid && process.stdin.isTTY) {
+    if (!coAuthorEnrichment && !options.skipOrcid && process.stdin.isTTY) {
       const descPath = resolve(absolutePath, "dataset_description.json");
       if (existsSync(descPath)) {
         try {
@@ -823,6 +832,15 @@ Examples:
       }
     }
 
+    // Validate progress file matches current dataset (discard stale progress)
+    if (uploadProgress && uploadProgress.dataset_id !== datasetInfo.dataset_id) {
+      console.log(
+        chalk.yellow("  Progress file is for a different dataset; starting fresh."),
+      );
+      clearUploadProgress(absolutePath);
+      uploadProgress = null;
+    }
+
     // Step 6b: Accept GitHub invitation
     spinner = ora("Accepting GitHub repository invitation...").start();
 
@@ -894,16 +912,22 @@ Examples:
     spinner.succeed("git-annex dataset initialized");
 
     // Ensure .nemar/ is gitignored (internal config, not dataset content)
-    const gitignorePath = resolve(absolutePath, ".gitignore");
-    let gitignoreContent = "";
-    if (existsSync(gitignorePath)) {
-      gitignoreContent = readFileSync(gitignorePath, "utf-8");
-    }
-    if (!gitignoreContent.includes(".nemar/")) {
-      const newContent = gitignoreContent
-        ? `${gitignoreContent.trimEnd()}\n.nemar/\n`
-        : ".nemar/\n";
-      writeFileSync(gitignorePath, newContent);
+    try {
+      const gitignorePath = resolve(absolutePath, ".gitignore");
+      let gitignoreContent = "";
+      if (existsSync(gitignorePath)) {
+        gitignoreContent = readFileSync(gitignorePath, "utf-8");
+      }
+      if (!gitignoreContent.includes(".nemar/")) {
+        const newContent = gitignoreContent
+          ? `${gitignoreContent.trimEnd()}\n.nemar/\n`
+          : ".nemar/\n";
+        writeFileSync(gitignorePath, newContent);
+      }
+    } catch (gitignoreErr) {
+      console.log(
+        chalk.yellow(`  Warning: Could not update .gitignore: ${errorDetail(gitignoreErr)}`),
+      );
     }
 
     // Step 8: Configure GitHub remote (auto-detects best auth method)
@@ -942,7 +966,6 @@ Examples:
         spinner = ora(`Uploading ${uploadUrlCount} data files to S3...`).start();
 
         let uploadedCount = 0;
-        const totalFiles = uploadUrlCount;
         const uploadResult = await uploadFilesWithPresignedUrls(
           absolutePath,
           datasetInfo.upload_urls,
@@ -951,7 +974,7 @@ Examples:
             onProgress: (progress) => {
               if (progress.status === "completed") {
                 uploadedCount++;
-                spinner.text = `Uploading data files to S3... (${uploadedCount}/${totalFiles})`;
+                spinner.text = `Uploading data files to S3... (${uploadedCount}/${uploadUrlCount})`;
                 markFileUploaded(uploadProgress!, progress.file);
               } else if (progress.status === "failed") {
                 markFileFailed(uploadProgress!, progress.file, progress.error || "Unknown error");
@@ -980,6 +1003,17 @@ Examples:
 
         spinner.succeed(`Uploaded ${uploadResult.uploaded} data files to S3`);
       } else {
+        // Verify all data files are uploaded before marking complete
+        const summary = getProgressSummary(uploadProgress);
+        if (summary.pending > 0 || summary.failed > 0) {
+          console.log(
+            chalk.yellow(
+              `  Warning: ${summary.pending + summary.failed} files not uploaded but no presigned URLs received.`,
+            ),
+          );
+          console.log(chalk.gray("  Use --restart to re-upload all files."));
+          process.exit(1);
+        }
         console.log(chalk.gray("No data files to upload to S3"));
       }
 

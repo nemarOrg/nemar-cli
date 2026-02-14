@@ -54,6 +54,12 @@ describe("initUploadProgress", () => {
     initUploadProgress(testDir, "nm000123", testFiles);
     expect(existsSync(join(testDir, ".nemar"))).toBe(true);
   });
+
+  test("handles empty file list", () => {
+    const progress = initUploadProgress(testDir, "nm000123", []);
+    expect(Object.keys(progress.files)).toHaveLength(0);
+    expect(progress.completed_steps).toEqual([]);
+  });
 });
 
 describe("readUploadProgress", () => {
@@ -82,6 +88,40 @@ describe("readUploadProgress", () => {
     const dir = join(testDir, ".nemar");
     mkdirSync(dir, { recursive: true });
     writeFileSync(join(dir, "upload-progress.json"), JSON.stringify({ foo: "bar" }));
+
+    expect(readUploadProgress(testDir)).toBeNull();
+  });
+
+  test("returns null for malformed file entries", () => {
+    const dir = join(testDir, ".nemar");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(
+      join(dir, "upload-progress.json"),
+      JSON.stringify({
+        dataset_id: "nm000123",
+        started_at: "2026-01-01T00:00:00Z",
+        updated_at: "2026-01-01T00:00:00Z",
+        files: { "sub-01/eeg.edf": { status: "banana", size: -1 } },
+        completed_steps: [],
+      }),
+    );
+
+    expect(readUploadProgress(testDir)).toBeNull();
+  });
+
+  test("returns null for invalid step values", () => {
+    const dir = join(testDir, ".nemar");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(
+      join(dir, "upload-progress.json"),
+      JSON.stringify({
+        dataset_id: "nm000123",
+        started_at: "2026-01-01T00:00:00Z",
+        updated_at: "2026-01-01T00:00:00Z",
+        files: {},
+        completed_steps: ["nonexistent_step"],
+      }),
+    );
 
     expect(readUploadProgress(testDir)).toBeNull();
   });
@@ -161,6 +201,18 @@ describe("step completion", () => {
     expect(isStepCompleted(progress, "url_registration")).toBe(true);
     expect(isStepCompleted(progress, "github_push")).toBe(false);
   });
+
+  test("step completion survives write/read cycle", () => {
+    const progress = initUploadProgress(testDir, "nm000123", testFiles);
+    markStepCompleted(progress, "s3_upload");
+    markStepCompleted(progress, "github_push");
+    writeUploadProgress(testDir, progress);
+
+    const read = readUploadProgress(testDir);
+    expect(isStepCompleted(read!, "s3_upload")).toBe(true);
+    expect(isStepCompleted(read!, "github_push")).toBe(true);
+    expect(isStepCompleted(read!, "dataset_save")).toBe(false);
+  });
 });
 
 describe("getFilesNeedingUpload", () => {
@@ -197,6 +249,17 @@ describe("getFilesNeedingUpload", () => {
     const needing = getFilesNeedingUpload(progress, testFiles);
     expect(needing).toHaveLength(1);
     expect(needing[0].path).toBe(testFiles[2].path);
+  });
+
+  test("ignores files removed from manifest between runs", () => {
+    const progress = initUploadProgress(testDir, "nm000123", testFiles);
+    markFileUploaded(progress, testFiles[0].path);
+
+    // Manifest now only has 2 of the original 3 files
+    const reducedManifest = testFiles.slice(1);
+    const needing = getFilesNeedingUpload(progress, reducedManifest);
+    expect(needing).toHaveLength(2); // pending files only from reduced manifest
+    expect(needing.find((f) => f.path === testFiles[0].path)).toBeUndefined();
   });
 
   test("includes files whose size changed", () => {
@@ -238,6 +301,16 @@ describe("getProgressSummary", () => {
     expect(summary.uploaded).toBe(1);
     expect(summary.failed).toBe(1);
     expect(summary.pending).toBe(1);
+  });
+
+  test("handles empty progress", () => {
+    const progress = initUploadProgress(testDir, "nm000123", []);
+    const summary = getProgressSummary(progress);
+    expect(summary.total).toBe(0);
+    expect(summary.uploaded).toBe(0);
+    expect(summary.failed).toBe(0);
+    expect(summary.pending).toBe(0);
+    expect(summary.completedSteps).toEqual([]);
   });
 
   test("includes completed steps", () => {

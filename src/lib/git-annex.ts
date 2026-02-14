@@ -1949,7 +1949,7 @@ export async function collectFileManifest(datasetPath: string): Promise<{
   let dataFiles = 0;
   let metadataFiles = 0;
 
-  // Use find to get all files (excluding .git)
+  // Use find to get all files (excluding .git, .nemar, and .gitattributes)
   const { stdout, exitCode } = await runCommand(
     [
       "find",

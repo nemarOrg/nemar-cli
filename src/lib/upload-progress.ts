@@ -10,6 +10,8 @@ import { join } from "node:path";
 
 export type FileStatus = "pending" | "uploaded" | "failed";
 
+const VALID_STATUSES = new Set<string>(["pending", "uploaded", "failed"]);
+
 export type UploadStep =
   | "s3_upload"
   | "url_registration"
@@ -17,6 +19,15 @@ export type UploadStep =
   | "dataset_save"
   | "github_push"
   | "ci_deploy";
+
+const VALID_STEPS = new Set<string>([
+  "s3_upload",
+  "url_registration",
+  "metadata_write",
+  "dataset_save",
+  "github_push",
+  "ci_deploy",
+]);
 
 export interface FileProgress {
   status: FileStatus;
@@ -40,10 +51,7 @@ function getProgressPath(datasetPath: string): string {
   return join(datasetPath, PROGRESS_DIR, PROGRESS_FILE);
 }
 
-/**
- * Initialize upload progress for a set of files.
- * All files start as "pending".
- */
+/** All files start as "pending". Writes progress to disk. */
 export function initUploadProgress(
   datasetPath: string,
   datasetId: string,
@@ -73,6 +81,7 @@ export function initUploadProgress(
 /**
  * Read existing upload progress from disk.
  * Returns null if file doesn't exist or is invalid.
+ * Logs a warning if the file exists but cannot be parsed.
  */
 export function readUploadProgress(datasetPath: string): UploadProgress | null {
   const progressPath = getProgressPath(datasetPath);
@@ -85,17 +94,24 @@ export function readUploadProgress(datasetPath: string): UploadProgress | null {
     const parsed = JSON.parse(content);
 
     if (!isValidProgress(parsed)) {
+      console.warn(`Warning: Upload progress file is invalid or corrupted (${progressPath})`);
+      console.warn("  Use --restart to clear progress and start fresh.");
       return null;
     }
 
     return parsed;
-  } catch {
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    console.warn(`Warning: Could not read upload progress (${progressPath}): ${detail}`);
+    console.warn("  Use --restart to clear progress and start fresh.");
     return null;
   }
 }
 
 /**
  * Write upload progress to disk.
+ * Mutates progress.updated_at to the current timestamp before writing.
+ * Logs a warning on failure.
  */
 export function writeUploadProgress(datasetPath: string, progress: UploadProgress): boolean {
   const dir = join(datasetPath, PROGRESS_DIR);
@@ -108,45 +124,46 @@ export function writeUploadProgress(datasetPath: string, progress: UploadProgres
     progress.updated_at = new Date().toISOString();
     writeFileSync(progressPath, JSON.stringify(progress, null, 2));
     return true;
-  } catch {
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    console.warn(`Warning: Could not save upload progress (${progressPath}): ${detail}`);
+    console.warn("  If the upload is interrupted, resume may not work correctly.");
     return false;
   }
 }
 
 /**
  * Mark a file as successfully uploaded.
+ * No-ops silently if filePath is not tracked in progress.
  */
 export function markFileUploaded(progress: UploadProgress, filePath: string): void {
-  if (progress.files[filePath]) {
-    progress.files[filePath].status = "uploaded";
-    progress.files[filePath].updated_at = new Date().toISOString();
-    delete progress.files[filePath].error;
+  const entry = progress.files[filePath];
+  if (entry) {
+    entry.status = "uploaded";
+    entry.updated_at = new Date().toISOString();
+    delete entry.error;
   }
 }
 
 /**
  * Mark a file as failed with an error message.
+ * No-ops silently if filePath is not tracked in progress.
  */
 export function markFileFailed(progress: UploadProgress, filePath: string, error: string): void {
-  if (progress.files[filePath]) {
-    progress.files[filePath].status = "failed";
-    progress.files[filePath].updated_at = new Date().toISOString();
-    progress.files[filePath].error = error;
+  const entry = progress.files[filePath];
+  if (entry) {
+    entry.status = "failed";
+    entry.updated_at = new Date().toISOString();
+    entry.error = error;
   }
 }
 
-/**
- * Mark a step as completed.
- */
 export function markStepCompleted(progress: UploadProgress, step: UploadStep): void {
   if (!progress.completed_steps.includes(step)) {
     progress.completed_steps.push(step);
   }
 }
 
-/**
- * Check if a step has been completed.
- */
 export function isStepCompleted(progress: UploadProgress, step: UploadStep): boolean {
   return progress.completed_steps.includes(step);
 }
@@ -155,34 +172,23 @@ export function isStepCompleted(progress: UploadProgress, step: UploadStep): boo
  * Get files that need uploading: pending, failed, new (not in progress), or size-changed.
  *
  * @param progress - existing progress state
- * @param currentManifest - current data files on disk
+ * @param currentManifest - current data files from the upload manifest
  * @returns files that need to be uploaded
  */
 export function getFilesNeedingUpload(
   progress: UploadProgress,
   currentManifest: Array<{ path: string; size: number }>,
 ): Array<{ path: string; size: number }> {
-  const needUpload: Array<{ path: string; size: number }> = [];
-
-  for (const file of currentManifest) {
+  return currentManifest.filter((file) => {
     const existing = progress.files[file.path];
-    if (!existing) {
-      // New file not in progress tracking
-      needUpload.push(file);
-    } else if (existing.status === "pending" || existing.status === "failed") {
-      needUpload.push(file);
-    } else if (existing.size !== file.size) {
-      // File size changed since last upload
-      needUpload.push(file);
-    }
-    // else: status === "uploaded" and size matches -- skip
-  }
-
-  return needUpload;
+    // Skip only if previously uploaded and size unchanged
+    return !existing || existing.status !== "uploaded" || existing.size !== file.size;
+  });
 }
 
 /**
- * Delete the upload progress file.
+ * Delete the upload progress file. The .nemar/ directory is preserved.
+ * Logs a warning on failure.
  */
 export function clearUploadProgress(datasetPath: string): boolean {
   const progressPath = getProgressPath(datasetPath);
@@ -191,14 +197,13 @@ export function clearUploadProgress(datasetPath: string): boolean {
       unlinkSync(progressPath);
     }
     return true;
-  } catch {
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    console.warn(`Warning: Could not clear upload progress (${progressPath}): ${detail}`);
     return false;
   }
 }
 
-/**
- * Get a summary of upload progress.
- */
 export function getProgressSummary(progress: UploadProgress): {
   total: number;
   uploaded: number;
@@ -206,11 +211,12 @@ export function getProgressSummary(progress: UploadProgress): {
   pending: number;
   completedSteps: UploadStep[];
 } {
+  const entries = Object.values(progress.files);
   let uploaded = 0;
   let failed = 0;
   let pending = 0;
 
-  for (const file of Object.values(progress.files)) {
+  for (const file of entries) {
     switch (file.status) {
       case "uploaded":
         uploaded++;
@@ -225,7 +231,7 @@ export function getProgressSummary(progress: UploadProgress): {
   }
 
   return {
-    total: Object.keys(progress.files).length,
+    total: entries.length,
     uploaded,
     failed,
     pending,
@@ -233,16 +239,37 @@ export function getProgressSummary(progress: UploadProgress): {
   };
 }
 
+/**
+ * Validates the structure of a parsed progress file, including individual
+ * file entries and step values.
+ */
 function isValidProgress(data: unknown): data is UploadProgress {
   if (!data || typeof data !== "object") return false;
   const d = data as Record<string, unknown>;
-  return (
-    typeof d.dataset_id === "string" &&
-    d.dataset_id.length > 0 &&
-    typeof d.started_at === "string" &&
-    typeof d.updated_at === "string" &&
-    typeof d.files === "object" &&
-    d.files !== null &&
-    Array.isArray(d.completed_steps)
-  );
+  if (
+    typeof d.dataset_id !== "string" ||
+    d.dataset_id.length === 0 ||
+    typeof d.started_at !== "string" ||
+    typeof d.updated_at !== "string" ||
+    typeof d.files !== "object" ||
+    d.files === null ||
+    !Array.isArray(d.completed_steps)
+  ) {
+    return false;
+  }
+
+  // Validate individual file entries
+  for (const entry of Object.values(d.files as Record<string, unknown>)) {
+    if (!entry || typeof entry !== "object") return false;
+    const e = entry as Record<string, unknown>;
+    if (typeof e.status !== "string" || !VALID_STATUSES.has(e.status)) return false;
+    if (typeof e.size !== "number" || e.size < 0) return false;
+  }
+
+  // Validate step values
+  for (const step of d.completed_steps as unknown[]) {
+    if (typeof step !== "string" || !VALID_STEPS.has(step)) return false;
+  }
+
+  return true;
 }
