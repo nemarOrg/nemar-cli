@@ -24,7 +24,6 @@ import {
   setRepoVisibility,
 } from "../services/github";
 import { grantDatasetAccess } from "../services/iam";
-import { generateUploadPolicy, getFederationToken } from "../services/sts";
 import {
   addPublicReadPolicy,
   generateDatasetUploadUrls,
@@ -32,6 +31,7 @@ import {
   listManifests,
   removePublicReadPolicy,
 } from "../services/s3";
+import { generateUploadPolicy, getFederationToken } from "../services/sts";
 import { type Bindings, type Variables, hasRole } from "../types/bindings";
 
 export const datasetRoutes = new Hono<{ Bindings: Bindings; Variables: Variables }>();

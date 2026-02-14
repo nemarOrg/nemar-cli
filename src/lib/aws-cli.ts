@@ -73,7 +73,12 @@ export async function uploadWithAwsCli(opts: AwsCliUploadOptions): Promise<AwsCl
   const { credentials, bucket, region, prefix, datasetPath, dataFiles, onProgress } = opts;
 
   if (!existsSync(datasetPath)) {
-    return { success: false, uploaded: 0, failed: [], error: `Dataset path does not exist: ${datasetPath}` };
+    return {
+      success: false,
+      uploaded: 0,
+      failed: [],
+      error: `Dataset path does not exist: ${datasetPath}`,
+    };
   }
 
   const s3Dest = `s3://${bucket}/${prefix}/`;

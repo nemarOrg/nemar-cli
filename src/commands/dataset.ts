@@ -231,7 +231,6 @@ async function uploadWithAdaptiveBatching(opts: {
   return { uploaded: totalUploaded, failed: totalFailed };
 }
 
-
 export const datasetCommand = new Command("dataset").description("Dataset management").addHelpText(
   "after",
   `
@@ -1178,7 +1177,9 @@ Examples:
               console.log(chalk.red(`  ... and ${uploadResult.failed.length - 5} more`));
             }
             console.log();
-            console.log(chalk.yellow("Re-run the same command to resume uploading remaining files."));
+            console.log(
+              chalk.yellow("Re-run the same command to resume uploading remaining files."),
+            );
             console.log(chalk.gray("Use --restart to clear progress and re-upload all files."));
             process.exit(1);
           }
