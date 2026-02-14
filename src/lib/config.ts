@@ -96,25 +96,23 @@ export function migrateConfig(): void {
   // Nothing to migrate if no credentials stored
   if (!legacyKey && !legacyUsername) return;
 
-  const accountName = legacyUsername || "default";
-  const account: Config = {
-    apiUrl: "https://api.osc.earth/nemar",
-  };
+  try {
+    const accountName = legacyUsername || "default";
+    const account: Config = {
+      apiUrl: "https://api.osc.earth/nemar",
+    };
 
-  for (const field of ACCOUNT_FIELDS) {
-    const val = config.get(field as keyof StoreSchema);
-    if (val !== undefined) {
-      (account as Record<string, unknown>)[field] = val;
+    for (const field of ACCOUNT_FIELDS) {
+      const val = config.get(field as keyof StoreSchema);
+      if (val !== undefined) {
+        (account as Record<string, unknown>)[field] = val;
+      }
     }
-  }
 
-  // Write new structure
-  config.set("accounts", { [accountName]: account });
-  config.set("activeAccount", accountName);
-
-  // Remove legacy flat fields
-  for (const field of ACCOUNT_FIELDS) {
-    config.delete(field as keyof StoreSchema);
+    // Atomic write: replace entire store at once
+    config.store = { activeAccount: accountName, accounts: { [accountName]: account } };
+  } catch {
+    // Migration failed; leave legacy fields intact so the CLI still works
   }
 }
 
@@ -192,17 +190,15 @@ export function deleteConfig<K extends keyof Config>(key: K): void {
 /**
  * Clear the active account (remove it from accounts).
  * If other accounts remain, switches to the first available.
- * Returns the username that was removed, or undefined.
  */
-export function clearConfig(): string | undefined {
+export function clearConfig(): void {
   const active = getActiveAccountName();
   if (!active) {
     config.clear();
-    return undefined;
+    return;
   }
 
   const accounts = getAccountsMap();
-  const removedUsername = active;
   delete accounts[active];
 
   const remaining = Object.keys(accounts);
@@ -212,7 +208,6 @@ export function clearConfig(): string | undefined {
   } else {
     config.clear();
   }
-  return removedUsername;
 }
 
 /**
@@ -283,28 +278,4 @@ export function switchAccount(identifier: string): Config | null {
   }
 
   return null;
-}
-
-/**
- * Remove a specific account by username.
- * If it was the active account, switches to next available.
- * Returns true if the account was found and removed.
- */
-export function removeAccount(username: string): boolean {
-  const accounts = getAccountsMap();
-  if (!accounts[username]) return false;
-
-  delete accounts[username];
-  const active = getActiveAccountName();
-
-  const remaining = Object.keys(accounts);
-  if (remaining.length > 0) {
-    config.set("accounts", accounts);
-    if (active === username) {
-      config.set("activeAccount", remaining[0]);
-    }
-  } else {
-    config.clear();
-  }
-  return true;
 }
