@@ -87,8 +87,9 @@ const ACCOUNT_FIELDS: (keyof Config)[] = [
  * Called automatically on first access. Safe to call multiple times.
  */
 export function migrateConfig(): void {
-  // Already migrated if accounts exists
-  if (config.get("accounts")) return;
+  // Already migrated if accounts exists and has entries
+  const existing = config.get("accounts") as Record<string, Config> | undefined;
+  if (existing && Object.keys(existing).length > 0) return;
 
   const legacyKey = config.get("apiKey") as string | undefined;
   const legacyUsername = config.get("username") as string | undefined;
@@ -98,9 +99,7 @@ export function migrateConfig(): void {
 
   try {
     const accountName = legacyUsername || "default";
-    const account: Config = {
-      apiUrl: "https://api.osc.earth/nemar",
-    };
+    const account: Config = {};
 
     for (const field of ACCOUNT_FIELDS) {
       const val = config.get(field as keyof StoreSchema);
