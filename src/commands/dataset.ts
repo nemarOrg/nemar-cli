@@ -108,6 +108,127 @@ import {
   writeUploadProgress,
 } from "../lib/upload-progress.js";
 
+// ---------------------------------------------------------------------------
+// Adaptive presigned URL batching
+// ---------------------------------------------------------------------------
+
+const PROBE_BATCH_SIZE = 20;
+const URL_SAFETY_WINDOW_SEC = 45 * 60; // 45 min (presigned URLs expire at 60 min)
+const MIN_BATCH = 20;
+const MAX_BATCH = 500;
+
+/**
+ * Upload files using adaptive presigned URL batching.
+ *
+ * Requests presigned URLs in progressive chunks calibrated to the user's
+ * upload speed so that URLs never expire mid-upload. A small probe batch
+ * measures throughput first, then subsequent batch sizes are calculated to
+ * fit within the URL safety window.
+ */
+async function uploadWithAdaptiveBatching(opts: {
+  datasetId: string;
+  basePath: string;
+  filesToUpload: Array<{ path: string; size: number }>;
+  initialUrls?: Record<string, string>;
+  jobs: number;
+  progress: UploadProgress;
+  progressPath: string;
+  spinner: ReturnType<typeof ora>;
+}): Promise<{ uploaded: number; failed: string[] }> {
+  const { datasetId, basePath, filesToUpload, jobs, progress, progressPath, spinner } = opts;
+
+  let totalUploaded = 0;
+  let totalFailed: string[] = [];
+  let totalElapsedSec = 0;
+  let offset = 0;
+
+  // Use initial URLs from dataset creation if provided (first upload only)
+  let initialUrls = opts.initialUrls || {};
+  const initialUrlPaths = new Set(Object.keys(initialUrls));
+
+  // If we have initial URLs, upload those first as the probe batch
+  if (Object.keys(initialUrls).length > 0) {
+    const batchSize = Object.keys(initialUrls).length;
+    spinner.text = `Uploading data files to S3... (0/${filesToUpload.length})`;
+
+    const batchStart = Date.now();
+    const result = await uploadFilesWithPresignedUrls(basePath, initialUrls, {
+      jobs,
+      onProgress: (p) => {
+        if (p.status === "completed") {
+          totalUploaded++;
+          spinner.text = `Uploading data files to S3... (${totalUploaded}/${filesToUpload.length})`;
+          markFileUploaded(progress, p.file);
+        } else if (p.status === "failed") {
+          markFileFailed(progress, p.file, p.error || "Unknown error");
+        }
+      },
+      onBatchComplete: () => {
+        writeUploadProgress(progressPath, progress);
+      },
+    });
+
+    totalUploaded = result.uploaded;
+    totalFailed = result.failed;
+    totalElapsedSec = (Date.now() - batchStart) / 1000;
+
+    // Skip files already covered by initial URLs
+    offset = filesToUpload.findIndex((f) => !initialUrlPaths.has(f.path));
+    if (offset === -1) offset = filesToUpload.length; // all files were in initial URLs
+    initialUrls = {}; // consumed
+  }
+
+  // Upload remaining files in adaptive batches
+  const remaining = filesToUpload.filter((f) => !initialUrlPaths.has(f.path));
+
+  let batchOffset = 0;
+  while (batchOffset < remaining.length) {
+    // Calculate adaptive batch size from cumulative speed
+    let batchSize: number;
+    if (totalUploaded > 0 && totalElapsedSec > 0) {
+      const avgSecPerFile = totalElapsedSec / totalUploaded;
+      batchSize = Math.floor(URL_SAFETY_WINDOW_SEC / avgSecPerFile);
+      batchSize = Math.max(MIN_BATCH, Math.min(MAX_BATCH, batchSize));
+    } else {
+      batchSize = PROBE_BATCH_SIZE;
+    }
+
+    const chunk = remaining.slice(batchOffset, batchOffset + batchSize);
+    if (chunk.length === 0) break;
+
+    // Request fresh presigned URLs for this chunk
+    const urlResponse = await requestUploadUrls(
+      datasetId,
+      chunk.map((f) => f.path),
+    );
+
+    spinner.text = `Uploading data files to S3... (${totalUploaded}/${filesToUpload.length}) [batch ${batchSize}]`;
+
+    const batchStart = Date.now();
+    const result = await uploadFilesWithPresignedUrls(basePath, urlResponse.upload_urls, {
+      jobs,
+      onProgress: (p) => {
+        if (p.status === "completed") {
+          totalUploaded++;
+          spinner.text = `Uploading data files to S3... (${totalUploaded}/${filesToUpload.length}) [batch ${batchSize}]`;
+          markFileUploaded(progress, p.file);
+        } else if (p.status === "failed") {
+          markFileFailed(progress, p.file, p.error || "Unknown error");
+        }
+      },
+      onBatchComplete: () => {
+        writeUploadProgress(progressPath, progress);
+      },
+    });
+
+    totalFailed.push(...result.failed);
+    totalElapsedSec += (Date.now() - batchStart) / 1000;
+    batchOffset += chunk.length;
+  }
+
+  return { uploaded: totalUploaded, failed: totalFailed };
+}
+
 export const datasetCommand = new Command("dataset").description("Dataset management").addHelpText(
   "after",
   `
@@ -647,6 +768,19 @@ Examples:
 
             if (Object.keys(authors).length > 0) {
               coAuthorEnrichment = { version: "1.0", authors };
+
+              // Write immediately so resumed uploads don't re-prompt
+              try {
+                const nemarMetaPath = resolve(absolutePath, "nemar_metadata.json");
+                writeFileSync(nemarMetaPath, JSON.stringify(coAuthorEnrichment, null, 2));
+                console.log(chalk.gray("  Saved nemar_metadata.json with author ORCIDs"));
+              } catch (writeErr) {
+                console.log(
+                  chalk.yellow(
+                    `  Warning: Could not save nemar_metadata.json: ${errorDetail(writeErr)}`,
+                  ),
+                );
+              }
             }
             console.log();
           }
@@ -756,18 +890,13 @@ Examples:
         // Verify dataset still exists on backend (throws ApiError if not found)
         await getDataset(existingConfig.dataset_id);
 
-        // Request fresh presigned URLs only for files that need uploading
-        const uploadResponse = await requestUploadUrls(
-          existingConfig.dataset_id,
-          filesToUpload.map((f) => f.path),
-        );
-
+        // Presigned URLs are requested adaptively in Step 9 (not upfront)
         datasetInfo = {
           dataset_id: existingConfig.dataset_id,
           ssh_url: existingConfig.ssh_url,
           s3_prefix: existingConfig.s3_prefix,
           github_url: existingConfig.github_url,
-          upload_urls: uploadResponse.upload_urls,
+          upload_urls: {},
           s3_config: existingConfig.s3_config,
         };
 
@@ -962,33 +1091,26 @@ Examples:
 
     // Narrow to non-null for use in callbacks below
     const activeProgress = uploadProgress;
-    const uploadUrlCount = Object.keys(datasetInfo.upload_urls).length;
     if (!isStepCompleted(activeProgress, "s3_upload")) {
-      if (uploadUrlCount > 0) {
-        spinner = ora(`Uploading ${uploadUrlCount} data files to S3...`).start();
+      if (filesToUpload.length > 0) {
+        spinner = ora(`Uploading ${filesToUpload.length} data files to S3...`).start();
 
-        let uploadedCount = 0;
-        const uploadResult = await uploadFilesWithPresignedUrls(
-          absolutePath,
-          datasetInfo.upload_urls,
-          {
-            jobs: Number.parseInt(options.jobs, 10),
-            onProgress: (progress) => {
-              if (progress.status === "completed") {
-                uploadedCount++;
-                spinner.text = `Uploading data files to S3... (${uploadedCount}/${uploadUrlCount})`;
-                markFileUploaded(activeProgress, progress.file);
-              } else if (progress.status === "failed") {
-                markFileFailed(activeProgress, progress.file, progress.error || "Unknown error");
-              }
-            },
-            onBatchComplete: () => {
-              writeUploadProgress(absolutePath, activeProgress);
-            },
-          },
-        );
+        // Use initial presigned URLs from creation (if any), then request adaptively
+        const initialUrls =
+          Object.keys(datasetInfo.upload_urls).length > 0 ? datasetInfo.upload_urls : undefined;
 
-        if (!uploadResult.success) {
+        const uploadResult = await uploadWithAdaptiveBatching({
+          datasetId: datasetInfo.dataset_id,
+          basePath: absolutePath,
+          filesToUpload,
+          initialUrls,
+          jobs: Number.parseInt(options.jobs, 10),
+          progress: activeProgress,
+          progressPath: absolutePath,
+          spinner,
+        });
+
+        if (uploadResult.failed.length > 0) {
           writeUploadProgress(absolutePath, uploadProgress);
           spinner.fail(`Failed to upload some files (${uploadResult.failed.length} failed)`);
           for (const failed of uploadResult.failed.slice(0, 5)) {
@@ -1050,13 +1172,16 @@ Examples:
       console.log(chalk.gray("  URL registration already completed (skipping)"));
     }
 
-    // Step 10b: Write nemar_metadata.json if ORCID data was collected
-    // (picked up by saveDataset in Step 11 via git add -A)
+    // Step 10b: Ensure .bidsignore includes NEMAR-specific paths
+    // (nemar_metadata.json is already written at Step 4b; this just updates bidsignore)
     if (!isStepCompleted(uploadProgress, "metadata_write")) {
       if (coAuthorEnrichment) {
         try {
+          // Write nemar_metadata.json if not already on disk (e.g. old CLI resume)
           const nemarMetaPath = resolve(absolutePath, "nemar_metadata.json");
-          writeFileSync(nemarMetaPath, JSON.stringify(coAuthorEnrichment, null, 2));
+          if (!existsSync(nemarMetaPath)) {
+            writeFileSync(nemarMetaPath, JSON.stringify(coAuthorEnrichment, null, 2));
+          }
 
           // Ensure .bidsignore includes NEMAR-specific paths
           const bidsignorePath = resolve(absolutePath, ".bidsignore");
@@ -1072,10 +1197,10 @@ Examples:
               : `${missing.join("\n")}\n`;
             writeFileSync(bidsignorePath, newContent);
           }
-          console.log(chalk.gray("  Saved nemar_metadata.json with author ORCIDs"));
+          console.log(chalk.gray("  Updated .bidsignore for NEMAR metadata"));
         } catch (writeErr) {
           console.log(
-            chalk.yellow(`  Warning: Could not save nemar_metadata.json: ${errorDetail(writeErr)}`),
+            chalk.yellow(`  Warning: Could not update .bidsignore: ${errorDetail(writeErr)}`),
           );
           console.log(chalk.gray("  Upload will continue without author enrichment."));
         }
