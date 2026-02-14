@@ -18,6 +18,7 @@ import {
   logoutAction,
   signupAction,
   statusAction,
+  switchAction,
 } from "./commands/auth.js";
 import { datasetCommand } from "./commands/dataset.js";
 import { sandboxCommand } from "./commands/sandbox.js";
@@ -92,6 +93,11 @@ program
   .description("Show current user (shortcut for 'auth status')")
   .option("--refresh", "Refresh user info from server")
   .action(statusAction);
+
+program
+  .command("switch [username]")
+  .description("Switch between accounts (shortcut for 'auth switch')")
+  .action(switchAction);
 
 // Parse arguments
 program.parse();

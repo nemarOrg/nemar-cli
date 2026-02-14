@@ -7,6 +7,7 @@
  * - nemar auth status    - Check authentication status
  * - nemar auth whoami    - Alias for status (common pattern)
  * - nemar auth logout    - Clear stored credentials
+ * - nemar auth switch    - Switch between stored accounts
  * - nemar auth setup-ssh - Configure SSH for GitHub access
  *
  * Note: The two-prong structure (nemar auth <cmd>) follows CLI best practices
@@ -30,11 +31,15 @@ import {
   signup,
 } from "../lib/api.js";
 import {
+  clearAllConfig,
   clearConfig,
+  getAccounts,
   getConfig,
   getConfigPath,
   isAuthenticated,
   setConfig,
+  storeAccount,
+  switchAccount,
 } from "../lib/config.js";
 import {
   type ConfirmOptions,
@@ -75,7 +80,9 @@ Examples:
   $ nemar auth regenerate-key           # Get a new API key (revokes old)
   $ nemar auth status --refresh          # Check authentication status
   $ nemar auth whoami                    # Alias for status
-  $ nemar auth logout                    # Clear credentials`,
+  $ nemar auth switch                    # Switch between accounts
+  $ nemar auth logout                    # Clear active account
+  $ nemar auth logout --all              # Clear all accounts`,
 );
 
 // ============================================================================
@@ -86,9 +93,10 @@ Examples:
 export async function loginAction(options: { key?: string } & ConfirmOptions): Promise<void> {
   // Check for existing authentication
   if (isAuthenticated()) {
-    const config = getConfig();
-    console.log(chalk.yellow(`Already logged in as ${config.username || "unknown"}`));
-    const result = await confirm("Do you want to log in with a different account?", options);
+    const cfg = getConfig();
+    console.log(chalk.yellow(`Already logged in as ${cfg.username || "unknown"}`));
+    console.log(chalk.gray("  This will add another account (use 'nemar auth switch' to switch)"));
+    const result = await confirm("Log in with a different account?", options);
     if (result !== "confirmed") return;
   }
 
@@ -129,15 +137,18 @@ export async function loginAction(options: { key?: string } & ConfirmOptions): P
       return;
     }
 
-    // Store credentials
-    setConfig("apiKey", apiKey);
-    setConfig("username", result.user.username);
-    setConfig("email", result.user.email);
-    setConfig("githubUsername", result.user.github_username);
-    setConfig("sandboxCompleted", result.user.sandbox_completed);
-    if (result.user.sandbox_dataset_id) {
-      setConfig("sandboxDatasetId", result.user.sandbox_dataset_id);
-    }
+    // Store credentials as a named account and set as active
+    storeAccount(result.user.username, {
+      apiKey,
+      apiUrl: "https://api.osc.earth/nemar",
+      username: result.user.username,
+      email: result.user.email,
+      githubUsername: result.user.github_username,
+      sandboxCompleted: result.user.sandbox_completed,
+      ...(result.user.sandbox_dataset_id
+        ? { sandboxDatasetId: result.user.sandbox_dataset_id }
+        : {}),
+    });
 
     spinner.succeed("Login successful");
     console.log();
@@ -382,7 +393,7 @@ authCommand.command("signup").description("Register for a new NEMAR account").ac
 /** Exported status action handler for use in root-level shortcuts (whoami) */
 export async function statusAction(options: { refresh?: boolean }): Promise<void> {
   const authenticated = isAuthenticated();
-  const config = getConfig();
+  const cfg = getConfig();
 
   if (!authenticated) {
     console.log(chalk.yellow("Not authenticated"));
@@ -411,17 +422,17 @@ export async function statusAction(options: { refresh?: boolean }): Promise<void
     }
   }
 
-  // Display status
+  // Display active account status
   console.log(chalk.green("Authenticated"));
   console.log();
-  if (config.username) {
-    console.log(`  Username: ${chalk.cyan(config.username)}`);
+  if (cfg.username) {
+    console.log(`  Username: ${chalk.cyan(cfg.username)}`);
   }
-  if (config.email) {
-    console.log(`  Email:    ${config.email}`);
+  if (cfg.email) {
+    console.log(`  Email:    ${cfg.email}`);
   }
-  if (config.githubUsername) {
-    console.log(`  GitHub:   @${config.githubUsername}`);
+  if (cfg.githubUsername) {
+    console.log(`  GitHub:   @${cfg.githubUsername}`);
   }
   if (userRole) {
     const roleDisplay =
@@ -433,6 +444,15 @@ export async function statusAction(options: { refresh?: boolean }): Promise<void
     console.log(`  Role:     ${roleDisplay}`);
   }
   console.log(`  Config:   ${chalk.gray(getConfigPath())}`);
+
+  // Show other stored accounts
+  const accounts = getAccounts();
+  const others = accounts.filter((a) => !a.active);
+  if (others.length > 0) {
+    console.log();
+    console.log(`  Other accounts: ${others.map((a) => chalk.gray(a.username)).join(", ")}`);
+    console.log(chalk.gray("  Run 'nemar auth switch' to switch accounts"));
+  }
 }
 
 authCommand
@@ -449,29 +469,162 @@ authCommand
   .action(statusAction);
 
 // ============================================================================
+// Switch
+// ============================================================================
+
+/** Try to switch the gh CLI to the matching GitHub account (best-effort) */
+async function switchGitHubAuth(githubUsername: string): Promise<void> {
+  try {
+    const { spawn } = await import("bun");
+    const proc = spawn({
+      cmd: ["gh", "auth", "switch", "--user", githubUsername],
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const exitCode = await proc.exited;
+    if (exitCode === 0) {
+      console.log(`  GitHub CLI switched to ${chalk.cyan(`@${githubUsername}`)}`);
+    } else {
+      const stderr = await new Response(proc.stderr).text();
+      if (stderr.includes("not found")) {
+        console.log(
+          chalk.gray(`  GitHub CLI: @${githubUsername} not logged in (run 'gh auth login')`),
+        );
+      }
+    }
+  } catch {
+    // gh not installed or not available; silently skip
+  }
+}
+
+/** Exported switch action handler for use in root-level shortcuts */
+export async function switchAction(identifier?: string): Promise<void> {
+  const accounts = getAccounts();
+
+  if (accounts.length === 0) {
+    console.log(chalk.yellow("No stored accounts"));
+    console.log("  Run 'nemar auth login' to add an account");
+    return;
+  }
+
+  if (accounts.length === 1) {
+    const only = accounts[0];
+    if (only.active) {
+      console.log(chalk.yellow(`Only one account stored: ${only.username}`));
+      console.log("  Run 'nemar auth login' to add another account");
+      return;
+    }
+  }
+
+  let target: string;
+
+  if (identifier) {
+    target = identifier;
+  } else {
+    // Interactive picker
+    const choices = accounts.map((a) => ({
+      name: `${a.username}${a.githubUsername ? ` (@${a.githubUsername})` : ""}${a.active ? chalk.green(" (active)") : ""}`,
+      value: a.username,
+      short: a.username,
+    }));
+
+    const { selected } = await inquirer.prompt([
+      {
+        type: "list",
+        name: "selected",
+        message: "Switch to account:",
+        choices,
+        default: accounts.find((a) => a.active)?.username,
+      },
+    ]);
+    target = selected;
+  }
+
+  // Check if already active
+  const current = accounts.find((a) => a.active);
+  if (current && current.username === target) {
+    console.log(chalk.yellow(`Already using account ${target}`));
+    return;
+  }
+
+  const switched = switchAccount(target);
+  if (!switched) {
+    console.log(chalk.red(`Account not found: ${target}`));
+    console.log(chalk.gray("  Provide a NEMAR username or GitHub username"));
+    console.log(chalk.gray(`  Available: ${accounts.map((a) => a.username).join(", ")}`));
+    return;
+  }
+
+  console.log(chalk.green(`Switched to ${chalk.cyan(switched.username || target)}`));
+
+  // Switch gh CLI auth if possible
+  if (switched.githubUsername) {
+    await switchGitHubAuth(switched.githubUsername);
+  }
+}
+
+authCommand
+  .command("switch [username]")
+  .description("Switch between stored accounts")
+  .addHelpText(
+    "after",
+    `
+Description:
+  Switch the active NEMAR account. You can specify a NEMAR username or
+  GitHub username. If no username is given, an interactive picker is shown.
+
+  Switching also updates the GitHub CLI (gh) to the matching account.
+
+Examples:
+  $ nemar auth switch              # Interactive picker
+  $ nemar auth switch yahya        # Switch by NEMAR username
+  $ nemar auth switch cool-vibers  # Switch by GitHub username`,
+  )
+  .action(switchAction);
+
+// ============================================================================
 // Logout
 // ============================================================================
 
 /** Exported logout action handler for use in root-level shortcuts */
-export async function logoutAction(options: ConfirmOptions): Promise<void> {
+export async function logoutAction(options: ConfirmOptions & { all?: boolean }): Promise<void> {
   if (!isAuthenticated()) {
     console.log(chalk.yellow("Not currently authenticated"));
     return;
   }
 
-  const config = getConfig();
-  const result = await confirm(`Log out ${config.username || "current user"}?`, options);
+  if (options.all) {
+    const accounts = getAccounts();
+    const result = await confirm(`Log out all ${accounts.length} stored account(s)?`, options);
+    if (result !== "confirmed") return;
+    clearAllConfig();
+    console.log(chalk.green("All accounts removed"));
+    return;
+  }
+
+  const cfg = getConfig();
+  const result = await confirm(`Log out ${cfg.username || "current user"}?`, options);
   if (result !== "confirmed") return;
 
   clearConfig();
   console.log(chalk.green("Logged out successfully"));
+
+  // If other accounts remain, inform the user
+  const remaining = getAccounts();
+  if (remaining.length > 0) {
+    const active = remaining.find((a) => a.active);
+    if (active) {
+      console.log(`  Switched to ${chalk.cyan(active.username)}`);
+    }
+  }
 }
 
 authCommand
   .command("logout")
-  .description("Clear stored credentials")
+  .description("Remove the active account (use --all to remove all)")
   .option(YES_OPTION, YES_DESCRIPTION)
   .option(NO_OPTION, NO_DESCRIPTION)
+  .option("--all", "Remove all stored accounts")
   .action(logoutAction);
 
 // ============================================================================
