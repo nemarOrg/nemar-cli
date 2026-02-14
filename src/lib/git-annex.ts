@@ -1102,16 +1102,16 @@ export async function uploadFileWithPresignedUrl(
   const initialDelayMs = options?.initialDelayMs ?? 10000; // 10 seconds
 
   try {
-    const fileContent = await Bun.file(filePath).arrayBuffer();
-    const fileSize = fileContent.byteLength;
+    const file = Bun.file(filePath);
+    const fileSize = file.size;
 
     let lastError = "";
 
     for (let attempt = 0; attempt <= maxRetries; attempt++) {
-      // Use fetch to upload - presigned URLs use simple PUT
+      // Stream file directly from disk to avoid buffering entire file in memory
       const response = await fetch(presignedUrl, {
         method: "PUT",
-        body: fileContent,
+        body: file,
         headers: {
           "Content-Length": fileSize.toString(),
         },
