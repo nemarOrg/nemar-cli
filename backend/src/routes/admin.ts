@@ -828,24 +828,23 @@ adminRoutes.post("/regenerate-iam/:username", async (c) => {
   // Track warning if old key revocation fails (security concern)
   let oldKeyRevocationWarning: string | undefined;
 
-  // Revoke old IAM credentials if they exist (but don't delete the user - we'll reuse it)
-  if (user.aws_iam_username && user.aws_access_key_id_encrypted) {
+  // Revoke ALL existing access keys for the IAM user (handles cases where
+  // D1 credentials can't be decrypted, e.g. after ENCRYPTION_KEY rotation)
+  if (user.aws_iam_username) {
+    const { deleteAccessKey, listAccessKeys } = await import("../services/iam");
+    const awsAdminConfig = {
+      accessKeyId: c.env.AWS_ACCESS_KEY_ID,
+      secretAccessKey: c.env.AWS_SECRET_ACCESS_KEY,
+      region: c.env.AWS_REGION,
+    };
     try {
-      const oldAccessKeyId = await decrypt(user.aws_access_key_id_encrypted, c.env.ENCRYPTION_KEY);
-      // Only delete the old access key, not the entire IAM user
-      const { deleteAccessKey } = await import("../services/iam");
-      await deleteAccessKey(
-        {
-          accessKeyId: c.env.AWS_ACCESS_KEY_ID,
-          secretAccessKey: c.env.AWS_SECRET_ACCESS_KEY,
-          region: c.env.AWS_REGION,
-        },
-        user.aws_iam_username,
-        oldAccessKeyId,
-      );
+      const existingKeys = await listAccessKeys(awsAdminConfig, user.aws_iam_username);
+      for (const keyId of existingKeys) {
+        await deleteAccessKey(awsAdminConfig, user.aws_iam_username, keyId);
+      }
     } catch (error) {
-      console.error("Failed to revoke old access key:", error);
-      oldKeyRevocationWarning = `Old access key may still be active: ${errorMessage(error)}`;
+      console.error("Failed to revoke old access keys:", error);
+      oldKeyRevocationWarning = `Old access keys may still be active: ${errorMessage(error)}`;
     }
   }
 

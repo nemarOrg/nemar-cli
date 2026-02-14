@@ -37,6 +37,7 @@ S3_BUCKET = "nemar"
 # - GITHUB_ADMIN_PAT
 # - AWS_ACCESS_KEY_ID
 # - AWS_SECRET_ACCESS_KEY
+# - ENCRYPTION_KEY          (AES-GCM key for encrypting per-user AWS credentials in D1)
 # - RESEND_API_KEY
 # - TEST_BYPASS_TOKEN
 # - ZENODO_API_KEY
