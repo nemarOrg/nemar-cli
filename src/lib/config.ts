@@ -99,7 +99,7 @@ export function migrateConfig(): void {
 
   try {
     const accountName = legacyUsername || "default";
-    const account: Config = {};
+    const account = {} as Config;
 
     for (const field of ACCOUNT_FIELDS) {
       const val = config.get(field as keyof StoreSchema);
