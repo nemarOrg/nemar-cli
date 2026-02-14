@@ -1171,6 +1171,7 @@ export async function uploadFilesWithPresignedUrls(
   options: {
     jobs?: number;
     onProgress?: (progress: PresignedUploadProgress) => void;
+    onBatchComplete?: () => void;
   } = {},
 ): Promise<{ success: boolean; uploaded: number; failed: string[]; error?: string }> {
   const jobs = options.jobs || 4;
@@ -1214,6 +1215,7 @@ export async function uploadFilesWithPresignedUrls(
         }
       }),
     );
+    options.onBatchComplete?.();
   }
 
   return {
@@ -1949,7 +1951,21 @@ export async function collectFileManifest(datasetPath: string): Promise<{
 
   // Use find to get all files (excluding .git)
   const { stdout, exitCode } = await runCommand(
-    ["find", ".", "-type", "f", "-not", "-path", "./.git/*", "-not", "-name", ".gitattributes"],
+    [
+      "find",
+      ".",
+      "-type",
+      "f",
+      "-not",
+      "-path",
+      "./.git/*",
+      "-not",
+      "-path",
+      "./.nemar/*",
+      "-not",
+      "-name",
+      ".gitattributes",
+    ],
     { cwd: datasetPath },
   );
 

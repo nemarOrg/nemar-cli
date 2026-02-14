@@ -94,6 +94,19 @@ import {
   verifyGitHubAuth,
 } from "../lib/git-annex.js";
 import { bumpVersion, isValidStableVersion, parseVersion } from "../lib/semver.js";
+import {
+  clearUploadProgress,
+  getFilesNeedingUpload,
+  getProgressSummary,
+  initUploadProgress,
+  isStepCompleted,
+  markFileFailed,
+  markFileUploaded,
+  markStepCompleted,
+  readUploadProgress,
+  type UploadProgress,
+  writeUploadProgress,
+} from "../lib/upload-progress.js";
 
 export const datasetCommand = new Command("dataset").description("Dataset management").addHelpText(
   "after",
@@ -366,6 +379,7 @@ datasetCommand
   .option("--dry-run", "Show what would be uploaded without doing it")
   .option("-j, --jobs <number>", "Parallel upload streams (default: 4)", "4")
   .option(YES_OPTION, YES_DESCRIPTION)
+  .option("--restart", "Clear upload progress and re-upload all files")
   .option("--no", "Skip confirmation and decline")
   .addHelpText(
     "after",
@@ -678,6 +692,35 @@ Examples:
     // Only request presigned URLs for data files
     const dataFiles = manifest.files.filter((f) => f.type === "data");
 
+    // Handle --restart: clear any existing progress
+    if (options.restart) {
+      clearUploadProgress(absolutePath);
+      console.log(chalk.gray("  Upload progress cleared (--restart)"));
+      console.log();
+    }
+
+    // Load existing upload progress (if any)
+    let uploadProgress: UploadProgress | null = options.restart
+      ? null
+      : readUploadProgress(absolutePath);
+
+    if (uploadProgress) {
+      const summary = getProgressSummary(uploadProgress);
+      console.log(chalk.bold.cyan("Upload Progress:"));
+      console.log(
+        `  Files: ${summary.uploaded}/${summary.total} uploaded, ${summary.failed} failed, ${summary.pending} pending`,
+      );
+      if (summary.completedSteps.length > 0) {
+        console.log(`  Completed steps: ${summary.completedSteps.join(", ")}`);
+      }
+      console.log();
+    }
+
+    // Determine which files need uploading
+    const filesToUpload = uploadProgress
+      ? getFilesNeedingUpload(uploadProgress, dataFiles)
+      : dataFiles;
+
     let datasetInfo: {
       dataset_id: string;
       ssh_url: string;
@@ -702,10 +745,10 @@ Examples:
         // Verify dataset still exists on backend (throws ApiError if not found)
         await getDataset(existingConfig.dataset_id);
 
-        // Request fresh presigned URLs for data files
+        // Request fresh presigned URLs only for files that need uploading
         const uploadResponse = await requestUploadUrls(
           existingConfig.dataset_id,
-          dataFiles.map((f) => f.path),
+          filesToUpload.map((f) => f.path),
         );
 
         datasetInfo = {
@@ -850,6 +893,19 @@ Examples:
 
     spinner.succeed("git-annex dataset initialized");
 
+    // Ensure .nemar/ is gitignored (internal config, not dataset content)
+    const gitignorePath = resolve(absolutePath, ".gitignore");
+    let gitignoreContent = "";
+    if (existsSync(gitignorePath)) {
+      gitignoreContent = readFileSync(gitignorePath, "utf-8");
+    }
+    if (!gitignoreContent.includes(".nemar/")) {
+      const newContent = gitignoreContent
+        ? `${gitignoreContent.trimEnd()}\n.nemar/\n`
+        : ".nemar/\n";
+      writeFileSync(gitignorePath, newContent);
+    }
+
     // Step 8: Configure GitHub remote (auto-detects best auth method)
     spinner = ora("Configuring GitHub remote...").start();
 
@@ -863,47 +919,86 @@ Examples:
     spinner.succeed("GitHub remote configured");
 
     // Step 9: Upload data files to S3 using presigned URLs
+    // Initialize progress tracking if not already present
+    if (!uploadProgress) {
+      uploadProgress = initUploadProgress(absolutePath, datasetInfo.dataset_id, dataFiles);
+    } else {
+      // Add any new files to progress tracking
+      for (const file of dataFiles) {
+        if (!uploadProgress.files[file.path]) {
+          uploadProgress.files[file.path] = {
+            status: "pending",
+            size: file.size,
+            updated_at: new Date().toISOString(),
+          };
+        }
+      }
+      writeUploadProgress(absolutePath, uploadProgress);
+    }
+
     const uploadUrlCount = Object.keys(datasetInfo.upload_urls).length;
-    if (uploadUrlCount > 0) {
-      spinner = ora(`Uploading ${uploadUrlCount} data files to S3...`).start();
+    if (!isStepCompleted(uploadProgress, "s3_upload")) {
+      if (uploadUrlCount > 0) {
+        spinner = ora(`Uploading ${uploadUrlCount} data files to S3...`).start();
 
-      let uploadedCount = 0;
-      const totalFiles = uploadUrlCount;
-      const uploadResult = await uploadFilesWithPresignedUrls(
-        absolutePath,
-        datasetInfo.upload_urls,
-        {
-          jobs: Number.parseInt(options.jobs, 10),
-          onProgress: (progress) => {
-            if (progress.status === "completed") {
-              uploadedCount++;
-              spinner.text = `Uploading data files to S3... (${uploadedCount}/${totalFiles})`;
-            }
+        let uploadedCount = 0;
+        const totalFiles = uploadUrlCount;
+        const uploadResult = await uploadFilesWithPresignedUrls(
+          absolutePath,
+          datasetInfo.upload_urls,
+          {
+            jobs: Number.parseInt(options.jobs, 10),
+            onProgress: (progress) => {
+              if (progress.status === "completed") {
+                uploadedCount++;
+                spinner.text = `Uploading data files to S3... (${uploadedCount}/${totalFiles})`;
+                markFileUploaded(uploadProgress!, progress.file);
+              } else if (progress.status === "failed") {
+                markFileFailed(uploadProgress!, progress.file, progress.error || "Unknown error");
+              }
+            },
+            onBatchComplete: () => {
+              writeUploadProgress(absolutePath, uploadProgress!);
+            },
           },
-        },
-      );
+        );
 
-      if (!uploadResult.success) {
-        spinner.fail(`Failed to upload some files (${uploadResult.failed.length} failed)`);
-        for (const failed of uploadResult.failed.slice(0, 5)) {
-          console.log(chalk.red(`  - ${failed}`));
+        if (!uploadResult.success) {
+          writeUploadProgress(absolutePath, uploadProgress);
+          spinner.fail(`Failed to upload some files (${uploadResult.failed.length} failed)`);
+          for (const failed of uploadResult.failed.slice(0, 5)) {
+            console.log(chalk.red(`  - ${failed}`));
+          }
+          if (uploadResult.failed.length > 5) {
+            console.log(chalk.red(`  ... and ${uploadResult.failed.length - 5} more`));
+          }
+          console.log();
+          console.log(chalk.yellow("Re-run the same command to resume uploading remaining files."));
+          console.log(chalk.gray("Use --restart to clear progress and re-upload all files."));
+          process.exit(1);
         }
-        if (uploadResult.failed.length > 5) {
-          console.log(chalk.red(`  ... and ${uploadResult.failed.length - 5} more`));
-        }
-        process.exit(1);
+
+        spinner.succeed(`Uploaded ${uploadResult.uploaded} data files to S3`);
+      } else {
+        console.log(chalk.gray("No data files to upload to S3"));
       }
 
-      spinner.succeed(`Uploaded ${uploadResult.uploaded} data files to S3`);
+      markStepCompleted(uploadProgress, "s3_upload");
+      writeUploadProgress(absolutePath, uploadProgress);
+    } else {
+      console.log(chalk.gray("  S3 upload already completed (skipping)"));
+    }
 
-      // Step 10: Register S3 URLs with git-annex
+    // Step 10: Register S3 URLs with git-annex
+    if (!isStepCompleted(uploadProgress, "url_registration")) {
       spinner = ora("Registering file URLs with git-annex...").start();
 
-      // Build public URLs for each uploaded file
+      // Build public URLs for ALL data files (not just upload_urls keys),
+      // so resumed uploads register URLs for previously uploaded files too
       const { s3_config, s3_prefix } = datasetInfo;
       const fileUrls: Record<string, string> = {};
-      for (const filePath of Object.keys(datasetInfo.upload_urls)) {
-        fileUrls[filePath] = `${s3_config.public_url}/${s3_prefix}/objects/${filePath}`;
+      for (const file of dataFiles) {
+        fileUrls[file.path] = `${s3_config.public_url}/${s3_prefix}/objects/${file.path}`;
       }
 
       const registerResult = await registerUrlsWithGitAnnex(absolutePath, fileUrls);
@@ -912,93 +1007,132 @@ Examples:
       } else {
         spinner.succeed(`Registered ${registerResult.registered} file URLs with git-annex`);
       }
+
+      markStepCompleted(uploadProgress, "url_registration");
+      writeUploadProgress(absolutePath, uploadProgress);
     } else {
-      console.log(chalk.gray("No data files to upload to S3"));
+      console.log(chalk.gray("  URL registration already completed (skipping)"));
     }
 
     // Step 10b: Write nemar_metadata.json if ORCID data was collected
     // (picked up by saveDataset in Step 11 via git add -A)
-    if (coAuthorEnrichment) {
-      try {
-        const nemarMetaPath = resolve(absolutePath, "nemar_metadata.json");
-        writeFileSync(nemarMetaPath, JSON.stringify(coAuthorEnrichment, null, 2));
+    if (!isStepCompleted(uploadProgress, "metadata_write")) {
+      if (coAuthorEnrichment) {
+        try {
+          const nemarMetaPath = resolve(absolutePath, "nemar_metadata.json");
+          writeFileSync(nemarMetaPath, JSON.stringify(coAuthorEnrichment, null, 2));
 
-        // Ensure .bidsignore includes NEMAR-specific paths
-        const bidsignorePath = resolve(absolutePath, ".bidsignore");
-        let bidsignoreContent = "";
-        if (existsSync(bidsignorePath)) {
-          bidsignoreContent = readFileSync(bidsignorePath, "utf-8");
+          // Ensure .bidsignore includes NEMAR-specific paths
+          const bidsignorePath = resolve(absolutePath, ".bidsignore");
+          let bidsignoreContent = "";
+          if (existsSync(bidsignorePath)) {
+            bidsignoreContent = readFileSync(bidsignorePath, "utf-8");
+          }
+          const entriesToIgnore = ["nemar_metadata.json", ".nemar/"];
+          const missing = entriesToIgnore.filter((e) => !bidsignoreContent.includes(e));
+          if (missing.length > 0) {
+            const newContent = bidsignoreContent
+              ? `${bidsignoreContent.trimEnd()}\n${missing.join("\n")}\n`
+              : `${missing.join("\n")}\n`;
+            writeFileSync(bidsignorePath, newContent);
+          }
+          console.log(chalk.gray("  Saved nemar_metadata.json with author ORCIDs"));
+        } catch (writeErr) {
+          console.log(
+            chalk.yellow(
+              `  Warning: Could not save nemar_metadata.json: ${errorDetail(writeErr)}`,
+            ),
+          );
+          console.log(chalk.gray("  Upload will continue without author enrichment."));
         }
-        const entriesToIgnore = ["nemar_metadata.json", ".nemar/"];
-        const missing = entriesToIgnore.filter((e) => !bidsignoreContent.includes(e));
-        if (missing.length > 0) {
-          const newContent = bidsignoreContent
-            ? `${bidsignoreContent.trimEnd()}\n${missing.join("\n")}\n`
-            : `${missing.join("\n")}\n`;
-          writeFileSync(bidsignorePath, newContent);
-        }
-        console.log(chalk.gray("  Saved nemar_metadata.json with author ORCIDs"));
-      } catch (writeErr) {
-        console.log(
-          chalk.yellow(`  Warning: Could not save nemar_metadata.json: ${errorDetail(writeErr)}`),
-        );
-        console.log(chalk.gray("  Upload will continue without author enrichment."));
       }
+
+      markStepCompleted(uploadProgress, "metadata_write");
+      writeUploadProgress(absolutePath, uploadProgress);
+    } else {
+      console.log(chalk.gray("  Metadata write already completed (skipping)"));
     }
 
     // Step 11: Save dataset changes
-    spinner = ora("Saving dataset changes...").start();
+    if (!isStepCompleted(uploadProgress, "dataset_save")) {
+      spinner = ora("Saving dataset changes...").start();
 
-    const saveResult = await saveDataset(absolutePath, "Initial NEMAR dataset upload", author);
-    if (!saveResult.success) {
-      spinner.fail("Failed to save dataset");
-      console.log(chalk.red(`  ${saveResult.error}`));
-      process.exit(1);
+      const saveResult = await saveDataset(absolutePath, "Initial NEMAR dataset upload", author);
+      if (!saveResult.success) {
+        writeUploadProgress(absolutePath, uploadProgress);
+        spinner.fail("Failed to save dataset");
+        console.log(chalk.red(`  ${saveResult.error}`));
+        console.log();
+        console.log(chalk.yellow("Re-run the same command to resume from this step."));
+        process.exit(1);
+      }
+
+      spinner.succeed("Dataset changes saved");
+      markStepCompleted(uploadProgress, "dataset_save");
+      writeUploadProgress(absolutePath, uploadProgress);
+    } else {
+      console.log(chalk.gray("  Dataset save already completed (skipping)"));
     }
-
-    spinner.succeed("Dataset changes saved");
 
     // Step 12: Push metadata to GitHub
-    spinner = ora("Pushing metadata to GitHub...").start();
+    if (!isStepCompleted(uploadProgress, "github_push")) {
+      spinner = ora("Pushing metadata to GitHub...").start();
 
-    const githubPushResult = await pushToGitHub(absolutePath);
-    if (!githubPushResult.success) {
-      spinner.fail("Failed to push to GitHub");
-      console.log(chalk.red(`  ${githubPushResult.error}`));
-      process.exit(1);
-    }
+      const githubPushResult = await pushToGitHub(absolutePath);
+      if (!githubPushResult.success) {
+        writeUploadProgress(absolutePath, uploadProgress);
+        spinner.fail("Failed to push to GitHub");
+        console.log(chalk.red(`  ${githubPushResult.error}`));
+        console.log();
+        console.log(chalk.yellow("Re-run the same command to resume from this step."));
+        process.exit(1);
+      }
 
-    if (githubPushResult.warning) {
-      spinner.warn("Metadata pushed to GitHub (with warning)");
-      console.log(chalk.yellow(`  ${githubPushResult.warning}`));
+      if (githubPushResult.warning) {
+        spinner.warn("Metadata pushed to GitHub (with warning)");
+        console.log(chalk.yellow(`  ${githubPushResult.warning}`));
+      } else {
+        spinner.succeed("Metadata pushed to GitHub");
+      }
+
+      markStepCompleted(uploadProgress, "github_push");
+      writeUploadProgress(absolutePath, uploadProgress);
     } else {
-      spinner.succeed("Metadata pushed to GitHub");
+      console.log(chalk.gray("  GitHub push already completed (skipping)"));
     }
 
     // Step 12b: Deploy BIDS validation CI
-    spinner = ora("Setting up BIDS validation CI...").start();
-    try {
-      await addCi(datasetInfo.dataset_id);
-      spinner.succeed("BIDS validation CI configured");
-    } catch (error) {
-      if (error instanceof ApiError && error.statusCode === 403) {
-        spinner.info("CI workflow will be configured by an admin");
-      } else {
-        const msg = error instanceof Error ? error.message : String(error);
-        spinner.warn(`Could not configure CI: ${msg}`);
-        console.log(
-          chalk.gray(
-            `  An admin can add it later with: nemar admin ci add ${datasetInfo.dataset_id}`,
-          ),
-        );
+    if (!isStepCompleted(uploadProgress, "ci_deploy")) {
+      spinner = ora("Setting up BIDS validation CI...").start();
+      try {
+        await addCi(datasetInfo.dataset_id);
+        spinner.succeed("BIDS validation CI configured");
+      } catch (error) {
+        if (error instanceof ApiError && error.statusCode === 403) {
+          spinner.info("CI workflow will be configured by an admin");
+        } else {
+          const msg = error instanceof Error ? error.message : String(error);
+          spinner.warn(`Could not configure CI: ${msg}`);
+          console.log(
+            chalk.gray(
+              `  An admin can add it later with: nemar admin ci add ${datasetInfo.dataset_id}`,
+            ),
+          );
+        }
       }
+
+      markStepCompleted(uploadProgress, "ci_deploy");
+      writeUploadProgress(absolutePath, uploadProgress);
+    } else {
+      console.log(chalk.gray("  CI deploy already completed (skipping)"));
     }
 
     // Note: Branch protection is NOT applied here for private datasets.
     // Protection is applied when creating a DOI (admin doi create) or making public.
 
     // Step 13: Success!
-    // Update last upload timestamp in local config
+    // Clear progress file and update last upload timestamp
+    clearUploadProgress(absolutePath);
     updateLastUpload(absolutePath);
 
     console.log();
