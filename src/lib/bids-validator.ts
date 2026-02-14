@@ -15,7 +15,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { spawn } from "bun";
 
-const VALIDATOR_JSR_SPECIFIER = "jsr:@bids/validator";
+const VALIDATOR_JSR_SPECIFIER = "jsr:@bids/validator@^2";
 const STALE_THRESHOLD_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
 
 /**
