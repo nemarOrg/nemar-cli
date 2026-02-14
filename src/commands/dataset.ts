@@ -43,9 +43,11 @@ import {
   listManifestVersions,
   requestDatasetAccess,
   requestPublication,
+  requestUploadCredentials,
   requestUploadUrls,
   resendPublishNotification,
 } from "../lib/api.js";
+import { isAwsCliAvailable, uploadWithAwsCli } from "../lib/aws-cli.js";
 import {
   type BidsValidationResult,
   checkDenoInstalled,
@@ -94,6 +96,44 @@ import {
   verifyGitHubAuth,
 } from "../lib/git-annex.js";
 import { bumpVersion, isValidStableVersion, parseVersion } from "../lib/semver.js";
+
+/**
+ * Upload files using presigned URLs (fallback when AWS CLI is unavailable).
+ * Manages its own spinner for progress display.
+ */
+async function uploadViaPresignedUrls(
+  basePath: string,
+  uploadUrls: Record<string, string>,
+  jobs: string,
+  totalFiles: number,
+): Promise<{ success: boolean; uploaded: number; failed: string[] }> {
+  const uploadSpinner = ora(`Uploading ${totalFiles} data files to S3...`).start();
+
+  let uploadedCount = 0;
+  let result: { success: boolean; uploaded: number; failed: string[] };
+  try {
+    result = await uploadFilesWithPresignedUrls(basePath, uploadUrls, {
+      jobs: Number.parseInt(jobs, 10),
+      onProgress: (progress) => {
+        if (progress.status === "completed") {
+          uploadedCount++;
+          uploadSpinner.text = `Uploading data files to S3... (${uploadedCount}/${totalFiles})`;
+        }
+      },
+    });
+  } catch (error) {
+    uploadSpinner.fail("Upload failed unexpectedly");
+    throw error;
+  }
+
+  if (result.success) {
+    uploadSpinner.succeed(`Uploaded ${result.uploaded} data files to S3`);
+  } else {
+    uploadSpinner.fail(`Failed to upload some files (${result.failed.length} failed)`);
+  }
+
+  return result;
+}
 
 export const datasetCommand = new Command("dataset").description("Dataset management").addHelpText(
   "after",
@@ -862,29 +902,78 @@ Examples:
 
     spinner.succeed("GitHub remote configured");
 
-    // Step 9: Upload data files to S3 using presigned URLs
+    // Step 9: Upload data files to S3
     const uploadUrlCount = Object.keys(datasetInfo.upload_urls).length;
     if (uploadUrlCount > 0) {
-      spinner = ora(`Uploading ${uploadUrlCount} data files to S3...`).start();
+      // Try AWS CLI path for faster uploads (connection pooling, multipart)
+      const awsCliAvailable = await isAwsCliAvailable();
+      let uploadResult: { success: boolean; uploaded: number; failed: string[]; error?: string };
 
-      let uploadedCount = 0;
-      const totalFiles = uploadUrlCount;
-      const uploadResult = await uploadFilesWithPresignedUrls(
-        absolutePath,
-        datasetInfo.upload_urls,
-        {
-          jobs: Number.parseInt(options.jobs, 10),
-          onProgress: (progress) => {
-            if (progress.status === "completed") {
-              uploadedCount++;
-              spinner.text = `Uploading data files to S3... (${uploadedCount}/${totalFiles})`;
+      if (awsCliAvailable) {
+        spinner = ora("Requesting upload credentials...").start();
+        let creds: Awaited<ReturnType<typeof requestUploadCredentials>> | null = null;
+        try {
+          creds = await requestUploadCredentials(datasetInfo.dataset_id);
+          spinner.succeed("Upload credentials received (2h expiry)");
+        } catch (credError) {
+          spinner.warn(
+            `Could not get upload credentials: ${errorDetail(credError)}. Falling back to presigned URLs.`,
+          );
+        }
+
+        if (creds) {
+          const dataFiles = Object.keys(datasetInfo.upload_urls);
+          spinner = ora(`Uploading ${uploadUrlCount} data files via AWS CLI...`).start();
+          try {
+            uploadResult = await uploadWithAwsCli({
+              credentials: creds.credentials,
+              bucket: creds.s3.bucket,
+              region: creds.s3.region,
+              prefix: creds.s3.prefix,
+              datasetPath: absolutePath,
+              dataFiles,
+              onProgress: (uploaded) => {
+                spinner.text = `Uploading data files via AWS CLI... (${uploaded}/${uploadUrlCount})`;
+              },
+            });
+
+            if (uploadResult.success) {
+              spinner.succeed(`Uploaded ${uploadResult.uploaded} data files to S3`);
+            } else {
+              spinner.fail(`Failed to upload some files (${uploadResult.failed.length} failed)`);
+              if (uploadResult.error) {
+                console.log(chalk.red(`  ${uploadResult.error}`));
+              }
             }
-          },
-        },
-      );
+          } catch (uploadError) {
+            spinner.warn(
+              `AWS CLI upload failed: ${errorDetail(uploadError)}. Falling back to presigned URLs.`,
+            );
+            uploadResult = await uploadViaPresignedUrls(
+              absolutePath,
+              datasetInfo.upload_urls,
+              options.jobs,
+              uploadUrlCount,
+            );
+          }
+        } else {
+          uploadResult = await uploadViaPresignedUrls(
+            absolutePath,
+            datasetInfo.upload_urls,
+            options.jobs,
+            uploadUrlCount,
+          );
+        }
+      } else {
+        uploadResult = await uploadViaPresignedUrls(
+          absolutePath,
+          datasetInfo.upload_urls,
+          options.jobs,
+          uploadUrlCount,
+        );
+      }
 
       if (!uploadResult.success) {
-        spinner.fail(`Failed to upload some files (${uploadResult.failed.length} failed)`);
         for (const failed of uploadResult.failed.slice(0, 5)) {
           console.log(chalk.red(`  - ${failed}`));
         }
@@ -893,8 +982,6 @@ Examples:
         }
         process.exit(1);
       }
-
-      spinner.succeed(`Uploaded ${uploadResult.uploaded} data files to S3`);
 
       // Step 10: Register S3 URLs with git-annex
       spinner = ora("Registering file URLs with git-annex...").start();
