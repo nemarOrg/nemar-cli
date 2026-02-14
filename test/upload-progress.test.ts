@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
 import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
   clearUploadProgress,
   getFilesNeedingUpload,
@@ -72,8 +72,8 @@ describe("readUploadProgress", () => {
     const read = readUploadProgress(testDir);
 
     expect(read).not.toBeNull();
-    expect(read!.dataset_id).toBe("nm000123");
-    expect(Object.keys(read!.files)).toHaveLength(3);
+    expect(read?.dataset_id).toBe("nm000123");
+    expect(Object.keys(read?.files)).toHaveLength(3);
   });
 
   test("returns null for invalid JSON", () => {
@@ -136,7 +136,7 @@ describe("writeUploadProgress", () => {
     expect(written).toBe(true);
 
     const read = readUploadProgress(testDir);
-    expect(read!.files[testFiles[0].path].status).toBe("uploaded");
+    expect(read?.files[testFiles[0].path].status).toBe("uploaded");
   });
 });
 
@@ -209,9 +209,11 @@ describe("step completion", () => {
     writeUploadProgress(testDir, progress);
 
     const read = readUploadProgress(testDir);
-    expect(isStepCompleted(read!, "s3_upload")).toBe(true);
-    expect(isStepCompleted(read!, "github_push")).toBe(true);
-    expect(isStepCompleted(read!, "dataset_save")).toBe(false);
+    expect(read).not.toBeNull();
+    if (!read) return; // narrowing guard
+    expect(isStepCompleted(read, "s3_upload")).toBe(true);
+    expect(isStepCompleted(read, "github_push")).toBe(true);
+    expect(isStepCompleted(read, "dataset_save")).toBe(false);
   });
 });
 

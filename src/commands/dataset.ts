@@ -564,7 +564,9 @@ Examples:
     if (existsSync(existingNemarMeta)) {
       try {
         coAuthorEnrichment = JSON.parse(readFileSync(existingNemarMeta, "utf-8"));
-        console.log(chalk.gray("  Using existing nemar_metadata.json (author ORCIDs from prior run)"));
+        console.log(
+          chalk.gray("  Using existing nemar_metadata.json (author ORCIDs from prior run)"),
+        );
       } catch {
         // File exists but is unreadable; will re-collect below
       }
@@ -834,9 +836,7 @@ Examples:
 
     // Validate progress file matches current dataset (discard stale progress)
     if (uploadProgress && uploadProgress.dataset_id !== datasetInfo.dataset_id) {
-      console.log(
-        chalk.yellow("  Progress file is for a different dataset; starting fresh."),
-      );
+      console.log(chalk.yellow("  Progress file is for a different dataset; starting fresh."));
       clearUploadProgress(absolutePath);
       uploadProgress = null;
     }
@@ -960,8 +960,10 @@ Examples:
       writeUploadProgress(absolutePath, uploadProgress);
     }
 
+    // Narrow to non-null for use in callbacks below
+    const activeProgress = uploadProgress;
     const uploadUrlCount = Object.keys(datasetInfo.upload_urls).length;
-    if (!isStepCompleted(uploadProgress, "s3_upload")) {
+    if (!isStepCompleted(activeProgress, "s3_upload")) {
       if (uploadUrlCount > 0) {
         spinner = ora(`Uploading ${uploadUrlCount} data files to S3...`).start();
 
@@ -975,13 +977,13 @@ Examples:
               if (progress.status === "completed") {
                 uploadedCount++;
                 spinner.text = `Uploading data files to S3... (${uploadedCount}/${uploadUrlCount})`;
-                markFileUploaded(uploadProgress!, progress.file);
+                markFileUploaded(activeProgress, progress.file);
               } else if (progress.status === "failed") {
-                markFileFailed(uploadProgress!, progress.file, progress.error || "Unknown error");
+                markFileFailed(activeProgress, progress.file, progress.error || "Unknown error");
               }
             },
             onBatchComplete: () => {
-              writeUploadProgress(absolutePath, uploadProgress!);
+              writeUploadProgress(absolutePath, activeProgress);
             },
           },
         );
@@ -1073,9 +1075,7 @@ Examples:
           console.log(chalk.gray("  Saved nemar_metadata.json with author ORCIDs"));
         } catch (writeErr) {
           console.log(
-            chalk.yellow(
-              `  Warning: Could not save nemar_metadata.json: ${errorDetail(writeErr)}`,
-            ),
+            chalk.yellow(`  Warning: Could not save nemar_metadata.json: ${errorDetail(writeErr)}`),
           );
           console.log(chalk.gray("  Upload will continue without author enrichment."));
         }

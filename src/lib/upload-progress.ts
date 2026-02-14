@@ -141,7 +141,7 @@ export function markFileUploaded(progress: UploadProgress, filePath: string): vo
   if (entry) {
     entry.status = "uploaded";
     entry.updated_at = new Date().toISOString();
-    delete entry.error;
+    entry.error = undefined;
   }
 }
 
