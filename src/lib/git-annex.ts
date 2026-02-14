@@ -1102,16 +1102,16 @@ export async function uploadFileWithPresignedUrl(
   const initialDelayMs = options?.initialDelayMs ?? 10000; // 10 seconds
 
   try {
-    const fileContent = await Bun.file(filePath).arrayBuffer();
-    const fileSize = fileContent.byteLength;
+    const file = Bun.file(filePath);
+    const fileSize = file.size;
 
     let lastError = "";
 
     for (let attempt = 0; attempt <= maxRetries; attempt++) {
-      // Use fetch to upload - presigned URLs use simple PUT
+      // Stream file directly from disk to avoid buffering entire file in memory
       const response = await fetch(presignedUrl, {
         method: "PUT",
-        body: fileContent,
+        body: file,
         headers: {
           "Content-Length": fileSize.toString(),
         },
@@ -1163,7 +1163,13 @@ export async function uploadFileWithPresignedUrl(
 }
 
 /**
- * Upload multiple files using presigned URLs with parallel execution
+ * Upload multiple files using presigned URLs with a concurrent pool.
+ *
+ * Uses a semaphore pattern to keep exactly `jobs` uploads running at all
+ * times, starting the next file as soon as any slot frees up. This avoids
+ * the idle-slot problem of fixed Promise.all batches.
+ *
+ * `onBatchComplete` fires every `jobs` completions to persist progress.
  */
 export async function uploadFilesWithPresignedUrls(
   basePath: string,
@@ -1171,49 +1177,95 @@ export async function uploadFilesWithPresignedUrls(
   options: {
     jobs?: number;
     onProgress?: (progress: PresignedUploadProgress) => void;
+    onBatchComplete?: () => void;
   } = {},
 ): Promise<{ success: boolean; uploaded: number; failed: string[]; error?: string }> {
   const jobs = options.jobs || 4;
   const files = Object.entries(uploadUrls);
   const failed: string[] = [];
   let uploaded = 0;
+  let completed = 0;
+  let sinceLastSave = 0;
 
-  // Process files in batches
-  for (let i = 0; i < files.length; i += jobs) {
-    const batch = files.slice(i, i + jobs);
-    await Promise.all(
-      batch.map(async ([relativePath, presignedUrl]) => {
-        const fullPath = join(basePath, relativePath);
+  // Semaphore: resolve functions for waiting workers
+  let running = 0;
+  let releaseSlot: (() => void) | null = null;
 
-        options.onProgress?.({
-          file: relativePath,
-          uploaded: 0,
-          total: 0,
-          status: "uploading",
-        });
+  function acquireSlot(): Promise<void> {
+    if (running < jobs) {
+      running++;
+      return Promise.resolve();
+    }
+    return new Promise<void>((resolve) => {
+      releaseSlot = () => {
+        releaseSlot = null;
+        resolve();
+      };
+    });
+  }
 
-        const result = await uploadFileWithPresignedUrl(fullPath, presignedUrl);
+  function freeSlot(): void {
+    running--;
+    if (releaseSlot) {
+      running++;
+      releaseSlot();
+    }
+  }
 
-        if (result.success) {
-          uploaded++;
-          options.onProgress?.({
-            file: relativePath,
-            uploaded: 1,
-            total: 1,
-            status: "completed",
-          });
-        } else {
-          failed.push(`${relativePath}: ${result.error || "Unknown error"}`);
-          options.onProgress?.({
-            file: relativePath,
-            uploaded: 0,
-            total: 1,
-            status: "failed",
-            error: result.error,
-          });
-        }
-      }),
-    );
+  const uploadFile = async (relativePath: string, presignedUrl: string) => {
+    const fullPath = join(basePath, relativePath);
+
+    options.onProgress?.({
+      file: relativePath,
+      uploaded: 0,
+      total: 0,
+      status: "uploading",
+    });
+
+    const result = await uploadFileWithPresignedUrl(fullPath, presignedUrl);
+
+    if (result.success) {
+      uploaded++;
+      options.onProgress?.({
+        file: relativePath,
+        uploaded: 1,
+        total: 1,
+        status: "completed",
+      });
+    } else {
+      failed.push(`${relativePath}: ${result.error || "Unknown error"}`);
+      options.onProgress?.({
+        file: relativePath,
+        uploaded: 0,
+        total: 1,
+        status: "failed",
+        error: result.error,
+      });
+    }
+
+    completed++;
+    sinceLastSave++;
+    if (sinceLastSave >= jobs) {
+      sinceLastSave = 0;
+      options.onBatchComplete?.();
+    }
+
+    freeSlot();
+  };
+
+  // Launch all uploads, gated by the semaphore
+  const promises: Promise<void>[] = [];
+  for (const [relativePath, presignedUrl] of files) {
+    await acquireSlot();
+    promises.push(uploadFile(relativePath, presignedUrl));
+  }
+
+  // Wait for all in-flight uploads to finish
+  await Promise.all(promises);
+
+  // Final save for any remaining completions
+  if (sinceLastSave > 0) {
+    options.onBatchComplete?.();
   }
 
   return {
@@ -1947,9 +1999,23 @@ export async function collectFileManifest(datasetPath: string): Promise<{
   let dataFiles = 0;
   let metadataFiles = 0;
 
-  // Use find to get all files (excluding .git)
+  // Use find to get all files (excluding .git, .nemar, and .gitattributes)
   const { stdout, exitCode } = await runCommand(
-    ["find", ".", "-type", "f", "-not", "-path", "./.git/*", "-not", "-name", ".gitattributes"],
+    [
+      "find",
+      ".",
+      "-type",
+      "f",
+      "-not",
+      "-path",
+      "./.git/*",
+      "-not",
+      "-path",
+      "./.nemar/*",
+      "-not",
+      "-name",
+      ".gitattributes",
+    ],
     { cwd: datasetPath },
   );
 

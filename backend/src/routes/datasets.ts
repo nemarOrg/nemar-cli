@@ -547,19 +547,22 @@ datasetRoutes.post(
     }
 
     // Check if user has permission for this dataset prefix
-    const hasPermission = await db
-      .prepare("SELECT 1 FROM user_s3_permissions WHERE user_id = ? AND s3_prefix = ?")
-      .bind(user.id, datasetId)
-      .first();
+    // Admin/owner roles have full bucket access via IAM; skip per-dataset check
+    if (!hasRole(user.role, "admin")) {
+      const hasPermission = await db
+        .prepare("SELECT 1 FROM user_s3_permissions WHERE user_id = ? AND s3_prefix = ?")
+        .bind(user.id, datasetId)
+        .first();
 
-    if (!hasPermission) {
-      return c.json(
-        {
-          error: "You do not have S3 upload permission for this dataset",
-          message: "Request access to this dataset first",
-        },
-        403,
-      );
+      if (!hasPermission) {
+        return c.json(
+          {
+            error: "You do not have S3 upload permission for this dataset",
+            message: "Request access to this dataset first",
+          },
+          403,
+        );
+      }
     }
 
     // Decrypt user credentials
