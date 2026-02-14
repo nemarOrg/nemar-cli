@@ -1,54 +1,85 @@
 /**
  * Dataset ID generation service
  *
- * Generates centralized sequential IDs:
- * - nm000XXX for regular datasets
- * - xx000XXX for sandbox datasets
+ * Generates IDs that reuse gaps from deleted datasets:
+ * - nm000XXX for regular datasets (starting at 108)
+ * - xx000XXX for sandbox datasets (starting at 1)
  */
 
+// First allocatable number for each prefix
+const START_NUMBER: Record<string, number> = { nm: 108, xx: 1 };
+
 /**
- * Generate the next dataset ID
+ * Generate the next dataset ID by finding the lowest unused number.
  *
- * Uses atomic UPDATE RETURNING to ensure uniqueness across concurrent requests.
+ * Queries existing datasets to find gaps from deletions, reusing freed IDs
+ * before allocating new ones.
  *
  * @param db - D1 database instance
  * @param sandbox - If true, generates xx000XXX sandbox ID instead of nm000XXX
  */
 export async function generateDatasetId(db: D1Database, sandbox = false): Promise<string> {
   const prefix = sandbox ? "xx" : "nm";
+  const start = START_NUMBER[prefix] ?? 1;
+  const likePattern = `${prefix}%`;
 
-  // Atomic increment and return
+  // Find the lowest unused number by looking for gaps in existing dataset IDs.
+  // This generates a sequence from start..max+1 and picks the first number
+  // not present in the datasets table.
   const result = await db
     .prepare(
       `
-    UPDATE id_sequence
-    SET next_number = next_number + 1
-    WHERE prefix = ?
-    RETURNING next_number - 1 as current_number
+    WITH RECURSIVE seq(n) AS (
+      SELECT ?2
+      UNION ALL
+      SELECT n + 1 FROM seq
+      WHERE n <= (
+        SELECT COALESCE(MAX(CAST(SUBSTR(dataset_id, 3) AS INTEGER)), ?2)
+        FROM datasets WHERE dataset_id LIKE ?1
+      )
+    )
+    SELECT n FROM seq
+    WHERE ?3 || SUBSTR('000000', 1, 6 - LENGTH(CAST(n AS TEXT))) || CAST(n AS TEXT)
+      NOT IN (SELECT dataset_id FROM datasets WHERE dataset_id LIKE ?1)
+    LIMIT 1
   `,
     )
-    .bind(prefix)
-    .first<{ current_number: number }>();
+    .bind(likePattern, start, prefix)
+    .first<{ n: number }>();
 
   if (!result) {
-    throw new Error(`Failed to generate dataset ID: no sequence found for prefix '${prefix}'`);
+    throw new Error(`Failed to generate dataset ID for prefix '${prefix}'`);
   }
 
-  // Format as XX000XXX (zero-padded to 6 digits)
-  const id = `${prefix}${result.current_number.toString().padStart(6, "0")}`;
-
+  const id = `${prefix}${result.n.toString().padStart(6, "0")}`;
   return id;
 }
 
 /**
- * Get the current sequence value without incrementing
+ * Get the next number that would be allocated (without allocating it)
  */
 export async function getCurrentSequence(db: D1Database): Promise<number> {
   const result = await db
-    .prepare("SELECT next_number FROM id_sequence WHERE prefix = 'nm'")
-    .first<{ next_number: number }>();
+    .prepare(
+      `
+    WITH RECURSIVE seq(n) AS (
+      SELECT 108
+      UNION ALL
+      SELECT n + 1 FROM seq
+      WHERE n <= (
+        SELECT COALESCE(MAX(CAST(SUBSTR(dataset_id, 3) AS INTEGER)), 108)
+        FROM datasets WHERE dataset_id LIKE 'nm%'
+      )
+    )
+    SELECT n FROM seq
+    WHERE 'nm' || SUBSTR('000000', 1, 6 - LENGTH(CAST(n AS TEXT))) || CAST(n AS TEXT)
+      NOT IN (SELECT dataset_id FROM datasets WHERE dataset_id LIKE 'nm%')
+    LIMIT 1
+  `,
+    )
+    .first<{ n: number }>();
 
-  return result?.next_number ?? 108;
+  return result?.n ?? 108;
 }
 
 /**
