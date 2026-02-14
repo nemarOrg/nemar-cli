@@ -481,19 +481,23 @@ async function switchGitHubAuth(githubUsername: string): Promise<void> {
       stdout: "pipe",
       stderr: "pipe",
     });
+    // Read stderr before awaiting exit to avoid stream race conditions
+    const stderrText = await new Response(proc.stderr).text();
     const exitCode = await proc.exited;
     if (exitCode === 0) {
       console.log(`  GitHub CLI switched to ${chalk.cyan(`@${githubUsername}`)}`);
     } else {
-      const stderr = await new Response(proc.stderr).text();
-      if (stderr.includes("not found")) {
+      const msg = stderrText.trim();
+      if (msg.includes("not found") || msg.includes("no accounts")) {
         console.log(
           chalk.gray(`  GitHub CLI: @${githubUsername} not logged in (run 'gh auth login')`),
         );
+      } else {
+        console.log(chalk.gray(`  GitHub CLI switch failed: ${msg || `exit code ${exitCode}`}`));
       }
     }
   } catch {
-    // gh not installed or not available; silently skip
+    console.log(chalk.gray("  GitHub CLI (gh) not available, skipping"));
   }
 }
 
