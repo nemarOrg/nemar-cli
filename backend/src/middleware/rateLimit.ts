@@ -14,7 +14,14 @@ const MAX_REQUESTS = 100; // requests per window
 
 // Stricter limits for auth endpoints
 const AUTH_MAX_REQUESTS = 10;
-const AUTH_PATHS = ["/auth/signup", "/auth/login", "/auth/verify"];
+const AUTH_PATHS = [
+  "/auth/signup",
+  "/auth/login",
+  "/auth/verify",
+  "/auth/retrieve-key",
+  "/auth/request-key-regeneration",
+  "/auth/confirm-key-regeneration",
+];
 
 type RateLimitContext = Context<{ Bindings: Bindings; Variables: Variables }>;
 

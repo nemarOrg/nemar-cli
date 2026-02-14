@@ -19,7 +19,7 @@ const CLI_PATH = join(import.meta.dir, "..", "src", "index.ts");
 const commands = {
   auth: {
     description: "Authentication and account management",
-    subcommands: ["login", "signup", "status", "logout", "resend-verification", "setup-ssh"],
+    subcommands: ["login", "signup", "status", "logout", "resend-verification", "setup-ssh", "retrieve-key", "regenerate-key"],
   },
   dataset: {
     description: "Dataset management operations",
@@ -52,6 +52,7 @@ const commands = {
       "publish list",
       "publish approve",
       "publish deny",
+      "role",
     ],
   },
 };
@@ -309,11 +310,20 @@ You'll be prompted to enter:
 
 !!! info "Admin Approval Required"
     After signing up, verify your email and wait for admin approval.
-    You'll receive an API key via email once approved.
+    You'll receive a notification email once approved.
 
-## 2. Log In
+## 2. Retrieve Your API Key
 
-After receiving your API key:
+After approval, retrieve your API key using your email and password:
+
+\`\`\`bash
+nemar auth retrieve-key
+\`\`\`
+
+!!! warning "Save Your Key"
+    The API key is only shown once. Store it securely.
+
+## 3. Log In
 
 \`\`\`bash
 nemar auth login
@@ -405,7 +415,8 @@ NEMAR uses API key authentication with an admin approval workflow.
 1. **Sign up** - Create an account with your details
 2. **Verify email** - Click the link in the verification email
 3. **Wait for approval** - Admin reviews your request
-4. **Log in** - Use your API key to authenticate
+4. **Retrieve API key** - Use \`nemar auth retrieve-key\` with your email and password
+5. **Log in** - Use your API key to authenticate
 
 ## Creating an Account
 
@@ -479,7 +490,13 @@ Your API key is linked to:
 - Your GitHub Personal Access Token (for repository operations)
 - Your S3 credentials (for data upload/download)
 
-If you suspect your key is compromised, contact an admin immediately.
+If you suspect your key is compromised, regenerate it immediately:
+
+\`\`\`bash
+nemar auth regenerate-key
+\`\`\`
+
+This sends a verification email and revokes the old key upon confirmation.
 `;
 }
 
@@ -995,6 +1012,9 @@ Authorization: Bearer nemar_your_api_key
 | POST | /auth/signup | Register new user |
 | GET | /auth/me | Get current user |
 | POST | /auth/resend-verification | Resend email verification |
+| POST | /auth/retrieve-key | Retrieve API key (email + password) |
+| POST | /auth/request-key-regeneration | Request key regeneration |
+| GET | /auth/confirm-key-regeneration | Confirm key regeneration |
 
 ### Datasets
 

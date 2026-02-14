@@ -7,11 +7,31 @@
 import { zValidator } from "@hono/zod-validator";
 import { Hono } from "hono";
 import { z } from "zod";
-import { sendAdminNotificationEmail, sendVerificationEmail } from "../services/email";
+import {
+  sendAdminNotificationEmail,
+  sendKeyReadyEmail,
+  sendKeyRegenerationVerificationEmail,
+  sendVerificationEmail,
+} from "../services/email";
 import { validateGitHubUsername } from "../services/github";
-import { hashPassword, validatePasswordStrength } from "../services/password";
-import { generateExpirationTimestamp, generateVerificationToken } from "../services/token";
+import { hashPassword, validatePasswordStrength, verifyPassword } from "../services/password";
+import {
+  generateApiKey,
+  generateExpirationTimestamp,
+  generateVerificationToken,
+  hashApiKey,
+} from "../services/token";
 import type { Bindings, Variables } from "../types/bindings";
+
+/** Escape HTML special characters to prevent XSS in inline HTML responses */
+function escapeHtml(str: string): string {
+  return str
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#039;");
+}
 
 export const authRoutes = new Hono<{ Bindings: Bindings; Variables: Variables }>();
 
@@ -330,7 +350,7 @@ authRoutes.get("/verify", async (c) => {
   // Notify all admins about the new user needing approval
   try {
     const adminUsers = await db
-      .prepare("SELECT email FROM users WHERE is_admin = 1")
+      .prepare("SELECT email FROM users WHERE role IN ('owner', 'admin') AND status = 'approved'")
       .all<{ email: string }>();
 
     if (adminUsers.results && adminUsers.results.length > 0) {
@@ -363,7 +383,7 @@ authRoutes.get("/verify", async (c) => {
 <body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; line-height: 1.6; color: #333; max-width: 600px; margin: 0 auto; padding: 40px 20px; text-align: center;">
   <div style="background: linear-gradient(135deg, #16a34a 0%, #22c55e 100%); color: white; padding: 40px 20px; border-radius: 12px; margin-bottom: 30px;">
     <h1 style="margin: 0 0 10px 0; font-size: 28px;">Email Verified!</h1>
-    <p style="margin: 0; font-size: 18px; opacity: 0.9;">Welcome to NEMAR, ${user.username}</p>
+    <p style="margin: 0; font-size: 18px; opacity: 0.9;">Welcome to NEMAR, ${escapeHtml(user.username)}</p>
   </div>
 
   <div style="background: #f9fafb; padding: 30px; border-radius: 12px; text-align: left;">
@@ -425,7 +445,7 @@ authRoutes.post("/login", zValidator("json", loginSchema), async (c) => {
       u.email,
       u.github_username,
       u.status,
-      u.is_admin,
+      u.role,
       u.sandbox_completed,
       u.sandbox_dataset_id
     FROM tokens t
@@ -443,7 +463,7 @@ authRoutes.post("/login", zValidator("json", loginSchema), async (c) => {
       email: string;
       github_username: string;
       status: string;
-      is_admin: number;
+      role: string | null;
       sandbox_completed: number;
       sandbox_dataset_id: string | null;
     }>();
@@ -474,7 +494,7 @@ authRoutes.post("/login", zValidator("json", loginSchema), async (c) => {
       username: result.username,
       email: result.email,
       github_username: result.github_username,
-      is_admin: result.is_admin === 1,
+      role: result.role || "member",
       sandbox_completed: result.sandbox_completed === 1,
       sandbox_dataset_id: result.sandbox_dataset_id,
     },
@@ -532,4 +552,314 @@ authRoutes.post("/resend-verification", zValidator("json", resendSchema), async 
   await sendVerificationEmail(email, user.username, verificationUrl, c.env.RESEND_API_KEY);
 
   return c.json({ message: "Verification email sent" });
+});
+
+// ============================================================================
+// Retrieve API Key (approved users only, requires email + password)
+// ============================================================================
+
+const retrieveKeySchema = z.object({
+  email: z.string().email(),
+  password: z.string().min(1, "Password is required"),
+});
+
+/**
+ * POST /auth/retrieve-key - Retrieve API key using email and password.
+ * Only works for approved users. Returns the existing API key prefix
+ * and generates a new key if needed (e.g., first retrieval after approval).
+ */
+authRoutes.post("/retrieve-key", zValidator("json", retrieveKeySchema), async (c) => {
+  const { email, password } = c.req.valid("json");
+  const db = c.env.DB;
+
+  // Find user by email
+  const user = await db
+    .prepare("SELECT id, username, email, password_hash, status FROM users WHERE email = ?")
+    .bind(email)
+    .first<{
+      id: number;
+      username: string;
+      email: string;
+      password_hash: string;
+      status: string;
+    }>();
+
+  if (!user) {
+    // Intentionally vague to prevent email enumeration
+    return c.json({ error: "Invalid email or password" }, 401);
+  }
+
+  // Verify password
+  const passwordValid = await verifyPassword(password, user.password_hash);
+  if (!passwordValid) {
+    return c.json({ error: "Invalid email or password" }, 401);
+  }
+
+  if (user.status !== "approved") {
+    return c.json(
+      {
+        error: "Account not approved",
+        message:
+          user.status === "pending"
+            ? "Please verify your email first"
+            : user.status === "verified"
+              ? "Your account is awaiting admin approval"
+              : "Your account access has been revoked",
+      },
+      403,
+    );
+  }
+
+  // Check if user has an active (non-revoked, non-expired) token
+  const existingToken = await db
+    .prepare(
+      `SELECT id, api_key_prefix FROM tokens
+       WHERE user_id = ? AND revoked_at IS NULL
+       AND (expires_at IS NULL OR expires_at > datetime('now'))
+       ORDER BY created_at DESC LIMIT 1`,
+    )
+    .bind(user.id)
+    .first<{ id: number; api_key_prefix: string }>();
+
+  if (!existingToken) {
+    // No active token; generate a new one (e.g., first login after approval)
+    const { apiKey, apiKeyPrefix } = generateApiKey();
+    const hashedKey = await hashApiKey(apiKey);
+
+    await db
+      .prepare(
+        `INSERT INTO tokens (user_id, api_key_hash, api_key_prefix, name)
+         VALUES (?, ?, ?, 'Retrieved Token')`,
+      )
+      .bind(user.id, hashedKey, apiKeyPrefix)
+      .run();
+
+    await db
+      .prepare(
+        `INSERT INTO audit_log (user_id, action, resource_type, resource_id)
+         VALUES (?, 'key_retrieved', 'user', ?)`,
+      )
+      .bind(user.id, user.username)
+      .run();
+
+    return c.json({
+      message: "API key generated successfully",
+      api_key: apiKey,
+      note: "Store this key securely. It will not be shown again.",
+    });
+  }
+
+  // User already has a token but we cannot show the actual key (only hash is stored).
+  // They need to use regenerate-key if they lost it.
+  return c.json(
+    {
+      error: "API key already issued",
+      api_key_prefix: existingToken.api_key_prefix,
+      message:
+        "An API key has already been generated for your account. " +
+        "If you lost it, use 'nemar auth regenerate-key' to get a new one.",
+    },
+    409,
+  );
+});
+
+// ============================================================================
+// Request API Key Regeneration (sends verification email)
+// ============================================================================
+
+const regenRequestSchema = z.object({
+  email: z.string().email(),
+});
+
+/**
+ * POST /auth/request-key-regeneration - Request a new API key.
+ * Sends a verification email; clicking the link generates a new key and revokes the old one.
+ */
+authRoutes.post(
+  "/request-key-regeneration",
+  zValidator("json", regenRequestSchema),
+  async (c) => {
+    const { email } = c.req.valid("json");
+    const db = c.env.DB;
+
+    // Find user
+    const user = await db
+      .prepare("SELECT id, username, email, status FROM users WHERE email = ?")
+      .bind(email)
+      .first<{ id: number; username: string; email: string; status: string }>();
+
+    if (!user || user.status !== "approved") {
+      // Intentionally vague
+      return c.json({
+        message: "If an approved account exists with this email, a verification link will be sent",
+      });
+    }
+
+    // Generate a regeneration verification token
+    const regenToken = generateVerificationToken();
+    const regenExpires = generateExpirationTimestamp(1); // 1 hour
+
+    // Store the token on the user record
+    await db
+      .prepare(
+        `UPDATE users
+         SET verification_token = ?,
+             verification_expires_at = ?,
+             updated_at = datetime('now')
+         WHERE id = ?`,
+      )
+      .bind(regenToken, regenExpires, user.id)
+      .run();
+
+    // Send verification email
+    const confirmUrl = `${c.env.API_BASE_URL}/auth/confirm-key-regeneration?token=${regenToken}`;
+    try {
+      await sendKeyRegenerationVerificationEmail(
+        user.email,
+        user.username,
+        confirmUrl,
+        c.env.RESEND_API_KEY,
+      );
+    } catch (emailError) {
+      console.error("Failed to send key regeneration email:", emailError);
+    }
+
+    return c.json({
+      message: "If an approved account exists with this email, a verification link will be sent",
+    });
+  },
+);
+
+// ============================================================================
+// Confirm Key Regeneration (via email link)
+// ============================================================================
+
+/**
+ * GET /auth/confirm-key-regeneration?token=... - Confirm key regeneration.
+ * Revokes old tokens, generates a new API key, and shows it in a success page.
+ */
+authRoutes.get("/confirm-key-regeneration", async (c) => {
+  const token = c.req.query("token");
+
+  if (!token) {
+    return c.json({ error: "Token required" }, 400);
+  }
+
+  const db = c.env.DB;
+
+  const user = await db
+    .prepare(
+      `SELECT id, username, email, status, verification_expires_at
+       FROM users WHERE verification_token = ?`,
+    )
+    .bind(token)
+    .first<{
+      id: number;
+      username: string;
+      email: string;
+      status: string;
+      verification_expires_at: string;
+    }>();
+
+  if (!user) {
+    return c.json({ error: "Invalid or expired token" }, 400);
+  }
+
+  if (user.status !== "approved") {
+    return c.json({ error: "Account is not approved" }, 403);
+  }
+
+  // Check expiration
+  const expiresAt = new Date(user.verification_expires_at);
+  if (expiresAt < new Date()) {
+    return c.json(
+      {
+        error: "Token has expired",
+        message: "Please request a new key regeneration link",
+      },
+      400,
+    );
+  }
+
+  // Revoke all existing tokens
+  const revokeResult = await db
+    .prepare(
+      `UPDATE tokens SET revoked_at = datetime('now')
+       WHERE user_id = ? AND revoked_at IS NULL`,
+    )
+    .bind(user.id)
+    .run();
+
+  // Generate new API key
+  const { apiKey, apiKeyPrefix } = generateApiKey();
+  const hashedKey = await hashApiKey(apiKey);
+
+  await db
+    .prepare(
+      `INSERT INTO tokens (user_id, api_key_hash, api_key_prefix, name)
+       VALUES (?, ?, ?, 'Regenerated Token')`,
+    )
+    .bind(user.id, hashedKey, apiKeyPrefix)
+    .run();
+
+  // Clear the verification token
+  await db
+    .prepare(
+      `UPDATE users
+       SET verification_token = NULL,
+           updated_at = datetime('now')
+       WHERE id = ?`,
+    )
+    .bind(user.id)
+    .run();
+
+  // Audit log
+  await db
+    .prepare(
+      `INSERT INTO audit_log (user_id, action, resource_type, resource_id, details)
+       VALUES (?, 'key_regenerated', 'user', ?, ?)`,
+    )
+    .bind(
+      user.id,
+      user.username,
+      JSON.stringify({ tokens_revoked: revokeResult.meta?.changes || 0 }),
+    )
+    .run();
+
+  // Return HTML page with the new API key
+  return c.html(`
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>New API Key - NEMAR</title>
+</head>
+<body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; line-height: 1.6; color: #333; max-width: 600px; margin: 0 auto; padding: 40px 20px; text-align: center;">
+  <div style="background: linear-gradient(135deg, #16a34a 0%, #22c55e 100%); color: white; padding: 40px 20px; border-radius: 12px; margin-bottom: 30px;">
+    <h1 style="margin: 0 0 10px 0; font-size: 28px;">New API Key Generated</h1>
+    <p style="margin: 0; font-size: 18px; opacity: 0.9;">Your old key has been revoked</p>
+  </div>
+
+  <div style="background: #f9fafb; padding: 30px; border-radius: 12px; text-align: left;">
+    <h2 style="color: #333; font-size: 18px; margin: 0 0 15px 0;">Your New API Key</h2>
+    <div style="background-color: #f4f4f5; padding: 16px; border-radius: 8px; font-family: monospace; font-size: 13px; word-break: break-all; margin: 16px 0;">
+      ${apiKey}
+    </div>
+    <p style="color: #dc2626; font-weight: bold; font-size: 14px;">
+      Copy this key now. It will not be shown again.
+    </p>
+
+    <h2 style="color: #333; font-size: 18px; margin: 25px 0 15px 0;">Login with your new key</h2>
+    <div style="background-color: #f4f4f5; padding: 12px; border-radius: 8px; font-family: monospace; font-size: 13px;">
+      nemar auth login
+    </div>
+  </div>
+
+  <p style="color: #9ca3af; font-size: 12px; margin-top: 40px;">
+    NEMAR - Neuroelectromagnetic Data Archive and Tools Resource
+  </p>
+</body>
+</html>
+  `);
 });

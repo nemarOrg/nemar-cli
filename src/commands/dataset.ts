@@ -7,14 +7,16 @@
  * - nemar dataset download        - Download dataset from NEMAR
  * - nemar dataset status          - Check dataset status
  * - nemar dataset list            - List user's datasets
- * - nemar dataset version         - Create new version with DOI
+ * - nemar dataset release         - Create version bump PR
+ * - nemar dataset update          - Update dataset via PR
  * - nemar dataset request-access  - Request access to a dataset
  * - nemar dataset invite          - Invite user as collaborator
  * - nemar dataset collaborators   - List dataset collaborators
  */
 
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
-import { basename, resolve } from "node:path";
+import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { basename, join, resolve } from "node:path";
 import { spawn } from "bun";
 import chalk from "chalk";
 import { Command } from "commander";
@@ -34,6 +36,7 @@ import {
   getManifest,
   getPublishStatus,
   getUserCiStatus,
+  getVersionHistory,
   inviteCollaborator,
   listCollaborators,
   listDatasets,
@@ -48,7 +51,9 @@ import {
   checkDenoInstalled,
   formatValidationResult,
   getValidatorVersion,
+  isValidatorCacheStale,
   runBidsValidatorDirect,
+  updateValidatorCache,
   validateBidsDataset,
 } from "../lib/bids-validator.js";
 import { getConfig, isAuthenticated, isSandboxCompleted } from "../lib/config.js";
@@ -65,9 +70,11 @@ import {
   checkPrerequisites,
   cloneDataset,
   collectFileManifest,
+  commitRevert,
   configureGitHubRemote,
   configureLargefiles,
   copyToAnnexRemote,
+  createRevertBranch,
   dropFiles,
   ensureGitAnnexInitialized,
   formatBytes,
@@ -78,12 +85,15 @@ import {
   getLocalDatasetInfo,
   initDataset,
   isGitAnnexDataset,
+  listDatasetVersions,
+  pushBranch,
   pushToGitHub,
   registerUrlsWithGitAnnex,
   saveDataset,
   uploadFilesWithPresignedUrls,
   verifyGitHubAuth,
 } from "../lib/git-annex.js";
+import { bumpVersion, isValidStableVersion, parseVersion } from "../lib/semver.js";
 
 export const datasetCommand = new Command("dataset").description("Dataset management").addHelpText(
   "after",
@@ -122,6 +132,7 @@ datasetCommand
   .option("-v, --verbose", "Show verbose output")
   .option("--json", "Output results as JSON (for scripting)")
   .option("--version-info", "Show BIDS validator version info")
+  .option("--update", "Force update the BIDS validator to the latest version")
   .allowUnknownOption()
   .addHelpText(
     "after",
@@ -137,6 +148,39 @@ datasetCommand
     $ nemar dataset validate ./ds --max-rows 0           # Headers only`,
   )
   .action(async (datasetPath, options) => {
+    // Handle --update: force-refresh the validator cache
+    if (options.update) {
+      const deno = await checkDenoInstalled();
+      if (!deno.installed) {
+        console.log(chalk.red("Deno is not installed"));
+        console.log("Install Deno: https://deno.com");
+        process.exit(1);
+      }
+
+      const oldVersion = await getValidatorVersion();
+      const spinner = ora("Updating BIDS validator to latest version...").start();
+      const newVersion = await updateValidatorCache();
+
+      if (!newVersion) {
+        spinner.fail("Failed to update BIDS validator");
+        process.exit(1);
+      }
+
+      if (oldVersion && oldVersion !== newVersion) {
+        spinner.succeed(`BIDS validator updated: ${oldVersion} -> ${newVersion}`);
+      } else {
+        spinner.succeed(`BIDS validator is up to date (v${newVersion})`);
+      }
+
+      // If no dataset path given, just update and exit
+      if (!datasetPath || datasetPath === ".") {
+        const cwd = process.cwd();
+        if (!existsSync(resolve(cwd, "dataset_description.json"))) {
+          return;
+        }
+      }
+    }
+
     // Show version info if requested
     if (options.versionInfo) {
       const deno = await checkDenoInstalled();
@@ -146,8 +190,11 @@ datasetCommand
         process.exit(1);
       }
 
+      const stale = isValidatorCacheStale();
       const version = await getValidatorVersion();
-      console.log(`BIDS Validator: ${version || "unknown"}`);
+      console.log(
+        `BIDS Validator: ${version || "unknown"}${stale ? chalk.yellow(" (cache may be stale, run --update to refresh)") : ""}`,
+      );
       console.log(`Deno: ${deno.version || "unknown"}`);
       return;
     }
@@ -178,6 +225,18 @@ datasetCommand
       console.log();
       console.log("Learn more: https://docs.deno.com/runtime/getting_started/installation/");
       process.exit(1);
+    }
+
+    // Auto-refresh stale cache (>7 days old)
+    const forceReload = !!options.update;
+    if (!forceReload && isValidatorCacheStale()) {
+      const refreshSpinner = ora("Checking for BIDS validator updates...").start();
+      const newVersion = await updateValidatorCache();
+      if (newVersion) {
+        refreshSpinner.succeed(`BIDS validator updated to v${newVersion}`);
+      } else {
+        refreshSpinner.info("Could not check for validator updates, using cached version");
+      }
     }
 
     // Resolve and check path
@@ -211,6 +270,7 @@ datasetCommand
         verbose: options.verbose,
         json: options.json,
         extraArgs,
+        forceReload,
       });
 
       // No output + non-zero exit = real failure (e.g. deno error)
@@ -863,16 +923,18 @@ Examples:
         const nemarMetaPath = resolve(absolutePath, "nemar_metadata.json");
         writeFileSync(nemarMetaPath, JSON.stringify(coAuthorEnrichment, null, 2));
 
-        // Ensure .bidsignore includes nemar_metadata.json
+        // Ensure .bidsignore includes NEMAR-specific paths
         const bidsignorePath = resolve(absolutePath, ".bidsignore");
         let bidsignoreContent = "";
         if (existsSync(bidsignorePath)) {
           bidsignoreContent = readFileSync(bidsignorePath, "utf-8");
         }
-        if (!bidsignoreContent.includes("nemar_metadata.json")) {
+        const entriesToIgnore = ["nemar_metadata.json", ".nemar/"];
+        const missing = entriesToIgnore.filter((e) => !bidsignoreContent.includes(e));
+        if (missing.length > 0) {
           const newContent = bidsignoreContent
-            ? `${bidsignoreContent.trimEnd()}\nnemar_metadata.json\n`
-            : "nemar_metadata.json\n";
+            ? `${bidsignoreContent.trimEnd()}\n${missing.join("\n")}\n`
+            : `${missing.join("\n")}\n`;
           writeFileSync(bidsignorePath, newContent);
         }
         console.log(chalk.gray("  Saved nemar_metadata.json with author ORCIDs"));
@@ -906,7 +968,12 @@ Examples:
       process.exit(1);
     }
 
-    spinner.succeed("Metadata pushed to GitHub");
+    if (githubPushResult.warning) {
+      spinner.warn("Metadata pushed to GitHub (with warning)");
+      console.log(chalk.yellow(`  ${githubPushResult.warning}`));
+    } else {
+      spinner.succeed("Metadata pushed to GitHub");
+    }
 
     // Step 12b: Deploy BIDS validation CI
     spinner = ora("Setting up BIDS validation CI...").start();
@@ -1315,30 +1382,840 @@ Examples:
     console.log(chalk.gray("For details: nemar dataset status <dataset-id>"));
   });
 
-// Version command
+// Release command - create a version bump PR
 datasetCommand
-  .command("version")
-  .description("Create a new version of a dataset with DOI")
+  .command("release")
+  .description("Create a version bump PR for a dataset")
   .argument("<dataset-id>", "Dataset ID (e.g., nm000104)")
-  .argument("<version>", "Version tag (e.g., v1.1.0)")
-  .option("-m, --message <msg>", "Version description")
-  .action(async (datasetId, version, _options) => {
-    if (!isAuthenticated()) {
-      console.log(chalk.red("Error: Not authenticated"));
-      console.log("Run 'nemar auth login' first");
-      process.exit(1);
-    }
+  .option("--type <type>", "Bump type: patch, minor, or major")
+  .option("--version <version>", "Explicit version (e.g., 2.0.0)")
+  .option("--dir <path>", "Use existing local clone instead of cloning")
+  .option("--monitor", "Watch CI checks and offer to merge")
+  .option(YES_OPTION, YES_DESCRIPTION)
+  .addHelpText(
+    "after",
+    `
+Description:
+  Create a pull request that bumps the dataset version in
+  dataset_description.json. The PR triggers CI checks (BIDS validation,
+  version check). On merge, GitHub Actions tags the release and
+  publishes a version DOI (if a concept DOI exists).
 
-    console.log(chalk.yellow("Version command not yet implemented"));
-    console.log(`Would create version ${version} for dataset ${datasetId}`);
-    console.log("Requires existing concept DOI (created by admin)");
-    // TODO: Implement versioning
-    // 1. Check dataset has concept DOI
-    // 2. Validate dataset passes BIDS
-    // 3. Create new version DOI on Zenodo
-    // 4. Update dataset_description.json
-    // 5. Create git tag and release
-  });
+Examples:
+  $ nemar dataset release nm000104 --type patch
+  $ nemar dataset release nm000104 --version 2.0.0
+  $ nemar dataset release nm000104                   # interactive prompt`,
+  )
+  .action(
+    async (
+      datasetId: string,
+      options: {
+        type?: string;
+        version?: string;
+        dir?: string;
+        monitor?: boolean;
+        yes?: boolean;
+      },
+    ) => {
+      if (!isAuthenticated()) {
+        console.log(chalk.red("Error: Not authenticated"));
+        console.log("Run 'nemar auth login' first");
+        process.exit(1);
+      }
+
+      // Check prerequisites: git and gh
+      const gitCheck = spawn({ cmd: ["git", "--version"], stdout: "pipe", stderr: "pipe" });
+      if ((await gitCheck.exited) !== 0) {
+        console.log(chalk.red("Error: git is not installed"));
+        process.exit(1);
+      }
+      const ghCheck = spawn({ cmd: ["gh", "--version"], stdout: "pipe", stderr: "pipe" });
+      if ((await ghCheck.exited) !== 0) {
+        console.log(chalk.red("Error: GitHub CLI (gh) is not installed"));
+        console.log("  Install: brew install gh (or see https://cli.github.com)");
+        process.exit(1);
+      }
+
+      // Fetch dataset info
+      const infoSpinner = ora("Fetching dataset info...").start();
+      let dataset: Dataset;
+      try {
+        dataset = await getDataset(datasetId);
+        infoSpinner.succeed(`Dataset: ${dataset.name || datasetId}`);
+      } catch (error) {
+        if (error instanceof ApiError) {
+          infoSpinner.fail(error.message);
+        } else {
+          infoSpinner.fail("Failed to fetch dataset");
+        }
+        process.exit(1);
+      }
+
+      if (!dataset.github_repo) {
+        console.log(chalk.red("Error: Dataset has no GitHub repository"));
+        process.exit(1);
+      }
+
+      // Fetch version history (required for correct version bumping)
+      let currentVersion: string;
+      try {
+        const history = await getVersionHistory(datasetId);
+        currentVersion = history.current_version;
+        console.log(`  Current version: ${chalk.cyan(currentVersion)}`);
+        if (history.versions.length > 0) {
+          console.log(`  Version DOIs: ${history.versions.length}`);
+          for (const v of history.versions.slice(0, 3)) {
+            console.log(`    ${v.version} - ${chalk.gray(v.doi)}`);
+          }
+          if (history.versions.length > 3) {
+            console.log(chalk.gray(`    ... and ${history.versions.length - 3} more`));
+          }
+        }
+      } catch (err) {
+        const detail = err instanceof ApiError ? `${err.statusCode}: ${err.message}` : String(err);
+        console.log(chalk.red(`Error: Could not fetch version history (${detail})`));
+        console.log("  Cannot determine current version. Ensure the backend is reachable.");
+        process.exit(1);
+      }
+
+      // Determine new version
+      let newVersion: string;
+      if (options.version) {
+        if (!isValidStableVersion(options.version)) {
+          console.log(chalk.red(`Error: Invalid version: ${options.version}`));
+          console.log("  Expected format: X.Y.Z (e.g., 2.0.0)");
+          process.exit(1);
+        }
+        newVersion = options.version.replace(/^v/, "");
+      } else if (options.type) {
+        const bumpType = options.type as "patch" | "minor" | "major";
+        if (!["patch", "minor", "major"].includes(bumpType)) {
+          console.log(chalk.red(`Error: Invalid bump type: ${options.type}`));
+          console.log("  Expected: patch, minor, or major");
+          process.exit(1);
+        }
+        newVersion = bumpVersion(currentVersion, bumpType);
+      } else {
+        // Interactive prompt
+        const parsed = parseVersion(currentVersion);
+        if (!parsed) {
+          console.log(chalk.red(`Error: Cannot parse current version: ${currentVersion}`));
+          process.exit(1);
+        }
+
+        const choices = [
+          {
+            name: `patch  ${currentVersion} -> ${bumpVersion(currentVersion, "patch")}`,
+            value: "patch",
+          },
+          {
+            name: `minor  ${currentVersion} -> ${bumpVersion(currentVersion, "minor")}`,
+            value: "minor",
+          },
+          {
+            name: `major  ${currentVersion} -> ${bumpVersion(currentVersion, "major")}`,
+            value: "major",
+          },
+          { name: "custom version", value: "custom" },
+        ];
+
+        const { bumpType } = await inquirer.prompt([
+          {
+            type: "list",
+            name: "bumpType",
+            message: "Select version bump type:",
+            choices,
+          },
+        ]);
+
+        if (bumpType === "custom") {
+          const { customVersion } = await inquirer.prompt([
+            {
+              type: "input",
+              name: "customVersion",
+              message: "Enter version (X.Y.Z):",
+              validate: (v: string) =>
+                isValidStableVersion(v) || "Invalid format. Use X.Y.Z (e.g., 2.0.0)",
+            },
+          ]);
+          newVersion = customVersion.replace(/^v/, "");
+        } else {
+          newVersion = bumpVersion(currentVersion, bumpType);
+        }
+      }
+
+      console.log();
+      console.log(
+        `  ${chalk.bold("Version bump:")} ${currentVersion} -> ${chalk.green(newVersion)}`,
+      );
+
+      // Confirm
+      const result = await confirm(`Create release PR for ${datasetId} v${newVersion}?`, {
+        yes: options.yes,
+      });
+      if (result !== "confirmed") {
+        console.log("Cancelled.");
+        return;
+      }
+
+      // Determine working directory
+      let workDir: string;
+      let needsClone = true;
+
+      if (options.dir) {
+        if (!existsSync(options.dir)) {
+          console.log(chalk.red(`Error: Directory not found: ${options.dir}`));
+          process.exit(1);
+        }
+        workDir = resolve(options.dir);
+        needsClone = false;
+      } else {
+        workDir = mkdtempSync(join(tmpdir(), `nemar-release-${datasetId}-`));
+      }
+
+      // Clone if needed
+      if (needsClone) {
+        const cloneUrl = `https://github.com/${dataset.github_repo}.git`;
+        const cloneSpinner = ora("Cloning dataset...").start();
+        const cloneResult = await cloneDataset(cloneUrl, workDir);
+        if (!cloneResult.success) {
+          cloneSpinner.fail(`Clone failed: ${cloneResult.error}`);
+          process.exit(1);
+        }
+        cloneSpinner.succeed("Cloned dataset");
+      }
+
+      // Create release branch
+      const branchName = `release/v${newVersion}`;
+      const branchSpinner = ora("Creating release branch...").start();
+
+      const branchProc = spawn({
+        cmd: ["git", "checkout", "-b", branchName],
+        cwd: workDir,
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      if ((await branchProc.exited) !== 0) {
+        const stderr = await new Response(branchProc.stderr).text();
+        branchSpinner.fail(`Failed to create branch: ${stderr.trim()}`);
+        process.exit(1);
+      }
+      branchSpinner.succeed(`Created branch: ${branchName}`);
+
+      // Update dataset_description.json
+      const descPath = join(workDir, "dataset_description.json");
+      if (!existsSync(descPath)) {
+        console.log(chalk.red("Error: dataset_description.json not found in repo"));
+        process.exit(1);
+      }
+
+      let descContent: Record<string, unknown>;
+      try {
+        descContent = JSON.parse(readFileSync(descPath, "utf-8"));
+      } catch (err) {
+        if (err instanceof SyntaxError) {
+          console.log(chalk.red("Error: dataset_description.json contains invalid JSON"));
+        } else {
+          console.log(chalk.red(`Error: Could not read dataset_description.json: ${err}`));
+        }
+        process.exit(1);
+      }
+      descContent.Version = newVersion;
+      writeFileSync(descPath, `${JSON.stringify(descContent, null, 2)}\n`);
+
+      // Commit
+      const commitSpinner = ora("Committing version bump...").start();
+      const addProc = spawn({
+        cmd: ["git", "add", "dataset_description.json"],
+        cwd: workDir,
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      if ((await addProc.exited) !== 0) {
+        const stderr = await new Response(addProc.stderr).text();
+        commitSpinner.fail(`Failed to stage changes: ${stderr.trim()}`);
+        process.exit(1);
+      }
+
+      const commitProc = spawn({
+        cmd: ["git", "commit", "-m", `Bump version to ${newVersion}`],
+        cwd: workDir,
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      if ((await commitProc.exited) !== 0) {
+        const stderr = await new Response(commitProc.stderr).text();
+        commitSpinner.fail(`Commit failed: ${stderr.trim()}`);
+        process.exit(1);
+      }
+      commitSpinner.succeed("Committed version bump");
+
+      // Push branch
+      const pushSpinner = ora("Pushing branch...").start();
+      const pushResult = await pushBranch(workDir, branchName);
+      if (!pushResult.success) {
+        pushSpinner.fail(`Push failed: ${pushResult.error}`);
+        process.exit(1);
+      }
+      pushSpinner.succeed("Pushed branch");
+
+      // Create PR via gh CLI
+      let prCreated = false;
+      const prSpinner = ora("Creating pull request...").start();
+      try {
+        const prTitle = `Release v${newVersion}`;
+        const prBody = `## Version Bump\n\nBumps ${datasetId} from ${currentVersion} to ${newVersion}.\n\nOn merge, CI will:\n- Tag the release (v${newVersion})\n- Publish a version DOI (if concept DOI exists)`;
+
+        const prProc = spawn({
+          cmd: [
+            "gh",
+            "pr",
+            "create",
+            "--repo",
+            dataset.github_repo,
+            "--head",
+            branchName,
+            "--base",
+            "main",
+            "--title",
+            prTitle,
+            "--body",
+            prBody,
+          ],
+          cwd: workDir,
+          stdout: "pipe",
+          stderr: "pipe",
+        });
+
+        const prUrl = (await new Response(prProc.stdout).text()).trim();
+        if ((await prProc.exited) !== 0) {
+          const stderr = await new Response(prProc.stderr).text();
+          throw new Error(stderr.trim() || "gh pr create failed");
+        }
+
+        prCreated = true;
+        prSpinner.succeed("Created pull request");
+        console.log();
+        console.log(`  ${chalk.cyan("PR:")} ${prUrl}`);
+      } catch (prError) {
+        prSpinner.fail("Failed to create PR");
+        const errorMsg = prError instanceof Error ? prError.message : String(prError);
+        console.log(chalk.red(`  ${errorMsg}`));
+        if (errorMsg.includes("not found") || errorMsg.includes("command not found")) {
+          console.log(chalk.yellow("  Install: brew install gh"));
+        } else if (errorMsg.includes("auth") || errorMsg.includes("401")) {
+          console.log(chalk.yellow("  Run: gh auth login"));
+        }
+        console.log(chalk.gray(`  Branch ${branchName} has been pushed. Create the PR manually.`));
+      }
+
+      // Monitor mode (only if PR was created successfully)
+      if (options.monitor && prCreated) {
+        console.log();
+        console.log(chalk.gray("Monitoring CI checks..."));
+        console.log(chalk.gray("  Press Ctrl+C to stop monitoring"));
+
+        let attempts = 0;
+        const maxAttempts = 60; // 10 minutes at 10s intervals
+
+        while (attempts < maxAttempts) {
+          await new Promise((r) => setTimeout(r, 10000));
+          attempts++;
+
+          const checkProc = spawn({
+            cmd: ["gh", "pr", "checks", "--repo", dataset.github_repo, branchName],
+            cwd: workDir,
+            stdout: "pipe",
+            stderr: "pipe",
+          });
+          const checkOutput = await new Response(checkProc.stdout).text();
+          const checkExit = await checkProc.exited;
+
+          if (checkExit === 0) {
+            console.log(chalk.green("  All checks passed!"));
+
+            const mergeResult = await confirm("Merge the PR?", { yes: options.yes });
+            if (mergeResult === "confirmed") {
+              const mergeProc = spawn({
+                cmd: [
+                  "gh",
+                  "pr",
+                  "merge",
+                  "--repo",
+                  dataset.github_repo,
+                  branchName,
+                  "--squash",
+                  "--delete-branch",
+                ],
+                cwd: workDir,
+                stdout: "pipe",
+                stderr: "pipe",
+              });
+              const mergeExit = await mergeProc.exited;
+              if (mergeExit === 0) {
+                console.log(chalk.green("  PR merged successfully!"));
+              } else {
+                const mergeErr = await new Response(mergeProc.stderr).text();
+                console.log(chalk.red(`  Merge failed: ${mergeErr.trim()}`));
+              }
+            }
+            break;
+          }
+
+          // Check if any failed
+          if (checkOutput.includes("fail") || checkOutput.includes("X")) {
+            console.log(chalk.red("  Some checks failed:"));
+            console.log(checkOutput);
+            break;
+          }
+
+          process.stdout.write(chalk.gray("."));
+        }
+
+        if (attempts >= maxAttempts) {
+          console.log(chalk.yellow("\n  Timed out waiting for checks."));
+        }
+      }
+
+      if (needsClone) {
+        console.log();
+        console.log(chalk.gray(`Working directory: ${workDir}`));
+        console.log(chalk.gray("You can delete this directory after the PR is merged."));
+      }
+    },
+  );
+
+// Update command - push data/metadata changes via PR
+datasetCommand
+  .command("update")
+  .description("Push local changes to a dataset via PR")
+  .argument("[path]", "Path to local dataset clone (default: current directory)")
+  .option("--bump <type>", "Version bump type: patch, minor, or major", "patch")
+  .option("--branch <name>", "Custom branch name")
+  .option("-m, --message <msg>", "Commit message")
+  .option("--monitor", "Watch CI checks and offer to merge")
+  .option(YES_OPTION, YES_DESCRIPTION)
+  .addHelpText(
+    "after",
+    `
+Description:
+  Push local changes (metadata or data files) to a dataset via a pull
+  request. Automatically bumps the version, commits, pushes, and creates
+  a PR. For data files (annexed), copies them to S3 via git-annex.
+
+  Run this from inside a dataset clone, or pass the path as an argument.
+
+Examples:
+  $ cd nm000104 && nemar dataset update
+  $ nemar dataset update ./nm000104 --bump minor -m "Add new subjects"
+  $ nemar dataset update --branch fix/metadata -m "Fix participant ages"`,
+  )
+  .action(
+    async (
+      path: string | undefined,
+      options: {
+        bump: string;
+        branch?: string;
+        message?: string;
+        monitor?: boolean;
+        yes?: boolean;
+      },
+    ) => {
+      if (!isAuthenticated()) {
+        console.log(chalk.red("Error: Not authenticated"));
+        console.log("Run 'nemar auth login' first");
+        process.exit(1);
+      }
+
+      // Check prerequisites: git, gh
+      const gitCheck = spawn({ cmd: ["git", "--version"], stdout: "pipe", stderr: "pipe" });
+      if ((await gitCheck.exited) !== 0) {
+        console.log(chalk.red("Error: git is not installed"));
+        process.exit(1);
+      }
+      const ghCheck = spawn({ cmd: ["gh", "--version"], stdout: "pipe", stderr: "pipe" });
+      if ((await ghCheck.exited) !== 0) {
+        console.log(chalk.red("Error: GitHub CLI (gh) is not installed"));
+        console.log("  Install: brew install gh (or see https://cli.github.com)");
+        process.exit(1);
+      }
+
+      const workDir = resolve(path || ".");
+
+      if (!existsSync(join(workDir, ".git"))) {
+        console.log(chalk.red("Error: Not a git repository"));
+        console.log("  Run this from inside a dataset clone, or pass the path.");
+        process.exit(1);
+      }
+
+      // Detect dataset ID from remote
+      const datasetId = await getDatasetIdFromRemote(workDir);
+      if (!datasetId) {
+        console.log(chalk.red("Error: Could not detect dataset ID from git remote"));
+        process.exit(1);
+      }
+
+      console.log(`  Dataset: ${chalk.cyan(datasetId)}`);
+
+      // Check we're on main branch
+      const currentBranchName = await getCurrentBranch(workDir);
+      if (currentBranchName !== "main") {
+        console.log(
+          chalk.yellow(`Warning: Currently on branch '${currentBranchName}', expected 'main'`),
+        );
+        const result = await confirm("Continue anyway?", { yes: options.yes });
+        if (result !== "confirmed") {
+          console.log("Cancelled.");
+          return;
+        }
+      }
+
+      // Check for changes
+      const statusProc = spawn({
+        cmd: ["git", "status", "--porcelain"],
+        cwd: workDir,
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      const statusOutput = (await new Response(statusProc.stdout).text()).trim();
+      if ((await statusProc.exited) !== 0) {
+        console.log(chalk.red("Error: Failed to check git status"));
+        process.exit(1);
+      }
+
+      if (!statusOutput) {
+        console.log(chalk.yellow("No changes detected."));
+        console.log("  Make changes to the dataset files, then run this command again.");
+        return;
+      }
+
+      // Categorize changes
+      const lines = statusOutput.split("\n");
+      const dataFiles: string[] = [];
+      const metadataFiles: string[] = [];
+      for (const line of lines) {
+        const filePath = line.substring(3).trim();
+        // Common neuroimaging data file extensions (typically git-annex managed)
+        if (/\.(edf|bdf|set|fdt|nwb|eeg|vhdr|vmrk|cnt|mff|gz)$/i.test(filePath)) {
+          dataFiles.push(filePath);
+        } else {
+          metadataFiles.push(filePath);
+        }
+      }
+
+      console.log();
+      if (metadataFiles.length > 0) {
+        console.log(`  ${chalk.bold("Metadata files:")} ${metadataFiles.length}`);
+        for (const f of metadataFiles.slice(0, 5)) {
+          console.log(`    ${f}`);
+        }
+        if (metadataFiles.length > 5) {
+          console.log(chalk.gray(`    ... and ${metadataFiles.length - 5} more`));
+        }
+      }
+      if (dataFiles.length > 0) {
+        console.log(`  ${chalk.bold("Data files:")} ${dataFiles.length}`);
+        for (const f of dataFiles.slice(0, 5)) {
+          console.log(`    ${f}`);
+        }
+        if (dataFiles.length > 5) {
+          console.log(chalk.gray(`    ... and ${dataFiles.length - 5} more`));
+        }
+      }
+
+      // Get dataset info for github_repo
+      const infoSpinner = ora("Fetching dataset info...").start();
+      let dataset: Dataset;
+      try {
+        dataset = await getDataset(datasetId);
+        infoSpinner.succeed();
+      } catch (error) {
+        if (error instanceof ApiError) {
+          infoSpinner.fail(error.message);
+        } else {
+          infoSpinner.fail("Failed to fetch dataset");
+        }
+        process.exit(1);
+      }
+
+      if (!dataset.github_repo) {
+        console.log(chalk.red("Error: Dataset has no GitHub repository"));
+        process.exit(1);
+      }
+
+      // Get current version (required for correct version bumping)
+      let currentVersion: string;
+      const versionDescPath = join(workDir, "dataset_description.json");
+      if (!existsSync(versionDescPath)) {
+        console.log(chalk.red("Error: dataset_description.json not found"));
+        console.log("  This file is required for BIDS datasets.");
+        process.exit(1);
+      }
+      try {
+        const desc = JSON.parse(readFileSync(versionDescPath, "utf-8"));
+        if (typeof desc.Version !== "string" || !desc.Version) {
+          console.log(chalk.red("Error: No Version field in dataset_description.json"));
+          console.log('  Set the Version field before updating (e.g., "Version": "1.0.0").');
+          process.exit(1);
+        }
+        currentVersion = desc.Version;
+      } catch (err) {
+        if (err instanceof SyntaxError) {
+          console.log(chalk.red("Error: dataset_description.json contains invalid JSON"));
+        } else {
+          console.log(chalk.red(`Error: Could not read dataset_description.json: ${err}`));
+        }
+        process.exit(1);
+      }
+
+      const bumpType = options.bump as "patch" | "minor" | "major";
+      if (!["patch", "minor", "major"].includes(bumpType)) {
+        console.log(chalk.red(`Error: Invalid bump type: ${options.bump}`));
+        process.exit(1);
+      }
+      const newVersion = bumpVersion(currentVersion, bumpType);
+
+      console.log(
+        `  ${chalk.bold("Version bump:")} ${currentVersion} -> ${chalk.green(newVersion)}`,
+      );
+
+      // Confirm
+      const confirmResult = await confirm(`Create update PR for ${datasetId}?`, {
+        yes: options.yes,
+      });
+      if (confirmResult !== "confirmed") {
+        console.log("Cancelled.");
+        return;
+      }
+
+      // Create branch
+      const timestamp = Date.now().toString(36);
+      const branchName = options.branch || `update/${datasetId}-${timestamp}`;
+
+      const branchSpinner = ora("Creating update branch...").start();
+      const branchProc = spawn({
+        cmd: ["git", "checkout", "-b", branchName],
+        cwd: workDir,
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      if ((await branchProc.exited) !== 0) {
+        const stderr = await new Response(branchProc.stderr).text();
+        branchSpinner.fail(`Failed to create branch: ${stderr.trim()}`);
+        process.exit(1);
+      }
+      branchSpinner.succeed(`Created branch: ${branchName}`);
+
+      // Bump version in dataset_description.json (already validated above)
+      const descPath = join(workDir, "dataset_description.json");
+      let descContent: Record<string, unknown>;
+      try {
+        descContent = JSON.parse(readFileSync(descPath, "utf-8"));
+      } catch (err) {
+        if (err instanceof SyntaxError) {
+          console.log(chalk.red("Error: dataset_description.json contains invalid JSON"));
+        } else {
+          console.log(chalk.red(`Error: Could not read dataset_description.json: ${err}`));
+        }
+        process.exit(1);
+      }
+      descContent.Version = newVersion;
+      writeFileSync(descPath, `${JSON.stringify(descContent, null, 2)}\n`);
+
+      // Stage all changes and commit
+      const commitSpinner = ora("Committing changes...").start();
+      const addProc = spawn({
+        cmd: ["git", "add", "-A"],
+        cwd: workDir,
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      if ((await addProc.exited) !== 0) {
+        const stderr = await new Response(addProc.stderr).text();
+        commitSpinner.fail(`Failed to stage changes: ${stderr.trim()}`);
+        process.exit(1);
+      }
+
+      const commitMsg = options.message || `Update ${datasetId} to ${newVersion}`;
+      const commitProc = spawn({
+        cmd: ["git", "commit", "-m", commitMsg],
+        cwd: workDir,
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      if ((await commitProc.exited) !== 0) {
+        const stderr = await new Response(commitProc.stderr).text();
+        commitSpinner.fail(`Commit failed: ${stderr.trim()}`);
+        process.exit(1);
+      }
+      commitSpinner.succeed("Committed changes");
+
+      // If data files exist and git-annex is available, copy to S3
+      if (dataFiles.length > 0) {
+        const annexCheck = spawn({
+          cmd: ["git", "annex", "version"],
+          cwd: workDir,
+          stdout: "pipe",
+          stderr: "pipe",
+        });
+        if ((await annexCheck.exited) === 0) {
+          const s3Spinner = ora("Uploading data files to S3...").start();
+          const copyProc = spawn({
+            cmd: ["git", "annex", "copy", "--to", "nemar-s3"],
+            cwd: workDir,
+            stdout: "pipe",
+            stderr: "pipe",
+          });
+          const copyExit = await copyProc.exited;
+          if (copyExit !== 0) {
+            const stderr = await new Response(copyProc.stderr).text();
+            s3Spinner.warn(`S3 upload issue: ${stderr.trim()}`);
+            console.log(chalk.yellow("  Data files may need manual upload after PR creation."));
+          } else {
+            s3Spinner.succeed("Uploaded data files to S3");
+          }
+        } else {
+          console.log(
+            chalk.yellow("  git-annex not available; data files will be committed to git."),
+          );
+        }
+      }
+
+      // Push branch (and git-annex branch if it exists)
+      const pushSpinner = ora("Pushing branch...").start();
+      const pushResult = await pushBranch(workDir, branchName);
+      if (!pushResult.success) {
+        pushSpinner.fail(`Push failed: ${pushResult.error}`);
+        process.exit(1);
+      }
+
+      // Also push git-annex branch if data files were uploaded
+      if (dataFiles.length > 0) {
+        const annexPush = spawn({
+          cmd: ["git", "push", "origin", "git-annex"],
+          cwd: workDir,
+          stdout: "pipe",
+          stderr: "pipe",
+        });
+        if ((await annexPush.exited) !== 0) {
+          console.log(chalk.yellow("  Warning: Failed to push git-annex branch"));
+        }
+      }
+      pushSpinner.succeed("Pushed branch");
+
+      // Create PR via gh CLI
+      let prCreated = false;
+      const prSpinner = ora("Creating pull request...").start();
+      try {
+        const prTitle = options.message
+          ? `${options.message} (v${newVersion})`
+          : `Update ${datasetId} to v${newVersion}`;
+        const fileList = [...metadataFiles, ...dataFiles].slice(0, 10).join("\n- ");
+        const prBody = `## Dataset Update\n\nBumps ${datasetId} from ${currentVersion} to ${newVersion}.\n\n### Changed files\n- ${fileList}${lines.length > 10 ? `\n- ... and ${lines.length - 10} more` : ""}`;
+
+        const prProc = spawn({
+          cmd: [
+            "gh",
+            "pr",
+            "create",
+            "--repo",
+            dataset.github_repo,
+            "--head",
+            branchName,
+            "--base",
+            "main",
+            "--title",
+            prTitle,
+            "--body",
+            prBody,
+          ],
+          cwd: workDir,
+          stdout: "pipe",
+          stderr: "pipe",
+        });
+
+        const prUrl = (await new Response(prProc.stdout).text()).trim();
+        if ((await prProc.exited) !== 0) {
+          const stderr = await new Response(prProc.stderr).text();
+          throw new Error(stderr.trim() || "gh pr create failed");
+        }
+
+        prCreated = true;
+        prSpinner.succeed("Created pull request");
+        console.log();
+        console.log(`  ${chalk.cyan("PR:")} ${prUrl}`);
+      } catch (prError) {
+        prSpinner.fail("Failed to create PR");
+        const errorMsg = prError instanceof Error ? prError.message : String(prError);
+        console.log(chalk.red(`  ${errorMsg}`));
+        console.log(chalk.gray(`  Branch ${branchName} has been pushed. Create the PR manually.`));
+      }
+
+      // Monitor mode (only if PR was created successfully)
+      if (options.monitor && prCreated) {
+        console.log();
+        console.log(chalk.gray("Monitoring CI checks..."));
+
+        let attempts = 0;
+        const maxAttempts = 60; // 10 minutes at 10s intervals
+
+        while (attempts < maxAttempts) {
+          await new Promise((r) => setTimeout(r, 10000));
+          attempts++;
+
+          const checkProc = spawn({
+            cmd: ["gh", "pr", "checks", "--repo", dataset.github_repo, branchName],
+            cwd: workDir,
+            stdout: "pipe",
+            stderr: "pipe",
+          });
+          const checkOutput = await new Response(checkProc.stdout).text();
+          const checkExit = await checkProc.exited;
+
+          if (checkExit === 0) {
+            console.log(chalk.green("  All checks passed!"));
+            const mergeResult = await confirm("Merge the PR?", { yes: options.yes });
+            if (mergeResult === "confirmed") {
+              const mergeProc = spawn({
+                cmd: [
+                  "gh",
+                  "pr",
+                  "merge",
+                  "--repo",
+                  dataset.github_repo,
+                  branchName,
+                  "--squash",
+                  "--delete-branch",
+                ],
+                cwd: workDir,
+                stdout: "pipe",
+                stderr: "pipe",
+              });
+              if ((await mergeProc.exited) === 0) {
+                console.log(chalk.green("  PR merged successfully!"));
+              } else {
+                const mergeErr = await new Response(mergeProc.stderr).text();
+                console.log(chalk.red(`  Merge failed: ${mergeErr.trim()}`));
+              }
+            }
+            break;
+          }
+
+          if (checkOutput.includes("fail") || checkOutput.includes("X")) {
+            console.log(chalk.red("  Some checks failed:"));
+            console.log(checkOutput);
+            break;
+          }
+
+          process.stdout.write(chalk.gray("."));
+        }
+
+        if (attempts >= maxAttempts) {
+          console.log(chalk.yellow("\n  Timed out waiting for checks."));
+        }
+      }
+    },
+  );
 
 // Request access command
 datasetCommand

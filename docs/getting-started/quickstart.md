@@ -19,11 +19,20 @@ You'll be prompted to enter:
 
 !!! info "Admin Approval Required"
     After signing up, verify your email and wait for admin approval.
-    You'll receive an API key via email once approved.
+    You'll receive a notification email once approved.
 
-## 2. Log In
+## 2. Retrieve Your API Key
 
-After receiving your API key:
+After approval, retrieve your API key using your email and password:
+
+```bash
+nemar auth retrieve-key
+```
+
+!!! warning "Save Your Key"
+    The API key is only shown once. Store it securely.
+
+## 3. Log In
 
 ```bash
 nemar auth login

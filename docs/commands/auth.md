@@ -20,6 +20,10 @@ Commands:
   logout [options]     Clear stored credentials
   resend-verification  Resend email verification link
   setup-ssh [options]  Configure SSH access for GitHub (auto-generates key)
+  retrieve-key         Retrieve your API key after account approval (requires
+                       email and password)
+  regenerate-key       Request a new API key (revokes current key, requires
+                       email verification)
   help [command]       display help for command
 
 Description:
@@ -27,15 +31,18 @@ Description:
   their email, and be approved by an admin before they can upload datasets.
 
 Workflow:
-  1. nemar auth signup     - Register a new account
-  2. Verify your email     - Click the link in the verification email
-  3. Wait for approval     - Admin will review your request
-  4. nemar auth login      - Log in with your API key (sent after approval)
+  1. nemar auth signup         - Register a new account
+  2. Verify your email         - Click the link in the verification email
+  3. Wait for approval         - Admin will review your request
+  4. nemar auth retrieve-key   - Retrieve your API key (requires password)
+  5. nemar auth login           - Log in with your API key
 
 Examples:
   $ nemar auth signup                    # Start registration
+  $ nemar auth retrieve-key             # Get your API key after approval
   $ nemar auth login                     # Interactive login
   $ nemar auth login -k <api-key>        # Login with API key
+  $ nemar auth regenerate-key           # Get a new API key (revokes old)
   $ nemar auth status --refresh          # Check authentication status
   $ nemar auth whoami                    # Alias for status
   $ nemar auth logout                    # Clear credentials
@@ -137,5 +144,50 @@ Description:
 Examples:
   $ nemar auth setup-ssh          # Set up SSH access
   $ nemar auth setup-ssh --force  # Regenerate key even if exists
+```
+
+### auth retrieve-key
+
+```bash
+Usage: nemar auth retrieve-key [options]
+
+Retrieve your API key after account approval (requires email and password)
+
+Options:
+  -h, --help  display help for command
+
+Description:
+  After an admin approves your account, use this command to securely
+  retrieve your API key. You will need the email and password you used
+  during signup.
+
+  API keys are not sent via email for security. This is the only way
+  to obtain your key.
+
+Examples:
+  $ nemar auth retrieve-key
+```
+
+### auth regenerate-key
+
+```bash
+Usage: nemar auth regenerate-key [options]
+
+Request a new API key (revokes current key, requires email verification)
+
+Options:
+  -h, --help  display help for command
+
+Description:
+  If you lost your API key or it was compromised, use this command to
+  request a new one. A verification email will be sent to confirm the
+  request. Clicking the link will:
+
+  1. Revoke your current API key
+  2. Generate a new API key (shown in the browser)
+  3. You will need to login again with the new key
+
+Examples:
+  $ nemar auth regenerate-key
 ```
 

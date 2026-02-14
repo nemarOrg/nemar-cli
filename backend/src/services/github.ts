@@ -2,7 +2,7 @@
  * GitHub API service
  *
  * Handles GitHub operations: validating usernames, managing collaborators,
- * creating repositories, and applying branch protection.
+ * creating/deleting repositories, and applying branch protection.
  */
 
 const GITHUB_API = "https://api.github.com";
@@ -211,6 +211,34 @@ export async function createRepository(
 }
 
 /**
+ * Delete a repository from the nemarDatasets organization.
+ * Idempotent: returns true if the repo was deleted or did not exist.
+ * Requires a PAT with `delete_repo` scope.
+ */
+export async function deleteRepository(repo: string, pat: string): Promise<boolean> {
+  if (!repo || repo.includes("/") || repo.includes("..")) {
+    throw new Error(`Invalid repository name: "${repo}"`);
+  }
+
+  const response = await fetch(`${GITHUB_API}/repos/${ORG_NAME}/${repo}`, {
+    method: "DELETE",
+    headers: {
+      Authorization: `Bearer ${pat}`,
+      Accept: "application/vnd.github.v3+json",
+      "User-Agent": "NEMAR-API",
+    },
+  });
+
+  // 204 = deleted, 404 = already gone (both are success)
+  if (response.status === 204 || response.status === 404) {
+    return true;
+  }
+
+  const error = await response.text();
+  throw new Error(`Failed to delete repo ${repo}: HTTP ${response.status} - ${error}`);
+}
+
+/**
  * Apply branch protection rules to main branch
  *
  * Configuration:
@@ -345,6 +373,35 @@ export async function setRepoVisibility(
   return { ok: true, status: response.status };
 }
 
+export async function setRepoDescription(
+  repo: string,
+  description: string,
+  pat: string,
+): Promise<{ ok: boolean; status: number; error?: string }> {
+  let response: Response;
+  try {
+    response = await fetch(`${GITHUB_API}/repos/${ORG_NAME}/${repo}`, {
+      method: "PATCH",
+      headers: {
+        Authorization: `Bearer ${pat}`,
+        Accept: "application/vnd.github.v3+json",
+        "User-Agent": "NEMAR-API",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ description }),
+    });
+  } catch (fetchError) {
+    const msg = fetchError instanceof Error ? fetchError.message : String(fetchError);
+    return { ok: false, status: 0, error: `Network error: ${msg}` };
+  }
+
+  if (!response.ok) {
+    const body = await response.text().catch(() => "");
+    return { ok: false, status: response.status, error: body || `HTTP ${response.status}` };
+  }
+  return { ok: true, status: response.status };
+}
+
 interface WorkflowRun {
   id: number;
   status: string;
@@ -445,17 +502,25 @@ jobs:
 
       - name: Run BIDS validator
         run: |
-          deno run -A jsr:@bids/validator . --json > validation.json
-          cat validation.json
+          mkdir -p .nemar
+          grep -qxF '.nemar/' .bidsignore 2>/dev/null || echo '.nemar/' >> .bidsignore
+          deno run -A jsr:@bids/validator . --json > .nemar/validation.json || true
+          cat .nemar/validation.json
 
       - name: Check validation result
         run: |
-          if jq -e '.valid == false' validation.json > /dev/null; then
-            echo "::error::BIDS validation failed"
-            jq '.issues[] | select(.severity == "error")' validation.json
+          if [ ! -f .nemar/validation.json ] || ! jq empty .nemar/validation.json 2>/dev/null; then
+            echo "::error::BIDS validator failed to produce valid output"
             exit 1
           fi
-          echo "BIDS validation passed"
+          ERRORS=$(jq '[.issues.issues[] | select(.severity == "error")] | length' .nemar/validation.json)
+          if [ "$ERRORS" -gt 0 ]; then
+            echo "::error::BIDS validation found $ERRORS error(s)"
+            jq '.issues.issues[] | select(.severity == "error")' .nemar/validation.json
+            exit 1
+          fi
+          WARNINGS=$(jq '[.issues.issues[] | select(.severity == "warning")] | length' .nemar/validation.json)
+          echo "BIDS validation passed ($WARNINGS warning(s))"
 `;
 
   // Version Check workflow
@@ -506,6 +571,9 @@ on:
     types: [closed]
     branches: [main]
 
+permissions:
+  contents: write
+
 jobs:
   create-release:
     name: Create Release
@@ -541,14 +609,11 @@ jobs:
         run: |
           git config user.name "GitHub Actions"
           git config user.email "actions@github.com"
-          git tag -a "v\${{ steps.version.outputs.version }}" -m "Release v\${{ steps.version.outputs.version }}"
-          git push origin "v\${{ steps.version.outputs.version }}"
-          gh release create "v\${{ steps.version.outputs.version }}" \\
-            --title "v\${{ steps.version.outputs.version }}" \\
-            --notes "Release from PR #\${{ github.event.pull_request.number }}
-
-Changes in this release:
-\${{ github.event.pull_request.body }}"
+          VERSION="\${{ steps.version.outputs.version }}"
+          git tag -a "v$VERSION" -m "Release v$VERSION"
+          git push origin "v$VERSION"
+          gh release create "v$VERSION" --title "v$VERSION" \\
+            --notes "Release v$VERSION from PR #\${{ github.event.pull_request.number }}"
           echo "created=true" >> $GITHUB_OUTPUT
 
   publish-zenodo:
@@ -607,21 +672,26 @@ Changes in this release:
           fi
 
   cleanup-staging:
-    name: Cleanup Staging
-    if: github.event.pull_request.merged == false
+    name: Cleanup Staging (runs on merge or close)
+    if: always()
     runs-on: ubuntu-latest
     steps:
-      - name: Cleanup staging on PR close
+      - name: Remove staging data for this PR/branch
         env:
           AWS_ACCESS_KEY_ID: \${{ secrets.AWS_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: \${{ secrets.AWS_SECRET_ACCESS_KEY }}
         run: |
-          STAGING_PREFIX="staging/pr-\${{ github.event.pull_request.number }}/"
-          echo "Cleaning up staging: s3://nemar/$STAGING_PREFIX"
-          aws s3 rm --recursive "s3://nemar/$STAGING_PREFIX" 2>/dev/null || true
+          DATASET_ID="\${{ github.event.repository.name }}"
+          BRANCH="\${{ github.event.pull_request.head.ref }}"
+          # Clean up branch-based staging
+          aws s3 rm --recursive "s3://nemar/staging/\${DATASET_ID}/\${BRANCH}/" 2>/dev/null || true
+          # Clean up legacy PR-number-based staging
+          aws s3 rm --recursive "s3://nemar/staging/pr-\${{ github.event.pull_request.number }}/" 2>/dev/null || true
 `;
 
   // Generate Archive workflow (triggered via repository_dispatch)
+  // Streams files directly from S3 into a zip and uploads via multipart,
+  // so disk usage is constant regardless of dataset size.
   const generateArchive = `name: Generate Archive
 
 on:
@@ -650,58 +720,192 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: v\${{ github.event.client_payload.version }}
-          fetch-depth: 0
 
-      - name: Install git-annex
-        run: sudo apt-get update && sudo apt-get install -y git-annex
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
 
-      - name: Configure git
+      - name: Install streaming dependencies
         run: |
-          git config --global user.email "actions@github.com"
-          git config --global user.name "GitHub Actions"
+          mkdir -p /tmp/archive-deps
+          cd /tmp/archive-deps
+          npm init -y > /dev/null
+          npm install --no-save archiver @aws-sdk/client-s3 @aws-sdk/lib-storage
 
-      - name: Configure S3 remote and get data
-        env:
-          AWS_ACCESS_KEY_ID: \${{ secrets.AWS_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: \${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      - name: Write archive script
         run: |
-          git annex init "archive-worker"
-          git annex enableremote nemar-s3
-          git annex get .
+          cat > /tmp/stream-archive.js << 'ARCHIVE_SCRIPT'
+          var fs = require("fs");
+          var path = require("path");
+          var S3Client = require("@aws-sdk/client-s3").S3Client;
+          var Upload = require("@aws-sdk/lib-storage").Upload;
+          var archiver = require("archiver");
+          var PassThrough = require("stream").PassThrough;
+          var https = require("https");
+          var http = require("http");
 
-      - name: Verify all files retrieved
-        run: |
-          MISSING=\$(git annex find --not --in here 2>/dev/null | wc -l)
-          if [ "\$MISSING" -gt 0 ]; then
-            echo "::error::\$MISSING files could not be retrieved from S3"
-            git annex find --not --in here
-            exit 1
-          fi
+          var DATASET_ID = process.env.DATASET_ID;
+          var VERSION = process.env.VERSION;
+          var BUCKET = "nemar";
+          var REGION = process.env.AWS_DEFAULT_REGION || "us-east-2";
+          var S3_BASE = "https://" + BUCKET + ".s3." + REGION + ".amazonaws.com";
 
-      - name: Create archive
-        run: |
-          zip -r "/tmp/\${DATASET_ID}-v\${VERSION}.zip" . -x ".git/*"
-          echo "Archive size: \$(du -h /tmp/\${DATASET_ID}-v\${VERSION}.zip | cut -f1)"
+          function resolveAnnexKey(filePath) {
+            try {
+              var stat = fs.lstatSync(filePath);
+              if (stat.isSymbolicLink()) {
+                var target = fs.readlinkSync(filePath);
+                var m = target.match(/([^\\/]+)\\/\\1$/);
+                if (m) return m[1];
+                var m2 = target.match(/\\/annex\\/objects\\/(.+)$/);
+                if (m2) return m2[1];
+              } else if (stat.isFile() && stat.size < 500 && stat.size > 20) {
+                var content = fs.readFileSync(filePath, "utf8").trim();
+                var m3 = content.match(/^\\/annex\\/objects\\/(.+)$/);
+                if (m3) return m3[1];
+              }
+            } catch (e) {}
+            return null;
+          }
 
-      - name: Upload to S3
+          function fetchUrl(url) {
+            return new Promise(function (resolve, reject) {
+              var mod = url.indexOf("https") === 0 ? https : http;
+              mod
+                .get(url, function (res) {
+                  if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+                    fetchUrl(res.headers.location).then(resolve).catch(reject);
+                    return;
+                  }
+                  if (res.statusCode !== 200) {
+                    res.resume();
+                    reject(new Error("HTTP " + res.statusCode + " for " + url));
+                    return;
+                  }
+                  resolve(res);
+                })
+                .on("error", reject);
+            });
+          }
+
+          function walkDir(dir, base) {
+            base = base || "";
+            var result = [];
+            var entries = fs.readdirSync(dir, { withFileTypes: true });
+            for (var i = 0; i < entries.length; i++) {
+              var entry = entries[i];
+              if (entry.name === ".git" || entry.name === ".github" || entry.name === "node_modules") continue;
+              var rel = base ? base + "/" + entry.name : entry.name;
+              var full = path.join(dir, entry.name);
+              if (entry.isDirectory()) {
+                result = result.concat(walkDir(full, rel));
+              } else {
+                result.push({ rel: rel, full: full });
+              }
+            }
+            return result;
+          }
+
+          async function main() {
+            console.log("Streaming archive for " + DATASET_ID + " v" + VERSION);
+
+            var archive = archiver("zip", { zlib: { level: 1 } });
+            var passThrough = new PassThrough();
+            archive.pipe(passThrough);
+
+            archive.on("warning", function (err) {
+              console.warn("Archive warning:", err.message);
+            });
+            archive.on("error", function (err) {
+              console.error("Archive error:", err.message);
+              process.exit(1);
+            });
+            passThrough.on("error", function (err) {
+              console.error("Stream error:", err.message);
+              process.exit(1);
+            });
+
+            var s3 = new S3Client({ region: REGION });
+            var s3Key = DATASET_ID + "/archives/v" + VERSION + ".zip";
+
+            var upload = new Upload({
+              client: s3,
+              params: {
+                Bucket: BUCKET,
+                Key: s3Key,
+                Body: passThrough,
+                ContentType: "application/zip",
+              },
+              queueSize: 4,
+              partSize: 10 * 1024 * 1024,
+            });
+
+            var files = walkDir(".");
+            console.log("Found " + files.length + " files");
+
+            var annexed = 0;
+            var regular = 0;
+            var skipped = 0;
+
+            for (var i = 0; i < files.length; i++) {
+              var rel = files[i].rel;
+              var full = files[i].full;
+              var annexKey = resolveAnnexKey(full);
+
+              if (annexKey) {
+                var encodedPath = rel.split("/").map(encodeURIComponent).join("/");
+                var url = S3_BASE + "/" + DATASET_ID + "/objects/" + encodedPath;
+                try {
+                  var stream = await fetchUrl(url);
+                  archive.append(stream, { name: rel });
+                  await new Promise(function (r) {
+                    archive.once("entry", r);
+                  });
+                  annexed++;
+                } catch (fetchErr) {
+                  skipped++;
+                  if (skipped <= 5) {
+                    console.warn("  Skipping " + rel + ": " + fetchErr.message);
+                  } else if (skipped === 6) {
+                    console.warn("  (suppressing further skip warnings)");
+                  }
+                }
+              } else {
+                archive.append(fs.createReadStream(full), { name: rel });
+                await new Promise(function (r) {
+                  archive.once("entry", r);
+                });
+                regular++;
+              }
+
+              if ((annexed + regular + skipped) % 100 === 0) {
+                console.log("  Progress: " + (annexed + regular + skipped) + "/" + files.length);
+              }
+            }
+
+            await archive.finalize();
+            await upload.done();
+
+            console.log("Archive complete: " + annexed + " annexed + " + regular + " regular + " + skipped + " skipped");
+            console.log("Uploaded to s3://" + BUCKET + "/" + s3Key);
+            if (skipped > 0) {
+              console.warn("WARNING: " + skipped + " annexed files were not found in S3");
+            }
+          }
+
+          main().catch(function (err) {
+            console.error("Fatal:", err);
+            process.exit(1);
+          });
+          ARCHIVE_SCRIPT
+
+      - name: Stream archive to S3
         env:
           AWS_ACCESS_KEY_ID: \${{ secrets.AWS_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: \${{ secrets.AWS_SECRET_ACCESS_KEY }}
           AWS_DEFAULT_REGION: us-east-2
-        run: |
-          aws s3 cp "/tmp/\${DATASET_ID}-v\${VERSION}.zip" \\
-            "s3://nemar/\${DATASET_ID}/archives/v\${VERSION}.zip"
-          echo "Uploaded archive to s3://nemar/\${DATASET_ID}/archives/v\${VERSION}.zip"
-
-      - name: Mark S3 remote as public for credential-free downloads
-        if: github.event.client_payload.public == true
-        env:
-          AWS_ACCESS_KEY_ID: \${{ secrets.AWS_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: \${{ secrets.AWS_SECRET_ACCESS_KEY }}
-        run: |
-          git annex enableremote nemar-s3 public=yes
-          git push origin git-annex
-          echo "S3 remote marked as public; git-annex branch pushed"
+          NODE_PATH: /tmp/archive-deps/node_modules
+        run: node /tmp/stream-archive.js
 `;
 
   // Deploy each workflow
@@ -849,6 +1053,47 @@ export async function getBlobContent(repo: string, blobSha: string, pat: string)
     return new TextDecoder().decode(bytes);
   }
   return blob.content;
+}
+
+/**
+ * Get the text content of a file from a repo via the Contents API.
+ * Returns null if the file does not exist.
+ */
+export async function getFileContent(
+  repo: string,
+  filePath: string,
+  pat: string,
+  ref = "main",
+): Promise<string | null> {
+  const response = await fetch(
+    `${GITHUB_API}/repos/${ORG_NAME}/${repo}/contents/${filePath}?ref=${ref}`,
+    {
+      headers: {
+        Authorization: `Bearer ${pat}`,
+        Accept: "application/vnd.github.v3+json",
+        "User-Agent": "NEMAR-API",
+      },
+    },
+  );
+
+  if (response.status === 404) return null;
+  if (!response.ok) {
+    throw new Error(`Failed to get ${filePath} from ${repo}: HTTP ${response.status}`);
+  }
+
+  const data = await response.json<{ content: string; encoding: string }>();
+  if (!data.content) {
+    throw new Error(`No content field in GitHub response for ${filePath} in ${repo}`);
+  }
+  if (data.encoding === "base64") {
+    const binary = atob(data.content.replace(/\n/g, ""));
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i++) {
+      bytes[i] = binary.charCodeAt(i);
+    }
+    return new TextDecoder().decode(bytes);
+  }
+  return data.content;
 }
 
 // ============================================================================

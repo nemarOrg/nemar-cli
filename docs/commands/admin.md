@@ -16,12 +16,15 @@ Commands:
   users [options]                          List NEMAR users
   approve [options] <username>             Approve a pending user
   revoke [options] <username>              Revoke user access
+  role [options] <username> <role>         Change a user's role (owner only)
   s3                                       S3 and IAM credential management
   repo                                     Repository visibility management
   ci                                       CI workflow management
   doi                                      DOI management
   publish                                  Publication workflow management
   revert [options] <dataset-id> [version]  Revert a dataset to a previous version (creates PR for review)
+  make-public <dataset-id>                 Publish a dataset (make repository and data public) - PERMANENT
+  delete-dataset [options] <dataset-id>    Delete a dataset and all associated resources (GitHub, S3, D1)
   help [command]                           display help for command
 
 Description:
@@ -32,6 +35,7 @@ User Management:
   users          - List users and their status
   approve        - Approve a pending user registration
   revoke         - Revoke user access
+  role           - Change a user's role (owner only: owner > admin > member)
 
 Dataset Management:
   repo     - Manage repository visibility (public/private)
@@ -42,7 +46,9 @@ Dataset Management:
 
 Examples:
   $ nemar admin users --verified           # List users awaiting approval
+  $ nemar admin users --role admin         # List all admins
   $ nemar admin approve john_doe           # Approve a user
+  $ nemar admin role john_doe admin        # Promote user to admin (owner only)
   $ nemar admin repo public nm000104       # Make dataset repo public
   $ nemar admin ci check nm000104          # Check CI status
   $ nemar admin s3 regenerate-iam john_doe # Regenerate AWS credentials
@@ -59,11 +65,19 @@ Usage: nemar admin users [options]
 List NEMAR users
 
 Options:
-  --pending   Show only pending approval
-  --verified  Show only verified (awaiting approval)
-  --approved  Show only approved users
-  --revoked   Show only revoked users
-  -h, --help  display help for command
+  --pending      Show only pending approval
+  --verified     Show only verified (awaiting approval)
+  --approved     Show only approved users
+  --revoked      Show only revoked users
+  --role <role>  Filter by role: owner, admin, or member
+  -h, --help     display help for command
+
+Examples:
+  $ nemar admin users                    # List all users
+  $ nemar admin users --verified         # Users awaiting approval
+  $ nemar admin users --role admin       # List all admins
+  $ nemar admin users --role owner       # List all owners
+  $ nemar admin users --approved --role member  # Approved regular users
 ```
 
 ### admin approve
@@ -117,15 +131,17 @@ Usage: nemar admin doi create [options] <dataset-id>
 Create concept DOI for a dataset
 
 Arguments:
-  dataset-id            Dataset ID (e.g., nm000104)
+  dataset-id             Dataset ID (e.g., nm000104)
 
 Options:
-  --title <title>       DOI title (defaults to dataset name)
-  --description <desc>  DOI description
-  --sandbox             Use Zenodo sandbox for testing
-  -y, --yes             Skip confirmation and proceed
-  -n, --no              Skip confirmation and decline
-  -h, --help            display help for command
+  --title <title>        DOI title (defaults to dataset name)
+  --description <desc>   DOI description
+  --provider <provider>  DOI provider: ezid (default) or zenodo (default:
+                         "ezid")
+  --sandbox              Use sandbox/test DOI
+  -y, --yes              Skip confirmation and proceed
+  -n, --no               Skip confirmation and decline
+  -h, --help             display help for command
 ```
 
 ### admin doi info
@@ -204,24 +220,33 @@ Arguments:
 
 Options:
   --resume    Resume from last failed step
+  --sandbox   Use Zenodo sandbox for testing
   -y, --yes   Skip confirmation and proceed
   -n, --no    Skip confirmation and decline
   -h, --help  display help for command
 
 Description:
-  Approve a publication request and run the automated 6-step orchestrator
+  Approve a publication request and run the automated 14-step orchestrator
   to make the dataset publicly accessible with a permanent DOI.
 
   WARNING: This action is PERMANENT. Published datasets cannot be unpublished.
   Once a DOI is assigned, it is permanent and cannot be deleted.
 
 Orchestrator Steps:
-  1. CI Check        - Verify BIDS validation passes, deploy workflows if missing
-  2. Make Public     - Change GitHub repository visibility to public
-  3. Tag Protection  - Enable tag protection rules (prevents version manipulation)
-  4. Create DOI      - Assign permanent Zenodo concept DOI (if not exists)
-  5. S3 Lock         - Enable S3 Object Lock (prevents data deletion)
-  6. Notify User     - Send publication confirmation email to dataset owner
+   1. CI Check          - Verify BIDS validation passes, deploy workflows if missing
+   2. Make Public       - Change GitHub repository visibility to public
+   3. S3 Public Read    - Grant public read access to S3 data
+   4. Tag Protection    - Enable tag protection rules
+   5. Create DOI        - Create concept DOI via EZID (or Zenodo if configured)
+   6. Update Metadata   - Update dataset metadata from BIDS description
+   7. Update README     - Add DOI badge and citation info to README
+   8. Create Tag        - Create version tag (e.g., v1.0.0)
+   9. Create Release    - Create GitHub release from tag
+  10. Upload to Zenodo  - Upload dataset archive to Zenodo (if Zenodo provider)
+  11. Publish DOI       - Make DOI public and findable (permanent, irreversible)
+  12. S3 Lock           - Enable S3 Object Lock (prevents data deletion)
+  13. Generate Archive  - Create downloadable zip archive
+  14. Notify User       - Send publication confirmation email
 
 Resume Capability:
   If a step fails, the orchestrator saves progress. Use --resume to retry
@@ -274,5 +299,37 @@ Examples:
   $ nemar admin publish deny nm000104 --reason "BIDS validation failing"
   $ nemar admin publish deny nm000104 -r "Dataset incomplete - missing subjects"
   $ nemar admin publish deny nm000104    # Prompts for reason interactively
+```
+
+### admin role
+
+```bash
+Usage: nemar admin role [options] <username> <role>
+
+Change a user's role (owner only)
+
+Arguments:
+  username    Username to change role for
+  role        New role: owner, admin, or member
+
+Options:
+  -y, --yes   Skip confirmation prompt
+  -h, --help  display help for command
+
+Permission Model:
+  owner  - Full access: can manage users, roles, datasets, DOIs, and system settings
+  admin  - Can approve/revoke users, manage datasets and DOIs
+  member - Can upload and manage their own datasets only
+
+Rules:
+  - Only owners can change roles
+  - You cannot change your own role (prevents self-lockout)
+  - The last owner cannot be demoted (prevents total lockout)
+  - Demoting a user revokes their tokens (they must re-login)
+
+Examples:
+  $ nemar admin role john_doe admin        # Promote to admin
+  $ nemar admin role john_doe member       # Demote to member
+  $ nemar admin role jane_doe owner -y     # Promote to owner (skip confirm)
 ```
 

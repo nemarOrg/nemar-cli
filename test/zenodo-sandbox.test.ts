@@ -16,8 +16,9 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { TEST_CONFIG, sleep, testRequest } from "./setup";
 
-// Only run these tests when explicitly enabled
-const SHOULD_RUN = process.env.RUN_ZENODO_TESTS === "true";
+// Only run these tests when explicitly enabled AND API key is available
+const SHOULD_RUN =
+  process.env.RUN_ZENODO_TESTS === "true" && !!process.env.ZENODO_SANDBOX_API_KEY;
 
 // We need a dataset to test with - use disposable test dataset
 const TEST_DATASET_ID = process.env.TEST_DATASET_ID || "nm099999";
@@ -31,9 +32,9 @@ const createdDepositions: number[] = [];
 // Safety check: detect if production token is accidentally used
 beforeAll(() => {
   if (!SHOULD_RUN) {
-    console.log("\n⚠️  Zenodo sandbox tests are SKIPPED by default.");
+    console.log("\n  Zenodo sandbox tests are SKIPPED by default.");
     console.log(
-      "   To run: RUN_ZENODO_TESTS=true TEST_DATASET_ID=nm099999 bun test test/zenodo-sandbox.test.ts\n",
+      "   To run: RUN_ZENODO_TESTS=true ZENODO_SANDBOX_API_KEY=<key> bun test test/zenodo-sandbox.test.ts\n",
     );
     return;
   }
@@ -122,7 +123,6 @@ describe("Zenodo Sandbox Integration", () => {
         concept_doi: string;
         zenodo_id: number;
         zenodo_url: string;
-        setup_command: string;
         warning: string;
         error?: string;
       }>(
@@ -144,7 +144,6 @@ describe("Zenodo Sandbox Integration", () => {
         expect(data.concept_doi).toMatch(/^10\.\d+\/zenodo\.\d+$/);
         expect(data.zenodo_id).toBeGreaterThan(0);
         expect(data.zenodo_url).toContain("sandbox.zenodo.org");
-        expect(data.setup_command).toContain("gh secret set");
       } else if (status === 400 && data.error?.includes("already has")) {
         console.log("   ✓ Dataset already has concept DOI (expected on re-run)");
         expect(data.error).toContain("already has a concept DOI");

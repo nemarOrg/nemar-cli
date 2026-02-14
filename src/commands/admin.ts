@@ -7,6 +7,7 @@
  * - nemar admin users              - List users (pending, approved, all)
  * - nemar admin approve            - Approve a pending user
  * - nemar admin revoke             - Revoke user access
+ * - nemar admin role               - Change a user's role (owner only)
  * - nemar admin s3 regenerate-iam  - Regenerate AWS credentials for a user
  * - nemar admin repo public/private - Change repository visibility
  * - nemar admin ci check/add       - Manage CI workflows
@@ -30,8 +31,10 @@ import {
   applyS3Lock,
   approvePublication,
   approveUser,
+  changeUserRole,
   changeVisibility,
   createConceptDoi,
+  deleteDataset,
   denyPublication,
   errorDetail,
   finalizeDataset,
@@ -122,6 +125,7 @@ User Management:
   users          - List users and their status
   approve        - Approve a pending user registration
   revoke         - Revoke user access
+  role           - Change a user's role (owner only: owner > admin > member)
 
 Dataset Management:
   repo     - Manage repository visibility (public/private)
@@ -132,7 +136,9 @@ Dataset Management:
 
 Examples:
   $ nemar admin users --verified           # List users awaiting approval
+  $ nemar admin users --role admin         # List all admins
   $ nemar admin approve john_doe           # Approve a user
+  $ nemar admin role john_doe admin        # Promote user to admin (owner only)
   $ nemar admin repo public nm000104       # Make dataset repo public
   $ nemar admin ci check nm000104          # Check CI status
   $ nemar admin s3 regenerate-iam john_doe # Regenerate AWS credentials
@@ -162,6 +168,17 @@ adminCommand
   .option("--verified", "Show only verified (awaiting approval)")
   .option("--approved", "Show only approved users")
   .option("--revoked", "Show only revoked users")
+  .option("--role <role>", "Filter by role: owner, admin, or member")
+  .addHelpText(
+    "after",
+    `
+Examples:
+  $ nemar admin users                    # List all users
+  $ nemar admin users --verified         # Users awaiting approval
+  $ nemar admin users --role admin       # List all admins
+  $ nemar admin users --role owner       # List all owners
+  $ nemar admin users --approved --role member  # Approved regular users`,
+  )
   .action(async (options) => {
     if (!requireAuth()) return;
 
@@ -172,18 +189,29 @@ adminCommand
     else if (options.approved) status = "approved";
     else if (options.revoked) status = "revoked";
 
+    // Validate role filter
+    const role: string | undefined = options.role;
+    if (role && !["owner", "admin", "member"].includes(role)) {
+      console.error(chalk.red(`Invalid role '${role}'. Must be: owner, admin, or member`));
+      process.exit(1);
+    }
+
     const spinner = ora("Fetching users...").start();
 
     try {
-      const result = await listUsers(status);
+      const result = await listUsers(status, role);
       spinner.stop();
 
       if (result.users.length === 0) {
-        console.log(chalk.yellow("No users found"));
+        const filters = [status, role].filter(Boolean).join(", ");
+        console.log(chalk.yellow(`No users found${filters ? ` (filter: ${filters})` : ""}`));
         return;
       }
 
-      console.log(`\n${chalk.cyan("NEMAR Users")} (${result.count} total)\n`);
+      const filterLabel = [status, role ? `role=${role}` : ""].filter(Boolean).join(", ");
+      console.log(
+        `\n${chalk.cyan("NEMAR Users")} (${result.count} total${filterLabel ? `, filter: ${filterLabel}` : ""})\n`,
+      );
 
       // Display users in a clean format
       for (const user of result.users) {
@@ -195,10 +223,16 @@ adminCommand
             revoked: chalk.red,
           }[user.status] || chalk.white;
 
-        const adminBadge = user.is_admin ? chalk.magenta(" [admin]") : "";
+        const userRole = user.role || "member";
+        const roleBadge =
+          userRole === "owner"
+            ? chalk.red(" [owner]")
+            : userRole === "admin"
+              ? chalk.magenta(" [admin]")
+              : chalk.gray(" [member]");
         const verifiedBadge = user.email_verified ? "" : chalk.gray(" (unverified)");
 
-        console.log(`  ${chalk.cyan(user.username)}${adminBadge}`);
+        console.log(`  ${chalk.cyan(user.username)}${roleBadge}`);
         console.log(`    Email:   ${user.email}${verifiedBadge}`);
         console.log(`    GitHub:  @${user.github_username}`);
         console.log(`    Status:  ${statusColor(user.status)}`);
@@ -226,8 +260,8 @@ adminCommand
     // Confirmation
     console.log(chalk.cyan(`\nApproving user: ${username}\n`));
     console.log("This will:");
-    console.log("  1. Generate an API key for the user");
-    console.log("  2. Send them an email with their API key");
+    console.log("  1. Set up S3 access for the user");
+    console.log("  2. Notify them to retrieve their API key via CLI");
     console.log();
 
     const result = await confirm(`Approve ${username}?`, options, true);
@@ -253,10 +287,9 @@ adminCommand
       }
 
       console.log();
-      console.log(chalk.yellow("API Key (shown once):"));
-      console.log(chalk.gray(`  ${result.api_key}`));
-      console.log();
-      console.log(chalk.gray("The user has also been emailed their API key"));
+      console.log(
+        chalk.green("User notified to retrieve their API key via 'nemar auth retrieve-key'"),
+      );
 
       // Show warning if IAM setup failed
       if (result.warning) {
@@ -316,6 +349,78 @@ adminCommand
     } catch (error) {
       handleCommandError(error, spinner, "Failed to revoke user", {
         404: "User not found",
+      });
+    }
+  });
+
+// ============================================================================
+// Role Management (Owner Only)
+// ============================================================================
+
+adminCommand
+  .command("role")
+  .description("Change a user's role (owner only)")
+  .argument("<username>", "Username to change role for")
+  .argument("<role>", "New role: owner, admin, or member")
+  .option("-y, --yes", "Skip confirmation prompt")
+  .addHelpText(
+    "after",
+    `
+Permission Model:
+  owner  - Full access: can manage users, roles, datasets, DOIs, and system settings
+  admin  - Can approve/revoke users, manage datasets and DOIs
+  member - Can upload and manage their own datasets only
+
+Rules:
+  - Only owners can change roles
+  - You cannot change your own role (prevents self-lockout)
+  - The last owner cannot be demoted (prevents total lockout)
+  - Demoting a user revokes their tokens (they must re-login)
+
+Examples:
+  $ nemar admin role john_doe admin        # Promote to admin
+  $ nemar admin role john_doe member       # Demote to member
+  $ nemar admin role jane_doe owner -y     # Promote to owner (skip confirm)`,
+  )
+  .action(async (username: string, role: string, options: { yes?: boolean }) => {
+    if (!requireAuth()) return;
+
+    if (!["owner", "admin", "member"].includes(role)) {
+      console.error(chalk.red(`Invalid role '${role}'. Must be: owner, admin, or member`));
+      process.exit(1);
+    }
+
+    if (!options.yes) {
+      const { confirmed } = await inquirer.prompt([
+        {
+          type: "confirm",
+          name: "confirmed",
+          message: `Change ${username}'s role to '${role}'?`,
+          default: false,
+        },
+      ]);
+      if (!confirmed) {
+        console.log(chalk.gray("Cancelled"));
+        return;
+      }
+    }
+
+    const spinner = ora(`Changing ${username}'s role to '${role}'...`).start();
+
+    try {
+      const result = await changeUserRole(username, role as "owner" | "admin" | "member");
+      spinner.succeed(result.message);
+      if (result.tokens_revoked !== undefined && result.tokens_revoked > 0) {
+        console.log(
+          chalk.yellow(`  ${result.tokens_revoked} token(s) revoked (user must re-login)`),
+        );
+      }
+    } catch (error) {
+      handleCommandError(error, spinner, "Failed to change role", {
+        400: "Invalid request (check if you are an owner)",
+        403: "Owner access required",
+        404: "User not found",
+        409: "User already has that role",
       });
     }
   });
@@ -415,8 +520,8 @@ async function regenerateIamAction(username: string, options: ConfirmOptions) {
     spinner.succeed(`Regenerated IAM credentials for ${username}`);
     console.log();
     console.log(`  IAM Username: ${chalk.cyan(result.user.iam_username)}`);
-    if (result.user.is_admin) {
-      console.log(`  Admin: ${chalk.magenta("yes (full bucket access)")}`);
+    if (result.user.role === "admin" || result.user.role === "owner") {
+      console.log(`  Access: ${chalk.magenta("full bucket access (admin/owner)")}`);
     }
     console.log(`  Datasets restored: ${chalk.green(result.datasets_restored)}`);
 
@@ -774,12 +879,8 @@ doiCommand
         console.log();
 
         console.log(chalk.yellow("Next steps:"));
-        console.log("  1. Set up automatic DOI publishing by running:");
-        console.log(chalk.gray(`     ${result.setup_command}`));
-        console.log("     (paste the webhook token when prompted)");
-        console.log();
-        console.log("  2. Update dataset_description.json with DatasetDOI field");
-        console.log("  3. Create a PR and merge it to trigger version DOI publication");
+        console.log("  1. Update dataset_description.json with DatasetDOI field");
+        console.log("  2. Create a PR and merge it to trigger version DOI publication");
         console.log();
         if (options.sandbox) {
           console.log(
@@ -1851,6 +1952,106 @@ Examples:
       } else {
         console.error(chalk.red(`\n${error instanceof Error ? error.message : String(error)}`));
       }
+      process.exit(1);
+    }
+  });
+
+// ============================================================================
+// Delete Dataset (Admin/Owner Only)
+// ============================================================================
+
+adminCommand
+  .command("delete-dataset")
+  .description("Delete a dataset and all associated resources (GitHub, S3, D1)")
+  .argument("<dataset-id>", "Dataset ID (e.g., nm000108)")
+  .option("--force", "Force deletion of published datasets with DOIs (owner only)")
+  .action(async (datasetId: string, options: { force?: boolean }) => {
+    if (!requireAuth()) return;
+
+    const spinner = ora("Looking up dataset...").start();
+
+    try {
+      const dataset = await getDataset(datasetId);
+      spinner.stop();
+
+      console.log(chalk.bold(`\nDataset: ${dataset.dataset_id}`));
+      console.log(`  Name: ${dataset.name || "(unnamed)"}`);
+      console.log(`  Visibility: ${dataset.visibility}`);
+      if (dataset.concept_doi) {
+        console.log(`  DOI: ${dataset.concept_doi}`);
+        console.log(
+          chalk.yellow("\n  WARNING: This dataset has a DOI. Only the NEMAR owner can delete it."),
+        );
+        if (!options.force) {
+          console.log(chalk.gray("  Use --force to confirm deletion of published datasets."));
+          process.exit(1);
+        }
+      }
+
+      const { proceed } = await inquirer.prompt([
+        {
+          type: "confirm",
+          name: "proceed",
+          message: chalk.red(
+            `Delete dataset ${datasetId}? This will remove the GitHub repo, S3 data, and all database records. This cannot be undone.`,
+          ),
+          default: false,
+        },
+      ]);
+
+      if (!proceed) {
+        console.log(chalk.gray("Cancelled."));
+        return;
+      }
+
+      spinner.start("Deleting dataset...");
+      const result = await deleteDataset(datasetId, options.force ?? false);
+      if (!result.deleted) {
+        spinner.fail("Dataset deletion incomplete");
+      } else if (result.warnings.length > 0) {
+        spinner.warn("Dataset deleted with warnings");
+      } else {
+        spinner.succeed("Dataset deleted");
+      }
+
+      // Summary
+      console.log(chalk.bold("\nDeletion summary:"));
+      console.log(
+        `  GitHub repo: ${result.steps.github.success ? chalk.green("deleted") : chalk.red("failed")}`,
+      );
+      if (result.steps.s3.skipped) {
+        console.log(`  S3 objects: ${chalk.yellow("skipped (published dataset)")}`);
+      } else {
+        let s3Summary = chalk.green(`${result.steps.s3.deleted} deleted`);
+        if (result.steps.s3.failed.length > 0) {
+          s3Summary += chalk.red(`, ${result.steps.s3.failed.length} failed`);
+        }
+        console.log(`  S3 objects: ${s3Summary}`);
+      }
+      console.log(
+        `  Database: ${result.steps.d1.success ? chalk.green("cleaned up") : chalk.red("failed")}`,
+      );
+      if (result.steps.d1.versionsDeleted > 0) {
+        console.log(chalk.gray(`    ${result.steps.d1.versionsDeleted} version records removed`));
+      }
+      if (result.steps.d1.pubRequestsDeleted > 0) {
+        console.log(
+          chalk.gray(`    ${result.steps.d1.pubRequestsDeleted} publication requests removed`),
+        );
+      }
+
+      if (result.warnings.length > 0) {
+        console.log(chalk.yellow("\nWarnings:"));
+        for (const w of result.warnings) {
+          console.log(chalk.yellow(`  - ${w}`));
+        }
+      }
+    } catch (error) {
+      handleCommandError(error, spinner, "Failed to delete dataset", {
+        403: "Published datasets can only be deleted by the NEMAR owner",
+        404: "Dataset not found",
+        409: "Cannot delete dataset with active publication requests",
+      });
       process.exit(1);
     }
   });

@@ -6,6 +6,20 @@
 
 For E2E testing, use disposable test dataset `nm099999` (already registered in D1 and GitHub). Note: `xx`-prefix datasets are blocked from publishing (sandbox check).
 
+## Dataset Deletion
+
+Datasets can be deleted via `DELETE /admin/datasets/:id` or `nemar admin delete-dataset <id>`. Deletion cascades through GitHub repo, S3 objects, and D1 records (`dataset_versions`, `publication_requests`, `datasets`; `dataset_collaborators` auto-cascades via FK).
+
+**Permission model:**
+- Unpublished datasets (no DOI, private): admin or owner can delete
+- Published datasets (with DOI or public): owner only, requires `force=true`
+
+**Scheduled cleanup** (daily at 3 AM UTC, production only):
+- Sandbox (`xx`) datasets: auto-deleted after 14 days
+- Stale `nm` datasets: private, no DOI, no active pub requests, inactive 90 days
+
+**Note:** `last_activity_at` must be updated by endpoints that mutate datasets (uploads, version creation, publication requests) to prevent premature staleness. See migration 0011.
+
 ## Project Overview
 **Purpose:** Command-line interface for NEMAR (Neuroelectromagnetic Data Archive and Tools Resource) dataset management
 **Tech Stack:** TypeScript, Bun, Commander.js, DataLad integration

@@ -9,6 +9,7 @@ import type { Context } from "hono";
 import { Hono } from "hono";
 import { createEzidVersionDoi, parseDoiProvider } from "../services/doi.js";
 import { extractDoi } from "../services/ezid.js";
+import { downloadReleaseArchive } from "../services/github.js";
 import { generateManifest } from "../services/manifest.js";
 import { errorMessage, extractRepoName, readRepoMetadata } from "../services/repo-metadata.js";
 import { uploadManifest } from "../services/s3.js";
@@ -39,7 +40,7 @@ webhooks.post("/publish-version-doi", async (c) => {
   }
 
   // Parse request body
-  let body: { dataset_id: string; version: string; release_url: string; sandbox?: boolean };
+  let body: { dataset_id: string; version: string; release_url: string };
   try {
     body = await c.req.json();
   } catch {
@@ -50,7 +51,7 @@ webhooks.post("/publish-version-doi", async (c) => {
     return c.json({ error: "Missing required fields: dataset_id, version, release_url" }, 400);
   }
 
-  const { dataset_id, version: rawVersion, release_url, sandbox = false } = body;
+  const { dataset_id, version: rawVersion, release_url } = body;
 
   // Normalize version: strip leading "v" or "V" prefix if present
   const version = rawVersion.replace(/^[vV]/, "");
@@ -103,6 +104,12 @@ webhooks.post("/publish-version-doi", async (c) => {
   }
 
   const provider = parseDoiProvider(dataset.doi_provider);
+
+  // Auto-detect sandbox from EZID identifier prefix (10.5072 = EZID sandbox shoulder)
+  const sandbox =
+    provider === "ezid" && dataset.ezid_identifier
+      ? dataset.ezid_identifier.includes("10.5072")
+      : false;
 
   // Route to appropriate provider
   if (provider === "ezid") {
@@ -242,6 +249,62 @@ async function handleEzidVersionDoi(
       );
     }
 
+    // Upload archive to Zenodo as draft backup (non-fatal)
+    let zenodoBackup: string | undefined;
+    let zenodoBackupError: string | undefined;
+    try {
+      const zenodoToken = sandbox ? c.env.ZENODO_SANDBOX_API_KEY : c.env.ZENODO_API_KEY;
+      if (zenodoToken && dataset.github_repo) {
+        const tag = `v${version}`;
+        const archiveData = await downloadReleaseArchive(repoName, tag, c.env.GITHUB_ADMIN_PAT);
+
+        // Check if dataset already has a Zenodo backup deposition
+        const row = await c.env.DB.prepare("SELECT zenodo_concept_id FROM datasets WHERE id = ?")
+          .bind(dataset.id)
+          .first<{ zenodo_concept_id: string | null }>();
+
+        let depositionId = row?.zenodo_concept_id ? Number.parseInt(row.zenodo_concept_id, 10) : NaN;
+
+        if (Number.isNaN(depositionId)) {
+          // Create initial Zenodo draft deposition
+          const deposition = await zenodo.createDeposition(
+            {
+              title: `${dataset.name} (NEMAR backup archive)`,
+              description: `Backup archive for NEMAR dataset ${dataset.dataset_id}. Primary DOI: ${dataset.concept_doi}`,
+              creators: [{ name: "NEMAR" }],
+              keywords: ["BIDS", "neuroscience", "NEMAR", "backup"],
+              version,
+            },
+            zenodoToken,
+            sandbox,
+          );
+          depositionId = deposition.id;
+          await c.env.DB.prepare("UPDATE datasets SET zenodo_concept_id = ?, updated_at = datetime('now') WHERE id = ?")
+            .bind(String(depositionId), dataset.id)
+            .run();
+        } else {
+          // Create a new version draft from existing deposition
+          const newVersion = await zenodo.createNewVersion(depositionId, zenodoToken, sandbox);
+          depositionId = newVersion.id;
+          await zenodo.updateDepositionMetadata(
+            depositionId,
+            { title: `${dataset.name} (NEMAR backup archive)`, description: `Backup archive v${version}`, creators: [{ name: "NEMAR" }], version },
+            zenodoToken,
+            sandbox,
+          );
+        }
+
+        const deposition = await zenodo.getDeposition(depositionId, zenodoToken, sandbox);
+        if (deposition.links.bucket) {
+          await zenodo.uploadFile(depositionId, deposition.links.bucket, `${dataset.dataset_id}-v${version}.zip`, archiveData, zenodoToken, sandbox);
+          zenodoBackup = `Zenodo draft #${depositionId}`;
+        }
+      }
+    } catch (zenodoErr) {
+      zenodoBackupError = errorMessage(zenodoErr);
+      console.error(`[webhook] Zenodo backup failed for ${dataset.dataset_id}@${version} (non-fatal):`, zenodoErr);
+    }
+
     return c.json({
       message: "Version DOI published successfully",
       version,
@@ -250,9 +313,11 @@ async function handleEzidVersionDoi(
       provider: "ezid",
       doi_url: `https://doi.org/${result.doi}`,
       manifest_generated: manifestGenerated,
+      ...(zenodoBackup && { zenodo_backup: zenodoBackup }),
       ...(repoMeta.warnings.length > 0 && { metadata_warnings: repoMeta.warnings }),
       ...(dbError && { db_error: dbError }),
       ...(manifestErrorMsg && { manifest_error: manifestErrorMsg }),
+      ...(zenodoBackupError && { zenodo_backup_error: zenodoBackupError }),
       ...(result.warnings && { doi_warnings: result.warnings }),
     });
   } catch (error) {

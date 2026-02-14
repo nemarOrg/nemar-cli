@@ -19,6 +19,7 @@ import {
   createRepository,
   deployWorkflows,
   enableAutoMerge,
+  getFileContent,
   getWorkflowRuns,
   setRepoVisibility,
 } from "../services/github";
@@ -30,7 +31,7 @@ import {
   listManifests,
   removePublicReadPolicy,
 } from "../services/s3";
-import type { Bindings, Variables } from "../types/bindings";
+import { type Bindings, type Variables, hasRole } from "../types/bindings";
 
 export const datasetRoutes = new Hono<{ Bindings: Bindings; Variables: Variables }>();
 
@@ -115,10 +116,10 @@ datasetRoutes.post("/", authMiddleware, zValidator("json", createDatasetSchema),
     }
   }
 
-  // Get user's AWS credentials and admin status
+  // Get user's AWS credentials
   const userCreds = await db
     .prepare(`
-      SELECT aws_iam_username, aws_access_key_id_encrypted, aws_secret_access_key_encrypted, is_admin
+      SELECT aws_iam_username, aws_access_key_id_encrypted, aws_secret_access_key_encrypted
       FROM users WHERE id = ?
     `)
     .bind(user.id)
@@ -126,7 +127,6 @@ datasetRoutes.post("/", authMiddleware, zValidator("json", createDatasetSchema),
       aws_iam_username: string | null;
       aws_access_key_id_encrypted: string | null;
       aws_secret_access_key_encrypted: string | null;
-      is_admin: number;
     }>();
 
   if (!userCreds?.aws_access_key_id_encrypted || !userCreds?.aws_secret_access_key_encrypted) {
@@ -156,8 +156,33 @@ datasetRoutes.post("/", authMiddleware, zValidator("json", createDatasetSchema),
     return c.json({ error: "Failed to access S3 credentials" }, 500);
   }
 
-  // Generate dataset ID (xx000XXX for sandbox, nm000XXX for regular)
-  const datasetId = await generateDatasetId(db, !!sandbox);
+  // Generate dataset ID (xx000XXX for sandbox, nm000XXX for regular).
+  // There is a TOCTOU gap between ID generation (SELECT) and the INSERT
+  // below. The UNIQUE constraint on datasets.dataset_id prevents duplicates;
+  // we retry on conflict to handle the rare concurrent-creation case.
+  let datasetId: string;
+  const MAX_ID_RETRIES = 3;
+  for (let attempt = 0; ; attempt++) {
+    datasetId = await generateDatasetId(db, !!sandbox);
+    try {
+      // Claim the ID early with a minimal INSERT to close the TOCTOU gap
+      await db
+        .prepare(
+          `INSERT INTO datasets (dataset_id, name, description, owner_user_id, github_repo, is_sandbox, visibility)
+           VALUES (?, ?, ?, ?, '', ?, 'private')`,
+        )
+        .bind(datasetId, name, description || null, user.id, sandbox ? 1 : 0)
+        .run();
+      break; // ID claimed successfully
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (attempt < MAX_ID_RETRIES - 1 && msg.includes("UNIQUE constraint failed")) {
+        continue; // Retry with a new ID
+      }
+      console.error("Failed to reserve dataset ID:", err);
+      return c.json({ error: "Failed to reserve dataset ID" }, 500);
+    }
+  }
 
   // Create GitHub repository
   let githubRepo: GitHubRepo;
@@ -170,6 +195,8 @@ datasetRoutes.post("/", authMiddleware, zValidator("json", createDatasetSchema),
     );
   } catch (error) {
     console.error("Failed to create GitHub repo:", error);
+    // Clean up the claimed dataset row
+    await db.prepare("DELETE FROM datasets WHERE dataset_id = ?").bind(datasetId).run();
     return c.json({ error: "Failed to create GitHub repository" }, 500);
   }
 
@@ -181,8 +208,8 @@ datasetRoutes.post("/", authMiddleware, zValidator("json", createDatasetSchema),
   }
 
   // Update user's IAM policy to include this dataset prefix
-  // Skip for admins - they already have full bucket access
-  if (userCreds.aws_iam_username && !userCreds.is_admin) {
+  // Skip for admins/owners - they already have full bucket access
+  if (userCreds.aws_iam_username && !hasRole(user.role, "admin")) {
     try {
       // Get user's current prefixes
       const currentPermissions = await db
@@ -262,23 +289,10 @@ datasetRoutes.post("/", authMiddleware, zValidator("json", createDatasetSchema),
     }
   }
 
-  // Insert dataset record
+  // Update the claimed dataset record with the GitHub repo info
   await db
-    .prepare(
-      `
-    INSERT INTO datasets (dataset_id, name, description, owner_user_id, github_repo, is_sandbox, visibility)
-    VALUES (?, ?, ?, ?, ?, ?, ?)
-  `,
-    )
-    .bind(
-      datasetId,
-      name,
-      description || null,
-      user.id,
-      githubRepo.full_name,
-      sandbox ? 1 : 0,
-      "private",
-    )
+    .prepare("UPDATE datasets SET github_repo = ? WHERE dataset_id = ?")
+    .bind(githubRepo.full_name, datasetId)
     .run();
 
   // Audit log
@@ -372,7 +386,7 @@ datasetRoutes.get("/", optionalAuthMiddleware, async (c) => {
     if (!user) {
       // Unauthenticated: public datasets only
       query += " AND d.visibility = 'public'";
-    } else if (!user.is_admin) {
+    } else if (!hasRole(user.role, "admin")) {
       // Authenticated non-admin: public datasets only
       // (use --mine to see your own private datasets)
       query += " AND d.visibility = 'public'";
@@ -455,7 +469,7 @@ datasetRoutes.get("/:id", optionalAuthMiddleware, async (c) => {
 
   // Enforce visibility restrictions for private datasets
   if (dataset.visibility !== "public") {
-    if (!user || (!user.is_admin && user.id !== dataset.owner_user_id)) {
+    if (!user || (!hasRole(user.role, "admin") && user.id !== dataset.owner_user_id)) {
       // Return 404 instead of 403 to avoid leaking dataset existence
       return c.json({ error: "Dataset not found" }, 404);
     }
@@ -491,7 +505,7 @@ datasetRoutes.post(
       return c.json({ error: "Dataset not found" }, 404);
     }
 
-    if (dataset.owner_user_id !== user.id && !user.is_admin) {
+    if (dataset.owner_user_id !== user.id && !hasRole(user.role, "admin")) {
       // Check if user is a collaborator
       const isCollaborator = await db
         .prepare(
@@ -604,7 +618,7 @@ datasetRoutes.post("/:id/finalize", authMiddleware, async (c) => {
       return c.json({ error: "Dataset not found" }, 404);
     }
 
-    if (dataset.owner_user_id !== user.id && !user.is_admin) {
+    if (dataset.owner_user_id !== user.id && !hasRole(user.role, "admin")) {
       return c.json({ error: "Only dataset owner can finalize upload" }, 403);
     }
 
@@ -813,7 +827,7 @@ datasetRoutes.post("/:id/invite", authMiddleware, zValidator("json", inviteSchem
   }
 
   // Only owner or admin can invite
-  if (dataset.owner_user_id !== currentUser.id && !currentUser.is_admin) {
+  if (dataset.owner_user_id !== currentUser.id && !hasRole(currentUser.role, "admin")) {
     return c.json({ error: "Only dataset owner or admin can invite collaborators" }, 403);
   }
 
@@ -917,7 +931,7 @@ datasetRoutes.get("/:id/collaborators", authMiddleware, async (c) => {
   }
 
   // Only owner or admin can view collaborators
-  if (dataset.owner_user_id !== currentUser.id && !currentUser.is_admin) {
+  if (dataset.owner_user_id !== currentUser.id && !hasRole(currentUser.role, "admin")) {
     return c.json({ error: "Only dataset owner or admin can view collaborators" }, 403);
   }
 
@@ -962,7 +976,7 @@ datasetRoutes.post("/:id/publish/request", authMiddleware, async (c) => {
     return c.json({ error: "Dataset not found" }, 404);
   }
 
-  if (dataset.owner_user_id !== currentUser.id && !currentUser.is_admin) {
+  if (dataset.owner_user_id !== currentUser.id && !hasRole(currentUser.role, "admin")) {
     return c.json({ error: "Only the dataset owner can request publication" }, 403);
   }
 
@@ -1001,7 +1015,7 @@ datasetRoutes.post("/:id/publish/request", authMiddleware, async (c) => {
   // Notify admins
   try {
     const admins = await db
-      .prepare("SELECT email FROM users WHERE is_admin = 1")
+      .prepare("SELECT email FROM users WHERE role IN ('owner', 'admin') AND status = 'approved'")
       .all<{ email: string }>();
 
     const adminEmails = admins.results.map((a) => a.email);
@@ -1041,7 +1055,7 @@ datasetRoutes.get("/:id/publish/status", authMiddleware, async (c) => {
     return c.json({ error: "Dataset not found" }, 404);
   }
 
-  if (dataset.owner_user_id !== currentUser.id && !currentUser.is_admin) {
+  if (dataset.owner_user_id !== currentUser.id && !hasRole(currentUser.role, "admin")) {
     return c.json({ error: "Only the dataset owner or admin can view publication status" }, 403);
   }
 
@@ -1110,7 +1124,7 @@ datasetRoutes.post("/:id/publish/resend", authMiddleware, async (c) => {
     return c.json({ error: "Dataset not found" }, 404);
   }
 
-  if (dataset.owner_user_id !== currentUser.id && !currentUser.is_admin) {
+  if (dataset.owner_user_id !== currentUser.id && !hasRole(currentUser.role, "admin")) {
     return c.json({ error: "Only the dataset owner can resend notifications" }, 403);
   }
 
@@ -1140,7 +1154,7 @@ datasetRoutes.post("/:id/publish/resend", authMiddleware, async (c) => {
 
   // Resend notification to admins
   const admins = await db
-    .prepare("SELECT email FROM users WHERE is_admin = 1")
+    .prepare("SELECT email FROM users WHERE role IN ('owner', 'admin') AND status = 'approved'")
     .all<{ email: string }>();
 
   const adminEmails = admins.results.map((a) => a.email);
@@ -1185,7 +1199,7 @@ datasetRoutes.get("/:id/ci/status", authMiddleware, async (c) => {
   }
 
   // Check ownership or admin status
-  if (dataset.owner_username !== currentUser.username && !currentUser.is_admin) {
+  if (dataset.owner_username !== currentUser.username && !hasRole(currentUser.role, "admin")) {
     return c.json({ error: "Access denied" }, 403);
   }
 
@@ -1261,7 +1275,7 @@ datasetRoutes.get("/:id/manifest", optionalAuthMiddleware, async (c) => {
   // Private datasets: only owner/admin
   if (dataset.visibility !== "public") {
     const user = c.get("user");
-    if (!user || (!user.is_admin && user.id !== dataset.owner_user_id)) {
+    if (!user || (!hasRole(user.role, "admin") && user.id !== dataset.owner_user_id)) {
       return c.json({ error: "Access denied" }, 403);
     }
   }
@@ -1300,7 +1314,7 @@ datasetRoutes.get("/:id/manifest/:version", optionalAuthMiddleware, async (c) =>
 
   if (dataset.visibility !== "public") {
     const user = c.get("user");
-    if (!user || (!user.is_admin && user.id !== dataset.owner_user_id)) {
+    if (!user || (!hasRole(user.role, "admin") && user.id !== dataset.owner_user_id)) {
       return c.json({ error: "Access denied" }, 403);
     }
   }
@@ -1318,6 +1332,82 @@ datasetRoutes.get("/:id/manifest/:version", optionalAuthMiddleware, async (c) =>
   }
 
   return c.json(JSON.parse(manifestJson));
+});
+
+/**
+ * GET /datasets/:id/versions - Get version history for a dataset
+ *
+ * Returns the current version from dataset_description.json and all
+ * recorded version DOIs from the dataset_versions table.
+ *
+ * Authorization: Owner, collaborator, or admin
+ */
+datasetRoutes.get("/:id/versions", authMiddleware, async (c) => {
+  const datasetId = c.req.param("id");
+  const user = c.get("user");
+  const db = c.env.DB;
+
+  const dataset = await db
+    .prepare("SELECT id, dataset_id, owner_user_id, github_repo FROM datasets WHERE dataset_id = ?")
+    .bind(datasetId)
+    .first<{
+      id: number;
+      dataset_id: string;
+      owner_user_id: number;
+      github_repo: string | null;
+    }>();
+
+  if (!dataset) {
+    return c.json({ error: "Dataset not found" }, 404);
+  }
+
+  // Check access: owner, admin, or collaborator
+  if (!hasRole(user.role, "admin") && user.id !== dataset.owner_user_id) {
+    const collabResult = await db
+      .prepare("SELECT 1 FROM dataset_collaborators WHERE dataset_id = ? AND user_id = ?")
+      .bind(dataset.id, user.id)
+      .first();
+    if (!collabResult) {
+      return c.json({ error: "Access denied" }, 403);
+    }
+  }
+
+  // Get current version from dataset_description.json via GitHub
+  let currentVersion = "1.0.0";
+  if (dataset.github_repo) {
+    const repoName = extractRepoName(dataset.github_repo);
+    if (repoName) {
+      try {
+        const content = await getFileContent(
+          repoName,
+          "dataset_description.json",
+          c.env.GITHUB_ADMIN_PAT,
+        );
+        if (content) {
+          const desc = JSON.parse(content);
+          if (typeof desc.Version === "string") {
+            currentVersion = desc.Version;
+          }
+        }
+      } catch (err) {
+        console.error(`[versions] Failed to read version for ${datasetId}:`, err);
+      }
+    }
+  }
+
+  // Get version DOIs from database
+  const versions = await db
+    .prepare(
+      "SELECT version, doi, provider, created_at FROM dataset_versions WHERE dataset_id = ? ORDER BY created_at DESC",
+    )
+    .bind(datasetId)
+    .all<{ version: string; doi: string; provider: string; created_at: string }>();
+
+  return c.json({
+    dataset_id: datasetId,
+    current_version: currentVersion,
+    versions: versions.results ?? [],
+  });
 });
 
 /**
@@ -1365,7 +1455,7 @@ datasetRoutes.post("/:id/publish", authMiddleware, async (c) => {
   }
 
   // Authorization: owner or admin
-  if (dataset.owner_user_id !== user.id && !user.is_admin) {
+  if (dataset.owner_user_id !== user.id && !hasRole(user.role, "admin")) {
     return c.json({ error: "Forbidden: Only dataset owner or admin can publish" }, 403);
   }
 

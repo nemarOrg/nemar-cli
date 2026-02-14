@@ -7,13 +7,14 @@
 import { zValidator } from "@hono/zod-validator";
 import { Hono } from "hono";
 import { z } from "zod";
-import { adminMiddleware, authMiddleware } from "../middleware/auth";
+import { adminMiddleware, authMiddleware, ownerMiddleware } from "../middleware/auth";
 import {
   bidsToDataCite,
   buildDataCiteXml,
   nemarMetadataToEnrichment,
   parseNemarMetadata,
 } from "../services/datacite";
+import { deleteDatasetCascade } from "../services/deletion";
 import {
   type DoiProvider,
   type DoiResult,
@@ -23,7 +24,7 @@ import {
   resolveEzidAuth,
 } from "../services/doi";
 import {
-  sendApprovalEmail,
+  sendKeyReadyEmail,
   sendPublicationApprovedEmail,
   sendPublicationDeniedEmail,
   sendRevocationEmail,
@@ -32,6 +33,7 @@ import { decrypt, encrypt } from "../services/encryption";
 import {
   type EzidAuth,
   extractDoi,
+  makePublic as ezidMakePublic,
   updateIdentifier as ezidUpdateIdentifier,
 } from "../services/ezid";
 import {
@@ -73,7 +75,15 @@ import {
   publishDeposition,
   uploadFile,
 } from "../services/zenodo";
-import type { Bindings, Variables } from "../types/bindings";
+import {
+  type Bindings,
+  type UserRole,
+  type Variables,
+  hasRole,
+  isDemotion,
+  isValidRole,
+  parseRole,
+} from "../types/bindings";
 
 /**
  * Valid publication workflow step names.
@@ -115,19 +125,36 @@ adminRoutes.use("*", adminMiddleware);
  */
 adminRoutes.get("/users", async (c) => {
   const status = c.req.query("status"); // pending, verified, approved, revoked
+  const role = c.req.query("role"); // owner, admin, member
   const db = c.env.DB;
 
   let query = `
     SELECT
       id, username, email, github_username, status,
-      email_verified, is_admin, created_at, approved_at, revoked_at
+      email_verified, role, created_at, approved_at, revoked_at
     FROM users
   `;
+  const conditions: string[] = [];
   const params: string[] = [];
 
   if (status) {
-    query += " WHERE status = ?";
+    conditions.push("status = ?");
     params.push(status);
+  }
+  if (role) {
+    if (!["owner", "admin", "member"].includes(role)) {
+      return c.json({ error: "Invalid role. Must be: owner, admin, or member" }, 400);
+    }
+    if (role === "member") {
+      conditions.push("(role = 'member' OR role IS NULL)");
+    } else {
+      conditions.push("role = ?");
+      params.push(role);
+    }
+  }
+
+  if (conditions.length > 0) {
+    query += ` WHERE ${conditions.join(" AND ")}`;
   }
 
   query += " ORDER BY created_at DESC";
@@ -170,6 +197,129 @@ adminRoutes.get("/users/:username", async (c) => {
 
   return c.json({ user });
 });
+
+const roleChangeSchema = z.object({
+  role: z.enum(["owner", "admin", "member"]),
+});
+
+/**
+ * POST /admin/users/:username/role - Change a user's role (owner-only)
+ */
+adminRoutes.post(
+  "/users/:username/role",
+  ownerMiddleware,
+  zValidator("json", roleChangeSchema),
+  async (c) => {
+    const username = c.req.param("username");
+    const { role: newRole } = c.req.valid("json");
+    const db = c.env.DB;
+    const requestingUser = c.get("user");
+
+    // Cannot change own role (prevents owner self-demotion lockout)
+    if (requestingUser.username === username) {
+      return c.json({ error: "Cannot change your own role" }, 400);
+    }
+
+    // Find target user
+    const target = await db
+      .prepare("SELECT id, username, role, status FROM users WHERE username = ?")
+      .bind(username)
+      .first<{ id: number; username: string; role: string | null; status: string }>();
+
+    if (!target) {
+      return c.json({ error: "User not found" }, 404);
+    }
+
+    if (target.status !== "approved") {
+      return c.json({ error: "User must be approved before role changes" }, 400);
+    }
+
+    const oldRole = parseRole(target.role, target.username);
+    if (oldRole === null) {
+      return c.json({ error: "Target user has invalid role configuration" }, 500);
+    }
+
+    if (oldRole === newRole) {
+      return c.json({ error: `User already has role '${newRole}'` }, 409);
+    }
+
+    // Protect against removing the last owner
+    if (oldRole === "owner" && newRole !== "owner") {
+      const ownerCount = await db
+        .prepare("SELECT COUNT(*) as count FROM users WHERE role = 'owner' AND status = 'approved'")
+        .first<{ count: number }>();
+      if (ownerCount && ownerCount.count <= 1) {
+        return c.json({ error: "Cannot remove the last owner" }, 400);
+      }
+    }
+
+    // Update role
+    await db
+      .prepare("UPDATE users SET role = ?, updated_at = datetime('now') WHERE id = ?")
+      .bind(newRole, target.id)
+      .run();
+
+    // On demotion, revoke tokens to force re-authentication
+    const demoted = isDemotion(oldRole, newRole);
+    let tokensRevoked = 0;
+    let tokenRevocationFailed = false;
+    if (demoted) {
+      try {
+        const result = await db
+          .prepare(
+            "UPDATE tokens SET revoked_at = datetime('now') WHERE user_id = ? AND revoked_at IS NULL",
+          )
+          .bind(target.id)
+          .run();
+        tokensRevoked = result.meta.changes ?? 0;
+      } catch (error) {
+        console.error(`SECURITY: Failed to revoke tokens for demoted user ${username}:`, error);
+        tokenRevocationFailed = true;
+      }
+    }
+
+    // Audit log (non-blocking)
+    try {
+      await db
+        .prepare(
+          "INSERT INTO audit_log (user_id, action, resource_type, resource_id, details) VALUES (?, ?, ?, ?, ?)",
+        )
+        .bind(
+          requestingUser.id,
+          "role_changed",
+          "user",
+          username,
+          JSON.stringify({
+            changed_by: requestingUser.username,
+            old_role: oldRole,
+            new_role: newRole,
+            tokens_revoked: tokensRevoked,
+            token_revocation_failed: tokenRevocationFailed,
+          }),
+        )
+        .run();
+    } catch (error) {
+      console.error(
+        `Failed to write audit log for role change ${username} ${oldRole}->${newRole}:`,
+        error,
+      );
+    }
+
+    const response: Record<string, unknown> = {
+      message: `User ${username} role changed from '${oldRole}' to '${newRole}'`,
+      user: { username, role: newRole },
+    };
+    if (demoted) {
+      response.tokens_revoked = tokensRevoked;
+    }
+    if (tokenRevocationFailed) {
+      response.warning =
+        "Token revocation failed. User may retain elevated session. Manually revoke tokens.";
+    }
+
+    return c.json(response);
+  },
+);
 
 /**
  * POST /admin/approve/:username - Approve a user and generate API token
@@ -298,7 +448,7 @@ adminRoutes.post("/approve/:username", async (c) => {
   // Send approval email with API key
   let emailSent = false;
   try {
-    await sendApprovalEmail(user.email, user.username, apiKey, c.env.RESEND_API_KEY);
+    await sendKeyReadyEmail(user.email, user.username, c.env.RESEND_API_KEY);
     emailSent = true;
   } catch (error) {
     console.error("Failed to send approval email:", error);
@@ -355,10 +505,10 @@ adminRoutes.post("/revoke/:username", async (c) => {
     return c.json({ error: "Cannot revoke your own access" }, 400);
   }
 
-  // Find user (include IAM credentials for revocation)
+  // Find user (include IAM credentials and role for revocation)
   const user = await db
     .prepare(`
-      SELECT id, username, email, github_username, status,
+      SELECT id, username, email, github_username, status, role,
              aws_iam_username, aws_access_key_id_encrypted
       FROM users WHERE username = ?
     `)
@@ -369,6 +519,7 @@ adminRoutes.post("/revoke/:username", async (c) => {
       email: string;
       github_username: string;
       status: string;
+      role: string | null;
       aws_iam_username: string | null;
       aws_access_key_id_encrypted: string | null;
     }>();
@@ -379,6 +530,11 @@ adminRoutes.post("/revoke/:username", async (c) => {
 
   if (user.status === "revoked") {
     return c.json({ error: "User already revoked" }, 409);
+  }
+
+  // Only owners can revoke other owners
+  if (user.role === "owner" && adminUser.role !== "owner") {
+    return c.json({ error: "Only owners can revoke other owners" }, 403);
   }
 
   // Revoke IAM access if configured - SECURITY CRITICAL
@@ -634,7 +790,7 @@ adminRoutes.post("/regenerate-iam/:username", async (c) => {
   // Find user
   const user = await db
     .prepare(
-      `SELECT id, username, email, status, is_admin, aws_iam_username, aws_access_key_id_encrypted
+      `SELECT id, username, email, status, role, aws_iam_username, aws_access_key_id_encrypted
        FROM users WHERE username = ?`,
     )
     .bind(username)
@@ -643,7 +799,7 @@ adminRoutes.post("/regenerate-iam/:username", async (c) => {
       username: string;
       email: string;
       status: string;
-      is_admin: number;
+      role: string | null;
       aws_iam_username: string | null;
       aws_access_key_id_encrypted: string | null;
     }>();
@@ -672,46 +828,50 @@ adminRoutes.post("/regenerate-iam/:username", async (c) => {
   // Track warning if old key revocation fails (security concern)
   let oldKeyRevocationWarning: string | undefined;
 
-  // Revoke old IAM credentials if they exist (but don't delete the user - we'll reuse it)
-  if (user.aws_iam_username && user.aws_access_key_id_encrypted) {
-    try {
-      const oldAccessKeyId = await decrypt(user.aws_access_key_id_encrypted, c.env.ENCRYPTION_KEY);
-      // Only delete the old access key, not the entire IAM user
-      const { deleteAccessKey } = await import("../services/iam");
-      await deleteAccessKey(
-        {
-          accessKeyId: c.env.AWS_ACCESS_KEY_ID,
-          secretAccessKey: c.env.AWS_SECRET_ACCESS_KEY,
-          region: c.env.AWS_REGION,
-        },
-        user.aws_iam_username,
-        oldAccessKeyId,
-      );
-    } catch (error) {
-      console.error("Failed to revoke old access key:", error);
-      oldKeyRevocationWarning = `Old access key may still be active: ${errorMessage(error)}`;
-    }
-  }
-
-  // Create new IAM credentials
-  const isAdmin = Boolean(user.is_admin);
   const awsConfig = {
     accessKeyId: c.env.AWS_ACCESS_KEY_ID,
     secretAccessKey: c.env.AWS_SECRET_ACCESS_KEY,
     region: c.env.AWS_REGION,
   };
 
-  try {
-    const {
-      createIamUser,
-      createAccessKey,
-      putUserPolicy,
-      generateS3PolicyDocument,
-      generateAdminS3PolicyDocument,
-      generateIamUsername,
-      deleteAccessKey,
-    } = await import("../services/iam");
+  const {
+    createIamUser,
+    createAccessKey,
+    deleteAccessKey,
+    listAccessKeys,
+    putUserPolicy,
+    generateS3PolicyDocument,
+    generateAdminS3PolicyDocument,
+    generateIamUsername,
+  } = await import("../services/iam");
 
+  // Revoke ALL existing access keys for the IAM user (handles cases where
+  // D1 credentials can't be decrypted, e.g. after ENCRYPTION_KEY rotation)
+  if (user.aws_iam_username) {
+    try {
+      const existingKeys = await listAccessKeys(awsConfig, user.aws_iam_username);
+      const failedKeys: string[] = [];
+      for (const keyId of existingKeys) {
+        try {
+          await deleteAccessKey(awsConfig, user.aws_iam_username, keyId);
+        } catch (error) {
+          console.error(`Failed to revoke access key ${keyId}:`, error);
+          failedKeys.push(keyId);
+        }
+      }
+      if (failedKeys.length > 0) {
+        oldKeyRevocationWarning = `${failedKeys.length} old access key(s) may still be active`;
+      }
+    } catch (error) {
+      console.error("Failed to list access keys:", error);
+      oldKeyRevocationWarning = `Could not list existing access keys: ${errorMessage(error)}`;
+    }
+  }
+
+  // Create new IAM credentials
+  const hasAdminAccess = hasRole((user.role || "member") as UserRole, "admin");
+
+  try {
     const iamUsername = generateIamUsername(user.username);
 
     // Create or get existing IAM user
@@ -721,7 +881,7 @@ adminRoutes.post("/regenerate-iam/:username", async (c) => {
     const { accessKeyId, secretAccessKey } = await createAccessKey(awsConfig, iamUsername);
 
     // Restore policy: admins get full bucket access, regular users get their datasets only
-    const policyDocument = isAdmin
+    const policyDocument = hasAdminAccess
       ? generateAdminS3PolicyDocument(c.env.S3_BUCKET)
       : generateS3PolicyDocument(c.env.S3_BUCKET, datasetPrefixes);
     await putUserPolicy(awsConfig, iamUsername, "nemar-s3-access", policyDocument);
@@ -754,7 +914,7 @@ adminRoutes.post("/regenerate-iam/:username", async (c) => {
     }
 
     // Log the action (non-blocking - credentials already created)
-    const datasetsRestoredCount = isAdmin ? "all" : datasetPrefixes.length;
+    const datasetsRestoredCount = hasAdminAccess ? "all" : datasetPrefixes.length;
     try {
       await db
         .prepare(
@@ -767,7 +927,7 @@ adminRoutes.post("/regenerate-iam/:username", async (c) => {
           user.username,
           JSON.stringify({
             username: user.username,
-            is_admin: isAdmin,
+            role: user.role || "member",
             datasets_restored: datasetsRestoredCount,
           }),
         )
@@ -782,9 +942,9 @@ adminRoutes.post("/regenerate-iam/:username", async (c) => {
       user: {
         username: user.username,
         iam_username: iamUsername,
-        is_admin: isAdmin,
+        role: user.role || "member",
       },
-      datasets_restored: isAdmin ? "all (full bucket access)" : datasetPrefixes.length,
+      datasets_restored: hasAdminAccess ? "all (full bucket access)" : datasetPrefixes.length,
       warning: oldKeyRevocationWarning,
     });
   } catch (error) {
@@ -1090,15 +1250,11 @@ adminRoutes.post(
         )
         .run();
 
-      // Generate the repo name for the setup command
-      const repoName = dataset.github_repo ? dataset.github_repo.split("/")[1] : datasetId;
-
       // Build response based on provider
       const response: Record<string, unknown> = {
         message: "Concept DOI created successfully",
         concept_doi: result.doi,
         provider,
-        setup_command: `gh secret set NEMAR_WEBHOOK_TOKEN --repo nemarDatasets/${repoName}`,
         warning:
           "DOI is pre-reserved but not yet published. It will become active on first version publish.",
       };
@@ -2324,6 +2480,7 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
       ezid_identifier: string | null;
       ezid_status: string | null;
       doi_provider: string | null;
+      is_sandbox: number | null;
       owner_username: string;
       owner_email: string;
       owner_orcid: string | null;
@@ -2874,6 +3031,17 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
         pat,
       );
 
+      // Update GitHub repo description with dataset name and DOI
+      const { setRepoDescription } = await import("../services/github.js");
+      const descResult = await setRepoDescription(
+        repoName,
+        `${dataset.name} - DOI: ${conceptDoi}`,
+        pat,
+      );
+      if (!descResult.ok) {
+        console.warn(`[publish] Failed to set repo description (non-fatal): ${descResult.error}`);
+      }
+
       await updateProgress("update_readme");
     } catch (err) {
       const msg = errorMessage(err);
@@ -2952,57 +3120,128 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
   }
 
   // Step: upload_to_zenodo - Upload release archive to Zenodo
+  // For Zenodo provider: upload to existing deposition
+  // For EZID provider: create a draft Zenodo deposition as backup archive (never published)
   if (stepsToRun.includes("upload_to_zenodo")) {
-    try {
-      await startStep("upload_to_zenodo");
+    const provider = parseDoiProvider(dataset.doi_provider);
+    if (provider === "ezid") {
+      try {
+        await startStep("upload_to_zenodo");
 
-      const vtResult = await getVersionTag("upload_to_zenodo");
-      if (vtResult instanceof Response) return vtResult;
-      const { tag } = vtResult;
+        const vtResult = await getVersionTag("upload_to_zenodo");
+        if (vtResult instanceof Response) return vtResult;
+        const { tag } = vtResult;
 
-      const archiveData = await downloadReleaseArchive(repoName, tag, pat);
+        const archiveData = await downloadReleaseArchive(repoName, tag, pat);
 
-      const zenodoResult = await getZenodoConfig("upload_to_zenodo");
-      if (zenodoResult instanceof Response) return zenodoResult;
-      const { depositionId, token: zenodoToken, isSandbox } = zenodoResult;
+        // Determine sandbox from EZID identifier prefix
+        const isSandbox = dataset.ezid_identifier?.includes("10.5072") ?? false;
+        const zenodoToken = isSandbox ? c.env.ZENODO_SANDBOX_API_KEY : c.env.ZENODO_API_KEY;
 
-      const deposition = await getDeposition(depositionId, zenodoToken, isSandbox);
+        if (!zenodoToken) {
+          console.warn(`[publish] No Zenodo API key for backup archive (sandbox=${isSandbox}); skipping`);
+          await updateProgress("upload_to_zenodo");
+        } else {
+          // Check if we already have a Zenodo backup deposition
+          let depositionId: number | null = null;
+          const row = await db
+            .prepare("SELECT zenodo_concept_id FROM datasets WHERE dataset_id = ?")
+            .bind(datasetId)
+            .first<{ zenodo_concept_id: string | null }>();
 
-      if (!deposition.links.bucket) {
-        await updateProgress("upload_to_zenodo", "No bucket URL in deposition");
+          if (row?.zenodo_concept_id) {
+            depositionId = Number.parseInt(row.zenodo_concept_id, 10);
+          }
+
+          if (!depositionId || Number.isNaN(depositionId)) {
+            // Create a new draft deposition for backup
+            const deposition = await createDeposition(
+              {
+                title: `${dataset.name} (NEMAR backup archive)`,
+                description: `Backup archive for NEMAR dataset ${datasetId}. Primary DOI: ${dataset.concept_doi}`,
+                creators: [{ name: "NEMAR" }],
+                keywords: ["BIDS", "neuroscience", "NEMAR", "backup"],
+                version: tag.replace(/^v/, ""),
+              },
+              zenodoToken,
+              isSandbox,
+            );
+            depositionId = deposition.id;
+
+            // Store the Zenodo deposition ID for future versions
+            await db
+              .prepare("UPDATE datasets SET zenodo_concept_id = ?, updated_at = datetime('now') WHERE dataset_id = ?")
+              .bind(String(depositionId), datasetId)
+              .run();
+          }
+
+          const deposition = await getDeposition(depositionId, zenodoToken, isSandbox);
+          if (deposition.links.bucket) {
+            const filename = `${datasetId}-${tag}.zip`;
+            await uploadFile(depositionId, deposition.links.bucket, filename, archiveData, zenodoToken, isSandbox);
+          } else {
+            console.warn(`[publish] Zenodo backup deposition ${depositionId} has no bucket URL; skipping upload`);
+          }
+
+          await updateProgress("upload_to_zenodo");
+        }
+      } catch (err) {
+        // Zenodo backup is non-fatal for EZID datasets; log and continue
+        console.error(`[publish] Zenodo backup failed for ${datasetId} (non-fatal):`, err);
+        await updateProgress("upload_to_zenodo");
+      }
+    } else {
+      try {
+        await startStep("upload_to_zenodo");
+
+        const vtResult = await getVersionTag("upload_to_zenodo");
+        if (vtResult instanceof Response) return vtResult;
+        const { tag } = vtResult;
+
+        const archiveData = await downloadReleaseArchive(repoName, tag, pat);
+
+        const zenodoResult = await getZenodoConfig("upload_to_zenodo");
+        if (zenodoResult instanceof Response) return zenodoResult;
+        const { depositionId, token: zenodoToken, isSandbox } = zenodoResult;
+
+        const deposition = await getDeposition(depositionId, zenodoToken, isSandbox);
+
+        if (!deposition.links.bucket) {
+          await updateProgress("upload_to_zenodo", "No bucket URL in deposition");
+          return c.json(
+            {
+              error: "Zenodo deposition has no bucket URL",
+              step: "upload_to_zenodo",
+              steps_completed: completed,
+            },
+            500,
+          );
+        }
+
+        const filename = `${datasetId}-${tag}.zip`;
+        await uploadFile(
+          depositionId,
+          deposition.links.bucket,
+          filename,
+          archiveData,
+          zenodoToken,
+          isSandbox,
+        );
+
+        await updateProgress("upload_to_zenodo");
+      } catch (err) {
+        const msg = errorMessage(err);
+        console.error(`[publish] upload_to_zenodo failed for dataset ${datasetId}:`, err);
+        await updateProgress("upload_to_zenodo", msg);
         return c.json(
           {
-            error: "Zenodo deposition has no bucket URL",
+            error: `Zenodo upload failed: ${msg}`,
             step: "upload_to_zenodo",
             steps_completed: completed,
           },
           500,
         );
       }
-
-      const filename = `${datasetId}-${tag}.zip`;
-      await uploadFile(
-        depositionId,
-        deposition.links.bucket,
-        filename,
-        archiveData,
-        zenodoToken,
-        isSandbox,
-      );
-
-      await updateProgress("upload_to_zenodo");
-    } catch (err) {
-      const msg = errorMessage(err);
-      console.error(`[publish] upload_to_zenodo failed for dataset ${datasetId}:`, err);
-      await updateProgress("upload_to_zenodo", msg);
-      return c.json(
-        {
-          error: `Zenodo upload failed: ${msg}`,
-          step: "upload_to_zenodo",
-          steps_completed: completed,
-        },
-        500,
-      );
     }
   }
 
@@ -3011,48 +3250,78 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
     try {
       await startStep("publish_doi");
 
-      const zenodoResult = await getZenodoConfig("publish_doi");
-      if (zenodoResult instanceof Response) return zenodoResult;
-      const { depositionId, token: zenodoToken, isSandbox } = zenodoResult;
+      const provider = parseDoiProvider(dataset.doi_provider);
 
-      // This is irreversible: once published, the DOI is permanent
-      const published = await publishDeposition(depositionId, zenodoToken, isSandbox);
-
-      // After publish, Zenodo confirms the concept DOI; update the database record.
-      // The DB update is in its own try/catch because the DOI is already published at
-      // this point; a DB failure must not be reported as "DOI publication failed."
-      if (published.doi) {
-        try {
-          await db
-            .prepare(
-              "UPDATE datasets SET concept_doi = ?, updated_at = datetime('now') WHERE dataset_id = ?",
-            )
-            .bind(published.doi, datasetId)
-            .run();
-        } catch (dbErr) {
-          console.error(
-            `[publish] CRITICAL: DOI published on Zenodo (${published.doi}) but database update failed for ${datasetId}:`,
-            dbErr,
-          );
-          await updateProgress(
-            "publish_doi",
-            `DOI published (${published.doi}) but DB update failed; manual correction required`,
-          );
+      if (provider === "ezid") {
+        // EZID: transition the reserved DOI to public status
+        if (!dataset.ezid_identifier) {
+          await updateProgress("publish_doi", "No EZID identifier found");
           return c.json(
-            {
-              error: `DOI was published successfully (${published.doi}) but database update failed. Manual database correction required.`,
-              published_doi: published.doi,
-              step: "publish_doi",
-              steps_completed: completed,
-            },
+            { error: "No EZID identifier found for dataset", step: "publish_doi", steps_completed: completed },
             500,
           );
         }
+
+        const auth = resolveEzidAuth(c.env, sandbox || !!dataset.is_sandbox);
+        const target = `https://github.com/nemarDatasets/${datasetId}`;
+        await ezidMakePublic(auth, dataset.ezid_identifier, target);
+
+        // Update EZID status in D1
+        try {
+          await db
+            .prepare("UPDATE datasets SET ezid_status = 'public', updated_at = datetime('now') WHERE dataset_id = ?")
+            .bind(datasetId)
+            .run();
+        } catch (dbErr) {
+          console.error(
+            `[publish] CRITICAL: EZID DOI published but database update failed for ${datasetId}:`,
+            dbErr,
+          );
+        }
       } else {
-        console.error(
-          `[publish] Zenodo publish returned no DOI for dataset ${datasetId}; response:`,
-          published,
-        );
+        // Zenodo: publish the deposition (irreversible)
+        const zenodoResult = await getZenodoConfig("publish_doi");
+        if (zenodoResult instanceof Response) return zenodoResult;
+        const { depositionId, token: zenodoToken, isSandbox } = zenodoResult;
+
+        const published = await publishDeposition(depositionId, zenodoToken, isSandbox);
+
+        // After publish, Zenodo confirms the concept DOI; update the database record.
+        // The DB update is in its own try/catch because the DOI is already published at
+        // this point; a DB failure must not be reported as "DOI publication failed."
+        if (published.doi) {
+          try {
+            await db
+              .prepare(
+                "UPDATE datasets SET concept_doi = ?, updated_at = datetime('now') WHERE dataset_id = ?",
+              )
+              .bind(published.doi, datasetId)
+              .run();
+          } catch (dbErr) {
+            console.error(
+              `[publish] CRITICAL: DOI published on Zenodo (${published.doi}) but database update failed for ${datasetId}:`,
+              dbErr,
+            );
+            await updateProgress(
+              "publish_doi",
+              `DOI published (${published.doi}) but DB update failed; manual correction required`,
+            );
+            return c.json(
+              {
+                error: `DOI was published successfully (${published.doi}) but database update failed. Manual database correction required.`,
+                published_doi: published.doi,
+                step: "publish_doi",
+                steps_completed: completed,
+              },
+              500,
+            );
+          }
+        } else {
+          console.error(
+            `[publish] Zenodo publish returned no DOI for dataset ${datasetId}; response:`,
+            published,
+          );
+        }
       }
 
       await updateProgress("publish_doi");
@@ -3345,4 +3614,125 @@ adminRoutes.post("/datasets/:id/manifest/:version", async (c) => {
     const msg = errorMessage(err);
     return c.json({ error: `Manifest generation failed: ${msg}` }, 500);
   }
+});
+
+// ---------------------------------------------------------------------------
+// Dataset deletion
+// ---------------------------------------------------------------------------
+
+const deleteDatasetSchema = z.object({
+  force: z.boolean().optional().default(false),
+});
+
+/**
+ * DELETE /admin/datasets/:id - Delete a dataset and all associated resources
+ *
+ * Permission:
+ * - Unpublished datasets (no DOI, private): admin or owner
+ * - Published datasets (with DOI or public visibility): owner only, requires force=true
+ */
+adminRoutes.delete("/datasets/:id", async (c) => {
+  const datasetId = c.req.param("id");
+  const requestingUser = c.get("user");
+
+  // Parse optional JSON body (DELETE requests may have no body)
+  let force = false;
+  try {
+    const body = await c.req.json();
+    const parsed = deleteDatasetSchema.safeParse(body);
+    if (parsed.success) {
+      force = parsed.data.force;
+    }
+  } catch {
+    // No body or invalid JSON: default force=false
+  }
+  const db = c.env.DB;
+
+  // Look up dataset
+  const dataset = await db
+    .prepare("SELECT * FROM datasets WHERE dataset_id = ?")
+    .bind(datasetId)
+    .first<{
+      id: number;
+      dataset_id: string;
+      name: string;
+      owner_user_id: number;
+      status: string;
+      visibility: string;
+      concept_doi: string | null;
+      latest_version_doi: string | null;
+    }>();
+
+  if (!dataset) {
+    return c.json({ error: "Dataset not found" }, 404);
+  }
+
+  // Permission check: published datasets require owner role
+  const hasDoiOrPublished = dataset.concept_doi !== null || dataset.visibility === "public";
+  if (hasDoiOrPublished) {
+    if (!hasRole(requestingUser.role, "owner")) {
+      return c.json(
+        { error: "Published datasets with DOIs can only be deleted by the NEMAR owner" },
+        403,
+      );
+    }
+    if (!force) {
+      return c.json(
+        {
+          error: "This dataset has a DOI or is published. Set force=true to confirm deletion.",
+          dataset_id: datasetId,
+          concept_doi: dataset.concept_doi,
+          visibility: dataset.visibility,
+        },
+        400,
+      );
+    }
+  }
+
+  // Check for active publication requests
+  const activePubReq = await db
+    .prepare(
+      "SELECT COUNT(*) as count FROM publication_requests WHERE dataset_id = ? AND status NOT IN ('published', 'denied')",
+    )
+    .bind(datasetId)
+    .first<{ count: number }>();
+
+  if (activePubReq && activePubReq.count > 0) {
+    return c.json(
+      {
+        error: `Cannot delete dataset with ${activePubReq.count} active publication request(s). Deny or complete them first.`,
+      },
+      409,
+    );
+  }
+
+  // Perform cascade deletion
+  const result = await deleteDatasetCascade(db, c.env, datasetId, {
+    bypassGovernance: force,
+  });
+
+  // Audit log (best-effort; don't fail the response if audit write fails)
+  try {
+    await db
+      .prepare("INSERT INTO audit_log (action, user_id, details) VALUES (?, ?, ?)")
+      .bind(
+        "dataset_deleted",
+        requestingUser.id,
+        JSON.stringify({
+          dataset_id: datasetId,
+          dataset_name: dataset.name,
+          owner_user_id: dataset.owner_user_id,
+          had_doi: dataset.concept_doi !== null,
+          force,
+          steps: result.steps,
+          warnings: result.warnings,
+        }),
+      )
+      .run();
+  } catch (err) {
+    console.error("Failed to write deletion audit log:", err);
+    result.warnings.push("Audit log write failed");
+  }
+
+  return c.json(result, result.deleted ? 200 : 207);
 });

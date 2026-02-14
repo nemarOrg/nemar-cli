@@ -375,7 +375,7 @@ export async function grantDatasetAccess(
 /**
  * List all access keys for an IAM user
  */
-async function listAccessKeys(config: IamConfig, iamUsername: string): Promise<string[]> {
+export async function listAccessKeys(config: IamConfig, iamUsername: string): Promise<string[]> {
   const aws = createIamClient(config);
 
   const params = new URLSearchParams({

@@ -2,14 +2,21 @@
  * BIDS Validator Service
  *
  * Wraps the BIDS validator (via Deno subprocess) to validate datasets.
- * Always uses the latest validator from JSR.
+ * Uses Deno's --reload flag to ensure the latest validator is fetched from JSR
+ * when the cached version is stale (older than 7 days) or when explicitly requested.
  *
  * Requirements:
  * - Deno must be installed (https://deno.com)
- * - Network access for first run (caches validator locally)
+ * - Network access for first run or when updating
  */
 
+import { existsSync, statSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
 import { spawn } from "bun";
+
+const VALIDATOR_JSR_SPECIFIER = "jsr:@bids/validator@^2";
+const STALE_THRESHOLD_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
 
 /**
  * BIDS validation issue from the validator
@@ -90,12 +97,48 @@ export async function checkDenoInstalled(): Promise<{ installed: boolean; versio
 }
 
 /**
- * Get BIDS validator version
+ * Check if the Deno cache for the BIDS validator is stale.
+ * Uses the modification time of the Deno cache directory as a heuristic.
+ * Returns true if cache is older than STALE_THRESHOLD_MS or doesn't exist.
  */
-export async function getValidatorVersion(): Promise<string | null> {
+export function isValidatorCacheStale(): boolean {
+  try {
+    // Deno stores JSR deps in DENO_DIR or ~/.cache/deno (Linux) / ~/Library/Caches/deno (macOS)
+    const platform = process.platform;
+    const denoDir =
+      process.env.DENO_DIR ||
+      (platform === "darwin"
+        ? join(homedir(), "Library", "Caches", "deno")
+        : platform === "win32"
+          ? join(process.env.LOCALAPPDATA || join(homedir(), "AppData", "Local"), "deno")
+          : join(homedir(), ".cache", "deno"));
+
+    const registryDir = join(denoDir, "deps");
+    if (!existsSync(registryDir)) return true;
+
+    const stats = statSync(registryDir);
+    const ageMs = Date.now() - stats.mtimeMs;
+    return ageMs > STALE_THRESHOLD_MS;
+  } catch {
+    return true;
+  }
+}
+
+/**
+ * Force-refresh the BIDS validator cache by running with --reload.
+ * Returns the new version string, or null on failure.
+ */
+export async function updateValidatorCache(): Promise<string | null> {
   try {
     const proc = spawn({
-      cmd: ["deno", "run", "-ERWN", "jsr:@bids/validator", "--version"],
+      cmd: [
+        "deno",
+        "run",
+        `--reload=${VALIDATOR_JSR_SPECIFIER}`,
+        "-ERWN",
+        VALIDATOR_JSR_SPECIFIER,
+        "--version",
+      ],
       stdout: "pipe",
       stderr: "pipe",
     });
@@ -103,7 +146,27 @@ export async function getValidatorVersion(): Promise<string | null> {
     const output = await new Response(proc.stdout).text();
     await proc.exited;
 
-    // Output is like "bids-validator 2.2.7" with ANSI codes
+    const match = output.match(/(\d+\.\d+\.\d+)/);
+    return match ? match[1] : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Get BIDS validator version from the current cache (does not refresh).
+ */
+export async function getValidatorVersion(): Promise<string | null> {
+  try {
+    const proc = spawn({
+      cmd: ["deno", "run", "-ERWN", VALIDATOR_JSR_SPECIFIER, "--version"],
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+
+    const output = await new Response(proc.stdout).text();
+    await proc.exited;
+
     const match = output.match(/(\d+\.\d+\.\d+)/);
     return match ? match[1] : null;
   } catch {
@@ -113,12 +176,17 @@ export async function getValidatorVersion(): Promise<string | null> {
 
 /**
  * Build the deno + bids-validator argument list from common options.
+ * When forceReload is true, adds --reload to fetch the latest validator from JSR.
  */
 function buildValidatorArgs(
   datasetPath: string,
-  options: ValidateOptions & { json?: boolean; extraArgs?: string[] } = {},
+  options: ValidateOptions & { json?: boolean; extraArgs?: string[]; forceReload?: boolean } = {},
 ): string[] {
-  const args = ["run", "-ERWN", "jsr:@bids/validator", datasetPath];
+  const args = ["run"];
+  if (options.forceReload) {
+    args.push(`--reload=${VALIDATOR_JSR_SPECIFIER}`);
+  }
+  args.push("-ERWN", VALIDATOR_JSR_SPECIFIER, datasetPath);
 
   if (options.json) {
     args.push("--json");
@@ -154,7 +222,7 @@ function buildValidatorArgs(
  */
 export async function validateBidsDataset(
   datasetPath: string,
-  options: ValidateOptions = {},
+  options: ValidateOptions & { forceReload?: boolean } = {},
 ): Promise<BidsValidationResult> {
   const args = buildValidatorArgs(datasetPath, { ...options, json: true });
 
@@ -212,7 +280,7 @@ export async function validateBidsDataset(
  */
 export async function runBidsValidatorDirect(
   datasetPath: string,
-  options: ValidateOptions & { json?: boolean; extraArgs?: string[] } = {},
+  options: ValidateOptions & { json?: boolean; extraArgs?: string[]; forceReload?: boolean } = {},
 ): Promise<{ stdout: string; stderr: string; exitCode: number }> {
   const args = buildValidatorArgs(datasetPath, options);
 

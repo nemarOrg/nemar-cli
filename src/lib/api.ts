@@ -175,7 +175,7 @@ export interface LoginResponse {
     username: string;
     email: string;
     github_username: string;
-    is_admin: boolean;
+    role: "owner" | "admin" | "member";
     sandbox_completed: boolean;
     sandbox_dataset_id?: string;
   };
@@ -205,6 +205,28 @@ export async function resendVerification(email: string): Promise<{ message: stri
   });
 }
 
+export interface RetrieveKeyResponse {
+  message: string;
+  api_key?: string;
+  api_key_prefix?: string;
+  note?: string;
+  error?: string;
+}
+
+export async function retrieveKey(email: string, password: string): Promise<RetrieveKeyResponse> {
+  return request<RetrieveKeyResponse>("/auth/retrieve-key", {
+    method: "POST",
+    body: JSON.stringify({ email, password }),
+  });
+}
+
+export async function requestKeyRegeneration(email: string): Promise<{ message: string }> {
+  return request<{ message: string }>("/auth/request-key-regeneration", {
+    method: "POST",
+    body: JSON.stringify({ email }),
+  });
+}
+
 // ============================================================================
 // User
 // ============================================================================
@@ -216,7 +238,7 @@ export interface UserInfo {
   github_username: string;
   orcid?: string | null;
   status: string;
-  is_admin: boolean;
+  role: "owner" | "admin" | "member";
   created_at: string;
   sandbox_completed: boolean;
   sandbox_dataset_id?: string;
@@ -278,7 +300,7 @@ export interface UserListItem {
   github_username: string;
   status: string;
   email_verified: number;
-  is_admin: number;
+  role: string;
   created_at: string;
   approved_at: string | null;
   revoked_at: string | null;
@@ -292,8 +314,11 @@ export interface UsersListResponse {
 /**
  * List users (admin only)
  */
-export async function listUsers(status?: string): Promise<UsersListResponse> {
-  const query = status ? `?status=${status}` : "";
+export async function listUsers(status?: string, role?: string): Promise<UsersListResponse> {
+  const params = new URLSearchParams();
+  if (status) params.set("status", status);
+  if (role) params.set("role", role);
+  const query = params.toString() ? `?${params.toString()}` : "";
   return request<UsersListResponse>(`/admin/users${query}`, {}, true);
 }
 
@@ -336,13 +361,35 @@ export async function revokeUser(username: string): Promise<{ message: string }>
   );
 }
 
+export interface ChangeRoleResponse {
+  message: string;
+  user: { username: string; role: string };
+  tokens_revoked?: number;
+}
+
+/**
+ * Change a user's role (owner only)
+ */
+export async function changeUserRole(
+  username: string,
+  role: "owner" | "admin" | "member",
+): Promise<ChangeRoleResponse> {
+  return request<ChangeRoleResponse>(
+    `/admin/users/${username}/role`,
+    {
+      method: "POST",
+      body: JSON.stringify({ role }),
+    },
+    true,
+  );
+}
+
 export interface RegenerateIamResponse {
   message: string;
   user: {
     username: string;
     iam_username: string;
-    /** True if user has admin privileges and received full bucket access */
-    is_admin?: boolean;
+    role: string;
   };
   /**
    * Number of dataset prefixes restored for regular users,
@@ -583,6 +630,30 @@ export async function getDataset(datasetId: string): Promise<Dataset> {
   return validateDataset(response.dataset);
 }
 
+// ============================================================================
+// Version History
+// ============================================================================
+
+export interface VersionInfo {
+  version: string;
+  doi: string;
+  provider: "ezid" | "zenodo";
+  created_at: string;
+}
+
+export interface VersionHistoryResponse {
+  dataset_id: string;
+  current_version: string;
+  versions: VersionInfo[];
+}
+
+/**
+ * Get version history for a dataset (requires auth)
+ */
+export async function getVersionHistory(datasetId: string): Promise<VersionHistoryResponse> {
+  return request<VersionHistoryResponse>(`/datasets/${datasetId}/versions`, {}, true);
+}
+
 export interface FileInfo {
   path: string;
   size: number;
@@ -711,7 +782,6 @@ export interface CreateConceptDoiRequest {
 interface CreateConceptDoiResponseBase {
   message: string;
   concept_doi: string;
-  setup_command: string;
   warning: string;
   metadata_warning?: string;
 }
@@ -1173,4 +1243,34 @@ export async function applyS3Lock(
   }
 
   return { locked: totalLocked, total, failed: allFailed };
+}
+
+// ---------------------------------------------------------------------------
+// Dataset deletion
+// ---------------------------------------------------------------------------
+
+export interface DeleteDatasetResponse {
+  datasetId: string;
+  deleted: boolean;
+  steps: {
+    github: { success: boolean; error?: string };
+    s3: { deleted: number; failed: Array<{ key: string; error: string }>; skipped?: boolean };
+    d1: { success: boolean; versionsDeleted: number; pubRequestsDeleted: number; error?: string };
+  };
+  warnings: string[];
+}
+
+export async function deleteDataset(
+  datasetId: string,
+  force = false,
+): Promise<DeleteDatasetResponse> {
+  return request<DeleteDatasetResponse>(
+    `/admin/datasets/${datasetId}`,
+    {
+      method: "DELETE",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ force }),
+    },
+    true,
+  );
 }

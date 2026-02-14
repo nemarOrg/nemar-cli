@@ -7,6 +7,7 @@
  * - nemar auth status    - Check authentication status
  * - nemar auth whoami    - Alias for status (common pattern)
  * - nemar auth logout    - Clear stored credentials
+ * - nemar auth switch    - Switch between stored accounts
  * - nemar auth setup-ssh - Configure SSH for GitHub access
  *
  * Note: The two-prong structure (nemar auth <cmd>) follows CLI best practices
@@ -24,15 +25,21 @@ import {
   checkUsername,
   getCurrentUser,
   login,
+  requestKeyRegeneration,
   resendVerification,
+  retrieveKey,
   signup,
 } from "../lib/api.js";
 import {
+  clearAllConfig,
   clearConfig,
+  getAccounts,
   getConfig,
   getConfigPath,
   isAuthenticated,
   setConfig,
+  storeAccount,
+  switchAccount,
 } from "../lib/config.js";
 import {
   type ConfirmOptions,
@@ -59,18 +66,23 @@ Description:
   their email, and be approved by an admin before they can upload datasets.
 
 Workflow:
-  1. nemar auth signup     - Register a new account
-  2. Verify your email     - Click the link in the verification email
-  3. Wait for approval     - Admin will review your request
-  4. nemar auth login      - Log in with your API key (sent after approval)
+  1. nemar auth signup         - Register a new account
+  2. Verify your email         - Click the link in the verification email
+  3. Wait for approval         - Admin will review your request
+  4. nemar auth retrieve-key   - Retrieve your API key (requires password)
+  5. nemar auth login           - Log in with your API key
 
 Examples:
   $ nemar auth signup                    # Start registration
+  $ nemar auth retrieve-key             # Get your API key after approval
   $ nemar auth login                     # Interactive login
   $ nemar auth login -k <api-key>        # Login with API key
+  $ nemar auth regenerate-key           # Get a new API key (revokes old)
   $ nemar auth status --refresh          # Check authentication status
   $ nemar auth whoami                    # Alias for status
-  $ nemar auth logout                    # Clear credentials`,
+  $ nemar auth switch                    # Switch between accounts
+  $ nemar auth logout                    # Clear active account
+  $ nemar auth logout --all              # Clear all accounts`,
 );
 
 // ============================================================================
@@ -81,9 +93,10 @@ Examples:
 export async function loginAction(options: { key?: string } & ConfirmOptions): Promise<void> {
   // Check for existing authentication
   if (isAuthenticated()) {
-    const config = getConfig();
-    console.log(chalk.yellow(`Already logged in as ${config.username || "unknown"}`));
-    const result = await confirm("Do you want to log in with a different account?", options);
+    const cfg = getConfig();
+    console.log(chalk.yellow(`Already logged in as ${cfg.username || "unknown"}`));
+    console.log(chalk.gray("  This will add another account (use 'nemar auth switch' to switch)"));
+    const result = await confirm("Log in with a different account?", options);
     if (result !== "confirmed") return;
   }
 
@@ -124,20 +137,25 @@ export async function loginAction(options: { key?: string } & ConfirmOptions): P
       return;
     }
 
-    // Store credentials
-    setConfig("apiKey", apiKey);
-    setConfig("username", result.user.username);
-    setConfig("email", result.user.email);
-    setConfig("githubUsername", result.user.github_username);
-    setConfig("sandboxCompleted", result.user.sandbox_completed);
-    if (result.user.sandbox_dataset_id) {
-      setConfig("sandboxDatasetId", result.user.sandbox_dataset_id);
-    }
+    // Store credentials as a named account and set as active
+    storeAccount(result.user.username, {
+      apiKey,
+      apiUrl: "https://api.osc.earth/nemar",
+      username: result.user.username,
+      email: result.user.email,
+      githubUsername: result.user.github_username,
+      sandboxCompleted: result.user.sandbox_completed,
+      ...(result.user.sandbox_dataset_id
+        ? { sandboxDatasetId: result.user.sandbox_dataset_id }
+        : {}),
+    });
 
     spinner.succeed("Login successful");
     console.log();
     console.log(`  Welcome back, ${chalk.cyan(result.user.username)}!`);
-    if (result.user.is_admin) {
+    if (result.user.role === "owner") {
+      console.log(`  ${chalk.red("Owner access enabled")}`);
+    } else if (result.user.role === "admin") {
       console.log(`  ${chalk.magenta("Admin access enabled")}`);
     }
 
@@ -342,7 +360,7 @@ export async function signupAction(): Promise<void> {
       console.log(`  ${i + 1}. ${step}`);
     });
     console.log();
-    console.log(chalk.gray("Once approved, use 'nemar auth login' with your API key"));
+    console.log(chalk.gray("Once approved, use 'nemar auth retrieve-key' to get your API key"));
   } catch (error) {
     if (error instanceof ApiError) {
       spinner.fail(error.message);
@@ -374,10 +392,7 @@ authCommand.command("signup").description("Register for a new NEMAR account").ac
 
 /** Exported status action handler for use in root-level shortcuts (whoami) */
 export async function statusAction(options: { refresh?: boolean }): Promise<void> {
-  const authenticated = isAuthenticated();
-  const config = getConfig();
-
-  if (!authenticated) {
+  if (!isAuthenticated()) {
     console.log(chalk.yellow("Not authenticated"));
     console.log();
     console.log("  Run 'nemar auth login' to authenticate");
@@ -386,6 +401,7 @@ export async function statusAction(options: { refresh?: boolean }): Promise<void
   }
 
   // If refresh requested, fetch latest from server
+  let userRole: string | undefined;
   if (options.refresh) {
     const spinner = ora("Fetching user info...").start();
     try {
@@ -393,6 +409,7 @@ export async function statusAction(options: { refresh?: boolean }): Promise<void
       setConfig("username", user.username);
       setConfig("email", user.email);
       setConfig("githubUsername", user.github_username);
+      userRole = user.role;
       spinner.stop();
     } catch (error) {
       spinner.fail("Could not refresh user info");
@@ -402,19 +419,40 @@ export async function statusAction(options: { refresh?: boolean }): Promise<void
     }
   }
 
-  // Display status
+  // Re-read config after potential refresh to show up-to-date values
+  const cfg = getConfig();
+
+  // Display active account status
   console.log(chalk.green("Authenticated"));
   console.log();
-  if (config.username) {
-    console.log(`  Username: ${chalk.cyan(config.username)}`);
+  if (cfg.username) {
+    console.log(`  Username: ${chalk.cyan(cfg.username)}`);
   }
-  if (config.email) {
-    console.log(`  Email:    ${config.email}`);
+  if (cfg.email) {
+    console.log(`  Email:    ${cfg.email}`);
   }
-  if (config.githubUsername) {
-    console.log(`  GitHub:   @${config.githubUsername}`);
+  if (cfg.githubUsername) {
+    console.log(`  GitHub:   @${cfg.githubUsername}`);
+  }
+  if (userRole) {
+    const roleDisplay =
+      userRole === "owner"
+        ? chalk.red("Owner")
+        : userRole === "admin"
+          ? chalk.magenta("Admin")
+          : chalk.white("Member");
+    console.log(`  Role:     ${roleDisplay}`);
   }
   console.log(`  Config:   ${chalk.gray(getConfigPath())}`);
+
+  // Show other stored accounts
+  const accounts = getAccounts();
+  const others = accounts.filter((a) => !a.active);
+  if (others.length > 0) {
+    console.log();
+    console.log(`  Other accounts: ${others.map((a) => chalk.gray(a.username)).join(", ")}`);
+    console.log(chalk.gray("  Run 'nemar auth switch' to switch accounts"));
+  }
 }
 
 authCommand
@@ -431,29 +469,172 @@ authCommand
   .action(statusAction);
 
 // ============================================================================
+// Switch
+// ============================================================================
+
+/** Try to switch the gh CLI to the matching GitHub account (best-effort) */
+async function switchGitHubAuth(githubUsername: string): Promise<void> {
+  try {
+    // Use Bun globals directly; dynamic import("bun") gets mangled by bun build --minify
+    const ghPath = Bun.which("gh");
+    if (!ghPath) {
+      console.log(chalk.gray("  GitHub CLI (gh) not found in PATH, skipping"));
+      return;
+    }
+    const proc = Bun.spawn({
+      cmd: [ghPath, "auth", "switch", "--user", githubUsername],
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    // Read stderr before awaiting exit to avoid stream race conditions
+    const stderrText = await new Response(proc.stderr).text();
+    const exitCode = await proc.exited;
+    if (exitCode === 0) {
+      console.log(`  GitHub CLI switched to ${chalk.cyan(`@${githubUsername}`)}`);
+    } else {
+      const msg = stderrText.trim();
+      if (msg.includes("not found") || msg.includes("no accounts")) {
+        console.log(
+          chalk.gray(`  GitHub CLI: @${githubUsername} not logged in (run 'gh auth login')`),
+        );
+      } else {
+        console.log(chalk.gray(`  GitHub CLI switch failed: ${msg || `exit code ${exitCode}`}`));
+      }
+    }
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : String(error);
+    console.log(chalk.gray(`  GitHub CLI switch skipped: ${msg}`));
+  }
+}
+
+/** Exported switch action handler for use in root-level shortcuts */
+export async function switchAction(identifier?: string): Promise<void> {
+  const accounts = getAccounts();
+
+  if (accounts.length === 0) {
+    console.log(chalk.yellow("No stored accounts"));
+    console.log("  Run 'nemar auth login' to add an account");
+    return;
+  }
+
+  if (accounts.length === 1) {
+    const only = accounts[0];
+    if (only.active) {
+      console.log(chalk.yellow(`Only one account stored: ${only.username}`));
+      console.log("  Run 'nemar auth login' to add another account");
+      return;
+    }
+  }
+
+  let target: string;
+
+  if (identifier) {
+    target = identifier;
+  } else {
+    // Interactive picker
+    const choices = accounts.map((a) => ({
+      name: `${a.username}${a.githubUsername ? ` (@${a.githubUsername})` : ""}${a.active ? chalk.green(" (active)") : ""}`,
+      value: a.username,
+      short: a.username,
+    }));
+
+    const { selected } = await inquirer.prompt([
+      {
+        type: "list",
+        name: "selected",
+        message: "Switch to account:",
+        choices,
+        default: accounts.find((a) => a.active)?.username,
+      },
+    ]);
+    target = selected;
+  }
+
+  // Check if already active
+  const current = accounts.find((a) => a.active);
+  if (current && current.username === target) {
+    console.log(chalk.yellow(`Already using account ${target}`));
+    return;
+  }
+
+  const switched = switchAccount(target);
+  if (!switched) {
+    console.log(chalk.red(`Account not found: ${target}`));
+    console.log(chalk.gray("  Provide a NEMAR username or GitHub username"));
+    console.log(chalk.gray(`  Available: ${accounts.map((a) => a.username).join(", ")}`));
+    return;
+  }
+
+  console.log(chalk.green(`Switched to ${chalk.cyan(switched.username || target)}`));
+
+  // Switch gh CLI auth if possible
+  if (switched.githubUsername) {
+    await switchGitHubAuth(switched.githubUsername);
+  }
+}
+
+authCommand
+  .command("switch [username]")
+  .description("Switch between stored accounts")
+  .addHelpText(
+    "after",
+    `
+Description:
+  Switch the active NEMAR account. You can specify a NEMAR username or
+  GitHub username. If no username is given, an interactive picker is shown.
+
+  Switching also updates the GitHub CLI (gh) to the matching account.
+
+Examples:
+  $ nemar auth switch              # Interactive picker
+  $ nemar auth switch yahya        # Switch by NEMAR username
+  $ nemar auth switch cool-vibers  # Switch by GitHub username`,
+  )
+  .action(switchAction);
+
+// ============================================================================
 // Logout
 // ============================================================================
 
 /** Exported logout action handler for use in root-level shortcuts */
-export async function logoutAction(options: ConfirmOptions): Promise<void> {
+export async function logoutAction(options: ConfirmOptions & { all?: boolean }): Promise<void> {
   if (!isAuthenticated()) {
     console.log(chalk.yellow("Not currently authenticated"));
     return;
   }
 
-  const config = getConfig();
-  const result = await confirm(`Log out ${config.username || "current user"}?`, options);
+  if (options.all) {
+    const accounts = getAccounts();
+    const result = await confirm(`Log out all ${accounts.length} stored account(s)?`, options);
+    if (result !== "confirmed") return;
+    clearAllConfig();
+    console.log(chalk.green("All accounts removed"));
+    return;
+  }
+
+  const cfg = getConfig();
+  const result = await confirm(`Log out ${cfg.username || "current user"}?`, options);
   if (result !== "confirmed") return;
 
   clearConfig();
   console.log(chalk.green("Logged out successfully"));
+
+  // If other accounts remain, inform the user
+  const remaining = getAccounts();
+  if (remaining.length > 0) {
+    const active = remaining.find((a) => a.active);
+    if (active) {
+      console.log(`  Switched to ${chalk.cyan(active.username)}`);
+    }
+  }
 }
 
 authCommand
   .command("logout")
-  .description("Clear stored credentials")
+  .description("Remove the active account (use --all to remove all)")
   .option(YES_OPTION, YES_DESCRIPTION)
   .option(NO_OPTION, NO_DESCRIPTION)
+  .option("--all", "Remove all stored accounts")
   .action(logoutAction);
 
 // ============================================================================
@@ -620,13 +801,159 @@ Description:
 
   1. Generate a dedicated Ed25519 SSH key for NEMAR (~/.ssh/nemar_ed25519)
   2. Configure SSH to use this key for GitHub
-  3. Register the key with your GitHub account (via NEMAR backend)
+  3. Verify the connection (prompts you to add the key to GitHub if needed)
 
-  This is a one-time setup. After running this command, you can upload
-  datasets without any manual SSH configuration.
+  This is a one-time setup. After running this command and adding the key
+  to GitHub, you can upload datasets.
 
 Examples:
   $ nemar auth setup-ssh          # Set up SSH access
   $ nemar auth setup-ssh --force  # Regenerate key even if exists`,
   )
   .action(setupSSHAction);
+
+// ============================================================================
+// Retrieve Key (after approval)
+// ============================================================================
+
+authCommand
+  .command("retrieve-key")
+  .description("Retrieve your API key after account approval (requires email and password)")
+  .addHelpText(
+    "after",
+    `
+Description:
+  After an admin approves your account, use this command to securely
+  retrieve your API key. You will need the email and password you used
+  during signup.
+
+  API keys are not sent via email for security. This is the only way
+  to obtain your key.
+
+Examples:
+  $ nemar auth retrieve-key`,
+  )
+  .action(async () => {
+    const answers = await inquirer.prompt([
+      {
+        type: "input",
+        name: "email",
+        message: "Email address:",
+        validate: (input) => {
+          if (!input || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(input)) {
+            return "Please enter a valid email address";
+          }
+          return true;
+        },
+      },
+      {
+        type: "password",
+        name: "password",
+        message: "Password:",
+        mask: "*",
+        validate: (input) => {
+          if (!input) return "Password is required";
+          return true;
+        },
+      },
+    ]);
+
+    const spinner = ora("Retrieving API key...").start();
+
+    try {
+      const result = await retrieveKey(answers.email, answers.password);
+
+      if (result.api_key) {
+        spinner.succeed("API key retrieved");
+        console.log();
+        console.log(chalk.yellow("Your API Key (store this securely):"));
+        console.log(chalk.gray(`  ${result.api_key}`));
+        console.log();
+        console.log("Next step:");
+        console.log(`  Run ${chalk.cyan("nemar auth login")} and paste your API key`);
+      } else if (result.api_key_prefix) {
+        spinner.info("API key already issued");
+        console.log();
+        console.log(`  Key prefix: ${chalk.gray(result.api_key_prefix)}`);
+        console.log();
+        console.log("  If you lost your API key, regenerate it:");
+        console.log(`  ${chalk.cyan("nemar auth regenerate-key")}`);
+      } else {
+        spinner.succeed(result.message);
+      }
+    } catch (error) {
+      if (error instanceof ApiError) {
+        spinner.fail(error.message);
+        if (error.statusCode === 401) {
+          console.log(chalk.gray("  Check your email and password"));
+        } else if (error.statusCode === 403) {
+          console.log(chalk.gray("  Your account may not be approved yet"));
+        }
+      } else {
+        spinner.fail("Failed to retrieve API key");
+        console.log(chalk.gray("  Check your internet connection"));
+      }
+    }
+  });
+
+// ============================================================================
+// Regenerate Key
+// ============================================================================
+
+authCommand
+  .command("regenerate-key")
+  .description("Request a new API key (revokes current key, requires email verification)")
+  .addHelpText(
+    "after",
+    `
+Description:
+  If you lost your API key or it was compromised, use this command to
+  request a new one. A verification email will be sent to confirm the
+  request. Clicking the link will:
+
+  1. Revoke your current API key
+  2. Generate a new API key (shown in the browser)
+  3. You will need to login again with the new key
+
+Examples:
+  $ nemar auth regenerate-key`,
+  )
+  .action(async () => {
+    console.log(chalk.yellow("API Key Regeneration"));
+    console.log(chalk.gray("This will revoke your current key and generate a new one\n"));
+
+    const { email } = await inquirer.prompt([
+      {
+        type: "input",
+        name: "email",
+        message: "Email address associated with your account:",
+        validate: (input) => {
+          if (!input || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(input)) {
+            return "Please enter a valid email address";
+          }
+          return true;
+        },
+      },
+    ]);
+
+    const spinner = ora("Sending verification email...").start();
+
+    try {
+      const result = await requestKeyRegeneration(email);
+      spinner.succeed("Verification email sent");
+      console.log();
+      console.log("Next steps:");
+      console.log("  1. Check your email for a verification link");
+      console.log("  2. Click the link to generate your new API key");
+      console.log("  3. Copy the new key and run 'nemar auth login'");
+      console.log();
+      console.log(chalk.gray("The link expires in 1 hour"));
+    } catch (error) {
+      if (error instanceof ApiError) {
+        spinner.fail(error.message);
+      } else {
+        spinner.fail("Failed to send verification email");
+        console.log(chalk.gray("  Check your internet connection"));
+      }
+    }
+  });

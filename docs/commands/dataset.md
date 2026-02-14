@@ -10,27 +10,36 @@ Usage: nemar dataset [options] [command]
 Dataset management
 
 Options:
-  -h, --help                                display help for command
+  -h, --help                            display help for command
 
 Commands:
-  validate [options] [path]                 Validate a BIDS dataset locally using the official BIDS validator
-  upload [options] <path>                   Upload a BIDS dataset to NEMAR
-  download [options] <dataset-id>           Download a dataset from NEMAR
-  status [options] <dataset-id>             Check status of a dataset
-  list [options]                            List publicly available datasets on NEMAR
-  version [options] <dataset-id> <version>  Create a new version of a dataset with DOI
-  request-access <dataset-id>               Request collaborator access to a dataset
-  invite <username> <dataset-id>            Invite a user as collaborator to your dataset
-  collaborators [options] <dataset-id>      List collaborators for a dataset
-  publish                                   Publication workflow management
-  clone [options] <dataset-id>              Clone a dataset from NEMAR
-  get [options] [files...]                  Download annexed data files for the current dataset
-  save [options]                            Stage and commit changes in the current dataset
-  push [options]                            Push commits and data to remotes
-  drop [files...]                           Free local copies of annexed files (keeps remote copies)
-  ci [dataset-id]                           Check BIDS validation CI status for the current dataset
-  manifest [options] [version]              View version manifests for a dataset
-  help [command]                            display help for command
+  validate [options] [path]             Validate a BIDS dataset using the
+                                        official BIDS validator (requires Deno)
+  upload [options] <path>               Upload a BIDS dataset to NEMAR
+  download [options] <dataset-id>       Download a dataset from NEMAR
+  status [options] <dataset-id>         Check status of a dataset
+  list [options]                        List publicly available datasets on
+                                        NEMAR
+  release [options] <dataset-id>        Create a version bump PR for a dataset
+  update [options] [path]               Push local changes to a dataset via PR
+  request-access <dataset-id>           Request collaborator access to a
+                                        dataset
+  invite <username> <dataset-id>        Invite a user as collaborator to your
+                                        dataset
+  collaborators [options] <dataset-id>  List collaborators for a dataset
+  publish                               Publication workflow management
+  clone [options] <dataset-id>          Clone a dataset from NEMAR
+  get [options] [files...]              Download annexed data files for the
+                                        current dataset
+  save [options]                        Stage and commit changes in the current
+                                        dataset
+  push [options]                        Push commits and data to remotes
+  drop [files...]                       Free local copies of annexed files
+                                        (keeps remote copies)
+  ci [dataset-id]                       Check BIDS validation CI status for the
+                                        current dataset
+  manifest [options] [version]          View version manifests for a dataset
+  help [command]                        display help for command
 
 Description:
   Manage BIDS datasets on NEMAR. Upload, download, validate, and version
@@ -61,7 +70,7 @@ Learn More:
 ```bash
 Usage: nemar dataset validate [options] [path]
 
-Validate a BIDS dataset locally using the official BIDS validator
+Validate a BIDS dataset using the official BIDS validator (requires Deno)
 
 Arguments:
   path                 Path to BIDS dataset directory (default: ".")
@@ -74,24 +83,18 @@ Options:
   -v, --verbose        Show verbose output
   --json               Output results as JSON (for scripting)
   --version-info       Show BIDS validator version info
+  --update             Force update the BIDS validator to the latest version
   -h, --help           display help for command
 
-Description:
-  Validates a BIDS dataset using the official BIDS validator (via Deno).
-  The validator checks dataset structure, file naming, and metadata.
+  Extra flags after known options are passed through to the BIDS validator.
+  See all validator flags: deno run jsr:@bids/validator --help
 
-Requirements:
-  Deno runtime must be installed: https://deno.com
-
-Exit Codes:
-  0 - Dataset is valid
-  1 - Dataset has errors or validation failed
-
-Examples:
-  $ nemar dataset validate                       # Validate current directory
-  $ nemar dataset validate ./my-dataset          # Validate specific path
-  $ nemar dataset validate ./ds --prune          # Fast validation (skip derivatives)
-  $ nemar dataset validate ./ds --json > out.json
+  Examples:
+    $ nemar dataset validate                            # Validate current directory
+    $ nemar dataset validate ./ds --prune               # Skip derivatives
+    $ nemar dataset validate ./ds --json > out.json     # JSON for scripting
+    $ nemar dataset validate ./ds --ignoreNiftiHeaders  # Pass-through flag
+    $ nemar dataset validate ./ds --max-rows 0           # Headers only
 ```
 
 ### dataset upload
@@ -108,6 +111,7 @@ Options:
   -n, --name <name>         Dataset name (defaults to directory name)
   -d, --description <desc>  Dataset description
   --skip-validation         Skip BIDS validation (not recommended)
+  --skip-orcid              Skip co-author ORCID collection
   --dry-run                 Show what would be uploaded without doing it
   -j, --jobs <number>       Parallel upload streams (default: 4) (default: "4")
   -y, --yes                 Skip confirmation and proceed
@@ -228,17 +232,62 @@ Examples:
 ### dataset version
 
 ```bash
-Usage: nemar dataset version [options] <dataset-id> <version>
+Usage: nemar dataset [options] [command]
 
-Create a new version of a dataset with DOI
-
-Arguments:
-  dataset-id           Dataset ID (e.g., nm000104)
-  version              Version tag (e.g., v1.1.0)
+Dataset management
 
 Options:
-  -m, --message <msg>  Version description
-  -h, --help           display help for command
+  -h, --help                            display help for command
+
+Commands:
+  validate [options] [path]             Validate a BIDS dataset using the
+                                        official BIDS validator (requires Deno)
+  upload [options] <path>               Upload a BIDS dataset to NEMAR
+  download [options] <dataset-id>       Download a dataset from NEMAR
+  status [options] <dataset-id>         Check status of a dataset
+  list [options]                        List publicly available datasets on
+                                        NEMAR
+  release [options] <dataset-id>        Create a version bump PR for a dataset
+  update [options] [path]               Push local changes to a dataset via PR
+  request-access <dataset-id>           Request collaborator access to a
+                                        dataset
+  invite <username> <dataset-id>        Invite a user as collaborator to your
+                                        dataset
+  collaborators [options] <dataset-id>  List collaborators for a dataset
+  publish                               Publication workflow management
+  clone [options] <dataset-id>          Clone a dataset from NEMAR
+  get [options] [files...]              Download annexed data files for the
+                                        current dataset
+  save [options]                        Stage and commit changes in the current
+                                        dataset
+  push [options]                        Push commits and data to remotes
+  drop [files...]                       Free local copies of annexed files
+                                        (keeps remote copies)
+  ci [dataset-id]                       Check BIDS validation CI status for the
+                                        current dataset
+  manifest [options] [version]          View version manifests for a dataset
+  help [command]                        display help for command
+
+Description:
+  Manage BIDS datasets on NEMAR. Upload, download, validate, and version
+  neurophysiology datasets in Brain Imaging Data Structure (BIDS) format.
+
+Prerequisites:
+  - git-annex (for upload/download)
+  - Deno runtime (for BIDS validation)
+  - NEMAR account (for upload)
+
+Examples:
+  $ nemar dataset validate ./my-dataset          # Validate locally
+  $ nemar dataset upload ./my-dataset            # Upload to NEMAR
+  $ nemar dataset download nm000104              # Download a dataset
+  $ nemar dataset list --mine                    # List your datasets
+  $ nemar dataset status nm000104                # Check dataset status
+  $ nemar dataset request-access nm000104        # Request collaborator access
+  $ nemar dataset invite johndoe nm000104        # Invite user as collaborator
+
+Learn More:
+  https://nemar-cli.pages.dev/commands/dataset/
 ```
 
 ### dataset publish request
@@ -298,12 +347,20 @@ Possible Statuses:
   denied     - Request was denied (includes reason)
 
 Steps in Approval Process:
-  1. CI check        - Verify BIDS validation passes
-  2. Make public     - Change repository visibility
-  3. Tag protection  - Prevent version manipulation
-  4. Create DOI      - Assign permanent Zenodo DOI
-  5. S3 lock         - Enable Object Lock for data preservation
-  6. Notify user     - Send publication confirmation email
+   1. CI check          - Verify BIDS validation passes
+   2. Make public       - Change repository visibility
+   3. S3 public read    - Grant public read access to S3 data
+   4. Tag protection    - Prevent version manipulation
+   5. Create DOI        - Create concept DOI (EZID/Zenodo)
+   6. Update metadata   - Update from BIDS description
+   7. Update README     - Add DOI badge and citation
+   8. Create tag        - Create version tag
+   9. Create release    - Create GitHub release
+  10. Upload to Zenodo  - Upload archive (if Zenodo provider)
+  11. Publish DOI       - Make DOI public (permanent)
+  12. S3 lock           - Enable Object Lock for data preservation
+  13. Generate archive  - Create downloadable zip
+  14. Notify user       - Send publication confirmation email
 
 Examples:
   $ nemar dataset publish status nm000104

@@ -464,7 +464,8 @@ export function getDoiUrl(identifier: string): string {
  * Extract the DOI value without the "doi:" prefix.
  */
 export function extractDoi(identifier: string): string {
-  return identifier.startsWith("doi:") ? identifier.substring(4) : identifier;
+  const raw = identifier.startsWith("doi:") ? identifier.substring(4) : identifier;
+  return raw.toLowerCase();
 }
 
 /**

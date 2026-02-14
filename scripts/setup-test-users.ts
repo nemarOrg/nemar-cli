@@ -3,6 +3,7 @@
  * Setup Test Users for Integration Testing
  *
  * Creates test users with different access levels:
+ * - test-owner: Owner user for testing owner-only commands
  * - test-admin: Admin user for testing admin commands
  * - test-user: Regular approved user
  * - test-pending: User awaiting approval
@@ -18,11 +19,19 @@ import { createHash, randomBytes } from "crypto";
 const TEST_PASSWORD = "TestPassword123!";
 const TEST_USERS = [
   {
+    username: "test-owner",
+    email: "test-owner@nemar.test",
+    github_username: "test-owner-gh",
+    status: "approved",
+    role: "owner",
+    email_verified: 1,
+  },
+  {
     username: "test-admin",
     email: "test-admin@nemar.test",
     github_username: "test-admin-gh",
     status: "approved",
-    is_admin: 1,
+    role: "admin",
     email_verified: 1,
   },
   {
@@ -30,7 +39,7 @@ const TEST_USERS = [
     email: "test-user@nemar.test",
     github_username: "test-user-gh",
     status: "approved",
-    is_admin: 0,
+    role: "member",
     email_verified: 1,
   },
   {
@@ -38,7 +47,7 @@ const TEST_USERS = [
     email: "test-pending@nemar.test",
     github_username: "test-pending-gh",
     status: "pending",
-    is_admin: 0,
+    role: "member",
     email_verified: 0,
   },
   {
@@ -46,7 +55,7 @@ const TEST_USERS = [
     email: "test-verified@nemar.test",
     github_username: "test-verified-gh",
     status: "verified",
-    is_admin: 0,
+    role: "member",
     email_verified: 1,
   },
   {
@@ -54,7 +63,7 @@ const TEST_USERS = [
     email: "test-revoked@nemar.test",
     github_username: "test-revoked-gh",
     status: "revoked",
-    is_admin: 0,
+    role: "member",
     email_verified: 1,
   },
 ];
@@ -98,8 +107,8 @@ async function main() {
     const approvedAt = user.status === "approved" ? ", datetime('now')" : ", NULL";
     const revokedAt = user.status === "revoked" ? ", datetime('now')" : ", NULL";
 
-    console.log(`INSERT INTO users (username, email, password_hash, github_username, status, is_admin, email_verified, approved_at, revoked_at)`);
-    console.log(`VALUES ('${user.username}', '${user.email}', '${passwordHash}', '${user.github_username}', '${user.status}', ${user.is_admin}, ${user.email_verified}${approvedAt}${revokedAt});`);
+    console.log(`INSERT INTO users (username, email, password_hash, github_username, status, role, email_verified, approved_at, revoked_at)`);
+    console.log(`VALUES ('${user.username}', '${user.email}', '${passwordHash}', '${user.github_username}', '${user.status}', '${user.role}', ${user.email_verified}${approvedAt}${revokedAt});`);
     console.log();
   }
 
