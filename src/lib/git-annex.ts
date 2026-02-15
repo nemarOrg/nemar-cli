@@ -352,13 +352,10 @@ export async function initDataset(
     }
 
     // Use unlocked mode so data files remain as regular files (not symlinks)
-    const { exitCode: adjustExitCode } = await runCommand(
-      ["git", "annex", "adjust", "--unlock"],
-      {
-        cwd: path,
-        ...(Object.keys(env).length > 0 ? { env } : {}),
-      },
-    );
+    const { exitCode: adjustExitCode } = await runCommand(["git", "annex", "adjust", "--unlock"], {
+      cwd: path,
+      ...(Object.keys(env).length > 0 ? { env } : {}),
+    });
 
     if (adjustExitCode !== 0) {
       // Non-fatal: locked mode still works, just uses symlinks
