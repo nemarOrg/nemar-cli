@@ -82,6 +82,15 @@ export async function uploadWithAwsCli(opts: AwsCliUploadOptions): Promise<AwsCl
   }
 
   const s3Dest = `s3://${bucket}/${prefix}/`;
+
+  // For small file lists, use per-file --include patterns for precision.
+  // For large lists, per-file patterns cause aws s3 sync to stall during
+  // pattern compilation, so exclude internal directories instead.
+  const filterArgs =
+    dataFiles.length <= 100
+      ? ["--exclude", "*", ...dataFiles.flatMap((f) => ["--include", f])]
+      : ["--exclude", ".git/*", "--exclude", ".datalad/*", "--exclude", ".nemar/*"];
+
   const cmd = [
     "aws",
     "s3",
@@ -92,10 +101,7 @@ export async function uploadWithAwsCli(opts: AwsCliUploadOptions): Promise<AwsCl
     region,
     // Skip files that already exist with matching size (enables resume)
     "--size-only",
-    // Exclude everything first, then selectively include only data files
-    "--exclude",
-    "*",
-    ...dataFiles.flatMap((f) => ["--include", f]),
+    ...filterArgs,
   ];
 
   const proc = spawn({
