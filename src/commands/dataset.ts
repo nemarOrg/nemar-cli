@@ -1122,8 +1122,11 @@ Examples:
                 prefix: creds.s3.prefix,
                 datasetPath: absolutePath,
                 dataFiles: dataFilePaths,
-                onProgress: (uploaded) => {
-                  spinner.text = `Uploading data files via AWS CLI... (${uploaded}/${filesToUpload.length})`;
+                onProgress: (uploaded, currentFile) => {
+                  const pct = Math.round((uploaded / filesToUpload.length) * 100);
+                  const short =
+                    currentFile.length > 40 ? `...${currentFile.slice(-37)}` : currentFile;
+                  spinner.text = `Uploading via AWS CLI: ${uploaded}/${filesToUpload.length} (${pct}%) ${short}`;
                 },
               });
 

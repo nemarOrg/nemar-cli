@@ -119,37 +119,52 @@ export async function uploadWithAwsCli(opts: AwsCliUploadOptions): Promise<AwsCl
 
   let uploaded = 0;
   const failed: string[] = [];
+  const stderrLines: string[] = [];
 
-  const reader = proc.stdout.getReader();
-  const decoder = new TextDecoder();
-  let buffer = "";
-
-  try {
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      buffer += decoder.decode(value, { stream: true });
-
-      const lines = buffer.split("\n");
-      buffer = lines.pop() || "";
-
-      for (const line of lines) {
-        processUploadLine(line, () => ++uploaded, onProgress);
+  // Read a stream, parsing upload progress lines and collecting the rest
+  async function readStream(
+    stream: ReadableStream<Uint8Array>,
+    collectNonProgress?: string[],
+  ): Promise<void> {
+    const reader = stream.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split("\n");
+        buffer = lines.pop() || "";
+        for (const line of lines) {
+          const trimmed = line.trim();
+          if (trimmed.startsWith("upload:")) {
+            processUploadLine(trimmed, () => ++uploaded, onProgress);
+          } else if (collectNonProgress && trimmed) {
+            collectNonProgress.push(trimmed);
+          }
+        }
       }
+      if (buffer.trim()) {
+        const trimmed = buffer.trim();
+        if (trimmed.startsWith("upload:")) {
+          processUploadLine(trimmed, () => ++uploaded, onProgress);
+        } else if (collectNonProgress) {
+          collectNonProgress.push(trimmed);
+        }
+      }
+    } finally {
+      reader.releaseLock();
     }
-
-    // Flush any remaining partial line
-    processUploadLine(buffer, () => ++uploaded, onProgress);
-  } finally {
-    reader.releaseLock();
   }
 
-  const stderr = await new Response(proc.stderr).text();
+  // Read both stdout and stderr concurrently for progress
+  await Promise.all([readStream(proc.stdout), readStream(proc.stderr, stderrLines)]);
+
   const exitCode = await proc.exited;
 
   if (exitCode !== 0) {
-    const errorLines = stderr.split("\n").filter((l) => l.includes("upload failed:"));
-    for (const line of errorLines) {
+    for (const line of stderrLines) {
       const match = line.match(/upload failed:\s+(.+?)\s+to\s+/);
       if (match) failed.push(match[1]);
     }
@@ -158,7 +173,7 @@ export async function uploadWithAwsCli(opts: AwsCliUploadOptions): Promise<AwsCl
       success: false,
       uploaded,
       failed,
-      error: stderr.trim() || `aws s3 sync exited with code ${exitCode}`,
+      error: stderrLines.join("\n") || `aws s3 sync exited with code ${exitCode}`,
     };
   }
 
