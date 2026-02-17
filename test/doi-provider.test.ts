@@ -523,8 +523,14 @@ describe("parseNemarMetadata", () => {
   });
 
   test("rejects unrecognized version", () => {
-    const result = parseNemarMetadata({ version: "2.0", description: "test" });
+    const result = parseNemarMetadata({ version: "3.0", description: "test" });
     expect(result).toBeNull();
+  });
+
+  test("accepts v2.0 format", () => {
+    const result = parseNemarMetadata({ version: "2.0", description: "test" });
+    expect(result).not.toBeNull();
+    expect(result!.version).toBe("2.0");
   });
 
   test("accepts missing version (defaults to 1.0)", () => {
@@ -720,16 +726,18 @@ describe("enrichment keywords merged with auto-keywords", () => {
     const metadata = bidsToDataCite(
       "nm000104",
       "10.82901/NEMAR.test",
-      { Name: "Test", Authors: ["Doe, Jane"], DatasetType: "eeg" },
+      { Name: "Test", Authors: ["Doe, Jane"] },
       { keywords: ["motor imagery", "BCI"] },
+      { modalities: ["eeg"] },
     );
 
+    const subjectValues = metadata.subjects?.map((s) => s.value) || [];
     // Auto-generated: EEG, BIDS, neuroscience
-    expect(metadata.subjects).toContain("motor imagery");
-    expect(metadata.subjects).toContain("BCI");
-    expect(metadata.subjects).toContain("EEG");
-    expect(metadata.subjects).toContain("BIDS");
-    expect(metadata.subjects).toContain("neuroscience");
+    expect(subjectValues).toContain("motor imagery");
+    expect(subjectValues).toContain("BCI");
+    expect(subjectValues).toContain("EEG");
+    expect(subjectValues).toContain("BIDS");
+    expect(subjectValues).toContain("neuroscience");
   });
 });
 

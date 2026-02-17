@@ -139,7 +139,7 @@ describe("buildDataCiteXml", () => {
       publicationYear: 2026,
       resourceTypeGeneral: "Dataset",
       resourceTypeSpecific: "EEG Dataset",
-      subjects: ["EEG", "BIDS"],
+      subjects: [{ value: "EEG" }, { value: "BIDS" }],
       contributors: [{
         name: "NEMAR",
         contributorType: "HostingInstitution",
@@ -152,7 +152,7 @@ describe("buildDataCiteXml", () => {
         relationType: "IsSupplementTo",
       }],
       descriptions: [{ description: "A test dataset", descriptionType: "Abstract" }],
-      geoLocations: ["San Diego, CA"],
+      geoLocations: [{ place: "San Diego, CA" }],
       language: "en",
       alternateIdentifiers: [{ identifier: "nm000103", type: "NEMAR" }],
       sizes: ["1.2 GB"],
@@ -329,8 +329,8 @@ describe("bidsToDataCite", () => {
 
     expect(metadata.creators[0].orcid).toBe("0000-0001-2345-6789");
     expect(metadata.creators[0].affiliation).toBe("UCSD");
-    expect(metadata.subjects).toContain("EEG");
-    expect(metadata.subjects).toContain("motor imagery");
+    expect(metadata.subjects?.map((s) => s.value)).toContain("EEG");
+    expect(metadata.subjects?.map((s) => s.value)).toContain("motor imagery");
     expect(metadata.relatedIdentifiers?.[0]?.identifier).toBe("10.1234/paper");
     expect(metadata.descriptions?.[0]?.description).toBe("A test EEG dataset");
   });
@@ -347,8 +347,8 @@ describe("bidsToDataCite", () => {
     const bids = { Name: "Test", Authors: ["Doe, John"] };
     const metadata = bidsToDataCite("nm000103", "10.82901/NEMAR.ABC", bids);
 
-    expect(metadata.subjects).toContain("BIDS");
-    expect(metadata.subjects).toContain("neuroscience");
+    expect(metadata.subjects?.map((s) => s.value)).toContain("BIDS");
+    expect(metadata.subjects?.map((s) => s.value)).toContain("neuroscience");
   });
 
   test("handles missing authors gracefully", () => {

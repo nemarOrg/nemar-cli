@@ -11,19 +11,30 @@
 
 import {
   type NemarMetadata,
+  type NemarMetadataV1,
+  type NemarMetadataV2,
   type RelationType,
   VALID_RELATION_TYPES,
   isValidRelationType,
 } from "../../../shared/datacite-constants.js";
 
-export { type NemarMetadata, type RelationType, VALID_RELATION_TYPES, isValidRelationType };
+export {
+  type NemarMetadata,
+  type NemarMetadataV1,
+  type NemarMetadataV2,
+  type RelationType,
+  VALID_RELATION_TYPES,
+  isValidRelationType,
+};
 
 // ---------------------------------------------------------------------------
 // DataCite controlled vocabularies (kernel-4 schema)
 // ---------------------------------------------------------------------------
 
+/** DataCite kernel-4.6 resource type general values (complete set of 33). */
 export type ResourceTypeGeneral =
   | "Audiovisual"
+  | "Award"
   | "Book"
   | "BookChapter"
   | "Collection"
@@ -35,6 +46,7 @@ export type ResourceTypeGeneral =
   | "Dissertation"
   | "Event"
   | "Image"
+  | "Instrument"
   | "InteractiveResource"
   | "Journal"
   | "JournalArticle"
@@ -43,11 +55,13 @@ export type ResourceTypeGeneral =
   | "PeerReview"
   | "PhysicalObject"
   | "Preprint"
+  | "Project"
   | "Report"
   | "Service"
   | "Software"
   | "Sound"
   | "Standard"
+  | "StudyRegistration"
   | "Text"
   | "Workflow"
   | "Other";
@@ -72,14 +86,17 @@ export type ContributorType =
   | "RightsHolder"
   | "Sponsor"
   | "Supervisor"
+  | "Translator"
   | "WorkPackageLeader"
   | "Other";
 
+/** DataCite kernel-4.6 date types (complete set of 12, includes new Coverage). */
 export type DateType =
   | "Accepted"
   | "Available"
   | "Collected"
   | "Copyrighted"
+  | "Coverage"
   | "Created"
   | "Issued"
   | "Other"
@@ -123,12 +140,14 @@ export interface DataCiteContributor {
 export interface DataCiteDate {
   date: string; // ISO 8601 date or range (YYYY-MM-DD or YYYY-MM-DD/YYYY-MM-DD)
   dateType: DateType;
+  dateInformation?: string;
 }
 
 export interface DataCiteRelatedIdentifier {
   identifier: string;
-  relatedIdentifierType: "DOI" | "URL" | "ARK" | "arXiv" | "PMID";
+  relatedIdentifierType: "DOI" | "URL" | "ARK" | "arXiv" | "PMID" | "ISBN" | "ISSN" | "URN" | "Handle";
   relationType: RelationType;
+  resourceTypeGeneral?: ResourceTypeGeneral;
 }
 
 export interface DataCiteRights {
@@ -149,6 +168,20 @@ export interface DataCiteFundingReference {
   funderIdentifierType?: string;
   awardNumber?: string;
   awardTitle?: string;
+  awardURI?: string;
+}
+
+export interface DataCiteSubject {
+  value: string;
+  subjectScheme?: string;
+  schemeURI?: string;
+  valueURI?: string;
+  classificationCode?: string;
+}
+
+export interface DataCiteGeoLocation {
+  place?: string;
+  point?: { latitude: number; longitude: number };
 }
 
 export interface DataCiteMetadata {
@@ -157,17 +190,19 @@ export interface DataCiteMetadata {
   creators: DataCiteCreator[];
   titles: string[];
   publisher: string;
+  publisherIdentifier?: string;
+  publisherIdentifierScheme?: string;
   publicationYear: number;
   resourceTypeGeneral: ResourceTypeGeneral;
   resourceTypeSpecific?: string;
 
   // Recommended
-  subjects?: string[];
+  subjects?: DataCiteSubject[];
   contributors?: DataCiteContributor[];
   dates?: DataCiteDate[];
   relatedIdentifiers?: DataCiteRelatedIdentifier[];
   descriptions?: DataCiteDescription[];
-  geoLocations?: string[];
+  geoLocations?: DataCiteGeoLocation[];
 
   // Optional
   language?: string;
@@ -209,7 +244,7 @@ export interface DataCiteEnrichment {
 // NemarMetadata is re-exported from shared/datacite-constants.ts above.
 
 /**
- * Parse raw JSON into a validated NemarMetadata object.
+ * Parse raw JSON into a validated NemarMetadata object (v1.0 or v2.0).
  * Returns null for non-object input or unrecognized versions.
  * Ignores unknown fields; returns partial data for partially valid input.
  */
@@ -218,10 +253,13 @@ export function parseNemarMetadata(raw: unknown): NemarMetadata | null {
 
   const obj = raw as Record<string, unknown>;
 
-  // Reject unrecognized versions (future-proofing)
-  if (obj.version !== undefined && obj.version !== "1.0") return null;
+  if (obj.version === "2.0") return parseNemarMetadataV2(obj);
+  if (obj.version === "1.0" || obj.version === undefined) return parseNemarMetadataV1(obj);
+  return null;
+}
 
-  const result: NemarMetadata = { version: "1.0" };
+function parseNemarMetadataV1(obj: Record<string, unknown>): NemarMetadataV1 {
+  const result: NemarMetadataV1 = { version: "1.0" };
 
   // Authors
   if (obj.authors && typeof obj.authors === "object" && !Array.isArray(obj.authors)) {
@@ -279,6 +317,14 @@ export function parseNemarMetadata(raw: unknown): NemarMetadata | null {
     result.methodsDescription = obj.methodsDescription;
   }
 
+  // Collection dates and geo location
+  if (typeof obj.collectionDates === "string" && obj.collectionDates) {
+    result.collectionDates = obj.collectionDates;
+  }
+  if (typeof obj.geoLocation === "string" && obj.geoLocation) {
+    result.geoLocation = obj.geoLocation;
+  }
+
   // Sizes
   if (Array.isArray(obj.sizes)) {
     const sizes = obj.sizes.filter((s): s is string => typeof s === "string");
@@ -294,8 +340,79 @@ export function parseNemarMetadata(raw: unknown): NemarMetadata | null {
   return result;
 }
 
+function parseNemarMetadataV2(obj: Record<string, unknown>): NemarMetadataV2 {
+  const result: NemarMetadataV2 = { version: "2.0" };
+
+  // Description
+  if (typeof obj.description === "string" && obj.description) {
+    result.description = obj.description;
+  }
+  if (typeof obj.methods_description === "string" && obj.methods_description) {
+    result.methods_description = obj.methods_description;
+  }
+
+  // Authors (same shape as v1 but with affiliations array)
+  if (obj.authors && typeof obj.authors === "object" && !Array.isArray(obj.authors)) {
+    result.authors = obj.authors as NemarMetadataV2["authors"];
+  }
+
+  // Structured keywords
+  if (Array.isArray(obj.keywords)) {
+    result.keywords = obj.keywords.filter(
+      (k): k is { term: string } => !!k && typeof k === "object" && typeof (k as Record<string, unknown>).term === "string",
+    );
+  }
+
+  // Related identifiers (full typed)
+  if (Array.isArray(obj.related_identifiers)) {
+    result.related_identifiers = obj.related_identifiers.filter((r) => {
+      if (!r || typeof r !== "object") return false;
+      const entry = r as Record<string, unknown>;
+      return typeof entry.identifier === "string" && typeof entry.relation_type === "string";
+    });
+  }
+
+  // Funding references
+  if (Array.isArray(obj.funding_references)) {
+    result.funding_references = obj.funding_references.filter(
+      (f) => !!f && typeof f === "object" && typeof (f as Record<string, unknown>).funder_name === "string",
+    );
+  }
+
+  // Contributors
+  if (Array.isArray(obj.contributors)) {
+    result.contributors = obj.contributors.filter(
+      (c) => !!c && typeof c === "object" && typeof (c as Record<string, unknown>).name === "string",
+    );
+  }
+
+  // Dates
+  if (Array.isArray(obj.dates)) {
+    result.dates = obj.dates.filter(
+      (d) => !!d && typeof d === "object" && typeof (d as Record<string, unknown>).date === "string",
+    );
+  }
+
+  // Geo locations
+  if (Array.isArray(obj.geo_locations)) {
+    result.geo_locations = obj.geo_locations.filter(
+      (g) => !!g && typeof g === "object",
+    );
+  }
+
+  // Sizes and formats
+  if (Array.isArray(obj.sizes)) {
+    result.sizes = obj.sizes.filter((s): s is string => typeof s === "string");
+  }
+  if (Array.isArray(obj.formats)) {
+    result.formats = obj.formats.filter((f): f is string => typeof f === "string");
+  }
+
+  return result;
+}
+
 /**
- * Convert NemarMetadata to DataCiteEnrichment for use with bidsToDataCite.
+ * Convert NemarMetadata (v1.0 or v2.0) to DataCiteEnrichment for use with bidsToDataCite.
  * Merges with an existing enrichment (e.g., from auto-ORCID injection).
  * Merge semantics: authors merged (NemarMetadata overrides per-key),
  * keywords merged and deduplicated, funding merged and deduplicated,
@@ -304,6 +421,16 @@ export function parseNemarMetadata(raw: unknown): NemarMetadata | null {
  */
 export function nemarMetadataToEnrichment(
   nemarMeta: NemarMetadata,
+  base?: DataCiteEnrichment,
+): DataCiteEnrichment {
+  if (nemarMeta.version === "2.0") {
+    return nemarMetadataV2ToEnrichment(nemarMeta, base);
+  }
+  return nemarMetadataV1ToEnrichment(nemarMeta, base);
+}
+
+function nemarMetadataV1ToEnrichment(
+  nemarMeta: NemarMetadataV1,
   base?: DataCiteEnrichment,
 ): DataCiteEnrichment {
   const enrichment: DataCiteEnrichment = { ...base };
@@ -364,6 +491,101 @@ export function nemarMetadataToEnrichment(
   // Description
   if (nemarMeta.description) enrichment.description = nemarMeta.description;
   if (nemarMeta.methodsDescription) enrichment.methodsDescription = nemarMeta.methodsDescription;
+
+  // Collection dates and geo location
+  if (nemarMeta.collectionDates) enrichment.collectionDates = nemarMeta.collectionDates;
+  if (nemarMeta.geoLocation) enrichment.geoLocation = nemarMeta.geoLocation;
+
+  // Sizes and formats
+  if (nemarMeta.sizes) enrichment.sizes = nemarMeta.sizes;
+  if (nemarMeta.formats) enrichment.formats = nemarMeta.formats;
+
+  return enrichment;
+}
+
+function nemarMetadataV2ToEnrichment(
+  nemarMeta: NemarMetadataV2,
+  base?: DataCiteEnrichment,
+): DataCiteEnrichment {
+  const enrichment: DataCiteEnrichment = { ...base };
+
+  // Authors: convert v2 affiliations[] to v1 affiliation string
+  if (nemarMeta.authors) {
+    const baseAuthors = enrichment.authors || {};
+    for (const [name, data] of Object.entries(nemarMeta.authors)) {
+      baseAuthors[name] = {
+        orcid: data.orcid || baseAuthors[name]?.orcid,
+        affiliation: data.affiliations?.[0]?.name || baseAuthors[name]?.affiliation,
+        ror: data.affiliations?.[0]?.identifier || baseAuthors[name]?.ror,
+      };
+    }
+    enrichment.authors = baseAuthors;
+  }
+
+  // Keywords: convert structured to plain strings
+  if (nemarMeta.keywords) {
+    const existing = enrichment.keywords || [];
+    const merged = [...existing];
+    for (const kw of nemarMeta.keywords) {
+      if (!merged.includes(kw.term)) merged.push(kw.term);
+    }
+    enrichment.keywords = merged;
+  }
+
+  // Related identifiers: convert to relatedDois format
+  if (nemarMeta.related_identifiers) {
+    const existing = enrichment.relatedDois || [];
+    const seen = new Set(existing.map((r) => `${r.doi}|${r.relationType}`));
+    for (const ri of nemarMeta.related_identifiers) {
+      if (isValidRelationType(ri.relation_type)) {
+        const key = `${ri.identifier}|${ri.relation_type}`;
+        if (!seen.has(key)) {
+          seen.add(key);
+          existing.push({
+            doi: ri.identifier,
+            relationType: ri.relation_type as RelationType,
+          });
+        }
+      }
+    }
+    enrichment.relatedDois = existing;
+  }
+
+  // Funding references
+  if (nemarMeta.funding_references) {
+    const existing = enrichment.fundingInfo || [];
+    const seen = new Set(existing.map((f) => `${f.funderName}|${f.awardNumber || ""}`));
+    for (const fr of nemarMeta.funding_references) {
+      const key = `${fr.funder_name}|${fr.award_number || ""}`;
+      if (!seen.has(key)) {
+        seen.add(key);
+        existing.push({
+          funderName: fr.funder_name,
+          funderIdentifier: fr.funder_identifier,
+          funderIdentifierType: fr.funder_identifier_type,
+          awardNumber: fr.award_number,
+          awardTitle: fr.award_title,
+          awardURI: fr.award_uri,
+        });
+      }
+    }
+    enrichment.fundingInfo = existing;
+  }
+
+  // Description
+  if (nemarMeta.description) enrichment.description = nemarMeta.description;
+  if (nemarMeta.methods_description) enrichment.methodsDescription = nemarMeta.methods_description;
+
+  // Dates -> collectionDates (take first Collected date)
+  if (nemarMeta.dates) {
+    const collected = nemarMeta.dates.find((d) => d.date_type === "Collected");
+    if (collected) enrichment.collectionDates = collected.date;
+  }
+
+  // Geo locations -> geoLocation (take first place)
+  if (nemarMeta.geo_locations && nemarMeta.geo_locations.length > 0) {
+    enrichment.geoLocation = nemarMeta.geo_locations[0].place || undefined;
+  }
 
   // Sizes and formats
   if (nemarMeta.sizes) enrichment.sizes = nemarMeta.sizes;
@@ -468,7 +690,15 @@ export function buildDataCiteXml(metadata: DataCiteMetadata): string {
   lines.push("  </titles>");
 
   // 4. Publisher
-  lines.push(`  <publisher>${escapeXml(metadata.publisher)}</publisher>`);
+  const pubAttrs: string[] = [];
+  if (metadata.publisherIdentifier) {
+    pubAttrs.push(`publisherIdentifier="${escapeXml(metadata.publisherIdentifier)}"`);
+  }
+  if (metadata.publisherIdentifierScheme) {
+    pubAttrs.push(`publisherIdentifierScheme="${escapeXml(metadata.publisherIdentifierScheme)}"`);
+  }
+  const pubAttrStr = pubAttrs.length > 0 ? ` ${pubAttrs.join(" ")}` : "";
+  lines.push(`  <publisher${pubAttrStr}>${escapeXml(metadata.publisher)}</publisher>`);
 
   // 5. PublicationYear
   lines.push(`  <publicationYear>${metadata.publicationYear}</publicationYear>`);
@@ -477,7 +707,21 @@ export function buildDataCiteXml(metadata: DataCiteMetadata): string {
   if (metadata.subjects && metadata.subjects.length > 0) {
     lines.push("  <subjects>");
     for (const subject of metadata.subjects) {
-      lines.push(`    <subject subjectScheme="keyword">${escapeXml(subject)}</subject>`);
+      const attrs: string[] = [];
+      if (subject.subjectScheme) {
+        attrs.push(`subjectScheme="${escapeXml(subject.subjectScheme)}"`);
+      }
+      if (subject.schemeURI) {
+        attrs.push(`schemeURI="${escapeXml(subject.schemeURI)}"`);
+      }
+      if (subject.valueURI) {
+        attrs.push(`valueURI="${escapeXml(subject.valueURI)}"`);
+      }
+      if (subject.classificationCode) {
+        attrs.push(`classificationCode="${escapeXml(subject.classificationCode)}"`);
+      }
+      const attrStr = attrs.length > 0 ? ` ${attrs.join(" ")}` : "";
+      lines.push(`    <subject${attrStr}>${escapeXml(subject.value)}</subject>`);
     }
     lines.push("  </subjects>");
   }
@@ -495,7 +739,10 @@ export function buildDataCiteXml(metadata: DataCiteMetadata): string {
   if (metadata.dates && metadata.dates.length > 0) {
     lines.push("  <dates>");
     for (const date of metadata.dates) {
-      lines.push(`    <date dateType="${escapeXml(date.dateType)}">${escapeXml(date.date)}</date>`);
+      const infoAttr = date.dateInformation
+        ? ` dateInformation="${escapeXml(date.dateInformation)}"`
+        : "";
+      lines.push(`    <date dateType="${escapeXml(date.dateType)}"${infoAttr}>${escapeXml(date.date)}</date>`);
     }
     lines.push("  </dates>");
   }
@@ -526,8 +773,11 @@ export function buildDataCiteXml(metadata: DataCiteMetadata): string {
   if (metadata.relatedIdentifiers && metadata.relatedIdentifiers.length > 0) {
     lines.push("  <relatedIdentifiers>");
     for (const rel of metadata.relatedIdentifiers) {
+      const rtgAttr = rel.resourceTypeGeneral
+        ? ` resourceTypeGeneral="${escapeXml(rel.resourceTypeGeneral)}"`
+        : "";
       lines.push(
-        `    <relatedIdentifier relatedIdentifierType="${escapeXml(rel.relatedIdentifierType)}" relationType="${escapeXml(rel.relationType)}">${escapeXml(rel.identifier)}</relatedIdentifier>`,
+        `    <relatedIdentifier relatedIdentifierType="${escapeXml(rel.relatedIdentifierType)}" relationType="${escapeXml(rel.relationType)}"${rtgAttr}>${escapeXml(rel.identifier)}</relatedIdentifier>`,
       );
     }
     lines.push("  </relatedIdentifiers>");
@@ -589,7 +839,15 @@ export function buildDataCiteXml(metadata: DataCiteMetadata): string {
     lines.push("  <geoLocations>");
     for (const loc of metadata.geoLocations) {
       lines.push("    <geoLocation>");
-      lines.push(`      <geoLocationPlace>${escapeXml(loc)}</geoLocationPlace>`);
+      if (loc.place) {
+        lines.push(`      <geoLocationPlace>${escapeXml(loc.place)}</geoLocationPlace>`);
+      }
+      if (loc.point) {
+        lines.push("      <geoLocationPoint>");
+        lines.push(`        <pointLongitude>${loc.point.longitude}</pointLongitude>`);
+        lines.push(`        <pointLatitude>${loc.point.latitude}</pointLatitude>`);
+        lines.push("      </geoLocationPoint>");
+      }
       lines.push("    </geoLocation>");
     }
     lines.push("  </geoLocations>");
@@ -610,7 +868,8 @@ export function buildDataCiteXml(metadata: DataCiteMetadata): string {
         );
       }
       if (fund.awardNumber) {
-        lines.push(`      <awardNumber>${escapeXml(fund.awardNumber)}</awardNumber>`);
+        const uriAttr = fund.awardURI ? ` awardURI="${escapeXml(fund.awardURI)}"` : "";
+        lines.push(`      <awardNumber${uriAttr}>${escapeXml(fund.awardNumber)}</awardNumber>`);
       }
       if (fund.awardTitle) {
         lines.push(`      <awardTitle>${escapeXml(fund.awardTitle)}</awardTitle>`);
@@ -642,6 +901,33 @@ export interface BidsDatasetDescription {
   HowToAcknowledge?: string;
   ReferencesAndLinks?: string[];
   Funding?: string[];
+  SourceDatasets?: Array<{
+    DOI?: string;
+    URL?: string;
+    Version?: string;
+  }>;
+}
+
+/**
+ * Detect recording modalities from BIDS file paths.
+ * Scans for datatype directories (eeg/, meg/, emg/, func/, ieeg/, etc.)
+ * in the standard BIDS structure: sub-XX/[ses-XX/]datatype/.
+ */
+export function detectModalitiesFromTree(paths: string[]): string[] {
+  const bidsDataTypes = new Set([
+    "eeg", "meg", "ieeg", "emg", "func", "anat", "dwi", "fmap",
+    "perf", "pet", "micr", "nirs", "motion", "beh",
+  ]);
+  const found = new Set<string>();
+  for (const p of paths) {
+    const parts = p.split("/");
+    for (const part of parts) {
+      if (bidsDataTypes.has(part)) {
+        found.add(part);
+      }
+    }
+  }
+  return [...found];
 }
 
 /**
@@ -712,6 +998,26 @@ export function mapLicense(license: string | undefined): DataCiteRights | null {
       uri: "https://opendatacommons.org/licenses/pddl/1-0/",
       spdx: "PDDL-1.0",
     },
+    "ODC-BY-1.0": {
+      rights: "Open Data Commons Attribution License v1.0",
+      uri: "https://opendatacommons.org/licenses/by/1.0/",
+      spdx: "ODC-By-1.0",
+    },
+    "ODC-BY": {
+      rights: "Open Data Commons Attribution License v1.0",
+      uri: "https://opendatacommons.org/licenses/by/1.0/",
+      spdx: "ODC-By-1.0",
+    },
+    "ODBL-1.0": {
+      rights: "Open Data Commons Open Database License v1.0",
+      uri: "https://opendatacommons.org/licenses/odbl/1.0/",
+      spdx: "ODbL-1.0",
+    },
+    ODBL: {
+      rights: "Open Data Commons Open Database License v1.0",
+      uri: "https://opendatacommons.org/licenses/odbl/1.0/",
+      spdx: "ODbL-1.0",
+    },
   };
 
   const match = licenseMap[normalized];
@@ -760,6 +1066,7 @@ export function bidsToDataCite(
   doi: string,
   bidsDescription: BidsDatasetDescription | Record<string, unknown>,
   enrichment?: DataCiteEnrichment,
+  options?: { modalities?: string[] },
 ): DataCiteMetadata {
   // Safely coerce fields from potentially untyped input
   const rawAuthors = bidsDescription.Authors;
@@ -805,10 +1112,9 @@ export function bidsToDataCite(
   const rawVersion = bidsDescription.Version;
   const version = typeof rawVersion === "string" ? rawVersion : undefined;
 
-  // Modality-specific resource type
-  const rawModality = bidsDescription.DatasetType;
-  const modality = typeof rawModality === "string" ? rawModality : undefined;
-  const resourceTypeSpecific = mapModalityToResourceType(modality);
+  // Modality-specific resource type (from detected BIDS datatypes, not DatasetType)
+  const modalities = options?.modalities;
+  const resourceTypeSpecific = mapModalityToResourceType(modalities);
 
   // Dates
   const dates: DataCiteDate[] = [
@@ -842,34 +1148,86 @@ export function bidsToDataCite(
       });
     }
   }
-  // BIDS ReferencesAndLinks
+  // BIDS ReferencesAndLinks (DOIs and URLs)
   const rawRefs = bidsDescription.ReferencesAndLinks;
   const refs = Array.isArray(rawRefs)
     ? rawRefs.filter((r): r is string => typeof r === "string")
     : [];
   for (const ref of refs) {
+    // Skip if already added from enrichment (deduplicate by identifier)
+    const isDuplicate = relatedIdentifiers.some((r) => r.identifier === ref);
+    if (isDuplicate) continue;
+
     if (ref.match(/^10\.\d{4,}/)) {
       relatedIdentifiers.push({
         identifier: ref,
         relatedIdentifierType: "DOI",
         relationType: "References",
       });
+    } else if (ref.startsWith("https://") || ref.startsWith("http://")) {
+      relatedIdentifiers.push({
+        identifier: ref,
+        relatedIdentifierType: "URL",
+        relationType: "References",
+      });
     }
   }
 
-  // Subjects/keywords
-  const subjects: string[] = enrichment?.keywords ? [...enrichment.keywords] : [];
-  // Add modality-based subjects
-  if (modality) {
-    if (!subjects.includes(modality.toUpperCase())) {
-      subjects.push(modality.toUpperCase());
+  // BIDS SourceDatasets -> IsDerivedFrom relations
+  const rawSources = (bidsDescription as Record<string, unknown>).SourceDatasets;
+  if (Array.isArray(rawSources)) {
+    for (const source of rawSources) {
+      if (!source || typeof source !== "object") continue;
+      const s = source as Record<string, unknown>;
+      if (typeof s.DOI === "string" && s.DOI) {
+        const isDuplicate = relatedIdentifiers.some((r) => r.identifier === s.DOI);
+        if (!isDuplicate) {
+          relatedIdentifiers.push({
+            identifier: s.DOI as string,
+            relatedIdentifierType: "DOI",
+            relationType: "IsDerivedFrom",
+          });
+        }
+      }
+      if (typeof s.URL === "string" && s.URL) {
+        const isDuplicate = relatedIdentifiers.some((r) => r.identifier === s.URL);
+        if (!isDuplicate) {
+          relatedIdentifiers.push({
+            identifier: s.URL as string,
+            relatedIdentifierType: "URL",
+            relationType: "IsDerivedFrom",
+          });
+        }
+      }
     }
   }
-  if (!subjects.includes("BIDS")) {
-    subjects.push("BIDS");
+
+  // Subjects/keywords as structured objects
+  const subjectValues = new Set<string>();
+  const subjects: DataCiteSubject[] = [];
+  if (enrichment?.keywords) {
+    for (const kw of enrichment.keywords) {
+      if (!subjectValues.has(kw)) {
+        subjectValues.add(kw);
+        subjects.push({ value: kw });
+      }
+    }
   }
-  if (!subjects.includes("neuroscience")) {
-    subjects.push("neuroscience");
+  // Add modality-based subjects from detected datatypes
+  if (modalities && modalities.length > 0) {
+    for (const mod of modalities) {
+      const upper = mod.toUpperCase();
+      if (!subjectValues.has(upper)) {
+        subjectValues.add(upper);
+        subjects.push({ value: upper });
+      }
+    }
+  }
+  if (!subjectValues.has("BIDS")) {
+    subjects.push({ value: "BIDS" });
+  }
+  if (!subjectValues.has("neuroscience")) {
+    subjects.push({ value: "neuroscience" });
   }
 
   // Contributors: NEMAR as hosting institution
@@ -899,9 +1257,9 @@ export function bidsToDataCite(
   }
 
   // GeoLocations
-  const geoLocations: string[] = [];
+  const geoLocations: DataCiteGeoLocation[] = [];
   if (enrichment?.geoLocation) {
-    geoLocations.push(enrichment.geoLocation);
+    geoLocations.push({ place: enrichment.geoLocation });
   }
 
   return {
@@ -909,6 +1267,8 @@ export function bidsToDataCite(
     creators,
     titles: [title],
     publisher: "NEMAR (Neuroelectromagnetic Data Archive and Tools Resource)",
+    publisherIdentifier: "https://ror.org/0168r3w48",
+    publisherIdentifierScheme: "ROR",
     publicationYear: new Date().getFullYear(),
     resourceTypeGeneral: "Dataset",
     resourceTypeSpecific,

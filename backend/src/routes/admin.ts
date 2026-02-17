@@ -1712,7 +1712,7 @@ adminRoutes.post("/datasets/:id/doi/update", zValidator("json", updateDoiSchema)
  * Accepts NemarMetadata JSON, commits nemar_metadata.json to the dataset repo,
  * ensures .bidsignore includes it, and caches in D1.
  */
-const enrichmentSchema = z.object({
+const enrichmentSchemaV1 = z.object({
   version: z.literal("1.0"),
   authors: z
     .record(
@@ -1742,9 +1742,108 @@ const enrichmentSchema = z.object({
     .optional(),
   description: z.string().optional(),
   methodsDescription: z.string().optional(),
+  collectionDates: z.string().optional(),
+  geoLocation: z.string().optional(),
   sizes: z.array(z.string()).optional(),
   formats: z.array(z.string()).optional(),
 });
+
+const enrichmentSchemaV2 = z.object({
+  version: z.literal("2.0"),
+  authors: z
+    .record(
+      z.object({
+        orcid: z.string().optional(),
+        affiliations: z
+          .array(
+            z.object({
+              name: z.string(),
+              identifier: z.string().optional(),
+              scheme: z.string().optional(),
+            }),
+          )
+          .optional(),
+      }),
+    )
+    .optional(),
+  keywords: z
+    .array(
+      z.object({
+        term: z.string(),
+        subject_scheme: z.string().optional(),
+        scheme_uri: z.string().optional(),
+        value_uri: z.string().optional(),
+        classification_code: z.string().optional(),
+      }),
+    )
+    .optional(),
+  related_identifiers: z
+    .array(
+      z.object({
+        identifier: z.string(),
+        identifier_type: z.string(),
+        relation_type: z.string(),
+        resource_type_general: z.string().optional(),
+      }),
+    )
+    .optional(),
+  funding_references: z
+    .array(
+      z.object({
+        funder_name: z.string(),
+        funder_identifier: z.string().optional(),
+        funder_identifier_type: z.string().optional(),
+        award_number: z.string().optional(),
+        award_title: z.string().optional(),
+        award_uri: z.string().optional(),
+      }),
+    )
+    .optional(),
+  contributors: z
+    .array(
+      z.object({
+        name: z.string(),
+        name_type: z.string().optional(),
+        given_name: z.string().optional(),
+        family_name: z.string().optional(),
+        orcid: z.string().optional(),
+        contributor_type: z.string(),
+      }),
+    )
+    .optional(),
+  dates: z
+    .array(
+      z.object({
+        date: z.string(),
+        date_type: z.string(),
+        date_information: z.string().optional(),
+      }),
+    )
+    .optional(),
+  geo_locations: z
+    .array(
+      z.object({
+        place: z.string().optional(),
+        point: z
+          .object({
+            latitude: z.number(),
+            longitude: z.number(),
+          })
+          .optional(),
+      }),
+    )
+    .optional(),
+  description: z.string().optional(),
+  methods_description: z.string().optional(),
+  resource_type_general: z.string().optional(),
+  sizes: z.array(z.string()).optional(),
+  formats: z.array(z.string()).optional(),
+});
+
+const enrichmentSchema = z.discriminatedUnion("version", [
+  enrichmentSchemaV1,
+  enrichmentSchemaV2,
+]);
 
 adminRoutes.post("/datasets/:id/enrichment", zValidator("json", enrichmentSchema), async (c) => {
   const datasetId = c.req.param("id");

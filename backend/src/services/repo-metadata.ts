@@ -99,8 +99,10 @@ export async function readRepoMetadata(
       }
     }
 
-    // Read nemar_metadata.json for rich enrichment
-    const nemarMetaFile = tree.find((f) => f.path === "nemar_metadata.json");
+    // Read enrichment metadata (.nemar/metadata.json first, fall back to nemar_metadata.json)
+    const nemarMetaFile =
+      tree.find((f) => f.path === ".nemar/metadata.json") ||
+      tree.find((f) => f.path === "nemar_metadata.json");
     if (nemarMetaFile) {
       try {
         const nemarContent = await getBlobContent(repoName, nemarMetaFile.sha, pat);
@@ -109,7 +111,7 @@ export async function readRepoMetadata(
           enrichment = nemarMetadataToEnrichment(nemarParsed, enrichment);
         }
       } catch (nemarErr) {
-        warnings.push(`nemar_metadata.json enrichment skipped: ${errorMessage(nemarErr)}`);
+        warnings.push(`Enrichment metadata skipped: ${errorMessage(nemarErr)}`);
       }
     }
   } catch (error) {
