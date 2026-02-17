@@ -11,6 +11,9 @@ import {
   parseAuthorName,
   mapLicense,
   mapModalityToResourceType,
+  detectModalitiesFromTree,
+  parseNemarMetadata,
+  nemarMetadataToEnrichment,
   type DataCiteMetadata,
   type DataCiteCreator,
 } from "../backend/src/services/datacite";
@@ -412,5 +415,247 @@ describe("bidsToDataCite", () => {
     );
     expect(doiRefs).toHaveLength(1);
     expect(doiRefs?.[0]?.identifier).toBe("10.1234/paper.2024.001");
+  });
+});
+
+describe("detectModalitiesFromTree", () => {
+  test("detects EEG modality from BIDS paths", () => {
+    const paths = [
+      "dataset_description.json",
+      "sub-01/eeg/sub-01_task-rest_eeg.bdf",
+      "sub-01/eeg/sub-01_task-rest_channels.tsv",
+    ];
+    expect(detectModalitiesFromTree(paths)).toEqual(["eeg"]);
+  });
+
+  test("detects multiple modalities", () => {
+    const paths = [
+      "sub-01/eeg/sub-01_eeg.bdf",
+      "sub-01/anat/sub-01_T1w.nii.gz",
+      "sub-02/func/sub-02_task-rest_bold.nii.gz",
+    ];
+    const result = detectModalitiesFromTree(paths);
+    expect(result).toContain("eeg");
+    expect(result).toContain("anat");
+    expect(result).toContain("func");
+    expect(result).toHaveLength(3);
+  });
+
+  test("deduplicates modalities", () => {
+    const paths = [
+      "sub-01/emg/sub-01_emg.bdf",
+      "sub-02/emg/sub-02_emg.bdf",
+    ];
+    expect(detectModalitiesFromTree(paths)).toEqual(["emg"]);
+  });
+
+  test("returns empty array for no BIDS paths", () => {
+    expect(detectModalitiesFromTree([])).toEqual([]);
+    expect(detectModalitiesFromTree(["README.md", "CHANGES"])).toEqual([]);
+  });
+
+  test("detects session-level paths", () => {
+    const paths = ["sub-01/ses-01/meg/sub-01_ses-01_meg.fif"];
+    expect(detectModalitiesFromTree(paths)).toEqual(["meg"]);
+  });
+});
+
+describe("mapModalityToResourceType", () => {
+  test("maps func to fMRI Dataset", () => {
+    expect(mapModalityToResourceType("func")).toBe("fMRI Dataset");
+  });
+
+  test("maps anat to Structural MRI Dataset", () => {
+    expect(mapModalityToResourceType("anat")).toBe("Structural MRI Dataset");
+  });
+
+  test("maps array with first modality", () => {
+    expect(mapModalityToResourceType(["emg", "eeg"])).toBe("EMG Dataset");
+  });
+
+  test("returns generic for unknown modality", () => {
+    expect(mapModalityToResourceType("beh")).toBe("Neuroimaging Dataset");
+  });
+
+  test("returns Dataset for undefined", () => {
+    expect(mapModalityToResourceType(undefined)).toBe("Dataset");
+  });
+});
+
+describe("parseNemarMetadata v2", () => {
+  test("parses v2 with all fields", () => {
+    const raw = {
+      version: "2.0",
+      description: "Test dataset",
+      methods_description: "EMG recording",
+      keywords: [
+        { term: "EMG", subject_scheme: "MeSH" },
+        { term: "hand gestures" },
+      ],
+      related_identifiers: [
+        { identifier: "10.1234/test", identifier_type: "DOI", relation_type: "IsDescribedBy" },
+      ],
+      authors: {
+        "Doe, John": { orcid: "https://orcid.org/0000-0001-2345-6789", affiliations: [{ name: "MIT" }] },
+      },
+      funding_references: [
+        { funder_name: "NIH", award_number: "R01-123" },
+      ],
+      contributors: [
+        { name: "Smith, Jane", contributor_type: "DataCollector" },
+      ],
+      dates: [
+        { date: "2024-01-15", date_type: "Collected" },
+      ],
+      geo_locations: [
+        { place: "Boston, MA", point: { latitude: 42.36, longitude: -71.06 } },
+      ],
+    };
+    const result = parseNemarMetadata(raw);
+    expect(result).not.toBeNull();
+    expect(result!.version).toBe("2.0");
+    if (result!.version === "2.0") {
+      expect(result!.keywords).toHaveLength(2);
+      expect(result!.related_identifiers).toHaveLength(1);
+      expect(result!.authors).toBeDefined();
+      expect(result!.funding_references).toHaveLength(1);
+      expect(result!.contributors).toHaveLength(1);
+      expect(result!.dates).toHaveLength(1);
+      expect(result!.geo_locations).toHaveLength(1);
+    }
+  });
+
+  test("validates author entries instead of raw casting", () => {
+    const raw = {
+      version: "2.0",
+      authors: {
+        "Valid Author": { orcid: "https://orcid.org/0000-0001-2345-6789" },
+        "Bad Author": "just a string",
+        "Number Author": 42,
+      },
+    };
+    const result = parseNemarMetadata(raw);
+    expect(result).not.toBeNull();
+    if (result!.version === "2.0") {
+      expect(result!.authors).toBeDefined();
+      expect(Object.keys(result!.authors!)).toHaveLength(1);
+      expect(result!.authors!["Valid Author"]).toBeDefined();
+    }
+  });
+
+  test("validates author affiliations array", () => {
+    const raw = {
+      version: "2.0",
+      authors: {
+        "Test Author": {
+          affiliations: [
+            { name: "MIT", identifier: "https://ror.org/042nb2s44" },
+            "not an object",
+            { noName: true },
+          ],
+        },
+      },
+    };
+    const result = parseNemarMetadata(raw);
+    if (result!.version === "2.0") {
+      expect(result!.authors!["Test Author"].affiliations).toHaveLength(1);
+      expect(result!.authors!["Test Author"].affiliations![0].name).toBe("MIT");
+    }
+  });
+
+  test("rejects geo_locations without place or point", () => {
+    const raw = {
+      version: "2.0",
+      geo_locations: [
+        { place: "Boston" },
+        {},
+        { point: { latitude: "not a number", longitude: -71 } },
+        { point: { latitude: 42.36, longitude: -71.06 } },
+      ],
+    };
+    const result = parseNemarMetadata(raw);
+    if (result!.version === "2.0") {
+      expect(result!.geo_locations).toHaveLength(2);
+      expect(result!.geo_locations![0].place).toBe("Boston");
+      expect(result!.geo_locations![1].point!.latitude).toBe(42.36);
+    }
+  });
+
+  test("returns null for unrecognized version", () => {
+    expect(parseNemarMetadata({ version: "3.0" })).toBeNull();
+  });
+});
+
+describe("nemarMetadataToEnrichment v2", () => {
+  test("converts v2 authors to enrichment format", () => {
+    const result = nemarMetadataToEnrichment({
+      version: "2.0",
+      authors: {
+        "Doe, John": {
+          orcid: "https://orcid.org/0000-0001-2345-6789",
+          affiliations: [{ name: "MIT", identifier: "https://ror.org/042nb2s44", scheme: "ROR" }],
+        },
+      },
+    });
+    expect(result.authors).toBeDefined();
+    expect(result.authors!["Doe, John"].orcid).toBe("https://orcid.org/0000-0001-2345-6789");
+    expect(result.authors!["Doe, John"].affiliation).toBe("MIT");
+    expect(result.authors!["Doe, John"].ror).toBe("https://ror.org/042nb2s44");
+  });
+
+  test("converts v2 keywords to plain strings", () => {
+    const result = nemarMetadataToEnrichment({
+      version: "2.0",
+      keywords: [
+        { term: "EMG", subject_scheme: "MeSH" },
+        { term: "neuroscience" },
+      ],
+    });
+    expect(result.keywords).toEqual(["EMG", "neuroscience"]);
+  });
+
+  test("converts v2 related_identifiers to relatedDois", () => {
+    const result = nemarMetadataToEnrichment({
+      version: "2.0",
+      related_identifiers: [
+        { identifier: "10.1234/test", identifier_type: "DOI", relation_type: "IsDescribedBy" },
+        { identifier: "10.5678/test2", identifier_type: "DOI", relation_type: "InvalidType" as any },
+      ],
+    });
+    expect(result.relatedDois).toHaveLength(1);
+    expect(result.relatedDois![0].doi).toBe("10.1234/test");
+  });
+
+  test("converts v2 funding to enrichment format", () => {
+    const result = nemarMetadataToEnrichment({
+      version: "2.0",
+      funding_references: [
+        { funder_name: "NIH", award_number: "R01-123", award_title: "Brain Study" },
+      ],
+    });
+    expect(result.fundingInfo).toHaveLength(1);
+    expect(result.fundingInfo![0].funderName).toBe("NIH");
+    expect(result.fundingInfo![0].awardNumber).toBe("R01-123");
+  });
+
+  test("extracts collection date from v2 dates", () => {
+    const result = nemarMetadataToEnrichment({
+      version: "2.0",
+      dates: [
+        { date: "2024-01-15", date_type: "Collected" },
+        { date: "2024-06-01", date_type: "Issued" },
+      ],
+    });
+    expect(result.collectionDates).toBe("2024-01-15");
+  });
+
+  test("extracts geo_location place from v2", () => {
+    const result = nemarMetadataToEnrichment({
+      version: "2.0",
+      geo_locations: [
+        { place: "Shanghai, China", point: { latitude: 31.23, longitude: 121.47 } },
+      ],
+    });
+    expect(result.geoLocation).toBe("Shanghai, China");
   });
 });

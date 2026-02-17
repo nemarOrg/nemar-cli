@@ -1,7 +1,7 @@
 /**
  * DataCite XML builder
  *
- * Generates DataCite kernel-4 XML metadata for NEMAR datasets.
+ * Generates DataCite kernel-4.6 XML metadata for NEMAR datasets.
  * Maps BIDS dataset_description.json fields to 19 of 20 DataCite properties
  * (RelatedItems excluded as it duplicates RelatedIdentifiers for our use case).
  *
@@ -28,10 +28,10 @@ export {
 };
 
 // ---------------------------------------------------------------------------
-// DataCite controlled vocabularies (kernel-4 schema)
+// DataCite controlled vocabularies (kernel-4.6 schema)
 // ---------------------------------------------------------------------------
 
-/** DataCite kernel-4.6 resource type general values (complete set of 33). */
+/** DataCite kernel-4.6 resource type general values (complete set of 32). */
 export type ResourceTypeGeneral =
   | "Audiovisual"
   | "Award"
@@ -351,9 +351,23 @@ function parseNemarMetadataV2(obj: Record<string, unknown>): NemarMetadataV2 {
     result.methods_description = obj.methods_description;
   }
 
-  // Authors (same shape as v1 but with affiliations array)
+  // Authors (keyed by display name, with optional ORCID and affiliations)
   if (obj.authors && typeof obj.authors === "object" && !Array.isArray(obj.authors)) {
-    result.authors = obj.authors as NemarMetadataV2["authors"];
+    const authors: Record<string, { orcid?: string; affiliations?: Array<{ name: string; identifier?: string; scheme?: string }> }> = {};
+    for (const [name, val] of Object.entries(obj.authors as Record<string, unknown>)) {
+      if (val && typeof val === "object" && !Array.isArray(val)) {
+        const entry = val as Record<string, unknown>;
+        const parsed: { orcid?: string; affiliations?: Array<{ name: string; identifier?: string; scheme?: string }> } = {};
+        if (typeof entry.orcid === "string") parsed.orcid = entry.orcid;
+        if (Array.isArray(entry.affiliations)) {
+          parsed.affiliations = entry.affiliations.filter(
+            (a) => !!a && typeof a === "object" && typeof (a as Record<string, unknown>).name === "string",
+          );
+        }
+        authors[name] = parsed;
+      }
+    }
+    if (Object.keys(authors).length > 0) result.authors = authors;
   }
 
   // Structured keywords
@@ -393,11 +407,17 @@ function parseNemarMetadataV2(obj: Record<string, unknown>): NemarMetadataV2 {
     );
   }
 
-  // Geo locations
+  // Geo locations (require at least place or valid point)
   if (Array.isArray(obj.geo_locations)) {
-    result.geo_locations = obj.geo_locations.filter(
-      (g) => !!g && typeof g === "object",
-    );
+    result.geo_locations = obj.geo_locations.filter((g) => {
+      if (!g || typeof g !== "object") return false;
+      const loc = g as Record<string, unknown>;
+      const hasPlace = typeof loc.place === "string" && loc.place.length > 0;
+      const hasPoint = loc.point && typeof loc.point === "object" &&
+        typeof (loc.point as Record<string, unknown>).latitude === "number" &&
+        typeof (loc.point as Record<string, unknown>).longitude === "number";
+      return hasPlace || hasPoint;
+    });
   }
 
   // Sizes and formats
@@ -1046,9 +1066,15 @@ export function mapModalityToResourceType(modality: string | string[] | undefine
     meg: "MEG Dataset",
     ieeg: "iEEG Dataset",
     emg: "EMG Dataset",
+    func: "fMRI Dataset",
     fmri: "fMRI Dataset",
     bold: "fMRI Dataset",
+    anat: "Structural MRI Dataset",
+    dwi: "Diffusion MRI Dataset",
+    pet: "PET Dataset",
     nirs: "fNIRS Dataset",
+    perf: "Perfusion MRI Dataset",
+    motion: "Motion Dataset",
   };
 
   return map[mod.toLowerCase()] || "Neuroimaging Dataset";

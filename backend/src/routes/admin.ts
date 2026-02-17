@@ -1637,8 +1637,10 @@ adminRoutes.post("/datasets/:id/doi/update", zValidator("json", updateDoiSchema)
         dataset.owner_orcid || undefined,
       );
 
-      // Read nemar_metadata.json for rich enrichment
-      const nemarMetaFile = tree.find((f) => f.path === "nemar_metadata.json");
+      // Read enrichment metadata (.nemar/metadata.json first, fall back to nemar_metadata.json)
+      const nemarMetaFile =
+        tree.find((f) => f.path === ".nemar/metadata.json") ||
+        tree.find((f) => f.path === "nemar_metadata.json");
       if (nemarMetaFile) {
         try {
           const nemarContent = await getBlobContent(
@@ -1709,8 +1711,9 @@ adminRoutes.post("/datasets/:id/doi/update", zValidator("json", updateDoiSchema)
 /**
  * POST /admin/datasets/:id/enrichment - Submit rich metadata enrichment
  *
- * Accepts NemarMetadata JSON, commits nemar_metadata.json to the dataset repo,
- * ensures .bidsignore includes it, and caches in D1.
+ * Accepts NemarMetadata JSON (v1.0 or v2.0), commits to the dataset repo
+ * (v1 at nemar_metadata.json, v2 at .nemar/metadata.json),
+ * ensures .bidsignore includes the path, and caches in D1.
  */
 const enrichmentSchemaV1 = z.object({
   version: z.literal("1.0"),
@@ -1878,33 +1881,42 @@ adminRoutes.post("/datasets/:id/enrichment", zValidator("json", enrichmentSchema
 
   const pat = c.env.GITHUB_ADMIN_PAT;
   const metadataContent = JSON.stringify(body, null, 2);
+  const isV2 = body.version === "2.0";
+  const metadataPath = isV2 ? ".nemar/metadata.json" : "nemar_metadata.json";
 
   try {
-    // Commit nemar_metadata.json to the repo
+    // Commit metadata to the repo (v2 uses .nemar/metadata.json, v1 uses nemar_metadata.json)
     await createOrUpdateFile(
       repoName,
-      "nemar_metadata.json",
+      metadataPath,
       metadataContent,
       "Update NEMAR metadata enrichment",
       pat,
     );
 
-    // Ensure .bidsignore includes nemar_metadata.json
+    // Ensure .bidsignore includes the metadata path
     const tree = await getTreeAtRef(repoName, "main", pat);
     const bidsignoreFile = tree.find((f) => f.path === ".bidsignore");
     let bidsignoreContent = "";
     if (bidsignoreFile) {
       bidsignoreContent = await getBlobContent(repoName, bidsignoreFile.sha, pat);
     }
-    if (!bidsignoreContent.includes("nemar_metadata.json")) {
-      const newContent = bidsignoreContent
-        ? `${bidsignoreContent.trimEnd()}\nnemar_metadata.json\n`
-        : "nemar_metadata.json\n";
+    const entriesToIgnore = isV2 ? [".nemar/"] : ["nemar_metadata.json"];
+    let bidsignoreUpdated = false;
+    for (const entry of entriesToIgnore) {
+      if (!bidsignoreContent.includes(entry)) {
+        bidsignoreContent = bidsignoreContent
+          ? `${bidsignoreContent.trimEnd()}\n${entry}\n`
+          : `${entry}\n`;
+        bidsignoreUpdated = true;
+      }
+    }
+    if (bidsignoreUpdated) {
       await createOrUpdateFile(
         repoName,
         ".bidsignore",
-        newContent,
-        "Add nemar_metadata.json to .bidsignore",
+        bidsignoreContent,
+        "Update .bidsignore for metadata",
         pat,
       );
     }
@@ -1921,7 +1933,7 @@ adminRoutes.post("/datasets/:id/enrichment", zValidator("json", enrichmentSchema
       message: "Enrichment saved",
       dataset_id: datasetId,
       committed: true,
-      bidsignore_updated: !bidsignoreContent.includes("nemar_metadata.json"),
+      bidsignore_updated: bidsignoreUpdated,
     });
   } catch (error) {
     console.error("Failed to save enrichment:", error);

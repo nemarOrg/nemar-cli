@@ -4,7 +4,7 @@
  * This file has ZERO dependencies so it can be imported from any context.
  */
 
-/** DataCite kernel-4.6 relation types (complete set of 37). */
+/** DataCite kernel-4.6 relation types (complete set of 38). */
 export const VALID_RELATION_TYPES = [
   "IsCitedBy",
   "Cites",

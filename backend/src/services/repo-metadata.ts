@@ -106,9 +106,14 @@ export async function readRepoMetadata(
     if (nemarMetaFile) {
       try {
         const nemarContent = await getBlobContent(repoName, nemarMetaFile.sha, pat);
-        const nemarParsed = parseNemarMetadata(JSON.parse(nemarContent));
+        const nemarRaw = JSON.parse(nemarContent);
+        const nemarParsed = parseNemarMetadata(nemarRaw);
         if (nemarParsed) {
           enrichment = nemarMetadataToEnrichment(nemarParsed, enrichment);
+        } else if (nemarRaw && typeof nemarRaw === "object" && (nemarRaw as Record<string, unknown>).version) {
+          warnings.push(
+            `Enrichment metadata has unrecognized version '${(nemarRaw as Record<string, unknown>).version}'; supported: 1.0, 2.0`,
+          );
         }
       } catch (nemarErr) {
         warnings.push(`Enrichment metadata skipped: ${errorMessage(nemarErr)}`);
