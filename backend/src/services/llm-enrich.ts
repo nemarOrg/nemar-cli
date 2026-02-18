@@ -443,6 +443,140 @@ export function mergeWithExisting(
 
 // ---- Stage 3: LLM Validation ----
 
+// ---- Stage 2b: MeSH term validation (NLM API) ----
+
+const MESH_LOOKUP_URL = "https://id.nlm.nih.gov/mesh/lookup/descriptor";
+
+interface MeshLookupResult {
+  resource: string;
+  label: string;
+}
+
+/**
+ * Validate a single term against the NLM MeSH API.
+ * Returns the canonical MeSH label and URI if found, null otherwise.
+ */
+async function lookupMeshTerm(term: string): Promise<{ label: string; uri: string } | null> {
+  // Try exact match first
+  const exactUrl = `${MESH_LOOKUP_URL}?label=${encodeURIComponent(term)}&match=exact&limit=1`;
+  try {
+    const resp = await fetch(exactUrl, {
+      headers: { Accept: "application/json" },
+    });
+    if (resp.ok) {
+      const results = (await resp.json()) as MeshLookupResult[];
+      if (results.length > 0) {
+        return { label: results[0].label, uri: results[0].resource };
+      }
+    }
+  } catch {
+    // API failure is non-fatal; skip validation for this term
+    return null;
+  }
+
+  // Try contains match for closest suggestion
+  const containsUrl = `${MESH_LOOKUP_URL}?label=${encodeURIComponent(term)}&match=contains&limit=1`;
+  try {
+    const resp = await fetch(containsUrl, {
+      headers: { Accept: "application/json" },
+    });
+    if (resp.ok) {
+      const results = (await resp.json()) as MeshLookupResult[];
+      if (results.length > 0) {
+        return { label: results[0].label, uri: results[0].resource };
+      }
+    }
+  } catch {
+    // Non-fatal
+  }
+
+  return null;
+}
+
+export interface MeshValidationLog {
+  term: string;
+  original_scheme: string;
+  action: "confirmed" | "corrected" | "scheme_removed";
+  mesh_label?: string;
+  mesh_uri?: string;
+}
+
+/**
+ * Stage 2b: Validate keywords tagged with subject_scheme "MeSH" against the NLM API.
+ *
+ * For each keyword with subject_scheme "MeSH":
+ * - If exact match found: keep scheme, add value_uri, use canonical label
+ * - If contains match found: correct to the canonical MeSH term
+ * - If no match: strip the subject_scheme (keep as plain keyword)
+ *
+ * Returns the updated metadata and a log of actions taken.
+ */
+export async function validateMeshTerms(
+  metadata: NemarMetadataV2,
+): Promise<{ metadata: NemarMetadataV2; log: MeshValidationLog[] }> {
+  if (!metadata.keywords || metadata.keywords.length === 0) {
+    return { metadata, log: [] };
+  }
+
+  const log: MeshValidationLog[] = [];
+  const updatedKeywords: StructuredKeyword[] = [];
+
+  for (const kw of metadata.keywords) {
+    if (kw.subject_scheme?.toLowerCase() !== "mesh") {
+      updatedKeywords.push(kw);
+      continue;
+    }
+
+    const result = await lookupMeshTerm(kw.term);
+
+    if (result && result.label.toLowerCase() === kw.term.toLowerCase()) {
+      // Exact match: confirm and add URI
+      updatedKeywords.push({
+        ...kw,
+        term: result.label,
+        value_uri: result.uri,
+      });
+      log.push({
+        term: kw.term,
+        original_scheme: "MeSH",
+        action: "confirmed",
+        mesh_label: result.label,
+        mesh_uri: result.uri,
+      });
+    } else if (result) {
+      // Close match: correct to canonical MeSH term
+      updatedKeywords.push({
+        term: result.label,
+        subject_scheme: "MeSH",
+        scheme_uri: "https://meshb.nlm.nih.gov/",
+        value_uri: result.uri,
+      });
+      log.push({
+        term: kw.term,
+        original_scheme: "MeSH",
+        action: "corrected",
+        mesh_label: result.label,
+        mesh_uri: result.uri,
+      });
+    } else {
+      // No match: strip scheme, keep as plain keyword
+      updatedKeywords.push({ term: kw.term });
+      log.push({
+        term: kw.term,
+        original_scheme: "MeSH",
+        action: "scheme_removed",
+      });
+    }
+  }
+
+  return {
+    metadata: { ...metadata, keywords: updatedKeywords },
+    log,
+  };
+}
+
+// ---- Stage 3: LLM Validation ----
+
 export interface ValidationCriterion {
   confidence: number;
   pass: boolean;

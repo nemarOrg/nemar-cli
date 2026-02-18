@@ -22,6 +22,7 @@ import {
   enrichFromReadme,
   mergeWithExisting,
   seedFromBids,
+  validateMeshTerms,
   validateMetadata,
 } from "../services/llm-enrich.js";
 import { generateManifest } from "../services/manifest.js";
@@ -660,14 +661,40 @@ webhooks.post("/llm-enrich", async (c) => {
         .join(", ")}`,
     );
 
+    // Stage 2b: MeSH term validation (NLM API, deterministic)
+    let meshValidated = enriched;
+    try {
+      const meshResult = await validateMeshTerms(enriched);
+      meshValidated = meshResult.metadata;
+      if (meshResult.log.length > 0) {
+        const confirmed = meshResult.log.filter((l) => l.action === "confirmed").length;
+        const corrected = meshResult.log.filter((l) => l.action === "corrected").length;
+        const removed = meshResult.log.filter((l) => l.action === "scheme_removed").length;
+        console.log(
+          `[llm-enrich] Stage 2b (MeSH): ${dataset_id} - ${confirmed} confirmed, ${corrected} corrected, ${removed} scheme removed`,
+        );
+        for (const entry of meshResult.log) {
+          if (entry.action === "corrected") {
+            console.log(`[llm-enrich]   MeSH corrected: "${entry.term}" -> "${entry.mesh_label}"`);
+          } else if (entry.action === "scheme_removed") {
+            console.log(`[llm-enrich]   MeSH not found: "${entry.term}" (scheme stripped)`);
+          }
+        }
+      }
+    } catch (meshErr) {
+      console.warn(
+        `[llm-enrich] Stage 2b (MeSH) failed for ${dataset_id}, continuing with unchecked keywords: ${errorMessage(meshErr)}`,
+      );
+    }
+
     // Stage 3: LLM validation with feedback loop (up to 3 correction attempts)
     const MAX_CORRECTION_ATTEMPTS = 3;
-    let finalMetadata = enriched;
+    let finalMetadata = meshValidated;
     let validationResult = null;
     let correctionAttempts = 0;
 
     try {
-      let currentMetadata = enriched;
+      let currentMetadata = meshValidated;
       for (let attempt = 0; attempt <= MAX_CORRECTION_ATTEMPTS; attempt++) {
         const validated = await validateMetadata(
           currentMetadata,
