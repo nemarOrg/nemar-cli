@@ -444,6 +444,45 @@ aws s3api put-bucket-policy --bucket nemar --policy '{
 
 ---
 
+## Metadata Pipeline Design (Issue #154)
+
+### Single Source of Truth
+
+`.nemar/metadata.json` should contain ALL metadata needed for DOI minting. No more assembling from multiple sources on the fly. The file tracks its pipeline stage so we know how mature the metadata is.
+
+### Pipeline Stage Progression
+
+```
+seeded -> enriched -> validated -> DOI-ready
+```
+
+- **seeded**: Base metadata pulled from BIDS files. All authors present (even without ORCIDs). Data type, license, source datasets, funding from BIDS.
+- **enriched**: LLM has added description, methods, keywords, additional funding/related identifiers from README.
+- **validated**: LLM judge has reviewed for correctness. Relation types verified, author completeness checked, keyword relevance confirmed.
+
+### DOI Gating
+
+DOIs should NOT be minted until metadata reaches `validated` stage. This prevents issues like the LLM incorrectly classifying a "derived from" relationship as "version of".
+
+### LLM Validation System Prompt Design
+
+The validation stage uses a judge LLM (same model) to review metadata quality. The system prompt should be modeled after Anthropic's pr-review-toolkit approach: structured evaluation with specific criteria, confidence scores, and actionable feedback.
+
+Validation criteria:
+1. **Author completeness** - Are all authors from README/BIDS present?
+2. **Relation type accuracy** - Is each related identifier's relation type correct? (IsDerivedFrom vs IsVersionOf vs IsDescribedBy vs IsSupplementTo)
+3. **Keyword relevance** - Do keywords accurately describe the dataset?
+4. **Description accuracy** - Does the abstract match the actual dataset content?
+5. **Funding accuracy** - Are award numbers real and correctly attributed?
+
+Output: JSON with pass/fail per criterion, confidence score, and suggested corrections.
+
+### Refactoring bidsToDataCite()
+
+Currently pulls from `dataset_description.json` + enrichment. Should be refactored to read `.nemar/metadata.json` as primary source. The metadata file IS the DOI record, just in a different format.
+
+---
+
 ## References
 - OpenNeuro CLI architecture
 - GitHub CLI patterns

@@ -461,6 +461,76 @@ versioning. Manifests add web-frontend access without git clone. S3 Object Lock
 
 ---
 
+## Metadata Pipeline Architecture (Issue #154)
+**Status:** Planned
+**Description:** Staged metadata enrichment pipeline where `.nemar/metadata.json` is the single source of truth for DOI records
+
+### Design
+
+`.nemar/metadata.json` is built through a staged pipeline. Each stage adds or refines metadata, and the file tracks its current stage via `pipeline_stage`.
+
+```
+dataset_description.json ─┐
+                          ├─> Stage 1: Seed ─> Stage 2: LLM Enrich ─> Stage 3: LLM Validate ─> DOI Mint
+README.md ────────────────┘
+```
+
+### Pipeline Stages
+
+**Stage 1: Seed** (`pipeline_stage: "seeded"`)
+Pull all base metadata from BIDS sources:
+- All authors from `dataset_description.json` (even without ORCIDs)
+- Title (`Name`), license (`License`), data type (`DatasetType`: raw/derivative)
+- `SourceDatasets` -> `IsDerivedFrom` related identifiers
+- `Funding` references
+- `ReferencesAndLinks` -> related identifiers
+- `HowToAcknowledge`
+
+**Stage 2: LLM Enrichment** (`pipeline_stage: "enriched"`)
+Extract what BIDS doesn't provide from README:
+- Rich description/abstract
+- Methods description
+- Structured keywords with subject schemes (e.g., MeSH)
+- Additional funding details (award numbers from text)
+- Additional related identifiers from README
+
+**Stage 3: LLM Validation** (`pipeline_stage: "validated"`)
+A second LLM pass that reviews the assembled metadata:
+- Validates relation types (e.g., `IsDerivedFrom` vs `IsVersionOf`)
+- Checks author completeness against README mentions
+- Validates keyword relevance and scheme assignments
+- Flags inconsistencies between description and actual data
+
+### DOI Gating
+
+DOI concept creation is blocked unless `pipeline_stage` is `"validated"`. Admin override available with `skip_enrichment_check: true`.
+
+### Refactoring Target
+
+`bidsToDataCite()` should read primarily from `.nemar/metadata.json` as the single source of truth, with `dataset_description.json` only as a fallback for unseeded datasets.
+
+### Schema
+
+```json
+{
+  "version": "2.0",
+  "pipeline_stage": "validated",
+  "authors": {
+    "Author Name": { "orcid": "...", "affiliations": [{ "name": "..." }] },
+    "Author Without ORCID": {}
+  },
+  "description": "...",
+  "methods_description": "...",
+  "data_type": "raw",
+  "license": "CC-BY-4.0",
+  "keywords": [{ "term": "...", "subject_scheme": "MeSH" }],
+  "funding_references": [{ "funder_name": "...", "award_number": "..." }],
+  "related_identifiers": [{ "identifier": "...", "identifier_type": "DOI", "relation_type": "IsDerivedFrom" }]
+}
+```
+
+---
+
 ## Architecture Decisions
 
 ### Authentication Flow
