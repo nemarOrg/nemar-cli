@@ -6,9 +6,9 @@
  */
 
 import {
-  type StructuredKeyword,
-  type RelatedIdentifierEntry,
   type FundingReferenceEntry,
+  type RelatedIdentifierEntry,
+  type StructuredKeyword,
   isValidRelationType,
 } from "../../shared/datacite-constants.js";
 

@@ -694,7 +694,9 @@ Examples:
         );
       } catch (err) {
         console.log(
-          chalk.yellow(`  Warning: Could not read .nemar/metadata.json: ${err instanceof Error ? err.message : err}. Will re-collect author information.`),
+          chalk.yellow(
+            `  Warning: Could not read .nemar/metadata.json: ${err instanceof Error ? err.message : err}. Will re-collect author information.`,
+          ),
         );
       }
     } else if (existsSync(existingNemarMetaV1)) {
@@ -705,7 +707,9 @@ Examples:
         );
       } catch (err) {
         console.log(
-          chalk.yellow(`  Warning: Could not read nemar_metadata.json: ${err instanceof Error ? err.message : err}. Will re-collect author information.`),
+          chalk.yellow(
+            `  Warning: Could not read nemar_metadata.json: ${err instanceof Error ? err.message : err}. Will re-collect author information.`,
+          ),
         );
       }
     }
@@ -739,7 +743,10 @@ Examples:
             console.log(chalk.cyan("Authors found:"), authorList.join(" | "));
 
             // Auto-match uploader ORCID (v2 format with affiliations array)
-            const authors: Record<string, { orcid?: string; affiliations?: Array<{ name: string }> }> = {};
+            const authors: Record<
+              string,
+              { orcid?: string; affiliations?: Array<{ name: string }> }
+            > = {};
             let uploaderMatchedAuthor: string | undefined;
             if (uploaderOrcid && uploaderUsername) {
               const lowerName = uploaderUsername.toLowerCase();
@@ -1278,7 +1285,7 @@ Examples:
           if (!bidsignoreContent.includes(".nemar/")) {
             const newContent = bidsignoreContent
               ? `${bidsignoreContent.trimEnd()}\n.nemar/\n`
-              : `.nemar/\n`;
+              : ".nemar/\n";
             writeFileSync(bidsignorePath, newContent);
           }
           console.log(chalk.gray("  Updated .bidsignore for NEMAR metadata"));

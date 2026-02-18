@@ -1106,7 +1106,8 @@ doiCommand
       ]);
 
       if (updateAuthors) {
-        const authors: Record<string, { orcid?: string; affiliations?: Array<{ name: string }> }> = {};
+        const authors: Record<string, { orcid?: string; affiliations?: Array<{ name: string }> }> =
+          {};
 
         let addMore = true;
         while (addMore) {
