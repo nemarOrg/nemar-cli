@@ -289,15 +289,13 @@ export function seedFromBids(
 
   if (relatedIds.length > 0) seeded.related_identifiers = relatedIds;
 
-  // Funding -> funding_references (raw strings; LLM will parse better)
-  const fundingRefs: FundingReferenceEntry[] = [...(existing?.funding_references || [])];
+  // Funding -> funding_references (raw BIDS strings; LLM will parse better in stage 2)
+  // Start fresh from BIDS to avoid carrying stale LLM-parsed duplicates from prior runs.
+  const fundingRefs: FundingReferenceEntry[] = [];
   if (Array.isArray(bidsDescription.Funding)) {
     for (const f of bidsDescription.Funding) {
       if (typeof f !== "string" || !f) continue;
-      const alreadyExists = fundingRefs.some((r) => r.funder_name === f);
-      if (!alreadyExists) {
-        fundingRefs.push({ funder_name: f });
-      }
+      fundingRefs.push({ funder_name: f });
     }
   }
   if (fundingRefs.length > 0) seeded.funding_references = fundingRefs;
