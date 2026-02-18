@@ -349,10 +349,13 @@ export function mergeWithExisting(
       if (!hasLlmReplacement) allFunds.push(ef);
     }
     for (const newFund of llmResult.funding_references) {
-      const key = `${newFund.funder_name}|${newFund.award_number || ""}`;
-      const exists = allFunds.some(
-        (f) => `${f.funder_name}|${f.award_number || ""}` === key,
-      );
+      // Deduplicate by exact match (funder_name + award_number) or by award_number alone
+      const exists = allFunds.some((f) => {
+        if (f.funder_name === newFund.funder_name && (f.award_number || "") === (newFund.award_number || "")) return true;
+        // Same award number with different funder names (LLM may normalize funder names differently)
+        if (newFund.award_number && f.award_number && f.award_number === newFund.award_number) return true;
+        return false;
+      });
       if (!exists) allFunds.push(newFund);
     }
     merged.funding_references = allFunds;
