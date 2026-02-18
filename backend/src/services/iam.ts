@@ -402,10 +402,11 @@ export async function listAccessKeys(config: IamConfig, iamUsername: string): Pr
   // Parse access key IDs from XML response
   const accessKeyIds: string[] = [];
   const regex = /<AccessKeyId>([^<]+)<\/AccessKeyId>/g;
-  let match: RegExpExecArray | null;
+  let match: RegExpExecArray | null = regex.exec(text);
 
-  while ((match = regex.exec(text)) !== null) {
+  while (match !== null) {
     accessKeyIds.push(match[1]);
+    match = regex.exec(text);
   }
 
   return accessKeyIds;

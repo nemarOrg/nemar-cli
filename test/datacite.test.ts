@@ -1209,39 +1209,29 @@ describe("seedFromBids SourceDatasets URL fallback", () => {
   test("extracts DOI from SourceDatasets URL when DOI field is absent", () => {
     const bids = {
       Name: "Test",
-      SourceDatasets: [
-        { URL: "https://doi.org/10.13026/ym7v-bh53" },
-      ],
+      SourceDatasets: [{ URL: "https://doi.org/10.13026/ym7v-bh53" }],
     };
     const result = seedFromBids(bids, null);
-    const derived = result.related_identifiers?.find(
-      (r) => r.relation_type === "IsDerivedFrom",
-    );
+    const derived = result.related_identifiers?.find((r) => r.relation_type === "IsDerivedFrom");
     expect(derived).toBeDefined();
-    expect(derived!.identifier).toBe("10.13026/ym7v-bh53");
+    expect(derived?.identifier).toBe("10.13026/ym7v-bh53");
   });
 
   test("extracts DOI from SourceDatasets URL with doi: prefix", () => {
     const bids = {
       Name: "Test",
-      SourceDatasets: [
-        { URL: "doi:10.13026/ym7v-bh53" },
-      ],
+      SourceDatasets: [{ URL: "doi:10.13026/ym7v-bh53" }],
     };
     const result = seedFromBids(bids, null);
-    const derived = result.related_identifiers?.find(
-      (r) => r.relation_type === "IsDerivedFrom",
-    );
+    const derived = result.related_identifiers?.find((r) => r.relation_type === "IsDerivedFrom");
     expect(derived).toBeDefined();
-    expect(derived!.identifier).toBe("10.13026/ym7v-bh53");
+    expect(derived?.identifier).toBe("10.13026/ym7v-bh53");
   });
 
   test("ignores SourceDatasets with non-DOI URL", () => {
     const bids = {
       Name: "Test",
-      SourceDatasets: [
-        { URL: "https://example.com/dataset" },
-      ],
+      SourceDatasets: [{ URL: "https://example.com/dataset" }],
     };
     const result = seedFromBids(bids, null);
     const derived = (result.related_identifiers || []).filter(
@@ -1263,7 +1253,11 @@ describe("validateMeshTerms", () => {
     const metadata: NemarMetadataV2 = {
       version: "2.0",
       keywords: [
-        { term: "Brain", subject_scheme: "LCSH", scheme_uri: "http://id.loc.gov/authorities/subjects" },
+        {
+          term: "Brain",
+          subject_scheme: "LCSH",
+          scheme_uri: "http://id.loc.gov/authorities/subjects",
+        },
         { term: "Neuroscience", subject_scheme: "FAST" },
         { term: "plain keyword" },
       ],
@@ -1275,38 +1269,34 @@ describe("validateMeshTerms", () => {
     expect(log[1].action).toBe("scheme_removed");
     // Keywords should remain but without schemes
     expect(result.keywords).toHaveLength(3);
-    expect(result.keywords![0].subject_scheme).toBeUndefined();
-    expect(result.keywords![1].subject_scheme).toBeUndefined();
+    expect(result.keywords?.[0].subject_scheme).toBeUndefined();
+    expect(result.keywords?.[1].subject_scheme).toBeUndefined();
     // Plain keyword passes through untouched
-    expect(result.keywords![2]).toEqual({ term: "plain keyword" });
+    expect(result.keywords?.[2]).toEqual({ term: "plain keyword" });
   });
 
   test("confirms valid MeSH term via NLM API", async () => {
     const metadata: NemarMetadataV2 = {
       version: "2.0",
-      keywords: [
-        { term: "Electroencephalography", subject_scheme: "MeSH" },
-      ],
+      keywords: [{ term: "Electroencephalography", subject_scheme: "MeSH" }],
     };
     const { metadata: result, log } = await validateMeshTerms(metadata);
     expect(log).toHaveLength(1);
     expect(log[0].action).toBe("confirmed");
     expect(log[0].mesh_uri).toContain("nlm.nih.gov/mesh");
-    expect(result.keywords![0].value_uri).toContain("nlm.nih.gov/mesh");
-    expect(result.keywords![0].subject_scheme).toBe("MeSH");
+    expect(result.keywords?.[0].value_uri).toContain("nlm.nih.gov/mesh");
+    expect(result.keywords?.[0].subject_scheme).toBe("MeSH");
   });
 
   test("strips scheme from invalid MeSH term", async () => {
     const metadata: NemarMetadataV2 = {
       version: "2.0",
-      keywords: [
-        { term: "BrainWaveStuff123NotReal", subject_scheme: "MeSH" },
-      ],
+      keywords: [{ term: "BrainWaveStuff123NotReal", subject_scheme: "MeSH" }],
     };
     const { metadata: result, log } = await validateMeshTerms(metadata);
     expect(log).toHaveLength(1);
     expect(log[0].action).toBe("scheme_removed");
-    expect(result.keywords![0].subject_scheme).toBeUndefined();
-    expect(result.keywords![0].term).toBe("BrainWaveStuff123NotReal");
+    expect(result.keywords?.[0].subject_scheme).toBeUndefined();
+    expect(result.keywords?.[0].term).toBe("BrainWaveStuff123NotReal");
   });
 });
