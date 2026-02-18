@@ -1154,6 +1154,7 @@ export async function approvePublication(
   datasetId: string,
   resume = false,
   sandbox = false,
+  skipCiCheck = false,
 ): Promise<PublishApproveResponse> {
   let s3_lock_offset: number | undefined;
   let result: PublishApproveResponse;
@@ -1165,7 +1166,12 @@ export async function approvePublication(
       {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ resume, sandbox, s3_lock_offset }),
+        body: JSON.stringify({
+          resume,
+          sandbox,
+          s3_lock_offset,
+          skip_ci_check: skipCiCheck,
+        }),
       },
       true,
     );

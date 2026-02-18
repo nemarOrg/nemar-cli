@@ -9,6 +9,9 @@ const GITHUB_API = "https://api.github.com";
 // Dataset repos (nm000XXX) live in nemarDatasets org; tooling repos live in nemarOrg
 const ORG_NAME = "nemarDatasets";
 
+/** Identity used for all backend-initiated commits and tags on dataset repos. */
+const NEMAR_COMMITTER = { name: "nemarAdmin", email: "nemarAdmin@osc.earth" };
+
 interface GitHubUser {
   id: number;
   login: string;
@@ -335,6 +338,8 @@ export async function createOrUpdateFile(
         Array.from(new TextEncoder().encode(content), (b) => String.fromCharCode(b)).join(""),
       ),
       ...(sha ? { sha } : {}),
+      committer: NEMAR_COMMITTER,
+      author: NEMAR_COMMITTER,
     }),
   });
 
@@ -488,8 +493,11 @@ export async function deployWorkflows(
   const bidsValidation = `name: BIDS Validation
 
 on:
+  push:
+    branches: [main]
   pull_request:
     branches: [main]
+  workflow_dispatch:
 
 jobs:
   validate:
@@ -1247,6 +1255,7 @@ export async function createTag(
       message,
       object: sha,
       type: "commit",
+      tagger: { ...NEMAR_COMMITTER, date: new Date().toISOString() },
     }),
   });
 

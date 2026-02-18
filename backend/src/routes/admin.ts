@@ -2555,6 +2555,7 @@ const approveSchema = z.object({
   resume: z.boolean().optional().default(false),
   sandbox: z.boolean().optional().default(false),
   s3_lock_offset: z.number().optional(),
+  skip_ci_check: z.boolean().optional().default(false),
 });
 
 adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), async (c) => {
@@ -2708,45 +2709,50 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
 
   // Step 1: CI Check
   if (stepsToRun.includes("ci_check")) {
-    try {
-      await startStep("ci_check");
-
-      const bidsExists = await checkWorkflowExists(
-        repoName,
-        ".github/workflows/bids-validation.yml",
-        pat,
-      );
-      if (!bidsExists) {
-        await deployWorkflows(repoName, pat);
-      }
-
-      // Check latest run status (if workflow existed, verify it passes)
-      // Freshly deployed workflows have no runs yet, which is acceptable
-      const runs = await getWorkflowRuns(repoName, "bids-validation.yml", pat);
-      if (runs.length > 0) {
-        const latest = runs[0];
-        if (latest.conclusion === "failure") {
-          await updateProgress("ci_check", "BIDS validation CI is failing");
-          return c.json(
-            {
-              error: "CI check failed: BIDS validation is failing",
-              dataset_id: datasetId,
-              step: "ci_check",
-              steps_completed: completed,
-            },
-            422,
-          );
-        }
-      }
-
+    if (body.skip_ci_check) {
+      console.warn(`[publish] CI check skipped by admin ${adminUser.username} for ${datasetId}`);
       await updateProgress("ci_check");
-    } catch (err) {
-      const msg = errorMessage(err);
-      await updateProgress("ci_check", msg);
-      return c.json(
-        { error: `CI check failed: ${msg}`, step: "ci_check", steps_completed: completed },
-        500,
-      );
+    } else {
+      try {
+        await startStep("ci_check");
+
+        const bidsExists = await checkWorkflowExists(
+          repoName,
+          ".github/workflows/bids-validation.yml",
+          pat,
+        );
+        if (!bidsExists) {
+          await deployWorkflows(repoName, pat);
+        }
+
+        // Check latest run status (if workflow existed, verify it passes)
+        // Freshly deployed workflows have no runs yet, which is acceptable
+        const runs = await getWorkflowRuns(repoName, "bids-validation.yml", pat);
+        if (runs.length > 0) {
+          const latest = runs[0];
+          if (latest.conclusion === "failure") {
+            await updateProgress("ci_check", "BIDS validation CI is failing");
+            return c.json(
+              {
+                error: "CI check failed: BIDS validation is failing",
+                dataset_id: datasetId,
+                step: "ci_check",
+                steps_completed: completed,
+              },
+              422,
+            );
+          }
+        }
+
+        await updateProgress("ci_check");
+      } catch (err) {
+        const msg = errorMessage(err);
+        await updateProgress("ci_check", msg);
+        return c.json(
+          { error: `CI check failed: ${msg}`, step: "ci_check", steps_completed: completed },
+          500,
+        );
+      }
     }
   }
 

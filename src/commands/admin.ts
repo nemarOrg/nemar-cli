@@ -1446,6 +1446,7 @@ publishCommand
   .argument("<dataset-id>", "Dataset ID")
   .option("--resume", "Resume from last failed step")
   .option("--sandbox", "Use Zenodo sandbox for testing")
+  .option("--skip-ci-check", "Skip BIDS validation CI check (admin override)")
   .option(YES_OPTION, YES_DESCRIPTION)
   .option(NO_OPTION, NO_DESCRIPTION)
   .addHelpText(
@@ -1482,9 +1483,10 @@ Resume Capability:
   steps are automatically skipped.
 
 Examples:
-  $ nemar admin publish approve nm000104         # Run full orchestrator
-  $ nemar admin publish approve nm000104 --resume  # Resume from failed step
-  $ nemar admin publish approve nm000104 --yes   # Skip confirmation
+  $ nemar admin publish approve nm000104                    # Run full orchestrator
+  $ nemar admin publish approve nm000104 --resume           # Resume from failed step
+  $ nemar admin publish approve nm000104 --skip-ci-check    # Override BIDS validation
+  $ nemar admin publish approve nm000104 --yes              # Skip confirmation
 
 After Approval:
   - User receives email with DOI and public dataset link
@@ -1492,66 +1494,76 @@ After Approval:
   - Tags are protected (prevents version manipulation)
   - Data is protected by S3 Object Lock`,
   )
-  .action(async (datasetId, options: ConfirmOptions & { resume?: boolean; sandbox?: boolean }) => {
-    if (!requireAuth()) return;
+  .action(
+    async (
+      datasetId,
+      options: ConfirmOptions & { resume?: boolean; sandbox?: boolean; skipCiCheck?: boolean },
+    ) => {
+      if (!requireAuth()) return;
 
-    const action = options.resume
-      ? `Resume publication of ${datasetId}`
-      : `Approve and publish ${datasetId}`;
-    console.log(chalk.cyan(`\n${action}\n`));
-    console.log("This will run the following 14-step orchestrator:");
-    console.log("   1. Check CI             7. Update README");
-    console.log("   2. Make repo public      8. Create version tag");
-    console.log("   3. S3 public read        9. Create GitHub release");
-    console.log("   4. Tag protection       10. Upload to Zenodo");
-    console.log(
-      options.sandbox
-        ? "   5. Create DOI (SANDBOX) 11. Publish DOI (irreversible)"
-        : "   5. Create DOI           11. Publish DOI (irreversible)",
-    );
-    console.log("   6. Update metadata      12. S3 Object Lock");
-    console.log("                           13. Generate archive");
-    console.log("                           14. Notify user");
-    console.log();
-
-    // Sandbox warning
-    if (options.sandbox) {
-      console.log(chalk.yellow("━".repeat(60)));
-      console.log(chalk.yellow.bold("                 SANDBOX MODE ENABLED"));
-      console.log(chalk.yellow("━".repeat(60)));
-      console.log(chalk.yellow("  • DOI will be created on sandbox.zenodo.org"));
-      console.log(chalk.yellow("  • DOI will NOT be indexed by DataCite"));
-      console.log(chalk.yellow("  • DOI will NOT resolve in production"));
-      console.log(chalk.yellow("  • Use this for testing workflows only"));
-      console.log(chalk.yellow("━".repeat(60)));
+      const action = options.resume
+        ? `Resume publication of ${datasetId}`
+        : `Approve and publish ${datasetId}`;
+      console.log(chalk.cyan(`\n${action}\n`));
+      console.log("This will run the following 14-step orchestrator:");
+      console.log("   1. Check CI             7. Update README");
+      console.log("   2. Make repo public      8. Create version tag");
+      console.log("   3. S3 public read        9. Create GitHub release");
+      console.log("   4. Tag protection       10. Upload to Zenodo");
+      console.log(
+        options.sandbox
+          ? "   5. Create DOI (SANDBOX) 11. Publish DOI (irreversible)"
+          : "   5. Create DOI           11. Publish DOI (irreversible)",
+      );
+      console.log("   6. Update metadata      12. S3 Object Lock");
+      console.log("                           13. Generate archive");
+      console.log("                           14. Notify user");
       console.log();
-    }
 
-    const confirmResult = await confirm(`${action}?`, options);
-    if (confirmResult !== "confirmed") {
-      console.log(chalk.gray(confirmResult === "declined" ? "Skipped" : "Cancelled"));
-      return;
-    }
-
-    const spinner = ora("Running publication workflow...").start();
-
-    try {
-      const result = await approvePublication(datasetId, !!options.resume, !!options.sandbox);
-      spinner.succeed(result.message);
-
-      if (result.steps_completed) {
-        console.log();
-        for (const step of result.steps_completed) {
-          console.log(`  ${chalk.green("[x]")} ${step.replace(/_/g, " ")}`);
-        }
+      // Sandbox warning
+      if (options.sandbox) {
+        console.log(chalk.yellow("━".repeat(60)));
+        console.log(chalk.yellow.bold("                 SANDBOX MODE ENABLED"));
+        console.log(chalk.yellow("━".repeat(60)));
+        console.log(chalk.yellow("  • DOI will be created on sandbox.zenodo.org"));
+        console.log(chalk.yellow("  • DOI will NOT be indexed by DataCite"));
+        console.log(chalk.yellow("  • DOI will NOT resolve in production"));
+        console.log(chalk.yellow("  • Use this for testing workflows only"));
+        console.log(chalk.yellow("━".repeat(60)));
         console.log();
       }
-    } catch (error) {
-      handleCommandError(error, spinner, "Failed to approve publication", {
-        422: "Fix the CI issues and retry with --resume",
-      });
-    }
-  });
+
+      const confirmResult = await confirm(`${action}?`, options);
+      if (confirmResult !== "confirmed") {
+        console.log(chalk.gray(confirmResult === "declined" ? "Skipped" : "Cancelled"));
+        return;
+      }
+
+      const spinner = ora("Running publication workflow...").start();
+
+      try {
+        const result = await approvePublication(
+          datasetId,
+          !!options.resume,
+          !!options.sandbox,
+          !!options.skipCiCheck,
+        );
+        spinner.succeed(result.message);
+
+        if (result.steps_completed) {
+          console.log();
+          for (const step of result.steps_completed) {
+            console.log(`  ${chalk.green("[x]")} ${step.replace(/_/g, " ")}`);
+          }
+          console.log();
+        }
+      } catch (error) {
+        handleCommandError(error, spinner, "Failed to approve publication", {
+          422: "Fix the CI issues and retry with --resume",
+        });
+      }
+    },
+  );
 
 adminCommand.addCommand(publishCommand);
 
