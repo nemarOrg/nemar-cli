@@ -692,8 +692,10 @@ Examples:
         console.log(
           chalk.gray("  Using existing .nemar/metadata.json (author ORCIDs from prior run)"),
         );
-      } catch {
-        // File exists but is unreadable; will re-collect below
+      } catch (err) {
+        console.log(
+          chalk.yellow(`  Warning: Could not read .nemar/metadata.json: ${err instanceof Error ? err.message : err}. Will re-collect author information.`),
+        );
       }
     } else if (existsSync(existingNemarMetaV1)) {
       try {
@@ -701,8 +703,10 @@ Examples:
         console.log(
           chalk.gray("  Using existing nemar_metadata.json (author ORCIDs from prior run)"),
         );
-      } catch {
-        // File exists but is unreadable; will re-collect below
+      } catch (err) {
+        console.log(
+          chalk.yellow(`  Warning: Could not read nemar_metadata.json: ${err instanceof Error ? err.message : err}. Will re-collect author information.`),
+        );
       }
     }
 

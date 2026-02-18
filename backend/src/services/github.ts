@@ -304,7 +304,7 @@ export async function createOrUpdateFile(
   content: string,
   message: string,
   pat: string,
-): Promise<boolean> {
+): Promise<void> {
   // First, try to get the file to see if it exists (need SHA for update)
   let sha: string | undefined;
   const getResponse = await fetch(`${GITHUB_API}/repos/${ORG_NAME}/${repo}/contents/${path}`, {
@@ -338,7 +338,10 @@ export async function createOrUpdateFile(
     }),
   });
 
-  return response.ok || response.status === 201;
+  if (!response.ok && response.status !== 201) {
+    const body = await response.text().catch(() => "");
+    throw new Error(`GitHub API error ${response.status} committing ${path}: ${body}`);
+  }
 }
 
 /**
@@ -937,7 +940,7 @@ jobs:
 
           echo "Triggering LLM enrichment for $REPO_NAME"
 
-          RESPONSE=$(curl -sf -w "\\n%{http_code}" -X POST \\
+          RESPONSE=$(curl -s -w "\\n%{http_code}" -X POST \\
             "https://api.osc.earth/nemar/webhooks/llm-enrich" \\
             -H "Content-Type: application/json" \\
             -H "X-Webhook-Token: $NEMAR_WEBHOOK_TOKEN" \\
@@ -963,14 +966,15 @@ jobs:
   ];
 
   for (const workflow of workflows) {
-    const success = await createOrUpdateFile(
-      repo,
-      workflow.path,
-      workflow.content,
-      `Add ${workflow.path.split("/").pop()} workflow`,
-      pat,
-    );
-    if (!success) {
+    try {
+      await createOrUpdateFile(
+        repo,
+        workflow.path,
+        workflow.content,
+        `Add ${workflow.path.split("/").pop()} workflow`,
+        pat,
+      );
+    } catch {
       errors.push(workflow.path);
     }
   }

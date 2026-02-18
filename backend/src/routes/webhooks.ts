@@ -573,11 +573,13 @@ webhooks.post("/llm-enrich", async (c) => {
     let bidsDescription: Record<string, unknown> = {};
     const descFile = tree.find((f) => f.path === "dataset_description.json");
     if (descFile) {
+      const descContent = await getBlobContent(repoName, descFile.sha, pat);
       try {
-        const descContent = await getBlobContent(repoName, descFile.sha, pat);
         bidsDescription = JSON.parse(descContent) as Record<string, unknown>;
-      } catch {
-        console.warn(`[llm-enrich] Could not parse dataset_description.json for ${dataset_id}`);
+      } catch (parseErr) {
+        console.warn(
+          `[llm-enrich] Could not parse dataset_description.json for ${dataset_id}: ${errorMessage(parseErr)}`,
+        );
       }
     }
 
@@ -587,8 +589,8 @@ webhooks.post("/llm-enrich", async (c) => {
       tree.find((f) => f.path === ".nemar/metadata.json") ||
       tree.find((f) => f.path === "nemar_metadata.json");
     if (nemarMetaFile) {
+      const nemarContent = await getBlobContent(repoName, nemarMetaFile.sha, pat);
       try {
-        const nemarContent = await getBlobContent(repoName, nemarMetaFile.sha, pat);
         const parsed = parseNemarMetadata(JSON.parse(nemarContent));
         if (parsed?.version === "2.0") {
           existingMetadata = parsed;
@@ -602,8 +604,10 @@ webhooks.post("/llm-enrich", async (c) => {
           }
           existingMetadata = { version: "2.0", authors: v2Authors };
         }
-      } catch (err) {
-        console.warn(`[llm-enrich] Could not read existing metadata for ${dataset_id}:`, err);
+      } catch (parseErr) {
+        console.warn(
+          `[llm-enrich] WARNING: Existing metadata for ${dataset_id} is corrupt and will not be preserved: ${errorMessage(parseErr)}`,
+        );
       }
     }
 

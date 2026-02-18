@@ -7,7 +7,6 @@
 
 import {
   type NemarMetadataV2,
-  type AuthorEnrichmentV2,
   type StructuredKeyword,
   type RelatedIdentifierEntry,
   type FundingReferenceEntry,

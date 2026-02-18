@@ -2742,9 +2742,10 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
 
       await updateProgress("enrichment_check");
     } catch (err) {
-      // Non-fatal: log warning and continue
-      const msg = errorMessage(err);
-      console.warn(`[publish] Enrichment check error for ${datasetId} (non-fatal): ${msg}`);
+      // Non-fatal: log error and continue (enrichment check should not block publication)
+      console.warn(
+        `[publish] Enrichment check failed for ${datasetId} (non-fatal): ${errorMessage(err)}`,
+      );
       await updateProgress("enrichment_check");
     }
   }

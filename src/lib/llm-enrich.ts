@@ -59,6 +59,7 @@ export async function enrichFromReadme(
 ): Promise<LlmEnrichmentResult> {
   const key = apiKey || process.env.OPENROUTER_API_KEY;
   if (!key) {
+    console.warn("[llm-enrich] No OPENROUTER_API_KEY configured. Skipping LLM enrichment.");
     return {};
   }
 
