@@ -1108,17 +1108,39 @@ adminRoutes.post(
       );
     }
 
-    // Gate on enrichment: require LLM enrichment before minting DOIs
-    if (!dataset.enrichment_json && !body.skip_enrichment_check) {
-      return c.json(
-        {
-          error: "LLM enrichment has not run yet",
-          message:
-            "Push to main (or trigger the LLM Metadata Enrichment workflow manually) so enrichment runs, then retry. Pass skip_enrichment_check: true to override.",
-          dataset_id: dataset.dataset_id,
-        },
-        422,
-      );
+    // Gate on enrichment: require validated metadata before minting DOIs
+    if (!body.skip_enrichment_check) {
+      if (!dataset.enrichment_json) {
+        return c.json(
+          {
+            error: "Metadata pipeline has not run yet",
+            message:
+              "Push to main (or trigger the LLM Metadata Enrichment workflow manually) so the metadata pipeline runs, then retry. Pass skip_enrichment_check: true to override.",
+            dataset_id: dataset.dataset_id,
+          },
+          422,
+        );
+      }
+      // Check pipeline_stage is "validated"
+      let pipelineStage: string | undefined;
+      try {
+        const meta = JSON.parse(dataset.enrichment_json) as Record<string, unknown>;
+        pipelineStage = typeof meta.pipeline_stage === "string" ? meta.pipeline_stage : undefined;
+      } catch {
+        // Corrupt enrichment_json; treat as needing re-enrichment
+      }
+      if (pipelineStage !== "validated") {
+        return c.json(
+          {
+            error: `Metadata not yet validated (current stage: ${pipelineStage || "unknown"})`,
+            message:
+              "The metadata pipeline must reach 'validated' stage before DOI minting. Re-trigger the LLM Metadata Enrichment workflow or pass skip_enrichment_check: true to override.",
+            dataset_id: dataset.dataset_id,
+            pipeline_stage: pipelineStage || "unknown",
+          },
+          422,
+        );
+      }
     }
 
     // SAFETY: Block production DOI creation in non-production environments

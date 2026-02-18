@@ -10,7 +10,7 @@ import { Hono } from "hono";
 import { createEzidVersionDoi, parseDoiProvider } from "../services/doi.js";
 import { extractDoi } from "../services/ezid.js";
 import { createOrUpdateFile, getBlobContent, getTreeAtRef, downloadReleaseArchive } from "../services/github.js";
-import { enrichFromReadme, mergeWithExisting } from "../services/llm-enrich.js";
+import { seedFromBids, enrichFromReadme, mergeWithExisting, validateMetadata } from "../services/llm-enrich.js";
 import { generateManifest } from "../services/manifest.js";
 import { errorMessage, extractRepoName, readRepoMetadata } from "../services/repo-metadata.js";
 import { uploadManifest } from "../services/s3.js";
@@ -611,19 +611,42 @@ webhooks.post("/llm-enrich", async (c) => {
       }
     }
 
-    // Call LLM for enrichment
-    const llmResult = await enrichFromReadme(readmeContent, bidsDescription, apiKey);
+    // Stage 1: Seed from BIDS (deterministic, no LLM call)
+    const seeded = seedFromBids(bidsDescription, existingMetadata);
+    console.log(
+      `[llm-enrich] Stage 1 (seed): ${dataset_id} - ${Object.keys(seeded.authors || {}).length} authors, ${(seeded.related_identifiers || []).length} related IDs`,
+    );
 
-    // Merge with existing (preserves author ORCIDs)
-    const merged = mergeWithExisting(existingMetadata, llmResult);
+    // Stage 2: LLM enrichment (adds description, keywords, methods, etc.)
+    const llmResult = await enrichFromReadme(readmeContent, bidsDescription, apiKey);
+    const enriched = mergeWithExisting(seeded, llmResult);
+    console.log(
+      `[llm-enrich] Stage 2 (enrich): ${dataset_id} - extracted: ${Object.keys(llmResult).filter((k) => llmResult[k as keyof typeof llmResult] !== undefined).join(", ")}`,
+    );
+
+    // Stage 3: LLM validation (judge reviews metadata quality)
+    let finalMetadata = enriched;
+    let validationResult = null;
+    try {
+      const validated = await validateMetadata(enriched, readmeContent, bidsDescription, apiKey);
+      finalMetadata = validated.metadata;
+      validationResult = validated.validation;
+      console.log(
+        `[llm-enrich] Stage 3 (validate): ${dataset_id} - ${validated.validation.valid ? "PASSED" : "FAILED"}, blocking: ${validated.validation.blocking_issues.length}, warnings: ${validated.validation.warnings.length}`,
+      );
+    } catch (valErr) {
+      console.warn(
+        `[llm-enrich] Stage 3 (validate) failed for ${dataset_id}, staying at 'enriched': ${errorMessage(valErr)}`,
+      );
+    }
 
     // Commit .nemar/metadata.json to repo
-    const metadataContent = JSON.stringify(merged, null, 2);
+    const metadataContent = JSON.stringify(finalMetadata, null, 2);
     await createOrUpdateFile(
       repoName,
       ".nemar/metadata.json",
       metadataContent,
-      "Update NEMAR metadata via LLM enrichment",
+      `Update NEMAR metadata (pipeline: ${finalMetadata.pipeline_stage})`,
       pat,
     );
 
@@ -654,14 +677,24 @@ webhooks.post("/llm-enrich", async (c) => {
       .run();
 
     return c.json({
-      message: "LLM enrichment completed",
+      message: `Metadata pipeline completed (stage: ${finalMetadata.pipeline_stage})`,
       dataset_id,
-      fields_extracted: Object.keys(llmResult).filter(
+      pipeline_stage: finalMetadata.pipeline_stage,
+      seeded_fields: {
+        authors: Object.keys(seeded.authors || {}).length,
+        related_identifiers: (seeded.related_identifiers || []).length,
+        funding_references: (seeded.funding_references || []).length,
+      },
+      enriched_fields: Object.keys(llmResult).filter(
         (k) => llmResult[k as keyof typeof llmResult] !== undefined,
       ),
-      authors_preserved: existingMetadata?.authors
-        ? Object.keys(existingMetadata.authors).length
-        : 0,
+      validation: validationResult
+        ? {
+            valid: validationResult.valid,
+            blocking_issues: validationResult.blocking_issues,
+            warnings: validationResult.warnings,
+          }
+        : null,
     });
   } catch (error) {
     console.error(`[llm-enrich] Failed for ${dataset_id}:`, error);

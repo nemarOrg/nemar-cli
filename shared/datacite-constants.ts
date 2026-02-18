@@ -128,8 +128,17 @@ export interface AuthorEnrichmentV2 {
  * v2.0 nemar_metadata.json schema (snake_case, aligned with neuroschema v0.3.0).
  * Stored at `.nemar/metadata.json`.
  */
+export type PipelineStage = "seeded" | "enriched" | "validated";
+
+const VALID_PIPELINE_STAGES = new Set<string>(["seeded", "enriched", "validated"]);
+
+export function isValidPipelineStage(value: string): value is PipelineStage {
+  return VALID_PIPELINE_STAGES.has(value);
+}
+
 export interface NemarMetadataV2 {
   version: "2.0";
+  pipeline_stage?: PipelineStage;
   description?: string;
   methods_description?: string;
   keywords?: StructuredKeyword[];

@@ -16,6 +16,7 @@ import {
   type RelationType,
   VALID_RELATION_TYPES,
   isValidRelationType,
+  isValidPipelineStage,
 } from "../../../shared/datacite-constants.js";
 
 export {
@@ -342,6 +343,11 @@ function parseNemarMetadataV1(obj: Record<string, unknown>): NemarMetadataV1 {
 
 function parseNemarMetadataV2(obj: Record<string, unknown>): NemarMetadataV2 {
   const result: NemarMetadataV2 = { version: "2.0" };
+
+  // Pipeline stage
+  if (typeof obj.pipeline_stage === "string" && isValidPipelineStage(obj.pipeline_stage)) {
+    result.pipeline_stage = obj.pipeline_stage;
+  }
 
   // Description
   if (typeof obj.description === "string" && obj.description) {

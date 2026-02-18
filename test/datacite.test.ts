@@ -20,6 +20,8 @@ import {
 import {
   validateLlmResultV2,
   mergeWithExisting,
+  seedFromBids,
+  parseValidationResult,
 } from "../backend/src/services/llm-enrich";
 
 describe("parseAuthorName", () => {
@@ -777,5 +779,290 @@ describe("mergeWithExisting", () => {
     expect(merged.description).toBe("Updated description");
     expect(merged.keywords).toHaveLength(1);
     expect(merged.keywords![0].term).toBe("new keyword");
+  });
+
+  test("additive merge for related_identifiers (preserves BIDS-seeded IsDerivedFrom)", () => {
+    const existing = {
+      version: "2.0" as const,
+      pipeline_stage: "seeded" as const,
+      related_identifiers: [
+        { identifier: "10.13026/ym7v-bh53", identifier_type: "DOI" as const, relation_type: "IsDerivedFrom" },
+      ],
+    };
+    const llmResult = {
+      related_identifiers: [
+        { identifier: "10.1109/TNSRE.2021.3082551", identifier_type: "DOI" as const, relation_type: "IsDescribedBy" },
+        // Duplicate of BIDS-seeded entry with different relation type (LLM might misclassify)
+        { identifier: "10.13026/ym7v-bh53", identifier_type: "DOI" as const, relation_type: "IsVersionOf" },
+      ],
+    };
+
+    const merged = mergeWithExisting(existing, llmResult);
+
+    // Should have 3 entries: original IsDerivedFrom + IsDescribedBy + IsVersionOf (different relation_type = different key)
+    expect(merged.related_identifiers).toHaveLength(3);
+    expect(merged.related_identifiers![0].relation_type).toBe("IsDerivedFrom");
+    expect(merged.related_identifiers![1].relation_type).toBe("IsDescribedBy");
+    expect(merged.pipeline_stage).toBe("enriched");
+  });
+
+  test("additive merge for funding_references (deduplicates by funder+award)", () => {
+    const existing = {
+      version: "2.0" as const,
+      pipeline_stage: "seeded" as const,
+      funding_references: [
+        { funder_name: "Shanghai Municipal Science and Technology Major Project (2017SHZDZX01)" },
+      ],
+    };
+    const llmResult = {
+      funding_references: [
+        { funder_name: "Shanghai Municipal Science and Technology Major Project", award_number: "2017SHZDZX01" },
+        { funder_name: "NIH", award_number: "R01-NS12345" },
+      ],
+    };
+
+    const merged = mergeWithExisting(existing, llmResult);
+
+    // BIDS raw string + 2 LLM entries (no exact funder_name|award_number match so all 3 remain)
+    expect(merged.funding_references!.length).toBeGreaterThanOrEqual(2);
+    expect(merged.pipeline_stage).toBe("enriched");
+  });
+});
+
+describe("seedFromBids", () => {
+  const fullBids = {
+    Name: "HySER Dataset",
+    BIDSVersion: "1.11.0",
+    DatasetType: "raw",
+    License: "ODC-By-1.0",
+    Authors: [
+      "Xinyu Jiang",
+      "Chenyun Dai",
+      "Xiangyu Liu",
+      "Jiahao Fan",
+    ],
+    ReferencesAndLinks: [
+      "https://doi.org/10.1109/TNSRE.2021.3082551",
+      "https://physionet.org/content/hd-semg/1.0.0/",
+    ],
+    DatasetDOI: "doi:10.13026/ym7v-bh53",
+    Funding: [
+      "Shanghai Municipal Science and Technology Major Project (2017SHZDZX01)",
+      "Shanghai Pujiang Program (19PJ1401100)",
+    ],
+    SourceDatasets: [
+      {
+        URL: "https://physionet.org/content/hd-semg/1.0.0/",
+        DOI: "doi:10.13026/ym7v-bh53",
+        Version: "1.0.0",
+      },
+    ],
+  };
+
+  test("extracts all authors from BIDS", () => {
+    const seeded = seedFromBids(fullBids, null);
+
+    expect(seeded.pipeline_stage).toBe("seeded");
+    expect(seeded.authors).toBeDefined();
+    expect(Object.keys(seeded.authors!)).toHaveLength(4);
+    expect(seeded.authors!["Xinyu Jiang"]).toEqual({});
+    expect(seeded.authors!["Jiahao Fan"]).toEqual({});
+  });
+
+  test("preserves existing ORCIDs when seeding", () => {
+    const existing = {
+      version: "2.0" as const,
+      authors: {
+        "Xinyu Jiang": { orcid: "https://orcid.org/0000-0001-2345-6789" },
+      },
+    };
+
+    const seeded = seedFromBids(fullBids, existing);
+
+    expect(Object.keys(seeded.authors!)).toHaveLength(4);
+    expect(seeded.authors!["Xinyu Jiang"].orcid).toBe("https://orcid.org/0000-0001-2345-6789");
+    expect(seeded.authors!["Chenyun Dai"]).toEqual({});
+  });
+
+  test("SourceDatasets mapped to IsDerivedFrom", () => {
+    const seeded = seedFromBids(fullBids, null);
+
+    const isDerivedFrom = seeded.related_identifiers?.filter(
+      (r) => r.relation_type === "IsDerivedFrom",
+    );
+    expect(isDerivedFrom).toHaveLength(1);
+    expect(isDerivedFrom![0].identifier).toBe("10.13026/ym7v-bh53");
+    expect(isDerivedFrom![0].identifier_type).toBe("DOI");
+  });
+
+  test("ReferencesAndLinks DOIs mapped to References", () => {
+    const seeded = seedFromBids(fullBids, null);
+
+    const references = seeded.related_identifiers?.filter(
+      (r) => r.relation_type === "References",
+    );
+    expect(references).toHaveLength(1);
+    expect(references![0].identifier).toBe("10.1109/TNSRE.2021.3082551");
+  });
+
+  test("Funding strings extracted as raw funding references", () => {
+    const seeded = seedFromBids(fullBids, null);
+
+    expect(seeded.funding_references).toHaveLength(2);
+    expect(seeded.funding_references![0].funder_name).toContain("Shanghai");
+  });
+
+  test("DatasetType sets resource_type_general", () => {
+    const seeded = seedFromBids(fullBids, null);
+    expect(seeded.resource_type_general).toBe("Dataset");
+  });
+
+  test("empty BIDS returns minimal metadata", () => {
+    const seeded = seedFromBids({}, null);
+
+    expect(seeded.version).toBe("2.0");
+    expect(seeded.pipeline_stage).toBe("seeded");
+    expect(seeded.authors).toBeUndefined();
+    expect(seeded.related_identifiers).toBeUndefined();
+    expect(seeded.funding_references).toBeUndefined();
+  });
+
+  test("does not duplicate existing related_identifiers", () => {
+    const existing = {
+      version: "2.0" as const,
+      related_identifiers: [
+        { identifier: "10.13026/ym7v-bh53", identifier_type: "DOI" as const, relation_type: "IsDerivedFrom" },
+      ],
+    };
+
+    const seeded = seedFromBids(fullBids, existing);
+
+    const isDerivedFrom = seeded.related_identifiers?.filter(
+      (r) => r.identifier === "10.13026/ym7v-bh53" && r.relation_type === "IsDerivedFrom",
+    );
+    expect(isDerivedFrom).toHaveLength(1);
+  });
+});
+
+describe("parseValidationResult", () => {
+  test("parses valid full result", () => {
+    const raw = {
+      overall_pass: true,
+      criteria: {
+        author_completeness: { confidence: 95, pass: true, issues: [] },
+        related_identifiers: { confidence: 90, pass: true, issues: [], suggestions: ["Add paper DOI"] },
+        description_accuracy: { confidence: 85, pass: true, issues: [] },
+        keyword_relevance: { confidence: 80, pass: true, issues: [] },
+        funding_accuracy: { confidence: 70, pass: true, issues: [] },
+        data_type: { confidence: 100, pass: true, issues: [] },
+      },
+      blocking_issues: [],
+      warnings: ["Consider adding MeSH subject schemes"],
+    };
+
+    const result = parseValidationResult(raw);
+
+    expect(result.valid).toBe(true);
+    expect(result.blocking_issues).toHaveLength(0);
+    expect(result.warnings).toHaveLength(1);
+    expect(result.criteria.author_completeness.confidence).toBe(95);
+    expect(result.criteria.related_identifiers.suggestions).toEqual(["Add paper DOI"]);
+  });
+
+  test("parses failing result with blocking issues", () => {
+    const raw = {
+      overall_pass: false,
+      criteria: {
+        author_completeness: { confidence: 30, pass: false, issues: ["Missing author: Jane Smith"] },
+        related_identifiers: { confidence: 40, pass: false, issues: ["Wrong relation type for PhysioNet DOI"] },
+        description_accuracy: { confidence: 80, pass: true, issues: [] },
+        keyword_relevance: { confidence: 70, pass: true, issues: [] },
+        funding_accuracy: { confidence: 60, pass: true, issues: [] },
+        data_type: { confidence: 100, pass: true, issues: [] },
+      },
+      blocking_issues: ["Missing author: Jane Smith", "Incorrect relation type"],
+      warnings: [],
+    };
+
+    const result = parseValidationResult(raw);
+
+    expect(result.valid).toBe(false);
+    expect(result.blocking_issues).toHaveLength(2);
+    expect(result.criteria.author_completeness.pass).toBe(false);
+  });
+
+  test("handles missing criteria gracefully", () => {
+    const raw = {
+      overall_pass: true,
+      criteria: {},
+      blocking_issues: [],
+      warnings: [],
+    };
+
+    const result = parseValidationResult(raw);
+
+    expect(result.valid).toBe(true);
+    expect(result.criteria.author_completeness.confidence).toBe(0);
+    expect(result.criteria.author_completeness.pass).toBe(false);
+    expect(result.criteria.author_completeness.issues).toEqual([]);
+  });
+
+  test("infers valid from empty blocking_issues when overall_pass missing", () => {
+    const raw = {
+      criteria: {},
+      blocking_issues: [],
+      warnings: ["Some warning"],
+    };
+
+    const result = parseValidationResult(raw);
+    expect(result.valid).toBe(true);
+  });
+
+  test("infers invalid from blocking_issues when overall_pass missing", () => {
+    const raw = {
+      criteria: {},
+      blocking_issues: ["A blocking issue"],
+      warnings: [],
+    };
+
+    const result = parseValidationResult(raw);
+    expect(result.valid).toBe(false);
+  });
+});
+
+describe("parseNemarMetadata pipeline_stage", () => {
+  test("parses valid pipeline_stage", () => {
+    const meta = parseNemarMetadata({
+      version: "2.0",
+      pipeline_stage: "validated",
+      description: "Test",
+    });
+    expect(meta?.version).toBe("2.0");
+    if (meta?.version === "2.0") {
+      expect(meta.pipeline_stage).toBe("validated");
+    }
+  });
+
+  test("ignores invalid pipeline_stage", () => {
+    const meta = parseNemarMetadata({
+      version: "2.0",
+      pipeline_stage: "invalid_stage",
+      description: "Test",
+    });
+    expect(meta?.version).toBe("2.0");
+    if (meta?.version === "2.0") {
+      expect(meta.pipeline_stage).toBeUndefined();
+    }
+  });
+
+  test("handles missing pipeline_stage", () => {
+    const meta = parseNemarMetadata({
+      version: "2.0",
+      description: "Test",
+    });
+    expect(meta?.version).toBe("2.0");
+    if (meta?.version === "2.0") {
+      expect(meta.pipeline_stage).toBeUndefined();
+    }
   });
 });
