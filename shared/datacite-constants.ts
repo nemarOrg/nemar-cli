@@ -84,7 +84,28 @@ export interface StructuredKeyword {
 
 export interface RelatedIdentifierEntry {
   identifier: string;
-  identifier_type: "DOI" | "URL" | "ARK" | "arXiv" | "PMID" | "ISBN" | "ISSN" | "URN" | "Handle" | "EAN13" | "EISSN" | "ISTC" | "LISSN" | "LSID" | "PURL" | "UPC" | "w3id" | "bibcode" | "IGSN" | "GND" | "RRID";
+  identifier_type:
+    | "DOI"
+    | "URL"
+    | "ARK"
+    | "arXiv"
+    | "PMID"
+    | "ISBN"
+    | "ISSN"
+    | "URN"
+    | "Handle"
+    | "EAN13"
+    | "EISSN"
+    | "ISTC"
+    | "LISSN"
+    | "LSID"
+    | "PURL"
+    | "UPC"
+    | "w3id"
+    | "bibcode"
+    | "IGSN"
+    | "GND"
+    | "RRID";
   relation_type: string;
   resource_type_general?: string;
 }

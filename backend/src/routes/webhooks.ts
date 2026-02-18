@@ -7,17 +7,27 @@
 
 import type { Context } from "hono";
 import { Hono } from "hono";
+import type { NemarMetadataV2 } from "../../../shared/datacite-constants.js";
+import { parseNemarMetadata } from "../services/datacite.js";
 import { createEzidVersionDoi, parseDoiProvider } from "../services/doi.js";
 import { extractDoi } from "../services/ezid.js";
-import { createOrUpdateFile, getBlobContent, getTreeAtRef, downloadReleaseArchive } from "../services/github.js";
-import { seedFromBids, enrichFromReadme, mergeWithExisting, validateMetadata } from "../services/llm-enrich.js";
+import {
+  createOrUpdateFile,
+  downloadReleaseArchive,
+  getBlobContent,
+  getTreeAtRef,
+} from "../services/github.js";
+import {
+  enrichFromReadme,
+  mergeWithExisting,
+  seedFromBids,
+  validateMetadata,
+} from "../services/llm-enrich.js";
 import { generateManifest } from "../services/manifest.js";
 import { errorMessage, extractRepoName, readRepoMetadata } from "../services/repo-metadata.js";
 import { uploadManifest } from "../services/s3.js";
 import * as zenodo from "../services/zenodo.js";
 import type { Bindings } from "../types/bindings.js";
-import type { NemarMetadataV2 } from "../../../shared/datacite-constants.js";
-import { parseNemarMetadata } from "../services/datacite.js";
 
 type WebhookContext = Context<{ Bindings: Bindings }>;
 
@@ -266,7 +276,9 @@ async function handleEzidVersionDoi(
           .bind(dataset.id)
           .first<{ zenodo_concept_id: string | null }>();
 
-        let depositionId = row?.zenodo_concept_id ? Number.parseInt(row.zenodo_concept_id, 10) : NaN;
+        let depositionId = row?.zenodo_concept_id
+          ? Number.parseInt(row.zenodo_concept_id, 10)
+          : Number.NaN;
 
         if (Number.isNaN(depositionId)) {
           // Create initial Zenodo draft deposition
@@ -282,7 +294,9 @@ async function handleEzidVersionDoi(
             sandbox,
           );
           depositionId = deposition.id;
-          await c.env.DB.prepare("UPDATE datasets SET zenodo_concept_id = ?, updated_at = datetime('now') WHERE id = ?")
+          await c.env.DB.prepare(
+            "UPDATE datasets SET zenodo_concept_id = ?, updated_at = datetime('now') WHERE id = ?",
+          )
             .bind(String(depositionId), dataset.id)
             .run();
         } else {
@@ -291,7 +305,12 @@ async function handleEzidVersionDoi(
           depositionId = newVersion.id;
           await zenodo.updateDepositionMetadata(
             depositionId,
-            { title: `${dataset.name} (NEMAR backup archive)`, description: `Backup archive v${version}`, creators: [{ name: "NEMAR" }], version },
+            {
+              title: `${dataset.name} (NEMAR backup archive)`,
+              description: `Backup archive v${version}`,
+              creators: [{ name: "NEMAR" }],
+              version,
+            },
             zenodoToken,
             sandbox,
           );
@@ -299,13 +318,23 @@ async function handleEzidVersionDoi(
 
         const deposition = await zenodo.getDeposition(depositionId, zenodoToken, sandbox);
         if (deposition.links.bucket) {
-          await zenodo.uploadFile(depositionId, deposition.links.bucket, `${dataset.dataset_id}-v${version}.zip`, archiveData, zenodoToken, sandbox);
+          await zenodo.uploadFile(
+            depositionId,
+            deposition.links.bucket,
+            `${dataset.dataset_id}-v${version}.zip`,
+            archiveData,
+            zenodoToken,
+            sandbox,
+          );
           zenodoBackup = `Zenodo draft #${depositionId}`;
         }
       }
     } catch (zenodoErr) {
       zenodoBackupError = errorMessage(zenodoErr);
-      console.error(`[webhook] Zenodo backup failed for ${dataset.dataset_id}@${version} (non-fatal):`, zenodoErr);
+      console.error(
+        `[webhook] Zenodo backup failed for ${dataset.dataset_id}@${version} (non-fatal):`,
+        zenodoErr,
+      );
     }
 
     return c.json({
@@ -596,7 +625,10 @@ webhooks.post("/llm-enrich", async (c) => {
           existingMetadata = parsed;
         } else if (parsed?.version === "1.0" && parsed.authors) {
           // Convert v1 authors to v2 format for preservation
-          const v2Authors: Record<string, { orcid?: string; affiliations?: Array<{ name: string }> }> = {};
+          const v2Authors: Record<
+            string,
+            { orcid?: string; affiliations?: Array<{ name: string }> }
+          > = {};
           for (const [name, entry] of Object.entries(parsed.authors)) {
             v2Authors[name] = {};
             if (entry.orcid) v2Authors[name].orcid = entry.orcid;
@@ -621,7 +653,9 @@ webhooks.post("/llm-enrich", async (c) => {
     const llmResult = await enrichFromReadme(readmeContent, bidsDescription, apiKey);
     const enriched = mergeWithExisting(seeded, llmResult);
     console.log(
-      `[llm-enrich] Stage 2 (enrich): ${dataset_id} - extracted: ${Object.keys(llmResult).filter((k) => llmResult[k as keyof typeof llmResult] !== undefined).join(", ")}`,
+      `[llm-enrich] Stage 2 (enrich): ${dataset_id} - extracted: ${Object.keys(llmResult)
+        .filter((k) => llmResult[k as keyof typeof llmResult] !== undefined)
+        .join(", ")}`,
     );
 
     // Stage 3: LLM validation (judge reviews metadata quality)
@@ -659,7 +693,7 @@ webhooks.post("/llm-enrich", async (c) => {
     if (!bidsignoreContent.includes(".nemar/")) {
       bidsignoreContent = bidsignoreContent
         ? `${bidsignoreContent.trimEnd()}\n.nemar/\n`
-        : `.nemar/\n`;
+        : ".nemar/\n";
       await createOrUpdateFile(
         repoName,
         ".bidsignore",

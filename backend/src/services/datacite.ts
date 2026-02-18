@@ -15,8 +15,8 @@ import {
   type NemarMetadataV2,
   type RelationType,
   VALID_RELATION_TYPES,
-  isValidRelationType,
   isValidPipelineStage,
+  isValidRelationType,
 } from "../../../shared/datacite-constants.js";
 
 export {
@@ -146,7 +146,16 @@ export interface DataCiteDate {
 
 export interface DataCiteRelatedIdentifier {
   identifier: string;
-  relatedIdentifierType: "DOI" | "URL" | "ARK" | "arXiv" | "PMID" | "ISBN" | "ISSN" | "URN" | "Handle";
+  relatedIdentifierType:
+    | "DOI"
+    | "URL"
+    | "ARK"
+    | "arXiv"
+    | "PMID"
+    | "ISBN"
+    | "ISSN"
+    | "URN"
+    | "Handle";
   relationType: RelationType;
   resourceTypeGeneral?: ResourceTypeGeneral;
 }
@@ -359,15 +368,27 @@ function parseNemarMetadataV2(obj: Record<string, unknown>): NemarMetadataV2 {
 
   // Authors (keyed by display name, with optional ORCID and affiliations)
   if (obj.authors && typeof obj.authors === "object" && !Array.isArray(obj.authors)) {
-    const authors: Record<string, { orcid?: string; affiliations?: Array<{ name: string; identifier?: string; scheme?: string }> }> = {};
+    const authors: Record<
+      string,
+      {
+        orcid?: string;
+        affiliations?: Array<{ name: string; identifier?: string; scheme?: string }>;
+      }
+    > = {};
     for (const [name, val] of Object.entries(obj.authors as Record<string, unknown>)) {
       if (val && typeof val === "object" && !Array.isArray(val)) {
         const entry = val as Record<string, unknown>;
-        const parsed: { orcid?: string; affiliations?: Array<{ name: string; identifier?: string; scheme?: string }> } = {};
+        const parsed: {
+          orcid?: string;
+          affiliations?: Array<{ name: string; identifier?: string; scheme?: string }>;
+        } = {};
         if (typeof entry.orcid === "string") parsed.orcid = entry.orcid;
         if (Array.isArray(entry.affiliations)) {
           parsed.affiliations = entry.affiliations.filter(
-            (a) => !!a && typeof a === "object" && typeof (a as Record<string, unknown>).name === "string",
+            (a) =>
+              !!a &&
+              typeof a === "object" &&
+              typeof (a as Record<string, unknown>).name === "string",
           );
         }
         authors[name] = parsed;
@@ -379,7 +400,8 @@ function parseNemarMetadataV2(obj: Record<string, unknown>): NemarMetadataV2 {
   // Structured keywords
   if (Array.isArray(obj.keywords)) {
     result.keywords = obj.keywords.filter(
-      (k): k is { term: string } => !!k && typeof k === "object" && typeof (k as Record<string, unknown>).term === "string",
+      (k): k is { term: string } =>
+        !!k && typeof k === "object" && typeof (k as Record<string, unknown>).term === "string",
     );
   }
 
@@ -395,21 +417,26 @@ function parseNemarMetadataV2(obj: Record<string, unknown>): NemarMetadataV2 {
   // Funding references
   if (Array.isArray(obj.funding_references)) {
     result.funding_references = obj.funding_references.filter(
-      (f) => !!f && typeof f === "object" && typeof (f as Record<string, unknown>).funder_name === "string",
+      (f) =>
+        !!f &&
+        typeof f === "object" &&
+        typeof (f as Record<string, unknown>).funder_name === "string",
     );
   }
 
   // Contributors
   if (Array.isArray(obj.contributors)) {
     result.contributors = obj.contributors.filter(
-      (c) => !!c && typeof c === "object" && typeof (c as Record<string, unknown>).name === "string",
+      (c) =>
+        !!c && typeof c === "object" && typeof (c as Record<string, unknown>).name === "string",
     );
   }
 
   // Dates
   if (Array.isArray(obj.dates)) {
     result.dates = obj.dates.filter(
-      (d) => !!d && typeof d === "object" && typeof (d as Record<string, unknown>).date === "string",
+      (d) =>
+        !!d && typeof d === "object" && typeof (d as Record<string, unknown>).date === "string",
     );
   }
 
@@ -419,7 +446,9 @@ function parseNemarMetadataV2(obj: Record<string, unknown>): NemarMetadataV2 {
       if (!g || typeof g !== "object") return false;
       const loc = g as Record<string, unknown>;
       const hasPlace = typeof loc.place === "string" && loc.place.length > 0;
-      const hasPoint = loc.point && typeof loc.point === "object" &&
+      const hasPoint =
+        loc.point &&
+        typeof loc.point === "object" &&
         typeof (loc.point as Record<string, unknown>).latitude === "number" &&
         typeof (loc.point as Record<string, unknown>).longitude === "number";
       return hasPlace || hasPoint;
@@ -768,7 +797,9 @@ export function buildDataCiteXml(metadata: DataCiteMetadata): string {
       const infoAttr = date.dateInformation
         ? ` dateInformation="${escapeXml(date.dateInformation)}"`
         : "";
-      lines.push(`    <date dateType="${escapeXml(date.dateType)}"${infoAttr}>${escapeXml(date.date)}</date>`);
+      lines.push(
+        `    <date dateType="${escapeXml(date.dateType)}"${infoAttr}>${escapeXml(date.date)}</date>`,
+      );
     }
     lines.push("  </dates>");
   }
@@ -941,8 +972,20 @@ export interface BidsDatasetDescription {
  */
 export function detectModalitiesFromTree(paths: string[]): string[] {
   const bidsDataTypes = new Set([
-    "eeg", "meg", "ieeg", "emg", "func", "anat", "dwi", "fmap",
-    "perf", "pet", "micr", "nirs", "motion", "beh",
+    "eeg",
+    "meg",
+    "ieeg",
+    "emg",
+    "func",
+    "anat",
+    "dwi",
+    "fmap",
+    "perf",
+    "pet",
+    "micr",
+    "nirs",
+    "motion",
+    "beh",
   ]);
   const found = new Set<string>();
   for (const p of paths) {

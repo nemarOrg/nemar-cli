@@ -6,12 +6,12 @@
  */
 
 import {
-  type NemarMetadataV2,
   type AuthorEnrichmentV2,
-  type StructuredKeyword,
-  type RelatedIdentifierEntry,
   type FundingReferenceEntry,
+  type NemarMetadataV2,
   type PipelineStage,
+  type RelatedIdentifierEntry,
+  type StructuredKeyword,
   isValidRelationType,
 } from "../../../shared/datacite-constants.js";
 
@@ -162,9 +162,11 @@ export function validateLlmResultV2(raw: Record<string, unknown>): LlmEnrichment
       const entry: FundingReferenceEntry = { funder_name: obj.funder_name };
       if (typeof obj.award_number === "string") entry.award_number = obj.award_number;
       if (typeof obj.award_title === "string") entry.award_title = obj.award_title;
-      if (typeof obj.funder_identifier === "string") entry.funder_identifier = obj.funder_identifier;
+      if (typeof obj.funder_identifier === "string")
+        entry.funder_identifier = obj.funder_identifier;
       if (typeof obj.funder_identifier_type === "string")
-        entry.funder_identifier_type = obj.funder_identifier_type as FundingReferenceEntry["funder_identifier_type"];
+        entry.funder_identifier_type =
+          obj.funder_identifier_type as FundingReferenceEntry["funder_identifier_type"];
       funds.push(entry);
     }
     if (funds.length > 0) result.funding_references = funds;
@@ -213,7 +215,9 @@ export function seedFromBids(
   const seeded: NemarMetadataV2 = {
     version: "2.0",
     pipeline_stage: "seeded",
-    ...(existing ? { ...existing, version: "2.0" as const, pipeline_stage: "seeded" as const } : {}),
+    ...(existing
+      ? { ...existing, version: "2.0" as const, pipeline_stage: "seeded" as const }
+      : {}),
   };
 
   // Authors: include ALL from BIDS, preserve existing ORCIDs/affiliations
@@ -341,17 +345,24 @@ export function mergeWithExisting(
 
     for (const ef of existingFunds) {
       // Check if LLM provided a parsed version of this raw BIDS string
-      const hasLlmReplacement = ef.award_number === undefined && llmResult.funding_references.some(
-        (lf) => lf.award_number && ef.funder_name.includes(lf.award_number),
-      );
+      const hasLlmReplacement =
+        ef.award_number === undefined &&
+        llmResult.funding_references.some(
+          (lf) => lf.award_number && ef.funder_name.includes(lf.award_number),
+        );
       if (!hasLlmReplacement) allFunds.push(ef);
     }
     for (const newFund of llmResult.funding_references) {
       // Deduplicate by exact match (funder_name + award_number) or by award_number alone
       const exists = allFunds.some((f) => {
-        if (f.funder_name === newFund.funder_name && (f.award_number || "") === (newFund.award_number || "")) return true;
+        if (
+          f.funder_name === newFund.funder_name &&
+          (f.award_number || "") === (newFund.award_number || "")
+        )
+          return true;
         // Same award number with different funder names (LLM may normalize funder names differently)
-        if (newFund.award_number && f.award_number && f.award_number === newFund.award_number) return true;
+        if (newFund.award_number && f.award_number && f.award_number === newFund.award_number)
+          return true;
         return false;
       });
       if (!exists) allFunds.push(newFund);
@@ -370,9 +381,7 @@ export function mergeWithExisting(
       // Skip LLM entries for identifiers already seeded from BIDS
       if (seededIdentifiers.has(newRel.identifier)) continue;
       const key = `${newRel.identifier}|${newRel.relation_type}`;
-      const exists = allRels.some(
-        (r) => `${r.identifier}|${r.relation_type}` === key,
-      );
+      const exists = allRels.some((r) => `${r.identifier}|${r.relation_type}` === key);
       if (!exists) allRels.push(newRel);
     }
     merged.related_identifiers = allRels;

@@ -1881,10 +1881,7 @@ const enrichmentSchemaV2 = z.object({
   formats: z.array(z.string()).optional(),
 });
 
-const enrichmentSchema = z.discriminatedUnion("version", [
-  enrichmentSchemaV1,
-  enrichmentSchemaV2,
-]);
+const enrichmentSchema = z.discriminatedUnion("version", [enrichmentSchemaV1, enrichmentSchemaV2]);
 
 adminRoutes.post("/datasets/:id/enrichment", zValidator("json", enrichmentSchema), async (c) => {
   const datasetId = c.req.param("id");
@@ -2379,7 +2376,13 @@ adminRoutes.post("/datasets/:id/ci", async (c) => {
     return c.json({ error: "Invalid repository format" }, 500);
   }
 
-  const WORKFLOW_FILES = ["bids-validation.yml", "version-check.yml", "pr-merge.yml", "generate-archive.yml", "llm-enrichment.yml"];
+  const WORKFLOW_FILES = [
+    "bids-validation.yml",
+    "version-check.yml",
+    "pr-merge.yml",
+    "generate-archive.yml",
+    "llm-enrichment.yml",
+  ];
   const result = await deployWorkflows(repoName, c.env.GITHUB_ADMIN_PAT);
 
   if (!result.success) {
@@ -3315,7 +3318,9 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
         const zenodoToken = isSandbox ? c.env.ZENODO_SANDBOX_API_KEY : c.env.ZENODO_API_KEY;
 
         if (!zenodoToken) {
-          console.warn(`[publish] No Zenodo API key for backup archive (sandbox=${isSandbox}); skipping`);
+          console.warn(
+            `[publish] No Zenodo API key for backup archive (sandbox=${isSandbox}); skipping`,
+          );
           await updateProgress("upload_to_zenodo");
         } else {
           // Check if we already have a Zenodo backup deposition
@@ -3346,7 +3351,9 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
 
             // Store the Zenodo deposition ID for future versions
             await db
-              .prepare("UPDATE datasets SET zenodo_concept_id = ?, updated_at = datetime('now') WHERE dataset_id = ?")
+              .prepare(
+                "UPDATE datasets SET zenodo_concept_id = ?, updated_at = datetime('now') WHERE dataset_id = ?",
+              )
               .bind(String(depositionId), datasetId)
               .run();
           }
@@ -3354,9 +3361,18 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
           const deposition = await getDeposition(depositionId, zenodoToken, isSandbox);
           if (deposition.links.bucket) {
             const filename = `${datasetId}-${tag}.zip`;
-            await uploadFile(depositionId, deposition.links.bucket, filename, archiveData, zenodoToken, isSandbox);
+            await uploadFile(
+              depositionId,
+              deposition.links.bucket,
+              filename,
+              archiveData,
+              zenodoToken,
+              isSandbox,
+            );
           } else {
-            console.warn(`[publish] Zenodo backup deposition ${depositionId} has no bucket URL; skipping upload`);
+            console.warn(
+              `[publish] Zenodo backup deposition ${depositionId} has no bucket URL; skipping upload`,
+            );
           }
 
           await updateProgress("upload_to_zenodo");
@@ -3433,7 +3449,11 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
         if (!dataset.ezid_identifier) {
           await updateProgress("publish_doi", "No EZID identifier found");
           return c.json(
-            { error: "No EZID identifier found for dataset", step: "publish_doi", steps_completed: completed },
+            {
+              error: "No EZID identifier found for dataset",
+              step: "publish_doi",
+              steps_completed: completed,
+            },
             500,
           );
         }
@@ -3445,7 +3465,9 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
         // Update EZID status in D1
         try {
           await db
-            .prepare("UPDATE datasets SET ezid_status = 'public', updated_at = datetime('now') WHERE dataset_id = ?")
+            .prepare(
+              "UPDATE datasets SET ezid_status = 'public', updated_at = datetime('now') WHERE dataset_id = ?",
+            )
             .bind(datasetId)
             .run();
         } catch (dbErr) {

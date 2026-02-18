@@ -4,24 +4,24 @@
  * Tests XML generation, BIDS mapping, and utility functions.
  */
 
-import { describe, test, expect } from "bun:test";
+import { describe, expect, test } from "bun:test";
 import {
-  buildDataCiteXml,
+  type DataCiteCreator,
+  type DataCiteMetadata,
   bidsToDataCite,
-  parseAuthorName,
+  buildDataCiteXml,
+  detectModalitiesFromTree,
   mapLicense,
   mapModalityToResourceType,
-  detectModalitiesFromTree,
-  parseNemarMetadata,
   nemarMetadataToEnrichment,
-  type DataCiteMetadata,
-  type DataCiteCreator,
+  parseAuthorName,
+  parseNemarMetadata,
 } from "../backend/src/services/datacite";
 import {
-  validateLlmResultV2,
   mergeWithExisting,
-  seedFromBids,
   parseValidationResult,
+  seedFromBids,
+  validateLlmResultV2,
 } from "../backend/src/services/llm-enrich";
 
 describe("parseAuthorName", () => {
@@ -135,31 +135,37 @@ describe("buildDataCiteXml", () => {
   test("includes all 20 properties when provided", () => {
     const metadata: DataCiteMetadata = {
       identifier: "10.82901/NEMAR.FULL",
-      creators: [{
-        name: "Shirazi, Yahya",
-        givenName: "Yahya",
-        familyName: "Shirazi",
-        orcid: "0000-0001-2345-6789",
-        affiliation: "UCSD",
-        ror: "https://ror.org/0168r3w48",
-      }],
+      creators: [
+        {
+          name: "Shirazi, Yahya",
+          givenName: "Yahya",
+          familyName: "Shirazi",
+          orcid: "0000-0001-2345-6789",
+          affiliation: "UCSD",
+          ror: "https://ror.org/0168r3w48",
+        },
+      ],
       titles: ["Full Metadata Test"],
       publisher: "NEMAR (Neuroelectromagnetic Data Archive and Tools Resource)",
       publicationYear: 2026,
       resourceTypeGeneral: "Dataset",
       resourceTypeSpecific: "EEG Dataset",
       subjects: [{ value: "EEG" }, { value: "BIDS" }],
-      contributors: [{
-        name: "NEMAR",
-        contributorType: "HostingInstitution",
-        nameType: "Organizational",
-      }],
+      contributors: [
+        {
+          name: "NEMAR",
+          contributorType: "HostingInstitution",
+          nameType: "Organizational",
+        },
+      ],
       dates: [{ date: "2026-02-10", dateType: "Issued" }],
-      relatedIdentifiers: [{
-        identifier: "10.1234/paper",
-        relatedIdentifierType: "DOI",
-        relationType: "IsSupplementTo",
-      }],
+      relatedIdentifiers: [
+        {
+          identifier: "10.1234/paper",
+          relatedIdentifierType: "DOI",
+          relationType: "IsSupplementTo",
+        },
+      ],
       descriptions: [{ description: "A test dataset", descriptionType: "Abstract" }],
       geoLocations: [{ place: "San Diego, CA" }],
       language: "en",
@@ -167,18 +173,22 @@ describe("buildDataCiteXml", () => {
       sizes: ["1.2 GB"],
       formats: ["application/x-edf"],
       version: "1.0.0",
-      rights: [{
-        rights: "CC BY 4.0",
-        rightsURI: "https://creativecommons.org/licenses/by/4.0/",
-        rightsIdentifier: "CC-BY-4.0",
-        rightsIdentifierScheme: "SPDX",
-      }],
-      fundingReferences: [{
-        funderName: "NIH",
-        funderIdentifier: "https://doi.org/10.13039/100000002",
-        funderIdentifierType: "Crossref Funder ID",
-        awardNumber: "R01-NS12345",
-      }],
+      rights: [
+        {
+          rights: "CC BY 4.0",
+          rightsURI: "https://creativecommons.org/licenses/by/4.0/",
+          rightsIdentifier: "CC-BY-4.0",
+          rightsIdentifierScheme: "SPDX",
+        },
+      ],
+      fundingReferences: [
+        {
+          funderName: "NIH",
+          funderIdentifier: "https://doi.org/10.13039/100000002",
+          funderIdentifierType: "Crossref Funder ID",
+          awardNumber: "R01-NS12345",
+        },
+      ],
     };
 
     const xml = buildDataCiteXml(metadata);
@@ -289,7 +299,7 @@ describe("buildDataCiteXml", () => {
         creators: [{ name: "Test" }],
         titles: ["Test"],
         publisher: "NEMAR",
-        publicationYear: NaN,
+        publicationYear: Number.NaN,
         resourceTypeGeneral: "Dataset",
       }),
     ).toThrow("publicationYear must be a valid number");
@@ -390,10 +400,12 @@ describe("bidsToDataCite", () => {
     };
 
     const enrichment = {
-      fundingInfo: [{
-        funderName: "National Institutes of Health",
-        awardNumber: "R01-NS12345",
-      }],
+      fundingInfo: [
+        {
+          funderName: "National Institutes of Health",
+          awardNumber: "R01-NS12345",
+        },
+      ],
     };
 
     const metadata = bidsToDataCite("nm000103", "10.82901/NEMAR.ABC", bids, enrichment);
@@ -407,18 +419,13 @@ describe("bidsToDataCite", () => {
     const bids = {
       Name: "Test",
       Authors: ["Doe, John"],
-      ReferencesAndLinks: [
-        "10.1234/paper.2024.001",
-        "https://example.com/docs",
-      ],
+      ReferencesAndLinks: ["10.1234/paper.2024.001", "https://example.com/docs"],
     };
 
     const metadata = bidsToDataCite("nm000103", "10.82901/NEMAR.ABC", bids);
 
     // Only DOI-like references should be included
-    const doiRefs = metadata.relatedIdentifiers?.filter(
-      (r) => r.relatedIdentifierType === "DOI",
-    );
+    const doiRefs = metadata.relatedIdentifiers?.filter((r) => r.relatedIdentifierType === "DOI");
     expect(doiRefs).toHaveLength(1);
     expect(doiRefs?.[0]?.identifier).toBe("10.1234/paper.2024.001");
   });
@@ -448,10 +455,7 @@ describe("detectModalitiesFromTree", () => {
   });
 
   test("deduplicates modalities", () => {
-    const paths = [
-      "sub-01/emg/sub-01_emg.bdf",
-      "sub-02/emg/sub-02_emg.bdf",
-    ];
+    const paths = ["sub-01/emg/sub-01_emg.bdf", "sub-02/emg/sub-02_emg.bdf"];
     expect(detectModalitiesFromTree(paths)).toEqual(["emg"]);
   });
 
@@ -494,40 +498,32 @@ describe("parseNemarMetadata v2", () => {
       version: "2.0",
       description: "Test dataset",
       methods_description: "EMG recording",
-      keywords: [
-        { term: "EMG", subject_scheme: "MeSH" },
-        { term: "hand gestures" },
-      ],
+      keywords: [{ term: "EMG", subject_scheme: "MeSH" }, { term: "hand gestures" }],
       related_identifiers: [
         { identifier: "10.1234/test", identifier_type: "DOI", relation_type: "IsDescribedBy" },
       ],
       authors: {
-        "Doe, John": { orcid: "https://orcid.org/0000-0001-2345-6789", affiliations: [{ name: "MIT" }] },
+        "Doe, John": {
+          orcid: "https://orcid.org/0000-0001-2345-6789",
+          affiliations: [{ name: "MIT" }],
+        },
       },
-      funding_references: [
-        { funder_name: "NIH", award_number: "R01-123" },
-      ],
-      contributors: [
-        { name: "Smith, Jane", contributor_type: "DataCollector" },
-      ],
-      dates: [
-        { date: "2024-01-15", date_type: "Collected" },
-      ],
-      geo_locations: [
-        { place: "Boston, MA", point: { latitude: 42.36, longitude: -71.06 } },
-      ],
+      funding_references: [{ funder_name: "NIH", award_number: "R01-123" }],
+      contributors: [{ name: "Smith, Jane", contributor_type: "DataCollector" }],
+      dates: [{ date: "2024-01-15", date_type: "Collected" }],
+      geo_locations: [{ place: "Boston, MA", point: { latitude: 42.36, longitude: -71.06 } }],
     };
     const result = parseNemarMetadata(raw);
     expect(result).not.toBeNull();
-    expect(result!.version).toBe("2.0");
-    if (result!.version === "2.0") {
-      expect(result!.keywords).toHaveLength(2);
-      expect(result!.related_identifiers).toHaveLength(1);
-      expect(result!.authors).toBeDefined();
-      expect(result!.funding_references).toHaveLength(1);
-      expect(result!.contributors).toHaveLength(1);
-      expect(result!.dates).toHaveLength(1);
-      expect(result!.geo_locations).toHaveLength(1);
+    expect(result?.version).toBe("2.0");
+    if (result?.version === "2.0") {
+      expect(result?.keywords).toHaveLength(2);
+      expect(result?.related_identifiers).toHaveLength(1);
+      expect(result?.authors).toBeDefined();
+      expect(result?.funding_references).toHaveLength(1);
+      expect(result?.contributors).toHaveLength(1);
+      expect(result?.dates).toHaveLength(1);
+      expect(result?.geo_locations).toHaveLength(1);
     }
   });
 
@@ -542,10 +538,10 @@ describe("parseNemarMetadata v2", () => {
     };
     const result = parseNemarMetadata(raw);
     expect(result).not.toBeNull();
-    if (result!.version === "2.0") {
-      expect(result!.authors).toBeDefined();
-      expect(Object.keys(result!.authors!)).toHaveLength(1);
-      expect(result!.authors!["Valid Author"]).toBeDefined();
+    if (result?.version === "2.0") {
+      expect(result?.authors).toBeDefined();
+      expect(Object.keys(result?.authors!)).toHaveLength(1);
+      expect(result?.authors?.["Valid Author"]).toBeDefined();
     }
   });
 
@@ -563,9 +559,9 @@ describe("parseNemarMetadata v2", () => {
       },
     };
     const result = parseNemarMetadata(raw);
-    if (result!.version === "2.0") {
-      expect(result!.authors!["Test Author"].affiliations).toHaveLength(1);
-      expect(result!.authors!["Test Author"].affiliations![0].name).toBe("MIT");
+    if (result?.version === "2.0") {
+      expect(result?.authors?.["Test Author"].affiliations).toHaveLength(1);
+      expect(result?.authors?.["Test Author"].affiliations?.[0].name).toBe("MIT");
     }
   });
 
@@ -580,10 +576,10 @@ describe("parseNemarMetadata v2", () => {
       ],
     };
     const result = parseNemarMetadata(raw);
-    if (result!.version === "2.0") {
-      expect(result!.geo_locations).toHaveLength(2);
-      expect(result!.geo_locations![0].place).toBe("Boston");
-      expect(result!.geo_locations![1].point!.latitude).toBe(42.36);
+    if (result?.version === "2.0") {
+      expect(result?.geo_locations).toHaveLength(2);
+      expect(result?.geo_locations?.[0].place).toBe("Boston");
+      expect(result?.geo_locations?.[1].point?.latitude).toBe(42.36);
     }
   });
 
@@ -604,18 +600,15 @@ describe("nemarMetadataToEnrichment v2", () => {
       },
     });
     expect(result.authors).toBeDefined();
-    expect(result.authors!["Doe, John"].orcid).toBe("https://orcid.org/0000-0001-2345-6789");
-    expect(result.authors!["Doe, John"].affiliation).toBe("MIT");
-    expect(result.authors!["Doe, John"].ror).toBe("https://ror.org/042nb2s44");
+    expect(result.authors?.["Doe, John"].orcid).toBe("https://orcid.org/0000-0001-2345-6789");
+    expect(result.authors?.["Doe, John"].affiliation).toBe("MIT");
+    expect(result.authors?.["Doe, John"].ror).toBe("https://ror.org/042nb2s44");
   });
 
   test("converts v2 keywords to plain strings", () => {
     const result = nemarMetadataToEnrichment({
       version: "2.0",
-      keywords: [
-        { term: "EMG", subject_scheme: "MeSH" },
-        { term: "neuroscience" },
-      ],
+      keywords: [{ term: "EMG", subject_scheme: "MeSH" }, { term: "neuroscience" }],
     });
     expect(result.keywords).toEqual(["EMG", "neuroscience"]);
   });
@@ -625,11 +618,15 @@ describe("nemarMetadataToEnrichment v2", () => {
       version: "2.0",
       related_identifiers: [
         { identifier: "10.1234/test", identifier_type: "DOI", relation_type: "IsDescribedBy" },
-        { identifier: "10.5678/test2", identifier_type: "DOI", relation_type: "InvalidType" as any },
+        {
+          identifier: "10.5678/test2",
+          identifier_type: "DOI",
+          relation_type: "InvalidType" as any,
+        },
       ],
     });
     expect(result.relatedDois).toHaveLength(1);
-    expect(result.relatedDois![0].doi).toBe("10.1234/test");
+    expect(result.relatedDois?.[0].doi).toBe("10.1234/test");
   });
 
   test("converts v2 funding to enrichment format", () => {
@@ -640,8 +637,8 @@ describe("nemarMetadataToEnrichment v2", () => {
       ],
     });
     expect(result.fundingInfo).toHaveLength(1);
-    expect(result.fundingInfo![0].funderName).toBe("NIH");
-    expect(result.fundingInfo![0].awardNumber).toBe("R01-123");
+    expect(result.fundingInfo?.[0].funderName).toBe("NIH");
+    expect(result.fundingInfo?.[0].awardNumber).toBe("R01-123");
   });
 
   test("extracts collection date from v2 dates", () => {
@@ -658,9 +655,7 @@ describe("nemarMetadataToEnrichment v2", () => {
   test("extracts geo_location place from v2", () => {
     const result = nemarMetadataToEnrichment({
       version: "2.0",
-      geo_locations: [
-        { place: "Shanghai, China", point: { latitude: 31.23, longitude: 121.47 } },
-      ],
+      geo_locations: [{ place: "Shanghai, China", point: { latitude: 31.23, longitude: 121.47 } }],
     });
     expect(result.geoLocation).toBe("Shanghai, China");
   });
@@ -680,12 +675,12 @@ describe("validateLlmResultV2 (backend)", () => {
     expect(result.description).toBe("An EEG dataset for motor imagery research");
     expect(result.methods_description).toBe("128-channel EEG recorded at 512Hz");
     expect(result.keywords).toHaveLength(2);
-    expect(result.keywords![0]).toEqual({ term: "EEG", subject_scheme: "MeSH" });
-    expect(result.keywords![1]).toEqual({ term: "BCI" });
+    expect(result.keywords?.[0]).toEqual({ term: "EEG", subject_scheme: "MeSH" });
+    expect(result.keywords?.[1]).toEqual({ term: "BCI" });
     expect(result.funding_references).toHaveLength(1);
-    expect(result.funding_references![0].funder_name).toBe("NIH");
+    expect(result.funding_references?.[0].funder_name).toBe("NIH");
     expect(result.related_identifiers).toHaveLength(1);
-    expect(result.related_identifiers![0].relation_type).toBe("IsDescribedBy");
+    expect(result.related_identifiers?.[0].relation_type).toBe("IsDescribedBy");
   });
 
   test("accepts plain string keywords", () => {
@@ -693,7 +688,7 @@ describe("validateLlmResultV2 (backend)", () => {
       keywords: ["EEG", "motor imagery", "BIDS"],
     });
     expect(result.keywords).toHaveLength(3);
-    expect(result.keywords![0]).toEqual({ term: "EEG" });
+    expect(result.keywords?.[0]).toEqual({ term: "EEG" });
   });
 
   test("filters invalid related identifiers", () => {
@@ -705,7 +700,7 @@ describe("validateLlmResultV2 (backend)", () => {
       ],
     });
     expect(result.related_identifiers).toHaveLength(1);
-    expect(result.related_identifiers![0].identifier).toBe("10.1234/valid");
+    expect(result.related_identifiers?.[0].identifier).toBe("10.1234/valid");
   });
 
   test("filters invalid funding references", () => {
@@ -747,7 +742,7 @@ describe("mergeWithExisting", () => {
     expect(merged.description).toBe("New LLM description");
     expect(merged.keywords).toHaveLength(1);
     expect(merged.authors).toBeDefined();
-    expect(merged.authors!["Doe, John"].orcid).toBe("https://orcid.org/0000-0001-2345-6789");
+    expect(merged.authors?.["Doe, John"].orcid).toBe("https://orcid.org/0000-0001-2345-6789");
   });
 
   test("works with null existing metadata", () => {
@@ -778,7 +773,7 @@ describe("mergeWithExisting", () => {
 
     expect(merged.description).toBe("Updated description");
     expect(merged.keywords).toHaveLength(1);
-    expect(merged.keywords![0].term).toBe("new keyword");
+    expect(merged.keywords?.[0].term).toBe("new keyword");
   });
 
   test("BIDS-seeded related_identifiers take priority over LLM for same DOI", () => {
@@ -786,14 +781,26 @@ describe("mergeWithExisting", () => {
       version: "2.0" as const,
       pipeline_stage: "seeded" as const,
       related_identifiers: [
-        { identifier: "10.13026/ym7v-bh53", identifier_type: "DOI" as const, relation_type: "IsDerivedFrom" },
+        {
+          identifier: "10.13026/ym7v-bh53",
+          identifier_type: "DOI" as const,
+          relation_type: "IsDerivedFrom",
+        },
       ],
     };
     const llmResult = {
       related_identifiers: [
-        { identifier: "10.1109/TNSRE.2021.3082551", identifier_type: "DOI" as const, relation_type: "IsDescribedBy" },
+        {
+          identifier: "10.1109/TNSRE.2021.3082551",
+          identifier_type: "DOI" as const,
+          relation_type: "IsDescribedBy",
+        },
         // Duplicate of BIDS-seeded entry with different relation type (LLM might misclassify)
-        { identifier: "10.13026/ym7v-bh53", identifier_type: "DOI" as const, relation_type: "IsVersionOf" },
+        {
+          identifier: "10.13026/ym7v-bh53",
+          identifier_type: "DOI" as const,
+          relation_type: "IsVersionOf",
+        },
       ],
     };
 
@@ -801,8 +808,8 @@ describe("mergeWithExisting", () => {
 
     // Should have 2 entries: BIDS IsDerivedFrom preserved, LLM IsVersionOf dropped (same identifier), new IsDescribedBy added
     expect(merged.related_identifiers).toHaveLength(2);
-    expect(merged.related_identifiers![0].relation_type).toBe("IsDerivedFrom");
-    expect(merged.related_identifiers![1].relation_type).toBe("IsDescribedBy");
+    expect(merged.related_identifiers?.[0].relation_type).toBe("IsDerivedFrom");
+    expect(merged.related_identifiers?.[1].relation_type).toBe("IsDescribedBy");
     expect(merged.pipeline_stage).toBe("enriched");
   });
 
@@ -817,7 +824,10 @@ describe("mergeWithExisting", () => {
     };
     const llmResult = {
       funding_references: [
-        { funder_name: "Shanghai Municipal Science and Technology Commission", award_number: "2017SHZDZX01" },
+        {
+          funder_name: "Shanghai Municipal Science and Technology Commission",
+          award_number: "2017SHZDZX01",
+        },
         { funder_name: "NIH", award_number: "R01-NS99999" },
         { funder_name: "NSF", award_number: "BCS-12345" },
       ],
@@ -827,11 +837,13 @@ describe("mergeWithExisting", () => {
 
     // Raw BIDS strings replaced by LLM-parsed versions (2 replaced + 1 new = 3 total)
     expect(merged.funding_references).toHaveLength(3);
-    expect(merged.funding_references!.some((f) => f.award_number === "2017SHZDZX01")).toBe(true);
-    expect(merged.funding_references!.some((f) => f.award_number === "R01-NS99999")).toBe(true);
-    expect(merged.funding_references!.some((f) => f.award_number === "BCS-12345")).toBe(true);
+    expect(merged.funding_references?.some((f) => f.award_number === "2017SHZDZX01")).toBe(true);
+    expect(merged.funding_references?.some((f) => f.award_number === "R01-NS99999")).toBe(true);
+    expect(merged.funding_references?.some((f) => f.award_number === "BCS-12345")).toBe(true);
     // Raw BIDS strings should be gone
-    expect(merged.funding_references!.some((f) => f.funder_name.includes("(2017SHZDZX01)"))).toBe(false);
+    expect(merged.funding_references?.some((f) => f.funder_name.includes("(2017SHZDZX01)"))).toBe(
+      false,
+    );
     expect(merged.pipeline_stage).toBe("enriched");
   });
 });
@@ -842,12 +854,7 @@ describe("seedFromBids", () => {
     BIDSVersion: "1.11.0",
     DatasetType: "raw",
     License: "ODC-By-1.0",
-    Authors: [
-      "Xinyu Jiang",
-      "Chenyun Dai",
-      "Xiangyu Liu",
-      "Jiahao Fan",
-    ],
+    Authors: ["Xinyu Jiang", "Chenyun Dai", "Xiangyu Liu", "Jiahao Fan"],
     ReferencesAndLinks: [
       "https://doi.org/10.1109/TNSRE.2021.3082551",
       "https://physionet.org/content/hd-semg/1.0.0/",
@@ -872,8 +879,8 @@ describe("seedFromBids", () => {
     expect(seeded.pipeline_stage).toBe("seeded");
     expect(seeded.authors).toBeDefined();
     expect(Object.keys(seeded.authors!)).toHaveLength(4);
-    expect(seeded.authors!["Xinyu Jiang"]).toEqual({});
-    expect(seeded.authors!["Jiahao Fan"]).toEqual({});
+    expect(seeded.authors?.["Xinyu Jiang"]).toEqual({});
+    expect(seeded.authors?.["Jiahao Fan"]).toEqual({});
   });
 
   test("preserves existing ORCIDs when seeding", () => {
@@ -887,8 +894,8 @@ describe("seedFromBids", () => {
     const seeded = seedFromBids(fullBids, existing);
 
     expect(Object.keys(seeded.authors!)).toHaveLength(4);
-    expect(seeded.authors!["Xinyu Jiang"].orcid).toBe("https://orcid.org/0000-0001-2345-6789");
-    expect(seeded.authors!["Chenyun Dai"]).toEqual({});
+    expect(seeded.authors?.["Xinyu Jiang"].orcid).toBe("https://orcid.org/0000-0001-2345-6789");
+    expect(seeded.authors?.["Chenyun Dai"]).toEqual({});
   });
 
   test("SourceDatasets mapped to IsDerivedFrom", () => {
@@ -898,25 +905,23 @@ describe("seedFromBids", () => {
       (r) => r.relation_type === "IsDerivedFrom",
     );
     expect(isDerivedFrom).toHaveLength(1);
-    expect(isDerivedFrom![0].identifier).toBe("10.13026/ym7v-bh53");
-    expect(isDerivedFrom![0].identifier_type).toBe("DOI");
+    expect(isDerivedFrom?.[0].identifier).toBe("10.13026/ym7v-bh53");
+    expect(isDerivedFrom?.[0].identifier_type).toBe("DOI");
   });
 
   test("ReferencesAndLinks DOIs mapped to References", () => {
     const seeded = seedFromBids(fullBids, null);
 
-    const references = seeded.related_identifiers?.filter(
-      (r) => r.relation_type === "References",
-    );
+    const references = seeded.related_identifiers?.filter((r) => r.relation_type === "References");
     expect(references).toHaveLength(1);
-    expect(references![0].identifier).toBe("10.1109/TNSRE.2021.3082551");
+    expect(references?.[0].identifier).toBe("10.1109/TNSRE.2021.3082551");
   });
 
   test("Funding strings extracted as raw funding references", () => {
     const seeded = seedFromBids(fullBids, null);
 
     expect(seeded.funding_references).toHaveLength(2);
-    expect(seeded.funding_references![0].funder_name).toContain("Shanghai");
+    expect(seeded.funding_references?.[0].funder_name).toContain("Shanghai");
   });
 
   test("DatasetType sets resource_type_general", () => {
@@ -938,7 +943,11 @@ describe("seedFromBids", () => {
     const existing = {
       version: "2.0" as const,
       related_identifiers: [
-        { identifier: "10.13026/ym7v-bh53", identifier_type: "DOI" as const, relation_type: "IsDerivedFrom" },
+        {
+          identifier: "10.13026/ym7v-bh53",
+          identifier_type: "DOI" as const,
+          relation_type: "IsDerivedFrom",
+        },
       ],
     };
 
@@ -955,25 +964,39 @@ describe("seedFromBids", () => {
       version: "2.0" as const,
       related_identifiers: [
         // Prior LLM run incorrectly classified as IsVersionOf
-        { identifier: "10.13026/ym7v-bh53", identifier_type: "DOI" as const, relation_type: "IsVersionOf" },
+        {
+          identifier: "10.13026/ym7v-bh53",
+          identifier_type: "DOI" as const,
+          relation_type: "IsVersionOf",
+        },
         // Another unrelated entry that should be preserved
-        { identifier: "10.1109/TNSRE.2021.3082551", identifier_type: "DOI" as const, relation_type: "IsDescribedBy" },
+        {
+          identifier: "10.1109/TNSRE.2021.3082551",
+          identifier_type: "DOI" as const,
+          relation_type: "IsDescribedBy",
+        },
       ],
     };
 
     const seeded = seedFromBids(fullBids, existing);
 
     // IsVersionOf for SourceDataset DOI should be removed, replaced with IsDerivedFrom
-    expect(seeded.related_identifiers!.some((r) =>
-      r.identifier === "10.13026/ym7v-bh53" && r.relation_type === "IsVersionOf",
-    )).toBe(false);
-    expect(seeded.related_identifiers!.some((r) =>
-      r.identifier === "10.13026/ym7v-bh53" && r.relation_type === "IsDerivedFrom",
-    )).toBe(true);
+    expect(
+      seeded.related_identifiers?.some(
+        (r) => r.identifier === "10.13026/ym7v-bh53" && r.relation_type === "IsVersionOf",
+      ),
+    ).toBe(false);
+    expect(
+      seeded.related_identifiers?.some(
+        (r) => r.identifier === "10.13026/ym7v-bh53" && r.relation_type === "IsDerivedFrom",
+      ),
+    ).toBe(true);
     // Unrelated entry preserved
-    expect(seeded.related_identifiers!.some((r) =>
-      r.identifier === "10.1109/TNSRE.2021.3082551" && r.relation_type === "IsDescribedBy",
-    )).toBe(true);
+    expect(
+      seeded.related_identifiers?.some(
+        (r) => r.identifier === "10.1109/TNSRE.2021.3082551" && r.relation_type === "IsDescribedBy",
+      ),
+    ).toBe(true);
   });
 });
 
@@ -983,7 +1006,12 @@ describe("parseValidationResult", () => {
       overall_pass: true,
       criteria: {
         author_completeness: { confidence: 95, pass: true, issues: [] },
-        related_identifiers: { confidence: 90, pass: true, issues: [], suggestions: ["Add paper DOI"] },
+        related_identifiers: {
+          confidence: 90,
+          pass: true,
+          issues: [],
+          suggestions: ["Add paper DOI"],
+        },
         description_accuracy: { confidence: 85, pass: true, issues: [] },
         keyword_relevance: { confidence: 80, pass: true, issues: [] },
         funding_accuracy: { confidence: 70, pass: true, issues: [] },
@@ -1006,8 +1034,16 @@ describe("parseValidationResult", () => {
     const raw = {
       overall_pass: false,
       criteria: {
-        author_completeness: { confidence: 30, pass: false, issues: ["Missing author: Jane Smith"] },
-        related_identifiers: { confidence: 40, pass: false, issues: ["Wrong relation type for PhysioNet DOI"] },
+        author_completeness: {
+          confidence: 30,
+          pass: false,
+          issues: ["Missing author: Jane Smith"],
+        },
+        related_identifiers: {
+          confidence: 40,
+          pass: false,
+          issues: ["Wrong relation type for PhysioNet DOI"],
+        },
         description_accuracy: { confidence: 80, pass: true, issues: [] },
         keyword_relevance: { confidence: 70, pass: true, issues: [] },
         funding_accuracy: { confidence: 60, pass: true, issues: [] },
