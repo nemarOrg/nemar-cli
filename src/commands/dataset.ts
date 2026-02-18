@@ -172,7 +172,6 @@ async function uploadWithAdaptiveBatching(opts: {
     totalUploaded = result.uploaded;
     totalFailed = result.failed;
     totalElapsedSec = (Date.now() - batchStart) / 1000;
-
   }
 
   // Upload remaining files in adaptive batches
