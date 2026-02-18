@@ -17,6 +17,10 @@ import {
   type DataCiteMetadata,
   type DataCiteCreator,
 } from "../backend/src/services/datacite";
+import {
+  validateLlmResultV2,
+  mergeWithExisting,
+} from "../backend/src/services/llm-enrich";
 
 describe("parseAuthorName", () => {
   test("parses Last, First format", () => {
@@ -657,5 +661,121 @@ describe("nemarMetadataToEnrichment v2", () => {
       ],
     });
     expect(result.geoLocation).toBe("Shanghai, China");
+  });
+});
+
+describe("validateLlmResultV2 (backend)", () => {
+  test("validates full v2 response", () => {
+    const result = validateLlmResultV2({
+      description: "An EEG dataset for motor imagery research",
+      methods_description: "128-channel EEG recorded at 512Hz",
+      keywords: [{ term: "EEG", subject_scheme: "MeSH" }, { term: "BCI" }],
+      funding_references: [{ funder_name: "NIH", award_number: "R01-NS12345" }],
+      related_identifiers: [
+        { identifier: "10.1234/paper", identifier_type: "DOI", relation_type: "IsDescribedBy" },
+      ],
+    });
+    expect(result.description).toBe("An EEG dataset for motor imagery research");
+    expect(result.methods_description).toBe("128-channel EEG recorded at 512Hz");
+    expect(result.keywords).toHaveLength(2);
+    expect(result.keywords![0]).toEqual({ term: "EEG", subject_scheme: "MeSH" });
+    expect(result.keywords![1]).toEqual({ term: "BCI" });
+    expect(result.funding_references).toHaveLength(1);
+    expect(result.funding_references![0].funder_name).toBe("NIH");
+    expect(result.related_identifiers).toHaveLength(1);
+    expect(result.related_identifiers![0].relation_type).toBe("IsDescribedBy");
+  });
+
+  test("accepts plain string keywords", () => {
+    const result = validateLlmResultV2({
+      keywords: ["EEG", "motor imagery", "BIDS"],
+    });
+    expect(result.keywords).toHaveLength(3);
+    expect(result.keywords![0]).toEqual({ term: "EEG" });
+  });
+
+  test("filters invalid related identifiers", () => {
+    const result = validateLlmResultV2({
+      related_identifiers: [
+        { identifier: "10.1234/valid", identifier_type: "DOI", relation_type: "Cites" },
+        { identifier: "not-a-doi", identifier_type: "DOI", relation_type: "Cites" },
+        { identifier: "10.1234/bad-type", identifier_type: "DOI", relation_type: "InvalidType" },
+      ],
+    });
+    expect(result.related_identifiers).toHaveLength(1);
+    expect(result.related_identifiers![0].identifier).toBe("10.1234/valid");
+  });
+
+  test("filters invalid funding references", () => {
+    const result = validateLlmResultV2({
+      funding_references: [
+        { funder_name: "NIH", award_number: "R01" },
+        { not_funder: "bad" },
+        null,
+      ],
+    });
+    expect(result.funding_references).toHaveLength(1);
+  });
+
+  test("empty object returns empty result", () => {
+    expect(validateLlmResultV2({})).toEqual({});
+  });
+});
+
+describe("mergeWithExisting", () => {
+  test("preserves author ORCIDs from existing metadata", () => {
+    const existing = {
+      version: "2.0" as const,
+      authors: {
+        "Doe, John": {
+          orcid: "https://orcid.org/0000-0001-2345-6789",
+          affiliations: [{ name: "MIT" }],
+        },
+      },
+      description: "Old description",
+    };
+    const llmResult = {
+      description: "New LLM description",
+      keywords: [{ term: "EEG" }],
+    };
+
+    const merged = mergeWithExisting(existing, llmResult);
+
+    expect(merged.version).toBe("2.0");
+    expect(merged.description).toBe("New LLM description");
+    expect(merged.keywords).toHaveLength(1);
+    expect(merged.authors).toBeDefined();
+    expect(merged.authors!["Doe, John"].orcid).toBe("https://orcid.org/0000-0001-2345-6789");
+  });
+
+  test("works with null existing metadata", () => {
+    const llmResult = {
+      description: "A new dataset",
+      keywords: [{ term: "MEG" }],
+    };
+
+    const merged = mergeWithExisting(null, llmResult);
+
+    expect(merged.version).toBe("2.0");
+    expect(merged.description).toBe("A new dataset");
+    expect(merged.authors).toBeUndefined();
+  });
+
+  test("LLM fields overwrite existing non-author fields", () => {
+    const existing = {
+      version: "2.0" as const,
+      description: "Old description",
+      keywords: [{ term: "old keyword" }],
+    };
+    const llmResult = {
+      description: "Updated description",
+      keywords: [{ term: "new keyword" }],
+    };
+
+    const merged = mergeWithExisting(existing, llmResult);
+
+    expect(merged.description).toBe("Updated description");
+    expect(merged.keywords).toHaveLength(1);
+    expect(merged.keywords![0].term).toBe("new keyword");
   });
 });

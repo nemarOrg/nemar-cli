@@ -9,12 +9,15 @@ import type { Context } from "hono";
 import { Hono } from "hono";
 import { createEzidVersionDoi, parseDoiProvider } from "../services/doi.js";
 import { extractDoi } from "../services/ezid.js";
-import { downloadReleaseArchive } from "../services/github.js";
+import { createOrUpdateFile, getBlobContent, getTreeAtRef, downloadReleaseArchive } from "../services/github.js";
+import { enrichFromReadme, mergeWithExisting } from "../services/llm-enrich.js";
 import { generateManifest } from "../services/manifest.js";
 import { errorMessage, extractRepoName, readRepoMetadata } from "../services/repo-metadata.js";
 import { uploadManifest } from "../services/s3.js";
 import * as zenodo from "../services/zenodo.js";
 import type { Bindings } from "../types/bindings.js";
+import type { NemarMetadataV2 } from "../../../shared/datacite-constants.js";
+import { parseNemarMetadata } from "../services/datacite.js";
 
 type WebhookContext = Context<{ Bindings: Bindings }>;
 
@@ -490,5 +493,182 @@ async function handleZenodoVersionDoi(
     );
   }
 }
+
+/**
+ * Trigger LLM-based metadata enrichment for a dataset
+ *
+ * Called by GitHub Actions when README.md or dataset_description.json changes.
+ * Reads source files from GitHub, extracts metadata via OpenRouter,
+ * merges with existing author ORCIDs, and commits .nemar/metadata.json.
+ */
+webhooks.post("/llm-enrich", async (c) => {
+  // Validate webhook token
+  const token = c.req.header("X-Webhook-Token");
+  const expectedToken = c.env.GITHUB_WEBHOOK_SECRET;
+
+  if (!expectedToken || !token || token !== expectedToken) {
+    return c.json({ error: "Invalid webhook token" }, 401);
+  }
+
+  // Check for API key
+  const apiKey = c.env.OPENROUTER_API_KEY;
+  if (!apiKey) {
+    return c.json({ error: "OPENROUTER_API_KEY not configured" }, 500);
+  }
+
+  // Parse request body
+  let body: { dataset_id: string };
+  try {
+    body = await c.req.json();
+  } catch {
+    return c.json({ error: "Invalid JSON in request body" }, 400);
+  }
+
+  if (!body.dataset_id) {
+    return c.json({ error: "Missing required field: dataset_id" }, 400);
+  }
+
+  const { dataset_id } = body;
+
+  // Look up dataset in D1
+  const dataset = await c.env.DB.prepare(
+    "SELECT dataset_id, github_repo, enrichment_json FROM datasets WHERE dataset_id = ?",
+  )
+    .bind(dataset_id)
+    .first<{
+      dataset_id: string;
+      github_repo: string | null;
+      enrichment_json: string | null;
+    }>();
+
+  if (!dataset) {
+    return c.json({ error: "Dataset not found" }, 404);
+  }
+
+  if (!dataset.github_repo) {
+    return c.json({ error: "Dataset has no GitHub repository" }, 400);
+  }
+
+  const repoName = extractRepoName(dataset.github_repo);
+  if (!repoName) {
+    return c.json({ error: "Invalid github_repo format" }, 400);
+  }
+
+  const pat = c.env.GITHUB_ADMIN_PAT;
+
+  try {
+    // Read repo tree to find README and dataset_description.json
+    const tree = await getTreeAtRef(repoName, "main", pat);
+
+    // Read README.md
+    const readmeFile = tree.find(
+      (f) => f.path === "README.md" || f.path === "README" || f.path === "readme.md",
+    );
+    if (!readmeFile) {
+      return c.json({ error: "No README found in repository", skipped: true }, 200);
+    }
+    const readmeContent = await getBlobContent(repoName, readmeFile.sha, pat);
+
+    // Read dataset_description.json
+    let bidsDescription: Record<string, unknown> = {};
+    const descFile = tree.find((f) => f.path === "dataset_description.json");
+    if (descFile) {
+      try {
+        const descContent = await getBlobContent(repoName, descFile.sha, pat);
+        bidsDescription = JSON.parse(descContent) as Record<string, unknown>;
+      } catch {
+        console.warn(`[llm-enrich] Could not parse dataset_description.json for ${dataset_id}`);
+      }
+    }
+
+    // Read existing .nemar/metadata.json to preserve author ORCIDs
+    let existingMetadata: NemarMetadataV2 | null = null;
+    const nemarMetaFile =
+      tree.find((f) => f.path === ".nemar/metadata.json") ||
+      tree.find((f) => f.path === "nemar_metadata.json");
+    if (nemarMetaFile) {
+      try {
+        const nemarContent = await getBlobContent(repoName, nemarMetaFile.sha, pat);
+        const parsed = parseNemarMetadata(JSON.parse(nemarContent));
+        if (parsed?.version === "2.0") {
+          existingMetadata = parsed;
+        } else if (parsed?.version === "1.0" && parsed.authors) {
+          // Convert v1 authors to v2 format for preservation
+          const v2Authors: Record<string, { orcid?: string; affiliations?: Array<{ name: string }> }> = {};
+          for (const [name, entry] of Object.entries(parsed.authors)) {
+            v2Authors[name] = {};
+            if (entry.orcid) v2Authors[name].orcid = entry.orcid;
+            if (entry.affiliation) v2Authors[name].affiliations = [{ name: entry.affiliation }];
+          }
+          existingMetadata = { version: "2.0", authors: v2Authors };
+        }
+      } catch (err) {
+        console.warn(`[llm-enrich] Could not read existing metadata for ${dataset_id}:`, err);
+      }
+    }
+
+    // Call LLM for enrichment
+    const llmResult = await enrichFromReadme(readmeContent, bidsDescription, apiKey);
+
+    // Merge with existing (preserves author ORCIDs)
+    const merged = mergeWithExisting(existingMetadata, llmResult);
+
+    // Commit .nemar/metadata.json to repo
+    const metadataContent = JSON.stringify(merged, null, 2);
+    await createOrUpdateFile(
+      repoName,
+      ".nemar/metadata.json",
+      metadataContent,
+      "Update NEMAR metadata via LLM enrichment",
+      pat,
+    );
+
+    // Ensure .bidsignore includes .nemar/
+    const bidsignoreFile = tree.find((f) => f.path === ".bidsignore");
+    let bidsignoreContent = "";
+    if (bidsignoreFile) {
+      bidsignoreContent = await getBlobContent(repoName, bidsignoreFile.sha, pat);
+    }
+    if (!bidsignoreContent.includes(".nemar/")) {
+      bidsignoreContent = bidsignoreContent
+        ? `${bidsignoreContent.trimEnd()}\n.nemar/\n`
+        : `.nemar/\n`;
+      await createOrUpdateFile(
+        repoName,
+        ".bidsignore",
+        bidsignoreContent,
+        "Add .nemar/ to .bidsignore",
+        pat,
+      );
+    }
+
+    // Cache in D1
+    await c.env.DB.prepare(
+      "UPDATE datasets SET enrichment_json = ?, enrichment_updated_at = datetime('now'), updated_at = datetime('now') WHERE dataset_id = ?",
+    )
+      .bind(metadataContent, dataset_id)
+      .run();
+
+    return c.json({
+      message: "LLM enrichment completed",
+      dataset_id,
+      fields_extracted: Object.keys(llmResult).filter(
+        (k) => llmResult[k as keyof typeof llmResult] !== undefined,
+      ),
+      authors_preserved: existingMetadata?.authors
+        ? Object.keys(existingMetadata.authors).length
+        : 0,
+    });
+  } catch (error) {
+    console.error(`[llm-enrich] Failed for ${dataset_id}:`, error);
+    return c.json(
+      {
+        error: "LLM enrichment failed",
+        details: errorMessage(error),
+      },
+      500,
+    );
+  }
+});
 
 export default webhooks;

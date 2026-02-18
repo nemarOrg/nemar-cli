@@ -1,19 +1,21 @@
 /**
- * LLM-based metadata enrichment using OpenRouter API (CLI-side)
+ * Backend LLM-based metadata enrichment service (Workers-compatible)
  *
  * Extracts structured v2 metadata from README.md and BIDS dataset_description.json
- * for populating DataCite DOI records. Used by `nemar admin doi enrich`.
+ * using OpenRouter API. Designed for server-side use in Cloudflare Workers webhooks.
  */
 
 import {
+  type NemarMetadataV2,
+  type AuthorEnrichmentV2,
   type StructuredKeyword,
   type RelatedIdentifierEntry,
   type FundingReferenceEntry,
   isValidRelationType,
-} from "../../shared/datacite-constants.js";
+} from "../../../shared/datacite-constants.js";
 
-/** v2 LLM enrichment result (snake_case, structured fields). */
-export interface LlmEnrichmentResult {
+/** Result of LLM enrichment (v2 format fields only). */
+export interface LlmEnrichmentResultV2 {
   description?: string;
   methods_description?: string;
   keywords?: StructuredKeyword[];
@@ -45,23 +47,18 @@ Rules:
 - Do NOT hallucinate DOIs or funding numbers.`;
 
 /**
- * Extract structured metadata from README content and BIDS description using an LLM.
+ * Extract structured v2 metadata from README and BIDS description using an LLM.
  *
  * @param readmeContent - Raw README.md content
  * @param bidsDescription - Parsed dataset_description.json
- * @param apiKey - OpenRouter API key (from env OPENROUTER_API_KEY or config)
- * @returns Extracted metadata in v2 format, or empty object if LLM is unavailable
+ * @param apiKey - OpenRouter API key
+ * @returns Extracted metadata in v2 format
  */
 export async function enrichFromReadme(
   readmeContent: string,
   bidsDescription: Record<string, unknown>,
-  apiKey?: string,
-): Promise<LlmEnrichmentResult> {
-  const key = apiKey || process.env.OPENROUTER_API_KEY;
-  if (!key) {
-    return {};
-  }
-
+  apiKey: string,
+): Promise<LlmEnrichmentResultV2> {
   // Truncate README to avoid token limits (keep first ~8000 chars)
   const truncatedReadme =
     readmeContent.length > 8000 ? `${readmeContent.slice(0, 8000)}\n[truncated]` : readmeContent;
@@ -77,7 +74,7 @@ ${truncatedReadme}`;
   const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
     method: "POST",
     headers: {
-      Authorization: `Bearer ${key}`,
+      Authorization: `Bearer ${apiKey}`,
       "Content-Type": "application/json",
     },
     body: JSON.stringify({
@@ -117,14 +114,14 @@ ${truncatedReadme}`;
       `LLM returned invalid JSON: ${parseErr instanceof Error ? parseErr.message : String(parseErr)}`,
     );
   }
-  return validateLlmResult(parsed);
+  return validateLlmResultV2(parsed);
 }
 
 /**
  * Validate and clean the LLM response to match v2 schema.
  */
-export function validateLlmResult(raw: Record<string, unknown>): LlmEnrichmentResult {
-  const result: LlmEnrichmentResult = {};
+export function validateLlmResultV2(raw: Record<string, unknown>): LlmEnrichmentResultV2 {
+  const result: LlmEnrichmentResultV2 = {};
 
   if (typeof raw.description === "string" && raw.description) {
     result.description = raw.description;
@@ -164,6 +161,9 @@ export function validateLlmResult(raw: Record<string, unknown>): LlmEnrichmentRe
       const entry: FundingReferenceEntry = { funder_name: obj.funder_name };
       if (typeof obj.award_number === "string") entry.award_number = obj.award_number;
       if (typeof obj.award_title === "string") entry.award_title = obj.award_title;
+      if (typeof obj.funder_identifier === "string") entry.funder_identifier = obj.funder_identifier;
+      if (typeof obj.funder_identifier_type === "string")
+        entry.funder_identifier_type = obj.funder_identifier_type as FundingReferenceEntry["funder_identifier_type"];
       funds.push(entry);
     }
     if (funds.length > 0) result.funding_references = funds;
@@ -193,4 +193,32 @@ export function validateLlmResult(raw: Record<string, unknown>): LlmEnrichmentRe
   }
 
   return result;
+}
+
+/**
+ * Merge LLM enrichment results into an existing NemarMetadataV2 object.
+ * Preserves author ORCIDs/affiliations from existing metadata while adding LLM-extracted fields.
+ */
+export function mergeWithExisting(
+  existing: NemarMetadataV2 | null,
+  llmResult: LlmEnrichmentResultV2,
+): NemarMetadataV2 {
+  const merged: NemarMetadataV2 = {
+    version: "2.0",
+    ...(existing ? { ...existing, version: "2.0" as const } : {}),
+  };
+
+  // LLM fields overwrite (these are the LLM's domain)
+  if (llmResult.description) merged.description = llmResult.description;
+  if (llmResult.methods_description) merged.methods_description = llmResult.methods_description;
+  if (llmResult.keywords) merged.keywords = llmResult.keywords;
+  if (llmResult.funding_references) merged.funding_references = llmResult.funding_references;
+  if (llmResult.related_identifiers) merged.related_identifiers = llmResult.related_identifiers;
+
+  // Preserve existing authors (ORCIDs, affiliations) -- LLM does not touch these
+  if (existing?.authors) {
+    merged.authors = existing.authors;
+  }
+
+  return merged;
 }

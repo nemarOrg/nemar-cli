@@ -908,12 +908,58 @@ jobs:
         run: node /tmp/stream-archive.js
 `;
 
+  // LLM Metadata Enrichment workflow
+  const llmEnrichment = `name: LLM Metadata Enrichment
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'README.md'
+      - 'dataset_description.json'
+  workflow_dispatch:
+
+jobs:
+  enrich:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger enrichment
+        env:
+          NEMAR_WEBHOOK_TOKEN: \${{ secrets.NEMAR_WEBHOOK_TOKEN }}
+        run: |
+          REPO_NAME="\${{ github.event.repository.name }}"
+
+          # Skip if webhook token not configured
+          if [ -z "$NEMAR_WEBHOOK_TOKEN" ]; then
+            echo "NEMAR_WEBHOOK_TOKEN not configured, skipping LLM enrichment"
+            exit 0
+          fi
+
+          echo "Triggering LLM enrichment for $REPO_NAME"
+
+          RESPONSE=$(curl -sf -w "\\n%{http_code}" -X POST \\
+            "https://api.osc.earth/nemar/webhooks/llm-enrich" \\
+            -H "Content-Type: application/json" \\
+            -H "X-Webhook-Token: $NEMAR_WEBHOOK_TOKEN" \\
+            -d "{\\"dataset_id\\": \\"$REPO_NAME\\"}")
+
+          HTTP_CODE=$(echo "$RESPONSE" | tail -1)
+          BODY=$(echo "$RESPONSE" | head -n -1)
+
+          echo "Response ($HTTP_CODE): $BODY"
+
+          if [ "$HTTP_CODE" -ge 400 ]; then
+            echo "::warning::LLM enrichment failed (HTTP $HTTP_CODE) - this is non-blocking"
+          fi
+`;
+
   // Deploy each workflow
   const workflows = [
     { path: ".github/workflows/bids-validation.yml", content: bidsValidation },
     { path: ".github/workflows/version-check.yml", content: versionCheck },
     { path: ".github/workflows/pr-merge.yml", content: prMerge },
     { path: ".github/workflows/generate-archive.yml", content: generateArchive },
+    { path: ".github/workflows/llm-enrichment.yml", content: llmEnrichment },
   ];
 
   for (const workflow of workflows) {

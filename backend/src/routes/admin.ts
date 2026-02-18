@@ -91,6 +91,7 @@ import {
  */
 type PublicationStep =
   | "ci_check"
+  | "enrichment_check"
   | "repo_public"
   | "s3_public_read"
   | "tag_protect"
@@ -1036,6 +1037,7 @@ const createConceptDoiSchema = z.object({
     .optional(),
   sandbox: z.boolean().optional().default(false),
   provider: z.enum(["ezid", "zenodo"]).optional().default("ezid"),
+  skip_enrichment_check: z.boolean().optional().default(false),
 });
 
 adminRoutes.post(
@@ -1072,6 +1074,7 @@ adminRoutes.post(
         owner_username: string;
         owner_orcid: string | null;
         is_sandbox: number | null;
+        enrichment_json: string | null;
       }>();
 
     if (!dataset) {
@@ -1102,6 +1105,19 @@ adminRoutes.post(
             : null,
         },
         400,
+      );
+    }
+
+    // Gate on enrichment: require LLM enrichment before minting DOIs
+    if (!dataset.enrichment_json && !body.skip_enrichment_check) {
+      return c.json(
+        {
+          error: "LLM enrichment has not run yet",
+          message:
+            "Push to main (or trigger the LLM Metadata Enrichment workflow manually) so enrichment runs, then retry. Pass skip_enrichment_check: true to override.",
+          dataset_id: dataset.dataset_id,
+        },
+        422,
       );
     }
 
@@ -2341,7 +2357,7 @@ adminRoutes.post("/datasets/:id/ci", async (c) => {
     return c.json({ error: "Invalid repository format" }, 500);
   }
 
-  const WORKFLOW_FILES = ["bids-validation.yml", "version-check.yml", "pr-merge.yml"];
+  const WORKFLOW_FILES = ["bids-validation.yml", "version-check.yml", "pr-merge.yml", "generate-archive.yml", "llm-enrichment.yml"];
   const result = await deployWorkflows(repoName, c.env.GITHUB_ADMIN_PAT);
 
   if (!result.success) {
@@ -2539,6 +2555,7 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
     : [];
   const allSteps: readonly PublicationStep[] = [
     "ci_check",
+    "enrichment_check",
     "repo_public",
     "s3_public_read",
     "tag_protect",
@@ -2707,7 +2724,32 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
     }
   }
 
-  // Step 2: Make repo public
+  // Step 2: Enrichment check (warn-only, does not block publication)
+  if (stepsToRun.includes("enrichment_check")) {
+    try {
+      await startStep("enrichment_check");
+
+      const enrichRow = await db
+        .prepare("SELECT enrichment_json FROM datasets WHERE dataset_id = ?")
+        .bind(datasetId)
+        .first<{ enrichment_json: string | null }>();
+
+      if (!enrichRow?.enrichment_json) {
+        console.warn(
+          `[publish] Dataset ${datasetId} has no LLM enrichment metadata. DOI will have minimal metadata.`,
+        );
+      }
+
+      await updateProgress("enrichment_check");
+    } catch (err) {
+      // Non-fatal: log warning and continue
+      const msg = errorMessage(err);
+      console.warn(`[publish] Enrichment check error for ${datasetId} (non-fatal): ${msg}`);
+      await updateProgress("enrichment_check");
+    }
+  }
+
+  // Step 3: Make repo public
   if (stepsToRun.includes("repo_public")) {
     try {
       await startStep("repo_public");

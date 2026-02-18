@@ -14,7 +14,7 @@
  * - nemar dataset collaborators   - List dataset collaborators
  */
 
-import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join, resolve } from "node:path";
 import { spawn } from "bun";
@@ -681,12 +681,23 @@ Examples:
       `Found ${manifest.files.length} files (${manifest.dataFiles} data, ${manifest.metadataFiles} metadata)`,
     );
 
-    // Step 4b: Collect co-author ORCIDs (skip if nemar_metadata.json already exists from prior run)
+    // Step 4b: Collect co-author ORCIDs (skip if metadata already exists from prior run)
+    // Check v2 first (.nemar/metadata.json), fall back to v1 (nemar_metadata.json)
     let coAuthorEnrichment: NemarMetadataPayload | undefined;
-    const existingNemarMeta = resolve(absolutePath, "nemar_metadata.json");
-    if (existsSync(existingNemarMeta)) {
+    const existingNemarMetaV2 = resolve(absolutePath, ".nemar", "metadata.json");
+    const existingNemarMetaV1 = resolve(absolutePath, "nemar_metadata.json");
+    if (existsSync(existingNemarMetaV2)) {
       try {
-        coAuthorEnrichment = JSON.parse(readFileSync(existingNemarMeta, "utf-8"));
+        coAuthorEnrichment = JSON.parse(readFileSync(existingNemarMetaV2, "utf-8"));
+        console.log(
+          chalk.gray("  Using existing .nemar/metadata.json (author ORCIDs from prior run)"),
+        );
+      } catch {
+        // File exists but is unreadable; will re-collect below
+      }
+    } else if (existsSync(existingNemarMetaV1)) {
+      try {
+        coAuthorEnrichment = JSON.parse(readFileSync(existingNemarMetaV1, "utf-8"));
         console.log(
           chalk.gray("  Using existing nemar_metadata.json (author ORCIDs from prior run)"),
         );
@@ -723,8 +734,8 @@ Examples:
             console.log();
             console.log(chalk.cyan("Authors found:"), authorList.join(" | "));
 
-            // Auto-match uploader ORCID
-            const authors: Record<string, { orcid?: string; affiliation?: string }> = {};
+            // Auto-match uploader ORCID (v2 format with affiliations array)
+            const authors: Record<string, { orcid?: string; affiliations?: Array<{ name: string }> }> = {};
             let uploaderMatchedAuthor: string | undefined;
             if (uploaderOrcid && uploaderUsername) {
               const lowerName = uploaderUsername.toLowerCase();
@@ -755,7 +766,7 @@ Examples:
               ]);
 
               if (orcid) {
-                const entry: { orcid: string; affiliation?: string } = { orcid };
+                const entry: { orcid: string; affiliations?: Array<{ name: string }> } = { orcid };
                 const { affiliation } = await inquirer.prompt([
                   {
                     type: "input",
@@ -763,23 +774,27 @@ Examples:
                     message: `  Affiliation for "${author}" (optional):`,
                   },
                 ]);
-                if (affiliation) entry.affiliation = affiliation;
+                if (affiliation) entry.affiliations = [{ name: affiliation }];
                 authors[author] = entry;
               }
             }
 
             if (Object.keys(authors).length > 0) {
-              coAuthorEnrichment = { version: "1.0", authors };
+              coAuthorEnrichment = { version: "2.0", authors };
 
               // Write immediately so resumed uploads don't re-prompt
               try {
-                const nemarMetaPath = resolve(absolutePath, "nemar_metadata.json");
+                const nemarMetaDir = resolve(absolutePath, ".nemar");
+                if (!existsSync(nemarMetaDir)) {
+                  mkdirSync(nemarMetaDir, { recursive: true });
+                }
+                const nemarMetaPath = resolve(nemarMetaDir, "metadata.json");
                 writeFileSync(nemarMetaPath, JSON.stringify(coAuthorEnrichment, null, 2));
-                console.log(chalk.gray("  Saved nemar_metadata.json with author ORCIDs"));
+                console.log(chalk.gray("  Saved .nemar/metadata.json with author ORCIDs"));
               } catch (writeErr) {
                 console.log(
                   chalk.yellow(
-                    `  Warning: Could not save nemar_metadata.json: ${errorDetail(writeErr)}`,
+                    `  Warning: Could not save .nemar/metadata.json: ${errorDetail(writeErr)}`,
                   ),
                 );
               }
@@ -1236,28 +1251,30 @@ Examples:
     }
 
     // Step 10b: Ensure .bidsignore includes NEMAR-specific paths
-    // (nemar_metadata.json is already written at Step 4b; this just updates bidsignore)
+    // (.nemar/metadata.json is already written at Step 4b; this just updates bidsignore)
     if (!isStepCompleted(uploadProgress, "metadata_write")) {
       if (coAuthorEnrichment) {
         try {
-          // Write nemar_metadata.json if not already on disk (e.g. old CLI resume)
-          const nemarMetaPath = resolve(absolutePath, "nemar_metadata.json");
+          // Write .nemar/metadata.json if not already on disk (e.g. old CLI resume)
+          const nemarMetaDir = resolve(absolutePath, ".nemar");
+          const nemarMetaPath = resolve(nemarMetaDir, "metadata.json");
           if (!existsSync(nemarMetaPath)) {
+            if (!existsSync(nemarMetaDir)) {
+              mkdirSync(nemarMetaDir, { recursive: true });
+            }
             writeFileSync(nemarMetaPath, JSON.stringify(coAuthorEnrichment, null, 2));
           }
 
-          // Ensure .bidsignore includes NEMAR-specific paths
+          // Ensure .bidsignore includes .nemar/ directory
           const bidsignorePath = resolve(absolutePath, ".bidsignore");
           let bidsignoreContent = "";
           if (existsSync(bidsignorePath)) {
             bidsignoreContent = readFileSync(bidsignorePath, "utf-8");
           }
-          const entriesToIgnore = ["nemar_metadata.json", ".nemar/"];
-          const missing = entriesToIgnore.filter((e) => !bidsignoreContent.includes(e));
-          if (missing.length > 0) {
+          if (!bidsignoreContent.includes(".nemar/")) {
             const newContent = bidsignoreContent
-              ? `${bidsignoreContent.trimEnd()}\n${missing.join("\n")}\n`
-              : `${missing.join("\n")}\n`;
+              ? `${bidsignoreContent.trimEnd()}\n.nemar/\n`
+              : `.nemar/\n`;
             writeFileSync(bidsignorePath, newContent);
           }
           console.log(chalk.gray("  Updated .bidsignore for NEMAR metadata"));
