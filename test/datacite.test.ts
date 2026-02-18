@@ -924,9 +924,39 @@ describe("seedFromBids", () => {
     expect(seeded.funding_references?.[0].funder_name).toContain("Shanghai");
   });
 
-  test("DatasetType sets resource_type_general", () => {
+  test("DatasetType sets resource_type_general and dataset_type", () => {
     const seeded = seedFromBids(fullBids, null);
     expect(seeded.resource_type_general).toBe("Dataset");
+    expect(seeded.dataset_type).toBe("raw");
+  });
+
+  test("title extracted from BIDS Name", () => {
+    const seeded = seedFromBids(fullBids, null);
+    expect(seeded.title).toBe("HySER Dataset");
+  });
+
+  test("license extracted from BIDS License", () => {
+    const seeded = seedFromBids(fullBids, null);
+    expect(seeded.license).toBe("ODC-By-1.0");
+  });
+
+  test("modalities detected from tree paths", () => {
+    const treePaths = [
+      "dataset_description.json",
+      "sub-001/emg/sub-001_task-gesture_emg.edf",
+      "sub-001/beh/sub-001_task-gesture_events.tsv",
+    ];
+    const seeded = seedFromBids(fullBids, null, "nm000108", treePaths);
+
+    expect(seeded.modalities).toContain("emg");
+    expect(seeded.modalities).toContain("beh");
+    expect(seeded.resource_type_specific).toBe("EMG Dataset");
+  });
+
+  test("modalities not set when tree paths not provided", () => {
+    const seeded = seedFromBids(fullBids, null);
+    expect(seeded.modalities).toBeUndefined();
+    expect(seeded.resource_type_specific).toBeUndefined();
   });
 
   test("empty BIDS returns minimal metadata", () => {

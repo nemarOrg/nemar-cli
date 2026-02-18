@@ -358,12 +358,27 @@ function parseNemarMetadataV2(obj: Record<string, unknown>): NemarMetadataV2 {
     result.pipeline_stage = obj.pipeline_stage;
   }
 
+  // Title
+  if (typeof obj.title === "string" && obj.title) {
+    result.title = obj.title;
+  }
+
   // Description
   if (typeof obj.description === "string" && obj.description) {
     result.description = obj.description;
   }
   if (typeof obj.methods_description === "string" && obj.methods_description) {
     result.methods_description = obj.methods_description;
+  }
+
+  // License
+  if (typeof obj.license === "string" && obj.license) {
+    result.license = obj.license;
+  }
+
+  // Dataset type (raw/derivative)
+  if (typeof obj.dataset_type === "string" && obj.dataset_type) {
+    result.dataset_type = obj.dataset_type;
   }
 
   // Authors (keyed by display name, with optional ORCID and affiliations)
@@ -453,6 +468,19 @@ function parseNemarMetadataV2(obj: Record<string, unknown>): NemarMetadataV2 {
         typeof (loc.point as Record<string, unknown>).longitude === "number";
       return hasPlace || hasPoint;
     });
+  }
+
+  // Resource types
+  if (typeof obj.resource_type_general === "string" && obj.resource_type_general) {
+    result.resource_type_general = obj.resource_type_general;
+  }
+  if (typeof obj.resource_type_specific === "string" && obj.resource_type_specific) {
+    result.resource_type_specific = obj.resource_type_specific;
+  }
+
+  // Modalities (detected BIDS datatype directories)
+  if (Array.isArray(obj.modalities)) {
+    result.modalities = obj.modalities.filter((m): m is string => typeof m === "string");
   }
 
   // Sizes and formats

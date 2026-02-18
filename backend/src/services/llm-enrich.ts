@@ -15,6 +15,11 @@ import {
   isValidRelationType,
 } from "../../../shared/datacite-constants.js";
 
+import {
+  detectModalitiesFromTree,
+  mapModalityToResourceType,
+} from "./datacite.js";
+
 /** Result of LLM enrichment (v2 format fields only). */
 export interface LlmEnrichmentResultV2 {
   description?: string;
@@ -212,6 +217,7 @@ export function seedFromBids(
   bidsDescription: Record<string, unknown>,
   existing: NemarMetadataV2 | null,
   datasetId?: string,
+  treePaths?: string[],
 ): NemarMetadataV2 {
   const seeded: NemarMetadataV2 = {
     version: "2.0",
@@ -305,9 +311,29 @@ export function seedFromBids(
   }
   if (fundingRefs.length > 0) seeded.funding_references = fundingRefs;
 
-  // DatasetType -> resource_type_general
+  // Title from BIDS Name
+  if (typeof bidsDescription.Name === "string" && bidsDescription.Name) {
+    seeded.title = bidsDescription.Name;
+  }
+
+  // License from BIDS License
+  if (typeof bidsDescription.License === "string" && bidsDescription.License) {
+    seeded.license = bidsDescription.License;
+  }
+
+  // DatasetType (raw/derivative) and resource_type_general
   if (typeof bidsDescription.DatasetType === "string") {
+    seeded.dataset_type = bidsDescription.DatasetType;
     seeded.resource_type_general = "Dataset";
+  }
+
+  // Detect modalities from repo tree (e.g. eeg, emg, func)
+  if (treePaths && treePaths.length > 0) {
+    const modalities = detectModalitiesFromTree(treePaths);
+    if (modalities.length > 0) {
+      seeded.modalities = modalities;
+      seeded.resource_type_specific = mapModalityToResourceType(modalities);
+    }
   }
 
   // Dataset URLs: GitHub repo and NEMAR landing page

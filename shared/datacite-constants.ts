@@ -160,8 +160,11 @@ export function isValidPipelineStage(value: string): value is PipelineStage {
 export interface NemarMetadataV2 {
   version: "2.0";
   pipeline_stage?: PipelineStage;
+  title?: string;
   description?: string;
   methods_description?: string;
+  license?: string;
+  dataset_type?: string;
   keywords?: StructuredKeyword[];
   related_identifiers?: RelatedIdentifierEntry[];
   authors?: Record<string, AuthorEnrichmentV2>;
@@ -170,6 +173,10 @@ export interface NemarMetadataV2 {
   dates?: StructuredDate[];
   geo_locations?: GeoLocationEntry[];
   resource_type_general?: string;
+  /** Modality-specific type, e.g. "EEG", "EMG", "fMRI" */
+  resource_type_specific?: string;
+  /** Detected BIDS datatype directories, e.g. ["eeg"], ["emg", "beh"] */
+  modalities?: string[];
   sizes?: string[];
   formats?: string[];
 }
