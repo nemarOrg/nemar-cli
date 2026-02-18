@@ -18,6 +18,7 @@ import {
   getTreeAtRef,
 } from "../services/github.js";
 import {
+  correctFromFeedback,
   enrichFromReadme,
   mergeWithExisting,
   seedFromBids,
@@ -659,20 +660,115 @@ webhooks.post("/llm-enrich", async (c) => {
         .join(", ")}`,
     );
 
-    // Stage 3: LLM validation (judge reviews metadata quality)
+    // Stage 3: LLM validation with feedback loop (up to 3 correction attempts)
+    const MAX_CORRECTION_ATTEMPTS = 3;
     let finalMetadata = enriched;
     let validationResult = null;
+    let correctionAttempts = 0;
+
     try {
-      const validated = await validateMetadata(enriched, readmeContent, bidsDescription, apiKey);
-      finalMetadata = validated.metadata;
-      validationResult = validated.validation;
-      console.log(
-        `[llm-enrich] Stage 3 (validate): ${dataset_id} - ${validated.validation.valid ? "PASSED" : "FAILED"}, blocking: ${validated.validation.blocking_issues.length}, warnings: ${validated.validation.warnings.length}`,
-      );
+      let currentMetadata = enriched;
+      for (let attempt = 0; attempt <= MAX_CORRECTION_ATTEMPTS; attempt++) {
+        const validated = await validateMetadata(
+          currentMetadata,
+          readmeContent,
+          bidsDescription,
+          apiKey,
+        );
+        validationResult = validated.validation;
+
+        const label = attempt === 0 ? "validate" : `correction-${attempt}`;
+        console.log(
+          `[llm-enrich] Stage 3 (${label}): ${dataset_id} - ${validated.validation.valid ? "PASSED" : "FAILED"}, blocking: ${validated.validation.blocking_issues.length}, warnings: ${validated.validation.warnings.length}`,
+        );
+
+        if (validated.validation.valid) {
+          finalMetadata = validated.metadata;
+          break;
+        }
+
+        // If we've exhausted correction attempts, keep the enriched metadata
+        if (attempt >= MAX_CORRECTION_ATTEMPTS) {
+          finalMetadata = validated.metadata;
+          break;
+        }
+
+        // Feed blocking issues back to LLM for correction
+        correctionAttempts++;
+        console.log(
+          `[llm-enrich] Correction attempt ${correctionAttempts}/${MAX_CORRECTION_ATTEMPTS} for ${dataset_id}`,
+        );
+        try {
+          const corrections = await correctFromFeedback(
+            currentMetadata,
+            validated.validation.blocking_issues,
+            validated.validation.warnings,
+            readmeContent,
+            bidsDescription,
+            apiKey,
+          );
+          currentMetadata = mergeWithExisting(currentMetadata, corrections);
+        } catch (corrErr) {
+          console.warn(
+            `[llm-enrich] Correction attempt ${correctionAttempts} failed for ${dataset_id}: ${errorMessage(corrErr)}`,
+          );
+          finalMetadata = validated.metadata;
+          break;
+        }
+      }
     } catch (valErr) {
       console.warn(
         `[llm-enrich] Stage 3 (validate) failed for ${dataset_id}, staying at 'enriched': ${errorMessage(valErr)}`,
       );
+    }
+
+    // If still not validated after all attempts, create a GitHub issue
+    if (
+      finalMetadata.pipeline_stage !== "validated" &&
+      validationResult &&
+      validationResult.blocking_issues.length > 0
+    ) {
+      try {
+        const issueBody = [
+          "## Metadata Validation Failed",
+          "",
+          `The automated metadata pipeline for **${dataset_id}** could not reach the "validated" stage after ${correctionAttempts} correction attempt(s).`,
+          "",
+          "### Blocking Issues",
+          ...validationResult.blocking_issues.map((i) => `- ${i}`),
+          "",
+          ...(validationResult.warnings.length > 0
+            ? ["### Warnings", ...validationResult.warnings.map((w) => `- ${w}`), ""]
+            : []),
+          "### Next Steps",
+          "1. Review the issues above and fix the underlying data (e.g., `dataset_description.json`)",
+          "2. Push the fix to `main` to re-trigger the enrichment pipeline",
+          "3. Or manually trigger the LLM Metadata Enrichment workflow",
+          "",
+          "*This issue was created automatically by the metadata pipeline.*",
+        ].join("\n");
+
+        await fetch(`https://api.github.com/repos/nemarDatasets/${repoName}/issues`, {
+          method: "POST",
+          headers: {
+            Authorization: `token ${pat}`,
+            Accept: "application/vnd.github+json",
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            title: `Metadata validation failed for ${dataset_id}`,
+            body: issueBody,
+            labels: ["metadata"],
+          }),
+        });
+        console.log(
+          `[llm-enrich] Created GitHub issue for unresolved validation failures on ${dataset_id}`,
+        );
+      } catch (issueErr) {
+        console.warn(
+          `[llm-enrich] Failed to create GitHub issue for ${dataset_id}: ${errorMessage(issueErr)}`,
+        );
+      }
     }
 
     // Commit .nemar/metadata.json to repo

@@ -15,10 +15,7 @@ import {
   isValidRelationType,
 } from "../../../shared/datacite-constants.js";
 
-import {
-  detectModalitiesFromTree,
-  mapModalityToResourceType,
-} from "./datacite.js";
+import { detectModalitiesFromTree, mapModalityToResourceType } from "./datacite.js";
 
 /** Result of LLM enrichment (v2 format fields only). */
 export interface LlmEnrichmentResultV2 {
@@ -485,11 +482,12 @@ Rate each criterion from 0-100 confidence that the metadata is CORRECT:
 - Is each relation type correct?
   - IsDerivedFrom: this dataset was created from that source
   - IsVersionOf: this is a newer version of the same dataset
-  - IsDescribedBy: a paper that describes this dataset
+  - IsDescribedBy: a paper/page that describes this dataset (also valid for GitHub repo and NEMAR landing page URLs)
   - IsSupplementTo: this dataset supplements a publication
   - References: general citation
 - Are the DOIs valid identifiers?
 - Cross-check: does dataset_description.json have SourceDatasets that should be IsDerivedFrom?
+- NOTE: GitHub repo URLs (github.com/nemarDatasets/...) and NEMAR landing page URLs (nemar.org/dataexplorer/...) with relation type IsDescribedBy are CORRECT and should NOT be flagged as issues.
 
 ### 3. Description Accuracy (weight: medium)
 - Does the abstract accurately describe the dataset content?
@@ -614,6 +612,107 @@ ${truncatedReadme}`;
   };
 
   return { metadata: updatedMetadata, validation };
+}
+
+/**
+ * Stage 3b: Correct enriched metadata based on validation feedback.
+ *
+ * Sends the current metadata, blocking issues, and source material back to the
+ * LLM to fix specific problems identified by the validator. Returns corrected
+ * LLM enrichment fields that can be merged back into the metadata.
+ */
+export async function correctFromFeedback(
+  metadata: NemarMetadataV2,
+  blockingIssues: string[],
+  warnings: string[],
+  readmeContent: string,
+  bidsDescription: Record<string, unknown>,
+  apiKey: string,
+): Promise<LlmEnrichmentResultV2> {
+  const truncatedReadme =
+    readmeContent.length > 8000 ? `${readmeContent.slice(0, 8000)}\n[truncated]` : readmeContent;
+
+  const correctionPrompt = `You are a metadata correction assistant for neuroimaging datasets.
+A validation judge has reviewed the metadata and found issues that need to be fixed.
+Your job is to produce CORRECTED metadata fields that address the blocking issues.
+
+IMPORTANT:
+- Only return fields that need correction. Do NOT return unchanged fields.
+- Do NOT modify authors (those are locked from BIDS).
+- Do NOT modify related_identifiers that were seeded from BIDS (IsDerivedFrom entries, GitHub/NEMAR URLs).
+- Focus on fixing the blocking issues. Warnings are optional to address.
+
+Return ONLY valid JSON with the corrected fields (same schema as enrichment):
+{
+  "description": "corrected abstract if needed",
+  "methods_description": "corrected methods if needed",
+  "keywords": [{"term": "...", "subject_scheme": "..."}],
+  "funding_references": [{"funder_name": "...", "award_number": "..."}],
+  "related_identifiers": [{"identifier": "...", "identifier_type": "DOI", "relation_type": "..."}]
+}`;
+
+  const userPrompt = `## Current metadata
+\`\`\`json
+${JSON.stringify(metadata, null, 2)}
+\`\`\`
+
+## BLOCKING ISSUES (must fix)
+${blockingIssues.map((i, idx) => `${idx + 1}. ${i}`).join("\n")}
+
+## WARNINGS (optional to fix)
+${warnings.map((w, idx) => `${idx + 1}. ${w}`).join("\n")}
+
+## BIDS dataset_description.json
+\`\`\`json
+${JSON.stringify(bidsDescription, null, 2)}
+\`\`\`
+
+## README.md
+${truncatedReadme}`;
+
+  const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      model: "anthropic/claude-haiku-4.5",
+      messages: [
+        { role: "system", content: correctionPrompt },
+        { role: "user", content: userPrompt },
+      ],
+      temperature: 0.1,
+      max_tokens: 3000,
+    }),
+  });
+
+  if (!response.ok) {
+    const errorText = await response.text();
+    throw new Error(`OpenRouter correction API error (${response.status}): ${errorText}`);
+  }
+
+  const data = (await response.json()) as {
+    choices?: Array<{ message?: { content?: string } }>;
+  };
+
+  const content = data.choices?.[0]?.message?.content;
+  if (!content) {
+    throw new Error("No content in correction LLM response");
+  }
+
+  const jsonMatch = content.match(/```(?:json)?\s*([\s\S]*?)```/) || [null, content];
+  const jsonStr = (jsonMatch[1] || content).trim();
+
+  let parsed: Record<string, unknown>;
+  try {
+    parsed = JSON.parse(jsonStr) as Record<string, unknown>;
+  } catch (parseErr) {
+    throw new Error(
+      `Correction LLM returned invalid JSON: ${parseErr instanceof Error ? parseErr.message : String(parseErr)}`,
+    );
+  }
+  return validateLlmResultV2(parsed);
 }
 
 /**
