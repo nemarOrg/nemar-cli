@@ -77,7 +77,7 @@ ${truncatedReadme}`;
       "Content-Type": "application/json",
     },
     body: JSON.stringify({
-      model: "anthropic/claude-haiku-4-5-20251001",
+      model: "anthropic/claude-haiku-4.5",
       messages: [
         { role: "system", content: SYSTEM_PROMPT },
         { role: "user", content: userPrompt },
