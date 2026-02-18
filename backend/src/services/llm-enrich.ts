@@ -211,6 +211,7 @@ export function validateLlmResultV2(raw: Record<string, unknown>): LlmEnrichment
 export function seedFromBids(
   bidsDescription: Record<string, unknown>,
   existing: NemarMetadataV2 | null,
+  datasetId?: string,
 ): NemarMetadataV2 {
   const seeded: NemarMetadataV2 = {
     version: "2.0",
@@ -307,6 +308,28 @@ export function seedFromBids(
   // DatasetType -> resource_type_general
   if (typeof bidsDescription.DatasetType === "string") {
     seeded.resource_type_general = "Dataset";
+  }
+
+  // Dataset URLs: GitHub repo and NEMAR landing page
+  if (datasetId) {
+    const githubUrl = `https://github.com/nemarDatasets/${datasetId}`;
+    if (!relatedIds.some((r) => r.identifier === githubUrl)) {
+      relatedIds.push({
+        identifier: githubUrl,
+        identifier_type: "URL",
+        relation_type: "IsDescribedBy",
+      });
+    }
+    const nemarUrl = `https://nemar.org/dataexplorer/detail?dataset_id=${datasetId}`;
+    if (!relatedIds.some((r) => r.identifier === nemarUrl)) {
+      relatedIds.push({
+        identifier: nemarUrl,
+        identifier_type: "URL",
+        relation_type: "IsDescribedBy",
+      });
+    }
+    // Ensure related_identifiers is set even if only URLs were added
+    if (relatedIds.length > 0) seeded.related_identifiers = relatedIds;
   }
 
   return seeded;

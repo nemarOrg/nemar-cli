@@ -174,9 +174,8 @@ async function createEzidConceptDoi(
   const metadata = bidsToDataCite(options.datasetId, doi, bids, enrichment);
   const dataciteXml = buildDataCiteXml(metadata);
 
-  const target = options.githubRepo
-    ? `https://github.com/${options.githubRepo}`
-    : `https://nemar.org/dataexplorer/detail?dataset_id=${options.datasetId}`;
+  // DOI landing page: always the NEMAR website (not GitHub)
+  const target = `https://nemar.org/dataexplorer/detail?dataset_id=${options.datasetId}`;
 
   let identifier: EzidIdentifier;
   try {

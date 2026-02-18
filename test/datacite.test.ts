@@ -959,6 +959,33 @@ describe("seedFromBids", () => {
     expect(isDerivedFrom).toHaveLength(1);
   });
 
+  test("adds GitHub repo and NEMAR landing page URLs when datasetId is provided", () => {
+    const seeded = seedFromBids(fullBids, null, "nm000108");
+
+    const githubEntry = seeded.related_identifiers?.find(
+      (r) => r.identifier === "https://github.com/nemarDatasets/nm000108",
+    );
+    expect(githubEntry).toBeDefined();
+    expect(githubEntry?.identifier_type).toBe("URL");
+    expect(githubEntry?.relation_type).toBe("IsDescribedBy");
+
+    const nemarEntry = seeded.related_identifiers?.find(
+      (r) => r.identifier === "https://nemar.org/dataexplorer/detail?dataset_id=nm000108",
+    );
+    expect(nemarEntry).toBeDefined();
+    expect(nemarEntry?.identifier_type).toBe("URL");
+    expect(nemarEntry?.relation_type).toBe("IsDescribedBy");
+  });
+
+  test("does not add URLs when datasetId is not provided", () => {
+    const seeded = seedFromBids(fullBids, null);
+
+    const githubEntries = seeded.related_identifiers?.filter((r) =>
+      r.identifier.includes("github.com/nemarDatasets/"),
+    );
+    expect(githubEntries?.length ?? 0).toBe(0);
+  });
+
   test("removes conflicting relation types for SourceDataset DOIs from prior runs", () => {
     const existing = {
       version: "2.0" as const,

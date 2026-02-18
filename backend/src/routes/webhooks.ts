@@ -644,7 +644,7 @@ webhooks.post("/llm-enrich", async (c) => {
     }
 
     // Stage 1: Seed from BIDS (deterministic, no LLM call)
-    const seeded = seedFromBids(bidsDescription, existingMetadata);
+    const seeded = seedFromBids(bidsDescription, existingMetadata, dataset_id);
     console.log(
       `[llm-enrich] Stage 1 (seed): ${dataset_id} - ${Object.keys(seeded.authors || {}).length} authors, ${(seeded.related_identifiers || []).length} related IDs`,
     );
