@@ -32,6 +32,7 @@ import {
 import { decrypt, encrypt } from "../services/encryption";
 import {
   type EzidAuth,
+  TEST_SHOULDER,
   extractDoi,
   makePublic as ezidMakePublic,
   updateIdentifier as ezidUpdateIdentifier,
@@ -91,6 +92,7 @@ import {
  */
 type PublicationStep =
   | "ci_check"
+  | "enrichment_check"
   | "repo_public"
   | "s3_public_read"
   | "tag_protect"
@@ -1036,6 +1038,7 @@ const createConceptDoiSchema = z.object({
     .optional(),
   sandbox: z.boolean().optional().default(false),
   provider: z.enum(["ezid", "zenodo"]).optional().default("ezid"),
+  skip_enrichment_check: z.boolean().optional().default(false),
 });
 
 adminRoutes.post(
@@ -1072,6 +1075,7 @@ adminRoutes.post(
         owner_username: string;
         owner_orcid: string | null;
         is_sandbox: number | null;
+        enrichment_json: string | null;
       }>();
 
     if (!dataset) {
@@ -1103,6 +1107,41 @@ adminRoutes.post(
         },
         400,
       );
+    }
+
+    // Gate on enrichment: require validated metadata before minting DOIs
+    if (!body.skip_enrichment_check) {
+      if (!dataset.enrichment_json) {
+        return c.json(
+          {
+            error: "Metadata pipeline has not run yet",
+            message:
+              "Push to main (or trigger the LLM Metadata Enrichment workflow manually) so the metadata pipeline runs, then retry. Pass skip_enrichment_check: true to override.",
+            dataset_id: dataset.dataset_id,
+          },
+          422,
+        );
+      }
+      // Check pipeline_stage is "validated"
+      let pipelineStage: string | undefined;
+      try {
+        const meta = JSON.parse(dataset.enrichment_json) as Record<string, unknown>;
+        pipelineStage = typeof meta.pipeline_stage === "string" ? meta.pipeline_stage : undefined;
+      } catch {
+        // Corrupt enrichment_json; treat as needing re-enrichment
+      }
+      if (pipelineStage !== "validated") {
+        return c.json(
+          {
+            error: `Metadata not yet validated (current stage: ${pipelineStage || "unknown"})`,
+            message:
+              "The metadata pipeline must reach 'validated' stage before DOI minting. Re-trigger the LLM Metadata Enrichment workflow or pass skip_enrichment_check: true to override.",
+            dataset_id: dataset.dataset_id,
+            pipeline_stage: pipelineStage || "unknown",
+          },
+          422,
+        );
+      }
     }
 
     // SAFETY: Block production DOI creation in non-production environments
@@ -1637,8 +1676,10 @@ adminRoutes.post("/datasets/:id/doi/update", zValidator("json", updateDoiSchema)
         dataset.owner_orcid || undefined,
       );
 
-      // Read nemar_metadata.json for rich enrichment
-      const nemarMetaFile = tree.find((f) => f.path === "nemar_metadata.json");
+      // Read enrichment metadata (.nemar/metadata.json first, fall back to nemar_metadata.json)
+      const nemarMetaFile =
+        tree.find((f) => f.path === ".nemar/metadata.json") ||
+        tree.find((f) => f.path === "nemar_metadata.json");
       if (nemarMetaFile) {
         try {
           const nemarContent = await getBlobContent(
@@ -1709,10 +1750,11 @@ adminRoutes.post("/datasets/:id/doi/update", zValidator("json", updateDoiSchema)
 /**
  * POST /admin/datasets/:id/enrichment - Submit rich metadata enrichment
  *
- * Accepts NemarMetadata JSON, commits nemar_metadata.json to the dataset repo,
- * ensures .bidsignore includes it, and caches in D1.
+ * Accepts NemarMetadata JSON (v1.0 or v2.0), commits to the dataset repo
+ * (v1 at nemar_metadata.json, v2 at .nemar/metadata.json),
+ * ensures .bidsignore includes the path, and caches in D1.
  */
-const enrichmentSchema = z.object({
+const enrichmentSchemaV1 = z.object({
   version: z.literal("1.0"),
   authors: z
     .record(
@@ -1742,9 +1784,105 @@ const enrichmentSchema = z.object({
     .optional(),
   description: z.string().optional(),
   methodsDescription: z.string().optional(),
+  collectionDates: z.string().optional(),
+  geoLocation: z.string().optional(),
   sizes: z.array(z.string()).optional(),
   formats: z.array(z.string()).optional(),
 });
+
+const enrichmentSchemaV2 = z.object({
+  version: z.literal("2.0"),
+  authors: z
+    .record(
+      z.object({
+        orcid: z.string().optional(),
+        affiliations: z
+          .array(
+            z.object({
+              name: z.string(),
+              identifier: z.string().optional(),
+              scheme: z.string().optional(),
+            }),
+          )
+          .optional(),
+      }),
+    )
+    .optional(),
+  keywords: z
+    .array(
+      z.object({
+        term: z.string(),
+        subject_scheme: z.string().optional(),
+        scheme_uri: z.string().optional(),
+        value_uri: z.string().optional(),
+        classification_code: z.string().optional(),
+      }),
+    )
+    .optional(),
+  related_identifiers: z
+    .array(
+      z.object({
+        identifier: z.string(),
+        identifier_type: z.string(),
+        relation_type: z.string(),
+        resource_type_general: z.string().optional(),
+      }),
+    )
+    .optional(),
+  funding_references: z
+    .array(
+      z.object({
+        funder_name: z.string(),
+        funder_identifier: z.string().optional(),
+        funder_identifier_type: z.string().optional(),
+        award_number: z.string().optional(),
+        award_title: z.string().optional(),
+        award_uri: z.string().optional(),
+      }),
+    )
+    .optional(),
+  contributors: z
+    .array(
+      z.object({
+        name: z.string(),
+        name_type: z.string().optional(),
+        given_name: z.string().optional(),
+        family_name: z.string().optional(),
+        orcid: z.string().optional(),
+        contributor_type: z.string(),
+      }),
+    )
+    .optional(),
+  dates: z
+    .array(
+      z.object({
+        date: z.string(),
+        date_type: z.string(),
+        date_information: z.string().optional(),
+      }),
+    )
+    .optional(),
+  geo_locations: z
+    .array(
+      z.object({
+        place: z.string().optional(),
+        point: z
+          .object({
+            latitude: z.number(),
+            longitude: z.number(),
+          })
+          .optional(),
+      }),
+    )
+    .optional(),
+  description: z.string().optional(),
+  methods_description: z.string().optional(),
+  resource_type_general: z.string().optional(),
+  sizes: z.array(z.string()).optional(),
+  formats: z.array(z.string()).optional(),
+});
+
+const enrichmentSchema = z.discriminatedUnion("version", [enrichmentSchemaV1, enrichmentSchemaV2]);
 
 adminRoutes.post("/datasets/:id/enrichment", zValidator("json", enrichmentSchema), async (c) => {
   const datasetId = c.req.param("id");
@@ -1779,33 +1917,42 @@ adminRoutes.post("/datasets/:id/enrichment", zValidator("json", enrichmentSchema
 
   const pat = c.env.GITHUB_ADMIN_PAT;
   const metadataContent = JSON.stringify(body, null, 2);
+  const isV2 = body.version === "2.0";
+  const metadataPath = isV2 ? ".nemar/metadata.json" : "nemar_metadata.json";
 
   try {
-    // Commit nemar_metadata.json to the repo
+    // Commit metadata to the repo (v2 uses .nemar/metadata.json, v1 uses nemar_metadata.json)
     await createOrUpdateFile(
       repoName,
-      "nemar_metadata.json",
+      metadataPath,
       metadataContent,
       "Update NEMAR metadata enrichment",
       pat,
     );
 
-    // Ensure .bidsignore includes nemar_metadata.json
+    // Ensure .bidsignore includes the metadata path
     const tree = await getTreeAtRef(repoName, "main", pat);
     const bidsignoreFile = tree.find((f) => f.path === ".bidsignore");
     let bidsignoreContent = "";
     if (bidsignoreFile) {
       bidsignoreContent = await getBlobContent(repoName, bidsignoreFile.sha, pat);
     }
-    if (!bidsignoreContent.includes("nemar_metadata.json")) {
-      const newContent = bidsignoreContent
-        ? `${bidsignoreContent.trimEnd()}\nnemar_metadata.json\n`
-        : "nemar_metadata.json\n";
+    const entriesToIgnore = isV2 ? [".nemar/"] : ["nemar_metadata.json"];
+    let bidsignoreUpdated = false;
+    for (const entry of entriesToIgnore) {
+      if (!bidsignoreContent.includes(entry)) {
+        bidsignoreContent = bidsignoreContent
+          ? `${bidsignoreContent.trimEnd()}\n${entry}\n`
+          : `${entry}\n`;
+        bidsignoreUpdated = true;
+      }
+    }
+    if (bidsignoreUpdated) {
       await createOrUpdateFile(
         repoName,
         ".bidsignore",
-        newContent,
-        "Add nemar_metadata.json to .bidsignore",
+        bidsignoreContent,
+        "Update .bidsignore for metadata",
         pat,
       );
     }
@@ -1822,7 +1969,7 @@ adminRoutes.post("/datasets/:id/enrichment", zValidator("json", enrichmentSchema
       message: "Enrichment saved",
       dataset_id: datasetId,
       committed: true,
-      bidsignore_updated: !bidsignoreContent.includes("nemar_metadata.json"),
+      bidsignore_updated: bidsignoreUpdated,
     });
   } catch (error) {
     console.error("Failed to save enrichment:", error);
@@ -2230,7 +2377,13 @@ adminRoutes.post("/datasets/:id/ci", async (c) => {
     return c.json({ error: "Invalid repository format" }, 500);
   }
 
-  const WORKFLOW_FILES = ["bids-validation.yml", "version-check.yml", "pr-merge.yml"];
+  const WORKFLOW_FILES = [
+    "bids-validation.yml",
+    "version-check.yml",
+    "pr-merge.yml",
+    "generate-archive.yml",
+    "llm-enrichment.yml",
+  ];
   const result = await deployWorkflows(repoName, c.env.GITHUB_ADMIN_PAT);
 
   if (!result.success) {
@@ -2428,6 +2581,7 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
     : [];
   const allSteps: readonly PublicationStep[] = [
     "ci_check",
+    "enrichment_check",
     "repo_public",
     "s3_public_read",
     "tag_protect",
@@ -2596,7 +2750,33 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
     }
   }
 
-  // Step 2: Make repo public
+  // Step 2: Enrichment check (warn-only, does not block publication)
+  if (stepsToRun.includes("enrichment_check")) {
+    try {
+      await startStep("enrichment_check");
+
+      const enrichRow = await db
+        .prepare("SELECT enrichment_json FROM datasets WHERE dataset_id = ?")
+        .bind(datasetId)
+        .first<{ enrichment_json: string | null }>();
+
+      if (!enrichRow?.enrichment_json) {
+        console.warn(
+          `[publish] Dataset ${datasetId} has no LLM enrichment metadata. DOI will have minimal metadata.`,
+        );
+      }
+
+      await updateProgress("enrichment_check");
+    } catch (err) {
+      // Non-fatal: log error and continue (enrichment check should not block publication)
+      console.warn(
+        `[publish] Enrichment check failed for ${datasetId} (non-fatal): ${errorMessage(err)}`,
+      );
+      await updateProgress("enrichment_check");
+    }
+  }
+
+  // Step 3: Make repo public
   if (stepsToRun.includes("repo_public")) {
     try {
       await startStep("repo_public");
@@ -3134,12 +3314,15 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
 
         const archiveData = await downloadReleaseArchive(repoName, tag, pat);
 
-        // Determine sandbox from EZID identifier prefix
-        const isSandbox = dataset.ezid_identifier?.includes("10.5072") ?? false;
+        // Determine sandbox from EZID test shoulder prefix
+        const sandboxPrefix = TEST_SHOULDER.replace(/^doi:/, "").split("/")[0];
+        const isSandbox = dataset.ezid_identifier?.includes(sandboxPrefix) ?? false;
         const zenodoToken = isSandbox ? c.env.ZENODO_SANDBOX_API_KEY : c.env.ZENODO_API_KEY;
 
         if (!zenodoToken) {
-          console.warn(`[publish] No Zenodo API key for backup archive (sandbox=${isSandbox}); skipping`);
+          console.warn(
+            `[publish] No Zenodo API key for backup archive (sandbox=${isSandbox}); skipping`,
+          );
           await updateProgress("upload_to_zenodo");
         } else {
           // Check if we already have a Zenodo backup deposition
@@ -3170,7 +3353,9 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
 
             // Store the Zenodo deposition ID for future versions
             await db
-              .prepare("UPDATE datasets SET zenodo_concept_id = ?, updated_at = datetime('now') WHERE dataset_id = ?")
+              .prepare(
+                "UPDATE datasets SET zenodo_concept_id = ?, updated_at = datetime('now') WHERE dataset_id = ?",
+              )
               .bind(String(depositionId), datasetId)
               .run();
           }
@@ -3178,9 +3363,18 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
           const deposition = await getDeposition(depositionId, zenodoToken, isSandbox);
           if (deposition.links.bucket) {
             const filename = `${datasetId}-${tag}.zip`;
-            await uploadFile(depositionId, deposition.links.bucket, filename, archiveData, zenodoToken, isSandbox);
+            await uploadFile(
+              depositionId,
+              deposition.links.bucket,
+              filename,
+              archiveData,
+              zenodoToken,
+              isSandbox,
+            );
           } else {
-            console.warn(`[publish] Zenodo backup deposition ${depositionId} has no bucket URL; skipping upload`);
+            console.warn(
+              `[publish] Zenodo backup deposition ${depositionId} has no bucket URL; skipping upload`,
+            );
           }
 
           await updateProgress("upload_to_zenodo");
@@ -3257,7 +3451,11 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
         if (!dataset.ezid_identifier) {
           await updateProgress("publish_doi", "No EZID identifier found");
           return c.json(
-            { error: "No EZID identifier found for dataset", step: "publish_doi", steps_completed: completed },
+            {
+              error: "No EZID identifier found for dataset",
+              step: "publish_doi",
+              steps_completed: completed,
+            },
             500,
           );
         }
@@ -3269,7 +3467,9 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
         // Update EZID status in D1
         try {
           await db
-            .prepare("UPDATE datasets SET ezid_status = 'public', updated_at = datetime('now') WHERE dataset_id = ?")
+            .prepare(
+              "UPDATE datasets SET ezid_status = 'public', updated_at = datetime('now') WHERE dataset_id = ?",
+            )
             .bind(datasetId)
             .run();
         } catch (dbErr) {

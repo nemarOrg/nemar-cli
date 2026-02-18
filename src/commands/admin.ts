@@ -1091,7 +1091,7 @@ doiCommand
         console.log(`  DOI: ${chalk.cyan(doiInfo.concept_doi)}`);
       }
 
-      const enrichment: NemarMetadataPayload = { version: "1.0" };
+      const enrichment: NemarMetadataPayload = { version: "2.0" };
 
       // --- Author ORCIDs ---
       console.log();
@@ -1106,7 +1106,8 @@ doiCommand
       ]);
 
       if (updateAuthors) {
-        const authors: Record<string, { orcid?: string; affiliation?: string }> = {};
+        const authors: Record<string, { orcid?: string; affiliations?: Array<{ name: string }> }> =
+          {};
 
         let addMore = true;
         while (addMore) {
@@ -1131,7 +1132,7 @@ doiCommand
             },
           ]);
 
-          const entry: { orcid?: string; affiliation?: string } = {};
+          const entry: { orcid?: string; affiliations?: Array<{ name: string }> } = {};
           if (orcid) entry.orcid = orcid;
 
           const { affiliation } = await inquirer.prompt([
@@ -1141,9 +1142,9 @@ doiCommand
               message: `Affiliation for "${authorName}" (optional):`,
             },
           ]);
-          if (affiliation) entry.affiliation = affiliation;
+          if (affiliation) entry.affiliations = [{ name: affiliation }];
 
-          if (entry.orcid || entry.affiliation) {
+          if (entry.orcid || entry.affiliations) {
             authors[authorName] = entry;
           }
 
@@ -1204,24 +1205,24 @@ doiCommand
                   console.log(`  Description: ${llmResult.description.slice(0, 100)}...`);
                   enrichment.description = llmResult.description;
                 }
-                if (llmResult.methodsDescription) {
-                  enrichment.methodsDescription = llmResult.methodsDescription;
+                if (llmResult.methods_description) {
+                  enrichment.methods_description = llmResult.methods_description;
                 }
                 if (llmResult.keywords && llmResult.keywords.length > 0) {
-                  console.log(`  Keywords: ${llmResult.keywords.join(", ")}`);
+                  console.log(`  Keywords: ${llmResult.keywords.map((k) => k.term).join(", ")}`);
                   enrichment.keywords = llmResult.keywords;
                 }
-                if (llmResult.fundingReferences && llmResult.fundingReferences.length > 0) {
+                if (llmResult.funding_references && llmResult.funding_references.length > 0) {
                   console.log(
-                    `  Funding: ${llmResult.fundingReferences.map((f) => `${f.funderName} ${f.awardNumber || ""}`).join(", ")}`,
+                    `  Funding: ${llmResult.funding_references.map((f) => `${f.funder_name} ${f.award_number || ""}`).join(", ")}`,
                   );
-                  enrichment.fundingReferences = llmResult.fundingReferences;
+                  enrichment.funding_references = llmResult.funding_references;
                 }
-                if (llmResult.relatedDois && llmResult.relatedDois.length > 0) {
+                if (llmResult.related_identifiers && llmResult.related_identifiers.length > 0) {
                   console.log(
-                    `  Related DOIs: ${llmResult.relatedDois.map((r) => `${r.doi} (${r.relationType})`).join(", ")}`,
+                    `  Related: ${llmResult.related_identifiers.map((r) => `${r.identifier} (${r.relation_type})`).join(", ")}`,
                   );
-                  enrichment.relatedDois = llmResult.relatedDois;
+                  enrichment.related_identifiers = llmResult.related_identifiers;
                 }
               }
             }
@@ -1268,7 +1269,7 @@ doiCommand
         submitSpinner.succeed(result.message);
 
         if (result.bidsignore_updated) {
-          console.log(chalk.gray("  .bidsignore updated to include nemar_metadata.json"));
+          console.log(chalk.gray("  .bidsignore updated to include .nemar/"));
         }
 
         // Refresh DOI metadata if the dataset has an EZID DOI

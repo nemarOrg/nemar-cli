@@ -23,14 +23,16 @@ import { type ZenodoMetadata, createDeposition, getPrereservedDoi } from "./zeno
 
 export type DoiProvider = "ezid" | "zenodo";
 
-/** Parse and validate a doi_provider value from the database. */
+/** Parse and validate a doi_provider value from the database.
+ *  Throws on non-null unrecognized values (data integrity issue).
+ *  Returns fallback only when raw is null/undefined (no provider configured yet). */
 export function parseDoiProvider(
   raw: string | null | undefined,
   fallback: DoiProvider = "ezid",
 ): DoiProvider {
   if (raw === "ezid" || raw === "zenodo") return raw;
   if (raw != null) {
-    console.error(`[doi] Unknown doi_provider "${raw}", falling back to "${fallback}"`);
+    throw new Error(`Unknown doi_provider "${raw}". Expected "ezid" or "zenodo".`);
   }
   return fallback;
 }
@@ -174,9 +176,8 @@ async function createEzidConceptDoi(
   const metadata = bidsToDataCite(options.datasetId, doi, bids, enrichment);
   const dataciteXml = buildDataCiteXml(metadata);
 
-  const target = options.githubRepo
-    ? `https://github.com/${options.githubRepo}`
-    : `https://nemar.org/dataexplorer/detail?dataset_id=${options.datasetId}`;
+  // DOI landing page: always the NEMAR website (not GitHub)
+  const target = `https://nemar.org/dataexplorer/detail?dataset_id=${options.datasetId}`;
 
   let identifier: EzidIdentifier;
   try {

@@ -398,7 +398,7 @@ datasetRoutes.get("/", optionalAuthMiddleware, async (c) => {
   query += " ORDER BY d.created_at DESC LIMIT ? OFFSET ?";
   params.push(limit, offset);
 
-  let queryResult;
+  let queryResult: Awaited<ReturnType<ReturnType<typeof db.prepare>["all"]>> | undefined;
   try {
     queryResult = await db
       .prepare(query)
