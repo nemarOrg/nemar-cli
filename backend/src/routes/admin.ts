@@ -32,6 +32,7 @@ import {
 import { decrypt, encrypt } from "../services/encryption";
 import {
   type EzidAuth,
+  TEST_SHOULDER,
   extractDoi,
   makePublic as ezidMakePublic,
   updateIdentifier as ezidUpdateIdentifier,
@@ -3313,8 +3314,9 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
 
         const archiveData = await downloadReleaseArchive(repoName, tag, pat);
 
-        // Determine sandbox from EZID identifier prefix
-        const isSandbox = dataset.ezid_identifier?.includes("10.5072") ?? false;
+        // Determine sandbox from EZID test shoulder prefix
+        const sandboxPrefix = TEST_SHOULDER.replace(/^doi:/, "").split("/")[0];
+        const isSandbox = dataset.ezid_identifier?.includes(sandboxPrefix) ?? false;
         const zenodoToken = isSandbox ? c.env.ZENODO_SANDBOX_API_KEY : c.env.ZENODO_API_KEY;
 
         if (!zenodoToken) {

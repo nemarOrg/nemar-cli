@@ -22,7 +22,9 @@ import {
   parseValidationResult,
   seedFromBids,
   validateLlmResultV2,
+  validateMeshTerms,
 } from "../backend/src/services/llm-enrich";
+import type { NemarMetadataV2 } from "../shared/datacite-constants";
 
 describe("parseAuthorName", () => {
   test("parses Last, First format", () => {
@@ -516,15 +518,14 @@ describe("parseNemarMetadata v2", () => {
     const result = parseNemarMetadata(raw);
     expect(result).not.toBeNull();
     expect(result?.version).toBe("2.0");
-    if (result?.version === "2.0") {
-      expect(result?.keywords).toHaveLength(2);
-      expect(result?.related_identifiers).toHaveLength(1);
-      expect(result?.authors).toBeDefined();
-      expect(result?.funding_references).toHaveLength(1);
-      expect(result?.contributors).toHaveLength(1);
-      expect(result?.dates).toHaveLength(1);
-      expect(result?.geo_locations).toHaveLength(1);
-    }
+    const v2 = result as NemarMetadataV2;
+    expect(v2.keywords).toHaveLength(2);
+    expect(v2.related_identifiers).toHaveLength(1);
+    expect(v2.authors).toBeDefined();
+    expect(v2.funding_references).toHaveLength(1);
+    expect(v2.contributors).toHaveLength(1);
+    expect(v2.dates).toHaveLength(1);
+    expect(v2.geo_locations).toHaveLength(1);
   });
 
   test("validates author entries instead of raw casting", () => {
@@ -538,11 +539,11 @@ describe("parseNemarMetadata v2", () => {
     };
     const result = parseNemarMetadata(raw);
     expect(result).not.toBeNull();
-    if (result?.version === "2.0") {
-      expect(result?.authors).toBeDefined();
-      expect(Object.keys(result?.authors!)).toHaveLength(1);
-      expect(result?.authors?.["Valid Author"]).toBeDefined();
-    }
+    expect(result?.version).toBe("2.0");
+    const v2 = result as NemarMetadataV2;
+    expect(v2.authors).toBeDefined();
+    expect(Object.keys(v2.authors!)).toHaveLength(1);
+    expect(v2.authors?.["Valid Author"]).toBeDefined();
   });
 
   test("validates author affiliations array", () => {
@@ -559,10 +560,11 @@ describe("parseNemarMetadata v2", () => {
       },
     };
     const result = parseNemarMetadata(raw);
-    if (result?.version === "2.0") {
-      expect(result?.authors?.["Test Author"].affiliations).toHaveLength(1);
-      expect(result?.authors?.["Test Author"].affiliations?.[0].name).toBe("MIT");
-    }
+    expect(result).not.toBeNull();
+    expect(result?.version).toBe("2.0");
+    const v2 = result as NemarMetadataV2;
+    expect(v2.authors?.["Test Author"].affiliations).toHaveLength(1);
+    expect(v2.authors?.["Test Author"].affiliations?.[0].name).toBe("MIT");
   });
 
   test("rejects geo_locations without place or point", () => {
@@ -576,11 +578,12 @@ describe("parseNemarMetadata v2", () => {
       ],
     };
     const result = parseNemarMetadata(raw);
-    if (result?.version === "2.0") {
-      expect(result?.geo_locations).toHaveLength(2);
-      expect(result?.geo_locations?.[0].place).toBe("Boston");
-      expect(result?.geo_locations?.[1].point?.latitude).toBe(42.36);
-    }
+    expect(result).not.toBeNull();
+    expect(result?.version).toBe("2.0");
+    const v2 = result as NemarMetadataV2;
+    expect(v2.geo_locations).toHaveLength(2);
+    expect(v2.geo_locations?.[0].place).toBe("Boston");
+    expect(v2.geo_locations?.[1].point?.latitude).toBe(42.36);
   });
 
   test("returns null for unrecognized version", () => {
@@ -1133,9 +1136,11 @@ describe("parseValidationResult", () => {
     expect(result.criteria.author_completeness.issues).toEqual([]);
   });
 
-  test("infers valid from empty blocking_issues when overall_pass missing", () => {
+  test("infers valid from populated criteria and empty blocking_issues when overall_pass missing", () => {
     const raw = {
-      criteria: {},
+      criteria: {
+        author_completeness: { confidence: 90, pass: true, issues: [] },
+      },
       blocking_issues: [],
       warnings: ["Some warning"],
     };
@@ -1144,9 +1149,22 @@ describe("parseValidationResult", () => {
     expect(result.valid).toBe(true);
   });
 
-  test("infers invalid from blocking_issues when overall_pass missing", () => {
+  test("treats empty criteria with no overall_pass as invalid (malformed LLM response)", () => {
     const raw = {
       criteria: {},
+      blocking_issues: [],
+      warnings: ["Some warning"],
+    };
+
+    const result = parseValidationResult(raw);
+    expect(result.valid).toBe(false);
+  });
+
+  test("infers invalid from blocking_issues when overall_pass missing", () => {
+    const raw = {
+      criteria: {
+        description_accuracy: { confidence: 50, pass: false, issues: ["Inaccurate"] },
+      },
       blocking_issues: ["A blocking issue"],
       warnings: [],
     };
@@ -1164,9 +1182,7 @@ describe("parseNemarMetadata pipeline_stage", () => {
       description: "Test",
     });
     expect(meta?.version).toBe("2.0");
-    if (meta?.version === "2.0") {
-      expect(meta.pipeline_stage).toBe("validated");
-    }
+    expect((meta as NemarMetadataV2).pipeline_stage).toBe("validated");
   });
 
   test("ignores invalid pipeline_stage", () => {
@@ -1176,9 +1192,7 @@ describe("parseNemarMetadata pipeline_stage", () => {
       description: "Test",
     });
     expect(meta?.version).toBe("2.0");
-    if (meta?.version === "2.0") {
-      expect(meta.pipeline_stage).toBeUndefined();
-    }
+    expect((meta as NemarMetadataV2).pipeline_stage).toBeUndefined();
   });
 
   test("handles missing pipeline_stage", () => {
@@ -1187,8 +1201,112 @@ describe("parseNemarMetadata pipeline_stage", () => {
       description: "Test",
     });
     expect(meta?.version).toBe("2.0");
-    if (meta?.version === "2.0") {
-      expect(meta.pipeline_stage).toBeUndefined();
-    }
+    expect((meta as NemarMetadataV2).pipeline_stage).toBeUndefined();
+  });
+});
+
+describe("seedFromBids SourceDatasets URL fallback", () => {
+  test("extracts DOI from SourceDatasets URL when DOI field is absent", () => {
+    const bids = {
+      Name: "Test",
+      SourceDatasets: [
+        { URL: "https://doi.org/10.13026/ym7v-bh53" },
+      ],
+    };
+    const result = seedFromBids(bids, null);
+    const derived = result.related_identifiers?.find(
+      (r) => r.relation_type === "IsDerivedFrom",
+    );
+    expect(derived).toBeDefined();
+    expect(derived!.identifier).toBe("10.13026/ym7v-bh53");
+  });
+
+  test("extracts DOI from SourceDatasets URL with doi: prefix", () => {
+    const bids = {
+      Name: "Test",
+      SourceDatasets: [
+        { URL: "doi:10.13026/ym7v-bh53" },
+      ],
+    };
+    const result = seedFromBids(bids, null);
+    const derived = result.related_identifiers?.find(
+      (r) => r.relation_type === "IsDerivedFrom",
+    );
+    expect(derived).toBeDefined();
+    expect(derived!.identifier).toBe("10.13026/ym7v-bh53");
+  });
+
+  test("ignores SourceDatasets with non-DOI URL", () => {
+    const bids = {
+      Name: "Test",
+      SourceDatasets: [
+        { URL: "https://example.com/dataset" },
+      ],
+    };
+    const result = seedFromBids(bids, null);
+    const derived = (result.related_identifiers || []).filter(
+      (r) => r.relation_type === "IsDerivedFrom",
+    );
+    expect(derived).toHaveLength(0);
+  });
+});
+
+describe("validateMeshTerms", () => {
+  test("returns unchanged metadata when no keywords", async () => {
+    const metadata: NemarMetadataV2 = { version: "2.0" };
+    const { metadata: result, log } = await validateMeshTerms(metadata);
+    expect(result).toEqual(metadata);
+    expect(log).toHaveLength(0);
+  });
+
+  test("strips non-MeSH schemes without calling API", async () => {
+    const metadata: NemarMetadataV2 = {
+      version: "2.0",
+      keywords: [
+        { term: "Brain", subject_scheme: "LCSH", scheme_uri: "http://id.loc.gov/authorities/subjects" },
+        { term: "Neuroscience", subject_scheme: "FAST" },
+        { term: "plain keyword" },
+      ],
+    };
+    const { metadata: result, log } = await validateMeshTerms(metadata);
+    // LCSH and FAST schemes should be stripped
+    expect(log).toHaveLength(2);
+    expect(log[0].action).toBe("scheme_removed");
+    expect(log[1].action).toBe("scheme_removed");
+    // Keywords should remain but without schemes
+    expect(result.keywords).toHaveLength(3);
+    expect(result.keywords![0].subject_scheme).toBeUndefined();
+    expect(result.keywords![1].subject_scheme).toBeUndefined();
+    // Plain keyword passes through untouched
+    expect(result.keywords![2]).toEqual({ term: "plain keyword" });
+  });
+
+  test("confirms valid MeSH term via NLM API", async () => {
+    const metadata: NemarMetadataV2 = {
+      version: "2.0",
+      keywords: [
+        { term: "Electroencephalography", subject_scheme: "MeSH" },
+      ],
+    };
+    const { metadata: result, log } = await validateMeshTerms(metadata);
+    expect(log).toHaveLength(1);
+    expect(log[0].action).toBe("confirmed");
+    expect(log[0].mesh_uri).toContain("nlm.nih.gov/mesh");
+    expect(result.keywords![0].value_uri).toContain("nlm.nih.gov/mesh");
+    expect(result.keywords![0].subject_scheme).toBe("MeSH");
+  });
+
+  test("strips scheme from invalid MeSH term", async () => {
+    const metadata: NemarMetadataV2 = {
+      version: "2.0",
+      keywords: [
+        { term: "BrainWaveStuff123NotReal", subject_scheme: "MeSH" },
+      ],
+    };
+    const { metadata: result, log } = await validateMeshTerms(metadata);
+    expect(log).toHaveLength(1);
+    expect(log[0].action).toBe("scheme_removed");
+    expect(result.keywords![0].subject_scheme).toBeUndefined();
+    expect(result.keywords![0].term).toBe("BrainWaveStuff123NotReal");
   });
 });

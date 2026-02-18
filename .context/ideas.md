@@ -444,113 +444,29 @@ aws s3api put-bucket-policy --bucket nemar --policy '{
 
 ---
 
-## Metadata Pipeline Design (Issue #154)
+## Metadata Pipeline Design (Issue #154) - IMPLEMENTED
 
 ### Single Source of Truth
 
-`.nemar/metadata.json` should contain ALL metadata needed for DOI minting. No more assembling from multiple sources on the fly. The file tracks its pipeline stage so we know how mature the metadata is.
+`.nemar/metadata.json` contains ALL metadata needed for DOI minting. The file tracks its pipeline stage so we know how mature the metadata is.
 
-### Pipeline Stage Progression
-
-```
-seeded -> enriched -> validated -> DOI-ready
-```
-
-- **seeded**: Base metadata pulled from BIDS files. All authors present (even without ORCIDs). Data type, license, source datasets, funding from BIDS.
-- **enriched**: LLM has added description, methods, keywords, additional funding/related identifiers from README.
-- **validated**: LLM judge has reviewed for correctness. Relation types verified, author completeness checked, keyword relevance confirmed.
-
-### DOI Gating
-
-DOIs should NOT be minted until metadata reaches `validated` stage. This prevents issues like the LLM incorrectly classifying a "derived from" relationship as "version of".
-
-### LLM Validation System Prompt Design
-
-The validation stage uses a judge LLM (same model) to review metadata quality. The system prompt should be modeled after Anthropic's pr-review-toolkit approach: structured evaluation with specific criteria, confidence scores, and actionable feedback.
-
-Validation criteria:
-1. **Author completeness** - Are all authors from README/BIDS present?
-2. **Relation type accuracy** - Is each related identifier's relation type correct? (IsDerivedFrom vs IsVersionOf vs IsDescribedBy vs IsSupplementTo)
-3. **Keyword relevance** - Do keywords accurately describe the dataset?
-4. **Description accuracy** - Does the abstract match the actual dataset content?
-5. **Funding accuracy** - Are award numbers real and correctly attributed?
-
-Output: JSON with pass/fail per criterion, confidence score, and suggested corrections.
-
-### LLM Validation Prompt (Draft)
-
-Modeled after Anthropic's pr-review-toolkit agents (structured criteria, confidence scoring, actionable output). See `/Users/yahya/.claude/plugins/cache/claude-plugins-official/pr-review-toolkit/` for the pattern.
+### Pipeline Stage Progression (Implemented)
 
 ```
-You are a metadata validation specialist for neuroimaging dataset DOI records.
-You will receive a dataset's metadata file (.nemar/metadata.json), its README.md,
-and its BIDS dataset_description.json. Your job is to validate the metadata for
-accuracy, completeness, and correctness before a permanent DOI is minted.
-
-## Validation Criteria
-
-Rate each criterion from 0-100 confidence that the metadata is CORRECT:
-
-### 1. Author Completeness (weight: high)
-- Are ALL authors from dataset_description.json present in the metadata?
-- Are there authors mentioned in the README who are missing?
-- Do author names match between sources?
-
-### 2. Related Identifier Accuracy (weight: high)
-- Is each relation type correct?
-  - IsDerivedFrom: this dataset was created from that source
-  - IsVersionOf: this is a newer version of the same dataset
-  - IsDescribedBy: a paper that describes this dataset
-  - IsSupplementTo: this dataset supplements a publication
-  - References: general citation
-- Are the DOIs/URLs valid identifiers?
-- Cross-check: does dataset_description.json have SourceDatasets that should be IsDerivedFrom?
-
-### 3. Description Accuracy (weight: medium)
-- Does the abstract accurately describe the dataset content?
-- Are claims in the description supported by the README?
-- Is the methods description technically accurate?
-
-### 4. Keyword Relevance (weight: medium)
-- Do keywords accurately describe the dataset?
-- Are subject scheme assignments correct (e.g., MeSH terms are real MeSH terms)?
-- Are there obvious missing keywords?
-
-### 5. Funding Accuracy (weight: medium)
-- Are funder names real organizations?
-- Do award numbers appear in the README or BIDS description?
-- Are there funding sources mentioned in README but missing from metadata?
-
-### 6. Data Type Correctness (weight: low)
-- Is the data_type field (raw/derivative) correct based on README context?
-- Does it match DatasetType in dataset_description.json if present?
-
-## Output Format
-
-Return ONLY valid JSON:
-{
-  "overall_pass": true/false,
-  "criteria": {
-    "author_completeness": {
-      "confidence": 0-100,
-      "pass": true/false,
-      "issues": ["Author X in README not in metadata"],
-      "suggestions": ["Add Author X to authors"]
-    },
-    "related_identifiers": { ... },
-    "description_accuracy": { ... },
-    "keyword_relevance": { ... },
-    "funding_accuracy": { ... },
-    "data_type": { ... }
-  },
-  "blocking_issues": ["list of issues that MUST be fixed before DOI minting"],
-  "warnings": ["list of issues that SHOULD be fixed but are not blocking"]
-}
-
-Only set overall_pass to false if there are blocking_issues.
-Blocking issues: missing authors, incorrect relation types, factually wrong description.
-Warnings: missing keywords, imprecise descriptions, unconfirmed funding details.
+seeded -> enriched -> (MeSH validated) -> validated -> DOI-ready
 ```
+
+- **seeded**: Base metadata pulled from BIDS files. All authors present (even without ORCIDs). Title, license, data type, modalities, source datasets, funding from BIDS. GitHub/NEMAR URLs as `IsDescribedBy`.
+- **enriched**: LLM has added description, methods, MeSH keywords, additional funding/related identifiers from README. MeSH terms validated against NLM API.
+- **validated**: LLM judge has reviewed for correctness. If blocking issues found, feeds them back to LLM for correction (up to 3 attempts). Creates GitHub issue if still failing.
+
+### Key Design Decisions
+
+1. **MeSH only** - Removed LCSH; only MeSH subject scheme used for keywords. NLM API validates terms.
+2. **Feedback loop** - Validation failures trigger LLM correction attempts before failing. Max 3 correction rounds.
+3. **Auto-issue creation** - If validation fails after all attempts, a GitHub issue is created on the dataset repo.
+4. **DOI target** - Always resolves to NEMAR landing page, not GitHub.
+5. **Modality detection** - `detectModalitiesFromTree()` scans repo files for BIDS datatypes.
 
 ### Refactoring bidsToDataCite()
 

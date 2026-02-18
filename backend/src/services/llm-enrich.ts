@@ -9,7 +9,6 @@ import {
   type AuthorEnrichmentV2,
   type FundingReferenceEntry,
   type NemarMetadataV2,
-  type PipelineStage,
   type RelatedIdentifierEntry,
   type StructuredKeyword,
   isValidRelationType,
@@ -24,6 +23,71 @@ export interface LlmEnrichmentResultV2 {
   keywords?: StructuredKeyword[];
   funding_references?: FundingReferenceEntry[];
   related_identifiers?: RelatedIdentifierEntry[];
+}
+
+const README_MAX_LENGTH = 8000;
+
+/** Truncate README content to stay within LLM token limits. */
+function truncateReadme(content: string): string {
+  if (content.length <= README_MAX_LENGTH) return content;
+  return `${content.slice(0, README_MAX_LENGTH)}\n[truncated]`;
+}
+
+interface OpenRouterResponse {
+  choices?: Array<{ message?: { content?: string } }>;
+}
+
+/**
+ * Call OpenRouter and extract a parsed JSON object from the response.
+ *
+ * Handles markdown code block unwrapping and JSON parsing.
+ * Throws on HTTP errors, missing content, or invalid JSON.
+ */
+async function callOpenRouter(
+  systemPrompt: string,
+  userPrompt: string,
+  apiKey: string,
+  maxTokens = 2000,
+): Promise<Record<string, unknown>> {
+  const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      model: "anthropic/claude-haiku-4.5",
+      messages: [
+        { role: "system", content: systemPrompt },
+        { role: "user", content: userPrompt },
+      ],
+      temperature: 0.1,
+      max_tokens: maxTokens,
+    }),
+  });
+
+  if (!response.ok) {
+    const errorText = await response.text();
+    throw new Error(`OpenRouter API error (${response.status}): ${errorText}`);
+  }
+
+  const data = (await response.json()) as OpenRouterResponse;
+  const content = data.choices?.[0]?.message?.content;
+  if (!content) {
+    throw new Error("No content in LLM response");
+  }
+
+  // Extract JSON from response (may be wrapped in markdown code block)
+  const jsonMatch = content.match(/```(?:json)?\s*([\s\S]*?)```/) || [null, content];
+  const jsonStr = (jsonMatch[1] || content).trim();
+
+  try {
+    return JSON.parse(jsonStr) as Record<string, unknown>;
+  } catch (parseErr) {
+    throw new Error(
+      `LLM returned invalid JSON: ${parseErr instanceof Error ? parseErr.message : String(parseErr)}`,
+    );
+  }
 }
 
 const SYSTEM_PROMPT = `You are a metadata extraction assistant for neuroimaging datasets.
@@ -62,61 +126,15 @@ export async function enrichFromReadme(
   bidsDescription: Record<string, unknown>,
   apiKey: string,
 ): Promise<LlmEnrichmentResultV2> {
-  // Truncate README to avoid token limits (keep first ~8000 chars)
-  const truncatedReadme =
-    readmeContent.length > 8000 ? `${readmeContent.slice(0, 8000)}\n[truncated]` : readmeContent;
-
   const userPrompt = `## BIDS dataset_description.json
 \`\`\`json
 ${JSON.stringify(bidsDescription, null, 2)}
 \`\`\`
 
 ## README.md
-${truncatedReadme}`;
+${truncateReadme(readmeContent)}`;
 
-  const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${apiKey}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      model: "anthropic/claude-haiku-4.5",
-      messages: [
-        { role: "system", content: SYSTEM_PROMPT },
-        { role: "user", content: userPrompt },
-      ],
-      temperature: 0.1,
-      max_tokens: 2000,
-    }),
-  });
-
-  if (!response.ok) {
-    const errorText = await response.text();
-    throw new Error(`OpenRouter API error (${response.status}): ${errorText}`);
-  }
-
-  const data = (await response.json()) as {
-    choices?: Array<{ message?: { content?: string } }>;
-  };
-
-  const content = data.choices?.[0]?.message?.content;
-  if (!content) {
-    throw new Error("No content in LLM response");
-  }
-
-  // Extract JSON from response (may be wrapped in markdown code block)
-  const jsonMatch = content.match(/```(?:json)?\s*([\s\S]*?)```/) || [null, content];
-  const jsonStr = (jsonMatch[1] || content).trim();
-
-  let parsed: Record<string, unknown>;
-  try {
-    parsed = JSON.parse(jsonStr) as Record<string, unknown>;
-  } catch (parseErr) {
-    throw new Error(
-      `LLM returned invalid JSON: ${parseErr instanceof Error ? parseErr.message : String(parseErr)}`,
-    );
-  }
+  const parsed = await callOpenRouter(SYSTEM_PROMPT, userPrompt, apiKey);
   return validateLlmResultV2(parsed);
 }
 
@@ -210,8 +228,9 @@ export function validateLlmResultV2(raw: Record<string, unknown>): LlmEnrichment
  * - All authors (even without ORCIDs), preserving existing enrichment
  * - SourceDatasets -> related_identifiers with IsDerivedFrom
  * - Funding strings -> funding_references (raw; LLM will parse better in stage 2)
- * - ReferencesAndLinks -> related_identifiers (DOIs get "References", URLs get "References")
+ * - ReferencesAndLinks -> related_identifiers (DOIs mapped to "References"; non-DOI URLs ignored)
  * - DatasetType -> resource_type_general
+ * - Dataset platform URLs (GitHub, NEMAR) -> related_identifiers with "IsDescribedBy"
  */
 export function seedFromBids(
   bidsDescription: Record<string, unknown>,
@@ -402,19 +421,15 @@ export function mergeWithExisting(
       if (!hasLlmReplacement) allFunds.push(ef);
     }
     for (const newFund of llmResult.funding_references) {
-      // Deduplicate by exact match (funder_name + award_number) or by award_number alone
-      const exists = allFunds.some((f) => {
-        if (
-          f.funder_name === newFund.funder_name &&
-          (f.award_number || "") === (newFund.award_number || "")
-        )
-          return true;
-        // Same award number with different funder names (LLM may normalize funder names differently)
-        if (newFund.award_number && f.award_number && f.award_number === newFund.award_number)
-          return true;
-        return false;
-      });
-      if (!exists) allFunds.push(newFund);
+      // Deduplicate: match by exact (funder_name + award_number) or by award_number alone
+      // (LLM may normalize funder names differently than BIDS)
+      const isDuplicate = allFunds.some(
+        (f) =>
+          (f.funder_name === newFund.funder_name &&
+            (f.award_number || "") === (newFund.award_number || "")) ||
+          (newFund.award_number && f.award_number === newFund.award_number),
+      );
+      if (!isDuplicate) allFunds.push(newFund);
     }
     merged.funding_references = allFunds;
   }
@@ -444,8 +459,6 @@ export function mergeWithExisting(
   return merged;
 }
 
-// ---- Stage 3: LLM Validation ----
-
 // ---- Stage 2b: MeSH term validation (NLM API) ----
 
 const MESH_LOOKUP_URL = "https://id.nlm.nih.gov/mesh/lookup/descriptor";
@@ -456,44 +469,39 @@ interface MeshLookupResult {
 }
 
 /**
+ * Query the NLM MeSH API with a given match strategy.
+ * Returns the first result or null. API failures are non-fatal but logged.
+ */
+async function queryMesh(
+  term: string,
+  matchType: "exact" | "contains",
+): Promise<{ label: string; uri: string } | null> {
+  const url = `${MESH_LOOKUP_URL}?label=${encodeURIComponent(term)}&match=${matchType}&limit=1`;
+  try {
+    const resp = await fetch(url, { headers: { Accept: "application/json" } });
+    if (!resp.ok) {
+      console.warn(`[mesh] ${matchType} lookup for "${term}" returned HTTP ${resp.status}`);
+      return null;
+    }
+    const results = (await resp.json()) as MeshLookupResult[];
+    if (results.length > 0) {
+      return { label: results[0].label, uri: results[0].resource };
+    }
+  } catch (err) {
+    console.warn(
+      `[mesh] ${matchType} lookup failed for "${term}": ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
+  return null;
+}
+
+/**
  * Validate a single term against the NLM MeSH API.
+ * Tries exact match first, then falls back to contains match.
  * Returns the canonical MeSH label and URI if found, null otherwise.
  */
 async function lookupMeshTerm(term: string): Promise<{ label: string; uri: string } | null> {
-  // Try exact match first
-  const exactUrl = `${MESH_LOOKUP_URL}?label=${encodeURIComponent(term)}&match=exact&limit=1`;
-  try {
-    const resp = await fetch(exactUrl, {
-      headers: { Accept: "application/json" },
-    });
-    if (resp.ok) {
-      const results = (await resp.json()) as MeshLookupResult[];
-      if (results.length > 0) {
-        return { label: results[0].label, uri: results[0].resource };
-      }
-    }
-  } catch {
-    // API failure is non-fatal; skip validation for this term
-    return null;
-  }
-
-  // Try contains match for closest suggestion
-  const containsUrl = `${MESH_LOOKUP_URL}?label=${encodeURIComponent(term)}&match=contains&limit=1`;
-  try {
-    const resp = await fetch(containsUrl, {
-      headers: { Accept: "application/json" },
-    });
-    if (resp.ok) {
-      const results = (await resp.json()) as MeshLookupResult[];
-      if (results.length > 0) {
-        return { label: results[0].label, uri: results[0].resource };
-      }
-    }
-  } catch {
-    // Non-fatal
-  }
-
-  return null;
+  return (await queryMesh(term, "exact")) ?? (await queryMesh(term, "contains"));
 }
 
 export interface MeshValidationLog {
@@ -693,9 +701,6 @@ export async function validateMetadata(
   bidsDescription: Record<string, unknown>,
   apiKey: string,
 ): Promise<{ metadata: NemarMetadataV2; validation: ValidationResult }> {
-  const truncatedReadme =
-    readmeContent.length > 8000 ? `${readmeContent.slice(0, 8000)}\n[truncated]` : readmeContent;
-
   const userPrompt = `## .nemar/metadata.json
 \`\`\`json
 ${JSON.stringify(metadata, null, 2)}
@@ -707,51 +712,9 @@ ${JSON.stringify(bidsDescription, null, 2)}
 \`\`\`
 
 ## README.md
-${truncatedReadme}`;
+${truncateReadme(readmeContent)}`;
 
-  const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${apiKey}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      model: "anthropic/claude-haiku-4.5",
-      messages: [
-        { role: "system", content: VALIDATION_PROMPT },
-        { role: "user", content: userPrompt },
-      ],
-      temperature: 0.1,
-      max_tokens: 3000,
-    }),
-  });
-
-  if (!response.ok) {
-    const errorText = await response.text();
-    throw new Error(`OpenRouter validation API error (${response.status}): ${errorText}`);
-  }
-
-  const data = (await response.json()) as {
-    choices?: Array<{ message?: { content?: string } }>;
-  };
-
-  const content = data.choices?.[0]?.message?.content;
-  if (!content) {
-    throw new Error("No content in validation LLM response");
-  }
-
-  const jsonMatch = content.match(/```(?:json)?\s*([\s\S]*?)```/) || [null, content];
-  const jsonStr = (jsonMatch[1] || content).trim();
-
-  let parsed: Record<string, unknown>;
-  try {
-    parsed = JSON.parse(jsonStr) as Record<string, unknown>;
-  } catch (parseErr) {
-    throw new Error(
-      `Validation LLM returned invalid JSON: ${parseErr instanceof Error ? parseErr.message : String(parseErr)}`,
-    );
-  }
-
+  const parsed = await callOpenRouter(VALIDATION_PROMPT, userPrompt, apiKey, 3000);
   const validation = parseValidationResult(parsed);
   const updatedMetadata: NemarMetadataV2 = {
     ...metadata,
@@ -776,9 +739,6 @@ export async function correctFromFeedback(
   bidsDescription: Record<string, unknown>,
   apiKey: string,
 ): Promise<LlmEnrichmentResultV2> {
-  const truncatedReadme =
-    readmeContent.length > 8000 ? `${readmeContent.slice(0, 8000)}\n[truncated]` : readmeContent;
-
   const correctionPrompt = `You are a metadata correction assistant for neuroimaging datasets.
 A validation judge has reviewed the metadata and found issues that need to be fixed.
 Your job is to produce CORRECTED metadata fields that address the blocking issues.
@@ -798,16 +758,19 @@ Return ONLY valid JSON with the corrected fields (same schema as enrichment):
   "related_identifiers": [{"identifier": "...", "identifier_type": "DOI", "relation_type": "..."}]
 }`;
 
+  const numberedList = (items: string[]): string =>
+    items.map((item, idx) => `${idx + 1}. ${item}`).join("\n");
+
   const userPrompt = `## Current metadata
 \`\`\`json
 ${JSON.stringify(metadata, null, 2)}
 \`\`\`
 
 ## BLOCKING ISSUES (must fix)
-${blockingIssues.map((i, idx) => `${idx + 1}. ${i}`).join("\n")}
+${numberedList(blockingIssues)}
 
 ## WARNINGS (optional to fix)
-${warnings.map((w, idx) => `${idx + 1}. ${w}`).join("\n")}
+${numberedList(warnings)}
 
 ## BIDS dataset_description.json
 \`\`\`json
@@ -815,50 +778,9 @@ ${JSON.stringify(bidsDescription, null, 2)}
 \`\`\`
 
 ## README.md
-${truncatedReadme}`;
+${truncateReadme(readmeContent)}`;
 
-  const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${apiKey}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      model: "anthropic/claude-haiku-4.5",
-      messages: [
-        { role: "system", content: correctionPrompt },
-        { role: "user", content: userPrompt },
-      ],
-      temperature: 0.1,
-      max_tokens: 3000,
-    }),
-  });
-
-  if (!response.ok) {
-    const errorText = await response.text();
-    throw new Error(`OpenRouter correction API error (${response.status}): ${errorText}`);
-  }
-
-  const data = (await response.json()) as {
-    choices?: Array<{ message?: { content?: string } }>;
-  };
-
-  const content = data.choices?.[0]?.message?.content;
-  if (!content) {
-    throw new Error("No content in correction LLM response");
-  }
-
-  const jsonMatch = content.match(/```(?:json)?\s*([\s\S]*?)```/) || [null, content];
-  const jsonStr = (jsonMatch[1] || content).trim();
-
-  let parsed: Record<string, unknown>;
-  try {
-    parsed = JSON.parse(jsonStr) as Record<string, unknown>;
-  } catch (parseErr) {
-    throw new Error(
-      `Correction LLM returned invalid JSON: ${parseErr instanceof Error ? parseErr.message : String(parseErr)}`,
-    );
-  }
+  const parsed = await callOpenRouter(correctionPrompt, userPrompt, apiKey, 3000);
   return validateLlmResultV2(parsed);
 }
 
@@ -905,8 +827,18 @@ export function parseValidationResult(raw: Record<string, unknown>): ValidationR
     ? raw.warnings.filter((w): w is string => typeof w === "string")
     : [];
 
+  // If overall_pass is missing AND no criteria were populated, treat as failed
+  // (the LLM returned a malformed response that should not be trusted as approval)
+  const hasCriteria = criteria != null && Object.keys(criteria).length > 0;
+  const valid =
+    typeof raw.overall_pass === "boolean"
+      ? raw.overall_pass
+      : hasCriteria
+        ? blockingIssues.length === 0
+        : false;
+
   return {
-    valid: typeof raw.overall_pass === "boolean" ? raw.overall_pass : blockingIssues.length === 0,
+    valid,
     criteria: parsedCriteria,
     blocking_issues: blockingIssues,
     warnings,

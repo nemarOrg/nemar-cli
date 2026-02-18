@@ -461,8 +461,8 @@ versioning. Manifests add web-frontend access without git clone. S3 Object Lock
 
 ---
 
-## Metadata Pipeline Architecture (Issue #154)
-**Status:** Planned
+## Metadata Pipeline Architecture (Issue #154, PR #152)
+**Status:** Implemented
 **Description:** Staged metadata enrichment pipeline where `.nemar/metadata.json` is the single source of truth for DOI records
 
 ### Design
@@ -471,39 +471,55 @@ versioning. Manifests add web-frontend access without git clone. S3 Object Lock
 
 ```
 dataset_description.json ─┐
-                          ├─> Stage 1: Seed ─> Stage 2: LLM Enrich ─> Stage 3: LLM Validate ─> DOI Mint
-README.md ────────────────┘
+repo file tree ────────────┤
+                           ├─> Stage 1: Seed ─> Stage 2a: LLM Enrich ─> Stage 2b: MeSH Validate ─> Stage 3: LLM Validate (with feedback loop) ─> DOI Mint
+README.md ─────────────────┘
 ```
 
 ### Pipeline Stages
 
 **Stage 1: Seed** (`pipeline_stage: "seeded"`)
-Pull all base metadata from BIDS sources:
+Deterministic extraction from BIDS sources:
 - All authors from `dataset_description.json` (even without ORCIDs)
 - Title (`Name`), license (`License`), data type (`DatasetType`: raw/derivative)
+- Modalities detected from repo file tree (eeg, emg, func, etc.)
+- `resource_type_specific` mapped from modalities (e.g., "EMG Dataset")
 - `SourceDatasets` -> `IsDerivedFrom` related identifiers
 - `Funding` references
 - `ReferencesAndLinks` -> related identifiers
-- `HowToAcknowledge`
+- GitHub repo URL and NEMAR landing page as `IsDescribedBy` related identifiers
 
-**Stage 2: LLM Enrichment** (`pipeline_stage: "enriched"`)
+**Stage 2a: LLM Enrichment** (`pipeline_stage: "enriched"`)
 Extract what BIDS doesn't provide from README:
 - Rich description/abstract
 - Methods description
-- Structured keywords with subject schemes (e.g., MeSH)
+- Structured keywords with MeSH subject scheme (MeSH only; LCSH removed)
 - Additional funding details (award numbers from text)
 - Additional related identifiers from README
 
-**Stage 3: LLM Validation** (`pipeline_stage: "validated"`)
+**Stage 2b: MeSH Validation**
+NLM API validates MeSH-tagged keywords:
+- Confirms valid terms (adds URI from `id.nlm.nih.gov`)
+- Strips scheme from invalid terms (keeps term as plain keyword)
+- Also strips any non-MeSH schemes (LCSH, etc.)
+- API: `https://id.nlm.nih.gov/mesh/lookup/descriptor?label={term}&match=exact&limit=1`
+
+**Stage 3: LLM Validation with Feedback Loop** (`pipeline_stage: "validated"`)
 A second LLM pass that reviews the assembled metadata:
 - Validates relation types (e.g., `IsDerivedFrom` vs `IsVersionOf`)
 - Checks author completeness against README mentions
 - Validates keyword relevance and scheme assignments
 - Flags inconsistencies between description and actual data
+- If blocking issues found: feeds them back to LLM for correction via `correctFromFeedback()` (up to 3 attempts)
+- If still failing after 3 attempts: creates GitHub issue on dataset repo with blocking issues
 
 ### DOI Gating
 
 DOI concept creation is blocked unless `pipeline_stage` is `"validated"`. Admin override available with `skip_enrichment_check: true`.
+
+### DOI Target URL
+
+DOI `_target` always resolves to `https://nemar.org/dataexplorer/detail?dataset_id=...` (NEMAR landing page, not GitHub).
 
 ### Refactoring Target
 
@@ -515,19 +531,38 @@ DOI concept creation is blocked unless `pipeline_stage` is `"validated"`. Admin 
 {
   "version": "2.0",
   "pipeline_stage": "validated",
+  "title": "Dataset Name",
+  "license": "ODC-By-1.0",
+  "dataset_type": "raw",
+  "modalities": ["emg", "beh"],
+  "resource_type_general": "Dataset",
+  "resource_type_specific": "EMG Dataset",
   "authors": {
     "Author Name": { "orcid": "...", "affiliations": [{ "name": "..." }] },
     "Author Without ORCID": {}
   },
   "description": "...",
   "methods_description": "...",
-  "data_type": "raw",
-  "license": "CC-BY-4.0",
-  "keywords": [{ "term": "...", "subject_scheme": "MeSH" }],
+  "keywords": [{ "term": "Electromyography", "subject_scheme": "MeSH", "scheme_uri": "https://id.nlm.nih.gov/mesh/", "value_uri": "https://id.nlm.nih.gov/mesh/D004576" }],
   "funding_references": [{ "funder_name": "...", "award_number": "..." }],
-  "related_identifiers": [{ "identifier": "...", "identifier_type": "DOI", "relation_type": "IsDerivedFrom" }]
+  "related_identifiers": [
+    { "identifier": "10.xxxx/...", "identifier_type": "DOI", "relation_type": "IsDerivedFrom" },
+    { "identifier": "https://github.com/nemarDatasets/nm000108", "identifier_type": "URL", "relation_type": "IsDescribedBy" },
+    { "identifier": "https://nemar.org/dataexplorer/detail?dataset_id=nm000108", "identifier_type": "URL", "relation_type": "IsDescribedBy" }
+  ]
 }
 ```
+
+### Key Files
+
+| File | Role |
+|---|---|
+| `backend/src/services/llm-enrich.ts` | `seedFromBids()`, `enrichFromReadme()`, `validateMetadata()`, `correctFromFeedback()`, `validateMeshTerms()` |
+| `backend/src/routes/webhooks.ts` | Pipeline orchestration (POST `/webhooks/llm-enrich`) |
+| `backend/src/routes/admin.ts` | DOI gating (`pipeline_stage === "validated"`) |
+| `backend/src/services/datacite.ts` | `parseNemarMetadataV2()`, `detectModalitiesFromTree()`, `mapModalityToResourceType()` |
+| `shared/datacite-constants.ts` | `NemarMetadataV2` type, `PipelineStage` |
+| `.github/workflows/llm-enrichment.yml` | CI trigger on README/dataset_description changes |
 
 ---
 

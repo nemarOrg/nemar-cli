@@ -10,7 +10,7 @@ import { Hono } from "hono";
 import type { NemarMetadataV2 } from "../../../shared/datacite-constants.js";
 import { parseNemarMetadata } from "../services/datacite.js";
 import { createEzidVersionDoi, parseDoiProvider } from "../services/doi.js";
-import { extractDoi } from "../services/ezid.js";
+import { TEST_SHOULDER, extractDoi } from "../services/ezid.js";
 import {
   createOrUpdateFile,
   downloadReleaseArchive,
@@ -120,10 +120,11 @@ webhooks.post("/publish-version-doi", async (c) => {
 
   const provider = parseDoiProvider(dataset.doi_provider);
 
-  // Auto-detect sandbox from EZID identifier prefix (10.5072 = EZID sandbox shoulder)
+  // Auto-detect sandbox from EZID test shoulder prefix
+  const sandboxPrefix = TEST_SHOULDER.replace(/^doi:/, "").split("/")[0]; // "10.5072"
   const sandbox =
     provider === "ezid" && dataset.ezid_identifier
-      ? dataset.ezid_identifier.includes("10.5072")
+      ? dataset.ezid_identifier.includes(sandboxPrefix)
       : false;
 
   // Route to appropriate provider
@@ -269,6 +270,15 @@ async function handleEzidVersionDoi(
     let zenodoBackupError: string | undefined;
     try {
       const zenodoToken = sandbox ? c.env.ZENODO_SANDBOX_API_KEY : c.env.ZENODO_API_KEY;
+      if (!zenodoToken) {
+        console.info(
+          `[webhook] Zenodo backup skipped for ${dataset.dataset_id}: no ${sandbox ? "sandbox " : ""}API key configured`,
+        );
+      } else if (!dataset.github_repo) {
+        console.info(
+          `[webhook] Zenodo backup skipped for ${dataset.dataset_id}: no GitHub repo configured`,
+        );
+      }
       if (zenodoToken && dataset.github_repo) {
         const tag = `v${version}`;
         const archiveData = await downloadReleaseArchive(repoName, tag, c.env.GITHUB_ADMIN_PAT);
@@ -329,6 +339,11 @@ async function handleEzidVersionDoi(
             sandbox,
           );
           zenodoBackup = `Zenodo draft #${depositionId}`;
+        } else {
+          console.warn(
+            `[webhook] Zenodo deposition #${depositionId} has no bucket URL; file upload skipped`,
+          );
+          zenodoBackupError = `Zenodo deposition #${depositionId} has no bucket URL`;
         }
       }
     } catch (zenodoErr) {
@@ -530,7 +545,8 @@ async function handleZenodoVersionDoi(
  *
  * Called by GitHub Actions when README.md or dataset_description.json changes.
  * Reads source files from GitHub, extracts metadata via OpenRouter,
- * merges with existing author ORCIDs, and commits .nemar/metadata.json.
+ * merges with existing author ORCIDs, commits .nemar/metadata.json,
+ * ensures .bidsignore includes .nemar/, and caches enrichment in D1.
  */
 webhooks.post("/llm-enrich", async (c) => {
   // Validate webhook token
@@ -608,8 +624,15 @@ webhooks.post("/llm-enrich", async (c) => {
       try {
         bidsDescription = JSON.parse(descContent) as Record<string, unknown>;
       } catch (parseErr) {
-        console.warn(
+        console.error(
           `[llm-enrich] Could not parse dataset_description.json for ${dataset_id}: ${errorMessage(parseErr)}`,
+        );
+        return c.json(
+          {
+            error: "dataset_description.json exists but contains invalid JSON",
+            details: errorMessage(parseErr),
+          },
+          422,
         );
       }
     }
@@ -639,8 +662,8 @@ webhooks.post("/llm-enrich", async (c) => {
           existingMetadata = { version: "2.0", authors: v2Authors };
         }
       } catch (parseErr) {
-        console.warn(
-          `[llm-enrich] WARNING: Existing metadata for ${dataset_id} is corrupt and will not be preserved: ${errorMessage(parseErr)}`,
+        console.error(
+          `[llm-enrich] Existing metadata for ${dataset_id} is corrupt and will not be preserved: ${errorMessage(parseErr)}`,
         );
       }
     }
@@ -655,10 +678,11 @@ webhooks.post("/llm-enrich", async (c) => {
     // Stage 2: LLM enrichment (adds description, keywords, methods, etc.)
     const llmResult = await enrichFromReadme(readmeContent, bidsDescription, apiKey);
     const enriched = mergeWithExisting(seeded, llmResult);
+    const enrichedFields = Object.keys(llmResult).filter(
+      (k) => llmResult[k as keyof typeof llmResult] !== undefined,
+    );
     console.log(
-      `[llm-enrich] Stage 2 (enrich): ${dataset_id} - extracted: ${Object.keys(llmResult)
-        .filter((k) => llmResult[k as keyof typeof llmResult] !== undefined)
-        .join(", ")}`,
+      `[llm-enrich] Stage 2 (enrich): ${dataset_id} - extracted: ${enrichedFields.join(", ")}`,
     );
 
     // Stage 2b: MeSH term validation (NLM API, deterministic)
@@ -667,19 +691,18 @@ webhooks.post("/llm-enrich", async (c) => {
       const meshResult = await validateMeshTerms(enriched);
       meshValidated = meshResult.metadata;
       if (meshResult.log.length > 0) {
-        const confirmed = meshResult.log.filter((l) => l.action === "confirmed").length;
-        const corrected = meshResult.log.filter((l) => l.action === "corrected").length;
-        const removed = meshResult.log.filter((l) => l.action === "scheme_removed").length;
-        console.log(
-          `[llm-enrich] Stage 2b (MeSH): ${dataset_id} - ${confirmed} confirmed, ${corrected} corrected, ${removed} scheme removed`,
-        );
+        const counts = { confirmed: 0, corrected: 0, scheme_removed: 0 };
         for (const entry of meshResult.log) {
+          counts[entry.action]++;
           if (entry.action === "corrected") {
             console.log(`[llm-enrich]   MeSH corrected: "${entry.term}" -> "${entry.mesh_label}"`);
           } else if (entry.action === "scheme_removed") {
             console.log(`[llm-enrich]   MeSH not found: "${entry.term}" (scheme stripped)`);
           }
         }
+        console.log(
+          `[llm-enrich] Stage 2b (MeSH): ${dataset_id} - ${counts.confirmed} confirmed, ${counts.corrected} corrected, ${counts.scheme_removed} scheme removed`,
+        );
       }
     } catch (meshErr) {
       console.warn(
@@ -688,14 +711,14 @@ webhooks.post("/llm-enrich", async (c) => {
     }
 
     // Stage 3: LLM validation with feedback loop (up to 3 correction attempts)
-    const MAX_CORRECTION_ATTEMPTS = 3;
+    const MAX_CORRECTIONS = 3;
     let finalMetadata = meshValidated;
     let validationResult = null;
     let correctionAttempts = 0;
 
     try {
       let currentMetadata = meshValidated;
-      for (let attempt = 0; attempt <= MAX_CORRECTION_ATTEMPTS; attempt++) {
+      for (let attempt = 0; attempt <= MAX_CORRECTIONS; attempt++) {
         const validated = await validateMetadata(
           currentMetadata,
           readmeContent,
@@ -703,27 +726,20 @@ webhooks.post("/llm-enrich", async (c) => {
           apiKey,
         );
         validationResult = validated.validation;
+        finalMetadata = validated.metadata;
 
         const label = attempt === 0 ? "validate" : `correction-${attempt}`;
         console.log(
           `[llm-enrich] Stage 3 (${label}): ${dataset_id} - ${validated.validation.valid ? "PASSED" : "FAILED"}, blocking: ${validated.validation.blocking_issues.length}, warnings: ${validated.validation.warnings.length}`,
         );
 
-        if (validated.validation.valid) {
-          finalMetadata = validated.metadata;
-          break;
-        }
-
-        // If we've exhausted correction attempts, keep the enriched metadata
-        if (attempt >= MAX_CORRECTION_ATTEMPTS) {
-          finalMetadata = validated.metadata;
-          break;
-        }
+        // Stop if validation passed or no more correction attempts remain
+        if (validated.validation.valid || attempt === MAX_CORRECTIONS) break;
 
         // Feed blocking issues back to LLM for correction
         correctionAttempts++;
         console.log(
-          `[llm-enrich] Correction attempt ${correctionAttempts}/${MAX_CORRECTION_ATTEMPTS} for ${dataset_id}`,
+          `[llm-enrich] Correction attempt ${correctionAttempts}/${MAX_CORRECTIONS} for ${dataset_id}`,
         );
         try {
           const corrections = await correctFromFeedback(
@@ -739,7 +755,6 @@ webhooks.post("/llm-enrich", async (c) => {
           console.warn(
             `[llm-enrich] Correction attempt ${correctionAttempts} failed for ${dataset_id}: ${errorMessage(corrErr)}`,
           );
-          finalMetadata = validated.metadata;
           break;
         }
       }
@@ -749,48 +764,82 @@ webhooks.post("/llm-enrich", async (c) => {
       );
     }
 
-    // If still not validated after all attempts, create a GitHub issue
+    // If still not validated after all attempts, create a GitHub issue (if not already reported)
     if (
       finalMetadata.pipeline_stage !== "validated" &&
       validationResult &&
       validationResult.blocking_issues.length > 0
     ) {
       try {
-        const issueBody = [
-          "## Metadata Validation Failed",
-          "",
-          `The automated metadata pipeline for **${dataset_id}** could not reach the "validated" stage after ${correctionAttempts} correction attempt(s).`,
-          "",
-          "### Blocking Issues",
-          ...validationResult.blocking_issues.map((i) => `- ${i}`),
-          "",
-          ...(validationResult.warnings.length > 0
-            ? ["### Warnings", ...validationResult.warnings.map((w) => `- ${w}`), ""]
-            : []),
-          "### Next Steps",
-          "1. Review the issues above and fix the underlying data (e.g., `dataset_description.json`)",
-          "2. Push the fix to `main` to re-trigger the enrichment pipeline",
-          "3. Or manually trigger the LLM Metadata Enrichment workflow",
-          "",
-          "*This issue was created automatically by the metadata pipeline.*",
-        ].join("\n");
+        const issueTitle = `Metadata validation failed for ${dataset_id}`;
 
-        await fetch(`https://api.github.com/repos/nemarDatasets/${repoName}/issues`, {
-          method: "POST",
-          headers: {
-            Authorization: `token ${pat}`,
-            Accept: "application/vnd.github+json",
-            "Content-Type": "application/json",
+        // Check for existing open issue to avoid duplicates on re-trigger
+        const existingResp = await fetch(
+          `https://api.github.com/repos/nemarDatasets/${repoName}/issues?state=open&labels=metadata&per_page=100`,
+          {
+            headers: {
+              Authorization: `token ${pat}`,
+              Accept: "application/vnd.github+json",
+            },
           },
-          body: JSON.stringify({
-            title: `Metadata validation failed for ${dataset_id}`,
-            body: issueBody,
-            labels: ["metadata"],
-          }),
-        });
-        console.log(
-          `[llm-enrich] Created GitHub issue for unresolved validation failures on ${dataset_id}`,
         );
+        let alreadyReported = false;
+        if (existingResp.ok) {
+          const existing = (await existingResp.json()) as Array<{ title: string }>;
+          alreadyReported = existing.some((i) => i.title === issueTitle);
+        }
+
+        if (alreadyReported) {
+          console.log(
+            `[llm-enrich] GitHub issue already exists for ${dataset_id}, skipping creation`,
+          );
+        } else {
+          const issueBody = [
+            "## Metadata Validation Failed",
+            "",
+            `The automated metadata pipeline for **${dataset_id}** could not reach the "validated" stage after ${correctionAttempts} correction attempt(s).`,
+            "",
+            "### Blocking Issues",
+            ...validationResult.blocking_issues.map((i) => `- ${i}`),
+            "",
+            ...(validationResult.warnings.length > 0
+              ? ["### Warnings", ...validationResult.warnings.map((w) => `- ${w}`), ""]
+              : []),
+            "### Next Steps",
+            "1. Review the issues above and fix the underlying data (e.g., `dataset_description.json`)",
+            "2. Push the fix to `main` to re-trigger the enrichment pipeline",
+            "3. Or manually trigger the LLM Metadata Enrichment workflow",
+            "",
+            "*This issue was created automatically by the metadata pipeline.*",
+          ].join("\n");
+
+          const issueResp = await fetch(
+            `https://api.github.com/repos/nemarDatasets/${repoName}/issues`,
+            {
+              method: "POST",
+              headers: {
+                Authorization: `token ${pat}`,
+                Accept: "application/vnd.github+json",
+                "Content-Type": "application/json",
+              },
+              body: JSON.stringify({
+                title: issueTitle,
+                body: issueBody,
+                labels: ["metadata"],
+              }),
+            },
+          );
+          if (issueResp.ok) {
+            console.log(
+              `[llm-enrich] Created GitHub issue for unresolved validation failures on ${dataset_id}`,
+            );
+          } else {
+            const respBody = await issueResp.text();
+            console.error(
+              `[llm-enrich] Failed to create GitHub issue for ${dataset_id}: HTTP ${issueResp.status}: ${respBody}`,
+            );
+          }
+        }
       } catch (issueErr) {
         console.warn(
           `[llm-enrich] Failed to create GitHub issue for ${dataset_id}: ${errorMessage(issueErr)}`,
@@ -798,41 +847,62 @@ webhooks.post("/llm-enrich", async (c) => {
       }
     }
 
-    // Commit .nemar/metadata.json to repo
+    // Pipeline LLM work is complete. Commit results; individual failures are
+    // non-fatal since the expensive LLM calls already succeeded.
     const metadataContent = JSON.stringify(finalMetadata, null, 2);
-    await createOrUpdateFile(
-      repoName,
-      ".nemar/metadata.json",
-      metadataContent,
-      `Update NEMAR metadata (pipeline: ${finalMetadata.pipeline_stage})`,
-      pat,
-    );
+    let commitError: string | undefined;
+    let bidsignoreError: string | undefined;
+    let cacheError: string | undefined;
 
-    // Ensure .bidsignore includes .nemar/
-    const bidsignoreFile = tree.find((f) => f.path === ".bidsignore");
-    let bidsignoreContent = "";
-    if (bidsignoreFile) {
-      bidsignoreContent = await getBlobContent(repoName, bidsignoreFile.sha, pat);
-    }
-    if (!bidsignoreContent.includes(".nemar/")) {
-      bidsignoreContent = bidsignoreContent
-        ? `${bidsignoreContent.trimEnd()}\n.nemar/\n`
-        : ".nemar/\n";
+    // Commit .nemar/metadata.json to repo
+    try {
       await createOrUpdateFile(
         repoName,
-        ".bidsignore",
-        bidsignoreContent,
-        "Add .nemar/ to .bidsignore",
+        ".nemar/metadata.json",
+        metadataContent,
+        `Update NEMAR metadata (pipeline: ${finalMetadata.pipeline_stage})`,
         pat,
       );
+    } catch (err) {
+      commitError = errorMessage(err);
+      console.error(`[llm-enrich] Failed to commit metadata for ${dataset_id}:`, err);
+    }
+
+    // Ensure .bidsignore includes .nemar/
+    try {
+      const bidsignoreFile = tree.find((f) => f.path === ".bidsignore");
+      let bidsignoreContent = "";
+      if (bidsignoreFile) {
+        bidsignoreContent = await getBlobContent(repoName, bidsignoreFile.sha, pat);
+      }
+      if (!bidsignoreContent.includes(".nemar/")) {
+        bidsignoreContent = bidsignoreContent
+          ? `${bidsignoreContent.trimEnd()}\n.nemar/\n`
+          : ".nemar/\n";
+        await createOrUpdateFile(
+          repoName,
+          ".bidsignore",
+          bidsignoreContent,
+          "Add .nemar/ to .bidsignore",
+          pat,
+        );
+      }
+    } catch (err) {
+      bidsignoreError = errorMessage(err);
+      console.error(`[llm-enrich] Failed to update .bidsignore for ${dataset_id}:`, err);
     }
 
     // Cache in D1
-    await c.env.DB.prepare(
-      "UPDATE datasets SET enrichment_json = ?, enrichment_updated_at = datetime('now'), updated_at = datetime('now') WHERE dataset_id = ?",
-    )
-      .bind(metadataContent, dataset_id)
-      .run();
+    try {
+      await c.env.DB.prepare(
+        "UPDATE datasets SET enrichment_json = ?, enrichment_updated_at = datetime('now'), updated_at = datetime('now') WHERE dataset_id = ?",
+      )
+        .bind(metadataContent, dataset_id)
+        .run();
+    } catch (err) {
+      cacheError = errorMessage(err);
+      console.error(`[llm-enrich] Failed to cache enrichment in D1 for ${dataset_id}:`, err);
+    }
 
     return c.json({
       message: `Metadata pipeline completed (stage: ${finalMetadata.pipeline_stage})`,
@@ -843,9 +913,7 @@ webhooks.post("/llm-enrich", async (c) => {
         related_identifiers: (seeded.related_identifiers || []).length,
         funding_references: (seeded.funding_references || []).length,
       },
-      enriched_fields: Object.keys(llmResult).filter(
-        (k) => llmResult[k as keyof typeof llmResult] !== undefined,
-      ),
+      enriched_fields: enrichedFields,
       validation: validationResult
         ? {
             valid: validationResult.valid,
@@ -853,6 +921,9 @@ webhooks.post("/llm-enrich", async (c) => {
             warnings: validationResult.warnings,
           }
         : null,
+      ...(commitError && { commit_error: commitError }),
+      ...(bidsignoreError && { bidsignore_error: bidsignoreError }),
+      ...(cacheError && { cache_error: cacheError }),
     });
   } catch (error) {
     console.error(`[llm-enrich] Failed for ${dataset_id}:`, error);
