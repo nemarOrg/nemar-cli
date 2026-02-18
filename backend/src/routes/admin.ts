@@ -3117,11 +3117,22 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
     if (result instanceof Response) return result;
     const datasetDesc = result;
     if (!datasetDesc.Version) {
-      const msg =
-        "dataset_description.json has no Version field; cannot create version tag for permanent DOI record";
-      console.warn(`[publish] ${msg} for ${repoName}`);
-      await updateProgress(stepName, msg);
-      return c.json({ error: msg, step: stepName, steps_completed: completed }, 500);
+      console.info(`[publish] No Version in dataset_description.json for ${repoName}; defaulting to 1.0.0`);
+      datasetDesc.Version = "1.0.0";
+      try {
+        await createOrUpdateFile(
+          repoName,
+          "dataset_description.json",
+          JSON.stringify(datasetDesc, null, 2),
+          "Set initial version to 1.0.0 for DOI publication",
+          pat,
+        );
+      } catch (writeErr) {
+        const msg = `Failed to write default Version to dataset_description.json: ${errorMessage(writeErr)}`;
+        console.error(`[publish] ${msg}`);
+        await updateProgress(stepName, msg);
+        return c.json({ error: msg, step: stepName, steps_completed: completed }, 500);
+      }
     }
     const version = String(datasetDesc.Version);
     return { version, tag: `v${version}`, datasetDesc };
