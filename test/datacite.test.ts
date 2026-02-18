@@ -949,6 +949,32 @@ describe("seedFromBids", () => {
     );
     expect(isDerivedFrom).toHaveLength(1);
   });
+
+  test("removes conflicting relation types for SourceDataset DOIs from prior runs", () => {
+    const existing = {
+      version: "2.0" as const,
+      related_identifiers: [
+        // Prior LLM run incorrectly classified as IsVersionOf
+        { identifier: "10.13026/ym7v-bh53", identifier_type: "DOI" as const, relation_type: "IsVersionOf" },
+        // Another unrelated entry that should be preserved
+        { identifier: "10.1109/TNSRE.2021.3082551", identifier_type: "DOI" as const, relation_type: "IsDescribedBy" },
+      ],
+    };
+
+    const seeded = seedFromBids(fullBids, existing);
+
+    // IsVersionOf for SourceDataset DOI should be removed, replaced with IsDerivedFrom
+    expect(seeded.related_identifiers!.some((r) =>
+      r.identifier === "10.13026/ym7v-bh53" && r.relation_type === "IsVersionOf",
+    )).toBe(false);
+    expect(seeded.related_identifiers!.some((r) =>
+      r.identifier === "10.13026/ym7v-bh53" && r.relation_type === "IsDerivedFrom",
+    )).toBe(true);
+    // Unrelated entry preserved
+    expect(seeded.related_identifiers!.some((r) =>
+      r.identifier === "10.1109/TNSRE.2021.3082551" && r.relation_type === "IsDescribedBy",
+    )).toBe(true);
+  });
 });
 
 describe("parseValidationResult", () => {

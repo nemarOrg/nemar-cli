@@ -230,33 +230,40 @@ export function seedFromBids(
     if (Object.keys(authors).length > 0) seeded.authors = authors;
   }
 
-  const relatedIds: RelatedIdentifierEntry[] = [...(existing?.related_identifiers || [])];
   const doiPattern = /^10\.\d{4,}\/.+$/;
 
-  // SourceDatasets -> IsDerivedFrom
+  // Collect SourceDatasets DOIs first so we can clean stale entries
+  const sourceDatasetDois = new Set<string>();
   if (Array.isArray(bidsDescription.SourceDatasets)) {
     for (const src of bidsDescription.SourceDatasets) {
       if (!src || typeof src !== "object") continue;
       const obj = src as Record<string, unknown>;
-      // Try DOI field first (strip "doi:" prefix if present)
       let doi = typeof obj.DOI === "string" ? obj.DOI.replace(/^doi:/, "") : "";
-      // Fall back to URL if it looks like a DOI
       if (!doi && typeof obj.URL === "string") {
         const urlDoi = obj.URL.match(/(?:doi\.org\/|doi:)(10\.\d{4,}\/.+)/);
         if (urlDoi) doi = urlDoi[1];
       }
-      if (doi && doiPattern.test(doi)) {
-        const alreadyExists = relatedIds.some(
-          (r) => r.identifier === doi && r.relation_type === "IsDerivedFrom",
-        );
-        if (!alreadyExists) {
-          relatedIds.push({
-            identifier: doi,
-            identifier_type: "DOI",
-            relation_type: "IsDerivedFrom",
-          });
-        }
-      }
+      if (doi && doiPattern.test(doi)) sourceDatasetDois.add(doi);
+    }
+  }
+
+  // Start from existing entries, but remove any that conflict with SourceDatasets
+  // (e.g. a previous LLM run may have added IsVersionOf for a SourceDataset DOI)
+  const relatedIds: RelatedIdentifierEntry[] = (existing?.related_identifiers || []).filter(
+    (r) => !sourceDatasetDois.has(r.identifier) || r.relation_type === "IsDerivedFrom",
+  );
+
+  // SourceDatasets -> IsDerivedFrom
+  for (const doi of sourceDatasetDois) {
+    const alreadyExists = relatedIds.some(
+      (r) => r.identifier === doi && r.relation_type === "IsDerivedFrom",
+    );
+    if (!alreadyExists) {
+      relatedIds.push({
+        identifier: doi,
+        identifier_type: "DOI",
+        relation_type: "IsDerivedFrom",
+      });
     }
   }
 
