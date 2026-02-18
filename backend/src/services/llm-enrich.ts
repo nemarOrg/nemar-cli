@@ -187,9 +187,13 @@ export function validateLlmResultV2(raw: Record<string, unknown>): LlmEnrichment
       if (typeof obj.award_title === "string") entry.award_title = obj.award_title;
       if (typeof obj.funder_identifier === "string")
         entry.funder_identifier = obj.funder_identifier;
-      if (typeof obj.funder_identifier_type === "string")
-        entry.funder_identifier_type =
-          obj.funder_identifier_type as FundingReferenceEntry["funder_identifier_type"];
+      if (typeof obj.funder_identifier_type === "string") {
+        const validTypes = ["Crossref Funder ID", "GRID", "ISNI", "ROR", "Other"] as const;
+        if ((validTypes as readonly string[]).includes(obj.funder_identifier_type)) {
+          entry.funder_identifier_type =
+            obj.funder_identifier_type as FundingReferenceEntry["funder_identifier_type"];
+        }
+      }
       funds.push(entry);
     }
     if (funds.length > 0) result.funding_references = funds;
@@ -569,7 +573,7 @@ export async function validateMeshTerms(
       updatedKeywords.push({
         term: result.label,
         subject_scheme: "MeSH",
-        scheme_uri: "https://meshb.nlm.nih.gov/",
+        scheme_uri: "https://id.nlm.nih.gov/mesh/",
         value_uri: result.uri,
       });
       log.push({

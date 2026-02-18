@@ -8,6 +8,15 @@
 import type { Context } from "hono";
 import { Hono } from "hono";
 import type { NemarMetadataV2 } from "../../../shared/datacite-constants.js";
+
+/** Constant-time string comparison to prevent timing attacks on secret tokens. */
+function timingSafeEqual(a: string, b: string): boolean {
+  const encoder = new TextEncoder();
+  const bufA = encoder.encode(a);
+  const bufB = encoder.encode(b);
+  if (bufA.byteLength !== bufB.byteLength) return false;
+  return crypto.subtle.timingSafeEqual(bufA, bufB);
+}
 import { parseNemarMetadata } from "../services/datacite.js";
 import { createEzidVersionDoi, parseDoiProvider } from "../services/doi.js";
 import { TEST_SHOULDER, extractDoi } from "../services/ezid.js";
@@ -50,7 +59,7 @@ webhooks.post("/publish-version-doi", async (c) => {
 
   // If webhook secret not configured OR token doesn't match, reject as unauthorized
   // Treat missing secret as "no valid token exists" for better security
-  if (!expectedToken || !token || token !== expectedToken) {
+  if (!expectedToken || !token || !timingSafeEqual(token, expectedToken)) {
     return c.json({ error: "Invalid webhook token" }, 401);
   }
 
@@ -121,7 +130,7 @@ webhooks.post("/publish-version-doi", async (c) => {
   const provider = parseDoiProvider(dataset.doi_provider);
 
   // Auto-detect sandbox from EZID test shoulder prefix
-  const sandboxPrefix = TEST_SHOULDER.replace(/^doi:/, "").split("/")[0]; // "10.5072"
+  const sandboxPrefix = TEST_SHOULDER.replace(/^doi:/, "").split("/")[0];
   const sandbox =
     provider === "ezid" && dataset.ezid_identifier
       ? dataset.ezid_identifier.includes(sandboxPrefix)
@@ -553,7 +562,7 @@ webhooks.post("/llm-enrich", async (c) => {
   const token = c.req.header("X-Webhook-Token");
   const expectedToken = c.env.GITHUB_WEBHOOK_SECRET;
 
-  if (!expectedToken || !token || token !== expectedToken) {
+  if (!expectedToken || !token || !timingSafeEqual(token, expectedToken)) {
     return c.json({ error: "Invalid webhook token" }, 401);
   }
 
@@ -715,6 +724,7 @@ webhooks.post("/llm-enrich", async (c) => {
     let finalMetadata = meshValidated;
     let validationResult = null;
     let correctionAttempts = 0;
+    let issueCreationError: string | undefined;
 
     try {
       let currentMetadata = meshValidated;
@@ -841,8 +851,9 @@ webhooks.post("/llm-enrich", async (c) => {
           }
         }
       } catch (issueErr) {
+        issueCreationError = errorMessage(issueErr);
         console.warn(
-          `[llm-enrich] Failed to create GitHub issue for ${dataset_id}: ${errorMessage(issueErr)}`,
+          `[llm-enrich] Failed to create GitHub issue for ${dataset_id}: ${issueCreationError}`,
         );
       }
     }
@@ -924,6 +935,7 @@ webhooks.post("/llm-enrich", async (c) => {
       ...(commitError && { commit_error: commitError }),
       ...(bidsignoreError && { bidsignore_error: bidsignoreError }),
       ...(cacheError && { cache_error: cacheError }),
+      ...(issueCreationError && { issue_creation_error: issueCreationError }),
     });
   } catch (error) {
     console.error(`[llm-enrich] Failed for ${dataset_id}:`, error);

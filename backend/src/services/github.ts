@@ -982,8 +982,8 @@ jobs:
         `Add ${workflow.path.split("/").pop()} workflow`,
         pat,
       );
-    } catch {
-      errors.push(workflow.path);
+    } catch (err) {
+      errors.push(`${workflow.path}: ${err instanceof Error ? err.message : String(err)}`);
     }
   }
 

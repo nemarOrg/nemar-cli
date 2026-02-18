@@ -1127,8 +1127,10 @@ adminRoutes.post(
       try {
         const meta = JSON.parse(dataset.enrichment_json) as Record<string, unknown>;
         pipelineStage = typeof meta.pipeline_stage === "string" ? meta.pipeline_stage : undefined;
-      } catch {
-        // Corrupt enrichment_json; treat as needing re-enrichment
+      } catch (parseErr) {
+        console.error(
+          `[doi] Corrupt enrichment_json for ${dataset.dataset_id}: ${parseErr instanceof Error ? parseErr.message : String(parseErr)}`,
+        );
       }
       if (pipelineStage !== "validated") {
         return c.json(

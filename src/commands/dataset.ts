@@ -142,15 +142,14 @@ async function uploadWithAdaptiveBatching(opts: {
   let totalUploaded = 0;
   let totalFailed: string[] = [];
   let totalElapsedSec = 0;
-  let offset = 0;
 
   // Use initial URLs from dataset creation if provided (first upload only)
-  let initialUrls = opts.initialUrls || {};
+  const initialUrls = opts.initialUrls || {};
   const initialUrlPaths = new Set(Object.keys(initialUrls));
 
   // If we have initial URLs, upload those first as the probe batch
-  if (Object.keys(initialUrls).length > 0) {
-    const batchSize = Object.keys(initialUrls).length;
+  if (initialUrlPaths.size > 0) {
+    const batchSize = initialUrlPaths.size;
     spinner.text = `Uploading data files to S3... (0/${filesToUpload.length})`;
 
     const batchStart = Date.now();
@@ -174,10 +173,6 @@ async function uploadWithAdaptiveBatching(opts: {
     totalFailed = result.failed;
     totalElapsedSec = (Date.now() - batchStart) / 1000;
 
-    // Skip files already covered by initial URLs
-    offset = filesToUpload.findIndex((f) => !initialUrlPaths.has(f.path));
-    if (offset === -1) offset = filesToUpload.length; // all files were in initial URLs
-    initialUrls = {}; // consumed
   }
 
   // Upload remaining files in adaptive batches

@@ -1453,7 +1453,7 @@ publishCommand
     "after",
     `
 Description:
-  Approve a publication request and run the automated 14-step orchestrator
+  Approve a publication request and run the automated 15-step orchestrator
   to make the dataset publicly accessible with a permanent DOI.
 
   WARNING: This action is PERMANENT. Published datasets cannot be unpublished.
@@ -1461,19 +1461,20 @@ Description:
 
 Orchestrator Steps:
    1. CI Check          - Verify BIDS validation passes, deploy workflows if missing
-   2. Make Public       - Change GitHub repository visibility to public
-   3. S3 Public Read    - Grant public read access to S3 data
-   4. Tag Protection    - Enable tag protection rules
-   5. Create DOI        - Create concept DOI via EZID (or Zenodo if configured)
-   6. Update Metadata   - Update dataset metadata from BIDS description
-   7. Update README     - Add DOI badge and citation info to README
-   8. Create Tag        - Create version tag (e.g., v1.0.0)
-   9. Create Release    - Create GitHub release from tag
-  10. Upload to Zenodo  - Upload dataset archive to Zenodo (if Zenodo provider)
-  11. Publish DOI       - Make DOI public and findable (permanent, irreversible)
-  12. S3 Lock           - Enable S3 Object Lock (prevents data deletion)
-  13. Generate Archive  - Create downloadable zip archive
-  14. Notify User       - Send publication confirmation email
+   2. Enrichment Check  - Verify metadata pipeline has run (warn-only, non-blocking)
+   3. Make Public       - Change GitHub repository visibility to public
+   4. S3 Public Read    - Grant public read access to S3 data
+   5. Tag Protection    - Enable tag protection rules
+   6. Create DOI        - Create concept DOI via EZID (or Zenodo if configured)
+   7. Update Metadata   - Update dataset metadata from BIDS description
+   8. Update README     - Add DOI badge and citation info to README
+   9. Create Tag        - Create version tag (e.g., v1.0.0)
+  10. Create Release    - Create GitHub release from tag
+  11. Upload to Zenodo  - Upload dataset archive to Zenodo (if Zenodo provider)
+  12. Publish DOI       - Make DOI public and findable (permanent, irreversible)
+  13. S3 Lock           - Enable S3 Object Lock (prevents data deletion)
+  14. Generate Archive  - Create downloadable zip archive
+  15. Notify User       - Send publication confirmation email
 
 Resume Capability:
   If a step fails, the orchestrator saves progress. Use --resume to retry
@@ -1505,19 +1506,19 @@ After Approval:
         ? `Resume publication of ${datasetId}`
         : `Approve and publish ${datasetId}`;
       console.log(chalk.cyan(`\n${action}\n`));
-      console.log("This will run the following 14-step orchestrator:");
-      console.log("   1. Check CI             7. Update README");
-      console.log("   2. Make repo public      8. Create version tag");
-      console.log("   3. S3 public read        9. Create GitHub release");
-      console.log("   4. Tag protection       10. Upload to Zenodo");
+      console.log("This will run the following 15-step orchestrator:");
+      console.log("   1. Check CI              9. Create version tag");
+      console.log("   2. Enrichment check     10. Create GitHub release");
+      console.log("   3. Make repo public     11. Upload to Zenodo");
+      console.log("   4. S3 public read       12. Publish DOI (irreversible)");
+      console.log("   5. Tag protection       13. S3 Object Lock");
       console.log(
         options.sandbox
-          ? "   5. Create DOI (SANDBOX) 11. Publish DOI (irreversible)"
-          : "   5. Create DOI           11. Publish DOI (irreversible)",
+          ? "   6. Create DOI (SANDBOX) 14. Generate archive"
+          : "   6. Create DOI           14. Generate archive",
       );
-      console.log("   6. Update metadata      12. S3 Object Lock");
-      console.log("                           13. Generate archive");
-      console.log("                           14. Notify user");
+      console.log("   7. Update metadata      15. Notify user");
+      console.log("   8. Update README");
       console.log();
 
       // Sandbox warning

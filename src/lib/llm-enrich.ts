@@ -36,7 +36,7 @@ Return ONLY valid JSON with these optional fields:
 Rules:
 - description: Write a scholarly abstract. Do not copy verbatim from README.
 - methods_description: Only include if methods/acquisition details are described.
-- keywords: 3-8 domain-specific terms. Include modality (EEG, MEG, etc.) if applicable. Use subject_scheme (e.g., "MeSH", "LCSH") when the term belongs to a known vocabulary.
+- keywords: 3-8 domain-specific terms. Include modality (EEG, MEG, etc.) if applicable. Use subject_scheme "MeSH" ONLY when the term is a valid MeSH descriptor. Do NOT use "LCSH" or any other scheme.
 - funding_references: Parse funding strings into structured format. Common funders: NIH, NSF, ERC, DFG. Use funder_name (not funderName).
 - related_identifiers: Only include actual DOIs (10.XXXX/...) with identifier_type "DOI". Common relation_type values:
   IsCitedBy, Cites, IsSupplementTo, IsSupplementedBy, References, IsReferencedBy,
@@ -145,9 +145,12 @@ export function validateLlmResult(raw: Record<string, unknown>): LlmEnrichmentRe
         const obj = k as Record<string, unknown>;
         if (typeof obj.term === "string" && obj.term) {
           const entry: StructuredKeyword = { term: obj.term };
-          if (typeof obj.subject_scheme === "string") entry.subject_scheme = obj.subject_scheme;
-          if (typeof obj.scheme_uri === "string") entry.scheme_uri = obj.scheme_uri;
-          if (typeof obj.value_uri === "string") entry.value_uri = obj.value_uri;
+          // Only preserve MeSH scheme; strip all others (LCSH, etc.)
+          if (typeof obj.subject_scheme === "string" && obj.subject_scheme === "MeSH") {
+            entry.subject_scheme = obj.subject_scheme;
+            if (typeof obj.scheme_uri === "string") entry.scheme_uri = obj.scheme_uri;
+            if (typeof obj.value_uri === "string") entry.value_uri = obj.value_uri;
+          }
           kw.push(entry);
         }
       }
