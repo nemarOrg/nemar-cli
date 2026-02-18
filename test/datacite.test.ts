@@ -781,7 +781,7 @@ describe("mergeWithExisting", () => {
     expect(merged.keywords![0].term).toBe("new keyword");
   });
 
-  test("additive merge for related_identifiers (preserves BIDS-seeded IsDerivedFrom)", () => {
+  test("BIDS-seeded related_identifiers take priority over LLM for same DOI", () => {
     const existing = {
       version: "2.0" as const,
       pipeline_stage: "seeded" as const,
@@ -799,32 +799,39 @@ describe("mergeWithExisting", () => {
 
     const merged = mergeWithExisting(existing, llmResult);
 
-    // Should have 3 entries: original IsDerivedFrom + IsDescribedBy + IsVersionOf (different relation_type = different key)
-    expect(merged.related_identifiers).toHaveLength(3);
+    // Should have 2 entries: BIDS IsDerivedFrom preserved, LLM IsVersionOf dropped (same identifier), new IsDescribedBy added
+    expect(merged.related_identifiers).toHaveLength(2);
     expect(merged.related_identifiers![0].relation_type).toBe("IsDerivedFrom");
     expect(merged.related_identifiers![1].relation_type).toBe("IsDescribedBy");
     expect(merged.pipeline_stage).toBe("enriched");
   });
 
-  test("additive merge for funding_references (deduplicates by funder+award)", () => {
+  test("LLM-parsed funding replaces raw BIDS strings when award number matches", () => {
     const existing = {
       version: "2.0" as const,
       pipeline_stage: "seeded" as const,
       funding_references: [
         { funder_name: "Shanghai Municipal Science and Technology Major Project (2017SHZDZX01)" },
+        { funder_name: "NIH (R01-NS99999)" },
       ],
     };
     const llmResult = {
       funding_references: [
-        { funder_name: "Shanghai Municipal Science and Technology Major Project", award_number: "2017SHZDZX01" },
-        { funder_name: "NIH", award_number: "R01-NS12345" },
+        { funder_name: "Shanghai Municipal Science and Technology Commission", award_number: "2017SHZDZX01" },
+        { funder_name: "NIH", award_number: "R01-NS99999" },
+        { funder_name: "NSF", award_number: "BCS-12345" },
       ],
     };
 
     const merged = mergeWithExisting(existing, llmResult);
 
-    // BIDS raw string + 2 LLM entries (no exact funder_name|award_number match so all 3 remain)
-    expect(merged.funding_references!.length).toBeGreaterThanOrEqual(2);
+    // Raw BIDS strings replaced by LLM-parsed versions (2 replaced + 1 new = 3 total)
+    expect(merged.funding_references).toHaveLength(3);
+    expect(merged.funding_references!.some((f) => f.award_number === "2017SHZDZX01")).toBe(true);
+    expect(merged.funding_references!.some((f) => f.award_number === "R01-NS99999")).toBe(true);
+    expect(merged.funding_references!.some((f) => f.award_number === "BCS-12345")).toBe(true);
+    // Raw BIDS strings should be gone
+    expect(merged.funding_references!.some((f) => f.funder_name.includes("(2017SHZDZX01)"))).toBe(false);
     expect(merged.pipeline_stage).toBe("enriched");
   });
 });

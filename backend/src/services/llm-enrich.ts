@@ -328,10 +328,19 @@ export function mergeWithExisting(
   if (llmResult.methods_description) merged.methods_description = llmResult.methods_description;
   if (llmResult.keywords) merged.keywords = llmResult.keywords;
 
-  // Additive merge for funding_references (deduplicate by funder_name + award_number)
+  // Funding merge: LLM-parsed entries replace BIDS raw strings when the award number
+  // from the LLM entry appears inside a raw BIDS funder_name string.
   if (llmResult.funding_references) {
-    const existingFunds = existing?.funding_references || [];
-    const allFunds = [...existingFunds];
+    const existingFunds = [...(existing?.funding_references || [])];
+    const allFunds: FundingReferenceEntry[] = [];
+
+    for (const ef of existingFunds) {
+      // Check if LLM provided a parsed version of this raw BIDS string
+      const hasLlmReplacement = ef.award_number === undefined && llmResult.funding_references.some(
+        (lf) => lf.award_number && ef.funder_name.includes(lf.award_number),
+      );
+      if (!hasLlmReplacement) allFunds.push(ef);
+    }
     for (const newFund of llmResult.funding_references) {
       const key = `${newFund.funder_name}|${newFund.award_number || ""}`;
       const exists = allFunds.some(
@@ -342,11 +351,16 @@ export function mergeWithExisting(
     merged.funding_references = allFunds;
   }
 
-  // Additive merge for related_identifiers (deduplicate by identifier + relation_type)
+  // Related identifiers merge: BIDS-seeded entries take priority for the same identifier.
+  // If BIDS seeds "IsDerivedFrom" for a DOI, drop any LLM entry for the same DOI
+  // (the LLM often misclassifies SourceDatasets as "IsVersionOf").
   if (llmResult.related_identifiers) {
     const existingRels = existing?.related_identifiers || [];
+    const seededIdentifiers = new Set(existingRels.map((r) => r.identifier));
     const allRels = [...existingRels];
     for (const newRel of llmResult.related_identifiers) {
+      // Skip LLM entries for identifiers already seeded from BIDS
+      if (seededIdentifiers.has(newRel.identifier)) continue;
       const key = `${newRel.identifier}|${newRel.relation_type}`;
       const exists = allRels.some(
         (r) => `${r.identifier}|${r.relation_type}` === key,
