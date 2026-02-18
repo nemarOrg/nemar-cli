@@ -19,25 +19,40 @@ async function findLowestUnusedNumber(db: D1Database, prefix: string): Promise<n
   const start = START_NUMBER[prefix] ?? 1;
   const likePattern = `${prefix}%`;
 
-  const result = await db
+  // Two-step approach to avoid D1 parameter binding issues with complex queries
+  // Step 1: Get all candidate numbers
+  const candidatesResult = await db
     .prepare(
-      `
-    SELECT MIN(candidate) AS n FROM (
-      SELECT ?2 AS candidate
-      UNION
-      SELECT CAST(SUBSTR(dataset_id, 3) AS INTEGER) + 1
-      FROM datasets
-      WHERE dataset_id LIKE ?1
+      `SELECT CAST(SUBSTR(dataset_id, 3) AS INTEGER) + 1 AS candidate
+       FROM datasets WHERE dataset_id LIKE ?`,
     )
-    WHERE ?3 || SUBSTR('000000', 1, 6 - LENGTH(CAST(candidate AS TEXT))) || CAST(candidate AS TEXT)
-      NOT IN (SELECT dataset_id FROM datasets WHERE dataset_id LIKE ?1)
-      AND candidate >= ?2
-  `,
-    )
-    .bind(likePattern, start, prefix)
-    .first<{ n: number }>();
+    .bind(likePattern)
+    .all<{ candidate: number }>();
 
-  return result?.n ?? null;
+  const existingIds = new Set(
+    (
+      await db
+        .prepare("SELECT dataset_id FROM datasets WHERE dataset_id LIKE ?")
+        .bind(likePattern)
+        .all<{ dataset_id: string }>()
+    ).results.map((r) => r.dataset_id),
+  );
+
+  // Step 2: Find the lowest unused candidate in JS
+  const candidates = new Set([start, ...candidatesResult.results.map((r) => r.candidate)]);
+  let minUnused: number | null = null;
+
+  for (const candidate of candidates) {
+    if (candidate < start) continue;
+    const id = `${prefix}${candidate.toString().padStart(6, "0")}`;
+    if (!existingIds.has(id)) {
+      if (minUnused === null || candidate < minUnused) {
+        minUnused = candidate;
+      }
+    }
+  }
+
+  return minUnused;
 }
 
 /**

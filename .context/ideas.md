@@ -444,6 +444,36 @@ aws s3api put-bucket-policy --bucket nemar --policy '{
 
 ---
 
+## Metadata Pipeline Design (Issue #154) - IMPLEMENTED
+
+### Single Source of Truth
+
+`.nemar/metadata.json` contains ALL metadata needed for DOI minting. The file tracks its pipeline stage so we know how mature the metadata is.
+
+### Pipeline Stage Progression (Implemented)
+
+```
+seeded -> enriched -> (MeSH validated) -> validated -> DOI-ready
+```
+
+- **seeded**: Base metadata pulled from BIDS files. All authors present (even without ORCIDs). Title, license, data type, modalities, source datasets, funding from BIDS. GitHub/NEMAR URLs as `IsDescribedBy`.
+- **enriched**: LLM has added description, methods, MeSH keywords, additional funding/related identifiers from README. MeSH terms validated against NLM API.
+- **validated**: LLM judge has reviewed for correctness. If blocking issues found, feeds them back to LLM for correction (up to 3 attempts). Creates GitHub issue if still failing.
+
+### Key Design Decisions
+
+1. **MeSH only** - Removed LCSH; only MeSH subject scheme used for keywords. NLM API validates terms.
+2. **Feedback loop** - Validation failures trigger LLM correction attempts before failing. Max 3 correction rounds.
+3. **Auto-issue creation** - If validation fails after all attempts, a GitHub issue is created on the dataset repo.
+4. **DOI target** - Always resolves to NEMAR landing page, not GitHub.
+5. **Modality detection** - `detectModalitiesFromTree()` scans repo files for BIDS datatypes.
+
+### Refactoring bidsToDataCite()
+
+Currently pulls from `dataset_description.json` + enrichment. Should be refactored to read `.nemar/metadata.json` as primary source. The metadata file IS the DOI record, just in a different format.
+
+---
+
 ## References
 - OpenNeuro CLI architecture
 - GitHub CLI patterns

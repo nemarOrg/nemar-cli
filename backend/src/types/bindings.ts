@@ -26,6 +26,7 @@ export interface Bindings {
   GITHUB_WEBHOOK_SECRET?: string; // Optional - for GitHub Actions webhook auth
   TEST_BYPASS_TOKEN?: string; // Optional - for CI/CD rate limit bypass
   ENCRYPTION_KEY?: string; // For encrypting stored credentials
+  OPENROUTER_API_KEY?: string; // For LLM-based metadata enrichment
 }
 
 /** User roles in hierarchical order: owner > admin > member */

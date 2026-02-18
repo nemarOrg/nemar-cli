@@ -9,6 +9,9 @@ const GITHUB_API = "https://api.github.com";
 // Dataset repos (nm000XXX) live in nemarDatasets org; tooling repos live in nemarOrg
 const ORG_NAME = "nemarDatasets";
 
+/** Identity used for all backend-initiated commits and tags on dataset repos. */
+const NEMAR_COMMITTER = { name: "nemarAdmin", email: "nemarAdmin@osc.earth" };
+
 interface GitHubUser {
   id: number;
   login: string;
@@ -304,7 +307,7 @@ export async function createOrUpdateFile(
   content: string,
   message: string,
   pat: string,
-): Promise<boolean> {
+): Promise<void> {
   // First, try to get the file to see if it exists (need SHA for update)
   let sha: string | undefined;
   const getResponse = await fetch(`${GITHUB_API}/repos/${ORG_NAME}/${repo}/contents/${path}`, {
@@ -335,10 +338,15 @@ export async function createOrUpdateFile(
         Array.from(new TextEncoder().encode(content), (b) => String.fromCharCode(b)).join(""),
       ),
       ...(sha ? { sha } : {}),
+      committer: NEMAR_COMMITTER,
+      author: NEMAR_COMMITTER,
     }),
   });
 
-  return response.ok || response.status === 201;
+  if (!response.ok && response.status !== 201) {
+    const body = await response.text().catch(() => "");
+    throw new Error(`GitHub API error ${response.status} committing ${path}: ${body}`);
+  }
 }
 
 /**
@@ -485,8 +493,11 @@ export async function deployWorkflows(
   const bidsValidation = `name: BIDS Validation
 
 on:
+  push:
+    branches: [main]
   pull_request:
     branches: [main]
+  workflow_dispatch:
 
 jobs:
   validate:
@@ -908,24 +919,71 @@ jobs:
         run: node /tmp/stream-archive.js
 `;
 
+  // LLM Metadata Enrichment workflow
+  const llmEnrichment = `name: LLM Metadata Enrichment
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'README.md'
+      - 'dataset_description.json'
+  workflow_dispatch:
+
+jobs:
+  enrich:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger enrichment
+        env:
+          NEMAR_WEBHOOK_TOKEN: \${{ secrets.NEMAR_WEBHOOK_TOKEN }}
+        run: |
+          REPO_NAME="\${{ github.event.repository.name }}"
+
+          # Skip if webhook token not configured
+          if [ -z "$NEMAR_WEBHOOK_TOKEN" ]; then
+            echo "NEMAR_WEBHOOK_TOKEN not configured, skipping LLM enrichment"
+            exit 0
+          fi
+
+          echo "Triggering LLM enrichment for $REPO_NAME"
+
+          RESPONSE=$(curl -s -w "\\n%{http_code}" -X POST \\
+            "https://api.osc.earth/nemar/webhooks/llm-enrich" \\
+            -H "Content-Type: application/json" \\
+            -H "X-Webhook-Token: $NEMAR_WEBHOOK_TOKEN" \\
+            -d "{\\"dataset_id\\": \\"$REPO_NAME\\"}")
+
+          HTTP_CODE=$(echo "$RESPONSE" | tail -1)
+          BODY=$(echo "$RESPONSE" | head -n -1)
+
+          echo "Response ($HTTP_CODE): $BODY"
+
+          if [ "$HTTP_CODE" -ge 400 ]; then
+            echo "::warning::LLM enrichment failed (HTTP $HTTP_CODE) - this is non-blocking"
+          fi
+`;
+
   // Deploy each workflow
   const workflows = [
     { path: ".github/workflows/bids-validation.yml", content: bidsValidation },
     { path: ".github/workflows/version-check.yml", content: versionCheck },
     { path: ".github/workflows/pr-merge.yml", content: prMerge },
     { path: ".github/workflows/generate-archive.yml", content: generateArchive },
+    { path: ".github/workflows/llm-enrichment.yml", content: llmEnrichment },
   ];
 
   for (const workflow of workflows) {
-    const success = await createOrUpdateFile(
-      repo,
-      workflow.path,
-      workflow.content,
-      `Add ${workflow.path.split("/").pop()} workflow`,
-      pat,
-    );
-    if (!success) {
-      errors.push(workflow.path);
+    try {
+      await createOrUpdateFile(
+        repo,
+        workflow.path,
+        workflow.content,
+        `Add ${workflow.path.split("/").pop()} workflow`,
+        pat,
+      );
+    } catch (err) {
+      errors.push(`${workflow.path}: ${err instanceof Error ? err.message : String(err)}`);
     }
   }
 
@@ -1197,6 +1255,7 @@ export async function createTag(
       message,
       object: sha,
       type: "commit",
+      tagger: { ...NEMAR_COMMITTER, date: new Date().toISOString() },
     }),
   });
 

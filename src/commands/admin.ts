@@ -1091,7 +1091,7 @@ doiCommand
         console.log(`  DOI: ${chalk.cyan(doiInfo.concept_doi)}`);
       }
 
-      const enrichment: NemarMetadataPayload = { version: "1.0" };
+      const enrichment: NemarMetadataPayload = { version: "2.0" };
 
       // --- Author ORCIDs ---
       console.log();
@@ -1106,7 +1106,8 @@ doiCommand
       ]);
 
       if (updateAuthors) {
-        const authors: Record<string, { orcid?: string; affiliation?: string }> = {};
+        const authors: Record<string, { orcid?: string; affiliations?: Array<{ name: string }> }> =
+          {};
 
         let addMore = true;
         while (addMore) {
@@ -1131,7 +1132,7 @@ doiCommand
             },
           ]);
 
-          const entry: { orcid?: string; affiliation?: string } = {};
+          const entry: { orcid?: string; affiliations?: Array<{ name: string }> } = {};
           if (orcid) entry.orcid = orcid;
 
           const { affiliation } = await inquirer.prompt([
@@ -1141,9 +1142,9 @@ doiCommand
               message: `Affiliation for "${authorName}" (optional):`,
             },
           ]);
-          if (affiliation) entry.affiliation = affiliation;
+          if (affiliation) entry.affiliations = [{ name: affiliation }];
 
-          if (entry.orcid || entry.affiliation) {
+          if (entry.orcid || entry.affiliations) {
             authors[authorName] = entry;
           }
 
@@ -1204,24 +1205,24 @@ doiCommand
                   console.log(`  Description: ${llmResult.description.slice(0, 100)}...`);
                   enrichment.description = llmResult.description;
                 }
-                if (llmResult.methodsDescription) {
-                  enrichment.methodsDescription = llmResult.methodsDescription;
+                if (llmResult.methods_description) {
+                  enrichment.methods_description = llmResult.methods_description;
                 }
                 if (llmResult.keywords && llmResult.keywords.length > 0) {
-                  console.log(`  Keywords: ${llmResult.keywords.join(", ")}`);
+                  console.log(`  Keywords: ${llmResult.keywords.map((k) => k.term).join(", ")}`);
                   enrichment.keywords = llmResult.keywords;
                 }
-                if (llmResult.fundingReferences && llmResult.fundingReferences.length > 0) {
+                if (llmResult.funding_references && llmResult.funding_references.length > 0) {
                   console.log(
-                    `  Funding: ${llmResult.fundingReferences.map((f) => `${f.funderName} ${f.awardNumber || ""}`).join(", ")}`,
+                    `  Funding: ${llmResult.funding_references.map((f) => `${f.funder_name} ${f.award_number || ""}`).join(", ")}`,
                   );
-                  enrichment.fundingReferences = llmResult.fundingReferences;
+                  enrichment.funding_references = llmResult.funding_references;
                 }
-                if (llmResult.relatedDois && llmResult.relatedDois.length > 0) {
+                if (llmResult.related_identifiers && llmResult.related_identifiers.length > 0) {
                   console.log(
-                    `  Related DOIs: ${llmResult.relatedDois.map((r) => `${r.doi} (${r.relationType})`).join(", ")}`,
+                    `  Related: ${llmResult.related_identifiers.map((r) => `${r.identifier} (${r.relation_type})`).join(", ")}`,
                   );
-                  enrichment.relatedDois = llmResult.relatedDois;
+                  enrichment.related_identifiers = llmResult.related_identifiers;
                 }
               }
             }
@@ -1268,7 +1269,7 @@ doiCommand
         submitSpinner.succeed(result.message);
 
         if (result.bidsignore_updated) {
-          console.log(chalk.gray("  .bidsignore updated to include nemar_metadata.json"));
+          console.log(chalk.gray("  .bidsignore updated to include .nemar/"));
         }
 
         // Refresh DOI metadata if the dataset has an EZID DOI
@@ -1445,13 +1446,14 @@ publishCommand
   .argument("<dataset-id>", "Dataset ID")
   .option("--resume", "Resume from last failed step")
   .option("--sandbox", "Use Zenodo sandbox for testing")
+  .option("--skip-ci-check", "Skip BIDS validation CI check (admin override)")
   .option(YES_OPTION, YES_DESCRIPTION)
   .option(NO_OPTION, NO_DESCRIPTION)
   .addHelpText(
     "after",
     `
 Description:
-  Approve a publication request and run the automated 14-step orchestrator
+  Approve a publication request and run the automated 15-step orchestrator
   to make the dataset publicly accessible with a permanent DOI.
 
   WARNING: This action is PERMANENT. Published datasets cannot be unpublished.
@@ -1459,19 +1461,20 @@ Description:
 
 Orchestrator Steps:
    1. CI Check          - Verify BIDS validation passes, deploy workflows if missing
-   2. Make Public       - Change GitHub repository visibility to public
-   3. S3 Public Read    - Grant public read access to S3 data
-   4. Tag Protection    - Enable tag protection rules
-   5. Create DOI        - Create concept DOI via EZID (or Zenodo if configured)
-   6. Update Metadata   - Update dataset metadata from BIDS description
-   7. Update README     - Add DOI badge and citation info to README
-   8. Create Tag        - Create version tag (e.g., v1.0.0)
-   9. Create Release    - Create GitHub release from tag
-  10. Upload to Zenodo  - Upload dataset archive to Zenodo (if Zenodo provider)
-  11. Publish DOI       - Make DOI public and findable (permanent, irreversible)
-  12. S3 Lock           - Enable S3 Object Lock (prevents data deletion)
-  13. Generate Archive  - Create downloadable zip archive
-  14. Notify User       - Send publication confirmation email
+   2. Enrichment Check  - Verify metadata pipeline has run (warn-only, non-blocking)
+   3. Make Public       - Change GitHub repository visibility to public
+   4. S3 Public Read    - Grant public read access to S3 data
+   5. Tag Protection    - Enable tag protection rules
+   6. Create DOI        - Create concept DOI via EZID (or Zenodo if configured)
+   7. Update Metadata   - Update dataset metadata from BIDS description
+   8. Update README     - Add DOI badge and citation info to README
+   9. Create Tag        - Create version tag (e.g., v1.0.0)
+  10. Create Release    - Create GitHub release from tag
+  11. Upload to Zenodo  - Upload dataset archive to Zenodo (if Zenodo provider)
+  12. Publish DOI       - Make DOI public and findable (permanent, irreversible)
+  13. S3 Lock           - Enable S3 Object Lock (prevents data deletion)
+  14. Generate Archive  - Create downloadable zip archive
+  15. Notify User       - Send publication confirmation email
 
 Resume Capability:
   If a step fails, the orchestrator saves progress. Use --resume to retry
@@ -1481,9 +1484,10 @@ Resume Capability:
   steps are automatically skipped.
 
 Examples:
-  $ nemar admin publish approve nm000104         # Run full orchestrator
-  $ nemar admin publish approve nm000104 --resume  # Resume from failed step
-  $ nemar admin publish approve nm000104 --yes   # Skip confirmation
+  $ nemar admin publish approve nm000104                    # Run full orchestrator
+  $ nemar admin publish approve nm000104 --resume           # Resume from failed step
+  $ nemar admin publish approve nm000104 --skip-ci-check    # Override BIDS validation
+  $ nemar admin publish approve nm000104 --yes              # Skip confirmation
 
 After Approval:
   - User receives email with DOI and public dataset link
@@ -1491,66 +1495,76 @@ After Approval:
   - Tags are protected (prevents version manipulation)
   - Data is protected by S3 Object Lock`,
   )
-  .action(async (datasetId, options: ConfirmOptions & { resume?: boolean; sandbox?: boolean }) => {
-    if (!requireAuth()) return;
+  .action(
+    async (
+      datasetId,
+      options: ConfirmOptions & { resume?: boolean; sandbox?: boolean; skipCiCheck?: boolean },
+    ) => {
+      if (!requireAuth()) return;
 
-    const action = options.resume
-      ? `Resume publication of ${datasetId}`
-      : `Approve and publish ${datasetId}`;
-    console.log(chalk.cyan(`\n${action}\n`));
-    console.log("This will run the following 14-step orchestrator:");
-    console.log("   1. Check CI             7. Update README");
-    console.log("   2. Make repo public      8. Create version tag");
-    console.log("   3. S3 public read        9. Create GitHub release");
-    console.log("   4. Tag protection       10. Upload to Zenodo");
-    console.log(
-      options.sandbox
-        ? "   5. Create DOI (SANDBOX) 11. Publish DOI (irreversible)"
-        : "   5. Create DOI           11. Publish DOI (irreversible)",
-    );
-    console.log("   6. Update metadata      12. S3 Object Lock");
-    console.log("                           13. Generate archive");
-    console.log("                           14. Notify user");
-    console.log();
-
-    // Sandbox warning
-    if (options.sandbox) {
-      console.log(chalk.yellow("━".repeat(60)));
-      console.log(chalk.yellow.bold("                 SANDBOX MODE ENABLED"));
-      console.log(chalk.yellow("━".repeat(60)));
-      console.log(chalk.yellow("  • DOI will be created on sandbox.zenodo.org"));
-      console.log(chalk.yellow("  • DOI will NOT be indexed by DataCite"));
-      console.log(chalk.yellow("  • DOI will NOT resolve in production"));
-      console.log(chalk.yellow("  • Use this for testing workflows only"));
-      console.log(chalk.yellow("━".repeat(60)));
+      const action = options.resume
+        ? `Resume publication of ${datasetId}`
+        : `Approve and publish ${datasetId}`;
+      console.log(chalk.cyan(`\n${action}\n`));
+      console.log("This will run the following 15-step orchestrator:");
+      console.log("   1. Check CI              9. Create version tag");
+      console.log("   2. Enrichment check     10. Create GitHub release");
+      console.log("   3. Make repo public     11. Upload to Zenodo");
+      console.log("   4. S3 public read       12. Publish DOI (irreversible)");
+      console.log("   5. Tag protection       13. S3 Object Lock");
+      console.log(
+        options.sandbox
+          ? "   6. Create DOI (SANDBOX) 14. Generate archive"
+          : "   6. Create DOI           14. Generate archive",
+      );
+      console.log("   7. Update metadata      15. Notify user");
+      console.log("   8. Update README");
       console.log();
-    }
 
-    const confirmResult = await confirm(`${action}?`, options);
-    if (confirmResult !== "confirmed") {
-      console.log(chalk.gray(confirmResult === "declined" ? "Skipped" : "Cancelled"));
-      return;
-    }
-
-    const spinner = ora("Running publication workflow...").start();
-
-    try {
-      const result = await approvePublication(datasetId, !!options.resume, !!options.sandbox);
-      spinner.succeed(result.message);
-
-      if (result.steps_completed) {
-        console.log();
-        for (const step of result.steps_completed) {
-          console.log(`  ${chalk.green("[x]")} ${step.replace(/_/g, " ")}`);
-        }
+      // Sandbox warning
+      if (options.sandbox) {
+        console.log(chalk.yellow("━".repeat(60)));
+        console.log(chalk.yellow.bold("                 SANDBOX MODE ENABLED"));
+        console.log(chalk.yellow("━".repeat(60)));
+        console.log(chalk.yellow("  • DOI will be created on sandbox.zenodo.org"));
+        console.log(chalk.yellow("  • DOI will NOT be indexed by DataCite"));
+        console.log(chalk.yellow("  • DOI will NOT resolve in production"));
+        console.log(chalk.yellow("  • Use this for testing workflows only"));
+        console.log(chalk.yellow("━".repeat(60)));
         console.log();
       }
-    } catch (error) {
-      handleCommandError(error, spinner, "Failed to approve publication", {
-        422: "Fix the CI issues and retry with --resume",
-      });
-    }
-  });
+
+      const confirmResult = await confirm(`${action}?`, options);
+      if (confirmResult !== "confirmed") {
+        console.log(chalk.gray(confirmResult === "declined" ? "Skipped" : "Cancelled"));
+        return;
+      }
+
+      const spinner = ora("Running publication workflow...").start();
+
+      try {
+        const result = await approvePublication(
+          datasetId,
+          !!options.resume,
+          !!options.sandbox,
+          !!options.skipCiCheck,
+        );
+        spinner.succeed(result.message);
+
+        if (result.steps_completed) {
+          console.log();
+          for (const step of result.steps_completed) {
+            console.log(`  ${chalk.green("[x]")} ${step.replace(/_/g, " ")}`);
+          }
+          console.log();
+        }
+      } catch (error) {
+        handleCommandError(error, spinner, "Failed to approve publication", {
+          422: "Fix the CI issues and retry with --resume",
+        });
+      }
+    },
+  );
 
 adminCommand.addCommand(publishCommand);
 

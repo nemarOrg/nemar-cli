@@ -1,22 +1,24 @@
 /**
- * LLM-based metadata enrichment using OpenRouter API
+ * LLM-based metadata enrichment using OpenRouter API (CLI-side)
  *
- * Extracts structured metadata from README.md and BIDS dataset_description.json
- * for populating DataCite DOI records. Runs CLI-side (not in Cloudflare Workers).
+ * Extracts structured v2 metadata from README.md and BIDS dataset_description.json
+ * for populating DataCite DOI records. Used by `nemar admin doi enrich`.
  */
 
-import { isValidRelationType } from "../../shared/datacite-constants.js";
+import {
+  type FundingReferenceEntry,
+  type RelatedIdentifierEntry,
+  type StructuredKeyword,
+  isValidRelationType,
+} from "../../shared/datacite-constants.js";
 
+/** v2 LLM enrichment result (snake_case, structured fields). */
 export interface LlmEnrichmentResult {
   description?: string;
-  methodsDescription?: string;
-  keywords?: string[];
-  fundingReferences?: Array<{
-    funderName: string;
-    awardNumber?: string;
-    awardTitle?: string;
-  }>;
-  relatedDois?: Array<{ doi: string; relationType: string }>;
+  methods_description?: string;
+  keywords?: StructuredKeyword[];
+  funding_references?: FundingReferenceEntry[];
+  related_identifiers?: RelatedIdentifierEntry[];
 }
 
 const SYSTEM_PROMPT = `You are a metadata extraction assistant for neuroimaging datasets.
@@ -25,18 +27,18 @@ Given a README and BIDS dataset description, extract structured metadata for a D
 Return ONLY valid JSON with these optional fields:
 {
   "description": "A concise abstract (2-4 sentences) describing the dataset's content, purpose, and scientific context.",
-  "methodsDescription": "A brief description of data collection methods if mentioned in the README.",
-  "keywords": ["keyword1", "keyword2"],
-  "fundingReferences": [{"funderName": "NIH", "awardNumber": "R01-MH123456", "awardTitle": "optional title"}],
-  "relatedDois": [{"doi": "10.1234/example", "relationType": "IsSupplementTo"}]
+  "methods_description": "A brief description of data collection methods if mentioned in the README.",
+  "keywords": [{"term": "EEG", "subject_scheme": "MeSH"}, {"term": "motor imagery"}],
+  "funding_references": [{"funder_name": "NIH", "award_number": "R01-MH123456", "award_title": "optional title"}],
+  "related_identifiers": [{"identifier": "10.1234/example", "identifier_type": "DOI", "relation_type": "IsSupplementTo"}]
 }
 
 Rules:
 - description: Write a scholarly abstract. Do not copy verbatim from README.
-- methodsDescription: Only include if methods/acquisition details are described.
-- keywords: 3-8 domain-specific terms. Include modality (EEG, MEG, etc.) if applicable.
-- fundingReferences: Parse funding strings into structured format. Common funders: NIH, NSF, ERC, DFG.
-- relatedDois: Only include actual DOIs (10.XXXX/...). Common relationType values (see DataCite schema for full list):
+- methods_description: Only include if methods/acquisition details are described.
+- keywords: 3-8 domain-specific terms. Include modality (EEG, MEG, etc.) if applicable. Use subject_scheme "MeSH" ONLY when the term is a valid MeSH descriptor. Do NOT use "LCSH" or any other scheme.
+- funding_references: Parse funding strings into structured format. Common funders: NIH, NSF, ERC, DFG. Use funder_name (not funderName).
+- related_identifiers: Only include actual DOIs (10.XXXX/...) with identifier_type "DOI". Common relation_type values:
   IsCitedBy, Cites, IsSupplementTo, IsSupplementedBy, References, IsReferencedBy,
   IsDescribedBy, Describes, IsVersionOf, HasVersion, IsPartOf, HasPart
 - Omit any field where you have no information. Return {} if nothing can be extracted.
@@ -48,7 +50,7 @@ Rules:
  * @param readmeContent - Raw README.md content
  * @param bidsDescription - Parsed dataset_description.json
  * @param apiKey - OpenRouter API key (from env OPENROUTER_API_KEY or config)
- * @returns Extracted metadata, or empty object if LLM is unavailable
+ * @returns Extracted metadata in v2 format, or empty object if LLM is unavailable
  */
 export async function enrichFromReadme(
   readmeContent: string,
@@ -57,6 +59,7 @@ export async function enrichFromReadme(
 ): Promise<LlmEnrichmentResult> {
   const key = apiKey || process.env.OPENROUTER_API_KEY;
   if (!key) {
+    console.warn("[llm-enrich] No OPENROUTER_API_KEY configured. Skipping LLM enrichment.");
     return {};
   }
 
@@ -79,7 +82,7 @@ ${truncatedReadme}`;
       "Content-Type": "application/json",
     },
     body: JSON.stringify({
-      model: "anthropic/claude-haiku-4-5-20251001",
+      model: "anthropic/claude-haiku-4.5",
       messages: [
         { role: "system", content: SYSTEM_PROMPT },
         { role: "user", content: userPrompt },
@@ -119,7 +122,7 @@ ${truncatedReadme}`;
 }
 
 /**
- * Validate and clean the LLM response to match the expected schema.
+ * Validate and clean the LLM response to match v2 schema.
  */
 export function validateLlmResult(raw: Record<string, unknown>): LlmEnrichmentResult {
   const result: LlmEnrichmentResult = {};
@@ -128,43 +131,69 @@ export function validateLlmResult(raw: Record<string, unknown>): LlmEnrichmentRe
     result.description = raw.description;
   }
 
-  if (typeof raw.methodsDescription === "string" && raw.methodsDescription) {
-    result.methodsDescription = raw.methodsDescription;
+  if (typeof raw.methods_description === "string" && raw.methods_description) {
+    result.methods_description = raw.methods_description;
   }
 
+  // Keywords: accept array of objects with term field, or plain strings
   if (Array.isArray(raw.keywords)) {
-    const kw = raw.keywords.filter((k): k is string => typeof k === "string");
+    const kw: StructuredKeyword[] = [];
+    for (const k of raw.keywords) {
+      if (typeof k === "string" && k) {
+        kw.push({ term: k });
+      } else if (k && typeof k === "object") {
+        const obj = k as Record<string, unknown>;
+        if (typeof obj.term === "string" && obj.term) {
+          const entry: StructuredKeyword = { term: obj.term };
+          // Only preserve MeSH scheme; strip all others (LCSH, etc.)
+          if (typeof obj.subject_scheme === "string" && obj.subject_scheme === "MeSH") {
+            entry.subject_scheme = obj.subject_scheme;
+            if (typeof obj.scheme_uri === "string") entry.scheme_uri = obj.scheme_uri;
+            if (typeof obj.value_uri === "string") entry.value_uri = obj.value_uri;
+          }
+          kw.push(entry);
+        }
+      }
+    }
     if (kw.length > 0) result.keywords = kw;
   }
 
-  if (Array.isArray(raw.fundingReferences)) {
-    const funds = raw.fundingReferences.filter(
-      (f): f is { funderName: string; awardNumber?: string; awardTitle?: string } => {
-        if (!f || typeof f !== "object") return false;
-        const obj = f as Record<string, unknown>;
-        return (
-          typeof obj.funderName === "string" &&
-          (obj.awardNumber === undefined || typeof obj.awardNumber === "string") &&
-          (obj.awardTitle === undefined || typeof obj.awardTitle === "string")
-        );
-      },
-    );
-    if (funds.length > 0) result.fundingReferences = funds;
+  // Funding references
+  if (Array.isArray(raw.funding_references)) {
+    const funds: FundingReferenceEntry[] = [];
+    for (const f of raw.funding_references) {
+      if (!f || typeof f !== "object") continue;
+      const obj = f as Record<string, unknown>;
+      if (typeof obj.funder_name !== "string") continue;
+      const entry: FundingReferenceEntry = { funder_name: obj.funder_name };
+      if (typeof obj.award_number === "string") entry.award_number = obj.award_number;
+      if (typeof obj.award_title === "string") entry.award_title = obj.award_title;
+      funds.push(entry);
+    }
+    if (funds.length > 0) result.funding_references = funds;
   }
 
-  if (Array.isArray(raw.relatedDois)) {
+  // Related identifiers
+  if (Array.isArray(raw.related_identifiers)) {
     const doiPattern = /^10\.\d{4,}\/.+$/;
-    const rels = raw.relatedDois.filter((r): r is { doi: string; relationType: string } => {
-      if (!r || typeof r !== "object") return false;
+    const rels: RelatedIdentifierEntry[] = [];
+    for (const r of raw.related_identifiers) {
+      if (!r || typeof r !== "object") continue;
       const obj = r as Record<string, unknown>;
-      return (
-        typeof obj.doi === "string" &&
-        doiPattern.test(obj.doi) &&
-        typeof obj.relationType === "string" &&
-        isValidRelationType(obj.relationType as string)
-      );
-    });
-    if (rels.length > 0) result.relatedDois = rels;
+      if (
+        typeof obj.identifier === "string" &&
+        typeof obj.relation_type === "string" &&
+        isValidRelationType(obj.relation_type) &&
+        doiPattern.test(obj.identifier)
+      ) {
+        rels.push({
+          identifier: obj.identifier,
+          identifier_type: "DOI",
+          relation_type: obj.relation_type,
+        });
+      }
+    }
+    if (rels.length > 0) result.related_identifiers = rels;
   }
 
   return result;
