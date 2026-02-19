@@ -1308,7 +1308,7 @@ export function bidsToDataCite(
   const addRelatedId = (
     identifier: string,
     idType: "DOI" | "URL" | "URN",
-    relationType: string,
+    relationType: RelationType,
   ) => {
     const normalizedId = idType === "DOI" ? normalizeDoi(identifier) : identifier;
     if (!normalizedId) return; // Skip empty identifiers
