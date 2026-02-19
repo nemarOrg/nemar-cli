@@ -854,6 +854,7 @@ jobs:
             var uploadDone = upload.done().catch(function (err) {
               console.error("S3 Upload error:", err.message);
               process.exitCode = 1;
+              throw err;
             });
 
             var files = walkDir(".");
@@ -869,6 +870,10 @@ jobs:
               var annexKey = resolveAnnexKey(full);
 
               try {
+                var entryDone = new Promise(function (resolve, reject) {
+                  archive.once("entry", resolve);
+                  archive.once("error", reject);
+                });
                 if (annexKey) {
                   var url = S3_BASE + "/" + DATASET_ID + "/objects/" + encodeURIComponent(annexKey);
                   var stream = await fetchUrl(url);
@@ -876,10 +881,7 @@ jobs:
                 } else {
                   archive.append(fs.createReadStream(full), { name: rel });
                 }
-                await new Promise(function (resolve, reject) {
-                  archive.once("entry", resolve);
-                  archive.once("error", reject);
-                });
+                await entryDone;
                 if (annexKey) annexed++;
                 else regular++;
               } catch (err) {
