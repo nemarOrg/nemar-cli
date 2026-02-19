@@ -277,9 +277,10 @@ export function detectIdentifierType(id: string): "DOI" | "URL" | "URN" {
  * DOIs are normalized (prefix stripped); URLs are compared as-is.
  */
 function normalizeIdentifierKey(identifier: string, relationType: string): string {
-  const type = detectIdentifierType(identifier);
-  const normalized = type === "DOI" ? normalizeDoi(identifier) : identifier;
-  return `${normalized}|${relationType}`;
+  // Always try normalizeDoi first -- handles both bare DOIs and doi.org URLs
+  const stripped = normalizeDoi(identifier);
+  const normalized = stripped !== identifier.trim() ? stripped : identifier;
+  return `${normalized.toLowerCase()}|${relationType}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -669,7 +670,7 @@ function nemarMetadataV2ToEnrichment(
 
   // Related identifiers: carry identifier_type, normalize DOIs
   if (nemarMeta.related_identifiers) {
-    const existing = enrichment.relatedDois || [];
+    const existing = [...(enrichment.relatedDois || [])];
     const seen = new Set(
       existing.map((r) => normalizeIdentifierKey(r.doi, r.relationType || "")),
     );
@@ -679,7 +680,7 @@ function nemarMetadataV2ToEnrichment(
           ? ri.identifier_type
           : detectIdentifierType(ri.identifier);
         const normalized = idType === "DOI" ? normalizeDoi(ri.identifier) : ri.identifier;
-        const key = normalizeIdentifierKey(ri.identifier, ri.relation_type);
+        const key = normalizeIdentifierKey(normalized, ri.relation_type);
         if (!seen.has(key)) {
           seen.add(key);
           existing.push({
@@ -695,7 +696,7 @@ function nemarMetadataV2ToEnrichment(
 
   // Funding references
   if (nemarMeta.funding_references) {
-    const existing = enrichment.fundingInfo || [];
+    const existing = [...(enrichment.fundingInfo || [])];
     const seen = new Set(existing.map((f) => `${f.funderName}|${f.awardNumber || ""}`));
     for (const fr of nemarMeta.funding_references) {
       const key = `${fr.funder_name}|${fr.award_number || ""}`;
@@ -1310,22 +1311,9 @@ export function bidsToDataCite(
     relationType: string,
   ) => {
     const normalizedId = idType === "DOI" ? normalizeDoi(identifier) : identifier;
-    // Dedup key: normalized identifier + relation type
+    if (!normalizedId) return; // Skip empty identifiers
     const key = `${normalizedId.toLowerCase()}|${relationType}`;
     if (seenIds.has(key)) return;
-    // Also check if the same DOI exists with a different relation (cross-format dedup)
-    const crossKey = `${normalizedId.toLowerCase()}|*`;
-    if (idType === "DOI") {
-      // Check if a URL form of this DOI already exists
-      const urlForm = `https://doi.org/${normalizedId}`.toLowerCase();
-      for (const existing of seenIds) {
-        const [existingId] = existing.split("|");
-        if (existingId === urlForm || existingId === normalizedId.toLowerCase()) {
-          // Same DOI in different format, skip if same relation type
-          if (existing === key) return;
-        }
-      }
-    }
     seenIds.add(key);
     relatedIdentifiers.push({
       identifier: normalizedId,

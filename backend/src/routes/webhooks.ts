@@ -585,6 +585,9 @@ webhooks.post("/llm-enrich", async (c) => {
   }
 
   const { dataset_id } = body;
+  if (body.force !== undefined && typeof body.force !== "boolean") {
+    return c.json({ error: "Invalid 'force' parameter: must be a boolean (true/false)" }, 400);
+  }
   const forceReenrich = body.force === true;
 
   // Look up dataset in D1
@@ -704,9 +707,15 @@ webhooks.post("/llm-enrich", async (c) => {
           pipeline_stage: "validated",
         });
       }
-      console.log(
-        `[llm-enrich] Re-enriching ${dataset_id}: sources changed since last validation`,
-      );
+      if (existingMetadata.source_hash === undefined) {
+        console.log(
+          `[llm-enrich] Re-enriching ${dataset_id}: no source_hash in existing validated metadata (migration)`,
+        );
+      } else {
+        console.log(
+          `[llm-enrich] Re-enriching ${dataset_id}: sources changed since last validation`,
+        );
+      }
     }
 
     // Stage 1: Seed from BIDS (deterministic, no LLM call)
