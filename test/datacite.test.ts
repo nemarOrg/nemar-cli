@@ -10,10 +10,12 @@ import {
   type DataCiteMetadata,
   bidsToDataCite,
   buildDataCiteXml,
+  detectIdentifierType,
   detectModalitiesFromTree,
   mapLicense,
   mapModalityToResourceType,
   nemarMetadataToEnrichment,
+  normalizeDoi,
   parseAuthorName,
   parseNemarMetadata,
 } from "../backend/src/services/datacite";
@@ -45,6 +47,63 @@ describe("parseAuthorName", () => {
     expect(result.name).toBe("NEMAR Consortium");
     expect(result.givenName).toBeUndefined();
     expect(result.familyName).toBeUndefined();
+  });
+});
+
+describe("normalizeDoi", () => {
+  test("strips doi: prefix", () => {
+    expect(normalizeDoi("doi:10.1234/foo")).toBe("10.1234/foo");
+  });
+
+  test("strips https://doi.org/ prefix", () => {
+    expect(normalizeDoi("https://doi.org/10.1234/foo")).toBe("10.1234/foo");
+  });
+
+  test("strips http://dx.doi.org/ prefix", () => {
+    expect(normalizeDoi("http://dx.doi.org/10.1234/foo")).toBe("10.1234/foo");
+  });
+
+  test("passes through bare DOI unchanged", () => {
+    expect(normalizeDoi("10.1234/foo")).toBe("10.1234/foo");
+  });
+
+  test("is case-insensitive for prefix", () => {
+    expect(normalizeDoi("DOI:10.1234/foo")).toBe("10.1234/foo");
+    expect(normalizeDoi("HTTPS://DOI.ORG/10.1234/foo")).toBe("10.1234/foo");
+  });
+
+  test("trims whitespace", () => {
+    expect(normalizeDoi("  10.1234/foo  ")).toBe("10.1234/foo");
+  });
+
+  test("returns empty string for prefix-only input", () => {
+    expect(normalizeDoi("doi:")).toBe("");
+  });
+});
+
+describe("detectIdentifierType", () => {
+  test("detects HTTPS URL", () => {
+    expect(detectIdentifierType("https://example.com")).toBe("URL");
+  });
+
+  test("detects HTTP URL", () => {
+    expect(detectIdentifierType("http://example.com")).toBe("URL");
+  });
+
+  test("detects DOI URL as URL type", () => {
+    expect(detectIdentifierType("https://doi.org/10.1234/foo")).toBe("URL");
+  });
+
+  test("detects URN", () => {
+    expect(detectIdentifierType("urn:nbn:de:0114-fqs0901272")).toBe("URN");
+  });
+
+  test("detects bare DOI", () => {
+    expect(detectIdentifierType("10.1234/foo")).toBe("DOI");
+  });
+
+  test("detects doi: prefix as DOI", () => {
+    expect(detectIdentifierType("doi:10.1234/foo")).toBe("DOI");
   });
 });
 
@@ -341,7 +400,7 @@ describe("bidsToDataCite", () => {
       authors: {
         "Shirazi, Yahya": { orcid: "0000-0001-2345-6789", affiliation: "UCSD" },
       },
-      keywords: ["EEG", "motor imagery"],
+      keywords: [{ value: "EEG" }, { value: "motor imagery" }],
       relatedDois: [{ doi: "10.1234/paper" }],
       description: "A test EEG dataset",
     };
@@ -430,6 +489,98 @@ describe("bidsToDataCite", () => {
     const doiRefs = metadata.relatedIdentifiers?.filter((r) => r.relatedIdentifierType === "DOI");
     expect(doiRefs).toHaveLength(1);
     expect(doiRefs?.[0]?.identifier).toBe("10.1234/paper.2024.001");
+  });
+
+  test("deduplicates DOIs across enrichment and BIDS ReferencesAndLinks", () => {
+    const bids = {
+      Name: "Test",
+      Authors: ["Doe, John"],
+      ReferencesAndLinks: ["https://doi.org/10.1234/paper"],
+    };
+    const enrichment = {
+      relatedDois: [{ doi: "10.1234/paper", relationType: "References" as const }],
+    };
+
+    const metadata = bidsToDataCite("nm000103", "10.82901/NEMAR.ABC", bids, enrichment);
+
+    const refs = metadata.relatedIdentifiers?.filter(
+      (r) => r.identifier === "10.1234/paper" && r.relationType === "References",
+    );
+    expect(refs).toHaveLength(1);
+  });
+
+  test("deduplicates SourceDatasets DOI and URL forms", () => {
+    const bids = {
+      Name: "Test",
+      Authors: ["Doe, John"],
+      SourceDatasets: [
+        { DOI: "doi:10.13026/ym7v-bh53", URL: "https://doi.org/10.13026/ym7v-bh53" },
+      ],
+    };
+
+    const metadata = bidsToDataCite("nm000103", "10.82901/NEMAR.ABC", bids);
+
+    const derived = metadata.relatedIdentifiers?.filter(
+      (r) => r.identifier === "10.13026/ym7v-bh53" && r.relationType === "IsDerivedFrom",
+    );
+    expect(derived).toHaveLength(1);
+    expect(derived?.[0]?.relatedIdentifierType).toBe("DOI");
+  });
+
+  test("extracts bare DOI from doi.org URL in ReferencesAndLinks", () => {
+    const bids = {
+      Name: "Test",
+      Authors: ["Doe, John"],
+      ReferencesAndLinks: ["https://doi.org/10.1109/TNSRE.2021.3082551"],
+    };
+
+    const metadata = bidsToDataCite("nm000103", "10.82901/NEMAR.ABC", bids);
+
+    const refs = metadata.relatedIdentifiers?.filter(
+      (r) => r.relationType === "References",
+    );
+    expect(refs).toHaveLength(1);
+    expect(refs?.[0]?.identifier).toBe("10.1109/TNSRE.2021.3082551");
+    expect(refs?.[0]?.relatedIdentifierType).toBe("DOI");
+  });
+
+  test("preserves MeSH scheme info through bidsToDataCite to XML", () => {
+    const bids = { Name: "Test", Authors: ["Doe, John"] };
+    const enrichment = {
+      keywords: [{
+        value: "Electroencephalography",
+        subjectScheme: "MeSH",
+        schemeURI: "https://meshb.nlm.nih.gov/",
+        valueURI: "https://id.nlm.nih.gov/mesh/D004569",
+      }],
+    };
+
+    const metadata = bidsToDataCite("nm000103", "10.82901/NEMAR.ABC", bids, enrichment);
+    const xml = buildDataCiteXml(metadata);
+
+    expect(xml).toContain('subjectScheme="MeSH"');
+    expect(xml).toContain('schemeURI="https://meshb.nlm.nih.gov/"');
+    expect(xml).toContain('valueURI="https://id.nlm.nih.gov/mesh/D004569"');
+    expect(xml).toContain("Electroencephalography");
+  });
+
+  test("skips empty identifiers from malformed DOI entries", () => {
+    const bids = {
+      Name: "Test",
+      Authors: ["Doe, John"],
+    };
+    const enrichment = {
+      relatedDois: [
+        { doi: "doi:", relationType: "References" as const },
+        { doi: "10.1234/valid", relationType: "References" as const },
+      ],
+    };
+
+    const metadata = bidsToDataCite("nm000103", "10.82901/NEMAR.ABC", bids, enrichment);
+
+    const refs = metadata.relatedIdentifiers?.filter((r) => r.relationType === "References");
+    expect(refs).toHaveLength(1);
+    expect(refs?.[0]?.identifier).toBe("10.1234/valid");
   });
 });
 
@@ -608,12 +759,14 @@ describe("nemarMetadataToEnrichment v2", () => {
     expect(result.authors?.["Doe, John"].ror).toBe("https://ror.org/042nb2s44");
   });
 
-  test("converts v2 keywords to plain strings", () => {
+  test("preserves v2 keyword scheme info", () => {
     const result = nemarMetadataToEnrichment({
       version: "2.0",
       keywords: [{ term: "EMG", subject_scheme: "MeSH" }, { term: "neuroscience" }],
     });
-    expect(result.keywords).toEqual(["EMG", "neuroscience"]);
+    expect(result.keywords).toHaveLength(2);
+    expect(result.keywords?.[0]).toMatchObject({ value: "EMG", subjectScheme: "MeSH" });
+    expect(result.keywords?.[1]).toMatchObject({ value: "neuroscience" });
   });
 
   test("converts v2 related_identifiers to relatedDois", () => {
@@ -630,6 +783,41 @@ describe("nemarMetadataToEnrichment v2", () => {
     });
     expect(result.relatedDois).toHaveLength(1);
     expect(result.relatedDois?.[0].doi).toBe("10.1234/test");
+  });
+
+  test("normalizes doi: prefix in v2 related_identifiers", () => {
+    const result = nemarMetadataToEnrichment({
+      version: "2.0",
+      related_identifiers: [
+        { identifier: "doi:10.1234/test", identifier_type: "DOI", relation_type: "IsDerivedFrom" },
+      ],
+    });
+    expect(result.relatedDois).toHaveLength(1);
+    expect(result.relatedDois?.[0].doi).toBe("10.1234/test");
+    expect(result.relatedDois?.[0].identifierType).toBe("DOI");
+  });
+
+  test("preserves URL identifier type in v2 related_identifiers", () => {
+    const result = nemarMetadataToEnrichment({
+      version: "2.0",
+      related_identifiers: [
+        { identifier: "https://physionet.org/content/chbmit", identifier_type: "URL", relation_type: "IsDerivedFrom" },
+      ],
+    });
+    expect(result.relatedDois).toHaveLength(1);
+    expect(result.relatedDois?.[0].doi).toBe("https://physionet.org/content/chbmit");
+    expect(result.relatedDois?.[0].identifierType).toBe("URL");
+  });
+
+  test("deduplicates v2 related_identifiers across DOI formats", () => {
+    const result = nemarMetadataToEnrichment({
+      version: "2.0",
+      related_identifiers: [
+        { identifier: "10.1234/test", identifier_type: "DOI", relation_type: "References" },
+        { identifier: "doi:10.1234/test", identifier_type: "DOI", relation_type: "References" },
+      ],
+    });
+    expect(result.relatedDois).toHaveLength(1);
   });
 
   test("converts v2 funding to enrichment format", () => {

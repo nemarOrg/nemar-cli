@@ -573,7 +573,7 @@ webhooks.post("/llm-enrich", async (c) => {
   }
 
   // Parse request body
-  let body: { dataset_id: string };
+  let body: { dataset_id: string; force?: boolean };
   try {
     body = await c.req.json();
   } catch {
@@ -585,6 +585,10 @@ webhooks.post("/llm-enrich", async (c) => {
   }
 
   const { dataset_id } = body;
+  if (body.force !== undefined && typeof body.force !== "boolean") {
+    return c.json({ error: "Invalid 'force' parameter: must be a boolean (true/false)" }, 400);
+  }
+  const forceReenrich = body.force === true;
 
   // Look up dataset in D1
   const dataset = await c.env.DB.prepare(
@@ -673,6 +677,43 @@ webhooks.post("/llm-enrich", async (c) => {
       } catch (parseErr) {
         console.error(
           `[llm-enrich] Existing metadata for ${dataset_id} is corrupt and will not be preserved: ${errorMessage(parseErr)}`,
+        );
+      }
+    }
+
+    // Compute source content hash for change detection
+    const sourceContent = readmeContent + "\n---\n" + JSON.stringify(bidsDescription);
+    const sourceHashBuffer = await crypto.subtle.digest(
+      "SHA-256",
+      new TextEncoder().encode(sourceContent),
+    );
+    const sourceHash = Array.from(new Uint8Array(sourceHashBuffer))
+      .map((b) => b.toString(16).padStart(2, "0"))
+      .join("");
+
+    // Guard: skip re-enrichment if metadata is already validated and sources unchanged
+    if (
+      existingMetadata?.pipeline_stage === "validated" &&
+      !forceReenrich
+    ) {
+      if (existingMetadata.source_hash === sourceHash) {
+        console.log(
+          `[llm-enrich] Skipping ${dataset_id}: already validated and sources unchanged`,
+        );
+        return c.json({
+          message: "Metadata already validated and sources unchanged",
+          dataset_id,
+          skipped: true,
+          pipeline_stage: "validated",
+        });
+      }
+      if (existingMetadata.source_hash === undefined) {
+        console.log(
+          `[llm-enrich] Re-enriching ${dataset_id}: no source_hash in existing validated metadata (migration)`,
+        );
+      } else {
+        console.log(
+          `[llm-enrich] Re-enriching ${dataset_id}: sources changed since last validation`,
         );
       }
     }
@@ -857,6 +898,9 @@ webhooks.post("/llm-enrich", async (c) => {
         );
       }
     }
+
+    // Store source hash for future change detection
+    finalMetadata.source_hash = sourceHash;
 
     // Pipeline LLM work is complete. Commit results; individual failures are
     // non-fatal since the expensive LLM calls already succeeded.
