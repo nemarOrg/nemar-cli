@@ -593,7 +593,7 @@ describe("nemarMetadataToEnrichment", () => {
 
     const enrichment = nemarMetadataToEnrichment(nemarMeta);
     expect(enrichment.authors?.["Doe, Jane"]?.orcid).toBe("0000-0001-5109-390X");
-    expect(enrichment.keywords).toEqual(["EEG"]);
+    expect(enrichment.keywords).toEqual([{ value: "EEG" }]);
     expect(enrichment.description).toBe("A dataset");
     expect(enrichment.sizes).toEqual(["1 GB"]);
     expect(enrichment.formats).toEqual([".edf"]);
@@ -605,7 +605,7 @@ describe("nemarMetadataToEnrichment", () => {
         "Shirazi, Yahya": { orcid: "0000-0002-1825-0097" },
         "Old, Author": { orcid: "0000-0000-0000-0001" },
       },
-      keywords: ["neuroscience"],
+      keywords: [{ value: "neuroscience" }],
     };
 
     const nemarMeta = parseNemarMetadata({
@@ -623,15 +623,16 @@ describe("nemarMetadataToEnrichment", () => {
     // NemarMetadata author overrides (adds affiliation)
     expect(enrichment.authors?.["Shirazi, Yahya"]?.affiliation).toBe("UCSD");
     // Keywords merged and deduplicated
-    expect(enrichment.keywords).toContain("neuroscience");
-    expect(enrichment.keywords).toContain("EEG");
+    const kwValues = enrichment.keywords?.map((k) => k.value);
+    expect(kwValues).toContain("neuroscience");
+    expect(kwValues).toContain("EEG");
   });
 
   test("deduplicates keywords on merge", () => {
-    const base = { keywords: ["EEG", "BIDS"] };
+    const base = { keywords: [{ value: "EEG" }, { value: "BIDS" }] };
     const nemarMeta = parseNemarMetadata({ keywords: ["EEG", "motor imagery"] })!;
     const enrichment = nemarMetadataToEnrichment(nemarMeta, base);
-    expect(enrichment.keywords).toEqual(["EEG", "BIDS", "motor imagery"]);
+    expect(enrichment.keywords?.map((k) => k.value)).toEqual(["EEG", "BIDS", "motor imagery"]);
   });
 
   test("merges funding references instead of overwriting", () => {
@@ -727,7 +728,7 @@ describe("enrichment keywords merged with auto-keywords", () => {
       "nm000104",
       "10.82901/NEMAR.test",
       { Name: "Test", Authors: ["Doe, Jane"] },
-      { keywords: ["motor imagery", "BCI"] },
+      { keywords: [{ value: "motor imagery" }, { value: "BCI" }] },
       { modalities: ["eeg"] },
     );
 

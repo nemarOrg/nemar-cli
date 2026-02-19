@@ -9,6 +9,7 @@ import { Hono } from "hono";
 import { z } from "zod";
 import { adminMiddleware, authMiddleware, ownerMiddleware } from "../middleware/auth";
 import {
+  type DataCiteEnrichment,
   bidsToDataCite,
   buildDataCiteXml,
   nemarMetadataToEnrichment,
@@ -54,7 +55,12 @@ import {
 } from "../services/github";
 import { generateIamUsername, revokeUserIamAccess, setupUserIamAccess } from "../services/iam";
 import { generateManifest } from "../services/manifest";
-import { errorMessage, extractRepoName, readBidsDescription } from "../services/repo-metadata";
+import {
+  errorMessage,
+  extractRepoName,
+  readBidsDescription,
+  readRepoMetadata,
+} from "../services/repo-metadata";
 import {
   addPublicReadPolicy,
   applyObjectLock,
@@ -1197,16 +1203,28 @@ adminRoutes.post(
       }
     }
 
-    // Read BIDS metadata from GitHub repo for richer DOI metadata
+    // Read BIDS + enrichment metadata from GitHub repo
     let bidsDescription: Record<string, unknown> | undefined;
+    let repoEnrichment: DataCiteEnrichment | undefined;
     let bidsMetadataWarning: string | undefined;
     if (dataset.github_repo) {
       const repoName = extractRepoName(dataset.github_repo);
       if (repoName) {
-        const bidsResult = await readBidsDescription(repoName, c.env.GITHUB_ADMIN_PAT);
-        bidsDescription = bidsResult.bidsDescription;
-        if (bidsResult.warning) {
-          bidsMetadataWarning = bidsResult.warning;
+        const baseEnrichment = buildOrcidEnrichment(
+          undefined,
+          dataset.owner_username,
+          dataset.owner_orcid || undefined,
+        );
+        const repoMeta = await readRepoMetadata(
+          repoName,
+          c.env.GITHUB_ADMIN_PAT,
+          baseEnrichment,
+          body.title || dataset.name,
+        );
+        bidsDescription = repoMeta.bidsDescription;
+        repoEnrichment = repoMeta.enrichment;
+        if (repoMeta.warnings.length > 0) {
+          bidsMetadataWarning = repoMeta.warnings.join("; ");
           console.warn("[doi]", bidsMetadataWarning);
         }
       }
@@ -1223,6 +1241,7 @@ adminRoutes.post(
           datasetDescription: body.description || dataset.description,
           githubRepo: dataset.github_repo,
           bidsDescription,
+          enrichment: repoEnrichment,
           uploaderOrcid: dataset.owner_orcid || undefined,
           uploaderName: dataset.owner_username,
           sandbox: body.sandbox,
@@ -1709,9 +1728,7 @@ adminRoutes.post("/datasets/:id/doi/update", zValidator("json", updateDoiSchema)
     // Change status
     if (body.status) {
       if (body.status === "public" && dataset.ezid_status === "reserved") {
-        const target = dataset.github_repo
-          ? `https://github.com/${dataset.github_repo}`
-          : `https://nemar.org/dataexplorer/detail?dataset_id=${datasetId}`;
+        const target = `https://nemar.org/dataexplorer/detail?dataset_id=${datasetId}`;
         updateOptions.status = "public";
         updateOptions.target = target;
       } else if (body.status === "unavailable") {

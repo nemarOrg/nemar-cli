@@ -946,13 +946,19 @@ jobs:
             exit 0
           fi
 
-          echo "Triggering LLM enrichment for $REPO_NAME"
+          # Force re-enrichment on manual workflow_dispatch
+          FORCE="false"
+          if [ "\${{ github.event_name }}" = "workflow_dispatch" ]; then
+            FORCE="true"
+          fi
+
+          echo "Triggering LLM enrichment for $REPO_NAME (force=$FORCE)"
 
           RESPONSE=$(curl -s -w "\\n%{http_code}" -X POST \\
             "https://api.osc.earth/nemar/webhooks/llm-enrich" \\
             -H "Content-Type: application/json" \\
             -H "X-Webhook-Token: $NEMAR_WEBHOOK_TOKEN" \\
-            -d "{\\"dataset_id\\": \\"$REPO_NAME\\"}")
+            -d "{\\"dataset_id\\": \\"$REPO_NAME\\", \\"force\\": $FORCE}")
 
           HTTP_CODE=$(echo "$RESPONSE" | tail -1)
           BODY=$(echo "$RESPONSE" | head -n -1)

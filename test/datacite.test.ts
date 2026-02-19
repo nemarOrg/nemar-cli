@@ -341,7 +341,7 @@ describe("bidsToDataCite", () => {
       authors: {
         "Shirazi, Yahya": { orcid: "0000-0001-2345-6789", affiliation: "UCSD" },
       },
-      keywords: ["EEG", "motor imagery"],
+      keywords: [{ value: "EEG" }, { value: "motor imagery" }],
       relatedDois: [{ doi: "10.1234/paper" }],
       description: "A test EEG dataset",
     };
@@ -608,12 +608,14 @@ describe("nemarMetadataToEnrichment v2", () => {
     expect(result.authors?.["Doe, John"].ror).toBe("https://ror.org/042nb2s44");
   });
 
-  test("converts v2 keywords to plain strings", () => {
+  test("preserves v2 keyword scheme info", () => {
     const result = nemarMetadataToEnrichment({
       version: "2.0",
       keywords: [{ term: "EMG", subject_scheme: "MeSH" }, { term: "neuroscience" }],
     });
-    expect(result.keywords).toEqual(["EMG", "neuroscience"]);
+    expect(result.keywords).toHaveLength(2);
+    expect(result.keywords?.[0]).toMatchObject({ value: "EMG", subjectScheme: "MeSH" });
+    expect(result.keywords?.[1]).toMatchObject({ value: "neuroscience" });
   });
 
   test("converts v2 related_identifiers to relatedDois", () => {

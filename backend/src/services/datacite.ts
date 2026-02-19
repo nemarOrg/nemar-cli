@@ -236,8 +236,12 @@ export interface AuthorEnrichment {
 export interface DataCiteEnrichment {
   /** Per-author metadata, keyed by author name as it appears in BIDS Authors. */
   authors?: Record<string, AuthorEnrichment>;
-  keywords?: string[];
-  relatedDois?: Array<{ doi: string; relationType?: RelationType }>;
+  keywords?: DataCiteSubject[];
+  relatedDois?: Array<{
+    doi: string;
+    relationType?: RelationType;
+    identifierType?: "DOI" | "URL" | "URN";
+  }>;
   fundingInfo?: DataCiteFundingReference[];
   description?: string;
   methodsDescription?: string;
@@ -245,6 +249,37 @@ export interface DataCiteEnrichment {
   geoLocation?: string;
   sizes?: string[];
   formats?: string[];
+}
+
+// ---------------------------------------------------------------------------
+// DOI / identifier normalization helpers
+// ---------------------------------------------------------------------------
+
+/**
+ * Strip common DOI prefixes to get the bare DOI (e.g., "10.1234/foo").
+ * Handles "doi:", "https://doi.org/", "http://dx.doi.org/" prefixes.
+ */
+export function normalizeDoi(id: string): string {
+  return id.replace(/^(doi:|https?:\/\/(dx\.)?doi\.org\/)/i, "").trim();
+}
+
+/**
+ * Detect the DataCite identifier type from the identifier string.
+ */
+export function detectIdentifierType(id: string): "DOI" | "URL" | "URN" {
+  if (id.startsWith("http://") || id.startsWith("https://")) return "URL";
+  if (id.startsWith("urn:")) return "URN";
+  return "DOI";
+}
+
+/**
+ * Build a normalized key for deduplicating related identifiers.
+ * DOIs are normalized (prefix stripped); URLs are compared as-is.
+ */
+function normalizeIdentifierKey(identifier: string, relationType: string): string {
+  const type = detectIdentifierType(identifier);
+  const normalized = type === "DOI" ? normalizeDoi(identifier) : identifier;
+  return `${normalized}|${relationType}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -523,28 +558,35 @@ function nemarMetadataV1ToEnrichment(
     enrichment.authors = { ...enrichment.authors, ...nemarMeta.authors };
   }
 
-  // Keywords: merge, deduplicate
+  // Keywords: merge, deduplicate (V1 has plain strings, wrap as DataCiteSubject)
   if (nemarMeta.keywords) {
     const existing = enrichment.keywords || [];
+    const seen = new Set(existing.map((s) => s.value));
     const merged = [...existing];
     for (const kw of nemarMeta.keywords) {
-      if (!merged.includes(kw)) merged.push(kw);
+      if (!seen.has(kw)) {
+        seen.add(kw);
+        merged.push({ value: kw });
+      }
     }
     enrichment.keywords = merged;
   }
 
-  // Related DOIs: merge and deduplicate by doi+relationType
+  // Related DOIs: merge and deduplicate with normalization
   if (nemarMeta.relatedDois) {
     const existing = enrichment.relatedDois || [];
-    const seen = new Set(existing.map((r) => `${r.doi}|${r.relationType}`));
+    const seen = new Set(
+      existing.map((r) => normalizeIdentifierKey(r.doi, r.relationType || "")),
+    );
     const newRels = nemarMeta.relatedDois
       .filter((r) => isValidRelationType(r.relationType))
       .map((r) => ({
-        doi: r.doi,
+        doi: normalizeDoi(r.doi),
         relationType: r.relationType as RelationType,
+        identifierType: detectIdentifierType(r.doi) as "DOI" | "URL" | "URN",
       }))
       .filter((r) => {
-        const key = `${r.doi}|${r.relationType}`;
+        const key = normalizeIdentifierKey(r.doi, r.relationType || "");
         if (seen.has(key)) return false;
         seen.add(key);
         return true;
@@ -605,28 +647,45 @@ function nemarMetadataV2ToEnrichment(
     enrichment.authors = baseAuthors;
   }
 
-  // Keywords: convert structured to plain strings
+  // Keywords: preserve structured scheme info (MeSH etc.)
   if (nemarMeta.keywords) {
     const existing = enrichment.keywords || [];
+    const seen = new Set(existing.map((s) => s.value));
     const merged = [...existing];
     for (const kw of nemarMeta.keywords) {
-      if (!merged.includes(kw.term)) merged.push(kw.term);
+      if (!seen.has(kw.term)) {
+        seen.add(kw.term);
+        merged.push({
+          value: kw.term,
+          subjectScheme: kw.subject_scheme,
+          schemeURI: kw.scheme_uri,
+          valueURI: kw.value_uri,
+          classificationCode: kw.classification_code,
+        });
+      }
     }
     enrichment.keywords = merged;
   }
 
-  // Related identifiers: convert to relatedDois format
+  // Related identifiers: carry identifier_type, normalize DOIs
   if (nemarMeta.related_identifiers) {
     const existing = enrichment.relatedDois || [];
-    const seen = new Set(existing.map((r) => `${r.doi}|${r.relationType}`));
+    const seen = new Set(
+      existing.map((r) => normalizeIdentifierKey(r.doi, r.relationType || "")),
+    );
     for (const ri of nemarMeta.related_identifiers) {
       if (isValidRelationType(ri.relation_type)) {
-        const key = `${ri.identifier}|${ri.relation_type}`;
+        const idType = (ri.identifier_type === "URL" || ri.identifier_type === "URN")
+          ? ri.identifier_type
+          : detectIdentifierType(ri.identifier);
+        const normalized = idType === "DOI" ? normalizeDoi(ri.identifier) : ri.identifier;
+        const key = normalizeIdentifierKey(ri.identifier, ri.relation_type);
         if (!seen.has(key)) {
           seen.add(key);
           existing.push({
-            doi: ri.identifier,
+            doi: normalized,
             relationType: ri.relation_type as RelationType,
+            identifierType: idType as "DOI" | "URL" | "URN",
           });
         }
       }
@@ -1240,39 +1299,63 @@ export function bidsToDataCite(
     descriptions.push({ description: rawAck, descriptionType: "Other" });
   }
 
-  // Related identifiers
+  // Related identifiers (with normalized deduplication)
   const relatedIdentifiers: DataCiteRelatedIdentifier[] = [];
+  const seenIds = new Set<string>();
+
+  // Helper to add a related identifier with dedup
+  const addRelatedId = (
+    identifier: string,
+    idType: "DOI" | "URL" | "URN",
+    relationType: string,
+  ) => {
+    const normalizedId = idType === "DOI" ? normalizeDoi(identifier) : identifier;
+    // Dedup key: normalized identifier + relation type
+    const key = `${normalizedId.toLowerCase()}|${relationType}`;
+    if (seenIds.has(key)) return;
+    // Also check if the same DOI exists with a different relation (cross-format dedup)
+    const crossKey = `${normalizedId.toLowerCase()}|*`;
+    if (idType === "DOI") {
+      // Check if a URL form of this DOI already exists
+      const urlForm = `https://doi.org/${normalizedId}`.toLowerCase();
+      for (const existing of seenIds) {
+        const [existingId] = existing.split("|");
+        if (existingId === urlForm || existingId === normalizedId.toLowerCase()) {
+          // Same DOI in different format, skip if same relation type
+          if (existing === key) return;
+        }
+      }
+    }
+    seenIds.add(key);
+    relatedIdentifiers.push({
+      identifier: normalizedId,
+      relatedIdentifierType: idType,
+      relationType,
+    });
+  };
+
+  // From enrichment (metadata.json data)
   if (enrichment?.relatedDois) {
     for (const rel of enrichment.relatedDois) {
-      relatedIdentifiers.push({
-        identifier: rel.doi,
-        relatedIdentifierType: "DOI",
-        relationType: rel.relationType || "IsSupplementTo",
-      });
+      const idType = rel.identifierType || detectIdentifierType(rel.doi);
+      addRelatedId(rel.doi, idType, rel.relationType || "IsSupplementTo");
     }
   }
+
   // BIDS ReferencesAndLinks (DOIs and URLs)
   const rawRefs = bidsDescription.ReferencesAndLinks;
   const refs = Array.isArray(rawRefs)
     ? rawRefs.filter((r): r is string => typeof r === "string")
     : [];
   for (const ref of refs) {
-    // Skip if already added from enrichment (deduplicate by identifier)
-    const isDuplicate = relatedIdentifiers.some((r) => r.identifier === ref);
-    if (isDuplicate) continue;
-
-    if (ref.match(/^10\.\d{4,}/)) {
-      relatedIdentifiers.push({
-        identifier: ref,
-        relatedIdentifierType: "DOI",
-        relationType: "References",
-      });
+    // Detect if this is a DOI URL (https://doi.org/10.xxx)
+    const doiMatch = ref.match(/^https?:\/\/(dx\.)?doi\.org\/(10\.\d{4,}\/.+)$/i);
+    if (doiMatch) {
+      addRelatedId(doiMatch[2], "DOI", "References");
+    } else if (ref.match(/^10\.\d{4,}/)) {
+      addRelatedId(ref, "DOI", "References");
     } else if (ref.startsWith("https://") || ref.startsWith("http://")) {
-      relatedIdentifiers.push({
-        identifier: ref,
-        relatedIdentifierType: "URL",
-        relationType: "References",
-      });
+      addRelatedId(ref, "URL", "References");
     }
   }
 
@@ -1283,36 +1366,30 @@ export function bidsToDataCite(
       if (!source || typeof source !== "object") continue;
       const s = source as Record<string, unknown>;
       if (typeof s.DOI === "string" && s.DOI) {
-        const isDuplicate = relatedIdentifiers.some((r) => r.identifier === s.DOI);
-        if (!isDuplicate) {
-          relatedIdentifiers.push({
-            identifier: s.DOI as string,
-            relatedIdentifierType: "DOI",
-            relationType: "IsDerivedFrom",
-          });
-        }
+        addRelatedId(s.DOI, "DOI", "IsDerivedFrom");
       }
       if (typeof s.URL === "string" && s.URL) {
-        const isDuplicate = relatedIdentifiers.some((r) => r.identifier === s.URL);
-        if (!isDuplicate) {
-          relatedIdentifiers.push({
-            identifier: s.URL as string,
-            relatedIdentifierType: "URL",
-            relationType: "IsDerivedFrom",
-          });
+        // Skip URL if it's a doi.org URL (already handled via DOI field)
+        const doiMatch = (s.URL as string).match(
+          /^https?:\/\/(dx\.)?doi\.org\/(10\.\d{4,}\/.+)$/i,
+        );
+        if (doiMatch) {
+          addRelatedId(doiMatch[2], "DOI", "IsDerivedFrom");
+        } else {
+          addRelatedId(s.URL as string, "URL", "IsDerivedFrom");
         }
       }
     }
   }
 
-  // Subjects/keywords as structured objects
+  // Subjects/keywords (now structured with scheme info)
   const subjectValues = new Set<string>();
   const subjects: DataCiteSubject[] = [];
   if (enrichment?.keywords) {
     for (const kw of enrichment.keywords) {
-      if (!subjectValues.has(kw)) {
-        subjectValues.add(kw);
-        subjects.push({ value: kw });
+      if (!subjectValues.has(kw.value)) {
+        subjectValues.add(kw.value);
+        subjects.push(kw);
       }
     }
   }

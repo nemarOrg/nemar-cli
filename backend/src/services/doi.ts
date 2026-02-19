@@ -56,6 +56,8 @@ export interface CreateConceptDoiOptions {
   githubRepo?: string | null;
   /** BIDS dataset_description.json content */
   bidsDescription?: BidsDatasetDescription | Record<string, unknown>;
+  /** Pre-built enrichment from .nemar/metadata.json (if available) */
+  enrichment?: DataCiteEnrichment;
   /** Uploader's ORCID for auto-injection into creators */
   uploaderOrcid?: string;
   /** Uploader's name (used for ORCID matching against BIDS authors, and as Zenodo creator) */
@@ -158,12 +160,13 @@ async function createEzidConceptDoi(
 ): Promise<DoiResult> {
   const auth = resolveEzidAuth(env, options.sandbox);
 
-  const enrichment: DataCiteEnrichment = buildOrcidEnrichment(
-    options.bidsDescription,
-    options.uploaderName,
-    options.uploaderOrcid,
-  );
+  // Use pre-built enrichment from .nemar/metadata.json when available,
+  // otherwise fall back to minimal ORCID-only enrichment
+  const enrichment: DataCiteEnrichment = options.enrichment
+    ? { ...options.enrichment }
+    : buildOrcidEnrichment(options.bidsDescription, options.uploaderName, options.uploaderOrcid);
 
+  // Override description from request body if provided
   if (options.datasetDescription) {
     enrichment.description = options.datasetDescription;
   }

@@ -179,6 +179,9 @@ export interface NemarMetadataV2 {
   modalities?: string[];
   sizes?: string[];
   formats?: string[];
+  /** SHA-256 hash of source content (README + dataset_description.json) used for enrichment.
+   *  Used to skip re-enrichment when sources haven't changed. */
+  source_hash?: string;
 }
 
 /** Union of both versions. */
