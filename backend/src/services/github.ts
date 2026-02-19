@@ -829,11 +829,11 @@ jobs:
             });
             archive.on("error", function (err) {
               console.error("Archive error:", err.message);
-              process.exit(1);
+              process.exitCode = 1;
             });
             passThrough.on("error", function (err) {
               console.error("Stream error:", err.message);
-              process.exit(1);
+              process.exitCode = 1;
             });
 
             var s3 = new S3Client({ region: REGION });
@@ -851,6 +851,11 @@ jobs:
               partSize: 10 * 1024 * 1024,
             });
 
+            var uploadDone = upload.done().catch(function (err) {
+              console.error("S3 Upload error:", err.message);
+              process.exitCode = 1;
+            });
+
             var files = walkDir(".");
             console.log("Found " + files.length + " files");
 
@@ -863,30 +868,27 @@ jobs:
               var full = files[i].full;
               var annexKey = resolveAnnexKey(full);
 
-              if (annexKey) {
-                var encodedPath = rel.split("/").map(encodeURIComponent).join("/");
-                var url = S3_BASE + "/" + DATASET_ID + "/objects/" + encodedPath;
-                try {
+              try {
+                if (annexKey) {
+                  var url = S3_BASE + "/" + DATASET_ID + "/objects/" + encodeURIComponent(annexKey);
                   var stream = await fetchUrl(url);
                   archive.append(stream, { name: rel });
-                  await new Promise(function (r) {
-                    archive.once("entry", r);
-                  });
-                  annexed++;
-                } catch (fetchErr) {
-                  skipped++;
-                  if (skipped <= 5) {
-                    console.warn("  Skipping " + rel + ": " + fetchErr.message);
-                  } else if (skipped === 6) {
-                    console.warn("  (suppressing further skip warnings)");
-                  }
+                } else {
+                  archive.append(fs.createReadStream(full), { name: rel });
                 }
-              } else {
-                archive.append(fs.createReadStream(full), { name: rel });
-                await new Promise(function (r) {
-                  archive.once("entry", r);
+                await new Promise(function (resolve, reject) {
+                  archive.once("entry", resolve);
+                  archive.once("error", reject);
                 });
-                regular++;
+                if (annexKey) annexed++;
+                else regular++;
+              } catch (err) {
+                skipped++;
+                if (skipped <= 10) {
+                  console.warn("  Skipping " + rel + ": " + err.message);
+                } else if (skipped === 11) {
+                  console.warn("  (suppressing further skip warnings)");
+                }
               }
 
               if ((annexed + regular + skipped) % 100 === 0) {
@@ -895,7 +897,7 @@ jobs:
             }
 
             await archive.finalize();
-            await upload.done();
+            await uploadDone;
 
             console.log("Archive complete: " + annexed + " annexed + " + regular + " regular + " + skipped + " skipped");
             console.log("Uploaded to s3://" + BUCKET + "/" + s3Key);
@@ -904,9 +906,14 @@ jobs:
             }
           }
 
+          process.on("unhandledRejection", function (err) {
+            console.error("Unhandled rejection:", err);
+            process.exitCode = 1;
+          });
+
           main().catch(function (err) {
             console.error("Fatal:", err);
-            process.exit(1);
+            process.exitCode = 1;
           });
           ARCHIVE_SCRIPT
 
