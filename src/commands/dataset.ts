@@ -669,22 +669,27 @@ Examples:
 
     // Step 4: Collect file manifest and show upload plan
     spinner = ora("Analyzing dataset files...").start();
-    // Use explicit --name flag, then BIDS Name from dataset_description.json, then directory name
-    let datasetName = options.name;
-    if (!datasetName) {
-      try {
-        const descPath = resolve(absolutePath, "dataset_description.json");
-        const desc = JSON.parse(readFileSync(descPath, "utf-8"));
-        if (desc.Name && typeof desc.Name === "string") {
-          datasetName = desc.Name;
-        }
-      } catch {
-        // Fall through to directory basename
-      }
-      if (!datasetName) {
-        datasetName = basename(absolutePath);
+
+    // Read dataset_description.json once (used for Name fallback and co-author ORCIDs)
+    let bidsDescription: Record<string, unknown> = {};
+    try {
+      const descPath = resolve(absolutePath, "dataset_description.json");
+      bidsDescription = JSON.parse(readFileSync(descPath, "utf-8")) as Record<string, unknown>;
+    } catch (err: unknown) {
+      const isNotFound =
+        err instanceof Error && "code" in err && (err as NodeJS.ErrnoException).code === "ENOENT";
+      if (!isNotFound) {
+        console.log(
+          chalk.yellow(`Warning: Could not read dataset_description.json: ${(err as Error).message}`),
+        );
       }
     }
+
+    // Use explicit --name flag, then BIDS Name from dataset_description.json, then directory name
+    const datasetName =
+      options.name ||
+      (typeof bidsDescription.Name === "string" ? bidsDescription.Name : null) ||
+      basename(absolutePath);
     const manifest = await collectFileManifest(absolutePath);
     spinner.succeed(
       `Found ${manifest.files.length} files (${manifest.dataFiles} data, ${manifest.metadataFiles} metadata)`,
@@ -724,103 +729,96 @@ Examples:
     }
 
     if (!coAuthorEnrichment && !options.skipOrcid && process.stdin.isTTY) {
-      const descPath = resolve(absolutePath, "dataset_description.json");
-      if (existsSync(descPath)) {
+      const rawAuthors = bidsDescription.Authors;
+      const authorList = Array.isArray(rawAuthors)
+        ? rawAuthors.filter((a): a is string => typeof a === "string")
+        : [];
+
+      if (authorList.length > 0) {
         try {
-          const descContent = JSON.parse(readFileSync(descPath, "utf-8")) as Record<
+          // Get uploader's ORCID from profile
+          let uploaderOrcid: string | undefined;
+          let uploaderUsername: string | undefined;
+          try {
+            const user = await getCurrentUser();
+            uploaderOrcid = user.orcid || undefined;
+            uploaderUsername = user.username;
+          } catch (userErr) {
+            console.log(chalk.gray(`  Could not fetch profile: ${errorDetail(userErr)}`));
+          }
+
+          console.log();
+          console.log(chalk.cyan("Authors found:"), authorList.join(" | "));
+
+          // Auto-match uploader ORCID (v2 format with affiliations array)
+          const authors: Record<
             string,
-            unknown
-          >;
-          const rawAuthors = descContent.Authors;
-          const authorList = Array.isArray(rawAuthors)
-            ? rawAuthors.filter((a): a is string => typeof a === "string")
-            : [];
-
-          if (authorList.length > 0) {
-            // Get uploader's ORCID from profile
-            let uploaderOrcid: string | undefined;
-            let uploaderUsername: string | undefined;
-            try {
-              const user = await getCurrentUser();
-              uploaderOrcid = user.orcid || undefined;
-              uploaderUsername = user.username;
-            } catch (userErr) {
-              console.log(chalk.gray(`  Could not fetch profile: ${errorDetail(userErr)}`));
+            { orcid?: string; affiliations?: Array<{ name: string }> }
+          > = {};
+          let uploaderMatchedAuthor: string | undefined;
+          if (uploaderOrcid && uploaderUsername) {
+            const lowerName = uploaderUsername.toLowerCase();
+            const match = authorList.find((a) => a.toLowerCase().includes(lowerName));
+            if (match) {
+              authors[match] = { orcid: uploaderOrcid };
+              uploaderMatchedAuthor = match;
+              console.log(
+                `  Your ORCID (from profile): ${chalk.green(uploaderOrcid)} (matched to "${match}")`,
+              );
             }
+          }
 
-            console.log();
-            console.log(chalk.cyan("Authors found:"), authorList.join(" | "));
+          // Prompt for each co-author's ORCID
+          for (const author of authorList) {
+            if (author === uploaderMatchedAuthor) continue;
 
-            // Auto-match uploader ORCID (v2 format with affiliations array)
-            const authors: Record<
-              string,
-              { orcid?: string; affiliations?: Array<{ name: string }> }
-            > = {};
-            let uploaderMatchedAuthor: string | undefined;
-            if (uploaderOrcid && uploaderUsername) {
-              const lowerName = uploaderUsername.toLowerCase();
-              const match = authorList.find((a) => a.toLowerCase().includes(lowerName));
-              if (match) {
-                authors[match] = { orcid: uploaderOrcid };
-                uploaderMatchedAuthor = match;
-                console.log(
-                  `  Your ORCID (from profile): ${chalk.green(uploaderOrcid)} (matched to "${match}")`,
-                );
-              }
-            }
+            const { orcid } = await inquirer.prompt([
+              {
+                type: "input",
+                name: "orcid",
+                message: `ORCID for "${author}" (Enter to skip):`,
+                validate: (input: string) => {
+                  if (!input) return true;
+                  return ORCID_REGEX.test(input) || "Invalid ORCID format (XXXX-XXXX-XXXX-XXXX)";
+                },
+              },
+            ]);
 
-            // Prompt for each co-author's ORCID
-            for (const author of authorList) {
-              if (author === uploaderMatchedAuthor) continue;
-
-              const { orcid } = await inquirer.prompt([
+            if (orcid) {
+              const entry: { orcid: string; affiliations?: Array<{ name: string }> } = { orcid };
+              const { affiliation } = await inquirer.prompt([
                 {
                   type: "input",
-                  name: "orcid",
-                  message: `ORCID for "${author}" (Enter to skip):`,
-                  validate: (input: string) => {
-                    if (!input) return true;
-                    return ORCID_REGEX.test(input) || "Invalid ORCID format (XXXX-XXXX-XXXX-XXXX)";
-                  },
+                  name: "affiliation",
+                  message: `  Affiliation for "${author}" (optional):`,
                 },
               ]);
-
-              if (orcid) {
-                const entry: { orcid: string; affiliations?: Array<{ name: string }> } = { orcid };
-                const { affiliation } = await inquirer.prompt([
-                  {
-                    type: "input",
-                    name: "affiliation",
-                    message: `  Affiliation for "${author}" (optional):`,
-                  },
-                ]);
-                if (affiliation) entry.affiliations = [{ name: affiliation }];
-                authors[author] = entry;
-              }
+              if (affiliation) entry.affiliations = [{ name: affiliation }];
+              authors[author] = entry;
             }
-
-            if (Object.keys(authors).length > 0) {
-              coAuthorEnrichment = { version: "2.0", authors };
-
-              // Write immediately so resumed uploads don't re-prompt
-              try {
-                const nemarMetaDir = resolve(absolutePath, ".nemar");
-                if (!existsSync(nemarMetaDir)) {
-                  mkdirSync(nemarMetaDir, { recursive: true });
-                }
-                const nemarMetaPath = resolve(nemarMetaDir, "metadata.json");
-                writeFileSync(nemarMetaPath, JSON.stringify(coAuthorEnrichment, null, 2));
-                console.log(chalk.gray("  Saved .nemar/metadata.json with author ORCIDs"));
-              } catch (writeErr) {
-                console.log(
-                  chalk.yellow(
-                    `  Warning: Could not save .nemar/metadata.json: ${errorDetail(writeErr)}`,
-                  ),
-                );
-              }
-            }
-            console.log();
           }
+
+          if (Object.keys(authors).length > 0) {
+            coAuthorEnrichment = { version: "2.0", authors };
+
+            // Write immediately so resumed uploads don't re-prompt
+            try {
+              const nemarMetaDir = resolve(absolutePath, ".nemar");
+              if (!existsSync(nemarMetaDir)) {
+                mkdirSync(nemarMetaDir, { recursive: true });
+              }
+              const nemarMetaPath = resolve(nemarMetaDir, "metadata.json");
+              writeFileSync(nemarMetaPath, JSON.stringify(coAuthorEnrichment, null, 2));
+              console.log(chalk.gray("  Saved .nemar/metadata.json with author ORCIDs"));
+            } catch (writeErr) {
+              console.log(
+                chalk.yellow(
+                  `  Warning: Could not save .nemar/metadata.json: ${errorDetail(writeErr)}`,
+                ),
+              );
+            }
+          }
+          console.log();
         } catch (orcidErr) {
           if (orcidErr instanceof ApiError) {
             console.log(chalk.yellow(`  Could not fetch profile: ${orcidErr.message}`));

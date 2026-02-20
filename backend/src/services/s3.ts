@@ -643,8 +643,8 @@ export async function deleteObjects(
 /**
  * Delete all S3 objects belonging to a dataset.
  *
- * Scans the entire `{datasetId}/` prefix to catch objects stored under any
- * sub-path (objects/, version/, archives/, or legacy direct-path uploads).
+ * Scans the entire `{datasetId}/` prefix rather than enumerating known
+ * sub-paths, ensuring nothing is missed if the prefix structure evolves.
  *
  * Validates the dataset ID before proceeding to prevent accidental deletion
  * of unrelated S3 paths.

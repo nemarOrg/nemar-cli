@@ -924,8 +924,8 @@ jobs:
           fi
 `;
 
-  // Version DOI workflow (triggered by tag push from pr-merge create-release job,
-  // or by manual/admin tag pushes - all paths converge here)
+  // Version DOI workflow: publishes a DOI then triggers archive generation.
+  // Fires on any v* tag push (from pr-merge create-release, manual tags, or admin tags).
   const versionDoi = `name: Version DOI
 
 on:
@@ -998,7 +998,6 @@ jobs:
   trigger-archive:
     name: Trigger Archive Generation
     needs: publish-doi
-    if: always()
     runs-on: ubuntu-latest
     steps:
       - name: Dispatch archive generation

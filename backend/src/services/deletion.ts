@@ -14,7 +14,7 @@ import { type DeleteResult, deleteDatasetObjects } from "./s3.js";
 export interface DeletionSteps {
   github: { success: boolean; error?: string };
   s3: DeleteResult & { skipped?: boolean };
-  d1: { success: boolean; versionsDeleted: number; pubRequestsDeleted: number; error?: string };
+  d1: { success: boolean; versionsDeleted: number; pubRequestsDeleted: number; s3PermsDeleted: number; error?: string };
 }
 
 export interface DeletionResult {
@@ -47,7 +47,7 @@ export async function deleteDatasetCascade(
   const steps: DeletionSteps = {
     github: { success: false },
     s3: { deleted: 0, failed: [], skipped: false },
-    d1: { success: false, versionsDeleted: 0, pubRequestsDeleted: 0 },
+    d1: { success: false, versionsDeleted: 0, pubRequestsDeleted: 0, s3PermsDeleted: 0 },
   };
 
   // Step 1: Delete GitHub repository
@@ -103,6 +103,7 @@ export async function deleteDatasetCascade(
 
     steps.d1.versionsDeleted = batchResults[0].meta.changes ?? 0;
     steps.d1.pubRequestsDeleted = batchResults[1].meta.changes ?? 0;
+    steps.d1.s3PermsDeleted = batchResults[3].meta.changes ?? 0;
     steps.d1.success = true;
   } catch (err) {
     steps.d1.error = err instanceof Error ? err.message : String(err);
