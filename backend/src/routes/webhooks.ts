@@ -25,6 +25,7 @@ import {
   downloadReleaseArchive,
   getBlobContent,
   getTreeAtRef,
+  setRepoDescription,
 } from "../services/github.js";
 import {
   correctFromFeedback,
@@ -592,11 +593,12 @@ webhooks.post("/llm-enrich", async (c) => {
 
   // Look up dataset in D1
   const dataset = await c.env.DB.prepare(
-    "SELECT dataset_id, github_repo, enrichment_json FROM datasets WHERE dataset_id = ?",
+    "SELECT dataset_id, name, github_repo, enrichment_json FROM datasets WHERE dataset_id = ?",
   )
     .bind(dataset_id)
     .first<{
       dataset_id: string;
+      name: string | null;
       github_repo: string | null;
       enrichment_json: string | null;
     }>();
@@ -647,6 +649,20 @@ webhooks.post("/llm-enrich", async (c) => {
           },
           422,
         );
+      }
+    }
+
+    // Sync BIDS Name to D1 and GitHub repo description if changed
+    const bidsName = typeof bidsDescription.Name === "string" ? bidsDescription.Name : null;
+    if (bidsName && bidsName !== dataset.name) {
+      try {
+        await c.env.DB.prepare("UPDATE datasets SET name = ? WHERE dataset_id = ?")
+          .bind(bidsName, dataset_id)
+          .run();
+        await setRepoDescription(repoName, `${bidsName} - NEMAR Dataset`, pat);
+        console.log(`[llm-enrich] Synced BIDS Name for ${dataset_id}: "${bidsName}"`);
+      } catch (nameErr) {
+        console.error(`[llm-enrich] Failed to sync BIDS Name for ${dataset_id}:`, nameErr);
       }
     }
 

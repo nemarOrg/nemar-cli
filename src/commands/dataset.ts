@@ -669,7 +669,22 @@ Examples:
 
     // Step 4: Collect file manifest and show upload plan
     spinner = ora("Analyzing dataset files...").start();
-    const datasetName = options.name || basename(absolutePath);
+    // Use explicit --name flag, then BIDS Name from dataset_description.json, then directory name
+    let datasetName = options.name;
+    if (!datasetName) {
+      try {
+        const descPath = resolve(absolutePath, "dataset_description.json");
+        const desc = JSON.parse(readFileSync(descPath, "utf-8"));
+        if (desc.Name && typeof desc.Name === "string") {
+          datasetName = desc.Name;
+        }
+      } catch {
+        // Fall through to directory basename
+      }
+      if (!datasetName) {
+        datasetName = basename(absolutePath);
+      }
+    }
     const manifest = await collectFileManifest(absolutePath);
     spinner.succeed(
       `Found ${manifest.files.length} files (${manifest.dataFiles} data, ${manifest.metadataFiles} metadata)`,
