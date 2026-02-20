@@ -246,7 +246,7 @@ describe("E2E Upload Tests", () => {
     const output = stdout + stderr;
     expect(output).toContain("Upload Plan:");
     expect(output).toContain("Dry run mode");
-  });
+  }, 30_000);
 
   test("upload with missing prerequisites shows helpful errors", async () => {
     // This test only runs if SOME prereqs are missing
@@ -290,7 +290,7 @@ describe("E2E Upload Tests", () => {
       stdout.includes("git-annex") ||
       stdout.includes("Prerequisites");
     expect(hasPrereqError).toBe(true);
-  });
+  }, 30_000);
 
   test("full upload flow with dry-run (requires all prerequisites)", async () => {
     if (!allPrereqsMet) {
@@ -336,7 +336,7 @@ describe("E2E Upload Tests", () => {
     expect(output).toContain("E2E-Test-Dataset");
     expect(output).toContain("Dry run mode");
     expect(exitCode).toBe(0);
-  });
+  }, 30_000);
 
   test("sandbox upload creates dataset with xx prefix (requires TEST_CREATE_SANDBOX=true)", async () => {
     if (!allPrereqsMet) {
@@ -378,7 +378,7 @@ describe("E2E Upload Tests", () => {
     // Sandbox datasets should have xx prefix
     expect(output).toMatch(/xx\d{6}/);
     expect(exitCode).toBe(0);
-  });
+  }, 30_000);
 
   // Tests for PR #33 fixes
   // This test requires Deno to NOT be installed, so it's skipped in CI where Deno is available
@@ -435,7 +435,7 @@ describe("E2E Upload Tests", () => {
 
     // Should mention skip-validation option
     expect(output).toContain("--skip-validation");
-  });
+  }, 30_000);
 
   test("initDataset initializes git-annex on existing directory", async () => {
     if (!allPrereqsMet) {

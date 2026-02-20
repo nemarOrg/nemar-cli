@@ -25,6 +25,7 @@ import {
   downloadReleaseArchive,
   getBlobContent,
   getTreeAtRef,
+  setRepoDescription,
 } from "../services/github.js";
 import {
   correctFromFeedback,
@@ -592,11 +593,12 @@ webhooks.post("/llm-enrich", async (c) => {
 
   // Look up dataset in D1
   const dataset = await c.env.DB.prepare(
-    "SELECT dataset_id, github_repo, enrichment_json FROM datasets WHERE dataset_id = ?",
+    "SELECT dataset_id, name, github_repo, enrichment_json FROM datasets WHERE dataset_id = ?",
   )
     .bind(dataset_id)
     .first<{
       dataset_id: string;
+      name: string | null;
       github_repo: string | null;
       enrichment_json: string | null;
     }>();
@@ -647,6 +649,30 @@ webhooks.post("/llm-enrich", async (c) => {
           },
           422,
         );
+      }
+    }
+
+    // Sync BIDS Name to D1 and GitHub repo description if changed.
+    // Done here because llm-enrich already reads dataset_description.json,
+    // and BIDS Name may change across versions.
+    const bidsName = typeof bidsDescription.Name === "string"
+      ? bidsDescription.Name.replace(/[\r\n]+/g, " ").trim().slice(0, 200)
+      : null;
+    if (bidsName && bidsName !== dataset.name) {
+      try {
+        await c.env.DB.prepare("UPDATE datasets SET name = ? WHERE dataset_id = ?")
+          .bind(bidsName, dataset_id)
+          .run();
+      } catch (dbErr) {
+        console.error(`[llm-enrich] Failed to update BIDS Name in D1 for ${dataset_id}:`, dbErr);
+      }
+      const repoResult = await setRepoDescription(repoName, `${bidsName} - NEMAR Dataset`, pat);
+      if (!repoResult.ok) {
+        console.error(
+          `[llm-enrich] Failed to set GitHub repo description for ${dataset_id}: HTTP ${repoResult.status} - ${repoResult.error}`,
+        );
+      } else {
+        console.log(`[llm-enrich] Synced BIDS Name for ${dataset_id}: "${bidsName}"`);
       }
     }
 
