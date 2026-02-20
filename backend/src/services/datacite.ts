@@ -1292,9 +1292,6 @@ export function bidsToDataCite(
   if (enrichment?.description) {
     descriptions.push({ description: enrichment.description, descriptionType: "Abstract" });
   }
-  if (enrichment?.methodsDescription) {
-    descriptions.push({ description: enrichment.methodsDescription, descriptionType: "Methods" });
-  }
   const rawAck = bidsDescription.HowToAcknowledge;
   if (typeof rawAck === "string" && rawAck) {
     descriptions.push({ description: rawAck, descriptionType: "Other" });

@@ -1722,15 +1722,15 @@ adminRoutes.post("/datasets/:id/doi/update", zValidator("json", updateDoiSchema)
 
       const metadata = bidsToDataCite(datasetId, doi, bidsDesc, enrichment);
       updateOptions.dataciteXml = buildDataCiteXml(metadata);
+      updateOptions.target = `https://nemar.org/dataexplorer/detail?dataset_id=${datasetId}`;
       metadataRefreshed = true;
     }
 
     // Change status
     if (body.status) {
       if (body.status === "public" && dataset.ezid_status === "reserved") {
-        const target = `https://nemar.org/dataexplorer/detail?dataset_id=${datasetId}`;
         updateOptions.status = "public";
-        updateOptions.target = target;
+        updateOptions.target = `https://nemar.org/dataexplorer/detail?dataset_id=${datasetId}`;
       } else if (body.status === "unavailable") {
         updateOptions.status = "unavailable";
       }
