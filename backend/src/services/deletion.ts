@@ -97,6 +97,7 @@ export async function deleteDatasetCascade(
           "DELETE FROM dataset_collaborators WHERE dataset_id IN (SELECT id FROM datasets WHERE dataset_id = ?)",
         )
         .bind(datasetId),
+      db.prepare("DELETE FROM user_s3_permissions WHERE s3_prefix = ?").bind(datasetId),
       db.prepare("DELETE FROM datasets WHERE dataset_id = ?").bind(datasetId),
     ]);
 
