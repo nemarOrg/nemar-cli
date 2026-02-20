@@ -680,7 +680,9 @@ Examples:
         err instanceof Error && "code" in err && (err as NodeJS.ErrnoException).code === "ENOENT";
       if (!isNotFound) {
         console.log(
-          chalk.yellow(`Warning: Could not read dataset_description.json: ${(err as Error).message}`),
+          chalk.yellow(
+            `Warning: Could not read dataset_description.json: ${(err as Error).message}`,
+          ),
         );
       }
     }
