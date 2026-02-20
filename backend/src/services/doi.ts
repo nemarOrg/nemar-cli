@@ -288,13 +288,14 @@ export async function createEzidVersionDoi(
   metadata.version = opts.version;
   const dataciteXml = buildDataCiteXml(metadata);
 
-  const releaseUrl = `https://github.com/${opts.githubRepo}/releases/tag/v${opts.version}`;
+  // Version DOI landing page: NEMAR website with version param (not GitHub release)
+  const target = `https://nemar.org/dataexplorer/detail?dataset_id=${opts.datasetId}&version=${opts.version}`;
 
   let identifier: EzidIdentifier;
   try {
     identifier = await createIdentifier(auth, fullIdentifier, {
       status: "reserved",
-      target: releaseUrl,
+      target,
       dataciteXml,
     });
   } catch (error) {
@@ -313,7 +314,7 @@ export async function createEzidVersionDoi(
   }
 
   // Make the version DOI public
-  await makePublic(auth, identifier.identifier, releaseUrl);
+  await makePublic(auth, identifier.identifier, target);
 
   // Update the concept DOI's XML to include HasVersion relation.
   // Non-fatal: the version DOI is already public at this point, so we log but

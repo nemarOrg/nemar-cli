@@ -627,61 +627,6 @@ jobs:
             --notes "Release v$VERSION from PR #\${{ github.event.pull_request.number }}"
           echo "created=true" >> $GITHUB_OUTPUT
 
-  publish-zenodo:
-    name: Publish Zenodo DOI
-    needs: create-release
-    if: needs.create-release.outputs.release_created == 'true'
-    runs-on: ubuntu-latest
-    steps:
-      - name: Publish version DOI
-        env:
-          NEMAR_WEBHOOK_TOKEN: \${{ secrets.NEMAR_WEBHOOK_TOKEN }}
-        run: |
-          # Extract dataset ID from repo name (e.g., nm000104)
-          DATASET_ID="\${{ github.event.repository.name }}"
-          VERSION="\${{ needs.create-release.outputs.version }}"
-          RELEASE_URL="https://github.com/\${{ github.repository }}/releases/tag/v$VERSION"
-
-          echo "Publishing DOI for $DATASET_ID version $VERSION"
-
-          # Skip if webhook token not configured
-          if [ -z "$NEMAR_WEBHOOK_TOKEN" ]; then
-            echo "NEMAR_WEBHOOK_TOKEN not configured, skipping DOI publish"
-            exit 0
-          fi
-
-          # Call NEMAR API to publish version DOI
-          RESPONSE=$(curl -s -w "\\n%{http_code}" -X POST \\
-            "https://api.osc.earth/nemar/webhooks/publish-version-doi" \\
-            -H "Content-Type: application/json" \\
-            -H "X-Webhook-Token: $NEMAR_WEBHOOK_TOKEN" \\
-            -d "{
-              \\"dataset_id\\": \\"$DATASET_ID\\",
-              \\"version\\": \\"$VERSION\\",
-              \\"release_url\\": \\"$RELEASE_URL\\"
-            }")
-
-          HTTP_CODE=$(echo "$RESPONSE" | tail -1)
-          BODY=$(echo "$RESPONSE" | head -n -1)
-
-          echo "Response: $BODY"
-
-          if [ "$HTTP_CODE" -ge 400 ]; then
-            # Check if it was skipped (no concept DOI)
-            if echo "$BODY" | jq -e '.skipped == true' > /dev/null 2>&1; then
-              echo "Skipped: No concept DOI exists for this dataset"
-              exit 0
-            fi
-            echo "::error::Failed to publish DOI (HTTP $HTTP_CODE)"
-            exit 1
-          fi
-
-          # Show DOI info
-          DOI=$(echo "$BODY" | jq -r '.version_doi // empty')
-          if [ -n "$DOI" ]; then
-            echo "Version DOI published: $DOI"
-          fi
-
   cleanup-staging:
     name: Cleanup Staging (runs on merge or close)
     if: always()
@@ -829,11 +774,11 @@ jobs:
             });
             archive.on("error", function (err) {
               console.error("Archive error:", err.message);
-              process.exit(1);
+              process.exitCode = 1;
             });
             passThrough.on("error", function (err) {
               console.error("Stream error:", err.message);
-              process.exit(1);
+              process.exitCode = 1;
             });
 
             var s3 = new S3Client({ region: REGION });
@@ -851,6 +796,12 @@ jobs:
               partSize: 10 * 1024 * 1024,
             });
 
+            var uploadDone = upload.done().catch(function (err) {
+              console.error("S3 Upload error:", err.message);
+              process.exitCode = 1;
+              throw err;
+            });
+
             var files = walkDir(".");
             console.log("Found " + files.length + " files");
 
@@ -863,30 +814,28 @@ jobs:
               var full = files[i].full;
               var annexKey = resolveAnnexKey(full);
 
-              if (annexKey) {
-                var encodedPath = rel.split("/").map(encodeURIComponent).join("/");
-                var url = S3_BASE + "/" + DATASET_ID + "/objects/" + encodedPath;
-                try {
+              try {
+                var entryDone = new Promise(function (resolve, reject) {
+                  archive.once("entry", resolve);
+                  archive.once("error", reject);
+                });
+                if (annexKey) {
+                  var url = S3_BASE + "/" + DATASET_ID + "/objects/" + encodeURIComponent(annexKey);
                   var stream = await fetchUrl(url);
                   archive.append(stream, { name: rel });
-                  await new Promise(function (r) {
-                    archive.once("entry", r);
-                  });
-                  annexed++;
-                } catch (fetchErr) {
-                  skipped++;
-                  if (skipped <= 5) {
-                    console.warn("  Skipping " + rel + ": " + fetchErr.message);
-                  } else if (skipped === 6) {
-                    console.warn("  (suppressing further skip warnings)");
-                  }
+                } else {
+                  archive.append(fs.createReadStream(full), { name: rel });
                 }
-              } else {
-                archive.append(fs.createReadStream(full), { name: rel });
-                await new Promise(function (r) {
-                  archive.once("entry", r);
-                });
-                regular++;
+                await entryDone;
+                if (annexKey) annexed++;
+                else regular++;
+              } catch (err) {
+                skipped++;
+                if (skipped <= 10) {
+                  console.warn("  Skipping " + rel + ": " + err.message);
+                } else if (skipped === 11) {
+                  console.warn("  (suppressing further skip warnings)");
+                }
               }
 
               if ((annexed + regular + skipped) % 100 === 0) {
@@ -895,7 +844,7 @@ jobs:
             }
 
             await archive.finalize();
-            await upload.done();
+            await uploadDone;
 
             console.log("Archive complete: " + annexed + " annexed + " + regular + " regular + " + skipped + " skipped");
             console.log("Uploaded to s3://" + BUCKET + "/" + s3Key);
@@ -904,9 +853,14 @@ jobs:
             }
           }
 
+          process.on("unhandledRejection", function (err) {
+            console.error("Unhandled rejection:", err);
+            process.exitCode = 1;
+          });
+
           main().catch(function (err) {
             console.error("Fatal:", err);
-            process.exit(1);
+            process.exitCode = 1;
           });
           ARCHIVE_SCRIPT
 
@@ -970,6 +924,98 @@ jobs:
           fi
 `;
 
+  // Version DOI workflow: publishes a DOI then triggers archive generation.
+  // Fires on any v* tag push (from pr-merge create-release, manual tags, or admin tags).
+  const versionDoi = `name: Version DOI
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  publish-doi:
+    name: Publish Version DOI
+    runs-on: ubuntu-latest
+    steps:
+      - name: Create release if missing
+        env:
+          GH_TOKEN: \${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="\${{ github.ref_name }}"
+          # Create release if it doesn't already exist (e.g., manual tag push)
+          gh release view "$TAG" --repo "\${{ github.repository }}" > /dev/null 2>&1 || \\
+            gh release create "$TAG" --repo "\${{ github.repository }}" \\
+              --title "$TAG" --notes "Release $TAG"
+
+      - name: Publish version DOI
+        env:
+          NEMAR_WEBHOOK_TOKEN: \${{ secrets.NEMAR_WEBHOOK_TOKEN }}
+        run: |
+          DATASET_ID="\${{ github.event.repository.name }}"
+          TAG="\${{ github.ref_name }}"
+          VERSION="\${TAG#v}"
+          RELEASE_URL="https://github.com/\${{ github.repository }}/releases/tag/$TAG"
+
+          echo "Publishing DOI for $DATASET_ID version $VERSION"
+
+          if [ -z "$NEMAR_WEBHOOK_TOKEN" ]; then
+            echo "NEMAR_WEBHOOK_TOKEN not configured, skipping DOI publish"
+            exit 0
+          fi
+
+          RESPONSE=$(curl -s -w "\\n%{http_code}" -X POST \\
+            "https://api.osc.earth/nemar/webhooks/publish-version-doi" \\
+            -H "Content-Type: application/json" \\
+            -H "X-Webhook-Token: $NEMAR_WEBHOOK_TOKEN" \\
+            -d "{
+              \\"dataset_id\\": \\"$DATASET_ID\\",
+              \\"version\\": \\"$VERSION\\",
+              \\"release_url\\": \\"$RELEASE_URL\\"
+            }")
+
+          HTTP_CODE=$(echo "$RESPONSE" | tail -1)
+          BODY=$(echo "$RESPONSE" | head -n -1)
+
+          echo "Response: $BODY"
+
+          if [ "$HTTP_CODE" -ge 400 ]; then
+            if echo "$BODY" | jq -e '.skipped == true' > /dev/null 2>&1; then
+              echo "Skipped: No concept DOI exists for this dataset"
+              exit 0
+            fi
+            echo "::error::Failed to publish DOI (HTTP $HTTP_CODE)"
+            exit 1
+          fi
+
+          DOI=$(echo "$BODY" | jq -r '.version_doi // empty')
+          if [ -n "$DOI" ]; then
+            echo "Version DOI published: $DOI"
+          fi
+
+  trigger-archive:
+    name: Trigger Archive Generation
+    needs: publish-doi
+    runs-on: ubuntu-latest
+    steps:
+      - name: Dispatch archive generation
+        env:
+          GH_TOKEN: \${{ secrets.GITHUB_TOKEN }}
+        run: |
+          DATASET_ID="\${{ github.event.repository.name }}"
+          TAG="\${{ github.ref_name }}"
+          VERSION="\${TAG#v}"
+
+          echo "Triggering archive generation for $DATASET_ID v$VERSION"
+
+          gh api "repos/\${{ github.repository }}/dispatches" \\
+            -f event_type=generate-archive \\
+            -f "client_payload[dataset_id]=$DATASET_ID" \\
+            -f "client_payload[version]=$VERSION"
+`;
+
   // Deploy each workflow
   const workflows = [
     { path: ".github/workflows/bids-validation.yml", content: bidsValidation },
@@ -977,6 +1023,7 @@ jobs:
     { path: ".github/workflows/pr-merge.yml", content: prMerge },
     { path: ".github/workflows/generate-archive.yml", content: generateArchive },
     { path: ".github/workflows/llm-enrichment.yml", content: llmEnrichment },
+    { path: ".github/workflows/version-doi.yml", content: versionDoi },
   ];
 
   for (const workflow of workflows) {
