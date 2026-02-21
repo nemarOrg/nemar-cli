@@ -98,7 +98,7 @@ async function request<T>(
     throw new ApiError(
       response.status,
       (data.error as string) || (data.message as string) || "Request failed",
-      data.details ?? data,
+      data.details,
     );
   }
 
@@ -207,10 +207,7 @@ export async function resendVerification(email: string): Promise<{ message: stri
 
 export interface RetrieveKeyResponse {
   message: string;
-  api_key?: string;
-  api_key_prefix?: string;
-  note?: string;
-  error?: string;
+  api_key: string;
 }
 
 export async function retrieveKey(email: string, password: string): Promise<RetrieveKeyResponse> {

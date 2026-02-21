@@ -167,7 +167,7 @@ This CLI provides tools for uploading, downloading, and managing datasets.
 - **Authentication**: Secure API key-based authentication with admin approval workflow
 - **BIDS Validation**: Validate datasets locally using the official BIDS validator
 - **Dataset Upload**: Upload BIDS datasets with automatic git-annex and S3 integration
-- **Dataset Download**: Download datasets using DataLad for efficient large file handling
+- **Dataset Download**: Download datasets using git-annex for efficient large file handling
 - **DOI Management**: Create and manage DOIs through EZID integration
 - **Collaboration**: Invite collaborators and manage access
 
@@ -190,7 +190,7 @@ nemar auth login
 nemar dataset validate ./my-dataset
 
 # Upload to NEMAR
-nemar dataset upload ./my-dataset --name "My EEG Dataset"
+nemar dataset upload ./my-dataset
 \`\`\`
 
 ## Getting Started
@@ -433,7 +433,7 @@ nemar dataset list --mine
 After making changes, create a version bump PR:
 
 \`\`\`bash
-nemar dataset release nm000104 --bump minor
+nemar dataset release nm000104 --type minor
 \`\`\`
 
 ## Need Help?

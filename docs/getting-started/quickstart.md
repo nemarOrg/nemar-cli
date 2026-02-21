@@ -107,7 +107,7 @@ nemar dataset list --mine
 After making changes, create a version bump PR:
 
 ```bash
-nemar dataset release nm000104 --bump minor
+nemar dataset release nm000104 --type minor
 ```
 
 ## Need Help?

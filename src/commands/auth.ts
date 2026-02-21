@@ -892,8 +892,8 @@ Examples:
           }
         }
       } else {
-        spinner.fail("Failed to retrieve API key");
-        console.log(chalk.gray("  Check your internet connection"));
+        const msg = error instanceof Error ? error.message : "Unknown error";
+        spinner.fail(`Failed to retrieve API key: ${msg}`);
       }
     }
   });
