@@ -38,11 +38,14 @@ User Management:
   role           - Change a user's role (owner only: owner > admin > member)
 
 Dataset Management:
-  repo     - Manage repository visibility (public/private)
-  ci       - Manage CI workflows (check status, deploy)
-  s3       - S3/IAM credential management
-  doi      - Create and manage DOIs for datasets
-  revert   - Revert dataset to previous version (via PR)
+  repo            - Manage repository visibility (public/private)
+  ci              - Manage CI workflows (check status, deploy)
+  s3              - S3/IAM credential management
+  doi             - Create and manage DOIs for datasets
+  publish         - Publication workflow management
+  revert          - Revert dataset to previous version (via PR)
+  make-public     - Publish a dataset (permanent, irreversible)
+  delete-dataset  - Delete a dataset and all associated resources
 
 Examples:
   $ nemar admin users --verified           # List users awaiting approval
@@ -112,10 +115,125 @@ Options:
   -h, --help  display help for command
 ```
 
-### admin regenerate-iam
+### admin role
 
 ```bash
-Usage: nemar admin regenerate-iam [options] <username>
+Usage: nemar admin role [options] <username> <role>
+
+Change a user's role (owner only)
+
+Arguments:
+  username    Username to change role for
+  role        New role: owner, admin, or member
+
+Options:
+  -y, --yes   Skip confirmation prompt
+  -h, --help  display help for command
+
+Permission Model:
+  owner  - Full access: can manage users, roles, datasets, DOIs, and system settings
+  admin  - Can approve/revoke users, manage datasets and DOIs
+  member - Can upload and manage their own datasets only
+
+Rules:
+  - Only owners can change roles
+  - You cannot change your own role (prevents self-lockout)
+  - The last owner cannot be demoted (prevents total lockout)
+  - Demoting a user revokes their tokens (they must re-login)
+
+Examples:
+  $ nemar admin role john_doe admin        # Promote to admin
+  $ nemar admin role john_doe member       # Demote to member
+  $ nemar admin role jane_doe owner -y     # Promote to owner (skip confirm)
+```
+
+### admin s3 regenerate-iam
+
+```bash
+Usage: nemar admin s3 regenerate-iam [options] <username>
+
+Regenerate AWS IAM credentials for a user
+
+Arguments:
+  username    Username to regenerate credentials for
+
+Options:
+  -y, --yes   Skip confirmation and proceed
+  -n, --no    Skip confirmation and decline
+  -h, --help  display help for command
+```
+
+### admin s3 lock
+
+```bash
+Usage: nemar admin s3 lock [options] <dataset-id>
+
+Apply S3 Object Lock (Governance mode) to a dataset
+
+Arguments:
+  dataset-id  Dataset ID to lock
+
+Options:
+  -y, --yes   Skip confirmation and proceed
+  -n, --no    Skip confirmation and decline
+  -h, --help  display help for command
+```
+
+### admin repo public
+
+```bash
+Usage: nemar admin repo public [options] <dataset-id>
+
+Make a dataset repository public
+
+Arguments:
+  dataset-id  Dataset ID (e.g., nm000104)
+
+Options:
+  -y, --yes   Skip confirmation and proceed
+  -n, --no    Skip confirmation and decline
+  -h, --help  display help for command
+```
+
+### admin repo private
+
+```bash
+Usage: nemar admin repo private [options] <dataset-id>
+
+Make a dataset repository private
+
+Arguments:
+  dataset-id  Dataset ID (e.g., nm000104)
+
+Options:
+  -y, --yes   Skip confirmation and proceed
+  -n, --no    Skip confirmation and decline
+  -h, --help  display help for command
+```
+
+### admin ci check
+
+```bash
+Usage: nemar admin ci check [options] <dataset-id>
+
+Check CI workflow status for a dataset
+
+Arguments:
+  dataset-id  Dataset ID (e.g., nm000104)
+
+Options:
+  -h, --help  display help for command
+```
+
+### admin ci add
+
+```bash
+Usage: nemar admin ci add [options] <dataset-id>
+
+Deploy CI workflows to a dataset repository
+
+Arguments:
+  dataset-id  Dataset ID (e.g., nm000104)
 
 Options:
   -y, --yes   Skip confirmation and proceed
@@ -158,25 +276,41 @@ Options:
   -h, --help  display help for command
 ```
 
-### admin revert
+### admin doi update
 
 ```bash
-Usage: nemar admin revert [options] <dataset-id> [version]
+Usage: nemar admin doi update [options] <dataset-id>
 
-Revert a dataset to a previous version (creates PR for review)
+Update EZID DOI metadata or status
 
 Arguments:
-  dataset-id       Dataset ID (e.g., nm000104)
-  version          Target version to revert to (e.g., 1.0.0)
+  dataset-id     Dataset ID (e.g., nm000104)
 
 Options:
-  --list           List available versions without reverting
-  --force          Direct push to main without PR (emergency only)
-  --message <msg>  Custom revert commit message
-  --dir <path>     Use existing local clone instead of cloning fresh
-  -y, --yes        Skip confirmation and proceed
-  -n, --no         Skip confirmation and decline
-  -h, --help       display help for command
+  --make-public  Transition DOI from reserved to public (permanent)
+  --refresh      Refresh metadata from dataset_description.json and
+                 .nemar/metadata.json
+  -y, --yes      Skip confirmation and proceed
+  -n, --no       Skip confirmation and decline
+  -h, --help     display help for command
+```
+
+### admin doi enrich
+
+```bash
+Usage: nemar admin doi enrich [options] <dataset-id>
+
+Enrich DOI metadata with ORCIDs, descriptions, funding, and more
+
+Arguments:
+  dataset-id  Dataset ID (e.g., nm000104)
+
+Options:
+  --no-llm    Skip LLM-based enrichment from README
+  --sandbox   Use sandbox DOI
+  -y, --yes   Skip confirmation and proceed
+  -n, --no    Skip confirmation and decline
+  -h, --help  display help for command
 ```
 
 ### admin publish list
@@ -216,17 +350,18 @@ Usage: nemar admin publish approve [options] <dataset-id>
 Approve and publish a dataset (runs orchestrator)
 
 Arguments:
-  dataset-id  Dataset ID
+  dataset-id       Dataset ID
 
 Options:
-  --resume    Resume from last failed step
-  --sandbox   Use Zenodo sandbox for testing
-  -y, --yes   Skip confirmation and proceed
-  -n, --no    Skip confirmation and decline
-  -h, --help  display help for command
+  --resume         Resume from last failed step
+  --sandbox        Use Zenodo sandbox for testing
+  --skip-ci-check  Skip BIDS validation CI check (admin override)
+  -y, --yes        Skip confirmation and proceed
+  -n, --no         Skip confirmation and decline
+  -h, --help       display help for command
 
 Description:
-  Approve a publication request and run the automated 14-step orchestrator
+  Approve a publication request and run the automated 15-step orchestrator
   to make the dataset publicly accessible with a permanent DOI.
 
   WARNING: This action is PERMANENT. Published datasets cannot be unpublished.
@@ -234,19 +369,20 @@ Description:
 
 Orchestrator Steps:
    1. CI Check          - Verify BIDS validation passes, deploy workflows if missing
-   2. Make Public       - Change GitHub repository visibility to public
-   3. S3 Public Read    - Grant public read access to S3 data
-   4. Tag Protection    - Enable tag protection rules
-   5. Create DOI        - Create concept DOI via EZID (or Zenodo if configured)
-   6. Update Metadata   - Update dataset metadata from BIDS description
-   7. Update README     - Add DOI badge and citation info to README
-   8. Create Tag        - Create version tag (e.g., v1.0.0)
-   9. Create Release    - Create GitHub release from tag
-  10. Upload to Zenodo  - Upload dataset archive to Zenodo (if Zenodo provider)
-  11. Publish DOI       - Make DOI public and findable (permanent, irreversible)
-  12. S3 Lock           - Enable S3 Object Lock (prevents data deletion)
-  13. Generate Archive  - Create downloadable zip archive
-  14. Notify User       - Send publication confirmation email
+   2. Enrichment Check  - Verify metadata pipeline has run (warn-only, non-blocking)
+   3. Make Public       - Change GitHub repository visibility to public
+   4. S3 Public Read    - Grant public read access to S3 data
+   5. Tag Protection    - Enable tag protection rules
+   6. Create DOI        - Create concept DOI via EZID (or Zenodo if configured)
+   7. Update Metadata   - Update dataset metadata from BIDS description
+   8. Update README     - Add DOI badge and citation info to README
+   9. Create Tag        - Create version tag (e.g., v1.0.0)
+  10. Create Release    - Create GitHub release from tag
+  11. Upload to Zenodo  - Upload dataset archive to Zenodo (if Zenodo provider)
+  12. Publish DOI       - Make DOI public and findable (permanent, irreversible)
+  13. S3 Lock           - Enable S3 Object Lock (prevents data deletion)
+  14. Generate Archive  - Create downloadable zip archive
+  15. Notify User       - Send publication confirmation email
 
 Resume Capability:
   If a step fails, the orchestrator saves progress. Use --resume to retry
@@ -256,9 +392,10 @@ Resume Capability:
   steps are automatically skipped.
 
 Examples:
-  $ nemar admin publish approve nm000104         # Run full orchestrator
-  $ nemar admin publish approve nm000104 --resume  # Resume from failed step
-  $ nemar admin publish approve nm000104 --yes   # Skip confirmation
+  $ nemar admin publish approve nm000104                    # Run full orchestrator
+  $ nemar admin publish approve nm000104 --resume           # Resume from failed step
+  $ nemar admin publish approve nm000104 --skip-ci-check    # Override BIDS validation
+  $ nemar admin publish approve nm000104 --yes              # Skip confirmation
 
 After Approval:
   - User receives email with DOI and public dataset link
@@ -301,35 +438,85 @@ Examples:
   $ nemar admin publish deny nm000104    # Prompts for reason interactively
 ```
 
-### admin role
+### admin revert
 
 ```bash
-Usage: nemar admin role [options] <username> <role>
+Usage: nemar admin revert [options] <dataset-id> [version]
 
-Change a user's role (owner only)
+Revert a dataset to a previous version (creates PR for review)
 
 Arguments:
-  username    Username to change role for
-  role        New role: owner, admin, or member
+  dataset-id       Dataset ID (e.g., nm000104)
+  version          Target version to revert to (e.g., 1.0.0)
 
 Options:
-  -y, --yes   Skip confirmation prompt
+  --list           List available versions without reverting
+  --force          Direct push to main without PR (emergency only)
+  --message <msg>  Custom revert commit message
+  --dir <path>     Use existing local clone instead of cloning fresh
+  -y, --yes        Skip confirmation and proceed
+  -n, --no         Skip confirmation and decline
+  -h, --help       display help for command
+```
+
+### admin make-public
+
+```bash
+Usage: nemar admin make-public [options] <dataset-id>
+
+Publish a dataset (make repository and data public) - PERMANENT
+
+Arguments:
+  dataset-id  Dataset ID (e.g., nm000104)
+
+Options:
   -h, --help  display help for command
 
-Permission Model:
-  owner  - Full access: can manage users, roles, datasets, DOIs, and system settings
-  admin  - Can approve/revoke users, manage datasets and DOIs
-  member - Can upload and manage their own datasets only
+Description:
+  Publish a dataset by making both the GitHub repository and S3 data publicly accessible.
 
-Rules:
-  - Only owners can change roles
-  - You cannot change your own role (prevents self-lockout)
-  - The last owner cannot be demoted (prevents total lockout)
-  - Demoting a user revokes their tokens (they must re-login)
+  WARNING: This operation is PERMANENT and IRREVERSIBLE
+
+  Once published:
+  - GitHub repository will be publicly visible
+  - S3 data files will be publicly downloadable
+  - git-annex will use public URLs for downloads
+
+  Publishing cannot be undone because:
+  - Data may be cached, indexed, or linked externally
+  - Unpublishing would create broken links
+  - Aligns with DOI permanence principles
+
+  Use this when:
+  - Dataset has been reviewed and validated
+  - Ready for public release and citation
+  - Associated with a DOI (concept or version)
+
+Requirements:
+  - Dataset must not be a sandbox dataset
+  - Dataset must have a GitHub repository
+  - Must be dataset owner or admin
 
 Examples:
-  $ nemar admin role john_doe admin        # Promote to admin
-  $ nemar admin role john_doe member       # Demote to member
-  $ nemar admin role jane_doe owner -y     # Promote to owner (skip confirm)
+  $ nemar admin make-public nm000104
+
+  This will prompt for confirmation by requiring you to type
+  the dataset ID to confirm the permanent action.
+
+```
+
+### admin delete-dataset
+
+```bash
+Usage: nemar admin delete-dataset [options] <dataset-id>
+
+Delete a dataset and all associated resources (GitHub, S3, D1)
+
+Arguments:
+  dataset-id  Dataset ID (e.g., nm000108)
+
+Options:
+  --force     Force deletion of published datasets with DOIs (owner only)
+  -h, --help  display help for command
 ```
 

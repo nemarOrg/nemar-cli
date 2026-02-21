@@ -13,7 +13,8 @@ This CLI provides tools for uploading, downloading, and managing datasets.
 - **BIDS Validation**: Validate datasets locally using the official BIDS validator
 - **Dataset Upload**: Upload BIDS datasets with automatic git-annex and S3 integration
 - **Dataset Download**: Download datasets using DataLad for efficient large file handling
-- **DOI Management**: Create and manage DOIs through Zenodo integration
+- **DOI Management**: Create and manage DOIs through EZID integration
+- **Collaboration**: Invite collaborators and manage access
 
 ## Quick Example
 
@@ -24,7 +25,10 @@ bun install -g nemar-cli
 # Sign up for an account
 nemar auth signup
 
-# After approval, log in
+# After approval, retrieve your API key
+nemar auth retrieve-key
+
+# Log in with your key
 nemar auth login
 
 # Validate your dataset

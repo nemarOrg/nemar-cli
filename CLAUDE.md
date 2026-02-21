@@ -274,23 +274,74 @@ git push origin git-annex
 - `aws s3 cp` doesn't update git-annex tracking; use `git annex copy --from --to` or register URLs
 - Always push `git-annex` branch for clone compatibility
 
-## CLI Commands (Target Structure)
+## CLI Commands
 ```bash
-nemar auth login          # Interactive login
-nemar auth signup         # New user registration
-nemar auth status         # Check authentication status
-nemar auth logout         # Clear credentials
+# Authentication
+nemar auth login              # Authenticate with API key
+nemar auth signup             # Register new account
+nemar auth status             # Check authentication status
+nemar auth whoami             # Alias for status
+nemar auth switch [username]  # Switch between stored accounts
+nemar auth logout             # Remove active account (--all for all)
+nemar auth resend-verification # Resend email verification
+nemar auth setup-ssh          # Configure SSH for GitHub
+nemar auth retrieve-key       # Retrieve API key after approval
+nemar auth regenerate-key     # Request new API key
 
-nemar dataset validate    # Validate BIDS dataset
-nemar dataset upload      # Upload dataset to NEMAR
-nemar dataset download    # Download dataset
-nemar dataset status      # Check dataset status
-nemar dataset list        # List user's datasets
+# Dataset Management
+nemar dataset validate        # Validate BIDS dataset
+nemar dataset upload          # Upload dataset to NEMAR
+nemar dataset download        # Download a dataset
+nemar dataset status          # Check dataset status
+nemar dataset list            # List datasets (--mine for own)
+nemar dataset release         # Create version bump PR
+nemar dataset update          # Push local changes via PR
+nemar dataset request-access  # Request collaborator access
+nemar dataset invite          # Invite collaborator
+nemar dataset collaborators   # List collaborators
+nemar dataset publish request # Request publication
+nemar dataset publish status  # Check publication status
+nemar dataset clone           # Clone dataset (metadata only)
+nemar dataset get             # Download annexed data files
+nemar dataset save            # Stage and commit changes
+nemar dataset push            # Push commits and data
+nemar dataset drop            # Free local copies of annexed files
+nemar dataset ci              # Check BIDS validation CI status
+nemar dataset manifest        # View version manifests
 
-nemar admin approve       # Approve pending user (admin)
-nemar admin users         # List users (admin)
-nemar admin revoke        # Revoke user access (admin)
-nemar admin doi create    # Create concept DOI (admin)
+# Sandbox (required before uploading)
+nemar sandbox                 # Run sandbox training
+nemar sandbox status          # Check training status
+nemar sandbox reset           # Reset for re-training
+
+# Admin (requires admin privileges)
+nemar admin users             # List users
+nemar admin approve           # Approve pending user
+nemar admin revoke            # Revoke user access
+nemar admin role              # Change user role (owner only)
+nemar admin s3 regenerate-iam # Regenerate AWS credentials
+nemar admin s3 lock           # Apply S3 Object Lock
+nemar admin repo public       # Make repo public
+nemar admin repo private      # Make repo private
+nemar admin ci check          # Check CI workflow status
+nemar admin ci add            # Deploy CI workflows
+nemar admin doi create        # Create concept DOI
+nemar admin doi info          # Get DOI info
+nemar admin doi update        # Update DOI metadata
+nemar admin doi enrich        # Enrich DOI metadata
+nemar admin publish list      # List publication requests
+nemar admin publish approve   # Approve and publish dataset
+nemar admin publish deny      # Deny publication request
+nemar admin revert            # Revert dataset to previous version
+nemar admin make-public       # Publish dataset (permanent)
+nemar admin delete-dataset    # Delete dataset and all resources
+
+# Root-level shortcuts
+nemar login                   # Alias for auth login
+nemar logout                  # Alias for auth logout
+nemar signup                  # Alias for auth signup
+nemar whoami                  # Alias for auth status
+nemar switch                  # Alias for auth switch
 ```
 
 ## External Resources

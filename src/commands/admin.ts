@@ -128,11 +128,14 @@ User Management:
   role           - Change a user's role (owner only: owner > admin > member)
 
 Dataset Management:
-  repo     - Manage repository visibility (public/private)
-  ci       - Manage CI workflows (check status, deploy)
-  s3       - S3/IAM credential management
-  doi      - Create and manage DOIs for datasets
-  revert   - Revert dataset to previous version (via PR)
+  repo            - Manage repository visibility (public/private)
+  ci              - Manage CI workflows (check status, deploy)
+  s3              - S3/IAM credential management
+  doi             - Create and manage DOIs for datasets
+  publish         - Publication workflow management
+  revert          - Revert dataset to previous version (via PR)
+  make-public     - Publish a dataset (permanent, irreversible)
+  delete-dataset  - Delete a dataset and all associated resources
 
 Examples:
   $ nemar admin users --verified           # List users awaiting approval
@@ -986,7 +989,7 @@ doiCommand
   .description("Update EZID DOI metadata or status")
   .argument("<dataset-id>", "Dataset ID (e.g., nm000104)")
   .option("--make-public", "Transition DOI from reserved to public (permanent)")
-  .option("--refresh", "Refresh metadata from BIDS dataset_description.json")
+  .option("--refresh", "Refresh metadata from dataset_description.json and .nemar/metadata.json")
   .option(YES_OPTION, YES_DESCRIPTION)
   .option(NO_OPTION, NO_DESCRIPTION)
   .action(
@@ -1526,7 +1529,7 @@ After Approval:
         console.log(chalk.yellow("━".repeat(60)));
         console.log(chalk.yellow.bold("                 SANDBOX MODE ENABLED"));
         console.log(chalk.yellow("━".repeat(60)));
-        console.log(chalk.yellow("  • DOI will be created on sandbox.zenodo.org"));
+        console.log(chalk.yellow("  • DOI will be created in sandbox mode (EZID test shoulder)"));
         console.log(chalk.yellow("  • DOI will NOT be indexed by DataCite"));
         console.log(chalk.yellow("  • DOI will NOT resolve in production"));
         console.log(chalk.yellow("  • Use this for testing workflows only"));
@@ -1858,7 +1861,7 @@ adminCommand
 Description:
   Publish a dataset by making both the GitHub repository and S3 data publicly accessible.
 
-  ${chalk.yellow("⚠️  WARNING: This operation is PERMANENT and IRREVERSIBLE")}
+  ${chalk.yellow("WARNING: This operation is PERMANENT and IRREVERSIBLE")}
 
   Once published:
   - GitHub repository will be publicly visible
@@ -1910,7 +1913,7 @@ Examples:
     }
 
     // Show warning and dataset info
-    console.log(chalk.yellow("\n⚠️  WARNING: Publishing is PERMANENT and IRREVERSIBLE\n"));
+    console.log(chalk.yellow("\nWARNING: Publishing is PERMANENT and IRREVERSIBLE\n"));
     console.log("This will:");
     console.log("  1. Make the GitHub repository PUBLIC");
     console.log("  2. Allow public S3 access to all dataset files");

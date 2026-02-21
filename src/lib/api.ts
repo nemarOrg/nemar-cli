@@ -98,7 +98,7 @@ async function request<T>(
     throw new ApiError(
       response.status,
       (data.error as string) || (data.message as string) || "Request failed",
-      data.details,
+      data.details ?? data,
     );
   }
 
