@@ -68,14 +68,20 @@ gh auth login
 # 1. Sign up for NEMAR
 nemar auth signup
 
-# 2. After admin approval, login
+# 2. After admin approval, retrieve your API key
+nemar auth retrieve-key
+
+# 3. Login with your API key
 nemar auth login
 
-# 3. Validate your BIDS dataset
+# 4. Complete sandbox training
+nemar sandbox
+
+# 5. Validate your BIDS dataset
 nemar dataset validate /path/to/dataset
 
-# 4. Upload to NEMAR
-nemar dataset upload /path/to/dataset --name "My Dataset"
+# 6. Upload to NEMAR
+nemar dataset upload /path/to/dataset
 ```
 
 ## Architecture Overview
@@ -268,34 +274,41 @@ sequenceDiagram
 ### Authentication
 
 ```bash
-nemar auth signup          # Register new account
-nemar auth login           # Login with API key
-nemar auth status          # Check authentication status
-nemar auth logout          # Clear credentials
+nemar auth signup              # Register new account
+nemar auth retrieve-key        # Retrieve API key after approval
+nemar auth login               # Login with API key
+nemar auth status              # Check authentication status
+nemar auth switch              # Switch between accounts
+nemar auth logout              # Remove active account (--all for all)
+nemar auth setup-ssh           # Configure SSH for GitHub
+nemar auth regenerate-key      # Request new API key
 ```
 
 ### Dataset Management
 
 ```bash
-nemar dataset validate <path>              # Validate BIDS dataset
-nemar dataset upload <path>                # Upload new dataset
-nemar dataset download <id> [output]       # Download dataset
-nemar dataset clone <id> [output]          # Clone for contribution
-nemar dataset list                         # List your datasets
-nemar dataset list --all                   # List all NEMAR datasets
-nemar dataset status <id>                  # Check dataset status
-nemar dataset version <id> <version>       # Create new version with DOI
+nemar dataset validate <path>  # Validate BIDS dataset
+nemar dataset upload <path>    # Upload new dataset
+nemar dataset download <id>    # Download dataset (with data)
+nemar dataset clone <id>       # Clone metadata only
+nemar dataset get [files]      # Download annexed data files
+nemar dataset drop [files]     # Free local copies of data
+nemar dataset list             # List all datasets (--mine for own)
+nemar dataset status <id>      # Check dataset status
+nemar dataset release <id>     # Create version bump PR
+nemar dataset update [path]    # Push local changes via PR
+nemar dataset save             # Stage and commit changes
+nemar dataset push             # Push commits and data
+nemar dataset ci [id]          # Check BIDS validation CI status
+nemar dataset manifest [ver]   # View version manifests
 ```
 
-### Pull Requests
+### Collaboration
 
 ```bash
-nemar dataset pr create                    # Create PR from local changes
-nemar dataset pr list                      # List PRs on your datasets
-nemar dataset pr list --mine               # List PRs you created
-nemar dataset pr show <pr-id>              # View PR details
-nemar dataset pr update <pr-id>            # Push updates to PR
-nemar dataset pr close <pr-id>             # Close PR without merging
+nemar dataset request-access <id>          # Request collaborator access
+nemar dataset invite <user> <id>           # Invite collaborator
+nemar dataset collaborators <id>           # List collaborators
 ```
 
 ### Publication Workflow
@@ -321,14 +334,22 @@ nemar admin users                          # List all users
 nemar admin users --pending                # List pending approvals
 nemar admin approve <username>             # Approve user
 nemar admin revoke <username>              # Revoke user access
+nemar admin role <username> <role>         # Change user role
 
-# Dataset publication
-nemar admin publish list                   # List publication requests
-nemar admin publish approve <dataset-id>   # Approve and publish dataset
-nemar admin publish deny <dataset-id>      # Deny publication request
+# Dataset management
+nemar admin repo public <id>               # Make repo public
+nemar admin repo private <id>              # Make repo private
+nemar admin ci check <id>                  # Check CI status
+nemar admin ci add <id>                    # Deploy CI workflows
+nemar admin s3 regenerate-iam <user>       # Regenerate AWS credentials
+nemar admin make-public <id>               # Publish dataset (permanent)
+nemar admin delete-dataset <id>            # Delete dataset
 
 # DOI management
-nemar admin doi create <dataset-id>        # Create concept DOI
+nemar admin doi create <id>                # Create concept DOI
+nemar admin doi info <id>                  # Get DOI info
+nemar admin doi update <id>                # Update DOI metadata
+nemar admin doi enrich <id>                # Enrich DOI metadata
 ```
 
 ## Access Control

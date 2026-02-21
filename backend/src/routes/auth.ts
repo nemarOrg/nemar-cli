@@ -654,7 +654,7 @@ authRoutes.post("/retrieve-key", zValidator("json", retrieveKeySchema), async (c
   return c.json(
     {
       error: "API key already issued",
-      api_key_prefix: existingToken.api_key_prefix,
+      details: { api_key_prefix: existingToken.api_key_prefix },
       message:
         "An API key has already been generated for your account. " +
         "If you lost it, use 'nemar auth regenerate-key' to get a new one.",

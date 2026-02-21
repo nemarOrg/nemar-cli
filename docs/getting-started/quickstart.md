@@ -15,6 +15,7 @@ You'll be prompted to enter:
 - Email address
 - Password (min 12 characters)
 - GitHub username
+- ORCID iD (optional, for DOI metadata)
 - Description of why you need access
 
 !!! info "Admin Approval Required"
@@ -42,7 +43,17 @@ nemar auth login
 nemar auth login -k nemar_your_api_key_here
 ```
 
-## 3. Validate Your Dataset
+## 4. Complete Sandbox Training
+
+Before uploading real datasets, complete sandbox training:
+
+```bash
+nemar sandbox
+```
+
+This verifies your git-annex and GitHub setup by uploading a small test dataset.
+
+## 5. Validate Your Dataset
 
 Before uploading, validate your BIDS dataset:
 
@@ -52,21 +63,17 @@ nemar dataset validate ./my-dataset
 
 Fix any errors before proceeding. Warnings are acceptable but should be reviewed.
 
-## 4. Upload Your Dataset
+## 6. Upload Your Dataset
 
 Upload your validated dataset:
 
 ```bash
-nemar dataset upload ./my-dataset --name "My EEG Dataset"
+nemar dataset upload ./my-dataset
 ```
 
-The upload process will:
-1. Run BIDS validation
-2. Create a private GitHub repository
-3. Upload large files to S3 via git-annex
-4. Initialize version control with DataLad
+The dataset name defaults to the BIDS Name field in dataset_description.json (or the directory name as fallback).
 
-## 5. Check Status
+## 7. Check Status
 
 Monitor your dataset:
 
@@ -79,12 +86,14 @@ nemar dataset status nm000104
 ### Download a Dataset
 
 ```bash
-# Download dataset metadata
+# Download a dataset (includes data files)
 nemar dataset download nm000104
 
-# Get all data files
-cd nm000104
-datalad get .
+# Or clone without data files
+nemar dataset clone nm000104
+
+# Get specific data files later
+nemar dataset get sub-01/
 ```
 
 ### List Your Datasets
@@ -95,10 +104,10 @@ nemar dataset list --mine
 
 ### Create a New Version
 
-After making changes, create a new version with DOI:
+After making changes, create a version bump PR:
 
 ```bash
-nemar dataset version nm000104 1.1.0 --description "Added 10 more subjects"
+nemar dataset release nm000104 --type minor
 ```
 
 ## Need Help?
