@@ -13,22 +13,23 @@ NEMAR is a curated repository for neurophysiology data in BIDS format.
 This CLI provides tools for uploading, downloading, and managing datasets.
 
 Options:
-  -v, --version     Output the current version
-  --no-color        Disable colored output
-  --verbose         Enable verbose output
-  -h, --help        display help for command
+  -v, --version      Output the current version
+  --no-color         Disable colored output
+  --verbose          Enable verbose output
+  -h, --help         display help for command
 
 Commands:
-  auth              Authentication management
-  dataset           Dataset management
-  sandbox           Complete sandbox training before uploading datasets
-  admin             Admin commands (requires admin privileges)
-  login [options]   Authenticate with your API key (shortcut for 'auth login')
-  logout [options]  Clear stored credentials (shortcut for 'auth logout')
-  signup            Register for a new account (shortcut for 'auth signup')
-  register          Register for a new account (alias for signup)
-  whoami [options]  Show current user (shortcut for 'auth status')
-  help [command]    display help for command
+  auth               Authentication management
+  dataset            Dataset management
+  sandbox            Complete sandbox training before uploading datasets
+  admin              Admin commands (requires admin privileges)
+  login [options]    Authenticate with your API key (shortcut for 'auth login')
+  logout [options]   Remove the active account (shortcut for 'auth logout')
+  signup             Register for a new account (shortcut for 'auth signup')
+  register           Register for a new account (alias for signup)
+  whoami [options]   Show current user (shortcut for 'auth status')
+  switch [username]  Switch between accounts (shortcut for 'auth switch')
+  help [command]     display help for command
 
 Examples:
   $ nemar auth login              # Authenticate with your API key

@@ -59,7 +59,7 @@ import {
   validateBidsDataset,
 } from "../lib/bids-validator.js";
 import { getConfig, isAuthenticated, isSandboxCompleted } from "../lib/config.js";
-import { YES_DESCRIPTION, YES_OPTION, confirm } from "../lib/confirm.js";
+import { NO_DESCRIPTION, YES_DESCRIPTION, YES_OPTION, confirm } from "../lib/confirm.js";
 import {
   type LocalDatasetConfig,
   readLocalConfig,
@@ -72,11 +72,9 @@ import {
   checkPrerequisites,
   cloneDataset,
   collectFileManifest,
-  commitRevert,
   configureGitHubRemote,
   configureLargefiles,
   copyToAnnexRemote,
-  createRevertBranch,
   dropFiles,
   ensureGitAnnexInitialized,
   formatBytes,
@@ -87,7 +85,6 @@ import {
   getLocalDatasetInfo,
   initDataset,
   isGitAnnexDataset,
-  listDatasetVersions,
   pushBranch,
   pushToGitHub,
   registerUrlsWithGitAnnex,
@@ -489,7 +486,7 @@ datasetCommand
   .command("upload")
   .description("Upload a BIDS dataset to NEMAR")
   .argument("<path>", "Path to BIDS dataset directory")
-  .option("-n, --name <name>", "Dataset name (defaults to directory name)")
+  .option("-n, --name <name>", "Dataset name (defaults to BIDS Name, then directory name)")
   .option("-d, --description <desc>", "Dataset description")
   .option("--skip-validation", "Skip BIDS validation (not recommended)")
   .option("--skip-orcid", "Skip co-author ORCID collection")
@@ -497,7 +494,7 @@ datasetCommand
   .option("-j, --jobs <number>", "Parallel upload streams (default: 4)", "4")
   .option(YES_OPTION, YES_DESCRIPTION)
   .option("--restart", "Clear upload progress and re-upload all files")
-  .option("--no", "Skip confirmation and decline")
+  .option("--no", NO_DESCRIPTION) // Long form only; -n conflicts with --name
   .addHelpText(
     "after",
     `
@@ -676,9 +673,7 @@ Examples:
       const descPath = resolve(absolutePath, "dataset_description.json");
       bidsDescription = JSON.parse(readFileSync(descPath, "utf-8")) as Record<string, unknown>;
     } catch (err: unknown) {
-      const isNotFound =
-        err instanceof Error && "code" in err && (err as NodeJS.ErrnoException).code === "ENOENT";
-      if (!isNotFound) {
+      if ((err as NodeJS.ErrnoException).code !== "ENOENT") {
         console.log(
           chalk.yellow(
             `Warning: Could not read dataset_description.json: ${(err as Error).message}`,

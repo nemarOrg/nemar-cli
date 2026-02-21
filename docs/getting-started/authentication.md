@@ -24,6 +24,7 @@ You'll be prompted for:
 | Email | Valid email for verification |
 | Password | Minimum 12 characters |
 | GitHub Username | Required for PR collaboration |
+| ORCID iD | Optional, used for DOI creator metadata |
 | Description | Why you need NEMAR access (min 20 chars) |
 
 ## Logging In
@@ -60,7 +61,23 @@ nemar auth status --refresh
 ## Log Out
 
 ```bash
+# Remove the active account
 nemar auth logout
+
+# Remove all stored accounts
+nemar auth logout --all
+```
+
+## Switch Accounts
+
+If you have multiple NEMAR accounts:
+
+```bash
+# Interactive account picker
+nemar auth switch
+
+# Switch to a specific account
+nemar auth switch <username>
 ```
 
 ## Resend Verification Email

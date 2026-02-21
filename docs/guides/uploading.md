@@ -8,7 +8,9 @@ Before uploading:
 
 - [ ] Dataset is in valid BIDS format
 - [ ] Logged in with `nemar auth login`
-- [ ] DataLad and git-annex installed
+- [ ] git-annex installed
+- [ ] GitHub CLI (`gh`) installed and authenticated
+- [ ] Sandbox training completed (`nemar sandbox`)
 
 ## Step 1: Validate Your Dataset
 
@@ -34,50 +36,54 @@ nemar dataset validate ./my-dataset
 ## Step 2: Upload
 
 ```bash
-nemar dataset upload ./my-dataset --name "My EEG Dataset"
+nemar dataset upload ./my-dataset
 ```
 
 ### Options
 
 | Option | Description |
 |--------|-------------|
-| `--name, -n` | Dataset name (defaults to folder name) |
+| `--name, -n` | Dataset name (defaults to BIDS Name field, then directory name) |
 | `--description` | Brief description |
 | `--skip-validation` | Skip BIDS validation (not recommended) |
+| `--skip-orcid` | Skip co-author ORCID collection |
 | `--dry-run` | Show what would be uploaded without doing it |
+| `--restart` | Clear upload progress and re-upload all files |
+| `-j, --jobs` | Number of parallel upload jobs (default: 4) |
+| `-y, --yes` | Skip confirmation and proceed |
 
 ## Step 3: What Happens
 
 The upload process:
 
-1. **Validation** - Runs BIDS validator
-2. **Repository Creation** - Creates private GitHub repo under nemarDatasets
-3. **Metadata Push** - Pushes small files to GitHub
-4. **Data Upload** - Uploads large files to S3 via git-annex
-5. **Workflow Setup** - Configures GitHub Actions for PR workflow
+1. **Auth and Prerequisites** - Verifies login, git-annex, GitHub CLI
+2. **BIDS Validation** - Runs the official BIDS validator (unless skipped)
+3. **File Manifest** - Collects files and co-author ORCIDs
+4. **Confirmation** - Shows upload plan for review
+5. **Dataset Registration** - Creates dataset record and private GitHub repo
+6. **GitHub Invitation** - Accepts collaborator invitation to the repo
+7. **git-annex Init** - Initializes git-annex and configures S3 remote
+8. **Data Upload** - Uploads large files to S3 (uses AWS CLI fast-path when available)
+9. **Metadata and Push** - Writes metadata, commits, and pushes to GitHub
+10. **CI Deployment** - Deploys GitHub Actions workflows for validation
 
 ## Step 4: Making Updates
 
-After initial upload, make changes via pull requests:
+After initial upload, push changes using the CLI:
 
 ```bash
 cd nm000104  # Your dataset directory
 
-# Create a branch
-git checkout -b add-new-subjects
-
-# Make changes...
-
-# Commit and push
-git add .
-git commit -m "Add subjects 101-110"
-git push -u origin add-new-subjects
-
-# Create PR (opens in browser)
-gh pr create
+# Make changes, then save and push
+nemar dataset save -m "Add subjects 101-110"
+nemar dataset push
 ```
 
-Changes are merged after admin review.
+Or create a formal update PR:
+
+```bash
+nemar dataset update ./nm000104
+```
 
 ## Troubleshooting
 
@@ -101,11 +107,14 @@ git annex version
 git annex init
 ```
 
-### Large File Upload Timeout
+### Upload Interrupted or Timed Out
 
-For very large datasets, files are uploaded in batches. If a timeout occurs:
+The upload tracks progress automatically. Re-run the same command to resume:
 
 ```bash
-# Resume upload
-git annex copy --to origin
+# Resume from where it left off
+nemar dataset upload ./my-dataset
+
+# Or start fresh if resume fails
+nemar dataset upload ./my-dataset --restart
 ```

@@ -17,7 +17,8 @@ Commands:
   signup               Register for a new NEMAR account
   status [options]     Check current authentication status
   whoami [options]     Show current user (alias for status)
-  logout [options]     Clear stored credentials
+  switch [username]    Switch between stored accounts
+  logout [options]     Remove the active account (use --all to remove all)
   resend-verification  Resend email verification link
   setup-ssh [options]  Configure SSH access for GitHub (auto-generates key)
   retrieve-key         Retrieve your API key after account approval (requires
@@ -45,7 +46,9 @@ Examples:
   $ nemar auth regenerate-key           # Get a new API key (revokes old)
   $ nemar auth status --refresh          # Check authentication status
   $ nemar auth whoami                    # Alias for status
-  $ nemar auth logout                    # Clear credentials
+  $ nemar auth switch                    # Switch between accounts
+  $ nemar auth logout                    # Clear active account
+  $ nemar auth logout --all              # Clear all accounts
 ```
 
 ## Subcommands
@@ -95,16 +98,51 @@ Options:
   -h, --help  display help for command
 ```
 
+### auth whoami
+
+```bash
+Usage: nemar auth whoami [options]
+
+Show current user (alias for status)
+
+Options:
+  --refresh   Refresh user info from server
+  -h, --help  display help for command
+```
+
+### auth switch
+
+```bash
+Usage: nemar auth switch [options] [username]
+
+Switch between stored accounts
+
+Options:
+  -h, --help  display help for command
+
+Description:
+  Switch the active NEMAR account. You can specify a NEMAR username or
+  GitHub username. If no username is given, an interactive picker is shown.
+
+  Switching also updates the GitHub CLI (gh) to the matching account.
+
+Examples:
+  $ nemar auth switch              # Interactive picker
+  $ nemar auth switch yahya        # Switch by NEMAR username
+  $ nemar auth switch cool-vibers  # Switch by GitHub username
+```
+
 ### auth logout
 
 ```bash
 Usage: nemar auth logout [options]
 
-Clear stored credentials
+Remove the active account (use --all to remove all)
 
 Options:
   -y, --yes   Skip confirmation and proceed
   -n, --no    Skip confirmation and decline
+  --all       Remove all stored accounts
   -h, --help  display help for command
 ```
 
@@ -136,10 +174,10 @@ Description:
 
   1. Generate a dedicated Ed25519 SSH key for NEMAR (~/.ssh/nemar_ed25519)
   2. Configure SSH to use this key for GitHub
-  3. Register the key with your GitHub account (via NEMAR backend)
+  3. Verify the connection (prompts you to add the key to GitHub if needed)
 
-  This is a one-time setup. After running this command, you can upload
-  datasets without any manual SSH configuration.
+  This is a one-time setup. After running this command and adding the key
+  to GitHub, you can upload datasets.
 
 Examples:
   $ nemar auth setup-ssh          # Set up SSH access

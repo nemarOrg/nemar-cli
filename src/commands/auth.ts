@@ -863,35 +863,37 @@ Examples:
     try {
       const result = await retrieveKey(answers.email, answers.password);
 
-      if (result.api_key) {
-        spinner.succeed("API key retrieved");
-        console.log();
-        console.log(chalk.yellow("Your API Key (store this securely):"));
-        console.log(chalk.gray(`  ${result.api_key}`));
-        console.log();
-        console.log("Next step:");
-        console.log(`  Run ${chalk.cyan("nemar auth login")} and paste your API key`);
-      } else if (result.api_key_prefix) {
-        spinner.info("API key already issued");
-        console.log();
-        console.log(`  Key prefix: ${chalk.gray(result.api_key_prefix)}`);
-        console.log();
-        console.log("  If you lost your API key, regenerate it:");
-        console.log(`  ${chalk.cyan("nemar auth regenerate-key")}`);
-      } else {
-        spinner.succeed(result.message);
-      }
+      spinner.succeed("API key retrieved");
+      console.log();
+      console.log(chalk.yellow("Your API Key (store this securely):"));
+      console.log(chalk.gray(`  ${result.api_key}`));
+      console.log();
+      console.log("Next step:");
+      console.log(`  Run ${chalk.cyan("nemar auth login")} and paste your API key`);
     } catch (error) {
       if (error instanceof ApiError) {
-        spinner.fail(error.message);
-        if (error.statusCode === 401) {
-          console.log(chalk.gray("  Check your email and password"));
-        } else if (error.statusCode === 403) {
-          console.log(chalk.gray("  Your account may not be approved yet"));
+        if (error.statusCode === 409) {
+          // Key already issued - extract prefix from error details
+          const details = error.details as { api_key_prefix?: string } | undefined;
+          spinner.info("API key already issued");
+          if (details?.api_key_prefix) {
+            console.log();
+            console.log(`  Key prefix: ${chalk.gray(details.api_key_prefix)}`);
+          }
+          console.log();
+          console.log("  If you lost your API key, regenerate it:");
+          console.log(`  ${chalk.cyan("nemar auth regenerate-key")}`);
+        } else {
+          spinner.fail(error.message);
+          if (error.statusCode === 401) {
+            console.log(chalk.gray("  Check your email and password"));
+          } else if (error.statusCode === 403) {
+            console.log(chalk.gray("  Your account may not be approved yet"));
+          }
         }
       } else {
-        spinner.fail("Failed to retrieve API key");
-        console.log(chalk.gray("  Check your internet connection"));
+        const msg = error instanceof Error ? error.message : "Unknown error";
+        spinner.fail(`Failed to retrieve API key: ${msg}`);
       }
     }
   });

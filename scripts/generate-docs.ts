@@ -19,7 +19,18 @@ const CLI_PATH = join(import.meta.dir, "..", "src", "index.ts");
 const commands = {
   auth: {
     description: "Authentication and account management",
-    subcommands: ["login", "signup", "status", "logout", "resend-verification", "setup-ssh", "retrieve-key", "regenerate-key"],
+    subcommands: [
+      "login",
+      "signup",
+      "status",
+      "whoami",
+      "switch",
+      "logout",
+      "resend-verification",
+      "setup-ssh",
+      "retrieve-key",
+      "regenerate-key",
+    ],
   },
   dataset: {
     description: "Dataset management operations",
@@ -29,10 +40,21 @@ const commands = {
       "download",
       "status",
       "list",
-      "version",
+      "release",
+      "update",
+      "request-access",
+      "invite",
+      "collaborators",
       "publish request",
       "publish status",
       "publish resend",
+      "clone",
+      "get",
+      "save",
+      "push",
+      "drop",
+      "ci",
+      "manifest",
     ],
   },
   sandbox: {
@@ -45,14 +67,23 @@ const commands = {
       "users",
       "approve",
       "revoke",
-      "regenerate-iam",
+      "role",
+      "s3 regenerate-iam",
+      "s3 lock",
+      "repo public",
+      "repo private",
+      "ci check",
+      "ci add",
       "doi create",
       "doi info",
-      "revert",
+      "doi update",
+      "doi enrich",
       "publish list",
       "publish approve",
       "publish deny",
-      "role",
+      "revert",
+      "make-public",
+      "delete-dataset",
     ],
   },
 };
@@ -136,8 +167,9 @@ This CLI provides tools for uploading, downloading, and managing datasets.
 - **Authentication**: Secure API key-based authentication with admin approval workflow
 - **BIDS Validation**: Validate datasets locally using the official BIDS validator
 - **Dataset Upload**: Upload BIDS datasets with automatic git-annex and S3 integration
-- **Dataset Download**: Download datasets using DataLad for efficient large file handling
-- **DOI Management**: Create and manage DOIs through Zenodo integration
+- **Dataset Download**: Download datasets using git-annex for efficient large file handling
+- **DOI Management**: Create and manage DOIs through EZID integration
+- **Collaboration**: Invite collaborators and manage access
 
 ## Quick Example
 
@@ -148,14 +180,17 @@ bun install -g nemar-cli
 # Sign up for an account
 nemar auth signup
 
-# After approval, log in
+# After approval, retrieve your API key
+nemar auth retrieve-key
+
+# Log in with your key
 nemar auth login
 
 # Validate your dataset
 nemar dataset validate ./my-dataset
 
 # Upload to NEMAR
-nemar dataset upload ./my-dataset --name "My EEG Dataset"
+nemar dataset upload ./my-dataset
 \`\`\`
 
 ## Getting Started
@@ -306,6 +341,7 @@ You'll be prompted to enter:
 - Email address
 - Password (min 12 characters)
 - GitHub username
+- ORCID iD (optional, for DOI metadata)
 - Description of why you need access
 
 !!! info "Admin Approval Required"
@@ -333,7 +369,17 @@ nemar auth login
 nemar auth login -k nemar_your_api_key_here
 \`\`\`
 
-## 3. Validate Your Dataset
+## 4. Complete Sandbox Training
+
+Before uploading real datasets, complete sandbox training:
+
+\`\`\`bash
+nemar sandbox
+\`\`\`
+
+This verifies your git-annex and GitHub setup by uploading a small test dataset.
+
+## 5. Validate Your Dataset
 
 Before uploading, validate your BIDS dataset:
 
@@ -343,21 +389,17 @@ nemar dataset validate ./my-dataset
 
 Fix any errors before proceeding. Warnings are acceptable but should be reviewed.
 
-## 4. Upload Your Dataset
+## 6. Upload Your Dataset
 
 Upload your validated dataset:
 
 \`\`\`bash
-nemar dataset upload ./my-dataset --name "My EEG Dataset"
+nemar dataset upload ./my-dataset
 \`\`\`
 
-The upload process will:
-1. Run BIDS validation
-2. Create a private GitHub repository
-3. Upload large files to S3 via git-annex
-4. Initialize version control with DataLad
+The dataset name defaults to the BIDS Name field in dataset_description.json (or the directory name as fallback).
 
-## 5. Check Status
+## 7. Check Status
 
 Monitor your dataset:
 
@@ -370,12 +412,14 @@ nemar dataset status nm000104
 ### Download a Dataset
 
 \`\`\`bash
-# Download dataset metadata
+# Download a dataset (includes data files)
 nemar dataset download nm000104
 
-# Get all data files
-cd nm000104
-datalad get .
+# Or clone without data files
+nemar dataset clone nm000104
+
+# Get specific data files later
+nemar dataset get sub-01/
 \`\`\`
 
 ### List Your Datasets
@@ -386,10 +430,10 @@ nemar dataset list --mine
 
 ### Create a New Version
 
-After making changes, create a new version with DOI:
+After making changes, create a version bump PR:
 
 \`\`\`bash
-nemar dataset version nm000104 1.1.0 --description "Added 10 more subjects"
+nemar dataset release nm000104 --type minor
 \`\`\`
 
 ## Need Help?
@@ -432,6 +476,7 @@ You'll be prompted for:
 | Email | Valid email for verification |
 | Password | Minimum 12 characters |
 | GitHub Username | Required for PR collaboration |
+| ORCID iD | Optional, used for DOI creator metadata |
 | Description | Why you need NEMAR access (min 20 chars) |
 
 ## Logging In
@@ -468,7 +513,23 @@ nemar auth status --refresh
 ## Log Out
 
 \`\`\`bash
+# Remove the active account
 nemar auth logout
+
+# Remove all stored accounts
+nemar auth logout --all
+\`\`\`
+
+## Switch Accounts
+
+If you have multiple NEMAR accounts:
+
+\`\`\`bash
+# Interactive account picker
+nemar auth switch
+
+# Switch to a specific account
+nemar auth switch <username>
 \`\`\`
 
 ## Resend Verification Email
@@ -511,7 +572,9 @@ Before uploading:
 
 - [ ] Dataset is in valid BIDS format
 - [ ] Logged in with \`nemar auth login\`
-- [ ] DataLad and git-annex installed
+- [ ] git-annex installed
+- [ ] GitHub CLI (\`gh\`) installed and authenticated
+- [ ] Sandbox training completed (\`nemar sandbox\`)
 
 ## Step 1: Validate Your Dataset
 
@@ -537,50 +600,54 @@ nemar dataset validate ./my-dataset
 ## Step 2: Upload
 
 \`\`\`bash
-nemar dataset upload ./my-dataset --name "My EEG Dataset"
+nemar dataset upload ./my-dataset
 \`\`\`
 
 ### Options
 
 | Option | Description |
 |--------|-------------|
-| \`--name, -n\` | Dataset name (defaults to folder name) |
+| \`--name, -n\` | Dataset name (defaults to BIDS Name field, then directory name) |
 | \`--description\` | Brief description |
 | \`--skip-validation\` | Skip BIDS validation (not recommended) |
+| \`--skip-orcid\` | Skip co-author ORCID collection |
 | \`--dry-run\` | Show what would be uploaded without doing it |
+| \`--restart\` | Clear upload progress and re-upload all files |
+| \`-j, --jobs\` | Number of parallel upload jobs (default: 4) |
+| \`-y, --yes\` | Skip confirmation and proceed |
 
 ## Step 3: What Happens
 
 The upload process:
 
-1. **Validation** - Runs BIDS validator
-2. **Repository Creation** - Creates private GitHub repo under nemarDatasets
-3. **Metadata Push** - Pushes small files to GitHub
-4. **Data Upload** - Uploads large files to S3 via git-annex
-5. **Workflow Setup** - Configures GitHub Actions for PR workflow
+1. **Auth and Prerequisites** - Verifies login, git-annex, GitHub CLI
+2. **BIDS Validation** - Runs the official BIDS validator (unless skipped)
+3. **File Manifest** - Collects files and co-author ORCIDs
+4. **Confirmation** - Shows upload plan for review
+5. **Dataset Registration** - Creates dataset record and private GitHub repo
+6. **GitHub Invitation** - Accepts collaborator invitation to the repo
+7. **git-annex Init** - Initializes git-annex and configures S3 remote
+8. **Data Upload** - Uploads large files to S3 (uses AWS CLI fast-path when available)
+9. **Metadata and Push** - Writes metadata, commits, and pushes to GitHub
+10. **CI Deployment** - Deploys GitHub Actions workflows for validation
 
 ## Step 4: Making Updates
 
-After initial upload, make changes via pull requests:
+After initial upload, push changes using the CLI:
 
 \`\`\`bash
 cd nm000104  # Your dataset directory
 
-# Create a branch
-git checkout -b add-new-subjects
-
-# Make changes...
-
-# Commit and push
-git add .
-git commit -m "Add subjects 101-110"
-git push -u origin add-new-subjects
-
-# Create PR (opens in browser)
-gh pr create
+# Make changes, then save and push
+nemar dataset save -m "Add subjects 101-110"
+nemar dataset push
 \`\`\`
 
-Changes are merged after admin review.
+Or create a formal update PR:
+
+\`\`\`bash
+nemar dataset update ./nm000104
+\`\`\`
 
 ## Troubleshooting
 
@@ -604,13 +671,16 @@ git annex version
 git annex init
 \`\`\`
 
-### Large File Upload Timeout
+### Upload Interrupted or Timed Out
 
-For very large datasets, files are uploaded in batches. If a timeout occurs:
+The upload tracks progress automatically. Re-run the same command to resume:
 
 \`\`\`bash
-# Resume upload
-git annex copy --to origin
+# Resume from where it left off
+nemar dataset upload ./my-dataset
+
+# Or start fresh if resume fails
+nemar dataset upload ./my-dataset --restart
 \`\`\`
 `;
 }
@@ -740,50 +810,49 @@ nemar dataset upload ./my-dataset --skip-validation
 function generateDownloadingGuide(): string {
   return `# Downloading Datasets
 
-Download NEMAR datasets using DataLad for efficient large file handling.
+Download NEMAR datasets using git-annex for efficient large file handling.
 
 ## Quick Download
 
 \`\`\`bash
-# Download dataset (metadata only by default)
+# Download dataset (includes all data files)
 nemar dataset download nm000104
 \`\`\`
 
-This creates a DataLad dataset with metadata. Large files are not downloaded yet.
-
-## Get Data Files
-
-After downloading, get the actual data files:
-
-\`\`\`bash
-cd nm000104
-
-# Get all files
-datalad get .
-
-# Get specific files
-datalad get sub-01/
-
-# Get specific modality
-datalad get **/eeg/*.edf
-\`\`\`
+This clones the dataset and downloads all data files from S3.
 
 ## Download Options
 
 \`\`\`bash
 # Download to specific directory
-nemar dataset download nm000104 --output ./datasets/
+nemar dataset download nm000104 -o ./datasets/
 
-# Force re-download (overwrite existing)
-nemar dataset download nm000104 --force
+# Clone metadata only (skip large data files)
+nemar dataset download nm000104 --no-data
 
-# Include data files immediately
-nemar dataset download nm000104 --get-data
+# Parallel downloads for large datasets
+nemar dataset download nm000104 -j 8
+\`\`\`
+
+## Clone vs Download
+
+For large datasets, you may want to clone first and get files selectively:
+
+\`\`\`bash
+# Clone metadata only
+nemar dataset clone nm000104
+
+# Get specific files later
+cd nm000104
+nemar dataset get sub-01/
+
+# Get specific modality
+nemar dataset get sub-01/eeg/
 \`\`\`
 
 ## How It Works
 
-NEMAR uses DataLad with git-annex for efficient data management:
+NEMAR uses git-annex for efficient data management:
 
 1. **Metadata** stored in Git (GitHub)
 2. **Large files** stored in S3 (retrieved on demand)
@@ -812,18 +881,11 @@ git annex find --in here
 Drop files you no longer need locally:
 
 \`\`\`bash
-# Drop a specific file (keeps in S3)
-datalad drop sub-01/eeg/sub-01_task-rest_eeg.edf
+# Drop specific files (keeps remote copies)
+nemar dataset drop sub-01/eeg/sub-01_task-rest_eeg.edf
 
-# Drop all files
-datalad drop .
-\`\`\`
-
-### Update to Latest Version
-
-\`\`\`bash
-cd nm000104
-datalad update --merge
+# Drop all local copies
+nemar dataset drop
 \`\`\`
 
 ## Troubleshooting
@@ -838,15 +900,16 @@ nemar auth status --refresh
 
 ### Slow Download
 
-For large datasets, downloads happen from S3. Check your connection.
+For large datasets, downloads happen from S3. Check your connection and try
+increasing parallelism with \`-j 8\`.
 
 ### "Content not available" Error
 
-The file may have been removed or moved. Try:
+The file may have been removed or moved. Try pulling the latest changes:
 
 \`\`\`bash
-datalad update --merge
-datalad get <file>
+git pull
+nemar dataset get <file>
 \`\`\`
 `;
 }
