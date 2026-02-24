@@ -439,12 +439,60 @@ export async function configureLargefiles(
 }
 
 /**
- * Configure S3 special remote for git-annex
+ * Stage files with git-annex. Data files matching the largefiles pattern
+ * are added to the annex; other files are added to git normally.
+ */
+export async function gitAnnexAdd(
+  path: string,
+  target = ".",
+): Promise<{ success: boolean; error?: string }> {
+  try {
+    const { stderr, exitCode } = await runCommand(["git", "annex", "add", target], { cwd: path });
+    if (exitCode !== 0) {
+      return { success: false, error: stderr.trim() || "Failed to add files to git-annex" };
+    }
+    return { success: true };
+  } catch (e) {
+    return { success: false, error: (e as Error).message };
+  }
+}
+
+/**
+ * S3 credentials for git-annex operations.
+ * Supports both long-lived IAM credentials and temporary STS credentials.
+ */
+export interface S3Credentials {
+  accessKeyId: string;
+  secretAccessKey: string;
+  sessionToken?: string;
+}
+
+/**
+ * Map API credential response to S3Credentials for git-annex operations.
+ */
+export function toS3Credentials(creds: {
+  access_key_id: string;
+  secret_access_key: string;
+  session_token: string;
+}): S3Credentials {
+  return {
+    accessKeyId: creds.access_key_id,
+    secretAccessKey: creds.secret_access_key,
+    sessionToken: creds.session_token,
+  };
+}
+
+/**
+ * Configure S3 special remote for git-annex.
+ *
+ * Uses `initremote` to create the remote, or `enableremote` if it already exists.
+ * With `publicurl` set, downloads work without credentials (public S3 bucket).
+ * With `autoenable=true`, clones automatically enable the remote.
  */
 export async function configureS3Remote(
   path: string,
   config: S3RemoteConfig,
-  credentials: { accessKeyId: string; secretAccessKey: string },
+  credentials: S3Credentials,
 ): Promise<{ success: boolean; error?: string }> {
   const args = [
     "git",
@@ -454,34 +502,34 @@ export async function configureS3Remote(
     "type=S3",
     "encryption=none",
     `bucket=${config.bucket}`,
-    `fileprefix=${config.prefix}/`,
+    `fileprefix=${config.prefix.replace(/\/$/, "")}/`,
     `datacenter=${config.region}`,
     "signature=v4",
+    "autoenable=true",
+    "protocol=https",
   ];
 
   if (config.publicUrl) {
     args.push(`publicurl=${config.publicUrl}`);
   }
 
+  const env: Record<string, string> = {
+    AWS_ACCESS_KEY_ID: credentials.accessKeyId,
+    AWS_SECRET_ACCESS_KEY: credentials.secretAccessKey,
+  };
+  if (credentials.sessionToken) {
+    env.AWS_SESSION_TOKEN = credentials.sessionToken;
+  }
+
   try {
-    const { stderr, exitCode } = await runCommand(args, {
-      cwd: path,
-      env: {
-        AWS_ACCESS_KEY_ID: credentials.accessKeyId,
-        AWS_SECRET_ACCESS_KEY: credentials.secretAccessKey,
-      },
-    });
+    const { stderr, exitCode } = await runCommand(args, { cwd: path, env });
 
     if (exitCode !== 0) {
       // Check if remote already exists
       if (stderr.includes("already exists")) {
-        // Enable existing remote instead
         const enableResult = await runCommand(["git", "annex", "enableremote", config.name], {
           cwd: path,
-          env: {
-            AWS_ACCESS_KEY_ID: credentials.accessKeyId,
-            AWS_SECRET_ACCESS_KEY: credentials.secretAccessKey,
-          },
+          env,
         });
 
         if (enableResult.exitCode === 0) {
@@ -496,6 +544,74 @@ export async function configureS3Remote(
     return { success: true };
   } catch (e) {
     return { success: false, error: (e as Error).message };
+  }
+}
+
+/**
+ * Clear cached S3 credentials from git-annex's local credential store.
+ *
+ * git-annex caches AWS credentials in .git/annex/creds/ during initremote.
+ * When using STS temporary credentials, these expire and cause 403 errors
+ * on subsequent downloads instead of falling back to publicurl.
+ * Call this after upload completes so downloads use publicurl.
+ */
+export async function clearAnnexCredentials(path: string): Promise<void> {
+  const { join } = await import("node:path");
+  const { readdirSync, unlinkSync } = await import("node:fs");
+  const credsDir = join(path, ".git", "annex", "creds");
+  let files: string[];
+  try {
+    files = readdirSync(credsDir);
+  } catch (e: unknown) {
+    if ((e as NodeJS.ErrnoException).code === "ENOENT") return;
+    console.warn(`Warning: Could not read ${credsDir}: ${(e as Error).message}`);
+    return;
+  }
+  for (const file of files) {
+    try {
+      unlinkSync(join(credsDir, file));
+    } catch (e: unknown) {
+      console.warn(`Warning: Could not delete ${file}: ${(e as Error).message}`);
+    }
+  }
+}
+
+/**
+ * Enable an existing S3 special remote in a cloned repository.
+ *
+ * After `git clone` + `git annex init`, the remote config exists in the git-annex
+ * branch but is not active locally. This function enables it so `git annex get`
+ * can fetch from the S3 publicurl without write credentials.
+ *
+ * Returns success even if the remote doesn't exist (old datasets without S3 remote),
+ * so callers don't need to handle backward compatibility.
+ */
+export async function enableS3Remote(
+  path: string,
+  remoteName = "nemar-s3",
+): Promise<{ success: boolean; enabled: boolean; error?: string }> {
+  try {
+    const { stderr, exitCode } = await runCommand(["git", "annex", "enableremote", remoteName], {
+      cwd: path,
+    });
+
+    if (exitCode === 0) {
+      return { success: true, enabled: true };
+    }
+
+    // Remote not found in git-annex branch (old dataset) - not an error
+    if (
+      stderr.includes("there is no special remote named") ||
+      stderr.includes("not a special remote") ||
+      stderr.includes("Unknown remote") ||
+      stderr.includes("not found")
+    ) {
+      return { success: true, enabled: false };
+    }
+
+    return { success: false, enabled: false, error: stderr.trim() };
+  } catch (e) {
+    return { success: false, enabled: false, error: (e as Error).message };
   }
 }
 
@@ -923,44 +1039,6 @@ export async function saveDataset(
 /**
  * Push data to S3 remote with parallel uploads
  */
-export async function pushToS3(
-  path: string,
-  remoteName: string,
-  options: {
-    jobs?: number;
-    credentials: { accessKeyId: string; secretAccessKey: string };
-    onProgress?: (progress: UploadProgress) => void;
-  },
-): Promise<{ success: boolean; error?: string; filesUploaded?: number }> {
-  const jobs = options.jobs || 4;
-
-  try {
-    // Use git annex copy for data transfer
-    const { stdout, stderr, exitCode } = await runCommand(
-      ["git", "annex", "copy", "--to", remoteName, "-J", jobs.toString(), "."],
-      {
-        cwd: path,
-        env: {
-          AWS_ACCESS_KEY_ID: options.credentials.accessKeyId,
-          AWS_SECRET_ACCESS_KEY: options.credentials.secretAccessKey,
-        },
-      },
-    );
-
-    if (exitCode !== 0) {
-      return { success: false, error: stderr.trim() || "Failed to push data to S3" };
-    }
-
-    // Count files uploaded from output
-    const copyMatches = stdout.match(/copy .+ ok/g);
-    const filesUploaded = copyMatches ? copyMatches.length : 0;
-
-    return { success: true, filesUploaded };
-  } catch (e) {
-    return { success: false, error: (e as Error).message };
-  }
-}
-
 /**
  * Push metadata to GitHub
  */
@@ -1618,17 +1696,29 @@ export async function getAnnexS3Remotes(datasetPath: string): Promise<string[]> 
 }
 
 /**
- * Copy annexed content to a remote. Inherits environment credentials (AWS_ACCESS_KEY_ID, etc.).
- * Suitable for push operations where the user has configured their own credentials.
+ * Copy annexed content to a remote.
+ *
+ * When credentials are provided, they are passed as env vars to the subprocess.
+ * Otherwise inherits environment credentials (AWS_ACCESS_KEY_ID, etc.).
  */
 export async function copyToAnnexRemote(
   datasetPath: string,
   remoteName: string,
   jobs = 4,
+  credentials?: S3Credentials,
 ): Promise<{ success: boolean; error?: string; filesCopied: number }> {
   try {
     const args = ["git", "annex", "copy", "--to", remoteName, "-J", jobs.toString(), "."];
-    const { stdout, stderr, exitCode } = await runCommand(args, { cwd: datasetPath });
+
+    const env: Record<string, string> | undefined = credentials
+      ? {
+          AWS_ACCESS_KEY_ID: credentials.accessKeyId,
+          AWS_SECRET_ACCESS_KEY: credentials.secretAccessKey,
+          ...(credentials.sessionToken ? { AWS_SESSION_TOKEN: credentials.sessionToken } : {}),
+        }
+      : undefined;
+
+    const { stdout, stderr, exitCode } = await runCommand(args, { cwd: datasetPath, env });
 
     if (exitCode !== 0) {
       return { success: false, error: stderr.trim() || "Failed to copy to remote", filesCopied: 0 };
