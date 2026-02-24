@@ -3900,7 +3900,7 @@ adminRoutes.post("/datasets/:id/reset", async (c) => {
 
   // 2. Recreate GitHub repo
   try {
-    const pat = c.env.GITHUB_PAT;
+    const pat = c.env.GITHUB_ADMIN_PAT;
     const repoName = datasetId;
     await deleteRepository(repoName, pat);
     await createRepository(repoName, "E2E test dataset (auto-reset)", true, pat);
