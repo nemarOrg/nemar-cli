@@ -68,7 +68,6 @@ import {
   removePublicReadPolicy,
   uploadManifest,
 } from "../services/s3";
-import { generateApiKey, hashApiKey } from "../services/token";
 import {
   type ZenodoDeposition,
   type ZenodoMetadata,
@@ -372,10 +371,6 @@ adminRoutes.post("/approve/:username", async (c) => {
     );
   }
 
-  // Generate API token
-  const { apiKey, apiKeyPrefix } = generateApiKey();
-  const hashedKey = await hashApiKey(apiKey);
-
   // Create per-user IAM credentials for S3 access
   let iamSetupSuccess = false;
   let iamUsername = "";
@@ -439,16 +434,9 @@ adminRoutes.post("/approve/:username", async (c) => {
     .bind(user.id)
     .run();
 
-  // Create token
-  await db
-    .prepare(
-      `
-    INSERT INTO tokens (user_id, api_key_hash, api_key_prefix, name)
-    VALUES (?, ?, ?, 'Primary Token')
-  `,
-    )
-    .bind(user.id, hashedKey, apiKeyPrefix)
-    .run();
+  // Note: API token is NOT created here. The user retrieves it via
+  // `nemar auth retrieve-key` which generates the token on first call.
+  // This ensures the user sees the plaintext key exactly once.
 
   // Note: We no longer auto-add users to all repos
   // Users request access to specific datasets via `nemar dataset request-access`
@@ -489,7 +477,6 @@ adminRoutes.post("/approve/:username", async (c) => {
       email: user.email,
       status: "approved",
     },
-    api_key: apiKey,
     email_sent: emailSent,
     iam_setup: iamSetupSuccess,
     iam_username: iamUsername || undefined,
