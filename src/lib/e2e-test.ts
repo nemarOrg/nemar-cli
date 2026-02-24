@@ -26,7 +26,6 @@ import {
   configureS3Remote,
   copyToAnnexRemote,
   enableS3Remote,
-  getDatasetData,
   gitAnnexAdd,
   initDataset,
   pushToGitHub,
@@ -247,9 +246,26 @@ export async function runE2ETest(options: {
     {
       name: "Download + verify",
       fn: async () => {
-        const getResult = await getDatasetData(cloneDir);
-        assertOk(getResult, "getDatasetData");
-        log(ctx, `Files downloaded: ${getResult.filesDownloaded}`);
+        // nm099999 is private, so we need S3 credentials for download
+        const creds = await requestUploadCredentials(TEST_DATASET_ID);
+        const s3Creds = toS3Credentials(creds.credentials);
+        const env: Record<string, string> = {
+          AWS_ACCESS_KEY_ID: s3Creds.accessKeyId,
+          AWS_SECRET_ACCESS_KEY: s3Creds.secretAccessKey,
+        };
+        if (s3Creds.sessionToken) {
+          env.AWS_SESSION_TOKEN = s3Creds.sessionToken;
+        }
+
+        const { stdout, stderr, exitCode } = await runCommand(
+          ["git", "annex", "get", "."],
+          { cwd: cloneDir, env },
+        );
+        if (exitCode !== 0) {
+          throw new Error(`getDatasetData: ${stderr.trim()}`);
+        }
+        const getMatches = stdout.match(/^get .+ ok$/gm);
+        log(ctx, `Files downloaded: ${getMatches ? getMatches.length : 0}`);
 
         const edfPath = join(cloneDir, "sub-01/eeg/sub-01_task-rest_eeg.edf");
         if (!existsSync(edfPath)) {
@@ -326,6 +342,9 @@ export async function runE2ETest(options: {
   if (!options.skipCleanup && steps.every((s) => s.passed)) {
     steps.push(
       await runStep("Cleanup", async () => {
+        // git-annex creates read-only directories; chmod before rm
+        await runCommand(["chmod", "-R", "u+w", uploadDir]);
+        await runCommand(["chmod", "-R", "u+w", cloneDir]);
         rmSync(uploadDir, { recursive: true, force: true });
         rmSync(cloneDir, { recursive: true, force: true });
         log(ctx, "Temp directories cleaned up");
