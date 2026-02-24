@@ -17,7 +17,7 @@ import {
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { spawn } from "bun";
-import { resetTestDataset, requestUploadCredentials } from "./api.js";
+import { requestUploadCredentials, resetTestDataset } from "./api.js";
 import {
   clearAnnexCredentials,
   cloneDataset,
@@ -61,10 +61,7 @@ function log(ctx: { verbose: boolean }, ...args: unknown[]) {
   if (ctx.verbose) console.log("  ", ...args);
 }
 
-async function runStep(
-  name: string,
-  fn: () => Promise<void>,
-): Promise<E2EStep> {
+async function runStep(name: string, fn: () => Promise<void>): Promise<E2EStep> {
   const start = performance.now();
   try {
     await fn();
@@ -124,7 +121,7 @@ function getFixturePath(): string {
     if (existsSync(p)) return p;
   }
   throw new Error(
-    `Could not find test/fixtures/bids-minimal. Run from the nemar-cli root directory.`,
+    "Could not find test/fixtures/bids-minimal. Run from the nemar-cli root directory.",
   );
 }
 
@@ -214,7 +211,7 @@ export async function runE2ETest(options: {
           uploadDir,
           "nemar-s3",
           4,
-          toS3Credentials(ctx.creds!.credentials),
+          toS3Credentials(ctx.creds?.credentials),
         );
         assertOk(copyResult, "copyToAnnexRemote");
         log(ctx, `Files copied to S3: ${copyResult.filesCopied}`);
@@ -250,7 +247,7 @@ export async function runE2ETest(options: {
       name: "Download + verify",
       fn: async () => {
         // nm099999 is private, so we need S3 credentials for download
-        const s3Creds = toS3Credentials(ctx.creds!.credentials);
+        const s3Creds = toS3Credentials(ctx.creds?.credentials);
         const env: Record<string, string> = {
           AWS_ACCESS_KEY_ID: s3Creds.accessKeyId,
           AWS_SECRET_ACCESS_KEY: s3Creds.secretAccessKey,
@@ -259,10 +256,10 @@ export async function runE2ETest(options: {
           env.AWS_SESSION_TOKEN = s3Creds.sessionToken;
         }
 
-        const { stdout, stderr, exitCode } = await runCommand(
-          ["git", "annex", "get", "."],
-          { cwd: cloneDir, env },
-        );
+        const { stdout, stderr, exitCode } = await runCommand(["git", "annex", "get", "."], {
+          cwd: cloneDir,
+          env,
+        });
         if (exitCode !== 0) {
           throw new Error(`getDatasetData: ${stderr.trim()}`);
         }
@@ -297,17 +294,13 @@ export async function runE2ETest(options: {
 
         // Update participants.tsv
         const partTsv = readFileSync(join(cloneDir, "participants.tsv"), "utf-8");
-        writeFileSync(
-          join(cloneDir, "participants.tsv"),
-          partTsv.trimEnd() + "\nsub-02\t30\tF\n",
-        );
+        writeFileSync(join(cloneDir, "participants.tsv"), `${partTsv.trimEnd()}\nsub-02\t30\tF\n`);
 
         // Create branch before committing (keeps local main clean)
         const branchName = `e2e-update-${Date.now()}`;
-        const { exitCode: branchCode } = await runCommand(
-          ["git", "checkout", "-b", branchName],
-          { cwd: cloneDir },
-        );
+        const { exitCode: branchCode } = await runCommand(["git", "checkout", "-b", branchName], {
+          cwd: cloneDir,
+        });
         if (branchCode !== 0) throw new Error("Failed to create update branch");
 
         // Track + commit

@@ -2116,46 +2116,44 @@ Examples:
   $ nemar admin e2e-test --skip-cleanup     # Keep temp dirs for inspection
   $ nemar admin e2e-test --skip-reset       # Reuse existing nm099999 state`,
   )
-  .action(
-    async (options: { verbose?: boolean; skipReset?: boolean; skipCleanup?: boolean }) => {
-      if (!requireAuth()) return;
+  .action(async (options: { verbose?: boolean; skipReset?: boolean; skipCleanup?: boolean }) => {
+    if (!requireAuth()) return;
 
-      console.log(chalk.cyan("\nNEMAR E2E Test (nm099999)\n"));
+    console.log(chalk.cyan("\nNEMAR E2E Test (nm099999)\n"));
 
-      // Lazy import to avoid loading e2e-test module on every CLI invocation
-      const { runE2ETest } = await import("../lib/e2e-test.js");
+    // Lazy import to avoid loading e2e-test module on every CLI invocation
+    const { runE2ETest } = await import("../lib/e2e-test.js");
 
-      const result = await runE2ETest({
-        verbose: options.verbose,
-        skipReset: options.skipReset,
-        skipCleanup: options.skipCleanup,
-      });
+    const result = await runE2ETest({
+      verbose: options.verbose,
+      skipReset: options.skipReset,
+      skipCleanup: options.skipCleanup,
+    });
 
-      // Print results table
-      console.log();
-      for (const step of result.steps) {
-        const icon = step.passed ? chalk.green("[x]") : chalk.red("[ ]");
-        const time = chalk.gray(`(${step.duration_ms}ms)`);
-        console.log(`  ${icon} ${step.name} ${time}`);
-        if (step.error) {
-          console.log(chalk.red(`      ${step.error}`));
-        }
+    // Print results table
+    console.log();
+    for (const step of result.steps) {
+      const icon = step.passed ? chalk.green("[x]") : chalk.red("[ ]");
+      const time = chalk.gray(`(${step.duration_ms}ms)`);
+      console.log(`  ${icon} ${step.name} ${time}`);
+      if (step.error) {
+        console.log(chalk.red(`      ${step.error}`));
       }
+    }
 
-      console.log();
-      const totalSec = (result.total_duration_ms / 1000).toFixed(1);
-      if (result.passed) {
-        console.log(chalk.green(`All ${result.steps.length} steps passed (${totalSec}s)`));
-      } else {
-        const failed = result.steps.filter((s) => !s.passed).length;
-        console.log(chalk.red(`${failed}/${result.steps.length} steps failed (${totalSec}s)`));
-      }
+    console.log();
+    const totalSec = (result.total_duration_ms / 1000).toFixed(1);
+    if (result.passed) {
+      console.log(chalk.green(`All ${result.steps.length} steps passed (${totalSec}s)`));
+    } else {
+      const failed = result.steps.filter((s) => !s.passed).length;
+      console.log(chalk.red(`${failed}/${result.steps.length} steps failed (${totalSec}s)`));
+    }
 
-      if (result.upload_dir) {
-        console.log(chalk.gray(`\nUpload dir: ${result.upload_dir}`));
-        console.log(chalk.gray(`Clone dir:  ${result.clone_dir}`));
-      }
+    if (result.upload_dir) {
+      console.log(chalk.gray(`\nUpload dir: ${result.upload_dir}`));
+      console.log(chalk.gray(`Clone dir:  ${result.clone_dir}`));
+    }
 
-      process.exit(result.passed ? 0 : 1);
-    },
-  );
+    process.exit(result.passed ? 0 : 1);
+  });

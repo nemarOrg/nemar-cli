@@ -3125,7 +3125,9 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
     if (result instanceof Response) return result;
     const datasetDesc = result;
     if (!datasetDesc.Version) {
-      console.info(`[publish] No Version in dataset_description.json for ${repoName}; defaulting to 1.0.0`);
+      console.info(
+        `[publish] No Version in dataset_description.json for ${repoName}; defaulting to 1.0.0`,
+      );
       datasetDesc.Version = "1.0.0";
       try {
         await createOrUpdateFile(
@@ -3895,7 +3897,10 @@ adminRoutes.post("/datasets/:id/reset", async (c) => {
     const s3Result = await deleteDatasetObjects(s3Options, datasetId, true);
     steps.s3_deleted = s3Result.deleted;
   } catch (err) {
-    console.error(`[reset] S3 cleanup failed for ${datasetId}:`, err instanceof Error ? err.message : err);
+    console.error(
+      `[reset] S3 cleanup failed for ${datasetId}:`,
+      err instanceof Error ? err.message : err,
+    );
   }
 
   // 2. Recreate GitHub repo
@@ -3907,7 +3912,10 @@ adminRoutes.post("/datasets/:id/reset", async (c) => {
     await addCollaborator(repoName, requestingUser.github_username, "push", pat);
     steps.github_recreated = true;
   } catch (err) {
-    console.error(`[reset] GitHub recreate failed for ${datasetId}:`, err instanceof Error ? err.message : err);
+    console.error(
+      `[reset] GitHub recreate failed for ${datasetId}:`,
+      err instanceof Error ? err.message : err,
+    );
   }
 
   // 3. Clean D1 records (keep datasets row)
@@ -3931,7 +3939,10 @@ adminRoutes.post("/datasets/:id/reset", async (c) => {
       .run();
     steps.d1_cleaned = true;
   } catch (err) {
-    console.error(`[reset] D1 cleanup failed for ${datasetId}:`, err instanceof Error ? err.message : err);
+    console.error(
+      `[reset] D1 cleanup failed for ${datasetId}:`,
+      err instanceof Error ? err.message : err,
+    );
   }
 
   const githubRepo = `nemarDatasets/${datasetId}`;
