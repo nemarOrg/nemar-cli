@@ -114,6 +114,22 @@ describe("Authentication API", () => {
       expect(data.error).toBe("Email already registered");
     });
 
+    test("signup with existing github_username returns 409", async () => {
+      const { status, data } = await testRequest<{ error: string }>("/auth/signup", {
+        method: "POST",
+        body: JSON.stringify({
+          username: "unique-test-user",
+          email: "unique@example.com",
+          password: "TestPassword123!",
+          github_username: "test-user-gh",
+          description: "I need NEMAR access for testing and research purposes.",
+        }),
+      });
+
+      expect(status).toBe(409);
+      expect(data.error).toBe("GitHub account already linked to another user");
+    });
+
     test("signup with weak password returns 400", async () => {
       const { status, data } = await testRequest<{ error: string }>("/auth/signup", {
         method: "POST",
@@ -171,6 +187,41 @@ describe("Authentication API", () => {
       });
 
       expect(status).toBe(400);
+    });
+  });
+
+  describe("GET /auth/check-github", () => {
+    test("registered github_username returns registered: true", async () => {
+      const { status, data } = await testRequest<{
+        valid: boolean;
+        username: string;
+        registered: boolean;
+      }>("/auth/check-github?username=test-user-gh");
+
+      expect(status).toBe(200);
+      expect(data.valid).toBe(true);
+      expect(data.registered).toBe(true);
+    });
+
+    test("valid but unregistered github returns registered: false", async () => {
+      const { status, data } = await testRequest<{
+        valid: boolean;
+        username: string;
+        registered: boolean;
+      }>("/auth/check-github?username=octocat");
+
+      expect(status).toBe(200);
+      expect(data.valid).toBe(true);
+      expect(data.registered).toBe(false);
+    });
+
+    test("missing username returns 400", async () => {
+      const { status, data } = await testRequest<{ error: string }>(
+        "/auth/check-github",
+      );
+
+      expect(status).toBe(400);
+      expect(data.error).toBe("GitHub username required");
     });
   });
 
