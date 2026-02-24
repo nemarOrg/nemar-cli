@@ -114,6 +114,22 @@ describe("Authentication API", () => {
       expect(data.error).toBe("Email already registered");
     });
 
+    test("signup with existing github_username returns 409", async () => {
+      const { status, data } = await testRequest<{ error: string }>("/auth/signup", {
+        method: "POST",
+        body: JSON.stringify({
+          username: "unique-test-user",
+          email: "unique@example.com",
+          password: "TestPassword123!",
+          github_username: "test-user-gh",
+          description: "I need NEMAR access for testing and research purposes.",
+        }),
+      });
+
+      expect(status).toBe(409);
+      expect(data.error).toBe("GitHub account already linked to another user");
+    });
+
     test("signup with weak password returns 400", async () => {
       const { status, data } = await testRequest<{ error: string }>("/auth/signup", {
         method: "POST",
@@ -174,6 +190,39 @@ describe("Authentication API", () => {
     });
   });
 
+  describe("GET /auth/check-github", () => {
+    test("registered github_username returns registered: true", async () => {
+      const { status, data } = await testRequest<{
+        valid: boolean;
+        username: string;
+        registered: boolean;
+      }>("/auth/check-github?username=test-user-gh");
+
+      expect(status).toBe(200);
+      expect(data.valid).toBe(true);
+      expect(data.registered).toBe(true);
+    });
+
+    test("valid but unregistered github returns registered: false", async () => {
+      const { status, data } = await testRequest<{
+        valid: boolean;
+        username: string;
+        registered: boolean;
+      }>("/auth/check-github?username=octocat");
+
+      expect(status).toBe(200);
+      expect(data.valid).toBe(true);
+      expect(data.registered).toBe(false);
+    });
+
+    test("missing username returns 400", async () => {
+      const { status, data } = await testRequest<{ error: string }>("/auth/check-github");
+
+      expect(status).toBe(400);
+      expect(data.error).toBe("GitHub username required");
+    });
+  });
+
   describe("POST /auth/resend-verification", () => {
     test("resend for non-existent email returns generic message (no leak)", async () => {
       const { status, data } = await testRequest<{ message: string }>("/auth/resend-verification", {
@@ -193,6 +242,56 @@ describe("Authentication API", () => {
 
       expect(status).toBe(200);
       expect(data.message).toContain("already verified");
+    });
+  });
+
+  describe("POST /auth/retrieve-key", () => {
+    test("invalid credentials return 401", async () => {
+      const { status, data } = await testRequest<{ error: string }>("/auth/retrieve-key", {
+        method: "POST",
+        body: JSON.stringify({ email: "test-user@nemar.test", password: "WrongPassword123!" }),
+      });
+
+      expect(status).toBe(401);
+      expect(data.error).toBe("Invalid email or password");
+    });
+
+    test("non-existent email returns 401 (no enumeration)", async () => {
+      const { status, data } = await testRequest<{ error: string }>("/auth/retrieve-key", {
+        method: "POST",
+        body: JSON.stringify({ email: "nobody@example.com", password: "SomePassword123!" }),
+      });
+
+      expect(status).toBe(401);
+      expect(data.error).toBe("Invalid email or password");
+    });
+
+    test("missing email or password returns 400", async () => {
+      const { status, data } = await testRequest<{ error: string }>("/auth/retrieve-key", {
+        method: "POST",
+        body: JSON.stringify({ email: "test-user@nemar.test" }),
+      });
+
+      expect(status).toBe(400);
+    });
+
+    test("approved user with existing token returns 409 with prefix", async () => {
+      const { status, data } = await testRequest<{
+        error: string;
+        details: { api_key_prefix: string };
+        message: string;
+      }>("/auth/retrieve-key", {
+        method: "POST",
+        body: JSON.stringify({
+          email: "test-user@nemar.test",
+          password: TEST_CONFIG.password,
+        }),
+      });
+
+      expect(status).toBe(409);
+      expect(data.error).toBe("API key already issued");
+      expect(data.details.api_key_prefix).toBeDefined();
+      expect(data.message).toContain("regenerate-key");
     });
   });
 });

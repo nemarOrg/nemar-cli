@@ -153,8 +153,21 @@ datasetRoutes.post("/", authMiddleware, zValidator("json", createDatasetSchema),
       c.env.ENCRYPTION_KEY,
     );
   } catch (error) {
-    console.error("Failed to decrypt user credentials:", error);
-    return c.json({ error: "Failed to access S3 credentials" }, 500);
+    console.error(
+      "Failed to decrypt S3 credentials for user:",
+      user.id,
+      "IAM:",
+      userCreds.aws_iam_username,
+      error,
+    );
+    return c.json(
+      {
+        error: "Failed to access S3 credentials",
+        message:
+          "Your S3 credentials could not be decrypted. This may happen if your account was set up on a different environment. Please contact an administrator to regenerate your credentials.",
+      },
+      500,
+    );
   }
 
   // Generate dataset ID (xx000XXX for sandbox, nm000XXX for regular).
@@ -568,7 +581,13 @@ datasetRoutes.post(
     // Decrypt user credentials
     if (!c.env.ENCRYPTION_KEY) {
       console.error("ENCRYPTION_KEY not configured");
-      return c.json({ error: "Server configuration error" }, 500);
+      return c.json(
+        {
+          error: "Failed to access S3 credentials",
+          message: "Server encryption is not configured. Please contact an administrator.",
+        },
+        500,
+      );
     }
 
     let userAccessKeyId: string;
@@ -580,8 +599,21 @@ datasetRoutes.post(
         c.env.ENCRYPTION_KEY,
       );
     } catch (error) {
-      console.error("Failed to decrypt user credentials:", error);
-      return c.json({ error: "Failed to access your S3 credentials" }, 500);
+      console.error(
+        "Failed to decrypt S3 credentials for user:",
+        user.id,
+        "IAM:",
+        userCreds.aws_iam_username,
+        error,
+      );
+      return c.json(
+        {
+          error: "Failed to access S3 credentials",
+          message:
+            "Your S3 credentials could not be decrypted. This may happen if your account was set up on a different environment. Please contact an administrator to regenerate your credentials.",
+        },
+        500,
+      );
     }
 
     // Generate presigned URLs using user's credentials

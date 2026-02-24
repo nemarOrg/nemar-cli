@@ -166,8 +166,8 @@ async function createEzidConceptDoi(
     ? { ...options.enrichment }
     : buildOrcidEnrichment(options.bidsDescription, options.uploaderName, options.uploaderOrcid);
 
-  // Override description from request body if provided
-  if (options.datasetDescription) {
+  // Use enriched description if available, otherwise fall back to request/database
+  if (!enrichment.description && options.datasetDescription) {
     enrichment.description = options.datasetDescription;
   }
 
