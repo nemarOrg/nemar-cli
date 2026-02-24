@@ -69,8 +69,8 @@ import {
   checkDownloadPrerequisites,
   checkPrerequisites,
   cloneDataset,
-  collectFileManifest,
   clearAnnexCredentials,
+  collectFileManifest,
   configureGitHubRemote,
   configureLargefiles,
   configureS3Remote,
@@ -1063,14 +1063,14 @@ Examples:
           },
         );
 
+        // Always clear cached STS creds so downloads use publicurl
+        await clearAnnexCredentials(absolutePath);
+
         if (!uploadResult.success) {
           spinner.fail(`S3 upload failed: ${uploadResult.error}`);
           console.log(chalk.yellow("Re-run the same command to resume uploading."));
           process.exit(1);
         }
-
-        // Clear cached STS creds so future downloads use publicurl
-        await clearAnnexCredentials(absolutePath);
 
         for (const file of filesToUpload) {
           markFileUploaded(uploadProgress, file.path);
@@ -1324,6 +1324,8 @@ Examples:
     const s3Enable = await enableS3Remote(absoluteOutput);
     if (s3Enable.enabled) {
       console.log(chalk.gray("  S3 remote enabled for data downloads"));
+    } else if (!s3Enable.success) {
+      console.log(chalk.yellow(`  Warning: Could not enable S3 remote: ${s3Enable.error}`));
     }
 
     // Step 5: Get data files (unless --no-data)
@@ -2277,14 +2279,13 @@ Examples:
         if ((await annexCheck.exited) === 0) {
           // Get STS credentials for S3 upload
           let s3Spinner = ora("Requesting upload credentials...").start();
-          let updateCreds: Awaited<ReturnType<typeof requestUploadCredentials>>;
+          let updateCreds: Awaited<ReturnType<typeof requestUploadCredentials>> | null = null;
           try {
             updateCreds = await requestUploadCredentials(datasetId);
             s3Spinner.succeed("Upload credentials received");
           } catch (credError) {
             s3Spinner.fail(`Could not get upload credentials: ${errorDetail(credError)}`);
             console.log(chalk.yellow("  Data files will not be uploaded. Push manually after PR."));
-            updateCreds = null as never;
           }
 
           if (updateCreds) {
@@ -2305,23 +2306,28 @@ Examples:
               });
               if (!s3Config.success) {
                 s3Spinner.warn(`Failed to configure S3 remote: ${s3Config.error}`);
+                console.log(chalk.yellow("  Data files will not be uploaded. Push manually after PR."));
               } else {
                 s3Spinner.succeed("S3 remote configured");
               }
             }
 
-            s3Spinner = ora("Uploading data files to S3...").start();
-            const copyResult = await copyToAnnexRemote(workDir, "nemar-s3", 4, {
-              accessKeyId: updateCreds.credentials.access_key_id,
-              secretAccessKey: updateCreds.credentials.secret_access_key,
-              sessionToken: updateCreds.credentials.session_token,
-            });
-            if (!copyResult.success) {
-              s3Spinner.warn(`S3 upload issue: ${copyResult.error}`);
-              console.log(chalk.yellow("  Data files may need manual upload after PR creation."));
-            } else {
+            // Only attempt upload if S3 remote is configured
+            const s3RemotesAfterConfig = await getAnnexS3Remotes(workDir);
+            if (s3RemotesAfterConfig.includes("nemar-s3")) {
+              s3Spinner = ora("Uploading data files to S3...").start();
+              const copyResult = await copyToAnnexRemote(workDir, "nemar-s3", 4, {
+                accessKeyId: updateCreds.credentials.access_key_id,
+                secretAccessKey: updateCreds.credentials.secret_access_key,
+                sessionToken: updateCreds.credentials.session_token,
+              });
               await clearAnnexCredentials(workDir);
-              s3Spinner.succeed(`Uploaded ${copyResult.filesCopied} data files to S3`);
+              if (!copyResult.success) {
+                s3Spinner.warn(`S3 upload issue: ${copyResult.error}`);
+                console.log(chalk.yellow("  Data files may need manual upload after PR creation."));
+              } else {
+                s3Spinner.succeed(`Uploaded ${copyResult.filesCopied} data files to S3`);
+              }
             }
           }
         } else {
@@ -2946,6 +2952,8 @@ Examples:
     const s3Enable = await enableS3Remote(outputPath);
     if (s3Enable.enabled) {
       console.log(chalk.gray("  S3 remote enabled for data downloads"));
+    } else if (!s3Enable.success) {
+      console.log(chalk.yellow(`  Warning: Could not enable S3 remote: ${s3Enable.error}`));
     }
 
     console.log();
@@ -2990,7 +2998,10 @@ Examples:
     }
 
     // Enable S3 remote if available (idempotent)
-    await enableS3Remote(cwd);
+    const s3Enable = await enableS3Remote(cwd);
+    if (!s3Enable.success && !s3Enable.enabled) {
+      console.log(chalk.yellow(`  Warning: Could not enable S3 remote: ${s3Enable.error}`));
+    }
 
     const paths = files.length > 0 ? files : undefined;
     const desc = paths ? `Getting ${paths.length} path(s)...` : "Getting all data files...";
@@ -3122,8 +3133,8 @@ Examples:
           try {
             pushCreds = await requestUploadCredentials(pushDatasetId);
             spinner.succeed("Upload credentials received");
-          } catch {
-            spinner.warn("Could not get upload credentials; trying with environment credentials.");
+          } catch (credError) {
+            spinner.warn(`Could not get upload credentials: ${errorDetail(credError)}. Trying environment credentials.`);
           }
         }
 

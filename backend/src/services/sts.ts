@@ -86,10 +86,12 @@ export async function getFederationToken(
  * Generate a scoped IAM policy for dataset S3 operations.
  *
  * Grants PutObject, GetObject, and HeadObject for data files, plus ListBucket
- * for prefix enumeration. git-annex needs:
+ * for bucket access. git-annex needs:
  * - GetObject/HeadObject: check whether content already exists (deduplication)
- * - ListBucket (unconditional): HeadBucket during `initremote` to verify bucket exists
- * - ListBucket (prefix-scoped): enumerate objects within the dataset prefix
+ * - ListBucket (unconditional): HeadBucket during `initremote` to verify bucket exists;
+ *   AWS requires s3:ListBucket for HeadBucket with no way to scope by prefix since
+ *   HeadBucket doesn't send a prefix parameter. Read/write are still scoped to the
+ *   dataset prefix, so listing only reveals object names, not contents.
  */
 export function generateUploadPolicy(bucket: string, datasetId: string): string {
   return JSON.stringify({

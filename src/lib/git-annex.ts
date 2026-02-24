@@ -544,14 +544,23 @@ export async function configureS3Remote(
  * Call this after upload completes so downloads use publicurl.
  */
 export async function clearAnnexCredentials(path: string): Promise<void> {
-  const credsDir = `${path}/.git/annex/creds`;
+  const { join } = await import("node:path");
+  const { readdirSync, unlinkSync } = await import("node:fs");
+  const credsDir = join(path, ".git", "annex", "creds");
+  let files: string[];
   try {
-    const { readdirSync, unlinkSync } = await import("node:fs");
-    for (const file of readdirSync(credsDir)) {
-      unlinkSync(`${credsDir}/${file}`);
+    files = readdirSync(credsDir);
+  } catch (e: unknown) {
+    if ((e as NodeJS.ErrnoException).code === "ENOENT") return;
+    console.warn(`Warning: Could not read ${credsDir}: ${(e as Error).message}`);
+    return;
+  }
+  for (const file of files) {
+    try {
+      unlinkSync(join(credsDir, file));
+    } catch (e: unknown) {
+      console.warn(`Warning: Could not delete ${file}: ${(e as Error).message}`);
     }
-  } catch {
-    // Directory may not exist; that's fine
   }
 }
 
