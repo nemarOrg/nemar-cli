@@ -3863,13 +3863,19 @@ adminRoutes.post("/datasets/:id/reset", async (c) => {
   const requestingUser = c.get("user");
   const db = c.env.DB;
 
+  // Ensure nm099999 row exists (another process may have deleted it)
   const dataset = await db
     .prepare("SELECT * FROM datasets WHERE dataset_id = ?")
     .bind(datasetId)
     .first<{ id: number; dataset_id: string; name: string; github_repo: string | null }>();
 
   if (!dataset) {
-    return c.json({ error: "Test dataset nm099999 not found in database" }, 404);
+    await db
+      .prepare(
+        "INSERT INTO datasets (dataset_id, name, description, owner_user_id, status, github_repo, visibility, is_sandbox) VALUES (?, 'E2E Test Dataset', 'Persistent test dataset for E2E testing', ?, 'active', 'nemarDatasets/nm099999', 'private', 0)",
+      )
+      .bind(datasetId, requestingUser.id)
+      .run();
   }
 
   const steps: { s3_deleted: number; github_recreated: boolean; d1_cleaned: boolean } = {

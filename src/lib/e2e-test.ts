@@ -5,7 +5,15 @@
  * Uses real infrastructure (S3, GitHub, API) with admin credentials.
  */
 
-import { cpSync, existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import {
+  cpSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { spawn } from "bun";
@@ -67,6 +75,19 @@ async function runStep(
   }
 }
 
+/** Run steps in order, stopping after the first failure. */
+async function runStepsSequentially(
+  defs: Array<{ name: string; fn: () => Promise<void> }>,
+): Promise<E2EStep[]> {
+  const steps: E2EStep[] = [];
+  for (const { name, fn } of defs) {
+    const step = await runStep(name, fn);
+    steps.push(step);
+    if (!step.passed) break;
+  }
+  return steps;
+}
+
 async function runCommand(
   cmd: string[],
   options: { cwd?: string; env?: Record<string, string> } = {},
@@ -114,16 +135,18 @@ export async function runE2ETest(options: {
 }): Promise<E2EResult> {
   const verbose = options.verbose ?? false;
   const totalStart = performance.now();
-  const steps: E2EStep[] = [];
 
   const uploadDir = mkdtempSync(join(tmpdir(), "nemar-e2e-upload-"));
   const cloneDir = mkdtempSync(join(tmpdir(), "nemar-e2e-clone-"));
   const ctx: E2EContext = { uploadDir, cloneDir, verbose };
 
-  // Step 1: Reset nm099999
+  // Build the step pipeline; each step runs only if all previous steps passed.
+  const stepDefs: Array<{ name: string; fn: () => Promise<void> }> = [];
+
   if (!options.skipReset) {
-    steps.push(
-      await runStep("Reset nm099999", async () => {
+    stepDefs.push({
+      name: "Reset nm099999",
+      fn: async () => {
         const result = await resetTestDataset(TEST_DATASET_ID);
         log(ctx, `S3 objects deleted: ${result.steps.s3_deleted}`);
         log(ctx, `GitHub recreated: ${result.steps.github_recreated}`);
@@ -131,204 +154,176 @@ export async function runE2ETest(options: {
         if (!result.steps.github_recreated) {
           throw new Error("GitHub repo was not recreated");
         }
-      }),
-    );
-    if (!steps[steps.length - 1].passed) {
-      return finish(steps, totalStart, uploadDir, cloneDir, options.skipCleanup);
-    }
+      },
+    });
   }
 
-  // Step 2: Prepare upload directory
-  steps.push(
-    await runStep("Prepare upload", async () => {
-      const fixturePath = getFixturePath();
-      cpSync(fixturePath, uploadDir, { recursive: true });
-      log(ctx, `Copied fixtures to ${uploadDir}`);
-    }),
-  );
-  if (!steps[steps.length - 1].passed) {
-    return finish(steps, totalStart, uploadDir, cloneDir, options.skipCleanup);
-  }
+  stepDefs.push(
+    {
+      name: "Prepare upload",
+      fn: async () => {
+        const fixturePath = getFixturePath();
+        cpSync(fixturePath, uploadDir, { recursive: true });
+        log(ctx, `Copied fixtures to ${uploadDir}`);
+      },
+    },
+    {
+      name: "Init git + annex",
+      fn: async () => {
+        assertOk(await initDataset(uploadDir, { force: true }), "initDataset");
+        assertOk(await configureLargefiles(uploadDir), "configureLargefiles");
+        log(ctx, "Git + git-annex initialized");
+      },
+    },
+    {
+      name: "Configure remotes",
+      fn: async () => {
+        const creds = await requestUploadCredentials(TEST_DATASET_ID);
+        log(ctx, `S3 prefix: ${creds.s3.prefix}`);
 
-  // Step 3: Init git + annex
-  steps.push(
-    await runStep("Init git + annex", async () => {
-      assertOk(await initDataset(uploadDir, { force: true }), "initDataset");
-      assertOk(await configureLargefiles(uploadDir), "configureLargefiles");
-      log(ctx, "Git + git-annex initialized");
-    }),
-  );
-  if (!steps[steps.length - 1].passed) {
-    return finish(steps, totalStart, uploadDir, cloneDir, options.skipCleanup);
-  }
+        assertOk(
+          await configureS3Remote(
+            uploadDir,
+            {
+              name: "nemar-s3",
+              bucket: creds.s3.bucket,
+              prefix: `${TEST_DATASET_ID}/objects`,
+              region: creds.s3.region,
+              publicUrl: `https://${creds.s3.bucket}.s3.${creds.s3.region}.amazonaws.com/${TEST_DATASET_ID}/objects`,
+            },
+            toS3Credentials(creds.credentials),
+          ),
+          "configureS3Remote",
+        );
 
-  // Step 4: Configure remotes
-  steps.push(
-    await runStep("Configure remotes", async () => {
-      const creds = await requestUploadCredentials(TEST_DATASET_ID);
-      log(ctx, `S3 prefix: ${creds.s3.prefix}`);
+        const sshUrl = `git@github.com:nemarDatasets/${TEST_DATASET_ID}.git`;
+        assertOk(await configureGitHubRemote(uploadDir, sshUrl), "configureGitHubRemote");
+        log(ctx, "S3 + GitHub remotes configured");
+      },
+    },
+    {
+      name: "Upload to S3",
+      fn: async () => {
+        assertOk(await gitAnnexAdd(uploadDir), "gitAnnexAdd");
+        assertOk(await saveDataset(uploadDir, "Initial BIDS dataset"), "saveDataset");
 
-      assertOk(
-        await configureS3Remote(
+        const creds = await requestUploadCredentials(TEST_DATASET_ID);
+        const copyResult = await copyToAnnexRemote(
           uploadDir,
-          {
-            name: "nemar-s3",
-            bucket: creds.s3.bucket,
-            prefix: `${TEST_DATASET_ID}/objects`,
-            region: creds.s3.region,
-            publicUrl: `https://${creds.s3.bucket}.s3.${creds.s3.region}.amazonaws.com/${TEST_DATASET_ID}/objects`,
-          },
+          "nemar-s3",
+          4,
           toS3Credentials(creds.credentials),
-        ),
-        "configureS3Remote",
-      );
+        );
+        assertOk(copyResult, "copyToAnnexRemote");
+        log(ctx, `Files copied to S3: ${copyResult.filesCopied}`);
 
-      const sshUrl = `git@github.com:nemarDatasets/${TEST_DATASET_ID}.git`;
-      assertOk(await configureGitHubRemote(uploadDir, sshUrl), "configureGitHubRemote");
-      log(ctx, "S3 + GitHub remotes configured");
-    }),
-  );
-  if (!steps[steps.length - 1].passed) {
-    return finish(steps, totalStart, uploadDir, cloneDir, options.skipCleanup);
-  }
+        await clearAnnexCredentials(uploadDir);
+      },
+    },
+    {
+      name: "Push to GitHub",
+      fn: async () => {
+        const pushResult = await pushToGitHub(uploadDir);
+        assertOk(pushResult, "pushToGitHub");
+        if (pushResult.warning) {
+          log(ctx, `Warning: ${pushResult.warning}`);
+        }
+        log(ctx, "Pushed to GitHub (main + git-annex branches)");
+      },
+    },
+    {
+      name: "Clone fresh",
+      fn: async () => {
+        const cloneUrl = `git@github.com:nemarDatasets/${TEST_DATASET_ID}.git`;
+        assertOk(await cloneDataset(cloneUrl, cloneDir), "cloneDataset");
 
-  // Step 5: Upload to S3
-  steps.push(
-    await runStep("Upload to S3", async () => {
-      assertOk(await gitAnnexAdd(uploadDir), "gitAnnexAdd");
-      assertOk(await saveDataset(uploadDir, "Initial BIDS dataset"), "saveDataset");
+        const enableResult = await enableS3Remote(cloneDir, "nemar-s3");
+        if (!enableResult.success) {
+          throw new Error(`enableS3Remote: ${enableResult.error}`);
+        }
+        log(ctx, `Clone at ${cloneDir}, S3 remote enabled: ${enableResult.enabled}`);
+      },
+    },
+    {
+      name: "Download + verify",
+      fn: async () => {
+        const getResult = await getDatasetData(cloneDir);
+        assertOk(getResult, "getDatasetData");
+        log(ctx, `Files downloaded: ${getResult.filesDownloaded}`);
 
-      const creds = await requestUploadCredentials(TEST_DATASET_ID);
-      const copyResult = await copyToAnnexRemote(
-        uploadDir,
-        "nemar-s3",
-        4,
-        toS3Credentials(creds.credentials),
-      );
-      assertOk(copyResult, "copyToAnnexRemote");
-      log(ctx, `Files copied to S3: ${copyResult.filesCopied}`);
+        const edfPath = join(cloneDir, "sub-01/eeg/sub-01_task-rest_eeg.edf");
+        if (!existsSync(edfPath)) {
+          throw new Error("EDF file not found after download");
+        }
+        const { size } = Bun.file(edfPath);
+        if (size < 512) {
+          throw new Error(`EDF file too small: ${size} bytes`);
+        }
+        log(ctx, `EDF file verified: ${size} bytes`);
+      },
+    },
+    {
+      name: "Update cycle",
+      fn: async () => {
+        const sub02Dir = join(cloneDir, "sub-02/eeg");
+        mkdirSync(sub02Dir, { recursive: true });
 
-      await clearAnnexCredentials(uploadDir);
-    }),
-  );
-  if (!steps[steps.length - 1].passed) {
-    return finish(steps, totalStart, uploadDir, cloneDir, options.skipCleanup);
-  }
+        // Create a small EDF for sub-02
+        const edfData = Buffer.alloc(1024);
+        edfData.write("0".padEnd(8), 0, "ascii"); // version
+        writeFileSync(join(sub02Dir, "sub-02_task-rest_eeg.edf"), edfData);
+        writeFileSync(
+          join(sub02Dir, "sub-02_task-rest_eeg.json"),
+          JSON.stringify({ TaskName: "rest", SamplingFrequency: 256 }),
+        );
 
-  // Step 6: Push to GitHub
-  steps.push(
-    await runStep("Push to GitHub", async () => {
-      const pushResult = await pushToGitHub(uploadDir);
-      assertOk(pushResult, "pushToGitHub");
-      if (pushResult.warning) {
-        log(ctx, `Warning: ${pushResult.warning}`);
-      }
-      log(ctx, "Pushed to GitHub (main + git-annex branches)");
-    }),
-  );
-  if (!steps[steps.length - 1].passed) {
-    return finish(steps, totalStart, uploadDir, cloneDir, options.skipCleanup);
-  }
+        // Update participants.tsv
+        const partTsv = readFileSync(join(cloneDir, "participants.tsv"), "utf-8");
+        writeFileSync(
+          join(cloneDir, "participants.tsv"),
+          partTsv.trimEnd() + "\nsub-02\t30\tF\n",
+        );
 
-  // Step 7: Clone fresh
-  steps.push(
-    await runStep("Clone fresh", async () => {
-      const cloneUrl = `git@github.com:nemarDatasets/${TEST_DATASET_ID}.git`;
-      assertOk(await cloneDataset(cloneUrl, cloneDir), "cloneDataset");
+        // Track + commit
+        assertOk(await gitAnnexAdd(cloneDir), "gitAnnexAdd (update)");
+        assertOk(await saveDataset(cloneDir, "Add sub-02"), "saveDataset (update)");
 
-      const enableResult = await enableS3Remote(cloneDir, "nemar-s3");
-      if (!enableResult.success) {
-        throw new Error(`enableS3Remote: ${enableResult.error}`);
-      }
-      log(ctx, `Clone at ${cloneDir}, S3 remote enabled: ${enableResult.enabled}`);
-    }),
-  );
-  if (!steps[steps.length - 1].passed) {
-    return finish(steps, totalStart, uploadDir, cloneDir, options.skipCleanup);
-  }
+        // Upload new data to S3
+        const creds = await requestUploadCredentials(TEST_DATASET_ID);
+        const copyResult = await copyToAnnexRemote(
+          cloneDir,
+          "nemar-s3",
+          4,
+          toS3Credentials(creds.credentials),
+        );
+        assertOk(copyResult, "copyToAnnexRemote (update)");
+        log(ctx, `Update files copied to S3: ${copyResult.filesCopied}`);
 
-  // Step 8: Download + verify
-  steps.push(
-    await runStep("Download + verify", async () => {
-      const getResult = await getDatasetData(cloneDir);
-      assertOk(getResult, "getDatasetData");
-      log(ctx, `Files downloaded: ${getResult.filesDownloaded}`);
+        await clearAnnexCredentials(cloneDir);
 
-      // Verify EDF file exists and has content
-      const edfPath = join(cloneDir, "sub-01/eeg/sub-01_task-rest_eeg.edf");
-      if (!existsSync(edfPath)) {
-        throw new Error("EDF file not found after download");
-      }
-      const { size } = Bun.file(edfPath);
-      if (size < 512) {
-        throw new Error(`EDF file too small: ${size} bytes`);
-      }
-      log(ctx, `EDF file verified: ${size} bytes`);
-    }),
-  );
-  if (!steps[steps.length - 1].passed) {
-    return finish(steps, totalStart, uploadDir, cloneDir, options.skipCleanup);
-  }
+        // Push to a new branch
+        const branchName = `e2e-update-${Date.now()}`;
+        const { exitCode: branchCode } = await runCommand(
+          ["git", "checkout", "-b", branchName],
+          { cwd: cloneDir },
+        );
+        if (branchCode !== 0) throw new Error("Failed to create update branch");
 
-  // Step 9: Update cycle
-  steps.push(
-    await runStep("Update cycle", async () => {
-      // Add sub-02 data to the clone
-      const sub02Dir = join(cloneDir, "sub-02/eeg");
-      const { mkdirSync } = await import("node:fs");
-      mkdirSync(sub02Dir, { recursive: true });
+        const pushResult = await pushToGitHub(cloneDir, "origin", branchName);
+        assertOk(pushResult, "pushToGitHub (update branch)");
 
-      // Create a small EDF for sub-02
-      const edfData = Buffer.alloc(1024);
-      edfData.write("0".padEnd(8), 0, "ascii"); // version
-      writeFileSync(join(sub02Dir, "sub-02_task-rest_eeg.edf"), edfData);
-      writeFileSync(
-        join(sub02Dir, "sub-02_task-rest_eeg.json"),
-        JSON.stringify({ TaskName: "rest", SamplingFrequency: 256 }),
-      );
+        await runCommand(["git", "push", "origin", "git-annex"], { cwd: cloneDir });
 
-      // Update participants.tsv
-      const { readFileSync } = await import("node:fs");
-      const partTsv = readFileSync(join(cloneDir, "participants.tsv"), "utf-8");
-      writeFileSync(join(cloneDir, "participants.tsv"), partTsv.trimEnd() + "\nsub-02\t30\tF\n");
-
-      // Track + commit
-      assertOk(await gitAnnexAdd(cloneDir), "gitAnnexAdd (update)");
-      assertOk(await saveDataset(cloneDir, "Add sub-02"), "saveDataset (update)");
-
-      // Upload new data to S3
-      const creds = await requestUploadCredentials(TEST_DATASET_ID);
-      const copyResult = await copyToAnnexRemote(
-        cloneDir,
-        "nemar-s3",
-        4,
-        toS3Credentials(creds.credentials),
-      );
-      assertOk(copyResult, "copyToAnnexRemote (update)");
-      log(ctx, `Update files copied to S3: ${copyResult.filesCopied}`);
-
-      await clearAnnexCredentials(cloneDir);
-
-      // Push to a new branch
-      const branchName = `e2e-update-${Date.now()}`;
-      const { exitCode: branchCode } = await runCommand(
-        ["git", "checkout", "-b", branchName],
-        { cwd: cloneDir },
-      );
-      if (branchCode !== 0) throw new Error("Failed to create update branch");
-
-      const pushResult = await pushToGitHub(cloneDir, "origin", branchName);
-      assertOk(pushResult, "pushToGitHub (update branch)");
-
-      // Also push git-annex branch
-      await runCommand(["git", "push", "origin", "git-annex"], { cwd: cloneDir });
-
-      log(ctx, `Update pushed to branch: ${branchName}`);
-    }),
+        log(ctx, `Update pushed to branch: ${branchName}`);
+      },
+    },
   );
 
-  // Step 10: Cleanup
-  if (!options.skipCleanup) {
+  // Run steps sequentially, stopping on first failure
+  const steps = await runStepsSequentially(stepDefs);
+
+  // Cleanup unless skipped or a prior step failed
+  if (!options.skipCleanup && steps.every((s) => s.passed)) {
     steps.push(
       await runStep("Cleanup", async () => {
         rmSync(uploadDir, { recursive: true, force: true });
