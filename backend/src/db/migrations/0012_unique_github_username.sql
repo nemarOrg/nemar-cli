@@ -1,4 +1,4 @@
 -- Enforce unique GitHub usernames to prevent duplicate account linking
--- Drop the existing non-unique index and recreate as unique
+-- Case-insensitive: GitHub usernames are case-insensitive (Foo == foo)
 DROP INDEX IF EXISTS idx_users_github;
-CREATE UNIQUE INDEX idx_users_github ON users(github_username);
+CREATE UNIQUE INDEX idx_users_github ON users(github_username COLLATE NOCASE);

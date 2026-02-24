@@ -190,6 +190,41 @@ describe("Authentication API", () => {
     });
   });
 
+  describe("GET /auth/check-github", () => {
+    test("registered github_username returns registered: true", async () => {
+      const { status, data } = await testRequest<{
+        valid: boolean;
+        username: string;
+        registered: boolean;
+      }>("/auth/check-github?username=test-user-gh");
+
+      expect(status).toBe(200);
+      expect(data.valid).toBe(true);
+      expect(data.registered).toBe(true);
+    });
+
+    test("valid but unregistered github returns registered: false", async () => {
+      const { status, data } = await testRequest<{
+        valid: boolean;
+        username: string;
+        registered: boolean;
+      }>("/auth/check-github?username=octocat");
+
+      expect(status).toBe(200);
+      expect(data.valid).toBe(true);
+      expect(data.registered).toBe(false);
+    });
+
+    test("missing username returns 400", async () => {
+      const { status, data } = await testRequest<{ error: string }>(
+        "/auth/check-github",
+      );
+
+      expect(status).toBe(400);
+      expect(data.error).toBe("GitHub username required");
+    });
+  });
+
   describe("POST /auth/resend-verification", () => {
     test("resend for non-existent email returns generic message (no leak)", async () => {
       const { status, data } = await testRequest<{ message: string }>("/auth/resend-verification", {

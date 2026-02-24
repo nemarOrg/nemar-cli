@@ -80,21 +80,30 @@ authRoutes.get("/check-github", async (c) => {
     return c.json({ error: "GitHub username required" }, 400);
   }
 
+  let githubUser: { login: string } | null;
   try {
-    const githubUser = await validateGitHubUsername(username, c.env.GITHUB_ADMIN_PAT);
-
-    // Also check if already registered in NEMAR
-    const db = c.env.DB;
-    const existingUser = await db
-      .prepare("SELECT id FROM users WHERE github_username = ?")
-      .bind(username)
-      .first();
-
-    return c.json({ valid: !!githubUser, username: githubUser?.login, registered: !!existingUser });
+    githubUser = await validateGitHubUsername(username, c.env.GITHUB_ADMIN_PAT);
   } catch (error) {
     console.error("GitHub API error in check-github:", error);
     return c.json({ error: "Unable to verify GitHub username" }, 503);
   }
+
+  // Only check registration if GitHub user exists (use canonical login for case-insensitive match)
+  let registered = false;
+  if (githubUser) {
+    try {
+      const db = c.env.DB;
+      const existingUser = await db
+        .prepare("SELECT id FROM users WHERE github_username = ? COLLATE NOCASE")
+        .bind(githubUser.login)
+        .first();
+      registered = !!existingUser;
+    } catch (dbError) {
+      console.error("Database error checking GitHub registration:", dbError);
+    }
+  }
+
+  return c.json({ valid: !!githubUser, username: githubUser?.login, registered });
 });
 
 // Signup request schema
@@ -166,17 +175,7 @@ authRoutes.post("/signup", zValidator("json", signupSchema), async (c) => {
       return c.json({ error: "Email already registered" }, 409);
     }
 
-    // Check if GitHub username already linked to another account
-    const existingGithub = await db
-      .prepare("SELECT id FROM users WHERE github_username = ?")
-      .bind(github_username)
-      .first();
-
-    if (existingGithub) {
-      return c.json({ error: "GitHub account already linked to another user" }, 409);
-    }
-
-    // Validate GitHub username exists
+    // Validate GitHub username exists (do this before duplicate check to get canonical login)
     const githubUser = await validateGitHubUsername(github_username, c.env.GITHUB_ADMIN_PAT);
     if (!githubUser) {
       return c.json(
@@ -186,6 +185,16 @@ authRoutes.post("/signup", zValidator("json", signupSchema), async (c) => {
         },
         400,
       );
+    }
+
+    // Check if GitHub username already linked to another account (use canonical login, case-insensitive)
+    const existingGithub = await db
+      .prepare("SELECT id FROM users WHERE github_username = ? COLLATE NOCASE")
+      .bind(githubUser.login)
+      .first();
+
+    if (existingGithub) {
+      return c.json({ error: "GitHub account already linked to another user" }, 409);
     }
 
     // Hash password
@@ -209,7 +218,7 @@ authRoutes.post("/signup", zValidator("json", signupSchema), async (c) => {
         username,
         email,
         passwordHash,
-        github_username,
+        githubUser.login,
         description,
         verificationToken,
         verificationExpires,
@@ -266,6 +275,7 @@ authRoutes.post("/signup", zValidator("json", signupSchema), async (c) => {
       if (msg.includes("users.github_username")) {
         return c.json({ error: "GitHub account already linked to another user" }, 409);
       }
+      console.error("Unhandled UNIQUE constraint column in signup:", msg);
       return c.json({ error: "An account with these details already exists" }, 409);
     }
 
