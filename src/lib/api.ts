@@ -1301,6 +1301,27 @@ export interface DeleteDatasetResponse {
   warnings: string[];
 }
 
+// ---------------------------------------------------------------------------
+// Test dataset reset
+// ---------------------------------------------------------------------------
+
+export interface ResetTestDatasetResponse {
+  message: string;
+  github_ssh_url: string;
+  steps: { s3_deleted: number; github_recreated: boolean; d1_cleaned: boolean };
+}
+
+/**
+ * Reset a test dataset to clean state (admin only, nm099999 only)
+ */
+export async function resetTestDataset(datasetId: string): Promise<ResetTestDatasetResponse> {
+  return request<ResetTestDatasetResponse>(
+    `/admin/datasets/${datasetId}/reset`,
+    { method: "POST" },
+    true,
+  );
+}
+
 export async function deleteDataset(
   datasetId: string,
   force = false,

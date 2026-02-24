@@ -1,0 +1,7 @@
+{
+  "TaskName": "rest",
+  "SamplingFrequency": 256,
+  "EEGReference": "Cz",
+  "PowerLineFrequency": 60,
+  "SoftwareFilters": "n/a"
+}
