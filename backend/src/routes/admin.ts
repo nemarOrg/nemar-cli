@@ -3915,11 +3915,17 @@ adminRoutes.post("/datasets/:id/reset", async (c) => {
     await db.batch([
       db.prepare("DELETE FROM dataset_versions WHERE dataset_id = ?").bind(datasetId),
       db.prepare("DELETE FROM publication_requests WHERE dataset_id = ?").bind(datasetId),
+      db
+        .prepare(
+          "DELETE FROM dataset_collaborators WHERE dataset_id IN (SELECT id FROM datasets WHERE dataset_id = ?)",
+        )
+        .bind(datasetId),
+      db.prepare("DELETE FROM user_s3_permissions WHERE s3_prefix = ?").bind(datasetId),
     ]);
-    // Reset DOI fields on the dataset
+    // Reset DOI and Zenodo fields on the dataset
     await db
       .prepare(
-        "UPDATE datasets SET concept_doi = NULL, latest_version_doi = NULL, doi_provider = NULL, ezid_identifier = NULL, ezid_status = NULL, visibility = 'private' WHERE dataset_id = ?",
+        "UPDATE datasets SET concept_doi = NULL, latest_version_doi = NULL, doi_provider = 'ezid', ezid_identifier = NULL, ezid_status = NULL, zenodo_concept_id = NULL, zenodo_latest_version_id = NULL, enrichment_json = NULL, enrichment_updated_at = NULL, visibility = 'private' WHERE dataset_id = ?",
       )
       .bind(datasetId)
       .run();
@@ -3929,11 +3935,16 @@ adminRoutes.post("/datasets/:id/reset", async (c) => {
   }
 
   const githubRepo = `nemarDatasets/${datasetId}`;
-  return c.json({
-    message: `Dataset ${datasetId} reset`,
-    github_ssh_url: `git@github.com:${githubRepo}.git`,
-    steps,
-  });
+  const allOk = steps.s3_deleted >= 0 && steps.github_recreated && steps.d1_cleaned;
+  return c.json(
+    {
+      message: allOk ? `Dataset ${datasetId} reset` : `Dataset ${datasetId} partially reset`,
+      success: allOk,
+      github_ssh_url: `git@github.com:${githubRepo}.git`,
+      steps,
+    },
+    allOk ? 200 : 207,
+  );
 });
 
 const deleteDatasetSchema = z.object({

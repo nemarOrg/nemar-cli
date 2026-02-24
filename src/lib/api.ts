@@ -1307,6 +1307,7 @@ export interface DeleteDatasetResponse {
 
 export interface ResetTestDatasetResponse {
   message: string;
+  success: boolean;
   github_ssh_url: string;
   steps: { s3_deleted: number; github_recreated: boolean; d1_cleaned: boolean };
 }

@@ -54,6 +54,7 @@ interface E2EContext {
   uploadDir: string;
   cloneDir: string;
   verbose: boolean;
+  creds?: Awaited<ReturnType<typeof requestUploadCredentials>>;
 }
 
 function log(ctx: { verbose: boolean }, ...args: unknown[]) {
@@ -150,8 +151,11 @@ export async function runE2ETest(options: {
         log(ctx, `S3 objects deleted: ${result.steps.s3_deleted}`);
         log(ctx, `GitHub recreated: ${result.steps.github_recreated}`);
         log(ctx, `D1 cleaned: ${result.steps.d1_cleaned}`);
-        if (!result.steps.github_recreated) {
-          throw new Error("GitHub repo was not recreated");
+        if (!result.success) {
+          const failed = [];
+          if (!result.steps.github_recreated) failed.push("GitHub");
+          if (!result.steps.d1_cleaned) failed.push("D1");
+          throw new Error(`Reset partially failed: ${failed.join(", ")}`);
         }
       },
     });
@@ -177,20 +181,20 @@ export async function runE2ETest(options: {
     {
       name: "Configure remotes",
       fn: async () => {
-        const creds = await requestUploadCredentials(TEST_DATASET_ID);
-        log(ctx, `S3 prefix: ${creds.s3.prefix}`);
+        ctx.creds = await requestUploadCredentials(TEST_DATASET_ID);
+        log(ctx, `S3 prefix: ${ctx.creds.s3.prefix}`);
 
         assertOk(
           await configureS3Remote(
             uploadDir,
             {
               name: "nemar-s3",
-              bucket: creds.s3.bucket,
+              bucket: ctx.creds.s3.bucket,
               prefix: `${TEST_DATASET_ID}/objects`,
-              region: creds.s3.region,
-              publicUrl: `https://${creds.s3.bucket}.s3.${creds.s3.region}.amazonaws.com/${TEST_DATASET_ID}/objects`,
+              region: ctx.creds.s3.region,
+              publicUrl: `https://${ctx.creds.s3.bucket}.s3.${ctx.creds.s3.region}.amazonaws.com/${TEST_DATASET_ID}/objects`,
             },
-            toS3Credentials(creds.credentials),
+            toS3Credentials(ctx.creds.credentials),
           ),
           "configureS3Remote",
         );
@@ -206,12 +210,11 @@ export async function runE2ETest(options: {
         assertOk(await gitAnnexAdd(uploadDir), "gitAnnexAdd");
         assertOk(await saveDataset(uploadDir, "Initial BIDS dataset"), "saveDataset");
 
-        const creds = await requestUploadCredentials(TEST_DATASET_ID);
         const copyResult = await copyToAnnexRemote(
           uploadDir,
           "nemar-s3",
           4,
-          toS3Credentials(creds.credentials),
+          toS3Credentials(ctx.creds!.credentials),
         );
         assertOk(copyResult, "copyToAnnexRemote");
         log(ctx, `Files copied to S3: ${copyResult.filesCopied}`);
@@ -247,8 +250,7 @@ export async function runE2ETest(options: {
       name: "Download + verify",
       fn: async () => {
         // nm099999 is private, so we need S3 credentials for download
-        const creds = await requestUploadCredentials(TEST_DATASET_ID);
-        const s3Creds = toS3Credentials(creds.credentials);
+        const s3Creds = toS3Credentials(ctx.creds!.credentials);
         const env: Record<string, string> = {
           AWS_ACCESS_KEY_ID: s3Creds.accessKeyId,
           AWS_SECRET_ACCESS_KEY: s3Creds.secretAccessKey,
@@ -300,30 +302,30 @@ export async function runE2ETest(options: {
           partTsv.trimEnd() + "\nsub-02\t30\tF\n",
         );
 
-        // Track + commit
-        assertOk(await gitAnnexAdd(cloneDir), "gitAnnexAdd (update)");
-        assertOk(await saveDataset(cloneDir, "Add sub-02"), "saveDataset (update)");
-
-        // Upload new data to S3
-        const creds = await requestUploadCredentials(TEST_DATASET_ID);
-        const copyResult = await copyToAnnexRemote(
-          cloneDir,
-          "nemar-s3",
-          4,
-          toS3Credentials(creds.credentials),
-        );
-        assertOk(copyResult, "copyToAnnexRemote (update)");
-        log(ctx, `Update files copied to S3: ${copyResult.filesCopied}`);
-
-        await clearAnnexCredentials(cloneDir);
-
-        // Push to a new branch
+        // Create branch before committing (keeps local main clean)
         const branchName = `e2e-update-${Date.now()}`;
         const { exitCode: branchCode } = await runCommand(
           ["git", "checkout", "-b", branchName],
           { cwd: cloneDir },
         );
         if (branchCode !== 0) throw new Error("Failed to create update branch");
+
+        // Track + commit
+        assertOk(await gitAnnexAdd(cloneDir), "gitAnnexAdd (update)");
+        assertOk(await saveDataset(cloneDir, "Add sub-02"), "saveDataset (update)");
+
+        // Upload new data to S3 (fresh creds; STS tokens may expire)
+        ctx.creds = await requestUploadCredentials(TEST_DATASET_ID);
+        const copyResult = await copyToAnnexRemote(
+          cloneDir,
+          "nemar-s3",
+          4,
+          toS3Credentials(ctx.creds.credentials),
+        );
+        assertOk(copyResult, "copyToAnnexRemote (update)");
+        log(ctx, `Update files copied to S3: ${copyResult.filesCopied}`);
+
+        await clearAnnexCredentials(cloneDir);
 
         const pushResult = await pushToGitHub(cloneDir, "origin", branchName);
         assertOk(pushResult, "pushToGitHub (update branch)");
