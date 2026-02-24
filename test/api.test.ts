@@ -114,6 +114,22 @@ describe("Authentication API", () => {
       expect(data.error).toBe("Email already registered");
     });
 
+    test("signup with existing github_username returns 409", async () => {
+      const { status, data } = await testRequest<{ error: string }>("/auth/signup", {
+        method: "POST",
+        body: JSON.stringify({
+          username: "unique-test-user",
+          email: "unique@example.com",
+          password: "TestPassword123!",
+          github_username: "test-user-gh",
+          description: "I need NEMAR access for testing and research purposes.",
+        }),
+      });
+
+      expect(status).toBe(409);
+      expect(data.error).toBe("GitHub account already linked to another user");
+    });
+
     test("signup with weak password returns 400", async () => {
       const { status, data } = await testRequest<{ error: string }>("/auth/signup", {
         method: "POST",

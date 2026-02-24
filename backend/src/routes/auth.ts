@@ -82,7 +82,15 @@ authRoutes.get("/check-github", async (c) => {
 
   try {
     const githubUser = await validateGitHubUsername(username, c.env.GITHUB_ADMIN_PAT);
-    return c.json({ valid: !!githubUser, username: githubUser?.login });
+
+    // Also check if already registered in NEMAR
+    const db = c.env.DB;
+    const existingUser = await db
+      .prepare("SELECT id FROM users WHERE github_username = ?")
+      .bind(username)
+      .first();
+
+    return c.json({ valid: !!githubUser, username: githubUser?.login, registered: !!existingUser });
   } catch (error) {
     console.error("GitHub API error in check-github:", error);
     return c.json({ error: "Unable to verify GitHub username" }, 503);
@@ -156,6 +164,16 @@ authRoutes.post("/signup", zValidator("json", signupSchema), async (c) => {
 
     if (existingEmail) {
       return c.json({ error: "Email already registered" }, 409);
+    }
+
+    // Check if GitHub username already linked to another account
+    const existingGithub = await db
+      .prepare("SELECT id FROM users WHERE github_username = ?")
+      .bind(github_username)
+      .first();
+
+    if (existingGithub) {
+      return c.json({ error: "GitHub account already linked to another user" }, 409);
     }
 
     // Validate GitHub username exists
@@ -234,6 +252,23 @@ authRoutes.post("/signup", zValidator("json", signupSchema), async (c) => {
     );
   } catch (error) {
     console.error("Signup error:", error);
+
+    // Handle DB UNIQUE constraint violations as a safety net
+    // D1 errors may not be standard Error instances, so check multiple ways
+    const msg = error instanceof Error ? error.message : String(error);
+    if (msg.includes("UNIQUE constraint failed")) {
+      if (msg.includes("users.username")) {
+        return c.json({ error: "Username already taken" }, 409);
+      }
+      if (msg.includes("users.email")) {
+        return c.json({ error: "Email already registered" }, 409);
+      }
+      if (msg.includes("users.github_username")) {
+        return c.json({ error: "GitHub account already linked to another user" }, 409);
+      }
+      return c.json({ error: "An account with these details already exists" }, 409);
+    }
+
     return c.json(
       {
         error: "Signup failed",
