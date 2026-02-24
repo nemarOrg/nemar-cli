@@ -494,6 +494,7 @@ export async function configureS3Remote(
     `datacenter=${config.region}`,
     "signature=v4",
     "autoenable=true",
+    "protocol=https",
   ];
 
   if (config.publicUrl) {
@@ -531,6 +532,26 @@ export async function configureS3Remote(
     return { success: true };
   } catch (e) {
     return { success: false, error: (e as Error).message };
+  }
+}
+
+/**
+ * Clear cached S3 credentials from git-annex's local credential store.
+ *
+ * git-annex caches AWS credentials in .git/annex/creds/ during initremote.
+ * When using STS temporary credentials, these expire and cause 403 errors
+ * on subsequent downloads instead of falling back to publicurl.
+ * Call this after upload completes so downloads use publicurl.
+ */
+export async function clearAnnexCredentials(path: string): Promise<void> {
+  const credsDir = `${path}/.git/annex/creds`;
+  try {
+    const { readdirSync, unlinkSync } = await import("node:fs");
+    for (const file of readdirSync(credsDir)) {
+      unlinkSync(`${credsDir}/${file}`);
+    }
+  } catch {
+    // Directory may not exist; that's fine
   }
 }
 

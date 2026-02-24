@@ -70,6 +70,7 @@ import {
   checkPrerequisites,
   cloneDataset,
   collectFileManifest,
+  clearAnnexCredentials,
   configureGitHubRemote,
   configureLargefiles,
   configureS3Remote,
@@ -1067,6 +1068,9 @@ Examples:
           console.log(chalk.yellow("Re-run the same command to resume uploading."));
           process.exit(1);
         }
+
+        // Clear cached STS creds so future downloads use publicurl
+        await clearAnnexCredentials(absolutePath);
 
         for (const file of filesToUpload) {
           markFileUploaded(uploadProgress, file.path);
@@ -2316,6 +2320,7 @@ Examples:
               s3Spinner.warn(`S3 upload issue: ${copyResult.error}`);
               console.log(chalk.yellow("  Data files may need manual upload after PR creation."));
             } else {
+              await clearAnnexCredentials(workDir);
               s3Spinner.succeed(`Uploaded ${copyResult.filesCopied} data files to S3`);
             }
           }
@@ -3143,6 +3148,7 @@ Examples:
           console.log(chalk.gray("  Git changes were pushed successfully."));
           process.exit(1);
         }
+        await clearAnnexCredentials(cwd);
         spinner.succeed(`Copied ${s3Result.filesCopied} file(s) to S3`);
       } else {
         console.log(chalk.gray("  No S3 remote configured; skipping data push."));

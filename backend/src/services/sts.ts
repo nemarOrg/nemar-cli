@@ -86,8 +86,10 @@ export async function getFederationToken(
  * Generate a scoped IAM policy for dataset S3 operations.
  *
  * Grants PutObject, GetObject, and HeadObject for data files, plus ListBucket
- * for prefix enumeration. git-annex needs GetObject/HeadObject to check whether
- * content already exists before uploading (deduplication).
+ * for prefix enumeration. git-annex needs:
+ * - GetObject/HeadObject: check whether content already exists (deduplication)
+ * - ListBucket (unconditional): HeadBucket during `initremote` to verify bucket exists
+ * - ListBucket (prefix-scoped): enumerate objects within the dataset prefix
  */
 export function generateUploadPolicy(bucket: string, datasetId: string): string {
   return JSON.stringify({
@@ -100,15 +102,10 @@ export function generateUploadPolicy(bucket: string, datasetId: string): string 
         Resource: `arn:aws:s3:::${bucket}/${datasetId}/objects/*`,
       },
       {
-        Sid: "AllowListPrefix",
+        Sid: "AllowBucketAccess",
         Effect: "Allow",
         Action: "s3:ListBucket",
         Resource: `arn:aws:s3:::${bucket}`,
-        Condition: {
-          StringLike: {
-            "s3:prefix": [`${datasetId}/objects/*`],
-          },
-        },
       },
     ],
   });
