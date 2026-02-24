@@ -39,10 +39,13 @@ import {
   updateIdentifier as ezidUpdateIdentifier,
 } from "../services/ezid";
 import {
+  addCollaborator,
   checkWorkflowExists,
   createOrUpdateFile,
   createRelease,
+  createRepository,
   createTag,
+  deleteRepository,
   deployWorkflows,
   downloadReleaseArchive,
   getBlobContent,
@@ -64,6 +67,7 @@ import {
 import {
   addPublicReadPolicy,
   applyObjectLock,
+  deleteDatasetObjects,
   getManifest,
   removePublicReadPolicy,
   uploadManifest,
@@ -3842,6 +3846,106 @@ adminRoutes.post("/datasets/:id/manifest/:version", async (c) => {
 // ---------------------------------------------------------------------------
 // Dataset deletion
 // ---------------------------------------------------------------------------
+
+/**
+ * POST /admin/datasets/:id/reset - Reset a test dataset to clean state
+ *
+ * Hardcoded to nm099999 only. Deletes S3 objects, recreates GitHub repo,
+ * cleans D1 version/publication records, re-adds caller as collaborator.
+ */
+adminRoutes.post("/datasets/:id/reset", async (c) => {
+  const datasetId = c.req.param("id");
+
+  if (datasetId !== "nm099999") {
+    return c.json({ error: "Reset is only allowed for test dataset nm099999" }, 400);
+  }
+
+  const requestingUser = c.get("user");
+  const db = c.env.DB;
+
+  // Ensure nm099999 row exists (another process may have deleted it)
+  const dataset = await db
+    .prepare("SELECT * FROM datasets WHERE dataset_id = ?")
+    .bind(datasetId)
+    .first<{ id: number; dataset_id: string; name: string; github_repo: string | null }>();
+
+  if (!dataset) {
+    await db
+      .prepare(
+        "INSERT INTO datasets (dataset_id, name, description, owner_user_id, status, github_repo, visibility, is_sandbox) VALUES (?, 'E2E Test Dataset', 'Persistent test dataset for E2E testing', ?, 'active', 'nemarDatasets/nm099999', 'private', 0)",
+      )
+      .bind(datasetId, requestingUser.id)
+      .run();
+  }
+
+  const steps: { s3_deleted: number; github_recreated: boolean; d1_cleaned: boolean } = {
+    s3_deleted: 0,
+    github_recreated: false,
+    d1_cleaned: false,
+  };
+
+  // 1. Delete S3 objects
+  try {
+    const s3Options = {
+      bucket: c.env.S3_BUCKET,
+      region: c.env.AWS_REGION,
+      accessKeyId: c.env.AWS_ACCESS_KEY_ID,
+      secretAccessKey: c.env.AWS_SECRET_ACCESS_KEY,
+    };
+    const s3Result = await deleteDatasetObjects(s3Options, datasetId, true);
+    steps.s3_deleted = s3Result.deleted;
+  } catch (err) {
+    console.error(`[reset] S3 cleanup failed for ${datasetId}:`, err instanceof Error ? err.message : err);
+  }
+
+  // 2. Recreate GitHub repo
+  try {
+    const pat = c.env.GITHUB_ADMIN_PAT;
+    const repoName = datasetId;
+    await deleteRepository(repoName, pat);
+    await createRepository(repoName, "E2E test dataset (auto-reset)", true, pat);
+    await addCollaborator(repoName, requestingUser.github_username, "push", pat);
+    steps.github_recreated = true;
+  } catch (err) {
+    console.error(`[reset] GitHub recreate failed for ${datasetId}:`, err instanceof Error ? err.message : err);
+  }
+
+  // 3. Clean D1 records (keep datasets row)
+  try {
+    await db.batch([
+      db.prepare("DELETE FROM dataset_versions WHERE dataset_id = ?").bind(datasetId),
+      db.prepare("DELETE FROM publication_requests WHERE dataset_id = ?").bind(datasetId),
+      db
+        .prepare(
+          "DELETE FROM dataset_collaborators WHERE dataset_id IN (SELECT id FROM datasets WHERE dataset_id = ?)",
+        )
+        .bind(datasetId),
+      db.prepare("DELETE FROM user_s3_permissions WHERE s3_prefix = ?").bind(datasetId),
+    ]);
+    // Reset DOI and Zenodo fields on the dataset
+    await db
+      .prepare(
+        "UPDATE datasets SET concept_doi = NULL, latest_version_doi = NULL, doi_provider = 'ezid', ezid_identifier = NULL, ezid_status = NULL, zenodo_concept_id = NULL, zenodo_latest_version_id = NULL, enrichment_json = NULL, enrichment_updated_at = NULL, visibility = 'private' WHERE dataset_id = ?",
+      )
+      .bind(datasetId)
+      .run();
+    steps.d1_cleaned = true;
+  } catch (err) {
+    console.error(`[reset] D1 cleanup failed for ${datasetId}:`, err instanceof Error ? err.message : err);
+  }
+
+  const githubRepo = `nemarDatasets/${datasetId}`;
+  const allOk = steps.s3_deleted >= 0 && steps.github_recreated && steps.d1_cleaned;
+  return c.json(
+    {
+      message: allOk ? `Dataset ${datasetId} reset` : `Dataset ${datasetId} partially reset`,
+      success: allOk,
+      github_ssh_url: `git@github.com:${githubRepo}.git`,
+      steps,
+    },
+    allOk ? 200 : 207,
+  );
+});
 
 const deleteDatasetSchema = z.object({
   force: z.boolean().optional().default(false),

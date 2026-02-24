@@ -2079,3 +2079,83 @@ adminCommand
       process.exit(1);
     }
   });
+
+// ============================================================================
+// E2E Test
+// ============================================================================
+
+adminCommand
+  .command("e2e-test")
+  .description("Run end-to-end test against nm099999 (admin only)")
+  .option("--verbose", "Show detailed output for each step")
+  .option("--skip-reset", "Use existing nm099999 state (skip reset)")
+  .option("--skip-cleanup", "Keep temp directories after test")
+  .addHelpText(
+    "after",
+    `
+Description:
+  Runs a full upload/download/update cycle against the test dataset nm099999.
+  Tests the complete git-annex S3 remote workflow with real infrastructure.
+
+Steps:
+   1. Reset nm099999          6. Push to GitHub
+   2. Prepare upload           7. Clone fresh
+   3. Init git + annex         8. Download + verify
+   4. Configure remotes        9. Update cycle
+   5. Upload to S3            10. Cleanup
+
+Requirements:
+  - Admin privileges (API role check)
+  - git-annex installed
+  - GitHub SSH or gh CLI configured
+  - Active nemar auth session
+
+Examples:
+  $ nemar admin e2e-test                    # Full test
+  $ nemar admin e2e-test --verbose          # With detailed output
+  $ nemar admin e2e-test --skip-cleanup     # Keep temp dirs for inspection
+  $ nemar admin e2e-test --skip-reset       # Reuse existing nm099999 state`,
+  )
+  .action(
+    async (options: { verbose?: boolean; skipReset?: boolean; skipCleanup?: boolean }) => {
+      if (!requireAuth()) return;
+
+      console.log(chalk.cyan("\nNEMAR E2E Test (nm099999)\n"));
+
+      // Lazy import to avoid loading e2e-test module on every CLI invocation
+      const { runE2ETest } = await import("../lib/e2e-test.js");
+
+      const result = await runE2ETest({
+        verbose: options.verbose,
+        skipReset: options.skipReset,
+        skipCleanup: options.skipCleanup,
+      });
+
+      // Print results table
+      console.log();
+      for (const step of result.steps) {
+        const icon = step.passed ? chalk.green("[x]") : chalk.red("[ ]");
+        const time = chalk.gray(`(${step.duration_ms}ms)`);
+        console.log(`  ${icon} ${step.name} ${time}`);
+        if (step.error) {
+          console.log(chalk.red(`      ${step.error}`));
+        }
+      }
+
+      console.log();
+      const totalSec = (result.total_duration_ms / 1000).toFixed(1);
+      if (result.passed) {
+        console.log(chalk.green(`All ${result.steps.length} steps passed (${totalSec}s)`));
+      } else {
+        const failed = result.steps.filter((s) => !s.passed).length;
+        console.log(chalk.red(`${failed}/${result.steps.length} steps failed (${totalSec}s)`));
+      }
+
+      if (result.upload_dir) {
+        console.log(chalk.gray(`\nUpload dir: ${result.upload_dir}`));
+        console.log(chalk.gray(`Clone dir:  ${result.clone_dir}`));
+      }
+
+      process.exit(result.passed ? 0 : 1);
+    },
+  );
