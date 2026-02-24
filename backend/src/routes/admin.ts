@@ -3895,7 +3895,7 @@ adminRoutes.post("/datasets/:id/reset", async (c) => {
     const s3Result = await deleteDatasetObjects(s3Options, datasetId, true);
     steps.s3_deleted = s3Result.deleted;
   } catch (err) {
-    console.error("S3 cleanup failed during reset:", err);
+    console.error(`[reset] S3 cleanup failed for ${datasetId}:`, err instanceof Error ? err.message : err);
   }
 
   // 2. Recreate GitHub repo
@@ -3907,7 +3907,7 @@ adminRoutes.post("/datasets/:id/reset", async (c) => {
     await addCollaborator(repoName, requestingUser.github_username, "push", pat);
     steps.github_recreated = true;
   } catch (err) {
-    console.error("GitHub recreate failed during reset:", err);
+    console.error(`[reset] GitHub recreate failed for ${datasetId}:`, err instanceof Error ? err.message : err);
   }
 
   // 3. Clean D1 records (keep datasets row)
@@ -3931,7 +3931,7 @@ adminRoutes.post("/datasets/:id/reset", async (c) => {
       .run();
     steps.d1_cleaned = true;
   } catch (err) {
-    console.error("D1 cleanup failed during reset:", err);
+    console.error(`[reset] D1 cleanup failed for ${datasetId}:`, err instanceof Error ? err.message : err);
   }
 
   const githubRepo = `nemarDatasets/${datasetId}`;

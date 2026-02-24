@@ -330,7 +330,13 @@ export async function runE2ETest(options: {
         const pushResult = await pushToGitHub(cloneDir, "origin", branchName);
         assertOk(pushResult, "pushToGitHub (update branch)");
 
-        await runCommand(["git", "push", "origin", "git-annex"], { cwd: cloneDir });
+        const { exitCode: annexPushCode, stderr: annexPushErr } = await runCommand(
+          ["git", "push", "origin", "git-annex"],
+          { cwd: cloneDir },
+        );
+        if (annexPushCode !== 0) {
+          throw new Error(`Failed to push git-annex branch: ${annexPushErr.trim()}`);
+        }
 
         log(ctx, `Update pushed to branch: ${branchName}`);
       },
