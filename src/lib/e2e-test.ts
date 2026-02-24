@@ -106,6 +106,11 @@ function assertOk(result: { success: boolean; error?: string }, msg: string) {
   if (!result.success) throw new Error(`${msg}: ${result.error}`);
 }
 
+function getCreds(ctx: E2EContext) {
+  if (!ctx.creds) throw new Error("credentials not yet fetched");
+  return ctx.creds;
+}
+
 /**
  * Get path to bids-minimal fixture directory.
  * Works both from source (src/) and built (dist/) locations.
@@ -211,7 +216,7 @@ export async function runE2ETest(options: {
           uploadDir,
           "nemar-s3",
           4,
-          toS3Credentials(ctx.creds?.credentials),
+          toS3Credentials(getCreds(ctx).credentials),
         );
         assertOk(copyResult, "copyToAnnexRemote");
         log(ctx, `Files copied to S3: ${copyResult.filesCopied}`);
@@ -247,7 +252,7 @@ export async function runE2ETest(options: {
       name: "Download + verify",
       fn: async () => {
         // nm099999 is private, so we need S3 credentials for download
-        const s3Creds = toS3Credentials(ctx.creds?.credentials);
+        const s3Creds = toS3Credentials(getCreds(ctx).credentials);
         const env: Record<string, string> = {
           AWS_ACCESS_KEY_ID: s3Creds.accessKeyId,
           AWS_SECRET_ACCESS_KEY: s3Creds.secretAccessKey,
