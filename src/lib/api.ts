@@ -130,6 +130,7 @@ export async function checkUsername(username: string): Promise<CheckUsernameResp
 export interface CheckGitHubResponse {
   valid: boolean;
   username?: string;
+  registered?: boolean;
 }
 
 /**
@@ -152,6 +153,7 @@ export interface SignupRequest {
 
 export interface SignupResponse {
   message: string;
+  email_sent: boolean;
   next_steps: string[];
 }
 
@@ -329,6 +331,8 @@ export interface ApproveResponse {
   email_sent: boolean;
   iam_setup?: boolean;
   iam_username?: string;
+  github_pat_created?: boolean;
+  github_pat_name?: string;
   warning?: string;
 }
 

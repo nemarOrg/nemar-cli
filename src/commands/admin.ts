@@ -290,9 +290,16 @@ adminCommand
       }
 
       console.log();
-      console.log(
-        chalk.green("User notified to retrieve their API key via 'nemar auth retrieve-key'"),
-      );
+      if (result.email_sent) {
+        console.log(
+          chalk.green("User notified to retrieve their API key via 'nemar auth retrieve-key'"),
+        );
+      } else {
+        console.log(chalk.yellow("Warning: Notification email failed to send."));
+        console.log(
+          chalk.yellow("Please notify the user manually to run 'nemar auth retrieve-key'"),
+        );
+      }
 
       // Show warning if IAM setup failed
       if (result.warning) {

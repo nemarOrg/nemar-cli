@@ -100,6 +100,7 @@ authRoutes.get("/check-github", async (c) => {
       registered = !!existingUser;
     } catch (dbError) {
       console.error("Database error checking GitHub registration:", dbError);
+      return c.json({ error: "Unable to check registration status" }, 503);
     }
   }
 
@@ -229,32 +230,39 @@ authRoutes.post("/signup", zValidator("json", signupSchema), async (c) => {
     // Send verification email
     const verificationUrl = `${c.env.API_BASE_URL}/auth/verify?token=${verificationToken}`;
 
+    let emailSent = false;
     try {
       await sendVerificationEmail(email, username, verificationUrl, c.env.RESEND_API_KEY);
+      emailSent = true;
     } catch (emailError) {
       console.error("Failed to send verification email:", emailError);
-      // User created but email failed - they can request a new verification
+      // User created but email failed - they can use resend-verification
     }
 
-    // Log audit event
-    await db
-      .prepare(
-        `
-      INSERT INTO audit_log (action, resource_type, resource_id, details)
-      VALUES ('user_signup', 'user', ?, ?)
-    `,
-      )
-      .bind(username, JSON.stringify({ email, github_username, description }))
-      .run();
+    // Audit log failure should not block signup response
+    try {
+      await db
+        .prepare(
+          `INSERT INTO audit_log (action, resource_type, resource_id, details)
+           VALUES ('user_signup', 'user', ?, ?)`,
+        )
+        .bind(username, JSON.stringify({ email, github_username, description }))
+        .run();
+    } catch (auditError) {
+      console.error("Failed to write signup audit log for user:", username, auditError);
+    }
 
     return c.json(
       {
         message: "Registration successful",
+        email_sent: emailSent,
         next_steps: [
-          "Check your email for a verification link",
-          "Click the link to verify your email address",
+          emailSent
+            ? "Check your email for a verification link"
+            : "Verification email failed to send. Use 'nemar auth resend-verification' to try again",
+          ...(emailSent ? ["Click the link to verify your email address"] : []),
           "Wait for admin approval",
-          "Once approved, you will receive your API key",
+          "Once approved, run 'nemar auth retrieve-key' to get your API key",
         ],
       },
       201,
@@ -445,7 +453,7 @@ authRoutes.get("/verify", async (c) => {
       </div>
       <div style="display: flex; align-items: flex-start;">
         <span style="background: #e5e7eb; color: #6b7280; border-radius: 50%; width: 24px; height: 24px; display: inline-flex; align-items: center; justify-content: center; margin-right: 12px; flex-shrink: 0; font-size: 12px;">3</span>
-        <span><strong>Get API key</strong> - Once approved, you'll receive your API key via email</span>
+        <span><strong>Get API key</strong> - Once approved, run <code>nemar auth retrieve-key</code> to get your API key</span>
       </div>
     </div>
   </div>
@@ -671,21 +679,39 @@ authRoutes.post("/retrieve-key", zValidator("json", retrieveKeySchema), async (c
     const { apiKey, apiKeyPrefix } = generateApiKey();
     const hashedKey = await hashApiKey(apiKey);
 
-    await db
-      .prepare(
-        `INSERT INTO tokens (user_id, api_key_hash, api_key_prefix, name)
-         VALUES (?, ?, ?, 'Retrieved Token')`,
-      )
-      .bind(user.id, hashedKey, apiKeyPrefix)
-      .run();
+    try {
+      await db
+        .prepare(
+          `INSERT INTO tokens (user_id, api_key_hash, api_key_prefix, name)
+           VALUES (?, ?, ?, 'Retrieved Token')`,
+        )
+        .bind(user.id, hashedKey, apiKeyPrefix)
+        .run();
+    } catch (tokenError) {
+      console.error("Failed to create token for user:", user.id, tokenError);
+      return c.json(
+        {
+          error: "Failed to generate API key",
+          message:
+            "Could not create your API key. Please try again. " +
+            "If the problem persists, contact an administrator.",
+        },
+        500,
+      );
+    }
 
-    await db
-      .prepare(
-        `INSERT INTO audit_log (user_id, action, resource_type, resource_id)
-         VALUES (?, 'key_retrieved', 'user', ?)`,
-      )
-      .bind(user.id, user.username)
-      .run();
+    // Audit log failure should not prevent key delivery
+    try {
+      await db
+        .prepare(
+          `INSERT INTO audit_log (user_id, action, resource_type, resource_id)
+           VALUES (?, 'key_retrieved', 'user', ?)`,
+        )
+        .bind(user.id, user.username)
+        .run();
+    } catch (auditError) {
+      console.error("Failed to write audit log for key retrieval, user:", user.id, auditError);
+    }
 
     return c.json({
       message: "API key generated successfully",
@@ -720,60 +746,56 @@ const regenRequestSchema = z.object({
  * POST /auth/request-key-regeneration - Request a new API key.
  * Sends a verification email; clicking the link generates a new key and revokes the old one.
  */
-authRoutes.post(
-  "/request-key-regeneration",
-  zValidator("json", regenRequestSchema),
-  async (c) => {
-    const { email } = c.req.valid("json");
-    const db = c.env.DB;
+authRoutes.post("/request-key-regeneration", zValidator("json", regenRequestSchema), async (c) => {
+  const { email } = c.req.valid("json");
+  const db = c.env.DB;
 
-    // Find user
-    const user = await db
-      .prepare("SELECT id, username, email, status FROM users WHERE email = ?")
-      .bind(email)
-      .first<{ id: number; username: string; email: string; status: string }>();
+  // Find user
+  const user = await db
+    .prepare("SELECT id, username, email, status FROM users WHERE email = ?")
+    .bind(email)
+    .first<{ id: number; username: string; email: string; status: string }>();
 
-    if (!user || user.status !== "approved") {
-      // Intentionally vague
-      return c.json({
-        message: "If an approved account exists with this email, a verification link will be sent",
-      });
-    }
+  if (!user || user.status !== "approved") {
+    // Intentionally vague
+    return c.json({
+      message: "If an approved account exists with this email, a verification link will be sent",
+    });
+  }
 
-    // Generate a regeneration verification token
-    const regenToken = generateVerificationToken();
-    const regenExpires = generateExpirationTimestamp(1); // 1 hour
+  // Generate a regeneration verification token
+  const regenToken = generateVerificationToken();
+  const regenExpires = generateExpirationTimestamp(1); // 1 hour
 
-    // Store the token on the user record
-    await db
-      .prepare(
-        `UPDATE users
+  // Store the token on the user record
+  await db
+    .prepare(
+      `UPDATE users
          SET verification_token = ?,
              verification_expires_at = ?,
              updated_at = datetime('now')
          WHERE id = ?`,
-      )
-      .bind(regenToken, regenExpires, user.id)
-      .run();
+    )
+    .bind(regenToken, regenExpires, user.id)
+    .run();
 
-    // Send verification email
-    const confirmUrl = `${c.env.API_BASE_URL}/auth/confirm-key-regeneration?token=${regenToken}`;
-    try {
-      await sendKeyRegenerationVerificationEmail(
-        user.email,
-        user.username,
-        confirmUrl,
-        c.env.RESEND_API_KEY,
-      );
-    } catch (emailError) {
-      console.error("Failed to send key regeneration email:", emailError);
-    }
+  // Send verification email
+  const confirmUrl = `${c.env.API_BASE_URL}/auth/confirm-key-regeneration?token=${regenToken}`;
+  try {
+    await sendKeyRegenerationVerificationEmail(
+      user.email,
+      user.username,
+      confirmUrl,
+      c.env.RESEND_API_KEY,
+    );
+  } catch (emailError) {
+    console.error("Failed to send key regeneration email:", emailError);
+  }
 
-    return c.json({
-      message: "If an approved account exists with this email, a verification link will be sent",
-    });
-  },
-);
+  return c.json({
+    message: "If an approved account exists with this email, a verification link will be sent",
+  });
+});
 
 // ============================================================================
 // Confirm Key Regeneration (via email link)
