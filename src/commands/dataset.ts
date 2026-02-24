@@ -44,10 +44,8 @@ import {
   requestDatasetAccess,
   requestPublication,
   requestUploadCredentials,
-  requestUploadUrls,
   resendPublishNotification,
 } from "../lib/api.js";
-import { isAwsCliAvailable, uploadWithAwsCli } from "../lib/aws-cli.js";
 import {
   type BidsValidationResult,
   checkDenoInstalled,
@@ -74,11 +72,14 @@ import {
   collectFileManifest,
   configureGitHubRemote,
   configureLargefiles,
+  configureS3Remote,
   copyToAnnexRemote,
   dropFiles,
+  enableS3Remote,
   ensureGitAnnexInitialized,
   formatBytes,
   getAnnexS3Remotes,
+  gitAnnexAdd,
   getCurrentBranch,
   getDatasetData,
   getDatasetIdFromRemote,
@@ -87,9 +88,7 @@ import {
   isGitAnnexDataset,
   pushBranch,
   pushToGitHub,
-  registerUrlsWithGitAnnex,
   saveDataset,
-  uploadFilesWithPresignedUrls,
   verifyGitHubAuth,
 } from "../lib/git-annex.js";
 import { bumpVersion, isValidStableVersion, parseVersion } from "../lib/semver.js";
@@ -100,127 +99,11 @@ import {
   getProgressSummary,
   initUploadProgress,
   isStepCompleted,
-  markFileFailed,
   markFileUploaded,
   markStepCompleted,
   readUploadProgress,
   writeUploadProgress,
 } from "../lib/upload-progress.js";
-
-// ---------------------------------------------------------------------------
-// Adaptive presigned URL batching
-// ---------------------------------------------------------------------------
-
-const PROBE_BATCH_SIZE = 20;
-const URL_SAFETY_WINDOW_SEC = 45 * 60; // 45 min (presigned URLs expire at 60 min)
-const MIN_BATCH = 20;
-const MAX_BATCH = 500;
-
-/**
- * Upload files using adaptive presigned URL batching.
- *
- * Requests presigned URLs in progressive chunks calibrated to the user's
- * upload speed so that URLs never expire mid-upload. A small probe batch
- * measures throughput first, then subsequent batch sizes are calculated to
- * fit within the URL safety window.
- */
-async function uploadWithAdaptiveBatching(opts: {
-  datasetId: string;
-  basePath: string;
-  filesToUpload: Array<{ path: string; size: number }>;
-  initialUrls?: Record<string, string>;
-  jobs: number;
-  progress: UploadProgress;
-  progressPath: string;
-  spinner: ReturnType<typeof ora>;
-}): Promise<{ uploaded: number; failed: string[] }> {
-  const { datasetId, basePath, filesToUpload, jobs, progress, progressPath, spinner } = opts;
-
-  let totalUploaded = 0;
-  let totalFailed: string[] = [];
-  let totalElapsedSec = 0;
-
-  // Use initial URLs from dataset creation if provided (first upload only)
-  const initialUrls = opts.initialUrls || {};
-  const initialUrlPaths = new Set(Object.keys(initialUrls));
-
-  // If we have initial URLs, upload those first as the probe batch
-  if (initialUrlPaths.size > 0) {
-    const batchSize = initialUrlPaths.size;
-    spinner.text = `Uploading data files to S3... (0/${filesToUpload.length})`;
-
-    const batchStart = Date.now();
-    const result = await uploadFilesWithPresignedUrls(basePath, initialUrls, {
-      jobs,
-      onProgress: (p) => {
-        if (p.status === "completed") {
-          totalUploaded++;
-          spinner.text = `Uploading data files to S3... (${totalUploaded}/${filesToUpload.length})`;
-          markFileUploaded(progress, p.file);
-        } else if (p.status === "failed") {
-          markFileFailed(progress, p.file, p.error || "Unknown error");
-        }
-      },
-      onBatchComplete: () => {
-        writeUploadProgress(progressPath, progress);
-      },
-    });
-
-    totalUploaded = result.uploaded;
-    totalFailed = result.failed;
-    totalElapsedSec = (Date.now() - batchStart) / 1000;
-  }
-
-  // Upload remaining files in adaptive batches
-  const remaining = filesToUpload.filter((f) => !initialUrlPaths.has(f.path));
-
-  let batchOffset = 0;
-  while (batchOffset < remaining.length) {
-    // Calculate adaptive batch size from cumulative speed
-    let batchSize: number;
-    if (totalUploaded > 0 && totalElapsedSec > 0) {
-      const avgSecPerFile = totalElapsedSec / totalUploaded;
-      batchSize = Math.floor(URL_SAFETY_WINDOW_SEC / avgSecPerFile);
-      batchSize = Math.max(MIN_BATCH, Math.min(MAX_BATCH, batchSize));
-    } else {
-      batchSize = PROBE_BATCH_SIZE;
-    }
-
-    const chunk = remaining.slice(batchOffset, batchOffset + batchSize);
-    if (chunk.length === 0) break;
-
-    // Request fresh presigned URLs for this chunk
-    const urlResponse = await requestUploadUrls(
-      datasetId,
-      chunk.map((f) => f.path),
-    );
-
-    spinner.text = `Uploading data files to S3... (${totalUploaded}/${filesToUpload.length}) [batch ${batchSize}]`;
-
-    const batchStart = Date.now();
-    const result = await uploadFilesWithPresignedUrls(basePath, urlResponse.upload_urls, {
-      jobs,
-      onProgress: (p) => {
-        if (p.status === "completed") {
-          totalUploaded++;
-          spinner.text = `Uploading data files to S3... (${totalUploaded}/${filesToUpload.length}) [batch ${batchSize}]`;
-          markFileUploaded(progress, p.file);
-        } else if (p.status === "failed") {
-          markFileFailed(progress, p.file, p.error || "Unknown error");
-        }
-      },
-      onBatchComplete: () => {
-        writeUploadProgress(progressPath, progress);
-      },
-    });
-
-    totalFailed.push(...result.failed);
-    totalElapsedSec += (Date.now() - batchStart) / 1000;
-    batchOffset += chunk.length;
-  }
-
-  return { uploaded: totalUploaded, failed: totalFailed };
-}
 
 export const datasetCommand = new Command("dataset").description("Dataset management").addHelpText(
   "after",
@@ -1103,7 +986,7 @@ Examples:
 
     spinner.succeed("GitHub remote configured");
 
-    // Step 9: Upload data files to S3
+    // Step 9: Upload data files to S3 via git-annex S3 special remote
     // Initialize progress tracking if not already present
     if (!uploadProgress) {
       uploadProgress = initUploadProgress(absolutePath, datasetInfo.dataset_id, dataFiles);
@@ -1121,116 +1004,76 @@ Examples:
       writeUploadProgress(absolutePath, uploadProgress);
     }
 
-    // Narrow to non-null for use in callbacks below
-    const activeProgress = uploadProgress;
-    if (!isStepCompleted(activeProgress, "s3_upload")) {
+    if (!isStepCompleted(uploadProgress, "s3_upload")) {
       if (filesToUpload.length > 0) {
-        // Try AWS CLI path for faster uploads (connection pooling, multipart)
-        const awsCliAvailable = await isAwsCliAvailable();
-        let awsCliSucceeded = false;
-
-        if (awsCliAvailable) {
-          spinner = ora("Requesting upload credentials...").start();
-          let creds: Awaited<ReturnType<typeof requestUploadCredentials>> | null = null;
-          try {
-            creds = await requestUploadCredentials(datasetInfo.dataset_id);
-            spinner.succeed("Upload credentials received (2h expiry)");
-          } catch (credError) {
-            spinner.warn(
-              `Could not get upload credentials: ${errorDetail(credError)}. Falling back to presigned URLs.`,
-            );
-          }
-
-          if (creds) {
-            const dataFilePaths = filesToUpload.map((f) => f.path);
-            spinner = ora(`Uploading ${filesToUpload.length} data files via AWS CLI...`).start();
-            try {
-              const cliResult = await uploadWithAwsCli({
-                credentials: creds.credentials,
-                bucket: creds.s3.bucket,
-                region: creds.s3.region,
-                prefix: creds.s3.prefix,
-                datasetPath: absolutePath,
-                dataFiles: dataFilePaths,
-                onProgress: (uploaded, currentFile) => {
-                  const pct = Math.round((uploaded / filesToUpload.length) * 100);
-                  const short =
-                    currentFile.length > 40 ? `...${currentFile.slice(-37)}` : currentFile;
-                  spinner.text = `Uploading via AWS CLI: ${uploaded}/${filesToUpload.length} (${pct}%) ${short}`;
-                },
-              });
-
-              if (cliResult.success) {
-                for (const file of filesToUpload) {
-                  markFileUploaded(activeProgress, file.path);
-                }
-                writeUploadProgress(absolutePath, uploadProgress);
-                spinner.succeed(`Uploaded ${cliResult.uploaded} data files to S3`);
-                awsCliSucceeded = true;
-              } else {
-                spinner.fail(`AWS CLI upload failed (${cliResult.failed.length} failed)`);
-                if (cliResult.error) {
-                  console.log(chalk.red(`  ${cliResult.error}`));
-                }
-                console.log(chalk.yellow("Falling back to presigned URLs..."));
-              }
-            } catch (uploadError) {
-              spinner.warn(
-                `AWS CLI upload failed: ${errorDetail(uploadError)}. Falling back to presigned URLs.`,
-              );
-            }
-          }
-        }
-
-        if (!awsCliSucceeded) {
-          spinner = ora(`Uploading ${filesToUpload.length} data files to S3...`).start();
-
-          // Use initial presigned URLs from creation (if any), then request adaptively
-          const initialUrls =
-            Object.keys(datasetInfo.upload_urls).length > 0 ? datasetInfo.upload_urls : undefined;
-
-          const uploadResult = await uploadWithAdaptiveBatching({
-            datasetId: datasetInfo.dataset_id,
-            basePath: absolutePath,
-            filesToUpload,
-            initialUrls,
-            jobs: Number.parseInt(options.jobs, 10),
-            progress: activeProgress,
-            progressPath: absolutePath,
-            spinner,
-          });
-
-          if (uploadResult.failed.length > 0) {
-            writeUploadProgress(absolutePath, uploadProgress);
-            spinner.fail(`Failed to upload some files (${uploadResult.failed.length} failed)`);
-            for (const failed of uploadResult.failed.slice(0, 5)) {
-              console.log(chalk.red(`  - ${failed}`));
-            }
-            if (uploadResult.failed.length > 5) {
-              console.log(chalk.red(`  ... and ${uploadResult.failed.length - 5} more`));
-            }
-            console.log();
-            console.log(
-              chalk.yellow("Re-run the same command to resume uploading remaining files."),
-            );
-            console.log(chalk.gray("Use --restart to clear progress and re-upload all files."));
-            process.exit(1);
-          }
-
-          spinner.succeed(`Uploaded ${uploadResult.uploaded} data files to S3`);
-        }
-      } else {
-        // Verify all data files are uploaded before marking complete
-        const summary = getProgressSummary(uploadProgress);
-        if (summary.pending > 0 || summary.failed > 0) {
-          console.log(
-            chalk.yellow(
-              `  Warning: ${summary.pending + summary.failed} files not uploaded but no presigned URLs received.`,
-            ),
-          );
-          console.log(chalk.gray("  Use --restart to re-upload all files."));
+        // Get STS credentials for S3 access
+        spinner = ora("Requesting upload credentials...").start();
+        let creds: Awaited<ReturnType<typeof requestUploadCredentials>>;
+        try {
+          creds = await requestUploadCredentials(datasetInfo.dataset_id);
+          spinner.succeed("Upload credentials received (2h expiry)");
+        } catch (credError) {
+          spinner.fail(`Could not get upload credentials: ${errorDetail(credError)}`);
+          console.log(chalk.red("  Upload credentials are required for S3 access."));
+          console.log(chalk.gray("  Re-run the command to retry."));
           process.exit(1);
         }
+
+        // Configure S3 special remote (idempotent: enables existing if already created)
+        spinner = ora("Configuring S3 remote...").start();
+        const s3Result = await configureS3Remote(absolutePath, {
+          name: "nemar-s3",
+          bucket: creds.s3.bucket,
+          prefix: `${datasetInfo.dataset_id}/objects`,
+          region: creds.s3.region,
+          publicUrl: datasetInfo.s3_config.public_url,
+        }, {
+          accessKeyId: creds.credentials.access_key_id,
+          secretAccessKey: creds.credentials.secret_access_key,
+          sessionToken: creds.credentials.session_token,
+        });
+
+        if (!s3Result.success) {
+          spinner.fail(`Failed to configure S3 remote: ${s3Result.error}`);
+          console.log(chalk.gray("  Re-run the command to retry."));
+          process.exit(1);
+        }
+        spinner.succeed("S3 remote configured");
+
+        // Track data files with git-annex before uploading
+        spinner = ora("Tracking data files with git-annex...").start();
+        const addResult = await gitAnnexAdd(absolutePath);
+        if (!addResult.success) {
+          spinner.fail(`Failed to track data files: ${addResult.error}`);
+          process.exit(1);
+        }
+        spinner.succeed("Data files tracked by git-annex");
+
+        // Upload via git-annex S3 remote (handles key-based layout + tracking)
+        spinner = ora(`Uploading ${filesToUpload.length} data files to S3...`).start();
+        const uploadResult = await copyToAnnexRemote(
+          absolutePath,
+          "nemar-s3",
+          Number.parseInt(options.jobs, 10),
+          {
+            accessKeyId: creds.credentials.access_key_id,
+            secretAccessKey: creds.credentials.secret_access_key,
+            sessionToken: creds.credentials.session_token,
+          },
+        );
+
+        if (!uploadResult.success) {
+          spinner.fail(`S3 upload failed: ${uploadResult.error}`);
+          console.log(chalk.yellow("Re-run the same command to resume uploading."));
+          process.exit(1);
+        }
+
+        for (const file of filesToUpload) {
+          markFileUploaded(uploadProgress, file.path);
+        }
+        writeUploadProgress(absolutePath, uploadProgress);
+        spinner.succeed(`Uploaded ${uploadResult.filesCopied} data files to S3`);
+      } else {
         console.log(chalk.gray("No data files to upload to S3"));
       }
 
@@ -1238,31 +1081,6 @@ Examples:
       writeUploadProgress(absolutePath, uploadProgress);
     } else {
       console.log(chalk.gray("  S3 upload already completed (skipping)"));
-    }
-
-    // Step 10: Register S3 URLs with git-annex
-    if (!isStepCompleted(uploadProgress, "url_registration")) {
-      spinner = ora("Registering file URLs with git-annex...").start();
-
-      // Build public URLs for ALL data files (not just upload_urls keys),
-      // so resumed uploads register URLs for previously uploaded files too
-      const { s3_config, s3_prefix } = datasetInfo;
-      const fileUrls: Record<string, string> = {};
-      for (const file of dataFiles) {
-        fileUrls[file.path] = `${s3_config.public_url}/${s3_prefix}/objects/${file.path}`;
-      }
-
-      const registerResult = await registerUrlsWithGitAnnex(absolutePath, fileUrls);
-      if (!registerResult.success) {
-        spinner.warn(`Some URLs could not be registered (${registerResult.failed.length} failed)`);
-      } else {
-        spinner.succeed(`Registered ${registerResult.registered} file URLs with git-annex`);
-      }
-
-      markStepCompleted(uploadProgress, "url_registration");
-      writeUploadProgress(absolutePath, uploadProgress);
-    } else {
-      console.log(chalk.gray("  URL registration already completed (skipping)"));
     }
 
     // Step 10b: Ensure .bidsignore includes NEMAR-specific paths
@@ -1497,6 +1315,12 @@ Examples:
     }
 
     spinner.succeed("Dataset cloned");
+
+    // Enable S3 remote if available (new datasets have it; old ones use web URLs)
+    const s3Enable = await enableS3Remote(absoluteOutput);
+    if (s3Enable.enabled) {
+      console.log(chalk.gray("  S3 remote enabled for data downloads"));
+    }
 
     // Step 5: Get data files (unless --no-data)
     if (options.data !== false) {
@@ -2447,20 +2271,53 @@ Examples:
           stderr: "pipe",
         });
         if ((await annexCheck.exited) === 0) {
-          const s3Spinner = ora("Uploading data files to S3...").start();
-          const copyProc = spawn({
-            cmd: ["git", "annex", "copy", "--to", "nemar-s3"],
-            cwd: workDir,
-            stdout: "pipe",
-            stderr: "pipe",
-          });
-          const copyExit = await copyProc.exited;
-          if (copyExit !== 0) {
-            const stderr = await new Response(copyProc.stderr).text();
-            s3Spinner.warn(`S3 upload issue: ${stderr.trim()}`);
-            console.log(chalk.yellow("  Data files may need manual upload after PR creation."));
-          } else {
-            s3Spinner.succeed("Uploaded data files to S3");
+          // Get STS credentials for S3 upload
+          let s3Spinner = ora("Requesting upload credentials...").start();
+          let updateCreds: Awaited<ReturnType<typeof requestUploadCredentials>>;
+          try {
+            updateCreds = await requestUploadCredentials(datasetId);
+            s3Spinner.succeed("Upload credentials received");
+          } catch (credError) {
+            s3Spinner.fail(`Could not get upload credentials: ${errorDetail(credError)}`);
+            console.log(chalk.yellow("  Data files will not be uploaded. Push manually after PR."));
+            updateCreds = null as never;
+          }
+
+          if (updateCreds) {
+            // Ensure S3 remote is configured (may not exist for pre-fix datasets)
+            const s3Remotes = await getAnnexS3Remotes(workDir);
+            if (s3Remotes.length === 0) {
+              s3Spinner = ora("Configuring S3 remote...").start();
+              const s3Config = await configureS3Remote(workDir, {
+                name: "nemar-s3",
+                bucket: updateCreds.s3.bucket,
+                prefix: `${datasetId}/objects`,
+                region: updateCreds.s3.region,
+                publicUrl: `https://${updateCreds.s3.bucket}.s3.${updateCreds.s3.region}.amazonaws.com`,
+              }, {
+                accessKeyId: updateCreds.credentials.access_key_id,
+                secretAccessKey: updateCreds.credentials.secret_access_key,
+                sessionToken: updateCreds.credentials.session_token,
+              });
+              if (!s3Config.success) {
+                s3Spinner.warn(`Failed to configure S3 remote: ${s3Config.error}`);
+              } else {
+                s3Spinner.succeed("S3 remote configured");
+              }
+            }
+
+            s3Spinner = ora("Uploading data files to S3...").start();
+            const copyResult = await copyToAnnexRemote(workDir, "nemar-s3", 4, {
+              accessKeyId: updateCreds.credentials.access_key_id,
+              secretAccessKey: updateCreds.credentials.secret_access_key,
+              sessionToken: updateCreds.credentials.session_token,
+            });
+            if (!copyResult.success) {
+              s3Spinner.warn(`S3 upload issue: ${copyResult.error}`);
+              console.log(chalk.yellow("  Data files may need manual upload after PR creation."));
+            } else {
+              s3Spinner.succeed(`Uploaded ${copyResult.filesCopied} data files to S3`);
+            }
           }
         } else {
           console.log(
@@ -3079,6 +2936,13 @@ Examples:
     }
 
     spinner.succeed("Dataset cloned");
+
+    // Enable S3 remote if available (new datasets have it; old ones use web URLs)
+    const s3Enable = await enableS3Remote(outputPath);
+    if (s3Enable.enabled) {
+      console.log(chalk.gray("  S3 remote enabled for data downloads"));
+    }
+
     console.log();
     console.log(`  Location: ${chalk.cyan(outputPath)}`);
     console.log();
@@ -3119,6 +2983,9 @@ Examples:
       console.log(chalk.red("Error: --jobs must be a positive integer"));
       process.exit(1);
     }
+
+    // Enable S3 remote if available (idempotent)
+    await enableS3Remote(cwd);
 
     const paths = files.length > 0 ? files : undefined;
     const desc = paths ? `Getting ${paths.length} path(s)...` : "Getting all data files...";
@@ -3192,8 +3059,8 @@ Description:
 
   With --pr, creates a pull request after pushing the current branch.
 
-  S3 push requires AWS credentials in environment (AWS_ACCESS_KEY_ID,
-  AWS_SECRET_ACCESS_KEY).
+  S3 push uses temporary credentials from the NEMAR API. Falls back to
+  environment AWS credentials if not logged in.
 
 Examples:
   $ nemar dataset push
@@ -3241,13 +3108,38 @@ Examples:
           console.log(chalk.red("Error: --jobs must be a positive integer"));
           process.exit(1);
         }
+
+        // Get STS credentials for S3 upload
+        const pushDatasetId = await getDatasetIdFromRemote(cwd);
+        let pushCreds: Awaited<ReturnType<typeof requestUploadCredentials>> | null = null;
+        if (pushDatasetId && isAuthenticated()) {
+          spinner = ora("Requesting upload credentials...").start();
+          try {
+            pushCreds = await requestUploadCredentials(pushDatasetId);
+            spinner.succeed("Upload credentials received");
+          } catch {
+            spinner.warn("Could not get upload credentials; trying with environment credentials.");
+          }
+        }
+
         spinner = ora(`Copying data to S3 (${remoteName})...`).start();
 
-        const s3Result = await copyToAnnexRemote(cwd, remoteName, jobs);
+        const s3Creds = pushCreds
+          ? {
+              accessKeyId: pushCreds.credentials.access_key_id,
+              secretAccessKey: pushCreds.credentials.secret_access_key,
+              sessionToken: pushCreds.credentials.session_token,
+            }
+          : undefined;
+
+        const s3Result = await copyToAnnexRemote(cwd, remoteName, jobs, s3Creds);
         if (!s3Result.success) {
           spinner.fail("S3 push failed");
           console.log(chalk.red(`  ${s3Result.error}`));
-          console.log(chalk.gray("  Ensure AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY are set."));
+          if (!pushCreds) {
+            console.log(chalk.gray("  Ensure AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY are set,"));
+            console.log(chalk.gray("  or log in with 'nemar auth login' for automatic credentials."));
+          }
           console.log(chalk.gray("  Git changes were pushed successfully."));
           process.exit(1);
         }
