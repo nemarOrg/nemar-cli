@@ -68,8 +68,8 @@ import {
   acceptGitHubInvitation,
   checkDownloadPrerequisites,
   checkPrerequisites,
-  cloneDataset,
   clearAnnexCredentials,
+  cloneDataset,
   collectFileManifest,
   configureGitHubRemote,
   configureLargefiles,
@@ -80,16 +80,17 @@ import {
   ensureGitAnnexInitialized,
   formatBytes,
   getAnnexS3Remotes,
-  gitAnnexAdd,
   getCurrentBranch,
   getDatasetData,
   getDatasetIdFromRemote,
   getLocalDatasetInfo,
+  gitAnnexAdd,
   initDataset,
   isGitAnnexDataset,
   pushBranch,
   pushToGitHub,
   saveDataset,
+  toS3Credentials,
   verifyGitHubAuth,
 } from "../lib/git-annex.js";
 import { bumpVersion, isValidStableVersion, parseVersion } from "../lib/semver.js";
@@ -1022,17 +1023,17 @@ Examples:
 
         // Configure S3 special remote (idempotent: enables existing if already created)
         spinner = ora("Configuring S3 remote...").start();
-        const s3Result = await configureS3Remote(absolutePath, {
-          name: "nemar-s3",
-          bucket: creds.s3.bucket,
-          prefix: `${datasetInfo.dataset_id}/objects`,
-          region: creds.s3.region,
-          publicUrl: datasetInfo.s3_config.public_url,
-        }, {
-          accessKeyId: creds.credentials.access_key_id,
-          secretAccessKey: creds.credentials.secret_access_key,
-          sessionToken: creds.credentials.session_token,
-        });
+        const s3Result = await configureS3Remote(
+          absolutePath,
+          {
+            name: "nemar-s3",
+            bucket: creds.s3.bucket,
+            prefix: `${datasetInfo.dataset_id}/objects`,
+            region: creds.s3.region,
+            publicUrl: datasetInfo.s3_config.public_url,
+          },
+          toS3Credentials(creds.credentials),
+        );
 
         if (!s3Result.success) {
           spinner.fail(`Failed to configure S3 remote: ${s3Result.error}`);
@@ -1056,11 +1057,7 @@ Examples:
           absolutePath,
           "nemar-s3",
           Number.parseInt(options.jobs, 10),
-          {
-            accessKeyId: creds.credentials.access_key_id,
-            secretAccessKey: creds.credentials.secret_access_key,
-            sessionToken: creds.credentials.session_token,
-          },
+          toS3Credentials(creds.credentials),
         );
 
         // Always clear cached STS creds so downloads use publicurl
@@ -2293,20 +2290,22 @@ Examples:
             const s3Remotes = await getAnnexS3Remotes(workDir);
             if (s3Remotes.length === 0) {
               s3Spinner = ora("Configuring S3 remote...").start();
-              const s3Config = await configureS3Remote(workDir, {
-                name: "nemar-s3",
-                bucket: updateCreds.s3.bucket,
-                prefix: `${datasetId}/objects`,
-                region: updateCreds.s3.region,
-                publicUrl: `https://${updateCreds.s3.bucket}.s3.${updateCreds.s3.region}.amazonaws.com`,
-              }, {
-                accessKeyId: updateCreds.credentials.access_key_id,
-                secretAccessKey: updateCreds.credentials.secret_access_key,
-                sessionToken: updateCreds.credentials.session_token,
-              });
+              const s3Config = await configureS3Remote(
+                workDir,
+                {
+                  name: "nemar-s3",
+                  bucket: updateCreds.s3.bucket,
+                  prefix: `${datasetId}/objects`,
+                  region: updateCreds.s3.region,
+                  publicUrl: `https://${updateCreds.s3.bucket}.s3.${updateCreds.s3.region}.amazonaws.com`,
+                },
+                toS3Credentials(updateCreds.credentials),
+              );
               if (!s3Config.success) {
                 s3Spinner.warn(`Failed to configure S3 remote: ${s3Config.error}`);
-                console.log(chalk.yellow("  Data files will not be uploaded. Push manually after PR."));
+                console.log(
+                  chalk.yellow("  Data files will not be uploaded. Push manually after PR."),
+                );
               } else {
                 s3Spinner.succeed("S3 remote configured");
               }
@@ -2316,11 +2315,12 @@ Examples:
             const s3RemotesAfterConfig = await getAnnexS3Remotes(workDir);
             if (s3RemotesAfterConfig.includes("nemar-s3")) {
               s3Spinner = ora("Uploading data files to S3...").start();
-              const copyResult = await copyToAnnexRemote(workDir, "nemar-s3", 4, {
-                accessKeyId: updateCreds.credentials.access_key_id,
-                secretAccessKey: updateCreds.credentials.secret_access_key,
-                sessionToken: updateCreds.credentials.session_token,
-              });
+              const copyResult = await copyToAnnexRemote(
+                workDir,
+                "nemar-s3",
+                4,
+                toS3Credentials(updateCreds.credentials),
+              );
               await clearAnnexCredentials(workDir);
               if (!copyResult.success) {
                 s3Spinner.warn(`S3 upload issue: ${copyResult.error}`);
@@ -3134,27 +3134,27 @@ Examples:
             pushCreds = await requestUploadCredentials(pushDatasetId);
             spinner.succeed("Upload credentials received");
           } catch (credError) {
-            spinner.warn(`Could not get upload credentials: ${errorDetail(credError)}. Trying environment credentials.`);
+            spinner.warn(
+              `Could not get upload credentials: ${errorDetail(credError)}. Trying environment credentials.`,
+            );
           }
         }
 
         spinner = ora(`Copying data to S3 (${remoteName})...`).start();
 
-        const s3Creds = pushCreds
-          ? {
-              accessKeyId: pushCreds.credentials.access_key_id,
-              secretAccessKey: pushCreds.credentials.secret_access_key,
-              sessionToken: pushCreds.credentials.session_token,
-            }
-          : undefined;
+        const s3Creds = pushCreds ? toS3Credentials(pushCreds.credentials) : undefined;
 
         const s3Result = await copyToAnnexRemote(cwd, remoteName, jobs, s3Creds);
         if (!s3Result.success) {
           spinner.fail("S3 push failed");
           console.log(chalk.red(`  ${s3Result.error}`));
           if (!pushCreds) {
-            console.log(chalk.gray("  Ensure AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY are set,"));
-            console.log(chalk.gray("  or log in with 'nemar auth login' for automatic credentials."));
+            console.log(
+              chalk.gray("  Ensure AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY are set,"),
+            );
+            console.log(
+              chalk.gray("  or log in with 'nemar auth login' for automatic credentials."),
+            );
           }
           console.log(chalk.gray("  Git changes were pushed successfully."));
           process.exit(1);

@@ -447,10 +447,7 @@ export async function gitAnnexAdd(
   target = ".",
 ): Promise<{ success: boolean; error?: string }> {
   try {
-    const { stderr, exitCode } = await runCommand(
-      ["git", "annex", "add", target],
-      { cwd: path },
-    );
+    const { stderr, exitCode } = await runCommand(["git", "annex", "add", target], { cwd: path });
     if (exitCode !== 0) {
       return { success: false, error: stderr.trim() || "Failed to add files to git-annex" };
     }
@@ -468,6 +465,21 @@ export interface S3Credentials {
   accessKeyId: string;
   secretAccessKey: string;
   sessionToken?: string;
+}
+
+/**
+ * Map API credential response to S3Credentials for git-annex operations.
+ */
+export function toS3Credentials(creds: {
+  access_key_id: string;
+  secret_access_key: string;
+  session_token: string;
+}): S3Credentials {
+  return {
+    accessKeyId: creds.access_key_id,
+    secretAccessKey: creds.secret_access_key,
+    sessionToken: creds.session_token,
+  };
 }
 
 /**
@@ -515,10 +527,10 @@ export async function configureS3Remote(
     if (exitCode !== 0) {
       // Check if remote already exists
       if (stderr.includes("already exists")) {
-        const enableResult = await runCommand(
-          ["git", "annex", "enableremote", config.name],
-          { cwd: path, env },
-        );
+        const enableResult = await runCommand(["git", "annex", "enableremote", config.name], {
+          cwd: path,
+          env,
+        });
 
         if (enableResult.exitCode === 0) {
           return { success: true };
@@ -579,10 +591,9 @@ export async function enableS3Remote(
   remoteName = "nemar-s3",
 ): Promise<{ success: boolean; enabled: boolean; error?: string }> {
   try {
-    const { stderr, exitCode } = await runCommand(
-      ["git", "annex", "enableremote", remoteName],
-      { cwd: path },
-    );
+    const { stderr, exitCode } = await runCommand(["git", "annex", "enableremote", remoteName], {
+      cwd: path,
+    });
 
     if (exitCode === 0) {
       return { success: true, enabled: true };
@@ -1028,46 +1039,6 @@ export async function saveDataset(
 /**
  * Push data to S3 remote with parallel uploads
  */
-export async function pushToS3(
-  path: string,
-  remoteName: string,
-  options: {
-    jobs?: number;
-    credentials: S3Credentials;
-    onProgress?: (progress: UploadProgress) => void;
-  },
-): Promise<{ success: boolean; error?: string; filesUploaded?: number }> {
-  const jobs = options.jobs || 4;
-
-  const env: Record<string, string> = {
-    AWS_ACCESS_KEY_ID: options.credentials.accessKeyId,
-    AWS_SECRET_ACCESS_KEY: options.credentials.secretAccessKey,
-  };
-  if (options.credentials.sessionToken) {
-    env.AWS_SESSION_TOKEN = options.credentials.sessionToken;
-  }
-
-  try {
-    // Use git annex copy for data transfer
-    const { stdout, stderr, exitCode } = await runCommand(
-      ["git", "annex", "copy", "--to", remoteName, "-J", jobs.toString(), "."],
-      { cwd: path, env },
-    );
-
-    if (exitCode !== 0) {
-      return { success: false, error: stderr.trim() || "Failed to push data to S3" };
-    }
-
-    // Count files uploaded from output
-    const copyMatches = stdout.match(/copy .+ ok/g);
-    const filesUploaded = copyMatches ? copyMatches.length : 0;
-
-    return { success: true, filesUploaded };
-  } catch (e) {
-    return { success: false, error: (e as Error).message };
-  }
-}
-
 /**
  * Push metadata to GitHub
  */
