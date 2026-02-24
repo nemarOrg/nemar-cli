@@ -793,7 +793,7 @@ jobs:
                 ContentType: "application/zip",
               },
               queueSize: 4,
-              partSize: 10 * 1024 * 1024,
+              partSize: 100 * 1024 * 1024,
             });
 
             var uploadDone = upload.done().catch(function (err) {
