@@ -1,0 +1,3 @@
+name	type	units	sampling_frequency	status
+Fp1	EEG	uV	256	good
+Fp2	EEG	uV	256	good

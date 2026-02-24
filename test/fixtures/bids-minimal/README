@@ -1,0 +1,5 @@
+E2E Test Dataset
+
+This is a minimal BIDS dataset used for automated end-to-end testing
+of the NEMAR upload/download pipeline. It contains synthetic data
+and should not be used for research purposes.
