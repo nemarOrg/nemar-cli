@@ -343,7 +343,7 @@ authRoutes.get("/verify", async (c) => {
 
   <div style="background: #f9fafb; padding: 30px; border-radius: 12px;">
     <p>Your NEMAR account is ${user.status === "approved" ? "approved and ready to use" : "awaiting admin approval"}.</p>
-    ${user.status === "approved" ? "<p>Use <code style='background: #e5e7eb; padding: 2px 6px; border-radius: 4px;'>nemar auth login</code> to sign in with your API key.</p>" : "<p>You'll receive an email with your API key once approved.</p>"}
+    ${user.status === "approved" ? "<p>Use <code style='background: #e5e7eb; padding: 2px 6px; border-radius: 4px;'>nemar auth login</code> to sign in with your API key.</p>" : "<p>You'll receive an email with instructions to retrieve your API key once approved.</p>"}
   </div>
 
   <p style="color: #9ca3af; font-size: 12px; margin-top: 40px;">

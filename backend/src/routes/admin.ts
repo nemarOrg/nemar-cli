@@ -329,7 +329,7 @@ adminRoutes.post(
 );
 
 /**
- * POST /admin/approve/:username - Approve a user and generate API token
+ * POST /admin/approve/:username - Approve a user (token created via retrieve-key)
  */
 adminRoutes.post("/approve/:username", async (c) => {
   const username = c.req.param("username");
@@ -441,7 +441,7 @@ adminRoutes.post("/approve/:username", async (c) => {
   // Note: We no longer auto-add users to all repos
   // Users request access to specific datasets via `nemar dataset request-access`
 
-  // Send approval email with API key
+  // Send approval notification email
   let emailSent = false;
   try {
     await sendKeyReadyEmail(user.email, user.username, c.env.RESEND_API_KEY);

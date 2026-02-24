@@ -326,7 +326,7 @@ export interface ApproveResponse {
     email: string;
     status: string;
   };
-  api_key: string;
+  email_sent: boolean;
   iam_setup?: boolean;
   iam_username?: string;
   warning?: string;
