@@ -29,7 +29,7 @@ function setTestConfig(
 
 async function runCli(
   args: string[],
-  options: { cwd?: string; configDir?: string } = {},
+  options: { cwd?: string; configDir?: string; testApiUrl?: string } = {},
 ): Promise<{ stdout: string; stderr: string; exitCode: number }> {
   const proc = spawn({
     cmd: ["bun", "run", join(import.meta.dir, "..", "src", "index.ts"), ...args],
@@ -37,6 +37,7 @@ async function runCli(
     env: {
       ...process.env,
       ...(options.configDir ? { NEMAR_CONFIG_DIR: options.configDir } : {}),
+      ...(options.testApiUrl ? { TEST_API_URL: options.testApiUrl } : {}),
     },
     stdin: "ignore",
     stdout: "pipe",
@@ -214,14 +215,17 @@ describe("manifest - auth and detection", () => {
     const ctx = createTestContext();
     setTestConfig(ctx, {
       apiKey: "fake-key",
-      apiUrl: "https://example.com",
+      apiUrl: "http://127.0.0.1:1",
       username: "test",
     });
 
     const { exitCode } = await runCli(["dataset", "manifest", "-d", "nm000104"], {
       configDir: ctx.configDir,
+      testApiUrl: "http://127.0.0.1:1",
     });
-    // Will fail at API call but should not fail at detection
+    // Will fail at API call (connection refused) but should not fail at detection.
+    // Uses TEST_API_URL env var because bun test shares module cache with spawned
+    // subprocesses, making NEMAR_CONFIG_DIR unreliable for isolating the Conf instance.
     expect(exitCode).toBe(1);
   });
 
