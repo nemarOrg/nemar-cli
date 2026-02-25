@@ -2,11 +2,22 @@
 
 Download NEMAR datasets using git-annex for efficient large file handling.
 
+## Public vs Private Datasets
+
+- **Public datasets** (published) can be downloaded by anyone without authentication.
+- **Private datasets** (pre-publication) can only be downloaded by the owner and designated collaborators, and only through the NEMAR CLI. Direct git-annex commands (`git annex get`, `git annex pull`) will not work for private data.
+
+After publishing, datasets become publicly available for everyone.
+
 ## Quick Download
 
 ```bash
-# Download dataset (includes all data files)
+# Download a public dataset (no account needed)
 nemar dataset download nm000104
+
+# Download a private dataset (requires login)
+nemar auth login
+nemar dataset download nm000115
 ```
 
 This clones the dataset and downloads all data files from S3.

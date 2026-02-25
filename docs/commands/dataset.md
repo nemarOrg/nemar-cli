@@ -162,8 +162,13 @@ Description:
   Download a BIDS dataset from NEMAR. Uses git-annex for efficient
   data transfer with parallel streams.
 
+  Private datasets require authentication (nemar auth login) and can
+  only be downloaded by the owner or designated collaborators.
+  After publishing, datasets become publicly available.
+
 Requirements:
-  - git-annex installed (no account needed)
+  - git-annex installed
+  - NEMAR account (for private datasets)
 
 Examples:
   $ nemar dataset download nm000104              # Download to ./nm000104
@@ -495,8 +500,12 @@ Description:
   Clone a NEMAR dataset repository with git-annex initialized.
   Data files are not downloaded; use 'nemar dataset get' afterward.
 
+  Private datasets require authentication (nemar auth login) and are
+  only accessible to the owner or designated collaborators.
+
 Requirements:
   - git-annex installed
+  - NEMAR account (for private datasets)
 
 Examples:
   $ nemar dataset clone nm000104
@@ -520,6 +529,9 @@ Options:
 Description:
   Download data files from the remote for a cloned dataset.
   Must be run inside a git-annex dataset directory.
+
+  For private datasets, credentials are fetched automatically
+  if you are logged in (nemar auth login).
 
 Examples:
   $ nemar dataset get                    # Get all files
@@ -568,8 +580,8 @@ Description:
 
   With --pr, creates a pull request after pushing the current branch.
 
-  S3 push requires AWS credentials in environment (AWS_ACCESS_KEY_ID,
-  AWS_SECRET_ACCESS_KEY).
+  S3 push uses temporary credentials from the NEMAR API. Falls back to
+  environment AWS credentials if not logged in.
 
 Examples:
   $ nemar dataset push
