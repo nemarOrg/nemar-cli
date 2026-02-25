@@ -785,6 +785,26 @@ export async function requestUploadCredentials(
   );
 }
 
+/**
+ * Request temporary read-only STS credentials for downloading private dataset
+ * files from S3 via git-annex.
+ */
+export async function requestDownloadCredentials(
+  datasetId: string,
+  durationSeconds?: number,
+): Promise<UploadCredentialsResponse> {
+  return request<UploadCredentialsResponse>(
+    `/datasets/${datasetId}/download-credentials`,
+    {
+      method: "POST",
+      body: JSON.stringify({
+        duration_seconds: durationSeconds,
+      }),
+    },
+    true,
+  );
+}
+
 // ============================================================================
 // Health
 // ============================================================================
