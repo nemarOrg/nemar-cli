@@ -25,6 +25,7 @@ Commands:
   revert [options] <dataset-id> [version]  Revert a dataset to a previous version (creates PR for review)
   make-public <dataset-id>                 Publish a dataset (make repository and data public) - PERMANENT
   delete-dataset [options] <dataset-id>    Delete a dataset and all associated resources (GitHub, S3, D1)
+  e2e-test [options]                       Run end-to-end test against nm099999 (admin only)
   help [command]                           display help for command
 
 Description:

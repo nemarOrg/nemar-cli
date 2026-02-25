@@ -112,3 +112,35 @@ export function generateUploadPolicy(bucket: string, datasetId: string): string 
     ],
   });
 }
+
+/**
+ * Generate a read-only IAM policy for downloading dataset files from S3.
+ *
+ * Grants GetObject and HeadObject for data files, plus ListBucket for
+ * bucket access. git-annex needs:
+ * - GetObject: download annexed content
+ * - HeadObject: check whether content exists locally vs remotely
+ * - ListBucket (unconditional): HeadBucket during `enableremote` to verify bucket exists;
+ *   AWS requires s3:ListBucket for HeadBucket with no way to scope by prefix since
+ *   HeadBucket doesn't send a prefix parameter. Read access is still scoped to the
+ *   dataset prefix, so listing only reveals object names, not contents.
+ */
+export function generateDownloadPolicy(bucket: string, datasetId: string): string {
+  return JSON.stringify({
+    Version: "2012-10-17",
+    Statement: [
+      {
+        Sid: "AllowDatasetRead",
+        Effect: "Allow",
+        Action: ["s3:GetObject", "s3:HeadObject"],
+        Resource: `arn:aws:s3:::${bucket}/${datasetId}/objects/*`,
+      },
+      {
+        Sid: "AllowBucketAccess",
+        Effect: "Allow",
+        Action: "s3:ListBucket",
+        Resource: `arn:aws:s3:::${bucket}`,
+      },
+    ],
+  });
+}
