@@ -8,6 +8,7 @@
 import { existsSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { spawn } from "bun";
+import chalk from "chalk";
 
 /**
  * Version info for a tool
@@ -2034,6 +2035,81 @@ export async function getCurrentBranch(datasetPath: string): Promise<string | nu
     return stdout.trim();
   } catch {
     return null;
+  }
+}
+
+/**
+ * Ensure the local branch is named "main". NEMAR requires "main" as the default branch
+ * for CI, branch protection, and metadata pipelines to work.
+ *
+ * If the branch is not "main", warns the user and offers to rename it.
+ * Respects --yes flag for non-interactive mode (auto-renames).
+ *
+ * @returns true if branch is (now) "main", false if user declined rename
+ */
+export async function ensureLocalMainBranch(
+  datasetPath: string,
+  options: { yes?: boolean } = {},
+): Promise<boolean> {
+  const currentBranch = await getCurrentBranch(datasetPath);
+
+  if (!currentBranch || currentBranch === "main") {
+    return true;
+  }
+
+  console.log(
+    chalk.yellow(
+      `\n  Warning: Your current branch is "${currentBranch}", but NEMAR requires "main".`,
+    ),
+  );
+  console.log(
+    chalk.yellow(
+      "  Without renaming, CI validation, branch protection, and metadata pipelines will not work.",
+    ),
+  );
+
+  if (options.yes) {
+    // Auto-rename in non-interactive mode
+    const { exitCode } = await runCommand(["git", "branch", "-m", currentBranch, "main"], {
+      cwd: datasetPath,
+    });
+    if (exitCode !== 0) {
+      console.log(chalk.red(`  Failed to rename branch "${currentBranch}" to "main".`));
+      return false;
+    }
+    console.log(chalk.green(`  Renamed branch "${currentBranch}" to "main".`));
+    return true;
+  }
+
+  // Interactive prompt
+  const inquirer = (await import("inquirer")).default;
+  try {
+    const { rename } = await inquirer.prompt([
+      {
+        type: "confirm",
+        name: "rename",
+        message: `Rename branch "${currentBranch}" to "main"?`,
+        default: true,
+      },
+    ]);
+
+    if (!rename) {
+      console.log(chalk.red("  Upload cancelled. Rename your branch to main before uploading:"));
+      console.log(chalk.dim(`    git branch -m ${currentBranch} main`));
+      return false;
+    }
+
+    const { exitCode } = await runCommand(["git", "branch", "-m", currentBranch, "main"], {
+      cwd: datasetPath,
+    });
+    if (exitCode !== 0) {
+      console.log(chalk.red(`  Failed to rename branch "${currentBranch}" to "main".`));
+      return false;
+    }
+    console.log(chalk.green(`  Renamed branch "${currentBranch}" to "main".`));
+    return true;
+  } catch {
+    return false;
   }
 }
 

@@ -79,6 +79,7 @@ import {
   dropFiles,
   enableS3Remote,
   ensureGitAnnexInitialized,
+  ensureLocalMainBranch,
   formatBytes,
   getAnnexS3Remotes,
   getCurrentBranch,
@@ -988,6 +989,12 @@ Examples:
     }
 
     spinner.succeed("GitHub remote configured");
+
+    // Step 8b: Ensure local branch is named "main"
+    const branchOk = await ensureLocalMainBranch(absolutePath, { yes: options.yes });
+    if (!branchOk) {
+      process.exit(1);
+    }
 
     // Step 9: Upload data files to S3 via git-annex S3 special remote
     // Initialize progress tracking if not already present

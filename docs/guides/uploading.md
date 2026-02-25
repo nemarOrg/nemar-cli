@@ -12,6 +12,13 @@ Before uploading:
 - [ ] GitHub CLI (`gh`) installed and authenticated
 - [ ] Sandbox training completed (`nemar sandbox`)
 
+!!! warning "DataLad Users"
+    If your dataset was initialized with `datalad create`, rename the default branch to `main` before uploading:
+    ```bash
+    git branch -m adjusted/master\(unlocked\) main
+    ```
+    NEMAR requires `main` as the default branch. DataLad's adjusted branch naming will cause CI and metadata pipelines to fail.
+
 ## Step 1: Validate Your Dataset
 
 Always validate before uploading:
