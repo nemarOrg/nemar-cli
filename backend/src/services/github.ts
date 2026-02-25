@@ -409,6 +409,39 @@ export async function createOrUpdateFile(
 }
 
 /**
+ * Delete a file from a repository via the GitHub Contents API.
+ */
+export async function deleteRepoFile(
+  repo: string,
+  path: string,
+  sha: string,
+  message: string,
+  pat: string,
+): Promise<void> {
+  const response = await fetch(`${GITHUB_API}/repos/${ORG_NAME}/${repo}/contents/${path}`, {
+    method: "DELETE",
+    headers: {
+      Authorization: `Bearer ${pat}`,
+      Accept: "application/vnd.github.v3+json",
+      "User-Agent": "NEMAR-API",
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      message,
+      sha,
+      committer: NEMAR_COMMITTER,
+      author: NEMAR_COMMITTER,
+    }),
+  });
+
+  if (response.status === 404) return; // already deleted; treat as success
+  if (!response.ok) {
+    const body = await response.text().catch(() => "");
+    throw new Error(`GitHub API error ${response.status} deleting ${path}: ${body}`);
+  }
+}
+
+/**
  * Set repository visibility (public or private)
  */
 export async function setRepoVisibility(
