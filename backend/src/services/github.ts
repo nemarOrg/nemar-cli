@@ -263,7 +263,8 @@ export async function ensureMainBranch(
   });
 
   if (!repoResponse.ok) {
-    throw new Error(`Failed to fetch repo info for ${repo}: ${repoResponse.status}`);
+    const body = await repoResponse.text().catch(() => "");
+    throw new Error(`Failed to fetch repo info for ${repo}: ${repoResponse.status} ${body}`);
   }
 
   const repoData = (await repoResponse.json()) as { default_branch: string };

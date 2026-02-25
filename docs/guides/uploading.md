@@ -13,11 +13,12 @@ Before uploading:
 - [ ] Sandbox training completed (`nemar sandbox`)
 
 !!! warning "DataLad Users"
-    If your dataset was initialized with `datalad create`, rename the default branch to `main` before uploading:
+    NEMAR requires `main` as the default branch. DataLad's adjusted branch naming (e.g. `adjusted/master(unlocked)`) will cause CI and metadata pipelines to fail.
+
+    The CLI will detect non-`main` branches during upload and offer to rename automatically. You can also rename manually:
     ```bash
     git branch -m adjusted/master\(unlocked\) main
     ```
-    NEMAR requires `main` as the default branch. DataLad's adjusted branch naming will cause CI and metadata pipelines to fail.
 
 ## Step 1: Validate Your Dataset
 

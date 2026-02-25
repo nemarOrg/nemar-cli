@@ -899,7 +899,7 @@ datasetRoutes.post("/:id/finalize", authMiddleware, async (c) => {
         );
       }
     } catch (error) {
-      console.error("Failed to check/rename default branch:", error);
+      console.error(`Failed to check/rename default branch for ${datasetId}:`, error);
       warnings.push("Could not verify default branch is 'main'; CI and protection may not work");
     }
 
