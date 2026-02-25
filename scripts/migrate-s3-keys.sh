@@ -98,8 +98,9 @@ for ds in "${DATASETS[@]}"; do
   echo "  Step 2: Cloning..."
   REPO_DIR="${WORK_DIR}/${ds}"
 
-  if ! git clone "git@github.com:${ORG}/${ds}.git" "$REPO_DIR" 2>&1 | tail -1; then
+  if ! git clone "git@github.com:${ORG}/${ds}.git" "$REPO_DIR" > "${WORK_DIR}/${ds}_clone.log" 2>&1; then
     echo "  FAIL: Could not clone $ds"
+    tail -3 "${WORK_DIR}/${ds}_clone.log"
     FAILED=$((FAILED + 1))
     echo ""
     continue
@@ -109,7 +110,13 @@ for ds in "${DATASETS[@]}"; do
 
   # Step 3: Initialize git-annex
   echo "  Step 3: Initializing git-annex..."
-  git annex init "migration" 2>/dev/null || true
+  if ! git annex init "migration" 2>&1; then
+    echo "  FAIL: git annex init failed for $ds"
+    FAILED=$((FAILED + 1))
+    cd "$WORK_DIR"
+    echo ""
+    continue
+  fi
 
   # Step 4: Map files to git-annex keys and copy S3 objects
   echo "  Step 4: Re-keying S3 objects (server-side copy)..."
@@ -171,7 +178,13 @@ for ds in "${DATASETS[@]}"; do
   if aws s3 ls "s3://${BUCKET}/${ANNEX_UUID_KEY}" &>/dev/null; then
     echo "  Step 5: Removing stale annex-uuid from S3..."
     if ! $DRY_RUN; then
-      aws s3 rm "s3://${BUCKET}/${ANNEX_UUID_KEY}" --quiet
+      if ! aws s3 rm "s3://${BUCKET}/${ANNEX_UUID_KEY}" --quiet 2>&1; then
+        echo "  FAIL: Could not remove stale annex-uuid for $ds"
+        FAILED=$((FAILED + 1))
+        cd "$WORK_DIR"
+        echo ""
+        continue
+      fi
     fi
   fi
 
@@ -207,7 +220,11 @@ for ds in "${DATASETS[@]}"; do
   if $DRY_RUN; then
     echo "    [DRY RUN] Would run: git annex fsck --from nemar-s3 --fast"
   else
-    git annex fsck --from nemar-s3 --fast 2>&1 | tail -3
+    if git annex fsck --from nemar-s3 --fast 2>&1; then
+      echo "    Location tracking updated"
+    else
+      echo "    WARNING: fsck reported errors for $ds (some files may not be tracked)"
+    fi
   fi
 
   # Step 8: Push git-annex branch
@@ -231,15 +248,21 @@ for ds in "${DATASETS[@]}"; do
   echo "  Step 9: Cleaning up old path-based S3 objects..."
 
   CLEANED=0
+  DEL_FAIL=0
   for old_key in "${OLD_KEYS[@]}"; do
     if $DRY_RUN; then
       echo "    [DRY RUN] Would delete s3://${BUCKET}/${old_key}"
+      CLEANED=$((CLEANED + 1))
     else
-      aws s3 rm "s3://${BUCKET}/${old_key}" --quiet 2>/dev/null
+      if aws s3 rm "s3://${BUCKET}/${old_key}" --quiet 2>&1; then
+        CLEANED=$((CLEANED + 1))
+      else
+        echo "    WARNING: Failed to delete s3://${BUCKET}/${old_key}"
+        DEL_FAIL=$((DEL_FAIL + 1))
+      fi
     fi
-    CLEANED=$((CLEANED + 1))
   done
-  echo "    Cleaned up $CLEANED old objects"
+  echo "    Cleaned up $CLEANED old objects${DEL_FAIL:+, $DEL_FAIL failed}"
 
   SUCCESS=$((SUCCESS + 1))
   echo "  Done: $ds"

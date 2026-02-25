@@ -93,8 +93,9 @@ for ds in "${DATASETS[@]}"; do
   echo "  Step 2: Cloning..."
   REPO_DIR="${WORK_DIR}/${ds}"
 
-  if ! git clone "git@github.com:${ORG}/${ds}.git" "$REPO_DIR" 2>&1 | tail -1; then
+  if ! git clone "git@github.com:${ORG}/${ds}.git" "$REPO_DIR" > "${WORK_DIR}/${ds}_clone.log" 2>&1; then
     echo "  FAIL: Could not clone $ds"
+    tail -3 "${WORK_DIR}/${ds}_clone.log"
     FAILED=$((FAILED + 1))
     echo ""
     continue
@@ -104,7 +105,13 @@ for ds in "${DATASETS[@]}"; do
 
   # Step 3: Initialize git-annex
   echo "  Step 3: Initializing git-annex..."
-  git annex init "migration" 2>/dev/null || true
+  if ! git annex init "migration" 2>&1; then
+    echo "  FAIL: git annex init failed for $ds"
+    FAILED=$((FAILED + 1))
+    cd "$WORK_DIR"
+    echo ""
+    continue
+  fi
 
   # Step 4: Remove stale annex-uuid from S3 if present
   # Previous migrations (migrate-s3-structure.sh) may have left an annex-uuid
@@ -116,7 +123,13 @@ for ds in "${DATASETS[@]}"; do
     if $DRY_RUN; then
       echo "    [DRY RUN] Would delete s3://${BUCKET}/${ANNEX_UUID_KEY}"
     else
-      aws s3 rm "s3://${BUCKET}/${ANNEX_UUID_KEY}" --quiet
+      if ! aws s3 rm "s3://${BUCKET}/${ANNEX_UUID_KEY}" --quiet 2>&1; then
+        echo "  FAIL: Could not remove stale annex-uuid for $ds"
+        FAILED=$((FAILED + 1))
+        cd "$WORK_DIR"
+        echo ""
+        continue
+      fi
       echo "    Removed stale annex-uuid"
     fi
   fi

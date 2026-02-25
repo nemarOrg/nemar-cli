@@ -76,7 +76,7 @@ const SANDBOX_MAX_TOTAL_SIZE = 10 * 1024 * 1024;
  * Creates GitHub repo, assigns dataset ID, and returns presigned URLs for upload.
  * Uses per-user AWS credentials for scoped S3 access.
  */
-datasetRoutes.post("/", authMiddleware, cliVersionGuard(), zValidator("json", createDatasetSchema), async (c) => {
+datasetRoutes.post("/", authMiddleware, cliVersionGuard, zValidator("json", createDatasetSchema), async (c) => {
   const { name, description, files, sandbox } = c.req.valid("json");
   const user = c.get("user");
   const db = c.env.DB;
@@ -658,7 +658,7 @@ const uploadCredentialsSchema = z.object({
 datasetRoutes.post(
   "/:id/upload-credentials",
   authMiddleware,
-  cliVersionGuard(),
+  cliVersionGuard,
   zValidator("json", uploadCredentialsSchema),
   async (c) => {
     const datasetId = c.req.param("id");

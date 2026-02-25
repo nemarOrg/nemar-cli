@@ -2,8 +2,8 @@
  * CLI Version Enforcement Middleware
  *
  * Rejects requests from CLI versions older than the minimum required.
- * Prevents broken uploads from pre-v0.6.4 clients that don't create
- * the S3 special remote properly.
+ * Pre-v0.6.3 clients used registerurl instead of the S3 special remote.
+ * The minimum is v0.6.4, the first version to send the X-CLI-Version header.
  */
 
 import type { Context, Next } from "hono";
@@ -13,60 +13,71 @@ const MIN_CLI_VERSION = "0.6.4";
 
 /**
  * Parse a semver string into comparable parts.
- * Returns null for unparseable versions.
+ * Returns null for unparseable versions. Accepts extra parts (only first 3 used).
  */
 function parseSemver(v: string): [number, number, number] | null {
-	// Strip leading 'v' and any pre-release suffix for comparison
 	const clean = v.replace(/^v/, "").split("-")[0];
 	const parts = clean.split(".").map(Number);
 	if (parts.length < 3 || parts.some(Number.isNaN)) return null;
 	return [parts[0], parts[1], parts[2]];
 }
 
-function isVersionBelow(version: string, minimum: string): boolean {
+function isVersionBelow(version: string, minimum: string): boolean | null {
 	const v = parseSemver(version);
 	const m = parseSemver(minimum);
-	if (!v || !m) return false; // Can't parse; don't block
+	if (!v || !m) return null;
 	if (v[0] !== m[0]) return v[0] < m[0];
 	if (v[1] !== m[1]) return v[1] < m[1];
 	return v[2] < m[2];
 }
 
 /**
- * Middleware that checks X-CLI-Version header on write endpoints.
+ * Middleware that checks the X-CLI-Version header.
  * Returns 426 Upgrade Required if the CLI is too old.
+ * Apply selectively to routes that require a minimum CLI version.
  */
-export function cliVersionGuard() {
-	return async (
-		c: Context<{ Bindings: Bindings; Variables: Variables }>,
-		next: Next,
-	) => {
-		const cliVersion = c.req.header("X-CLI-Version");
+export const cliVersionGuard = async (
+	c: Context<{ Bindings: Bindings; Variables: Variables }>,
+	next: Next,
+) => {
+	const cliVersion = c.req.header("X-CLI-Version");
 
-		// No header = old CLI or non-CLI client. Block it.
-		if (!cliVersion) {
-			return c.json(
-				{
-					error: "CLI version too old",
-					message: `This operation requires NEMAR CLI v${MIN_CLI_VERSION} or newer. Run: bun install -g nemar@latest`,
-					minimum_version: MIN_CLI_VERSION,
-				},
-				426,
-			);
-		}
+	if (!cliVersion) {
+		return c.json(
+			{
+				error: "CLI version too old",
+				message: `This operation requires NEMAR CLI v${MIN_CLI_VERSION} or newer. Run: bun install -g nemar@latest`,
+				minimum_version: MIN_CLI_VERSION,
+			},
+			426,
+		);
+	}
 
-		if (isVersionBelow(cliVersion, MIN_CLI_VERSION)) {
-			return c.json(
-				{
-					error: "CLI version too old",
-					message: `Your CLI version (${cliVersion}) is below the minimum required (${MIN_CLI_VERSION}). Run: bun install -g nemar@latest`,
-					minimum_version: MIN_CLI_VERSION,
-					current_version: cliVersion,
-				},
-				426,
-			);
-		}
+	const result = isVersionBelow(cliVersion, MIN_CLI_VERSION);
 
-		await next();
-	};
-}
+	if (result === null) {
+		return c.json(
+			{
+				error: "Invalid CLI version",
+				message: `Could not parse CLI version "${cliVersion}". Run: bun install -g nemar@latest`,
+				minimum_version: MIN_CLI_VERSION,
+				current_version: cliVersion,
+			},
+			400,
+		);
+	}
+
+	if (result) {
+		return c.json(
+			{
+				error: "CLI version too old",
+				message: `Your CLI version (${cliVersion}) is below the minimum required (${MIN_CLI_VERSION}). Run: bun install -g nemar@latest`,
+				minimum_version: MIN_CLI_VERSION,
+				current_version: cliVersion,
+			},
+			426,
+		);
+	}
+
+	await next();
+};
