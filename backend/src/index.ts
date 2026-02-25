@@ -44,7 +44,7 @@ api.use(
       return null;
     },
     allowMethods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-    allowHeaders: ["Content-Type", "Authorization"],
+    allowHeaders: ["Content-Type", "Authorization", "X-CLI-Version"],
     exposeHeaders: ["X-Request-Id"],
     credentials: true,
     maxAge: 86400,
