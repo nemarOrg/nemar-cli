@@ -6,6 +6,7 @@
  */
 
 import { getConfig } from "./config.js";
+import { version } from "./version.js";
 
 const DEFAULT_API_URL = "https://api.osc.earth/nemar";
 
@@ -60,6 +61,7 @@ async function request<T>(
   const url = `${getApiUrl()}${path}`;
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
+    "X-CLI-Version": version,
     ...(options.headers as Record<string, string>),
   };
 
