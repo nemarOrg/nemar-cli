@@ -42,6 +42,7 @@ import {
   listDatasets,
   listManifestVersions,
   requestDatasetAccess,
+  requestDownloadCredentials,
   requestPublication,
   requestUploadCredentials,
   resendPublishNotification,
@@ -1214,8 +1215,20 @@ Examples:
     console.log(`  Dataset ID: ${chalk.cyan(datasetInfo.dataset_id)}`);
     console.log(`  GitHub: ${chalk.cyan(datasetInfo.github_url)}`);
     console.log();
-    console.log(chalk.gray("To clone this dataset:"));
-    console.log(chalk.gray(`  git clone ${datasetInfo.ssh_url}`));
+    console.log(chalk.gray("To download this dataset:"));
+    console.log(chalk.gray(`  nemar dataset download ${datasetInfo.dataset_id}`));
+    console.log();
+    console.log(
+      chalk.yellow(
+        "Note: This dataset is private. Only the owner and designated collaborators can",
+      ),
+    );
+    console.log(
+      chalk.yellow("download it, and only through the NEMAR CLI (not direct git-annex commands)."),
+    );
+    console.log(
+      chalk.yellow("After publishing, the data will be publicly available for everyone."),
+    );
   });
 
 // Download command
@@ -1233,8 +1246,13 @@ Description:
   Download a BIDS dataset from NEMAR. Uses git-annex for efficient
   data transfer with parallel streams.
 
+  Private datasets require authentication (nemar auth login) and can
+  only be downloaded by the owner or designated collaborators.
+  After publishing, datasets become publicly available.
+
 Requirements:
-  - git-annex installed (no account needed)
+  - git-annex installed
+  - NEMAR account (for private datasets)
 
 Examples:
   $ nemar dataset download nm000104              # Download to ./nm000104
@@ -1317,8 +1335,27 @@ Examples:
 
     spinner.succeed("Dataset cloned");
 
+    // For private datasets, fetch temporary S3 download credentials
+    let downloadCreds: Awaited<ReturnType<typeof requestDownloadCredentials>> | null = null;
+    if (datasetInfo.visibility !== "public") {
+      spinner = ora("Requesting download credentials...").start();
+      try {
+        downloadCreds = await requestDownloadCredentials(datasetId);
+        spinner.succeed("Download credentials received (2h expiry)");
+      } catch (error) {
+        spinner.fail("Failed to get download credentials");
+        console.log(chalk.red(`  ${(error as Error).message}`));
+        console.log(
+          chalk.gray("Private datasets require authentication. Run 'nemar auth login' first."),
+        );
+        process.exit(1);
+      }
+    }
+
+    const s3Creds = downloadCreds ? toS3Credentials(downloadCreds.credentials) : undefined;
+
     // Enable S3 remote if available (new datasets have it; old ones use web URLs)
-    const s3Enable = await enableS3Remote(absoluteOutput);
+    const s3Enable = await enableS3Remote(absoluteOutput, "nemar-s3", s3Creds);
     if (s3Enable.enabled) {
       console.log(chalk.gray("  S3 remote enabled for data downloads"));
     } else if (!s3Enable.success) {
@@ -1331,19 +1368,30 @@ Examples:
 
       const getResult = await getDatasetData(absoluteOutput, {
         jobs: Number.parseInt(options.jobs, 10),
+        credentials: s3Creds,
       });
 
       if (!getResult.success) {
         spinner.fail("Failed to download data files");
         console.log(chalk.red(`  ${getResult.error}`));
         console.log(chalk.gray("The dataset was cloned but data files are not available locally."));
-        console.log(chalk.gray(`You can try again with: cd ${absoluteOutput} && git annex get .`));
+        console.log(
+          chalk.gray(`You can try again with: cd ${absoluteOutput} && nemar dataset get`),
+        );
+        if (downloadCreds) {
+          await clearAnnexCredentials(absoluteOutput);
+        }
         process.exit(1);
       }
 
       spinner.succeed(`Data downloaded (${getResult.filesDownloaded || 0} files)`);
     } else {
       console.log(chalk.gray("Skipping data files (--no-data flag)"));
+    }
+
+    // Clear cached S3 credentials so future operations request fresh tokens
+    if (downloadCreds) {
+      await clearAnnexCredentials(absoluteOutput);
     }
 
     // Step 6: Show completion info
@@ -2893,8 +2941,12 @@ Description:
   Clone a NEMAR dataset repository with git-annex initialized.
   Data files are not downloaded; use 'nemar dataset get' afterward.
 
+  Private datasets require authentication (nemar auth login) and are
+  only accessible to the owner or designated collaborators.
+
 Requirements:
   - git-annex installed
+  - NEMAR account (for private datasets)
 
 Examples:
   $ nemar dataset clone nm000104
@@ -2916,6 +2968,7 @@ Examples:
     // Resolve dataset ID to repo URL
     spinner = ora(`Resolving dataset ${datasetId}...`).start();
     let repoUrl: string;
+    let datasetVisibility: string;
     try {
       const dataset = await getDataset(datasetId);
       if (!dataset.github_repo || !/^[a-zA-Z0-9_.-]+\/[a-zA-Z0-9_.-]+$/.test(dataset.github_repo)) {
@@ -2924,6 +2977,7 @@ Examples:
         process.exit(1);
       }
       repoUrl = `https://github.com/${dataset.github_repo}.git`;
+      datasetVisibility = dataset.visibility;
       spinner.succeed(`Found: ${dataset.name}`);
     } catch (error) {
       spinner.fail("Dataset not found");
@@ -2938,6 +2992,27 @@ Examples:
       process.exit(1);
     }
 
+    // For private datasets, fetch temporary S3 download credentials
+    let cloneDownloadCreds: Awaited<ReturnType<typeof requestDownloadCredentials>> | null = null;
+    if (datasetVisibility !== "public") {
+      spinner = ora("Requesting download credentials...").start();
+      try {
+        cloneDownloadCreds = await requestDownloadCredentials(datasetId);
+        spinner.succeed("Download credentials received (2h expiry)");
+      } catch (error) {
+        spinner.fail("Failed to get download credentials");
+        console.log(chalk.red(`  ${(error as Error).message}`));
+        console.log(
+          chalk.gray("Private datasets require authentication. Run 'nemar auth login' first."),
+        );
+        process.exit(1);
+      }
+    }
+
+    const cloneS3Creds = cloneDownloadCreds
+      ? toS3Credentials(cloneDownloadCreds.credentials)
+      : undefined;
+
     spinner = ora("Cloning dataset...").start();
     const result = await cloneDataset(repoUrl, outputPath);
     if (!result.success) {
@@ -2949,11 +3024,16 @@ Examples:
     spinner.succeed("Dataset cloned");
 
     // Enable S3 remote if available (new datasets have it; old ones use web URLs)
-    const s3Enable = await enableS3Remote(outputPath);
+    const s3Enable = await enableS3Remote(outputPath, "nemar-s3", cloneS3Creds);
     if (s3Enable.enabled) {
       console.log(chalk.gray("  S3 remote enabled for data downloads"));
     } else if (!s3Enable.success) {
       console.log(chalk.yellow(`  Warning: Could not enable S3 remote: ${s3Enable.error}`));
+    }
+
+    // Clear cached credentials to prevent stale STS tokens
+    if (cloneDownloadCreds) {
+      await clearAnnexCredentials(outputPath);
     }
 
     console.log();
@@ -2977,6 +3057,9 @@ Description:
   Download data files from the remote for a cloned dataset.
   Must be run inside a git-annex dataset directory.
 
+  For private datasets, credentials are fetched automatically
+  if you are logged in (nemar auth login).
+
 Examples:
   $ nemar dataset get                    # Get all files
   $ nemar dataset get sub-01/eeg/        # Get specific directory
@@ -2997,8 +3080,42 @@ Examples:
       process.exit(1);
     }
 
+    // Detect dataset ID and check if private (needs authenticated S3 creds)
+    let getCreds: Awaited<ReturnType<typeof requestDownloadCredentials>> | null = null;
+    const getDatasetId = await getDatasetIdFromRemote(cwd);
+    if (getDatasetId) {
+      let dsInfo: Awaited<ReturnType<typeof getDataset>> | null = null;
+      try {
+        dsInfo = await getDataset(getDatasetId);
+      } catch {
+        // Dataset info fetch failed; proceed without creds (will use publicurl if public)
+      }
+
+      if (dsInfo && dsInfo.visibility !== "public") {
+        if (!isAuthenticated()) {
+          console.log(chalk.red("Error: This is a private dataset. Authentication required."));
+          console.log(chalk.gray("Run 'nemar auth login' first."));
+          process.exit(1);
+        }
+        const credSpinner = ora("Requesting download credentials...").start();
+        try {
+          getCreds = await requestDownloadCredentials(getDatasetId);
+          credSpinner.succeed("Download credentials received (2h expiry)");
+        } catch (error) {
+          credSpinner.fail("Failed to get download credentials");
+          console.log(chalk.red(`  ${(error as Error).message}`));
+          console.log(
+            chalk.gray("Private datasets require authentication. Run 'nemar auth login' first."),
+          );
+          process.exit(1);
+        }
+      }
+    }
+
+    const getS3Creds = getCreds ? toS3Credentials(getCreds.credentials) : undefined;
+
     // Enable S3 remote if available (idempotent)
-    const s3Enable = await enableS3Remote(cwd);
+    const s3Enable = await enableS3Remote(cwd, "nemar-s3", getS3Creds);
     if (!s3Enable.success && !s3Enable.enabled) {
       console.log(chalk.yellow(`  Warning: Could not enable S3 remote: ${s3Enable.error}`));
     }
@@ -3007,11 +3124,19 @@ Examples:
     const desc = paths ? `Getting ${paths.length} path(s)...` : "Getting all data files...";
     const spinner = ora(desc).start();
 
-    const result = await getDatasetData(cwd, { jobs, paths });
+    const result = await getDatasetData(cwd, { jobs, paths, credentials: getS3Creds });
     if (!result.success) {
       spinner.fail("Failed to get data");
       console.log(chalk.red(`  ${result.error}`));
+      if (getCreds) {
+        await clearAnnexCredentials(cwd);
+      }
       process.exit(1);
+    }
+
+    // Clear cached S3 credentials so future operations request fresh tokens
+    if (getCreds) {
+      await clearAnnexCredentials(cwd);
     }
 
     if (result.filesDownloaded === 0) {

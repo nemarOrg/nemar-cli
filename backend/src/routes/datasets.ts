@@ -31,7 +31,7 @@ import {
   listManifests,
   removePublicReadPolicy,
 } from "../services/s3";
-import { generateUploadPolicy, getFederationToken } from "../services/sts";
+import { generateDownloadPolicy, generateUploadPolicy, getFederationToken } from "../services/sts";
 import { type Bindings, type Variables, hasRole } from "../types/bindings";
 
 export const datasetRoutes = new Hono<{ Bindings: Bindings; Variables: Variables }>();
@@ -451,7 +451,7 @@ datasetRoutes.get("/", optionalAuthMiddleware, async (c) => {
  *
  * Visibility rules:
  * - Public datasets: accessible to everyone
- * - Private datasets: only accessible to owner or admin
+ * - Private datasets: accessible to owner, admin, or collaborator
  */
 datasetRoutes.get("/:id", optionalAuthMiddleware, async (c) => {
   const datasetId = c.req.param("id");
@@ -484,8 +484,18 @@ datasetRoutes.get("/:id", optionalAuthMiddleware, async (c) => {
   // Enforce visibility restrictions for private datasets
   if (dataset.visibility !== "public") {
     if (!user || (!hasRole(user.role, "admin") && user.id !== dataset.owner_user_id)) {
-      // Return 404 instead of 403 to avoid leaking dataset existence
-      return c.json({ error: "Dataset not found" }, 404);
+      // Check if user is a collaborator before returning 404
+      const isCollaborator = user
+        ? await db
+            .prepare(
+              "SELECT 1 FROM dataset_collaborators dc JOIN datasets d ON dc.dataset_id = d.id WHERE d.dataset_id = ? AND dc.user_id = ?",
+            )
+            .bind(datasetId, user.id)
+            .first()
+        : null;
+      if (!isCollaborator) {
+        return c.json({ error: "Dataset not found" }, 404);
+      }
     }
   }
 
@@ -746,6 +756,103 @@ datasetRoutes.post(
     } catch (error) {
       console.error("Failed to generate upload credentials:", error);
       return c.json({ error: "Failed to generate upload credentials" }, 502);
+    }
+  },
+);
+
+// Schema for download credentials request
+const downloadCredentialsSchema = z.object({
+  duration_seconds: z.number().int().min(900).max(7200).optional(),
+});
+
+/**
+ * POST /datasets/:id/download-credentials - Get temporary read-only S3 credentials
+ *
+ * Returns STS temporary credentials scoped to GetObject on the dataset's
+ * objects/ prefix. Required for downloading private datasets via git-annex.
+ * Public datasets use the publicurl path and don't need this endpoint.
+ */
+datasetRoutes.post(
+  "/:id/download-credentials",
+  authMiddleware,
+  zValidator("json", downloadCredentialsSchema),
+  async (c) => {
+    const datasetId = c.req.param("id");
+    const { duration_seconds } = c.req.valid("json");
+    const user = c.get("user");
+    const db = c.env.DB;
+
+    if (!isValidDatasetId(datasetId)) {
+      return c.json({ error: "Invalid dataset ID format" }, 400);
+    }
+
+    const dataset = await db
+      .prepare("SELECT owner_user_id, visibility FROM datasets WHERE dataset_id = ?")
+      .bind(datasetId)
+      .first<{ owner_user_id: number; visibility: string }>();
+
+    if (!dataset) {
+      return c.json({ error: "Dataset not found" }, 404);
+    }
+
+    if (dataset.visibility === "public") {
+      return c.json({ error: "Public datasets do not require download credentials" }, 400);
+    }
+
+    // Owner or admin can always download; otherwise check collaborator status
+    if (dataset.owner_user_id !== user.id && !hasRole(user.role, "admin")) {
+      const isCollaborator = await db
+        .prepare(
+          "SELECT 1 FROM dataset_collaborators dc JOIN datasets d ON dc.dataset_id = d.id WHERE d.dataset_id = ? AND dc.user_id = ?",
+        )
+        .bind(datasetId, user.id)
+        .first();
+
+      if (!isCollaborator) {
+        return c.json(
+          { error: "Only dataset owner or collaborators can download this dataset" },
+          403,
+        );
+      }
+    }
+
+    const policy = generateDownloadPolicy(c.env.S3_BUCKET, datasetId);
+
+    const tokenName = `dl-${datasetId}`.replace(/[^\w=,.@-]/g, "").slice(0, 32);
+    if (tokenName.length < 2) {
+      return c.json({ error: `Cannot generate token name from dataset ID: ${datasetId}` }, 400);
+    }
+
+    try {
+      const token = await getFederationToken(
+        {
+          accessKeyId: c.env.AWS_ACCESS_KEY_ID,
+          secretAccessKey: c.env.AWS_SECRET_ACCESS_KEY,
+          region: c.env.AWS_REGION,
+        },
+        {
+          name: tokenName,
+          policy,
+          durationSeconds: duration_seconds ?? 7200,
+        },
+      );
+
+      return c.json({
+        credentials: {
+          access_key_id: token.accessKeyId,
+          secret_access_key: token.secretAccessKey,
+          session_token: token.sessionToken,
+          expiration: token.expiration,
+        },
+        s3: {
+          bucket: c.env.S3_BUCKET,
+          region: c.env.AWS_REGION,
+          prefix: `${datasetId}/objects`,
+        },
+      });
+    } catch (error) {
+      console.error("Failed to generate download credentials:", error);
+      return c.json({ error: "Failed to generate download credentials" }, 502);
     }
   },
 );

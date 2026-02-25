@@ -589,10 +589,27 @@ export async function clearAnnexCredentials(path: string): Promise<void> {
 export async function enableS3Remote(
   path: string,
   remoteName = "nemar-s3",
+  credentials?: S3Credentials,
 ): Promise<{ success: boolean; enabled: boolean; error?: string }> {
   try {
+    const env: Record<string, string> = {};
+    if (credentials) {
+      env.AWS_ACCESS_KEY_ID = credentials.accessKeyId;
+      env.AWS_SECRET_ACCESS_KEY = credentials.secretAccessKey;
+      if (credentials.sessionToken) {
+        env.AWS_SESSION_TOKEN = credentials.sessionToken;
+      }
+    }
+
     const { stderr, exitCode } = await runCommand(["git", "annex", "enableremote", remoteName], {
       cwd: path,
+      ...(Object.keys(env).length > 0 && {
+        env: Object.fromEntries(
+          Object.entries({ ...process.env, ...env }).filter(
+            (e): e is [string, string] => e[1] != null,
+          ),
+        ),
+      }),
     });
 
     if (exitCode === 0) {
@@ -1556,6 +1573,7 @@ export async function getDatasetData(
   options: {
     jobs?: number;
     paths?: string[]; // Specific paths to get, or all if empty
+    credentials?: S3Credentials;
   } = {},
 ): Promise<{ success: boolean; error?: string; filesDownloaded?: number }> {
   const jobs = options.jobs || 4;
@@ -1563,7 +1581,24 @@ export async function getDatasetData(
 
   try {
     const args = ["git", "annex", "get", "-J", jobs.toString(), ...paths];
-    const { stdout, stderr, exitCode } = await runCommand(args, { cwd: datasetPath });
+    const env: Record<string, string> = {};
+    if (options.credentials) {
+      env.AWS_ACCESS_KEY_ID = options.credentials.accessKeyId;
+      env.AWS_SECRET_ACCESS_KEY = options.credentials.secretAccessKey;
+      if (options.credentials.sessionToken) {
+        env.AWS_SESSION_TOKEN = options.credentials.sessionToken;
+      }
+    }
+    const { stdout, stderr, exitCode } = await runCommand(args, {
+      cwd: datasetPath,
+      ...(Object.keys(env).length > 0 && {
+        env: Object.fromEntries(
+          Object.entries({ ...process.env, ...env }).filter(
+            (e): e is [string, string] => e[1] != null,
+          ),
+        ),
+      }),
+    });
 
     if (exitCode !== 0) {
       return { success: false, error: stderr.trim() || "Failed to get dataset data" };
