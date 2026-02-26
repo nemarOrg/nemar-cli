@@ -45,6 +45,7 @@ import {
   createRelease,
   createRepository,
   createTag,
+  deleteRepoFile,
   deleteRepository,
   deployWorkflows,
   downloadReleaseArchive,
@@ -3205,21 +3206,19 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
       const doiBadge = `[![DOI](${badgeImg})](${doiUrl})`;
 
       const tree = await getTreeAtRef(repoName, "main", pat);
-      // Look for existing README in any format: README.md, README.rst, README.txt, README
+      // Find all README variants in the repo
       const readmeCandidates = ["README.md", "README.rst", "README.txt", "README"];
-      let existingReadme: { path: string; sha: string } | undefined;
+      const foundReadmes: { path: string; sha: string }[] = [];
       for (const candidate of readmeCandidates) {
         const found = tree.find((f) => f.path === candidate);
-        if (found) {
-          existingReadme = found;
-          break;
-        }
+        if (found) foundReadmes.push(found);
       }
 
+      // Use the best available README for content (prefer README.md, then others in order)
+      const contentSource = foundReadmes[0];
       let readmeContent = "";
-      const readmePath = existingReadme?.path || "README.md";
-      if (existingReadme) {
-        readmeContent = await getBlobContent(repoName, existingReadme.sha, pat);
+      if (contentSource) {
+        readmeContent = await getBlobContent(repoName, contentSource.sha, pat);
       } else {
         console.warn(`[publish] No README found in ${repoName}; creating README.md with DOI badge`);
       }
@@ -3232,13 +3231,35 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
         readmeContent = `${doiBadge}\n\n${readmeContent}`;
       }
 
+      // Always write to README.md (GitHub requires .md for badge rendering)
+      const isRename = contentSource && contentSource.path !== "README.md";
       await createOrUpdateFile(
         repoName,
-        readmePath,
+        "README.md",
         readmeContent,
-        `Add DOI badge: ${conceptDoi}`,
+        isRename
+          ? `Rename ${contentSource.path} to README.md and add DOI badge: ${conceptDoi}`
+          : `Add DOI badge: ${conceptDoi}`,
         pat,
       );
+
+      // Delete any non-.md README files (handles both fresh rename and resume after partial run)
+      for (const readme of foundReadmes) {
+        if (readme.path === "README.md") continue;
+        await deleteRepoFile(
+          repoName,
+          readme.path,
+          readme.sha,
+          `Remove old ${readme.path} (renamed to README.md)`,
+          pat,
+        );
+        console.log(`[publish] Removed ${readme.path} from ${repoName} (using README.md)`);
+        if (readme.path.endsWith(".rst")) {
+          console.warn(
+            `[publish] Warning: ${readme.path} was RST; content may not render correctly as Markdown`,
+          );
+        }
+      }
 
       // Update GitHub repo description with dataset name and DOI
       const { setRepoDescription } = await import("../services/github.js");

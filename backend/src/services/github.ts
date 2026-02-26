@@ -242,6 +242,65 @@ export async function deleteRepository(repo: string, pat: string): Promise<boole
 }
 
 /**
+ * Ensure a dataset repo's default branch is "main".
+ *
+ * Checks the repo's default branch via the GitHub API. If it is not "main",
+ * renames it using the branch rename endpoint. This handles repos created
+ * with DataLad (adjusted/master(unlocked)) or older git defaults (master).
+ *
+ * Safe to call multiple times (no-op if already "main").
+ */
+export async function ensureMainBranch(
+  repo: string,
+  pat: string,
+): Promise<{ renamed: boolean; previousBranch?: string }> {
+  const repoResponse = await fetch(`${GITHUB_API}/repos/${ORG_NAME}/${repo}`, {
+    headers: {
+      Authorization: `Bearer ${pat}`,
+      Accept: "application/vnd.github.v3+json",
+      "User-Agent": "NEMAR-API",
+    },
+  });
+
+  if (!repoResponse.ok) {
+    const body = await repoResponse.text().catch(() => "");
+    throw new Error(`Failed to fetch repo info for ${repo}: ${repoResponse.status} ${body}`);
+  }
+
+  const repoData = (await repoResponse.json()) as { default_branch: string };
+  const defaultBranch = repoData.default_branch;
+
+  if (defaultBranch === "main") {
+    return { renamed: false };
+  }
+
+  console.log(`Renaming default branch "${defaultBranch}" to "main" for ${repo}`);
+
+  const renameResponse = await fetch(
+    `${GITHUB_API}/repos/${ORG_NAME}/${repo}/branches/${encodeURIComponent(defaultBranch)}/rename`,
+    {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${pat}`,
+        Accept: "application/vnd.github.v3+json",
+        "User-Agent": "NEMAR-API",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ new_name: "main" }),
+    },
+  );
+
+  if (!renameResponse.ok) {
+    const errorBody = await renameResponse.text();
+    throw new Error(
+      `Failed to rename branch "${defaultBranch}" to "main" for ${repo}: ${renameResponse.status} ${errorBody}`,
+    );
+  }
+
+  return { renamed: true, previousBranch: defaultBranch };
+}
+
+/**
  * Apply branch protection rules to main branch
  *
  * Configuration:
@@ -346,6 +405,39 @@ export async function createOrUpdateFile(
   if (!response.ok && response.status !== 201) {
     const body = await response.text().catch(() => "");
     throw new Error(`GitHub API error ${response.status} committing ${path}: ${body}`);
+  }
+}
+
+/**
+ * Delete a file from a repository via the GitHub Contents API.
+ */
+export async function deleteRepoFile(
+  repo: string,
+  path: string,
+  sha: string,
+  message: string,
+  pat: string,
+): Promise<void> {
+  const response = await fetch(`${GITHUB_API}/repos/${ORG_NAME}/${repo}/contents/${path}`, {
+    method: "DELETE",
+    headers: {
+      Authorization: `Bearer ${pat}`,
+      Accept: "application/vnd.github.v3+json",
+      "User-Agent": "NEMAR-API",
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      message,
+      sha,
+      committer: NEMAR_COMMITTER,
+      author: NEMAR_COMMITTER,
+    }),
+  });
+
+  if (response.status === 404) return; // already deleted; treat as success
+  if (!response.ok) {
+    const body = await response.text().catch(() => "");
+    throw new Error(`GitHub API error ${response.status} deleting ${path}: ${body}`);
   }
 }
 

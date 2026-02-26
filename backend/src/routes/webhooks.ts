@@ -23,6 +23,7 @@ import { TEST_SHOULDER, extractDoi } from "../services/ezid.js";
 import {
   createOrUpdateFile,
   downloadReleaseArchive,
+  ensureMainBranch,
   getBlobContent,
   getTreeAtRef,
   setRepoDescription,
@@ -617,6 +618,14 @@ webhooks.post("/llm-enrich", async (c) => {
   }
 
   const pat = c.env.GITHUB_ADMIN_PAT;
+
+  // Ensure default branch is "main" before reading from it
+  try {
+    await ensureMainBranch(repoName, pat);
+  } catch (error) {
+    console.error(`[llm-enrich] Failed to verify default branch for ${repoName}:`, error);
+    // Continue anyway; getTreeAtRef will fail with a clear error if "main" doesn't exist
+  }
 
   try {
     // Read repo tree to find README and dataset_description.json

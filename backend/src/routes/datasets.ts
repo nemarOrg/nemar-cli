@@ -16,6 +16,7 @@ import {
   type GitHubRepo,
   addCollaborator,
   applyBranchProtection,
+  ensureMainBranch,
   checkWorkflowExists,
   createRepository,
   deployWorkflows,
@@ -890,6 +891,19 @@ datasetRoutes.post("/:id/finalize", authMiddleware, async (c) => {
 
     // Track warnings for non-fatal operations
     const warnings: string[] = [];
+
+    // Ensure default branch is "main" (handles DataLad or legacy repos)
+    try {
+      const branchResult = await ensureMainBranch(datasetId, c.env.GITHUB_ADMIN_PAT);
+      if (branchResult.renamed) {
+        warnings.push(
+          `Default branch renamed from "${branchResult.previousBranch}" to "main"`,
+        );
+      }
+    } catch (error) {
+      console.error(`Failed to check/rename default branch for ${datasetId}:`, error);
+      warnings.push("Could not verify default branch is 'main'; CI and protection may not work");
+    }
 
     // Deploy GitHub Actions workflows
     try {
