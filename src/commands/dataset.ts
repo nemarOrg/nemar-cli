@@ -105,6 +105,8 @@ import {
   promptForLicense,
   updateLicenseInDescription,
 } from "../lib/license.js";
+import { checkPrerequisitesForCommand } from "../lib/prerequisites.js";
+import { DownloadProgressTracker } from "../lib/progress.js";
 import { promptForProvenance } from "../lib/provenance.js";
 import { bumpVersion, isValidStableVersion, parseVersion } from "../lib/semver.js";
 import type { UploadProgress } from "../lib/upload-progress.js";
@@ -459,6 +461,9 @@ Examples:
       console.log(chalk.red(`Error: Path does not exist: ${absolutePath}`));
       process.exit(1);
     }
+
+    // Step 1c: Check required tools
+    await checkPrerequisitesForCommand("upload");
 
     // Step 2: Check prerequisites
     let spinner = ora("Checking prerequisites...").start();
@@ -1407,8 +1412,10 @@ Examples:
   $ nemar dataset download nm000104 -j 8         # More parallel streams`,
   )
   .action(async (datasetId, options) => {
-    // Step 1: Check prerequisites
-    let spinner = ora("Checking prerequisites...").start();
+    // Step 1: Check prerequisites (fast, parallel checks)
+    await checkPrerequisitesForCommand("download");
+
+    let spinner = ora("Checking git-annex...").start();
     const prereqs = await checkDownloadPrerequisites();
 
     if (!prereqs.allPassed) {
@@ -1420,9 +1427,7 @@ Examples:
       process.exit(1);
     }
 
-    spinner.succeed("Prerequisites check passed");
-    console.log(chalk.gray(`  git-annex ${prereqs.gitAnnex.version}`));
-    console.log();
+    spinner.succeed(`git-annex ${prereqs.gitAnnex.version}`);
 
     // Step 2: Get dataset info from backend
     spinner = ora(`Fetching dataset info for ${datasetId}...`).start();
@@ -1468,9 +1473,9 @@ Examples:
     }
     console.log();
 
-    // Step 4: Clone the dataset
+    // Step 4: Clone the dataset (metadata)
     const repoUrl = `https://github.com/${datasetInfo.github_repo}.git`;
-    spinner = ora("Cloning dataset from GitHub...").start();
+    spinner = ora("Cloning metadata from GitHub...").start();
 
     const cloneResult = await cloneDataset(repoUrl, absoluteOutput);
     if (!cloneResult.success) {
@@ -1479,7 +1484,7 @@ Examples:
       process.exit(1);
     }
 
-    spinner.succeed("Dataset cloned");
+    spinner.succeed("Metadata cloned");
 
     // For private datasets, fetch temporary S3 download credentials
     let downloadCreds: Awaited<ReturnType<typeof requestDownloadCredentials>> | null = null;
@@ -1508,18 +1513,21 @@ Examples:
       console.log(chalk.yellow(`  Warning: Could not enable S3 remote: ${s3Enable.error}`));
     }
 
-    // Step 5: Get data files (unless --no-data)
+    // Step 5: Get data files with progress (unless --no-data)
     if (options.data !== false) {
-      spinner = ora(`Downloading data files (${options.jobs} parallel streams)...`).start();
+      console.log(chalk.bold(`Downloading data files (${options.jobs} parallel streams)...`));
+
+      const tracker = new DownloadProgressTracker();
 
       const getResult = await getDatasetData(absoluteOutput, {
         jobs: Number.parseInt(options.jobs, 10),
         credentials: s3Creds,
+        onProgress: (line) => tracker.processLine(line),
       });
 
       if (!getResult.success) {
-        spinner.fail("Failed to download data files");
-        console.log(chalk.red(`  ${getResult.error}`));
+        tracker.finish(0);
+        console.log(chalk.red(`Failed to download data files: ${getResult.error}`));
         console.log(chalk.gray("The dataset was cloned but data files are not available locally."));
         console.log(
           chalk.gray(`You can try again with: cd ${absoluteOutput} && nemar dataset get`),
@@ -1530,7 +1538,8 @@ Examples:
         process.exit(1);
       }
 
-      spinner.succeed(`Data downloaded (${getResult.filesDownloaded || 0} files)`);
+      tracker.finish(getResult.filesDownloaded || 0);
+      console.log(chalk.green(`Data downloaded (${getResult.filesDownloaded || 0} files)`));
     } else {
       console.log(chalk.gray("Skipping data files (--no-data flag)"));
     }
@@ -3104,6 +3113,9 @@ Examples:
   $ nemar dataset clone nm000104 -o ./my-dataset`,
   )
   .action(async (datasetId, options) => {
+    // Check required tools first
+    await checkPrerequisitesForCommand("clone");
+
     let spinner = ora("Checking prerequisites...").start();
     const prereqs = await checkDownloadPrerequisites();
 
