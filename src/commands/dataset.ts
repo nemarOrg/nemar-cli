@@ -12,8 +12,8 @@
  * - nemar dataset request-access  - Request access to a dataset
  * - nemar dataset invite          - Invite user as collaborator
  * - nemar dataset collaborators   - List dataset collaborators
- * - nemar dataset commit          - Stage and commit changes (alias for save)
- * - nemar dataset save            - Stage and commit changes
+ * - nemar dataset commit          - Stage and commit changes
+ * - nemar dataset save            - Stage and commit changes (alias for commit)
  * - nemar dataset push            - Push commits and data to remotes
  */
 

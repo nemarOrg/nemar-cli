@@ -8,7 +8,7 @@ import { zValidator } from "@hono/zod-validator";
 import { Hono } from "hono";
 import { z } from "zod";
 import { adminMiddleware, authMiddleware, ownerMiddleware } from "../middleware/auth";
-import { isValidDatasetId } from "../services/datasetId";
+
 import {
   type DataCiteEnrichment,
   bidsToDataCite,
@@ -40,6 +40,7 @@ import {
   updateIdentifier as ezidUpdateIdentifier,
 } from "../services/ezid";
 import {
+  type GitHubRepo,
   addCollaborator,
   checkWorkflowExists,
   createOrUpdateFile,
@@ -4137,7 +4138,7 @@ adminRoutes.post(
     }
 
     // Create GitHub repo
-    let githubRepo;
+    let githubRepo: GitHubRepo;
     try {
       githubRepo = await createRepository(
         dataset_id,
@@ -4173,27 +4174,33 @@ adminRoutes.post(
         .run();
     } catch (error) {
       console.error("Failed to insert dataset record:", error);
+      const dbMsg = error instanceof Error ? error.message : String(error);
       // Clean up GitHub repo
       try {
         await deleteRepository(dataset_id, c.env.GITHUB_ADMIN_PAT);
       } catch (cleanupErr) {
         console.error("Failed to clean up GitHub repo after D1 failure:", cleanupErr);
+        return c.json(
+          {
+            error: `Failed to create dataset record: ${dbMsg}. GitHub repo nemarDatasets/${dataset_id} was created but could not be cleaned up. Manual deletion required.`,
+          },
+          500,
+        );
       }
-      return c.json({ error: "Failed to create dataset record" }, 500);
+      return c.json({ error: `Failed to create dataset record: ${dbMsg}` }, 500);
     }
 
     // Audit log
     try {
       await db
         .prepare("INSERT INTO audit_log (action, user_id, details) VALUES (?, ?, ?)")
-        .bind(
-          "dataset_imported",
-          admin.id,
-          JSON.stringify({ dataset_id, source, source_id, name }),
-        )
+        .bind("dataset_imported", admin.id, JSON.stringify({ dataset_id, source, source_id, name }))
         .run();
     } catch (err) {
-      console.error(`Failed to write audit log for dataset import ${dataset_id} by admin ${admin.id}:`, err);
+      console.error(
+        `Failed to write audit log for dataset import ${dataset_id} by admin ${admin.id}:`,
+        err,
+      );
     }
 
     return c.json(

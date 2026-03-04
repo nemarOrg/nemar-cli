@@ -32,6 +32,14 @@ jobs:
         env:
           INPUT_IDS: ${{ inputs.openneuro_ids }}
         run: |
+          # Validate all IDs match ds###### format
+          for id in $(echo "$INPUT_IDS" | tr ',' ' '); do
+            id=$(echo "$id" | xargs)
+            if ! echo "$id" | grep -qE '^ds[0-9]{6}$'; then
+              echo "::error::Invalid OpenNeuro ID: '$id'. Expected format: ds###### (e.g., ds007262)"
+              exit 1
+            fi
+          done
           # Convert comma-separated to JSON array
           JSON=$(echo "$INPUT_IDS" | tr ',' '\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | jq -R . | jq -s -c .)
           echo "matrix={\"dataset_id\":$JSON}" >> "$GITHUB_OUTPUT"
