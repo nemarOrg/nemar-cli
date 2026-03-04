@@ -9,15 +9,8 @@ import type { Context } from "hono";
 import { Hono } from "hono";
 import type { NemarMetadataV2 } from "../../../shared/datacite-constants.js";
 
-/** Constant-time string comparison to prevent timing attacks on secret tokens. */
-function timingSafeEqual(a: string, b: string): boolean {
-  const encoder = new TextEncoder();
-  const bufA = encoder.encode(a);
-  const bufB = encoder.encode(b);
-  if (bufA.byteLength !== bufB.byteLength) return false;
-  return crypto.subtle.timingSafeEqual(bufA, bufB);
-}
 import { parseNemarMetadata } from "../services/datacite.js";
+import { discoverOrcidsFromReferencedDois } from "../services/doi-orcid-discovery.js";
 import { createEzidVersionDoi, parseDoiProvider } from "../services/doi.js";
 import { TEST_SHOULDER, extractDoi } from "../services/ezid.js";
 import {
@@ -43,6 +36,15 @@ import * as zenodo from "../services/zenodo.js";
 import type { Bindings } from "../types/bindings.js";
 
 type WebhookContext = Context<{ Bindings: Bindings }>;
+
+/** Constant-time string comparison to prevent timing attacks on secret tokens. */
+function timingSafeEqual(a: string, b: string): boolean {
+  const encoder = new TextEncoder();
+  const bufA = encoder.encode(a);
+  const bufB = encoder.encode(b);
+  if (bufA.byteLength !== bufB.byteLength) return false;
+  return crypto.subtle.timingSafeEqual(bufA, bufB);
+}
 
 const webhooks = new Hono<{ Bindings: Bindings }>();
 
@@ -675,7 +677,8 @@ webhooks.post("/llm-enrich", async (c) => {
       } catch (dbErr) {
         console.error(`[llm-enrich] Failed to update BIDS Name in D1 for ${dataset_id}:`, dbErr);
       }
-      const repoResult = await setRepoDescription(repoName, `${bidsName} - NEMAR Dataset`, pat);
+      const nemarUrl = `https://nemar.org/dataexplorer/detail?dataset_id=${dataset_id}`;
+      const repoResult = await setRepoDescription(repoName, bidsName, pat, nemarUrl);
       if (!repoResult.ok) {
         console.error(
           `[llm-enrich] Failed to set GitHub repo description for ${dataset_id}: HTTP ${repoResult.status} - ${repoResult.error}`,
@@ -760,9 +763,42 @@ webhooks.post("/llm-enrich", async (c) => {
       `[llm-enrich] Stage 1 (seed): ${dataset_id} - ${Object.keys(seeded.authors || {}).length} authors, ${(seeded.related_identifiers || []).length} related IDs`,
     );
 
+    // Stage 1b: ORCID discovery from referenced DOIs (deterministic, no LLM)
+    let seededWithOrcids = seeded;
+    let orcidDiscoveryCount = 0;
+    try {
+      const orcidResult = await discoverOrcidsFromReferencedDois(
+        bidsDescription,
+        seeded.authors,
+      );
+      orcidDiscoveryCount = Object.keys(orcidResult.discoveries).length;
+      if (orcidDiscoveryCount > 0) {
+        const authors = { ...seeded.authors };
+        for (const [name, discovery] of Object.entries(orcidResult.discoveries)) {
+          authors[name] = {
+            ...authors[name],
+            orcid: discovery.orcid,
+            affiliations: discovery.affiliations ?? authors[name]?.affiliations,
+          };
+        }
+        seededWithOrcids = { ...seeded, authors };
+        console.log(
+          `[llm-enrich] Stage 1b (ORCID discovery): ${dataset_id} - found ${orcidDiscoveryCount} ORCIDs from ${orcidResult.totalDoisQueried} DOIs`,
+        );
+      } else {
+        console.log(
+          `[llm-enrich] Stage 1b (ORCID discovery): ${dataset_id} - no matches from ${orcidResult.totalDoisQueried} DOIs`,
+        );
+      }
+    } catch (orcidErr) {
+      console.warn(
+        `[llm-enrich] Stage 1b (ORCID discovery) failed for ${dataset_id}, continuing: ${errorMessage(orcidErr)}`,
+      );
+    }
+
     // Stage 2: LLM enrichment (adds description, keywords, methods, etc.)
     const llmResult = await enrichFromReadme(readmeContent, bidsDescription, apiKey);
-    const enriched = mergeWithExisting(seeded, llmResult);
+    const enriched = mergeWithExisting(seededWithOrcids, llmResult);
     const enrichedFields = Object.keys(llmResult).filter(
       (k) => llmResult[k as keyof typeof llmResult] !== undefined,
     );
@@ -1002,6 +1038,7 @@ webhooks.post("/llm-enrich", async (c) => {
         authors: Object.keys(seeded.authors || {}).length,
         related_identifiers: (seeded.related_identifiers || []).length,
         funding_references: (seeded.funding_references || []).length,
+        orcids_discovered: orcidDiscoveryCount,
       },
       enriched_fields: enrichedFields,
       validation: validationResult

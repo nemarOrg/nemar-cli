@@ -61,6 +61,14 @@ export async function generatePresignedPutUrls(
   const urls: Record<string, string> = {};
 
   for (const file of files) {
+    // Check both raw and URL-decoded forms to catch double-encoded traversal (e.g. %252e%252e)
+    const decoded = decodeURIComponent(file);
+    if (
+      decoded.includes("..") || decoded.startsWith("/") || decoded.includes("\\") || decoded.includes("\0") ||
+      file.includes("..") || file.startsWith("/") || file.includes("\\")
+    ) {
+      throw new Error(`Invalid file path: ${file}`);
+    }
     const key = `${prefix}/${file}`;
     // Include X-Amz-Expires in URL BEFORE signing so it's part of the signature
     const url = `https://${bucket}.s3.${region}.amazonaws.com/${key}?X-Amz-Expires=${expiresIn}`;
@@ -85,6 +93,14 @@ export async function generatePresignedGetUrl(
   key: string,
   expiresIn = 3600,
 ): Promise<string> {
+  // Check both raw and URL-decoded forms to catch double-encoded traversal
+  const decoded = decodeURIComponent(key);
+  if (
+    decoded.includes("..") || decoded.startsWith("/") || decoded.includes("\\") || decoded.includes("\0") ||
+    key.includes("..") || key.startsWith("/") || key.includes("\\")
+  ) {
+    throw new Error(`Invalid S3 key: ${key}`);
+  }
   const { bucket, region } = options;
   const aws = createS3Client(options);
 

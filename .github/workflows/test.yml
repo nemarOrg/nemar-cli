@@ -136,6 +136,7 @@ jobs:
   # Runs on PRs to dev (basic) and main (comprehensive)
   e2e-sandbox:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     needs: changes
     if: |
       github.event_name == 'pull_request' &&
@@ -167,7 +168,7 @@ jobs:
 
           # Wait for npm-publish workflow to complete with matching version
           for i in {1..30}; do
-            VERSION=$(npm view nemar-cli@PR${PR_NUMBER} version 2>/dev/null || echo "")
+            VERSION=$(timeout 10 npm view nemar-cli@PR${PR_NUMBER} version 2>/dev/null || echo "")
             if [[ "$VERSION" == *"$SHORT_SHA"* ]]; then
               echo "Found matching version: $VERSION"
               echo "tag=PR${PR_NUMBER}" >> $GITHUB_OUTPUT

@@ -162,8 +162,9 @@ async function withRetry<T>(
         ) {
           return true;
         }
-        // Retry on 5xx and 429 status codes embedded in the error message
-        if (/\b(5\d\d|429)\b/.test(msg)) {
+        // Retry on 5xx and 429 status codes (require HTTP/status prefix to
+        // avoid false positives on dataset IDs like nm000500)
+        if (/(?:http|status)\s*(5\d\d|429)\b/i.test(msg)) {
           return true;
         }
       }
@@ -3143,34 +3144,32 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
           }
         }
 
+        // DOI creation is NOT idempotent (mints a permanent identifier).
+        // Do not retry: a timeout could mean the DOI was created server-side
+        // but the response was lost, and retrying would mint a duplicate.
         const { createConceptDoi: doiDispatch } = await import("../services/doi");
-        const { result: doiResult, attempts: doiAttempts } = await withRetry(
-          () =>
-            doiDispatch(
-              {
-                provider,
-                datasetId,
-                datasetName: dataset.name,
-                datasetDescription: dataset.description,
-                githubRepo: dataset.github_repo,
-                bidsDescription: bidsDesc,
-                enrichment,
-                uploaderOrcid: dataset.owner_orcid || undefined,
-                uploaderName: dataset.owner_username,
-                sandbox,
-              },
-              {
-                EZID_USERNAME: c.env.EZID_USERNAME,
-                EZID_PASSWORD: c.env.EZID_PASSWORD,
-                EZID_SANDBOX_USERNAME: c.env.EZID_SANDBOX_USERNAME,
-                EZID_SANDBOX_PASSWORD: c.env.EZID_SANDBOX_PASSWORD,
-                ZENODO_API_KEY: c.env.ZENODO_API_KEY,
-                ZENODO_SANDBOX_API_KEY: c.env.ZENODO_SANDBOX_API_KEY,
-              },
-            ),
-          "doi_create",
+        const doiResult = await doiDispatch(
+          {
+            provider,
+            datasetId,
+            datasetName: dataset.name,
+            datasetDescription: dataset.description,
+            githubRepo: dataset.github_repo,
+            bidsDescription: bidsDesc,
+            enrichment,
+            uploaderOrcid: dataset.owner_orcid || undefined,
+            uploaderName: dataset.owner_username,
+            sandbox,
+          },
+          {
+            EZID_USERNAME: c.env.EZID_USERNAME,
+            EZID_PASSWORD: c.env.EZID_PASSWORD,
+            EZID_SANDBOX_USERNAME: c.env.EZID_SANDBOX_USERNAME,
+            EZID_SANDBOX_PASSWORD: c.env.EZID_SANDBOX_PASSWORD,
+            ZENODO_API_KEY: c.env.ZENODO_API_KEY,
+            ZENODO_SANDBOX_API_KEY: c.env.ZENODO_SANDBOX_API_KEY,
+          },
         );
-
         if (provider === "ezid") {
           await db
             .prepare(
@@ -3193,7 +3192,7 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
             .run();
         }
 
-        await updateProgress("doi_create", undefined, doiAttempts);
+        await updateProgress("doi_create");
       } else {
         await updateProgress("doi_create");
       }
@@ -3442,18 +3441,21 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
         }
       }
 
-      // Update GitHub repo description with dataset name and DOI
+      // Update GitHub repo description (name only) and homepage (DOI URL)
       const { setRepoDescription } = await import("../services/github.js");
       const descResult = await setRepoDescription(
         repoName,
-        `${dataset.name} - DOI: ${conceptDoi}`,
+        dataset.name,
         pat,
+        conceptDoi ? `https://doi.org/${conceptDoi}` : undefined,
       );
+      let descWarning: string | undefined;
       if (!descResult.ok) {
-        console.warn(`[publish] Failed to set repo description (non-fatal): ${descResult.error}`);
+        descWarning = `Repo description not set: ${descResult.error}`;
+        console.warn(`[publish] ${descWarning}`);
       }
 
-      await updateProgress("update_readme");
+      await updateProgress("update_readme", descWarning);
     } catch (err) {
       const msg = errorMessage(err);
       console.error(`[publish] update_readme failed for dataset ${datasetId}:`, err);
@@ -3519,11 +3521,20 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
       if (vtResult instanceof Response) return vtResult;
       const { version, tag, datasetDesc } = vtResult;
 
-      const doiInfo = datasetDesc.DatasetDOI ? `DOI: ${datasetDesc.DatasetDOI}` : "";
-      const releaseBody = `# ${dataset.name} - Version ${version}\n\n${doiInfo}\n\nBIDS-formatted dataset published via NEMAR.`;
+      const nemarUrl = `https://nemar.org/dataexplorer/detail?dataset_id=${datasetId}`;
+      const archiveLine = `**Download:** [${tag}.zip](https://github.com/nemarDatasets/${repoName}/archive/refs/tags/${tag}.zip)`;
+      const sections = [
+        `# ${dataset.name} - Version ${version}`,
+        `BIDS-formatted dataset published via [NEMAR](${nemarUrl}).`,
+        archiveLine,
+      ];
+      if (datasetDesc.DatasetDOI) {
+        sections.push(`**DOI:** https://doi.org/${datasetDesc.DatasetDOI}`);
+      }
+      const releaseBody = sections.join("\n\n");
 
       const { attempts: createReleaseAttempts } = await withRetry(
-        () => createRelease(repoName, tag, `${dataset.name} ${tag}`, releaseBody, pat),
+        () => createRelease(repoName, tag, tag, releaseBody, pat),
         "create_release",
       );
 
@@ -3631,7 +3642,7 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
       } catch (err) {
         // Zenodo backup is non-fatal for EZID datasets; log and continue
         console.error(`[publish] Zenodo backup failed for ${datasetId} (non-fatal):`, err);
-        await updateProgress("upload_to_zenodo");
+        await updateProgress("upload_to_zenodo", `Non-fatal: Zenodo backup failed: ${errorMessage(err)}`);
       }
     } else {
       try {

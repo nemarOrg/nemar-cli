@@ -122,7 +122,11 @@ const signupSchema = z.object({
   github_username: z
     .string()
     .min(1, "GitHub username is required")
-    .max(39, "GitHub username is too long"),
+    .max(39, "GitHub username is too long")
+    .regex(
+      /^[a-zA-Z0-9](?:[a-zA-Z0-9-]*[a-zA-Z0-9])?$/,
+      "GitHub username must start and end with a letter or number, and can only contain letters, numbers, and hyphens",
+    ),
   description: z
     .string()
     .min(
@@ -893,7 +897,9 @@ authRoutes.get("/confirm-key-regeneration", async (c) => {
     )
     .run();
 
-  // Return HTML page with the new API key
+  // Return HTML page with the new API key (prevent browser caching)
+  c.header("Cache-Control", "no-store, no-cache, must-revalidate");
+  c.header("Pragma", "no-cache");
   return c.html(`
 <!DOCTYPE html>
 <html>

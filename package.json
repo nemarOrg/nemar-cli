@@ -1,6 +1,6 @@
 {
   "name": "nemar-cli",
-  "version": "0.7.9",
+  "version": "0.7.11",
   "description": "CLI for NEMAR (Neuroelectromagnetic Data Archive and Tools Resource) dataset management",
   "type": "module",
   "main": "dist/index.js",
@@ -31,7 +31,7 @@
     "cli"
   ],
   "author": "NEMAR Team",
-  "license": "MIT",
+  "license": "CC-BY-NC-ND-4.0",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/nemarOrg/nemar-cli.git"

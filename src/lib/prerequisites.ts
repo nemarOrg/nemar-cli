@@ -86,7 +86,11 @@ async function isToolAvailable(toolCheck: ToolCheck): Promise<boolean> {
   try {
     const { exitCode } = await runCommand(toolCheck.cmd);
     return exitCode === 0;
-  } catch {
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    if (!msg.includes("ENOENT") && !msg.includes("not found")) {
+      console.error(`  Warning: ${toolCheck.name} check failed unexpectedly: ${msg}`);
+    }
     return false;
   }
 }
