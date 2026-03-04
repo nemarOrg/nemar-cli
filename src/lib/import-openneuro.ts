@@ -128,53 +128,21 @@ function seedMetadata(
 }
 
 /**
- * Convert an HTTP URL from git-annex whereis to an S3 URI for aws s3 cp.
- *
- * OpenNeuro uses path-style URLs without a region:
- *   "https://s3.amazonaws.com/openneuro.org/ds007262/file.edf?versionId=abc"
- *   -> "s3://openneuro.org/ds007262/file.edf"
- *
- * Also handles virtual-hosted style:
- *   "http://openneuro.org.s3.amazonaws.com/ds007262/file.edf"
- *   -> "s3://openneuro.org/ds007262/file.edf"
- */
-function httpToS3Uri(httpUrl: string): string | null {
-  // Strip query string (e.g., ?versionId=...) before converting
-  const urlWithoutQuery = httpUrl.split("?")[0];
-
-  // Pattern: http(s)://{bucket}.s3[.region].amazonaws.com/{path}
-  // Bucket can contain dots (e.g., openneuro.org), so use non-greedy match up to .s3.
-  const vhostMatch = urlWithoutQuery.match(
-    /^https?:\/\/(.+?)\.s3(?:\.[^.]+)?\.amazonaws\.com\/(.+)$/,
-  );
-  if (vhostMatch) {
-    return `s3://${vhostMatch[1]}/${vhostMatch[2]}`;
-  }
-  // Pattern: http(s)://s3[.region].amazonaws.com/{bucket}/{path}
-  // Region is optional (OpenNeuro uses plain s3.amazonaws.com)
-  const pathMatch = urlWithoutQuery.match(
-    /^https?:\/\/s3(?:\.[^.]+)?\.amazonaws\.com\/([^/]+)\/(.+)$/,
-  );
-  if (pathMatch) {
-    return `s3://${pathMatch[1]}/${pathMatch[2]}`;
-  }
-  // Already an S3 URI
-  if (httpUrl.startsWith("s3://")) {
-    return httpUrl.split("?")[0];
-  }
-  return null;
-}
-
-/**
- * Copy a single object between S3 buckets using aws s3 cp.
- * The source can be a public bucket (no credentials needed to read).
+ * Copy a single object from a public HTTP URL to NEMAR S3.
+ * Uses curl to stream from the public source (no AWS creds needed for read)
+ * and pipes to aws s3 cp for the upload (uses NEMAR creds).
+ * This avoids the 403 that happens when aws s3 cp tries to use NEMAR creds
+ * to read from a different account's bucket.
  */
 async function s3Copy(
-  sourceUri: string,
+  sourceUrl: string,
   destUri: string,
   region: string,
 ): Promise<{ success: boolean; error?: string }> {
-  const result = await runCommand(["aws", "s3", "cp", sourceUri, destUri, "--region", region], {});
+  const result = await runCommand(
+    ["bash", "-c", `curl -sfL '${sourceUrl}' | aws s3 cp - '${destUri}' --region '${region}'`],
+    {},
+  );
   if (result.exitCode !== 0) {
     return { success: false, error: result.stderr.trim() };
   }
@@ -185,7 +153,7 @@ async function s3Copy(
  * Copy objects from OpenNeuro S3 to NEMAR S3 in parallel batches.
  */
 async function batchS3Copy(
-  items: Array<{ key: string; sourceUri: string; destUri: string }>,
+  items: Array<{ key: string; sourceUrl: string; destUri: string }>,
   region: string,
   concurrency: number,
   onProgress?: (copied: number, total: number, currentKey: string) => void,
@@ -197,7 +165,7 @@ async function batchS3Copy(
     const batch = items.slice(i, i + concurrency);
     const results = await Promise.allSettled(
       batch.map(async (item) => {
-        const result = await s3Copy(item.sourceUri, item.destUri, region);
+        const result = await s3Copy(item.sourceUrl, item.destUri, region);
         if (!result.success) {
           throw new Error(result.error || "Unknown S3 copy error");
         }
@@ -358,12 +326,11 @@ export async function importOpenNeuro(
     const keys = Array.from(keyUrlMap.keys());
     const hashDirs = await getKeyHashDirs(datasetPath, keys);
 
-    const copyItems: Array<{ key: string; sourceUri: string; destUri: string }> = [];
+    const copyItems: Array<{ key: string; sourceUrl: string; destUri: string }> = [];
     const skipped: string[] = [];
 
     for (const [key, httpUrl] of keyUrlMap) {
-      const sourceUri = httpToS3Uri(httpUrl);
-      if (!sourceUri) {
+      if (!httpUrl.startsWith("http")) {
         skipped.push(key);
         continue;
       }
@@ -373,7 +340,7 @@ export async function importOpenNeuro(
         continue;
       }
       const destUri = `s3://${S3_BUCKET}/${nemarId}/objects/${hashDir}${key}`;
-      copyItems.push({ key, sourceUri, destUri });
+      copyItems.push({ key, sourceUrl: httpUrl, destUri });
     }
 
     if (skipped.length > 0) {
