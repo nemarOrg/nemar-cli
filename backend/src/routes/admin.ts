@@ -146,7 +146,7 @@ async function withRetry<T>(
   },
 ): Promise<{ result: T; attempts: number }> {
   const maxAttempts = options?.maxAttempts ?? 3;
-  const delayMs = options?.delayMs ?? 10_000;
+  const delayMs = options?.delayMs ?? 1_000;
   const isRetryable =
     options?.isRetryable ??
     ((error: unknown) => {
@@ -3608,7 +3608,7 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
           const deposition = await getDeposition(depositionId, zenodoToken, isSandbox);
           if (deposition.links.bucket) {
             const filename = `${datasetId}-${tag}.zip`;
-            await withRetry(
+            const { attempts: backupUploadAttempts } = await withRetry(
               () =>
                 uploadFile(
                   depositionId as number,
@@ -3620,13 +3620,12 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
                 ),
               "upload_to_zenodo (backup)",
             );
+            await updateProgress("upload_to_zenodo", undefined, backupUploadAttempts);
           } else {
             console.warn(
               `[publish] Zenodo backup deposition ${depositionId} has no bucket URL; skipping upload`,
             );
-          }
-
-          await updateProgress("upload_to_zenodo");
+            await updateProgress("upload_to_zenodo");
         }
       } catch (err) {
         // Zenodo backup is non-fatal for EZID datasets; log and continue
