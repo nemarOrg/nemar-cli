@@ -1714,6 +1714,19 @@ adminRoutes.post("/datasets/:id/doi/update", zValidator("json", updateDoiSchema)
         }
       }
 
+      // Add HasVersion relations for all existing version DOIs
+      const versions = await db
+        .prepare("SELECT version, doi FROM dataset_versions WHERE dataset_id = ? ORDER BY created_at DESC")
+        .bind(datasetId)
+        .all<{ version: string; doi: string }>();
+      if (versions.results?.length) {
+        const hasVersionRels = versions.results.map((v) => ({
+          doi: v.doi,
+          relationType: "HasVersion" as const,
+        }));
+        enrichment.relatedDois = [...(enrichment.relatedDois || []), ...hasVersionRels];
+      }
+
       const metadata = bidsToDataCite(datasetId, doi, bidsDesc, enrichment);
       updateOptions.dataciteXml = buildDataCiteXml(metadata);
       updateOptions.target = `https://nemar.org/dataexplorer/detail?dataset_id=${datasetId}`;
