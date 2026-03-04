@@ -710,6 +710,7 @@ Examples:
               if (confirmOrcids) {
                 for (const [name, d] of Object.entries(orcidResult.discoveries)) {
                   authors[name] = {
+                    ...authors[name],
                     orcid: d.orcid,
                     ...(d.affiliations && { affiliations: d.affiliations }),
                   };

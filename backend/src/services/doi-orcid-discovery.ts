@@ -6,7 +6,7 @@
  * BIDS Authors list by name.
  */
 
-import type { AuthorEnrichmentV2 } from "../../shared/datacite-constants.js";
+import type { AuthorEnrichmentV2 } from "../../../shared/datacite-constants.js";
 import { normalizeDoi, parseAuthorName } from "./datacite.js";
 
 // ---------------------------------------------------------------------------
@@ -63,7 +63,7 @@ export interface OrcidDiscoveryResult {
 // DOI extraction from BIDS dataset_description.json
 // ---------------------------------------------------------------------------
 
-const DOI_PATTERN = /^10\.\d{4,}\/.+$/;
+const DOI_PATTERN = /^10\.\d{4,}\/[^\s]+$/;
 
 export function extractDoisFromBids(
   bidsDescription: Record<string, unknown>,
@@ -97,7 +97,7 @@ export function extractDoisFromBids(
   if (Array.isArray(bidsDescription.ReferencesAndLinks)) {
     for (const ref of bidsDescription.ReferencesAndLinks) {
       if (typeof ref !== "string" || !ref) continue;
-      const m = ref.match(/(?:doi\.org\/|^)(10\.\d{4,}\/.+)/);
+      const m = ref.match(/(?:doi\.org\/|^)(10\.\d{4,}\/[^\s]+)/);
       if (m) addDoi(m[1], "ReferencesAndLinks");
     }
   }

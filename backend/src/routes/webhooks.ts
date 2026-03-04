@@ -761,6 +761,7 @@ webhooks.post("/llm-enrich", async (c) => {
     );
 
     // Stage 1b: ORCID discovery from referenced DOIs (deterministic, no LLM)
+    let seededWithOrcids = seeded;
     try {
       const { discoverOrcidsFromReferencedDois } = await import(
         "../services/doi-orcid-discovery.js"
@@ -776,10 +777,10 @@ webhooks.post("/llm-enrich", async (c) => {
           authors[name] = {
             ...authors[name],
             orcid: discovery.orcid,
-            affiliations: discovery.affiliations || authors[name]?.affiliations,
+            affiliations: discovery.affiliations ?? authors[name]?.affiliations,
           };
         }
-        seeded.authors = authors;
+        seededWithOrcids = { ...seeded, authors };
         console.log(
           `[llm-enrich] Stage 1b (ORCID discovery): ${dataset_id} - found ${count} ORCIDs from ${orcidResult.totalDoisQueried} DOIs`,
         );
@@ -797,7 +798,7 @@ webhooks.post("/llm-enrich", async (c) => {
 
     // Stage 2: LLM enrichment (adds description, keywords, methods, etc.)
     const llmResult = await enrichFromReadme(readmeContent, bidsDescription, apiKey);
-    const enriched = mergeWithExisting(seeded, llmResult);
+    const enriched = mergeWithExisting(seededWithOrcids, llmResult);
     const enrichedFields = Object.keys(llmResult).filter(
       (k) => llmResult[k as keyof typeof llmResult] !== undefined,
     );
