@@ -1102,11 +1102,20 @@ export interface PublishRequestsResponse {
   count: number;
 }
 
+export interface StepResult {
+  step: string;
+  status: "completed" | "failed" | "skipped";
+  attempts: number;
+  duration_ms: number;
+  error?: string;
+}
+
 export interface PublishApproveResponse {
   message: string;
   dataset_id: string;
   status?: string;
   steps_completed?: string[];
+  step_results?: StepResult[];
   error?: string;
   step?: string;
   hasMore?: boolean;

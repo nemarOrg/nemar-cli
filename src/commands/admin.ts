@@ -27,6 +27,7 @@ import {
   type Dataset,
   type NemarMetadataPayload,
   ORCID_REGEX,
+  type StepResult,
   addCi,
   applyS3Lock,
   approvePublication,
@@ -1551,7 +1552,7 @@ After Approval:
         return;
       }
 
-      const spinner = ora("Running publication workflow...").start();
+      const spinner = ora("Running publication workflow (this may take a few minutes)...").start();
 
       try {
         const result = await approvePublication(
@@ -1562,7 +1563,33 @@ After Approval:
         );
         spinner.succeed(result.message);
 
-        if (result.steps_completed) {
+        // Display step-by-step results if available
+        if (result.step_results && result.step_results.length > 0) {
+          console.log();
+          const allSteps = result.step_results;
+          const totalSteps = allSteps.length;
+          allSteps.forEach((sr: StepResult, idx: number) => {
+            const stepNum = `[${String(idx + 1).padStart(2, " ")}/${totalSteps}]`;
+            const stepName = sr.step.replace(/_/g, " ");
+            if (sr.status === "completed") {
+              const durationSec = (sr.duration_ms / 1000).toFixed(1);
+              const retryNote = sr.attempts > 1 ? ` (attempt ${sr.attempts})` : "";
+              console.log(
+                `  ${chalk.green("[x]")} ${chalk.gray(stepNum)} ${stepName} ${chalk.gray(`(${durationSec}s${retryNote})`)}`,
+              );
+            } else if (sr.status === "failed") {
+              console.log(
+                `  ${chalk.red("[!]")} ${chalk.gray(stepNum)} ${stepName}${sr.error ? `: ${chalk.red(sr.error)}` : ""}`,
+              );
+            } else {
+              console.log(
+                `  ${chalk.gray("[-]")} ${chalk.gray(stepNum)} ${chalk.gray(stepName)} ${chalk.gray("(skipped)")}`,
+              );
+            }
+          });
+          console.log();
+        } else if (result.steps_completed) {
+          // Fallback for responses without step_results
           console.log();
           for (const step of result.steps_completed) {
             console.log(`  ${chalk.green("[x]")} ${step.replace(/_/g, " ")}`);
