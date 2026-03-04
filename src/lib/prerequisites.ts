@@ -65,7 +65,7 @@ const TOOL_CHECKS: Record<string, ToolCheck> = {
  */
 const COMMAND_TOOLS: Record<NemarCommand, string[]> = {
   upload: ["git-annex", "gh", "aws"],
-  download: ["git-annex", "gh"],
+  download: ["gh"],
   clone: ["git", "gh"],
   push: ["git-annex", "gh"],
   publish: ["gh", "aws"],

@@ -267,9 +267,13 @@ export async function checkPrerequisites(): Promise<PrerequisitesResult> {
   }
 
   if (!githubSSH.accessible) {
-    errors.push(
-      "GitHub SSH access not configured. Run 'nemar auth setup-ssh' to configure automatically.",
-    );
+    // HTTPS-first: try gh CLI token before failing on SSH
+    const ghToken = await getGitHubToken();
+    if (!ghToken.token) {
+      errors.push(
+        "GitHub authentication not configured. Either authenticate with gh CLI ('gh auth login') or configure SSH ('nemar auth setup-ssh').",
+      );
+    }
   }
 
   return {
@@ -910,7 +914,12 @@ export async function configureGitHubRemote(
       };
     }
     const repoPath = repoUrl.replace("git@github.com:", "");
-    finalUrl = `https://${token}@github.com/${repoPath}`;
+    finalUrl = `https://github.com/${repoPath}`;
+    // Set token via credential helper instead of embedding in URL
+    await runCommand(
+      ["git", "config", "credential.https://github.com.helper", `!echo password=${token}`],
+      { cwd: path },
+    );
   }
   // Local: Try HTTPS via gh CLI token first (preferred), then SSH as fallback
   else if (repoUrl.startsWith("git@github.com:")) {
@@ -919,7 +928,17 @@ export async function configureGitHubRemote(
     const ghTokenResult = await getGitHubToken();
 
     if (ghTokenResult.token) {
-      finalUrl = `https://${ghTokenResult.token}@github.com/${repoPath}`;
+      finalUrl = `https://github.com/${repoPath}`;
+      // Set token via credential helper instead of embedding in URL
+      await runCommand(
+        [
+          "git",
+          "config",
+          "credential.https://github.com.helper",
+          `!echo password=${ghTokenResult.token}`,
+        ],
+        { cwd: path },
+      );
     } else {
       // HTTPS not available, try SSH as last resort
       const sshResult = await testGitHubSsh();
