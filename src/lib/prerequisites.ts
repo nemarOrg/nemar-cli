@@ -89,7 +89,7 @@ async function isToolAvailable(toolCheck: ToolCheck): Promise<boolean> {
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     if (!msg.includes("ENOENT") && !msg.includes("not found")) {
-      console.error(chalk.gray(`  Debug: ${toolCheck.name} check failed unexpectedly: ${msg}`));
+      console.error(`  Debug: ${toolCheck.name} check failed unexpectedly: ${msg}`);
     }
     return false;
   }

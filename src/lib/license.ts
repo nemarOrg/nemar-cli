@@ -133,7 +133,9 @@ export function detectLicense(datasetPath: string): {
       }
     } catch (err) {
       if (err instanceof SyntaxError) {
-        console.warn(`  Warning: dataset_description.json has invalid JSON; skipping license detection from it.`);
+        console.warn(
+          "  Warning: dataset_description.json has invalid JSON; skipping license detection from it.",
+        );
       } else {
         console.warn(
           `  Warning: Could not read dataset_description.json: ${err instanceof Error ? err.message : String(err)}`,
