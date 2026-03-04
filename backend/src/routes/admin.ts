@@ -3442,12 +3442,13 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
         }
       }
 
-      // Update GitHub repo description with dataset name and DOI
+      // Update GitHub repo description (name only) and homepage (DOI URL)
       const { setRepoDescription } = await import("../services/github.js");
       const descResult = await setRepoDescription(
         repoName,
-        `${dataset.name} - DOI: ${conceptDoi}`,
+        dataset.name,
         pat,
+        conceptDoi ? `https://doi.org/${conceptDoi}` : undefined,
       );
       if (!descResult.ok) {
         console.warn(`[publish] Failed to set repo description (non-fatal): ${descResult.error}`);
@@ -3519,11 +3520,24 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
       if (vtResult instanceof Response) return vtResult;
       const { version, tag, datasetDesc } = vtResult;
 
-      const doiInfo = datasetDesc.DatasetDOI ? `DOI: ${datasetDesc.DatasetDOI}` : "";
-      const releaseBody = `# ${dataset.name} - Version ${version}\n\n${doiInfo}\n\nBIDS-formatted dataset published via NEMAR.`;
+      const nemarUrl = `https://nemar.org/dataexplorer/detail?dataset_id=${datasetId}`;
+      const doiLine = datasetDesc.DatasetDOI
+        ? `**DOI:** https://doi.org/${datasetDesc.DatasetDOI}`
+        : "";
+      const archiveLine = `**Download:** [${tag}.zip](https://github.com/nemarDatasets/${repoName}/archive/refs/tags/${tag}.zip)`;
+      const releaseBody = [
+        `# ${dataset.name} - Version ${version}`,
+        "",
+        "BIDS-formatted dataset published via [NEMAR](" + nemarUrl + ").",
+        "",
+        archiveLine,
+        doiLine,
+      ]
+        .filter(Boolean)
+        .join("\n");
 
       const { attempts: createReleaseAttempts } = await withRetry(
-        () => createRelease(repoName, tag, `${dataset.name} ${tag}`, releaseBody, pat),
+        () => createRelease(repoName, tag, tag, releaseBody, pat),
         "create_release",
       );
 
@@ -3626,6 +3640,7 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
               `[publish] Zenodo backup deposition ${depositionId} has no bucket URL; skipping upload`,
             );
             await updateProgress("upload_to_zenodo");
+          }
         }
       } catch (err) {
         // Zenodo backup is non-fatal for EZID datasets; log and continue

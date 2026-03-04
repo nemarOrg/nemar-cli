@@ -477,9 +477,12 @@ export async function setRepoDescription(
   repo: string,
   description: string,
   pat: string,
+  homepage?: string,
 ): Promise<{ ok: boolean; status: number; error?: string }> {
   let response: Response;
   try {
+    const payload: Record<string, string> = { description };
+    if (homepage !== undefined) payload.homepage = homepage;
     response = await fetch(`${GITHUB_API}/repos/${ORG_NAME}/${repo}`, {
       method: "PATCH",
       headers: {
@@ -488,7 +491,7 @@ export async function setRepoDescription(
         "User-Agent": "NEMAR-API",
         "Content-Type": "application/json",
       },
-      body: JSON.stringify({ description }),
+      body: JSON.stringify(payload),
     });
   } catch (fetchError) {
     const msg = fetchError instanceof Error ? fetchError.message : String(fetchError);

@@ -675,7 +675,8 @@ webhooks.post("/llm-enrich", async (c) => {
       } catch (dbErr) {
         console.error(`[llm-enrich] Failed to update BIDS Name in D1 for ${dataset_id}:`, dbErr);
       }
-      const repoResult = await setRepoDescription(repoName, `${bidsName} - NEMAR Dataset`, pat);
+      const nemarUrl = `https://nemar.org/dataexplorer/detail?dataset_id=${dataset_id}`;
+      const repoResult = await setRepoDescription(repoName, bidsName, pat, nemarUrl);
       if (!repoResult.ok) {
         console.error(
           `[llm-enrich] Failed to set GitHub repo description for ${dataset_id}: HTTP ${repoResult.status} - ${repoResult.error}`,
