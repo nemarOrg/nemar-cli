@@ -2971,12 +2971,30 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
         // Determine provider: use dataset's setting or default to ezid
         const provider = parseDoiProvider(dataset.doi_provider);
 
-        // Read BIDS metadata for richer DOI records
+        // Read BIDS metadata and enrichment for richer DOI records
         let bidsDesc: Record<string, unknown> | undefined;
+        let enrichment: DataCiteEnrichment | undefined;
         if (repoName) {
           const descResult = await readDatasetDescription("doi_create");
           if (descResult instanceof Response) return descResult;
           bidsDesc = descResult;
+
+          // Read .nemar/metadata.json enrichment (same pattern as doi update)
+          const tree = await getTreeAtRef(repoName, "main", pat);
+          const nemarMetaFile =
+            tree.find((f) => f.path === ".nemar/metadata.json") ||
+            tree.find((f) => f.path === "nemar_metadata.json");
+          if (nemarMetaFile) {
+            try {
+              const nemarContent = await getBlobContent(repoName, nemarMetaFile.sha, pat);
+              const nemarParsed = parseNemarMetadata(JSON.parse(nemarContent));
+              if (nemarParsed) {
+                enrichment = nemarMetadataToEnrichment(nemarParsed);
+              }
+            } catch (nemarErr) {
+              console.warn(`[publish] doi_create: .nemar/metadata.json enrichment skipped:`, nemarErr);
+            }
+          }
         }
 
         const { createConceptDoi: doiDispatch } = await import("../services/doi");
@@ -2988,6 +3006,7 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
             datasetDescription: dataset.description,
             githubRepo: dataset.github_repo,
             bidsDescription: bidsDesc,
+            enrichment,
             uploaderOrcid: dataset.owner_orcid || undefined,
             uploaderName: dataset.owner_username,
             sandbox,
@@ -3513,7 +3532,7 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
         }
 
         const auth = resolveEzidAuth(c.env, sandbox || !!dataset.is_sandbox);
-        const target = `https://github.com/nemarDatasets/${datasetId}`;
+        const target = `https://nemar.org/dataexplorer/detail?dataset_id=${datasetId}`;
         await ezidMakePublic(auth, dataset.ezid_identifier, target);
 
         // Update EZID status in D1
