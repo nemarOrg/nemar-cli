@@ -98,6 +98,8 @@ import {
   toS3Credentials,
   verifyGitHubAuth,
 } from "../lib/git-annex.js";
+import { detectLicense, ensureLicenseFile, isResearchCompatible, promptForLicense, updateLicenseInDescription } from "../lib/license.js";
+import { promptForProvenance } from "../lib/provenance.js";
 import { bumpVersion, isValidStableVersion, parseVersion } from "../lib/semver.js";
 import type { UploadProgress } from "../lib/upload-progress.js";
 import {
@@ -727,6 +729,113 @@ Examples:
           }
           console.log(chalk.gray("  Continuing without author enrichment."));
         }
+      }
+    }
+
+    // Step 4c: License detection and enforcement
+    let resolvedLicense: string | undefined;
+    if (process.stdin.isTTY && !options.skipValidation /* non-interactive guard */) {
+      const detected = detectLicense(absolutePath);
+
+      if (detected.spdxId) {
+        console.log();
+        console.log(
+          chalk.cyan("License detected:"),
+          chalk.bold(detected.spdxId),
+          chalk.gray(
+            `(from ${detected.source === "dataset_description" ? "dataset_description.json" : "LICENSE file"})`,
+          ),
+        );
+
+        if (!isResearchCompatible(detected.spdxId)) {
+          console.log(
+            chalk.yellow(
+              `  Warning: "${detected.spdxId}" is not in the list of known research-compatible licenses.`,
+            ),
+          );
+        }
+
+        const { keepLicense } = await inquirer.prompt<{ keepLicense: boolean }>([
+          {
+            type: "confirm",
+            name: "keepLicense",
+            message: `Use "${detected.spdxId}" as the dataset license?`,
+            default: true,
+          },
+        ]);
+
+        if (keepLicense) {
+          resolvedLicense = detected.spdxId;
+        } else {
+          resolvedLicense = await promptForLicense(detected.spdxId);
+        }
+      } else {
+        console.log();
+        if (detected.source === "license_file") {
+          console.log(
+            chalk.yellow(
+              "A LICENSE file was found but the license could not be identified automatically.",
+            ),
+          );
+        } else {
+          console.log(chalk.yellow("No license found in this dataset."));
+        }
+        console.log(chalk.gray("A license is required to publish on NEMAR."));
+        resolvedLicense = await promptForLicense();
+      }
+
+      // Apply the resolved license back to dataset_description.json if it differs
+      try {
+        const descPath = resolve(absolutePath, "dataset_description.json");
+        if (existsSync(descPath)) {
+          const desc = JSON.parse(readFileSync(descPath, "utf-8")) as Record<string, unknown>;
+          if (desc.License !== resolvedLicense) {
+            updateLicenseInDescription(absolutePath, resolvedLicense);
+            console.log(chalk.gray(`  Updated dataset_description.json License -> ${resolvedLicense}`));
+          }
+        }
+      } catch (licErr) {
+        console.log(
+          chalk.yellow(`  Warning: Could not update license in dataset_description.json: ${errorDetail(licErr)}`),
+        );
+      }
+
+      // Ensure LICENSE file exists
+      const created = ensureLicenseFile(absolutePath, resolvedLicense);
+      if (created) {
+        console.log(chalk.gray(`  Created LICENSE file (${resolvedLicense})`));
+      }
+      console.log();
+    }
+
+    // Step 4d: Data provenance
+    if (process.stdin.isTTY && resolvedLicense) {
+      const provenance = await promptForProvenance(resolvedLicense);
+
+      // Update dataset_description.json SourceDatasets field for derived data
+      if (provenance.isDerived && provenance.sourceDatasets && provenance.sourceDatasets.length > 0) {
+        try {
+          const descPath = resolve(absolutePath, "dataset_description.json");
+          if (existsSync(descPath)) {
+            const desc = JSON.parse(readFileSync(descPath, "utf-8")) as Record<string, unknown>;
+            const existingSources = Array.isArray(desc.SourceDatasets) ? desc.SourceDatasets : [];
+            const newSources = provenance.sourceDatasets.map((s) => s.identifier);
+            // Merge without duplicates
+            const merged = Array.from(new Set([...existingSources as string[], ...newSources]));
+            desc.SourceDatasets = merged;
+            writeFileSync(descPath, `${JSON.stringify(desc, null, 2)}\n`);
+            console.log(
+              chalk.gray(
+                `  Updated dataset_description.json SourceDatasets (${merged.length} source(s))`,
+              ),
+            );
+          }
+        } catch (srcErr) {
+          console.log(
+            chalk.yellow(`  Warning: Could not update SourceDatasets: ${errorDetail(srcErr)}`),
+          );
+        }
+        console.log();
       }
     }
 
