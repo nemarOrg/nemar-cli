@@ -61,6 +61,10 @@ export async function generatePresignedPutUrls(
   const urls: Record<string, string> = {};
 
   for (const file of files) {
+    const decoded = decodeURIComponent(file);
+    if (decoded.includes("..") || decoded.startsWith("/") || file.includes("..") || file.startsWith("/")) {
+      throw new Error(`Invalid file path: ${file}`);
+    }
     const key = `${prefix}/${file}`;
     // Include X-Amz-Expires in URL BEFORE signing so it's part of the signature
     const url = `https://${bucket}.s3.${region}.amazonaws.com/${key}?X-Amz-Expires=${expiresIn}`;
@@ -85,6 +89,10 @@ export async function generatePresignedGetUrl(
   key: string,
   expiresIn = 3600,
 ): Promise<string> {
+  const decoded = decodeURIComponent(key);
+  if (decoded.includes("..") || decoded.startsWith("/") || key.includes("..") || key.startsWith("/")) {
+    throw new Error(`Invalid S3 key: ${key}`);
+  }
   const { bucket, region } = options;
   const aws = createS3Client(options);
 
