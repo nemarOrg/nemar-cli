@@ -3,7 +3,7 @@ name: Publish to npm
 # Handles both tag-based releases and branch-based pre-releases:
 # - Tags (v*): Stable releases with version from tag
 # - dev branch: dev tag with build number
-# - feature branches: PR{number} tag with SHA in version (only if PR exists)
+# - PR branches: PR{number} tag with SHA in version (only if PR exists)
 
 on:
   push:
@@ -11,7 +11,7 @@ on:
       - 'v*'
     branches:
       - dev
-      - 'feature/**'
+      - '**'
 
 jobs:
   publish:
