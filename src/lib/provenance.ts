@@ -62,6 +62,14 @@ const LICENSE_COMPATIBILITY: Record<string, { allows: string[]; note?: string }>
     allows: ["ODbL-1.0"],
     note: "Share-alike for databases: derivative databases must use ODbL-1.0.",
   },
+  "CC-BY-ND-4.0": {
+    allows: [],
+    note: "NoDerivatives: derivative datasets are not permitted under this license.",
+  },
+  "CC-BY-NC-ND-4.0": {
+    allows: [],
+    note: "NonCommercial-NoDerivatives: derivative datasets are not permitted under this license.",
+  },
 };
 
 /**
