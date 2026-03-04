@@ -18,6 +18,7 @@ function timingSafeEqual(a: string, b: string): boolean {
   return crypto.subtle.timingSafeEqual(bufA, bufB);
 }
 import { parseNemarMetadata } from "../services/datacite.js";
+import { discoverOrcidsFromReferencedDois } from "../services/doi-orcid-discovery.js";
 import { createEzidVersionDoi, parseDoiProvider } from "../services/doi.js";
 import { TEST_SHOULDER, extractDoi } from "../services/ezid.js";
 import {
@@ -762,16 +763,14 @@ webhooks.post("/llm-enrich", async (c) => {
 
     // Stage 1b: ORCID discovery from referenced DOIs (deterministic, no LLM)
     let seededWithOrcids = seeded;
+    let orcidDiscoveryCount = 0;
     try {
-      const { discoverOrcidsFromReferencedDois } = await import(
-        "../services/doi-orcid-discovery.js"
-      );
       const orcidResult = await discoverOrcidsFromReferencedDois(
         bidsDescription,
         seeded.authors,
       );
-      const count = Object.keys(orcidResult.discoveries).length;
-      if (count > 0) {
+      orcidDiscoveryCount = Object.keys(orcidResult.discoveries).length;
+      if (orcidDiscoveryCount > 0) {
         const authors = { ...seeded.authors };
         for (const [name, discovery] of Object.entries(orcidResult.discoveries)) {
           authors[name] = {
@@ -782,7 +781,7 @@ webhooks.post("/llm-enrich", async (c) => {
         }
         seededWithOrcids = { ...seeded, authors };
         console.log(
-          `[llm-enrich] Stage 1b (ORCID discovery): ${dataset_id} - found ${count} ORCIDs from ${orcidResult.totalDoisQueried} DOIs`,
+          `[llm-enrich] Stage 1b (ORCID discovery): ${dataset_id} - found ${orcidDiscoveryCount} ORCIDs from ${orcidResult.totalDoisQueried} DOIs`,
         );
       } else {
         console.log(
@@ -791,8 +790,7 @@ webhooks.post("/llm-enrich", async (c) => {
       }
     } catch (orcidErr) {
       console.warn(
-        `[llm-enrich] Stage 1b (ORCID discovery) failed for ${dataset_id}, continuing:`,
-        orcidErr,
+        `[llm-enrich] Stage 1b (ORCID discovery) failed for ${dataset_id}, continuing: ${errorMessage(orcidErr)}`,
       );
     }
 
@@ -1038,6 +1036,7 @@ webhooks.post("/llm-enrich", async (c) => {
         authors: Object.keys(seeded.authors || {}).length,
         related_identifiers: (seeded.related_identifiers || []).length,
         funding_references: (seeded.funding_references || []).length,
+        orcids_discovered: orcidDiscoveryCount,
       },
       enriched_fields: enrichedFields,
       validation: validationResult

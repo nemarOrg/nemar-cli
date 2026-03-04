@@ -64,6 +64,7 @@ export interface OrcidDiscoveryResult {
 // ---------------------------------------------------------------------------
 
 const DOI_PATTERN = /^10\.\d{4,}\/[^\s]+$/;
+const ORCID_PATTERN = /^\d{4}-\d{4}-\d{4}-[\dX]{4}$/;
 
 export function extractDoisFromBids(
   bidsDescription: Record<string, unknown>,
@@ -119,7 +120,12 @@ export async function queryDataCiteDoi(
       headers: { Accept: "application/vnd.datacite.datacite+json" },
       signal: AbortSignal.timeout(10_000),
     });
-    if (!response.ok) return null;
+    if (!response.ok) {
+      if (response.status !== 404) {
+        console.warn(`[orcid-discovery] DataCite returned HTTP ${response.status} for ${doi}`);
+      }
+      return null;
+    }
     const data = (await response.json()) as {
       creators?: DataCiteCreator[];
     };
@@ -127,7 +133,8 @@ export async function queryDataCiteDoi(
       doi,
       creators: Array.isArray(data.creators) ? data.creators : [],
     };
-  } catch {
+  } catch (err) {
+    console.warn(`[orcid-discovery] DataCite query failed for ${doi}:`, err);
     return null;
   }
 }
@@ -178,10 +185,20 @@ export function matchCreatorsToAuthors(
         matchedCreatorIdx.add(ci);
         break;
       }
-      // Also try "First Last" == "Last, First" cross-format
+      // Also try cross-format: "First Last" vs "Last, First"
       if (a.parsed.familyName && a.parsed.givenName) {
         const aFlipped = normalizeStr(`${a.parsed.givenName} ${a.parsed.familyName}`);
         if (aFlipped === cNorm) {
+          results.push({ bidsAuthor: a.original, matchedCreator: c, confidence: "exact" });
+          matchedAuthors.add(a.original);
+          matchedCreatorIdx.add(ci);
+          break;
+        }
+      }
+      // Try creator in "First Last" format against BIDS author
+      if (c.givenName && c.familyName) {
+        const cFlipped = normalizeStr(`${c.givenName} ${c.familyName}`);
+        if (normalizeStr(a.original) === cFlipped) {
           results.push({ bidsAuthor: a.original, matchedCreator: c, confidence: "exact" });
           matchedAuthors.add(a.original);
           matchedCreatorIdx.add(ci);
@@ -278,13 +295,11 @@ export async function discoverOrcidsFromReferencedDois(
 
   for (let i = 0; i < extracted.length; i += BATCH_SIZE) {
     const batch = extracted.slice(i, i + BATCH_SIZE);
-    const results = await Promise.allSettled(
-      batch.map((e) => queryDataCiteDoi(e.doi)),
-    );
+    // queryDataCiteDoi never rejects (catches internally), so Promise.all is safe
+    const results = await Promise.all(batch.map((e) => queryDataCiteDoi(e.doi)));
     for (let j = 0; j < batch.length; j++) {
-      const r = results[j];
-      if (r.status === "fulfilled" && r.value) {
-        allCreatorsByDoi.set(batch[j].doi, r.value.creators);
+      if (results[j]) {
+        allCreatorsByDoi.set(batch[j].doi, results[j]!.creators);
       } else {
         unresolvedDois.push(batch[j].doi);
       }
@@ -310,10 +325,11 @@ export async function discoverOrcidsFromReferencedDois(
       );
       if (!orcidEntry) continue;
 
-      // Extract bare ORCID (strip URL prefix)
+      // Extract bare ORCID (strip URL prefix) and validate format
       const orcid = orcidEntry.nameIdentifier
         .replace(/^https?:\/\/orcid\.org\//i, "")
         .trim();
+      if (!ORCID_PATTERN.test(orcid)) continue;
 
       const affiliations = match.matchedCreator.affiliation
         ?.filter((a) => a.name)

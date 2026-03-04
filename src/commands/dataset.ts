@@ -721,7 +721,7 @@ Examples:
             }
           } catch (discoverErr) {
             console.log(
-              chalk.gray(`  Could not auto-discover ORCIDs: ${errorDetail(discoverErr)}`),
+              chalk.yellow(`  Could not auto-discover ORCIDs: ${errorDetail(discoverErr)}`),
             );
           }
 

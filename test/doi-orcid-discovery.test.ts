@@ -161,6 +161,27 @@ describe("matchCreatorsToAuthors", () => {
     // After NFD normalization + accent stripping, should match
     expect(matches[0].confidence).toBe("exact");
   });
+
+  test("cross-format: creator 'First Last' matches BIDS 'Last, First'", () => {
+    const creator: DataCiteCreator = {
+      name: "Stefan Appelhoff",
+      familyName: "Appelhoff",
+      givenName: "Stefan",
+      nameIdentifiers: [],
+      affiliation: [],
+    };
+    const matches = matchCreatorsToAuthors([creator], ["Appelhoff, Stefan"]);
+    expect(matches).toHaveLength(1);
+    expect(matches[0].confidence).toBe("exact");
+  });
+
+  test("cross-format: BIDS 'First Last' matches creator 'Last, First'", () => {
+    const creators = [makeCreator("Appelhoff", "Stefan")];
+    // BIDS author in "First Last" format (non-standard but possible)
+    const matches = matchCreatorsToAuthors(creators, ["Stefan Appelhoff"]);
+    expect(matches).toHaveLength(1);
+    expect(matches[0].confidence).toBe("exact");
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -220,11 +241,35 @@ describe("discoverOrcidsFromReferencedDois", () => {
     });
 
     expect(result.totalDoisQueried).toBe(1);
+    expect(result.unresolvedDois).toHaveLength(0);
     expect(Object.keys(result.discoveries).length).toBe(3);
     expect(result.discoveries["Appelhoff, Stefan"].orcid).toBe("0000-0001-8002-0877");
+    expect(result.discoveries["Appelhoff, Stefan"].confidence).toBe("exact");
     expect(result.discoveries["Jas, Mainak"].orcid).toBe("0000-0002-3199-9027");
     expect(result.discoveries["Gramfort, Alexandre"].orcid).toBe("0000-0001-9791-4404");
     expect(result.discoveries["Unknown Author"]).toBeUndefined();
+  });
+
+  test("tracks unresolved DOIs", async () => {
+    const result = await discoverOrcidsFromReferencedDois({
+      Authors: ["Doe, John"],
+      ReferencesAndLinks: ["10.9999/does-not-exist-xyz"],
+    });
+    expect(result.totalDoisQueried).toBe(1);
+    expect(result.unresolvedDois).toContain("10.9999/does-not-exist-xyz");
+    expect(Object.keys(result.discoveries)).toHaveLength(0);
+  });
+
+  test("discovers affiliations from DataCite creators", async () => {
+    const result = await discoverOrcidsFromReferencedDois({
+      Authors: ["Appelhoff, Stefan"],
+      ReferencesAndLinks: ["10.21105/joss.01896"],
+    });
+    expect(result.discoveries["Appelhoff, Stefan"]).toBeDefined();
+    // ORCID format should be valid (XXXX-XXXX-XXXX-XXXX)
+    expect(result.discoveries["Appelhoff, Stefan"].orcid).toMatch(
+      /^\d{4}-\d{4}-\d{4}-[\dX]{4}$/,
+    );
   });
 
   test("skips authors with existing ORCIDs", async () => {
