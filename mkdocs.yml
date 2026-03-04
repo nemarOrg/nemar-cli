@@ -37,8 +37,6 @@ plugins:
 
 markdown_extensions:
   - pymdownx.highlight:
-      anchor_linenums: true
-      line_spans: __span
       pygments_lang_class: true
   - pymdownx.inlinehilite
   - pymdownx.snippets
@@ -73,6 +71,7 @@ nav:
       - Environment Variables: reference/environment.md
       - API: reference/api.md
   - Development:
+      - Setup: development/setup.md
       - Zenodo Testing: development/zenodo-testing.md
 
 extra:
