@@ -129,8 +129,11 @@ const colorFormatHelp = {
       output.push(chalk.bold("Options:"), formatList(optionList), "");
     }
 
-    // Commands (subcommands)
-    const commandList = helper.visibleCommands(cmd).map((subCmd: Command) => {
+    // Commands (subcommands), sorted alphabetically for consistent help output
+    const sortedCommands = helper
+      .visibleCommands(cmd)
+      .sort((a: Command, b: Command) => a.name().localeCompare(b.name()));
+    const commandList = sortedCommands.map((subCmd: Command) => {
       const plain = helper.subcommandTerm(subCmd);
       return formatItem(plain, chalk.cyan(plain), helper.subcommandDescription(subCmd));
     });
