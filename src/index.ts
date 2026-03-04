@@ -10,6 +10,11 @@
  * (nemar login, nemar whoami, etc.) are provided as convenience aliases.
  */
 
+// IMPORTANT: help.ts must be imported first. It patches Commander's
+// Command.prototype.addHelpText at module load time so that all subsequent
+// command module imports pick up the concise-by-default help behavior.
+import { addVerboseHelp, configureColorHelp } from "./lib/help.js";
+
 import { Command } from "commander";
 import { adminCommand } from "./commands/admin.js";
 import {
@@ -38,9 +43,13 @@ This CLI provides tools for uploading, downloading, and managing datasets.`,
   .version(version, "-v, --version", "Output the current version")
   .option("--no-color", "Disable colored output")
   .option("--verbose", "Enable verbose output")
-  .addHelpText(
-    "after",
-    `
+  .option("--help-all", "Show detailed help with examples and descriptions");
+
+configureColorHelp(program);
+
+addVerboseHelp(
+  program,
+  `
 Examples:
   $ nemar auth login              # Authenticate with your API key
   $ nemar dataset validate ./my-dataset
@@ -52,7 +61,7 @@ Documentation:
 
 Support:
   https://github.com/nemarOrg/nemar-cli/issues`,
-  );
+);
 
 // Register command groups
 program.addCommand(authCommand);

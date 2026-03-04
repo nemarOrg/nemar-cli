@@ -49,6 +49,7 @@ import {
   YES_OPTION,
   confirm,
 } from "../lib/confirm.js";
+import { addVerboseHelp } from "../lib/help.js";
 import {
   configureSSHForGitHub,
   generateSSHKey,
@@ -58,8 +59,10 @@ import {
   testGitHubSSH,
 } from "../lib/ssh.js";
 
-export const authCommand = new Command("auth").description("Authentication management").addHelpText(
-  "after",
+export const authCommand = new Command("auth").description("Authentication management");
+
+addVerboseHelp(
+  authCommand,
   `
 Description:
   Manage your NEMAR account authentication. New users must register, verify
@@ -180,15 +183,17 @@ export async function loginAction(options: { key?: string } & ConfirmOptions): P
   }
 }
 
-authCommand
+const loginCmd = authCommand
   .command("login")
   .description("Authenticate with your NEMAR API key")
   .option("-k, --key <key>", "API key (alternative: set NEMAR_API_KEY env var)")
   .option(YES_OPTION, YES_DESCRIPTION)
   .option(NO_OPTION, NO_DESCRIPTION)
-  .addHelpText(
-    "after",
-    `
+  .action(loginAction);
+
+addVerboseHelp(
+  loginCmd,
+  `
 Environment Variables:
   NEMAR_API_KEY    Your API key (alternative to -k flag)
 
@@ -196,8 +201,7 @@ Examples:
   $ nemar auth login                     # Interactive prompt
   $ nemar auth login -k nemar_abc123...  # Provide key directly
   $ NEMAR_API_KEY=nemar_abc... nemar auth login`,
-  )
-  .action(loginAction);
+);
 
 // ============================================================================
 // Signup
@@ -573,12 +577,14 @@ export async function switchAction(identifier?: string): Promise<void> {
   }
 }
 
-authCommand
+const switchCmd = authCommand
   .command("switch [username]")
   .description("Switch between stored accounts")
-  .addHelpText(
-    "after",
-    `
+  .action(switchAction);
+
+addVerboseHelp(
+  switchCmd,
+  `
 Description:
   Switch the active NEMAR account. You can specify a NEMAR username or
   GitHub username. If no username is given, an interactive picker is shown.
@@ -589,8 +595,7 @@ Examples:
   $ nemar auth switch              # Interactive picker
   $ nemar auth switch yahya        # Switch by NEMAR username
   $ nemar auth switch cool-vibers  # Switch by GitHub username`,
-  )
-  .action(switchAction);
+);
 
 // ============================================================================
 // Logout
@@ -788,13 +793,15 @@ export async function setupSSHAction(options: { force?: boolean }): Promise<void
   console.log(chalk.gray("After adding the key, run 'nemar auth setup-ssh' again to verify."));
 }
 
-authCommand
+const setupSshCmd = authCommand
   .command("setup-ssh")
   .description("Configure SSH access for GitHub (auto-generates key)")
   .option("-f, --force", "Regenerate SSH key even if one exists")
-  .addHelpText(
-    "after",
-    `
+  .action(setupSSHAction);
+
+addVerboseHelp(
+  setupSshCmd,
+  `
 Description:
   Automatically configures SSH access for GitHub, which is required
   for uploading datasets. This command will:
@@ -809,30 +816,15 @@ Description:
 Examples:
   $ nemar auth setup-ssh          # Set up SSH access
   $ nemar auth setup-ssh --force  # Regenerate key even if exists`,
-  )
-  .action(setupSSHAction);
+);
 
 // ============================================================================
 // Retrieve Key (after approval)
 // ============================================================================
 
-authCommand
+const retrieveKeyCmd = authCommand
   .command("retrieve-key")
   .description("Retrieve your API key after account approval (requires email and password)")
-  .addHelpText(
-    "after",
-    `
-Description:
-  After an admin approves your account, use this command to securely
-  retrieve your API key. You will need the email and password you used
-  during signup.
-
-  API keys are not sent via email for security. This is the only way
-  to obtain your key.
-
-Examples:
-  $ nemar auth retrieve-key`,
-  )
   .action(async () => {
     const answers = await inquirer.prompt([
       {
@@ -898,28 +890,28 @@ Examples:
     }
   });
 
+addVerboseHelp(
+  retrieveKeyCmd,
+  `
+Description:
+  After an admin approves your account, use this command to securely
+  retrieve your API key. You will need the email and password you used
+  during signup.
+
+  API keys are not sent via email for security. This is the only way
+  to obtain your key.
+
+Examples:
+  $ nemar auth retrieve-key`,
+);
+
 // ============================================================================
 // Regenerate Key
 // ============================================================================
 
-authCommand
+const regenerateKeyCmd = authCommand
   .command("regenerate-key")
   .description("Request a new API key (revokes current key, requires email verification)")
-  .addHelpText(
-    "after",
-    `
-Description:
-  If you lost your API key or it was compromised, use this command to
-  request a new one. A verification email will be sent to confirm the
-  request. Clicking the link will:
-
-  1. Revoke your current API key
-  2. Generate a new API key (shown in the browser)
-  3. You will need to login again with the new key
-
-Examples:
-  $ nemar auth regenerate-key`,
-  )
   .action(async () => {
     console.log(chalk.yellow("API Key Regeneration"));
     console.log(chalk.gray("This will revoke your current key and generate a new one\n"));
@@ -959,3 +951,19 @@ Examples:
       }
     }
   });
+
+addVerboseHelp(
+  regenerateKeyCmd,
+  `
+Description:
+  If you lost your API key or it was compromised, use this command to
+  request a new one. A verification email will be sent to confirm the
+  request. Clicking the link will:
+
+  1. Revoke your current API key
+  2. Generate a new API key (shown in the browser)
+  3. You will need to login again with the new key
+
+Examples:
+  $ nemar auth regenerate-key`,
+);
