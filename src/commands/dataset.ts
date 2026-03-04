@@ -687,10 +687,7 @@ Examples:
               "../../backend/src/services/doi-orcid-discovery.js"
             );
             const spinner = ora("Looking up author ORCIDs from referenced publications...").start();
-            const orcidResult = await discoverOrcidsFromReferencedDois(
-              bidsDescription,
-              authors,
-            );
+            const orcidResult = await discoverOrcidsFromReferencedDois(bidsDescription, authors);
             const count = Object.keys(orcidResult.discoveries).length;
             if (count > 0) {
               spinner.succeed(`Found ${count} ORCID(s) from referenced DOIs`);
