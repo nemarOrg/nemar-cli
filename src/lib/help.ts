@@ -15,7 +15,7 @@
  */
 
 import chalk from "chalk";
-import { Command, type Argument, type Help, type Option } from "commander";
+import { type Argument, Command, type Help, type Option } from "commander";
 
 /**
  * True when the user passed --help-all anywhere on the command line.
@@ -40,8 +40,11 @@ if (helpAllIdx !== -1) {
 // Prototype patch (runs at module load time)
 // ============================================================================
 
-const originalAddHelpText = Command.prototype.addHelpText;
-const HINT_TEXT = `\n  Run with --help-all for examples and detailed descriptions.\n`;
+// Store original before patching. Typed as Function to work around Commander's
+// overloaded addHelpText signature which can't be captured in a single variable type.
+// biome-ignore lint/complexity/noBannedTypes: overloaded method reference
+const originalAddHelpText: Function = Command.prototype.addHelpText;
+const HINT_TEXT = "\n  Run with --help-all for examples and detailed descriptions.\n";
 // Track commands that already have the hint appended (avoid duplicates)
 const hintedCmds = new WeakSet<Command>();
 
