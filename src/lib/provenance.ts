@@ -90,14 +90,7 @@ export function validateLicenseCompatibility(
     };
   }
 
-  if (rule.allows.includes("*")) {
-    return {
-      compatible: true,
-      reason: rule.note ?? "Compatible.",
-    };
-  }
-
-  if (rule.allows.includes(targetLicense)) {
+  if (rule.allows.includes("*") || rule.allows.includes(targetLicense)) {
     return {
       compatible: true,
       reason: rule.note ?? "Compatible.",

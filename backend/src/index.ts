@@ -40,8 +40,8 @@ api.use(
         // Allow nemar.org and osc.earth domains
         if (hostname === "nemar.org" || hostname.endsWith(".nemar.org")) return origin;
         if (hostname === "osc.earth" || hostname.endsWith(".osc.earth")) return origin;
-      } catch {
-        console.warn(`CORS: rejected unparseable origin: ${origin}`);
+      } catch (err) {
+        console.warn(`CORS: rejected unparseable origin: ${origin}`, err);
       }
       return null;
     },

@@ -134,7 +134,7 @@ export function detectLicense(datasetPath: string): {
     } catch (err) {
       if (err instanceof SyntaxError) {
         console.warn(
-          "  Warning: dataset_description.json has invalid JSON; skipping license detection from it.",
+          `  Warning: dataset_description.json has invalid JSON: ${err.message}`,
         );
       } else {
         console.warn(
