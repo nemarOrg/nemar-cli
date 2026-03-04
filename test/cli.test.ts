@@ -394,7 +394,8 @@ describe("CLI Dataset Validate", () => {
     expect(stdout).toContain("--json");
     expect(stdout).toContain("--config");
     expect(stdout).toContain("--recursive");
-    expect(stdout).toContain("passed through to the BIDS validator");
+    // Verbose help text (examples, pass-through info) is now behind --help-all
+    expect(stdout).toContain("--help-all");
   });
 
   test("nemar dataset validate --version-info shows validator version", async () => {

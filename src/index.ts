@@ -10,6 +10,11 @@
  * (nemar login, nemar whoami, etc.) are provided as convenience aliases.
  */
 
+// IMPORTANT: help.ts must be imported first. It patches Commander's
+// Command.prototype.addHelpText at module load time so that all subsequent
+// command module imports pick up the concise-by-default help behavior.
+import { configureColorHelp } from "./lib/help.js";
+
 import { Command } from "commander";
 import { adminCommand } from "./commands/admin.js";
 import {
@@ -38,6 +43,7 @@ This CLI provides tools for uploading, downloading, and managing datasets.`,
   .version(version, "-v, --version", "Output the current version")
   .option("--no-color", "Disable colored output")
   .option("--verbose", "Enable verbose output")
+  .option("--help-all", "Show detailed help with examples and descriptions")
   .addHelpText(
     "after",
     `
@@ -102,6 +108,9 @@ program
   .command("switch [username]")
   .description("Switch between accounts (shortcut for 'auth switch')")
   .action(switchAction);
+
+// Apply color formatting to all commands (must be after addCommand calls)
+configureColorHelp(program);
 
 // Parse arguments
 program.parse();
