@@ -134,7 +134,8 @@ function seedMetadata(
  */
 function httpToS3Uri(httpUrl: string): string | null {
   // Pattern: http(s)://{bucket}.s3.amazonaws.com/{path}
-  const match = httpUrl.match(/^https?:\/\/([^.]+)\.s3(?:\.[^.]+)?\.amazonaws\.com\/(.+)$/);
+  // Bucket can contain dots (e.g., openneuro.org), so use non-greedy match up to .s3.
+  const match = httpUrl.match(/^https?:\/\/(.+?)\.s3(?:\.[^.]+)?\.amazonaws\.com\/(.+)$/);
   if (match) {
     return `s3://${match[1]}/${match[2]}`;
   }
@@ -352,13 +353,17 @@ export async function importOpenNeuro(
         skipped.push(key);
         continue;
       }
-      const hashDir = hashDirs.get(key) || "";
+      const hashDir = hashDirs.get(key);
+      if (!hashDir) {
+        skipped.push(key);
+        continue;
+      }
       const destUri = `s3://${S3_BUCKET}/${nemarId}/objects/${hashDir}${key}`;
       copyItems.push({ key, sourceUri, destUri });
     }
 
     if (skipped.length > 0) {
-      console.log(chalk.yellow(`  Skipped ${skipped.length} keys with non-S3 URLs`));
+      console.log(chalk.yellow(`  Skipped ${skipped.length} keys (no S3 URL or hash dir)`));
     }
 
     copySpinner.succeed(`Prepared ${copyItems.length} files for S3-to-S3 copy`);
@@ -377,18 +382,18 @@ export async function importOpenNeuro(
       if (copyResult.failed.length > 5) {
         console.error(chalk.red(`    ... and ${copyResult.failed.length - 5} more`));
       }
-    }
-
-    if (copyResult.copied === 0) {
-      s3CopySpinner.fail("No files copied to NEMAR S3");
+      s3CopySpinner.fail(
+        `${copyResult.failed.length} of ${copyItems.length} files failed to copy. Re-run to retry.`,
+      );
       process.exit(1);
     }
     s3CopySpinner.succeed(`Copied ${copyResult.copied} files to NEMAR S3`);
 
     // Register all copied keys with git-annex
     const registerSpinner = ora("Registering files in git-annex...").start();
+    const failedKeys = new Set(copyResult.failed.map((f) => f.key));
     const copiedKeys = copyItems
-      .filter((item) => !copyResult.failed.some((f) => f.key === item.key))
+      .filter((item) => !failedKeys.has(item.key))
       .map((item) => item.key);
 
     const regResult = await batchSetKeysPresent(datasetPath, copiedKeys, nemarUuid);
@@ -400,7 +405,14 @@ export async function importOpenNeuro(
 
   // Step 6: Seed .nemar/metadata.json
   const metaSpinner = ora("Seeding metadata...").start();
-  seedMetadata(datasetPath, nemarId, openneuroId, bidsDesc, openNeuroDoi);
+  try {
+    seedMetadata(datasetPath, nemarId, openneuroId, bidsDesc, openNeuroDoi);
+  } catch (err) {
+    metaSpinner.fail(
+      `Failed to seed metadata: ${err instanceof Error ? err.message : String(err)}`,
+    );
+    process.exit(1);
+  }
 
   // Stage and commit the metadata
   const addResult = await runCommand(["git", "add", ".nemar/metadata.json"], { cwd: datasetPath });

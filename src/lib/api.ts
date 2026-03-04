@@ -1381,7 +1381,6 @@ export async function importDataset(opts: {
     "/admin/datasets/import",
     {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
       body: JSON.stringify(opts),
     },
     true,

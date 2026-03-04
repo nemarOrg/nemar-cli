@@ -2321,8 +2321,11 @@ export async function getAnnexWhereisAll(datasetPath: string): Promise<Map<strin
         }
         if (keyUrlMap.has(key)) break;
       }
-    } catch {
-      // Skip unparseable lines
+    } catch (err) {
+      if (err instanceof SyntaxError) continue;
+      console.error(
+        `Warning: failed to process whereis entry: ${err instanceof Error ? err.message : String(err)}`,
+      );
     }
   }
 
@@ -2351,18 +2354,26 @@ export async function getKeyHashDirs(
   datasetPath: string,
   keys: string[],
 ): Promise<Map<string, string>> {
-  const result = new Map<string, string>();
-  // Process in batches to avoid command line length limits
+  const hashDirMap = new Map<string, string>();
+  // Limit concurrency to avoid overwhelming the system with subprocesses
   const batchSize = 50;
   for (let i = 0; i < keys.length; i += batchSize) {
     const batch = keys.slice(i, i + batchSize);
-    const promises = batch.map(async (key) => {
-      const hashDir = await getKeyHashDir(datasetPath, key);
-      result.set(key, hashDir);
-    });
-    await Promise.all(promises);
+    const results = await Promise.allSettled(
+      batch.map(async (key) => {
+        const hashDir = await getKeyHashDir(datasetPath, key);
+        return { key, hashDir };
+      }),
+    );
+    for (const r of results) {
+      if (r.status === "fulfilled") {
+        hashDirMap.set(r.value.key, r.value.hashDir);
+      } else {
+        console.error(`Warning: failed to resolve hash dir: ${r.reason?.message || "unknown"}`);
+      }
+    }
   }
-  return result;
+  return hashDirMap;
 }
 
 /**
