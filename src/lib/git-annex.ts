@@ -267,9 +267,13 @@ export async function checkPrerequisites(): Promise<PrerequisitesResult> {
   }
 
   if (!githubSSH.accessible) {
-    errors.push(
-      "GitHub SSH access not configured. Run 'nemar auth setup-ssh' to configure automatically.",
-    );
+    // HTTPS-first: try gh CLI token before failing on SSH
+    const ghToken = await getGitHubToken();
+    if (!ghToken.token) {
+      errors.push(
+        "GitHub authentication not configured. Either authenticate with gh CLI ('gh auth login') or configure SSH ('nemar auth setup-ssh').",
+      );
+    }
   }
 
   return {
@@ -910,41 +914,53 @@ export async function configureGitHubRemote(
       };
     }
     const repoPath = repoUrl.replace("git@github.com:", "");
-    finalUrl = `https://${token}@github.com/${repoPath}`;
+    finalUrl = `https://github.com/${repoPath}`;
+    // Set token via credential helper instead of embedding in URL
+    await runCommand(
+      ["git", "config", "credential.https://github.com.helper", `!echo password=${token}`],
+      { cwd: path },
+    );
   }
-  // Local: Try standard SSH first, then fallback to HTTPS with gh token
+  // Local: Try HTTPS via gh CLI token first (preferred), then SSH as fallback
   else if (repoUrl.startsWith("git@github.com:")) {
     const repoPath = repoUrl.replace("git@github.com:", "");
-    const sshResult = await testGitHubSsh();
 
-    if (sshResult.works) {
-      finalUrl = repoUrl;
+    const ghTokenResult = await getGitHubToken();
+
+    if (ghTokenResult.token) {
+      finalUrl = `https://github.com/${repoPath}`;
+      // Set token via credential helper instead of embedding in URL
+      await runCommand(
+        [
+          "git",
+          "config",
+          "credential.https://github.com.helper",
+          `!echo password=${ghTokenResult.token}`,
+        ],
+        { cwd: path },
+      );
     } else {
-      console.warn("GitHub SSH not available, falling back to HTTPS with gh CLI token...");
+      // HTTPS not available, try SSH as last resort
+      const sshResult = await testGitHubSsh();
 
-      const ghTokenResult = await getGitHubToken();
-
-      if (ghTokenResult.token) {
-        finalUrl = `https://${ghTokenResult.token}@github.com/${repoPath}`;
-        console.warn(
-          "Note: using HTTPS with gh CLI token. If the token expires, re-run 'gh auth login'.",
-        );
+      if (sshResult.works) {
+        finalUrl = repoUrl;
       } else {
         return {
           success: false,
           error: `GitHub authentication not configured.
 
-SSH failed: ${sshResult.error || "could not connect"}
 gh CLI failed: ${ghTokenResult.error || "could not get token"}
+SSH failed: ${sshResult.error || "could not connect"}
 
 Fix one of these:
-  1. Configure SSH for GitHub:
+  1. Install and authenticate gh CLI (recommended):
+     brew install gh && gh auth login
+
+  2. Configure SSH for GitHub:
      ssh-keygen -t ed25519 -C "your@email.com"
      Add the public key to https://github.com/settings/keys
-     Test with: ssh -T git@github.com
-
-  2. Install and authenticate gh CLI:
-     gh auth login`,
+     Test with: ssh -T git@github.com`,
         };
       }
     }
@@ -1567,7 +1583,31 @@ export async function cloneDataset(
 }
 
 /**
- * Get data files from remote (S3) for a cloned dataset
+ * git-annex JSON progress line (from --json-progress output)
+ */
+interface GitAnnexProgressLine {
+  action?: string;
+  file?: string;
+  "byte-progress"?: number;
+  "total-size"?: number;
+  "percent-progress"?: string;
+  key?: string;
+  ok?: boolean;
+  success?: boolean;
+  note?: string;
+  error?: string;
+}
+
+/**
+ * Progress callback for getDatasetData streaming mode
+ */
+export type DownloadProgressCallback = (line: GitAnnexProgressLine) => void;
+
+/**
+ * Get data files from remote (S3) for a cloned dataset.
+ *
+ * When onProgress is provided, uses --json-progress to stream progress
+ * events. Falls back to regular output if --json-progress is not supported.
  */
 export async function getDatasetData(
   datasetPath: string,
@@ -1575,30 +1615,128 @@ export async function getDatasetData(
     jobs?: number;
     paths?: string[]; // Specific paths to get, or all if empty
     credentials?: S3Credentials;
+    onProgress?: DownloadProgressCallback;
   } = {},
 ): Promise<{ success: boolean; error?: string; filesDownloaded?: number }> {
   const jobs = options.jobs || 4;
   const paths = options.paths && options.paths.length > 0 ? options.paths : ["."];
+  const useProgress = Boolean(options.onProgress);
+
+  const env: Record<string, string> = {};
+  if (options.credentials) {
+    env.AWS_ACCESS_KEY_ID = options.credentials.accessKeyId;
+    env.AWS_SECRET_ACCESS_KEY = options.credentials.secretAccessKey;
+    if (options.credentials.sessionToken) {
+      env.AWS_SESSION_TOKEN = options.credentials.sessionToken;
+    }
+  }
+
+  const mergedEnv = Object.fromEntries(
+    Object.entries({ ...process.env, ...env }).filter((e): e is [string, string] => e[1] != null),
+  );
 
   try {
-    const args = ["git", "annex", "get", "-J", jobs.toString(), ...paths];
-    const env: Record<string, string> = {};
-    if (options.credentials) {
-      env.AWS_ACCESS_KEY_ID = options.credentials.accessKeyId;
-      env.AWS_SECRET_ACCESS_KEY = options.credentials.secretAccessKey;
-      if (options.credentials.sessionToken) {
-        env.AWS_SESSION_TOKEN = options.credentials.sessionToken;
+    if (useProgress) {
+      // Streaming mode: parse --json-progress lines as they arrive
+      const args = [
+        "git",
+        "annex",
+        "get",
+        "--json",
+        "--json-progress",
+        "-J",
+        jobs.toString(),
+        ...paths,
+      ];
+
+      const proc = spawn({
+        cmd: args,
+        cwd: datasetPath,
+        stdout: "pipe",
+        stderr: "pipe",
+        env: mergedEnv,
+      });
+
+      let filesDownloaded = 0;
+      let stderrOutput = "";
+      const stderrChunks: Uint8Array[] = [];
+
+      // Collect stderr in background
+      const stderrPromise = (async () => {
+        const reader = proc.stderr.getReader();
+        const decoder = new TextDecoder();
+        for (;;) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          stderrChunks.push(value);
+        }
+        stderrOutput = decoder.decode(
+          stderrChunks.reduce((acc, chunk) => {
+            const merged = new Uint8Array(acc.length + chunk.length);
+            merged.set(acc);
+            merged.set(chunk, acc.length);
+            return merged;
+          }, new Uint8Array()),
+        );
+      })();
+
+      // Stream and parse stdout JSON lines
+      const reader = proc.stdout.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+
+        // Process complete lines
+        const lines = buffer.split("\n");
+        buffer = lines.pop() ?? ""; // Keep partial last line in buffer
+
+        for (const line of lines) {
+          const trimmed = line.trim();
+          if (!trimmed || !trimmed.startsWith("{")) continue;
+          try {
+            const parsed = JSON.parse(trimmed) as GitAnnexProgressLine;
+            options.onProgress?.(parsed);
+            if (parsed.ok === true || parsed.success === true) {
+              filesDownloaded++;
+            }
+          } catch {
+            // Non-JSON lines are ignored
+          }
+        }
       }
+
+      // Process any remaining buffer content
+      if (buffer.trim().startsWith("{")) {
+        try {
+          const parsed = JSON.parse(buffer.trim()) as GitAnnexProgressLine;
+          options.onProgress?.(parsed);
+          if (parsed.ok === true || parsed.success === true) {
+            filesDownloaded++;
+          }
+        } catch {
+          // Ignore partial lines
+        }
+      }
+
+      await stderrPromise;
+      const exitCode = await proc.exited;
+
+      if (exitCode !== 0) {
+        return { success: false, error: stderrOutput.trim() || "Failed to get dataset data" };
+      }
+
+      return { success: true, filesDownloaded };
     }
+
+    // Non-streaming fallback (no onProgress callback)
+    const args = ["git", "annex", "get", "-J", jobs.toString(), ...paths];
     const { stdout, stderr, exitCode } = await runCommand(args, {
       cwd: datasetPath,
-      ...(Object.keys(env).length > 0 && {
-        env: Object.fromEntries(
-          Object.entries({ ...process.env, ...env }).filter(
-            (e): e is [string, string] => e[1] != null,
-          ),
-        ),
-      }),
+      ...(Object.keys(env).length > 0 && { env: mergedEnv }),
     });
 
     if (exitCode !== 0) {
