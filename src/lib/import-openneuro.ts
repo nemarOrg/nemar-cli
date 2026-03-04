@@ -1,8 +1,9 @@
 /**
  * OpenNeuro dataset import
  *
- * Clones an OpenNeuro dataset, copies data to NEMAR S3, and creates the
- * corresponding nemarDatasets repo with 'on' prefix ID.
+ * Clones an OpenNeuro dataset, copies data directly from OpenNeuro S3 to
+ * NEMAR S3 (server-side, no local download), and creates the corresponding
+ * nemarDatasets repo with 'on' prefix ID.
  */
 
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
@@ -13,10 +14,13 @@ import ora from "ora";
 import { importDataset } from "./api.js";
 import {
   type S3Credentials,
+  batchSetKeysPresent,
   cloneDataset,
   configureGitHubRemote,
   configureS3Remote,
-  copyToAnnexRemote,
+  getAnnexWhereisAll,
+  getKeyHashDirs,
+  getRemoteUuid,
   pushToGitHub,
   runCommand,
 } from "./git-annex.js";
@@ -124,14 +128,93 @@ function seedMetadata(
 }
 
 /**
+ * Convert an HTTP URL from git-annex whereis to an S3 URI for aws s3 cp.
+ * Example: "http://openneuro.org.s3.amazonaws.com/ds007262/abc/KEY"
+ *       -> "s3://openneuro.org/ds007262/abc/KEY"
+ */
+function httpToS3Uri(httpUrl: string): string | null {
+  // Pattern: http(s)://{bucket}.s3.amazonaws.com/{path}
+  // Bucket can contain dots (e.g., openneuro.org), so use non-greedy match up to .s3.
+  const match = httpUrl.match(/^https?:\/\/(.+?)\.s3(?:\.[^.]+)?\.amazonaws\.com\/(.+)$/);
+  if (match) {
+    return `s3://${match[1]}/${match[2]}`;
+  }
+  // Pattern: http(s)://s3.{region}.amazonaws.com/{bucket}/{path}
+  const pathMatch = httpUrl.match(/^https?:\/\/s3\.[^.]+\.amazonaws\.com\/([^/]+)\/(.+)$/);
+  if (pathMatch) {
+    return `s3://${pathMatch[1]}/${pathMatch[2]}`;
+  }
+  // Already an S3 URI
+  if (httpUrl.startsWith("s3://")) {
+    return httpUrl;
+  }
+  return null;
+}
+
+/**
+ * Copy a single object between S3 buckets using aws s3 cp.
+ * The source can be a public bucket (no credentials needed to read).
+ */
+async function s3Copy(
+  sourceUri: string,
+  destUri: string,
+  region: string,
+): Promise<{ success: boolean; error?: string }> {
+  const result = await runCommand(["aws", "s3", "cp", sourceUri, destUri, "--region", region], {});
+  if (result.exitCode !== 0) {
+    return { success: false, error: result.stderr.trim() };
+  }
+  return { success: true };
+}
+
+/**
+ * Copy objects from OpenNeuro S3 to NEMAR S3 in parallel batches.
+ */
+async function batchS3Copy(
+  items: Array<{ key: string; sourceUri: string; destUri: string }>,
+  region: string,
+  concurrency: number,
+  onProgress?: (copied: number, total: number, currentKey: string) => void,
+): Promise<{ copied: number; failed: Array<{ key: string; error: string }> }> {
+  let copied = 0;
+  const failed: Array<{ key: string; error: string }> = [];
+
+  for (let i = 0; i < items.length; i += concurrency) {
+    const batch = items.slice(i, i + concurrency);
+    const results = await Promise.allSettled(
+      batch.map(async (item) => {
+        const result = await s3Copy(item.sourceUri, item.destUri, region);
+        if (!result.success) {
+          throw new Error(result.error || "Unknown S3 copy error");
+        }
+        return item.key;
+      }),
+    );
+
+    for (let j = 0; j < results.length; j++) {
+      const result = results[j];
+      if (result.status === "fulfilled") {
+        copied++;
+      } else {
+        failed.push({ key: batch[j].key, error: result.reason?.message || "Unknown error" });
+      }
+    }
+
+    onProgress?.(copied, items.length, batch[batch.length - 1].key);
+  }
+
+  return { copied, failed };
+}
+
+/**
  * Import an OpenNeuro dataset into NEMAR.
  *
  * Steps:
  * 1. Clone OpenNeuro dataset (maps ds###### -> on######)
  * 2. Create NEMAR dataset record + GitHub repo via API
- * 3. Get annexed data from OpenNeuro S3
+ * 3. Enable OpenNeuro S3 remote and build key-to-URL map
  * 4. Reconfigure git remote to nemarDatasets
- * 5. Set up NEMAR S3 remote and copy data
+ * 5. Set up NEMAR S3 remote, copy data S3-to-S3, register keys
  * 6. Seed .nemar/metadata.json
  * 7. Push to nemarDatasets
  */
@@ -187,28 +270,24 @@ export async function importOpenNeuro(
     }
   }
 
-  // Step 3: Get annexed data from OpenNeuro S3
+  // Step 3: Enable OpenNeuro S3 remote and build key-to-URL map
+  let keyUrlMap = new Map<string, string>();
   if (!options.skipData) {
-    const getSpinner = ora("Enabling OpenNeuro S3 remote...").start();
+    const whereisSpinner = ora("Mapping annexed files from OpenNeuro S3...").start();
     const enableResult = await runCommand(["git", "annex", "enableremote", "s3-PUBLIC"], {
       cwd: datasetPath,
     });
     if (enableResult.exitCode !== 0) {
-      getSpinner.fail(`Failed to enable s3-PUBLIC remote: ${enableResult.stderr.trim()}`);
+      whereisSpinner.fail(`Failed to enable s3-PUBLIC remote: ${enableResult.stderr.trim()}`);
       process.exit(1);
     }
-    getSpinner.text = "Downloading annexed data from OpenNeuro...";
-    const { stderr, exitCode } = await runCommand(["git", "annex", "get", "--all", "-J", "4"], {
-      cwd: datasetPath,
-    });
-    if (exitCode !== 0) {
-      getSpinner.fail(`Failed to get annexed data: ${stderr.trim()}`);
-      console.error(
-        chalk.red("Cannot continue: data download is required. Use --skip-data for metadata only."),
-      );
-      process.exit(1);
+
+    keyUrlMap = await getAnnexWhereisAll(datasetPath);
+    if (keyUrlMap.size === 0) {
+      whereisSpinner.warn("No annexed files found, skipping data copy");
+    } else {
+      whereisSpinner.succeed(`Found ${keyUrlMap.size} annexed files`);
     }
-    getSpinner.succeed("Downloaded annexed data");
   }
 
   // Step 4: Reconfigure git remote to nemarDatasets
@@ -232,8 +311,8 @@ export async function importOpenNeuro(
   }
   remoteSpinner.succeed("Configured NEMAR remote");
 
-  // Step 5: Set up NEMAR S3 remote and copy data
-  if (!options.skipData) {
+  // Step 5: Set up NEMAR S3 remote, copy data S3-to-S3, register keys
+  if (!options.skipData && keyUrlMap.size > 0) {
     const s3Spinner = ora("Setting up NEMAR S3 remote...").start();
     const s3Creds = resolveS3Credentials();
 
@@ -251,21 +330,89 @@ export async function importOpenNeuro(
       s3Spinner.fail(`Failed to configure S3 remote: ${s3Result.error}`);
       process.exit(1);
     }
-    s3Spinner.succeed("Configured NEMAR S3 remote");
 
-    // Copy data from local (downloaded from OpenNeuro) to NEMAR S3
-    const copySpinner = ora("Copying data to NEMAR S3...").start();
-    const copyResult = await copyToAnnexRemote(datasetPath, "nemar-s3", 4, s3Creds);
-    if (!copyResult.success) {
-      copySpinner.fail(`Failed to copy data: ${copyResult.error}`);
+    // Get NEMAR remote UUID for setpresentkey
+    const nemarUuid = await getRemoteUuid(datasetPath, "nemar-s3");
+    if (!nemarUuid) {
+      s3Spinner.fail("Failed to get NEMAR S3 remote UUID");
       process.exit(1);
     }
-    copySpinner.succeed(`Copied ${copyResult.filesCopied} files to NEMAR S3`);
+    s3Spinner.succeed("Configured NEMAR S3 remote");
+
+    // Build copy items: resolve source URLs and compute destination paths
+    const copySpinner = ora("Preparing S3-to-S3 copy...").start();
+    const keys = Array.from(keyUrlMap.keys());
+    const hashDirs = await getKeyHashDirs(datasetPath, keys);
+
+    const copyItems: Array<{ key: string; sourceUri: string; destUri: string }> = [];
+    const skipped: string[] = [];
+
+    for (const [key, httpUrl] of keyUrlMap) {
+      const sourceUri = httpToS3Uri(httpUrl);
+      if (!sourceUri) {
+        skipped.push(key);
+        continue;
+      }
+      const hashDir = hashDirs.get(key);
+      if (!hashDir) {
+        skipped.push(key);
+        continue;
+      }
+      const destUri = `s3://${S3_BUCKET}/${nemarId}/objects/${hashDir}${key}`;
+      copyItems.push({ key, sourceUri, destUri });
+    }
+
+    if (skipped.length > 0) {
+      console.log(chalk.yellow(`  Skipped ${skipped.length} keys (no S3 URL or hash dir)`));
+    }
+
+    copySpinner.succeed(`Prepared ${copyItems.length} files for S3-to-S3 copy`);
+
+    // Execute S3-to-S3 copy in parallel batches
+    const s3CopySpinner = ora(`Copying ${copyItems.length} files to NEMAR S3...`).start();
+    const copyResult = await batchS3Copy(copyItems, S3_REGION, 8, (copied, total) => {
+      s3CopySpinner.text = `Copying files to NEMAR S3... ${copied}/${total}`;
+    });
+
+    if (copyResult.failed.length > 0) {
+      console.error(chalk.red(`\n  Failed to copy ${copyResult.failed.length} files:`));
+      for (const f of copyResult.failed.slice(0, 5)) {
+        console.error(chalk.red(`    ${f.key}: ${f.error}`));
+      }
+      if (copyResult.failed.length > 5) {
+        console.error(chalk.red(`    ... and ${copyResult.failed.length - 5} more`));
+      }
+      s3CopySpinner.fail(
+        `${copyResult.failed.length} of ${copyItems.length} files failed to copy. Re-run to retry.`,
+      );
+      process.exit(1);
+    }
+    s3CopySpinner.succeed(`Copied ${copyResult.copied} files to NEMAR S3`);
+
+    // Register all copied keys with git-annex
+    const registerSpinner = ora("Registering files in git-annex...").start();
+    const failedKeys = new Set(copyResult.failed.map((f) => f.key));
+    const copiedKeys = copyItems
+      .filter((item) => !failedKeys.has(item.key))
+      .map((item) => item.key);
+
+    const regResult = await batchSetKeysPresent(datasetPath, copiedKeys, nemarUuid);
+    if (regResult.failed > 0) {
+      console.log(chalk.yellow(`  ${regResult.failed} keys failed to register (non-fatal)`));
+    }
+    registerSpinner.succeed(`Registered ${regResult.success} files in git-annex`);
   }
 
   // Step 6: Seed .nemar/metadata.json
   const metaSpinner = ora("Seeding metadata...").start();
-  seedMetadata(datasetPath, nemarId, openneuroId, bidsDesc, openNeuroDoi);
+  try {
+    seedMetadata(datasetPath, nemarId, openneuroId, bidsDesc, openNeuroDoi);
+  } catch (err) {
+    metaSpinner.fail(
+      `Failed to seed metadata: ${err instanceof Error ? err.message : String(err)}`,
+    );
+    process.exit(1);
+  }
 
   // Stage and commit the metadata
   const addResult = await runCommand(["git", "add", ".nemar/metadata.json"], { cwd: datasetPath });
