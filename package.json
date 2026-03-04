@@ -30,7 +30,7 @@
     "cli"
   ],
   "author": "NEMAR Team",
-  "license": "MIT",
+  "license": "CC-BY-NC-ND-4.0",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/nemarOrg/nemar-cli.git"
