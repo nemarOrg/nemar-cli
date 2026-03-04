@@ -105,7 +105,13 @@ function seedMetadata(
   }
 
   const relatedIdentifiers = openNeuroDoi
-    ? [{ doi: openNeuroDoi, relationType: "IsIdenticalTo" }]
+    ? [
+        {
+          identifier: openNeuroDoi,
+          identifier_type: "DOI",
+          relation_type: "IsIdenticalTo",
+        },
+      ]
     : [];
 
   const metadata = {
