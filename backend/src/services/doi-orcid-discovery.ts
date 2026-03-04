@@ -134,7 +134,13 @@ export async function queryDataCiteDoi(
       creators: Array.isArray(data.creators) ? data.creators : [],
     };
   } catch (err) {
-    console.warn(`[orcid-discovery] DataCite query failed for ${doi}:`, err);
+    const msg = err instanceof Error ? err.message : String(err);
+    const isNetwork = msg.includes("AbortError") || msg.includes("timeout") || msg.includes("fetch");
+    if (isNetwork) {
+      console.warn(`[orcid-discovery] DataCite query failed for ${doi}: ${msg}`);
+    } else {
+      console.error(`[orcid-discovery] Unexpected error querying DataCite for ${doi}:`, err);
+    }
     return null;
   }
 }
