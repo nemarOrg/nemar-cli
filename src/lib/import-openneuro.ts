@@ -19,7 +19,6 @@ import {
   configureGitHubRemote,
   configureS3Remote,
   getAnnexWhereisAll,
-  getKeyHashDirs,
   getRemoteUuid,
   pushToGitHub,
   runCommand,
@@ -321,10 +320,8 @@ export async function importOpenNeuro(
     }
     s3Spinner.succeed("Configured NEMAR S3 remote");
 
-    // Build copy items: resolve source URLs and compute destination paths
+    // Build copy items: source HTTP URLs and flat destination paths (no hash dirs)
     const copySpinner = ora("Preparing S3-to-S3 copy...").start();
-    const keys = Array.from(keyUrlMap.keys());
-    const hashDirs = await getKeyHashDirs(datasetPath, keys);
 
     const copyItems: Array<{ key: string; sourceUrl: string; destUri: string }> = [];
     const skipped: string[] = [];
@@ -334,17 +331,12 @@ export async function importOpenNeuro(
         skipped.push(key);
         continue;
       }
-      const hashDir = hashDirs.get(key);
-      if (!hashDir) {
-        skipped.push(key);
-        continue;
-      }
-      const destUri = `s3://${S3_BUCKET}/${nemarId}/objects/${hashDir}${key}`;
+      const destUri = `s3://${S3_BUCKET}/${nemarId}/objects/${key}`;
       copyItems.push({ key, sourceUrl: httpUrl, destUri });
     }
 
     if (skipped.length > 0) {
-      console.log(chalk.yellow(`  Skipped ${skipped.length} keys (no S3 URL or hash dir)`));
+      console.log(chalk.yellow(`  Skipped ${skipped.length} keys (no source URL)`));
     }
 
     copySpinner.succeed(`Prepared ${copyItems.length} files for S3-to-S3 copy`);
