@@ -55,10 +55,10 @@ Support:
   );
 
 // Register command groups
+program.addCommand(adminCommand);
 program.addCommand(authCommand);
 program.addCommand(datasetCommand);
 program.addCommand(sandboxCommand);
-program.addCommand(adminCommand);
 
 // ============================================================================
 // Root-level shortcuts (convenience aliases)
@@ -83,25 +83,25 @@ program
   .action(logoutAction);
 
 program
+  .command("register")
+  .description("Register for a new account (alias for signup)")
+  .action(signupAction);
+
+program
   .command("signup")
   .description("Register for a new account (shortcut for 'auth signup')")
   .action(signupAction);
 
 program
-  .command("register")
-  .description("Register for a new account (alias for signup)")
-  .action(signupAction);
+  .command("switch [username]")
+  .description("Switch between accounts (shortcut for 'auth switch')")
+  .action(switchAction);
 
 program
   .command("whoami")
   .description("Show current user (shortcut for 'auth status')")
   .option("--refresh", "Refresh user info from server")
   .action(statusAction);
-
-program
-  .command("switch [username]")
-  .description("Switch between accounts (shortcut for 'auth switch')")
-  .action(switchAction);
 
 // Parse arguments
 program.parse();

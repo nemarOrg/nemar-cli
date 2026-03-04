@@ -3,8 +3,8 @@
  *
  * Commands:
  * - nemar sandbox         - Run sandbox training (main entry point)
- * - nemar sandbox status  - Check if sandbox training is completed
  * - nemar sandbox reset   - Reset sandbox status for re-training
+ * - nemar sandbox status  - Check if sandbox training is completed
  */
 
 import chalk from "chalk";
@@ -398,6 +398,61 @@ async function sandboxAction(): Promise<void> {
 }
 
 // ============================================================================
+// Reset command
+// ============================================================================
+
+sandboxCommand
+  .command("reset")
+  .description("Reset sandbox training status for re-training")
+  .option(YES_OPTION, YES_DESCRIPTION)
+  .option(NO_OPTION, NO_DESCRIPTION)
+  .action(async (options: ConfirmOptions) => {
+    if (!isAuthenticated()) {
+      console.log(chalk.red("Not authenticated"));
+      console.log(chalk.gray("Run 'nemar auth login' first"));
+      return;
+    }
+
+    const localConfig = getConfig();
+    if (!localConfig.sandboxCompleted) {
+      console.log(chalk.yellow("Sandbox training not yet completed"));
+      console.log(chalk.gray("Nothing to reset"));
+      return;
+    }
+
+    const result = await confirm(
+      "Reset sandbox training status? You will need to complete training again.",
+      options,
+    );
+    if (result !== "confirmed") {
+      console.log(chalk.gray(result === "declined" ? "Skipped" : "Cancelled"));
+      return;
+    }
+
+    const spinner = ora("Resetting sandbox status...").start();
+
+    try {
+      await resetSandbox();
+
+      // Clear local config
+      deleteConfig("sandboxCompleted");
+      deleteConfig("sandboxDatasetId");
+
+      spinner.succeed("Sandbox status reset");
+      console.log();
+      console.log("Run sandbox training again with:");
+      console.log(chalk.cyan("  nemar sandbox"));
+    } catch (error) {
+      spinner.fail("Failed to reset");
+      if (error instanceof ApiError) {
+        console.log(chalk.red(`  ${error.message}`));
+      } else {
+        console.log(chalk.red(`  ${error instanceof Error ? error.message : "Unknown error"}`));
+      }
+    }
+  });
+
+// ============================================================================
 // Status command
 // ============================================================================
 
@@ -452,61 +507,6 @@ sandboxCommand
         console.log();
         console.log("Run sandbox training with:");
         console.log(chalk.cyan("  nemar sandbox"));
-      }
-    }
-  });
-
-// ============================================================================
-// Reset command
-// ============================================================================
-
-sandboxCommand
-  .command("reset")
-  .description("Reset sandbox training status for re-training")
-  .option(YES_OPTION, YES_DESCRIPTION)
-  .option(NO_OPTION, NO_DESCRIPTION)
-  .action(async (options: ConfirmOptions) => {
-    if (!isAuthenticated()) {
-      console.log(chalk.red("Not authenticated"));
-      console.log(chalk.gray("Run 'nemar auth login' first"));
-      return;
-    }
-
-    const localConfig = getConfig();
-    if (!localConfig.sandboxCompleted) {
-      console.log(chalk.yellow("Sandbox training not yet completed"));
-      console.log(chalk.gray("Nothing to reset"));
-      return;
-    }
-
-    const result = await confirm(
-      "Reset sandbox training status? You will need to complete training again.",
-      options,
-    );
-    if (result !== "confirmed") {
-      console.log(chalk.gray(result === "declined" ? "Skipped" : "Cancelled"));
-      return;
-    }
-
-    const spinner = ora("Resetting sandbox status...").start();
-
-    try {
-      await resetSandbox();
-
-      // Clear local config
-      deleteConfig("sandboxCompleted");
-      deleteConfig("sandboxDatasetId");
-
-      spinner.succeed("Sandbox status reset");
-      console.log();
-      console.log("Run sandbox training again with:");
-      console.log(chalk.cyan("  nemar sandbox"));
-    } catch (error) {
-      spinner.fail("Failed to reset");
-      if (error instanceof ApiError) {
-        console.log(chalk.red(`  ${error.message}`));
-      } else {
-        console.log(chalk.red(`  ${error instanceof Error ? error.message : "Unknown error"}`));
       }
     }
   });

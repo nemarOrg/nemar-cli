@@ -4,16 +4,19 @@
  * These commands require admin privileges.
  *
  * Commands:
- * - nemar admin users              - List users (pending, approved, all)
- * - nemar admin approve            - Approve a pending user
- * - nemar admin revoke             - Revoke user access
- * - nemar admin role               - Change a user's role (owner only)
- * - nemar admin s3 regenerate-iam  - Regenerate AWS credentials for a user
- * - nemar admin repo public/private - Change repository visibility
- * - nemar admin ci check/add       - Manage CI workflows
- * - nemar admin doi create/info    - DOI management
- * - nemar admin publish list/deny/approve - Publication workflow
- * - nemar admin revert             - Revert dataset to a previous version
+ * - nemar admin approve                    - Approve a pending user
+ * - nemar admin ci add/check               - Manage CI workflows
+ * - nemar admin delete-dataset             - Delete a dataset
+ * - nemar admin doi create/enrich/info/update - DOI management
+ * - nemar admin e2e-test                   - Run end-to-end tests
+ * - nemar admin make-public                - Publish dataset (permanent)
+ * - nemar admin publish approve/deny/list  - Publication workflow
+ * - nemar admin repo private/public        - Change repository visibility
+ * - nemar admin revert                     - Revert dataset to a previous version
+ * - nemar admin revoke                     - Revoke user access
+ * - nemar admin role                       - Change a user's role (owner only)
+ * - nemar admin s3 lock/regenerate-iam     - S3/IAM credential management
+ * - nemar admin users                      - List users (pending, approved, all)
  */
 
 import { existsSync } from "node:fs";
@@ -161,93 +164,6 @@ function requireAuth(): boolean {
 }
 
 // ============================================================================
-// Users
-// ============================================================================
-
-adminCommand
-  .command("users")
-  .description("List NEMAR users")
-  .option("--pending", "Show only pending approval")
-  .option("--verified", "Show only verified (awaiting approval)")
-  .option("--approved", "Show only approved users")
-  .option("--revoked", "Show only revoked users")
-  .option("--role <role>", "Filter by role: owner, admin, or member")
-  .addHelpText(
-    "after",
-    `
-Examples:
-  $ nemar admin users                    # List all users
-  $ nemar admin users --verified         # Users awaiting approval
-  $ nemar admin users --role admin       # List all admins
-  $ nemar admin users --role owner       # List all owners
-  $ nemar admin users --approved --role member  # Approved regular users`,
-  )
-  .action(async (options) => {
-    if (!requireAuth()) return;
-
-    // Determine status filter
-    let status: string | undefined;
-    if (options.pending) status = "pending";
-    else if (options.verified) status = "verified";
-    else if (options.approved) status = "approved";
-    else if (options.revoked) status = "revoked";
-
-    // Validate role filter
-    const role: string | undefined = options.role;
-    if (role && !["owner", "admin", "member"].includes(role)) {
-      console.error(chalk.red(`Invalid role '${role}'. Must be: owner, admin, or member`));
-      process.exit(1);
-    }
-
-    const spinner = ora("Fetching users...").start();
-
-    try {
-      const result = await listUsers(status, role);
-      spinner.stop();
-
-      if (result.users.length === 0) {
-        const filters = [status, role].filter(Boolean).join(", ");
-        console.log(chalk.yellow(`No users found${filters ? ` (filter: ${filters})` : ""}`));
-        return;
-      }
-
-      const filterLabel = [status, role ? `role=${role}` : ""].filter(Boolean).join(", ");
-      console.log(
-        `\n${chalk.cyan("NEMAR Users")} (${result.count} total${filterLabel ? `, filter: ${filterLabel}` : ""})\n`,
-      );
-
-      // Display users in a clean format
-      for (const user of result.users) {
-        const statusColor =
-          {
-            pending: chalk.gray,
-            verified: chalk.yellow,
-            approved: chalk.green,
-            revoked: chalk.red,
-          }[user.status] || chalk.white;
-
-        const userRole = user.role || "member";
-        const roleBadge =
-          userRole === "owner"
-            ? chalk.red(" [owner]")
-            : userRole === "admin"
-              ? chalk.magenta(" [admin]")
-              : chalk.gray(" [member]");
-        const verifiedBadge = user.email_verified ? "" : chalk.gray(" (unverified)");
-
-        console.log(`  ${chalk.cyan(user.username)}${roleBadge}`);
-        console.log(`    Email:   ${user.email}${verifiedBadge}`);
-        console.log(`    GitHub:  @${user.github_username}`);
-        console.log(`    Status:  ${statusColor(user.status)}`);
-        console.log(`    Created: ${new Date(user.created_at).toLocaleDateString()}`);
-        console.log();
-      }
-    } catch (error) {
-      handleCommandError(error, spinner, "Failed to fetch users");
-    }
-  });
-
-// ============================================================================
 // Approve
 // ============================================================================
 
@@ -314,315 +230,49 @@ adminCommand
   });
 
 // ============================================================================
-// Revoke
-// ============================================================================
-
-adminCommand
-  .command("revoke")
-  .description("Revoke user access")
-  .argument("<username>", "Username to revoke")
-  .option(YES_OPTION, YES_DESCRIPTION)
-  .option(NO_OPTION, NO_DESCRIPTION)
-  .action(async (username, options: ConfirmOptions) => {
-    if (!requireAuth()) return;
-
-    // Prevent self-revocation
-    const config = getConfig();
-    if (config.username === username) {
-      console.log(chalk.red("Error: Cannot revoke your own access"));
-      return;
-    }
-
-    // Confirmation with warning
-    console.log(chalk.red(`\nRevoking access for: ${username}\n`));
-    console.log(chalk.yellow("This will:"));
-    console.log("  1. Invalidate all API keys for this user");
-    console.log("  2. Remove them from datasets they have access to");
-    console.log("  3. Send them a notification email");
-    console.log();
-
-    const result = await confirmWithInput(
-      `Type '${username}' to confirm revocation:`,
-      username,
-      options,
-    );
-    if (result !== "confirmed") {
-      console.log(chalk.gray(result === "declined" ? "Skipped" : "Cancelled"));
-      return;
-    }
-
-    const spinner = ora(`Revoking ${username}...`).start();
-
-    try {
-      await revokeUser(username);
-      spinner.succeed(`Revoked access for ${username}`);
-    } catch (error) {
-      handleCommandError(error, spinner, "Failed to revoke user", {
-        404: "User not found",
-      });
-    }
-  });
-
-// ============================================================================
-// Role Management (Owner Only)
-// ============================================================================
-
-adminCommand
-  .command("role")
-  .description("Change a user's role (owner only)")
-  .argument("<username>", "Username to change role for")
-  .argument("<role>", "New role: owner, admin, or member")
-  .option("-y, --yes", "Skip confirmation prompt")
-  .addHelpText(
-    "after",
-    `
-Permission Model:
-  owner  - Full access: can manage users, roles, datasets, DOIs, and system settings
-  admin  - Can approve/revoke users, manage datasets and DOIs
-  member - Can upload and manage their own datasets only
-
-Rules:
-  - Only owners can change roles
-  - You cannot change your own role (prevents self-lockout)
-  - The last owner cannot be demoted (prevents total lockout)
-  - Demoting a user revokes their tokens (they must re-login)
-
-Examples:
-  $ nemar admin role john_doe admin        # Promote to admin
-  $ nemar admin role john_doe member       # Demote to member
-  $ nemar admin role jane_doe owner -y     # Promote to owner (skip confirm)`,
-  )
-  .action(async (username: string, role: string, options: { yes?: boolean }) => {
-    if (!requireAuth()) return;
-
-    if (!["owner", "admin", "member"].includes(role)) {
-      console.error(chalk.red(`Invalid role '${role}'. Must be: owner, admin, or member`));
-      process.exit(1);
-    }
-
-    if (!options.yes) {
-      const { confirmed } = await inquirer.prompt([
-        {
-          type: "confirm",
-          name: "confirmed",
-          message: `Change ${username}'s role to '${role}'?`,
-          default: false,
-        },
-      ]);
-      if (!confirmed) {
-        console.log(chalk.gray("Cancelled"));
-        return;
-      }
-    }
-
-    const spinner = ora(`Changing ${username}'s role to '${role}'...`).start();
-
-    try {
-      const result = await changeUserRole(username, role as "owner" | "admin" | "member");
-      spinner.succeed(result.message);
-      if (result.tokens_revoked !== undefined && result.tokens_revoked > 0) {
-        console.log(
-          chalk.yellow(`  ${result.tokens_revoked} token(s) revoked (user must re-login)`),
-        );
-      }
-    } catch (error) {
-      handleCommandError(error, spinner, "Failed to change role", {
-        400: "Invalid request (check if you are an owner)",
-        403: "Owner access required",
-        404: "User not found",
-        409: "User already has that role",
-      });
-    }
-  });
-
-// ============================================================================
-// S3 / IAM Management
-// ============================================================================
-
-const s3Command = new Command("s3").description("S3 and IAM credential management");
-
-s3Command
-  .command("regenerate-iam")
-  .description("Regenerate AWS IAM credentials for a user")
-  .argument("<username>", "Username to regenerate credentials for")
-  .option(YES_OPTION, YES_DESCRIPTION)
-  .option(NO_OPTION, NO_DESCRIPTION)
-  .action(regenerateIamAction);
-
-s3Command
-  .command("lock")
-  .description("Apply S3 Object Lock (Governance mode) to a dataset")
-  .argument("<dataset-id>", "Dataset ID to lock")
-  .option(YES_OPTION, YES_DESCRIPTION)
-  .option(NO_OPTION, NO_DESCRIPTION)
-  .action(async (datasetId: string, options: ConfirmOptions) => {
-    if (!requireAuth()) return;
-
-    console.log(chalk.cyan(`\nApply S3 Object Lock to ${datasetId}\n`));
-    console.log("This will:");
-    console.log("  • Set GOVERNANCE mode Object Lock on all objects");
-    console.log("  • Retention period: 100 years");
-    console.log("  • Objects cannot be deleted or modified without bypass");
-    console.log();
-
-    const confirmResult = await confirm(`Apply S3 Object Lock to ${datasetId}?`, options);
-    if (confirmResult !== "confirmed") {
-      console.log(chalk.gray(confirmResult === "declined" ? "Skipped" : "Cancelled"));
-      return;
-    }
-
-    const spinner = ora("Applying S3 Object Lock...").start();
-
-    try {
-      const result = await applyS3Lock(datasetId);
-      if (result.failed.length > 0) {
-        spinner.fail(
-          `Partial lock: ${result.locked}/${result.total} locked, ${result.failed.length} failed`,
-        );
-        console.log(chalk.yellow("\nFailed objects:"));
-        for (const key of result.failed.slice(0, 10)) {
-          console.log(`  • ${key}`);
-        }
-        if (result.failed.length > 10) {
-          console.log(`  ... and ${result.failed.length - 10} more`);
-        }
-      } else {
-        spinner.succeed(`All ${result.locked} objects locked successfully`);
-      }
-    } catch (error) {
-      spinner.fail("S3 lock failed");
-      console.log(chalk.gray(`  ${errorDetail(error)}`));
-    }
-  });
-
-adminCommand.addCommand(s3Command);
-
-// Hidden alias for backward compatibility
-adminCommand
-  .command("regenerate-iam", { hidden: true })
-  .argument("<username>")
-  .option(YES_OPTION, YES_DESCRIPTION)
-  .option(NO_OPTION, NO_DESCRIPTION)
-  .action(regenerateIamAction);
-
-async function regenerateIamAction(username: string, options: ConfirmOptions) {
-  if (!requireAuth()) return;
-
-  console.log(chalk.yellow(`\nRegenerate IAM credentials for: ${username}\n`));
-  console.log("This will:");
-  console.log("  1. Create new AWS IAM access keys for the user");
-  console.log("  2. Invalidate any existing access keys");
-  console.log("  3. Restore S3 access to their datasets");
-  console.log();
-  console.log(chalk.gray("Use this if a user's credentials were compromised or lost."));
-  console.log();
-
-  const confirmResult = await confirm(`Regenerate IAM credentials for ${username}?`, options);
-  if (confirmResult !== "confirmed") {
-    console.log(chalk.gray(confirmResult === "declined" ? "Skipped" : "Cancelled"));
-    return;
-  }
-
-  const spinner = ora(`Regenerating IAM credentials for ${username}...`).start();
-
-  try {
-    const result = await regenerateUserIam(username);
-    spinner.succeed(`Regenerated IAM credentials for ${username}`);
-    console.log();
-    console.log(`  IAM Username: ${chalk.cyan(result.user.iam_username)}`);
-    if (result.user.role === "admin" || result.user.role === "owner") {
-      console.log(`  Access: ${chalk.magenta("full bucket access (admin/owner)")}`);
-    }
-    console.log(`  Datasets restored: ${chalk.green(result.datasets_restored)}`);
-
-    if (result.warning) {
-      console.log();
-      console.log(chalk.yellow(`  Warning: ${result.warning}`));
-      console.log(chalk.gray("  Please verify old credentials are revoked in AWS console."));
-    }
-
-    console.log();
-    console.log(chalk.gray("The user can now upload to their datasets again."));
-  } catch (error) {
-    handleCommandError(error, spinner, "Failed to regenerate IAM credentials", {
-      404: "User not found or not approved",
-    });
-  }
-}
-
-// ============================================================================
-// Repository Management
-// ============================================================================
-
-const repoCommand = new Command("repo").description("Repository visibility management");
-
-repoCommand
-  .command("public")
-  .description("Make a dataset repository public")
-  .argument("<dataset-id>", "Dataset ID (e.g., nm000104)")
-  .option(YES_OPTION, YES_DESCRIPTION)
-  .option(NO_OPTION, NO_DESCRIPTION)
-  .action(async (datasetId, options: ConfirmOptions) => {
-    if (!requireAuth()) return;
-
-    console.log(chalk.cyan(`\nMaking repository public: ${datasetId}\n`));
-    console.log(chalk.yellow("Warning: This will make the dataset visible to everyone."));
-    console.log();
-
-    const confirmResult = await confirm(`Make ${datasetId} public?`, options);
-    if (confirmResult !== "confirmed") {
-      console.log(chalk.gray(confirmResult === "declined" ? "Skipped" : "Cancelled"));
-      return;
-    }
-
-    const spinner = ora(`Setting ${datasetId} to public...`).start();
-    try {
-      await changeVisibility(datasetId, "public");
-      spinner.succeed(`Repository ${datasetId} is now public`);
-    } catch (error) {
-      handleCommandError(error, spinner, "Failed to change visibility", {
-        404: "Dataset not found",
-      });
-    }
-  });
-
-repoCommand
-  .command("private")
-  .description("Make a dataset repository private")
-  .argument("<dataset-id>", "Dataset ID (e.g., nm000104)")
-  .option(YES_OPTION, YES_DESCRIPTION)
-  .option(NO_OPTION, NO_DESCRIPTION)
-  .action(async (datasetId, options: ConfirmOptions) => {
-    if (!requireAuth()) return;
-
-    console.log(chalk.yellow(`\nMaking repository private: ${datasetId}\n`));
-    console.log("This will restrict access to collaborators only.");
-    console.log();
-
-    const confirmResult = await confirm(`Make ${datasetId} private?`, options);
-    if (confirmResult !== "confirmed") {
-      console.log(chalk.gray(confirmResult === "declined" ? "Skipped" : "Cancelled"));
-      return;
-    }
-
-    const spinner = ora(`Setting ${datasetId} to private...`).start();
-    try {
-      await changeVisibility(datasetId, "private");
-      spinner.succeed(`Repository ${datasetId} is now private`);
-    } catch (error) {
-      handleCommandError(error, spinner, "Failed to change visibility", {
-        404: "Dataset not found",
-      });
-    }
-  });
-
-adminCommand.addCommand(repoCommand);
-
-// ============================================================================
 // CI Management
 // ============================================================================
 
 const ciCommand = new Command("ci").description("CI workflow management");
+
+ciCommand
+  .command("add")
+  .description("Deploy CI workflows to a dataset repository")
+  .argument("<dataset-id>", "Dataset ID (e.g., nm000104)")
+  .option(YES_OPTION, YES_DESCRIPTION)
+  .option(NO_OPTION, NO_DESCRIPTION)
+  .action(async (datasetId, options: ConfirmOptions) => {
+    if (!requireAuth()) return;
+
+    console.log(chalk.cyan(`\nDeploy CI workflows to: ${datasetId}\n`));
+    console.log("This will add the following workflows:");
+    console.log("  1. BIDS Validation (runs on PRs)");
+    console.log("  2. Version Check (ensures version bump on PRs)");
+    console.log("  3. PR Merge Handler (creates releases, publishes DOIs)");
+    console.log();
+
+    const confirmResult = await confirm(`Deploy CI workflows to ${datasetId}?`, options);
+    if (confirmResult !== "confirmed") {
+      console.log(chalk.gray(confirmResult === "declined" ? "Skipped" : "Cancelled"));
+      return;
+    }
+
+    const spinner = ora(`Deploying CI workflows to ${datasetId}...`).start();
+
+    try {
+      const result = await addCi(datasetId);
+      spinner.succeed("CI workflows deployed");
+      console.log();
+      for (const workflow of result.workflows_deployed) {
+        console.log(`  ${chalk.green("[x]")} ${workflow}`);
+      }
+      console.log();
+    } catch (error) {
+      handleCommandError(error, spinner, "Failed to deploy CI workflows", {
+        404: "Dataset not found",
+      });
+    }
+  });
 
 ciCommand
   .command("check")
@@ -674,46 +324,107 @@ ciCommand
     }
   });
 
-ciCommand
-  .command("add")
-  .description("Deploy CI workflows to a dataset repository")
-  .argument("<dataset-id>", "Dataset ID (e.g., nm000104)")
-  .option(YES_OPTION, YES_DESCRIPTION)
-  .option(NO_OPTION, NO_DESCRIPTION)
-  .action(async (datasetId, options: ConfirmOptions) => {
+adminCommand.addCommand(ciCommand);
+
+// ============================================================================
+// Delete Dataset (Admin/Owner Only)
+// ============================================================================
+
+adminCommand
+  .command("delete-dataset")
+  .description("Delete a dataset and all associated resources (GitHub, S3, D1)")
+  .argument("<dataset-id>", "Dataset ID (e.g., nm000108)")
+  .option("--force", "Force deletion of published datasets with DOIs (owner only)")
+  .action(async (datasetId: string, options: { force?: boolean }) => {
     if (!requireAuth()) return;
 
-    console.log(chalk.cyan(`\nDeploy CI workflows to: ${datasetId}\n`));
-    console.log("This will add the following workflows:");
-    console.log("  1. BIDS Validation (runs on PRs)");
-    console.log("  2. Version Check (ensures version bump on PRs)");
-    console.log("  3. PR Merge Handler (creates releases, publishes DOIs)");
-    console.log();
-
-    const confirmResult = await confirm(`Deploy CI workflows to ${datasetId}?`, options);
-    if (confirmResult !== "confirmed") {
-      console.log(chalk.gray(confirmResult === "declined" ? "Skipped" : "Cancelled"));
-      return;
-    }
-
-    const spinner = ora(`Deploying CI workflows to ${datasetId}...`).start();
+    const spinner = ora("Looking up dataset...").start();
 
     try {
-      const result = await addCi(datasetId);
-      spinner.succeed("CI workflows deployed");
-      console.log();
-      for (const workflow of result.workflows_deployed) {
-        console.log(`  ${chalk.green("[x]")} ${workflow}`);
+      const dataset = await getDataset(datasetId);
+      spinner.stop();
+
+      console.log(chalk.bold(`\nDataset: ${dataset.dataset_id}`));
+      console.log(`  Name: ${dataset.name || "(unnamed)"}`);
+      console.log(`  Visibility: ${dataset.visibility}`);
+      if (dataset.concept_doi) {
+        console.log(`  DOI: ${dataset.concept_doi}`);
+        console.log(
+          chalk.yellow("\n  WARNING: This dataset has a DOI. Only the NEMAR owner can delete it."),
+        );
+        if (!options.force) {
+          console.log(chalk.gray("  Use --force to confirm deletion of published datasets."));
+          process.exit(1);
+        }
       }
-      console.log();
+
+      const { proceed } = await inquirer.prompt([
+        {
+          type: "confirm",
+          name: "proceed",
+          message: chalk.red(
+            `Delete dataset ${datasetId}? This will remove the GitHub repo, S3 data, and all database records. This cannot be undone.`,
+          ),
+          default: false,
+        },
+      ]);
+
+      if (!proceed) {
+        console.log(chalk.gray("Cancelled."));
+        return;
+      }
+
+      spinner.start("Deleting dataset...");
+      const result = await deleteDataset(datasetId, options.force ?? false);
+      if (!result.deleted) {
+        spinner.fail("Dataset deletion incomplete");
+      } else if (result.warnings.length > 0) {
+        spinner.warn("Dataset deleted with warnings");
+      } else {
+        spinner.succeed("Dataset deleted");
+      }
+
+      // Summary
+      console.log(chalk.bold("\nDeletion summary:"));
+      console.log(
+        `  GitHub repo: ${result.steps.github.success ? chalk.green("deleted") : chalk.red("failed")}`,
+      );
+      if (result.steps.s3.skipped) {
+        console.log(`  S3 objects: ${chalk.yellow("skipped (published dataset)")}`);
+      } else {
+        let s3Summary = chalk.green(`${result.steps.s3.deleted} deleted`);
+        if (result.steps.s3.failed.length > 0) {
+          s3Summary += chalk.red(`, ${result.steps.s3.failed.length} failed`);
+        }
+        console.log(`  S3 objects: ${s3Summary}`);
+      }
+      console.log(
+        `  Database: ${result.steps.d1.success ? chalk.green("cleaned up") : chalk.red("failed")}`,
+      );
+      if (result.steps.d1.versionsDeleted > 0) {
+        console.log(chalk.gray(`    ${result.steps.d1.versionsDeleted} version records removed`));
+      }
+      if (result.steps.d1.pubRequestsDeleted > 0) {
+        console.log(
+          chalk.gray(`    ${result.steps.d1.pubRequestsDeleted} publication requests removed`),
+        );
+      }
+
+      if (result.warnings.length > 0) {
+        console.log(chalk.yellow("\nWarnings:"));
+        for (const w of result.warnings) {
+          console.log(chalk.yellow(`  - ${w}`));
+        }
+      }
     } catch (error) {
-      handleCommandError(error, spinner, "Failed to deploy CI workflows", {
+      handleCommandError(error, spinner, "Failed to delete dataset", {
+        403: "Published datasets can only be deleted by the NEMAR owner",
         404: "Dataset not found",
+        409: "Cannot delete dataset with active publication requests",
       });
+      process.exit(1);
     }
   });
-
-adminCommand.addCommand(ciCommand);
 
 // ============================================================================
 // DOI Management
@@ -905,150 +616,6 @@ doiCommand
           }
         } else {
           createSpinner.fail("Failed to create concept DOI");
-          console.log(chalk.gray(`  ${errorDetail(error)}`));
-        }
-      }
-    },
-  );
-
-doiCommand
-  .command("info")
-  .description("Get DOI info for a dataset")
-  .argument("<dataset-id>", "Dataset ID (e.g., nm000104)")
-  .action(async (datasetId) => {
-    if (!requireAuth()) return;
-
-    const spinner = ora("Fetching DOI info...").start();
-
-    try {
-      const doiInfo = await getDoiInfo(datasetId);
-      spinner.stop();
-
-      console.log();
-      console.log(chalk.cyan(`DOI Information for ${datasetId}:`));
-      console.log(`  Dataset Name:    ${doiInfo.name}`);
-      console.log();
-
-      if (doiInfo.concept_doi) {
-        console.log(chalk.green("Concept DOI:"));
-        console.log(`  DOI:      ${doiInfo.concept_doi}`);
-        console.log(`  URL:      https://doi.org/${doiInfo.concept_doi}`);
-        console.log(`  Provider: ${(doiInfo.doi_provider || "zenodo").toUpperCase()}`);
-
-        if (doiInfo.doi_provider === "ezid") {
-          if (doiInfo.ezid_identifier) {
-            console.log(`  EZID ID:  ${doiInfo.ezid_identifier}`);
-          }
-          if (doiInfo.ezid_status) {
-            const statusColor = doiInfo.ezid_status === "public" ? chalk.green : chalk.yellow;
-            console.log(`  Status:   ${statusColor(doiInfo.ezid_status)}`);
-          }
-        }
-
-        if (doiInfo.zenodo_concept_url) {
-          console.log(`  Zenodo:   ${doiInfo.zenodo_concept_url}`);
-
-          // Detect and warn about sandbox DOIs
-          if (doiInfo.zenodo_concept_url.includes("sandbox.zenodo.org")) {
-            console.log();
-            console.log(chalk.yellow("Mode: SANDBOX (test DOI)"));
-            console.log(
-              chalk.yellow(
-                "  This DOI is not indexed by DataCite and will not resolve in production",
-              ),
-            );
-          }
-        }
-      } else {
-        console.log(chalk.yellow("No concept DOI created yet"));
-        console.log(chalk.gray("  Use 'nemar admin doi create' to create one"));
-      }
-
-      console.log();
-
-      if (doiInfo.latest_version_doi) {
-        console.log(chalk.green("Latest Version DOI:"));
-        console.log(`  DOI:  ${doiInfo.latest_version_doi}`);
-        console.log(`  URL:  https://doi.org/${doiInfo.latest_version_doi}`);
-        if (doiInfo.zenodo_latest_version_url) {
-          console.log(`  Zenodo: ${doiInfo.zenodo_latest_version_url}`);
-        }
-      } else if (doiInfo.concept_doi) {
-        console.log(chalk.yellow("No version DOI published yet"));
-        console.log(chalk.gray("  Version DOIs are created automatically on PR merge"));
-      }
-    } catch (error) {
-      if (error instanceof ApiError) {
-        spinner.fail(error.message);
-        if (error.statusCode === 404) {
-          console.log(chalk.gray("  Dataset not found"));
-        } else if (error.statusCode === 403) {
-          console.log(chalk.gray("  This command requires admin privileges"));
-        }
-      } else {
-        spinner.fail("Failed to fetch DOI info");
-      }
-    }
-  });
-
-doiCommand
-  .command("update")
-  .description("Update EZID DOI metadata or status")
-  .argument("<dataset-id>", "Dataset ID (e.g., nm000104)")
-  .option("--make-public", "Transition DOI from reserved to public (permanent)")
-  .option("--refresh", "Refresh metadata from dataset_description.json and .nemar/metadata.json")
-  .option(YES_OPTION, YES_DESCRIPTION)
-  .option(NO_OPTION, NO_DESCRIPTION)
-  .action(
-    async (
-      datasetId: string,
-      options: { makePublic?: boolean; refresh?: boolean } & ConfirmOptions,
-    ) => {
-      if (!requireAuth()) return;
-
-      if (!options.makePublic && !options.refresh) {
-        console.log(chalk.yellow("No action specified. Use --make-public and/or --refresh."));
-        return;
-      }
-
-      if (options.makePublic) {
-        console.log(chalk.red("WARNING: Making a DOI public is PERMANENT!"));
-        console.log(chalk.gray("  The DOI will be findable in DataCite and cannot be reverted."));
-        console.log();
-
-        const confirmResult = await confirm(
-          `Make DOI for ${datasetId} PUBLIC and permanent?`,
-          options,
-        );
-        if (confirmResult !== "confirmed") {
-          console.log(chalk.gray(confirmResult === "declined" ? "Skipped" : "Cancelled"));
-          return;
-        }
-      }
-
-      const spinner = ora("Updating DOI...").start();
-
-      try {
-        const result = await updateDoi(datasetId, {
-          status: options.makePublic ? "public" : undefined,
-          refresh_metadata: options.refresh,
-        });
-
-        spinner.succeed("DOI updated successfully");
-        console.log();
-        console.log(`  EZID ID: ${chalk.cyan(result.ezid_identifier)}`);
-        console.log(
-          `  Status:  ${result.status === "public" ? chalk.green(result.status) : chalk.yellow(result.status)}`,
-        );
-        console.log(`  URL:     ${result.doi_url}`);
-      } catch (error) {
-        if (error instanceof ApiError) {
-          spinner.fail(error.message);
-          if (error.statusCode === 400) {
-            console.log(chalk.gray("  DOI update is only supported for EZID-managed DOIs"));
-          }
-        } else {
-          spinner.fail("Failed to update DOI");
           console.log(chalk.gray(`  ${errorDetail(error)}`));
         }
       }
@@ -1318,137 +885,361 @@ doiCommand
     },
   );
 
+doiCommand
+  .command("info")
+  .description("Get DOI info for a dataset")
+  .argument("<dataset-id>", "Dataset ID (e.g., nm000104)")
+  .action(async (datasetId) => {
+    if (!requireAuth()) return;
+
+    const spinner = ora("Fetching DOI info...").start();
+
+    try {
+      const doiInfo = await getDoiInfo(datasetId);
+      spinner.stop();
+
+      console.log();
+      console.log(chalk.cyan(`DOI Information for ${datasetId}:`));
+      console.log(`  Dataset Name:    ${doiInfo.name}`);
+      console.log();
+
+      if (doiInfo.concept_doi) {
+        console.log(chalk.green("Concept DOI:"));
+        console.log(`  DOI:      ${doiInfo.concept_doi}`);
+        console.log(`  URL:      https://doi.org/${doiInfo.concept_doi}`);
+        console.log(`  Provider: ${(doiInfo.doi_provider || "zenodo").toUpperCase()}`);
+
+        if (doiInfo.doi_provider === "ezid") {
+          if (doiInfo.ezid_identifier) {
+            console.log(`  EZID ID:  ${doiInfo.ezid_identifier}`);
+          }
+          if (doiInfo.ezid_status) {
+            const statusColor = doiInfo.ezid_status === "public" ? chalk.green : chalk.yellow;
+            console.log(`  Status:   ${statusColor(doiInfo.ezid_status)}`);
+          }
+        }
+
+        if (doiInfo.zenodo_concept_url) {
+          console.log(`  Zenodo:   ${doiInfo.zenodo_concept_url}`);
+
+          // Detect and warn about sandbox DOIs
+          if (doiInfo.zenodo_concept_url.includes("sandbox.zenodo.org")) {
+            console.log();
+            console.log(chalk.yellow("Mode: SANDBOX (test DOI)"));
+            console.log(
+              chalk.yellow(
+                "  This DOI is not indexed by DataCite and will not resolve in production",
+              ),
+            );
+          }
+        }
+      } else {
+        console.log(chalk.yellow("No concept DOI created yet"));
+        console.log(chalk.gray("  Use 'nemar admin doi create' to create one"));
+      }
+
+      console.log();
+
+      if (doiInfo.latest_version_doi) {
+        console.log(chalk.green("Latest Version DOI:"));
+        console.log(`  DOI:  ${doiInfo.latest_version_doi}`);
+        console.log(`  URL:  https://doi.org/${doiInfo.latest_version_doi}`);
+        if (doiInfo.zenodo_latest_version_url) {
+          console.log(`  Zenodo: ${doiInfo.zenodo_latest_version_url}`);
+        }
+      } else if (doiInfo.concept_doi) {
+        console.log(chalk.yellow("No version DOI published yet"));
+        console.log(chalk.gray("  Version DOIs are created automatically on PR merge"));
+      }
+    } catch (error) {
+      if (error instanceof ApiError) {
+        spinner.fail(error.message);
+        if (error.statusCode === 404) {
+          console.log(chalk.gray("  Dataset not found"));
+        } else if (error.statusCode === 403) {
+          console.log(chalk.gray("  This command requires admin privileges"));
+        }
+      } else {
+        spinner.fail("Failed to fetch DOI info");
+      }
+    }
+  });
+
+doiCommand
+  .command("update")
+  .description("Update EZID DOI metadata or status")
+  .argument("<dataset-id>", "Dataset ID (e.g., nm000104)")
+  .option("--make-public", "Transition DOI from reserved to public (permanent)")
+  .option("--refresh", "Refresh metadata from dataset_description.json and .nemar/metadata.json")
+  .option(YES_OPTION, YES_DESCRIPTION)
+  .option(NO_OPTION, NO_DESCRIPTION)
+  .action(
+    async (
+      datasetId: string,
+      options: { makePublic?: boolean; refresh?: boolean } & ConfirmOptions,
+    ) => {
+      if (!requireAuth()) return;
+
+      if (!options.makePublic && !options.refresh) {
+        console.log(chalk.yellow("No action specified. Use --make-public and/or --refresh."));
+        return;
+      }
+
+      if (options.makePublic) {
+        console.log(chalk.red("WARNING: Making a DOI public is PERMANENT!"));
+        console.log(chalk.gray("  The DOI will be findable in DataCite and cannot be reverted."));
+        console.log();
+
+        const confirmResult = await confirm(
+          `Make DOI for ${datasetId} PUBLIC and permanent?`,
+          options,
+        );
+        if (confirmResult !== "confirmed") {
+          console.log(chalk.gray(confirmResult === "declined" ? "Skipped" : "Cancelled"));
+          return;
+        }
+      }
+
+      const spinner = ora("Updating DOI...").start();
+
+      try {
+        const result = await updateDoi(datasetId, {
+          status: options.makePublic ? "public" : undefined,
+          refresh_metadata: options.refresh,
+        });
+
+        spinner.succeed("DOI updated successfully");
+        console.log();
+        console.log(`  EZID ID: ${chalk.cyan(result.ezid_identifier)}`);
+        console.log(
+          `  Status:  ${result.status === "public" ? chalk.green(result.status) : chalk.yellow(result.status)}`,
+        );
+        console.log(`  URL:     ${result.doi_url}`);
+      } catch (error) {
+        if (error instanceof ApiError) {
+          spinner.fail(error.message);
+          if (error.statusCode === 400) {
+            console.log(chalk.gray("  DOI update is only supported for EZID-managed DOIs"));
+          }
+        } else {
+          spinner.fail("Failed to update DOI");
+          console.log(chalk.gray(`  ${errorDetail(error)}`));
+        }
+      }
+    },
+  );
+
 adminCommand.addCommand(doiCommand);
+
+// ============================================================================
+// E2E Test
+// ============================================================================
+
+adminCommand
+  .command("e2e-test")
+  .description("Run end-to-end test against nm099999 (admin only)")
+  .option("--verbose", "Show detailed output for each step")
+  .option("--skip-reset", "Use existing nm099999 state (skip reset)")
+  .option("--skip-cleanup", "Keep temp directories after test")
+  .addHelpText(
+    "after",
+    `
+Description:
+  Runs a full upload/download/update cycle against the test dataset nm099999.
+  Tests the complete git-annex S3 remote workflow with real infrastructure.
+
+Steps:
+   1. Reset nm099999          6. Push to GitHub
+   2. Prepare upload           7. Clone fresh
+   3. Init git + annex         8. Download + verify
+   4. Configure remotes        9. Update cycle
+   5. Upload to S3            10. Cleanup
+
+Requirements:
+  - Admin privileges (API role check)
+  - git-annex installed
+  - GitHub SSH or gh CLI configured
+  - Active nemar auth session
+
+Examples:
+  $ nemar admin e2e-test                    # Full test
+  $ nemar admin e2e-test --verbose          # With detailed output
+  $ nemar admin e2e-test --skip-cleanup     # Keep temp dirs for inspection
+  $ nemar admin e2e-test --skip-reset       # Reuse existing nm099999 state`,
+  )
+  .action(async (options: { verbose?: boolean; skipReset?: boolean; skipCleanup?: boolean }) => {
+    if (!requireAuth()) return;
+
+    console.log(chalk.cyan("\nNEMAR E2E Test (nm099999)\n"));
+
+    // Lazy import to avoid loading e2e-test module on every CLI invocation
+    const { runE2ETest } = await import("../lib/e2e-test.js");
+
+    const result = await runE2ETest({
+      verbose: options.verbose,
+      skipReset: options.skipReset,
+      skipCleanup: options.skipCleanup,
+    });
+
+    // Print results table
+    console.log();
+    for (const step of result.steps) {
+      const icon = step.passed ? chalk.green("[x]") : chalk.red("[ ]");
+      const time = chalk.gray(`(${step.duration_ms}ms)`);
+      console.log(`  ${icon} ${step.name} ${time}`);
+      if (step.error) {
+        console.log(chalk.red(`      ${step.error}`));
+      }
+    }
+
+    console.log();
+    const totalSec = (result.total_duration_ms / 1000).toFixed(1);
+    if (result.passed) {
+      console.log(chalk.green(`All ${result.steps.length} steps passed (${totalSec}s)`));
+    } else {
+      const failed = result.steps.filter((s) => !s.passed).length;
+      console.log(chalk.red(`${failed}/${result.steps.length} steps failed (${totalSec}s)`));
+    }
+
+    if (result.upload_dir) {
+      console.log(chalk.gray(`\nUpload dir: ${result.upload_dir}`));
+      console.log(chalk.gray(`Clone dir:  ${result.clone_dir}`));
+    }
+
+    process.exit(result.passed ? 0 : 1);
+  });
+
+// ============================================================================
+// Make Public (One-Way Publish)
+// ============================================================================
+
+adminCommand
+  .command("make-public")
+  .description("Publish a dataset (make repository and data public) - PERMANENT")
+  .argument("<dataset-id>", "Dataset ID (e.g., nm000104)")
+  .addHelpText(
+    "after",
+    `
+Description:
+  Publish a dataset by making both the GitHub repository and S3 data publicly accessible.
+
+  ${chalk.yellow("WARNING: This operation is PERMANENT and IRREVERSIBLE")}
+
+  Once published:
+  - GitHub repository will be publicly visible
+  - S3 data files will be publicly downloadable
+  - git-annex will use public URLs for downloads
+
+  Publishing cannot be undone because:
+  - Data may be cached, indexed, or linked externally
+  - Unpublishing would create broken links
+  - Aligns with DOI permanence principles
+
+  Use this when:
+  - Dataset has been reviewed and validated
+  - Ready for public release and citation
+  - Associated with a DOI (concept or version)
+
+Requirements:
+  - Dataset must not be a sandbox dataset
+  - Dataset must have a GitHub repository
+  - Must be dataset owner or admin
+
+Examples:
+  $ nemar admin make-public nm000104
+
+  This will prompt for confirmation by requiring you to type
+  the dataset ID to confirm the permanent action.
+`,
+  )
+  .action(async (datasetIdArg: string) => {
+    if (!requireAuth()) return;
+
+    const datasetId = datasetIdArg.trim();
+
+    // Fetch dataset details first
+    let dataset: Dataset;
+    try {
+      dataset = await getDataset(datasetId);
+    } catch (error) {
+      if (error instanceof ApiError && error.statusCode === 404) {
+        console.error(chalk.red(`Dataset '${datasetId}' not found`));
+      } else {
+        console.error(
+          chalk.red(
+            `Failed to fetch dataset: ${error instanceof Error ? error.message : String(error)}`,
+          ),
+        );
+      }
+      process.exit(1);
+    }
+
+    // Show warning and dataset info
+    console.log(chalk.yellow("\nWARNING: Publishing is PERMANENT and IRREVERSIBLE\n"));
+    console.log("This will:");
+    console.log("  1. Make the GitHub repository PUBLIC");
+    console.log("  2. Allow public S3 access to all dataset files");
+    console.log("  3. Update git-annex configuration for web access\n");
+    console.log(`Dataset: ${chalk.cyan(dataset.dataset_id)} - ${dataset.name}`);
+    if (dataset.owner_username) {
+      console.log(`Owner: ${dataset.owner_username}`);
+    }
+    if (dataset.github_repo) {
+      console.log(`Repository: ${dataset.github_repo}`);
+    }
+    console.log();
+
+    // Require typing dataset ID to confirm
+    const confirmation = await inquirer.prompt([
+      {
+        type: "input",
+        name: "datasetId",
+        message: `Type '${datasetId}' to confirm:`,
+        validate: (input: string) => {
+          if (input.trim() === datasetId) {
+            return true;
+          }
+          return `Please type exactly '${datasetId}' to confirm`;
+        },
+      },
+    ]);
+
+    if (confirmation.datasetId !== datasetId) {
+      console.log(chalk.gray("Cancelled."));
+      process.exit(0);
+    }
+
+    const spinner = ora("Publishing dataset...").start();
+
+    try {
+      const result = await publishDataset(datasetId);
+      spinner.succeed(chalk.green("Dataset published successfully"));
+      console.log(`\nGitHub: ${chalk.cyan(result.github_url)}`);
+      console.log(`S3: ${chalk.cyan(result.s3_url)}`);
+    } catch (error) {
+      spinner.fail(chalk.red("Failed to publish dataset"));
+      if (error instanceof ApiError) {
+        console.error(chalk.red(`\n${error.message}`));
+        if (error.details) {
+          console.error(chalk.gray(JSON.stringify(error.details, null, 2)));
+        }
+        if (error.statusCode === 403) {
+          console.log(chalk.gray("  You must be the dataset owner or an admin to publish"));
+        } else if (error.statusCode === 400 && error.message.includes("sandbox")) {
+          console.log(chalk.gray("  Sandbox datasets cannot be published"));
+        }
+      } else {
+        console.error(chalk.red(`\n${error instanceof Error ? error.message : String(error)}`));
+      }
+      process.exit(1);
+    }
+  });
 
 // ============================================================================
 // Publication Workflow (Admin)
 // ============================================================================
 
 const publishCommand = new Command("publish").description("Publication workflow management");
-
-publishCommand
-  .command("list")
-  .description("List publication requests")
-  .option("-s, --status <status>", "Filter by status (requested, approving, published, denied)")
-  .addHelpText(
-    "after",
-    `
-Description:
-  List all publication requests from users, with optional filtering by status.
-  Shows dataset ID, status, requesting user, and current progress.
-
-Filter Options:
-  requested  - Pending requests awaiting admin action
-  approving  - Currently being processed by orchestrator
-  published  - Successfully published datasets
-  denied     - Denied requests with reasons
-
-Examples:
-  $ nemar admin publish list                # All requests
-  $ nemar admin publish list --status requested   # Pending only
-  $ nemar admin publish list --status approving   # In progress
-  $ nemar admin publish list --status denied      # View denied`,
-  )
-  .action(async (options: { status?: string }) => {
-    if (!requireAuth()) return;
-
-    const spinner = ora("Fetching publication requests...").start();
-
-    try {
-      const result = await listPublishRequests(options.status);
-      spinner.stop();
-
-      if (result.requests.length === 0) {
-        console.log(chalk.gray("\n  No publication requests found.\n"));
-        return;
-      }
-
-      console.log(`\n${chalk.cyan("Publication Requests")} (${result.count})\n`);
-
-      for (const req of result.requests) {
-        const statusColor =
-          req.status === "published"
-            ? chalk.green
-            : req.status === "denied"
-              ? chalk.red
-              : req.status === "approving"
-                ? chalk.yellow
-                : chalk.white;
-
-        console.log(
-          `  ${chalk.bold(req.dataset_id)}  ${statusColor(req.status)}  by ${req.requested_by_username}  ${chalk.gray(req.requested_at)}`,
-        );
-        if (req.current_step && req.status === "approving") {
-          console.log(
-            `    ${chalk.yellow(">")} ${req.current_step.replace(/_/g, " ")}${req.last_error ? chalk.red(` (${req.last_error})`) : ""}`,
-          );
-        }
-      }
-      console.log();
-    } catch (error) {
-      handleCommandError(error, spinner, "Failed to list publication requests");
-    }
-  });
-
-publishCommand
-  .command("deny")
-  .description("Deny a publication request")
-  .argument("<dataset-id>", "Dataset ID")
-  .option("-r, --reason <reason>", "Reason for denial")
-  .option(YES_OPTION, YES_DESCRIPTION)
-  .option(NO_OPTION, NO_DESCRIPTION)
-  .addHelpText(
-    "after",
-    `
-Description:
-  Deny a user's publication request with a specific reason.
-  The user will receive an email notification with your reason.
-
-  A clear, actionable reason helps users understand what to fix
-  before resubmitting their publication request.
-
-Requirements:
-  - Must provide a reason for denial
-  - Reason will be sent to the user via email
-  - User can fix issues and submit a new request
-
-Examples:
-  $ nemar admin publish deny nm000104 --reason "BIDS validation failing"
-  $ nemar admin publish deny nm000104 -r "Dataset incomplete - missing subjects"
-  $ nemar admin publish deny nm000104    # Prompts for reason interactively`,
-  )
-  .action(async (datasetId, options: ConfirmOptions & { reason?: string }) => {
-    if (!requireAuth()) return;
-
-    let reason = options.reason;
-    if (!reason) {
-      const { inputReason } = await inquirer.prompt([
-        { type: "input", name: "inputReason", message: "Reason for denial:" },
-      ]);
-      reason = inputReason;
-    }
-
-    if (!reason) {
-      console.log(chalk.red("Reason is required"));
-      return;
-    }
-
-    const confirmResult = await confirm(`Deny publication of ${datasetId}?`, options);
-    if (confirmResult !== "confirmed") {
-      console.log(chalk.gray(confirmResult === "declined" ? "Skipped" : "Cancelled"));
-      return;
-    }
-
-    const spinner = ora(`Denying publication for ${datasetId}...`).start();
-
-    try {
-      await denyPublication(datasetId, reason);
-      spinner.succeed(`Publication denied for ${datasetId}`);
-      console.log(chalk.gray("  User has been notified."));
-    } catch (error) {
-      handleCommandError(error, spinner, "Failed to deny publication");
-    }
-  });
 
 publishCommand
   .command("approve")
@@ -1576,7 +1367,199 @@ After Approval:
     },
   );
 
+publishCommand
+  .command("deny")
+  .description("Deny a publication request")
+  .argument("<dataset-id>", "Dataset ID")
+  .option("-r, --reason <reason>", "Reason for denial")
+  .option(YES_OPTION, YES_DESCRIPTION)
+  .option(NO_OPTION, NO_DESCRIPTION)
+  .addHelpText(
+    "after",
+    `
+Description:
+  Deny a user's publication request with a specific reason.
+  The user will receive an email notification with your reason.
+
+  A clear, actionable reason helps users understand what to fix
+  before resubmitting their publication request.
+
+Requirements:
+  - Must provide a reason for denial
+  - Reason will be sent to the user via email
+  - User can fix issues and submit a new request
+
+Examples:
+  $ nemar admin publish deny nm000104 --reason "BIDS validation failing"
+  $ nemar admin publish deny nm000104 -r "Dataset incomplete - missing subjects"
+  $ nemar admin publish deny nm000104    # Prompts for reason interactively`,
+  )
+  .action(async (datasetId, options: ConfirmOptions & { reason?: string }) => {
+    if (!requireAuth()) return;
+
+    let reason = options.reason;
+    if (!reason) {
+      const { inputReason } = await inquirer.prompt([
+        { type: "input", name: "inputReason", message: "Reason for denial:" },
+      ]);
+      reason = inputReason;
+    }
+
+    if (!reason) {
+      console.log(chalk.red("Reason is required"));
+      return;
+    }
+
+    const confirmResult = await confirm(`Deny publication of ${datasetId}?`, options);
+    if (confirmResult !== "confirmed") {
+      console.log(chalk.gray(confirmResult === "declined" ? "Skipped" : "Cancelled"));
+      return;
+    }
+
+    const spinner = ora(`Denying publication for ${datasetId}...`).start();
+
+    try {
+      await denyPublication(datasetId, reason);
+      spinner.succeed(`Publication denied for ${datasetId}`);
+      console.log(chalk.gray("  User has been notified."));
+    } catch (error) {
+      handleCommandError(error, spinner, "Failed to deny publication");
+    }
+  });
+
+publishCommand
+  .command("list")
+  .description("List publication requests")
+  .option("-s, --status <status>", "Filter by status (requested, approving, published, denied)")
+  .addHelpText(
+    "after",
+    `
+Description:
+  List all publication requests from users, with optional filtering by status.
+  Shows dataset ID, status, requesting user, and current progress.
+
+Filter Options:
+  requested  - Pending requests awaiting admin action
+  approving  - Currently being processed by orchestrator
+  published  - Successfully published datasets
+  denied     - Denied requests with reasons
+
+Examples:
+  $ nemar admin publish list                # All requests
+  $ nemar admin publish list --status requested   # Pending only
+  $ nemar admin publish list --status approving   # In progress
+  $ nemar admin publish list --status denied      # View denied`,
+  )
+  .action(async (options: { status?: string }) => {
+    if (!requireAuth()) return;
+
+    const spinner = ora("Fetching publication requests...").start();
+
+    try {
+      const result = await listPublishRequests(options.status);
+      spinner.stop();
+
+      if (result.requests.length === 0) {
+        console.log(chalk.gray("\n  No publication requests found.\n"));
+        return;
+      }
+
+      console.log(`\n${chalk.cyan("Publication Requests")} (${result.count})\n`);
+
+      for (const req of result.requests) {
+        const statusColor =
+          req.status === "published"
+            ? chalk.green
+            : req.status === "denied"
+              ? chalk.red
+              : req.status === "approving"
+                ? chalk.yellow
+                : chalk.white;
+
+        console.log(
+          `  ${chalk.bold(req.dataset_id)}  ${statusColor(req.status)}  by ${req.requested_by_username}  ${chalk.gray(req.requested_at)}`,
+        );
+        if (req.current_step && req.status === "approving") {
+          console.log(
+            `    ${chalk.yellow(">")} ${req.current_step.replace(/_/g, " ")}${req.last_error ? chalk.red(` (${req.last_error})`) : ""}`,
+          );
+        }
+      }
+      console.log();
+    } catch (error) {
+      handleCommandError(error, spinner, "Failed to list publication requests");
+    }
+  });
+
 adminCommand.addCommand(publishCommand);
+
+// ============================================================================
+// Repository Management
+// ============================================================================
+
+const repoCommand = new Command("repo").description("Repository visibility management");
+
+repoCommand
+  .command("private")
+  .description("Make a dataset repository private")
+  .argument("<dataset-id>", "Dataset ID (e.g., nm000104)")
+  .option(YES_OPTION, YES_DESCRIPTION)
+  .option(NO_OPTION, NO_DESCRIPTION)
+  .action(async (datasetId, options: ConfirmOptions) => {
+    if (!requireAuth()) return;
+
+    console.log(chalk.yellow(`\nMaking repository private: ${datasetId}\n`));
+    console.log("This will restrict access to collaborators only.");
+    console.log();
+
+    const confirmResult = await confirm(`Make ${datasetId} private?`, options);
+    if (confirmResult !== "confirmed") {
+      console.log(chalk.gray(confirmResult === "declined" ? "Skipped" : "Cancelled"));
+      return;
+    }
+
+    const spinner = ora(`Setting ${datasetId} to private...`).start();
+    try {
+      await changeVisibility(datasetId, "private");
+      spinner.succeed(`Repository ${datasetId} is now private`);
+    } catch (error) {
+      handleCommandError(error, spinner, "Failed to change visibility", {
+        404: "Dataset not found",
+      });
+    }
+  });
+
+repoCommand
+  .command("public")
+  .description("Make a dataset repository public")
+  .argument("<dataset-id>", "Dataset ID (e.g., nm000104)")
+  .option(YES_OPTION, YES_DESCRIPTION)
+  .option(NO_OPTION, NO_DESCRIPTION)
+  .action(async (datasetId, options: ConfirmOptions) => {
+    if (!requireAuth()) return;
+
+    console.log(chalk.cyan(`\nMaking repository public: ${datasetId}\n`));
+    console.log(chalk.yellow("Warning: This will make the dataset visible to everyone."));
+    console.log();
+
+    const confirmResult = await confirm(`Make ${datasetId} public?`, options);
+    if (confirmResult !== "confirmed") {
+      console.log(chalk.gray(confirmResult === "declined" ? "Skipped" : "Cancelled"));
+      return;
+    }
+
+    const spinner = ora(`Setting ${datasetId} to public...`).start();
+    try {
+      await changeVisibility(datasetId, "public");
+      spinner.succeed(`Repository ${datasetId} is now public`);
+    } catch (error) {
+      handleCommandError(error, spinner, "Failed to change visibility", {
+        404: "Dataset not found",
+      });
+    }
+  });
+
+adminCommand.addCommand(repoCommand);
 
 // ============================================================================
 // Revert (Admin Only)
@@ -1855,305 +1838,326 @@ adminCommand
   );
 
 // ============================================================================
-// Make Public (One-Way Publish)
+// Revoke
 // ============================================================================
 
 adminCommand
-  .command("make-public")
-  .description("Publish a dataset (make repository and data public) - PERMANENT")
-  .argument("<dataset-id>", "Dataset ID (e.g., nm000104)")
-  .addHelpText(
-    "after",
-    `
-Description:
-  Publish a dataset by making both the GitHub repository and S3 data publicly accessible.
-
-  ${chalk.yellow("WARNING: This operation is PERMANENT and IRREVERSIBLE")}
-
-  Once published:
-  - GitHub repository will be publicly visible
-  - S3 data files will be publicly downloadable
-  - git-annex will use public URLs for downloads
-
-  Publishing cannot be undone because:
-  - Data may be cached, indexed, or linked externally
-  - Unpublishing would create broken links
-  - Aligns with DOI permanence principles
-
-  Use this when:
-  - Dataset has been reviewed and validated
-  - Ready for public release and citation
-  - Associated with a DOI (concept or version)
-
-Requirements:
-  - Dataset must not be a sandbox dataset
-  - Dataset must have a GitHub repository
-  - Must be dataset owner or admin
-
-Examples:
-  $ nemar admin make-public nm000104
-
-  This will prompt for confirmation by requiring you to type
-  the dataset ID to confirm the permanent action.
-`,
-  )
-  .action(async (datasetIdArg: string) => {
+  .command("revoke")
+  .description("Revoke user access")
+  .argument("<username>", "Username to revoke")
+  .option(YES_OPTION, YES_DESCRIPTION)
+  .option(NO_OPTION, NO_DESCRIPTION)
+  .action(async (username, options: ConfirmOptions) => {
     if (!requireAuth()) return;
 
-    const datasetId = datasetIdArg.trim();
-
-    // Fetch dataset details first
-    let dataset: Dataset;
-    try {
-      dataset = await getDataset(datasetId);
-    } catch (error) {
-      if (error instanceof ApiError && error.statusCode === 404) {
-        console.error(chalk.red(`Dataset '${datasetId}' not found`));
-      } else {
-        console.error(
-          chalk.red(
-            `Failed to fetch dataset: ${error instanceof Error ? error.message : String(error)}`,
-          ),
-        );
-      }
-      process.exit(1);
+    // Prevent self-revocation
+    const config = getConfig();
+    if (config.username === username) {
+      console.log(chalk.red("Error: Cannot revoke your own access"));
+      return;
     }
 
-    // Show warning and dataset info
-    console.log(chalk.yellow("\nWARNING: Publishing is PERMANENT and IRREVERSIBLE\n"));
-    console.log("This will:");
-    console.log("  1. Make the GitHub repository PUBLIC");
-    console.log("  2. Allow public S3 access to all dataset files");
-    console.log("  3. Update git-annex configuration for web access\n");
-    console.log(`Dataset: ${chalk.cyan(dataset.dataset_id)} - ${dataset.name}`);
-    if (dataset.owner_username) {
-      console.log(`Owner: ${dataset.owner_username}`);
-    }
-    if (dataset.github_repo) {
-      console.log(`Repository: ${dataset.github_repo}`);
-    }
+    // Confirmation with warning
+    console.log(chalk.red(`\nRevoking access for: ${username}\n`));
+    console.log(chalk.yellow("This will:"));
+    console.log("  1. Invalidate all API keys for this user");
+    console.log("  2. Remove them from datasets they have access to");
+    console.log("  3. Send them a notification email");
     console.log();
 
-    // Require typing dataset ID to confirm
-    const confirmation = await inquirer.prompt([
-      {
-        type: "input",
-        name: "datasetId",
-        message: `Type '${datasetId}' to confirm:`,
-        validate: (input: string) => {
-          if (input.trim() === datasetId) {
-            return true;
-          }
-          return `Please type exactly '${datasetId}' to confirm`;
-        },
-      },
-    ]);
-
-    if (confirmation.datasetId !== datasetId) {
-      console.log(chalk.gray("Cancelled."));
-      process.exit(0);
+    const result = await confirmWithInput(
+      `Type '${username}' to confirm revocation:`,
+      username,
+      options,
+    );
+    if (result !== "confirmed") {
+      console.log(chalk.gray(result === "declined" ? "Skipped" : "Cancelled"));
+      return;
     }
 
-    const spinner = ora("Publishing dataset...").start();
+    const spinner = ora(`Revoking ${username}...`).start();
 
     try {
-      const result = await publishDataset(datasetId);
-      spinner.succeed(chalk.green("Dataset published successfully"));
-      console.log(`\nGitHub: ${chalk.cyan(result.github_url)}`);
-      console.log(`S3: ${chalk.cyan(result.s3_url)}`);
+      await revokeUser(username);
+      spinner.succeed(`Revoked access for ${username}`);
     } catch (error) {
-      spinner.fail(chalk.red("Failed to publish dataset"));
-      if (error instanceof ApiError) {
-        console.error(chalk.red(`\n${error.message}`));
-        if (error.details) {
-          console.error(chalk.gray(JSON.stringify(error.details, null, 2)));
-        }
-        if (error.statusCode === 403) {
-          console.log(chalk.gray("  You must be the dataset owner or an admin to publish"));
-        } else if (error.statusCode === 400 && error.message.includes("sandbox")) {
-          console.log(chalk.gray("  Sandbox datasets cannot be published"));
-        }
-      } else {
-        console.error(chalk.red(`\n${error instanceof Error ? error.message : String(error)}`));
-      }
-      process.exit(1);
+      handleCommandError(error, spinner, "Failed to revoke user", {
+        404: "User not found",
+      });
     }
   });
 
 // ============================================================================
-// Delete Dataset (Admin/Owner Only)
+// Role Management (Owner Only)
 // ============================================================================
 
 adminCommand
-  .command("delete-dataset")
-  .description("Delete a dataset and all associated resources (GitHub, S3, D1)")
-  .argument("<dataset-id>", "Dataset ID (e.g., nm000108)")
-  .option("--force", "Force deletion of published datasets with DOIs (owner only)")
-  .action(async (datasetId: string, options: { force?: boolean }) => {
+  .command("role")
+  .description("Change a user's role (owner only)")
+  .argument("<username>", "Username to change role for")
+  .argument("<role>", "New role: owner, admin, or member")
+  .option("-y, --yes", "Skip confirmation prompt")
+  .addHelpText(
+    "after",
+    `
+Permission Model:
+  owner  - Full access: can manage users, roles, datasets, DOIs, and system settings
+  admin  - Can approve/revoke users, manage datasets and DOIs
+  member - Can upload and manage their own datasets only
+
+Rules:
+  - Only owners can change roles
+  - You cannot change your own role (prevents self-lockout)
+  - The last owner cannot be demoted (prevents total lockout)
+  - Demoting a user revokes their tokens (they must re-login)
+
+Examples:
+  $ nemar admin role john_doe admin        # Promote to admin
+  $ nemar admin role john_doe member       # Demote to member
+  $ nemar admin role jane_doe owner -y     # Promote to owner (skip confirm)`,
+  )
+  .action(async (username: string, role: string, options: { yes?: boolean }) => {
     if (!requireAuth()) return;
 
-    const spinner = ora("Looking up dataset...").start();
+    if (!["owner", "admin", "member"].includes(role)) {
+      console.error(chalk.red(`Invalid role '${role}'. Must be: owner, admin, or member`));
+      process.exit(1);
+    }
 
-    try {
-      const dataset = await getDataset(datasetId);
-      spinner.stop();
-
-      console.log(chalk.bold(`\nDataset: ${dataset.dataset_id}`));
-      console.log(`  Name: ${dataset.name || "(unnamed)"}`);
-      console.log(`  Visibility: ${dataset.visibility}`);
-      if (dataset.concept_doi) {
-        console.log(`  DOI: ${dataset.concept_doi}`);
-        console.log(
-          chalk.yellow("\n  WARNING: This dataset has a DOI. Only the NEMAR owner can delete it."),
-        );
-        if (!options.force) {
-          console.log(chalk.gray("  Use --force to confirm deletion of published datasets."));
-          process.exit(1);
-        }
-      }
-
-      const { proceed } = await inquirer.prompt([
+    if (!options.yes) {
+      const { confirmed } = await inquirer.prompt([
         {
           type: "confirm",
-          name: "proceed",
-          message: chalk.red(
-            `Delete dataset ${datasetId}? This will remove the GitHub repo, S3 data, and all database records. This cannot be undone.`,
-          ),
+          name: "confirmed",
+          message: `Change ${username}'s role to '${role}'?`,
           default: false,
         },
       ]);
-
-      if (!proceed) {
-        console.log(chalk.gray("Cancelled."));
+      if (!confirmed) {
+        console.log(chalk.gray("Cancelled"));
         return;
       }
+    }
 
-      spinner.start("Deleting dataset...");
-      const result = await deleteDataset(datasetId, options.force ?? false);
-      if (!result.deleted) {
-        spinner.fail("Dataset deletion incomplete");
-      } else if (result.warnings.length > 0) {
-        spinner.warn("Dataset deleted with warnings");
-      } else {
-        spinner.succeed("Dataset deleted");
-      }
+    const spinner = ora(`Changing ${username}'s role to '${role}'...`).start();
 
-      // Summary
-      console.log(chalk.bold("\nDeletion summary:"));
-      console.log(
-        `  GitHub repo: ${result.steps.github.success ? chalk.green("deleted") : chalk.red("failed")}`,
-      );
-      if (result.steps.s3.skipped) {
-        console.log(`  S3 objects: ${chalk.yellow("skipped (published dataset)")}`);
-      } else {
-        let s3Summary = chalk.green(`${result.steps.s3.deleted} deleted`);
-        if (result.steps.s3.failed.length > 0) {
-          s3Summary += chalk.red(`, ${result.steps.s3.failed.length} failed`);
-        }
-        console.log(`  S3 objects: ${s3Summary}`);
-      }
-      console.log(
-        `  Database: ${result.steps.d1.success ? chalk.green("cleaned up") : chalk.red("failed")}`,
-      );
-      if (result.steps.d1.versionsDeleted > 0) {
-        console.log(chalk.gray(`    ${result.steps.d1.versionsDeleted} version records removed`));
-      }
-      if (result.steps.d1.pubRequestsDeleted > 0) {
+    try {
+      const result = await changeUserRole(username, role as "owner" | "admin" | "member");
+      spinner.succeed(result.message);
+      if (result.tokens_revoked !== undefined && result.tokens_revoked > 0) {
         console.log(
-          chalk.gray(`    ${result.steps.d1.pubRequestsDeleted} publication requests removed`),
+          chalk.yellow(`  ${result.tokens_revoked} token(s) revoked (user must re-login)`),
         );
       }
-
-      if (result.warnings.length > 0) {
-        console.log(chalk.yellow("\nWarnings:"));
-        for (const w of result.warnings) {
-          console.log(chalk.yellow(`  - ${w}`));
-        }
-      }
     } catch (error) {
-      handleCommandError(error, spinner, "Failed to delete dataset", {
-        403: "Published datasets can only be deleted by the NEMAR owner",
-        404: "Dataset not found",
-        409: "Cannot delete dataset with active publication requests",
+      handleCommandError(error, spinner, "Failed to change role", {
+        400: "Invalid request (check if you are an owner)",
+        403: "Owner access required",
+        404: "User not found",
+        409: "User already has that role",
       });
-      process.exit(1);
     }
   });
 
 // ============================================================================
-// E2E Test
+// S3 / IAM Management
+// ============================================================================
+
+const s3Command = new Command("s3").description("S3 and IAM credential management");
+
+s3Command
+  .command("lock")
+  .description("Apply S3 Object Lock (Governance mode) to a dataset")
+  .argument("<dataset-id>", "Dataset ID to lock")
+  .option(YES_OPTION, YES_DESCRIPTION)
+  .option(NO_OPTION, NO_DESCRIPTION)
+  .action(async (datasetId: string, options: ConfirmOptions) => {
+    if (!requireAuth()) return;
+
+    console.log(chalk.cyan(`\nApply S3 Object Lock to ${datasetId}\n`));
+    console.log("This will:");
+    console.log("  • Set GOVERNANCE mode Object Lock on all objects");
+    console.log("  • Retention period: 100 years");
+    console.log("  • Objects cannot be deleted or modified without bypass");
+    console.log();
+
+    const confirmResult = await confirm(`Apply S3 Object Lock to ${datasetId}?`, options);
+    if (confirmResult !== "confirmed") {
+      console.log(chalk.gray(confirmResult === "declined" ? "Skipped" : "Cancelled"));
+      return;
+    }
+
+    const spinner = ora("Applying S3 Object Lock...").start();
+
+    try {
+      const result = await applyS3Lock(datasetId);
+      if (result.failed.length > 0) {
+        spinner.fail(
+          `Partial lock: ${result.locked}/${result.total} locked, ${result.failed.length} failed`,
+        );
+        console.log(chalk.yellow("\nFailed objects:"));
+        for (const key of result.failed.slice(0, 10)) {
+          console.log(`  • ${key}`);
+        }
+        if (result.failed.length > 10) {
+          console.log(`  ... and ${result.failed.length - 10} more`);
+        }
+      } else {
+        spinner.succeed(`All ${result.locked} objects locked successfully`);
+      }
+    } catch (error) {
+      spinner.fail("S3 lock failed");
+      console.log(chalk.gray(`  ${errorDetail(error)}`));
+    }
+  });
+
+s3Command
+  .command("regenerate-iam")
+  .description("Regenerate AWS IAM credentials for a user")
+  .argument("<username>", "Username to regenerate credentials for")
+  .option(YES_OPTION, YES_DESCRIPTION)
+  .option(NO_OPTION, NO_DESCRIPTION)
+  .action(regenerateIamAction);
+
+adminCommand.addCommand(s3Command);
+
+// Hidden alias for backward compatibility
+adminCommand
+  .command("regenerate-iam", { hidden: true })
+  .argument("<username>")
+  .option(YES_OPTION, YES_DESCRIPTION)
+  .option(NO_OPTION, NO_DESCRIPTION)
+  .action(regenerateIamAction);
+
+async function regenerateIamAction(username: string, options: ConfirmOptions) {
+  if (!requireAuth()) return;
+
+  console.log(chalk.yellow(`\nRegenerate IAM credentials for: ${username}\n`));
+  console.log("This will:");
+  console.log("  1. Create new AWS IAM access keys for the user");
+  console.log("  2. Invalidate any existing access keys");
+  console.log("  3. Restore S3 access to their datasets");
+  console.log();
+  console.log(chalk.gray("Use this if a user's credentials were compromised or lost."));
+  console.log();
+
+  const confirmResult = await confirm(`Regenerate IAM credentials for ${username}?`, options);
+  if (confirmResult !== "confirmed") {
+    console.log(chalk.gray(confirmResult === "declined" ? "Skipped" : "Cancelled"));
+    return;
+  }
+
+  const spinner = ora(`Regenerating IAM credentials for ${username}...`).start();
+
+  try {
+    const result = await regenerateUserIam(username);
+    spinner.succeed(`Regenerated IAM credentials for ${username}`);
+    console.log();
+    console.log(`  IAM Username: ${chalk.cyan(result.user.iam_username)}`);
+    if (result.user.role === "admin" || result.user.role === "owner") {
+      console.log(`  Access: ${chalk.magenta("full bucket access (admin/owner)")}`);
+    }
+    console.log(`  Datasets restored: ${chalk.green(result.datasets_restored)}`);
+
+    if (result.warning) {
+      console.log();
+      console.log(chalk.yellow(`  Warning: ${result.warning}`));
+      console.log(chalk.gray("  Please verify old credentials are revoked in AWS console."));
+    }
+
+    console.log();
+    console.log(chalk.gray("The user can now upload to their datasets again."));
+  } catch (error) {
+    handleCommandError(error, spinner, "Failed to regenerate IAM credentials", {
+      404: "User not found or not approved",
+    });
+  }
+}
+
+// ============================================================================
+// Users
 // ============================================================================
 
 adminCommand
-  .command("e2e-test")
-  .description("Run end-to-end test against nm099999 (admin only)")
-  .option("--verbose", "Show detailed output for each step")
-  .option("--skip-reset", "Use existing nm099999 state (skip reset)")
-  .option("--skip-cleanup", "Keep temp directories after test")
+  .command("users")
+  .description("List NEMAR users")
+  .option("--pending", "Show only pending approval")
+  .option("--verified", "Show only verified (awaiting approval)")
+  .option("--approved", "Show only approved users")
+  .option("--revoked", "Show only revoked users")
+  .option("--role <role>", "Filter by role: owner, admin, or member")
   .addHelpText(
     "after",
     `
-Description:
-  Runs a full upload/download/update cycle against the test dataset nm099999.
-  Tests the complete git-annex S3 remote workflow with real infrastructure.
-
-Steps:
-   1. Reset nm099999          6. Push to GitHub
-   2. Prepare upload           7. Clone fresh
-   3. Init git + annex         8. Download + verify
-   4. Configure remotes        9. Update cycle
-   5. Upload to S3            10. Cleanup
-
-Requirements:
-  - Admin privileges (API role check)
-  - git-annex installed
-  - GitHub SSH or gh CLI configured
-  - Active nemar auth session
-
 Examples:
-  $ nemar admin e2e-test                    # Full test
-  $ nemar admin e2e-test --verbose          # With detailed output
-  $ nemar admin e2e-test --skip-cleanup     # Keep temp dirs for inspection
-  $ nemar admin e2e-test --skip-reset       # Reuse existing nm099999 state`,
+  $ nemar admin users                    # List all users
+  $ nemar admin users --verified         # Users awaiting approval
+  $ nemar admin users --role admin       # List all admins
+  $ nemar admin users --role owner       # List all owners
+  $ nemar admin users --approved --role member  # Approved regular users`,
   )
-  .action(async (options: { verbose?: boolean; skipReset?: boolean; skipCleanup?: boolean }) => {
+  .action(async (options) => {
     if (!requireAuth()) return;
 
-    console.log(chalk.cyan("\nNEMAR E2E Test (nm099999)\n"));
+    // Determine status filter
+    let status: string | undefined;
+    if (options.pending) status = "pending";
+    else if (options.verified) status = "verified";
+    else if (options.approved) status = "approved";
+    else if (options.revoked) status = "revoked";
 
-    // Lazy import to avoid loading e2e-test module on every CLI invocation
-    const { runE2ETest } = await import("../lib/e2e-test.js");
+    // Validate role filter
+    const role: string | undefined = options.role;
+    if (role && !["owner", "admin", "member"].includes(role)) {
+      console.error(chalk.red(`Invalid role '${role}'. Must be: owner, admin, or member`));
+      process.exit(1);
+    }
 
-    const result = await runE2ETest({
-      verbose: options.verbose,
-      skipReset: options.skipReset,
-      skipCleanup: options.skipCleanup,
-    });
+    const spinner = ora("Fetching users...").start();
 
-    // Print results table
-    console.log();
-    for (const step of result.steps) {
-      const icon = step.passed ? chalk.green("[x]") : chalk.red("[ ]");
-      const time = chalk.gray(`(${step.duration_ms}ms)`);
-      console.log(`  ${icon} ${step.name} ${time}`);
-      if (step.error) {
-        console.log(chalk.red(`      ${step.error}`));
+    try {
+      const result = await listUsers(status, role);
+      spinner.stop();
+
+      if (result.users.length === 0) {
+        const filters = [status, role].filter(Boolean).join(", ");
+        console.log(chalk.yellow(`No users found${filters ? ` (filter: ${filters})` : ""}`));
+        return;
       }
-    }
 
-    console.log();
-    const totalSec = (result.total_duration_ms / 1000).toFixed(1);
-    if (result.passed) {
-      console.log(chalk.green(`All ${result.steps.length} steps passed (${totalSec}s)`));
-    } else {
-      const failed = result.steps.filter((s) => !s.passed).length;
-      console.log(chalk.red(`${failed}/${result.steps.length} steps failed (${totalSec}s)`));
-    }
+      const filterLabel = [status, role ? `role=${role}` : ""].filter(Boolean).join(", ");
+      console.log(
+        `\n${chalk.cyan("NEMAR Users")} (${result.count} total${filterLabel ? `, filter: ${filterLabel}` : ""})\n`,
+      );
 
-    if (result.upload_dir) {
-      console.log(chalk.gray(`\nUpload dir: ${result.upload_dir}`));
-      console.log(chalk.gray(`Clone dir:  ${result.clone_dir}`));
-    }
+      // Display users in a clean format
+      for (const user of result.users) {
+        const statusColor =
+          {
+            pending: chalk.gray,
+            verified: chalk.yellow,
+            approved: chalk.green,
+            revoked: chalk.red,
+          }[user.status] || chalk.white;
 
-    process.exit(result.passed ? 0 : 1);
+        const userRole = user.role || "member";
+        const roleBadge =
+          userRole === "owner"
+            ? chalk.red(" [owner]")
+            : userRole === "admin"
+              ? chalk.magenta(" [admin]")
+              : chalk.gray(" [member]");
+        const verifiedBadge = user.email_verified ? "" : chalk.gray(" (unverified)");
+
+        console.log(`  ${chalk.cyan(user.username)}${roleBadge}`);
+        console.log(`    Email:   ${user.email}${verifiedBadge}`);
+        console.log(`    GitHub:  @${user.github_username}`);
+        console.log(`    Status:  ${statusColor(user.status)}`);
+        console.log(`    Created: ${new Date(user.created_at).toLocaleDateString()}`);
+        console.log();
+      }
+    } catch (error) {
+      handleCommandError(error, spinner, "Failed to fetch users");
+    }
   });
+

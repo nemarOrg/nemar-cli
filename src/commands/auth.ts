@@ -2,13 +2,16 @@
  * Authentication commands for NEMAR CLI
  *
  * Commands:
- * - nemar auth login     - Authenticate with API key
- * - nemar auth signup    - Register new account
- * - nemar auth status    - Check authentication status
- * - nemar auth whoami    - Alias for status (common pattern)
- * - nemar auth logout    - Clear stored credentials
- * - nemar auth switch    - Switch between stored accounts
- * - nemar auth setup-ssh - Configure SSH for GitHub access
+ * - nemar auth login               - Authenticate with API key
+ * - nemar auth logout              - Clear stored credentials
+ * - nemar auth regenerate-key      - Request new API key
+ * - nemar auth resend-verification - Resend email verification
+ * - nemar auth retrieve-key        - Retrieve API key after approval
+ * - nemar auth setup-ssh           - Configure SSH for GitHub access
+ * - nemar auth signup              - Register new account
+ * - nemar auth status              - Check authentication status
+ * - nemar auth switch              - Switch between stored accounts
+ * - nemar auth whoami              - Alias for status (common pattern)
  *
  * Note: The two-prong structure (nemar auth <cmd>) follows CLI best practices
  * for discoverability and organization. Root-level shortcuts (nemar login,
@@ -200,6 +203,374 @@ Examples:
   .action(loginAction);
 
 // ============================================================================
+// Logout
+// ============================================================================
+
+/** Exported logout action handler for use in root-level shortcuts */
+export async function logoutAction(options: ConfirmOptions & { all?: boolean }): Promise<void> {
+  if (!isAuthenticated()) {
+    console.log(chalk.yellow("Not currently authenticated"));
+    return;
+  }
+
+  if (options.all) {
+    const accounts = getAccounts();
+    const result = await confirm(`Log out all ${accounts.length} stored account(s)?`, options);
+    if (result !== "confirmed") return;
+    clearAllConfig();
+    console.log(chalk.green("All accounts removed"));
+    return;
+  }
+
+  const cfg = getConfig();
+  const result = await confirm(`Log out ${cfg.username || "current user"}?`, options);
+  if (result !== "confirmed") return;
+
+  clearConfig();
+  console.log(chalk.green("Logged out successfully"));
+
+  // If other accounts remain, inform the user
+  const remaining = getAccounts();
+  if (remaining.length > 0) {
+    const active = remaining.find((a) => a.active);
+    if (active) {
+      console.log(`  Switched to ${chalk.cyan(active.username)}`);
+    }
+  }
+}
+
+authCommand
+  .command("logout")
+  .description("Remove the active account (use --all to remove all)")
+  .option(YES_OPTION, YES_DESCRIPTION)
+  .option(NO_OPTION, NO_DESCRIPTION)
+  .option("--all", "Remove all stored accounts")
+  .action(logoutAction);
+
+// ============================================================================
+// Regenerate Key
+// ============================================================================
+
+authCommand
+  .command("regenerate-key")
+  .description("Request a new API key (revokes current key, requires email verification)")
+  .addHelpText(
+    "after",
+    `
+Description:
+  If you lost your API key or it was compromised, use this command to
+  request a new one. A verification email will be sent to confirm the
+  request. Clicking the link will:
+
+  1. Revoke your current API key
+  2. Generate a new API key (shown in the browser)
+  3. You will need to login again with the new key
+
+Examples:
+  $ nemar auth regenerate-key`,
+  )
+  .action(async () => {
+    console.log(chalk.yellow("API Key Regeneration"));
+    console.log(chalk.gray("This will revoke your current key and generate a new one\n"));
+
+    const { email } = await inquirer.prompt([
+      {
+        type: "input",
+        name: "email",
+        message: "Email address associated with your account:",
+        validate: (input) => {
+          if (!input || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(input)) {
+            return "Please enter a valid email address";
+          }
+          return true;
+        },
+      },
+    ]);
+
+    const spinner = ora("Sending verification email...").start();
+
+    try {
+      const result = await requestKeyRegeneration(email);
+      spinner.succeed("Verification email sent");
+      console.log();
+      console.log("Next steps:");
+      console.log("  1. Check your email for a verification link");
+      console.log("  2. Click the link to generate your new API key");
+      console.log("  3. Copy the new key and run 'nemar auth login'");
+      console.log();
+      console.log(chalk.gray("The link expires in 1 hour"));
+    } catch (error) {
+      if (error instanceof ApiError) {
+        spinner.fail(error.message);
+      } else {
+        spinner.fail("Failed to send verification email");
+        console.log(chalk.gray("  Check your internet connection"));
+      }
+    }
+  });
+
+// ============================================================================
+// Resend Verification
+// ============================================================================
+
+authCommand
+  .command("resend-verification")
+  .description("Resend email verification link")
+  .action(async () => {
+    const { email } = await inquirer.prompt([
+      {
+        type: "input",
+        name: "email",
+        message: "Enter your email address:",
+        validate: (input) => {
+          if (!input || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(input)) {
+            return "Please enter a valid email address";
+          }
+          return true;
+        },
+      },
+    ]);
+
+    const spinner = ora("Sending verification email...").start();
+
+    try {
+      const result = await resendVerification(email);
+      spinner.succeed(result.message);
+    } catch (error) {
+      if (error instanceof ApiError) {
+        spinner.fail(error.message);
+        if (error.statusCode === 0) {
+          console.log(chalk.gray("  Check your internet connection"));
+        }
+      } else {
+        spinner.fail(
+          `Failed to send verification email: ${error instanceof Error ? error.message : "Unknown error"}`,
+        );
+        console.log(chalk.gray("  Check your internet connection"));
+      }
+    }
+  });
+
+// ============================================================================
+// Retrieve Key (after approval)
+// ============================================================================
+
+authCommand
+  .command("retrieve-key")
+  .description("Retrieve your API key after account approval (requires email and password)")
+  .addHelpText(
+    "after",
+    `
+Description:
+  After an admin approves your account, use this command to securely
+  retrieve your API key. You will need the email and password you used
+  during signup.
+
+  API keys are not sent via email for security. This is the only way
+  to obtain your key.
+
+Examples:
+  $ nemar auth retrieve-key`,
+  )
+  .action(async () => {
+    const answers = await inquirer.prompt([
+      {
+        type: "input",
+        name: "email",
+        message: "Email address:",
+        validate: (input) => {
+          if (!input || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(input)) {
+            return "Please enter a valid email address";
+          }
+          return true;
+        },
+      },
+      {
+        type: "password",
+        name: "password",
+        message: "Password:",
+        mask: "*",
+        validate: (input) => {
+          if (!input) return "Password is required";
+          return true;
+        },
+      },
+    ]);
+
+    const spinner = ora("Retrieving API key...").start();
+
+    try {
+      const result = await retrieveKey(answers.email, answers.password);
+
+      spinner.succeed("API key retrieved");
+      console.log();
+      console.log(chalk.yellow("Your API Key (store this securely):"));
+      console.log(chalk.gray(`  ${result.api_key}`));
+      console.log();
+      console.log("Next step:");
+      console.log(`  Run ${chalk.cyan("nemar auth login")} and paste your API key`);
+    } catch (error) {
+      if (error instanceof ApiError) {
+        if (error.statusCode === 409) {
+          // Key already issued - extract prefix from error details
+          const details = error.details as { api_key_prefix?: string } | undefined;
+          spinner.info("API key already issued");
+          if (details?.api_key_prefix) {
+            console.log();
+            console.log(`  Key prefix: ${chalk.gray(details.api_key_prefix)}`);
+          }
+          console.log();
+          console.log("  If you lost your API key, regenerate it:");
+          console.log(`  ${chalk.cyan("nemar auth regenerate-key")}`);
+        } else {
+          spinner.fail(error.message);
+          if (error.statusCode === 401) {
+            console.log(chalk.gray("  Check your email and password"));
+          } else if (error.statusCode === 403) {
+            console.log(chalk.gray("  Your account may not be approved yet"));
+          }
+        }
+      } else {
+        const msg = error instanceof Error ? error.message : "Unknown error";
+        spinner.fail(`Failed to retrieve API key: ${msg}`);
+      }
+    }
+  });
+
+// ============================================================================
+// Setup SSH
+// ============================================================================
+
+/** Exported setup-ssh action handler for use in root-level shortcuts */
+export async function setupSSHAction(options: { force?: boolean }): Promise<void> {
+  // Check authentication
+  if (!isAuthenticated()) {
+    console.log(chalk.yellow("Not authenticated"));
+    console.log();
+    console.log("  Run 'nemar auth login' first to authenticate");
+    return;
+  }
+
+  const config = getConfig();
+
+  // Test if SSH already works
+  if (!options.force) {
+    const spinner = ora("Checking existing SSH access...").start();
+    const sshTest = await testGitHubSSH();
+
+    if (sshTest.success) {
+      spinner.succeed("SSH access to GitHub already configured");
+      if (sshTest.username) {
+        console.log(`  GitHub user: ${chalk.cyan(sshTest.username)}`);
+      }
+      console.log();
+      console.log(chalk.gray("Use --force to regenerate SSH key anyway"));
+      return;
+    }
+    spinner.info("SSH access to GitHub not configured");
+  }
+
+  console.log();
+  console.log(chalk.cyan("Setting up SSH access for GitHub"));
+  console.log(chalk.gray("This will generate a dedicated SSH key for NEMAR uploads\n"));
+
+  // Step 1: Generate SSH key
+  let publicKey: string | null = null;
+  const paths = getSSHKeyPaths();
+
+  if (nemarSSHKeyExists() && !options.force) {
+    console.log(chalk.gray(`  Using existing key: ${paths.privateKey}`));
+    publicKey = readPublicKey();
+  } else {
+    const spinner = ora("Generating SSH key...").start();
+    const keyResult = await generateSSHKey(config.email || "nemar-user");
+
+    if (!keyResult.success) {
+      spinner.fail("Failed to generate SSH key");
+      console.log(chalk.gray(`  ${keyResult.error}`));
+      return;
+    }
+
+    spinner.succeed("SSH key generated");
+    console.log(chalk.gray(`  Private key: ${paths.privateKey}`));
+    console.log(chalk.gray(`  Public key: ${paths.publicKey}`));
+    publicKey = keyResult.publicKey || null;
+  }
+
+  if (!publicKey) {
+    console.log(chalk.red("Could not read public key"));
+    return;
+  }
+
+  // Step 2: Configure SSH
+  const configSpinner = ora("Configuring SSH...").start();
+  const configResult = configureSSHForGitHub();
+
+  if (!configResult.success) {
+    configSpinner.fail("Failed to configure SSH");
+    console.log(chalk.gray(`  ${configResult.error}`));
+    return;
+  }
+  configSpinner.succeed("SSH configured for GitHub");
+
+  // Step 3: Check if key is already registered with GitHub
+  console.log();
+  const verifySpinner = ora("Testing SSH connection to GitHub...").start();
+
+  const verifyResult = await testGitHubSSH();
+
+  if (verifyResult.success) {
+    verifySpinner.succeed("SSH connection verified");
+    if (verifyResult.username) {
+      console.log(`  GitHub user: ${chalk.cyan(verifyResult.username)}`);
+    }
+    console.log();
+    console.log(chalk.green("SSH setup complete! You can now upload datasets."));
+    return;
+  }
+
+  verifySpinner.info("SSH key generated but not yet added to GitHub");
+
+  // Step 4: Show instructions to add key to GitHub
+  console.log();
+  console.log(chalk.yellow("To complete setup, add this SSH key to your GitHub account:"));
+  console.log();
+  console.log(chalk.cyan(`  ${publicKey}`));
+  console.log();
+  console.log("Steps:");
+  console.log("  1. Copy the key above");
+  console.log(`  2. Go to: ${chalk.underline("https://github.com/settings/ssh/new")}`);
+  console.log(`  3. Title: ${chalk.gray("NEMAR CLI")}`);
+  console.log("  4. Paste the key and click 'Add SSH key'");
+  console.log();
+  console.log(chalk.gray("After adding the key, run 'nemar auth setup-ssh' again to verify."));
+}
+
+authCommand
+  .command("setup-ssh")
+  .description("Configure SSH access for GitHub (auto-generates key)")
+  .option("-f, --force", "Regenerate SSH key even if one exists")
+  .addHelpText(
+    "after",
+    `
+Description:
+  Automatically configures SSH access for GitHub, which is required
+  for uploading datasets. This command will:
+
+  1. Generate a dedicated Ed25519 SSH key for NEMAR (~/.ssh/nemar_ed25519)
+  2. Configure SSH to use this key for GitHub
+  3. Verify the connection (prompts you to add the key to GitHub if needed)
+
+  This is a one-time setup. After running this command and adding the key
+  to GitHub, you can upload datasets.
+
+Examples:
+  $ nemar auth setup-ssh          # Set up SSH access
+  $ nemar auth setup-ssh --force  # Regenerate key even if exists`,
+  )
+  .action(setupSSHAction);
+
+// ============================================================================
 // Signup
 // ============================================================================
 
@@ -387,7 +758,7 @@ export async function signupAction(): Promise<void> {
 authCommand.command("signup").description("Register for a new NEMAR account").action(signupAction);
 
 // ============================================================================
-// Status / Whoami
+// Status
 // ============================================================================
 
 /** Exported status action handler for use in root-level shortcuts (whoami) */
@@ -458,13 +829,6 @@ export async function statusAction(options: { refresh?: boolean }): Promise<void
 authCommand
   .command("status")
   .description("Check current authentication status")
-  .option("--refresh", "Refresh user info from server")
-  .action(statusAction);
-
-// whoami is an alias for status (common CLI pattern)
-authCommand
-  .command("whoami")
-  .description("Show current user (alias for status)")
   .option("--refresh", "Refresh user info from server")
   .action(statusAction);
 
@@ -593,369 +957,12 @@ Examples:
   .action(switchAction);
 
 // ============================================================================
-// Logout
+// Whoami
 // ============================================================================
 
-/** Exported logout action handler for use in root-level shortcuts */
-export async function logoutAction(options: ConfirmOptions & { all?: boolean }): Promise<void> {
-  if (!isAuthenticated()) {
-    console.log(chalk.yellow("Not currently authenticated"));
-    return;
-  }
-
-  if (options.all) {
-    const accounts = getAccounts();
-    const result = await confirm(`Log out all ${accounts.length} stored account(s)?`, options);
-    if (result !== "confirmed") return;
-    clearAllConfig();
-    console.log(chalk.green("All accounts removed"));
-    return;
-  }
-
-  const cfg = getConfig();
-  const result = await confirm(`Log out ${cfg.username || "current user"}?`, options);
-  if (result !== "confirmed") return;
-
-  clearConfig();
-  console.log(chalk.green("Logged out successfully"));
-
-  // If other accounts remain, inform the user
-  const remaining = getAccounts();
-  if (remaining.length > 0) {
-    const active = remaining.find((a) => a.active);
-    if (active) {
-      console.log(`  Switched to ${chalk.cyan(active.username)}`);
-    }
-  }
-}
-
+// whoami is an alias for status (common CLI pattern)
 authCommand
-  .command("logout")
-  .description("Remove the active account (use --all to remove all)")
-  .option(YES_OPTION, YES_DESCRIPTION)
-  .option(NO_OPTION, NO_DESCRIPTION)
-  .option("--all", "Remove all stored accounts")
-  .action(logoutAction);
-
-// ============================================================================
-// Resend Verification
-// ============================================================================
-
-authCommand
-  .command("resend-verification")
-  .description("Resend email verification link")
-  .action(async () => {
-    const { email } = await inquirer.prompt([
-      {
-        type: "input",
-        name: "email",
-        message: "Enter your email address:",
-        validate: (input) => {
-          if (!input || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(input)) {
-            return "Please enter a valid email address";
-          }
-          return true;
-        },
-      },
-    ]);
-
-    const spinner = ora("Sending verification email...").start();
-
-    try {
-      const result = await resendVerification(email);
-      spinner.succeed(result.message);
-    } catch (error) {
-      if (error instanceof ApiError) {
-        spinner.fail(error.message);
-        if (error.statusCode === 0) {
-          console.log(chalk.gray("  Check your internet connection"));
-        }
-      } else {
-        spinner.fail(
-          `Failed to send verification email: ${error instanceof Error ? error.message : "Unknown error"}`,
-        );
-        console.log(chalk.gray("  Check your internet connection"));
-      }
-    }
-  });
-
-// ============================================================================
-// Setup SSH
-// ============================================================================
-
-/** Exported setup-ssh action handler for use in root-level shortcuts */
-export async function setupSSHAction(options: { force?: boolean }): Promise<void> {
-  // Check authentication
-  if (!isAuthenticated()) {
-    console.log(chalk.yellow("Not authenticated"));
-    console.log();
-    console.log("  Run 'nemar auth login' first to authenticate");
-    return;
-  }
-
-  const config = getConfig();
-
-  // Test if SSH already works
-  if (!options.force) {
-    const spinner = ora("Checking existing SSH access...").start();
-    const sshTest = await testGitHubSSH();
-
-    if (sshTest.success) {
-      spinner.succeed("SSH access to GitHub already configured");
-      if (sshTest.username) {
-        console.log(`  GitHub user: ${chalk.cyan(sshTest.username)}`);
-      }
-      console.log();
-      console.log(chalk.gray("Use --force to regenerate SSH key anyway"));
-      return;
-    }
-    spinner.info("SSH access to GitHub not configured");
-  }
-
-  console.log();
-  console.log(chalk.cyan("Setting up SSH access for GitHub"));
-  console.log(chalk.gray("This will generate a dedicated SSH key for NEMAR uploads\n"));
-
-  // Step 1: Generate SSH key
-  let publicKey: string | null = null;
-  const paths = getSSHKeyPaths();
-
-  if (nemarSSHKeyExists() && !options.force) {
-    console.log(chalk.gray(`  Using existing key: ${paths.privateKey}`));
-    publicKey = readPublicKey();
-  } else {
-    const spinner = ora("Generating SSH key...").start();
-    const keyResult = await generateSSHKey(config.email || "nemar-user");
-
-    if (!keyResult.success) {
-      spinner.fail("Failed to generate SSH key");
-      console.log(chalk.gray(`  ${keyResult.error}`));
-      return;
-    }
-
-    spinner.succeed("SSH key generated");
-    console.log(chalk.gray(`  Private key: ${paths.privateKey}`));
-    console.log(chalk.gray(`  Public key: ${paths.publicKey}`));
-    publicKey = keyResult.publicKey || null;
-  }
-
-  if (!publicKey) {
-    console.log(chalk.red("Could not read public key"));
-    return;
-  }
-
-  // Step 2: Configure SSH
-  const configSpinner = ora("Configuring SSH...").start();
-  const configResult = configureSSHForGitHub();
-
-  if (!configResult.success) {
-    configSpinner.fail("Failed to configure SSH");
-    console.log(chalk.gray(`  ${configResult.error}`));
-    return;
-  }
-  configSpinner.succeed("SSH configured for GitHub");
-
-  // Step 3: Check if key is already registered with GitHub
-  console.log();
-  const verifySpinner = ora("Testing SSH connection to GitHub...").start();
-
-  const verifyResult = await testGitHubSSH();
-
-  if (verifyResult.success) {
-    verifySpinner.succeed("SSH connection verified");
-    if (verifyResult.username) {
-      console.log(`  GitHub user: ${chalk.cyan(verifyResult.username)}`);
-    }
-    console.log();
-    console.log(chalk.green("SSH setup complete! You can now upload datasets."));
-    return;
-  }
-
-  verifySpinner.info("SSH key generated but not yet added to GitHub");
-
-  // Step 4: Show instructions to add key to GitHub
-  console.log();
-  console.log(chalk.yellow("To complete setup, add this SSH key to your GitHub account:"));
-  console.log();
-  console.log(chalk.cyan(`  ${publicKey}`));
-  console.log();
-  console.log("Steps:");
-  console.log("  1. Copy the key above");
-  console.log(`  2. Go to: ${chalk.underline("https://github.com/settings/ssh/new")}`);
-  console.log(`  3. Title: ${chalk.gray("NEMAR CLI")}`);
-  console.log("  4. Paste the key and click 'Add SSH key'");
-  console.log();
-  console.log(chalk.gray("After adding the key, run 'nemar auth setup-ssh' again to verify."));
-}
-
-authCommand
-  .command("setup-ssh")
-  .description("Configure SSH access for GitHub (auto-generates key)")
-  .option("-f, --force", "Regenerate SSH key even if one exists")
-  .addHelpText(
-    "after",
-    `
-Description:
-  Automatically configures SSH access for GitHub, which is required
-  for uploading datasets. This command will:
-
-  1. Generate a dedicated Ed25519 SSH key for NEMAR (~/.ssh/nemar_ed25519)
-  2. Configure SSH to use this key for GitHub
-  3. Verify the connection (prompts you to add the key to GitHub if needed)
-
-  This is a one-time setup. After running this command and adding the key
-  to GitHub, you can upload datasets.
-
-Examples:
-  $ nemar auth setup-ssh          # Set up SSH access
-  $ nemar auth setup-ssh --force  # Regenerate key even if exists`,
-  )
-  .action(setupSSHAction);
-
-// ============================================================================
-// Retrieve Key (after approval)
-// ============================================================================
-
-authCommand
-  .command("retrieve-key")
-  .description("Retrieve your API key after account approval (requires email and password)")
-  .addHelpText(
-    "after",
-    `
-Description:
-  After an admin approves your account, use this command to securely
-  retrieve your API key. You will need the email and password you used
-  during signup.
-
-  API keys are not sent via email for security. This is the only way
-  to obtain your key.
-
-Examples:
-  $ nemar auth retrieve-key`,
-  )
-  .action(async () => {
-    const answers = await inquirer.prompt([
-      {
-        type: "input",
-        name: "email",
-        message: "Email address:",
-        validate: (input) => {
-          if (!input || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(input)) {
-            return "Please enter a valid email address";
-          }
-          return true;
-        },
-      },
-      {
-        type: "password",
-        name: "password",
-        message: "Password:",
-        mask: "*",
-        validate: (input) => {
-          if (!input) return "Password is required";
-          return true;
-        },
-      },
-    ]);
-
-    const spinner = ora("Retrieving API key...").start();
-
-    try {
-      const result = await retrieveKey(answers.email, answers.password);
-
-      spinner.succeed("API key retrieved");
-      console.log();
-      console.log(chalk.yellow("Your API Key (store this securely):"));
-      console.log(chalk.gray(`  ${result.api_key}`));
-      console.log();
-      console.log("Next step:");
-      console.log(`  Run ${chalk.cyan("nemar auth login")} and paste your API key`);
-    } catch (error) {
-      if (error instanceof ApiError) {
-        if (error.statusCode === 409) {
-          // Key already issued - extract prefix from error details
-          const details = error.details as { api_key_prefix?: string } | undefined;
-          spinner.info("API key already issued");
-          if (details?.api_key_prefix) {
-            console.log();
-            console.log(`  Key prefix: ${chalk.gray(details.api_key_prefix)}`);
-          }
-          console.log();
-          console.log("  If you lost your API key, regenerate it:");
-          console.log(`  ${chalk.cyan("nemar auth regenerate-key")}`);
-        } else {
-          spinner.fail(error.message);
-          if (error.statusCode === 401) {
-            console.log(chalk.gray("  Check your email and password"));
-          } else if (error.statusCode === 403) {
-            console.log(chalk.gray("  Your account may not be approved yet"));
-          }
-        }
-      } else {
-        const msg = error instanceof Error ? error.message : "Unknown error";
-        spinner.fail(`Failed to retrieve API key: ${msg}`);
-      }
-    }
-  });
-
-// ============================================================================
-// Regenerate Key
-// ============================================================================
-
-authCommand
-  .command("regenerate-key")
-  .description("Request a new API key (revokes current key, requires email verification)")
-  .addHelpText(
-    "after",
-    `
-Description:
-  If you lost your API key or it was compromised, use this command to
-  request a new one. A verification email will be sent to confirm the
-  request. Clicking the link will:
-
-  1. Revoke your current API key
-  2. Generate a new API key (shown in the browser)
-  3. You will need to login again with the new key
-
-Examples:
-  $ nemar auth regenerate-key`,
-  )
-  .action(async () => {
-    console.log(chalk.yellow("API Key Regeneration"));
-    console.log(chalk.gray("This will revoke your current key and generate a new one\n"));
-
-    const { email } = await inquirer.prompt([
-      {
-        type: "input",
-        name: "email",
-        message: "Email address associated with your account:",
-        validate: (input) => {
-          if (!input || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(input)) {
-            return "Please enter a valid email address";
-          }
-          return true;
-        },
-      },
-    ]);
-
-    const spinner = ora("Sending verification email...").start();
-
-    try {
-      const result = await requestKeyRegeneration(email);
-      spinner.succeed("Verification email sent");
-      console.log();
-      console.log("Next steps:");
-      console.log("  1. Check your email for a verification link");
-      console.log("  2. Click the link to generate your new API key");
-      console.log("  3. Copy the new key and run 'nemar auth login'");
-      console.log();
-      console.log(chalk.gray("The link expires in 1 hour"));
-    } catch (error) {
-      if (error instanceof ApiError) {
-        spinner.fail(error.message);
-      } else {
-        spinner.fail("Failed to send verification email");
-        console.log(chalk.gray("  Check your internet connection"));
-      }
-    }
-  });
+  .command("whoami")
+  .description("Show current user (alias for status)")
+  .option("--refresh", "Refresh user info from server")
+  .action(statusAction);
