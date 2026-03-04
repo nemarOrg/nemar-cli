@@ -98,6 +98,16 @@ import {
   toS3Credentials,
   verifyGitHubAuth,
 } from "../lib/git-annex.js";
+import {
+  detectLicense,
+  ensureLicenseFile,
+  isResearchCompatible,
+  promptForLicense,
+  updateLicenseInDescription,
+} from "../lib/license.js";
+import { checkPrerequisitesForCommand } from "../lib/prerequisites.js";
+import { DownloadProgressTracker } from "../lib/progress.js";
+import { promptForProvenance } from "../lib/provenance.js";
 import { bumpVersion, isValidStableVersion, parseVersion } from "../lib/semver.js";
 import type { UploadProgress } from "../lib/upload-progress.js";
 import {
@@ -452,6 +462,9 @@ Examples:
       process.exit(1);
     }
 
+    // Step 1c: Check required tools
+    await checkPrerequisitesForCommand("upload");
+
     // Step 2: Check prerequisites
     let spinner = ora("Checking prerequisites...").start();
     const prereqs = await checkPrerequisites();
@@ -727,6 +740,121 @@ Examples:
           }
           console.log(chalk.gray("  Continuing without author enrichment."));
         }
+      }
+    }
+
+    // Step 4c: License detection and enforcement
+    let resolvedLicense: string | undefined;
+    if (process.stdin.isTTY && !options.skipValidation /* non-interactive guard */) {
+      const detected = detectLicense(absolutePath);
+
+      if (detected.spdxId) {
+        console.log();
+        console.log(
+          chalk.cyan("License detected:"),
+          chalk.bold(detected.spdxId),
+          chalk.gray(
+            `(from ${detected.source === "dataset_description" ? "dataset_description.json" : "LICENSE file"})`,
+          ),
+        );
+
+        if (!isResearchCompatible(detected.spdxId)) {
+          console.log(
+            chalk.yellow(
+              `  Warning: "${detected.spdxId}" is not in the list of known research-compatible licenses.`,
+            ),
+          );
+        }
+
+        const { keepLicense } = await inquirer.prompt<{ keepLicense: boolean }>([
+          {
+            type: "confirm",
+            name: "keepLicense",
+            message: `Use "${detected.spdxId}" as the dataset license?`,
+            default: true,
+          },
+        ]);
+
+        if (keepLicense) {
+          resolvedLicense = detected.spdxId;
+        } else {
+          resolvedLicense = await promptForLicense(detected.spdxId);
+        }
+      } else {
+        console.log();
+        if (detected.source === "license_file") {
+          console.log(
+            chalk.yellow(
+              "A LICENSE file was found but the license could not be identified automatically.",
+            ),
+          );
+        } else {
+          console.log(chalk.yellow("No license found in this dataset."));
+        }
+        console.log(chalk.gray("A license is required to publish on NEMAR."));
+        resolvedLicense = await promptForLicense();
+      }
+
+      // Apply the resolved license back to dataset_description.json if it differs
+      try {
+        const descPath = resolve(absolutePath, "dataset_description.json");
+        if (existsSync(descPath)) {
+          const desc = JSON.parse(readFileSync(descPath, "utf-8")) as Record<string, unknown>;
+          if (desc.License !== resolvedLicense) {
+            updateLicenseInDescription(absolutePath, resolvedLicense);
+            console.log(
+              chalk.gray(`  Updated dataset_description.json License -> ${resolvedLicense}`),
+            );
+          }
+        }
+      } catch (licErr) {
+        console.log(
+          chalk.yellow(
+            `  Warning: Could not update license in dataset_description.json: ${errorDetail(licErr)}`,
+          ),
+        );
+      }
+
+      // Ensure LICENSE file exists
+      const created = ensureLicenseFile(absolutePath, resolvedLicense);
+      if (created) {
+        console.log(chalk.gray(`  Created LICENSE file (${resolvedLicense})`));
+      }
+      console.log();
+    }
+
+    // Step 4d: Data provenance
+    if (process.stdin.isTTY && !options.skipValidation && resolvedLicense) {
+      const provenance = await promptForProvenance(resolvedLicense);
+
+      // Update dataset_description.json SourceDatasets field for derived data
+      if (
+        provenance.isDerived &&
+        provenance.sourceDatasets &&
+        provenance.sourceDatasets.length > 0
+      ) {
+        try {
+          const descPath = resolve(absolutePath, "dataset_description.json");
+          if (existsSync(descPath)) {
+            const desc = JSON.parse(readFileSync(descPath, "utf-8")) as Record<string, unknown>;
+            const existingSources = Array.isArray(desc.SourceDatasets) ? desc.SourceDatasets : [];
+            const newSources = provenance.sourceDatasets.map((s) => s.identifier);
+            // Merge without duplicates
+            const merged = Array.from(new Set([...(existingSources as string[]), ...newSources]));
+            desc.SourceDatasets = merged;
+            writeFileSync(descPath, `${JSON.stringify(desc, null, 2)}\n`);
+            console.log(
+              chalk.gray(
+                `  Updated dataset_description.json SourceDatasets (${merged.length} source(s))`,
+              ),
+            );
+          }
+        } catch (srcErr) {
+          console.log(
+            chalk.yellow(`  Warning: Could not update SourceDatasets: ${errorDetail(srcErr)}`),
+          );
+        }
+        console.log();
       }
     }
 
@@ -1284,8 +1412,10 @@ Examples:
   $ nemar dataset download nm000104 -j 8         # More parallel streams`,
   )
   .action(async (datasetId, options) => {
-    // Step 1: Check prerequisites
-    let spinner = ora("Checking prerequisites...").start();
+    // Step 1: Check prerequisites (fast, parallel checks)
+    await checkPrerequisitesForCommand("download");
+
+    let spinner = ora("Checking git-annex...").start();
     const prereqs = await checkDownloadPrerequisites();
 
     if (!prereqs.allPassed) {
@@ -1297,9 +1427,7 @@ Examples:
       process.exit(1);
     }
 
-    spinner.succeed("Prerequisites check passed");
-    console.log(chalk.gray(`  git-annex ${prereqs.gitAnnex.version}`));
-    console.log();
+    spinner.succeed(`git-annex ${prereqs.gitAnnex.version}`);
 
     // Step 2: Get dataset info from backend
     spinner = ora(`Fetching dataset info for ${datasetId}...`).start();
@@ -1345,9 +1473,9 @@ Examples:
     }
     console.log();
 
-    // Step 4: Clone the dataset
+    // Step 4: Clone the dataset (metadata)
     const repoUrl = `https://github.com/${datasetInfo.github_repo}.git`;
-    spinner = ora("Cloning dataset from GitHub...").start();
+    spinner = ora("Cloning metadata from GitHub...").start();
 
     const cloneResult = await cloneDataset(repoUrl, absoluteOutput);
     if (!cloneResult.success) {
@@ -1356,7 +1484,7 @@ Examples:
       process.exit(1);
     }
 
-    spinner.succeed("Dataset cloned");
+    spinner.succeed("Metadata cloned");
 
     // For private datasets, fetch temporary S3 download credentials
     let downloadCreds: Awaited<ReturnType<typeof requestDownloadCredentials>> | null = null;
@@ -1385,18 +1513,21 @@ Examples:
       console.log(chalk.yellow(`  Warning: Could not enable S3 remote: ${s3Enable.error}`));
     }
 
-    // Step 5: Get data files (unless --no-data)
+    // Step 5: Get data files with progress (unless --no-data)
     if (options.data !== false) {
-      spinner = ora(`Downloading data files (${options.jobs} parallel streams)...`).start();
+      console.log(chalk.bold(`Downloading data files (${options.jobs} parallel streams)...`));
+
+      const tracker = new DownloadProgressTracker();
 
       const getResult = await getDatasetData(absoluteOutput, {
         jobs: Number.parseInt(options.jobs, 10),
         credentials: s3Creds,
+        onProgress: (line) => tracker.processLine(line),
       });
 
       if (!getResult.success) {
-        spinner.fail("Failed to download data files");
-        console.log(chalk.red(`  ${getResult.error}`));
+        tracker.finish(0);
+        console.log(chalk.red(`Failed to download data files: ${getResult.error}`));
         console.log(chalk.gray("The dataset was cloned but data files are not available locally."));
         console.log(
           chalk.gray(`You can try again with: cd ${absoluteOutput} && nemar dataset get`),
@@ -1407,7 +1538,8 @@ Examples:
         process.exit(1);
       }
 
-      spinner.succeed(`Data downloaded (${getResult.filesDownloaded || 0} files)`);
+      tracker.finish(getResult.filesDownloaded || 0);
+      console.log(chalk.green(`Data downloaded (${getResult.filesDownloaded || 0} files)`));
     } else {
       console.log(chalk.gray("Skipping data files (--no-data flag)"));
     }
@@ -2981,6 +3113,9 @@ Examples:
   $ nemar dataset clone nm000104 -o ./my-dataset`,
   )
   .action(async (datasetId, options) => {
+    // Check required tools first
+    await checkPrerequisitesForCommand("clone");
+
     let spinner = ora("Checking prerequisites...").start();
     const prereqs = await checkDownloadPrerequisites();
 

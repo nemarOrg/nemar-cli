@@ -1135,6 +1135,16 @@ export function mapLicense(license: string | undefined): DataCiteRights | null {
       uri: "https://creativecommons.org/licenses/by-nc-sa/4.0/",
       spdx: "CC-BY-NC-SA-4.0",
     },
+    "CC-BY-ND-4.0": {
+      rights: "Creative Commons Attribution-NoDerivatives 4.0 International",
+      uri: "https://creativecommons.org/licenses/by-nd/4.0/",
+      spdx: "CC-BY-ND-4.0",
+    },
+    "CC-BY-NC-ND-4.0": {
+      rights: "Creative Commons Attribution-NonCommercial-NoDerivatives 4.0 International",
+      uri: "https://creativecommons.org/licenses/by-nc-nd/4.0/",
+      spdx: "CC-BY-NC-ND-4.0",
+    },
     "CC0-1.0": {
       rights: "CC0 1.0 Universal",
       uri: "https://creativecommons.org/publicdomain/zero/1.0/",
@@ -1142,6 +1152,17 @@ export function mapLicense(license: string | undefined): DataCiteRights | null {
     },
     CC0: {
       rights: "CC0 1.0 Universal",
+      uri: "https://creativecommons.org/publicdomain/zero/1.0/",
+      spdx: "CC0-1.0",
+    },
+    // Public domain aliases
+    "PUBLIC-DOMAIN": {
+      rights: "Public Domain",
+      uri: "https://creativecommons.org/publicdomain/zero/1.0/",
+      spdx: "CC0-1.0",
+    },
+    PD: {
+      rights: "Public Domain",
       uri: "https://creativecommons.org/publicdomain/zero/1.0/",
       spdx: "CC0-1.0",
     },
