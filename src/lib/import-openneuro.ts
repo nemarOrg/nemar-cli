@@ -189,7 +189,15 @@ export async function importOpenNeuro(
 
   // Step 3: Get annexed data from OpenNeuro S3
   if (!options.skipData) {
-    const getSpinner = ora("Downloading annexed data from OpenNeuro...").start();
+    const getSpinner = ora("Enabling OpenNeuro S3 remote...").start();
+    const enableResult = await runCommand(["git", "annex", "enableremote", "s3-PUBLIC"], {
+      cwd: datasetPath,
+    });
+    if (enableResult.exitCode !== 0) {
+      getSpinner.fail(`Failed to enable s3-PUBLIC remote: ${enableResult.stderr.trim()}`);
+      process.exit(1);
+    }
+    getSpinner.text = "Downloading annexed data from OpenNeuro...";
     const { stderr, exitCode } = await runCommand(["git", "annex", "get", "--all", "-J", "4"], {
       cwd: datasetPath,
     });
