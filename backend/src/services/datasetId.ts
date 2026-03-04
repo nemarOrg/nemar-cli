@@ -4,10 +4,10 @@
  * Generates IDs that reuse gaps from deleted datasets:
  * - nm000XXX for regular datasets (starting at 108)
  * - xx000XXX for sandbox datasets (starting at 1)
+ * - on000XXX for OpenNeuro-sourced datasets (assigned by import, not auto-generated)
  */
 
 // First allocatable number for each prefix
-// on: OpenNeuro-sourced datasets (not auto-generated, IDs mirror OpenNeuro's ds###### scheme)
 const START_NUMBER: Record<string, number> = { nm: 108, xx: 1, on: 1 };
 
 /**

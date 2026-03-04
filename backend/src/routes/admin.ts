@@ -4099,8 +4099,9 @@ adminRoutes.delete("/datasets/:id", async (c) => {
 
 // ─── Import external dataset ────────────────────────────────────────────────
 
+// 8 chars: 2-char prefix + 6 digits (e.g., on007262)
 const importDatasetSchema = z.object({
-  dataset_id: z.string().min(8).max(8),
+  dataset_id: z.string().regex(/^on\d{6}$/, "Import only supports 'on' prefix datasets (on######)"),
   name: z.string().min(1).max(200),
   description: z.string().optional(),
   source: z.enum(["openneuro"]),
@@ -4112,6 +4113,7 @@ const importDatasetSchema = z.object({
  *
  * Import a dataset from an external source (e.g., OpenNeuro).
  * Creates the D1 record and GitHub repo with a caller-specified dataset ID.
+ * The calling admin becomes the dataset owner (owner_user_id).
  * Does not set up S3 credentials or presigned URLs; the CLI handles data copy.
  */
 adminRoutes.post(
@@ -4123,17 +4125,6 @@ adminRoutes.post(
     const { dataset_id, name, description, source, source_id } = c.req.valid("json");
     const db = c.env.DB;
     const admin = c.get("user");
-
-    if (!isValidDatasetId(dataset_id)) {
-      return c.json({ error: `Invalid dataset ID format: "${dataset_id}"` }, 400);
-    }
-
-    if (!dataset_id.startsWith("on")) {
-      return c.json(
-        { error: "Import endpoint only supports 'on' prefix datasets (OpenNeuro)" },
-        400,
-      );
-    }
 
     // Check for duplicate
     const existing = await db
@@ -4160,15 +4151,15 @@ adminRoutes.post(
         return c.json({ error: `GitHub repo nemarDatasets/${dataset_id} already exists` }, 409);
       }
       console.error("Failed to create GitHub repo for import:", error);
-      return c.json({ error: "Failed to create GitHub repository" }, 500);
+      return c.json({ error: `Failed to create GitHub repository: ${msg}` }, 500);
     }
 
     // Insert D1 record
     try {
       await db
         .prepare(
-          `INSERT INTO datasets (dataset_id, name, description, owner_user_id, github_repo, is_sandbox, visibility, source, source_id)
-           VALUES (?, ?, ?, ?, ?, 0, 'private', ?, ?)`,
+          `INSERT INTO datasets (dataset_id, name, description, owner_user_id, github_repo, is_sandbox, visibility, source, source_id, last_activity_at)
+           VALUES (?, ?, ?, ?, ?, 0, 'private', ?, ?, datetime('now'))`,
         )
         .bind(
           dataset_id,
@@ -4202,7 +4193,7 @@ adminRoutes.post(
         )
         .run();
     } catch (err) {
-      console.error("Failed to write import audit log:", err);
+      console.error(`Failed to write audit log for dataset import ${dataset_id} by admin ${admin.id}:`, err);
     }
 
     return c.json(

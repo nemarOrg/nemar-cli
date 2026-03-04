@@ -2097,10 +2097,16 @@ adminCommand
     // Lazy import to keep CLI startup fast
     const { importOpenNeuro } = await import("../lib/import-openneuro.js");
 
-    await importOpenNeuro(openneuroId, {
-      workDir: options.dir,
-      skipData: options.skipData,
-    });
+    try {
+      await importOpenNeuro(openneuroId, {
+        workDir: options.dir,
+        skipData: options.skipData,
+      });
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error);
+      console.error(chalk.red(`\nImport failed: ${msg}`));
+      process.exit(1);
+    }
   });
 
 // ============================================================================

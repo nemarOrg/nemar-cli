@@ -29,10 +29,11 @@ jobs:
     steps:
       - name: Parse dataset IDs into matrix
         id: parse
+        env:
+          INPUT_IDS: ${{ inputs.openneuro_ids }}
         run: |
-          IDS="${{ inputs.openneuro_ids }}"
           # Convert comma-separated to JSON array
-          JSON=$(echo "$IDS" | tr ',' '\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | jq -R . | jq -s -c .)
+          JSON=$(echo "$INPUT_IDS" | tr ',' '\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | jq -R . | jq -s -c .)
           echo "matrix={\"dataset_id\":$JSON}" >> "$GITHUB_OUTPUT"
           echo "Parsed datasets: $JSON"
 
@@ -58,12 +59,17 @@ jobs:
         run: npm install -g @nemarorg/nemar-cli
 
       - name: Authenticate nemar CLI
-        run: nemar auth login --key "${{ secrets.NEMAR_ADMIN_API_KEY }}"
+        env:
+          NEMAR_API_KEY: ${{ secrets.NEMAR_ADMIN_API_KEY }}
+        run: nemar auth login --key "$NEMAR_API_KEY"
 
-      - name: Import dataset ${{ matrix.dataset_id }}
+      - name: Import dataset
+        env:
+          DATASET_ID: ${{ matrix.dataset_id }}
+          SKIP_DATA: ${{ inputs.skip_data }}
         run: |
-          ARGS="${{ matrix.dataset_id }}"
-          if [ "${{ inputs.skip_data }}" = "true" ]; then
+          ARGS="$DATASET_ID"
+          if [ "$SKIP_DATA" = "true" ]; then
             ARGS="$ARGS --skip-data"
           fi
           nemar admin import-openneuro $ARGS

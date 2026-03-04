@@ -8,7 +8,6 @@
 import { existsSync, mkdtempSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { spawn } from "bun";
 import chalk from "chalk";
 import ora from "ora";
 import { importDataset } from "./api.js";
@@ -18,6 +17,7 @@ import {
   configureS3Remote,
   copyToAnnexRemote,
   pushToGitHub,
+  runCommand,
   type S3Credentials,
 } from "./git-annex.js";
 
@@ -44,26 +44,6 @@ function mapDatasetId(openneuroId: string): string {
 }
 
 /**
- * Run a shell command and return result.
- */
-async function run(
-  cmd: string[],
-  options: { cwd?: string; env?: Record<string, string> } = {},
-): Promise<{ stdout: string; stderr: string; exitCode: number }> {
-  const proc = spawn({
-    cmd,
-    cwd: options.cwd,
-    stdout: "pipe",
-    stderr: "pipe",
-    env: { ...process.env, ...options.env },
-  });
-  const stdout = await new Response(proc.stdout).text();
-  const stderr = await new Response(proc.stderr).text();
-  const exitCode = await proc.exited;
-  return { stdout, stderr, exitCode };
-}
-
-/**
  * Read dataset_description.json from a cloned dataset directory.
  */
 function readBidsDescription(datasetPath: string): Record<string, unknown> {
@@ -71,20 +51,13 @@ function readBidsDescription(datasetPath: string): Record<string, unknown> {
   if (!existsSync(descPath)) {
     throw new Error(`dataset_description.json not found at ${descPath}`);
   }
-  return JSON.parse(readFileSync(descPath, "utf-8"));
-}
-
-/**
- * Read datacite.yml from a cloned dataset if it exists.
- */
-function readDataciteYml(datasetPath: string): string | null {
-  for (const name of ["datacite.yml", "datacite.yaml"]) {
-    const p = join(datasetPath, name);
-    if (existsSync(p)) {
-      return readFileSync(p, "utf-8");
-    }
+  try {
+    return JSON.parse(readFileSync(descPath, "utf-8"));
+  } catch (err) {
+    throw new Error(
+      `Failed to parse dataset_description.json at ${descPath}: ${err instanceof Error ? err.message : String(err)}`,
+    );
   }
-  return null;
 }
 
 /**
@@ -107,6 +80,15 @@ function resolveS3Credentials(): S3Credentials {
 }
 
 /**
+ * Extract the OpenNeuro DOI from dataset_description.json, stripping the "doi:" prefix.
+ */
+function extractOpenNeuroDoi(bidsDesc: Record<string, unknown>): string | null {
+  return typeof bidsDesc.DatasetDOI === "string"
+    ? bidsDesc.DatasetDOI.replace(/^doi:/, "")
+    : null;
+}
+
+/**
  * Seed .nemar/metadata.json with source information and IsIdenticalTo relation.
  */
 function seedMetadata(
@@ -114,24 +96,16 @@ function seedMetadata(
   nemarId: string,
   openneuroId: string,
   bidsDesc: Record<string, unknown>,
+  openNeuroDoi: string | null,
 ): void {
   const nemarDir = join(datasetPath, ".nemar");
   if (!existsSync(nemarDir)) {
     mkdirSync(nemarDir, { recursive: true });
   }
 
-  // Extract OpenNeuro DOI from dataset_description.json
-  const openNeuroDoi = typeof bidsDesc.DatasetDOI === "string"
-    ? bidsDesc.DatasetDOI.replace(/^doi:/, "")
-    : null;
-
-  const relatedIdentifiers: Array<{ doi: string; relationType: string }> = [];
-  if (openNeuroDoi) {
-    relatedIdentifiers.push({
-      doi: openNeuroDoi,
-      relationType: "IsIdenticalTo",
-    });
-  }
+  const relatedIdentifiers = openNeuroDoi
+    ? [{ doi: openNeuroDoi, relationType: "IsIdenticalTo" }]
+    : [];
 
   const metadata = {
     version: "2.0",
@@ -155,15 +129,13 @@ function seedMetadata(
  * Import an OpenNeuro dataset into NEMAR.
  *
  * Steps:
- * 1. Map ds###### -> on######
- * 2. Clone OpenNeuro dataset
- * 3. Create NEMAR dataset record + GitHub repo via API
- * 4. Get annexed data from OpenNeuro S3
- * 5. Reconfigure git remote to nemarDatasets
- * 6. Set up NEMAR S3 remote
- * 7. Copy data to NEMAR S3
- * 8. Seed .nemar/metadata.json
- * 9. Push to nemarDatasets
+ * 1. Clone OpenNeuro dataset (maps ds###### -> on######)
+ * 2. Create NEMAR dataset record + GitHub repo via API
+ * 3. Get annexed data from OpenNeuro S3
+ * 4. Reconfigure git remote to nemarDatasets
+ * 5. Set up NEMAR S3 remote and copy data
+ * 6. Seed .nemar/metadata.json
+ * 7. Push to nemarDatasets
  */
 export async function importOpenNeuro(
   openneuroId: string,
@@ -187,10 +159,14 @@ export async function importOpenNeuro(
   }
   cloneSpinner.succeed(`Cloned ${openneuroId}`);
 
-  // Read BIDS metadata
+  // Read BIDS metadata and extract OpenNeuro DOI once for reuse
   const bidsDesc = readBidsDescription(datasetPath);
   const datasetName = (bidsDesc.Name as string) || openneuroId;
+  const openNeuroDoi = extractOpenNeuroDoi(bidsDesc);
   console.log(chalk.gray(`  Dataset: ${datasetName}`));
+  if (openNeuroDoi) {
+    console.log(chalk.gray(`  OpenNeuro DOI: ${openNeuroDoi}`));
+  }
 
   // Step 2: Create NEMAR dataset record + GitHub repo
   const createSpinner = ora("Creating NEMAR dataset record...").start();
@@ -216,23 +192,29 @@ export async function importOpenNeuro(
   // Step 3: Get annexed data from OpenNeuro S3
   if (!options.skipData) {
     const getSpinner = ora("Downloading annexed data from OpenNeuro...").start();
-    const { stderr, exitCode } = await run(
+    const { stderr, exitCode } = await runCommand(
       ["git", "annex", "get", "--all", "-J", "4"],
       { cwd: datasetPath },
     );
     if (exitCode !== 0) {
       getSpinner.fail(`Failed to get annexed data: ${stderr.trim()}`);
-      console.log(chalk.yellow("Continuing without full data download..."));
-    } else {
-      getSpinner.succeed("Downloaded annexed data");
+      console.error(
+        chalk.red("Cannot continue: data download is required. Use --skip-data for metadata only."),
+      );
+      process.exit(1);
     }
+    getSpinner.succeed("Downloaded annexed data");
   }
 
   // Step 4: Reconfigure git remote to nemarDatasets
   const remoteSpinner = ora("Configuring NEMAR remote...").start();
 
   // Remove the OpenNeuro origin
-  await run(["git", "remote", "remove", "origin"], { cwd: datasetPath });
+  const removeResult = await runCommand(["git", "remote", "remove", "origin"], { cwd: datasetPath });
+  if (removeResult.exitCode !== 0 && !removeResult.stderr.includes("No such remote")) {
+    remoteSpinner.fail(`Failed to remove OpenNeuro remote: ${removeResult.stderr.trim()}`);
+    process.exit(1);
+  }
 
   // Add nemarDatasets origin
   const nemarRepoUrl = `git@github.com:nemarDatasets/${nemarId}.git`;
@@ -276,14 +258,23 @@ export async function importOpenNeuro(
 
   // Step 6: Seed .nemar/metadata.json
   const metaSpinner = ora("Seeding metadata...").start();
-  seedMetadata(datasetPath, nemarId, openneuroId, bidsDesc);
+  seedMetadata(datasetPath, nemarId, openneuroId, bidsDesc, openNeuroDoi);
 
   // Stage and commit the metadata
-  await run(["git", "add", ".nemar/metadata.json"], { cwd: datasetPath });
-  await run(
+  const addResult = await runCommand(["git", "add", ".nemar/metadata.json"], { cwd: datasetPath });
+  if (addResult.exitCode !== 0) {
+    metaSpinner.fail(`Failed to stage metadata: ${addResult.stderr.trim()}`);
+    process.exit(1);
+  }
+
+  const commitResult = await runCommand(
     ["git", "commit", "-m", `Add NEMAR metadata (imported from OpenNeuro ${openneuroId})`],
     { cwd: datasetPath },
   );
+  if (commitResult.exitCode !== 0 && !commitResult.stdout.includes("nothing to commit")) {
+    metaSpinner.fail(`Failed to commit metadata: ${commitResult.stderr.trim()}`);
+    process.exit(1);
+  }
   metaSpinner.succeed("Seeded .nemar/metadata.json");
 
   // Step 7: Push to nemarDatasets
@@ -299,11 +290,6 @@ export async function importOpenNeuro(
   console.log(chalk.green(`\nImport complete: ${openneuroId} -> ${nemarId}`));
   console.log(chalk.gray(`  GitHub: https://github.com/nemarDatasets/${nemarId}`));
   console.log(chalk.gray(`  Working dir: ${datasetPath}`));
-
-  const openNeuroDoi = typeof bidsDesc.DatasetDOI === "string" ? bidsDesc.DatasetDOI : null;
-  if (openNeuroDoi) {
-    console.log(chalk.gray(`  OpenNeuro DOI: ${openNeuroDoi}`));
-  }
 
   console.log(chalk.cyan("\nNext steps:"));
   console.log(chalk.gray("  1. Review the imported dataset"));
