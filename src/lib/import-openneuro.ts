@@ -5,20 +5,20 @@
  * corresponding nemarDatasets repo with 'on' prefix ID.
  */
 
-import { existsSync, mkdtempSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import chalk from "chalk";
 import ora from "ora";
 import { importDataset } from "./api.js";
 import {
+  type S3Credentials,
   cloneDataset,
   configureGitHubRemote,
   configureS3Remote,
   copyToAnnexRemote,
   pushToGitHub,
   runCommand,
-  type S3Credentials,
 } from "./git-annex.js";
 
 const OPENNEURO_ORG = "OpenNeuroDatasets";
@@ -83,9 +83,7 @@ function resolveS3Credentials(): S3Credentials {
  * Extract the OpenNeuro DOI from dataset_description.json, stripping the "doi:" prefix.
  */
 function extractOpenNeuroDoi(bidsDesc: Record<string, unknown>): string | null {
-  return typeof bidsDesc.DatasetDOI === "string"
-    ? bidsDesc.DatasetDOI.replace(/^doi:/, "")
-    : null;
+  return typeof bidsDesc.DatasetDOI === "string" ? bidsDesc.DatasetDOI.replace(/^doi:/, "") : null;
 }
 
 /**
@@ -122,7 +120,7 @@ function seedMetadata(
     pipeline_stage: "seeded",
   };
 
-  writeFileSync(join(nemarDir, "metadata.json"), JSON.stringify(metadata, null, 2) + "\n");
+  writeFileSync(join(nemarDir, "metadata.json"), `${JSON.stringify(metadata, null, 2)}\n`);
 }
 
 /**
@@ -192,10 +190,9 @@ export async function importOpenNeuro(
   // Step 3: Get annexed data from OpenNeuro S3
   if (!options.skipData) {
     const getSpinner = ora("Downloading annexed data from OpenNeuro...").start();
-    const { stderr, exitCode } = await runCommand(
-      ["git", "annex", "get", "--all", "-J", "4"],
-      { cwd: datasetPath },
-    );
+    const { stderr, exitCode } = await runCommand(["git", "annex", "get", "--all", "-J", "4"], {
+      cwd: datasetPath,
+    });
     if (exitCode !== 0) {
       getSpinner.fail(`Failed to get annexed data: ${stderr.trim()}`);
       console.error(
@@ -210,7 +207,9 @@ export async function importOpenNeuro(
   const remoteSpinner = ora("Configuring NEMAR remote...").start();
 
   // Remove the OpenNeuro origin
-  const removeResult = await runCommand(["git", "remote", "remove", "origin"], { cwd: datasetPath });
+  const removeResult = await runCommand(["git", "remote", "remove", "origin"], {
+    cwd: datasetPath,
+  });
   if (removeResult.exitCode !== 0 && !removeResult.stderr.includes("No such remote")) {
     remoteSpinner.fail(`Failed to remove OpenNeuro remote: ${removeResult.stderr.trim()}`);
     process.exit(1);
