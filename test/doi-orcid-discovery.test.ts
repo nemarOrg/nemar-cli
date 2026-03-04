@@ -168,6 +168,22 @@ describe("matchCreatorsToAuthors", () => {
 // ---------------------------------------------------------------------------
 
 describe("queryDataCiteDoi", () => {
+  test("resolves MNE-BIDS JOSS paper (16 authors, all with ORCIDs)", async () => {
+    const result = await queryDataCiteDoi("10.21105/joss.01896");
+    expect(result).not.toBeNull();
+    expect(result!.creators.length).toBe(16);
+
+    const withOrcid = result!.creators.filter((c) =>
+      c.nameIdentifiers?.some((ni) => ni.nameIdentifierScheme === "ORCID"),
+    );
+    expect(withOrcid.length).toBe(16);
+
+    // Spot-check a known author
+    const stefan = result!.creators.find((c) => c.familyName === "Appelhoff");
+    expect(stefan).toBeDefined();
+    expect(stefan!.nameIdentifiers[0].nameIdentifier).toContain("0000-0001-8002-0877");
+  });
+
   test("resolves a known DOI with ORCIDs (BIDS paper)", async () => {
     const result = await queryDataCiteDoi("10.1038/s41597-019-0104-8");
     expect(result).not.toBeNull();
@@ -192,16 +208,22 @@ describe("queryDataCiteDoi", () => {
 // ---------------------------------------------------------------------------
 
 describe("discoverOrcidsFromReferencedDois", () => {
-  test("discovers ORCIDs from a known paper", async () => {
-    // The BIDS paper (10.1038/s41597-019-0104-8) has Stefan Appelhoff with ORCID
+  test("discovers ORCIDs from MNE-BIDS JOSS paper", async () => {
     const result = await discoverOrcidsFromReferencedDois({
-      Authors: ["Appelhoff, Stefan", "Unknown Author"],
-      ReferencesAndLinks: ["https://doi.org/10.1038/s41597-019-0104-8"],
+      Authors: [
+        "Appelhoff, Stefan",
+        "Jas, Mainak",
+        "Gramfort, Alexandre",
+        "Unknown Author",
+      ],
+      ReferencesAndLinks: ["10.21105/joss.01896"],
     });
 
     expect(result.totalDoisQueried).toBe(1);
-    expect(result.discoveries["Appelhoff, Stefan"]).toBeDefined();
+    expect(Object.keys(result.discoveries).length).toBe(3);
     expect(result.discoveries["Appelhoff, Stefan"].orcid).toBe("0000-0001-8002-0877");
+    expect(result.discoveries["Jas, Mainak"].orcid).toBe("0000-0002-3199-9027");
+    expect(result.discoveries["Gramfort, Alexandre"].orcid).toBe("0000-0001-9791-4404");
     expect(result.discoveries["Unknown Author"]).toBeUndefined();
   });
 
