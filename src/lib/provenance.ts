@@ -131,9 +131,7 @@ export async function promptForProvenance(targetLicense: string): Promise<Proven
     ]);
 
     if (!confirmed) {
-      throw new Error(
-        "Upload cancelled: you must confirm redistribution rights before uploading.",
-      );
+      throw new Error("Upload cancelled: you must confirm redistribution rights before uploading.");
     }
 
     return { isDerived: false, confirmedRedistributionRights: true };
@@ -143,9 +141,7 @@ export async function promptForProvenance(targetLicense: string): Promise<Proven
   const sourceDatasets: SourceDataset[] = [];
   let addMore = true;
 
-  console.log(
-    "\nProvide source dataset information so we can check license compatibility.",
-  );
+  console.log("\nProvide source dataset information so we can check license compatibility.");
 
   while (addMore) {
     const { identifier } = await inquirer.prompt<{ identifier: string }>([
@@ -181,10 +177,10 @@ export async function promptForProvenance(targetLicense: string): Promise<Proven
     const compatibility = validateLicenseCompatibility(sourceLicense.trim(), targetLicense);
 
     if (!compatibility.compatible) {
-      console.error(`\n  Warning: License incompatibility detected.`);
+      console.error("\n  Warning: License incompatibility detected.");
       console.error(`  ${compatibility.reason}`);
       console.error(
-        `  You should change your target license or verify this derivation is permitted.\n`,
+        "  You should change your target license or verify this derivation is permitted.\n",
       );
 
       const { continueAnyway } = await inquirer.prompt<{ continueAnyway: boolean }>([

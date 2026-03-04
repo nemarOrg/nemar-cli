@@ -98,7 +98,13 @@ import {
   toS3Credentials,
   verifyGitHubAuth,
 } from "../lib/git-annex.js";
-import { detectLicense, ensureLicenseFile, isResearchCompatible, promptForLicense, updateLicenseInDescription } from "../lib/license.js";
+import {
+  detectLicense,
+  ensureLicenseFile,
+  isResearchCompatible,
+  promptForLicense,
+  updateLicenseInDescription,
+} from "../lib/license.js";
 import { promptForProvenance } from "../lib/provenance.js";
 import { bumpVersion, isValidStableVersion, parseVersion } from "../lib/semver.js";
 import type { UploadProgress } from "../lib/upload-progress.js";
@@ -791,12 +797,16 @@ Examples:
           const desc = JSON.parse(readFileSync(descPath, "utf-8")) as Record<string, unknown>;
           if (desc.License !== resolvedLicense) {
             updateLicenseInDescription(absolutePath, resolvedLicense);
-            console.log(chalk.gray(`  Updated dataset_description.json License -> ${resolvedLicense}`));
+            console.log(
+              chalk.gray(`  Updated dataset_description.json License -> ${resolvedLicense}`),
+            );
           }
         }
       } catch (licErr) {
         console.log(
-          chalk.yellow(`  Warning: Could not update license in dataset_description.json: ${errorDetail(licErr)}`),
+          chalk.yellow(
+            `  Warning: Could not update license in dataset_description.json: ${errorDetail(licErr)}`,
+          ),
         );
       }
 
@@ -813,7 +823,11 @@ Examples:
       const provenance = await promptForProvenance(resolvedLicense);
 
       // Update dataset_description.json SourceDatasets field for derived data
-      if (provenance.isDerived && provenance.sourceDatasets && provenance.sourceDatasets.length > 0) {
+      if (
+        provenance.isDerived &&
+        provenance.sourceDatasets &&
+        provenance.sourceDatasets.length > 0
+      ) {
         try {
           const descPath = resolve(absolutePath, "dataset_description.json");
           if (existsSync(descPath)) {
@@ -821,7 +835,7 @@ Examples:
             const existingSources = Array.isArray(desc.SourceDatasets) ? desc.SourceDatasets : [];
             const newSources = provenance.sourceDatasets.map((s) => s.identifier);
             // Merge without duplicates
-            const merged = Array.from(new Set([...existingSources as string[], ...newSources]));
+            const merged = Array.from(new Set([...(existingSources as string[]), ...newSources]));
             desc.SourceDatasets = merged;
             writeFileSync(descPath, `${JSON.stringify(desc, null, 2)}\n`);
             console.log(

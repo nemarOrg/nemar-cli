@@ -165,10 +165,7 @@ export function detectLicense(datasetPath: string): {
         if (content.includes("open data commons") && content.includes("attribution")) {
           return { spdxId: "ODC-By-1.0", source: "license_file" };
         }
-        if (
-          content.includes("public domain dedication and license") ||
-          content.includes("pddl")
-        ) {
+        if (content.includes("public domain dedication and license") || content.includes("pddl")) {
           return { spdxId: "PDDL-1.0", source: "license_file" };
         }
         if (content.includes("mit license") || content.includes("mit ")) {
