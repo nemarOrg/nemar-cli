@@ -61,6 +61,9 @@ export async function generatePresignedPutUrls(
   const urls: Record<string, string> = {};
 
   for (const file of files) {
+    if (file.includes("..") || file.startsWith("/")) {
+      throw new Error(`Invalid file path: ${file}`);
+    }
     const key = `${prefix}/${file}`;
     // Include X-Amz-Expires in URL BEFORE signing so it's part of the signature
     const url = `https://${bucket}.s3.${region}.amazonaws.com/${key}?X-Amz-Expires=${expiresIn}`;

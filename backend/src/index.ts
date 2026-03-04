@@ -33,7 +33,14 @@ api.use(
   cors({
     origin: (origin) => {
       // Allow localhost for development
-      if (origin?.includes("localhost")) return origin;
+      if (origin) {
+        try {
+          const url = new URL(origin);
+          if (url.hostname === "localhost" || url.hostname === "127.0.0.1") return origin;
+        } catch {
+          // Invalid origin URL, skip
+        }
+      }
       // Allow nemar.org and osc.earth domains
       if (origin?.endsWith(".nemar.org") || origin === "https://nemar.org") {
         return origin;
