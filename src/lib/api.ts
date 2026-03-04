@@ -1102,11 +1102,20 @@ export interface PublishRequestsResponse {
   count: number;
 }
 
+export interface StepResult {
+  step: string;
+  status: "completed" | "failed" | "skipped";
+  attempts: number;
+  duration_ms: number;
+  error?: string;
+}
+
 export interface PublishApproveResponse {
   message: string;
   dataset_id: string;
   status?: string;
   steps_completed?: string[];
+  step_results?: StepResult[];
   error?: string;
   step?: string;
   hasMore?: boolean;
@@ -1181,6 +1190,7 @@ export async function approvePublication(
 ): Promise<PublishApproveResponse> {
   let s3_lock_offset: number | undefined;
   let result: PublishApproveResponse;
+  const accumulatedStepResults: StepResult[] = [];
 
   // Loop to handle S3 lock pagination (CF Workers subrequest limit)
   do {
@@ -1199,12 +1209,20 @@ export async function approvePublication(
       true,
     );
 
+    if (result.step_results) {
+      accumulatedStepResults.push(...result.step_results);
+    }
+
     if (result.hasMore && result.s3_lock_offset !== undefined) {
       s3_lock_offset = result.s3_lock_offset;
     } else {
       break;
     }
   } while (result.hasMore);
+
+  if (accumulatedStepResults.length > 0) {
+    result.step_results = accumulatedStepResults;
+  }
 
   return result;
 }
