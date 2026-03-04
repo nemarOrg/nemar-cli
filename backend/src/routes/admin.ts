@@ -3521,20 +3521,16 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
       const { version, tag, datasetDesc } = vtResult;
 
       const nemarUrl = `https://nemar.org/dataexplorer/detail?dataset_id=${datasetId}`;
-      const doiLine = datasetDesc.DatasetDOI
-        ? `**DOI:** https://doi.org/${datasetDesc.DatasetDOI}`
-        : "";
       const archiveLine = `**Download:** [${tag}.zip](https://github.com/nemarDatasets/${repoName}/archive/refs/tags/${tag}.zip)`;
-      const releaseBody = [
+      const sections = [
         `# ${dataset.name} - Version ${version}`,
-        "",
-        "BIDS-formatted dataset published via [NEMAR](" + nemarUrl + ").",
-        "",
+        `BIDS-formatted dataset published via [NEMAR](${nemarUrl}).`,
         archiveLine,
-        doiLine,
-      ]
-        .filter(Boolean)
-        .join("\n");
+      ];
+      if (datasetDesc.DatasetDOI) {
+        sections.push(`**DOI:** https://doi.org/${datasetDesc.DatasetDOI}`);
+      }
+      const releaseBody = sections.join("\n\n");
 
       const { attempts: createReleaseAttempts } = await withRetry(
         () => createRelease(repoName, tag, tag, releaseBody, pat),
