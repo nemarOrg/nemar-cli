@@ -1,5 +1,6 @@
 # NEMAR CLI
 
+[![License: CC BY-NC-ND 4.0](https://img.shields.io/badge/License-CC%20BY--NC--ND%204.0-lightgrey.svg)](https://creativecommons.org/licenses/by-nc-nd/4.0/)
 [![Documentation](https://img.shields.io/badge/docs-nemar--cli.pages.dev-blue)](https://nemar-cli.pages.dev)
 [![Tests](https://github.com/nemarOrg/nemar-cli/actions/workflows/test.yml/badge.svg)](https://github.com/nemarOrg/nemar-cli/actions/workflows/test.yml)
 
@@ -563,4 +564,6 @@ bun run build
 
 ## License
 
-MIT
+This project is licensed under the [Creative Commons Attribution-NonCommercial-NoDerivatives 4.0 International License](https://creativecommons.org/licenses/by-nc-nd/4.0/).
+
+You are free to share (copy and redistribute) the material for non-commercial purposes, with appropriate attribution. No derivatives or adaptations are permitted.
