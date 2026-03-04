@@ -1359,3 +1359,31 @@ export async function deleteDataset(
     true,
   );
 }
+
+// ─── Import ─────────────────────────────────────────────────────────────────
+
+export interface ImportDatasetResponse {
+  dataset_id: string;
+  name: string;
+  github_repo: string;
+  source: string;
+  source_id: string;
+}
+
+export async function importDataset(opts: {
+  dataset_id: string;
+  name: string;
+  description?: string;
+  source: "openneuro";
+  source_id: string;
+}): Promise<ImportDatasetResponse> {
+  return request<ImportDatasetResponse>(
+    "/admin/datasets/import",
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(opts),
+    },
+    true,
+  );
+}

@@ -4,10 +4,11 @@
  * Generates IDs that reuse gaps from deleted datasets:
  * - nm000XXX for regular datasets (starting at 108)
  * - xx000XXX for sandbox datasets (starting at 1)
+ * - on000XXX for OpenNeuro-sourced datasets (assigned by import, not auto-generated)
  */
 
 // First allocatable number for each prefix
-const START_NUMBER: Record<string, number> = { nm: 108, xx: 1 };
+const START_NUMBER: Record<string, number> = { nm: 108, xx: 1, on: 1 };
 
 /**
  * Find the lowest unused number for a given prefix.
@@ -86,10 +87,10 @@ export async function getCurrentSequence(db: D1Database): Promise<number> {
 
 /**
  * Check if a dataset ID is valid format
- * Accepts both nm000XXX (regular) and xx000XXX (sandbox) formats
+ * Accepts nm000XXX (regular), xx000XXX (sandbox), and on000XXX (OpenNeuro) formats
  */
 export function isValidDatasetId(id: string): boolean {
-  return /^(nm|xx)\d{6}$/.test(id);
+  return /^(nm|xx|on)\d{6}$/.test(id);
 }
 
 /**

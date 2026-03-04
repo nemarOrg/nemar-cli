@@ -135,7 +135,8 @@ Dataset Management:
   publish         - Publication workflow management
   revert          - Revert dataset to previous version (via PR)
   make-public     - Publish a dataset (permanent, irreversible)
-  delete-dataset  - Delete a dataset and all associated resources
+  delete-dataset    - Delete a dataset and all associated resources
+  import-openneuro  - Import an OpenNeuro dataset into NEMAR
 
 Examples:
   $ nemar admin users --verified           # List users awaiting approval
@@ -2076,6 +2077,34 @@ adminCommand
         404: "Dataset not found",
         409: "Cannot delete dataset with active publication requests",
       });
+      process.exit(1);
+    }
+  });
+
+// ============================================================================
+// Import OpenNeuro
+// ============================================================================
+
+adminCommand
+  .command("import-openneuro")
+  .description("Import an OpenNeuro dataset into NEMAR")
+  .argument("<openneuro-id>", "OpenNeuro dataset ID (e.g., ds007262)")
+  .option("--dir <path>", "Working directory for clone (default: temp dir)")
+  .option("--skip-data", "Skip S3 data copy (metadata only)")
+  .action(async (openneuroId: string, options: { dir?: string; skipData?: boolean }) => {
+    if (!requireAuth()) return;
+
+    // Lazy import to keep CLI startup fast
+    const { importOpenNeuro } = await import("../lib/import-openneuro.js");
+
+    try {
+      await importOpenNeuro(openneuroId, {
+        workDir: options.dir,
+        skipData: options.skipData,
+      });
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error);
+      console.error(chalk.red(`\nImport failed: ${msg}`));
       process.exit(1);
     }
   });
