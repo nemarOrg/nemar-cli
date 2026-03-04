@@ -809,7 +809,7 @@ Examples:
     }
 
     // Step 4d: Data provenance
-    if (process.stdin.isTTY && resolvedLicense) {
+    if (process.stdin.isTTY && !options.skipValidation && resolvedLicense) {
       const provenance = await promptForProvenance(resolvedLicense);
 
       // Update dataset_description.json SourceDatasets field for derived data

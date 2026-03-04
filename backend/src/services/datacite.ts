@@ -1186,12 +1186,6 @@ export function mapLicense(license: string | undefined): DataCiteRights | null {
       uri: "https://opendatacommons.org/licenses/by/1.0/",
       spdx: "ODC-By-1.0",
     },
-    // Canonical ODC-By SPDX ID (mixed case)
-    "ODC-BY-1.0-SPDX": {
-      rights: "Open Data Commons Attribution License v1.0",
-      uri: "https://opendatacommons.org/licenses/by/1.0/",
-      spdx: "ODC-By-1.0",
-    },
     "ODBL-1.0": {
       rights: "Open Data Commons Open Database License v1.0",
       uri: "https://opendatacommons.org/licenses/odbl/1.0/",

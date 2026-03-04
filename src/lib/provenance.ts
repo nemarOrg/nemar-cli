@@ -131,10 +131,9 @@ export async function promptForProvenance(targetLicense: string): Promise<Proven
     ]);
 
     if (!confirmed) {
-      console.error(
-        "\nUpload cancelled: you must confirm redistribution rights before uploading.",
+      throw new Error(
+        "Upload cancelled: you must confirm redistribution rights before uploading.",
       );
-      process.exit(1);
     }
 
     return { isDerived: false, confirmedRedistributionRights: true };
@@ -198,8 +197,7 @@ export async function promptForProvenance(targetLicense: string): Promise<Proven
       ]);
 
       if (!continueAnyway) {
-        console.error("\nUpload cancelled due to license incompatibility.");
-        process.exit(1);
+        throw new Error("Upload cancelled due to license incompatibility.");
       }
     } else if (compatibility.reason && !compatibility.reason.includes("Compatible.")) {
       console.log(`\n  Note: ${compatibility.reason}\n`);
@@ -231,8 +229,7 @@ export async function promptForProvenance(targetLicense: string): Promise<Proven
   ]);
 
   if (!confirmed) {
-    console.error("\nUpload cancelled: redistribution rights must be confirmed before uploading.");
-    process.exit(1);
+    throw new Error("Upload cancelled: redistribution rights must be confirmed before uploading.");
   }
 
   return {
