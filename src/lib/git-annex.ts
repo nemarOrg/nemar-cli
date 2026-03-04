@@ -2286,6 +2286,140 @@ export async function collectFileManifest(datasetPath: string): Promise<{
 }
 
 // =============================================================================
+// S3-to-S3 copy helpers (OpenNeuro import)
+// =============================================================================
+
+/**
+ * Get all git-annex keys and their known URLs via `git annex whereis --all --json`.
+ * Returns a Map of key -> source S3 URL (first HTTP/S3 URL found).
+ */
+export async function getAnnexWhereisAll(datasetPath: string): Promise<Map<string, string>> {
+  const result = await runCommand(["git", "annex", "whereis", "--all", "--json"], {
+    cwd: datasetPath,
+  });
+  if (result.exitCode !== 0) {
+    throw new Error(`git annex whereis failed: ${result.stderr.trim()}`);
+  }
+
+  const keyUrlMap = new Map<string, string>();
+  for (const line of result.stdout.split("\n")) {
+    if (!line.trim()) continue;
+    try {
+      const entry = JSON.parse(line);
+      const key = entry.key;
+      if (!key) continue;
+
+      // Collect URLs from all whereis entries
+      const whereis = [...(entry.whereis || []), ...(entry.untrusted || [])];
+      for (const remote of whereis) {
+        if (!Array.isArray(remote.urls)) continue;
+        for (const url of remote.urls) {
+          if (typeof url === "string" && (url.startsWith("http") || url.startsWith("s3://"))) {
+            keyUrlMap.set(key, url);
+            break;
+          }
+        }
+        if (keyUrlMap.has(key)) break;
+      }
+    } catch {
+      // Skip unparseable lines
+    }
+  }
+
+  return keyUrlMap;
+}
+
+/**
+ * Get the hash directory path for a git-annex key.
+ * Used to construct the S3 destination path.
+ */
+export async function getKeyHashDir(datasetPath: string, key: string): Promise<string> {
+  const result = await runCommand(["git", "annex", "examinekey", "--format=${hashdirlower}", key], {
+    cwd: datasetPath,
+  });
+  if (result.exitCode !== 0) {
+    throw new Error(`git annex examinekey failed for ${key}: ${result.stderr.trim()}`);
+  }
+  return result.stdout.trim();
+}
+
+/**
+ * Batch get hash directories for multiple keys.
+ * More efficient than calling getKeyHashDir one at a time.
+ */
+export async function getKeyHashDirs(
+  datasetPath: string,
+  keys: string[],
+): Promise<Map<string, string>> {
+  const result = new Map<string, string>();
+  // Process in batches to avoid command line length limits
+  const batchSize = 50;
+  for (let i = 0; i < keys.length; i += batchSize) {
+    const batch = keys.slice(i, i + batchSize);
+    const promises = batch.map(async (key) => {
+      const hashDir = await getKeyHashDir(datasetPath, key);
+      result.set(key, hashDir);
+    });
+    await Promise.all(promises);
+  }
+  return result;
+}
+
+/**
+ * Get the UUID of a configured git-annex remote.
+ */
+export async function getRemoteUuid(
+  datasetPath: string,
+  remoteName: string,
+): Promise<string | null> {
+  const result = await runCommand(["git", "config", `remote.${remoteName}.annex-uuid`], {
+    cwd: datasetPath,
+  });
+  if (result.exitCode !== 0) return null;
+  return result.stdout.trim() || null;
+}
+
+/**
+ * Mark a git-annex key as present in a remote.
+ */
+export async function setKeyPresent(
+  datasetPath: string,
+  key: string,
+  remoteUuid: string,
+): Promise<boolean> {
+  const result = await runCommand(["git", "annex", "setpresentkey", key, remoteUuid, "1"], {
+    cwd: datasetPath,
+  });
+  return result.exitCode === 0;
+}
+
+/**
+ * Batch mark keys as present in a remote.
+ * Returns count of successful and failed registrations.
+ */
+export async function batchSetKeysPresent(
+  datasetPath: string,
+  keys: string[],
+  remoteUuid: string,
+): Promise<{ success: number; failed: number }> {
+  let success = 0;
+  let failed = 0;
+  // Process in parallel batches
+  const batchSize = 50;
+  for (let i = 0; i < keys.length; i += batchSize) {
+    const batch = keys.slice(i, i + batchSize);
+    const results = await Promise.all(
+      batch.map((key) => setKeyPresent(datasetPath, key, remoteUuid)),
+    );
+    for (const ok of results) {
+      if (ok) success++;
+      else failed++;
+    }
+  }
+  return { success, failed };
+}
+
+// =============================================================================
 // Backward-compatible aliases (to be removed in future versions)
 // =============================================================================
 
