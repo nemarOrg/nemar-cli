@@ -129,24 +129,38 @@ function seedMetadata(
 
 /**
  * Convert an HTTP URL from git-annex whereis to an S3 URI for aws s3 cp.
- * Example: "http://openneuro.org.s3.amazonaws.com/ds007262/abc/KEY"
- *       -> "s3://openneuro.org/ds007262/abc/KEY"
+ *
+ * OpenNeuro uses path-style URLs without a region:
+ *   "https://s3.amazonaws.com/openneuro.org/ds007262/file.edf?versionId=abc"
+ *   -> "s3://openneuro.org/ds007262/file.edf"
+ *
+ * Also handles virtual-hosted style:
+ *   "http://openneuro.org.s3.amazonaws.com/ds007262/file.edf"
+ *   -> "s3://openneuro.org/ds007262/file.edf"
  */
 function httpToS3Uri(httpUrl: string): string | null {
-  // Pattern: http(s)://{bucket}.s3.amazonaws.com/{path}
+  // Strip query string (e.g., ?versionId=...) before converting
+  const urlWithoutQuery = httpUrl.split("?")[0];
+
+  // Pattern: http(s)://{bucket}.s3[.region].amazonaws.com/{path}
   // Bucket can contain dots (e.g., openneuro.org), so use non-greedy match up to .s3.
-  const match = httpUrl.match(/^https?:\/\/(.+?)\.s3(?:\.[^.]+)?\.amazonaws\.com\/(.+)$/);
-  if (match) {
-    return `s3://${match[1]}/${match[2]}`;
+  const vhostMatch = urlWithoutQuery.match(
+    /^https?:\/\/(.+?)\.s3(?:\.[^.]+)?\.amazonaws\.com\/(.+)$/,
+  );
+  if (vhostMatch) {
+    return `s3://${vhostMatch[1]}/${vhostMatch[2]}`;
   }
-  // Pattern: http(s)://s3.{region}.amazonaws.com/{bucket}/{path}
-  const pathMatch = httpUrl.match(/^https?:\/\/s3\.[^.]+\.amazonaws\.com\/([^/]+)\/(.+)$/);
+  // Pattern: http(s)://s3[.region].amazonaws.com/{bucket}/{path}
+  // Region is optional (OpenNeuro uses plain s3.amazonaws.com)
+  const pathMatch = urlWithoutQuery.match(
+    /^https?:\/\/s3(?:\.[^.]+)?\.amazonaws\.com\/([^/]+)\/(.+)$/,
+  );
   if (pathMatch) {
     return `s3://${pathMatch[1]}/${pathMatch[2]}`;
   }
   // Already an S3 URI
   if (httpUrl.startsWith("s3://")) {
-    return httpUrl;
+    return httpUrl.split("?")[0];
   }
   return null;
 }
