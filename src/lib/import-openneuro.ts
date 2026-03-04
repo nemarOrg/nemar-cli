@@ -11,7 +11,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import chalk from "chalk";
 import ora from "ora";
-import { importDataset } from "./api.js";
+import { approvePublication, importDataset, requestPublication } from "./api.js";
 import {
   type S3Credentials,
   batchSetKeysPresent,
@@ -198,6 +198,7 @@ async function batchS3Copy(
  * 5. Set up NEMAR S3 remote, copy data S3-to-S3, register keys
  * 6. Seed .nemar/metadata.json
  * 7. Push to nemarDatasets
+ * 8. Request and approve publication (with retry)
  */
 export async function importOpenNeuro(
   openneuroId: string,
@@ -413,12 +414,42 @@ export async function importOpenNeuro(
   }
   pushSpinner.succeed("Pushed to nemarDatasets");
 
+  // Step 8: Request and approve publication
+  const pubSpinner = ora("Requesting publication...").start();
+  try {
+    await requestPublication(nemarId);
+    pubSpinner.succeed("Publication requested");
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    pubSpinner.fail(`Failed to request publication: ${msg}`);
+    process.exit(1);
+  }
+
+  const approveSpinner = ora("Approving publication...").start();
+  const maxRetries = 10;
+  let approved = false;
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      await approvePublication(nemarId, attempt > 1, false, true);
+      approved = true;
+      break;
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (attempt < maxRetries) {
+        approveSpinner.text = `Approving publication... (attempt ${attempt + 1}/${maxRetries})`;
+        await new Promise((r) => setTimeout(r, 3000));
+      } else {
+        approveSpinner.fail(`Failed to approve publication after ${maxRetries} attempts: ${msg}`);
+        process.exit(1);
+      }
+    }
+  }
+  if (approved) {
+    approveSpinner.succeed("Publication approved");
+  }
+
   // Summary
-  console.log(chalk.green(`\nImport complete: ${openneuroId} -> ${nemarId}`));
+  console.log(chalk.green(`\nImport and publish complete: ${openneuroId} -> ${nemarId}`));
   console.log(chalk.gray(`  GitHub: https://github.com/nemarDatasets/${nemarId}`));
   console.log(chalk.gray(`  Working dir: ${datasetPath}`));
-
-  console.log(chalk.cyan("\nNext steps:"));
-  console.log(chalk.gray("  1. Review the imported dataset"));
-  console.log(chalk.gray(`  2. Run: nemar admin publish approve ${nemarId}`));
 }
