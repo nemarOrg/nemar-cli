@@ -73,6 +73,7 @@ nav:
       - Environment Variables: reference/environment.md
       - API: reference/api.md
   - Development:
+      - Setup: development/setup.md
       - Zenodo Testing: development/zenodo-testing.md
 
 extra:
