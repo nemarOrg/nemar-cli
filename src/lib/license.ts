@@ -131,8 +131,14 @@ export function detectLicense(datasetPath: string): {
       if (typeof desc.License === "string" && desc.License.trim()) {
         return { spdxId: desc.License.trim(), source: "dataset_description" };
       }
-    } catch {
-      // Ignore parse errors; will try LICENSE file next
+    } catch (err) {
+      if (err instanceof SyntaxError) {
+        console.warn(`  Warning: dataset_description.json has invalid JSON; skipping license detection from it.`);
+      } else {
+        console.warn(
+          `  Warning: Could not read dataset_description.json: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
     }
   }
 
@@ -171,8 +177,10 @@ export function detectLicense(datasetPath: string): {
         if (content.includes("mit license") || content.includes("mit ")) {
           return { spdxId: "MIT", source: "license_file" };
         }
-      } catch {
-        // Ignore read errors
+      } catch (err) {
+        console.warn(
+          `  Warning: Could not read ${filename}: ${err instanceof Error ? err.message : String(err)}`,
+        );
       }
       // LICENSE file exists but couldn't identify; signal it exists
       return { spdxId: undefined, source: "license_file" };

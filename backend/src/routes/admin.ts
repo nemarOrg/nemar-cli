@@ -162,8 +162,9 @@ async function withRetry<T>(
         ) {
           return true;
         }
-        // Retry on 5xx and 429 status codes embedded in the error message
-        if (/\b(5\d\d|429)\b/.test(msg)) {
+        // Retry on 5xx and 429 status codes (require HTTP/status prefix to
+        // avoid false positives on dataset IDs like nm000500)
+        if (/(?:http|status)\s*(5\d\d|429)\b/i.test(msg)) {
           return true;
         }
       }
@@ -3143,33 +3144,33 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
           }
         }
 
+        // DOI creation is NOT idempotent (mints a permanent identifier).
+        // Do not retry: a timeout could mean the DOI was created server-side
+        // but the response was lost, and retrying would mint a duplicate.
         const { createConceptDoi: doiDispatch } = await import("../services/doi");
-        const { result: doiResult, attempts: doiAttempts } = await withRetry(
-          () =>
-            doiDispatch(
-              {
-                provider,
-                datasetId,
-                datasetName: dataset.name,
-                datasetDescription: dataset.description,
-                githubRepo: dataset.github_repo,
-                bidsDescription: bidsDesc,
-                enrichment,
-                uploaderOrcid: dataset.owner_orcid || undefined,
-                uploaderName: dataset.owner_username,
-                sandbox,
-              },
-              {
-                EZID_USERNAME: c.env.EZID_USERNAME,
-                EZID_PASSWORD: c.env.EZID_PASSWORD,
-                EZID_SANDBOX_USERNAME: c.env.EZID_SANDBOX_USERNAME,
-                EZID_SANDBOX_PASSWORD: c.env.EZID_SANDBOX_PASSWORD,
-                ZENODO_API_KEY: c.env.ZENODO_API_KEY,
-                ZENODO_SANDBOX_API_KEY: c.env.ZENODO_SANDBOX_API_KEY,
-              },
-            ),
-          "doi_create",
+        const doiResult = await doiDispatch(
+          {
+            provider,
+            datasetId,
+            datasetName: dataset.name,
+            datasetDescription: dataset.description,
+            githubRepo: dataset.github_repo,
+            bidsDescription: bidsDesc,
+            enrichment,
+            uploaderOrcid: dataset.owner_orcid || undefined,
+            uploaderName: dataset.owner_username,
+            sandbox,
+          },
+          {
+            EZID_USERNAME: c.env.EZID_USERNAME,
+            EZID_PASSWORD: c.env.EZID_PASSWORD,
+            EZID_SANDBOX_USERNAME: c.env.EZID_SANDBOX_USERNAME,
+            EZID_SANDBOX_PASSWORD: c.env.EZID_SANDBOX_PASSWORD,
+            ZENODO_API_KEY: c.env.ZENODO_API_KEY,
+            ZENODO_SANDBOX_API_KEY: c.env.ZENODO_SANDBOX_API_KEY,
+          },
         );
+        const doiAttempts = 1;
 
         if (provider === "ezid") {
           await db
