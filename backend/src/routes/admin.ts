@@ -8,6 +8,7 @@ import { zValidator } from "@hono/zod-validator";
 import { Hono } from "hono";
 import { z } from "zod";
 import { adminMiddleware, authMiddleware, ownerMiddleware } from "../middleware/auth";
+
 import {
   type DataCiteEnrichment,
   bidsToDataCite,
@@ -39,6 +40,7 @@ import {
   updateIdentifier as ezidUpdateIdentifier,
 } from "../services/ezid";
 import {
+  type GitHubRepo,
   addCollaborator,
   checkWorkflowExists,
   createOrUpdateFile,
@@ -4095,3 +4097,121 @@ adminRoutes.delete("/datasets/:id", async (c) => {
 
   return c.json(result, result.deleted ? 200 : 207);
 });
+
+// ─── Import external dataset ────────────────────────────────────────────────
+
+// 8 chars: 2-char prefix + 6 digits (e.g., on007262)
+const importDatasetSchema = z.object({
+  dataset_id: z.string().regex(/^on\d{6}$/, "Import only supports 'on' prefix datasets (on######)"),
+  name: z.string().min(1).max(200),
+  description: z.string().optional(),
+  source: z.enum(["openneuro"]),
+  source_id: z.string().min(1).max(50),
+});
+
+/**
+ * POST /admin/datasets/import
+ *
+ * Import a dataset from an external source (e.g., OpenNeuro).
+ * Creates the D1 record and GitHub repo with a caller-specified dataset ID.
+ * The calling admin becomes the dataset owner (owner_user_id).
+ * Does not set up S3 credentials or presigned URLs; the CLI handles data copy.
+ */
+adminRoutes.post(
+  "/datasets/import",
+  authMiddleware,
+  adminMiddleware,
+  zValidator("json", importDatasetSchema),
+  async (c) => {
+    const { dataset_id, name, description, source, source_id } = c.req.valid("json");
+    const db = c.env.DB;
+    const admin = c.get("user");
+
+    // Check for duplicate
+    const existing = await db
+      .prepare("SELECT dataset_id FROM datasets WHERE dataset_id = ?")
+      .bind(dataset_id)
+      .first<{ dataset_id: string }>();
+
+    if (existing) {
+      return c.json({ error: `Dataset ${dataset_id} already exists` }, 409);
+    }
+
+    // Create GitHub repo
+    let githubRepo: GitHubRepo;
+    try {
+      githubRepo = await createRepository(
+        dataset_id,
+        `${name} - NEMAR Dataset (imported from OpenNeuro ${source_id})`,
+        true,
+        c.env.GITHUB_ADMIN_PAT,
+      );
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error);
+      if (msg.includes("already exists")) {
+        return c.json({ error: `GitHub repo nemarDatasets/${dataset_id} already exists` }, 409);
+      }
+      console.error("Failed to create GitHub repo for import:", error);
+      return c.json({ error: `Failed to create GitHub repository: ${msg}` }, 500);
+    }
+
+    // Insert D1 record
+    try {
+      await db
+        .prepare(
+          `INSERT INTO datasets (dataset_id, name, description, owner_user_id, github_repo, is_sandbox, visibility, source, source_id, last_activity_at)
+           VALUES (?, ?, ?, ?, ?, 0, 'private', ?, ?, datetime('now'))`,
+        )
+        .bind(
+          dataset_id,
+          name,
+          description || null,
+          admin.id,
+          githubRepo.full_name,
+          source,
+          source_id,
+        )
+        .run();
+    } catch (error) {
+      console.error("Failed to insert dataset record:", error);
+      const dbMsg = error instanceof Error ? error.message : String(error);
+      // Clean up GitHub repo
+      try {
+        await deleteRepository(dataset_id, c.env.GITHUB_ADMIN_PAT);
+      } catch (cleanupErr) {
+        console.error("Failed to clean up GitHub repo after D1 failure:", cleanupErr);
+        return c.json(
+          {
+            error: `Failed to create dataset record: ${dbMsg}. GitHub repo nemarDatasets/${dataset_id} was created but could not be cleaned up. Manual deletion required.`,
+          },
+          500,
+        );
+      }
+      return c.json({ error: `Failed to create dataset record: ${dbMsg}` }, 500);
+    }
+
+    // Audit log
+    try {
+      await db
+        .prepare("INSERT INTO audit_log (action, user_id, details) VALUES (?, ?, ?)")
+        .bind("dataset_imported", admin.id, JSON.stringify({ dataset_id, source, source_id, name }))
+        .run();
+    } catch (err) {
+      console.error(
+        `Failed to write audit log for dataset import ${dataset_id} by admin ${admin.id}:`,
+        err,
+      );
+    }
+
+    return c.json(
+      {
+        dataset_id,
+        name,
+        github_repo: githubRepo.full_name,
+        source,
+        source_id,
+      },
+      201,
+    );
+  },
+);

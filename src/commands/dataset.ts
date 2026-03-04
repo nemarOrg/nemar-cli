@@ -12,6 +12,9 @@
  * - nemar dataset request-access  - Request access to a dataset
  * - nemar dataset invite          - Invite user as collaborator
  * - nemar dataset collaborators   - List dataset collaborators
+ * - nemar dataset commit          - Stage and commit changes
+ * - nemar dataset save            - Stage and commit changes (alias for commit)
+ * - nemar dataset push            - Push commits and data to remotes
  */
 
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
@@ -120,6 +123,14 @@ Prerequisites:
   - git-annex (for upload/download)
   - Deno runtime (for BIDS validation)
   - NEMAR account (for upload)
+
+Workflows:
+  New dataset:          nemar dataset upload <path>
+  Edit (private):       nemar dataset commit -> nemar dataset push
+  Edit (public):        nemar dataset update
+  New version:          nemar dataset release
+  Download:             nemar dataset clone <id> -> nemar dataset get
+  Request publication:  nemar dataset publish request <id>
 
 Examples:
   $ nemar dataset validate ./my-dataset          # Validate locally
@@ -399,6 +410,11 @@ Process:
   2. Creates GitHub repository for metadata
   3. Uploads large files to S3 in parallel
   4. Enables PR-based versioning workflow
+
+Note:
+  This command is for initial dataset creation only. To update an
+  existing dataset, use 'nemar dataset commit' + 'nemar dataset push'
+  (private) or 'nemar dataset update' (public).
 
 Examples:
   $ nemar dataset upload ./my-eeg-dataset
@@ -2075,6 +2091,11 @@ Description:
 
   Run this from inside a dataset clone, or pass the path as an argument.
 
+Note:
+  This is the recommended way to update public datasets. It creates a
+  PR that must be reviewed before merging. For private datasets, you
+  can also use 'nemar dataset push' for direct updates.
+
 Examples:
   $ cd nm000104 && nemar dataset update
   $ nemar dataset update ./nm000104 --bump minor -m "Add new subjects"
@@ -3153,9 +3174,30 @@ Examples:
     }
   });
 
-// Save command
+// Shared action handler for commit/save
+async function commitAction(options: { message: string }) {
+  const cwd = process.cwd();
+
+  if (!(await isGitAnnexDataset(cwd))) {
+    console.log(chalk.red("Error: Not inside a git-annex dataset directory"));
+    process.exit(1);
+  }
+
+  const spinner = ora("Saving changes...").start();
+  const result = await saveDataset(cwd, options.message);
+
+  if (!result.success) {
+    spinner.fail("Save failed");
+    console.log(chalk.red(`  ${result.error}`));
+    process.exit(1);
+  }
+
+  spinner.succeed("Changes saved");
+}
+
+// Commit command
 datasetCommand
-  .command("save")
+  .command("commit")
   .description("Stage and commit changes in the current dataset")
   .option("-m, --message <msg>", "Commit message", "Save changes")
   .addHelpText(
@@ -3165,29 +3207,39 @@ Description:
   Stage all changes (git add -A) and commit them. Large files are
   automatically handled by git-annex based on the dataset's largefiles config.
 
+Tip:
+  After committing, use 'nemar dataset push' for private datasets
+  or 'nemar dataset update' for public datasets.
+
+Examples:
+  $ nemar dataset commit
+  $ nemar dataset commit -m "Add new EEG recordings"`,
+  )
+  .action(commitAction);
+
+// Save command (alias for commit)
+datasetCommand
+  .command("save")
+  .description("Stage and commit changes (alias for commit)")
+  .option("-m, --message <msg>", "Commit message", "Save changes")
+  .addHelpText(
+    "after",
+    `
+Description:
+  Stage all changes (git add -A) and commit them. Large files are
+  automatically handled by git-annex based on the dataset's largefiles config.
+
+  This command is an alias for 'nemar dataset commit'.
+
+Tip:
+  After committing, use 'nemar dataset push' for private datasets
+  or 'nemar dataset update' for public datasets.
+
 Examples:
   $ nemar dataset save
   $ nemar dataset save -m "Add new EEG recordings"`,
   )
-  .action(async (options) => {
-    const cwd = process.cwd();
-
-    if (!(await isGitAnnexDataset(cwd))) {
-      console.log(chalk.red("Error: Not inside a git-annex dataset directory"));
-      process.exit(1);
-    }
-
-    const spinner = ora("Saving changes...").start();
-    const result = await saveDataset(cwd, options.message);
-
-    if (!result.success) {
-      spinner.fail("Save failed");
-      console.log(chalk.red(`  ${result.error}`));
-      process.exit(1);
-    }
-
-    spinner.succeed("Changes saved");
-  });
+  .action(commitAction);
 
 // Push command
 datasetCommand
@@ -3209,6 +3261,11 @@ Description:
 
   S3 push uses temporary credentials from the NEMAR API. Falls back to
   environment AWS credentials if not logged in.
+
+Note:
+  Direct push to main works for private datasets only. For public
+  datasets with branch protection, use 'nemar dataset update' instead,
+  or use 'push --pr' to push to a branch and create a PR.
 
 Examples:
   $ nemar dataset push

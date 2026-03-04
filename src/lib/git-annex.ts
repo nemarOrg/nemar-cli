@@ -59,7 +59,7 @@ export interface UploadProgress {
 /**
  * Run a command and return stdout, stderr, and exit code
  */
-async function runCommand(
+export async function runCommand(
   cmd: string[],
   options: {
     cwd?: string;
