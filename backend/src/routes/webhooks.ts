@@ -760,6 +760,41 @@ webhooks.post("/llm-enrich", async (c) => {
       `[llm-enrich] Stage 1 (seed): ${dataset_id} - ${Object.keys(seeded.authors || {}).length} authors, ${(seeded.related_identifiers || []).length} related IDs`,
     );
 
+    // Stage 1b: ORCID discovery from referenced DOIs (deterministic, no LLM)
+    try {
+      const { discoverOrcidsFromReferencedDois } = await import(
+        "../services/doi-orcid-discovery.js"
+      );
+      const orcidResult = await discoverOrcidsFromReferencedDois(
+        bidsDescription,
+        seeded.authors,
+      );
+      const count = Object.keys(orcidResult.discoveries).length;
+      if (count > 0) {
+        const authors = { ...seeded.authors };
+        for (const [name, discovery] of Object.entries(orcidResult.discoveries)) {
+          authors[name] = {
+            ...authors[name],
+            orcid: discovery.orcid,
+            affiliations: discovery.affiliations || authors[name]?.affiliations,
+          };
+        }
+        seeded.authors = authors;
+        console.log(
+          `[llm-enrich] Stage 1b (ORCID discovery): ${dataset_id} - found ${count} ORCIDs from ${orcidResult.totalDoisQueried} DOIs`,
+        );
+      } else {
+        console.log(
+          `[llm-enrich] Stage 1b (ORCID discovery): ${dataset_id} - no matches from ${orcidResult.totalDoisQueried} DOIs`,
+        );
+      }
+    } catch (orcidErr) {
+      console.warn(
+        `[llm-enrich] Stage 1b (ORCID discovery) failed for ${dataset_id}, continuing:`,
+        orcidErr,
+      );
+    }
+
     // Stage 2: LLM enrichment (adds description, keywords, methods, etc.)
     const llmResult = await enrichFromReadme(readmeContent, bidsDescription, apiKey);
     const enriched = mergeWithExisting(seeded, llmResult);

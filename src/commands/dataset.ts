@@ -681,9 +681,53 @@ Examples:
             }
           }
 
+          // Auto-discover ORCIDs from referenced DOIs
+          try {
+            const { discoverOrcidsFromReferencedDois } = await import(
+              "../../backend/src/services/doi-orcid-discovery.js"
+            );
+            const spinner = ora("Looking up author ORCIDs from referenced publications...").start();
+            const orcidResult = await discoverOrcidsFromReferencedDois(
+              bidsDescription,
+              authors,
+            );
+            const count = Object.keys(orcidResult.discoveries).length;
+            if (count > 0) {
+              spinner.succeed(`Found ${count} ORCID(s) from referenced DOIs`);
+              for (const [name, d] of Object.entries(orcidResult.discoveries)) {
+                console.log(
+                  `  ${chalk.green(d.orcid)} -> "${name}" (from ${d.sourceDoi}, ${d.confidence} match)`,
+                );
+              }
+              const { confirmOrcids } = await inquirer.prompt([
+                {
+                  type: "confirm",
+                  name: "confirmOrcids",
+                  message: "Accept these auto-discovered ORCIDs?",
+                  default: true,
+                },
+              ]);
+              if (confirmOrcids) {
+                for (const [name, d] of Object.entries(orcidResult.discoveries)) {
+                  authors[name] = {
+                    orcid: d.orcid,
+                    ...(d.affiliations && { affiliations: d.affiliations }),
+                  };
+                }
+              }
+            } else {
+              spinner.info("No ORCIDs found from referenced DOIs");
+            }
+          } catch (discoverErr) {
+            console.log(
+              chalk.gray(`  Could not auto-discover ORCIDs: ${errorDetail(discoverErr)}`),
+            );
+          }
+
           // Prompt for each co-author's ORCID
           for (const author of authorList) {
             if (author === uploaderMatchedAuthor) continue;
+            if (authors[author]?.orcid) continue; // skip auto-discovered
 
             const { orcid } = await inquirer.prompt([
               {
