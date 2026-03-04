@@ -629,16 +629,25 @@ datasetRoutes.post(
     }
 
     // Generate presigned URLs using user's credentials
-    const uploadUrls = await generateDatasetUploadUrls(
-      {
-        bucket: c.env.S3_BUCKET,
-        region: c.env.AWS_REGION,
-        accessKeyId: userAccessKeyId,
-        secretAccessKey: userSecretAccessKey,
-      },
-      datasetId,
-      files,
-    );
+    let uploadUrls: Record<string, string>;
+    try {
+      uploadUrls = await generateDatasetUploadUrls(
+        {
+          bucket: c.env.S3_BUCKET,
+          region: c.env.AWS_REGION,
+          accessKeyId: userAccessKeyId,
+          secretAccessKey: userSecretAccessKey,
+        },
+        datasetId,
+        files,
+      );
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Unknown error";
+      if (message.includes("Invalid file path")) {
+        return c.json({ error: message }, 400);
+      }
+      throw error;
+    }
 
     return c.json({ upload_urls: uploadUrls });
   },

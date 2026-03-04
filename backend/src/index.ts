@@ -32,21 +32,16 @@ api.use(
   "*",
   cors({
     origin: (origin) => {
-      // Allow localhost for development
-      if (origin) {
-        try {
-          const url = new URL(origin);
-          if (url.hostname === "localhost" || url.hostname === "127.0.0.1") return origin;
-        } catch {
-          // Invalid origin URL, skip
-        }
-      }
-      // Allow nemar.org and osc.earth domains
-      if (origin?.endsWith(".nemar.org") || origin === "https://nemar.org") {
-        return origin;
-      }
-      if (origin?.endsWith(".osc.earth") || origin === "https://osc.earth") {
-        return origin;
+      if (!origin) return null;
+      try {
+        const { hostname } = new URL(origin);
+        // Allow localhost for development
+        if (hostname === "localhost" || hostname === "127.0.0.1") return origin;
+        // Allow nemar.org and osc.earth domains
+        if (hostname === "nemar.org" || hostname.endsWith(".nemar.org")) return origin;
+        if (hostname === "osc.earth" || hostname.endsWith(".osc.earth")) return origin;
+      } catch {
+        console.warn(`CORS: rejected unparseable origin: ${origin}`);
       }
       return null;
     },

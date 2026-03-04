@@ -125,7 +125,7 @@ const signupSchema = z.object({
     .max(39, "GitHub username is too long")
     .regex(
       /^[a-zA-Z0-9](?:[a-zA-Z0-9-]*[a-zA-Z0-9])?$/,
-      "GitHub username can only contain letters, numbers, and hyphens",
+      "GitHub username must start and end with a letter or number, and can only contain letters, numbers, and hyphens",
     ),
   description: z
     .string()
