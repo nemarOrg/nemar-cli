@@ -1740,12 +1740,54 @@ adminRoutes.post("/datasets/:id/doi/update", zValidator("json", updateDoiSchema)
       .bind(updated.status, datasetId)
       .run();
 
+    // Also refresh version DOIs if metadata was refreshed
+    let versionDoiUpdated = 0;
+    if (metadataRefreshed) {
+      const versions = await db
+        .prepare("SELECT version, doi FROM dataset_versions WHERE dataset_id = ? ORDER BY created_at DESC")
+        .bind(datasetId)
+        .all<{ version: string; doi: string }>();
+
+      for (const ver of versions.results || []) {
+        try {
+          const versionIdentifier = `${dataset.ezid_identifier}.V${ver.version.toUpperCase()}`;
+          const repoName = dataset.github_repo!.split("/")[1];
+          const tree = await getTreeAtRef(repoName, "main", c.env.GITHUB_ADMIN_PAT);
+          const descFile = tree.find((f) => f.path === "dataset_description.json");
+          if (!descFile) continue;
+          const content = await getBlobContent(repoName, descFile.sha, c.env.GITHUB_ADMIN_PAT);
+          const bidsDesc = JSON.parse(content) as Record<string, unknown>;
+
+          let vEnrichment = buildOrcidEnrichment(bidsDesc, dataset.owner_username, dataset.owner_orcid || undefined);
+          const nemarMetaFile = tree.find((f) => f.path === ".nemar/metadata.json") || tree.find((f) => f.path === "nemar_metadata.json");
+          if (nemarMetaFile) {
+            try {
+              const nemarContent = await getBlobContent(repoName, nemarMetaFile.sha, c.env.GITHUB_ADMIN_PAT);
+              const nemarParsed = parseNemarMetadata(JSON.parse(nemarContent));
+              if (nemarParsed) vEnrichment = nemarMetadataToEnrichment(nemarParsed, vEnrichment);
+            } catch {}
+          }
+
+          const vDoi = extractDoi(versionIdentifier);
+          const vMetadata = bidsToDataCite(datasetId, vDoi, bidsDesc, vEnrichment);
+          vMetadata.version = ver.version;
+          const vXml = buildDataCiteXml(vMetadata);
+          const vTarget = `https://nemar.org/dataexplorer/detail?dataset_id=${datasetId}&version=${ver.version}`;
+          await ezidUpdateIdentifier(auth, versionIdentifier, { dataciteXml: vXml, target: vTarget });
+          versionDoiUpdated++;
+        } catch (vErr) {
+          warnings.push(`Version ${ver.version} DOI update failed: ${vErr instanceof Error ? vErr.message : String(vErr)}`);
+        }
+      }
+    }
+
     return c.json({
       message: "DOI updated successfully",
       ezid_identifier: dataset.ezid_identifier,
       status: updated.status,
       doi_url: `https://doi.org/${extractDoi(dataset.ezid_identifier)}`,
       metadata_refreshed: metadataRefreshed,
+      version_dois_updated: versionDoiUpdated,
       ...(warnings.length > 0 ? { warnings } : {}),
     });
   } catch (error) {
