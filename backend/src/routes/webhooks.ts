@@ -763,6 +763,53 @@ webhooks.post("/llm-enrich", async (c) => {
       `[llm-enrich] Stage 1 (seed): ${dataset_id} - ${Object.keys(seeded.authors || {}).length} authors, ${(seeded.related_identifiers || []).length} related IDs`,
     );
 
+    // Stage 1a: Compute sizes from S3 and formats from tree
+    try {
+      const { getDatasetS3Stats } = await import("../services/s3.js");
+      const s3Stats = await getDatasetS3Stats(
+        {
+          bucket: c.env.S3_BUCKET,
+          region: c.env.AWS_REGION,
+          accessKeyId: c.env.AWS_ACCESS_KEY_ID,
+          secretAccessKey: c.env.AWS_SECRET_ACCESS_KEY,
+        },
+        dataset_id,
+      );
+
+      const bytes = s3Stats.totalSize;
+      let sizeStr: string;
+      if (bytes >= 1e12) sizeStr = `${(bytes / 1e12).toFixed(1)} TB`;
+      else if (bytes >= 1e9) sizeStr = `${(bytes / 1e9).toFixed(1)} GB`;
+      else if (bytes >= 1e6) sizeStr = `${(bytes / 1e6).toFixed(1)} MB`;
+      else sizeStr = `${(bytes / 1e3).toFixed(1)} KB`;
+
+      const gitFiles = tree.filter(
+        (f) => f.type === "blob" && !f.path.startsWith("."),
+      );
+      const totalFiles = s3Stats.objectCount + gitFiles.length;
+      seeded.sizes = [`${sizeStr} (${totalFiles} files)`];
+
+      const extensions = [
+        ...new Set(
+          treePaths
+            .map((p) => {
+              const lastDot = p.lastIndexOf(".");
+              return lastDot > 0 ? p.slice(lastDot) : null;
+            })
+            .filter((e): e is string => e !== null),
+        ),
+      ].sort();
+      if (extensions.length > 0) seeded.formats = extensions;
+
+      console.log(
+        `[llm-enrich] Stage 1a (sizes): ${dataset_id} - ${sizeStr} (${totalFiles} files), ${extensions.length} formats`,
+      );
+    } catch (sizeErr) {
+      console.warn(
+        `[llm-enrich] Stage 1a (sizes) failed for ${dataset_id}, continuing: ${errorMessage(sizeErr)}`,
+      );
+    }
+
     // Stage 1b: ORCID discovery from referenced DOIs (deterministic, no LLM)
     let seededWithOrcids = seeded;
     let orcidDiscoveryCount = 0;

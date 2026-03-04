@@ -154,6 +154,56 @@ export async function generateDatasetUploadUrls(
 }
 
 /**
+ * Get total size and object count for a dataset's S3 objects.
+ * Parses Size from S3 ListObjectsV2 XML to get real file sizes (not symlink sizes).
+ */
+export async function getDatasetS3Stats(
+  options: PresignedUrlOptions,
+  datasetId: string,
+): Promise<{ totalSize: number; objectCount: number }> {
+  const { bucket, region } = options;
+  const aws = createS3Client(options);
+  let totalSize = 0;
+  let objectCount = 0;
+  let continuationToken: string | undefined;
+
+  do {
+    const params = new URLSearchParams({
+      "list-type": "2",
+      prefix: `${datasetId}/objects/`,
+      ...(continuationToken ? { "continuation-token": continuationToken } : {}),
+    });
+
+    const url = `https://${bucket}.s3.${region}.amazonaws.com/?${params.toString()}`;
+    const response = await aws.sign(url, { method: "GET" });
+    const res = await fetch(response);
+
+    if (!res.ok) {
+      throw new Error(`Failed to list objects: HTTP ${res.status}`);
+    }
+
+    const xml = await res.text();
+
+    // Parse Size from each Contents entry
+    const sizeMatches = xml.matchAll(/<Size>(\d+)<\/Size>/g);
+    for (const match of sizeMatches) {
+      totalSize += Number.parseInt(match[1], 10);
+      objectCount++;
+    }
+
+    const truncated = xml.includes("<IsTruncated>true</IsTruncated>");
+    if (truncated) {
+      const tokenMatch = xml.match(/<NextContinuationToken>([^<]+)<\/NextContinuationToken>/);
+      continuationToken = tokenMatch?.[1];
+    } else {
+      continuationToken = undefined;
+    }
+  } while (continuationToken);
+
+  return { totalSize, objectCount };
+}
+
+/**
  * List all object keys under a given prefix
  */
 export async function listObjectKeys(

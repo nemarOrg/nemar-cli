@@ -48,6 +48,7 @@ import {
   publishDataset,
   regenerateUserIam,
   revokeUser,
+  runEnrichment,
   submitEnrichment,
   updateDoi,
 } from "../lib/api.js";
@@ -1103,7 +1104,32 @@ doiCommand
         console.log(`  DOI: ${chalk.cyan(doiInfo.concept_doi)}`);
       }
 
-      const enrichment: NemarMetadataPayload = { version: "2.0" };
+      // Fetch existing .nemar/metadata.json to merge with (never overwrite)
+      let enrichment: NemarMetadataPayload = { version: "2.0" };
+      if (dataset.github_repo) {
+        const metaSpinner = ora("Reading existing metadata...").start();
+        const existingContent = await fetchGitHubFileContent(
+          dataset.github_repo,
+          ".nemar/metadata.json",
+        );
+        if (existingContent) {
+          try {
+            const parsed = JSON.parse(existingContent);
+            if (parsed && typeof parsed === "object" && parsed.version === "2.0") {
+              enrichment = parsed as NemarMetadataPayload;
+              metaSpinner.succeed(
+                `Loaded existing metadata (stage: ${(parsed as Record<string, unknown>).pipeline_stage || "unknown"})`,
+              );
+            } else {
+              metaSpinner.warn("Existing metadata has unsupported version, starting fresh");
+            }
+          } catch {
+            metaSpinner.warn("Could not parse existing metadata, starting fresh");
+          }
+        } else {
+          metaSpinner.info("No existing .nemar/metadata.json found, starting fresh");
+        }
+      }
 
       // --- Author ORCIDs ---
       console.log();
@@ -1167,81 +1193,77 @@ doiCommand
         }
 
         if (Object.keys(authors).length > 0) {
-          enrichment.authors = authors;
+          // Merge new ORCIDs into existing authors (don't replace the whole map)
+          enrichment.authors = { ...(enrichment.authors || {}), ...authors };
         }
       }
 
-      // --- LLM Enrichment ---
+      // --- LLM Enrichment (runs on backend using server-side OpenRouter key) ---
       if (options.llm !== false) {
         console.log();
-        console.log(chalk.cyan("--- Generating enrichment from README ---"));
+        console.log(chalk.cyan("--- Running LLM enrichment pipeline (server-side) ---"));
 
-        const apiKey = process.env.OPENROUTER_API_KEY;
-        if (!apiKey) {
-          console.log(chalk.yellow("  OPENROUTER_API_KEY not set; skipping LLM enrichment"));
-          console.log(chalk.gray("  Set it in your environment to enable LLM-based enrichment"));
-        } else {
-          const llmSpinner = ora("Analyzing README and dataset metadata...").start();
-          try {
-            const { enrichFromReadme } = await import("../lib/llm-enrich.js");
+        const llmSpinner = ora(
+          "Running full pipeline: seed -> ORCID discovery -> LLM -> MeSH -> validation...",
+        ).start();
+        try {
+          const result = await runEnrichment(datasetId);
 
-            const repoName = dataset.github_repo;
-            if (!repoName) {
-              llmSpinner.warn("No GitHub repository configured for this dataset");
-            } else {
-              const readmeContent = await fetchGitHubFileContent(repoName, "README");
-              if (!readmeContent) {
-                llmSpinner.warn("Could not fetch README from repository");
+          if (result.skipped) {
+            llmSpinner.info(result.message);
+          } else {
+            llmSpinner.succeed(`Pipeline complete (stage: ${result.pipeline_stage})`);
+            if (result.seeded_fields) {
+              console.log(
+                chalk.gray(
+                  `  Seeded: ${result.seeded_fields.authors} authors, ${result.seeded_fields.related_identifiers} related IDs, ${result.seeded_fields.orcids_discovered} ORCIDs discovered`,
+                ),
+              );
+            }
+            if (result.enriched_fields && result.enriched_fields.length > 0) {
+              console.log(chalk.gray(`  Enriched: ${result.enriched_fields.join(", ")}`));
+            }
+            if (result.validation) {
+              if (result.validation.valid) {
+                console.log(chalk.green("  Validation: PASSED"));
               } else {
-                const descContent = await fetchGitHubFileContent(
-                  repoName,
-                  "dataset_description.json",
-                );
-                let bidsDesc: Record<string, unknown> = {};
-                if (descContent) {
-                  try {
-                    bidsDesc = JSON.parse(descContent) as Record<string, unknown>;
-                  } catch {
-                    console.log(
-                      chalk.yellow(
-                        "  Warning: Could not parse dataset_description.json; LLM will use README only",
-                      ),
-                    );
-                  }
+                console.log(chalk.yellow("  Validation: FAILED"));
+                for (const issue of result.validation.blocking_issues) {
+                  console.log(chalk.yellow(`    - ${issue}`));
                 }
-
-                const llmResult = await enrichFromReadme(readmeContent, bidsDesc, apiKey);
-                llmSpinner.succeed("LLM enrichment complete");
-
-                if (llmResult.description) {
-                  console.log(`  Description: ${llmResult.description.slice(0, 100)}...`);
-                  enrichment.description = llmResult.description;
-                }
-                if (llmResult.methods_description) {
-                  enrichment.methods_description = llmResult.methods_description;
-                }
-                if (llmResult.keywords && llmResult.keywords.length > 0) {
-                  console.log(`  Keywords: ${llmResult.keywords.map((k) => k.term).join(", ")}`);
-                  enrichment.keywords = llmResult.keywords;
-                }
-                if (llmResult.funding_references && llmResult.funding_references.length > 0) {
-                  console.log(
-                    `  Funding: ${llmResult.funding_references.map((f) => `${f.funder_name} ${f.award_number || ""}`).join(", ")}`,
-                  );
-                  enrichment.funding_references = llmResult.funding_references;
-                }
-                if (llmResult.related_identifiers && llmResult.related_identifiers.length > 0) {
-                  console.log(
-                    `  Related: ${llmResult.related_identifiers.map((r) => `${r.identifier} (${r.relation_type})`).join(", ")}`,
-                  );
-                  enrichment.related_identifiers = llmResult.related_identifiers;
+              }
+              if (result.validation.warnings.length > 0) {
+                for (const w of result.validation.warnings) {
+                  console.log(chalk.gray(`    Warning: ${w}`));
                 }
               }
             }
-          } catch (error) {
-            llmSpinner.fail("LLM enrichment failed");
-            console.log(chalk.gray(`  ${errorDetail(error)}`));
+            if (result.commit_error) {
+              console.log(chalk.yellow(`  Commit error: ${result.commit_error}`));
+            }
           }
+
+          // Re-read the metadata from repo since backend committed it
+          if (!result.skipped && dataset.github_repo) {
+            const updatedContent = await fetchGitHubFileContent(
+              dataset.github_repo,
+              ".nemar/metadata.json",
+            );
+            if (updatedContent) {
+              try {
+                const parsed = JSON.parse(updatedContent);
+                if (parsed && typeof parsed === "object" && parsed.version === "2.0") {
+                  // Replace enrichment with the full pipeline result
+                  Object.assign(enrichment, parsed);
+                }
+              } catch {
+                // Keep existing enrichment
+              }
+            }
+          }
+        } catch (error) {
+          llmSpinner.fail("LLM enrichment pipeline failed");
+          console.log(chalk.gray(`  ${errorDetail(error)}`));
         }
       }
 

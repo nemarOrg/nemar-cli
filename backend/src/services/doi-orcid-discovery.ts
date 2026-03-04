@@ -146,6 +146,82 @@ export async function queryDataCiteDoi(
 }
 
 // ---------------------------------------------------------------------------
+// Crossref public API client (fallback for DOIs not in DataCite)
+// ---------------------------------------------------------------------------
+
+interface CrossrefAuthor {
+  given?: string;
+  family?: string;
+  name?: string;
+  ORCID?: string;
+  affiliation?: Array<{ name: string }>;
+}
+
+/**
+ * Query the Crossref API for a DOI and return creators in DataCiteCreator format.
+ * Crossref covers most journal DOIs (Nature, bioRxiv, etc.) that DataCite doesn't.
+ */
+export async function queryCrossrefDoi(
+  doi: string,
+): Promise<DataCiteDoiResult | null> {
+  try {
+    const response = await fetch(
+      `https://api.crossref.org/works/${encodeURIComponent(doi)}`,
+      {
+        headers: {
+          Accept: "application/json",
+          // Polite pool: identify ourselves per Crossref etiquette
+          "User-Agent": "NEMAR/1.0 (https://nemar.org; mailto:nemar@ucsd.edu)",
+        },
+        signal: AbortSignal.timeout(10_000),
+      },
+    );
+    if (!response.ok) {
+      if (response.status !== 404) {
+        console.warn(`[orcid-discovery] Crossref returned HTTP ${response.status} for ${doi}`);
+      }
+      return null;
+    }
+    const data = (await response.json()) as {
+      message?: { author?: CrossrefAuthor[] };
+    };
+    const authors = data.message?.author;
+    if (!Array.isArray(authors) || authors.length === 0) return null;
+
+    // Convert Crossref authors to DataCiteCreator format
+    const creators: DataCiteCreator[] = authors.map((a) => {
+      const nameIdentifiers: DataCiteCreator["nameIdentifiers"] = [];
+      if (a.ORCID) {
+        nameIdentifiers.push({
+          nameIdentifier: a.ORCID,
+          nameIdentifierScheme: "ORCID",
+        });
+      }
+      return {
+        name: a.family && a.given ? `${a.family}, ${a.given}` : a.name || a.family || "",
+        givenName: a.given,
+        familyName: a.family,
+        nameIdentifiers,
+        affiliation: (a.affiliation || []).filter((aff) => aff.name),
+      };
+    });
+
+    return { doi, creators };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.warn(`[orcid-discovery] Crossref query failed for ${doi}: ${msg}`);
+    return null;
+  }
+}
+
+/**
+ * Query a DOI against DataCite first, then fall back to Crossref.
+ */
+async function queryDoi(doi: string): Promise<DataCiteDoiResult | null> {
+  return (await queryDataCiteDoi(doi)) ?? (await queryCrossrefDoi(doi));
+}
+
+// ---------------------------------------------------------------------------
 // Name matching
 // ---------------------------------------------------------------------------
 
@@ -301,8 +377,8 @@ export async function discoverOrcidsFromReferencedDois(
 
   for (let i = 0; i < extracted.length; i += BATCH_SIZE) {
     const batch = extracted.slice(i, i + BATCH_SIZE);
-    // queryDataCiteDoi never rejects (catches internally), so Promise.all is safe
-    const results = await Promise.all(batch.map((e) => queryDataCiteDoi(e.doi)));
+    // queryDoi never rejects (catches internally), so Promise.all is safe
+    const results = await Promise.all(batch.map((e) => queryDoi(e.doi)));
     for (let j = 0; j < batch.length; j++) {
       if (results[j]) {
         allCreatorsByDoi.set(batch[j].doi, results[j]!.creators);
