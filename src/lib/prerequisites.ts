@@ -5,7 +5,6 @@
  * fast, clear prerequisite checking with platform-specific install guidance.
  */
 
-import chalk from "chalk";
 import { runCommand } from "./git-annex.js";
 
 export type NemarCommand = "upload" | "download" | "clone" | "push" | "publish";
@@ -127,12 +126,10 @@ export async function checkPrerequisitesForCommand(command: NemarCommand): Promi
 
   if (failures.length === 0) return;
 
-  console.error();
-  console.error(chalk.red("Missing required tools:"));
+  const lines = ["\nMissing required tools:"];
   for (const failure of failures) {
-    console.error(chalk.red(`  ${failure.tool} not installed`));
-    console.error(chalk.gray(`    Install: ${failure.installInstruction}`));
+    lines.push(`  ${failure.tool} not installed`);
+    lines.push(`    Install: ${failure.installInstruction}`);
   }
-  console.error();
-  process.exit(1);
+  throw new Error(lines.join("\n"));
 }

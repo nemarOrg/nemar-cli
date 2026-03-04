@@ -917,7 +917,12 @@ export async function configureGitHubRemote(
     finalUrl = `https://github.com/${repoPath}`;
     // Set token via credential helper instead of embedding in URL
     await runCommand(
-      ["git", "config", "credential.https://github.com.helper", `!echo password=${token}`],
+      [
+        "git",
+        "config",
+        "credential.https://github.com.helper",
+        `!printf 'username=x-access-token\\npassword=${token}'`,
+      ],
       { cwd: path },
     );
   }
@@ -935,7 +940,7 @@ export async function configureGitHubRemote(
           "git",
           "config",
           "credential.https://github.com.helper",
-          `!echo password=${ghTokenResult.token}`,
+          `!printf 'username=x-access-token\\npassword=${ghTokenResult.token}'`,
         ],
         { cwd: path },
       );
@@ -1185,16 +1190,8 @@ export async function getDatasetStats(path: string): Promise<{
   };
 }
 
-/**
- * Format bytes to human readable
- */
-export function formatBytes(bytes: number): string {
-  if (bytes === 0) return "0 B";
-  const k = 1024;
-  const sizes = ["B", "KB", "MB", "GB", "TB"];
-  const i = Math.floor(Math.log(bytes) / Math.log(k));
-  return `${Number.parseFloat((bytes / k ** i).toFixed(2))} ${sizes[i]}`;
-}
+// Re-export formatBytes from progress.ts (canonical implementation)
+export { formatBytes } from "./progress.js";
 
 // =============================================================================
 // Presigned URL Upload Functions

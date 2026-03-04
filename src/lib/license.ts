@@ -174,7 +174,10 @@ export function detectLicense(datasetPath: string): {
         if (content.includes("public domain dedication and license") || content.includes("pddl")) {
           return { spdxId: "PDDL-1.0", source: "license_file" };
         }
-        if (content.includes("mit license") || content.includes("mit ")) {
+        if (
+          content.includes("permission is hereby granted, free of charge") ||
+          content.includes("mit license")
+        ) {
           return { spdxId: "MIT", source: "license_file" };
         }
       } catch (err) {
@@ -195,7 +198,7 @@ export function detectLicense(datasetPath: string): {
  * Returns the chosen SPDX ID.
  */
 export async function promptForLicense(defaultSpdxId?: string): Promise<string> {
-  const choices = RECOMMENDED_LICENSES.map((l, idx) => ({
+  const choices = RECOMMENDED_LICENSES.map((l) => ({
     name: `${l.spdxId.padEnd(22)} ${l.description}`,
     value: l.spdxId,
     short: l.spdxId,
@@ -283,7 +286,7 @@ export function ensureLicenseFile(datasetPath: string, spdxId: string): boolean 
 
 /**
  * Update the License field in dataset_description.json.
- * Creates a backup of the original if the field changes.
+ * No-ops if the file does not exist.
  */
 export function updateLicenseInDescription(datasetPath: string, spdxId: string): void {
   const descPath = resolve(datasetPath, "dataset_description.json");

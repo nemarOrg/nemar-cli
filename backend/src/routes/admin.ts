@@ -3170,8 +3170,6 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
             ZENODO_SANDBOX_API_KEY: c.env.ZENODO_SANDBOX_API_KEY,
           },
         );
-        const doiAttempts = 1;
-
         if (provider === "ezid") {
           await db
             .prepare(
@@ -3194,7 +3192,7 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
             .run();
         }
 
-        await updateProgress("doi_create", undefined, doiAttempts);
+        await updateProgress("doi_create");
       } else {
         await updateProgress("doi_create");
       }
@@ -3451,11 +3449,13 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
         pat,
         conceptDoi ? `https://doi.org/${conceptDoi}` : undefined,
       );
+      let descWarning: string | undefined;
       if (!descResult.ok) {
-        console.warn(`[publish] Failed to set repo description (non-fatal): ${descResult.error}`);
+        descWarning = `Repo description not set: ${descResult.error}`;
+        console.warn(`[publish] ${descWarning}`);
       }
 
-      await updateProgress("update_readme");
+      await updateProgress("update_readme", descWarning);
     } catch (err) {
       const msg = errorMessage(err);
       console.error(`[publish] update_readme failed for dataset ${datasetId}:`, err);
@@ -3642,7 +3642,7 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
       } catch (err) {
         // Zenodo backup is non-fatal for EZID datasets; log and continue
         console.error(`[publish] Zenodo backup failed for ${datasetId} (non-fatal):`, err);
-        await updateProgress("upload_to_zenodo");
+        await updateProgress("upload_to_zenodo", `Non-fatal: Zenodo backup failed: ${errorMessage(err)}`);
       }
     } else {
       try {

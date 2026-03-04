@@ -481,7 +481,7 @@ export async function setRepoDescription(
 ): Promise<{ ok: boolean; status: number; error?: string }> {
   let response: Response;
   try {
-    const payload: Record<string, string> = { description };
+    const payload: { description: string; homepage?: string } = { description };
     if (homepage !== undefined) payload.homepage = homepage;
     response = await fetch(`${GITHUB_API}/repos/${ORG_NAME}/${repo}`, {
       method: "PATCH",

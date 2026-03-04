@@ -20,7 +20,7 @@ nemar auth login
 nemar dataset download nm000115
 ```
 
-This clones the dataset and downloads all data files from S3.
+This clones the dataset and downloads all data files from S3. The CLI shows real-time progress during download, including transfer speed, estimated time remaining, and per-file status.
 
 ## Download Options
 
@@ -50,6 +50,23 @@ nemar dataset get sub-01/
 # Get specific modality
 nemar dataset get sub-01/eeg/
 ```
+
+## Download Progress
+
+Downloads display real-time progress with:
+
+- **Transfer speed** - current download rate (e.g., 2.4 MB/s)
+- **Estimated time remaining** - based on sliding-window speed averaging
+- **File progress** - tracks completed vs total files
+- **Per-file status** - shows which file is currently downloading
+
+The CLI automatically detects whether `git-annex` is installed. If available, it uses git-annex for efficient content-addressed downloads. Otherwise, it falls back to direct S3 downloads via pre-signed URLs.
+
+## Prerequisites
+
+The `download` command requires the GitHub CLI (`gh`) to be installed and authenticated. The CLI checks for required tools before starting and provides platform-specific install guidance if anything is missing.
+
+For private datasets, you must also be logged in with `nemar auth login`.
 
 ## How It Works
 
