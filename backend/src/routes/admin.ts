@@ -3626,8 +3626,8 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
               `[publish] Zenodo backup deposition ${depositionId} has no bucket URL; skipping upload`,
             );
             await updateProgress("upload_to_zenodo");
-        }
-      } catch (err) {
+          }
+        } catch (err) {
         // Zenodo backup is non-fatal for EZID datasets; log and continue
         console.error(`[publish] Zenodo backup failed for ${datasetId} (non-fatal):`, err);
         await updateProgress("upload_to_zenodo");
