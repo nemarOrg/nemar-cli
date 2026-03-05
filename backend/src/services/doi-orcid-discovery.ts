@@ -110,6 +110,19 @@ export function extractDoisFromBids(bidsDescription: Record<string, unknown>): E
 
 const DATACITE_API = "https://api.datacite.org/application/vnd.datacite.datacite+json";
 
+/**
+ * Log a DOI query error: network errors get a warning, others get a full error trace.
+ */
+function logDoiQueryError(source: string, doi: string, err: unknown): void {
+  const msg = err instanceof Error ? err.message : String(err);
+  const isNetwork = msg.includes("AbortError") || msg.includes("timeout") || msg.includes("fetch");
+  if (isNetwork) {
+    console.warn(`[orcid-discovery] ${source} query failed for ${doi}: ${msg}`);
+  } else {
+    console.error(`[orcid-discovery] Unexpected error querying ${source} for ${doi}:`, err);
+  }
+}
+
 export async function queryDataCiteDoi(doi: string): Promise<DataCiteDoiResult | null> {
   try {
     const response = await fetch(`${DATACITE_API}/${encodeURIComponent(doi)}`, {
@@ -130,14 +143,7 @@ export async function queryDataCiteDoi(doi: string): Promise<DataCiteDoiResult |
       creators: Array.isArray(data.creators) ? data.creators : [],
     };
   } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    const isNetwork =
-      msg.includes("AbortError") || msg.includes("timeout") || msg.includes("fetch");
-    if (isNetwork) {
-      console.warn(`[orcid-discovery] DataCite query failed for ${doi}: ${msg}`);
-    } else {
-      console.error(`[orcid-discovery] Unexpected error querying DataCite for ${doi}:`, err);
-    }
+    logDoiQueryError("DataCite", doi, err);
     return null;
   }
 }
@@ -202,14 +208,7 @@ export async function queryCrossrefDoi(doi: string): Promise<DataCiteDoiResult |
 
     return { doi, creators };
   } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    const isNetwork =
-      msg.includes("AbortError") || msg.includes("timeout") || msg.includes("fetch");
-    if (isNetwork) {
-      console.warn(`[orcid-discovery] Crossref query failed for ${doi}: ${msg}`);
-    } else {
-      console.error(`[orcid-discovery] Unexpected error querying Crossref for ${doi}:`, err);
-    }
+    logDoiQueryError("Crossref", doi, err);
     return null;
   }
 }
