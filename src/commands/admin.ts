@@ -1219,6 +1219,7 @@ doiCommand
             await new Promise((r) => setTimeout(r, 5000));
           }
 
+          let discoveryRan = false;
           if (!conclusion) {
             llmSpinner.warn("Workflow timed out after 5 minutes (may still be running)");
           } else if (conclusion === "success") {
@@ -1230,7 +1231,9 @@ doiCommand
               try {
                 const parsed = JSON.parse(updatedContent);
                 if (parsed && typeof parsed === "object" && parsed.version === "2.0") {
-                  enrichment = parsed as NemarMetadataPayload;
+                  // Merge LLM results into enrichment (preserves any fields set by earlier steps)
+                  Object.assign(enrichment, parsed);
+                  discoveryRan = true;
                   const stage = parsed.pipeline_stage || "unknown";
                   console.log(chalk.gray(`  Pipeline stage: ${stage}`));
                   if (enrichment.authors) {
@@ -1246,13 +1249,31 @@ doiCommand
                 );
                 console.log(chalk.gray("  Using pre-workflow enrichment data"));
               }
+            } else {
+              console.log(
+                chalk.yellow(
+                  "  Warning: Could not fetch updated metadata after successful workflow.",
+                ),
+              );
+              console.log(chalk.gray("  Author data below may be from a previous run."));
             }
           } else {
             llmSpinner.fail(`LLM enrichment workflow failed (conclusion: ${conclusion})`);
           }
+
+          if (!discoveryRan) {
+            console.log(
+              chalk.yellow(
+                "  ORCID discovery did not complete. Authors below may be from previous metadata.",
+              ),
+            );
+          }
         } catch (error) {
           llmSpinner.fail("LLM enrichment pipeline failed");
           console.log(chalk.gray(`  ${errorDetail(error)}`));
+          console.log(
+            chalk.yellow("  ORCID discovery did not run. You will need to enter ORCIDs manually."),
+          );
         }
       }
 
@@ -1268,7 +1289,7 @@ doiCommand
         const withoutOrcid = authorNames.filter((n) => !existingAuthors[n]?.orcid);
         console.log(chalk.gray(`  Discovered ${authorNames.length} authors from pipeline:`));
         for (const name of withOrcid) {
-          console.log(chalk.green(`    [x] ${name}: ${existingAuthors[name].orcid}`));
+          console.log(chalk.green(`    [x] ${name}: ${existingAuthors[name]?.orcid}`));
         }
         for (const name of withoutOrcid) {
           console.log(chalk.yellow(`    [ ] ${name}: no ORCID found`));
@@ -1346,8 +1367,17 @@ doiCommand
         }
 
         if (Object.keys(authors).length > 0) {
-          // Manual entries override discovered values
-          enrichment.authors = { ...(enrichment.authors || {}), ...authors };
+          // Deep-merge: preserve discovered fields (e.g., ORCID) when user only adds affiliation
+          const merged = { ...(enrichment.authors || {}) };
+          for (const [name, manualEntry] of Object.entries(authors)) {
+            const existing = merged[name] || {};
+            merged[name] = {
+              ...existing,
+              ...manualEntry,
+              orcid: manualEntry.orcid || existing.orcid,
+            };
+          }
+          enrichment.authors = merged;
         }
       }
 
