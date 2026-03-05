@@ -1132,74 +1132,8 @@ doiCommand
         }
       }
 
-      // --- Author ORCIDs ---
-      console.log();
-      console.log(chalk.cyan("--- Author ORCIDs ---"));
-      const { updateAuthors } = await inquirer.prompt([
-        {
-          type: "confirm",
-          name: "updateAuthors",
-          message: "Update author ORCIDs?",
-          default: false,
-        },
-      ]);
-
-      if (updateAuthors) {
-        const authors: Record<string, { orcid?: string; affiliations?: Array<{ name: string }> }> =
-          {};
-
-        let addMore = true;
-        while (addMore) {
-          const { authorName } = await inquirer.prompt([
-            {
-              type: "input",
-              name: "authorName",
-              message: 'Author name (as in BIDS, e.g., "Shirazi, Yahya"):',
-            },
-          ]);
-          if (!authorName) break;
-
-          const { orcid } = await inquirer.prompt([
-            {
-              type: "input",
-              name: "orcid",
-              message: `ORCID for "${authorName}" (Enter to skip):`,
-              validate: (input: string) => {
-                if (!input) return true;
-                return ORCID_REGEX.test(input) || "Invalid ORCID format (XXXX-XXXX-XXXX-XXXX)";
-              },
-            },
-          ]);
-
-          const entry: { orcid?: string; affiliations?: Array<{ name: string }> } = {};
-          if (orcid) entry.orcid = orcid;
-
-          const { affiliation } = await inquirer.prompt([
-            {
-              type: "input",
-              name: "affiliation",
-              message: `Affiliation for "${authorName}" (optional):`,
-            },
-          ]);
-          if (affiliation) entry.affiliations = [{ name: affiliation }];
-
-          if (entry.orcid || entry.affiliations) {
-            authors[authorName] = entry;
-          }
-
-          const { more } = await inquirer.prompt([
-            { type: "confirm", name: "more", message: "Add another author?", default: true },
-          ]);
-          addMore = more;
-        }
-
-        if (Object.keys(authors).length > 0) {
-          // Merge new ORCIDs into existing authors (don't replace the whole map)
-          enrichment.authors = { ...(enrichment.authors || {}), ...authors };
-        }
-      }
-
       // --- LLM Enrichment (triggers CI workflow on GitHub Actions) ---
+      // Run BEFORE manual author entry so discovered ORCIDs are shown for confirmation
       if (options.llm !== false && dataset.github_repo) {
         console.log();
         console.log(chalk.cyan("--- Running LLM enrichment pipeline (CI workflow) ---"));
@@ -1296,12 +1230,7 @@ doiCommand
               try {
                 const parsed = JSON.parse(updatedContent);
                 if (parsed && typeof parsed === "object" && parsed.version === "2.0") {
-                  // Deep-merge authors to preserve manually-entered ORCIDs
-                  const manualAuthors = enrichment.authors;
-                  Object.assign(enrichment, parsed);
-                  if (manualAuthors) {
-                    enrichment.authors = { ...parsed.authors, ...manualAuthors };
-                  }
+                  enrichment = parsed as NemarMetadataPayload;
                   const stage = parsed.pipeline_stage || "unknown";
                   console.log(chalk.gray(`  Pipeline stage: ${stage}`));
                   if (enrichment.authors) {
@@ -1324,6 +1253,101 @@ doiCommand
         } catch (error) {
           llmSpinner.fail("LLM enrichment pipeline failed");
           console.log(chalk.gray(`  ${errorDetail(error)}`));
+        }
+      }
+
+      // --- Author ORCIDs (confirm discovered + supplement missing) ---
+      console.log();
+      console.log(chalk.cyan("--- Author ORCIDs ---"));
+
+      // Show authors discovered by the pipeline
+      const existingAuthors = enrichment.authors || {};
+      const authorNames = Object.keys(existingAuthors);
+      if (authorNames.length > 0) {
+        const withOrcid = authorNames.filter((n) => existingAuthors[n]?.orcid);
+        const withoutOrcid = authorNames.filter((n) => !existingAuthors[n]?.orcid);
+        console.log(chalk.gray(`  Discovered ${authorNames.length} authors from pipeline:`));
+        for (const name of withOrcid) {
+          console.log(chalk.green(`    [x] ${name}: ${existingAuthors[name].orcid}`));
+        }
+        for (const name of withoutOrcid) {
+          console.log(chalk.yellow(`    [ ] ${name}: no ORCID found`));
+        }
+        if (withoutOrcid.length > 0) {
+          console.log(chalk.gray(`  ${withoutOrcid.length} author(s) missing ORCIDs.`));
+        }
+      }
+
+      const { updateAuthors } = await inquirer.prompt([
+        {
+          type: "confirm",
+          name: "updateAuthors",
+          message:
+            authorNames.length > 0
+              ? "Add or correct author ORCIDs?"
+              : "Add author ORCIDs manually?",
+          default: false,
+        },
+      ]);
+
+      if (updateAuthors) {
+        const authors: Record<string, { orcid?: string; affiliations?: Array<{ name: string }> }> =
+          {};
+
+        let addMore = true;
+        while (addMore) {
+          const { authorName } = await inquirer.prompt([
+            {
+              type: "input",
+              name: "authorName",
+              message: 'Author name (as in BIDS, e.g., "Shirazi, Yahya"):',
+            },
+          ]);
+          if (!authorName) break;
+
+          // Show current ORCID if one was discovered
+          const current = existingAuthors[authorName];
+          if (current?.orcid) {
+            console.log(chalk.gray(`  Current ORCID: ${current.orcid}`));
+          }
+
+          const { orcid } = await inquirer.prompt([
+            {
+              type: "input",
+              name: "orcid",
+              message: `ORCID for "${authorName}" (Enter to ${current?.orcid ? "keep current" : "skip"}):`,
+              validate: (input: string) => {
+                if (!input) return true;
+                return ORCID_REGEX.test(input) || "Invalid ORCID format (XXXX-XXXX-XXXX-XXXX)";
+              },
+            },
+          ]);
+
+          const entry: { orcid?: string; affiliations?: Array<{ name: string }> } = {};
+          if (orcid) entry.orcid = orcid;
+
+          const { affiliation } = await inquirer.prompt([
+            {
+              type: "input",
+              name: "affiliation",
+              message: `Affiliation for "${authorName}" (optional):`,
+            },
+          ]);
+          if (affiliation) entry.affiliations = [{ name: affiliation }];
+
+          if (entry.orcid || entry.affiliations) {
+            authors[authorName] = entry;
+          }
+
+          const { more } = await inquirer.prompt([
+            { type: "confirm", name: "more", message: "Add another author?", default: true },
+          ]);
+          addMore = more;
+        }
+
+        if (Object.keys(authors).length > 0) {
+          // Manual entries override discovered values
+          enrichment.authors = { ...(enrichment.authors || {}), ...authors };
         }
       }
 
