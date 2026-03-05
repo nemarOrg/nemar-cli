@@ -666,9 +666,12 @@ webhooks.post("/llm-enrich", async (c) => {
     // Sync BIDS Name to D1 and GitHub repo description if changed.
     // Done here because llm-enrich already reads dataset_description.json,
     // and BIDS Name may change across versions.
-    const bidsName = typeof bidsDescription.Name === "string"
-      ? bidsDescription.Name.replace(/[\r\n]+/g, " ").trim().slice(0, 200)
-      : null;
+    const bidsName =
+      typeof bidsDescription.Name === "string"
+        ? bidsDescription.Name.replace(/[\r\n]+/g, " ")
+            .trim()
+            .slice(0, 200)
+        : null;
     if (bidsName && bidsName !== dataset.name) {
       try {
         await c.env.DB.prepare("UPDATE datasets SET name = ? WHERE dataset_id = ?")
@@ -720,7 +723,7 @@ webhooks.post("/llm-enrich", async (c) => {
     }
 
     // Compute source content hash for change detection
-    const sourceContent = readmeContent + "\n---\n" + JSON.stringify(bidsDescription);
+    const sourceContent = `${readmeContent}\n---\n${JSON.stringify(bidsDescription)}`;
     const sourceHashBuffer = await crypto.subtle.digest(
       "SHA-256",
       new TextEncoder().encode(sourceContent),
@@ -730,14 +733,9 @@ webhooks.post("/llm-enrich", async (c) => {
       .join("");
 
     // Guard: skip re-enrichment if metadata is already validated and sources unchanged
-    if (
-      existingMetadata?.pipeline_stage === "validated" &&
-      !forceReenrich
-    ) {
+    if (existingMetadata?.pipeline_stage === "validated" && !forceReenrich) {
       if (existingMetadata.source_hash === sourceHash) {
-        console.log(
-          `[llm-enrich] Skipping ${dataset_id}: already validated and sources unchanged`,
-        );
+        console.log(`[llm-enrich] Skipping ${dataset_id}: already validated and sources unchanged`);
         return c.json({
           message: "Metadata already validated and sources unchanged",
           dataset_id,
@@ -783,9 +781,7 @@ webhooks.post("/llm-enrich", async (c) => {
       else if (bytes >= 1e6) sizeStr = `${(bytes / 1e6).toFixed(1)} MB`;
       else sizeStr = `${(bytes / 1e3).toFixed(1)} KB`;
 
-      const gitFiles = tree.filter(
-        (f) => f.type === "blob" && !f.path.startsWith("."),
-      );
+      const gitFiles = tree.filter((f) => f.type === "blob" && !f.path.startsWith("."));
       const totalFiles = s3Stats.objectCount + gitFiles.length;
       seeded.sizes = [`${sizeStr} (${totalFiles} files)`];
 
@@ -814,10 +810,7 @@ webhooks.post("/llm-enrich", async (c) => {
     let seededWithOrcids = seeded;
     let orcidDiscoveryCount = 0;
     try {
-      const orcidResult = await discoverOrcidsFromReferencedDois(
-        bidsDescription,
-        seeded.authors,
-      );
+      const orcidResult = await discoverOrcidsFromReferencedDois(bidsDescription, seeded.authors);
       orcidDiscoveryCount = Object.keys(orcidResult.discoveries).length;
       if (orcidDiscoveryCount > 0) {
         const authors = { ...seeded.authors };

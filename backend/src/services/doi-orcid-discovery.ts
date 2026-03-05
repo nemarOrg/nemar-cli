@@ -66,9 +66,7 @@ export interface OrcidDiscoveryResult {
 const DOI_PATTERN = /^10\.\d{4,}\/[^\s]+$/;
 const ORCID_PATTERN = /^\d{4}-\d{4}-\d{4}-[\dX]{4}$/;
 
-export function extractDoisFromBids(
-  bidsDescription: Record<string, unknown>,
-): ExtractedDoi[] {
+export function extractDoisFromBids(bidsDescription: Record<string, unknown>): ExtractedDoi[] {
   const dois: ExtractedDoi[] = [];
   const seen = new Set<string>();
 
@@ -112,9 +110,7 @@ export function extractDoisFromBids(
 
 const DATACITE_API = "https://api.datacite.org/application/vnd.datacite.datacite+json";
 
-export async function queryDataCiteDoi(
-  doi: string,
-): Promise<DataCiteDoiResult | null> {
+export async function queryDataCiteDoi(doi: string): Promise<DataCiteDoiResult | null> {
   try {
     const response = await fetch(`${DATACITE_API}/${encodeURIComponent(doi)}`, {
       headers: { Accept: "application/vnd.datacite.datacite+json" },
@@ -135,7 +131,8 @@ export async function queryDataCiteDoi(
     };
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    const isNetwork = msg.includes("AbortError") || msg.includes("timeout") || msg.includes("fetch");
+    const isNetwork =
+      msg.includes("AbortError") || msg.includes("timeout") || msg.includes("fetch");
     if (isNetwork) {
       console.warn(`[orcid-discovery] DataCite query failed for ${doi}: ${msg}`);
     } else {
@@ -161,21 +158,16 @@ interface CrossrefAuthor {
  * Query the Crossref API for a DOI and return creators in DataCiteCreator format.
  * Crossref covers most journal DOIs (Nature, bioRxiv, etc.) that DataCite doesn't.
  */
-export async function queryCrossrefDoi(
-  doi: string,
-): Promise<DataCiteDoiResult | null> {
+export async function queryCrossrefDoi(doi: string): Promise<DataCiteDoiResult | null> {
   try {
-    const response = await fetch(
-      `https://api.crossref.org/works/${encodeURIComponent(doi)}`,
-      {
-        headers: {
-          Accept: "application/json",
-          // Polite pool: identify ourselves per Crossref etiquette
-          "User-Agent": "NEMAR/1.0 (https://nemar.org; mailto:nemar@ucsd.edu)",
-        },
-        signal: AbortSignal.timeout(10_000),
+    const response = await fetch(`https://api.crossref.org/works/${encodeURIComponent(doi)}`, {
+      headers: {
+        Accept: "application/json",
+        // Polite pool: identify ourselves per Crossref etiquette
+        "User-Agent": "NEMAR/1.0 (https://nemar.org; mailto:nemar@ucsd.edu)",
       },
-    );
+      signal: AbortSignal.timeout(10_000),
+    });
     if (!response.ok) {
       if (response.status !== 404) {
         console.warn(`[orcid-discovery] Crossref returned HTTP ${response.status} for ${doi}`);
@@ -228,7 +220,7 @@ async function queryDoi(doi: string): Promise<DataCiteDoiResult | null> {
 function normalizeStr(s: string): string {
   return s
     .normalize("NFD")
-    .replace(/[\u0300-\u036f]/g, "") // strip accents
+    .replace(/\p{Diacritic}/gu, "") // strip accents
     .toLowerCase()
     .trim();
 }
@@ -381,7 +373,7 @@ export async function discoverOrcidsFromReferencedDois(
     const results = await Promise.all(batch.map((e) => queryDoi(e.doi)));
     for (let j = 0; j < batch.length; j++) {
       if (results[j]) {
-        allCreatorsByDoi.set(batch[j].doi, results[j]!.creators);
+        allCreatorsByDoi.set(batch[j].doi, results[j]?.creators ?? []);
       } else {
         unresolvedDois.push(batch[j].doi);
       }
@@ -408,9 +400,7 @@ export async function discoverOrcidsFromReferencedDois(
       if (!orcidEntry) continue;
 
       // Extract bare ORCID (strip URL prefix) and validate format
-      const orcid = orcidEntry.nameIdentifier
-        .replace(/^https?:\/\/orcid\.org\//i, "")
-        .trim();
+      const orcid = orcidEntry.nameIdentifier.replace(/^https?:\/\/orcid\.org\//i, "").trim();
       if (!ORCID_PATTERN.test(orcid)) continue;
 
       const affiliations = match.matchedCreator.affiliation

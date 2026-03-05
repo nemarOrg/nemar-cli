@@ -1790,7 +1790,9 @@ adminRoutes.post("/datasets/:id/doi/update", zValidator("json", updateDoiSchema)
 
       // Add HasVersion relations for all existing version DOIs
       const versions = await db
-        .prepare("SELECT version, doi FROM dataset_versions WHERE dataset_id = ? ORDER BY created_at DESC")
+        .prepare(
+          "SELECT version, doi FROM dataset_versions WHERE dataset_id = ? ORDER BY created_at DESC",
+        )
         .bind(datasetId)
         .all<{ version: string; doi: string }>();
       if (versions.results?.length) {
@@ -1831,25 +1833,38 @@ adminRoutes.post("/datasets/:id/doi/update", zValidator("json", updateDoiSchema)
     let versionDoiUpdated = 0;
     if (metadataRefreshed) {
       const versions = await db
-        .prepare("SELECT version, doi FROM dataset_versions WHERE dataset_id = ? ORDER BY created_at DESC")
+        .prepare(
+          "SELECT version, doi FROM dataset_versions WHERE dataset_id = ? ORDER BY created_at DESC",
+        )
         .bind(datasetId)
         .all<{ version: string; doi: string }>();
 
       for (const ver of versions.results || []) {
         try {
           const versionIdentifier = `${dataset.ezid_identifier}.V${ver.version.toUpperCase()}`;
-          const repoName = dataset.github_repo!.split("/")[1];
+          const repoName = dataset.github_repo?.split("/")[1];
+          if (!repoName) continue;
           const tree = await getTreeAtRef(repoName, "main", c.env.GITHUB_ADMIN_PAT);
           const descFile = tree.find((f) => f.path === "dataset_description.json");
           if (!descFile) continue;
           const content = await getBlobContent(repoName, descFile.sha, c.env.GITHUB_ADMIN_PAT);
           const bidsDesc = JSON.parse(content) as Record<string, unknown>;
 
-          let vEnrichment = buildOrcidEnrichment(bidsDesc, dataset.owner_username, dataset.owner_orcid || undefined);
-          const nemarMetaFile = tree.find((f) => f.path === ".nemar/metadata.json") || tree.find((f) => f.path === "nemar_metadata.json");
+          let vEnrichment = buildOrcidEnrichment(
+            bidsDesc,
+            dataset.owner_username,
+            dataset.owner_orcid || undefined,
+          );
+          const nemarMetaFile =
+            tree.find((f) => f.path === ".nemar/metadata.json") ||
+            tree.find((f) => f.path === "nemar_metadata.json");
           if (nemarMetaFile) {
             try {
-              const nemarContent = await getBlobContent(repoName, nemarMetaFile.sha, c.env.GITHUB_ADMIN_PAT);
+              const nemarContent = await getBlobContent(
+                repoName,
+                nemarMetaFile.sha,
+                c.env.GITHUB_ADMIN_PAT,
+              );
               const nemarParsed = parseNemarMetadata(JSON.parse(nemarContent));
               if (nemarParsed) vEnrichment = nemarMetadataToEnrichment(nemarParsed, vEnrichment);
             } catch {}
@@ -1860,10 +1875,15 @@ adminRoutes.post("/datasets/:id/doi/update", zValidator("json", updateDoiSchema)
           vMetadata.version = ver.version;
           const vXml = buildDataCiteXml(vMetadata);
           const vTarget = `https://nemar.org/dataexplorer/detail?dataset_id=${datasetId}&version=${ver.version}`;
-          await ezidUpdateIdentifier(auth, versionIdentifier, { dataciteXml: vXml, target: vTarget });
+          await ezidUpdateIdentifier(auth, versionIdentifier, {
+            dataciteXml: vXml,
+            target: vTarget,
+          });
           versionDoiUpdated++;
         } catch (vErr) {
-          warnings.push(`Version ${ver.version} DOI update failed: ${vErr instanceof Error ? vErr.message : String(vErr)}`);
+          warnings.push(
+            `Version ${ver.version} DOI update failed: ${vErr instanceof Error ? vErr.message : String(vErr)}`,
+          );
         }
       }
     }
@@ -1900,339 +1920,333 @@ const enrichRequestSchema = z.object({
   force: z.boolean().optional().default(false),
 });
 
-adminRoutes.post(
-  "/datasets/:id/enrich",
-  zValidator("json", enrichRequestSchema),
-  async (c) => {
-    const datasetId = c.req.param("id");
-    const { force } = c.req.valid("json");
-    const db = c.env.DB;
+adminRoutes.post("/datasets/:id/enrich", zValidator("json", enrichRequestSchema), async (c) => {
+  const datasetId = c.req.param("id");
+  const { force } = c.req.valid("json");
+  const db = c.env.DB;
 
-    const apiKey = c.env.OPENROUTER_API_KEY;
-    if (!apiKey) {
-      return c.json({ error: "OPENROUTER_API_KEY not configured on backend" }, 500);
-    }
+  const apiKey = c.env.OPENROUTER_API_KEY;
+  if (!apiKey) {
+    return c.json({ error: "OPENROUTER_API_KEY not configured on backend" }, 500);
+  }
 
-    const dataset = await db
-      .prepare(
-        "SELECT dataset_id, name, github_repo, enrichment_json FROM datasets WHERE dataset_id = ?",
-      )
-      .bind(datasetId)
-      .first<{
-        dataset_id: string;
-        name: string | null;
-        github_repo: string | null;
-        enrichment_json: string | null;
-      }>();
+  const dataset = await db
+    .prepare(
+      "SELECT dataset_id, name, github_repo, enrichment_json FROM datasets WHERE dataset_id = ?",
+    )
+    .bind(datasetId)
+    .first<{
+      dataset_id: string;
+      name: string | null;
+      github_repo: string | null;
+      enrichment_json: string | null;
+    }>();
 
-    if (!dataset) {
-      return c.json({ error: "Dataset not found" }, 404);
-    }
-    if (!dataset.github_repo) {
-      return c.json({ error: "Dataset has no GitHub repository" }, 400);
-    }
+  if (!dataset) {
+    return c.json({ error: "Dataset not found" }, 404);
+  }
+  if (!dataset.github_repo) {
+    return c.json({ error: "Dataset has no GitHub repository" }, 400);
+  }
 
-    const repoName = extractRepoName(dataset.github_repo);
-    if (!repoName) {
-      return c.json({ error: "Invalid github_repo format" }, 400);
-    }
+  const repoName = extractRepoName(dataset.github_repo);
+  if (!repoName) {
+    return c.json({ error: "Invalid github_repo format" }, 400);
+  }
 
-    const pat = c.env.GITHUB_ADMIN_PAT;
+  const pat = c.env.GITHUB_ADMIN_PAT;
 
-    // Lazy-import llm-enrich functions (heavy module, only needed here)
-    const {
-      seedFromBids,
-      enrichFromReadme,
-      mergeWithExisting,
-      validateMeshTerms,
-      validateMetadata,
-      correctFromFeedback,
-    } = await import("../services/llm-enrich.js");
-    const { discoverOrcidsFromReferencedDois } = await import(
-      "../services/doi-orcid-discovery.js"
+  // Lazy-import llm-enrich functions (heavy module, only needed here)
+  const {
+    seedFromBids,
+    enrichFromReadme,
+    mergeWithExisting,
+    validateMeshTerms,
+    validateMetadata,
+    correctFromFeedback,
+  } = await import("../services/llm-enrich.js");
+  const { discoverOrcidsFromReferencedDois } = await import("../services/doi-orcid-discovery.js");
+  const { ensureMainBranch } = await import("../services/github.js");
+
+  try {
+    await ensureMainBranch(repoName, pat);
+  } catch (error) {
+    console.error(`[admin-enrich] Failed to verify default branch for ${repoName}:`, error);
+  }
+
+  try {
+    // Read repo tree
+    const tree = await getTreeAtRef(repoName, "main", pat);
+    const treePaths = tree.map((f) => f.path);
+
+    // Read README
+    const readmeFile = tree.find(
+      (f) => f.path === "README.md" || f.path === "README" || f.path === "readme.md",
     );
-    const { ensureMainBranch } = await import("../services/github.js");
+    if (!readmeFile) {
+      return c.json({ error: "No README found in repository", skipped: true }, 200);
+    }
+    const readmeContent = await getBlobContent(repoName, readmeFile.sha, pat);
 
-    try {
-      await ensureMainBranch(repoName, pat);
-    } catch (error) {
-      console.error(`[admin-enrich] Failed to verify default branch for ${repoName}:`, error);
+    // Read dataset_description.json
+    let bidsDescription: Record<string, unknown> = {};
+    const descFile = tree.find((f) => f.path === "dataset_description.json");
+    if (descFile) {
+      const descContent = await getBlobContent(repoName, descFile.sha, pat);
+      try {
+        bidsDescription = JSON.parse(descContent) as Record<string, unknown>;
+      } catch (parseErr) {
+        return c.json(
+          {
+            error: "dataset_description.json contains invalid JSON",
+            details: errorMessage(parseErr),
+          },
+          422,
+        );
+      }
     }
 
+    // Read existing metadata
+    let existingMetadata: NemarMetadataV2 | null = null;
+    const nemarMetaFile =
+      tree.find((f) => f.path === ".nemar/metadata.json") ||
+      tree.find((f) => f.path === "nemar_metadata.json");
+    if (nemarMetaFile) {
+      try {
+        const nemarContent = await getBlobContent(repoName, nemarMetaFile.sha, pat);
+        const parsed = parseNemarMetadata(JSON.parse(nemarContent));
+        if (parsed?.version === "2.0") {
+          existingMetadata = parsed;
+        }
+      } catch (parseErr) {
+        console.error(
+          `[admin-enrich] Existing metadata corrupt for ${datasetId}: ${errorMessage(parseErr)}`,
+        );
+      }
+    }
+
+    // Source hash for change detection
+    const sourceContent = `${readmeContent}\n---\n${JSON.stringify(bidsDescription)}`;
+    const sourceHashBuffer = await crypto.subtle.digest(
+      "SHA-256",
+      new TextEncoder().encode(sourceContent),
+    );
+    const sourceHash = Array.from(new Uint8Array(sourceHashBuffer))
+      .map((b) => b.toString(16).padStart(2, "0"))
+      .join("");
+
+    // Skip if already validated and unchanged
+    if (existingMetadata?.pipeline_stage === "validated" && !force) {
+      if (existingMetadata.source_hash === sourceHash) {
+        return c.json({
+          message: "Metadata already validated and sources unchanged",
+          dataset_id: datasetId,
+          skipped: true,
+          pipeline_stage: "validated",
+        });
+      }
+    }
+
+    // Stage 1: Seed from BIDS
+    const seeded = seedFromBids(bidsDescription, existingMetadata, datasetId, treePaths);
+
+    // Stage 1a: Compute sizes from S3 and formats from tree
     try {
-      // Read repo tree
-      const tree = await getTreeAtRef(repoName, "main", pat);
-      const treePaths = tree.map((f) => f.path);
-
-      // Read README
-      const readmeFile = tree.find(
-        (f) => f.path === "README.md" || f.path === "README" || f.path === "readme.md",
+      const { getDatasetS3Stats } = await import("../services/s3.js");
+      const s3Stats = await getDatasetS3Stats(
+        {
+          bucket: c.env.S3_BUCKET,
+          region: c.env.AWS_REGION,
+          accessKeyId: c.env.AWS_ACCESS_KEY_ID,
+          secretAccessKey: c.env.AWS_SECRET_ACCESS_KEY,
+        },
+        datasetId,
       );
-      if (!readmeFile) {
-        return c.json({ error: "No README found in repository", skipped: true }, 200);
-      }
-      const readmeContent = await getBlobContent(repoName, readmeFile.sha, pat);
 
-      // Read dataset_description.json
-      let bidsDescription: Record<string, unknown> = {};
-      const descFile = tree.find((f) => f.path === "dataset_description.json");
-      if (descFile) {
-        const descContent = await getBlobContent(repoName, descFile.sha, pat);
-        try {
-          bidsDescription = JSON.parse(descContent) as Record<string, unknown>;
-        } catch (parseErr) {
-          return c.json(
-            { error: "dataset_description.json contains invalid JSON", details: errorMessage(parseErr) },
-            422,
-          );
+      // Format size human-readable
+      const bytes = s3Stats.totalSize;
+      let sizeStr: string;
+      if (bytes >= 1e12) sizeStr = `${(bytes / 1e12).toFixed(1)} TB`;
+      else if (bytes >= 1e9) sizeStr = `${(bytes / 1e9).toFixed(1)} GB`;
+      else if (bytes >= 1e6) sizeStr = `${(bytes / 1e6).toFixed(1)} MB`;
+      else sizeStr = `${(bytes / 1e3).toFixed(1)} KB`;
+
+      // Count total files (S3 objects + non-annexed git files)
+      const gitFiles = tree.filter((f) => f.type === "blob" && !f.path.startsWith("."));
+      const totalFiles = s3Stats.objectCount + gitFiles.length;
+      seeded.sizes = [`${sizeStr} (${totalFiles} files)`];
+
+      // Compute formats from tree paths
+      const extensions = [
+        ...new Set(
+          treePaths
+            .map((p) => {
+              const lastDot = p.lastIndexOf(".");
+              return lastDot > 0 ? p.slice(lastDot) : null;
+            })
+            .filter((e): e is string => e !== null),
+        ),
+      ].sort();
+      if (extensions.length > 0) seeded.formats = extensions;
+    } catch (sizeErr) {
+      console.warn(`[admin-enrich] S3 stats failed for ${datasetId}: ${errorMessage(sizeErr)}`);
+    }
+
+    // Stage 1b: ORCID discovery
+    let seededWithOrcids = seeded;
+    let orcidDiscoveryCount = 0;
+    try {
+      const orcidResult = await discoverOrcidsFromReferencedDois(bidsDescription, seeded.authors);
+      orcidDiscoveryCount = Object.keys(orcidResult.discoveries).length;
+      if (orcidDiscoveryCount > 0) {
+        const authors = { ...seeded.authors };
+        for (const [name, discovery] of Object.entries(orcidResult.discoveries)) {
+          authors[name] = {
+            ...authors[name],
+            orcid: discovery.orcid,
+            affiliations: discovery.affiliations ?? authors[name]?.affiliations,
+          };
         }
+        seededWithOrcids = { ...seeded, authors };
       }
-
-      // Read existing metadata
-      let existingMetadata: NemarMetadataV2 | null = null;
-      const nemarMetaFile =
-        tree.find((f) => f.path === ".nemar/metadata.json") ||
-        tree.find((f) => f.path === "nemar_metadata.json");
-      if (nemarMetaFile) {
-        try {
-          const nemarContent = await getBlobContent(repoName, nemarMetaFile.sha, pat);
-          const parsed = parseNemarMetadata(JSON.parse(nemarContent));
-          if (parsed?.version === "2.0") {
-            existingMetadata = parsed;
-          }
-        } catch (parseErr) {
-          console.error(
-            `[admin-enrich] Existing metadata corrupt for ${datasetId}: ${errorMessage(parseErr)}`,
-          );
-        }
-      }
-
-      // Source hash for change detection
-      const sourceContent = readmeContent + "\n---\n" + JSON.stringify(bidsDescription);
-      const sourceHashBuffer = await crypto.subtle.digest(
-        "SHA-256",
-        new TextEncoder().encode(sourceContent),
+    } catch (orcidErr) {
+      console.warn(
+        `[admin-enrich] ORCID discovery failed for ${datasetId}: ${errorMessage(orcidErr)}`,
       );
-      const sourceHash = Array.from(new Uint8Array(sourceHashBuffer))
-        .map((b) => b.toString(16).padStart(2, "0"))
-        .join("");
+    }
 
-      // Skip if already validated and unchanged
-      if (existingMetadata?.pipeline_stage === "validated" && !force) {
-        if (existingMetadata.source_hash === sourceHash) {
-          return c.json({
-            message: "Metadata already validated and sources unchanged",
-            dataset_id: datasetId,
-            skipped: true,
-            pipeline_stage: "validated",
-          });
-        }
-      }
+    // Stage 2: LLM enrichment
+    const llmResult = await enrichFromReadme(readmeContent, bidsDescription, apiKey);
+    const enriched = mergeWithExisting(seededWithOrcids, llmResult);
+    const enrichedFields = Object.keys(llmResult).filter(
+      (k) => llmResult[k as keyof typeof llmResult] !== undefined,
+    );
 
-      // Stage 1: Seed from BIDS
-      const seeded = seedFromBids(bidsDescription, existingMetadata, datasetId, treePaths);
+    // Stage 2b: MeSH validation
+    let meshValidated = enriched;
+    try {
+      const meshResult = await validateMeshTerms(enriched);
+      meshValidated = meshResult.metadata;
+    } catch (meshErr) {
+      console.warn(
+        `[admin-enrich] MeSH validation failed for ${datasetId}: ${errorMessage(meshErr)}`,
+      );
+    }
 
-      // Stage 1a: Compute sizes from S3 and formats from tree
-      try {
-        const { getDatasetS3Stats } = await import("../services/s3.js");
-        const s3Stats = await getDatasetS3Stats(
-          {
-            bucket: c.env.S3_BUCKET,
-            region: c.env.AWS_REGION,
-            accessKeyId: c.env.AWS_ACCESS_KEY_ID,
-            secretAccessKey: c.env.AWS_SECRET_ACCESS_KEY,
-          },
-          datasetId,
-        );
+    // Stage 3: LLM validation with correction loop
+    const MAX_CORRECTIONS = 3;
+    let finalMetadata = meshValidated;
+    let validationResult = null;
 
-        // Format size human-readable
-        const bytes = s3Stats.totalSize;
-        let sizeStr: string;
-        if (bytes >= 1e12) sizeStr = `${(bytes / 1e12).toFixed(1)} TB`;
-        else if (bytes >= 1e9) sizeStr = `${(bytes / 1e9).toFixed(1)} GB`;
-        else if (bytes >= 1e6) sizeStr = `${(bytes / 1e6).toFixed(1)} MB`;
-        else sizeStr = `${(bytes / 1e3).toFixed(1)} KB`;
-
-        // Count total files (S3 objects + non-annexed git files)
-        const gitFiles = tree.filter(
-          (f) => f.type === "blob" && !f.path.startsWith("."),
-        );
-        const totalFiles = s3Stats.objectCount + gitFiles.length;
-        seeded.sizes = [`${sizeStr} (${totalFiles} files)`];
-
-        // Compute formats from tree paths
-        const extensions = [
-          ...new Set(
-            treePaths
-              .map((p) => {
-                const lastDot = p.lastIndexOf(".");
-                return lastDot > 0 ? p.slice(lastDot) : null;
-              })
-              .filter((e): e is string => e !== null),
-          ),
-        ].sort();
-        if (extensions.length > 0) seeded.formats = extensions;
-      } catch (sizeErr) {
-        console.warn(
-          `[admin-enrich] S3 stats failed for ${datasetId}: ${errorMessage(sizeErr)}`,
-        );
-      }
-
-      // Stage 1b: ORCID discovery
-      let seededWithOrcids = seeded;
-      let orcidDiscoveryCount = 0;
-      try {
-        const orcidResult = await discoverOrcidsFromReferencedDois(
+    try {
+      let currentMetadata = meshValidated;
+      for (let attempt = 0; attempt <= MAX_CORRECTIONS; attempt++) {
+        const validated = await validateMetadata(
+          currentMetadata,
+          readmeContent,
           bidsDescription,
-          seeded.authors,
+          apiKey,
         );
-        orcidDiscoveryCount = Object.keys(orcidResult.discoveries).length;
-        if (orcidDiscoveryCount > 0) {
-          const authors = { ...seeded.authors };
-          for (const [name, discovery] of Object.entries(orcidResult.discoveries)) {
-            authors[name] = {
-              ...authors[name],
-              orcid: discovery.orcid,
-              affiliations: discovery.affiliations ?? authors[name]?.affiliations,
-            };
-          }
-          seededWithOrcids = { ...seeded, authors };
-        }
-      } catch (orcidErr) {
-        console.warn(
-          `[admin-enrich] ORCID discovery failed for ${datasetId}: ${errorMessage(orcidErr)}`,
-        );
-      }
+        validationResult = validated.validation;
+        finalMetadata = validated.metadata;
 
-      // Stage 2: LLM enrichment
-      const llmResult = await enrichFromReadme(readmeContent, bidsDescription, apiKey);
-      const enriched = mergeWithExisting(seededWithOrcids, llmResult);
-      const enrichedFields = Object.keys(llmResult).filter(
-        (k) => llmResult[k as keyof typeof llmResult] !== undefined,
-      );
+        if (validated.validation.valid || attempt === MAX_CORRECTIONS) break;
 
-      // Stage 2b: MeSH validation
-      let meshValidated = enriched;
-      try {
-        const meshResult = await validateMeshTerms(enriched);
-        meshValidated = meshResult.metadata;
-      } catch (meshErr) {
-        console.warn(
-          `[admin-enrich] MeSH validation failed for ${datasetId}: ${errorMessage(meshErr)}`,
-        );
-      }
-
-      // Stage 3: LLM validation with correction loop
-      const MAX_CORRECTIONS = 3;
-      let finalMetadata = meshValidated;
-      let validationResult = null;
-
-      try {
-        let currentMetadata = meshValidated;
-        for (let attempt = 0; attempt <= MAX_CORRECTIONS; attempt++) {
-          const validated = await validateMetadata(
+        try {
+          const corrections = await correctFromFeedback(
             currentMetadata,
+            validated.validation.blocking_issues,
+            validated.validation.warnings,
             readmeContent,
             bidsDescription,
             apiKey,
           );
-          validationResult = validated.validation;
-          finalMetadata = validated.metadata;
-
-          if (validated.validation.valid || attempt === MAX_CORRECTIONS) break;
-
-          try {
-            const corrections = await correctFromFeedback(
-              currentMetadata,
-              validated.validation.blocking_issues,
-              validated.validation.warnings,
-              readmeContent,
-              bidsDescription,
-              apiKey,
-            );
-            currentMetadata = mergeWithExisting(currentMetadata, corrections);
-          } catch {
-            break;
-          }
+          currentMetadata = mergeWithExisting(currentMetadata, corrections);
+        } catch {
+          break;
         }
-      } catch (valErr) {
-        console.warn(
-          `[admin-enrich] Validation failed for ${datasetId}: ${errorMessage(valErr)}`,
-        );
       }
+    } catch (valErr) {
+      console.warn(`[admin-enrich] Validation failed for ${datasetId}: ${errorMessage(valErr)}`);
+    }
 
-      // Store source hash
-      finalMetadata.source_hash = sourceHash;
+    // Store source hash
+    finalMetadata.source_hash = sourceHash;
 
-      // Commit .nemar/metadata.json
-      const metadataContent = JSON.stringify(finalMetadata, null, 2);
-      let commitError: string | undefined;
-      try {
+    // Commit .nemar/metadata.json
+    const metadataContent = JSON.stringify(finalMetadata, null, 2);
+    let commitError: string | undefined;
+    try {
+      await createOrUpdateFile(
+        repoName,
+        ".nemar/metadata.json",
+        metadataContent,
+        `Update NEMAR metadata (pipeline: ${finalMetadata.pipeline_stage})`,
+        pat,
+      );
+    } catch (err) {
+      commitError = errorMessage(err);
+    }
+
+    // Ensure .bidsignore includes .nemar/
+    try {
+      const bidsignoreFile = tree.find((f) => f.path === ".bidsignore");
+      let bidsignoreContent = "";
+      if (bidsignoreFile) {
+        bidsignoreContent = await getBlobContent(repoName, bidsignoreFile.sha, pat);
+      }
+      if (!bidsignoreContent.includes(".nemar/")) {
+        bidsignoreContent = bidsignoreContent
+          ? `${bidsignoreContent.trimEnd()}\n.nemar/\n`
+          : ".nemar/\n";
         await createOrUpdateFile(
           repoName,
-          ".nemar/metadata.json",
-          metadataContent,
-          `Update NEMAR metadata (pipeline: ${finalMetadata.pipeline_stage})`,
+          ".bidsignore",
+          bidsignoreContent,
+          "Add .nemar/ to .bidsignore",
           pat,
         );
-      } catch (err) {
-        commitError = errorMessage(err);
       }
-
-      // Ensure .bidsignore includes .nemar/
-      try {
-        const bidsignoreFile = tree.find((f) => f.path === ".bidsignore");
-        let bidsignoreContent = "";
-        if (bidsignoreFile) {
-          bidsignoreContent = await getBlobContent(repoName, bidsignoreFile.sha, pat);
-        }
-        if (!bidsignoreContent.includes(".nemar/")) {
-          bidsignoreContent = bidsignoreContent
-            ? `${bidsignoreContent.trimEnd()}\n.nemar/\n`
-            : ".nemar/\n";
-          await createOrUpdateFile(repoName, ".bidsignore", bidsignoreContent, "Add .nemar/ to .bidsignore", pat);
-        }
-      } catch (err) {
-        console.error(`[admin-enrich] Failed to update .bidsignore for ${datasetId}:`, err);
-      }
-
-      // Cache in D1
-      try {
-        await db
-          .prepare(
-            "UPDATE datasets SET enrichment_json = ?, enrichment_updated_at = datetime('now'), updated_at = datetime('now') WHERE dataset_id = ?",
-          )
-          .bind(metadataContent, datasetId)
-          .run();
-      } catch (err) {
-        console.error(`[admin-enrich] Failed to cache enrichment in D1 for ${datasetId}:`, err);
-      }
-
-      return c.json({
-        message: `Metadata pipeline completed (stage: ${finalMetadata.pipeline_stage})`,
-        dataset_id: datasetId,
-        pipeline_stage: finalMetadata.pipeline_stage,
-        seeded_fields: {
-          authors: Object.keys(seeded.authors || {}).length,
-          related_identifiers: (seeded.related_identifiers || []).length,
-          orcids_discovered: orcidDiscoveryCount,
-        },
-        enriched_fields: enrichedFields,
-        validation: validationResult
-          ? {
-              valid: validationResult.valid,
-              blocking_issues: validationResult.blocking_issues,
-              warnings: validationResult.warnings,
-            }
-          : null,
-        ...(commitError && { commit_error: commitError }),
-      });
-    } catch (error) {
-      console.error(`[admin-enrich] Failed for ${datasetId}:`, error);
-      return c.json({ error: "Enrichment pipeline failed", details: errorMessage(error) }, 500);
+    } catch (err) {
+      console.error(`[admin-enrich] Failed to update .bidsignore for ${datasetId}:`, err);
     }
-  },
-);
+
+    // Cache in D1
+    try {
+      await db
+        .prepare(
+          "UPDATE datasets SET enrichment_json = ?, enrichment_updated_at = datetime('now'), updated_at = datetime('now') WHERE dataset_id = ?",
+        )
+        .bind(metadataContent, datasetId)
+        .run();
+    } catch (err) {
+      console.error(`[admin-enrich] Failed to cache enrichment in D1 for ${datasetId}:`, err);
+    }
+
+    return c.json({
+      message: `Metadata pipeline completed (stage: ${finalMetadata.pipeline_stage})`,
+      dataset_id: datasetId,
+      pipeline_stage: finalMetadata.pipeline_stage,
+      seeded_fields: {
+        authors: Object.keys(seeded.authors || {}).length,
+        related_identifiers: (seeded.related_identifiers || []).length,
+        orcids_discovered: orcidDiscoveryCount,
+      },
+      enriched_fields: enrichedFields,
+      validation: validationResult
+        ? {
+            valid: validationResult.valid,
+            blocking_issues: validationResult.blocking_issues,
+            warnings: validationResult.warnings,
+          }
+        : null,
+      ...(commitError && { commit_error: commitError }),
+    });
+  } catch (error) {
+    console.error(`[admin-enrich] Failed for ${datasetId}:`, error);
+    return c.json({ error: "Enrichment pipeline failed", details: errorMessage(error) }, 500);
+  }
+});
 
 /**
  * POST /admin/datasets/:id/enrichment - Submit rich metadata enrichment
@@ -3276,7 +3290,12 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
         const msg = errorMessage(err);
         await updateProgress("ci_check", msg);
         return c.json(
-          { error: `CI check failed: ${msg}`, step: "ci_check", steps_completed: completed, step_results: stepResults },
+          {
+            error: `CI check failed: ${msg}`,
+            step: "ci_check",
+            steps_completed: completed,
+            step_results: stepResults,
+          },
           500,
         );
       }
@@ -3386,7 +3405,12 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
       const msg = errorMessage(err);
       await updateProgress("repo_public", msg);
       return c.json(
-        { error: `repo_public failed: ${msg}`, step: "repo_public", steps_completed: completed, step_results: stepResults },
+        {
+          error: `repo_public failed: ${msg}`,
+          step: "repo_public",
+          steps_completed: completed,
+          step_results: stepResults,
+        },
         500,
       );
     }
@@ -3445,7 +3469,12 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
       const msg = errorMessage(err);
       await updateProgress("tag_protect", msg);
       return c.json(
-        { error: `Tag protection failed: ${msg}`, step: "tag_protect", steps_completed: completed, step_results: stepResults },
+        {
+          error: `Tag protection failed: ${msg}`,
+          step: "tag_protect",
+          steps_completed: completed,
+          step_results: stepResults,
+        },
         500,
       );
     }
@@ -3515,7 +3544,10 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
                 enrichment = nemarMetadataToEnrichment(nemarParsed);
               }
             } catch (nemarErr) {
-              console.warn(`[publish] doi_create: .nemar/metadata.json enrichment skipped:`, nemarErr);
+              console.warn(
+                "[publish] doi_create: .nemar/metadata.json enrichment skipped:",
+                nemarErr,
+              );
             }
           }
         }
@@ -3614,7 +3646,10 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
         `[publish] ${parseMsg} for ${repoName}. Content starts with: ${content.substring(0, 200)}`,
       );
       await updateProgress(stepName, parseMsg);
-      return c.json({ error: parseMsg, step: stepName, steps_completed: completed, step_results: stepResults }, 500);
+      return c.json(
+        { error: parseMsg, step: stepName, steps_completed: completed, step_results: stepResults },
+        500,
+      );
     }
   }
 
@@ -3650,7 +3685,12 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
     if (!row?.zenodo_concept_id) {
       await updateProgress(stepName, "No Zenodo deposition found");
       return c.json(
-        { error: "No Zenodo deposition ID found", step: stepName, steps_completed: completed, step_results: stepResults },
+        {
+          error: "No Zenodo deposition ID found",
+          step: stepName,
+          steps_completed: completed,
+          step_results: stepResults,
+        },
         500,
       );
     }
@@ -3659,7 +3699,10 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
       const msg = `Invalid Zenodo deposition ID: ${row.zenodo_concept_id}`;
       console.error(`[publish] ${msg} for dataset ${datasetId}`);
       await updateProgress(stepName, msg);
-      return c.json({ error: msg, step: stepName, steps_completed: completed, step_results: stepResults }, 500);
+      return c.json(
+        { error: msg, step: stepName, steps_completed: completed, step_results: stepResults },
+        500,
+      );
     }
     const isSandbox = row.is_sandbox === 1;
     const token = isSandbox ? c.env.ZENODO_SANDBOX_API_KEY : c.env.ZENODO_API_KEY;
@@ -3668,7 +3711,10 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
         ? "Zenodo sandbox API key not configured"
         : "Zenodo API key not configured";
       await updateProgress(stepName, msg);
-      return c.json({ error: msg, step: stepName, steps_completed: completed, step_results: stepResults }, 500);
+      return c.json(
+        { error: msg, step: stepName, steps_completed: completed, step_results: stepResults },
+        500,
+      );
     }
     return { depositionId, token, isSandbox };
   }
@@ -3697,7 +3743,10 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
         const msg = `Failed to write default Version to dataset_description.json: ${errorMessage(writeErr)}`;
         console.error(`[publish] ${msg}`);
         await updateProgress(stepName, msg);
-        return c.json({ error: msg, step: stepName, steps_completed: completed, step_results: stepResults }, 500);
+        return c.json(
+          { error: msg, step: stepName, steps_completed: completed, step_results: stepResults },
+          500,
+        );
       }
     }
     const version = String(datasetDesc.Version);
@@ -4018,7 +4067,10 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
       } catch (err) {
         // Zenodo backup is non-fatal for EZID datasets; log and continue
         console.error(`[publish] Zenodo backup failed for ${datasetId} (non-fatal):`, err);
-        await updateProgress("upload_to_zenodo", `Non-fatal: Zenodo backup failed: ${errorMessage(err)}`);
+        await updateProgress(
+          "upload_to_zenodo",
+          `Non-fatal: Zenodo backup failed: ${errorMessage(err)}`,
+        );
       }
     } else {
       try {
@@ -4285,7 +4337,12 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
       const msg = errorMessage(err);
       await updateProgress("notify_user", msg);
       return c.json(
-        { error: `Notification failed: ${msg}`, step: "notify_user", steps_completed: completed, step_results: stepResults },
+        {
+          error: `Notification failed: ${msg}`,
+          step: "notify_user",
+          steps_completed: completed,
+          step_results: stepResults,
+        },
         500,
       );
     }
