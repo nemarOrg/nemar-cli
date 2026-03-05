@@ -1122,8 +1122,10 @@ doiCommand
             } else {
               metaSpinner.warn("Existing metadata has unsupported version, starting fresh");
             }
-          } catch {
-            metaSpinner.warn("Could not parse existing metadata, starting fresh");
+          } catch (parseErr) {
+            metaSpinner.warn(
+              `Could not parse existing metadata (${parseErr instanceof Error ? parseErr.message : String(parseErr)}), starting fresh`,
+            );
           }
         } else {
           metaSpinner.info("No existing .nemar/metadata.json found, starting fresh");
@@ -1226,6 +1228,7 @@ doiCommand
           llmSpinner.text = "Polling workflow status...";
           const maxAttempts = 60; // 5 minutes at 5s intervals
           let conclusion = "";
+          let consecutiveFailures = 0;
           for (let attempt = 0; attempt < maxAttempts; attempt++) {
             const poll = bunSpawn({
               cmd: [
@@ -1245,10 +1248,22 @@ doiCommand
               stderr: "pipe",
             });
             const pollOut = await new Response(poll.stdout).text();
-            await poll.exited;
+            const pollErr = await new Response(poll.stderr).text();
+            const pollExit = await poll.exited;
+
+            if (pollExit !== 0) {
+              consecutiveFailures++;
+              if (consecutiveFailures >= 3) {
+                llmSpinner.warn(`gh CLI error: ${pollErr.trim()}`);
+                break;
+              }
+              await new Promise((r) => setTimeout(r, 5000));
+              continue;
+            }
 
             try {
               const runs = JSON.parse(pollOut.trim());
+              consecutiveFailures = 0;
               if (runs.length > 0) {
                 const run = runs[0];
                 if (run.status === "completed") {
@@ -1258,7 +1273,13 @@ doiCommand
                 llmSpinner.text = `Workflow ${run.status}... (${attempt * 5}s)`;
               }
             } catch {
-              // Parse error, keep polling
+              consecutiveFailures++;
+              if (consecutiveFailures >= 3) {
+                llmSpinner.warn(
+                  `Unable to parse workflow status (raw: ${pollOut.trim().slice(0, 200)})`,
+                );
+                break;
+              }
             }
 
             await new Promise((r) => setTimeout(r, 5000));
@@ -1275,16 +1296,26 @@ doiCommand
               try {
                 const parsed = JSON.parse(updatedContent);
                 if (parsed && typeof parsed === "object" && parsed.version === "2.0") {
+                  // Deep-merge authors to preserve manually-entered ORCIDs
+                  const manualAuthors = enrichment.authors;
                   Object.assign(enrichment, parsed);
+                  if (manualAuthors) {
+                    enrichment.authors = { ...parsed.authors, ...manualAuthors };
+                  }
                   const stage = parsed.pipeline_stage || "unknown";
                   console.log(chalk.gray(`  Pipeline stage: ${stage}`));
-                  if (parsed.authors) {
-                    const authorCount = Object.keys(parsed.authors).length;
+                  if (enrichment.authors) {
+                    const authorCount = Object.keys(enrichment.authors).length;
                     console.log(chalk.gray(`  Authors: ${authorCount}`));
                   }
                 }
-              } catch {
-                // Keep existing enrichment
+              } catch (parseErr) {
+                console.log(
+                  chalk.yellow(
+                    `  Warning: Could not parse updated metadata: ${parseErr instanceof Error ? parseErr.message : String(parseErr)}`,
+                  ),
+                );
+                console.log(chalk.gray("  Using pre-workflow enrichment data"));
               }
             }
           } else {

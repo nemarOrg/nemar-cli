@@ -203,7 +203,13 @@ export async function queryCrossrefDoi(doi: string): Promise<DataCiteDoiResult |
     return { doi, creators };
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    console.warn(`[orcid-discovery] Crossref query failed for ${doi}: ${msg}`);
+    const isNetwork =
+      msg.includes("AbortError") || msg.includes("timeout") || msg.includes("fetch");
+    if (isNetwork) {
+      console.warn(`[orcid-discovery] Crossref query failed for ${doi}: ${msg}`);
+    } else {
+      console.error(`[orcid-discovery] Unexpected error querying Crossref for ${doi}:`, err);
+    }
     return null;
   }
 }

@@ -56,7 +56,6 @@
     "conf": "^13.0.1",
     "inquirer": "^9.2.15",
     "ora": "^8.0.1",
-    "wrangler": "^4.70.0",
     "zod": "^3.23.8"
   },
   "lint-staged": {
@@ -75,6 +74,7 @@
     "bcryptjs": "^3.0.3",
     "husky": "^9.1.7",
     "lint-staged": "^16.3.2",
-    "typescript": "^5.5.4"
+    "typescript": "^5.5.4",
+    "wrangler": "^4.70.0"
   }
 }

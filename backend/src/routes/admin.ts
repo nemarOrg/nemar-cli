@@ -1866,7 +1866,11 @@ adminRoutes.post("/datasets/:id/doi/update", zValidator("json", updateDoiSchema)
               );
               const nemarParsed = parseNemarMetadata(JSON.parse(nemarContent));
               if (nemarParsed) vEnrichment = nemarMetadataToEnrichment(nemarParsed, vEnrichment);
-            } catch {}
+            } catch (metaErr) {
+              console.warn(
+                `[doi/update] Metadata enrichment skipped for version ${ver.version}: ${metaErr instanceof Error ? metaErr.message : String(metaErr)}`,
+              );
+            }
           }
 
           const vDoi = extractDoi(versionIdentifier);
@@ -2185,8 +2189,8 @@ adminRoutes.get("/datasets/:id/files", async (c) => {
     // Use S3 for real sizes (git tree shows symlink sizes for annexed files)
     let totalSize = files.reduce((sum, f) => sum + f.size, 0);
     let fileCount = files.length;
+    const { getDatasetS3Stats, extractExtensions } = await import("../services/s3.js");
     try {
-      const { getDatasetS3Stats } = await import("../services/s3.js");
       const s3Stats = await getDatasetS3Stats(
         {
           bucket: c.env.S3_BUCKET,
@@ -2200,20 +2204,13 @@ adminRoutes.get("/datasets/:id/files", async (c) => {
         totalSize = s3Stats.totalSize;
         fileCount = s3Stats.objectCount;
       }
-    } catch {
-      // Fall back to tree sizes
+    } catch (s3Err) {
+      console.warn(
+        `[admin/files] S3 stats failed for ${datasetId}, using tree sizes: ${s3Err instanceof Error ? s3Err.message : String(s3Err)}`,
+      );
     }
 
-    const extensions = [
-      ...new Set(
-        files
-          .map((f) => {
-            const lastDot = f.path.lastIndexOf(".");
-            return lastDot > 0 ? f.path.slice(lastDot) : null;
-          })
-          .filter((e): e is string => e !== null),
-      ),
-    ].sort();
+    const extensions = extractExtensions(files.map((f) => f.path));
 
     return c.json({
       dataset_id: datasetId,

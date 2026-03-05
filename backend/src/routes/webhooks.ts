@@ -31,7 +31,7 @@ import {
 } from "../services/llm-enrich.js";
 import { generateManifest } from "../services/manifest.js";
 import { errorMessage, extractRepoName, readRepoMetadata } from "../services/repo-metadata.js";
-import { uploadManifest } from "../services/s3.js";
+import { extractExtensions, formatBytes, uploadManifest } from "../services/s3.js";
 import * as zenodo from "../services/zenodo.js";
 import type { Bindings } from "../types/bindings.js";
 
@@ -774,30 +774,14 @@ webhooks.post("/llm-enrich", async (c) => {
         dataset_id,
       );
 
-      const bytes = s3Stats.totalSize;
-      let sizeStr: string;
-      if (bytes >= 1e12) sizeStr = `${(bytes / 1e12).toFixed(1)} TB`;
-      else if (bytes >= 1e9) sizeStr = `${(bytes / 1e9).toFixed(1)} GB`;
-      else if (bytes >= 1e6) sizeStr = `${(bytes / 1e6).toFixed(1)} MB`;
-      else sizeStr = `${(bytes / 1e3).toFixed(1)} KB`;
+      const sizeStr = formatBytes(s3Stats.totalSize);
+      seeded.sizes = [`${sizeStr} (${s3Stats.objectCount} files)`];
 
-      const totalFiles = s3Stats.objectCount;
-      seeded.sizes = [`${sizeStr} (${totalFiles} files)`];
-
-      const extensions = [
-        ...new Set(
-          treePaths
-            .map((p) => {
-              const lastDot = p.lastIndexOf(".");
-              return lastDot > 0 ? p.slice(lastDot) : null;
-            })
-            .filter((e): e is string => e !== null),
-        ),
-      ].sort();
+      const extensions = extractExtensions(treePaths);
       if (extensions.length > 0) seeded.formats = extensions;
 
       console.log(
-        `[llm-enrich] Stage 1a (sizes): ${dataset_id} - ${sizeStr} (${totalFiles} files), ${extensions.length} formats`,
+        `[llm-enrich] Stage 1a (sizes): ${dataset_id} - ${sizeStr} (${s3Stats.objectCount} files), ${extensions.length} formats`,
       );
     } catch (sizeErr) {
       console.warn(
