@@ -781,8 +781,7 @@ webhooks.post("/llm-enrich", async (c) => {
       else if (bytes >= 1e6) sizeStr = `${(bytes / 1e6).toFixed(1)} MB`;
       else sizeStr = `${(bytes / 1e3).toFixed(1)} KB`;
 
-      const gitFiles = tree.filter((f) => f.type === "blob" && !f.path.startsWith("."));
-      const totalFiles = s3Stats.objectCount + gitFiles.length;
+      const totalFiles = s3Stats.objectCount;
       seeded.sizes = [`${sizeStr} (${totalFiles} files)`];
 
       const extensions = [

@@ -48,7 +48,6 @@ import {
   publishDataset,
   regenerateUserIam,
   revokeUser,
-  runEnrichment,
   submitEnrichment,
   updateDoi,
 } from "../lib/api.js";
@@ -1198,68 +1197,98 @@ doiCommand
         }
       }
 
-      // --- LLM Enrichment (runs on backend using server-side OpenRouter key) ---
-      if (options.llm !== false) {
+      // --- LLM Enrichment (triggers CI workflow on GitHub Actions) ---
+      if (options.llm !== false && dataset.github_repo) {
         console.log();
-        console.log(chalk.cyan("--- Running LLM enrichment pipeline (server-side) ---"));
+        console.log(chalk.cyan("--- Running LLM enrichment pipeline (CI workflow) ---"));
 
-        const llmSpinner = ora(
-          "Running full pipeline: seed -> ORCID discovery -> LLM -> MeSH -> validation...",
-        ).start();
+        const llmSpinner = ora("Triggering llm-enrichment workflow...").start();
         try {
-          const result = await runEnrichment(datasetId);
+          const { spawn: bunSpawn } = await import("bun");
+          const repo = dataset.github_repo;
 
-          if (result.skipped) {
-            llmSpinner.info(result.message);
-          } else {
-            llmSpinner.succeed(`Pipeline complete (stage: ${result.pipeline_stage})`);
-            if (result.seeded_fields) {
-              console.log(
-                chalk.gray(
-                  `  Seeded: ${result.seeded_fields.authors} authors, ${result.seeded_fields.related_identifiers} related IDs, ${result.seeded_fields.orcids_discovered} ORCIDs discovered`,
-                ),
-              );
-            }
-            if (result.enriched_fields && result.enriched_fields.length > 0) {
-              console.log(chalk.gray(`  Enriched: ${result.enriched_fields.join(", ")}`));
-            }
-            if (result.validation) {
-              if (result.validation.valid) {
-                console.log(chalk.green("  Validation: PASSED"));
-              } else {
-                console.log(chalk.yellow("  Validation: FAILED"));
-                for (const issue of result.validation.blocking_issues) {
-                  console.log(chalk.yellow(`    - ${issue}`));
-                }
-              }
-              if (result.validation.warnings.length > 0) {
-                for (const w of result.validation.warnings) {
-                  console.log(chalk.gray(`    Warning: ${w}`));
-                }
-              }
-            }
-            if (result.commit_error) {
-              console.log(chalk.yellow(`  Commit error: ${result.commit_error}`));
-            }
+          // Trigger the workflow
+          const trigger = bunSpawn({
+            cmd: ["gh", "workflow", "run", "llm-enrichment.yml", "--repo", repo, "--ref", "main"],
+            stdout: "pipe",
+            stderr: "pipe",
+          });
+          const triggerErr = await new Response(trigger.stderr).text();
+          const triggerExit = await trigger.exited;
+          if (triggerExit !== 0) {
+            throw new Error(`Failed to trigger workflow: ${triggerErr.trim()}`);
           }
 
-          // Re-read the metadata from repo since backend committed it
-          if (!result.skipped && dataset.github_repo) {
-            const updatedContent = await fetchGitHubFileContent(
-              dataset.github_repo,
-              ".nemar/metadata.json",
-            );
+          llmSpinner.text = "Waiting for workflow to register...";
+          await new Promise((r) => setTimeout(r, 3000));
+
+          // Poll for completion
+          llmSpinner.text = "Polling workflow status...";
+          const maxAttempts = 60; // 5 minutes at 5s intervals
+          let conclusion = "";
+          for (let attempt = 0; attempt < maxAttempts; attempt++) {
+            const poll = bunSpawn({
+              cmd: [
+                "gh",
+                "run",
+                "list",
+                "--repo",
+                repo,
+                "--workflow",
+                "llm-enrichment.yml",
+                "-L",
+                "1",
+                "--json",
+                "databaseId,status,conclusion",
+              ],
+              stdout: "pipe",
+              stderr: "pipe",
+            });
+            const pollOut = await new Response(poll.stdout).text();
+            await poll.exited;
+
+            try {
+              const runs = JSON.parse(pollOut.trim());
+              if (runs.length > 0) {
+                const run = runs[0];
+                if (run.status === "completed") {
+                  conclusion = run.conclusion || "unknown";
+                  break;
+                }
+                llmSpinner.text = `Workflow ${run.status}... (${attempt * 5}s)`;
+              }
+            } catch {
+              // Parse error, keep polling
+            }
+
+            await new Promise((r) => setTimeout(r, 5000));
+          }
+
+          if (!conclusion) {
+            llmSpinner.warn("Workflow timed out after 5 minutes (may still be running)");
+          } else if (conclusion === "success") {
+            llmSpinner.succeed("LLM enrichment workflow completed successfully");
+
+            // Re-read metadata from repo since CI committed it
+            const updatedContent = await fetchGitHubFileContent(repo, ".nemar/metadata.json");
             if (updatedContent) {
               try {
                 const parsed = JSON.parse(updatedContent);
                 if (parsed && typeof parsed === "object" && parsed.version === "2.0") {
-                  // Replace enrichment with the full pipeline result
                   Object.assign(enrichment, parsed);
+                  const stage = parsed.pipeline_stage || "unknown";
+                  console.log(chalk.gray(`  Pipeline stage: ${stage}`));
+                  if (parsed.authors) {
+                    const authorCount = Object.keys(parsed.authors).length;
+                    console.log(chalk.gray(`  Authors: ${authorCount}`));
+                  }
                 }
               } catch {
                 // Keep existing enrichment
               }
             }
+          } else {
+            llmSpinner.fail(`LLM enrichment workflow failed (conclusion: ${conclusion})`);
           }
         } catch (error) {
           llmSpinner.fail("LLM enrichment pipeline failed");

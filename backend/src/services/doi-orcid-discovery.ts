@@ -181,22 +181,24 @@ export async function queryCrossrefDoi(doi: string): Promise<DataCiteDoiResult |
     if (!Array.isArray(authors) || authors.length === 0) return null;
 
     // Convert Crossref authors to DataCiteCreator format
-    const creators: DataCiteCreator[] = authors.map((a) => {
-      const nameIdentifiers: DataCiteCreator["nameIdentifiers"] = [];
-      if (a.ORCID) {
-        nameIdentifiers.push({
-          nameIdentifier: a.ORCID,
-          nameIdentifierScheme: "ORCID",
-        });
-      }
-      return {
-        name: a.family && a.given ? `${a.family}, ${a.given}` : a.name || a.family || "",
-        givenName: a.given,
-        familyName: a.family,
-        nameIdentifiers,
-        affiliation: (a.affiliation || []).filter((aff) => aff.name),
-      };
-    });
+    const creators: DataCiteCreator[] = authors
+      .map((a) => {
+        const nameIdentifiers: DataCiteCreator["nameIdentifiers"] = [];
+        if (a.ORCID) {
+          nameIdentifiers.push({
+            nameIdentifier: a.ORCID,
+            nameIdentifierScheme: "ORCID",
+          });
+        }
+        return {
+          name: a.family && a.given ? `${a.family}, ${a.given}` : a.name || a.family || "",
+          givenName: a.given,
+          familyName: a.family,
+          nameIdentifiers,
+          affiliation: (a.affiliation || []).filter((aff) => aff.name),
+        };
+      })
+      .filter((c) => c.name.trim() !== "");
 
     return { doi, creators };
   } catch (err) {

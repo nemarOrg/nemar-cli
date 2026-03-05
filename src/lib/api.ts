@@ -1269,43 +1269,6 @@ export async function submitEnrichment(
   );
 }
 
-export interface RunEnrichmentResponse {
-  message: string;
-  dataset_id: string;
-  pipeline_stage?: string;
-  skipped?: boolean;
-  seeded_fields?: {
-    authors: number;
-    related_identifiers: number;
-    orcids_discovered: number;
-  };
-  enriched_fields?: string[];
-  validation?: {
-    valid: boolean;
-    blocking_issues: string[];
-    warnings: string[];
-  };
-  commit_error?: string;
-}
-
-/**
- * Run the full LLM enrichment pipeline on the backend (admin only).
- * Uses the backend's OPENROUTER_API_KEY; no local key needed.
- */
-export async function runEnrichment(
-  datasetId: string,
-  force = false,
-): Promise<RunEnrichmentResponse> {
-  return request<RunEnrichmentResponse>(
-    `/admin/datasets/${datasetId}/enrich`,
-    {
-      method: "POST",
-      body: JSON.stringify({ force }),
-    },
-    true,
-  );
-}
-
 export interface DatasetFileInfo {
   path: string;
   size: number;
