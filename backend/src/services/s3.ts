@@ -64,8 +64,13 @@ export async function generatePresignedPutUrls(
     // Check both raw and URL-decoded forms to catch double-encoded traversal (e.g. %252e%252e)
     const decoded = decodeURIComponent(file);
     if (
-      decoded.includes("..") || decoded.startsWith("/") || decoded.includes("\\") || decoded.includes("\0") ||
-      file.includes("..") || file.startsWith("/") || file.includes("\\")
+      decoded.includes("..") ||
+      decoded.startsWith("/") ||
+      decoded.includes("\\") ||
+      decoded.includes("\0") ||
+      file.includes("..") ||
+      file.startsWith("/") ||
+      file.includes("\\")
     ) {
       throw new Error(`Invalid file path: ${file}`);
     }
@@ -96,8 +101,13 @@ export async function generatePresignedGetUrl(
   // Check both raw and URL-decoded forms to catch double-encoded traversal
   const decoded = decodeURIComponent(key);
   if (
-    decoded.includes("..") || decoded.startsWith("/") || decoded.includes("\\") || decoded.includes("\0") ||
-    key.includes("..") || key.startsWith("/") || key.includes("\\")
+    decoded.includes("..") ||
+    decoded.startsWith("/") ||
+    decoded.includes("\\") ||
+    decoded.includes("\0") ||
+    key.includes("..") ||
+    key.startsWith("/") ||
+    key.includes("\\")
   ) {
     throw new Error(`Invalid S3 key: ${key}`);
   }
@@ -153,16 +163,16 @@ export async function generateDatasetUploadUrls(
   });
 }
 
-/**
- * List all object keys under a given prefix
- */
-export async function listObjectKeys(
+// ---------------------------------------------------------------------------
+// S3 ListObjectsV2 pagination helper
+// ---------------------------------------------------------------------------
+
+async function* listObjectPages(
   options: PresignedUrlOptions,
   prefix: string,
-): Promise<string[]> {
+): AsyncGenerator<string> {
   const { bucket, region } = options;
   const aws = createS3Client(options);
-  const keys: string[] = [];
   let continuationToken: string | undefined;
 
   do {
@@ -182,23 +192,85 @@ export async function listObjectKeys(
 
     const xml = await res.text();
 
-    // Parse keys from XML response
-    const keyMatches = xml.matchAll(/<Key>([^<]+)<\/Key>/g);
-    for (const match of keyMatches) {
-      keys.push(match[1]);
+    if (!xml.includes("<ListBucketResult")) {
+      throw new Error(`Unexpected S3 response (not ListBucketResult): ${xml.slice(0, 200)}`);
     }
 
-    // Check for continuation
+    yield xml;
+
     const truncated = xml.includes("<IsTruncated>true</IsTruncated>");
     if (truncated) {
       const tokenMatch = xml.match(/<NextContinuationToken>([^<]+)<\/NextContinuationToken>/);
-      continuationToken = tokenMatch?.[1];
+      if (!tokenMatch?.[1]) {
+        throw new Error("S3 response is truncated but no NextContinuationToken found");
+      }
+      continuationToken = tokenMatch[1];
     } else {
       continuationToken = undefined;
     }
   } while (continuationToken);
+}
+
+/**
+ * Get total size and object count for a dataset's S3 objects.
+ * Uses S3 ListObjectsV2 for real file sizes (git tree shows symlink sizes for annexed files).
+ */
+export async function getDatasetS3Stats(
+  options: PresignedUrlOptions,
+  datasetId: string,
+): Promise<{ totalSize: number; objectCount: number }> {
+  let totalSize = 0;
+  let objectCount = 0;
+
+  for await (const xml of listObjectPages(options, `${datasetId}/objects/`)) {
+    const contentMatches = xml.matchAll(
+      /<Contents>[\s\S]*?<Size>(\d+)<\/Size>[\s\S]*?<\/Contents>/g,
+    );
+    for (const match of contentMatches) {
+      totalSize += Number.parseInt(match[1], 10);
+      objectCount++;
+    }
+  }
+
+  return { totalSize, objectCount };
+}
+
+/**
+ * List all object keys under a given prefix.
+ */
+export async function listObjectKeys(
+  options: PresignedUrlOptions,
+  prefix: string,
+): Promise<string[]> {
+  const keys: string[] = [];
+
+  for await (const xml of listObjectPages(options, prefix)) {
+    for (const match of xml.matchAll(/<Key>([^<]+)<\/Key>/g)) {
+      keys.push(match[1]);
+    }
+  }
 
   return keys;
+}
+
+// ---------------------------------------------------------------------------
+// Shared utilities
+// ---------------------------------------------------------------------------
+
+export function formatBytes(bytes: number): string {
+  if (bytes >= 1e12) return `${(bytes / 1e12).toFixed(1)} TB`;
+  if (bytes >= 1e9) return `${(bytes / 1e9).toFixed(1)} GB`;
+  if (bytes >= 1e6) return `${(bytes / 1e6).toFixed(1)} MB`;
+  return `${(bytes / 1e3).toFixed(1)} KB`;
+}
+
+export function extractExtensions(paths: string[]): string[] {
+  const exts = new Set<string>();
+  for (const p of paths) {
+    const lastDot = p.lastIndexOf(".");
+    if (lastDot > 0) exts.add(p.slice(lastDot));
+  }
+  return [...exts].sort();
 }
 
 /**

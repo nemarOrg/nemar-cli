@@ -108,8 +108,16 @@ async function fetchGitHubFileContent(repoName: string, path: string): Promise<s
     stderr: "pipe",
   });
   const base64Content = await new Response(proc.stdout).text();
+  const stderrContent = await new Response(proc.stderr).text();
   const exitCode = await proc.exited;
-  if (exitCode !== 0 || !base64Content.trim()) return null;
+  if (exitCode !== 0) {
+    // Log non-404 errors so we can distinguish "not found" from real failures
+    if (stderrContent.trim() && !stderrContent.includes("404")) {
+      console.warn(`[fetchGitHubFileContent] Error fetching ${path}: ${stderrContent.trim()}`);
+    }
+    return null;
+  }
+  if (!base64Content.trim()) return null;
   return Buffer.from(base64Content.trim(), "base64").toString("utf-8");
 }
 
@@ -1103,16 +1111,210 @@ doiCommand
         console.log(`  DOI: ${chalk.cyan(doiInfo.concept_doi)}`);
       }
 
-      const enrichment: NemarMetadataPayload = { version: "2.0" };
+      // Fetch existing .nemar/metadata.json to merge with (never overwrite)
+      let enrichment: NemarMetadataPayload = { version: "2.0" };
+      if (dataset.github_repo) {
+        const metaSpinner = ora("Reading existing metadata...").start();
+        const existingContent = await fetchGitHubFileContent(
+          dataset.github_repo,
+          ".nemar/metadata.json",
+        );
+        if (existingContent) {
+          try {
+            const parsed = JSON.parse(existingContent);
+            if (parsed && typeof parsed === "object" && parsed.version === "2.0") {
+              enrichment = parsed as NemarMetadataPayload;
+              metaSpinner.succeed(
+                `Loaded existing metadata (stage: ${(parsed as Record<string, unknown>).pipeline_stage || "unknown"})`,
+              );
+            } else {
+              metaSpinner.warn("Existing metadata has unsupported version, starting fresh");
+            }
+          } catch (parseErr) {
+            metaSpinner.warn(
+              `Could not parse existing metadata (${parseErr instanceof Error ? parseErr.message : String(parseErr)}), starting fresh`,
+            );
+          }
+        } else {
+          metaSpinner.info("No existing .nemar/metadata.json found, starting fresh");
+        }
+      }
 
-      // --- Author ORCIDs ---
+      // --- LLM Enrichment (triggers CI workflow on GitHub Actions) ---
+      // Run BEFORE manual author entry so discovered ORCIDs are shown for confirmation
+      if (options.llm !== false && dataset.github_repo) {
+        console.log();
+        console.log(chalk.cyan("--- Running LLM enrichment pipeline (CI workflow) ---"));
+
+        const llmSpinner = ora("Triggering llm-enrichment workflow...").start();
+        try {
+          const { spawn: bunSpawn } = await import("bun");
+          const repo = dataset.github_repo;
+
+          // Trigger the workflow
+          const trigger = bunSpawn({
+            cmd: ["gh", "workflow", "run", "llm-enrichment.yml", "--repo", repo, "--ref", "main"],
+            stdout: "pipe",
+            stderr: "pipe",
+          });
+          const triggerErr = await new Response(trigger.stderr).text();
+          const triggerExit = await trigger.exited;
+          if (triggerExit !== 0) {
+            throw new Error(`Failed to trigger workflow: ${triggerErr.trim()}`);
+          }
+
+          llmSpinner.text = "Waiting for workflow to register...";
+          await new Promise((r) => setTimeout(r, 3000));
+
+          // Poll for completion
+          llmSpinner.text = "Polling workflow status...";
+          const maxAttempts = 60; // 5 minutes at 5s intervals
+          let conclusion = "";
+          let consecutiveFailures = 0;
+          for (let attempt = 0; attempt < maxAttempts; attempt++) {
+            const poll = bunSpawn({
+              cmd: [
+                "gh",
+                "run",
+                "list",
+                "--repo",
+                repo,
+                "--workflow",
+                "llm-enrichment.yml",
+                "-L",
+                "1",
+                "--json",
+                "databaseId,status,conclusion",
+              ],
+              stdout: "pipe",
+              stderr: "pipe",
+            });
+            const pollOut = await new Response(poll.stdout).text();
+            const pollErr = await new Response(poll.stderr).text();
+            const pollExit = await poll.exited;
+
+            if (pollExit !== 0) {
+              consecutiveFailures++;
+              if (consecutiveFailures >= 3) {
+                llmSpinner.warn(`gh CLI error: ${pollErr.trim()}`);
+                break;
+              }
+              await new Promise((r) => setTimeout(r, 5000));
+              continue;
+            }
+
+            try {
+              const runs = JSON.parse(pollOut.trim());
+              consecutiveFailures = 0;
+              if (runs.length > 0) {
+                const run = runs[0];
+                if (run.status === "completed") {
+                  conclusion = run.conclusion || "unknown";
+                  break;
+                }
+                llmSpinner.text = `Workflow ${run.status}... (${attempt * 5}s)`;
+              }
+            } catch (parseErr) {
+              consecutiveFailures++;
+              if (consecutiveFailures >= 3) {
+                llmSpinner.warn(
+                  `Unable to parse workflow status: ${parseErr instanceof Error ? parseErr.message : String(parseErr)} (raw: ${pollOut.trim().slice(0, 200)})`,
+                );
+                break;
+              }
+            }
+
+            await new Promise((r) => setTimeout(r, 5000));
+          }
+
+          let discoveryRan = false;
+          if (!conclusion) {
+            llmSpinner.warn("Workflow timed out after 5 minutes (may still be running)");
+          } else if (conclusion === "success") {
+            llmSpinner.succeed("LLM enrichment workflow completed successfully");
+
+            // Re-read metadata from repo since CI committed it
+            const updatedContent = await fetchGitHubFileContent(repo, ".nemar/metadata.json");
+            if (updatedContent) {
+              try {
+                const parsed = JSON.parse(updatedContent);
+                if (parsed && typeof parsed === "object" && parsed.version === "2.0") {
+                  // Merge LLM results into enrichment (preserves any fields set by earlier steps)
+                  Object.assign(enrichment, parsed);
+                  discoveryRan = true;
+                  const stage = parsed.pipeline_stage || "unknown";
+                  console.log(chalk.gray(`  Pipeline stage: ${stage}`));
+                  if (enrichment.authors) {
+                    const authorCount = Object.keys(enrichment.authors).length;
+                    console.log(chalk.gray(`  Authors: ${authorCount}`));
+                  }
+                }
+              } catch (parseErr) {
+                console.log(
+                  chalk.yellow(
+                    `  Warning: Could not parse updated metadata: ${parseErr instanceof Error ? parseErr.message : String(parseErr)}`,
+                  ),
+                );
+                console.log(chalk.gray("  Using pre-workflow enrichment data"));
+              }
+            } else {
+              console.log(
+                chalk.yellow(
+                  "  Warning: Could not fetch updated metadata after successful workflow.",
+                ),
+              );
+              console.log(chalk.gray("  Author data below may be from a previous run."));
+            }
+          } else {
+            llmSpinner.fail(`LLM enrichment workflow failed (conclusion: ${conclusion})`);
+          }
+
+          if (!discoveryRan) {
+            console.log(
+              chalk.yellow(
+                "  ORCID discovery did not complete. Authors below may be from previous metadata.",
+              ),
+            );
+          }
+        } catch (error) {
+          llmSpinner.fail("LLM enrichment pipeline failed");
+          console.log(chalk.gray(`  ${errorDetail(error)}`));
+          console.log(
+            chalk.yellow("  ORCID discovery did not run. You will need to enter ORCIDs manually."),
+          );
+        }
+      }
+
+      // --- Author ORCIDs (confirm discovered + supplement missing) ---
       console.log();
       console.log(chalk.cyan("--- Author ORCIDs ---"));
+
+      // Show authors discovered by the pipeline
+      const existingAuthors = enrichment.authors || {};
+      const authorNames = Object.keys(existingAuthors);
+      if (authorNames.length > 0) {
+        const withOrcid = authorNames.filter((n) => existingAuthors[n]?.orcid);
+        const withoutOrcid = authorNames.filter((n) => !existingAuthors[n]?.orcid);
+        console.log(chalk.gray(`  Discovered ${authorNames.length} authors from pipeline:`));
+        for (const name of withOrcid) {
+          console.log(chalk.green(`    [x] ${name}: ${existingAuthors[name]?.orcid}`));
+        }
+        for (const name of withoutOrcid) {
+          console.log(chalk.yellow(`    [ ] ${name}: no ORCID found`));
+        }
+        if (withoutOrcid.length > 0) {
+          console.log(chalk.gray(`  ${withoutOrcid.length} author(s) missing ORCIDs.`));
+        }
+      }
+
       const { updateAuthors } = await inquirer.prompt([
         {
           type: "confirm",
           name: "updateAuthors",
-          message: "Update author ORCIDs?",
+          message:
+            authorNames.length > 0
+              ? "Add or correct author ORCIDs?"
+              : "Add author ORCIDs manually?",
           default: false,
         },
       ]);
@@ -1132,11 +1334,17 @@ doiCommand
           ]);
           if (!authorName) break;
 
+          // Show current ORCID if one was discovered
+          const current = existingAuthors[authorName];
+          if (current?.orcid) {
+            console.log(chalk.gray(`  Current ORCID: ${current.orcid}`));
+          }
+
           const { orcid } = await inquirer.prompt([
             {
               type: "input",
               name: "orcid",
-              message: `ORCID for "${authorName}" (Enter to skip):`,
+              message: `ORCID for "${authorName}" (Enter to ${current?.orcid ? "keep current" : "skip"}):`,
               validate: (input: string) => {
                 if (!input) return true;
                 return ORCID_REGEX.test(input) || "Invalid ORCID format (XXXX-XXXX-XXXX-XXXX)";
@@ -1167,81 +1375,17 @@ doiCommand
         }
 
         if (Object.keys(authors).length > 0) {
-          enrichment.authors = authors;
-        }
-      }
-
-      // --- LLM Enrichment ---
-      if (options.llm !== false) {
-        console.log();
-        console.log(chalk.cyan("--- Generating enrichment from README ---"));
-
-        const apiKey = process.env.OPENROUTER_API_KEY;
-        if (!apiKey) {
-          console.log(chalk.yellow("  OPENROUTER_API_KEY not set; skipping LLM enrichment"));
-          console.log(chalk.gray("  Set it in your environment to enable LLM-based enrichment"));
-        } else {
-          const llmSpinner = ora("Analyzing README and dataset metadata...").start();
-          try {
-            const { enrichFromReadme } = await import("../lib/llm-enrich.js");
-
-            const repoName = dataset.github_repo;
-            if (!repoName) {
-              llmSpinner.warn("No GitHub repository configured for this dataset");
-            } else {
-              const readmeContent = await fetchGitHubFileContent(repoName, "README");
-              if (!readmeContent) {
-                llmSpinner.warn("Could not fetch README from repository");
-              } else {
-                const descContent = await fetchGitHubFileContent(
-                  repoName,
-                  "dataset_description.json",
-                );
-                let bidsDesc: Record<string, unknown> = {};
-                if (descContent) {
-                  try {
-                    bidsDesc = JSON.parse(descContent) as Record<string, unknown>;
-                  } catch {
-                    console.log(
-                      chalk.yellow(
-                        "  Warning: Could not parse dataset_description.json; LLM will use README only",
-                      ),
-                    );
-                  }
-                }
-
-                const llmResult = await enrichFromReadme(readmeContent, bidsDesc, apiKey);
-                llmSpinner.succeed("LLM enrichment complete");
-
-                if (llmResult.description) {
-                  console.log(`  Description: ${llmResult.description.slice(0, 100)}...`);
-                  enrichment.description = llmResult.description;
-                }
-                if (llmResult.methods_description) {
-                  enrichment.methods_description = llmResult.methods_description;
-                }
-                if (llmResult.keywords && llmResult.keywords.length > 0) {
-                  console.log(`  Keywords: ${llmResult.keywords.map((k) => k.term).join(", ")}`);
-                  enrichment.keywords = llmResult.keywords;
-                }
-                if (llmResult.funding_references && llmResult.funding_references.length > 0) {
-                  console.log(
-                    `  Funding: ${llmResult.funding_references.map((f) => `${f.funder_name} ${f.award_number || ""}`).join(", ")}`,
-                  );
-                  enrichment.funding_references = llmResult.funding_references;
-                }
-                if (llmResult.related_identifiers && llmResult.related_identifiers.length > 0) {
-                  console.log(
-                    `  Related: ${llmResult.related_identifiers.map((r) => `${r.identifier} (${r.relation_type})`).join(", ")}`,
-                  );
-                  enrichment.related_identifiers = llmResult.related_identifiers;
-                }
-              }
-            }
-          } catch (error) {
-            llmSpinner.fail("LLM enrichment failed");
-            console.log(chalk.gray(`  ${errorDetail(error)}`));
+          // Deep-merge: preserve discovered fields (e.g., ORCID) when user only adds affiliation
+          const merged = { ...(enrichment.authors || {}) };
+          for (const [name, manualEntry] of Object.entries(authors)) {
+            const existing = merged[name] || {};
+            merged[name] = {
+              ...existing,
+              ...manualEntry,
+              orcid: manualEntry.orcid || existing.orcid,
+            };
           }
+          enrichment.authors = merged;
         }
       }
 

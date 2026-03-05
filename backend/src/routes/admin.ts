@@ -1789,7 +1789,9 @@ adminRoutes.post("/datasets/:id/doi/update", zValidator("json", updateDoiSchema)
 
       // Add HasVersion relations for all existing version DOIs
       const versions = await db
-        .prepare("SELECT version, doi FROM dataset_versions WHERE dataset_id = ? ORDER BY created_at DESC")
+        .prepare(
+          "SELECT version, doi FROM dataset_versions WHERE dataset_id = ? ORDER BY created_at DESC",
+        )
         .bind(datasetId)
         .all<{ version: string; doi: string }>();
       if (versions.results?.length) {
@@ -1830,28 +1832,48 @@ adminRoutes.post("/datasets/:id/doi/update", zValidator("json", updateDoiSchema)
     let versionDoiUpdated = 0;
     if (metadataRefreshed) {
       const versions = await db
-        .prepare("SELECT version, doi FROM dataset_versions WHERE dataset_id = ? ORDER BY created_at DESC")
+        .prepare(
+          "SELECT version, doi FROM dataset_versions WHERE dataset_id = ? ORDER BY created_at DESC",
+        )
         .bind(datasetId)
         .all<{ version: string; doi: string }>();
 
       for (const ver of versions.results || []) {
         try {
           const versionIdentifier = `${dataset.ezid_identifier}.V${ver.version.toUpperCase()}`;
-          const repoName = dataset.github_repo!.split("/")[1];
+          const repoName = dataset.github_repo?.split("/")[1];
+          if (!repoName) {
+            warnings.push(`Version ${ver.version}: skipped DOI update (no valid github_repo)`);
+            continue;
+          }
           const tree = await getTreeAtRef(repoName, "main", c.env.GITHUB_ADMIN_PAT);
           const descFile = tree.find((f) => f.path === "dataset_description.json");
           if (!descFile) continue;
           const content = await getBlobContent(repoName, descFile.sha, c.env.GITHUB_ADMIN_PAT);
           const bidsDesc = JSON.parse(content) as Record<string, unknown>;
 
-          let vEnrichment = buildOrcidEnrichment(bidsDesc, dataset.owner_username, dataset.owner_orcid || undefined);
-          const nemarMetaFile = tree.find((f) => f.path === ".nemar/metadata.json") || tree.find((f) => f.path === "nemar_metadata.json");
+          let vEnrichment = buildOrcidEnrichment(
+            bidsDesc,
+            dataset.owner_username,
+            dataset.owner_orcid || undefined,
+          );
+          const nemarMetaFile =
+            tree.find((f) => f.path === ".nemar/metadata.json") ||
+            tree.find((f) => f.path === "nemar_metadata.json");
           if (nemarMetaFile) {
             try {
-              const nemarContent = await getBlobContent(repoName, nemarMetaFile.sha, c.env.GITHUB_ADMIN_PAT);
+              const nemarContent = await getBlobContent(
+                repoName,
+                nemarMetaFile.sha,
+                c.env.GITHUB_ADMIN_PAT,
+              );
               const nemarParsed = parseNemarMetadata(JSON.parse(nemarContent));
               if (nemarParsed) vEnrichment = nemarMetadataToEnrichment(nemarParsed, vEnrichment);
-            } catch {}
+            } catch (metaErr) {
+              console.warn(
+                `[doi/update] Metadata enrichment skipped for version ${ver.version}: ${metaErr instanceof Error ? metaErr.message : String(metaErr)}`,
+              );
+            }
           }
 
           const vDoi = extractDoi(versionIdentifier);
@@ -1859,10 +1881,15 @@ adminRoutes.post("/datasets/:id/doi/update", zValidator("json", updateDoiSchema)
           vMetadata.version = ver.version;
           const vXml = buildDataCiteXml(vMetadata);
           const vTarget = `https://nemar.org/dataexplorer/detail?dataset_id=${datasetId}&version=${ver.version}`;
-          await ezidUpdateIdentifier(auth, versionIdentifier, { dataciteXml: vXml, target: vTarget });
+          await ezidUpdateIdentifier(auth, versionIdentifier, {
+            dataciteXml: vXml,
+            target: vTarget,
+          });
           versionDoiUpdated++;
         } catch (vErr) {
-          warnings.push(`Version ${ver.version} DOI update failed: ${vErr instanceof Error ? vErr.message : String(vErr)}`);
+          warnings.push(
+            `Version ${ver.version} DOI update failed: ${vErr instanceof Error ? vErr.message : String(vErr)}`,
+          );
         }
       }
     }
@@ -1931,97 +1958,106 @@ const enrichmentSchemaV1 = z.object({
   formats: z.array(z.string()).optional(),
 });
 
-const enrichmentSchemaV2 = z.object({
-  version: z.literal("2.0"),
-  authors: z
-    .record(
-      z.object({
-        orcid: z.string().optional(),
-        affiliations: z
-          .array(
-            z.object({
-              name: z.string(),
-              identifier: z.string().optional(),
-              scheme: z.string().optional(),
-            }),
-          )
-          .optional(),
-      }),
-    )
-    .optional(),
-  keywords: z
-    .array(
-      z.object({
-        term: z.string(),
-        subject_scheme: z.string().optional(),
-        scheme_uri: z.string().optional(),
-        value_uri: z.string().optional(),
-        classification_code: z.string().optional(),
-      }),
-    )
-    .optional(),
-  related_identifiers: z
-    .array(
-      z.object({
-        identifier: z.string(),
-        identifier_type: z.string(),
-        relation_type: z.string(),
-        resource_type_general: z.string().optional(),
-      }),
-    )
-    .optional(),
-  funding_references: z
-    .array(
-      z.object({
-        funder_name: z.string(),
-        funder_identifier: z.string().optional(),
-        funder_identifier_type: z.string().optional(),
-        award_number: z.string().optional(),
-        award_title: z.string().optional(),
-        award_uri: z.string().optional(),
-      }),
-    )
-    .optional(),
-  contributors: z
-    .array(
-      z.object({
-        name: z.string(),
-        name_type: z.string().optional(),
-        given_name: z.string().optional(),
-        family_name: z.string().optional(),
-        orcid: z.string().optional(),
-        contributor_type: z.string(),
-      }),
-    )
-    .optional(),
-  dates: z
-    .array(
-      z.object({
-        date: z.string(),
-        date_type: z.string(),
-        date_information: z.string().optional(),
-      }),
-    )
-    .optional(),
-  geo_locations: z
-    .array(
-      z.object({
-        place: z.string().optional(),
-        point: z
-          .object({
-            latitude: z.number(),
-            longitude: z.number(),
-          })
-          .optional(),
-      }),
-    )
-    .optional(),
-  description: z.string().optional(),
-  methods_description: z.string().optional(),
-  resource_type_general: z.string().optional(),
-  sizes: z.array(z.string()).optional(),
-  formats: z.array(z.string()).optional(),
-});
+const enrichmentSchemaV2 = z
+  .object({
+    version: z.literal("2.0"),
+    pipeline_stage: z.enum(["seeded", "enriched", "validated"]).optional(),
+    title: z.string().optional(),
+    description: z.string().optional(),
+    methods_description: z.string().optional(),
+    license: z.string().optional(),
+    dataset_type: z.string().optional(),
+    resource_type_general: z.string().optional(),
+    resource_type_specific: z.string().optional(),
+    modalities: z.array(z.string()).optional(),
+    sizes: z.array(z.string()).optional(),
+    formats: z.array(z.string()).optional(),
+    source_hash: z.string().optional(),
+    authors: z
+      .record(
+        z.object({
+          orcid: z.string().optional(),
+          affiliations: z
+            .array(
+              z.object({
+                name: z.string(),
+                identifier: z.string().optional(),
+                scheme: z.string().optional(),
+              }),
+            )
+            .optional(),
+        }),
+      )
+      .optional(),
+    keywords: z
+      .array(
+        z.object({
+          term: z.string(),
+          subject_scheme: z.string().optional(),
+          scheme_uri: z.string().optional(),
+          value_uri: z.string().optional(),
+          classification_code: z.string().optional(),
+        }),
+      )
+      .optional(),
+    related_identifiers: z
+      .array(
+        z.object({
+          identifier: z.string(),
+          identifier_type: z.string(),
+          relation_type: z.string(),
+          resource_type_general: z.string().optional(),
+        }),
+      )
+      .optional(),
+    funding_references: z
+      .array(
+        z.object({
+          funder_name: z.string(),
+          funder_identifier: z.string().optional(),
+          funder_identifier_type: z.string().optional(),
+          award_number: z.string().optional(),
+          award_title: z.string().optional(),
+          award_uri: z.string().optional(),
+        }),
+      )
+      .optional(),
+    contributors: z
+      .array(
+        z.object({
+          name: z.string(),
+          name_type: z.string().optional(),
+          given_name: z.string().optional(),
+          family_name: z.string().optional(),
+          orcid: z.string().optional(),
+          contributor_type: z.string(),
+        }),
+      )
+      .optional(),
+    dates: z
+      .array(
+        z.object({
+          date: z.string(),
+          date_type: z.string(),
+          date_information: z.string().optional(),
+        }),
+      )
+      .optional(),
+    geo_locations: z
+      .array(
+        z.object({
+          place: z.string().optional(),
+          point: z
+            .object({
+              latitude: z.number(),
+              longitude: z.number(),
+            })
+            .optional(),
+        }),
+      )
+      .optional(),
+  })
+  .passthrough();
 
 const enrichmentSchema = z.discriminatedUnion("version", [enrichmentSchemaV1, enrichmentSchemaV2]);
 
@@ -2153,21 +2189,35 @@ adminRoutes.get("/datasets/:id/files", async (c) => {
       .filter((f) => f.type === "blob")
       .map((f) => ({ path: f.path, size: f.size || 0 }));
 
-    const totalSize = files.reduce((sum, f) => sum + f.size, 0);
-    const extensions = [
-      ...new Set(
-        files
-          .map((f) => {
-            const lastDot = f.path.lastIndexOf(".");
-            return lastDot > 0 ? f.path.slice(lastDot) : null;
-          })
-          .filter((e): e is string => e !== null),
-      ),
-    ].sort();
+    // Use S3 for real sizes (git tree shows symlink sizes for annexed files)
+    let totalSize = files.reduce((sum, f) => sum + f.size, 0);
+    let fileCount = files.length;
+    const { getDatasetS3Stats, extractExtensions } = await import("../services/s3.js");
+    try {
+      const s3Stats = await getDatasetS3Stats(
+        {
+          bucket: c.env.S3_BUCKET,
+          region: c.env.AWS_REGION,
+          accessKeyId: c.env.AWS_ACCESS_KEY_ID,
+          secretAccessKey: c.env.AWS_SECRET_ACCESS_KEY,
+        },
+        datasetId,
+      );
+      if (s3Stats.totalSize > totalSize) {
+        totalSize = s3Stats.totalSize;
+        fileCount = s3Stats.objectCount;
+      }
+    } catch (s3Err) {
+      console.warn(
+        `[admin/files] S3 stats failed for ${datasetId}, using tree sizes: ${s3Err instanceof Error ? s3Err.message : String(s3Err)}`,
+      );
+    }
+
+    const extensions = extractExtensions(files.map((f) => f.path));
 
     return c.json({
       dataset_id: datasetId,
-      file_count: files.length,
+      file_count: fileCount,
       total_size: totalSize,
       extensions,
       files,
@@ -2900,7 +2950,12 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
         const msg = errorMessage(err);
         await updateProgress("ci_check", msg);
         return c.json(
-          { error: `CI check failed: ${msg}`, step: "ci_check", steps_completed: completed, step_results: stepResults },
+          {
+            error: `CI check failed: ${msg}`,
+            step: "ci_check",
+            steps_completed: completed,
+            step_results: stepResults,
+          },
           500,
         );
       }
@@ -3010,7 +3065,12 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
       const msg = errorMessage(err);
       await updateProgress("repo_public", msg);
       return c.json(
-        { error: `repo_public failed: ${msg}`, step: "repo_public", steps_completed: completed, step_results: stepResults },
+        {
+          error: `repo_public failed: ${msg}`,
+          step: "repo_public",
+          steps_completed: completed,
+          step_results: stepResults,
+        },
         500,
       );
     }
@@ -3069,7 +3129,12 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
       const msg = errorMessage(err);
       await updateProgress("tag_protect", msg);
       return c.json(
-        { error: `Tag protection failed: ${msg}`, step: "tag_protect", steps_completed: completed, step_results: stepResults },
+        {
+          error: `Tag protection failed: ${msg}`,
+          step: "tag_protect",
+          steps_completed: completed,
+          step_results: stepResults,
+        },
         500,
       );
     }
@@ -3139,7 +3204,10 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
                 enrichment = nemarMetadataToEnrichment(nemarParsed);
               }
             } catch (nemarErr) {
-              console.warn(`[publish] doi_create: .nemar/metadata.json enrichment skipped:`, nemarErr);
+              console.warn(
+                "[publish] doi_create: .nemar/metadata.json enrichment skipped:",
+                nemarErr,
+              );
             }
           }
         }
@@ -3238,7 +3306,10 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
         `[publish] ${parseMsg} for ${repoName}. Content starts with: ${content.substring(0, 200)}`,
       );
       await updateProgress(stepName, parseMsg);
-      return c.json({ error: parseMsg, step: stepName, steps_completed: completed, step_results: stepResults }, 500);
+      return c.json(
+        { error: parseMsg, step: stepName, steps_completed: completed, step_results: stepResults },
+        500,
+      );
     }
   }
 
@@ -3274,7 +3345,12 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
     if (!row?.zenodo_concept_id) {
       await updateProgress(stepName, "No Zenodo deposition found");
       return c.json(
-        { error: "No Zenodo deposition ID found", step: stepName, steps_completed: completed, step_results: stepResults },
+        {
+          error: "No Zenodo deposition ID found",
+          step: stepName,
+          steps_completed: completed,
+          step_results: stepResults,
+        },
         500,
       );
     }
@@ -3283,7 +3359,10 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
       const msg = `Invalid Zenodo deposition ID: ${row.zenodo_concept_id}`;
       console.error(`[publish] ${msg} for dataset ${datasetId}`);
       await updateProgress(stepName, msg);
-      return c.json({ error: msg, step: stepName, steps_completed: completed, step_results: stepResults }, 500);
+      return c.json(
+        { error: msg, step: stepName, steps_completed: completed, step_results: stepResults },
+        500,
+      );
     }
     const isSandbox = row.is_sandbox === 1;
     const token = isSandbox ? c.env.ZENODO_SANDBOX_API_KEY : c.env.ZENODO_API_KEY;
@@ -3292,7 +3371,10 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
         ? "Zenodo sandbox API key not configured"
         : "Zenodo API key not configured";
       await updateProgress(stepName, msg);
-      return c.json({ error: msg, step: stepName, steps_completed: completed, step_results: stepResults }, 500);
+      return c.json(
+        { error: msg, step: stepName, steps_completed: completed, step_results: stepResults },
+        500,
+      );
     }
     return { depositionId, token, isSandbox };
   }
@@ -3321,7 +3403,10 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
         const msg = `Failed to write default Version to dataset_description.json: ${errorMessage(writeErr)}`;
         console.error(`[publish] ${msg}`);
         await updateProgress(stepName, msg);
-        return c.json({ error: msg, step: stepName, steps_completed: completed, step_results: stepResults }, 500);
+        return c.json(
+          { error: msg, step: stepName, steps_completed: completed, step_results: stepResults },
+          500,
+        );
       }
     }
     const version = String(datasetDesc.Version);
@@ -3642,7 +3727,10 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
       } catch (err) {
         // Zenodo backup is non-fatal for EZID datasets; log and continue
         console.error(`[publish] Zenodo backup failed for ${datasetId} (non-fatal):`, err);
-        await updateProgress("upload_to_zenodo", `Non-fatal: Zenodo backup failed: ${errorMessage(err)}`);
+        await updateProgress(
+          "upload_to_zenodo",
+          `Non-fatal: Zenodo backup failed: ${errorMessage(err)}`,
+        );
       }
     } else {
       try {
@@ -3909,7 +3997,12 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
       const msg = errorMessage(err);
       await updateProgress("notify_user", msg);
       return c.json(
-        { error: `Notification failed: ${msg}`, step: "notify_user", steps_completed: completed, step_results: stepResults },
+        {
+          error: `Notification failed: ${msg}`,
+          step: "notify_user",
+          steps_completed: completed,
+          step_results: stepResults,
+        },
         500,
       );
     }

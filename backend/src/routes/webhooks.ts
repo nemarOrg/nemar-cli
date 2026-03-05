@@ -31,7 +31,7 @@ import {
 } from "../services/llm-enrich.js";
 import { generateManifest } from "../services/manifest.js";
 import { errorMessage, extractRepoName, readRepoMetadata } from "../services/repo-metadata.js";
-import { uploadManifest } from "../services/s3.js";
+import { extractExtensions, formatBytes, uploadManifest } from "../services/s3.js";
 import * as zenodo from "../services/zenodo.js";
 import type { Bindings } from "../types/bindings.js";
 
@@ -666,9 +666,12 @@ webhooks.post("/llm-enrich", async (c) => {
     // Sync BIDS Name to D1 and GitHub repo description if changed.
     // Done here because llm-enrich already reads dataset_description.json,
     // and BIDS Name may change across versions.
-    const bidsName = typeof bidsDescription.Name === "string"
-      ? bidsDescription.Name.replace(/[\r\n]+/g, " ").trim().slice(0, 200)
-      : null;
+    const bidsName =
+      typeof bidsDescription.Name === "string"
+        ? bidsDescription.Name.replace(/[\r\n]+/g, " ")
+            .trim()
+            .slice(0, 200)
+        : null;
     if (bidsName && bidsName !== dataset.name) {
       try {
         await c.env.DB.prepare("UPDATE datasets SET name = ? WHERE dataset_id = ?")
@@ -720,7 +723,7 @@ webhooks.post("/llm-enrich", async (c) => {
     }
 
     // Compute source content hash for change detection
-    const sourceContent = readmeContent + "\n---\n" + JSON.stringify(bidsDescription);
+    const sourceContent = `${readmeContent}\n---\n${JSON.stringify(bidsDescription)}`;
     const sourceHashBuffer = await crypto.subtle.digest(
       "SHA-256",
       new TextEncoder().encode(sourceContent),
@@ -730,14 +733,9 @@ webhooks.post("/llm-enrich", async (c) => {
       .join("");
 
     // Guard: skip re-enrichment if metadata is already validated and sources unchanged
-    if (
-      existingMetadata?.pipeline_stage === "validated" &&
-      !forceReenrich
-    ) {
+    if (existingMetadata?.pipeline_stage === "validated" && !forceReenrich) {
       if (existingMetadata.source_hash === sourceHash) {
-        console.log(
-          `[llm-enrich] Skipping ${dataset_id}: already validated and sources unchanged`,
-        );
+        console.log(`[llm-enrich] Skipping ${dataset_id}: already validated and sources unchanged`);
         return c.json({
           message: "Metadata already validated and sources unchanged",
           dataset_id,
@@ -763,14 +761,39 @@ webhooks.post("/llm-enrich", async (c) => {
       `[llm-enrich] Stage 1 (seed): ${dataset_id} - ${Object.keys(seeded.authors || {}).length} authors, ${(seeded.related_identifiers || []).length} related IDs`,
     );
 
+    // Stage 1a: Compute sizes from S3 and formats from tree
+    try {
+      const { getDatasetS3Stats } = await import("../services/s3.js");
+      const s3Stats = await getDatasetS3Stats(
+        {
+          bucket: c.env.S3_BUCKET,
+          region: c.env.AWS_REGION,
+          accessKeyId: c.env.AWS_ACCESS_KEY_ID,
+          secretAccessKey: c.env.AWS_SECRET_ACCESS_KEY,
+        },
+        dataset_id,
+      );
+
+      const sizeStr = formatBytes(s3Stats.totalSize);
+      seeded.sizes = [`${sizeStr} (${s3Stats.objectCount} files)`];
+
+      const extensions = extractExtensions(treePaths);
+      if (extensions.length > 0) seeded.formats = extensions;
+
+      console.log(
+        `[llm-enrich] Stage 1a (sizes): ${dataset_id} - ${sizeStr} (${s3Stats.objectCount} files), ${extensions.length} formats`,
+      );
+    } catch (sizeErr) {
+      console.warn(
+        `[llm-enrich] Stage 1a (sizes) failed for ${dataset_id}, continuing: ${errorMessage(sizeErr)}`,
+      );
+    }
+
     // Stage 1b: ORCID discovery from referenced DOIs (deterministic, no LLM)
     let seededWithOrcids = seeded;
     let orcidDiscoveryCount = 0;
     try {
-      const orcidResult = await discoverOrcidsFromReferencedDois(
-        bidsDescription,
-        seeded.authors,
-      );
+      const orcidResult = await discoverOrcidsFromReferencedDois(bidsDescription, seeded.authors);
       orcidDiscoveryCount = Object.keys(orcidResult.discoveries).length;
       if (orcidDiscoveryCount > 0) {
         const authors = { ...seeded.authors };

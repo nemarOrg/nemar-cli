@@ -66,9 +66,7 @@ export interface OrcidDiscoveryResult {
 const DOI_PATTERN = /^10\.\d{4,}\/[^\s]+$/;
 const ORCID_PATTERN = /^\d{4}-\d{4}-\d{4}-[\dX]{4}$/;
 
-export function extractDoisFromBids(
-  bidsDescription: Record<string, unknown>,
-): ExtractedDoi[] {
+export function extractDoisFromBids(bidsDescription: Record<string, unknown>): ExtractedDoi[] {
   const dois: ExtractedDoi[] = [];
   const seen = new Set<string>();
 
@@ -112,9 +110,20 @@ export function extractDoisFromBids(
 
 const DATACITE_API = "https://api.datacite.org/application/vnd.datacite.datacite+json";
 
-export async function queryDataCiteDoi(
-  doi: string,
-): Promise<DataCiteDoiResult | null> {
+/**
+ * Log a DOI query error: network errors get a warning, others get a full error trace.
+ */
+function logDoiQueryError(source: string, doi: string, err: unknown): void {
+  const msg = err instanceof Error ? err.message : String(err);
+  const isNetwork = msg.includes("AbortError") || msg.includes("timeout") || msg.includes("fetch");
+  if (isNetwork) {
+    console.warn(`[orcid-discovery] ${source} query failed for ${doi}: ${msg}`);
+  } else {
+    console.error(`[orcid-discovery] Unexpected error querying ${source} for ${doi}:`, err);
+  }
+}
+
+export async function queryDataCiteDoi(doi: string): Promise<DataCiteDoiResult | null> {
   try {
     const response = await fetch(`${DATACITE_API}/${encodeURIComponent(doi)}`, {
       headers: { Accept: "application/vnd.datacite.datacite+json" },
@@ -134,15 +143,81 @@ export async function queryDataCiteDoi(
       creators: Array.isArray(data.creators) ? data.creators : [],
     };
   } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    const isNetwork = msg.includes("AbortError") || msg.includes("timeout") || msg.includes("fetch");
-    if (isNetwork) {
-      console.warn(`[orcid-discovery] DataCite query failed for ${doi}: ${msg}`);
-    } else {
-      console.error(`[orcid-discovery] Unexpected error querying DataCite for ${doi}:`, err);
-    }
+    logDoiQueryError("DataCite", doi, err);
     return null;
   }
+}
+
+// ---------------------------------------------------------------------------
+// Crossref public API client (fallback for DOIs not in DataCite)
+// ---------------------------------------------------------------------------
+
+interface CrossrefAuthor {
+  given?: string;
+  family?: string;
+  name?: string;
+  ORCID?: string;
+  affiliation?: Array<{ name: string }>;
+}
+
+/**
+ * Query the Crossref API for a DOI and return creators in DataCiteCreator format.
+ * Crossref covers most journal DOIs (Nature, bioRxiv, etc.) that DataCite doesn't.
+ */
+export async function queryCrossrefDoi(doi: string): Promise<DataCiteDoiResult | null> {
+  try {
+    const response = await fetch(`https://api.crossref.org/works/${encodeURIComponent(doi)}`, {
+      headers: {
+        Accept: "application/json",
+        // Polite pool: identify ourselves per Crossref etiquette
+        "User-Agent": "NEMAR/1.0 (https://nemar.org; mailto:nemar@ucsd.edu)",
+      },
+      signal: AbortSignal.timeout(10_000),
+    });
+    if (!response.ok) {
+      if (response.status !== 404) {
+        console.warn(`[orcid-discovery] Crossref returned HTTP ${response.status} for ${doi}`);
+      }
+      return null;
+    }
+    const data = (await response.json()) as {
+      message?: { author?: CrossrefAuthor[] };
+    };
+    const authors = data.message?.author;
+    if (!Array.isArray(authors) || authors.length === 0) return null;
+
+    // Convert Crossref authors to DataCiteCreator format
+    const creators: DataCiteCreator[] = authors
+      .map((a) => {
+        const nameIdentifiers: DataCiteCreator["nameIdentifiers"] = [];
+        if (a.ORCID) {
+          nameIdentifiers.push({
+            nameIdentifier: a.ORCID,
+            nameIdentifierScheme: "ORCID",
+          });
+        }
+        return {
+          name: a.family && a.given ? `${a.family}, ${a.given}` : a.name || a.family || "",
+          givenName: a.given,
+          familyName: a.family,
+          nameIdentifiers,
+          affiliation: (a.affiliation || []).filter((aff) => aff.name),
+        };
+      })
+      .filter((c) => c.name.trim() !== "");
+
+    return { doi, creators };
+  } catch (err) {
+    logDoiQueryError("Crossref", doi, err);
+    return null;
+  }
+}
+
+/**
+ * Query a DOI against DataCite first, then fall back to Crossref.
+ */
+async function queryDoi(doi: string): Promise<DataCiteDoiResult | null> {
+  return (await queryDataCiteDoi(doi)) ?? (await queryCrossrefDoi(doi));
 }
 
 // ---------------------------------------------------------------------------
@@ -152,7 +227,7 @@ export async function queryDataCiteDoi(
 function normalizeStr(s: string): string {
   return s
     .normalize("NFD")
-    .replace(/[\u0300-\u036f]/g, "") // strip accents
+    .replace(/\p{Diacritic}/gu, "") // strip accents
     .toLowerCase()
     .trim();
 }
@@ -301,11 +376,11 @@ export async function discoverOrcidsFromReferencedDois(
 
   for (let i = 0; i < extracted.length; i += BATCH_SIZE) {
     const batch = extracted.slice(i, i + BATCH_SIZE);
-    // queryDataCiteDoi never rejects (catches internally), so Promise.all is safe
-    const results = await Promise.all(batch.map((e) => queryDataCiteDoi(e.doi)));
+    // queryDoi never rejects (catches internally), so Promise.all is safe
+    const results = await Promise.all(batch.map((e) => queryDoi(e.doi)));
     for (let j = 0; j < batch.length; j++) {
       if (results[j]) {
-        allCreatorsByDoi.set(batch[j].doi, results[j]!.creators);
+        allCreatorsByDoi.set(batch[j].doi, results[j]?.creators ?? []);
       } else {
         unresolvedDois.push(batch[j].doi);
       }
@@ -332,9 +407,7 @@ export async function discoverOrcidsFromReferencedDois(
       if (!orcidEntry) continue;
 
       // Extract bare ORCID (strip URL prefix) and validate format
-      const orcid = orcidEntry.nameIdentifier
-        .replace(/^https?:\/\/orcid\.org\//i, "")
-        .trim();
+      const orcid = orcidEntry.nameIdentifier.replace(/^https?:\/\/orcid\.org\//i, "").trim();
       if (!ORCID_PATTERN.test(orcid)) continue;
 
       const affiliations = match.matchedCreator.affiliation

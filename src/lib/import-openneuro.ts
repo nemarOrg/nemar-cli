@@ -11,7 +11,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import chalk from "chalk";
 import ora from "ora";
-import { approvePublication, importDataset, requestPublication } from "./api.js";
+import { addCi, approvePublication, importDataset, requestPublication } from "./api.js";
 import {
   type S3Credentials,
   batchSetKeysPresent,
@@ -258,6 +258,21 @@ export async function importOpenNeuro(
     }
   }
 
+  // Step 2b: Deploy CI workflows (must exist on main before push triggers them)
+  const ciSpinner = ora("Deploying CI workflows...").start();
+  try {
+    await addCi(nemarId);
+    ciSpinner.succeed(
+      "CI workflows deployed (BIDS validation, LLM enrichment, archive generation)",
+    );
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    ciSpinner.warn(`CI deployment failed (non-fatal): ${msg}`);
+    console.log(
+      chalk.gray(`  Workflows can be deployed later with: nemar admin ci add ${nemarId}`),
+    );
+  }
+
   // Step 3: Enable OpenNeuro S3 remote and build key-to-URL map
   let keyUrlMap = new Map<string, string>();
   if (!options.skipData) {
@@ -436,7 +451,8 @@ export async function importOpenNeuro(
   let approved = false;
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
     try {
-      await approvePublication(nemarId, attempt > 1, false, true);
+      // skipCiCheck=false: CI workflows are deployed before push, so checks should run
+      await approvePublication(nemarId, attempt > 1, false, false);
       approved = true;
       break;
     } catch (err) {
