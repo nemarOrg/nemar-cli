@@ -1842,7 +1842,10 @@ adminRoutes.post("/datasets/:id/doi/update", zValidator("json", updateDoiSchema)
         try {
           const versionIdentifier = `${dataset.ezid_identifier}.V${ver.version.toUpperCase()}`;
           const repoName = dataset.github_repo?.split("/")[1];
-          if (!repoName) continue;
+          if (!repoName) {
+            warnings.push(`Version ${ver.version}: skipped DOI update (no valid github_repo)`);
+            continue;
+          }
           const tree = await getTreeAtRef(repoName, "main", c.env.GITHUB_ADMIN_PAT);
           const descFile = tree.find((f) => f.path === "dataset_description.json");
           if (!descFile) continue;

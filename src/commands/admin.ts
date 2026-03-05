@@ -108,8 +108,16 @@ async function fetchGitHubFileContent(repoName: string, path: string): Promise<s
     stderr: "pipe",
   });
   const base64Content = await new Response(proc.stdout).text();
+  const stderrContent = await new Response(proc.stderr).text();
   const exitCode = await proc.exited;
-  if (exitCode !== 0 || !base64Content.trim()) return null;
+  if (exitCode !== 0) {
+    // Log non-404 errors so we can distinguish "not found" from real failures
+    if (stderrContent.trim() && !stderrContent.includes("404")) {
+      console.warn(`[fetchGitHubFileContent] Error fetching ${path}: ${stderrContent.trim()}`);
+    }
+    return null;
+  }
+  if (!base64Content.trim()) return null;
   return Buffer.from(base64Content.trim(), "base64").toString("utf-8");
 }
 
@@ -1206,11 +1214,11 @@ doiCommand
                 }
                 llmSpinner.text = `Workflow ${run.status}... (${attempt * 5}s)`;
               }
-            } catch {
+            } catch (parseErr) {
               consecutiveFailures++;
               if (consecutiveFailures >= 3) {
                 llmSpinner.warn(
-                  `Unable to parse workflow status (raw: ${pollOut.trim().slice(0, 200)})`,
+                  `Unable to parse workflow status: ${parseErr instanceof Error ? parseErr.message : String(parseErr)} (raw: ${pollOut.trim().slice(0, 200)})`,
                 );
                 break;
               }
