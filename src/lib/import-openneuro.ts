@@ -215,7 +215,7 @@ export async function importOpenNeuro(
   const datasetPath = join(workDir, nemarId);
 
   console.log(chalk.cyan(`\nImporting OpenNeuro dataset ${openneuroId} -> ${nemarId}\n`));
-  console.log(chalk.gray(`Working directory: ${workDir}`));
+  console.log(chalk.dim(`Working directory: ${workDir}`));
 
   // Step 1: Clone OpenNeuro dataset
   const cloneSpinner = ora("Cloning OpenNeuro dataset...").start();
@@ -232,9 +232,9 @@ export async function importOpenNeuro(
   const bidsDesc = readBidsDescription(datasetPath);
   const datasetName = (bidsDesc.Name as string) || openneuroId;
   const openNeuroDoi = extractOpenNeuroDoi(bidsDesc);
-  console.log(chalk.gray(`  Dataset: ${datasetName}`));
+  console.log(chalk.dim(`  Dataset: ${datasetName}`));
   if (openNeuroDoi) {
-    console.log(chalk.gray(`  OpenNeuro DOI: ${openNeuroDoi}`));
+    console.log(chalk.dim(`  OpenNeuro DOI: ${openNeuroDoi}`));
   }
 
   // Step 2: Create NEMAR dataset record + GitHub repo
@@ -268,9 +268,7 @@ export async function importOpenNeuro(
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     ciSpinner.warn(`CI deployment failed (non-fatal): ${msg}`);
-    console.log(
-      chalk.gray(`  Workflows can be deployed later with: nemar admin ci add ${nemarId}`),
-    );
+    console.log(chalk.dim(`  Workflows can be deployed later with: nemar admin ci add ${nemarId}`));
   }
 
   // Step 3: Enable OpenNeuro S3 remote and build key-to-URL map
@@ -472,6 +470,6 @@ export async function importOpenNeuro(
 
   // Summary
   console.log(chalk.green(`\nImport and publish complete: ${openneuroId} -> ${nemarId}`));
-  console.log(chalk.gray(`  GitHub: https://github.com/nemarDatasets/${nemarId}`));
-  console.log(chalk.gray(`  Working dir: ${datasetPath}`));
+  console.log(chalk.dim(`  GitHub: https://github.com/nemarDatasets/${nemarId}`));
+  console.log(chalk.dim(`  Working dir: ${datasetPath}`));
 }

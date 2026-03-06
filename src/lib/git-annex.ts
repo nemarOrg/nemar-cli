@@ -270,9 +270,7 @@ export async function checkPrerequisites(): Promise<PrerequisitesResult> {
     // HTTPS-first: try gh CLI token before failing on SSH
     const ghToken = await getGitHubToken();
     if (!ghToken.token) {
-      errors.push(
-        "GitHub authentication not configured. Either authenticate with gh CLI ('gh auth login') or configure SSH ('nemar auth setup-ssh').",
-      );
+      errors.push("GitHub authentication not configured. Run 'gh auth login' to authenticate.");
     }
   }
 
