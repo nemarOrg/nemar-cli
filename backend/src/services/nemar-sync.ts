@@ -414,7 +414,7 @@ function buildDataexplorerDataset(
     BIDSVersion: (bd.BIDSVersion as string) || "",
     License: (bd.License as string) || meta?.license || "",
     Authors: Array.isArray(bd.Authors)
-      ? (bd.Authors as string[]).join(NEMAR_SEP)
+      ? (bd.Authors as string[]).join(", ")
       : String(bd.Authors || ""),
     Acknowledgements: (bd.Acknowledgements as string) || "",
     HowToAcknowledge: (bd.HowToAcknowledge as string) || "",
