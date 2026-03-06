@@ -1404,3 +1404,39 @@ export async function importDataset(opts: {
     true,
   );
 }
+
+// ============================================================================
+// Admin - nemar.org Datapipeline Sync
+// ============================================================================
+
+export interface SyncDatasetResponse {
+  dataset_id: string;
+  synced: boolean;
+  errors: string[];
+}
+
+export interface SyncStatusResponse {
+  datasets: Array<{
+    dataset_id: string;
+    name: string;
+    nemar_sync_status: string | null;
+    nemar_sync_at: string | null;
+    nemar_sync_error: string | null;
+  }>;
+  total: number;
+  synced: number;
+  failed: number;
+  pending: number;
+}
+
+export async function syncDataset(datasetId: string): Promise<SyncDatasetResponse> {
+  return request<SyncDatasetResponse>(
+    `/admin/datasets/${datasetId}/sync`,
+    { method: "POST" },
+    true,
+  );
+}
+
+export async function getSyncStatus(): Promise<SyncStatusResponse> {
+  return request<SyncStatusResponse>("/admin/sync/status", {}, true);
+}

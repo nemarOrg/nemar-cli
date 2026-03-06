@@ -349,6 +349,29 @@ export async function listManifests(
 }
 
 /**
+ * Get the latest zip archive size for a dataset from S3.
+ * Scans archives/ prefix and returns the largest (latest version) zip file size in bytes.
+ */
+export async function getArchiveSize(
+  options: PresignedUrlOptions,
+  datasetId: string,
+): Promise<number> {
+  let maxSize = 0;
+  for await (const xml of listObjectPages(options, `${datasetId}/archives/`)) {
+    const matches = xml.matchAll(
+      /<Contents>[\s\S]*?<Key>([^<]+)<\/Key>[\s\S]*?<Size>(\d+)<\/Size>[\s\S]*?<\/Contents>/g,
+    );
+    for (const match of matches) {
+      if (match[1].endsWith(".zip")) {
+        const size = Number.parseInt(match[2], 10);
+        if (size > maxSize) maxSize = size;
+      }
+    }
+  }
+  return maxSize;
+}
+
+/**
  * Apply S3 Object Lock (Governance mode) to all objects under a dataset's
  * objects/ prefix. Uses a 100-year retention period to effectively make
  * data blobs immutable. Manifests (version/) and archives (archives/) are
