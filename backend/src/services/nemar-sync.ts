@@ -124,11 +124,13 @@ interface ChannelCount {
 // Token management
 // ---------------------------------------------------------------------------
 
-let cachedToken: { token: string; expiresAt: number } | null = null;
-
-async function getAccessToken(username: string, password: string): Promise<string> {
-  if (cachedToken && Date.now() < cachedToken.expiresAt - 60_000) {
-    return cachedToken.token;
+async function getAccessToken(
+  username: string,
+  password: string,
+  cache: { token: string; expiresAt: number } | null = null,
+): Promise<{ token: string; cache: { token: string; expiresAt: number } }> {
+  if (cache && Date.now() < cache.expiresAt - 60_000) {
+    return { token: cache.token, cache };
   }
 
   const res = await fetch(`${NEMAR_API_BASE}/token`, {
@@ -157,8 +159,8 @@ async function getAccessToken(username: string, password: string): Promise<strin
     console.warn(`[nemar-sync] Failed to parse JWT expiry, using 30min default: ${err}`);
   }
 
-  cachedToken = { token, expiresAt };
-  return token;
+  const newCache = { token, expiresAt };
+  return { token, cache: newCache };
 }
 
 // Detect which key name the API expects
@@ -235,7 +237,8 @@ function formatDate(dateStr: string | null | undefined): string {
       .toISOString()
       .replace("T", " ")
       .replace(/\.\d+Z$/, "");
-  } catch {
+  } catch (err) {
+    console.warn(`[nemar-sync] Failed to format date "${dateStr}": ${err}`);
     return "";
   }
 }
@@ -513,7 +516,8 @@ async function detectHedAnnotation(src: NemarSyncSource): Promise<boolean> {
   try {
     const content = await getBlobContent(src.repoName, eventsJson.sha, src.pat);
     return content.includes('"HED"');
-  } catch {
+  } catch (err) {
+    console.warn(`[nemar-sync] Failed to check HED annotation in ${eventsJson.path}: ${err}`);
     return false;
   }
 }
@@ -548,7 +552,7 @@ export async function syncDatasetToNemar(
   const errors: string[] = [];
 
   // 1. Get access token
-  const token = await getAccessToken(username, password);
+  const { token } = await getAccessToken(username, password);
 
   // 2. Gather data that requires blob reads
   const [participants, channelCounts, hasHed] = await Promise.all([
@@ -571,6 +575,11 @@ export async function syncDatasetToNemar(
       await deleteRecords(token, table, src.datasetId);
     } catch (err) {
       errors.push(`delete ${table}: ${err}`);
+      // Auth failures will affect all tables; abort early
+      if (String(err).includes("401") || String(err).includes("403")) {
+        errors.push("Aborting: auth failure affects all operations");
+        return { synced: false, errors };
+      }
     }
   }
 

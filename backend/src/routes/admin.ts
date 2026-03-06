@@ -4034,8 +4034,14 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
             .prepare("SELECT approved_at FROM publication_requests WHERE id = ?")
             .bind(requestId)
             .first<{ approved_at: string | null }>(),
-          getDatasetS3Stats(s3Cfg, datasetId).catch(() => ({ totalSize: 0, objectCount: 0 })),
-          getArchiveSize(s3Cfg, datasetId).catch(() => 0),
+          getDatasetS3Stats(s3Cfg, datasetId).catch((err) => {
+            console.warn(`[publish] S3 stats failed for ${datasetId}: ${err}`);
+            return { totalSize: 0, objectCount: 0 };
+          }),
+          getArchiveSize(s3Cfg, datasetId).catch((err) => {
+            console.warn(`[publish] Archive size failed for ${datasetId}: ${err}`);
+            return 0;
+          }),
         ]);
 
         // Try to read version manifest from S3 for accurate file sizes
@@ -4043,9 +4049,17 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
         if (latestVersion?.version) {
           try {
             const raw = await getManifest(s3Cfg, datasetId, latestVersion.version);
-            if (raw) manifest = JSON.parse(raw);
+            if (raw) {
+              try {
+                manifest = JSON.parse(raw);
+              } catch (parseErr) {
+                console.warn(
+                  `[publish] Manifest JSON corrupted for ${datasetId} v${latestVersion.version}: ${parseErr}`,
+                );
+              }
+            }
           } catch (err) {
-            console.warn(`[publish] Manifest not available for ${datasetId}: ${err}`);
+            console.warn(`[publish] Failed to fetch manifest from S3 for ${datasetId}: ${err}`);
           }
         }
 
@@ -4723,7 +4737,17 @@ adminRoutes.post("/datasets/:id/sync", async (c) => {
   const s3 = getS3Config(c.env);
 
   // Gather data from GitHub
-  const tree = await getTreeAtRef(repoName, "main", pat);
+  let tree: Awaited<ReturnType<typeof getTreeAtRef>>;
+  try {
+    tree = await getTreeAtRef(repoName, "main", pat);
+  } catch (err) {
+    return c.json(
+      {
+        error: `Failed to read repository tree: ${errorMessage(err)}. Does the repo use "main" as the default branch?`,
+      },
+      500,
+    );
+  }
   const bidsFile = tree.find((f) => f.path === "dataset_description.json");
   let bidsDescription: Record<string, unknown> = {};
   if (bidsFile) {
@@ -4763,13 +4787,28 @@ adminRoutes.post("/datasets/:id/sync", async (c) => {
       )
       .bind(datasetId)
       .first<{ approved_at: string | null }>(),
-    getDatasetS3Stats(s3, datasetId).catch(() => ({ totalSize: 0, objectCount: 0 })),
-    getArchiveSize(s3, datasetId).catch(() => 0),
+    getDatasetS3Stats(s3, datasetId).catch((err) => {
+      console.warn(`[sync] S3 stats failed for ${datasetId}: ${err}`);
+      return { totalSize: 0, objectCount: 0 };
+    }),
+    getArchiveSize(s3, datasetId).catch((err) => {
+      console.warn(`[sync] Archive size failed for ${datasetId}: ${err}`);
+      return 0;
+    }),
     fetch(`https://api.github.com/repos/nemarDatasets/${repoName}`, {
       headers: { Authorization: `token ${pat}`, Accept: "application/vnd.github.v3+json" },
     })
-      .then((r) => r.json() as Promise<{ created_at?: string }>)
-      .catch(() => null),
+      .then(async (r) => {
+        if (!r.ok) {
+          console.warn(`[sync] GitHub repo info for ${repoName}: HTTP ${r.status}`);
+          return null;
+        }
+        return r.json() as Promise<{ created_at?: string }>;
+      })
+      .catch((err) => {
+        console.warn(`[sync] GitHub repo info fetch failed for ${repoName}: ${err}`);
+        return null;
+      }),
   ]);
 
   // Try to read version manifest from S3 for accurate file sizes
@@ -4777,9 +4816,17 @@ adminRoutes.post("/datasets/:id/sync", async (c) => {
   if (latestVersion?.version) {
     try {
       const raw = await getManifest(s3, datasetId, latestVersion.version);
-      if (raw) manifest = JSON.parse(raw);
+      if (raw) {
+        try {
+          manifest = JSON.parse(raw);
+        } catch (parseErr) {
+          console.warn(
+            `[sync] Manifest JSON corrupted for ${datasetId} v${latestVersion.version}: ${parseErr}`,
+          );
+        }
+      }
     } catch (err) {
-      console.warn(`[sync] Manifest not available for ${datasetId}: ${err}`);
+      console.warn(`[sync] Failed to fetch manifest from S3 for ${datasetId}: ${err}`);
     }
   }
 
