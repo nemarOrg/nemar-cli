@@ -201,7 +201,7 @@ export class DownloadProgressTracker {
 
     // Only write if changed (avoids flicker)
     if (line !== this.lastRenderedLine) {
-      process.stderr.write(`\r${chalk.dim(line)}${" ".repeat(10)}`);
+      process.stderr.write(`\r${chalk.cyan(line)}${" ".repeat(10)}`);
       this.lastRenderedLine = line;
     }
   }

@@ -8,7 +8,7 @@
  * - nemar auth whoami    - Alias for status (common pattern)
  * - nemar auth logout    - Clear stored credentials
  * - nemar auth switch    - Switch between stored accounts
- * - nemar auth setup-ssh - Configure SSH for GitHub access
+ * - nemar auth setup-ssh - Configure SSH for GitHub (optional, gh CLI preferred)
  *
  * Note: The two-prong structure (nemar auth <cmd>) follows CLI best practices
  * for discoverability and organization. Root-level shortcuts (nemar login,

@@ -98,7 +98,7 @@ async function sandboxAction(): Promise<void> {
 
   // Step 3: Check prerequisites
   console.log(chalk.bold("Step 1/6: Checking prerequisites..."));
-  const prereqSpinner = ora("Checking git-annex and SSH...").start();
+  const prereqSpinner = ora("Checking prerequisites...").start();
 
   const prereqs = await checkPrerequisites();
   if (!prereqs.allPassed) {
@@ -108,7 +108,7 @@ async function sandboxAction(): Promise<void> {
     for (const error of prereqs.errors) {
       console.log(chalk.yellow(`  - ${error}`));
     }
-    if (!prereqs.githubSSH.accessible) {
+    if (prereqs.errors.some((e) => e.includes("GitHub"))) {
       console.log(chalk.dim("    Run 'gh auth login' to authenticate with GitHub"));
     }
     return;
