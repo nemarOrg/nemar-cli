@@ -335,6 +335,8 @@ nemar admin publish deny      # Deny publication request
 nemar admin revert            # Revert dataset to previous version
 nemar admin make-public       # Publish dataset (permanent)
 nemar admin delete-dataset    # Delete dataset and all resources
+nemar admin sync run          # Sync dataset metadata to nemar.org
+nemar admin sync status       # Show nemar.org sync status
 
 # Root-level shortcuts
 nemar login                   # Alias for auth login

@@ -27,12 +27,18 @@ export interface Bindings {
   TEST_BYPASS_TOKEN?: string; // Optional - for CI/CD rate limit bypass
   ENCRYPTION_KEY?: string; // For encrypting stored credentials
   OPENROUTER_API_KEY?: string; // For LLM-based metadata enrichment
+  NEMAR_USERNAME?: string; // nemar.org datapipeline API credentials
+  NEMAR_PASSWORD?: string;
 }
 
 /** User roles in hierarchical order: owner > admin > member */
 export type UserRole = "owner" | "admin" | "member";
 
-export const ROLE_HIERARCHY: Readonly<Record<UserRole, number>> = Object.freeze({ owner: 3, admin: 2, member: 1 });
+export const ROLE_HIERARCHY: Readonly<Record<UserRole, number>> = Object.freeze({
+  owner: 3,
+  admin: 2,
+  member: 1,
+});
 
 /** Check if userRole meets or exceeds the minimum required role */
 export function hasRole(userRole: UserRole, minimumRole: UserRole): boolean {
@@ -55,7 +61,9 @@ export function isValidRole(value: string): value is UserRole {
  */
 export function parseRole(value: string | null | undefined, username?: string): UserRole | null {
   if (value === null || value === undefined) {
-    console.warn(`User ${username ?? "unknown"} has null role -- migration 0009 may not be applied. Defaulting to "member".`);
+    console.warn(
+      `User ${username ?? "unknown"} has null role -- migration 0009 may not be applied. Defaulting to "member".`,
+    );
     return "member";
   }
   if (!isValidRole(value)) {

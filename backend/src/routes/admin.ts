@@ -61,6 +61,7 @@ import {
 } from "../services/github";
 import { generateIamUsername, revokeUserIamAccess, setupUserIamAccess } from "../services/iam";
 import { generateManifest } from "../services/manifest";
+import { syncDatasetToNemar } from "../services/nemar-sync";
 import {
   errorMessage,
   extractRepoName,
@@ -71,6 +72,8 @@ import {
   addPublicReadPolicy,
   applyObjectLock,
   deleteDatasetObjects,
+  getArchiveSize,
+  getDatasetS3Stats,
   getManifest,
   removePublicReadPolicy,
   uploadManifest,
@@ -117,6 +120,7 @@ type PublicationStep =
   | "publish_doi"
   | "s3_lock"
   | "generate_archive"
+  | "sync_nemar"
   | "notify_user";
 
 /**
@@ -2738,7 +2742,8 @@ adminRoutes.post("/publish/:id/deny", zValidator("json", denySchema), async (c) 
  * 11. publish_doi - Publish the Zenodo DOI (permanent and irreversible!)
  * 12. s3_lock - Apply S3 Object Lock (Governance mode)
  * 13. generate_archive - Trigger archive zip generation (async, non-blocking)
- * 14. notify_user - Send publication confirmation email
+ * 14. sync_nemar - Sync metadata to nemar.org datapipeline (non-fatal)
+ * 15. notify_user - Send publication confirmation email
  *
  * Body: { resume?: boolean } - if true, skip already-completed steps
  */
@@ -2786,6 +2791,7 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
     "publish_doi", // Permanent and irreversible!
     "s3_lock",
     "generate_archive",
+    "sync_nemar",
     "notify_user",
   ] as const;
   const stepsToRun = allSteps.filter((s) => !stepsCompleted.includes(s));
@@ -3973,7 +3979,139 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
     }
   }
 
-  // Step 14: Notify user
+  // Step 14: Sync metadata to nemar.org datapipeline
+  if (stepsToRun.includes("sync_nemar")) {
+    try {
+      await startStep("sync_nemar");
+
+      const nemarUser = c.env.NEMAR_USERNAME;
+      const nemarPass = c.env.NEMAR_PASSWORD;
+      if (!nemarUser || !nemarPass) {
+        console.warn("[publish] NEMAR_USERNAME/PASSWORD not configured; skipping nemar.org sync");
+        await updateProgress("sync_nemar", "Credentials not configured");
+      } else {
+        // Gather source data
+        const s3Cfg = getS3Config(c.env);
+        const tree = await getTreeAtRef(repoName, "main", pat);
+        const bidsFile = tree.find((f) => f.path === "dataset_description.json");
+        let bidsDescription: Record<string, unknown> = {};
+        if (bidsFile) {
+          try {
+            bidsDescription = JSON.parse(await getBlobContent(repoName, bidsFile.sha, pat));
+          } catch (err) {
+            console.warn(`[publish] Failed to parse dataset_description.json: ${err}`);
+          }
+        }
+
+        const readmeFile = tree.find((f) => f.path === "README" || f.path === "README.md");
+        const readme = readmeFile ? await getBlobContent(repoName, readmeFile.sha, pat) : "";
+
+        const nemarMetaFile = tree.find((f) => f.path === ".nemar/metadata.json");
+        let nemarMeta = null;
+        if (nemarMetaFile) {
+          try {
+            const raw = JSON.parse(await getBlobContent(repoName, nemarMetaFile.sha, pat));
+            const parsed = parseNemarMetadata(raw);
+            if (parsed && parsed.version === "2.0") nemarMeta = parsed;
+          } catch (err) {
+            console.warn(`[publish] Failed to parse .nemar/metadata.json: ${err}`);
+          }
+        }
+
+        // Gather D1 data, S3 stats, repo info in parallel
+        const [latestVersion, updatedDoi, pubRequest, s3Stats, zipFileSize] = await Promise.all([
+          db
+            .prepare(
+              "SELECT version, doi, created_at FROM dataset_versions WHERE dataset_id = ? ORDER BY created_at DESC LIMIT 1",
+            )
+            .bind(datasetId)
+            .first<{ version: string; doi: string; created_at: string }>(),
+          db
+            .prepare("SELECT concept_doi, created_at FROM datasets WHERE dataset_id = ?")
+            .bind(datasetId)
+            .first<{ concept_doi: string | null; created_at: string | null }>(),
+          db
+            .prepare("SELECT approved_at FROM publication_requests WHERE id = ?")
+            .bind(requestId)
+            .first<{ approved_at: string | null }>(),
+          getDatasetS3Stats(s3Cfg, datasetId).catch(() => ({ totalSize: 0, objectCount: 0 })),
+          getArchiveSize(s3Cfg, datasetId).catch(() => 0),
+        ]);
+
+        // Try to read version manifest from S3 for accurate file sizes
+        let manifest = null;
+        if (latestVersion?.version) {
+          try {
+            const raw = await getManifest(s3Cfg, datasetId, latestVersion.version);
+            if (raw) manifest = JSON.parse(raw);
+          } catch (err) {
+            console.warn(`[publish] Manifest not available for ${datasetId}: ${err}`);
+          }
+        }
+
+        const syncResult = await syncDatasetToNemar(nemarUser, nemarPass, {
+          datasetId,
+          bidsDescription,
+          nemarMetadata: nemarMeta,
+          readme,
+          tree,
+          conceptDoi: updatedDoi?.concept_doi || null,
+          latestVersionDoi: latestVersion?.doi || null,
+          latestVersion: latestVersion?.version || null,
+          versionCreatedAt: latestVersion?.created_at || null,
+          ownerUsername: dataset.owner_username,
+          createdAt: updatedDoi?.created_at || null,
+          publishDate: pubRequest?.approved_at || null,
+          repoName,
+          pat,
+          manifest,
+          s3Stats,
+          zipFileSize,
+        });
+
+        // Update sync tracking
+        await db
+          .prepare(
+            `UPDATE datasets SET nemar_sync_status = ?, nemar_sync_at = CASE WHEN ? = 'synced' THEN datetime('now') ELSE nemar_sync_at END, nemar_sync_error = ?, updated_at = datetime('now') WHERE dataset_id = ?`,
+          )
+          .bind(
+            syncResult.synced ? "synced" : "failed",
+            syncResult.synced ? "synced" : "failed",
+            syncResult.errors.length ? syncResult.errors.join("; ") : null,
+            datasetId,
+          )
+          .run();
+
+        if (!syncResult.synced) {
+          console.warn(
+            `[publish] nemar.org sync partially failed for ${datasetId}: ${syncResult.errors.join("; ")}`,
+          );
+        }
+
+        await updateProgress(
+          "sync_nemar",
+          syncResult.synced ? undefined : syncResult.errors.join("; "),
+        );
+      }
+    } catch (err) {
+      const msg = errorMessage(err);
+      // Non-fatal: nemar.org sync failure should not block publication
+      console.warn(`[publish] nemar.org sync failed for ${datasetId} (non-fatal): ${msg}`);
+      try {
+        await db
+          .prepare(
+            "UPDATE datasets SET nemar_sync_status = 'failed', nemar_sync_error = ?, updated_at = datetime('now') WHERE dataset_id = ?",
+          )
+          .bind(msg, datasetId)
+          .run();
+      } catch (d1Err) {
+        console.warn(`[publish] Failed to update sync status in D1: ${d1Err}`);
+      }
+      await updateProgress("sync_nemar", msg);
+    }
+  }
+
+  // Step 15: Notify user
   if (stepsToRun.includes("notify_user")) {
     try {
       await startStep("notify_user");
@@ -4532,3 +4670,186 @@ adminRoutes.post(
     );
   },
 );
+
+// ---------------------------------------------------------------------------
+// nemar.org Datapipeline Sync
+// ---------------------------------------------------------------------------
+
+/**
+ * POST /admin/datasets/:id/sync - Manually sync a dataset to nemar.org
+ *
+ * Gathers metadata from D1/GitHub and pushes to nemar.org datapipeline API.
+ * Useful for backfilling datasets published before this feature existed.
+ */
+adminRoutes.post("/datasets/:id/sync", async (c) => {
+  const datasetId = c.req.param("id");
+  const db = c.env.DB;
+  const nemarUser = c.env.NEMAR_USERNAME;
+  const nemarPass = c.env.NEMAR_PASSWORD;
+
+  if (!nemarUser || !nemarPass) {
+    return c.json({ error: "NEMAR_USERNAME/PASSWORD not configured" }, 500);
+  }
+
+  const dataset = await db
+    .prepare(
+      `SELECT d.*, u.username as owner_username
+       FROM datasets d
+       JOIN users u ON d.owner_user_id = u.id
+       WHERE d.dataset_id = ?`,
+    )
+    .bind(datasetId)
+    .first<{
+      dataset_id: string;
+      github_repo: string | null;
+      concept_doi: string | null;
+      created_at: string | null;
+      owner_username: string;
+    }>();
+
+  if (!dataset) {
+    return c.json({ error: "Dataset not found" }, 404);
+  }
+  if (!dataset.github_repo) {
+    return c.json({ error: "Dataset has no GitHub repository" }, 400);
+  }
+
+  const repoSlug = dataset.github_repo.split("/");
+  if (repoSlug.length < 2 || !repoSlug[1]) {
+    return c.json({ error: `Invalid github_repo format: ${dataset.github_repo}` }, 400);
+  }
+  const repoName = repoSlug[1];
+  const pat = c.env.GITHUB_ADMIN_PAT;
+  const s3 = getS3Config(c.env);
+
+  // Gather data from GitHub
+  const tree = await getTreeAtRef(repoName, "main", pat);
+  const bidsFile = tree.find((f) => f.path === "dataset_description.json");
+  let bidsDescription: Record<string, unknown> = {};
+  if (bidsFile) {
+    try {
+      bidsDescription = JSON.parse(await getBlobContent(repoName, bidsFile.sha, pat));
+    } catch (err) {
+      console.warn(`[sync] Failed to parse dataset_description.json for ${datasetId}: ${err}`);
+    }
+  }
+
+  const readmeFile = tree.find((f) => f.path === "README" || f.path === "README.md");
+  const readme = readmeFile ? await getBlobContent(repoName, readmeFile.sha, pat) : "";
+
+  const nemarMetaFile = tree.find((f) => f.path === ".nemar/metadata.json");
+  let nemarMeta = null;
+  if (nemarMetaFile) {
+    try {
+      const raw = JSON.parse(await getBlobContent(repoName, nemarMetaFile.sha, pat));
+      const parsed = parseNemarMetadata(raw);
+      if (parsed && parsed.version === "2.0") nemarMeta = parsed;
+    } catch (err) {
+      console.warn(`[sync] Failed to parse .nemar/metadata.json for ${datasetId}: ${err}`);
+    }
+  }
+
+  // Gather D1 data, S3 stats, repo info in parallel
+  const [latestVersion, pubRequest, s3Stats, zipFileSize, repoInfo] = await Promise.all([
+    db
+      .prepare(
+        "SELECT version, doi, created_at FROM dataset_versions WHERE dataset_id = ? ORDER BY created_at DESC LIMIT 1",
+      )
+      .bind(datasetId)
+      .first<{ version: string; doi: string; created_at: string }>(),
+    db
+      .prepare(
+        "SELECT approved_at FROM publication_requests WHERE dataset_id = ? AND status = 'published' ORDER BY approved_at DESC LIMIT 1",
+      )
+      .bind(datasetId)
+      .first<{ approved_at: string | null }>(),
+    getDatasetS3Stats(s3, datasetId).catch(() => ({ totalSize: 0, objectCount: 0 })),
+    getArchiveSize(s3, datasetId).catch(() => 0),
+    fetch(`https://api.github.com/repos/nemarDatasets/${repoName}`, {
+      headers: { Authorization: `token ${pat}`, Accept: "application/vnd.github.v3+json" },
+    })
+      .then((r) => r.json() as Promise<{ created_at?: string }>)
+      .catch(() => null),
+  ]);
+
+  // Try to read version manifest from S3 for accurate file sizes
+  let manifest = null;
+  if (latestVersion?.version) {
+    try {
+      const raw = await getManifest(s3, datasetId, latestVersion.version);
+      if (raw) manifest = JSON.parse(raw);
+    } catch (err) {
+      console.warn(`[sync] Manifest not available for ${datasetId}: ${err}`);
+    }
+  }
+
+  const syncResult = await syncDatasetToNemar(nemarUser, nemarPass, {
+    datasetId,
+    bidsDescription,
+    nemarMetadata: nemarMeta,
+    readme,
+    tree,
+    conceptDoi: dataset.concept_doi,
+    latestVersionDoi: latestVersion?.doi || null,
+    latestVersion: latestVersion?.version || null,
+    versionCreatedAt: latestVersion?.created_at || null,
+    ownerUsername: dataset.owner_username,
+    createdAt: dataset.created_at,
+    publishDate: pubRequest?.approved_at || null,
+    repoName,
+    pat,
+    manifest,
+    s3Stats,
+    zipFileSize,
+    repoCreatedAt: repoInfo?.created_at || null,
+  });
+
+  // Update tracking
+  await db
+    .prepare(
+      `UPDATE datasets SET nemar_sync_status = ?, nemar_sync_at = CASE WHEN ? = 'synced' THEN datetime('now') ELSE nemar_sync_at END, nemar_sync_error = ?, updated_at = datetime('now') WHERE dataset_id = ?`,
+    )
+    .bind(
+      syncResult.synced ? "synced" : "failed",
+      syncResult.synced ? "synced" : "failed",
+      syncResult.errors.length ? syncResult.errors.join("; ") : null,
+      datasetId,
+    )
+    .run();
+
+  return c.json({
+    dataset_id: datasetId,
+    synced: syncResult.synced,
+    errors: syncResult.errors,
+  });
+});
+
+/**
+ * GET /admin/sync/status - List sync status for all published datasets
+ */
+adminRoutes.get("/sync/status", async (c) => {
+  const db = c.env.DB;
+
+  const results = await db
+    .prepare(
+      `SELECT d.dataset_id, d.name, d.nemar_sync_status, d.nemar_sync_at, d.nemar_sync_error
+       FROM datasets d
+       WHERE d.visibility = 'public' OR d.concept_doi IS NOT NULL
+       ORDER BY d.nemar_sync_status IS NULL DESC, d.nemar_sync_status = 'failed' DESC, d.dataset_id`,
+    )
+    .all<{
+      dataset_id: string;
+      name: string;
+      nemar_sync_status: string | null;
+      nemar_sync_at: string | null;
+      nemar_sync_error: string | null;
+    }>();
+
+  return c.json({
+    datasets: results.results,
+    total: results.results.length,
+    synced: results.results.filter((d) => d.nemar_sync_status === "synced").length,
+    failed: results.results.filter((d) => d.nemar_sync_status === "failed").length,
+    pending: results.results.filter((d) => d.nemar_sync_status === null).length,
+  });
+});

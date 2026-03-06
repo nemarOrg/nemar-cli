@@ -14,6 +14,7 @@
  * - nemar admin doi create/info    - DOI management
  * - nemar admin publish list/deny/approve - Publication workflow
  * - nemar admin revert             - Revert dataset to a previous version
+ * - nemar admin sync run/status    - nemar.org datapipeline sync
  */
 
 import { existsSync } from "node:fs";
@@ -43,12 +44,14 @@ import {
   getDataset,
   getDatasetFiles,
   getDoiInfo,
+  getSyncStatus,
   listPublishRequests,
   listUsers,
   publishDataset,
   regenerateUserIam,
   revokeUser,
   submitEnrichment,
+  syncDataset,
   updateDoi,
 } from "../lib/api.js";
 import { getConfig, isAuthenticated } from "../lib/config.js";
@@ -2357,3 +2360,87 @@ Examples:
 
     process.exit(result.passed ? 0 : 1);
   });
+
+// ============================================================================
+// nemar.org Datapipeline Sync (Admin Only)
+// ============================================================================
+
+const syncCommand = new Command("sync").description(
+  "Sync dataset metadata to nemar.org datapipeline",
+);
+
+syncCommand
+  .command("run")
+  .description("Sync a dataset to nemar.org")
+  .argument("<dataset-id>", "Dataset ID (e.g., nm000103)")
+  .action(async (datasetId: string) => {
+    if (!requireAuth()) return;
+
+    const spinner = ora(`Syncing ${datasetId} to nemar.org...`).start();
+    try {
+      const result = await syncDataset(datasetId);
+      if (result.synced) {
+        spinner.succeed(`${datasetId} synced to nemar.org`);
+      } else {
+        spinner.warn(`${datasetId} sync completed with errors:`);
+        for (const err of result.errors) {
+          console.log(chalk.red(`  - ${err}`));
+        }
+      }
+    } catch (err) {
+      spinner.fail(`Failed to sync ${datasetId}`);
+      console.error(chalk.red(errorDetail(err)));
+    }
+  });
+
+syncCommand
+  .command("status")
+  .description("Show nemar.org sync status for all published datasets")
+  .action(async () => {
+    if (!requireAuth()) return;
+
+    const spinner = ora("Fetching sync status...").start();
+    try {
+      const result = await getSyncStatus();
+      spinner.stop();
+
+      console.log(chalk.bold(`\nnemar.org Sync Status (${result.total} datasets)\n`));
+      console.log(
+        `  Synced: ${chalk.green(result.synced)}  Failed: ${chalk.red(result.failed)}  Pending: ${chalk.yellow(result.pending)}\n`,
+      );
+
+      if (result.datasets.length === 0) {
+        console.log(chalk.gray("  No published datasets found."));
+        return;
+      }
+
+      // Table header
+      console.log(
+        chalk.gray(
+          `  ${"ID".padEnd(12)} ${"Name".padEnd(40)} ${"Status".padEnd(10)} ${"Last Sync".padEnd(20)}`,
+        ),
+      );
+      console.log(chalk.gray(`  ${"─".repeat(85)}`));
+
+      for (const d of result.datasets) {
+        const status = d.nemar_sync_status || "pending";
+        const statusColor =
+          status === "synced" ? chalk.green : status === "failed" ? chalk.red : chalk.yellow;
+        const syncAt = d.nemar_sync_at ? new Date(d.nemar_sync_at).toLocaleDateString() : "-";
+        const rawName = d.name || d.dataset_id;
+        const name = rawName.length > 38 ? `${rawName.substring(0, 35)}...` : rawName;
+
+        console.log(
+          `  ${d.dataset_id.padEnd(12)} ${name.padEnd(40)} ${statusColor(status.padEnd(10))} ${syncAt}`,
+        );
+        if (d.nemar_sync_error) {
+          console.log(chalk.red(`    Error: ${d.nemar_sync_error}`));
+        }
+      }
+    } catch (err) {
+      spinner.fail("Failed to fetch sync status");
+      console.error(chalk.red(errorDetail(err)));
+    }
+  });
+
+adminCommand.addCommand(syncCommand);
