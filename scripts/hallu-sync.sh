@@ -201,7 +201,7 @@ discover_datasets() {
     done <<< "$ids"
 
     local count
-    count=$(echo "$response" | jq -r '.count // 0')
+    count=$(echo "$response" | jq '.datasets | length')
     if (( count < limit )); then
       break
     fi
@@ -217,6 +217,7 @@ get_latest_version() {
   local dataset_id="$1"
   local response
   response=$(curl -sf "${API_BASE}/datasets/${dataset_id}/manifest" 2>/dev/null) || {
+    log_error "${dataset_id}: Failed to fetch manifest from API"
     echo ""
     return
   }

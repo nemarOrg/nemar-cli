@@ -55,11 +55,11 @@ Request:
 | Field | Type | Notes |
 |---|---|---|
 | id | string | Dataset ID, e.g., "nm000103" |
-| created | string | ISO 8601 timestamp |
+| created | string | YYYY-MM-DD HH:MM:SS |
 | uploader | string | Username of uploader |
 | latestSnapshot | string | Version, e.g., "1.0.0" |
 | name | string | Dataset name from BIDS |
-| publishDate | string | ISO 8601 timestamp |
+| publishDate | string | YYYY-MM-DD HH:MM:SS |
 | onBrainlife | int | 0 or 1 |
 | sessionsNum | int | Number of sessions |
 | file_size | int | Total file size in bytes |
@@ -70,7 +70,7 @@ Request:
 | age_max | int | Maximum participant age |
 | BIDSVersion | string | e.g., "1.9.0" |
 | License | string | e.g., "CC-BY-NC-SA 4.0" |
-| Authors | string | Joined with ` ===NEMAR-SEP=== ` |
+| Authors | string | Comma-separated |
 | Acknowledgements | string | |
 | HowToAcknowledge | string | |
 | Funding | string | Joined with ` ===NEMAR-SEP=== ` |
@@ -111,7 +111,7 @@ Request:
 | Field | Type | Notes |
 |---|---|---|
 | id | string | Dataset ID |
-| latestSnapshot_created | string | ISO 8601 timestamp |
+| latestSnapshot_created | string | YYYY-MM-DD HH:MM:SS |
 | description_name | string | Dataset name |
 | primaryModality | string | Primary modality |
 | secondaryModalities | string | Comma-separated |
@@ -159,7 +159,6 @@ Request:
 ## Multi-Value Field Separator
 
 The ` ===NEMAR-SEP=== ` separator (space-equals-equals-equals-NEMAR-hyphen-SEP-equals-equals-equals-space) is used to join arrays for these fields:
-- Authors
 - Funding
 - ReferencesAndLinks
 - EthicsApprovals
