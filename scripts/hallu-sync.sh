@@ -50,6 +50,7 @@ API_BASE="${API_BASE:-https://api.osc.earth/nemar}"
 S3_BASE="${S3_BASE:-https://nemar.s3.us-east-2.amazonaws.com}"
 NEMAR_GROUP="${NEMAR_GROUP:-nemar}"
 DOWNLOAD_JOBS="${DOWNLOAD_JOBS:-4}"
+ZIP_ENABLED=true
 
 ################################################################################
 # Logging
@@ -114,19 +115,27 @@ check_prerequisites() {
     exit 2
   fi
 
-  # Check directories
-  for dir in "$DATA_DIR" "$ZIP_DIR"; do
-    if [[ ! -d "$dir" ]]; then
-      log_error "Directory does not exist: $dir"
-      exit 2
-    fi
-    if [[ ! -w "$dir" ]]; then
-      log_error "Directory is not writable: $dir"
-      exit 2
-    fi
-  done
+  # Check DATA_DIR (required)
+  if [[ ! -d "$DATA_DIR" ]]; then
+    log_error "Directory does not exist: $DATA_DIR"
+    exit 2
+  fi
+  if [[ ! -w "$DATA_DIR" ]]; then
+    log_error "Directory is not writable: $DATA_DIR"
+    exit 2
+  fi
 
-  log "Prerequisites OK"
+  # Check ZIP_DIR (optional; skip zip sync if not writable)
+  ZIP_ENABLED=true
+  if [[ ! -d "$ZIP_DIR" ]]; then
+    log "WARNING: ZIP_DIR does not exist: $ZIP_DIR (zip sync disabled)"
+    ZIP_ENABLED=false
+  elif [[ ! -w "$ZIP_DIR" ]]; then
+    log "WARNING: ZIP_DIR is not writable: $ZIP_DIR (zip sync disabled)"
+    ZIP_ENABLED=false
+  fi
+
+  log "Prerequisites OK (zip_sync=${ZIP_ENABLED})"
 }
 
 ################################################################################
@@ -242,20 +251,17 @@ sync_dataset_data() {
     rm -rf "$dataset_dir"
   fi
 
-  # Case 2: No directory on disk -> fresh download
+  # Case 2: No directory on disk -> fresh download directly to final path
   if [[ ! -d "$dataset_dir" ]]; then
     log "${dataset_id}: Downloading (version ${latest_version})"
-    local tmp_dir="${DATA_DIR}/.tmp-${dataset_id}"
-    rm -rf "$tmp_dir"
 
-    if ! nemar dataset download "$dataset_id" -o "$tmp_dir" -j "$DOWNLOAD_JOBS" >>"$LOG_FILE" 2>&1; then
+    if ! nemar dataset download "$dataset_id" -o "$dataset_dir" -j "$DOWNLOAD_JOBS" >>"$LOG_FILE" 2>&1; then
       log_error "${dataset_id}: Download failed"
-      rm -rf "$tmp_dir"
+      rm -rf "$dataset_dir"
       return 1
     fi
 
-    apply_permissions "$tmp_dir"
-    mv "$tmp_dir" "$dataset_dir"
+    apply_permissions "$dataset_dir"
     update_manifest "$dataset_id" "data_version" "$latest_version"
     log "${dataset_id}: Data synced (version ${latest_version})"
     return 0
@@ -343,7 +349,9 @@ sync_dataset() {
   local failed=0
 
   sync_dataset_data "$dataset_id" "$latest_version" || failed=1
-  sync_dataset_zip "$dataset_id" "$latest_version" || failed=1
+  if [[ "$ZIP_ENABLED" == "true" ]]; then
+    sync_dataset_zip "$dataset_id" "$latest_version" || failed=1
+  fi
 
   return $failed
 }
