@@ -73,13 +73,13 @@ Examples:
 async function sandboxAction(): Promise<void> {
   console.log();
   console.log(chalk.bold("NEMAR Sandbox Training"));
-  console.log(chalk.gray("Verify your setup and learn the upload workflow"));
+  console.log(chalk.dim("Verify your setup and learn the upload workflow"));
   console.log();
 
   // Step 1: Check authentication
   if (!isAuthenticated()) {
     console.log(chalk.red("Not authenticated"));
-    console.log(chalk.gray("Run 'nemar auth login' first"));
+    console.log(chalk.dim("Run 'nemar auth login' first"));
     return;
   }
 
@@ -87,12 +87,12 @@ async function sandboxAction(): Promise<void> {
   const config = getConfig();
   if (config.sandboxCompleted) {
     console.log(chalk.green("Sandbox training already completed!"));
-    console.log(chalk.gray(`Dataset ID: ${config.sandboxDatasetId}`));
+    console.log(chalk.dim(`Dataset ID: ${config.sandboxDatasetId}`));
     console.log();
     console.log("You can upload real datasets with:");
     console.log(chalk.cyan("  nemar dataset upload ./your-dataset"));
     console.log();
-    console.log(chalk.gray("To re-run training, use: nemar sandbox reset"));
+    console.log(chalk.dim("To re-run training, use: nemar sandbox reset"));
     return;
   }
 
@@ -109,7 +109,7 @@ async function sandboxAction(): Promise<void> {
       console.log(chalk.yellow(`  - ${error}`));
     }
     if (!prereqs.githubSSH.accessible) {
-      console.log(chalk.gray("    Run 'nemar auth setup-ssh' to configure SSH"));
+      console.log(chalk.dim("    Run 'gh auth login' to authenticate with GitHub"));
     }
     return;
   }
@@ -161,7 +161,7 @@ async function sandboxAction(): Promise<void> {
     datasetPath = paths.root;
     const size = getSandboxDatasetSize(paths);
     genSpinner.succeed(`Test dataset created (${formatBytes(size)})`);
-    console.log(chalk.gray(`  Location: ${datasetPath}`));
+    console.log(chalk.dim(`  Location: ${datasetPath}`));
   } catch (error) {
     genSpinner.fail("Failed to generate test dataset");
     console.log(chalk.red(`  ${error instanceof Error ? error.message : "Unknown error"}`));
@@ -202,7 +202,7 @@ async function sandboxAction(): Promise<void> {
     uploadUrls = response.upload_urls || {};
 
     apiSpinner.succeed(`Sandbox dataset created: ${chalk.cyan(datasetId)}`);
-    console.log(chalk.gray(`  GitHub: ${githubUrl}`));
+    console.log(chalk.dim(`  GitHub: ${githubUrl}`));
 
     // Wait for IAM policy propagation (AWS is eventually consistent)
     // This initial wait helps reduce retry attempts during upload
@@ -307,7 +307,7 @@ async function sandboxAction(): Promise<void> {
         }
         console.log();
         console.log(chalk.yellow("Sandbox training aborted due to upload failures."));
-        console.log(chalk.gray("Please check your network connection and try again."));
+        console.log(chalk.dim("Please check your network connection and try again."));
         cleanupSandboxDataset(datasetPath);
         return;
       }
@@ -336,7 +336,7 @@ async function sandboxAction(): Promise<void> {
         }
         console.log();
         console.log(chalk.yellow("Sandbox training aborted due to URL registration failures."));
-        console.log(chalk.gray("This may indicate a git-annex configuration issue."));
+        console.log(chalk.dim("This may indicate a git-annex configuration issue."));
         cleanupSandboxDataset(datasetPath);
         return;
       }
@@ -394,7 +394,7 @@ async function sandboxAction(): Promise<void> {
   console.log("Your setup is verified and you're ready to upload real datasets:");
   console.log(chalk.cyan("  nemar dataset upload ./your-dataset"));
   console.log();
-  console.log(chalk.gray(`Sandbox dataset: ${datasetId}`));
+  console.log(chalk.dim(`Sandbox dataset: ${datasetId}`));
 }
 
 // ============================================================================
@@ -408,7 +408,7 @@ sandboxCommand
   .action(async (options: { refresh?: boolean }) => {
     if (!isAuthenticated()) {
       console.log(chalk.red("Not authenticated"));
-      console.log(chalk.gray("Run 'nemar auth login' first"));
+      console.log(chalk.dim("Run 'nemar auth login' first"));
       return;
     }
 
@@ -425,9 +425,9 @@ sandboxCommand
 
         if (status.sandbox_completed) {
           console.log(chalk.green("Sandbox training: Completed"));
-          console.log(chalk.gray(`  Dataset ID: ${status.sandbox_dataset_id}`));
+          console.log(chalk.dim(`  Dataset ID: ${status.sandbox_dataset_id}`));
           if (status.sandbox_completed_at) {
-            console.log(chalk.gray(`  Completed: ${status.sandbox_completed_at}`));
+            console.log(chalk.dim(`  Completed: ${status.sandbox_completed_at}`));
           }
         } else {
           console.log(chalk.yellow("Sandbox training: Not completed"));
@@ -446,7 +446,7 @@ sandboxCommand
       const config = getConfig();
       if (config.sandboxCompleted) {
         console.log(chalk.green("Sandbox training: Completed"));
-        console.log(chalk.gray(`  Dataset ID: ${config.sandboxDatasetId}`));
+        console.log(chalk.dim(`  Dataset ID: ${config.sandboxDatasetId}`));
       } else {
         console.log(chalk.yellow("Sandbox training: Not completed"));
         console.log();
@@ -468,14 +468,14 @@ sandboxCommand
   .action(async (options: ConfirmOptions) => {
     if (!isAuthenticated()) {
       console.log(chalk.red("Not authenticated"));
-      console.log(chalk.gray("Run 'nemar auth login' first"));
+      console.log(chalk.dim("Run 'nemar auth login' first"));
       return;
     }
 
     const localConfig = getConfig();
     if (!localConfig.sandboxCompleted) {
       console.log(chalk.yellow("Sandbox training not yet completed"));
-      console.log(chalk.gray("Nothing to reset"));
+      console.log(chalk.dim("Nothing to reset"));
       return;
     }
 
@@ -484,7 +484,7 @@ sandboxCommand
       options,
     );
     if (result !== "confirmed") {
-      console.log(chalk.gray(result === "declined" ? "Skipped" : "Cancelled"));
+      console.log(chalk.dim(result === "declined" ? "Skipped" : "Cancelled"));
       return;
     }
 
