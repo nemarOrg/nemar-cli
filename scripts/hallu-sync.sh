@@ -245,10 +245,20 @@ sync_dataset_data() {
   local recorded_data_version
   recorded_data_version=$(get_manifest_field "$dataset_id" "data_version")
 
-  # Case 1: Directory exists but no manifest entry (orphan from crashed run)
+  # Case 1: Directory exists but no manifest entry
   if [[ -d "$dataset_dir" && -z "$recorded_data_version" ]]; then
-    log "${dataset_id}: Orphan directory detected, removing and re-downloading"
-    rm -rf "$dataset_dir"
+    if [[ -d "$dataset_dir/.git" ]]; then
+      # Looks like a valid dataset (has .git), adopt it into manifest
+      log "${dataset_id}: Existing dataset found without manifest entry, adopting"
+      update_manifest "$dataset_id" "data_version" "$latest_version"
+      apply_permissions "$dataset_dir"
+      log "${dataset_id}: Adopted at version ${latest_version}"
+      return 0
+    else
+      # No .git dir, likely a failed partial download; clean up
+      log "${dataset_id}: Incomplete directory detected (no .git), removing"
+      rm -rf "$dataset_dir"
+    fi
   fi
 
   # Case 2: No directory on disk -> fresh download directly to final path
