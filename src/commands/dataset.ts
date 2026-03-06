@@ -413,7 +413,7 @@ Description:
 Requirements:
   - NEMAR account (nemar auth login)
   - git-annex installed
-  - GitHub SSH access configured
+  - GitHub CLI authenticated (gh auth login)
 
 Process:
   1. Validates BIDS format (unless --skip-validation)
@@ -479,9 +479,9 @@ Examples:
     }
 
     spinner.succeed("Prerequisites check passed");
-    console.log(chalk.gray(`  git-annex ${prereqs.gitAnnex.version}`));
+    console.log(chalk.dim(`  git-annex ${prereqs.gitAnnex.version}`));
     if (prereqs.githubSSH.username) {
-      console.log(chalk.gray(`  GitHub SSH: ${prereqs.githubSSH.username}`));
+      console.log(chalk.dim(`  GitHub: ${prereqs.githubSSH.username}`));
     }
     console.log();
 
@@ -554,9 +554,7 @@ Examples:
         console.log("Learn more: https://docs.deno.com/runtime/getting_started/installation/");
         console.log();
         console.log(
-          chalk.gray(
-            "To skip validation (not recommended): nemar dataset upload --skip-validation",
-          ),
+          chalk.dim("To skip validation (not recommended): nemar dataset upload --skip-validation"),
         );
         process.exit(1);
       }
@@ -568,7 +566,7 @@ Examples:
           console.log(formatValidationResult(result));
           console.log();
           console.log(chalk.yellow("Fix the errors above before uploading."));
-          console.log(chalk.gray("Or use --skip-validation to upload anyway (not recommended)."));
+          console.log(chalk.dim("Or use --skip-validation to upload anyway (not recommended)."));
           process.exit(1);
         }
         spinner.succeed(`Dataset is valid BIDS (${result.warningCount} warnings)`);
@@ -617,7 +615,7 @@ Examples:
       try {
         coAuthorEnrichment = JSON.parse(readFileSync(existingNemarMetaV2, "utf-8"));
         console.log(
-          chalk.gray("  Using existing .nemar/metadata.json (author ORCIDs from prior run)"),
+          chalk.dim("  Using existing .nemar/metadata.json (author ORCIDs from prior run)"),
         );
       } catch (err) {
         console.log(
@@ -630,7 +628,7 @@ Examples:
       try {
         coAuthorEnrichment = JSON.parse(readFileSync(existingNemarMetaV1, "utf-8"));
         console.log(
-          chalk.gray("  Using existing nemar_metadata.json (author ORCIDs from prior run)"),
+          chalk.dim("  Using existing nemar_metadata.json (author ORCIDs from prior run)"),
         );
       } catch (err) {
         console.log(
@@ -657,7 +655,7 @@ Examples:
             uploaderOrcid = user.orcid || undefined;
             uploaderUsername = user.username;
           } catch (userErr) {
-            console.log(chalk.gray(`  Could not fetch profile: ${errorDetail(userErr)}`));
+            console.log(chalk.dim(`  Could not fetch profile: ${errorDetail(userErr)}`));
           }
 
           console.log();
@@ -764,7 +762,7 @@ Examples:
               }
               const nemarMetaPath = resolve(nemarMetaDir, "metadata.json");
               writeFileSync(nemarMetaPath, JSON.stringify(coAuthorEnrichment, null, 2));
-              console.log(chalk.gray("  Saved .nemar/metadata.json with author ORCIDs"));
+              console.log(chalk.dim("  Saved .nemar/metadata.json with author ORCIDs"));
             } catch (writeErr) {
               console.log(
                 chalk.yellow(
@@ -780,7 +778,7 @@ Examples:
           } else {
             console.log(chalk.yellow(`  Could not collect ORCIDs: ${errorDetail(orcidErr)}`));
           }
-          console.log(chalk.gray("  Continuing without author enrichment."));
+          console.log(chalk.dim("  Continuing without author enrichment."));
         }
       }
     }
@@ -795,7 +793,7 @@ Examples:
         console.log(
           chalk.cyan("License detected:"),
           chalk.bold(detected.spdxId),
-          chalk.gray(
+          chalk.dim(
             `(from ${detected.source === "dataset_description" ? "dataset_description.json" : "LICENSE file"})`,
           ),
         );
@@ -833,7 +831,7 @@ Examples:
         } else {
           console.log(chalk.yellow("No license found in this dataset."));
         }
-        console.log(chalk.gray("A license is required to publish on NEMAR."));
+        console.log(chalk.dim("A license is required to publish on NEMAR."));
         resolvedLicense = await promptForLicense();
       }
 
@@ -845,7 +843,7 @@ Examples:
           if (desc.License !== resolvedLicense) {
             updateLicenseInDescription(absolutePath, resolvedLicense);
             console.log(
-              chalk.gray(`  Updated dataset_description.json License -> ${resolvedLicense}`),
+              chalk.dim(`  Updated dataset_description.json License -> ${resolvedLicense}`),
             );
           }
         }
@@ -860,7 +858,7 @@ Examples:
       // Ensure LICENSE file exists
       const created = ensureLicenseFile(absolutePath, resolvedLicense);
       if (created) {
-        console.log(chalk.gray(`  Created LICENSE file (${resolvedLicense})`));
+        console.log(chalk.dim(`  Created LICENSE file (${resolvedLicense})`));
       }
       console.log();
     }
@@ -886,7 +884,7 @@ Examples:
             desc.SourceDatasets = merged;
             writeFileSync(descPath, `${JSON.stringify(desc, null, 2)}\n`);
             console.log(
-              chalk.gray(
+              chalk.dim(
                 `  Updated dataset_description.json SourceDatasets (${merged.length} source(s))`,
               ),
             );
@@ -945,7 +943,7 @@ Examples:
     // Handle --restart: clear any existing progress
     if (options.restart) {
       clearUploadProgress(absolutePath);
-      console.log(chalk.gray("  Upload progress cleared (--restart)"));
+      console.log(chalk.dim("  Upload progress cleared (--restart)"));
       console.log();
     }
 
@@ -1014,7 +1012,7 @@ Examples:
             console.log(
               chalk.yellow("  The dataset may have been deleted. Try uploading as a new dataset."),
             );
-            console.log(chalk.gray(`  Remove ${absolutePath}/.nemar to start fresh.`));
+            console.log(chalk.dim(`  Remove ${absolutePath}/.nemar to start fresh.`));
           }
         } else {
           console.log(chalk.red(`  ${(error as Error).message}`));
@@ -1140,7 +1138,7 @@ Examples:
     const largefilesResult = await configureLargefiles(absolutePath);
     if (!largefilesResult.success) {
       spinner.warn("Could not configure largefiles pattern");
-      console.log(chalk.gray(`  ${largefilesResult.error}`));
+      console.log(chalk.dim(`  ${largefilesResult.error}`));
     }
 
     spinner.succeed("git-annex dataset initialized");
@@ -1211,7 +1209,7 @@ Examples:
         } catch (credError) {
           spinner.fail(`Could not get upload credentials: ${errorDetail(credError)}`);
           console.log(chalk.red("  Upload credentials are required for S3 access."));
-          console.log(chalk.gray("  Re-run the command to retry."));
+          console.log(chalk.dim("  Re-run the command to retry."));
           process.exit(1);
         }
 
@@ -1231,7 +1229,7 @@ Examples:
 
         if (!s3Result.success) {
           spinner.fail(`Failed to configure S3 remote: ${s3Result.error}`);
-          console.log(chalk.gray("  Re-run the command to retry."));
+          console.log(chalk.dim("  Re-run the command to retry."));
           process.exit(1);
         }
         spinner.succeed("S3 remote configured");
@@ -1269,13 +1267,13 @@ Examples:
         writeUploadProgress(absolutePath, uploadProgress);
         spinner.succeed(`Uploaded ${uploadResult.filesCopied} data files to S3`);
       } else {
-        console.log(chalk.gray("No data files to upload to S3"));
+        console.log(chalk.dim("No data files to upload to S3"));
       }
 
       markStepCompleted(uploadProgress, "s3_upload");
       writeUploadProgress(absolutePath, uploadProgress);
     } else {
-      console.log(chalk.gray("  S3 upload already completed (skipping)"));
+      console.log(chalk.dim("  S3 upload already completed (skipping)"));
     }
 
     // Step 10b: Ensure .bidsignore includes NEMAR-specific paths
@@ -1305,19 +1303,19 @@ Examples:
               : ".nemar/\n";
             writeFileSync(bidsignorePath, newContent);
           }
-          console.log(chalk.gray("  Updated .bidsignore for NEMAR metadata"));
+          console.log(chalk.dim("  Updated .bidsignore for NEMAR metadata"));
         } catch (writeErr) {
           console.log(
             chalk.yellow(`  Warning: Could not update .bidsignore: ${errorDetail(writeErr)}`),
           );
-          console.log(chalk.gray("  Upload will continue without author enrichment."));
+          console.log(chalk.dim("  Upload will continue without author enrichment."));
         }
       }
 
       markStepCompleted(uploadProgress, "metadata_write");
       writeUploadProgress(absolutePath, uploadProgress);
     } else {
-      console.log(chalk.gray("  Metadata write already completed (skipping)"));
+      console.log(chalk.dim("  Metadata write already completed (skipping)"));
     }
 
     // Step 11: Save dataset changes
@@ -1338,7 +1336,7 @@ Examples:
       markStepCompleted(uploadProgress, "dataset_save");
       writeUploadProgress(absolutePath, uploadProgress);
     } else {
-      console.log(chalk.gray("  Dataset save already completed (skipping)"));
+      console.log(chalk.dim("  Dataset save already completed (skipping)"));
     }
 
     // Step 12: Push metadata to GitHub
@@ -1365,7 +1363,7 @@ Examples:
       markStepCompleted(uploadProgress, "github_push");
       writeUploadProgress(absolutePath, uploadProgress);
     } else {
-      console.log(chalk.gray("  GitHub push already completed (skipping)"));
+      console.log(chalk.dim("  GitHub push already completed (skipping)"));
     }
 
     // Step 12b: Deploy BIDS validation CI
@@ -1381,7 +1379,7 @@ Examples:
           const msg = error instanceof Error ? error.message : String(error);
           spinner.warn(`Could not configure CI: ${msg}`);
           console.log(
-            chalk.gray(
+            chalk.dim(
               `  An admin can add it later with: nemar admin ci add ${datasetInfo.dataset_id}`,
             ),
           );
@@ -1391,7 +1389,7 @@ Examples:
       markStepCompleted(uploadProgress, "ci_deploy");
       writeUploadProgress(absolutePath, uploadProgress);
     } else {
-      console.log(chalk.gray("  CI deploy already completed (skipping)"));
+      console.log(chalk.dim("  CI deploy already completed (skipping)"));
     }
 
     // Note: Branch protection is NOT applied here for private datasets.
@@ -1408,8 +1406,8 @@ Examples:
     console.log(`  Dataset ID: ${chalk.cyan(datasetInfo.dataset_id)}`);
     console.log(`  GitHub: ${chalk.cyan(datasetInfo.github_url)}`);
     console.log();
-    console.log(chalk.gray("To download this dataset:"));
-    console.log(chalk.gray(`  nemar dataset download ${datasetInfo.dataset_id}`));
+    console.log(chalk.dim("To download this dataset:"));
+    console.log(chalk.dim(`  nemar dataset download ${datasetInfo.dataset_id}`));
     console.log();
     console.log(
       chalk.yellow(
@@ -1539,7 +1537,7 @@ Examples:
         spinner.fail("Failed to get download credentials");
         console.log(chalk.red(`  ${(error as Error).message}`));
         console.log(
-          chalk.gray("Private datasets require authentication. Run 'nemar auth login' first."),
+          chalk.dim("Private datasets require authentication. Run 'nemar auth login' first."),
         );
         process.exit(1);
       }
@@ -1550,7 +1548,7 @@ Examples:
     // Enable S3 remote if available (new datasets have it; old ones use web URLs)
     const s3Enable = await enableS3Remote(absoluteOutput, "nemar-s3", s3Creds);
     if (s3Enable.enabled) {
-      console.log(chalk.gray("  S3 remote enabled for data downloads"));
+      console.log(chalk.dim("  S3 remote enabled for data downloads"));
     } else if (!s3Enable.success) {
       console.log(chalk.yellow(`  Warning: Could not enable S3 remote: ${s3Enable.error}`));
     }
@@ -1570,10 +1568,8 @@ Examples:
       if (!getResult.success) {
         tracker.finish(0);
         console.log(chalk.red(`Failed to download data files: ${getResult.error}`));
-        console.log(chalk.gray("The dataset was cloned but data files are not available locally."));
-        console.log(
-          chalk.gray(`You can try again with: cd ${absoluteOutput} && nemar dataset get`),
-        );
+        console.log(chalk.dim("The dataset was cloned but data files are not available locally."));
+        console.log(chalk.dim(`You can try again with: cd ${absoluteOutput} && nemar dataset get`));
         if (downloadCreds) {
           await clearAnnexCredentials(absoluteOutput);
         }
@@ -1583,7 +1579,7 @@ Examples:
       tracker.finish(getResult.filesDownloaded || 0);
       console.log(chalk.green(`Data downloaded (${getResult.filesDownloaded || 0} files)`));
     } else {
-      console.log(chalk.gray("Skipping data files (--no-data flag)"));
+      console.log(chalk.dim("Skipping data files (--no-data flag)"));
     }
 
     // Clear cached S3 credentials so future operations request fresh tokens
@@ -1605,15 +1601,13 @@ Examples:
       }
       if (localInfo.missingFiles > 0) {
         console.log(
-          chalk.gray(
-            `  Missing files: ${localInfo.missingFiles} (use 'git annex get' to download)`,
-          ),
+          chalk.dim(`  Missing files: ${localInfo.missingFiles} (use 'git annex get' to download)`),
         );
       }
     }
     console.log();
-    console.log(chalk.gray("To get additional data:"));
-    console.log(chalk.gray(`  cd ${absoluteOutput} && git annex get <path>`));
+    console.log(chalk.dim("To get additional data:"));
+    console.log(chalk.dim(`  cd ${absoluteOutput} && git annex get <path>`));
   });
 
 // Status command
@@ -1678,8 +1672,8 @@ Examples:
     }
 
     console.log();
-    console.log(chalk.gray("To download this dataset:"));
-    console.log(chalk.gray(`  nemar dataset download ${datasetId}`));
+    console.log(chalk.dim("To download this dataset:"));
+    console.log(chalk.dim(`  nemar dataset download ${datasetId}`));
   });
 
 /**
@@ -1692,7 +1686,7 @@ function colorizeStatus(status: string): string {
     case "active":
       return chalk.blue(status);
     case "archived":
-      return chalk.gray(status);
+      return chalk.dim(status);
     case "pending":
       return chalk.yellow(status);
     default:
@@ -1785,7 +1779,7 @@ Examples:
       console.log();
       if (options.mine) {
         console.log(chalk.yellow("You don't have any datasets yet."));
-        console.log(chalk.gray("Create one with: nemar dataset upload <path>"));
+        console.log(chalk.dim("Create one with: nemar dataset upload <path>"));
       } else {
         console.log(chalk.yellow("No datasets found."));
       }
@@ -1815,8 +1809,8 @@ Examples:
       "Visibility".padEnd(visWidth),
       "Status",
     ].join("  ");
-    console.log(chalk.gray(header));
-    console.log(chalk.gray("-".repeat(header.length)));
+    console.log(chalk.dim(header));
+    console.log(chalk.dim("-".repeat(header.length)));
 
     // Rows
     for (const dataset of datasets) {
@@ -1839,7 +1833,7 @@ Examples:
     }
 
     console.log();
-    console.log(chalk.gray("For details: nemar dataset status <dataset-id>"));
+    console.log(chalk.dim("For details: nemar dataset status <dataset-id>"));
   });
 
 // Release command - create a version bump PR
@@ -1925,10 +1919,10 @@ Examples:
         if (history.versions.length > 0) {
           console.log(`  Version DOIs: ${history.versions.length}`);
           for (const v of history.versions.slice(0, 3)) {
-            console.log(`    ${v.version} - ${chalk.gray(v.doi)}`);
+            console.log(`    ${v.version} - ${chalk.dim(v.doi)}`);
           }
           if (history.versions.length > 3) {
-            console.log(chalk.gray(`    ... and ${history.versions.length - 3} more`));
+            console.log(chalk.dim(`    ... and ${history.versions.length - 3} more`));
           }
         }
       } catch (err) {
@@ -2166,14 +2160,14 @@ Examples:
         } else if (errorMsg.includes("auth") || errorMsg.includes("401")) {
           console.log(chalk.yellow("  Run: gh auth login"));
         }
-        console.log(chalk.gray(`  Branch ${branchName} has been pushed. Create the PR manually.`));
+        console.log(chalk.dim(`  Branch ${branchName} has been pushed. Create the PR manually.`));
       }
 
       // Monitor mode (only if PR was created successfully)
       if (options.monitor && prCreated) {
         console.log();
-        console.log(chalk.gray("Monitoring CI checks..."));
-        console.log(chalk.gray("  Press Ctrl+C to stop monitoring"));
+        console.log(chalk.dim("Monitoring CI checks..."));
+        console.log(chalk.dim("  Press Ctrl+C to stop monitoring"));
 
         let attempts = 0;
         const maxAttempts = 60; // 10 minutes at 10s intervals
@@ -2229,7 +2223,7 @@ Examples:
             break;
           }
 
-          process.stdout.write(chalk.gray("."));
+          process.stdout.write(chalk.dim("."));
         }
 
         if (attempts >= maxAttempts) {
@@ -2239,8 +2233,8 @@ Examples:
 
       if (needsClone) {
         console.log();
-        console.log(chalk.gray(`Working directory: ${workDir}`));
-        console.log(chalk.gray("You can delete this directory after the PR is merged."));
+        console.log(chalk.dim(`Working directory: ${workDir}`));
+        console.log(chalk.dim("You can delete this directory after the PR is merged."));
       }
     },
   );
@@ -2375,7 +2369,7 @@ Examples:
           console.log(`    ${f}`);
         }
         if (metadataFiles.length > 5) {
-          console.log(chalk.gray(`    ... and ${metadataFiles.length - 5} more`));
+          console.log(chalk.dim(`    ... and ${metadataFiles.length - 5} more`));
         }
       }
       if (dataFiles.length > 0) {
@@ -2384,7 +2378,7 @@ Examples:
           console.log(`    ${f}`);
         }
         if (dataFiles.length > 5) {
-          console.log(chalk.gray(`    ... and ${dataFiles.length - 5} more`));
+          console.log(chalk.dim(`    ... and ${dataFiles.length - 5} more`));
         }
       }
 
@@ -2654,13 +2648,13 @@ Examples:
         prSpinner.fail("Failed to create PR");
         const errorMsg = prError instanceof Error ? prError.message : String(prError);
         console.log(chalk.red(`  ${errorMsg}`));
-        console.log(chalk.gray(`  Branch ${branchName} has been pushed. Create the PR manually.`));
+        console.log(chalk.dim(`  Branch ${branchName} has been pushed. Create the PR manually.`));
       }
 
       // Monitor mode (only if PR was created successfully)
       if (options.monitor && prCreated) {
         console.log();
-        console.log(chalk.gray("Monitoring CI checks..."));
+        console.log(chalk.dim("Monitoring CI checks..."));
 
         let attempts = 0;
         const maxAttempts = 60; // 10 minutes at 10s intervals
@@ -2713,7 +2707,7 @@ Examples:
             break;
           }
 
-          process.stdout.write(chalk.gray("."));
+          process.stdout.write(chalk.dim("."));
         }
 
         if (attempts >= maxAttempts) {
@@ -2760,7 +2754,7 @@ Examples:
       console.log();
       console.log(`  GitHub: https://github.com/${result.github_repo}`);
       console.log();
-      console.log(chalk.gray("You can now push data to this dataset via git-annex."));
+      console.log(chalk.dim("You can now push data to this dataset via git-annex."));
     } catch (error) {
       if (error instanceof ApiError) {
         spinner.fail(error.message);
@@ -2857,16 +2851,16 @@ Examples:
       console.log();
 
       if (result.collaborators.length === 0) {
-        console.log(chalk.gray("  No collaborators yet."));
+        console.log(chalk.dim("  No collaborators yet."));
         console.log();
-        console.log(chalk.gray(`Invite users with: nemar dataset invite <username> ${datasetId}`));
+        console.log(chalk.dim(`Invite users with: nemar dataset invite <username> ${datasetId}`));
         return;
       }
 
       // Table header
       const header = ["Username", "GitHub", "Access", "Granted"].join("  ");
-      console.log(chalk.gray(`  ${header}`));
-      console.log(chalk.gray(`  ${"-".repeat(header.length)}`));
+      console.log(chalk.dim(`  ${header}`));
+      console.log(chalk.dim(`  ${"-".repeat(header.length)}`));
 
       for (const collab of result.collaborators) {
         const grantedDate = new Date(collab.granted_at).toLocaleDateString();
@@ -2936,23 +2930,23 @@ Examples:
       const result = await requestPublication(datasetId);
       spinner.succeed(result.message);
       console.log(
-        chalk.gray(
+        chalk.dim(
           "\n  Admins have been notified. Use 'nemar dataset publish status' to check progress.",
         ),
       );
     } catch (error) {
       if (error instanceof ApiError) {
         spinner.fail(error.message);
-        console.log(chalk.gray(`  ${error.message}`));
+        console.log(chalk.dim(`  ${error.message}`));
         if (error.statusCode === 409) {
-          console.log(chalk.gray("  Use 'nemar dataset publish resend' to remind admins."));
+          console.log(chalk.dim("  Use 'nemar dataset publish resend' to remind admins."));
         } else if (error.statusCode === 403) {
-          console.log(chalk.gray("  Only the dataset owner can request publication."));
+          console.log(chalk.dim("  Only the dataset owner can request publication."));
         }
       } else {
         spinner.fail("Failed to request publication");
         const msg = error instanceof Error ? error.message : String(error);
-        console.log(chalk.gray(`  Error details: ${msg}`));
+        console.log(chalk.dim(`  Error details: ${msg}`));
       }
     }
   });
@@ -3013,15 +3007,15 @@ Examples:
         denied: chalk.red,
         approving: chalk.yellow,
       };
-      const statusColor = statusColors[result.status] || chalk.gray;
+      const statusColor = statusColors[result.status] || chalk.dim;
 
       console.log(`  Status: ${statusColor(result.status)}`);
 
       if (result.requested_at) {
-        console.log(`  Requested: ${chalk.gray(result.requested_at)}`);
+        console.log(`  Requested: ${chalk.dim(result.requested_at)}`);
       }
       if (result.requested_by) {
-        console.log(`  Requested by: ${chalk.gray(result.requested_by)}`);
+        console.log(`  Requested by: ${chalk.dim(result.requested_by)}`);
       }
 
       if (result.status === "denied" && result.denied_reason) {
@@ -3054,7 +3048,7 @@ Examples:
             ? chalk.green("[x]")
             : isCurrent
               ? chalk.yellow("[>]")
-              : chalk.gray("[ ]");
+              : chalk.dim("[ ]");
           const label = step.replace(/_/g, " ");
           console.log(
             `    ${icon} ${label}${isCurrent && result.last_error ? chalk.red(` (error: ${result.last_error})`) : ""}`,
@@ -3063,18 +3057,18 @@ Examples:
       }
 
       if (result.status === "published" && result.approved_at) {
-        console.log(`  Published: ${chalk.gray(result.approved_at)}`);
+        console.log(`  Published: ${chalk.dim(result.approved_at)}`);
       }
 
       console.log();
     } catch (error) {
       if (error instanceof ApiError) {
         spinner.fail(error.message);
-        console.log(chalk.gray(`  ${error.message}`));
+        console.log(chalk.dim(`  ${error.message}`));
       } else {
         spinner.fail("Failed to check publication status");
         const msg = error instanceof Error ? error.message : String(error);
-        console.log(chalk.gray(`  Error details: ${msg}`));
+        console.log(chalk.dim(`  Error details: ${msg}`));
       }
     }
   });
@@ -3116,14 +3110,14 @@ Examples:
     } catch (error) {
       if (error instanceof ApiError) {
         spinner.fail(error.message);
-        console.log(chalk.gray(`  ${error.message}`));
+        console.log(chalk.dim(`  ${error.message}`));
         if (error.statusCode === 404) {
-          console.log(chalk.gray("  Publication request not found for this dataset."));
+          console.log(chalk.dim("  Publication request not found for this dataset."));
         }
       } else {
         spinner.fail("Failed to resend notification");
         const msg = error instanceof Error ? error.message : String(error);
-        console.log(chalk.gray(`  Error details: ${msg}`));
+        console.log(chalk.dim(`  Error details: ${msg}`));
       }
     }
   });
@@ -3208,7 +3202,7 @@ Examples:
         spinner.fail("Failed to get download credentials");
         console.log(chalk.red(`  ${(error as Error).message}`));
         console.log(
-          chalk.gray("Private datasets require authentication. Run 'nemar auth login' first."),
+          chalk.dim("Private datasets require authentication. Run 'nemar auth login' first."),
         );
         process.exit(1);
       }
@@ -3231,7 +3225,7 @@ Examples:
     // Enable S3 remote if available (new datasets have it; old ones use web URLs)
     const s3Enable = await enableS3Remote(outputPath, "nemar-s3", cloneS3Creds);
     if (s3Enable.enabled) {
-      console.log(chalk.gray("  S3 remote enabled for data downloads"));
+      console.log(chalk.dim("  S3 remote enabled for data downloads"));
     } else if (!s3Enable.success) {
       console.log(chalk.yellow(`  Warning: Could not enable S3 remote: ${s3Enable.error}`));
     }
@@ -3244,9 +3238,9 @@ Examples:
     console.log();
     console.log(`  Location: ${chalk.cyan(outputPath)}`);
     console.log();
-    console.log(chalk.gray("Data files are not downloaded yet. To get them:"));
-    console.log(chalk.gray(`  cd ${outputPath}`));
-    console.log(chalk.gray("  nemar dataset get"));
+    console.log(chalk.dim("Data files are not downloaded yet. To get them:"));
+    console.log(chalk.dim(`  cd ${outputPath}`));
+    console.log(chalk.dim("  nemar dataset get"));
   });
 
 // Get command
@@ -3275,7 +3269,7 @@ Examples:
 
     if (!(await isGitAnnexDataset(cwd))) {
       console.log(chalk.red("Error: Not inside a git-annex dataset directory"));
-      console.log(chalk.gray("Use 'nemar dataset clone <id>' first, then cd into the dataset."));
+      console.log(chalk.dim("Use 'nemar dataset clone <id>' first, then cd into the dataset."));
       process.exit(1);
     }
 
@@ -3299,7 +3293,7 @@ Examples:
       if (dsInfo && dsInfo.visibility !== "public") {
         if (!isAuthenticated()) {
           console.log(chalk.red("Error: This is a private dataset. Authentication required."));
-          console.log(chalk.gray("Run 'nemar auth login' first."));
+          console.log(chalk.dim("Run 'nemar auth login' first."));
           process.exit(1);
         }
         const credSpinner = ora("Requesting download credentials...").start();
@@ -3310,7 +3304,7 @@ Examples:
           credSpinner.fail("Failed to get download credentials");
           console.log(chalk.red(`  ${(error as Error).message}`));
           console.log(
-            chalk.gray("Private datasets require authentication. Run 'nemar auth login' first."),
+            chalk.dim("Private datasets require authentication. Run 'nemar auth login' first."),
           );
           process.exit(1);
         }
@@ -3482,7 +3476,7 @@ Examples:
         const remoteName = s3Remotes[0];
         if (s3Remotes.length > 1) {
           console.log(
-            chalk.gray(`  Multiple S3 remotes: ${s3Remotes.join(", ")}. Using: ${remoteName}`),
+            chalk.dim(`  Multiple S3 remotes: ${s3Remotes.join(", ")}. Using: ${remoteName}`),
           );
         }
         const jobs = Number.parseInt(options.jobs, 10);
@@ -3515,20 +3509,18 @@ Examples:
           spinner.fail("S3 push failed");
           console.log(chalk.red(`  ${s3Result.error}`));
           if (!pushCreds) {
+            console.log(chalk.dim("  Ensure AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY are set,"));
             console.log(
-              chalk.gray("  Ensure AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY are set,"),
-            );
-            console.log(
-              chalk.gray("  or log in with 'nemar auth login' for automatic credentials."),
+              chalk.dim("  or log in with 'nemar auth login' for automatic credentials."),
             );
           }
-          console.log(chalk.gray("  Git changes were pushed successfully."));
+          console.log(chalk.dim("  Git changes were pushed successfully."));
           process.exit(1);
         }
         await clearAnnexCredentials(cwd);
         spinner.succeed(`Copied ${s3Result.filesCopied} file(s) to S3`);
       } else {
-        console.log(chalk.gray("  No S3 remote configured; skipping data push."));
+        console.log(chalk.dim("  No S3 remote configured; skipping data push."));
       }
     }
 
@@ -3537,7 +3529,7 @@ Examples:
       const branch = await getCurrentBranch(cwd);
       if (!branch) {
         console.log(chalk.red("  Could not determine current branch"));
-        console.log(chalk.gray("  Ensure you are inside a valid git repository."));
+        console.log(chalk.dim("  Ensure you are inside a valid git repository."));
         process.exit(1);
       }
       if (branch === "main" || branch === "master") {
@@ -3582,7 +3574,7 @@ Examples:
           const msg = spawnError instanceof Error ? spawnError.message : String(spawnError);
           if (msg.includes("ENOENT") || msg.includes("not found")) {
             console.log(chalk.red("  'gh' CLI is not installed or not in PATH"));
-            console.log(chalk.gray("  Install it: https://cli.github.com/"));
+            console.log(chalk.dim("  Install it: https://cli.github.com/"));
           } else {
             console.log(chalk.red(`  ${msg}`));
           }
@@ -3640,7 +3632,7 @@ Examples:
         console.log(chalk.yellow(`  ... and ${result.kept.length - 5} more`));
       }
       if (result.error) {
-        console.log(chalk.gray(`  ${result.error}`));
+        console.log(chalk.dim(`  ${result.error}`));
       }
       process.exit(1);
     } else {
@@ -3681,7 +3673,7 @@ Examples:
       }
       if (!resolvedId) {
         console.log(chalk.red("Error: Could not detect dataset ID from current directory"));
-        console.log(chalk.gray("Provide dataset ID explicitly: nemar dataset ci <id>"));
+        console.log(chalk.dim("Provide dataset ID explicitly: nemar dataset ci <id>"));
         process.exit(1);
       }
     }
@@ -3697,8 +3689,8 @@ Examples:
 
       const { bids_validation } = result;
       if (!bids_validation.present) {
-        console.log(`  BIDS Validation: ${chalk.gray("not configured")}`);
-        console.log(chalk.gray(`  Ask an admin to run: nemar admin ci add ${resolvedId}`));
+        console.log(`  BIDS Validation: ${chalk.dim("not configured")}`);
+        console.log(chalk.dim(`  Ask an admin to run: nemar admin ci add ${resolvedId}`));
       } else {
         const statusColor =
           bids_validation.status === "success"
@@ -3718,7 +3710,7 @@ Examples:
       } else {
         spinner.fail("Failed to check CI status");
         const msg = error instanceof Error ? error.message : String(error);
-        console.log(chalk.gray(`  ${msg}`));
+        console.log(chalk.dim(`  ${msg}`));
       }
       process.exit(1);
     }
@@ -3762,7 +3754,7 @@ Examples:
       }
       if (!datasetId) {
         console.log(chalk.red("Error: Could not detect dataset ID"));
-        console.log(chalk.gray("Provide dataset ID: nemar dataset manifest -d <id>"));
+        console.log(chalk.dim("Provide dataset ID: nemar dataset manifest -d <id>"));
         process.exit(1);
       }
     }
@@ -3779,8 +3771,8 @@ Examples:
         console.log();
 
         if (result.versions.length === 0) {
-          console.log(chalk.gray("  No manifests available yet."));
-          console.log(chalk.gray("  Manifests are generated when a version DOI is published."));
+          console.log(chalk.dim("  No manifests available yet."));
+          console.log(chalk.dim("  Manifests are generated when a version DOI is published."));
         } else {
           for (const v of result.versions) {
             console.log(`  ${chalk.cyan(v)}`);
@@ -3800,7 +3792,7 @@ Examples:
             console.log(`  DOI: ${chalk.cyan(manifest.doi)}`);
           }
           if (manifest.concept_doi) {
-            console.log(`  Concept DOI: ${chalk.gray(manifest.concept_doi)}`);
+            console.log(`  Concept DOI: ${chalk.dim(manifest.concept_doi)}`);
           }
           console.log(`  Created: ${manifest.created}`);
           console.log();
@@ -3813,7 +3805,7 @@ Examples:
             console.log(chalk.bold(`  Annexed files (${annexed.length}):`));
             for (const [path, file] of annexed) {
               const sizeStr = formatSize(file.size);
-              console.log(`    ${path} ${chalk.gray(`(${sizeStr})`)}`);
+              console.log(`    ${path} ${chalk.dim(`(${sizeStr})`)}`);
             }
           }
 
@@ -3822,7 +3814,7 @@ Examples:
             console.log(chalk.bold(`  Metadata files (${gitFiles.length}):`));
             for (const [path, file] of gitFiles) {
               const sizeStr = formatSize(file.size);
-              console.log(`    ${path} ${chalk.gray(`(${sizeStr})`)}`);
+              console.log(`    ${path} ${chalk.dim(`(${sizeStr})`)}`);
             }
           }
           console.log();
@@ -3834,7 +3826,7 @@ Examples:
       } else {
         spinner.fail("Failed to fetch manifest");
         const msg = error instanceof Error ? error.message : String(error);
-        console.log(chalk.gray(`  ${msg}`));
+        console.log(chalk.dim(`  ${msg}`));
       }
       process.exit(1);
     }

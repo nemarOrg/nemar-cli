@@ -86,13 +86,13 @@ function handleCommandError(
     spinner.fail(error.message);
     const hint = hints?.[error.statusCode];
     if (hint) {
-      console.log(chalk.gray(`  ${hint}`));
+      console.log(chalk.dim(`  ${hint}`));
     } else if (error.statusCode === 403) {
-      console.log(chalk.gray("  This command requires admin privileges"));
+      console.log(chalk.dim("  This command requires admin privileges"));
     }
   } else {
     spinner.fail(defaultMsg);
-    console.log(chalk.gray(`  Error details: ${errorDetail(error)}`));
+    console.log(chalk.dim(`  Error details: ${errorDetail(error)}`));
   }
 }
 
@@ -167,7 +167,7 @@ Examples:
 function requireAuth(): boolean {
   if (!isAuthenticated()) {
     console.log(chalk.red("Error: Not authenticated"));
-    console.log(chalk.gray("  Run 'nemar auth login' first"));
+    console.log(chalk.dim("  Run 'nemar auth login' first"));
     return false;
   }
   return true;
@@ -233,7 +233,7 @@ Examples:
       for (const user of result.users) {
         const statusColor =
           {
-            pending: chalk.gray,
+            pending: chalk.dim,
             verified: chalk.yellow,
             approved: chalk.green,
             revoked: chalk.red,
@@ -245,8 +245,8 @@ Examples:
             ? chalk.red(" [owner]")
             : userRole === "admin"
               ? chalk.magenta(" [admin]")
-              : chalk.gray(" [member]");
-        const verifiedBadge = user.email_verified ? "" : chalk.gray(" (unverified)");
+              : chalk.dim(" [member]");
+        const verifiedBadge = user.email_verified ? "" : chalk.dim(" (unverified)");
 
         console.log(`  ${chalk.cyan(user.username)}${roleBadge}`);
         console.log(`    Email:   ${user.email}${verifiedBadge}`);
@@ -282,7 +282,7 @@ adminCommand
 
     const result = await confirm(`Approve ${username}?`, options, true);
     if (result !== "confirmed") {
-      console.log(chalk.gray(result === "declined" ? "Skipped" : "Cancelled"));
+      console.log(chalk.dim(result === "declined" ? "Skipped" : "Cancelled"));
       return;
     }
 
@@ -360,7 +360,7 @@ adminCommand
       options,
     );
     if (result !== "confirmed") {
-      console.log(chalk.gray(result === "declined" ? "Skipped" : "Cancelled"));
+      console.log(chalk.dim(result === "declined" ? "Skipped" : "Cancelled"));
       return;
     }
 
@@ -423,7 +423,7 @@ Examples:
         },
       ]);
       if (!confirmed) {
-        console.log(chalk.gray("Cancelled"));
+        console.log(chalk.dim("Cancelled"));
         return;
       }
     }
@@ -480,7 +480,7 @@ s3Command
 
     const confirmResult = await confirm(`Apply S3 Object Lock to ${datasetId}?`, options);
     if (confirmResult !== "confirmed") {
-      console.log(chalk.gray(confirmResult === "declined" ? "Skipped" : "Cancelled"));
+      console.log(chalk.dim(confirmResult === "declined" ? "Skipped" : "Cancelled"));
       return;
     }
 
@@ -504,7 +504,7 @@ s3Command
       }
     } catch (error) {
       spinner.fail("S3 lock failed");
-      console.log(chalk.gray(`  ${errorDetail(error)}`));
+      console.log(chalk.dim(`  ${errorDetail(error)}`));
     }
   });
 
@@ -527,12 +527,12 @@ async function regenerateIamAction(username: string, options: ConfirmOptions) {
   console.log("  2. Invalidate any existing access keys");
   console.log("  3. Restore S3 access to their datasets");
   console.log();
-  console.log(chalk.gray("Use this if a user's credentials were compromised or lost."));
+  console.log(chalk.dim("Use this if a user's credentials were compromised or lost."));
   console.log();
 
   const confirmResult = await confirm(`Regenerate IAM credentials for ${username}?`, options);
   if (confirmResult !== "confirmed") {
-    console.log(chalk.gray(confirmResult === "declined" ? "Skipped" : "Cancelled"));
+    console.log(chalk.dim(confirmResult === "declined" ? "Skipped" : "Cancelled"));
     return;
   }
 
@@ -551,11 +551,11 @@ async function regenerateIamAction(username: string, options: ConfirmOptions) {
     if (result.warning) {
       console.log();
       console.log(chalk.yellow(`  Warning: ${result.warning}`));
-      console.log(chalk.gray("  Please verify old credentials are revoked in AWS console."));
+      console.log(chalk.dim("  Please verify old credentials are revoked in AWS console."));
     }
 
     console.log();
-    console.log(chalk.gray("The user can now upload to their datasets again."));
+    console.log(chalk.dim("The user can now upload to their datasets again."));
   } catch (error) {
     handleCommandError(error, spinner, "Failed to regenerate IAM credentials", {
       404: "User not found or not approved",
@@ -584,7 +584,7 @@ repoCommand
 
     const confirmResult = await confirm(`Make ${datasetId} public?`, options);
     if (confirmResult !== "confirmed") {
-      console.log(chalk.gray(confirmResult === "declined" ? "Skipped" : "Cancelled"));
+      console.log(chalk.dim(confirmResult === "declined" ? "Skipped" : "Cancelled"));
       return;
     }
 
@@ -614,7 +614,7 @@ repoCommand
 
     const confirmResult = await confirm(`Make ${datasetId} private?`, options);
     if (confirmResult !== "confirmed") {
-      console.log(chalk.gray(confirmResult === "declined" ? "Skipped" : "Cancelled"));
+      console.log(chalk.dim(confirmResult === "declined" ? "Skipped" : "Cancelled"));
       return;
     }
 
@@ -665,10 +665,10 @@ ciCommand
               : chalk.yellow;
         console.log(`      Status: ${statusColor(result.bids_validation.status)}`);
         if (result.bids_validation.url) {
-          console.log(`      URL:    ${chalk.gray(result.bids_validation.url)}`);
+          console.log(`      URL:    ${chalk.dim(result.bids_validation.url)}`);
         }
       } else {
-        console.log(`      ${chalk.gray("Not deployed. Use 'nemar admin ci add' to deploy.")}`);
+        console.log(`      ${chalk.dim("Not deployed. Use 'nemar admin ci add' to deploy.")}`);
       }
 
       // Version Check
@@ -676,7 +676,7 @@ ciCommand
       const versionIcon = versionPresent ? chalk.green("[x]") : chalk.red("[ ]");
       console.log(`  ${versionIcon} Version Check`);
       if (!versionPresent) {
-        console.log(`      ${chalk.gray("Not deployed. Use 'nemar admin ci add' to deploy.")}`);
+        console.log(`      ${chalk.dim("Not deployed. Use 'nemar admin ci add' to deploy.")}`);
       }
 
       console.log();
@@ -705,7 +705,7 @@ ciCommand
 
     const confirmResult = await confirm(`Deploy CI workflows to ${datasetId}?`, options);
     if (confirmResult !== "confirmed") {
-      console.log(chalk.gray(confirmResult === "declined" ? "Skipped" : "Cancelled"));
+      console.log(chalk.dim(confirmResult === "declined" ? "Skipped" : "Cancelled"));
       return;
     }
 
@@ -766,7 +766,7 @@ doiCommand
         if (error instanceof ApiError) {
           spinner.fail(error.message);
           if (error.statusCode === 404) {
-            console.log(chalk.gray("  Dataset not found"));
+            console.log(chalk.dim("  Dataset not found"));
           }
         } else {
           spinner.fail("Failed to fetch dataset");
@@ -826,7 +826,7 @@ doiCommand
       // Confirmation
       console.log(chalk.red("WARNING: DOIs are PERMANENT and cannot be deleted!"));
       console.log(
-        chalk.gray(
+        chalk.dim(
           "The DOI will be pre-reserved but not published until the first version release.",
         ),
       );
@@ -838,7 +838,7 @@ doiCommand
         : `Create PERMANENT concept DOI via ${provider.toUpperCase()} PRODUCTION?`;
       const result = await confirm(confirmMessage, options);
       if (result !== "confirmed") {
-        console.log(chalk.gray(result === "declined" ? "Skipped" : "Cancelled"));
+        console.log(chalk.dim(result === "declined" ? "Skipped" : "Cancelled"));
         return;
       }
 
@@ -870,19 +870,19 @@ doiCommand
         } catch (protectionError) {
           protectionSpinner.warn("Could not apply branch protection");
           if (protectionError instanceof ApiError) {
-            console.log(chalk.gray(`  ${protectionError.message}`));
+            console.log(chalk.dim(`  ${protectionError.message}`));
             if (protectionError.statusCode === 403) {
-              console.log(chalk.gray("  Check admin credentials and permissions"));
+              console.log(chalk.dim("  Check admin credentials and permissions"));
             }
           } else {
             console.log(
-              chalk.gray(
+              chalk.dim(
                 `  ${protectionError instanceof Error ? protectionError.message : "Unknown error"}`,
               ),
             );
           }
           console.log(
-            chalk.gray("  Manual setup: Go to GitHub repo Settings > Branches > Add rule"),
+            chalk.dim("  Manual setup: Go to GitHub repo Settings > Branches > Add rule"),
           );
         }
 
@@ -906,19 +906,17 @@ doiCommand
         console.log("  2. Create a PR and merge it to trigger version DOI publication");
         console.log();
         if (options.sandbox) {
-          console.log(
-            chalk.gray("Note: This is a sandbox DOI and will not resolve in production."),
-          );
+          console.log(chalk.dim("Note: This is a sandbox DOI and will not resolve in production."));
         }
       } catch (error) {
         if (error instanceof ApiError) {
           createSpinner.fail(error.message);
           if (error.statusCode === 403) {
-            console.log(chalk.gray("  This command requires admin privileges"));
+            console.log(chalk.dim("  This command requires admin privileges"));
           }
         } else {
           createSpinner.fail("Failed to create concept DOI");
-          console.log(chalk.gray(`  ${errorDetail(error)}`));
+          console.log(chalk.dim(`  ${errorDetail(error)}`));
         }
       }
     },
@@ -974,7 +972,7 @@ doiCommand
         }
       } else {
         console.log(chalk.yellow("No concept DOI created yet"));
-        console.log(chalk.gray("  Use 'nemar admin doi create' to create one"));
+        console.log(chalk.dim("  Use 'nemar admin doi create' to create one"));
       }
 
       console.log();
@@ -988,15 +986,15 @@ doiCommand
         }
       } else if (doiInfo.concept_doi) {
         console.log(chalk.yellow("No version DOI published yet"));
-        console.log(chalk.gray("  Version DOIs are created automatically on PR merge"));
+        console.log(chalk.dim("  Version DOIs are created automatically on PR merge"));
       }
     } catch (error) {
       if (error instanceof ApiError) {
         spinner.fail(error.message);
         if (error.statusCode === 404) {
-          console.log(chalk.gray("  Dataset not found"));
+          console.log(chalk.dim("  Dataset not found"));
         } else if (error.statusCode === 403) {
-          console.log(chalk.gray("  This command requires admin privileges"));
+          console.log(chalk.dim("  This command requires admin privileges"));
         }
       } else {
         spinner.fail("Failed to fetch DOI info");
@@ -1026,7 +1024,7 @@ doiCommand
 
       if (options.makePublic) {
         console.log(chalk.red("WARNING: Making a DOI public is PERMANENT!"));
-        console.log(chalk.gray("  The DOI will be findable in DataCite and cannot be reverted."));
+        console.log(chalk.dim("  The DOI will be findable in DataCite and cannot be reverted."));
         console.log();
 
         const confirmResult = await confirm(
@@ -1034,7 +1032,7 @@ doiCommand
           options,
         );
         if (confirmResult !== "confirmed") {
-          console.log(chalk.gray(confirmResult === "declined" ? "Skipped" : "Cancelled"));
+          console.log(chalk.dim(confirmResult === "declined" ? "Skipped" : "Cancelled"));
           return;
         }
       }
@@ -1058,11 +1056,11 @@ doiCommand
         if (error instanceof ApiError) {
           spinner.fail(error.message);
           if (error.statusCode === 400) {
-            console.log(chalk.gray("  DOI update is only supported for EZID-managed DOIs"));
+            console.log(chalk.dim("  DOI update is only supported for EZID-managed DOIs"));
           }
         } else {
           spinner.fail("Failed to update DOI");
-          console.log(chalk.gray(`  ${errorDetail(error)}`));
+          console.log(chalk.dim(`  ${errorDetail(error)}`));
         }
       }
     },
@@ -1246,10 +1244,10 @@ doiCommand
                   Object.assign(enrichment, parsed);
                   discoveryRan = true;
                   const stage = parsed.pipeline_stage || "unknown";
-                  console.log(chalk.gray(`  Pipeline stage: ${stage}`));
+                  console.log(chalk.dim(`  Pipeline stage: ${stage}`));
                   if (enrichment.authors) {
                     const authorCount = Object.keys(enrichment.authors).length;
-                    console.log(chalk.gray(`  Authors: ${authorCount}`));
+                    console.log(chalk.dim(`  Authors: ${authorCount}`));
                   }
                 }
               } catch (parseErr) {
@@ -1258,7 +1256,7 @@ doiCommand
                     `  Warning: Could not parse updated metadata: ${parseErr instanceof Error ? parseErr.message : String(parseErr)}`,
                   ),
                 );
-                console.log(chalk.gray("  Using pre-workflow enrichment data"));
+                console.log(chalk.dim("  Using pre-workflow enrichment data"));
               }
             } else {
               console.log(
@@ -1266,7 +1264,7 @@ doiCommand
                   "  Warning: Could not fetch updated metadata after successful workflow.",
                 ),
               );
-              console.log(chalk.gray("  Author data below may be from a previous run."));
+              console.log(chalk.dim("  Author data below may be from a previous run."));
             }
           } else {
             llmSpinner.fail(`LLM enrichment workflow failed (conclusion: ${conclusion})`);
@@ -1281,7 +1279,7 @@ doiCommand
           }
         } catch (error) {
           llmSpinner.fail("LLM enrichment pipeline failed");
-          console.log(chalk.gray(`  ${errorDetail(error)}`));
+          console.log(chalk.dim(`  ${errorDetail(error)}`));
           console.log(
             chalk.yellow("  ORCID discovery did not run. You will need to enter ORCIDs manually."),
           );
@@ -1298,7 +1296,7 @@ doiCommand
       if (authorNames.length > 0) {
         const withOrcid = authorNames.filter((n) => existingAuthors[n]?.orcid);
         const withoutOrcid = authorNames.filter((n) => !existingAuthors[n]?.orcid);
-        console.log(chalk.gray(`  Discovered ${authorNames.length} authors from pipeline:`));
+        console.log(chalk.dim(`  Discovered ${authorNames.length} authors from pipeline:`));
         for (const name of withOrcid) {
           console.log(chalk.green(`    [x] ${name}: ${existingAuthors[name]?.orcid}`));
         }
@@ -1306,7 +1304,7 @@ doiCommand
           console.log(chalk.yellow(`    [ ] ${name}: no ORCID found`));
         }
         if (withoutOrcid.length > 0) {
-          console.log(chalk.gray(`  ${withoutOrcid.length} author(s) missing ORCIDs.`));
+          console.log(chalk.dim(`  ${withoutOrcid.length} author(s) missing ORCIDs.`));
         }
       }
 
@@ -1340,7 +1338,7 @@ doiCommand
           // Show current ORCID if one was discovered
           const current = existingAuthors[authorName];
           if (current?.orcid) {
-            console.log(chalk.gray(`  Current ORCID: ${current.orcid}`));
+            console.log(chalk.dim(`  Current ORCID: ${current.orcid}`));
           }
 
           const { orcid } = await inquirer.prompt([
@@ -1406,7 +1404,7 @@ doiCommand
         );
       } catch (error) {
         statsSpinner.warn("Could not compute dataset stats");
-        console.log(chalk.gray(`  ${errorDetail(error)}`));
+        console.log(chalk.dim(`  ${errorDetail(error)}`));
       }
 
       // --- Review ---
@@ -1417,7 +1415,7 @@ doiCommand
 
       const confirmResult = await confirm("Commit to repo and refresh DOI?", options, true);
       if (confirmResult !== "confirmed") {
-        console.log(chalk.gray(confirmResult === "declined" ? "Skipped" : "Cancelled"));
+        console.log(chalk.dim(confirmResult === "declined" ? "Skipped" : "Cancelled"));
         return;
       }
 
@@ -1428,7 +1426,7 @@ doiCommand
         submitSpinner.succeed(result.message);
 
         if (result.bidsignore_updated) {
-          console.log(chalk.gray("  .bidsignore updated to include .nemar/"));
+          console.log(chalk.dim("  .bidsignore updated to include .nemar/"));
         }
 
         // Refresh DOI metadata if the dataset has an EZID DOI
@@ -1447,7 +1445,7 @@ doiCommand
             refreshSpinner.succeed("DOI metadata refreshed");
           } catch (error) {
             refreshSpinner.warn("Could not refresh DOI metadata");
-            console.log(chalk.gray(`  ${errorDetail(error)}`));
+            console.log(chalk.dim(`  ${errorDetail(error)}`));
           }
         } else if (doiFetchFailed) {
           console.log(
@@ -1461,7 +1459,7 @@ doiCommand
           submitSpinner.fail(error.message);
         } else {
           submitSpinner.fail("Failed to save enrichment");
-          console.log(chalk.gray(`  ${errorDetail(error)}`));
+          console.log(chalk.dim(`  ${errorDetail(error)}`));
         }
       }
     },
@@ -1508,7 +1506,7 @@ Examples:
       spinner.stop();
 
       if (result.requests.length === 0) {
-        console.log(chalk.gray("\n  No publication requests found.\n"));
+        console.log(chalk.dim("\n  No publication requests found.\n"));
         return;
       }
 
@@ -1525,7 +1523,7 @@ Examples:
                 : chalk.white;
 
         console.log(
-          `  ${chalk.bold(req.dataset_id)}  ${statusColor(req.status)}  by ${req.requested_by_username}  ${chalk.gray(req.requested_at)}`,
+          `  ${chalk.bold(req.dataset_id)}  ${statusColor(req.status)}  by ${req.requested_by_username}  ${chalk.dim(req.requested_at)}`,
         );
         if (req.current_step && req.status === "approving") {
           console.log(
@@ -1584,7 +1582,7 @@ Examples:
 
     const confirmResult = await confirm(`Deny publication of ${datasetId}?`, options);
     if (confirmResult !== "confirmed") {
-      console.log(chalk.gray(confirmResult === "declined" ? "Skipped" : "Cancelled"));
+      console.log(chalk.dim(confirmResult === "declined" ? "Skipped" : "Cancelled"));
       return;
     }
 
@@ -1593,7 +1591,7 @@ Examples:
     try {
       await denyPublication(datasetId, reason);
       spinner.succeed(`Publication denied for ${datasetId}`);
-      console.log(chalk.gray("  User has been notified."));
+      console.log(chalk.dim("  User has been notified."));
     } catch (error) {
       handleCommandError(error, spinner, "Failed to deny publication");
     }
@@ -1695,7 +1693,7 @@ After Approval:
 
       const confirmResult = await confirm(`${action}?`, options);
       if (confirmResult !== "confirmed") {
-        console.log(chalk.gray(confirmResult === "declined" ? "Skipped" : "Cancelled"));
+        console.log(chalk.dim(confirmResult === "declined" ? "Skipped" : "Cancelled"));
         return;
       }
 
@@ -1722,15 +1720,15 @@ After Approval:
               const durationSec = (sr.duration_ms / 1000).toFixed(1);
               const retryNote = sr.attempts > 1 ? ` (attempt ${sr.attempts})` : "";
               console.log(
-                `  ${chalk.green("[x]")} ${chalk.gray(stepNum)} ${stepName} ${chalk.gray(`(${durationSec}s${retryNote})`)}`,
+                `  ${chalk.green("[x]")} ${chalk.dim(stepNum)} ${stepName} ${chalk.dim(`(${durationSec}s${retryNote})`)}`,
               );
             } else if (sr.status === "failed") {
               console.log(
-                `  ${chalk.red("[!]")} ${chalk.gray(stepNum)} ${stepName}${sr.error ? `: ${chalk.red(sr.error)}` : ""}`,
+                `  ${chalk.red("[!]")} ${chalk.dim(stepNum)} ${stepName}${sr.error ? `: ${chalk.red(sr.error)}` : ""}`,
               );
             } else {
               console.log(
-                `  ${chalk.gray("[-]")} ${chalk.gray(stepNum)} ${chalk.gray(stepName)} ${chalk.gray("(skipped)")}`,
+                `  ${chalk.dim("[-]")} ${chalk.dim(stepNum)} ${chalk.dim(stepName)} ${chalk.dim("(skipped)")}`,
               );
             }
           });
@@ -1781,7 +1779,7 @@ adminCommand
       if (!prereqs.allPassed) {
         console.log(chalk.red("Error: Missing prerequisites"));
         for (const error of prereqs.errors) {
-          console.log(chalk.gray(`  - ${error}`));
+          console.log(chalk.dim(`  - ${error}`));
         }
         return;
       }
@@ -1811,7 +1809,7 @@ adminCommand
         if (error instanceof ApiError) {
           spinner.fail(error.message);
           if (error.statusCode === 404) {
-            console.log(chalk.gray("  Dataset not found"));
+            console.log(chalk.dim("  Dataset not found"));
           }
         } else {
           spinner.fail("Failed to fetch dataset");
@@ -1842,7 +1840,7 @@ adminCommand
 
       if (versions.length === 0) {
         console.log(chalk.yellow("No versions found for this dataset"));
-        console.log(chalk.gray("  Dataset may not have any tagged releases yet"));
+        console.log(chalk.dim("  Dataset may not have any tagged releases yet"));
         return;
       }
 
@@ -1850,9 +1848,7 @@ adminCommand
       if (options.list) {
         console.log(`\n${chalk.cyan("Available Versions:")}\n`);
         for (const v of versions) {
-          console.log(
-            `  ${chalk.green(v.version)}  ${chalk.gray(v.date)}  ${chalk.gray(v.commit)}`,
-          );
+          console.log(`  ${chalk.green(v.version)}  ${chalk.dim(v.date)}  ${chalk.dim(v.commit)}`);
         }
         return;
       }
@@ -1862,7 +1858,7 @@ adminCommand
       if (!selectedVersion) {
         console.log(`\n${chalk.cyan("Available Versions:")}\n`);
         for (const v of versions) {
-          console.log(`  ${chalk.green(v.version)}  ${chalk.gray(v.date)}`);
+          console.log(`  ${chalk.green(v.version)}  ${chalk.dim(v.date)}`);
         }
         console.log();
 
@@ -1884,7 +1880,7 @@ adminCommand
       const commitHash = await getVersionCommit(workDir, selectedVersion);
       if (!commitHash) {
         console.log(chalk.red(`Error: Version ${selectedVersion} not found`));
-        console.log(chalk.gray("  Use --list to see available versions"));
+        console.log(chalk.dim("  Use --list to see available versions"));
         return;
       }
 
@@ -1893,7 +1889,7 @@ adminCommand
       console.log(chalk.yellow("Revert Summary:"));
       console.log(`  Dataset:        ${chalk.cyan(datasetId)}`);
       console.log(`  Target version: ${chalk.green(selectedVersion)}`);
-      console.log(`  Commit:         ${chalk.gray(commitHash)}`);
+      console.log(`  Commit:         ${chalk.dim(commitHash)}`);
       if (options.force) {
         console.log(`  Mode:           ${chalk.red("DIRECT PUSH (--force)")}`);
       } else {
@@ -1912,7 +1908,7 @@ adminCommand
         : `Create PR to revert to ${selectedVersion}?`;
       const confirmResult = await confirm(confirmMessage, options);
       if (confirmResult !== "confirmed") {
-        console.log(chalk.gray(confirmResult === "declined" ? "Skipped" : "Cancelled"));
+        console.log(chalk.dim(confirmResult === "declined" ? "Skipped" : "Cancelled"));
         return;
       }
 
@@ -1992,7 +1988,7 @@ adminCommand
           console.log();
           console.log(chalk.green("Revert PR created successfully."));
           console.log(
-            chalk.gray("The PR will go through validation checks before it can be merged."),
+            chalk.dim("The PR will go through validation checks before it can be merged."),
           );
         } catch (_prError) {
           prSpinner.fail("Failed to create PR via gh CLI");
@@ -2008,23 +2004,23 @@ adminCommand
             console.log("    • Run: gh auth login");
           }
 
-          console.log(chalk.gray("  You may need to create the PR manually on GitHub"));
-          console.log(chalk.gray(`  Branch: ${branchName}`));
+          console.log(chalk.dim("  You may need to create the PR manually on GitHub"));
+          console.log(chalk.dim(`  Branch: ${branchName}`));
         }
       } else {
         // Force mode: merge directly (emergency only)
         console.log(chalk.yellow("Force mode: Merging directly to main..."));
         // Note: We'd need to checkout main, merge, and push. For safety, just inform user.
         console.log(chalk.red("Direct merge not implemented for safety."));
-        console.log(chalk.gray("To force-merge, manually merge the branch on GitHub:"));
-        console.log(chalk.gray(`  git checkout main && git merge ${branchName} && git push`));
+        console.log(chalk.dim("To force-merge, manually merge the branch on GitHub:"));
+        console.log(chalk.dim(`  git checkout main && git merge ${branchName} && git push`));
       }
 
       // Cleanup info
       if (needsClone) {
         console.log();
-        console.log(chalk.gray(`Working directory: ${workDir}`));
-        console.log(chalk.gray("You can delete this directory after the PR is merged."));
+        console.log(chalk.dim(`Working directory: ${workDir}`));
+        console.log(chalk.dim("You can delete this directory after the PR is merged."));
       }
     },
   );
@@ -2125,7 +2121,7 @@ Examples:
     ]);
 
     if (confirmation.datasetId !== datasetId) {
-      console.log(chalk.gray("Cancelled."));
+      console.log(chalk.dim("Cancelled."));
       process.exit(0);
     }
 
@@ -2141,12 +2137,12 @@ Examples:
       if (error instanceof ApiError) {
         console.error(chalk.red(`\n${error.message}`));
         if (error.details) {
-          console.error(chalk.gray(JSON.stringify(error.details, null, 2)));
+          console.error(chalk.dim(JSON.stringify(error.details, null, 2)));
         }
         if (error.statusCode === 403) {
-          console.log(chalk.gray("  You must be the dataset owner or an admin to publish"));
+          console.log(chalk.dim("  You must be the dataset owner or an admin to publish"));
         } else if (error.statusCode === 400 && error.message.includes("sandbox")) {
-          console.log(chalk.gray("  Sandbox datasets cannot be published"));
+          console.log(chalk.dim("  Sandbox datasets cannot be published"));
         }
       } else {
         console.error(chalk.red(`\n${error instanceof Error ? error.message : String(error)}`));
@@ -2182,7 +2178,7 @@ adminCommand
           chalk.yellow("\n  WARNING: This dataset has a DOI. Only the NEMAR owner can delete it."),
         );
         if (!options.force) {
-          console.log(chalk.gray("  Use --force to confirm deletion of published datasets."));
+          console.log(chalk.dim("  Use --force to confirm deletion of published datasets."));
           process.exit(1);
         }
       }
@@ -2199,7 +2195,7 @@ adminCommand
       ]);
 
       if (!proceed) {
-        console.log(chalk.gray("Cancelled."));
+        console.log(chalk.dim("Cancelled."));
         return;
       }
 
@@ -2231,11 +2227,11 @@ adminCommand
         `  Database: ${result.steps.d1.success ? chalk.green("cleaned up") : chalk.red("failed")}`,
       );
       if (result.steps.d1.versionsDeleted > 0) {
-        console.log(chalk.gray(`    ${result.steps.d1.versionsDeleted} version records removed`));
+        console.log(chalk.dim(`    ${result.steps.d1.versionsDeleted} version records removed`));
       }
       if (result.steps.d1.pubRequestsDeleted > 0) {
         console.log(
-          chalk.gray(`    ${result.steps.d1.pubRequestsDeleted} publication requests removed`),
+          chalk.dim(`    ${result.steps.d1.pubRequestsDeleted} publication requests removed`),
         );
       }
 
@@ -2310,7 +2306,7 @@ Steps:
 Requirements:
   - Admin privileges (API role check)
   - git-annex installed
-  - GitHub SSH or gh CLI configured
+  - GitHub CLI authenticated (gh auth login)
   - Active nemar auth session
 
 Examples:
@@ -2337,7 +2333,7 @@ Examples:
     console.log();
     for (const step of result.steps) {
       const icon = step.passed ? chalk.green("[x]") : chalk.red("[ ]");
-      const time = chalk.gray(`(${step.duration_ms}ms)`);
+      const time = chalk.dim(`(${step.duration_ms}ms)`);
       console.log(`  ${icon} ${step.name} ${time}`);
       if (step.error) {
         console.log(chalk.red(`      ${step.error}`));
@@ -2354,8 +2350,8 @@ Examples:
     }
 
     if (result.upload_dir) {
-      console.log(chalk.gray(`\nUpload dir: ${result.upload_dir}`));
-      console.log(chalk.gray(`Clone dir:  ${result.clone_dir}`));
+      console.log(chalk.dim(`\nUpload dir: ${result.upload_dir}`));
+      console.log(chalk.dim(`Clone dir:  ${result.clone_dir}`));
     }
 
     process.exit(result.passed ? 0 : 1);
@@ -2410,17 +2406,17 @@ syncCommand
       );
 
       if (result.datasets.length === 0) {
-        console.log(chalk.gray("  No published datasets found."));
+        console.log(chalk.dim("  No published datasets found."));
         return;
       }
 
       // Table header
       console.log(
-        chalk.gray(
+        chalk.dim(
           `  ${"ID".padEnd(12)} ${"Name".padEnd(40)} ${"Status".padEnd(10)} ${"Last Sync".padEnd(20)}`,
         ),
       );
-      console.log(chalk.gray(`  ${"─".repeat(85)}`));
+      console.log(chalk.dim(`  ${"─".repeat(85)}`));
 
       for (const d of result.datasets) {
         const status = d.nemar_sync_status || "pending";

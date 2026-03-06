@@ -114,7 +114,7 @@ const colorFormatHelp = {
     // Arguments
     const argumentList = helper.visibleArguments(cmd).map((arg: Argument) => {
       const plain = helper.argumentTerm(arg);
-      return formatItem(plain, chalk.yellow(plain), helper.argumentDescription(arg));
+      return formatItem(plain, chalk.blue(plain), helper.argumentDescription(arg));
     });
     if (argumentList.length > 0) {
       output.push(chalk.bold("Arguments:"), formatList(argumentList), "");
@@ -123,7 +123,7 @@ const colorFormatHelp = {
     // Options
     const optionList = helper.visibleOptions(cmd).map((option: Option) => {
       const plain = helper.optionTerm(option);
-      return formatItem(plain, chalk.green(plain), helper.optionDescription(option));
+      return formatItem(plain, chalk.cyan(plain), helper.optionDescription(option));
     });
     if (optionList.length > 0) {
       output.push(chalk.bold("Options:"), formatList(optionList), "");
@@ -135,7 +135,7 @@ const colorFormatHelp = {
       .sort((a: Command, b: Command) => a.name().localeCompare(b.name()));
     const commandList = sortedCommands.map((subCmd: Command) => {
       const plain = helper.subcommandTerm(subCmd);
-      return formatItem(plain, chalk.cyan(plain), helper.subcommandDescription(subCmd));
+      return formatItem(plain, chalk.bold.cyan(plain), helper.subcommandDescription(subCmd));
     });
     if (commandList.length > 0) {
       output.push(chalk.bold("Commands:"), formatList(commandList), "");
@@ -149,11 +149,11 @@ const colorFormatHelp = {
  * Configure Commander's help formatter to add color coding.
  * Applies recursively to the root program and all registered subcommands.
  *
- * Colors applied:
+ * Colors applied (Bun-style):
  *   - Section headers (Commands:, Options:, Arguments:): bold
- *   - Command names in subcommand list: cyan
- *   - Option flags in option list: green
- *   - Argument placeholders in argument list: yellow
+ *   - Command names in subcommand list: bold cyan
+ *   - Option flags in option list: cyan
+ *   - Argument placeholders in argument list: blue
  */
 export function configureColorHelp(program: Command): void {
   applyColorHelp(program);

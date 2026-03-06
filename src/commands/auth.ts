@@ -8,7 +8,7 @@
  * - nemar auth whoami    - Alias for status (common pattern)
  * - nemar auth logout    - Clear stored credentials
  * - nemar auth switch    - Switch between stored accounts
- * - nemar auth setup-ssh - Configure SSH for GitHub access
+ * - nemar auth setup-ssh - Configure SSH for GitHub (optional, gh CLI preferred)
  *
  * Note: The two-prong structure (nemar auth <cmd>) follows CLI best practices
  * for discoverability and organization. Root-level shortcuts (nemar login,
@@ -98,7 +98,7 @@ export async function loginAction(options: { key?: string } & ConfirmOptions): P
   if (isAuthenticated()) {
     const cfg = getConfig();
     console.log(chalk.yellow(`Already logged in as ${cfg.username || "unknown"}`));
-    console.log(chalk.gray("  This will add another account (use 'nemar auth switch' to switch)"));
+    console.log(chalk.dim("  This will add another account (use 'nemar auth switch' to switch)"));
     const result = await confirm("Log in with a different account?", options);
     if (result !== "confirmed") return;
   }
@@ -166,19 +166,19 @@ export async function loginAction(options: { key?: string } & ConfirmOptions): P
     if (!result.user.sandbox_completed) {
       console.log();
       console.log(chalk.yellow("  Note: Sandbox training required before uploading datasets"));
-      console.log(chalk.gray("  Run 'nemar sandbox' to complete training"));
+      console.log(chalk.dim("  Run 'nemar sandbox' to complete training"));
     }
   } catch (error) {
     if (error instanceof ApiError) {
       spinner.fail(error.message);
       if (error.statusCode === 401) {
-        console.log(chalk.gray("  Check that your API key is correct"));
+        console.log(chalk.dim("  Check that your API key is correct"));
       } else if (error.statusCode === 403) {
-        console.log(chalk.gray("  Your account may not be approved yet"));
+        console.log(chalk.dim("  Your account may not be approved yet"));
       }
     } else {
       spinner.fail("Connection failed");
-      console.log(chalk.gray("  Check your internet connection"));
+      console.log(chalk.dim("  Check your internet connection"));
     }
   }
 }
@@ -210,7 +210,7 @@ Examples:
 /** Exported signup action handler for use in root-level shortcuts */
 export async function signupAction(): Promise<void> {
   console.log(chalk.cyan("NEMAR Account Registration"));
-  console.log(chalk.gray("Create an account to upload and manage datasets\n"));
+  console.log(chalk.dim("Create an account to upload and manage datasets\n"));
 
   // Collect user information
   const answers = await inquirer.prompt([
@@ -364,26 +364,26 @@ export async function signupAction(): Promise<void> {
       console.log(`  ${i + 1}. ${step}`);
     });
     console.log();
-    console.log(chalk.gray("Once approved, use 'nemar auth retrieve-key' to get your API key"));
+    console.log(chalk.dim("Once approved, use 'nemar auth retrieve-key' to get your API key"));
   } catch (error) {
     if (error instanceof ApiError) {
       spinner.fail(error.message);
       if (error.details && Array.isArray(error.details)) {
         error.details.forEach((detail) => {
-          console.log(chalk.gray(`  - ${detail}`));
+          console.log(chalk.dim(`  - ${detail}`));
         });
       }
       // Provide helpful hints for common errors
       if (error.message.includes("already taken")) {
-        console.log(chalk.gray("  Try a different username"));
+        console.log(chalk.dim("  Try a different username"));
       } else if (error.message.includes("already registered")) {
         console.log(
-          chalk.gray("  Use 'nemar auth resend-verification' if you need a new verification link"),
+          chalk.dim("  Use 'nemar auth resend-verification' if you need a new verification link"),
         );
       }
     } else {
       spinner.fail("Registration failed");
-      console.log(chalk.gray(`  ${error instanceof Error ? error.message : "Unknown error"}`));
+      console.log(chalk.dim(`  ${error instanceof Error ? error.message : "Unknown error"}`));
     }
   }
 }
@@ -418,7 +418,7 @@ export async function statusAction(options: { refresh?: boolean }): Promise<void
     } catch (error) {
       spinner.fail("Could not refresh user info");
       if (error instanceof ApiError && error.statusCode === 401) {
-        console.log(chalk.gray("  Your session may have expired. Try logging in again."));
+        console.log(chalk.dim("  Your session may have expired. Try logging in again."));
       }
     }
   }
@@ -447,15 +447,15 @@ export async function statusAction(options: { refresh?: boolean }): Promise<void
           : chalk.white("Member");
     console.log(`  Role:     ${roleDisplay}`);
   }
-  console.log(`  Config:   ${chalk.gray(getConfigPath())}`);
+  console.log(`  Config:   ${chalk.dim(getConfigPath())}`);
 
   // Show other stored accounts
   const accounts = getAccounts();
   const others = accounts.filter((a) => !a.active);
   if (others.length > 0) {
     console.log();
-    console.log(`  Other accounts: ${others.map((a) => chalk.gray(a.username)).join(", ")}`);
-    console.log(chalk.gray("  Run 'nemar auth switch' to switch accounts"));
+    console.log(`  Other accounts: ${others.map((a) => chalk.dim(a.username)).join(", ")}`);
+    console.log(chalk.dim("  Run 'nemar auth switch' to switch accounts"));
   }
 }
 
@@ -482,7 +482,7 @@ async function switchGitHubAuth(githubUsername: string): Promise<void> {
     // Use Bun globals directly; dynamic import("bun") gets mangled by bun build --minify
     const ghPath = Bun.which("gh");
     if (!ghPath) {
-      console.log(chalk.gray("  GitHub CLI (gh) not found in PATH, skipping"));
+      console.log(chalk.dim("  GitHub CLI (gh) not found in PATH, skipping"));
       return;
     }
     const proc = Bun.spawn({
@@ -499,15 +499,15 @@ async function switchGitHubAuth(githubUsername: string): Promise<void> {
       const msg = stderrText.trim();
       if (msg.includes("not found") || msg.includes("no accounts")) {
         console.log(
-          chalk.gray(`  GitHub CLI: @${githubUsername} not logged in (run 'gh auth login')`),
+          chalk.dim(`  GitHub CLI: @${githubUsername} not logged in (run 'gh auth login')`),
         );
       } else {
-        console.log(chalk.gray(`  GitHub CLI switch failed: ${msg || `exit code ${exitCode}`}`));
+        console.log(chalk.dim(`  GitHub CLI switch failed: ${msg || `exit code ${exitCode}`}`));
       }
     }
   } catch (error) {
     const msg = error instanceof Error ? error.message : String(error);
-    console.log(chalk.gray(`  GitHub CLI switch skipped: ${msg}`));
+    console.log(chalk.dim(`  GitHub CLI switch skipped: ${msg}`));
   }
 }
 
@@ -564,8 +564,8 @@ export async function switchAction(identifier?: string): Promise<void> {
   const switched = switchAccount(target);
   if (!switched) {
     console.log(chalk.red(`Account not found: ${target}`));
-    console.log(chalk.gray("  Provide a NEMAR username or GitHub username"));
-    console.log(chalk.gray(`  Available: ${accounts.map((a) => a.username).join(", ")}`));
+    console.log(chalk.dim("  Provide a NEMAR username or GitHub username"));
+    console.log(chalk.dim(`  Available: ${accounts.map((a) => a.username).join(", ")}`));
     return;
   }
 
@@ -673,13 +673,13 @@ authCommand
       if (error instanceof ApiError) {
         spinner.fail(error.message);
         if (error.statusCode === 0) {
-          console.log(chalk.gray("  Check your internet connection"));
+          console.log(chalk.dim("  Check your internet connection"));
         }
       } else {
         spinner.fail(
           `Failed to send verification email: ${error instanceof Error ? error.message : "Unknown error"}`,
         );
-        console.log(chalk.gray("  Check your internet connection"));
+        console.log(chalk.dim("  Check your internet connection"));
       }
     }
   });
@@ -711,7 +711,7 @@ export async function setupSSHAction(options: { force?: boolean }): Promise<void
         console.log(`  GitHub user: ${chalk.cyan(sshTest.username)}`);
       }
       console.log();
-      console.log(chalk.gray("Use --force to regenerate SSH key anyway"));
+      console.log(chalk.dim("Use --force to regenerate SSH key anyway"));
       return;
     }
     spinner.info("SSH access to GitHub not configured");
@@ -719,14 +719,14 @@ export async function setupSSHAction(options: { force?: boolean }): Promise<void
 
   console.log();
   console.log(chalk.cyan("Setting up SSH access for GitHub"));
-  console.log(chalk.gray("This will generate a dedicated SSH key for NEMAR uploads\n"));
+  console.log(chalk.dim("This will generate a dedicated SSH key for NEMAR uploads\n"));
 
   // Step 1: Generate SSH key
   let publicKey: string | null = null;
   const paths = getSSHKeyPaths();
 
   if (nemarSSHKeyExists() && !options.force) {
-    console.log(chalk.gray(`  Using existing key: ${paths.privateKey}`));
+    console.log(chalk.dim(`  Using existing key: ${paths.privateKey}`));
     publicKey = readPublicKey();
   } else {
     const spinner = ora("Generating SSH key...").start();
@@ -734,13 +734,13 @@ export async function setupSSHAction(options: { force?: boolean }): Promise<void
 
     if (!keyResult.success) {
       spinner.fail("Failed to generate SSH key");
-      console.log(chalk.gray(`  ${keyResult.error}`));
+      console.log(chalk.dim(`  ${keyResult.error}`));
       return;
     }
 
     spinner.succeed("SSH key generated");
-    console.log(chalk.gray(`  Private key: ${paths.privateKey}`));
-    console.log(chalk.gray(`  Public key: ${paths.publicKey}`));
+    console.log(chalk.dim(`  Private key: ${paths.privateKey}`));
+    console.log(chalk.dim(`  Public key: ${paths.publicKey}`));
     publicKey = keyResult.publicKey || null;
   }
 
@@ -755,7 +755,7 @@ export async function setupSSHAction(options: { force?: boolean }): Promise<void
 
   if (!configResult.success) {
     configSpinner.fail("Failed to configure SSH");
-    console.log(chalk.gray(`  ${configResult.error}`));
+    console.log(chalk.dim(`  ${configResult.error}`));
     return;
   }
   configSpinner.succeed("SSH configured for GitHub");
@@ -787,15 +787,15 @@ export async function setupSSHAction(options: { force?: boolean }): Promise<void
   console.log("Steps:");
   console.log("  1. Copy the key above");
   console.log(`  2. Go to: ${chalk.underline("https://github.com/settings/ssh/new")}`);
-  console.log(`  3. Title: ${chalk.gray("NEMAR CLI")}`);
+  console.log(`  3. Title: ${chalk.dim("NEMAR CLI")}`);
   console.log("  4. Paste the key and click 'Add SSH key'");
   console.log();
-  console.log(chalk.gray("After adding the key, run 'nemar auth setup-ssh' again to verify."));
+  console.log(chalk.dim("After adding the key, run 'nemar auth setup-ssh' again to verify."));
 }
 
 const setupSshCmd = authCommand
   .command("setup-ssh")
-  .description("Configure SSH access for GitHub (auto-generates key)")
+  .description("Configure SSH access for GitHub (optional, gh CLI preferred)")
   .option("-f, --force", "Regenerate SSH key even if one exists")
   .action(setupSSHAction);
 
@@ -803,15 +803,13 @@ addVerboseHelp(
   setupSshCmd,
   `
 Description:
-  Automatically configures SSH access for GitHub, which is required
-  for uploading datasets. This command will:
+  Configures SSH access for GitHub as an alternative to gh CLI (HTTPS).
+  Most users should use 'gh auth login' instead; SSH is only needed if
+  you cannot use the GitHub CLI.
 
   1. Generate a dedicated Ed25519 SSH key for NEMAR (~/.ssh/nemar_ed25519)
   2. Configure SSH to use this key for GitHub
   3. Verify the connection (prompts you to add the key to GitHub if needed)
-
-  This is a one-time setup. After running this command and adding the key
-  to GitHub, you can upload datasets.
 
 Examples:
   $ nemar auth setup-ssh          # Set up SSH access
@@ -858,7 +856,7 @@ const retrieveKeyCmd = authCommand
       spinner.succeed("API key retrieved");
       console.log();
       console.log(chalk.yellow("Your API Key (store this securely):"));
-      console.log(chalk.gray(`  ${result.api_key}`));
+      console.log(chalk.dim(`  ${result.api_key}`));
       console.log();
       console.log("Next step:");
       console.log(`  Run ${chalk.cyan("nemar auth login")} and paste your API key`);
@@ -870,7 +868,7 @@ const retrieveKeyCmd = authCommand
           spinner.info("API key already issued");
           if (details?.api_key_prefix) {
             console.log();
-            console.log(`  Key prefix: ${chalk.gray(details.api_key_prefix)}`);
+            console.log(`  Key prefix: ${chalk.dim(details.api_key_prefix)}`);
           }
           console.log();
           console.log("  If you lost your API key, regenerate it:");
@@ -878,9 +876,9 @@ const retrieveKeyCmd = authCommand
         } else {
           spinner.fail(error.message);
           if (error.statusCode === 401) {
-            console.log(chalk.gray("  Check your email and password"));
+            console.log(chalk.dim("  Check your email and password"));
           } else if (error.statusCode === 403) {
-            console.log(chalk.gray("  Your account may not be approved yet"));
+            console.log(chalk.dim("  Your account may not be approved yet"));
           }
         }
       } else {
@@ -914,7 +912,7 @@ const regenerateKeyCmd = authCommand
   .description("Request a new API key (revokes current key, requires email verification)")
   .action(async () => {
     console.log(chalk.yellow("API Key Regeneration"));
-    console.log(chalk.gray("This will revoke your current key and generate a new one\n"));
+    console.log(chalk.dim("This will revoke your current key and generate a new one\n"));
 
     const { email } = await inquirer.prompt([
       {
@@ -941,13 +939,13 @@ const regenerateKeyCmd = authCommand
       console.log("  2. Click the link to generate your new API key");
       console.log("  3. Copy the new key and run 'nemar auth login'");
       console.log();
-      console.log(chalk.gray("The link expires in 1 hour"));
+      console.log(chalk.dim("The link expires in 1 hour"));
     } catch (error) {
       if (error instanceof ApiError) {
         spinner.fail(error.message);
       } else {
         spinner.fail("Failed to send verification email");
-        console.log(chalk.gray("  Check your internet connection"));
+        console.log(chalk.dim("  Check your internet connection"));
       }
     }
   });
