@@ -72,6 +72,8 @@ import {
   addPublicReadPolicy,
   applyObjectLock,
   deleteDatasetObjects,
+  getArchiveSize,
+  getDatasetS3Stats,
   getManifest,
   removePublicReadPolicy,
   uploadManifest,
@@ -3989,11 +3991,17 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
         await updateProgress("sync_nemar", "Credentials not configured");
       } else {
         // Gather source data
+        const s3Cfg = getS3Config(c.env);
         const tree = await getTreeAtRef(repoName, "main", pat);
         const bidsFile = tree.find((f) => f.path === "dataset_description.json");
-        const bidsDescription = bidsFile
-          ? JSON.parse(await getBlobContent(repoName, bidsFile.sha, pat))
-          : {};
+        let bidsDescription: Record<string, unknown> = {};
+        if (bidsFile) {
+          try {
+            bidsDescription = JSON.parse(await getBlobContent(repoName, bidsFile.sha, pat));
+          } catch (err) {
+            console.warn(`[publish] Failed to parse dataset_description.json: ${err}`);
+          }
+        }
 
         const readmeFile = tree.find((f) => f.path === "README" || f.path === "README.md");
         const readme = readmeFile ? await getBlobContent(repoName, readmeFile.sha, pat) : "";
@@ -4005,36 +4013,39 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
             const raw = JSON.parse(await getBlobContent(repoName, nemarMetaFile.sha, pat));
             const parsed = parseNemarMetadata(raw);
             if (parsed && parsed.version === "2.0") nemarMeta = parsed;
-          } catch {
-            /* ignore parse errors */
+          } catch (err) {
+            console.warn(`[publish] Failed to parse .nemar/metadata.json: ${err}`);
           }
         }
 
-        const latestVersion = await db
-          .prepare(
-            "SELECT version, doi, created_at FROM dataset_versions WHERE dataset_id = ? ORDER BY created_at DESC LIMIT 1",
-          )
-          .bind(datasetId)
-          .first<{ version: string; doi: string; created_at: string }>();
-
-        const updatedDoi = await db
-          .prepare("SELECT concept_doi, created_at FROM datasets WHERE dataset_id = ?")
-          .bind(datasetId)
-          .first<{ concept_doi: string | null; created_at: string | null }>();
-
-        const pubRequest = await db
-          .prepare("SELECT approved_at FROM publication_requests WHERE id = ?")
-          .bind(requestId)
-          .first<{ approved_at: string | null }>();
+        // Gather D1 data, S3 stats, repo info in parallel
+        const [latestVersion, updatedDoi, pubRequest, s3Stats, zipFileSize] = await Promise.all([
+          db
+            .prepare(
+              "SELECT version, doi, created_at FROM dataset_versions WHERE dataset_id = ? ORDER BY created_at DESC LIMIT 1",
+            )
+            .bind(datasetId)
+            .first<{ version: string; doi: string; created_at: string }>(),
+          db
+            .prepare("SELECT concept_doi, created_at FROM datasets WHERE dataset_id = ?")
+            .bind(datasetId)
+            .first<{ concept_doi: string | null; created_at: string | null }>(),
+          db
+            .prepare("SELECT approved_at FROM publication_requests WHERE id = ?")
+            .bind(requestId)
+            .first<{ approved_at: string | null }>(),
+          getDatasetS3Stats(s3Cfg, datasetId).catch(() => ({ totalSize: 0, objectCount: 0 })),
+          getArchiveSize(s3Cfg, datasetId).catch(() => 0),
+        ]);
 
         // Try to read version manifest from S3 for accurate file sizes
         let manifest = null;
         if (latestVersion?.version) {
           try {
-            const raw = await getManifest(getS3Config(c.env), datasetId, latestVersion.version);
+            const raw = await getManifest(s3Cfg, datasetId, latestVersion.version);
             if (raw) manifest = JSON.parse(raw);
-          } catch {
-            /* manifest not available yet, use tree sizes */
+          } catch (err) {
+            console.warn(`[publish] Manifest not available for ${datasetId}: ${err}`);
           }
         }
 
@@ -4054,6 +4065,8 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
           repoName,
           pat,
           manifest,
+          s3Stats,
+          zipFileSize,
         });
 
         // Update sync tracking
@@ -4091,8 +4104,8 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
           )
           .bind(msg, datasetId)
           .run();
-      } catch {
-        /* ignore D1 failure in error path */
+      } catch (d1Err) {
+        console.warn(`[publish] Failed to update sync status in D1: ${d1Err}`);
       }
       await updateProgress("sync_nemar", msg);
     }
@@ -4701,15 +4714,25 @@ adminRoutes.post("/datasets/:id/sync", async (c) => {
     return c.json({ error: "Dataset has no GitHub repository" }, 400);
   }
 
-  const repoName = dataset.github_repo.split("/")[1];
+  const repoSlug = dataset.github_repo.split("/");
+  if (repoSlug.length < 2 || !repoSlug[1]) {
+    return c.json({ error: `Invalid github_repo format: ${dataset.github_repo}` }, 400);
+  }
+  const repoName = repoSlug[1];
   const pat = c.env.GITHUB_ADMIN_PAT;
+  const s3 = getS3Config(c.env);
 
   // Gather data from GitHub
   const tree = await getTreeAtRef(repoName, "main", pat);
   const bidsFile = tree.find((f) => f.path === "dataset_description.json");
-  const bidsDescription = bidsFile
-    ? JSON.parse(await getBlobContent(repoName, bidsFile.sha, pat))
-    : {};
+  let bidsDescription: Record<string, unknown> = {};
+  if (bidsFile) {
+    try {
+      bidsDescription = JSON.parse(await getBlobContent(repoName, bidsFile.sha, pat));
+    } catch (err) {
+      console.warn(`[sync] Failed to parse dataset_description.json for ${datasetId}: ${err}`);
+    }
+  }
 
   const readmeFile = tree.find((f) => f.path === "README" || f.path === "README.md");
   const readme = readmeFile ? await getBlobContent(repoName, readmeFile.sha, pat) : "";
@@ -4721,33 +4744,42 @@ adminRoutes.post("/datasets/:id/sync", async (c) => {
       const raw = JSON.parse(await getBlobContent(repoName, nemarMetaFile.sha, pat));
       const parsed = parseNemarMetadata(raw);
       if (parsed && parsed.version === "2.0") nemarMeta = parsed;
-    } catch {
-      /* ignore parse errors */
+    } catch (err) {
+      console.warn(`[sync] Failed to parse .nemar/metadata.json for ${datasetId}: ${err}`);
     }
   }
 
-  const latestVersion = await db
-    .prepare(
-      "SELECT version, doi, created_at FROM dataset_versions WHERE dataset_id = ? ORDER BY created_at DESC LIMIT 1",
-    )
-    .bind(datasetId)
-    .first<{ version: string; doi: string; created_at: string }>();
-
-  const pubRequest = await db
-    .prepare(
-      "SELECT approved_at FROM publication_requests WHERE dataset_id = ? AND status = 'published' ORDER BY approved_at DESC LIMIT 1",
-    )
-    .bind(datasetId)
-    .first<{ approved_at: string | null }>();
+  // Gather D1 data, S3 stats, repo info in parallel
+  const [latestVersion, pubRequest, s3Stats, zipFileSize, repoInfo] = await Promise.all([
+    db
+      .prepare(
+        "SELECT version, doi, created_at FROM dataset_versions WHERE dataset_id = ? ORDER BY created_at DESC LIMIT 1",
+      )
+      .bind(datasetId)
+      .first<{ version: string; doi: string; created_at: string }>(),
+    db
+      .prepare(
+        "SELECT approved_at FROM publication_requests WHERE dataset_id = ? AND status = 'published' ORDER BY approved_at DESC LIMIT 1",
+      )
+      .bind(datasetId)
+      .first<{ approved_at: string | null }>(),
+    getDatasetS3Stats(s3, datasetId).catch(() => ({ totalSize: 0, objectCount: 0 })),
+    getArchiveSize(s3, datasetId).catch(() => 0),
+    fetch(`https://api.github.com/repos/nemarDatasets/${repoName}`, {
+      headers: { Authorization: `token ${pat}`, Accept: "application/vnd.github.v3+json" },
+    })
+      .then((r) => r.json() as Promise<{ created_at?: string }>)
+      .catch(() => null),
+  ]);
 
   // Try to read version manifest from S3 for accurate file sizes
   let manifest = null;
   if (latestVersion?.version) {
     try {
-      const raw = await getManifest(getS3Config(c.env), datasetId, latestVersion.version);
+      const raw = await getManifest(s3, datasetId, latestVersion.version);
       if (raw) manifest = JSON.parse(raw);
-    } catch {
-      /* manifest not available yet */
+    } catch (err) {
+      console.warn(`[sync] Manifest not available for ${datasetId}: ${err}`);
     }
   }
 
@@ -4767,6 +4799,9 @@ adminRoutes.post("/datasets/:id/sync", async (c) => {
     repoName,
     pat,
     manifest,
+    s3Stats,
+    zipFileSize,
+    repoCreatedAt: repoInfo?.created_at || null,
   });
 
   // Update tracking

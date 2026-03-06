@@ -2427,7 +2427,8 @@ syncCommand
         const statusColor =
           status === "synced" ? chalk.green : status === "failed" ? chalk.red : chalk.yellow;
         const syncAt = d.nemar_sync_at ? new Date(d.nemar_sync_at).toLocaleDateString() : "-";
-        const name = d.name.length > 38 ? `${d.name.substring(0, 35)}...` : d.name;
+        const rawName = d.name || d.dataset_id;
+        const name = rawName.length > 38 ? `${rawName.substring(0, 35)}...` : rawName;
 
         console.log(
           `  ${d.dataset_id.padEnd(12)} ${name.padEnd(40)} ${statusColor(status.padEnd(10))} ${syncAt}`,

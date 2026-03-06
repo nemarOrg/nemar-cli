@@ -96,6 +96,12 @@ export interface NemarSyncSource {
   pat: string;
   /** Pre-loaded version manifest from S3 (has accurate file sizes from annex keys) */
   manifest?: VersionManifest | null;
+  /** S3 object stats (totalSize in bytes, objectCount) -- most accurate size source */
+  s3Stats?: { totalSize: number; objectCount: number } | null;
+  /** Zip archive size in bytes from S3 archives/ prefix */
+  zipFileSize?: number;
+  /** GitHub repo creation date -- fallback when D1 dates are null (legacy datasets) */
+  repoCreatedAt?: string | null;
 }
 
 export interface SyncResult {
@@ -147,8 +153,8 @@ async function getAccessToken(username: string, password: string): Promise<strin
   try {
     const payload = JSON.parse(atob(token.split(".")[1]));
     if (payload.exp) expiresAt = payload.exp * 1000;
-  } catch {
-    // ignore parse failure, use default
+  } catch (err) {
+    console.warn(`[nemar-sync] Failed to parse JWT expiry, using 30min default: ${err}`);
   }
 
   cachedToken = { token, expiresAt };
@@ -161,8 +167,8 @@ function tokenKeyName(token: string): string {
     const payload = JSON.parse(atob(token.split(".")[1]));
     // nemar.org tokens have iss = "https://nemar.org"
     if (payload.iss?.includes("nemar.org")) return "nemar_access_token";
-  } catch {
-    // fall through
+  } catch (err) {
+    console.warn(`[nemar-sync] Failed to parse token payload: ${err}`);
   }
   return "access_token";
 }
@@ -219,12 +225,16 @@ function formatBytes(bytes: number): string {
   return `${Math.round(val * 10) / 10} ${units[i]}`;
 }
 
-function toIso(dateStr: string | null | undefined): string {
+/** Format date as "YYYY-MM-DD HH:MM:SS" (nemar.org expected format, not ISO 8601) */
+function formatDate(dateStr: string | null | undefined): string {
   if (!dateStr) return "";
   try {
     const d = new Date(dateStr);
     if (Number.isNaN(d.getTime())) return "";
-    return d.toISOString().replace(/\.\d+Z$/, "Z");
+    return d
+      .toISOString()
+      .replace("T", " ")
+      .replace(/\.\d+Z$/, "");
   } catch {
     return "";
   }
@@ -376,19 +386,26 @@ function buildDataexplorerDataset(
     detectModalitiesFromTree(src.tree.map((t) => t.path)).join(",") ||
     "EEG";
 
-  // Prefer manifest sizes (accurate) over tree sizes (annex pointer sizes)
-  const fileSize = totalFileSizeFromManifest(src.manifest) || totalFileSizeFromTree(src.tree);
+  // Size priority: S3 stats (most accurate) > manifest > tree (annex pointers, inaccurate)
+  const fileSize =
+    src.s3Stats?.totalSize ||
+    totalFileSizeFromManifest(src.manifest) ||
+    totalFileSizeFromTree(src.tree);
+
+  // Date fallbacks: D1 dates > repo creation date > empty
+  const created = formatDate(src.createdAt) || formatDate(src.repoCreatedAt);
+  const published = formatDate(src.publishDate) || created;
 
   return {
     id: src.datasetId,
-    created: toIso(src.createdAt),
+    created,
     uploader: src.ownerUsername,
     latestSnapshot: src.latestVersion || "1.0.0",
     name: (bd.Name as string) || src.datasetId,
-    publishDate: toIso(src.publishDate),
+    publishDate: published,
     onBrainlife: 0,
     sessionsNum: countSessions(src.tree),
-    file_size: fileSize,
+    file_size: Math.round(fileSize),
     byte_size_format: formatBytes(fileSize),
     totalFiles: totalFileCount(src.tree),
     participants: participants.count,
@@ -411,7 +428,7 @@ function buildDataexplorerDataset(
     readme: src.readme,
     local_dataset: 1,
     processed: meta?.dataset_type === "derivative" ? 1 : 0,
-    hedAnnotation: 0, // updated below if HED found
+    hedAnnotation: 0, // updated by caller (syncDatasetToNemar) if HED annotation detected
   };
 }
 
@@ -432,9 +449,11 @@ function buildDataexplorerExtra(
     data_pipeline: "",
     event_count: countEventFiles(src.tree),
     total_actual_file_size: Math.round(
-      (totalFileSizeFromManifest(src.manifest) || totalFileSizeFromTree(src.tree)) / 1024,
-    ), // KB
-    zip_file_size: 0, // updated later when archive is available
+      (src.s3Stats?.totalSize ||
+        totalFileSizeFromManifest(src.manifest) ||
+        totalFileSizeFromTree(src.tree)) / 1024,
+    ), // KiB (bytes / 1024)
+    zip_file_size: src.zipFileSize ? Math.round(src.zipFileSize / 1024) : 0, // KiB
   };
 }
 
@@ -444,7 +463,7 @@ function buildSupplementary(src: NemarSyncSource): Record<string, unknown> {
 
   return {
     id: src.datasetId,
-    latestSnapshot_created: toIso(src.versionCreatedAt || src.createdAt),
+    latestSnapshot_created: formatDate(src.versionCreatedAt || src.createdAt || src.repoCreatedAt),
     description_name: (src.bidsDescription.Name as string) || src.datasetId,
     primaryModality: modalities[0] || "EEG",
     secondaryModalities: modalities.slice(1).join(","),
