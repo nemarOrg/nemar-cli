@@ -3390,6 +3390,12 @@ Examples:
   )
   .action(commitAction);
 
+function printBranchProtectionSuggestions(): void {
+  console.log("  Options:");
+  console.log(`    ${chalk.cyan("nemar dataset update")}          Update via PR (recommended)`);
+  console.log(`    ${chalk.cyan("nemar dataset push --pr")}       Push branch + create PR`);
+}
+
 // Push command
 datasetCommand
   .command("push")
@@ -3432,10 +3438,9 @@ Examples:
       process.exit(1);
     }
 
-    // Check if this is a public dataset (branch protection blocks direct push)
+    // Public datasets have branch protection enabled; warn early instead of a cryptic git error
     const currentBranchName = await getCurrentBranch(cwd);
-    const isOnMain =
-      !currentBranchName || currentBranchName === "main" || currentBranchName === "master";
+    const isOnMain = currentBranchName === "main" || currentBranchName === "master";
     if (isOnMain && !options.pr) {
       const pushDatasetIdCheck = await getDatasetIdFromRemote(cwd);
       if (pushDatasetIdCheck && isAuthenticated()) {
@@ -3444,18 +3449,11 @@ Examples:
           if (dsInfo.visibility === "public") {
             console.log(chalk.red("Error: This dataset is public with branch protection."));
             console.log(chalk.red("  Direct push to main is not allowed."));
-            console.log();
-            console.log("  Options:");
-            console.log(
-              `    ${chalk.cyan("nemar dataset update")}          Update via PR (recommended)`,
-            );
-            console.log(
-              `    ${chalk.cyan("nemar dataset push --pr")}       Push branch + create PR`,
-            );
+            printBranchProtectionSuggestions();
             process.exit(1);
           }
         } catch {
-          // API unreachable or not authorized; continue and let git report errors
+          // API call failed (network, 404, etc.); fall through and let git report errors
         }
       }
     }
@@ -3470,11 +3468,7 @@ Examples:
         spinner.fail("Push rejected: branch protection is enabled");
         console.log();
         console.log("  Public datasets require changes via pull request.");
-        console.log("  Options:");
-        console.log(
-          `    ${chalk.cyan("nemar dataset update")}          Update via PR (recommended)`,
-        );
-        console.log(`    ${chalk.cyan("nemar dataset push --pr")}       Push branch + create PR`);
+        printBranchProtectionSuggestions();
       } else {
         spinner.fail("Git push failed");
         console.log(chalk.red(`  ${err}`));
