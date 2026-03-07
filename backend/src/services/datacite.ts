@@ -135,6 +135,7 @@ export interface DataCiteContributor {
   name: string;
   contributorType: ContributorType;
   nameType?: "Personal" | "Organizational";
+  orcid?: string;
   affiliation?: string;
 }
 
@@ -780,6 +781,9 @@ function buildContributorXml(contributor: DataCiteContributor): string {
   const nameType = contributor.nameType || "Personal";
   let xml = `    <contributor contributorType="${escapeXml(contributor.contributorType)}">\n`;
   xml += `      <contributorName nameType="${nameType}">${escapeXml(contributor.name)}</contributorName>\n`;
+  if (contributor.orcid) {
+    xml += `      <nameIdentifier nameIdentifierScheme="ORCID" schemeURI="https://orcid.org">${escapeXml(contributor.orcid)}</nameIdentifier>\n`;
+  }
   if (contributor.affiliation) {
     xml += `      <affiliation>${escapeXml(contributor.affiliation)}</affiliation>\n`;
   }
@@ -1428,12 +1432,18 @@ export function bidsToDataCite(
   // uploaderName is a NEMAR username (not a formal name), so we use it as-is.
   if (enrichment?.uploaderName) {
     const uploaderLower = enrichment.uploaderName.toLowerCase();
-    const isAuthor = creators.some((c) => c.name.toLowerCase().includes(uploaderLower));
+    // Word-boundary match to avoid false positives (e.g., "li" matching "Elizabeth")
+    const boundary = new RegExp(
+      `\\b${uploaderLower.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`,
+      "i",
+    );
+    const isAuthor = creators.some((c) => boundary.test(c.name));
     if (!isAuthor) {
       contributors.push({
         name: enrichment.uploaderName,
         contributorType: "DataCurator",
         nameType: "Personal",
+        ...(enrichment.uploaderOrcid && { orcid: enrichment.uploaderOrcid }),
       });
     }
   }

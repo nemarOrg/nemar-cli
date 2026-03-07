@@ -102,7 +102,9 @@ export function buildOrcidEnrichment(
   const authorList = authors.filter((a): a is string => typeof a === "string");
   const uploaderLower = uploaderName.toLowerCase();
 
-  const matched = authorList.find((a) => a.toLowerCase().includes(uploaderLower));
+  // Use word-boundary matching to avoid false positives (e.g., "li" matching "Elizabeth")
+  const boundary = new RegExp(`\\b${uploaderLower.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`, "i");
+  const matched = authorList.find((a) => boundary.test(a));
   if (!matched) return enrichment;
 
   enrichment.authors = { [matched]: { orcid: uploaderOrcid } };
