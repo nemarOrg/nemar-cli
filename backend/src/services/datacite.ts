@@ -135,6 +135,7 @@ export interface DataCiteContributor {
   name: string;
   contributorType: ContributorType;
   nameType?: "Personal" | "Organizational";
+  orcid?: string;
   affiliation?: string;
 }
 
@@ -249,6 +250,10 @@ export interface DataCiteEnrichment {
   geoLocation?: string;
   sizes?: string[];
   formats?: string[];
+  /** Uploader username; added as DataCurator contributor when not in BIDS Authors. */
+  uploaderName?: string;
+  /** Uploader ORCID; attached to contributor entry if present. */
+  uploaderOrcid?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -576,9 +581,7 @@ function nemarMetadataV1ToEnrichment(
   // Related DOIs: merge and deduplicate with normalization
   if (nemarMeta.relatedDois) {
     const existing = enrichment.relatedDois || [];
-    const seen = new Set(
-      existing.map((r) => normalizeIdentifierKey(r.doi, r.relationType || "")),
-    );
+    const seen = new Set(existing.map((r) => normalizeIdentifierKey(r.doi, r.relationType || "")));
     const newRels = nemarMeta.relatedDois
       .filter((r) => isValidRelationType(r.relationType))
       .map((r) => ({
@@ -671,14 +674,13 @@ function nemarMetadataV2ToEnrichment(
   // Related identifiers: carry identifier_type, normalize DOIs
   if (nemarMeta.related_identifiers) {
     const existing = [...(enrichment.relatedDois || [])];
-    const seen = new Set(
-      existing.map((r) => normalizeIdentifierKey(r.doi, r.relationType || "")),
-    );
+    const seen = new Set(existing.map((r) => normalizeIdentifierKey(r.doi, r.relationType || "")));
     for (const ri of nemarMeta.related_identifiers) {
       if (isValidRelationType(ri.relation_type)) {
-        const idType = (ri.identifier_type === "URL" || ri.identifier_type === "URN")
-          ? ri.identifier_type
-          : detectIdentifierType(ri.identifier);
+        const idType =
+          ri.identifier_type === "URL" || ri.identifier_type === "URN"
+            ? ri.identifier_type
+            : detectIdentifierType(ri.identifier);
         const normalized = idType === "DOI" ? normalizeDoi(ri.identifier) : ri.identifier;
         const key = normalizeIdentifierKey(normalized, ri.relation_type);
         if (!seen.has(key)) {
@@ -779,6 +781,9 @@ function buildContributorXml(contributor: DataCiteContributor): string {
   const nameType = contributor.nameType || "Personal";
   let xml = `    <contributor contributorType="${escapeXml(contributor.contributorType)}">\n`;
   xml += `      <contributorName nameType="${nameType}">${escapeXml(contributor.name)}</contributorName>\n`;
+  if (contributor.orcid) {
+    xml += `      <nameIdentifier nameIdentifierScheme="ORCID" schemeURI="https://orcid.org">${escapeXml(contributor.orcid)}</nameIdentifier>\n`;
+  }
   if (contributor.affiliation) {
     xml += `      <affiliation>${escapeXml(contributor.affiliation)}</affiliation>\n`;
   }
@@ -1376,9 +1381,7 @@ export function bidsToDataCite(
       }
       if (typeof s.URL === "string" && s.URL) {
         // Skip URL if it's a doi.org URL (already handled via DOI field)
-        const doiMatch = (s.URL as string).match(
-          /^https?:\/\/(dx\.)?doi\.org\/(10\.\d{4,}\/.+)$/i,
-        );
+        const doiMatch = (s.URL as string).match(/^https?:\/\/(dx\.)?doi\.org\/(10\.\d{4,}\/.+)$/i);
         if (doiMatch) {
           addRelatedId(doiMatch[2], "DOI", "IsDerivedFrom");
         } else {
@@ -1424,6 +1427,26 @@ export function bidsToDataCite(
       nameType: "Organizational",
     },
   ];
+
+  // Add uploader as DataCurator if not already listed as an author.
+  // uploaderName is a NEMAR username (not a formal name), so we use it as-is.
+  if (enrichment?.uploaderName) {
+    const uploaderLower = enrichment.uploaderName.toLowerCase();
+    // Word-boundary match to avoid false positives (e.g., "li" matching "Elizabeth")
+    const boundary = new RegExp(
+      `\\b${uploaderLower.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`,
+      "i",
+    );
+    const isAuthor = creators.some((c) => boundary.test(c.name));
+    if (!isAuthor) {
+      contributors.push({
+        name: enrichment.uploaderName,
+        contributorType: "DataCurator",
+        nameType: "Personal",
+        ...(enrichment.uploaderOrcid && { orcid: enrichment.uploaderOrcid }),
+      });
+    }
+  }
 
   // Alternate identifiers
   const alternateIdentifiers = [{ identifier: datasetId, type: "NEMAR" }];

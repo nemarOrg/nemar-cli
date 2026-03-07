@@ -3433,6 +3433,24 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
       if (descResult instanceof Response) return descResult;
       const datasetDesc = descResult;
 
+      // Preserve existing DatasetDOI in SourceDatasets before overwriting
+      const existingDoi = datasetDesc.DatasetDOI;
+      if (typeof existingDoi === "string" && existingDoi && existingDoi !== conceptDoi) {
+        const sources: Array<Record<string, unknown>> = Array.isArray(datasetDesc.SourceDatasets)
+          ? [...(datasetDesc.SourceDatasets as Array<Record<string, unknown>>)]
+          : [];
+        const alreadyPresent = sources.some(
+          (s) => typeof s.DOI === "string" && s.DOI === existingDoi,
+        );
+        if (!alreadyPresent) {
+          sources.push({ DOI: existingDoi });
+          datasetDesc.SourceDatasets = sources;
+          console.log(
+            `[publish] Preserved existing DatasetDOI "${existingDoi}" in SourceDatasets for ${datasetId}`,
+          );
+        }
+      }
+
       datasetDesc.DatasetDOI = conceptDoi;
 
       await createOrUpdateFile(

@@ -9,10 +9,20 @@ import type { Context } from "hono";
 import { Hono } from "hono";
 import type { NemarMetadataV2 } from "../../../shared/datacite-constants.js";
 
-import { parseNemarMetadata } from "../services/datacite.js";
+import {
+  bidsToDataCite,
+  buildDataCiteXml,
+  nemarMetadataToEnrichment,
+  parseNemarMetadata,
+} from "../services/datacite.js";
 import { discoverOrcidsFromReferencedDois } from "../services/doi-orcid-discovery.js";
-import { createEzidVersionDoi, parseDoiProvider } from "../services/doi.js";
-import { TEST_SHOULDER, extractDoi } from "../services/ezid.js";
+import {
+  buildOrcidEnrichment,
+  createEzidVersionDoi,
+  parseDoiProvider,
+  resolveEzidAuth,
+} from "../services/doi.js";
+import { TEST_SHOULDER, extractDoi, updateIdentifier } from "../services/ezid.js";
 import {
   createOrUpdateFile,
   downloadReleaseArchive,
@@ -594,9 +604,14 @@ webhooks.post("/llm-enrich", async (c) => {
   }
   const forceReenrich = body.force === true;
 
-  // Look up dataset in D1
+  // Look up dataset in D1 (includes EZID/owner fields for DOI title sync)
   const dataset = await c.env.DB.prepare(
-    "SELECT dataset_id, name, github_repo, enrichment_json FROM datasets WHERE dataset_id = ?",
+    `SELECT d.dataset_id, d.name, d.github_repo, d.enrichment_json,
+            d.ezid_identifier, d.is_sandbox,
+            u.username AS owner_username, u.orcid AS owner_orcid
+     FROM datasets d
+     LEFT JOIN users u ON d.owner_user_id = u.id
+     WHERE d.dataset_id = ?`,
   )
     .bind(dataset_id)
     .first<{
@@ -604,6 +619,10 @@ webhooks.post("/llm-enrich", async (c) => {
       name: string | null;
       github_repo: string | null;
       enrichment_json: string | null;
+      ezid_identifier: string | null;
+      is_sandbox: number | null;
+      owner_username: string | null;
+      owner_orcid: string | null;
     }>();
 
   if (!dataset) {
@@ -1053,6 +1072,49 @@ webhooks.post("/llm-enrich", async (c) => {
       console.error(`[llm-enrich] Failed to cache enrichment in D1 for ${dataset_id}:`, err);
     }
 
+    // Sync DOI metadata after enrichment if dataset has an EZID DOI.
+    // Covers title, description, keywords, related identifiers, etc.
+    let doiSyncError: string | undefined;
+    if (dataset.ezid_identifier) {
+      try {
+        const ezidAuth = resolveEzidAuth(
+          {
+            EZID_USERNAME: c.env.EZID_USERNAME,
+            EZID_PASSWORD: c.env.EZID_PASSWORD,
+            EZID_SANDBOX_USERNAME: c.env.EZID_SANDBOX_USERNAME,
+            EZID_SANDBOX_PASSWORD: c.env.EZID_SANDBOX_PASSWORD,
+          },
+          !!dataset.is_sandbox,
+        );
+
+        const doi = extractDoi(dataset.ezid_identifier);
+        let doiEnrichment = buildOrcidEnrichment(
+          bidsDescription,
+          dataset.owner_username || undefined,
+          dataset.owner_orcid || undefined,
+        );
+        // Merge with the just-committed .nemar/metadata.json enrichment
+        const committedMeta = parseNemarMetadata(finalMetadata);
+        if (committedMeta) {
+          doiEnrichment = nemarMetadataToEnrichment(committedMeta, doiEnrichment);
+        }
+        const dataciteMetadata = bidsToDataCite(dataset_id, doi, bidsDescription, doiEnrichment);
+        const dataciteXml = buildDataCiteXml(dataciteMetadata);
+        await updateIdentifier(ezidAuth, dataset.ezid_identifier, { dataciteXml });
+        console.log(`[llm-enrich] Synced DOI metadata for ${dataset_id}`);
+      } catch (doiErr) {
+        doiSyncError = errorMessage(doiErr);
+        const isConfigError = doiSyncError.includes("not configured");
+        if (isConfigError) {
+          console.error(
+            `[llm-enrich] EZID credentials missing for ${dataset_id}; DOI metadata will not be updated`,
+          );
+        } else {
+          console.error(`[llm-enrich] Failed to sync DOI metadata for ${dataset_id}:`, doiErr);
+        }
+      }
+    }
+
     return c.json({
       message: `Metadata pipeline completed (stage: ${finalMetadata.pipeline_stage})`,
       dataset_id,
@@ -1075,6 +1137,7 @@ webhooks.post("/llm-enrich", async (c) => {
       ...(bidsignoreError && { bidsignore_error: bidsignoreError }),
       ...(cacheError && { cache_error: cacheError }),
       ...(issueCreationError && { issue_creation_error: issueCreationError }),
+      ...(doiSyncError && { doi_sync_error: doiSyncError }),
     });
   } catch (error) {
     console.error(`[llm-enrich] Failed for ${dataset_id}:`, error);
