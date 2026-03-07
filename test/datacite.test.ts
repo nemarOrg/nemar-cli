@@ -423,6 +423,43 @@ describe("bidsToDataCite", () => {
     expect(metadata.contributors?.[0]?.name).toContain("NEMAR");
   });
 
+  test("adds uploader as DataCurator when not in BIDS Authors", () => {
+    const bids = { Name: "Test", Authors: ["Smith, John"] };
+    const metadata = bidsToDataCite("nm000104", "10.82901/NEMAR.test", bids, {
+      uploaderName: "jane",
+    });
+    const curator = metadata.contributors?.find((c) => c.contributorType === "DataCurator");
+    expect(curator).toBeDefined();
+    expect(curator?.name).toBe("jane");
+    expect(curator?.nameType).toBe("Personal");
+  });
+
+  test("does NOT add DataCurator when uploader IS a BIDS author", () => {
+    const bids = { Name: "Test", Authors: ["Doe, Jane"] };
+    const metadata = bidsToDataCite("nm000104", "10.82901/NEMAR.test", bids, {
+      uploaderName: "jane",
+    });
+    const curators = metadata.contributors?.filter((c) => c.contributorType === "DataCurator");
+    expect(curators).toHaveLength(0);
+  });
+
+  test("does NOT add DataCurator when uploaderName is absent", () => {
+    const bids = { Name: "Test", Authors: ["Doe, Jane"] };
+    const metadata = bidsToDataCite("nm000104", "10.82901/NEMAR.test", bids, {});
+    const curators = metadata.contributors?.filter((c) => c.contributorType === "DataCurator");
+    expect(curators).toHaveLength(0);
+  });
+
+  test("DataCurator appears in generated DataCite XML", () => {
+    const bids = { Name: "Test", Authors: ["Smith, John"] };
+    const metadata = bidsToDataCite("nm000104", "10.82901/NEMAR.test", bids, {
+      uploaderName: "jane",
+    });
+    const xml = buildDataCiteXml(metadata);
+    expect(xml).toContain("DataCurator");
+    expect(xml).toContain("jane");
+  });
+
   test("adds BIDS and neuroscience as default subjects", () => {
     const bids = { Name: "Test", Authors: ["Doe, John"] };
     const metadata = bidsToDataCite("nm000103", "10.82901/NEMAR.ABC", bids);

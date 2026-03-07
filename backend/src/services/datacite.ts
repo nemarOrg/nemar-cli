@@ -1424,14 +1424,14 @@ export function bidsToDataCite(
     },
   ];
 
-  // Add uploader as DataCurator if not already listed as an author
+  // Add uploader as DataCurator if not already listed as an author.
+  // uploaderName is a NEMAR username (not a formal name), so we use it as-is.
   if (enrichment?.uploaderName) {
     const uploaderLower = enrichment.uploaderName.toLowerCase();
     const isAuthor = creators.some((c) => c.name.toLowerCase().includes(uploaderLower));
     if (!isAuthor) {
-      const parsed = parseAuthorName(enrichment.uploaderName);
       contributors.push({
-        name: parsed.name,
+        name: enrichment.uploaderName,
         contributorType: "DataCurator",
         nameType: "Personal",
       });

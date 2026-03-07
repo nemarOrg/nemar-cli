@@ -610,7 +610,7 @@ webhooks.post("/llm-enrich", async (c) => {
             d.ezid_identifier, d.is_sandbox,
             u.username AS owner_username, u.orcid AS owner_orcid
      FROM datasets d
-     JOIN users u ON d.owner_user_id = u.id
+     LEFT JOIN users u ON d.owner_user_id = u.id
      WHERE d.dataset_id = ?`,
   )
     .bind(dataset_id)
@@ -621,7 +621,7 @@ webhooks.post("/llm-enrich", async (c) => {
       enrichment_json: string | null;
       ezid_identifier: string | null;
       is_sandbox: number | null;
-      owner_username: string;
+      owner_username: string | null;
       owner_orcid: string | null;
     }>();
 
@@ -1072,9 +1072,10 @@ webhooks.post("/llm-enrich", async (c) => {
       console.error(`[llm-enrich] Failed to cache enrichment in D1 for ${dataset_id}:`, err);
     }
 
-    // Sync DOI metadata if BIDS Name changed and dataset has an EZID DOI
+    // Sync DOI metadata after enrichment if dataset has an EZID DOI.
+    // Covers title, description, keywords, related identifiers, etc.
     let doiSyncError: string | undefined;
-    if (bidsName && bidsName !== dataset.name && dataset.ezid_identifier) {
+    if (dataset.ezid_identifier) {
       try {
         const ezidAuth = resolveEzidAuth(
           {
@@ -1089,7 +1090,7 @@ webhooks.post("/llm-enrich", async (c) => {
         const doi = extractDoi(dataset.ezid_identifier);
         let doiEnrichment = buildOrcidEnrichment(
           bidsDescription,
-          dataset.owner_username,
+          dataset.owner_username || undefined,
           dataset.owner_orcid || undefined,
         );
         // Merge with the just-committed .nemar/metadata.json enrichment
@@ -1100,10 +1101,17 @@ webhooks.post("/llm-enrich", async (c) => {
         const dataciteMetadata = bidsToDataCite(dataset_id, doi, bidsDescription, doiEnrichment);
         const dataciteXml = buildDataCiteXml(dataciteMetadata);
         await updateIdentifier(ezidAuth, dataset.ezid_identifier, { dataciteXml });
-        console.log(`[llm-enrich] Synced DOI metadata for ${dataset_id}: "${bidsName}"`);
+        console.log(`[llm-enrich] Synced DOI metadata for ${dataset_id}`);
       } catch (doiErr) {
         doiSyncError = errorMessage(doiErr);
-        console.error(`[llm-enrich] Failed to sync DOI metadata for ${dataset_id}:`, doiErr);
+        const isConfigError = doiSyncError.includes("not configured");
+        if (isConfigError) {
+          console.error(
+            `[llm-enrich] EZID credentials missing for ${dataset_id}; DOI metadata will not be updated`,
+          );
+        } else {
+          console.error(`[llm-enrich] Failed to sync DOI metadata for ${dataset_id}:`, doiErr);
+        }
       }
     }
 
