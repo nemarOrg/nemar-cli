@@ -95,43 +95,49 @@ describe("buildOrcidEnrichment", () => {
     expect(enrichment.authors?.["Smith, John"]).toBeUndefined();
   });
 
-  test("returns empty enrichment when no ORCID provided", () => {
+  test("returns enrichment with uploaderName but no authors when no ORCID provided", () => {
     const enrichment = buildOrcidEnrichment({ Name: "Test", Authors: ["Doe, Jane"] }, "jane");
 
-    expect(enrichment).toEqual({});
+    expect(enrichment).toEqual({ uploaderName: "jane" });
+    expect(enrichment.authors).toBeUndefined();
   });
 
-  test("returns empty enrichment when no BIDS description", () => {
+  test("returns enrichment with uploader fields when no BIDS description", () => {
     const enrichment = buildOrcidEnrichment(undefined, "jane", "0000-0002-1825-0097");
 
-    expect(enrichment).toEqual({});
+    expect(enrichment).toEqual({ uploaderName: "jane", uploaderOrcid: "0000-0002-1825-0097" });
+    expect(enrichment.authors).toBeUndefined();
   });
 
-  test("returns empty enrichment when no uploaderName", () => {
+  test("returns enrichment with uploaderOrcid when no uploaderName", () => {
     const enrichment = buildOrcidEnrichment(
       { Name: "Test", Authors: ["Doe, Jane"] },
       undefined,
       "0000-0002-1825-0097",
     );
 
-    expect(enrichment).toEqual({});
+    expect(enrichment).toEqual({ uploaderOrcid: "0000-0002-1825-0097" });
+    expect(enrichment.authors).toBeUndefined();
   });
 
-  test("returns empty enrichment when no authors in BIDS", () => {
+  test("returns enrichment with uploader fields when no authors in BIDS", () => {
     const enrichment = buildOrcidEnrichment({ Name: "Test" }, "jane", "0000-0002-1825-0097");
 
-    expect(enrichment).toEqual({});
+    expect(enrichment).toEqual({ uploaderName: "jane", uploaderOrcid: "0000-0002-1825-0097" });
+    expect(enrichment.authors).toBeUndefined();
   });
 
-  test("returns empty enrichment when uploader name does not match any author", () => {
+  test("returns enrichment with uploader fields when uploader name does not match any author", () => {
     const enrichment = buildOrcidEnrichment(
       { Name: "Test", Authors: ["Doe, Jane", "Smith, John"] },
       "nobody",
       "0000-0002-1825-0097",
     );
 
-    // No match found, so authors map should not be set
+    // No match found, so authors map should not be set but uploader fields preserved
     expect(enrichment.authors).toBeUndefined();
+    expect(enrichment.uploaderName).toBe("nobody");
+    expect(enrichment.uploaderOrcid).toBe("0000-0002-1825-0097");
   });
 
   test("matches first matching author only", () => {
