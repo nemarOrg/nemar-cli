@@ -1877,18 +1877,7 @@ Examples:
         process.exit(1);
       }
 
-      // Check prerequisites: git and gh
-      const gitCheck = spawn({ cmd: ["git", "--version"], stdout: "pipe", stderr: "pipe" });
-      if ((await gitCheck.exited) !== 0) {
-        console.log(chalk.red("Error: git is not installed"));
-        process.exit(1);
-      }
-      const ghCheck = spawn({ cmd: ["gh", "--version"], stdout: "pipe", stderr: "pipe" });
-      if ((await ghCheck.exited) !== 0) {
-        console.log(chalk.red("Error: GitHub CLI (gh) is not installed"));
-        console.log("  Install: brew install gh (or see https://cli.github.com)");
-        process.exit(1);
-      }
+      await checkPrerequisitesForCommand("release");
 
       // Fetch dataset info
       const infoSpinner = ora("Fetching dataset info...").start();
@@ -2286,18 +2275,7 @@ Examples:
         process.exit(1);
       }
 
-      // Check prerequisites: git, gh
-      const gitCheck = spawn({ cmd: ["git", "--version"], stdout: "pipe", stderr: "pipe" });
-      if ((await gitCheck.exited) !== 0) {
-        console.log(chalk.red("Error: git is not installed"));
-        process.exit(1);
-      }
-      const ghCheck = spawn({ cmd: ["gh", "--version"], stdout: "pipe", stderr: "pipe" });
-      if ((await ghCheck.exited) !== 0) {
-        console.log(chalk.red("Error: GitHub CLI (gh) is not installed"));
-        console.log("  Install: brew install gh (or see https://cli.github.com)");
-        process.exit(1);
-      }
+      await checkPrerequisitesForCommand("update");
 
       const workDir = resolve(path || ".");
 
@@ -3447,9 +3425,39 @@ Examples:
   .action(async (options) => {
     const cwd = process.cwd();
 
+    await checkPrerequisitesForCommand("push");
+
     if (!(await isGitAnnexDataset(cwd))) {
       console.log(chalk.red("Error: Not inside a git-annex dataset directory"));
       process.exit(1);
+    }
+
+    // Check if this is a public dataset (branch protection blocks direct push)
+    const currentBranchName = await getCurrentBranch(cwd);
+    const isOnMain =
+      !currentBranchName || currentBranchName === "main" || currentBranchName === "master";
+    if (isOnMain && !options.pr) {
+      const pushDatasetIdCheck = await getDatasetIdFromRemote(cwd);
+      if (pushDatasetIdCheck && isAuthenticated()) {
+        try {
+          const dsInfo = await getDataset(pushDatasetIdCheck);
+          if (dsInfo.visibility === "public") {
+            console.log(chalk.red("Error: This dataset is public with branch protection."));
+            console.log(chalk.red("  Direct push to main is not allowed."));
+            console.log();
+            console.log("  Options:");
+            console.log(
+              `    ${chalk.cyan("nemar dataset update")}          Update via PR (recommended)`,
+            );
+            console.log(
+              `    ${chalk.cyan("nemar dataset push --pr")}       Push branch + create PR`,
+            );
+            process.exit(1);
+          }
+        } catch {
+          // API unreachable or not authorized; continue and let git report errors
+        }
+      }
     }
 
     // Push git to GitHub
@@ -3457,8 +3465,20 @@ Examples:
     const gitResult = await pushToGitHub(cwd);
 
     if (!gitResult.success) {
-      spinner.fail("Git push failed");
-      console.log(chalk.red(`  ${gitResult.error}`));
+      const err = gitResult.error || "";
+      if (err.includes("protected branch") || err.includes("GH006")) {
+        spinner.fail("Push rejected: branch protection is enabled");
+        console.log();
+        console.log("  Public datasets require changes via pull request.");
+        console.log("  Options:");
+        console.log(
+          `    ${chalk.cyan("nemar dataset update")}          Update via PR (recommended)`,
+        );
+        console.log(`    ${chalk.cyan("nemar dataset push --pr")}       Push branch + create PR`);
+      } else {
+        spinner.fail("Git push failed");
+        console.log(chalk.red(`  ${err}`));
+      }
       process.exit(1);
     }
 

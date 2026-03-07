@@ -7,7 +7,14 @@
 
 import { runCommand } from "./git-annex.js";
 
-export type NemarCommand = "upload" | "download" | "clone" | "push" | "publish";
+export type NemarCommand =
+  | "upload"
+  | "download"
+  | "clone"
+  | "push"
+  | "publish"
+  | "update"
+  | "release";
 
 interface ToolCheck {
   name: string;
@@ -68,6 +75,8 @@ const COMMAND_TOOLS: Record<NemarCommand, string[]> = {
   clone: ["git", "gh"],
   push: ["git-annex", "gh"],
   publish: ["gh", "aws"],
+  update: ["git", "gh"],
+  release: ["git", "gh"],
 };
 
 /**

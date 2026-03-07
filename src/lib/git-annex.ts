@@ -57,13 +57,19 @@ export interface UploadProgress {
 }
 
 /**
- * Run a command and return stdout, stderr, and exit code
+ * Run a command and return stdout, stderr, and exit code.
+ *
+ * Sets GIT_TERMINAL_PROMPT=0 to prevent git from blocking on credential
+ * prompts (which causes the CLI to appear hung). Callers can override
+ * via options.env.
  */
 export async function runCommand(
   cmd: string[],
   options: {
     cwd?: string;
     env?: Record<string, string>;
+    /** Kill the process after this many milliseconds */
+    timeout?: number;
   } = {},
 ): Promise<{ stdout: string; stderr: string; exitCode: number }> {
   const proc = spawn({
@@ -73,13 +79,33 @@ export async function runCommand(
     stderr: "pipe",
     env: {
       ...process.env,
+      GIT_TERMINAL_PROMPT: "0",
       ...options.env,
     },
   });
 
+  let timedOut = false;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  if (options.timeout) {
+    timer = setTimeout(() => {
+      timedOut = true;
+      proc.kill();
+    }, options.timeout);
+  }
+
   const stdout = await new Response(proc.stdout).text();
   const stderr = await new Response(proc.stderr).text();
   const exitCode = await proc.exited;
+
+  if (timer) clearTimeout(timer);
+
+  if (timedOut) {
+    return {
+      stdout,
+      stderr: stderr || `Command timed out after ${Math.round(options.timeout! / 1000)}s`,
+      exitCode: exitCode ?? 1,
+    };
+  }
 
   return { stdout, stderr, exitCode };
 }
