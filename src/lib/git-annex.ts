@@ -2464,14 +2464,19 @@ export async function getAnnexWhereisAll(datasetPath: string): Promise<Map<strin
   });
   if (result.exitCode !== 0 && !result.stdout.trim()) {
     throw new Error(`git annex whereis failed: ${result.stderr.trim()}`);
-  } else if (result.exitCode !== 0) {
+  }
+  if (result.exitCode !== 0) {
     // Only tolerate the expected "whereis: N failed" pattern (files with no
     // known location). Any other non-zero exit is an unexpected error.
     const failMatch = result.stderr.match(/whereis:\s*(\d+)\s*failed/);
     if (failMatch) {
-      console.warn(`  Warning: ${failMatch[1]} files had no location info (continuing with available files)`);
+      console.warn(
+        `  Warning: ${failMatch[1]} files had no location info (continuing with available files)`,
+      );
     } else {
-      throw new Error(`git annex whereis failed (exit ${result.exitCode}): ${result.stderr.trim()}`);
+      throw new Error(
+        `git annex whereis failed (exit ${result.exitCode}): ${result.stderr.trim()}`,
+      );
     }
   }
 

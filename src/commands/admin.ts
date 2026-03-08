@@ -2337,7 +2337,7 @@ adminCommand
           "  Monitor at: https://github.com/nemarDatasets/.github/actions/workflows/onboard-openneuro.yml",
         ),
       );
-      console.log(chalk.dim(`  Or run: gh run list --repo nemarDatasets/.github --limit 5`));
+      console.log(chalk.dim("  Or run: gh run list --repo nemarDatasets/.github --limit 5"));
     },
   );
 
