@@ -2258,26 +2258,83 @@ adminCommand
 adminCommand
   .command("import-openneuro")
   .description("Import an OpenNeuro dataset into NEMAR")
-  .argument("<openneuro-id>", "OpenNeuro dataset ID (e.g., ds007262)")
-  .option("--dir <path>", "Working directory for clone (default: temp dir)")
-  .option("--skip-data", "Skip S3 data copy (metadata only)")
-  .action(async (openneuroId: string, options: { dir?: string; skipData?: boolean }) => {
-    if (!requireAuth()) return;
+  .argument("<openneuro-ids>", "OpenNeuro dataset ID(s), comma-separated (e.g., ds007262,ds007263)")
+  .option("--local", "Run import locally instead of dispatching GitHub Actions workflow")
+  .option("--dir <path>", "Working directory for local clone (requires --local)")
+  .option("--skip-data", "Skip S3 data copy, metadata only (requires --local)")
+  .action(
+    async (
+      openneuroIds: string,
+      options: { local?: boolean; dir?: string; skipData?: boolean },
+    ) => {
+      if (!requireAuth()) return;
 
-    // Lazy import to keep CLI startup fast
-    const { importOpenNeuro } = await import("../lib/import-openneuro.js");
+      const ids = openneuroIds
+        .split(",")
+        .map((id) => id.trim())
+        .filter(Boolean);
 
-    try {
-      await importOpenNeuro(openneuroId, {
-        workDir: options.dir,
-        skipData: options.skipData,
-      });
-    } catch (error) {
-      const msg = error instanceof Error ? error.message : String(error);
-      console.error(chalk.red(`\nImport failed: ${msg}`));
-      process.exit(1);
-    }
-  });
+      // Validate all IDs
+      for (const id of ids) {
+        if (!/^ds\d{6}$/.test(id)) {
+          console.error(
+            chalk.red(`Invalid OpenNeuro ID "${id}". Expected format: ds###### (e.g., ds007262)`),
+          );
+          process.exit(1);
+        }
+      }
+
+      if (options.local) {
+        if (ids.length > 1) {
+          console.error(chalk.red("--local only supports a single dataset ID"));
+          process.exit(1);
+        }
+        const { importOpenNeuro } = await import("../lib/import-openneuro.js");
+        try {
+          await importOpenNeuro(ids[0], {
+            workDir: options.dir,
+            skipData: options.skipData,
+          });
+        } catch (error) {
+          const msg = error instanceof Error ? error.message : String(error);
+          console.error(chalk.red(`\nImport failed: ${msg}`));
+          process.exit(1);
+        }
+        return;
+      }
+
+      // Default: dispatch GitHub Actions workflow on nemarDatasets/.github
+      const { runCommand } = await import("../lib/git-annex.js");
+
+      const idsStr = ids.join(",");
+      console.log(chalk.cyan(`\nDispatching OpenNeuro import workflow for: ${idsStr}\n`));
+
+      const dispatchResult = await runCommand([
+        "gh",
+        "workflow",
+        "run",
+        "onboard-openneuro.yml",
+        "--repo",
+        "nemarDatasets/.github",
+        "--field",
+        `openneuro_ids=${idsStr}`,
+      ]);
+      if (dispatchResult.exitCode !== 0) {
+        console.error(chalk.red(`Failed to dispatch workflow: ${dispatchResult.stderr.trim()}`));
+        console.error(
+          chalk.dim("Make sure gh CLI is authenticated with access to nemarDatasets org"),
+        );
+        process.exit(1);
+      }
+      console.log(chalk.green("Workflow dispatched successfully"));
+      console.log(
+        chalk.dim(
+          "  Monitor at: https://github.com/nemarDatasets/.github/actions/workflows/onboard-openneuro.yml",
+        ),
+      );
+      console.log(chalk.dim(`  Or run: gh run list --repo nemarDatasets/.github --limit 5`));
+    },
+  );
 
 // ============================================================================
 // E2E Test
