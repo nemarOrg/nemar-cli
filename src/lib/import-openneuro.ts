@@ -426,7 +426,16 @@ export async function importOpenNeuro(
   metaSpinner.succeed("Seeded .nemar/metadata.json");
 
   // Step 7: Push to nemarDatasets
+  // Pull first: CI workflow deployment (step 2b) may have pushed commits to the
+  // remote (e.g., workflow YAML files), so we need to rebase our local commits.
   const pushSpinner = ora("Pushing to nemarDatasets...").start();
+  const pullResult = await runCommand(["git", "pull", "--rebase", "origin", "main"], {
+    cwd: datasetPath,
+  });
+  if (pullResult.exitCode !== 0 && !pullResult.stderr.includes("up to date")) {
+    pushSpinner.fail(`Failed to pull remote changes: ${pullResult.stderr.trim()}`);
+    process.exit(1);
+  }
   const pushResult = await pushToGitHub(datasetPath, "origin");
   if (!pushResult.success) {
     pushSpinner.fail(`Failed to push: ${pushResult.error}`);
