@@ -2456,11 +2456,21 @@ export async function collectFileManifest(datasetPath: string): Promise<{
  * Returns a Map of key -> source S3 URL (first HTTP/S3 URL found).
  */
 export async function getAnnexWhereisAll(datasetPath: string): Promise<Map<string, string>> {
-  const result = await runCommand(["git", "annex", "whereis", "--all", "--json"], {
+  // Use "-- ." instead of "--all" to only process files in the current tree.
+  // "--all" includes orphaned keys from old git history that may have no location
+  // info, causing spurious failures (e.g., ds000117 had 718 orphan key failures).
+  const result = await runCommand(["git", "annex", "whereis", "--json", "--", "."], {
     cwd: datasetPath,
   });
-  if (result.exitCode !== 0) {
+  // whereis exits non-zero when some files can't be located. Parse whatever
+  // output we got and only fail if there's no output at all.
+  if (result.exitCode !== 0 && !result.stdout.trim()) {
     throw new Error(`git annex whereis failed: ${result.stderr.trim()}`);
+  }
+  if (result.exitCode !== 0) {
+    const failMatch = result.stderr.match(/whereis:\s*(\d+)\s*failed/);
+    const failCount = failMatch ? failMatch[1] : "some";
+    console.warn(`  Warning: ${failCount} files had no location info (continuing with available files)`);
   }
 
   const keyUrlMap = new Map<string, string>();
