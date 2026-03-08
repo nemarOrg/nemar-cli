@@ -80,26 +80,35 @@ export interface ZenodoEnv {
 /**
  * Build DataCite enrichment with ORCID matched to a BIDS author entry.
  * Matches the uploader name against the BIDS Authors list (case-insensitive substring).
+ * Always passes uploaderName/uploaderOrcid through so bidsToDataCite can add
+ * the uploader as a DataCurator contributor when they are not a BIDS author.
  */
 export function buildOrcidEnrichment(
   bidsDescription?: BidsDatasetDescription | Record<string, unknown>,
   uploaderName?: string,
   uploaderOrcid?: string,
 ): DataCiteEnrichment {
+  const enrichment: DataCiteEnrichment = {};
+  if (uploaderName) enrichment.uploaderName = uploaderName;
+  if (uploaderOrcid) enrichment.uploaderOrcid = uploaderOrcid;
+
   if (!uploaderOrcid || !bidsDescription || !uploaderName) {
-    return {};
+    return enrichment;
   }
 
   const authors = bidsDescription.Authors;
-  if (!Array.isArray(authors)) return {};
+  if (!Array.isArray(authors)) return enrichment;
 
   const authorList = authors.filter((a): a is string => typeof a === "string");
   const uploaderLower = uploaderName.toLowerCase();
 
-  const matched = authorList.find((a) => a.toLowerCase().includes(uploaderLower));
-  if (!matched) return {};
+  // Use word-boundary matching to avoid false positives (e.g., "li" matching "Elizabeth")
+  const boundary = new RegExp(`\\b${uploaderLower.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`, "i");
+  const matched = authorList.find((a) => boundary.test(a));
+  if (!matched) return enrichment;
 
-  return { authors: { [matched]: { orcid: uploaderOrcid } } };
+  enrichment.authors = { [matched]: { orcid: uploaderOrcid } };
+  return enrichment;
 }
 
 /**

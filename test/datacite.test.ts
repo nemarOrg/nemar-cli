@@ -423,6 +423,67 @@ describe("bidsToDataCite", () => {
     expect(metadata.contributors?.[0]?.name).toContain("NEMAR");
   });
 
+  test("adds uploader as DataCurator when not in BIDS Authors", () => {
+    const bids = { Name: "Test", Authors: ["Smith, John"] };
+    const metadata = bidsToDataCite("nm000104", "10.82901/NEMAR.test", bids, {
+      uploaderName: "jane",
+    });
+    const curator = metadata.contributors?.find((c) => c.contributorType === "DataCurator");
+    expect(curator).toBeDefined();
+    expect(curator?.name).toBe("jane");
+    expect(curator?.nameType).toBe("Personal");
+  });
+
+  test("does NOT add DataCurator when uploader IS a BIDS author", () => {
+    const bids = { Name: "Test", Authors: ["Doe, Jane"] };
+    const metadata = bidsToDataCite("nm000104", "10.82901/NEMAR.test", bids, {
+      uploaderName: "jane",
+    });
+    const curators = metadata.contributors?.filter((c) => c.contributorType === "DataCurator");
+    expect(curators).toHaveLength(0);
+  });
+
+  test("does NOT add DataCurator when uploaderName is absent", () => {
+    const bids = { Name: "Test", Authors: ["Doe, Jane"] };
+    const metadata = bidsToDataCite("nm000104", "10.82901/NEMAR.test", bids, {});
+    const curators = metadata.contributors?.filter((c) => c.contributorType === "DataCurator");
+    expect(curators).toHaveLength(0);
+  });
+
+  test("DataCurator includes ORCID when uploaderOrcid is set", () => {
+    const bids = { Name: "Test", Authors: ["Smith, John"] };
+    const metadata = bidsToDataCite("nm000104", "10.82901/NEMAR.test", bids, {
+      uploaderName: "jane",
+      uploaderOrcid: "0000-0002-1825-0097",
+    });
+    const curator = metadata.contributors?.find((c) => c.contributorType === "DataCurator");
+    expect(curator?.orcid).toBe("0000-0002-1825-0097");
+    const xml = buildDataCiteXml(metadata);
+    expect(xml).toContain("0000-0002-1825-0097");
+    expect(xml).toContain("nameIdentifierScheme=\"ORCID\"");
+  });
+
+  test("DataCurator appears in generated DataCite XML", () => {
+    const bids = { Name: "Test", Authors: ["Smith, John"] };
+    const metadata = bidsToDataCite("nm000104", "10.82901/NEMAR.test", bids, {
+      uploaderName: "jane",
+    });
+    const xml = buildDataCiteXml(metadata);
+    expect(xml).toContain("DataCurator");
+    expect(xml).toContain("jane");
+  });
+
+  test("DataCurator uses word-boundary matching to avoid false positives", () => {
+    const bids = { Name: "Test", Authors: ["Elizabeth, Chen"] };
+    // "li" is a substring of "Elizabeth" but should NOT match on word boundary
+    const metadata = bidsToDataCite("nm000104", "10.82901/NEMAR.test", bids, {
+      uploaderName: "li",
+    });
+    const curator = metadata.contributors?.find((c) => c.contributorType === "DataCurator");
+    expect(curator).toBeDefined();
+    expect(curator?.name).toBe("li");
+  });
+
   test("adds BIDS and neuroscience as default subjects", () => {
     const bids = { Name: "Test", Authors: ["Doe, John"] };
     const metadata = bidsToDataCite("nm000103", "10.82901/NEMAR.ABC", bids);
