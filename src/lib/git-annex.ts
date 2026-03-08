@@ -62,6 +62,9 @@ export interface UploadProgress {
  * Sets GIT_TERMINAL_PROMPT=0 to prevent git from blocking on credential
  * prompts (which causes the CLI to appear hung). Callers can override
  * via options.env.
+ *
+ * An optional `timeout` (ms) kills the subprocess if exceeded; the returned
+ * stderr will contain a timeout message and exitCode defaults to 1.
  */
 export async function runCommand(
   cmd: string[],

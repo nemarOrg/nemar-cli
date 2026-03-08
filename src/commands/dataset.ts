@@ -3469,6 +3469,10 @@ Examples:
         console.log();
         console.log("  Public datasets require changes via pull request.");
         printBranchProtectionSuggestions();
+      } else if (err.includes("terminal prompts disabled")) {
+        spinner.fail("Git push failed: authentication required");
+        console.log();
+        console.log("  Run 'nemar auth setup-ssh' to configure SSH authentication.");
       } else {
         spinner.fail("Git push failed");
         console.log(chalk.red(`  ${err}`));
