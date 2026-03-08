@@ -2452,7 +2452,7 @@ export async function collectFileManifest(datasetPath: string): Promise<{
 // =============================================================================
 
 /**
- * Get all git-annex keys and their known URLs via `git annex whereis --all --json`.
+ * Get git-annex keys and their known URLs for files in the current tree.
  * Returns a Map of key -> source S3 URL (first HTTP/S3 URL found).
  */
 export async function getAnnexWhereisAll(datasetPath: string): Promise<Map<string, string>> {
@@ -2462,15 +2462,17 @@ export async function getAnnexWhereisAll(datasetPath: string): Promise<Map<strin
   const result = await runCommand(["git", "annex", "whereis", "--json", "--", "."], {
     cwd: datasetPath,
   });
-  // whereis exits non-zero when some files can't be located. Parse whatever
-  // output we got and only fail if there's no output at all.
   if (result.exitCode !== 0 && !result.stdout.trim()) {
     throw new Error(`git annex whereis failed: ${result.stderr.trim()}`);
-  }
-  if (result.exitCode !== 0) {
+  } else if (result.exitCode !== 0) {
+    // Only tolerate the expected "whereis: N failed" pattern (files with no
+    // known location). Any other non-zero exit is an unexpected error.
     const failMatch = result.stderr.match(/whereis:\s*(\d+)\s*failed/);
-    const failCount = failMatch ? failMatch[1] : "some";
-    console.warn(`  Warning: ${failCount} files had no location info (continuing with available files)`);
+    if (failMatch) {
+      console.warn(`  Warning: ${failMatch[1]} files had no location info (continuing with available files)`);
+    } else {
+      throw new Error(`git annex whereis failed (exit ${result.exitCode}): ${result.stderr.trim()}`);
+    }
   }
 
   const keyUrlMap = new Map<string, string>();

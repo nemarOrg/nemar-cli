@@ -2284,6 +2284,11 @@ adminCommand
         }
       }
 
+      if ((options.dir || options.skipData) && !options.local) {
+        console.error(chalk.red("--dir and --skip-data require --local flag"));
+        process.exit(1);
+      }
+
       if (options.local) {
         if (ids.length > 1) {
           console.error(chalk.red("--local only supports a single dataset ID"));
