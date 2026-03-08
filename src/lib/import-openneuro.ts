@@ -284,6 +284,7 @@ export async function importOpenNeuro(
     }
 
     keyUrlMap = await getAnnexWhereisAll(datasetPath);
+
     if (keyUrlMap.size === 0) {
       whereisSpinner.warn("No annexed files found, skipping data copy");
     } else {
