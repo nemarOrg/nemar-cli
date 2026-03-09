@@ -19,6 +19,7 @@ import {
   configureGitHubRemote,
   configureS3Remote,
   getAnnexWhereisAll,
+  getCurrentBranch,
   getRemoteUuid,
   pushToGitHub,
   runCommand,
@@ -227,6 +228,23 @@ export async function importOpenNeuro(
     process.exit(1);
   }
   cloneSpinner.succeed(`Cloned ${openneuroId}`);
+
+  // Ensure local branch is "main" (OpenNeuro repos may use "master" or other names)
+  const currentBranch = await getCurrentBranch(datasetPath);
+  if (currentBranch && currentBranch !== "main") {
+    const renameResult = await runCommand(["git", "branch", "-m", currentBranch, "main"], {
+      cwd: datasetPath,
+    });
+    if (renameResult.exitCode !== 0) {
+      console.log(
+        chalk.yellow(
+          `  Warning: Could not rename branch '${currentBranch}' to 'main': ${renameResult.stderr.trim()}`,
+        ),
+      );
+    } else {
+      console.log(chalk.dim(`  Renamed branch '${currentBranch}' -> 'main'`));
+    }
+  }
 
   // Read BIDS metadata and extract OpenNeuro DOI once for reuse
   const bidsDesc = readBidsDescription(datasetPath);
