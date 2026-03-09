@@ -5,8 +5,7 @@
  * Credentials are stored per-account and the active account is tracked.
  *
  * Storage layout:
- * - Linux/macOS: ~/.config/nemar/config.json
- * - Windows: %APPDATA%/nemar/config.json
+ * - All platforms: ~/.config/nemar/config.json
  *
  * Config structure:
  * {
@@ -85,6 +84,10 @@ function migrateConfigPath(): void {
   const oldPaths: string[] = [];
   if (process.platform === "darwin") {
     oldPaths.push(join(homedir(), "Library", "Preferences", "nemar-nodejs", "config.json"));
+  }
+  if (process.platform === "win32") {
+    const appData = process.env.APPDATA || join(homedir(), "AppData", "Roaming");
+    oldPaths.push(join(appData, "nemar-nodejs", "config.json"));
   }
   // Linux default (also check on macOS in case XDG was used)
   oldPaths.push(join(homedir(), ".config", "nemar-nodejs", "config.json"));
