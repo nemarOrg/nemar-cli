@@ -337,6 +337,8 @@ nemar admin make-public       # Publish dataset (permanent)
 nemar admin delete-dataset    # Delete dataset and all resources
 nemar admin sync run          # Sync dataset metadata to nemar.org
 nemar admin sync status       # Show nemar.org sync status
+nemar admin email-preferences show    # Show email notification preferences
+nemar admin email-preferences update  # Update email notification preferences
 
 # Root-level shortcuts
 nemar login                   # Alias for auth login

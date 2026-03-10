@@ -8,6 +8,7 @@ import { zValidator } from "@hono/zod-validator";
 import { Hono } from "hono";
 import { z } from "zod";
 import {
+  getAdminEmailsForCategory,
   sendAdminNotificationEmail,
   sendKeyReadyEmail,
   sendKeyRegenerationVerificationEmail,
@@ -404,14 +405,10 @@ authRoutes.get("/verify", async (c) => {
     .bind(user.id, user.username)
     .run();
 
-  // Notify all admins about the new user needing approval
+  // Notify admins who have user_approval notifications enabled
   try {
-    const adminUsers = await db
-      .prepare("SELECT email FROM users WHERE role IN ('owner', 'admin') AND status = 'approved'")
-      .all<{ email: string }>();
-
-    if (adminUsers.results && adminUsers.results.length > 0) {
-      const adminEmails = adminUsers.results.map((a) => a.email);
+    const adminEmails = await getAdminEmailsForCategory(db, "user_approval");
+    if (adminEmails.length > 0) {
       await sendAdminNotificationEmail(
         adminEmails,
         {

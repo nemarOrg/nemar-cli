@@ -1440,3 +1440,30 @@ export async function syncDataset(datasetId: string): Promise<SyncDatasetRespons
 export async function getSyncStatus(): Promise<SyncStatusResponse> {
   return request<SyncStatusResponse>("/admin/sync/status", {}, true);
 }
+
+// ============================================================================
+// Email Preferences
+// ============================================================================
+
+export interface EmailPreferences {
+  user_approval: boolean;
+  publication_request: boolean;
+}
+
+export async function getEmailPreferences(): Promise<EmailPreferences> {
+  return request<EmailPreferences>("/admin/email-preferences", {}, true);
+}
+
+export async function updateEmailPreferences(
+  prefs: Partial<EmailPreferences>,
+): Promise<EmailPreferences> {
+  return request<EmailPreferences>(
+    "/admin/email-preferences",
+    {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(prefs),
+    },
+    true,
+  );
+}
