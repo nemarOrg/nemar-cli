@@ -102,7 +102,11 @@ function migrateConfigPath(): void {
         );
         return;
       } catch (err) {
-        console.error(`[nemar] Failed to migrate config from ${oldPath}:`, err);
+        console.error(
+          `[nemar] Failed to migrate config from ${oldPath}:`,
+          err,
+          `\n[nemar] You can manually copy ${oldPath} to ${newConfigFile}`,
+        );
       }
     }
   }

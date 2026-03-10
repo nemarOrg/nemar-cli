@@ -26,7 +26,6 @@ import {
   resolveEzidAuth,
 } from "../services/doi";
 import {
-  DEFAULT_EMAIL_PREFERENCES,
   parseEmailPreferences,
   sendKeyReadyEmail,
   sendPublicationApprovedEmail,

@@ -26,21 +26,10 @@ import { dirname, join } from "node:path";
 import { spawn } from "bun";
 import { TEST_CONFIG, sleep } from "./setup";
 
-// Cross-platform config path (matches Conf library behavior)
-// Conf uses env-paths which respects XDG_CONFIG_HOME on Linux
+// Standardized config path: ~/.config/nemar/ on all platforms
 function getConfigDir(): string {
   const home = process.env.HOME || "";
-  if (process.platform === "darwin") {
-    // macOS: ~/Library/Preferences/nemar-nodejs/
-    return join(home, "Library/Preferences/nemar-nodejs");
-  }
-  if (process.platform === "win32") {
-    // Windows: %APPDATA%/nemar/
-    return join(process.env.APPDATA || "", "nemar");
-  }
-  // Linux: $XDG_CONFIG_HOME/nemar/ or ~/.config/nemar/
-  const xdgConfig = process.env.XDG_CONFIG_HOME || join(home, ".config");
-  return join(xdgConfig, "nemar");
+  return join(home, ".config", "nemar");
 }
 
 const CONFIG_DIR = getConfigDir();

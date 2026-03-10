@@ -11,7 +11,7 @@
  * - nemar admin s3 regenerate-iam  - Regenerate AWS credentials for a user
  * - nemar admin repo public/private - Change repository visibility
  * - nemar admin ci check/add       - Manage CI workflows
- * - nemar admin doi create/info    - DOI management
+ * - nemar admin doi create/info/update/enrich - DOI management
  * - nemar admin publish list/deny/approve - Publication workflow
  * - nemar admin revert             - Revert dataset to a previous version
  * - nemar admin sync run/status    - nemar.org datapipeline sync

@@ -71,6 +71,16 @@ const createDatasetSchema = z.object({
 // Sandbox file size limit: 10MB total
 const SANDBOX_MAX_TOTAL_SIZE = 10 * 1024 * 1024;
 
+// User-facing messages for each publication block reason
+const BLOCK_MESSAGES: Record<string, string> = {
+  bids_validation_failed:
+    "BIDS validation is failing on your dataset. Please check the repository CI and fix validation errors, then re-request publication.",
+  bids_validation_pending:
+    "BIDS validation has not run yet. Please wait for CI to complete, then re-request publication.",
+  bids_validation_in_progress:
+    "BIDS validation is currently running. Please wait for it to complete, then re-request publication.",
+};
+
 /**
  * POST /datasets - Create a new dataset
  *
@@ -1348,12 +1358,19 @@ datasetRoutes.post("/:id/publish/request", authMiddleware, async (c) => {
         blockReason = "bids_validation_in_progress";
       }
     } catch (err) {
-      // CI check failure is non-fatal; proceed with request
+      // CI infrastructure failure (GitHub API outage, PAT expired, etc.)
+      // Block the request so it can be retried rather than bypassing validation
       console.error(
         `[publish-request] CI readiness check failed for ${datasetId}:`,
         err instanceof Error ? err.message : err,
       );
+      blocked = true;
+      blockReason = "bids_validation_pending";
     }
+  } else {
+    console.warn(
+      `[publish-request] Skipping CI checks for ${datasetId}: ${!repoName ? "no GitHub repo" : "no GITHUB_ADMIN_PAT"}`,
+    );
   }
 
   if (requestId) {
@@ -1385,19 +1402,11 @@ datasetRoutes.post("/:id/publish/request", authMiddleware, async (c) => {
   }
 
   if (blocked) {
-    const blockMessages: Record<string, string> = {
-      bids_validation_failed:
-        "BIDS validation is failing on your dataset. Please check the repository CI and fix validation errors, then re-request publication.",
-      bids_validation_pending:
-        "BIDS validation has not run yet. Please wait for CI to complete, then re-request publication.",
-      bids_validation_in_progress:
-        "BIDS validation is currently running. Please wait for it to complete, then re-request publication.",
-    };
     return c.json(
       {
         status: "blocked",
         block_reason: blockReason,
-        message: blockMessages[blockReason || ""] || "Publication request blocked.",
+        message: BLOCK_MESSAGES[blockReason || ""] || "Publication request blocked.",
         dataset_id: datasetId,
         ci_url: ciUrl,
       },
@@ -1497,8 +1506,7 @@ datasetRoutes.get("/:id/publish/status", authMiddleware, async (c) => {
     block_reason: request.block_reason,
     ...(request.status === "blocked" && repoName
       ? {
-          message:
-            "BIDS validation is failing. Please fix validation errors and re-request publication.",
+          message: BLOCK_MESSAGES[request.block_reason || ""] || "Publication request blocked.",
           ci_url: `https://github.com/nemarDatasets/${repoName}/actions`,
         }
       : {}),
@@ -1567,6 +1575,14 @@ datasetRoutes.post("/:id/publish/resend", authMiddleware, async (c) => {
     }
   } catch (emailError) {
     console.error("Failed to resend publication notification:", emailError);
+    return c.json(
+      {
+        error: "Failed to resend notification email",
+        message:
+          "The notification could not be sent. Please try again later or contact an administrator directly.",
+      },
+      500,
+    );
   }
 
   return c.json({

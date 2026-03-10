@@ -1,8 +1,9 @@
 /**
  * Email service using Resend API
  *
- * Handles verification emails and approval notifications.
- * Uses fetch directly for better Cloudflare Workers compatibility.
+ * Handles email notifications (verification, approval, publication, revocation)
+ * and admin email preference management.
+ * Uses fetch directly for Cloudflare Workers compatibility.
  */
 
 const FROM_EMAIL = "NEMAR <nemar@osc.earth>";
@@ -18,7 +19,7 @@ export type EmailCategory = keyof EmailPreferences;
 export const DEFAULT_EMAIL_PREFERENCES: EmailPreferences = {
   user_approval: true,
   publication_request: true,
-} as const;
+};
 
 interface ResendResponse {
   id?: string;
@@ -50,8 +51,8 @@ export function parseEmailPreferences(raw: string | null): EmailPreferences {
 
 /**
  * Get admin/owner emails filtered by notification category.
- * Returns at least one recipient if any admins exist (the first admin
- * in the list always receives emails regardless of preferences).
+ * If all admins have opted out, falls back to the first admin
+ * to ensure at least one recipient.
  */
 export async function getAdminEmailsForCategory(
   db: D1Database,
