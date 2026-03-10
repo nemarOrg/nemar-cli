@@ -16,11 +16,11 @@ import {
   type GitHubRepo,
   addCollaborator,
   applyBranchProtection,
-  ensureMainBranch,
   checkWorkflowExists,
   createRepository,
   deployWorkflows,
   enableAutoMerge,
+  ensureMainBranch,
   getFileContent,
   getWorkflowRuns,
   setRepoVisibility,
@@ -77,280 +77,286 @@ const SANDBOX_MAX_TOTAL_SIZE = 10 * 1024 * 1024;
  * Creates GitHub repo, assigns dataset ID, and returns presigned URLs for upload.
  * Uses per-user AWS credentials for scoped S3 access.
  */
-datasetRoutes.post("/", authMiddleware, cliVersionGuard, zValidator("json", createDatasetSchema), async (c) => {
-  const { name, description, files, sandbox } = c.req.valid("json");
-  const user = c.get("user");
-  const db = c.env.DB;
+datasetRoutes.post(
+  "/",
+  authMiddleware,
+  cliVersionGuard,
+  zValidator("json", createDatasetSchema),
+  async (c) => {
+    const { name, description, files, sandbox } = c.req.valid("json");
+    const user = c.get("user");
+    const db = c.env.DB;
 
-  // Check if non-sandbox upload requires sandbox training
-  if (!sandbox) {
-    const userStatus = await db
-      .prepare("SELECT sandbox_completed FROM users WHERE id = ?")
+    // Check if non-sandbox upload requires sandbox training
+    if (!sandbox) {
+      const userStatus = await db
+        .prepare("SELECT sandbox_completed FROM users WHERE id = ?")
+        .bind(user.id)
+        .first<{ sandbox_completed: number }>();
+
+      if (!userStatus?.sandbox_completed) {
+        return c.json(
+          {
+            error: "Sandbox training required",
+            message:
+              "You must complete sandbox training before uploading real datasets. Run 'nemar sandbox' to complete training.",
+          },
+          403,
+        );
+      }
+    }
+
+    // Validate sandbox file size limit
+    if (sandbox && files && files.length > 0) {
+      const totalSize = files.reduce((sum, f) => sum + f.size, 0);
+      if (totalSize > SANDBOX_MAX_TOTAL_SIZE) {
+        const sizeMB = (totalSize / (1024 * 1024)).toFixed(2);
+        const limitMB = (SANDBOX_MAX_TOTAL_SIZE / (1024 * 1024)).toFixed(0);
+        return c.json(
+          {
+            error: "Sandbox file size limit exceeded",
+            message: `Sandbox datasets are limited to ${limitMB}MB total. Your dataset is ${sizeMB}MB. Sandbox is for testing the workflow, not storing real data.`,
+            total_size: totalSize,
+            limit: SANDBOX_MAX_TOTAL_SIZE,
+          },
+          400,
+        );
+      }
+    }
+
+    // Get user's AWS credentials
+    const userCreds = await db
+      .prepare(`
+      SELECT aws_iam_username, aws_access_key_id_encrypted, aws_secret_access_key_encrypted
+      FROM users WHERE id = ?
+    `)
       .bind(user.id)
-      .first<{ sandbox_completed: number }>();
+      .first<{
+        aws_iam_username: string | null;
+        aws_access_key_id_encrypted: string | null;
+        aws_secret_access_key_encrypted: string | null;
+      }>();
 
-    if (!userStatus?.sandbox_completed) {
+    if (!userCreds?.aws_access_key_id_encrypted || !userCreds?.aws_secret_access_key_encrypted) {
       return c.json(
         {
-          error: "Sandbox training required",
-          message:
-            "You must complete sandbox training before uploading real datasets. Run 'nemar sandbox' to complete training.",
+          error: "S3 access not configured for your account",
+          message: "Please contact an administrator to set up your S3 credentials.",
         },
         403,
       );
     }
-  }
 
-  // Validate sandbox file size limit
-  if (sandbox && files && files.length > 0) {
-    const totalSize = files.reduce((sum, f) => sum + f.size, 0);
-    if (totalSize > SANDBOX_MAX_TOTAL_SIZE) {
-      const sizeMB = (totalSize / (1024 * 1024)).toFixed(2);
-      const limitMB = (SANDBOX_MAX_TOTAL_SIZE / (1024 * 1024)).toFixed(0);
-      return c.json(
-        {
-          error: "Sandbox file size limit exceeded",
-          message: `Sandbox datasets are limited to ${limitMB}MB total. Your dataset is ${sizeMB}MB. Sandbox is for testing the workflow, not storing real data.`,
-          total_size: totalSize,
-          limit: SANDBOX_MAX_TOTAL_SIZE,
-        },
-        400,
-      );
-    }
-  }
-
-  // Get user's AWS credentials
-  const userCreds = await db
-    .prepare(`
-      SELECT aws_iam_username, aws_access_key_id_encrypted, aws_secret_access_key_encrypted
-      FROM users WHERE id = ?
-    `)
-    .bind(user.id)
-    .first<{
-      aws_iam_username: string | null;
-      aws_access_key_id_encrypted: string | null;
-      aws_secret_access_key_encrypted: string | null;
-    }>();
-
-  if (!userCreds?.aws_access_key_id_encrypted || !userCreds?.aws_secret_access_key_encrypted) {
-    return c.json(
-      {
-        error: "S3 access not configured for your account",
-        message: "Please contact an administrator to set up your S3 credentials.",
-      },
-      403,
-    );
-  }
-
-  // Decrypt user's AWS credentials
-  let userAccessKeyId: string;
-  let userSecretAccessKey: string;
-  try {
-    if (!c.env.ENCRYPTION_KEY) {
-      throw new Error("ENCRYPTION_KEY not configured");
-    }
-    userAccessKeyId = await decrypt(userCreds.aws_access_key_id_encrypted, c.env.ENCRYPTION_KEY);
-    userSecretAccessKey = await decrypt(
-      userCreds.aws_secret_access_key_encrypted,
-      c.env.ENCRYPTION_KEY,
-    );
-  } catch (error) {
-    console.error(
-      "Failed to decrypt S3 credentials for user:",
-      user.id,
-      "IAM:",
-      userCreds.aws_iam_username,
-      error,
-    );
-    return c.json(
-      {
-        error: "Failed to access S3 credentials",
-        message:
-          "Your S3 credentials could not be decrypted. This may happen if your account was set up on a different environment. Please contact an administrator to regenerate your credentials.",
-      },
-      500,
-    );
-  }
-
-  // Generate dataset ID (xx000XXX for sandbox, nm000XXX for regular).
-  // There is a TOCTOU gap between ID generation (SELECT) and the INSERT
-  // below. The UNIQUE constraint on datasets.dataset_id prevents duplicates;
-  // we retry on conflict to handle the rare concurrent-creation case.
-  let datasetId: string;
-  const MAX_ID_RETRIES = 3;
-  for (let attempt = 0; ; attempt++) {
-    datasetId = await generateDatasetId(db, !!sandbox);
+    // Decrypt user's AWS credentials
+    let userAccessKeyId: string;
+    let userSecretAccessKey: string;
     try {
-      // Claim the ID early with a minimal INSERT to close the TOCTOU gap
-      await db
-        .prepare(
-          `INSERT INTO datasets (dataset_id, name, description, owner_user_id, github_repo, is_sandbox, visibility)
-           VALUES (?, ?, ?, ?, '', ?, 'private')`,
-        )
-        .bind(datasetId, name, description || null, user.id, sandbox ? 1 : 0)
-        .run();
-      break; // ID claimed successfully
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      if (attempt < MAX_ID_RETRIES - 1 && msg.includes("UNIQUE constraint failed")) {
-        continue; // Retry with a new ID
+      if (!c.env.ENCRYPTION_KEY) {
+        throw new Error("ENCRYPTION_KEY not configured");
       }
-      console.error("Failed to reserve dataset ID:", err);
-      return c.json({ error: "Failed to reserve dataset ID" }, 500);
-    }
-  }
-
-  // Create GitHub repository
-  let githubRepo: GitHubRepo;
-  try {
-    githubRepo = await createRepository(
-      datasetId,
-      `${name} - NEMAR Dataset`,
-      true, // Private - owner added as collaborator
-      c.env.GITHUB_ADMIN_PAT,
-    );
-  } catch (error) {
-    console.error("Failed to create GitHub repo:", error);
-    // Clean up the claimed dataset row
-    await db.prepare("DELETE FROM datasets WHERE dataset_id = ?").bind(datasetId).run();
-    return c.json({ error: "Failed to create GitHub repository" }, 500);
-  }
-
-  // Add dataset owner as maintainer
-  try {
-    await addCollaborator(datasetId, user.github_username, "maintain", c.env.GITHUB_ADMIN_PAT);
-  } catch (error) {
-    console.error("Failed to add owner as collaborator:", error);
-  }
-
-  // Update user's IAM policy to include this dataset prefix
-  // Skip for admins/owners - they already have full bucket access
-  if (userCreds.aws_iam_username && !hasRole(user.role, "admin")) {
-    try {
-      // Get user's current prefixes
-      const currentPermissions = await db
-        .prepare("SELECT s3_prefix FROM user_s3_permissions WHERE user_id = ?")
-        .bind(user.id)
-        .all<{ s3_prefix: string }>();
-
-      const currentPrefixes = currentPermissions.results?.map((p) => p.s3_prefix) || [];
-
-      // Update IAM policy to include new dataset
-      await grantDatasetAccess(
-        {
-          accessKeyId: c.env.AWS_ACCESS_KEY_ID,
-          secretAccessKey: c.env.AWS_SECRET_ACCESS_KEY,
-          region: c.env.AWS_REGION,
-        },
-        c.env.S3_BUCKET,
-        userCreds.aws_iam_username,
-        currentPrefixes,
-        datasetId,
+      userAccessKeyId = await decrypt(userCreds.aws_access_key_id_encrypted, c.env.ENCRYPTION_KEY);
+      userSecretAccessKey = await decrypt(
+        userCreds.aws_secret_access_key_encrypted,
+        c.env.ENCRYPTION_KEY,
       );
-
-      // Record the permission in database
-      await db
-        .prepare(`
-          INSERT INTO user_s3_permissions (user_id, s3_prefix, permission, granted_by)
-          VALUES (?, ?, 'read_write', ?)
-        `)
-        .bind(user.id, datasetId, user.id)
-        .run();
     } catch (error) {
-      console.error("Failed to update IAM policy for dataset:", datasetId, error);
+      console.error(
+        "Failed to decrypt S3 credentials for user:",
+        user.id,
+        "IAM:",
+        userCreds.aws_iam_username,
+        error,
+      );
       return c.json(
         {
-          error: "Failed to configure S3 access for dataset",
-          details: error instanceof Error ? error.message : "Unknown error",
-          dataset_id: datasetId,
-          github_repo: githubRepo.full_name,
-          note: "GitHub repository was created but S3 upload permissions could not be configured. Contact an administrator.",
+          error: "Failed to access S3 credentials",
+          message:
+            "Your S3 credentials could not be decrypted. This may happen if your account was set up on a different environment. Please contact an administrator to regenerate your credentials.",
         },
         500,
       );
     }
-  }
 
-  // NOTE: Branch protection is applied in the finalize endpoint after initial upload
-
-  // Generate presigned URLs for data files using user's credentials
-  let uploadUrls: Record<string, string> = {};
-  if (files && files.length > 0) {
-    const dataFiles = files.filter((f) => f.type === "data").map((f) => f.path);
-    if (dataFiles.length > 0) {
+    // Generate dataset ID (xx000XXX for sandbox, nm000XXX for regular).
+    // There is a TOCTOU gap between ID generation (SELECT) and the INSERT
+    // below. The UNIQUE constraint on datasets.dataset_id prevents duplicates;
+    // we retry on conflict to handle the rare concurrent-creation case.
+    let datasetId: string;
+    const MAX_ID_RETRIES = 3;
+    for (let attempt = 0; ; attempt++) {
+      datasetId = await generateDatasetId(db, !!sandbox);
       try {
-        uploadUrls = await generateDatasetUploadUrls(
-          {
-            bucket: c.env.S3_BUCKET,
-            region: c.env.AWS_REGION,
-            accessKeyId: userAccessKeyId,
-            secretAccessKey: userSecretAccessKey,
-          },
-          datasetId,
-          dataFiles,
-        );
-      } catch (error) {
-        const message = error instanceof Error ? error.message : "Unknown error";
-        if (message.includes("Invalid file path")) {
-          return c.json({ error: message }, 400);
+        // Claim the ID early with a minimal INSERT to close the TOCTOU gap
+        await db
+          .prepare(
+            `INSERT INTO datasets (dataset_id, name, description, owner_user_id, github_repo, is_sandbox, visibility)
+           VALUES (?, ?, ?, ?, '', ?, 'private')`,
+          )
+          .bind(datasetId, name, description || null, user.id, sandbox ? 1 : 0)
+          .run();
+        break; // ID claimed successfully
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        if (attempt < MAX_ID_RETRIES - 1 && msg.includes("UNIQUE constraint failed")) {
+          continue; // Retry with a new ID
         }
-        console.error("Failed to generate presigned URLs:", error);
+        console.error("Failed to reserve dataset ID:", err);
+        return c.json({ error: "Failed to reserve dataset ID" }, 500);
+      }
+    }
+
+    // Create GitHub repository
+    let githubRepo: GitHubRepo;
+    try {
+      githubRepo = await createRepository(
+        datasetId,
+        `${name} - NEMAR Dataset`,
+        true, // Private - owner added as collaborator
+        c.env.GITHUB_ADMIN_PAT,
+      );
+    } catch (error) {
+      console.error("Failed to create GitHub repo:", error);
+      // Clean up the claimed dataset row
+      await db.prepare("DELETE FROM datasets WHERE dataset_id = ?").bind(datasetId).run();
+      return c.json({ error: "Failed to create GitHub repository" }, 500);
+    }
+
+    // Add dataset owner as maintainer
+    try {
+      await addCollaborator(datasetId, user.github_username, "maintain", c.env.GITHUB_ADMIN_PAT);
+    } catch (error) {
+      console.error("Failed to add owner as collaborator:", error);
+    }
+
+    // Update user's IAM policy to include this dataset prefix
+    // Skip for admins/owners - they already have full bucket access
+    if (userCreds.aws_iam_username && !hasRole(user.role, "admin")) {
+      try {
+        // Get user's current prefixes
+        const currentPermissions = await db
+          .prepare("SELECT s3_prefix FROM user_s3_permissions WHERE user_id = ?")
+          .bind(user.id)
+          .all<{ s3_prefix: string }>();
+
+        const currentPrefixes = currentPermissions.results?.map((p) => p.s3_prefix) || [];
+
+        // Update IAM policy to include new dataset
+        await grantDatasetAccess(
+          {
+            accessKeyId: c.env.AWS_ACCESS_KEY_ID,
+            secretAccessKey: c.env.AWS_SECRET_ACCESS_KEY,
+            region: c.env.AWS_REGION,
+          },
+          c.env.S3_BUCKET,
+          userCreds.aws_iam_username,
+          currentPrefixes,
+          datasetId,
+        );
+
+        // Record the permission in database
+        await db
+          .prepare(`
+          INSERT INTO user_s3_permissions (user_id, s3_prefix, permission, granted_by)
+          VALUES (?, ?, 'read_write', ?)
+        `)
+          .bind(user.id, datasetId, user.id)
+          .run();
+      } catch (error) {
+        console.error("Failed to update IAM policy for dataset:", datasetId, error);
         return c.json(
           {
-            error: "Failed to generate upload URLs",
-            details: message,
+            error: "Failed to configure S3 access for dataset",
+            details: error instanceof Error ? error.message : "Unknown error",
             dataset_id: datasetId,
             github_repo: githubRepo.full_name,
-            note: "Dataset and GitHub repository were created, but upload URLs could not be generated.",
+            note: "GitHub repository was created but S3 upload permissions could not be configured. Contact an administrator.",
           },
           500,
         );
       }
     }
-  }
 
-  // Update the claimed dataset record with the GitHub repo info
-  await db
-    .prepare("UPDATE datasets SET github_repo = ? WHERE dataset_id = ?")
-    .bind(githubRepo.full_name, datasetId)
-    .run();
+    // NOTE: Branch protection is applied in the finalize endpoint after initial upload
 
-  // Audit log
-  await db
-    .prepare(
-      `
+    // Generate presigned URLs for data files using user's credentials
+    let uploadUrls: Record<string, string> = {};
+    if (files && files.length > 0) {
+      const dataFiles = files.filter((f) => f.type === "data").map((f) => f.path);
+      if (dataFiles.length > 0) {
+        try {
+          uploadUrls = await generateDatasetUploadUrls(
+            {
+              bucket: c.env.S3_BUCKET,
+              region: c.env.AWS_REGION,
+              accessKeyId: userAccessKeyId,
+              secretAccessKey: userSecretAccessKey,
+            },
+            datasetId,
+            dataFiles,
+          );
+        } catch (error) {
+          const message = error instanceof Error ? error.message : "Unknown error";
+          if (message.includes("Invalid file path")) {
+            return c.json({ error: message }, 400);
+          }
+          console.error("Failed to generate presigned URLs:", error);
+          return c.json(
+            {
+              error: "Failed to generate upload URLs",
+              details: message,
+              dataset_id: datasetId,
+              github_repo: githubRepo.full_name,
+              note: "Dataset and GitHub repository were created, but upload URLs could not be generated.",
+            },
+            500,
+          );
+        }
+      }
+    }
+
+    // Update the claimed dataset record with the GitHub repo info
+    await db
+      .prepare("UPDATE datasets SET github_repo = ? WHERE dataset_id = ?")
+      .bind(githubRepo.full_name, datasetId)
+      .run();
+
+    // Audit log
+    await db
+      .prepare(
+        `
     INSERT INTO audit_log (user_id, action, resource_type, resource_id, details)
     VALUES (?, 'dataset_created', 'dataset', ?, ?)
   `,
-    )
-    .bind(user.id, datasetId, JSON.stringify({ name, file_count: files?.length || 0 }))
-    .run();
+      )
+      .bind(user.id, datasetId, JSON.stringify({ name, file_count: files?.length || 0 }))
+      .run();
 
-  // Note: We no longer return AWS credentials to the CLI
-  // The CLI will use the presigned URLs for upload
-  return c.json(
-    {
-      message: "Dataset created successfully",
-      dataset: {
-        id: datasetId,
-        dataset_id: datasetId,
-        name,
-        description: description || null,
-        github_repo: githubRepo.full_name,
-        github_url: githubRepo.html_url,
-        ssh_url: githubRepo.ssh_url,
-        s3_prefix: datasetId,
+    // Note: We no longer return AWS credentials to the CLI
+    // The CLI will use the presigned URLs for upload
+    return c.json(
+      {
+        message: "Dataset created successfully",
+        dataset: {
+          id: datasetId,
+          dataset_id: datasetId,
+          name,
+          description: description || null,
+          github_repo: githubRepo.full_name,
+          github_url: githubRepo.html_url,
+          ssh_url: githubRepo.ssh_url,
+          s3_prefix: datasetId,
+        },
+        upload_urls: uploadUrls,
+        s3_config: {
+          bucket: c.env.S3_BUCKET,
+          region: c.env.AWS_REGION,
+          public_url: `https://${c.env.S3_BUCKET}.s3.${c.env.AWS_REGION}.amazonaws.com`,
+        },
       },
-      upload_urls: uploadUrls,
-      s3_config: {
-        bucket: c.env.S3_BUCKET,
-        region: c.env.AWS_REGION,
-        public_url: `https://${c.env.S3_BUCKET}.s3.${c.env.AWS_REGION}.amazonaws.com`,
-      },
-    },
-    201,
-  );
-});
+      201,
+    );
+  },
+);
 
 /**
  * GET /datasets - List datasets
@@ -909,9 +915,7 @@ datasetRoutes.post("/:id/finalize", authMiddleware, async (c) => {
     try {
       const branchResult = await ensureMainBranch(datasetId, c.env.GITHUB_ADMIN_PAT);
       if (branchResult.renamed) {
-        warnings.push(
-          `Default branch renamed from "${branchResult.previousBranch}" to "main"`,
-        );
+        warnings.push(`Default branch renamed from "${branchResult.previousBranch}" to "main"`);
       }
     } catch (error) {
       console.error(`Failed to check/rename default branch for ${datasetId}:`, error);
@@ -1258,9 +1262,18 @@ datasetRoutes.post("/:id/publish/request", authMiddleware, async (c) => {
   const db = c.env.DB;
 
   const dataset = await db
-    .prepare("SELECT id, dataset_id, owner_user_id, is_sandbox FROM datasets WHERE dataset_id = ?")
+    .prepare(
+      "SELECT id, dataset_id, owner_user_id, is_sandbox, github_repo, visibility FROM datasets WHERE dataset_id = ?",
+    )
     .bind(datasetId)
-    .first<{ id: number; dataset_id: string; owner_user_id: number; is_sandbox: number | null }>();
+    .first<{
+      id: number;
+      dataset_id: string;
+      owner_user_id: number;
+      is_sandbox: number | null;
+      github_repo: string | null;
+      visibility: string | null;
+    }>();
 
   if (!dataset) {
     return c.json({ error: "Dataset not found" }, 404);
@@ -1274,15 +1287,19 @@ datasetRoutes.post("/:id/publish/request", authMiddleware, async (c) => {
     return c.json({ error: "Cannot publish sandbox datasets" }, 400);
   }
 
-  // Check for existing active request
+  if (dataset.visibility === "public") {
+    return c.json({ error: "Dataset is already published" }, 409);
+  }
+
+  // Check for existing active request (allow re-checking blocked requests)
   const existing = await db
     .prepare(
-      "SELECT id, status FROM publication_requests WHERE dataset_id = ? AND status IN ('requested', 'approving') ORDER BY requested_at DESC LIMIT 1",
+      "SELECT id, status, block_reason FROM publication_requests WHERE dataset_id = ? AND status IN ('requested', 'approving', 'blocked') ORDER BY requested_at DESC LIMIT 1",
     )
     .bind(datasetId)
-    .first<{ id: number; status: string }>();
+    .first<{ id: number; status: string; block_reason: string | null }>();
 
-  if (existing) {
+  if (existing && existing.status !== "blocked") {
     return c.json(
       {
         error: "A publication request already exists",
@@ -1296,13 +1313,99 @@ datasetRoutes.post("/:id/publish/request", authMiddleware, async (c) => {
     );
   }
 
-  // Create publication request
-  await db
-    .prepare("INSERT INTO publication_requests (dataset_id, requested_by) VALUES (?, ?)")
-    .bind(datasetId, currentUser.id)
-    .run();
+  // For blocked requests, re-run readiness checks instead of creating a new one
+  const requestId = existing?.id;
 
-  // Notify admins
+  // Run readiness checks: deploy CI if missing, check BIDS validation
+  const pat = c.env.GITHUB_ADMIN_PAT;
+  const repoName = dataset.github_repo?.split("/")[1];
+  let blocked = false;
+  let blockReason: string | null = null;
+  const ciUrl = repoName ? `https://github.com/nemarDatasets/${repoName}/actions` : undefined;
+
+  if (repoName && pat) {
+    try {
+      // Deploy CI workflows if missing
+      const hasWorkflow = await checkWorkflowExists(
+        repoName,
+        ".github/workflows/bids-validation.yml",
+        pat,
+      );
+      if (!hasWorkflow) {
+        await deployWorkflows(repoName, pat);
+      }
+
+      // Check latest BIDS validation run
+      const runs = await getWorkflowRuns(repoName, "bids-validation.yml", pat);
+      if (runs.length === 0) {
+        blocked = true;
+        blockReason = "bids_validation_pending";
+      } else if (runs[0].conclusion === "failure") {
+        blocked = true;
+        blockReason = "bids_validation_failed";
+      } else if (runs[0].conclusion === null) {
+        blocked = true;
+        blockReason = "bids_validation_in_progress";
+      }
+    } catch (err) {
+      // CI check failure is non-fatal; proceed with request
+      console.error(
+        `[publish-request] CI readiness check failed for ${datasetId}:`,
+        err instanceof Error ? err.message : err,
+      );
+    }
+  }
+
+  if (requestId) {
+    // Update existing blocked request
+    if (blocked) {
+      await db
+        .prepare(
+          "UPDATE publication_requests SET status = 'blocked', block_reason = ?, updated_at = datetime('now') WHERE id = ?",
+        )
+        .bind(blockReason, requestId)
+        .run();
+    } else {
+      // Unblock: transition to requested
+      await db
+        .prepare(
+          "UPDATE publication_requests SET status = 'requested', block_reason = NULL, updated_at = datetime('now') WHERE id = ?",
+        )
+        .bind(requestId)
+        .run();
+    }
+  } else {
+    // Create new publication request
+    await db
+      .prepare(
+        "INSERT INTO publication_requests (dataset_id, requested_by, status, block_reason) VALUES (?, ?, ?, ?)",
+      )
+      .bind(datasetId, currentUser.id, blocked ? "blocked" : "requested", blockReason)
+      .run();
+  }
+
+  if (blocked) {
+    const blockMessages: Record<string, string> = {
+      bids_validation_failed:
+        "BIDS validation is failing on your dataset. Please check the repository CI and fix validation errors, then re-request publication.",
+      bids_validation_pending:
+        "BIDS validation has not run yet. Please wait for CI to complete, then re-request publication.",
+      bids_validation_in_progress:
+        "BIDS validation is currently running. Please wait for it to complete, then re-request publication.",
+    };
+    return c.json(
+      {
+        status: "blocked",
+        block_reason: blockReason,
+        message: blockMessages[blockReason || ""] || "Publication request blocked.",
+        dataset_id: datasetId,
+        ci_url: ciUrl,
+      },
+      422,
+    );
+  }
+
+  // Notify admins (only when not blocked)
   try {
     const admins = await db
       .prepare("SELECT email FROM users WHERE role IN ('owner', 'admin') AND status = 'approved'")
@@ -1351,9 +1454,10 @@ datasetRoutes.get("/:id/publish/status", authMiddleware, async (c) => {
 
   const request = await db
     .prepare(
-      `SELECT pr.*, u.username as requested_by_username
+      `SELECT pr.*, u.username as requested_by_username, d.github_repo
        FROM publication_requests pr
        JOIN users u ON pr.requested_by = u.id
+       JOIN datasets d ON pr.dataset_id = d.dataset_id
        WHERE pr.dataset_id = ?
        ORDER BY pr.requested_at DESC
        LIMIT 1`,
@@ -1368,10 +1472,12 @@ datasetRoutes.get("/:id/publish/status", authMiddleware, async (c) => {
       approved_at: string | null;
       denied_at: string | null;
       denied_reason: string | null;
+      block_reason: string | null;
       steps_completed: string;
       current_step: string | null;
       last_error: string | null;
       updated_at: string;
+      github_repo: string | null;
     }>();
 
   if (!request) {
@@ -1382,6 +1488,8 @@ datasetRoutes.get("/:id/publish/status", authMiddleware, async (c) => {
     });
   }
 
+  const repoName = request.github_repo?.split("/")[1];
+
   return c.json({
     dataset_id: datasetId,
     status: request.status,
@@ -1390,6 +1498,14 @@ datasetRoutes.get("/:id/publish/status", authMiddleware, async (c) => {
     approved_at: request.approved_at,
     denied_at: request.denied_at,
     denied_reason: request.denied_reason,
+    block_reason: request.block_reason,
+    ...(request.status === "blocked" && repoName
+      ? {
+          message:
+            "BIDS validation is failing. Please fix validation errors and re-request publication.",
+          ci_url: `https://github.com/nemarDatasets/${repoName}/actions`,
+        }
+      : {}),
     steps_completed: JSON.parse(request.steps_completed || "[]"),
     current_step: request.current_step,
     last_error: request.last_error,

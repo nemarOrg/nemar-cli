@@ -2680,7 +2680,7 @@ adminRoutes.post("/publish/:id/deny", zValidator("json", denySchema), async (c) 
 
   const request = await db
     .prepare(
-      "SELECT id, status, requested_by FROM publication_requests WHERE dataset_id = ? AND status IN ('requested', 'approving') ORDER BY requested_at DESC LIMIT 1",
+      "SELECT id, status, requested_by FROM publication_requests WHERE dataset_id = ? AND status IN ('requested', 'approving', 'blocked') ORDER BY requested_at DESC LIMIT 1",
     )
     .bind(datasetId)
     .first<{ id: number; status: string; requested_by: number }>();
@@ -2764,7 +2764,7 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
   // Find the publication request
   const request = await db
     .prepare(
-      "SELECT id, status, steps_completed FROM publication_requests WHERE dataset_id = ? AND status IN ('requested', 'approving') ORDER BY requested_at DESC LIMIT 1",
+      "SELECT id, status, steps_completed FROM publication_requests WHERE dataset_id = ? AND status IN ('requested', 'approving', 'blocked') ORDER BY requested_at DESC LIMIT 1",
     )
     .bind(datasetId)
     .first<{ id: number; status: string; steps_completed: string }>();
