@@ -10,7 +10,7 @@ import { z } from "zod";
 import { authMiddleware, optionalAuthMiddleware } from "../middleware/auth";
 import { cliVersionGuard } from "../middleware/cliVersion";
 import { generateDatasetId, isValidDatasetId } from "../services/datasetId";
-import { sendPublicationRequestEmail } from "../services/email";
+import { getAdminEmailsForCategory, sendPublicationRequestEmail } from "../services/email";
 import { decrypt } from "../services/encryption";
 import {
   type GitHubRepo,
@@ -1405,13 +1405,9 @@ datasetRoutes.post("/:id/publish/request", authMiddleware, async (c) => {
     );
   }
 
-  // Notify admins (only when not blocked)
+  // Notify admins who have publication_request notifications enabled
   try {
-    const admins = await db
-      .prepare("SELECT email FROM users WHERE role IN ('owner', 'admin') AND status = 'approved'")
-      .all<{ email: string }>();
-
-    const adminEmails = admins.results.map((a) => a.email);
+    const adminEmails = await getAdminEmailsForCategory(db, "publication_request");
     if (adminEmails.length > 0) {
       await sendPublicationRequestEmail(
         adminEmails,
@@ -1558,12 +1554,8 @@ datasetRoutes.post("/:id/publish/resend", authMiddleware, async (c) => {
     .bind(request.id)
     .run();
 
-  // Resend notification to admins
-  const admins = await db
-    .prepare("SELECT email FROM users WHERE role IN ('owner', 'admin') AND status = 'approved'")
-    .all<{ email: string }>();
-
-  const adminEmails = admins.results.map((a) => a.email);
+  // Resend notification to admins who have publication_request notifications enabled
+  const adminEmails = await getAdminEmailsForCategory(db, "publication_request");
   if (adminEmails.length > 0) {
     await sendPublicationRequestEmail(
       adminEmails,

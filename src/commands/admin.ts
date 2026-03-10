@@ -15,6 +15,7 @@
  * - nemar admin publish list/deny/approve - Publication workflow
  * - nemar admin revert             - Revert dataset to a previous version
  * - nemar admin sync run/status    - nemar.org datapipeline sync
+ * - nemar admin email-preferences show/update - Email notification opt-out
  */
 
 import { existsSync } from "node:fs";
@@ -26,6 +27,7 @@ import ora from "ora";
 import {
   ApiError,
   type Dataset,
+  type EmailPreferences,
   type NemarMetadataPayload,
   ORCID_REGEX,
   type StepResult,
@@ -44,6 +46,7 @@ import {
   getDataset,
   getDatasetFiles,
   getDoiInfo,
+  getEmailPreferences,
   getSyncStatus,
   listPublishRequests,
   listUsers,
@@ -53,6 +56,7 @@ import {
   submitEnrichment,
   syncDataset,
   updateDoi,
+  updateEmailPreferences,
 } from "../lib/api.js";
 import { getConfig, isAuthenticated } from "../lib/config.js";
 import {
@@ -2502,3 +2506,107 @@ syncCommand
   });
 
 adminCommand.addCommand(syncCommand);
+
+// ============================================================================
+// Email Notification Preferences
+// ============================================================================
+
+const emailPrefsCommand = new Command("email-preferences").description(
+  "Manage email notification preferences",
+);
+
+emailPrefsCommand
+  .command("show")
+  .description("Show current email notification preferences")
+  .action(async () => {
+    if (!isAuthenticated()) {
+      console.error(chalk.red("Not authenticated. Run: nemar auth login"));
+      process.exit(1);
+    }
+
+    const spinner = ora("Fetching email preferences...").start();
+    try {
+      const prefs = await getEmailPreferences();
+      spinner.succeed("Email notification preferences:");
+      console.log();
+
+      const categories: Array<{ key: keyof EmailPreferences; label: string }> = [
+        { key: "user_approval", label: "User approval notifications" },
+        { key: "publication_request", label: "Publication request notifications" },
+      ];
+
+      for (const cat of categories) {
+        const enabled = prefs[cat.key];
+        const status = enabled ? chalk.green("enabled") : chalk.dim("disabled");
+        console.log(`  ${cat.label.padEnd(40)} ${status}`);
+      }
+
+      console.log();
+      console.log(chalk.dim("  Use 'nemar admin email-preferences update' to change settings."));
+    } catch (err) {
+      spinner.fail("Failed to fetch preferences");
+      console.error(chalk.red(errorDetail(err)));
+    }
+  });
+
+emailPrefsCommand
+  .command("update")
+  .description("Update email notification preferences")
+  .option("--user-approval <bool>", "Enable/disable user approval notifications")
+  .option("--publication-request <bool>", "Enable/disable publication request notifications")
+  .option("--all <bool>", "Enable/disable all notifications")
+  .action(async (options: { userApproval?: string; publicationRequest?: string; all?: string }) => {
+    if (!isAuthenticated()) {
+      console.error(chalk.red("Not authenticated. Run: nemar auth login"));
+      process.exit(1);
+    }
+
+    function parseBool(val: string | undefined): boolean | undefined {
+      if (val === undefined) return undefined;
+      const lower = val.toLowerCase();
+      if (lower === "true" || lower === "1" || lower === "on" || lower === "yes") return true;
+      if (lower === "false" || lower === "0" || lower === "off" || lower === "no") return false;
+      console.error(chalk.red(`Invalid boolean value: "${val}". Use true/false, on/off, yes/no.`));
+      process.exit(1);
+    }
+
+    const updates: Partial<EmailPreferences> = {};
+
+    if (options.all !== undefined) {
+      const val = parseBool(options.all);
+      updates.user_approval = val;
+      updates.publication_request = val;
+    } else {
+      const ua = parseBool(options.userApproval);
+      const pr = parseBool(options.publicationRequest);
+
+      if (ua === undefined && pr === undefined) {
+        console.error(chalk.red("No preferences specified."));
+        console.log("  --user-approval <bool>        User approval notifications");
+        console.log("  --publication-request <bool>   Publication request notifications");
+        console.log("  --all <bool>                   All notifications");
+        process.exit(1);
+      }
+
+      if (ua !== undefined) updates.user_approval = ua;
+      if (pr !== undefined) updates.publication_request = pr;
+    }
+
+    const spinner = ora("Updating email preferences...").start();
+    try {
+      const result = await updateEmailPreferences(updates);
+      spinner.succeed("Email preferences updated:");
+      console.log();
+      console.log(
+        `  User approval:        ${result.user_approval ? chalk.green("enabled") : chalk.dim("disabled")}`,
+      );
+      console.log(
+        `  Publication request:   ${result.publication_request ? chalk.green("enabled") : chalk.dim("disabled")}`,
+      );
+    } catch (err) {
+      spinner.fail("Failed to update preferences");
+      console.error(chalk.red(errorDetail(err)));
+    }
+  });
+
+adminCommand.addCommand(emailPrefsCommand);

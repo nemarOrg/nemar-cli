@@ -8,10 +8,73 @@
 const FROM_EMAIL = "NEMAR <nemar@osc.earth>";
 const RESEND_API_URL = "https://api.resend.com/emails";
 
+export type EmailCategory = "user_approval" | "publication_request";
+
+export interface EmailPreferences {
+  user_approval: boolean;
+  publication_request: boolean;
+}
+
+export const DEFAULT_EMAIL_PREFERENCES: EmailPreferences = {
+  user_approval: true,
+  publication_request: true,
+};
+
 interface ResendResponse {
   id?: string;
   error?: string;
   message?: string;
+}
+
+interface AdminRow {
+  email: string;
+  email_preferences: string | null;
+}
+
+/**
+ * Parse email preferences from DB JSON string, defaulting to all enabled
+ */
+function parseEmailPreferences(raw: string | null): EmailPreferences {
+  if (!raw) return { ...DEFAULT_EMAIL_PREFERENCES };
+  try {
+    const parsed = JSON.parse(raw);
+    return {
+      user_approval: parsed.user_approval !== false,
+      publication_request: parsed.publication_request !== false,
+    };
+  } catch {
+    return { ...DEFAULT_EMAIL_PREFERENCES };
+  }
+}
+
+/**
+ * Get admin/owner emails filtered by notification category.
+ * Returns at least one recipient if any admins exist (the first admin
+ * in the list always receives emails regardless of preferences).
+ */
+export async function getAdminEmailsForCategory(
+  db: D1Database,
+  category: EmailCategory,
+): Promise<string[]> {
+  const result = await db
+    .prepare(
+      "SELECT email, email_preferences FROM users WHERE role IN ('owner', 'admin') AND status = 'approved'",
+    )
+    .all<AdminRow>();
+
+  if (!result.results || result.results.length === 0) return [];
+
+  const opted = result.results.filter((row) => {
+    const prefs = parseEmailPreferences(row.email_preferences);
+    return prefs[category];
+  });
+
+  // Safety: at least one admin must receive each category
+  if (opted.length === 0) {
+    return [result.results[0].email];
+  }
+
+  return opted.map((r) => r.email);
 }
 
 /**

@@ -4786,3 +4786,77 @@ adminRoutes.get("/sync/status", async (c) => {
     pending: results.results.filter((d) => d.nemar_sync_status === null).length,
   });
 });
+
+// ============================================================================
+// Email Notification Preferences
+// ============================================================================
+
+const emailPreferencesSchema = z.object({
+  user_approval: z.boolean().optional(),
+  publication_request: z.boolean().optional(),
+});
+
+/**
+ * GET /admin/email-preferences - Get current user's email notification preferences
+ */
+adminRoutes.get("/email-preferences", async (c) => {
+  const user = c.get("user");
+  const db = c.env.DB;
+
+  const row = await db
+    .prepare("SELECT email_preferences FROM users WHERE id = ?")
+    .bind(user.id)
+    .first<{ email_preferences: string | null }>();
+
+  const defaults = { user_approval: true, publication_request: true };
+  if (!row?.email_preferences) {
+    return c.json(defaults);
+  }
+
+  try {
+    const parsed = JSON.parse(row.email_preferences);
+    return c.json({
+      user_approval: parsed.user_approval !== false,
+      publication_request: parsed.publication_request !== false,
+    });
+  } catch {
+    return c.json(defaults);
+  }
+});
+
+/**
+ * PUT /admin/email-preferences - Update current user's email notification preferences
+ */
+adminRoutes.put("/email-preferences", zValidator("json", emailPreferencesSchema), async (c) => {
+  const user = c.get("user");
+  const db = c.env.DB;
+  const body = c.req.valid("json");
+
+  // Load existing preferences
+  const row = await db
+    .prepare("SELECT email_preferences FROM users WHERE id = ?")
+    .bind(user.id)
+    .first<{ email_preferences: string | null }>();
+
+  const current = row?.email_preferences
+    ? (() => {
+        try {
+          return JSON.parse(row.email_preferences);
+        } catch {
+          return {};
+        }
+      })()
+    : {};
+
+  const updated = {
+    user_approval: body.user_approval ?? current.user_approval ?? true,
+    publication_request: body.publication_request ?? current.publication_request ?? true,
+  };
+
+  await db
+    .prepare("UPDATE users SET email_preferences = ? WHERE id = ?")
+    .bind(JSON.stringify(updated), user.id)
+    .run();
+
+  return c.json(updated);
+});
