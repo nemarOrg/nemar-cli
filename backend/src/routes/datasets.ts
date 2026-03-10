@@ -1337,9 +1337,15 @@ datasetRoutes.post("/:id/publish/request", authMiddleware, async (c) => {
 
       // Check latest BIDS validation run
       const runs = await getWorkflowRuns(repoName, "bids-validation.yml", pat);
-      if (runs.length > 0 && runs[0].conclusion === "failure") {
+      if (runs.length === 0) {
+        blocked = true;
+        blockReason = "bids_validation_pending";
+      } else if (runs[0].conclusion === "failure") {
         blocked = true;
         blockReason = "bids_validation_failed";
+      } else if (runs[0].conclusion === null) {
+        blocked = true;
+        blockReason = "bids_validation_in_progress";
       }
     } catch (err) {
       // CI check failure is non-fatal; proceed with request
@@ -1379,14 +1385,24 @@ datasetRoutes.post("/:id/publish/request", authMiddleware, async (c) => {
   }
 
   if (blocked) {
-    return c.json({
-      status: "blocked",
-      block_reason: blockReason,
-      message:
+    const blockMessages: Record<string, string> = {
+      bids_validation_failed:
         "BIDS validation is failing on your dataset. Please check the repository CI and fix validation errors, then re-request publication.",
-      dataset_id: datasetId,
-      ci_url: ciUrl,
-    });
+      bids_validation_pending:
+        "BIDS validation has not run yet. Please wait for CI to complete, then re-request publication.",
+      bids_validation_in_progress:
+        "BIDS validation is currently running. Please wait for it to complete, then re-request publication.",
+    };
+    return c.json(
+      {
+        status: "blocked",
+        block_reason: blockReason,
+        message: blockMessages[blockReason || ""] || "Publication request blocked.",
+        dataset_id: datasetId,
+        ci_url: ciUrl,
+      },
+      422,
+    );
   }
 
   // Notify admins (only when not blocked)
