@@ -36,8 +36,10 @@ async function runCli(
     cwd: options.cwd || join(import.meta.dir, ".."),
     env: {
       ...process.env,
+      // Clear TEST_API_URL by default so the CLI uses the config's apiUrl.
+      // Only set it when explicitly passed via testApiUrl option.
+      TEST_API_URL: options.testApiUrl || "",
       ...(options.configDir ? { NEMAR_CONFIG_DIR: options.configDir } : {}),
-      ...(options.testApiUrl ? { TEST_API_URL: options.testApiUrl } : {}),
     },
     stdin: "ignore",
     stdout: "pipe",

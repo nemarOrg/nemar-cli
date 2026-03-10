@@ -18,6 +18,7 @@ import {
   cloneDataset,
   configureGitHubRemote,
   configureS3Remote,
+  ensureLocalMainBranch,
   getAnnexWhereisAll,
   getRemoteUuid,
   pushToGitHub,
@@ -227,6 +228,13 @@ export async function importOpenNeuro(
     process.exit(1);
   }
   cloneSpinner.succeed(`Cloned ${openneuroId}`);
+
+  // Ensure local branch is "main" (OpenNeuro repos may use "master" or other names)
+  const branchOk = await ensureLocalMainBranch(datasetPath, { yes: true });
+  if (!branchOk) {
+    console.error(chalk.red("Cannot proceed with import: branch must be named 'main'."));
+    process.exit(1);
+  }
 
   // Read BIDS metadata and extract OpenNeuro DOI once for reuse
   const bidsDesc = readBidsDescription(datasetPath);

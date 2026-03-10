@@ -5,8 +5,7 @@
  * Credentials are stored per-account and the active account is tracked.
  *
  * Storage layout:
- * - Linux/macOS: ~/.config/nemar/config.json
- * - Windows: %APPDATA%/nemar/config.json
+ * - All platforms: ~/.config/nemar/config.json
  *
  * Config structure:
  * {
@@ -17,10 +16,19 @@
  * }
  */
 
+import { copyFileSync, existsSync, mkdirSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
 import Conf from "conf";
 import { z } from "zod";
 
 const DEFAULT_API_URL = "https://api.osc.earth/nemar";
+
+/**
+ * Standardized config directory: ~/.config/nemar/ on all platforms.
+ * Overridden by NEMAR_CONFIG_DIR env var for test isolation.
+ */
+const CONFIG_DIR = process.env.NEMAR_CONFIG_DIR || join(homedir(), ".config", "nemar");
 
 // Per-account configuration schema
 const accountSchema = z.object({
@@ -58,7 +66,56 @@ interface StoreSchema {
   sandboxDatasetId?: string;
 }
 
-// Create configuration store
+/**
+ * Migrate config from the old OS-native path to the new standardized path.
+ * Old paths (set by `conf` with projectName "nemar"):
+ *   macOS:  ~/Library/Preferences/nemar-nodejs/config.json
+ *   Linux:  ~/.config/nemar-nodejs/config.json
+ *
+ * Only runs once: if old config exists and new config does not.
+ */
+function migrateConfigPath(): void {
+  // Skip migration when using a custom config dir (e.g., tests)
+  if (process.env.NEMAR_CONFIG_DIR) return;
+
+  const newConfigFile = join(CONFIG_DIR, "config.json");
+  if (existsSync(newConfigFile)) return;
+
+  const oldPaths: string[] = [];
+  if (process.platform === "darwin") {
+    oldPaths.push(join(homedir(), "Library", "Preferences", "nemar-nodejs", "config.json"));
+  }
+  if (process.platform === "win32") {
+    const appData = process.env.APPDATA || join(homedir(), "AppData", "Roaming");
+    oldPaths.push(join(appData, "nemar-nodejs", "config.json"));
+  }
+  // Linux default (also check on macOS in case XDG was used)
+  oldPaths.push(join(homedir(), ".config", "nemar-nodejs", "config.json"));
+
+  for (const oldPath of oldPaths) {
+    if (existsSync(oldPath)) {
+      try {
+        mkdirSync(CONFIG_DIR, { recursive: true });
+        copyFileSync(oldPath, newConfigFile);
+        console.error(
+          `[nemar] Config migrated from ${oldPath} to ${newConfigFile}\n[nemar] You can safely remove the old file.`,
+        );
+        return;
+      } catch (err) {
+        console.error(
+          `[nemar] Failed to migrate config from ${oldPath}:`,
+          err,
+          `\n[nemar] You can manually copy ${oldPath} to ${newConfigFile}`,
+        );
+      }
+    }
+  }
+}
+
+// Migrate old config path before creating the Conf instance
+migrateConfigPath();
+
+// Create configuration store with standardized path
 const config = new Conf<StoreSchema>({
   projectName: "nemar",
   schema: {
@@ -72,8 +129,7 @@ const config = new Conf<StoreSchema>({
     sandboxCompleted: { type: "boolean" },
     sandboxDatasetId: { type: "string" },
   },
-  // Support NEMAR_CONFIG_DIR env var for test isolation
-  ...(process.env.NEMAR_CONFIG_DIR ? { cwd: process.env.NEMAR_CONFIG_DIR } : {}),
+  cwd: CONFIG_DIR,
 });
 
 const ACCOUNT_FIELDS: (keyof Config)[] = [

@@ -1,17 +1,85 @@
 /**
  * Email service using Resend API
  *
- * Handles verification emails and approval notifications.
- * Uses fetch directly for better Cloudflare Workers compatibility.
+ * Handles email notifications (verification, approval, publication, revocation)
+ * and admin email preference management.
+ * Uses fetch directly for Cloudflare Workers compatibility.
  */
 
 const FROM_EMAIL = "NEMAR <nemar@osc.earth>";
 const RESEND_API_URL = "https://api.resend.com/emails";
 
+export interface EmailPreferences {
+  user_approval: boolean;
+  publication_request: boolean;
+}
+
+export type EmailCategory = keyof EmailPreferences;
+
+export const DEFAULT_EMAIL_PREFERENCES: EmailPreferences = {
+  user_approval: true,
+  publication_request: true,
+};
+
 interface ResendResponse {
   id?: string;
   error?: string;
   message?: string;
+}
+
+interface AdminRow {
+  email: string;
+  email_preferences: string | null;
+}
+
+/**
+ * Parse email preferences from DB JSON string, defaulting to all enabled
+ */
+export function parseEmailPreferences(raw: string | null): EmailPreferences {
+  if (!raw) return { ...DEFAULT_EMAIL_PREFERENCES };
+  try {
+    const parsed = JSON.parse(raw);
+    return {
+      user_approval: parsed.user_approval !== false,
+      publication_request: parsed.publication_request !== false,
+    };
+  } catch (err) {
+    console.error("Corrupt email_preferences JSON, defaulting to all enabled:", raw, err);
+    return { ...DEFAULT_EMAIL_PREFERENCES };
+  }
+}
+
+/**
+ * Get admin/owner emails filtered by notification category.
+ * If all admins have opted out, falls back to the first admin
+ * to ensure at least one recipient.
+ */
+export async function getAdminEmailsForCategory(
+  db: D1Database,
+  category: EmailCategory,
+): Promise<string[]> {
+  const result = await db
+    .prepare(
+      "SELECT email, email_preferences FROM users WHERE role IN ('owner', 'admin') AND status = 'approved'",
+    )
+    .all<AdminRow>();
+
+  if (!result.results || result.results.length === 0) return [];
+
+  const opted = result.results.filter((row) => {
+    const prefs = parseEmailPreferences(row.email_preferences);
+    return prefs[category];
+  });
+
+  // Safety: at least one admin must receive each category
+  if (opted.length === 0) {
+    console.warn(
+      `All admins opted out of "${category}" notifications. Falling back to: ${result.results[0].email}`,
+    );
+    return [result.results[0].email];
+  }
+
+  return opted.map((r) => r.email);
 }
 
 /**

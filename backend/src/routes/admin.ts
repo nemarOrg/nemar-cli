@@ -26,6 +26,7 @@ import {
   resolveEzidAuth,
 } from "../services/doi";
 import {
+  parseEmailPreferences,
   sendKeyReadyEmail,
   sendPublicationApprovedEmail,
   sendPublicationDeniedEmail,
@@ -2680,7 +2681,7 @@ adminRoutes.post("/publish/:id/deny", zValidator("json", denySchema), async (c) 
 
   const request = await db
     .prepare(
-      "SELECT id, status, requested_by FROM publication_requests WHERE dataset_id = ? AND status IN ('requested', 'approving') ORDER BY requested_at DESC LIMIT 1",
+      "SELECT id, status, requested_by FROM publication_requests WHERE dataset_id = ? AND status IN ('requested', 'approving', 'blocked') ORDER BY requested_at DESC LIMIT 1",
     )
     .bind(datasetId)
     .first<{ id: number; status: string; requested_by: number }>();
@@ -2764,7 +2765,7 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
   // Find the publication request
   const request = await db
     .prepare(
-      "SELECT id, status, steps_completed FROM publication_requests WHERE dataset_id = ? AND status IN ('requested', 'approving') ORDER BY requested_at DESC LIMIT 1",
+      "SELECT id, status, steps_completed FROM publication_requests WHERE dataset_id = ? AND status IN ('requested', 'approving', 'blocked') ORDER BY requested_at DESC LIMIT 1",
     )
     .bind(datasetId)
     .first<{ id: number; status: string; steps_completed: string }>();
@@ -3664,157 +3665,12 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
     }
   }
 
-  // Step: upload_to_zenodo - Upload release archive to Zenodo
-  // For Zenodo provider: upload to existing deposition
-  // For EZID provider: create a draft Zenodo deposition as backup archive (never published)
+  // Step: upload_to_zenodo - Disabled (EZID is now the DOI provider)
+  // The step is kept in allSteps so existing DB records with upload_to_zenodo
+  // in steps_completed remain valid.
   if (stepsToRun.includes("upload_to_zenodo")) {
-    const provider = parseDoiProvider(dataset.doi_provider);
-    if (provider === "ezid") {
-      try {
-        await startStep("upload_to_zenodo");
-
-        const vtResult = await getVersionTag("upload_to_zenodo");
-        if (vtResult instanceof Response) return vtResult;
-        const { tag } = vtResult;
-
-        const archiveData = await downloadReleaseArchive(repoName, tag, pat);
-
-        // Determine sandbox from EZID test shoulder prefix
-        const sandboxPrefix = TEST_SHOULDER.replace(/^doi:/, "").split("/")[0];
-        const isSandbox = dataset.ezid_identifier?.includes(sandboxPrefix) ?? false;
-        const zenodoToken = isSandbox ? c.env.ZENODO_SANDBOX_API_KEY : c.env.ZENODO_API_KEY;
-
-        if (!zenodoToken) {
-          console.warn(
-            `[publish] No Zenodo API key for backup archive (sandbox=${isSandbox}); skipping`,
-          );
-          await updateProgress("upload_to_zenodo");
-        } else {
-          // Check if we already have a Zenodo backup deposition
-          let depositionId: number | null = null;
-          const row = await db
-            .prepare("SELECT zenodo_concept_id FROM datasets WHERE dataset_id = ?")
-            .bind(datasetId)
-            .first<{ zenodo_concept_id: string | null }>();
-
-          if (row?.zenodo_concept_id) {
-            depositionId = Number.parseInt(row.zenodo_concept_id, 10);
-          }
-
-          if (!depositionId || Number.isNaN(depositionId)) {
-            // Create a new draft deposition for backup
-            const deposition = await createDeposition(
-              {
-                title: `${dataset.name} (NEMAR backup archive)`,
-                description: `Backup archive for NEMAR dataset ${datasetId}. Primary DOI: ${dataset.concept_doi}`,
-                creators: [{ name: "NEMAR" }],
-                keywords: ["BIDS", "neuroscience", "NEMAR", "backup"],
-                version: tag.replace(/^v/, ""),
-              },
-              zenodoToken,
-              isSandbox,
-            );
-            depositionId = deposition.id;
-
-            // Store the Zenodo deposition ID for future versions
-            await db
-              .prepare(
-                "UPDATE datasets SET zenodo_concept_id = ?, updated_at = datetime('now') WHERE dataset_id = ?",
-              )
-              .bind(String(depositionId), datasetId)
-              .run();
-          }
-
-          const deposition = await getDeposition(depositionId, zenodoToken, isSandbox);
-          if (deposition.links.bucket) {
-            const filename = `${datasetId}-${tag}.zip`;
-            const { attempts: backupUploadAttempts } = await withRetry(
-              () =>
-                uploadFile(
-                  depositionId as number,
-                  deposition.links.bucket as string,
-                  filename,
-                  archiveData,
-                  zenodoToken,
-                  isSandbox,
-                ),
-              "upload_to_zenodo (backup)",
-            );
-            await updateProgress("upload_to_zenodo", undefined, backupUploadAttempts);
-          } else {
-            console.warn(
-              `[publish] Zenodo backup deposition ${depositionId} has no bucket URL; skipping upload`,
-            );
-            await updateProgress("upload_to_zenodo");
-          }
-        }
-      } catch (err) {
-        // Zenodo backup is non-fatal for EZID datasets; log and continue
-        console.error(`[publish] Zenodo backup failed for ${datasetId} (non-fatal):`, err);
-        await updateProgress(
-          "upload_to_zenodo",
-          `Non-fatal: Zenodo backup failed: ${errorMessage(err)}`,
-        );
-      }
-    } else {
-      try {
-        await startStep("upload_to_zenodo");
-
-        const vtResult = await getVersionTag("upload_to_zenodo");
-        if (vtResult instanceof Response) return vtResult;
-        const { tag } = vtResult;
-
-        const archiveData = await downloadReleaseArchive(repoName, tag, pat);
-
-        const zenodoResult = await getZenodoConfig("upload_to_zenodo");
-        if (zenodoResult instanceof Response) return zenodoResult;
-        const { depositionId, token: zenodoToken, isSandbox } = zenodoResult;
-
-        const deposition = await getDeposition(depositionId, zenodoToken, isSandbox);
-
-        if (!deposition.links.bucket) {
-          await updateProgress("upload_to_zenodo", "No bucket URL in deposition");
-          return c.json(
-            {
-              error: "Zenodo deposition has no bucket URL",
-              step: "upload_to_zenodo",
-              steps_completed: completed,
-              step_results: stepResults,
-            },
-            500,
-          );
-        }
-
-        const filename = `${datasetId}-${tag}.zip`;
-        const { attempts: uploadAttempts } = await withRetry(
-          () =>
-            uploadFile(
-              depositionId,
-              deposition.links.bucket as string,
-              filename,
-              archiveData,
-              zenodoToken,
-              isSandbox,
-            ),
-          "upload_to_zenodo",
-        );
-
-        await updateProgress("upload_to_zenodo", undefined, uploadAttempts);
-      } catch (err) {
-        const msg = errorMessage(err);
-        console.error(`[publish] upload_to_zenodo failed for dataset ${datasetId}:`, err);
-        await updateProgress("upload_to_zenodo", msg);
-        return c.json(
-          {
-            error: `Zenodo upload failed: ${msg}`,
-            step: "upload_to_zenodo",
-            steps_completed: completed,
-            step_results: stepResults,
-          },
-          500,
-        );
-      }
-    }
+    console.log("[publish] Zenodo upload skipped (disabled)");
+    await updateProgress("upload_to_zenodo");
   }
 
   // Step: publish_doi - Publish DOI (permanent and irreversible!)
@@ -4002,12 +3858,18 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
     try {
       await startStep("sync_nemar");
 
-      const nemarUser = c.env.NEMAR_USERNAME;
-      const nemarPass = c.env.NEMAR_PASSWORD;
-      if (!nemarUser || !nemarPass) {
+      // OpenNeuro-imported datasets need alternate_id mapping before syncing
+      if (datasetId.startsWith("on")) {
+        console.log(
+          `[publish] Skipping nemar.org sync for OpenNeuro dataset ${datasetId} (alternate_id not yet supported)`,
+        );
+        await updateProgress("sync_nemar");
+      } else if (!c.env.NEMAR_USERNAME || !c.env.NEMAR_PASSWORD) {
         console.warn("[publish] NEMAR_USERNAME/PASSWORD not configured; skipping nemar.org sync");
-        await updateProgress("sync_nemar", "Credentials not configured");
+        await updateProgress("sync_nemar");
       } else {
+        const nemarUser = c.env.NEMAR_USERNAME;
+        const nemarPass = c.env.NEMAR_PASSWORD;
         // Gather source data
         const s3Cfg = getS3Config(c.env);
         const tree = await getTreeAtRef(repoName, "main", pat);
@@ -4716,9 +4578,16 @@ adminRoutes.post(
 adminRoutes.post("/datasets/:id/sync", async (c) => {
   const datasetId = c.req.param("id");
   const db = c.env.DB;
+
+  if (datasetId.startsWith("on")) {
+    return c.json(
+      { error: "OpenNeuro datasets require alternate_id mapping before nemar.org sync" },
+      400,
+    );
+  }
+
   const nemarUser = c.env.NEMAR_USERNAME;
   const nemarPass = c.env.NEMAR_PASSWORD;
-
   if (!nemarUser || !nemarPass) {
     return c.json({ error: "NEMAR_USERNAME/PASSWORD not configured" }, 500);
   }
@@ -4917,4 +4786,61 @@ adminRoutes.get("/sync/status", async (c) => {
     failed: results.results.filter((d) => d.nemar_sync_status === "failed").length,
     pending: results.results.filter((d) => d.nemar_sync_status === null).length,
   });
+});
+
+// ============================================================================
+// Email Notification Preferences
+// ============================================================================
+
+const emailPreferencesSchema = z.object({
+  user_approval: z.boolean().optional(),
+  publication_request: z.boolean().optional(),
+});
+
+/**
+ * GET /admin/email-preferences - Get current user's email notification preferences
+ */
+adminRoutes.get("/email-preferences", async (c) => {
+  const user = c.get("user");
+  const db = c.env.DB;
+
+  const row = await db
+    .prepare("SELECT email_preferences FROM users WHERE id = ?")
+    .bind(user.id)
+    .first<{ email_preferences: string | null }>();
+
+  if (!row) {
+    return c.json({ error: "User not found" }, 404);
+  }
+
+  return c.json(parseEmailPreferences(row.email_preferences));
+});
+
+/**
+ * PUT /admin/email-preferences - Update current user's email notification preferences
+ */
+adminRoutes.put("/email-preferences", zValidator("json", emailPreferencesSchema), async (c) => {
+  const user = c.get("user");
+  const db = c.env.DB;
+  const body = c.req.valid("json");
+
+  // Load existing preferences
+  const row = await db
+    .prepare("SELECT email_preferences FROM users WHERE id = ?")
+    .bind(user.id)
+    .first<{ email_preferences: string | null }>();
+
+  const current = parseEmailPreferences(row?.email_preferences ?? null);
+
+  const updated = {
+    user_approval: body.user_approval ?? current.user_approval,
+    publication_request: body.publication_request ?? current.publication_request,
+  };
+
+  await db
+    .prepare("UPDATE users SET email_preferences = ? WHERE id = ?")
+    .bind(JSON.stringify(updated), user.id)
+    .run();
+
+  return c.json(updated);
 });
