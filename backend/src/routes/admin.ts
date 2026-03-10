@@ -3857,12 +3857,18 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
     try {
       await startStep("sync_nemar");
 
-      const nemarUser = c.env.NEMAR_USERNAME;
-      const nemarPass = c.env.NEMAR_PASSWORD;
-      if (!nemarUser || !nemarPass) {
+      // OpenNeuro-imported datasets need alternate_id mapping before syncing
+      if (datasetId.startsWith("on")) {
+        console.log(
+          `[publish] Skipping nemar.org sync for OpenNeuro dataset ${datasetId} (alternate_id not yet supported)`,
+        );
+        await updateProgress("sync_nemar");
+      } else if (!c.env.NEMAR_USERNAME || !c.env.NEMAR_PASSWORD) {
         console.warn("[publish] NEMAR_USERNAME/PASSWORD not configured; skipping nemar.org sync");
-        await updateProgress("sync_nemar", "Credentials not configured");
+        await updateProgress("sync_nemar");
       } else {
+        const nemarUser = c.env.NEMAR_USERNAME;
+        const nemarPass = c.env.NEMAR_PASSWORD;
         // Gather source data
         const s3Cfg = getS3Config(c.env);
         const tree = await getTreeAtRef(repoName, "main", pat);
@@ -4571,9 +4577,16 @@ adminRoutes.post(
 adminRoutes.post("/datasets/:id/sync", async (c) => {
   const datasetId = c.req.param("id");
   const db = c.env.DB;
+
+  if (datasetId.startsWith("on")) {
+    return c.json(
+      { error: "OpenNeuro datasets require alternate_id mapping before nemar.org sync" },
+      400,
+    );
+  }
+
   const nemarUser = c.env.NEMAR_USERNAME;
   const nemarPass = c.env.NEMAR_PASSWORD;
-
   if (!nemarUser || !nemarPass) {
     return c.json({ error: "NEMAR_USERNAME/PASSWORD not configured" }, 500);
   }
