@@ -8,17 +8,17 @@
 const FROM_EMAIL = "NEMAR <nemar@osc.earth>";
 const RESEND_API_URL = "https://api.resend.com/emails";
 
-export type EmailCategory = "user_approval" | "publication_request";
-
 export interface EmailPreferences {
   user_approval: boolean;
   publication_request: boolean;
 }
 
+export type EmailCategory = keyof EmailPreferences;
+
 export const DEFAULT_EMAIL_PREFERENCES: EmailPreferences = {
   user_approval: true,
   publication_request: true,
-};
+} as const;
 
 interface ResendResponse {
   id?: string;
@@ -34,7 +34,7 @@ interface AdminRow {
 /**
  * Parse email preferences from DB JSON string, defaulting to all enabled
  */
-function parseEmailPreferences(raw: string | null): EmailPreferences {
+export function parseEmailPreferences(raw: string | null): EmailPreferences {
   if (!raw) return { ...DEFAULT_EMAIL_PREFERENCES };
   try {
     const parsed = JSON.parse(raw);
@@ -42,7 +42,8 @@ function parseEmailPreferences(raw: string | null): EmailPreferences {
       user_approval: parsed.user_approval !== false,
       publication_request: parsed.publication_request !== false,
     };
-  } catch {
+  } catch (err) {
+    console.error("Corrupt email_preferences JSON, defaulting to all enabled:", raw, err);
     return { ...DEFAULT_EMAIL_PREFERENCES };
   }
 }
@@ -71,6 +72,9 @@ export async function getAdminEmailsForCategory(
 
   // Safety: at least one admin must receive each category
   if (opted.length === 0) {
+    console.warn(
+      `All admins opted out of "${category}" notifications. Falling back to: ${result.results[0].email}`,
+    );
     return [result.results[0].email];
   }
 

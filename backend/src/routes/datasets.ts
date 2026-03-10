@@ -1555,14 +1555,18 @@ datasetRoutes.post("/:id/publish/resend", authMiddleware, async (c) => {
     .run();
 
   // Resend notification to admins who have publication_request notifications enabled
-  const adminEmails = await getAdminEmailsForCategory(db, "publication_request");
-  if (adminEmails.length > 0) {
-    await sendPublicationRequestEmail(
-      adminEmails,
-      datasetId,
-      currentUser.username,
-      c.env.RESEND_API_KEY,
-    );
+  try {
+    const adminEmails = await getAdminEmailsForCategory(db, "publication_request");
+    if (adminEmails.length > 0) {
+      await sendPublicationRequestEmail(
+        adminEmails,
+        datasetId,
+        currentUser.username,
+        c.env.RESEND_API_KEY,
+      );
+    }
+  } catch (emailError) {
+    console.error("Failed to resend publication notification:", emailError);
   }
 
   return c.json({

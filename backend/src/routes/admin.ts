@@ -26,6 +26,8 @@ import {
   resolveEzidAuth,
 } from "../services/doi";
 import {
+  DEFAULT_EMAIL_PREFERENCES,
+  parseEmailPreferences,
   sendKeyReadyEmail,
   sendPublicationApprovedEmail,
   sendPublicationDeniedEmail,
@@ -4808,20 +4810,11 @@ adminRoutes.get("/email-preferences", async (c) => {
     .bind(user.id)
     .first<{ email_preferences: string | null }>();
 
-  const defaults = { user_approval: true, publication_request: true };
-  if (!row?.email_preferences) {
-    return c.json(defaults);
+  if (!row) {
+    return c.json({ error: "User not found" }, 404);
   }
 
-  try {
-    const parsed = JSON.parse(row.email_preferences);
-    return c.json({
-      user_approval: parsed.user_approval !== false,
-      publication_request: parsed.publication_request !== false,
-    });
-  } catch {
-    return c.json(defaults);
-  }
+  return c.json(parseEmailPreferences(row.email_preferences));
 });
 
 /**
@@ -4838,19 +4831,11 @@ adminRoutes.put("/email-preferences", zValidator("json", emailPreferencesSchema)
     .bind(user.id)
     .first<{ email_preferences: string | null }>();
 
-  const current = row?.email_preferences
-    ? (() => {
-        try {
-          return JSON.parse(row.email_preferences);
-        } catch {
-          return {};
-        }
-      })()
-    : {};
+  const current = parseEmailPreferences(row?.email_preferences ?? null);
 
   const updated = {
-    user_approval: body.user_approval ?? current.user_approval ?? true,
-    publication_request: body.publication_request ?? current.publication_request ?? true,
+    user_approval: body.user_approval ?? current.user_approval,
+    publication_request: body.publication_request ?? current.publication_request,
   };
 
   await db
