@@ -71,7 +71,7 @@ S3_BASE_URL="https://nemar.s3.${S3_REGION}.amazonaws.com"
 # Git-annex largefiles configuration
 # Annex data files by extension or size, but NEVER annex metadata (TSV, JSON,
 # MD, txt, etc.) - they must stay in git for BIDS validation. tsv.gz IS annexed.
-ANNEX_LARGEFILES="(include=*.edf or include=*.bdf or include=*.set or largerthan=100kb) and exclude=*.tsv and exclude=*.json and exclude=*.md and exclude=*.txt and exclude=*.yml and exclude=*.yaml and exclude=README* and exclude=LICENSE* and exclude=CHANGES* and exclude=.bidsignore and exclude=.gitignore"
+ANNEX_LARGEFILES="(include=*.edf or include=*.bdf or include=*.set or include=*.fif or include=*.vhdr or include=*.eeg or include=*.cnt or include=*.fdt or largerthan=100kb) and exclude=*.tsv and exclude=*.json and exclude=*.md and exclude=*.txt and exclude=*.yml and exclude=*.yaml and exclude=README* and exclude=LICENSE* and exclude=CHANGES* and exclude=.bidsignore and exclude=.gitignore"
 
 # Colors for output
 RED='\033[0;31m'

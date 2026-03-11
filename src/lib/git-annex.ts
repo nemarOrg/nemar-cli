@@ -448,12 +448,29 @@ export async function configureLargefiles(
   path: string,
   pattern?: string,
 ): Promise<{ success: boolean; error?: string }> {
-  // Default pattern: annex large data files, but NEVER annex metadata files
-  // (TSV, JSON, MD, txt, etc.) regardless of size. Metadata must stay in git
-  // for BIDS validation and GitHub readability. Note: tsv.gz IS annexed since
-  // it's compressed data.
-  const defaultPattern =
-    "(include=*.edf or include=*.bdf or include=*.set or include=*.fif or include=*.vhdr or include=*.eeg or include=*.cnt or include=*.fdt or largerthan=100kb) and exclude=*.tsv and exclude=*.json and exclude=*.md and exclude=*.txt and exclude=*.yml and exclude=*.yaml and exclude=README* and exclude=LICENSE* and exclude=CHANGES* and exclude=.bidsignore and exclude=.gitignore";
+  // Annex large data files, but NEVER annex metadata files regardless of size.
+  // Metadata must stay in git for BIDS validation and GitHub readability.
+  // Note: exclude=*.tsv does not match *.tsv.gz (glob is exact), so compressed
+  // data is correctly annexed.
+  // Keep in sync with: scripts/nemar-restore-dataset.sh ANNEX_LARGEFILES
+  const DATA_EXTENSIONS = ["*.edf", "*.bdf", "*.set", "*.fif", "*.vhdr", "*.eeg", "*.cnt", "*.fdt"];
+  const METADATA_EXCLUSIONS = [
+    "*.tsv",
+    "*.json",
+    "*.md",
+    "*.txt",
+    "*.yml",
+    "*.yaml",
+    "README*",
+    "LICENSE*",
+    "CHANGES*",
+    ".bidsignore",
+    ".gitignore",
+  ];
+
+  const includes = DATA_EXTENSIONS.map((ext) => `include=${ext}`).join(" or ");
+  const excludes = METADATA_EXCLUSIONS.map((pat) => `exclude=${pat}`).join(" and ");
+  const defaultPattern = `(${includes} or largerthan=100kb) and ${excludes}`;
 
   const largefilesPattern = pattern || defaultPattern;
 
