@@ -448,9 +448,12 @@ export async function configureLargefiles(
   path: string,
   pattern?: string,
 ): Promise<{ success: boolean; error?: string }> {
-  // Default pattern for EEG/MEG data files
+  // Default pattern: annex large data files, but NEVER annex metadata files
+  // (TSV, JSON, MD, txt, etc.) regardless of size. Metadata must stay in git
+  // for BIDS validation and GitHub readability. Note: tsv.gz IS annexed since
+  // it's compressed data.
   const defaultPattern =
-    "include=*.edf or include=*.bdf or include=*.set or include=*.fif or include=*.vhdr or include=*.eeg or include=*.cnt or include=*.fdt or largerthan=100kb";
+    "(include=*.edf or include=*.bdf or include=*.set or include=*.fif or include=*.vhdr or include=*.eeg or include=*.cnt or include=*.fdt or largerthan=100kb) and exclude=*.tsv and exclude=*.json and exclude=*.md and exclude=*.txt and exclude=*.yml and exclude=*.yaml and exclude=README* and exclude=LICENSE* and exclude=CHANGES* and exclude=.bidsignore and exclude=.gitignore";
 
   const largefilesPattern = pattern || defaultPattern;
 
