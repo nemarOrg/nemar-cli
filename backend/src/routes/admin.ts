@@ -9,6 +9,7 @@ import { Hono } from "hono";
 import { z } from "zod";
 import { adminMiddleware, authMiddleware, ownerMiddleware } from "../middleware/auth";
 
+import { getBroadcastRecipients, sendBroadcast } from "../services/broadcast";
 import {
   type DataCiteEnrichment,
   bidsToDataCite,
@@ -63,6 +64,7 @@ import {
 import { generateIamUsername, revokeUserIamAccess, setupUserIamAccess } from "../services/iam";
 import { generateManifest } from "../services/manifest";
 import { syncDatasetToNemar } from "../services/nemar-sync";
+import { createNotice, deleteNotice, listAllNotices } from "../services/notices";
 import {
   errorMessage,
   extractRepoName,
@@ -4795,6 +4797,7 @@ adminRoutes.get("/sync/status", async (c) => {
 const emailPreferencesSchema = z.object({
   user_approval: z.boolean().optional(),
   publication_request: z.boolean().optional(),
+  announcements: z.boolean().optional(),
 });
 
 /**
@@ -4835,6 +4838,7 @@ adminRoutes.put("/email-preferences", zValidator("json", emailPreferencesSchema)
   const updated = {
     user_approval: body.user_approval ?? current.user_approval,
     publication_request: body.publication_request ?? current.publication_request,
+    announcements: body.announcements ?? current.announcements,
   };
 
   await db
@@ -4843,4 +4847,100 @@ adminRoutes.put("/email-preferences", zValidator("json", emailPreferencesSchema)
     .run();
 
   return c.json(updated);
+});
+
+// ============================================================================
+// Notices
+// ============================================================================
+
+/**
+ * GET /admin/notices - List all notices (including expired)
+ */
+adminRoutes.get("/notices", async (c) => {
+  const db = c.env.DB;
+  const notices = await listAllNotices(db);
+  return c.json({ notices });
+});
+
+const createNoticeSchema = z.object({
+  message: z.string().min(1).max(1000),
+  level: z.enum(["info", "warning", "critical"]).default("info"),
+  scope: z.enum(["all", "admins", "members"]).default("all"),
+  expires_at: z.string().datetime({ offset: true }).optional(),
+});
+
+/**
+ * POST /admin/notices - Create a notice
+ */
+adminRoutes.post("/notices", zValidator("json", createNoticeSchema), async (c) => {
+  const user = c.get("user");
+  const db = c.env.DB;
+  const body = c.req.valid("json");
+
+  const notice = await createNotice(db, body, user.id);
+  return c.json(notice, 201);
+});
+
+/**
+ * DELETE /admin/notices/:id - Delete a notice
+ */
+adminRoutes.delete("/notices/:id", async (c) => {
+  const db = c.env.DB;
+  const id = Number.parseInt(c.req.param("id"), 10);
+
+  if (Number.isNaN(id)) {
+    return c.json({ error: "Invalid notice ID" }, 400);
+  }
+
+  const deleted = await deleteNotice(db, id);
+  if (!deleted) {
+    return c.json({ error: "Notice not found" }, 404);
+  }
+
+  return c.json({ message: "Notice deleted" });
+});
+
+// ============================================================================
+// Broadcast Emails
+// ============================================================================
+
+const broadcastSchema = z.object({
+  to: z.enum(["all", "admins", "members"]),
+  subject: z.string().min(1).max(200),
+  body: z.string().min(1).max(10000),
+  dry_run: z.boolean().optional().default(false),
+});
+
+/**
+ * POST /admin/notify - Send broadcast email to user group
+ */
+adminRoutes.post("/notify", zValidator("json", broadcastSchema), async (c) => {
+  const user = c.get("user");
+  const db = c.env.DB;
+  const body = c.req.valid("json");
+
+  const recipients = await getBroadcastRecipients(db, body.to);
+
+  if (recipients.length === 0) {
+    return c.json({ error: "No recipients match the selected group" }, 404);
+  }
+
+  if (body.dry_run) {
+    return c.json({
+      dry_run: true,
+      recipient_group: body.to,
+      recipient_count: recipients.length,
+      recipients,
+    });
+  }
+
+  const result = await sendBroadcast(db, c.env.RESEND_API_KEY, {
+    sentById: user.id,
+    group: body.to,
+    subject: body.subject,
+    bodyMarkdown: body.body,
+    recipients,
+  });
+
+  return c.json(result);
 });

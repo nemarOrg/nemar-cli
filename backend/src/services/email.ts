@@ -12,6 +12,7 @@ const RESEND_API_URL = "https://api.resend.com/emails";
 export interface EmailPreferences {
   user_approval: boolean;
   publication_request: boolean;
+  announcements: boolean;
 }
 
 export type EmailCategory = keyof EmailPreferences;
@@ -19,6 +20,7 @@ export type EmailCategory = keyof EmailPreferences;
 export const DEFAULT_EMAIL_PREFERENCES: EmailPreferences = {
   user_approval: true,
   publication_request: true,
+  announcements: true,
 };
 
 interface ResendResponse {
@@ -42,6 +44,7 @@ export function parseEmailPreferences(raw: string | null): EmailPreferences {
     return {
       user_approval: parsed.user_approval !== false,
       publication_request: parsed.publication_request !== false,
+      announcements: parsed.announcements !== false,
     };
   } catch (err) {
     console.error("Corrupt email_preferences JSON, defaulting to all enabled:", raw, err);
