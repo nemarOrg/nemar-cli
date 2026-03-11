@@ -85,9 +85,14 @@ api.get("/", (c) => {
 
 // Public notices endpoint (uses optional auth to filter by role)
 api.get("/notices", optionalAuthMiddleware, async (c) => {
-  const user = c.get("user");
-  const notices = await getActiveNotices(c.env.DB, user?.role);
-  return c.json({ notices });
+  try {
+    const user = c.get("user");
+    const notices = await getActiveNotices(c.env.DB, user?.role);
+    return c.json({ notices });
+  } catch (err) {
+    console.error("[notices] Failed to fetch active notices:", err);
+    return c.json({ notices: [] });
+  }
 });
 
 // Mount route handlers

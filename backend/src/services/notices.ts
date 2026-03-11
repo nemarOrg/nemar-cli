@@ -16,15 +16,6 @@ export interface Notice {
   expires_at: string | null;
 }
 
-interface NoticeRow {
-  id: number;
-  message: string;
-  level: string;
-  scope: string;
-  created_at: string;
-  expires_at: string | null;
-}
-
 /**
  * Get active (non-expired) notices visible to a given role.
  * Unauthenticated callers only see "all"-scoped notices.
@@ -46,9 +37,9 @@ export async function getActiveNotices(db: D1Database, userRole?: UserRole): Pro
          created_at DESC`,
     )
     .bind(...scopes)
-    .all<NoticeRow>();
+    .all<Notice>();
 
-  return (result.results || []) as Notice[];
+  return result.results || [];
 }
 
 /**
@@ -61,9 +52,9 @@ export async function listAllNotices(db: D1Database): Promise<Notice[]> {
        FROM notices
        ORDER BY created_at DESC`,
     )
-    .all<NoticeRow>();
+    .all<Notice>();
 
-  return (result.results || []) as Notice[];
+  return result.results || [];
 }
 
 /**
@@ -86,10 +77,10 @@ export async function createNotice(
        RETURNING id, message, level, scope, created_at, expires_at`,
     )
     .bind(data.message, data.level, data.scope, createdById, data.expires_at || null)
-    .first<NoticeRow>();
+    .first<Notice>();
 
   if (!result) throw new Error("Failed to create notice");
-  return result as Notice;
+  return result;
 }
 
 /**

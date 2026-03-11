@@ -40,7 +40,12 @@ function readCache(): UpdateCache | null {
     const data = JSON.parse(raw) as UpdateCache;
     if (typeof data.checkedAt !== "number" || typeof data.latestVersion !== "string") return null;
     return data;
-  } catch {
+  } catch (err) {
+    if (process.env.VERBOSE) {
+      process.stderr.write(
+        `[update-check] Cache read failed: ${err instanceof Error ? err.message : err}\n`,
+      );
+    }
     return null;
   }
 }
@@ -55,7 +60,13 @@ function refreshCacheInBackground(): void {
       const cache: UpdateCache = { checkedAt: Date.now(), latestVersion: version };
       writeFileSync(CACHE_FILE, JSON.stringify(cache));
     })
-    .catch(() => {});
+    .catch((err) => {
+      if (process.env.VERBOSE) {
+        process.stderr.write(
+          `[update-check] Refresh failed: ${err instanceof Error ? err.message : err}\n`,
+        );
+      }
+    });
 }
 
 function detectInstallMethod(): "bunx" | "bun" {

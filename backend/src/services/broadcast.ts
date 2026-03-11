@@ -244,6 +244,7 @@ export async function sendBroadcast(
           failedRecipients.push(...chunk.slice(result.data.length));
         }
       } else {
+        console.warn("[broadcast] Resend response missing data array, assuming success for chunk");
         totalSent += chunk.length;
       }
     } catch (error) {
@@ -269,6 +270,14 @@ export async function sendBroadcast(
       JSON.stringify(failedRecipients),
     )
     .first<{ id: number }>();
+
+  if (!auditResult?.id) {
+    console.error("[broadcast] Audit record not created; emails were sent but not logged", {
+      group: params.group,
+      subject: params.subject,
+      recipientCount: totalSent,
+    });
+  }
 
   return {
     broadcast_id: auditResult?.id ?? 0,

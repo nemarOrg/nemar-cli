@@ -38,8 +38,11 @@ export async function fetchAndDisplayNotices(): Promise<void> {
         dismissNotices(infoDismissals);
       }
     }
-  } catch {
-    // Notice fetch failures should never block the CLI
+  } catch (err) {
+    // Notice failures must never block the CLI
+    if (process.env.VERBOSE) {
+      process.stderr.write(`[notices] ${err instanceof Error ? err.message : err}\n`);
+    }
   }
 }
 

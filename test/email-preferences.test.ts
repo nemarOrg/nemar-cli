@@ -31,9 +31,9 @@ describe("parseEmailPreferences", () => {
 
   test("valid JSON with all disabled", () => {
     const result = parseEmailPreferences(
-      JSON.stringify({ user_approval: false, publication_request: false, announcements: true }),
+      JSON.stringify({ user_approval: false, publication_request: false, announcements: false }),
     );
-    expect(result).toEqual({ user_approval: false, publication_request: false, announcements: true });
+    expect(result).toEqual({ user_approval: false, publication_request: false, announcements: false });
   });
 
   test("missing fields default to true", () => {

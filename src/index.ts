@@ -116,23 +116,12 @@ configureColorHelp(program);
 
 // CLI update check (synchronous cache read, background refresh)
 const pendingUpdate = initUpdateCheck();
-let updateBannerPrinted = false;
 
 if (pendingUpdate) {
-  program.hook("postAction", () => {
-    if (!updateBannerPrinted) {
-      updateBannerPrinted = true;
-      printUpdateBanner(pendingUpdate);
-    }
-  });
-
+  // printUpdateBanner is internally idempotent (prints once per process)
+  program.hook("postAction", () => printUpdateBanner(pendingUpdate));
   // Fallback: postAction does not fire for --help / --version
-  process.on("exit", () => {
-    if (!updateBannerPrinted) {
-      updateBannerPrinted = true;
-      printUpdateBanner(pendingUpdate);
-    }
-  });
+  process.on("exit", () => printUpdateBanner(pendingUpdate));
 }
 
 // Display system notices before command execution
@@ -141,4 +130,7 @@ program.hook("preAction", async () => {
 });
 
 // Parse arguments
-program.parseAsync();
+program.parseAsync().catch((err) => {
+  console.error(err.message || err);
+  process.exit(1);
+});
