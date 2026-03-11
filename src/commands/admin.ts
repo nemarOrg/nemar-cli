@@ -16,9 +16,11 @@
  * - nemar admin revert             - Revert dataset to a previous version
  * - nemar admin sync run/status    - nemar.org datapipeline sync
  * - nemar admin email-preferences show/update - Email notification opt-out
+ * - nemar admin notice list/set/clear - System notice management
+ * - nemar admin notify              - Send broadcast email to users
  */
 
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import chalk from "chalk";
 import { Command } from "commander";
@@ -38,7 +40,9 @@ import {
   changeUserRole,
   changeVisibility,
   createConceptDoi,
+  createNotice,
   deleteDataset,
+  deleteNotice,
   denyPublication,
   errorDetail,
   finalizeDataset,
@@ -48,11 +52,13 @@ import {
   getDoiInfo,
   getEmailPreferences,
   getSyncStatus,
+  listAdminNotices,
   listPublishRequests,
   listUsers,
   publishDataset,
   regenerateUserIam,
   revokeUser,
+  sendBroadcast,
   submitEnrichment,
   syncDataset,
   updateDoi,
@@ -2533,6 +2539,7 @@ emailPrefsCommand
       const categories: Array<{ key: keyof EmailPreferences; label: string }> = [
         { key: "user_approval", label: "User approval notifications" },
         { key: "publication_request", label: "Publication request notifications" },
+        { key: "announcements", label: "Announcement emails" },
       ];
 
       for (const cat of categories) {
@@ -2554,59 +2561,324 @@ emailPrefsCommand
   .description("Update email notification preferences")
   .option("--user-approval <bool>", "Enable/disable user approval notifications")
   .option("--publication-request <bool>", "Enable/disable publication request notifications")
+  .option("--announcements <bool>", "Enable/disable announcement emails")
   .option("--all <bool>", "Enable/disable all notifications")
-  .action(async (options: { userApproval?: string; publicationRequest?: string; all?: string }) => {
+  .action(
+    async (options: {
+      userApproval?: string;
+      publicationRequest?: string;
+      announcements?: string;
+      all?: string;
+    }) => {
+      if (!isAuthenticated()) {
+        console.error(chalk.red("Not authenticated. Run: nemar auth login"));
+        process.exit(1);
+      }
+
+      function parseBool(val: string | undefined): boolean | undefined {
+        if (val === undefined) return undefined;
+        const lower = val.toLowerCase();
+        if (lower === "true" || lower === "1" || lower === "on" || lower === "yes") return true;
+        if (lower === "false" || lower === "0" || lower === "off" || lower === "no") return false;
+        console.error(
+          chalk.red(`Invalid boolean value: "${val}". Use true/false, on/off, yes/no.`),
+        );
+        process.exit(1);
+      }
+
+      const updates: Partial<EmailPreferences> = {};
+
+      if (options.all !== undefined) {
+        const val = parseBool(options.all);
+        updates.user_approval = val;
+        updates.publication_request = val;
+        updates.announcements = val;
+      } else {
+        const ua = parseBool(options.userApproval);
+        const pr = parseBool(options.publicationRequest);
+        const ann = parseBool(options.announcements);
+
+        if (ua === undefined && pr === undefined && ann === undefined) {
+          console.error(chalk.red("No preferences specified."));
+          console.log("  --user-approval <bool>        User approval notifications");
+          console.log("  --publication-request <bool>   Publication request notifications");
+          console.log("  --announcements <bool>         Announcement emails");
+          console.log("  --all <bool>                   All notifications");
+          process.exit(1);
+        }
+
+        if (ua !== undefined) updates.user_approval = ua;
+        if (pr !== undefined) updates.publication_request = pr;
+        if (ann !== undefined) updates.announcements = ann;
+      }
+
+      const spinner = ora("Updating email preferences...").start();
+      try {
+        const result = await updateEmailPreferences(updates);
+        spinner.succeed("Email preferences updated:");
+        console.log();
+        console.log(
+          `  User approval:        ${result.user_approval ? chalk.green("enabled") : chalk.dim("disabled")}`,
+        );
+        console.log(
+          `  Publication request:   ${result.publication_request ? chalk.green("enabled") : chalk.dim("disabled")}`,
+        );
+        console.log(
+          `  Announcements:         ${result.announcements ? chalk.green("enabled") : chalk.dim("disabled")}`,
+        );
+      } catch (err) {
+        spinner.fail("Failed to update preferences");
+        console.error(chalk.red(errorDetail(err)));
+      }
+    },
+  );
+
+adminCommand.addCommand(emailPrefsCommand);
+
+// ============================================================================
+// System Notices
+// ============================================================================
+
+const noticeCommand = new Command("notice").description(
+  "Manage system notices displayed to CLI users",
+);
+
+noticeCommand
+  .command("list")
+  .description("List all notices (including expired)")
+  .action(async () => {
     if (!isAuthenticated()) {
       console.error(chalk.red("Not authenticated. Run: nemar auth login"));
       process.exit(1);
     }
 
-    function parseBool(val: string | undefined): boolean | undefined {
-      if (val === undefined) return undefined;
-      const lower = val.toLowerCase();
-      if (lower === "true" || lower === "1" || lower === "on" || lower === "yes") return true;
-      if (lower === "false" || lower === "0" || lower === "off" || lower === "no") return false;
-      console.error(chalk.red(`Invalid boolean value: "${val}". Use true/false, on/off, yes/no.`));
-      process.exit(1);
-    }
-
-    const updates: Partial<EmailPreferences> = {};
-
-    if (options.all !== undefined) {
-      const val = parseBool(options.all);
-      updates.user_approval = val;
-      updates.publication_request = val;
-    } else {
-      const ua = parseBool(options.userApproval);
-      const pr = parseBool(options.publicationRequest);
-
-      if (ua === undefined && pr === undefined) {
-        console.error(chalk.red("No preferences specified."));
-        console.log("  --user-approval <bool>        User approval notifications");
-        console.log("  --publication-request <bool>   Publication request notifications");
-        console.log("  --all <bool>                   All notifications");
-        process.exit(1);
+    const spinner = ora("Fetching notices...").start();
+    try {
+      const { notices } = await listAdminNotices();
+      if (notices.length === 0) {
+        spinner.succeed("No notices found.");
+        return;
       }
 
-      if (ua !== undefined) updates.user_approval = ua;
-      if (pr !== undefined) updates.publication_request = pr;
-    }
-
-    const spinner = ora("Updating email preferences...").start();
-    try {
-      const result = await updateEmailPreferences(updates);
-      spinner.succeed("Email preferences updated:");
+      spinner.succeed(`${notices.length} notice(s):`);
       console.log();
-      console.log(
-        `  User approval:        ${result.user_approval ? chalk.green("enabled") : chalk.dim("disabled")}`,
-      );
-      console.log(
-        `  Publication request:   ${result.publication_request ? chalk.green("enabled") : chalk.dim("disabled")}`,
-      );
+
+      for (const notice of notices) {
+        const levelColors: Record<string, (s: string) => string> = {
+          critical: chalk.red.bold,
+          warning: chalk.yellow,
+          info: chalk.blue,
+        };
+        const colorFn = levelColors[notice.level] || chalk.white;
+        const expired =
+          notice.expires_at && new Date(notice.expires_at) < new Date()
+            ? chalk.dim(" (expired)")
+            : "";
+
+        console.log(
+          `  ${chalk.dim(`#${notice.id}`)} ${colorFn(`[${notice.level.toUpperCase()}]`)} ${chalk.dim(`scope:${notice.scope}`)}${expired}`,
+        );
+        console.log(`     ${notice.message}`);
+        console.log(`     ${chalk.dim(`Created: ${notice.created_at}`)}`);
+        if (notice.expires_at) {
+          console.log(`     ${chalk.dim(`Expires: ${notice.expires_at}`)}`);
+        }
+        console.log();
+      }
     } catch (err) {
-      spinner.fail("Failed to update preferences");
-      console.error(chalk.red(errorDetail(err)));
+      handleCommandError(err, spinner, "Failed to fetch notices");
     }
   });
 
-adminCommand.addCommand(emailPrefsCommand);
+noticeCommand
+  .command("set")
+  .description("Create a new system notice")
+  .requiredOption("-m, --message <text>", "Notice message text")
+  .option("-l, --level <level>", "Notice level: info, warning, critical", "info")
+  .option("-s, --scope <scope>", "Target scope: all, admins, members", "all")
+  .option("-e, --expires <datetime>", "Expiry datetime (ISO 8601)")
+  .action(
+    async (options: {
+      message: string;
+      level: string;
+      scope: string;
+      expires?: string;
+    }) => {
+      if (!isAuthenticated()) {
+        console.error(chalk.red("Not authenticated. Run: nemar auth login"));
+        process.exit(1);
+      }
+
+      if (!["info", "warning", "critical"].includes(options.level)) {
+        console.error(
+          chalk.red(`Invalid level: ${options.level}. Use info, warning, or critical.`),
+        );
+        process.exit(1);
+      }
+      if (!["all", "admins", "members"].includes(options.scope)) {
+        console.error(chalk.red(`Invalid scope: ${options.scope}. Use all, admins, or members.`));
+        process.exit(1);
+      }
+
+      const spinner = ora("Creating notice...").start();
+      try {
+        const notice = await createNotice({
+          message: options.message,
+          level: options.level,
+          scope: options.scope,
+          expires_at: options.expires,
+        });
+        spinner.succeed(`Notice created (ID: ${notice.id})`);
+        console.log(`  Level: ${notice.level}`);
+        console.log(`  Scope: ${notice.scope}`);
+        console.log(`  Message: ${notice.message}`);
+        if (notice.expires_at) {
+          console.log(`  Expires: ${notice.expires_at}`);
+        }
+      } catch (err) {
+        handleCommandError(err, spinner, "Failed to create notice");
+      }
+    },
+  );
+
+noticeCommand
+  .command("clear <id>")
+  .description("Delete a notice by ID")
+  .option(YES_OPTION, YES_DESCRIPTION)
+  .option(NO_OPTION, NO_DESCRIPTION)
+  .action(async (idStr: string, options: ConfirmOptions) => {
+    if (!isAuthenticated()) {
+      console.error(chalk.red("Not authenticated. Run: nemar auth login"));
+      process.exit(1);
+    }
+
+    const id = Number.parseInt(idStr, 10);
+    if (Number.isNaN(id)) {
+      console.error(chalk.red("Invalid notice ID"));
+      process.exit(1);
+    }
+
+    const confirmed = await confirm(`Delete notice #${id}?`, options, false);
+    if (!confirmed) return;
+
+    const spinner = ora("Deleting notice...").start();
+    try {
+      await deleteNotice(id);
+      spinner.succeed(`Notice #${id} deleted`);
+    } catch (err) {
+      handleCommandError(err, spinner, "Failed to delete notice");
+    }
+  });
+
+adminCommand.addCommand(noticeCommand);
+
+// ============================================================================
+// Broadcast Notifications
+// ============================================================================
+
+adminCommand
+  .command("notify")
+  .description("Send a broadcast email to users")
+  .requiredOption("--to <group>", "Recipient group: all, admins, members")
+  .requiredOption("--subject <text>", "Email subject line")
+  .option("--body <text>", "Email body (markdown)")
+  .option("--body-file <path>", "Read email body from file (markdown)")
+  .option("--dry-run", "Preview recipients without sending")
+  .option(YES_OPTION, YES_DESCRIPTION)
+  .option(NO_OPTION, NO_DESCRIPTION)
+  .action(
+    async (options: {
+      to: string;
+      subject: string;
+      body?: string;
+      bodyFile?: string;
+      dryRun?: boolean;
+      yes?: boolean;
+      no?: boolean;
+    }) => {
+      if (!isAuthenticated()) {
+        console.error(chalk.red("Not authenticated. Run: nemar auth login"));
+        process.exit(1);
+      }
+
+      if (!["all", "admins", "members"].includes(options.to)) {
+        console.error(chalk.red(`Invalid group: ${options.to}. Use all, admins, or members.`));
+        process.exit(1);
+      }
+
+      // Resolve body content
+      let body: string;
+      if (options.bodyFile) {
+        if (!existsSync(options.bodyFile)) {
+          console.error(chalk.red(`File not found: ${options.bodyFile}`));
+          process.exit(1);
+        }
+        body = readFileSync(options.bodyFile, "utf-8");
+      } else if (options.body) {
+        body = options.body;
+      } else {
+        console.error(chalk.red("Email body required. Use --body or --body-file."));
+        process.exit(1);
+      }
+
+      if (options.dryRun) {
+        const spinner = ora("Checking recipients...").start();
+        try {
+          const result = await sendBroadcast({
+            to: options.to,
+            subject: options.subject,
+            body,
+            dry_run: true,
+          });
+          if ("dry_run" in result) {
+            spinner.succeed(
+              `Dry run: ${result.recipient_count} recipient(s) in group "${result.recipient_group}"`,
+            );
+            console.log();
+            for (const email of result.recipients) {
+              console.log(`  ${email}`);
+            }
+          }
+        } catch (err) {
+          handleCommandError(err, spinner, "Failed to check recipients");
+        }
+        return;
+      }
+
+      // Preview and confirm
+      console.log(chalk.bold("Broadcast email preview:"));
+      console.log(`  To: ${chalk.cyan(options.to)}`);
+      console.log(`  Subject: ${options.subject}`);
+      console.log(`  Body: ${body.length > 100 ? `${body.substring(0, 100)}...` : body}`);
+      console.log();
+
+      const confirmed = await confirm("Send this broadcast email?", options, false);
+      if (!confirmed) return;
+
+      const spinner = ora("Sending broadcast...").start();
+      try {
+        const result = await sendBroadcast({
+          to: options.to,
+          subject: options.subject,
+          body,
+        });
+
+        if ("broadcast_id" in result) {
+          if (result.failure_count > 0) {
+            spinner.warn(
+              `Broadcast sent: ${result.recipient_count} delivered, ${result.failure_count} failed`,
+            );
+            for (const email of result.failed_recipients) {
+              console.log(chalk.red(`  Failed: ${email}`));
+            }
+          } else {
+            spinner.succeed(
+              `Broadcast sent to ${result.recipient_count} recipient(s) (ID: ${result.broadcast_id})`,
+            );
+          }
+        }
+      } catch (err) {
+        handleCommandError(err, spinner, "Failed to send broadcast");
+      }
+    },
+  );

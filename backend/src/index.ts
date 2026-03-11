@@ -12,6 +12,7 @@ import { cors } from "hono/cors";
 import { logger } from "hono/logger";
 import { secureHeaders } from "hono/secure-headers";
 
+import { optionalAuthMiddleware } from "./middleware/auth";
 import { rateLimiter } from "./middleware/rateLimit";
 import { adminRoutes } from "./routes/admin";
 import { authRoutes } from "./routes/auth";
@@ -20,6 +21,7 @@ import { sandboxRoutes } from "./routes/sandbox";
 import { userRoutes } from "./routes/users";
 import webhooks from "./routes/webhooks";
 import { deleteDatasetCascade } from "./services/deletion";
+import { getActiveNotices } from "./services/notices";
 import type { Bindings, Variables } from "./types/bindings";
 
 // Create the API app with all routes
@@ -79,6 +81,13 @@ api.get("/", (c) => {
       webhooks: "/webhooks/*",
     },
   });
+});
+
+// Public notices endpoint (uses optional auth to filter by role)
+api.get("/notices", optionalAuthMiddleware, async (c) => {
+  const user = c.get("user");
+  const notices = await getActiveNotices(c.env.DB, user?.role);
+  return c.json({ notices });
 });
 
 // Mount route handlers

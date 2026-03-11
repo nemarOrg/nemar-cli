@@ -39,6 +39,7 @@ const accountSchema = z.object({
   githubUsername: z.string().optional(),
   sandboxCompleted: z.boolean().optional(),
   sandboxDatasetId: z.string().optional(),
+  dismissedNoticeIds: z.array(z.number()).optional(),
 });
 
 export type Config = z.infer<typeof accountSchema>;
@@ -140,6 +141,7 @@ const ACCOUNT_FIELDS: (keyof Config)[] = [
   "githubUsername",
   "sandboxCompleted",
   "sandboxDatasetId",
+  "dismissedNoticeIds",
 ];
 
 /**

@@ -19,64 +19,64 @@ import { parseEmailPreferences } from "../backend/src/services/email";
 describe("parseEmailPreferences", () => {
   test("null input returns all enabled", () => {
     const result = parseEmailPreferences(null);
-    expect(result).toEqual({ user_approval: true, publication_request: true });
+    expect(result).toEqual({ user_approval: true, publication_request: true, announcements: true });
   });
 
   test("valid JSON with both fields", () => {
     const result = parseEmailPreferences(
-      JSON.stringify({ user_approval: false, publication_request: true }),
+      JSON.stringify({ user_approval: false, publication_request: true, announcements: true }),
     );
-    expect(result).toEqual({ user_approval: false, publication_request: true });
+    expect(result).toEqual({ user_approval: false, publication_request: true, announcements: true });
   });
 
   test("valid JSON with all disabled", () => {
     const result = parseEmailPreferences(
-      JSON.stringify({ user_approval: false, publication_request: false }),
+      JSON.stringify({ user_approval: false, publication_request: false, announcements: true }),
     );
-    expect(result).toEqual({ user_approval: false, publication_request: false });
+    expect(result).toEqual({ user_approval: false, publication_request: false, announcements: true });
   });
 
   test("missing fields default to true", () => {
     const result = parseEmailPreferences(JSON.stringify({}));
-    expect(result).toEqual({ user_approval: true, publication_request: true });
+    expect(result).toEqual({ user_approval: true, publication_request: true, announcements: true });
   });
 
   test("partial fields: only user_approval set", () => {
     const result = parseEmailPreferences(
       JSON.stringify({ user_approval: false }),
     );
-    expect(result).toEqual({ user_approval: false, publication_request: true });
+    expect(result).toEqual({ user_approval: false, publication_request: true, announcements: true });
   });
 
   test("partial fields: only publication_request set", () => {
     const result = parseEmailPreferences(
       JSON.stringify({ publication_request: false }),
     );
-    expect(result).toEqual({ user_approval: true, publication_request: false });
+    expect(result).toEqual({ user_approval: true, publication_request: false, announcements: true });
   });
 
   test("corrupt JSON returns all enabled", () => {
     const result = parseEmailPreferences("{not valid json");
-    expect(result).toEqual({ user_approval: true, publication_request: true });
+    expect(result).toEqual({ user_approval: true, publication_request: true, announcements: true });
   });
 
   test("empty string returns all enabled", () => {
     const result = parseEmailPreferences("");
-    expect(result).toEqual({ user_approval: true, publication_request: true });
+    expect(result).toEqual({ user_approval: true, publication_request: true, announcements: true });
   });
 
   test("extra fields are ignored", () => {
     const result = parseEmailPreferences(
       JSON.stringify({ user_approval: false, publication_request: true, unknown_field: false }),
     );
-    expect(result).toEqual({ user_approval: false, publication_request: true });
+    expect(result).toEqual({ user_approval: false, publication_request: true, announcements: true });
   });
 
   test("null values in fields default to true", () => {
     const result = parseEmailPreferences(
       JSON.stringify({ user_approval: null, publication_request: null }),
     );
-    expect(result).toEqual({ user_approval: true, publication_request: true });
+    expect(result).toEqual({ user_approval: true, publication_request: true, announcements: true });
   });
 
   test("zero values treated as false", () => {
@@ -84,7 +84,7 @@ describe("parseEmailPreferences", () => {
       JSON.stringify({ user_approval: 0, publication_request: 0 }),
     );
     // 0 !== false is true, so these default to enabled
-    expect(result).toEqual({ user_approval: true, publication_request: true });
+    expect(result).toEqual({ user_approval: true, publication_request: true, announcements: true });
   });
 });
 
