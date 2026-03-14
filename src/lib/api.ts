@@ -1448,6 +1448,7 @@ export async function getSyncStatus(): Promise<SyncStatusResponse> {
 export interface EmailPreferences {
   user_approval: boolean;
   publication_request: boolean;
+  announcements: boolean;
 }
 
 export async function getEmailPreferences(): Promise<EmailPreferences> {
@@ -1463,6 +1464,96 @@ export async function updateEmailPreferences(
       method: "PUT",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(prefs),
+    },
+    true,
+  );
+}
+
+// ============================================================================
+// Notices
+// ============================================================================
+
+export interface Notice {
+  id: number;
+  message: string;
+  level: "info" | "warning" | "critical";
+  scope: "all" | "admins" | "members";
+  created_at: string;
+  expires_at: string | null;
+}
+
+/**
+ * Get active notices for the current user's role (optional auth)
+ */
+export async function getNotices(): Promise<{ notices: Notice[] }> {
+  return request<{ notices: Notice[] }>("/notices", {}, "optional");
+}
+
+/**
+ * List all notices including expired (admin only)
+ */
+export async function listAdminNotices(): Promise<{ notices: Notice[] }> {
+  return request<{ notices: Notice[] }>("/admin/notices", {}, true);
+}
+
+/**
+ * Create a notice (admin only)
+ */
+export async function createNotice(data: {
+  message: string;
+  level?: string;
+  scope?: string;
+  expires_at?: string;
+}): Promise<Notice> {
+  return request<Notice>(
+    "/admin/notices",
+    {
+      method: "POST",
+      body: JSON.stringify(data),
+    },
+    true,
+  );
+}
+
+/**
+ * Delete a notice (admin only)
+ */
+export async function deleteNotice(id: number): Promise<{ message: string }> {
+  return request<{ message: string }>(`/admin/notices/${id}`, { method: "DELETE" }, true);
+}
+
+// ============================================================================
+// Broadcast
+// ============================================================================
+
+export interface BroadcastResponse {
+  broadcast_id: number;
+  recipient_count: number;
+  failure_count: number;
+  failed_recipients: string[];
+}
+
+export interface BroadcastDryRunResponse {
+  dry_run: true;
+  recipient_group: string;
+  recipient_count: number;
+  recipients: string[];
+}
+
+/**
+ * Send broadcast email to user group (admin only)
+ */
+export async function sendBroadcast(data: {
+  to: string;
+  subject: string;
+  body: string;
+  dry_run?: boolean;
+}): Promise<BroadcastResponse | BroadcastDryRunResponse> {
+  return request<BroadcastResponse | BroadcastDryRunResponse>(
+    "/admin/notify",
+    {
+      method: "POST",
+      body: JSON.stringify(data),
     },
     true,
   );

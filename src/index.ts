@@ -28,6 +28,8 @@ import {
 import { datasetCommand } from "./commands/dataset.js";
 import { sandboxCommand } from "./commands/sandbox.js";
 import { NO_DESCRIPTION, NO_OPTION, YES_DESCRIPTION, YES_OPTION } from "./lib/confirm.js";
+import { fetchAndDisplayNotices } from "./lib/notices.js";
+import { initUpdateCheck, printUpdateBanner } from "./lib/update-check.js";
 import { version } from "./lib/version.js";
 
 const program = new Command();
@@ -112,5 +114,23 @@ program
 // Apply color formatting to all commands (must be after addCommand calls)
 configureColorHelp(program);
 
+// CLI update check (synchronous cache read, background refresh)
+const pendingUpdate = initUpdateCheck();
+
+if (pendingUpdate) {
+  // printUpdateBanner is internally idempotent (prints once per process)
+  program.hook("postAction", () => printUpdateBanner(pendingUpdate));
+  // Fallback: postAction does not fire for --help / --version
+  process.on("exit", () => printUpdateBanner(pendingUpdate));
+}
+
+// Display system notices before command execution
+program.hook("preAction", async () => {
+  await fetchAndDisplayNotices();
+});
+
 // Parse arguments
-program.parse();
+program.parseAsync().catch((err) => {
+  console.error(err.message || err);
+  process.exit(1);
+});

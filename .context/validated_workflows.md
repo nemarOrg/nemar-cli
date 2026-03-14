@@ -478,7 +478,7 @@ For the full workflow (combining Prototypes 1 and 3):
 1. **Git-annex largefiles configuration is critical**
    - By default, git-annex tracks ALL files including workflow YAML
    - GitHub can't read workflow files stored as git-annex symlinks
-   - Must configure: `git annex config --set annex.largefiles 'largerthan=100kb or include=*.edf ...'`
+   - Must configure with explicit metadata exclusions (see `src/lib/git-annex.ts` DATA_EXTENSIONS and METADATA_EXCLUSIONS)
 
 2. **GitHub Actions S3 copy doesn't update git-annex**
    - `aws s3 cp` moves the file but git-annex doesn't know
@@ -498,8 +498,8 @@ For the full workflow (combining Prototypes 1 and 3):
 datalad create my-dataset
 cd my-dataset
 
-# 2. Configure git-annex to only track large files
-git annex config --set annex.largefiles 'include=*.edf or include=*.bdf or include=*.set or largerthan=100kb'
+# 2. Configure git-annex: annex data files, never metadata (see src/lib/git-annex.ts for canonical pattern)
+git annex config --set annex.largefiles '(include=*.edf or include=*.bdf or include=*.set or include=*.fif or include=*.vhdr or include=*.eeg or include=*.cnt or include=*.fdt or largerthan=100kb) and exclude=*.tsv and exclude=*.json and exclude=*.md and exclude=*.txt and exclude=*.yml and exclude=*.yaml and exclude=README* and exclude=LICENSE* and exclude=CHANGES* and exclude=.bidsignore and exclude=.gitignore'
 
 # 3. Add workflow files (will be in git, not git-annex)
 mkdir -p .github/workflows
@@ -623,13 +623,16 @@ datalad get sub-XXX/eeg/
 
 ### Recommended Largefiles Configuration
 
+See `src/lib/git-annex.ts` (DATA_EXTENSIONS + METADATA_EXCLUSIONS) for the canonical pattern.
+
 ```bash
-git annex config --set annex.largefiles 'include=*.edf or include=*.bdf or include=*.set or include=*.fif or include=*.vhdr or include=*.eeg or include=*.cnt or largerthan=100kb'
+git annex config --set annex.largefiles '(include=*.edf or include=*.bdf or include=*.set or include=*.fif or include=*.vhdr or include=*.eeg or include=*.cnt or include=*.fdt or largerthan=100kb) and exclude=*.tsv and exclude=*.json and exclude=*.md and exclude=*.txt and exclude=*.yml and exclude=*.yaml and exclude=README* and exclude=LICENSE* and exclude=CHANGES* and exclude=.bidsignore and exclude=.gitignore'
 ```
 
 This ensures:
-- EEG data files → git-annex (S3)
-- Metadata, workflows, configs → git (GitHub)
+- EEG/MEG data files -> git-annex (S3)
+- Metadata (TSV, JSON, MD, txt, yml) -> always git (GitHub), regardless of size
+- tsv.gz -> annexed (compressed data; `exclude=*.tsv` doesn't match `*.tsv.gz`)
 
 ---
 

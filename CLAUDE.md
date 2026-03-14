@@ -263,8 +263,8 @@ Install and use git-annex in GitHub Actions for native operations:
 ### Full E2E PR Workflow (Validated 2026-01-14)
 Critical configuration for DataLad + GitHub + S3:
 ```bash
-# Configure git-annex to NOT annex workflow files (critical!)
-git annex config --set annex.largefiles 'include=*.edf or include=*.bdf or largerthan=100kb'
+# Configure git-annex to annex data files but NEVER metadata (tsv, json, md, etc.)
+git annex config --set annex.largefiles '(include=*.edf or include=*.bdf or include=*.set or include=*.fif or include=*.vhdr or include=*.eeg or include=*.cnt or include=*.fdt or largerthan=100kb) and exclude=*.tsv and exclude=*.json and exclude=*.md and exclude=*.txt and exclude=*.yml and exclude=*.yaml and exclude=README* and exclude=LICENSE* and exclude=CHANGES* and exclude=.bidsignore and exclude=.gitignore'
 
 # Push git-annex branch so clones can see remotes
 git push origin git-annex

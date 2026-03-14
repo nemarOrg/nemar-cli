@@ -118,13 +118,14 @@ Dataset Repository
 
 **Largefiles Policy:**
 ```bash
-annex.largefiles='include=*.edf or include=*.bdf or include=*.set or largerthan=100kb'
+annex.largefiles='(include=*.edf or include=*.bdf or include=*.set or include=*.fif or include=*.vhdr or include=*.eeg or include=*.cnt or include=*.fdt or largerthan=100kb) and exclude=*.tsv and exclude=*.json and exclude=*.md and exclude=*.txt and exclude=*.yml and exclude=*.yaml and exclude=README* and exclude=LICENSE* and exclude=CHANGES* and exclude=.bidsignore and exclude=.gitignore'
 ```
 
 **What This Means:**
-- ✅ Files matching `*.edf`, `*.bdf`, `*.set` → Git-annex (S3)
-- ✅ Files > 100 KB → Git-annex (S3)
-- ✅ Everything else → Regular git (GitHub)
+- Files matching EEG/MEG extensions (`*.edf`, `*.bdf`, `*.set`, etc.) -> Git-annex (S3)
+- Files > 100 KB -> Git-annex (S3)
+- EXCEPT metadata files (`.tsv`, `.json`, `.md`, `.txt`, `.yml`, etc.) -> Always regular git
+- `*.tsv.gz` is NOT excluded (compressed data, annexed normally)
 
 ### GitHub Structure
 
@@ -223,15 +224,15 @@ git annex init "nm000105-restored"
 #### 3. Configure Annexing Policy (Step 4/13)
 
 ```bash
-# Configure what should be annexed
+# Configure what should be annexed (data files only, never metadata)
 git annex config --set annex.largefiles \
-  'include=*.edf or include=*.bdf or include=*.set or largerthan=100kb'
+  '(include=*.edf or include=*.bdf or include=*.set or include=*.fif or include=*.vhdr or include=*.eeg or include=*.cnt or include=*.fdt or largerthan=100kb) and exclude=*.tsv and exclude=*.json and exclude=*.md and exclude=*.txt and exclude=*.yml and exclude=*.yaml and exclude=README* and exclude=LICENSE* and exclude=CHANGES* and exclude=.bidsignore and exclude=.gitignore'
 ```
 
 **Critical Step:**
-- Ensures ONLY data files are annexed
-- Metadata files go to regular git
-- Without this, README would be a pointer file on GitHub ❌
+- Ensures data files are annexed to S3
+- Metadata files (TSV, JSON, MD, txt) always stay in git regardless of size
+- Without this, large TSV/JSON files become annex pointers and break BIDS validation
 
 #### 4. Add Files (Step 5/13)
 
