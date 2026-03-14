@@ -50,6 +50,12 @@ export async function rateLimiter(c: RateLimitContext, next: Next) {
   const ip = c.req.header("CF-Connecting-IP") || c.req.header("X-Forwarded-For") || "unknown";
   const path = c.req.path;
 
+  // Skip rate limiting for admin endpoints (already behind API key auth)
+  if (path.includes("/admin")) {
+    await next();
+    return;
+  }
+
   // Use stricter limits for auth endpoints
   const isAuthEndpoint = AUTH_PATHS.some((p) => path.startsWith(p));
   const maxRequests = isAuthEndpoint ? AUTH_MAX_REQUESTS : MAX_REQUESTS;

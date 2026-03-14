@@ -1193,6 +1193,7 @@ export async function approvePublication(
   const accumulatedStepResults: StepResult[] = [];
 
   // Loop to handle S3 lock pagination (CF Workers subrequest limit)
+  let isFirstCall = true;
   do {
     result = await request<PublishApproveResponse>(
       `/admin/publish/${datasetId}/approve`,
@@ -1200,7 +1201,7 @@ export async function approvePublication(
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          resume,
+          resume: isFirstCall ? resume : true,
           sandbox,
           s3_lock_offset,
           skip_ci_check: skipCiCheck,
@@ -1208,6 +1209,7 @@ export async function approvePublication(
       },
       true,
     );
+    isFirstCall = false;
 
     if (result.step_results) {
       accumulatedStepResults.push(...result.step_results);
