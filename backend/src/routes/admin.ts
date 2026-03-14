@@ -3398,7 +3398,7 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
           repoName,
           "dataset_description.json",
           JSON.stringify(datasetDesc, null, 2),
-          "Set initial version to 1.0.0 for DOI publication",
+          "Set initial version to 1.0.0 for DOI publication [skip ci]",
           pat,
         );
       } catch (writeErr) {
@@ -3453,7 +3453,7 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
         repoName,
         "dataset_description.json",
         JSON.stringify(datasetDesc, null, 2),
-        `Update DatasetDOI with concept DOI: ${conceptDoi}`,
+        `Update DatasetDOI with concept DOI: ${conceptDoi} [skip ci]`,
         pat,
       );
 
