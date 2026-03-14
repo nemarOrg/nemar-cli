@@ -130,7 +130,11 @@ for ds in "${DATASETS[@]}"; do
     [[ -z "$key" ]] && continue
 
     # Get web URLs via whereis
-    WHEREIS_OUT=$(git annex whereis "$file" 2>/dev/null || echo "")
+    if ! WHEREIS_OUT=$(git annex whereis "$file" 2>&1); then
+      echo "    WARN: whereis failed for $file"
+      RM_FAIL=$((RM_FAIL + 1))
+      continue
+    fi
 
     # Extract URLs from whereis output (lines starting with "  web: ")
     while IFS= read -r line; do
@@ -141,10 +145,11 @@ for ds in "${DATASETS[@]}"; do
         echo "    [DRY RUN] Would remove: $(basename "$file") -> $url"
         REMOVED=$((REMOVED + 1))
       else
-        if git annex rmurl "$file" "$url" > /dev/null 2>&1; then
+        rmurl_out=$(git annex rmurl "$file" "$url" 2>&1) && rmurl_ok=true || rmurl_ok=false
+        if $rmurl_ok; then
           REMOVED=$((REMOVED + 1))
         else
-          echo "    FAIL: Could not remove URL for $file"
+          echo "    FAIL: Could not remove URL for $file: $rmurl_out"
           RM_FAIL=$((RM_FAIL + 1))
         fi
       fi
@@ -167,10 +172,12 @@ for ds in "${DATASETS[@]}"; do
   if $DRY_RUN; then
     echo "    [DRY RUN] Would push git-annex branch"
   else
-    if git push origin git-annex 2>&1; then
+    push_out=$(git push origin git-annex 2>&1) && push_ok=true || push_ok=false
+    if $push_ok; then
       echo "    Pushed"
     else
-      echo "    Regular push failed, trying force push..."
+      echo "    Regular push failed: $push_out"
+      echo "    Trying force push..."
       if git push --force-with-lease origin git-annex 2>&1; then
         echo "    Force pushed (with lease)"
       else
@@ -199,7 +206,11 @@ for ds in "${DATASETS[@]}"; do
   fi
 
   SUCCESS=$((SUCCESS + 1))
-  echo "  Done: $ds ($REMOVED URLs removed)"
+  if $DRY_RUN; then
+    echo "  Done: $ds ($REMOVED URLs would be removed)"
+  else
+    echo "  Done: $ds ($REMOVED URLs removed)"
+  fi
   cd "$WORK_DIR"
   echo ""
 done
