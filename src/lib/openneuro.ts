@@ -164,6 +164,16 @@ export async function downloadWithAwsCli(
   const stderrLines: string[] = [];
   const downloadLineRegex = /^download:\s+s3:\/\/[^\s]+\/(.*?)\s+to\s+/;
 
+  function processLine(trimmed: string, isStderr: boolean): void {
+    if (trimmed.startsWith("download:")) {
+      filesDownloaded++;
+      const match = trimmed.match(downloadLineRegex);
+      onFileDownloaded?.(filesDownloaded, match?.[1] || "");
+    } else if (isStderr) {
+      stderrLines.push(trimmed);
+    }
+  }
+
   async function readStream(stream: ReadableStream<Uint8Array>, isStderr: boolean): Promise<void> {
     const reader = stream.getReader();
     const decoder = new TextDecoder();
@@ -177,26 +187,11 @@ export async function downloadWithAwsCli(
         buffer = lines.pop() || "";
         for (const line of lines) {
           const trimmed = line.trim();
-          if (!trimmed) continue;
-          if (trimmed.startsWith("download:")) {
-            filesDownloaded++;
-            const match = trimmed.match(downloadLineRegex);
-            onFileDownloaded?.(filesDownloaded, match?.[1] || "");
-          } else if (isStderr) {
-            stderrLines.push(trimmed);
-          }
+          if (trimmed) processLine(trimmed, isStderr);
         }
       }
-      if (buffer.trim()) {
-        const trimmed = buffer.trim();
-        if (trimmed.startsWith("download:")) {
-          filesDownloaded++;
-          const match = trimmed.match(downloadLineRegex);
-          onFileDownloaded?.(filesDownloaded, match?.[1] || "");
-        } else if (isStderr) {
-          stderrLines.push(trimmed);
-        }
-      }
+      const remaining = buffer.trim();
+      if (remaining) processLine(remaining, isStderr);
     } finally {
       reader.releaseLock();
     }

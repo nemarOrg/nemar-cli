@@ -1430,6 +1430,19 @@ Examples:
     );
   });
 
+function formatProgressBar(
+  filesDown: number,
+  filesTotal: number,
+  bytesDown: number,
+  bytesTotal: number,
+): string {
+  const percent = Math.round((filesDown / filesTotal) * 100);
+  const width = 20;
+  const filled = Math.round((percent / 100) * width);
+  const bar = `[${"=".repeat(filled)}${" ".repeat(width - filled)}]`;
+  return `${bar} ${percent}% | ${filesDown}/${filesTotal} files | ${formatBytes(bytesDown)} / ${formatBytes(bytesTotal)}`;
+}
+
 /**
  * Handle download of an OpenNeuro dataset (ds######).
  * Downloads directly from OpenNeuro's public S3 bucket.
@@ -1477,13 +1490,13 @@ async function handleOpenNeuroDownload(
   // Check AWS CLI once and pass the result through to avoid spawning twice
   const hasAwsCli = await isAwsCliAvailable();
 
-  let spinner = ora(`Checking OpenNeuro for ${datasetId}...`).start();
+  const checkSpinner = ora(`Checking OpenNeuro for ${datasetId}...`).start();
   const exists = await openNeuroDatasetExists(datasetId, hasAwsCli);
   if (!exists) {
-    spinner.fail(`Dataset ${datasetId} not found on OpenNeuro`);
+    checkSpinner.fail(`Dataset ${datasetId} not found on OpenNeuro`);
     process.exit(1);
   }
-  spinner.succeed(`Found ${datasetId} on OpenNeuro`);
+  checkSpinner.succeed(`Found ${datasetId} on OpenNeuro`);
 
   if (hasAwsCli) {
     // Primary path: AWS CLI
@@ -1518,22 +1531,22 @@ async function handleOpenNeuroDownload(
     );
     console.log();
 
-    spinner = ora("Listing dataset files...").start();
+    const listSpinner = ora("Listing dataset files...").start();
     let objects: Awaited<ReturnType<typeof listOpenNeuroObjects>>;
     try {
       objects = await listOpenNeuroObjects(datasetId);
     } catch (err) {
-      spinner.fail(`Failed to list files: ${(err as Error).message}`);
+      listSpinner.fail(`Failed to list files: ${(err as Error).message}`);
       process.exit(1);
     }
 
     if (objects.length === 0) {
-      spinner.fail("No files found in dataset");
+      listSpinner.fail("No files found in dataset");
       process.exit(1);
     }
 
     const totalBytes = objects.reduce((sum, o) => sum + o.size, 0);
-    spinner.succeed(`${objects.length} files (${formatBytes(totalBytes)})`);
+    listSpinner.succeed(`${objects.length} files (${formatBytes(totalBytes)})`);
 
     console.log(chalk.bold("Download Plan:"));
     console.log(`  Dataset: ${datasetId} (OpenNeuro)`);
@@ -1548,16 +1561,8 @@ async function handleOpenNeuroDownload(
     const result = await downloadWithHttps(datasetId, absoluteOutput, objects, {
       concurrency,
       onProgress: (filesDown, filesTotal, bytesDown, bytesTotal) => {
-        const percent = Math.round((filesDown / filesTotal) * 100);
-        const width = 20;
-        const filled = Math.round((percent / 100) * width);
-        const empty = width - filled;
-        const bar = `[${"=".repeat(filled)}${" ".repeat(empty)}]`;
         process.stderr.write(
-          `\r${chalk.cyan(
-            `${bar} ${percent}% | ${filesDown}/${filesTotal} files | ` +
-              `${formatBytes(bytesDown)} / ${formatBytes(bytesTotal)}`,
-          )}`,
+          `\r${chalk.cyan(formatProgressBar(filesDown, filesTotal, bytesDown, bytesTotal))}`,
         );
       },
     });
