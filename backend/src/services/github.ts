@@ -369,38 +369,55 @@ export async function createOrUpdateFile(
 ): Promise<void> {
   // First, try to get the file to see if it exists (need SHA for update)
   let sha: string | undefined;
-  const getResponse = await fetch(`${GITHUB_API}/repos/${ORG_NAME}/${repo}/contents/${path}`, {
-    headers: {
-      Authorization: `Bearer ${pat}`,
-      Accept: "application/vnd.github.v3+json",
-      "User-Agent": "NEMAR-API",
-    },
-  });
+  let getResponse: Response;
+  try {
+    getResponse = await fetch(`${GITHUB_API}/repos/${ORG_NAME}/${repo}/contents/${path}`, {
+      headers: {
+        Authorization: `Bearer ${pat}`,
+        Accept: "application/vnd.github.v3+json",
+        "User-Agent": "NEMAR-API",
+      },
+    });
+  } catch (err) {
+    throw new Error(
+      `Network error checking ${path}: ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
 
   if (getResponse.ok) {
     const existing = await getResponse.json<{ sha: string }>();
     sha = existing.sha;
+  } else if (getResponse.status !== 404) {
+    const body = await getResponse.text().catch(() => "");
+    throw new Error(`GitHub API error ${getResponse.status} checking ${path}: ${body}`);
   }
 
   // Create or update the file
-  const response = await fetch(`${GITHUB_API}/repos/${ORG_NAME}/${repo}/contents/${path}`, {
-    method: "PUT",
-    headers: {
-      Authorization: `Bearer ${pat}`,
-      Accept: "application/vnd.github.v3+json",
-      "User-Agent": "NEMAR-API",
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      message,
-      content: btoa(
-        Array.from(new TextEncoder().encode(content), (b) => String.fromCharCode(b)).join(""),
-      ),
-      ...(sha ? { sha } : {}),
-      committer: NEMAR_COMMITTER,
-      author: NEMAR_COMMITTER,
-    }),
-  });
+  let response: Response;
+  try {
+    response = await fetch(`${GITHUB_API}/repos/${ORG_NAME}/${repo}/contents/${path}`, {
+      method: "PUT",
+      headers: {
+        Authorization: `Bearer ${pat}`,
+        Accept: "application/vnd.github.v3+json",
+        "User-Agent": "NEMAR-API",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        message,
+        content: btoa(
+          Array.from(new TextEncoder().encode(content), (b) => String.fromCharCode(b)).join(""),
+        ),
+        ...(sha ? { sha } : {}),
+        committer: NEMAR_COMMITTER,
+        author: NEMAR_COMMITTER,
+      }),
+    });
+  } catch (err) {
+    throw new Error(
+      `Network error committing ${path}: ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
 
   if (!response.ok && response.status !== 201) {
     const body = await response.text().catch(() => "");
@@ -578,12 +595,7 @@ export async function getWorkflowRuns(
 /**
  * Deploy GitHub Actions workflow files to a dataset repository
  */
-export async function deployWorkflows(
-  repo: string,
-  pat: string,
-): Promise<{ success: boolean; errors: string[] }> {
-  const errors: string[] = [];
-
+export function getWorkflowTemplates(): Array<{ path: string; content: string }> {
   // BIDS Validation workflow
   const bidsValidation = `name: BIDS Validation
 
@@ -848,7 +860,9 @@ jobs:
                 var m3 = content.match(/^\\/annex\\/objects\\/(.+)$/);
                 if (m3) return m3[1];
               }
-            } catch (e) {}
+            } catch (e) {
+              console.warn("  resolveAnnexKey failed for " + filePath + ": " + e.message);
+            }
             return null;
           }
 
@@ -1144,8 +1158,7 @@ jobs:
             -f "client_payload[version]=$VERSION"
 `;
 
-  // Deploy each workflow
-  const workflows = [
+  return [
     { path: ".github/workflows/bids-validation.yml", content: bidsValidation },
     { path: ".github/workflows/version-check.yml", content: versionCheck },
     { path: ".github/workflows/pr-merge.yml", content: prMerge },
@@ -1153,6 +1166,15 @@ jobs:
     { path: ".github/workflows/llm-enrichment.yml", content: llmEnrichment },
     { path: ".github/workflows/version-doi.yml", content: versionDoi },
   ];
+}
+
+export async function deployWorkflows(
+  repo: string,
+  pat: string,
+): Promise<{ success: boolean; errors: string[]; deployed: string[] }> {
+  const errors: string[] = [];
+  const deployed: string[] = [];
+  const workflows = getWorkflowTemplates();
 
   for (const workflow of workflows) {
     try {
@@ -1163,12 +1185,13 @@ jobs:
         `Add ${workflow.path.split("/").pop()} workflow`,
         pat,
       );
+      deployed.push(workflow.path.split("/").pop()!);
     } catch (err) {
       errors.push(`${workflow.path}: ${err instanceof Error ? err.message : String(err)}`);
     }
   }
 
-  return { success: errors.length === 0, errors };
+  return { success: errors.length === 0, errors, deployed };
 }
 
 /**
