@@ -3,15 +3,17 @@
  * These tests hit OpenNeuro's public S3 bucket (no auth needed).
  */
 
+import { afterAll, describe, expect, test } from "bun:test";
 import { existsSync, rmSync } from "node:fs";
-import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { describe, expect, test, afterAll } from "bun:test";
+import { join } from "node:path";
 import {
-  isOpenNeuroDatasetId,
-  openNeuroDatasetExists,
-  listOpenNeuroObjects,
+  type S3Object,
+  decodeXmlEntities,
   downloadWithHttps,
+  isOpenNeuroDatasetId,
+  listOpenNeuroObjects,
+  openNeuroDatasetExists,
 } from "../src/lib/openneuro";
 
 describe("OpenNeuro dataset ID validation", () => {
@@ -33,8 +35,19 @@ describe("OpenNeuro dataset ID validation", () => {
   });
 });
 
+describe("XML entity decoding", () => {
+  test("decodes all XML entities", () => {
+    expect(decodeXmlEntities("file&amp;name")).toBe("file&name");
+    expect(decodeXmlEntities("a&lt;b&gt;c")).toBe("a<b>c");
+    expect(decodeXmlEntities("it&apos;s &quot;quoted&quot;")).toBe('it\'s "quoted"');
+  });
+
+  test("passes through strings without entities", () => {
+    expect(decodeXmlEntities("normal/path/file.edf")).toBe("normal/path/file.edf");
+  });
+});
+
 describe("OpenNeuro S3 integration", () => {
-  // Use a well-known small dataset for testing
   const KNOWN_DATASET = "ds000248";
   const NONEXISTENT_DATASET = "ds999999";
 
@@ -45,6 +58,17 @@ describe("OpenNeuro S3 integration", () => {
 
   test("non-existent dataset returns false", async () => {
     const exists = await openNeuroDatasetExists(NONEXISTENT_DATASET);
+    expect(exists).toBe(false);
+  }, 15000);
+
+  test("existing dataset found via HTTPS fallback", async () => {
+    // Force HTTPS path by telling it AWS CLI is not available
+    const exists = await openNeuroDatasetExists(KNOWN_DATASET, false);
+    expect(exists).toBe(true);
+  }, 15000);
+
+  test("non-existent dataset returns false via HTTPS fallback", async () => {
+    const exists = await openNeuroDatasetExists(NONEXISTENT_DATASET, false);
     expect(exists).toBe(false);
   }, 15000);
 
@@ -71,19 +95,20 @@ describe("OpenNeuro S3 integration", () => {
 describe("OpenNeuro HTTPS download", () => {
   const KNOWN_DATASET = "ds000248";
   const outputDir = join(tmpdir(), `nemar-openneuro-test-${Date.now()}`);
+  const partialFailDir = join(tmpdir(), `nemar-openneuro-partial-${Date.now()}`);
 
   afterAll(() => {
-    if (existsSync(outputDir)) {
-      rmSync(outputDir, { recursive: true, force: true });
+    for (const dir of [outputDir, partialFailDir]) {
+      if (existsSync(dir)) {
+        rmSync(dir, { recursive: true, force: true });
+      }
     }
   });
 
   test("downloads files via HTTPS with progress", async () => {
     // Only download the small root-level files (skip large data files)
     const allObjects = await listOpenNeuroObjects(KNOWN_DATASET);
-    const smallObjects = allObjects.filter(
-      (o) => o.size < 10000 && !o.key.includes("sub-"),
-    );
+    const smallObjects = allObjects.filter((o) => o.size < 10000 && !o.key.includes("sub-"));
     expect(smallObjects.length).toBeGreaterThan(0);
 
     let lastProgress = { filesDown: 0, bytesDown: 0 };
@@ -110,16 +135,31 @@ describe("OpenNeuro HTTPS download", () => {
   test("resume skips already-downloaded files", async () => {
     // Re-download same files - should skip all (already exist with correct size)
     const allObjects = await listOpenNeuroObjects(KNOWN_DATASET);
-    const smallObjects = allObjects.filter(
-      (o) => o.size < 10000 && !o.key.includes("sub-"),
-    );
+    const smallObjects = allObjects.filter((o) => o.size < 10000 && !o.key.includes("sub-"));
 
     const result = await downloadWithHttps(KNOWN_DATASET, outputDir, smallObjects, {
       concurrency: 4,
     });
 
     expect(result.success).toBe(true);
-    // Files should still be counted as downloaded (skipped = success)
     expect(result.filesDownloaded).toBe(smallObjects.length);
   }, 60000);
+
+  test("rejects path traversal in S3 keys", async () => {
+    const maliciousObjects: S3Object[] = [{ key: "ds000248/../../etc/passwd", size: 100 }];
+    const result = await downloadWithHttps("ds000248", outputDir, maliciousObjects);
+    expect(result.success).toBe(false);
+    expect(result.error).toContain("failed");
+  }, 15000);
+
+  test("reports partial failures with error details", async () => {
+    const objects: S3Object[] = [
+      { key: "ds000248/dataset_description.json", size: 1536 },
+      { key: "ds000248/NONEXISTENT_FILE_12345.txt", size: 100 },
+    ];
+    const result = await downloadWithHttps("ds000248", partialFailDir, objects);
+    expect(result.success).toBe(false);
+    expect(result.filesDownloaded).toBe(1);
+    expect(result.error).toContain("1 file(s) failed");
+  }, 30000);
 });

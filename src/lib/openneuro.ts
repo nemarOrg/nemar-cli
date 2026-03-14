@@ -32,7 +32,7 @@ export interface OpenNeuroDownloadResult {
   error?: string;
 }
 
-function decodeXmlEntities(s: string): string {
+export function decodeXmlEntities(s: string): string {
   return s
     .replace(/&amp;/g, "&")
     .replace(/&lt;/g, "<")
@@ -45,6 +45,9 @@ function decodeXmlEntities(s: string): string {
  * Check if an OpenNeuro dataset exists on S3.
  * Accepts an optional pre-computed AWS CLI availability flag to avoid
  * spawning `aws --version` twice in the same flow.
+ *
+ * Throws on network errors so callers can distinguish "not found" from
+ * "could not reach S3".
  */
 export async function openNeuroDatasetExists(
   datasetId: string,
@@ -67,24 +70,21 @@ export async function openNeuroDatasetExists(
         stdout: "pipe",
         stderr: "pipe",
       });
+      // Read stdout before awaiting exit to avoid pipe buffer deadlock
+      const output = await new Response(proc.stdout).text();
       const exitCode = await proc.exited;
       if (exitCode !== 0) return false;
-      const output = await new Response(proc.stdout).text();
       return output.trim().length > 0;
     } catch {
-      // Fall through to HTTPS check
+      // AWS CLI spawn failed unexpectedly; fall through to HTTPS check
     }
   }
 
   const url = `${OPENNEURO_S3_BASE_URL}?list-type=2&prefix=${datasetId}/&max-keys=1`;
-  try {
-    const response = await fetch(url);
-    if (!response.ok) return false;
-    const text = await response.text();
-    return text.includes("<Key>");
-  } catch {
-    return false;
-  }
+  const response = await fetch(url);
+  if (!response.ok) return false;
+  const text = await response.text();
+  return text.includes("<Key>");
 }
 
 /**
@@ -124,7 +124,12 @@ export async function listOpenNeuroObjects(datasetId: string): Promise<S3Object[
     const truncated = xml.includes("<IsTruncated>true</IsTruncated>");
     if (truncated) {
       const tokenMatch = xml.match(/<NextContinuationToken>([^<]+)<\/NextContinuationToken>/);
-      continuationToken = tokenMatch ? decodeXmlEntities(tokenMatch[1]) : undefined;
+      if (!tokenMatch) {
+        throw new Error(
+          `S3 listing indicated more results but no continuation token was provided. Got ${objects.length} objects so far.`,
+        );
+      }
+      continuationToken = decodeXmlEntities(tokenMatch[1]);
     } else {
       continuationToken = undefined;
     }
@@ -154,11 +159,22 @@ export async function downloadWithAwsCli(
     outputPath,
   ];
 
-  const proc = spawn({
-    cmd,
-    stdout: "pipe",
-    stderr: "pipe",
-  });
+  let proc: ReturnType<typeof spawn>;
+  try {
+    proc = spawn({
+      cmd,
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+  } catch (err) {
+    return {
+      success: false,
+      filesDownloaded: 0,
+      totalBytes: 0,
+      method: "aws-cli",
+      error: `Failed to start AWS CLI: ${(err as Error).message}`,
+    };
+  }
 
   let filesDownloaded = 0;
   const stderrLines: string[] = [];
@@ -285,7 +301,8 @@ export async function downloadWithHttps(
   const totalFiles = objects.length;
   const totalBytes = objects.reduce((sum, o) => sum + o.size, 0);
 
-  let filesDownloaded = 0;
+  let filesProcessed = 0;
+  let filesSucceeded = 0;
   let bytesDownloaded = 0;
   const errors: string[] = [];
 
@@ -293,7 +310,7 @@ export async function downloadWithHttps(
     mkdirSync(outputPath, { recursive: true });
   }
 
-  // Worker pool for parallel downloads
+  // Worker pool for parallel downloads (safe: JS single-threaded event loop)
   const queue = [...objects];
   const poolSize = Math.min(concurrency, totalFiles);
   const workers = Array.from({ length: poolSize }, async () => {
@@ -302,14 +319,13 @@ export async function downloadWithHttps(
       if (!obj) break;
       try {
         const bytes = await downloadSingleFile(obj.key, obj.size, outputPath, datasetId);
-        filesDownloaded++;
+        filesSucceeded++;
         bytesDownloaded += bytes;
-        onProgress?.(filesDownloaded, totalFiles, bytesDownloaded, totalBytes);
       } catch (err) {
         errors.push((err as Error).message);
-        filesDownloaded++;
-        onProgress?.(filesDownloaded, totalFiles, bytesDownloaded, totalBytes);
       }
+      filesProcessed++;
+      onProgress?.(filesProcessed, totalFiles, bytesDownloaded, totalBytes);
     }
   });
 
@@ -317,9 +333,12 @@ export async function downloadWithHttps(
 
   return {
     success: errors.length === 0,
-    filesDownloaded: filesDownloaded - errors.length,
+    filesDownloaded: filesSucceeded,
     totalBytes: bytesDownloaded,
     method: "https",
-    error: errors.length > 0 ? `${errors.length} file(s) failed to download` : undefined,
+    error:
+      errors.length > 0
+        ? `${errors.length} file(s) failed:\n${errors.slice(0, 10).join("\n")}${errors.length > 10 ? `\n  ... and ${errors.length - 10} more` : ""}`
+        : undefined,
   };
 }

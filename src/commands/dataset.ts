@@ -1491,7 +1491,13 @@ async function handleOpenNeuroDownload(
   const hasAwsCli = await isAwsCliAvailable();
 
   const checkSpinner = ora(`Checking OpenNeuro for ${datasetId}...`).start();
-  const exists = await openNeuroDatasetExists(datasetId, hasAwsCli);
+  let exists: boolean;
+  try {
+    exists = await openNeuroDatasetExists(datasetId, hasAwsCli);
+  } catch (err) {
+    checkSpinner.fail(`Could not reach OpenNeuro: ${(err as Error).message}`);
+    process.exit(1);
+  }
   if (!exists) {
     checkSpinner.fail(`Dataset ${datasetId} not found on OpenNeuro`);
     process.exit(1);
@@ -1570,7 +1576,16 @@ async function handleOpenNeuroDownload(
     process.stderr.write(`\r${" ".repeat(80)}\r`);
 
     if (!result.success) {
-      console.log(chalk.yellow(`Warning: ${result.error}`));
+      console.log(chalk.red(`\nDownload incomplete: ${result.error}`));
+      if (result.filesDownloaded > 0) {
+        console.log(
+          chalk.yellow(
+            `${result.filesDownloaded} files succeeded. Re-run to retry failed files (resume support).`,
+          ),
+        );
+      }
+      console.log(`\n  Location: ${chalk.cyan(absoluteOutput)}`);
+      process.exit(1);
     }
 
     console.log(
