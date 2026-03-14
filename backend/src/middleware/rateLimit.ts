@@ -50,6 +50,17 @@ export async function rateLimiter(c: RateLimitContext, next: Next) {
   const ip = c.req.header("CF-Connecting-IP") || c.req.header("X-Forwarded-For") || "unknown";
   const path = c.req.path;
 
+  // Skip rate limiting for admin endpoints. These are already protected by
+  // authMiddleware + adminMiddleware (API key + admin role). Rate limiting
+  // would break multi-request orchestration like S3 lock pagination, which
+  // can require 100+ sequential API calls for large datasets.
+  // Within the Hono sub-app, c.req.path is relative to the mount point,
+  // so admin routes appear as "/admin/..." regardless of the app prefix.
+  if (path.startsWith("/admin")) {
+    await next();
+    return;
+  }
+
   // Use stricter limits for auth endpoints
   const isAuthEndpoint = AUTH_PATHS.some((p) => path.startsWith(p));
   const maxRequests = isAuthEndpoint ? AUTH_MAX_REQUESTS : MAX_REQUESTS;
