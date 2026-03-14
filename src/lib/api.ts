@@ -1192,7 +1192,11 @@ export async function approvePublication(
   let result: PublishApproveResponse;
   const accumulatedStepResults: StepResult[] = [];
 
-  // Loop to handle S3 lock pagination (CF Workers subrequest limit)
+  // Loop to handle S3 lock pagination (CF Workers ~50 subrequest limit).
+  // On the first call, pass the caller's `resume` flag so the orchestrator
+  // either starts fresh or resumes from persisted progress. On subsequent
+  // iterations (S3 lock batching), always pass resume=true so we skip
+  // already-completed steps and only continue locking objects.
   let isFirstCall = true;
   do {
     result = await request<PublishApproveResponse>(

@@ -50,8 +50,10 @@ export async function rateLimiter(c: RateLimitContext, next: Next) {
   const ip = c.req.header("CF-Connecting-IP") || c.req.header("X-Forwarded-For") || "unknown";
   const path = c.req.path;
 
-  // Skip rate limiting for admin endpoints (already behind API key auth)
-  if (path.includes("/admin")) {
+  // Skip rate limiting for admin endpoints (already behind API key auth).
+  // Within the Hono sub-app, c.req.path is relative to the mount point,
+  // so admin routes appear as "/admin/..." regardless of the app prefix.
+  if (path.startsWith("/admin")) {
     await next();
     return;
   }

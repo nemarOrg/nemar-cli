@@ -10,14 +10,9 @@
 # The S3 special remote (nemar-s3) already has the correct key-based
 # paths, so the web URLs are just stale noise that breaks downloads.
 #
-# For public datasets (with DOI), this creates a patch version bump
-# since the git-annex branch change affects the repo.
-# For private datasets, it force-pushes the cleaned git-annex branch.
-#
 # Prerequisites:
 #   - git-annex installed
 #   - SSH access to nemarDatasets GitHub org
-#   - gh CLI authenticated
 #
 # Usage:
 #   ./scripts/cleanup-web-urls.sh [--dry-run] dataset_id [dataset_id ...]
@@ -71,14 +66,21 @@ for ds in "${DATASETS[@]}"; do
   echo "Processing $ds"
   echo "============================================"
 
-  # Step 1: Check if dataset has web URLs
+  # Step 1: Check if dataset has web URLs via a bare clone of git-annex branch
   echo "  Step 1: Checking for stale web URLs..."
 
-  WEB_COUNT=$(cd /tmp && rm -rf "${ds}-probe" \
-    && git clone --bare --single-branch -b git-annex "git@github.com:${ORG}/${ds}.git" "${ds}-probe" 2>/dev/null \
-    && cd "${ds}-probe" \
-    && git ls-tree -r HEAD --name-only 2>/dev/null | grep -c '\.log\.web$' || echo 0)
-  rm -rf "/tmp/${ds}-probe"
+  PROBE_DIR="/tmp/${ds}-probe"
+  rm -rf "$PROBE_DIR"
+  if ! git clone --bare --single-branch -b git-annex "git@github.com:${ORG}/${ds}.git" "$PROBE_DIR" 2>/dev/null; then
+    echo "  FAIL: Could not clone git-annex branch for $ds"
+    rm -rf "$PROBE_DIR"
+    FAILED=$((FAILED + 1))
+    echo ""
+    continue
+  fi
+
+  WEB_COUNT=$(cd "$PROBE_DIR" && git ls-tree -r HEAD --name-only 2>/dev/null | grep -c '\.log\.web$' || echo 0)
+  rm -rf "$PROBE_DIR"
 
   if [[ "$WEB_COUNT" -eq 0 ]]; then
     echo "  SKIP: $ds has no web URLs"
@@ -105,7 +107,7 @@ for ds in "${DATASETS[@]}"; do
 
   # Step 3: Initialize git-annex
   echo "  Step 3: Initializing git-annex..."
-  if ! git annex init "web-url-cleanup" > /dev/null 2>&1; then
+  if ! git annex init "web-url-cleanup"; then
     echo "  FAIL: git annex init failed for $ds"
     FAILED=$((FAILED + 1))
     cd "$WORK_DIR"
@@ -136,7 +138,7 @@ for ds in "${DATASETS[@]}"; do
       [[ -z "$url" ]] && continue
 
       if $DRY_RUN; then
-        echo "    [DRY RUN] rmurl $(basename "$file") -> $url"
+        echo "    [DRY RUN] Would remove: $(basename "$file") -> $url"
         REMOVED=$((REMOVED + 1))
       else
         if git annex rmurl "$file" "$url" > /dev/null 2>&1; then
@@ -169,8 +171,8 @@ for ds in "${DATASETS[@]}"; do
       echo "    Pushed"
     else
       echo "    Regular push failed, trying force push..."
-      if git push --force origin git-annex 2>&1; then
-        echo "    Force pushed"
+      if git push --force-with-lease origin git-annex 2>&1; then
+        echo "    Force pushed (with lease)"
       else
         echo "  FAIL: Could not push git-annex branch for $ds"
         FAILED=$((FAILED + 1))
@@ -210,4 +212,9 @@ echo "  Failed:  $FAILED"
 if $DRY_RUN; then
   echo ""
   echo "(This was a dry run. Re-run without --dry-run to execute.)"
+fi
+
+# Exit with failure if any datasets failed
+if [[ $FAILED -gt 0 ]]; then
+  exit 1
 fi
