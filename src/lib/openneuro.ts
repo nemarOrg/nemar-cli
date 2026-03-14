@@ -213,7 +213,10 @@ export async function downloadWithAwsCli(
     }
   }
 
-  await Promise.all([readStream(proc.stdout, false), readStream(proc.stderr, true)]);
+  await Promise.all([
+    readStream(proc.stdout as ReadableStream<Uint8Array>, false),
+    readStream(proc.stderr as ReadableStream<Uint8Array>, true),
+  ]);
 
   const exitCode = await proc.exited;
 
