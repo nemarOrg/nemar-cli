@@ -1192,11 +1192,12 @@ export async function approvePublication(
   let result: PublishApproveResponse;
   const accumulatedStepResults: StepResult[] = [];
   // After the first call completes all publish steps, subsequent calls
-  // must use resume=true to only run the s3_lock step (not re-run
-  // update_metadata, update_readme, etc. which would create duplicate commits)
-  let shouldResume = resume;
-
-  // Loop to handle S3 lock pagination (CF Workers subrequest limit)
+  // Loop to handle S3 lock pagination (CF Workers ~50 subrequest limit).
+  // On the first call, pass the caller's `resume` flag so the orchestrator
+  // either starts fresh or resumes from persisted progress. On subsequent
+  // iterations (S3 lock batching), always pass resume=true so we skip
+  // already-completed steps and only continue locking objects.
+  let isFirstCall = true;
   do {
     result = await request<PublishApproveResponse>(
       `/admin/publish/${datasetId}/approve`,
@@ -1204,7 +1205,7 @@ export async function approvePublication(
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          resume: shouldResume,
+          resume: isFirstCall ? resume : true,
           sandbox,
           s3_lock_offset,
           skip_ci_check: skipCiCheck,
@@ -1212,6 +1213,7 @@ export async function approvePublication(
       },
       true,
     );
+    isFirstCall = false;
 
     if (result.step_results) {
       accumulatedStepResults.push(...result.step_results);
@@ -1219,7 +1221,6 @@ export async function approvePublication(
 
     if (result.hasMore && result.s3_lock_offset !== undefined) {
       s3_lock_offset = result.s3_lock_offset;
-      shouldResume = true;
     } else {
       break;
     }
