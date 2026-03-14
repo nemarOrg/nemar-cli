@@ -50,6 +50,7 @@ import {
   requestUploadCredentials,
   resendPublishNotification,
 } from "../lib/api.js";
+import { isAwsCliAvailable } from "../lib/aws-cli.js";
 import {
   type BidsValidationResult,
   checkDenoInstalled,
@@ -105,6 +106,13 @@ import {
   promptForLicense,
   updateLicenseInDescription,
 } from "../lib/license.js";
+import {
+  downloadWithAwsCli,
+  downloadWithHttps,
+  isOpenNeuroDatasetId,
+  listOpenNeuroObjects,
+  openNeuroDatasetExists,
+} from "../lib/openneuro.js";
 import { checkPrerequisitesForCommand } from "../lib/prerequisites.js";
 import { DownloadProgressTracker } from "../lib/progress.js";
 import { promptForProvenance } from "../lib/provenance.js";
@@ -1422,11 +1430,161 @@ Examples:
     );
   });
 
+/**
+ * Handle download of an OpenNeuro dataset (ds######).
+ * Downloads directly from OpenNeuro's public S3 bucket.
+ * Primary: AWS CLI (fast). Fallback: direct HTTPS (slower, no extra deps).
+ */
+async function handleOpenNeuroDownload(
+  datasetId: string,
+  options: { output?: string; jobs?: string; data?: boolean },
+): Promise<void> {
+  // Warning: no version control
+  console.log();
+  console.log(chalk.yellow("OpenNeuro Dataset"));
+  console.log(
+    chalk.yellow(
+      "This dataset will be downloaded as plain files from OpenNeuro's public S3 bucket.",
+    ),
+  );
+  console.log(
+    chalk.yellow(
+      "Unlike NEMAR datasets, there is no git-annex version tracking or selective file download.",
+    ),
+  );
+  console.log(chalk.dim("For full version control, use DataLad directly:"));
+  console.log(chalk.dim(`  datalad install https://github.com/OpenNeuroDatasets/${datasetId}`));
+  console.log();
+
+  if (options.data === false) {
+    console.log(
+      chalk.yellow(
+        "Note: --no-data is not supported for OpenNeuro downloads. Downloading all files.",
+      ),
+    );
+    console.log();
+  }
+
+  const outputPath = options.output || datasetId;
+  const absoluteOutput = resolve(outputPath);
+
+  if (existsSync(absoluteOutput)) {
+    console.log(chalk.red(`Error: Output path already exists: ${absoluteOutput}`));
+    console.log("Remove or rename the existing directory and try again.");
+    process.exit(1);
+  }
+
+  // Check AWS CLI once and pass the result through to avoid spawning twice
+  const hasAwsCli = await isAwsCliAvailable();
+
+  let spinner = ora(`Checking OpenNeuro for ${datasetId}...`).start();
+  const exists = await openNeuroDatasetExists(datasetId, hasAwsCli);
+  if (!exists) {
+    spinner.fail(`Dataset ${datasetId} not found on OpenNeuro`);
+    process.exit(1);
+  }
+  spinner.succeed(`Found ${datasetId} on OpenNeuro`);
+
+  if (hasAwsCli) {
+    // Primary path: AWS CLI
+    console.log();
+    console.log(chalk.bold("Download Plan:"));
+    console.log(`  Dataset: ${datasetId} (OpenNeuro)`);
+    console.log(`  Output:  ${absoluteOutput}`);
+    console.log("  Method:  AWS CLI (aws s3 sync)");
+    console.log();
+
+    console.log(chalk.bold("Downloading data files..."));
+
+    const result = await downloadWithAwsCli(datasetId, absoluteOutput, (count) => {
+      process.stderr.write(`\r${chalk.cyan(`  ${count} files downloaded`)}`);
+    });
+
+    process.stderr.write(`\r${" ".repeat(40)}\r`);
+
+    if (!result.success) {
+      console.log(chalk.red(`Download failed: ${result.error}`));
+      process.exit(1);
+    }
+
+    console.log(chalk.green(`Downloaded ${result.filesDownloaded} files`));
+  } else {
+    // Fallback path: direct HTTPS
+    console.log();
+    console.log(chalk.yellow("AWS CLI not found. Using direct HTTPS download."));
+    console.log(chalk.yellow("This will be slower than AWS CLI. To install it:"));
+    console.log(
+      chalk.dim("  https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html"),
+    );
+    console.log();
+
+    spinner = ora("Listing dataset files...").start();
+    let objects: Awaited<ReturnType<typeof listOpenNeuroObjects>>;
+    try {
+      objects = await listOpenNeuroObjects(datasetId);
+    } catch (err) {
+      spinner.fail(`Failed to list files: ${(err as Error).message}`);
+      process.exit(1);
+    }
+
+    if (objects.length === 0) {
+      spinner.fail("No files found in dataset");
+      process.exit(1);
+    }
+
+    const totalBytes = objects.reduce((sum, o) => sum + o.size, 0);
+    spinner.succeed(`${objects.length} files (${formatBytes(totalBytes)})`);
+
+    console.log(chalk.bold("Download Plan:"));
+    console.log(`  Dataset: ${datasetId} (OpenNeuro)`);
+    console.log(`  Output:  ${absoluteOutput}`);
+    console.log("  Method:  HTTPS (direct download)");
+    console.log(`  Files:   ${objects.length} (${formatBytes(totalBytes)})`);
+    console.log();
+
+    console.log(chalk.bold("Downloading data files..."));
+
+    const concurrency = Number.parseInt(options.jobs || "8", 10);
+    const result = await downloadWithHttps(datasetId, absoluteOutput, objects, {
+      concurrency,
+      onProgress: (filesDown, filesTotal, bytesDown, bytesTotal) => {
+        const percent = Math.round((filesDown / filesTotal) * 100);
+        const width = 20;
+        const filled = Math.round((percent / 100) * width);
+        const empty = width - filled;
+        const bar = `[${"=".repeat(filled)}${" ".repeat(empty)}]`;
+        process.stderr.write(
+          `\r${chalk.cyan(
+            `${bar} ${percent}% | ${filesDown}/${filesTotal} files | ` +
+              `${formatBytes(bytesDown)} / ${formatBytes(bytesTotal)}`,
+          )}`,
+        );
+      },
+    });
+
+    process.stderr.write(`\r${" ".repeat(80)}\r`);
+
+    if (!result.success) {
+      console.log(chalk.yellow(`Warning: ${result.error}`));
+    }
+
+    console.log(
+      chalk.green(`Downloaded ${result.filesDownloaded} files (${formatBytes(result.totalBytes)})`),
+    );
+  }
+
+  console.log();
+  console.log(chalk.green.bold("Download complete!"));
+  console.log();
+  console.log(`  Location: ${chalk.cyan(absoluteOutput)}`);
+  console.log();
+}
+
 // Download command
 datasetCommand
   .command("download")
-  .description("Download a dataset from NEMAR")
-  .argument("<dataset-id>", "Dataset ID (e.g., nm000104)")
+  .description("Download a dataset from NEMAR or OpenNeuro")
+  .argument("<dataset-id>", "Dataset ID (e.g., nm000104 or OpenNeuro ds000248)")
   .option("-o, --output <path>", "Output directory (default: ./<dataset-id>)")
   .option("-j, --jobs <number>", "Parallel download streams (default: 4)", "4")
   .option("--no-data", "Download metadata only (skip large data files)")
@@ -1434,24 +1592,33 @@ datasetCommand
     "after",
     `
 Description:
-  Download a BIDS dataset from NEMAR. Uses git-annex for efficient
-  data transfer with parallel streams.
+  Download a BIDS dataset from NEMAR or OpenNeuro.
 
-  Private datasets require authentication (nemar auth login) and can
-  only be downloaded by the owner or designated collaborators.
-  After publishing, datasets become publicly available.
+  NEMAR datasets (nm/on prefix) use git-annex for efficient data transfer
+  with parallel streams and version tracking.
+
+  OpenNeuro datasets (ds prefix) are downloaded as plain files from
+  OpenNeuro's public S3 bucket. No account or git-annex required.
 
 Requirements:
-  - git-annex installed
+  - git-annex installed (NEMAR datasets only)
   - NEMAR account (for private datasets)
+  - AWS CLI recommended for OpenNeuro downloads (falls back to HTTPS)
 
 Examples:
-  $ nemar dataset download nm000104              # Download to ./nm000104
+  $ nemar dataset download nm000104              # Download NEMAR dataset
   $ nemar dataset download nm000104 -o ./data    # Custom output directory
   $ nemar dataset download nm000104 --no-data    # Metadata only (fast)
-  $ nemar dataset download nm000104 -j 8         # More parallel streams`,
+  $ nemar dataset download nm000104 -j 8         # More parallel streams
+  $ nemar dataset download ds000248              # Download from OpenNeuro`,
   )
   .action(async (datasetId, options) => {
+    // OpenNeuro datasets (ds######) - separate download flow
+    if (isOpenNeuroDatasetId(datasetId)) {
+      await handleOpenNeuroDownload(datasetId, options);
+      return;
+    }
+
     // Step 1: Check prerequisites (fast, parallel checks)
     await checkPrerequisitesForCommand("download");
 
