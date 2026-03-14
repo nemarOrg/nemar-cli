@@ -938,12 +938,13 @@ datasetRoutes.post("/:id/finalize", authMiddleware, async (c) => {
       if (!workflowResult.success) {
         console.error("Failed to deploy some workflows:", workflowResult.errors);
         warnings.push(
-          "Some GitHub workflows could not be deployed; PR-based uploads may not work correctly",
+          `Some GitHub workflows could not be deployed: ${workflowResult.errors.join("; ")}`,
         );
       }
     } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error);
       console.error("Failed to deploy workflows:", error);
-      warnings.push("GitHub workflow deployment failed");
+      warnings.push(`GitHub workflow deployment failed: ${msg}`);
     }
 
     // Apply branch protection (requires workflows to be deployed first for status checks)

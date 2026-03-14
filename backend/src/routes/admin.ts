@@ -2575,20 +2575,13 @@ adminRoutes.post("/datasets/:id/ci", async (c) => {
     return c.json({ error: "Invalid repository format" }, 500);
   }
 
-  const WORKFLOW_FILES = [
-    "bids-validation.yml",
-    "version-check.yml",
-    "pr-merge.yml",
-    "generate-archive.yml",
-    "llm-enrichment.yml",
-  ];
   const result = await deployWorkflows(repoName, c.env.GITHUB_ADMIN_PAT);
 
   if (!result.success) {
     return c.json(
       {
         error: "Failed to deploy some workflows",
-        deployed: WORKFLOW_FILES.length - result.errors.length,
+        deployed: result.deployed,
         failed: result.errors,
       },
       500,
@@ -2615,7 +2608,7 @@ adminRoutes.post("/datasets/:id/ci", async (c) => {
   return c.json({
     message: "CI workflows deployed successfully",
     dataset_id: datasetId,
-    workflows_deployed: WORKFLOW_FILES,
+    workflows_deployed: result.deployed,
   });
 });
 
