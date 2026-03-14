@@ -1,0 +1,211 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 700" width="720" height="700" font-family="'Inter', 'Segoe UI', system-ui, -apple-system, sans-serif">
+  <defs>
+    <linearGradient id="bgGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#f8fafc"/>
+      <stop offset="100%" style="stop-color:#eef2f7"/>
+    </linearGradient>
+    <linearGradient id="cliGrad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" style="stop-color:#3b82f6"/>
+      <stop offset="100%" style="stop-color:#2563eb"/>
+    </linearGradient>
+    <linearGradient id="cfGrad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" style="stop-color:#f97316"/>
+      <stop offset="100%" style="stop-color:#ea580c"/>
+    </linearGradient>
+    <linearGradient id="ghGrad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" style="stop-color:#1f2937"/>
+      <stop offset="100%" style="stop-color:#111827"/>
+    </linearGradient>
+    <linearGradient id="s3Grad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" style="stop-color:#16a34a"/>
+      <stop offset="100%" style="stop-color:#15803d"/>
+    </linearGradient>
+    <linearGradient id="doiGrad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" style="stop-color:#7c3aed"/>
+      <stop offset="100%" style="stop-color:#6d28d9"/>
+    </linearGradient>
+    <linearGradient id="webGrad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" style="stop-color:#0891b2"/>
+      <stop offset="100%" style="stop-color:#0e7490"/>
+    </linearGradient>
+    <filter id="shadow" x="-4%" y="-4%" width="108%" height="112%">
+      <feDropShadow dx="0" dy="2" stdDeviation="4" flood-opacity="0.08"/>
+    </filter>
+    <filter id="shadowSm" x="-2%" y="-2%" width="104%" height="108%">
+      <feDropShadow dx="0" dy="1" stdDeviation="2" flood-opacity="0.06"/>
+    </filter>
+  </defs>
+
+  <!-- Background -->
+  <rect width="720" height="700" rx="16" fill="url(#bgGrad)" stroke="#d1d5db" stroke-width="1"/>
+
+  <!-- Title -->
+  <text x="360" y="38" text-anchor="middle" font-size="18" font-weight="700" fill="#0f172a" letter-spacing="-0.3">NEMAR Infrastructure</text>
+  <text x="360" y="56" text-anchor="middle" font-size="11" fill="#64748b">Neuroelectromagnetic Data Archive and Tools Resource</text>
+
+  <!-- ═══════ ROW 1: User ═══════ -->
+  <g transform="translate(360, 100)">
+    <circle cx="0" cy="-12" r="9" fill="none" stroke="#475569" stroke-width="2"/>
+    <path d="M-14,12 Q-14,-2 0,0 Q14,-2 14,12" fill="none" stroke="#475569" stroke-width="2"/>
+    <text x="0" y="32" text-anchor="middle" font-size="12" font-weight="600" fill="#334155">Researcher</text>
+  </g>
+
+  <!-- Arrow: User -> CLI -->
+  <line x1="360" y1="138" x2="360" y2="170" stroke="#94a3b8" stroke-width="1.5"/>
+  <polygon points="354,166 360,176 366,166" fill="#94a3b8"/>
+
+  <!-- ═══════ ROW 2: CLI ═══════ -->
+  <g filter="url(#shadow)">
+    <rect x="270" y="178" width="180" height="52" rx="10" fill="url(#cliGrad)"/>
+    <text x="360" y="201" text-anchor="middle" font-size="13" font-weight="700" fill="white">nemar-cli</text>
+    <text x="360" y="219" text-anchor="middle" font-size="9.5" fill="#bfdbfe">TypeScript / Bun / Commander.js</text>
+  </g>
+
+  <!-- Arrow: CLI -> Backend -->
+  <line x1="360" y1="230" x2="360" y2="264" stroke="#94a3b8" stroke-width="1.5"/>
+  <polygon points="354,260 360,270 366,260" fill="#94a3b8"/>
+  <text x="376" y="254" font-size="8.5" fill="#94a3b8">REST API</text>
+
+  <!-- ═══════ ROW 3: Backend ═══════ -->
+  <g filter="url(#shadow)">
+    <rect x="220" y="272" width="280" height="62" rx="10" fill="url(#cfGrad)"/>
+    <text x="360" y="298" text-anchor="middle" font-size="13" font-weight="700" fill="white">Cloudflare Workers</text>
+    <text x="360" y="316" text-anchor="middle" font-size="9.5" fill="#fed7aa">api.osc.earth/nemar  +  D1 (SQLite)</text>
+  </g>
+
+  <!-- Backend zone label -->
+  <rect x="220" y="264" width="62" height="16" rx="4" fill="#fdba74"/>
+  <text x="251" y="275" text-anchor="middle" font-size="8" font-weight="600" fill="#7c2d12">Backend</text>
+
+  <!-- ═══════ CONNECTORS: Backend -> Services (with inline arrowheads) ═══════ -->
+
+  <!-- Left branch: Backend -> GitHub -->
+  <path d="M280,334 L280,358 L140,358 L140,388" fill="none" stroke="#94a3b8" stroke-width="1.5"/>
+  <polygon points="134,384 140,394 146,384" fill="#94a3b8"/>
+  <text x="200" y="354" text-anchor="middle" font-size="8.5" fill="#94a3b8">metadata</text>
+
+  <!-- Center-left: Backend -> S3 -->
+  <path d="M330,334 L330,388" fill="none" stroke="#94a3b8" stroke-width="1.5"/>
+  <polygon points="324,384 330,394 336,384" fill="#94a3b8"/>
+  <text x="344" y="368" font-size="8.5" fill="#94a3b8">data</text>
+
+  <!-- Center-right: Backend -> EZID -->
+  <path d="M400,334 L400,358 L510,358 L510,388" fill="none" stroke="#94a3b8" stroke-width="1.5"/>
+  <polygon points="504,384 510,394 516,384" fill="#94a3b8"/>
+  <text x="462" y="354" text-anchor="middle" font-size="8.5" fill="#94a3b8">DOIs</text>
+
+  <!-- Right: Backend -> nemar.org -->
+  <path d="M440,334 L440,358 L643,358 L643,388" fill="none" stroke="#94a3b8" stroke-width="1.5"/>
+  <polygon points="637,384 643,394 649,384" fill="#94a3b8"/>
+  <text x="550" y="354" text-anchor="middle" font-size="8.5" fill="#94a3b8">sync</text>
+
+  <!-- ═══════ ROW 4: External Services ═══════ -->
+
+  <!-- GitHub -->
+  <g filter="url(#shadow)">
+    <rect x="55" y="396" width="170" height="80" rx="10" fill="url(#ghGrad)"/>
+    <g transform="translate(82, 416)">
+      <path d="M8,0 C3.58,0 0,3.58 0,8 C0,11.54 2.29,14.53 5.47,15.59 C5.87,15.66 6.02,15.42 6.02,15.21 C6.02,15.02 6.01,14.39 6.01,13.72 C4,14.09 3.48,13.23 3.32,12.78 C3.23,12.55 2.84,11.84 2.5,11.65 C2.22,11.5 1.82,11.13 2.49,11.12 C3.12,11.11 3.57,11.7 3.72,11.94 C4.44,13.15 5.59,12.81 6.05,12.6 C6.12,12.08 6.33,11.73 6.56,11.53 C4.78,11.33 2.92,10.64 2.92,7.58 C2.92,6.71 3.23,5.99 3.74,5.43 C3.66,5.23 3.38,4.41 3.82,3.31 C3.82,3.31 4.49,3.1 6.02,4.13 C6.66,3.95 7.34,3.86 8.02,3.86 C8.7,3.86 9.38,3.95 10.02,4.13 C11.55,3.09 12.22,3.31 12.22,3.31 C12.66,4.41 12.38,5.23 12.3,5.43 C12.81,5.99 13.12,6.7 13.12,7.58 C13.12,10.65 11.25,11.33 9.47,11.53 C9.76,11.78 10.01,12.26 10.01,13.01 C10.01,14.08 10,14.94 10,15.21 C10,15.42 10.15,15.67 10.55,15.59 C13.71,14.53 16,11.53 16,8 C16,3.58 12.42,0 8,0Z" fill="white" transform="scale(0.9)"/>
+    </g>
+    <text x="140" y="420" text-anchor="middle" font-size="12.5" font-weight="700" fill="white">GitHub</text>
+    <text x="140" y="436" text-anchor="middle" font-size="9" fill="#9ca3af">nemarDatasets org</text>
+    <line x1="75" y1="445" x2="205" y2="445" stroke="#374151" stroke-width="0.5"/>
+    <text x="140" y="459" text-anchor="middle" font-size="8.5" fill="#d1d5db">Dataset repos (nm######)</text>
+    <text x="140" y="470" text-anchor="middle" font-size="8.5" fill="#d1d5db">Branch protection + CI</text>
+  </g>
+
+  <!-- S3 -->
+  <g filter="url(#shadow)">
+    <rect x="248" y="396" width="160" height="80" rx="10" fill="url(#s3Grad)"/>
+    <text x="328" y="420" text-anchor="middle" font-size="12.5" font-weight="700" fill="white">Amazon S3</text>
+    <text x="328" y="436" text-anchor="middle" font-size="9" fill="#bbf7d0">s3://nemar/</text>
+    <line x1="268" y1="445" x2="388" y2="445" stroke="#166534" stroke-width="0.5"/>
+    <text x="328" y="459" text-anchor="middle" font-size="8.5" fill="#dcfce7">git-annex blobs (objects/)</text>
+    <text x="328" y="470" text-anchor="middle" font-size="8.5" fill="#dcfce7">Versions + archives</text>
+  </g>
+
+  <!-- EZID -->
+  <g filter="url(#shadow)">
+    <rect x="435" y="396" width="150" height="80" rx="10" fill="url(#doiGrad)"/>
+    <text x="510" y="420" text-anchor="middle" font-size="12.5" font-weight="700" fill="white">EZID</text>
+    <text x="510" y="436" text-anchor="middle" font-size="9" fill="#ddd6fe">doi:10.82901/NEMAR.</text>
+    <line x1="455" y1="445" x2="565" y2="445" stroke="#5b21b6" stroke-width="0.5"/>
+    <text x="510" y="459" text-anchor="middle" font-size="8.5" fill="#ede9fe">Concept + version DOIs</text>
+    <text x="510" y="470" text-anchor="middle" font-size="8.5" fill="#ede9fe">DataCite metadata</text>
+  </g>
+
+  <!-- nemar.org -->
+  <g filter="url(#shadow)">
+    <rect x="598" y="396" width="100" height="80" rx="10" fill="url(#webGrad)"/>
+    <text x="648" y="420" text-anchor="middle" font-size="12.5" font-weight="700" fill="white">nemar.org</text>
+    <text x="648" y="436" text-anchor="middle" font-size="9" fill="#a5f3fc">Web interface</text>
+    <line x1="608" y1="445" x2="688" y2="445" stroke="#155e75" stroke-width="0.5"/>
+    <text x="648" y="459" text-anchor="middle" font-size="8.5" fill="#cffafe">Data explorer</text>
+    <text x="648" y="470" text-anchor="middle" font-size="8.5" fill="#cffafe">PHP datapipeline</text>
+  </g>
+
+  <!-- ═══════ ROW 5: GitHub Actions + Processing ═══════ -->
+
+  <!-- Arrow: GitHub -> GH Actions -->
+  <line x1="140" y1="476" x2="140" y2="510" stroke="#94a3b8" stroke-width="1.5"/>
+  <polygon points="134,506 140,516 146,506" fill="#94a3b8"/>
+
+  <!-- GitHub Actions -->
+  <g filter="url(#shadowSm)">
+    <rect x="55" y="518" width="170" height="48" rx="8" fill="white" stroke="#d1d5db" stroke-width="1"/>
+    <circle cx="78" cy="542" r="8" fill="#2563eb" opacity="0.12"/>
+    <text x="78" y="545" text-anchor="middle" font-size="10" fill="#2563eb">&#9654;</text>
+    <text x="148" y="537" text-anchor="middle" font-size="11" font-weight="600" fill="#1e293b">GitHub Actions</text>
+    <text x="148" y="552" text-anchor="middle" font-size="8.5" fill="#64748b">BIDS validation, S3 copy, LLM enrichment</text>
+  </g>
+
+  <!-- Dashed arrow: GH Actions -> S3 (staging copy) -->
+  <path d="M225,536 L248,476" fill="none" stroke="#94a3b8" stroke-width="1.2" stroke-dasharray="4,3"/>
+  <polygon points="244,482 248,472 252,482" fill="#94a3b8"/>
+  <text x="250" y="510" font-size="7.5" fill="#94a3b8" transform="rotate(-69, 250, 510)">staging</text>
+
+  <!-- Processing Pipeline -->
+  <g filter="url(#shadowSm)">
+    <rect x="260" y="518" width="200" height="48" rx="8" fill="white" stroke="#d1d5db" stroke-width="1"/>
+    <rect x="270" y="532" width="8" height="8" rx="2" fill="#dc2626" opacity="0.7"/>
+    <text x="368" y="537" text-anchor="middle" font-size="11" font-weight="600" fill="#1e293b">NEMAR Pipeline</text>
+    <text x="368" y="552" text-anchor="middle" font-size="8.5" fill="#64748b">MATLAB / EEGLAB processing</text>
+  </g>
+
+  <!-- ═══════ ROW 6: Supporting Tools ═══════ -->
+
+  <rect x="40" y="594" width="640" height="62" rx="8" fill="white" fill-opacity="0.5" stroke="#cbd5e1" stroke-width="1" stroke-dasharray="6,3"/>
+  <text x="60" y="609" font-size="9" font-weight="600" fill="#64748b">Supporting Tools</text>
+
+  <g filter="url(#shadowSm)">
+    <rect x="60" y="616" width="130" height="30" rx="6" fill="white" stroke="#d1d5db" stroke-width="1"/>
+    <text x="125" y="634" text-anchor="middle" font-size="10" font-weight="600" fill="#334155">nemar-tools</text>
+    <text x="125" y="644" text-anchor="middle" font-size="7.5" fill="#94a3b8">Python publishing</text>
+  </g>
+
+  <g filter="url(#shadowSm)">
+    <rect x="210" y="616" width="130" height="30" rx="6" fill="white" stroke="#d1d5db" stroke-width="1"/>
+    <text x="275" y="634" text-anchor="middle" font-size="10" font-weight="600" fill="#334155">nemar-metadata</text>
+    <text x="275" y="644" text-anchor="middle" font-size="7.5" fill="#94a3b8">Dataset JSON</text>
+  </g>
+
+  <g filter="url(#shadowSm)">
+    <rect x="360" y="616" width="130" height="30" rx="6" fill="white" stroke="#d1d5db" stroke-width="1"/>
+    <text x="425" y="634" text-anchor="middle" font-size="10" font-weight="600" fill="#334155">neuroschema</text>
+    <text x="425" y="644" text-anchor="middle" font-size="7.5" fill="#94a3b8">JSON Schema</text>
+  </g>
+
+  <g filter="url(#shadowSm)">
+    <rect x="510" y="616" width="130" height="30" rx="6" fill="white" stroke="#d1d5db" stroke-width="1"/>
+    <text x="575" y="634" text-anchor="middle" font-size="10" font-weight="600" fill="#334155">EEGDash</text>
+    <text x="575" y="644" text-anchor="middle" font-size="7.5" fill="#94a3b8">Visualization</text>
+  </g>
+
+  <!-- ═══════ LEGEND ═══════ -->
+  <g transform="translate(40, 674)">
+    <text x="0" y="0" font-size="8.5" fill="#94a3b8">
+      <tspan font-weight="600">Data flow:</tspan>
+      CLI uploads datasets via API; backend orchestrates GitHub repos, S3 storage, and DOI registration
+    </text>
+  </g>
+</svg>
