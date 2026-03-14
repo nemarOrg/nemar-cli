@@ -88,6 +88,17 @@ describe("extractDoisFromBids", () => {
     expect(result[1].doi).toBe("10.5678/def");
   });
 
+  test("strips trailing punctuation from HowToAcknowledge DOIs", () => {
+    const result = extractDoisFromBids({
+      HowToAcknowledge:
+        'See https://doi.org/10.31234/osf.io/4azqm. Also cite 10.1234/foo; and 10.5678/bar:',
+    });
+    expect(result).toHaveLength(3);
+    expect(result[0].doi).toBe("10.31234/osf.io/4azqm");
+    expect(result[1].doi).toBe("10.1234/foo");
+    expect(result[2].doi).toBe("10.5678/bar");
+  });
+
   test("deduplicates DOIs between HowToAcknowledge and ReferencesAndLinks", () => {
     const result = extractDoisFromBids({
       HowToAcknowledge: 'Cite https://doi.org/10.31234/osf.io/4azqm',
@@ -398,14 +409,10 @@ describe("discoverOrcidsFromReferencedDois", () => {
 
     // The preprint DOI should be found in HowToAcknowledge
     expect(result.totalDoisQueried).toBeGreaterThanOrEqual(1);
-    // Should find at least some author ORCIDs from the preprint
-    // (Crossref/DataCite coverage varies, but the DOI should resolve)
-    if (Object.keys(result.discoveries).length > 0) {
-      // Verify ORCID format for any discovered authors
-      for (const discovery of Object.values(result.discoveries)) {
-        expect(discovery.orcid).toMatch(/^\d{4}-\d{4}-\d{4}-[\dX]{4}$/);
-      }
-    }
+    // DataCite+Crossref merged results: ORCIDs for Zhang and Stewart
+    expect(Object.keys(result.discoveries).length).toBeGreaterThanOrEqual(2);
+    expect(result.discoveries["Wendy Zhang"]?.orcid).toBe("0000-0002-3586-2626");
+    expect(result.discoveries["Andrew X. Stewart"]?.orcid).toBe("0000-0002-9402-4411");
   });
 
   test("accepts additionalDois for second-pass discovery", async () => {

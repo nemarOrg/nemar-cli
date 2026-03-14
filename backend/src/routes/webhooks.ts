@@ -19,6 +19,7 @@ import {
   discoverOrcidsFromReferencedDois,
   extractDoisFromBids,
   extractDoisFromRelatedIdentifiers,
+  mergeOrcidDiscoveries,
 } from "../services/doi-orcid-discovery.js";
 import {
   buildOrcidEnrichment,
@@ -747,20 +748,23 @@ webhooks.post("/llm-enrich", async (c) => {
         // but the ORCID data is too valuable to silently discard.
         try {
           const recoveredAuthors: Record<string, { orcid?: string }> = {};
-          // Match "Author Name": { ... "orcid": "XXXX-XXXX-XXXX-XXXX" ... }
-          const orcidPattern =
-            /"([^"]+)":\s*\{[^}]*"orcid":\s*"(\d{4}-\d{4}-\d{4}-[\dX]{4})"[^}]*\}/g;
-          for (
-            let match = orcidPattern.exec(nemarContent);
-            match !== null;
-            match = orcidPattern.exec(nemarContent)
-          ) {
-            recoveredAuthors[match[1]] = { orcid: match[2] };
+          // Match "orcid": "XXXX-XXXX-XXXX-XXXX" and find the nearest preceding
+          // quoted key that looks like an author name. This approach is robust to
+          // nested objects (affiliations) unlike a single-regex approach.
+          const orcidValues = nemarContent.matchAll(/"orcid":\s*"(\d{4}-\d{4}-\d{4}-[\dX]{4})"/g);
+          for (const match of orcidValues) {
+            // Look backwards from the orcid match to find the author name key
+            const before = nemarContent.slice(0, match.index);
+            const nameMatch = before.match(/"([^"]+)":\s*\{[^{}]*$/);
+            if (nameMatch) {
+              recoveredAuthors[nameMatch[1]] = { orcid: match[1] };
+            }
           }
-          if (Object.keys(recoveredAuthors).length > 0) {
+          const recoveredCount = Object.keys(recoveredAuthors).length;
+          if (recoveredCount > 0) {
             existingMetadata = { version: "2.0", authors: recoveredAuthors };
             console.log(
-              `[llm-enrich] Recovered ${Object.keys(recoveredAuthors).length} author ORCIDs from corrupt JSON for ${dataset_id}`,
+              `[llm-enrich] Recovered ${recoveredCount} author ORCIDs from corrupt JSON for ${dataset_id}`,
             );
           } else {
             console.warn(
@@ -849,15 +853,10 @@ webhooks.post("/llm-enrich", async (c) => {
       const orcidResult = await discoverOrcidsFromReferencedDois(bidsDescription, seeded.authors);
       orcidDiscoveryCount = Object.keys(orcidResult.discoveries).length;
       if (orcidDiscoveryCount > 0) {
-        const authors = { ...seeded.authors };
-        for (const [name, discovery] of Object.entries(orcidResult.discoveries)) {
-          authors[name] = {
-            ...authors[name],
-            orcid: discovery.orcid,
-            affiliations: discovery.affiliations ?? authors[name]?.affiliations,
-          };
-        }
-        seededWithOrcids = { ...seeded, authors };
+        seededWithOrcids = {
+          ...seeded,
+          authors: mergeOrcidDiscoveries(seeded.authors || {}, orcidResult.discoveries),
+        };
         console.log(
           `[llm-enrich] Stage 1b (ORCID discovery): ${dataset_id} - found ${orcidDiscoveryCount} ORCIDs from ${orcidResult.totalDoisQueried} DOIs`,
         );
@@ -914,22 +913,19 @@ webhooks.post("/llm-enrich", async (c) => {
       const alreadySeen = new Set(extractDoisFromBids(bidsDescription).map((e) => e.doi));
       const llmDois = extractDoisFromRelatedIdentifiers(enrichedRels, alreadySeen);
       if (llmDois.length > 0) {
+        // Only pass Authors (not DOI fields) to avoid re-querying BIDS DOIs
+        // already resolved in Stage 1b; only llmDois should be queried
         const secondPass = await discoverOrcidsFromReferencedDois(
-          bidsDescription,
+          { Authors: bidsDescription.Authors },
           meshValidated.authors,
           llmDois,
         );
         const newOrcids = Object.keys(secondPass.discoveries).length;
         if (newOrcids > 0) {
-          const authors = { ...meshValidated.authors };
-          for (const [name, discovery] of Object.entries(secondPass.discoveries)) {
-            authors[name] = {
-              ...authors[name],
-              orcid: discovery.orcid,
-              affiliations: discovery.affiliations ?? authors[name]?.affiliations,
-            };
-          }
-          meshValidated = { ...meshValidated, authors };
+          meshValidated = {
+            ...meshValidated,
+            authors: mergeOrcidDiscoveries(meshValidated.authors || {}, secondPass.discoveries),
+          };
           console.log(
             `[llm-enrich] Stage 2c (ORCID pass 2): ${dataset_id} - found ${newOrcids} ORCIDs from ${llmDois.length} LLM-discovered DOIs`,
           );

@@ -108,10 +108,12 @@ export function extractDoisFromBids(bidsDescription: Record<string, unknown>): E
   // HowToAcknowledge (free-text string that commonly embeds citation DOIs)
   if (typeof bidsDescription.HowToAcknowledge === "string") {
     const text = bidsDescription.HowToAcknowledge;
-    // Match DOIs in URL form (doi.org/...) or raw form (10.XXXX/...)
+    // Match DOIs after doi.org/ (anywhere) or in raw form (10.NNNNN/...)
+    // when preceded by whitespace or start of string
     const doiMatches = text.matchAll(/(?:doi\.org\/|(?<=\s|^))(10\.\d{4,}\/[^\s,)]+)/g);
     for (const m of doiMatches) {
-      addDoi(m[1], "HowToAcknowledge");
+      // Strip trailing punctuation common in prose (periods, semicolons, colons)
+      addDoi(m[1].replace(/[.;:]+$/, ""), "HowToAcknowledge");
     }
   }
 
@@ -122,6 +124,9 @@ export function extractDoisFromBids(bidsDescription: Record<string, unknown>): E
  * Extract DOIs from enriched related_identifiers (for the second ORCID
  * discovery pass after LLM enrichment). Only returns DOIs not already
  * present in the BIDS extraction.
+ *
+ * Note: mutates the `alreadyExtracted` set by adding newly extracted DOIs,
+ * so subsequent calls will not re-extract them.
  */
 export function extractDoisFromRelatedIdentifiers(
   relatedIdentifiers: RelatedIdentifierEntry[],
@@ -129,6 +134,7 @@ export function extractDoisFromRelatedIdentifiers(
 ): ExtractedDoi[] {
   const dois: ExtractedDoi[] = [];
   for (const ri of relatedIdentifiers) {
+    if (!ri || typeof ri.identifier !== "string") continue;
     if (ri.identifier_type !== "DOI") continue;
     const normalized = normalizeDoi(ri.identifier).trim();
     if (DOI_PATTERN.test(normalized) && !alreadyExtracted.has(normalized)) {
@@ -252,7 +258,25 @@ export async function queryCrossrefDoi(doi: string): Promise<DataCiteDoiResult |
  * Query a DOI against DataCite first, then fall back to Crossref.
  */
 async function queryDoi(doi: string): Promise<DataCiteDoiResult | null> {
-  return (await queryDataCiteDoi(doi)) ?? (await queryCrossrefDoi(doi));
+  const dcResult = await queryDataCiteDoi(doi);
+  const crResult = await queryCrossrefDoi(doi);
+  if (!dcResult) return crResult;
+  if (!crResult) return dcResult;
+
+  // Merge: supplement DataCite creators with ORCIDs from Crossref when missing
+  for (const dc of dcResult.creators) {
+    const hasOrcid = dc.nameIdentifiers?.some((ni) => ni.nameIdentifierScheme === "ORCID");
+    if (hasOrcid || !dc.familyName) continue;
+
+    const crMatch = crResult.creators.find(
+      (cr) => cr.familyName && normalizeStr(cr.familyName) === normalizeStr(dc.familyName!),
+    );
+    const crOrcid = crMatch?.nameIdentifiers?.find((ni) => ni.nameIdentifierScheme === "ORCID");
+    if (crOrcid) {
+      dc.nameIdentifiers = [...(dc.nameIdentifiers ?? []), crOrcid];
+    }
+  }
+  return dcResult;
 }
 
 // ---------------------------------------------------------------------------
@@ -263,6 +287,7 @@ function normalizeStr(s: string): string {
   return s
     .normalize("NFD")
     .replace(/\p{Diacritic}/gu, "") // strip accents
+    .replace(/\./g, "") // strip periods (common in initials like "J." or trailing "Luck.")
     .toLowerCase()
     .trim();
 }
@@ -367,6 +392,29 @@ export function matchCreatorsToAuthors(
   }
 
   return results;
+}
+
+// ---------------------------------------------------------------------------
+// ORCID merge helper
+// ---------------------------------------------------------------------------
+
+/**
+ * Merge ORCID discoveries into an existing authors map, returning a new map.
+ * Preserves existing affiliations when the discovery has none.
+ */
+export function mergeOrcidDiscoveries(
+  authors: Record<string, AuthorEnrichmentV2>,
+  discoveries: Record<string, OrcidDiscovery>,
+): Record<string, AuthorEnrichmentV2> {
+  const merged = { ...authors };
+  for (const [name, discovery] of Object.entries(discoveries)) {
+    merged[name] = {
+      ...merged[name],
+      orcid: discovery.orcid,
+      affiliations: discovery.affiliations ?? merged[name]?.affiliations,
+    };
+  }
+  return merged;
 }
 
 // ---------------------------------------------------------------------------
