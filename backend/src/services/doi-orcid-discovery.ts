@@ -1,12 +1,16 @@
 /**
- * Auto-discover ORCIDs from DOIs referenced in dataset_description.json.
+ * Auto-discover ORCIDs from DOIs referenced in dataset_description.json
+ * and enriched metadata.
  *
- * Queries the DataCite public API (no auth) to resolve DOIs and extract
- * creator ORCIDs and affiliations, then matches them against the dataset's
- * BIDS Authors list by name.
+ * Queries the DataCite and Crossref public APIs (no auth) to resolve DOIs
+ * and extract creator ORCIDs and affiliations, then matches them against
+ * the dataset's BIDS Authors list by name.
  */
 
-import type { AuthorEnrichmentV2 } from "../../../shared/datacite-constants.js";
+import type {
+  AuthorEnrichmentV2,
+  RelatedIdentifierEntry,
+} from "../../../shared/datacite-constants.js";
 import { normalizeDoi, parseAuthorName } from "./datacite.js";
 
 // ---------------------------------------------------------------------------
@@ -15,7 +19,7 @@ import { normalizeDoi, parseAuthorName } from "./datacite.js";
 
 export interface ExtractedDoi {
   doi: string;
-  source: "ReferencesAndLinks" | "SourceDatasets";
+  source: "ReferencesAndLinks" | "SourceDatasets" | "HowToAcknowledge" | "RelatedIdentifiers";
 }
 
 export interface DataCiteCreator {
@@ -101,6 +105,37 @@ export function extractDoisFromBids(bidsDescription: Record<string, unknown>): E
     }
   }
 
+  // HowToAcknowledge (free-text string that commonly embeds citation DOIs)
+  if (typeof bidsDescription.HowToAcknowledge === "string") {
+    const text = bidsDescription.HowToAcknowledge;
+    // Match DOIs in URL form (doi.org/...) or raw form (10.XXXX/...)
+    const doiMatches = text.matchAll(/(?:doi\.org\/|(?<=\s|^))(10\.\d{4,}\/[^\s,)]+)/g);
+    for (const m of doiMatches) {
+      addDoi(m[1], "HowToAcknowledge");
+    }
+  }
+
+  return dois;
+}
+
+/**
+ * Extract DOIs from enriched related_identifiers (for the second ORCID
+ * discovery pass after LLM enrichment). Only returns DOIs not already
+ * present in the BIDS extraction.
+ */
+export function extractDoisFromRelatedIdentifiers(
+  relatedIdentifiers: RelatedIdentifierEntry[],
+  alreadyExtracted: Set<string>,
+): ExtractedDoi[] {
+  const dois: ExtractedDoi[] = [];
+  for (const ri of relatedIdentifiers) {
+    if (ri.identifier_type !== "DOI") continue;
+    const normalized = normalizeDoi(ri.identifier).trim();
+    if (DOI_PATTERN.test(normalized) && !alreadyExtracted.has(normalized)) {
+      alreadyExtracted.add(normalized);
+      dois.push({ doi: normalized, source: "RelatedIdentifiers" });
+    }
+  }
   return dois;
 }
 
@@ -340,11 +375,19 @@ export function matchCreatorsToAuthors(
 
 const BATCH_SIZE = 5;
 
+/**
+ * Discover ORCIDs from DOIs in BIDS fields and optionally from additional
+ * DOIs (e.g. LLM-discovered related_identifiers).
+ */
 export async function discoverOrcidsFromReferencedDois(
   bidsDescription: Record<string, unknown>,
   existingAuthors?: Record<string, AuthorEnrichmentV2>,
+  additionalDois?: ExtractedDoi[],
 ): Promise<OrcidDiscoveryResult> {
   const extracted = extractDoisFromBids(bidsDescription);
+  if (additionalDois?.length) {
+    extracted.push(...additionalDois);
+  }
   if (extracted.length === 0) {
     return { discoveries: {}, unresolvedDois: [], totalDoisQueried: 0 };
   }

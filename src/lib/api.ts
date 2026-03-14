@@ -1191,6 +1191,10 @@ export async function approvePublication(
   let s3_lock_offset: number | undefined;
   let result: PublishApproveResponse;
   const accumulatedStepResults: StepResult[] = [];
+  // After the first call completes all publish steps, subsequent calls
+  // must use resume=true to only run the s3_lock step (not re-run
+  // update_metadata, update_readme, etc. which would create duplicate commits)
+  let shouldResume = resume;
 
   // Loop to handle S3 lock pagination (CF Workers subrequest limit)
   do {
@@ -1200,7 +1204,7 @@ export async function approvePublication(
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          resume,
+          resume: shouldResume,
           sandbox,
           s3_lock_offset,
           skip_ci_check: skipCiCheck,
@@ -1215,6 +1219,7 @@ export async function approvePublication(
 
     if (result.hasMore && result.s3_lock_offset !== undefined) {
       s3_lock_offset = result.s3_lock_offset;
+      shouldResume = true;
     } else {
       break;
     }

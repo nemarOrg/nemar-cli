@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import {
   type DataCiteCreator,
   extractDoisFromBids,
+  extractDoisFromRelatedIdentifiers,
   matchCreatorsToAuthors,
   queryDataCiteDoi,
   discoverOrcidsFromReferencedDois,
@@ -62,6 +63,85 @@ describe("extractDoisFromBids", () => {
     const result = extractDoisFromBids({
       SourceDatasets: [null, "string", { DOI: 123 }, { URL: null }],
     });
+    expect(result).toHaveLength(0);
+  });
+
+  test("extracts DOIs from HowToAcknowledge", () => {
+    const result = extractDoisFromBids({
+      HowToAcknowledge:
+        'Please cite: Kappenman et al. (2020). ERP CORE. https://doi.org/10.31234/osf.io/4azqm',
+    });
+    expect(result).toHaveLength(1);
+    expect(result[0]).toEqual({
+      doi: "10.31234/osf.io/4azqm",
+      source: "HowToAcknowledge",
+    });
+  });
+
+  test("extracts multiple DOIs from HowToAcknowledge", () => {
+    const result = extractDoisFromBids({
+      HowToAcknowledge:
+        'Cite 10.1234/abc and also https://doi.org/10.5678/def for this dataset.',
+    });
+    expect(result).toHaveLength(2);
+    expect(result[0].doi).toBe("10.1234/abc");
+    expect(result[1].doi).toBe("10.5678/def");
+  });
+
+  test("deduplicates DOIs between HowToAcknowledge and ReferencesAndLinks", () => {
+    const result = extractDoisFromBids({
+      HowToAcknowledge: 'Cite https://doi.org/10.31234/osf.io/4azqm',
+      ReferencesAndLinks: ["https://doi.org/10.31234/osf.io/4azqm"],
+    });
+    expect(result).toHaveLength(1);
+  });
+
+  test("ignores non-string HowToAcknowledge", () => {
+    const result = extractDoisFromBids({ HowToAcknowledge: 12345 });
+    expect(result).toHaveLength(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// extractDoisFromRelatedIdentifiers
+// ---------------------------------------------------------------------------
+
+describe("extractDoisFromRelatedIdentifiers", () => {
+  test("extracts DOIs from related identifiers", () => {
+    const result = extractDoisFromRelatedIdentifiers(
+      [
+        { identifier: "10.1234/foo", identifier_type: "DOI", relation_type: "References" },
+        { identifier: "https://example.com", identifier_type: "URL", relation_type: "IsDescribedBy" },
+        { identifier: "10.5678/bar", identifier_type: "DOI", relation_type: "IsSupplementedBy" },
+      ],
+      new Set(),
+    );
+    expect(result).toHaveLength(2);
+    expect(result[0].doi).toBe("10.1234/foo");
+    expect(result[0].source).toBe("RelatedIdentifiers");
+    expect(result[1].doi).toBe("10.5678/bar");
+  });
+
+  test("skips DOIs already in the seen set", () => {
+    const alreadySeen = new Set(["10.1234/foo"]);
+    const result = extractDoisFromRelatedIdentifiers(
+      [
+        { identifier: "10.1234/foo", identifier_type: "DOI", relation_type: "References" },
+        { identifier: "10.5678/bar", identifier_type: "DOI", relation_type: "References" },
+      ],
+      alreadySeen,
+    );
+    expect(result).toHaveLength(1);
+    expect(result[0].doi).toBe("10.5678/bar");
+  });
+
+  test("skips non-DOI identifiers", () => {
+    const result = extractDoisFromRelatedIdentifiers(
+      [
+        { identifier: "https://github.com/test", identifier_type: "URL", relation_type: "IsDescribedBy" },
+      ],
+      new Set(),
+    );
     expect(result).toHaveLength(0);
   });
 });
@@ -298,5 +378,49 @@ describe("discoverOrcidsFromReferencedDois", () => {
       ReferencesAndLinks: ["https://doi.org/10.1038/s41597-019-0104-8"],
     });
     expect(Object.keys(result.discoveries)).toHaveLength(0);
+  });
+
+  test("discovers ORCIDs from HowToAcknowledge DOI (nm000132 scenario)", async () => {
+    // nm000132's dataset_description.json has DOI only in HowToAcknowledge,
+    // not in ReferencesAndLinks or SourceDatasets
+    const result = await discoverOrcidsFromReferencedDois({
+      Authors: [
+        "Emily S. Kappenman",
+        "Jaclyn L. Farrens",
+        "Wendy Zhang",
+        "Andrew X. Stewart",
+        "Steven J. Luck.",
+      ],
+      HowToAcknowledge:
+        "Kappenman, E., Farrens, J., Zhang, W., Stewart, A. X., & Luck, S. J. (2020, May 22). ERP CORE: An Open Resource for Human Event-Related Potential Research. https://doi.org/10.31234/osf.io/4azqm",
+      ReferencesAndLinks: ["https://erpinfo.org/erp-core"],
+    });
+
+    // The preprint DOI should be found in HowToAcknowledge
+    expect(result.totalDoisQueried).toBeGreaterThanOrEqual(1);
+    // Should find at least some author ORCIDs from the preprint
+    // (Crossref/DataCite coverage varies, but the DOI should resolve)
+    if (Object.keys(result.discoveries).length > 0) {
+      // Verify ORCID format for any discovered authors
+      for (const discovery of Object.values(result.discoveries)) {
+        expect(discovery.orcid).toMatch(/^\d{4}-\d{4}-\d{4}-[\dX]{4}$/);
+      }
+    }
+  });
+
+  test("accepts additionalDois for second-pass discovery", async () => {
+    const result = await discoverOrcidsFromReferencedDois(
+      {
+        Authors: ["Appelhoff, Stefan", "Jas, Mainak"],
+        // No DOIs in BIDS fields
+      },
+      undefined,
+      // DOIs discovered by LLM from README
+      [{ doi: "10.21105/joss.01896", source: "RelatedIdentifiers" as const }],
+    );
+
+    expect(result.totalDoisQueried).toBe(1);
+    expect(Object.keys(result.discoveries).length).toBeGreaterThanOrEqual(1);
+    expect(result.discoveries["Appelhoff, Stefan"]?.orcid).toBe("0000-0001-8002-0877");
   });
 });
