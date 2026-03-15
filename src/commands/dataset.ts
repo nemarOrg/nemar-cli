@@ -1151,6 +1151,16 @@ Examples:
 
     spinner.succeed("git-annex dataset initialized");
 
+    // Inform user that the adjusted branch name is normal
+    const postInitBranch = await getCurrentBranch(absolutePath);
+    if (postInitBranch?.startsWith("adjusted/")) {
+      console.log(chalk.dim(`  Note: Your local branch is "${postInitBranch}".`));
+      console.log(
+        chalk.dim("  This is normal; it keeps files unlocked so you can work with them directly."),
+      );
+      console.log(chalk.dim('  Pushes will go to the "main" branch on GitHub automatically.'));
+    }
+
     // Ensure .nemar/ is gitignored (internal config, not dataset content)
     try {
       const gitignorePath = resolve(absolutePath, ".gitignore");
@@ -3627,7 +3637,10 @@ Examples:
 
     // Public datasets have branch protection enabled; warn early instead of a cryptic git error
     const currentBranchName = await getCurrentBranch(cwd);
-    const isOnMain = currentBranchName === "main" || currentBranchName === "master";
+    const isOnMain =
+      currentBranchName === "main" ||
+      currentBranchName === "master" ||
+      (currentBranchName?.startsWith("adjusted/main") ?? false);
     if (isOnMain && !options.pr) {
       const pushDatasetIdCheck = await getDatasetIdFromRemote(cwd);
       if (pushDatasetIdCheck && isAuthenticated()) {

@@ -1183,6 +1183,11 @@ export async function pushToGitHub(
         } else {
           return { success: false, error: "Could not detect current branch" };
         }
+      } else if (currentBranch.startsWith("adjusted/")) {
+        // git-annex adjusted branches (e.g. "adjusted/main(unlocked)") track a base branch.
+        // Extract the base branch name and push with the correct refspec.
+        const baseBranch = currentBranch.replace(/^adjusted\//, "").replace(/\(.*\)$/, "");
+        branchToPush = `${currentBranch}:${baseBranch}`;
       } else {
         branchToPush = currentBranch;
       }
