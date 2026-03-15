@@ -263,7 +263,10 @@ async function sandboxAction(): Promise<void> {
     config.username && config.email ? { name: config.username, email: config.email } : undefined;
 
   try {
-    await initDataset(datasetPath, { author });
+    const initResult = await initDataset(datasetPath, { author });
+    if (!initResult.success) {
+      throw new Error(initResult.error || "Failed to initialize dataset");
+    }
     await configureLargefiles(datasetPath);
     await configureGitHubRemote(datasetPath, sshUrl);
     initSpinner.succeed("Repository initialized");

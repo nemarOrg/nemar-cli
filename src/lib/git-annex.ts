@@ -390,7 +390,7 @@ export async function initDataset(
     // Create initial commit so git-annex adjust and branch detection work.
     // git-annex adjust --unlock requires at least one commit on the working branch,
     // and git rev-parse --abbrev-ref HEAD fails with no commits.
-    const { exitCode: commitExitCode } = await runCommand(
+    const { stderr: commitStderr, exitCode: commitExitCode } = await runCommand(
       ["git", "commit", "--allow-empty", "-m", "Initialize dataset"],
       {
         cwd: path,
@@ -399,7 +399,7 @@ export async function initDataset(
     );
 
     if (commitExitCode !== 0) {
-      return { success: false, error: "Failed to create initial commit" };
+      return { success: false, error: commitStderr.trim() || "Failed to create initial commit" };
     }
 
     // Use unlocked mode so data files remain as regular files (not symlinks)
@@ -2265,8 +2265,9 @@ export async function ensureLocalMainBranch(
     return true;
   }
 
-  // Accept git-annex adjusted branches based on main (e.g. "adjusted/main(unlocked)")
-  if (currentBranch.startsWith("adjusted/main")) {
+  // Accept "main" or git-annex adjusted branches that track main (e.g. "adjusted/main(unlocked)").
+  // Adjusted branches are working copies that track "main" under the hood; renaming them would break git-annex.
+  if (currentBranch === "main" || currentBranch.startsWith("adjusted/main")) {
     return true;
   }
 
