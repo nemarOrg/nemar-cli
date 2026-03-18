@@ -22,6 +22,7 @@ import {
   type DoiProvider,
   type DoiResult,
   buildOrcidEnrichment,
+  createEzidVersionDoi,
   createConceptDoi as dispatchCreateConceptDoi,
   parseDoiProvider,
   resolveEzidAuth,
@@ -3764,70 +3765,123 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
   }
 
   // Step: version_doi - Create version DOI record and manifest via webhook
-  // This calls the publish-version-doi webhook endpoint directly so we don't
-  // depend solely on the GitHub Actions version-doi.yml workflow (which can be
-  // skipped if the tagged commit contains [skip ci]).
+  // This creates the version DOI record and manifest directly (same logic as
+  // the publish-version-doi webhook). We can't self-fetch in Cloudflare Workers,
+  // so we call the service functions directly. The CI workflow (version-doi.yml)
+  // serves as a fallback for PR/patch scenarios.
   if (stepsToRun.includes("version_doi")) {
     try {
       await startStep("version_doi");
-
-      const webhookSecret = c.env.GITHUB_WEBHOOK_SECRET;
-      if (!webhookSecret) {
-        throw new Error("GITHUB_WEBHOOK_SECRET not configured");
-      }
 
       const vtResult = await getVersionTag("version_doi");
       if (vtResult instanceof Response) {
         throw new Error("Could not resolve version tag");
       }
 
-      const { version, tag } = vtResult;
-      const releaseUrl = `https://github.com/nemarDatasets/${repoName}/releases/tag/${tag}`;
-      const webhookUrl = new URL("/nemar/webhooks/publish-version-doi", c.req.url);
+      const { version } = vtResult;
 
-      const { result: webhookResult, attempts: versionDoiAttempts } = await withRetry(async () => {
-        const resp = await fetch(webhookUrl.toString(), {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "X-Webhook-Token": webhookSecret,
-          },
-          body: JSON.stringify({
-            dataset_id: datasetId,
-            version,
-            release_url: releaseUrl,
-          }),
-        });
+      // Re-read dataset to get latest state (concept DOI may have been set in earlier steps)
+      const freshDataset = await db
+        .prepare("SELECT * FROM datasets WHERE dataset_id = ?")
+        .bind(datasetId)
+        .first<{
+          id: number;
+          dataset_id: string;
+          name: string;
+          github_repo: string | null;
+          concept_doi: string | null;
+          ezid_identifier: string | null;
+          doi_provider: string | null;
+        }>();
 
-        let respBody: Record<string, unknown>;
-        try {
-          respBody = (await resp.json()) as Record<string, unknown>;
-        } catch {
-          const text = await resp.text().catch(() => "(unreadable)");
-          throw new Error(
-            `Webhook returned ${resp.status} with non-JSON body: ${text.slice(0, 200)}`,
-          );
-        }
-
-        if (!resp.ok) {
-          throw new Error(`Webhook returned ${resp.status}: ${JSON.stringify(respBody)}`);
-        }
-
-        return respBody;
-      }, "version_doi");
-
-      if (webhookResult.skipped) {
-        const skipReason = String(webhookResult.error || "skipped by webhook");
-        console.info(`[publish] version_doi skipped for ${datasetId}: ${skipReason}`);
-        await updateProgress("version_doi", `Skipped: ${skipReason}`);
-      } else if (webhookResult.version_doi) {
-        console.log(`[publish] Version DOI created for ${datasetId}: ${webhookResult.version_doi}`);
-        await updateProgress("version_doi", undefined, versionDoiAttempts);
+      if (!freshDataset?.ezid_identifier) {
+        console.info(`[publish] version_doi skipped for ${datasetId}: no EZID identifier`);
+        await updateProgress("version_doi", "Skipped: no EZID identifier");
+      } else if (!freshDataset.concept_doi) {
+        console.info(`[publish] version_doi skipped for ${datasetId}: no concept DOI`);
+        await updateProgress("version_doi", "Skipped: no concept DOI");
       } else {
-        console.warn(
-          `[publish] version_doi returned unexpected response for ${datasetId}: ${JSON.stringify(webhookResult)}`,
+        // Read BIDS + NEMAR metadata from the release tag
+        const repoMeta = await readRepoMetadata(
+          repoName,
+          pat,
+          undefined,
+          freshDataset.name,
+          `v${version}`,
         );
-        await updateProgress("version_doi", undefined, versionDoiAttempts);
+        for (const w of repoMeta.warnings) {
+          console.warn("[publish:version_doi]", w);
+        }
+
+        // Query existing version DOIs for concept DOI HasVersion relations
+        const versionRows = await db
+          .prepare("SELECT doi FROM dataset_versions WHERE dataset_id = ?")
+          .bind(datasetId)
+          .all<{ doi: string }>();
+        const existingVersionDois = versionRows.results.map((r) => r.doi);
+
+        // Auto-detect sandbox from EZID test shoulder prefix
+        const sandboxPrefix = TEST_SHOULDER.replace(/^doi:/, "").split("/")[0];
+        const isSandboxDoi = freshDataset.ezid_identifier.includes(sandboxPrefix);
+
+        const result = await createEzidVersionDoi(
+          {
+            EZID_USERNAME: c.env.EZID_USERNAME,
+            EZID_PASSWORD: c.env.EZID_PASSWORD,
+            EZID_SANDBOX_USERNAME: c.env.EZID_SANDBOX_USERNAME,
+            EZID_SANDBOX_PASSWORD: c.env.EZID_SANDBOX_PASSWORD,
+          },
+          {
+            datasetId,
+            conceptIdentifier: freshDataset.ezid_identifier,
+            version,
+            bidsDescription: repoMeta.bidsDescription,
+            githubRepo: freshDataset.github_repo || `nemarDatasets/${repoName}`,
+            sandbox: isSandboxDoi,
+            existingVersionDois,
+            enrichment: repoMeta.enrichment,
+          },
+        );
+
+        // Update DB: latest_version_doi + insert version record
+        await db
+          .prepare(
+            "UPDATE datasets SET latest_version_doi = ?, updated_at = datetime('now') WHERE id = ?",
+          )
+          .bind(result.doi, freshDataset.id)
+          .run();
+
+        await db
+          .prepare(
+            "INSERT OR IGNORE INTO dataset_versions (dataset_id, version, doi, provider) VALUES (?, ?, ?, 'ezid')",
+          )
+          .bind(datasetId, version, result.doi)
+          .run();
+
+        // Generate and upload version manifest
+        const manifest = await generateManifest(
+          repoName,
+          version,
+          pat,
+          datasetId,
+          result.doi,
+          freshDataset.concept_doi,
+        );
+
+        await uploadManifest(
+          {
+            bucket: c.env.S3_BUCKET,
+            region: c.env.AWS_REGION,
+            accessKeyId: c.env.AWS_ACCESS_KEY_ID,
+            secretAccessKey: c.env.AWS_SECRET_ACCESS_KEY,
+          },
+          datasetId,
+          version,
+          JSON.stringify(manifest, null, 2),
+        );
+
+        console.log(`[publish] Version DOI created for ${datasetId}: ${result.doi}`);
+        await updateProgress("version_doi");
       }
     } catch (err) {
       // Non-fatal: the CI workflow may still handle this as a fallback
