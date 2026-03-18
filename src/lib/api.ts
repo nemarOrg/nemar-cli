@@ -331,11 +331,6 @@ export interface ApproveResponse {
     status: string;
   };
   email_sent: boolean;
-  iam_setup?: boolean;
-  iam_username?: string;
-  github_pat_created?: boolean;
-  github_pat_name?: string;
-  warning?: string;
 }
 
 /**

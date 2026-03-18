@@ -333,46 +333,6 @@ export async function deleteIamUser(config: IamConfig, iamUsername: string): Pro
 }
 
 /**
- * Full setup for a new NEMAR user:
- * 1. Create IAM user
- * 2. Create access keys
- * 3. Put initial empty policy
- */
-export async function setupUserIamAccess(
-  config: IamConfig,
-  bucket: string,
-  nemarUsername: string,
-): Promise<{ iamUsername: string; accessKeyId: string; secretAccessKey: string }> {
-  // Create IAM user
-  const { username: iamUsername } = await createIamUser(config, nemarUsername);
-
-  // Create access keys
-  const { accessKeyId, secretAccessKey } = await createAccessKey(config, iamUsername);
-
-  // Put initial empty policy (no dataset access yet)
-  const policyDocument = generateS3PolicyDocument(bucket, []);
-  await putUserPolicy(config, iamUsername, "nemar-s3-access", policyDocument);
-
-  return { iamUsername, accessKeyId, secretAccessKey };
-}
-
-/**
- * Grant user access to a dataset prefix
- */
-export async function grantDatasetAccess(
-  config: IamConfig,
-  bucket: string,
-  iamUsername: string,
-  currentPrefixes: string[],
-  newPrefix: string,
-): Promise<string[]> {
-  const allPrefixes = [...new Set([...currentPrefixes, newPrefix])];
-  const policyDocument = generateS3PolicyDocument(bucket, allPrefixes);
-  await putUserPolicy(config, iamUsername, "nemar-s3-access", policyDocument);
-  return allPrefixes;
-}
-
-/**
  * List all access keys for an IAM user
  */
 export async function listAccessKeys(config: IamConfig, iamUsername: string): Promise<string[]> {
