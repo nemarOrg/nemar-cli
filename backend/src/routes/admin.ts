@@ -121,6 +121,7 @@ type PublicationStep =
   | "create_release"
   | "upload_to_zenodo"
   | "publish_doi"
+  | "version_doi"
   | "s3_lock"
   | "generate_archive"
   | "sync_nemar"
@@ -2785,6 +2786,7 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
     "create_release",
     "upload_to_zenodo",
     "publish_doi", // Permanent and irreversible!
+    "version_doi",
     "s3_lock",
     "generate_archive",
     "sync_nemar",
@@ -3382,36 +3384,15 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
   }
 
   // --- Helper: get version and tag from dataset_description.json ---
+  // NOTE: This helper only reads; version defaulting is handled in update_metadata
+  // to avoid creating [skip ci] commits that the create_tag step would tag.
   async function getVersionTag(
     stepName: PublicationStep,
   ): Promise<{ version: string; tag: string; datasetDesc: Record<string, unknown> } | Response> {
     const result = await readDatasetDescription(stepName);
     if (result instanceof Response) return result;
     const datasetDesc = result;
-    if (!datasetDesc.Version) {
-      console.info(
-        `[publish] No Version in dataset_description.json for ${repoName}; defaulting to 1.0.0`,
-      );
-      datasetDesc.Version = "1.0.0";
-      try {
-        await createOrUpdateFile(
-          repoName,
-          "dataset_description.json",
-          JSON.stringify(datasetDesc, null, 2),
-          "Set initial version to 1.0.0 for DOI publication [skip ci]",
-          pat,
-        );
-      } catch (writeErr) {
-        const msg = `Failed to write default Version to dataset_description.json: ${errorMessage(writeErr)}`;
-        console.error(`[publish] ${msg}`);
-        await updateProgress(stepName, msg);
-        return c.json(
-          { error: msg, step: stepName, steps_completed: completed, step_results: stepResults },
-          500,
-        );
-      }
-    }
-    const version = String(datasetDesc.Version);
+    const version = String(datasetDesc.Version || "1.0.0");
     return { version, tag: `v${version}`, datasetDesc };
   }
 
@@ -3448,6 +3429,16 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
       }
 
       datasetDesc.DatasetDOI = conceptDoi;
+
+      // Set default Version if missing so create_tag doesn't need to write a
+      // separate [skip ci] commit (which would prevent the version-doi CI from
+      // triggering on the tag push).
+      if (!datasetDesc.Version) {
+        console.info(
+          `[publish] No Version in dataset_description.json for ${repoName}; defaulting to 1.0.0`,
+        );
+        datasetDesc.Version = "1.0.0";
+      }
 
       await createOrUpdateFile(
         repoName,
@@ -3769,6 +3760,69 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
         },
         500,
       );
+    }
+  }
+
+  // Step: version_doi - Create version DOI record and manifest via webhook
+  // This calls the publish-version-doi webhook endpoint directly so we don't
+  // depend solely on the GitHub Actions version-doi.yml workflow (which can be
+  // skipped if the tagged commit contains [skip ci]).
+  if (stepsToRun.includes("version_doi")) {
+    try {
+      await startStep("version_doi");
+
+      const vtResult = await getVersionTag("version_doi");
+      if (vtResult instanceof Response) {
+        console.warn(`[publish] Could not get version tag for version_doi of ${datasetId}`);
+        await updateProgress("version_doi", "Could not resolve version tag");
+      } else {
+        const { version, tag } = vtResult;
+        const releaseUrl = `https://github.com/nemarDatasets/${repoName}/releases/tag/${tag}`;
+        const webhookUrl = new URL("/nemar/webhooks/publish-version-doi", c.req.url);
+
+        const { result: webhookResult, attempts: versionDoiAttempts } = await withRetry(
+          async () => {
+            const resp = await fetch(webhookUrl.toString(), {
+              method: "POST",
+              headers: {
+                "Content-Type": "application/json",
+                "X-Webhook-Token": c.env.GITHUB_WEBHOOK_SECRET || "",
+              },
+              body: JSON.stringify({
+                dataset_id: datasetId,
+                version,
+                release_url: releaseUrl,
+              }),
+            });
+
+            const respBody = (await resp.json()) as Record<string, unknown>;
+
+            if (!resp.ok) {
+              // "skipped" means no concept DOI; not a real failure
+              if (respBody.skipped) {
+                return respBody;
+              }
+              throw new Error(`Webhook returned ${resp.status}: ${JSON.stringify(respBody)}`);
+            }
+
+            return respBody;
+          },
+          "version_doi",
+        );
+
+        if (webhookResult.version_doi) {
+          console.log(
+            `[publish] Version DOI created for ${datasetId}: ${webhookResult.version_doi}`,
+          );
+        }
+
+        await updateProgress("version_doi", undefined, versionDoiAttempts);
+      }
+    } catch (err) {
+      // Non-fatal: the CI workflow may still handle this as a fallback
+      const msg = errorMessage(err);
+      console.error(`[publish] version_doi failed for ${datasetId}: ${msg}`);
+      await updateProgress("version_doi", msg);
     }
   }
 
