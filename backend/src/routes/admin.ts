@@ -3771,51 +3771,62 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
     try {
       await startStep("version_doi");
 
+      const webhookSecret = c.env.GITHUB_WEBHOOK_SECRET;
+      if (!webhookSecret) {
+        throw new Error("GITHUB_WEBHOOK_SECRET not configured");
+      }
+
       const vtResult = await getVersionTag("version_doi");
       if (vtResult instanceof Response) {
-        console.warn(`[publish] Could not get version tag for version_doi of ${datasetId}`);
-        await updateProgress("version_doi", "Could not resolve version tag");
-      } else {
-        const { version, tag } = vtResult;
-        const releaseUrl = `https://github.com/nemarDatasets/${repoName}/releases/tag/${tag}`;
-        const webhookUrl = new URL("/nemar/webhooks/publish-version-doi", c.req.url);
+        throw new Error("Could not resolve version tag");
+      }
 
-        const { result: webhookResult, attempts: versionDoiAttempts } = await withRetry(
-          async () => {
-            const resp = await fetch(webhookUrl.toString(), {
-              method: "POST",
-              headers: {
-                "Content-Type": "application/json",
-                "X-Webhook-Token": c.env.GITHUB_WEBHOOK_SECRET || "",
-              },
-              body: JSON.stringify({
-                dataset_id: datasetId,
-                version,
-                release_url: releaseUrl,
-              }),
-            });
+      const { version, tag } = vtResult;
+      const releaseUrl = `https://github.com/nemarDatasets/${repoName}/releases/tag/${tag}`;
+      const webhookUrl = new URL("/nemar/webhooks/publish-version-doi", c.req.url);
 
-            const respBody = (await resp.json()) as Record<string, unknown>;
-
-            if (!resp.ok) {
-              // "skipped" means no concept DOI; not a real failure
-              if (respBody.skipped) {
-                return respBody;
-              }
-              throw new Error(`Webhook returned ${resp.status}: ${JSON.stringify(respBody)}`);
-            }
-
-            return respBody;
+      const { result: webhookResult, attempts: versionDoiAttempts } = await withRetry(async () => {
+        const resp = await fetch(webhookUrl.toString(), {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "X-Webhook-Token": webhookSecret,
           },
-          "version_doi",
-        );
+          body: JSON.stringify({
+            dataset_id: datasetId,
+            version,
+            release_url: releaseUrl,
+          }),
+        });
 
-        if (webhookResult.version_doi) {
-          console.log(
-            `[publish] Version DOI created for ${datasetId}: ${webhookResult.version_doi}`,
+        let respBody: Record<string, unknown>;
+        try {
+          respBody = (await resp.json()) as Record<string, unknown>;
+        } catch {
+          const text = await resp.text().catch(() => "(unreadable)");
+          throw new Error(
+            `Webhook returned ${resp.status} with non-JSON body: ${text.slice(0, 200)}`,
           );
         }
 
+        if (!resp.ok) {
+          throw new Error(`Webhook returned ${resp.status}: ${JSON.stringify(respBody)}`);
+        }
+
+        return respBody;
+      }, "version_doi");
+
+      if (webhookResult.skipped) {
+        const skipReason = String(webhookResult.error || "skipped by webhook");
+        console.info(`[publish] version_doi skipped for ${datasetId}: ${skipReason}`);
+        await updateProgress("version_doi", `Skipped: ${skipReason}`);
+      } else if (webhookResult.version_doi) {
+        console.log(`[publish] Version DOI created for ${datasetId}: ${webhookResult.version_doi}`);
+        await updateProgress("version_doi", undefined, versionDoiAttempts);
+      } else {
+        console.warn(
+          `[publish] version_doi returned unexpected response for ${datasetId}: ${JSON.stringify(webhookResult)}`,
+        );
         await updateProgress("version_doi", undefined, versionDoiAttempts);
       }
     } catch (err) {
