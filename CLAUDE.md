@@ -4,7 +4,16 @@
 
 **nm000103-nm000107 are LIVE datasets.** Do NOT modify their visibility, S3 data, DOIs, or repo settings during development/testing. They are kept private during dev for maximum control but contain real data.
 
-For E2E testing, use disposable test dataset `nm099999` (already registered in D1 and GitHub). Note: `xx`-prefix datasets are blocked from publishing (sandbox check).
+For E2E testing, use test dataset `nm099999`. It is created on-demand via `POST /admin/datasets/nm099999/reset` (lazy creation if missing). Run the full E2E cycle with:
+
+```bash
+nemar admin e2e-test --verbose    # Reset, upload, clone, download, update cycle
+nemar admin e2e-test --skip-reset # Reuse existing nm099999 state
+```
+
+The E2E test (`src/lib/e2e-test.ts`) runs a 10-step pipeline: reset, prepare fixtures, init git-annex, configure S3/GitHub remotes, upload, push, clone, download+verify, update cycle, cleanup. It uses `test/fixtures/bids-minimal/` as the source BIDS dataset.
+
+Note: `xx`-prefix datasets are blocked from publishing (sandbox check).
 
 ## Dataset Deletion
 
