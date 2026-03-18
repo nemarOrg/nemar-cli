@@ -186,7 +186,7 @@ datasetRoutes.post(
       console.error("Failed to add owner as collaborator:", error);
     }
 
-    // Record S3 permission in D1 (skip for admins; they have full access)
+    // Record S3 permission in D1 (sole authorization source; skip for admins)
     if (!hasRole(user.role, "admin")) {
       try {
         await db
@@ -197,6 +197,15 @@ datasetRoutes.post(
           .run();
       } catch (error) {
         console.error("Failed to record S3 permission for dataset:", datasetId, error);
+        return c.json(
+          {
+            error: "Failed to configure S3 access for dataset",
+            dataset_id: datasetId,
+            github_repo: githubRepo.full_name,
+            note: "GitHub repository was created but S3 upload permissions could not be configured. Contact an administrator.",
+          },
+          500,
+        );
       }
     }
 
@@ -930,6 +939,14 @@ datasetRoutes.post("/:id/request-access", authMiddleware, async (c) => {
       .bind(dataset.id, user.id)
       .run();
 
+    // Grant S3 upload permission (D1 is the sole authorization source)
+    await db
+      .prepare(
+        "INSERT OR IGNORE INTO user_s3_permissions (user_id, s3_prefix, permission, granted_by) VALUES (?, ?, 'read_write', ?)",
+      )
+      .bind(user.id, datasetId, user.id)
+      .run();
+
     // Audit log
     await db
       .prepare(
@@ -1043,6 +1060,14 @@ datasetRoutes.post("/:id/invite", authMiddleware, zValidator("json", inviteSchem
         "INSERT INTO dataset_collaborators (dataset_id, user_id, granted_by, access_type) VALUES (?, ?, ?, 'invited')",
       )
       .bind(dataset.id, invitee.id, currentUser.id)
+      .run();
+
+    // Grant S3 upload permission (D1 is the sole authorization source)
+    await db
+      .prepare(
+        "INSERT OR IGNORE INTO user_s3_permissions (user_id, s3_prefix, permission, granted_by) VALUES (?, ?, 'read_write', ?)",
+      )
+      .bind(invitee.id, datasetId, currentUser.id)
       .run();
 
     // Audit log

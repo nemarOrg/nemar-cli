@@ -816,11 +816,14 @@ adminRoutes.post("/revoke/:username", async (c) => {
  * user_s3_permissions table is the sole authorization source.
  */
 adminRoutes.post("/regenerate-iam/:username", async (c) => {
-  return c.json({
-    message:
-      "IAM credential regeneration is no longer needed. S3 access is managed through backend-scoped credentials.",
-    status: "deprecated",
-  });
+  return c.json(
+    {
+      message:
+        "IAM credential regeneration is no longer needed. S3 access is managed through backend-scoped credentials.",
+      status: "deprecated",
+    },
+    410,
+  );
 });
 
 /**
