@@ -169,6 +169,19 @@ export async function runE2ETest(options: {
       fn: async () => {
         const fixturePath = getFixturePath();
         cpSync(fixturePath, uploadDir, { recursive: true });
+        // Remove any leftover git/nemar state from the fixture copy
+        for (const stale of [".git", ".nemar", ".gitattributes"]) {
+          const p = join(uploadDir, stale);
+          if (existsSync(p)) {
+            const chmodResult = await runCommand(["chmod", "-R", "u+w", p]);
+            if (chmodResult.exitCode !== 0) {
+              console.warn(
+                `chmod failed for ${p} (exit ${chmodResult.exitCode}): ${chmodResult.stderr}`,
+              );
+            }
+            rmSync(p, { recursive: true, force: true });
+          }
+        }
         log(ctx, `Copied fixtures to ${uploadDir}`);
       },
     },

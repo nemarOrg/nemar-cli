@@ -24,6 +24,9 @@ test/.env.test
 coverage/
 *.lcov
 test/.test-configs/
+test/fixtures/**/.git/
+test/fixtures/**/.nemar/
+test/fixtures/**/.gitattributes
 
 
 # Logs

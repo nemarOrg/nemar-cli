@@ -361,21 +361,25 @@ export async function initDataset(
       env.GIT_COMMITTER_EMAIL = options.author.email;
     }
 
-    // Initialize git repository
-    const { stderr: gitStderr, exitCode: gitExitCode } = await runCommand(["git", "init", path], {
-      ...(Object.keys(env).length > 0 ? { env } : {}),
-    });
+    // Initialize git repository with explicit "main" branch name
+    const { stderr: gitStderr, exitCode: gitExitCode } = await runCommand(
+      ["git", "init", "-b", "main", path],
+      {
+        ...(Object.keys(env).length > 0 ? { env } : {}),
+      },
+    );
 
     if (gitExitCode !== 0) {
       return { success: false, error: gitStderr.trim() || "Failed to initialize git repository" };
     }
 
     // Initialize git-annex
+    const envOpts = Object.keys(env).length > 0 ? { env } : {};
     const { stderr: initStderr, exitCode: initExitCode } = await runCommand(
       ["git", "annex", "init"],
       {
         cwd: path,
-        ...(Object.keys(env).length > 0 ? { env } : {}),
+        ...envOpts,
       },
     );
 
@@ -383,15 +387,35 @@ export async function initDataset(
       return { success: false, error: initStderr.trim() || "Failed to initialize git-annex" };
     }
 
+    // Create initial commit so git-annex adjust and branch detection work.
+    // git-annex adjust --unlock requires at least one commit on the working branch,
+    // and git rev-parse --abbrev-ref HEAD fails with no commits.
+    const { stderr: commitStderr, exitCode: commitExitCode } = await runCommand(
+      ["git", "commit", "--allow-empty", "-m", "Initialize dataset"],
+      {
+        cwd: path,
+        ...envOpts,
+      },
+    );
+
+    if (commitExitCode !== 0) {
+      return { success: false, error: commitStderr.trim() || "Failed to create initial commit" };
+    }
+
     // Use unlocked mode so data files remain as regular files (not symlinks)
-    const { exitCode: adjustExitCode } = await runCommand(["git", "annex", "adjust", "--unlock"], {
-      cwd: path,
-      ...(Object.keys(env).length > 0 ? { env } : {}),
-    });
+    const { stderr: adjustStderr, exitCode: adjustExitCode } = await runCommand(
+      ["git", "annex", "adjust", "--unlock"],
+      {
+        cwd: path,
+        ...envOpts,
+      },
+    );
 
     if (adjustExitCode !== 0) {
-      // Non-fatal: locked mode still works, just uses symlinks
-      console.warn("Could not switch to unlocked mode; data files will be symlinks");
+      return {
+        success: false,
+        error: adjustStderr.trim() || "Failed to switch to unlocked mode",
+      };
     }
 
     return { success: true };
@@ -1159,6 +1183,11 @@ export async function pushToGitHub(
         } else {
           return { success: false, error: "Could not detect current branch" };
         }
+      } else if (currentBranch.startsWith("adjusted/")) {
+        // git-annex adjusted branches (e.g. "adjusted/main(unlocked)") track a base branch.
+        // Extract the base branch name and push with the correct refspec.
+        const baseBranch = currentBranch.replace(/^adjusted\//, "").replace(/\(.*\)$/, "");
+        branchToPush = `${currentBranch}:${baseBranch}`;
       } else {
         branchToPush = currentBranch;
       }
@@ -2235,13 +2264,15 @@ export async function ensureLocalMainBranch(
 ): Promise<boolean> {
   const currentBranch = await getCurrentBranch(datasetPath);
 
-  if (currentBranch === "main") {
-    return true;
-  }
-
   if (!currentBranch) {
     console.log(chalk.yellow("\n  Warning: Could not determine current branch name."));
     console.log(chalk.yellow("  Proceeding with upload; ensure your branch is named 'main'."));
+    return true;
+  }
+
+  // Accept "main" or git-annex adjusted branches that track main (e.g. "adjusted/main(unlocked)").
+  // Adjusted branches are working copies that track "main" under the hood; renaming them would break git-annex.
+  if (currentBranch === "main" || currentBranch.startsWith("adjusted/main")) {
     return true;
   }
 
