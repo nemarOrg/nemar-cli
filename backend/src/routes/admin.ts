@@ -3775,38 +3775,46 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
 
       const vtResult = await getVersionTag("version_doi");
       if (vtResult instanceof Response) {
-        throw new Error("Could not resolve version tag");
-      }
-
-      const { version } = vtResult;
-
-      // Only stable semver versions get permanent DOIs (matches webhook guard)
-      if (!/^\d+\.\d+\.\d+$/.test(version)) {
-        console.info(
-          `[publish] version_doi skipped for ${datasetId}: non-stable version "${version}"`,
-        );
-        await updateProgress("version_doi", `Skipped: non-stable version "${version}"`);
+        // updateProgress was already called by readDatasetDescription inside getVersionTag
+        // so we just mark completed to avoid double-recording and unnecessary retries
+        await updateProgress("version_doi");
       } else {
-        // Re-read dataset to get latest state (concept DOI may have been set in earlier steps)
-        const freshDataset = await db
-          .prepare("SELECT * FROM datasets WHERE dataset_id = ?")
-          .bind(datasetId)
-          .first<{
-            id: number;
-            dataset_id: string;
-            name: string;
-            github_repo: string | null;
-            concept_doi: string | null;
-            ezid_identifier: string | null;
-            doi_provider: string | null;
-          }>();
+        const { version } = vtResult;
 
-        if (!freshDataset?.ezid_identifier) {
+        // Only stable semver versions get permanent DOIs (matches webhook guard)
+        if (!/^\d+\.\d+\.\d+$/.test(version)) {
+          console.info(
+            `[publish] version_doi skipped for ${datasetId}: non-stable version "${version}"`,
+          );
+        }
+
+        // Re-read dataset to get latest state (concept DOI may have been set in earlier steps)
+        const freshDataset = !/^\d+\.\d+\.\d+$/.test(version)
+          ? null
+          : await db.prepare("SELECT * FROM datasets WHERE dataset_id = ?").bind(datasetId).first<{
+              id: number;
+              dataset_id: string;
+              name: string;
+              github_repo: string | null;
+              concept_doi: string | null;
+              ezid_identifier: string | null;
+              doi_provider: string | null;
+            }>();
+
+        if (!freshDataset) {
+          // Non-stable version, or dataset disappeared during publish
+          if (/^\d+\.\d+\.\d+$/.test(version)) {
+            console.error(
+              `[publish] version_doi: dataset ${datasetId} not found in D1 (deleted during publish?)`,
+            );
+          }
+          await updateProgress("version_doi");
+        } else if (!freshDataset.ezid_identifier) {
           console.info(`[publish] version_doi skipped for ${datasetId}: no EZID identifier`);
-          await updateProgress("version_doi", "Skipped: no EZID identifier");
+          await updateProgress("version_doi");
         } else if (!freshDataset.concept_doi) {
           console.info(`[publish] version_doi skipped for ${datasetId}: no concept DOI`);
-          await updateProgress("version_doi", "Skipped: no concept DOI");
+          await updateProgress("version_doi");
         } else {
           // Read BIDS + NEMAR metadata from the release tag
           const repoMeta = await readRepoMetadata(
@@ -3849,6 +3857,13 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
               enrichment: repoMeta.enrichment,
             },
           );
+
+          // Surface warnings from DOI creation (e.g., concept DOI HasVersion update failed)
+          if (result.warnings?.length) {
+            for (const w of result.warnings) {
+              console.warn(`[publish:version_doi] ${w}`);
+            }
+          }
 
           // DOI is now public and permanent. DB and manifest failures below are
           // non-fatal but must be surfaced for operator awareness.
@@ -3898,9 +3913,13 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
           );
 
           console.log(`[publish] Version DOI created for ${datasetId}: ${result.doi}`);
+          const issues = [
+            ...(dbError ? [`DB update failed: ${dbError}`] : []),
+            ...(result.warnings || []),
+          ];
           await updateProgress(
             "version_doi",
-            dbError ? `DOI created (${result.doi}) but DB update failed: ${dbError}` : undefined,
+            issues.length ? `DOI created (${result.doi}) but: ${issues.join("; ")}` : undefined,
           );
         }
       }
