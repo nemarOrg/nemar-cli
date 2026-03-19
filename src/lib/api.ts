@@ -382,32 +382,6 @@ export async function changeUserRole(
   );
 }
 
-export interface RegenerateIamResponse {
-  message: string;
-  user: {
-    username: string;
-    iam_username: string;
-    role: string;
-  };
-  /**
-   * Number of dataset prefixes restored for regular users,
-   * or "all (full bucket access)" for admins
-   */
-  datasets_restored: number | string;
-  /** Warning if old key revocation failed (security concern) */
-  warning?: string;
-}
-
-export async function regenerateUserIam(username: string): Promise<RegenerateIamResponse> {
-  return request<RegenerateIamResponse>(
-    `/admin/regenerate-iam/${username}`,
-    {
-      method: "POST",
-    },
-    true,
-  );
-}
-
 // ============================================================================
 // Admin - Repository Management
 // ============================================================================

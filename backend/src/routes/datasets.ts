@@ -83,7 +83,8 @@ const BLOCK_MESSAGES: Record<string, string> = {
  * POST /datasets - Create a new dataset
  *
  * Creates GitHub repo, assigns dataset ID, and returns presigned URLs for upload.
- * Uses per-user AWS credentials for scoped S3 access.
+ * Uses backend-scoped credentials for presigned URL generation.
+ * Authorization enforced via user_s3_permissions in D1.
  */
 datasetRoutes.post(
   "/",
@@ -955,26 +956,43 @@ datasetRoutes.post("/:id/request-access", authMiddleware, async (c) => {
       )
       .bind(dataset.id, user.id)
       .run();
+  } catch (dbError) {
+    // GitHub succeeded but DB failed -- log but continue to S3 permission
+    console.error("Failed to record collaborator in database:", dbError);
+  }
 
-    // Grant S3 upload permission (D1 is the sole authorization source)
+  // S3 permission is critical: sole authorization source for uploads.
+  // Must not be swallowed in a shared catch block.
+  try {
     await db
       .prepare(
         "INSERT OR IGNORE INTO user_s3_permissions (user_id, s3_prefix, permission, granted_by) VALUES (?, ?, 'read_write', ?)",
       )
       .bind(user.id, datasetId, user.id)
       .run();
+  } catch (s3Error) {
+    console.error("CRITICAL: Failed to grant S3 permission for", datasetId, s3Error);
+    return c.json(
+      {
+        error: "Failed to configure S3 upload permission",
+        message:
+          "GitHub access was granted but S3 upload permission could not be set. Contact an administrator.",
+        dataset_id: datasetId,
+      },
+      500,
+    );
+  }
 
-    // Audit log
+  // Audit log (non-critical)
+  try {
     await db
       .prepare(
         "INSERT INTO audit_log (user_id, action, resource_type, resource_id, details) VALUES (?, 'dataset_access_granted', 'dataset', ?, ?)",
       )
       .bind(user.id, datasetId, JSON.stringify({ access_type: "requested" }))
       .run();
-  } catch (dbError) {
-    // GitHub succeeded but DB failed - log error but don't fail the request
-    // User has access on GitHub; DB record can be reconciled later
-    console.error("Failed to record collaborator in database:", dbError);
+  } catch (logError) {
+    console.error("Failed to write audit log:", logError);
   }
 
   return c.json({
@@ -1078,16 +1096,34 @@ datasetRoutes.post("/:id/invite", authMiddleware, zValidator("json", inviteSchem
       )
       .bind(dataset.id, invitee.id, currentUser.id)
       .run();
+  } catch (dbError) {
+    // GitHub succeeded but DB failed -- log but continue to S3 permission
+    console.error("Failed to record collaborator in database:", dbError);
+  }
 
-    // Grant S3 upload permission (D1 is the sole authorization source)
+  // S3 permission is critical: sole authorization source for uploads.
+  try {
     await db
       .prepare(
         "INSERT OR IGNORE INTO user_s3_permissions (user_id, s3_prefix, permission, granted_by) VALUES (?, ?, 'read_write', ?)",
       )
       .bind(invitee.id, datasetId, currentUser.id)
       .run();
+  } catch (s3Error) {
+    console.error("CRITICAL: Failed to grant S3 permission for", datasetId, s3Error);
+    return c.json(
+      {
+        error: "Failed to configure S3 upload permission",
+        message:
+          "GitHub access was granted but S3 upload permission could not be set. Contact an administrator.",
+        dataset_id: datasetId,
+      },
+      500,
+    );
+  }
 
-    // Audit log
+  // Audit log (non-critical)
+  try {
     await db
       .prepare(
         "INSERT INTO audit_log (user_id, action, resource_type, resource_id, details) VALUES (?, 'dataset_access_granted', 'dataset', ?, ?)",
@@ -1098,10 +1134,8 @@ datasetRoutes.post("/:id/invite", authMiddleware, zValidator("json", inviteSchem
         JSON.stringify({ invitee: username, access_type: "invited" }),
       )
       .run();
-  } catch (dbError) {
-    // GitHub succeeded but DB failed - log error but don't fail the request
-    // User has access on GitHub; DB record can be reconciled later
-    console.error("Failed to record collaborator in database:", dbError);
+  } catch (logError) {
+    console.error("Failed to write audit log:", logError);
   }
 
   return c.json({
