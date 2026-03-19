@@ -233,20 +233,22 @@ describe("IAM Removal: Deprecated endpoints", () => {
 });
 
 describe("IAM Removal: User approval (no IAM setup)", () => {
-  test("approval response has no iam_setup field", async () => {
+  // Note: We do NOT actually approve test-verified here because it would
+  // change shared DB state and break other tests (e.g., cli.test.ts expects
+  // test-verified to remain in "verified" status). Instead, we verify the
+  // approve endpoint exists and rejects already-approved users without
+  // returning IAM fields.
+  test("re-approving already-approved user returns no iam fields", async () => {
+    // test-admin is already approved in seed data
     const { status, data } = await testRequest<Record<string, unknown>>(
-      "/admin/approve/test-verified",
+      "/admin/approve/test-admin",
       { method: "POST" },
       adminKey,
     );
 
-    // 200 = freshly approved, 409 = already approved from previous test run
-    expect([200, 409]).toContain(status);
-
-    if (status === 200) {
-      expect(data.iam_setup).toBeUndefined();
-      expect(data.iam_username).toBeUndefined();
-      expect(data.email_sent).toBeDefined();
-    }
+    // Already approved -> 409 Conflict
+    expect(status).toBe(409);
+    expect(data.iam_setup).toBeUndefined();
+    expect(data.iam_username).toBeUndefined();
   });
 });

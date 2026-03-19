@@ -44,15 +44,30 @@ if ! git rev-parse --git-dir > /dev/null 2>&1; then
   exit 1
 fi
 
-# Branch guard: release bumps (patch/minor/major) only allowed on dev or main.
-# Pre-release bumps (dev/alpha/beta/rc) allowed on any branch.
+# Branch guard: release versions only allowed on dev or main.
+# Pre-release bumps (dev/alpha/beta/rc) and explicit pre-release versions
+# are allowed on any branch.
 CURRENT_BRANCH=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "unknown")
+is_release_on_wrong_branch() {
+  [ "$CURRENT_BRANCH" != "dev" ] && [ "$CURRENT_BRANCH" != "main" ]
+}
 case "$VERSION_TYPE" in
   patch|minor|major)
-    if [ "$CURRENT_BRANCH" != "dev" ] && [ "$CURRENT_BRANCH" != "main" ]; then
+    if is_release_on_wrong_branch; then
       echo "Error: Release bumps ($VERSION_TYPE) only allowed on dev or main branch."
       echo "Current branch: $CURRENT_BRANCH"
       echo "Use a pre-release bump (dev/alpha/beta/rc) on feature branches."
+      exit 1
+    fi
+    ;;
+  dev|alpha|beta|rc)
+    ;; # Pre-release keywords allowed on any branch
+  *)
+    # Explicit versions: block release versions (no pre-release suffix) on feature branches
+    if [[ "$VERSION_TYPE" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] && is_release_on_wrong_branch; then
+      echo "Error: Release versions ($VERSION_TYPE) only allowed on dev or main branch."
+      echo "Current branch: $CURRENT_BRANCH"
+      echo "Use a pre-release version (e.g., ${VERSION_TYPE}-dev) on feature branches."
       exit 1
     fi
     ;;
