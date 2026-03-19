@@ -15,6 +15,7 @@
 // command module imports pick up the concise-by-default help behavior.
 import { configureColorHelp } from "./lib/help.js";
 
+import chalk from "chalk";
 import { Command } from "commander";
 import { adminCommand } from "./commands/admin.js";
 import {
@@ -27,6 +28,7 @@ import {
 } from "./commands/auth.js";
 import { datasetCommand } from "./commands/dataset.js";
 import { sandboxCommand } from "./commands/sandbox.js";
+import { IS_DEV_BUILD } from "./lib/api.js";
 import { NO_DESCRIPTION, NO_OPTION, YES_DESCRIPTION, YES_OPTION } from "./lib/confirm.js";
 import { fetchAndDisplayNotices } from "./lib/notices.js";
 import { initUpdateCheck, printUpdateBanner } from "./lib/update-check.js";
@@ -128,6 +130,14 @@ if (pendingUpdate) {
 program.hook("preAction", async () => {
   await fetchAndDisplayNotices();
 });
+
+// Warn if running a dev build (injected URL via CI)
+if (IS_DEV_BUILD) {
+  console.warn(
+    chalk.yellow.bold("[DEV BUILD]") +
+      chalk.yellow(" Connected to development backend. Not for production use."),
+  );
+}
 
 // Parse arguments
 program.parseAsync().catch((err) => {

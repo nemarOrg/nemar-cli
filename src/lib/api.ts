@@ -33,7 +33,7 @@ export class ApiError extends Error {
   }
 }
 
-const IS_DEV_BUILD = DEFAULT_API_URL.includes("workers.dev");
+export const IS_DEV_BUILD = DEFAULT_API_URL.includes("workers.dev");
 
 /**
  * Get the API base URL from config or default.
@@ -331,11 +331,6 @@ export interface ApproveResponse {
     status: string;
   };
   email_sent: boolean;
-  iam_setup?: boolean;
-  iam_username?: string;
-  github_pat_created?: boolean;
-  github_pat_name?: string;
-  warning?: string;
 }
 
 /**
@@ -382,32 +377,6 @@ export async function changeUserRole(
     {
       method: "POST",
       body: JSON.stringify({ role }),
-    },
-    true,
-  );
-}
-
-export interface RegenerateIamResponse {
-  message: string;
-  user: {
-    username: string;
-    iam_username: string;
-    role: string;
-  };
-  /**
-   * Number of dataset prefixes restored for regular users,
-   * or "all (full bucket access)" for admins
-   */
-  datasets_restored: number | string;
-  /** Warning if old key revocation failed (security concern) */
-  warning?: string;
-}
-
-export async function regenerateUserIam(username: string): Promise<RegenerateIamResponse> {
-  return request<RegenerateIamResponse>(
-    `/admin/regenerate-iam/${username}`,
-    {
-      method: "POST",
     },
     true,
   );

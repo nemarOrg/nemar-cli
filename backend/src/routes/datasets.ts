@@ -11,7 +11,6 @@ import { authMiddleware, optionalAuthMiddleware } from "../middleware/auth";
 import { cliVersionGuard } from "../middleware/cliVersion";
 import { generateDatasetId, isValidDatasetId } from "../services/datasetId";
 import { getAdminEmailsForCategory, sendPublicationRequestEmail } from "../services/email";
-import { decrypt } from "../services/encryption";
 import {
   type GitHubRepo,
   addCollaborator,
@@ -25,7 +24,6 @@ import {
   getWorkflowRuns,
   setRepoVisibility,
 } from "../services/github";
-import { grantDatasetAccess } from "../services/iam";
 import {
   addPublicReadPolicy,
   generateDatasetUploadUrls,
@@ -85,7 +83,8 @@ const BLOCK_MESSAGES: Record<string, string> = {
  * POST /datasets - Create a new dataset
  *
  * Creates GitHub repo, assigns dataset ID, and returns presigned URLs for upload.
- * Uses per-user AWS credentials for scoped S3 access.
+ * Uses backend-scoped credentials for presigned URL generation.
+ * Authorization enforced via user_s3_permissions in D1.
  */
 datasetRoutes.post(
   "/",
@@ -93,9 +92,26 @@ datasetRoutes.post(
   cliVersionGuard,
   zValidator("json", createDatasetSchema),
   async (c) => {
-    const { name, description, files, sandbox } = c.req.valid("json");
+    const { name, description, files, sandbox: requestedSandbox } = c.req.valid("json");
     const user = c.get("user");
     const db = c.env.DB;
+
+    // Non-production environments can only create sandbox (xx-prefix) datasets.
+    // This prevents dev from minting real nm-prefix dataset IDs.
+    const environment = c.env.ENVIRONMENT;
+    if (!environment) {
+      console.warn(
+        "[datasets] ENVIRONMENT not configured; defaulting to non-production (sandbox-only)",
+      );
+    }
+    const isProduction = environment === "production";
+    const sandbox = isProduction ? !!requestedSandbox : true;
+
+    if (!isProduction && !requestedSandbox) {
+      console.warn(
+        `[datasets] Non-production env: forcing sandbox=true for user ${user.username} (requested: ${requestedSandbox})`,
+      );
+    }
 
     // Check if non-sandbox upload requires sandbox training
     if (!sandbox) {
@@ -134,58 +150,8 @@ datasetRoutes.post(
       }
     }
 
-    // Get user's AWS credentials
-    const userCreds = await db
-      .prepare(`
-      SELECT aws_iam_username, aws_access_key_id_encrypted, aws_secret_access_key_encrypted
-      FROM users WHERE id = ?
-    `)
-      .bind(user.id)
-      .first<{
-        aws_iam_username: string | null;
-        aws_access_key_id_encrypted: string | null;
-        aws_secret_access_key_encrypted: string | null;
-      }>();
-
-    if (!userCreds?.aws_access_key_id_encrypted || !userCreds?.aws_secret_access_key_encrypted) {
-      return c.json(
-        {
-          error: "S3 access not configured for your account",
-          message: "Please contact an administrator to set up your S3 credentials.",
-        },
-        403,
-      );
-    }
-
-    // Decrypt user's AWS credentials
-    let userAccessKeyId: string;
-    let userSecretAccessKey: string;
-    try {
-      if (!c.env.ENCRYPTION_KEY) {
-        throw new Error("ENCRYPTION_KEY not configured");
-      }
-      userAccessKeyId = await decrypt(userCreds.aws_access_key_id_encrypted, c.env.ENCRYPTION_KEY);
-      userSecretAccessKey = await decrypt(
-        userCreds.aws_secret_access_key_encrypted,
-        c.env.ENCRYPTION_KEY,
-      );
-    } catch (error) {
-      console.error(
-        "Failed to decrypt S3 credentials for user:",
-        user.id,
-        "IAM:",
-        userCreds.aws_iam_username,
-        error,
-      );
-      return c.json(
-        {
-          error: "Failed to access S3 credentials",
-          message:
-            "Your S3 credentials could not be decrypted. This may happen if your account was set up on a different environment. Please contact an administrator to regenerate your credentials.",
-        },
-        500,
-      );
-    }
+    // S3 credentials: use backend-owned credentials for presigned URL generation.
+    // Authorization is enforced via user_s3_permissions in D1, not IAM policies.
 
     // Generate dataset ID (xx000XXX for sandbox, nm000XXX for regular).
     // There is a TOCTOU gap between ID generation (SELECT) and the INSERT
@@ -238,45 +204,20 @@ datasetRoutes.post(
       console.error("Failed to add owner as collaborator:", error);
     }
 
-    // Update user's IAM policy to include this dataset prefix
-    // Skip for admins/owners - they already have full bucket access
-    if (userCreds.aws_iam_username && !hasRole(user.role, "admin")) {
+    // Record S3 permission in D1 (sole authorization source; skip for admins)
+    if (!hasRole(user.role, "admin")) {
       try {
-        // Get user's current prefixes
-        const currentPermissions = await db
-          .prepare("SELECT s3_prefix FROM user_s3_permissions WHERE user_id = ?")
-          .bind(user.id)
-          .all<{ s3_prefix: string }>();
-
-        const currentPrefixes = currentPermissions.results?.map((p) => p.s3_prefix) || [];
-
-        // Update IAM policy to include new dataset
-        await grantDatasetAccess(
-          {
-            accessKeyId: c.env.AWS_ACCESS_KEY_ID,
-            secretAccessKey: c.env.AWS_SECRET_ACCESS_KEY,
-            region: c.env.AWS_REGION,
-          },
-          c.env.S3_BUCKET,
-          userCreds.aws_iam_username,
-          currentPrefixes,
-          datasetId,
-        );
-
-        // Record the permission in database
         await db
-          .prepare(`
-          INSERT INTO user_s3_permissions (user_id, s3_prefix, permission, granted_by)
-          VALUES (?, ?, 'read_write', ?)
-        `)
+          .prepare(
+            "INSERT INTO user_s3_permissions (user_id, s3_prefix, permission, granted_by) VALUES (?, ?, 'read_write', ?)",
+          )
           .bind(user.id, datasetId, user.id)
           .run();
       } catch (error) {
-        console.error("Failed to update IAM policy for dataset:", datasetId, error);
+        console.error("Failed to record S3 permission for dataset:", datasetId, error);
         return c.json(
           {
             error: "Failed to configure S3 access for dataset",
-            details: error instanceof Error ? error.message : "Unknown error",
             dataset_id: datasetId,
             github_repo: githubRepo.full_name,
             note: "GitHub repository was created but S3 upload permissions could not be configured. Contact an administrator.",
@@ -288,7 +229,7 @@ datasetRoutes.post(
 
     // NOTE: Branch protection is applied in the finalize endpoint after initial upload
 
-    // Generate presigned URLs for data files using user's credentials
+    // Generate presigned URLs for data files using backend credentials
     let uploadUrls: Record<string, string> = {};
     if (files && files.length > 0) {
       const dataFiles = files.filter((f) => f.type === "data").map((f) => f.path);
@@ -298,8 +239,8 @@ datasetRoutes.post(
             {
               bucket: c.env.S3_BUCKET,
               region: c.env.AWS_REGION,
-              accessKeyId: userAccessKeyId,
-              secretAccessKey: userSecretAccessKey,
+              accessKeyId: c.env.AWS_ACCESS_KEY_ID,
+              secretAccessKey: c.env.AWS_SECRET_ACCESS_KEY,
             },
             datasetId,
             dataFiles,
@@ -568,31 +509,7 @@ datasetRoutes.post(
       }
     }
 
-    // Get user's encrypted credentials
-    const userCreds = await db
-      .prepare(`
-        SELECT aws_iam_username, aws_access_key_id_encrypted, aws_secret_access_key_encrypted
-        FROM users WHERE id = ?
-      `)
-      .bind(user.id)
-      .first<{
-        aws_iam_username: string | null;
-        aws_access_key_id_encrypted: string | null;
-        aws_secret_access_key_encrypted: string | null;
-      }>();
-
-    if (!userCreds?.aws_access_key_id_encrypted || !userCreds?.aws_secret_access_key_encrypted) {
-      return c.json(
-        {
-          error: "S3 credentials not configured for your account",
-          message: "Contact an administrator to set up your S3 access",
-        },
-        403,
-      );
-    }
-
     // Check if user has permission for this dataset prefix
-    // Admin/owner roles have full bucket access via IAM; skip per-dataset check
     if (!hasRole(user.role, "admin")) {
       const hasPermission = await db
         .prepare("SELECT 1 FROM user_s3_permissions WHERE user_id = ? AND s3_prefix = ?")
@@ -610,53 +527,15 @@ datasetRoutes.post(
       }
     }
 
-    // Decrypt user credentials
-    if (!c.env.ENCRYPTION_KEY) {
-      console.error("ENCRYPTION_KEY not configured");
-      return c.json(
-        {
-          error: "Failed to access S3 credentials",
-          message: "Server encryption is not configured. Please contact an administrator.",
-        },
-        500,
-      );
-    }
-
-    let userAccessKeyId: string;
-    let userSecretAccessKey: string;
-    try {
-      userAccessKeyId = await decrypt(userCreds.aws_access_key_id_encrypted, c.env.ENCRYPTION_KEY);
-      userSecretAccessKey = await decrypt(
-        userCreds.aws_secret_access_key_encrypted,
-        c.env.ENCRYPTION_KEY,
-      );
-    } catch (error) {
-      console.error(
-        "Failed to decrypt S3 credentials for user:",
-        user.id,
-        "IAM:",
-        userCreds.aws_iam_username,
-        error,
-      );
-      return c.json(
-        {
-          error: "Failed to access S3 credentials",
-          message:
-            "Your S3 credentials could not be decrypted. This may happen if your account was set up on a different environment. Please contact an administrator to regenerate your credentials.",
-        },
-        500,
-      );
-    }
-
-    // Generate presigned URLs using user's credentials
+    // Generate presigned URLs using backend credentials
     let uploadUrls: Record<string, string>;
     try {
       uploadUrls = await generateDatasetUploadUrls(
         {
           bucket: c.env.S3_BUCKET,
           region: c.env.AWS_REGION,
-          accessKeyId: userAccessKeyId,
-          secretAccessKey: userSecretAccessKey,
+          accessKeyId: c.env.AWS_ACCESS_KEY_ID,
+          secretAccessKey: c.env.AWS_SECRET_ACCESS_KEY,
         },
         datasetId,
         files,
@@ -1077,18 +956,43 @@ datasetRoutes.post("/:id/request-access", authMiddleware, async (c) => {
       )
       .bind(dataset.id, user.id)
       .run();
+  } catch (dbError) {
+    // GitHub succeeded but DB failed -- log but continue to S3 permission
+    console.error("Failed to record collaborator in database:", dbError);
+  }
 
-    // Audit log
+  // S3 permission is critical: sole authorization source for uploads.
+  // Must not be swallowed in a shared catch block.
+  try {
+    await db
+      .prepare(
+        "INSERT OR IGNORE INTO user_s3_permissions (user_id, s3_prefix, permission, granted_by) VALUES (?, ?, 'read_write', ?)",
+      )
+      .bind(user.id, datasetId, user.id)
+      .run();
+  } catch (s3Error) {
+    console.error("CRITICAL: Failed to grant S3 permission for", datasetId, s3Error);
+    return c.json(
+      {
+        error: "Failed to configure S3 upload permission",
+        message:
+          "GitHub access was granted but S3 upload permission could not be set. Contact an administrator.",
+        dataset_id: datasetId,
+      },
+      500,
+    );
+  }
+
+  // Audit log (non-critical)
+  try {
     await db
       .prepare(
         "INSERT INTO audit_log (user_id, action, resource_type, resource_id, details) VALUES (?, 'dataset_access_granted', 'dataset', ?, ?)",
       )
       .bind(user.id, datasetId, JSON.stringify({ access_type: "requested" }))
       .run();
-  } catch (dbError) {
-    // GitHub succeeded but DB failed - log error but don't fail the request
-    // User has access on GitHub; DB record can be reconciled later
-    console.error("Failed to record collaborator in database:", dbError);
+  } catch (logError) {
+    console.error("Failed to write audit log:", logError);
   }
 
   return c.json({
@@ -1192,8 +1096,34 @@ datasetRoutes.post("/:id/invite", authMiddleware, zValidator("json", inviteSchem
       )
       .bind(dataset.id, invitee.id, currentUser.id)
       .run();
+  } catch (dbError) {
+    // GitHub succeeded but DB failed -- log but continue to S3 permission
+    console.error("Failed to record collaborator in database:", dbError);
+  }
 
-    // Audit log
+  // S3 permission is critical: sole authorization source for uploads.
+  try {
+    await db
+      .prepare(
+        "INSERT OR IGNORE INTO user_s3_permissions (user_id, s3_prefix, permission, granted_by) VALUES (?, ?, 'read_write', ?)",
+      )
+      .bind(invitee.id, datasetId, currentUser.id)
+      .run();
+  } catch (s3Error) {
+    console.error("CRITICAL: Failed to grant S3 permission for", datasetId, s3Error);
+    return c.json(
+      {
+        error: "Failed to configure S3 upload permission",
+        message:
+          "GitHub access was granted but S3 upload permission could not be set. Contact an administrator.",
+        dataset_id: datasetId,
+      },
+      500,
+    );
+  }
+
+  // Audit log (non-critical)
+  try {
     await db
       .prepare(
         "INSERT INTO audit_log (user_id, action, resource_type, resource_id, details) VALUES (?, 'dataset_access_granted', 'dataset', ?, ?)",
@@ -1204,10 +1134,8 @@ datasetRoutes.post("/:id/invite", authMiddleware, zValidator("json", inviteSchem
         JSON.stringify({ invitee: username, access_type: "invited" }),
       )
       .run();
-  } catch (dbError) {
-    // GitHub succeeded but DB failed - log error but don't fail the request
-    // User has access on GitHub; DB record can be reconciled later
-    console.error("Failed to record collaborator in database:", dbError);
+  } catch (logError) {
+    console.error("Failed to write audit log:", logError);
   }
 
   return c.json({

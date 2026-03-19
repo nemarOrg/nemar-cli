@@ -311,7 +311,7 @@ sync_dataset_zip() {
   fi
 
   local archive_url="${S3_BASE}/${dataset_id}/archives/${latest_version}.zip"
-  local zip_file="${ZIP_DIR}/${dataset_id}-${latest_version}.zip"
+  local zip_file="${ZIP_DIR}/${dataset_id}.zip"
 
   # HEAD check: archive may not exist yet (async generation)
   local http_status
@@ -342,8 +342,8 @@ sync_dataset_zip() {
   chmod 644 "$tmp_zip"
   chgrp "$NEMAR_GROUP" "$tmp_zip" 2>/dev/null || true
 
-  # Remove old version zip if different
-  if [[ -n "$recorded_zip_version" && "$recorded_zip_version" != "$latest_version" ]]; then
+  # Remove old versioned zip if it exists (from before naming convention change)
+  if [[ -n "$recorded_zip_version" ]]; then
     local old_zip="${ZIP_DIR}/${dataset_id}-${recorded_zip_version}.zip"
     rm -f "$old_zip"
   fi

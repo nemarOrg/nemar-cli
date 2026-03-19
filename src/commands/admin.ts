@@ -56,7 +56,6 @@ import {
   listPublishRequests,
   listUsers,
   publishDataset,
-  regenerateUserIam,
   revokeUser,
   sendBroadcast,
   submitEnrichment,
@@ -305,13 +304,6 @@ adminCommand
       console.log(`  Email: ${result.user.email}`);
       console.log(`  Status: ${chalk.green(result.user.status)}`);
 
-      // Show IAM setup status
-      if (result.iam_setup === true) {
-        console.log(`  S3 Access: ${chalk.green("configured")}`);
-      } else if (result.iam_setup === false) {
-        console.log(`  S3 Access: ${chalk.red("NOT configured")}`);
-      }
-
       console.log();
       if (result.email_sent) {
         console.log(
@@ -322,12 +314,6 @@ adminCommand
         console.log(
           chalk.yellow("Please notify the user manually to run 'nemar auth retrieve-key'"),
         );
-      }
-
-      // Show warning if IAM setup failed
-      if (result.warning) {
-        console.log();
-        console.log(chalk.yellow(`Warning: ${result.warning}`));
       }
     } catch (error) {
       handleCommandError(error, spinner, "Failed to approve user", {
@@ -528,49 +514,14 @@ adminCommand
   .option(NO_OPTION, NO_DESCRIPTION)
   .action(regenerateIamAction);
 
-async function regenerateIamAction(username: string, options: ConfirmOptions) {
+async function regenerateIamAction(_username: string, _options: ConfirmOptions) {
   if (!requireAuth()) return;
 
-  console.log(chalk.yellow(`\nRegenerate IAM credentials for: ${username}\n`));
-  console.log("This will:");
-  console.log("  1. Create new AWS IAM access keys for the user");
-  console.log("  2. Invalidate any existing access keys");
-  console.log("  3. Restore S3 access to their datasets");
+  console.log(chalk.yellow("\nThis command is deprecated.\n"));
+  console.log("S3 access is now managed through backend-scoped credentials.");
+  console.log("Per-user IAM credentials are no longer needed.");
   console.log();
-  console.log(chalk.dim("Use this if a user's credentials were compromised or lost."));
-  console.log();
-
-  const confirmResult = await confirm(`Regenerate IAM credentials for ${username}?`, options);
-  if (confirmResult !== "confirmed") {
-    console.log(chalk.dim(confirmResult === "declined" ? "Skipped" : "Cancelled"));
-    return;
-  }
-
-  const spinner = ora(`Regenerating IAM credentials for ${username}...`).start();
-
-  try {
-    const result = await regenerateUserIam(username);
-    spinner.succeed(`Regenerated IAM credentials for ${username}`);
-    console.log();
-    console.log(`  IAM Username: ${chalk.cyan(result.user.iam_username)}`);
-    if (result.user.role === "admin" || result.user.role === "owner") {
-      console.log(`  Access: ${chalk.magenta("full bucket access (admin/owner)")}`);
-    }
-    console.log(`  Datasets restored: ${chalk.green(result.datasets_restored)}`);
-
-    if (result.warning) {
-      console.log();
-      console.log(chalk.yellow(`  Warning: ${result.warning}`));
-      console.log(chalk.dim("  Please verify old credentials are revoked in AWS console."));
-    }
-
-    console.log();
-    console.log(chalk.dim("The user can now upload to their datasets again."));
-  } catch (error) {
-    handleCommandError(error, spinner, "Failed to regenerate IAM credentials", {
-      404: "User not found or not approved",
-    });
-  }
+  console.log(chalk.dim("Users can upload datasets without any IAM setup."));
 }
 
 // ============================================================================
