@@ -44,6 +44,20 @@ if ! git rev-parse --git-dir > /dev/null 2>&1; then
   exit 1
 fi
 
+# Branch guard: release bumps (patch/minor/major) only allowed on dev or main.
+# Pre-release bumps (dev/alpha/beta/rc) allowed on any branch.
+CURRENT_BRANCH=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "unknown")
+case "$VERSION_TYPE" in
+  patch|minor|major)
+    if [ "$CURRENT_BRANCH" != "dev" ] && [ "$CURRENT_BRANCH" != "main" ]; then
+      echo "Error: Release bumps ($VERSION_TYPE) only allowed on dev or main branch."
+      echo "Current branch: $CURRENT_BRANCH"
+      echo "Use a pre-release bump (dev/alpha/beta/rc) on feature branches."
+      exit 1
+    fi
+    ;;
+esac
+
 # Validate package.json exists
 if [ ! -f package.json ]; then
   echo "Error: package.json not found. Are you in the project root?"

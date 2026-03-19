@@ -91,9 +91,18 @@ datasetRoutes.post(
   cliVersionGuard,
   zValidator("json", createDatasetSchema),
   async (c) => {
-    const { name, description, files, sandbox } = c.req.valid("json");
+    const { name, description, files, sandbox: requestedSandbox } = c.req.valid("json");
     const user = c.get("user");
     const db = c.env.DB;
+
+    // Non-production environments can only create sandbox (xx-prefix) datasets.
+    // This prevents dev/staging from minting real nm-prefix dataset IDs.
+    const isProduction = c.env.ENVIRONMENT === "production";
+    const sandbox = isProduction ? !!requestedSandbox : true;
+
+    if (!isProduction && requestedSandbox === false) {
+      console.warn(`[datasets] Non-production env: forcing sandbox=true for user ${user.username}`);
+    }
 
     // Check if non-sandbox upload requires sandbox training
     if (!sandbox) {
