@@ -33,7 +33,7 @@ export class ApiError extends Error {
   }
 }
 
-const IS_DEV_BUILD = DEFAULT_API_URL.includes("workers.dev");
+export const IS_DEV_BUILD = DEFAULT_API_URL.includes("workers.dev");
 
 /**
  * Get the API base URL from config or default.
