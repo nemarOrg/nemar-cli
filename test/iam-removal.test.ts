@@ -11,13 +11,48 @@
  * Run with: bun test test/iam-removal.test.ts
  */
 
-import { describe, expect, test } from "bun:test";
-import { TEST_CONFIG, testRequest as _testRequest } from "./setup";
+import { beforeAll, describe, expect, test } from "bun:test";
+import { version as cliVersion } from "../package.json";
+import { TEST_CONFIG, testRequest as baseTestRequest } from "./setup";
 
 const adminKey = TEST_CONFIG.adminApiKey;
 const userKey = TEST_CONFIG.userApiKey;
 
-// Wrap testRequest to include X-CLI-Version header (required by backend)
+beforeAll(() => {
+  if (!adminKey) {
+    throw new Error(
+      "TEST_ADMIN_API_KEY not configured. Create test/.env.test with the required keys. " +
+        "See scripts/seed-dev-db.sql for the expected test users.",
+    );
+  }
+  if (!userKey) {
+    throw new Error(
+      "TEST_USER_API_KEY not configured. Create test/.env.test with the required keys.",
+    );
+  }
+});
+
+// -- Shared response types -------------------------------------------------
+
+interface StsCredentials {
+  access_key_id: string;
+  secret_access_key: string;
+  session_token: string;
+  expiration: string;
+}
+
+interface UploadCredentialsResponse {
+  credentials: StsCredentials;
+  s3: { bucket: string; region: string; prefix: string };
+}
+
+interface UploadUrlsResponse {
+  upload_urls: Record<string, string>;
+}
+
+// -- Helpers ---------------------------------------------------------------
+
+/** Wraps baseTestRequest to include X-CLI-Version header (required by backend). */
 async function testRequest<T>(
   path: string,
   options: RequestInit = {},
@@ -25,24 +60,23 @@ async function testRequest<T>(
 ): Promise<{ status: number; data: T }> {
   const headers = {
     ...(options.headers as Record<string, string>),
-    "X-CLI-Version": "0.7.20",
+    "X-CLI-Version": cliVersion,
   };
-  return _testRequest<T>(path, { ...options, headers }, apiKey);
+  return baseTestRequest<T>(path, { ...options, headers }, apiKey);
 }
 
+/** Shorthand for POST with an optional JSON body. */
+function postJson(body: unknown = {}): RequestInit {
+  return { method: "POST", body: JSON.stringify(body) };
+}
+
+// -- Tests -----------------------------------------------------------------
+
 describe("IAM Removal: Upload credentials (STS tokens)", () => {
-  test("owner gets upload credentials for nm099999", async () => {
-    const { status, data } = await testRequest<{
-      credentials: {
-        access_key_id: string;
-        secret_access_key: string;
-        session_token: string;
-        expiration: string;
-      };
-      s3: { bucket: string; region: string; prefix: string };
-    }>(
+  test("dataset owner gets upload credentials for nm099999", async () => {
+    const { status, data } = await testRequest<UploadCredentialsResponse>(
       "/datasets/nm099999/upload-credentials",
-      { method: "POST", body: JSON.stringify({}) },
+      postJson(),
       adminKey,
     );
 
@@ -58,18 +92,18 @@ describe("IAM Removal: Upload credentials (STS tokens)", () => {
   });
 
   test("STS credentials have correct expiration (within 2 hours)", async () => {
-    const { data } = await testRequest<{
-      credentials: { expiration: string };
-    }>(
+    const { status, data } = await testRequest<UploadCredentialsResponse>(
       "/datasets/nm099999/upload-credentials",
-      { method: "POST", body: JSON.stringify({}) },
+      postJson(),
       adminKey,
     );
 
+    expect(status).toBe(200);
     const expiration = new Date(data.credentials.expiration);
     const now = new Date();
-    const hoursUntilExpiry = (expiration.getTime() - now.getTime()) / (1000 * 60 * 60);
-    // Should expire within ~2 hours (default duration)
+    const hoursUntilExpiry =
+      (expiration.getTime() - now.getTime()) / (1000 * 60 * 60);
+    // Default STS duration is 7200s (2h); allowing up to 2.1h for clock drift
     expect(hoursUntilExpiry).toBeGreaterThan(1);
     expect(hoursUntilExpiry).toBeLessThanOrEqual(2.1);
   });
@@ -77,14 +111,9 @@ describe("IAM Removal: Upload credentials (STS tokens)", () => {
 
 describe("IAM Removal: Presigned upload URLs", () => {
   test("presigned URLs use valid AWS signatures", async () => {
-    const { status, data } = await testRequest<{
-      upload_urls: Record<string, string>;
-    }>(
+    const { status, data } = await testRequest<UploadUrlsResponse>(
       "/datasets/nm099999/upload-urls",
-      {
-        method: "POST",
-        body: JSON.stringify({ files: ["test-iam-validation.txt"] }),
-      },
+      postJson({ files: ["test-iam-validation.txt"] }),
       adminKey,
     );
 
@@ -97,19 +126,14 @@ describe("IAM Removal: Presigned upload URLs", () => {
   });
 
   test("presigned URL actually works for S3 PUT", async () => {
-    const { data } = await testRequest<{
-      upload_urls: Record<string, string>;
-    }>(
+    const { status, data } = await testRequest<UploadUrlsResponse>(
       "/datasets/nm099999/upload-urls",
-      {
-        method: "POST",
-        body: JSON.stringify({ files: ["test-iam-put-validation.txt"] }),
-      },
+      postJson({ files: ["test-iam-put-validation.txt"] }),
       adminKey,
     );
 
+    expect(status).toBe(200);
     const url = data.upload_urls["test-iam-put-validation.txt"];
-    // Actually PUT a small file to S3 using the presigned URL
     const putResponse = await fetch(url, {
       method: "PUT",
       body: "IAM removal test content",
@@ -122,12 +146,9 @@ describe("IAM Removal: Presigned upload URLs", () => {
 
 describe("IAM Removal: Collaborator access", () => {
   test("collaborator (test-user) can get upload credentials for nm099999", async () => {
-    // test-user has user_s3_permissions for nm099999 (seeded)
-    const { status, data } = await testRequest<{
-      credentials: { session_token: string };
-    }>(
+    const { status, data } = await testRequest<UploadCredentialsResponse>(
       "/datasets/nm099999/upload-credentials",
-      { method: "POST", body: JSON.stringify({}) },
+      postJson(),
       userKey,
     );
 
@@ -136,14 +157,9 @@ describe("IAM Removal: Collaborator access", () => {
   });
 
   test("collaborator can get presigned upload URLs", async () => {
-    const { status, data } = await testRequest<{
-      upload_urls: Record<string, string>;
-    }>(
+    const { status, data } = await testRequest<UploadUrlsResponse>(
       "/datasets/nm099999/upload-urls",
-      {
-        method: "POST",
-        body: JSON.stringify({ files: ["collaborator-test.txt"] }),
-      },
+      postJson({ files: ["collaborator-test.txt"] }),
       userKey,
     );
 
@@ -156,36 +172,31 @@ describe("IAM Removal: Authorization enforcement", () => {
   test("unauthenticated request gets 401", async () => {
     const { status } = await testRequest(
       "/datasets/nm099999/upload-credentials",
-      { method: "POST", body: JSON.stringify({}) },
+      postJson(),
     );
 
     expect(status).toBe(401);
   });
 
-  test("user without s3_permission gets 403 on upload-credentials", async () => {
-    // test-user does NOT have permission for a non-existent dataset
+  test("user gets error for non-existent dataset", async () => {
+    // nm000999 does not exist in dev D1, so this tests the 404/403 boundary
     const { status } = await testRequest(
       "/datasets/nm000999/upload-credentials",
-      { method: "POST", body: JSON.stringify({}) },
+      postJson(),
       userKey,
     );
 
-    // 404 (dataset not found) or 403 (no permission) -- either is correct
     expect([403, 404]).toContain(status);
   });
 });
 
 describe("IAM Removal: Download credentials", () => {
-  test("owner gets download credentials for private dataset", async () => {
+  test("dataset owner gets download credentials for private dataset", async () => {
     const { status, data } = await testRequest<{
-      credentials: {
-        access_key_id: string;
-        secret_access_key: string;
-        session_token: string;
-      };
+      credentials: StsCredentials;
     }>(
       "/datasets/nm099999/download-credentials",
-      { method: "POST", body: JSON.stringify({}) },
+      postJson(),
       adminKey,
     );
 
@@ -195,10 +206,10 @@ describe("IAM Removal: Download credentials", () => {
 
   test("collaborator gets download credentials", async () => {
     const { status, data } = await testRequest<{
-      credentials: { session_token: string };
+      credentials: StsCredentials;
     }>(
       "/datasets/nm099999/download-credentials",
-      { method: "POST", body: JSON.stringify({}) },
+      postJson(),
       userKey,
     );
 
@@ -223,14 +234,15 @@ describe("IAM Removal: Deprecated endpoints", () => {
 
 describe("IAM Removal: User approval (no IAM setup)", () => {
   test("approval response has no iam_setup field", async () => {
-    // Approve test-verified user (already in verified status in seed)
     const { status, data } = await testRequest<Record<string, unknown>>(
       "/admin/approve/test-verified",
       { method: "POST" },
       adminKey,
     );
 
-    // May be 200 (approved) or 400 (already approved from previous test run)
+    // 200 = freshly approved, 409 = already approved from previous test run
+    expect([200, 409]).toContain(status);
+
     if (status === 200) {
       expect(data.iam_setup).toBeUndefined();
       expect(data.iam_username).toBeUndefined();
