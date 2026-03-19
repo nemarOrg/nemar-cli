@@ -106,8 +106,10 @@ datasetRoutes.post(
     const isProduction = environment === "production";
     const sandbox = isProduction ? !!requestedSandbox : true;
 
-    if (!isProduction && requestedSandbox === false) {
-      console.warn(`[datasets] Non-production env: forcing sandbox=true for user ${user.username}`);
+    if (!isProduction && !requestedSandbox) {
+      console.warn(
+        `[datasets] Non-production env: forcing sandbox=true for user ${user.username} (requested: ${requestedSandbox})`,
+      );
     }
 
     // Check if non-sandbox upload requires sandbox training
