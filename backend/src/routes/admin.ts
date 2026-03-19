@@ -62,7 +62,7 @@ import {
   setRepoVisibility,
   triggerArchiveGeneration,
 } from "../services/github";
-import { generateIamUsername, revokeUserIamAccess } from "../services/iam";
+import { revokeUserIamAccess } from "../services/iam";
 import { generateManifest } from "../services/manifest";
 import { syncDatasetToNemar } from "../services/nemar-sync";
 import { createNotice, deleteNotice, listAllNotices } from "../services/notices";
