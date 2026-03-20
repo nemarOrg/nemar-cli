@@ -387,8 +387,8 @@ datasetRoutes.get("/", optionalAuthMiddleware, async (c) => {
   // Public catalog: UNION managed datasets + catalog-only
   const managedParams: (string | number)[] = [status];
   let managedQuery = `
-    SELECT d.dataset_id AS id, d.name, d.description, d.status, d.visibility,
-           d.github_repo, d.concept_doi AS doi, d.created_at,
+    SELECT d.dataset_id, d.dataset_id AS id, d.name, d.description, d.status, d.visibility,
+           d.github_repo, d.concept_doi, d.concept_doi AS doi, d.created_at, d.updated_at,
            u.username AS owner_username, d.nemar_sync_status,
            COALESCE(c.modalities, '') AS modalities,
            COALESCE(c.participants, 0) AS participants,
@@ -424,8 +424,8 @@ datasetRoutes.get("/", optionalAuthMiddleware, async (c) => {
   // Catalog-only datasets (not in managed datasets table)
   const catalogParams: (string | number)[] = [];
   let catalogQuery = `
-    SELECT c.id, c.name, c.description, NULL AS status, 'public' AS visibility,
-           NULL AS github_repo, c.doi, COALESCE(c.publish_date, c.created_date) AS created_at,
+    SELECT c.id AS dataset_id, c.id, c.name, c.description, NULL AS status, 'public' AS visibility,
+           NULL AS github_repo, NULL AS concept_doi, c.doi, COALESCE(c.publish_date, c.created_date) AS created_at, NULL AS updated_at,
            c.uploader AS owner_username, NULL AS nemar_sync_status,
            COALESCE(c.modalities, '') AS modalities,
            COALESCE(c.participants, 0) AS participants,
