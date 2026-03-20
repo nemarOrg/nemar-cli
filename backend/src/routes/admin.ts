@@ -10,6 +10,7 @@ import { z } from "zod";
 import { adminMiddleware, authMiddleware, ownerMiddleware } from "../middleware/auth";
 
 import { getBroadcastRecipients, sendBroadcast } from "../services/broadcast";
+import { syncCatalog } from "../services/catalog-sync";
 import {
   type DataCiteEnrichment,
   bidsToDataCite,
@@ -4722,6 +4723,57 @@ adminRoutes.get("/sync/status", async (c) => {
     synced: results.results.filter((d) => d.nemar_sync_status === "synced").length,
     failed: results.results.filter((d) => d.nemar_sync_status === "failed").length,
     pending: results.results.filter((d) => d.nemar_sync_status === null).length,
+  });
+});
+
+// ============================================================================
+// Catalog Sync (nemar.org catalog -> D1)
+// ============================================================================
+
+/**
+ * POST /admin/catalog/sync - Manually trigger a catalog sync from nemar.org
+ */
+adminRoutes.post("/catalog/sync", async (c) => {
+  const result = await syncCatalog(c.env.DB, c.env.AI, c.env.VECTORIZE);
+
+  return c.json({
+    records_synced: result.recordsSynced,
+    records_indexed: result.recordsIndexed,
+    errors: result.errors,
+    duration_ms: result.durationMs,
+  });
+});
+
+/**
+ * GET /admin/catalog/status - Show catalog sync history
+ */
+adminRoutes.get("/catalog/status", async (c) => {
+  const db = c.env.DB;
+
+  const logs = await db
+    .prepare(
+      `SELECT id, started_at, completed_at, records_synced, records_indexed, errors, status
+       FROM catalog_sync_log
+       ORDER BY started_at DESC
+       LIMIT 10`,
+    )
+    .all<{
+      id: number;
+      started_at: string;
+      completed_at: string | null;
+      records_synced: number;
+      records_indexed: number;
+      errors: string | null;
+      status: string;
+    }>();
+
+  const catalogCount = await db
+    .prepare("SELECT COUNT(*) AS count FROM nemar_catalog")
+    .first<{ count: number }>();
+
+  return c.json({
+    catalog_size: catalogCount?.count ?? 0,
+    recent_syncs: logs.results,
   });
 });
 
