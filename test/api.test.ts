@@ -455,25 +455,16 @@ describe("Datasets API", () => {
 describe("DOI/Zenodo API", () => {
   describe("GET /admin/datasets/:id/doi", () => {
     test("admin can get DOI info for a dataset", async () => {
-      // First check if we have any datasets
-      const { data: datasetsList } = await testRequest<{
-        datasets: Array<{ dataset_id: string }>;
-      }>("/datasets");
-
-      if (datasetsList.datasets.length === 0) {
-        // Skip if no datasets exist
-        return;
-      }
-
-      const datasetId = datasetsList.datasets[0].dataset_id;
+      // Use nm099999 (seeded managed dataset) directly; the list endpoint
+      // may return catalog-only datasets first which don't exist in D1.
       const { status, data } = await testRequest<{
         dataset_id: string;
         name: string;
         concept_doi: string | null;
-      }>(`/admin/datasets/${datasetId}/doi`, {}, TEST_CONFIG.adminApiKey);
+      }>("/admin/datasets/nm099999/doi", {}, TEST_CONFIG.adminApiKey);
 
       expect(status).toBe(200);
-      expect(data.dataset_id).toBe(datasetId);
+      expect(data.dataset_id).toBe("nm099999");
     });
 
     test("non-admin user gets 403", async () => {
@@ -633,20 +624,9 @@ describe("Dataset Collaborators API", () => {
     });
 
     test("non-admin non-owner gets 403", async () => {
-      // First get a dataset that test-user doesn't own
-      const { data: datasetsList } = await testRequest<{
-        datasets: Array<{ dataset_id: string; owner_username: string }>;
-      }>("/datasets");
-
-      const otherDataset = datasetsList.datasets.find((d) => d.owner_username !== "test-user");
-
-      if (!otherDataset) {
-        // Skip if no suitable dataset exists
-        return;
-      }
-
+      // nm099999 is owned by test-admin; test-user is not the owner
       const { status, data } = await testRequest<{ error: string }>(
-        `/datasets/${otherDataset.dataset_id}/invite`,
+        "/datasets/nm099999/invite",
         { method: "POST", body: JSON.stringify({ username: "someone" }) },
         TEST_CONFIG.userApiKey,
       );
@@ -666,15 +646,6 @@ describe("Dataset Collaborators API", () => {
     });
 
     test("inviting non-existent user returns 404", async () => {
-      // First get any dataset
-      const { data: datasetsList } = await testRequest<{
-        datasets: Array<{ dataset_id: string }>;
-      }>("/datasets");
-
-      if (datasetsList.datasets.length === 0) {
-        return;
-      }
-
       const { status, data } = await testRequest<{ error: string }>(
         `/datasets/${datasetsList.datasets[0].dataset_id}/invite`,
         { method: "POST", body: JSON.stringify({ username: "nonexistent-user-12345" }) },
@@ -704,20 +675,9 @@ describe("Dataset Collaborators API", () => {
     });
 
     test("non-admin non-owner gets 403", async () => {
-      // First get a dataset that test-user doesn't own
-      const { data: datasetsList } = await testRequest<{
-        datasets: Array<{ dataset_id: string; owner_username: string }>;
-      }>("/datasets");
-
-      const otherDataset = datasetsList.datasets.find((d) => d.owner_username !== "test-user");
-
-      if (!otherDataset) {
-        // Skip if no suitable dataset exists
-        return;
-      }
-
+      // nm099999 is owned by test-admin; test-user is not the owner
       const { status, data } = await testRequest<{ error: string }>(
-        `/datasets/${otherDataset.dataset_id}/collaborators`,
+        "/datasets/nm099999/collaborators",
         {},
         TEST_CONFIG.userApiKey,
       );
@@ -737,26 +697,19 @@ describe("Dataset Collaborators API", () => {
     });
 
     test("admin can list collaborators for any dataset", async () => {
-      const { data: datasetsList } = await testRequest<{
-        datasets: Array<{ dataset_id: string }>;
-      }>("/datasets");
-
-      if (datasetsList.datasets.length === 0) {
-        return;
-      }
-
+      // Use nm099999 (seeded managed dataset) directly
       const { status, data } = await testRequest<{
         dataset_id: string;
         collaborators: Array<{ username: string }>;
         count: number;
       }>(
-        `/datasets/${datasetsList.datasets[0].dataset_id}/collaborators`,
+        "/datasets/nm099999/collaborators",
         {},
         TEST_CONFIG.adminApiKey,
       );
 
       expect(status).toBe(200);
-      expect(data.dataset_id).toBe(datasetsList.datasets[0].dataset_id);
+      expect(data.dataset_id).toBe("nm099999");
       expect(Array.isArray(data.collaborators)).toBe(true);
       expect(typeof data.count).toBe("number");
     });
