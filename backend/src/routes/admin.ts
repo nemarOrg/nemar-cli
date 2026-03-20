@@ -4745,13 +4745,33 @@ adminRoutes.post("/catalog/sync", async (c) => {
   const body = await c.req.json<{ records?: unknown[] }>();
 
   if (body.records && Array.isArray(body.records) && body.records.length > 0) {
-    // Import pre-fetched records from GitHub Action
-    const result = await importCatalogRecords(
-      c.env.DB,
-      body.records as NemarCatalogRecord[],
-      c.env.AI,
-      c.env.VECTORIZE,
-    );
+    // Validate records before importing
+    const validRecords: NemarCatalogRecord[] = [];
+    const validationErrors: string[] = [];
+    for (const [i, raw] of (body.records as Array<Record<string, unknown>>).entries()) {
+      if (!raw.id || typeof raw.id !== "string") {
+        validationErrors.push(`Record ${i}: missing or invalid 'id'`);
+        continue;
+      }
+      if (!raw.name || typeof raw.name !== "string") {
+        validationErrors.push(`Record ${i} (${raw.id}): missing or invalid 'name'`);
+        continue;
+      }
+      validRecords.push(raw as unknown as NemarCatalogRecord);
+    }
+    if (validRecords.length === 0) {
+      return c.json(
+        { error: "No valid records in payload", validation_errors: validationErrors },
+        400,
+      );
+    }
+    if (validationErrors.length > 0) {
+      console.warn(
+        `[catalog-sync] ${validationErrors.length} records failed validation, importing ${validRecords.length}`,
+      );
+    }
+
+    const result = await importCatalogRecords(c.env.DB, validRecords, c.env.AI, c.env.VECTORIZE);
     return c.json({
       records_synced: result.recordsSynced,
       records_indexed: result.recordsIndexed,

@@ -307,14 +307,21 @@ export async function syncCatalog(
     console.error("[catalog-sync] Sync failed:", msg);
     errors.push(msg);
 
-    await db
-      .prepare(
-        `UPDATE catalog_sync_log
-         SET status = 'failed', completed_at = datetime('now'), errors = ?
-         WHERE id = ?`,
-      )
-      .bind(msg, logId)
-      .run();
+    try {
+      await db
+        .prepare(
+          `UPDATE catalog_sync_log
+           SET status = 'failed', completed_at = datetime('now'), errors = ?
+           WHERE id = ?`,
+        )
+        .bind(msg, logId)
+        .run();
+    } catch (logErr) {
+      console.error(
+        "[catalog-sync] Failed to update sync log:",
+        logErr instanceof Error ? logErr.message : logErr,
+      );
+    }
   }
 
   return {
@@ -376,14 +383,21 @@ export async function importCatalogRecords(
     console.error("[catalog-sync] Import failed:", msg);
     errors.push(msg);
 
-    await db
-      .prepare(
-        `UPDATE catalog_sync_log
-         SET status = 'failed', completed_at = datetime('now'), errors = ?
-         WHERE id = ?`,
-      )
-      .bind(msg, logId)
-      .run();
+    try {
+      await db
+        .prepare(
+          `UPDATE catalog_sync_log
+           SET status = 'failed', completed_at = datetime('now'), errors = ?
+           WHERE id = ?`,
+        )
+        .bind(msg, logId)
+        .run();
+    } catch (logErr) {
+      console.error(
+        "[catalog-sync] Failed to update sync log:",
+        logErr instanceof Error ? logErr.message : logErr,
+      );
+    }
   }
 
   return {

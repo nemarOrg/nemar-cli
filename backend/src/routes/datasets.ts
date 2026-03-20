@@ -579,7 +579,12 @@ async function executeAndReturn(
              ORDER BY d.created_at DESC LIMIT 50`,
           )
           .all();
-        return c.json({ datasets: fallback.results || [], count: fallback.results?.length || 0 });
+        return c.json({
+          datasets: fallback.results || [],
+          count: fallback.results?.length || 0,
+          fallback: true,
+          warning: "Catalog not available; filters and catalog datasets not included",
+        });
       } catch (fallbackErr) {
         const fallbackMsg =
           fallbackErr instanceof Error ? fallbackErr.message : String(fallbackErr);
@@ -612,9 +617,11 @@ datasetRoutes.get("/search", optionalAuthMiddleware, async (c) => {
   try {
     // Try semantic search via Vectorize, fall back to LIKE
     let results: Awaited<ReturnType<typeof semanticSearch>>;
-    if (c.env.AI && c.env.VECTORIZE) {
-      results = await semanticSearch(c.env.AI, c.env.VECTORIZE, query, limit * 2);
+    const hasVectorize = Boolean(c.env.AI && c.env.VECTORIZE);
+    if (hasVectorize) {
+      results = await semanticSearch(c.env.AI!, c.env.VECTORIZE!, query, limit * 2);
     } else {
+      console.warn("[search] AI or VECTORIZE binding not available, using text search");
       results = await textSearch(db, query, limit * 2);
     }
 
@@ -627,7 +634,7 @@ datasetRoutes.get("/search", optionalAuthMiddleware, async (c) => {
     return c.json({
       results: results.slice(0, limit),
       count: results.length,
-      method: c.env.AI && c.env.VECTORIZE ? "semantic" : "text",
+      method: hasVectorize ? "semantic" : "text",
     });
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
