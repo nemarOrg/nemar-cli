@@ -540,18 +540,58 @@ export interface Dataset {
    * Access control state.
    * - private: Only owner and admins can view (default for new datasets)
    * - public: Visible to all users, accessible via public catalog
-   *
-   * Independent from status: datasets can be active+private, archived+public, etc.
    */
   visibility: "public" | "private";
   github_repo: string | null;
   concept_doi: string | null;
   created_at: string;
+  // Catalog-enriched fields (from nemar_catalog JOIN or catalog-only)
+  modalities?: string;
+  participants?: number;
+  tasks?: string;
+  authors?: string;
+  file_size?: number;
+  file_size_formatted?: string;
+  /** 'managed' = in D1 datasets table, 'catalog' = nemar.org only */
+  source_type?: "managed" | "catalog";
+  /** nemar.org sync status for managed datasets */
+  nemar_sync_status?: string | null;
+  /** DOI field from catalog (for catalog-only datasets) */
+  doi?: string | null;
 }
 
 export interface DatasetsListResponse {
   datasets: Dataset[];
   count: number;
+}
+
+export interface DatasetListFilters {
+  mine?: boolean;
+  search?: string;
+  modality?: string;
+  author?: string;
+  task?: string;
+  hasDoi?: boolean;
+  recent?: number;
+  sort?: "newest" | "oldest" | "name" | "participants" | "size";
+  limit?: number;
+}
+
+export interface DatasetSearchResult {
+  id: string;
+  name: string;
+  modalities: string;
+  participants: number;
+  doi: string;
+  tasks: string;
+  authors: string;
+  score: number;
+}
+
+export interface DatasetSearchResponse {
+  results: DatasetSearchResult[];
+  count: number;
+  method: "semantic" | "text" | "text_fallback";
 }
 
 /**
@@ -576,18 +616,42 @@ export function validateDataset(data: unknown): Dataset {
 }
 
 /**
- * List datasets
+ * List datasets with optional filters
  */
-export async function listDatasets(mine = false): Promise<DatasetsListResponse> {
-  const query = mine ? "?mine=true" : "";
+export async function listDatasets(
+  filters: DatasetListFilters = {},
+): Promise<DatasetsListResponse> {
+  const params = new URLSearchParams();
+  if (filters.mine) params.set("mine", "true");
+  if (filters.search) params.set("search", filters.search);
+  if (filters.modality) params.set("modality", filters.modality);
+  if (filters.author) params.set("author", filters.author);
+  if (filters.task) params.set("task", filters.task);
+  if (filters.hasDoi) params.set("has_doi", "true");
+  if (filters.recent) params.set("recent", String(filters.recent));
+  if (filters.sort) params.set("sort", filters.sort);
+  if (filters.limit) params.set("limit", String(filters.limit));
+  const query = params.toString() ? `?${params.toString()}` : "";
   const response = await request<DatasetsListResponse>(
     `/datasets${query}`,
     {},
-    mine ? true : "optional",
+    filters.mine ? true : "optional",
   );
-  // Validate each dataset in the response
   response.datasets = response.datasets.map(validateDataset);
   return response;
+}
+
+/**
+ * Semantic dataset search
+ */
+export async function searchDatasets(
+  query: string,
+  filters: { modality?: string; limit?: number } = {},
+): Promise<DatasetSearchResponse> {
+  const params = new URLSearchParams({ q: query });
+  if (filters.modality) params.set("modality", filters.modality);
+  if (filters.limit) params.set("limit", String(filters.limit));
+  return request<DatasetSearchResponse>(`/datasets/search?${params.toString()}`, {}, "optional");
 }
 
 interface GetDatasetResponse {

@@ -49,6 +49,7 @@ import {
   requestPublication,
   requestUploadCredentials,
   resendPublishNotification,
+  searchDatasets,
 } from "../lib/api.js";
 import { isAwsCliAvailable } from "../lib/aws-cli.js";
 import {
@@ -1891,40 +1892,127 @@ function colorizeStatus(status: string): string {
   }
 }
 
+// Shared logic for rendering dataset tables
+function renderDatasetTable(datasets: Dataset[], response: { count: number }) {
+  console.log();
+  console.log(
+    chalk.bold(
+      `Datasets (${datasets.length}${response.count > datasets.length ? ` of ${response.count}` : ""}):`,
+    ),
+  );
+  console.log();
+
+  const getId = (d: Dataset) => d.dataset_id || (d as unknown as { id?: string }).id || "";
+  const idWidth = Math.max(10, ...datasets.map((d) => getId(d).length));
+  const nameWidth = Math.min(30, Math.max(10, ...datasets.map((d) => d.name.length)));
+  const modWidth = 10;
+  const subjWidth = 8;
+  const ownerWidth = Math.max(8, ...datasets.map((d) => (d.owner_username || "-").length));
+
+  const header = [
+    "ID".padEnd(idWidth),
+    "Name".padEnd(nameWidth),
+    "Modality".padEnd(modWidth),
+    "Subj".padEnd(subjWidth),
+    "Owner".padEnd(ownerWidth),
+    "Status",
+  ].join("  ");
+  console.log(chalk.dim(header));
+  console.log(chalk.dim("-".repeat(header.length)));
+
+  for (const dataset of datasets) {
+    const id = getId(dataset);
+    const name =
+      dataset.name.length > nameWidth
+        ? `${dataset.name.substring(0, nameWidth - 3)}...`
+        : dataset.name;
+    const modality = (dataset.modalities || "").substring(0, modWidth);
+    const subjects = dataset.participants ? String(dataset.participants) : "-";
+    const owner = dataset.owner_username || "-";
+
+    // Discrepancy indicators:
+    // * = managed (on GitHub) but not synced to nemar.org
+    // italic/dim = catalog-only (on nemar.org but not on GitHub)
+    let statusIndicator = "";
+    if (dataset.source_type === "managed" && !dataset.nemar_sync_status) {
+      statusIndicator = chalk.yellow("*"); // On GitHub, not synced
+    } else if (dataset.source_type === "managed" && dataset.nemar_sync_status === "failed") {
+      statusIndicator = chalk.red("!"); // Sync failed
+    }
+
+    const visLabel = dataset.visibility === "public" ? chalk.green("pub") : chalk.yellow("prv");
+
+    let idDisplay: string;
+    if (dataset.source_type === "catalog") {
+      // Catalog-only: dim to indicate not on GitHub
+      idDisplay = chalk.dim(id.padEnd(idWidth));
+    } else {
+      idDisplay = chalk.cyan(id.padEnd(idWidth));
+    }
+
+    const nameDisplay = dataset.source_type === "catalog" ? chalk.dim(name) : name;
+
+    const row = [
+      idDisplay,
+      nameDisplay.padEnd(
+        nameWidth + (dataset.source_type === "catalog" ? chalk.dim("").length : 0),
+      ),
+      modality.padEnd(modWidth),
+      subjects.padEnd(subjWidth),
+      owner.padEnd(ownerWidth),
+      `${visLabel} ${statusIndicator}`.trim(),
+    ].join("  ");
+    console.log(row);
+  }
+
+  console.log();
+  console.log(
+    chalk.dim(
+      `  * = not synced to nemar.org    ${chalk.dim("dim")} = catalog-only (not on GitHub)`,
+    ),
+  );
+  console.log(chalk.dim("For details: nemar dataset status <dataset-id>"));
+  console.log(chalk.dim("Search: nemar dataset search <query>"));
+}
+
 // List command
 datasetCommand
   .command("list")
-  .description("List publicly available datasets on NEMAR")
+  .description("List datasets on NEMAR (full catalog)")
   .option("--mine", "List only your datasets (both private and public)")
+  .option("--search <query>", "Search by name, description, authors, or tasks")
+  .option("--modality <type>", "Filter by modality (eeg, emg, meg, etc.)")
+  .option("--author <name>", "Filter by author name")
+  .option("--task <name>", "Filter by task name")
+  .option("--doi", "Show only datasets with DOIs")
+  .option("--recent [days]", "Show recently published datasets")
+  .option("--sort <order>", "Sort: newest, oldest, name, participants, size", "newest")
   .option("--json", "Output as JSON for scripting")
   .option("--limit <n>", "Limit number of results (default: 50)", "50")
   .addHelpText(
     "after",
     `
 Description:
-  By default, lists only PUBLIC datasets on NEMAR that anyone can access.
+  Lists the full NEMAR catalog, including legacy datasets from nemar.org
+  and datasets managed via nemar-cli. Use filters to find specific datasets.
 
-  To see your own datasets (including private ones), use the --mine flag.
-  This requires authentication.
+  With --mine: shows only YOUR datasets (requires authentication).
 
-Visibility Rules:
-  Without --mine:
-    - Shows only public datasets (visible to everyone)
-    - Does not show private datasets, even your own
-    - Exception: Admins see ALL datasets for oversight
-
-  With --mine:
-    - Shows all YOUR datasets (both private and public)
-    - Requires authentication (nemar auth login)
+Display Indicators:
+  ${chalk.cyan("cyan ID")}     Managed dataset (on GitHub)
+  ${chalk.dim("dim ID")}      Catalog-only (nemar.org, not on GitHub)
+  ${chalk.yellow("*")}           On GitHub but not synced to nemar.org
+  ${chalk.red("!")}           Sync to nemar.org failed
 
 Examples:
-  $ nemar dataset list                   # List public datasets only
-  $ nemar dataset list --mine            # List YOUR datasets (private + public)
-  $ nemar dataset list --json            # JSON output for scripting
-  $ nemar dataset list --limit 10        # Show only 10 datasets`,
+  $ nemar dataset list                         # Full catalog
+  $ nemar dataset list --mine                  # Your datasets
+  $ nemar dataset list --modality eeg          # EEG datasets only
+  $ nemar dataset list --search "motor"        # Search by keyword
+  $ nemar dataset list --doi --sort size       # Published, by size
+  $ nemar dataset search "resting state EEG"   # Semantic search`,
   )
   .action(async (options) => {
-    // If --mine, require authentication
     if (options.mine && !isAuthenticated()) {
       console.log(chalk.red("Error: Not authenticated"));
       console.log("Run 'nemar auth login' to see your datasets");
@@ -1935,7 +2023,17 @@ Examples:
 
     let response: DatasetsListResponse;
     try {
-      response = await listDatasets(!!options.mine);
+      response = await listDatasets({
+        mine: !!options.mine,
+        search: options.search,
+        modality: options.modality,
+        author: options.author,
+        task: options.task,
+        hasDoi: !!options.doi,
+        recent: options.recent ? Number.parseInt(options.recent, 10) || 30 : undefined,
+        sort: options.sort,
+        limit: Number.parseInt(options.limit, 10),
+      });
       spinner.stop();
     } catch (error) {
       spinner.fail("Failed to fetch datasets");
@@ -1947,90 +2045,129 @@ Examples:
       process.exit(1);
     }
 
-    let datasets = response.datasets;
+    const datasets = response.datasets;
 
-    // Filter by owner if --mine
-    // NOTE: Backend already filters by owner when mine=true is passed,
-    // but we apply client-side filter as defense-in-depth in case backend
-    // behavior changes or for backward compatibility with older backends.
-    if (options.mine) {
-      const config = getConfig();
-      const username = config.username;
-      datasets = datasets.filter((d) => d.owner_username === username);
-    }
-
-    // Limit results
-    const limit = Number.parseInt(options.limit, 10);
-    if (datasets.length > limit) {
-      datasets = datasets.slice(0, limit);
-    }
-
-    // JSON output
     if (options.json) {
       console.log(JSON.stringify(datasets, null, 2));
       return;
     }
 
-    // No datasets found
     if (datasets.length === 0) {
       console.log();
       if (options.mine) {
         console.log(chalk.yellow("You don't have any datasets yet."));
         console.log(chalk.dim("Create one with: nemar dataset upload <path>"));
+      } else if (options.search || options.modality || options.author) {
+        console.log(chalk.yellow("No datasets match your filters."));
+        console.log(chalk.dim("Try broader search terms or remove filters."));
       } else {
         console.log(chalk.yellow("No datasets found."));
       }
       return;
     }
 
-    // Table output
-    console.log();
-    console.log(
-      chalk.bold(
-        `Datasets (${datasets.length}${response.count > datasets.length ? ` of ${response.count}` : ""}):`,
-      ),
-    );
-    console.log();
+    renderDatasetTable(datasets, response);
+  });
 
-    // Calculate column widths
-    const idWidth = Math.max(10, ...datasets.map((d) => d.dataset_id.length));
-    const nameWidth = Math.min(30, Math.max(10, ...datasets.map((d) => d.name.length)));
-    const ownerWidth = Math.max(8, ...datasets.map((d) => d.owner_username.length));
-    const visWidth = 10;
+// Search command (semantic search via Vectorize)
+datasetCommand
+  .command("search <query>")
+  .description("Search datasets using semantic matching")
+  .option("--modality <type>", "Filter by modality (eeg, emg, meg, etc.)")
+  .option("--json", "Output as JSON for scripting")
+  .option("--limit <n>", "Limit results (default: 20)", "20")
+  .addHelpText(
+    "after",
+    `
+Description:
+  Performs semantic search across the NEMAR dataset catalog. Unlike
+  --search on the list command (which uses exact text matching), this
+  uses AI embeddings to find conceptually similar datasets.
 
-    // Header
-    const header = [
-      "ID".padEnd(idWidth),
-      "Name".padEnd(nameWidth),
-      "Owner".padEnd(ownerWidth),
-      "Visibility".padEnd(visWidth),
-      "Status",
-    ].join("  ");
-    console.log(chalk.dim(header));
-    console.log(chalk.dim("-".repeat(header.length)));
+  For example, "brain signals during sleep" will match datasets about
+  "EEG recordings in sleep studies" even if those exact words don't appear.
 
-    // Rows
-    for (const dataset of datasets) {
-      const name =
-        dataset.name.length > nameWidth
-          ? `${dataset.name.substring(0, nameWidth - 3)}...`
-          : dataset.name;
+Examples:
+  $ nemar dataset search "motor imagery EEG"
+  $ nemar dataset search "resting state" --modality eeg
+  $ nemar dataset search "sleep spindles" --json`,
+  )
+  .action(async (query: string, options) => {
+    const spinner = ora("Searching datasets...").start();
 
-      const visLabel =
-        dataset.visibility === "public" ? chalk.green("public") : chalk.yellow("private");
+    try {
+      const response = await searchDatasets(query, {
+        modality: options.modality,
+        limit: Number.parseInt(options.limit, 10),
+      });
+      spinner.stop();
 
-      const row = [
-        chalk.cyan(dataset.dataset_id.padEnd(idWidth)),
-        name.padEnd(nameWidth),
-        dataset.owner_username.padEnd(ownerWidth),
-        visLabel.padEnd(visWidth + (visLabel.length - dataset.visibility.length)),
-        colorizeStatus(dataset.status),
+      if (options.json) {
+        console.log(JSON.stringify(response, null, 2));
+        return;
+      }
+
+      if (response.results.length === 0) {
+        console.log();
+        console.log(chalk.yellow("No datasets match your search."));
+        console.log(
+          chalk.dim("Try different search terms or use 'nemar dataset list' for browsing."),
+        );
+        return;
+      }
+
+      console.log();
+      console.log(
+        chalk.bold(
+          `Search results for "${query}" (${response.results.length} found, ${response.method}):`,
+        ),
+      );
+      console.log();
+
+      const idWidth = Math.max(10, ...response.results.map((r) => r.id.length));
+      const nameWidth = Math.min(35, Math.max(10, ...response.results.map((r) => r.name.length)));
+      const modWidth = 10;
+      const subjWidth = 6;
+
+      const header = [
+        "Score".padEnd(5),
+        "ID".padEnd(idWidth),
+        "Name".padEnd(nameWidth),
+        "Modality".padEnd(modWidth),
+        "Subj".padEnd(subjWidth),
       ].join("  ");
-      console.log(row);
-    }
+      console.log(chalk.dim(header));
+      console.log(chalk.dim("-".repeat(header.length)));
 
-    console.log();
-    console.log(chalk.dim("For details: nemar dataset status <dataset-id>"));
+      for (const result of response.results) {
+        const name =
+          result.name.length > nameWidth
+            ? `${result.name.substring(0, nameWidth - 3)}...`
+            : result.name;
+        const scoreColor =
+          result.score >= 0.8 ? chalk.green : result.score >= 0.5 ? chalk.yellow : chalk.dim;
+
+        const row = [
+          scoreColor(String(result.score).padEnd(5)),
+          chalk.cyan(result.id.padEnd(idWidth)),
+          name.padEnd(nameWidth),
+          (result.modalities || "-").substring(0, modWidth).padEnd(modWidth),
+          (result.participants ? String(result.participants) : "-").padEnd(subjWidth),
+        ].join("  ");
+        console.log(row);
+      }
+
+      console.log();
+      console.log(chalk.dim("For details: nemar dataset status <dataset-id>"));
+    } catch (error) {
+      spinner.fail("Search failed");
+      if (error instanceof ApiError) {
+        console.log(chalk.red(`  ${error.message}`));
+      } else {
+        console.log(chalk.red(`  ${(error as Error).message}`));
+      }
+      process.exit(1);
+    }
   });
 
 // Release command - create a version bump PR
