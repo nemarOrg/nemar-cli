@@ -601,7 +601,10 @@ export interface DatasetSearchResponse {
 export function validateDataset(data: unknown): Dataset {
   const d = data as Dataset;
 
-  if (!["active", "archived", "deleted"].includes(d.status)) {
+  // Catalog-only records have null status; default to "active"
+  if (!d.status) {
+    d.status = "active";
+  } else if (!["active", "archived", "deleted"].includes(d.status)) {
     throw new Error(`Invalid dataset status: ${d.status}`);
   }
 
