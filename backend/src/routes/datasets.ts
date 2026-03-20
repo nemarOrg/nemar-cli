@@ -9,6 +9,7 @@ import { Hono } from "hono";
 import { z } from "zod";
 import { authMiddleware, optionalAuthMiddleware } from "../middleware/auth";
 import { cliVersionGuard } from "../middleware/cliVersion";
+import { semanticSearch, textSearch } from "../services/dataset-search";
 import { generateDatasetId, isValidDatasetId } from "../services/datasetId";
 import { getAdminEmailsForCategory, sendPublicationRequestEmail } from "../services/email";
 import {
@@ -310,103 +311,335 @@ datasetRoutes.post(
 );
 
 /**
- * GET /datasets - List datasets
+ * GET /datasets - List datasets (unified catalog)
+ *
+ * Merges managed datasets (D1) with the nemar.org catalog for a complete listing.
+ * Managed datasets take precedence for deduplication (LEFT JOIN on nemar_catalog).
  *
  * Visibility rules:
- * - --mine flag: show only the authenticated user's datasets (private + public + sandbox)
- * - No --mine flag (public catalog):
- *   - Sandbox datasets are ALWAYS excluded (sandbox is for testing workflow only)
+ * - --mine flag: show only the authenticated user's managed datasets (private + public + sandbox)
+ * - No --mine flag (public catalog): merge managed + catalog-only datasets
+ *   - Sandbox datasets are ALWAYS excluded
  *   - Unauthenticated: public datasets only
  *   - Authenticated non-admin: public datasets only
- *   - Admin: all datasets (public + private from all users, excluding sandbox)
+ *   - Admin: all datasets (including private managed datasets)
+ *
+ * Filter params: modality, author, task, has_doi, recent, sort, search (LIKE fallback)
  */
 datasetRoutes.get("/", optionalAuthMiddleware, async (c) => {
   const mine = c.req.query("mine") === "true";
   const status = c.req.query("status") || "active";
-  const limit = Number.parseInt(c.req.query("limit") || "50", 10);
+  const limit = Math.min(Number.parseInt(c.req.query("limit") || "50", 10), 200);
   const offset = Number.parseInt(c.req.query("offset") || "0", 10);
   const user = c.get("user");
   const db = c.env.DB;
 
-  let query = `
-    SELECT
-      d.dataset_id,
-      d.name,
-      d.description,
-      d.status,
-      d.visibility,
-      d.github_repo,
-      d.concept_doi,
-      d.created_at,
-      d.updated_at,
-      u.username as owner_username
-    FROM datasets d
-    JOIN users u ON d.owner_user_id = u.id
-    WHERE d.status = ?
-  `;
-  const params: (string | number)[] = [status];
+  // Filter params
+  const search = c.req.query("search");
+  const modality = c.req.query("modality");
+  const author = c.req.query("author");
+  const task = c.req.query("task");
+  const hasDoi = c.req.query("has_doi") === "true";
+  const recentParam = c.req.query("recent");
+  const recent = recentParam ? Number.parseInt(recentParam, 10) : undefined;
+  const sort = c.req.query("sort") || "newest";
 
   if (mine) {
-    // User wants to see only their own datasets
+    // --mine: only managed datasets, no catalog
     if (!user) {
       return c.json({ error: "Authentication required to view your datasets" }, 401);
     }
-    query += " AND d.owner_user_id = ?";
-    params.push(user.id);
-    // User can see their own datasets regardless of visibility (including sandbox)
-  } else {
-    // Public catalog view
-    // Exclude sandbox datasets from public listings (sandbox is for testing workflow only)
-    query += " AND (d.is_sandbox = 0 OR d.is_sandbox IS NULL)";
 
-    // Filter by visibility based on user permissions
-    if (!user) {
-      // Unauthenticated: public datasets only
-      query += " AND d.visibility = 'public'";
-    } else if (!hasRole(user.role, "admin")) {
-      // Authenticated non-admin: public datasets only
-      // (use --mine to see your own private datasets)
-      query += " AND d.visibility = 'public'";
-    }
-    // Admin: show all datasets (no additional filter)
+    let query = `
+      SELECT d.dataset_id, d.name, d.description, d.status, d.visibility,
+             d.github_repo, d.concept_doi, d.created_at, d.updated_at,
+             u.username AS owner_username, d.nemar_sync_status,
+             COALESCE(c.modalities, '') AS modalities,
+             COALESCE(c.participants, 0) AS participants,
+             COALESCE(c.tasks, '') AS tasks,
+             COALESCE(c.authors, '') AS authors,
+             COALESCE(c.file_size, 0) AS file_size,
+             COALESCE(c.file_size_formatted, '') AS file_size_formatted,
+             'managed' AS source_type
+      FROM datasets d
+      JOIN users u ON d.owner_user_id = u.id
+      LEFT JOIN nemar_catalog c ON c.id = d.dataset_id
+      WHERE d.status = ? AND d.owner_user_id = ?
+    `;
+    const params: (string | number)[] = [status, user.id];
+
+    query += buildFilterClauses(params, {
+      search,
+      modality,
+      author,
+      task,
+      hasDoi,
+      recent,
+      managed: true,
+    });
+    query += buildSortClause(sort);
+    query += " LIMIT ? OFFSET ?";
+    params.push(limit, offset);
+
+    return executeAndReturn(c, db, query, params);
   }
 
-  query += " ORDER BY d.created_at DESC LIMIT ? OFFSET ?";
-  params.push(limit, offset);
+  // Public catalog: UNION managed datasets + catalog-only
+  const managedParams: (string | number)[] = [status];
+  let managedQuery = `
+    SELECT d.dataset_id, d.dataset_id AS id, d.name, d.description, d.status, d.visibility,
+           d.github_repo, d.concept_doi, d.concept_doi AS doi, d.created_at, d.updated_at,
+           u.username AS owner_username, d.nemar_sync_status,
+           COALESCE(c.modalities, '') AS modalities,
+           COALESCE(c.participants, 0) AS participants,
+           COALESCE(c.tasks, '') AS tasks,
+           COALESCE(c.authors, '') AS authors,
+           COALESCE(c.file_size, 0) AS file_size,
+           COALESCE(c.file_size_formatted, '') AS file_size_formatted,
+           'managed' AS source_type
+    FROM datasets d
+    JOIN users u ON d.owner_user_id = u.id
+    LEFT JOIN nemar_catalog c ON c.id = d.dataset_id
+    WHERE d.status = ?
+      AND (d.is_sandbox = 0 OR d.is_sandbox IS NULL)
+  `;
 
-  let queryResult: Awaited<ReturnType<ReturnType<typeof db.prepare>["all"]>> | undefined;
+  // Visibility filter for managed datasets
+  if (!user) {
+    managedQuery += " AND d.visibility = 'public'";
+  } else if (!hasRole(user.role, "admin")) {
+    managedQuery += " AND d.visibility = 'public'";
+  }
+
+  managedQuery += buildFilterClauses(managedParams, {
+    search,
+    modality,
+    author,
+    task,
+    hasDoi,
+    recent,
+    managed: true,
+  });
+
+  // Catalog-only datasets (not in managed datasets table)
+  const catalogParams: (string | number)[] = [];
+  let catalogQuery = `
+    SELECT c.id AS dataset_id, c.id, c.name, c.description, NULL AS status, 'public' AS visibility,
+           NULL AS github_repo, NULL AS concept_doi, c.doi, COALESCE(c.publish_date, c.created_date) AS created_at, NULL AS updated_at,
+           c.uploader AS owner_username, NULL AS nemar_sync_status,
+           COALESCE(c.modalities, '') AS modalities,
+           COALESCE(c.participants, 0) AS participants,
+           COALESCE(c.tasks, '') AS tasks,
+           COALESCE(c.authors, '') AS authors,
+           COALESCE(c.file_size, 0) AS file_size,
+           COALESCE(c.file_size_formatted, '') AS file_size_formatted,
+           'catalog' AS source_type
+    FROM nemar_catalog c
+    WHERE c.id NOT IN (SELECT dataset_id FROM datasets WHERE status = 'active')
+  `;
+
+  catalogQuery += buildFilterClauses(catalogParams, {
+    search,
+    modality,
+    author,
+    task,
+    hasDoi,
+    recent,
+    managed: false,
+  });
+
+  // Combine with UNION ALL
+  const unionQuery = `${managedQuery} UNION ALL ${catalogQuery}${buildSortClause(sort)} LIMIT ? OFFSET ?`;
+  const allParams = [...managedParams, ...catalogParams, limit, offset];
+
+  return executeAndReturn(c, db, unionQuery, allParams);
+});
+
+/** Build WHERE clauses for search/filter params */
+function buildFilterClauses(
+  params: (string | number)[],
+  opts: {
+    search?: string;
+    modality?: string;
+    author?: string;
+    task?: string;
+    hasDoi?: boolean;
+    recent?: number;
+    managed: boolean;
+  },
+): string {
+  let clauses = "";
+
+  if (opts.search) {
+    if (opts.managed) {
+      clauses +=
+        " AND (LOWER(d.name) LIKE ? OR LOWER(d.description) LIKE ? OR LOWER(COALESCE(c.search_text, '')) LIKE ?)";
+      const pattern = `%${opts.search.toLowerCase()}%`;
+      params.push(pattern, pattern, pattern);
+    } else {
+      clauses += " AND LOWER(c.search_text) LIKE ?";
+      params.push(`%${opts.search.toLowerCase()}%`);
+    }
+  }
+
+  if (opts.modality) {
+    if (opts.managed) {
+      clauses += " AND LOWER(COALESCE(c.modalities, '')) LIKE ?";
+    } else {
+      clauses += " AND LOWER(c.modalities) LIKE ?";
+    }
+    params.push(`%${opts.modality.toLowerCase()}%`);
+  }
+
+  if (opts.author) {
+    if (opts.managed) {
+      clauses += " AND LOWER(COALESCE(c.authors, '')) LIKE ?";
+    } else {
+      clauses += " AND LOWER(c.authors) LIKE ?";
+    }
+    params.push(`%${opts.author.toLowerCase()}%`);
+  }
+
+  if (opts.task) {
+    if (opts.managed) {
+      clauses += " AND LOWER(COALESCE(c.tasks, '')) LIKE ?";
+    } else {
+      clauses += " AND LOWER(c.tasks) LIKE ?";
+    }
+    params.push(`%${opts.task.toLowerCase()}%`);
+  }
+
+  if (opts.hasDoi) {
+    if (opts.managed) {
+      clauses += " AND (d.concept_doi IS NOT NULL AND d.concept_doi != '')";
+    } else {
+      clauses += " AND (c.doi IS NOT NULL AND c.doi != '')";
+    }
+  }
+
+  if (opts.recent) {
+    if (opts.managed) {
+      clauses += " AND d.created_at > datetime('now', ?)";
+    } else {
+      clauses += " AND c.publish_date > datetime('now', ?)";
+    }
+    params.push(`-${opts.recent} days`);
+  }
+
+  return clauses;
+}
+
+function buildSortClause(sort: string): string {
+  switch (sort) {
+    case "oldest":
+      return " ORDER BY created_at ASC";
+    case "name":
+      return " ORDER BY name ASC";
+    case "participants":
+      return " ORDER BY participants DESC";
+    case "size":
+      return " ORDER BY file_size DESC";
+    default:
+      return " ORDER BY created_at DESC";
+  }
+}
+
+async function executeAndReturn(
+  c: { json: (data: unknown, status?: number) => Response },
+  db: D1Database,
+  query: string,
+  params: (string | number)[],
+) {
   try {
-    queryResult = await db
+    const result = await db
       .prepare(query)
       .bind(...params)
       .all();
+    if (!result?.results) {
+      return c.json({ error: "Database query failed" }, 500);
+    }
+    return c.json({ datasets: result.results, count: result.results.length });
   } catch (dbError) {
     const msg = dbError instanceof Error ? dbError.message : String(dbError);
-    console.error("Failed to query datasets:", msg, "Query params:", params);
-    return c.json(
-      {
-        error: "Failed to retrieve datasets",
-        details: msg,
-      },
-      500,
-    );
+
+    // Graceful fallback: if nemar_catalog table doesn't exist yet (migration
+    // 0018 not applied), fall back to the basic datasets-only query.
+    if (msg.includes("no such table: nemar_catalog")) {
+      console.warn("[datasets] nemar_catalog table not found, falling back to basic query");
+      try {
+        const fallback = await db
+          .prepare(
+            `SELECT d.dataset_id, d.name, d.description, d.status, d.visibility,
+                    d.github_repo, d.concept_doi, d.created_at, d.updated_at,
+                    u.username AS owner_username
+             FROM datasets d
+             JOIN users u ON d.owner_user_id = u.id
+             WHERE d.status = 'active' AND (d.is_sandbox = 0 OR d.is_sandbox IS NULL)
+             ORDER BY d.created_at DESC LIMIT 50`,
+          )
+          .all();
+        return c.json({ datasets: fallback.results || [], count: fallback.results?.length || 0 });
+      } catch (fallbackErr) {
+        const fallbackMsg =
+          fallbackErr instanceof Error ? fallbackErr.message : String(fallbackErr);
+        return c.json({ error: "Failed to retrieve datasets", details: fallbackMsg }, 500);
+      }
+    }
+
+    console.error("Failed to query datasets:", msg);
+    return c.json({ error: "Failed to retrieve datasets", details: msg }, 500);
+  }
+}
+
+/**
+ * GET /datasets/search - Semantic dataset search
+ *
+ * Uses Vectorize for semantic similarity matching. Falls back to LIKE
+ * queries when Vectorize is unavailable. Returns results ranked by
+ * relevance score.
+ */
+datasetRoutes.get("/search", optionalAuthMiddleware, async (c) => {
+  const query = c.req.query("q");
+  if (!query) {
+    return c.json({ error: "Search query parameter 'q' is required" }, 400);
   }
 
-  if (!queryResult || !queryResult.results) {
-    console.error("Database query returned invalid result structure for datasets list");
-    return c.json(
-      {
-        error: "Database query failed",
-        details: "Query did not return expected result structure",
-      },
-      500,
-    );
-  }
+  const limit = Math.min(Number.parseInt(c.req.query("limit") || "20", 10), 100);
+  const modality = c.req.query("modality");
+  const db = c.env.DB;
 
-  return c.json({
-    datasets: queryResult.results,
-    count: queryResult.results.length,
-  });
+  try {
+    // Try semantic search via Vectorize, fall back to LIKE
+    let results: Awaited<ReturnType<typeof semanticSearch>>;
+    if (c.env.AI && c.env.VECTORIZE) {
+      results = await semanticSearch(c.env.AI, c.env.VECTORIZE, query, limit * 2);
+    } else {
+      results = await textSearch(db, query, limit * 2);
+    }
+
+    // Apply post-search filters
+    if (modality) {
+      const mod = modality.toLowerCase();
+      results = results.filter((r) => r.modalities.toLowerCase().includes(mod));
+    }
+
+    return c.json({
+      results: results.slice(0, limit),
+      count: results.length,
+      method: c.env.AI && c.env.VECTORIZE ? "semantic" : "text",
+    });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error("Dataset search failed:", msg);
+
+    // Fall back to text search on Vectorize failure
+    try {
+      const results = await textSearch(db, query, limit);
+      return c.json({ results, count: results.length, method: "text_fallback" });
+    } catch (fallbackErr) {
+      return c.json({ error: "Search failed", details: msg }, 500);
+    }
+  }
 });
 
 /**
