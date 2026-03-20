@@ -59,17 +59,34 @@ export interface CatalogSyncResult {
 
 /**
  * Fetch all dataset records from the nemar.org datapipeline API.
- * Uses GET with a JSON body (the API's convention).
+ * The API requires GET with a JSON body (non-standard). Workers' fetch()
+ * rejects bodies on GET, so we construct the Request manually to bypass
+ * the validation.
  */
 export async function fetchNemarCatalog(): Promise<NemarCatalogRecord[]> {
-  const response = await fetch(`${NEMAR_API_BASE}/records`, {
-    method: "GET",
+  const body = JSON.stringify({
+    table_name: "dataexplorer_dataset",
+    start: 0,
+    limit: 1000,
+  });
+
+  // Workers' fetch(url, {method:"GET", body}) throws. Use Request + POST
+  // method override via the actual HTTP library, or fall back to a proxy
+  // approach. Since the nemar.org API only checks the method string and
+  // Workers enforce it, we need a workaround.
+  //
+  // Strategy: use the datapipeline/datasetid endpoint per-dataset, or
+  // use an intermediate approach. Actually, let's try using a custom
+  // Request object which some runtimes allow.
+  const request = new Request(`${NEMAR_API_BASE}/records`, {
+    method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      table_name: "dataexplorer_dataset",
-      start: 0,
-      limit: 1000,
-    }),
+    body,
+  });
+  // Override the method after construction (the body is already attached)
+  Object.defineProperty(request, "method", { value: "GET" });
+
+  const response = await fetch(request, {
     signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
   });
 
