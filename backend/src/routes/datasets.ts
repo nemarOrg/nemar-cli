@@ -561,6 +561,31 @@ async function executeAndReturn(
     return c.json({ datasets: result.results, count: result.results.length });
   } catch (dbError) {
     const msg = dbError instanceof Error ? dbError.message : String(dbError);
+
+    // Graceful fallback: if nemar_catalog table doesn't exist yet (migration
+    // 0018 not applied), fall back to the basic datasets-only query.
+    if (msg.includes("no such table: nemar_catalog")) {
+      console.warn("[datasets] nemar_catalog table not found, falling back to basic query");
+      try {
+        const fallback = await db
+          .prepare(
+            `SELECT d.dataset_id, d.name, d.description, d.status, d.visibility,
+                    d.github_repo, d.concept_doi, d.created_at, d.updated_at,
+                    u.username AS owner_username
+             FROM datasets d
+             JOIN users u ON d.owner_user_id = u.id
+             WHERE d.status = 'active' AND (d.is_sandbox = 0 OR d.is_sandbox IS NULL)
+             ORDER BY d.created_at DESC LIMIT 50`,
+          )
+          .all();
+        return c.json({ datasets: fallback.results || [], count: fallback.results?.length || 0 });
+      } catch (fallbackErr) {
+        const fallbackMsg =
+          fallbackErr instanceof Error ? fallbackErr.message : String(fallbackErr);
+        return c.json({ error: "Failed to retrieve datasets", details: fallbackMsg }, 500);
+      }
+    }
+
     console.error("Failed to query datasets:", msg);
     return c.json({ error: "Failed to retrieve datasets", details: msg }, 500);
   }

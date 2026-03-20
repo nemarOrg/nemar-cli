@@ -65,6 +65,8 @@ async function runCli(
       ...process.env,
       // Use NEMAR_CONFIG_DIR for test isolation (cross-platform)
       ...(ctx ? { NEMAR_CONFIG_DIR: ctx.configDir } : {}),
+      // Disable update check in test subprocesses (avoids 5s cold-start delay)
+      NEMAR_NO_UPDATE_CHECK: "1",
       ...options.env,
     },
     stdin: options.input ? "pipe" : "ignore",
@@ -615,7 +617,7 @@ describe("CLI Dataset List", () => {
     const { stdout, exitCode } = await runCli(["dataset", "list", "--help"]);
 
     expect(exitCode).toBe(0);
-    expect(stdout).toContain("List publicly available datasets");
+    expect(stdout).toContain("List datasets on NEMAR");
     expect(stdout).toContain("--mine");
     expect(stdout).toContain("--json");
     expect(stdout).toContain("--limit");
