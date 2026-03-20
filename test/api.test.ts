@@ -647,7 +647,7 @@ describe("Dataset Collaborators API", () => {
 
     test("inviting non-existent user returns 404", async () => {
       const { status, data } = await testRequest<{ error: string }>(
-        `/datasets/${datasetsList.datasets[0].dataset_id}/invite`,
+        "/datasets/nm099999/invite",
         { method: "POST", body: JSON.stringify({ username: "nonexistent-user-12345" }) },
         TEST_CONFIG.adminApiKey,
       );
