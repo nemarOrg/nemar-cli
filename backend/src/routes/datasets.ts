@@ -449,7 +449,7 @@ datasetRoutes.get("/", optionalAuthMiddleware, async (c) => {
   });
 
   // Combine with UNION ALL
-  const unionQuery = `${managedQuery} UNION ALL ${catalogQuery}${buildSortClause(sort)} LIMIT ? OFFSET ?`;
+  const unionQuery = `${managedQuery} UNION ALL ${catalogQuery}${buildSortClause(sort, true)} LIMIT ? OFFSET ?`;
   const allParams = [...managedParams, ...catalogParams, limit, offset];
 
   return executeAndReturn(c, db, unionQuery, allParams);
@@ -529,18 +529,22 @@ function buildFilterClauses(
   return clauses;
 }
 
-function buildSortClause(sort: string): string {
+function buildSortClause(sort: string, forUnion = false): string {
+  // For JOIN queries, qualify with table alias to avoid ambiguity.
+  // For UNION queries, use the output column name (no prefix).
+  const dateCol = forUnion ? "created_at" : "d.created_at";
+  const nameCol = forUnion ? "name" : "d.name";
   switch (sort) {
     case "oldest":
-      return " ORDER BY created_at ASC";
+      return ` ORDER BY ${dateCol} ASC`;
     case "name":
-      return " ORDER BY name ASC";
+      return ` ORDER BY ${nameCol} ASC`;
     case "participants":
       return " ORDER BY participants DESC";
     case "size":
       return " ORDER BY file_size DESC";
     default:
-      return " ORDER BY created_at DESC";
+      return ` ORDER BY ${dateCol} DESC`;
   }
 }
 
