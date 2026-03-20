@@ -67,6 +67,15 @@ database_name = "nemar-db-dev"
 database_id = "b0e94f45-09cb-431a-b3b6-171d5e1620f2"
 migrations_dir = "src/db/migrations"
 
+# Workers AI for dev (not inherited from top-level)
+[env.dev.ai]
+binding = "AI"
+
+# Vectorize for dev (not inherited from top-level)
+[[env.dev.vectorize]]
+binding = "VECTORIZE"
+index_name = "nemar-dataset-index"
+
 [env.dev.vars]
 ENVIRONMENT = "development"
 API_BASE_URL = "https://nemar-api-dev.shirazi-10f.workers.dev"
