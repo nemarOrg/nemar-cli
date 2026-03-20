@@ -129,11 +129,14 @@ if (IS_DEV_BUILD) {
   );
 }
 
-// Update check (async on cold start, then parse)
+// Initialize update check before parsing (may block up to 5s on first run)
 async function main() {
   const pendingUpdate = await initUpdateCheck();
 
   if (pendingUpdate) {
+    // postAction fires after commands; exit handler covers --help/--version
+    // where postAction does not fire. printUpdateBanner is internally
+    // idempotent (prints at most once per process).
     program.hook("postAction", () => printUpdateBanner(pendingUpdate));
     process.on("exit", () => printUpdateBanner(pendingUpdate));
   }
