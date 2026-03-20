@@ -6,8 +6,9 @@ export interface Bindings {
   DB: D1Database;
 
   // Workers AI and Vectorize (for semantic dataset search)
-  AI: Ai;
-  VECTORIZE: VectorizeIndex;
+  // Optional: deploy succeeds without index; runtime checks before use
+  AI?: Ai;
+  VECTORIZE?: VectorizeIndex;
 
   // Environment variables
   ENVIRONMENT: "production" | "development" | "staging" | "test";

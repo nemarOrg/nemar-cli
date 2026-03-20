@@ -53,7 +53,7 @@ jobs:
           RESPONSE=$(curl -s -X POST \
             'https://api.osc.earth/nemar/admin/catalog/sync' \
             -H "Authorization: Bearer $ADMIN_API_KEY" \
-            -H "X-CLI-Version: 0.7.21" \
+            -H "X-CLI-Version: 0.7.22" \
             -H "Content-Type: application/json" \
             -d "{\"records\": $RECORDS}")
 
@@ -79,7 +79,7 @@ jobs:
           RESPONSE=$(curl -s -X POST \
             'https://nemar-api-dev.shirazi-10f.workers.dev/admin/catalog/sync' \
             -H "Authorization: Bearer $ADMIN_API_KEY" \
-            -H "X-CLI-Version: 0.7.21" \
+            -H "X-CLI-Version: 0.7.22" \
             -H "Content-Type: application/json" \
             -d "{\"records\": $RECORDS}")
 

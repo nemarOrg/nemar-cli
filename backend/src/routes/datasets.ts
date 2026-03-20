@@ -575,6 +575,7 @@ async function executeAndReturn(
              FROM datasets d
              JOIN users u ON d.owner_user_id = u.id
              WHERE d.status = 'active' AND (d.is_sandbox = 0 OR d.is_sandbox IS NULL)
+               AND d.visibility = 'public'
              ORDER BY d.created_at DESC LIMIT 50`,
           )
           .all();
@@ -637,6 +638,11 @@ datasetRoutes.get("/search", optionalAuthMiddleware, async (c) => {
       const results = await textSearch(db, query, limit);
       return c.json({ results, count: results.length, method: "text_fallback" });
     } catch (fallbackErr) {
+      const fallbackMsg = fallbackErr instanceof Error ? fallbackErr.message : String(fallbackErr);
+      // If nemar_catalog doesn't exist yet, return empty results
+      if (fallbackMsg.includes("no such table")) {
+        return c.json({ results: [], count: 0, method: "unavailable" });
+      }
       return c.json({ error: "Search failed", details: msg }, 500);
     }
   }

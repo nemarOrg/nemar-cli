@@ -75,7 +75,7 @@ binding = "AI"
 # Vectorize for dev (not inherited from top-level)
 [[env.dev.vectorize]]
 binding = "VECTORIZE"
-index_name = "nemar-dataset-index"
+index_name = "nemar-dataset-index-dev"
 
 [env.dev.vars]
 ENVIRONMENT = "development"

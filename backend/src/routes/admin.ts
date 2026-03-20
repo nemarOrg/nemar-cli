@@ -4776,31 +4776,43 @@ adminRoutes.post("/catalog/sync", async (c) => {
 adminRoutes.get("/catalog/status", async (c) => {
   const db = c.env.DB;
 
-  const logs = await db
-    .prepare(
-      `SELECT id, started_at, completed_at, records_synced, records_indexed, errors, status
-       FROM catalog_sync_log
-       ORDER BY started_at DESC
-       LIMIT 10`,
-    )
-    .all<{
-      id: number;
-      started_at: string;
-      completed_at: string | null;
-      records_synced: number;
-      records_indexed: number;
-      errors: string | null;
-      status: string;
-    }>();
+  try {
+    const logs = await db
+      .prepare(
+        `SELECT id, started_at, completed_at, records_synced, records_indexed, errors, status
+         FROM catalog_sync_log
+         ORDER BY started_at DESC
+         LIMIT 10`,
+      )
+      .all<{
+        id: number;
+        started_at: string;
+        completed_at: string | null;
+        records_synced: number;
+        records_indexed: number;
+        errors: string | null;
+        status: string;
+      }>();
 
-  const catalogCount = await db
-    .prepare("SELECT COUNT(*) AS count FROM nemar_catalog")
-    .first<{ count: number }>();
+    const catalogCount = await db
+      .prepare("SELECT COUNT(*) AS count FROM nemar_catalog")
+      .first<{ count: number }>();
 
-  return c.json({
-    catalog_size: catalogCount?.count ?? 0,
-    recent_syncs: logs.results,
-  });
+    return c.json({
+      catalog_size: catalogCount?.count ?? 0,
+      recent_syncs: logs.results,
+    });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    if (msg.includes("no such table")) {
+      return c.json({
+        catalog_size: 0,
+        recent_syncs: [],
+        message: "Catalog not initialized (migration 0018 pending)",
+      });
+    }
+    return c.json({ error: "Failed to query catalog status", details: msg }, 500);
+  }
 });
 
 // ============================================================================
