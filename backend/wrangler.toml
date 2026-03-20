@@ -11,9 +11,9 @@ routes = [
   { pattern = "api.osc.earth/nemar/*", zone_id = "adce8c117d3373bda82d3aba2dfd5b13" }
 ]
 
-# Scheduled cleanup: daily at 3 AM UTC
+# Scheduled triggers: cleanup (3 AM) + catalog sync (every 4h)
 [triggers]
-crons = ["0 3 * * *"]
+crons = ["0 3 * * *", "0 */4 * * *"]
 
 # D1 Database
 [[d1_databases]]
@@ -21,6 +21,15 @@ binding = "DB"
 database_name = "nemar-db"
 database_id = "0a168b1a-1923-4436-9509-6e4a9b5bb7ae"
 migrations_dir = "src/db/migrations"
+
+# Workers AI (for dataset search embeddings)
+[ai]
+binding = "AI"
+
+# Vectorize (for semantic dataset search)
+[[vectorize]]
+binding = "VECTORIZE"
+index_name = "nemar-dataset-index"
 
 # Note: Rate limiting uses Cache API instead of KV to avoid daily operation limits
 # KV namespace 9afb2679c6ea4ed4acd1a5916cf291d7 is no longer used
