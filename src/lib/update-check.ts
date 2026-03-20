@@ -2,8 +2,13 @@
  * CLI update check
  *
  * Checks the npm registry for a newer version of nemar-cli and displays
- * a banner after command output. Uses a check-on-next-run pattern:
- * reads cached result synchronously, fires background fetch if stale.
+ * a banner after command output.
+ *
+ * Strategy:
+ * - If cache exists and is fresh (<24h): use cached result (sync, no delay)
+ * - If cache exists but is stale: use cached result, refresh in background
+ * - If no cache exists (cold start): do a blocking fetch (up to 5s) so the
+ *   user sees the update notice on their very first run
  *
  * Disable with NEMAR_NO_UPDATE_CHECK=1.
  */
@@ -19,6 +24,7 @@ const CONFIG_DIR = process.env.NEMAR_CONFIG_DIR || join(homedir(), ".config", "n
 const CACHE_FILE = join(CONFIG_DIR, "update-check.json");
 const CACHE_TTL_MS = 24 * 60 * 60 * 1000;
 const NPM_URL = "https://registry.npmjs.org/nemar-cli/latest";
+const FETCH_TIMEOUT_MS = 5000;
 
 interface UpdateCache {
   checkedAt: number;
@@ -50,23 +56,47 @@ function readCache(): UpdateCache | null {
   }
 }
 
+function writeCache(latestVersion: string): void {
+  try {
+    mkdirSync(CONFIG_DIR, { recursive: true });
+    const cache: UpdateCache = { checkedAt: Date.now(), latestVersion };
+    writeFileSync(CACHE_FILE, JSON.stringify(cache));
+  } catch {
+    // Non-critical; cache will be retried next run
+  }
+}
+
+async function fetchLatestVersion(): Promise<string | null> {
+  try {
+    const response = await fetch(NPM_URL, { signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) });
+    const data = (await response.json()) as { version?: string };
+    return data.version ?? null;
+  } catch (err) {
+    if (process.env.VERBOSE) {
+      process.stderr.write(
+        `[update-check] Fetch failed: ${err instanceof Error ? err.message : err}\n`,
+      );
+    }
+    return null;
+  }
+}
+
 function refreshCacheInBackground(): void {
-  fetch(NPM_URL, { signal: AbortSignal.timeout(3000) })
-    .then((r) => r.json())
-    .then((data: unknown) => {
-      const { version } = data as { version: string };
-      if (!version) return;
-      mkdirSync(CONFIG_DIR, { recursive: true });
-      const cache: UpdateCache = { checkedAt: Date.now(), latestVersion: version };
-      writeFileSync(CACHE_FILE, JSON.stringify(cache));
-    })
-    .catch((err) => {
-      if (process.env.VERBOSE) {
-        process.stderr.write(
-          `[update-check] Refresh failed: ${err instanceof Error ? err.message : err}\n`,
-        );
-      }
-    });
+  fetchLatestVersion().then((version) => {
+    if (version) writeCache(version);
+  });
+}
+
+function checkUpdate(latestVersion: string): string | null {
+  try {
+    const normalized = normalizeVersion(currentVersion);
+    if (compareVersions(latestVersion, normalized) > 0) {
+      return latestVersion;
+    }
+  } catch {
+    // Invalid version format; skip
+  }
+  return null;
 }
 
 function detectInstallMethod(): "bunx" | "bun" {
@@ -76,28 +106,29 @@ function detectInstallMethod(): "bunx" | "bun" {
 }
 
 /**
- * Read update cache synchronously and kick off background refresh if stale.
- * Returns the latest version string if an update is available, null otherwise.
+ * Initialize the update check. Returns the latest version if an update is
+ * available, or null. On cold start (no cache), does a blocking fetch so
+ * the user sees the notice on their first run.
  */
-export function initUpdateCheck(): string | null {
+export async function initUpdateCheck(): Promise<string | null> {
   if (process.env.NEMAR_NO_UPDATE_CHECK === "1") return null;
 
   const cache = readCache();
-  const isFresh = cache && Date.now() - cache.checkedAt < CACHE_TTL_MS;
 
-  if (!isFresh) {
-    refreshCacheInBackground();
+  if (cache) {
+    const isFresh = Date.now() - cache.checkedAt < CACHE_TTL_MS;
+    if (!isFresh) {
+      refreshCacheInBackground();
+    }
+    return checkUpdate(cache.latestVersion);
   }
 
-  if (!cache) return null;
-
-  try {
-    const normalized = normalizeVersion(currentVersion);
-    if (compareVersions(cache.latestVersion, normalized) > 0) {
-      return cache.latestVersion;
-    }
-  } catch {
-    // Invalid version format; skip
+  // Cold start: no cache exists. Do a blocking fetch so the user sees
+  // the update notice on their very first run.
+  const latestVersion = await fetchLatestVersion();
+  if (latestVersion) {
+    writeCache(latestVersion);
+    return checkUpdate(latestVersion);
   }
 
   return null;

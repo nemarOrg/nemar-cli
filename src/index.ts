@@ -116,16 +116,6 @@ program
 // Apply color formatting to all commands (must be after addCommand calls)
 configureColorHelp(program);
 
-// CLI update check (synchronous cache read, background refresh)
-const pendingUpdate = initUpdateCheck();
-
-if (pendingUpdate) {
-  // printUpdateBanner is internally idempotent (prints once per process)
-  program.hook("postAction", () => printUpdateBanner(pendingUpdate));
-  // Fallback: postAction does not fire for --help / --version
-  process.on("exit", () => printUpdateBanner(pendingUpdate));
-}
-
 // Display system notices before command execution
 program.hook("preAction", async () => {
   await fetchAndDisplayNotices();
@@ -139,8 +129,19 @@ if (IS_DEV_BUILD) {
   );
 }
 
-// Parse arguments
-program.parseAsync().catch((err) => {
+// Update check (async on cold start, then parse)
+async function main() {
+  const pendingUpdate = await initUpdateCheck();
+
+  if (pendingUpdate) {
+    program.hook("postAction", () => printUpdateBanner(pendingUpdate));
+    process.on("exit", () => printUpdateBanner(pendingUpdate));
+  }
+
+  await program.parseAsync();
+}
+
+main().catch((err) => {
   console.error(err.message || err);
   process.exit(1);
 });
