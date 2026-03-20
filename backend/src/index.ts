@@ -20,7 +20,6 @@ import { datasetRoutes } from "./routes/datasets";
 import { sandboxRoutes } from "./routes/sandbox";
 import { userRoutes } from "./routes/users";
 import webhooks from "./routes/webhooks";
-import { syncCatalog } from "./services/catalog-sync";
 import { deleteDatasetCascade } from "./services/deletion";
 import { getActiveNotices } from "./services/notices";
 import type { Bindings, Variables } from "./types/bindings";
@@ -233,32 +232,10 @@ async function scheduledCleanup(env: Bindings): Promise<void> {
   console.log(`Scheduled cleanup: ${deleted} deleted, ${failed} failed`);
 }
 
-/**
- * Scheduled catalog sync handler.
- * Pulls the full dataset catalog from nemar.org and indexes into D1 + Vectorize.
- */
-async function scheduledCatalogSync(env: Bindings): Promise<void> {
-  try {
-    const result = await syncCatalog(env.DB, env.AI, env.VECTORIZE);
-    console.log(
-      `[catalog-sync] Completed: ${result.recordsSynced} synced, ${result.recordsIndexed} indexed, ${result.errors.length} errors, ${result.durationMs}ms`,
-    );
-  } catch (err) {
-    console.error("[catalog-sync] Scheduled sync failed:", err);
-  }
-}
-
 export default {
   fetch: app.fetch,
   async scheduled(event: ScheduledEvent, env: Bindings, ctx: ExecutionContext) {
-    if (event.cron === "0 3 * * *") {
-      ctx.waitUntil(scheduledCleanup(env));
-    } else if (event.cron === "0 */4 * * *") {
-      ctx.waitUntil(scheduledCatalogSync(env));
-    } else {
-      // Unknown cron, run both as fallback
-      ctx.waitUntil(scheduledCleanup(env));
-      ctx.waitUntil(scheduledCatalogSync(env));
-    }
+    // Catalog sync runs via GitHub Action, not Worker cron
+    ctx.waitUntil(scheduledCleanup(env));
   },
 };

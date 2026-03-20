@@ -59,34 +59,24 @@ export interface CatalogSyncResult {
 
 /**
  * Fetch all dataset records from the nemar.org datapipeline API.
- * The API requires GET with a JSON body (non-standard). Workers' fetch()
- * rejects bodies on GET, so we construct the Request manually to bypass
- * the validation.
+ *
+ * The API requires GET with a JSON body (non-standard). Cloudflare Workers'
+ * fetch() rejects bodies on GET requests per HTTP spec. This function is
+ * intended to be called from GitHub Actions (Node.js) where GET+body works.
+ *
+ * When called from a Worker context, it will fail. Use the GitHub Action
+ * workflow (.github/workflows/catalog-sync.yml) for scheduled syncs, or
+ * call POST /admin/catalog/import with pre-fetched records.
  */
 export async function fetchNemarCatalog(): Promise<NemarCatalogRecord[]> {
-  const body = JSON.stringify({
-    table_name: "dataexplorer_dataset",
-    start: 0,
-    limit: 1000,
-  });
-
-  // Workers' fetch(url, {method:"GET", body}) throws. Use Request + POST
-  // method override via the actual HTTP library, or fall back to a proxy
-  // approach. Since the nemar.org API only checks the method string and
-  // Workers enforce it, we need a workaround.
-  //
-  // Strategy: use the datapipeline/datasetid endpoint per-dataset, or
-  // use an intermediate approach. Actually, let's try using a custom
-  // Request object which some runtimes allow.
-  const request = new Request(`${NEMAR_API_BASE}/records`, {
-    method: "POST",
+  const response = await fetch(`${NEMAR_API_BASE}/records`, {
+    method: "GET",
     headers: { "Content-Type": "application/json" },
-    body,
-  });
-  // Override the method after construction (the body is already attached)
-  Object.defineProperty(request, "method", { value: "GET" });
-
-  const response = await fetch(request, {
+    body: JSON.stringify({
+      table_name: "dataexplorer_dataset",
+      start: 0,
+      limit: 1000,
+    }),
     signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
   });
 
@@ -315,6 +305,75 @@ export async function syncCatalog(
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     console.error("[catalog-sync] Sync failed:", msg);
+    errors.push(msg);
+
+    await db
+      .prepare(
+        `UPDATE catalog_sync_log
+         SET status = 'failed', completed_at = datetime('now'), errors = ?
+         WHERE id = ?`,
+      )
+      .bind(msg, logId)
+      .run();
+  }
+
+  return {
+    recordsSynced,
+    recordsIndexed,
+    errors,
+    durationMs: Date.now() - startTime,
+  };
+}
+
+/**
+ * Import pre-fetched catalog records into D1 and optionally Vectorize.
+ * Called by the admin endpoint when the GitHub Action POSTs records.
+ */
+export async function importCatalogRecords(
+  db: D1Database,
+  records: NemarCatalogRecord[],
+  ai?: Ai,
+  vectorize?: VectorizeIndex,
+): Promise<CatalogSyncResult> {
+  const startTime = Date.now();
+  const errors: string[] = [];
+  let recordsSynced = 0;
+  let recordsIndexed = 0;
+
+  const logResult = await db
+    .prepare("INSERT INTO catalog_sync_log (status) VALUES ('running')")
+    .run();
+  const logId = logResult.meta.last_row_id;
+
+  try {
+    console.log(`[catalog-sync] Importing ${records.length} pre-fetched records`);
+
+    recordsSynced = await syncToD1(db, records);
+    console.log(`[catalog-sync] Synced ${recordsSynced} records to D1`);
+
+    if (ai && vectorize) {
+      try {
+        recordsIndexed = await syncToVectorize(ai, vectorize, records);
+        console.log(`[catalog-sync] Indexed ${recordsIndexed} records in Vectorize`);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        console.error("[catalog-sync] Vectorize indexing failed:", msg);
+        errors.push(`Vectorize: ${msg}`);
+      }
+    }
+
+    await db
+      .prepare(
+        `UPDATE catalog_sync_log
+         SET status = 'completed', completed_at = datetime('now'),
+             records_synced = ?, records_indexed = ?, errors = ?
+         WHERE id = ?`,
+      )
+      .bind(recordsSynced, recordsIndexed, errors.length > 0 ? errors.join("; ") : null, logId)
+      .run();
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error("[catalog-sync] Import failed:", msg);
     errors.push(msg);
 
     await db

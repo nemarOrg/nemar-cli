@@ -10,7 +10,11 @@ import { z } from "zod";
 import { adminMiddleware, authMiddleware, ownerMiddleware } from "../middleware/auth";
 
 import { getBroadcastRecipients, sendBroadcast } from "../services/broadcast";
-import { syncCatalog } from "../services/catalog-sync";
+import {
+  type NemarCatalogRecord,
+  importCatalogRecords,
+  syncCatalog,
+} from "../services/catalog-sync";
 import {
   type DataCiteEnrichment,
   bidsToDataCite,
@@ -4731,11 +4735,33 @@ adminRoutes.get("/sync/status", async (c) => {
 // ============================================================================
 
 /**
- * POST /admin/catalog/sync - Manually trigger a catalog sync from nemar.org
+ * POST /admin/catalog/sync - Import pre-fetched catalog records into D1 + Vectorize
+ *
+ * The nemar.org API requires GET with a JSON body, which Workers' fetch()
+ * rejects. The GitHub Action fetches the catalog and POSTs records here.
+ * Accepts { records: NemarCatalogRecord[] } in the request body.
  */
 adminRoutes.post("/catalog/sync", async (c) => {
-  const result = await syncCatalog(c.env.DB, c.env.AI, c.env.VECTORIZE);
+  const body = await c.req.json<{ records?: unknown[] }>();
 
+  if (body.records && Array.isArray(body.records) && body.records.length > 0) {
+    // Import pre-fetched records from GitHub Action
+    const result = await importCatalogRecords(
+      c.env.DB,
+      body.records as NemarCatalogRecord[],
+      c.env.AI,
+      c.env.VECTORIZE,
+    );
+    return c.json({
+      records_synced: result.recordsSynced,
+      records_indexed: result.recordsIndexed,
+      errors: result.errors,
+      duration_ms: result.durationMs,
+    });
+  }
+
+  // No records provided; try fetching directly (will fail in Workers due to GET+body)
+  const result = await syncCatalog(c.env.DB, c.env.AI, c.env.VECTORIZE);
   return c.json({
     records_synced: result.recordsSynced,
     records_indexed: result.recordsIndexed,

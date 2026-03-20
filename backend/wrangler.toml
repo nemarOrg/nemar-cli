@@ -11,9 +11,10 @@ routes = [
   { pattern = "api.osc.earth/nemar/*", zone_id = "adce8c117d3373bda82d3aba2dfd5b13" }
 ]
 
-# Scheduled triggers: cleanup (3 AM) + catalog sync (every 4h)
+# Scheduled cleanup: daily at 3 AM UTC
+# Catalog sync runs via GitHub Action (.github/workflows/catalog-sync.yml)
 [triggers]
-crons = ["0 3 * * *", "0 */4 * * *"]
+crons = ["0 3 * * *"]
 
 # D1 Database
 [[d1_databases]]
