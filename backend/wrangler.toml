@@ -12,6 +12,7 @@ routes = [
 ]
 
 # Scheduled cleanup: daily at 3 AM UTC
+# Catalog sync runs via GitHub Action (.github/workflows/catalog-sync.yml)
 [triggers]
 crons = ["0 3 * * *"]
 
@@ -21,6 +22,15 @@ binding = "DB"
 database_name = "nemar-db"
 database_id = "0a168b1a-1923-4436-9509-6e4a9b5bb7ae"
 migrations_dir = "src/db/migrations"
+
+# Workers AI (for dataset search embeddings)
+[ai]
+binding = "AI"
+
+# Vectorize (for semantic dataset search)
+[[vectorize]]
+binding = "VECTORIZE"
+index_name = "nemar-dataset-index"
 
 # Note: Rate limiting uses Cache API instead of KV to avoid daily operation limits
 # KV namespace 9afb2679c6ea4ed4acd1a5916cf291d7 is no longer used
@@ -57,6 +67,15 @@ binding = "DB"
 database_name = "nemar-db-dev"
 database_id = "b0e94f45-09cb-431a-b3b6-171d5e1620f2"
 migrations_dir = "src/db/migrations"
+
+# Workers AI for dev (not inherited from top-level)
+[env.dev.ai]
+binding = "AI"
+
+# Vectorize for dev (not inherited from top-level)
+[[env.dev.vectorize]]
+binding = "VECTORIZE"
+index_name = "nemar-dataset-index-dev"
 
 [env.dev.vars]
 ENVIRONMENT = "development"

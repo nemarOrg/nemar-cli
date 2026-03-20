@@ -11,6 +11,11 @@ import { adminMiddleware, authMiddleware, ownerMiddleware } from "../middleware/
 
 import { getBroadcastRecipients, sendBroadcast } from "../services/broadcast";
 import {
+  type NemarCatalogRecord,
+  importCatalogRecords,
+  syncCatalog,
+} from "../services/catalog-sync";
+import {
   type DataCiteEnrichment,
   bidsToDataCite,
   buildDataCiteXml,
@@ -4723,6 +4728,111 @@ adminRoutes.get("/sync/status", async (c) => {
     failed: results.results.filter((d) => d.nemar_sync_status === "failed").length,
     pending: results.results.filter((d) => d.nemar_sync_status === null).length,
   });
+});
+
+// ============================================================================
+// Catalog Sync (nemar.org catalog -> D1)
+// ============================================================================
+
+/**
+ * POST /admin/catalog/sync - Import pre-fetched catalog records into D1 + Vectorize
+ *
+ * The nemar.org API requires GET with a JSON body, which Workers' fetch()
+ * rejects. The GitHub Action fetches the catalog and POSTs records here.
+ * Accepts { records: NemarCatalogRecord[] } in the request body.
+ */
+adminRoutes.post("/catalog/sync", async (c) => {
+  const body = await c.req.json<{ records?: unknown[] }>();
+
+  if (body.records && Array.isArray(body.records) && body.records.length > 0) {
+    // Validate records before importing
+    const validRecords: NemarCatalogRecord[] = [];
+    const validationErrors: string[] = [];
+    for (const [i, raw] of (body.records as Array<Record<string, unknown>>).entries()) {
+      if (!raw.id || typeof raw.id !== "string") {
+        validationErrors.push(`Record ${i}: missing or invalid 'id'`);
+        continue;
+      }
+      if (!raw.name || typeof raw.name !== "string") {
+        validationErrors.push(`Record ${i} (${raw.id}): missing or invalid 'name'`);
+        continue;
+      }
+      validRecords.push(raw as unknown as NemarCatalogRecord);
+    }
+    if (validRecords.length === 0) {
+      return c.json(
+        { error: "No valid records in payload", validation_errors: validationErrors },
+        400,
+      );
+    }
+    if (validationErrors.length > 0) {
+      console.warn(
+        `[catalog-sync] ${validationErrors.length} records failed validation, importing ${validRecords.length}`,
+      );
+    }
+
+    const result = await importCatalogRecords(c.env.DB, validRecords, c.env.AI, c.env.VECTORIZE);
+    return c.json({
+      records_synced: result.recordsSynced,
+      records_indexed: result.recordsIndexed,
+      errors: result.errors,
+      duration_ms: result.durationMs,
+    });
+  }
+
+  // No records provided; try fetching directly (will fail in Workers due to GET+body)
+  const result = await syncCatalog(c.env.DB, c.env.AI, c.env.VECTORIZE);
+  return c.json({
+    records_synced: result.recordsSynced,
+    records_indexed: result.recordsIndexed,
+    errors: result.errors,
+    duration_ms: result.durationMs,
+  });
+});
+
+/**
+ * GET /admin/catalog/status - Show catalog sync history
+ */
+adminRoutes.get("/catalog/status", async (c) => {
+  const db = c.env.DB;
+
+  try {
+    const logs = await db
+      .prepare(
+        `SELECT id, started_at, completed_at, records_synced, records_indexed, errors, status
+         FROM catalog_sync_log
+         ORDER BY started_at DESC
+         LIMIT 10`,
+      )
+      .all<{
+        id: number;
+        started_at: string;
+        completed_at: string | null;
+        records_synced: number;
+        records_indexed: number;
+        errors: string | null;
+        status: string;
+      }>();
+
+    const catalogCount = await db
+      .prepare("SELECT COUNT(*) AS count FROM nemar_catalog")
+      .first<{ count: number }>();
+
+    return c.json({
+      catalog_size: catalogCount?.count ?? 0,
+      recent_syncs: logs.results,
+    });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    if (msg.includes("no such table")) {
+      return c.json({
+        catalog_size: 0,
+        recent_syncs: [],
+        message: "Catalog not initialized (migration 0018 pending)",
+      });
+    }
+    return c.json({ error: "Failed to query catalog status", details: msg }, 500);
+  }
 });
 
 // ============================================================================

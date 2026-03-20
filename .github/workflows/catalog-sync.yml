@@ -1,0 +1,123 @@
+name: Catalog Sync
+
+# Sync the nemar.org dataset catalog into D1 + Vectorize every 4 hours.
+# The nemar.org API requires GET with a JSON body, which Cloudflare Workers
+# rejects. This Action fetches the catalog via curl and POSTs records
+# to the backend's /admin/catalog/sync endpoint.
+
+on:
+  schedule:
+    - cron: '0 */4 * * *'  # Every 4 hours
+  workflow_dispatch:  # Manual trigger
+
+env:
+  # Centralized config: update these when URLs or versions change
+  PROD_API_URL: https://api.osc.earth/nemar
+  DEV_API_URL: https://nemar-api-dev.shirazi-10f.workers.dev
+  NEMAR_API_URL: https://nemar.org/api/dataexplorer/datapipeline
+  CLI_VERSION: '0.7.22'
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout (for package.json version)
+        uses: actions/checkout@v4
+        with:
+          sparse-checkout: package.json
+          sparse-checkout-cone-mode: false
+
+      - name: Read CLI version from package.json
+        id: version
+        run: |
+          VERSION=$(jq -r '.version' package.json)
+          echo "cli_version=$VERSION" >> $GITHUB_OUTPUT
+          echo "CLI version: $VERSION"
+
+      - name: Fetch nemar.org catalog
+        id: fetch
+        run: |
+          # nemar.org requires GET with JSON body (non-standard)
+          RESPONSE=$(curl -s -X GET \
+            "${{ env.NEMAR_API_URL }}/records" \
+            -H 'Content-Type: application/json' \
+            -d '{"table_name":"dataexplorer_dataset","start":0,"limit":1000}')
+
+          # Validate response
+          SUCCESS=$(echo "$RESPONSE" | jq -r '.success // false')
+          if [ "$SUCCESS" != "true" ]; then
+            echo "::error::nemar.org API returned unsuccessful response"
+            echo "$RESPONSE" | jq -r '.error // "unknown error"'
+            exit 1
+          fi
+
+          TOTAL=$(echo "$RESPONSE" | jq -r '.total')
+          echo "Fetched $TOTAL records from nemar.org"
+
+          # Convert entries object to array, filter out empty IDs
+          RECORDS=$(echo "$RESPONSE" | jq '[.entries | to_entries | .[].value | select(.id != null and .id != "")]')
+          COUNT=$(echo "$RECORDS" | jq 'length')
+          echo "Parsed $COUNT valid records"
+
+          # Save to file (too large for env var)
+          echo "$RECORDS" > /tmp/catalog-records.json
+          echo "count=$COUNT" >> $GITHUB_OUTPUT
+
+      - name: Push to production backend
+        if: fromJSON(steps.fetch.outputs.count) > 0
+        env:
+          ADMIN_API_KEY: ${{ secrets.PROD_ADMIN_API_KEY }}
+        run: |
+          HTTP_CODE=$(curl -s -o /tmp/prod-response.json -w "%{http_code}" -X POST \
+            "${{ env.PROD_API_URL }}/admin/catalog/sync" \
+            -H "Authorization: Bearer $ADMIN_API_KEY" \
+            -H "X-CLI-Version: ${{ steps.version.outputs.cli_version }}" \
+            -H "Content-Type: application/json" \
+            -d "{\"records\": $(cat /tmp/catalog-records.json)}" \
+            --max-time 120)
+
+          RESPONSE=$(cat /tmp/prod-response.json)
+          echo "Production sync response (HTTP $HTTP_CODE):"
+          echo "$RESPONSE" | jq .
+
+          if [ "$HTTP_CODE" -ne 200 ]; then
+            echo "::error::Production backend returned HTTP $HTTP_CODE"
+            exit 1
+          fi
+
+          SYNCED=$(echo "$RESPONSE" | jq -r '.records_synced // 0')
+          INDEXED=$(echo "$RESPONSE" | jq -r '.records_indexed // 0')
+          echo "Synced: $SYNCED, Indexed: $INDEXED"
+
+          if [ "$SYNCED" -eq 0 ]; then
+            echo "::error::Production sync reported 0 records synced"
+            exit 1
+          fi
+
+          ERRORS=$(echo "$RESPONSE" | jq -r '.errors | length // 0')
+          if [ "$ERRORS" -gt 0 ]; then
+            echo "::warning::Sync completed with $ERRORS error(s)"
+            echo "$RESPONSE" | jq -r '.errors[]'
+          fi
+
+      - name: Push to dev backend
+        if: fromJSON(steps.fetch.outputs.count) > 0
+        env:
+          ADMIN_API_KEY: ${{ secrets.TEST_ADMIN_API_KEY }}
+        run: |
+          HTTP_CODE=$(curl -s -o /tmp/dev-response.json -w "%{http_code}" -X POST \
+            "${{ env.DEV_API_URL }}/admin/catalog/sync" \
+            -H "Authorization: Bearer $ADMIN_API_KEY" \
+            -H "X-CLI-Version: ${{ steps.version.outputs.cli_version }}" \
+            -H "Content-Type: application/json" \
+            -d "{\"records\": $(cat /tmp/catalog-records.json)}" \
+            --max-time 120)
+
+          RESPONSE=$(cat /tmp/dev-response.json)
+          echo "Dev sync response (HTTP $HTTP_CODE):"
+          echo "$RESPONSE" | jq .
+
+          if [ "$HTTP_CODE" -ne 200 ]; then
+            echo "::warning::Dev backend returned HTTP $HTTP_CODE (non-fatal)"
+          fi

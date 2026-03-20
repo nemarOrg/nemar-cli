@@ -235,6 +235,7 @@ async function scheduledCleanup(env: Bindings): Promise<void> {
 export default {
   fetch: app.fetch,
   async scheduled(event: ScheduledEvent, env: Bindings, ctx: ExecutionContext) {
+    // Catalog sync runs via GitHub Action, not Worker cron
     ctx.waitUntil(scheduledCleanup(env));
   },
 };
