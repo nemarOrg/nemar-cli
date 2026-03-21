@@ -88,7 +88,7 @@ index_name = "nemar-dataset-index-dev"
 
 [env.dev.vars]
 ENVIRONMENT = "development"
-API_BASE_URL = "https://nemar-api-dev.<sccn-subdomain>.workers.dev"
+API_BASE_URL = "https://nemar-api-dev.sccn-org.workers.dev"
 FRONTEND_URL = "https://nemar.org"
 AWS_REGION = "us-east-2"
 S3_BUCKET = "nemar"
