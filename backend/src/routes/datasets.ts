@@ -739,17 +739,16 @@ datasetRoutes.get("/resolve/:sourceId", optionalAuthMiddleware, async (c) => {
   try {
     const match = await db
       .prepare(
-        `SELECT d.dataset_id, d.name, d.visibility, d.github_repo, u.username as owner_username
+        `SELECT d.dataset_id, d.name, d.github_repo, u.username as owner_username
          FROM datasets d
          JOIN users u ON d.owner_user_id = u.id
-         WHERE d.source_id = ? AND d.status = 'active'
+         WHERE d.source_id = ? AND d.status = 'active' AND d.visibility = 'public'
          LIMIT 1`,
       )
       .bind(sourceId)
       .first<{
         dataset_id: string;
         name: string;
-        visibility: string;
         github_repo: string | null;
         owner_username: string;
       }>();
@@ -762,7 +761,6 @@ datasetRoutes.get("/resolve/:sourceId", optionalAuthMiddleware, async (c) => {
       found: true,
       dataset_id: match.dataset_id,
       name: match.name,
-      visibility: match.visibility,
       github_repo: match.github_repo,
       owner_username: match.owner_username,
     });

@@ -659,13 +659,12 @@ interface ResolveSourceResult {
   found: boolean;
   dataset_id?: string;
   name?: string;
-  visibility?: string;
   github_repo?: string | null;
   owner_username?: string;
 }
 
 /**
- * Resolve an OpenNeuro ds ID to its NEMAR on counterpart
+ * Resolve an OpenNeuro source ID (ds######) to its NEMAR counterpart
  */
 export async function resolveSourceId(sourceId: string): Promise<ResolveSourceResult> {
   return request<ResolveSourceResult>(`/datasets/resolve/${sourceId}`, {}, "optional");

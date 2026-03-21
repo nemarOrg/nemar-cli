@@ -2087,6 +2087,12 @@ Examples:
   $ nemar dataset search "resting state EEG"   # Semantic search`,
   )
   .action(async (options) => {
+    if (options.mine && options.owner) {
+      console.log(chalk.red("Error: --mine and --owner cannot be used together"));
+      console.log("Use --mine for your datasets, or --owner <username> for another user's.");
+      process.exit(1);
+    }
+
     if (options.mine && !isAuthenticated()) {
       console.log(chalk.red("Error: Not authenticated"));
       console.log("Run 'nemar auth login' to see your datasets");
