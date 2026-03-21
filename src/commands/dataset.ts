@@ -1646,40 +1646,10 @@ Examples:
   )
   .action(async (datasetId, options) => {
     // OpenNeuro datasets (ds######) - check for NEMAR counterpart first
-    let effectiveId = datasetId;
-    if (isOpenNeuroDatasetId(datasetId)) {
-      let useNemar = false;
-      try {
-        const resolved = await resolveSourceId(datasetId);
-        if (resolved.found && resolved.dataset_id) {
-          console.log();
-          console.log(
-            chalk.green(`This dataset is available on NEMAR as ${chalk.bold(resolved.dataset_id)}`),
-          );
-          console.log(
-            chalk.dim("NEMAR provides git-annex version tracking and selective file download."),
-          );
-          const { useNemarBackend } = await inquirer.prompt([
-            {
-              type: "confirm",
-              name: "useNemarBackend",
-              message: `Download from NEMAR (${resolved.dataset_id}) instead of OpenNeuro?`,
-              default: true,
-            },
-          ]);
-          if (useNemarBackend) {
-            effectiveId = resolved.dataset_id;
-            useNemar = true;
-          }
-        }
-      } catch {
-        // Resolve failed (network error, old backend); fall through to OpenNeuro
-      }
-
-      if (!useNemar) {
-        await handleOpenNeuroDownload(datasetId, options);
-        return;
-      }
+    const effectiveId = await resolveOpenNeuroId(datasetId);
+    if (!effectiveId) {
+      await handleOpenNeuroDownload(datasetId, options);
+      return;
     }
 
     // Step 1: Check prerequisites (fast, parallel checks)
@@ -1907,6 +1877,48 @@ Examples:
   });
 
 /**
+ * If datasetId is an OpenNeuro ds ID, check whether NEMAR has a copy and
+ * prompt the user to use it. Returns the NEMAR dataset_id if accepted,
+ * the original datasetId for non-OpenNeuro IDs, or null if the user
+ * declined (meaning the caller should fall back to OpenNeuro download).
+ */
+async function resolveOpenNeuroId(datasetId: string): Promise<string | null> {
+  if (!isOpenNeuroDatasetId(datasetId)) {
+    return datasetId;
+  }
+
+  // Only catch network/API errors; let prompt errors (Ctrl+C) propagate
+  let resolved: Awaited<ReturnType<typeof resolveSourceId>> | null = null;
+  try {
+    resolved = await resolveSourceId(datasetId);
+  } catch (err) {
+    console.log(chalk.dim(`Could not check NEMAR availability: ${(err as Error).message}`));
+    return null;
+  }
+
+  if (!resolved?.found || !resolved.dataset_id) {
+    return null;
+  }
+
+  console.log();
+  console.log(
+    chalk.green(`This dataset is available on NEMAR as ${chalk.bold(resolved.dataset_id)}`),
+  );
+  console.log(chalk.dim("NEMAR provides git-annex version tracking and selective file download."));
+
+  const { useNemarBackend } = await inquirer.prompt([
+    {
+      type: "confirm",
+      name: "useNemarBackend",
+      message: `Download from NEMAR (${resolved.dataset_id}) instead of OpenNeuro?`,
+      default: true,
+    },
+  ]);
+
+  return useNemarBackend ? resolved.dataset_id : null;
+}
+
+/**
  * Colorize dataset status for display
  */
 function colorizeStatus(status: string): string {
@@ -1927,12 +1939,11 @@ function colorizeStatus(status: string): string {
 // Shared logic for rendering dataset tables
 function renderDatasetTable(
   datasets: Dataset[],
-  response: { count: number; total_count?: number },
-  pagination?: { limit: number; offset: number; totalCount: number },
+  pagination: { limit: number; offset: number; totalCount: number },
 ) {
-  const totalCount = pagination?.totalCount ?? response.total_count ?? response.count;
-  const pageStart = (pagination?.offset ?? 0) + 1;
-  const pageEnd = (pagination?.offset ?? 0) + datasets.length;
+  const { offset, totalCount } = pagination;
+  const pageStart = offset + 1;
+  const pageEnd = offset + datasets.length;
   const pageInfo =
     totalCount > datasets.length ? `${pageStart}-${pageEnd} of ${totalCount}` : `${totalCount}`;
 
@@ -2005,8 +2016,8 @@ function renderDatasetTable(
 
   console.log();
   // Pagination footer
-  if (pagination && totalCount > pageEnd) {
-    const currentPage = Math.floor(pagination.offset / pagination.limit) + 1;
+  if (totalCount > pageEnd) {
+    const currentPage = Math.floor(offset / pagination.limit) + 1;
     const totalPages = Math.ceil(totalCount / pagination.limit);
     console.log(
       chalk.dim(
@@ -2144,7 +2155,7 @@ Examples:
       return;
     }
 
-    renderDatasetTable(datasets, response, { limit, offset, totalCount });
+    renderDatasetTable(datasets, { limit, offset, totalCount });
   });
 
 // Search command (semantic search via Vectorize)

@@ -642,8 +642,8 @@ export async function listDatasets(
   if (filters.hasDoi) params.set("has_doi", "true");
   if (filters.recent) params.set("recent", String(filters.recent));
   if (filters.sort) params.set("sort", filters.sort);
-  if (filters.limit) params.set("limit", String(filters.limit));
-  if (filters.offset) params.set("offset", String(filters.offset));
+  if (filters.limit != null) params.set("limit", String(filters.limit));
+  if (filters.offset != null) params.set("offset", String(filters.offset));
   if (filters.owner) params.set("owner", filters.owner);
   const query = params.toString() ? `?${params.toString()}` : "";
   const response = await request<DatasetsListResponse>(
