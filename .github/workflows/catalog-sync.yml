@@ -15,7 +15,6 @@ env:
   PROD_API_URL: https://api.osc.earth/nemar
   DEV_API_URL: https://nemar-api-dev.shirazi-10f.workers.dev
   NEMAR_API_URL: https://nemar.org/api/dataexplorer/datapipeline
-  CLI_VERSION: '0.7.22'
 
 jobs:
   sync:
@@ -38,31 +37,37 @@ jobs:
       - name: Fetch nemar.org catalog
         id: fetch
         run: |
-          # nemar.org requires GET with JSON body (non-standard)
-          RESPONSE=$(curl -s -X GET \
+          # nemar.org requires GET with JSON body (non-standard).
+          # Save raw response to file to avoid shell escaping issues.
+          curl -s -X GET \
             "${{ env.NEMAR_API_URL }}/records" \
             -H 'Content-Type: application/json' \
-            -d '{"table_name":"dataexplorer_dataset","start":0,"limit":1000}')
+            -d '{"table_name":"dataexplorer_dataset","start":0,"limit":1000}' \
+            -o /tmp/nemar-response.json
 
-          # Validate response
-          SUCCESS=$(echo "$RESPONSE" | jq -r '.success // false')
-          if [ "$SUCCESS" != "true" ]; then
-            echo "::error::nemar.org API returned unsuccessful response"
-            echo "$RESPONSE" | jq -r '.error // "unknown error"'
-            exit 1
-          fi
+          # Use Python to parse (more lenient with escape sequences than jq)
+          python3 << 'PYEOF'
+          import json, sys
 
-          TOTAL=$(echo "$RESPONSE" | jq -r '.total')
-          echo "Fetched $TOTAL records from nemar.org"
+          with open("/tmp/nemar-response.json") as f:
+              data = json.load(f)
 
-          # Convert entries object to array, filter out empty IDs
-          RECORDS=$(echo "$RESPONSE" | jq '[.entries | to_entries | .[].value | select(.id != null and .id != "")]')
-          COUNT=$(echo "$RECORDS" | jq 'length')
-          echo "Parsed $COUNT valid records"
+          if not data.get("success"):
+              print(f"::error::nemar.org API returned unsuccessful response: {data.get('error', 'unknown')}")
+              sys.exit(1)
 
-          # Save to file (too large for env var)
-          echo "$RECORDS" > /tmp/catalog-records.json
-          echo "count=$COUNT" >> $GITHUB_OUTPUT
+          entries = data.get("entries", {})
+          records = [v for v in entries.values() if v.get("id")]
+          print(f"Fetched {data.get('total', 0)} records, {len(records)} valid")
+
+          with open("/tmp/catalog-records.json", "w") as f:
+              json.dump(records, f)
+
+          # Write count to GITHUB_OUTPUT
+          import os
+          with open(os.environ["GITHUB_OUTPUT"], "a") as f:
+              f.write(f"count={len(records)}\n")
+          PYEOF
 
       - name: Push to production backend
         if: fromJSON(steps.fetch.outputs.count) > 0
@@ -74,31 +79,25 @@ jobs:
             -H "Authorization: Bearer $ADMIN_API_KEY" \
             -H "X-CLI-Version: ${{ steps.version.outputs.cli_version }}" \
             -H "Content-Type: application/json" \
-            -d "{\"records\": $(cat /tmp/catalog-records.json)}" \
+            -d @/tmp/catalog-records.json \
             --max-time 120)
 
           RESPONSE=$(cat /tmp/prod-response.json)
           echo "Production sync response (HTTP $HTTP_CODE):"
-          echo "$RESPONSE" | jq .
+          echo "$RESPONSE" | python3 -m json.tool 2>/dev/null || echo "$RESPONSE"
 
           if [ "$HTTP_CODE" -ne 200 ]; then
             echo "::error::Production backend returned HTTP $HTTP_CODE"
             exit 1
           fi
 
-          SYNCED=$(echo "$RESPONSE" | jq -r '.records_synced // 0')
-          INDEXED=$(echo "$RESPONSE" | jq -r '.records_indexed // 0')
+          SYNCED=$(echo "$RESPONSE" | python3 -c "import sys,json; print(json.load(sys.stdin).get('records_synced',0))")
+          INDEXED=$(echo "$RESPONSE" | python3 -c "import sys,json; print(json.load(sys.stdin).get('records_indexed',0))")
           echo "Synced: $SYNCED, Indexed: $INDEXED"
 
           if [ "$SYNCED" -eq 0 ]; then
             echo "::error::Production sync reported 0 records synced"
             exit 1
-          fi
-
-          ERRORS=$(echo "$RESPONSE" | jq -r '.errors | length // 0')
-          if [ "$ERRORS" -gt 0 ]; then
-            echo "::warning::Sync completed with $ERRORS error(s)"
-            echo "$RESPONSE" | jq -r '.errors[]'
           fi
 
       - name: Push to dev backend
@@ -111,12 +110,12 @@ jobs:
             -H "Authorization: Bearer $ADMIN_API_KEY" \
             -H "X-CLI-Version: ${{ steps.version.outputs.cli_version }}" \
             -H "Content-Type: application/json" \
-            -d "{\"records\": $(cat /tmp/catalog-records.json)}" \
+            -d @/tmp/catalog-records.json \
             --max-time 120)
 
           RESPONSE=$(cat /tmp/dev-response.json)
           echo "Dev sync response (HTTP $HTTP_CODE):"
-          echo "$RESPONSE" | jq .
+          echo "$RESPONSE" | python3 -m json.tool 2>/dev/null || echo "$RESPONSE"
 
           if [ "$HTTP_CODE" -ne 200 ]; then
             echo "::warning::Dev backend returned HTTP $HTTP_CODE (non-fatal)"
