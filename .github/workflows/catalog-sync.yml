@@ -38,19 +38,36 @@ jobs:
         id: fetch
         run: |
           # nemar.org requires GET with JSON body (non-standard).
-          # Save raw response to file to avoid shell escaping issues.
-          curl -s -X GET \
-            "${{ env.NEMAR_API_URL }}/records" \
-            -H 'Content-Type: application/json' \
-            -d '{"table_name":"dataexplorer_dataset","start":0,"limit":1000}' \
-            -o /tmp/nemar-response.json
-
-          # Use Python to parse (more lenient with escape sequences than jq)
+          # Some curl versions strip the body on GET; use Python urllib as fallback.
           python3 << 'PYEOF'
-          import json, sys
+          import json, sys, subprocess, os
 
-          with open("/tmp/nemar-response.json") as f:
-              data = json.load(f)
+          # Try curl first (some versions support GET with body)
+          result = subprocess.run(
+              ["curl", "-s", "-X", "GET",
+               f"{os.environ.get('NEMAR_API_URL', 'https://nemar.org/api/dataexplorer/datapipeline')}/records",
+               "-H", "Content-Type: application/json",
+               "-d", '{"table_name":"dataexplorer_dataset","start":0,"limit":1000}'],
+              capture_output=True, text=True, timeout=60
+          )
+
+          data = None
+          if result.stdout.strip():
+              try:
+                  data = json.loads(result.stdout)
+              except json.JSONDecodeError:
+                  print(f"curl response not valid JSON, trying http.client...")
+
+          # Fallback: use http.client which supports GET with body
+          if not data or not data.get("success"):
+              import http.client
+              conn = http.client.HTTPSConnection("nemar.org", timeout=60)
+              body = json.dumps({"table_name": "dataexplorer_dataset", "start": 0, "limit": 1000})
+              conn.request("GET", "/api/dataexplorer/datapipeline/records", body=body,
+                           headers={"Content-Type": "application/json"})
+              resp = conn.getresponse()
+              data = json.loads(resp.read().decode())
+              conn.close()
 
           if not data.get("success"):
               print(f"::error::nemar.org API returned unsuccessful response: {data.get('error', 'unknown')}")
