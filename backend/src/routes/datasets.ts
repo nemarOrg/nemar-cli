@@ -329,8 +329,9 @@ datasetRoutes.post(
 datasetRoutes.get("/", optionalAuthMiddleware, async (c) => {
   const mine = c.req.query("mine") === "true";
   const status = c.req.query("status") || "active";
-  const limit = Math.min(Number.parseInt(c.req.query("limit") || "50", 10), 200);
-  const offset = Number.parseInt(c.req.query("offset") || "0", 10);
+  const limit = Math.min(Math.max(Number.parseInt(c.req.query("limit") || "50", 10), 1), 200);
+  const offset = Math.max(Number.parseInt(c.req.query("offset") || "0", 10), 0);
+  const owner = c.req.query("owner");
   const user = c.get("user");
   const db = c.env.DB;
 
@@ -354,6 +355,7 @@ datasetRoutes.get("/", optionalAuthMiddleware, async (c) => {
       SELECT d.dataset_id, d.name, d.description, d.status, d.visibility,
              d.github_repo, d.concept_doi, d.created_at, d.updated_at,
              u.username AS owner_username, d.nemar_sync_status,
+             d.source, d.source_id,
              COALESCE(c.modalities, '') AS modalities,
              COALESCE(c.participants, 0) AS participants,
              COALESCE(c.tasks, '') AS tasks,
@@ -381,7 +383,7 @@ datasetRoutes.get("/", optionalAuthMiddleware, async (c) => {
     query += " LIMIT ? OFFSET ?";
     params.push(limit, offset);
 
-    return executeAndReturn(c, db, query, params);
+    return executeAndReturn(c, db, query, params, limit, offset);
   }
 
   // Public catalog: UNION managed datasets + catalog-only
@@ -390,6 +392,7 @@ datasetRoutes.get("/", optionalAuthMiddleware, async (c) => {
     SELECT d.dataset_id, d.dataset_id AS id, d.name, d.description, d.status, d.visibility,
            d.github_repo, d.concept_doi, d.concept_doi AS doi, d.created_at, d.updated_at,
            u.username AS owner_username, d.nemar_sync_status,
+           d.source, d.source_id,
            COALESCE(c.modalities, '') AS modalities,
            COALESCE(c.participants, 0) AS participants,
            COALESCE(c.tasks, '') AS tasks,
@@ -411,6 +414,12 @@ datasetRoutes.get("/", optionalAuthMiddleware, async (c) => {
     managedQuery += " AND d.visibility = 'public'";
   }
 
+  // Owner filter for managed datasets
+  if (owner) {
+    managedQuery += " AND u.username = ?";
+    managedParams.push(owner);
+  }
+
   managedQuery += buildFilterClauses(managedParams, {
     search,
     modality,
@@ -427,6 +436,7 @@ datasetRoutes.get("/", optionalAuthMiddleware, async (c) => {
     SELECT c.id AS dataset_id, c.id, c.name, c.description, NULL AS status, 'public' AS visibility,
            NULL AS github_repo, NULL AS concept_doi, c.doi, COALESCE(c.publish_date, c.created_date) AS created_at, NULL AS updated_at,
            c.uploader AS owner_username, NULL AS nemar_sync_status,
+           NULL AS source, NULL AS source_id,
            COALESCE(c.modalities, '') AS modalities,
            COALESCE(c.participants, 0) AS participants,
            COALESCE(c.tasks, '') AS tasks,
@@ -437,6 +447,12 @@ datasetRoutes.get("/", optionalAuthMiddleware, async (c) => {
     FROM nemar_catalog c
     WHERE c.id NOT IN (SELECT dataset_id FROM datasets WHERE status = 'active')
   `;
+
+  // Owner filter for catalog datasets
+  if (owner) {
+    catalogQuery += " AND c.uploader = ?";
+    catalogParams.push(owner);
+  }
 
   catalogQuery += buildFilterClauses(catalogParams, {
     search,
@@ -452,7 +468,7 @@ datasetRoutes.get("/", optionalAuthMiddleware, async (c) => {
   const unionQuery = `${managedQuery} UNION ALL ${catalogQuery}${buildSortClause(sort, true)} LIMIT ? OFFSET ?`;
   const allParams = [...managedParams, ...catalogParams, limit, offset];
 
-  return executeAndReturn(c, db, unionQuery, allParams);
+  return executeAndReturn(c, db, unionQuery, allParams, limit, offset);
 });
 
 /** Build WHERE clauses for search/filter params */
@@ -553,16 +569,38 @@ async function executeAndReturn(
   db: D1Database,
   query: string,
   params: (string | number)[],
+  limit?: number,
+  offset?: number,
 ) {
   try {
-    const result = await db
-      .prepare(query)
-      .bind(...params)
-      .all();
+    // Build a COUNT query by wrapping the original (strip trailing LIMIT/OFFSET)
+    const countQuery = `SELECT COUNT(*) AS total FROM (${query.replace(/\s+LIMIT\s+\?\s+OFFSET\s+\?$/i, "")})`;
+    const countParams = params.slice(0, -2); // Remove limit/offset params
+
+    const [result, countResult] = await Promise.all([
+      db
+        .prepare(query)
+        .bind(...params)
+        .all(),
+      db
+        .prepare(countQuery)
+        .bind(...countParams)
+        .first<{ total: number }>(),
+    ]);
+
     if (!result?.results) {
       return c.json({ error: "Database query failed" }, 500);
     }
-    return c.json({ datasets: result.results, count: result.results.length });
+
+    const totalCount = countResult?.total ?? result.results.length;
+
+    return c.json({
+      datasets: result.results,
+      count: result.results.length,
+      total_count: totalCount,
+      limit: limit ?? result.results.length,
+      offset: offset ?? 0,
+    });
   } catch (dbError) {
     const msg = dbError instanceof Error ? dbError.message : String(dbError);
 
@@ -586,6 +624,7 @@ async function executeAndReturn(
         return c.json({
           datasets: fallback.results || [],
           count: fallback.results?.length || 0,
+          total_count: fallback.results?.length || 0,
           fallback: true,
           warning: "Catalog not available; filters and catalog datasets not included",
         });
@@ -657,6 +696,47 @@ datasetRoutes.get("/search", optionalAuthMiddleware, async (c) => {
       return c.json({ error: "Search failed", details: msg }, 500);
     }
   }
+});
+
+/**
+ * GET /datasets/resolve/:sourceId - Resolve an OpenNeuro ds ID to its NEMAR on counterpart
+ *
+ * Returns the NEMAR dataset_id if a dataset was imported from the given source_id.
+ * Used by the CLI to redirect ds###### downloads to the NEMAR backend when available.
+ */
+datasetRoutes.get("/resolve/:sourceId", optionalAuthMiddleware, async (c) => {
+  const sourceId = c.req.param("sourceId");
+  const db = c.env.DB;
+
+  const match = await db
+    .prepare(
+      `SELECT d.dataset_id, d.name, d.visibility, d.github_repo, u.username as owner_username
+       FROM datasets d
+       JOIN users u ON d.owner_user_id = u.id
+       WHERE d.source_id = ? AND d.status = 'active'
+       LIMIT 1`,
+    )
+    .bind(sourceId)
+    .first<{
+      dataset_id: string;
+      name: string;
+      visibility: string;
+      github_repo: string | null;
+      owner_username: string;
+    }>();
+
+  if (!match) {
+    return c.json({ found: false });
+  }
+
+  return c.json({
+    found: true,
+    dataset_id: match.dataset_id,
+    name: match.name,
+    visibility: match.visibility,
+    github_repo: match.github_repo,
+    owner_username: match.owner_username,
+  });
 });
 
 /**

@@ -558,11 +558,18 @@ export interface Dataset {
   nemar_sync_status?: string | null;
   /** DOI field from catalog (for catalog-only datasets) */
   doi?: string | null;
+  /** Import source (e.g. "openneuro") */
+  source?: string | null;
+  /** Original ID at the source (e.g. "ds007315") */
+  source_id?: string | null;
 }
 
 export interface DatasetsListResponse {
   datasets: Dataset[];
   count: number;
+  total_count: number;
+  limit: number;
+  offset: number;
 }
 
 export interface DatasetListFilters {
@@ -575,6 +582,8 @@ export interface DatasetListFilters {
   recent?: number;
   sort?: "newest" | "oldest" | "name" | "participants" | "size";
   limit?: number;
+  offset?: number;
+  owner?: string;
 }
 
 export interface DatasetSearchResult {
@@ -634,6 +643,8 @@ export async function listDatasets(
   if (filters.recent) params.set("recent", String(filters.recent));
   if (filters.sort) params.set("sort", filters.sort);
   if (filters.limit) params.set("limit", String(filters.limit));
+  if (filters.offset) params.set("offset", String(filters.offset));
+  if (filters.owner) params.set("owner", filters.owner);
   const query = params.toString() ? `?${params.toString()}` : "";
   const response = await request<DatasetsListResponse>(
     `/datasets${query}`,
@@ -642,6 +653,22 @@ export async function listDatasets(
   );
   response.datasets = response.datasets.map(validateDataset);
   return response;
+}
+
+interface ResolveSourceResult {
+  found: boolean;
+  dataset_id?: string;
+  name?: string;
+  visibility?: string;
+  github_repo?: string | null;
+  owner_username?: string;
+}
+
+/**
+ * Resolve an OpenNeuro ds ID to its NEMAR on counterpart
+ */
+export async function resolveSourceId(sourceId: string): Promise<ResolveSourceResult> {
+  return request<ResolveSourceResult>(`/datasets/resolve/${sourceId}`, {}, "optional");
 }
 
 /**
