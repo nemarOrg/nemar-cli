@@ -60,8 +60,9 @@ jobs:
           records = [v for v in entries.values() if v.get("id")]
           print(f"Fetched {data.get('total', 0)} records, {len(records)} valid")
 
+          # Wrap in {"records": [...]} for the admin endpoint
           with open("/tmp/catalog-records.json", "w") as f:
-              json.dump(records, f)
+              json.dump({"records": records}, f)
 
           # Write count to GITHUB_OUTPUT
           import os
