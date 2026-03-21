@@ -634,7 +634,10 @@ describe("CLI Dataset List", () => {
 
     if (exitCode === 0) {
       const result = JSON.parse(stdout);
-      expect(Array.isArray(result)).toBe(true);
+      expect(Array.isArray(result.datasets)).toBe(true);
+      expect(typeof result.total_count).toBe("number");
+      expect(typeof result.limit).toBe("number");
+      expect(typeof result.offset).toBe("number");
     }
     // Skip assertion if backend returned error (pre-migration)
   });
@@ -819,12 +822,13 @@ describe("CLI Dataset Collaborator Commands", () => {
       const { stdout: listOut } = await runCli(["dataset", "list", "--json"], ctx);
       let datasets: { dataset_id: string }[] = [];
       try {
-        datasets = JSON.parse(listOut);
+        const parsed = JSON.parse(listOut);
+        datasets = parsed.datasets ?? parsed;
       } catch {
         return; // Skip if no datasets
       }
 
-      if (datasets.length === 0) {
+      if (!datasets || datasets.length === 0) {
         return;
       }
 

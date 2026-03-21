@@ -324,13 +324,18 @@ datasetRoutes.post(
  *   - Authenticated non-admin: public datasets only
  *   - Admin: all datasets (including private managed datasets)
  *
- * Filter params: modality, author, task, has_doi, recent, sort, search (LIKE fallback)
+ * Filter params: modality, author, task, has_doi, recent, sort, search, owner
+ * Pagination: limit (1-200, default 50), offset (>= 0, default 0)
+ * Response includes total_count, limit, offset for client-side pagination
  */
 datasetRoutes.get("/", optionalAuthMiddleware, async (c) => {
   const mine = c.req.query("mine") === "true";
   const status = c.req.query("status") || "active";
-  const limit = Math.min(Number.parseInt(c.req.query("limit") || "50", 10), 200);
-  const offset = Number.parseInt(c.req.query("offset") || "0", 10);
+  const rawLimit = Number.parseInt(c.req.query("limit") ?? "", 10);
+  const limit = Math.min(Math.max(Number.isNaN(rawLimit) ? 50 : rawLimit, 1), 200);
+  const rawOffset = Number.parseInt(c.req.query("offset") ?? "", 10);
+  const offset = Math.max(Number.isNaN(rawOffset) ? 0 : rawOffset, 0);
+  const owner = c.req.query("owner");
   const user = c.get("user");
   const db = c.env.DB;
 
@@ -354,6 +359,7 @@ datasetRoutes.get("/", optionalAuthMiddleware, async (c) => {
       SELECT d.dataset_id, d.name, d.description, d.status, d.visibility,
              d.github_repo, d.concept_doi, d.created_at, d.updated_at,
              u.username AS owner_username, d.nemar_sync_status,
+             d.source, d.source_id,
              COALESCE(c.modalities, '') AS modalities,
              COALESCE(c.participants, 0) AS participants,
              COALESCE(c.tasks, '') AS tasks,
@@ -378,10 +384,8 @@ datasetRoutes.get("/", optionalAuthMiddleware, async (c) => {
       managed: true,
     });
     query += buildSortClause(sort);
-    query += " LIMIT ? OFFSET ?";
-    params.push(limit, offset);
 
-    return executeAndReturn(c, db, query, params);
+    return executeAndReturn(c, db, query, params, { limit, offset });
   }
 
   // Public catalog: UNION managed datasets + catalog-only
@@ -390,6 +394,7 @@ datasetRoutes.get("/", optionalAuthMiddleware, async (c) => {
     SELECT d.dataset_id, d.dataset_id AS id, d.name, d.description, d.status, d.visibility,
            d.github_repo, d.concept_doi, d.concept_doi AS doi, d.created_at, d.updated_at,
            u.username AS owner_username, d.nemar_sync_status,
+           d.source, d.source_id,
            COALESCE(c.modalities, '') AS modalities,
            COALESCE(c.participants, 0) AS participants,
            COALESCE(c.tasks, '') AS tasks,
@@ -411,6 +416,12 @@ datasetRoutes.get("/", optionalAuthMiddleware, async (c) => {
     managedQuery += " AND d.visibility = 'public'";
   }
 
+  // Owner filter for managed datasets
+  if (owner) {
+    managedQuery += " AND u.username = ?";
+    managedParams.push(owner);
+  }
+
   managedQuery += buildFilterClauses(managedParams, {
     search,
     modality,
@@ -427,6 +438,7 @@ datasetRoutes.get("/", optionalAuthMiddleware, async (c) => {
     SELECT c.id AS dataset_id, c.id, c.name, c.description, NULL AS status, 'public' AS visibility,
            NULL AS github_repo, NULL AS concept_doi, c.doi, COALESCE(c.publish_date, c.created_date) AS created_at, NULL AS updated_at,
            c.uploader AS owner_username, NULL AS nemar_sync_status,
+           NULL AS source, NULL AS source_id,
            COALESCE(c.modalities, '') AS modalities,
            COALESCE(c.participants, 0) AS participants,
            COALESCE(c.tasks, '') AS tasks,
@@ -437,6 +449,12 @@ datasetRoutes.get("/", optionalAuthMiddleware, async (c) => {
     FROM nemar_catalog c
     WHERE c.id NOT IN (SELECT dataset_id FROM datasets WHERE status = 'active')
   `;
+
+  // Owner filter for catalog datasets
+  if (owner) {
+    catalogQuery += " AND c.uploader = ?";
+    catalogParams.push(owner);
+  }
 
   catalogQuery += buildFilterClauses(catalogParams, {
     search,
@@ -449,10 +467,10 @@ datasetRoutes.get("/", optionalAuthMiddleware, async (c) => {
   });
 
   // Combine with UNION ALL
-  const unionQuery = `${managedQuery} UNION ALL ${catalogQuery}${buildSortClause(sort, true)} LIMIT ? OFFSET ?`;
-  const allParams = [...managedParams, ...catalogParams, limit, offset];
+  const unionQuery = `${managedQuery} UNION ALL ${catalogQuery}${buildSortClause(sort, true)}`;
+  const allParams = [...managedParams, ...catalogParams];
 
-  return executeAndReturn(c, db, unionQuery, allParams);
+  return executeAndReturn(c, db, unionQuery, allParams, { limit, offset });
 });
 
 /** Build WHERE clauses for search/filter params */
@@ -551,18 +569,56 @@ function buildSortClause(sort: string, forUnion = false): string {
 async function executeAndReturn(
   c: { json: (data: unknown, status?: number) => Response },
   db: D1Database,
-  query: string,
-  params: (string | number)[],
+  baseQuery: string,
+  baseParams: (string | number)[],
+  pagination: { limit: number; offset: number },
 ) {
+  const { limit, offset } = pagination;
   try {
-    const result = await db
-      .prepare(query)
-      .bind(...params)
-      .all();
+    const paginatedQuery = `${baseQuery} LIMIT ? OFFSET ?`;
+    const countQuery = `SELECT COUNT(*) AS total FROM (${baseQuery})`;
+
+    // Run main query and count in parallel; use allSettled so a count
+    // failure does not prevent returning the main results.
+    const [mainSettled, countSettled] = await Promise.allSettled([
+      db
+        .prepare(paginatedQuery)
+        .bind(...baseParams, limit, offset)
+        .all(),
+      db
+        .prepare(countQuery)
+        .bind(...baseParams)
+        .first<{ total: number }>(),
+    ]);
+
+    if (mainSettled.status === "rejected") {
+      throw mainSettled.reason;
+    }
+
+    const result = mainSettled.value;
     if (!result?.results) {
       return c.json({ error: "Database query failed" }, 500);
     }
-    return c.json({ datasets: result.results, count: result.results.length });
+
+    let totalCount = result.results.length;
+    if (countSettled.status === "fulfilled" && countSettled.value?.total != null) {
+      totalCount = countSettled.value.total;
+    } else if (countSettled.status === "rejected") {
+      console.warn(
+        "[datasets] COUNT query failed, using result length:",
+        countSettled.reason instanceof Error
+          ? countSettled.reason.message
+          : String(countSettled.reason),
+      );
+    }
+
+    return c.json({
+      datasets: result.results,
+      count: result.results.length,
+      total_count: totalCount,
+      limit,
+      offset,
+    });
   } catch (dbError) {
     const msg = dbError instanceof Error ? dbError.message : String(dbError);
 
@@ -580,12 +636,16 @@ async function executeAndReturn(
              JOIN users u ON d.owner_user_id = u.id
              WHERE d.status = 'active' AND (d.is_sandbox = 0 OR d.is_sandbox IS NULL)
                AND d.visibility = 'public'
-             ORDER BY d.created_at DESC LIMIT 50`,
+             ORDER BY d.created_at DESC LIMIT ? OFFSET ?`,
           )
+          .bind(limit, offset)
           .all();
         return c.json({
           datasets: fallback.results || [],
           count: fallback.results?.length || 0,
+          total_count: fallback.results?.length || 0,
+          limit,
+          offset,
           fallback: true,
           warning: "Catalog not available; filters and catalog datasets not included",
         });
@@ -656,6 +716,58 @@ datasetRoutes.get("/search", optionalAuthMiddleware, async (c) => {
       }
       return c.json({ error: "Search failed", details: msg }, 500);
     }
+  }
+});
+
+/**
+ * GET /datasets/resolve/:sourceId - Resolve an OpenNeuro source ID to its NEMAR counterpart
+ *
+ * Returns the NEMAR dataset_id if a dataset was imported from the given source_id.
+ * Used by the CLI to redirect ds###### downloads to the NEMAR backend when available.
+ * Returns { found: true, ... } on match, or { found: false } when no match exists.
+ * Always returns 200 (except on validation or server errors).
+ */
+datasetRoutes.get("/resolve/:sourceId", optionalAuthMiddleware, async (c) => {
+  const sourceId = c.req.param("sourceId");
+
+  if (!/^ds\d{6}$/.test(sourceId)) {
+    return c.json({ error: "Invalid source ID format. Expected ds followed by 6 digits." }, 400);
+  }
+
+  const db = c.env.DB;
+
+  try {
+    const match = await db
+      .prepare(
+        `SELECT d.dataset_id, d.name, d.github_repo, u.username as owner_username
+         FROM datasets d
+         JOIN users u ON d.owner_user_id = u.id
+         WHERE d.source_id = ? AND d.status = 'active' AND d.visibility = 'public'
+         LIMIT 1`,
+      )
+      .bind(sourceId)
+      .first<{
+        dataset_id: string;
+        name: string;
+        github_repo: string | null;
+        owner_username: string;
+      }>();
+
+    if (!match) {
+      return c.json({ found: false });
+    }
+
+    return c.json({
+      found: true,
+      dataset_id: match.dataset_id,
+      name: match.name,
+      github_repo: match.github_repo,
+      owner_username: match.owner_username,
+    });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error(`[resolve] Failed to resolve source_id ${sourceId}:`, msg);
+    return c.json({ error: "Failed to resolve dataset", details: msg }, 500);
   }
 });
 
