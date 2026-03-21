@@ -49,6 +49,7 @@ import {
   requestPublication,
   requestUploadCredentials,
   resendPublishNotification,
+  resolveSourceId,
   searchDatasets,
 } from "../lib/api.js";
 import { isAwsCliAvailable } from "../lib/aws-cli.js";
@@ -1644,8 +1645,9 @@ Examples:
   $ nemar dataset download ds000248              # Download from OpenNeuro`,
   )
   .action(async (datasetId, options) => {
-    // OpenNeuro datasets (ds######) - separate download flow
-    if (isOpenNeuroDatasetId(datasetId)) {
+    // OpenNeuro datasets (ds######) - check for NEMAR counterpart first
+    const effectiveId = await resolveOpenNeuroId(datasetId);
+    if (!effectiveId) {
       await handleOpenNeuroDownload(datasetId, options);
       return;
     }
@@ -1668,11 +1670,11 @@ Examples:
     spinner.succeed(`git-annex ${prereqs.gitAnnex.version}`);
 
     // Step 2: Get dataset info from backend
-    spinner = ora(`Fetching dataset info for ${datasetId}...`).start();
+    spinner = ora(`Fetching dataset info for ${effectiveId}...`).start();
 
     let datasetInfo: Dataset;
     try {
-      datasetInfo = await getDataset(datasetId);
+      datasetInfo = await getDataset(effectiveId);
       spinner.succeed(`Found dataset: ${datasetInfo.name}`);
     } catch (error) {
       spinner.fail("Dataset not found");
@@ -1691,7 +1693,7 @@ Examples:
     }
 
     // Determine output path
-    const outputPath = options.output || datasetId;
+    const outputPath = options.output || effectiveId;
     const absoluteOutput = resolve(outputPath);
 
     // Check if output already exists
@@ -1703,7 +1705,7 @@ Examples:
 
     console.log();
     console.log(chalk.bold("Download Plan:"));
-    console.log(`  Dataset: ${datasetInfo.name} (${datasetId})`);
+    console.log(`  Dataset: ${datasetInfo.name} (${effectiveId})`);
     console.log(`  Output: ${absoluteOutput}`);
     console.log(`  Data files: ${options.data === false ? "metadata only" : "included"}`);
     if (options.data !== false) {
@@ -1729,7 +1731,7 @@ Examples:
     if (datasetInfo.visibility !== "public") {
       spinner = ora("Requesting download credentials...").start();
       try {
-        downloadCreds = await requestDownloadCredentials(datasetId);
+        downloadCreds = await requestDownloadCredentials(effectiveId);
         spinner.succeed("Download credentials received (2h expiry)");
       } catch (error) {
         spinner.fail("Failed to get download credentials");
@@ -1875,6 +1877,48 @@ Examples:
   });
 
 /**
+ * If datasetId is an OpenNeuro ds ID, check whether NEMAR has a copy and
+ * prompt the user to use it. Returns the NEMAR dataset_id if accepted,
+ * the original datasetId for non-OpenNeuro IDs, or null if the user
+ * declined (meaning the caller should fall back to OpenNeuro download).
+ */
+async function resolveOpenNeuroId(datasetId: string): Promise<string | null> {
+  if (!isOpenNeuroDatasetId(datasetId)) {
+    return datasetId;
+  }
+
+  // Only catch network/API errors; let prompt errors (Ctrl+C) propagate
+  let resolved: Awaited<ReturnType<typeof resolveSourceId>> | null = null;
+  try {
+    resolved = await resolveSourceId(datasetId);
+  } catch (err) {
+    console.log(chalk.dim(`Could not check NEMAR availability: ${(err as Error).message}`));
+    return null;
+  }
+
+  if (!resolved?.found || !resolved.dataset_id) {
+    return null;
+  }
+
+  console.log();
+  console.log(
+    chalk.green(`This dataset is available on NEMAR as ${chalk.bold(resolved.dataset_id)}`),
+  );
+  console.log(chalk.dim("NEMAR provides git-annex version tracking and selective file download."));
+
+  const { useNemarBackend } = await inquirer.prompt([
+    {
+      type: "confirm",
+      name: "useNemarBackend",
+      message: `Download from NEMAR (${resolved.dataset_id}) instead of OpenNeuro?`,
+      default: true,
+    },
+  ]);
+
+  return useNemarBackend ? resolved.dataset_id : null;
+}
+
+/**
  * Colorize dataset status for display
  */
 function colorizeStatus(status: string): string {
@@ -1893,13 +1937,18 @@ function colorizeStatus(status: string): string {
 }
 
 // Shared logic for rendering dataset tables
-function renderDatasetTable(datasets: Dataset[], response: { count: number }) {
+function renderDatasetTable(
+  datasets: Dataset[],
+  pagination: { limit: number; offset: number; totalCount: number },
+) {
+  const { offset, totalCount } = pagination;
+  const pageStart = offset + 1;
+  const pageEnd = offset + datasets.length;
+  const pageInfo =
+    totalCount > datasets.length ? `${pageStart}-${pageEnd} of ${totalCount}` : `${totalCount}`;
+
   console.log();
-  console.log(
-    chalk.bold(
-      `Datasets (${datasets.length}${response.count > datasets.length ? ` of ${response.count}` : ""}):`,
-    ),
-  );
+  console.log(chalk.bold(`Datasets (${pageInfo}):`));
   console.log();
 
   const getId = (d: Dataset) => d.dataset_id || (d as unknown as { id?: string }).id || "";
@@ -1966,6 +2015,16 @@ function renderDatasetTable(datasets: Dataset[], response: { count: number }) {
   }
 
   console.log();
+  // Pagination footer
+  if (totalCount > pageEnd) {
+    const currentPage = Math.floor(offset / pagination.limit) + 1;
+    const totalPages = Math.ceil(totalCount / pagination.limit);
+    console.log(
+      chalk.dim(
+        `Page ${currentPage}/${totalPages}. Next: nemar dataset list --page ${currentPage + 1}`,
+      ),
+    );
+  }
   console.log(
     chalk.dim(
       `  * = not synced to nemar.org    ${chalk.dim("dim")} = catalog-only (not on GitHub)`,
@@ -1980,6 +2039,7 @@ datasetCommand
   .command("list")
   .description("List datasets on NEMAR (full catalog)")
   .option("--mine", "List only your datasets (both private and public)")
+  .option("--owner <username>", "List datasets owned by a specific user")
   .option("--search <query>", "Search by name, description, authors, or tasks")
   .option("--modality <type>", "Filter by modality (eeg, emg, meg, etc.)")
   .option("--author <name>", "Filter by author name")
@@ -1988,15 +2048,25 @@ datasetCommand
   .option("--recent [days]", "Show recently published datasets")
   .option("--sort <order>", "Sort: newest, oldest, name, participants, size", "newest")
   .option("--json", "Output as JSON for scripting")
-  .option("--limit <n>", "Limit number of results (default: 50)", "50")
+  .option("-n, --limit <n>", "Results per page (default: 20, max: 200)", "20")
+  .option("--page <n>", "Page number (starts at 1)")
+  .option("--offset <n>", "Skip this many results (alternative to --page)")
+  .option("--all", "Show all results (up to 200)")
   .addHelpText(
     "after",
     `
 Description:
   Lists the full NEMAR catalog, including legacy datasets from nemar.org
-  and datasets managed via nemar-cli. Use filters to find specific datasets.
+  and datasets managed via nemar-cli. Shows 20 results per page by default.
 
   With --mine: shows only YOUR datasets (requires authentication).
+  With --owner <username>: shows datasets owned by a specific user.
+
+Pagination:
+  -n, --limit <n>    Results per page (default: 20, max: 200)
+  --page <n>         Page number (e.g., --page 2 for results 21-40)
+  --offset <n>       Skip N results (e.g., --offset 40 for results 41+)
+  --all              Show all results (up to 200)
 
 Display Indicators:
   ${chalk.cyan("cyan ID")}     Managed dataset (on GitHub)
@@ -2005,18 +2075,38 @@ Display Indicators:
   ${chalk.red("!")}           Sync to nemar.org failed
 
 Examples:
-  $ nemar dataset list                         # Full catalog
+  $ nemar dataset list                         # First 20 datasets
+  $ nemar dataset list --page 2                # Next 20 datasets
+  $ nemar dataset list -n 50                   # 50 per page
+  $ nemar dataset list --all                   # All results (up to 200)
   $ nemar dataset list --mine                  # Your datasets
+  $ nemar dataset list --owner yahya           # Datasets by 'yahya'
   $ nemar dataset list --modality eeg          # EEG datasets only
   $ nemar dataset list --search "motor"        # Search by keyword
   $ nemar dataset list --doi --sort size       # Published, by size
   $ nemar dataset search "resting state EEG"   # Semantic search`,
   )
   .action(async (options) => {
+    if (options.mine && options.owner) {
+      console.log(chalk.red("Error: --mine and --owner cannot be used together"));
+      console.log("Use --mine for your datasets, or --owner <username> for another user's.");
+      process.exit(1);
+    }
+
     if (options.mine && !isAuthenticated()) {
       console.log(chalk.red("Error: Not authenticated"));
       console.log("Run 'nemar auth login' to see your datasets");
       process.exit(1);
+    }
+
+    // Parse pagination
+    const limit = options.all ? 200 : Math.min(Number.parseInt(options.limit, 10) || 20, 200);
+    let offset = 0;
+    if (options.page) {
+      const page = Math.max(Number.parseInt(options.page, 10) || 1, 1);
+      offset = (page - 1) * limit;
+    } else if (options.offset) {
+      offset = Math.max(Number.parseInt(options.offset, 10) || 0, 0);
     }
 
     const spinner = ora("Fetching datasets...").start();
@@ -2032,7 +2122,9 @@ Examples:
         hasDoi: !!options.doi,
         recent: options.recent ? Number.parseInt(options.recent, 10) || 30 : undefined,
         sort: options.sort,
-        limit: Number.parseInt(options.limit, 10),
+        limit,
+        offset,
+        owner: options.owner,
       });
       spinner.stop();
     } catch (error) {
@@ -2046,9 +2138,10 @@ Examples:
     }
 
     const datasets = response.datasets;
+    const totalCount = response.total_count ?? response.count;
 
     if (options.json) {
-      console.log(JSON.stringify(datasets, null, 2));
+      console.log(JSON.stringify({ datasets, total_count: totalCount, limit, offset }, null, 2));
       return;
     }
 
@@ -2057,6 +2150,8 @@ Examples:
       if (options.mine) {
         console.log(chalk.yellow("You don't have any datasets yet."));
         console.log(chalk.dim("Create one with: nemar dataset upload <path>"));
+      } else if (options.owner) {
+        console.log(chalk.yellow(`No datasets found for user '${options.owner}'.`));
       } else if (options.search || options.modality || options.author) {
         console.log(chalk.yellow("No datasets match your filters."));
         console.log(chalk.dim("Try broader search terms or remove filters."));
@@ -2066,7 +2161,7 @@ Examples:
       return;
     }
 
-    renderDatasetTable(datasets, response);
+    renderDatasetTable(datasets, { limit, offset, totalCount });
   });
 
 // Search command (semantic search via Vectorize)
