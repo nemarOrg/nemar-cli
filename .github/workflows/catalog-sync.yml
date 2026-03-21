@@ -64,9 +64,16 @@ jobs:
               conn = http.client.HTTPSConnection("nemar.org", timeout=60)
               body = json.dumps({"table_name": "dataexplorer_dataset", "start": 0, "limit": 1000})
               conn.request("GET", "/api/dataexplorer/datapipeline/records", body=body,
-                           headers={"Content-Type": "application/json"})
+                           headers={"Content-Type": "application/json",
+                                    "User-Agent": "nemar-cli/catalog-sync"})
               resp = conn.getresponse()
-              data = json.loads(resp.read().decode())
+              raw = resp.read().decode()
+              print(f"http.client response: status={resp.status}, length={len(raw)}")
+              if not raw.strip():
+                  print(f"::error::nemar.org returned empty response (HTTP {resp.status})")
+                  print(f"Response headers: {dict(resp.getheaders())}")
+                  sys.exit(1)
+              data = json.loads(raw)
               conn.close()
 
           if not data.get("success"):
