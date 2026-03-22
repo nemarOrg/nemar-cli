@@ -1,4 +1,5 @@
 # NEMAR API - SCCN Cloudflare Account Configuration
+# Mirrors backend/wrangler.toml (personal account) with SCCN account resource IDs.
 # This is a parallel config for the SCCN account migration (Epic #314).
 # Do NOT use this for production traffic until DNS cutover is complete.
 #
@@ -7,7 +8,7 @@
 #   CLOUDFLARE_API_TOKEN=$SCCN_CF_API_TOKEN \
 #   npx wrangler@latest -c backend/wrangler-sccn.toml <command>
 #
-# Or via cfman:
+# Or via cfman (multi-account Cloudflare CLI, ~/.config/cfman/tokens.json):
 #   npx cfman wrangler --account sccn -c backend/wrangler-sccn.toml <command>
 
 name = "nemar-api"
@@ -52,7 +53,7 @@ S3_BUCKET = "nemar"
 # - GITHUB_ADMIN_PAT
 # - AWS_ACCESS_KEY_ID
 # - AWS_SECRET_ACCESS_KEY
-# - ENCRYPTION_KEY          (AES-GCM key -- MUST be identical to personal account)
+# - ENCRYPTION_KEY          (AES-GCM key -- MUST be identical to personal account; mismatch makes stored credentials undecryptable)
 # - RESEND_API_KEY
 # - TEST_BYPASS_TOKEN
 # - GITHUB_WEBHOOK_SECRET
