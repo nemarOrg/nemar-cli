@@ -3,13 +3,11 @@
 # This is a parallel config for the SCCN account migration (Epic #314).
 # Do NOT use this for production traffic until DNS cutover is complete.
 #
-# Usage:
-#   CLOUDFLARE_ACCOUNT_ID=$SCCN_CF_ACCOUNT_ID \
-#   CLOUDFLARE_API_TOKEN=$SCCN_CF_API_TOKEN \
-#   npx wrangler@latest -c backend/wrangler-sccn.toml <command>
-#
-# Or via cfman (multi-account Cloudflare CLI, ~/.config/cfman/tokens.json):
+# Usage (via cfman for multi-account management):
 #   npx cfman wrangler --account sccn -c backend/wrangler-sccn.toml <command>
+#
+# cfman accounts: neuromechanist (personal), sccn (SCCN), yooz-labs (legacy)
+# Config: ~/.config/cfman/tokens.json
 
 name = "nemar-api"
 main = "src/index.ts"
@@ -49,7 +47,7 @@ FRONTEND_URL = "https://nemar.org"
 AWS_REGION = "us-east-2"
 S3_BUCKET = "nemar"
 
-# Secrets (set via: CLOUDFLARE_ACCOUNT_ID=... CLOUDFLARE_API_TOKEN=... npx wrangler@latest secret put <NAME> -c backend/wrangler-sccn.toml)
+# Secrets (set via: npx cfman wrangler --account sccn secret put <NAME> -c backend/wrangler-sccn.toml)
 # - GITHUB_ADMIN_PAT
 # - AWS_ACCESS_KEY_ID
 # - AWS_SECRET_ACCESS_KEY
