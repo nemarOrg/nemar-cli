@@ -4392,7 +4392,11 @@ adminRoutes.delete("/datasets/:id", async (c) => {
 // ─── Bulk delete datasets ────────────────────────────────────────────────────
 
 const bulkDeleteSchema = z.object({
-  dataset_ids: z.array(z.string()).min(1).max(200),
+  dataset_ids: z
+    .array(z.string().regex(/^(nm|xx|on)\d{6}$/, "Invalid dataset ID format"))
+    .min(1)
+    .max(200)
+    .transform((ids) => [...new Set(ids)]),
 });
 
 /**
@@ -4402,19 +4406,13 @@ const bulkDeleteSchema = z.object({
  * Intended for cleaning up phantom/orphaned datasets.
  * Requires owner role.
  */
-adminRoutes.post("/datasets/bulk-delete", async (c) => {
+adminRoutes.post("/datasets/bulk-delete", zValidator("json", bulkDeleteSchema), async (c) => {
   const requestingUser = c.get("user");
   if (!hasRole(requestingUser.role, "owner")) {
     return c.json({ error: "Only the NEMAR owner can bulk-delete datasets" }, 403);
   }
 
-  const body = await c.req.json();
-  const parsed = bulkDeleteSchema.safeParse(body);
-  if (!parsed.success) {
-    return c.json({ error: "Invalid request", details: parsed.error.issues }, 400);
-  }
-
-  const { dataset_ids } = parsed.data;
+  const { dataset_ids } = c.req.valid("json");
   const db = c.env.DB;
   const results: Array<{ dataset_id: string; deleted: boolean; error?: string }> = [];
 
@@ -4453,18 +4451,25 @@ adminRoutes.post("/datasets/bulk-delete", async (c) => {
   const deletedCount = results.filter((r) => r.deleted).length;
   const failedCount = results.filter((r) => !r.deleted).length;
 
-  // Audit log
+  // Audit log (non-fatal; don't fail the response if audit write fails)
   try {
     await db
-      .prepare("INSERT INTO audit_log (action, user_id, details) VALUES (?, ?, ?)")
+      .prepare(
+        "INSERT INTO audit_log (user_id, action, resource_type, resource_id, details) VALUES (?, ?, ?, ?, ?)",
+      )
       .bind(
-        "bulk_delete",
         requestingUser.id,
+        "bulk_delete",
+        "dataset",
+        dataset_ids.join(","),
         JSON.stringify({ deleted: deletedCount, failed: failedCount, ids: dataset_ids }),
       )
       .run();
-  } catch {
-    // non-fatal
+  } catch (auditErr) {
+    console.error(
+      `[bulk-delete] Failed to write audit log (${deletedCount} deleted, ${failedCount} failed):`,
+      auditErr,
+    );
   }
 
   return c.json({ deleted: deletedCount, failed: failedCount, results });

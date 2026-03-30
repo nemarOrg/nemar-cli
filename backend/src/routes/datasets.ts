@@ -81,6 +81,58 @@ const BLOCK_MESSAGES: Record<string, string> = {
 };
 
 /**
+ * Generate presigned upload URLs for data files.
+ * Returns { urls, error } where error is set on failure with status and body for the response.
+ */
+async function generateUploadUrlsForFiles(
+  env: Bindings,
+  datasetId: string,
+  files?: Array<{ path: string; size: number; type: string }>,
+): Promise<{
+  urls: Record<string, string>;
+  error?: {
+    status: number;
+    body: { error: string; details?: string; dataset_id?: string; note?: string };
+  };
+}> {
+  if (!files || files.length === 0) return { urls: {} };
+  const dataFiles = files.filter((f) => f.type === "data").map((f) => f.path);
+  if (dataFiles.length === 0) return { urls: {} };
+
+  try {
+    const urls = await generateDatasetUploadUrls(
+      {
+        bucket: env.S3_BUCKET,
+        region: env.AWS_REGION,
+        accessKeyId: env.AWS_ACCESS_KEY_ID,
+        secretAccessKey: env.AWS_SECRET_ACCESS_KEY,
+      },
+      datasetId,
+      dataFiles,
+    );
+    return { urls };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Unknown error";
+    if (message.includes("Invalid file path")) {
+      return { urls: {}, error: { status: 400, body: { error: message } } };
+    }
+    console.error(`Failed to generate presigned URLs for ${datasetId}:`, error);
+    return {
+      urls: {},
+      error: {
+        status: 500,
+        body: {
+          error: "Failed to generate upload URLs",
+          details: message,
+          dataset_id: datasetId,
+          note: "Dataset exists but upload URLs could not be generated. Re-run the upload.",
+        },
+      },
+    };
+  }
+}
+
+/**
  * POST /datasets - Create a new dataset
  *
  * Creates GitHub repo, assigns dataset ID, and returns presigned URLs for upload.
@@ -157,7 +209,7 @@ datasetRoutes.post(
     // Server-side dedup: if this user already has an incomplete dataset with the
     // same name, return it instead of creating a new one. This prevents phantom
     // datasets when the CLI loses .nemar/config.json and retries.
-    // "Incomplete" = private, no DOI, no version records.
+    // "Incomplete" = private, no DOI, no version records, has a GitHub repo.
     const existingIncomplete = await db
       .prepare(
         `SELECT d.dataset_id, d.github_repo
@@ -167,6 +219,7 @@ datasetRoutes.post(
            AND d.is_sandbox = ?
            AND d.visibility = 'private'
            AND d.concept_doi IS NULL
+           AND d.github_repo IS NOT NULL AND d.github_repo != ''
            AND NOT EXISTS (
              SELECT 1 FROM dataset_versions dv WHERE dv.dataset_id = d.dataset_id
            )
@@ -185,29 +238,13 @@ datasetRoutes.post(
       const githubRepo = existingIncomplete.github_repo;
 
       // Generate fresh presigned URLs for the resumed upload
-      let uploadUrls: Record<string, string> = {};
-      if (files && files.length > 0) {
-        const dataFiles = files.filter((f) => f.type === "data").map((f) => f.path);
-        if (dataFiles.length > 0) {
-          try {
-            uploadUrls = await generateDatasetUploadUrls(
-              {
-                bucket: c.env.S3_BUCKET,
-                region: c.env.AWS_REGION,
-                accessKeyId: c.env.AWS_ACCESS_KEY_ID,
-                secretAccessKey: c.env.AWS_SECRET_ACCESS_KEY,
-              },
-              datasetId,
-              dataFiles,
-            );
-          } catch (error) {
-            const message = error instanceof Error ? error.message : "Unknown error";
-            if (message.includes("Invalid file path")) {
-              return c.json({ error: message }, 400);
-            }
-            console.error("Failed to generate presigned URLs for resumed dataset:", error);
-          }
-        }
+      const { urls: uploadUrls, error: urlError } = await generateUploadUrlsForFiles(
+        c.env,
+        datasetId,
+        files,
+      );
+      if (urlError) {
+        return c.json(urlError.body, urlError.status as 400 | 500);
       }
 
       return c.json(
@@ -312,39 +349,13 @@ datasetRoutes.post(
     // NOTE: Branch protection is applied in the finalize endpoint after initial upload
 
     // Generate presigned URLs for data files using backend credentials
-    let uploadUrls: Record<string, string> = {};
-    if (files && files.length > 0) {
-      const dataFiles = files.filter((f) => f.type === "data").map((f) => f.path);
-      if (dataFiles.length > 0) {
-        try {
-          uploadUrls = await generateDatasetUploadUrls(
-            {
-              bucket: c.env.S3_BUCKET,
-              region: c.env.AWS_REGION,
-              accessKeyId: c.env.AWS_ACCESS_KEY_ID,
-              secretAccessKey: c.env.AWS_SECRET_ACCESS_KEY,
-            },
-            datasetId,
-            dataFiles,
-          );
-        } catch (error) {
-          const message = error instanceof Error ? error.message : "Unknown error";
-          if (message.includes("Invalid file path")) {
-            return c.json({ error: message }, 400);
-          }
-          console.error("Failed to generate presigned URLs:", error);
-          return c.json(
-            {
-              error: "Failed to generate upload URLs",
-              details: message,
-              dataset_id: datasetId,
-              github_repo: githubRepo.full_name,
-              note: "Dataset and GitHub repository were created, but upload URLs could not be generated.",
-            },
-            500,
-          );
-        }
-      }
+    const { urls: uploadUrls, error: urlError } = await generateUploadUrlsForFiles(
+      c.env,
+      datasetId,
+      files,
+    );
+    if (urlError) {
+      return c.json(urlError.body, urlError.status as 400 | 500);
     }
 
     // Update the claimed dataset record with the GitHub repo info
@@ -369,6 +380,7 @@ datasetRoutes.post(
     return c.json(
       {
         message: "Dataset created successfully",
+        resumed: false,
         dataset: {
           id: datasetId,
           dataset_id: datasetId,

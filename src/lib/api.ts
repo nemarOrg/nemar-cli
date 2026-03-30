@@ -734,9 +734,9 @@ export interface CreateDatasetRequest {
 
 export interface CreateDatasetResponse {
   message: string;
-  resumed?: boolean;
+  resumed: boolean;
   dataset: {
-    id: number;
+    id: string;
     dataset_id: string;
     name: string;
     description: string | null;
