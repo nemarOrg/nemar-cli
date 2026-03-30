@@ -4389,6 +4389,87 @@ adminRoutes.delete("/datasets/:id", async (c) => {
   return c.json(result, result.deleted ? 200 : 207);
 });
 
+// ─── Bulk delete datasets ────────────────────────────────────────────────────
+
+const bulkDeleteSchema = z.object({
+  dataset_ids: z.array(z.string()).min(1).max(200),
+});
+
+/**
+ * POST /admin/datasets/bulk-delete - Delete multiple datasets at once
+ *
+ * Only works on unpublished datasets (private, no DOI, no active pub requests).
+ * Intended for cleaning up phantom/orphaned datasets.
+ * Requires owner role.
+ */
+adminRoutes.post("/datasets/bulk-delete", async (c) => {
+  const requestingUser = c.get("user");
+  if (!hasRole(requestingUser.role, "owner")) {
+    return c.json({ error: "Only the NEMAR owner can bulk-delete datasets" }, 403);
+  }
+
+  const body = await c.req.json();
+  const parsed = bulkDeleteSchema.safeParse(body);
+  if (!parsed.success) {
+    return c.json({ error: "Invalid request", details: parsed.error.issues }, 400);
+  }
+
+  const { dataset_ids } = parsed.data;
+  const db = c.env.DB;
+  const results: Array<{ dataset_id: string; deleted: boolean; error?: string }> = [];
+
+  for (const datasetId of dataset_ids) {
+    try {
+      // Safety: only delete private datasets with no DOI
+      const dataset = await db
+        .prepare("SELECT visibility, concept_doi FROM datasets WHERE dataset_id = ?")
+        .bind(datasetId)
+        .first<{ visibility: string; concept_doi: string | null }>();
+
+      if (!dataset) {
+        results.push({ dataset_id: datasetId, deleted: false, error: "not found" });
+        continue;
+      }
+      if (dataset.concept_doi || dataset.visibility === "public") {
+        results.push({ dataset_id: datasetId, deleted: false, error: "has DOI or is public" });
+        continue;
+      }
+
+      const result = await deleteDatasetCascade(db, c.env, datasetId);
+      results.push({
+        dataset_id: datasetId,
+        deleted: result.deleted,
+        error: result.warnings.join("; ") || undefined,
+      });
+    } catch (err) {
+      results.push({
+        dataset_id: datasetId,
+        deleted: false,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  const deletedCount = results.filter((r) => r.deleted).length;
+  const failedCount = results.filter((r) => !r.deleted).length;
+
+  // Audit log
+  try {
+    await db
+      .prepare("INSERT INTO audit_log (action, user_id, details) VALUES (?, ?, ?)")
+      .bind(
+        "bulk_delete",
+        requestingUser.id,
+        JSON.stringify({ deleted: deletedCount, failed: failedCount, ids: dataset_ids }),
+      )
+      .run();
+  } catch {
+    // non-fatal
+  }
+
+  return c.json({ deleted: deletedCount, failed: failedCount, results });
+});
+
 // ─── Import external dataset ────────────────────────────────────────────────
 
 // 8 chars: 2-char prefix + 6 digits (e.g., on007262)

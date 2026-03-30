@@ -37,6 +37,7 @@ import {
   applyS3Lock,
   approvePublication,
   approveUser,
+  bulkDeleteDatasets,
   changeUserRole,
   changeVisibility,
   createConceptDoi,
@@ -2207,6 +2208,71 @@ adminCommand
         403: "Published datasets can only be deleted by the NEMAR owner",
         404: "Dataset not found",
         409: "Cannot delete dataset with active publication requests",
+      });
+      process.exit(1);
+    }
+  });
+
+// ============================================================================
+// Bulk Delete
+// ============================================================================
+
+adminCommand
+  .command("bulk-delete")
+  .description("Delete multiple phantom/orphaned datasets at once (owner only)")
+  .argument("<dataset-ids>", "Comma-separated dataset IDs (e.g., nm000153,nm000154,nm000155)")
+  .option("--yes", "Skip confirmation prompt")
+  .action(async (datasetIdsArg: string, options: { yes?: boolean }) => {
+    if (!requireAuth()) return;
+
+    const datasetIds = datasetIdsArg
+      .split(",")
+      .map((id) => id.trim())
+      .filter(Boolean);
+
+    if (datasetIds.length === 0) {
+      console.log(chalk.red("No dataset IDs provided."));
+      process.exit(1);
+    }
+
+    console.log(chalk.bold(`\nBulk delete: ${datasetIds.length} datasets`));
+    console.log(
+      chalk.dim(
+        `  IDs: ${datasetIds.slice(0, 10).join(", ")}${datasetIds.length > 10 ? ` ... +${datasetIds.length - 10} more` : ""}`,
+      ),
+    );
+    console.log(chalk.yellow("\n  Only private datasets without DOIs will be deleted."));
+
+    if (!options.yes) {
+      const { proceed } = await inquirer.prompt([
+        {
+          type: "confirm",
+          name: "proceed",
+          message: chalk.red(`Delete ${datasetIds.length} datasets? This cannot be undone.`),
+          default: false,
+        },
+      ]);
+      if (!proceed) {
+        console.log(chalk.dim("Cancelled."));
+        return;
+      }
+    }
+
+    const spinner = ora(`Deleting ${datasetIds.length} datasets...`).start();
+
+    try {
+      const result = await bulkDeleteDatasets(datasetIds);
+      spinner.succeed(`Bulk delete complete: ${result.deleted} deleted, ${result.failed} failed`);
+
+      if (result.failed > 0) {
+        console.log(chalk.yellow("\nFailed deletions:"));
+        for (const r of result.results.filter((r) => !r.deleted)) {
+          console.log(chalk.yellow(`  ${r.dataset_id}: ${r.error || "unknown error"}`));
+        }
+      }
+    } catch (error) {
+      handleCommandError(error, spinner, "Bulk delete failed", {
+        403: "Only the NEMAR owner can bulk-delete datasets",
       });
       process.exit(1);
     }
