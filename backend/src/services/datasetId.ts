@@ -10,6 +10,14 @@
 // First allocatable number for each prefix
 const START_NUMBER: Record<string, number> = { nm: 108, xx: 1, on: 1 };
 
+// Maximum allocatable number (6-digit zero-padded IDs: 000001-099999).
+// IDs above this (e.g. nm100000) break the expected nm000XXX convention.
+const MAX_NUMBER = 99999;
+
+// Test dataset IDs excluded from the gap-filling candidate pool.
+// nm099999 would otherwise contribute candidate 100000 (99999+1).
+const EXCLUDED_IDS = new Set(["nm099999"]);
+
 /**
  * Find the lowest unused number for a given prefix.
  *
@@ -44,8 +52,9 @@ async function findLowestUnusedNumber(db: D1Database, prefix: string): Promise<n
   let minUnused: number | null = null;
 
   for (const candidate of candidates) {
-    if (candidate < start) continue;
+    if (candidate < start || candidate > MAX_NUMBER) continue;
     const id = `${prefix}${candidate.toString().padStart(6, "0")}`;
+    if (EXCLUDED_IDS.has(id)) continue;
     if (!existingIds.has(id)) {
       if (minUnused === null || candidate < minUnused) {
         minUnused = candidate;
@@ -71,7 +80,7 @@ export async function generateDatasetId(db: D1Database, sandbox = false): Promis
 
   if (n === null) {
     throw new Error(
-      `Failed to generate dataset ID for prefix '${prefix}': gap-finding query returned no results`,
+      `Failed to generate dataset ID for prefix '${prefix}': all IDs from ${START_NUMBER[prefix] ?? 1} to ${MAX_NUMBER} are allocated`,
     );
   }
 
@@ -90,7 +99,10 @@ export async function getCurrentSequence(db: D1Database): Promise<number> {
  * Accepts nm000XXX (regular), xx000XXX (sandbox), and on000XXX (OpenNeuro) formats
  */
 export function isValidDatasetId(id: string): boolean {
-  return /^(nm|xx|on)\d{6}$/.test(id);
+  if (!/^(nm|xx|on)\d{6}$/.test(id)) return false;
+  // Enforce upper bound: numeric part must be <= 99999 (i.e. 0-padded to 6 digits)
+  const num = Number.parseInt(id.slice(2), 10);
+  return num <= MAX_NUMBER;
 }
 
 /**

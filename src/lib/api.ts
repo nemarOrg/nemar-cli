@@ -734,8 +734,9 @@ export interface CreateDatasetRequest {
 
 export interface CreateDatasetResponse {
   message: string;
+  resumed: boolean;
   dataset: {
-    id: number;
+    id: string;
     dataset_id: string;
     name: string;
     description: string | null;
@@ -1441,6 +1442,24 @@ export async function deleteDataset(
       method: "DELETE",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ force }),
+    },
+    true,
+  );
+}
+
+export interface BulkDeleteResponse {
+  deleted: number;
+  failed: number;
+  results: Array<{ dataset_id: string; deleted: boolean; error?: string }>;
+}
+
+export async function bulkDeleteDatasets(datasetIds: string[]): Promise<BulkDeleteResponse> {
+  return request<BulkDeleteResponse>(
+    "/admin/datasets/bulk-delete",
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ dataset_ids: datasetIds }),
     },
     true,
   );
