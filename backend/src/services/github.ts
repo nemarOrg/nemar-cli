@@ -718,7 +718,7 @@ jobs:
   const prMerge = `name: PR Merge Handler
 
 on:
-  pull_request:
+  pull_request_target:
     types: [closed]
     branches: [main]
 
