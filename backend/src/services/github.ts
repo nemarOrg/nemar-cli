@@ -776,13 +776,14 @@ jobs:
         env:
           AWS_ACCESS_KEY_ID: \${{ secrets.AWS_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: \${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          DATASET_ID: \${{ github.event.repository.name }}
+          BRANCH: \${{ github.event.pull_request.head.ref }}
+          PR_NUMBER: \${{ github.event.pull_request.number }}
         run: |
-          DATASET_ID="\${{ github.event.repository.name }}"
-          BRANCH="\${{ github.event.pull_request.head.ref }}"
           # Clean up branch-based staging
           aws s3 rm --recursive "s3://nemar/staging/\${DATASET_ID}/\${BRANCH}/" 2>/dev/null || true
           # Clean up legacy PR-number-based staging
-          aws s3 rm --recursive "s3://nemar/staging/pr-\${{ github.event.pull_request.number }}/" 2>/dev/null || true
+          aws s3 rm --recursive "s3://nemar/staging/pr-\${PR_NUMBER}/" 2>/dev/null || true
 `;
 
   // Generate Archive workflow (triggered via repository_dispatch)
