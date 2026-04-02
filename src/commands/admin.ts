@@ -54,6 +54,7 @@ import {
   getEmailPreferences,
   getSyncStatus,
   listAdminNotices,
+  listDatasets,
   listPublishRequests,
   listUsers,
   publishDataset,
@@ -651,12 +652,68 @@ ciCommand
 
 ciCommand
   .command("add")
-  .description("Deploy CI workflows to a dataset repository")
-  .argument("<dataset-id>", "Dataset ID (e.g., nm000104)")
+  .description("Deploy CI workflows to a dataset repository (or all with --all)")
+  .argument("[dataset-id]", "Dataset ID (e.g., nm000104)")
+  .option("--all", "Deploy to all dataset repositories")
   .option(YES_OPTION, YES_DESCRIPTION)
   .option(NO_OPTION, NO_DESCRIPTION)
-  .action(async (datasetId, options: ConfirmOptions) => {
+  .action(async (datasetId, options: { all?: boolean } & ConfirmOptions) => {
     if (!requireAuth()) return;
+
+    if (options.all) {
+      const spinner = ora("Fetching dataset list...").start();
+      let datasets: { dataset_id: string }[];
+      try {
+        const result = await listDatasets({ limit: 1000 });
+        datasets = result.datasets;
+        spinner.succeed(`Found ${datasets.length} datasets`);
+      } catch (error) {
+        handleCommandError(error, spinner, "Failed to fetch datasets");
+        return;
+      }
+
+      console.log(chalk.cyan(`\nDeploy CI workflows to ${datasets.length} datasets\n`));
+      console.log("This will add/update the following workflows on each:");
+      console.log("  1. BIDS Validation (runs on PRs)");
+      console.log("  2. Version Check (ensures version bump on PRs)");
+      console.log("  3. PR Merge Handler (creates releases, publishes DOIs)");
+      console.log();
+
+      const confirmResult = await confirm(
+        `Deploy CI workflows to all ${datasets.length} datasets?`,
+        options,
+      );
+      if (confirmResult !== "confirmed") {
+        console.log(chalk.dim(confirmResult === "declined" ? "Skipped" : "Cancelled"));
+        return;
+      }
+
+      let succeeded = 0;
+      let failed = 0;
+      for (const ds of datasets) {
+        const dsSpinner = ora(`Deploying to ${ds.dataset_id}...`).start();
+        try {
+          await addCi(ds.dataset_id);
+          dsSpinner.succeed(`${ds.dataset_id}: deployed`);
+          succeeded++;
+        } catch (error) {
+          const msg = error instanceof ApiError ? error.message : String(error);
+          dsSpinner.fail(`${ds.dataset_id}: ${msg}`);
+          failed++;
+        }
+      }
+
+      console.log();
+      console.log(
+        chalk.cyan(`Done: ${succeeded} succeeded, ${failed} failed out of ${datasets.length}`),
+      );
+      return;
+    }
+
+    if (!datasetId) {
+      console.error(chalk.red("Error: dataset-id is required (or use --all)"));
+      return;
+    }
 
     console.log(chalk.cyan(`\nDeploy CI workflows to: ${datasetId}\n`));
     console.log("This will add the following workflows:");
