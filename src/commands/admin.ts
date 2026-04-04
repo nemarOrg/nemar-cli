@@ -667,6 +667,11 @@ ciCommand
         const result = await listDatasets({ limit: 1000 });
         datasets = result.datasets;
         spinner.succeed(`Found ${datasets.length} datasets`);
+        if (datasets.length >= 1000) {
+          console.log(
+            chalk.yellow("Warning: reached 1000 dataset limit; some datasets may be skipped"),
+          );
+        }
       } catch (error) {
         handleCommandError(error, spinner, "Failed to fetch datasets");
         return;

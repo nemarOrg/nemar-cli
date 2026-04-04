@@ -393,6 +393,11 @@ async function handleEzidVersionDoi(
     // Sync to nemar.org in the background (non-fatal, non-blocking)
     const nemarUser = c.env.NEMAR_USERNAME;
     const nemarPass = c.env.NEMAR_PASSWORD;
+    if (!nemarUser || !nemarPass) {
+      console.warn("[webhook] NEMAR_USERNAME/PASSWORD not configured; skipping nemar.org sync");
+    } else if (dataset.dataset_id.startsWith("on")) {
+      console.info(`[webhook] Skipping nemar.org sync for OpenNeuro dataset ${dataset.dataset_id}`);
+    }
     if (nemarUser && nemarPass && !dataset.dataset_id.startsWith("on")) {
       const pat = c.env.GITHUB_ADMIN_PAT;
       const s3Cfg = {
@@ -479,7 +484,12 @@ async function syncToNemarAfterVersionDoi(
         const raw = JSON.parse(await getBlobContent(repoName, nemarMetaFile.sha, pat));
         const parsed = parseNemarMetadata(raw);
         if (parsed?.version === "2.0") nemarMeta = parsed;
-      } catch {}
+      } catch (e) {
+        console.warn(
+          `[webhook] Failed to parse .nemar/metadata.json for ${dataset.dataset_id}:`,
+          e,
+        );
+      }
     }
 
     const ownerRow = await db
@@ -502,16 +512,34 @@ async function syncToNemarAfterVersionDoi(
       .first<{ version: string; doi: string; created_at: string }>();
 
     const [s3Stats, zipFileSize] = await Promise.all([
-      getDatasetS3Stats(s3Cfg, dataset.dataset_id).catch(() => ({ totalSize: 0, objectCount: 0 })),
-      getArchiveSize(s3Cfg, dataset.dataset_id).catch(() => 0),
+      getDatasetS3Stats(s3Cfg, dataset.dataset_id).catch((err) => {
+        console.warn(`[webhook] S3 stats failed for ${dataset.dataset_id}: ${err}`);
+        return { totalSize: 0, objectCount: 0 };
+      }),
+      getArchiveSize(s3Cfg, dataset.dataset_id).catch((err) => {
+        console.warn(`[webhook] Archive size failed for ${dataset.dataset_id}: ${err}`);
+        return 0;
+      }),
     ]);
 
     let manifest = null;
     if (versionRow?.version) {
       try {
         const raw = await getManifest(s3Cfg, dataset.dataset_id, versionRow.version);
-        if (raw) manifest = JSON.parse(raw);
-      } catch {}
+        if (raw) {
+          try {
+            manifest = JSON.parse(raw);
+          } catch (parseErr) {
+            console.warn(
+              `[webhook] Manifest JSON corrupted for ${dataset.dataset_id} v${versionRow.version}: ${parseErr}`,
+            );
+          }
+        }
+      } catch (err) {
+        console.warn(
+          `[webhook] Failed to fetch manifest from S3 for ${dataset.dataset_id}: ${err}`,
+        );
+      }
     }
 
     const syncResult = await syncDatasetToNemar(nemarUser, nemarPass, {
@@ -562,7 +590,11 @@ async function syncToNemarAfterVersionDoi(
         )
         .bind(errorMessage(err), dataset.dataset_id)
         .run();
-    } catch {}
+    } catch (d1Err) {
+      console.warn(
+        `[webhook] Failed to update sync status in D1 for ${dataset.dataset_id}: ${d1Err}`,
+      );
+    }
   }
 }
 
