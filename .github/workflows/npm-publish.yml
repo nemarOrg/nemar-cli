@@ -45,7 +45,7 @@ jobs:
           registry-url: 'https://registry.npmjs.org'
 
       - name: Verify npm OIDC support
-        run: echo "npm version: $(npm --version)"
+        run: npm --version
 
       - name: Determine version and tag
         id: version
