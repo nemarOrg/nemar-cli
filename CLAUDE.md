@@ -68,6 +68,18 @@ s3://nemar/staging/pr-{n}/{datasetId}/objects/   # PR staging area
 3. User uploads dataset -> BIDS validation -> private GitHub repo + S3 upload
 4. Admin creates concept DOI -> user can version with new DOIs
 
+### SDSC Hallu Sync
+Datasets are synced to SDSC Hallu (`ssh hallu`) for processing pipelines and downloads.
+
+- **Cron:** `0 * * * *` (hourly) via `/data/qumulo/openneuro/nemar-cli/scripts/hallu-sync.sh`
+- **Log:** `/data/qumulo/openneuro/.nm-sync-cron.log` (cron output), `/data/qumulo/openneuro/.nm-sync.log` (detailed)
+- **Manifest:** `/data/qumulo/openneuro/.nm-sync-manifest.json` (tracks synced versions per dataset)
+- **Data dir:** `/data/qumulo/openneuro/{datasetId}/` (cloned repos with annex data)
+- **Zip dir:** `/data/qumulo/openneuro/zip_files/` (downloadable archives from S3)
+- **Discovery:** Queries `GET /datasets` API, filters for `nm`-prefix only
+- **Manual run:** `ssh hallu /data/qumulo/openneuro/nemar-cli/scripts/hallu-sync.sh --dataset nm000132 --verbose`
+- **Note:** This syncs data files. Website metadata (nemar.org) is synced separately via `nemar admin sync run` or automatically on version DOI publish.
+
 ## Environment Setup
 ```bash
 # Install dependencies
