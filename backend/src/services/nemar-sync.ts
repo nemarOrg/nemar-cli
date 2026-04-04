@@ -506,10 +506,9 @@ async function collectChannelCounts(src: NemarSyncSource): Promise<ChannelCount[
 // ---------------------------------------------------------------------------
 
 async function detectHedAnnotation(src: NemarSyncSource): Promise<boolean> {
-  // Check if any events.json file contains "HED" key
-  const eventsJson = src.tree.find(
-    (f) => f.type === "blob" && f.path.endsWith("_events.json") && f.path.startsWith("sub-"),
-  );
+  // Check if any events.json file contains "HED" key.
+  // Look at both subject-level and root-level (BIDS inheritance) files.
+  const eventsJson = src.tree.find((f) => f.type === "blob" && f.path.endsWith("_events.json"));
 
   if (!eventsJson) return false;
 
