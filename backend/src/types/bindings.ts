@@ -1,3 +1,5 @@
+import type { MaintenanceMode } from "./maintenance";
+
 /**
  * Cloudflare Workers environment bindings
  */
@@ -16,6 +18,8 @@ export interface Bindings {
   FRONTEND_URL: string;
   AWS_REGION: string;
   S3_BUCKET: string;
+  /** Undefined is treated as "off". See backend/src/types/maintenance.ts. */
+  MAINTENANCE_MODE?: MaintenanceMode;
 
   // Secrets
   GITHUB_ADMIN_PAT: string;
