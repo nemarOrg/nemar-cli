@@ -718,7 +718,7 @@ jobs:
   const prMerge = `name: PR Merge Handler
 
 on:
-  pull_request:
+  pull_request_target:
     types: [closed]
     branches: [main]
 
@@ -757,6 +757,7 @@ jobs:
         if: steps.check_tag.outputs.exists == 'false'
         env:
           GH_TOKEN: \${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: \${{ github.event.pull_request.number }}
         run: |
           git config user.name "GitHub Actions"
           git config user.email "actions@github.com"
@@ -764,7 +765,7 @@ jobs:
           git tag -a "v$VERSION" -m "Release v$VERSION"
           git push origin "v$VERSION"
           gh release create "v$VERSION" --title "v$VERSION" \\
-            --notes "Release v$VERSION from PR #\${{ github.event.pull_request.number }}"
+            --notes "Release v$VERSION from PR #\${PR_NUMBER}"
           echo "created=true" >> $GITHUB_OUTPUT
 
   cleanup-staging:
@@ -776,13 +777,14 @@ jobs:
         env:
           AWS_ACCESS_KEY_ID: \${{ secrets.AWS_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: \${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          DATASET_ID: \${{ github.event.repository.name }}
+          BRANCH: \${{ github.event.pull_request.head.ref }}
+          PR_NUMBER: \${{ github.event.pull_request.number }}
         run: |
-          DATASET_ID="\${{ github.event.repository.name }}"
-          BRANCH="\${{ github.event.pull_request.head.ref }}"
           # Clean up branch-based staging
           aws s3 rm --recursive "s3://nemar/staging/\${DATASET_ID}/\${BRANCH}/" 2>/dev/null || true
           # Clean up legacy PR-number-based staging
-          aws s3 rm --recursive "s3://nemar/staging/pr-\${{ github.event.pull_request.number }}/" 2>/dev/null || true
+          aws s3 rm --recursive "s3://nemar/staging/pr-\${PR_NUMBER}/" 2>/dev/null || true
 `;
 
   // Generate Archive workflow (triggered via repository_dispatch)

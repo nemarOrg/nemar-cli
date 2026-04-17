@@ -28,8 +28,9 @@ import {
 } from "./commands/auth.js";
 import { datasetCommand } from "./commands/dataset.js";
 import { sandboxCommand } from "./commands/sandbox.js";
-import { IS_DEV_BUILD } from "./lib/api.js";
+import { IS_DEV_BUILD, MaintenanceError, errorDetail } from "./lib/api.js";
 import { NO_DESCRIPTION, NO_OPTION, YES_DESCRIPTION, YES_OPTION } from "./lib/confirm.js";
+import { printMaintenanceBanner } from "./lib/maintenance-banner.js";
 import { fetchAndDisplayNotices } from "./lib/notices.js";
 import { initUpdateCheck, printUpdateBanner } from "./lib/update-check.js";
 import { version } from "./lib/version.js";
@@ -145,6 +146,10 @@ async function main() {
 }
 
 main().catch((err) => {
-  console.error(err.message || err);
+  if (err instanceof MaintenanceError) {
+    printMaintenanceBanner(err);
+    process.exit(1);
+  }
+  console.error(errorDetail(err));
   process.exit(1);
 });

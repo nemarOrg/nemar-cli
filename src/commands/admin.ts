@@ -37,6 +37,7 @@ import {
   applyS3Lock,
   approvePublication,
   approveUser,
+  bulkDeleteDatasets,
   changeUserRole,
   changeVisibility,
   createConceptDoi,
@@ -53,6 +54,7 @@ import {
   getEmailPreferences,
   getSyncStatus,
   listAdminNotices,
+  listDatasets,
   listPublishRequests,
   listUsers,
   publishDataset,
@@ -650,12 +652,73 @@ ciCommand
 
 ciCommand
   .command("add")
-  .description("Deploy CI workflows to a dataset repository")
-  .argument("<dataset-id>", "Dataset ID (e.g., nm000104)")
+  .description("Deploy CI workflows to a dataset repository (or all with --all)")
+  .argument("[dataset-id]", "Dataset ID (e.g., nm000104)")
+  .option("--all", "Deploy to all dataset repositories")
   .option(YES_OPTION, YES_DESCRIPTION)
   .option(NO_OPTION, NO_DESCRIPTION)
-  .action(async (datasetId, options: ConfirmOptions) => {
+  .action(async (datasetId, options: { all?: boolean } & ConfirmOptions) => {
     if (!requireAuth()) return;
+
+    if (options.all) {
+      const spinner = ora("Fetching dataset list...").start();
+      let datasets: { dataset_id: string }[];
+      try {
+        const result = await listDatasets({ limit: 1000 });
+        datasets = result.datasets;
+        spinner.succeed(`Found ${datasets.length} datasets`);
+        if (datasets.length >= 1000) {
+          console.log(
+            chalk.yellow("Warning: reached 1000 dataset limit; some datasets may be skipped"),
+          );
+        }
+      } catch (error) {
+        handleCommandError(error, spinner, "Failed to fetch datasets");
+        return;
+      }
+
+      console.log(chalk.cyan(`\nDeploy CI workflows to ${datasets.length} datasets\n`));
+      console.log("This will add/update the following workflows on each:");
+      console.log("  1. BIDS Validation (runs on PRs)");
+      console.log("  2. Version Check (ensures version bump on PRs)");
+      console.log("  3. PR Merge Handler (creates releases, publishes DOIs)");
+      console.log();
+
+      const confirmResult = await confirm(
+        `Deploy CI workflows to all ${datasets.length} datasets?`,
+        options,
+      );
+      if (confirmResult !== "confirmed") {
+        console.log(chalk.dim(confirmResult === "declined" ? "Skipped" : "Cancelled"));
+        return;
+      }
+
+      let succeeded = 0;
+      let failed = 0;
+      for (const ds of datasets) {
+        const dsSpinner = ora(`Deploying to ${ds.dataset_id}...`).start();
+        try {
+          await addCi(ds.dataset_id);
+          dsSpinner.succeed(`${ds.dataset_id}: deployed`);
+          succeeded++;
+        } catch (error) {
+          const msg = error instanceof ApiError ? error.message : String(error);
+          dsSpinner.fail(`${ds.dataset_id}: ${msg}`);
+          failed++;
+        }
+      }
+
+      console.log();
+      console.log(
+        chalk.cyan(`Done: ${succeeded} succeeded, ${failed} failed out of ${datasets.length}`),
+      );
+      return;
+    }
+
+    if (!datasetId) {
+      console.error(chalk.red("Error: dataset-id is required (or use --all)"));
+      return;
+    }
 
     console.log(chalk.cyan(`\nDeploy CI workflows to: ${datasetId}\n`));
     console.log("This will add the following workflows:");
@@ -2207,6 +2270,71 @@ adminCommand
         403: "Published datasets can only be deleted by the NEMAR owner",
         404: "Dataset not found",
         409: "Cannot delete dataset with active publication requests",
+      });
+      process.exit(1);
+    }
+  });
+
+// ============================================================================
+// Bulk Delete
+// ============================================================================
+
+adminCommand
+  .command("bulk-delete")
+  .description("Delete multiple phantom/orphaned datasets at once (owner only)")
+  .argument("<dataset-ids>", "Comma-separated dataset IDs (e.g., nm000153,nm000154,nm000155)")
+  .option("--yes", "Skip confirmation prompt")
+  .action(async (datasetIdsArg: string, options: { yes?: boolean }) => {
+    if (!requireAuth()) return;
+
+    const datasetIds = datasetIdsArg
+      .split(",")
+      .map((id) => id.trim())
+      .filter(Boolean);
+
+    if (datasetIds.length === 0) {
+      console.log(chalk.red("No dataset IDs provided."));
+      process.exit(1);
+    }
+
+    console.log(chalk.bold(`\nBulk delete: ${datasetIds.length} datasets`));
+    console.log(
+      chalk.dim(
+        `  IDs: ${datasetIds.slice(0, 10).join(", ")}${datasetIds.length > 10 ? ` ... +${datasetIds.length - 10} more` : ""}`,
+      ),
+    );
+    console.log(chalk.yellow("\n  Only private datasets without DOIs will be deleted."));
+
+    if (!options.yes) {
+      const { proceed } = await inquirer.prompt([
+        {
+          type: "confirm",
+          name: "proceed",
+          message: chalk.red(`Delete ${datasetIds.length} datasets? This cannot be undone.`),
+          default: false,
+        },
+      ]);
+      if (!proceed) {
+        console.log(chalk.dim("Cancelled."));
+        return;
+      }
+    }
+
+    const spinner = ora(`Deleting ${datasetIds.length} datasets...`).start();
+
+    try {
+      const result = await bulkDeleteDatasets(datasetIds);
+      spinner.succeed(`Bulk delete complete: ${result.deleted} deleted, ${result.failed} failed`);
+
+      if (result.failed > 0) {
+        console.log(chalk.yellow("\nFailed deletions:"));
+        for (const r of result.results.filter((r) => !r.deleted)) {
+          console.log(chalk.yellow(`  ${r.dataset_id}: ${r.error || "unknown error"}`));
+        }
+      }
+    } catch (error) {
+      handleCommandError(error, spinner, "Bulk delete failed", {
+        403: "Only the NEMAR owner can bulk-delete datasets",
       });
       process.exit(1);
     }
