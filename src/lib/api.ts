@@ -6,6 +6,7 @@
  */
 
 import { getConfig } from "./config.js";
+import { printMaintenanceBanner } from "./maintenance-banner.js";
 import { version } from "./version.js";
 
 const DEFAULT_API_URL = "https://api.osc.earth/nemar";
@@ -30,6 +31,23 @@ export class ApiError extends Error {
   ) {
     super(message);
     this.name = "ApiError";
+  }
+}
+
+/**
+ * Thrown when the backend is in maintenance mode (503 with a `mode` body).
+ * Mode describes what the server is rejecting; CLI treats it as an expected
+ * temporary state and shows a friendly banner instead of a stack trace.
+ */
+export class MaintenanceError extends ApiError {
+  constructor(
+    public readonly mode: "read-only" | "full",
+    message: string,
+    public readonly eta: string | null,
+    details?: unknown,
+  ) {
+    super(503, message, details);
+    this.name = "MaintenanceError";
   }
 }
 
@@ -97,6 +115,16 @@ async function request<T>(
   }
 
   if (!response.ok) {
+    if (response.status === 503 && (data.mode === "read-only" || data.mode === "full")) {
+      const message =
+        typeof data.message === "string"
+          ? data.message
+          : "NEMAR is in maintenance mode. Please retry shortly.";
+      const eta = typeof data.eta === "string" ? data.eta : null;
+      const maintErr = new MaintenanceError(data.mode, message, eta, data.details);
+      printMaintenanceBanner(maintErr);
+      throw maintErr;
+    }
     throw new ApiError(
       response.status,
       (data.error as string) || (data.message as string) || "Request failed",
@@ -734,8 +762,9 @@ export interface CreateDatasetRequest {
 
 export interface CreateDatasetResponse {
   message: string;
+  resumed: boolean;
   dataset: {
-    id: number;
+    id: string;
     dataset_id: string;
     name: string;
     description: string | null;
@@ -1441,6 +1470,24 @@ export async function deleteDataset(
       method: "DELETE",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ force }),
+    },
+    true,
+  );
+}
+
+export interface BulkDeleteResponse {
+  deleted: number;
+  failed: number;
+  results: Array<{ dataset_id: string; deleted: boolean; error?: string }>;
+}
+
+export async function bulkDeleteDatasets(datasetIds: string[]): Promise<BulkDeleteResponse> {
+  return request<BulkDeleteResponse>(
+    "/admin/datasets/bulk-delete",
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ dataset_ids: datasetIds }),
     },
     true,
   );

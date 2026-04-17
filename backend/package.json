@@ -8,7 +8,8 @@
     "deploy:dev": "wrangler deploy --env development",
     "db:migrate": "wrangler d1 migrations apply nemar-db",
     "db:migrate:local": "wrangler d1 migrations apply nemar-db --local",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "bun test"
   },
   "dependencies": {
     "hono": "^4.6.0",

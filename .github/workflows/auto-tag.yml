@@ -1,4 +1,4 @@
-name: Auto Tag
+name: Auto Tag and Release
 
 on:
   push:
@@ -45,6 +45,13 @@ jobs:
             echo "Version unchanged at $CURRENT_VERSION"
           fi
 
+          # Check if this is a pre-release version (contains -)
+          if [[ "$CURRENT_VERSION" == *-* ]]; then
+            echo "prerelease=true" >> $GITHUB_OUTPUT
+          else
+            echo "prerelease=false" >> $GITHUB_OUTPUT
+          fi
+
       - name: Create tag
         if: steps.version.outputs.changed == 'true'
         run: |
@@ -63,3 +70,33 @@ jobs:
           git push origin "$TAG_NAME"
 
           echo "Created and pushed tag $TAG_NAME"
+
+      - name: Create GitHub Release
+        if: steps.version.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.AUTO_TAG_PAT }}
+        run: |
+          TAG_NAME="v${{ steps.version.outputs.current }}"
+          PREV_TAG="v${{ steps.version.outputs.previous }}"
+          PRERELEASE="${{ steps.version.outputs.prerelease }}"
+
+          # Build release notes from commits since previous version
+          RELEASE_ARGS=(
+            "$TAG_NAME"
+            --title "$TAG_NAME"
+            --generate-notes
+          )
+
+          # If previous tag exists, use it as the baseline for notes
+          if git rev-parse "$PREV_TAG" >/dev/null 2>&1; then
+            RELEASE_ARGS+=(--notes-start-tag "$PREV_TAG")
+          fi
+
+          if [ "$PRERELEASE" = "true" ]; then
+            RELEASE_ARGS+=(--prerelease)
+          else
+            RELEASE_ARGS+=(--latest)
+          fi
+
+          gh release create "${RELEASE_ARGS[@]}"
+          echo "Created GitHub Release $TAG_NAME"

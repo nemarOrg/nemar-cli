@@ -13,6 +13,7 @@ import { logger } from "hono/logger";
 import { secureHeaders } from "hono/secure-headers";
 
 import { optionalAuthMiddleware } from "./middleware/auth";
+import { maintenanceMode } from "./middleware/maintenance";
 import { rateLimiter } from "./middleware/rateLimit";
 import { adminRoutes } from "./routes/admin";
 import { authRoutes } from "./routes/auth";
@@ -55,6 +56,7 @@ api.use(
   }),
 );
 api.use("*", rateLimiter);
+api.use("*", maintenanceMode);
 
 // Health check endpoint
 api.get("/health", (c) => {

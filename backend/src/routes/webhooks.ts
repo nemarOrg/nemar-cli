@@ -45,8 +45,16 @@ import {
   validateMetadata,
 } from "../services/llm-enrich.js";
 import { generateManifest } from "../services/manifest.js";
+import { syncDatasetToNemar } from "../services/nemar-sync.js";
 import { errorMessage, extractRepoName, readRepoMetadata } from "../services/repo-metadata.js";
-import { extractExtensions, formatBytes, uploadManifest } from "../services/s3.js";
+import {
+  extractExtensions,
+  formatBytes,
+  getArchiveSize,
+  getDatasetS3Stats,
+  getManifest,
+  uploadManifest,
+} from "../services/s3.js";
 import * as zenodo from "../services/zenodo.js";
 import type { Bindings } from "../types/bindings.js";
 
@@ -382,6 +390,38 @@ async function handleEzidVersionDoi(
       );
     }
 
+    // Sync to nemar.org in the background (non-fatal, non-blocking)
+    const nemarUser = c.env.NEMAR_USERNAME;
+    const nemarPass = c.env.NEMAR_PASSWORD;
+    if (!nemarUser || !nemarPass) {
+      console.warn("[webhook] NEMAR_USERNAME/PASSWORD not configured; skipping nemar.org sync");
+    } else if (dataset.dataset_id.startsWith("on")) {
+      console.info(`[webhook] Skipping nemar.org sync for OpenNeuro dataset ${dataset.dataset_id}`);
+    }
+    if (nemarUser && nemarPass && !dataset.dataset_id.startsWith("on")) {
+      const pat = c.env.GITHUB_ADMIN_PAT;
+      const s3Cfg = {
+        bucket: c.env.S3_BUCKET,
+        region: c.env.AWS_REGION,
+        accessKeyId: c.env.AWS_ACCESS_KEY_ID,
+        secretAccessKey: c.env.AWS_SECRET_ACCESS_KEY,
+      };
+      c.executionCtx.waitUntil(
+        syncToNemarAfterVersionDoi(
+          c.env.DB,
+          nemarUser,
+          nemarPass,
+          dataset,
+          version,
+          result.doi,
+          repoName,
+          pat,
+          repoMeta.bidsDescription,
+          s3Cfg,
+        ),
+      );
+    }
+
     return c.json({
       message: "Version DOI published successfully",
       version,
@@ -406,6 +446,155 @@ async function handleEzidVersionDoi(
       },
       500,
     );
+  }
+}
+
+/**
+ * Background task: sync dataset metadata to nemar.org after a version DOI is published.
+ * Non-fatal; logs errors but never throws.
+ */
+async function syncToNemarAfterVersionDoi(
+  db: D1Database,
+  nemarUser: string,
+  nemarPass: string,
+  dataset: {
+    id: number;
+    dataset_id: string;
+    name: string;
+    github_repo: string | null;
+    concept_doi: string | null;
+  },
+  version: string,
+  versionDoi: string,
+  repoName: string,
+  pat: string,
+  bidsDescription: Record<string, unknown>,
+  s3Cfg: { bucket: string; region: string; accessKeyId: string; secretAccessKey: string },
+): Promise<void> {
+  try {
+    const tree = await getTreeAtRef(repoName, "main", pat);
+
+    const readmeFile = tree.find((f) => f.path === "README" || f.path === "README.md");
+    const readme = readmeFile ? await getBlobContent(repoName, readmeFile.sha, pat) : "";
+
+    let nemarMeta = null;
+    const nemarMetaFile = tree.find((f) => f.path === ".nemar/metadata.json");
+    if (nemarMetaFile) {
+      try {
+        const raw = JSON.parse(await getBlobContent(repoName, nemarMetaFile.sha, pat));
+        const parsed = parseNemarMetadata(raw);
+        if (parsed?.version === "2.0") nemarMeta = parsed;
+      } catch (e) {
+        console.warn(
+          `[webhook] Failed to parse .nemar/metadata.json for ${dataset.dataset_id}:`,
+          e,
+        );
+      }
+    }
+
+    const ownerRow = await db
+      .prepare("SELECT owner_username, created_at FROM datasets WHERE dataset_id = ?")
+      .bind(dataset.dataset_id)
+      .first<{ owner_username: string; created_at: string | null }>();
+
+    const pubRow = await db
+      .prepare(
+        "SELECT approved_at FROM publication_requests WHERE dataset_id = ? AND status = 'published' ORDER BY approved_at DESC LIMIT 1",
+      )
+      .bind(dataset.dataset_id)
+      .first<{ approved_at: string | null }>();
+
+    const versionRow = await db
+      .prepare(
+        "SELECT version, doi, created_at FROM dataset_versions WHERE dataset_id = ? ORDER BY created_at DESC LIMIT 1",
+      )
+      .bind(dataset.dataset_id)
+      .first<{ version: string; doi: string; created_at: string }>();
+
+    const [s3Stats, zipFileSize] = await Promise.all([
+      getDatasetS3Stats(s3Cfg, dataset.dataset_id).catch((err) => {
+        console.warn(`[webhook] S3 stats failed for ${dataset.dataset_id}: ${err}`);
+        return { totalSize: 0, objectCount: 0 };
+      }),
+      getArchiveSize(s3Cfg, dataset.dataset_id).catch((err) => {
+        console.warn(`[webhook] Archive size failed for ${dataset.dataset_id}: ${err}`);
+        return 0;
+      }),
+    ]);
+
+    let manifest = null;
+    if (versionRow?.version) {
+      try {
+        const raw = await getManifest(s3Cfg, dataset.dataset_id, versionRow.version);
+        if (raw) {
+          try {
+            manifest = JSON.parse(raw);
+          } catch (parseErr) {
+            console.warn(
+              `[webhook] Manifest JSON corrupted for ${dataset.dataset_id} v${versionRow.version}: ${parseErr}`,
+            );
+          }
+        }
+      } catch (err) {
+        console.warn(
+          `[webhook] Failed to fetch manifest from S3 for ${dataset.dataset_id}: ${err}`,
+        );
+      }
+    }
+
+    const syncResult = await syncDatasetToNemar(nemarUser, nemarPass, {
+      datasetId: dataset.dataset_id,
+      bidsDescription,
+      nemarMetadata: nemarMeta,
+      readme,
+      tree,
+      conceptDoi: dataset.concept_doi,
+      latestVersionDoi: versionRow?.doi || versionDoi,
+      latestVersion: versionRow?.version || version,
+      versionCreatedAt: versionRow?.created_at || null,
+      ownerUsername: ownerRow?.owner_username || "unknown",
+      createdAt: ownerRow?.created_at || null,
+      publishDate: pubRow?.approved_at || null,
+      repoName,
+      pat,
+      manifest,
+      s3Stats,
+      zipFileSize,
+    });
+
+    await db
+      .prepare(
+        `UPDATE datasets SET nemar_sync_status = ?, nemar_sync_at = CASE WHEN ? = 'synced' THEN datetime('now') ELSE nemar_sync_at END, nemar_sync_error = ?, updated_at = datetime('now') WHERE dataset_id = ?`,
+      )
+      .bind(
+        syncResult.synced ? "synced" : "failed",
+        syncResult.synced ? "synced" : "failed",
+        syncResult.errors.length ? syncResult.errors.join("; ") : null,
+        dataset.dataset_id,
+      )
+      .run();
+
+    if (syncResult.synced) {
+      console.log(`[webhook] nemar.org sync succeeded for ${dataset.dataset_id} v${version}`);
+    } else {
+      console.warn(
+        `[webhook] nemar.org sync failed for ${dataset.dataset_id}: ${syncResult.errors.join("; ")}`,
+      );
+    }
+  } catch (err) {
+    console.error(`[webhook] nemar.org sync error for ${dataset.dataset_id} (non-fatal):`, err);
+    try {
+      await db
+        .prepare(
+          "UPDATE datasets SET nemar_sync_status = 'failed', nemar_sync_error = ?, updated_at = datetime('now') WHERE dataset_id = ?",
+        )
+        .bind(errorMessage(err), dataset.dataset_id)
+        .run();
+    } catch (d1Err) {
+      console.warn(
+        `[webhook] Failed to update sync status in D1 for ${dataset.dataset_id}: ${d1Err}`,
+      );
+    }
   }
 }
 
