@@ -6,6 +6,7 @@
  */
 
 import { getConfig } from "./config.js";
+import { printMaintenanceBanner } from "./maintenance-banner.js";
 import { version } from "./version.js";
 
 const DEFAULT_API_URL = "https://api.osc.earth/nemar";
@@ -40,9 +41,9 @@ export class ApiError extends Error {
  */
 export class MaintenanceError extends ApiError {
   constructor(
-    public mode: "read-only" | "full",
+    public readonly mode: "read-only" | "full",
     message: string,
-    public eta: string | null,
+    public readonly eta: string | null,
     details?: unknown,
   ) {
     super(503, message, details);
@@ -116,13 +117,13 @@ async function request<T>(
   if (!response.ok) {
     if (response.status === 503 && (data.mode === "read-only" || data.mode === "full")) {
       const message =
-        (data.message as string) || "NEMAR is in maintenance mode. Please retry shortly.";
-      throw new MaintenanceError(
-        data.mode,
-        message,
-        (data.eta as string | null) ?? null,
-        data.details,
-      );
+        typeof data.message === "string"
+          ? data.message
+          : "NEMAR is in maintenance mode. Please retry shortly.";
+      const eta = typeof data.eta === "string" ? data.eta : null;
+      const maintErr = new MaintenanceError(data.mode, message, eta, data.details);
+      printMaintenanceBanner(maintErr);
+      throw maintErr;
     }
     throw new ApiError(
       response.status,

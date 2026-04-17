@@ -28,8 +28,9 @@ import {
 } from "./commands/auth.js";
 import { datasetCommand } from "./commands/dataset.js";
 import { sandboxCommand } from "./commands/sandbox.js";
-import { IS_DEV_BUILD, MaintenanceError } from "./lib/api.js";
+import { IS_DEV_BUILD, MaintenanceError, errorDetail } from "./lib/api.js";
 import { NO_DESCRIPTION, NO_OPTION, YES_DESCRIPTION, YES_OPTION } from "./lib/confirm.js";
+import { printMaintenanceBanner } from "./lib/maintenance-banner.js";
 import { fetchAndDisplayNotices } from "./lib/notices.js";
 import { initUpdateCheck, printUpdateBanner } from "./lib/update-check.js";
 import { version } from "./lib/version.js";
@@ -149,16 +150,6 @@ main().catch((err) => {
     printMaintenanceBanner(err);
     process.exit(1);
   }
-  console.error(err.message || err);
+  console.error(errorDetail(err));
   process.exit(1);
 });
-
-function printMaintenanceBanner(err: MaintenanceError): void {
-  const border = chalk.yellow("\u2500".repeat(60));
-  const tag = chalk.yellow.bold("[MAINTENANCE]");
-  const modeLine = chalk.dim(`mode: ${err.mode}`);
-  const etaLine = err.eta ? chalk.dim(`eta:  ${err.eta}`) : "";
-  process.stderr.write(
-    `${border}\n${tag} ${err.message}\n${modeLine}${etaLine ? `\n${etaLine}` : ""}\n${border}\n`,
-  );
-}

@@ -42,8 +42,7 @@ API_BASE_URL = "https://api.osc.earth/nemar"
 FRONTEND_URL = "https://nemar.org"
 AWS_REGION = "us-east-2"
 S3_BUCKET = "nemar"
-# Maintenance mode: "off" (normal), "read-only" (block writes), "full" (503 all).
-# Flip and redeploy during SCCN migration. See Epic #314 / issue #342.
+# Redeploy to change. Valid: off, read-only, full. See backend/src/types/maintenance.ts.
 MAINTENANCE_MODE = "off"
 
 # Secrets (set via: wrangler secret put <NAME>)

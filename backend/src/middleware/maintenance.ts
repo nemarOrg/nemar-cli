@@ -1,21 +1,17 @@
 /**
  * Maintenance-mode middleware
  *
- * Freezes the API during infrastructure migrations (e.g., Epic #314 SCCN).
- * Toggled via the MAINTENANCE_MODE env var in wrangler.toml; redeploy to flip.
- *
- * Modes:
- *   - "off":        normal operation
- *   - "read-only":  block mutating methods (POST/PUT/DELETE/PATCH) except /admin/*
- *                   and /webhooks/* so admins can moderate and GitHub webhooks
- *                   still reach the backend
- *   - "full":       block everything except /health, /notices, GET /
+ * Freezes the API during infrastructure migrations or incidents. Toggled via
+ * the MAINTENANCE_MODE env var in wrangler.toml; redeploy to flip.
  */
 
 import type { Context, Next } from "hono";
 import type { Bindings, Variables } from "../types/bindings";
-
-export type MaintenanceMode = "off" | "read-only" | "full";
+import {
+  type ActiveMaintenanceMode,
+  type MaintenanceMode,
+  isMaintenanceMode,
+} from "../types/maintenance";
 
 type MaintenanceContext = Context<{ Bindings: Bindings; Variables: Variables }>;
 
@@ -23,18 +19,33 @@ const READ_METHODS = new Set(["GET", "HEAD", "OPTIONS"]);
 
 const ALWAYS_ALLOWED_PATHS = new Set(["/", "/health", "/notices"]);
 
+// Mutating routes that remain open in read-only so admins can still moderate
+// (admin), GitHub webhooks can still deliver (webhooks), and a locked-out
+// admin can re-authenticate (auth/login). Signup stays blocked.
+const READ_ONLY_MUTATION_ALLOWLIST = ["/admin/", "/webhooks/"];
+const READ_ONLY_EXACT_MUTATIONS = new Set(["/auth/login"]);
+
+let warnedUnknownMode = false;
+
 function parseMode(raw: string | undefined): MaintenanceMode {
-  if (raw === "read-only" || raw === "full") return raw;
+  if (raw === undefined) return "off";
+  if (isMaintenanceMode(raw)) return raw;
+  if (!warnedUnknownMode) {
+    warnedUnknownMode = true;
+    console.error(
+      `[maintenance] Unrecognized MAINTENANCE_MODE=${JSON.stringify(raw)}; treating as "off". Valid values: off, read-only, full.`,
+    );
+  }
   return "off";
 }
 
-function respond503(c: MaintenanceContext, mode: MaintenanceMode) {
+function respond503(c: MaintenanceContext, mode: ActiveMaintenanceMode) {
+  console.warn(`[maintenance] blocked ${c.req.method} ${c.req.path} (mode=${mode})`);
   c.header("Retry-After", "3600");
   return c.json(
     {
       error: "Service Unavailable",
-      message:
-        "NEMAR is in maintenance mode. Please retry shortly. Updates at https://github.com/nemarOrg/nemar-cli/issues/314",
+      message: "NEMAR is in maintenance mode. Please retry shortly.",
       mode,
       eta: null,
     },
@@ -66,7 +77,12 @@ export async function maintenanceMode(c: MaintenanceContext, next: Next) {
     return;
   }
 
-  if (path.startsWith("/admin/") || path.startsWith("/webhooks/")) {
+  if (READ_ONLY_EXACT_MUTATIONS.has(path)) {
+    await next();
+    return;
+  }
+
+  if (READ_ONLY_MUTATION_ALLOWLIST.some((prefix) => path.startsWith(prefix))) {
     await next();
     return;
   }
