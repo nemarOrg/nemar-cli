@@ -33,6 +33,23 @@ export class ApiError extends Error {
   }
 }
 
+/**
+ * Thrown when the backend is in maintenance mode (503 with a `mode` body).
+ * Mode describes what the server is rejecting; CLI treats it as an expected
+ * temporary state and shows a friendly banner instead of a stack trace.
+ */
+export class MaintenanceError extends ApiError {
+  constructor(
+    public mode: "read-only" | "full",
+    message: string,
+    public eta: string | null,
+    details?: unknown,
+  ) {
+    super(503, message, details);
+    this.name = "MaintenanceError";
+  }
+}
+
 export const IS_DEV_BUILD = DEFAULT_API_URL.includes("workers.dev");
 
 /**
@@ -97,6 +114,16 @@ async function request<T>(
   }
 
   if (!response.ok) {
+    if (response.status === 503 && (data.mode === "read-only" || data.mode === "full")) {
+      const message =
+        (data.message as string) || "NEMAR is in maintenance mode. Please retry shortly.";
+      throw new MaintenanceError(
+        data.mode,
+        message,
+        (data.eta as string | null) ?? null,
+        data.details,
+      );
+    }
     throw new ApiError(
       response.status,
       (data.error as string) || (data.message as string) || "Request failed",

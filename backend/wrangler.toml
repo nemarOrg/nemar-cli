@@ -42,6 +42,9 @@ API_BASE_URL = "https://api.osc.earth/nemar"
 FRONTEND_URL = "https://nemar.org"
 AWS_REGION = "us-east-2"
 S3_BUCKET = "nemar"
+# Maintenance mode: "off" (normal), "read-only" (block writes), "full" (503 all).
+# Flip and redeploy during SCCN migration. See Epic #314 / issue #342.
+MAINTENANCE_MODE = "off"
 
 # Secrets (set via: wrangler secret put <NAME>)
 # - GITHUB_ADMIN_PAT
@@ -83,6 +86,7 @@ API_BASE_URL = "https://nemar-api-dev.shirazi-10f.workers.dev"
 FRONTEND_URL = "https://nemar.org"
 AWS_REGION = "us-east-2"
 S3_BUCKET = "nemar"
+MAINTENANCE_MODE = "off"
 # Note: Rate limiting is disabled in development
 
 # Note: D1 migrations are in src/db/migrations/

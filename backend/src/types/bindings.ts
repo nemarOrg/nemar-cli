@@ -16,6 +16,7 @@ export interface Bindings {
   FRONTEND_URL: string;
   AWS_REGION: string;
   S3_BUCKET: string;
+  MAINTENANCE_MODE?: "off" | "read-only" | "full";
 
   // Secrets
   GITHUB_ADMIN_PAT: string;
