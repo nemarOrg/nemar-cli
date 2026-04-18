@@ -46,6 +46,11 @@ API_BASE_URL = "https://nemar-api.sccn-org.workers.dev"
 FRONTEND_URL = "https://nemar.org"
 AWS_REGION = "us-east-2"
 S3_BUCKET = "nemar"
+# Sender + reply-to for Resend emails (SCCN nemar.org sender).
+# Requires nemar.org domain verified in SCCN Resend account before deploy;
+# otherwise Resend 403s every send and failures are silent (caught per-site).
+FROM_EMAIL = "NEMAR Archive <noreply@nemar.org>"
+REPLY_TO = "info@nemar.org"
 
 # Secrets (set via: npx cfman wrangler --account sccn secret put <NAME> -c backend/wrangler-sccn.toml)
 # - GITHUB_ADMIN_PAT
@@ -92,3 +97,5 @@ API_BASE_URL = "https://nemar-api-dev.sccn-org.workers.dev"
 FRONTEND_URL = "https://nemar.org"
 AWS_REGION = "us-east-2"
 S3_BUCKET = "nemar"
+FROM_EMAIL = "NEMAR Archive <noreply@nemar.org>"
+REPLY_TO = "info@nemar.org"

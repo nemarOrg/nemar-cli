@@ -575,7 +575,8 @@ describe("CLI Dataset Status", () => {
   });
 
   test("nemar dataset status with non-existent dataset shows error", async () => {
-    const { stdout, exitCode } = await runCli(["dataset", "status", "nm999999"]);
+    // Valid format within MAX_NUMBER=99999 cap, but unlikely to be allocated.
+    const { stdout, exitCode } = await runCli(["dataset", "status", "nm099998"]);
 
     expect(stdout).toContain("not found");
   });
