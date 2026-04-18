@@ -42,7 +42,8 @@ API_BASE_URL = "https://api.osc.earth/nemar"
 FRONTEND_URL = "https://nemar.org"
 AWS_REGION = "us-east-2"
 S3_BUCKET = "nemar"
-# Sender + reply-to for Resend emails. Personal account uses osc.earth domain.
+# Sender for Resend emails. Personal account uses osc.earth domain.
+# REPLY_TO intentionally unset here; nemar@osc.earth is monitored.
 FROM_EMAIL = "NEMAR <nemar@osc.earth>"
 # Redeploy to change. Valid: off, read-only, full. See backend/src/types/maintenance.ts.
 MAINTENANCE_MODE = "read-only"

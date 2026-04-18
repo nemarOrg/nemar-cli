@@ -21,10 +21,12 @@ export interface Bindings {
   /** Undefined is treated as "off". See backend/src/types/maintenance.ts. */
   MAINTENANCE_MODE?: MaintenanceMode;
   /** Sender for outbound Resend emails, e.g. "NEMAR <nemar@osc.earth>".
-   *  Falls back to DEFAULT_FROM_EMAIL in email.ts if unset. */
+   *  Falls back to DEFAULT_FROM_EMAIL in email.ts if unset/empty.
+   *  The domain must be verified in the Resend account tied to RESEND_API_KEY,
+   *  otherwise Resend rejects the send (caught and logged per-site). */
   FROM_EMAIL?: string;
   /** Reply-To address (e.g. "info@nemar.org") when FROM is a no-reply mailbox.
-   *  Omitted if unset. */
+   *  Omitted when unset/empty. */
   REPLY_TO?: string;
 
   // Secrets

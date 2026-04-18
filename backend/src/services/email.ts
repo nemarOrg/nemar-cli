@@ -11,14 +11,23 @@ export const DEFAULT_FROM_EMAIL = "NEMAR <nemar@osc.earth>";
 const RESEND_API_URL = "https://api.resend.com/emails";
 
 /**
- * Resolve sender/reply-to from Workers env with sensible defaults.
- * Callers pass `c.env` to avoid repeating the FROM_EMAIL fallback at every site.
+ * Resolve sender + reply-to from Workers env.
+ * `fromEmail` falls back to DEFAULT_FROM_EMAIL when unset, empty, or whitespace.
+ * `replyTo` passes through as-is (undefined when unset or empty/whitespace).
+ * Callers pass `c.env` to avoid repeating the fallback at every site.
+ * NOTE: The domain in FROM_EMAIL must be verified in the Resend account tied
+ * to RESEND_API_KEY, otherwise Resend will reject the send.
  */
 export function resolveEmailConfig(env: { FROM_EMAIL?: string; REPLY_TO?: string }): {
   fromEmail: string;
   replyTo?: string;
 } {
-  return { fromEmail: env.FROM_EMAIL ?? DEFAULT_FROM_EMAIL, replyTo: env.REPLY_TO };
+  const from = env.FROM_EMAIL?.trim();
+  const reply = env.REPLY_TO?.trim();
+  return {
+    fromEmail: from || DEFAULT_FROM_EMAIL,
+    replyTo: reply || undefined,
+  };
 }
 
 export interface EmailPreferences {
@@ -126,7 +135,9 @@ async function sendEmail(
 
   if (!response.ok) {
     const error: ResendResponse = await response.json();
-    throw new Error(`Failed to send email: ${error.message || response.statusText}`);
+    throw new Error(
+      `Failed to send email from ${fromEmail} to ${to}: ${error.message || response.statusText}`,
+    );
   }
 }
 

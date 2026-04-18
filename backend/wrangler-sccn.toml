@@ -47,7 +47,8 @@ FRONTEND_URL = "https://nemar.org"
 AWS_REGION = "us-east-2"
 S3_BUCKET = "nemar"
 # Sender + reply-to for Resend emails (SCCN nemar.org sender).
-# Requires nemar.org domain verified in SCCN Resend account before deploy.
+# Requires nemar.org domain verified in SCCN Resend account before deploy;
+# otherwise Resend 403s every send and failures are silent (caught per-site).
 FROM_EMAIL = "NEMAR Archive <noreply@nemar.org>"
 REPLY_TO = "info@nemar.org"
 
