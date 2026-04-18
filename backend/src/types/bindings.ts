@@ -20,6 +20,12 @@ export interface Bindings {
   S3_BUCKET: string;
   /** Undefined is treated as "off". See backend/src/types/maintenance.ts. */
   MAINTENANCE_MODE?: MaintenanceMode;
+  /** Sender for outbound Resend emails, e.g. "NEMAR <nemar@osc.earth>".
+   *  Falls back to DEFAULT_FROM_EMAIL in email.ts if unset. */
+  FROM_EMAIL?: string;
+  /** Reply-To address (e.g. "info@nemar.org") when FROM is a no-reply mailbox.
+   *  Omitted if unset. */
+  REPLY_TO?: string;
 
   // Secrets
   GITHUB_ADMIN_PAT: string;

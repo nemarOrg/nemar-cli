@@ -6,8 +6,20 @@
  * Uses fetch directly for Cloudflare Workers compatibility.
  */
 
-const FROM_EMAIL = "NEMAR <nemar@osc.earth>";
+/** Fallback sender when FROM_EMAIL env var is unset. */
+export const DEFAULT_FROM_EMAIL = "NEMAR <nemar@osc.earth>";
 const RESEND_API_URL = "https://api.resend.com/emails";
+
+/**
+ * Resolve sender/reply-to from Workers env with sensible defaults.
+ * Callers pass `c.env` to avoid repeating the FROM_EMAIL fallback at every site.
+ */
+export function resolveEmailConfig(env: { FROM_EMAIL?: string; REPLY_TO?: string }): {
+  fromEmail: string;
+  replyTo?: string;
+} {
+  return { fromEmail: env.FROM_EMAIL ?? DEFAULT_FROM_EMAIL, replyTo: env.REPLY_TO };
+}
 
 export interface EmailPreferences {
   user_approval: boolean;
@@ -93,19 +105,23 @@ async function sendEmail(
   subject: string,
   html: string,
   resendApiKey: string,
+  fromEmail: string,
+  replyTo?: string,
 ): Promise<void> {
+  const body: Record<string, unknown> = {
+    from: fromEmail,
+    to: [to],
+    subject,
+    html,
+  };
+  if (replyTo) body.reply_to = replyTo;
   const response = await fetch(RESEND_API_URL, {
     method: "POST",
     headers: {
       Authorization: `Bearer ${resendApiKey}`,
       "Content-Type": "application/json",
     },
-    body: JSON.stringify({
-      from: FROM_EMAIL,
-      to: [to],
-      subject,
-      html,
-    }),
+    body: JSON.stringify(body),
   });
 
   if (!response.ok) {
@@ -122,6 +138,8 @@ export async function sendVerificationEmail(
   username: string,
   verificationUrl: string,
   resendApiKey: string,
+  fromEmail: string,
+  replyTo?: string,
 ): Promise<void> {
   const html = `
 <!DOCTYPE html>
@@ -168,7 +186,7 @@ export async function sendVerificationEmail(
 </html>
   `;
 
-  await sendEmail(to, "Verify your NEMAR account", html, resendApiKey);
+  await sendEmail(to, "Verify your NEMAR account", html, resendApiKey, fromEmail, replyTo);
 }
 
 /**
@@ -179,6 +197,8 @@ export async function sendKeyReadyEmail(
   to: string,
   username: string,
   resendApiKey: string,
+  fromEmail: string,
+  replyTo?: string,
 ): Promise<void> {
   const html = `
 <!DOCTYPE html>
@@ -222,7 +242,14 @@ nemar auth login
 </html>
   `;
 
-  await sendEmail(to, "Your NEMAR account has been approved!", html, resendApiKey);
+  await sendEmail(
+    to,
+    "Your NEMAR account has been approved!",
+    html,
+    resendApiKey,
+    fromEmail,
+    replyTo,
+  );
 }
 
 /**
@@ -233,6 +260,8 @@ export async function sendKeyRegenerationVerificationEmail(
   username: string,
   confirmUrl: string,
   resendApiKey: string,
+  fromEmail: string,
+  replyTo?: string,
 ): Promise<void> {
   const html = `
 <!DOCTYPE html>
@@ -276,7 +305,7 @@ export async function sendKeyRegenerationVerificationEmail(
 </html>
   `;
 
-  await sendEmail(to, "NEMAR API Key Regeneration", html, resendApiKey);
+  await sendEmail(to, "NEMAR API Key Regeneration", html, resendApiKey, fromEmail, replyTo);
 }
 
 /**
@@ -292,6 +321,8 @@ export async function sendAdminNotificationEmail(
     description: string;
   },
   resendApiKey: string,
+  fromEmail: string,
+  replyTo?: string,
 ): Promise<void> {
   const html = `
 <!DOCTYPE html>
@@ -357,6 +388,8 @@ export async function sendAdminNotificationEmail(
         `[NEMAR] New user awaiting approval: ${user.username}`,
         html,
         resendApiKey,
+        fromEmail,
+        replyTo,
       );
     } catch (error) {
       console.error(`Failed to send admin notification to ${adminEmail}:`, error);
@@ -371,6 +404,8 @@ export async function sendRevocationEmail(
   to: string,
   username: string,
   resendApiKey: string,
+  fromEmail: string,
+  replyTo?: string,
 ): Promise<void> {
   const html = `
 <!DOCTYPE html>
@@ -398,7 +433,7 @@ export async function sendRevocationEmail(
 </html>
   `;
 
-  await sendEmail(to, "NEMAR account access revoked", html, resendApiKey);
+  await sendEmail(to, "NEMAR account access revoked", html, resendApiKey, fromEmail, replyTo);
 }
 
 /**
@@ -421,6 +456,8 @@ export async function sendPublicationRequestEmail(
   datasetId: string,
   username: string,
   resendApiKey: string,
+  fromEmail: string,
+  replyTo?: string,
 ): Promise<void> {
   const html = `
 <!DOCTYPE html>
@@ -463,6 +500,8 @@ export async function sendPublicationRequestEmail(
         `[NEMAR] Publication request: ${datasetId} by ${username}`,
         html,
         resendApiKey,
+        fromEmail,
+        replyTo,
       );
     } catch (error) {
       console.error(`Failed to send publication request email to ${adminEmail}:`, error);
@@ -479,6 +518,8 @@ export async function sendPublicationDeniedEmail(
   datasetId: string,
   reason: string,
   resendApiKey: string,
+  fromEmail: string,
+  replyTo?: string,
 ): Promise<void> {
   const html = `
 <!DOCTYPE html>
@@ -513,7 +554,14 @@ export async function sendPublicationDeniedEmail(
 </html>
   `;
 
-  await sendEmail(to, `Publication request denied: ${datasetId}`, html, resendApiKey);
+  await sendEmail(
+    to,
+    `Publication request denied: ${datasetId}`,
+    html,
+    resendApiKey,
+    fromEmail,
+    replyTo,
+  );
 }
 
 /**
@@ -525,6 +573,8 @@ export async function sendPublicationApprovedEmail(
   datasetId: string,
   doi: string | null,
   resendApiKey: string,
+  fromEmail: string,
+  replyTo?: string,
 ): Promise<void> {
   const safeDoi = doi ? escapeHtml(doi) : "";
   const doiSection = doi
@@ -565,5 +615,5 @@ export async function sendPublicationApprovedEmail(
 </html>
   `;
 
-  await sendEmail(to, `Dataset published: ${datasetId}`, html, resendApiKey);
+  await sendEmail(to, `Dataset published: ${datasetId}`, html, resendApiKey, fromEmail, replyTo);
 }

@@ -34,6 +34,7 @@ import {
 } from "../services/doi";
 import {
   parseEmailPreferences,
+  resolveEmailConfig,
   sendKeyReadyEmail,
   sendPublicationApprovedEmail,
   sendPublicationDeniedEmail,
@@ -493,7 +494,8 @@ adminRoutes.post("/approve/:username", async (c) => {
   // Send approval notification email
   let emailSent = false;
   try {
-    await sendKeyReadyEmail(user.email, user.username, c.env.RESEND_API_KEY);
+    const { fromEmail, replyTo } = resolveEmailConfig(c.env);
+    await sendKeyReadyEmail(user.email, user.username, c.env.RESEND_API_KEY, fromEmail, replyTo);
     emailSent = true;
   } catch (error) {
     console.error("Failed to send approval email:", error);
@@ -724,7 +726,8 @@ adminRoutes.post("/revoke/:username", async (c) => {
   // Send revocation email
   let emailSent = false;
   try {
-    await sendRevocationEmail(user.email, user.username, c.env.RESEND_API_KEY);
+    const { fromEmail, replyTo } = resolveEmailConfig(c.env);
+    await sendRevocationEmail(user.email, user.username, c.env.RESEND_API_KEY, fromEmail, replyTo);
     emailSent = true;
   } catch (error) {
     console.error("Failed to send revocation email:", error);
@@ -2492,12 +2495,15 @@ adminRoutes.post("/publish/:id/deny", zValidator("json", denySchema), async (c) 
       .first<{ username: string; email: string }>();
 
     if (user) {
+      const { fromEmail, replyTo } = resolveEmailConfig(c.env);
       await sendPublicationDeniedEmail(
         user.email,
         user.username,
         datasetId,
         reason,
         c.env.RESEND_API_KEY,
+        fromEmail,
+        replyTo,
       );
     }
   } catch (emailError) {
@@ -3958,12 +3964,15 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
         .bind(datasetId)
         .first<{ concept_doi: string | null }>();
 
+      const { fromEmail, replyTo } = resolveEmailConfig(c.env);
       await sendPublicationApprovedEmail(
         dataset.owner_email,
         dataset.owner_username,
         datasetId,
         updatedDataset?.concept_doi || null,
         c.env.RESEND_API_KEY,
+        fromEmail,
+        replyTo,
       );
 
       await updateProgress("notify_user");
@@ -5065,13 +5074,20 @@ adminRoutes.post("/notify", zValidator("json", broadcastSchema), async (c) => {
     });
   }
 
-  const result = await sendBroadcast(db, c.env.RESEND_API_KEY, {
-    sentById: user.id,
-    group: body.to,
-    subject: body.subject,
-    bodyMarkdown: body.body,
-    recipients,
-  });
+  const { fromEmail, replyTo } = resolveEmailConfig(c.env);
+  const result = await sendBroadcast(
+    db,
+    c.env.RESEND_API_KEY,
+    fromEmail,
+    {
+      sentById: user.id,
+      group: body.to,
+      subject: body.subject,
+      bodyMarkdown: body.body,
+      recipients,
+    },
+    replyTo,
+  );
 
   return c.json(result);
 });
