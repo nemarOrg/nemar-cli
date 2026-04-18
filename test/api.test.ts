@@ -445,7 +445,8 @@ describe("Datasets API", () => {
 
   describe("GET /datasets/:id", () => {
     test("non-existent dataset returns 404", async () => {
-      const { status } = await testRequest("/datasets/nm999999");
+      // Valid format within MAX_NUMBER=99999 cap, but unlikely to be allocated.
+      const { status } = await testRequest("/datasets/nm099998");
 
       expect(status).toBe(404);
     });
