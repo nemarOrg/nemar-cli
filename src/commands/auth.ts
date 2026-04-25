@@ -31,6 +31,7 @@ import {
   signup,
 } from "../lib/api.js";
 import {
+  DEFAULT_API_URL,
   clearAllConfig,
   clearConfig,
   getAccounts,
@@ -143,7 +144,7 @@ export async function loginAction(options: { key?: string } & ConfirmOptions): P
     // Store credentials as a named account and set as active
     storeAccount(result.user.username, {
       apiKey,
-      apiUrl: "https://api.osc.earth/nemar",
+      apiUrl: DEFAULT_API_URL,
       username: result.user.username,
       email: result.user.email,
       githubUsername: result.user.github_username,

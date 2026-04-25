@@ -22,7 +22,15 @@ import { join } from "node:path";
 import Conf from "conf";
 import { z } from "zod";
 
-const DEFAULT_API_URL = "https://api.osc.earth/nemar";
+export const DEFAULT_API_URL = "https://api.nemar.org";
+
+/**
+ * Old default URL pre-Phase-9. Rewritten to DEFAULT_API_URL on CLI launch by
+ * migrateApiUrl(). The legacy redirect on personal Cloudflare keeps stale
+ * configs working too, but we proactively rewrite so users don't ride the
+ * redirect forever.
+ */
+const LEGACY_DEFAULT_API_URL = "https://api.osc.earth/nemar";
 
 /**
  * Standardized config directory: ~/.config/nemar/ on all platforms.
@@ -179,6 +187,35 @@ export function migrateConfig(): void {
 
 // Run migration on module load
 migrateConfig();
+
+/**
+ * Phase 9 (epic #314): rewrite stored apiUrl entries that still point at the
+ * pre-cutover personal-account URL. Legacy redirect keeps old configs working,
+ * but we rewrite proactively so users converge on the canonical host.
+ *
+ * Only rewrites *exact* matches of the legacy default. Custom URLs (dev
+ * builds, self-hosted, workers.dev fallbacks) are left alone.
+ *
+ * Idempotent and safe under concurrent CLI launches: the exact-match guard
+ * means a second run is a no-op, and Conf writes via atomic file replace, so
+ * a racing process sees pre- or post-state, never partial.
+ */
+export function migrateApiUrl(): void {
+  const accounts = config.get("accounts") as Record<string, Config> | undefined;
+  if (!accounts) return;
+  let changed = false;
+  for (const [name, account] of Object.entries(accounts)) {
+    if (account?.apiUrl === LEGACY_DEFAULT_API_URL) {
+      accounts[name] = { ...account, apiUrl: DEFAULT_API_URL };
+      changed = true;
+    }
+  }
+  if (changed) {
+    config.store = { ...config.store, accounts };
+  }
+}
+
+migrateApiUrl();
 
 /**
  * Get the active account name
