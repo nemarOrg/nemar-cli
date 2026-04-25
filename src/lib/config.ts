@@ -22,7 +22,7 @@ import { join } from "node:path";
 import Conf from "conf";
 import { z } from "zod";
 
-const DEFAULT_API_URL = "https://api.nemar.org";
+export const DEFAULT_API_URL = "https://api.nemar.org";
 
 /**
  * Old default URL pre-Phase-9. Rewritten to DEFAULT_API_URL on CLI launch by
@@ -195,6 +195,10 @@ migrateConfig();
  *
  * Only rewrites *exact* matches of the legacy default. Custom URLs (dev
  * builds, self-hosted, workers.dev fallbacks) are left alone.
+ *
+ * Idempotent and safe under concurrent CLI launches: the exact-match guard
+ * means a second run is a no-op, and Conf writes via atomic file replace, so
+ * a racing process sees pre- or post-state, never partial.
  */
 export function migrateApiUrl(): void {
   const accounts = config.get("accounts") as Record<string, Config> | undefined;

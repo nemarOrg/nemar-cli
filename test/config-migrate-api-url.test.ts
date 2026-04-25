@@ -27,6 +27,10 @@ beforeAll(() => {
         carol: { apiUrl: NEW_URL, apiKey: "k3" },
         dev: { apiUrl: DEV_URL, apiKey: "k4" },
         custom: { apiUrl: CUSTOM_URL, apiKey: "k5" },
+        // Legacy-flat migration produces accounts with no apiUrl when none
+        // was stored. Optional chaining in migrateApiUrl must not crash here
+        // and must leave the field absent.
+        partial: { apiKey: "k6" },
       },
     }),
   );
@@ -54,5 +58,7 @@ describe("migrateApiUrl", () => {
     // Non-default URLs untouched
     expect(after.accounts.dev.apiUrl).toBe(DEV_URL);
     expect(after.accounts.custom.apiUrl).toBe(CUSTOM_URL);
+    // Account with no apiUrl: must not crash, must not invent one
+    expect(after.accounts.partial.apiUrl).toBeUndefined();
   });
 });
