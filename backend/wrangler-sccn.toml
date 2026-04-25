@@ -1,7 +1,6 @@
 # NEMAR API - SCCN Cloudflare Account Configuration
-# Mirrors backend/wrangler.toml (personal account) with SCCN account resource IDs.
-# This is a parallel config for the SCCN account migration (Epic #314).
-# Do NOT use this for production traffic until DNS cutover is complete.
+# Canonical production config for the SCCN account (Epic #314).
+# api.nemar.org is bound here as a Workers Custom Domain (Phase 8).
 #
 # Usage (via cfman for multi-account management):
 #   npx cfman wrangler --account sccn -c backend/wrangler-sccn.toml <command>

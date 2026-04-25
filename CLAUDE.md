@@ -44,7 +44,7 @@ The backend code (`ORG_NAME = "nemarDatasets"` in `backend/src/services/github.t
 
 ### Backend Infrastructure
 - **API URL:** `https://api.osc.earth/nemar` (production, personal account)
-- **SCCN API URL:** `https://nemar-api.sccn-org.workers.dev` (SCCN account, migration in progress)
+- **SCCN API URL:** `https://api.nemar.org` (SCCN account, canonical post-Phase-8; `https://nemar-api.sccn-org.workers.dev` kept as fallback)
 - **Platform:** Cloudflare Workers + D1 (SQLite)
 - **Cloudflare accounts:** Managed via `npx cfman wrangler --account <name>`
   - `neuromechanist` - Personal account (current production)
