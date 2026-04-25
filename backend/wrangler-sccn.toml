@@ -14,8 +14,15 @@ main = "src/index.ts"
 compatibility_date = "2024-12-01"
 compatibility_flags = ["nodejs_compat"]
 
-# No routes yet -- workers.dev only until DNS cutover (Phase 8)
-# Future routes will use api.nemar.org zone
+# Phase 8: api.nemar.org bound as Workers Custom Domain.
+# custom_domain=true lets Cloudflare auto-manage DNS + TLS for the whole
+# hostname (no /* path pattern needed, no separate DNS record to create).
+# Zone must be on the same SCCN account; nemar.org is.
+routes = [
+  { pattern = "api.nemar.org", custom_domain = true }
+]
+# workers.dev kept enabled during transition so the *.workers.dev URL still
+# answers (gives us a buffer if the custom domain misbehaves).
 workers_dev = true
 
 # Scheduled cleanup: daily at 3 AM UTC
@@ -41,8 +48,7 @@ index_name = "nemar-dataset-index"
 # Environment variables
 [vars]
 ENVIRONMENT = "production"
-# Will change to https://api.nemar.org after DNS cutover (Phase 8)
-API_BASE_URL = "https://nemar-api.sccn-org.workers.dev"
+API_BASE_URL = "https://api.nemar.org"
 FRONTEND_URL = "https://nemar.org"
 AWS_REGION = "us-east-2"
 S3_BUCKET = "nemar"
