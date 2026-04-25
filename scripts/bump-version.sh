@@ -205,6 +205,19 @@ if [ "$BUILD_VERSION" != "$NEW_VERSION" ]; then
   exit 1
 fi
 
+# Sanity check: root package.json is the runtime source of truth (backend
+# imports it via ../../package.json). backend/package.json is kept synced for
+# tooling. If they drift, bail with a loud error rather than shipping a
+# package whose two manifests disagree.
+if [ -f backend/package.json ]; then
+  BACKEND_VERSION=$(jq -r '.version' backend/package.json)
+  if [ "$BACKEND_VERSION" != "$NEW_VERSION" ]; then
+    echo "Error: backend/package.json version ($BACKEND_VERSION) does not match root ($NEW_VERSION)"
+    restore_versions
+    exit 1
+  fi
+fi
+
 echo "Build verified: $BUILD_VERSION"
 
 # Stage and commit

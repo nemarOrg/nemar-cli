@@ -13,7 +13,12 @@ import { cors } from "hono/cors";
 import { logger } from "hono/logger";
 import { secureHeaders } from "hono/secure-headers";
 
-import pkg from "../package.json" with { type: "json" };
+// Single source of truth for the version. The Worker runtime reads the
+// repo-root package.json (the npm-published CLI's manifest). backend/package.json
+// is private (not published) and only exists for wrangler tooling, but
+// scripts/bump-version.sh keeps it in lockstep so devs running `wrangler dev`
+// see consistent metadata.
+import pkg from "../../package.json" with { type: "json" };
 import { optionalAuthMiddleware } from "./middleware/auth";
 import { maintenanceMode } from "./middleware/maintenance";
 import { rateLimiter } from "./middleware/rateLimit";
