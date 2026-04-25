@@ -25,7 +25,7 @@ if (existsSync(envPath)) {
 
 // Test configuration
 export const TEST_CONFIG = {
-  apiUrl: process.env.TEST_API_URL || "https://api.osc.earth/nemar",
+  apiUrl: process.env.TEST_API_URL || "https://api.nemar.org",
   password: process.env.TEST_PASSWORD || "TestPassword123!",
   adminApiKey: process.env.TEST_ADMIN_API_KEY || "",
   userApiKey: process.env.TEST_USER_API_KEY || "",
