@@ -170,12 +170,22 @@ if [ -f backend/package.json ]; then
     && mv backend/package.json.tmp backend/package.json
 fi
 
+# Restore both files to their pre-bump version (called from each failure path
+# so an aborted bump never leaves the working tree half-modified).
+restore_versions() {
+  jq --arg v "$CURRENT_VERSION" '.version = $v' package.json > package.json.tmp \
+    && mv package.json.tmp package.json
+  if [ -f backend/package.json ]; then
+    jq --arg v "$CURRENT_VERSION" '.version = $v' backend/package.json > backend/package.json.tmp \
+      && mv backend/package.json.tmp backend/package.json
+  fi
+}
+
 # Build to verify everything works
 echo "Building..."
 if ! bun run build > /dev/null 2>&1; then
   echo "Error: Build failed"
-  # Restore original version
-  jq --arg v "$CURRENT_VERSION" '.version = $v' package.json > package.json.tmp && mv package.json.tmp package.json
+  restore_versions
   exit 1
 fi
 
@@ -185,13 +195,13 @@ chmod +x dist/index.js
 # Verify version is correct in build
 if ! BUILD_VERSION=$(./dist/index.js --version 2>&1); then
   echo "Error: Failed to run built CLI"
-  jq --arg v "$CURRENT_VERSION" '.version = $v' package.json > package.json.tmp && mv package.json.tmp package.json
+  restore_versions
   exit 1
 fi
 
 if [ "$BUILD_VERSION" != "$NEW_VERSION" ]; then
   echo "Error: Build version ($BUILD_VERSION) doesn't match expected ($NEW_VERSION)"
-  jq --arg v "$CURRENT_VERSION" '.version = $v' package.json > package.json.tmp && mv package.json.tmp package.json
+  restore_versions
   exit 1
 fi
 
