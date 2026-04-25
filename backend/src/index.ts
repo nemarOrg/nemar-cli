@@ -3,8 +3,9 @@
  *
  * Handles user authentication, dataset management, and admin workflows.
  *
- * Production route: api.osc.earth/nemar/*
- * Dev route: nemar-api-dev.shirazi-10f.workers.dev/*
+ * Production route: api.nemar.org (SCCN account)
+ * Dev route: nemar-api-dev.sccn-org.workers.dev (SCCN account)
+ * Legacy route: api.osc.earth/nemar (personal account, read-only buffer)
  */
 
 import { Hono } from "hono";
@@ -12,6 +13,12 @@ import { cors } from "hono/cors";
 import { logger } from "hono/logger";
 import { secureHeaders } from "hono/secure-headers";
 
+// Single source of truth for the version. The Worker runtime reads the
+// repo-root package.json (the npm-published CLI's manifest). backend/package.json
+// is private (not published) and only exists for wrangler tooling, but
+// scripts/bump-version.sh keeps it in lockstep so devs running `wrangler dev`
+// see consistent metadata.
+import pkg from "../../package.json" with { type: "json" };
 import { optionalAuthMiddleware } from "./middleware/auth";
 import { maintenanceMode } from "./middleware/maintenance";
 import { rateLimiter } from "./middleware/rateLimit";
@@ -63,7 +70,7 @@ api.get("/health", (c) => {
   return c.json({
     status: "ok",
     timestamp: new Date().toISOString(),
-    version: "0.1.0",
+    version: pkg.version,
   });
 });
 
@@ -71,7 +78,7 @@ api.get("/health", (c) => {
 api.get("/", (c) => {
   return c.json({
     name: "NEMAR API",
-    version: "0.1.0",
+    version: pkg.version,
     description: "Backend API for NEMAR CLI",
     base_url: c.env.API_BASE_URL,
     endpoints: {
