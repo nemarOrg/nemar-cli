@@ -163,6 +163,13 @@ echo "New version: $NEW_VERSION"
 # Update package.json using jq
 jq --arg v "$NEW_VERSION" '.version = $v' package.json > package.json.tmp && mv package.json.tmp package.json
 
+# Keep backend/package.json in sync (powers the version reported by /health
+# and / on api.nemar.org). CLI and backend ship together; single version.
+if [ -f backend/package.json ]; then
+  jq --arg v "$NEW_VERSION" '.version = $v' backend/package.json > backend/package.json.tmp \
+    && mv backend/package.json.tmp backend/package.json
+fi
+
 # Build to verify everything works
 echo "Building..."
 if ! bun run build > /dev/null 2>&1; then
@@ -192,6 +199,9 @@ echo "Build verified: $BUILD_VERSION"
 
 # Stage and commit
 git add package.json
+if [ -f backend/package.json ]; then
+  git add backend/package.json
+fi
 if ! git diff --cached --quiet; then
   git commit -m "chore: bump version to $NEW_VERSION"
 else
