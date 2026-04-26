@@ -189,8 +189,8 @@ export function migrateConfig(): void {
 migrateConfig();
 
 /**
- * Phase 9 (epic #314): rewrite stored apiUrl entries that still point at the
- * pre-cutover personal-account URL. Legacy redirect keeps old configs working,
+ * Rewrite stored apiUrl entries that still point at the pre-cutover legacy
+ * URL. The server-side redirect on the legacy host keeps old configs working,
  * but we rewrite proactively so users converge on the canonical host.
  *
  * Only rewrites *exact* matches of the legacy default. Custom URLs (dev
@@ -199,6 +199,10 @@ migrateConfig();
  * Idempotent and safe under concurrent CLI launches: the exact-match guard
  * means a second run is a no-op, and Conf writes via atomic file replace, so
  * a racing process sees pre- or post-state, never partial.
+ *
+ * If the underlying config write fails (EACCES, ENOSPC, FS race), we log and
+ * continue rather than abort CLI startup. The legacy redirect is the safety
+ * net, so the user's next command still works against the pre-rewrite URL.
  */
 export function migrateApiUrl(): void {
   const accounts = config.get("accounts") as Record<string, Config> | undefined;
@@ -211,7 +215,11 @@ export function migrateApiUrl(): void {
     }
   }
   if (changed) {
-    config.store = { ...config.store, accounts };
+    try {
+      config.store = { ...config.store, accounts };
+    } catch (error) {
+      console.error("API URL migration failed (legacy URL preserved, redirect still works):", error);
+    }
   }
 }
 

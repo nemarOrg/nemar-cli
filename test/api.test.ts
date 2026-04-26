@@ -6,6 +6,7 @@
  */
 
 import { beforeAll, beforeEach, describe, expect, test } from "bun:test";
+import rootPkg from "../package.json";
 import { TEST_CONFIG, sleep, testRequest } from "./setup";
 
 // Add delay between tests to avoid rate limiting
@@ -19,7 +20,9 @@ describe("API Health", () => {
 
     expect(status).toBe(200);
     expect(data.status).toBe("ok");
-    expect(data.version).toBeDefined();
+    // /health must echo the root package.json version. Drift between root
+    // and backend/package.json (both ship together) would surface here.
+    expect(data.version).toBe(rootPkg.version);
   });
 
   test("GET / returns 200 or 404 (no dedicated root handler)", async () => {

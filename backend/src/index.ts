@@ -13,11 +13,11 @@ import { cors } from "hono/cors";
 import { logger } from "hono/logger";
 import { secureHeaders } from "hono/secure-headers";
 
-// Single source of truth for the version. The Worker runtime reads the
-// repo-root package.json (the npm-published CLI's manifest). backend/package.json
-// is private (not published) and only exists for wrangler tooling, but
-// scripts/bump-version.sh keeps it in lockstep so devs running `wrangler dev`
-// see consistent metadata.
+// Single source of truth for the version. The worker reads the repo-root
+// package.json (the npm-published CLI's manifest). backend/package.json is
+// private and exists only for wrangler tooling; scripts/bump-version.sh
+// keeps both in lockstep and asserts equality post-bump, so drift between
+// the two manifests fails the bump rather than silently shipping.
 import pkg from "../../package.json" with { type: "json" };
 import { optionalAuthMiddleware } from "./middleware/auth";
 import { maintenanceMode } from "./middleware/maintenance";

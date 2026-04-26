@@ -4,8 +4,18 @@
  * Loads test environment and provides test utilities.
  */
 
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
+
+// Force every test process to use an isolated config dir before any module
+// (notably src/lib/config.ts) can capture the user's real ~/.config/nemar/
+// path at import time. Tests that explicitly need a different dir override
+// NEMAR_CONFIG_DIR locally; the shared default just keeps the developer's
+// real config out of the blast radius.
+if (!process.env.NEMAR_CONFIG_DIR) {
+  process.env.NEMAR_CONFIG_DIR = mkdtempSync(join(tmpdir(), "nemar-test-cfg-"));
+}
 
 // Load test environment variables
 const envPath = join(import.meta.dir, ".env.test");

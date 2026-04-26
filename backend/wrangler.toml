@@ -1,11 +1,13 @@
-# NEMAR API - Cloudflare Workers Configuration
+# NEMAR API - LEGACY personal-account config, kept as a read-only buffer
+# for old CLIs still pointed at api.osc.earth/nemar. Canonical production
+# config is wrangler-sccn.toml. Do not deploy CI from this file.
 name = "nemar-api"
 main = "src/index.ts"
 compatibility_date = "2024-12-01"
 compatibility_flags = ["nodejs_compat"]
 
-# Route configuration for api.osc.earth/nemar/*
-# This intercepts /nemar/* while letting /osa/* pass through to origin (hedtools.ucsd.edu)
+# Routes intercept /nemar/* on api.osc.earth while letting /osa/* pass
+# through to the origin (hedtools.ucsd.edu).
 routes = [
   { pattern = "api.osc.earth/nemar", zone_id = "adce8c117d3373bda82d3aba2dfd5b13" },
   { pattern = "api.osc.earth/nemar/*", zone_id = "adce8c117d3373bda82d3aba2dfd5b13" }

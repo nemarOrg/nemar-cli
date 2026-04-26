@@ -10,13 +10,19 @@
 export const DEFAULT_FROM_EMAIL = "NEMAR <nemar@osc.earth>";
 const RESEND_API_URL = "https://api.resend.com/emails";
 
+let warnedMissingFromEmail = false;
+
 /**
  * Resolve sender + reply-to from Workers env.
  * `fromEmail` falls back to DEFAULT_FROM_EMAIL when unset, empty, or whitespace.
  * `replyTo` passes through as-is (undefined when unset or empty/whitespace).
  * Callers pass `c.env` to avoid repeating the fallback at every site.
+ *
  * NOTE: The domain in FROM_EMAIL must be verified in the Resend account tied
- * to RESEND_API_KEY, otherwise Resend will reject the send.
+ * to RESEND_API_KEY, otherwise Resend will reject the send. A deploy that
+ * forgets FROM_EMAIL silently falls back to the legacy osc.earth address;
+ * on accounts where that domain is not verified, every send fails. We log
+ * once per worker instance to surface this in Workers Logs.
  */
 export function resolveEmailConfig(env: { FROM_EMAIL?: string; REPLY_TO?: string }): {
   fromEmail: string;
@@ -24,6 +30,14 @@ export function resolveEmailConfig(env: { FROM_EMAIL?: string; REPLY_TO?: string
 } {
   const from = env.FROM_EMAIL?.trim();
   const reply = env.REPLY_TO?.trim();
+  if (!from && !warnedMissingFromEmail) {
+    warnedMissingFromEmail = true;
+    console.error(
+      `FROM_EMAIL env var is unset; falling back to ${DEFAULT_FROM_EMAIL}. ` +
+        "If the Resend account tied to this worker does not verify osc.earth, every email will fail. " +
+        "Set FROM_EMAIL in wrangler config.",
+    );
+  }
   return {
     fromEmail: from || DEFAULT_FROM_EMAIL,
     replyTo: reply || undefined,

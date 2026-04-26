@@ -37,6 +37,17 @@ describe("CI workflow templates", () => {
     }
   });
 
+  test("webhook URLs target the canonical api.nemar.org host", () => {
+    for (const { path, content } of templates) {
+      // The legacy api.osc.earth host is in read-only buffer mode and will be
+      // sunset; templates emitted into dataset repos must target SCCN prod.
+      expect(content).not.toContain("api.osc.earth");
+      if (content.includes("/webhooks/")) {
+        expect(content).toMatch(/https:\/\/api\.nemar\.org\/webhooks\//);
+      }
+    }
+  });
+
   test("no literal newlines inside shell strings (escape regression)", () => {
     for (const { path, content } of templates) {
       // In valid YAML, printf format strings and jq arguments should
