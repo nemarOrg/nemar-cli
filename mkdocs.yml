@@ -1,6 +1,6 @@
 site_name: NEMAR CLI
 site_description: Command-line interface for NEMAR dataset management
-site_url: https://nemar-cli.pages.dev
+site_url: https://docs.nemar.org
 repo_url: https://github.com/nemarOrg/nemar-cli
 repo_name: nemarOrg/nemar-cli
 

@@ -9,7 +9,7 @@ import { getConfig } from "./config.js";
 import { printMaintenanceBanner } from "./maintenance-banner.js";
 import { version } from "./version.js";
 
-const DEFAULT_API_URL = "https://api.osc.earth/nemar";
+const DEFAULT_API_URL = "https://api.nemar.org";
 
 /** ORCID identifier format: XXXX-XXXX-XXXX-XXXX (last char may be X) */
 export const ORCID_REGEX = /^\d{4}-\d{4}-\d{4}-\d{3}[\dX]$/;

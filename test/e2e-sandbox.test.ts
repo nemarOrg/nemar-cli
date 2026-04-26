@@ -17,7 +17,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 // Test configuration
-const TEST_API_URL = process.env.TEST_API_URL || "https://nemar-api-dev.shirazi-10f.workers.dev";
+const TEST_API_URL = process.env.TEST_API_URL || "https://nemar-api-dev.sccn-org.workers.dev";
 const TEST_USER_API_KEY = process.env.TEST_USER_API_KEY;
 const NPM_TAG = process.env.NPM_TAG || "dev";
 const TEST_DIR = join(tmpdir(), `nemar-e2e-${Date.now()}`);

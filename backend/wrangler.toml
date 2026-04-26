@@ -1,11 +1,13 @@
-# NEMAR API - Cloudflare Workers Configuration
+# NEMAR API - LEGACY personal-account config, kept as a read-only buffer
+# for old CLIs still pointed at api.osc.earth/nemar. Canonical production
+# config is wrangler-sccn.toml. Do not deploy CI from this file.
 name = "nemar-api"
 main = "src/index.ts"
 compatibility_date = "2024-12-01"
 compatibility_flags = ["nodejs_compat"]
 
-# Route configuration for api.osc.earth/nemar/*
-# This intercepts /nemar/* while letting /osa/* pass through to origin (hedtools.ucsd.edu)
+# Routes intercept /nemar/* on api.osc.earth while letting /osa/* pass
+# through to the origin (hedtools.ucsd.edu).
 routes = [
   { pattern = "api.osc.earth/nemar", zone_id = "adce8c117d3373bda82d3aba2dfd5b13" },
   { pattern = "api.osc.earth/nemar/*", zone_id = "adce8c117d3373bda82d3aba2dfd5b13" }
@@ -42,6 +44,9 @@ API_BASE_URL = "https://api.osc.earth/nemar"
 FRONTEND_URL = "https://nemar.org"
 AWS_REGION = "us-east-2"
 S3_BUCKET = "nemar"
+# Sender for Resend emails. Personal account uses osc.earth domain.
+# REPLY_TO intentionally unset here; nemar@osc.earth is monitored.
+FROM_EMAIL = "NEMAR <nemar@osc.earth>"
 # Redeploy to change. Valid: off, read-only, full. See backend/src/types/maintenance.ts.
 MAINTENANCE_MODE = "read-only"
 
@@ -58,6 +63,10 @@ MAINTENANCE_MODE = "read-only"
 # - EZID_PASSWORD
 # - EZID_SANDBOX_USERNAME
 # - EZID_SANDBOX_PASSWORD
+# - GITHUB_WEBHOOK_SECRET
+# - OPENROUTER_API_KEY
+# - NEMAR_USERNAME
+# - NEMAR_PASSWORD
 
 # Development environment
 [env.dev]
@@ -85,6 +94,7 @@ API_BASE_URL = "https://nemar-api-dev.shirazi-10f.workers.dev"
 FRONTEND_URL = "https://nemar.org"
 AWS_REGION = "us-east-2"
 S3_BUCKET = "nemar"
+FROM_EMAIL = "NEMAR <nemar@osc.earth>"
 MAINTENANCE_MODE = "off"
 # Note: Rate limiting is disabled in development
 

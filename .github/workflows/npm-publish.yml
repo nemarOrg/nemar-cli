@@ -142,9 +142,9 @@ jobs:
         if: steps.version.outputs.branch == 'dev'
         run: |
           echo "Replacing production API URL with dev API URL in dist/index.js"
-          sed -i 's|https://api.osc.earth/nemar|https://nemar-api-dev.shirazi-10f.workers.dev|g' dist/index.js
+          sed -i 's|https://api.nemar.org|https://nemar-api-dev.sccn-org.workers.dev|g' dist/index.js
           echo "Verifying replacement:"
-          grep -c "nemar-api-dev.shirazi-10f.workers.dev" dist/index.js || (echo "ERROR: URL replacement failed" && exit 1)
+          grep -c "nemar-api-dev.sccn-org.workers.dev" dist/index.js || (echo "ERROR: URL replacement failed" && exit 1)
           echo "✓ Dev backend URL injected successfully"
 
       - name: Publish to npm

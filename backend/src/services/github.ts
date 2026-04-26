@@ -1053,7 +1053,7 @@ jobs:
           echo "Triggering LLM enrichment for $REPO_NAME (force=$FORCE)"
 
           RESPONSE=$(curl -s -w "\\n%{http_code}" -X POST \\
-            "https://api.osc.earth/nemar/webhooks/llm-enrich" \\
+            "https://api.nemar.org/webhooks/llm-enrich" \\
             -H "Content-Type: application/json" \\
             -H "X-Webhook-Token: $NEMAR_WEBHOOK_TOKEN" \\
             -d "{\\"dataset_id\\": \\"$REPO_NAME\\", \\"force\\": $FORCE}")
@@ -1111,7 +1111,7 @@ jobs:
           fi
 
           RESPONSE=$(curl -s -w "\\n%{http_code}" -X POST \\
-            "https://api.osc.earth/nemar/webhooks/publish-version-doi" \\
+            "https://api.nemar.org/webhooks/publish-version-doi" \\
             -H "Content-Type: application/json" \\
             -H "X-Webhook-Token: $NEMAR_WEBHOOK_TOKEN" \\
             -d "{

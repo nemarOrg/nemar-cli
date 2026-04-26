@@ -163,12 +163,29 @@ echo "New version: $NEW_VERSION"
 # Update package.json using jq
 jq --arg v "$NEW_VERSION" '.version = $v' package.json > package.json.tmp && mv package.json.tmp package.json
 
+# Keep backend/package.json in sync (powers the version reported by /health
+# and / on api.nemar.org). CLI and backend ship together; single version.
+if [ -f backend/package.json ]; then
+  jq --arg v "$NEW_VERSION" '.version = $v' backend/package.json > backend/package.json.tmp \
+    && mv backend/package.json.tmp backend/package.json
+fi
+
+# Restore both files to their pre-bump version (called from each failure path
+# so an aborted bump never leaves the working tree half-modified).
+restore_versions() {
+  jq --arg v "$CURRENT_VERSION" '.version = $v' package.json > package.json.tmp \
+    && mv package.json.tmp package.json
+  if [ -f backend/package.json ]; then
+    jq --arg v "$CURRENT_VERSION" '.version = $v' backend/package.json > backend/package.json.tmp \
+      && mv backend/package.json.tmp backend/package.json
+  fi
+}
+
 # Build to verify everything works
 echo "Building..."
 if ! bun run build > /dev/null 2>&1; then
   echo "Error: Build failed"
-  # Restore original version
-  jq --arg v "$CURRENT_VERSION" '.version = $v' package.json > package.json.tmp && mv package.json.tmp package.json
+  restore_versions
   exit 1
 fi
 
@@ -178,20 +195,36 @@ chmod +x dist/index.js
 # Verify version is correct in build
 if ! BUILD_VERSION=$(./dist/index.js --version 2>&1); then
   echo "Error: Failed to run built CLI"
-  jq --arg v "$CURRENT_VERSION" '.version = $v' package.json > package.json.tmp && mv package.json.tmp package.json
+  restore_versions
   exit 1
 fi
 
 if [ "$BUILD_VERSION" != "$NEW_VERSION" ]; then
   echo "Error: Build version ($BUILD_VERSION) doesn't match expected ($NEW_VERSION)"
-  jq --arg v "$CURRENT_VERSION" '.version = $v' package.json > package.json.tmp && mv package.json.tmp package.json
+  restore_versions
   exit 1
+fi
+
+# Sanity check: root package.json is the runtime source of truth (backend
+# imports it via ../../package.json). backend/package.json is kept synced for
+# tooling. If they drift, bail with a loud error rather than shipping a
+# package whose two manifests disagree.
+if [ -f backend/package.json ]; then
+  BACKEND_VERSION=$(jq -r '.version' backend/package.json)
+  if [ "$BACKEND_VERSION" != "$NEW_VERSION" ]; then
+    echo "Error: backend/package.json version ($BACKEND_VERSION) does not match root ($NEW_VERSION)"
+    restore_versions
+    exit 1
+  fi
 fi
 
 echo "Build verified: $BUILD_VERSION"
 
 # Stage and commit
 git add package.json
+if [ -f backend/package.json ]; then
+  git add backend/package.json
+fi
 if ! git diff --cached --quiet; then
   git commit -m "chore: bump version to $NEW_VERSION"
 else

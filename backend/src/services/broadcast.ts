@@ -22,7 +22,6 @@ interface UserRow {
 }
 
 const RESEND_BATCH_URL = "https://api.resend.com/emails/batch";
-const FROM_EMAIL = "NEMAR <nemar@osc.earth>";
 const BATCH_SIZE = 100;
 
 /**
@@ -176,6 +175,7 @@ interface ResendBatchItem {
   to: string[];
   subject: string;
   html: string;
+  reply_to?: string;
 }
 
 interface ResendBatchResponseItem {
@@ -190,6 +190,7 @@ interface ResendBatchResponseItem {
 export async function sendBroadcast(
   db: D1Database,
   resendApiKey: string,
+  fromEmail: string,
   params: {
     sentById: number;
     group: RecipientGroup;
@@ -197,6 +198,7 @@ export async function sendBroadcast(
     bodyMarkdown: string;
     recipients: string[];
   },
+  replyTo?: string,
 ): Promise<BroadcastResult> {
   const bodyHtml = markdownToEmailHtml(params.bodyMarkdown);
   const html = buildBroadcastHtml(params.subject, bodyHtml);
@@ -207,10 +209,11 @@ export async function sendBroadcast(
   for (let i = 0; i < params.recipients.length; i += BATCH_SIZE) {
     const chunk = params.recipients.slice(i, i + BATCH_SIZE);
     const batch: ResendBatchItem[] = chunk.map((email) => ({
-      from: FROM_EMAIL,
+      from: fromEmail,
       to: [email],
       subject: params.subject,
       html,
+      ...(replyTo ? { reply_to: replyTo } : {}),
     }));
 
     try {

@@ -6,6 +6,7 @@
  */
 
 import { beforeAll, beforeEach, describe, expect, test } from "bun:test";
+import rootPkg from "../package.json";
 import { TEST_CONFIG, sleep, testRequest } from "./setup";
 
 // Add delay between tests to avoid rate limiting
@@ -19,7 +20,13 @@ describe("API Health", () => {
 
     expect(status).toBe(200);
     expect(data.status).toBe("ok");
-    expect(data.version).toBeDefined();
+    // /health must echo a semver from the worker's bundled package.json.
+    // We don't lock to rootPkg.version because api-test runs against the
+    // already-deployed dev backend and races deploy-dev (deploy-dev
+    // re-rolls the worker on the same push). The shape check still
+    // catches the original failure mode where the import resolved to an
+    // unexpected file and version came back undefined or empty.
+    expect(data.version).toMatch(/^\d+\.\d+\.\d+(-[\w.]+)?$/);
   });
 
   test("GET / returns 200 or 404 (no dedicated root handler)", async () => {
@@ -445,7 +452,8 @@ describe("Datasets API", () => {
 
   describe("GET /datasets/:id", () => {
     test("non-existent dataset returns 404", async () => {
-      const { status } = await testRequest("/datasets/nm999999");
+      // Valid format within MAX_NUMBER=99999 cap, but unlikely to be allocated.
+      const { status } = await testRequest("/datasets/nm099998");
 
       expect(status).toBe(404);
     });

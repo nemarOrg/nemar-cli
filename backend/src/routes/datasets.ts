@@ -11,7 +11,11 @@ import { authMiddleware, optionalAuthMiddleware } from "../middleware/auth";
 import { cliVersionGuard } from "../middleware/cliVersion";
 import { semanticSearch, textSearch } from "../services/dataset-search";
 import { generateDatasetId, isValidDatasetId } from "../services/datasetId";
-import { getAdminEmailsForCategory, sendPublicationRequestEmail } from "../services/email";
+import {
+  getAdminEmailsForCategory,
+  resolveEmailConfig,
+  sendPublicationRequestEmail,
+} from "../services/email";
 import {
   type GitHubRepo,
   addCollaborator,
@@ -1802,11 +1806,14 @@ datasetRoutes.post("/:id/publish/request", authMiddleware, async (c) => {
   try {
     const adminEmails = await getAdminEmailsForCategory(db, "publication_request");
     if (adminEmails.length > 0) {
+      const { fromEmail, replyTo } = resolveEmailConfig(c.env);
       await sendPublicationRequestEmail(
         adminEmails,
         datasetId,
         currentUser.username,
         c.env.RESEND_API_KEY,
+        fromEmail,
+        replyTo,
       );
     }
   } catch (emailError) {
@@ -1950,11 +1957,14 @@ datasetRoutes.post("/:id/publish/resend", authMiddleware, async (c) => {
   try {
     const adminEmails = await getAdminEmailsForCategory(db, "publication_request");
     if (adminEmails.length > 0) {
+      const { fromEmail, replyTo } = resolveEmailConfig(c.env);
       await sendPublicationRequestEmail(
         adminEmails,
         datasetId,
         currentUser.username,
         c.env.RESEND_API_KEY,
+        fromEmail,
+        replyTo,
       );
     }
   } catch (emailError) {
