@@ -49,4 +49,6 @@ jobs:
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          command: pages deploy site --project-name=nemar-cli
+          # SCCN Pages project bound to docs.nemar.org (Phase 1, Epic #314).
+          # Personal account's nemar-cli project is sunsetting in Phase 11.
+          command: pages deploy site --project-name=nemar-docs
