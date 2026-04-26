@@ -150,13 +150,11 @@ api.onError((err, c) => {
   );
 });
 
-// Create root app that mounts API at both /nemar (production) and / (dev)
+// Mount the API at both / and /nemar so the same worker answers
+// api.nemar.org/* (and *.workers.dev/*) at root and the legacy
+// api.osc.earth/nemar/* prefix.
 const app = new Hono<{ Bindings: Bindings; Variables: Variables }>();
-
-// Mount at /nemar for production (api.osc.earth/nemar/*)
 app.route("/nemar", api);
-
-// Also mount at root for dev environment and workers.dev domain
 app.route("/", api);
 
 /**

@@ -12,7 +12,6 @@ on:
 
 env:
   # Centralized config: update these when URLs or versions change.
-  # SCCN account endpoints (Phase 10 cutover, Epic #314).
   PROD_API_URL: https://api.nemar.org
   DEV_API_URL: https://nemar-api-dev.sccn-org.workers.dev
   NEMAR_API_URL: https://nemar.org/api/dataexplorer/datapipeline
