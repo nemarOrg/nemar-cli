@@ -218,7 +218,10 @@ export function migrateApiUrl(): void {
     try {
       config.store = { ...config.store, accounts };
     } catch (error) {
-      console.error("API URL migration failed (legacy URL preserved, redirect still works):", error);
+      console.error(
+        "API URL migration failed (legacy URL preserved, redirect still works):",
+        error,
+      );
     }
   }
 }

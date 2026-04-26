@@ -33,9 +33,7 @@ export function resolveEmailConfig(env: { FROM_EMAIL?: string; REPLY_TO?: string
   if (!from && !warnedMissingFromEmail) {
     warnedMissingFromEmail = true;
     console.error(
-      `FROM_EMAIL env var is unset; falling back to ${DEFAULT_FROM_EMAIL}. ` +
-        "If the Resend account tied to this worker does not verify osc.earth, every email will fail. " +
-        "Set FROM_EMAIL in wrangler config.",
+      `FROM_EMAIL env var is unset; falling back to ${DEFAULT_FROM_EMAIL}. If the Resend account tied to this worker does not verify osc.earth, every email will fail. Set FROM_EMAIL in wrangler config.`,
     );
   }
   return {
