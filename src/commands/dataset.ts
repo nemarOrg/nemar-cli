@@ -53,6 +53,7 @@ import {
   searchDatasets,
 } from "../lib/api.js";
 import { isAwsCliAvailable } from "../lib/aws-cli.js";
+import { buildBidsFilterArgs } from "../lib/bids-filter.js";
 import {
   type BidsValidationResult,
   checkDenoInstalled,
@@ -1634,6 +1635,13 @@ datasetCommand
   .option("--resume", "Resume a partial download into an existing clone")
   .option("--update", "Pull only the version diff into an existing clone")
   .option("--prune", "With --update, drop annex objects that no longer exist upstream")
+  .option("--subjects <list>", "Comma-separated subjects (e.g. sub-01,02)")
+  .option("--sessions <list>", "Comma-separated sessions (e.g. ses-pre,post)")
+  .option("--tasks <list>", "Comma-separated tasks (e.g. rest,nback)")
+  .option("--runs <list>", "Comma-separated runs (e.g. 1,2 — matches run-1 and run-01)")
+  .option("--datatypes <list>", "Comma-separated BIDS datatypes (e.g. eeg,emg)")
+  .option("--include <globs>", "Comma-separated extra include globs")
+  .option("--exclude <globs>", "Comma-separated exclude globs (e.g. derivatives/**)")
   .addHelpText(
     "after",
     `
@@ -1659,6 +1667,9 @@ Examples:
   $ nemar dataset download nm000104 --resume     # Resume partial download
   $ nemar dataset download nm000104 --update     # Pull only the version diff
   $ nemar dataset download nm000104 --update --prune  # Plus drop orphan objects
+  $ nemar dataset download nm000104 --subjects sub-01,02      # Only these subjects
+  $ nemar dataset download nm000104 --tasks rest --datatypes eeg  # Subset
+  $ nemar dataset download nm000104 --exclude 'derivatives/**'    # Skip derivatives
   $ nemar dataset download ds000248              # Download from OpenNeuro`,
   )
   .action(async (datasetId, options) => {
@@ -1676,6 +1687,25 @@ Examples:
     }
     if (options.prune && !options.update) {
       console.log(chalk.red("Error: --prune requires --update."));
+      process.exit(1);
+    }
+
+    const filter = buildBidsFilterArgs({
+      subjects: options.subjects,
+      sessions: options.sessions,
+      tasks: options.tasks,
+      runs: options.runs,
+      datatypes: options.datatypes,
+      include: options.include,
+      exclude: options.exclude,
+    });
+
+    if (filter.active && options.data === false) {
+      console.log(
+        chalk.red(
+          "Error: --no-data cannot be combined with BIDS filters (--subjects, --tasks, etc.). Filters imply data download.",
+        ),
+      );
       process.exit(1);
     }
 
@@ -1859,6 +1889,11 @@ Examples:
     if (options.update && updatePaths && updatePaths.length > 0) {
       console.log(`  Files to fetch: ${updatePaths.length}`);
     }
+    if (filter.active) {
+      for (const line of filter.summary) {
+        console.log(`  Filter ${line}`);
+      }
+    }
     console.log();
 
     // Step 4: Clone the dataset (metadata) — skipped on resume / update.
@@ -1919,6 +1954,7 @@ Examples:
         jobs: Number.parseInt(options.jobs, 10),
         credentials: s3Creds,
         paths: updatePaths,
+        extraArgs: filter.active ? filter.args : undefined,
         onProgress: (line) => tracker.processLine(line),
       });
 
