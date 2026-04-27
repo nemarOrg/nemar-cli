@@ -2576,9 +2576,6 @@ export async function isWorkingTreeDirty(
   return { dirty: stdout.trim().length > 0 };
 }
 
-/**
- * Run `git fetch --tags origin` in the dataset working tree.
- */
 export async function gitFetchOrigin(
   datasetPath: string,
 ): Promise<{ success: boolean; error?: string }> {
@@ -2591,10 +2588,6 @@ export async function gitFetchOrigin(
   return { success: true };
 }
 
-/**
- * Run `git merge --ff-only <ref>`. Returns success=false with a clear error if
- * the merge cannot fast-forward (local has diverging commits).
- */
 export async function gitMergeFastForward(
   datasetPath: string,
   ref: string,

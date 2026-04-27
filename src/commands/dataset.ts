@@ -1681,7 +1681,6 @@ Examples:
       return;
     }
 
-    // Mutex / dependency checks for the new download flags.
     if (options.resume && options.update) {
       console.log(chalk.red("Error: --resume and --update are mutually exclusive."));
       process.exit(1);

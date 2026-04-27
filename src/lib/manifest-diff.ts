@@ -1,27 +1,13 @@
-/**
- * Manifest diff: compute added / changed / removed paths between two version
- * manifests for a dataset.
- *
- * Used by `nemar dataset download --update` to figure out which files to
- * `git annex get` after a fast-forward merge so users only pay for the delta.
- */
-
 import type { VersionManifest } from "./api.js";
 
 export interface ManifestDiff {
-  /** Paths present in `to` but not in `from`. */
   added: string[];
-  /** Paths present in both, but with a different annex key. */
   changed: string[];
-  /** Paths present in `from` but not in `to`. */
   removed: string[];
 }
 
 /**
- * Diff two version manifests.
- *
- * The `key` field on each entry is the git-annex content-addressed key, so two
- * versions of the same path compare equal iff their content is identical.
+ * `key` is the git-annex content-addressed key: equal keys ⇒ identical content.
  */
 export function diffManifests(from: VersionManifest, to: VersionManifest): ManifestDiff {
   const fromFiles = from.files ?? {};
