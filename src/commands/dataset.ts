@@ -83,6 +83,7 @@ import {
   configureS3Remote,
   copyToAnnexRemote,
   dropFiles,
+  dropUnusedAnnexObjects,
   enableS3Remote,
   ensureGitAnnexInitialized,
   ensureLocalMainBranch,
@@ -94,6 +95,7 @@ import {
   getLocalDatasetInfo,
   gitAnnexAdd,
   gitFetchOrigin,
+  gitMergeFastForward,
   initDataset,
   isGitAnnexDataset,
   isWorkingTreeDirty,
@@ -112,6 +114,7 @@ import {
   promptForLicense,
   updateLicenseInDescription,
 } from "../lib/license.js";
+import { diffManifests } from "../lib/manifest-diff.js";
 import {
   downloadWithAwsCli,
   downloadWithHttps,
@@ -1629,6 +1632,8 @@ datasetCommand
   .option("-j, --jobs <number>", "Parallel download streams (default: 4)", "4")
   .option("--no-data", "Download metadata only (skip large data files)")
   .option("--resume", "Resume a partial download into an existing clone")
+  .option("--update", "Pull only the version diff into an existing clone")
+  .option("--prune", "With --update, drop annex objects that no longer exist upstream")
   .addHelpText(
     "after",
     `
@@ -1652,6 +1657,8 @@ Examples:
   $ nemar dataset download nm000104 --no-data    # Metadata only (fast)
   $ nemar dataset download nm000104 -j 8         # More parallel streams
   $ nemar dataset download nm000104 --resume     # Resume partial download
+  $ nemar dataset download nm000104 --update     # Pull only the version diff
+  $ nemar dataset download nm000104 --update --prune  # Plus drop orphan objects
   $ nemar dataset download ds000248              # Download from OpenNeuro`,
   )
   .action(async (datasetId, options) => {
@@ -1660,6 +1667,16 @@ Examples:
     if (!effectiveId) {
       await handleOpenNeuroDownload(datasetId, options);
       return;
+    }
+
+    // Mutex / dependency checks for the new download flags.
+    if (options.resume && options.update) {
+      console.log(chalk.red("Error: --resume and --update are mutually exclusive."));
+      process.exit(1);
+    }
+    if (options.prune && !options.update) {
+      console.log(chalk.red("Error: --prune requires --update."));
+      process.exit(1);
     }
 
     // Step 1: Check prerequisites (fast, parallel checks)
@@ -1706,20 +1723,27 @@ Examples:
     const outputPath = options.output || effectiveId;
     const absoluteOutput = resolve(outputPath);
 
-    // Resume mode: validate the existing clone is the right dataset and skip the clone step.
-    if (options.resume) {
+    // Paths to fetch with `git annex get`. Undefined → full retrieval. Used by
+    // --update to limit the get to changed annex keys.
+    let updatePaths: string[] | undefined;
+
+    // Resume / update modes share validation: target must exist, be a git-annex
+    // clone of the requested dataset, with a clean working tree.
+    const reuseMode = options.resume ? "resume" : options.update ? "update" : null;
+
+    if (reuseMode) {
       if (!existsSync(absoluteOutput)) {
-        console.log(chalk.red(`Error: --resume target does not exist: ${absoluteOutput}`));
-        console.log(chalk.dim("Drop --resume to perform a fresh clone."));
+        console.log(chalk.red(`Error: --${reuseMode} target does not exist: ${absoluteOutput}`));
+        console.log(chalk.dim(`Drop --${reuseMode} to perform a fresh clone.`));
         process.exit(1);
       }
 
-      spinner = ora("Validating resume target...").start();
+      spinner = ora(`Validating ${reuseMode} target...`).start();
 
       if (!(await isGitAnnexDataset(absoluteOutput))) {
         spinner.fail("Not a git-annex dataset");
         console.log(chalk.red(`  ${absoluteOutput} is not a git-annex repository.`));
-        console.log(chalk.dim("--resume requires a previous clone of the same dataset."));
+        console.log(chalk.dim(`--${reuseMode} requires a previous clone of the same dataset.`));
         process.exit(1);
       }
 
@@ -1736,12 +1760,12 @@ Examples:
 
       if (await isWorkingTreeDirty(absoluteOutput)) {
         spinner.fail("Working tree is dirty");
-        console.log(chalk.red("  Refusing to resume with uncommitted local changes."));
+        console.log(chalk.red(`  Refusing to ${reuseMode} with uncommitted local changes.`));
         console.log(chalk.dim("  Commit, stash, or discard them first."));
         process.exit(1);
       }
 
-      // Refresh remote refs so we can compare versions.
+      // Refresh remote refs so we can compare versions and (for update) merge.
       const fetchResult = await gitFetchOrigin(absoluteOutput);
       if (!fetchResult.success) {
         spinner.fail("Failed to fetch remote refs");
@@ -1751,36 +1775,94 @@ Examples:
 
       const localVersion = readLocalDatasetVersion(absoluteOutput);
       const remoteVersion = await readRemoteHeadDatasetVersion(absoluteOutput);
-      if (localVersion && remoteVersion && localVersion !== remoteVersion) {
-        spinner.fail("Local clone is behind upstream");
-        console.log(chalk.red(`  Local version: ${localVersion} | Remote HEAD: ${remoteVersion}`));
-        console.log(
-          chalk.dim("  Run `nemar dataset download <id> --update` to pull the version diff."),
-        );
-        process.exit(1);
-      }
 
-      spinner.succeed(`Resume target verified: ${effectiveId}`);
+      if (options.resume) {
+        if (localVersion && remoteVersion && localVersion !== remoteVersion) {
+          spinner.fail("Local clone is behind upstream");
+          console.log(
+            chalk.red(`  Local version: ${localVersion} | Remote HEAD: ${remoteVersion}`),
+          );
+          console.log(
+            chalk.dim("  Run `nemar dataset download <id> --update` to pull the version diff."),
+          );
+          process.exit(1);
+        }
+        spinner.succeed(`Resume target verified: ${effectiveId}`);
+      } else {
+        // --update path
+        if (localVersion && remoteVersion && localVersion === remoteVersion) {
+          spinner.succeed(`Already up to date (${localVersion})`);
+          process.exit(0);
+        }
+        spinner.succeed(`Update plan: ${localVersion ?? "unknown"} → ${remoteVersion ?? "HEAD"}`);
+
+        if (localVersion && remoteVersion) {
+          spinner = ora("Computing version diff from manifests...").start();
+          try {
+            const [fromManifest, toManifest] = await Promise.all([
+              getManifest(effectiveId, localVersion),
+              getManifest(effectiveId, remoteVersion),
+            ]);
+            const diff = diffManifests(fromManifest, toManifest);
+            spinner.succeed(
+              `Diff: +${diff.added.length} added, ~${diff.changed.length} changed, -${diff.removed.length} removed`,
+            );
+            updatePaths = [...diff.added, ...diff.changed];
+            if (updatePaths.length === 0) {
+              console.log(
+                chalk.dim("  No annex content changes between versions; metadata-only update."),
+              );
+            }
+          } catch (err) {
+            spinner.warn(`Manifest diff unavailable: ${(err as Error).message}`);
+            console.log(
+              chalk.dim("  Falling back to full git annex get (skips already-present files)."),
+            );
+            updatePaths = undefined;
+          }
+        }
+
+        spinner = ora("Fast-forwarding to remote HEAD...").start();
+        const ffRef = "origin/HEAD";
+        const mergeResult = await gitMergeFastForward(absoluteOutput, ffRef);
+        if (!mergeResult.success) {
+          spinner.fail("Cannot fast-forward (local has diverging commits)");
+          console.log(chalk.red(`  ${mergeResult.error}`));
+          console.log(
+            chalk.dim("  Use `nemar dataset update` (PR workflow) to push local changes first."),
+          );
+          process.exit(1);
+        }
+        spinner.succeed("Merged remote changes");
+      }
     } else if (existsSync(absoluteOutput)) {
       console.log(chalk.red(`Error: Output path already exists: ${absoluteOutput}`));
       console.log(
-        "Remove or rename the existing directory, or pass --resume to continue a partial download.",
+        "Remove or rename the existing directory, or pass --resume / --update to reuse it.",
       );
       process.exit(1);
     }
 
     console.log();
-    console.log(chalk.bold(options.resume ? "Resume Plan:" : "Download Plan:"));
+    const planLabel = options.update
+      ? "Update Plan:"
+      : options.resume
+        ? "Resume Plan:"
+        : "Download Plan:";
+    console.log(chalk.bold(planLabel));
     console.log(`  Dataset: ${datasetInfo.name} (${effectiveId})`);
     console.log(`  Output: ${absoluteOutput}`);
     console.log(`  Data files: ${options.data === false ? "metadata only" : "included"}`);
     if (options.data !== false) {
       console.log(`  Parallel jobs: ${options.jobs}`);
     }
+    if (options.update && updatePaths && updatePaths.length > 0) {
+      console.log(`  Files to fetch: ${updatePaths.length}`);
+    }
     console.log();
 
-    // Step 4: Clone the dataset (metadata) — skipped on resume.
-    if (!options.resume) {
+    // Step 4: Clone the dataset (metadata) — skipped on resume / update.
+    if (!reuseMode) {
       const repoUrl = `https://github.com/${datasetInfo.github_repo}.git`;
       spinner = ora("Cloning metadata from GitHub...").start();
 
@@ -1822,7 +1904,13 @@ Examples:
     }
 
     // Step 5: Get data files with progress (unless --no-data)
-    if (options.data !== false) {
+    const skipGet =
+      options.data === false || (options.update && updatePaths && updatePaths.length === 0);
+    if (skipGet) {
+      if (options.data === false) {
+        console.log(chalk.dim("Skipping data files (--no-data flag)"));
+      }
+    } else {
       console.log(chalk.bold(`Downloading data files (${options.jobs} parallel streams)...`));
 
       const tracker = new DownloadProgressTracker();
@@ -1830,6 +1918,7 @@ Examples:
       const getResult = await getDatasetData(absoluteOutput, {
         jobs: Number.parseInt(options.jobs, 10),
         credentials: s3Creds,
+        paths: updatePaths,
         onProgress: (line) => tracker.processLine(line),
       });
 
@@ -1846,8 +1935,18 @@ Examples:
 
       tracker.finish(getResult.filesDownloaded || 0);
       console.log(chalk.green(`Data downloaded (${getResult.filesDownloaded || 0} files)`));
-    } else {
-      console.log(chalk.dim("Skipping data files (--no-data flag)"));
+    }
+
+    // --prune: drop annex objects that are no longer referenced by any branch
+    // (typically files removed in the upstream version).
+    if (options.update && options.prune) {
+      spinner = ora("Pruning orphan annex objects...").start();
+      const pruneResult = await dropUnusedAnnexObjects(absoluteOutput);
+      if (pruneResult.success) {
+        spinner.succeed(`Pruned ${pruneResult.dropped ?? 0} unused annex objects`);
+      } else {
+        spinner.warn(`Prune skipped: ${pruneResult.error}`);
+      }
     }
 
     // Clear cached S3 credentials so future operations request fresh tokens
@@ -1859,7 +1958,12 @@ Examples:
     const localInfo = await getLocalDatasetInfo(absoluteOutput);
 
     console.log();
-    console.log(chalk.green.bold("Download complete!"));
+    const completionLabel = options.update
+      ? "Update complete!"
+      : options.resume
+        ? "Resume complete!"
+        : "Download complete!";
+    console.log(chalk.green.bold(completionLabel));
     console.log();
     console.log(`  Location: ${chalk.cyan(absoluteOutput)}`);
     if (localInfo) {
