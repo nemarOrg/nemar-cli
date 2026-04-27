@@ -1,0 +1,88 @@
+name: Sync dev with main and bump
+
+# Fires after a stable release publishes to npm successfully. Merges main
+# back into dev and bumps dev to <next-patch>-dev0 so feature branches off
+# dev never collide with the just-released version.
+#
+# Trigger: Publish to npm completes successfully on a v* tag (i.e. a stable
+# release tag pushed by auto-tag.yml after main is updated). Branch-only
+# publishes (dev, feature) are filtered out by the head_branch check below.
+
+on:
+  workflow_run:
+    workflows: ["Publish to npm"]
+    types: [completed]
+
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    # Only run when:
+    # 1. The upstream publish succeeded.
+    # 2. The upstream was triggered by a v* tag push (stable release), not a
+    #    branch push. Tag pushes give head_branch == "v0.8.1" etc.
+    if: >
+      github.event.workflow_run.conclusion == 'success' &&
+      startsWith(github.event.workflow_run.head_branch, 'v') &&
+      github.event.workflow_run.event == 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout dev
+        uses: actions/checkout@v4
+        with:
+          ref: dev
+          fetch-depth: 0
+          # AUTO_TAG_PAT (already used by auto-tag.yml) lets us push to dev
+          # without tripping branch protection or workflow-trigger limits
+          # that the default GITHUB_TOKEN imposes on its own commits.
+          token: ${{ secrets.AUTO_TAG_PAT }}
+
+      - name: Configure git identity
+        run: |
+          git config user.name "nemar-bot"
+          git config user.email "nemar-bot@users.noreply.github.com"
+
+      - name: Validate trigger tag matches a real release
+        id: tag
+        run: |
+          TAG="${{ github.event.workflow_run.head_branch }}"
+          if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            # Defensive gate: a real stable release tag never trips this, so any
+            # ::warning:: here is something the human should look at (mistagged
+            # release, branch named v*, etc.). ::notice:: would hide in step logs.
+            echo "::warning::head_branch '$TAG' is not a stable release tag (expected vX.Y.Z); skipping sync."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "skip=false" >> "$GITHUB_OUTPUT"
+
+      - name: Merge main into dev
+        if: steps.tag.outputs.skip != 'true'
+        run: |
+          git fetch origin main
+          # Regular merge (no fast-forward) preserves the release commit
+          # graph and matches the project's "dev -> main uses --merge" rule
+          # in reverse.
+          git merge --no-ff origin/main -m "chore: sync dev with main after ${{ steps.tag.outputs.tag }}"
+
+      - name: Setup Bun
+        if: steps.tag.outputs.skip != 'true'
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install dependencies
+        if: steps.tag.outputs.skip != 'true'
+        run: bun install
+
+      - name: Bump dev to next-patch-dev0
+        if: steps.tag.outputs.skip != 'true'
+        run: |
+          ./scripts/bump-version.sh dev0
+
+      - name: Push dev
+        if: steps.tag.outputs.skip != 'true'
+        run: |
+          git push origin dev

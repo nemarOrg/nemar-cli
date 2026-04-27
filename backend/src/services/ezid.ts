@@ -13,6 +13,8 @@
  * Rich metadata is passed as DataCite kernel-4 XML via the `datacite` ANVL key.
  */
 
+import { HttpError } from "./retry";
+
 export const EZID_BASE_URL = "https://ezid.cdlib.org";
 export const PRODUCTION_SHOULDER = "doi:10.82901/NEMAR.";
 export const TEST_SHOULDER = "doi:10.5072/FK2";
@@ -204,10 +206,13 @@ async function ezidRequest(
     );
   }
 
-  // Guard against non-ANVL error responses (HTML error pages, proxy errors)
+  // Guard against non-ANVL error responses (HTML error pages, proxy errors).
+  // Throw HttpError so isRetryable can classify by status, not by string match.
   if (!response.ok && !responseBody.startsWith("error: ")) {
-    throw new Error(
+    throw new HttpError(
       `EZID HTTP error (${response.status} ${response.statusText}): ${responseBody.substring(0, 200)}`,
+      response.status,
+      responseBody.substring(0, 200),
     );
   }
 

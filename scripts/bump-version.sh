@@ -8,6 +8,8 @@
 #   ./scripts/bump-version.sh minor         # 0.2.7 -> 0.3.0
 #   ./scripts/bump-version.sh major         # 0.2.7 -> 1.0.0
 #   ./scripts/bump-version.sh dev           # 0.2.7 -> 0.2.8-dev, 0.2.7-dev -> 0.2.8-dev
+#   ./scripts/bump-version.sh dev0          # 0.2.7 -> 0.2.8-dev0 (numbered: dev0, dev1, ...)
+#   ./scripts/bump-version.sh dev1          # 0.2.7-dev0 -> 0.2.7-dev1
 #   ./scripts/bump-version.sh alpha         # 0.2.7 -> 0.2.8-alpha
 #   ./scripts/bump-version.sh beta          # 0.2.7-alpha -> 0.2.7-beta
 #   ./scripts/bump-version.sh rc            # 0.2.7-beta -> 0.2.7-rc
@@ -26,6 +28,7 @@ if [ -z "${1:-}" ]; then
   echo ""
   echo "Pre-release bumps (adds/changes suffix, bumps patch if needed):"
   echo "  $0 dev      # 0.2.7 -> 0.2.8-dev, 0.2.7-dev -> 0.2.8-dev"
+  echo "  $0 dev0     # 0.2.7 -> 0.2.8-dev0 (numbered: dev0, dev1, ...)"
   echo "  $0 alpha    # 0.2.7 -> 0.2.8-alpha"
   echo "  $0 beta     # 0.2.7-alpha -> 0.2.7-beta (same base if pre-release)"
   echo "  $0 rc       # 0.2.7-beta -> 0.2.7-rc"
@@ -62,6 +65,15 @@ case "$VERSION_TYPE" in
     ;;
   dev|alpha|beta|rc)
     ;; # Pre-release keywords allowed on any branch
+  dev[0-9]*)
+    # Numbered dev pre-releases (dev0, dev1, ...) allowed on any branch.
+    # The case glob `dev[0-9]*` is permissive (would also match `dev0a`),
+    # so anchor with a regex check before falling through.
+    if [[ ! "$VERSION_TYPE" =~ ^dev[0-9]+$ ]]; then
+      echo "Error: numbered dev pre-release must match dev<N> (got '$VERSION_TYPE')"
+      exit 1
+    fi
+    ;;
   *)
     # Explicit versions: block release versions (no pre-release suffix) on feature branches
     if [[ "$VERSION_TYPE" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] && is_release_on_wrong_branch; then
@@ -131,6 +143,19 @@ calculate_new_version() {
         fi
       else
         # From stable - bump patch and add suffix
+        echo "$MAJOR.$MINOR.$((PATCH + 1))-$type"
+      fi
+      ;;
+    dev[0-9]*)
+      # Numbered dev (dev0, dev1, ...): semver pre-release ordering means
+      # dev0 < dev1 < dev2 < ... < <base>. Used by sync-dev automation: every
+      # release bumps dev to <next-patch>-dev0, then manual feature work can
+      # advance to dev1, dev2, etc. on the same base.
+      if [ -n "$PRERELEASE" ]; then
+        # Already pre-release: replace suffix on same base.
+        echo "$MAJOR.$MINOR.$PATCH-$type"
+      else
+        # From stable: bump patch and add numbered suffix.
         echo "$MAJOR.$MINOR.$((PATCH + 1))-$type"
       fi
       ;;

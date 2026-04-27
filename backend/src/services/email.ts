@@ -201,8 +201,7 @@ export async function sendVerificationEmail(
   </p>
 
   <p style="color: #999; font-size: 12px; margin-top: 30px;">
-    NEMAR - Neuroelectromagnetic Data Archive and Tools Resource<br>
-    Part of <a href="https://osc.earth" style="color: #999;">Open Science Collective</a><br>
+    <a href="https://nemar.org" style="color: #999;">NEMAR</a> - Neuroelectromagnetic Data Archive and Tools Resource<br>
     If you didn't create this account, you can safely ignore this email.
   </p>
 </body>
@@ -258,8 +257,7 @@ nemar auth login
   </p>
 
   <p style="color: #999; font-size: 12px; margin-top: 30px;">
-    NEMAR - Neuroelectromagnetic Data Archive and Tools Resource<br>
-    Part of <a href="https://osc.earth" style="color: #999;">Open Science Collective</a>
+    <a href="https://nemar.org" style="color: #999;">NEMAR</a> - Neuroelectromagnetic Data Archive and Tools Resource
   </p>
 </body>
 </html>
@@ -321,8 +319,7 @@ export async function sendKeyRegenerationVerificationEmail(
   <hr style="border: none; border-top: 1px solid #eee; margin: 30px 0;">
 
   <p style="color: #999; font-size: 12px; margin-top: 30px;">
-    NEMAR - Neuroelectromagnetic Data Archive and Tools Resource<br>
-    Part of <a href="https://osc.earth" style="color: #999;">Open Science Collective</a>
+    <a href="https://nemar.org" style="color: #999;">NEMAR</a> - Neuroelectromagnetic Data Archive and Tools Resource
   </p>
 </body>
 </html>
@@ -396,8 +393,7 @@ export async function sendAdminNotificationEmail(
   <hr style="border: none; border-top: 1px solid #eee; margin: 30px 0;">
 
   <p style="color: #999; font-size: 12px;">
-    NEMAR - Neuroelectromagnetic Data Archive and Tools Resource<br>
-    Part of <a href="https://osc.earth" style="color: #999;">Open Science Collective</a>
+    <a href="https://nemar.org" style="color: #999;">NEMAR</a> - Neuroelectromagnetic Data Archive and Tools Resource
   </p>
 </body>
 </html>
@@ -449,8 +445,7 @@ export async function sendRevocationEmail(
   <hr style="border: none; border-top: 1px solid #eee; margin: 30px 0;">
 
   <p style="color: #999; font-size: 12px;">
-    NEMAR - Neuroelectromagnetic Data Archive and Tools Resource<br>
-    Part of <a href="https://osc.earth" style="color: #999;">Open Science Collective</a>
+    <a href="https://nemar.org" style="color: #999;">NEMAR</a> - Neuroelectromagnetic Data Archive and Tools Resource
   </p>
 </body>
 </html>
@@ -509,8 +504,7 @@ export async function sendPublicationRequestEmail(
 
   <hr style="border: none; border-top: 1px solid #eee; margin: 30px 0;">
   <p style="color: #999; font-size: 12px;">
-    NEMAR - Neuroelectromagnetic Data Archive and Tools Resource<br>
-    Part of <a href="https://osc.earth" style="color: #999;">Open Science Collective</a>
+    <a href="https://nemar.org" style="color: #999;">NEMAR</a> - Neuroelectromagnetic Data Archive and Tools Resource
   </p>
 </body>
 </html>
@@ -570,8 +564,7 @@ export async function sendPublicationDeniedEmail(
 
   <hr style="border: none; border-top: 1px solid #eee; margin: 30px 0;">
   <p style="color: #999; font-size: 12px;">
-    NEMAR - Neuroelectromagnetic Data Archive and Tools Resource<br>
-    Part of <a href="https://osc.earth" style="color: #999;">Open Science Collective</a>
+    <a href="https://nemar.org" style="color: #999;">NEMAR</a> - Neuroelectromagnetic Data Archive and Tools Resource
   </p>
 </body>
 </html>
@@ -631,8 +624,7 @@ export async function sendPublicationApprovedEmail(
 
   <hr style="border: none; border-top: 1px solid #eee; margin: 30px 0;">
   <p style="color: #999; font-size: 12px;">
-    NEMAR - Neuroelectromagnetic Data Archive and Tools Resource<br>
-    Part of <a href="https://osc.earth" style="color: #999;">Open Science Collective</a>
+    <a href="https://nemar.org" style="color: #999;">NEMAR</a> - Neuroelectromagnetic Data Archive and Tools Resource
   </p>
 </body>
 </html>

@@ -1,5 +1,22 @@
 name: Auto Tag and Release
 
+# Fires on push to main when package.json changes. Two flows:
+#
+# 1. Pre-release strip (e.g., 0.8.2-dev4 lands on main):
+#    - Detect "-dev*" suffix.
+#    - Bump package.json to clean version (0.8.2).
+#    - Commit + push to main with "[skip ci]" so this workflow does not
+#      re-trigger on the bump commit.
+#    - Tag the bump commit `v0.8.2` and create a stable GitHub Release.
+#    - Tag push triggers npm-publish.yml separately (different event,
+#      so [skip ci] on the branch commit does not affect it).
+#    - sync-dev.yml fires after npm publish succeeds, merges main back
+#      to dev, and bumps dev to next-patch-dev0.
+#
+# 2. Direct release (clean version on main, e.g. 0.8.2 or 0.9.0-rc1):
+#    - No strip; tag literal version.
+#    - Mark `--latest` if no `-` suffix, else `--prerelease`.
+
 on:
   push:
     branches: [main]
@@ -16,50 +33,141 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
         with:
+          # `ref: main` ensures we are on a real branch (not detached HEAD)
+          # so `git push origin main` resolves the local refspec correctly.
+          ref: main
           fetch-depth: 2
+          # AUTO_TAG_PAT is required so the bot's strip-commit can be pushed
+          # back to main without tripping branch protection or workflow-token
+          # restrictions on default GITHUB_TOKEN.
           token: ${{ secrets.AUTO_TAG_PAT }}
 
-      - name: Check for version change
-        id: version
+      - name: Fetch tags
+        # actions/checkout@v4 does not fetch tags by default; the
+        # "tag already exists" guards in this workflow need them.
+        run: git fetch --tags origin
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install dependencies
+        # bump-version.sh runs `bun run build` to verify the bump, which
+        # needs node_modules. Only run when we actually need to strip.
+        run: bun install
+
+      - name: Detect and strip -dev* suffix
+        id: strip
         run: |
-          # Get current version from package.json
           CURRENT_VERSION=$(jq -r '.version' package.json)
-          echo "current=$CURRENT_VERSION" >> $GITHUB_OUTPUT
+          echo "original=$CURRENT_VERSION" >> $GITHUB_OUTPUT
 
-          # Get previous version from the commit before
-          if git show HEAD^:package.json > /tmp/old-package.json 2>&1; then
-            echo "Found previous package.json"
-          else
-            echo "::notice::Could not fetch previous package.json (first commit or shallow clone). Using fallback version 0.0.0"
-            echo '{"version":"0.0.0"}' > /tmp/old-package.json
-          fi
-          PREVIOUS_VERSION=$(jq -r '.version' /tmp/old-package.json)
-          echo "previous=$PREVIOUS_VERSION" >> $GITHUB_OUTPUT
+          # Strip "-dev*" suffix only. Other prereleases (-rc*, -alpha*,
+          # -beta*) are intentional and pass through unchanged.
+          STRIPPED="${CURRENT_VERSION%-dev*}"
+          echo "stripped=$STRIPPED" >> $GITHUB_OUTPUT
 
-          # Check if version changed
-          if [ "$CURRENT_VERSION" != "$PREVIOUS_VERSION" ]; then
-            echo "changed=true" >> $GITHUB_OUTPUT
-            echo "Version changed from $PREVIOUS_VERSION to $CURRENT_VERSION"
+          if [ "$STRIPPED" != "$CURRENT_VERSION" ]; then
+            echo "did_strip=true" >> $GITHUB_OUTPUT
+            echo "Will strip $CURRENT_VERSION -> $STRIPPED"
           else
-            echo "changed=false" >> $GITHUB_OUTPUT
-            echo "Version unchanged at $CURRENT_VERSION"
+            echo "did_strip=false" >> $GITHUB_OUTPUT
+            echo "No -dev* suffix; tagging $CURRENT_VERSION as-is"
           fi
 
-          # Check if this is a pre-release version (contains -)
-          if [[ "$CURRENT_VERSION" == *-* ]]; then
+      - name: Apply strip and push
+        id: apply_strip
+        if: steps.strip.outputs.did_strip == 'true'
+        # Fail-fast philosophy: a release workflow that silently degrades
+        # to "ship -dev4@dev instead of -clean@latest" is worse than one
+        # that halts. Releases are rare; the operator can re-run after
+        # fixing the underlying cause (PAT expiry, hook regression, etc.)
+        # rather than discovering a wrongly-tagged npm publish later.
+        env:
+          # bump-version.sh -> git commit triggers husky pre-commit which
+          # runs root + backend typecheck. Backend deps are not installed
+          # in this job and the bump itself is mechanical (jq edit), so
+          # disable husky entirely here. HUSKY=0 is the supported toggle
+          # (per husky docs); not the same as --no-verify per-commit.
+          HUSKY: '0'
+        run: |
+          STRIPPED="${{ steps.strip.outputs.stripped }}"
+
+          # Anomaly: target tag already exists but package.json on main is
+          # still at the unstripped -dev* version. Either someone tagged
+          # manually without bumping, or a previous run partially completed
+          # in an inconsistent state. Refuse to proceed — tagging the
+          # literal -dev* would publish a prerelease that the operator
+          # didn't ask for.
+          if git rev-parse "v$STRIPPED" >/dev/null 2>&1; then
+            echo "::error::Tag v$STRIPPED already exists but package.json is still at ${{ steps.strip.outputs.original }}. Refusing to tag the literal -dev* version. Investigate manually."
+            exit 1
+          fi
+
+          git config user.name "nemar-bot"
+          git config user.email "nemar-bot@users.noreply.github.com"
+
+          # Use bump-version.sh for build verification + consistent commit
+          # behavior. It commits "chore: bump version to $STRIPPED".
+          BEFORE_HASH=$(git rev-parse HEAD)
+          ./scripts/bump-version.sh "$STRIPPED"
+          AFTER_HASH=$(git rev-parse HEAD)
+
+          # bump-version.sh exits 0 without committing if package.json was
+          # already at $STRIPPED. With did_strip=true this is contradictory
+          # (we just read $original != $stripped). Halt: something raced
+          # between the strip-detect step and now.
+          if [ "$BEFORE_HASH" = "$AFTER_HASH" ]; then
+            echo "::error::bump-version.sh did not create a new commit despite did_strip=true. State raced between detection and apply."
+            exit 1
+          fi
+
+          # Amend with [skip ci] so this workflow does not re-trigger on
+          # the bump commit when it lands on main. Tag push (separate
+          # event) is not affected by [skip ci].
+          ORIGINAL_MSG=$(git log -1 --format=%s)
+          git commit --amend -m "$ORIGINAL_MSG [skip ci]"
+
+          git push origin main
+
+          echo "Pushed strip-commit: $ORIGINAL_MSG [skip ci]"
+
+      - name: Determine final version for tag
+        id: final
+        run: |
+          # Pull the strip-commit (if any) so HEAD matches what is on
+          # remote main. Drop `|| true`: a fast-forward failure here means
+          # local diverges from remote (third-party push, force-push, etc.),
+          # and tagging a stale local would mis-publish.
+          git pull --ff-only origin main
+          FINAL=$(jq -r '.version' package.json)
+          echo "version=$FINAL" >> $GITHUB_OUTPUT
+          echo "Tagging version: $FINAL"
+
+          # Prerelease iff the version still has "-" after the strip step
+          # (covers intentional -rc/-alpha/-beta releases).
+          if [[ "$FINAL" == *-* ]]; then
             echo "prerelease=true" >> $GITHUB_OUTPUT
           else
             echo "prerelease=false" >> $GITHUB_OUTPUT
           fi
 
       - name: Create tag
-        if: steps.version.outputs.changed == 'true'
+        id: create_tag
         run: |
-          TAG_NAME="v${{ steps.version.outputs.current }}"
+          TAG_NAME="v${{ steps.final.outputs.version }}"
 
-          # Check if tag already exists
           if git rev-parse "$TAG_NAME" >/dev/null 2>&1; then
-            echo "::warning::Tag $TAG_NAME already exists - skipping creation. This may indicate manual tag creation or workflow re-run."
+            # Tag exists. If apply_strip was skipped (no -dev* on main, so
+            # we just want to tag the existing version), then re-running on
+            # the same SHA is benign — tag was already created. Skip cleanly.
+            # If apply_strip ran in this job (did_strip=true), it would have
+            # halted earlier due to its own existence guard, so this branch
+            # only fires for did_strip=false workflows on already-tagged
+            # commits.
+            echo "::warning::Tag $TAG_NAME already exists — workflow re-run on the same commit. Skipping creation."
+            echo "created=false" >> $GITHUB_OUTPUT
             exit 0
           fi
 
@@ -69,28 +177,25 @@ jobs:
           git tag -a "$TAG_NAME" -m "Release $TAG_NAME"
           git push origin "$TAG_NAME"
 
+          echo "created=true" >> $GITHUB_OUTPUT
           echo "Created and pushed tag $TAG_NAME"
 
       - name: Create GitHub Release
-        if: steps.version.outputs.changed == 'true'
+        if: steps.create_tag.outputs.created == 'true'
         env:
           GH_TOKEN: ${{ secrets.AUTO_TAG_PAT }}
         run: |
-          TAG_NAME="v${{ steps.version.outputs.current }}"
-          PREV_TAG="v${{ steps.version.outputs.previous }}"
-          PRERELEASE="${{ steps.version.outputs.prerelease }}"
+          TAG_NAME="v${{ steps.final.outputs.version }}"
+          PRERELEASE="${{ steps.final.outputs.prerelease }}"
 
-          # Build release notes from commits since previous version
+          # `--generate-notes` without `--notes-start-tag` lets GitHub pick
+          # the previous semantic tag automatically — robust against the
+          # strip-commit's HEAD^ no longer reflecting the prior release.
           RELEASE_ARGS=(
             "$TAG_NAME"
             --title "$TAG_NAME"
             --generate-notes
           )
-
-          # If previous tag exists, use it as the baseline for notes
-          if git rev-parse "$PREV_TAG" >/dev/null 2>&1; then
-            RELEASE_ARGS+=(--notes-start-tag "$PREV_TAG")
-          fi
 
           if [ "$PRERELEASE" = "true" ]; then
             RELEASE_ARGS+=(--prerelease)
