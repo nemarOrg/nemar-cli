@@ -13,6 +13,11 @@ on:
       - dev
       - '**'
       - '!main'
+  # Manual escape hatch: re-run the publish for an existing tag when the
+  # automatic push trigger was missed (e.g. a [skip ci] marker on the
+  # head commit blocked it). Trigger via:
+  #   gh workflow run npm-publish.yml --ref v0.8.2
+  workflow_dispatch:
 
 jobs:
   publish:
