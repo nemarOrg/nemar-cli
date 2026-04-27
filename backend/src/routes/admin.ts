@@ -177,9 +177,12 @@ async function withRetry<T>(
         ) {
           return true;
         }
-        // Retry on 5xx and 429 status codes (require HTTP/status prefix to
-        // avoid false positives on dataset IDs like nm000500)
-        if (/(?:http|status)\s*(5\d\d|429)\b/i.test(msg)) {
+        // Retry on 5xx and 429 status codes. The HTTP/status prefix avoids
+        // false positives on dataset IDs like nm000500. Allow whitespace or
+        // an opening paren between the prefix and the code so we match both
+        // GitHub-style ("HTTP 503") and EZID-style ("EZID HTTP error (503 ...)")
+        // error messages.
+        if (/(?:http|status)[\s(]*(?:error\s*\()?\s*(5\d\d|429)\b/i.test(msg)) {
           return true;
         }
       }
@@ -2903,15 +2906,21 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
   }
 
   // Step 4: Tag protection (before DOI to prevent tag manipulation)
+  // Idempotent: applyTagProtection treats 422 (rule already exists) as success,
+  // so wrapping with withRetry safely absorbs propagation delays after the
+  // repo_public flip.
   if (stepsToRun.includes("tag_protect")) {
     try {
       await startStep("tag_protect");
 
       const { applyTagProtection } = await import("../services/github");
-      const tagProtected = await applyTagProtection(repoName, pat);
+      const { result: tagProtected, attempts: tagAttempts } = await withRetry(
+        () => applyTagProtection(repoName, pat),
+        "tag_protect",
+      );
 
       if (!tagProtected) {
-        await updateProgress("tag_protect", "Failed to apply tag protection rules");
+        await updateProgress("tag_protect", "Failed to apply tag protection rules", tagAttempts);
         return c.json(
           {
             error: "Tag protection failed",
@@ -2923,7 +2932,7 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
         );
       }
 
-      await updateProgress("tag_protect");
+      await updateProgress("tag_protect", undefined, tagAttempts);
     } catch (err) {
       const msg = errorMessage(err);
       await updateProgress("tag_protect", msg);
@@ -3011,32 +3020,42 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
           }
         }
 
-        // DOI creation is NOT idempotent (mints a permanent identifier).
-        // Do not retry: a timeout could mean the DOI was created server-side
-        // but the response was lost, and retrying would mint a duplicate.
+        // EZID DOIs are deterministic (buildConceptIdentifier is a pure function
+        // of datasetId), and createEzidConceptDoi already handles the
+        // "already exists" case by fetching the existing record. That makes
+        // EZID minting idempotent under retry, which is what we want here:
+        // EZID/DataCite propagation can briefly fail with transient 5xx or
+        // network errors during approval. Zenodo's createDeposition is NOT
+        // idempotent (each call mints a fresh deposition), so we only retry
+        // when the provider is EZID.
         const { createConceptDoi: doiDispatch } = await import("../services/doi");
-        const doiResult = await doiDispatch(
-          {
-            provider,
-            datasetId,
-            datasetName: dataset.name,
-            datasetDescription: dataset.description,
-            githubRepo: dataset.github_repo,
-            bidsDescription: bidsDesc,
-            enrichment,
-            uploaderOrcid: dataset.owner_orcid || undefined,
-            uploaderName: dataset.owner_username,
-            sandbox,
-          },
-          {
-            EZID_USERNAME: c.env.EZID_USERNAME,
-            EZID_PASSWORD: c.env.EZID_PASSWORD,
-            EZID_SANDBOX_USERNAME: c.env.EZID_SANDBOX_USERNAME,
-            EZID_SANDBOX_PASSWORD: c.env.EZID_SANDBOX_PASSWORD,
-            ZENODO_API_KEY: c.env.ZENODO_API_KEY,
-            ZENODO_SANDBOX_API_KEY: c.env.ZENODO_SANDBOX_API_KEY,
-          },
-        );
+        const doiCall = () =>
+          doiDispatch(
+            {
+              provider,
+              datasetId,
+              datasetName: dataset.name,
+              datasetDescription: dataset.description,
+              githubRepo: dataset.github_repo,
+              bidsDescription: bidsDesc,
+              enrichment,
+              uploaderOrcid: dataset.owner_orcid || undefined,
+              uploaderName: dataset.owner_username,
+              sandbox,
+            },
+            {
+              EZID_USERNAME: c.env.EZID_USERNAME,
+              EZID_PASSWORD: c.env.EZID_PASSWORD,
+              EZID_SANDBOX_USERNAME: c.env.EZID_SANDBOX_USERNAME,
+              EZID_SANDBOX_PASSWORD: c.env.EZID_SANDBOX_PASSWORD,
+              ZENODO_API_KEY: c.env.ZENODO_API_KEY,
+              ZENODO_SANDBOX_API_KEY: c.env.ZENODO_SANDBOX_API_KEY,
+            },
+          );
+        const { result: doiResult } =
+          provider === "ezid"
+            ? await withRetry(doiCall, "doi_create")
+            : { result: await doiCall() };
         if (provider === "ezid") {
           await db
             .prepare(

@@ -12,6 +12,59 @@ const ORG_NAME = "nemarDatasets";
 /** Identity used for all backend-initiated commits and tags on dataset repos. */
 const NEMAR_COMMITTER = { name: "nemarAdmin", email: "nemarAdmin@osc.earth" };
 
+/**
+ * Fetch with retry for transient and propagation failures.
+ *
+ * Retries on:
+ *   - Network/transport errors (fetch throws)
+ *   - HTTP 5xx and 429
+ *   - HTTP 404 (only when retryOn404=true): GitHub may briefly 404 a freshly
+ *     created/changed resource (repo flip, branch/tag write, ruleset endpoint)
+ *     while caches catch up. Caller opts in only where 404 is never legitimate.
+ *
+ * Does NOT retry on 4xx other than 404/429: those are validation/auth errors
+ * that won't change on retry.
+ */
+async function githubFetchWithRetry(
+  url: string,
+  init: RequestInit,
+  options?: { maxAttempts?: number; delayMs?: number; retryOn404?: boolean },
+): Promise<Response> {
+  const maxAttempts = options?.maxAttempts ?? 3;
+  const delayMs = options?.delayMs ?? 1_000;
+  const retryOn404 = options?.retryOn404 ?? false;
+
+  let lastError: unknown;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      const response = await fetch(url, init);
+      const isTransient =
+        response.status >= 500 ||
+        response.status === 429 ||
+        (retryOn404 && response.status === 404);
+      if (isTransient && attempt < maxAttempts) {
+        console.warn(
+          `[github] ${init.method || "GET"} ${url} attempt ${attempt} -> HTTP ${response.status}, retrying in ${delayMs}ms`,
+        );
+        await new Promise((resolve) => setTimeout(resolve, delayMs));
+        continue;
+      }
+      return response;
+    } catch (err) {
+      lastError = err;
+      if (attempt < maxAttempts) {
+        console.warn(
+          `[github] ${init.method || "GET"} ${url} attempt ${attempt} threw (${err instanceof Error ? err.message : String(err)}), retrying in ${delayMs}ms`,
+        );
+        await new Promise((resolve) => setTimeout(resolve, delayMs));
+        continue;
+      }
+      throw err;
+    }
+  }
+  throw lastError ?? new Error("githubFetchWithRetry: exhausted attempts");
+}
+
 interface GitHubUser {
   id: number;
   login: string;
@@ -1250,14 +1303,20 @@ export interface TreeEntry {
  * Returns all entries (blobs and trees) in the repository at that ref.
  */
 export async function getTreeAtRef(repo: string, ref: string, pat: string): Promise<TreeEntry[]> {
-  // First resolve the ref to a commit SHA
-  const refResponse = await fetch(`${GITHUB_API}/repos/${ORG_NAME}/${repo}/commits/${ref}`, {
-    headers: {
-      Authorization: `Bearer ${pat}`,
-      Accept: "application/vnd.github.v3+json",
-      "User-Agent": "NEMAR-API",
+  // First resolve the ref to a commit SHA. retryOn404: caller knows the ref
+  // (e.g., "main" or a tag we just wrote) should exist; a 404 here means
+  // GitHub hasn't propagated the write yet.
+  const refResponse = await githubFetchWithRetry(
+    `${GITHUB_API}/repos/${ORG_NAME}/${repo}/commits/${ref}`,
+    {
+      headers: {
+        Authorization: `Bearer ${pat}`,
+        Accept: "application/vnd.github.v3+json",
+        "User-Agent": "NEMAR-API",
+      },
     },
-  });
+    { retryOn404: true },
+  );
 
   if (!refResponse.ok) {
     throw new Error(`Failed to resolve ref '${ref}': HTTP ${refResponse.status}`);
@@ -1267,7 +1326,7 @@ export async function getTreeAtRef(repo: string, ref: string, pat: string): Prom
   const treeSha = commit.commit.tree.sha;
 
   // Get the tree recursively
-  const treeResponse = await fetch(
+  const treeResponse = await githubFetchWithRetry(
     `${GITHUB_API}/repos/${ORG_NAME}/${repo}/git/trees/${treeSha}?recursive=1`,
     {
       headers: {
@@ -1295,13 +1354,19 @@ export async function getTreeAtRef(repo: string, ref: string, pat: string): Prom
  * Uses the blob API to get base64-encoded content.
  */
 export async function getBlobContent(repo: string, blobSha: string, pat: string): Promise<string> {
-  const response = await fetch(`${GITHUB_API}/repos/${ORG_NAME}/${repo}/git/blobs/${blobSha}`, {
-    headers: {
-      Authorization: `Bearer ${pat}`,
-      Accept: "application/vnd.github.v3+json",
-      "User-Agent": "NEMAR-API",
+  // retryOn404: blob SHA came from a tree we just resolved, so 404 indicates
+  // propagation lag, not a missing object.
+  const response = await githubFetchWithRetry(
+    `${GITHUB_API}/repos/${ORG_NAME}/${repo}/git/blobs/${blobSha}`,
+    {
+      headers: {
+        Authorization: `Bearer ${pat}`,
+        Accept: "application/vnd.github.v3+json",
+        "User-Agent": "NEMAR-API",
+      },
     },
-  });
+    { retryOn404: true },
+  );
 
   if (!response.ok) {
     throw new Error(`Failed to get blob ${blobSha}: HTTP ${response.status}`);
@@ -1329,7 +1394,8 @@ export async function getFileContent(
   pat: string,
   ref = "main",
 ): Promise<string | null> {
-  const response = await fetch(
+  // No retryOn404 here: 404 is a valid "file not present" signal returned as null.
+  const response = await githubFetchWithRetry(
     `${GITHUB_API}/repos/${ORG_NAME}/${repo}/contents/${filePath}?ref=${ref}`,
     {
       headers: {
@@ -1369,27 +1435,33 @@ export async function getFileContent(
  * Protects tags matching the pattern "v*" (semver version tags).
  */
 export async function applyTagProtection(repo: string, pat: string): Promise<boolean> {
-  const response = await fetch(`${GITHUB_API}/repos/${ORG_NAME}/${repo}/rulesets`, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${pat}`,
-      Accept: "application/vnd.github.v3+json",
-      "User-Agent": "NEMAR-API",
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      name: "Protect version tags",
-      target: "tag",
-      enforcement: "active",
-      conditions: {
-        ref_name: {
-          include: ["refs/tags/v*"],
-          exclude: [],
-        },
+  // retryOn404: rulesets endpoint can briefly 404 right after a repo
+  // visibility flip while GitHub propagates ACLs.
+  const response = await githubFetchWithRetry(
+    `${GITHUB_API}/repos/${ORG_NAME}/${repo}/rulesets`,
+    {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${pat}`,
+        Accept: "application/vnd.github.v3+json",
+        "User-Agent": "NEMAR-API",
+        "Content-Type": "application/json",
       },
-      rules: [{ type: "deletion" }, { type: "update" }],
-    }),
-  });
+      body: JSON.stringify({
+        name: "Protect version tags",
+        target: "tag",
+        enforcement: "active",
+        conditions: {
+          ref_name: {
+            include: ["refs/tags/v*"],
+            exclude: [],
+          },
+        },
+        rules: [{ type: "deletion" }, { type: "update" }],
+      }),
+    },
+    { retryOn404: true },
+  );
 
   if (response.ok || response.status === 201) return true;
   // 422 means rule already exists
@@ -1409,13 +1481,19 @@ export async function applyTagProtection(repo: string, pat: string): Promise<boo
  * @throws {Error} If the branch ref cannot be resolved
  */
 export async function getMainBranchSha(repo: string, branch: string, pat: string): Promise<string> {
-  const response = await fetch(`${GITHUB_API}/repos/${ORG_NAME}/${repo}/git/ref/heads/${branch}`, {
-    headers: {
-      Authorization: `Bearer ${pat}`,
-      Accept: "application/vnd.github.v3+json",
-      "User-Agent": "NEMAR-API",
+  // retryOn404: caller knows the branch exists (e.g., we just committed to it),
+  // so 404 indicates GitHub hasn't propagated the ref yet.
+  const response = await githubFetchWithRetry(
+    `${GITHUB_API}/repos/${ORG_NAME}/${repo}/git/ref/heads/${branch}`,
+    {
+      headers: {
+        Authorization: `Bearer ${pat}`,
+        Accept: "application/vnd.github.v3+json",
+        "User-Agent": "NEMAR-API",
+      },
     },
-  });
+    { retryOn404: true },
+  );
 
   if (!response.ok) {
     const error = await response.text();
