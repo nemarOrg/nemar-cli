@@ -104,6 +104,7 @@ import {
   pushToGitHub,
   readLocalDatasetVersion,
   readRemoteHeadDatasetVersion,
+  resolveUpstreamRef,
   saveDataset,
   toS3Credentials,
   verifyGitHubAuth,
@@ -1852,9 +1853,33 @@ Examples:
           }
         }
 
-        spinner = ora("Fast-forwarding to remote HEAD...").start();
-        const ffRef = "origin/HEAD";
-        const mergeResult = await gitMergeFastForward(absoluteOutput, ffRef);
+        // Refuse on git-annex adjusted branches: a normal git merge corrupts
+        // the adjusted view. Users on adjusted clones should run `git annex
+        // sync` (or rename their default branch) before --update.
+        const localBranch = await getCurrentBranch(absoluteOutput);
+        if (localBranch?.startsWith("adjusted/")) {
+          console.log(
+            chalk.red(
+              `  --update is not supported on git-annex adjusted branches (${localBranch}).`,
+            ),
+          );
+          console.log(
+            chalk.dim(
+              "  Run `git -C <clone> annex sync` to bring the clone onto a normal branch first.",
+            ),
+          );
+          process.exit(1);
+        }
+
+        spinner = ora("Resolving remote tracking branch...").start();
+        const upstreamRef = await resolveUpstreamRef(absoluteOutput);
+        if (!upstreamRef.ref) {
+          spinner.fail("Cannot resolve remote tracking branch");
+          console.log(chalk.red(`  ${upstreamRef.error ?? "no upstream ref found"}`));
+          process.exit(1);
+        }
+        spinner.text = `Fast-forwarding to ${upstreamRef.ref}...`;
+        const mergeResult = await gitMergeFastForward(absoluteOutput, upstreamRef.ref);
         if (!mergeResult.success) {
           spinner.fail("Cannot fast-forward (local has diverging commits)");
           console.log(chalk.red(`  ${mergeResult.error}`));
@@ -1863,7 +1888,7 @@ Examples:
           );
           process.exit(1);
         }
-        spinner.succeed("Merged remote changes");
+        spinner.succeed(`Merged ${upstreamRef.ref}`);
       }
     } else if (existsSync(absoluteOutput)) {
       console.log(chalk.red(`Error: Output path already exists: ${absoluteOutput}`));

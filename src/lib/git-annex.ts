@@ -2513,6 +2513,39 @@ export async function readRemoteHeadDatasetVersion(datasetPath: string): Promise
 }
 
 /**
+ * Resolve the remote ref a `git merge --ff-only` should target. Prefers the
+ * configured upstream of the current branch; falls back to origin/HEAD,
+ * origin/main, then origin/master for older datasets that pre-date the main
+ * default-branch convention.
+ */
+export async function resolveUpstreamRef(
+  datasetPath: string,
+): Promise<{ ref: string | null; error?: string }> {
+  // Fast path: the current branch's configured upstream tracking ref.
+  const { stdout: upstream, exitCode: upCode } = await runCommand(
+    ["git", "rev-parse", "--abbrev-ref", "@{upstream}"],
+    { cwd: datasetPath },
+  );
+  if (upCode === 0 && upstream.trim()) {
+    return { ref: upstream.trim() };
+  }
+
+  // Fallback: probe common remote-default refs in order.
+  for (const ref of ["origin/HEAD", "origin/main", "origin/master"]) {
+    const { exitCode } = await runCommand(["git", "rev-parse", "--verify", "--quiet", ref], {
+      cwd: datasetPath,
+    });
+    if (exitCode === 0) return { ref };
+  }
+
+  return {
+    ref: null,
+    error:
+      "Could not resolve a remote tracking branch (origin/HEAD, origin/main, origin/master all missing)",
+  };
+}
+
+/**
  * Returns true if the working tree has uncommitted changes (staged, unstaged,
  * or untracked).
  */
