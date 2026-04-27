@@ -2608,15 +2608,23 @@ export async function gitMergeFastForward(
   return { success: true };
 }
 
-/**
- * Drop unused annex objects (orphaned keys no longer referenced by any branch).
- * Used by `nemar dataset download --update --prune` to reclaim space after
- * upstream removed files.
- */
+/** Drop orphan annex keys (no longer referenced by any branch). */
 export async function dropUnusedAnnexObjects(
   datasetPath: string,
 ): Promise<{ success: boolean; error?: string; dropped?: number }> {
-  // Step 1: mark unused keys
+  // Without --prune-tags here, stale local tags would keep their content
+  // 'reachable' and `git annex unused` would skip those keys.
+  const { stderr: pruneStderr, exitCode: pruneCode } = await runCommand(
+    ["git", "fetch", "--prune", "--prune-tags", "origin"],
+    { cwd: datasetPath },
+  );
+  if (pruneCode !== 0) {
+    return {
+      success: false,
+      error: pruneStderr.trim() || "git fetch --prune-tags failed",
+    };
+  }
+
   const { exitCode: unusedCode, stderr: unusedStderr } = await runCommand(
     ["git", "annex", "unused"],
     { cwd: datasetPath },
@@ -2625,7 +2633,6 @@ export async function dropUnusedAnnexObjects(
     return { success: false, error: unusedStderr.trim() || "git annex unused failed" };
   }
 
-  // Step 2: drop them
   const { stdout, stderr, exitCode } = await runCommand(
     ["git", "annex", "dropunused", "--force", "all"],
     { cwd: datasetPath },
@@ -2634,7 +2641,6 @@ export async function dropUnusedAnnexObjects(
     return { success: false, error: stderr.trim() || "git annex dropunused failed" };
   }
 
-  // Count "dropunused N ok" lines from stdout
   const dropMatches = stdout.match(/^dropunused .+ ok$/gm);
   return { success: true, dropped: dropMatches ? dropMatches.length : 0 };
 }
