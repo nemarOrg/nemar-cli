@@ -2,25 +2,14 @@
 
 Download NEMAR datasets using git-annex for efficient large file handling.
 
-## Public vs Private Datasets
-
-- **Public datasets** (published) can be downloaded by anyone without authentication.
-- **Private datasets** (pre-publication) can only be downloaded by the owner and designated collaborators, and only through the NEMAR CLI. Direct git-annex commands (`git annex get`, `git annex pull`) will not work for private data.
-
-After publishing, datasets become publicly available for everyone.
-
 ## Quick Download
 
 ```bash
-# Download a public dataset (no account needed)
+# Download dataset (includes all data files)
 nemar dataset download nm000104
-
-# Download a private dataset (requires login)
-nemar auth login
-nemar dataset download nm000115
 ```
 
-This clones the dataset and downloads all data files from S3. The CLI shows real-time progress during download, including transfer speed, estimated time remaining, and per-file status.
+This clones the dataset and downloads all data files from S3.
 
 ## Download Options
 
@@ -34,6 +23,79 @@ nemar dataset download nm000104 --no-data
 # Parallel downloads for large datasets
 nemar dataset download nm000104 -j 8
 ```
+
+## Resume an Interrupted Download
+
+If a download is interrupted, rerun with `--resume` instead of deleting the
+partial clone:
+
+```bash
+nemar dataset download nm000104 --resume
+```
+
+`--resume` validates the existing directory is a git-annex clone of the same
+dataset, refuses to proceed when the working tree is dirty, and refuses when
+the local `DatasetVersion` has fallen behind the remote (use `--update`
+instead). It then re-runs `git annex get` so only missing files are pulled.
+
+## Update to a Newer Version
+
+When upstream publishes a new version, pull only the diff:
+
+```bash
+nemar dataset download nm000104 --update           # pulls just the changed files
+nemar dataset download nm000104 --update --prune   # also drops orphaned annex objects
+```
+
+`--update` reads the local and remote `DatasetVersion`, fast-forwards to the
+remote `HEAD`, and runs `git annex get` only on the annex keys that changed
+between the two manifests. For a 5 GB dataset with a 20 MB metadata bump, this
+typically transfers ~20 MB instead of the whole dataset. Non-fast-forward
+merges (you have local commits) are refused; use `nemar dataset update`
+(the PR workflow) to push them first.
+
+## BIDS Entity Filters
+
+Pull only the parts of the dataset you need. The clone retains the full
+git-annex tree (so the result is still a structurally valid BIDS dataset),
+but only matching files have content locally. You can `git annex get <path>`
+later to pull more.
+
+```bash
+# Specific subjects only (auto-prefix; "01" == "sub-01")
+nemar dataset download nm000104 --subjects sub-01,02
+
+# A single task across all subjects
+nemar dataset download nm000104 --tasks rest
+
+# Subjects, tasks, and datatypes intersected
+nemar dataset download nm000104 \
+  --subjects 01,02 --tasks rest --datatypes eeg
+
+# Runs (unpadded 1-9 match both run-1 and run-01)
+nemar dataset download nm000104 --runs 1,2
+
+# Sessions
+nemar dataset download nm000104 --sessions ses-pre,post
+
+# Raw glob pass-through
+nemar dataset download nm000104 --include 'sub-01/eeg/*.edf,*.json'
+nemar dataset download nm000104 --exclude 'derivatives/**,sourcedata/**'
+```
+
+| Flag | Comma-list values | Maps to |
+|---|---|---|
+| `--subjects` | `sub-01,02` | `sub-01/**`, `sub-02/**` |
+| `--sessions` | `ses-pre,post` | `**/ses-pre/**`, `**/ses-post/**` |
+| `--tasks` | `rest,nback` | `**/*_task-rest_*`, `**/*_task-nback_*` |
+| `--runs` | `1,2` | `**/*_run-1_*`, `**/*_run-01_*`, ... |
+| `--datatypes` | `eeg,emg` | `**/eeg/**`, `**/emg/**` |
+| `--include` | raw glob list | `--include` pass-through |
+| `--exclude` | raw glob list | `--exclude` pass-through |
+
+Filters compose with `--update` (only changed files inside the filter scope
+are pulled). They cannot be combined with `--no-data`, since filters imply
+data download.
 
 ## Clone vs Download
 
@@ -50,23 +112,6 @@ nemar dataset get sub-01/
 # Get specific modality
 nemar dataset get sub-01/eeg/
 ```
-
-## Download Progress
-
-Downloads display real-time progress with:
-
-- **Transfer speed** - current download rate (e.g., 2.4 MB/s)
-- **Estimated time remaining** - based on sliding-window speed averaging
-- **File progress** - tracks completed vs total files
-- **Per-file status** - shows which file is currently downloading
-
-The CLI automatically detects whether `git-annex` is installed. If available, it uses git-annex for efficient content-addressed downloads. Otherwise, it falls back to direct S3 downloads via pre-signed URLs.
-
-## Prerequisites
-
-The `download` command requires the GitHub CLI (`gh`) to be installed and authenticated. The CLI checks for required tools before starting and provides platform-specific install guidance if anything is missing.
-
-For private datasets, you must also be logged in with `nemar auth login`.
 
 ## How It Works
 
