@@ -48,7 +48,10 @@ jobs:
         run: |
           TAG="${{ github.event.workflow_run.head_branch }}"
           if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            echo "::notice::head_branch '$TAG' is not a stable release tag (expected vX.Y.Z); skipping."
+            # Defensive gate: a real stable release tag never trips this, so any
+            # ::warning:: here is something the human should look at (mistagged
+            # release, branch named v*, etc.). ::notice:: would hide in step logs.
+            echo "::warning::head_branch '$TAG' is not a stable release tag (expected vX.Y.Z); skipping sync."
             echo "skip=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi

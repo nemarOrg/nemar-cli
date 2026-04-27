@@ -66,7 +66,14 @@ case "$VERSION_TYPE" in
   dev|alpha|beta|rc)
     ;; # Pre-release keywords allowed on any branch
   dev[0-9]*)
-    ;; # Numbered dev pre-releases (dev0, dev1, ...) allowed on any branch
+    # Numbered dev pre-releases (dev0, dev1, ...) allowed on any branch.
+    # The case glob `dev[0-9]*` is permissive (would also match `dev0a`),
+    # so anchor with a regex check before falling through.
+    if [[ ! "$VERSION_TYPE" =~ ^dev[0-9]+$ ]]; then
+      echo "Error: numbered dev pre-release must match dev<N> (got '$VERSION_TYPE')"
+      exit 1
+    fi
+    ;;
   *)
     # Explicit versions: block release versions (no pre-release suffix) on feature branches
     if [[ "$VERSION_TYPE" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] && is_release_on_wrong_branch; then
