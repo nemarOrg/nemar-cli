@@ -79,12 +79,11 @@ jobs:
       - name: Apply strip and push
         id: apply_strip
         if: steps.strip.outputs.did_strip == 'true'
-        # If the strip step fails (e.g. unexpected hook failure, push race),
-        # do NOT halt the release. The downstream "Determine final version"
-        # step falls back to tagging the original (pre-strip) version, so
-        # the worst case is shipping the literal -dev4 as a prerelease —
-        # the existing pre-strip behavior — rather than a stuck release.
-        continue-on-error: true
+        # Fail-fast philosophy: a release workflow that silently degrades
+        # to "ship -dev4@dev instead of -clean@latest" is worse than one
+        # that halts. Releases are rare; the operator can re-run after
+        # fixing the underlying cause (PAT expiry, hook regression, etc.)
+        # rather than discovering a wrongly-tagged npm publish later.
         env:
           # bump-version.sh -> git commit triggers husky pre-commit which
           # runs root + backend typecheck. Backend deps are not installed
@@ -95,14 +94,16 @@ jobs:
         run: |
           STRIPPED="${{ steps.strip.outputs.stripped }}"
 
-          # Guard: if the stripped tag already exists, the strip+release
-          # has already happened (workflow re-run). Skip cleanly.
+          # Anomaly: target tag already exists but package.json on main is
+          # still at the unstripped -dev* version. Either someone tagged
+          # manually without bumping, or a previous run partially completed
+          # in an inconsistent state. Refuse to proceed — tagging the
+          # literal -dev* would publish a prerelease that the operator
+          # didn't ask for.
           if git rev-parse "v$STRIPPED" >/dev/null 2>&1; then
-            echo "::warning::Tag v$STRIPPED already exists — strip-commit must have been pushed already. Skipping bump."
-            echo "skipped=true" >> $GITHUB_OUTPUT
-            exit 0
+            echo "::error::Tag v$STRIPPED already exists but package.json is still at ${{ steps.strip.outputs.original }}. Refusing to tag the literal -dev* version. Investigate manually."
+            exit 1
           fi
-          echo "skipped=false" >> $GITHUB_OUTPUT
 
           git config user.name "nemar-bot"
           git config user.email "nemar-bot@users.noreply.github.com"
@@ -114,12 +115,12 @@ jobs:
           AFTER_HASH=$(git rev-parse HEAD)
 
           # bump-version.sh exits 0 without committing if package.json was
-          # already at $STRIPPED (e.g. a manual prior release). Skip amend
-          # in that case to avoid corrupting an unrelated commit.
+          # already at $STRIPPED. With did_strip=true this is contradictory
+          # (we just read $original != $stripped). Halt: something raced
+          # between the strip-detect step and now.
           if [ "$BEFORE_HASH" = "$AFTER_HASH" ]; then
-            echo "::warning::bump-version.sh did not create a new commit; nothing to amend or push."
-            echo "skipped=true" >> $GITHUB_OUTPUT
-            exit 0
+            echo "::error::bump-version.sh did not create a new commit despite did_strip=true. State raced between detection and apply."
+            exit 1
           fi
 
           # Amend with [skip ci] so this workflow does not re-trigger on
@@ -135,17 +136,17 @@ jobs:
       - name: Determine final version for tag
         id: final
         run: |
-          # Pull the version from package.json on disk — this is the source
-          # of truth after the strip step (which may have updated and pushed
-          # it). If strip step failed (continue-on-error), package.json may
-          # still carry the original -dev* version, and we fall back to
-          # tagging it literally (existing pre-strip behavior).
-          git pull --ff-only origin main || true
+          # Pull the strip-commit (if any) so HEAD matches what is on
+          # remote main. Drop `|| true`: a fast-forward failure here means
+          # local diverges from remote (third-party push, force-push, etc.),
+          # and tagging a stale local would mis-publish.
+          git pull --ff-only origin main
           FINAL=$(jq -r '.version' package.json)
           echo "version=$FINAL" >> $GITHUB_OUTPUT
           echo "Tagging version: $FINAL"
 
-          # Prerelease iff the version still has "-" after the strip step.
+          # Prerelease iff the version still has "-" after the strip step
+          # (covers intentional -rc/-alpha/-beta releases).
           if [[ "$FINAL" == *-* ]]; then
             echo "prerelease=true" >> $GITHUB_OUTPUT
           else
@@ -158,7 +159,14 @@ jobs:
           TAG_NAME="v${{ steps.final.outputs.version }}"
 
           if git rev-parse "$TAG_NAME" >/dev/null 2>&1; then
-            echo "::warning::Tag $TAG_NAME already exists — skipping creation."
+            # Tag exists. If apply_strip was skipped (no -dev* on main, so
+            # we just want to tag the existing version), then re-running on
+            # the same SHA is benign — tag was already created. Skip cleanly.
+            # If apply_strip ran in this job (did_strip=true), it would have
+            # halted earlier due to its own existence guard, so this branch
+            # only fires for did_strip=false workflows on already-tagged
+            # commits.
+            echo "::warning::Tag $TAG_NAME already exists — workflow re-run on the same commit. Skipping creation."
             echo "created=false" >> $GITHUB_OUTPUT
             exit 0
           fi
