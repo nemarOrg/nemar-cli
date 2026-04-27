@@ -4,12 +4,15 @@ name: Auto Tag and Release
 #
 # 1. Pre-release strip (e.g., 0.8.2-dev4 lands on main):
 #    - Detect "-dev*" suffix.
-#    - Bump package.json to clean version (0.8.2).
-#    - Commit + push to main with "[skip ci]" so this workflow does not
-#      re-trigger on the bump commit.
+#    - Bump package.json to clean version (0.8.2) as nemar-bot.
+#    - Commit + push to main. The bot push re-triggers this workflow,
+#      but the job-level `if:` filters on author email and skips.
 #    - Tag the bump commit `v0.8.2` and create a stable GitHub Release.
-#    - Tag push triggers npm-publish.yml separately (different event,
-#      so [skip ci] on the branch commit does not affect it).
+#    - Tag push triggers npm-publish.yml independently.
+#    - We deliberately do NOT use `[skip ci]` in the strip-commit
+#      message: GitHub's skip-ci marker is per-commit (not per-event),
+#      so it would also block the tag-push event from triggering
+#      npm-publish.yml on the same SHA.
 #    - sync-dev.yml fires after npm publish succeeds, merges main back
 #      to dev, and bumps dev to next-patch-dev0.
 #
@@ -28,6 +31,10 @@ permissions:
 
 jobs:
   tag:
+    # Skip the entire job when the push was made by the release bot.
+    # The strip-and-push step below commits as nemar-bot; without this
+    # filter, the bot's push would re-trigger this workflow forever.
+    if: github.event.head_commit.author.email != 'nemar-bot@users.noreply.github.com'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
@@ -53,8 +60,7 @@ jobs:
           bun-version: latest
 
       - name: Install dependencies
-        # bump-version.sh runs `bun run build` to verify the bump, which
-        # needs node_modules. Only run when we actually need to strip.
+        # bump-version.sh runs `bun run build` to verify the bump.
         run: bun install
 
       - name: Detect and strip -dev* suffix
@@ -79,27 +85,20 @@ jobs:
       - name: Apply strip and push
         id: apply_strip
         if: steps.strip.outputs.did_strip == 'true'
-        # Fail-fast philosophy: a release workflow that silently degrades
-        # to "ship -dev4@dev instead of -clean@latest" is worse than one
-        # that halts. Releases are rare; the operator can re-run after
-        # fixing the underlying cause (PAT expiry, hook regression, etc.)
-        # rather than discovering a wrongly-tagged npm publish later.
+        # Fail-fast: a release workflow that silently degrades to "ship
+        # -dev4@dev instead of clean@latest" is worse than one that halts.
+        # Operator re-runs after fixing the underlying cause.
         env:
           # bump-version.sh -> git commit triggers husky pre-commit which
           # runs root + backend typecheck. Backend deps are not installed
-          # in this job and the bump itself is mechanical (jq edit), so
-          # disable husky entirely here. HUSKY=0 is the supported toggle
-          # (per husky docs); not the same as --no-verify per-commit.
+          # here and the bump is mechanical, so disable husky.
           HUSKY: '0'
         run: |
           STRIPPED="${{ steps.strip.outputs.stripped }}"
 
           # Anomaly: target tag already exists but package.json on main is
-          # still at the unstripped -dev* version. Either someone tagged
-          # manually without bumping, or a previous run partially completed
-          # in an inconsistent state. Refuse to proceed — tagging the
-          # literal -dev* would publish a prerelease that the operator
-          # didn't ask for.
+          # still at the unstripped -dev* version. Refuse to tag the
+          # literal -dev*; investigate manually.
           if git rev-parse "v$STRIPPED" >/dev/null 2>&1; then
             echo "::error::Tag v$STRIPPED already exists but package.json is still at ${{ steps.strip.outputs.original }}. Refusing to tag the literal -dev* version. Investigate manually."
             exit 1
@@ -108,45 +107,37 @@ jobs:
           git config user.name "nemar-bot"
           git config user.email "nemar-bot@users.noreply.github.com"
 
-          # Use bump-version.sh for build verification + consistent commit
-          # behavior. It commits "chore: bump version to $STRIPPED".
+          # bump-version.sh commits "chore: bump version to $STRIPPED".
           BEFORE_HASH=$(git rev-parse HEAD)
           ./scripts/bump-version.sh "$STRIPPED"
           AFTER_HASH=$(git rev-parse HEAD)
 
-          # bump-version.sh exits 0 without committing if package.json was
-          # already at $STRIPPED. With did_strip=true this is contradictory
-          # (we just read $original != $stripped). Halt: something raced
-          # between the strip-detect step and now.
+          # No-op despite did_strip=true is contradictory; halt.
           if [ "$BEFORE_HASH" = "$AFTER_HASH" ]; then
             echo "::error::bump-version.sh did not create a new commit despite did_strip=true. State raced between detection and apply."
             exit 1
           fi
 
-          # Amend with [skip ci] so this workflow does not re-trigger on
-          # the bump commit when it lands on main. Tag push (separate
-          # event) is not affected by [skip ci].
-          ORIGINAL_MSG=$(git log -1 --format=%s)
-          git commit --amend -m "$ORIGINAL_MSG [skip ci]"
-
+          # Push the bump commit. Re-trigger of this workflow on the
+          # nemar-bot push is prevented by the job-level `if:` guard.
+          # NO [skip ci] in the message: that marker would also block
+          # the tag-push event from triggering npm-publish.yml.
           git push origin main
 
-          echo "Pushed strip-commit: $ORIGINAL_MSG [skip ci]"
+          echo "Pushed strip-commit: $(git log -1 --format=%s)"
 
       - name: Determine final version for tag
         id: final
         run: |
-          # Pull the strip-commit (if any) so HEAD matches what is on
-          # remote main. Drop `|| true`: a fast-forward failure here means
-          # local diverges from remote (third-party push, force-push, etc.),
-          # and tagging a stale local would mis-publish.
+          # Pull the strip-commit (if any) so HEAD matches remote main.
+          # No `|| true`: FF failure means divergence (force-push, race)
+          # and tagging stale local would mis-publish.
           git pull --ff-only origin main
           FINAL=$(jq -r '.version' package.json)
           echo "version=$FINAL" >> $GITHUB_OUTPUT
           echo "Tagging version: $FINAL"
 
-          # Prerelease iff the version still has "-" after the strip step
-          # (covers intentional -rc/-alpha/-beta releases).
+          # Prerelease iff `-` remains after strip step.
           if [[ "$FINAL" == *-* ]]; then
             echo "prerelease=true" >> $GITHUB_OUTPUT
           else
@@ -159,14 +150,7 @@ jobs:
           TAG_NAME="v${{ steps.final.outputs.version }}"
 
           if git rev-parse "$TAG_NAME" >/dev/null 2>&1; then
-            # Tag exists. If apply_strip was skipped (no -dev* on main, so
-            # we just want to tag the existing version), then re-running on
-            # the same SHA is benign — tag was already created. Skip cleanly.
-            # If apply_strip ran in this job (did_strip=true), it would have
-            # halted earlier due to its own existence guard, so this branch
-            # only fires for did_strip=false workflows on already-tagged
-            # commits.
-            echo "::warning::Tag $TAG_NAME already exists — workflow re-run on the same commit. Skipping creation."
+            echo "::warning::Tag $TAG_NAME already exists — workflow re-run on already-tagged commit. Skipping creation."
             echo "created=false" >> $GITHUB_OUTPUT
             exit 0
           fi
@@ -188,9 +172,8 @@ jobs:
           TAG_NAME="v${{ steps.final.outputs.version }}"
           PRERELEASE="${{ steps.final.outputs.prerelease }}"
 
-          # `--generate-notes` without `--notes-start-tag` lets GitHub pick
-          # the previous semantic tag automatically — robust against the
-          # strip-commit's HEAD^ no longer reflecting the prior release.
+          # `--generate-notes` without `--notes-start-tag` lets GitHub
+          # pick the previous semantic tag automatically.
           RELEASE_ARGS=(
             "$TAG_NAME"
             --title "$TAG_NAME"
