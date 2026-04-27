@@ -1803,17 +1803,29 @@ export async function countPendingDownload(
 ): Promise<{ fileCount: number; totalBytes: number } | null> {
   const targets = paths && paths.length > 0 ? paths : ["."];
   try {
-    const { stdout, exitCode } = await runCommand(
+    const { stdout, stderr, exitCode } = await runCommand(
       ["git", "annex", "find", "--not", "--in=here", "--json", ...targets],
       { cwd: datasetPath },
     );
-    if (exitCode !== 0) return null;
+    if (exitCode !== 0) {
+      if (process.env.VERBOSE && stderr.trim()) {
+        console.warn(`countPendingDownload: git annex find failed: ${stderr.trim()}`);
+      }
+      return null;
+    }
 
     let fileCount = 0;
     let totalBytes = 0;
+    let sawNonJson = false;
+    let sawAnyContent = false;
     for (const line of stdout.split("\n")) {
       const trimmed = line.trim();
-      if (!trimmed.startsWith("{")) continue;
+      if (!trimmed) continue;
+      sawAnyContent = true;
+      if (!trimmed.startsWith("{")) {
+        sawNonJson = true;
+        continue;
+      }
       try {
         const entry = JSON.parse(trimmed) as { bytesize?: string };
         fileCount++;
@@ -1822,11 +1834,21 @@ export async function countPendingDownload(
           if (Number.isFinite(n)) totalBytes += n;
         }
       } catch {
-        // ignore malformed lines
+        sawNonJson = true;
       }
     }
+
+    // Distinguish "annex find succeeded with truly empty output" (zero pending)
+    // from "annex emitted only warnings/non-JSON" (unknown). The former is
+    // authoritative; the latter must degrade so the caller does not
+    // misreport "All data files already present".
+    if (fileCount === 0 && sawAnyContent && sawNonJson) return null;
+
     return { fileCount, totalBytes };
-  } catch {
+  } catch (err) {
+    if (process.env.VERBOSE) {
+      console.warn(`countPendingDownload: ${(err as Error).message}`);
+    }
     return null;
   }
 }

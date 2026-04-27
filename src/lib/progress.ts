@@ -89,8 +89,11 @@ export class DownloadProgressTracker {
   private filesCompleted = 0;
   private filesTotal: number;
   private bytesTotal = 0;
-  private currentFileBytesTransferred = 0;
-  private currentFileBytesTotal = 0;
+  // Per-file in-flight state. With `-J N` git-annex interleaves
+  // --json-progress events from up to N concurrent files on stdout, so a
+  // single shared "current file" pair would credit the wrong file's bytes
+  // to whichever file completed first.
+  private inFlight = new Map<string, { transferred: number; total: number }>();
   private currentFile = "";
   private startTime: number;
   private lastUpdateTime: number;
@@ -107,39 +110,56 @@ export class DownloadProgressTracker {
   }
 
   /**
+   * Sum of bytes currently in flight across all concurrent files.
+   */
+  private inFlightBytes(): number {
+    let sum = 0;
+    for (const v of this.inFlight.values()) sum += v.transferred;
+    return sum;
+  }
+
+  /**
    * Process a parsed JSON line from git-annex --json-progress output
    */
   processLine(parsed: GitAnnexProgressLine): void {
     // File completion event
     if (parsed.ok === true || parsed.success === true) {
       this.filesCompleted++;
-      this.totalBytesTransferred += this.currentFileBytesTotal || this.currentFileBytesTransferred;
-      this.currentFileBytesTransferred = 0;
-      this.currentFileBytesTotal = 0;
+      // Credit the matching file's known total (preferred) or last-seen
+      // transferred bytes. With concurrent transfers we cannot rely on a
+      // shared "current file" — match by `parsed.file` when present.
+      const key = parsed.file ?? this.currentFile;
+      const state = key ? this.inFlight.get(key) : undefined;
+      const credited = state ? state.total || state.transferred : 0;
+      this.totalBytesTransferred += credited;
+      if (key) this.inFlight.delete(key);
       this.render();
       return;
     }
 
     // Progress update within a file
     if (parsed["byte-progress"] !== undefined) {
-      this.currentFile = parsed.file || this.currentFile;
-      this.currentFileBytesTransferred = parsed["byte-progress"];
-      if (parsed["total-size"] !== undefined) {
-        this.currentFileBytesTotal = parsed["total-size"];
-      }
+      const key = parsed.file ?? this.currentFile;
+      if (!key) return;
+      this.currentFile = key;
+
+      const state = this.inFlight.get(key) ?? { transferred: 0, total: 0 };
+      state.transferred = parsed["byte-progress"] ?? state.transferred;
+      if (parsed["total-size"] !== undefined) state.total = parsed["total-size"];
+      this.inFlight.set(key, state);
 
       // Update speed estimate
       const now = Date.now();
       const elapsed = (now - this.lastUpdateTime) / 1000;
       if (elapsed > 0.5) {
-        const bytesDelta =
-          this.totalBytesTransferred + this.currentFileBytesTransferred - this.lastBytesTransferred;
+        const currentTotal = this.totalBytesTransferred + this.inFlightBytes();
+        const bytesDelta = currentTotal - this.lastBytesTransferred;
         const speed = bytesDelta / elapsed;
         if (speed > 0) {
           this.speedSamples.push(speed);
           if (this.speedSamples.length > 5) this.speedSamples.shift();
         }
-        this.lastBytesTransferred = this.totalBytesTransferred + this.currentFileBytesTransferred;
+        this.lastBytesTransferred = currentTotal;
         this.lastUpdateTime = now;
       }
 
@@ -175,7 +195,7 @@ export class DownloadProgressTracker {
    * Returns null when no authoritative total has been set.
    */
   getPercent(): number | null {
-    const currentTotal = this.totalBytesTransferred + this.currentFileBytesTransferred;
+    const currentTotal = this.totalBytesTransferred + this.inFlightBytes();
     if (this.bytesTotal > 0) {
       return Math.min(100, Math.round((currentTotal / this.bytesTotal) * 100));
     }
@@ -192,7 +212,7 @@ export class DownloadProgressTracker {
     return {
       filesCompleted: this.filesCompleted,
       filesTotal: this.filesTotal,
-      bytesTransferred: this.totalBytesTransferred + this.currentFileBytesTransferred,
+      bytesTransferred: this.totalBytesTransferred + this.inFlightBytes(),
       bytesTotal: this.bytesTotal,
       currentFile: this.currentFile || undefined,
     };
@@ -207,7 +227,7 @@ export class DownloadProgressTracker {
         ? this.speedSamples.reduce((a, b) => a + b, 0) / this.speedSamples.length
         : 0;
 
-    const currentTotal = this.totalBytesTransferred + this.currentFileBytesTransferred;
+    const currentTotal = this.totalBytesTransferred + this.inFlightBytes();
 
     // Prefer byte-based percentage when an authoritative bytesTotal was set.
     // Fall back to file-based only when files are pre-counted. Never invent a
@@ -248,13 +268,15 @@ export class DownloadProgressTracker {
       line += ` | ${formatSpeed(avgSpeed)}`;
     }
     if (avgSpeed > 0) {
-      // ETA from overall remaining bytes when known, else from current file
-      const remaining =
-        this.bytesTotal > 0
-          ? Math.max(0, this.bytesTotal - currentTotal)
-          : this.currentFileBytesTotal > 0
-            ? this.currentFileBytesTotal - this.currentFileBytesTransferred
-            : 0;
+      // ETA from overall remaining bytes when known, else from in-flight files
+      let remaining = 0;
+      if (this.bytesTotal > 0) {
+        remaining = Math.max(0, this.bytesTotal - currentTotal);
+      } else {
+        for (const v of this.inFlight.values()) {
+          if (v.total > v.transferred) remaining += v.total - v.transferred;
+        }
+      }
       if (remaining > 0) {
         const eta = remaining / avgSpeed;
         if (eta > 0) line += ` | ETA ${formatEta(eta)}`;
