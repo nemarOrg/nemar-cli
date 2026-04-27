@@ -1787,6 +1787,73 @@ interface GitAnnexProgressLine {
 export type DownloadProgressCallback = (line: GitAnnexProgressLine) => void;
 
 /**
+ * Count files and bytes pending download from remote(s).
+ *
+ * Wraps `git annex find --not --in=here --json` and sums the `bytesize`
+ * field. Used to seed progress totals before calling `git annex get` so the
+ * progress bar has an authoritative denominator.
+ *
+ * Returns {fileCount: 0, totalBytes: 0} when nothing is pending.
+ * Returns null when the command fails (e.g., git-annex too old) so callers
+ * can degrade gracefully rather than aborting.
+ */
+export async function countPendingDownload(
+  datasetPath: string,
+  paths?: string[],
+): Promise<{ fileCount: number; totalBytes: number } | null> {
+  const targets = paths && paths.length > 0 ? paths : ["."];
+  try {
+    const { stdout, stderr, exitCode } = await runCommand(
+      ["git", "annex", "find", "--not", "--in=here", "--json", ...targets],
+      { cwd: datasetPath },
+    );
+    if (exitCode !== 0) {
+      if (process.env.VERBOSE && stderr.trim()) {
+        console.warn(`countPendingDownload: git annex find failed: ${stderr.trim()}`);
+      }
+      return null;
+    }
+
+    let fileCount = 0;
+    let totalBytes = 0;
+    let sawNonJson = false;
+    let sawAnyContent = false;
+    for (const line of stdout.split("\n")) {
+      const trimmed = line.trim();
+      if (!trimmed) continue;
+      sawAnyContent = true;
+      if (!trimmed.startsWith("{")) {
+        sawNonJson = true;
+        continue;
+      }
+      try {
+        const entry = JSON.parse(trimmed) as { bytesize?: string };
+        fileCount++;
+        if (entry.bytesize) {
+          const n = Number.parseInt(entry.bytesize, 10);
+          if (Number.isFinite(n)) totalBytes += n;
+        }
+      } catch {
+        sawNonJson = true;
+      }
+    }
+
+    // Distinguish "annex find succeeded with truly empty output" (zero pending)
+    // from "annex emitted only warnings/non-JSON" (unknown). The former is
+    // authoritative; the latter must degrade so the caller does not
+    // misreport "All data files already present".
+    if (fileCount === 0 && sawAnyContent && sawNonJson) return null;
+
+    return { fileCount, totalBytes };
+  } catch (err) {
+    if (process.env.VERBOSE) {
+      console.warn(`countPendingDownload: ${(err as Error).message}`);
+    }
+    return null;
+  }
+}
+
+/**
  * Get data files from remote (S3) for a cloned dataset.
  *
  * When onProgress is provided, uses --json-progress to stream progress

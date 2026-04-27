@@ -83,6 +83,7 @@ import {
   configureLargefiles,
   configureS3Remote,
   copyToAnnexRemote,
+  countPendingDownload,
   dropFiles,
   dropUnusedAnnexObjects,
   enableS3Remote,
@@ -1996,7 +1997,13 @@ Examples:
     } else {
       console.log(chalk.bold(`Downloading data files (${options.jobs} parallel streams)...`));
 
-      const tracker = new DownloadProgressTracker();
+      // Pre-count pending files+bytes so the progress bar has an authoritative
+      // denominator. Falls back to non-percent display if precount fails.
+      const pending = await countPendingDownload(absoluteOutput);
+      const tracker = new DownloadProgressTracker(
+        pending?.fileCount ?? 0,
+        pending?.totalBytes ?? 0,
+      );
 
       const getResult = await getDatasetData(absoluteOutput, {
         jobs: Number.parseInt(options.jobs, 10),
@@ -3992,12 +3999,33 @@ Examples:
     }
 
     const paths = files.length > 0 ? files : undefined;
-    const desc = paths ? `Getting ${paths.length} path(s)...` : "Getting all data files...";
-    const spinner = ora(desc).start();
 
-    const result = await getDatasetData(cwd, { jobs, paths, credentials: getS3Creds });
+    // Pre-count pending files+bytes scoped to the same paths the get will use.
+    const pending = await countPendingDownload(cwd, paths);
+
+    if (pending && pending.fileCount === 0) {
+      console.log(chalk.green("All data files already present"));
+      if (getCreds) {
+        await clearAnnexCredentials(cwd);
+      }
+      return;
+    }
+
+    const desc = paths
+      ? `Getting ${paths.length} path(s)${pending ? ` (${pending.fileCount} files, ${formatBytes(pending.totalBytes)})` : ""}...`
+      : `Getting all data files${pending ? ` (${pending.fileCount} files, ${formatBytes(pending.totalBytes)})` : ""}...`;
+    console.log(chalk.bold(desc));
+
+    const tracker = new DownloadProgressTracker(pending?.fileCount ?? 0, pending?.totalBytes ?? 0);
+
+    const result = await getDatasetData(cwd, {
+      jobs,
+      paths,
+      credentials: getS3Creds,
+      onProgress: (line) => tracker.processLine(line),
+    });
     if (!result.success) {
-      spinner.fail("Failed to get data");
+      tracker.finish(0);
       console.log(chalk.red(`  ${result.error}`));
       if (getCreds) {
         await clearAnnexCredentials(cwd);
@@ -4005,15 +4033,17 @@ Examples:
       process.exit(1);
     }
 
+    tracker.finish(result.filesDownloaded || 0);
+
     // Clear cached S3 credentials so future operations request fresh tokens
     if (getCreds) {
       await clearAnnexCredentials(cwd);
     }
 
     if (result.filesDownloaded === 0) {
-      spinner.succeed("All data files already present");
+      console.log(chalk.green("All data files already present"));
     } else {
-      spinner.succeed(`Downloaded ${result.filesDownloaded} file(s)`);
+      console.log(chalk.green(`Downloaded ${result.filesDownloaded} file(s)`));
     }
   });
 
