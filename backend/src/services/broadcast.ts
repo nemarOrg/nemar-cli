@@ -162,8 +162,7 @@ export function buildBroadcastHtml(subject: string, bodyHtml: string): string {
   <hr style="border: none; border-top: 1px solid #eee; margin: 30px 0;">
 
   <p style="color: #999; font-size: 12px; margin-top: 30px;">
-    NEMAR - Neuroelectromagnetic Data Archive and Tools Resource<br>
-    Part of <a href="https://osc.earth" style="color: #999;">Open Science Collective</a>
+    <a href="https://nemar.org" style="color: #999;">NEMAR</a> - Neuroelectromagnetic Data Archive and Tools Resource
   </p>
 </body>
 </html>
