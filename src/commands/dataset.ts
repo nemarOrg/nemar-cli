@@ -93,10 +93,14 @@ import {
   getDatasetIdFromRemote,
   getLocalDatasetInfo,
   gitAnnexAdd,
+  gitFetchOrigin,
   initDataset,
   isGitAnnexDataset,
+  isWorkingTreeDirty,
   pushBranch,
   pushToGitHub,
+  readLocalDatasetVersion,
+  readRemoteHeadDatasetVersion,
   saveDataset,
   toS3Credentials,
   verifyGitHubAuth,
@@ -1624,6 +1628,7 @@ datasetCommand
   .option("-o, --output <path>", "Output directory (default: ./<dataset-id>)")
   .option("-j, --jobs <number>", "Parallel download streams (default: 4)", "4")
   .option("--no-data", "Download metadata only (skip large data files)")
+  .option("--resume", "Resume a partial download into an existing clone")
   .addHelpText(
     "after",
     `
@@ -1646,6 +1651,7 @@ Examples:
   $ nemar dataset download nm000104 -o ./data    # Custom output directory
   $ nemar dataset download nm000104 --no-data    # Metadata only (fast)
   $ nemar dataset download nm000104 -j 8         # More parallel streams
+  $ nemar dataset download nm000104 --resume     # Resume partial download
   $ nemar dataset download ds000248              # Download from OpenNeuro`,
   )
   .action(async (datasetId, options) => {
@@ -1700,15 +1706,71 @@ Examples:
     const outputPath = options.output || effectiveId;
     const absoluteOutput = resolve(outputPath);
 
-    // Check if output already exists
-    if (existsSync(absoluteOutput)) {
+    // Resume mode: validate the existing clone is the right dataset and skip the clone step.
+    if (options.resume) {
+      if (!existsSync(absoluteOutput)) {
+        console.log(chalk.red(`Error: --resume target does not exist: ${absoluteOutput}`));
+        console.log(chalk.dim("Drop --resume to perform a fresh clone."));
+        process.exit(1);
+      }
+
+      spinner = ora("Validating resume target...").start();
+
+      if (!(await isGitAnnexDataset(absoluteOutput))) {
+        spinner.fail("Not a git-annex dataset");
+        console.log(chalk.red(`  ${absoluteOutput} is not a git-annex repository.`));
+        console.log(chalk.dim("--resume requires a previous clone of the same dataset."));
+        process.exit(1);
+      }
+
+      const existingId = await getDatasetIdFromRemote(absoluteOutput);
+      if (existingId !== effectiveId) {
+        spinner.fail("Dataset ID mismatch");
+        console.log(
+          chalk.red(
+            `  Expected ${effectiveId}, but ${absoluteOutput} is a clone of ${existingId ?? "an unknown repo"}.`,
+          ),
+        );
+        process.exit(1);
+      }
+
+      if (await isWorkingTreeDirty(absoluteOutput)) {
+        spinner.fail("Working tree is dirty");
+        console.log(chalk.red("  Refusing to resume with uncommitted local changes."));
+        console.log(chalk.dim("  Commit, stash, or discard them first."));
+        process.exit(1);
+      }
+
+      // Refresh remote refs so we can compare versions.
+      const fetchResult = await gitFetchOrigin(absoluteOutput);
+      if (!fetchResult.success) {
+        spinner.fail("Failed to fetch remote refs");
+        console.log(chalk.red(`  ${fetchResult.error}`));
+        process.exit(1);
+      }
+
+      const localVersion = readLocalDatasetVersion(absoluteOutput);
+      const remoteVersion = await readRemoteHeadDatasetVersion(absoluteOutput);
+      if (localVersion && remoteVersion && localVersion !== remoteVersion) {
+        spinner.fail("Local clone is behind upstream");
+        console.log(chalk.red(`  Local version: ${localVersion} | Remote HEAD: ${remoteVersion}`));
+        console.log(
+          chalk.dim("  Run `nemar dataset download <id> --update` to pull the version diff."),
+        );
+        process.exit(1);
+      }
+
+      spinner.succeed(`Resume target verified: ${effectiveId}`);
+    } else if (existsSync(absoluteOutput)) {
       console.log(chalk.red(`Error: Output path already exists: ${absoluteOutput}`));
-      console.log("Remove or rename the existing directory and try again.");
+      console.log(
+        "Remove or rename the existing directory, or pass --resume to continue a partial download.",
+      );
       process.exit(1);
     }
 
     console.log();
-    console.log(chalk.bold("Download Plan:"));
+    console.log(chalk.bold(options.resume ? "Resume Plan:" : "Download Plan:"));
     console.log(`  Dataset: ${datasetInfo.name} (${effectiveId})`);
     console.log(`  Output: ${absoluteOutput}`);
     console.log(`  Data files: ${options.data === false ? "metadata only" : "included"}`);
@@ -1717,18 +1779,20 @@ Examples:
     }
     console.log();
 
-    // Step 4: Clone the dataset (metadata)
-    const repoUrl = `https://github.com/${datasetInfo.github_repo}.git`;
-    spinner = ora("Cloning metadata from GitHub...").start();
+    // Step 4: Clone the dataset (metadata) — skipped on resume.
+    if (!options.resume) {
+      const repoUrl = `https://github.com/${datasetInfo.github_repo}.git`;
+      spinner = ora("Cloning metadata from GitHub...").start();
 
-    const cloneResult = await cloneDataset(repoUrl, absoluteOutput);
-    if (!cloneResult.success) {
-      spinner.fail("Failed to clone dataset");
-      console.log(chalk.red(`  ${cloneResult.error}`));
-      process.exit(1);
+      const cloneResult = await cloneDataset(repoUrl, absoluteOutput);
+      if (!cloneResult.success) {
+        spinner.fail("Failed to clone dataset");
+        console.log(chalk.red(`  ${cloneResult.error}`));
+        process.exit(1);
+      }
+
+      spinner.succeed("Metadata cloned");
     }
-
-    spinner.succeed("Metadata cloned");
 
     // For private datasets, fetch temporary S3 download credentials
     let downloadCreds: Awaited<ReturnType<typeof requestDownloadCredentials>> | null = null;

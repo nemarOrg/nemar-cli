@@ -5,7 +5,7 @@
  * Requires git-annex >= 10.0 to be installed.
  */
 
-import { existsSync, statSync } from "node:fs";
+import { existsSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { spawn } from "bun";
 import chalk from "chalk";
@@ -1797,12 +1797,19 @@ export async function getDatasetData(
   options: {
     jobs?: number;
     paths?: string[]; // Specific paths to get, or all if empty
+    /**
+     * Extra arguments inserted before the path arguments. Used by callers to
+     * pass git-annex matching options like --include/--exclude/--and/--or
+     * (and the literal "-(" / "-)" group delimiters).
+     */
+    extraArgs?: string[];
     credentials?: S3Credentials;
     onProgress?: DownloadProgressCallback;
   } = {},
 ): Promise<{ success: boolean; error?: string; filesDownloaded?: number }> {
   const jobs = options.jobs || 4;
   const paths = options.paths && options.paths.length > 0 ? options.paths : ["."];
+  const extraArgs = options.extraArgs ?? [];
   const useProgress = Boolean(options.onProgress);
 
   const env: Record<string, string> = {};
@@ -1829,6 +1836,7 @@ export async function getDatasetData(
         "--json-progress",
         "-J",
         jobs.toString(),
+        ...extraArgs,
         ...paths,
       ];
 
@@ -1916,7 +1924,7 @@ export async function getDatasetData(
     }
 
     // Non-streaming fallback (no onProgress callback)
-    const args = ["git", "annex", "get", "-J", jobs.toString(), ...paths];
+    const args = ["git", "annex", "get", "-J", jobs.toString(), ...extraArgs, ...paths];
     const { stdout, stderr, exitCode } = await runCommand(args, {
       cwd: datasetPath,
       ...(Object.keys(env).length > 0 && { env: mergedEnv }),
@@ -2465,6 +2473,118 @@ export async function getDatasetIdFromRemote(datasetPath: string): Promise<strin
   } catch {
     return null;
   }
+}
+
+/**
+ * Read DatasetVersion from the local working tree's dataset_description.json.
+ * Returns null if the file is missing, unreadable, or has no version field.
+ */
+export function readLocalDatasetVersion(datasetPath: string): string | null {
+  const descPath = join(datasetPath, "dataset_description.json");
+  if (!existsSync(descPath)) return null;
+  try {
+    const desc = JSON.parse(readFileSync(descPath, "utf-8")) as { DatasetVersion?: unknown };
+    return typeof desc.DatasetVersion === "string" ? desc.DatasetVersion : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Read DatasetVersion from the remote HEAD's dataset_description.json without
+ * checking it out. Requires `git fetch` to have populated the remote ref.
+ */
+export async function readRemoteHeadDatasetVersion(datasetPath: string): Promise<string | null> {
+  const refs = ["origin/HEAD", "origin/main", "origin/master"];
+  for (const ref of refs) {
+    const { stdout, exitCode } = await runCommand(
+      ["git", "show", `${ref}:dataset_description.json`],
+      { cwd: datasetPath },
+    );
+    if (exitCode !== 0 || !stdout.trim()) continue;
+    try {
+      const desc = JSON.parse(stdout) as { DatasetVersion?: unknown };
+      if (typeof desc.DatasetVersion === "string") return desc.DatasetVersion;
+    } catch {
+      // Try next ref
+    }
+  }
+  return null;
+}
+
+/**
+ * Returns true if the working tree has uncommitted changes (staged, unstaged,
+ * or untracked).
+ */
+export async function isWorkingTreeDirty(datasetPath: string): Promise<boolean> {
+  const { stdout, exitCode } = await runCommand(["git", "status", "--porcelain"], {
+    cwd: datasetPath,
+  });
+  if (exitCode !== 0) return false;
+  return stdout.trim().length > 0;
+}
+
+/**
+ * Run `git fetch --tags origin` in the dataset working tree.
+ */
+export async function gitFetchOrigin(
+  datasetPath: string,
+): Promise<{ success: boolean; error?: string }> {
+  const { stderr, exitCode } = await runCommand(["git", "fetch", "--tags", "origin"], {
+    cwd: datasetPath,
+  });
+  if (exitCode !== 0) {
+    return { success: false, error: stderr.trim() || "git fetch failed" };
+  }
+  return { success: true };
+}
+
+/**
+ * Run `git merge --ff-only <ref>`. Returns success=false with a clear error if
+ * the merge cannot fast-forward (local has diverging commits).
+ */
+export async function gitMergeFastForward(
+  datasetPath: string,
+  ref: string,
+): Promise<{ success: boolean; error?: string }> {
+  const { stderr, exitCode } = await runCommand(["git", "merge", "--ff-only", ref], {
+    cwd: datasetPath,
+  });
+  if (exitCode !== 0) {
+    return { success: false, error: stderr.trim() || `Cannot fast-forward to ${ref}` };
+  }
+  return { success: true };
+}
+
+/**
+ * Drop unused annex objects (orphaned keys no longer referenced by any branch).
+ * Used by `nemar dataset download --update --prune` to reclaim space after
+ * upstream removed files.
+ */
+export async function dropUnusedAnnexObjects(
+  datasetPath: string,
+): Promise<{ success: boolean; error?: string; dropped?: number }> {
+  // Step 1: mark unused keys
+  const { exitCode: unusedCode, stderr: unusedStderr } = await runCommand(
+    ["git", "annex", "unused"],
+    { cwd: datasetPath },
+  );
+  if (unusedCode !== 0) {
+    return { success: false, error: unusedStderr.trim() || "git annex unused failed" };
+  }
+
+  // Step 2: drop them
+  const { stdout, stderr, exitCode } = await runCommand(
+    ["git", "annex", "dropunused", "--force", "all"],
+    { cwd: datasetPath },
+  );
+  if (exitCode !== 0) {
+    return { success: false, error: stderr.trim() || "git annex dropunused failed" };
+  }
+
+  // Count "dropunused N ok" lines from stdout
+  const dropMatches = stdout.match(/^dropunused .+ ok$/gm);
+  return { success: true, dropped: dropMatches ? dropMatches.length : 0 };
 }
 
 /**
