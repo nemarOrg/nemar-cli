@@ -27,8 +27,8 @@ export const DEFAULT_API_URL = "https://api.nemar.org";
 /**
  * Hosts that pointed at NEMAR backends before the SCCN cutover and are now
  * either retired or stuck in MAINTENANCE_MODE. migrateApiUrl() rewrites any
- * stored apiUrl matching one of these (after host-and-path normalization) to
- * DEFAULT_API_URL.
+ * stored apiUrl matching one of these (after trailing-slash and host-case
+ * normalization, see normalizeApiUrl) to DEFAULT_API_URL.
  *
  * Live hosts (api.nemar.org, *.sccn-org.workers.dev) are deliberately absent
  * so dev builds and self-hosted URLs are untouched.
@@ -41,18 +41,27 @@ const LEGACY_API_URLS: ReadonlySet<string> = new Set([
   "https://nemar-api-dev.shirazi-10f.workers.dev",
 ]);
 
-/** Strip trailing slash and lowercase scheme+host so equivalent URLs compare equal. */
+/**
+ * Strip trailing slashes and lowercase scheme+host so equivalent URL spellings
+ * compare equal. Path is intentionally left untouched: legacy entries above
+ * use lowercase paths and we don't want a hand-edited "/Nemar" to collide
+ * with a hypothetical future legacy that differs only in path case.
+ *
+ * On parse failure (malformed stored URL), logs once and returns the trimmed
+ * raw input so the LEGACY_API_URLS lookup falls through to a no-op rather
+ * than crashing CLI startup.
+ */
 function normalizeApiUrl(raw: string): string {
-  let u = raw.trim().replace(/\/+$/, "");
+  const trimmed = raw.trim().replace(/\/+$/, "");
   try {
-    const parsed = new URL(u);
+    const parsed = new URL(trimmed);
     parsed.protocol = parsed.protocol.toLowerCase();
     parsed.host = parsed.host.toLowerCase();
-    u = parsed.toString().replace(/\/+$/, "");
+    return parsed.toString().replace(/\/+$/, "");
   } catch {
-    // Non-URL string; leave as-is. Match below will fall through to no-op.
+    console.error(`[nemar] could not parse stored apiUrl ${JSON.stringify(raw)}; leaving as-is`);
+    return trimmed;
   }
-  return u;
 }
 
 /**
@@ -155,8 +164,10 @@ const config = new Conf<StoreSchema>({
     accounts: { type: "object" },
     apiKey: { type: "string" },
     // Top-level apiUrl is a legacy flat field consumed only by migrateConfig()
-    // when converting pre-multi-account configs. No schema default: we don't
-    // want Conf re-asserting it on every write after migrateApiUrl() drops it.
+    // when converting pre-multi-account configs. No schema default: with one,
+    // every Conf construction (i.e. every CLI start) merges the default into
+    // the on-disk store when the key is absent, fighting migrateApiUrl()'s
+    // cleanup. Without the default, once cleanup runs the field stays gone.
     apiUrl: { type: "string" },
     username: { type: "string" },
     email: { type: "string" },
@@ -250,19 +261,22 @@ export function migrateApiUrl(): void {
 
   // Drop the stale top-level apiUrl. migrateConfig() consumes it on first run;
   // after accounts is populated the field is unused and only confuses users
-  // who inspect config.json. Keeping it lets the Conf schema default
-  // (DEFAULT_API_URL) re-assert it on access if the file is rewritten.
+  // inspecting config.json (two apiUrl values, one top-level and one per
+  // account, with no obvious indication that only the per-account one wins).
   const topLevel = store.apiUrl;
   if (accounts && Object.keys(accounts).length > 0 && topLevel !== undefined) {
-    // Destructure to drop the key entirely (vs assigning undefined, which
-    // Conf may persist as a literal `null`/keep depending on adapter).
+    // Destructure to drop the key entirely. Assigning `undefined` would still
+    // satisfy `JSON.stringify` (undefined fields are dropped) but trips the
+    // AJV schema validation Conf runs before write.
     const { apiUrl: _legacy, ...next } = store;
     try {
       config.store = next as StoreSchema;
       console.error(`[nemar] removed stale top-level apiUrl from config (was: ${topLevel})`);
-      changed = false; // already wrote
+      changed = false; // single-write path: account rewrites are already in `next`
     } catch (error) {
-      console.error("API URL cleanup failed (stale top-level apiUrl preserved):", error);
+      // In-memory `accounts` was mutated above; the file write failed so the
+      // next CLI invocation re-reads the legacy URLs from disk and retries.
+      console.error("API URL cleanup failed (config file unchanged):", error);
     }
   }
 
@@ -270,7 +284,8 @@ export function migrateApiUrl(): void {
     try {
       config.store = { ...config.store, accounts };
     } catch (error) {
-      console.error("API URL migration failed (legacy URL preserved):", error);
+      // Same as above: in-memory mutation lost on next read; migration retries.
+      console.error("API URL migration failed (config file unchanged):", error);
     }
   }
 }
