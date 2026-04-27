@@ -5,6 +5,8 @@
  * creating/deleting repositories, and applying branch protection.
  */
 
+import { HttpError } from "./retry";
+
 const GITHUB_API = "https://api.github.com";
 // Dataset repos (nm000XXX) live in nemarDatasets org; tooling repos live in nemarOrg
 const ORG_NAME = "nemarDatasets";
@@ -1303,9 +1305,9 @@ export interface TreeEntry {
  * Returns all entries (blobs and trees) in the repository at that ref.
  */
 export async function getTreeAtRef(repo: string, ref: string, pat: string): Promise<TreeEntry[]> {
-  // First resolve the ref to a commit SHA. retryOn404: caller knows the ref
-  // (e.g., "main" or a tag we just wrote) should exist; a 404 here means
-  // GitHub hasn't propagated the write yet.
+  // First resolve the ref to a commit SHA. retryOn404: callers that pass a
+  // ref they just created (a tag we wrote, "main" right after a merge) will
+  // see GitHub briefly 404 the new ref while caches catch up; we retry those.
   const refResponse = await githubFetchWithRetry(
     `${GITHUB_API}/repos/${ORG_NAME}/${repo}/commits/${ref}`,
     {
@@ -1319,7 +1321,10 @@ export async function getTreeAtRef(repo: string, ref: string, pat: string): Prom
   );
 
   if (!refResponse.ok) {
-    throw new Error(`Failed to resolve ref '${ref}': HTTP ${refResponse.status}`);
+    throw new HttpError(
+      `Failed to resolve ref '${ref}': HTTP ${refResponse.status}`,
+      refResponse.status,
+    );
   }
 
   const commit = await refResponse.json<{ sha: string; commit: { tree: { sha: string } } }>();
@@ -1338,7 +1343,7 @@ export async function getTreeAtRef(repo: string, ref: string, pat: string): Prom
   );
 
   if (!treeResponse.ok) {
-    throw new Error(`Failed to get tree: HTTP ${treeResponse.status}`);
+    throw new HttpError(`Failed to get tree: HTTP ${treeResponse.status}`, treeResponse.status);
   }
 
   const tree = await treeResponse.json<{ tree: TreeEntry[]; truncated: boolean }>();
@@ -1369,7 +1374,7 @@ export async function getBlobContent(repo: string, blobSha: string, pat: string)
   );
 
   if (!response.ok) {
-    throw new Error(`Failed to get blob ${blobSha}: HTTP ${response.status}`);
+    throw new HttpError(`Failed to get blob ${blobSha}: HTTP ${response.status}`, response.status);
   }
 
   const blob = await response.json<{ content: string; encoding: string }>();
@@ -1408,7 +1413,10 @@ export async function getFileContent(
 
   if (response.status === 404) return null;
   if (!response.ok) {
-    throw new Error(`Failed to get ${filePath} from ${repo}: HTTP ${response.status}`);
+    throw new HttpError(
+      `Failed to get ${filePath} from ${repo}: HTTP ${response.status}`,
+      response.status,
+    );
   }
 
   const data = await response.json<{ content: string; encoding: string }>();
@@ -1434,7 +1442,12 @@ export async function getFileContent(
  * Apply tag protection rules to prevent deletion of version tags.
  * Protects tags matching the pattern "v*" (semver version tags).
  */
-export async function applyTagProtection(repo: string, pat: string): Promise<boolean> {
+/**
+ * Apply tag protection. Throws `HttpError` on terminal failure so the caller's
+ * step-level retry can classify the error and operators see status + body in
+ * the surfaced message. 422 is treated as success (rule already exists).
+ */
+export async function applyTagProtection(repo: string, pat: string): Promise<void> {
   // retryOn404: rulesets endpoint can briefly 404 right after a repo
   // visibility flip while GitHub propagates ACLs.
   const response = await githubFetchWithRetry(
@@ -1463,12 +1476,16 @@ export async function applyTagProtection(repo: string, pat: string): Promise<boo
     { retryOn404: true },
   );
 
-  if (response.ok || response.status === 201) return true;
-  // 422 means rule already exists
-  if (response.status === 422) return true;
+  // 2xx success or 422 (ruleset already exists) both count as applied.
+  if (response.ok || response.status === 422) return;
 
-  console.error(`[tag-protection] Failed for ${repo}: HTTP ${response.status}`);
-  return false;
+  const body = await response.text().catch(() => "<failed to read body>");
+  const snippet = body.slice(0, 300);
+  throw new HttpError(
+    `Tag protection failed for ${repo}: HTTP ${response.status}: ${snippet}`,
+    response.status,
+    snippet,
+  );
 }
 
 /**
@@ -1496,8 +1513,12 @@ export async function getMainBranchSha(repo: string, branch: string, pat: string
   );
 
   if (!response.ok) {
-    const error = await response.text();
-    throw new Error(`Failed to get ${branch} branch ref: ${error}`);
+    const error = await response.text().catch(() => "<failed to read body>");
+    throw new HttpError(
+      `Failed to get ${branch} branch ref: HTTP ${response.status}: ${error.slice(0, 300)}`,
+      response.status,
+      error.slice(0, 300),
+    );
   }
 
   const refData = (await response.json()) as { object: { sha: string } };

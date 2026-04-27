@@ -78,6 +78,7 @@ import {
   readBidsDescription,
   readRepoMetadata,
 } from "../services/repo-metadata";
+import { withRetry } from "../services/retry";
 import {
   addPublicReadPolicy,
   applyObjectLock,
@@ -143,71 +144,6 @@ interface StepResult {
   attempts: number;
   duration_ms: number;
   error?: string;
-}
-
-/**
- * Retry a transient operation up to maxAttempts times.
- *
- * Only retries on network errors, 5xx responses, and 429 rate limits.
- * 4xx validation errors are not retried.
- */
-async function withRetry<T>(
-  fn: () => Promise<T>,
-  stepName: string,
-  options?: {
-    maxAttempts?: number;
-    delayMs?: number;
-    isRetryable?: (error: unknown) => boolean;
-  },
-): Promise<{ result: T; attempts: number }> {
-  const maxAttempts = options?.maxAttempts ?? 3;
-  const delayMs = options?.delayMs ?? 1_000;
-  const isRetryable =
-    options?.isRetryable ??
-    ((error: unknown) => {
-      if (error instanceof Error) {
-        const msg = error.message.toLowerCase();
-        // Retry on network timeouts, connection errors
-        if (
-          msg.includes("timeout") ||
-          msg.includes("network") ||
-          msg.includes("econnreset") ||
-          msg.includes("fetch failed") ||
-          msg.includes("connection")
-        ) {
-          return true;
-        }
-        // Retry on 5xx and 429 status codes. The HTTP/status prefix avoids
-        // false positives on dataset IDs like nm000500. Allow whitespace or
-        // an opening paren between the prefix and the code so we match both
-        // GitHub-style ("HTTP 503") and EZID-style ("EZID HTTP error (503 ...)")
-        // error messages.
-        if (/(?:http|status)[\s(]*(?:error\s*\()?\s*(5\d\d|429)\b/i.test(msg)) {
-          return true;
-        }
-      }
-      return false;
-    });
-
-  let lastError: unknown;
-  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-    try {
-      const result = await fn();
-      return { result, attempts: attempt };
-    } catch (err) {
-      lastError = err;
-      if (attempt < maxAttempts && isRetryable(err)) {
-        console.log(
-          `[publish] ${stepName} attempt ${attempt} failed (retryable), retrying in ${delayMs}ms: ${err instanceof Error ? err.message : String(err)}`,
-        );
-        await new Promise((resolve) => setTimeout(resolve, delayMs));
-      } else {
-        // Not retryable or last attempt
-        break;
-      }
-    }
-  }
-  throw lastError;
 }
 
 export const adminRoutes = new Hono<{ Bindings: Bindings; Variables: Variables }>();
@@ -2906,31 +2842,18 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
   }
 
   // Step 4: Tag protection (before DOI to prevent tag manipulation)
-  // Idempotent: applyTagProtection treats 422 (rule already exists) as success,
-  // so wrapping with withRetry safely absorbs propagation delays after the
-  // repo_public flip.
+  // Idempotent: applyTagProtection treats 422 (rule already exists) as success
+  // and throws HttpError with status + body on terminal failure. withRetry
+  // absorbs the propagation 5xx/404 window after the repo_public flip.
   if (stepsToRun.includes("tag_protect")) {
     try {
       await startStep("tag_protect");
 
       const { applyTagProtection } = await import("../services/github");
-      const { result: tagProtected, attempts: tagAttempts } = await withRetry(
+      const { attempts: tagAttempts } = await withRetry(
         () => applyTagProtection(repoName, pat),
         "tag_protect",
       );
-
-      if (!tagProtected) {
-        await updateProgress("tag_protect", "Failed to apply tag protection rules", tagAttempts);
-        return c.json(
-          {
-            error: "Tag protection failed",
-            step: "tag_protect",
-            steps_completed: completed,
-            step_results: stepResults,
-          },
-          500,
-        );
-      }
 
       await updateProgress("tag_protect", undefined, tagAttempts);
     } catch (err) {
@@ -3052,10 +2975,10 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
               ZENODO_SANDBOX_API_KEY: c.env.ZENODO_SANDBOX_API_KEY,
             },
           );
-        const { result: doiResult } =
+        const { result: doiResult, attempts: doiAttempts } =
           provider === "ezid"
             ? await withRetry(doiCall, "doi_create")
-            : { result: await doiCall() };
+            : { result: await doiCall(), attempts: 1 };
         if (provider === "ezid") {
           await db
             .prepare(
@@ -3078,7 +3001,7 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
             .run();
         }
 
-        await updateProgress("doi_create");
+        await updateProgress("doi_create", undefined, doiAttempts);
       } else {
         await updateProgress("doi_create");
       }
