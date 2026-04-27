@@ -2063,6 +2063,15 @@ Examples:
       }
     }
     console.log();
+    if (options.update) {
+      console.log(
+        chalk.dim("Note: --update fetches only the version diff. If a prior version was"),
+      );
+      console.log(
+        chalk.dim("partially downloaded, run with --resume to fill any pre-existing gaps."),
+      );
+      console.log();
+    }
     console.log(chalk.dim("To get additional data:"));
     console.log(chalk.dim(`  cd ${absoluteOutput} && git annex get <path>`));
   });
