@@ -25,12 +25,35 @@ import { z } from "zod";
 export const DEFAULT_API_URL = "https://api.nemar.org";
 
 /**
- * Old default URL pre-Phase-9. Rewritten to DEFAULT_API_URL on CLI launch by
- * migrateApiUrl(). The legacy redirect on personal Cloudflare keeps stale
- * configs working too, but we proactively rewrite so users don't ride the
- * redirect forever.
+ * Hosts that pointed at NEMAR backends before the SCCN cutover and are now
+ * either retired or stuck in MAINTENANCE_MODE. migrateApiUrl() rewrites any
+ * stored apiUrl matching one of these (after host-and-path normalization) to
+ * DEFAULT_API_URL.
+ *
+ * Live hosts (api.nemar.org, *.sccn-org.workers.dev) are deliberately absent
+ * so dev builds and self-hosted URLs are untouched.
  */
-const LEGACY_DEFAULT_API_URL = "https://api.osc.earth/nemar";
+const LEGACY_API_URLS: ReadonlySet<string> = new Set([
+  // Pre-Phase-9 default; redirected to api.nemar.org but slated for sunset
+  "https://api.osc.earth/nemar",
+  // Legacy personal-account workers (dead / read-only after Phase 10)
+  "https://nemar-api.neuromechanist.workers.dev",
+  "https://nemar-api-dev.shirazi-10f.workers.dev",
+]);
+
+/** Strip trailing slash and lowercase scheme+host so equivalent URLs compare equal. */
+function normalizeApiUrl(raw: string): string {
+  let u = raw.trim().replace(/\/+$/, "");
+  try {
+    const parsed = new URL(u);
+    parsed.protocol = parsed.protocol.toLowerCase();
+    parsed.host = parsed.host.toLowerCase();
+    u = parsed.toString().replace(/\/+$/, "");
+  } catch {
+    // Non-URL string; leave as-is. Match below will fall through to no-op.
+  }
+  return u;
+}
 
 /**
  * Standardized config directory: ~/.config/nemar/ on all platforms.
@@ -131,7 +154,10 @@ const config = new Conf<StoreSchema>({
     activeAccount: { type: "string" },
     accounts: { type: "object" },
     apiKey: { type: "string" },
-    apiUrl: { type: "string", default: DEFAULT_API_URL },
+    // Top-level apiUrl is a legacy flat field consumed only by migrateConfig()
+    // when converting pre-multi-account configs. No schema default: we don't
+    // want Conf re-asserting it on every write after migrateApiUrl() drops it.
+    apiUrl: { type: "string" },
     username: { type: "string" },
     email: { type: "string" },
     githubUsername: { type: "string" },
@@ -189,39 +215,62 @@ export function migrateConfig(): void {
 migrateConfig();
 
 /**
- * Rewrite stored apiUrl entries that still point at the pre-cutover legacy
- * URL. The server-side redirect on the legacy host keeps old configs working,
- * but we rewrite proactively so users converge on the canonical host.
+ * Rewrite stored apiUrl entries that still point at a retired NEMAR backend
+ * to DEFAULT_API_URL, and drop the leftover top-level apiUrl field that
+ * pre-multi-account configs left behind.
  *
- * Only rewrites *exact* matches of the legacy default. Custom URLs (dev
- * builds, self-hosted, workers.dev fallbacks) are left alone.
+ * Match is by normalized URL (trailing slash stripped, scheme/host lowercased)
+ * against LEGACY_API_URLS. Live URLs and arbitrary self-hosted/dev workers.dev
+ * URLs are untouched.
  *
- * Idempotent and safe under concurrent CLI launches: the exact-match guard
- * means a second run is a no-op, and Conf writes via atomic file replace, so
- * a racing process sees pre- or post-state, never partial.
+ * Idempotent and safe under concurrent CLI launches: a second run is a no-op,
+ * and Conf writes via atomic file replace.
  *
  * If the underlying config write fails (EACCES, ENOSPC, FS race), we log and
- * continue rather than abort CLI startup. The legacy redirect is the safety
- * net, so the user's next command still works against the pre-rewrite URL.
+ * continue rather than abort CLI startup.
  */
 export function migrateApiUrl(): void {
-  const accounts = config.get("accounts") as Record<string, Config> | undefined;
-  if (!accounts) return;
+  const store = config.store as StoreSchema;
+  const accounts = store.accounts;
   let changed = false;
-  for (const [name, account] of Object.entries(accounts)) {
-    if (account?.apiUrl === LEGACY_DEFAULT_API_URL) {
-      accounts[name] = { ...account, apiUrl: DEFAULT_API_URL };
-      changed = true;
+
+  if (accounts) {
+    for (const [name, account] of Object.entries(accounts)) {
+      const url = account?.apiUrl;
+      if (!url) continue;
+      if (LEGACY_API_URLS.has(normalizeApiUrl(url))) {
+        accounts[name] = { ...account, apiUrl: DEFAULT_API_URL };
+        console.error(
+          `[nemar] migrated stored apiUrl for account "${name}": ${url} -> ${DEFAULT_API_URL}`,
+        );
+        changed = true;
+      }
     }
   }
+
+  // Drop the stale top-level apiUrl. migrateConfig() consumes it on first run;
+  // after accounts is populated the field is unused and only confuses users
+  // who inspect config.json. Keeping it lets the Conf schema default
+  // (DEFAULT_API_URL) re-assert it on access if the file is rewritten.
+  const topLevel = store.apiUrl;
+  if (accounts && Object.keys(accounts).length > 0 && topLevel !== undefined) {
+    // Destructure to drop the key entirely (vs assigning undefined, which
+    // Conf may persist as a literal `null`/keep depending on adapter).
+    const { apiUrl: _legacy, ...next } = store;
+    try {
+      config.store = next as StoreSchema;
+      console.error(`[nemar] removed stale top-level apiUrl from config (was: ${topLevel})`);
+      changed = false; // already wrote
+    } catch (error) {
+      console.error("API URL cleanup failed (stale top-level apiUrl preserved):", error);
+    }
+  }
+
   if (changed) {
     try {
       config.store = { ...config.store, accounts };
     } catch (error) {
-      console.error(
-        "API URL migration failed (legacy URL preserved, redirect still works):",
-        error,
-      );
+      console.error("API URL migration failed (legacy URL preserved):", error);
     }
   }
 }
