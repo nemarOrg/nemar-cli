@@ -88,6 +88,7 @@ function renderProgressBar(percent: number, width = 20): string {
 export class DownloadProgressTracker {
   private filesCompleted = 0;
   private filesTotal: number;
+  private bytesTotal = 0;
   private currentFileBytesTransferred = 0;
   private currentFileBytesTotal = 0;
   private currentFile = "";
@@ -98,8 +99,9 @@ export class DownloadProgressTracker {
   private speedSamples: number[] = [];
   private lastRenderedLine = "";
 
-  constructor(filesTotal = 0) {
+  constructor(filesTotal = 0, bytesTotal = 0) {
     this.filesTotal = filesTotal;
+    this.bytesTotal = bytesTotal;
     this.startTime = Date.now();
     this.lastUpdateTime = this.startTime;
   }
@@ -111,9 +113,6 @@ export class DownloadProgressTracker {
     // File completion event
     if (parsed.ok === true || parsed.success === true) {
       this.filesCompleted++;
-      if (this.filesTotal === 0 || this.filesCompleted > this.filesTotal) {
-        this.filesTotal = this.filesCompleted;
-      }
       this.totalBytesTransferred += this.currentFileBytesTotal || this.currentFileBytesTransferred;
       this.currentFileBytesTransferred = 0;
       this.currentFileBytesTotal = 0;
@@ -153,7 +152,6 @@ export class DownloadProgressTracker {
    */
   incrementFilesCompleted(): void {
     this.filesCompleted++;
-    if (this.filesTotal === 0) this.filesTotal = this.filesCompleted;
   }
 
   /**
@@ -161,6 +159,43 @@ export class DownloadProgressTracker {
    */
   setFilesTotal(total: number): void {
     this.filesTotal = total;
+  }
+
+  /**
+   * Set total bytes to transfer (if known ahead of time).
+   * When > 0, the progress percentage is computed from bytes (more stable
+   * than file count when sizes vary). When 0, the bar is hidden until known.
+   */
+  setBytesTotal(total: number): void {
+    this.bytesTotal = total;
+  }
+
+  /**
+   * Compute the current percent (0-100). Used for rendering and testing.
+   * Returns null when no authoritative total has been set.
+   */
+  getPercent(): number | null {
+    const currentTotal = this.totalBytesTransferred + this.currentFileBytesTransferred;
+    if (this.bytesTotal > 0) {
+      return Math.min(100, Math.round((currentTotal / this.bytesTotal) * 100));
+    }
+    if (this.filesTotal > 0) {
+      return Math.min(100, Math.round((this.filesCompleted / this.filesTotal) * 100));
+    }
+    return null;
+  }
+
+  /**
+   * Snapshot current counters (used in tests).
+   */
+  getProgress(): DownloadProgress {
+    return {
+      filesCompleted: this.filesCompleted,
+      filesTotal: this.filesTotal,
+      bytesTransferred: this.totalBytesTransferred + this.currentFileBytesTransferred,
+      bytesTotal: this.bytesTotal,
+      currentFile: this.currentFile || undefined,
+    };
   }
 
   /**
@@ -174,29 +209,56 @@ export class DownloadProgressTracker {
 
     const currentTotal = this.totalBytesTransferred + this.currentFileBytesTransferred;
 
-    // Calculate percentage from files
-    const filePercent =
-      this.filesTotal > 0 ? Math.round((this.filesCompleted / this.filesTotal) * 100) : 0;
+    // Prefer byte-based percentage when an authoritative bytesTotal was set.
+    // Fall back to file-based only when files are pre-counted. Never invent a
+    // total from completed counts (would pin progress at 100%).
+    let percent = 0;
+    let hasAuthoritativeTotal = false;
+    if (this.bytesTotal > 0) {
+      percent = Math.min(100, Math.round((currentTotal / this.bytesTotal) * 100));
+      hasAuthoritativeTotal = true;
+    } else if (this.filesTotal > 0) {
+      percent = Math.min(100, Math.round((this.filesCompleted / this.filesTotal) * 100));
+      hasAuthoritativeTotal = true;
+    }
 
-    // Build status line
-    const bar = renderProgressBar(filePercent);
     const filesStr =
       this.filesTotal > 0
         ? `${this.filesCompleted}/${this.filesTotal} files`
         : `${this.filesCompleted} files`;
 
-    let line = `${bar} ${filePercent}% ${filesStr}`;
+    let line: string;
+    if (hasAuthoritativeTotal) {
+      const bar = renderProgressBar(percent);
+      line = `${bar} ${percent}% ${filesStr}`;
+    } else {
+      // Degraded mode: no authoritative totals known. Show running counters
+      // without a misleading percent or bar.
+      line = filesStr;
+    }
 
     if (currentTotal > 0) {
-      line += ` | ${formatBytes(currentTotal)}`;
+      const bytesStr =
+        this.bytesTotal > 0
+          ? `${formatBytes(currentTotal)}/${formatBytes(this.bytesTotal)}`
+          : formatBytes(currentTotal);
+      line += ` | ${bytesStr}`;
     }
     if (avgSpeed > 0) {
       line += ` | ${formatSpeed(avgSpeed)}`;
     }
-    if (avgSpeed > 0 && this.currentFileBytesTotal > 0) {
-      const remaining = this.currentFileBytesTotal - this.currentFileBytesTransferred;
-      const eta = remaining / avgSpeed;
-      if (eta > 0) line += ` | ETA ${formatEta(eta)}`;
+    if (avgSpeed > 0) {
+      // ETA from overall remaining bytes when known, else from current file
+      const remaining =
+        this.bytesTotal > 0
+          ? Math.max(0, this.bytesTotal - currentTotal)
+          : this.currentFileBytesTotal > 0
+            ? this.currentFileBytesTotal - this.currentFileBytesTransferred
+            : 0;
+      if (remaining > 0) {
+        const eta = remaining / avgSpeed;
+        if (eta > 0) line += ` | ETA ${formatEta(eta)}`;
+      }
     }
 
     // Only write if changed (avoids flicker)
