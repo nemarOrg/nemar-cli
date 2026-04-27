@@ -81,6 +81,11 @@ jobs:
 
       - name: Bump dev to next-patch-dev0
         if: steps.tag.outputs.skip != 'true'
+        env:
+          # bump-version.sh -> git commit triggers husky pre-commit which
+          # runs root + backend typecheck. Backend deps are not installed
+          # here and the bump is mechanical, so disable husky.
+          HUSKY: '0'
         run: |
           ./scripts/bump-version.sh dev0
 
