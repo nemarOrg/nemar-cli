@@ -1810,8 +1810,16 @@ Examples:
         process.exit(1);
       }
 
-      const localVersion = readLocalDatasetVersion(absoluteOutput);
-      const remoteVersion = await readRemoteHeadDatasetVersion(absoluteOutput);
+      const localRead = readLocalDatasetVersion(absoluteOutput);
+      if (localRead.error) {
+        console.log(chalk.yellow(`  Warning: ${localRead.error}`));
+      }
+      const remoteRead = await readRemoteHeadDatasetVersion(absoluteOutput);
+      for (const w of remoteRead.warnings) {
+        console.log(chalk.yellow(`  Warning: ${w}`));
+      }
+      const localVersion = localRead.version;
+      const remoteVersion = remoteRead.version;
 
       if (options.resume) {
         if (localVersion && remoteVersion && localVersion !== remoteVersion) {
@@ -1851,7 +1859,17 @@ Examples:
               );
             }
           } catch (err) {
-            spinner.warn(`Manifest diff unavailable: ${(err as Error).message}`);
+            const message = (err as Error).message;
+            spinner.warn(`Manifest diff unavailable: ${message}`);
+            if (/401|403|unauthor/i.test(message)) {
+              console.log(
+                chalk.yellow("  Looks like an auth issue. Run `nemar auth status` to verify."),
+              );
+            } else if (!/404|not found/i.test(message)) {
+              console.log(
+                chalk.yellow("  Unexpected manifest error. Please report if this recurs."),
+              );
+            }
             console.log(
               chalk.dim("  Falling back to full git annex get (skips already-present files)."),
             );

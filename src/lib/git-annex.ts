@@ -2476,40 +2476,59 @@ export async function getDatasetIdFromRemote(datasetPath: string): Promise<strin
 }
 
 /**
- * Read DatasetVersion from the local working tree's dataset_description.json.
- * Returns null if the file is missing, unreadable, or has no version field.
+ * Distinguishes "no DatasetVersion field" (version=null, no error) from
+ * "file unreadable / malformed JSON" (version=null with error message).
  */
-export function readLocalDatasetVersion(datasetPath: string): string | null {
+export interface DatasetVersionRead {
+  version: string | null;
+  error?: string;
+}
+
+export function readLocalDatasetVersion(datasetPath: string): DatasetVersionRead {
   const descPath = join(datasetPath, "dataset_description.json");
-  if (!existsSync(descPath)) return null;
+  if (!existsSync(descPath)) return { version: null };
   try {
     const desc = JSON.parse(readFileSync(descPath, "utf-8")) as { DatasetVersion?: unknown };
-    return typeof desc.DatasetVersion === "string" ? desc.DatasetVersion : null;
-  } catch {
-    return null;
+    return {
+      version: typeof desc.DatasetVersion === "string" ? desc.DatasetVersion : null,
+    };
+  } catch (err) {
+    return {
+      version: null,
+      error: `dataset_description.json is unreadable: ${(err as Error).message}`,
+    };
   }
 }
 
-/**
- * Read DatasetVersion from the remote HEAD's dataset_description.json without
- * checking it out. Requires `git fetch` to have populated the remote ref.
- */
-export async function readRemoteHeadDatasetVersion(datasetPath: string): Promise<string | null> {
-  const refs = ["origin/HEAD", "origin/main", "origin/master"];
-  for (const ref of refs) {
-    const { stdout, exitCode } = await runCommand(
+/** Requires `git fetch` to have populated the remote ref. */
+export async function readRemoteHeadDatasetVersion(
+  datasetPath: string,
+): Promise<{ version: string | null; warnings: string[] }> {
+  const warnings: string[] = [];
+  for (const ref of ["origin/HEAD", "origin/main", "origin/master"]) {
+    const { stdout, stderr, exitCode } = await runCommand(
       ["git", "show", `${ref}:dataset_description.json`],
       { cwd: datasetPath },
     );
-    if (exitCode !== 0 || !stdout.trim()) continue;
+    if (exitCode !== 0) {
+      // "ref does not exist" is expected for the fallback chain; only
+      // report git failures that look like real problems.
+      if (stderr && !/unknown revision|bad revision|does not exist/i.test(stderr)) {
+        warnings.push(`git show ${ref} failed: ${stderr.trim()}`);
+      }
+      continue;
+    }
+    if (!stdout.trim()) continue;
     try {
       const desc = JSON.parse(stdout) as { DatasetVersion?: unknown };
-      if (typeof desc.DatasetVersion === "string") return desc.DatasetVersion;
-    } catch {
-      // Try next ref
+      if (typeof desc.DatasetVersion === "string") {
+        return { version: desc.DatasetVersion, warnings };
+      }
+    } catch (err) {
+      warnings.push(`${ref}:dataset_description.json is malformed: ${(err as Error).message}`);
     }
   }
-  return null;
+  return { version: null, warnings };
 }
 
 /**
