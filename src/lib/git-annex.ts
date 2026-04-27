@@ -2545,16 +2545,16 @@ export async function resolveUpstreamRef(
   };
 }
 
-/**
- * Returns true if the working tree has uncommitted changes (staged, unstaged,
- * or untracked).
- */
-export async function isWorkingTreeDirty(datasetPath: string): Promise<boolean> {
-  const { stdout, exitCode } = await runCommand(["git", "status", "--porcelain"], {
+export async function isWorkingTreeDirty(
+  datasetPath: string,
+): Promise<{ dirty: boolean; error?: string }> {
+  const { stdout, stderr, exitCode } = await runCommand(["git", "status", "--porcelain"], {
     cwd: datasetPath,
   });
-  if (exitCode !== 0) return false;
-  return stdout.trim().length > 0;
+  if (exitCode !== 0) {
+    return { dirty: false, error: stderr.trim() || "git status failed" };
+  }
+  return { dirty: stdout.trim().length > 0 };
 }
 
 /**

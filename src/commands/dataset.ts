@@ -1789,7 +1789,13 @@ Examples:
         process.exit(1);
       }
 
-      if (await isWorkingTreeDirty(absoluteOutput)) {
+      const dirtyCheck = await isWorkingTreeDirty(absoluteOutput);
+      if (dirtyCheck.error) {
+        spinner.fail("Could not check working tree status");
+        console.log(chalk.red(`  ${dirtyCheck.error}`));
+        process.exit(1);
+      }
+      if (dirtyCheck.dirty) {
         spinner.fail("Working tree is dirty");
         console.log(chalk.red(`  Refusing to ${reuseMode} with uncommitted local changes.`));
         console.log(chalk.dim("  Commit, stash, or discard them first."));
