@@ -18,10 +18,28 @@ export interface DownloadProgress {
 }
 
 /**
- * git-annex --json-progress output line (progress update)
+ * git-annex --json-progress output line.
+ *
+ * Two distinct shapes are emitted by `git annex get --json --json-progress`:
+ *
+ * 1. byte-progress events: `file`/`key`/`command` are nested under `action`.
+ *    Top-level `file` is undefined for these.
+ *      {"action":{"command":"get","file":"a.bin","key":"..."},
+ *       "byte-progress":1024,"total-size":2048,"percent-progress":"50%"}
+ *
+ * 2. completion events: `file`/`key`/`command` are top-level, no `action`.
+ *      {"command":"get","file":"a.bin","key":"...","success":true}
+ *
+ * The tracker reads the file path from whichever location is populated.
  */
+interface GitAnnexAction {
+  command?: string;
+  file?: string;
+  key?: string;
+}
+
 interface GitAnnexProgressLine {
-  action?: string;
+  action?: GitAnnexAction;
   file?: string;
   "byte-progress"?: number;
   "total-size"?: number;
@@ -122,13 +140,17 @@ export class DownloadProgressTracker {
    * Process a parsed JSON line from git-annex --json-progress output
    */
   processLine(parsed: GitAnnexProgressLine): void {
+    // git-annex puts `file` at top level for completion events but nests it
+    // inside `action` for byte-progress events. Read both locations.
+    const eventFile = parsed.file ?? parsed.action?.file;
+
     // File completion event
     if (parsed.ok === true || parsed.success === true) {
       this.filesCompleted++;
       // Credit the matching file's known total (preferred) or last-seen
       // transferred bytes. With concurrent transfers we cannot rely on a
-      // shared "current file" — match by `parsed.file` when present.
-      const key = parsed.file ?? this.currentFile;
+      // shared "current file" — match by event file when present.
+      const key = eventFile ?? this.currentFile;
       const state = key ? this.inFlight.get(key) : undefined;
       const credited = state ? state.total || state.transferred : 0;
       this.totalBytesTransferred += credited;
@@ -139,7 +161,7 @@ export class DownloadProgressTracker {
 
     // Progress update within a file
     if (parsed["byte-progress"] !== undefined) {
-      const key = parsed.file ?? this.currentFile;
+      const key = eventFile ?? this.currentFile;
       if (!key) return;
       this.currentFile = key;
 

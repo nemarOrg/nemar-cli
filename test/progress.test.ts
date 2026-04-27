@@ -9,6 +9,36 @@
 import { describe, expect, test } from "bun:test";
 import { DownloadProgressTracker, parseGitAnnexProgressLine } from "../src/lib/progress";
 
+/**
+ * Build a byte-progress event in the actual git-annex --json-progress shape.
+ * git-annex nests `file`/`key`/`command` under `action` for in-flight events.
+ */
+function progressEvent(
+  file: string,
+  bytes: number,
+  total: number,
+): Record<string, unknown> {
+  return {
+    action: { command: "get", file, key: `SHA256E-s${total}--${file}` },
+    "byte-progress": bytes,
+    "total-size": total,
+    "percent-progress": `${Math.round((bytes / total) * 100)}%`,
+  };
+}
+
+/**
+ * Build a completion event in the actual git-annex shape (top-level fields).
+ */
+function completionEvent(file: string, success = true): Record<string, unknown> {
+  return {
+    command: "get",
+    file,
+    key: `SHA256E--${file}`,
+    success,
+    "error-messages": [],
+  };
+}
+
 // Silence stderr writes during render() so test output stays clean.
 const origStderrWrite = process.stderr.write.bind(process.stderr);
 function muteStderr(): () => void {
@@ -27,16 +57,16 @@ describe("DownloadProgressTracker", () => {
       // Three files: 100 bytes, 300 bytes, 600 bytes; total 1000.
       const tracker = new DownloadProgressTracker(3, 1000);
       const sequence = [
-        { file: "a.bin", "byte-progress": 50, "total-size": 100 },
-        { file: "a.bin", "byte-progress": 100, "total-size": 100 },
-        { file: "a.bin", ok: true },
-        { file: "b.bin", "byte-progress": 150, "total-size": 300 },
-        { file: "b.bin", "byte-progress": 300, "total-size": 300 },
-        { file: "b.bin", ok: true },
-        { file: "c.bin", "byte-progress": 200, "total-size": 600 },
-        { file: "c.bin", "byte-progress": 400, "total-size": 600 },
-        { file: "c.bin", "byte-progress": 600, "total-size": 600 },
-        { file: "c.bin", ok: true },
+        progressEvent("a.bin", 50, 100),
+        progressEvent("a.bin", 100, 100),
+        completionEvent("a.bin"),
+        progressEvent("b.bin", 150, 300),
+        progressEvent("b.bin", 300, 300),
+        completionEvent("b.bin"),
+        progressEvent("c.bin", 200, 600),
+        progressEvent("c.bin", 400, 600),
+        progressEvent("c.bin", 600, 600),
+        completionEvent("c.bin"),
       ];
 
       const percents: number[] = [];
@@ -75,10 +105,10 @@ describe("DownloadProgressTracker", () => {
       // Pre-count says 5 files; only complete 2 so far. Tracker must keep
       // filesTotal at 5 (not collapse to 2).
       const tracker = new DownloadProgressTracker(5, 500);
-      tracker.processLine({ file: "x", "byte-progress": 100, "total-size": 100 });
-      tracker.processLine({ file: "x", ok: true });
-      tracker.processLine({ file: "y", "byte-progress": 100, "total-size": 100 });
-      tracker.processLine({ file: "y", ok: true });
+      tracker.processLine(progressEvent("x", 100, 100));
+      tracker.processLine(completionEvent("x"));
+      tracker.processLine(progressEvent("y", 100, 100));
+      tracker.processLine(completionEvent("y"));
 
       const snap = tracker.getProgress();
       expect(snap.filesCompleted).toBe(2);
@@ -95,10 +125,10 @@ describe("DownloadProgressTracker", () => {
     try {
       const tracker = new DownloadProgressTracker();
       expect(tracker.getPercent()).toBeNull();
-      tracker.processLine({ file: "z", "byte-progress": 50, "total-size": 100 });
+      tracker.processLine(progressEvent("z", 50, 100));
       // No bytesTotal, no filesTotal -> still no authoritative percent
       expect(tracker.getPercent()).toBeNull();
-      tracker.processLine({ file: "z", ok: true });
+      tracker.processLine(completionEvent("z"));
       // Still null: completing files must not invent a total.
       expect(tracker.getPercent()).toBeNull();
 
@@ -117,13 +147,13 @@ describe("DownloadProgressTracker", () => {
       const tracker = new DownloadProgressTracker(2, 1000);
 
       // Finish small file
-      tracker.processLine({ file: "small", "byte-progress": 10, "total-size": 10 });
-      tracker.processLine({ file: "small", ok: true });
+      tracker.processLine(progressEvent("small", 10, 10));
+      tracker.processLine(completionEvent("small"));
       // 1/2 files done = 50% by file count, but only 1% by bytes
       expect(tracker.getPercent()).toBe(1);
 
       // Half through huge file
-      tracker.processLine({ file: "huge", "byte-progress": 495, "total-size": 990 });
+      tracker.processLine(progressEvent("huge", 495, 990));
       // (10 + 495) / 1000 = ~50.5%
       expect(tracker.getPercent()).toBe(51);
     } finally {
@@ -135,8 +165,11 @@ describe("DownloadProgressTracker", () => {
     expect(parseGitAnnexProgressLine("")).toBeNull();
     expect(parseGitAnnexProgressLine("not json")).toBeNull();
     expect(parseGitAnnexProgressLine("{broken")).toBeNull();
-    const ok = parseGitAnnexProgressLine('{"file":"a","byte-progress":10}');
+    const ok = parseGitAnnexProgressLine(
+      '{"action":{"command":"get","file":"a"},"byte-progress":10,"total-size":20}',
+    );
     expect(ok?.["byte-progress"]).toBe(10);
+    expect(ok?.action?.file).toBe("a");
   });
 
   test("interleaved -J events credit bytes to the correct file", () => {
@@ -149,14 +182,14 @@ describe("DownloadProgressTracker", () => {
       // Two files: A=100B (small), B=900B (large). Total=1000B.
       const tracker = new DownloadProgressTracker(2, 1000);
       const interleaved = [
-        { file: "A", "byte-progress": 50, "total-size": 100 },
-        { file: "B", "byte-progress": 200, "total-size": 900 },
-        { file: "A", "byte-progress": 100, "total-size": 100 },
-        { file: "B", "byte-progress": 500, "total-size": 900 },
-        { file: "A", ok: true }, // A done first
-        { file: "B", "byte-progress": 700, "total-size": 900 },
-        { file: "B", "byte-progress": 900, "total-size": 900 },
-        { file: "B", ok: true },
+        progressEvent("A", 50, 100),
+        progressEvent("B", 200, 900),
+        progressEvent("A", 100, 100),
+        progressEvent("B", 500, 900),
+        completionEvent("A"), // A done first
+        progressEvent("B", 700, 900),
+        progressEvent("B", 900, 900),
+        completionEvent("B"),
       ];
 
       const percents: number[] = [];
@@ -190,9 +223,9 @@ describe("DownloadProgressTracker", () => {
     const restore = muteStderr();
     try {
       const tracker = new DownloadProgressTracker(3, 0); // file-based percent
-      tracker.processLine({ file: "a", ok: true });
-      tracker.processLine({ file: "b", ok: true });
-      tracker.processLine({ file: "c", ok: true });
+      tracker.processLine(completionEvent("a"));
+      tracker.processLine(completionEvent("b"));
+      tracker.processLine(completionEvent("c"));
       const snap = tracker.getProgress();
       expect(snap.filesCompleted).toBe(3);
       expect(snap.filesTotal).toBe(3);
@@ -208,12 +241,12 @@ describe("DownloadProgressTracker", () => {
     const restore = muteStderr();
     try {
       const tracker = new DownloadProgressTracker(2, 200);
-      tracker.processLine({ file: "a", "byte-progress": 100, "total-size": 100 });
-      tracker.processLine({ file: "a", ok: true });
-      tracker.processLine({ file: "b", "byte-progress": 100, "total-size": 100 });
-      tracker.processLine({ file: "b", ok: true });
-      tracker.processLine({ file: "c", "byte-progress": 100, "total-size": 100 });
-      tracker.processLine({ file: "c", ok: true });
+      tracker.processLine(progressEvent("a", 100, 100));
+      tracker.processLine(completionEvent("a"));
+      tracker.processLine(progressEvent("b", 100, 100));
+      tracker.processLine(completionEvent("b"));
+      tracker.processLine(progressEvent("c", 100, 100));
+      tracker.processLine(completionEvent("c"));
       // 3 files completed against precounted 2: percent stays at 100, not >100
       expect(tracker.getPercent()).toBe(100);
       const snap = tracker.getProgress();
@@ -227,15 +260,55 @@ describe("DownloadProgressTracker", () => {
     const restore = muteStderr();
     try {
       const tracker = new DownloadProgressTracker(4, 1000);
-      tracker.processLine({ file: "a", "byte-progress": 250, "total-size": 250 });
-      tracker.processLine({ file: "a", ok: true });
-      tracker.processLine({ file: "b", "byte-progress": 250, "total-size": 250 });
-      tracker.processLine({ file: "b", ok: true });
+      tracker.processLine(progressEvent("a", 250, 250));
+      tracker.processLine(completionEvent("a"));
+      tracker.processLine(progressEvent("b", 250, 250));
+      tracker.processLine(completionEvent("b"));
       // Aborted before c, d
       const p = tracker.getPercent();
       expect(p).not.toBeNull();
       expect(p as number).toBeLessThan(100);
       expect(p as number).toBe(50); // 500/1000
+    } finally {
+      restore();
+    }
+  });
+
+  test("byte-progress with file nested under action (real git-annex shape)", () => {
+    // Regression for the "stuck at 0% 134/181 files" bug: git-annex emits
+    // {"action":{"file":"x"},"byte-progress":N,"total-size":M} for in-flight
+    // events, with no top-level `file`. The earlier parser only checked
+    // top-level `parsed.file`, so inFlight was never populated, every ok
+    // credited 0 bytes, and the bar stayed at 0% even as files completed.
+    const restore = muteStderr();
+    try {
+      const tracker = new DownloadProgressTracker(2, 200);
+
+      // Real shape: file nested under action for byte-progress
+      tracker.processLine({
+        action: { command: "get", file: "big.bin", key: "K1" },
+        "byte-progress": 50,
+        "total-size": 100,
+      });
+      tracker.processLine({
+        action: { command: "get", file: "big.bin", key: "K1" },
+        "byte-progress": 100,
+        "total-size": 100,
+      });
+      // Real shape: file at top level for completion
+      tracker.processLine({ command: "get", file: "big.bin", key: "K1", success: true });
+
+      // After one 100B file: 50% by bytes, NOT stuck at 0%.
+      expect(tracker.getPercent()).toBe(50);
+      const snap = tracker.getProgress();
+      expect(snap.filesCompleted).toBe(1);
+      expect(snap.bytesTransferred).toBe(100);
+
+      // Second file with no preceding byte-progress (e.g., tiny file, fast
+      // path). filesCompleted advances; byte credit defaults to 0 for that
+      // file but the file count still climbs.
+      tracker.processLine({ command: "get", file: "small.bin", key: "K2", success: true });
+      expect(tracker.getProgress().filesCompleted).toBe(2);
     } finally {
       restore();
     }

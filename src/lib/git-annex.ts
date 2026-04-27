@@ -1766,10 +1766,25 @@ export async function cloneDataset(
 }
 
 /**
- * git-annex JSON progress line (from --json-progress output)
+ * git-annex JSON progress line (from --json-progress output).
+ *
+ * For byte-progress events, git-annex nests file/key/command under `action`:
+ *   {"action":{"command":"get","file":"x.bin","key":"..."},
+ *    "byte-progress":1024,"total-size":2048}
+ *
+ * For completion events, file/key/command are top-level (no `action`):
+ *   {"command":"get","file":"x.bin","key":"...","success":true}
+ *
+ * Consumers should read the file path from `line.file ?? line.action?.file`.
  */
+interface GitAnnexAction {
+  command?: string;
+  file?: string;
+  key?: string;
+}
+
 interface GitAnnexProgressLine {
-  action?: string;
+  action?: GitAnnexAction;
   file?: string;
   "byte-progress"?: number;
   "total-size"?: number;
