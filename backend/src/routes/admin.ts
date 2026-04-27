@@ -78,6 +78,7 @@ import {
   readBidsDescription,
   readRepoMetadata,
 } from "../services/repo-metadata";
+import { withRetry } from "../services/retry";
 import {
   addPublicReadPolicy,
   applyObjectLock,
@@ -143,68 +144,6 @@ interface StepResult {
   attempts: number;
   duration_ms: number;
   error?: string;
-}
-
-/**
- * Retry a transient operation up to maxAttempts times.
- *
- * Only retries on network errors, 5xx responses, and 429 rate limits.
- * 4xx validation errors are not retried.
- */
-async function withRetry<T>(
-  fn: () => Promise<T>,
-  stepName: string,
-  options?: {
-    maxAttempts?: number;
-    delayMs?: number;
-    isRetryable?: (error: unknown) => boolean;
-  },
-): Promise<{ result: T; attempts: number }> {
-  const maxAttempts = options?.maxAttempts ?? 3;
-  const delayMs = options?.delayMs ?? 1_000;
-  const isRetryable =
-    options?.isRetryable ??
-    ((error: unknown) => {
-      if (error instanceof Error) {
-        const msg = error.message.toLowerCase();
-        // Retry on network timeouts, connection errors
-        if (
-          msg.includes("timeout") ||
-          msg.includes("network") ||
-          msg.includes("econnreset") ||
-          msg.includes("fetch failed") ||
-          msg.includes("connection")
-        ) {
-          return true;
-        }
-        // Retry on 5xx and 429 status codes (require HTTP/status prefix to
-        // avoid false positives on dataset IDs like nm000500)
-        if (/(?:http|status)\s*(5\d\d|429)\b/i.test(msg)) {
-          return true;
-        }
-      }
-      return false;
-    });
-
-  let lastError: unknown;
-  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-    try {
-      const result = await fn();
-      return { result, attempts: attempt };
-    } catch (err) {
-      lastError = err;
-      if (attempt < maxAttempts && isRetryable(err)) {
-        console.log(
-          `[publish] ${stepName} attempt ${attempt} failed (retryable), retrying in ${delayMs}ms: ${err instanceof Error ? err.message : String(err)}`,
-        );
-        await new Promise((resolve) => setTimeout(resolve, delayMs));
-      } else {
-        // Not retryable or last attempt
-        break;
-      }
-    }
-  }
-  throw lastError;
 }
 
 export const adminRoutes = new Hono<{ Bindings: Bindings; Variables: Variables }>();
@@ -2903,27 +2842,20 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
   }
 
   // Step 4: Tag protection (before DOI to prevent tag manipulation)
+  // Idempotent: applyTagProtection treats 422 (rule already exists) as success
+  // and throws HttpError with status + body on terminal failure. withRetry
+  // absorbs the propagation 5xx/404 window after the repo_public flip.
   if (stepsToRun.includes("tag_protect")) {
     try {
       await startStep("tag_protect");
 
       const { applyTagProtection } = await import("../services/github");
-      const tagProtected = await applyTagProtection(repoName, pat);
+      const { attempts: tagAttempts } = await withRetry(
+        () => applyTagProtection(repoName, pat),
+        "tag_protect",
+      );
 
-      if (!tagProtected) {
-        await updateProgress("tag_protect", "Failed to apply tag protection rules");
-        return c.json(
-          {
-            error: "Tag protection failed",
-            step: "tag_protect",
-            steps_completed: completed,
-            step_results: stepResults,
-          },
-          500,
-        );
-      }
-
-      await updateProgress("tag_protect");
+      await updateProgress("tag_protect", undefined, tagAttempts);
     } catch (err) {
       const msg = errorMessage(err);
       await updateProgress("tag_protect", msg);
@@ -3011,32 +2943,42 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
           }
         }
 
-        // DOI creation is NOT idempotent (mints a permanent identifier).
-        // Do not retry: a timeout could mean the DOI was created server-side
-        // but the response was lost, and retrying would mint a duplicate.
+        // EZID DOIs are deterministic (buildConceptIdentifier is a pure function
+        // of datasetId), and createEzidConceptDoi already handles the
+        // "already exists" case by fetching the existing record. That makes
+        // EZID minting idempotent under retry, which is what we want here:
+        // EZID/DataCite propagation can briefly fail with transient 5xx or
+        // network errors during approval. Zenodo's createDeposition is NOT
+        // idempotent (each call mints a fresh deposition), so we only retry
+        // when the provider is EZID.
         const { createConceptDoi: doiDispatch } = await import("../services/doi");
-        const doiResult = await doiDispatch(
-          {
-            provider,
-            datasetId,
-            datasetName: dataset.name,
-            datasetDescription: dataset.description,
-            githubRepo: dataset.github_repo,
-            bidsDescription: bidsDesc,
-            enrichment,
-            uploaderOrcid: dataset.owner_orcid || undefined,
-            uploaderName: dataset.owner_username,
-            sandbox,
-          },
-          {
-            EZID_USERNAME: c.env.EZID_USERNAME,
-            EZID_PASSWORD: c.env.EZID_PASSWORD,
-            EZID_SANDBOX_USERNAME: c.env.EZID_SANDBOX_USERNAME,
-            EZID_SANDBOX_PASSWORD: c.env.EZID_SANDBOX_PASSWORD,
-            ZENODO_API_KEY: c.env.ZENODO_API_KEY,
-            ZENODO_SANDBOX_API_KEY: c.env.ZENODO_SANDBOX_API_KEY,
-          },
-        );
+        const doiCall = () =>
+          doiDispatch(
+            {
+              provider,
+              datasetId,
+              datasetName: dataset.name,
+              datasetDescription: dataset.description,
+              githubRepo: dataset.github_repo,
+              bidsDescription: bidsDesc,
+              enrichment,
+              uploaderOrcid: dataset.owner_orcid || undefined,
+              uploaderName: dataset.owner_username,
+              sandbox,
+            },
+            {
+              EZID_USERNAME: c.env.EZID_USERNAME,
+              EZID_PASSWORD: c.env.EZID_PASSWORD,
+              EZID_SANDBOX_USERNAME: c.env.EZID_SANDBOX_USERNAME,
+              EZID_SANDBOX_PASSWORD: c.env.EZID_SANDBOX_PASSWORD,
+              ZENODO_API_KEY: c.env.ZENODO_API_KEY,
+              ZENODO_SANDBOX_API_KEY: c.env.ZENODO_SANDBOX_API_KEY,
+            },
+          );
+        const { result: doiResult, attempts: doiAttempts } =
+          provider === "ezid"
+            ? await withRetry(doiCall, "doi_create")
+            : { result: await doiCall(), attempts: 1 };
         if (provider === "ezid") {
           await db
             .prepare(
@@ -3059,7 +3001,7 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
             .run();
         }
 
-        await updateProgress("doi_create");
+        await updateProgress("doi_create", undefined, doiAttempts);
       } else {
         await updateProgress("doi_create");
       }
