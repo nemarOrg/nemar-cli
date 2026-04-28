@@ -402,7 +402,12 @@ export async function applyObjectLockBatch(
   options: PresignedUrlOptions,
   datasetId: string,
   continuationToken?: string,
-  batchSize = 15,
+  // 25 keeps us comfortably under any plan's per-invocation subrequest
+  // cap: ~7 D1 + 1 LIST + 25 PUTs + a couple of internal calls = ~35.
+  // Halves the number of CLI round-trips vs. the original 15 for medium
+  // datasets (e.g. 702 → 28 batches instead of 47) without eating into
+  // the budget.
+  batchSize = 25,
 ): Promise<{
   locked: number;
   failed: ObjectLockFailure[];
@@ -436,13 +441,36 @@ export async function applyObjectLockBatch(
 
   const truncated = xml.includes("<IsTruncated>true</IsTruncated>");
   const tokenMatch = xml.match(/<NextContinuationToken>([^<]+)<\/NextContinuationToken>/);
-  const nextContinuationToken = truncated && tokenMatch?.[1] ? tokenMatch[1] : undefined;
+
+  // S3 contract violation guard: IsTruncated=true MUST come with a
+  // NextContinuationToken. If we silently treated this as "stream done",
+  // we'd mark s3_lock complete with the dataset only partially locked —
+  // exactly the failure mode S3 Object Lock exists to prevent. Throw so
+  // the orchestrator surfaces a 500 and the CLI retries.
+  if (truncated && !tokenMatch?.[1]) {
+    throw new Error(
+      "S3 LIST response was truncated but NextContinuationToken is missing; aborting to avoid partial object lock",
+    );
+  }
+  // Only honor the token when the page is genuinely truncated. AWS does
+  // not emit NextContinuationToken on a non-truncated page; this guard
+  // is just defensive against malformed proxies.
+  const nextContinuationToken = truncated ? tokenMatch?.[1] : undefined;
 
   const failed: ObjectLockFailure[] = [];
   let locked = 0;
 
+  // Empty page is allowed by the S3 contract (e.g. all matching keys on
+  // this page were deleted between request and response). Preserve the
+  // continuation token so the caller can advance through subsequent
+  // pages instead of stopping the stream short of the dataset's tail.
   if (keys.length === 0) {
-    return { locked: 0, failed, hasMore: false };
+    return {
+      locked: 0,
+      failed,
+      hasMore: !!nextContinuationToken,
+      nextContinuationToken,
+    };
   }
 
   // Retention date: 100 years from now

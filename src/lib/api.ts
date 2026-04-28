@@ -1454,14 +1454,18 @@ function dedupeStepResults(results: StepResult[]): StepResult[] {
   return Array.from(byStep.values());
 }
 
+export interface S3LockFailure {
+  key: string;
+  error: string;
+}
+
 export interface S3LockResponse {
   message: string;
   dataset_id: string;
   locked: number;
-  total: number;
-  failed: string[];
+  failed: S3LockFailure[];
   hasMore: boolean;
-  offset: number;
+  continuation_token?: string;
 }
 
 // ============================================================================
@@ -1522,11 +1526,10 @@ export async function getDatasetFiles(datasetId: string): Promise<DatasetFilesRe
 
 export async function applyS3Lock(
   datasetId: string,
-): Promise<{ locked: number; total: number; failed: string[] }> {
-  let offset = 0;
+): Promise<{ locked: number; failed: S3LockFailure[] }> {
+  let continuationToken: string | undefined;
   let totalLocked = 0;
-  const allFailed: string[] = [];
-  let total = 0;
+  const allFailed: S3LockFailure[] = [];
   let hasMore = true;
 
   while (hasMore) {
@@ -1535,22 +1538,29 @@ export async function applyS3Lock(
       {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ offset }),
+        body: JSON.stringify({ continuation_token: continuationToken }),
       },
       true,
     );
 
     totalLocked += result.locked;
-    allFailed.push(...result.failed);
-    total = result.total;
+    if (result.failed?.length) allFailed.push(...result.failed);
     hasMore = result.hasMore;
+    continuationToken = result.continuation_token;
 
-    if (hasMore) {
-      offset += 40;
+    // Defensive guard: if the server says hasMore but doesn't return a
+    // token, stop the loop instead of looping on undefined forever. The
+    // server should never do this; if it does, surface the issue rather
+    // than silently spin.
+    if (hasMore && !continuationToken) {
+      throw new ApiError(
+        500,
+        "S3 lock paginated response missing continuation_token; aborting to avoid infinite loop",
+      );
     }
   }
 
-  return { locked: totalLocked, total, failed: allFailed };
+  return { locked: totalLocked, failed: allFailed };
 }
 
 // ---------------------------------------------------------------------------

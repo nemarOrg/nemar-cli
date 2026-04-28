@@ -2482,11 +2482,15 @@ const approveSchema = z.object({
   resume: z.boolean().optional().default(false),
   sandbox: z.boolean().optional().default(false),
   s3_lock_continuation_token: z.string().optional(),
-  // Accepted but ignored. Pre-#385 CLIs sent `s3_lock_offset` for
-  // offset-paginated batching; the server now uses S3 continuation tokens
-  // and a fresh client will send `s3_lock_continuation_token` instead.
-  // We accept the legacy field for back-compat with v0.8.4-and-earlier
-  // CLIs that may still be in admins' shells.
+  // Pre-#385 CLIs (v0.8.4 and earlier) sent `s3_lock_offset` for
+  // offset-paginated batching. The server no longer reads it AND no
+  // longer returns it on the response, which means an old CLI's inner
+  // pagination loop breaks out on the very first `hasMore: true`,
+  // silently reporting "lock complete" after only the first batch — a
+  // dataset published this way ends up with most objects unlocked. We
+  // detect this case explicitly and reject with 426 so the admin sees a
+  // clear "upgrade required" message instead of corrupt-by-omission
+  // success.
   s3_lock_offset: z.number().optional(),
   skip_ci_check: z.boolean().optional().default(false),
 });
@@ -2497,6 +2501,25 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
   const body = c.req.valid("json");
   const adminUser = c.get("user");
   const db = c.env.DB;
+
+  // Refuse pre-#385 CLIs that still drive s3_lock by offset. See the
+  // approveSchema comment for the silent-partial-lock failure mode this
+  // prevents.
+  if (body.s3_lock_offset !== undefined && body.s3_lock_continuation_token === undefined) {
+    console.warn(
+      `[publish] rejecting pre-0.8.5 CLI for ${datasetId}: s3_lock_offset is no longer supported`,
+    );
+    return c.json(
+      {
+        error: "Outdated nemar-cli; please upgrade to >=0.8.5 for S3 lock streaming",
+        message:
+          "This server uses S3 ListObjectsV2 continuation tokens for s3_lock. Upgrade with `bun add -g @nemarOrg/nemar-cli@latest` and re-run.",
+      },
+      // 426 Upgrade Required signals a strictly-non-retryable client problem
+      // so the CLI's transient-error retry classifier won't mask it.
+      426,
+    );
+  }
 
   // Find the publication request
   const request = await db
@@ -3720,6 +3743,11 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
             steps_completed: completed,
             step_results: stepResults,
             details: lockResult,
+            // Echo the same token the caller sent so the CLI's retry
+            // replays this exact batch (idempotent: 403=already-locked).
+            // Without this echo, the CLI would lose its place and
+            // re-stream from page 1 on retry.
+            s3_lock_continuation_token: body.s3_lock_continuation_token,
           },
           500,
         );
