@@ -377,27 +377,101 @@ export async function getArchiveSize(
  * data blobs immutable. Manifests (version/) and archives (archives/) are
  * excluded so they can be updated or regenerated if needed.
  *
- * Processes objects in batches of `batchSize` to stay within Cloudflare Workers
- * subrequest limits. Returns `hasMore` if there are remaining objects to lock.
+ * Streams via S3 ListObjectsV2 continuation tokens: each invocation issues
+ * exactly **one** LIST page (capped to `batchSize` keys via `max-keys`)
+ * plus up to `batchSize` PutObjectRetention calls. Per-invocation
+ * subrequest cost is bounded at ~`batchSize + 1` regardless of dataset
+ * size — this is the load-bearing property that keeps us under
+ * Cloudflare Workers' per-invocation subrequest cap on every plan tier.
+ *
+ * The previous offset-based approach paginated the *entire* dataset on
+ * every call (full LIST plus a 40-PUT slice), which compounded across
+ * batches and tripped the cap on the SCCN deployment for datasets with
+ * even a few hundred objects. See #385 for the regression analysis.
+ *
+ * Idempotent on retry: 403 responses (already-locked objects) are
+ * counted as success, so re-invoking with the same continuation token
+ * after a transient failure is safe.
  */
 export interface ObjectLockFailure {
   key: string;
   error: string;
 }
 
-export async function applyObjectLock(
+export async function applyObjectLockBatch(
   options: PresignedUrlOptions,
   datasetId: string,
-  offset = 0,
-  batchSize = 40,
-): Promise<{ locked: number; failed: ObjectLockFailure[]; total: number; hasMore: boolean }> {
+  continuationToken?: string,
+  // 25 keeps us comfortably under any plan's per-invocation subrequest
+  // cap: ~7 D1 + 1 LIST + 25 PUTs + a couple of internal calls = ~35.
+  // Halves the number of CLI round-trips vs. the original 15 for medium
+  // datasets (e.g. 702 → 28 batches instead of 47) without eating into
+  // the budget.
+  batchSize = 25,
+): Promise<{
+  locked: number;
+  failed: ObjectLockFailure[];
+  hasMore: boolean;
+  nextContinuationToken?: string;
+}> {
   const { bucket, region } = options;
   const aws = createS3Client(options);
 
-  const keys = await listObjectKeys(options, `${datasetId}/objects/`);
-  const batch = keys.slice(offset, offset + batchSize);
+  // Single-page list with max-keys=batchSize. This is the only LIST call
+  // per invocation — no full pagination here.
+  const params = new URLSearchParams({
+    "list-type": "2",
+    prefix: `${datasetId}/objects/`,
+    "max-keys": String(batchSize),
+    ...(continuationToken ? { "continuation-token": continuationToken } : {}),
+  });
+  const listUrl = `https://${bucket}.s3.${region}.amazonaws.com/?${params.toString()}`;
+  const signedList = await aws.sign(listUrl, { method: "GET" });
+  const listRes = await fetch(signedList);
+  if (!listRes.ok) {
+    throw new Error(`Failed to list objects for lock: HTTP ${listRes.status}`);
+  }
+  const xml = await listRes.text();
+  if (!xml.includes("<ListBucketResult")) {
+    throw new Error(`Unexpected S3 response (not ListBucketResult): ${xml.slice(0, 200)}`);
+  }
+
+  const keys: string[] = [];
+  for (const m of xml.matchAll(/<Key>([^<]+)<\/Key>/g)) keys.push(m[1]);
+
+  const truncated = xml.includes("<IsTruncated>true</IsTruncated>");
+  const tokenMatch = xml.match(/<NextContinuationToken>([^<]+)<\/NextContinuationToken>/);
+
+  // S3 contract violation guard: IsTruncated=true MUST come with a
+  // NextContinuationToken. If we silently treated this as "stream done",
+  // we'd mark s3_lock complete with the dataset only partially locked —
+  // exactly the failure mode S3 Object Lock exists to prevent. Throw so
+  // the orchestrator surfaces a 500 and the CLI retries.
+  if (truncated && !tokenMatch?.[1]) {
+    throw new Error(
+      "S3 LIST response was truncated but NextContinuationToken is missing; aborting to avoid partial object lock",
+    );
+  }
+  // Only honor the token when the page is genuinely truncated. AWS does
+  // not emit NextContinuationToken on a non-truncated page; this guard
+  // is just defensive against malformed proxies.
+  const nextContinuationToken = truncated ? tokenMatch?.[1] : undefined;
+
   const failed: ObjectLockFailure[] = [];
   let locked = 0;
+
+  // Empty page is allowed by the S3 contract (e.g. all matching keys on
+  // this page were deleted between request and response). Preserve the
+  // continuation token so the caller can advance through subsequent
+  // pages instead of stopping the stream short of the dataset's tail.
+  if (keys.length === 0) {
+    return {
+      locked: 0,
+      failed,
+      hasMore: !!nextContinuationToken,
+      nextContinuationToken,
+    };
+  }
 
   // Retention date: 100 years from now
   const retainUntil = new Date();
@@ -414,7 +488,7 @@ export async function applyObjectLock(
   const bodyBytes = new TextEncoder().encode(retentionXml);
   const contentMd5 = await computeMd5Base64(bodyBytes);
 
-  for (const key of batch) {
+  for (const key of keys) {
     // Encode each path segment individually, preserving "/" separators
     const encodedKey = key.split("/").map(encodeURIComponent).join("/");
     const url = `https://${bucket}.s3.${region}.amazonaws.com/${encodedKey}?retention`;
@@ -441,7 +515,12 @@ export async function applyObjectLock(
     }
   }
 
-  return { locked, failed, total: keys.length, hasMore: offset + batchSize < keys.length };
+  return {
+    locked,
+    failed,
+    hasMore: !!nextContinuationToken,
+    nextContinuationToken,
+  };
 }
 
 /**

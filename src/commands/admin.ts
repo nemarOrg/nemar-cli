@@ -487,12 +487,10 @@ s3Command
     try {
       const result = await applyS3Lock(datasetId);
       if (result.failed.length > 0) {
-        spinner.fail(
-          `Partial lock: ${result.locked}/${result.total} locked, ${result.failed.length} failed`,
-        );
+        spinner.fail(`Partial lock: ${result.locked} locked, ${result.failed.length} failed`);
         console.log(chalk.yellow("\nFailed objects:"));
-        for (const key of result.failed.slice(0, 10)) {
-          console.log(`  • ${key}`);
+        for (const f of result.failed.slice(0, 10)) {
+          console.log(`  • ${f.key}: ${chalk.dim(f.error)}`);
         }
         if (result.failed.length > 10) {
           console.log(`  ... and ${result.failed.length - 10} more`);
