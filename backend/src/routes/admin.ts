@@ -81,7 +81,7 @@ import {
 import { withRetry } from "../services/retry";
 import {
   addPublicReadPolicy,
-  applyObjectLock,
+  applyObjectLockBatch,
   deleteDatasetObjects,
   getArchiveSize,
   getDatasetS3Stats,
@@ -2481,6 +2481,12 @@ adminRoutes.post("/publish/:id/deny", zValidator("json", denySchema), async (c) 
 const approveSchema = z.object({
   resume: z.boolean().optional().default(false),
   sandbox: z.boolean().optional().default(false),
+  s3_lock_continuation_token: z.string().optional(),
+  // Accepted but ignored. Pre-#385 CLIs sent `s3_lock_offset` for
+  // offset-paginated batching; the server now uses S3 continuation tokens
+  // and a fresh client will send `s3_lock_continuation_token` instead.
+  // We accept the legacy field for back-compat with v0.8.4-and-earlier
+  // CLIs that may still be in admins' shells.
   s3_lock_offset: z.number().optional(),
   skip_ci_check: z.boolean().optional().default(false),
 });
@@ -3681,23 +3687,27 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
     }
   }
 
-  // Step 12: S3 Object Lock (single batch per request due to CF Workers subrequest limits)
-  // No inline withRetry here: each batch already issues ~40 PUT subrequests
-  // plus listObjectKeys pagination, and retrying the call inside the same
-  // Worker invocation triples the subrequest count and reliably trips
-  // Cloudflare's per-invocation limit ("Too many subrequests by single
-  // Worker invocation"). The CLI's retry-with-delay loop re-invokes from a
-  // fresh Worker (fresh subrequest budget) and preserves s3_lock_offset, so
-  // each retry resumes the same batch idempotently (already-locked objects
-  // return 403, which applyObjectLock counts as success).
+  // Step 12: S3 Object Lock — streamed via S3 ListObjectsV2 continuation
+  // tokens. Each invocation issues exactly one LIST page (capped to
+  // batchSize keys via max-keys) plus up to batchSize PutObjectRetention
+  // calls — bounded subrequest cost regardless of dataset size. The CLI
+  // re-invokes with the returned `s3_lock_continuation_token` until
+  // `hasMore` is false. Idempotent: 403 = already-locked = counted as
+  // success, so retries on the same token are safe.
+  //
+  // The previous offset-based approach paginated the entire dataset on
+  // every call (full LIST + 40-PUT slice), which compounded across
+  // batches and tripped Cloudflare's per-invocation subrequest cap on
+  // the SCCN deployment for datasets with even a few hundred objects
+  // (#385).
   if (stepsToRun.includes("s3_lock")) {
     try {
       await startStep("s3_lock");
 
-      const lockResult = await applyObjectLock(
+      const lockResult = await applyObjectLockBatch(
         getS3Config(c.env),
         datasetId,
-        body.s3_lock_offset || 0,
+        body.s3_lock_continuation_token,
       );
 
       if (lockResult.failed.length > 0) {
@@ -3716,13 +3726,14 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
       }
 
       if (lockResult.hasMore) {
-        // More objects to lock - return progress with next offset
+        // More pages to lock — return next continuation token for the
+        // CLI to thread into its next invocation.
         return c.json({
-          message: `S3 lock in progress: ${lockResult.locked} locked, ${lockResult.total} total`,
+          message: `S3 lock in progress: ${lockResult.locked} locked in this batch`,
           step: "s3_lock",
           steps_completed: completed,
           step_results: stepResults,
-          s3_lock_offset: (body.s3_lock_offset || 0) + 40,
+          s3_lock_continuation_token: lockResult.nextContinuationToken,
           hasMore: true,
         });
       }
@@ -4026,12 +4037,14 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
 
 /**
  * POST /admin/datasets/:id/s3-lock - Apply S3 Object Lock to dataset
+ *
+ * Streamed via S3 ListObjectsV2 continuation tokens — see
+ * `applyObjectLockBatch` for the per-invocation subrequest contract.
  */
 adminRoutes.post("/datasets/:id/s3-lock", async (c) => {
   const datasetId = c.req.param("id");
   const db = c.env.DB;
-  const body = (await c.req.json().catch(() => ({}))) as { offset?: number };
-  const offset = body.offset || 0;
+  const body = (await c.req.json().catch(() => ({}))) as { continuation_token?: string };
 
   const dataset = await db
     .prepare("SELECT dataset_id FROM datasets WHERE dataset_id = ?")
@@ -4043,16 +4056,19 @@ adminRoutes.post("/datasets/:id/s3-lock", async (c) => {
   }
 
   try {
-    const result = await applyObjectLock(getS3Config(c.env), datasetId, offset);
+    const result = await applyObjectLockBatch(
+      getS3Config(c.env),
+      datasetId,
+      body.continuation_token,
+    );
 
     return c.json({
       message: result.failed.length === 0 ? "Batch locked" : "Some objects failed",
       dataset_id: datasetId,
       locked: result.locked,
-      total: result.total,
       failed: result.failed.map((f) => ({ key: f.key, error: f.error })),
       hasMore: result.hasMore,
-      offset,
+      continuation_token: result.nextContinuationToken,
     });
   } catch (err) {
     const msg = errorMessage(err);

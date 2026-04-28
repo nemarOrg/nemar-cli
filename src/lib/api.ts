@@ -1217,6 +1217,14 @@ export interface PublishApproveResponse {
   error?: string;
   step?: string;
   hasMore?: boolean;
+  /** S3 ListObjectsV2 continuation token returned by the server while
+   *  streaming object-lock batches. The CLI threads it back unchanged on
+   *  the next invocation until `hasMore` is false. Replaced the legacy
+   *  `s3_lock_offset` field as of #385.
+   */
+  s3_lock_continuation_token?: string;
+  /** Legacy field — kept on the response type for back-compat but no
+   *  longer populated by current servers. */
   s3_lock_offset?: number;
 }
 
@@ -1350,7 +1358,7 @@ export async function approvePublication(
   const MAX_ATTEMPTS = 5;
   const RETRY_DELAY_MS = 10_000;
 
-  let s3_lock_offset: number | undefined;
+  let s3_lock_continuation_token: string | undefined;
   let useResume = resume;
   const accumulatedStepResults: StepResult[] = [];
   let lastError: unknown;
@@ -1374,7 +1382,7 @@ export async function approvePublication(
             body: JSON.stringify({
               resume: isFirstCall ? useResume : true,
               sandbox,
-              s3_lock_offset,
+              s3_lock_continuation_token,
               skip_ci_check: skipCiCheck,
             }),
           },
@@ -1386,8 +1394,8 @@ export async function approvePublication(
           accumulatedStepResults.push(...result.step_results);
         }
 
-        if (result.hasMore && result.s3_lock_offset !== undefined) {
-          s3_lock_offset = result.s3_lock_offset;
+        if (result.hasMore && result.s3_lock_continuation_token !== undefined) {
+          s3_lock_continuation_token = result.s3_lock_continuation_token;
         } else {
           break;
         }
