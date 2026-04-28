@@ -16,6 +16,7 @@ import {
   createDataset,
   finalizeDataset,
   getSandboxStatus,
+  requestUploadCredentials,
   resetSandbox,
 } from "../lib/api.js";
 import { deleteConfig, getConfig, isAuthenticated, setConfig } from "../lib/config.js";
@@ -30,14 +31,17 @@ import {
 import {
   acceptGitHubInvitation,
   checkPrerequisites,
+  clearAnnexCredentials,
   configureGitHubRemote,
   configureLargefiles,
+  configureS3Remote,
+  copyToAnnexRemote,
   formatBytes,
+  gitAnnexAdd,
   initDataset,
   pushToGitHub,
-  registerUrlsWithGitAnnex,
   saveDataset,
-  uploadFilesWithPresignedUrls,
+  toS3Credentials,
   verifyGitHubAuth,
 } from "../lib/git-annex.js";
 import {
@@ -45,9 +49,11 @@ import {
   generateSandboxDataset,
   getSandboxDatasetSize,
 } from "../lib/sandbox.js";
+import { setVerbose } from "../lib/verbose.js";
 
 export const sandboxCommand = new Command("sandbox")
   .description("Complete sandbox training before uploading datasets")
+  .option("-v, --verbose", "Print full subprocess output (git, git-annex) for debugging")
   .addHelpText(
     "after",
     `
@@ -59,9 +65,10 @@ Description:
   the sandbox environment, testing your git-annex and SSH setup.
 
 Examples:
-  $ nemar sandbox           # Run sandbox training
-  $ nemar sandbox status    # Check if training is completed
-  $ nemar sandbox reset     # Reset for re-training
+  $ nemar sandbox             # Run sandbox training
+  $ nemar sandbox --verbose   # Run with full subprocess output (debug stuck runs)
+  $ nemar sandbox status      # Check if training is completed
+  $ nemar sandbox reset       # Reset for re-training
 `,
   )
   .action(sandboxAction);
@@ -70,10 +77,17 @@ Examples:
 // Main sandbox training action
 // ============================================================================
 
-async function sandboxAction(): Promise<void> {
+async function sandboxAction(options: { verbose?: boolean } = {}): Promise<void> {
+  if (options.verbose) {
+    setVerbose(true);
+  }
+
   console.log();
   console.log(chalk.bold("NEMAR Sandbox Training"));
   console.log(chalk.dim("Verify your setup and learn the upload workflow"));
+  if (options.verbose) {
+    console.log(chalk.dim("Verbose mode: subprocess invocations will be printed"));
+  }
   console.log();
 
   // Step 1: Check authentication
@@ -199,6 +213,9 @@ async function sandboxAction(): Promise<void> {
     githubUrl = response.dataset.github_url;
     s3Config = response.s3_config;
     s3Prefix = response.dataset.s3_prefix;
+    // upload_urls (presigned) intentionally ignored: the modern flow uses
+    // git-annex's S3 special remote (configureS3Remote + copyToAnnexRemote).
+    // Backend still returns them for older CLIs.
     uploadUrls = response.upload_urls || {};
 
     apiSpinner.succeed(`Sandbox dataset created: ${chalk.cyan(datasetId)}`);
@@ -277,79 +294,79 @@ async function sandboxAction(): Promise<void> {
     return;
   }
 
-  // Step 7: Upload files to S3
+  // Step 7: Upload data files to S3 via git-annex S3 special remote
   console.log();
   console.log(chalk.bold("Step 5/6: Uploading to S3..."));
 
-  if (Object.keys(uploadUrls).length === 0) {
+  const dataFileCount = Object.keys(uploadUrls).length;
+
+  if (dataFileCount === 0) {
     console.log(chalk.yellow("  No data files to upload (metadata only)"));
   } else {
-    const uploadSpinner = ora("Uploading test data...").start();
-
+    // Get STS upload credentials for the sandbox dataset prefix
+    const credsSpinner = ora("Requesting upload credentials...").start();
+    let credsResponse: Awaited<ReturnType<typeof requestUploadCredentials>>;
     try {
-      let completedFiles = 0;
-      const totalFiles = Object.keys(uploadUrls).length;
-
-      const result = await uploadFilesWithPresignedUrls(datasetPath, uploadUrls, {
-        jobs: 4,
-        onProgress: (progress) => {
-          if (progress.status === "completed" || progress.status === "failed") {
-            completedFiles++;
-            uploadSpinner.text = `Uploading... ${completedFiles}/${totalFiles} files`;
-          }
-        },
-      });
-
-      if (result.failed.length > 0) {
-        uploadSpinner.fail(`Upload failed for ${result.failed.length} file(s)`);
-        for (const failedFile of result.failed) {
-          console.log(chalk.red(`    Failed: ${failedFile}`));
-        }
-        if (result.error) {
-          console.log(chalk.red(`    Error: ${result.error}`));
-        }
-        console.log();
-        console.log(chalk.yellow("Sandbox training aborted due to upload failures."));
-        console.log(chalk.dim("Please check your network connection and try again."));
-        cleanupSandboxDataset(datasetPath);
-        return;
-      }
-      uploadSpinner.succeed(`Uploaded ${result.uploaded} file(s)`);
+      credsResponse = await requestUploadCredentials(datasetId);
+      credsSpinner.succeed("Upload credentials received");
     } catch (error) {
-      uploadSpinner.fail("Upload failed");
+      credsSpinner.fail("Could not get upload credentials");
       console.log(chalk.red(`  ${error instanceof Error ? error.message : "Unknown error"}`));
       cleanupSandboxDataset(datasetPath);
       return;
     }
 
-    // Register URLs with git-annex
-    const registerSpinner = ora("Registering file URLs...").start();
-    try {
-      // Construct full S3 URLs for each file
-      const fileUrls: Record<string, string> = {};
-      for (const filePath of Object.keys(uploadUrls)) {
-        fileUrls[filePath] = `${s3Config.public_url}/${s3Prefix}/objects/${filePath}`;
-      }
+    const credentials = toS3Credentials(credsResponse.credentials);
 
-      const registerResult = await registerUrlsWithGitAnnex(datasetPath, fileUrls);
-      if (!registerResult.success) {
-        registerSpinner.fail(`URL registration failed for ${registerResult.failed.length} file(s)`);
-        for (const failedFile of registerResult.failed) {
-          console.log(chalk.red(`    Failed: ${failedFile}`));
-        }
-        console.log();
-        console.log(chalk.yellow("Sandbox training aborted due to URL registration failures."));
-        console.log(chalk.dim("This may indicate a git-annex configuration issue."));
-        cleanupSandboxDataset(datasetPath);
-        return;
-      }
-      registerSpinner.succeed(`Registered ${registerResult.registered} file URLs`);
-    } catch (error) {
-      registerSpinner.fail("Failed to register URLs");
-      console.log(chalk.red(`  ${error instanceof Error ? error.message : "Unknown error"}`));
+    // Configure git-annex S3 special remote
+    const remoteSpinner = ora("Configuring S3 remote...").start();
+    const remoteResult = await configureS3Remote(
+      datasetPath,
+      {
+        name: "nemar-s3",
+        bucket: credsResponse.s3.bucket,
+        prefix: `${s3Prefix}/objects`,
+        region: credsResponse.s3.region,
+        publicUrl: s3Config.public_url,
+      },
+      credentials,
+    );
+    if (!remoteResult.success) {
+      remoteSpinner.fail("Failed to configure S3 remote");
+      console.log(chalk.red(`  ${remoteResult.error}`));
+      console.log(chalk.dim("  Re-run with --verbose to see git-annex output."));
       cleanupSandboxDataset(datasetPath);
       return;
     }
+    remoteSpinner.succeed("S3 remote configured");
+
+    // Track data files with git-annex (respects annex.largefiles pattern)
+    const addSpinner = ora("Tracking data files with git-annex...").start();
+    const addResult = await gitAnnexAdd(datasetPath);
+    if (!addResult.success) {
+      addSpinner.fail("Failed to track data files");
+      console.log(chalk.red(`  ${addResult.error}`));
+      console.log(chalk.dim("  Re-run with --verbose to see git-annex output."));
+      cleanupSandboxDataset(datasetPath);
+      return;
+    }
+    addSpinner.succeed("Data files tracked by git-annex");
+
+    // Upload via git-annex S3 remote (handles key-based layout + tracking)
+    const uploadSpinner = ora(`Uploading ${dataFileCount} data file(s) to S3...`).start();
+    const uploadResult = await copyToAnnexRemote(datasetPath, "nemar-s3", 4, credentials);
+
+    // Always clear cached STS creds so downloads use publicurl
+    await clearAnnexCredentials(datasetPath);
+
+    if (!uploadResult.success) {
+      uploadSpinner.fail("S3 upload failed");
+      console.log(chalk.red(`  ${uploadResult.error}`));
+      console.log(chalk.dim("  Re-run with --verbose to see git-annex output."));
+      cleanupSandboxDataset(datasetPath);
+      return;
+    }
+    uploadSpinner.succeed(`Uploaded ${uploadResult.filesCopied} data file(s) to S3`);
   }
 
   // Step 8: Save and push to GitHub
