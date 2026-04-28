@@ -1729,6 +1729,19 @@ After Approval:
           !!options.resume,
           !!options.sandbox,
           !!options.skipCiCheck,
+          (info) => {
+            // Surface transient failures the CLI is about to retry. We pause
+            // the spinner so the message isn't overwritten, then resume it.
+            spinner.stop();
+            const stepLabel = info.step ? info.step.replace(/_/g, " ") : "step";
+            console.log(chalk.yellow(`  [!] ${stepLabel} failed: ${info.error}`));
+            console.log(
+              chalk.dim(
+                `  Retrying in ${Math.round(info.delayMs / 1000)}s (attempt ${info.attempt + 1}/${info.maxAttempts})...`,
+              ),
+            );
+            spinner.start("Running publication workflow (this may take a few minutes)...");
+          },
         );
         spinner.succeed(result.message);
 
@@ -1769,6 +1782,36 @@ After Approval:
         handleCommandError(error, spinner, "Failed to approve publication", {
           422: "Fix the CI issues and retry with --resume",
         });
+
+        // After all retries fail, surface the per-attempt step timeline the
+        // retry loop attached to the error so the admin sees which step
+        // failed when, instead of just the final 500 message.
+        const stepResults = (error as { stepResults?: StepResult[] }).stepResults;
+        if (stepResults && stepResults.length > 0) {
+          console.log();
+          console.log(chalk.dim("Step timeline (last attempt):"));
+          const totalSteps = stepResults.length;
+          stepResults.forEach((sr, idx) => {
+            const stepNum = `[${String(idx + 1).padStart(2, " ")}/${totalSteps}]`;
+            const stepName = sr.step.replace(/_/g, " ");
+            const durationSec = (sr.duration_ms / 1000).toFixed(1);
+            const retryNote = sr.attempts > 1 ? ` (attempt ${sr.attempts})` : "";
+            if (sr.status === "completed") {
+              console.log(
+                `  ${chalk.green("[x]")} ${chalk.dim(stepNum)} ${stepName} ${chalk.dim(`(${durationSec}s${retryNote})`)}`,
+              );
+            } else if (sr.status === "failed") {
+              console.log(
+                `  ${chalk.red("[!]")} ${chalk.dim(stepNum)} ${stepName}${sr.error ? `: ${chalk.red(sr.error)}` : ""}`,
+              );
+            } else {
+              console.log(
+                `  ${chalk.dim("[-]")} ${chalk.dim(stepNum)} ${chalk.dim(stepName)} ${chalk.dim("(skipped)")}`,
+              );
+            }
+          });
+          console.log();
+        }
       }
     },
   );
