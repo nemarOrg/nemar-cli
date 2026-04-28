@@ -21,13 +21,19 @@ export function errorDetail(error: unknown): string {
 }
 
 /**
- * API error with status code and message
+ * API error with status code and message.
+ *
+ * `step` carries the top-level `step` field from orchestrator-style error
+ * responses (publish-approve, etc.), where the failing pipeline step is
+ * surfaced separately from `details`. It is optional because most endpoints
+ * don't use this field.
  */
 export class ApiError extends Error {
   constructor(
     public statusCode: number,
     message: string,
     public details?: unknown,
+    public step?: string,
   ) {
     super(message);
     this.name = "ApiError";
@@ -129,6 +135,7 @@ async function request<T>(
       response.status,
       (data.error as string) || (data.message as string) || "Request failed",
       data.details,
+      typeof data.step === "string" ? data.step : undefined,
     );
   }
 
@@ -1291,16 +1298,23 @@ export interface PublishRetryInfo {
  *
  *   - 5xx / 429 from the Worker itself or upstream services (EZID 503,
  *     Cloudflare "Too many subrequests by single Worker invocation",
- *     transient GitHub 5xx)
+ *     transient GitHub 5xx). In practice this is the dominant retry path:
+ *     the orchestrator wraps every step failure as HTTP 500 with the
+ *     upstream message in the body, so propagation 5xx and even GitHub's
+ *     "Repository has been locked" 403 (re-wrapped as 500) match here.
  *   - Network-layer drops surfaced by the request helper as `statusCode === 0`
- *   - GitHub 403 "Repository has been locked", which appears for ~10–30s
- *     right after a visibility flip and clears on its own
+ *   - A bare HTTP 403 whose message still contains "repository has been
+ *     locked" — defensive coverage for any future code path that returns
+ *     the GitHub 403 directly without wrapping it in a 500.
  *
  * Real input errors (CI failure 422, sandbox-prefix rejection 400, missing
  * auth 401/403, dataset-not-found 404) are NOT retried — they will not fix
  * themselves with time and the admin needs to act.
+ *
+ * Exported for direct unit testing — kept as a pure predicate over
+ * `ApiError` so the retry surface can be locked in by the test suite.
  */
-function isRetryablePublishError(err: unknown): boolean {
+export function isRetryablePublishError(err: unknown): boolean {
   if (!(err instanceof ApiError)) return false;
   if (err.statusCode === 0) return true;
   if (err.statusCode === 429) return true;
@@ -1380,24 +1394,34 @@ export async function approvePublication(
       } while (result.hasMore);
 
       if (accumulatedStepResults.length > 0) {
-        result.step_results = accumulatedStepResults;
+        // Dedupe by step name, keeping the most recent entry. Without this,
+        // a step that failed-then-succeeded across a retry boundary appears
+        // twice in the post-publication summary (once failed, once
+        // completed) and the admin can't trust the count.
+        result.step_results = dedupeStepResults(accumulatedStepResults);
       }
       return result;
     } catch (err) {
       lastError = err;
       const lastAttempt = attempt === MAX_ATTEMPTS;
-      if (lastAttempt || !isRetryablePublishError(err)) throw err;
+      if (lastAttempt || !isRetryablePublishError(err)) {
+        if (err instanceof ApiError && accumulatedStepResults.length > 0) {
+          // Attach the per-attempt step timeline to the thrown error so the
+          // CLI handler can show the full retry history (which step failed
+          // when, and how many attempts each took) instead of just the
+          // final raw 500 message.
+          (err as ApiError & { stepResults?: StepResult[] }).stepResults =
+            dedupeStepResults(accumulatedStepResults);
+        }
+        throw err;
+      }
 
       const apiErr = err as ApiError;
-      const step =
-        apiErr.details && typeof apiErr.details === "object" && "step" in apiErr.details
-          ? String((apiErr.details as { step: unknown }).step ?? "")
-          : undefined;
       onRetry?.({
         attempt,
         maxAttempts: MAX_ATTEMPTS,
         delayMs: RETRY_DELAY_MS,
-        step: step || undefined,
+        step: apiErr.step,
         error: apiErr.message,
       });
 
@@ -1409,6 +1433,17 @@ export async function approvePublication(
   }
 
   throw lastError;
+}
+
+/**
+ * Dedupe step results by step name, keeping the latest entry per step.
+ * Used to collapse multi-attempt retry timelines into a single summary
+ * where each step appears once with its final status.
+ */
+function dedupeStepResults(results: StepResult[]): StepResult[] {
+  const byStep = new Map<string, StepResult>();
+  for (const r of results) byStep.set(r.step, r);
+  return Array.from(byStep.values());
 }
 
 export interface S3LockResponse {
