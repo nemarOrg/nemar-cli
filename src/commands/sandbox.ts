@@ -192,7 +192,6 @@ async function sandboxAction(options: { verbose?: boolean } = {}): Promise<void>
   let githubUrl: string;
   let s3Config: { bucket: string; region: string; public_url: string };
   let s3Prefix: string;
-  let uploadUrls: Record<string, string>;
 
   try {
     const response = await createDataset({
@@ -213,10 +212,6 @@ async function sandboxAction(options: { verbose?: boolean } = {}): Promise<void>
     githubUrl = response.dataset.github_url;
     s3Config = response.s3_config;
     s3Prefix = response.dataset.s3_prefix;
-    // upload_urls (presigned) intentionally ignored: the modern flow uses
-    // git-annex's S3 special remote (configureS3Remote + copyToAnnexRemote).
-    // Backend still returns them for older CLIs.
-    uploadUrls = response.upload_urls || {};
 
     apiSpinner.succeed(`Sandbox dataset created: ${chalk.cyan(datasetId)}`);
     console.log(chalk.dim(`  GitHub: ${githubUrl}`));
@@ -294,80 +289,69 @@ async function sandboxAction(options: { verbose?: boolean } = {}): Promise<void>
     return;
   }
 
-  // Step 7: Upload data files to S3 via git-annex S3 special remote
   console.log();
   console.log(chalk.bold("Step 5/6: Uploading to S3..."));
 
-  const dataFileCount = Object.keys(uploadUrls).length;
-
-  if (dataFileCount === 0) {
-    console.log(chalk.yellow("  No data files to upload (metadata only)"));
-  } else {
-    // Get STS upload credentials for the sandbox dataset prefix
-    const credsSpinner = ora("Requesting upload credentials...").start();
-    let credsResponse: Awaited<ReturnType<typeof requestUploadCredentials>>;
-    try {
-      credsResponse = await requestUploadCredentials(datasetId);
-      credsSpinner.succeed("Upload credentials received");
-    } catch (error) {
-      credsSpinner.fail("Could not get upload credentials");
-      console.log(chalk.red(`  ${error instanceof Error ? error.message : "Unknown error"}`));
-      cleanupSandboxDataset(datasetPath);
-      return;
-    }
-
-    const credentials = toS3Credentials(credsResponse.credentials);
-
-    // Configure git-annex S3 special remote
-    const remoteSpinner = ora("Configuring S3 remote...").start();
-    const remoteResult = await configureS3Remote(
-      datasetPath,
-      {
-        name: "nemar-s3",
-        bucket: credsResponse.s3.bucket,
-        prefix: `${s3Prefix}/objects`,
-        region: credsResponse.s3.region,
-        publicUrl: s3Config.public_url,
-      },
-      credentials,
-    );
-    if (!remoteResult.success) {
-      remoteSpinner.fail("Failed to configure S3 remote");
-      console.log(chalk.red(`  ${remoteResult.error}`));
-      console.log(chalk.dim("  Re-run with --verbose to see git-annex output."));
-      cleanupSandboxDataset(datasetPath);
-      return;
-    }
-    remoteSpinner.succeed("S3 remote configured");
-
-    // Track data files with git-annex (respects annex.largefiles pattern)
-    const addSpinner = ora("Tracking data files with git-annex...").start();
-    const addResult = await gitAnnexAdd(datasetPath);
-    if (!addResult.success) {
-      addSpinner.fail("Failed to track data files");
-      console.log(chalk.red(`  ${addResult.error}`));
-      console.log(chalk.dim("  Re-run with --verbose to see git-annex output."));
-      cleanupSandboxDataset(datasetPath);
-      return;
-    }
-    addSpinner.succeed("Data files tracked by git-annex");
-
-    // Upload via git-annex S3 remote (handles key-based layout + tracking)
-    const uploadSpinner = ora(`Uploading ${dataFileCount} data file(s) to S3...`).start();
-    const uploadResult = await copyToAnnexRemote(datasetPath, "nemar-s3", 4, credentials);
-
-    // Always clear cached STS creds so downloads use publicurl
-    await clearAnnexCredentials(datasetPath);
-
-    if (!uploadResult.success) {
-      uploadSpinner.fail("S3 upload failed");
-      console.log(chalk.red(`  ${uploadResult.error}`));
-      console.log(chalk.dim("  Re-run with --verbose to see git-annex output."));
-      cleanupSandboxDataset(datasetPath);
-      return;
-    }
-    uploadSpinner.succeed(`Uploaded ${uploadResult.filesCopied} data file(s) to S3`);
+  const credsSpinner = ora("Requesting upload credentials...").start();
+  let credsResponse: Awaited<ReturnType<typeof requestUploadCredentials>>;
+  try {
+    credsResponse = await requestUploadCredentials(datasetId);
+    credsSpinner.succeed("Upload credentials received");
+  } catch (error) {
+    credsSpinner.fail("Could not get upload credentials");
+    console.log(chalk.red(`  ${error instanceof Error ? error.message : "Unknown error"}`));
+    cleanupSandboxDataset(datasetPath);
+    return;
   }
+
+  const credentials = toS3Credentials(credsResponse.credentials);
+
+  const remoteSpinner = ora("Configuring S3 remote...").start();
+  const remoteResult = await configureS3Remote(
+    datasetPath,
+    {
+      name: "nemar-s3",
+      bucket: credsResponse.s3.bucket,
+      prefix: `${s3Prefix}/objects`,
+      region: credsResponse.s3.region,
+      publicUrl: s3Config.public_url,
+    },
+    credentials,
+  );
+  if (!remoteResult.success) {
+    remoteSpinner.fail("Failed to configure S3 remote");
+    console.log(chalk.red(`  ${remoteResult.error}`));
+    console.log(chalk.dim("  Re-run with --verbose to see git-annex output."));
+    cleanupSandboxDataset(datasetPath);
+    return;
+  }
+  remoteSpinner.succeed("S3 remote configured");
+
+  const addSpinner = ora("Tracking data files with git-annex...").start();
+  const addResult = await gitAnnexAdd(datasetPath);
+  if (!addResult.success) {
+    addSpinner.fail("Failed to track data files");
+    console.log(chalk.red(`  ${addResult.error}`));
+    console.log(chalk.dim("  Re-run with --verbose to see git-annex output."));
+    cleanupSandboxDataset(datasetPath);
+    return;
+  }
+  addSpinner.succeed("Data files tracked by git-annex");
+
+  const uploadSpinner = ora("Uploading data files to S3...").start();
+  const uploadResult = await copyToAnnexRemote(datasetPath, "nemar-s3", 4, credentials);
+
+  // Clear cached STS creds so subsequent `git annex get` falls back to publicurl
+  await clearAnnexCredentials(datasetPath);
+
+  if (!uploadResult.success) {
+    uploadSpinner.fail("S3 upload failed");
+    console.log(chalk.red(`  ${uploadResult.error}`));
+    console.log(chalk.dim("  Re-run with --verbose to see git-annex output."));
+    cleanupSandboxDataset(datasetPath);
+    return;
+  }
+  uploadSpinner.succeed(`Uploaded ${uploadResult.filesCopied} data file(s) to S3`);
 
   // Step 8: Save and push to GitHub
   console.log();
