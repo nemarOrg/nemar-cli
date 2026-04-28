@@ -76,6 +76,14 @@ describe("isRetryablePublishError - non-retryable client errors", () => {
     ).toBe(false);
   });
 
+  test("does NOT retry 426 (Upgrade Required - old CLI must act)", () => {
+    // The publish/approve route returns 426 when a pre-#385 CLI sends
+    // the legacy s3_lock_offset field. Retrying would loop indefinitely.
+    expect(
+      isRetryablePublishError(new ApiError(426, "Outdated nemar-cli; please upgrade")),
+    ).toBe(false);
+  });
+
   test("does NOT retry 499 (just below 5xx boundary)", () => {
     expect(isRetryablePublishError(new ApiError(499, "Client Closed Request"))).toBe(false);
   });
