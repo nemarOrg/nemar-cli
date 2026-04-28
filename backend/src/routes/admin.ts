@@ -2842,20 +2842,21 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
   }
 
   // Step 4: Tag protection (before DOI to prevent tag manipulation)
-  // Idempotent: applyTagProtection treats 422 (rule already exists) as success
-  // and throws HttpError with status + body on terminal failure. withRetry
-  // absorbs the propagation 5xx/404 window after the repo_public flip.
+  // Idempotent: applyTagProtection treats 422 (rule already exists) as
+  // success and throws HttpError with status + body on terminal failure.
+  // No inline withRetry: githubFetchWithRetry inside applyTagProtection
+  // already absorbs short propagation 5xx/404 windows. Persistent failures
+  // (e.g., GitHub "Repository has been locked" right after a visibility
+  // flip) are surfaced as 500 so the CLI's retry-with-delay loop can
+  // re-invoke from a fresh Worker (and a fresh propagation window).
   if (stepsToRun.includes("tag_protect")) {
     try {
       await startStep("tag_protect");
 
       const { applyTagProtection } = await import("../services/github");
-      const { attempts: tagAttempts } = await withRetry(
-        () => applyTagProtection(repoName, pat),
-        "tag_protect",
-      );
+      await applyTagProtection(repoName, pat);
 
-      await updateProgress("tag_protect", undefined, tagAttempts);
+      await updateProgress("tag_protect");
     } catch (err) {
       const msg = errorMessage(err);
       await updateProgress("tag_protect", msg);
@@ -2999,6 +3000,19 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
             )
             .bind(doiResult.doi, doiResult.providerRecordId, sandbox ? 1 : 0, datasetId)
             .run();
+        }
+
+        // Keep the in-memory `dataset` snapshot in sync with the DB write so
+        // later steps in this same invocation (publish_doi, etc.) don't read
+        // a stale null and fail with "No EZID identifier found".
+        dataset.concept_doi = doiResult.doi;
+        dataset.doi_provider = provider;
+        dataset.is_sandbox = sandbox ? 1 : 0;
+        if (provider === "ezid") {
+          dataset.ezid_identifier = doiResult.providerRecordId;
+          dataset.ezid_status = doiResult.status;
+        } else {
+          dataset.zenodo_concept_id = doiResult.providerRecordId;
         }
 
         await updateProgress("doi_create", undefined, doiAttempts);
@@ -3668,18 +3682,27 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
   }
 
   // Step 12: S3 Object Lock (single batch per request due to CF Workers subrequest limits)
+  // No inline withRetry here: each batch already issues ~40 PUT subrequests
+  // plus listObjectKeys pagination, and retrying the call inside the same
+  // Worker invocation triples the subrequest count and reliably trips
+  // Cloudflare's per-invocation limit ("Too many subrequests by single
+  // Worker invocation"). The CLI's retry-with-delay loop re-invokes from a
+  // fresh Worker (fresh subrequest budget) and preserves s3_lock_offset, so
+  // each retry resumes the same batch idempotently (already-locked objects
+  // return 403, which applyObjectLock counts as success).
   if (stepsToRun.includes("s3_lock")) {
     try {
       await startStep("s3_lock");
 
-      const { result: lockResult, attempts: lockAttempts } = await withRetry(
-        () => applyObjectLock(getS3Config(c.env), datasetId, body.s3_lock_offset || 0),
-        "s3_lock",
+      const lockResult = await applyObjectLock(
+        getS3Config(c.env),
+        datasetId,
+        body.s3_lock_offset || 0,
       );
 
       if (lockResult.failed.length > 0) {
         const msg = `${lockResult.locked} locked, ${lockResult.failed.length} failed`;
-        await updateProgress("s3_lock", msg, lockAttempts);
+        await updateProgress("s3_lock", msg);
         return c.json(
           {
             error: `S3 lock partially failed: ${msg}`,
@@ -3704,7 +3727,7 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
         });
       }
 
-      await updateProgress("s3_lock", undefined, lockAttempts);
+      await updateProgress("s3_lock");
     } catch (err) {
       const msg = errorMessage(err);
       await updateProgress("s3_lock", msg);
