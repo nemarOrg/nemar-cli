@@ -9,6 +9,7 @@ import { existsSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { spawn } from "bun";
 import chalk from "chalk";
+import { isVerbose, vlog } from "./verbose.js";
 
 /**
  * Version info for a tool
@@ -96,11 +97,22 @@ export async function runCommand(
     }, options.timeout);
   }
 
+  if (isVerbose()) {
+    const cwdHint = options.cwd ? ` (cwd=${options.cwd})` : "";
+    vlog(chalk.dim(`$ ${cmd.join(" ")}${cwdHint}`));
+  }
+
   const stdout = await new Response(proc.stdout).text();
   const stderr = await new Response(proc.stderr).text();
   const exitCode = await proc.exited;
 
   if (timer) clearTimeout(timer);
+
+  if (isVerbose()) {
+    if (stdout.trim()) vlog(chalk.dim(stdout.trimEnd()));
+    if (stderr.trim()) vlog(chalk.yellow(stderr.trimEnd()));
+    vlog(chalk.dim(`(exit ${exitCode})`));
+  }
 
   if (timedOut) {
     return {
@@ -1378,307 +1390,6 @@ export async function getDatasetStats(path: string): Promise<{
 
 // Re-export formatBytes from progress.ts (canonical implementation)
 export { formatBytes } from "./progress.js";
-
-// =============================================================================
-// Presigned URL Upload Functions
-// =============================================================================
-
-export interface PresignedUploadProgress {
-  file: string;
-  uploaded: number;
-  total: number;
-  status: "pending" | "uploading" | "completed" | "failed";
-  error?: string;
-}
-
-/**
- * Upload a single file to S3 using a presigned URL
- *
- * Includes retry logic for transient errors:
- * - 403 AccessDenied: IAM eventual consistency delays after policy updates
- * - 503 SlowDown: S3 rate limiting when too many concurrent requests hit the bucket
- */
-export async function uploadFileWithPresignedUrl(
-  filePath: string,
-  presignedUrl: string,
-  onProgress?: (uploaded: number, total: number) => void,
-  options?: { maxRetries?: number; initialDelayMs?: number },
-): Promise<{ success: boolean; error?: string }> {
-  const maxRetries = options?.maxRetries ?? 4;
-  const initialDelayMs = options?.initialDelayMs ?? 10000; // 10 seconds
-
-  try {
-    const file = Bun.file(filePath);
-    const fileSize = file.size;
-
-    let lastError = "";
-
-    for (let attempt = 0; attempt <= maxRetries; attempt++) {
-      // Stream file directly from disk to avoid buffering entire file in memory
-      const response = await fetch(presignedUrl, {
-        method: "PUT",
-        body: file,
-        headers: {
-          "Content-Length": fileSize.toString(),
-        },
-      });
-
-      if (response.ok) {
-        onProgress?.(fileSize, fileSize);
-        return { success: true };
-      }
-
-      const errorText = await response.text();
-      lastError = `Upload failed: ${response.status} ${errorText}`;
-
-      // Retry on 403 AccessDenied (IAM propagation delay) or 503 SlowDown (rate limiting)
-      const isIamError = response.status === 403 && errorText.includes("AccessDenied");
-      const isRateLimited = response.status === 503 && errorText.includes("SlowDown");
-      const isRetryable = isIamError || isRateLimited;
-
-      if (!isRetryable || attempt === maxRetries) {
-        if (isRetryable && attempt === maxRetries) {
-          console.warn(`Upload failed after ${maxRetries} retries: ${filePath}`);
-        }
-        return { success: false, error: lastError };
-      }
-
-      // Exponential backoff for rate limiting (4s, 8s, 16s, 30s cap); linear for IAM (10s, 15s, 20s, 25s)
-      const delayMs = isRateLimited
-        ? Math.min(4000 * 2 ** attempt, 30000)
-        : initialDelayMs + attempt * 5000;
-
-      if (isRateLimited) {
-        console.warn(
-          `S3 rate limit hit, retrying in ${delayMs / 1000}s (attempt ${attempt + 1}/${maxRetries})...`,
-        );
-      } else if (isIamError) {
-        console.warn(
-          `Waiting for S3 permissions to propagate, retrying in ${delayMs / 1000}s (attempt ${attempt + 1}/${maxRetries})...`,
-        );
-      }
-
-      await new Promise((resolve) => setTimeout(resolve, delayMs));
-    }
-
-    return { success: false, error: lastError };
-  } catch (error) {
-    const errorMsg = error instanceof Error ? error.message : String(error);
-    return { success: false, error: `Failed to upload ${filePath}: ${errorMsg}` };
-  }
-}
-
-/**
- * Upload multiple files using presigned URLs with a concurrent pool.
- *
- * Uses a semaphore pattern to keep exactly `jobs` uploads running at all
- * times, starting the next file as soon as any slot frees up. This avoids
- * the idle-slot problem of fixed Promise.all batches.
- *
- * `onBatchComplete` fires every `jobs` completions to persist progress.
- */
-export async function uploadFilesWithPresignedUrls(
-  basePath: string,
-  uploadUrls: Record<string, string>,
-  options: {
-    jobs?: number;
-    onProgress?: (progress: PresignedUploadProgress) => void;
-    onBatchComplete?: () => void;
-  } = {},
-): Promise<{ success: boolean; uploaded: number; failed: string[]; error?: string }> {
-  const jobs = options.jobs || 4;
-  const files = Object.entries(uploadUrls);
-  const failed: string[] = [];
-  let uploaded = 0;
-  let completed = 0;
-  let sinceLastSave = 0;
-
-  // Semaphore: resolve functions for waiting workers
-  let running = 0;
-  let releaseSlot: (() => void) | null = null;
-
-  function acquireSlot(): Promise<void> {
-    if (running < jobs) {
-      running++;
-      return Promise.resolve();
-    }
-    return new Promise<void>((resolve) => {
-      releaseSlot = () => {
-        releaseSlot = null;
-        resolve();
-      };
-    });
-  }
-
-  function freeSlot(): void {
-    running--;
-    if (releaseSlot) {
-      running++;
-      releaseSlot();
-    }
-  }
-
-  const uploadFile = async (relativePath: string, presignedUrl: string) => {
-    const fullPath = join(basePath, relativePath);
-
-    options.onProgress?.({
-      file: relativePath,
-      uploaded: 0,
-      total: 0,
-      status: "uploading",
-    });
-
-    const result = await uploadFileWithPresignedUrl(fullPath, presignedUrl);
-
-    if (result.success) {
-      uploaded++;
-      options.onProgress?.({
-        file: relativePath,
-        uploaded: 1,
-        total: 1,
-        status: "completed",
-      });
-    } else {
-      failed.push(`${relativePath}: ${result.error || "Unknown error"}`);
-      options.onProgress?.({
-        file: relativePath,
-        uploaded: 0,
-        total: 1,
-        status: "failed",
-        error: result.error,
-      });
-    }
-
-    completed++;
-    sinceLastSave++;
-    if (sinceLastSave >= jobs) {
-      sinceLastSave = 0;
-      options.onBatchComplete?.();
-    }
-
-    freeSlot();
-  };
-
-  // Launch all uploads, gated by the semaphore
-  const promises: Promise<void>[] = [];
-  for (const [relativePath, presignedUrl] of files) {
-    await acquireSlot();
-    promises.push(uploadFile(relativePath, presignedUrl));
-  }
-
-  // Wait for all in-flight uploads to finish
-  await Promise.all(promises);
-
-  // Final save for any remaining completions
-  if (sinceLastSave > 0) {
-    options.onBatchComplete?.();
-  }
-
-  return {
-    success: failed.length === 0,
-    uploaded,
-    failed,
-    error: failed.length > 0 ? `${failed.length} files failed to upload` : undefined,
-  };
-}
-
-/**
- * Register a URL with git-annex for a file
- * This allows git-annex to track files uploaded via presigned URLs
- */
-export async function registerUrlWithGitAnnex(
-  repoPath: string,
-  relativePath: string,
-  url: string,
-): Promise<{ success: boolean; error?: string }> {
-  try {
-    // First, add the file to git-annex if not already tracked
-    const addResult = await runCommand(["git", "annex", "add", relativePath], {
-      cwd: repoPath,
-    });
-
-    if (addResult.exitCode !== 0) {
-      // File might already be tracked, that's OK
-    }
-
-    // Get the key for the file
-    const keyResult = await runCommand(["git", "annex", "lookupkey", relativePath], {
-      cwd: repoPath,
-    });
-
-    if (keyResult.exitCode !== 0 || !keyResult.stdout.trim()) {
-      return { success: false, error: `Could not get git-annex key for ${relativePath}` };
-    }
-
-    const key = keyResult.stdout.trim();
-
-    // Register the URL with the key
-    const registerResult = await runCommand(["git", "annex", "registerurl", key, url], {
-      cwd: repoPath,
-    });
-
-    if (registerResult.exitCode !== 0) {
-      return { success: false, error: `Failed to register URL: ${registerResult.stderr}` };
-    }
-
-    return { success: true };
-  } catch (error) {
-    return { success: false, error: (error as Error).message };
-  }
-}
-
-/**
- * Register multiple URLs with git-annex
- */
-export async function registerUrlsWithGitAnnex(
-  repoPath: string,
-  fileUrls: Record<string, string>,
-  onProgress?: (file: string, success: boolean) => void,
-): Promise<{ success: boolean; registered: number; failed: string[] }> {
-  let registered = 0;
-  const failed: string[] = [];
-
-  for (const [relativePath, url] of Object.entries(fileUrls)) {
-    const result = await registerUrlWithGitAnnex(repoPath, relativePath, url);
-    if (result.success) {
-      registered++;
-      onProgress?.(relativePath, true);
-    } else {
-      failed.push(relativePath);
-      onProgress?.(relativePath, false);
-    }
-  }
-
-  return {
-    success: failed.length === 0,
-    registered,
-    failed,
-  };
-}
-
-/**
- * Configure git-annex web remote for tracking S3 URLs
- * This allows git-annex to use the registered URLs for downloads
- */
-export async function configureWebRemote(
-  repoPath: string,
-): Promise<{ success: boolean; error?: string }> {
-  try {
-    // Check if web remote already exists
-    const checkResult = await runCommand(["git", "annex", "enableremote", "web"], {
-      cwd: repoPath,
-    });
-
-    // Web remote is built-in to git-annex, should always work
-    if (checkResult.exitCode !== 0 && !checkResult.stderr.includes("already exists")) {
-      return { success: false, error: `Failed to enable web remote: ${checkResult.stderr}` };
-    }
-
-    return { success: true };
-  } catch (error) {
-    return { success: false, error: (error as Error).message };
-  }
-}
 
 // =============================================================================
 // Download Functions
