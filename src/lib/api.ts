@@ -1271,57 +1271,144 @@ export async function denyPublication(
 }
 
 /**
- * Approve publication request (admin) - runs orchestrator
+ * Info passed to `onRetry` when the orchestrator hits a transient failure
+ * and the CLI is about to wait and re-invoke.
+ */
+export interface PublishRetryInfo {
+  attempt: number;
+  maxAttempts: number;
+  delayMs: number;
+  step?: string;
+  error: string;
+}
+
+/**
+ * Decide whether a failed `approvePublication` request is worth re-invoking
+ * from a fresh Worker. The orchestrator persists progress in D1, so a
+ * re-invocation skips already-completed steps and only re-attempts the one
+ * that failed — that makes wait-and-retry safe and idempotent for the
+ * transient failures admins actually see in practice:
+ *
+ *   - 5xx / 429 from the Worker itself or upstream services (EZID 503,
+ *     Cloudflare "Too many subrequests by single Worker invocation",
+ *     transient GitHub 5xx)
+ *   - Network-layer drops surfaced by the request helper as `statusCode === 0`
+ *   - GitHub 403 "Repository has been locked", which appears for ~10–30s
+ *     right after a visibility flip and clears on its own
+ *
+ * Real input errors (CI failure 422, sandbox-prefix rejection 400, missing
+ * auth 401/403, dataset-not-found 404) are NOT retried — they will not fix
+ * themselves with time and the admin needs to act.
+ */
+function isRetryablePublishError(err: unknown): boolean {
+  if (!(err instanceof ApiError)) return false;
+  if (err.statusCode === 0) return true;
+  if (err.statusCode === 429) return true;
+  if (err.statusCode >= 500 && err.statusCode < 600) return true;
+  if (err.statusCode === 403 && /repository has been locked/i.test(err.message)) return true;
+  return false;
+}
+
+/**
+ * Approve publication request (admin) - runs orchestrator with
+ * retry-with-delay across Worker invocations.
+ *
+ * The pipeline's flakiest steps (tag protection, EZID DOI mint, S3 Object
+ * Lock) hit transient failures: GitHub propagation lag right after the
+ * repo visibility flip, EZID rate limits, and Cloudflare per-invocation
+ * subrequest limits. Inline retry inside a single Worker (`withRetry` in
+ * the backend) made S3 Object Lock worse — each retry re-issued ~40 S3
+ * PUTs in the same invocation and tripped CF's subrequest cap.
+ *
+ * Instead we drive retries from the CLI: each retry is a *fresh* Worker
+ * invocation with a fresh subrequest budget, and the 10s gap between
+ * attempts gives GitHub/EZID propagation a real chance to clear. The
+ * orchestrator's persisted progress means the retry only re-runs the
+ * failed step, not the whole pipeline.
  */
 export async function approvePublication(
   datasetId: string,
   resume = false,
   sandbox = false,
   skipCiCheck = false,
+  onRetry?: (info: PublishRetryInfo) => void,
 ): Promise<PublishApproveResponse> {
+  const MAX_ATTEMPTS = 5;
+  const RETRY_DELAY_MS = 10_000;
+
   let s3_lock_offset: number | undefined;
-  let result: PublishApproveResponse;
+  let useResume = resume;
   const accumulatedStepResults: StepResult[] = [];
-  // After the first call completes all publish steps, subsequent calls
-  // Loop to handle S3 lock pagination (CF Workers ~50 subrequest limit).
-  // On the first call, pass the caller's `resume` flag so the orchestrator
-  // either starts fresh or resumes from persisted progress. On subsequent
-  // iterations (S3 lock batching), always pass resume=true so we skip
-  // already-completed steps and only continue locking objects.
-  let isFirstCall = true;
-  do {
-    result = await request<PublishApproveResponse>(
-      `/admin/publish/${datasetId}/approve`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          resume: isFirstCall ? resume : true,
-          sandbox,
-          s3_lock_offset,
-          skip_ci_check: skipCiCheck,
-        }),
-      },
-      true,
-    );
-    isFirstCall = false;
+  let lastError: unknown;
 
-    if (result.step_results) {
-      accumulatedStepResults.push(...result.step_results);
+  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+    try {
+      let result: PublishApproveResponse;
+      // Inner loop handles S3 lock pagination (CF Workers ~50 subrequest
+      // limit per invocation). On the first call, pass the caller's
+      // `resume` flag so the orchestrator either starts fresh or resumes
+      // from persisted progress. On subsequent iterations (S3 lock
+      // batching) always pass resume=true so we skip already-completed
+      // steps and only continue locking objects.
+      let isFirstCall = true;
+      do {
+        result = await request<PublishApproveResponse>(
+          `/admin/publish/${datasetId}/approve`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              resume: isFirstCall ? useResume : true,
+              sandbox,
+              s3_lock_offset,
+              skip_ci_check: skipCiCheck,
+            }),
+          },
+          true,
+        );
+        isFirstCall = false;
+
+        if (result.step_results) {
+          accumulatedStepResults.push(...result.step_results);
+        }
+
+        if (result.hasMore && result.s3_lock_offset !== undefined) {
+          s3_lock_offset = result.s3_lock_offset;
+        } else {
+          break;
+        }
+      } while (result.hasMore);
+
+      if (accumulatedStepResults.length > 0) {
+        result.step_results = accumulatedStepResults;
+      }
+      return result;
+    } catch (err) {
+      lastError = err;
+      const lastAttempt = attempt === MAX_ATTEMPTS;
+      if (lastAttempt || !isRetryablePublishError(err)) throw err;
+
+      const apiErr = err as ApiError;
+      const step =
+        apiErr.details && typeof apiErr.details === "object" && "step" in apiErr.details
+          ? String((apiErr.details as { step: unknown }).step ?? "")
+          : undefined;
+      onRetry?.({
+        attempt,
+        maxAttempts: MAX_ATTEMPTS,
+        delayMs: RETRY_DELAY_MS,
+        step: step || undefined,
+        error: apiErr.message,
+      });
+
+      await new Promise((resolve) => setTimeout(resolve, RETRY_DELAY_MS));
+      // Anything that succeeded in the failed attempt is already persisted
+      // in D1; the next attempt must resume to skip it.
+      useResume = true;
     }
-
-    if (result.hasMore && result.s3_lock_offset !== undefined) {
-      s3_lock_offset = result.s3_lock_offset;
-    } else {
-      break;
-    }
-  } while (result.hasMore);
-
-  if (accumulatedStepResults.length > 0) {
-    result.step_results = accumulatedStepResults;
   }
 
-  return result;
+  throw lastError;
 }
 
 export interface S3LockResponse {

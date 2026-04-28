@@ -1729,6 +1729,19 @@ After Approval:
           !!options.resume,
           !!options.sandbox,
           !!options.skipCiCheck,
+          (info) => {
+            // Surface transient failures the CLI is about to retry. We pause
+            // the spinner so the message isn't overwritten, then resume it.
+            spinner.stop();
+            const stepLabel = info.step ? info.step.replace(/_/g, " ") : "step";
+            console.log(chalk.yellow(`  [!] ${stepLabel} failed: ${info.error}`));
+            console.log(
+              chalk.dim(
+                `  Retrying in ${Math.round(info.delayMs / 1000)}s (attempt ${info.attempt + 1}/${info.maxAttempts})...`,
+              ),
+            );
+            spinner.start("Running publication workflow (this may take a few minutes)...");
+          },
         );
         spinner.succeed(result.message);
 
