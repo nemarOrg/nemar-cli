@@ -402,12 +402,15 @@ export async function applyObjectLockBatch(
   options: PresignedUrlOptions,
   datasetId: string,
   continuationToken?: string,
-  // 25 keeps us comfortably under any plan's per-invocation subrequest
-  // cap: ~7 D1 + 1 LIST + 25 PUTs + a couple of internal calls = ~35.
-  // Halves the number of CLI round-trips vs. the original 15 for medium
-  // datasets (e.g. 702 → 28 batches instead of 47) without eating into
-  // the budget.
-  batchSize = 25,
+  // Sized for Cloudflare Workers Paid plan (1,000 subrequests per
+  // invocation). Per-invocation cost: ~7 D1 + 1 LIST + 100 PUTs +
+  // ~15 hidden runtime overhead = ~123 subrequests, leaving 8× headroom
+  // before the cap. Halves CLI round-trips from the previous 25-batch
+  // value (e.g. nm000103: 36 batches instead of 141) and lets most
+  // approvals complete in a single invocation without using the retry
+  // loop. Note: this requires the deployed worker to be on Workers Paid
+  // (Free plan caps at 50 subrequests, which doesn't fit 100 PUTs).
+  batchSize = 100,
 ): Promise<{
   locked: number;
   failed: ObjectLockFailure[];
@@ -488,31 +491,51 @@ export async function applyObjectLockBatch(
   const bodyBytes = new TextEncoder().encode(retentionXml);
   const contentMd5 = await computeMd5Base64(bodyBytes);
 
-  for (const key of keys) {
-    // Encode each path segment individually, preserving "/" separators
-    const encodedKey = key.split("/").map(encodeURIComponent).join("/");
-    const url = `https://${bucket}.s3.${region}.amazonaws.com/${encodedKey}?retention`;
-    try {
-      const signed = await aws.sign(url, {
-        method: "PUT",
-        headers: {
-          "Content-Type": "application/xml",
-          "Content-MD5": contentMd5,
-        },
-        body: retentionXml,
-      });
+  // Parallelize the PUTs. Subrequest count is identical to a sequential
+  // loop (each fetch counts once regardless of order), but wall time
+  // drops from ~50ms × N to roughly the slowest individual PUT — for
+  // 100 keys that's ~500ms instead of ~5s. Workers Paid gives us a 30s
+  // CPU budget, so signing 100 requests in parallel is comfortable.
+  // Failure ordering becomes nondeterministic; for a partial-fail
+  // batch the CLI replays via the same continuation token, so order
+  // doesn't affect correctness.
+  const lockResults = await Promise.all(
+    keys.map(async (key) => {
+      // Encode each path segment individually, preserving "/" separators
+      const encodedKey = key.split("/").map(encodeURIComponent).join("/");
+      const url = `https://${bucket}.s3.${region}.amazonaws.com/${encodedKey}?retention`;
+      try {
+        const signed = await aws.sign(url, {
+          method: "PUT",
+          headers: {
+            "Content-Type": "application/xml",
+            "Content-MD5": contentMd5,
+          },
+          body: retentionXml,
+        });
 
-      const res = await fetch(signed);
-      if (res.ok || res.status === 403) {
-        // 200: newly locked; 403: already locked (object protected)
-        locked++;
-      } else {
+        const res = await fetch(signed);
+        if (res.ok || res.status === 403) {
+          // 200: newly locked; 403: already locked (object protected)
+          return { ok: true as const };
+        }
         const errorText = await res.text().catch(() => "");
-        failed.push({ key, error: `HTTP ${res.status}: ${errorText}`.trim() });
+        return {
+          ok: false as const,
+          failure: { key, error: `HTTP ${res.status}: ${errorText}`.trim() },
+        };
+      } catch (err) {
+        return {
+          ok: false as const,
+          failure: { key, error: err instanceof Error ? err.message : String(err) },
+        };
       }
-    } catch (err) {
-      failed.push({ key, error: err instanceof Error ? err.message : String(err) });
-    }
+    }),
+  );
+
+  for (const r of lockResults) {
+    if (r.ok) locked++;
+    else failed.push(r.failure);
   }
 
   return {
