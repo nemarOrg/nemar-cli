@@ -37,6 +37,17 @@ index_name = "nemar-dataset-index"
 # Note: Rate limiting uses Cache API instead of KV to avoid daily operation limits
 # KV namespace 9afb2679c6ea4ed4acd1a5916cf291d7 is no longer used
 
+# Workers Observability. Mirrors the SCCN config so the legacy buffer is
+# diagnosable too while it's still live in MAINTENANCE_MODE=read-only
+# during the SCCN migration tail (see #314 Phase 11).
+[observability]
+enabled = true
+head_sampling_rate = 1
+
+[observability.logs]
+enabled = true
+invocation_logs = true
+
 # Environment variables
 [vars]
 ENVIRONMENT = "production"
@@ -87,6 +98,15 @@ binding = "AI"
 [[env.dev.vectorize]]
 binding = "VECTORIZE"
 index_name = "nemar-dataset-index-dev"
+
+# Observability for dev (not inherited from top-level)
+[env.dev.observability]
+enabled = true
+head_sampling_rate = 1
+
+[env.dev.observability.logs]
+enabled = true
+invocation_logs = true
 
 [env.dev.vars]
 ENVIRONMENT = "development"
