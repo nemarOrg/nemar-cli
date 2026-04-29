@@ -37,6 +37,21 @@ binding = "AI"
 binding = "VECTORIZE"
 index_name = "nemar-dataset-index"
 
+# Workers Observability (Workers Paid plan).
+# Captures invocation logs (inbound request shape, response status, duration,
+# subrequest count) and console.log output for searchable runtime telemetry.
+# 100% sampling is comfortable at NEMAR's volume (admin-heavy, low QPS) under
+# the 200k events/day Paid-plan cap. Drop head_sampling_rate to 0.1 if usage
+# grows past the cap. Required for #393 diagnostics; without it, runtime
+# subrequest counts are only readable via GraphQL Analytics API.
+[observability]
+enabled = true
+head_sampling_rate = 1
+
+[observability.logs]
+enabled = true
+invocation_logs = true
+
 # Environment variables
 [vars]
 ENVIRONMENT = "production"
@@ -88,6 +103,15 @@ binding = "AI"
 [[env.dev.vectorize]]
 binding = "VECTORIZE"
 index_name = "nemar-dataset-index-dev"
+
+# Observability for dev (not inherited from top-level)
+[env.dev.observability]
+enabled = true
+head_sampling_rate = 1
+
+[env.dev.observability.logs]
+enabled = true
+invocation_logs = true
 
 [env.dev.vars]
 ENVIRONMENT = "development"
