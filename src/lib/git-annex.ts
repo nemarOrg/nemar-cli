@@ -619,34 +619,28 @@ function buildS3RemoteArgs(config: S3RemoteConfig): string[] {
 }
 
 /**
- * Check whether a named special remote is registered in git-annex.
- * Searches repository descriptions in `git annex info --json` for either
- * `[name]` (standard description format for special remotes) or an exact
- * name match. Returns false on any error (caller falls back to initremote).
+ * git-annex prints this when initremote is called for an already-registered
+ * special remote name. Used to decide whether to fall back to enableremote.
+ * Anchored to git-annex's exact wording so unrelated S3 messages (e.g.
+ * BucketAlreadyOwnedByYou) cannot trigger the fallback.
  */
-async function annexRemoteExists(path: string, name: string): Promise<boolean> {
-  const { stdout, stderr, exitCode } = await runCommand(["git", "annex", "info", "--json"], {
+export const ANNEX_REMOTE_EXISTS_RE = /There is already a special remote named "[^"]+"/;
+
+/**
+ * Check whether a named special remote is registered in git-annex.
+ * Probes with `git annex info <name> --json`; git-annex returns success only
+ * when the name resolves to a known special remote. Returns false on any
+ * error or unrecognized name (caller falls back to initremote).
+ */
+export async function annexRemoteExists(path: string, name: string): Promise<boolean> {
+  const { stdout, exitCode } = await runCommand(["git", "annex", "info", name, "--json"], {
     cwd: path,
   });
-  if (exitCode !== 0) {
-    console.warn(
-      `Warning: could not check for existing remote (git annex info exited ${exitCode}): ${stderr.trim()}`,
-    );
-    return false;
-  }
+  if (exitCode !== 0) return false;
   try {
     const info = JSON.parse(stdout);
-    const repos = [
-      ...(info["semitrusted repositories"] ?? []),
-      ...(info["trusted repositories"] ?? []),
-      ...(info["untrusted repositories"] ?? []),
-    ];
-    return repos.some(
-      (r: { description?: string }) =>
-        r.description?.includes(`[${name}]`) || r.description === name,
-    );
-  } catch (e) {
-    console.warn(`Warning: could not parse git annex info output: ${(e as Error).message}`);
+    return info?.success === true && typeof info.uuid === "string" && info.uuid.length > 0;
+  } catch {
     return false;
   }
 }
@@ -722,9 +716,11 @@ export async function configureS3Remote(
     const { stderr, exitCode } = await runCommand(initArgs, { cwd: path, env });
 
     if (exitCode !== 0) {
-      // Fallback: initremote reported remote already exists (e.g., our
-      // pre-check missed it or the description format was unexpected)
-      if (stderr.includes("already exists")) {
+      // Fallback only on git-annex's exact "already a special remote" message.
+      // Loose substring matching previously caught S3 bucket-level messages
+      // (e.g. BucketAlreadyOwnedByYou) and triggered a doomed enableremote
+      // for a remote that was never actually registered.
+      if (ANNEX_REMOTE_EXISTS_RE.test(stderr)) {
         return enableS3RemoteWithConfig(path, config.name, s3Params, env);
       }
 
