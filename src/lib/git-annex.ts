@@ -619,18 +619,21 @@ function buildS3RemoteArgs(config: S3RemoteConfig): string[] {
 }
 
 /**
- * git-annex prints this when initremote is called for an already-registered
- * special remote name. Used to decide whether to fall back to enableremote.
- * Anchored to git-annex's exact wording so unrelated S3 messages (e.g.
- * BucketAlreadyOwnedByYou) cannot trigger the fallback.
+ * Match git-annex's wording when initremote is called for an already-registered
+ * special-remote name. Anchored to the exact phrase so unrelated stderr (S3
+ * bucket-conflict messages, key-collision warnings, etc.) cannot trigger the
+ * enableremote fallback in `initOrEnableSpecialRemote`.
  */
 export const ANNEX_REMOTE_EXISTS_RE = /There is already a special remote named "[^"]+"/;
 
 /**
- * Check whether a named special remote is registered in git-annex.
- * Probes with `git annex info <name> --json`; git-annex returns success only
- * when the name resolves to a known special remote. Returns false on any
- * error or unrecognized name (caller falls back to initremote).
+ * Check whether a named special remote is registered in this git-annex repo.
+ *
+ * Probes with `git annex info <name> --json` and accepts the result only when
+ * git-annex echoes back the same name in the `remote` field. `git annex info`
+ * also accepts files, keys, treeish refs, UUIDs, and the `here` alias; the
+ * `remote === name` constraint rejects all of those even if a working-tree
+ * collision happens to give the same name. Returns false on any error.
  */
 export async function annexRemoteExists(path: string, name: string): Promise<boolean> {
   const { stdout, exitCode } = await runCommand(["git", "annex", "info", name, "--json"], {
@@ -639,24 +642,30 @@ export async function annexRemoteExists(path: string, name: string): Promise<boo
   if (exitCode !== 0) return false;
   try {
     const info = JSON.parse(stdout);
-    return info?.success === true && typeof info.uuid === "string" && info.uuid.length > 0;
+    return (
+      info?.success === true &&
+      typeof info.uuid === "string" &&
+      info.uuid.length > 0 &&
+      info.remote === name
+    );
   } catch {
     return false;
   }
 }
 
 /**
- * Run `git annex enableremote` with full S3 config params and credentials.
- * Returns success/error result.
+ * Run `git annex enableremote NAME PARAMS...` and surface a useful error.
  */
-async function enableS3RemoteWithConfig(
+async function enableSpecialRemoteWithParams(
   path: string,
   name: string,
-  s3Params: string[],
+  params: string[],
   env: Record<string, string>,
 ): Promise<{ success: boolean; error?: string }> {
-  const args = ["git", "annex", "enableremote", name, ...s3Params];
-  const result = await runCommand(args, { cwd: path, env });
+  const result = await runCommand(["git", "annex", "enableremote", name, ...params], {
+    cwd: path,
+    env,
+  });
   if (result.exitCode !== 0) {
     const realStderr = filterAnnexInfoMessages(result.stderr);
     return {
@@ -669,13 +678,51 @@ async function enableS3RemoteWithConfig(
 }
 
 /**
- * Configure S3 special remote for git-annex.
- *
- * Handles resume: if the remote already exists (from a previous failed upload),
- * uses `enableremote` with full S3 config to reconnect. Pre-suppresses the
- * annex-ignore warning on origin so it does not pollute stderr error reporting.
- * The remote is configured with publicurl for credential-free downloads and
- * autoenable=true so clones automatically enable it.
+ * Init a special remote, falling back to enableremote when the remote is
+ * already registered (resume from a prior failed run). The fallback fires
+ * pre-emptively via `annexRemoteExists`, and post-hoc when initremote stderr
+ * matches `ANNEX_REMOTE_EXISTS_RE`. Any other initremote failure surfaces the
+ * raw stderr so callers can see the underlying error (S3 access denied,
+ * bucket region mismatch, etc.).
+ */
+export async function initOrEnableSpecialRemote(
+  path: string,
+  name: string,
+  params: string[],
+  env: Record<string, string>,
+): Promise<{ success: boolean; error?: string }> {
+  if (await annexRemoteExists(path, name)) {
+    return enableSpecialRemoteWithParams(path, name, params, env);
+  }
+
+  const { stderr, exitCode } = await runCommand(["git", "annex", "initremote", name, ...params], {
+    cwd: path,
+    env,
+  });
+
+  if (exitCode !== 0) {
+    if (ANNEX_REMOTE_EXISTS_RE.test(stderr)) {
+      return enableSpecialRemoteWithParams(path, name, params, env);
+    }
+    const realStderr = filterAnnexInfoMessages(stderr);
+    return {
+      success: false,
+      error: realStderr || stderr.trim() || `initremote exited with code ${exitCode}`,
+    };
+  }
+
+  const residual = filterAnnexInfoMessages(stderr);
+  if (residual) {
+    console.warn(`  Warning during special remote setup: ${residual}`);
+  }
+  return { success: true };
+}
+
+/**
+ * Configure an S3 special remote, idempotently. Resumes a prior partial
+ * upload by re-enabling instead of re-creating. The remote is configured
+ * with publicurl for credential-free downloads and autoenable=true so clones
+ * automatically enable it.
  */
 export async function configureS3Remote(
   path: string,
@@ -690,9 +737,9 @@ export async function configureS3Remote(
     env.AWS_SESSION_TOKEN = credentials.sessionToken;
   }
 
-  // Pre-suppress "Remote origin not usable by git-annex; setting annex-ignore"
-  // warning. While harmless, this message pollutes stderr and can obscure real errors.
-  // filterAnnexInfoMessages provides a backup if this config fails to apply.
+  // git-annex emits "Remote origin not usable by git-annex; setting
+  // annex-ignore" on first probe of an unrelated origin. Pre-set the flag
+  // so the message does not get mixed into our error stderr.
   const configResult = await runCommand(["git", "config", "remote.origin.annex-ignore", "true"], {
     cwd: path,
   });
@@ -702,39 +749,8 @@ export async function configureS3Remote(
     );
   }
 
-  const s3Params = buildS3RemoteArgs(config);
-
   try {
-    // Check if the remote already exists from a previous attempt
-    const exists = await annexRemoteExists(path, config.name);
-
-    if (exists) {
-      return enableS3RemoteWithConfig(path, config.name, s3Params, env);
-    }
-
-    const initArgs = ["git", "annex", "initremote", config.name, ...s3Params];
-    const { stderr, exitCode } = await runCommand(initArgs, { cwd: path, env });
-
-    if (exitCode !== 0) {
-      // Fallback only on git-annex's exact "already a special remote" message.
-      // Loose substring matching previously caught S3 bucket-level messages
-      // (e.g. BucketAlreadyOwnedByYou) and triggered a doomed enableremote
-      // for a remote that was never actually registered.
-      if (ANNEX_REMOTE_EXISTS_RE.test(stderr)) {
-        return enableS3RemoteWithConfig(path, config.name, s3Params, env);
-      }
-
-      const realStderr = filterAnnexInfoMessages(stderr);
-      return { success: false, error: realStderr || "Failed to configure S3 remote" };
-    }
-
-    // Log any surviving warnings even on success
-    const residualStderr = filterAnnexInfoMessages(stderr);
-    if (residualStderr) {
-      console.warn(`  Warning during S3 remote setup: ${residualStderr}`);
-    }
-
-    return { success: true };
+    return await initOrEnableSpecialRemote(path, config.name, buildS3RemoteArgs(config), env);
   } catch (e) {
     const message = e instanceof Error ? e.message : String(e);
     return { success: false, error: `S3 remote configuration failed: ${message}` };
