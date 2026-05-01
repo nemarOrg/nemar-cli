@@ -433,8 +433,15 @@ adminRoutes.post("/approve/:username", async (c) => {
   // Send approval notification email
   let emailSent = false;
   try {
-    const { fromEmail, replyTo } = resolveEmailConfig(c.env);
-    await sendKeyReadyEmail(user.email, user.username, c.env.RESEND_API_KEY, fromEmail, replyTo);
+    const { fromEmail, replyTo, isDev } = resolveEmailConfig(c.env);
+    await sendKeyReadyEmail(
+      user.email,
+      user.username,
+      c.env.RESEND_API_KEY,
+      fromEmail,
+      replyTo,
+      isDev,
+    );
     emailSent = true;
   } catch (error) {
     console.error("Failed to send approval email:", error);
@@ -665,8 +672,15 @@ adminRoutes.post("/revoke/:username", async (c) => {
   // Send revocation email
   let emailSent = false;
   try {
-    const { fromEmail, replyTo } = resolveEmailConfig(c.env);
-    await sendRevocationEmail(user.email, user.username, c.env.RESEND_API_KEY, fromEmail, replyTo);
+    const { fromEmail, replyTo, isDev } = resolveEmailConfig(c.env);
+    await sendRevocationEmail(
+      user.email,
+      user.username,
+      c.env.RESEND_API_KEY,
+      fromEmail,
+      replyTo,
+      isDev,
+    );
     emailSent = true;
   } catch (error) {
     console.error("Failed to send revocation email:", error);
@@ -2434,7 +2448,7 @@ adminRoutes.post("/publish/:id/deny", zValidator("json", denySchema), async (c) 
       .first<{ username: string; email: string }>();
 
     if (user) {
-      const { fromEmail, replyTo } = resolveEmailConfig(c.env);
+      const { fromEmail, replyTo, isDev } = resolveEmailConfig(c.env);
       await sendPublicationDeniedEmail(
         user.email,
         user.username,
@@ -2443,6 +2457,7 @@ adminRoutes.post("/publish/:id/deny", zValidator("json", denySchema), async (c) 
         c.env.RESEND_API_KEY,
         fromEmail,
         replyTo,
+        isDev,
       );
     }
   } catch (emailError) {
@@ -3968,7 +3983,7 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
         .bind(datasetId)
         .first<{ concept_doi: string | null }>();
 
-      const { fromEmail, replyTo } = resolveEmailConfig(c.env);
+      const { fromEmail, replyTo, isDev } = resolveEmailConfig(c.env);
       await sendPublicationApprovedEmail(
         dataset.owner_email,
         dataset.owner_username,
@@ -3977,6 +3992,7 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
         c.env.RESEND_API_KEY,
         fromEmail,
         replyTo,
+        isDev,
       );
 
       await updateProgress("notify_user");
@@ -5083,7 +5099,7 @@ adminRoutes.post("/notify", zValidator("json", broadcastSchema), async (c) => {
     });
   }
 
-  const { fromEmail, replyTo } = resolveEmailConfig(c.env);
+  const { fromEmail, replyTo, isDev } = resolveEmailConfig(c.env);
   const result = await sendBroadcast(
     db,
     c.env.RESEND_API_KEY,
@@ -5096,6 +5112,7 @@ adminRoutes.post("/notify", zValidator("json", broadcastSchema), async (c) => {
       recipients,
     },
     replyTo,
+    isDev,
   );
 
   return c.json(result);

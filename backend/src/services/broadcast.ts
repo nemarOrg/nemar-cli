@@ -5,7 +5,7 @@
  * Supports markdown body converted to styled HTML matching NEMAR email templates.
  */
 
-import { parseEmailPreferences } from "./email";
+import { applyDevWrap, parseEmailPreferences } from "./email";
 
 export type RecipientGroup = "all" | "admins" | "members";
 
@@ -198,9 +198,11 @@ export async function sendBroadcast(
     recipients: string[];
   },
   replyTo?: string,
+  isDev?: boolean,
 ): Promise<BroadcastResult> {
   const bodyHtml = markdownToEmailHtml(params.bodyMarkdown);
   const html = buildBroadcastHtml(params.subject, bodyHtml);
+  const wrapped = applyDevWrap(params.subject, html, isDev);
   const failedRecipients: string[] = [];
   let totalSent = 0;
 
@@ -210,8 +212,8 @@ export async function sendBroadcast(
     const batch: ResendBatchItem[] = chunk.map((email) => ({
       from: fromEmail,
       to: [email],
-      subject: params.subject,
-      html,
+      subject: wrapped.subject,
+      html: wrapped.html,
       ...(replyTo ? { reply_to: replyTo } : {}),
     }));
 
