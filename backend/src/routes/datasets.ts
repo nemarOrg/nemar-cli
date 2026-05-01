@@ -1806,7 +1806,7 @@ datasetRoutes.post("/:id/publish/request", authMiddleware, async (c) => {
   try {
     const adminEmails = await getAdminEmailsForCategory(db, "publication_request");
     if (adminEmails.length > 0) {
-      const { fromEmail, replyTo } = resolveEmailConfig(c.env);
+      const { fromEmail, replyTo, isDev } = resolveEmailConfig(c.env);
       await sendPublicationRequestEmail(
         adminEmails,
         datasetId,
@@ -1814,6 +1814,7 @@ datasetRoutes.post("/:id/publish/request", authMiddleware, async (c) => {
         c.env.RESEND_API_KEY,
         fromEmail,
         replyTo,
+        isDev,
       );
     }
   } catch (emailError) {
@@ -1957,7 +1958,7 @@ datasetRoutes.post("/:id/publish/resend", authMiddleware, async (c) => {
   try {
     const adminEmails = await getAdminEmailsForCategory(db, "publication_request");
     if (adminEmails.length > 0) {
-      const { fromEmail, replyTo } = resolveEmailConfig(c.env);
+      const { fromEmail, replyTo, isDev } = resolveEmailConfig(c.env);
       await sendPublicationRequestEmail(
         adminEmails,
         datasetId,
@@ -1965,6 +1966,7 @@ datasetRoutes.post("/:id/publish/resend", authMiddleware, async (c) => {
         c.env.RESEND_API_KEY,
         fromEmail,
         replyTo,
+        isDev,
       );
     }
   } catch (emailError) {

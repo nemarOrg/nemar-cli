@@ -191,7 +191,7 @@ describe("CLI Auth Commands", () => {
         apiKey: TEST_CONFIG.adminApiKey,
         apiUrl: TEST_CONFIG.apiUrl,
         username: "test-admin",
-        email: "test-admin@nemar.test",
+        email: "testAdmin@nemar.org",
         githubUsername: "test-admin-gh",
       });
 

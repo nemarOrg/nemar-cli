@@ -238,7 +238,7 @@ authRoutes.post("/signup", zValidator("json", signupSchema), async (c) => {
 
     let emailSent = false;
     try {
-      const { fromEmail, replyTo } = resolveEmailConfig(c.env);
+      const { fromEmail, replyTo, isDev } = resolveEmailConfig(c.env);
       await sendVerificationEmail(
         email,
         username,
@@ -246,6 +246,7 @@ authRoutes.post("/signup", zValidator("json", signupSchema), async (c) => {
         c.env.RESEND_API_KEY,
         fromEmail,
         replyTo,
+        isDev,
       );
       emailSent = true;
     } catch (emailError) {
@@ -418,7 +419,7 @@ authRoutes.get("/verify", async (c) => {
   try {
     const adminEmails = await getAdminEmailsForCategory(db, "user_approval");
     if (adminEmails.length > 0) {
-      const { fromEmail, replyTo } = resolveEmailConfig(c.env);
+      const { fromEmail, replyTo, isDev } = resolveEmailConfig(c.env);
       await sendAdminNotificationEmail(
         adminEmails,
         {
@@ -430,6 +431,7 @@ authRoutes.get("/verify", async (c) => {
         c.env.RESEND_API_KEY,
         fromEmail,
         replyTo,
+        isDev,
       );
     }
   } catch (emailError) {
@@ -615,7 +617,7 @@ authRoutes.post("/resend-verification", zValidator("json", resendSchema), async 
 
   // Send email
   const verificationUrl = `${c.env.API_BASE_URL}/auth/verify?token=${verificationToken}`;
-  const { fromEmail, replyTo } = resolveEmailConfig(c.env);
+  const { fromEmail, replyTo, isDev } = resolveEmailConfig(c.env);
   await sendVerificationEmail(
     email,
     user.username,
@@ -623,6 +625,7 @@ authRoutes.post("/resend-verification", zValidator("json", resendSchema), async 
     c.env.RESEND_API_KEY,
     fromEmail,
     replyTo,
+    isDev,
   );
 
   return c.json({ message: "Verification email sent" });
@@ -803,7 +806,7 @@ authRoutes.post("/request-key-regeneration", zValidator("json", regenRequestSche
   // Send verification email
   const confirmUrl = `${c.env.API_BASE_URL}/auth/confirm-key-regeneration?token=${regenToken}`;
   try {
-    const { fromEmail, replyTo } = resolveEmailConfig(c.env);
+    const { fromEmail, replyTo, isDev } = resolveEmailConfig(c.env);
     await sendKeyRegenerationVerificationEmail(
       user.email,
       user.username,
@@ -811,6 +814,7 @@ authRoutes.post("/request-key-regeneration", zValidator("json", regenRequestSche
       c.env.RESEND_API_KEY,
       fromEmail,
       replyTo,
+      isDev,
     );
   } catch (emailError) {
     console.error("Failed to send key regeneration email:", emailError);

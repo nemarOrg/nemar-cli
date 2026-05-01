@@ -24,9 +24,14 @@ let warnedMissingFromEmail = false;
  * on accounts where that domain is not verified, every send fails. We log
  * once per worker instance to surface this in Workers Logs.
  */
-export function resolveEmailConfig(env: { FROM_EMAIL?: string; REPLY_TO?: string }): {
+export function resolveEmailConfig(env: {
+  FROM_EMAIL?: string;
+  REPLY_TO?: string;
+  ENVIRONMENT?: string;
+}): {
   fromEmail: string;
   replyTo?: string;
+  isDev: boolean;
 } {
   const from = env.FROM_EMAIL?.trim();
   const reply = env.REPLY_TO?.trim();
@@ -39,6 +44,32 @@ export function resolveEmailConfig(env: { FROM_EMAIL?: string; REPLY_TO?: string
   return {
     fromEmail: from || DEFAULT_FROM_EMAIL,
     replyTo: reply || undefined,
+    isDev: env.ENVIRONMENT?.trim().toLowerCase() === "development",
+  };
+}
+
+/**
+ * Red banner injected into every email body when sent from the dev backend,
+ * so recipients (mostly admins via testAdmin@nemar.org / testOwner@nemar.org)
+ * never confuse a dev send with a real production notification.
+ */
+const DEV_BANNER_HTML = `
+<div style="background:#dc2626;color:#ffffff;padding:14px 20px;border-radius:8px;margin:0 0 20px 0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;text-align:center;">
+  <div style="font-size:16px;font-weight:bold;letter-spacing:0.5px;">DEV BACKEND - NOT PRODUCTION</div>
+  <div style="font-size:13px;margin-top:4px;">Sent from the NEMAR development backend. Do not act on this email.</div>
+</div>
+`;
+
+export function applyDevWrap(
+  subject: string,
+  html: string,
+  isDev: boolean | undefined,
+): { subject: string; html: string } {
+  if (!isDev) return { subject, html };
+  const wrappedHtml = html.replace(/<body([^>]*)>/i, (match) => `${match}${DEV_BANNER_HTML}`);
+  return {
+    subject: `[DEV] ${subject}`,
+    html: wrappedHtml === html ? `${DEV_BANNER_HTML}${html}` : wrappedHtml,
   };
 }
 
@@ -128,12 +159,14 @@ async function sendEmail(
   resendApiKey: string,
   fromEmail: string,
   replyTo?: string,
+  isDev?: boolean,
 ): Promise<void> {
+  const wrapped = applyDevWrap(subject, html, isDev);
   const body: Record<string, unknown> = {
     from: fromEmail,
     to: [to],
-    subject,
-    html,
+    subject: wrapped.subject,
+    html: wrapped.html,
   };
   if (replyTo) body.reply_to = replyTo;
   const response = await fetch(RESEND_API_URL, {
@@ -163,6 +196,7 @@ export async function sendVerificationEmail(
   resendApiKey: string,
   fromEmail: string,
   replyTo?: string,
+  isDev?: boolean,
 ): Promise<void> {
   const html = `
 <!DOCTYPE html>
@@ -208,7 +242,7 @@ export async function sendVerificationEmail(
 </html>
   `;
 
-  await sendEmail(to, "Verify your NEMAR account", html, resendApiKey, fromEmail, replyTo);
+  await sendEmail(to, "Verify your NEMAR account", html, resendApiKey, fromEmail, replyTo, isDev);
 }
 
 /**
@@ -221,6 +255,7 @@ export async function sendKeyReadyEmail(
   resendApiKey: string,
   fromEmail: string,
   replyTo?: string,
+  isDev?: boolean,
 ): Promise<void> {
   const html = `
 <!DOCTYPE html>
@@ -270,6 +305,7 @@ nemar auth login
     resendApiKey,
     fromEmail,
     replyTo,
+    isDev,
   );
 }
 
@@ -283,6 +319,7 @@ export async function sendKeyRegenerationVerificationEmail(
   resendApiKey: string,
   fromEmail: string,
   replyTo?: string,
+  isDev?: boolean,
 ): Promise<void> {
   const html = `
 <!DOCTYPE html>
@@ -325,7 +362,7 @@ export async function sendKeyRegenerationVerificationEmail(
 </html>
   `;
 
-  await sendEmail(to, "NEMAR API Key Regeneration", html, resendApiKey, fromEmail, replyTo);
+  await sendEmail(to, "NEMAR API Key Regeneration", html, resendApiKey, fromEmail, replyTo, isDev);
 }
 
 /**
@@ -343,6 +380,7 @@ export async function sendAdminNotificationEmail(
   resendApiKey: string,
   fromEmail: string,
   replyTo?: string,
+  isDev?: boolean,
 ): Promise<void> {
   const html = `
 <!DOCTYPE html>
@@ -409,6 +447,7 @@ export async function sendAdminNotificationEmail(
         resendApiKey,
         fromEmail,
         replyTo,
+        isDev,
       );
     } catch (error) {
       console.error(`Failed to send admin notification to ${adminEmail}:`, error);
@@ -425,6 +464,7 @@ export async function sendRevocationEmail(
   resendApiKey: string,
   fromEmail: string,
   replyTo?: string,
+  isDev?: boolean,
 ): Promise<void> {
   const html = `
 <!DOCTYPE html>
@@ -451,7 +491,15 @@ export async function sendRevocationEmail(
 </html>
   `;
 
-  await sendEmail(to, "NEMAR account access revoked", html, resendApiKey, fromEmail, replyTo);
+  await sendEmail(
+    to,
+    "NEMAR account access revoked",
+    html,
+    resendApiKey,
+    fromEmail,
+    replyTo,
+    isDev,
+  );
 }
 
 /**
@@ -476,6 +524,7 @@ export async function sendPublicationRequestEmail(
   resendApiKey: string,
   fromEmail: string,
   replyTo?: string,
+  isDev?: boolean,
 ): Promise<void> {
   const html = `
 <!DOCTYPE html>
@@ -519,6 +568,7 @@ export async function sendPublicationRequestEmail(
         resendApiKey,
         fromEmail,
         replyTo,
+        isDev,
       );
     } catch (error) {
       console.error(`Failed to send publication request email to ${adminEmail}:`, error);
@@ -537,6 +587,7 @@ export async function sendPublicationDeniedEmail(
   resendApiKey: string,
   fromEmail: string,
   replyTo?: string,
+  isDev?: boolean,
 ): Promise<void> {
   const html = `
 <!DOCTYPE html>
@@ -577,6 +628,7 @@ export async function sendPublicationDeniedEmail(
     resendApiKey,
     fromEmail,
     replyTo,
+    isDev,
   );
 }
 
@@ -591,6 +643,7 @@ export async function sendPublicationApprovedEmail(
   resendApiKey: string,
   fromEmail: string,
   replyTo?: string,
+  isDev?: boolean,
 ): Promise<void> {
   const safeDoi = doi ? escapeHtml(doi) : "";
   const doiSection = doi
@@ -630,5 +683,13 @@ export async function sendPublicationApprovedEmail(
 </html>
   `;
 
-  await sendEmail(to, `Dataset published: ${datasetId}`, html, resendApiKey, fromEmail, replyTo);
+  await sendEmail(
+    to,
+    `Dataset published: ${datasetId}`,
+    html,
+    resendApiKey,
+    fromEmail,
+    replyTo,
+    isDev,
+  );
 }
