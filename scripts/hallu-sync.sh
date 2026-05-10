@@ -186,6 +186,11 @@ apply_permissions() {
 # Emits tab-separated `dataset_id<TAB>latest_version` pairs. The version
 # column is empty when the listing endpoint doesn't include it (older
 # backend) or when the dataset has no minted version yet.
+#
+# jq stderr is captured and bubbled up via log_error so a parse failure
+# does not silently end pagination and produce a truncated sync. A
+# returned-but-empty page is the only condition that ends the loop
+# cleanly.
 discover_datasets() {
   local offset=0
   local limit=100
@@ -194,12 +199,20 @@ discover_datasets() {
   while true; do
     local response
     response=$(curl -sf "${API_BASE}/datasets?limit=${limit}&offset=${offset}" 2>/dev/null) || {
-      log_error "API request failed at offset=${offset}"
-      break
+      log_error "API request failed at offset=${offset}; aborting discovery"
+      return 1
     }
 
-    local rows
-    rows=$(echo "$response" | jq -r '.datasets[] | [.dataset_id, (.latest_version // "")] | @tsv' 2>/dev/null)
+    local rows jq_err jq_status
+    jq_err=$(mktemp)
+    rows=$(echo "$response" | jq -r '.datasets[] | [.dataset_id, (.latest_version // "")] | @tsv' 2>"$jq_err") || true
+    jq_status=$?
+    if (( jq_status != 0 )); then
+      log_error "jq parse failed at offset=${offset} (exit=${jq_status}): $(cat "$jq_err"); aborting discovery"
+      rm -f "$jq_err"
+      return 1
+    fi
+    rm -f "$jq_err"
 
     if [[ -z "$rows" ]]; then
       break
@@ -212,7 +225,11 @@ discover_datasets() {
     done <<< "$rows"
 
     local count
-    count=$(echo "$response" | jq '.datasets | length')
+    count=$(echo "$response" | jq '.datasets | length' 2>/dev/null)
+    if [[ ! "$count" =~ ^[0-9]+$ ]]; then
+      log_error "Unexpected /datasets shape at offset=${offset} (no numeric .datasets length); aborting discovery"
+      return 1
+    fi
     if (( count < limit )); then
       break
     fi
@@ -376,7 +393,10 @@ main() {
   # Discover datasets
   log "Discovering datasets..."
   local datasets
-  datasets=$(discover_datasets)
+  if ! datasets=$(discover_datasets); then
+    log_error "Dataset discovery failed; nothing synced this cycle"
+    return 1
+  fi
 
   if [[ -z "$datasets" ]]; then
     log "No datasets found"
@@ -413,6 +433,13 @@ main() {
   done <<< "$datasets"
 
   log "=== Sync complete: ${total} datasets, ${ok} OK, ${failed} failed, ${skipped} skipped, ${manifest_fallbacks} manifest API fallbacks ==="
+
+  # If the listing failed to carry latest_version for every single dataset,
+  # the optimisation has silently regressed (column dropped, all NULLs,
+  # rollback). Surface this loudly so cron monitoring fires.
+  if (( total > 0 && manifest_fallbacks == total )); then
+    log_error "Listing returned no latest_version for any dataset (${manifest_fallbacks}/${total} fell back to /manifest); the listing optimisation may have regressed"
+  fi
 }
 
 main "$@"

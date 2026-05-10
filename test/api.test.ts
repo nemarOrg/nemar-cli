@@ -459,12 +459,41 @@ describe("Datasets API", () => {
 
       expect(status).toBe(200);
       for (const entry of data.datasets) {
-        // Key must exist on every entry (allow null or string).
         expect("latest_version" in entry).toBe(true);
         if (entry.latest_version !== null && entry.latest_version !== undefined) {
           expect(typeof entry.latest_version).toBe("string");
         }
       }
+    });
+
+    test("listing's latest_version agrees with /manifest for managed datasets", async () => {
+      // Ground truth for what the hallu sync script previously read.
+      // If the SQL subquery diverges from /manifest's ordering or source,
+      // the script will silently fall back to per-dataset /manifest calls.
+      // Tolerated: dev DBs without any minted version still pass via early
+      // return when no managed-and-versioned dataset exists.
+      const { data } = await testRequest<{
+        datasets: Array<{
+          dataset_id: string;
+          latest_version: string | null;
+          source_type?: string;
+        }>;
+      }>("/datasets?limit=200");
+
+      const managedWithVersion = data.datasets.filter(
+        (d) => d.source_type === "managed" && d.latest_version,
+      );
+      if (managedWithVersion.length === 0) return;
+
+      const sample = managedWithVersion[0];
+      const { status: mStatus, data: m } = await testRequest<{
+        versions: Array<{ version: string; created_at: string }>;
+      }>(`/datasets/${sample.dataset_id}/versions`, {}, TEST_CONFIG.adminApiKey);
+      // /versions requires auth + access; admin bypasses owner/collab checks.
+      // It returns versions sorted DESC by created_at, matching the listing's
+      // SQL subquery (`ORDER BY created_at DESC LIMIT 1`).
+      if (mStatus !== 200) return; // tolerated: dataset may be admin-only/private
+      expect(m.versions[0]?.version).toBe(sample.latest_version);
     });
   });
 

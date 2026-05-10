@@ -465,6 +465,10 @@ datasetRoutes.get("/", optionalAuthMiddleware, async (c) => {
              COALESCE(c.file_size, 0) AS file_size,
              COALESCE(c.file_size_formatted, '') AS file_size_formatted,
              'managed' AS source_type,
+             -- latest_version: most recently minted DOI version for the dataset
+             -- (null when none). scripts/hallu-sync.sh reads this to skip the
+             -- per-dataset /manifest call; keep the ordering in sync with what
+             -- /datasets/:id/manifest reports.
              (
                SELECT version FROM dataset_versions dv
                WHERE dv.dataset_id = d.dataset_id
@@ -506,6 +510,7 @@ datasetRoutes.get("/", optionalAuthMiddleware, async (c) => {
            COALESCE(c.file_size, 0) AS file_size,
            COALESCE(c.file_size_formatted, '') AS file_size_formatted,
            'managed' AS source_type,
+           -- latest_version: see managed `mine` branch above; same contract.
            (
              SELECT version FROM dataset_versions dv
              WHERE dv.dataset_id = d.dataset_id
