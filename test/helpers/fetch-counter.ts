@@ -11,6 +11,7 @@ import type { Server } from "bun";
 export interface RecordedCall {
   method: string;
   path: string;
+  body?: string;
 }
 
 export interface FakeGithubHandlers {
@@ -47,7 +48,17 @@ export function startFakeGithub(handlers: FakeGithubHandlers): FakeGithubServer 
       const path = url.pathname;
       const method = req.method.toUpperCase();
       const methodPath = `${method} ${path}`;
-      state.calls.push({ method, path });
+      // Capture body once, then rebuild a new Request for the handler so the
+      // handler can still await req.json() / req.text() if it wants to.
+      let body: string | undefined;
+      if (method !== "GET" && method !== "HEAD") {
+        try {
+          body = await req.text();
+        } catch {
+          body = undefined;
+        }
+      }
+      state.calls.push({ method, path, body });
       state.countByPath[path] = (state.countByPath[path] ?? 0) + 1;
       state.countByMethodPath[methodPath] = (state.countByMethodPath[methodPath] ?? 0) + 1;
 
@@ -58,7 +69,14 @@ export function startFakeGithub(handlers: FakeGithubHandlers): FakeGithubServer 
           headers: { "Content-Type": "application/json" },
         });
       }
-      return handler(req);
+      // Reconstruct the request so handlers reading the body work even though
+      // we already consumed it above.
+      const replay = new Request(req.url, {
+        method: req.method,
+        headers: req.headers,
+        body: body === undefined ? null : body,
+      });
+      return handler(replay);
     },
   });
 

@@ -50,10 +50,9 @@ import {
 } from "../services/ezid";
 import {
   type GitHubRepo,
-  type TreeFile,
   addCollaborator,
   checkWorkflowExists,
-  commitFilesAsTree,
+  commitEnrichmentWithBidsignore,
   createOrUpdateFile,
   createRelease,
   createRepository,
@@ -1852,44 +1851,24 @@ adminRoutes.post("/datasets/:id/enrichment", zValidator("json", enrichmentSchema
   const isV2 = body.version === "2.0";
   const metadataPath = isV2 ? ".nemar/metadata.json" : "nemar_metadata.json";
 
-  try {
-    // Compute whether .bidsignore needs to change before any writes, so we can
-    // batch metadata + .bidsignore into a single commit when both are dirty
-    // (see issue #407: tree-batched commits cap REST cost at 4 calls for any N).
-    const tree = await getTreeAtRef(repoName, "main", pat);
-    const bidsignoreFile = tree.find((f) => f.path === ".bidsignore");
-    let bidsignoreContent = "";
-    if (bidsignoreFile) {
-      bidsignoreContent = await getBlobContent(repoName, bidsignoreFile.sha, pat);
-    }
-    const entriesToIgnore = isV2 ? [".nemar/"] : ["nemar_metadata.json"];
-    let bidsignoreUpdated = false;
-    for (const entry of entriesToIgnore) {
-      if (!bidsignoreContent.includes(entry)) {
-        bidsignoreContent = bidsignoreContent
-          ? `${bidsignoreContent.trimEnd()}\n${entry}\n`
-          : `${entry}\n`;
-        bidsignoreUpdated = true;
-      }
-    }
+  const entriesToIgnore = isV2 ? [".nemar/"] : ["nemar_metadata.json"];
 
-    if (bidsignoreUpdated) {
-      const files: TreeFile[] = [
-        { path: metadataPath, content: metadataContent },
-        { path: ".bidsignore", content: bidsignoreContent },
-      ];
-      await commitFilesAsTree(repoName, "main", files, "Update NEMAR metadata enrichment", pat);
-    } else {
-      await createOrUpdateFile(
-        repoName,
-        metadataPath,
-        metadataContent,
-        "Update NEMAR metadata enrichment",
-        pat,
+  try {
+    const commitResult = await commitEnrichmentWithBidsignore(
+      repoName,
+      "main",
+      metadataPath,
+      metadataContent,
+      entriesToIgnore,
+      "Update NEMAR metadata enrichment",
+      pat,
+    );
+    if (commitResult.bidsignoreReadError) {
+      console.warn(
+        `[enrichment] Could not read .bidsignore for ${datasetId}; committed metadata alone: ${commitResult.bidsignoreReadError}`,
       );
     }
 
-    // Cache in D1
     await db
       .prepare(
         "UPDATE datasets SET enrichment_json = ?, enrichment_updated_at = datetime('now'), updated_at = datetime('now') WHERE dataset_id = ?",
@@ -1901,7 +1880,11 @@ adminRoutes.post("/datasets/:id/enrichment", zValidator("json", enrichmentSchema
       message: "Enrichment saved",
       dataset_id: datasetId,
       committed: true,
-      bidsignore_updated: bidsignoreUpdated,
+      bidsignore_updated: commitResult.bidsignoreUpdated,
+      commit_mode: commitResult.commitMode,
+      ...(commitResult.bidsignoreReadError
+        ? { bidsignore_read_error: commitResult.bidsignoreReadError }
+        : {}),
     });
   } catch (error) {
     console.error("Failed to save enrichment:", error);
@@ -2706,7 +2689,12 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
           pat,
         );
         if (!bidsExists) {
-          await deployWorkflows(repoName, pat);
+          const deployResult = await deployWorkflows(repoName, pat);
+          if (!deployResult.success) {
+            throw new Error(
+              `Failed to deploy CI workflows to ${repoName}: ${deployResult.errors.join("; ")}`,
+            );
+          }
         }
 
         // Check latest run status (if workflow existed, verify it passes)

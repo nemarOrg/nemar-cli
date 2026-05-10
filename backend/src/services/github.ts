@@ -8,10 +8,9 @@
 import { HttpError } from "./retry";
 
 // NEMAR_GITHUB_API_URL is a test-only override that points at a local
-// Bun.serve fake. Read at call time (not module init) so test helpers can
-// install the override after the module has loaded. Stored on globalThis to
-// avoid depending on Node's `process` type (the backend tsconfig only ships
-// @cloudflare/workers-types). Unset in production -> identical to before.
+// Bun.serve fake. Stored on globalThis because the Workers runtime has no
+// `process.env`; read at call time so test helpers can install the override
+// after the module has loaded.
 function GITHUB_API(): string {
   const override = (globalThis as { NEMAR_GITHUB_API_URL?: string }).NEMAR_GITHUB_API_URL;
   return override ?? "https://api.github.com";
@@ -1239,13 +1238,22 @@ jobs:
   ];
 }
 
+/**
+ * Deploy every CI workflow template to a dataset repo in a single
+ * tree-batched commit. All-or-nothing: on failure, `deployed` is empty
+ * (no partial deployment, unlike the prior per-file loop that could
+ * half-succeed). Callers MUST check `success` — this function never throws.
+ */
 export async function deployWorkflows(
   repo: string,
   pat: string,
 ): Promise<{ success: boolean; errors: string[]; deployed: string[] }> {
   const workflows = getWorkflowTemplates();
   const files: TreeFile[] = workflows.map((w) => ({ path: w.path, content: w.content }));
-  const deployedNames = workflows.map((w) => w.path.split("/").pop()!);
+  const deployedNames = workflows.map((w) => {
+    const parts = w.path.split("/");
+    return parts[parts.length - 1] ?? w.path;
+  });
 
   try {
     await commitFilesAsTree(repo, "main", files, "Add CI workflows", pat);
@@ -1536,29 +1544,72 @@ export async function getMainBranchSha(repo: string, branch: string, pat: string
   return refData.object.sha;
 }
 
-/**
- * A file to include in a tree-batched commit.
- *
- * Content is passed as UTF-8 text directly; GitHub's tree API accepts a
- * `content` field on blob entries and encodes server-side.
- */
+/** Input to `commitFilesAsTree`. `content` must be UTF-8 text; binary is not supported. */
 export interface TreeFile {
   path: string;
   content: string;
-  mode?: "100644" | "100755" | "120000";
+  mode?: "100644" | "100755";
+}
+
+/**
+ * Validate `files` against the constraints GitHub enforces on tree entries.
+ * Catches problems locally so they fail fast instead of being retried 3 times
+ * through `commitFilesAsTree`'s ref-conflict loop.
+ */
+function validateTreeFiles(files: TreeFile[]): void {
+  const seen = new Set<string>();
+  for (const f of files) {
+    if (!f.path) {
+      throw new Error("commitFilesAsTree: empty path");
+    }
+    if (f.path.startsWith("/")) {
+      throw new Error(`commitFilesAsTree: path must be repo-relative, got '${f.path}'`);
+    }
+    if (f.path.endsWith("/")) {
+      throw new Error(`commitFilesAsTree: path must not end with '/', got '${f.path}'`);
+    }
+    if (f.path.includes("\0")) {
+      throw new Error("commitFilesAsTree: path contains NUL byte");
+    }
+    if (f.path.split("/").some((seg) => seg === "..")) {
+      throw new Error(`commitFilesAsTree: path contains '..' segment, got '${f.path}'`);
+    }
+    if (seen.has(f.path)) {
+      throw new Error(`commitFilesAsTree: duplicate path '${f.path}'`);
+    }
+    seen.add(f.path);
+  }
+}
+
+/**
+ * Detect GitHub's fast-forward conflict 422. The endpoint returns 422 for
+ * several distinct reasons (bad SHA, missing ref, signed-commit policy, etc.)
+ * and only the fast-forward case is safe to retry. Match the documented
+ * English message rather than the raw status code.
+ */
+function isFastForwardConflict422(bodyText: string): boolean {
+  let parsed: { message?: string } | null = null;
+  try {
+    parsed = JSON.parse(bodyText) as { message?: string };
+  } catch {
+    // Fall through to substring match.
+  }
+  const msg = parsed?.message ?? bodyText;
+  return /not a fast forward/i.test(msg);
 }
 
 /**
  * Commit one or more files to a branch in a single Git Data API transaction.
  *
- * Cost: 4 REST calls regardless of how many files are written. Compare to
- * `createOrUpdateFile()` which costs 2 calls per file. Crossover is N=2 (tie);
- * for N >= 3 the tree-batched path strictly wins. For N=1, prefer
- * `createOrUpdateFile()` — see issue #407 for the crossover analysis.
+ * Cost (happy path): 4 REST calls regardless of how many files are written —
+ * `createOrUpdateFile()` costs 2 per file, so this strictly wins for N >= 3
+ * and ties at N = 2. For N = 1 prefer `createOrUpdateFile()`.
  *
- * Concurrency: if another writer advances the branch between steps, the final
- * ref PATCH returns 422 and we retry up to 3 times, refetching the base on
- * each attempt. This matches the standard Git Data API safe-commit pattern.
+ * Concurrency: if the branch advances between resolving the base and the
+ * ref PATCH, GitHub returns 422 "Update is not a fast forward". We make up to
+ * 3 attempts (2 retries), refetching the base each time. Non-fast-forward
+ * 422s (bad branch, signed-commit policy, missing ref) are surfaced
+ * immediately — they will never succeed on retry.
  *
  * @returns SHA of the new commit. For an empty `files` array, returns the
  *   current branch head SHA without making any write calls.
@@ -1578,15 +1629,14 @@ export async function commitFilesAsTree(
   const jsonHeaders = { ...authHeaders, "Content-Type": "application/json" };
 
   if (files.length === 0) {
-    // No-op: return current branch SHA without writing.
     return getMainBranchSha(repo, branch, pat);
   }
 
+  validateTreeFiles(files);
+
   const maxAttempts = 3;
-  let lastError: unknown;
 
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-    // Step 1: resolve branch head -> { commitSha, treeSha } in one call.
     const branchResp = await githubFetchWithRetry(
       `${GITHUB_API()}/repos/${ORG_NAME}/${repo}/branches/${branch}`,
       { headers: authHeaders },
@@ -1595,9 +1645,9 @@ export async function commitFilesAsTree(
     if (!branchResp.ok) {
       const body = await branchResp.text().catch(() => "");
       throw new HttpError(
-        `Failed to resolve branch '${branch}': HTTP ${branchResp.status}: ${body.slice(0, 300)}`,
+        `Failed to resolve branch '${branch}': HTTP ${branchResp.status}: ${body.slice(0, 1024)}`,
         branchResp.status,
-        body.slice(0, 300),
+        body.slice(0, 1024),
       );
     }
     const branchData = (await branchResp.json()) as {
@@ -1606,7 +1656,6 @@ export async function commitFilesAsTree(
     const baseCommitSha = branchData.commit.sha;
     const baseTreeSha = branchData.commit.commit.tree.sha;
 
-    // Step 2: create a new tree on top of the base.
     const treeResp = await githubFetchWithRetry(
       `${GITHUB_API()}/repos/${ORG_NAME}/${repo}/git/trees`,
       {
@@ -1626,14 +1675,13 @@ export async function commitFilesAsTree(
     if (!treeResp.ok) {
       const body = await treeResp.text().catch(() => "");
       throw new HttpError(
-        `Failed to create tree on ${repo}@${branch}: HTTP ${treeResp.status}: ${body.slice(0, 300)}`,
+        `Failed to create tree on ${repo}@${branch}: HTTP ${treeResp.status}: ${body.slice(0, 1024)}`,
         treeResp.status,
-        body.slice(0, 300),
+        body.slice(0, 1024),
       );
     }
     const { sha: newTreeSha } = (await treeResp.json()) as { sha: string };
 
-    // Step 3: create a commit pointing at the new tree.
     const isoDate = new Date().toISOString();
     const commitResp = await githubFetchWithRetry(
       `${GITHUB_API()}/repos/${ORG_NAME}/${repo}/git/commits`,
@@ -1652,14 +1700,13 @@ export async function commitFilesAsTree(
     if (!commitResp.ok) {
       const body = await commitResp.text().catch(() => "");
       throw new HttpError(
-        `Failed to create commit on ${repo}@${branch}: HTTP ${commitResp.status}: ${body.slice(0, 300)}`,
+        `Failed to create commit on ${repo}@${branch}: HTTP ${commitResp.status}: ${body.slice(0, 1024)}`,
         commitResp.status,
-        body.slice(0, 300),
+        body.slice(0, 1024),
       );
     }
     const { sha: newCommitSha } = (await commitResp.json()) as { sha: string };
 
-    // Step 4: fast-forward the branch ref to the new commit.
     const refResp = await githubFetchWithRetry(
       `${GITHUB_API()}/repos/${ORG_NAME}/${repo}/git/refs/heads/${branch}`,
       {
@@ -1670,29 +1717,126 @@ export async function commitFilesAsTree(
     );
     if (refResp.ok) return newCommitSha;
 
-    // 422 here means the branch advanced between steps 1 and 4. Refetch and retry.
-    if (refResp.status === 422 && attempt < maxAttempts) {
-      const body = await refResp.text().catch(() => "");
+    const body = await refResp.text().catch(() => "");
+    // 422 with a non-fast-forward message means the branch advanced; refetch
+    // and retry. Other 422 causes (bad ref, signed-commit policy, missing
+    // ref) never succeed on retry — surface them immediately.
+    if (refResp.status === 422 && isFastForwardConflict422(body) && attempt < maxAttempts) {
       console.warn(
-        `[github] commitFilesAsTree ref-update conflict on ${repo}@${branch} (attempt ${attempt}/${maxAttempts}): ${body.slice(0, 200)}`,
-      );
-      lastError = new HttpError(
-        `ref update conflict: ${body.slice(0, 300)}`,
-        refResp.status,
-        body.slice(0, 300),
+        `[github] commitFilesAsTree fast-forward conflict on ${repo}@${branch} (attempt ${attempt}/${maxAttempts}): ${body.slice(0, 200)}`,
       );
       continue;
     }
-
-    const body = await refResp.text().catch(() => "");
+    const note =
+      refResp.status === 422 && isFastForwardConflict422(body)
+        ? ` (exhausted ${maxAttempts} attempts)`
+        : "";
     throw new HttpError(
-      `Failed to update ref ${branch} on ${repo}: HTTP ${refResp.status}: ${body.slice(0, 300)}`,
+      `Failed to update ref ${branch} on ${repo}: HTTP ${refResp.status}${note}: ${body.slice(0, 1024)}`,
       refResp.status,
-      body.slice(0, 300),
+      body.slice(0, 1024),
     );
   }
 
-  throw lastError ?? new Error(`commitFilesAsTree: exhausted ${maxAttempts} attempts`);
+  // Unreachable: the for loop either returns, continues, or throws.
+  throw new Error(`commitFilesAsTree: unreachable end-of-function for ${repo}@${branch}`);
+}
+
+export interface EnrichmentCommitResult {
+  /** "batched" when metadata + .bidsignore were committed together; "single" when only metadata was committed. */
+  commitMode: "batched" | "single";
+  /** True when .bidsignore was modified in the commit. */
+  bidsignoreUpdated: boolean;
+  /** Set when reading existing .bidsignore failed; metadata was still committed alone. */
+  bidsignoreReadError?: string;
+}
+
+/**
+ * Thrown by `commitEnrichmentWithBidsignore` on commit failure. Carries the
+ * `commitMode` that was attempted so callers can decide whether the failure
+ * affected both files (batched) or only metadata (single).
+ */
+export class EnrichmentCommitError extends Error {
+  readonly commitMode: "batched" | "single";
+  readonly bidsignoreReadError?: string;
+  constructor(
+    message: string,
+    commitMode: "batched" | "single",
+    bidsignoreReadError: string | undefined,
+    cause?: unknown,
+  ) {
+    super(message);
+    this.name = "EnrichmentCommitError";
+    this.commitMode = commitMode;
+    this.bidsignoreReadError = bidsignoreReadError;
+    if (cause !== undefined) (this as { cause?: unknown }).cause = cause;
+  }
+}
+
+/**
+ * Commit a NEMAR enrichment metadata file plus a `.bidsignore` update (when
+ * needed) using whichever path is cheapest:
+ *
+ *   - both files dirty -> `commitFilesAsTree` (one atomic commit, 4 calls)
+ *   - only metadata dirty -> `createOrUpdateFile` (single-file Contents API, 2 calls)
+ *
+ * If reading the existing `.bidsignore` fails, commits metadata alone and
+ * returns the read error in `bidsignoreReadError`. Throws
+ * `EnrichmentCommitError` on commit failure, with `commitMode` set so callers
+ * can tell which path was attempted.
+ */
+export async function commitEnrichmentWithBidsignore(
+  repo: string,
+  branch: string,
+  metadataPath: string,
+  metadataContent: string,
+  bidsignoreEntriesToIgnore: string[],
+  message: string,
+  pat: string,
+): Promise<EnrichmentCommitResult> {
+  let bidsignoreUpdated = false;
+  let bidsignoreContent = "";
+  let bidsignoreReadError: string | undefined;
+  try {
+    const tree = await getTreeAtRef(repo, branch, pat);
+    const bidsignoreFile = tree.find((f) => f.path === ".bidsignore");
+    if (bidsignoreFile) {
+      bidsignoreContent = await getBlobContent(repo, bidsignoreFile.sha, pat);
+    }
+    for (const entry of bidsignoreEntriesToIgnore) {
+      if (!bidsignoreContent.includes(entry)) {
+        bidsignoreContent = bidsignoreContent
+          ? `${bidsignoreContent.trimEnd()}\n${entry}\n`
+          : `${entry}\n`;
+        bidsignoreUpdated = true;
+      }
+    }
+  } catch (readErr) {
+    bidsignoreReadError = readErr instanceof Error ? readErr.message : String(readErr);
+    bidsignoreUpdated = false;
+  }
+
+  const commitMode: "batched" | "single" = bidsignoreUpdated ? "batched" : "single";
+  try {
+    if (commitMode === "batched") {
+      await commitFilesAsTree(
+        repo,
+        branch,
+        [
+          { path: metadataPath, content: metadataContent },
+          { path: ".bidsignore", content: bidsignoreContent },
+        ],
+        message,
+        pat,
+      );
+    } else {
+      await createOrUpdateFile(repo, metadataPath, metadataContent, message, pat);
+    }
+  } catch (commitErr) {
+    const detail = commitErr instanceof Error ? commitErr.message : String(commitErr);
+    throw new EnrichmentCommitError(detail, commitMode, bidsignoreReadError, commitErr);
+  }
+  return { commitMode, bidsignoreUpdated, bidsignoreReadError };
 }
 
 /**
