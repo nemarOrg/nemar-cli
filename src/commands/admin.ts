@@ -837,7 +837,9 @@ ciCommand
     try {
       const result = await syncCi(datasetId);
       const changes = result.changed.length + result.added.length;
-      if (changes === 0 && result.errors.length === 0) {
+      if (result.errors.length > 0) {
+        spinner.warn(`${datasetId}: ${result.errors.length} error(s)`);
+      } else if (changes === 0) {
         spinner.succeed(`${datasetId}: already up to date`);
       } else {
         spinner.succeed(`${datasetId}: synced`);
@@ -849,6 +851,17 @@ ciCommand
       }
       if (result.changed.length > 0) {
         console.log(`  ${chalk.yellow("Updated:")} ${result.changed.join(", ")}`);
+      }
+      if (!result.committed && changes > 0 && result.errors.length === 0) {
+        // Defensive: the intended changes were computed but no commit
+        // was made. Should never happen in practice (the helper sets
+        // `committed: true` whenever it tries to write).
+        console.log(`  ${chalk.yellow("Note:")}    listed changes were not committed`);
+      }
+      if (result.list_failed) {
+        console.log(
+          `  ${chalk.red("Warning:")} workflow directory listing failed; presence is unknown`,
+        );
       }
       if (result.errors.length > 0) {
         console.log(`  ${chalk.red("Errors:")}`);

@@ -38,6 +38,17 @@ let contentByPath: Record<string, string> = {};
 let lastTreeBody: { tree: Array<{ path: string }> } | null = null;
 // Whether the listing should return 404 (workflows directory missing).
 let listingMissing = false;
+// When set, the listing endpoint returns this HTTP status (overrides
+// `listingMissing`). Used to simulate non-404 listing errors.
+let listingStatusOverride: number | null = null;
+// When set, the ref-update endpoint fails so commitFilesAsTree throws.
+let refUpdateShouldFail = false;
+// Paths whose content endpoint should return the given status instead of
+// the normal content response. Used to test read failures.
+let contentEndpointStatus: Record<string, number> = {};
+// When non-null, the listing endpoint returns this exact entry list
+// (overrides `presentPaths`). Used to test non-file `type` values.
+let listingEntriesOverride: Array<{ path: string; type: string; sha: string }> | null = null;
 
 function setGithubApiOverride(url: string | undefined): void {
   if (url === undefined) {
@@ -50,7 +61,10 @@ function setGithubApiOverride(url: string | undefined): void {
 beforeAll(() => {
   const handlers: Record<string, (req: Request) => Promise<Response> | Response> = {
     [`GET /repos/nemarDatasets/${REPO}/contents/.github/workflows`]: () => {
+      if (listingStatusOverride !== null)
+        return json(listingStatusOverride, { message: "Simulated failure" });
       if (listingMissing) return json(404, { message: "Not Found" });
+      if (listingEntriesOverride !== null) return json(200, listingEntriesOverride);
       return json(
         200,
         presentPaths.map((p) => ({ path: p, type: "file", sha: "deadbeef" })),
@@ -67,13 +81,22 @@ beforeAll(() => {
       return json(201, { sha: NEW_TREE });
     },
     [`POST /repos/nemarDatasets/${REPO}/git/commits`]: () => json(201, { sha: NEW_COMMIT }),
-    [`PATCH /repos/nemarDatasets/${REPO}/git/refs/heads/${BRANCH}`]: () => json(200, {}),
+    [`PATCH /repos/nemarDatasets/${REPO}/git/refs/heads/${BRANCH}`]: () => {
+      if (refUpdateShouldFail) {
+        // 422 with a non-fast-forward-conflict body is terminal (no retry).
+        return json(422, { message: "Reference does not exist" });
+      }
+      return json(200, {});
+    },
   };
   // Register a contents handler for every template path so we don't have to
   // hand-maintain the list as templates evolve.
   for (const template of getWorkflowTemplates()) {
-    handlers[`GET /repos/nemarDatasets/${REPO}/contents/${template.path}`] = () =>
-      makeContentsResponse(template.path);
+    handlers[`GET /repos/nemarDatasets/${REPO}/contents/${template.path}`] = () => {
+      const override = contentEndpointStatus[template.path];
+      if (override !== undefined) return json(override, { message: "Simulated read failure" });
+      return makeContentsResponse(template.path);
+    };
   }
   fake = startFakeGithub(handlers);
   setGithubApiOverride(fake.url);
@@ -90,6 +113,10 @@ beforeEach(() => {
   contentByPath = {};
   lastTreeBody = null;
   listingMissing = false;
+  listingStatusOverride = null;
+  refUpdateShouldFail = false;
+  contentEndpointStatus = {};
+  listingEntriesOverride = null;
   __resetRateLimitStateForTests();
 });
 
@@ -100,9 +127,13 @@ afterEach(() => {
 function makeContentsResponse(filePath: string): Response {
   const content = contentByPath[filePath];
   if (content === undefined) return json(404, { message: "Not Found" });
-  // GitHub Contents API returns base64-encoded content. The service decodes
-  // it via atob, so we encode the same way here.
-  const encoded = btoa(content);
+  // Match the byte-level wire format GitHub uses: UTF-8 encode then base64,
+  // so non-Latin1 characters like a UTF-8 BOM (U+FEFF) round-trip correctly.
+  // `btoa(content)` would throw on those.
+  const bytes = new TextEncoder().encode(content);
+  let binary = "";
+  for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
+  const encoded = btoa(binary);
   return json(200, {
     name: filePath.split("/").pop(),
     path: filePath,
@@ -122,6 +153,7 @@ describe("ensureWorkflowsDeployed", () => {
     expect(result.errors).toEqual([]);
     expect(result.deployed).toEqual([]);
     expect(result.alreadyPresent.length).toBe(templates.length);
+    expect(result.listFailed).toBe(false);
 
     expect(
       fake.countByMethodPath[`GET /repos/nemarDatasets/${REPO}/contents/.github/workflows`],
@@ -132,7 +164,6 @@ describe("ensureWorkflowsDeployed", () => {
 
   test("some missing: tree commit with only the missing files", async () => {
     const templates = getWorkflowTemplates();
-    // Pretend only the first three are deployed.
     presentPaths = templates.slice(0, 3).map((t) => t.path);
     const missing = templates.slice(3);
 
@@ -141,6 +172,7 @@ describe("ensureWorkflowsDeployed", () => {
     expect(result.errors).toEqual([]);
     expect(result.deployed.length).toBe(missing.length);
     expect(result.alreadyPresent.length).toBe(3);
+    expect(result.listFailed).toBe(false);
 
     expect(lastTreeBody).not.toBeNull();
     const treePaths = lastTreeBody?.tree.map((e) => e.path) ?? [];
@@ -157,9 +189,52 @@ describe("ensureWorkflowsDeployed", () => {
     expect(result.errors).toEqual([]);
     expect(result.alreadyPresent).toEqual([]);
     expect(result.deployed.length).toBe(templates.length);
+    expect(result.listFailed).toBe(false);
 
     const treePaths = lastTreeBody?.tree.map((e) => e.path) ?? [];
     expect(new Set(treePaths)).toEqual(new Set(templates.map((t) => t.path)));
+  });
+
+  test("listing fails (non-404): listFailed=true, no commit, error recorded", async () => {
+    // 422 is a terminal status (no retry) so the test finishes fast while
+    // still exercising the listing-failure path.
+    listingStatusOverride = 422;
+
+    const result = await ensureWorkflowsDeployed(REPO, BRANCH, PAT);
+
+    expect(result.listFailed).toBe(true);
+    expect(result.alreadyPresent).toEqual([]);
+    expect(result.deployed).toEqual([]);
+    expect(result.errors.length).toBe(1);
+    expect(fake.countByMethodPath[`POST /repos/nemarDatasets/${REPO}/git/trees`]).toBeUndefined();
+  });
+
+  test("commit failure: deployed=[], error recorded, alreadyPresent preserved", async () => {
+    const templates = getWorkflowTemplates();
+    presentPaths = templates.slice(0, 2).map((t) => t.path);
+    refUpdateShouldFail = true;
+
+    const result = await ensureWorkflowsDeployed(REPO, BRANCH, PAT);
+
+    expect(result.deployed).toEqual([]);
+    expect(result.alreadyPresent.length).toBe(2);
+    expect(result.errors.length).toBe(1);
+    expect(result.listFailed).toBe(false);
+  });
+
+  test("symlinked workflow is treated as present (not missing)", async () => {
+    const templates = getWorkflowTemplates();
+    listingEntriesOverride = templates.map((t, i) => ({
+      path: t.path,
+      type: i === 0 ? "symlink" : "file",
+      sha: "deadbeef",
+    }));
+
+    const result = await ensureWorkflowsDeployed(REPO, BRANCH, PAT);
+
+    expect(result.deployed).toEqual([]);
+    expect(result.alreadyPresent.length).toBe(templates.length);
+    expect(fake.countByMethodPath[`POST /repos/nemarDatasets/${REPO}/git/trees`]).toBeUndefined();
   });
 });
 
@@ -175,6 +250,8 @@ describe("syncWorkflowTemplates", () => {
     expect(result.changed).toEqual([]);
     expect(result.added).toEqual([]);
     expect(result.checked.length).toBe(templates.length);
+    expect(result.committed).toBe(false);
+    expect(result.listFailed).toBe(false);
     expect(fake.countByMethodPath[`POST /repos/nemarDatasets/${REPO}/git/trees`]).toBeUndefined();
   });
 
@@ -182,7 +259,6 @@ describe("syncWorkflowTemplates", () => {
     const templates = getWorkflowTemplates();
     presentPaths = templates.map((t) => t.path);
     for (const t of templates) contentByPath[t.path] = t.content;
-    // Drift one file:
     contentByPath[templates[2].path] = "# stale\n";
 
     const result = await syncWorkflowTemplates(REPO, BRANCH, PAT);
@@ -191,14 +267,15 @@ describe("syncWorkflowTemplates", () => {
     expect(result.added).toEqual([]);
     expect(result.changed.length).toBe(1);
     expect(result.changed[0]).toBe(templates[2].path.split("/").pop());
+    expect(result.committed).toBe(true);
 
     const treePaths = lastTreeBody?.tree.map((e) => e.path) ?? [];
     expect(treePaths).toEqual([templates[2].path]);
+    expect(fake.countByMethodPath[`POST /repos/nemarDatasets/${REPO}/git/trees`]).toBe(1);
   });
 
   test("missing + drift mix: commit includes both", async () => {
     const templates = getWorkflowTemplates();
-    // Drop one (added) and stale another (changed).
     presentPaths = templates.filter((_, i) => i !== 0).map((t) => t.path);
     for (const p of presentPaths) contentByPath[p] = templates.find((t) => t.path === p)!.content;
     contentByPath[templates[1].path] = "drifted content\n";
@@ -208,8 +285,10 @@ describe("syncWorkflowTemplates", () => {
     expect(result.errors).toEqual([]);
     expect(result.added.length).toBe(1);
     expect(result.changed.length).toBe(1);
+    expect(result.committed).toBe(true);
     const treePaths = lastTreeBody?.tree.map((e) => e.path) ?? [];
     expect(new Set(treePaths)).toEqual(new Set([templates[0].path, templates[1].path]));
+    expect(fake.countByMethodPath[`POST /repos/nemarDatasets/${REPO}/git/trees`]).toBe(1);
   });
 
   test("CRLF line endings do not cause false-positive diffs", async () => {
@@ -222,6 +301,74 @@ describe("syncWorkflowTemplates", () => {
     expect(result.errors).toEqual([]);
     expect(result.changed).toEqual([]);
     expect(result.added).toEqual([]);
+    expect(result.committed).toBe(false);
+    expect(fake.countByMethodPath[`POST /repos/nemarDatasets/${REPO}/git/trees`]).toBeUndefined();
+  });
+
+  test("UTF-8 BOM and trailing whitespace do not cause false-positive diffs", async () => {
+    const templates = getWorkflowTemplates();
+    presentPaths = templates.map((t) => t.path);
+    for (const t of templates) {
+      // Prefix BOM and drop the trailing newline (worst-case round-trip
+      // through Windows editor + missing-newline-at-EOF).
+      contentByPath[t.path] = `﻿${t.content.replace(/\n+$/, "")}`;
+    }
+
+    const result = await syncWorkflowTemplates(REPO, BRANCH, PAT);
+
+    expect(result.errors).toEqual([]);
+    expect(result.changed).toEqual([]);
+    expect(result.committed).toBe(false);
+  });
+
+  test("per-file read failure: file is skipped, error recorded, others sync", async () => {
+    const templates = getWorkflowTemplates();
+    presentPaths = templates.map((t) => t.path);
+    for (const t of templates) contentByPath[t.path] = t.content;
+    // Make one read fail and another drift; the drift should still commit
+    // even though the failed read is left untouched.
+    contentEndpointStatus[templates[0].path] = 422; // terminal, fast
+    contentByPath[templates[1].path] = "drifted content\n";
+
+    const result = await syncWorkflowTemplates(REPO, BRANCH, PAT);
+
+    expect(result.errors.length).toBe(1);
+    expect(result.errors[0]).toContain(templates[0].path);
+    expect(result.changed.length).toBe(1);
+    expect(result.changed[0]).toBe(templates[1].path.split("/").pop());
+    expect(result.committed).toBe(true);
+    const treePaths = lastTreeBody?.tree.map((e) => e.path) ?? [];
+    expect(treePaths).toEqual([templates[1].path]); // failed-read file NOT in the commit
+  });
+
+  test("commit failure: intended changed/added preserved, committed=false", async () => {
+    const templates = getWorkflowTemplates();
+    presentPaths = templates.filter((_, i) => i !== 0).map((t) => t.path);
+    for (const p of presentPaths) contentByPath[p] = templates.find((t) => t.path === p)!.content;
+    contentByPath[templates[1].path] = "drifted\n";
+    refUpdateShouldFail = true;
+
+    const result = await syncWorkflowTemplates(REPO, BRANCH, PAT);
+
+    // Both the added and changed lists are preserved so callers can see what
+    // we wanted to write; `committed: false` distinguishes from happy "no diff".
+    expect(result.added.length).toBe(1);
+    expect(result.changed.length).toBe(1);
+    expect(result.committed).toBe(false);
+    expect(result.errors.length).toBe(1);
+    expect(result.errors[0]).toContain("commit failed");
+  });
+
+  test("listing failure: listFailed=true, no read attempts, error recorded", async () => {
+    listingStatusOverride = 422;
+
+    const result = await syncWorkflowTemplates(REPO, BRANCH, PAT);
+
+    expect(result.listFailed).toBe(true);
+    expect(result.changed).toEqual([]);
+    expect(result.added).toEqual([]);
+    expect(result.committed).toBe(false);
+    expect(result.errors.length).toBe(1);
     expect(fake.countByMethodPath[`POST /repos/nemarDatasets/${REPO}/git/trees`]).toBeUndefined();
   });
 });

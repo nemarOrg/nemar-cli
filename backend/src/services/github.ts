@@ -1487,6 +1487,10 @@ export async function deployWorkflows(
  * given branch. Returns paths relative to the repo root (e.g.
  * `.github/workflows/bids-validation.yml`). A 404 on the directory itself
  * (workflows folder not yet created) is treated as "empty", not an error.
+ *
+ * Includes both regular files and symlinks: a symlinked workflow is still
+ * a deployed workflow from GitHub Actions' perspective, and silently
+ * misclassifying it as missing would cause us to overwrite it.
  */
 async function listDeployedWorkflowPaths(
   repo: string,
@@ -1514,7 +1518,19 @@ async function listDeployedWorkflowPaths(
     );
   }
   const entries = (await response.json()) as Array<{ path: string; type: string }>;
-  return new Set(entries.filter((e) => e.type === "file").map((e) => e.path));
+  return new Set(
+    entries.filter((e) => e.type === "file" || e.type === "symlink").map((e) => e.path),
+  );
+}
+
+export interface EnsureWorkflowsResult {
+  alreadyPresent: string[];
+  deployed: string[];
+  errors: string[];
+  /** True iff we could not list the workflows directory; callers should
+      not interpret `alreadyPresent: []` as "no workflows deployed" in
+      that case. */
+  listFailed: boolean;
 }
 
 /**
@@ -1527,7 +1543,7 @@ export async function ensureWorkflowsDeployed(
   repo: string,
   branch: string,
   pat: string,
-): Promise<{ alreadyPresent: string[]; deployed: string[]; errors: string[] }> {
+): Promise<EnsureWorkflowsResult> {
   const workflows = getWorkflowTemplates();
   const nameOf = (path: string): string => {
     const parts = path.split("/");
@@ -1542,6 +1558,7 @@ export async function ensureWorkflowsDeployed(
       alreadyPresent: [],
       deployed: [],
       errors: [err instanceof Error ? err.message : String(err)],
+      listFailed: true,
     };
   }
 
@@ -1551,6 +1568,7 @@ export async function ensureWorkflowsDeployed(
       alreadyPresent: workflows.map((w) => nameOf(w.path)),
       deployed: [],
       errors: [],
+      listFailed: false,
     };
   }
 
@@ -1568,6 +1586,7 @@ export async function ensureWorkflowsDeployed(
         .map((w) => nameOf(w.path)),
       deployed: missing.map((w) => nameOf(w.path)),
       errors: [],
+      listFailed: false,
     };
   } catch (err) {
     return {
@@ -1576,18 +1595,39 @@ export async function ensureWorkflowsDeployed(
         .map((w) => nameOf(w.path)),
       deployed: [],
       errors: [err instanceof Error ? err.message : String(err)],
+      listFailed: false,
     };
   }
 }
 
 /**
- * Normalize line endings before comparing template content vs. deployed
- * content. GitHub's Contents API may return text with CRLF in some
- * environments while our inline template strings use LF; treat them as
- * equal when only line endings differ.
+ * Normalize text before comparing template content vs. deployed content.
+ * GitHub's Contents API returns the file's exact bytes; if a workflow
+ * was ever round-tripped through tooling that adds a UTF-8 BOM,
+ * normalizes CRLF, or drops the trailing newline, a naive byte compare
+ * would loop forever rewriting the same file. We strip:
+ *
+ *   - UTF-8 BOM (﻿)
+ *   - CR before LF and bare CR
+ *   - trailing whitespace (so a missing final newline doesn't drift)
  */
 function normalizeForCompare(s: string): string {
-  return s.replace(/\r\n/g, "\n");
+  return s.replace(/^﻿/, "").replace(/\r\n?/g, "\n").replace(/\s+$/, "");
+}
+
+export interface SyncWorkflowsResult {
+  checked: string[];
+  /** Templates whose deployed content drifted from the source. */
+  changed: string[];
+  /** Templates that were missing from the deployed workflows directory. */
+  added: string[];
+  errors: string[];
+  /** True iff a tree commit was made. Distinguishes "nothing to do" from
+      "we tried to commit but it failed" (both leave `errors` populated
+      via different paths). */
+  committed: boolean;
+  /** True iff the workflow directory listing failed. */
+  listFailed: boolean;
 }
 
 /**
@@ -1597,12 +1637,15 @@ function normalizeForCompare(s: string): string {
  * throws; per-file read errors land in `errors` and the file is treated
  * as unchanged so we don't risk clobbering a hand-edited workflow on a
  * read failure.
+ *
+ * On commit failure the intended `changed` and `added` lists are preserved
+ * (so callers can see what *would* have synced) and `committed` is false.
  */
 export async function syncWorkflowTemplates(
   repo: string,
   branch: string,
   pat: string,
-): Promise<{ checked: string[]; changed: string[]; added: string[]; errors: string[] }> {
+): Promise<SyncWorkflowsResult> {
   const workflows = getWorkflowTemplates();
   const nameOf = (path: string): string => {
     const parts = path.split("/");
@@ -1619,6 +1662,8 @@ export async function syncWorkflowTemplates(
       changed: [],
       added: [],
       errors: [err instanceof Error ? err.message : String(err)],
+      committed: false,
+      listFailed: true,
     };
   }
 
@@ -1655,7 +1700,7 @@ export async function syncWorkflowTemplates(
   }
 
   if (filesToWrite.length === 0) {
-    return { checked, changed, added, errors };
+    return { checked, changed, added, errors, committed: false, listFailed: false };
   }
 
   try {
@@ -1670,12 +1715,12 @@ export async function syncWorkflowTemplates(
           : "Update CI workflows to current templates",
       pat,
     );
-    return { checked, changed, added, errors };
+    return { checked, changed, added, errors, committed: true, listFailed: false };
   } catch (err) {
     errors.push(
       `commit failed: ${err instanceof Error ? err.message : String(err)}`,
     );
-    return { checked, changed: [], added: [], errors };
+    return { checked, changed, added, errors, committed: false, listFailed: false };
   }
 }
 

@@ -506,6 +506,11 @@ export interface SyncCiResponse {
   changed: string[];
   added: string[];
   errors: string[];
+  /** True iff a tree commit was actually made. */
+  committed: boolean;
+  /** True iff the workflow directory listing failed; treat result as
+      "presence unknown" rather than "no workflows deployed." */
+  list_failed: boolean;
 }
 
 /**

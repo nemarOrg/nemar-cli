@@ -2381,7 +2381,7 @@ adminRoutes.post("/datasets/:id/ci/sync", async (c) => {
       )
       .bind(
         adminUser.id,
-        "ci_templates_synced",
+        "ci_workflows_synced",
         "dataset",
         datasetId,
         JSON.stringify({
@@ -2389,6 +2389,8 @@ adminRoutes.post("/datasets/:id/ci/sync", async (c) => {
           changed: result.changed,
           added: result.added,
           errors: result.errors,
+          committed: result.committed,
+          list_failed: result.listFailed,
         }),
       )
       .run();
@@ -2396,13 +2398,21 @@ adminRoutes.post("/datasets/:id/ci/sync", async (c) => {
     console.error("Audit log write failed for CI sync:", auditError);
   }
 
-  return c.json({
-    dataset_id: datasetId,
-    checked: result.checked,
-    changed: result.changed,
-    added: result.added,
-    errors: result.errors,
-  });
+  // 207 (Multi-Status) when the call surfaced any partial failures so
+  // automation and `--all` loops don't false-green on partial errors.
+  const status = result.errors.length > 0 ? 207 : 200;
+  return c.json(
+    {
+      dataset_id: datasetId,
+      checked: result.checked,
+      changed: result.changed,
+      added: result.added,
+      errors: result.errors,
+      committed: result.committed,
+      list_failed: result.listFailed,
+    },
+    status,
+  );
 });
 
 // ============================================================================
