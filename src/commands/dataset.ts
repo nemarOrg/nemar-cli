@@ -4257,16 +4257,33 @@ Examples:
                 pushCreds = await requestUploadCredentials(pushDatasetId);
                 spinner.succeed("Granted collaborator access; upload credentials received");
               } catch (retryError) {
-                credPermissionDenied = true;
+                // Distinguish a real permission denial (retry is also a 4xx)
+                // from a transient backend failure (5xx, network, parse). Only
+                // the former should suggest `request-access`; the latter is a
+                // service issue the user can't fix that way.
+                const retryIs4xx =
+                  retryError instanceof ApiError &&
+                  retryError.statusCode >= 400 &&
+                  retryError.statusCode < 500;
                 spinner.fail(`Could not get upload credentials: ${errorDetail(credError)}`);
                 console.log(
                   chalk.dim(`  Tried request-access automatically: ${errorDetail(retryError)}`),
                 );
-                console.log(
-                  chalk.yellow(
-                    `  Run 'nemar dataset request-access ${pushDatasetId}' and retry this push.`,
-                  ),
-                );
+                if (retryIs4xx) {
+                  credPermissionDenied = true;
+                  console.log(
+                    chalk.yellow(
+                      `  Run 'nemar dataset request-access ${pushDatasetId}' and retry this push.`,
+                    ),
+                  );
+                } else {
+                  console.log(
+                    chalk.yellow(
+                      "  The credentials service is unavailable; retry the push in a moment.",
+                    ),
+                  );
+                  s3PushFailed = true;
+                }
               }
             } else {
               spinner.warn(
@@ -4277,7 +4294,6 @@ Examples:
         }
 
         if (credPermissionDenied) {
-          // Skip the upload attempt; we already explained what to do.
           s3PushFailed = true;
         } else {
           const s3Creds = pushCreds ? toS3Credentials(pushCreds.credentials) : undefined;
@@ -4297,24 +4313,31 @@ Examples:
           }
 
           spinner = ora(`Copying data to S3 (${remoteName})...`).start();
-          const s3Result = await copyToAnnexRemote(cwd, remoteName, jobs, s3Creds);
+          let s3Result: Awaited<ReturnType<typeof copyToAnnexRemote>>;
+          try {
+            s3Result = await copyToAnnexRemote(cwd, remoteName, jobs, s3Creds);
+          } finally {
+            // Always clear STS creds from .git/annex/creds/ once the copy
+            // subprocess exits, regardless of outcome. Otherwise an interrupted
+            // upload leaves expired credentials on disk that fail later reads.
+            if (pushCreds) await clearAnnexCredentials(cwd);
+          }
           if (!s3Result.success) {
             spinner.fail("S3 push failed");
             console.log(chalk.red(`  ${s3Result.error}`));
             console.log(
-              chalk.dim(
+              chalk.yellow(
                 "  Git changes were pushed successfully; data upload can be retried later with 'nemar dataset push --no-pr'.",
               ),
             );
             s3PushFailed = true;
           } else {
-            await clearAnnexCredentials(cwd);
             spinner.succeed(`Copied ${s3Result.filesCopied} file(s) to S3`);
 
-            // Bug C: `git annex copy` writes new location records to the local
-            // git-annex branch. The earlier pushToGitHub already pushed it,
-            // but those new commits haven't reached origin yet — without this
-            // step a fresh clone won't know the S3 copies exist.
+            // git annex copy writes new location records to the local git-annex
+            // branch. The pushToGitHub at the start of this action pushed the
+            // branch as it stood then; those new commits have to be pushed
+            // separately or fresh clones won't know the S3 copies exist.
             const annexPushSpinner = ora("Pushing git-annex branch...").start();
             const annexPush = spawn({
               cmd: ["git", "push", "origin", "git-annex"],
@@ -4329,10 +4352,11 @@ Examples:
                 `Could not push git-annex branch: ${annexPushStderr.trim() || "unknown error"}`,
               );
               console.log(
-                chalk.dim(
+                chalk.yellow(
                   "  Run 'git push origin git-annex' manually so other clones can locate the new files.",
                 ),
               );
+              s3PushFailed = true;
             } else {
               annexPushSpinner.succeed("Pushed git-annex branch");
             }
@@ -4401,6 +4425,12 @@ Examples:
         }
       }
     }
+
+    // Surface the partial-failure exit code so callers and CI scripts can tell
+    // that data didn't ship even when git push (and optionally PR creation)
+    // succeeded. With --pr the PR is already open at this point, so users see
+    // both the URL and the nonzero exit.
+    if (s3PushFailed) process.exit(1);
   });
 
 // Drop command

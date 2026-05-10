@@ -21,6 +21,7 @@ import {
   ensureLocalMainBranch,
   getAnnexWhereisAll,
   getRemoteUuid,
+  markInheritedOpenNeuroRemotesIgnored,
   pushToGitHub,
   runCommand,
 } from "./git-annex.js";
@@ -298,21 +299,22 @@ export async function importOpenNeuro(
     } else {
       whereisSpinner.succeed(`Found ${keyUrlMap.size} annexed files`);
     }
-
-    // Mark inherited OpenNeuro S3 remotes as annex-ignored so subsequent
-    // `nemar dataset push` operations never select them as upload targets.
-    // After this point keyUrlMap is the only thing we need from s3-PUBLIC,
-    // and `nemar-s3` (created in Step 5) is the canonical write destination.
-    for (const inherited of ["s3-PUBLIC", "s3-PRIVATE"]) {
-      const exists = await runCommand(["git", "config", `remote.${inherited}.annex-uuid`], {
-        cwd: datasetPath,
-      });
-      if (exists.exitCode !== 0 || !exists.stdout.trim()) continue;
-      await runCommand(["git", "config", `remote.${inherited}.annex-ignore`, "true"], {
-        cwd: datasetPath,
-      });
-    }
   }
+
+  // Inherited OpenNeuro remotes (`s3-PUBLIC`, `s3-PRIVATE`) must not be
+  // selected by future `nemar dataset push` calls. nemar-s3 (created by
+  // configureS3Remote below) is the canonical write destination. Runs even
+  // when --skip-data because the inherited remotes are present in git config
+  // from the upstream clone regardless of whether we built the URL map.
+  await markInheritedOpenNeuroRemotesIgnored(datasetPath, (remote, err) => {
+    console.log(
+      chalk.yellow(
+        `  Warning: could not mark ${remote} as annex-ignore (${err}). ` +
+          `Future pushes may try to upload to ${remote}; ` +
+          `run 'git config remote.${remote}.annex-ignore true' manually.`,
+      ),
+    );
+  });
 
   // Step 4: Reconfigure git remote to nemarDatasets
   const remoteSpinner = ora("Configuring NEMAR remote...").start();

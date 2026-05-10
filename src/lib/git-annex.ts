@@ -1893,6 +1893,36 @@ export async function getAnnexS3Remotes(datasetPath: string): Promise<string[]> 
 }
 
 /**
+ * Mark git-annex remotes inherited from upstream OpenNeuro mirrors
+ * (`s3-PUBLIC`, `s3-PRIVATE`) as `annex-ignore=true` so subsequent
+ * `nemar dataset push` calls never pick them as upload targets. Skips
+ * remotes that aren't configured. Returns the list of names that were
+ * actually marked. Warnings (non-fatal) are written to `onWarn` if provided
+ * so callers can surface them through their existing UI.
+ */
+export async function markInheritedOpenNeuroRemotesIgnored(
+  datasetPath: string,
+  onWarn?: (remote: string, error: string) => void,
+): Promise<string[]> {
+  const marked: string[] = [];
+  for (const inherited of ["s3-PUBLIC", "s3-PRIVATE"]) {
+    const exists = await runCommand(["git", "config", `remote.${inherited}.annex-uuid`], {
+      cwd: datasetPath,
+    });
+    if (exists.exitCode !== 0 || !exists.stdout.trim()) continue;
+    const ignore = await runCommand(["git", "config", `remote.${inherited}.annex-ignore`, "true"], {
+      cwd: datasetPath,
+    });
+    if (ignore.exitCode !== 0) {
+      onWarn?.(inherited, ignore.stderr.trim() || "unknown error");
+      continue;
+    }
+    marked.push(inherited);
+  }
+  return marked;
+}
+
+/**
  * Pick the best S3 remote for upload from the candidates returned by
  * {@link getAnnexS3Remotes}. Prefers the canonical `nemar-s3` remote name,
  * then any remote whose annex description equals `[nemar-s3]`, then the first
@@ -1937,8 +1967,12 @@ export async function selectAnnexS3Remote(
           if (stdout.trim() === uuid) return candidate;
         }
       }
-    } catch {
-      // Fall through to first-match below.
+    } catch (parseError) {
+      // Malformed `git annex info --json` usually means a corrupted git-annex
+      // branch or a version mismatch — both worth surfacing so the user knows
+      // why the description tiebreaker was skipped before we fall through.
+      const msg = parseError instanceof Error ? parseError.message : String(parseError);
+      console.warn(`Could not parse git annex info JSON for remote selection: ${msg}`);
     }
   }
 
