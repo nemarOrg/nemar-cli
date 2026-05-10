@@ -30,14 +30,15 @@ export interface BidsFilterOptions {
   /** Comma-separated raw glob patterns to exclude (pass-through). */
   exclude?: string;
   /**
-   * When true, append excludes for `stimuli/**` and `**\/stimuli/**` so large
-   * stimulus files are skipped. Pointer files are still cloned by git, so
-   * users can fetch later. Default false (no extra excludes).
+   * When true, append excludes for `stimuli/**` and `**\/stimuli/**` so the
+   * `git annex get` pass skips stimuli content. Default false (no extra
+   * excludes).
    */
   excludeStimuli?: boolean;
   /**
    * When true, append excludes for `derivatives/**` and `**\/derivatives/**`
-   * so processed outputs are skipped. Default false (no extra excludes).
+   * so the `git annex get` pass skips derivative content. Default false (no
+   * extra excludes).
    */
   excludeDerivatives?: boolean;
 }
@@ -192,4 +193,29 @@ export function buildBidsFilterArgs(opts: BidsFilterOptions): BidsFilterResult {
   }
 
   return { args, active, summary };
+}
+
+/**
+ * Pick the right filter for `nemar dataset get`.
+ *
+ * When the user supplies explicit `paths` (e.g. `nemar dataset get stimuli/`),
+ * the path itself is the filter and we MUST NOT add the default-skip
+ * excludes — otherwise the request would silently match nothing. With no
+ * paths, the default-skip applies unless the user opted in via `--stimuli` /
+ * `--derivatives`.
+ *
+ * Centralized here so the rule is regression-protected by unit tests rather
+ * than relying on inline logic in the CLI action handler.
+ */
+export function chooseGetFilter(
+  paths: string[] | undefined,
+  options: { stimuli?: boolean; derivatives?: boolean },
+): BidsFilterResult {
+  if (paths && paths.length > 0) {
+    return buildBidsFilterArgs({});
+  }
+  return buildBidsFilterArgs({
+    excludeStimuli: options.stimuli !== true,
+    excludeDerivatives: options.derivatives !== true,
+  });
 }

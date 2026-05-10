@@ -53,7 +53,7 @@ import {
   searchDatasets,
 } from "../lib/api.js";
 import { isAwsCliAvailable } from "../lib/aws-cli.js";
-import { buildBidsFilterArgs } from "../lib/bids-filter.js";
+import { buildBidsFilterArgs, chooseGetFilter } from "../lib/bids-filter.js";
 import {
   type BidsValidationResult,
   checkDenoInstalled,
@@ -167,8 +167,10 @@ Workflows:
 Note:
   'download' runs OUTSIDE a dataset directory and clones + fetches in one step.
   'get' runs INSIDE an already-cloned dataset directory and only fetches data.
-  Both default-skip content under stimuli/ and derivatives/ (large folders);
-  pass --stimuli or --derivatives to include them.
+  For NEMAR datasets (nm/on prefix), both default-skip content under stimuli/
+  and derivatives/ (large folders); pass --stimuli or --derivatives to include
+  them. OpenNeuro datasets (ds prefix) ignore these flags and download the
+  full tree.
 
 Examples:
   $ nemar dataset validate ./my-dataset          # Validate locally
@@ -1668,10 +1670,12 @@ Description:
   OpenNeuro datasets (ds prefix) are downloaded as plain files from
   OpenNeuro's public S3 bucket. No account or git-annex required.
 
-  By default, content under stimuli/ and derivatives/ is skipped because
-  these folders can be very large. The git-annex pointers are still cloned,
-  so you can fetch them later with 'nemar dataset get --stimuli' or
-  'nemar dataset get --derivatives' from inside the dataset directory.
+  For NEMAR datasets, content under stimuli/ and derivatives/ is skipped by
+  default because these folders can be very large. The git-annex pointers
+  are still cloned, so you can fetch them later with 'nemar dataset get
+  --stimuli' or 'nemar dataset get --derivatives' from inside the dataset
+  directory. (OpenNeuro datasets ignore these flags; the full tree is
+  always downloaded.)
 
 Requirements:
   - git-annex installed (NEMAR datasets only)
@@ -4034,16 +4038,18 @@ Examples:
 
     const paths = files.length > 0 ? files : undefined;
 
-    // Default-skip stimuli/derivatives only when no explicit paths are given.
-    // When the user names paths, the path itself is the filter and we trust
-    // their intent (otherwise `nemar dataset get stimuli/` would do nothing).
-    const filter = paths
-      ? buildBidsFilterArgs({})
-      : buildBidsFilterArgs({
-          excludeStimuli: options.stimuli !== true,
-          excludeDerivatives: options.derivatives !== true,
-        });
+    const filter = chooseGetFilter(paths, {
+      stimuli: options.stimuli,
+      derivatives: options.derivatives,
+    });
     const matchArgs = filter.args.length > 0 ? filter.args : undefined;
+
+    // Print skip/summary lines first so the user sees them even when the
+    // filtered precount is empty (e.g., a dataset whose only annex content
+    // lives under stimuli/).
+    for (const line of filter.summary) {
+      console.log(chalk.dim(`  ${line}`));
+    }
 
     // Pre-count pending files+bytes scoped to the same paths the get will use.
     const pending = await countPendingDownload(cwd, paths, matchArgs);
@@ -4054,10 +4060,6 @@ Examples:
         await clearAnnexCredentials(cwd);
       }
       return;
-    }
-
-    for (const line of filter.summary) {
-      console.log(chalk.dim(`  ${line}`));
     }
 
     const desc = paths

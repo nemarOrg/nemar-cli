@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { buildBidsFilterArgs } from "../src/lib/bids-filter";
+import { buildBidsFilterArgs, chooseGetFilter } from "../src/lib/bids-filter";
 
 describe("buildBidsFilterArgs — empty input", () => {
   test("no options yields no args and inactive", () => {
@@ -279,5 +279,54 @@ describe("buildBidsFilterArgs — stimuli/derivatives default-skip", () => {
       excludeDerivatives: false,
     });
     expect(r.args).toEqual(["--include", "sub-01/**"]);
+  });
+});
+
+describe("chooseGetFilter — explicit paths bypass default-skip", () => {
+  test("no paths, no flags: applies default-skip for both", () => {
+    const r = chooseGetFilter(undefined, {});
+    expect(r.args).toEqual([
+      "--exclude",
+      "stimuli/**",
+      "--exclude",
+      "**/stimuli/**",
+      "--exclude",
+      "derivatives/**",
+      "--exclude",
+      "**/derivatives/**",
+    ]);
+  });
+
+  test("explicit paths: emits NO excludes (path is the filter)", () => {
+    const r = chooseGetFilter(["stimuli/"], {});
+    expect(r.args).toEqual([]);
+    expect(r.active).toBe(false);
+  });
+
+  test("explicit paths ignore --stimuli/--derivatives flags", () => {
+    // Flags are no-ops when paths are given; the path itself decides.
+    const rWith = chooseGetFilter(["stimuli/"], { stimuli: true });
+    const rWithout = chooseGetFilter(["stimuli/"], {});
+    expect(rWith.args).toEqual(rWithout.args);
+  });
+
+  test("--stimuli alone (no paths) drops stimuli excludes, keeps derivatives", () => {
+    const r = chooseGetFilter(undefined, { stimuli: true });
+    expect(r.args).toEqual([
+      "--exclude",
+      "derivatives/**",
+      "--exclude",
+      "**/derivatives/**",
+    ]);
+  });
+
+  test("both flags (no paths) drop all default excludes", () => {
+    const r = chooseGetFilter(undefined, { stimuli: true, derivatives: true });
+    expect(r.args).toEqual([]);
+  });
+
+  test("empty paths array is treated as 'no paths'", () => {
+    const r = chooseGetFilter([], {});
+    expect(r.args.length).toBeGreaterThan(0);
   });
 });

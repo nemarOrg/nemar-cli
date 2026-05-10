@@ -571,6 +571,17 @@ describe("CLI Dataset Download", () => {
     expect(stdout).toContain("INSIDE");
   });
 
+  test("nemar dataset download --no-data does not conflict with default skip", async () => {
+    // The default stimuli/derivatives skip excludes do NOT count toward
+    // `filter.active`, so they must not trigger the "filters imply data
+    // download" conflict that real user filters do. Regression guard for
+    // the active-flag semantics. We use a non-existent id so the command
+    // exits before any network work, but the conflict check runs early.
+    const { stdout, stderr } = await runCli(["dataset", "download", "nm999999", "--no-data"]);
+    const output = stdout + stderr;
+    expect(output).not.toContain("--no-data cannot be combined with BIDS filters");
+  });
+
   test("nemar dataset download with non-existent dataset shows error", async () => {
     const { stdout, stderr, exitCode } = await runCli(["dataset", "download", "nm999999"]);
 

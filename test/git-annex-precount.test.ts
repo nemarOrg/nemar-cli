@@ -124,6 +124,37 @@ describe("countPendingDownload", () => {
     expect(scoped).not.toBeNull();
   });
 
+  test("extraArgs filters the pending count (stimuli excludes)", async () => {
+    // Build a remote with one regular file and one under stimuli/, then
+    // clone without the data to make both pending. The unfiltered count
+    // should be 2; passing the stimuli excludes the CLI emits should drop
+    // the stimuli file from the count.
+    const remote = await newAnnexRepo("remote-stimuli");
+    await annexFile(remote, "data.bin", "a".repeat(100));
+    mkdirSync(join(remote, "stimuli"), { recursive: true });
+    await annexFile(remote, "stimuli/sound.bin", "b".repeat(200));
+
+    const local = join(TMP_DIR, `clone-stim-${Date.now()}`);
+    await runCmd(["git", "clone", "-q", remote, local]);
+    await runCmd(["git", "annex", "init", "-q", "local"], local);
+    await runCmd(["git", "annex", "enableremote", "origin"], local).catch(() => undefined);
+
+    const unfiltered = await countPendingDownload(local);
+    expect(unfiltered).not.toBeNull();
+    expect(unfiltered?.fileCount).toBe(2);
+    expect(unfiltered?.totalBytes).toBe(300);
+
+    const filtered = await countPendingDownload(local, undefined, [
+      "--exclude",
+      "stimuli/**",
+      "--exclude",
+      "**/stimuli/**",
+    ]);
+    expect(filtered).not.toBeNull();
+    expect(filtered?.fileCount).toBe(1);
+    expect(filtered?.totalBytes).toBe(100);
+  });
+
   test("file count and bytes match for files missing from local annex", async () => {
     // Build a repo with files, then drop them while pointing at a sibling
     // remote that has the data. countPendingDownload should report the
