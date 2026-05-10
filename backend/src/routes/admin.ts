@@ -61,6 +61,7 @@ import {
   deleteRepository,
   deployWorkflows,
   downloadReleaseArchive,
+  syncWorkflowTemplates,
   getBlobContent,
   getMainBranchSha,
   getTreeAtRef,
@@ -2341,6 +2342,77 @@ adminRoutes.post("/datasets/:id/ci", async (c) => {
     dataset_id: datasetId,
     workflows_deployed: result.deployed,
   });
+});
+
+/**
+ * POST /admin/datasets/:id/ci/sync - Bring deployed CI workflows in sync with
+ * the current templates. Only files that drift or are missing are written,
+ * in a single tree commit. Idempotent and cheap when nothing has changed
+ * (single Contents-API listing).
+ */
+adminRoutes.post("/datasets/:id/ci/sync", async (c) => {
+  const datasetId = c.req.param("id");
+  const db = c.env.DB;
+  const adminUser = c.get("user");
+
+  const dataset = await db
+    .prepare("SELECT dataset_id, github_repo FROM datasets WHERE dataset_id = ?")
+    .bind(datasetId)
+    .first<{ dataset_id: string; github_repo: string | null }>();
+
+  if (!dataset) {
+    return c.json({ error: "Dataset not found" }, 404);
+  }
+  if (!dataset.github_repo) {
+    return c.json({ error: "Dataset has no GitHub repository" }, 400);
+  }
+
+  const repoName = dataset.github_repo.split("/")[1];
+  if (!repoName) {
+    return c.json({ error: "Invalid repository format" }, 500);
+  }
+
+  const result = await syncWorkflowTemplates(repoName, "main", c.env.GITHUB_ADMIN_PAT);
+
+  try {
+    await db
+      .prepare(
+        "INSERT INTO audit_log (user_id, action, resource_type, resource_id, details) VALUES (?, ?, ?, ?, ?)",
+      )
+      .bind(
+        adminUser.id,
+        "ci_workflows_synced",
+        "dataset",
+        datasetId,
+        JSON.stringify({
+          synced_by: adminUser.username,
+          changed: result.changed,
+          added: result.added,
+          errors: result.errors,
+          committed: result.committed,
+          list_failed: result.listFailed,
+        }),
+      )
+      .run();
+  } catch (auditError) {
+    console.error("Audit log write failed for CI sync:", auditError);
+  }
+
+  // 207 (Multi-Status) when the call surfaced any partial failures so
+  // automation and `--all` loops don't false-green on partial errors.
+  const status = result.errors.length > 0 ? 207 : 200;
+  return c.json(
+    {
+      dataset_id: datasetId,
+      checked: result.checked,
+      changed: result.changed,
+      added: result.added,
+      errors: result.errors,
+      committed: result.committed,
+      list_failed: result.listFailed,
+    },
+    status,
+  );
 });
 
 // ============================================================================

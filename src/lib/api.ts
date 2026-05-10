@@ -500,6 +500,31 @@ export async function addCi(datasetId: string): Promise<AddCiResponse> {
   return request<AddCiResponse>(`/admin/datasets/${datasetId}/ci`, { method: "POST" }, true);
 }
 
+export interface SyncCiResponse {
+  dataset_id: string;
+  checked: string[];
+  changed: string[];
+  added: string[];
+  errors: string[];
+  /** True iff a tree commit was actually made. */
+  committed: boolean;
+  /** True iff the workflow directory listing failed; treat result as
+      "presence unknown" rather than "no workflows deployed." */
+  list_failed: boolean;
+}
+
+/**
+ * Sync deployed CI workflows to current templates (admin only).
+ * Only writes files that drift or are missing.
+ */
+export async function syncCi(datasetId: string): Promise<SyncCiResponse> {
+  return request<SyncCiResponse>(
+    `/admin/datasets/${datasetId}/ci/sync`,
+    { method: "POST" },
+    true,
+  );
+}
+
 export interface UserCiStatusResponse {
   dataset_id: string;
   bids_validation: {

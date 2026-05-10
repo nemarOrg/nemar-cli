@@ -34,6 +34,7 @@ import {
   ORCID_REGEX,
   type StepResult,
   addCi,
+  syncCi,
   applyS3Lock,
   approvePublication,
   approveUser,
@@ -743,6 +744,132 @@ ciCommand
       console.log();
     } catch (error) {
       handleCommandError(error, spinner, "Failed to deploy CI workflows", {
+        404: "Dataset not found",
+      });
+    }
+  });
+
+ciCommand
+  .command("sync")
+  .description("Sync deployed CI workflows to current templates (only writes drifted/missing files)")
+  .argument("[dataset-id]", "Dataset ID (e.g., nm000104)")
+  .option("--all", "Sync across all dataset repositories")
+  .option(YES_OPTION, YES_DESCRIPTION)
+  .option(NO_OPTION, NO_DESCRIPTION)
+  .action(async (datasetId, options: { all?: boolean } & ConfirmOptions) => {
+    if (!requireAuth()) return;
+
+    if (options.all) {
+      const spinner = ora("Fetching dataset list...").start();
+      let datasets: { dataset_id: string }[];
+      try {
+        const result = await listDatasets({ limit: 1000 });
+        datasets = result.datasets;
+        spinner.succeed(`Found ${datasets.length} datasets`);
+        if (datasets.length >= 1000) {
+          console.log(
+            chalk.yellow("Warning: reached 1000 dataset limit; some datasets may be skipped"),
+          );
+        }
+      } catch (error) {
+        handleCommandError(error, spinner, "Failed to fetch datasets");
+        return;
+      }
+
+      console.log(
+        chalk.cyan(
+          `\nSync CI templates across ${datasets.length} datasets (writes only diffs)\n`,
+        ),
+      );
+
+      const confirmResult = await confirm(
+        `Sync templates on all ${datasets.length} datasets?`,
+        options,
+      );
+      if (confirmResult !== "confirmed") {
+        console.log(chalk.dim(confirmResult === "declined" ? "Skipped" : "Cancelled"));
+        return;
+      }
+
+      let upToDate = 0;
+      let updated = 0;
+      let withErrors = 0;
+      for (const ds of datasets) {
+        const dsSpinner = ora(`Syncing ${ds.dataset_id}...`).start();
+        try {
+          const result = await syncCi(ds.dataset_id);
+          const changes = result.changed.length + result.added.length;
+          if (result.errors.length > 0) {
+            dsSpinner.warn(`${ds.dataset_id}: ${changes} updated, ${result.errors.length} error(s)`);
+            withErrors++;
+          } else if (changes === 0) {
+            dsSpinner.succeed(`${ds.dataset_id}: up to date`);
+            upToDate++;
+          } else {
+            const parts: string[] = [];
+            if (result.added.length > 0) parts.push(`+${result.added.length} added`);
+            if (result.changed.length > 0) parts.push(`~${result.changed.length} updated`);
+            dsSpinner.succeed(`${ds.dataset_id}: ${parts.join(", ")}`);
+            updated++;
+          }
+        } catch (error) {
+          const msg = error instanceof ApiError ? error.message : String(error);
+          dsSpinner.fail(`${ds.dataset_id}: ${msg}`);
+          withErrors++;
+        }
+      }
+
+      console.log();
+      console.log(
+        chalk.cyan(
+          `Done: ${upToDate} up-to-date, ${updated} updated, ${withErrors} with errors`,
+        ),
+      );
+      return;
+    }
+
+    if (!datasetId) {
+      console.error(chalk.red("Error: dataset-id is required (or use --all)"));
+      return;
+    }
+
+    const spinner = ora(`Syncing CI templates for ${datasetId}...`).start();
+    try {
+      const result = await syncCi(datasetId);
+      const changes = result.changed.length + result.added.length;
+      if (result.errors.length > 0) {
+        spinner.warn(`${datasetId}: ${result.errors.length} error(s)`);
+      } else if (changes === 0) {
+        spinner.succeed(`${datasetId}: already up to date`);
+      } else {
+        spinner.succeed(`${datasetId}: synced`);
+      }
+      console.log();
+      console.log(`  ${chalk.dim("Checked:")} ${result.checked.join(", ")}`);
+      if (result.added.length > 0) {
+        console.log(`  ${chalk.green("Added:")}   ${result.added.join(", ")}`);
+      }
+      if (result.changed.length > 0) {
+        console.log(`  ${chalk.yellow("Updated:")} ${result.changed.join(", ")}`);
+      }
+      if (!result.committed && changes > 0 && result.errors.length === 0) {
+        // Defensive: the intended changes were computed but no commit
+        // was made. Should never happen in practice (the helper sets
+        // `committed: true` whenever it tries to write).
+        console.log(`  ${chalk.yellow("Note:")}    listed changes were not committed`);
+      }
+      if (result.list_failed) {
+        console.log(
+          `  ${chalk.red("Warning:")} workflow directory listing failed; presence is unknown`,
+        );
+      }
+      if (result.errors.length > 0) {
+        console.log(`  ${chalk.red("Errors:")}`);
+        for (const err of result.errors) console.log(`    - ${err}`);
+      }
+      console.log();
+    } catch (error) {
+      handleCommandError(error, spinner, "Failed to sync CI templates", {
         404: "Dataset not found",
       });
     }
