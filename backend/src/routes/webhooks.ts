@@ -29,7 +29,8 @@ import {
 } from "../services/doi.js";
 import { TEST_SHOULDER, extractDoi, updateIdentifier } from "../services/ezid.js";
 import {
-  createOrUpdateFile,
+  EnrichmentCommitError,
+  commitEnrichmentWithBidsignore,
   downloadReleaseArchive,
   ensureMainBranch,
   getBlobContent,
@@ -1279,42 +1280,38 @@ webhooks.post("/llm-enrich", async (c) => {
     let bidsignoreError: string | undefined;
     let cacheError: string | undefined;
 
-    // Commit .nemar/metadata.json to repo
+    let commitMode: "batched" | "single" = "single";
     try {
-      await createOrUpdateFile(
+      const result = await commitEnrichmentWithBidsignore(
         repoName,
+        "main",
         ".nemar/metadata.json",
         metadataContent,
+        [".nemar/"],
         `Update NEMAR metadata (pipeline: ${finalMetadata.pipeline_stage})`,
         pat,
       );
-    } catch (err) {
-      commitError = errorMessage(err);
-      console.error(`[llm-enrich] Failed to commit metadata for ${dataset_id}:`, err);
-    }
-
-    // Ensure .bidsignore includes .nemar/
-    try {
-      const bidsignoreFile = tree.find((f) => f.path === ".bidsignore");
-      let bidsignoreContent = "";
-      if (bidsignoreFile) {
-        bidsignoreContent = await getBlobContent(repoName, bidsignoreFile.sha, pat);
-      }
-      if (!bidsignoreContent.includes(".nemar/")) {
-        bidsignoreContent = bidsignoreContent
-          ? `${bidsignoreContent.trimEnd()}\n.nemar/\n`
-          : ".nemar/\n";
-        await createOrUpdateFile(
-          repoName,
-          ".bidsignore",
-          bidsignoreContent,
-          "Add .nemar/ to .bidsignore",
-          pat,
+      commitMode = result.commitMode;
+      if (result.bidsignoreReadError) {
+        bidsignoreError = result.bidsignoreReadError;
+        console.warn(
+          `[llm-enrich] Could not read .bidsignore for ${dataset_id}; committed metadata alone (next validation may fail if .nemar/ is missing): ${result.bidsignoreReadError}`,
         );
       }
     } catch (err) {
-      bidsignoreError = errorMessage(err);
-      console.error(`[llm-enrich] Failed to update .bidsignore for ${dataset_id}:`, err);
+      // The helper tells us which path failed via the typed error. Batched
+      // failures affect both files, so mirror the error onto bidsignoreError
+      // too; single failures only affect metadata.
+      const msg = errorMessage(err);
+      commitError = msg;
+      if (err instanceof EnrichmentCommitError) {
+        commitMode = err.commitMode;
+        if (err.commitMode === "batched") bidsignoreError = msg;
+        if (err.bidsignoreReadError && !bidsignoreError) {
+          bidsignoreError = err.bidsignoreReadError;
+        }
+      }
+      console.error(`[llm-enrich] Failed enrichment commit for ${dataset_id}:`, err);
     }
 
     // Cache in D1
@@ -1390,6 +1387,7 @@ webhooks.post("/llm-enrich", async (c) => {
             warnings: validationResult.warnings,
           }
         : null,
+      commit_mode: commitMode,
       ...(commitError && { commit_error: commitError }),
       ...(bidsignoreError && { bidsignore_error: bidsignoreError }),
       ...(cacheError && { cache_error: cacheError }),

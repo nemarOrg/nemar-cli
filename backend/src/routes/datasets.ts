@@ -1730,7 +1730,12 @@ datasetRoutes.post("/:id/publish/request", authMiddleware, async (c) => {
         pat,
       );
       if (!hasWorkflow) {
-        await deployWorkflows(repoName, pat);
+        const deployResult = await deployWorkflows(repoName, pat);
+        if (!deployResult.success) {
+          throw new Error(
+            `Failed to deploy CI workflows to ${repoName}: ${deployResult.errors.join("; ")}`,
+          );
+        }
       }
 
       // Check latest BIDS validation run
