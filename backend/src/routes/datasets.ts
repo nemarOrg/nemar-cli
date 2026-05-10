@@ -25,6 +25,7 @@ import {
   deployWorkflows,
   enableAutoMerge,
   ensureMainBranch,
+  ensureWorkflowsDeployed,
   getFileContent,
   getWorkflowRuns,
   setRepoVisibility,
@@ -1270,10 +1271,19 @@ datasetRoutes.post("/:id/finalize", authMiddleware, async (c) => {
       warnings.push("Could not verify default branch is 'main'; CI and protection may not work");
     }
 
-    // Deploy GitHub Actions workflows
+    // Deploy GitHub Actions workflows (idempotent: only writes the missing
+    // templates; in the steady state this is a single Contents API list call).
+    let workflowDeployed: string[] = [];
+    let workflowAlreadyPresent: string[] = [];
     try {
-      const workflowResult = await deployWorkflows(datasetId, c.env.GITHUB_ADMIN_PAT);
-      if (!workflowResult.success) {
+      const workflowResult = await ensureWorkflowsDeployed(
+        datasetId,
+        "main",
+        c.env.GITHUB_ADMIN_PAT,
+      );
+      workflowDeployed = workflowResult.deployed;
+      workflowAlreadyPresent = workflowResult.alreadyPresent;
+      if (workflowResult.errors.length > 0) {
         console.error("Failed to deploy some workflows:", workflowResult.errors);
         warnings.push(
           `Some GitHub workflows could not be deployed: ${workflowResult.errors.join("; ")}`,
@@ -1335,6 +1345,10 @@ datasetRoutes.post("/:id/finalize", authMiddleware, async (c) => {
         dataset_id: datasetId,
         status: "active",
         github_url: githubUrl,
+      },
+      workflows: {
+        deployed: workflowDeployed,
+        already_present: workflowAlreadyPresent,
       },
     });
   } catch (error) {

@@ -1483,6 +1483,203 @@ export async function deployWorkflows(
 }
 
 /**
+ * List the file paths currently present under `.github/workflows` on the repo's
+ * given branch. Returns paths relative to the repo root (e.g.
+ * `.github/workflows/bids-validation.yml`). A 404 on the directory itself
+ * (workflows folder not yet created) is treated as "empty", not an error.
+ */
+async function listDeployedWorkflowPaths(
+  repo: string,
+  branch: string,
+  pat: string,
+): Promise<Set<string>> {
+  const response = await githubFetchWithRetry(
+    `${GITHUB_API()}/repos/${ORG_NAME}/${repo}/contents/.github/workflows?ref=${encodeURIComponent(branch)}`,
+    {
+      headers: {
+        Authorization: `Bearer ${pat}`,
+        Accept: "application/vnd.github.v3+json",
+        "User-Agent": "NEMAR-API",
+      },
+    },
+  );
+
+  if (response.status === 404) return new Set();
+  if (!response.ok) {
+    const body = await response.text().catch(() => "");
+    throw new HttpError(
+      `Failed to list workflows for ${repo}@${branch}: HTTP ${response.status}: ${body.slice(0, 300)}`,
+      response.status,
+      body.slice(0, 300),
+    );
+  }
+  const entries = (await response.json()) as Array<{ path: string; type: string }>;
+  return new Set(entries.filter((e) => e.type === "file").map((e) => e.path));
+}
+
+/**
+ * Idempotent presence check: list the workflow directory once, deploy only the
+ * templates that are missing in a single tree commit. Never throws; failures
+ * are aggregated in `errors`. Steady-state cost when everything is already
+ * present is one REST call (the directory listing).
+ */
+export async function ensureWorkflowsDeployed(
+  repo: string,
+  branch: string,
+  pat: string,
+): Promise<{ alreadyPresent: string[]; deployed: string[]; errors: string[] }> {
+  const workflows = getWorkflowTemplates();
+  const nameOf = (path: string): string => {
+    const parts = path.split("/");
+    return parts[parts.length - 1] ?? path;
+  };
+
+  let present: Set<string>;
+  try {
+    present = await listDeployedWorkflowPaths(repo, branch, pat);
+  } catch (err) {
+    return {
+      alreadyPresent: [],
+      deployed: [],
+      errors: [err instanceof Error ? err.message : String(err)],
+    };
+  }
+
+  const missing = workflows.filter((w) => !present.has(w.path));
+  if (missing.length === 0) {
+    return {
+      alreadyPresent: workflows.map((w) => nameOf(w.path)),
+      deployed: [],
+      errors: [],
+    };
+  }
+
+  try {
+    await commitFilesAsTree(
+      repo,
+      branch,
+      missing.map((w) => ({ path: w.path, content: w.content })),
+      missing.length === workflows.length ? "Add CI workflows" : "Add missing CI workflows",
+      pat,
+    );
+    return {
+      alreadyPresent: workflows
+        .filter((w) => present.has(w.path))
+        .map((w) => nameOf(w.path)),
+      deployed: missing.map((w) => nameOf(w.path)),
+      errors: [],
+    };
+  } catch (err) {
+    return {
+      alreadyPresent: workflows
+        .filter((w) => present.has(w.path))
+        .map((w) => nameOf(w.path)),
+      deployed: [],
+      errors: [err instanceof Error ? err.message : String(err)],
+    };
+  }
+}
+
+/**
+ * Normalize line endings before comparing template content vs. deployed
+ * content. GitHub's Contents API may return text with CRLF in some
+ * environments while our inline template strings use LF; treat them as
+ * equal when only line endings differ.
+ */
+function normalizeForCompare(s: string): string {
+  return s.replace(/\r\n/g, "\n");
+}
+
+/**
+ * Compare every workflow template against what is currently deployed and
+ * commit, in one tree, only the files whose content drifted. Files that
+ * are missing entirely are written as part of the same commit. Never
+ * throws; per-file read errors land in `errors` and the file is treated
+ * as unchanged so we don't risk clobbering a hand-edited workflow on a
+ * read failure.
+ */
+export async function syncWorkflowTemplates(
+  repo: string,
+  branch: string,
+  pat: string,
+): Promise<{ checked: string[]; changed: string[]; added: string[]; errors: string[] }> {
+  const workflows = getWorkflowTemplates();
+  const nameOf = (path: string): string => {
+    const parts = path.split("/");
+    return parts[parts.length - 1] ?? path;
+  };
+  const checked = workflows.map((w) => nameOf(w.path));
+
+  let present: Set<string>;
+  try {
+    present = await listDeployedWorkflowPaths(repo, branch, pat);
+  } catch (err) {
+    return {
+      checked,
+      changed: [],
+      added: [],
+      errors: [err instanceof Error ? err.message : String(err)],
+    };
+  }
+
+  const errors: string[] = [];
+  const filesToWrite: TreeFile[] = [];
+  const changed: string[] = [];
+  const added: string[] = [];
+
+  for (const template of workflows) {
+    if (!present.has(template.path)) {
+      filesToWrite.push({ path: template.path, content: template.content });
+      added.push(nameOf(template.path));
+      continue;
+    }
+    let deployedContent: string | null;
+    try {
+      deployedContent = await getFileContent(repo, template.path, pat, branch);
+    } catch (err) {
+      errors.push(
+        `${template.path}: read failed (${err instanceof Error ? err.message : String(err)})`,
+      );
+      continue;
+    }
+    if (deployedContent === null) {
+      // Listing said file exists but content fetch returned null — race or
+      // permissions. Skip rather than risk a clobbering write.
+      errors.push(`${template.path}: present in listing but content unavailable`);
+      continue;
+    }
+    if (normalizeForCompare(deployedContent) !== normalizeForCompare(template.content)) {
+      filesToWrite.push({ path: template.path, content: template.content });
+      changed.push(nameOf(template.path));
+    }
+  }
+
+  if (filesToWrite.length === 0) {
+    return { checked, changed, added, errors };
+  }
+
+  try {
+    await commitFilesAsTree(
+      repo,
+      branch,
+      filesToWrite,
+      added.length > 0 && changed.length > 0
+        ? "Sync CI workflows (add missing, update drifted)"
+        : added.length > 0
+          ? "Add missing CI workflows"
+          : "Update CI workflows to current templates",
+      pat,
+    );
+    return { checked, changed, added, errors };
+  } catch (err) {
+    errors.push(
+      `commit failed: ${err instanceof Error ? err.message : String(err)}`,
+    );
+    return { checked, changed: [], added: [], errors };
+  }
+}
+
+/**
  * Trigger archive generation via repository_dispatch event.
  * Sends dataset_id and version in the client_payload. The generate-archive
  * workflow checks out the version tag, retrieves git-annex data, creates a zip,
