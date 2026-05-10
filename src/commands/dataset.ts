@@ -53,7 +53,7 @@ import {
   searchDatasets,
 } from "../lib/api.js";
 import { isAwsCliAvailable } from "../lib/aws-cli.js";
-import { buildBidsFilterArgs } from "../lib/bids-filter.js";
+import { buildBidsFilterArgs, chooseGetFilter } from "../lib/bids-filter.js";
 import {
   type BidsValidationResult,
   checkDenoInstalled,
@@ -159,13 +159,25 @@ Workflows:
   Edit (private):       nemar dataset commit -> nemar dataset push
   Edit (public):        nemar dataset update
   New version:          nemar dataset release
-  Download:             nemar dataset clone <id> -> nemar dataset get
+  Download (one-shot):  nemar dataset download <id>            (clone + fetch data)
+  Download (lazy):      nemar dataset clone <id>               (clone only, then 'cd' in)
+                        nemar dataset get [paths]              (fetch data later)
   Request publication:  nemar dataset publish request <id>
+
+Note:
+  'download' runs OUTSIDE a dataset directory and clones + fetches in one step.
+  'get' runs INSIDE an already-cloned dataset directory and only fetches data.
+  For NEMAR datasets (nm/on prefix), both default-skip content under stimuli/
+  and derivatives/ (large folders); pass --stimuli or --derivatives to include
+  them. OpenNeuro datasets (ds prefix) ignore these flags and download the
+  full tree.
 
 Examples:
   $ nemar dataset validate ./my-dataset          # Validate locally
   $ nemar dataset upload ./my-dataset            # Upload to NEMAR
-  $ nemar dataset download nm000104              # Download a dataset
+  $ nemar dataset download nm000104              # Download (skips stimuli/derivatives)
+  $ nemar dataset download nm000104 --stimuli    # Also fetch stimuli/
+  $ nemar dataset get --derivatives              # Fetch derivatives/ in a clone
   $ nemar dataset list --mine                    # List your datasets
   $ nemar dataset status nm000104                # Check dataset status
   $ nemar dataset request-access nm000104        # Request collaborator access
@@ -1643,7 +1655,9 @@ datasetCommand
   .option("--runs <list>", "Comma-separated runs (e.g. 1,2 — matches run-1 and run-01)")
   .option("--datatypes <list>", "Comma-separated BIDS datatypes (e.g. eeg,emg)")
   .option("--include <globs>", "Comma-separated extra include globs")
-  .option("--exclude <globs>", "Comma-separated exclude globs (e.g. derivatives/**)")
+  .option("--exclude <globs>", "Comma-separated exclude globs (e.g. sourcedata/**)")
+  .option("--stimuli", "Include stimuli/ content (skipped by default; can be large)")
+  .option("--derivatives", "Include derivatives/ content (skipped by default; can be large)")
   .addHelpText(
     "after",
     `
@@ -1656,13 +1670,20 @@ Description:
   OpenNeuro datasets (ds prefix) are downloaded as plain files from
   OpenNeuro's public S3 bucket. No account or git-annex required.
 
+  For NEMAR datasets, content under stimuli/ and derivatives/ is skipped by
+  default because these folders can be very large. The git-annex pointers
+  are still cloned, so you can fetch them later with 'nemar dataset get
+  --stimuli' or 'nemar dataset get --derivatives' from inside the dataset
+  directory. (OpenNeuro datasets ignore these flags; the full tree is
+  always downloaded.)
+
 Requirements:
   - git-annex installed (NEMAR datasets only)
   - NEMAR account (for private datasets)
   - AWS CLI recommended for OpenNeuro downloads (falls back to HTTPS)
 
 Examples:
-  $ nemar dataset download nm000104              # Download NEMAR dataset
+  $ nemar dataset download nm000104              # Download NEMAR dataset (skips stimuli/derivatives)
   $ nemar dataset download nm000104 -o ./data    # Custom output directory
   $ nemar dataset download nm000104 --no-data    # Metadata only (fast)
   $ nemar dataset download nm000104 -j 8         # More parallel streams
@@ -1671,7 +1692,8 @@ Examples:
   $ nemar dataset download nm000104 --update --prune  # Plus drop orphan objects
   $ nemar dataset download nm000104 --subjects sub-01,02      # Only these subjects
   $ nemar dataset download nm000104 --tasks rest --datatypes eeg  # Subset
-  $ nemar dataset download nm000104 --exclude 'derivatives/**'    # Skip derivatives
+  $ nemar dataset download nm000104 --stimuli                 # Also download stimuli/
+  $ nemar dataset download nm000104 --stimuli --derivatives   # Download everything
   $ nemar dataset download ds000248              # Download from OpenNeuro`,
   )
   .action(async (datasetId, options) => {
@@ -1699,6 +1721,8 @@ Examples:
       datatypes: options.datatypes,
       include: options.include,
       exclude: options.exclude,
+      excludeStimuli: options.stimuli !== true,
+      excludeDerivatives: options.derivatives !== true,
     });
 
     if (filter.active && options.data === false) {
@@ -1995,11 +2019,15 @@ Examples:
         console.log(chalk.dim("Skipping data files (--no-data flag)"));
       }
     } else {
+      for (const line of filter.summary) {
+        console.log(chalk.dim(`  ${line}`));
+      }
       console.log(chalk.bold(`Downloading data files (${options.jobs} parallel streams)...`));
 
       // Pre-count pending files+bytes so the progress bar has an authoritative
       // denominator. Falls back to non-percent display if precount fails.
-      const pending = await countPendingDownload(absoluteOutput);
+      const matchArgs = filter.args.length > 0 ? filter.args : undefined;
+      const pending = await countPendingDownload(absoluteOutput, undefined, matchArgs);
       const tracker = new DownloadProgressTracker(
         pending?.fileCount ?? 0,
         pending?.totalBytes ?? 0,
@@ -2009,7 +2037,7 @@ Examples:
         jobs: Number.parseInt(options.jobs, 10),
         credentials: s3Creds,
         paths: updatePaths,
-        extraArgs: filter.active ? filter.args : undefined,
+        extraArgs: matchArgs,
         onProgress: (line) => tracker.processLine(line),
       });
 
@@ -3928,6 +3956,8 @@ datasetCommand
   .description("Download annexed data files for the current dataset")
   .argument("[files...]", "Specific files/paths to get (default: all)")
   .option("-j, --jobs <number>", "Parallel download streams", "4")
+  .option("--stimuli", "Include stimuli/ content (skipped by default; can be large)")
+  .option("--derivatives", "Include derivatives/ content (skipped by default; can be large)")
   .addHelpText(
     "after",
     `
@@ -3938,10 +3968,18 @@ Description:
   For private datasets, credentials are fetched automatically
   if you are logged in (nemar auth login).
 
+  By default, content under stimuli/ and derivatives/ is skipped because
+  these folders can be very large. Pass --stimuli or --derivatives to
+  fetch them. When you supply explicit file paths, the path itself is
+  treated as the filter and the default-skip is not applied.
+
 Examples:
-  $ nemar dataset get                    # Get all files
-  $ nemar dataset get sub-01/eeg/        # Get specific directory
-  $ nemar dataset get *.edf -j 8         # Get EDF files with 8 streams`,
+  $ nemar dataset get                       # Get all files (skips stimuli/derivatives)
+  $ nemar dataset get --stimuli             # Get all files including stimuli/
+  $ nemar dataset get --stimuli --derivatives  # Get everything
+  $ nemar dataset get sub-01/eeg/           # Get specific directory
+  $ nemar dataset get stimuli/              # Explicit path: fetches stimuli/
+  $ nemar dataset get *.edf -j 8            # Get EDF files with 8 streams`,
   )
   .action(async (files, options) => {
     const cwd = process.cwd();
@@ -4000,8 +4038,21 @@ Examples:
 
     const paths = files.length > 0 ? files : undefined;
 
+    const filter = chooseGetFilter(paths, {
+      stimuli: options.stimuli,
+      derivatives: options.derivatives,
+    });
+    const matchArgs = filter.args.length > 0 ? filter.args : undefined;
+
+    // Print skip/summary lines first so the user sees them even when the
+    // filtered precount is empty (e.g., a dataset whose only annex content
+    // lives under stimuli/).
+    for (const line of filter.summary) {
+      console.log(chalk.dim(`  ${line}`));
+    }
+
     // Pre-count pending files+bytes scoped to the same paths the get will use.
-    const pending = await countPendingDownload(cwd, paths);
+    const pending = await countPendingDownload(cwd, paths, matchArgs);
 
     if (pending && pending.fileCount === 0) {
       console.log(chalk.green("All data files already present"));
@@ -4022,6 +4073,7 @@ Examples:
       jobs,
       paths,
       credentials: getS3Creds,
+      extraArgs: matchArgs,
       onProgress: (line) => tracker.processLine(line),
     });
     if (!result.success) {

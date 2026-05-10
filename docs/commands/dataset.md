@@ -155,7 +155,9 @@ Arguments:
 Options:
   -o, --output <path>  Output directory (default: ./<dataset-id>)
   -j, --jobs <number>  Parallel download streams (default: 4) (default: "4")
-  --no-data            Download metadata only (skip large data files)
+  --no-data            Download metadata only (skip all data files)
+  --stimuli            Include stimuli/ content (skipped by default)
+  --derivatives        Include derivatives/ content (skipped by default)
   -h, --help           display help for command
 
 Description:
@@ -166,14 +168,20 @@ Description:
   only be downloaded by the owner or designated collaborators.
   After publishing, datasets become publicly available.
 
+  By default, content under stimuli/ and derivatives/ is skipped because
+  these folders can be very large. Pointer files are still cloned, so
+  you can fetch them later with `nemar dataset get --stimuli` or
+  `nemar dataset get --derivatives` from inside the dataset directory.
+
 Requirements:
   - git-annex installed
   - NEMAR account (for private datasets)
 
 Examples:
-  $ nemar dataset download nm000104              # Download to ./nm000104
+  $ nemar dataset download nm000104              # Skips stimuli/ and derivatives/
   $ nemar dataset download nm000104 -o ./data    # Custom output directory
   $ nemar dataset download nm000104 --no-data    # Metadata only (fast)
+  $ nemar dataset download nm000104 --stimuli    # Also fetch stimuli/
   $ nemar dataset download nm000104 -j 8         # More parallel streams
 ```
 
@@ -524,6 +532,8 @@ Arguments:
 
 Options:
   -j, --jobs <number>  Parallel download streams (default: "4")
+  --stimuli            Include stimuli/ content (skipped by default)
+  --derivatives        Include derivatives/ content (skipped by default)
   -h, --help           display help for command
 
 Description:
@@ -533,10 +543,18 @@ Description:
   For private datasets, credentials are fetched automatically
   if you are logged in (nemar auth login).
 
+  By default, content under stimuli/ and derivatives/ is skipped. Pass
+  --stimuli or --derivatives to fetch them. When you supply explicit
+  file paths, the path itself is treated as the filter and the default
+  skip is not applied (so 'nemar dataset get stimuli/' fetches stimuli/).
+
 Examples:
-  $ nemar dataset get                    # Get all files
-  $ nemar dataset get sub-01/eeg/        # Get specific directory
-  $ nemar dataset get *.edf -j 8         # Get EDF files with 8 streams
+  $ nemar dataset get                       # All files (skips stimuli/derivatives)
+  $ nemar dataset get --stimuli             # All files including stimuli/
+  $ nemar dataset get --stimuli --derivatives  # Everything
+  $ nemar dataset get sub-01/eeg/           # Specific directory
+  $ nemar dataset get stimuli/              # Explicit path: fetches stimuli/
+  $ nemar dataset get *.edf -j 8            # EDF files with 8 streams
 ```
 
 ### dataset save
