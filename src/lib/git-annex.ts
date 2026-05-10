@@ -1538,11 +1538,13 @@ export type DownloadProgressCallback = (line: GitAnnexProgressLine) => void;
 export async function countPendingDownload(
   datasetPath: string,
   paths?: string[],
+  extraArgs?: string[],
 ): Promise<{ fileCount: number; totalBytes: number } | null> {
   const targets = paths && paths.length > 0 ? paths : ["."];
+  const matchArgs = extraArgs && extraArgs.length > 0 ? extraArgs : [];
   try {
     const { stdout, stderr, exitCode } = await runCommand(
-      ["git", "annex", "find", "--not", "--in=here", "--json", ...targets],
+      ["git", "annex", "find", "--not", "--in=here", ...matchArgs, "--json", ...targets],
       { cwd: datasetPath },
     );
     if (exitCode !== 0) {
