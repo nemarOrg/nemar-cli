@@ -622,6 +622,9 @@ export interface Dataset {
   source?: string | null;
   /** Original ID at the source (e.g. "ds007315") */
   source_id?: string | null;
+  /** Latest published version DOI tag (e.g. "1.0.0"), or null when no
+      version has been minted yet. Added in v0.8.9; older backends omit it. */
+  latest_version?: string | null;
 }
 
 export interface DatasetsListResponse {
