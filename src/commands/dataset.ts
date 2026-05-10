@@ -4258,13 +4258,9 @@ Examples:
                 spinner.succeed("Granted collaborator access; upload credentials received");
               } catch (retryError) {
                 credPermissionDenied = true;
-                spinner.fail(
-                  `Could not get upload credentials: ${errorDetail(credError)}`,
-                );
+                spinner.fail(`Could not get upload credentials: ${errorDetail(credError)}`);
                 console.log(
-                  chalk.dim(
-                    `  Tried request-access automatically: ${errorDetail(retryError)}`,
-                  ),
+                  chalk.dim(`  Tried request-access automatically: ${errorDetail(retryError)}`),
                 );
                 console.log(
                   chalk.yellow(
@@ -4320,10 +4316,17 @@ Examples:
             // but those new commits haven't reached origin yet — without this
             // step a fresh clone won't know the S3 copies exist.
             const annexPushSpinner = ora("Pushing git-annex branch...").start();
-            const annexPush = await runCommand(["git", "push", "origin", "git-annex"], { cwd });
-            if (annexPush.exitCode !== 0) {
+            const annexPush = spawn({
+              cmd: ["git", "push", "origin", "git-annex"],
+              cwd,
+              stdout: "pipe",
+              stderr: "pipe",
+            });
+            const annexPushStderr = await new Response(annexPush.stderr).text();
+            const annexPushExit = await annexPush.exited;
+            if (annexPushExit !== 0) {
               annexPushSpinner.warn(
-                `Could not push git-annex branch: ${annexPush.stderr.trim() || "unknown error"}`,
+                `Could not push git-annex branch: ${annexPushStderr.trim() || "unknown error"}`,
               );
               console.log(
                 chalk.dim(

@@ -304,15 +304,13 @@ export async function importOpenNeuro(
     // After this point keyUrlMap is the only thing we need from s3-PUBLIC,
     // and `nemar-s3` (created in Step 5) is the canonical write destination.
     for (const inherited of ["s3-PUBLIC", "s3-PRIVATE"]) {
-      const exists = await runCommand(
-        ["git", "config", `remote.${inherited}.annex-uuid`],
-        { cwd: datasetPath },
-      );
+      const exists = await runCommand(["git", "config", `remote.${inherited}.annex-uuid`], {
+        cwd: datasetPath,
+      });
       if (exists.exitCode !== 0 || !exists.stdout.trim()) continue;
-      await runCommand(
-        ["git", "config", `remote.${inherited}.annex-ignore`, "true"],
-        { cwd: datasetPath },
-      );
+      await runCommand(["git", "config", `remote.${inherited}.annex-ignore`, "true"], {
+        cwd: datasetPath,
+      });
     }
   }
 

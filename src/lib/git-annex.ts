@@ -1802,10 +1802,9 @@ export const NEMAR_S3_REMOTE_NAME = "nemar-s3";
  * never select as an upload target (e.g., OpenNeuro's `s3-PUBLIC` after import).
  */
 async function isAnnexIgnoredRemote(datasetPath: string, name: string): Promise<boolean> {
-  const { stdout, exitCode } = await runCommand(
-    ["git", "config", `remote.${name}.annex-ignore`],
-    { cwd: datasetPath },
-  );
+  const { stdout, exitCode } = await runCommand(["git", "config", `remote.${name}.annex-ignore`], {
+    cwd: datasetPath,
+  });
   if (exitCode !== 0) return false;
   return stdout.trim().toLowerCase() === "true";
 }
@@ -1914,16 +1913,17 @@ export async function selectAnnexS3Remote(
 
   // Tiebreaker: pick the remote whose git-annex description equals [nemar-s3].
   // Useful if a future repo renames the git remote but keeps the description.
-  const { stdout: infoJson, exitCode } = await runCommand(
-    ["git", "annex", "info", "--json"],
-    { cwd: datasetPath },
-  );
+  const { stdout: infoJson, exitCode } = await runCommand(["git", "annex", "info", "--json"], {
+    cwd: datasetPath,
+  });
   if (exitCode === 0 && infoJson.trim()) {
     try {
       const info = JSON.parse(infoJson) as Record<string, unknown>;
       const repos = [
         ...(Array.isArray(info["trusted repositories"]) ? info["trusted repositories"] : []),
-        ...(Array.isArray(info["semitrusted repositories"]) ? info["semitrusted repositories"] : []),
+        ...(Array.isArray(info["semitrusted repositories"])
+          ? info["semitrusted repositories"]
+          : []),
         ...(Array.isArray(info["untrusted repositories"]) ? info["untrusted repositories"] : []),
       ];
       for (const repo of repos) {
@@ -1931,10 +1931,9 @@ export async function selectAnnexS3Remote(
         const uuid = typeof repo.uuid === "string" ? repo.uuid : null;
         if (!uuid) continue;
         for (const candidate of remotes) {
-          const { stdout } = await runCommand(
-            ["git", "config", `remote.${candidate}.annex-uuid`],
-            { cwd: datasetPath },
-          );
+          const { stdout } = await runCommand(["git", "config", `remote.${candidate}.annex-uuid`], {
+            cwd: datasetPath,
+          });
           if (stdout.trim() === uuid) return candidate;
         }
       }
