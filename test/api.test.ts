@@ -448,6 +448,24 @@ describe("Datasets API", () => {
       expect(Array.isArray(data.datasets)).toBe(true);
       expect(typeof data.count).toBe("number");
     });
+
+    test("listing entries expose latest_version (null when no minted version)", async () => {
+      // The hallu sync script reads this field to skip the per-dataset
+      // /manifest call. Every entry must include the key, even if null,
+      // so the script can rely on its presence.
+      const { status, data } = await testRequest<{
+        datasets: Array<{ dataset_id: string; latest_version: string | null | undefined }>;
+      }>("/datasets?limit=50");
+
+      expect(status).toBe(200);
+      for (const entry of data.datasets) {
+        // Key must exist on every entry (allow null or string).
+        expect("latest_version" in entry).toBe(true);
+        if (entry.latest_version !== null && entry.latest_version !== undefined) {
+          expect(typeof entry.latest_version).toBe("string");
+        }
+      }
+    });
   });
 
   describe("GET /datasets/:id", () => {
