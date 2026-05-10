@@ -107,6 +107,7 @@ import {
   readRemoteHeadDatasetVersion,
   resolveUpstreamRef,
   saveDataset,
+  selectAnnexS3Remote,
   toS3Credentials,
   verifyGitHubAuth,
 } from "../lib/git-annex.js";
@@ -4215,13 +4216,15 @@ Examples:
     }
 
     // Push annex content to S3 (if enabled and remote exists)
+    let s3PushFailed = false;
     if (options.s3 !== false) {
       const s3Remotes = await getAnnexS3Remotes(cwd);
-      if (s3Remotes.length > 0) {
-        const remoteName = s3Remotes[0];
+      const remoteName = await selectAnnexS3Remote(cwd, s3Remotes);
+      if (remoteName) {
         if (s3Remotes.length > 1) {
+          const others = s3Remotes.filter((r) => r !== remoteName).join(", ");
           console.log(
-            chalk.dim(`  Multiple S3 remotes: ${s3Remotes.join(", ")}. Using: ${remoteName}`),
+            chalk.dim(`  Multiple S3 remotes available; using ${remoteName} (skipped: ${others})`),
           );
         }
         const jobs = Number.parseInt(options.jobs, 10);
@@ -4233,39 +4236,107 @@ Examples:
         // Get STS credentials for S3 upload
         const pushDatasetId = await getDatasetIdFromRemote(cwd);
         let pushCreds: Awaited<ReturnType<typeof requestUploadCredentials>> | null = null;
+        let credPermissionDenied = false;
         if (pushDatasetId && isAuthenticated()) {
           spinner = ora("Requesting upload credentials...").start();
           try {
             pushCreds = await requestUploadCredentials(pushDatasetId);
             spinner.succeed("Upload credentials received");
           } catch (credError) {
-            spinner.warn(
-              `Could not get upload credentials: ${errorDetail(credError)}. Trying environment credentials.`,
-            );
+            // The backend returns 403 when the user is authenticated but is not
+            // a NEMAR collaborator on this dataset. Detect that, auto-call
+            // request-access once, and retry — public datasets auto-approve.
+            const isCollaboratorError =
+              credError instanceof ApiError &&
+              credError.statusCode === 403 &&
+              /collaborator/i.test(credError.message);
+            if (isCollaboratorError) {
+              spinner.text = "Requesting collaborator access...";
+              try {
+                await requestDatasetAccess(pushDatasetId);
+                pushCreds = await requestUploadCredentials(pushDatasetId);
+                spinner.succeed("Granted collaborator access; upload credentials received");
+              } catch (retryError) {
+                credPermissionDenied = true;
+                spinner.fail(
+                  `Could not get upload credentials: ${errorDetail(credError)}`,
+                );
+                console.log(
+                  chalk.dim(
+                    `  Tried request-access automatically: ${errorDetail(retryError)}`,
+                  ),
+                );
+                console.log(
+                  chalk.yellow(
+                    `  Run 'nemar dataset request-access ${pushDatasetId}' and retry this push.`,
+                  ),
+                );
+              }
+            } else {
+              spinner.warn(
+                `Could not get upload credentials: ${errorDetail(credError)}. Falling back to environment credentials.`,
+              );
+            }
           }
         }
 
-        spinner = ora(`Copying data to S3 (${remoteName})...`).start();
+        if (credPermissionDenied) {
+          // Skip the upload attempt; we already explained what to do.
+          s3PushFailed = true;
+        } else {
+          const s3Creds = pushCreds ? toS3Credentials(pushCreds.credentials) : undefined;
 
-        const s3Creds = pushCreds ? toS3Credentials(pushCreds.credentials) : undefined;
-
-        const s3Result = await copyToAnnexRemote(cwd, remoteName, jobs, s3Creds);
-        if (!s3Result.success) {
-          spinner.fail("S3 push failed");
-          console.log(chalk.red(`  ${s3Result.error}`));
           if (!pushCreds) {
-            console.log(chalk.dim("  Ensure AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY are set,"));
-            console.log(
-              chalk.dim("  or log in with 'nemar auth login' for automatic credentials."),
-            );
+            const hasAwsId = Boolean(process.env.AWS_ACCESS_KEY_ID);
+            const hasAwsSecret = Boolean(process.env.AWS_SECRET_ACCESS_KEY);
+            if (!hasAwsId || !hasAwsSecret) {
+              console.log(
+                chalk.yellow(
+                  `  No NEMAR credentials and AWS env vars are missing (AWS_ACCESS_KEY_ID=${
+                    hasAwsId ? "set" : "unset"
+                  }, AWS_SECRET_ACCESS_KEY=${hasAwsSecret ? "set" : "unset"}).`,
+                ),
+              );
+            }
           }
-          console.log(chalk.dim("  Git changes were pushed successfully."));
-          process.exit(1);
+
+          spinner = ora(`Copying data to S3 (${remoteName})...`).start();
+          const s3Result = await copyToAnnexRemote(cwd, remoteName, jobs, s3Creds);
+          if (!s3Result.success) {
+            spinner.fail("S3 push failed");
+            console.log(chalk.red(`  ${s3Result.error}`));
+            console.log(
+              chalk.dim(
+                "  Git changes were pushed successfully; data upload can be retried later with 'nemar dataset push --no-pr'.",
+              ),
+            );
+            s3PushFailed = true;
+          } else {
+            await clearAnnexCredentials(cwd);
+            spinner.succeed(`Copied ${s3Result.filesCopied} file(s) to S3`);
+
+            // Bug C: `git annex copy` writes new location records to the local
+            // git-annex branch. The earlier pushToGitHub already pushed it,
+            // but those new commits haven't reached origin yet — without this
+            // step a fresh clone won't know the S3 copies exist.
+            const annexPushSpinner = ora("Pushing git-annex branch...").start();
+            const annexPush = await runCommand(["git", "push", "origin", "git-annex"], { cwd });
+            if (annexPush.exitCode !== 0) {
+              annexPushSpinner.warn(
+                `Could not push git-annex branch: ${annexPush.stderr.trim() || "unknown error"}`,
+              );
+              console.log(
+                chalk.dim(
+                  "  Run 'git push origin git-annex' manually so other clones can locate the new files.",
+                ),
+              );
+            } else {
+              annexPushSpinner.succeed("Pushed git-annex branch");
+            }
+          }
         }
-        await clearAnnexCredentials(cwd);
-        spinner.succeed(`Copied ${s3Result.filesCopied} file(s) to S3`);
       } else {
-        console.log(chalk.dim("  No S3 remote configured; skipping data push."));
+        console.log(chalk.dim("  No usable S3 remote configured; skipping data push."));
       }
     }
 
