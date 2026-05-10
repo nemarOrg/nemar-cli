@@ -549,6 +549,26 @@ describe("CLI Dataset Download", () => {
     expect(stdout).toContain("--output");
     expect(stdout).toContain("--jobs");
     expect(stdout).toContain("--no-data");
+    expect(stdout).toContain("--stimuli");
+    expect(stdout).toContain("--derivatives");
+  });
+
+  test("nemar dataset get --help advertises --stimuli/--derivatives", async () => {
+    const { stdout, exitCode } = await runCli(["dataset", "get", "--help"]);
+
+    expect(exitCode).toBe(0);
+    expect(stdout).toContain("--stimuli");
+    expect(stdout).toContain("--derivatives");
+  });
+
+  test("nemar dataset --help-all spells out download vs get", async () => {
+    const { stdout, exitCode } = await runCli(["dataset", "--help-all"]);
+
+    expect(exitCode).toBe(0);
+    expect(stdout).toContain("download");
+    expect(stdout).toContain("get");
+    expect(stdout).toContain("OUTSIDE");
+    expect(stdout).toContain("INSIDE");
   });
 
   test("nemar dataset download with non-existent dataset shows error", async () => {
