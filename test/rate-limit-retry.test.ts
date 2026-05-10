@@ -322,6 +322,127 @@ describe("Retry-After takes precedence over delayMs", () => {
   });
 });
 
+describe("Coverage of additional retry paths", () => {
+  test("fetch throw is retried with delayMs and propagates after exhaustion", async () => {
+    // 127.0.0.1:1 is reserved + unused. fetch() will reject on every attempt,
+    // exercising the catch branch.
+    const deadUrl = `http://127.0.0.1:1${PATH}`;
+    let thrown: unknown;
+    try {
+      await githubFetchWithRetry(
+        deadUrl,
+        { method: "GET" },
+        { sleepFn: recordingSleep, delayMs: 333, maxAttempts: 3 },
+      );
+      throw new Error("expected fetch to throw");
+    } catch (err) {
+      thrown = err;
+    }
+    expect(thrown).toBeDefined();
+    // Two retries between three attempts; the catch path uses delayMs.
+    expect(recordedSleeps).toEqual([333, 333]);
+  });
+
+  test("retryOn404 retries 404 with delayMs; without it 404 is terminal", async () => {
+    // First sub-test: retryOn404 true.
+    nextHandler = (_req, idx) =>
+      idx === 0
+        ? new Response("{}", { status: 404, headers: plainHeaders() })
+        : new Response(JSON.stringify({ ok: true }), { status: 200, headers: plainHeaders() });
+
+    const okRes = await githubFetchWithRetry(
+      `${fake.url}${PATH}`,
+      { method: "GET" },
+      { sleepFn: recordingSleep, delayMs: 250, retryOn404: true },
+    );
+    expect(okRes.status).toBe(200);
+    expect(recordedSleeps).toEqual([250]);
+    expect(callIndex).toBe(2);
+
+    // Reset state between sub-tests.
+    recordedSleeps = [];
+    callIndex = 0;
+    fake.reset();
+
+    // Second sub-test: retryOn404 false (default).
+    nextHandler = () => new Response("{}", { status: 404, headers: plainHeaders() });
+
+    const noRetryRes = await githubFetchWithRetry(
+      `${fake.url}${PATH}`,
+      { method: "GET" },
+      { sleepFn: recordingSleep },
+    );
+    expect(noRetryRes.status).toBe(404);
+    expect(recordedSleeps).toEqual([]);
+    expect(callIndex).toBe(1);
+  });
+
+  test("maxAttempts exhausted on a transient response returns the final response", async () => {
+    nextHandler = () =>
+      new Response("{}", { status: 503, headers: plainHeaders() });
+
+    const res = await githubFetchWithRetry(
+      `${fake.url}${PATH}`,
+      { method: "GET" },
+      { sleepFn: recordingSleep, delayMs: 100, maxAttempts: 3 },
+    );
+
+    expect(res.status).toBe(503);
+    expect(res.ok).toBe(false);
+    // Two retries between three attempts.
+    expect(recordedSleeps).toEqual([100, 100]);
+    expect(callIndex).toBe(3);
+  });
+
+  test("5xx with Retry-After honors the header (not delayMs)", async () => {
+    nextHandler = (_req, idx) => {
+      if (idx === 0) {
+        return new Response("{}", {
+          status: 503,
+          headers: plainHeaders({ "Retry-After": "4" }),
+        });
+      }
+      return new Response(JSON.stringify({ ok: true }), { status: 200, headers: plainHeaders() });
+    };
+
+    const res = await githubFetchWithRetry(
+      `${fake.url}${PATH}`,
+      { method: "GET" },
+      { sleepFn: recordingSleep, delayMs: 1 },
+    );
+
+    expect(res.status).toBe(200);
+    expect(recordedSleeps).toEqual([4_000]);
+  });
+
+  test("in-loop Retry-After is capped by maxThrottleMs", async () => {
+    nextHandler = (_req, idx) => {
+      if (idx === 0) {
+        return new Response("{}", {
+          status: 429,
+          headers: plainHeaders({ "Retry-After": "600" }),
+        });
+      }
+      return new Response(JSON.stringify({ ok: true }), { status: 200, headers: plainHeaders() });
+    };
+
+    const res = await githubFetchWithRetry(
+      `${fake.url}${PATH}`,
+      { method: "GET" },
+      { sleepFn: recordingSleep, maxThrottleMs: 5_000 },
+    );
+
+    expect(res.status).toBe(200);
+    expect(recordedSleeps).toEqual([5_000]);
+  });
+
+  // Note: the "403 with unreadable body falls back to secondary" code path
+  // is intentionally hard to exercise via Bun.serve (a server-side body
+  // error materializes as an empty body on the client, not a thrown read).
+  // The fail-safe behavior is implemented and exercised manually; this test
+  // file does not cover it deterministically.
+});
+
 describe("Structured logging", () => {
   test("emits one github-rl JSON line per call with parsed fields", async () => {
     const futureResetEpoch = Math.floor((Date.now() + 7_000) / 1_000);

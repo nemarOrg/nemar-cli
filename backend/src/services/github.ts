@@ -134,9 +134,15 @@ async function defaultSleep(ms: number): Promise<void> {
  * Does NOT retry on other 4xx: those are validation/auth errors that won't
  * change on retry.
  *
+ * On exhausted retries with a still-transient HTTP response, returns the
+ * final response (`response.ok === false`); the caller decides what to do
+ * based on `response.status`. Only thrown errors (network failure or
+ * pre-flight interactive throttle) propagate as exceptions.
+ *
  * Rate-limit behavior:
- *   - Honors `Retry-After` exactly (capped by `maxThrottleMs`). Falls back to
- *     `delayMs` only when the response carried no `Retry-After`.
+ *   - Honors `Retry-After` for the wait between retries, capped by
+ *     `maxThrottleMs`. Falls back to `delayMs` only when the response
+ *     carried no `Retry-After`.
  *   - Inspects `X-RateLimit-Remaining`/`Reset`/`Resource` on every response
  *     and caches the most recent snapshot per bucket. On the next call, if
  *     `remaining < lowRemainingThreshold` and the bucket hasn't reset yet:
@@ -207,19 +213,38 @@ export async function githubFetchWithRetry(
       const response = await fetch(url, init);
 
       const snapshot = parseRateLimitHeaders(response);
-      if (snapshot) rateLimitState.set(snapshot.resource, snapshot);
+      if (snapshot) {
+        // Monotonic write: a delayed older response shouldn't overwrite a
+        // fresher snapshot from a concurrent in-flight request.
+        const existing = rateLimitState.get(snapshot.resource);
+        if (!existing || snapshot.resetEpoch >= existing.resetEpoch) {
+          rateLimitState.set(snapshot.resource, snapshot);
+        }
+      }
 
       const retryAfterMs = parseRetryAfter(response.headers.get("Retry-After"));
 
       let secondary = false;
       if (response.status === 403) {
         let bodySnippet = "";
+        let bodyReadFailed = false;
         try {
           bodySnippet = await response.clone().text();
         } catch {
-          // body unreadable; fall back to a non-secondary classification
+          bodyReadFailed = true;
         }
-        secondary = isSecondaryRateLimit(response.status, bodySnippet);
+        // Fail safe: if we can't read the body on a 403, assume secondary
+        // rate limit and retry. Treating it as a terminal auth 403 here
+        // would burn the secondary cool-down window and surface a
+        // misleading "permission denied" upstream. Retrying is the
+        // cheaper mistake.
+        secondary =
+          bodyReadFailed || isSecondaryRateLimit(response.status, bodySnippet);
+        if (bodyReadFailed) {
+          console.warn(
+            `[github] ${method} ${parsedPath} 403 body unreadable; treating as secondary rate limit (fail-safe)`,
+          );
+        }
       }
 
       emitRateLimitLog({
