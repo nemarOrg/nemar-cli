@@ -21,41 +21,231 @@ const ORG_NAME = "nemarDatasets";
 /** Identity used for all backend-initiated commits and tags on dataset repos. */
 const NEMAR_COMMITTER = { name: "nemarAdmin", email: "nemarAdmin@osc.earth" };
 
+// ============================================================================
+// Rate limit instrumentation
+// ============================================================================
+
+interface RateLimitSnapshot {
+  resource: string;
+  remaining: number;
+  resetEpoch: number;
+  limit?: number;
+}
+
+// Most recent rate-limit snapshot per resource bucket. Workers isolates relearn
+// from the first response after a cold start, which is fine: the cache is a
+// hint, not a correctness constraint.
+const rateLimitState: Map<string, RateLimitSnapshot> = new Map();
+
+export function __resetRateLimitStateForTests(): void {
+  rateLimitState.clear();
+}
+
+export function __seedRateLimitStateForTests(snapshot: RateLimitSnapshot): void {
+  rateLimitState.set(snapshot.resource, snapshot);
+}
+
+function parseRateLimitHeaders(res: Response): RateLimitSnapshot | null {
+  const remainingRaw = res.headers.get("X-RateLimit-Remaining");
+  const resetRaw = res.headers.get("X-RateLimit-Reset");
+  if (remainingRaw === null || resetRaw === null) return null;
+  const remaining = Number.parseInt(remainingRaw, 10);
+  const resetEpoch = Number.parseInt(resetRaw, 10);
+  if (!Number.isFinite(remaining) || !Number.isFinite(resetEpoch)) return null;
+  const resource = res.headers.get("X-RateLimit-Resource") ?? "core";
+  const limitRaw = res.headers.get("X-RateLimit-Limit");
+  const limitParsed = limitRaw === null ? Number.NaN : Number.parseInt(limitRaw, 10);
+  return {
+    resource,
+    remaining,
+    resetEpoch,
+    limit: Number.isFinite(limitParsed) ? limitParsed : undefined,
+  };
+}
+
+function parseRetryAfter(headerValue: string | null): number | null {
+  if (headerValue === null) return null;
+  const trimmed = headerValue.trim();
+  if (trimmed === "") return null;
+  // Integer seconds form. Re-stringify to reject mixed inputs like "10abc".
+  const asInt = Number.parseInt(trimmed, 10);
+  if (Number.isFinite(asInt) && String(asInt) === trimmed) {
+    return Math.max(0, asInt * 1000);
+  }
+  const asDate = Date.parse(trimmed);
+  if (!Number.isNaN(asDate)) {
+    return Math.max(0, asDate - Date.now());
+  }
+  return null;
+}
+
+function isSecondaryRateLimit(status: number, bodySnippet: string): boolean {
+  if (status !== 403) return false;
+  return /secondary rate limit/i.test(bodySnippet);
+}
+
+interface RateLimitLogFields {
+  method: string;
+  path: string;
+  status: number;
+  attempt: number;
+  maxAttempts: number;
+  snapshot: RateLimitSnapshot | null;
+  retryAfterMs: number | null;
+  secondary: boolean;
+}
+
+function emitRateLimitLog(fields: RateLimitLogFields): void {
+  const line: Record<string, unknown> = {
+    tag: "github-rl",
+    method: fields.method,
+    path: fields.path,
+    status: fields.status,
+    attempt: fields.attempt,
+    maxAttempts: fields.maxAttempts,
+  };
+  if (fields.snapshot) {
+    line.resource = fields.snapshot.resource;
+    line.remaining = fields.snapshot.remaining;
+    line.resetEpoch = fields.snapshot.resetEpoch;
+    if (fields.snapshot.limit !== undefined) line.limit = fields.snapshot.limit;
+  }
+  if (fields.retryAfterMs !== null) line.retryAfterMs = fields.retryAfterMs;
+  if (fields.secondary) line.secondary = true;
+  console.log(JSON.stringify(line));
+}
+
+async function defaultSleep(ms: number): Promise<void> {
+  if (ms <= 0) return;
+  await new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 /**
- * Fetch with retry for transient and propagation failures.
+ * Fetch with retry for transient failures, with GitHub rate-limit awareness.
  *
  * Retries on:
  *   - Network/transport errors (fetch throws)
  *   - HTTP 5xx and 429
+ *   - HTTP 403 carrying a "secondary rate limit" body
  *   - HTTP 404 (only when retryOn404=true): GitHub may briefly 404 a freshly
  *     created/changed resource (repo flip, branch/tag write, ruleset endpoint)
  *     while caches catch up. Caller opts in only where 404 is never legitimate.
  *
- * Does NOT retry on 4xx other than 404/429: those are validation/auth errors
- * that won't change on retry.
+ * Does NOT retry on other 4xx: those are validation/auth errors that won't
+ * change on retry.
+ *
+ * Rate-limit behavior:
+ *   - Honors `Retry-After` exactly (capped by `maxThrottleMs`). Falls back to
+ *     `delayMs` only when the response carried no `Retry-After`.
+ *   - Inspects `X-RateLimit-Remaining`/`Reset`/`Resource` on every response
+ *     and caches the most recent snapshot per bucket. On the next call, if
+ *     `remaining < lowRemainingThreshold` and the bucket hasn't reset yet:
+ *       - `kind: "background"` (default): sleep min(timeUntilReset, maxThrottleMs).
+ *       - `kind: "interactive"`: throw HttpError(503) with a clear message.
+ *   - Emits one JSON line per request tagged `"github-rl"` for Cloudflare Logs.
  */
-async function githubFetchWithRetry(
+export async function githubFetchWithRetry(
   url: string,
   init: RequestInit,
-  options?: { maxAttempts?: number; delayMs?: number; retryOn404?: boolean },
+  options?: {
+    maxAttempts?: number;
+    delayMs?: number;
+    retryOn404?: boolean;
+    kind?: "background" | "interactive";
+    lowRemainingThreshold?: number;
+    maxThrottleMs?: number;
+    sleepFn?: (ms: number) => Promise<void>;
+  },
 ): Promise<Response> {
   const maxAttempts = options?.maxAttempts ?? 3;
   const delayMs = options?.delayMs ?? 1_000;
   const retryOn404 = options?.retryOn404 ?? false;
+  const kind = options?.kind ?? "background";
+  const lowRemainingThreshold = options?.lowRemainingThreshold ?? 50;
+  const maxThrottleMs = options?.maxThrottleMs ?? 60_000;
+  const sleep = options?.sleepFn ?? defaultSleep;
+
+  let parsedPath = url;
+  try {
+    parsedPath = new URL(url).pathname;
+  } catch {
+    // keep raw url for log; non-fatal
+  }
+  const method = init.method ?? "GET";
+
+  // Pre-flight throttle on the "core" bucket (the only one we exercise in
+  // bursty workloads). We can't know the target bucket before the first
+  // response, so this is best-effort against a stale snapshot.
+  const cached = rateLimitState.get("core");
+  if (cached && cached.remaining < lowRemainingThreshold) {
+    const msUntilReset = cached.resetEpoch * 1000 - Date.now();
+    if (msUntilReset > 0) {
+      const secondsUntilReset = Math.ceil(msUntilReset / 1000);
+      if (kind === "interactive") {
+        throw new HttpError(
+          `GitHub rate limit nearly exhausted (remaining=${cached.remaining}); retry in ${secondsUntilReset}s`,
+          503,
+        );
+      }
+      const sleepMs = Math.min(msUntilReset, maxThrottleMs);
+      if (sleepMs < msUntilReset) {
+        console.warn(
+          `[github] pre-flight throttle: reset in ${secondsUntilReset}s exceeds cap ${maxThrottleMs}ms; sleeping ${sleepMs}ms then proceeding`,
+        );
+      } else {
+        console.warn(
+          `[github] pre-flight throttle: remaining=${cached.remaining} < ${lowRemainingThreshold}; sleeping ${sleepMs}ms until bucket resets`,
+        );
+      }
+      await sleep(sleepMs);
+    }
+  }
 
   let lastError: unknown;
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     try {
       const response = await fetch(url, init);
-      const isTransient =
+
+      const snapshot = parseRateLimitHeaders(response);
+      if (snapshot) rateLimitState.set(snapshot.resource, snapshot);
+
+      const retryAfterMs = parseRetryAfter(response.headers.get("Retry-After"));
+
+      let secondary = false;
+      if (response.status === 403) {
+        let bodySnippet = "";
+        try {
+          bodySnippet = await response.clone().text();
+        } catch {
+          // body unreadable; fall back to a non-secondary classification
+        }
+        secondary = isSecondaryRateLimit(response.status, bodySnippet);
+      }
+
+      emitRateLimitLog({
+        method,
+        path: parsedPath,
+        status: response.status,
+        attempt,
+        maxAttempts,
+        snapshot,
+        retryAfterMs,
+        secondary,
+      });
+
+      const transient =
         response.status >= 500 ||
         response.status === 429 ||
+        secondary ||
         (retryOn404 && response.status === 404);
-      if (isTransient && attempt < maxAttempts) {
+
+      if (transient && attempt < maxAttempts) {
+        const waitMs =
+          retryAfterMs !== null ? Math.min(retryAfterMs, maxThrottleMs) : delayMs;
         console.warn(
-          `[github] ${init.method || "GET"} ${url} attempt ${attempt} -> HTTP ${response.status}, retrying in ${delayMs}ms`,
+          `[github] ${method} ${parsedPath} attempt ${attempt} -> HTTP ${response.status}${secondary ? " (secondary rate limit)" : ""}, retrying in ${waitMs}ms`,
         );
-        await new Promise((resolve) => setTimeout(resolve, delayMs));
+        await sleep(waitMs);
         continue;
       }
       return response;
@@ -63,9 +253,9 @@ async function githubFetchWithRetry(
       lastError = err;
       if (attempt < maxAttempts) {
         console.warn(
-          `[github] ${init.method || "GET"} ${url} attempt ${attempt} threw (${err instanceof Error ? err.message : String(err)}), retrying in ${delayMs}ms`,
+          `[github] ${method} ${parsedPath} attempt ${attempt} threw (${err instanceof Error ? err.message : String(err)}), retrying in ${delayMs}ms`,
         );
-        await new Promise((resolve) => setTimeout(resolve, delayMs));
+        await sleep(delayMs);
         continue;
       }
       throw err;
