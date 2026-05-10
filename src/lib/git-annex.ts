@@ -1791,12 +1791,34 @@ export async function dropFiles(
 const VALID_REMOTE_NAME = /^[a-zA-Z0-9._-]+$/;
 
 /**
+ * The canonical NEMAR S3 remote name. Created by `configureS3Remote` and
+ * `import-openneuro.ts` for every NEMAR-managed dataset.
+ */
+export const NEMAR_S3_REMOTE_NAME = "nemar-s3";
+
+/**
+ * Returns true when `git config remote.<name>.annex-ignore` is `true`.
+ * `annex-ignore` is set for inherited or read-only S3 remotes that we should
+ * never select as an upload target (e.g., OpenNeuro's `s3-PUBLIC` after import).
+ */
+async function isAnnexIgnoredRemote(datasetPath: string, name: string): Promise<boolean> {
+  const { stdout, exitCode } = await runCommand(
+    ["git", "config", `remote.${name}.annex-ignore`],
+    { cwd: datasetPath },
+  );
+  if (exitCode !== 0) return false;
+  return stdout.trim().toLowerCase() === "true";
+}
+
+/**
  * Get names of S3-type git-annex special remotes configured in a dataset.
  * Uses git config to detect remotes with S3-related configuration.
- * Returns empty array if no S3 remotes found or detection fails.
+ * Skips any remote where `remote.<name>.annex-ignore=true` so inherited or
+ * read-only S3 remotes (e.g., OpenNeuro's `s3-PUBLIC`) are never selected as
+ * an upload target. Returns empty array if no usable S3 remotes are found.
  */
 export async function getAnnexS3Remotes(datasetPath: string): Promise<string[]> {
-  const remotes: string[] = [];
+  const candidates: string[] = [];
 
   // Primary: check git config for S3-configured remotes
   const { stdout: remoteList, exitCode: listCode } = await runCommand(
@@ -1810,59 +1832,118 @@ export async function getAnnexS3Remotes(datasetPath: string): Promise<string[]> 
     for (const line of remoteList.trim().split("\n")) {
       const match = line.match(/^remote\.(.+?)\.annex-/);
       if (match && VALID_REMOTE_NAME.test(match[1])) {
-        remotes.push(match[1]);
+        candidates.push(match[1]);
       }
     }
   }
 
-  if (remotes.length > 0) return [...new Set(remotes)];
-
   // Fallback: parse git-annex info --json for remote descriptions
-  const {
-    stdout: infoJson,
-    exitCode: jsonCode,
-    stderr: infoStderr,
-  } = await runCommand(["git", "annex", "info", "--json"], { cwd: datasetPath });
+  if (candidates.length === 0) {
+    const {
+      stdout: infoJson,
+      exitCode: jsonCode,
+      stderr: infoStderr,
+    } = await runCommand(["git", "annex", "info", "--json"], { cwd: datasetPath });
 
-  if (jsonCode !== 0) {
-    if (infoStderr.trim()) {
-      console.error(`git annex info failed: ${infoStderr.trim()}`);
+    if (jsonCode !== 0) {
+      if (infoStderr.trim()) {
+        console.error(`git annex info failed: ${infoStderr.trim()}`);
+      }
+      return [];
     }
-    return [];
+
+    if (!infoJson.trim()) return [];
+
+    let info: Record<string, unknown>;
+    try {
+      info = JSON.parse(infoJson);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      console.error(`Failed to parse git-annex info JSON: ${msg}`);
+      return [];
+    }
+
+    const repos = [
+      ...(Array.isArray(info["trusted repositories"]) ? info["trusted repositories"] : []),
+      ...(Array.isArray(info["semitrusted repositories"]) ? info["semitrusted repositories"] : []),
+      ...(Array.isArray(info["untrusted repositories"]) ? info["untrusted repositories"] : []),
+    ];
+
+    for (const repo of repos) {
+      if (!repo?.description?.includes("[")) continue;
+      const nameMatch = repo.description.match(/\[(.+?)\]/);
+      if (!nameMatch) continue;
+
+      const name = nameMatch[1];
+      if (!VALID_REMOTE_NAME.test(name)) continue;
+
+      const { stdout: typeOut } = await runCommand(["git", "config", `remote.${name}.annex-s3`], {
+        cwd: datasetPath,
+      });
+      if (typeOut.trim()) candidates.push(name);
+    }
   }
 
-  if (!infoJson.trim()) return [];
+  const unique = [...new Set(candidates)];
+  const usable: string[] = [];
+  for (const name of unique) {
+    if (await isAnnexIgnoredRemote(datasetPath, name)) continue;
+    usable.push(name);
+  }
+  return usable;
+}
 
-  let info: Record<string, unknown>;
-  try {
-    info = JSON.parse(infoJson);
-  } catch (e) {
-    const msg = e instanceof Error ? e.message : String(e);
-    console.error(`Failed to parse git-annex info JSON: ${msg}`);
-    return [];
+/**
+ * Pick the best S3 remote for upload from the candidates returned by
+ * {@link getAnnexS3Remotes}. Prefers the canonical `nemar-s3` remote name,
+ * then any remote whose annex description equals `[nemar-s3]`, then the first
+ * remaining candidate. Returns null if the list is empty.
+ *
+ * This handles datasets imported from OpenNeuro that still have the inherited
+ * `s3-PUBLIC` / `s3-PRIVATE` remotes alongside `nemar-s3` even when those
+ * remotes are not annex-ignored: we always prefer the NEMAR-owned bucket.
+ */
+export async function selectAnnexS3Remote(
+  datasetPath: string,
+  remotes: string[],
+): Promise<string | null> {
+  if (remotes.length === 0) return null;
+  if (remotes.length === 1) return remotes[0];
+
+  if (remotes.includes(NEMAR_S3_REMOTE_NAME)) return NEMAR_S3_REMOTE_NAME;
+
+  // Tiebreaker: pick the remote whose git-annex description equals [nemar-s3].
+  // Useful if a future repo renames the git remote but keeps the description.
+  const { stdout: infoJson, exitCode } = await runCommand(
+    ["git", "annex", "info", "--json"],
+    { cwd: datasetPath },
+  );
+  if (exitCode === 0 && infoJson.trim()) {
+    try {
+      const info = JSON.parse(infoJson) as Record<string, unknown>;
+      const repos = [
+        ...(Array.isArray(info["trusted repositories"]) ? info["trusted repositories"] : []),
+        ...(Array.isArray(info["semitrusted repositories"]) ? info["semitrusted repositories"] : []),
+        ...(Array.isArray(info["untrusted repositories"]) ? info["untrusted repositories"] : []),
+      ];
+      for (const repo of repos) {
+        if (repo?.description !== `[${NEMAR_S3_REMOTE_NAME}]`) continue;
+        const uuid = typeof repo.uuid === "string" ? repo.uuid : null;
+        if (!uuid) continue;
+        for (const candidate of remotes) {
+          const { stdout } = await runCommand(
+            ["git", "config", `remote.${candidate}.annex-uuid`],
+            { cwd: datasetPath },
+          );
+          if (stdout.trim() === uuid) return candidate;
+        }
+      }
+    } catch {
+      // Fall through to first-match below.
+    }
   }
 
-  const repos = [
-    ...(Array.isArray(info["trusted repositories"]) ? info["trusted repositories"] : []),
-    ...(Array.isArray(info["semitrusted repositories"]) ? info["semitrusted repositories"] : []),
-    ...(Array.isArray(info["untrusted repositories"]) ? info["untrusted repositories"] : []),
-  ];
-
-  for (const repo of repos) {
-    if (!repo?.description?.includes("[")) continue;
-    const nameMatch = repo.description.match(/\[(.+?)\]/);
-    if (!nameMatch) continue;
-
-    const name = nameMatch[1];
-    if (!VALID_REMOTE_NAME.test(name)) continue;
-
-    const { stdout: typeOut } = await runCommand(["git", "config", `remote.${name}.annex-s3`], {
-      cwd: datasetPath,
-    });
-    if (typeOut.trim()) remotes.push(name);
-  }
-
-  return [...new Set(remotes)];
+  return remotes[0];
 }
 
 /**

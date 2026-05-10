@@ -18,7 +18,9 @@ import { spawn } from "bun";
 import {
   ANNEX_REMOTE_EXISTS_RE,
   annexRemoteExists,
+  getAnnexS3Remotes,
   initOrEnableSpecialRemote,
+  selectAnnexS3Remote,
 } from "../src/lib/git-annex";
 
 const TMP_DIR = join(import.meta.dir, ".test-annex-remote");
@@ -239,6 +241,65 @@ describe("initOrEnableSpecialRemote (end-to-end fallback)", () => {
     );
     expect(second.success).toBe(true);
     expect(second.error).toBeUndefined();
+  });
+
+  test("getAnnexS3Remotes returns nothing for a fresh annex repo with no special remotes", async () => {
+    const repo = await newAnnexRepo("get-empty");
+    expect(await getAnnexS3Remotes(repo)).toEqual([]);
+  });
+
+  test("getAnnexS3Remotes filters remotes with annex-ignore=true", async () => {
+    // Issue #401 Bug A: OpenNeuro mirrors leave inherited s3-PUBLIC/s3-PRIVATE
+    // remotes. After import we mark them annex-ignore=true; getAnnexS3Remotes
+    // must skip them so push never picks them as the upload destination.
+    const repo = await newAnnexRepo("get-filter-ignored");
+
+    // Fake an "S3 remote" via git config alone — we don't need a real bucket
+    // for this test, just the shape getAnnexS3Remotes inspects.
+    await runCmd(["git", "remote", "add", "nemar-s3", "https://example/nemar-s3"], repo);
+    await runCmd(["git", "config", "remote.nemar-s3.annex-s3", "true"], repo);
+    await runCmd(["git", "config", "remote.nemar-s3.annex-uuid", crypto.randomUUID()], repo);
+
+    await runCmd(["git", "remote", "add", "s3-PUBLIC", "https://example/openneuro"], repo);
+    await runCmd(["git", "config", "remote.s3-PUBLIC.annex-s3", "true"], repo);
+    await runCmd(["git", "config", "remote.s3-PUBLIC.annex-uuid", crypto.randomUUID()], repo);
+    await runCmd(["git", "config", "remote.s3-PUBLIC.annex-ignore", "true"], repo);
+
+    const remotes = await getAnnexS3Remotes(repo);
+    expect(remotes).toEqual(["nemar-s3"]);
+  });
+
+  test("selectAnnexS3Remote prefers nemar-s3 over inherited remotes", async () => {
+    const repo = await newAnnexRepo("select-prefer-nemar");
+
+    // Two non-ignored S3 remotes; getAnnexS3Remotes returns both; the picker
+    // must choose nemar-s3 even when it's not first in iteration order.
+    await runCmd(["git", "remote", "add", "s3-PUBLIC", "https://example/openneuro"], repo);
+    await runCmd(["git", "config", "remote.s3-PUBLIC.annex-s3", "true"], repo);
+    await runCmd(["git", "config", "remote.s3-PUBLIC.annex-uuid", crypto.randomUUID()], repo);
+
+    await runCmd(["git", "remote", "add", "nemar-s3", "https://example/nemar-s3"], repo);
+    await runCmd(["git", "config", "remote.nemar-s3.annex-s3", "true"], repo);
+    await runCmd(["git", "config", "remote.nemar-s3.annex-uuid", crypto.randomUUID()], repo);
+
+    const remotes = await getAnnexS3Remotes(repo);
+    expect(remotes).toContain("nemar-s3");
+    expect(remotes).toContain("s3-PUBLIC");
+    expect(await selectAnnexS3Remote(repo, remotes)).toBe("nemar-s3");
+  });
+
+  test("selectAnnexS3Remote falls back to first match when nemar-s3 is absent", async () => {
+    const repo = await newAnnexRepo("select-fallback");
+    await runCmd(["git", "remote", "add", "custom-s3", "https://example/custom"], repo);
+    await runCmd(["git", "config", "remote.custom-s3.annex-s3", "true"], repo);
+    await runCmd(["git", "config", "remote.custom-s3.annex-uuid", crypto.randomUUID()], repo);
+
+    expect(await selectAnnexS3Remote(repo, ["custom-s3"])).toBe("custom-s3");
+  });
+
+  test("selectAnnexS3Remote returns null on empty input", async () => {
+    const repo = await newAnnexRepo("select-empty");
+    expect(await selectAnnexS3Remote(repo, [])).toBeNull();
   });
 
   test("surfaces the real stderr when initremote fails for unrelated reasons", async () => {

@@ -298,6 +298,22 @@ export async function importOpenNeuro(
     } else {
       whereisSpinner.succeed(`Found ${keyUrlMap.size} annexed files`);
     }
+
+    // Mark inherited OpenNeuro S3 remotes as annex-ignored so subsequent
+    // `nemar dataset push` operations never select them as upload targets.
+    // After this point keyUrlMap is the only thing we need from s3-PUBLIC,
+    // and `nemar-s3` (created in Step 5) is the canonical write destination.
+    for (const inherited of ["s3-PUBLIC", "s3-PRIVATE"]) {
+      const exists = await runCommand(
+        ["git", "config", `remote.${inherited}.annex-uuid`],
+        { cwd: datasetPath },
+      );
+      if (exists.exitCode !== 0 || !exists.stdout.trim()) continue;
+      await runCommand(
+        ["git", "config", `remote.${inherited}.annex-ignore`, "true"],
+        { cwd: datasetPath },
+      );
+    }
   }
 
   // Step 4: Reconfigure git remote to nemarDatasets
