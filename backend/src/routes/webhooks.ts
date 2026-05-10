@@ -29,6 +29,8 @@ import {
 } from "../services/doi.js";
 import { TEST_SHOULDER, extractDoi, updateIdentifier } from "../services/ezid.js";
 import {
+  type TreeFile,
+  commitFilesAsTree,
   createOrUpdateFile,
   downloadReleaseArchive,
   ensureMainBranch,
@@ -1279,24 +1281,14 @@ webhooks.post("/llm-enrich", async (c) => {
     let bidsignoreError: string | undefined;
     let cacheError: string | undefined;
 
-    // Commit .nemar/metadata.json to repo
-    try {
-      await createOrUpdateFile(
-        repoName,
-        ".nemar/metadata.json",
-        metadataContent,
-        `Update NEMAR metadata (pipeline: ${finalMetadata.pipeline_stage})`,
-        pat,
-      );
-    } catch (err) {
-      commitError = errorMessage(err);
-      console.error(`[llm-enrich] Failed to commit metadata for ${dataset_id}:`, err);
-    }
-
-    // Ensure .bidsignore includes .nemar/
+    // Decide whether .bidsignore needs to change up front. When both metadata
+    // and .bidsignore are dirty, commit them atomically in one tree-batched
+    // call (4 REST calls total). When only metadata is dirty, fall back to the
+    // single-file Contents API path (2 calls). See issue #407.
+    let bidsignoreDirty = false;
+    let bidsignoreContent = "";
     try {
       const bidsignoreFile = tree.find((f) => f.path === ".bidsignore");
-      let bidsignoreContent = "";
       if (bidsignoreFile) {
         bidsignoreContent = await getBlobContent(repoName, bidsignoreFile.sha, pat);
       }
@@ -1304,17 +1296,52 @@ webhooks.post("/llm-enrich", async (c) => {
         bidsignoreContent = bidsignoreContent
           ? `${bidsignoreContent.trimEnd()}\n.nemar/\n`
           : ".nemar/\n";
-        await createOrUpdateFile(
-          repoName,
-          ".bidsignore",
-          bidsignoreContent,
-          "Add .nemar/ to .bidsignore",
-          pat,
-        );
+        bidsignoreDirty = true;
       }
     } catch (err) {
+      // Reading the existing .bidsignore failed; record it as a bidsignore
+      // error and fall through to commit metadata alone.
       bidsignoreError = errorMessage(err);
-      console.error(`[llm-enrich] Failed to update .bidsignore for ${dataset_id}:`, err);
+      console.error(`[llm-enrich] Failed to read .bidsignore for ${dataset_id}:`, err);
+    }
+
+    if (bidsignoreDirty) {
+      const files: TreeFile[] = [
+        { path: ".nemar/metadata.json", content: metadataContent },
+        { path: ".bidsignore", content: bidsignoreContent },
+      ];
+      try {
+        await commitFilesAsTree(
+          repoName,
+          "main",
+          files,
+          `Update NEMAR metadata (pipeline: ${finalMetadata.pipeline_stage})`,
+          pat,
+        );
+      } catch (err) {
+        // A failed batched commit affects both files; report it on both fields
+        // so existing API consumers still see the partial-success signals.
+        const msg = errorMessage(err);
+        commitError = msg;
+        bidsignoreError = msg;
+        console.error(
+          `[llm-enrich] Failed batched metadata+bidsignore commit for ${dataset_id}:`,
+          err,
+        );
+      }
+    } else {
+      try {
+        await createOrUpdateFile(
+          repoName,
+          ".nemar/metadata.json",
+          metadataContent,
+          `Update NEMAR metadata (pipeline: ${finalMetadata.pipeline_stage})`,
+          pat,
+        );
+      } catch (err) {
+        commitError = errorMessage(err);
+        console.error(`[llm-enrich] Failed to commit metadata for ${dataset_id}:`, err);
+      }
     }
 
     // Cache in D1

@@ -7,7 +7,15 @@
 
 import { HttpError } from "./retry";
 
-const GITHUB_API = "https://api.github.com";
+// NEMAR_GITHUB_API_URL is a test-only override that points at a local
+// Bun.serve fake. Read at call time (not module init) so test helpers can
+// install the override after the module has loaded. Stored on globalThis to
+// avoid depending on Node's `process` type (the backend tsconfig only ships
+// @cloudflare/workers-types). Unset in production -> identical to before.
+function GITHUB_API(): string {
+  const override = (globalThis as { NEMAR_GITHUB_API_URL?: string }).NEMAR_GITHUB_API_URL;
+  return override ?? "https://api.github.com";
+}
 // Dataset repos (nm000XXX) live in nemarDatasets org; tooling repos live in nemarOrg
 const ORG_NAME = "nemarDatasets";
 
@@ -89,7 +97,7 @@ export async function validateGitHubUsername(
   username: string,
   pat: string,
 ): Promise<GitHubUser | null> {
-  const response = await fetch(`${GITHUB_API}/users/${username}`, {
+  const response = await fetch(`${GITHUB_API()}/users/${username}`, {
     headers: {
       Authorization: `Bearer ${pat}`,
       Accept: "application/vnd.github.v3+json",
@@ -112,13 +120,16 @@ export async function listOrgRepos(pat: string): Promise<GitHubRepo[]> {
   let page = 1;
 
   while (true) {
-    const response = await fetch(`${GITHUB_API}/orgs/${ORG_NAME}/repos?per_page=100&page=${page}`, {
-      headers: {
-        Authorization: `Bearer ${pat}`,
-        Accept: "application/vnd.github.v3+json",
-        "User-Agent": "NEMAR-API",
+    const response = await fetch(
+      `${GITHUB_API()}/orgs/${ORG_NAME}/repos?per_page=100&page=${page}`,
+      {
+        headers: {
+          Authorization: `Bearer ${pat}`,
+          Accept: "application/vnd.github.v3+json",
+          "User-Agent": "NEMAR-API",
+        },
       },
-    });
+    );
 
     if (!response.ok) {
       throw new Error(`Failed to list repos: ${response.status}`);
@@ -144,7 +155,7 @@ export async function addCollaborator(
   pat: string,
 ): Promise<boolean> {
   const response = await fetch(
-    `${GITHUB_API}/repos/${ORG_NAME}/${repo}/collaborators/${username}`,
+    `${GITHUB_API()}/repos/${ORG_NAME}/${repo}/collaborators/${username}`,
     {
       method: "PUT",
       headers: {
@@ -169,7 +180,7 @@ export async function removeCollaborator(
   pat: string,
 ): Promise<boolean> {
   const response = await fetch(
-    `${GITHUB_API}/repos/${ORG_NAME}/${repo}/collaborators/${username}`,
+    `${GITHUB_API()}/repos/${ORG_NAME}/${repo}/collaborators/${username}`,
     {
       method: "DELETE",
       headers: {
@@ -241,7 +252,7 @@ export async function createRepository(
   isPrivate: boolean,
   pat: string,
 ): Promise<GitHubRepo> {
-  const response = await fetch(`${GITHUB_API}/orgs/${ORG_NAME}/repos`, {
+  const response = await fetch(`${GITHUB_API()}/orgs/${ORG_NAME}/repos`, {
     method: "POST",
     headers: {
       Authorization: `Bearer ${pat}`,
@@ -278,7 +289,7 @@ export async function deleteRepository(repo: string, pat: string): Promise<boole
     throw new Error(`Invalid repository name: "${repo}"`);
   }
 
-  const response = await fetch(`${GITHUB_API}/repos/${ORG_NAME}/${repo}`, {
+  const response = await fetch(`${GITHUB_API()}/repos/${ORG_NAME}/${repo}`, {
     method: "DELETE",
     headers: {
       Authorization: `Bearer ${pat}`,
@@ -309,7 +320,7 @@ export async function ensureMainBranch(
   repo: string,
   pat: string,
 ): Promise<{ renamed: boolean; previousBranch?: string }> {
-  const repoResponse = await fetch(`${GITHUB_API}/repos/${ORG_NAME}/${repo}`, {
+  const repoResponse = await fetch(`${GITHUB_API()}/repos/${ORG_NAME}/${repo}`, {
     headers: {
       Authorization: `Bearer ${pat}`,
       Accept: "application/vnd.github.v3+json",
@@ -332,7 +343,7 @@ export async function ensureMainBranch(
   console.log(`Renaming default branch "${defaultBranch}" to "main" for ${repo}`);
 
   const renameResponse = await fetch(
-    `${GITHUB_API}/repos/${ORG_NAME}/${repo}/branches/${encodeURIComponent(defaultBranch)}/rename`,
+    `${GITHUB_API()}/repos/${ORG_NAME}/${repo}/branches/${encodeURIComponent(defaultBranch)}/rename`,
     {
       method: "POST",
       headers: {
@@ -365,29 +376,32 @@ export async function ensureMainBranch(
  * - No force pushes or deletions
  */
 export async function applyBranchProtection(repo: string, pat: string): Promise<boolean> {
-  const response = await fetch(`${GITHUB_API}/repos/${ORG_NAME}/${repo}/branches/main/protection`, {
-    method: "PUT",
-    headers: {
-      Authorization: `Bearer ${pat}`,
-      Accept: "application/vnd.github.v3+json",
-      "User-Agent": "NEMAR-API",
-      "Content-Type": "application/json",
+  const response = await fetch(
+    `${GITHUB_API()}/repos/${ORG_NAME}/${repo}/branches/main/protection`,
+    {
+      method: "PUT",
+      headers: {
+        Authorization: `Bearer ${pat}`,
+        Accept: "application/vnd.github.v3+json",
+        "User-Agent": "NEMAR-API",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        required_pull_request_reviews: {
+          required_approving_review_count: 0, // Owner can self-merge
+          dismiss_stale_reviews: true,
+        },
+        enforce_admins: false, // Admins can bypass if needed
+        required_status_checks: {
+          strict: true,
+          contexts: ["bids-validation", "version-check"],
+        },
+        restrictions: null,
+        allow_force_pushes: false,
+        allow_deletions: false,
+      }),
     },
-    body: JSON.stringify({
-      required_pull_request_reviews: {
-        required_approving_review_count: 0, // Owner can self-merge
-        dismiss_stale_reviews: true,
-      },
-      enforce_admins: false, // Admins can bypass if needed
-      required_status_checks: {
-        strict: true,
-        contexts: ["bids-validation", "version-check"],
-      },
-      restrictions: null,
-      allow_force_pushes: false,
-      allow_deletions: false,
-    }),
-  });
+  );
 
   return response.ok;
 }
@@ -396,7 +410,7 @@ export async function applyBranchProtection(repo: string, pat: string): Promise<
  * Enable auto-merge for a repository
  */
 export async function enableAutoMerge(repo: string, pat: string): Promise<boolean> {
-  const response = await fetch(`${GITHUB_API}/repos/${ORG_NAME}/${repo}`, {
+  const response = await fetch(`${GITHUB_API()}/repos/${ORG_NAME}/${repo}`, {
     method: "PATCH",
     headers: {
       Authorization: `Bearer ${pat}`,
@@ -426,7 +440,7 @@ export async function createOrUpdateFile(
   let sha: string | undefined;
   let getResponse: Response;
   try {
-    getResponse = await fetch(`${GITHUB_API}/repos/${ORG_NAME}/${repo}/contents/${path}`, {
+    getResponse = await fetch(`${GITHUB_API()}/repos/${ORG_NAME}/${repo}/contents/${path}`, {
       headers: {
         Authorization: `Bearer ${pat}`,
         Accept: "application/vnd.github.v3+json",
@@ -450,7 +464,7 @@ export async function createOrUpdateFile(
   // Create or update the file
   let response: Response;
   try {
-    response = await fetch(`${GITHUB_API}/repos/${ORG_NAME}/${repo}/contents/${path}`, {
+    response = await fetch(`${GITHUB_API()}/repos/${ORG_NAME}/${repo}/contents/${path}`, {
       method: "PUT",
       headers: {
         Authorization: `Bearer ${pat}`,
@@ -490,7 +504,7 @@ export async function deleteRepoFile(
   message: string,
   pat: string,
 ): Promise<void> {
-  const response = await fetch(`${GITHUB_API}/repos/${ORG_NAME}/${repo}/contents/${path}`, {
+  const response = await fetch(`${GITHUB_API()}/repos/${ORG_NAME}/${repo}/contents/${path}`, {
     method: "DELETE",
     headers: {
       Authorization: `Bearer ${pat}`,
@@ -523,7 +537,7 @@ export async function setRepoVisibility(
 ): Promise<{ ok: boolean; status: number; error?: string }> {
   let response: Response;
   try {
-    response = await fetch(`${GITHUB_API}/repos/${ORG_NAME}/${repo}`, {
+    response = await fetch(`${GITHUB_API()}/repos/${ORG_NAME}/${repo}`, {
       method: "PATCH",
       headers: {
         Authorization: `Bearer ${pat}`,
@@ -555,7 +569,7 @@ export async function setRepoDescription(
   try {
     const payload: { description: string; homepage?: string } = { description };
     if (homepage !== undefined) payload.homepage = homepage;
-    response = await fetch(`${GITHUB_API}/repos/${ORG_NAME}/${repo}`, {
+    response = await fetch(`${GITHUB_API()}/repos/${ORG_NAME}/${repo}`, {
       method: "PATCH",
       headers: {
         Authorization: `Bearer ${pat}`,
@@ -596,7 +610,7 @@ export async function checkWorkflowExists(
 ): Promise<boolean> {
   let response: Response;
   try {
-    response = await fetch(`${GITHUB_API}/repos/${ORG_NAME}/${repo}/contents/${workflowPath}`, {
+    response = await fetch(`${GITHUB_API()}/repos/${ORG_NAME}/${repo}/contents/${workflowPath}`, {
       headers: {
         Authorization: `Bearer ${pat}`,
         Accept: "application/vnd.github.v3+json",
@@ -625,7 +639,7 @@ export async function getWorkflowRuns(
   let response: Response;
   try {
     response = await fetch(
-      `${GITHUB_API}/repos/${ORG_NAME}/${repo}/actions/workflows/${workflowFile}/runs?per_page=5`,
+      `${GITHUB_API()}/repos/${ORG_NAME}/${repo}/actions/workflows/${workflowFile}/runs?per_page=5`,
       {
         headers: {
           Authorization: `Bearer ${pat}`,
@@ -1229,26 +1243,20 @@ export async function deployWorkflows(
   repo: string,
   pat: string,
 ): Promise<{ success: boolean; errors: string[]; deployed: string[] }> {
-  const errors: string[] = [];
-  const deployed: string[] = [];
   const workflows = getWorkflowTemplates();
+  const files: TreeFile[] = workflows.map((w) => ({ path: w.path, content: w.content }));
+  const deployedNames = workflows.map((w) => w.path.split("/").pop()!);
 
-  for (const workflow of workflows) {
-    try {
-      await createOrUpdateFile(
-        repo,
-        workflow.path,
-        workflow.content,
-        `Add ${workflow.path.split("/").pop()} workflow`,
-        pat,
-      );
-      deployed.push(workflow.path.split("/").pop()!);
-    } catch (err) {
-      errors.push(`${workflow.path}: ${err instanceof Error ? err.message : String(err)}`);
-    }
+  try {
+    await commitFilesAsTree(repo, "main", files, "Add CI workflows", pat);
+    return { success: true, errors: [], deployed: deployedNames };
+  } catch (err) {
+    return {
+      success: false,
+      errors: [err instanceof Error ? err.message : String(err)],
+      deployed: [],
+    };
   }
-
-  return { success: errors.length === 0, errors, deployed };
 }
 
 /**
@@ -1264,7 +1272,7 @@ export async function triggerArchiveGeneration(
   pat: string,
   options?: { public?: boolean },
 ): Promise<void> {
-  const response = await fetch(`${GITHUB_API}/repos/${ORG_NAME}/${repo}/dispatches`, {
+  const response = await fetch(`${GITHUB_API()}/repos/${ORG_NAME}/${repo}/dispatches`, {
     method: "POST",
     headers: {
       Authorization: `Bearer ${pat}`,
@@ -1309,7 +1317,7 @@ export async function getTreeAtRef(repo: string, ref: string, pat: string): Prom
   // ref they just created (a tag we wrote, "main" right after a merge) will
   // see GitHub briefly 404 the new ref while caches catch up; we retry those.
   const refResponse = await githubFetchWithRetry(
-    `${GITHUB_API}/repos/${ORG_NAME}/${repo}/commits/${ref}`,
+    `${GITHUB_API()}/repos/${ORG_NAME}/${repo}/commits/${ref}`,
     {
       headers: {
         Authorization: `Bearer ${pat}`,
@@ -1332,7 +1340,7 @@ export async function getTreeAtRef(repo: string, ref: string, pat: string): Prom
 
   // Get the tree recursively
   const treeResponse = await githubFetchWithRetry(
-    `${GITHUB_API}/repos/${ORG_NAME}/${repo}/git/trees/${treeSha}?recursive=1`,
+    `${GITHUB_API()}/repos/${ORG_NAME}/${repo}/git/trees/${treeSha}?recursive=1`,
     {
       headers: {
         Authorization: `Bearer ${pat}`,
@@ -1362,7 +1370,7 @@ export async function getBlobContent(repo: string, blobSha: string, pat: string)
   // retryOn404: blob SHA came from a tree we just resolved, so 404 indicates
   // propagation lag, not a missing object.
   const response = await githubFetchWithRetry(
-    `${GITHUB_API}/repos/${ORG_NAME}/${repo}/git/blobs/${blobSha}`,
+    `${GITHUB_API()}/repos/${ORG_NAME}/${repo}/git/blobs/${blobSha}`,
     {
       headers: {
         Authorization: `Bearer ${pat}`,
@@ -1401,7 +1409,7 @@ export async function getFileContent(
 ): Promise<string | null> {
   // No retryOn404 here: 404 is a valid "file not present" signal returned as null.
   const response = await githubFetchWithRetry(
-    `${GITHUB_API}/repos/${ORG_NAME}/${repo}/contents/${filePath}?ref=${ref}`,
+    `${GITHUB_API()}/repos/${ORG_NAME}/${repo}/contents/${filePath}?ref=${ref}`,
     {
       headers: {
         Authorization: `Bearer ${pat}`,
@@ -1451,7 +1459,7 @@ export async function applyTagProtection(repo: string, pat: string): Promise<voi
   // retryOn404: rulesets endpoint can briefly 404 right after a repo
   // visibility flip while GitHub propagates ACLs.
   const response = await githubFetchWithRetry(
-    `${GITHUB_API}/repos/${ORG_NAME}/${repo}/rulesets`,
+    `${GITHUB_API()}/repos/${ORG_NAME}/${repo}/rulesets`,
     {
       method: "POST",
       headers: {
@@ -1501,7 +1509,7 @@ export async function getMainBranchSha(repo: string, branch: string, pat: string
   // retryOn404: caller knows the branch exists (e.g., we just committed to it),
   // so 404 indicates GitHub hasn't propagated the ref yet.
   const response = await githubFetchWithRetry(
-    `${GITHUB_API}/repos/${ORG_NAME}/${repo}/git/ref/heads/${branch}`,
+    `${GITHUB_API()}/repos/${ORG_NAME}/${repo}/git/ref/heads/${branch}`,
     {
       headers: {
         Authorization: `Bearer ${pat}`,
@@ -1529,6 +1537,165 @@ export async function getMainBranchSha(repo: string, branch: string, pat: string
 }
 
 /**
+ * A file to include in a tree-batched commit.
+ *
+ * Content is passed as UTF-8 text directly; GitHub's tree API accepts a
+ * `content` field on blob entries and encodes server-side.
+ */
+export interface TreeFile {
+  path: string;
+  content: string;
+  mode?: "100644" | "100755" | "120000";
+}
+
+/**
+ * Commit one or more files to a branch in a single Git Data API transaction.
+ *
+ * Cost: 4 REST calls regardless of how many files are written. Compare to
+ * `createOrUpdateFile()` which costs 2 calls per file. Crossover is N=2 (tie);
+ * for N >= 3 the tree-batched path strictly wins. For N=1, prefer
+ * `createOrUpdateFile()` — see issue #407 for the crossover analysis.
+ *
+ * Concurrency: if another writer advances the branch between steps, the final
+ * ref PATCH returns 422 and we retry up to 3 times, refetching the base on
+ * each attempt. This matches the standard Git Data API safe-commit pattern.
+ *
+ * @returns SHA of the new commit. For an empty `files` array, returns the
+ *   current branch head SHA without making any write calls.
+ */
+export async function commitFilesAsTree(
+  repo: string,
+  branch: string,
+  files: TreeFile[],
+  message: string,
+  pat: string,
+): Promise<string> {
+  const authHeaders = {
+    Authorization: `Bearer ${pat}`,
+    Accept: "application/vnd.github.v3+json",
+    "User-Agent": "NEMAR-API",
+  };
+  const jsonHeaders = { ...authHeaders, "Content-Type": "application/json" };
+
+  if (files.length === 0) {
+    // No-op: return current branch SHA without writing.
+    return getMainBranchSha(repo, branch, pat);
+  }
+
+  const maxAttempts = 3;
+  let lastError: unknown;
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    // Step 1: resolve branch head -> { commitSha, treeSha } in one call.
+    const branchResp = await githubFetchWithRetry(
+      `${GITHUB_API()}/repos/${ORG_NAME}/${repo}/branches/${branch}`,
+      { headers: authHeaders },
+      { retryOn404: true },
+    );
+    if (!branchResp.ok) {
+      const body = await branchResp.text().catch(() => "");
+      throw new HttpError(
+        `Failed to resolve branch '${branch}': HTTP ${branchResp.status}: ${body.slice(0, 300)}`,
+        branchResp.status,
+        body.slice(0, 300),
+      );
+    }
+    const branchData = (await branchResp.json()) as {
+      commit: { sha: string; commit: { tree: { sha: string } } };
+    };
+    const baseCommitSha = branchData.commit.sha;
+    const baseTreeSha = branchData.commit.commit.tree.sha;
+
+    // Step 2: create a new tree on top of the base.
+    const treeResp = await githubFetchWithRetry(
+      `${GITHUB_API()}/repos/${ORG_NAME}/${repo}/git/trees`,
+      {
+        method: "POST",
+        headers: jsonHeaders,
+        body: JSON.stringify({
+          base_tree: baseTreeSha,
+          tree: files.map((f) => ({
+            path: f.path,
+            mode: f.mode ?? "100644",
+            type: "blob",
+            content: f.content,
+          })),
+        }),
+      },
+    );
+    if (!treeResp.ok) {
+      const body = await treeResp.text().catch(() => "");
+      throw new HttpError(
+        `Failed to create tree on ${repo}@${branch}: HTTP ${treeResp.status}: ${body.slice(0, 300)}`,
+        treeResp.status,
+        body.slice(0, 300),
+      );
+    }
+    const { sha: newTreeSha } = (await treeResp.json()) as { sha: string };
+
+    // Step 3: create a commit pointing at the new tree.
+    const isoDate = new Date().toISOString();
+    const commitResp = await githubFetchWithRetry(
+      `${GITHUB_API()}/repos/${ORG_NAME}/${repo}/git/commits`,
+      {
+        method: "POST",
+        headers: jsonHeaders,
+        body: JSON.stringify({
+          message,
+          tree: newTreeSha,
+          parents: [baseCommitSha],
+          author: { ...NEMAR_COMMITTER, date: isoDate },
+          committer: { ...NEMAR_COMMITTER, date: isoDate },
+        }),
+      },
+    );
+    if (!commitResp.ok) {
+      const body = await commitResp.text().catch(() => "");
+      throw new HttpError(
+        `Failed to create commit on ${repo}@${branch}: HTTP ${commitResp.status}: ${body.slice(0, 300)}`,
+        commitResp.status,
+        body.slice(0, 300),
+      );
+    }
+    const { sha: newCommitSha } = (await commitResp.json()) as { sha: string };
+
+    // Step 4: fast-forward the branch ref to the new commit.
+    const refResp = await githubFetchWithRetry(
+      `${GITHUB_API()}/repos/${ORG_NAME}/${repo}/git/refs/heads/${branch}`,
+      {
+        method: "PATCH",
+        headers: jsonHeaders,
+        body: JSON.stringify({ sha: newCommitSha }),
+      },
+    );
+    if (refResp.ok) return newCommitSha;
+
+    // 422 here means the branch advanced between steps 1 and 4. Refetch and retry.
+    if (refResp.status === 422 && attempt < maxAttempts) {
+      const body = await refResp.text().catch(() => "");
+      console.warn(
+        `[github] commitFilesAsTree ref-update conflict on ${repo}@${branch} (attempt ${attempt}/${maxAttempts}): ${body.slice(0, 200)}`,
+      );
+      lastError = new HttpError(
+        `ref update conflict: ${body.slice(0, 300)}`,
+        refResp.status,
+        body.slice(0, 300),
+      );
+      continue;
+    }
+
+    const body = await refResp.text().catch(() => "");
+    throw new HttpError(
+      `Failed to update ref ${branch} on ${repo}: HTTP ${refResp.status}: ${body.slice(0, 300)}`,
+      refResp.status,
+      body.slice(0, 300),
+    );
+  }
+
+  throw lastError ?? new Error(`commitFilesAsTree: exhausted ${maxAttempts} attempts`);
+}
+
+/**
  * Create a git tag on a repository.
  *
  * @param repo Repository name (e.g., "nm000123")
@@ -1547,7 +1714,7 @@ export async function createTag(
   pat: string,
 ): Promise<string> {
   // First, create an annotated tag object
-  const tagResponse = await fetch(`${GITHUB_API}/repos/${ORG_NAME}/${repo}/git/tags`, {
+  const tagResponse = await fetch(`${GITHUB_API()}/repos/${ORG_NAME}/${repo}/git/tags`, {
     method: "POST",
     headers: {
       Authorization: `Bearer ${pat}`,
@@ -1572,7 +1739,7 @@ export async function createTag(
   const tagData = (await tagResponse.json()) as { sha: string };
 
   // Then, create a reference to the tag
-  const refResponse = await fetch(`${GITHUB_API}/repos/${ORG_NAME}/${repo}/git/refs`, {
+  const refResponse = await fetch(`${GITHUB_API()}/repos/${ORG_NAME}/${repo}/git/refs`, {
     method: "POST",
     headers: {
       Authorization: `Bearer ${pat}`,
@@ -1616,7 +1783,7 @@ export async function createRelease(
   body: string,
   pat: string,
 ): Promise<number> {
-  const response = await fetch(`${GITHUB_API}/repos/${ORG_NAME}/${repo}/releases`, {
+  const response = await fetch(`${GITHUB_API()}/repos/${ORG_NAME}/${repo}/releases`, {
     method: "POST",
     headers: {
       Authorization: `Bearer ${pat}`,
@@ -1636,13 +1803,16 @@ export async function createRelease(
   if (!response.ok) {
     // 422 means release already exists for this tag; fetch the existing one
     if (response.status === 422) {
-      const existing = await fetch(`${GITHUB_API}/repos/${ORG_NAME}/${repo}/releases/tags/${tag}`, {
-        headers: {
-          Authorization: `Bearer ${pat}`,
-          Accept: "application/vnd.github.v3+json",
-          "User-Agent": "NEMAR-API",
+      const existing = await fetch(
+        `${GITHUB_API()}/repos/${ORG_NAME}/${repo}/releases/tags/${tag}`,
+        {
+          headers: {
+            Authorization: `Bearer ${pat}`,
+            Accept: "application/vnd.github.v3+json",
+            "User-Agent": "NEMAR-API",
+          },
         },
-      });
+      );
       if (existing.ok) {
         const existingData = (await existing.json()) as { id: number };
         return existingData.id;
@@ -1671,7 +1841,7 @@ export async function downloadReleaseArchive(
   ref: string,
   pat: string,
 ): Promise<ArrayBuffer> {
-  const response = await fetch(`${GITHUB_API}/repos/${ORG_NAME}/${repo}/zipball/${ref}`, {
+  const response = await fetch(`${GITHUB_API()}/repos/${ORG_NAME}/${repo}/zipball/${ref}`, {
     method: "GET",
     headers: {
       Authorization: `Bearer ${pat}`,

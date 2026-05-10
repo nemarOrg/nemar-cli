@@ -50,8 +50,10 @@ import {
 } from "../services/ezid";
 import {
   type GitHubRepo,
+  type TreeFile,
   addCollaborator,
   checkWorkflowExists,
+  commitFilesAsTree,
   createOrUpdateFile,
   createRelease,
   createRepository,
@@ -1851,16 +1853,9 @@ adminRoutes.post("/datasets/:id/enrichment", zValidator("json", enrichmentSchema
   const metadataPath = isV2 ? ".nemar/metadata.json" : "nemar_metadata.json";
 
   try {
-    // Commit metadata to the repo (v2 uses .nemar/metadata.json, v1 uses nemar_metadata.json)
-    await createOrUpdateFile(
-      repoName,
-      metadataPath,
-      metadataContent,
-      "Update NEMAR metadata enrichment",
-      pat,
-    );
-
-    // Ensure .bidsignore includes the metadata path
+    // Compute whether .bidsignore needs to change before any writes, so we can
+    // batch metadata + .bidsignore into a single commit when both are dirty
+    // (see issue #407: tree-batched commits cap REST cost at 4 calls for any N).
     const tree = await getTreeAtRef(repoName, "main", pat);
     const bidsignoreFile = tree.find((f) => f.path === ".bidsignore");
     let bidsignoreContent = "";
@@ -1877,12 +1872,19 @@ adminRoutes.post("/datasets/:id/enrichment", zValidator("json", enrichmentSchema
         bidsignoreUpdated = true;
       }
     }
+
     if (bidsignoreUpdated) {
+      const files: TreeFile[] = [
+        { path: metadataPath, content: metadataContent },
+        { path: ".bidsignore", content: bidsignoreContent },
+      ];
+      await commitFilesAsTree(repoName, "main", files, "Update NEMAR metadata enrichment", pat);
+    } else {
       await createOrUpdateFile(
         repoName,
-        ".bidsignore",
-        bidsignoreContent,
-        "Update .bidsignore for metadata",
+        metadataPath,
+        metadataContent,
+        "Update NEMAR metadata enrichment",
         pat,
       );
     }
