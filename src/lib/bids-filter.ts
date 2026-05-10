@@ -29,16 +29,35 @@ export interface BidsFilterOptions {
   include?: string;
   /** Comma-separated raw glob patterns to exclude (pass-through). */
   exclude?: string;
+  /**
+   * When true, append excludes for `stimuli/**` and `**\/stimuli/**` so large
+   * stimulus files are skipped. Pointer files are still cloned by git, so
+   * users can fetch later. Default false (no extra excludes).
+   */
+  excludeStimuli?: boolean;
+  /**
+   * When true, append excludes for `derivatives/**` and `**\/derivatives/**`
+   * so processed outputs are skipped. Default false (no extra excludes).
+   */
+  excludeDerivatives?: boolean;
 }
 
 export interface BidsFilterResult {
   /** git-annex matching args to insert before path arguments. */
   args: string[];
-  /** True if any filter was specified. */
+  /**
+   * True if the user specified a positive filter (subjects/tasks/include/etc.)
+   * or a user-provided --exclude. Default stimuli/derivatives excludes do NOT
+   * set this; callers use it to detect conflicts with --no-data.
+   */
   active: boolean;
   /** Human-readable summary lines for the download plan. */
   summary: string[];
 }
+
+/** Glob patterns matched against git-annex paths (relative to dataset root). */
+const STIMULI_EXCLUDE_PATTERNS = ["stimuli/**", "**/stimuli/**"];
+const DERIVATIVES_EXCLUDE_PATTERNS = ["derivatives/**", "**/derivatives/**"];
 
 /**
  * Strip a known prefix from an entity value if present, then re-add it.
@@ -142,22 +161,35 @@ export function buildBidsFilterArgs(opts: BidsFilterOptions): BidsFilterResult {
     summary.push(`include: ${includes.join(", ")}`);
   }
 
-  const excludes = splitCsv(opts.exclude);
+  const userExcludes = splitCsv(opts.exclude);
+  const active = groups.length > 0 || userExcludes.length > 0;
+
+  // Optional default-skip for stimuli/derivatives. These excludes do NOT count
+  // toward `active` so callers can apply them without triggering the
+  // "filter present" semantics (e.g. the --no-data conflict check).
+  const defaultExcludes: string[] = [];
+  if (opts.excludeStimuli) {
+    defaultExcludes.push(...STIMULI_EXCLUDE_PATTERNS);
+    summary.push("skipping stimuli/ (use --stimuli to include)");
+  }
+  if (opts.excludeDerivatives) {
+    defaultExcludes.push(...DERIVATIVES_EXCLUDE_PATTERNS);
+    summary.push("skipping derivatives/ (use --derivatives to include)");
+  }
 
   const args: string[] = [];
   for (const group of groups) {
     args.push(...buildIncludeGroup(group));
   }
-  for (const exc of excludes) {
+  for (const exc of defaultExcludes) {
     args.push("--exclude", exc);
   }
-  if (excludes.length > 0) {
-    summary.push(`exclude: ${excludes.join(", ")}`);
+  for (const exc of userExcludes) {
+    args.push("--exclude", exc);
+  }
+  if (userExcludes.length > 0) {
+    summary.push(`exclude: ${userExcludes.join(", ")}`);
   }
 
-  return {
-    args,
-    active: groups.length > 0 || excludes.length > 0,
-    summary,
-  };
+  return { args, active, summary };
 }

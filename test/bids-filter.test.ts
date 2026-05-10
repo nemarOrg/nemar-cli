@@ -194,3 +194,90 @@ describe("buildBidsFilterArgs — composition", () => {
     expect(r.active).toBe(true);
   });
 });
+
+describe("buildBidsFilterArgs — stimuli/derivatives default-skip", () => {
+  test("excludeStimuli adds stimuli excludes but does not set active", () => {
+    const r = buildBidsFilterArgs({ excludeStimuli: true });
+    expect(r.active).toBe(false);
+    expect(r.args).toEqual([
+      "--exclude",
+      "stimuli/**",
+      "--exclude",
+      "**/stimuli/**",
+    ]);
+    expect(r.summary).toEqual(["skipping stimuli/ (use --stimuli to include)"]);
+  });
+
+  test("excludeDerivatives adds derivatives excludes but does not set active", () => {
+    const r = buildBidsFilterArgs({ excludeDerivatives: true });
+    expect(r.active).toBe(false);
+    expect(r.args).toEqual([
+      "--exclude",
+      "derivatives/**",
+      "--exclude",
+      "**/derivatives/**",
+    ]);
+    expect(r.summary).toEqual([
+      "skipping derivatives/ (use --derivatives to include)",
+    ]);
+  });
+
+  test("both flags emit both exclude pairs in order", () => {
+    const r = buildBidsFilterArgs({
+      excludeStimuli: true,
+      excludeDerivatives: true,
+    });
+    expect(r.args).toEqual([
+      "--exclude",
+      "stimuli/**",
+      "--exclude",
+      "**/stimuli/**",
+      "--exclude",
+      "derivatives/**",
+      "--exclude",
+      "**/derivatives/**",
+    ]);
+  });
+
+  test("default-skip composes with positive filters (subjects ∩ ¬stimuli)", () => {
+    const r = buildBidsFilterArgs({
+      subjects: "sub-01",
+      excludeStimuli: true,
+    });
+    expect(r.active).toBe(true);
+    expect(r.args).toEqual([
+      "--include",
+      "sub-01/**",
+      "--exclude",
+      "stimuli/**",
+      "--exclude",
+      "**/stimuli/**",
+    ]);
+  });
+
+  test("default-skip excludes precede user-provided excludes", () => {
+    const r = buildBidsFilterArgs({
+      excludeStimuli: true,
+      exclude: "sourcedata/**",
+    });
+    expect(r.args).toEqual([
+      "--exclude",
+      "stimuli/**",
+      "--exclude",
+      "**/stimuli/**",
+      "--exclude",
+      "sourcedata/**",
+    ]);
+    // user-provided exclude is still active
+    expect(r.active).toBe(true);
+  });
+
+  test("excludeStimuli=false (opt-in) emits no extra excludes", () => {
+    const r = buildBidsFilterArgs({
+      subjects: "sub-01",
+      excludeStimuli: false,
+      excludeDerivatives: false,
+    });
+    expect(r.args).toEqual(["--include", "sub-01/**"]);
+  });
+});
