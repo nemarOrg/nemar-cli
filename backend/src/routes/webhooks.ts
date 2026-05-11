@@ -16,6 +16,11 @@ import {
   parseNemarMetadata,
 } from "../services/datacite.js";
 import {
+  computeDatasetMetadataColumns,
+  writeDatasetMetadataColumns,
+} from "../services/dataset-metadata-columns.js";
+import { runDatasetSync } from "../services/dataset-reindex.js";
+import {
   discoverOrcidsFromReferencedDois,
   extractDoisFromBids,
   extractDoisFromRelatedIdentifiers,
@@ -46,16 +51,8 @@ import {
   validateMetadata,
 } from "../services/llm-enrich.js";
 import { generateManifest } from "../services/manifest.js";
-import { syncDatasetToNemar } from "../services/nemar-sync.js";
 import { errorMessage, extractRepoName, readRepoMetadata } from "../services/repo-metadata.js";
-import {
-  extractExtensions,
-  formatBytes,
-  getArchiveSize,
-  getDatasetS3Stats,
-  getManifest,
-  uploadManifest,
-} from "../services/s3.js";
+import { extractExtensions, formatBytes, uploadManifest } from "../services/s3.js";
 import * as zenodo from "../services/zenodo.js";
 import type { Bindings } from "../types/bindings.js";
 
@@ -93,6 +90,30 @@ export function buildEnrichmentCommitPayload(
     bidsignore_entries: bidsignoreEntries,
     commit_message: commitMessage,
   };
+}
+
+/**
+ * Validate a `ref` value supplied to the /webhooks/llm-enrich endpoint.
+ * The ref is interpolated into GitHub API URL fragments and into the shell
+ * payload emitted by llm-enrichment.yml, so the allowed characters are
+ * intentionally narrow.
+ *
+ * Returns null when the ref is acceptable. Otherwise returns a human-readable
+ * error string suitable for a 400 response body. Exported so unit tests can
+ * pin the validation table without spinning up a webhook harness.
+ *
+ * Accepts `undefined` so callers can use it on optional request fields; the
+ * function treats `undefined` as "field absent" and returns null.
+ */
+export function validateEnrichmentRef(ref: unknown): string | null {
+  if (ref === undefined) return null;
+  if (typeof ref !== "string" || ref.length === 0 || ref.length > 200) {
+    return "Invalid 'ref' parameter: must be a non-empty string up to 200 characters";
+  }
+  if (!/^[A-Za-z0-9._/-]+$/.test(ref) || ref.includes("..") || ref.startsWith("/")) {
+    return "Invalid 'ref' parameter: contains forbidden characters";
+  }
+  return null;
 }
 
 const webhooks = new Hono<{ Bindings: Bindings }>();
@@ -425,27 +446,11 @@ async function handleEzidVersionDoi(
       console.info(`[webhook] Skipping nemar.org sync for OpenNeuro dataset ${dataset.dataset_id}`);
     }
     if (nemarUser && nemarPass && !dataset.dataset_id.startsWith("on")) {
-      const pat = c.env.GITHUB_ADMIN_PAT;
-      const s3Cfg = {
-        bucket: c.env.S3_BUCKET,
-        region: c.env.AWS_REGION,
-        accessKeyId: c.env.AWS_ACCESS_KEY_ID,
-        secretAccessKey: c.env.AWS_SECRET_ACCESS_KEY,
-      };
-      c.executionCtx.waitUntil(
-        syncToNemarAfterVersionDoi(
-          c.env.DB,
-          nemarUser,
-          nemarPass,
-          dataset,
-          version,
-          result.doi,
-          repoName,
-          pat,
-          repoMeta.bidsDescription,
-          s3Cfg,
-        ),
-      );
+      // Pass the freshly-minted DOI + version through as overrides so a D1
+      // read-after-write race (background waitUntil firing before the new
+      // dataset_versions row replicates) doesn't drop the version DOI
+      // from the nemar.org payload.
+      c.executionCtx.waitUntil(syncToNemarAfterVersionDoi(c.env, dataset, version, result.doi));
     }
 
     return c.json({
@@ -480,9 +485,7 @@ async function handleEzidVersionDoi(
  * Non-fatal; logs errors but never throws.
  */
 async function syncToNemarAfterVersionDoi(
-  db: D1Database,
-  nemarUser: string,
-  nemarPass: string,
+  env: Bindings,
   dataset: {
     id: number;
     dataset_id: string;
@@ -492,129 +495,39 @@ async function syncToNemarAfterVersionDoi(
   },
   version: string,
   versionDoi: string,
-  repoName: string,
-  pat: string,
-  bidsDescription: Record<string, unknown>,
-  s3Cfg: { bucket: string; region: string; accessKeyId: string; secretAccessKey: string },
 ): Promise<void> {
+  // Delegated to runDatasetSync (epic #417 phase 3) so this path stays in
+  // step with the admin reindex endpoint. The helper handles tree+S3+
+  // participants gathering, syncDatasetToNemar, nemar_sync_* fields, and the
+  // Phase 2 metadata columns + metadata_columns_error.
   try {
-    const tree = await getTreeAtRef(repoName, "main", pat);
-
-    const readmeFile = tree.find((f) => f.path === "README" || f.path === "README.md");
-    const readme = readmeFile ? await getBlobContent(repoName, readmeFile.sha, pat) : "";
-
-    let nemarMeta = null;
-    const nemarMetaFile = tree.find((f) => f.path === ".nemar/metadata.json");
-    if (nemarMetaFile) {
-      try {
-        const raw = JSON.parse(await getBlobContent(repoName, nemarMetaFile.sha, pat));
-        const parsed = parseNemarMetadata(raw);
-        if (parsed?.version === "2.0") nemarMeta = parsed;
-      } catch (e) {
-        console.warn(
-          `[webhook] Failed to parse .nemar/metadata.json for ${dataset.dataset_id}:`,
-          e,
-        );
-      }
-    }
-
-    const ownerRow = await db
-      .prepare("SELECT owner_username, created_at FROM datasets WHERE dataset_id = ?")
-      .bind(dataset.dataset_id)
-      .first<{ owner_username: string; created_at: string | null }>();
-
-    const pubRow = await db
-      .prepare(
-        "SELECT approved_at FROM publication_requests WHERE dataset_id = ? AND status = 'published' ORDER BY approved_at DESC LIMIT 1",
-      )
-      .bind(dataset.dataset_id)
-      .first<{ approved_at: string | null }>();
-
-    const versionRow = await db
-      .prepare(
-        "SELECT version, doi, created_at FROM dataset_versions WHERE dataset_id = ? ORDER BY created_at DESC LIMIT 1",
-      )
-      .bind(dataset.dataset_id)
-      .first<{ version: string; doi: string; created_at: string }>();
-
-    const [s3Stats, zipFileSize] = await Promise.all([
-      getDatasetS3Stats(s3Cfg, dataset.dataset_id).catch((err) => {
-        console.warn(`[webhook] S3 stats failed for ${dataset.dataset_id}: ${err}`);
-        return { totalSize: 0, objectCount: 0 };
-      }),
-      getArchiveSize(s3Cfg, dataset.dataset_id).catch((err) => {
-        console.warn(`[webhook] Archive size failed for ${dataset.dataset_id}: ${err}`);
-        return 0;
-      }),
-    ]);
-
-    let manifest = null;
-    if (versionRow?.version) {
-      try {
-        const raw = await getManifest(s3Cfg, dataset.dataset_id, versionRow.version);
-        if (raw) {
-          try {
-            manifest = JSON.parse(raw);
-          } catch (parseErr) {
-            console.warn(
-              `[webhook] Manifest JSON corrupted for ${dataset.dataset_id} v${versionRow.version}: ${parseErr}`,
-            );
-          }
-        }
-      } catch (err) {
-        console.warn(
-          `[webhook] Failed to fetch manifest from S3 for ${dataset.dataset_id}: ${err}`,
-        );
-      }
-    }
-
-    const syncResult = await syncDatasetToNemar(nemarUser, nemarPass, {
-      datasetId: dataset.dataset_id,
-      bidsDescription,
-      nemarMetadata: nemarMeta,
-      readme,
-      tree,
-      conceptDoi: dataset.concept_doi,
-      latestVersionDoi: versionRow?.doi || versionDoi,
-      latestVersion: versionRow?.version || version,
-      versionCreatedAt: versionRow?.created_at || null,
-      ownerUsername: ownerRow?.owner_username || "unknown",
-      createdAt: ownerRow?.created_at || null,
-      publishDate: pubRow?.approved_at || null,
-      repoName,
-      pat,
-      manifest,
-      s3Stats,
-      zipFileSize,
+    const result = await runDatasetSync(env, dataset.dataset_id, {
+      versionOverride: version,
+      versionDoiOverride: versionDoi,
     });
-
-    await db
-      .prepare(
-        `UPDATE datasets SET nemar_sync_status = ?, nemar_sync_at = CASE WHEN ? = 'synced' THEN datetime('now') ELSE nemar_sync_at END, nemar_sync_error = ?, updated_at = datetime('now') WHERE dataset_id = ?`,
-      )
-      .bind(
-        syncResult.synced ? "synced" : "failed",
-        syncResult.synced ? "synced" : "failed",
-        syncResult.errors.length ? syncResult.errors.join("; ") : null,
-        dataset.dataset_id,
-      )
-      .run();
-
-    if (syncResult.synced) {
+    if (result.synced) {
       console.log(`[webhook] nemar.org sync succeeded for ${dataset.dataset_id} v${version}`);
     } else {
       console.warn(
-        `[webhook] nemar.org sync failed for ${dataset.dataset_id}: ${syncResult.errors.join("; ")}`,
+        `[webhook] nemar.org sync failed for ${dataset.dataset_id}: ${result.errors.join("; ")}`,
+      );
+    }
+    if (result.metadata_columns_error) {
+      console.warn(
+        `[webhook] metadata_columns failed for ${dataset.dataset_id}: ${result.metadata_columns_error}`,
       );
     }
   } catch (err) {
     console.error(`[webhook] nemar.org sync error for ${dataset.dataset_id} (non-fatal):`, err);
+    // Record both failures together: runDatasetSync threw before reaching
+    // either the nemar_sync UPDATE or the metadata-columns UPDATE, so set
+    // both so operators querying for stale state get a consistent view.
+    const msg = errorMessage(err);
     try {
-      await db
-        .prepare(
-          "UPDATE datasets SET nemar_sync_status = 'failed', nemar_sync_error = ?, updated_at = datetime('now') WHERE dataset_id = ?",
-        )
-        .bind(errorMessage(err), dataset.dataset_id)
+      await env.DB.prepare(
+        "UPDATE datasets SET nemar_sync_status = 'failed', nemar_sync_error = ?, metadata_columns_error = ?, updated_at = datetime('now') WHERE dataset_id = ?",
+      )
+        .bind(msg, `runDatasetSync threw before metadata-columns write: ${msg}`, dataset.dataset_id)
         .run();
     } catch (d1Err) {
       console.warn(
@@ -807,7 +720,12 @@ webhooks.post("/llm-enrich", async (c) => {
   }
 
   // Parse request body
-  let body: { dataset_id: string; force?: boolean; client_commits?: boolean };
+  let body: {
+    dataset_id: string;
+    force?: boolean;
+    client_commits?: boolean;
+    ref?: string;
+  };
   try {
     body = await c.req.json();
   } catch {
@@ -828,11 +746,19 @@ webhooks.post("/llm-enrich", async (c) => {
       400,
     );
   }
+  const refValidationError = validateEnrichmentRef(body.ref);
+  if (refValidationError) {
+    return c.json({ error: refValidationError }, 400);
+  }
   const forceReenrich = body.force === true;
   // When true, the caller (typically the llm-enrichment.yml Action) will write
   // the metadata commit using its own GITHUB_TOKEN; the Worker just returns
   // the would-be commit payload and skips the admin-PAT REST commit.
   const clientCommits = body.client_commits === true;
+  // Branch or ref to read from / commit to. Defaults to "main" for back-compat.
+  // Release-branch and tag-driven enrichment pass the current ref so the
+  // pipeline operates on the right snapshot (e.g., release/v1.0.1 or v1.0.1).
+  const ref = body.ref ?? "main";
 
   // Look up dataset in D1 (includes EZID/owner fields for DOI title sync)
   const dataset = await c.env.DB.prepare(
@@ -870,17 +796,25 @@ webhooks.post("/llm-enrich", async (c) => {
 
   const pat = c.env.GITHUB_ADMIN_PAT;
 
-  // Ensure default branch is "main" before reading from it
-  try {
-    await ensureMainBranch(repoName, pat);
-  } catch (error) {
-    console.error(`[llm-enrich] Failed to verify default branch for ${repoName}:`, error);
-    // Continue anyway; getTreeAtRef will fail with a clear error if "main" doesn't exist
+  console.log(
+    `[llm-enrich] Starting ${dataset_id} on ref="${ref}" (force=${forceReenrich}, client_commits=${clientCommits})`,
+  );
+
+  // Ensure default branch is "main" before reading from it. Only relevant
+  // for the main-branch flow; release branches and tags are explicit refs
+  // and do not depend on the default-branch rename helper.
+  if (ref === "main") {
+    try {
+      await ensureMainBranch(repoName, pat);
+    } catch (error) {
+      console.error(`[llm-enrich] Failed to verify default branch for ${repoName}:`, error);
+      // Continue anyway; getTreeAtRef will fail with a clear error if "main" doesn't exist
+    }
   }
 
   try {
-    // Read repo tree to find README and dataset_description.json
-    const tree = await getTreeAtRef(repoName, "main", pat);
+    // Read repo tree at the requested ref to find README and dataset_description.json
+    const tree = await getTreeAtRef(repoName, ref, pat);
 
     // Read README.md
     const readmeFile = tree.find(
@@ -1043,10 +977,13 @@ webhooks.post("/llm-enrich", async (c) => {
       `[llm-enrich] Stage 1 (seed): ${dataset_id} - ${Object.keys(seeded.authors || {}).length} authors, ${(seeded.related_identifiers || []).length} related IDs`,
     );
 
-    // Stage 1a: Compute sizes from S3 and formats from tree
+    // Stage 1a: Compute sizes from S3 and formats from tree. s3Stats is
+    // hoisted so the metadata-columns writer (post-cache, below) can reuse it
+    // without re-querying S3.
+    let s3Stats: { totalSize: number; objectCount: number } | null = null;
     try {
       const { getDatasetS3Stats } = await import("../services/s3.js");
-      const s3Stats = await getDatasetS3Stats(
+      s3Stats = await getDatasetS3Stats(
         {
           bucket: c.env.S3_BUCKET,
           region: c.env.AWS_REGION,
@@ -1069,6 +1006,21 @@ webhooks.post("/llm-enrich", async (c) => {
       console.warn(
         `[llm-enrich] Stage 1a (sizes) failed for ${dataset_id}, continuing: ${errorMessage(sizeErr)}`,
       );
+    }
+
+    // Stage 1c: Read participants.tsv so the metadata-columns writer below
+    // can populate subject_count and age range. Non-fatal: if the file is
+    // missing or unreadable, subject_count/age_min/age_max stay NULL in D1.
+    let participantsTsv: string | null = null;
+    const participantsFile = tree.find((f) => f.path === "participants.tsv");
+    if (participantsFile) {
+      try {
+        participantsTsv = await getBlobContent(repoName, participantsFile.sha, pat);
+      } catch (partErr) {
+        console.warn(
+          `[llm-enrich] Failed to read participants.tsv for ${dataset_id}, continuing: ${errorMessage(partErr)}`,
+        );
+      }
     }
 
     // Stage 1b: ORCID discovery from referenced DOIs (deterministic, no LLM)
@@ -1332,7 +1284,7 @@ webhooks.post("/llm-enrich", async (c) => {
       try {
         const result = await commitEnrichmentWithBidsignore(
           repoName,
-          "main",
+          ref,
           ".nemar/metadata.json",
           metadataContent,
           bidsignoreEntries,
@@ -1373,6 +1325,39 @@ webhooks.post("/llm-enrich", async (c) => {
     } catch (err) {
       cacheError = errorMessage(err);
       console.error(`[llm-enrich] Failed to cache enrichment in D1 for ${dataset_id}:`, err);
+    }
+
+    // Populate first-class metadata columns (epic #417 phase 2). Reuses the
+    // tree, participants.tsv and S3 stats already gathered above so no
+    // additional API calls are needed beyond the one participants.tsv blob
+    // read. Non-fatal: a failure here does not roll back the enrichment.
+    // The outcome is mirrored to datasets.metadata_columns_error (cleared on
+    // success) so operators can query D1 directly without log-grepping.
+    let metadataColumnsError: string | undefined;
+    try {
+      const cols = computeDatasetMetadataColumns({
+        treePaths,
+        participantsTsv,
+        s3Stats,
+      });
+      await writeDatasetMetadataColumns(c.env.DB, dataset_id, cols);
+      console.log(
+        `[llm-enrich] Metadata columns: ${dataset_id} - subjects=${cols.subject_count}, modalities=${cols.modalities}, files=${cols.total_files}`,
+      );
+    } catch (err) {
+      metadataColumnsError = errorMessage(err);
+      console.error(`[llm-enrich] Failed to write metadata columns for ${dataset_id}:`, err);
+    }
+    try {
+      await c.env.DB.prepare(
+        `UPDATE datasets SET metadata_columns_error = ?, updated_at = datetime('now') WHERE dataset_id = ?`,
+      )
+        .bind(metadataColumnsError ?? null, dataset_id)
+        .run();
+    } catch (errFieldErr) {
+      console.warn(
+        `[llm-enrich] Failed to record metadata_columns_error for ${dataset_id}: ${errorMessage(errFieldErr)}`,
+      );
     }
 
     // Sync DOI metadata after enrichment if dataset has an EZID DOI.
@@ -1445,6 +1430,7 @@ webhooks.post("/llm-enrich", async (c) => {
       ...(commitError && { commit_error: commitError }),
       ...(bidsignoreError && { bidsignore_error: bidsignoreError }),
       ...(cacheError && { cache_error: cacheError }),
+      ...(metadataColumnsError && { metadata_columns_error: metadataColumnsError }),
       ...(issueCreationError && { issue_creation_error: issueCreationError }),
       ...(doiSyncError && { doi_sync_error: doiSyncError }),
     });
