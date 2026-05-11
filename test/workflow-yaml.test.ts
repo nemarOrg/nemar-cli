@@ -172,6 +172,21 @@ describe("CI workflow templates", () => {
     expect(llm.content).toContain("(see git output above)");
   });
 
+  test("generate-archive workflow pins archiver to v7", () => {
+    // Guards against a future hand-edit dropping the archiver version pin.
+    // archiver v8 is ESM-only and breaks the require()-style streaming
+    // script, throwing "archiver is not a function" at runtime.
+    const archive = templates.find((t) => t.path.endsWith("generate-archive.yml"));
+    expect(archive).toBeDefined();
+    expect(archive?.content).toMatch(/'archiver@\^?7\./);
+    // Reject the bare unpinned form on the install line specifically.
+    const installLine = archive?.content
+      .split("\n")
+      .find((l) => /npm install.*archiver/.test(l));
+    expect(installLine).toBeDefined();
+    expect(installLine).not.toMatch(/\barchiver\b(?!@)/);
+  });
+
   test("no literal newlines inside shell strings (escape regression)", () => {
     for (const { path, content } of templates) {
       // In valid YAML, printf format strings and jq arguments should
