@@ -565,11 +565,20 @@ async function syncToNemarAfterVersionDoi(
       .bind(dataset.dataset_id)
       .first<{ version: string; doi: string; created_at: string }>();
 
+    // s3StatsForColumns tracks the real measurement (or null on failure) so a
+    // fallback {0,0} for the nemar.org sync does not silently overwrite the
+    // file_size/total_files columns in D1 with zeros (epic #417 phase 2).
+    let s3StatsForColumns: { totalSize: number; objectCount: number } | null = null;
     const [s3Stats, zipFileSize] = await Promise.all([
-      getDatasetS3Stats(s3Cfg, dataset.dataset_id).catch((err) => {
-        console.warn(`[webhook] S3 stats failed for ${dataset.dataset_id}: ${err}`);
-        return { totalSize: 0, objectCount: 0 };
-      }),
+      getDatasetS3Stats(s3Cfg, dataset.dataset_id)
+        .then((r) => {
+          s3StatsForColumns = r;
+          return r;
+        })
+        .catch((err) => {
+          console.warn(`[webhook] S3 stats failed for ${dataset.dataset_id}: ${err}`);
+          return { totalSize: 0, objectCount: 0 };
+        }),
       getArchiveSize(s3Cfg, dataset.dataset_id).catch((err) => {
         console.warn(`[webhook] Archive size failed for ${dataset.dataset_id}: ${err}`);
         return 0;
@@ -654,20 +663,39 @@ async function syncToNemarAfterVersionDoi(
     // Refresh D1 metadata columns (epic #417 phase 2). Independent of the
     // nemar.org sync result so a transient nemar.org outage does not also
     // hold D1 back; we use the inputs we already gathered above.
+    // Pass s3StatsForColumns (null on S3 failure) NOT the fallback {0,0}
+    // so a transient S3 outage leaves file_size/total_files at their
+    // previous values instead of being silently rewritten to zero.
+    // Failures are recorded in metadata_columns_error so operators can
+    // find them without grepping logs; success clears the field.
+    let metadataColumnsError: string | null = null;
     try {
       const cols = computeDatasetMetadataColumns({
         treePaths: tree.map((f) => f.path),
         participantsTsv,
-        s3Stats,
+        s3Stats: s3StatsForColumns,
       });
       await writeDatasetMetadataColumns(db, dataset.dataset_id, cols);
       console.log(
         `[webhook] Metadata columns refreshed for ${dataset.dataset_id}: subjects=${cols.subject_count}, modalities=${cols.modalities}, files=${cols.total_files}`,
       );
     } catch (colErr) {
+      metadataColumnsError = errorMessage(colErr);
       console.error(
         `[webhook] Failed to write metadata columns for ${dataset.dataset_id}:`,
         colErr,
+      );
+    }
+    try {
+      await db
+        .prepare(
+          `UPDATE datasets SET metadata_columns_error = ?, updated_at = datetime('now') WHERE dataset_id = ?`,
+        )
+        .bind(metadataColumnsError, dataset.dataset_id)
+        .run();
+    } catch (errFieldErr) {
+      console.warn(
+        `[webhook] Failed to record metadata_columns_error for ${dataset.dataset_id}: ${errorMessage(errFieldErr)}`,
       );
     }
   } catch (err) {
@@ -1481,6 +1509,8 @@ webhooks.post("/llm-enrich", async (c) => {
     // tree, participants.tsv and S3 stats already gathered above so no
     // additional API calls are needed beyond the one participants.tsv blob
     // read. Non-fatal: a failure here does not roll back the enrichment.
+    // The outcome is mirrored to datasets.metadata_columns_error (cleared on
+    // success) so operators can query D1 directly without log-grepping.
     let metadataColumnsError: string | undefined;
     try {
       const cols = computeDatasetMetadataColumns({
@@ -1495,6 +1525,17 @@ webhooks.post("/llm-enrich", async (c) => {
     } catch (err) {
       metadataColumnsError = errorMessage(err);
       console.error(`[llm-enrich] Failed to write metadata columns for ${dataset_id}:`, err);
+    }
+    try {
+      await c.env.DB.prepare(
+        `UPDATE datasets SET metadata_columns_error = ?, updated_at = datetime('now') WHERE dataset_id = ?`,
+      )
+        .bind(metadataColumnsError ?? null, dataset_id)
+        .run();
+    } catch (errFieldErr) {
+      console.warn(
+        `[llm-enrich] Failed to record metadata_columns_error for ${dataset_id}: ${errorMessage(errFieldErr)}`,
+      );
     }
 
     // Sync DOI metadata after enrichment if dataset has an EZID DOI.

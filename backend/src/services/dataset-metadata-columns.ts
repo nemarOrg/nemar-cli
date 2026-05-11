@@ -80,25 +80,30 @@ export function computeDatasetMetadataColumns(input: MetadataColumnInputs): Data
 /**
  * Persist the computed columns to D1. Updates metadata_updated_at to now().
  *
- * This is intentionally a single UPDATE so the columns are written
- * atomically together; partial state (e.g., subject_count without
- * modalities) would be misleading.
+ * COALESCE semantics: a NULL input means "no fresh measurement for this
+ * field", so the existing column value is preserved. This lets callers
+ * partially refresh — e.g., if the S3 lookup failed, file_size/total_files
+ * are NULL on the input and the previously-stored values stay intact rather
+ * than being silently overwritten with NULL.
+ *
+ * The metadata_updated_at timestamp always advances, so operators can still
+ * see when the most recent refresh attempt ran.
  */
 export async function writeDatasetMetadataColumns(
   db: D1Database,
   datasetId: string,
   cols: DatasetMetadataColumns,
-): Promise<void> {
-  await db
+): Promise<{ changes: number }> {
+  const result = await db
     .prepare(
       `UPDATE datasets
-       SET subject_count = ?,
-           modalities = ?,
-           age_min = ?,
-           age_max = ?,
-           file_size = ?,
-           total_files = ?,
-           tasks = ?,
+       SET subject_count = COALESCE(?, subject_count),
+           modalities = COALESCE(?, modalities),
+           age_min = COALESCE(?, age_min),
+           age_max = COALESCE(?, age_max),
+           file_size = COALESCE(?, file_size),
+           total_files = COALESCE(?, total_files),
+           tasks = COALESCE(?, tasks),
            metadata_updated_at = datetime('now'),
            updated_at = datetime('now')
        WHERE dataset_id = ?`,
@@ -114,4 +119,16 @@ export async function writeDatasetMetadataColumns(
       datasetId,
     )
     .run();
+
+  // D1 returns meta.changes = 0 when the WHERE clause matched no rows.
+  // Surface that explicitly: a 0-row update is almost always a race with
+  // dataset deletion or a dataset_id mismatch, and the project rule against
+  // silent failures requires we log it.
+  const changes = result.meta?.changes ?? 0;
+  if (changes === 0) {
+    console.warn(
+      `[metadata-columns] No rows updated for ${datasetId} - dataset may have been deleted or renamed`,
+    );
+  }
+  return { changes };
 }

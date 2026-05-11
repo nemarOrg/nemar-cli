@@ -9,6 +9,7 @@
 
 import { describe, expect, test } from "bun:test";
 import { computeDatasetMetadataColumns } from "../backend/src/services/dataset-metadata-columns";
+import { extractTasks } from "../backend/src/services/nemar-sync";
 
 const TASK_PATHS = [
   "sub-01/eeg/sub-01_task-rest_eeg.set",
@@ -184,6 +185,50 @@ describe("computeDatasetMetadataColumns", () => {
     expect(cols.file_size).toBe(0);
     expect(cols.total_files).toBe(0);
   });
+
+  test("partial S3 state: one pointer file with zero bytes is preserved", () => {
+    // Real edge case: a freshly initialized dataset can have one
+    // annex pointer file referenced but no annexed content uploaded yet,
+    // producing totalSize=0 with objectCount>0. We preserve both rather
+    // than treating it as "no data" — operators may want to detect this.
+    const cols = computeDatasetMetadataColumns({
+      treePaths: ["sub-01/eeg/sub-01_task-rest_eeg.set"],
+      participantsTsv: null,
+      s3Stats: { totalSize: 0, objectCount: 1 },
+    });
+    expect(cols.file_size).toBe(0);
+    expect(cols.total_files).toBe(1);
+    expect(cols.modalities).toBe("eeg");
+  });
+});
+
+describe("extractTasks contract (string[] input)", () => {
+  // The export signature changed from TreeEntry[] to readonly string[] when
+  // extractTasks became public (epic #417 phase 2). Pin the contract so a
+  // future refactor reverting it would fail this test even before the type
+  // system catches the upstream caller breakage.
+
+  test("accepts plain string paths and dedups + sorts the labels", () => {
+    const result = extractTasks([
+      "sub-01/eeg/sub-01_task-rest_eeg.set",
+      "sub-01/eeg/sub-01_task-rest_eeg.fdt", // duplicate label
+      "sub-01/eeg/sub-01_task-music_eeg.set",
+      "sub-02/eeg/sub-02_task-rest_eeg.set", // duplicate across subjects
+    ]);
+    expect(result).toEqual(["music", "rest"]);
+  });
+
+  test("returns empty array for paths with no _task- segment", () => {
+    const result = extractTasks(["README.md", "sub-01/eeg/sub-01_eeg.set"]);
+    expect(result).toEqual([]);
+  });
+
+  test("readonly input is accepted (compile-time contract)", () => {
+    // `as const` forces a readonly string[]; if extractTasks regressed to
+    // accepting only TreeEntry[], this would fail to compile.
+    const paths = ["sub-01/eeg/sub-01_task-rest_eeg.set"] as const;
+    expect(extractTasks(paths)).toEqual(["rest"]);
+  });
 });
 
 describe("migration 0020 file shape", () => {
@@ -204,6 +249,12 @@ describe("migration 0020 file shape", () => {
     }
     expect(sql).toContain("CREATE INDEX IF NOT EXISTS idx_datasets_modalities");
     expect(sql).toContain("CREATE INDEX IF NOT EXISTS idx_datasets_subject_count");
+    // Both backfill paths must be present: array (the typical enrichment
+    // output) and text (legacy fallback). Missing the array path silently
+    // skips every dataset that went through llm-enrich.
+    expect(sql).toContain("json_each(enrichment_json, '$.modalities')");
+    expect(sql).toContain("json_type(enrichment_json, '$.modalities') = 'array'");
     expect(sql).toContain("json_extract(enrichment_json, '$.modalities')");
+    expect(sql).toContain("json_type(enrichment_json, '$.modalities') = 'text'");
   });
 });
