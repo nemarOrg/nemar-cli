@@ -148,6 +148,12 @@ The canonical copy lives in 1Password.
 Phase 2 (#437) consumes these credentials in the Worker. No Worker secret
 changes happen in this phase.
 
+> **Do NOT remove `GITHUB_ADMIN_PAT` from the Worker yet.** The Phase 3 routing helper
+> falls back to the PAT when any App secret is missing; if both are absent the helper
+> throws "No GitHub auth configured" and every orchestrator call 500s. The PAT stays
+> as a safety net until Phase 5 (#440) removes it after a soak period confirms App
+> auth is live in `github-rl` logs.
+
 ## Dataset-repo CI uses the same App
 
 Workflow templates in dataset repos mint short-lived installation tokens
