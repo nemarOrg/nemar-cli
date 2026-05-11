@@ -1,0 +1,101 @@
+name: Auto Bump Dev
+
+# Increments the `-devN` suffix on `dev` after every push that adds real
+# code, so every commit on the dev branch carries a fresh pre-release
+# version. The clean version + tag is still owned by auto-tag.yml when dev
+# eventually merges into main.
+#
+# Skip conditions:
+#   - HEAD commit was authored by nemar-bot (prevents loop on our own
+#     bump-and-push).
+#   - HEAD commit message starts with "chore: bump version to" (catches
+#     manual bumps and the sync-dev.yml bump).
+#   - HEAD commit message contains "[skip-bump]" (escape hatch).
+#
+# The flow:
+#   - Read current version from package.json.
+#   - If no `-devN` suffix, log and exit (dev should always carry one;
+#     missing means a release just merged and sync-dev hasn't fired yet,
+#     or someone is mid-release).
+#   - Otherwise bump to `-dev(N+1)` via scripts/bump-version.sh.
+#   - Push as nemar-bot. The commit message starts with the standard
+#     "chore: bump version to ..." prefix so this workflow self-filters
+#     on the next push event.
+
+on:
+  push:
+    branches: [dev]
+
+permissions:
+  contents: write
+
+jobs:
+  bump:
+    # Filter out the bot's own commits and explicit opt-outs at the job
+    # level so we never even spin up a runner for those events.
+    if: |
+      github.event.head_commit.author.email != 'nemar-bot@users.noreply.github.com'
+      && !startsWith(github.event.head_commit.message, 'chore: bump version to')
+      && !contains(github.event.head_commit.message, '[skip-bump]')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout dev
+        uses: actions/checkout@v4
+        with:
+          ref: dev
+          fetch-depth: 2
+          # AUTO_TAG_PAT is required to push the bump commit back to dev
+          # without tripping branch protection rules that block the
+          # default GITHUB_TOKEN from writing.
+          token: ${{ secrets.AUTO_TAG_PAT }}
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install dependencies
+        # bump-version.sh runs `bun run build` to verify the bump took.
+        run: bun install
+
+      - name: Compute next dev suffix
+        id: compute
+        run: |
+          CURRENT=$(jq -r '.version' package.json)
+          echo "current=$CURRENT" >> "$GITHUB_OUTPUT"
+
+          # Expect a -devN suffix. Anything else is unexpected on dev;
+          # we log and exit success without bumping rather than guessing.
+          if [[ ! "$CURRENT" =~ ^([0-9]+\.[0-9]+\.[0-9]+)-dev([0-9]+)$ ]]; then
+            echo "No -devN suffix on $CURRENT — leaving dev branch as-is."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          BASE="${BASH_REMATCH[1]}"
+          N="${BASH_REMATCH[2]}"
+          NEXT=$((N + 1))
+          echo "next=$BASE-dev$NEXT" >> "$GITHUB_OUTPUT"
+          echo "arg=dev$NEXT" >> "$GITHUB_OUTPUT"
+          echo "skip=false" >> "$GITHUB_OUTPUT"
+          echo "Will bump $CURRENT -> $BASE-dev$NEXT"
+
+      - name: Configure git identity
+        if: steps.compute.outputs.skip == 'false'
+        run: |
+          git config user.name "nemar-bot"
+          git config user.email "nemar-bot@users.noreply.github.com"
+
+      - name: Run bump script
+        if: steps.compute.outputs.skip == 'false'
+        run: ./scripts/bump-version.sh "${{ steps.compute.outputs.arg }}"
+
+      - name: Push bump commit
+        if: steps.compute.outputs.skip == 'false'
+        run: |
+          # bump-version.sh has already created the commit; push it.
+          # If a parallel push raced us, abort: the next push will
+          # trigger this workflow again from the new HEAD.
+          git push origin dev || {
+            echo "::warning::push to dev rejected (likely a concurrent push); skipping"
+            exit 0
+          }
