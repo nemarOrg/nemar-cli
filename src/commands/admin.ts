@@ -32,6 +32,11 @@ import {
   type EmailPreferences,
   type NemarMetadataPayload,
   ORCID_REGEX,
+  type ReindexBulkOptions,
+  type ReindexBulkResponse,
+  type ReindexFilter,
+  type ReindexOptions,
+  type ReindexResponse,
   type StepResult,
   addCi,
   applyS3Lock,
@@ -58,9 +63,12 @@ import {
   listPublishRequests,
   listUsers,
   publishDataset,
+  reindexBulk,
+  reindexDataset,
   revokeUser,
   sendBroadcast,
   submitEnrichment,
+  syncCi,
   syncDataset,
   updateDoi,
   updateEmailPreferences,
@@ -743,6 +751,132 @@ ciCommand
       console.log();
     } catch (error) {
       handleCommandError(error, spinner, "Failed to deploy CI workflows", {
+        404: "Dataset not found",
+      });
+    }
+  });
+
+ciCommand
+  .command("sync")
+  .description(
+    "Sync deployed CI workflows to current templates (only writes drifted/missing files)",
+  )
+  .argument("[dataset-id]", "Dataset ID (e.g., nm000104)")
+  .option("--all", "Sync across all dataset repositories")
+  .option(YES_OPTION, YES_DESCRIPTION)
+  .option(NO_OPTION, NO_DESCRIPTION)
+  .action(async (datasetId, options: { all?: boolean } & ConfirmOptions) => {
+    if (!requireAuth()) return;
+
+    if (options.all) {
+      const spinner = ora("Fetching dataset list...").start();
+      let datasets: { dataset_id: string }[];
+      try {
+        const result = await listDatasets({ limit: 1000 });
+        datasets = result.datasets;
+        spinner.succeed(`Found ${datasets.length} datasets`);
+        if (datasets.length >= 1000) {
+          console.log(
+            chalk.yellow("Warning: reached 1000 dataset limit; some datasets may be skipped"),
+          );
+        }
+      } catch (error) {
+        handleCommandError(error, spinner, "Failed to fetch datasets");
+        return;
+      }
+
+      console.log(
+        chalk.cyan(`\nSync CI templates across ${datasets.length} datasets (writes only diffs)\n`),
+      );
+
+      const confirmResult = await confirm(
+        `Sync templates on all ${datasets.length} datasets?`,
+        options,
+      );
+      if (confirmResult !== "confirmed") {
+        console.log(chalk.dim(confirmResult === "declined" ? "Skipped" : "Cancelled"));
+        return;
+      }
+
+      let upToDate = 0;
+      let updated = 0;
+      let withErrors = 0;
+      for (const ds of datasets) {
+        const dsSpinner = ora(`Syncing ${ds.dataset_id}...`).start();
+        try {
+          const result = await syncCi(ds.dataset_id);
+          const changes = result.changed.length + result.added.length;
+          if (result.errors.length > 0) {
+            dsSpinner.warn(
+              `${ds.dataset_id}: ${changes} updated, ${result.errors.length} error(s)`,
+            );
+            withErrors++;
+          } else if (changes === 0) {
+            dsSpinner.succeed(`${ds.dataset_id}: up to date`);
+            upToDate++;
+          } else {
+            const parts: string[] = [];
+            if (result.added.length > 0) parts.push(`+${result.added.length} added`);
+            if (result.changed.length > 0) parts.push(`~${result.changed.length} updated`);
+            dsSpinner.succeed(`${ds.dataset_id}: ${parts.join(", ")}`);
+            updated++;
+          }
+        } catch (error) {
+          const msg = error instanceof ApiError ? error.message : String(error);
+          dsSpinner.fail(`${ds.dataset_id}: ${msg}`);
+          withErrors++;
+        }
+      }
+
+      console.log();
+      console.log(
+        chalk.cyan(`Done: ${upToDate} up-to-date, ${updated} updated, ${withErrors} with errors`),
+      );
+      return;
+    }
+
+    if (!datasetId) {
+      console.error(chalk.red("Error: dataset-id is required (or use --all)"));
+      return;
+    }
+
+    const spinner = ora(`Syncing CI templates for ${datasetId}...`).start();
+    try {
+      const result = await syncCi(datasetId);
+      const changes = result.changed.length + result.added.length;
+      if (result.errors.length > 0) {
+        spinner.warn(`${datasetId}: ${result.errors.length} error(s)`);
+      } else if (changes === 0) {
+        spinner.succeed(`${datasetId}: already up to date`);
+      } else {
+        spinner.succeed(`${datasetId}: synced`);
+      }
+      console.log();
+      console.log(`  ${chalk.dim("Checked:")} ${result.checked.join(", ")}`);
+      if (result.added.length > 0) {
+        console.log(`  ${chalk.green("Added:")}   ${result.added.join(", ")}`);
+      }
+      if (result.changed.length > 0) {
+        console.log(`  ${chalk.yellow("Updated:")} ${result.changed.join(", ")}`);
+      }
+      if (!result.committed && changes > 0 && result.errors.length === 0) {
+        // Defensive: the intended changes were computed but no commit
+        // was made. Should never happen in practice (the helper sets
+        // `committed: true` whenever it tries to write).
+        console.log(`  ${chalk.yellow("Note:")}    listed changes were not committed`);
+      }
+      if (result.list_failed) {
+        console.log(
+          `  ${chalk.red("Warning:")} workflow directory listing failed; presence is unknown`,
+        );
+      }
+      if (result.errors.length > 0) {
+        console.log(`  ${chalk.red("Errors:")}`);
+        for (const err of result.errors) console.log(`    - ${err}`);
+      }
+      console.log();
+    } catch (error) {
+      handleCommandError(error, spinner, "Failed to sync CI templates", {
         404: "Dataset not found",
       });
     }
@@ -2632,6 +2766,195 @@ syncCommand
   });
 
 adminCommand.addCommand(syncCommand);
+
+// ============================================================================
+// Reindex (epic #417 phase 3): refresh enrichment + nemar.org sync +
+// Phase 2 metadata columns for one or many datasets.
+// ============================================================================
+
+function printReindexLine(r: ReindexResponse, opts?: { showRef?: boolean }): void {
+  const enrLabel = r.enrichment.status;
+  const enr =
+    enrLabel === "ok"
+      ? chalk.green("enrich:ok")
+      : enrLabel === "failed"
+        ? chalk.red("enrich:failed")
+        : chalk.dim("enrich:skipped");
+  const syncLabel = r.sync.status;
+  const sync =
+    syncLabel === "ok"
+      ? chalk.green("sync:ok")
+      : syncLabel === "failed"
+        ? chalk.red("sync:failed")
+        : chalk.dim("sync:skipped");
+  const cols =
+    r.sync.metadata_columns_written === true
+      ? chalk.green("cols:written")
+      : r.sync.metadata_columns_error
+        ? chalk.red("cols:failed")
+        : "";
+  const ref = opts?.showRef && r.enrichment.ref ? chalk.dim(`@${r.enrichment.ref}`) : "";
+  console.log(`  ${r.dataset_id.padEnd(12)} ${enr}${ref}  ${sync}  ${cols}`);
+  if (r.enrichment.error) console.log(chalk.red(`    enrichment: ${r.enrichment.error}`));
+  if (r.sync.errors?.length) {
+    for (const e of r.sync.errors) console.log(chalk.red(`    sync: ${e}`));
+  }
+  if (r.sync.metadata_columns_error) {
+    console.log(chalk.red(`    metadata columns: ${r.sync.metadata_columns_error}`));
+  }
+}
+
+const reindexCommand = new Command("reindex").description(
+  "Refresh dataset metadata: enrichment + nemar.org sync + first-class D1 columns",
+);
+
+reindexCommand
+  .argument("[dataset-id]", "Dataset ID to reindex (e.g., nm000103)")
+  .option("--all", "Reindex every dataset with a GitHub repo")
+  .option("--missing-metadata", "Reindex only datasets with NULL metadata columns")
+  .option("--stale", "Reindex only datasets whose metadata is older than --older-than days")
+  .option("--older-than <days>", "Threshold for --stale (default: 30)", "30")
+  .option("--skip-enrichment", "Skip the LLM enrichment step")
+  .option("--skip-sync", "Skip the nemar.org sync + D1 column refresh step")
+  .option("--ref <ref>", "Ref to enrich from (single-dataset only; default: main)")
+  .option("--dry-run", "List matched datasets without firing the reindex (bulk only)")
+  .action(
+    async (
+      datasetIdArg: string | undefined,
+      options: {
+        all?: boolean;
+        missingMetadata?: boolean;
+        stale?: boolean;
+        olderThan?: string;
+        skipEnrichment?: boolean;
+        skipSync?: boolean;
+        ref?: string;
+        dryRun?: boolean;
+      },
+    ) => {
+      if (!requireAuth()) return;
+
+      const bulkFlags = [options.all, options.missingMetadata, options.stale].filter(
+        Boolean,
+      ).length;
+      if (datasetIdArg && bulkFlags > 0) {
+        console.error(
+          chalk.red(
+            "Provide either a dataset-id OR a bulk flag (--all/--missing-metadata/--stale), not both",
+          ),
+        );
+        process.exit(1);
+      }
+      if (!datasetIdArg && bulkFlags === 0) {
+        console.error(
+          chalk.red("Provide a dataset-id or one of: --all, --missing-metadata, --stale"),
+        );
+        process.exit(1);
+      }
+      if (bulkFlags > 1) {
+        console.error(chalk.red("Use only one of --all, --missing-metadata, --stale"));
+        process.exit(1);
+      }
+      if (options.skipEnrichment && options.skipSync) {
+        console.error(chalk.red("--skip-enrichment and --skip-sync cannot both be set"));
+        process.exit(1);
+      }
+
+      // Single-dataset path
+      if (datasetIdArg) {
+        const spinner = ora(`Reindexing ${datasetIdArg}...`).start();
+        try {
+          const reindexOpts: ReindexOptions = {
+            skip_enrichment: options.skipEnrichment === true,
+            skip_sync: options.skipSync === true,
+            ...(options.ref && { ref: options.ref }),
+          };
+          const result = await reindexDataset(datasetIdArg, reindexOpts);
+          const ok = result.enrichment.status !== "failed" && result.sync.status !== "failed";
+          if (ok) {
+            spinner.succeed(`${datasetIdArg} reindexed`);
+          } else {
+            spinner.warn(`${datasetIdArg} reindexed with errors`);
+          }
+          console.log();
+          printReindexLine(result, { showRef: true });
+          if (!ok) process.exit(1);
+        } catch (err) {
+          spinner.fail(`Failed to reindex ${datasetIdArg}`);
+          console.error(chalk.red(errorDetail(err)));
+          process.exit(1);
+        }
+        return;
+      }
+
+      // Bulk path
+      const filter: ReindexFilter = options.all
+        ? "all"
+        : options.missingMetadata
+          ? "missing-metadata"
+          : "stale";
+      const bulkOpts: ReindexBulkOptions = {
+        skip_enrichment: options.skipEnrichment === true,
+        skip_sync: options.skipSync === true,
+        dry_run: options.dryRun === true,
+      };
+      if (options.olderThan !== undefined) {
+        const parsed = Number.parseInt(options.olderThan, 10);
+        if (!Number.isFinite(parsed) || parsed < 0) {
+          console.error(chalk.red(`Invalid --older-than: "${options.olderThan}"`));
+          process.exit(1);
+        }
+        bulkOpts.older_than_days = parsed;
+      }
+
+      const label = options.dryRun
+        ? `Listing ${filter} datasets...`
+        : `Reindexing ${filter} datasets...`;
+      const spinner = ora(label).start();
+      let response: ReindexBulkResponse;
+      try {
+        response = await reindexBulk(filter, bulkOpts);
+      } catch (err) {
+        spinner.fail("Bulk reindex failed");
+        console.error(chalk.red(errorDetail(err)));
+        process.exit(1);
+      }
+
+      if (response.dry_run) {
+        spinner.succeed(`${response.total} datasets match filter=${filter} (dry run, no changes)`);
+        if (response.datasets) {
+          for (const id of response.datasets) {
+            console.log(chalk.dim(`  - ${id}`));
+          }
+        }
+        return;
+      }
+
+      const results = response.results ?? [];
+      const okCount = results.filter(
+        (r) => r.enrichment.status !== "failed" && r.sync.status !== "failed",
+      ).length;
+      const failed = results.length - okCount;
+      if (failed === 0) {
+        spinner.succeed(
+          `${results.length}/${results.length} datasets reindexed in ${(response.elapsed_ms / 1000).toFixed(1)}s`,
+        );
+      } else {
+        spinner.warn(
+          `${okCount}/${results.length} ok; ${failed} failed in ${(response.elapsed_ms / 1000).toFixed(1)}s`,
+        );
+      }
+      console.log();
+      for (const r of results) {
+        printReindexLine(r);
+      }
+      // Non-zero exit on partial bulk failure so shell scripts can chain
+      // safely (`nemar admin reindex --missing-metadata && do_next_step`).
+      if (failed > 0) process.exit(1);
+    },
+  );
+
+adminCommand.addCommand(reindexCommand);
 
 // ============================================================================
 // Email Notification Preferences

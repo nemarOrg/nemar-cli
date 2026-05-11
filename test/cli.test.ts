@@ -191,7 +191,7 @@ describe("CLI Auth Commands", () => {
         apiKey: TEST_CONFIG.adminApiKey,
         apiUrl: TEST_CONFIG.apiUrl,
         username: "test-admin",
-        email: "test-admin@nemar.test",
+        email: "testAdmin@nemar.org",
         githubUsername: "test-admin-gh",
       });
 
@@ -549,6 +549,37 @@ describe("CLI Dataset Download", () => {
     expect(stdout).toContain("--output");
     expect(stdout).toContain("--jobs");
     expect(stdout).toContain("--no-data");
+    expect(stdout).toContain("--stimuli");
+    expect(stdout).toContain("--derivatives");
+  });
+
+  test("nemar dataset get --help advertises --stimuli/--derivatives", async () => {
+    const { stdout, exitCode } = await runCli(["dataset", "get", "--help"]);
+
+    expect(exitCode).toBe(0);
+    expect(stdout).toContain("--stimuli");
+    expect(stdout).toContain("--derivatives");
+  });
+
+  test("nemar dataset --help-all spells out download vs get", async () => {
+    const { stdout, exitCode } = await runCli(["dataset", "--help-all"]);
+
+    expect(exitCode).toBe(0);
+    expect(stdout).toContain("download");
+    expect(stdout).toContain("get");
+    expect(stdout).toContain("OUTSIDE");
+    expect(stdout).toContain("INSIDE");
+  });
+
+  test("nemar dataset download --no-data does not conflict with default skip", async () => {
+    // The default stimuli/derivatives skip excludes do NOT count toward
+    // `filter.active`, so they must not trigger the "filters imply data
+    // download" conflict that real user filters do. Regression guard for
+    // the active-flag semantics. We use a non-existent id so the command
+    // exits before any network work, but the conflict check runs early.
+    const { stdout, stderr } = await runCli(["dataset", "download", "nm999999", "--no-data"]);
+    const output = stdout + stderr;
+    expect(output).not.toContain("--no-data cannot be combined with BIDS filters");
   });
 
   test("nemar dataset download with non-existent dataset shows error", async () => {

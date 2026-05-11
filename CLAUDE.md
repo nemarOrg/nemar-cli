@@ -122,44 +122,46 @@ ssh mcm "zsh -i -c 'nemar admin users'"
 5. **Commit:** Atomic, <50 chars, no emojis, no co-author tags
 6. **PR:** Reference context and issue
 
-## Version Bumping
+## Version Bumping and Release
 
-**Never edit package.json version manually.** Always use the bump script.
+**Never edit package.json version manually.** The release pipeline is fully
+automated by CI; **do NOT manually run `./scripts/bump-version.sh` before a
+dev → main PR**. Manual bumps cause tag/version skew with the automation.
 
-### When to Bump
-- **patch**: Bug fixes, minor improvements (0.2.7 -> 0.2.8)
-- **minor**: New features, backward compatible (0.2.7 -> 0.3.0)
-- **major**: Breaking changes (0.2.7 -> 1.0.0)
-- **dev**: Development pre-release for testing (0.2.7 -> 0.2.8-dev)
+### How releases actually flow
 
-### Release Workflow
+`dev` always carries an `X.Y.Z-devN` suffix (e.g., `0.8.9-dev1`). Feature
+branches merge into dev without touching the version.
+
+1. **Open a dev → main PR as-is.** Do not bump the version first.
+2. **On merge to main**, `.github/workflows/auto-tag.yml` fires:
+   - Detects the `-dev*` suffix in `package.json`.
+   - Runs `./scripts/bump-version.sh <stripped>` (e.g., `0.8.9`), commits as `nemar-bot`, and pushes the strip commit back to main.
+   - Creates tag `vX.Y.Z` on the strip commit.
+   - A job-level `if: head_commit.author.email != 'nemar-bot@...'` guard prevents the bot's push from re-triggering the workflow.
+3. **`npm-publish.yml` fires on the `v*` tag push** and publishes to npm with `latest` (or pre-release tag for `-rc*`/`-alpha*`/`-beta*`).
+4. **`sync-dev.yml` fires on `npm-publish` success** (only for `vX.Y.Z` head_branch), merges main back into dev with `--no-ff`, and runs `./scripts/bump-version.sh dev0` to advance dev to next-patch `-dev0` (e.g., `0.8.10-dev0`).
+
+The pipeline intentionally owns bump-and-tag so the human can't desync
+package.json, the tag, and the npm release. `[skip ci]` is deliberately
+NOT used in the strip commit message because GitHub's skip marker would
+also block the tag-push event from triggering `npm-publish.yml`.
+
+### When manual bumps DO apply
+
+- **Cutting a minor or major release** (e.g., `0.8.9-devN` → `0.9.0`): on dev, run `./scripts/bump-version.sh minor-dev0` (or the equivalent pre-release form — read `scripts/bump-version.sh` for the exact spelling). Commit, push, then open the dev → main PR. The strip step still handles the suffix.
+- **Tagging a pre-release on main** (`-rc*`, `-alpha*`, `-beta*`): merge with that suffix in package.json. The auto-tag step skips the strip and tags the literal version with `--prerelease`.
+- **Direct main push** that bumps `package.json` to a clean version (no `-dev*`): `auto-tag.yml` tags the literal version. Rare; usually unwanted.
+
+### Bump Commands (reference for when they apply)
+
 ```bash
-# 1. Work on feature branch, merge to dev via PR
-# 2. When ready to release, bump version on dev branch:
-git checkout dev && git pull origin dev
-./scripts/bump-version.sh minor    # or patch/major
-
-# 3. Push to dev
-git push origin dev
-
-# 4. Create PR from dev to main (or merge existing PR)
-# 5. When merged to main, CI automatically:
-#    - Tags the release (v0.3.0)
-#    - Publishes to npm with 'latest' tag
-```
-
-### Bump Commands
-```bash
-# Release bumps (strips pre-release suffix)
-./scripts/bump-version.sh patch    # 0.2.7-dev -> 0.2.8
-./scripts/bump-version.sh minor    # 0.2.7-dev -> 0.3.0
-./scripts/bump-version.sh major    # 0.2.7 -> 1.0.0
-
-# Pre-release bumps (for testing before release)
-./scripts/bump-version.sh dev      # 0.2.7 -> 0.2.8-dev
-
-# Explicit version
-./scripts/bump-version.sh 1.0.0    # Set exact version
+./scripts/bump-version.sh patch     # 0.2.7-dev0 -> 0.2.8
+./scripts/bump-version.sh minor     # 0.2.7-dev0 -> 0.3.0
+./scripts/bump-version.sh major     # 0.2.7      -> 1.0.0
+./scripts/bump-version.sh dev0      # 0.2.7      -> 0.2.8-dev0
+./scripts/bump-version.sh dev1      # 0.2.7-dev0 -> 0.2.7-dev1
+./scripts/bump-version.sh 1.0.0     # Set exact version
 ```
 
 ### What the Script Does
@@ -363,6 +365,8 @@ nemar admin make-public       # Publish dataset (permanent)
 nemar admin delete-dataset    # Delete dataset and all resources
 nemar admin sync run          # Sync dataset metadata to nemar.org
 nemar admin sync status       # Show nemar.org sync status
+nemar admin reindex <id>      # Refresh enrichment + nemar.org sync + D1 metadata columns
+nemar admin reindex --all     # Bulk; also --missing-metadata, --stale [--older-than N]
 nemar admin email-preferences show    # Show email notification preferences
 nemar admin email-preferences update  # Update email notification preferences
 

@@ -20,7 +20,7 @@ const TEST_PASSWORD = "TestPassword123!";
 const TEST_USERS = [
   {
     username: "test-owner",
-    email: "test-owner@nemar.test",
+    email: "testOwner@nemar.org",
     github_username: "test-owner-gh",
     status: "approved",
     role: "owner",
@@ -28,7 +28,7 @@ const TEST_USERS = [
   },
   {
     username: "test-admin",
-    email: "test-admin@nemar.test",
+    email: "testAdmin@nemar.org",
     github_username: "test-admin-gh",
     status: "approved",
     role: "admin",

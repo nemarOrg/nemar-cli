@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { buildBidsFilterArgs } from "../src/lib/bids-filter";
+import { buildBidsFilterArgs, chooseGetFilter } from "../src/lib/bids-filter";
 
 describe("buildBidsFilterArgs — empty input", () => {
   test("no options yields no args and inactive", () => {
@@ -192,5 +192,141 @@ describe("buildBidsFilterArgs — composition", () => {
   test("only-exclude is still active", () => {
     const r = buildBidsFilterArgs({ exclude: "derivatives/**" });
     expect(r.active).toBe(true);
+  });
+});
+
+describe("buildBidsFilterArgs — stimuli/derivatives default-skip", () => {
+  test("excludeStimuli adds stimuli excludes but does not set active", () => {
+    const r = buildBidsFilterArgs({ excludeStimuli: true });
+    expect(r.active).toBe(false);
+    expect(r.args).toEqual([
+      "--exclude",
+      "stimuli/**",
+      "--exclude",
+      "**/stimuli/**",
+    ]);
+    expect(r.summary).toEqual(["skipping stimuli/ (use --stimuli to include)"]);
+  });
+
+  test("excludeDerivatives adds derivatives excludes but does not set active", () => {
+    const r = buildBidsFilterArgs({ excludeDerivatives: true });
+    expect(r.active).toBe(false);
+    expect(r.args).toEqual([
+      "--exclude",
+      "derivatives/**",
+      "--exclude",
+      "**/derivatives/**",
+    ]);
+    expect(r.summary).toEqual([
+      "skipping derivatives/ (use --derivatives to include)",
+    ]);
+  });
+
+  test("both flags emit both exclude pairs in order", () => {
+    const r = buildBidsFilterArgs({
+      excludeStimuli: true,
+      excludeDerivatives: true,
+    });
+    expect(r.args).toEqual([
+      "--exclude",
+      "stimuli/**",
+      "--exclude",
+      "**/stimuli/**",
+      "--exclude",
+      "derivatives/**",
+      "--exclude",
+      "**/derivatives/**",
+    ]);
+  });
+
+  test("default-skip composes with positive filters (subjects ∩ ¬stimuli)", () => {
+    const r = buildBidsFilterArgs({
+      subjects: "sub-01",
+      excludeStimuli: true,
+    });
+    expect(r.active).toBe(true);
+    expect(r.args).toEqual([
+      "--include",
+      "sub-01/**",
+      "--exclude",
+      "stimuli/**",
+      "--exclude",
+      "**/stimuli/**",
+    ]);
+  });
+
+  test("default-skip excludes precede user-provided excludes", () => {
+    const r = buildBidsFilterArgs({
+      excludeStimuli: true,
+      exclude: "sourcedata/**",
+    });
+    expect(r.args).toEqual([
+      "--exclude",
+      "stimuli/**",
+      "--exclude",
+      "**/stimuli/**",
+      "--exclude",
+      "sourcedata/**",
+    ]);
+    // user-provided exclude is still active
+    expect(r.active).toBe(true);
+  });
+
+  test("excludeStimuli=false (opt-in) emits no extra excludes", () => {
+    const r = buildBidsFilterArgs({
+      subjects: "sub-01",
+      excludeStimuli: false,
+      excludeDerivatives: false,
+    });
+    expect(r.args).toEqual(["--include", "sub-01/**"]);
+  });
+});
+
+describe("chooseGetFilter — explicit paths bypass default-skip", () => {
+  test("no paths, no flags: applies default-skip for both", () => {
+    const r = chooseGetFilter(undefined, {});
+    expect(r.args).toEqual([
+      "--exclude",
+      "stimuli/**",
+      "--exclude",
+      "**/stimuli/**",
+      "--exclude",
+      "derivatives/**",
+      "--exclude",
+      "**/derivatives/**",
+    ]);
+  });
+
+  test("explicit paths: emits NO excludes (path is the filter)", () => {
+    const r = chooseGetFilter(["stimuli/"], {});
+    expect(r.args).toEqual([]);
+    expect(r.active).toBe(false);
+  });
+
+  test("explicit paths ignore --stimuli/--derivatives flags", () => {
+    // Flags are no-ops when paths are given; the path itself decides.
+    const rWith = chooseGetFilter(["stimuli/"], { stimuli: true });
+    const rWithout = chooseGetFilter(["stimuli/"], {});
+    expect(rWith.args).toEqual(rWithout.args);
+  });
+
+  test("--stimuli alone (no paths) drops stimuli excludes, keeps derivatives", () => {
+    const r = chooseGetFilter(undefined, { stimuli: true });
+    expect(r.args).toEqual([
+      "--exclude",
+      "derivatives/**",
+      "--exclude",
+      "**/derivatives/**",
+    ]);
+  });
+
+  test("both flags (no paths) drop all default excludes", () => {
+    const r = chooseGetFilter(undefined, { stimuli: true, derivatives: true });
+    expect(r.args).toEqual([]);
+  });
+
+  test("empty paths array is treated as 'no paths'", () => {
+    const r = chooseGetFilter([], {});
+    expect(r.args.length).toBeGreaterThan(0);
   });
 });

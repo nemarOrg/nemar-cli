@@ -3,11 +3,11 @@
 
 -- test-owner (owner user for testing owner-only commands)
 INSERT INTO users (username, email, password_hash, github_username, status, role, email_verified, approved_at, revoked_at)
-VALUES ('test-owner', 'test-owner@nemar.test', '$2b$10$JmaHDE03Q2pjaBgWB4jeN.mgLCp9WdSWRpicN4J5gAiJ/YZBRPWIi', 'test-owner-gh', 'approved', 'owner', 1, datetime('now'), NULL);
+VALUES ('test-owner', 'testOwner@nemar.org', '$2b$10$JmaHDE03Q2pjaBgWB4jeN.mgLCp9WdSWRpicN4J5gAiJ/YZBRPWIi', 'test-owner-gh', 'approved', 'owner', 1, datetime('now'), NULL);
 
 -- test-admin (admin user for testing admin commands)
 INSERT INTO users (username, email, password_hash, github_username, status, role, email_verified, approved_at, revoked_at)
-VALUES ('test-admin', 'test-admin@nemar.test', '$2b$10$JmaHDE03Q2pjaBgWB4jeN.mgLCp9WdSWRpicN4J5gAiJ/YZBRPWIi', 'test-admin-gh', 'approved', 'admin', 1, datetime('now'), NULL);
+VALUES ('test-admin', 'testAdmin@nemar.org', '$2b$10$JmaHDE03Q2pjaBgWB4jeN.mgLCp9WdSWRpicN4J5gAiJ/YZBRPWIi', 'test-admin-gh', 'approved', 'admin', 1, datetime('now'), NULL);
 
 -- test-user (regular approved user)
 INSERT INTO users (username, email, password_hash, github_username, status, role, email_verified, approved_at, revoked_at)

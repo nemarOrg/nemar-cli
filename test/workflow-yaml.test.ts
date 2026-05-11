@@ -8,6 +8,7 @@
 
 import { describe, expect, test } from "bun:test";
 import { parse } from "yaml";
+import { buildEnrichmentCommitPayload } from "../backend/src/routes/webhooks";
 import { getWorkflowTemplates } from "../backend/src/services/github";
 
 describe("CI workflow templates", () => {
@@ -46,6 +47,129 @@ describe("CI workflow templates", () => {
         expect(content).toMatch(/https:\/\/api\.nemar\.org\/webhooks\//);
       }
     }
+  });
+
+  test("buildEnrichmentCommitPayload returns the contract field set", () => {
+    // The llm-enrichment.yml Action reads exactly these field names via jq.
+    // Pin the contract so a typo (`bidsignore_entry`, dropped key) is caught
+    // by a unit test instead of by a silent no-op on the Action side.
+    const payload = buildEnrichmentCommitPayload(
+      '{"hello":"world"}',
+      [".nemar/", "extra"],
+      "Update X",
+    );
+    expect(payload.metadata_path).toBe(".nemar/metadata.json");
+    expect(payload.metadata_content).toBe('{"hello":"world"}');
+    expect(payload.bidsignore_entries).toEqual([".nemar/", "extra"]);
+    expect(payload.commit_message).toBe("Update X");
+    // The set of keys IS the contract; any future addition must be explicit.
+    expect(Object.keys(payload).sort()).toEqual([
+      "bidsignore_entries",
+      "commit_message",
+      "metadata_content",
+      "metadata_path",
+    ]);
+  });
+
+  test("llm-enrichment opts into client_commits and has write permission", () => {
+    // Phase 5 contract: the Action sends client_commits:true so the Worker
+    // returns the metadata payload and skips its own commit. The Action
+    // commits with the per-repo GITHUB_TOKEN, moving the REST traffic off
+    // the shared admin PAT.
+    const llm = templates.find((t) => t.path.endsWith("llm-enrichment.yml"));
+    expect(llm).toBeDefined();
+    if (!llm) return;
+    expect(llm.content).toContain("\\\"client_commits\\\": true");
+    expect(llm.content).toContain("actions/checkout@v4");
+    // permissions should be job-scoped, not workflow-scoped, so future jobs
+    // added to this template don't silently inherit write.
+    const parsed = parse(llm.content) as {
+      permissions?: unknown;
+      jobs: Record<string, { permissions?: { contents?: string } }>;
+    };
+    expect(parsed.permissions).toBeUndefined();
+    expect(parsed.jobs.enrich.permissions?.contents).toBe("write");
+    // Worker-fallback path: when client_commits is missing/false in the
+    // response (older backend), the Action must skip the local commit.
+    expect(llm.content).toMatch(/client_commits.*\/\/\s*false/);
+  });
+
+  test("llm-enrichment triggers on release branches and passes ref through (epic #417 phase 1)", () => {
+    const llm = templates.find((t) => t.path.endsWith("llm-enrichment.yml"));
+    expect(llm).toBeDefined();
+    if (!llm) return;
+
+    const parsed = parse(llm.content) as {
+      on: { push?: { branches?: string[]; paths?: string[] } };
+    };
+    // Trigger must cover release/** branches so the release PR re-enriches
+    // before merge, baking fresh .nemar/metadata.json into the merge commit
+    // (and therefore into the tag created by pr-merge.yml).
+    expect(parsed.on.push?.branches).toEqual(["main", "release/**"]);
+    // .nemar/metadata.json change must also re-trigger so a hand-edit reflects.
+    expect(parsed.on.push?.paths).toContain(".nemar/metadata.json");
+
+    // The Action must pass ref to the webhook so the Worker reads from the
+    // right snapshot (main, release/v*, etc.) instead of always "main".
+    expect(llm.content).toContain('\\"ref\\": \\"$BRANCH_REF\\"');
+    expect(llm.content).toContain('BRANCH_REF="${{ github.ref_name }}"');
+
+    // Release-branch pushes must force re-enrichment so the source_hash
+    // short-circuit doesn't skip a Version-only bump.
+    expect(llm.content).toMatch(/case "\$BRANCH_REF" in\s*\n\s*release\/\*\) FORCE="true"/);
+
+    // The commit-back path must push to the branch that triggered the run,
+    // not always to main.
+    expect(llm.content).toContain('git push origin "HEAD:$BRANCH_REF"');
+    expect(llm.content).toContain('git pull --rebase origin "$BRANCH_REF"');
+
+    // Checkout must use the triggering ref (not the default branch) so the
+    // local working tree matches what we're about to commit back to.
+    expect(llm.content).toContain("ref: ${{ github.ref_name }}");
+  });
+
+  test("version-doi.yml refreshes enrichment before minting (epic #417 phase 1)", () => {
+    const versionDoi = templates.find((t) => t.path.endsWith("version-doi.yml"));
+    expect(versionDoi).toBeDefined();
+    if (!versionDoi) return;
+
+    // The defensive refresh step must call llm-enrich with the tag as ref
+    // and force=true, and it must be tolerant of failure so a transient
+    // outage does not block DOI publication. client_commits=true keeps the
+    // Worker from attempting a (doomed) commit against an immutable tag.
+    expect(versionDoi.content).toContain("Refresh enrichment from tag");
+    expect(versionDoi.content).toContain("continue-on-error: true");
+    expect(versionDoi.content).toContain('\\"force\\": true');
+    expect(versionDoi.content).toContain('\\"client_commits\\": true');
+    expect(versionDoi.content).toContain('\\"ref\\": \\"$TAG\\"');
+    // Curl-level failure must fall through to the warning branch, not a
+    // silent green step.
+    expect(versionDoi.content).toContain("|| HTTP_CODE=0");
+    expect(versionDoi.content).toContain('[ "$HTTP_CODE" = "0" ]');
+    // The Worker returns HTTP 200 with embedded *_error fields when a
+    // sub-step fails (commit/openrouter/doi/cache); the Action must surface
+    // these as warnings so a green check does not mask a silent failure.
+    expect(versionDoi.content).toMatch(/for field in commit_error openrouter_error/);
+
+    // The refresh step must appear before the publish-DOI step.
+    const refreshIdx = versionDoi.content.indexOf("Refresh enrichment from tag");
+    const publishIdx = versionDoi.content.indexOf("Publish version DOI");
+    expect(refreshIdx).toBeGreaterThan(0);
+    expect(publishIdx).toBeGreaterThan(refreshIdx);
+  });
+
+  test("llm-enrichment.yml guards curl-level failures and includes failure context (epic #417 phase 1)", () => {
+    const llm = templates.find((t) => t.path.endsWith("llm-enrichment.yml"));
+    expect(llm).toBeDefined();
+    if (!llm) return;
+    // Network/DNS/TLS failure should fall through to the warning branch
+    // instead of leaving HTTP_CODE empty (which bash coerces to 0 and would
+    // bypass the >= 400 check, yielding a silent green step).
+    expect(llm.content).toContain("|| HTTP_CODE=0");
+    expect(llm.content).toContain('[ "$HTTP_CODE" = "0" ]');
+    // Push-retry warnings should point operators at the git output they
+    // need to read instead of being opaque.
+    expect(llm.content).toContain("(see git output above)");
   });
 
   test("no literal newlines inside shell strings (escape regression)", () => {

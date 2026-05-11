@@ -5,11 +5,12 @@ Download NEMAR datasets using git-annex for efficient large file handling.
 ## Quick Download
 
 ```bash
-# Download dataset (includes all data files)
+# Download dataset (skips stimuli/ and derivatives/ by default)
 nemar dataset download nm000104
 ```
 
-This clones the dataset and downloads all data files from S3.
+This clones the dataset and downloads data files from S3, except for content
+under `stimuli/` and `derivatives/` (see "Stimuli and derivatives" below).
 
 ## Download Options
 
@@ -17,11 +18,35 @@ This clones the dataset and downloads all data files from S3.
 # Download to specific directory
 nemar dataset download nm000104 -o ./datasets/
 
-# Clone metadata only (skip large data files)
+# Clone metadata only (skip all data files)
 nemar dataset download nm000104 --no-data
 
 # Parallel downloads for large datasets
 nemar dataset download nm000104 -j 8
+```
+
+## Stimuli and Derivatives
+
+By default, content under `stimuli/` and `derivatives/` is skipped because
+these folders can be very large. Git-annex pointers (symlinks) are still
+cloned, so the dataset structure is intact and you can fetch the content on
+demand.
+
+```bash
+# Default: skip stimuli/ and derivatives/
+nemar dataset download nm000104
+
+# Include stimuli/
+nemar dataset download nm000104 --stimuli
+
+# Include both
+nemar dataset download nm000104 --stimuli --derivatives
+
+# Already cloned? Fetch them later from inside the dataset directory:
+cd nm000104
+nemar dataset get --stimuli
+nemar dataset get --derivatives
+nemar dataset get stimuli/sub-01/         # explicit path is also honored
 ```
 
 ## Resume an Interrupted Download

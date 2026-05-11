@@ -53,7 +53,7 @@ import {
   searchDatasets,
 } from "../lib/api.js";
 import { isAwsCliAvailable } from "../lib/aws-cli.js";
-import { buildBidsFilterArgs } from "../lib/bids-filter.js";
+import { buildBidsFilterArgs, chooseGetFilter } from "../lib/bids-filter.js";
 import {
   type BidsValidationResult,
   checkDenoInstalled,
@@ -107,6 +107,7 @@ import {
   readRemoteHeadDatasetVersion,
   resolveUpstreamRef,
   saveDataset,
+  selectAnnexS3Remote,
   toS3Credentials,
   verifyGitHubAuth,
 } from "../lib/git-annex.js";
@@ -159,13 +160,25 @@ Workflows:
   Edit (private):       nemar dataset commit -> nemar dataset push
   Edit (public):        nemar dataset update
   New version:          nemar dataset release
-  Download:             nemar dataset clone <id> -> nemar dataset get
+  Download (one-shot):  nemar dataset download <id>            (clone + fetch data)
+  Download (lazy):      nemar dataset clone <id>               (clone only, then 'cd' in)
+                        nemar dataset get [paths]              (fetch data later)
   Request publication:  nemar dataset publish request <id>
+
+Note:
+  'download' runs OUTSIDE a dataset directory and clones + fetches in one step.
+  'get' runs INSIDE an already-cloned dataset directory and only fetches data.
+  For NEMAR datasets (nm/on prefix), both default-skip content under stimuli/
+  and derivatives/ (large folders); pass --stimuli or --derivatives to include
+  them. OpenNeuro datasets (ds prefix) ignore these flags and download the
+  full tree.
 
 Examples:
   $ nemar dataset validate ./my-dataset          # Validate locally
   $ nemar dataset upload ./my-dataset            # Upload to NEMAR
-  $ nemar dataset download nm000104              # Download a dataset
+  $ nemar dataset download nm000104              # Download (skips stimuli/derivatives)
+  $ nemar dataset download nm000104 --stimuli    # Also fetch stimuli/
+  $ nemar dataset get --derivatives              # Fetch derivatives/ in a clone
   $ nemar dataset list --mine                    # List your datasets
   $ nemar dataset status nm000104                # Check dataset status
   $ nemar dataset request-access nm000104        # Request collaborator access
@@ -1643,7 +1656,9 @@ datasetCommand
   .option("--runs <list>", "Comma-separated runs (e.g. 1,2 — matches run-1 and run-01)")
   .option("--datatypes <list>", "Comma-separated BIDS datatypes (e.g. eeg,emg)")
   .option("--include <globs>", "Comma-separated extra include globs")
-  .option("--exclude <globs>", "Comma-separated exclude globs (e.g. derivatives/**)")
+  .option("--exclude <globs>", "Comma-separated exclude globs (e.g. sourcedata/**)")
+  .option("--stimuli", "Include stimuli/ content (skipped by default; can be large)")
+  .option("--derivatives", "Include derivatives/ content (skipped by default; can be large)")
   .addHelpText(
     "after",
     `
@@ -1656,13 +1671,20 @@ Description:
   OpenNeuro datasets (ds prefix) are downloaded as plain files from
   OpenNeuro's public S3 bucket. No account or git-annex required.
 
+  For NEMAR datasets, content under stimuli/ and derivatives/ is skipped by
+  default because these folders can be very large. The git-annex pointers
+  are still cloned, so you can fetch them later with 'nemar dataset get
+  --stimuli' or 'nemar dataset get --derivatives' from inside the dataset
+  directory. (OpenNeuro datasets ignore these flags; the full tree is
+  always downloaded.)
+
 Requirements:
   - git-annex installed (NEMAR datasets only)
   - NEMAR account (for private datasets)
   - AWS CLI recommended for OpenNeuro downloads (falls back to HTTPS)
 
 Examples:
-  $ nemar dataset download nm000104              # Download NEMAR dataset
+  $ nemar dataset download nm000104              # Download NEMAR dataset (skips stimuli/derivatives)
   $ nemar dataset download nm000104 -o ./data    # Custom output directory
   $ nemar dataset download nm000104 --no-data    # Metadata only (fast)
   $ nemar dataset download nm000104 -j 8         # More parallel streams
@@ -1671,7 +1693,8 @@ Examples:
   $ nemar dataset download nm000104 --update --prune  # Plus drop orphan objects
   $ nemar dataset download nm000104 --subjects sub-01,02      # Only these subjects
   $ nemar dataset download nm000104 --tasks rest --datatypes eeg  # Subset
-  $ nemar dataset download nm000104 --exclude 'derivatives/**'    # Skip derivatives
+  $ nemar dataset download nm000104 --stimuli                 # Also download stimuli/
+  $ nemar dataset download nm000104 --stimuli --derivatives   # Download everything
   $ nemar dataset download ds000248              # Download from OpenNeuro`,
   )
   .action(async (datasetId, options) => {
@@ -1699,6 +1722,8 @@ Examples:
       datatypes: options.datatypes,
       include: options.include,
       exclude: options.exclude,
+      excludeStimuli: options.stimuli !== true,
+      excludeDerivatives: options.derivatives !== true,
     });
 
     if (filter.active && options.data === false) {
@@ -1995,11 +2020,15 @@ Examples:
         console.log(chalk.dim("Skipping data files (--no-data flag)"));
       }
     } else {
+      for (const line of filter.summary) {
+        console.log(chalk.dim(`  ${line}`));
+      }
       console.log(chalk.bold(`Downloading data files (${options.jobs} parallel streams)...`));
 
       // Pre-count pending files+bytes so the progress bar has an authoritative
       // denominator. Falls back to non-percent display if precount fails.
-      const pending = await countPendingDownload(absoluteOutput);
+      const matchArgs = filter.args.length > 0 ? filter.args : undefined;
+      const pending = await countPendingDownload(absoluteOutput, undefined, matchArgs);
       const tracker = new DownloadProgressTracker(
         pending?.fileCount ?? 0,
         pending?.totalBytes ?? 0,
@@ -2009,7 +2038,7 @@ Examples:
         jobs: Number.parseInt(options.jobs, 10),
         credentials: s3Creds,
         paths: updatePaths,
-        extraArgs: filter.active ? filter.args : undefined,
+        extraArgs: matchArgs,
         onProgress: (line) => tracker.processLine(line),
       });
 
@@ -3928,6 +3957,8 @@ datasetCommand
   .description("Download annexed data files for the current dataset")
   .argument("[files...]", "Specific files/paths to get (default: all)")
   .option("-j, --jobs <number>", "Parallel download streams", "4")
+  .option("--stimuli", "Include stimuli/ content (skipped by default; can be large)")
+  .option("--derivatives", "Include derivatives/ content (skipped by default; can be large)")
   .addHelpText(
     "after",
     `
@@ -3938,10 +3969,18 @@ Description:
   For private datasets, credentials are fetched automatically
   if you are logged in (nemar auth login).
 
+  By default, content under stimuli/ and derivatives/ is skipped because
+  these folders can be very large. Pass --stimuli or --derivatives to
+  fetch them. When you supply explicit file paths, the path itself is
+  treated as the filter and the default-skip is not applied.
+
 Examples:
-  $ nemar dataset get                    # Get all files
-  $ nemar dataset get sub-01/eeg/        # Get specific directory
-  $ nemar dataset get *.edf -j 8         # Get EDF files with 8 streams`,
+  $ nemar dataset get                       # Get all files (skips stimuli/derivatives)
+  $ nemar dataset get --stimuli             # Get all files including stimuli/
+  $ nemar dataset get --stimuli --derivatives  # Get everything
+  $ nemar dataset get sub-01/eeg/           # Get specific directory
+  $ nemar dataset get stimuli/              # Explicit path: fetches stimuli/
+  $ nemar dataset get *.edf -j 8            # Get EDF files with 8 streams`,
   )
   .action(async (files, options) => {
     const cwd = process.cwd();
@@ -4000,8 +4039,21 @@ Examples:
 
     const paths = files.length > 0 ? files : undefined;
 
+    const filter = chooseGetFilter(paths, {
+      stimuli: options.stimuli,
+      derivatives: options.derivatives,
+    });
+    const matchArgs = filter.args.length > 0 ? filter.args : undefined;
+
+    // Print skip/summary lines first so the user sees them even when the
+    // filtered precount is empty (e.g., a dataset whose only annex content
+    // lives under stimuli/).
+    for (const line of filter.summary) {
+      console.log(chalk.dim(`  ${line}`));
+    }
+
     // Pre-count pending files+bytes scoped to the same paths the get will use.
-    const pending = await countPendingDownload(cwd, paths);
+    const pending = await countPendingDownload(cwd, paths, matchArgs);
 
     if (pending && pending.fileCount === 0) {
       console.log(chalk.green("All data files already present"));
@@ -4022,6 +4074,7 @@ Examples:
       jobs,
       paths,
       credentials: getS3Creds,
+      extraArgs: matchArgs,
       onProgress: (line) => tracker.processLine(line),
     });
     if (!result.success) {
@@ -4215,13 +4268,15 @@ Examples:
     }
 
     // Push annex content to S3 (if enabled and remote exists)
+    let s3PushFailed = false;
     if (options.s3 !== false) {
       const s3Remotes = await getAnnexS3Remotes(cwd);
-      if (s3Remotes.length > 0) {
-        const remoteName = s3Remotes[0];
+      const remoteName = await selectAnnexS3Remote(cwd, s3Remotes);
+      if (remoteName) {
         if (s3Remotes.length > 1) {
+          const others = s3Remotes.filter((r) => r !== remoteName).join(", ");
           console.log(
-            chalk.dim(`  Multiple S3 remotes: ${s3Remotes.join(", ")}. Using: ${remoteName}`),
+            chalk.dim(`  Multiple S3 remotes available; using ${remoteName} (skipped: ${others})`),
           );
         }
         const jobs = Number.parseInt(options.jobs, 10);
@@ -4233,39 +4288,134 @@ Examples:
         // Get STS credentials for S3 upload
         const pushDatasetId = await getDatasetIdFromRemote(cwd);
         let pushCreds: Awaited<ReturnType<typeof requestUploadCredentials>> | null = null;
+        let credPermissionDenied = false;
         if (pushDatasetId && isAuthenticated()) {
           spinner = ora("Requesting upload credentials...").start();
           try {
             pushCreds = await requestUploadCredentials(pushDatasetId);
             spinner.succeed("Upload credentials received");
           } catch (credError) {
-            spinner.warn(
-              `Could not get upload credentials: ${errorDetail(credError)}. Trying environment credentials.`,
-            );
+            // The backend returns 403 when the user is authenticated but is not
+            // a NEMAR collaborator on this dataset. Detect that, auto-call
+            // request-access once, and retry — public datasets auto-approve.
+            const isCollaboratorError =
+              credError instanceof ApiError &&
+              credError.statusCode === 403 &&
+              /collaborator/i.test(credError.message);
+            if (isCollaboratorError) {
+              spinner.text = "Requesting collaborator access...";
+              try {
+                await requestDatasetAccess(pushDatasetId);
+                pushCreds = await requestUploadCredentials(pushDatasetId);
+                spinner.succeed("Granted collaborator access; upload credentials received");
+              } catch (retryError) {
+                // Distinguish a real permission denial (retry is also a 4xx)
+                // from a transient backend failure (5xx, network, parse). Only
+                // the former should suggest `request-access`; the latter is a
+                // service issue the user can't fix that way.
+                const retryIs4xx =
+                  retryError instanceof ApiError &&
+                  retryError.statusCode >= 400 &&
+                  retryError.statusCode < 500;
+                spinner.fail(`Could not get upload credentials: ${errorDetail(credError)}`);
+                console.log(
+                  chalk.dim(`  Tried request-access automatically: ${errorDetail(retryError)}`),
+                );
+                if (retryIs4xx) {
+                  credPermissionDenied = true;
+                  console.log(
+                    chalk.yellow(
+                      `  Run 'nemar dataset request-access ${pushDatasetId}' and retry this push.`,
+                    ),
+                  );
+                } else {
+                  console.log(
+                    chalk.yellow(
+                      "  The credentials service is unavailable; retry the push in a moment.",
+                    ),
+                  );
+                  s3PushFailed = true;
+                }
+              }
+            } else {
+              spinner.warn(
+                `Could not get upload credentials: ${errorDetail(credError)}. Falling back to environment credentials.`,
+              );
+            }
           }
         }
 
-        spinner = ora(`Copying data to S3 (${remoteName})...`).start();
+        if (credPermissionDenied) {
+          s3PushFailed = true;
+        } else {
+          const s3Creds = pushCreds ? toS3Credentials(pushCreds.credentials) : undefined;
 
-        const s3Creds = pushCreds ? toS3Credentials(pushCreds.credentials) : undefined;
-
-        const s3Result = await copyToAnnexRemote(cwd, remoteName, jobs, s3Creds);
-        if (!s3Result.success) {
-          spinner.fail("S3 push failed");
-          console.log(chalk.red(`  ${s3Result.error}`));
           if (!pushCreds) {
-            console.log(chalk.dim("  Ensure AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY are set,"));
-            console.log(
-              chalk.dim("  or log in with 'nemar auth login' for automatic credentials."),
-            );
+            const hasAwsId = Boolean(process.env.AWS_ACCESS_KEY_ID);
+            const hasAwsSecret = Boolean(process.env.AWS_SECRET_ACCESS_KEY);
+            if (!hasAwsId || !hasAwsSecret) {
+              console.log(
+                chalk.yellow(
+                  `  No NEMAR credentials and AWS env vars are missing (AWS_ACCESS_KEY_ID=${
+                    hasAwsId ? "set" : "unset"
+                  }, AWS_SECRET_ACCESS_KEY=${hasAwsSecret ? "set" : "unset"}).`,
+                ),
+              );
+            }
           }
-          console.log(chalk.dim("  Git changes were pushed successfully."));
-          process.exit(1);
+
+          spinner = ora(`Copying data to S3 (${remoteName})...`).start();
+          let s3Result: Awaited<ReturnType<typeof copyToAnnexRemote>>;
+          try {
+            s3Result = await copyToAnnexRemote(cwd, remoteName, jobs, s3Creds);
+          } finally {
+            // Always clear STS creds from .git/annex/creds/ once the copy
+            // subprocess exits, regardless of outcome. Otherwise an interrupted
+            // upload leaves expired credentials on disk that fail later reads.
+            if (pushCreds) await clearAnnexCredentials(cwd);
+          }
+          if (!s3Result.success) {
+            spinner.fail("S3 push failed");
+            console.log(chalk.red(`  ${s3Result.error}`));
+            console.log(
+              chalk.yellow(
+                "  Git changes were pushed successfully; data upload can be retried later with 'nemar dataset push --no-pr'.",
+              ),
+            );
+            s3PushFailed = true;
+          } else {
+            spinner.succeed(`Copied ${s3Result.filesCopied} file(s) to S3`);
+
+            // git annex copy writes new location records to the local git-annex
+            // branch. The pushToGitHub at the start of this action pushed the
+            // branch as it stood then; those new commits have to be pushed
+            // separately or fresh clones won't know the S3 copies exist.
+            const annexPushSpinner = ora("Pushing git-annex branch...").start();
+            const annexPush = spawn({
+              cmd: ["git", "push", "origin", "git-annex"],
+              cwd,
+              stdout: "pipe",
+              stderr: "pipe",
+            });
+            const annexPushStderr = await new Response(annexPush.stderr).text();
+            const annexPushExit = await annexPush.exited;
+            if (annexPushExit !== 0) {
+              annexPushSpinner.warn(
+                `Could not push git-annex branch: ${annexPushStderr.trim() || "unknown error"}`,
+              );
+              console.log(
+                chalk.yellow(
+                  "  Run 'git push origin git-annex' manually so other clones can locate the new files.",
+                ),
+              );
+              s3PushFailed = true;
+            } else {
+              annexPushSpinner.succeed("Pushed git-annex branch");
+            }
+          }
         }
-        await clearAnnexCredentials(cwd);
-        spinner.succeed(`Copied ${s3Result.filesCopied} file(s) to S3`);
       } else {
-        console.log(chalk.dim("  No S3 remote configured; skipping data push."));
+        console.log(chalk.dim("  No usable S3 remote configured; skipping data push."));
       }
     }
 
@@ -4327,6 +4477,12 @@ Examples:
         }
       }
     }
+
+    // Surface the partial-failure exit code so callers and CI scripts can tell
+    // that data didn't ship even when git push (and optionally PR creation)
+    // succeeded. With --pr the PR is already open at this point, so users see
+    // both the URL and the nonzero exit.
+    if (s3PushFailed) process.exit(1);
   });
 
 // Drop command
