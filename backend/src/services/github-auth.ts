@@ -317,3 +317,24 @@ export function getDefaultGitHubAuth(env: Bindings, installationId?: number): Gi
   }
   return { kind: "pat", token: env.GITHUB_ADMIN_PAT };
 }
+
+/** Auth source for any operation targeting the `nemarDatasets` org —
+ *  which is every dataset-repo helper in `services/github.ts` today.
+ *  Routes through `getDefaultGitHubAuth` so partial App config falls
+ *  back to PAT gracefully. */
+export function getDatasetsAuth(env: Bindings): GitHubAuth {
+  return getDefaultGitHubAuth(env, resolveInstallationId(env, "nemarDatasets"));
+}
+
+/** Resolve a bearer token for the nemarDatasets org. The convenience
+ *  shape route handlers want: `const pat = await getDatasetsToken(c.env);`
+ *  swaps the previous `const pat = c.env.GITHUB_ADMIN_PAT;` 1:1.
+ *  App-minted tokens are cached per-installation in this module, so
+ *  repeated calls within one request are essentially free.
+ *
+ *  Phase 5 will rip this function out alongside the PAT path once all
+ *  callers have moved through (#440). */
+export async function getDatasetsToken(env: Bindings): Promise<string> {
+  const auth = getDatasetsAuth(env);
+  return auth.kind === "app" ? await auth.getToken() : auth.token;
+}

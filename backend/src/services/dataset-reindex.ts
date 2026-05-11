@@ -25,6 +25,7 @@ import {
   computeDatasetMetadataColumns,
   writeDatasetMetadataColumns,
 } from "./dataset-metadata-columns.js";
+import { getDatasetsToken } from "./github-auth.js";
 import { getBlobContent, getTreeAtRef } from "./github.js";
 import { syncDatasetToNemar } from "./nemar-sync.js";
 import { errorMessage } from "./repo-metadata.js";
@@ -136,7 +137,7 @@ export async function runDatasetSync(
   if (!repoName) {
     throw new DatasetReindexError(`Invalid github_repo format: ${dataset.github_repo}`, 400);
   }
-  const pat = env.GITHUB_ADMIN_PAT;
+  const pat = await getDatasetsToken(env);
   const s3 = s3Cfg(env);
 
   // Read repo tree first; everything else depends on it. Wrap to give the
