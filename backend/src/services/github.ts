@@ -238,8 +238,7 @@ export async function githubFetchWithRetry(
         // would burn the secondary cool-down window and surface a
         // misleading "permission denied" upstream. Retrying is the
         // cheaper mistake.
-        secondary =
-          bodyReadFailed || isSecondaryRateLimit(response.status, bodySnippet);
+        secondary = bodyReadFailed || isSecondaryRateLimit(response.status, bodySnippet);
         if (bodyReadFailed) {
           console.warn(
             `[github] ${method} ${parsedPath} 403 body unreadable; treating as secondary rate limit (fail-safe)`,
@@ -265,8 +264,7 @@ export async function githubFetchWithRetry(
         (retryOn404 && response.status === 404);
 
       if (transient && attempt < maxAttempts) {
-        const waitMs =
-          retryAfterMs !== null ? Math.min(retryAfterMs, maxThrottleMs) : delayMs;
+        const waitMs = retryAfterMs !== null ? Math.min(retryAfterMs, maxThrottleMs) : delayMs;
         console.warn(
           `[github] ${method} ${parsedPath} attempt ${attempt} -> HTTP ${response.status}${secondary ? " (secondary rate limit)" : ""}, retrying in ${waitMs}ms`,
         );
@@ -1300,7 +1298,15 @@ jobs:
         run: node /tmp/stream-archive.js
 `;
 
-  // LLM Metadata Enrichment workflow
+  // LLM Metadata Enrichment workflow.
+  //
+  // The Action sends \`client_commits: true\` in the webhook payload. When the
+  // Worker honors the flag (current backend), it returns the metadata commit
+  // payload in the response and the Action commits with its own GITHUB_TOKEN,
+  // off the shared admin PAT. When the flag is ignored (older backend), the
+  // Worker commits itself; the Action notices the absence of \`client_commits\`
+  // in the response and skips local commit, falling through to the
+  // worker-side behavior.
   const llmEnrichment = `name: LLM Metadata Enrichment
 
 on:
@@ -1311,11 +1317,20 @@ on:
       - 'dataset_description.json'
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   enrich:
     runs-on: ubuntu-latest
     steps:
-      - name: Trigger enrichment
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          token: \${{ secrets.GITHUB_TOKEN }}
+
+      - name: Trigger enrichment and commit locally if asked
         env:
           NEMAR_WEBHOOK_TOKEN: \${{ secrets.NEMAR_WEBHOOK_TOKEN }}
         run: |
@@ -1335,20 +1350,77 @@ jobs:
 
           echo "Triggering LLM enrichment for $REPO_NAME (force=$FORCE)"
 
-          RESPONSE=$(curl -s -w "\\n%{http_code}" -X POST \\
+          # Capture full response (no trailing-newline stripping) so jq can
+          # parse the body. The Worker returns 200 even when commit_error
+          # is populated; non-2xx is reserved for hard failures.
+          BODY_FILE=$(mktemp)
+          HTTP_CODE=$(curl -sS -o "$BODY_FILE" -w "%{http_code}" -X POST \\
             "https://api.nemar.org/webhooks/llm-enrich" \\
             -H "Content-Type: application/json" \\
             -H "X-Webhook-Token: $NEMAR_WEBHOOK_TOKEN" \\
-            -d "{\\"dataset_id\\": \\"$REPO_NAME\\", \\"force\\": $FORCE}")
+            -d "{\\"dataset_id\\": \\"$REPO_NAME\\", \\"force\\": $FORCE, \\"client_commits\\": true}")
 
-          HTTP_CODE=$(echo "$RESPONSE" | tail -1)
-          BODY=$(echo "$RESPONSE" | head -n -1)
-
-          echo "Response ($HTTP_CODE): $BODY"
+          echo "HTTP $HTTP_CODE"
+          cat "$BODY_FILE"
+          echo
 
           if [ "$HTTP_CODE" -ge 400 ]; then
             echo "::warning::LLM enrichment failed (HTTP $HTTP_CODE) - this is non-blocking"
+            rm -f "$BODY_FILE"
+            exit 0
           fi
+
+          # If the Worker honored client_commits, apply the returned payload.
+          # Older Workers ignore the flag and have already committed themselves;
+          # in that case client_commits will be missing/false and we no-op.
+          CLIENT_COMMITS=$(jq -r '.client_commits // false' "$BODY_FILE")
+          if [ "$CLIENT_COMMITS" != "true" ]; then
+            echo "Worker committed metadata server-side; nothing to write locally."
+            rm -f "$BODY_FILE"
+            exit 0
+          fi
+
+          METADATA_PATH=$(jq -r '.metadata_path' "$BODY_FILE")
+          COMMIT_MESSAGE=$(jq -r '.commit_message' "$BODY_FILE")
+
+          if [ -z "$METADATA_PATH" ] || [ "$METADATA_PATH" = "null" ]; then
+            echo "::warning::client_commits=true but no metadata_path; skipping local commit"
+            rm -f "$BODY_FILE"
+            exit 0
+          fi
+
+          mkdir -p "$(dirname "$METADATA_PATH")"
+          jq -r '.metadata_content' "$BODY_FILE" > "$METADATA_PATH"
+
+          # Ensure each requested bidsignore entry is present exactly once.
+          touch .bidsignore
+          while IFS= read -r entry; do
+            [ -z "$entry" ] && continue
+            grep -qxF "$entry" .bidsignore || echo "$entry" >> .bidsignore
+          done < <(jq -r '.bidsignore_entries[]?' "$BODY_FILE")
+
+          rm -f "$BODY_FILE"
+
+          git config user.name "nemar-bot"
+          git config user.email "actions@github.com"
+          git add "$METADATA_PATH" .bidsignore
+
+          if git diff --cached --quiet; then
+            echo "Metadata already up-to-date; nothing to commit."
+            exit 0
+          fi
+
+          git commit -m "$COMMIT_MESSAGE [skip ci]"
+          # Pull-rebase guards against a concurrent push from a parallel run.
+          git pull --rebase origin main || {
+            echo "::warning::rebase failed; leaving the local commit unpushed"
+            exit 0
+          }
+          git push origin HEAD:main || {
+            echo "::warning::push rejected; the Worker fallback will catch the next push"
+            exit 0
+          }
+          echo "Action-side metadata commit applied."
 `;
 
   // Version DOI workflow: publishes a DOI then triggers archive generation.
@@ -1581,18 +1653,14 @@ export async function ensureWorkflowsDeployed(
       pat,
     );
     return {
-      alreadyPresent: workflows
-        .filter((w) => present.has(w.path))
-        .map((w) => nameOf(w.path)),
+      alreadyPresent: workflows.filter((w) => present.has(w.path)).map((w) => nameOf(w.path)),
       deployed: missing.map((w) => nameOf(w.path)),
       errors: [],
       listFailed: false,
     };
   } catch (err) {
     return {
-      alreadyPresent: workflows
-        .filter((w) => present.has(w.path))
-        .map((w) => nameOf(w.path)),
+      alreadyPresent: workflows.filter((w) => present.has(w.path)).map((w) => nameOf(w.path)),
       deployed: [],
       errors: [err instanceof Error ? err.message : String(err)],
       listFailed: false,
@@ -1717,9 +1785,7 @@ export async function syncWorkflowTemplates(
     );
     return { checked, changed, added, errors, committed: true, listFailed: false };
   } catch (err) {
-    errors.push(
-      `commit failed: ${err instanceof Error ? err.message : String(err)}`,
-    );
+    errors.push(`commit failed: ${err instanceof Error ? err.message : String(err)}`);
     return { checked, changed, added, errors, committed: false, listFailed: false };
   }
 }

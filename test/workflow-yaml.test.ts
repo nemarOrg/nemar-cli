@@ -48,6 +48,23 @@ describe("CI workflow templates", () => {
     }
   });
 
+  test("llm-enrichment opts into client_commits and has write permission", () => {
+    // Phase 5 contract: the Action sends client_commits:true so the Worker
+    // returns the metadata payload and skips its own commit. The Action
+    // commits with the per-repo GITHUB_TOKEN, moving the REST traffic off
+    // the shared admin PAT.
+    const llm = templates.find((t) => t.path.endsWith("llm-enrichment.yml"));
+    expect(llm).toBeDefined();
+    if (!llm) return;
+    expect(llm.content).toContain("\\\"client_commits\\\": true");
+    expect(llm.content).toContain("permissions:");
+    expect(llm.content).toContain("contents: write");
+    expect(llm.content).toContain("actions/checkout@v4");
+    // Worker-fallback path: when client_commits is missing/false in the
+    // response (older backend), the Action must skip the local commit.
+    expect(llm.content).toMatch(/client_commits.*\/\/\s*false/);
+  });
+
   test("no literal newlines inside shell strings (escape regression)", () => {
     for (const { path, content } of templates) {
       // In valid YAML, printf format strings and jq arguments should

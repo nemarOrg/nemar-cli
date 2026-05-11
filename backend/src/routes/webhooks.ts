@@ -782,7 +782,7 @@ webhooks.post("/llm-enrich", async (c) => {
   }
 
   // Parse request body
-  let body: { dataset_id: string; force?: boolean };
+  let body: { dataset_id: string; force?: boolean; client_commits?: boolean };
   try {
     body = await c.req.json();
   } catch {
@@ -797,7 +797,17 @@ webhooks.post("/llm-enrich", async (c) => {
   if (body.force !== undefined && typeof body.force !== "boolean") {
     return c.json({ error: "Invalid 'force' parameter: must be a boolean (true/false)" }, 400);
   }
+  if (body.client_commits !== undefined && typeof body.client_commits !== "boolean") {
+    return c.json(
+      { error: "Invalid 'client_commits' parameter: must be a boolean (true/false)" },
+      400,
+    );
+  }
   const forceReenrich = body.force === true;
+  // When true, the caller (typically the llm-enrichment.yml Action) will write
+  // the metadata commit using its own GITHUB_TOKEN; the Worker just returns
+  // the would-be commit payload and skips the admin-PAT REST commit.
+  const clientCommits = body.client_commits === true;
 
   // Look up dataset in D1 (includes EZID/owner fields for DOI title sync)
   const dataset = await c.env.DB.prepare(
@@ -1279,39 +1289,48 @@ webhooks.post("/llm-enrich", async (c) => {
     let commitError: string | undefined;
     let bidsignoreError: string | undefined;
     let cacheError: string | undefined;
+    const commitMessage = `Update NEMAR metadata (pipeline: ${finalMetadata.pipeline_stage})`;
+    const bidsignoreEntries = [".nemar/"];
 
-    let commitMode: "batched" | "single" = "single";
-    try {
-      const result = await commitEnrichmentWithBidsignore(
-        repoName,
-        "main",
-        ".nemar/metadata.json",
-        metadataContent,
-        [".nemar/"],
-        `Update NEMAR metadata (pipeline: ${finalMetadata.pipeline_stage})`,
-        pat,
-      );
-      commitMode = result.commitMode;
-      if (result.bidsignoreReadError) {
-        bidsignoreError = result.bidsignoreReadError;
-        console.warn(
-          `[llm-enrich] Could not read .bidsignore for ${dataset_id}; committed metadata alone (next validation may fail if .nemar/ is missing): ${result.bidsignoreReadError}`,
+    let commitMode: "batched" | "single" | "client" = "single";
+    if (clientCommits) {
+      // Caller (Action) will perform the commit using its own GITHUB_TOKEN.
+      // The Worker skips the admin-PAT write here; the commit payload is
+      // returned in the response below for the caller to apply.
+      commitMode = "client";
+    } else {
+      try {
+        const result = await commitEnrichmentWithBidsignore(
+          repoName,
+          "main",
+          ".nemar/metadata.json",
+          metadataContent,
+          bidsignoreEntries,
+          commitMessage,
+          pat,
         );
-      }
-    } catch (err) {
-      // The helper tells us which path failed via the typed error. Batched
-      // failures affect both files, so mirror the error onto bidsignoreError
-      // too; single failures only affect metadata.
-      const msg = errorMessage(err);
-      commitError = msg;
-      if (err instanceof EnrichmentCommitError) {
-        commitMode = err.commitMode;
-        if (err.commitMode === "batched") bidsignoreError = msg;
-        if (err.bidsignoreReadError && !bidsignoreError) {
-          bidsignoreError = err.bidsignoreReadError;
+        commitMode = result.commitMode;
+        if (result.bidsignoreReadError) {
+          bidsignoreError = result.bidsignoreReadError;
+          console.warn(
+            `[llm-enrich] Could not read .bidsignore for ${dataset_id}; committed metadata alone (next validation may fail if .nemar/ is missing): ${result.bidsignoreReadError}`,
+          );
         }
+      } catch (err) {
+        // The helper tells us which path failed via the typed error. Batched
+        // failures affect both files, so mirror the error onto bidsignoreError
+        // too; single failures only affect metadata.
+        const msg = errorMessage(err);
+        commitError = msg;
+        if (err instanceof EnrichmentCommitError) {
+          commitMode = err.commitMode;
+          if (err.commitMode === "batched") bidsignoreError = msg;
+          if (err.bidsignoreReadError && !bidsignoreError) {
+            bidsignoreError = err.bidsignoreReadError;
+          }
+        }
+        console.error(`[llm-enrich] Failed enrichment commit for ${dataset_id}:`, err);
       }
-      console.error(`[llm-enrich] Failed enrichment commit for ${dataset_id}:`, err);
     }
 
     // Cache in D1
@@ -1388,6 +1407,16 @@ webhooks.post("/llm-enrich", async (c) => {
           }
         : null,
       commit_mode: commitMode,
+      // Returned only when the caller requested `client_commits: true`.
+      // The Action picks up these fields and performs the commit itself
+      // using GITHUB_TOKEN.
+      ...(clientCommits && {
+        client_commits: true as const,
+        metadata_path: ".nemar/metadata.json",
+        metadata_content: metadataContent,
+        bidsignore_entries: bidsignoreEntries,
+        commit_message: commitMessage,
+      }),
       ...(commitError && { commit_error: commitError }),
       ...(bidsignoreError && { bidsignore_error: bidsignoreError }),
       ...(cacheError && { cache_error: cacheError }),
