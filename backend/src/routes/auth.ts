@@ -16,6 +16,7 @@ import {
   sendVerificationEmail,
 } from "../services/email";
 import { validateGitHubUsername } from "../services/github";
+import { getDatasetsToken } from "../services/github-auth";
 import { hashPassword, validatePasswordStrength, verifyPassword } from "../services/password";
 import {
   generateApiKey,
@@ -84,7 +85,7 @@ authRoutes.get("/check-github", async (c) => {
 
   let githubUser: { login: string } | null;
   try {
-    githubUser = await validateGitHubUsername(username, c.env.GITHUB_ADMIN_PAT);
+    githubUser = await validateGitHubUsername(username, await getDatasetsToken(c.env));
   } catch (error) {
     console.error("GitHub API error in check-github:", error);
     return c.json({ error: "Unable to verify GitHub username" }, 503);
@@ -197,7 +198,7 @@ authRoutes.post("/signup", zValidator("json", signupSchema), async (c) => {
 
     // Validate GitHub username exists. This is also where we recover the
     // canonical login (matters for case-variant dedup below).
-    const githubUser = await validateGitHubUsername(github_username, c.env.GITHUB_ADMIN_PAT);
+    const githubUser = await validateGitHubUsername(github_username, await getDatasetsToken(c.env));
     if (!githubUser) {
       return c.json(
         {

@@ -317,3 +317,16 @@ export function getDefaultGitHubAuth(env: Bindings, installationId?: number): Gi
   }
   return { kind: "pat", token: env.GITHUB_ADMIN_PAT };
 }
+
+/** Auth for operations on the nemarDatasets org. Falls back to PAT
+ *  when App config is incomplete. */
+export function getDatasetsAuth(env: Bindings): GitHubAuth {
+  return getDefaultGitHubAuth(env, resolveInstallationId(env, "nemarDatasets"));
+}
+
+/** Bearer token for the nemarDatasets org. App-minted tokens are cached
+ *  per-installation, so repeat calls in one request are cheap. */
+export async function getDatasetsToken(env: Bindings): Promise<string> {
+  const auth = getDatasetsAuth(env);
+  return auth.kind === "app" ? await auth.getToken() : auth.token;
+}

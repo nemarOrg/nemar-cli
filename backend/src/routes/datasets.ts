@@ -30,6 +30,7 @@ import {
   getWorkflowRuns,
   setRepoVisibility,
 } from "../services/github";
+import { getDatasetsToken } from "../services/github-auth";
 import {
   addPublicReadPolicy,
   generateDatasetUploadUrls,
@@ -306,13 +307,14 @@ datasetRoutes.post(
     }
 
     // Create GitHub repository
+    const pat = await getDatasetsToken(c.env);
     let githubRepo: GitHubRepo;
     try {
       githubRepo = await createRepository(
         datasetId,
         `${name} - NEMAR Dataset`,
         true, // Private - owner added as collaborator
-        c.env.GITHUB_ADMIN_PAT,
+        pat,
       );
     } catch (error) {
       console.error("Failed to create GitHub repo:", error);
@@ -323,7 +325,7 @@ datasetRoutes.post(
 
     // Add dataset owner as maintainer
     try {
-      await addCollaborator(datasetId, user.github_username, "maintain", c.env.GITHUB_ADMIN_PAT);
+      await addCollaborator(datasetId, user.github_username, "maintain", pat);
     } catch (error) {
       console.error("Failed to add owner as collaborator:", error);
     }
@@ -1277,10 +1279,11 @@ datasetRoutes.post("/:id/finalize", authMiddleware, async (c) => {
 
     // Track warnings for non-fatal operations
     const warnings: string[] = [];
+    const pat = await getDatasetsToken(c.env);
 
     // Ensure default branch is "main" (handles DataLad or legacy repos)
     try {
-      const branchResult = await ensureMainBranch(datasetId, c.env.GITHUB_ADMIN_PAT);
+      const branchResult = await ensureMainBranch(datasetId, pat);
       if (branchResult.renamed) {
         warnings.push(`Default branch renamed from "${branchResult.previousBranch}" to "main"`);
       }
@@ -1294,11 +1297,7 @@ datasetRoutes.post("/:id/finalize", authMiddleware, async (c) => {
     let workflowDeployed: string[] = [];
     let workflowAlreadyPresent: string[] = [];
     try {
-      const workflowResult = await ensureWorkflowsDeployed(
-        datasetId,
-        "main",
-        c.env.GITHUB_ADMIN_PAT,
-      );
+      const workflowResult = await ensureWorkflowsDeployed(datasetId, "main", pat);
       workflowDeployed = workflowResult.deployed;
       workflowAlreadyPresent = workflowResult.alreadyPresent;
       if (workflowResult.errors.length > 0) {
@@ -1315,7 +1314,7 @@ datasetRoutes.post("/:id/finalize", authMiddleware, async (c) => {
 
     // Apply branch protection (requires workflows to be deployed first for status checks)
     try {
-      await applyBranchProtection(datasetId, c.env.GITHUB_ADMIN_PAT);
+      await applyBranchProtection(datasetId, pat);
     } catch (error) {
       console.error("Failed to apply branch protection:", error);
       warnings.push(
@@ -1325,7 +1324,7 @@ datasetRoutes.post("/:id/finalize", authMiddleware, async (c) => {
 
     // Enable auto-merge
     try {
-      await enableAutoMerge(datasetId, c.env.GITHUB_ADMIN_PAT);
+      await enableAutoMerge(datasetId, pat);
     } catch (error) {
       console.error("Failed to enable auto-merge:", error);
       warnings.push("Auto-merge could not be enabled; PRs will need manual merging");
@@ -1433,7 +1432,7 @@ datasetRoutes.post("/:id/request-access", authMiddleware, async (c) => {
 
   // Add as collaborator on GitHub
   try {
-    await addCollaborator(repoName, user.github_username, "push", c.env.GITHUB_ADMIN_PAT);
+    await addCollaborator(repoName, user.github_username, "push", await getDatasetsToken(c.env));
   } catch (error) {
     console.error("Failed to add collaborator on GitHub:", error);
     return c.json({ error: "Failed to grant access on GitHub" }, 500);
@@ -1573,7 +1572,7 @@ datasetRoutes.post("/:id/invite", authMiddleware, zValidator("json", inviteSchem
 
   // Add as collaborator on GitHub
   try {
-    await addCollaborator(repoName, invitee.github_username, "push", c.env.GITHUB_ADMIN_PAT);
+    await addCollaborator(repoName, invitee.github_username, "push", await getDatasetsToken(c.env));
   } catch (error) {
     console.error("Failed to add collaborator on GitHub:", error);
     return c.json({ error: "Failed to grant access on GitHub" }, 500);
@@ -1747,14 +1746,18 @@ datasetRoutes.post("/:id/publish/request", authMiddleware, async (c) => {
   const requestId = existing?.id;
 
   // Run readiness checks: deploy CI if missing, check BIDS validation
-  const pat = c.env.GITHUB_ADMIN_PAT;
   const repoName = dataset.github_repo?.split("/")[1];
   let blocked = false;
   let blockReason: string | null = null;
   const ciUrl = repoName ? `https://github.com/nemarDatasets/${repoName}/actions` : undefined;
 
-  if (repoName && pat) {
+  // Resolve auth inside the try so a missing or unconfigured token blocks
+  // the request the same way other CI infrastructure failures do, rather
+  // than 500-ing the request before we've even recorded a row.
+  let pat: string | null = null;
+  if (repoName) {
     try {
+      pat = await getDatasetsToken(c.env);
       // Deploy CI workflows if missing
       const hasWorkflow = await checkWorkflowExists(
         repoName,
@@ -1783,8 +1786,9 @@ datasetRoutes.post("/:id/publish/request", authMiddleware, async (c) => {
         blockReason = "bids_validation_in_progress";
       }
     } catch (err) {
-      // CI infrastructure failure (GitHub API outage, PAT expired, etc.)
-      // Block the request so it can be retried rather than bypassing validation
+      // CI infrastructure failure (GitHub API outage, PAT expired, auth
+      // misconfig, etc.). Block the request so it can be retried rather
+      // than bypassing validation.
       console.error(
         `[publish-request] CI readiness check failed for ${datasetId}:`,
         err instanceof Error ? err.message : err,
@@ -1793,9 +1797,7 @@ datasetRoutes.post("/:id/publish/request", authMiddleware, async (c) => {
       blockReason = "bids_validation_pending";
     }
   } else {
-    console.warn(
-      `[publish-request] Skipping CI checks for ${datasetId}: ${!repoName ? "no GitHub repo" : "no GITHUB_ADMIN_PAT"}`,
-    );
+    console.warn(`[publish-request] Skipping CI checks for ${datasetId}: no GitHub repo`);
   }
 
   if (requestId) {
@@ -2063,7 +2065,7 @@ datasetRoutes.get("/:id/ci/status", authMiddleware, async (c) => {
     return c.json({ error: "Invalid repository format" }, 500);
   }
 
-  const pat = c.env.GITHUB_ADMIN_PAT;
+  const pat = await getDatasetsToken(c.env);
 
   let bidsWorkflowExists = false;
   let latestRunStatus = "unknown";
@@ -2232,7 +2234,7 @@ datasetRoutes.get("/:id/versions", authMiddleware, async (c) => {
         const content = await getFileContent(
           repoName,
           "dataset_description.json",
-          c.env.GITHUB_ADMIN_PAT,
+          await getDatasetsToken(c.env),
         );
         if (content) {
           const desc = JSON.parse(content);
@@ -2350,7 +2352,8 @@ datasetRoutes.post("/:id/publish", authMiddleware, async (c) => {
   }
 
   // Step 1: Update GitHub repository visibility
-  const ghResult = await setRepoVisibility(repoName, false, c.env.GITHUB_ADMIN_PAT);
+  const pat = await getDatasetsToken(c.env);
+  const ghResult = await setRepoVisibility(repoName, false, pat);
   if (!ghResult.ok) {
     console.error(`GitHub visibility update failed for ${datasetId}:`, ghResult.error);
     return c.json(
@@ -2379,7 +2382,7 @@ datasetRoutes.post("/:id/publish", authMiddleware, async (c) => {
     console.error(`S3 policy update failed for ${datasetId}:`, s3Msg);
 
     // Revert GitHub to private on S3 failure
-    const revertResult = await setRepoVisibility(repoName, true, c.env.GITHUB_ADMIN_PAT);
+    const revertResult = await setRepoVisibility(repoName, true, pat);
     if (revertResult.ok) {
       return c.json(
         {
@@ -2418,7 +2421,7 @@ datasetRoutes.post("/:id/publish", authMiddleware, async (c) => {
     console.error(`Database update failed for ${datasetId}:`, dbMsg);
 
     // Revert both GitHub and S3 on database failure
-    const ghRevertResult = await setRepoVisibility(repoName, true, c.env.GITHUB_ADMIN_PAT);
+    const ghRevertResult = await setRepoVisibility(repoName, true, pat);
 
     let s3Reverted = false;
     try {

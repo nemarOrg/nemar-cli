@@ -78,6 +78,7 @@ import {
   syncWorkflowTemplates,
   triggerArchiveGeneration,
 } from "../services/github";
+import { getDatasetsToken } from "../services/github-auth";
 import { revokeUserIamAccess } from "../services/iam";
 import { generateManifest } from "../services/manifest";
 import { syncDatasetToNemar } from "../services/nemar-sync";
@@ -667,7 +668,7 @@ adminRoutes.post("/revoke/:username", async (c) => {
       }
       const repoName = parts[1];
       try {
-        await removeCollaborator(repoName, user.github_username, c.env.GITHUB_ADMIN_PAT);
+        await removeCollaborator(repoName, user.github_username, await getDatasetsToken(c.env));
         reposRemoved++;
       } catch (error) {
         console.error(`Failed to remove from ${collab.github_repo}:`, error);
@@ -1047,7 +1048,7 @@ adminRoutes.post(
         );
         const repoMeta = await readRepoMetadata(
           repoName,
-          c.env.GITHUB_ADMIN_PAT,
+          await getDatasetsToken(c.env),
           baseEnrichment,
           body.title || dataset.name,
         );
@@ -1503,7 +1504,8 @@ adminRoutes.post("/datasets/:id/doi/update", zValidator("json", updateDoiSchema)
       if (!repoName) {
         return c.json({ error: "Cannot refresh metadata: invalid github_repo format" }, 400);
       }
-      const tree = await getTreeAtRef(repoName, "main", c.env.GITHUB_ADMIN_PAT);
+      const pat = await getDatasetsToken(c.env);
+      const tree = await getTreeAtRef(repoName, "main", pat);
       const descFile = tree.find((f) => f.path === "dataset_description.json");
       if (!descFile) {
         return c.json(
@@ -1511,7 +1513,7 @@ adminRoutes.post("/datasets/:id/doi/update", zValidator("json", updateDoiSchema)
           400,
         );
       }
-      const content = await getBlobContent(repoName, descFile.sha, c.env.GITHUB_ADMIN_PAT);
+      const content = await getBlobContent(repoName, descFile.sha, pat);
       const parsed = JSON.parse(content);
       if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
         return c.json(
@@ -1533,11 +1535,7 @@ adminRoutes.post("/datasets/:id/doi/update", zValidator("json", updateDoiSchema)
         tree.find((f) => f.path === "nemar_metadata.json");
       if (nemarMetaFile) {
         try {
-          const nemarContent = await getBlobContent(
-            repoName,
-            nemarMetaFile.sha,
-            c.env.GITHUB_ADMIN_PAT,
-          );
+          const nemarContent = await getBlobContent(repoName, nemarMetaFile.sha, pat);
           const nemarParsed = parseNemarMetadata(JSON.parse(nemarContent));
           if (nemarParsed) {
             enrichment = nemarMetadataToEnrichment(nemarParsed, enrichment);
@@ -1601,6 +1599,7 @@ adminRoutes.post("/datasets/:id/doi/update", zValidator("json", updateDoiSchema)
         .bind(datasetId)
         .all<{ version: string; doi: string }>();
 
+      const pat = await getDatasetsToken(c.env);
       for (const ver of versions.results || []) {
         try {
           const versionIdentifier = `${dataset.ezid_identifier}.V${ver.version.toUpperCase()}`;
@@ -1609,10 +1608,10 @@ adminRoutes.post("/datasets/:id/doi/update", zValidator("json", updateDoiSchema)
             warnings.push(`Version ${ver.version}: skipped DOI update (no valid github_repo)`);
             continue;
           }
-          const tree = await getTreeAtRef(repoName, "main", c.env.GITHUB_ADMIN_PAT);
+          const tree = await getTreeAtRef(repoName, "main", pat);
           const descFile = tree.find((f) => f.path === "dataset_description.json");
           if (!descFile) continue;
-          const content = await getBlobContent(repoName, descFile.sha, c.env.GITHUB_ADMIN_PAT);
+          const content = await getBlobContent(repoName, descFile.sha, pat);
           const bidsDesc = JSON.parse(content) as Record<string, unknown>;
 
           let vEnrichment = buildOrcidEnrichment(
@@ -1625,11 +1624,7 @@ adminRoutes.post("/datasets/:id/doi/update", zValidator("json", updateDoiSchema)
             tree.find((f) => f.path === "nemar_metadata.json");
           if (nemarMetaFile) {
             try {
-              const nemarContent = await getBlobContent(
-                repoName,
-                nemarMetaFile.sha,
-                c.env.GITHUB_ADMIN_PAT,
-              );
+              const nemarContent = await getBlobContent(repoName, nemarMetaFile.sha, pat);
               const nemarParsed = parseNemarMetadata(JSON.parse(nemarContent));
               if (nemarParsed) vEnrichment = nemarMetadataToEnrichment(nemarParsed, vEnrichment);
             } catch (metaErr) {
@@ -1855,7 +1850,7 @@ adminRoutes.post("/datasets/:id/enrichment", zValidator("json", enrichmentSchema
     return c.json({ error: "Invalid github_repo format" }, 400);
   }
 
-  const pat = c.env.GITHUB_ADMIN_PAT;
+  const pat = await getDatasetsToken(c.env);
   const metadataContent = JSON.stringify(body, null, 2);
   const isV2 = body.version === "2.0";
   const metadataPath = isV2 ? ".nemar/metadata.json" : "nemar_metadata.json";
@@ -1931,7 +1926,7 @@ adminRoutes.get("/datasets/:id/files", async (c) => {
   }
 
   try {
-    const tree = await getTreeAtRef(repoName, "main", c.env.GITHUB_ADMIN_PAT);
+    const tree = await getTreeAtRef(repoName, "main", await getDatasetsToken(c.env));
     const files = tree
       .filter((f) => f.type === "blob")
       .map((f) => ({ path: f.path, size: f.size || 0 }));
@@ -2059,7 +2054,8 @@ adminRoutes.patch("/datasets/:id/visibility", zValidator("json", visibilitySchem
   }
 
   const isPrivate = visibility === "private";
-  const result = await setRepoVisibility(repoName, isPrivate, c.env.GITHUB_ADMIN_PAT);
+  const pat = await getDatasetsToken(c.env);
+  const result = await setRepoVisibility(repoName, isPrivate, pat);
 
   if (!result.ok) {
     return c.json({ error: `Failed to set repository to ${visibility}: ${result.error}` }, 500);
@@ -2077,7 +2073,7 @@ adminRoutes.patch("/datasets/:id/visibility", zValidator("json", visibilitySchem
     const s3Msg = s3Error instanceof Error ? s3Error.message : String(s3Error);
     console.error(`WARNING: Failed to update S3 policy for ${datasetId}:`, s3Msg);
     // GitHub visibility changed but S3 policy failed - revert GitHub
-    const revertResult = await setRepoVisibility(repoName, !isPrivate, c.env.GITHUB_ADMIN_PAT);
+    const revertResult = await setRepoVisibility(repoName, !isPrivate, pat);
     if (revertResult.ok) {
       return c.json(
         {
@@ -2104,7 +2100,7 @@ adminRoutes.patch("/datasets/:id/visibility", zValidator("json", visibilitySchem
 
   // Helper to revert GitHub + S3 visibility changes on DB failure
   async function revertVisibilityChanges(errorDetails: string): Promise<Response> {
-    const ghRevertResult = await setRepoVisibility(repoName, !isPrivate, c.env.GITHUB_ADMIN_PAT);
+    const ghRevertResult = await setRepoVisibility(repoName, !isPrivate, pat);
 
     let s3Reverted = false;
     try {
@@ -2241,7 +2237,7 @@ adminRoutes.get("/datasets/:id/ci", async (c) => {
     return c.json({ error: "Invalid repository format" }, 500);
   }
 
-  const pat = c.env.GITHUB_ADMIN_PAT;
+  const pat = await getDatasetsToken(c.env);
 
   let bidsWorkflowExists = false;
   let versionCheckExists = false;
@@ -2315,7 +2311,7 @@ adminRoutes.post("/datasets/:id/ci", async (c) => {
     return c.json({ error: "Invalid repository format" }, 500);
   }
 
-  const result = await deployWorkflows(repoName, c.env.GITHUB_ADMIN_PAT);
+  const result = await deployWorkflows(repoName, await getDatasetsToken(c.env));
 
   if (!result.success) {
     return c.json(
@@ -2380,7 +2376,7 @@ adminRoutes.post("/datasets/:id/ci/sync", async (c) => {
     return c.json({ error: "Invalid repository format" }, 500);
   }
 
-  const result = await syncWorkflowTemplates(repoName, "main", c.env.GITHUB_ADMIN_PAT);
+  const result = await syncWorkflowTemplates(repoName, "main", await getDatasetsToken(c.env));
 
   try {
     await db
@@ -2704,7 +2700,7 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
     return c.json({ error: "Invalid repository format" }, 500);
   }
 
-  const pat = c.env.GITHUB_ADMIN_PAT;
+  const pat = await getDatasetsToken(c.env);
   const completed: PublicationStep[] = [...stepsCompleted];
   const requestId = request.id;
   const stepResults: StepResult[] = [];
@@ -4222,7 +4218,7 @@ adminRoutes.post("/datasets/:id/manifest/:version", async (c) => {
     return c.json({ error: "Invalid repository format" }, 500);
   }
 
-  const pat = c.env.GITHUB_ADMIN_PAT;
+  const pat = await getDatasetsToken(c.env);
 
   // Resolve version DOI: use provided value, or try existing manifest
   let versionDoi: string | null = "doi" in body ? (body.doi ?? null) : null;
@@ -4319,7 +4315,7 @@ adminRoutes.post("/datasets/:id/reset", async (c) => {
 
   // 2. Recreate GitHub repo
   try {
-    const pat = c.env.GITHUB_ADMIN_PAT;
+    const pat = await getDatasetsToken(c.env);
     const repoName = datasetId;
     await deleteRepository(repoName, pat);
     await createRepository(repoName, "E2E test dataset (auto-reset)", true, pat);
@@ -4615,13 +4611,14 @@ adminRoutes.post(
     }
 
     // Create GitHub repo
+    const pat = await getDatasetsToken(c.env);
     let githubRepo: GitHubRepo;
     try {
       githubRepo = await createRepository(
         dataset_id,
         `${name} - NEMAR Dataset (imported from OpenNeuro ${source_id})`,
         true,
-        c.env.GITHUB_ADMIN_PAT,
+        pat,
       );
     } catch (error) {
       const msg = error instanceof Error ? error.message : String(error);
@@ -4654,7 +4651,7 @@ adminRoutes.post(
       const dbMsg = error instanceof Error ? error.message : String(error);
       // Clean up GitHub repo
       try {
-        await deleteRepository(dataset_id, c.env.GITHUB_ADMIN_PAT);
+        await deleteRepository(dataset_id, pat);
       } catch (cleanupErr) {
         console.error("Failed to clean up GitHub repo after D1 failure:", cleanupErr);
         return c.json(
