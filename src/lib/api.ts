@@ -518,11 +518,7 @@ export interface SyncCiResponse {
  * Only writes files that drift or are missing.
  */
 export async function syncCi(datasetId: string): Promise<SyncCiResponse> {
-  return request<SyncCiResponse>(
-    `/admin/datasets/${datasetId}/ci/sync`,
-    { method: "POST" },
-    true,
-  );
+  return request<SyncCiResponse>(`/admin/datasets/${datasetId}/ci/sync`, { method: "POST" }, true);
 }
 
 export interface UserCiStatusResponse {
@@ -1722,6 +1718,78 @@ export async function syncDataset(datasetId: string): Promise<SyncDatasetRespons
 
 export async function getSyncStatus(): Promise<SyncStatusResponse> {
   return request<SyncStatusResponse>("/admin/sync/status", {}, true);
+}
+
+// ============================================================================
+// Reindex (epic #417 phase 3)
+// ============================================================================
+
+export interface ReindexOptions {
+  skip_enrichment?: boolean;
+  skip_sync?: boolean;
+  ref?: string;
+}
+
+export interface ReindexResponse {
+  dataset_id: string;
+  enrichment: { status: "ok" | "failed" | "skipped"; ref?: string; error?: string };
+  sync: {
+    status: "ok" | "failed" | "skipped";
+    errors?: string[];
+    metadata_columns_written?: boolean;
+    metadata_columns_error?: string;
+  };
+}
+
+export type ReindexFilter = "all" | "missing-metadata" | "stale";
+
+export interface ReindexBulkOptions {
+  older_than_days?: number;
+  skip_enrichment?: boolean;
+  skip_sync?: boolean;
+  dry_run?: boolean;
+}
+
+export interface ReindexBulkResponse {
+  filter: ReindexFilter;
+  total: number;
+  elapsed_ms: number;
+  /** Populated only when dry_run=true. */
+  dry_run?: boolean;
+  /** Populated only when dry_run=true. */
+  datasets?: string[];
+  /** Populated only when dry_run is false or absent. */
+  results?: ReindexResponse[];
+}
+
+export async function reindexDataset(
+  datasetId: string,
+  options?: ReindexOptions,
+): Promise<ReindexResponse> {
+  return request<ReindexResponse>(
+    `/admin/datasets/${datasetId}/reindex`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(options ?? {}),
+    },
+    true,
+  );
+}
+
+export async function reindexBulk(
+  filter: ReindexFilter,
+  options?: ReindexBulkOptions,
+): Promise<ReindexBulkResponse> {
+  return request<ReindexBulkResponse>(
+    "/admin/datasets/reindex/bulk",
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ filter, ...(options ?? {}) }),
+    },
+    true,
+  );
 }
 
 // ============================================================================
