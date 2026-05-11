@@ -135,16 +135,41 @@ describe("CI workflow templates", () => {
 
     // The defensive refresh step must call llm-enrich with the tag as ref
     // and force=true, and it must be tolerant of failure so a transient
-    // outage does not block DOI publication.
+    // outage does not block DOI publication. client_commits=true keeps the
+    // Worker from attempting a (doomed) commit against an immutable tag.
     expect(versionDoi.content).toContain("Refresh enrichment from tag");
     expect(versionDoi.content).toContain("continue-on-error: true");
-    expect(versionDoi.content).toContain('"force\\": true, \\"ref\\": \\"$TAG\\"');
+    expect(versionDoi.content).toContain('\\"force\\": true');
+    expect(versionDoi.content).toContain('\\"client_commits\\": true');
+    expect(versionDoi.content).toContain('\\"ref\\": \\"$TAG\\"');
+    // Curl-level failure must fall through to the warning branch, not a
+    // silent green step.
+    expect(versionDoi.content).toContain("|| HTTP_CODE=0");
+    expect(versionDoi.content).toContain('[ "$HTTP_CODE" = "0" ]');
+    // The Worker returns HTTP 200 with embedded *_error fields when a
+    // sub-step fails (commit/openrouter/doi/cache); the Action must surface
+    // these as warnings so a green check does not mask a silent failure.
+    expect(versionDoi.content).toMatch(/for field in commit_error openrouter_error/);
 
     // The refresh step must appear before the publish-DOI step.
     const refreshIdx = versionDoi.content.indexOf("Refresh enrichment from tag");
     const publishIdx = versionDoi.content.indexOf("Publish version DOI");
     expect(refreshIdx).toBeGreaterThan(0);
     expect(publishIdx).toBeGreaterThan(refreshIdx);
+  });
+
+  test("llm-enrichment.yml guards curl-level failures and includes failure context (epic #417 phase 1)", () => {
+    const llm = templates.find((t) => t.path.endsWith("llm-enrichment.yml"));
+    expect(llm).toBeDefined();
+    if (!llm) return;
+    // Network/DNS/TLS failure should fall through to the warning branch
+    // instead of leaving HTTP_CODE empty (which bash coerces to 0 and would
+    // bypass the >= 400 check, yielding a silent green step).
+    expect(llm.content).toContain("|| HTTP_CODE=0");
+    expect(llm.content).toContain('[ "$HTTP_CODE" = "0" ]');
+    // Push-retry warnings should point operators at the git output they
+    // need to read instead of being opaque.
+    expect(llm.content).toContain("(see git output above)");
   });
 
   test("no literal newlines inside shell strings (escape regression)", () => {

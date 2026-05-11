@@ -95,6 +95,30 @@ export function buildEnrichmentCommitPayload(
   };
 }
 
+/**
+ * Validate a `ref` value supplied to the /webhooks/llm-enrich endpoint.
+ * The ref is interpolated into GitHub API URL fragments and into the shell
+ * payload emitted by llm-enrichment.yml, so the allowed characters are
+ * intentionally narrow.
+ *
+ * Returns null when the ref is acceptable. Otherwise returns a human-readable
+ * error string suitable for a 400 response body. Exported so unit tests can
+ * pin the validation table without spinning up a webhook harness.
+ *
+ * Accepts `undefined` so callers can use it on optional request fields; the
+ * function treats `undefined` as "field absent" and returns null.
+ */
+export function validateEnrichmentRef(ref: unknown): string | null {
+  if (ref === undefined) return null;
+  if (typeof ref !== "string" || ref.length === 0 || ref.length > 200) {
+    return "Invalid 'ref' parameter: must be a non-empty string up to 200 characters";
+  }
+  if (!/^[A-Za-z0-9._/-]+$/.test(ref) || ref.includes("..") || ref.startsWith("/")) {
+    return "Invalid 'ref' parameter: contains forbidden characters";
+  }
+  return null;
+}
+
 const webhooks = new Hono<{ Bindings: Bindings }>();
 
 /**
@@ -833,21 +857,9 @@ webhooks.post("/llm-enrich", async (c) => {
       400,
     );
   }
-  if (body.ref !== undefined) {
-    if (typeof body.ref !== "string" || body.ref.length === 0 || body.ref.length > 200) {
-      return c.json(
-        { error: "Invalid 'ref' parameter: must be a non-empty string up to 200 characters" },
-        400,
-      );
-    }
-    // Allow letters, digits, dot, underscore, hyphen, slash; forbid '..' and leading '/'.
-    if (
-      !/^[A-Za-z0-9._/-]+$/.test(body.ref) ||
-      body.ref.includes("..") ||
-      body.ref.startsWith("/")
-    ) {
-      return c.json({ error: "Invalid 'ref' parameter: contains forbidden characters" }, 400);
-    }
+  const refValidationError = validateEnrichmentRef(body.ref);
+  if (refValidationError) {
+    return c.json({ error: refValidationError }, 400);
   }
   const forceReenrich = body.force === true;
   // When true, the caller (typically the llm-enrichment.yml Action) will write

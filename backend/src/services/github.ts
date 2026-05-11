@@ -1375,13 +1375,16 @@ jobs:
             "https://api.nemar.org/webhooks/llm-enrich" \\
             -H "Content-Type: application/json" \\
             -H "X-Webhook-Token: $NEMAR_WEBHOOK_TOKEN" \\
-            -d "{\\"dataset_id\\": \\"$REPO_NAME\\", \\"force\\": $FORCE, \\"client_commits\\": true, \\"ref\\": \\"$BRANCH_REF\\"}")
+            -d "{\\"dataset_id\\": \\"$REPO_NAME\\", \\"force\\": $FORCE, \\"client_commits\\": true, \\"ref\\": \\"$BRANCH_REF\\"}") || HTTP_CODE=0
 
           echo "HTTP $HTTP_CODE"
           cat "$BODY_FILE"
           echo
 
-          if [ "$HTTP_CODE" -ge 400 ]; then
+          # Treat curl-level failure (HTTP_CODE=0 from a fallback) the same as
+          # an HTTP 5xx so a network outage surfaces as a visible warning
+          # instead of a silent green step.
+          if [ "$HTTP_CODE" -ge 400 ] || [ "$HTTP_CODE" = "0" ]; then
             echo "::warning::LLM enrichment failed (HTTP $HTTP_CODE) - this is non-blocking"
             rm -f "$BODY_FILE"
             exit 0
@@ -1462,7 +1465,7 @@ jobs:
               pushed=1
               break
             fi
-            echo "::warning::push attempt $attempt failed; retrying"
+            echo "::warning::push attempt $attempt failed (see git output above); retrying in $((attempt * 2))s"
             sleep $((attempt * 2))
           done
 
@@ -1509,6 +1512,10 @@ jobs:
           # where llm-enrichment.yml didn't run on the release branch
           # (manual tags, legacy repos). Non-fatal: on failure we still
           # publish the DOI from whatever metadata is in the tag.
+          # client_commits=true tells the Worker to return the payload
+          # without attempting a commit; tags are immutable and the Worker
+          # would otherwise hit a 404 when probing the (nonexistent) branch.
+          # The D1 cache update happens regardless of commit attempt.
           DATASET_ID="\${{ github.event.repository.name }}"
           TAG="\${{ github.ref_name }}"
 
@@ -1523,7 +1530,7 @@ jobs:
             "https://api.nemar.org/webhooks/llm-enrich" \\
             -H "Content-Type: application/json" \\
             -H "X-Webhook-Token: $NEMAR_WEBHOOK_TOKEN" \\
-            -d "{\\"dataset_id\\": \\"$DATASET_ID\\", \\"force\\": true, \\"ref\\": \\"$TAG\\"}") || HTTP_CODE=0
+            -d "{\\"dataset_id\\": \\"$DATASET_ID\\", \\"force\\": true, \\"client_commits\\": true, \\"ref\\": \\"$TAG\\"}") || HTTP_CODE=0
 
           echo "HTTP $HTTP_CODE"
           cat /tmp/llm-enrich-refresh.json 2>/dev/null || true
@@ -1531,7 +1538,19 @@ jobs:
 
           if [ "$HTTP_CODE" -ge 400 ] || [ "$HTTP_CODE" = "0" ]; then
             echo "::warning::Pre-DOI enrichment refresh failed (HTTP $HTTP_CODE) - continuing with existing metadata"
+            exit 0
           fi
+
+          # The Worker returns HTTP 200 with embedded *_error fields when
+          # individual sub-steps fail (commit, OpenRouter, DOI sync, cache).
+          # Surface these as warnings so a green checkmark does not mask a
+          # silently stale enrichment cycle.
+          for field in commit_error openrouter_error doi_sync_error cache_error bidsignore_error; do
+            err=$(jq -r --arg f "$field" '.[$f] // empty' /tmp/llm-enrich-refresh.json 2>/dev/null)
+            if [ -n "$err" ]; then
+              echo "::warning::Enrichment refresh reported $field: $err"
+            fi
+          done
 
       - name: Publish version DOI
         env:
