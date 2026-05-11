@@ -1298,7 +1298,7 @@ jobs:
         run: node /tmp/stream-archive.js
 `;
 
-  // LLM Metadata Enrichment workflow.
+  // LLM Metadata Enrichment workflow. Template version: 2 (epic #417 phase 1).
   //
   // The Action sends \`client_commits: true\` in the webhook payload. When the
   // Worker honors the flag (current backend), it returns the metadata commit
@@ -1307,14 +1307,23 @@ jobs:
   // Worker commits itself; the Action notices the absence of \`client_commits\`
   // in the response and skips local commit, falling through to the
   // worker-side behavior.
+  //
+  // The workflow triggers on both \`main\` (normal edits) and \`release/**\`
+  // branches (release PRs). On a release branch the Action passes the current
+  // ref to the webhook so enrichment reads + commits on the right snapshot;
+  // this ensures the merge commit (and the tag created from it) already
+  // contain a fresh \`.nemar/metadata.json\` when version-doi.yml mints the DOI.
   const llmEnrichment = `name: LLM Metadata Enrichment
 
 on:
   push:
-    branches: [main]
+    branches:
+      - main
+      - 'release/**'
     paths:
       - 'README.md'
       - 'dataset_description.json'
+      - '.nemar/metadata.json'
   workflow_dispatch:
 
 jobs:
@@ -1327,6 +1336,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 1
+          ref: \${{ github.ref_name }}
           token: \${{ secrets.GITHUB_TOKEN }}
 
       - name: Trigger enrichment and commit locally if asked
@@ -1334,6 +1344,7 @@ jobs:
           NEMAR_WEBHOOK_TOKEN: \${{ secrets.NEMAR_WEBHOOK_TOKEN }}
         run: |
           REPO_NAME="\${{ github.event.repository.name }}"
+          BRANCH_REF="\${{ github.ref_name }}"
 
           # Skip if webhook token not configured
           if [ -z "$NEMAR_WEBHOOK_TOKEN" ]; then
@@ -1341,13 +1352,20 @@ jobs:
             exit 0
           fi
 
-          # Force re-enrichment on manual workflow_dispatch
+          # Force re-enrichment on manual workflow_dispatch and on every
+          # release-branch push. Release pushes only change the Version field
+          # in dataset_description.json, so the source_hash short-circuit
+          # would otherwise skip the run; we want a fresh enrichment baked
+          # into the release PR before merge.
           FORCE="false"
+          case "$BRANCH_REF" in
+            release/*) FORCE="true" ;;
+          esac
           if [ "\${{ github.event_name }}" = "workflow_dispatch" ]; then
             FORCE="true"
           fi
 
-          echo "Triggering LLM enrichment for $REPO_NAME (force=$FORCE)"
+          echo "Triggering LLM enrichment for $REPO_NAME on ref=$BRANCH_REF (force=$FORCE)"
 
           # Capture full response (no trailing-newline stripping) so jq can
           # parse the body. The Worker returns 200 even when commit_error
@@ -1357,7 +1375,7 @@ jobs:
             "https://api.nemar.org/webhooks/llm-enrich" \\
             -H "Content-Type: application/json" \\
             -H "X-Webhook-Token: $NEMAR_WEBHOOK_TOKEN" \\
-            -d "{\\"dataset_id\\": \\"$REPO_NAME\\", \\"force\\": $FORCE, \\"client_commits\\": true}")
+            -d "{\\"dataset_id\\": \\"$REPO_NAME\\", \\"force\\": $FORCE, \\"client_commits\\": true, \\"ref\\": \\"$BRANCH_REF\\"}")
 
           echo "HTTP $HTTP_CODE"
           cat "$BODY_FILE"
@@ -1437,9 +1455,10 @@ jobs:
           # run is RED and operators are alerted. The Worker's D1 cache was
           # already updated, so a missing repo commit will desync until the
           # next README/dataset_description push triggers re-enrichment.
+          # Push to whichever ref triggered this run (main or release/*).
           pushed=0
           for attempt in 1 2 3; do
-            if git pull --rebase origin main && git push origin HEAD:main; then
+            if git pull --rebase origin "$BRANCH_REF" && git push origin "HEAD:$BRANCH_REF"; then
               pushed=1
               break
             fi
@@ -1479,6 +1498,40 @@ jobs:
           gh release view "$TAG" --repo "\${{ github.repository }}" > /dev/null 2>&1 || \\
             gh release create "$TAG" --repo "\${{ github.repository }}" \\
               --title "$TAG" --notes "Release $TAG"
+
+      - name: Refresh enrichment from tag (defensive)
+        env:
+          NEMAR_WEBHOOK_TOKEN: \${{ secrets.NEMAR_WEBHOOK_TOKEN }}
+        continue-on-error: true
+        run: |
+          # Belt-and-suspenders: refresh D1 enrichment_json from the tag's
+          # snapshot before the version DOI is minted. This covers cases
+          # where llm-enrichment.yml didn't run on the release branch
+          # (manual tags, legacy repos). Non-fatal: on failure we still
+          # publish the DOI from whatever metadata is in the tag.
+          DATASET_ID="\${{ github.event.repository.name }}"
+          TAG="\${{ github.ref_name }}"
+
+          if [ -z "$NEMAR_WEBHOOK_TOKEN" ]; then
+            echo "NEMAR_WEBHOOK_TOKEN not configured, skipping enrichment refresh"
+            exit 0
+          fi
+
+          echo "Refreshing enrichment for $DATASET_ID from tag $TAG"
+
+          HTTP_CODE=$(curl -sS -o /tmp/llm-enrich-refresh.json -w "%{http_code}" -X POST \\
+            "https://api.nemar.org/webhooks/llm-enrich" \\
+            -H "Content-Type: application/json" \\
+            -H "X-Webhook-Token: $NEMAR_WEBHOOK_TOKEN" \\
+            -d "{\\"dataset_id\\": \\"$DATASET_ID\\", \\"force\\": true, \\"ref\\": \\"$TAG\\"}") || HTTP_CODE=0
+
+          echo "HTTP $HTTP_CODE"
+          cat /tmp/llm-enrich-refresh.json 2>/dev/null || true
+          echo
+
+          if [ "$HTTP_CODE" -ge 400 ] || [ "$HTTP_CODE" = "0" ]; then
+            echo "::warning::Pre-DOI enrichment refresh failed (HTTP $HTTP_CODE) - continuing with existing metadata"
+          fi
 
       - name: Publish version DOI
         env:
