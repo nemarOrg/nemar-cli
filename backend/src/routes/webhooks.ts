@@ -16,6 +16,10 @@ import {
   parseNemarMetadata,
 } from "../services/datacite.js";
 import {
+  computeDatasetMetadataColumns,
+  writeDatasetMetadataColumns,
+} from "../services/dataset-metadata-columns.js";
+import {
   discoverOrcidsFromReferencedDois,
   extractDoisFromBids,
   extractDoisFromRelatedIdentifiers,
@@ -572,6 +576,21 @@ async function syncToNemarAfterVersionDoi(
       }),
     ]);
 
+    // Read participants.tsv for the metadata-columns writer (epic #417 phase 2).
+    // Pulled here so the same fetch can feed both nemar.org sync (via existing
+    // collectors inside syncDatasetToNemar) and the D1 column write below.
+    let participantsTsv: string | null = null;
+    const participantsFile = tree.find((f) => f.path === "participants.tsv");
+    if (participantsFile) {
+      try {
+        participantsTsv = await getBlobContent(repoName, participantsFile.sha, pat);
+      } catch (partErr) {
+        console.warn(
+          `[webhook] Failed to read participants.tsv for ${dataset.dataset_id}: ${errorMessage(partErr)}`,
+        );
+      }
+    }
+
     let manifest = null;
     if (versionRow?.version) {
       try {
@@ -629,6 +648,26 @@ async function syncToNemarAfterVersionDoi(
     } else {
       console.warn(
         `[webhook] nemar.org sync failed for ${dataset.dataset_id}: ${syncResult.errors.join("; ")}`,
+      );
+    }
+
+    // Refresh D1 metadata columns (epic #417 phase 2). Independent of the
+    // nemar.org sync result so a transient nemar.org outage does not also
+    // hold D1 back; we use the inputs we already gathered above.
+    try {
+      const cols = computeDatasetMetadataColumns({
+        treePaths: tree.map((f) => f.path),
+        participantsTsv,
+        s3Stats,
+      });
+      await writeDatasetMetadataColumns(db, dataset.dataset_id, cols);
+      console.log(
+        `[webhook] Metadata columns refreshed for ${dataset.dataset_id}: subjects=${cols.subject_count}, modalities=${cols.modalities}, files=${cols.total_files}`,
+      );
+    } catch (colErr) {
+      console.error(
+        `[webhook] Failed to write metadata columns for ${dataset.dataset_id}:`,
+        colErr,
       );
     }
   } catch (err) {
@@ -1088,10 +1127,13 @@ webhooks.post("/llm-enrich", async (c) => {
       `[llm-enrich] Stage 1 (seed): ${dataset_id} - ${Object.keys(seeded.authors || {}).length} authors, ${(seeded.related_identifiers || []).length} related IDs`,
     );
 
-    // Stage 1a: Compute sizes from S3 and formats from tree
+    // Stage 1a: Compute sizes from S3 and formats from tree. s3Stats is
+    // hoisted so the metadata-columns writer (post-cache, below) can reuse it
+    // without re-querying S3.
+    let s3Stats: { totalSize: number; objectCount: number } | null = null;
     try {
       const { getDatasetS3Stats } = await import("../services/s3.js");
-      const s3Stats = await getDatasetS3Stats(
+      s3Stats = await getDatasetS3Stats(
         {
           bucket: c.env.S3_BUCKET,
           region: c.env.AWS_REGION,
@@ -1114,6 +1156,21 @@ webhooks.post("/llm-enrich", async (c) => {
       console.warn(
         `[llm-enrich] Stage 1a (sizes) failed for ${dataset_id}, continuing: ${errorMessage(sizeErr)}`,
       );
+    }
+
+    // Stage 1c: Read participants.tsv so the metadata-columns writer below
+    // can populate subject_count and age range. Non-fatal: if the file is
+    // missing or unreadable, subject_count/age_min/age_max stay NULL in D1.
+    let participantsTsv: string | null = null;
+    const participantsFile = tree.find((f) => f.path === "participants.tsv");
+    if (participantsFile) {
+      try {
+        participantsTsv = await getBlobContent(repoName, participantsFile.sha, pat);
+      } catch (partErr) {
+        console.warn(
+          `[llm-enrich] Failed to read participants.tsv for ${dataset_id}, continuing: ${errorMessage(partErr)}`,
+        );
+      }
     }
 
     // Stage 1b: ORCID discovery from referenced DOIs (deterministic, no LLM)
@@ -1420,6 +1477,26 @@ webhooks.post("/llm-enrich", async (c) => {
       console.error(`[llm-enrich] Failed to cache enrichment in D1 for ${dataset_id}:`, err);
     }
 
+    // Populate first-class metadata columns (epic #417 phase 2). Reuses the
+    // tree, participants.tsv and S3 stats already gathered above so no
+    // additional API calls are needed beyond the one participants.tsv blob
+    // read. Non-fatal: a failure here does not roll back the enrichment.
+    let metadataColumnsError: string | undefined;
+    try {
+      const cols = computeDatasetMetadataColumns({
+        treePaths,
+        participantsTsv,
+        s3Stats,
+      });
+      await writeDatasetMetadataColumns(c.env.DB, dataset_id, cols);
+      console.log(
+        `[llm-enrich] Metadata columns: ${dataset_id} - subjects=${cols.subject_count}, modalities=${cols.modalities}, files=${cols.total_files}`,
+      );
+    } catch (err) {
+      metadataColumnsError = errorMessage(err);
+      console.error(`[llm-enrich] Failed to write metadata columns for ${dataset_id}:`, err);
+    }
+
     // Sync DOI metadata after enrichment if dataset has an EZID DOI.
     // Covers title, description, keywords, related identifiers, etc.
     let doiSyncError: string | undefined;
@@ -1490,6 +1567,7 @@ webhooks.post("/llm-enrich", async (c) => {
       ...(commitError && { commit_error: commitError }),
       ...(bidsignoreError && { bidsignore_error: bidsignoreError }),
       ...(cacheError && { cache_error: cacheError }),
+      ...(metadataColumnsError && { metadata_columns_error: metadataColumnsError }),
       ...(issueCreationError && { issue_creation_error: issueCreationError }),
       ...(doiSyncError && { doi_sync_error: doiSyncError }),
     });

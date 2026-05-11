@@ -1,0 +1,117 @@
+/**
+ * Dataset metadata column helpers (epic #417 phase 2).
+ *
+ * Computes and persists the first-class metadata columns added to the
+ * `datasets` table by migration 0020: subject_count, modalities, age_min,
+ * age_max, file_size, total_files, tasks, metadata_updated_at.
+ *
+ * Source data is reused from existing helpers — see references on each
+ * field — so the two callers (the LLM enrichment webhook and the
+ * post-version-DOI nemar.org sync) compute identical values.
+ *
+ * NULL semantics: when an input is missing, the corresponding output field
+ * is null rather than 0/"" so downstream queries can distinguish
+ * "not populated yet" from "really zero".
+ */
+
+import { detectModalitiesFromTree } from "./datacite.js";
+import { extractTasks, parseParticipantsTsv } from "./nemar-sync.js";
+
+export interface DatasetMetadataColumns {
+  subject_count: number | null;
+  modalities: string | null;
+  age_min: number | null;
+  age_max: number | null;
+  file_size: number | null;
+  total_files: number | null;
+  tasks: string | null;
+}
+
+export interface MetadataColumnInputs {
+  /** Paths of all files in the dataset tree (used for modality and task detection). */
+  treePaths: string[];
+  /** Raw contents of participants.tsv at the same ref, or null if absent. */
+  participantsTsv: string | null;
+  /** S3 size and object count, or null if the lookup failed/was skipped. */
+  s3Stats: { totalSize: number; objectCount: number } | null;
+}
+
+/**
+ * Pure transformation from collected inputs to the column shape.
+ *
+ * - subject_count / age_min / age_max derive from participants.tsv via
+ *   `parseParticipantsTsv` (`backend/src/services/nemar-sync.ts:257`).
+ * - modalities sorts the output of `detectModalitiesFromTree`
+ *   (`backend/src/services/datacite.ts:1066`) into a deterministic CSV.
+ * - tasks delegates to `extractTasks` (`backend/src/services/nemar-sync.ts:343`)
+ *   which already sorts and deduplicates.
+ * - file_size / total_files mirror `getDatasetS3Stats` output
+ *   (`backend/src/services/s3.ts:218`).
+ */
+export function computeDatasetMetadataColumns(input: MetadataColumnInputs): DatasetMetadataColumns {
+  const modalitiesArr = input.treePaths.length
+    ? [...detectModalitiesFromTree(input.treePaths)].sort()
+    : [];
+  const tasksArr = input.treePaths.length ? extractTasks(input.treePaths) : [];
+
+  let subjectCount: number | null = null;
+  let ageMin: number | null = null;
+  let ageMax: number | null = null;
+  if (input.participantsTsv) {
+    const stats = parseParticipantsTsv(input.participantsTsv);
+    // parseParticipantsTsv returns count=0 for files with no rows; treat
+    // an empty participants.tsv as "no data" rather than "zero subjects".
+    subjectCount = stats.count > 0 ? stats.count : null;
+    ageMin = stats.ageMin;
+    ageMax = stats.ageMax;
+  }
+
+  return {
+    subject_count: subjectCount,
+    modalities: modalitiesArr.length ? modalitiesArr.join(",") : null,
+    age_min: ageMin,
+    age_max: ageMax,
+    file_size: input.s3Stats ? input.s3Stats.totalSize : null,
+    total_files: input.s3Stats ? input.s3Stats.objectCount : null,
+    tasks: tasksArr.length ? tasksArr.join(",") : null,
+  };
+}
+
+/**
+ * Persist the computed columns to D1. Updates metadata_updated_at to now().
+ *
+ * This is intentionally a single UPDATE so the columns are written
+ * atomically together; partial state (e.g., subject_count without
+ * modalities) would be misleading.
+ */
+export async function writeDatasetMetadataColumns(
+  db: D1Database,
+  datasetId: string,
+  cols: DatasetMetadataColumns,
+): Promise<void> {
+  await db
+    .prepare(
+      `UPDATE datasets
+       SET subject_count = ?,
+           modalities = ?,
+           age_min = ?,
+           age_max = ?,
+           file_size = ?,
+           total_files = ?,
+           tasks = ?,
+           metadata_updated_at = datetime('now'),
+           updated_at = datetime('now')
+       WHERE dataset_id = ?`,
+    )
+    .bind(
+      cols.subject_count,
+      cols.modalities,
+      cols.age_min,
+      cols.age_max,
+      cols.file_size,
+      cols.total_files,
+      cols.tasks,
+      datasetId,
+    )
+    .run();
+}
