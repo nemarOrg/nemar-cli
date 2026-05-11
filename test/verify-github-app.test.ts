@@ -1,14 +1,5 @@
-/**
- * Unit tests for the signAppJwt helper exported from
- * scripts/verify-github-app.ts. The helper is the prototype that Phase 2
- * of epic #432 lifts into backend/src/services/github-auth.ts; locking
- * its behavior here lets that migration be a copy rather than a
- * re-implementation.
- *
- * Project rule: no mocks. We generate a real RSA keypair on the spot,
- * sign with the helper, and verify with crypto.subtle.verify against
- * the matching public key.
- */
+// Verifies signAppJwt with a real RSA keypair (no mocks).
+// Locks the JWT shape that downstream code will reuse.
 
 import { describe, expect, test } from "bun:test";
 import { signAppJwt } from "../scripts/verify-github-app";
@@ -76,11 +67,29 @@ describe("signAppJwt", () => {
     const jwt = await signAppJwt(987654, pem, now);
     const [, payloadPart] = jwt.split(".");
     const payload = decodeJsonPart(payloadPart) as { iat: number; exp: number; iss: string };
-    // 30 s safety margin shaves iat backward so GitHub never sees a future iat
     expect(payload.iat).toBe(now - 30);
     expect(payload.exp).toBe(payload.iat + 600);
     // GitHub requires `iss` as a string even when the App ID is numeric
     expect(payload.iss).toBe("987654");
+  });
+
+  test("accepts appId as a numeric string and emits the same iss", async () => {
+    const { pem } = await generateKeypair();
+    const now = 1_700_000_000;
+    const fromNumber = await signAppJwt(987654, pem, now);
+    const fromString = await signAppJwt("987654", pem, now);
+    const issFrom = (jwt: string) =>
+      (decodeJsonPart(jwt.split(".")[1]) as { iss: string }).iss;
+    expect(issFrom(fromNumber)).toBe("987654");
+    expect(issFrom(fromString)).toBe("987654");
+  });
+
+  test("appId=0 still serializes iss as the string \"0\"", async () => {
+    const { pem } = await generateKeypair();
+    const jwt = await signAppJwt(0, pem, 1_700_000_000);
+    const payload = decodeJsonPart(jwt.split(".")[1]) as { iss: string };
+    // Defends against a future truthy-check refactor swallowing falsy IDs.
+    expect(payload.iss).toBe("0");
   });
 
   test("signature verifies against the matching public key", async () => {
@@ -112,7 +121,43 @@ m+r3FwAH3GZNAiEAtrXxlsVZGsRLN8lhqYjk5LWNu/AfsLY2BbcwlS40dl0CIQCK
     await expect(signAppJwt(1, pkcs1)).rejects.toThrow(/PKCS#1/);
   });
 
+  test("rejects encrypted PKCS#8 with a hint at -nocrypt", async () => {
+    const encrypted =
+      "-----BEGIN ENCRYPTED PRIVATE KEY-----\nAAAA\n-----END ENCRYPTED PRIVATE KEY-----\n";
+    await expect(signAppJwt(1, encrypted)).rejects.toThrow(/-nocrypt/);
+  });
+
   test("rejects garbage with a clear error", async () => {
     await expect(signAppJwt(1, "not a pem at all")).rejects.toThrow(/PKCS#8 PEM/);
+  });
+
+  test("accepts PEM with Windows CRLF line endings", async () => {
+    // 1Password export / Windows clipboard reality.
+    const { pem } = await generateKeypair();
+    const crlf = pem.replace(/\n/g, "\r\n");
+    const jwt = await signAppJwt(1, crlf, 1_700_000_000);
+    expect(jwt.split(".")).toHaveLength(3);
+  });
+});
+
+describe("module side-effects", () => {
+  test("importing the module does not invoke main() or hit the network", async () => {
+    // Sentinel: replace globalThis.fetch with one that records calls.
+    // If a future maintainer hoists main() out of the import.meta.main
+    // guard, this test catches it.
+    const originalFetch = globalThis.fetch;
+    const calls: string[] = [];
+    globalThis.fetch = ((input: RequestInfo | URL) => {
+      calls.push(String(input));
+      return Promise.reject(new Error("fetch should not be called during import"));
+    }) as typeof fetch;
+    try {
+      // Re-import via dynamic import to exercise the module-load path.
+      // `?t=` query busts Bun's module cache so the top-level code re-runs.
+      await import(`../scripts/verify-github-app?t=${Date.now()}`);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+    expect(calls).toEqual([]);
   });
 });

@@ -6,22 +6,17 @@ Cloudflare Worker will use to authenticate against GitHub once the
 
 ## Why
 
-The Worker today reads `GITHUB_ADMIN_PAT` from its secrets store. That PAT
-is tied to an individual maintainer's user account, which means every
-orchestrator step (publish-approve, hallu-sync, webhook handlers) charges
-against the same 5,000-requests-per-hour core bucket that the maintainer's
-own `gh` CLI uses. Triaging a 20-dataset publication batch on 2026-05-11
-drained that bucket to zero and stranded the rest of the queue with 403
-errors. PR #413 added rate-limit-aware throttling inside
-`githubFetchWithRetry`, which helps within a single Worker invocation but
-cannot fix the shared-identity problem.
+The Worker today reads `GITHUB_ADMIN_PAT`, a user PAT tied to an
+individual maintainer. Every Worker call to GitHub competes against that
+same maintainer's interactive `gh` CLI usage in one shared 5,000/hr core
+bucket, so a large publication batch can starve the queue.
 
 A GitHub App installation gets its own rate-limit pool per installed
-organization, independent of any human user. Once Phase 2-5 of the
-migration ship, the Worker mints short-lived installation tokens from the
-App and never touches a user PAT again.
+organization, independent of any human user. Once the migration ships,
+the Worker mints short-lived installation tokens from the App and never
+touches a user PAT again.
 
-This runbook covers Phase 1 only: creating the App and verifying it works.
+This runbook covers creating the App and verifying it works.
 
 ## Steps
 
@@ -35,8 +30,8 @@ survives any individual maintainer leaving.
 2. Fill in:
    - **GitHub App name**: `nemar-publish-bot`
    - **Homepage URL**: `https://github.com/nemarOrg/nemar-cli`
-   - **Webhook**: uncheck **Active**. We do not consume webhooks from the
-     App in this phase.
+   - **Webhook**: uncheck **Active**. Webhooks are delivered via the
+     existing repo-level secret, not the App.
    - **Repository permissions**:
      - Contents: **Read & write**
      - Actions: **Read-only**
@@ -66,8 +61,9 @@ survives any individual maintainer leaving.
      -out /tmp/nemar-app.pem
    ```
 3. Store the original download AND the PKCS#8 copy in 1Password under a
-   new item titled **NEMAR / GitHub App** along with the App ID. Tag
-   shared so a second maintainer can rotate if needed.
+   new item titled **NEMAR / GitHub App** along with the App ID. Share
+   the 1Password item with at least one other maintainer so rotation
+   isn't single-pointed.
 4. Delete the local downloads:
    ```bash
    rm ~/Downloads/nemar-publish-bot.*.private-key.pem
@@ -142,6 +138,5 @@ changes happen in this phase.
 
 ## Cross-references
 
-- Existing PAT documentation: [Publishing workflow troubleshooting](publishing.md#authentication-errors)
+- Existing PAT troubleshooting: [Publishing workflow Admin Issues](publishing.md#admin-issues)
 - Tracking epic: [#432](https://github.com/nemarOrg/nemar-cli/issues/432)
-- Companion: [#406 rate-limit hardening](https://github.com/nemarOrg/nemar-cli/issues/406), [#413 throttling](https://github.com/nemarOrg/nemar-cli/issues/413)
