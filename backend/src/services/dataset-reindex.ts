@@ -137,7 +137,15 @@ export async function runDatasetSync(
   if (!repoName) {
     throw new DatasetReindexError(`Invalid github_repo format: ${dataset.github_repo}`, 400);
   }
-  const pat = await getDatasetsToken(env);
+  // Wrap so a GitHub-auth failure surfaces as a DatasetReindexError; bulk
+  // callers (admin reindex endpoint) update nemar_sync_status only on
+  // typed throws — an unguarded throw here would skip that status write.
+  let pat: string;
+  try {
+    pat = await getDatasetsToken(env);
+  } catch (err) {
+    throw new DatasetReindexError(`Failed to resolve GitHub auth: ${errorMessage(err)}`, 500);
+  }
   const s3 = s3Cfg(env);
 
   // Read repo tree first; everything else depends on it. Wrap to give the

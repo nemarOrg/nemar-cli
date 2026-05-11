@@ -1746,14 +1746,18 @@ datasetRoutes.post("/:id/publish/request", authMiddleware, async (c) => {
   const requestId = existing?.id;
 
   // Run readiness checks: deploy CI if missing, check BIDS validation
-  const pat = await getDatasetsToken(c.env);
   const repoName = dataset.github_repo?.split("/")[1];
   let blocked = false;
   let blockReason: string | null = null;
   const ciUrl = repoName ? `https://github.com/nemarDatasets/${repoName}/actions` : undefined;
 
-  if (repoName && pat) {
+  // Resolve auth inside the try so a missing or unconfigured token blocks
+  // the request the same way other CI infrastructure failures do, rather
+  // than 500-ing the request before we've even recorded a row.
+  let pat: string | null = null;
+  if (repoName) {
     try {
+      pat = await getDatasetsToken(c.env);
       // Deploy CI workflows if missing
       const hasWorkflow = await checkWorkflowExists(
         repoName,
@@ -1782,8 +1786,9 @@ datasetRoutes.post("/:id/publish/request", authMiddleware, async (c) => {
         blockReason = "bids_validation_in_progress";
       }
     } catch (err) {
-      // CI infrastructure failure (GitHub API outage, PAT expired, etc.)
-      // Block the request so it can be retried rather than bypassing validation
+      // CI infrastructure failure (GitHub API outage, PAT expired, auth
+      // misconfig, etc.). Block the request so it can be retried rather
+      // than bypassing validation.
       console.error(
         `[publish-request] CI readiness check failed for ${datasetId}:`,
         err instanceof Error ? err.message : err,
@@ -1792,9 +1797,7 @@ datasetRoutes.post("/:id/publish/request", authMiddleware, async (c) => {
       blockReason = "bids_validation_pending";
     }
   } else {
-    console.warn(
-      `[publish-request] Skipping CI checks for ${datasetId}: ${!repoName ? "no GitHub repo" : "no GitHub token"}`,
-    );
+    console.warn(`[publish-request] Skipping CI checks for ${datasetId}: no GitHub repo`);
   }
 
   if (requestId) {

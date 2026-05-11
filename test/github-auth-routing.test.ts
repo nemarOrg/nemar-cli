@@ -1,6 +1,5 @@
-// Phase 3 routing helper: getDatasetsToken collapses the App/PAT
-// selection into a single bearer-string call. Routes use this instead
-// of `c.env.GITHUB_ADMIN_PAT` so the right token gets used per env.
+// getDatasetsAuth/getDatasetsToken pick the right credential for the
+// nemarDatasets org: App token when fully configured, PAT otherwise.
 
 import { describe, expect, test } from "bun:test";
 import {
@@ -59,5 +58,24 @@ describe("getDatasetsToken", () => {
     __resetInstallationTokenCacheForTests();
     const token = await getDatasetsToken(makeEnv({ GITHUB_APP_ID: undefined }));
     expect(token).toBe("pat-fallback");
+  });
+
+  test("returns the PAT verbatim when only the install ID is malformed", async () => {
+    // The realistic partial-deploy case: App ID + key are set but the
+    // nemarDatasets install ID env var got typo'd. We expect the helper
+    // to surface a warning (from getGitHubAppConfig) AND return the exact
+    // PAT string that `c.env.GITHUB_ADMIN_PAT` would have returned at the
+    // old callsite — pinning behavioral parity for the dev-deploy gate.
+    __resetInstallationTokenCacheForTests();
+    const originalWarn = console.warn;
+    console.warn = () => {}; // silence the expected warning
+    try {
+      const token = await getDatasetsToken(
+        makeEnv({ GITHUB_APP_INSTALLATION_ID_NEMAR_DATASETS: "not-a-number" }),
+      );
+      expect(token).toBe("pat-fallback");
+    } finally {
+      console.warn = originalWarn;
+    }
   });
 });
