@@ -182,7 +182,21 @@ authRoutes.post("/signup", zValidator("json", signupSchema), async (c) => {
       return c.json({ error: "Email already registered" }, 409);
     }
 
-    // Validate GitHub username exists (do this before duplicate check to get canonical login)
+    // Direct dup check on the raw input (case-insensitive). Common case:
+    // the username is already registered exactly as typed. Saves one GitHub
+    // API call and lets the request 409 even when the GitHub user happens
+    // not to resolve (e.g., user was renamed/deleted on GitHub after
+    // signing up here).
+    const directDupGithub = await db
+      .prepare("SELECT id FROM users WHERE github_username = ? COLLATE NOCASE")
+      .bind(github_username)
+      .first();
+    if (directDupGithub) {
+      return c.json({ error: "GitHub account already linked to another user" }, 409);
+    }
+
+    // Validate GitHub username exists. This is also where we recover the
+    // canonical login (matters for case-variant dedup below).
     const githubUser = await validateGitHubUsername(github_username, c.env.GITHUB_ADMIN_PAT);
     if (!githubUser) {
       return c.json(
@@ -194,14 +208,16 @@ authRoutes.post("/signup", zValidator("json", signupSchema), async (c) => {
       );
     }
 
-    // Check if GitHub username already linked to another account (use canonical login, case-insensitive)
-    const existingGithub = await db
-      .prepare("SELECT id FROM users WHERE github_username = ? COLLATE NOCASE")
-      .bind(githubUser.login)
-      .first();
-
-    if (existingGithub) {
-      return c.json({ error: "GitHub account already linked to another user" }, 409);
+    // Re-check with the canonical login when GitHub normalized the case.
+    // Catches the "Octocat" stored vs "octocat" submitted shape.
+    if (githubUser.login.toLowerCase() !== github_username.toLowerCase()) {
+      const canonicalDup = await db
+        .prepare("SELECT id FROM users WHERE github_username = ? COLLATE NOCASE")
+        .bind(githubUser.login)
+        .first();
+      if (canonicalDup) {
+        return c.json({ error: "GitHub account already linked to another user" }, 409);
+      }
     }
 
     // Hash password

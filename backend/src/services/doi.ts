@@ -363,3 +363,50 @@ export async function createEzidVersionDoi(
     ...(warnings.length > 0 && { warnings }),
   };
 }
+
+/** Decision for the publish orchestrator's update_readme step.
+ *  `commit=false` means the README is already correct on disk and the
+ *  step should make no GitHub call. `commit=true` means write `content`
+ *  to README.md with `message` as the commit subject. */
+export type ReadmeBadgePlan =
+  | { commit: false; reason: string }
+  | { commit: true; content: string; message: string };
+
+/** Decide whether the update_readme step should ship a commit.
+ *
+ *  Skips when the existing README.md already contains a badge whose URL
+ *  encodes the *current* conceptDoi. Without the DOI match, a stale badge
+ *  from a re-registered or migrated DOI would be silently kept. */
+export function planReadmeBadgeCommit(args: {
+  readmeContent: string;
+  doiBadge: string;
+  conceptDoi: string;
+  contentSourcePath: string | undefined;
+}): ReadmeBadgePlan {
+  const { readmeContent, doiBadge, conceptDoi, contentSourcePath } = args;
+  const isRename = contentSourcePath !== undefined && contentSourcePath !== "README.md";
+
+  const hasAnyBadge =
+    readmeContent.includes("zenodo.org/badge/DOI") ||
+    readmeContent.includes("img.shields.io/badge/DOI");
+
+  const encodedDoi = encodeURIComponent(conceptDoi);
+  const hasCurrentBadge =
+    hasAnyBadge && (readmeContent.includes(conceptDoi) || readmeContent.includes(encodedDoi));
+
+  if (hasCurrentBadge && !isRename) {
+    return { commit: false, reason: "badge already points to current concept DOI" };
+  }
+
+  const nextContent = hasCurrentBadge ? readmeContent : `${doiBadge}\n\n${readmeContent}`;
+  const verb = hasAnyBadge && !hasCurrentBadge ? "Replace stale" : "Add";
+  const renameVerb = isRename
+    ? `Rename ${contentSourcePath} to README.md and ${verb.toLowerCase()}`
+    : verb;
+
+  return {
+    commit: true,
+    content: nextContent,
+    message: `${renameVerb} DOI badge: ${conceptDoi}`,
+  };
+}

@@ -37,6 +37,7 @@ import {
   createEzidVersionDoi,
   createConceptDoi as dispatchCreateConceptDoi,
   parseDoiProvider,
+  planReadmeBadgeCommit,
   resolveEzidAuth,
 } from "../services/doi";
 import {
@@ -3363,25 +3364,21 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
         console.warn(`[publish] No README found in ${repoName}; creating README.md with DOI badge`);
       }
 
-      // Add DOI badge if no DOI badge exists yet.
-      const hasBadge =
-        readmeContent.includes("zenodo.org/badge/DOI") ||
-        readmeContent.includes("img.shields.io/badge/DOI");
-      if (!hasBadge) {
-        readmeContent = `${doiBadge}\n\n${readmeContent}`;
-      }
-
-      // Always write to README.md (GitHub requires .md for badge rendering)
-      const isRename = contentSource && contentSource.path !== "README.md";
-      await createOrUpdateFile(
-        repoName,
-        "README.md",
+      // Decide whether the README needs a commit. Skips the no-op case
+      // (current badge already present in README.md) so --resume runs do
+      // not stack empty "Add DOI badge" commits that re-trigger CI.
+      const plan = planReadmeBadgeCommit({
         readmeContent,
-        isRename
-          ? `Rename ${contentSource.path} to README.md and add DOI badge: ${conceptDoi}`
-          : `Add DOI badge: ${conceptDoi}`,
-        pat,
-      );
+        doiBadge,
+        conceptDoi,
+        contentSourcePath: contentSource?.path,
+      });
+
+      if (!plan.commit) {
+        console.log(`[publish] update_readme skipping commit for ${repoName}: ${plan.reason}`);
+      } else {
+        await createOrUpdateFile(repoName, "README.md", plan.content, plan.message, pat);
+      }
 
       // Delete any non-.md README files (handles both fresh rename and resume after partial run)
       for (const readme of foundReadmes) {
