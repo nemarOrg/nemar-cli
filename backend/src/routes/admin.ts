@@ -22,6 +22,12 @@ import {
   nemarMetadataToEnrichment,
   parseNemarMetadata,
 } from "../services/datacite";
+import {
+  type ReindexFilter,
+  buildReindexFilterQuery,
+  runDatasetSync,
+  runEnrichmentForDataset,
+} from "../services/dataset-reindex";
 import { deleteDatasetCascade } from "../services/deletion";
 import {
   type DoiProvider,
@@ -61,13 +67,13 @@ import {
   deleteRepository,
   deployWorkflows,
   downloadReleaseArchive,
-  syncWorkflowTemplates,
   getBlobContent,
   getMainBranchSha,
   getTreeAtRef,
   getWorkflowRuns,
   removeCollaborator,
   setRepoVisibility,
+  syncWorkflowTemplates,
   triggerArchiveGeneration,
 } from "../services/github";
 import { revokeUserIamAccess } from "../services/iam";
@@ -4701,184 +4707,218 @@ adminRoutes.post(
  */
 adminRoutes.post("/datasets/:id/sync", async (c) => {
   const datasetId = c.req.param("id");
-  const db = c.env.DB;
 
-  if (datasetId.startsWith("on")) {
-    return c.json(
-      { error: "OpenNeuro datasets require alternate_id mapping before nemar.org sync" },
-      400,
-    );
-  }
-
-  const nemarUser = c.env.NEMAR_USERNAME;
-  const nemarPass = c.env.NEMAR_PASSWORD;
-  if (!nemarUser || !nemarPass) {
-    return c.json({ error: "NEMAR_USERNAME/PASSWORD not configured" }, 500);
-  }
-
-  const dataset = await db
-    .prepare(
-      `SELECT d.*, u.username as owner_username
-       FROM datasets d
-       JOIN users u ON d.owner_user_id = u.id
-       WHERE d.dataset_id = ?`,
-    )
-    .bind(datasetId)
-    .first<{
-      dataset_id: string;
-      github_repo: string | null;
-      concept_doi: string | null;
-      created_at: string | null;
-      owner_username: string;
-    }>();
-
-  if (!dataset) {
-    return c.json({ error: "Dataset not found" }, 404);
-  }
-  if (!dataset.github_repo) {
-    return c.json({ error: "Dataset has no GitHub repository" }, 400);
-  }
-
-  const repoSlug = dataset.github_repo.split("/");
-  if (repoSlug.length < 2 || !repoSlug[1]) {
-    return c.json({ error: `Invalid github_repo format: ${dataset.github_repo}` }, 400);
-  }
-  const repoName = repoSlug[1];
-  const pat = c.env.GITHUB_ADMIN_PAT;
-  const s3 = getS3Config(c.env);
-
-  // Gather data from GitHub
-  let tree: Awaited<ReturnType<typeof getTreeAtRef>>;
+  // Thin wrapper around runDatasetSync (epic #417 phase 3) so the admin
+  // and post-version-DOI sync paths share one implementation, and so this
+  // endpoint also populates the Phase 2 metadata columns.
   try {
-    tree = await getTreeAtRef(repoName, "main", pat);
-  } catch (err) {
-    return c.json(
-      {
-        error: `Failed to read repository tree: ${errorMessage(err)}. Does the repo use "main" as the default branch?`,
-      },
-      500,
-    );
-  }
-  const bidsFile = tree.find((f) => f.path === "dataset_description.json");
-  let bidsDescription: Record<string, unknown> = {};
-  if (bidsFile) {
-    try {
-      bidsDescription = JSON.parse(await getBlobContent(repoName, bidsFile.sha, pat));
-    } catch (err) {
-      console.warn(`[sync] Failed to parse dataset_description.json for ${datasetId}: ${err}`);
-    }
-  }
-
-  const readmeFile = tree.find((f) => f.path === "README" || f.path === "README.md");
-  const readme = readmeFile ? await getBlobContent(repoName, readmeFile.sha, pat) : "";
-
-  const nemarMetaFile = tree.find((f) => f.path === ".nemar/metadata.json");
-  let nemarMeta = null;
-  if (nemarMetaFile) {
-    try {
-      const raw = JSON.parse(await getBlobContent(repoName, nemarMetaFile.sha, pat));
-      const parsed = parseNemarMetadata(raw);
-      if (parsed && parsed.version === "2.0") nemarMeta = parsed;
-    } catch (err) {
-      console.warn(`[sync] Failed to parse .nemar/metadata.json for ${datasetId}: ${err}`);
-    }
-  }
-
-  // Gather D1 data, S3 stats, repo info in parallel
-  const [latestVersion, pubRequest, s3Stats, zipFileSize, repoInfo] = await Promise.all([
-    db
-      .prepare(
-        "SELECT version, doi, created_at FROM dataset_versions WHERE dataset_id = ? ORDER BY created_at DESC LIMIT 1",
-      )
-      .bind(datasetId)
-      .first<{ version: string; doi: string; created_at: string }>(),
-    db
-      .prepare(
-        "SELECT approved_at FROM publication_requests WHERE dataset_id = ? AND status = 'published' ORDER BY approved_at DESC LIMIT 1",
-      )
-      .bind(datasetId)
-      .first<{ approved_at: string | null }>(),
-    getDatasetS3Stats(s3, datasetId).catch((err) => {
-      console.warn(`[sync] S3 stats failed for ${datasetId}: ${err}`);
-      return { totalSize: 0, objectCount: 0 };
-    }),
-    getArchiveSize(s3, datasetId).catch((err) => {
-      console.warn(`[sync] Archive size failed for ${datasetId}: ${err}`);
-      return 0;
-    }),
-    fetch(`https://api.github.com/repos/nemarDatasets/${repoName}`, {
-      headers: { Authorization: `token ${pat}`, Accept: "application/vnd.github.v3+json" },
-    })
-      .then(async (r) => {
-        if (!r.ok) {
-          console.warn(`[sync] GitHub repo info for ${repoName}: HTTP ${r.status}`);
-          return null;
-        }
-        return r.json() as Promise<{ created_at?: string }>;
-      })
-      .catch((err) => {
-        console.warn(`[sync] GitHub repo info fetch failed for ${repoName}: ${err}`);
-        return null;
+    const result = await runDatasetSync(c.env, datasetId);
+    return c.json({
+      dataset_id: datasetId,
+      synced: result.synced,
+      errors: result.errors,
+      metadata_columns_written: result.metadata_columns_written,
+      ...(result.metadata_columns_error && {
+        metadata_columns_error: result.metadata_columns_error,
       }),
-  ]);
+    });
+  } catch (err) {
+    const msg = errorMessage(err);
+    const status = msg.includes("Dataset not found")
+      ? 404
+      : msg.includes("OpenNeuro datasets")
+        ? 400
+        : msg.includes("no GitHub repository") || msg.includes("Invalid github_repo")
+          ? 400
+          : msg.includes("NEMAR_USERNAME") || msg.includes("NEMAR_PASSWORD")
+            ? 500
+            : 500;
+    return c.json({ error: msg }, status);
+  }
+});
 
-  // Try to read version manifest from S3 for accurate file sizes
-  let manifest = null;
-  if (latestVersion?.version) {
+/**
+ * POST /admin/datasets/:id/reindex - Refresh enrichment + nemar.org sync +
+ * Phase 2 metadata columns for a single dataset (epic #417 phase 3).
+ *
+ * Body: { skip_enrichment?: boolean, skip_sync?: boolean, ref?: string }
+ *
+ * Returns per-step status so a transient failure in one path does not
+ * cause the operator to repeat the entire reindex.
+ */
+adminRoutes.post("/datasets/:id/reindex", async (c) => {
+  const datasetId = c.req.param("id");
+  let body: { skip_enrichment?: boolean; skip_sync?: boolean; ref?: string } = {};
+  try {
+    if (c.req.header("content-length") && c.req.header("content-length") !== "0") {
+      body = await c.req.json();
+    }
+  } catch {
+    return c.json({ error: "Invalid JSON in request body" }, 400);
+  }
+
+  const skipEnrichment = body.skip_enrichment === true;
+  const skipSync = body.skip_sync === true;
+  if (skipEnrichment && skipSync) {
+    return c.json({ error: "skip_enrichment and skip_sync cannot both be true" }, 400);
+  }
+
+  const result: {
+    dataset_id: string;
+    enrichment: { status: "ok" | "failed" | "skipped"; ref?: string; error?: string };
+    sync: {
+      status: "ok" | "failed" | "skipped";
+      errors?: string[];
+      metadata_columns_written?: boolean;
+      metadata_columns_error?: string;
+    };
+  } = {
+    dataset_id: datasetId,
+    enrichment: { status: "skipped" },
+    sync: { status: "skipped" },
+  };
+
+  if (!skipEnrichment) {
+    const enr = await runEnrichmentForDataset(c.env, datasetId, { ref: body.ref });
+    result.enrichment = enr.ok
+      ? { status: "ok", ref: enr.ref }
+      : { status: "failed", ref: enr.ref, error: enr.error };
+  }
+
+  if (!skipSync) {
     try {
-      const raw = await getManifest(s3, datasetId, latestVersion.version);
-      if (raw) {
-        try {
-          manifest = JSON.parse(raw);
-        } catch (parseErr) {
-          console.warn(
-            `[sync] Manifest JSON corrupted for ${datasetId} v${latestVersion.version}: ${parseErr}`,
-          );
-        }
-      }
+      const sync = await runDatasetSync(c.env, datasetId);
+      result.sync = {
+        status: sync.synced ? "ok" : "failed",
+        errors: sync.errors,
+        metadata_columns_written: sync.metadata_columns_written,
+        ...(sync.metadata_columns_error && {
+          metadata_columns_error: sync.metadata_columns_error,
+        }),
+      };
     } catch (err) {
-      console.warn(`[sync] Failed to fetch manifest from S3 for ${datasetId}: ${err}`);
+      const msg = errorMessage(err);
+      const status = msg.includes("Dataset not found")
+        ? 404
+        : msg.includes("OpenNeuro datasets") ||
+            msg.includes("no GitHub repository") ||
+            msg.includes("Invalid github_repo")
+          ? 400
+          : 500;
+      return c.json({ ...result, sync: { status: "failed", errors: [msg] } }, status);
     }
   }
 
-  const syncResult = await syncDatasetToNemar(nemarUser, nemarPass, {
-    datasetId,
-    bidsDescription,
-    nemarMetadata: nemarMeta,
-    readme,
-    tree,
-    conceptDoi: dataset.concept_doi,
-    latestVersionDoi: latestVersion?.doi || null,
-    latestVersion: latestVersion?.version || null,
-    versionCreatedAt: latestVersion?.created_at || null,
-    ownerUsername: dataset.owner_username,
-    createdAt: dataset.created_at,
-    publishDate: pubRequest?.approved_at || null,
-    repoName,
-    pat,
-    manifest,
-    s3Stats,
-    zipFileSize,
-    repoCreatedAt: repoInfo?.created_at || null,
-  });
+  return c.json(result);
+});
 
-  // Update tracking
-  await db
-    .prepare(
-      `UPDATE datasets SET nemar_sync_status = ?, nemar_sync_at = CASE WHEN ? = 'synced' THEN datetime('now') ELSE nemar_sync_at END, nemar_sync_error = ?, updated_at = datetime('now') WHERE dataset_id = ?`,
-    )
-    .bind(
-      syncResult.synced ? "synced" : "failed",
-      syncResult.synced ? "synced" : "failed",
-      syncResult.errors.length ? syncResult.errors.join("; ") : null,
-      datasetId,
-    )
-    .run();
+/**
+ * POST /admin/datasets/reindex/bulk - Run reindex across a filtered set of
+ * datasets. Sequential to respect upstream rate limits (epic #417 phase 3).
+ *
+ * Body: {
+ *   filter: "all" | "missing-metadata" | "stale",
+ *   older_than_days?: number,
+ *   skip_enrichment?: boolean,
+ *   skip_sync?: boolean,
+ *   dry_run?: boolean,
+ * }
+ */
+adminRoutes.post("/datasets/reindex/bulk", async (c) => {
+  let body: {
+    filter?: string;
+    older_than_days?: number;
+    skip_enrichment?: boolean;
+    skip_sync?: boolean;
+    dry_run?: boolean;
+  } = {};
+  try {
+    body = await c.req.json();
+  } catch {
+    return c.json({ error: "Invalid JSON in request body" }, 400);
+  }
+
+  const validFilters: ReindexFilter[] = ["all", "missing-metadata", "stale"];
+  if (!body.filter || !validFilters.includes(body.filter as ReindexFilter)) {
+    return c.json({ error: `filter must be one of: ${validFilters.join(", ")}` }, 400);
+  }
+  const filter = body.filter as ReindexFilter;
+  const skipEnrichment = body.skip_enrichment === true;
+  const skipSync = body.skip_sync === true;
+  if (skipEnrichment && skipSync) {
+    return c.json({ error: "skip_enrichment and skip_sync cannot both be true" }, 400);
+  }
+
+  let query: { sql: string; params: unknown[] };
+  try {
+    query = buildReindexFilterQuery(filter, { olderThanDays: body.older_than_days });
+  } catch (err) {
+    return c.json({ error: errorMessage(err) }, 400);
+  }
+
+  const rows = await c.env.DB.prepare(query.sql)
+    .bind(...query.params)
+    .all<{ dataset_id: string }>();
+  const datasetIds = (rows.results ?? []).map((r) => r.dataset_id);
+  const startedAt = Date.now();
+
+  if (body.dry_run === true) {
+    return c.json({
+      filter,
+      dry_run: true,
+      total: datasetIds.length,
+      datasets: datasetIds,
+      elapsed_ms: Date.now() - startedAt,
+    });
+  }
+
+  type PerDataset = {
+    dataset_id: string;
+    enrichment: { status: "ok" | "failed" | "skipped"; error?: string };
+    sync: {
+      status: "ok" | "failed" | "skipped";
+      errors?: string[];
+      metadata_columns_error?: string;
+    };
+  };
+  const results: PerDataset[] = [];
+
+  // Sequential to keep per-dataset failures isolated and respect upstream
+  // rate limits (nemar.org, OpenRouter, GitHub). The runtime budget for a
+  // Cloudflare Worker request is the limiting factor for very large batches;
+  // operators should narrow the filter or split into multiple runs.
+  for (const datasetId of datasetIds) {
+    const entry: PerDataset = {
+      dataset_id: datasetId,
+      enrichment: { status: "skipped" },
+      sync: { status: "skipped" },
+    };
+    if (!skipEnrichment) {
+      const enr = await runEnrichmentForDataset(c.env, datasetId);
+      entry.enrichment = enr.ok ? { status: "ok" } : { status: "failed", error: enr.error };
+    }
+    if (!skipSync) {
+      try {
+        const sync = await runDatasetSync(c.env, datasetId);
+        entry.sync = {
+          status: sync.synced ? "ok" : "failed",
+          errors: sync.errors,
+          ...(sync.metadata_columns_error && {
+            metadata_columns_error: sync.metadata_columns_error,
+          }),
+        };
+      } catch (err) {
+        entry.sync = { status: "failed", errors: [errorMessage(err)] };
+      }
+    }
+    results.push(entry);
+  }
 
   return c.json({
-    dataset_id: datasetId,
-    synced: syncResult.synced,
-    errors: syncResult.errors,
+    filter,
+    total: results.length,
+    results,
+    elapsed_ms: Date.now() - startedAt,
   });
 });
 
