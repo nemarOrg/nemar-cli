@@ -1,26 +1,25 @@
 /**
- * GitHub App authentication for the Worker.
- *
- * Signs short-lived App JWTs, mints per-installation access tokens, and
- * caches them in module scope until they're close to expiry. Exposes a
- * discriminated `GitHubAuth` source so callers can stay agnostic about
- * whether they're talking to GitHub via the legacy user PAT or the new
- * App installation token. Phase 3 of epic #432 rewires every callsite
- * through `getDefaultGitHubAuth`; until then this module is dormant.
+ * GitHub App authentication for the Worker. Signs short-lived App JWTs,
+ * mints per-installation access tokens, caches them in module scope,
+ * and exposes a discriminated `GitHubAuth` source so the orchestrator
+ * can route through one helper without caring whether the underlying
+ * credential is a user PAT or an App installation token.
  */
 
 import type { Bindings } from "../types/bindings";
 
 const GITHUB_API = "https://api.github.com";
 
-/** Refresh installation tokens this far before they expire. GitHub's
- *  default token lifetime is 60 min; refreshing at 5 min remaining
- *  leaves room for clock drift and a slow round trip. */
+/** 5-min lead on GitHub's 60-min token lifetime covers clock drift + round trip. */
 const REFRESH_LEAD_MS = 5 * 60 * 1000;
+
+/** Branded epoch-milliseconds. Prevents accidental mixing with seconds
+ *  elsewhere in the codebase (cf. JWT `iat`/`exp` in seconds). */
+export type EpochMs = number & { readonly __brand: "EpochMs" };
 
 interface CacheEntry {
   token: string;
-  expiresAt: number; // epoch ms
+  expiresAt: EpochMs;
   refreshing?: Promise<string>;
 }
 
@@ -35,7 +34,7 @@ export function __seedInstallationTokenCacheForTests(
   token: string,
   expiresAt: number,
 ): void {
-  installationTokenCache.set(installationId, { token, expiresAt });
+  installationTokenCache.set(installationId, { token, expiresAt: expiresAt as EpochMs });
 }
 
 // ---------------------------------------------------------------------
@@ -47,7 +46,6 @@ export function __seedInstallationTokenCacheForTests(
 // the same invariants on their respective copies; divergence is caught.
 // ---------------------------------------------------------------------
 
-// base64url per RFC 7515 §2.
 function base64url(input: ArrayBuffer | Uint8Array): string {
   const bytes = input instanceof Uint8Array ? input : new Uint8Array(input);
   let bin = "";
@@ -81,9 +79,8 @@ function pkcs8PemToDer(pem: string): ArrayBuffer {
   return der.buffer;
 }
 
-/** Sign a 10-minute App JWT (RS256). The 30 s backstep on `iat`
- *  defends against laptop clock skew on the maintainer side; on a
- *  Worker the clock is GitHub-aligned but the skew costs nothing. */
+/** Sign a 10-minute App JWT (RS256). 30 s iat backstep covers
+ *  maintainer-laptop clock skew; harmless on a Worker. */
 export async function signAppJwt(
   appId: number | string,
   privateKeyPem: string,
@@ -119,24 +116,23 @@ interface InstallationTokenResponse {
 
 export interface InstallationToken {
   token: string;
-  expiresAt: number; // epoch ms
+  expiresAt: EpochMs;
 }
 
-export interface FetchInstallationTokenOptions {
-  /** Inject for tests. Defaults to global `fetch`. */
+/** Internal options for tests only; not exported so production callers
+ *  can't accidentally point at a fake GitHub. */
+interface FetchInstallationTokenInternalOptions {
   fetchFn?: typeof fetch;
-  /** Base URL override for tests; defaults to https://api.github.com. */
   baseUrl?: string;
 }
 
 /** POST /app/installations/:id/access_tokens with the signed App JWT.
- *  Throws on any non-2xx with the raw response body, which is the
- *  caller's hint at what went wrong (401 → key/clock/App ID mismatch;
- *  404 → installation not visible to this App). */
+ *  401 from GitHub usually means key/clock/App ID mismatch; 404 means
+ *  the installation isn't visible to this App. */
 export async function fetchInstallationToken(
   jwt: string,
   installationId: number,
-  options: FetchInstallationTokenOptions = {},
+  options: FetchInstallationTokenInternalOptions = {},
 ): Promise<InstallationToken> {
   const fetchFn = options.fetchFn ?? fetch;
   const baseUrl = options.baseUrl ?? GITHUB_API;
@@ -154,18 +150,29 @@ export async function fetchInstallationToken(
     );
   }
   const body = (await res.json()) as Partial<InstallationTokenResponse>;
-  if (typeof body.token !== "string" || typeof body.expires_at !== "string") {
+  if (typeof body.token !== "string" || body.token.length === 0) {
     throw new Error(
-      `POST /app/installations/${installationId}/access_tokens: malformed response: ${JSON.stringify(body).slice(0, 200)}`,
+      `POST /app/installations/${installationId}/access_tokens: response \`token\` missing or empty: ${JSON.stringify(body).slice(0, 200)}`,
     );
   }
-  const expiresAt = Date.parse(body.expires_at);
-  if (Number.isNaN(expiresAt)) {
+  if (typeof body.expires_at !== "string") {
+    throw new Error(
+      `POST /app/installations/${installationId}/access_tokens: response missing \`expires_at\`: ${JSON.stringify(body).slice(0, 200)}`,
+    );
+  }
+  const expiresAtMs = Date.parse(body.expires_at);
+  if (Number.isNaN(expiresAtMs)) {
     throw new Error(
       `POST /app/installations/${installationId}/access_tokens: invalid expires_at "${body.expires_at}"`,
     );
   }
-  return { token: body.token, expiresAt };
+  if (expiresAtMs <= Date.now()) {
+    // Token born expired: clock skew, replay, or a buggy upstream. Don't cache it.
+    throw new Error(
+      `POST /app/installations/${installationId}/access_tokens: token already expired (expires_at=${body.expires_at}, now=${new Date().toISOString()})`,
+    );
+  }
+  return { token: body.token, expiresAt: expiresAtMs as EpochMs };
 }
 
 function entryIsFresh(entry: CacheEntry, now: number): boolean {
@@ -179,7 +186,7 @@ function entryIsFresh(entry: CacheEntry, now: number): boolean {
 export async function getInstallationToken(
   env: Bindings,
   installationId: number,
-  options: FetchInstallationTokenOptions = {},
+  options: FetchInstallationTokenInternalOptions = {},
 ): Promise<string> {
   if (!env.GITHUB_APP_ID || !env.GITHUB_APP_PRIVATE_KEY) {
     throw new Error(
@@ -202,11 +209,10 @@ export async function getInstallationToken(
   })();
 
   // Stash the in-flight promise so concurrent callers attach instead of
-  // spawning their own mints. Whether we had a stale cache entry or no
-  // entry at all, the right thing to do is to record the refresh.
+  // spawning their own mints.
   installationTokenCache.set(installationId, {
     token: cached?.token ?? "",
-    expiresAt: cached?.expiresAt ?? 0,
+    expiresAt: cached?.expiresAt ?? (0 as EpochMs),
     refreshing,
   });
 
@@ -214,12 +220,11 @@ export async function getInstallationToken(
     return await refreshing;
   } catch (err) {
     // Drop the failed entry so the next call re-attempts a clean mint
-    // rather than serving a stale token (or worse, an empty string).
+    // rather than serving a stale token or an empty string. If we had a
+    // still-fresh stale entry, preserve it (without the failed refresh).
     if (!cached || !entryIsFresh(cached, Date.now())) {
       installationTokenCache.delete(installationId);
     } else {
-      // We had a still-fresh stale entry; preserve it without the
-      // failed refresh promise.
       installationTokenCache.set(installationId, {
         token: cached.token,
         expiresAt: cached.expiresAt,
@@ -230,39 +235,85 @@ export async function getInstallationToken(
 }
 
 // ---------------------------------------------------------------------
-// Discriminated source for the orchestrator + webhooks (Phase 3 wires).
+// Discriminated source the orchestrator + webhooks will consume.
 // ---------------------------------------------------------------------
 
 export type GitHubAuth =
   | { kind: "pat"; token: string }
   | { kind: "app"; installationId: number; getToken: () => Promise<string> };
 
-/** Pick the right auth source for an operation targeting `installationId`.
- *  Returns App auth when all three of GITHUB_APP_ID,
- *  GITHUB_APP_PRIVATE_KEY, and `installationId` are available; otherwise
- *  falls back to the legacy `GITHUB_ADMIN_PAT`. The fallback is what
- *  keeps dev environments without the App secrets working until they
- *  set them. */
-export function getDefaultGitHubAuth(env: Bindings, installationId?: number): GitHubAuth {
-  if (installationId !== undefined && env.GITHUB_APP_ID && env.GITHUB_APP_PRIVATE_KEY) {
-    return {
-      kind: "app",
-      installationId,
-      getToken: () => getInstallationToken(env, installationId),
-    };
-  }
-  return { kind: "pat", token: env.GITHUB_ADMIN_PAT };
+/** Parsed GitHub App configuration, or `null` when not configured. */
+export interface GitHubAppConfig {
+  appId: string;
+  privateKey: string;
+  installationIdsByOrg: Readonly<Record<string, number>>;
 }
 
-/** Map an org login to the configured installation ID, or `undefined` if
- *  the env doesn't have it. The helper exists so Phase 3 callsites can
- *  do `getDefaultGitHubAuth(env, resolveInstallationId(env, "nemarDatasets"))`
- *  and stay decoupled from the exact env variable names. */
+/** Read the App config from env. Returns `null` when the required pair
+ *  (`GITHUB_APP_ID` + `GITHUB_APP_PRIVATE_KEY`) is absent. Per-org
+ *  installation IDs are best-effort: missing or malformed values are
+ *  silently omitted, and the caller will fall back to PAT for that org.
+ *  This is the single place that decides "App auth is available"; all
+ *  callers should route through here rather than re-reading env. */
+export function getGitHubAppConfig(env: Bindings): GitHubAppConfig | null {
+  if (!env.GITHUB_APP_ID || !env.GITHUB_APP_PRIVATE_KEY) return null;
+  const installationIdsByOrg: Record<string, number> = {};
+  const orgs: ReadonlyArray<readonly [string, string | undefined]> = [
+    ["nemarDatasets", env.GITHUB_APP_INSTALLATION_ID_NEMAR_DATASETS],
+    ["nemarOrg", env.GITHUB_APP_INSTALLATION_ID_NEMAR_ORG],
+  ];
+  for (const [orgLogin, raw] of orgs) {
+    if (!raw) continue;
+    const n = Number.parseInt(raw, 10);
+    if (Number.isFinite(n) && n > 0 && String(n) === raw.trim()) {
+      installationIdsByOrg[orgLogin] = n;
+    } else {
+      // Loud signal that App auth is partially configured. Without this,
+      // a single typo would silently degrade every orchestrator call for
+      // that org to the legacy PAT path.
+      console.warn(
+        `[github-auth] GITHUB_APP_INSTALLATION_ID for ${orgLogin} is set but not a positive integer: "${raw}". Falling back to PAT for this org.`,
+      );
+    }
+  }
+  return {
+    appId: env.GITHUB_APP_ID,
+    privateKey: env.GITHUB_APP_PRIVATE_KEY,
+    installationIdsByOrg,
+  };
+}
+
+/** Lookup the installation ID configured for an org login, or
+ *  `undefined` when there isn't one. Phase 3 callsites use this with
+ *  `getDefaultGitHubAuth` to stay decoupled from env var names. */
 export function resolveInstallationId(env: Bindings, orgLogin: string): number | undefined {
-  let raw: string | undefined;
-  if (orgLogin === "nemarDatasets") raw = env.GITHUB_APP_INSTALLATION_ID_NEMAR_DATASETS;
-  else if (orgLogin === "nemarOrg") raw = env.GITHUB_APP_INSTALLATION_ID_NEMAR_ORG;
-  if (!raw) return undefined;
-  const n = Number.parseInt(raw, 10);
-  return Number.isFinite(n) && n > 0 ? n : undefined;
+  return getGitHubAppConfig(env)?.installationIdsByOrg[orgLogin];
+}
+
+/** Pick the right auth source for an operation targeting `installationId`.
+ *  Returns App auth when the App is configured AND the requested
+ *  installation ID is present. Falls back to PAT otherwise — including
+ *  when App auth is partially configured. The fallback exists so dev
+ *  environments without App secrets keep working.
+ *
+ *  Throws if neither App nor a non-empty PAT is configured: a Worker in
+ *  that state can't talk to GitHub at all, so a clear error here beats
+ *  an opaque 401 from the next REST call. */
+export function getDefaultGitHubAuth(env: Bindings, installationId?: number): GitHubAuth {
+  if (installationId !== undefined) {
+    const app = getGitHubAppConfig(env);
+    if (app) {
+      return {
+        kind: "app",
+        installationId,
+        getToken: () => getInstallationToken(env, installationId),
+      };
+    }
+  }
+  if (!env.GITHUB_ADMIN_PAT) {
+    throw new Error(
+      "No GitHub auth configured: set GITHUB_APP_ID + GITHUB_APP_PRIVATE_KEY + installation IDs, or GITHUB_ADMIN_PAT as fallback.",
+    );
+  }
+  return { kind: "pat", token: env.GITHUB_ADMIN_PAT };
 }
