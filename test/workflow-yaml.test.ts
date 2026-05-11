@@ -187,6 +187,57 @@ describe("CI workflow templates", () => {
     expect(installLine).not.toMatch(/\barchiver\b(?!@)/);
   });
 
+  test("pr-merge / llm-enrichment / version-doi mint App tokens for writes (#439)", () => {
+    // Each migrated template should:
+    //   - reference actions/create-github-app-token@v1
+    //   - pass app-id from secrets.NEMAR_APP_ID and key from secrets.NEMAR_APP_PRIVATE_KEY
+    //   - scope `repositories:` to the calling repo (least-privilege)
+    //   - NOT reference secrets.GITHUB_TOKEN anywhere
+    const writeTemplates = [
+      "pr-merge.yml",
+      "llm-enrichment.yml",
+      "version-doi.yml",
+    ];
+    for (const name of writeTemplates) {
+      const tpl = templates.find((t) => t.path.endsWith(name));
+      expect(tpl, `${name} missing from templates`).toBeDefined();
+      if (!tpl) continue;
+      expect(tpl.content).toContain("uses: actions/create-github-app-token@v1");
+      expect(tpl.content).toContain("app-id: ${{ secrets.NEMAR_APP_ID }}");
+      expect(tpl.content).toContain("private-key: ${{ secrets.NEMAR_APP_PRIVATE_KEY }}");
+      expect(tpl.content).toContain("repositories: ${{ github.event.repository.name }}");
+      expect(tpl.content).not.toContain("secrets.GITHUB_TOKEN");
+    }
+  });
+
+  test("version-doi spawns the App-token step in BOTH jobs (publish-doi + trigger-archive)", () => {
+    // version-doi has two jobs; each does its own write and needs its own
+    // installation token. If a future refactor coalesces jobs, this test
+    // documents the contract.
+    const versionDoi = templates.find((t) => t.path.endsWith("version-doi.yml"));
+    expect(versionDoi).toBeDefined();
+    if (!versionDoi) return;
+    const appTokenCount = (versionDoi.content.match(/actions\/create-github-app-token@v1/g) || []).length;
+    expect(appTokenCount).toBe(2);
+  });
+
+  test("read-only / AWS-only templates stay on the auto-token (no App-token step)", () => {
+    // bids-validation + version-check do no writes; generate-archive writes
+    // only to S3 (AWS creds, not GitHub). Adding an App-token step there
+    // would force an org-secret prerequisite for no benefit.
+    const readOnlyTemplates = [
+      "bids-validation.yml",
+      "version-check.yml",
+      "generate-archive.yml",
+    ];
+    for (const name of readOnlyTemplates) {
+      const tpl = templates.find((t) => t.path.endsWith(name));
+      expect(tpl, `${name} missing from templates`).toBeDefined();
+      if (!tpl) continue;
+      expect(tpl.content).not.toContain("create-github-app-token");
+    }
+  });
+
   test("no literal newlines inside shell strings (escape regression)", () => {
     for (const { path, content } of templates) {
       // In valid YAML, printf format strings and jq arguments should
