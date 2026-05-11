@@ -4851,11 +4851,37 @@ adminRoutes.post("/datasets/reindex/bulk", async (c) => {
     return c.json({ error: errorMessage(err) }, 400);
   }
 
-  const rows = await c.env.DB.prepare(query.sql)
-    .bind(...query.params)
-    .all<{ dataset_id: string }>();
-  const datasetIds = (rows.results ?? []).map((r) => r.dataset_id);
+  // Guard against the Worker-deployed-before-migration partial-deploy window:
+  // the filter SQL references Phase 2 columns (subject_count, modalities,
+  // metadata_updated_at, etc.). If migration 0020 hasn't been applied yet,
+  // D1 returns a column-not-found error. Map that to 503 with a clear
+  // message instead of a generic 500 so operators know what to do.
+  let datasetIds: string[];
   const startedAt = Date.now();
+  try {
+    const rows = await c.env.DB.prepare(query.sql)
+      .bind(...query.params)
+      .all<{ dataset_id: string }>();
+    datasetIds = (rows.results ?? []).map((r) => r.dataset_id);
+  } catch (err) {
+    const msg = errorMessage(err);
+    if (/no such column|undefined column/i.test(msg)) {
+      console.error(
+        "[admin/reindex/bulk] D1 query failed; migration 0020 may not be applied:",
+        err,
+      );
+      return c.json(
+        {
+          error:
+            "Bulk reindex query references columns added by migration 0020. Apply the migration (wrangler d1 migrations apply) and retry.",
+          details: msg,
+        },
+        503,
+      );
+    }
+    console.error("[admin/reindex/bulk] D1 query failed unexpectedly:", err);
+    return c.json({ error: msg }, 500);
+  }
 
   if (body.dry_run === true) {
     return c.json({

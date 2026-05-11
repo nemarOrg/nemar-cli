@@ -9,6 +9,7 @@ import { describe, expect, test } from "bun:test";
 import {
   buildReindexFilterQuery,
   extractEnrichmentSubErrors,
+  looksLikeTagRef,
 } from "../backend/src/services/dataset-reindex";
 
 describe("buildReindexFilterQuery", () => {
@@ -170,5 +171,36 @@ describe("extractEnrichmentSubErrors", () => {
       "metadata_columns_error: d1 down",
       "issue_creation_error: no perms",
     ]);
+  });
+});
+
+describe("looksLikeTagRef", () => {
+  // Used by runEnrichmentForDataset to force client_commits=true when the
+  // ref is a (immutable) version tag, so the Worker doesn't try to commit
+  // back to refs/heads/v1.0.0 or worse, fall through to the bare Contents
+  // API and silently land tag-era metadata on main.
+
+  test("matches semver-style version tags", () => {
+    expect(looksLikeTagRef("v1.0.0")).toBe(true);
+    expect(looksLikeTagRef("v0.0.1")).toBe(true);
+    expect(looksLikeTagRef("v10.20.30")).toBe(true);
+    expect(looksLikeTagRef("v1.0.0-rc1")).toBe(true);
+    expect(looksLikeTagRef("v1")).toBe(true);
+  });
+
+  test("rejects branch-shaped refs", () => {
+    expect(looksLikeTagRef("main")).toBe(false);
+    expect(looksLikeTagRef("master")).toBe(false);
+    expect(looksLikeTagRef("dev")).toBe(false);
+    expect(looksLikeTagRef("release/v1.0.0")).toBe(false);
+    expect(looksLikeTagRef("feature/my-branch")).toBe(false);
+    expect(looksLikeTagRef("verify-something")).toBe(false); // starts with v but not a tag pattern
+  });
+
+  test("rejects empty / non-digit-suffixed v refs", () => {
+    expect(looksLikeTagRef("")).toBe(false);
+    expect(looksLikeTagRef("v")).toBe(false);
+    expect(looksLikeTagRef("version")).toBe(false);
+    expect(looksLikeTagRef("vNext")).toBe(false);
   });
 });

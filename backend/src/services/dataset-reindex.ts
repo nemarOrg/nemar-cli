@@ -385,6 +385,18 @@ export function extractEnrichmentSubErrors(body: unknown): string[] {
  * Defaults to ref="main" and force=true (admin paths always want a fresh
  * enrichment regardless of source_hash). The caller can override either.
  */
+/**
+ * Heuristic: does the given ref look like a version tag (immutable)?
+ * Matches `v` followed by a digit, the conventional shape for semver-style
+ * release tags produced by pr-merge.yml. Tag refs must use client_commits=true
+ * because the Worker's commit path resolves refs/heads/<ref> and gets 404
+ * for tags; the worse failure mode is the bare-Contents-API write silently
+ * landing on main. Exported for unit tests.
+ */
+export function looksLikeTagRef(ref: string): boolean {
+  return /^v\d/.test(ref);
+}
+
 export async function runEnrichmentForDataset(
   env: Bindings,
   datasetId: string,
@@ -402,6 +414,12 @@ export async function runEnrichmentForDataset(
     return { ok: false, error: "API_BASE_URL not configured", ref };
   }
 
+  // Tag refs are immutable; force client_commits=true so the Worker skips
+  // its commit path. If the explicit caller already opted into client_commits
+  // we honor that. Branch refs default to false unless the caller asked
+  // otherwise (mirroring the existing behavior).
+  const clientCommits = options?.clientCommits === true || looksLikeTagRef(ref);
+
   // The webhook handler is on the same Worker; forwarding via API_BASE_URL
   // (configured per environment in wrangler.toml) ensures dev hits the dev
   // Worker and prod hits api.nemar.org. Cloudflare routes the request back
@@ -417,7 +435,7 @@ export async function runEnrichmentForDataset(
         dataset_id: datasetId,
         force: true,
         ref,
-        client_commits: options?.clientCommits ?? false,
+        client_commits: clientCommits,
       }),
     });
     if (!res.ok) {
