@@ -340,10 +340,14 @@ function countSessions(tree: TreeEntry[]): number {
   return sessions.size;
 }
 
-function extractTasks(tree: TreeEntry[]): string[] {
+/**
+ * Extract sorted, deduplicated BIDS task labels from a list of file paths.
+ * Reads `_task-<label>` segments and stops at `_`, `.`, or `/`.
+ */
+export function extractTasks(paths: readonly string[]): string[] {
   const tasks = new Set<string>();
-  for (const entry of tree) {
-    const match = entry.path.match(/_task-([^_./]+)/);
+  for (const p of paths) {
+    const match = p.match(/_task-([^_./]+)/);
     if (match) tasks.add(match[1]);
   }
   return [...tasks].sort();
@@ -425,7 +429,7 @@ function buildDataexplorerDataset(
     ReferencesAndLinks: joinSep(bd.ReferencesAndLinks),
     DatasetDOI: src.conceptDoi || "",
     EthicsApprovals: joinSep(bd.EthicsApprovals),
-    tasks: extractTasks(src.tree).join(", "),
+    tasks: extractTasks(src.tree.map((e) => e.path)).join(", "),
     HEDVersion: (bd.HEDVersion as string) || "",
     modalities,
     readme: src.readme,
