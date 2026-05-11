@@ -95,6 +95,30 @@ export function buildEnrichmentCommitPayload(
   };
 }
 
+/**
+ * Validate a `ref` value supplied to the /webhooks/llm-enrich endpoint.
+ * The ref is interpolated into GitHub API URL fragments and into the shell
+ * payload emitted by llm-enrichment.yml, so the allowed characters are
+ * intentionally narrow.
+ *
+ * Returns null when the ref is acceptable. Otherwise returns a human-readable
+ * error string suitable for a 400 response body. Exported so unit tests can
+ * pin the validation table without spinning up a webhook harness.
+ *
+ * Accepts `undefined` so callers can use it on optional request fields; the
+ * function treats `undefined` as "field absent" and returns null.
+ */
+export function validateEnrichmentRef(ref: unknown): string | null {
+  if (ref === undefined) return null;
+  if (typeof ref !== "string" || ref.length === 0 || ref.length > 200) {
+    return "Invalid 'ref' parameter: must be a non-empty string up to 200 characters";
+  }
+  if (!/^[A-Za-z0-9._/-]+$/.test(ref) || ref.includes("..") || ref.startsWith("/")) {
+    return "Invalid 'ref' parameter: contains forbidden characters";
+  }
+  return null;
+}
+
 const webhooks = new Hono<{ Bindings: Bindings }>();
 
 /**
@@ -807,7 +831,12 @@ webhooks.post("/llm-enrich", async (c) => {
   }
 
   // Parse request body
-  let body: { dataset_id: string; force?: boolean; client_commits?: boolean };
+  let body: {
+    dataset_id: string;
+    force?: boolean;
+    client_commits?: boolean;
+    ref?: string;
+  };
   try {
     body = await c.req.json();
   } catch {
@@ -828,11 +857,19 @@ webhooks.post("/llm-enrich", async (c) => {
       400,
     );
   }
+  const refValidationError = validateEnrichmentRef(body.ref);
+  if (refValidationError) {
+    return c.json({ error: refValidationError }, 400);
+  }
   const forceReenrich = body.force === true;
   // When true, the caller (typically the llm-enrichment.yml Action) will write
   // the metadata commit using its own GITHUB_TOKEN; the Worker just returns
   // the would-be commit payload and skips the admin-PAT REST commit.
   const clientCommits = body.client_commits === true;
+  // Branch or ref to read from / commit to. Defaults to "main" for back-compat.
+  // Release-branch and tag-driven enrichment pass the current ref so the
+  // pipeline operates on the right snapshot (e.g., release/v1.0.1 or v1.0.1).
+  const ref = body.ref ?? "main";
 
   // Look up dataset in D1 (includes EZID/owner fields for DOI title sync)
   const dataset = await c.env.DB.prepare(
@@ -870,17 +907,25 @@ webhooks.post("/llm-enrich", async (c) => {
 
   const pat = c.env.GITHUB_ADMIN_PAT;
 
-  // Ensure default branch is "main" before reading from it
-  try {
-    await ensureMainBranch(repoName, pat);
-  } catch (error) {
-    console.error(`[llm-enrich] Failed to verify default branch for ${repoName}:`, error);
-    // Continue anyway; getTreeAtRef will fail with a clear error if "main" doesn't exist
+  console.log(
+    `[llm-enrich] Starting ${dataset_id} on ref="${ref}" (force=${forceReenrich}, client_commits=${clientCommits})`,
+  );
+
+  // Ensure default branch is "main" before reading from it. Only relevant
+  // for the main-branch flow; release branches and tags are explicit refs
+  // and do not depend on the default-branch rename helper.
+  if (ref === "main") {
+    try {
+      await ensureMainBranch(repoName, pat);
+    } catch (error) {
+      console.error(`[llm-enrich] Failed to verify default branch for ${repoName}:`, error);
+      // Continue anyway; getTreeAtRef will fail with a clear error if "main" doesn't exist
+    }
   }
 
   try {
-    // Read repo tree to find README and dataset_description.json
-    const tree = await getTreeAtRef(repoName, "main", pat);
+    // Read repo tree at the requested ref to find README and dataset_description.json
+    const tree = await getTreeAtRef(repoName, ref, pat);
 
     // Read README.md
     const readmeFile = tree.find(
@@ -1332,7 +1377,7 @@ webhooks.post("/llm-enrich", async (c) => {
       try {
         const result = await commitEnrichmentWithBidsignore(
           repoName,
-          "main",
+          ref,
           ".nemar/metadata.json",
           metadataContent,
           bidsignoreEntries,
