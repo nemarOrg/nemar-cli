@@ -44,7 +44,10 @@ survives any individual maintainer leaving.
      - Pull requests: **Read & write**
      - Workflows: **Read & write** (CI workflow deploy)
    - **Organization permissions**: leave all at `No access` for now.
-   - **Where can this GitHub App be installed?**: **Only on this account**.
+   - **Where can this GitHub App be installed?**: **Any account**. The
+     App is owned by `nemarOrg` but needs to be installable on
+     `nemarDatasets` too. "Only on this account" locks the App to its
+     owner and blocks the second installation.
 3. Click **Create GitHub App**.
 4. On the new App's settings page, note the numeric **App ID** near the
    top. Record it; Phase 2 will store it as the Worker secret
@@ -75,17 +78,24 @@ survives any individual maintainer leaving.
 
 ### 3. Install on both organizations
 
-The same App needs two installations, one per org. Repository visibility
-in each install scope determines which repos the Worker can access.
+The App is owned by `nemarOrg` and needs two installations:
+- **`nemarDatasets`** — required. All dataset-repo writes happen here.
+- **`nemarOrg`** — optional today; covers any future feature that
+  writes to tooling repos. Install it too to stay symmetric.
+
+Repository visibility in each install scope determines which repos
+the Worker can access.
 
 1. From the App settings page, click **Install App** in the left sidebar.
-2. Click **Install** next to **nemarOrg**.
-3. Choose **All repositories** and confirm. Note the installation ID from
-   the resulting URL: `https://github.com/organizations/nemarOrg/settings/installations/<INSTALL_ID>`.
-   Record this as `GITHUB_APP_INSTALLATION_ID_NEMAR_ORG`.
-4. Back on the install screen, click **Install** next to **nemarDatasets**.
-5. Choose **All repositories** and confirm. Note the installation ID.
+2. Click **Install** next to **nemarDatasets** first (this is the
+   one Phase 3 actively uses).
+3. Choose **All repositories** and confirm. Note the installation ID
+   from the resulting URL:
+   `https://github.com/organizations/nemarDatasets/settings/installations/<INSTALL_ID>`.
    Record this as `GITHUB_APP_INSTALLATION_ID_NEMAR_DATASETS`.
+4. Back on the install screen, click **Install** next to **nemarOrg**.
+5. Choose **All repositories** and confirm. Note the installation ID.
+   Record this as `GITHUB_APP_INSTALLATION_ID_NEMAR_ORG`.
 
 ### 4. Verify
 
