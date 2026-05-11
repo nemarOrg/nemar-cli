@@ -45,6 +45,12 @@ site/
 .venv/
 .wrangler/
 
+# Root-level wrangler.jsonc is for the unrelated nemar-cli static-site
+# worker and would shadow backend/wrangler.toml when wrangler is invoked
+# without an explicit -c flag. Keep it out of the tracked tree so it
+# can't accidentally affect a backend deploy.
+wrangler.jsonc
+
 .dev.vars*
 !.dev.vars.example
 !.env.example

@@ -203,11 +203,15 @@ discover_datasets() {
       return 1
     }
 
-    local rows jq_err jq_status
+    local rows jq_err
     jq_err=$(mktemp)
-    rows=$(echo "$response" | jq -r '.datasets[] | [.dataset_id, (.latest_version // "")] | @tsv' 2>"$jq_err") || true
-    jq_status=$?
-    if (( jq_status != 0 )); then
+    # Use `if ! ...` so a jq failure doesn't trip the global `set -e` AND
+    # we still inspect the failure. The previous form used `|| true` to
+    # suppress the exit, but that overwrote $? with `true`'s status (0), so
+    # the jq_status check that followed was always 0 and a malformed
+    # response silently looked like "no more datasets" and ended discovery.
+    if ! rows=$(echo "$response" | jq -r '.datasets[] | [.dataset_id, (.latest_version // "")] | @tsv' 2>"$jq_err"); then
+      local jq_status=$?
       log_error "jq parse failed at offset=${offset} (exit=${jq_status}): $(cat "$jq_err"); aborting discovery"
       rm -f "$jq_err"
       return 1

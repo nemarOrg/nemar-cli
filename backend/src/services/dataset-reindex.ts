@@ -165,7 +165,19 @@ export async function runDatasetSync(
     }
   }
   const readmeFile = tree.find((f) => f.path === "README" || f.path === "README.md");
-  const readme = readmeFile ? await getBlobContent(repoName, readmeFile.sha, pat) : "";
+  // Mirror the dataset_description.json / .nemar/metadata.json catch pattern:
+  // an unguarded throw here used to escape runDatasetSync entirely, skipping
+  // both the nemar_sync_status update and the metadata-columns write — so a
+  // transient GitHub error would leave D1 holding stale status with no
+  // record that the sync was attempted.
+  let readme = "";
+  if (readmeFile) {
+    try {
+      readme = await getBlobContent(repoName, readmeFile.sha, pat);
+    } catch (err) {
+      console.warn(`[reindex] Failed to read README for ${datasetId}: ${errorMessage(err)}`);
+    }
+  }
   let nemarMeta = null;
   const nemarMetaFile = tree.find((f) => f.path === ".nemar/metadata.json");
   if (nemarMetaFile) {
@@ -288,18 +300,24 @@ export async function runDatasetSync(
     repoCreatedAt: repoInfo?.created_at || null,
   });
 
-  // Persist nemar.org sync status.
-  await db
-    .prepare(
-      `UPDATE datasets SET nemar_sync_status = ?, nemar_sync_at = CASE WHEN ? = 'synced' THEN datetime('now') ELSE nemar_sync_at END, nemar_sync_error = ?, updated_at = datetime('now') WHERE dataset_id = ?`,
-    )
-    .bind(
-      syncResult.synced ? "synced" : "failed",
-      syncResult.synced ? "synced" : "failed",
-      syncResult.errors.length ? syncResult.errors.join("; ") : null,
-      datasetId,
-    )
-    .run();
+  // Persist nemar.org sync status. Guard against transient D1 errors so a
+  // hiccup here doesn't unwind past the metadata-columns block below, which
+  // is the only path that records its own failure into D1.
+  try {
+    await db
+      .prepare(
+        `UPDATE datasets SET nemar_sync_status = ?, nemar_sync_at = CASE WHEN ? = 'synced' THEN datetime('now') ELSE nemar_sync_at END, nemar_sync_error = ?, updated_at = datetime('now') WHERE dataset_id = ?`,
+      )
+      .bind(
+        syncResult.synced ? "synced" : "failed",
+        syncResult.synced ? "synced" : "failed",
+        syncResult.errors.length ? syncResult.errors.join("; ") : null,
+        datasetId,
+      )
+      .run();
+  } catch (statusErr) {
+    console.error(`[reindex] Failed to persist nemar_sync_status for ${datasetId}:`, statusErr);
+  }
 
   // Refresh Phase 2 metadata columns. Failure here doesn't fail the sync.
   let metadataColumnsError: string | undefined;

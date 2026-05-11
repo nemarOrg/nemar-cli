@@ -222,7 +222,12 @@ describe("ensureWorkflowsDeployed", () => {
     expect(result.listFailed).toBe(false);
   });
 
-  test("symlinked workflow is treated as present (not missing)", async () => {
+  test("symlinked workflow is treated as MISSING and replaced (not skipped)", async () => {
+    // Older DataLad-style repos can have workflow YAMLs annexed, which
+    // GitHub returns as `type: "symlink"`. Actions cannot read or execute
+    // those, so a symlinked workflow looks deployed in the Contents API
+    // but is actually broken. ensureWorkflowsDeployed must overwrite it
+    // with a real file blob instead of skipping it.
     const templates = getWorkflowTemplates();
     listingEntriesOverride = templates.map((t, i) => ({
       path: t.path,
@@ -232,9 +237,12 @@ describe("ensureWorkflowsDeployed", () => {
 
     const result = await ensureWorkflowsDeployed(REPO, BRANCH, PAT);
 
-    expect(result.deployed).toEqual([]);
-    expect(result.alreadyPresent.length).toBe(templates.length);
-    expect(fake.countByMethodPath[`POST /repos/nemarDatasets/${REPO}/git/trees`]).toBeUndefined();
+    // The symlinked entry must be in `deployed`, not `alreadyPresent`.
+    const symlinkName = templates[0].path.split("/").pop();
+    expect(result.deployed).toEqual([symlinkName as string]);
+    expect(result.alreadyPresent).not.toContain(symlinkName as string);
+    // A tree commit must have been issued for the missing/symlinked file.
+    expect(fake.countByMethodPath[`POST /repos/nemarDatasets/${REPO}/git/trees`]).toBe(1);
   });
 });
 

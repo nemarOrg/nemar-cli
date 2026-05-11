@@ -639,7 +639,14 @@ export async function enableAutoMerge(repo: string, pat: string): Promise<boolea
 }
 
 /**
- * Create or update a file in a repository
+ * Create or update a file in a repository.
+ *
+ * The optional `branch` argument is passed through to the Contents API
+ * via the `branch` field on the GET and PUT calls so this function commits
+ * to the requested ref instead of the repo default branch. Without it, a
+ * caller like `commitEnrichmentWithBidsignore` that only touches one file
+ * would silently land its commit on `main` regardless of the branch it
+ * was invoked for.
  */
 export async function createOrUpdateFile(
   repo: string,
@@ -647,18 +654,23 @@ export async function createOrUpdateFile(
   content: string,
   message: string,
   pat: string,
+  branch?: string,
 ): Promise<void> {
+  const branchQuery = branch ? `?ref=${encodeURIComponent(branch)}` : "";
   // First, try to get the file to see if it exists (need SHA for update)
   let sha: string | undefined;
   let getResponse: Response;
   try {
-    getResponse = await fetch(`${GITHUB_API()}/repos/${ORG_NAME}/${repo}/contents/${path}`, {
-      headers: {
-        Authorization: `Bearer ${pat}`,
-        Accept: "application/vnd.github.v3+json",
-        "User-Agent": "NEMAR-API",
+    getResponse = await fetch(
+      `${GITHUB_API()}/repos/${ORG_NAME}/${repo}/contents/${path}${branchQuery}`,
+      {
+        headers: {
+          Authorization: `Bearer ${pat}`,
+          Accept: "application/vnd.github.v3+json",
+          "User-Agent": "NEMAR-API",
+        },
       },
-    });
+    );
   } catch (err) {
     throw new Error(
       `Network error checking ${path}: ${err instanceof Error ? err.message : String(err)}`,
@@ -690,6 +702,7 @@ export async function createOrUpdateFile(
           Array.from(new TextEncoder().encode(content), (b) => String.fromCharCode(b)).join(""),
         ),
         ...(sha ? { sha } : {}),
+        ...(branch ? { branch } : {}),
         committer: NEMAR_COMMITTER,
         author: NEMAR_COMMITTER,
       }),
@@ -1663,9 +1676,13 @@ export async function deployWorkflows(
  * `.github/workflows/bids-validation.yml`). A 404 on the directory itself
  * (workflows folder not yet created) is treated as "empty", not an error.
  *
- * Includes both regular files and symlinks: a symlinked workflow is still
- * a deployed workflow from GitHub Actions' perspective, and silently
- * misclassifying it as missing would cause us to overwrite it.
+ * ONLY regular files count as "present". Symlinks are deliberately treated
+ * as MISSING: in older DataLad-style repos a workflow YAML may be annexed,
+ * which GitHub returns as `type: "symlink"`. GitHub Actions cannot read /
+ * execute symlinked workflows, so a symlinked file looks deployed in the
+ * Contents API but is actually broken. We want
+ * `ensureWorkflowsDeployed` / `syncWorkflowTemplates` to overwrite it with
+ * a real file blob instead of skipping it.
  */
 async function listDeployedWorkflowPaths(
   repo: string,
@@ -1693,9 +1710,7 @@ async function listDeployedWorkflowPaths(
     );
   }
   const entries = (await response.json()) as Array<{ path: string; type: string }>;
-  return new Set(
-    entries.filter((e) => e.type === "file" || e.type === "symlink").map((e) => e.path),
-  );
+  return new Set(entries.filter((e) => e.type === "file").map((e) => e.path));
 }
 
 export interface EnsureWorkflowsResult {
@@ -2456,7 +2471,9 @@ export async function commitEnrichmentWithBidsignore(
         pat,
       );
     } else {
-      await createOrUpdateFile(repo, metadataPath, metadataContent, message, pat);
+      // Pass `branch` so a release/* or other non-main caller doesn't have
+      // its single-file commit silently land on the default branch.
+      await createOrUpdateFile(repo, metadataPath, metadataContent, message, pat, branch);
     }
   } catch (commitErr) {
     const detail = commitErr instanceof Error ? commitErr.message : String(commitErr);
