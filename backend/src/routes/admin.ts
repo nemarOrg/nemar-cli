@@ -3373,15 +3373,25 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
 
       // Always write to README.md (GitHub requires .md for badge rendering)
       const isRename = contentSource && contentSource.path !== "README.md";
-      await createOrUpdateFile(
-        repoName,
-        "README.md",
-        readmeContent,
-        isRename
-          ? `Rename ${contentSource.path} to README.md and add DOI badge: ${conceptDoi}`
-          : `Add DOI badge: ${conceptDoi}`,
-        pat,
-      );
+
+      // Skip the commit entirely if the badge is already in place and the
+      // file is already named README.md — otherwise we ship an empty commit
+      // on every --resume that re-triggers BIDS validation pointlessly.
+      if (hasBadge && !isRename) {
+        console.log(
+          `[publish] DOI badge already present in README.md for ${repoName}, skipping commit`,
+        );
+      } else {
+        await createOrUpdateFile(
+          repoName,
+          "README.md",
+          readmeContent,
+          isRename
+            ? `Rename ${contentSource.path} to README.md and add DOI badge: ${conceptDoi}`
+            : `Add DOI badge: ${conceptDoi}`,
+          pat,
+        );
+      }
 
       // Delete any non-.md README files (handles both fresh rename and resume after partial run)
       for (const readme of foundReadmes) {
