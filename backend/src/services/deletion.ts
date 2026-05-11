@@ -8,13 +8,20 @@
 
 import type { Bindings } from "../types/bindings.js";
 import { isValidDatasetId } from "./datasetId.js";
+import { getDatasetsToken } from "./github-auth.js";
 import { deleteRepository } from "./github.js";
 import { type DeleteResult, deleteDatasetObjects } from "./s3.js";
 
 export interface DeletionSteps {
   github: { success: boolean; error?: string };
   s3: DeleteResult & { skipped?: boolean };
-  d1: { success: boolean; versionsDeleted: number; pubRequestsDeleted: number; s3PermsDeleted: number; error?: string };
+  d1: {
+    success: boolean;
+    versionsDeleted: number;
+    pubRequestsDeleted: number;
+    s3PermsDeleted: number;
+    error?: string;
+  };
 }
 
 export interface DeletionResult {
@@ -52,7 +59,7 @@ export async function deleteDatasetCascade(
 
   // Step 1: Delete GitHub repository
   try {
-    await deleteRepository(datasetId, env.GITHUB_ADMIN_PAT);
+    await deleteRepository(datasetId, await getDatasetsToken(env));
     steps.github.success = true;
   } catch (err) {
     steps.github.error = err instanceof Error ? err.message : String(err);
