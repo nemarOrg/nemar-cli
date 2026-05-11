@@ -1476,8 +1476,8 @@ jobs:
 
           rm -f "$BODY_FILE"
 
-          git config user.name "nemar-bot"
-          git config user.email "actions@github.com"
+          git config user.name "nemar-publish-bot"
+          git config user.email "nemar-publish-bot@users.noreply.github.com"
           git add "$METADATA_PATH" .bidsignore
 
           if git diff --cached --quiet; then

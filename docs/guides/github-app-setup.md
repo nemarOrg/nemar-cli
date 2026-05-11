@@ -138,7 +138,7 @@ The canonical copy lives in 1Password.
 Phase 2 (#437) consumes these credentials in the Worker. No Worker secret
 changes happen in this phase.
 
-## Phase 4: dataset-repo CI uses the same App
+## Dataset-repo CI uses the same App
 
 Workflow templates in dataset repos mint short-lived installation tokens
 via `actions/create-github-app-token@v1` so all CI writes carry the
@@ -149,9 +149,10 @@ via `actions/create-github-app-token@v1` so all CI writes carry the
 
 1. **Accept the updated App permissions.**
 
-   Phase 4 raises **Actions** from Read-only to Read & write. If the App
-   was created against the original list, GitHub holds the new permission
-   request as "pending approval" until an org owner accepts it.
+   This step raises **Actions** from Read-only to Read & write. If the
+   App was created against the original list, GitHub holds the new
+   permission request as "pending approval" until an org owner accepts
+   it.
 
    - Visit the App settings page: `https://github.com/organizations/nemarOrg/settings/apps/nemar-publish-bot/permissions`.
    - Bump **Actions** to **Read & write** if not already set.
@@ -179,7 +180,7 @@ via `actions/create-github-app-token@v1` so all CI writes carry the
    `/tmp/refresh-archive-workflow.sh` pattern from the May 2026 sweep
    works as a reference).
 
-### Phase 4 acceptance
+### Acceptance
 
 - [ ] App permissions show **Actions: Read & write** and the update is
       accepted on both org installations.

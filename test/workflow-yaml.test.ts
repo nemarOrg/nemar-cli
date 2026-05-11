@@ -187,30 +187,51 @@ describe("CI workflow templates", () => {
     expect(installLine).not.toMatch(/\barchiver\b(?!@)/);
   });
 
-  test("pr-merge / llm-enrichment / version-doi mint App tokens for writes (#439)", () => {
-    // Each migrated template should:
-    //   - reference actions/create-github-app-token@v1
-    //   - pass app-id from secrets.NEMAR_APP_ID and key from secrets.NEMAR_APP_PRIVATE_KEY
-    //   - scope `repositories:` to the calling repo (least-privilege)
-    //   - NOT reference secrets.GITHUB_TOKEN anywhere
-    const writeTemplates = [
-      "pr-merge.yml",
-      "llm-enrichment.yml",
-      "version-doi.yml",
-    ];
+  test("migrated templates mint App tokens and never reference secrets.GITHUB_TOKEN", () => {
+    // Each migrated template authenticates as the App with least-privilege
+    // repo scope and no static GITHUB_TOKEN. Parsed YAML so input values
+    // are pinned exactly (a copy-pasted hardcoded `repositories:` would
+    // still pass a substring check; this catches it).
+    const writeTemplates = ["pr-merge.yml", "llm-enrichment.yml", "version-doi.yml"];
     for (const name of writeTemplates) {
       const tpl = templates.find((t) => t.path.endsWith(name));
       expect(tpl, `${name} missing from templates`).toBeDefined();
       if (!tpl) continue;
-      expect(tpl.content).toContain("uses: actions/create-github-app-token@v1");
-      expect(tpl.content).toContain("app-id: ${{ secrets.NEMAR_APP_ID }}");
-      expect(tpl.content).toContain("private-key: ${{ secrets.NEMAR_APP_PRIVATE_KEY }}");
-      expect(tpl.content).toContain("repositories: ${{ github.event.repository.name }}");
       expect(tpl.content).not.toContain("secrets.GITHUB_TOKEN");
+
+      const parsed = parse(tpl.content) as { jobs: Record<string, { steps: Array<Record<string, unknown>> }> };
+      for (const [jobName, job] of Object.entries(parsed.jobs)) {
+        const mintIdx = job.steps.findIndex(
+          (s) => s.uses === "actions/create-github-app-token@v1",
+        );
+        // Not every job in a migrated template mints (e.g. pr-merge's
+        // cleanup-staging job uses AWS only). Only check when present.
+        if (mintIdx < 0) continue;
+        // Ordering: mint must be the first step so subsequent
+        // checkout/`gh` calls can reference its outputs.
+        expect(
+          mintIdx,
+          `${name}:${jobName} app-token step must be first (was index ${mintIdx})`,
+        ).toBe(0);
+        const mintWith = (job.steps[mintIdx].with ?? {}) as Record<string, unknown>;
+        expect(mintWith["app-id"]).toBe("${{ secrets.NEMAR_APP_ID }}");
+        expect(mintWith["private-key"]).toBe("${{ secrets.NEMAR_APP_PRIVATE_KEY }}");
+        expect(mintWith.owner).toBe("nemarDatasets");
+        expect(mintWith.repositories).toBe("${{ github.event.repository.name }}");
+
+        // Any GH_TOKEN env in the rest of the job's steps must reference
+        // the minted token, not a stale `secrets.GITHUB_TOKEN` left behind.
+        for (const step of job.steps) {
+          const env = (step.env ?? {}) as Record<string, unknown>;
+          if ("GH_TOKEN" in env) {
+            expect(env.GH_TOKEN).toBe("${{ steps.app-token.outputs.token }}");
+          }
+        }
+      }
     }
   });
 
-  test("version-doi spawns the App-token step in BOTH jobs (publish-doi + trigger-archive)", () => {
+  test("version-doi spawns the App-token step in BOTH jobs", () => {
     // version-doi has two jobs; each does its own write and needs its own
     // installation token. If a future refactor coalesces jobs, this test
     // documents the contract.
