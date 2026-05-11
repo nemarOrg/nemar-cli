@@ -291,6 +291,8 @@ nemar admin publish deny nm000104 --reason "BIDS validation failing - please fix
 - **Cause:** GitHub API error or permissions issue
 - **Solution:** Check `GITHUB_ADMIN_PAT` is valid with `repo` and `admin:org` scopes. Retry with `--resume`.
 
+> **Heads up:** the `GITHUB_ADMIN_PAT` user-token approach is being replaced by a GitHub App installation token; see [GitHub App setup](github-app-setup.md). Migration tracked in [epic #432](https://github.com/nemarOrg/nemar-cli/issues/432).
+
 **Problem:** Approval fails at `doi_create`
 - **Cause:** DOI provider API error
 - **Solution:**
