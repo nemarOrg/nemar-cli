@@ -70,6 +70,31 @@ function timingSafeEqual(a: string, b: string): boolean {
   return crypto.subtle.timingSafeEqual(bufA, bufB);
 }
 
+export interface EnrichmentCommitPayload {
+  metadata_path: string;
+  metadata_content: string;
+  bidsignore_entries: string[];
+  commit_message: string;
+}
+
+/**
+ * Canonical shape of the commit payload returned to an Action that opted into
+ * `client_commits: true`. Exported so a unit test can pin the contract; the
+ * Action's jq script in llm-enrichment.yml reads these exact field names.
+ */
+export function buildEnrichmentCommitPayload(
+  metadataContent: string,
+  bidsignoreEntries: string[],
+  commitMessage: string,
+): EnrichmentCommitPayload {
+  return {
+    metadata_path: ".nemar/metadata.json",
+    metadata_content: metadataContent,
+    bidsignore_entries: bidsignoreEntries,
+    commit_message: commitMessage,
+  };
+}
+
 const webhooks = new Hono<{ Bindings: Bindings }>();
 
 /**
@@ -1289,8 +1314,13 @@ webhooks.post("/llm-enrich", async (c) => {
     let commitError: string | undefined;
     let bidsignoreError: string | undefined;
     let cacheError: string | undefined;
-    const commitMessage = `Update NEMAR metadata (pipeline: ${finalMetadata.pipeline_stage})`;
-    const bidsignoreEntries = [".nemar/"];
+    const commitPayload = buildEnrichmentCommitPayload(
+      metadataContent,
+      [".nemar/"],
+      `Update NEMAR metadata (pipeline: ${finalMetadata.pipeline_stage})`,
+    );
+    const commitMessage = commitPayload.commit_message;
+    const bidsignoreEntries = commitPayload.bidsignore_entries;
 
     let commitMode: "batched" | "single" | "client" = "single";
     if (clientCommits) {
@@ -1409,14 +1439,9 @@ webhooks.post("/llm-enrich", async (c) => {
       commit_mode: commitMode,
       // Returned only when the caller requested `client_commits: true`.
       // The Action picks up these fields and performs the commit itself
-      // using GITHUB_TOKEN.
-      ...(clientCommits && {
-        client_commits: true as const,
-        metadata_path: ".nemar/metadata.json",
-        metadata_content: metadataContent,
-        bidsignore_entries: bidsignoreEntries,
-        commit_message: commitMessage,
-      }),
+      // using GITHUB_TOKEN. See buildEnrichmentCommitPayload for the
+      // canonical shape.
+      ...(clientCommits ? { client_commits: true as const, ...commitPayload } : {}),
       ...(commitError && { commit_error: commitError }),
       ...(bidsignoreError && { bidsignore_error: bidsignoreError }),
       ...(cacheError && { cache_error: cacheError }),

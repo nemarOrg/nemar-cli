@@ -1317,12 +1317,11 @@ on:
       - 'dataset_description.json'
   workflow_dispatch:
 
-permissions:
-  contents: write
-
 jobs:
   enrich:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -1380,17 +1379,38 @@ jobs:
             exit 0
           fi
 
+          # Validate the payload contains everything we need before touching
+          # the working tree. \`jq -e\` exits non-zero on missing/null fields
+          # so we never write the literal string "null" over real metadata.
+          if ! jq -e '.metadata_path' "$BODY_FILE" > /dev/null; then
+            echo "::error::client_commits=true but metadata_path missing; refusing to write"
+            rm -f "$BODY_FILE"
+            exit 1
+          fi
+          if ! jq -e '.metadata_content' "$BODY_FILE" > /dev/null; then
+            echo "::error::client_commits=true but metadata_content missing; refusing to write"
+            rm -f "$BODY_FILE"
+            exit 1
+          fi
+          if ! jq -e '.commit_message' "$BODY_FILE" > /dev/null; then
+            echo "::error::client_commits=true but commit_message missing; refusing to write"
+            rm -f "$BODY_FILE"
+            exit 1
+          fi
+
           METADATA_PATH=$(jq -r '.metadata_path' "$BODY_FILE")
           COMMIT_MESSAGE=$(jq -r '.commit_message' "$BODY_FILE")
 
-          if [ -z "$METADATA_PATH" ] || [ "$METADATA_PATH" = "null" ]; then
-            echo "::warning::client_commits=true but no metadata_path; skipping local commit"
-            rm -f "$BODY_FILE"
-            exit 0
-          fi
-
           mkdir -p "$(dirname "$METADATA_PATH")"
           jq -r '.metadata_content' "$BODY_FILE" > "$METADATA_PATH"
+
+          # Validate the file we just wrote is non-empty and parseable JSON.
+          if [ ! -s "$METADATA_PATH" ] || ! jq empty "$METADATA_PATH" 2>/dev/null; then
+            echo "::error::metadata_content was empty or not JSON; reverting"
+            rm -f "$METADATA_PATH"
+            rm -f "$BODY_FILE"
+            exit 1
+          fi
 
           # Ensure each requested bidsignore entry is present exactly once.
           touch .bidsignore
@@ -1411,15 +1431,26 @@ jobs:
           fi
 
           git commit -m "$COMMIT_MESSAGE [skip ci]"
-          # Pull-rebase guards against a concurrent push from a parallel run.
-          git pull --rebase origin main || {
-            echo "::warning::rebase failed; leaving the local commit unpushed"
-            exit 0
-          }
-          git push origin HEAD:main || {
-            echo "::warning::push rejected; the Worker fallback will catch the next push"
-            exit 0
-          }
+
+          # Concurrent enrichment runs can race on the push. Retry rebase+push
+          # a few times with jitter; on final failure raise an error so the
+          # run is RED and operators are alerted. The Worker's D1 cache was
+          # already updated, so a missing repo commit will desync until the
+          # next README/dataset_description push triggers re-enrichment.
+          pushed=0
+          for attempt in 1 2 3; do
+            if git pull --rebase origin main && git push origin HEAD:main; then
+              pushed=1
+              break
+            fi
+            echo "::warning::push attempt $attempt failed; retrying"
+            sleep $((attempt * 2))
+          done
+
+          if [ "$pushed" != "1" ]; then
+            echo "::error::Action-side metadata commit could not be pushed after 3 attempts; D1 cache is ahead of the repo for this enrichment cycle"
+            exit 1
+          fi
           echo "Action-side metadata commit applied."
 `;
 
