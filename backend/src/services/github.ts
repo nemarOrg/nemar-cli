@@ -1122,10 +1122,7 @@ jobs:
           mkdir -p /tmp/archive-deps
           cd /tmp/archive-deps
           npm init -y > /dev/null
-          # Pin archiver to v7 (CommonJS, exports the factory function).
-          # archiver v8+ switched to ESM-only and require("archiver") no
-          # longer returns a function -- regressed runs throw
-          # "archiver is not a function". See issue triage 2026-05-11.
+          # Pin to v7: v8+ is ESM-only, require() no longer returns the factory.
           npm install --no-save 'archiver@^7.0.1' @aws-sdk/client-s3 @aws-sdk/lib-storage
 
       - name: Write archive script

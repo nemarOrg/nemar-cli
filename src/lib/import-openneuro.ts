@@ -483,12 +483,8 @@ export async function importOpenNeuro(
   let approved = false;
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
     try {
-      // skipCiCheck=true: workflows are deployed in the same step as the
-      // push that uploads the dataset, so the BIDS validation run is racing
-      // the approval call. The check happens separately after push (and
-      // OpenNeuro datasets have already been validated upstream), so we
-      // skip it here. PR #271 originally set this to false; restoring true
-      // because the race consistently leaves imports stuck in `blocked`.
+      // skipCiCheck=true: validation workflow races the approval call on
+      // the initial push; OpenNeuro data is pre-validated upstream anyway.
       await approvePublication(nemarId, attempt > 1, false, true);
       approved = true;
       break;
