@@ -187,6 +187,78 @@ describe("CI workflow templates", () => {
     expect(installLine).not.toMatch(/\barchiver\b(?!@)/);
   });
 
+  test("migrated templates mint App tokens and never reference secrets.GITHUB_TOKEN", () => {
+    // Each migrated template authenticates as the App with least-privilege
+    // repo scope and no static GITHUB_TOKEN. Parsed YAML so input values
+    // are pinned exactly (a copy-pasted hardcoded `repositories:` would
+    // still pass a substring check; this catches it).
+    const writeTemplates = ["pr-merge.yml", "llm-enrichment.yml", "version-doi.yml"];
+    for (const name of writeTemplates) {
+      const tpl = templates.find((t) => t.path.endsWith(name));
+      expect(tpl, `${name} missing from templates`).toBeDefined();
+      if (!tpl) continue;
+      expect(tpl.content).not.toContain("secrets.GITHUB_TOKEN");
+
+      const parsed = parse(tpl.content) as { jobs: Record<string, { steps: Array<Record<string, unknown>> }> };
+      for (const [jobName, job] of Object.entries(parsed.jobs)) {
+        const mintIdx = job.steps.findIndex(
+          (s) => s.uses === "actions/create-github-app-token@v1",
+        );
+        // Not every job in a migrated template mints (e.g. pr-merge's
+        // cleanup-staging job uses AWS only). Only check when present.
+        if (mintIdx < 0) continue;
+        // Ordering: mint must be the first step so subsequent
+        // checkout/`gh` calls can reference its outputs.
+        expect(
+          mintIdx,
+          `${name}:${jobName} app-token step must be first (was index ${mintIdx})`,
+        ).toBe(0);
+        const mintWith = (job.steps[mintIdx].with ?? {}) as Record<string, unknown>;
+        expect(mintWith["app-id"]).toBe("${{ secrets.NEMAR_APP_ID }}");
+        expect(mintWith["private-key"]).toBe("${{ secrets.NEMAR_APP_PRIVATE_KEY }}");
+        expect(mintWith.owner).toBe("nemarDatasets");
+        expect(mintWith.repositories).toBe("${{ github.event.repository.name }}");
+
+        // Any GH_TOKEN env in the rest of the job's steps must reference
+        // the minted token, not a stale `secrets.GITHUB_TOKEN` left behind.
+        for (const step of job.steps) {
+          const env = (step.env ?? {}) as Record<string, unknown>;
+          if ("GH_TOKEN" in env) {
+            expect(env.GH_TOKEN).toBe("${{ steps.app-token.outputs.token }}");
+          }
+        }
+      }
+    }
+  });
+
+  test("version-doi spawns the App-token step in BOTH jobs", () => {
+    // version-doi has two jobs; each does its own write and needs its own
+    // installation token. If a future refactor coalesces jobs, this test
+    // documents the contract.
+    const versionDoi = templates.find((t) => t.path.endsWith("version-doi.yml"));
+    expect(versionDoi).toBeDefined();
+    if (!versionDoi) return;
+    const appTokenCount = (versionDoi.content.match(/actions\/create-github-app-token@v1/g) || []).length;
+    expect(appTokenCount).toBe(2);
+  });
+
+  test("read-only / AWS-only templates stay on the auto-token (no App-token step)", () => {
+    // bids-validation + version-check do no writes; generate-archive writes
+    // only to S3 (AWS creds, not GitHub). Adding an App-token step there
+    // would force an org-secret prerequisite for no benefit.
+    const readOnlyTemplates = [
+      "bids-validation.yml",
+      "version-check.yml",
+      "generate-archive.yml",
+    ];
+    for (const name of readOnlyTemplates) {
+      const tpl = templates.find((t) => t.path.endsWith(name));
+      expect(tpl, `${name} missing from templates`).toBeDefined();
+      if (!tpl) continue;
+      expect(tpl.content).not.toContain("create-github-app-token");
+    }
+  });
+
   test("no literal newlines inside shell strings (escape regression)", () => {
     for (const { path, content } of templates) {
       // In valid YAML, printf format strings and jq arguments should

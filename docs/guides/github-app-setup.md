@@ -34,7 +34,9 @@ survives any individual maintainer leaving.
      existing repo-level secret, not the App.
    - **Repository permissions**:
      - Contents: **Read & write**
-     - Actions: **Read-only**
+     - Actions: **Read & write** (Read for orchestrator CI checks;
+       Write so dataset-repo CI can dispatch `generate-archive` via
+       `gh api .../dispatches`)
      - Administration: **Read & write** (needed for branch / tag
        protection rulesets and visibility flips)
      - Issues: **Read & write** (BIDS-validation issue creation flow)
@@ -135,6 +137,59 @@ The canonical copy lives in 1Password.
 
 Phase 2 (#437) consumes these credentials in the Worker. No Worker secret
 changes happen in this phase.
+
+## Dataset-repo CI uses the same App
+
+Workflow templates in dataset repos mint short-lived installation tokens
+via `actions/create-github-app-token@v1` so all CI writes carry the
+`nemar-publish-bot[bot]` identity. Two org-level secrets must be set on
+**nemarDatasets** for the templates to work.
+
+### Ops steps
+
+1. **Accept the updated App permissions.**
+
+   This step raises **Actions** from Read-only to Read & write. If the
+   App was created against the original list, GitHub holds the new
+   permission request as "pending approval" until an org owner accepts
+   it.
+
+   - Visit the App settings page: `https://github.com/organizations/nemarOrg/settings/apps/nemar-publish-bot/permissions`.
+   - Bump **Actions** to **Read & write** if not already set.
+   - Save. GitHub emails the installations.
+   - In each org's **Installed GitHub Apps** page (one for nemarOrg, one
+     for nemarDatasets), click the App and accept the new permissions.
+
+2. **Set org-level secrets on `nemarDatasets`.**
+
+   Visit `https://github.com/organizations/nemarDatasets/settings/secrets/actions`.
+   Add (Repository access: **All repositories**):
+
+   - `NEMAR_APP_ID` — the same numeric App ID stored in 1Password.
+   - `NEMAR_APP_PRIVATE_KEY` — the PKCS#8 PEM, pasted in full
+     (BEGIN/END lines included).
+
+3. **Refresh existing dataset repos** so they pick up the new workflow
+   templates with the App-token step:
+
+   ```bash
+   nemar admin ci add <dataset-id>
+   ```
+
+   Or sweep the catalog if many at once (the
+   `/tmp/refresh-archive-workflow.sh` pattern from the May 2026 sweep
+   works as a reference).
+
+### Acceptance
+
+- [ ] App permissions show **Actions: Read & write** and the update is
+      accepted on both org installations.
+- [ ] `NEMAR_APP_ID` and `NEMAR_APP_PRIVATE_KEY` exist as org secrets on
+      `nemarDatasets`.
+- [ ] At least one dataset repo's most recent `pr-merge`,
+      `llm-enrichment`, or `version-doi` workflow run shows the
+      "Mint App installation token" step succeeding, and subsequent
+      writes are attributed to `nemar-publish-bot[bot]` in the run log.
 
 ## Cross-references
 
