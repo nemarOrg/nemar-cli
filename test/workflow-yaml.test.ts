@@ -8,6 +8,7 @@
 
 import { describe, expect, test } from "bun:test";
 import { parse } from "yaml";
+import { buildEnrichmentCommitPayload } from "../backend/src/routes/webhooks";
 import { getWorkflowTemplates } from "../backend/src/services/github";
 
 describe("CI workflow templates", () => {
@@ -46,6 +47,51 @@ describe("CI workflow templates", () => {
         expect(content).toMatch(/https:\/\/api\.nemar\.org\/webhooks\//);
       }
     }
+  });
+
+  test("buildEnrichmentCommitPayload returns the contract field set", () => {
+    // The llm-enrichment.yml Action reads exactly these field names via jq.
+    // Pin the contract so a typo (`bidsignore_entry`, dropped key) is caught
+    // by a unit test instead of by a silent no-op on the Action side.
+    const payload = buildEnrichmentCommitPayload(
+      '{"hello":"world"}',
+      [".nemar/", "extra"],
+      "Update X",
+    );
+    expect(payload.metadata_path).toBe(".nemar/metadata.json");
+    expect(payload.metadata_content).toBe('{"hello":"world"}');
+    expect(payload.bidsignore_entries).toEqual([".nemar/", "extra"]);
+    expect(payload.commit_message).toBe("Update X");
+    // The set of keys IS the contract; any future addition must be explicit.
+    expect(Object.keys(payload).sort()).toEqual([
+      "bidsignore_entries",
+      "commit_message",
+      "metadata_content",
+      "metadata_path",
+    ]);
+  });
+
+  test("llm-enrichment opts into client_commits and has write permission", () => {
+    // Phase 5 contract: the Action sends client_commits:true so the Worker
+    // returns the metadata payload and skips its own commit. The Action
+    // commits with the per-repo GITHUB_TOKEN, moving the REST traffic off
+    // the shared admin PAT.
+    const llm = templates.find((t) => t.path.endsWith("llm-enrichment.yml"));
+    expect(llm).toBeDefined();
+    if (!llm) return;
+    expect(llm.content).toContain("\\\"client_commits\\\": true");
+    expect(llm.content).toContain("actions/checkout@v4");
+    // permissions should be job-scoped, not workflow-scoped, so future jobs
+    // added to this template don't silently inherit write.
+    const parsed = parse(llm.content) as {
+      permissions?: unknown;
+      jobs: Record<string, { permissions?: { contents?: string } }>;
+    };
+    expect(parsed.permissions).toBeUndefined();
+    expect(parsed.jobs.enrich.permissions?.contents).toBe("write");
+    // Worker-fallback path: when client_commits is missing/false in the
+    // response (older backend), the Action must skip the local commit.
+    expect(llm.content).toMatch(/client_commits.*\/\/\s*false/);
   });
 
   test("no literal newlines inside shell strings (escape regression)", () => {

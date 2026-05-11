@@ -7,48 +7,268 @@
 
 import { HttpError } from "./retry";
 
-const GITHUB_API = "https://api.github.com";
+// NEMAR_GITHUB_API_URL is a test-only override that points at a local
+// Bun.serve fake. Stored on globalThis because the Workers runtime has no
+// `process.env`; read at call time so test helpers can install the override
+// after the module has loaded.
+function GITHUB_API(): string {
+  const override = (globalThis as { NEMAR_GITHUB_API_URL?: string }).NEMAR_GITHUB_API_URL;
+  return override ?? "https://api.github.com";
+}
 // Dataset repos (nm000XXX) live in nemarDatasets org; tooling repos live in nemarOrg
 const ORG_NAME = "nemarDatasets";
 
 /** Identity used for all backend-initiated commits and tags on dataset repos. */
 const NEMAR_COMMITTER = { name: "nemarAdmin", email: "nemarAdmin@osc.earth" };
 
+// ============================================================================
+// Rate limit instrumentation
+// ============================================================================
+
+interface RateLimitSnapshot {
+  resource: string;
+  remaining: number;
+  resetEpoch: number;
+  limit?: number;
+}
+
+// Most recent rate-limit snapshot per resource bucket. Workers isolates relearn
+// from the first response after a cold start, which is fine: the cache is a
+// hint, not a correctness constraint.
+const rateLimitState: Map<string, RateLimitSnapshot> = new Map();
+
+export function __resetRateLimitStateForTests(): void {
+  rateLimitState.clear();
+}
+
+export function __seedRateLimitStateForTests(snapshot: RateLimitSnapshot): void {
+  rateLimitState.set(snapshot.resource, snapshot);
+}
+
+function parseRateLimitHeaders(res: Response): RateLimitSnapshot | null {
+  const remainingRaw = res.headers.get("X-RateLimit-Remaining");
+  const resetRaw = res.headers.get("X-RateLimit-Reset");
+  if (remainingRaw === null || resetRaw === null) return null;
+  const remaining = Number.parseInt(remainingRaw, 10);
+  const resetEpoch = Number.parseInt(resetRaw, 10);
+  if (!Number.isFinite(remaining) || !Number.isFinite(resetEpoch)) return null;
+  const resource = res.headers.get("X-RateLimit-Resource") ?? "core";
+  const limitRaw = res.headers.get("X-RateLimit-Limit");
+  const limitParsed = limitRaw === null ? Number.NaN : Number.parseInt(limitRaw, 10);
+  return {
+    resource,
+    remaining,
+    resetEpoch,
+    limit: Number.isFinite(limitParsed) ? limitParsed : undefined,
+  };
+}
+
+function parseRetryAfter(headerValue: string | null): number | null {
+  if (headerValue === null) return null;
+  const trimmed = headerValue.trim();
+  if (trimmed === "") return null;
+  // Integer seconds form. Re-stringify to reject mixed inputs like "10abc".
+  const asInt = Number.parseInt(trimmed, 10);
+  if (Number.isFinite(asInt) && String(asInt) === trimmed) {
+    return Math.max(0, asInt * 1000);
+  }
+  const asDate = Date.parse(trimmed);
+  if (!Number.isNaN(asDate)) {
+    return Math.max(0, asDate - Date.now());
+  }
+  return null;
+}
+
+function isSecondaryRateLimit(status: number, bodySnippet: string): boolean {
+  if (status !== 403) return false;
+  return /secondary rate limit/i.test(bodySnippet);
+}
+
+interface RateLimitLogFields {
+  method: string;
+  path: string;
+  status: number;
+  attempt: number;
+  maxAttempts: number;
+  snapshot: RateLimitSnapshot | null;
+  retryAfterMs: number | null;
+  secondary: boolean;
+}
+
+function emitRateLimitLog(fields: RateLimitLogFields): void {
+  const line: Record<string, unknown> = {
+    tag: "github-rl",
+    method: fields.method,
+    path: fields.path,
+    status: fields.status,
+    attempt: fields.attempt,
+    maxAttempts: fields.maxAttempts,
+  };
+  if (fields.snapshot) {
+    line.resource = fields.snapshot.resource;
+    line.remaining = fields.snapshot.remaining;
+    line.resetEpoch = fields.snapshot.resetEpoch;
+    if (fields.snapshot.limit !== undefined) line.limit = fields.snapshot.limit;
+  }
+  if (fields.retryAfterMs !== null) line.retryAfterMs = fields.retryAfterMs;
+  if (fields.secondary) line.secondary = true;
+  console.log(JSON.stringify(line));
+}
+
+async function defaultSleep(ms: number): Promise<void> {
+  if (ms <= 0) return;
+  await new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 /**
- * Fetch with retry for transient and propagation failures.
+ * Fetch with retry for transient failures, with GitHub rate-limit awareness.
  *
  * Retries on:
  *   - Network/transport errors (fetch throws)
  *   - HTTP 5xx and 429
+ *   - HTTP 403 carrying a "secondary rate limit" body
  *   - HTTP 404 (only when retryOn404=true): GitHub may briefly 404 a freshly
  *     created/changed resource (repo flip, branch/tag write, ruleset endpoint)
  *     while caches catch up. Caller opts in only where 404 is never legitimate.
  *
- * Does NOT retry on 4xx other than 404/429: those are validation/auth errors
- * that won't change on retry.
+ * Does NOT retry on other 4xx: those are validation/auth errors that won't
+ * change on retry.
+ *
+ * On exhausted retries with a still-transient HTTP response, returns the
+ * final response (`response.ok === false`); the caller decides what to do
+ * based on `response.status`. Only thrown errors (network failure or
+ * pre-flight interactive throttle) propagate as exceptions.
+ *
+ * Rate-limit behavior:
+ *   - Honors `Retry-After` for the wait between retries, capped by
+ *     `maxThrottleMs`. Falls back to `delayMs` only when the response
+ *     carried no `Retry-After`.
+ *   - Inspects `X-RateLimit-Remaining`/`Reset`/`Resource` on every response
+ *     and caches the most recent snapshot per bucket. On the next call, if
+ *     `remaining < lowRemainingThreshold` and the bucket hasn't reset yet:
+ *       - `kind: "background"` (default): sleep min(timeUntilReset, maxThrottleMs).
+ *       - `kind: "interactive"`: throw HttpError(503) with a clear message.
+ *   - Emits one JSON line per request tagged `"github-rl"` for Cloudflare Logs.
  */
-async function githubFetchWithRetry(
+export async function githubFetchWithRetry(
   url: string,
   init: RequestInit,
-  options?: { maxAttempts?: number; delayMs?: number; retryOn404?: boolean },
+  options?: {
+    maxAttempts?: number;
+    delayMs?: number;
+    retryOn404?: boolean;
+    kind?: "background" | "interactive";
+    lowRemainingThreshold?: number;
+    maxThrottleMs?: number;
+    sleepFn?: (ms: number) => Promise<void>;
+  },
 ): Promise<Response> {
   const maxAttempts = options?.maxAttempts ?? 3;
   const delayMs = options?.delayMs ?? 1_000;
   const retryOn404 = options?.retryOn404 ?? false;
+  const kind = options?.kind ?? "background";
+  const lowRemainingThreshold = options?.lowRemainingThreshold ?? 50;
+  const maxThrottleMs = options?.maxThrottleMs ?? 60_000;
+  const sleep = options?.sleepFn ?? defaultSleep;
+
+  let parsedPath = url;
+  try {
+    parsedPath = new URL(url).pathname;
+  } catch {
+    // keep raw url for log; non-fatal
+  }
+  const method = init.method ?? "GET";
+
+  // Pre-flight throttle on the "core" bucket (the only one we exercise in
+  // bursty workloads). We can't know the target bucket before the first
+  // response, so this is best-effort against a stale snapshot.
+  const cached = rateLimitState.get("core");
+  if (cached && cached.remaining < lowRemainingThreshold) {
+    const msUntilReset = cached.resetEpoch * 1000 - Date.now();
+    if (msUntilReset > 0) {
+      const secondsUntilReset = Math.ceil(msUntilReset / 1000);
+      if (kind === "interactive") {
+        throw new HttpError(
+          `GitHub rate limit nearly exhausted (remaining=${cached.remaining}); retry in ${secondsUntilReset}s`,
+          503,
+        );
+      }
+      const sleepMs = Math.min(msUntilReset, maxThrottleMs);
+      if (sleepMs < msUntilReset) {
+        console.warn(
+          `[github] pre-flight throttle: reset in ${secondsUntilReset}s exceeds cap ${maxThrottleMs}ms; sleeping ${sleepMs}ms then proceeding`,
+        );
+      } else {
+        console.warn(
+          `[github] pre-flight throttle: remaining=${cached.remaining} < ${lowRemainingThreshold}; sleeping ${sleepMs}ms until bucket resets`,
+        );
+      }
+      await sleep(sleepMs);
+    }
+  }
 
   let lastError: unknown;
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     try {
       const response = await fetch(url, init);
-      const isTransient =
+
+      const snapshot = parseRateLimitHeaders(response);
+      if (snapshot) {
+        // Monotonic write: a delayed older response shouldn't overwrite a
+        // fresher snapshot from a concurrent in-flight request.
+        const existing = rateLimitState.get(snapshot.resource);
+        if (!existing || snapshot.resetEpoch >= existing.resetEpoch) {
+          rateLimitState.set(snapshot.resource, snapshot);
+        }
+      }
+
+      const retryAfterMs = parseRetryAfter(response.headers.get("Retry-After"));
+
+      let secondary = false;
+      if (response.status === 403) {
+        let bodySnippet = "";
+        let bodyReadFailed = false;
+        try {
+          bodySnippet = await response.clone().text();
+        } catch {
+          bodyReadFailed = true;
+        }
+        // Fail safe: if we can't read the body on a 403, assume secondary
+        // rate limit and retry. Treating it as a terminal auth 403 here
+        // would burn the secondary cool-down window and surface a
+        // misleading "permission denied" upstream. Retrying is the
+        // cheaper mistake.
+        secondary = bodyReadFailed || isSecondaryRateLimit(response.status, bodySnippet);
+        if (bodyReadFailed) {
+          console.warn(
+            `[github] ${method} ${parsedPath} 403 body unreadable; treating as secondary rate limit (fail-safe)`,
+          );
+        }
+      }
+
+      emitRateLimitLog({
+        method,
+        path: parsedPath,
+        status: response.status,
+        attempt,
+        maxAttempts,
+        snapshot,
+        retryAfterMs,
+        secondary,
+      });
+
+      const transient =
         response.status >= 500 ||
         response.status === 429 ||
+        secondary ||
         (retryOn404 && response.status === 404);
-      if (isTransient && attempt < maxAttempts) {
+
+      if (transient && attempt < maxAttempts) {
+        const waitMs = retryAfterMs !== null ? Math.min(retryAfterMs, maxThrottleMs) : delayMs;
         console.warn(
-          `[github] ${init.method || "GET"} ${url} attempt ${attempt} -> HTTP ${response.status}, retrying in ${delayMs}ms`,
+          `[github] ${method} ${parsedPath} attempt ${attempt} -> HTTP ${response.status}${secondary ? " (secondary rate limit)" : ""}, retrying in ${waitMs}ms`,
         );
-        await new Promise((resolve) => setTimeout(resolve, delayMs));
+        await sleep(waitMs);
         continue;
       }
       return response;
@@ -56,9 +276,9 @@ async function githubFetchWithRetry(
       lastError = err;
       if (attempt < maxAttempts) {
         console.warn(
-          `[github] ${init.method || "GET"} ${url} attempt ${attempt} threw (${err instanceof Error ? err.message : String(err)}), retrying in ${delayMs}ms`,
+          `[github] ${method} ${parsedPath} attempt ${attempt} threw (${err instanceof Error ? err.message : String(err)}), retrying in ${delayMs}ms`,
         );
-        await new Promise((resolve) => setTimeout(resolve, delayMs));
+        await sleep(delayMs);
         continue;
       }
       throw err;
@@ -89,7 +309,7 @@ export async function validateGitHubUsername(
   username: string,
   pat: string,
 ): Promise<GitHubUser | null> {
-  const response = await fetch(`${GITHUB_API}/users/${username}`, {
+  const response = await fetch(`${GITHUB_API()}/users/${username}`, {
     headers: {
       Authorization: `Bearer ${pat}`,
       Accept: "application/vnd.github.v3+json",
@@ -112,13 +332,16 @@ export async function listOrgRepos(pat: string): Promise<GitHubRepo[]> {
   let page = 1;
 
   while (true) {
-    const response = await fetch(`${GITHUB_API}/orgs/${ORG_NAME}/repos?per_page=100&page=${page}`, {
-      headers: {
-        Authorization: `Bearer ${pat}`,
-        Accept: "application/vnd.github.v3+json",
-        "User-Agent": "NEMAR-API",
+    const response = await fetch(
+      `${GITHUB_API()}/orgs/${ORG_NAME}/repos?per_page=100&page=${page}`,
+      {
+        headers: {
+          Authorization: `Bearer ${pat}`,
+          Accept: "application/vnd.github.v3+json",
+          "User-Agent": "NEMAR-API",
+        },
       },
-    });
+    );
 
     if (!response.ok) {
       throw new Error(`Failed to list repos: ${response.status}`);
@@ -144,7 +367,7 @@ export async function addCollaborator(
   pat: string,
 ): Promise<boolean> {
   const response = await fetch(
-    `${GITHUB_API}/repos/${ORG_NAME}/${repo}/collaborators/${username}`,
+    `${GITHUB_API()}/repos/${ORG_NAME}/${repo}/collaborators/${username}`,
     {
       method: "PUT",
       headers: {
@@ -169,7 +392,7 @@ export async function removeCollaborator(
   pat: string,
 ): Promise<boolean> {
   const response = await fetch(
-    `${GITHUB_API}/repos/${ORG_NAME}/${repo}/collaborators/${username}`,
+    `${GITHUB_API()}/repos/${ORG_NAME}/${repo}/collaborators/${username}`,
     {
       method: "DELETE",
       headers: {
@@ -241,7 +464,7 @@ export async function createRepository(
   isPrivate: boolean,
   pat: string,
 ): Promise<GitHubRepo> {
-  const response = await fetch(`${GITHUB_API}/orgs/${ORG_NAME}/repos`, {
+  const response = await fetch(`${GITHUB_API()}/orgs/${ORG_NAME}/repos`, {
     method: "POST",
     headers: {
       Authorization: `Bearer ${pat}`,
@@ -278,7 +501,7 @@ export async function deleteRepository(repo: string, pat: string): Promise<boole
     throw new Error(`Invalid repository name: "${repo}"`);
   }
 
-  const response = await fetch(`${GITHUB_API}/repos/${ORG_NAME}/${repo}`, {
+  const response = await fetch(`${GITHUB_API()}/repos/${ORG_NAME}/${repo}`, {
     method: "DELETE",
     headers: {
       Authorization: `Bearer ${pat}`,
@@ -309,7 +532,7 @@ export async function ensureMainBranch(
   repo: string,
   pat: string,
 ): Promise<{ renamed: boolean; previousBranch?: string }> {
-  const repoResponse = await fetch(`${GITHUB_API}/repos/${ORG_NAME}/${repo}`, {
+  const repoResponse = await fetch(`${GITHUB_API()}/repos/${ORG_NAME}/${repo}`, {
     headers: {
       Authorization: `Bearer ${pat}`,
       Accept: "application/vnd.github.v3+json",
@@ -332,7 +555,7 @@ export async function ensureMainBranch(
   console.log(`Renaming default branch "${defaultBranch}" to "main" for ${repo}`);
 
   const renameResponse = await fetch(
-    `${GITHUB_API}/repos/${ORG_NAME}/${repo}/branches/${encodeURIComponent(defaultBranch)}/rename`,
+    `${GITHUB_API()}/repos/${ORG_NAME}/${repo}/branches/${encodeURIComponent(defaultBranch)}/rename`,
     {
       method: "POST",
       headers: {
@@ -365,29 +588,32 @@ export async function ensureMainBranch(
  * - No force pushes or deletions
  */
 export async function applyBranchProtection(repo: string, pat: string): Promise<boolean> {
-  const response = await fetch(`${GITHUB_API}/repos/${ORG_NAME}/${repo}/branches/main/protection`, {
-    method: "PUT",
-    headers: {
-      Authorization: `Bearer ${pat}`,
-      Accept: "application/vnd.github.v3+json",
-      "User-Agent": "NEMAR-API",
-      "Content-Type": "application/json",
+  const response = await fetch(
+    `${GITHUB_API()}/repos/${ORG_NAME}/${repo}/branches/main/protection`,
+    {
+      method: "PUT",
+      headers: {
+        Authorization: `Bearer ${pat}`,
+        Accept: "application/vnd.github.v3+json",
+        "User-Agent": "NEMAR-API",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        required_pull_request_reviews: {
+          required_approving_review_count: 0, // Owner can self-merge
+          dismiss_stale_reviews: true,
+        },
+        enforce_admins: false, // Admins can bypass if needed
+        required_status_checks: {
+          strict: true,
+          contexts: ["bids-validation", "version-check"],
+        },
+        restrictions: null,
+        allow_force_pushes: false,
+        allow_deletions: false,
+      }),
     },
-    body: JSON.stringify({
-      required_pull_request_reviews: {
-        required_approving_review_count: 0, // Owner can self-merge
-        dismiss_stale_reviews: true,
-      },
-      enforce_admins: false, // Admins can bypass if needed
-      required_status_checks: {
-        strict: true,
-        contexts: ["bids-validation", "version-check"],
-      },
-      restrictions: null,
-      allow_force_pushes: false,
-      allow_deletions: false,
-    }),
-  });
+  );
 
   return response.ok;
 }
@@ -396,7 +622,7 @@ export async function applyBranchProtection(repo: string, pat: string): Promise<
  * Enable auto-merge for a repository
  */
 export async function enableAutoMerge(repo: string, pat: string): Promise<boolean> {
-  const response = await fetch(`${GITHUB_API}/repos/${ORG_NAME}/${repo}`, {
+  const response = await fetch(`${GITHUB_API()}/repos/${ORG_NAME}/${repo}`, {
     method: "PATCH",
     headers: {
       Authorization: `Bearer ${pat}`,
@@ -426,7 +652,7 @@ export async function createOrUpdateFile(
   let sha: string | undefined;
   let getResponse: Response;
   try {
-    getResponse = await fetch(`${GITHUB_API}/repos/${ORG_NAME}/${repo}/contents/${path}`, {
+    getResponse = await fetch(`${GITHUB_API()}/repos/${ORG_NAME}/${repo}/contents/${path}`, {
       headers: {
         Authorization: `Bearer ${pat}`,
         Accept: "application/vnd.github.v3+json",
@@ -450,7 +676,7 @@ export async function createOrUpdateFile(
   // Create or update the file
   let response: Response;
   try {
-    response = await fetch(`${GITHUB_API}/repos/${ORG_NAME}/${repo}/contents/${path}`, {
+    response = await fetch(`${GITHUB_API()}/repos/${ORG_NAME}/${repo}/contents/${path}`, {
       method: "PUT",
       headers: {
         Authorization: `Bearer ${pat}`,
@@ -490,7 +716,7 @@ export async function deleteRepoFile(
   message: string,
   pat: string,
 ): Promise<void> {
-  const response = await fetch(`${GITHUB_API}/repos/${ORG_NAME}/${repo}/contents/${path}`, {
+  const response = await fetch(`${GITHUB_API()}/repos/${ORG_NAME}/${repo}/contents/${path}`, {
     method: "DELETE",
     headers: {
       Authorization: `Bearer ${pat}`,
@@ -523,7 +749,7 @@ export async function setRepoVisibility(
 ): Promise<{ ok: boolean; status: number; error?: string }> {
   let response: Response;
   try {
-    response = await fetch(`${GITHUB_API}/repos/${ORG_NAME}/${repo}`, {
+    response = await fetch(`${GITHUB_API()}/repos/${ORG_NAME}/${repo}`, {
       method: "PATCH",
       headers: {
         Authorization: `Bearer ${pat}`,
@@ -555,7 +781,7 @@ export async function setRepoDescription(
   try {
     const payload: { description: string; homepage?: string } = { description };
     if (homepage !== undefined) payload.homepage = homepage;
-    response = await fetch(`${GITHUB_API}/repos/${ORG_NAME}/${repo}`, {
+    response = await fetch(`${GITHUB_API()}/repos/${ORG_NAME}/${repo}`, {
       method: "PATCH",
       headers: {
         Authorization: `Bearer ${pat}`,
@@ -596,7 +822,7 @@ export async function checkWorkflowExists(
 ): Promise<boolean> {
   let response: Response;
   try {
-    response = await fetch(`${GITHUB_API}/repos/${ORG_NAME}/${repo}/contents/${workflowPath}`, {
+    response = await fetch(`${GITHUB_API()}/repos/${ORG_NAME}/${repo}/contents/${workflowPath}`, {
       headers: {
         Authorization: `Bearer ${pat}`,
         Accept: "application/vnd.github.v3+json",
@@ -625,7 +851,7 @@ export async function getWorkflowRuns(
   let response: Response;
   try {
     response = await fetch(
-      `${GITHUB_API}/repos/${ORG_NAME}/${repo}/actions/workflows/${workflowFile}/runs?per_page=5`,
+      `${GITHUB_API()}/repos/${ORG_NAME}/${repo}/actions/workflows/${workflowFile}/runs?per_page=5`,
       {
         headers: {
           Authorization: `Bearer ${pat}`,
@@ -1072,7 +1298,15 @@ jobs:
         run: node /tmp/stream-archive.js
 `;
 
-  // LLM Metadata Enrichment workflow
+  // LLM Metadata Enrichment workflow.
+  //
+  // The Action sends \`client_commits: true\` in the webhook payload. When the
+  // Worker honors the flag (current backend), it returns the metadata commit
+  // payload in the response and the Action commits with its own GITHUB_TOKEN,
+  // off the shared admin PAT. When the flag is ignored (older backend), the
+  // Worker commits itself; the Action notices the absence of \`client_commits\`
+  // in the response and skips local commit, falling through to the
+  // worker-side behavior.
   const llmEnrichment = `name: LLM Metadata Enrichment
 
 on:
@@ -1086,8 +1320,16 @@ on:
 jobs:
   enrich:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
-      - name: Trigger enrichment
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          token: \${{ secrets.GITHUB_TOKEN }}
+
+      - name: Trigger enrichment and commit locally if asked
         env:
           NEMAR_WEBHOOK_TOKEN: \${{ secrets.NEMAR_WEBHOOK_TOKEN }}
         run: |
@@ -1107,20 +1349,109 @@ jobs:
 
           echo "Triggering LLM enrichment for $REPO_NAME (force=$FORCE)"
 
-          RESPONSE=$(curl -s -w "\\n%{http_code}" -X POST \\
+          # Capture full response (no trailing-newline stripping) so jq can
+          # parse the body. The Worker returns 200 even when commit_error
+          # is populated; non-2xx is reserved for hard failures.
+          BODY_FILE=$(mktemp)
+          HTTP_CODE=$(curl -sS -o "$BODY_FILE" -w "%{http_code}" -X POST \\
             "https://api.nemar.org/webhooks/llm-enrich" \\
             -H "Content-Type: application/json" \\
             -H "X-Webhook-Token: $NEMAR_WEBHOOK_TOKEN" \\
-            -d "{\\"dataset_id\\": \\"$REPO_NAME\\", \\"force\\": $FORCE}")
+            -d "{\\"dataset_id\\": \\"$REPO_NAME\\", \\"force\\": $FORCE, \\"client_commits\\": true}")
 
-          HTTP_CODE=$(echo "$RESPONSE" | tail -1)
-          BODY=$(echo "$RESPONSE" | head -n -1)
-
-          echo "Response ($HTTP_CODE): $BODY"
+          echo "HTTP $HTTP_CODE"
+          cat "$BODY_FILE"
+          echo
 
           if [ "$HTTP_CODE" -ge 400 ]; then
             echo "::warning::LLM enrichment failed (HTTP $HTTP_CODE) - this is non-blocking"
+            rm -f "$BODY_FILE"
+            exit 0
           fi
+
+          # If the Worker honored client_commits, apply the returned payload.
+          # Older Workers ignore the flag and have already committed themselves;
+          # in that case client_commits will be missing/false and we no-op.
+          CLIENT_COMMITS=$(jq -r '.client_commits // false' "$BODY_FILE")
+          if [ "$CLIENT_COMMITS" != "true" ]; then
+            echo "Worker committed metadata server-side; nothing to write locally."
+            rm -f "$BODY_FILE"
+            exit 0
+          fi
+
+          # Validate the payload contains everything we need before touching
+          # the working tree. \`jq -e\` exits non-zero on missing/null fields
+          # so we never write the literal string "null" over real metadata.
+          if ! jq -e '.metadata_path' "$BODY_FILE" > /dev/null; then
+            echo "::error::client_commits=true but metadata_path missing; refusing to write"
+            rm -f "$BODY_FILE"
+            exit 1
+          fi
+          if ! jq -e '.metadata_content' "$BODY_FILE" > /dev/null; then
+            echo "::error::client_commits=true but metadata_content missing; refusing to write"
+            rm -f "$BODY_FILE"
+            exit 1
+          fi
+          if ! jq -e '.commit_message' "$BODY_FILE" > /dev/null; then
+            echo "::error::client_commits=true but commit_message missing; refusing to write"
+            rm -f "$BODY_FILE"
+            exit 1
+          fi
+
+          METADATA_PATH=$(jq -r '.metadata_path' "$BODY_FILE")
+          COMMIT_MESSAGE=$(jq -r '.commit_message' "$BODY_FILE")
+
+          mkdir -p "$(dirname "$METADATA_PATH")"
+          jq -r '.metadata_content' "$BODY_FILE" > "$METADATA_PATH"
+
+          # Validate the file we just wrote is non-empty and parseable JSON.
+          if [ ! -s "$METADATA_PATH" ] || ! jq empty "$METADATA_PATH" 2>/dev/null; then
+            echo "::error::metadata_content was empty or not JSON; reverting"
+            rm -f "$METADATA_PATH"
+            rm -f "$BODY_FILE"
+            exit 1
+          fi
+
+          # Ensure each requested bidsignore entry is present exactly once.
+          touch .bidsignore
+          while IFS= read -r entry; do
+            [ -z "$entry" ] && continue
+            grep -qxF "$entry" .bidsignore || echo "$entry" >> .bidsignore
+          done < <(jq -r '.bidsignore_entries[]?' "$BODY_FILE")
+
+          rm -f "$BODY_FILE"
+
+          git config user.name "nemar-bot"
+          git config user.email "actions@github.com"
+          git add "$METADATA_PATH" .bidsignore
+
+          if git diff --cached --quiet; then
+            echo "Metadata already up-to-date; nothing to commit."
+            exit 0
+          fi
+
+          git commit -m "$COMMIT_MESSAGE [skip ci]"
+
+          # Concurrent enrichment runs can race on the push. Retry rebase+push
+          # a few times with jitter; on final failure raise an error so the
+          # run is RED and operators are alerted. The Worker's D1 cache was
+          # already updated, so a missing repo commit will desync until the
+          # next README/dataset_description push triggers re-enrichment.
+          pushed=0
+          for attempt in 1 2 3; do
+            if git pull --rebase origin main && git push origin HEAD:main; then
+              pushed=1
+              break
+            fi
+            echo "::warning::push attempt $attempt failed; retrying"
+            sleep $((attempt * 2))
+          done
+
+          if [ "$pushed" != "1" ]; then
+            echo "::error::Action-side metadata commit could not be pushed after 3 attempts; D1 cache is ahead of the repo for this enrichment cycle"
+            exit 1
+          fi
+          echo "Action-side metadata commit applied."
 `;
 
   // Version DOI workflow: publishes a DOI then triggers archive generation.
@@ -1225,30 +1556,269 @@ jobs:
   ];
 }
 
+/**
+ * Deploy every CI workflow template to a dataset repo in a single
+ * tree-batched commit. All-or-nothing: on failure, `deployed` is empty
+ * (no partial deployment, unlike the prior per-file loop that could
+ * half-succeed). Callers MUST check `success` — this function never throws.
+ */
 export async function deployWorkflows(
   repo: string,
   pat: string,
 ): Promise<{ success: boolean; errors: string[]; deployed: string[] }> {
-  const errors: string[] = [];
-  const deployed: string[] = [];
   const workflows = getWorkflowTemplates();
+  const files: TreeFile[] = workflows.map((w) => ({ path: w.path, content: w.content }));
+  const deployedNames = workflows.map((w) => {
+    const parts = w.path.split("/");
+    return parts[parts.length - 1] ?? w.path;
+  });
 
-  for (const workflow of workflows) {
+  try {
+    await commitFilesAsTree(repo, "main", files, "Add CI workflows", pat);
+    return { success: true, errors: [], deployed: deployedNames };
+  } catch (err) {
+    return {
+      success: false,
+      errors: [err instanceof Error ? err.message : String(err)],
+      deployed: [],
+    };
+  }
+}
+
+/**
+ * List the file paths currently present under `.github/workflows` on the repo's
+ * given branch. Returns paths relative to the repo root (e.g.
+ * `.github/workflows/bids-validation.yml`). A 404 on the directory itself
+ * (workflows folder not yet created) is treated as "empty", not an error.
+ *
+ * Includes both regular files and symlinks: a symlinked workflow is still
+ * a deployed workflow from GitHub Actions' perspective, and silently
+ * misclassifying it as missing would cause us to overwrite it.
+ */
+async function listDeployedWorkflowPaths(
+  repo: string,
+  branch: string,
+  pat: string,
+): Promise<Set<string>> {
+  const response = await githubFetchWithRetry(
+    `${GITHUB_API()}/repos/${ORG_NAME}/${repo}/contents/.github/workflows?ref=${encodeURIComponent(branch)}`,
+    {
+      headers: {
+        Authorization: `Bearer ${pat}`,
+        Accept: "application/vnd.github.v3+json",
+        "User-Agent": "NEMAR-API",
+      },
+    },
+  );
+
+  if (response.status === 404) return new Set();
+  if (!response.ok) {
+    const body = await response.text().catch(() => "");
+    throw new HttpError(
+      `Failed to list workflows for ${repo}@${branch}: HTTP ${response.status}: ${body.slice(0, 300)}`,
+      response.status,
+      body.slice(0, 300),
+    );
+  }
+  const entries = (await response.json()) as Array<{ path: string; type: string }>;
+  return new Set(
+    entries.filter((e) => e.type === "file" || e.type === "symlink").map((e) => e.path),
+  );
+}
+
+export interface EnsureWorkflowsResult {
+  alreadyPresent: string[];
+  deployed: string[];
+  errors: string[];
+  /** True iff we could not list the workflows directory; callers should
+      not interpret `alreadyPresent: []` as "no workflows deployed" in
+      that case. */
+  listFailed: boolean;
+}
+
+/**
+ * Idempotent presence check: list the workflow directory once, deploy only the
+ * templates that are missing in a single tree commit. Never throws; failures
+ * are aggregated in `errors`. Steady-state cost when everything is already
+ * present is one REST call (the directory listing).
+ */
+export async function ensureWorkflowsDeployed(
+  repo: string,
+  branch: string,
+  pat: string,
+): Promise<EnsureWorkflowsResult> {
+  const workflows = getWorkflowTemplates();
+  const nameOf = (path: string): string => {
+    const parts = path.split("/");
+    return parts[parts.length - 1] ?? path;
+  };
+
+  let present: Set<string>;
+  try {
+    present = await listDeployedWorkflowPaths(repo, branch, pat);
+  } catch (err) {
+    return {
+      alreadyPresent: [],
+      deployed: [],
+      errors: [err instanceof Error ? err.message : String(err)],
+      listFailed: true,
+    };
+  }
+
+  const missing = workflows.filter((w) => !present.has(w.path));
+  if (missing.length === 0) {
+    return {
+      alreadyPresent: workflows.map((w) => nameOf(w.path)),
+      deployed: [],
+      errors: [],
+      listFailed: false,
+    };
+  }
+
+  try {
+    await commitFilesAsTree(
+      repo,
+      branch,
+      missing.map((w) => ({ path: w.path, content: w.content })),
+      missing.length === workflows.length ? "Add CI workflows" : "Add missing CI workflows",
+      pat,
+    );
+    return {
+      alreadyPresent: workflows.filter((w) => present.has(w.path)).map((w) => nameOf(w.path)),
+      deployed: missing.map((w) => nameOf(w.path)),
+      errors: [],
+      listFailed: false,
+    };
+  } catch (err) {
+    return {
+      alreadyPresent: workflows.filter((w) => present.has(w.path)).map((w) => nameOf(w.path)),
+      deployed: [],
+      errors: [err instanceof Error ? err.message : String(err)],
+      listFailed: false,
+    };
+  }
+}
+
+/**
+ * Normalize text before comparing template content vs. deployed content.
+ * GitHub's Contents API returns the file's exact bytes; if a workflow
+ * was ever round-tripped through tooling that adds a UTF-8 BOM,
+ * normalizes CRLF, or drops the trailing newline, a naive byte compare
+ * would loop forever rewriting the same file. We strip:
+ *
+ *   - UTF-8 BOM (﻿)
+ *   - CR before LF and bare CR
+ *   - trailing whitespace (so a missing final newline doesn't drift)
+ */
+function normalizeForCompare(s: string): string {
+  return s.replace(/^﻿/, "").replace(/\r\n?/g, "\n").replace(/\s+$/, "");
+}
+
+export interface SyncWorkflowsResult {
+  checked: string[];
+  /** Templates whose deployed content drifted from the source. */
+  changed: string[];
+  /** Templates that were missing from the deployed workflows directory. */
+  added: string[];
+  errors: string[];
+  /** True iff a tree commit was made. Distinguishes "nothing to do" from
+      "we tried to commit but it failed" (both leave `errors` populated
+      via different paths). */
+  committed: boolean;
+  /** True iff the workflow directory listing failed. */
+  listFailed: boolean;
+}
+
+/**
+ * Compare every workflow template against what is currently deployed and
+ * commit, in one tree, only the files whose content drifted. Files that
+ * are missing entirely are written as part of the same commit. Never
+ * throws; per-file read errors land in `errors` and the file is treated
+ * as unchanged so we don't risk clobbering a hand-edited workflow on a
+ * read failure.
+ *
+ * On commit failure the intended `changed` and `added` lists are preserved
+ * (so callers can see what *would* have synced) and `committed` is false.
+ */
+export async function syncWorkflowTemplates(
+  repo: string,
+  branch: string,
+  pat: string,
+): Promise<SyncWorkflowsResult> {
+  const workflows = getWorkflowTemplates();
+  const nameOf = (path: string): string => {
+    const parts = path.split("/");
+    return parts[parts.length - 1] ?? path;
+  };
+  const checked = workflows.map((w) => nameOf(w.path));
+
+  let present: Set<string>;
+  try {
+    present = await listDeployedWorkflowPaths(repo, branch, pat);
+  } catch (err) {
+    return {
+      checked,
+      changed: [],
+      added: [],
+      errors: [err instanceof Error ? err.message : String(err)],
+      committed: false,
+      listFailed: true,
+    };
+  }
+
+  const errors: string[] = [];
+  const filesToWrite: TreeFile[] = [];
+  const changed: string[] = [];
+  const added: string[] = [];
+
+  for (const template of workflows) {
+    if (!present.has(template.path)) {
+      filesToWrite.push({ path: template.path, content: template.content });
+      added.push(nameOf(template.path));
+      continue;
+    }
+    let deployedContent: string | null;
     try {
-      await createOrUpdateFile(
-        repo,
-        workflow.path,
-        workflow.content,
-        `Add ${workflow.path.split("/").pop()} workflow`,
-        pat,
-      );
-      deployed.push(workflow.path.split("/").pop()!);
+      deployedContent = await getFileContent(repo, template.path, pat, branch);
     } catch (err) {
-      errors.push(`${workflow.path}: ${err instanceof Error ? err.message : String(err)}`);
+      errors.push(
+        `${template.path}: read failed (${err instanceof Error ? err.message : String(err)})`,
+      );
+      continue;
+    }
+    if (deployedContent === null) {
+      // Listing said file exists but content fetch returned null — race or
+      // permissions. Skip rather than risk a clobbering write.
+      errors.push(`${template.path}: present in listing but content unavailable`);
+      continue;
+    }
+    if (normalizeForCompare(deployedContent) !== normalizeForCompare(template.content)) {
+      filesToWrite.push({ path: template.path, content: template.content });
+      changed.push(nameOf(template.path));
     }
   }
 
-  return { success: errors.length === 0, errors, deployed };
+  if (filesToWrite.length === 0) {
+    return { checked, changed, added, errors, committed: false, listFailed: false };
+  }
+
+  try {
+    await commitFilesAsTree(
+      repo,
+      branch,
+      filesToWrite,
+      added.length > 0 && changed.length > 0
+        ? "Sync CI workflows (add missing, update drifted)"
+        : added.length > 0
+          ? "Add missing CI workflows"
+          : "Update CI workflows to current templates",
+      pat,
+    );
+    return { checked, changed, added, errors, committed: true, listFailed: false };
+  } catch (err) {
+    errors.push(`commit failed: ${err instanceof Error ? err.message : String(err)}`);
+    return { checked, changed, added, errors, committed: false, listFailed: false };
+  }
 }
 
 /**
@@ -1264,7 +1834,7 @@ export async function triggerArchiveGeneration(
   pat: string,
   options?: { public?: boolean },
 ): Promise<void> {
-  const response = await fetch(`${GITHUB_API}/repos/${ORG_NAME}/${repo}/dispatches`, {
+  const response = await fetch(`${GITHUB_API()}/repos/${ORG_NAME}/${repo}/dispatches`, {
     method: "POST",
     headers: {
       Authorization: `Bearer ${pat}`,
@@ -1309,7 +1879,7 @@ export async function getTreeAtRef(repo: string, ref: string, pat: string): Prom
   // ref they just created (a tag we wrote, "main" right after a merge) will
   // see GitHub briefly 404 the new ref while caches catch up; we retry those.
   const refResponse = await githubFetchWithRetry(
-    `${GITHUB_API}/repos/${ORG_NAME}/${repo}/commits/${ref}`,
+    `${GITHUB_API()}/repos/${ORG_NAME}/${repo}/commits/${ref}`,
     {
       headers: {
         Authorization: `Bearer ${pat}`,
@@ -1332,7 +1902,7 @@ export async function getTreeAtRef(repo: string, ref: string, pat: string): Prom
 
   // Get the tree recursively
   const treeResponse = await githubFetchWithRetry(
-    `${GITHUB_API}/repos/${ORG_NAME}/${repo}/git/trees/${treeSha}?recursive=1`,
+    `${GITHUB_API()}/repos/${ORG_NAME}/${repo}/git/trees/${treeSha}?recursive=1`,
     {
       headers: {
         Authorization: `Bearer ${pat}`,
@@ -1362,7 +1932,7 @@ export async function getBlobContent(repo: string, blobSha: string, pat: string)
   // retryOn404: blob SHA came from a tree we just resolved, so 404 indicates
   // propagation lag, not a missing object.
   const response = await githubFetchWithRetry(
-    `${GITHUB_API}/repos/${ORG_NAME}/${repo}/git/blobs/${blobSha}`,
+    `${GITHUB_API()}/repos/${ORG_NAME}/${repo}/git/blobs/${blobSha}`,
     {
       headers: {
         Authorization: `Bearer ${pat}`,
@@ -1401,7 +1971,7 @@ export async function getFileContent(
 ): Promise<string | null> {
   // No retryOn404 here: 404 is a valid "file not present" signal returned as null.
   const response = await githubFetchWithRetry(
-    `${GITHUB_API}/repos/${ORG_NAME}/${repo}/contents/${filePath}?ref=${ref}`,
+    `${GITHUB_API()}/repos/${ORG_NAME}/${repo}/contents/${filePath}?ref=${ref}`,
     {
       headers: {
         Authorization: `Bearer ${pat}`,
@@ -1451,7 +2021,7 @@ export async function applyTagProtection(repo: string, pat: string): Promise<voi
   // retryOn404: rulesets endpoint can briefly 404 right after a repo
   // visibility flip while GitHub propagates ACLs.
   const response = await githubFetchWithRetry(
-    `${GITHUB_API}/repos/${ORG_NAME}/${repo}/rulesets`,
+    `${GITHUB_API()}/repos/${ORG_NAME}/${repo}/rulesets`,
     {
       method: "POST",
       headers: {
@@ -1501,7 +2071,7 @@ export async function getMainBranchSha(repo: string, branch: string, pat: string
   // retryOn404: caller knows the branch exists (e.g., we just committed to it),
   // so 404 indicates GitHub hasn't propagated the ref yet.
   const response = await githubFetchWithRetry(
-    `${GITHUB_API}/repos/${ORG_NAME}/${repo}/git/ref/heads/${branch}`,
+    `${GITHUB_API()}/repos/${ORG_NAME}/${repo}/git/ref/heads/${branch}`,
     {
       headers: {
         Authorization: `Bearer ${pat}`,
@@ -1528,6 +2098,301 @@ export async function getMainBranchSha(repo: string, branch: string, pat: string
   return refData.object.sha;
 }
 
+/** Input to `commitFilesAsTree`. `content` must be UTF-8 text; binary is not supported. */
+export interface TreeFile {
+  path: string;
+  content: string;
+  mode?: "100644" | "100755";
+}
+
+/**
+ * Validate `files` against the constraints GitHub enforces on tree entries.
+ * Catches problems locally so they fail fast instead of being retried 3 times
+ * through `commitFilesAsTree`'s ref-conflict loop.
+ */
+function validateTreeFiles(files: TreeFile[]): void {
+  const seen = new Set<string>();
+  for (const f of files) {
+    if (!f.path) {
+      throw new Error("commitFilesAsTree: empty path");
+    }
+    if (f.path.startsWith("/")) {
+      throw new Error(`commitFilesAsTree: path must be repo-relative, got '${f.path}'`);
+    }
+    if (f.path.endsWith("/")) {
+      throw new Error(`commitFilesAsTree: path must not end with '/', got '${f.path}'`);
+    }
+    if (f.path.includes("\0")) {
+      throw new Error("commitFilesAsTree: path contains NUL byte");
+    }
+    if (f.path.split("/").some((seg) => seg === "..")) {
+      throw new Error(`commitFilesAsTree: path contains '..' segment, got '${f.path}'`);
+    }
+    if (seen.has(f.path)) {
+      throw new Error(`commitFilesAsTree: duplicate path '${f.path}'`);
+    }
+    seen.add(f.path);
+  }
+}
+
+/**
+ * Detect GitHub's fast-forward conflict 422. The endpoint returns 422 for
+ * several distinct reasons (bad SHA, missing ref, signed-commit policy, etc.)
+ * and only the fast-forward case is safe to retry. Match the documented
+ * English message rather than the raw status code.
+ */
+function isFastForwardConflict422(bodyText: string): boolean {
+  let parsed: { message?: string } | null = null;
+  try {
+    parsed = JSON.parse(bodyText) as { message?: string };
+  } catch {
+    // Fall through to substring match.
+  }
+  const msg = parsed?.message ?? bodyText;
+  return /not a fast forward/i.test(msg);
+}
+
+/**
+ * Commit one or more files to a branch in a single Git Data API transaction.
+ *
+ * Cost (happy path): 4 REST calls regardless of how many files are written —
+ * `createOrUpdateFile()` costs 2 per file, so this strictly wins for N >= 3
+ * and ties at N = 2. For N = 1 prefer `createOrUpdateFile()`.
+ *
+ * Concurrency: if the branch advances between resolving the base and the
+ * ref PATCH, GitHub returns 422 "Update is not a fast forward". We make up to
+ * 3 attempts (2 retries), refetching the base each time. Non-fast-forward
+ * 422s (bad branch, signed-commit policy, missing ref) are surfaced
+ * immediately — they will never succeed on retry.
+ *
+ * @returns SHA of the new commit. For an empty `files` array, returns the
+ *   current branch head SHA without making any write calls.
+ */
+export async function commitFilesAsTree(
+  repo: string,
+  branch: string,
+  files: TreeFile[],
+  message: string,
+  pat: string,
+): Promise<string> {
+  const authHeaders = {
+    Authorization: `Bearer ${pat}`,
+    Accept: "application/vnd.github.v3+json",
+    "User-Agent": "NEMAR-API",
+  };
+  const jsonHeaders = { ...authHeaders, "Content-Type": "application/json" };
+
+  if (files.length === 0) {
+    return getMainBranchSha(repo, branch, pat);
+  }
+
+  validateTreeFiles(files);
+
+  const maxAttempts = 3;
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    const branchResp = await githubFetchWithRetry(
+      `${GITHUB_API()}/repos/${ORG_NAME}/${repo}/branches/${branch}`,
+      { headers: authHeaders },
+      { retryOn404: true },
+    );
+    if (!branchResp.ok) {
+      const body = await branchResp.text().catch(() => "");
+      throw new HttpError(
+        `Failed to resolve branch '${branch}': HTTP ${branchResp.status}: ${body.slice(0, 1024)}`,
+        branchResp.status,
+        body.slice(0, 1024),
+      );
+    }
+    const branchData = (await branchResp.json()) as {
+      commit: { sha: string; commit: { tree: { sha: string } } };
+    };
+    const baseCommitSha = branchData.commit.sha;
+    const baseTreeSha = branchData.commit.commit.tree.sha;
+
+    const treeResp = await githubFetchWithRetry(
+      `${GITHUB_API()}/repos/${ORG_NAME}/${repo}/git/trees`,
+      {
+        method: "POST",
+        headers: jsonHeaders,
+        body: JSON.stringify({
+          base_tree: baseTreeSha,
+          tree: files.map((f) => ({
+            path: f.path,
+            mode: f.mode ?? "100644",
+            type: "blob",
+            content: f.content,
+          })),
+        }),
+      },
+    );
+    if (!treeResp.ok) {
+      const body = await treeResp.text().catch(() => "");
+      throw new HttpError(
+        `Failed to create tree on ${repo}@${branch}: HTTP ${treeResp.status}: ${body.slice(0, 1024)}`,
+        treeResp.status,
+        body.slice(0, 1024),
+      );
+    }
+    const { sha: newTreeSha } = (await treeResp.json()) as { sha: string };
+
+    const isoDate = new Date().toISOString();
+    const commitResp = await githubFetchWithRetry(
+      `${GITHUB_API()}/repos/${ORG_NAME}/${repo}/git/commits`,
+      {
+        method: "POST",
+        headers: jsonHeaders,
+        body: JSON.stringify({
+          message,
+          tree: newTreeSha,
+          parents: [baseCommitSha],
+          author: { ...NEMAR_COMMITTER, date: isoDate },
+          committer: { ...NEMAR_COMMITTER, date: isoDate },
+        }),
+      },
+    );
+    if (!commitResp.ok) {
+      const body = await commitResp.text().catch(() => "");
+      throw new HttpError(
+        `Failed to create commit on ${repo}@${branch}: HTTP ${commitResp.status}: ${body.slice(0, 1024)}`,
+        commitResp.status,
+        body.slice(0, 1024),
+      );
+    }
+    const { sha: newCommitSha } = (await commitResp.json()) as { sha: string };
+
+    const refResp = await githubFetchWithRetry(
+      `${GITHUB_API()}/repos/${ORG_NAME}/${repo}/git/refs/heads/${branch}`,
+      {
+        method: "PATCH",
+        headers: jsonHeaders,
+        body: JSON.stringify({ sha: newCommitSha }),
+      },
+    );
+    if (refResp.ok) return newCommitSha;
+
+    const body = await refResp.text().catch(() => "");
+    // 422 with a non-fast-forward message means the branch advanced; refetch
+    // and retry. Other 422 causes (bad ref, signed-commit policy, missing
+    // ref) never succeed on retry — surface them immediately.
+    if (refResp.status === 422 && isFastForwardConflict422(body) && attempt < maxAttempts) {
+      console.warn(
+        `[github] commitFilesAsTree fast-forward conflict on ${repo}@${branch} (attempt ${attempt}/${maxAttempts}): ${body.slice(0, 200)}`,
+      );
+      continue;
+    }
+    const note =
+      refResp.status === 422 && isFastForwardConflict422(body)
+        ? ` (exhausted ${maxAttempts} attempts)`
+        : "";
+    throw new HttpError(
+      `Failed to update ref ${branch} on ${repo}: HTTP ${refResp.status}${note}: ${body.slice(0, 1024)}`,
+      refResp.status,
+      body.slice(0, 1024),
+    );
+  }
+
+  // Unreachable: the for loop either returns, continues, or throws.
+  throw new Error(`commitFilesAsTree: unreachable end-of-function for ${repo}@${branch}`);
+}
+
+export interface EnrichmentCommitResult {
+  /** "batched" when metadata + .bidsignore were committed together; "single" when only metadata was committed. */
+  commitMode: "batched" | "single";
+  /** True when .bidsignore was modified in the commit. */
+  bidsignoreUpdated: boolean;
+  /** Set when reading existing .bidsignore failed; metadata was still committed alone. */
+  bidsignoreReadError?: string;
+}
+
+/**
+ * Thrown by `commitEnrichmentWithBidsignore` on commit failure. Carries the
+ * `commitMode` that was attempted so callers can decide whether the failure
+ * affected both files (batched) or only metadata (single).
+ */
+export class EnrichmentCommitError extends Error {
+  readonly commitMode: "batched" | "single";
+  readonly bidsignoreReadError?: string;
+  constructor(
+    message: string,
+    commitMode: "batched" | "single",
+    bidsignoreReadError: string | undefined,
+    cause?: unknown,
+  ) {
+    super(message);
+    this.name = "EnrichmentCommitError";
+    this.commitMode = commitMode;
+    this.bidsignoreReadError = bidsignoreReadError;
+    if (cause !== undefined) (this as { cause?: unknown }).cause = cause;
+  }
+}
+
+/**
+ * Commit a NEMAR enrichment metadata file plus a `.bidsignore` update (when
+ * needed) using whichever path is cheapest:
+ *
+ *   - both files dirty -> `commitFilesAsTree` (one atomic commit, 4 calls)
+ *   - only metadata dirty -> `createOrUpdateFile` (single-file Contents API, 2 calls)
+ *
+ * If reading the existing `.bidsignore` fails, commits metadata alone and
+ * returns the read error in `bidsignoreReadError`. Throws
+ * `EnrichmentCommitError` on commit failure, with `commitMode` set so callers
+ * can tell which path was attempted.
+ */
+export async function commitEnrichmentWithBidsignore(
+  repo: string,
+  branch: string,
+  metadataPath: string,
+  metadataContent: string,
+  bidsignoreEntriesToIgnore: string[],
+  message: string,
+  pat: string,
+): Promise<EnrichmentCommitResult> {
+  let bidsignoreUpdated = false;
+  let bidsignoreContent = "";
+  let bidsignoreReadError: string | undefined;
+  try {
+    const tree = await getTreeAtRef(repo, branch, pat);
+    const bidsignoreFile = tree.find((f) => f.path === ".bidsignore");
+    if (bidsignoreFile) {
+      bidsignoreContent = await getBlobContent(repo, bidsignoreFile.sha, pat);
+    }
+    for (const entry of bidsignoreEntriesToIgnore) {
+      if (!bidsignoreContent.includes(entry)) {
+        bidsignoreContent = bidsignoreContent
+          ? `${bidsignoreContent.trimEnd()}\n${entry}\n`
+          : `${entry}\n`;
+        bidsignoreUpdated = true;
+      }
+    }
+  } catch (readErr) {
+    bidsignoreReadError = readErr instanceof Error ? readErr.message : String(readErr);
+    bidsignoreUpdated = false;
+  }
+
+  const commitMode: "batched" | "single" = bidsignoreUpdated ? "batched" : "single";
+  try {
+    if (commitMode === "batched") {
+      await commitFilesAsTree(
+        repo,
+        branch,
+        [
+          { path: metadataPath, content: metadataContent },
+          { path: ".bidsignore", content: bidsignoreContent },
+        ],
+        message,
+        pat,
+      );
+    } else {
+      await createOrUpdateFile(repo, metadataPath, metadataContent, message, pat);
+    }
+  } catch (commitErr) {
+    const detail = commitErr instanceof Error ? commitErr.message : String(commitErr);
+    throw new EnrichmentCommitError(detail, commitMode, bidsignoreReadError, commitErr);
+  }
+  return { commitMode, bidsignoreUpdated, bidsignoreReadError };
+}
+
 /**
  * Create a git tag on a repository.
  *
@@ -1547,7 +2412,7 @@ export async function createTag(
   pat: string,
 ): Promise<string> {
   // First, create an annotated tag object
-  const tagResponse = await fetch(`${GITHUB_API}/repos/${ORG_NAME}/${repo}/git/tags`, {
+  const tagResponse = await fetch(`${GITHUB_API()}/repos/${ORG_NAME}/${repo}/git/tags`, {
     method: "POST",
     headers: {
       Authorization: `Bearer ${pat}`,
@@ -1572,7 +2437,7 @@ export async function createTag(
   const tagData = (await tagResponse.json()) as { sha: string };
 
   // Then, create a reference to the tag
-  const refResponse = await fetch(`${GITHUB_API}/repos/${ORG_NAME}/${repo}/git/refs`, {
+  const refResponse = await fetch(`${GITHUB_API()}/repos/${ORG_NAME}/${repo}/git/refs`, {
     method: "POST",
     headers: {
       Authorization: `Bearer ${pat}`,
@@ -1616,7 +2481,7 @@ export async function createRelease(
   body: string,
   pat: string,
 ): Promise<number> {
-  const response = await fetch(`${GITHUB_API}/repos/${ORG_NAME}/${repo}/releases`, {
+  const response = await fetch(`${GITHUB_API()}/repos/${ORG_NAME}/${repo}/releases`, {
     method: "POST",
     headers: {
       Authorization: `Bearer ${pat}`,
@@ -1636,13 +2501,16 @@ export async function createRelease(
   if (!response.ok) {
     // 422 means release already exists for this tag; fetch the existing one
     if (response.status === 422) {
-      const existing = await fetch(`${GITHUB_API}/repos/${ORG_NAME}/${repo}/releases/tags/${tag}`, {
-        headers: {
-          Authorization: `Bearer ${pat}`,
-          Accept: "application/vnd.github.v3+json",
-          "User-Agent": "NEMAR-API",
+      const existing = await fetch(
+        `${GITHUB_API()}/repos/${ORG_NAME}/${repo}/releases/tags/${tag}`,
+        {
+          headers: {
+            Authorization: `Bearer ${pat}`,
+            Accept: "application/vnd.github.v3+json",
+            "User-Agent": "NEMAR-API",
+          },
         },
-      });
+      );
       if (existing.ok) {
         const existingData = (await existing.json()) as { id: number };
         return existingData.id;
@@ -1671,7 +2539,7 @@ export async function downloadReleaseArchive(
   ref: string,
   pat: string,
 ): Promise<ArrayBuffer> {
-  const response = await fetch(`${GITHUB_API}/repos/${ORG_NAME}/${repo}/zipball/${ref}`, {
+  const response = await fetch(`${GITHUB_API()}/repos/${ORG_NAME}/${repo}/zipball/${ref}`, {
     method: "GET",
     headers: {
       Authorization: `Bearer ${pat}`,

@@ -52,6 +52,7 @@ import {
   type GitHubRepo,
   addCollaborator,
   checkWorkflowExists,
+  commitEnrichmentWithBidsignore,
   createOrUpdateFile,
   createRelease,
   createRepository,
@@ -60,6 +61,7 @@ import {
   deleteRepository,
   deployWorkflows,
   downloadReleaseArchive,
+  syncWorkflowTemplates,
   getBlobContent,
   getMainBranchSha,
   getTreeAtRef,
@@ -1850,44 +1852,24 @@ adminRoutes.post("/datasets/:id/enrichment", zValidator("json", enrichmentSchema
   const isV2 = body.version === "2.0";
   const metadataPath = isV2 ? ".nemar/metadata.json" : "nemar_metadata.json";
 
+  const entriesToIgnore = isV2 ? [".nemar/"] : ["nemar_metadata.json"];
+
   try {
-    // Commit metadata to the repo (v2 uses .nemar/metadata.json, v1 uses nemar_metadata.json)
-    await createOrUpdateFile(
+    const commitResult = await commitEnrichmentWithBidsignore(
       repoName,
+      "main",
       metadataPath,
       metadataContent,
+      entriesToIgnore,
       "Update NEMAR metadata enrichment",
       pat,
     );
-
-    // Ensure .bidsignore includes the metadata path
-    const tree = await getTreeAtRef(repoName, "main", pat);
-    const bidsignoreFile = tree.find((f) => f.path === ".bidsignore");
-    let bidsignoreContent = "";
-    if (bidsignoreFile) {
-      bidsignoreContent = await getBlobContent(repoName, bidsignoreFile.sha, pat);
-    }
-    const entriesToIgnore = isV2 ? [".nemar/"] : ["nemar_metadata.json"];
-    let bidsignoreUpdated = false;
-    for (const entry of entriesToIgnore) {
-      if (!bidsignoreContent.includes(entry)) {
-        bidsignoreContent = bidsignoreContent
-          ? `${bidsignoreContent.trimEnd()}\n${entry}\n`
-          : `${entry}\n`;
-        bidsignoreUpdated = true;
-      }
-    }
-    if (bidsignoreUpdated) {
-      await createOrUpdateFile(
-        repoName,
-        ".bidsignore",
-        bidsignoreContent,
-        "Update .bidsignore for metadata",
-        pat,
+    if (commitResult.bidsignoreReadError) {
+      console.warn(
+        `[enrichment] Could not read .bidsignore for ${datasetId}; committed metadata alone: ${commitResult.bidsignoreReadError}`,
       );
     }
 
-    // Cache in D1
     await db
       .prepare(
         "UPDATE datasets SET enrichment_json = ?, enrichment_updated_at = datetime('now'), updated_at = datetime('now') WHERE dataset_id = ?",
@@ -1899,7 +1881,11 @@ adminRoutes.post("/datasets/:id/enrichment", zValidator("json", enrichmentSchema
       message: "Enrichment saved",
       dataset_id: datasetId,
       committed: true,
-      bidsignore_updated: bidsignoreUpdated,
+      bidsignore_updated: commitResult.bidsignoreUpdated,
+      commit_mode: commitResult.commitMode,
+      ...(commitResult.bidsignoreReadError
+        ? { bidsignore_read_error: commitResult.bidsignoreReadError }
+        : {}),
     });
   } catch (error) {
     console.error("Failed to save enrichment:", error);
@@ -2358,6 +2344,77 @@ adminRoutes.post("/datasets/:id/ci", async (c) => {
   });
 });
 
+/**
+ * POST /admin/datasets/:id/ci/sync - Bring deployed CI workflows in sync with
+ * the current templates. Only files that drift or are missing are written,
+ * in a single tree commit. Idempotent and cheap when nothing has changed
+ * (single Contents-API listing).
+ */
+adminRoutes.post("/datasets/:id/ci/sync", async (c) => {
+  const datasetId = c.req.param("id");
+  const db = c.env.DB;
+  const adminUser = c.get("user");
+
+  const dataset = await db
+    .prepare("SELECT dataset_id, github_repo FROM datasets WHERE dataset_id = ?")
+    .bind(datasetId)
+    .first<{ dataset_id: string; github_repo: string | null }>();
+
+  if (!dataset) {
+    return c.json({ error: "Dataset not found" }, 404);
+  }
+  if (!dataset.github_repo) {
+    return c.json({ error: "Dataset has no GitHub repository" }, 400);
+  }
+
+  const repoName = dataset.github_repo.split("/")[1];
+  if (!repoName) {
+    return c.json({ error: "Invalid repository format" }, 500);
+  }
+
+  const result = await syncWorkflowTemplates(repoName, "main", c.env.GITHUB_ADMIN_PAT);
+
+  try {
+    await db
+      .prepare(
+        "INSERT INTO audit_log (user_id, action, resource_type, resource_id, details) VALUES (?, ?, ?, ?, ?)",
+      )
+      .bind(
+        adminUser.id,
+        "ci_workflows_synced",
+        "dataset",
+        datasetId,
+        JSON.stringify({
+          synced_by: adminUser.username,
+          changed: result.changed,
+          added: result.added,
+          errors: result.errors,
+          committed: result.committed,
+          list_failed: result.listFailed,
+        }),
+      )
+      .run();
+  } catch (auditError) {
+    console.error("Audit log write failed for CI sync:", auditError);
+  }
+
+  // 207 (Multi-Status) when the call surfaced any partial failures so
+  // automation and `--all` loops don't false-green on partial errors.
+  const status = result.errors.length > 0 ? 207 : 200;
+  return c.json(
+    {
+      dataset_id: datasetId,
+      checked: result.checked,
+      changed: result.changed,
+      added: result.added,
+      errors: result.errors,
+      committed: result.committed,
+      list_failed: result.listFailed,
+    },
+    status,
+  );
+});
+
 // ============================================================================
 // Publication Workflow (Admin)
 // ============================================================================
@@ -2704,7 +2761,12 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
           pat,
         );
         if (!bidsExists) {
-          await deployWorkflows(repoName, pat);
+          const deployResult = await deployWorkflows(repoName, pat);
+          if (!deployResult.success) {
+            throw new Error(
+              `Failed to deploy CI workflows to ${repoName}: ${deployResult.errors.join("; ")}`,
+            );
+          }
         }
 
         // Check latest run status (if workflow existed, verify it passes)

@@ -25,6 +25,7 @@ import {
   deployWorkflows,
   enableAutoMerge,
   ensureMainBranch,
+  ensureWorkflowsDeployed,
   getFileContent,
   getWorkflowRuns,
   setRepoVisibility,
@@ -463,7 +464,17 @@ datasetRoutes.get("/", optionalAuthMiddleware, async (c) => {
              COALESCE(c.authors, '') AS authors,
              COALESCE(c.file_size, 0) AS file_size,
              COALESCE(c.file_size_formatted, '') AS file_size_formatted,
-             'managed' AS source_type
+             'managed' AS source_type,
+             -- latest_version: most recently minted DOI version for the dataset
+             -- (null when none). scripts/hallu-sync.sh reads this to skip the
+             -- per-dataset /manifest call; keep the ordering in sync with what
+             -- /datasets/:id/manifest reports.
+             (
+               SELECT version FROM dataset_versions dv
+               WHERE dv.dataset_id = d.dataset_id
+               ORDER BY created_at DESC
+               LIMIT 1
+             ) AS latest_version
       FROM datasets d
       JOIN users u ON d.owner_user_id = u.id
       LEFT JOIN nemar_catalog c ON c.id = d.dataset_id
@@ -498,7 +509,14 @@ datasetRoutes.get("/", optionalAuthMiddleware, async (c) => {
            COALESCE(c.authors, '') AS authors,
            COALESCE(c.file_size, 0) AS file_size,
            COALESCE(c.file_size_formatted, '') AS file_size_formatted,
-           'managed' AS source_type
+           'managed' AS source_type,
+           -- latest_version: same contract as the managed-mine branch above.
+           (
+             SELECT version FROM dataset_versions dv
+             WHERE dv.dataset_id = d.dataset_id
+             ORDER BY created_at DESC
+             LIMIT 1
+           ) AS latest_version
     FROM datasets d
     JOIN users u ON d.owner_user_id = u.id
     LEFT JOIN nemar_catalog c ON c.id = d.dataset_id
@@ -542,7 +560,8 @@ datasetRoutes.get("/", optionalAuthMiddleware, async (c) => {
            COALESCE(c.authors, '') AS authors,
            COALESCE(c.file_size, 0) AS file_size,
            COALESCE(c.file_size_formatted, '') AS file_size_formatted,
-           'catalog' AS source_type
+           'catalog' AS source_type,
+           NULL AS latest_version
     FROM nemar_catalog c
     WHERE c.id NOT IN (SELECT dataset_id FROM datasets WHERE status = 'active')
   `;
@@ -1270,10 +1289,19 @@ datasetRoutes.post("/:id/finalize", authMiddleware, async (c) => {
       warnings.push("Could not verify default branch is 'main'; CI and protection may not work");
     }
 
-    // Deploy GitHub Actions workflows
+    // Deploy GitHub Actions workflows (idempotent: only writes the missing
+    // templates; in the steady state this is a single Contents API list call).
+    let workflowDeployed: string[] = [];
+    let workflowAlreadyPresent: string[] = [];
     try {
-      const workflowResult = await deployWorkflows(datasetId, c.env.GITHUB_ADMIN_PAT);
-      if (!workflowResult.success) {
+      const workflowResult = await ensureWorkflowsDeployed(
+        datasetId,
+        "main",
+        c.env.GITHUB_ADMIN_PAT,
+      );
+      workflowDeployed = workflowResult.deployed;
+      workflowAlreadyPresent = workflowResult.alreadyPresent;
+      if (workflowResult.errors.length > 0) {
         console.error("Failed to deploy some workflows:", workflowResult.errors);
         warnings.push(
           `Some GitHub workflows could not be deployed: ${workflowResult.errors.join("; ")}`,
@@ -1335,6 +1363,10 @@ datasetRoutes.post("/:id/finalize", authMiddleware, async (c) => {
         dataset_id: datasetId,
         status: "active",
         github_url: githubUrl,
+      },
+      workflows: {
+        deployed: workflowDeployed,
+        already_present: workflowAlreadyPresent,
       },
     });
   } catch (error) {
@@ -1730,7 +1762,12 @@ datasetRoutes.post("/:id/publish/request", authMiddleware, async (c) => {
         pat,
       );
       if (!hasWorkflow) {
-        await deployWorkflows(repoName, pat);
+        const deployResult = await deployWorkflows(repoName, pat);
+        if (!deployResult.success) {
+          throw new Error(
+            `Failed to deploy CI workflows to ${repoName}: ${deployResult.errors.join("; ")}`,
+          );
+        }
       }
 
       // Check latest BIDS validation run
