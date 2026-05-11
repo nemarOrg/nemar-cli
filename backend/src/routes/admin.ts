@@ -23,6 +23,7 @@ import {
   parseNemarMetadata,
 } from "../services/datacite";
 import {
+  DatasetReindexError,
   type ReindexFilter,
   buildReindexFilterQuery,
   runDatasetSync,
@@ -4723,17 +4724,11 @@ adminRoutes.post("/datasets/:id/sync", async (c) => {
       }),
     });
   } catch (err) {
-    const msg = errorMessage(err);
-    const status = msg.includes("Dataset not found")
-      ? 404
-      : msg.includes("OpenNeuro datasets")
-        ? 400
-        : msg.includes("no GitHub repository") || msg.includes("Invalid github_repo")
-          ? 400
-          : msg.includes("NEMAR_USERNAME") || msg.includes("NEMAR_PASSWORD")
-            ? 500
-            : 500;
-    return c.json({ error: msg }, status);
+    if (err instanceof DatasetReindexError) {
+      return c.json({ error: err.message }, err.statusCode);
+    }
+    console.error(`[admin/sync] Unexpected error for ${datasetId}:`, err);
+    return c.json({ error: errorMessage(err) }, 500);
   }
 });
 
@@ -4748,11 +4743,12 @@ adminRoutes.post("/datasets/:id/sync", async (c) => {
  */
 adminRoutes.post("/datasets/:id/reindex", async (c) => {
   const datasetId = c.req.param("id");
+  // Parse body directly so chunked-transfer requests (no Content-Length
+  // header) still produce a body. An empty body is treated as defaults.
   let body: { skip_enrichment?: boolean; skip_sync?: boolean; ref?: string } = {};
   try {
-    if (c.req.header("content-length") && c.req.header("content-length") !== "0") {
-      body = await c.req.json();
-    }
+    const raw = await c.req.text();
+    if (raw.length > 0) body = JSON.parse(raw);
   } catch {
     return c.json({ error: "Invalid JSON in request body" }, 400);
   }
@@ -4797,15 +4793,14 @@ adminRoutes.post("/datasets/:id/reindex", async (c) => {
         }),
       };
     } catch (err) {
-      const msg = errorMessage(err);
-      const status = msg.includes("Dataset not found")
-        ? 404
-        : msg.includes("OpenNeuro datasets") ||
-            msg.includes("no GitHub repository") ||
-            msg.includes("Invalid github_repo")
-          ? 400
-          : 500;
-      return c.json({ ...result, sync: { status: "failed", errors: [msg] } }, status);
+      if (err instanceof DatasetReindexError) {
+        return c.json(
+          { ...result, sync: { status: "failed", errors: [err.message] } },
+          err.statusCode,
+        );
+      }
+      console.error(`[admin/reindex] Unexpected sync error for ${datasetId}:`, err);
+      return c.json({ ...result, sync: { status: "failed", errors: [errorMessage(err)] } }, 500);
     }
   }
 
@@ -4908,8 +4903,17 @@ adminRoutes.post("/datasets/reindex/bulk", async (c) => {
           }),
         };
       } catch (err) {
+        // Per-dataset failure must surface in server logs in addition to the
+        // response body so an operator running with -i (or a CI job that
+        // only checks HTTP status) still gets a trace.
+        console.error(`[admin/reindex/bulk] ${datasetId} sync threw:`, err);
         entry.sync = { status: "failed", errors: [errorMessage(err)] };
       }
+    }
+    if (entry.enrichment.status === "failed") {
+      console.warn(
+        `[admin/reindex/bulk] ${datasetId} enrichment failed: ${entry.enrichment.error}`,
+      );
     }
     results.push(entry);
   }

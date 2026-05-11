@@ -6,7 +6,10 @@
  */
 
 import { describe, expect, test } from "bun:test";
-import { buildReindexFilterQuery } from "../backend/src/services/dataset-reindex";
+import {
+  buildReindexFilterQuery,
+  extractEnrichmentSubErrors,
+} from "../backend/src/services/dataset-reindex";
 
 describe("buildReindexFilterQuery", () => {
   test("filter=all returns unfiltered SQL with no params", () => {
@@ -16,6 +19,9 @@ describe("buildReindexFilterQuery", () => {
     expect(q.sql).toContain("github_repo IS NOT NULL");
     // OpenNeuro datasets are always excluded — they need alternate_id mapping.
     expect(q.sql).toContain("dataset_id NOT LIKE 'on%'");
+    // Sandbox datasets must also be excluded — they're not eligible for
+    // nemar.org sync and pollute the live datapipeline if included.
+    expect(q.sql).toContain("dataset_id NOT LIKE 'xx%'");
     expect(q.sql).toContain("ORDER BY dataset_id");
   });
 
@@ -68,5 +74,101 @@ describe("buildReindexFilterQuery", () => {
       // accidentally rely on other columns that aren't projected.
       expect(q.sql.split("FROM")[0]?.trim()).toBe("SELECT dataset_id");
     }
+  });
+
+  test("every filter excludes on% and xx% datasets", () => {
+    // Regression guard: a future contributor adding a new filter must
+    // also exclude these prefixes or the bulk reindex will hit the
+    // nemar.org datapipeline with sandbox / OpenNeuro datasets.
+    for (const filter of ["all", "missing-metadata", "stale"] as const) {
+      const q = buildReindexFilterQuery(filter);
+      expect(q.sql).toContain("dataset_id NOT LIKE 'on%'");
+      expect(q.sql).toContain("dataset_id NOT LIKE 'xx%'");
+    }
+  });
+
+  test("filter=stale accepts 0 (boundary)", () => {
+    // The guard is `< 0`, so 0 is valid and reads as "anything not updated
+    // in the last 0 days" -- effectively every row, useful for a forced
+    // bulk refresh. Pin the boundary so a future tightening to `<= 0`
+    // breaks loudly.
+    expect(() => buildReindexFilterQuery("stale", { olderThanDays: 0 })).not.toThrow();
+  });
+});
+
+describe("extractEnrichmentSubErrors", () => {
+  // The enrichment webhook returns HTTP 200 with embedded *_error fields
+  // when individual sub-steps fail. This pure helper turns that body into
+  // a list of "<field>: <message>" strings; runEnrichmentForDataset uses
+  // it to decide ok vs failed.
+
+  test("returns empty for a clean body", () => {
+    expect(extractEnrichmentSubErrors({ ok: true })).toEqual([]);
+  });
+
+  test("returns empty for non-object input", () => {
+    expect(extractEnrichmentSubErrors(null)).toEqual([]);
+    expect(extractEnrichmentSubErrors(undefined)).toEqual([]);
+    expect(extractEnrichmentSubErrors("oops")).toEqual([]);
+    expect(extractEnrichmentSubErrors(42)).toEqual([]);
+  });
+
+  test("returns one entry for a single populated *_error field", () => {
+    expect(extractEnrichmentSubErrors({ commit_error: "rate limited" })).toEqual([
+      "commit_error: rate limited",
+    ]);
+  });
+
+  test("joins multiple populated error fields preserving the canonical order", () => {
+    const errors = extractEnrichmentSubErrors({
+      commit_error: "rate limited",
+      doi_sync_error: "ezid down",
+      bidsignore_error: "merge conflict",
+    });
+    // Preserves the canonical field order from the implementation so
+    // operators see a consistent ordering across log lines.
+    expect(errors).toEqual([
+      "commit_error: rate limited",
+      "doi_sync_error: ezid down",
+      "bidsignore_error: merge conflict",
+    ]);
+  });
+
+  test("skips falsy / non-string error fields", () => {
+    expect(
+      extractEnrichmentSubErrors({
+        commit_error: "",
+        openrouter_error: null,
+        doi_sync_error: undefined,
+        cache_error: 0,
+        bidsignore_error: false,
+        metadata_columns_error: { msg: "oops" },
+      }),
+    ).toEqual([]);
+  });
+
+  test("ignores unknown fields so the body shape can evolve", () => {
+    expect(
+      extractEnrichmentSubErrors({
+        commit_error: "x",
+        unrelated_field: "y",
+        future_error: "z",
+      }),
+    ).toEqual(["commit_error: x"]);
+  });
+
+  test("covers metadata_columns_error and issue_creation_error", () => {
+    // These two are the newer (phase 2 / earlier) additions; the
+    // canonical list in dataset-reindex.ts must include them so admin
+    // reindex surfaces them too.
+    expect(
+      extractEnrichmentSubErrors({
+        metadata_columns_error: "d1 down",
+        issue_creation_error: "no perms",
+      }),
+    ).toEqual([
+      "metadata_columns_error: d1 down",
+      "issue_creation_error: no perms",
+    ]);
   });
 });

@@ -2878,9 +2878,11 @@ reindexCommand
           }
           console.log();
           printReindexLine(result, { showRef: true });
+          if (!ok) process.exit(1);
         } catch (err) {
           spinner.fail(`Failed to reindex ${datasetIdArg}`);
           console.error(chalk.red(errorDetail(err)));
+          process.exit(1);
         }
         return;
       }
@@ -2915,7 +2917,7 @@ reindexCommand
       } catch (err) {
         spinner.fail("Bulk reindex failed");
         console.error(chalk.red(errorDetail(err)));
-        return;
+        process.exit(1);
       }
 
       if (response.dry_run) {
@@ -2946,6 +2948,9 @@ reindexCommand
       for (const r of results) {
         printReindexLine(r);
       }
+      // Non-zero exit on partial bulk failure so shell scripts can chain
+      // safely (`nemar admin reindex --missing-metadata && do_next_step`).
+      if (failed > 0) process.exit(1);
     },
   );
 

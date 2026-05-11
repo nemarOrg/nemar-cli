@@ -446,7 +446,11 @@ async function handleEzidVersionDoi(
       console.info(`[webhook] Skipping nemar.org sync for OpenNeuro dataset ${dataset.dataset_id}`);
     }
     if (nemarUser && nemarPass && !dataset.dataset_id.startsWith("on")) {
-      c.executionCtx.waitUntil(syncToNemarAfterVersionDoi(c.env, dataset, version));
+      // Pass the freshly-minted DOI + version through as overrides so a D1
+      // read-after-write race (background waitUntil firing before the new
+      // dataset_versions row replicates) doesn't drop the version DOI
+      // from the nemar.org payload.
+      c.executionCtx.waitUntil(syncToNemarAfterVersionDoi(c.env, dataset, version, result.doi));
     }
 
     return c.json({
@@ -490,13 +494,17 @@ async function syncToNemarAfterVersionDoi(
     concept_doi: string | null;
   },
   version: string,
+  versionDoi: string,
 ): Promise<void> {
   // Delegated to runDatasetSync (epic #417 phase 3) so this path stays in
   // step with the admin reindex endpoint. The helper handles tree+S3+
   // participants gathering, syncDatasetToNemar, nemar_sync_* fields, and the
   // Phase 2 metadata columns + metadata_columns_error.
   try {
-    const result = await runDatasetSync(env, dataset.dataset_id);
+    const result = await runDatasetSync(env, dataset.dataset_id, {
+      versionOverride: version,
+      versionDoiOverride: versionDoi,
+    });
     if (result.synced) {
       console.log(`[webhook] nemar.org sync succeeded for ${dataset.dataset_id} v${version}`);
     } else {
@@ -511,11 +519,15 @@ async function syncToNemarAfterVersionDoi(
     }
   } catch (err) {
     console.error(`[webhook] nemar.org sync error for ${dataset.dataset_id} (non-fatal):`, err);
+    // Record both failures together: runDatasetSync threw before reaching
+    // either the nemar_sync UPDATE or the metadata-columns UPDATE, so set
+    // both so operators querying for stale state get a consistent view.
+    const msg = errorMessage(err);
     try {
       await env.DB.prepare(
-        "UPDATE datasets SET nemar_sync_status = 'failed', nemar_sync_error = ?, updated_at = datetime('now') WHERE dataset_id = ?",
+        "UPDATE datasets SET nemar_sync_status = 'failed', nemar_sync_error = ?, metadata_columns_error = ?, updated_at = datetime('now') WHERE dataset_id = ?",
       )
-        .bind(errorMessage(err), dataset.dataset_id)
+        .bind(msg, `runDatasetSync threw before metadata-columns write: ${msg}`, dataset.dataset_id)
         .run();
     } catch (d1Err) {
       console.warn(

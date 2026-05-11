@@ -37,6 +37,33 @@ export interface DatasetSyncResult {
   metadata_columns_error?: string;
 }
 
+/**
+ * Typed error class so admin routes can map runDatasetSync failures to the
+ * right HTTP status without substring-matching error messages. Status codes
+ * are intentionally narrow: 400 for caller-side issues (bad dataset config),
+ * 404 when the dataset row is missing, 500 for upstream / config failures.
+ */
+export class DatasetReindexError extends Error {
+  constructor(
+    message: string,
+    public readonly statusCode: 400 | 404 | 500,
+  ) {
+    super(message);
+    this.name = "DatasetReindexError";
+  }
+}
+
+export interface RunDatasetSyncOptions {
+  /**
+   * Fallback version DOI to use when the most-recent dataset_versions row is
+   * not yet visible (D1 read-after-write race). Set by the webhook caller
+   * that just minted this DOI in the same request.
+   */
+  versionDoiOverride?: string;
+  /** Companion override for versionDoiOverride. */
+  versionOverride?: string;
+}
+
 function s3Cfg(env: Bindings) {
   return {
     bucket: env.S3_BUCKET,
@@ -49,16 +76,23 @@ function s3Cfg(env: Bindings) {
 /**
  * Gather upstream data and push it to nemar.org + refresh D1 metadata columns.
  *
- * Tolerates per-step failures: each fetch/write has its own try/catch and is
- * reported in the return value (or in the D1 error fields). The function only
- * throws when the dataset row itself can't be found.
+ * Throws DatasetReindexError for caller-recoverable validation failures
+ * (missing dataset row, OpenNeuro dataset, bad github_repo, missing creds)
+ * so admin routes can map them to specific HTTP status codes. Re-throws the
+ * underlying error (wrapped with context) when the initial GitHub tree fetch
+ * fails. Once the tree is in hand, every downstream sub-step has its own
+ * try/catch and is reported through the return value or D1 fields.
  */
-export async function runDatasetSync(env: Bindings, datasetId: string): Promise<DatasetSyncResult> {
+export async function runDatasetSync(
+  env: Bindings,
+  datasetId: string,
+  options?: RunDatasetSyncOptions,
+): Promise<DatasetSyncResult> {
   const db = env.DB;
   const nemarUser = env.NEMAR_USERNAME;
   const nemarPass = env.NEMAR_PASSWORD;
   if (!nemarUser || !nemarPass) {
-    throw new Error("NEMAR_USERNAME / NEMAR_PASSWORD not configured");
+    throw new DatasetReindexError("NEMAR_USERNAME / NEMAR_PASSWORD not configured", 500);
   }
 
   const dataset = await db
@@ -79,25 +113,44 @@ export async function runDatasetSync(env: Bindings, datasetId: string): Promise<
     }>();
 
   if (!dataset) {
-    throw new Error(`Dataset not found: ${datasetId}`);
+    throw new DatasetReindexError(`Dataset not found: ${datasetId}`, 404);
   }
   if (!dataset.github_repo) {
-    throw new Error(`Dataset has no GitHub repository: ${datasetId}`);
+    throw new DatasetReindexError(`Dataset has no GitHub repository: ${datasetId}`, 400);
   }
   if (datasetId.startsWith("on")) {
-    throw new Error("OpenNeuro datasets require alternate_id mapping before nemar.org sync");
+    throw new DatasetReindexError(
+      "OpenNeuro datasets require alternate_id mapping before nemar.org sync",
+      400,
+    );
+  }
+  if (datasetId.startsWith("xx")) {
+    throw new DatasetReindexError(
+      `Sandbox dataset ${datasetId} is not eligible for nemar.org sync`,
+      400,
+    );
   }
 
   const repoParts = dataset.github_repo.split("/");
   const repoName = repoParts[1];
   if (!repoName) {
-    throw new Error(`Invalid github_repo format: ${dataset.github_repo}`);
+    throw new DatasetReindexError(`Invalid github_repo format: ${dataset.github_repo}`, 400);
   }
   const pat = env.GITHUB_ADMIN_PAT;
   const s3 = s3Cfg(env);
 
-  // Read repo tree first; everything else depends on it.
-  const tree = await getTreeAtRef(repoName, "main", pat);
+  // Read repo tree first; everything else depends on it. Wrap to give the
+  // caller a clear error context (most-likely cause: GitHub auth or repo
+  // visibility, not anything in our code).
+  let tree: Awaited<ReturnType<typeof getTreeAtRef>>;
+  try {
+    tree = await getTreeAtRef(repoName, "main", pat);
+  } catch (err) {
+    throw new DatasetReindexError(
+      `Failed to read GitHub tree for ${repoName}@main: ${errorMessage(err)}`,
+      500,
+    );
+  }
 
   // dataset_description.json + README + .nemar/metadata.json for the nemar.org payload.
   let bidsDescription: Record<string, unknown> = {};
@@ -217,8 +270,12 @@ export async function runDatasetSync(env: Bindings, datasetId: string): Promise<
     readme,
     tree,
     conceptDoi: dataset.concept_doi,
-    latestVersionDoi: latestVersion?.doi || null,
-    latestVersion: latestVersion?.version || null,
+    // Fall back to the caller-supplied overrides when the D1 versions row is
+    // not yet visible. This covers the webhook path where the version row was
+    // just inserted in the same request and the post-DOI sync runs via
+    // waitUntil before D1 read-after-write replication catches up.
+    latestVersionDoi: latestVersion?.doi || options?.versionDoiOverride || null,
+    latestVersion: latestVersion?.version || options?.versionOverride || null,
     versionCreatedAt: latestVersion?.created_at || null,
     ownerUsername: dataset.owner_username || "unknown",
     createdAt: dataset.created_at || null,
@@ -290,6 +347,37 @@ export interface EnrichmentRunResult {
 }
 
 /**
+ * Field names the /webhooks/llm-enrich handler uses to surface non-fatal
+ * sub-step failures inside a 200 response body. Kept in sync with the
+ * spread at webhooks.ts where the response is built.
+ */
+const ENRICHMENT_SUBERROR_FIELDS = [
+  "commit_error",
+  "openrouter_error",
+  "doi_sync_error",
+  "cache_error",
+  "bidsignore_error",
+  "metadata_columns_error",
+  "issue_creation_error",
+] as const;
+
+/**
+ * Pull named *_error fields from a parsed enrichment response body and emit
+ * "<field>: <message>" for each one populated with a non-empty string. Pure
+ * function so the surfacing matrix is unit-testable.
+ */
+export function extractEnrichmentSubErrors(body: unknown): string[] {
+  if (!body || typeof body !== "object") return [];
+  const record = body as Record<string, unknown>;
+  const out: string[] = [];
+  for (const field of ENRICHMENT_SUBERROR_FIELDS) {
+    const v = record[field];
+    if (typeof v === "string" && v.length > 0) out.push(`${field}: ${v}`);
+  }
+  return out;
+}
+
+/**
  * Forward to /webhooks/llm-enrich in-process using the configured webhook
  * secret so admin-triggered reindex reuses the existing enrichment pipeline
  * end-to-end without extracting an 800-line handler.
@@ -310,12 +398,16 @@ export async function runEnrichmentForDataset(
   if (!env.OPENROUTER_API_KEY) {
     return { ok: false, error: "OPENROUTER_API_KEY not configured", ref };
   }
+  if (!env.API_BASE_URL) {
+    return { ok: false, error: "API_BASE_URL not configured", ref };
+  }
 
-  // The webhook handler is on the same Worker; forwarding via the public
-  // hostname keeps the call path identical to GitHub Actions. Cloudflare
-  // routes the request back to this Worker.
+  // The webhook handler is on the same Worker; forwarding via API_BASE_URL
+  // (configured per environment in wrangler.toml) ensures dev hits the dev
+  // Worker and prod hits api.nemar.org. Cloudflare routes the request back
+  // to this Worker.
   try {
-    const res = await fetch("https://api.nemar.org/webhooks/llm-enrich", {
+    const res = await fetch(`${env.API_BASE_URL.replace(/\/$/, "")}/webhooks/llm-enrich`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -336,20 +428,19 @@ export async function runEnrichmentForDataset(
         ref,
       };
     }
-    const body = (await res.json().catch(() => ({}))) as Record<string, unknown>;
-    // The webhook returns 200 even when sub-steps fail; surface those.
-    const subErrors: string[] = [];
-    for (const f of [
-      "commit_error",
-      "openrouter_error",
-      "doi_sync_error",
-      "cache_error",
-      "bidsignore_error",
-      "metadata_columns_error",
-    ]) {
-      const v = body[f];
-      if (typeof v === "string" && v.length > 0) subErrors.push(`${f}: ${v}`);
+    // Parse the body explicitly so a malformed/gateway response is reported
+    // as a failure rather than silently treated as "everything OK".
+    let body: unknown;
+    try {
+      body = await res.json();
+    } catch (parseErr) {
+      return {
+        ok: false,
+        error: `Enrichment response body was not valid JSON: ${errorMessage(parseErr)}`,
+        ref,
+      };
     }
+    const subErrors = extractEnrichmentSubErrors(body);
     if (subErrors.length > 0) {
       return { ok: false, error: subErrors.join("; "), ref };
     }
@@ -374,8 +465,11 @@ export function buildReindexFilterQuery(
   filter: ReindexFilter,
   options?: ReindexFilterOptions,
 ): { sql: string; params: unknown[] } {
+  // Excludes on% datasets (OpenNeuro, need alternate_id mapping) and xx%
+  // datasets (sandbox/throwaway, not eligible for nemar.org sync — see
+  // dataset deletion/publish handlers for the same short-circuit).
   const base =
-    "SELECT dataset_id FROM datasets WHERE github_repo IS NOT NULL AND dataset_id NOT LIKE 'on%'";
+    "SELECT dataset_id FROM datasets WHERE github_repo IS NOT NULL AND dataset_id NOT LIKE 'on%' AND dataset_id NOT LIKE 'xx%'";
   if (filter === "all") {
     return { sql: `${base} ORDER BY dataset_id`, params: [] };
   }
