@@ -46,6 +46,14 @@ export interface Bindings {
   OPENROUTER_API_KEY?: string; // For LLM-based metadata enrichment
   NEMAR_USERNAME?: string; // nemar.org datapipeline API credentials
   NEMAR_PASSWORD?: string;
+
+  // GitHub App credentials. Optional during the migration (#432); the
+  // Worker falls back to GITHUB_ADMIN_PAT when any of these are unset.
+  // Phase 5 will drop the PAT and make these required.
+  GITHUB_APP_ID?: string;
+  GITHUB_APP_PRIVATE_KEY?: string; // PKCS#8 PEM
+  GITHUB_APP_INSTALLATION_ID_NEMAR_DATASETS?: string;
+  GITHUB_APP_INSTALLATION_ID_NEMAR_ORG?: string;
 }
 
 /** User roles in hierarchical order: owner > admin > member */

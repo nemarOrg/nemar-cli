@@ -1028,7 +1028,18 @@ jobs:
       version: \${{ steps.version.outputs.version }}
       release_created: \${{ steps.create_release.outputs.created }}
     steps:
+      - name: Mint App installation token
+        id: app-token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: \${{ secrets.NEMAR_APP_ID }}
+          private-key: \${{ secrets.NEMAR_APP_PRIVATE_KEY }}
+          owner: nemarDatasets
+          repositories: \${{ github.event.repository.name }}
+
       - uses: actions/checkout@v4
+        with:
+          token: \${{ steps.app-token.outputs.token }}
 
       - name: Get version
         id: version
@@ -1050,11 +1061,11 @@ jobs:
         id: create_release
         if: steps.check_tag.outputs.exists == 'false'
         env:
-          GH_TOKEN: \${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: \${{ steps.app-token.outputs.token }}
           PR_NUMBER: \${{ github.event.pull_request.number }}
         run: |
-          git config user.name "GitHub Actions"
-          git config user.email "actions@github.com"
+          git config user.name "nemar-publish-bot"
+          git config user.email "nemar-publish-bot@users.noreply.github.com"
           VERSION="\${{ steps.version.outputs.version }}"
           git tag -a "v$VERSION" -m "Release v$VERSION"
           git push origin "v$VERSION"
@@ -1346,12 +1357,21 @@ jobs:
     permissions:
       contents: write
     steps:
+      - name: Mint App installation token
+        id: app-token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: \${{ secrets.NEMAR_APP_ID }}
+          private-key: \${{ secrets.NEMAR_APP_PRIVATE_KEY }}
+          owner: nemarDatasets
+          repositories: \${{ github.event.repository.name }}
+
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
           fetch-depth: 1
           ref: \${{ github.ref_name }}
-          token: \${{ secrets.GITHUB_TOKEN }}
+          token: \${{ steps.app-token.outputs.token }}
 
       - name: Trigger enrichment and commit locally if asked
         env:
@@ -1456,8 +1476,8 @@ jobs:
 
           rm -f "$BODY_FILE"
 
-          git config user.name "nemar-bot"
-          git config user.email "actions@github.com"
+          git config user.name "nemar-publish-bot"
+          git config user.email "nemar-publish-bot@users.noreply.github.com"
           git add "$METADATA_PATH" .bidsignore
 
           if git diff --cached --quiet; then
@@ -1506,9 +1526,18 @@ jobs:
     name: Publish Version DOI
     runs-on: ubuntu-latest
     steps:
+      - name: Mint App installation token
+        id: app-token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: \${{ secrets.NEMAR_APP_ID }}
+          private-key: \${{ secrets.NEMAR_APP_PRIVATE_KEY }}
+          owner: nemarDatasets
+          repositories: \${{ github.event.repository.name }}
+
       - name: Create release if missing
         env:
-          GH_TOKEN: \${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: \${{ steps.app-token.outputs.token }}
         run: |
           TAG="\${{ github.ref_name }}"
           # Create release if it doesn't already exist (e.g., manual tag push)
@@ -1616,9 +1645,18 @@ jobs:
     needs: publish-doi
     runs-on: ubuntu-latest
     steps:
+      - name: Mint App installation token
+        id: app-token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: \${{ secrets.NEMAR_APP_ID }}
+          private-key: \${{ secrets.NEMAR_APP_PRIVATE_KEY }}
+          owner: nemarDatasets
+          repositories: \${{ github.event.repository.name }}
+
       - name: Dispatch archive generation
         env:
-          GH_TOKEN: \${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: \${{ steps.app-token.outputs.token }}
         run: |
           DATASET_ID="\${{ github.event.repository.name }}"
           TAG="\${{ github.ref_name }}"

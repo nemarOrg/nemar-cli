@@ -33,6 +33,7 @@ import {
   resolveEzidAuth,
 } from "../services/doi.js";
 import { TEST_SHOULDER, extractDoi, updateIdentifier } from "../services/ezid.js";
+import { getDatasetsToken } from "../services/github-auth.js";
 import {
   EnrichmentCommitError,
   commitEnrichmentWithBidsignore,
@@ -255,14 +256,9 @@ async function handleEzidVersionDoi(
   }
 
   try {
+    const pat = await getDatasetsToken(c.env);
     // Read BIDS + NEMAR metadata from the release tag (not main)
-    const repoMeta = await readRepoMetadata(
-      repoName,
-      c.env.GITHUB_ADMIN_PAT,
-      undefined,
-      dataset.name,
-      `v${version}`,
-    );
+    const repoMeta = await readRepoMetadata(repoName, pat, undefined, dataset.name, `v${version}`);
     const { bidsDescription, enrichment } = repoMeta;
     for (const w of repoMeta.warnings) {
       console.error("[webhook]", w);
@@ -322,7 +318,7 @@ async function handleEzidVersionDoi(
       const manifest = await generateManifest(
         repoName,
         version,
-        c.env.GITHUB_ADMIN_PAT,
+        pat,
         dataset.dataset_id,
         result.doi,
         dataset.concept_doi,
@@ -364,7 +360,7 @@ async function handleEzidVersionDoi(
       }
       if (zenodoToken && dataset.github_repo) {
         const tag = `v${version}`;
-        const archiveData = await downloadReleaseArchive(repoName, tag, c.env.GITHUB_ADMIN_PAT);
+        const archiveData = await downloadReleaseArchive(repoName, tag, pat);
 
         // Check if dataset already has a Zenodo backup deposition
         const row = await c.env.DB.prepare("SELECT zenodo_concept_id FROM datasets WHERE id = ?")
@@ -646,7 +642,7 @@ async function handleZenodoVersionDoi(
         const manifest = await generateManifest(
           zenodoRepoName,
           version,
-          c.env.GITHUB_ADMIN_PAT,
+          await getDatasetsToken(c.env),
           dataset.dataset_id,
           published.doi ?? null,
           dataset.concept_doi,
@@ -794,7 +790,7 @@ webhooks.post("/llm-enrich", async (c) => {
     return c.json({ error: "Invalid github_repo format" }, 400);
   }
 
-  const pat = c.env.GITHUB_ADMIN_PAT;
+  const pat = await getDatasetsToken(c.env);
 
   console.log(
     `[llm-enrich] Starting ${dataset_id} on ref="${ref}" (force=${forceReenrich}, client_commits=${clientCommits})`,
