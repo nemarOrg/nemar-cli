@@ -637,15 +637,43 @@ export async function importOpenNeuro(
   }
   const skipCiCheck = decision.skipCiCheck;
 
-  // Step 10: Request and approve publication
+  // Step 10: Request and approve publication.
+  //
+  // The backend's /publish/request rejects with HTTP 422 + a "BIDS
+  // validation is currently running" message while the just-deployed
+  // validation workflow_run is still in flight. The bounded poll in
+  // step 9 only waits for a run to REGISTER, not COMPLETE — so for
+  // larger datasets we land here while validation is still running.
+  // Retry the request up to 5 times with 5-minute waits (25 min total
+  // budget) before giving up. Any other error fails fast.
+  const PUBLICATION_REQUEST_MAX_ATTEMPTS = 5;
+  const PUBLICATION_REQUEST_WAIT_MS = 5 * 60_000;
   const pubSpinner = ora("Requesting publication...").start();
-  try {
-    await requestPublication(nemarId);
+  let publicationRequested = false;
+  for (let attempt = 1; attempt <= PUBLICATION_REQUEST_MAX_ATTEMPTS; attempt++) {
+    try {
+      await requestPublication(nemarId);
+      publicationRequested = true;
+      break;
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      const isValidationInProgress = msg.includes("BIDS validation is currently running");
+      if (!isValidationInProgress) {
+        pubSpinner.fail(`Failed to request publication: ${msg}`);
+        process.exit(1);
+      }
+      if (attempt === PUBLICATION_REQUEST_MAX_ATTEMPTS) {
+        pubSpinner.fail(
+          `BIDS validation still in progress after ${PUBLICATION_REQUEST_MAX_ATTEMPTS} attempts (~${Math.round((PUBLICATION_REQUEST_MAX_ATTEMPTS * PUBLICATION_REQUEST_WAIT_MS) / 60000)}min). Re-run 'nemar admin publish request/approve ${nemarId}' once validation completes.`,
+        );
+        process.exit(1);
+      }
+      pubSpinner.text = `Waiting for BIDS validation to complete... (attempt ${attempt}/${PUBLICATION_REQUEST_MAX_ATTEMPTS}, next retry in 5min)`;
+      await new Promise((r) => setTimeout(r, PUBLICATION_REQUEST_WAIT_MS));
+    }
+  }
+  if (publicationRequested) {
     pubSpinner.succeed("Publication requested");
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    pubSpinner.fail(`Failed to request publication: ${msg}`);
-    process.exit(1);
   }
 
   const approveSpinner = ora("Approving publication...").start();
