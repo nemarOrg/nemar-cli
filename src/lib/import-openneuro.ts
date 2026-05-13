@@ -50,35 +50,105 @@ interface ImportOptions {
 }
 
 /**
+ * Outcome of `waitForBidsValidationRun`. Distinguishes three states an
+ * operator (and the `--trust-upstream` fallback) must reason about:
+ *   - found: a workflow_run registered before the deadline. ci_check at
+ *     approval time will evaluate it normally; skipCiCheck must be false.
+ *   - timeout: every poll succeeded but no run ever registered. This is
+ *     the case `--trust-upstream` is designed to bypass — the deployed
+ *     workflow files never produced a run within the budget, likely a
+ *     webhook-delivery edge case on a freshly populated repo.
+ *   - error: every poll attempt threw (auth, 5xx, network). We never
+ *     actually checked validation state, so `--trust-upstream` must NOT
+ *     silently approve under this condition — that would reintroduce the
+ *     trust-assumption pathology #431 is meant to remove.
+ */
+type PollOutcome = { kind: "found" } | { kind: "timeout" } | { kind: "error"; lastError: unknown };
+
+/**
  * Bounded wait for a BIDS validation workflow run to register on the freshly
- * deployed CI. Returns true once `getUserCiStatus` reports a non-empty run
- * (status !== "no_runs"), false if the deadline passes first. Surfaces the
- * wait visibly via the supplied spinner so operators understand the pause.
+ * deployed CI. Polls `getUserCiStatus` and reports the wait visibly via the
+ * supplied spinner so operators understand the pause.
  *
  * Replaces the previous unconditional `skip_ci_check=true` trust assumption
- * (see nemarOrg/nemar-cli#431).
+ * (see nemarOrg/nemar-cli#431). Reviewer note: a bare `catch {}` here would
+ * mask persistent 4xx/5xx and either mislead the operator on timeout or
+ * silently approve a never-validated publication under `--trust-upstream`.
  */
 async function waitForBidsValidationRun(
   nemarId: string,
   spinner: ReturnType<typeof ora>,
   maxWaitMs = 120_000,
   pollIntervalMs = 5_000,
-): Promise<boolean> {
+): Promise<PollOutcome> {
   const deadline = Date.now() + maxWaitMs;
+  let lastError: unknown;
+  let sawCleanResponse = false;
   while (Date.now() < deadline) {
     try {
       const status = await getUserCiStatus(nemarId);
+      sawCleanResponse = true;
       if (status.bids_validation.present && status.bids_validation.status !== "no_runs") {
-        return true;
+        return { kind: "found" };
       }
-    } catch {
-      // Transient — keep polling until deadline.
+    } catch (err) {
+      lastError = err;
     }
     const remaining = Math.max(0, deadline - Date.now());
     spinner.text = `Waiting for BIDS validation run to register... (${Math.ceil(remaining / 1000)}s left)`;
     await new Promise((r) => setTimeout(r, Math.min(pollIntervalMs, remaining)));
   }
-  return false;
+  if (!sawCleanResponse && lastError !== undefined) {
+    return { kind: "error", lastError };
+  }
+  return { kind: "timeout" };
+}
+
+/**
+ * Pure decision over the (CI deployed, poll outcome, --trust-upstream)
+ * matrix. Centralised so it is unit-testable and so the rules stay legible
+ * after this function has been re-read in the next post-mortem.
+ *
+ * Hard rule: if `addCi()` failed we never proceed to publication, regardless
+ * of `--trust-upstream`. The flag bypasses validation lookup, not the
+ * presence of validation, enrichment, and archive workflows themselves
+ * (reviewer note for nemarOrg/nemar-cli#451).
+ *
+ * Hard rule: if every poll attempt threw we treat the bounded wait as a hard
+ * error even under `--trust-upstream` — we never actually observed validation
+ * state, which is the same trust hole #431 was meant to close.
+ */
+export function decideSkipCiCheck(args: {
+  ciDeployed: boolean;
+  poll: PollOutcome | null;
+  trustUpstream: boolean;
+}): { skipCiCheck: boolean; abortReason?: string } {
+  if (!args.ciDeployed) {
+    return {
+      skipCiCheck: false,
+      abortReason:
+        "CI workflows did not deploy. Aborting before approval: --trust-upstream bypasses validation lookup, not workflow deployment. Re-run after fixing the deploy failure, or run `nemar admin ci add <id>` manually before approving.",
+    };
+  }
+  const poll = args.poll;
+  if (poll === null || poll.kind === "found") {
+    return { skipCiCheck: false };
+  }
+  if (poll.kind === "error") {
+    const msg = poll.lastError instanceof Error ? poll.lastError.message : String(poll.lastError);
+    return {
+      skipCiCheck: false,
+      abortReason: `Every BIDS validation poll attempt failed (last error: ${msg}). Refusing to bypass under --trust-upstream because validation state was never actually observed. Investigate API/auth health and re-run.`,
+    };
+  }
+  if (args.trustUpstream) {
+    return { skipCiCheck: true };
+  }
+  return {
+    skipCiCheck: false,
+    abortReason:
+      "BIDS validation run did not register within the bounded poll window. Re-run with --trust-upstream to bypass (OpenNeuro datasets are pre-validated upstream), or investigate why the deployed CI did not trigger.",
+  };
 }
 
 /**
@@ -493,6 +563,13 @@ export async function importOpenNeuro(
   // Step 7: Push OpenNeuro git history + metadata commit to nemarDatasets.
   // This is the initial push to a brand-new empty repo; no pre-pull needed
   // (and previously a pre-pull broke the import — see #450).
+  //
+  // A non-fatal `warning` from pushToGitHub means the main branch landed but
+  // the git-annex branch did NOT. That is a hard fail for OpenNeuro imports:
+  // a published dataset whose git-annex branch is missing cannot be cloned
+  // (clients can't resolve where annexed blobs live). The dataset would look
+  // fine in GitHub but be functionally broken for every downstream user.
+  // (Reviewer note for nemarOrg/nemar-cli#451.)
   const pushSpinner = ora("Pushing to nemarDatasets...").start();
   const pushResult = await pushToGitHub(datasetPath, "origin");
   if (!pushResult.success) {
@@ -500,12 +577,17 @@ export async function importOpenNeuro(
     process.exit(1);
   }
   if (pushResult.warning) {
-    pushSpinner.warn(`Pushed to nemarDatasets (${pushResult.warning})`);
-  } else {
-    pushSpinner.succeed("Pushed to nemarDatasets");
+    pushSpinner.fail(
+      `Pushed main but git-annex branch failed: ${pushResult.warning}. Aborting — published dataset would be uncloneable. Investigate the git-annex push failure and re-run.`,
+    );
+    process.exit(1);
   }
+  pushSpinner.succeed("Pushed to nemarDatasets");
 
   // Step 8: Deploy CI workflows now that remote main exists.
+  // addCi failure is fatal: --trust-upstream bypasses validation lookup,
+  // not the deployment of validation/enrichment/archive workflows. Missing
+  // workflows mean no future safety net (reviewer note for #451).
   let ciDeployedSuccessfully = false;
   const ciSpinner = ora("Deploying CI workflows...").start();
   try {
@@ -516,44 +598,44 @@ export async function importOpenNeuro(
     ciDeployedSuccessfully = true;
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    ciSpinner.warn(`CI deployment failed (non-fatal): ${msg}`);
-    console.log(chalk.dim(`  Workflows can be deployed later with: nemar admin ci add ${nemarId}`));
+    ciSpinner.fail(`CI deployment failed: ${msg}`);
+    console.log(
+      chalk.dim(
+        `  After fixing the deploy failure, run 'nemar admin ci add ${nemarId}' and 'nemar admin publish request/approve ${nemarId}' to resume.`,
+      ),
+    );
   }
 
-  // Step 9: Bounded wait for the BIDS validation workflow run to register.
-  // Replaces the prior unconditional skip_ci_check=true (#431).
-  let skipCiCheck = false;
+  // Step 9: Bounded wait for the BIDS validation workflow run to register
+  // (replaces unconditional skip_ci_check=true; see #431). Only run when CI
+  // actually deployed; the decision matrix is centralised in decideSkipCiCheck
+  // so the post-mortem reading is legible.
+  let poll: PollOutcome | null = null;
   if (ciDeployedSuccessfully) {
     const waitSpinner = ora("Waiting for BIDS validation run to register...").start();
-    const runRegistered = await waitForBidsValidationRun(nemarId, waitSpinner);
-    if (runRegistered) {
+    poll = await waitForBidsValidationRun(nemarId, waitSpinner);
+    if (poll.kind === "found") {
       waitSpinner.succeed("BIDS validation run registered; deferring to ci_check at approval");
-    } else if (options.trustUpstream) {
-      waitSpinner.warn(
-        "BIDS validation run did not register within 120s; trusting upstream OpenNeuro validation (--trust-upstream)",
-      );
-      skipCiCheck = true;
+    } else if (poll.kind === "timeout") {
+      const note = options.trustUpstream
+        ? "trusting upstream OpenNeuro validation (--trust-upstream)"
+        : "no --trust-upstream — aborting";
+      waitSpinner.warn(`BIDS validation run did not register within 120s; ${note}`);
     } else {
-      waitSpinner.fail(
-        "BIDS validation run did not register within 120s. Re-run with --trust-upstream to bypass (OpenNeuro datasets are pre-validated upstream), or investigate why CI did not trigger.",
-      );
-      process.exit(1);
+      const msg = poll.lastError instanceof Error ? poll.lastError.message : String(poll.lastError);
+      waitSpinner.fail(`All BIDS validation polls failed (last error: ${msg})`);
     }
-  } else if (options.trustUpstream) {
-    console.log(
-      chalk.yellow(
-        "  CI workflows did not deploy; trusting upstream OpenNeuro validation (--trust-upstream)",
-      ),
-    );
-    skipCiCheck = true;
-  } else {
-    console.error(
-      chalk.red(
-        "CI workflows did not deploy and --trust-upstream was not set. Aborting before approval to avoid publishing without validation.",
-      ),
-    );
+  }
+  const decision = decideSkipCiCheck({
+    ciDeployed: ciDeployedSuccessfully,
+    poll,
+    trustUpstream: options.trustUpstream ?? false,
+  });
+  if (decision.abortReason) {
+    console.error(chalk.red(decision.abortReason));
     process.exit(1);
   }
+  const skipCiCheck = decision.skipCiCheck;
 
   // Step 10: Request and approve publication
   const pubSpinner = ora("Requesting publication...").start();
