@@ -26,12 +26,15 @@ jobs:
     outputs:
       matrix: ${{ steps.parse.outputs.matrix }}
     steps:
-      - name: Parse dataset IDs into matrix
+      - name: Parse dataset IDs and dedup against existing nemarDatasets repos
         id: parse
         env:
           INPUT_IDS: ${{ inputs.openneuro_ids }}
+          # PAT (not GITHUB_TOKEN) because nemarDatasets dataset repos are
+          # private and outside the org this workflow runs in.
+          GH_TOKEN: ${{ secrets.NEMAR_GITHUB_PAT }}
         run: |
-          # Validate all IDs match ds###### format
+          # Step 1: validate format.
           for id in $(echo "$INPUT_IDS" | tr ',' ' '); do
             id=$(echo "$id" | xargs)
             if ! echo "$id" | grep -qE '^ds[0-9]{6}$'; then
@@ -39,10 +42,56 @@ jobs:
               exit 1
             fi
           done
-          # Convert comma-separated to JSON array
-          JSON=$(echo "$INPUT_IDS" | tr ',' '\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | jq -R . | jq -s -c .)
+
+          # Step 2: dedup against existing on* repos on nemarDatasets.
+          # Until nemarOrg/nemar-cli#448 (proper "update existing OpenNeuro
+          # dataset" command) lands, re-importing a live dataset would
+          # clobber state. Skip any ds###### whose on###### counterpart
+          # already exists with non-empty contents. Empty shells (size==0,
+          # e.g. the nemarOrg/nemar-cli#450 recovery state) are kept so
+          # operators can re-import after deleting them.
+          kept=()
+          skipped=()
+          for ds in $(echo "$INPUT_IDS" | tr ',' ' '); do
+            ds=$(echo "$ds" | xargs)
+            on="on${ds#ds}"
+            http_status=$(curl -fsSL -o /tmp/repo.json -w "%{http_code}" \
+              -H "Authorization: Bearer $GH_TOKEN" \
+              -H "Accept: application/vnd.github+json" \
+              -H "User-Agent: nemar-onboard-openneuro" \
+              "https://api.github.com/repos/nemarDatasets/$on" || true)
+            if [ "$http_status" = "404" ]; then
+              kept+=("$ds")
+              continue
+            fi
+            if [ "$http_status" != "200" ]; then
+              echo "::error::Unexpected HTTP $http_status checking nemarDatasets/$on; aborting to avoid duplicate imports"
+              cat /tmp/repo.json || true
+              exit 1
+            fi
+            size=$(jq -r '.size // 0' /tmp/repo.json)
+            if [ "$size" -gt 0 ]; then
+              skipped+=("$ds")
+              echo "::warning::Skipping $ds: nemarDatasets/$on already exists (size=${size}KB). Run 'nemar admin delete-dataset $on --force' first if you intend to re-import. See nemarOrg/nemar-cli#448 for the proper update workflow."
+            else
+              # Empty shell — almost certainly a #450 leftover. Importer
+              # will hit "Dataset already exists, continuing..." and
+              # re-populate cleanly.
+              kept+=("$ds")
+            fi
+          done
+
+          if [ ${#kept[@]} -eq 0 ]; then
+            echo "::error::All input IDs already exist on nemarDatasets with non-empty contents. Nothing to import."
+            exit 1
+          fi
+
+          JSON=$(printf '%s\n' "${kept[@]}" | jq -R . | jq -s -c .)
           echo "matrix={\"dataset_id\":$JSON}" >> "$GITHUB_OUTPUT"
-          echo "Parsed datasets: $JSON"
+          echo "Will import (${#kept[@]}): ${kept[*]}"
+          if [ ${#skipped[@]} -gt 0 ]; then
+            echo "Skipped (${#skipped[@]}, already on nemarDatasets): ${skipped[*]}"
+          fi
 
   onboard:
     needs: parse-ids
