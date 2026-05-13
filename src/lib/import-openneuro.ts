@@ -11,7 +11,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import chalk from "chalk";
 import ora from "ora";
-import { addCi, approvePublication, importDataset, requestPublication } from "./api.js";
+import {
+  addCi,
+  approvePublication,
+  getUserCiStatus,
+  importDataset,
+  requestPublication,
+} from "./api.js";
 import {
   type S3Credentials,
   batchSetKeysPresent,
@@ -33,6 +39,46 @@ const S3_REGION = "us-east-2";
 interface ImportOptions {
   workDir?: string;
   skipData?: boolean;
+  /**
+   * If the bounded workflow-run poll times out without seeing a registered
+   * BIDS validation run, fall back to skip_ci_check=true at publication time.
+   * Off by default: missing validation should fail the import. The OpenNeuro
+   * onboarding workflow opts in because OpenNeuro pre-validates BIDS upstream
+   * (see nemarOrg/nemar-cli#431).
+   */
+  trustUpstream?: boolean;
+}
+
+/**
+ * Bounded wait for a BIDS validation workflow run to register on the freshly
+ * deployed CI. Returns true once `getUserCiStatus` reports a non-empty run
+ * (status !== "no_runs"), false if the deadline passes first. Surfaces the
+ * wait visibly via the supplied spinner so operators understand the pause.
+ *
+ * Replaces the previous unconditional `skip_ci_check=true` trust assumption
+ * (see nemarOrg/nemar-cli#431).
+ */
+async function waitForBidsValidationRun(
+  nemarId: string,
+  spinner: ReturnType<typeof ora>,
+  maxWaitMs = 120_000,
+  pollIntervalMs = 5_000,
+): Promise<boolean> {
+  const deadline = Date.now() + maxWaitMs;
+  while (Date.now() < deadline) {
+    try {
+      const status = await getUserCiStatus(nemarId);
+      if (status.bids_validation.present && status.bids_validation.status !== "no_runs") {
+        return true;
+      }
+    } catch {
+      // Transient — keep polling until deadline.
+    }
+    const remaining = Math.max(0, deadline - Date.now());
+    spinner.text = `Waiting for BIDS validation run to register... (${Math.ceil(remaining / 1000)}s left)`;
+    await new Promise((r) => setTimeout(r, Math.min(pollIntervalMs, remaining)));
+  }
+  return false;
 }
 
 /**
@@ -200,13 +246,16 @@ async function batchS3Copy(
  *
  * Steps:
  * 1. Clone OpenNeuro dataset (maps ds###### -> on######)
- * 2. Create NEMAR dataset record + GitHub repo via API
+ * 2. Create NEMAR dataset record + GitHub repo via API (empty repo, no main yet)
  * 3. Enable OpenNeuro S3 remote and build key-to-URL map
  * 4. Reconfigure git remote to nemarDatasets
  * 5. Set up NEMAR S3 remote, copy data S3-to-S3, register keys
  * 6. Seed .nemar/metadata.json
- * 7. Push to nemarDatasets
- * 8. Request and approve publication (with retry)
+ * 7. Push OpenNeuro git history + metadata commit to nemarDatasets (creates remote main)
+ * 8. Deploy CI workflows via API — must run AFTER step 7 because the GitHub
+ *    Contents API requires the target branch to exist (#450)
+ * 9. Bounded poll for a BIDS validation workflow run to register (#431)
+ * 10. Request and approve publication (with retry)
  */
 export async function importOpenNeuro(
   openneuroId: string,
@@ -267,18 +316,10 @@ export async function importOpenNeuro(
     }
   }
 
-  // Step 2b: Deploy CI workflows (must exist on main before push triggers them)
-  const ciSpinner = ora("Deploying CI workflows...").start();
-  try {
-    await addCi(nemarId);
-    ciSpinner.succeed(
-      "CI workflows deployed (BIDS validation, LLM enrichment, archive generation)",
-    );
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    ciSpinner.warn(`CI deployment failed (non-fatal): ${msg}`);
-    console.log(chalk.dim(`  Workflows can be deployed later with: nemar admin ci add ${nemarId}`));
-  }
+  // CI workflow deployment is deferred until AFTER the initial push (step 8 below).
+  // The GitHub Contents API requires the target branch to exist; on a freshly
+  // created empty repo `commitFilesAsTree(repo, "main", ...)` 404s on the
+  // branch lookup. See #450 for the regression history.
 
   // Step 3: Enable OpenNeuro S3 remote and build key-to-URL map
   let keyUrlMap = new Map<string, string>();
@@ -449,25 +490,72 @@ export async function importOpenNeuro(
   }
   metaSpinner.succeed("Seeded .nemar/metadata.json");
 
-  // Step 7: Push to nemarDatasets
-  // Pull first: CI workflow deployment (step 2b) may have pushed commits to the
-  // remote (e.g., workflow YAML files), so we need to rebase our local commits.
+  // Step 7: Push OpenNeuro git history + metadata commit to nemarDatasets.
+  // This is the initial push to a brand-new empty repo; no pre-pull needed
+  // (and previously a pre-pull broke the import — see #450).
   const pushSpinner = ora("Pushing to nemarDatasets...").start();
-  const pullResult = await runCommand(["git", "pull", "--rebase", "origin", "main"], {
-    cwd: datasetPath,
-  });
-  if (pullResult.exitCode !== 0 && !pullResult.stderr.includes("up to date")) {
-    pushSpinner.fail(`Failed to pull remote changes: ${pullResult.stderr.trim()}`);
-    process.exit(1);
-  }
   const pushResult = await pushToGitHub(datasetPath, "origin");
   if (!pushResult.success) {
     pushSpinner.fail(`Failed to push: ${pushResult.error}`);
     process.exit(1);
   }
-  pushSpinner.succeed("Pushed to nemarDatasets");
+  if (pushResult.warning) {
+    pushSpinner.warn(`Pushed to nemarDatasets (${pushResult.warning})`);
+  } else {
+    pushSpinner.succeed("Pushed to nemarDatasets");
+  }
 
-  // Step 8: Request and approve publication
+  // Step 8: Deploy CI workflows now that remote main exists.
+  let ciDeployedSuccessfully = false;
+  const ciSpinner = ora("Deploying CI workflows...").start();
+  try {
+    await addCi(nemarId);
+    ciSpinner.succeed(
+      "CI workflows deployed (BIDS validation, LLM enrichment, archive generation)",
+    );
+    ciDeployedSuccessfully = true;
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    ciSpinner.warn(`CI deployment failed (non-fatal): ${msg}`);
+    console.log(chalk.dim(`  Workflows can be deployed later with: nemar admin ci add ${nemarId}`));
+  }
+
+  // Step 9: Bounded wait for the BIDS validation workflow run to register.
+  // Replaces the prior unconditional skip_ci_check=true (#431).
+  let skipCiCheck = false;
+  if (ciDeployedSuccessfully) {
+    const waitSpinner = ora("Waiting for BIDS validation run to register...").start();
+    const runRegistered = await waitForBidsValidationRun(nemarId, waitSpinner);
+    if (runRegistered) {
+      waitSpinner.succeed("BIDS validation run registered; deferring to ci_check at approval");
+    } else if (options.trustUpstream) {
+      waitSpinner.warn(
+        "BIDS validation run did not register within 120s; trusting upstream OpenNeuro validation (--trust-upstream)",
+      );
+      skipCiCheck = true;
+    } else {
+      waitSpinner.fail(
+        "BIDS validation run did not register within 120s. Re-run with --trust-upstream to bypass (OpenNeuro datasets are pre-validated upstream), or investigate why CI did not trigger.",
+      );
+      process.exit(1);
+    }
+  } else if (options.trustUpstream) {
+    console.log(
+      chalk.yellow(
+        "  CI workflows did not deploy; trusting upstream OpenNeuro validation (--trust-upstream)",
+      ),
+    );
+    skipCiCheck = true;
+  } else {
+    console.error(
+      chalk.red(
+        "CI workflows did not deploy and --trust-upstream was not set. Aborting before approval to avoid publishing without validation.",
+      ),
+    );
+    process.exit(1);
+  }
+
+  // Step 10: Request and approve publication
   const pubSpinner = ora("Requesting publication...").start();
   try {
     await requestPublication(nemarId);
@@ -483,9 +571,9 @@ export async function importOpenNeuro(
   let approved = false;
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
     try {
-      // skipCiCheck=true: validation workflow races the approval call on
-      // the initial push; OpenNeuro data is pre-validated upstream anyway.
-      await approvePublication(nemarId, attempt > 1, false, true);
+      // skipCiCheck is set in step 9 — true only when the bounded
+      // workflow_run poll timed out AND --trust-upstream was passed.
+      await approvePublication(nemarId, attempt > 1, false, skipCiCheck);
       approved = true;
       break;
     } catch (err) {

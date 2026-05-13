@@ -76,4 +76,8 @@ jobs:
           GH_TOKEN: ${{ secrets.NEMAR_GITHUB_PAT }}
           AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-        run: nemar admin import-openneuro "$DATASET_ID"
+        # --local: run import in-process; --trust-upstream: OpenNeuro is
+        # already BIDS-validated upstream, so skip_ci_check fallback is safe
+        # if the freshly deployed validation workflow does not register a run
+        # within the bounded poll window (#431).
+        run: nemar admin import-openneuro "$DATASET_ID" --local --trust-upstream
