@@ -87,6 +87,12 @@ jobs:
 
       - name: Run bump script
         if: steps.compute.outputs.skip == 'false'
+        env:
+          # bump-version.sh -> git commit triggers husky pre-commit which
+          # runs root + backend typecheck. Backend deps are not installed
+          # here and the bump is mechanical, so disable husky. Matches the
+          # existing pattern in sync-dev.yml and auto-tag.yml (see #454).
+          HUSKY: '0'
         run: ./scripts/bump-version.sh "${{ steps.compute.outputs.arg }}"
 
       - name: Push bump commit

@@ -2526,10 +2526,19 @@ adminCommand
   .option("--local", "Run import locally instead of dispatching GitHub Actions workflow")
   .option("--dir <path>", "Working directory for local clone (requires --local)")
   .option("--skip-data", "Skip S3 data copy, metadata only (requires --local)")
+  .option(
+    "--trust-upstream",
+    "If BIDS validation does not register within the bounded poll, fall back to skip_ci_check=true at approval. OpenNeuro data is pre-validated upstream so this is the recommended setting for OpenNeuro imports (#431).",
+  )
   .action(
     async (
       openneuroIds: string,
-      options: { local?: boolean; dir?: string; skipData?: boolean },
+      options: {
+        local?: boolean;
+        dir?: string;
+        skipData?: boolean;
+        trustUpstream?: boolean;
+      },
     ) => {
       if (!requireAuth()) return;
 
@@ -2563,6 +2572,7 @@ adminCommand
           await importOpenNeuro(ids[0], {
             workDir: options.dir,
             skipData: options.skipData,
+            trustUpstream: options.trustUpstream,
           });
         } catch (error) {
           const msg = error instanceof Error ? error.message : String(error);
