@@ -9,7 +9,7 @@ import { Hono } from "hono";
 import { z } from "zod";
 import { authMiddleware, optionalAuthMiddleware } from "../middleware/auth";
 import { cliVersionGuard } from "../middleware/cliVersion";
-import { semanticSearch, textSearch } from "../services/dataset-search";
+import { type SearchResult, semanticSearch, textSearch } from "../services/dataset-search";
 import { generateDatasetId, isValidDatasetId } from "../services/datasetId";
 import {
   getAdminEmailsForCategory,
@@ -809,9 +809,15 @@ async function executeAndReturn(
 /**
  * GET /datasets/search - Semantic dataset search
  *
- * Uses Vectorize for semantic similarity matching. Falls back to LIKE
- * queries when Vectorize is unavailable. Returns results ranked by
- * relevance score.
+ * Combines three strategies:
+ *  - Exact dataset-ID lookup (nm###### / ds######) via D1, since embeddings
+ *    cannot meaningfully match literal IDs.
+ *  - Vectorize semantic similarity (when bindings are configured).
+ *  - D1 LIKE text search as a fallback, also used to backfill semantic
+ *    results when Vectorize returns no hits.
+ *
+ * Semantic and text hits are merged on `id`; semantic ranking is preserved
+ * and text-only hits are appended.
  */
 datasetRoutes.get("/search", optionalAuthMiddleware, async (c) => {
   const query = c.req.query("q");
@@ -822,40 +828,73 @@ datasetRoutes.get("/search", optionalAuthMiddleware, async (c) => {
   const limit = Math.min(Number.parseInt(c.req.query("limit") || "20", 10), 100);
   const modality = c.req.query("modality");
   const db = c.env.DB;
+  const trimmed = query.trim();
+  const exactIdMatch = /^(nm|ds)\d{6}$/i.test(trimmed);
+
+  const applyModality = (rows: SearchResult[]): SearchResult[] => {
+    if (!modality) return rows;
+    const mod = modality.toLowerCase();
+    return rows.filter((r) => r.modalities.toLowerCase().includes(mod));
+  };
+
+  const respond = (rows: SearchResult[], method: string) =>
+    c.json({
+      results: applyModality(rows).slice(0, limit),
+      count: rows.length,
+      method,
+    });
 
   try {
-    // Try semantic search via Vectorize, fall back to LIKE
-    let results: Awaited<ReturnType<typeof semanticSearch>>;
+    // Exact dataset-ID hits skip the embedding step entirely. Embeddings
+    // can't match literal IDs, so we always try this first.
+    if (exactIdMatch) {
+      const idHit = await textSearch(db, trimmed, 1);
+      if (idHit.length > 0) {
+        return respond(idHit, "exact_id");
+      }
+    }
+
     const hasVectorize = Boolean(c.env.AI && c.env.VECTORIZE);
-    if (hasVectorize) {
-      results = await semanticSearch(c.env.AI!, c.env.VECTORIZE!, query, limit * 2);
-    } else {
+    if (!hasVectorize) {
       console.warn("[search] AI or VECTORIZE binding not available, using text search");
-      results = await textSearch(db, query, limit * 2);
+      const rows = await textSearch(db, trimmed, limit * 2);
+      return respond(rows, "text");
     }
 
-    // Apply post-search filters
-    if (modality) {
-      const mod = modality.toLowerCase();
-      results = results.filter((r) => r.modalities.toLowerCase().includes(mod));
+    const semantic = await semanticSearch(c.env.AI!, c.env.VECTORIZE!, trimmed, limit * 2);
+
+    // Vectorize can return zero hits when the index is empty or when the
+    // query has no semantic signal (e.g. a literal ID). In those cases the
+    // D1 LIKE search still finds real matches against the catalog.
+    if (semantic.length === 0) {
+      const rows = await textSearch(db, trimmed, limit * 2);
+      return respond(rows, "text_fallback");
     }
 
-    return c.json({
-      results: results.slice(0, limit),
-      count: results.length,
-      method: hasVectorize ? "semantic" : "text",
-    });
+    // Merge in text matches the semantic search missed, preserving the
+    // ranked semantic order at the head of the list.
+    const textRows = await textSearch(db, trimmed, limit * 2);
+    if (textRows.length > 0) {
+      const seen = new Set(semantic.map((r) => r.id));
+      for (const row of textRows) {
+        if (!seen.has(row.id)) {
+          semantic.push(row);
+          seen.add(row.id);
+        }
+      }
+    }
+
+    return respond(semantic, "semantic");
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     console.error("Dataset search failed:", msg);
 
-    // Fall back to text search on Vectorize failure
+    // Last-ditch fall back to text search on any unexpected failure.
     try {
-      const results = await textSearch(db, query, limit);
-      return c.json({ results, count: results.length, method: "text_fallback" });
+      const rows = await textSearch(db, trimmed, limit);
+      return respond(rows, "text_fallback");
     } catch (fallbackErr) {
       const fallbackMsg = fallbackErr instanceof Error ? fallbackErr.message : String(fallbackErr);
-      // If nemar_catalog doesn't exist yet, return empty results
       if (fallbackMsg.includes("no such table")) {
         return c.json({ results: [], count: 0, method: "unavailable" });
       }
