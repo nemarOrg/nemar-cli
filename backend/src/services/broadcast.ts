@@ -21,7 +21,7 @@ export type RecipientGroup = "all" | "admins" | "members";
 export const broadcastRequestSchema = z
   .object({
     to: z.enum(["all", "admins", "members"]).optional(),
-    user: z.string().min(1).max(64).optional(),
+    user: z.string().min(3).max(30).optional(),
     subject: z.string().min(1).max(200),
     body: z.string().min(1).max(10000),
     dry_run: z.boolean().optional().default(false),
