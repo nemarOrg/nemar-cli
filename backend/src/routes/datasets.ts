@@ -749,7 +749,17 @@ async function executeAndReturn(
           .prepare(
             `SELECT d.dataset_id, d.name, d.description, d.status, d.visibility,
                     d.github_repo, d.concept_doi, d.created_at, d.updated_at,
-                    u.username AS owner_username
+                    u.username AS owner_username,
+                    -- API contract: every list entry exposes latest_version
+                    -- (null when no minted DOI version yet) so callers
+                    -- (e.g. scripts/hallu-sync.sh) can rely on its presence
+                    -- without falling back to per-dataset /manifest calls.
+                    (
+                      SELECT version FROM dataset_versions dv
+                      WHERE dv.dataset_id = d.dataset_id
+                      ORDER BY created_at DESC
+                      LIMIT 1
+                    ) AS latest_version
              FROM datasets d
              JOIN users u ON d.owner_user_id = u.id
              WHERE d.status = 'active' AND (d.is_sandbox = 0 OR d.is_sandbox IS NULL)

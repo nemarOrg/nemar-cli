@@ -2005,13 +2005,22 @@ adminCommand
         dataset = await getDataset(datasetId);
         spinner.succeed(`Found dataset: ${dataset.name}`);
       } catch (error) {
+        // Echo a plain stdout error after the spinner line (which goes to stderr)
+        // so callers grepping stdout can detect the failure reliably. Treat
+        // 400 (invalid id format) and 404 alike as "dataset not found" from
+        // the user's perspective: both mean we cannot load this dataset.
         if (error instanceof ApiError) {
           spinner.fail(error.message);
-          if (error.statusCode === 404) {
-            console.log(chalk.dim("  Dataset not found"));
+          if (error.statusCode === 404 || error.statusCode === 400) {
+            console.log(chalk.red(`Error: Dataset ${datasetId} not found`));
+            console.log(chalk.dim(`  ${error.message}`));
+          } else {
+            console.log(chalk.red(`Error: ${error.message}`));
           }
         } else {
           spinner.fail("Failed to fetch dataset");
+          const msg = error instanceof Error ? error.message : String(error);
+          console.log(chalk.red(`Error: Could not load dataset ${datasetId}: ${msg}`));
         }
         return;
       }
