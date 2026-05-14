@@ -687,7 +687,8 @@ export interface DatasetSearchResult {
 export interface DatasetSearchResponse {
   results: DatasetSearchResult[];
   count: number;
-  method: "semantic" | "text" | "text_fallback";
+  method: "semantic" | "text" | "text_fallback" | "exact_id" | "unavailable";
+  min_score?: number;
 }
 
 /**
