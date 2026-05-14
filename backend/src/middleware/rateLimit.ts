@@ -206,8 +206,14 @@ export async function rateLimiter(c: RateLimitContext, next: Next) {
     c.header("X-RateLimit-Remaining", (maxRequests - newCount).toString());
     c.header("X-RateLimit-Bucket", keyKind);
   } catch (error) {
-    // If cache fails, log but don't block the request
-    console.error("Rate limit cache error:", error);
+    // Fail open so a cache outage doesn't block all traffic, but emit a
+    // structured log so Workers tail / log tooling surfaces the issue.
+    // TODO(#478): replace with Sentry captureException once DSN is wired.
+    console.error("[rate-limit] cache failure", {
+      route: path,
+      keyKind,
+      error: error instanceof Error ? error.message : String(error),
+    });
   }
 
   await next();
