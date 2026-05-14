@@ -2370,6 +2370,12 @@ adminRoutes.post("/datasets/:id/ci", async (c) => {
  * Returns valid/missing/errors for the workflows defined by the current
  * template set. Best-effort: a 500 from GitHub or a transport error lands in
  * `errors` rather than failing the response.
+ *
+ * Verb choice: this is a read-only probe and a strict REST reading would
+ * favor GET. We keep POST to stay consistent with the rest of the ci/*
+ * family (POST /ci to deploy, POST /ci/sync to bring drift back in line —
+ * both admin-only RPC-style operations). Mixing verbs across the family
+ * would surprise admin tooling that scripts these endpoints.
  */
 adminRoutes.post("/datasets/:id/ci/validate", async (c) => {
   const datasetId = c.req.param("id");

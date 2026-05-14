@@ -658,26 +658,38 @@ ciCommand
     }
   });
 
+/** Probe shape — see pollCiValidation. Exported for the unit test. */
+export type ValidationProbe = () => Promise<{
+  valid: string[];
+  missing: string[];
+  errors: string[];
+}>;
+
 /**
  * Poll the validate endpoint after a CI deploy. GitHub's workflow index lags
  * the commit by a few seconds; the previous design slept inside the Worker,
  * which burned wall-clock budget. This runs the sleep + retry on the user's
  * machine instead (issue #472).
  *
- * Backoff: 2.5 s, then 5 s if anything is still missing. Returns the final
- * validation result (or null if the poll itself errored out — also treated
- * as a best-effort warning by the caller).
+ * Default backoff: 2.5 s, then 5 s if anything is still missing. Returns the
+ * final validation result (or null if the poll itself errored out — also
+ * treated as a best-effort warning by the caller). `probe` and `delaysMs`
+ * are dependency-injected so the unit test can pass a fake probe and zero
+ * delays without spinning up a real backend.
  */
-async function pollCiValidation(
+export async function pollCiValidation(
   datasetId: string,
+  probe: ValidationProbe = async () => {
+    const r = await validateCi(datasetId);
+    return { valid: r.valid, missing: r.missing, errors: r.errors };
+  },
+  delaysMs: readonly number[] = [2500, 5000],
 ): Promise<{ valid: string[]; missing: string[]; errors: string[] } | null> {
-  const delays = [2500, 5000];
   let last: { valid: string[]; missing: string[]; errors: string[] } | null = null;
-  for (let i = 0; i < delays.length; i++) {
-    await new Promise((resolve) => setTimeout(resolve, delays[i]));
+  for (const delay of delaysMs) {
+    if (delay > 0) await new Promise((resolve) => setTimeout(resolve, delay));
     try {
-      const r = await validateCi(datasetId);
-      last = { valid: r.valid, missing: r.missing, errors: r.errors };
+      last = await probe();
       // Stop early when everything is parseable or the call itself failed
       // (retrying a 500 just adds latency without new information).
       if (last.missing.length === 0 || last.errors.length > 0) return last;
@@ -710,7 +722,7 @@ ciCommand
   .option("--all", "Deploy to all dataset repositories")
   .option(
     "--no-validate",
-    "Skip the post-deploy parseability poll (deploy still succeeds; YAML errors surface on the dataset's next CI run)",
+    "Skip the post-deploy parseability poll on the single-dataset path. No-op for --all (fleet deploys always skip the poll).",
   )
   .option(YES_OPTION, YES_DESCRIPTION)
   .option(NO_OPTION, NO_DESCRIPTION)
@@ -742,9 +754,11 @@ ciCommand
       console.log("  1. BIDS Validation (runs on PRs)");
       console.log("  2. Version Check (ensures version bump on PRs)");
       console.log("  3. PR Merge Handler (creates releases, publishes DOIs)");
-      if (skipValidate) {
-        console.log(chalk.dim("  (post-deploy parseability poll disabled via --no-validate)"));
-      }
+      console.log(
+        chalk.dim(
+          "  (post-deploy parseability poll skipped for --all; run 'nemar admin ci validate <id>' per dataset)",
+        ),
+      );
       console.log();
 
       const confirmResult = await confirm(
@@ -756,10 +770,13 @@ ciCommand
         return;
       }
 
-      // Fleet deploys: skip the parseability poll by default. With many
-      // datasets the per-dataset 2.5–7.5 s wait adds up; users running --all
-      // typically just want fast confirmation of commits. Pass --validate to
-      // override.
+      // Fleet deploys always skip the parseability poll. With many datasets
+      // the per-dataset 2.5–7.5 s wait adds up; users running --all typically
+      // just want fast confirmation of commits. Admins can run
+      // `nemar admin ci validate <id>` on individual datasets afterward.
+      // skipValidate is intentionally unused here — --no-validate accepts but
+      // is a no-op on the fleet path (consistent with what the help text
+      // says).
       let succeeded = 0;
       let failed = 0;
       for (const ds of datasets) {
@@ -828,7 +845,14 @@ ciCommand
       } else if (validation.missing.length === 0 && validation.errors.length === 0) {
         validateSpinner.succeed("All workflows parseable by GitHub Actions");
       } else {
-        validateSpinner.warn("Some workflows missing from GitHub Actions listing");
+        // missing.length > 0 and errors.length > 0 are independent: a 5xx on
+        // the listing call (errors) doesn't necessarily mean any workflow
+        // is missing. Be precise about which case is firing.
+        const warnMsg =
+          validation.missing.length > 0
+            ? "Some workflows missing from GitHub Actions listing"
+            : "Could not fully verify workflow parseability (GitHub API error)";
+        validateSpinner.warn(warnMsg);
         printValidationWarning(validation);
       }
     }

@@ -1800,8 +1800,13 @@ export async function deployWorkflows(
  * Returns the listing diff against `getWorkflowTemplates()` so callers can
  * surface which (if any) deployed files GitHub Actions failed to parse.
  *
- * No sleeps, no retries — the CLI orchestrates timing and retry (the whole
- * point of issue #472 was getting the per-attempt sleep out of the Worker).
+ * No outer sleeps or backoff retries — the CLI orchestrates wait timing and
+ * the missing-workflow retry on the user's machine (the whole point of
+ * issue #472 was getting that out of the Worker). Transport-level retries
+ * for 5xx responses are still handled internally by `githubFetchWithRetry`
+ * (up to 3 attempts), so a sustained 500 here surfaces in `errors` after
+ * the internal retries have been exhausted.
+ *
  * Best-effort: never throws; transport / API errors land in `errors`.
  */
 export async function validateDeployedWorkflows(
