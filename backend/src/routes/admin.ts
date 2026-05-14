@@ -10,6 +10,8 @@ import { z } from "zod";
 import { adminMiddleware, authMiddleware, ownerMiddleware } from "../middleware/auth";
 
 import {
+  type RecipientGroup,
+  type RecipientGroupOrUser,
   broadcastRequestSchema,
   getBroadcastRecipientByUsername,
   getBroadcastRecipients,
@@ -5322,7 +5324,7 @@ adminRoutes.post("/notify", zValidator("json", broadcastRequestSchema), async (c
       }
     }
 
-    const auditGroup = `user:${lookup.username}` as const;
+    const auditGroup: RecipientGroupOrUser = `user:${lookup.username}`;
 
     if (body.dry_run) {
       return c.json({
@@ -5356,7 +5358,7 @@ adminRoutes.post("/notify", zValidator("json", broadcastRequestSchema), async (c
   }
 
   // Group broadcast path (existing behavior)
-  const group = body.to as "all" | "admins" | "members";
+  const group = body.to as RecipientGroup;
   const recipients = await getBroadcastRecipients(db, group);
 
   if (recipients.length === 0) {

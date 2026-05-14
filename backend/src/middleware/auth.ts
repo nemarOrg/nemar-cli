@@ -174,7 +174,6 @@ export async function optionalAuthMiddleware(c: AuthContext, next: Next) {
   // not a practical concern, but proxies that lowercase headers will silently
   // degrade to unauthenticated rather than triggering the stale-token path.
   if (!authHeader || !authHeader.startsWith("Bearer ")) {
-    c.set("authAttempted", false);
     await next();
     return;
   }

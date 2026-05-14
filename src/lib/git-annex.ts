@@ -1617,7 +1617,7 @@ export async function countPendingDownload(
  * import step). Any future mechanism that sets `source="openneuro"` in D1
  * without following this commit convention will produce a false `absent`
  * result. If that happens, add a `--skip-port-check` bypass or adjust the
- * detection logic. TODO: track in nemarOrg/nemar-cli#460.
+ * detection logic.
  *
  * See nemarOrg/nemar-cli#460 for the user-reported failure mode.
  */

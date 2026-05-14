@@ -11,6 +11,12 @@ import { applyDevWrap, parseEmailPreferences } from "./email";
 export type RecipientGroup = "all" | "admins" | "members";
 
 /**
+ * Value stored in `broadcast_emails.recipient_group`. Either a named group
+ * or a per-user target encoded as `user:<username>`.
+ */
+export type RecipientGroupOrUser = RecipientGroup | `user:${string}`;
+
+/**
  * Zod schema for POST /admin/notify request bodies.
  *
  * Exactly one of `to` (group broadcast) or `user` (per-user transactional)
@@ -267,7 +273,7 @@ export async function sendBroadcast(
   fromEmail: string,
   params: {
     sentById: number;
-    group: RecipientGroup | `user:${string}`;
+    group: RecipientGroupOrUser;
     subject: string;
     bodyMarkdown: string;
     recipients: string[];

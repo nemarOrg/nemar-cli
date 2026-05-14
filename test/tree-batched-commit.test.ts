@@ -416,12 +416,11 @@ describe("deployWorkflows", () => {
     // error on the listing call (non-2xx) indicates a server issue rather
     // than GitHub indexing lag.
     //
-    // TODO: 429 (rate-limit) is handled by githubFetchWithRetry internally
-    // (up to 3 retries). Testing that path here would require the fake server
-    // to return 429 a specific number of times, which conflicts with the
-    // no-mock policy (we'd need sleep control). The production code path for
-    // 429 is covered by the existing rate-limit-retry.test.ts suite;
-    // exhausted-retry 429s surface in validationErrors as status 429.
+    // 429 (rate-limit) is handled by githubFetchWithRetry internally (up to 3
+    // retries). Testing that path here would require the fake server to return
+    // 429 a specific number of times, which conflicts with the no-mock policy.
+    // The production 429 path is covered by rate-limit-retry.test.ts; exhausted
+    // retries surface in validationErrors as status 429.
     actionsWorkflowsBehavior = "server-error";
 
     const result = await deployWorkflows(REPO, PAT, { validateDelayMs: 0 });
