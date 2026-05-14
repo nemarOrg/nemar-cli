@@ -333,7 +333,11 @@ describe("migration 0021 — broadcast_emails user recipient", () => {
     }).toThrow();
   });
 
-  test("CHECK rejects 'Users:alex' (capital U — not matching LIKE 'user:%')", () => {
+  test("CHECK rejects 'Users:alex' (extra 's' makes prefix 'users:' not 'user:')", () => {
+    // Note: the rejection is from the prefix mismatch, NOT capital-U.
+    // SQLite/D1 evaluate LIKE case-insensitively, so 'User:alex' would
+    // pass this 0021 CHECK. Case sensitivity arrives in migration 0022
+    // (issue #488) via GLOB.
     expect(() => {
       execInsert(
         db,
@@ -414,5 +418,178 @@ describe("migration 0021 — broadcast_emails user recipient", () => {
       )
       .get();
     expect(tbl).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Migration 0022 — broadcast_emails GLOB user:* (issue #488)
+//
+// Applies 0001-0022 against a fresh in-memory database, seeds the user FK
+// row, and verifies the only behavioral change vs 0021: the CHECK is now
+// case-sensitive on the `user:` prefix, so 'User:alex' (capital U) is
+// rejected at write time. All 0021 invariants still hold under 0022 since
+// GLOB 'user:*' is a strict subset of LIKE 'user:%' for the values the
+// CLI actually produces (lowercase).
+// ---------------------------------------------------------------------------
+
+describe("migration 0022 — broadcast_emails GLOB user:*", () => {
+  let db: Database;
+
+  beforeAll(() => {
+    db = new Database(":memory:");
+    const files = getMigrationFiles();
+    const upTo0022 = files.filter((f) => {
+      const num = Number.parseInt(f.split("_")[0], 10);
+      return num >= 1 && num <= 22;
+    });
+    for (const file of upTo0022) {
+      const sql = readFileSync(join(MIGRATIONS_DIR, file), "utf-8");
+      execScript(db, sql);
+    }
+    execInsert(
+      db,
+      `INSERT INTO users (id, username, email, password_hash, github_username, status)
+       VALUES (1, 'yahya', 'yahya@nemar.org', 'hash', 'yahya', 'approved')`,
+    );
+  });
+
+  afterAll(() => {
+    db.close();
+  });
+
+  test("CHECK still accepts lowercase user:<username>", () => {
+    expect(() => {
+      execInsert(
+        db,
+        `INSERT INTO broadcast_emails (sent_by, recipient_group, subject, body_markdown, recipient_count, failure_count, failed_recipients, sent_at) VALUES (1, 'user:alex', 'Direct to alex', 'Hi.', 1, 0, '[]', '2026-06-01 00:00:00')`,
+      );
+    }).not.toThrow();
+  });
+
+  test("CHECK rejects 'User:alex' (capital U) — case-sensitive GLOB", () => {
+    // The whole point of 0022. Under 0021's LIKE this would have silently
+    // passed because SQLite/D1 LIKE is case-insensitive.
+    expect(() => {
+      execInsert(
+        db,
+        `INSERT INTO broadcast_emails (sent_by, recipient_group, subject, body_markdown, recipient_count, failure_count, failed_recipients, sent_at) VALUES (1, 'User:alex', 'Bad prefix', 'Body.', 0, 0, '[]', '2026-06-02 00:00:00')`,
+      );
+    }).toThrow();
+  });
+
+  test("CHECK rejects 'USER:alex' (all caps)", () => {
+    expect(() => {
+      execInsert(
+        db,
+        `INSERT INTO broadcast_emails (sent_by, recipient_group, subject, body_markdown, recipient_count, failure_count, failed_recipients, sent_at) VALUES (1, 'USER:alex', 'Bad prefix', 'Body.', 0, 0, '[]', '2026-06-03 00:00:00')`,
+      );
+    }).toThrow();
+  });
+
+  test("CHECK still accepts the original enum values", () => {
+    for (const group of ["all", "admins", "members"]) {
+      expect(() => {
+        execInsert(
+          db,
+          `INSERT INTO broadcast_emails (sent_by, recipient_group, subject, body_markdown, recipient_count, failure_count, failed_recipients, sent_at) VALUES (1, '${group}', 'Test ${group}', 'Body.', 0, 0, '[]', '2026-06-04 00:00:00')`,
+        );
+      }).not.toThrow();
+    }
+  });
+
+  test("indexes survive the second table rebuild", () => {
+    const idxs = db
+      .prepare(
+        "SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='broadcast_emails' ORDER BY name",
+      )
+      .all() as { name: string }[];
+    const names = idxs.map((r) => r.name);
+    expect(names).toContain("idx_broadcast_sent_at");
+    expect(names).toContain("idx_broadcast_sent_by");
+  });
+
+  test("no stale broadcast_emails_new table remains after 0022", () => {
+    const tbl = db
+      .prepare(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='broadcast_emails_new'",
+      )
+      .get();
+    expect(tbl).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// AUTOINCREMENT continuity across the chained 0021 + 0022 rebuild
+//
+// Each of 0021 and 0022 rebuilds the broadcast_emails table by creating
+// broadcast_emails_new, INSERT...SELECTing existing rows, dropping the
+// original, and renaming. SQLite tracks AUTOINCREMENT counters in the
+// hidden sqlite_sequence table; if either rebuild reset the counter, new
+// inserts after 0022 would collide with pre-existing ids. This block
+// seeds fixture rows BEFORE 0021 runs, applies both rebuilds, and
+// verifies the next insert gets max(id)+1 — exactly the scenario the
+// chained-rebuild concern from the #491 review was about.
+// ---------------------------------------------------------------------------
+
+describe("broadcast_emails AUTOINCREMENT across 0021 + 0022", () => {
+  let db: Database;
+
+  beforeAll(() => {
+    db = new Database(":memory:");
+    const files = getMigrationFiles();
+    // 0001-0020 build the schema and create broadcast_emails (0017).
+    const pre0021 = files.filter((f) => {
+      const num = Number.parseInt(f.split("_")[0], 10);
+      return num >= 1 && num <= 20;
+    });
+    for (const file of pre0021) {
+      execScript(db, readFileSync(join(MIGRATIONS_DIR, file), "utf-8"));
+    }
+    execInsert(
+      db,
+      `INSERT INTO users (id, username, email, password_hash, github_username, status)
+       VALUES (1, 'yahya', 'yahya@nemar.org', 'hash', 'yahya', 'approved')`,
+    );
+    // Insert 5 fixture rows. Each gets a sequential AUTOINCREMENT id (1..5)
+    // and bumps the sqlite_sequence counter to 5.
+    const insert = db.prepare(
+      `INSERT INTO broadcast_emails
+         (sent_by, recipient_group, subject, body_markdown, recipient_count, failure_count, failed_recipients, sent_at)
+       VALUES (1, 'all', $subject, 'Body.', 0, 0, '[]', $sent_at)`,
+    );
+    for (let i = 1; i <= 5; i++) {
+      insert.run({ $subject: `Pre-0021 row ${i}`, $sent_at: `2025-01-${String(i).padStart(2, "0")} 00:00:00` });
+    }
+    insert.finalize();
+    // Apply both rebuilds in order — the scenario the chained-rebuild
+    // concern was about.
+    execScript(db, readFileSync(join(MIGRATIONS_DIR, "0021_broadcast_user_recipient.sql"), "utf-8"));
+    execScript(db, readFileSync(join(MIGRATIONS_DIR, "0022_broadcast_user_glob_check.sql"), "utf-8"));
+  });
+
+  afterAll(() => {
+    db.close();
+  });
+
+  test("all 5 pre-0021 rows survive both rebuilds with original ids", () => {
+    const rows = db
+      .prepare("SELECT id, subject FROM broadcast_emails ORDER BY id")
+      .all() as { id: number; subject: string }[];
+    expect(rows).toHaveLength(5);
+    for (let i = 0; i < 5; i++) {
+      expect(rows[i].id).toBe(i + 1);
+      expect(rows[i].subject).toBe(`Pre-0021 row ${i + 1}`);
+    }
+  });
+
+  test("next insert after the chained rebuild gets id 6 (counter preserved)", () => {
+    execInsert(
+      db,
+      `INSERT INTO broadcast_emails (sent_by, recipient_group, subject, body_markdown, recipient_count, failure_count, failed_recipients, sent_at) VALUES (1, 'all', 'Post-rebuild row', 'Body.', 0, 0, '[]', '2026-07-01 00:00:00')`,
+    );
+    const row = db
+      .prepare("SELECT id FROM broadcast_emails WHERE subject = 'Post-rebuild row'")
+      .get() as { id: number };
+    expect(row.id).toBe(6);
   });
 });
