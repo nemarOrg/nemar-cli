@@ -662,10 +662,17 @@ ciCommand
   .description("Deploy CI workflows to a dataset repository (or all with --all)")
   .argument("[dataset-id]", "Dataset ID (e.g., nm000104)")
   .option("--all", "Deploy to all dataset repositories")
+  .option(
+    "--no-validate",
+    "Skip post-deploy parseability check (saves ~2.5 s per dataset; use for fleet deploys with --all)",
+  )
   .option(YES_OPTION, YES_DESCRIPTION)
   .option(NO_OPTION, NO_DESCRIPTION)
-  .action(async (datasetId, options: { all?: boolean } & ConfirmOptions) => {
+  .action(async (datasetId, options: { all?: boolean; validate?: boolean } & ConfirmOptions) => {
     if (!requireAuth()) return;
+
+    // Commander sets `validate: false` when the user passes `--no-validate`.
+    const skipValidate = options.validate === false;
 
     if (options.all) {
       const spinner = ora("Fetching dataset list...").start();
@@ -689,6 +696,9 @@ ciCommand
       console.log("  1. BIDS Validation (runs on PRs)");
       console.log("  2. Version Check (ensures version bump on PRs)");
       console.log("  3. PR Merge Handler (creates releases, publishes DOIs)");
+      if (skipValidate) {
+        console.log(chalk.dim("  (post-deploy parseability check disabled via --no-validate)"));
+      }
       console.log();
 
       const confirmResult = await confirm(
@@ -705,8 +715,15 @@ ciCommand
       for (const ds of datasets) {
         const dsSpinner = ora(`Deploying to ${ds.dataset_id}...`).start();
         try {
-          await addCi(ds.dataset_id);
-          dsSpinner.succeed(`${ds.dataset_id}: deployed`);
+          const r = await addCi(ds.dataset_id, { validate: !skipValidate });
+          if (r.validation_warnings && r.validation_warnings.length > 0) {
+            dsSpinner.warn(`${ds.dataset_id}: deployed (with warnings)`);
+            for (const w of r.validation_warnings) {
+              console.log(`    ${chalk.yellow("!")} ${w}`);
+            }
+          } else {
+            dsSpinner.succeed(`${ds.dataset_id}: deployed`);
+          }
           succeeded++;
         } catch (error) {
           const msg = error instanceof ApiError ? error.message : String(error);
@@ -732,6 +749,9 @@ ciCommand
     console.log("  1. BIDS Validation (runs on PRs)");
     console.log("  2. Version Check (ensures version bump on PRs)");
     console.log("  3. PR Merge Handler (creates releases, publishes DOIs)");
+    if (skipValidate) {
+      console.log(chalk.dim("  (post-deploy parseability check disabled via --no-validate)"));
+    }
     console.log();
 
     const confirmResult = await confirm(`Deploy CI workflows to ${datasetId}?`, options);
@@ -743,11 +763,18 @@ ciCommand
     const spinner = ora(`Deploying CI workflows to ${datasetId}...`).start();
 
     try {
-      const result = await addCi(datasetId);
+      const result = await addCi(datasetId, { validate: !skipValidate });
       spinner.succeed("CI workflows deployed");
       console.log();
       for (const workflow of result.workflows_deployed) {
         console.log(`  ${chalk.green("[x]")} ${workflow}`);
+      }
+      if (result.validation_warnings && result.validation_warnings.length > 0) {
+        console.log();
+        console.log(chalk.yellow("Validation warnings (best-effort; deploy succeeded):"));
+        for (const w of result.validation_warnings) {
+          console.log(`  ${chalk.yellow("!")} ${w}`);
+        }
       }
       console.log();
     } catch (error) {
