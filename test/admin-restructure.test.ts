@@ -84,11 +84,14 @@ describe("admin command restructure - help output", () => {
     expect(stdout).toContain("Repository visibility management");
   });
 
-  test("admin ci --help shows check and add", async () => {
+  test("admin ci --help shows check, add, sync, and validate", async () => {
     const { stdout, exitCode } = await runCli(["admin", "ci", "--help"]);
     expect(exitCode).toBe(0);
     expect(stdout).toContain("check");
     expect(stdout).toContain("add");
+    expect(stdout).toContain("sync");
+    // validate was added in #472 — guard against silent removal in refactors.
+    expect(stdout).toContain("validate");
     expect(stdout).toContain("CI workflow management");
   });
 
