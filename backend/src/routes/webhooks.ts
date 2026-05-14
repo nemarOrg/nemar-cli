@@ -126,7 +126,7 @@ export function validateEnrichmentRef(ref: unknown): string | null {
  * Rules (mirrors the prior inline EZID logic):
  *   - missing NEMAR_USERNAME or NEMAR_PASSWORD: skip with "no_credentials"
  *   - OpenNeuro dataset (`on`-prefix): skip with "openneuro" (nemar.org
- *     pipeline doesn't yet accept alternate_id; tracked in CLAUDE.md)
+ *     pipeline doesn't yet accept alternate_id; see nemarOrg/nemar-cli#339)
  *   - Sandbox dataset (`xx`-prefix): skip with "sandbox" (blocked from
  *     publishing; syncing would write a false-alarm failed row)
  *   - missing DOI string: skip with "no_doi" (Zenodo only; EZID always
