@@ -3887,12 +3887,25 @@ Examples:
       datasetVisibility = dataset.visibility;
       spinner.succeed(`Found: ${dataset.name}`);
     } catch (error) {
-      spinner.fail("Dataset not found");
-      const msg = error instanceof Error ? error.message : String(error);
-      // Echo a plain stdout error so callers grepping stdout can see it
-      // (ora writes the spinner line to stderr).
-      console.log(chalk.red(`Error: Dataset ${datasetId} not found`));
-      console.log(chalk.red(`  ${msg}`));
+      if (error instanceof ApiError && (error.statusCode === 404 || error.statusCode === 400)) {
+        spinner.fail(`Dataset ${datasetId} not found`);
+        console.log(chalk.red(`Error: Dataset ${datasetId} not found`));
+        console.log(chalk.dim(`  ${error.message}`));
+      } else if (
+        error instanceof ApiError &&
+        (error.statusCode === 401 || error.statusCode === 403)
+      ) {
+        spinner.fail("Not authorized");
+        console.log(chalk.red(`Error: Not authorized to access dataset ${datasetId}`));
+        console.log(chalk.dim("  Run 'nemar auth login' to authenticate."));
+      } else if (error instanceof ApiError) {
+        spinner.fail("Failed to resolve dataset");
+        console.log(chalk.red(`Error: ${error.message}`));
+      } else {
+        spinner.fail("Failed to resolve dataset");
+        const msg = error instanceof Error ? error.message : String(error);
+        console.log(chalk.red(`Error: ${msg}`));
+      }
       process.exit(1);
     }
 
