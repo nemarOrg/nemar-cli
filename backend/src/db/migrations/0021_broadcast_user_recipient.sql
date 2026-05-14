@@ -8,8 +8,14 @@
 -- SQLite can't ALTER an existing CHECK constraint, so we rebuild the table.
 -- All existing rows are preserved verbatim (their group values already match
 -- the original enum and pass the new check).
+--
+-- The rebuild is wrapped in BEGIN/COMMIT so a partial failure (e.g. INSERT
+-- after DROP) rolls back rather than losing the original table. No PRAGMA
+-- foreign_keys toggle is needed: no other table references broadcast_emails,
+-- and the new table's FK to users(id) is satisfied by the existing rows
+-- being INSERTed (they were already valid against the same FK).
 
-PRAGMA foreign_keys = OFF;
+BEGIN;
 
 CREATE TABLE broadcast_emails_new (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -44,4 +50,4 @@ ALTER TABLE broadcast_emails_new RENAME TO broadcast_emails;
 CREATE INDEX IF NOT EXISTS idx_broadcast_sent_at ON broadcast_emails(sent_at);
 CREATE INDEX IF NOT EXISTS idx_broadcast_sent_by ON broadcast_emails(sent_by);
 
-PRAGMA foreign_keys = ON;
+COMMIT;
