@@ -466,6 +466,39 @@ describe("Datasets API", () => {
       }
     });
 
+    test("GET /datasets?mine=true with no auth header returns 401 generic", async () => {
+      // Caller never logged in. Backend can't tell why they want --mine, so
+      // the generic "Authentication required" reply stands.
+      const { status, data } = await testRequest<{ error: string }>("/datasets?mine=true");
+      expect(status).toBe(401);
+      expect(data.error).toBe("Authentication required to view your datasets");
+    });
+
+    test("GET /datasets?mine=true with invalid bearer token returns 401 with re-login hint", async () => {
+      // This is the nemarOrg/nemar-cli#447 case: the CLI thinks it's logged
+      // in (config has an apiKey) but the backend can't resolve the key
+      // (revoked, rotated, wrong env). Generic "Authentication required"
+      // leaves the user stuck. The backend must direct them to re-login.
+      const { status, data } = await testRequest<{ error: string }>(
+        "/datasets?mine=true",
+        {},
+        // 32+ chars so authMiddleware does the DB lookup; a hash that won't
+        // match any real token's api_key_hash.
+        "nemar_definitely_invalid_token_for_test_only_12345",
+      );
+      expect(status).toBe(401);
+      expect(data.error).toContain("rejected");
+      expect(data.error).toContain("nemar auth login");
+    });
+
+    test("GET /datasets?mine=true with valid user token returns 200", async () => {
+      const { status, data } = await testRequest<{
+        datasets: Array<{ dataset_id: string }>;
+      }>("/datasets?mine=true", {}, TEST_CONFIG.userApiKey);
+      expect(status).toBe(200);
+      expect(Array.isArray(data.datasets)).toBe(true);
+    });
+
     test("listing's latest_version agrees with /manifest for managed datasets", async () => {
       // Ground truth for what the hallu sync script previously read.
       // If the SQL subquery diverges from /manifest's ordering or source,

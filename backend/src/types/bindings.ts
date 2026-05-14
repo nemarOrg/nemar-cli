@@ -115,4 +115,10 @@ export interface AuthUser {
  */
 export interface Variables {
   user: AuthUser;
+  // Set by optionalAuthMiddleware when an Authorization: Bearer header was
+  // provided but did not resolve to a valid, approved user. Lets routes that
+  // require auth on a flag (e.g., /datasets?mine=true) emit a token-specific
+  // 401 instead of the generic "Authentication required" reply, so CLIs can
+  // tell "no header sent" from "header sent but token invalid/expired".
+  authAttempted: boolean;
 }
