@@ -1047,12 +1047,12 @@ export function buildDataCiteXml(metadata: DataCiteMetadata): string {
             `      <funderIdentifier${typeAttr}>${escapeXml(fund.funderIdentifier)}</funderIdentifier>`,
           );
         }
-        if (fund.awardNumber) {
+        if (typeof fund.awardNumber === "string" && fund.awardNumber.trim().length > 0) {
           const uriAttr = fund.awardURI ? ` awardURI="${escapeXml(fund.awardURI)}"` : "";
-          lines.push(`      <awardNumber${uriAttr}>${escapeXml(fund.awardNumber)}</awardNumber>`);
+          lines.push(`      <awardNumber${uriAttr}>${escapeXml(fund.awardNumber.trim())}</awardNumber>`);
         }
-        if (fund.awardTitle) {
-          lines.push(`      <awardTitle>${escapeXml(fund.awardTitle)}</awardTitle>`);
+        if (typeof fund.awardTitle === "string" && fund.awardTitle.trim().length > 0) {
+          lines.push(`      <awardTitle>${escapeXml(fund.awardTitle.trim())}</awardTitle>`);
         }
         lines.push("    </fundingReference>");
       }
@@ -1470,7 +1470,8 @@ export function bidsToDataCite(
   // non-empty; otherwise the XML builder would emit `<contributorName/>`
   // and EZID would reject the document.
   if (enrichment?.uploaderName && enrichment.uploaderName.trim().length > 0) {
-    const uploaderLower = enrichment.uploaderName.toLowerCase();
+    const trimmedUploaderName = enrichment.uploaderName.trim();
+    const uploaderLower = trimmedUploaderName.toLowerCase();
     // Word-boundary match to avoid false positives (e.g., "li" matching "Elizabeth")
     const boundary = new RegExp(
       `\\b${uploaderLower.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`,
@@ -1479,7 +1480,7 @@ export function bidsToDataCite(
     const isAuthor = creators.some((c) => boundary.test(c.name));
     if (!isAuthor) {
       contributors.push({
-        name: enrichment.uploaderName,
+        name: trimmedUploaderName,
         contributorType: "DataCurator",
         nameType: "Personal",
         ...(enrichment.uploaderOrcid && { orcid: enrichment.uploaderOrcid }),

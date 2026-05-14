@@ -591,6 +591,19 @@ describe("bidsToDataCite", () => {
     expect(curator?.name).toBe("li");
   });
 
+  test("DataCurator name is trimmed when uploaderName has surrounding whitespace", () => {
+    const bids = { Name: "Test", Authors: ["Smith, John"] };
+    const metadata = bidsToDataCite("nm000104", "10.82901/NEMAR.test", bids, {
+      uploaderName: "  yahya  ",
+    });
+    const curator = metadata.contributors?.find((c) => c.contributorType === "DataCurator");
+    expect(curator).toBeDefined();
+    expect(curator?.name).toBe("yahya");
+    const xml = buildDataCiteXml(metadata);
+    expect(xml).not.toContain("  yahya  ");
+    expect(xml).toContain("yahya");
+  });
+
   test("adds BIDS and neuroscience as default subjects", () => {
     const bids = { Name: "Test", Authors: ["Doe, John"] };
     const metadata = bidsToDataCite("nm000103", "10.82901/NEMAR.ABC", bids);
@@ -691,6 +704,53 @@ describe("bidsToDataCite", () => {
     expect(metadata.fundingReferences).toHaveLength(1);
     expect(metadata.fundingReferences?.[0]?.funderName).toBe("National Institutes of Health");
     expect(metadata.fundingReferences?.[0]?.awardNumber).toBe("R01-NS12345");
+  });
+
+  test("omits awardNumber and awardTitle from XML when whitespace-only", () => {
+    const metadata: DataCiteMetadata = {
+      identifier: "10.82901/NEMAR.WS",
+      creators: [{ name: "Doe, John" }],
+      titles: ["Test"],
+      publisher: "NEMAR",
+      publicationYear: 2026,
+      resourceTypeGeneral: "Dataset",
+      fundingReferences: [
+        {
+          funderName: "NIH",
+          awardNumber: "   ",
+          awardTitle: "  \t  ",
+        },
+      ],
+    };
+
+    const xml = buildDataCiteXml(metadata);
+    expect(xml).not.toContain("<awardNumber");
+    expect(xml).not.toContain("<awardTitle");
+    expect(xml).toContain("<funderName>NIH</funderName>");
+  });
+
+  test("trims awardNumber and awardTitle in XML output", () => {
+    const metadata: DataCiteMetadata = {
+      identifier: "10.82901/NEMAR.TRIM",
+      creators: [{ name: "Doe, John" }],
+      titles: ["Test"],
+      publisher: "NEMAR",
+      publicationYear: 2026,
+      resourceTypeGeneral: "Dataset",
+      fundingReferences: [
+        {
+          funderName: "NIH",
+          awardNumber: "  R01-NS12345  ",
+          awardTitle: "  Brain Study  ",
+        },
+      ],
+    };
+
+    const xml = buildDataCiteXml(metadata);
+    expect(xml).toContain("<awardNumber>R01-NS12345</awardNumber>");
+    expect(xml).toContain("<awardTitle>Brain Study</awardTitle>");
+    expect(xml).not.toContain("  R01-NS12345  ");
+    expect(xml).not.toContain("  Brain Study  ");
   });
 
   test("parses BIDS ReferencesAndLinks as DOIs", () => {
