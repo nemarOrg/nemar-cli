@@ -220,6 +220,12 @@ async function* listObjectPages(
  *   caps the Cloudflare Workers subrequest cost when called from within the
  *   publish orchestrator (each LIST page = 1 subrequest). Callers that need
  *   the authoritative total should pass `undefined` (default = unlimited).
+ *
+ * @warning When `maxPages` is exceeded, `totalSize` reflects only the pages
+ *   scanned — it is a partial sum, not the dataset's true total. Callers
+ *   MUST check whether `objectCount === undefined` before relying on
+ *   `totalSize` for anything that requires an accurate byte count (e.g. DOI
+ *   metadata, download size display). Discard or label it clearly if capped.
  */
 export async function getDatasetS3Stats(
   options: PresignedUrlOptions,
