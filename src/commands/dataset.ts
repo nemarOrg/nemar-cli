@@ -31,6 +31,7 @@ import {
   type DatasetsListResponse,
   type NemarMetadataPayload,
   ORCID_REGEX,
+  PUBLICATION_STEPS,
   addCi,
   createDataset,
   errorDetail,
@@ -3731,25 +3732,17 @@ Examples:
       }
 
       if (result.status === "approving") {
-        const steps = [
-          "ci_check",
-          "repo_public",
-          "s3_public_read",
-          "tag_protect",
-          "doi_create",
-          "update_metadata",
-          "update_readme",
-          "create_tag",
-          "create_release",
-          "upload_to_zenodo",
-          "publish_doi",
-          "s3_lock",
-          "generate_archive",
-          "notify_user",
-        ];
+        // Source of truth is `PUBLICATION_STEPS` in src/lib/api.ts, which
+        // mirrors the backend orchestrator. Showing fewer steps here than
+        // the backend actually runs (the legacy list missed
+        // enrichment_check, version_doi, sync_nemar) made the status
+        // display claim "all steps complete" while the backend was still
+        // running — exactly the visibility gap #284 calls out.
+        const steps = PUBLICATION_STEPS;
         const completed = result.steps_completed || [];
+        const total = steps.length;
         console.log("\n  Steps:");
-        for (const step of steps) {
+        steps.forEach((step, idx) => {
           const done = completed.includes(step);
           const isCurrent = result.current_step === step;
           const icon = done
@@ -3758,10 +3751,11 @@ Examples:
               ? chalk.yellow("[>]")
               : chalk.dim("[ ]");
           const label = step.replace(/_/g, " ");
+          const stepNum = `[${String(idx + 1).padStart(2, " ")}/${total}]`;
           console.log(
-            `    ${icon} ${label}${isCurrent && result.last_error ? chalk.red(` (error: ${result.last_error})`) : ""}`,
+            `    ${icon} ${chalk.dim(stepNum)} ${label}${isCurrent && result.last_error ? chalk.red(` (error: ${result.last_error})`) : ""}`,
           );
-        }
+        });
       }
 
       if (result.status === "published" && result.approved_at) {
@@ -3887,9 +3881,25 @@ Examples:
       datasetVisibility = dataset.visibility;
       spinner.succeed(`Found: ${dataset.name}`);
     } catch (error) {
-      spinner.fail("Dataset not found");
-      const msg = error instanceof Error ? error.message : String(error);
-      console.log(chalk.red(`  ${msg}`));
+      if (error instanceof ApiError && (error.statusCode === 404 || error.statusCode === 400)) {
+        spinner.fail(`Dataset ${datasetId} not found`);
+        console.log(chalk.red(`Error: Dataset ${datasetId} not found`));
+        console.log(chalk.dim(`  ${error.message}`));
+      } else if (
+        error instanceof ApiError &&
+        (error.statusCode === 401 || error.statusCode === 403)
+      ) {
+        spinner.fail("Not authorized");
+        console.log(chalk.red(`Error: Not authorized to access dataset ${datasetId}`));
+        console.log(chalk.dim("  Run 'nemar auth login' to authenticate."));
+      } else if (error instanceof ApiError) {
+        spinner.fail("Failed to resolve dataset");
+        console.log(chalk.red(`Error: ${error.message}`));
+      } else {
+        spinner.fail("Failed to resolve dataset");
+        const msg = error instanceof Error ? error.message : String(error);
+        console.log(chalk.red(`Error: ${msg}`));
+      }
       process.exit(1);
     }
 
