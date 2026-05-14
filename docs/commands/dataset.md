@@ -153,12 +153,13 @@ Arguments:
   dataset-id           Dataset ID (e.g., nm000104)
 
 Options:
-  -o, --output <path>  Output directory (default: ./<dataset-id>)
-  -j, --jobs <number>  Parallel download streams (default: 4) (default: "4")
-  --no-data            Download metadata only (skip all data files)
-  --stimuli            Include stimuli/ content (skipped by default)
-  --derivatives        Include derivatives/ content (skipped by default)
-  -h, --help           display help for command
+  -o, --output <path>   Output directory (default: ./<dataset-id>)
+  -j, --jobs <number>   Parallel download streams (default: 4) (default: "4")
+  --no-data             Download metadata only (skip all data files)
+  --stimuli             Include stimuli/ content (skipped by default)
+  --derivatives         Include derivatives/ content (skipped by default)
+  --skip-port-check     Skip the OpenNeuro porting-in-progress check
+  -h, --help            display help for command
 
 Description:
   Download a BIDS dataset from NEMAR. Uses git-annex for efficient
@@ -173,6 +174,13 @@ Description:
   you can fetch them later with `nemar dataset get --stimuli` or
   `nemar dataset get --derivatives` from inside the dataset directory.
 
+  For OpenNeuro-derived datasets, the command checks whether the import
+  has fully landed before attempting to fetch annexed files. If the
+  porting workflow is still in flight, the command exits early with a
+  retry hint instead of producing a cryptic "remote unavailable" error.
+  Pass `--skip-port-check` to bypass the check (useful for automation or
+  partial recovery flows).
+
 Requirements:
   - git-annex installed
   - NEMAR account (for private datasets)
@@ -183,6 +191,7 @@ Examples:
   $ nemar dataset download nm000104 --no-data    # Metadata only (fast)
   $ nemar dataset download nm000104 --stimuli    # Also fetch stimuli/
   $ nemar dataset download nm000104 -j 8         # More parallel streams
+  $ nemar dataset download nm000104 --skip-port-check
 ```
 
 ### dataset status
@@ -236,6 +245,9 @@ Visibility Rules:
   With --mine:
     - Shows all YOUR datasets (both private and public)
     - Requires authentication (nemar auth login)
+    - A stale or revoked API token produces a clear re-login error
+      directing you to `nemar auth login` / `nemar auth regenerate-key`
+      rather than a generic 401
 
 Examples:
   $ nemar dataset list                   # List public datasets only
@@ -404,11 +416,15 @@ Description:
 
   Once approved, your dataset will:
   - Become publicly visible on GitHub
-  - Receive a permanent DOI via Zenodo
+  - Receive a permanent DOI via EZID (Zenodo for legacy records)
   - Have tag protection enabled (prevents version manipulation)
   - Have S3 Object Lock enabled (prevents data deletion)
 
   You can only have one active publication request per dataset.
+
+  The `publish request`, `publish status`, and `publish resend` commands
+  all exit non-zero (code 1) on failure, so CI pipelines and shell
+  scripts can detect errors with `&&` / `||` chaining.
 
 Status Flow:
   requested → approving → published (or denied)
@@ -531,17 +547,23 @@ Arguments:
   files                Specific files/paths to get (default: all)
 
 Options:
-  -j, --jobs <number>  Parallel download streams (default: "4")
-  --stimuli            Include stimuli/ content (skipped by default)
-  --derivatives        Include derivatives/ content (skipped by default)
-  -h, --help           display help for command
+  -j, --jobs <number>   Parallel download streams (default: "4")
+  --stimuli             Include stimuli/ content (skipped by default)
+  --derivatives         Include derivatives/ content (skipped by default)
+  --skip-port-check     Skip the OpenNeuro porting-in-progress check
+  -h, --help            display help for command
 
 Description:
   Download data files from the remote for a cloned dataset.
   Must be run inside a git-annex dataset directory.
 
   For private datasets, credentials are fetched automatically
-  if you are logged in (nemar auth login).
+  if you are logged in (nemar auth login). A stale or revoked token
+  produces a clear re-login error rather than a cryptic git-annex failure.
+
+  For OpenNeuro-derived datasets, the command bails early with a
+  retry hint if the porting workflow has not finished landing data.
+  Pass `--skip-port-check` to bypass the check.
 
   By default, content under stimuli/ and derivatives/ is skipped. Pass
   --stimuli or --derivatives to fetch them. When you supply explicit
