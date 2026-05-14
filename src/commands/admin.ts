@@ -1977,6 +1977,12 @@ After Approval:
           }
           console.log();
         }
+
+        // Surface non-fatal orchestrator warnings (e.g. notify_user email
+        // failure) so operators know to follow up without re-running.
+        if (result.warning) {
+          console.log(chalk.yellow(`  Warning: ${result.warning}`));
+        }
       } catch (error) {
         handleCommandError(error, spinner, "Failed to approve publication", {
           422: "Fix the CI issues and retry with --resume",

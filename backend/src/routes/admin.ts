@@ -4106,7 +4106,8 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
     }
   }
 
-  // Step 15: Notify user
+  // Step 15: Notify user (non-fatal — mirrors sync_nemar pattern)
+  let notifyUserWarning: string | undefined;
   if (stepsToRun.includes("notify_user")) {
     try {
       await startStep("notify_user");
@@ -4132,16 +4133,26 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
       await updateProgress("notify_user");
     } catch (err) {
       const msg = errorMessage(err);
+      // Non-fatal: email failure must not block publication after DOI is minted
+      console.error(`[publish] notify_user failed for ${datasetId} (non-fatal): ${msg}`);
+      notifyUserWarning = `Notification email failed: ${msg}`;
+      try {
+        await db
+          .prepare(
+            "INSERT INTO audit_log (user_id, action, resource_type, resource_id, details) VALUES (?, ?, ?, ?, ?)",
+          )
+          .bind(
+            adminUser.id,
+            "notify_user_failed",
+            "dataset",
+            datasetId,
+            JSON.stringify({ error: msg, owner_email: dataset.owner_email }),
+          )
+          .run();
+      } catch (auditErr) {
+        console.warn(`[publish] Failed to write notify_user failure to audit log: ${auditErr}`);
+      }
       await updateProgress("notify_user", msg);
-      return c.json(
-        {
-          error: `Notification failed: ${msg}`,
-          step: "notify_user",
-          steps_completed: completed,
-          step_results: stepResults,
-        },
-        500,
-      );
     }
   }
 
@@ -4201,6 +4212,13 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
     );
   }
 
+  // Combine all non-fatal warnings into the response so operators can act
+  // without tailing logs. Both warnings are optional and independent.
+  const auditWarning = auditLogFailed
+    ? `Audit log write failed: ${auditLogError}. Publication succeeded but was not logged for compliance.`
+    : undefined;
+  const responseWarnings = [auditWarning, notifyUserWarning].filter(Boolean);
+
   return c.json({
     message: "Dataset published successfully",
     dataset_id: datasetId,
@@ -4213,9 +4231,7 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
     // instead of 4963/4963) even when locking succeeded. (#284)
     s3_lock_total: s3LockFinalTotal,
     s3_lock_batch_count: s3LockFinalBatchCount,
-    warning: auditLogFailed
-      ? `Audit log write failed: ${auditLogError}. Publication succeeded but was not logged for compliance.`
-      : undefined,
+    warning: responseWarnings.length > 0 ? responseWarnings.join(" | ") : undefined,
   });
 });
 
@@ -5335,6 +5351,9 @@ adminRoutes.post("/notify", zValidator("json", broadcastRequestSchema), async (c
       isDev,
     );
 
+    if (result.error === "email_service_unconfigured") {
+      return c.json({ error: "email_service_unconfigured" }, 500);
+    }
     return c.json(result);
   }
 
@@ -5371,5 +5390,8 @@ adminRoutes.post("/notify", zValidator("json", broadcastRequestSchema), async (c
     isDev,
   );
 
+  if (result.error === "email_service_unconfigured") {
+    return c.json({ error: "email_service_unconfigured" }, 500);
+  }
   return c.json(result);
 });
