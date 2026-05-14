@@ -234,12 +234,24 @@ Usage: nemar admin ci add [options] <dataset-id>
 Deploy CI workflows to a dataset repository
 
 Arguments:
-  dataset-id  Dataset ID (e.g., nm000104)
+  dataset-id      Dataset ID (e.g., nm000104)
 
 Options:
-  -y, --yes   Skip confirmation and proceed
-  -n, --no    Skip confirmation and decline
-  -h, --help  display help for command
+  -y, --yes       Skip confirmation and proceed
+  -n, --no        Skip confirmation and decline
+  --no-validate   Skip post-deploy workflow parseability validation
+  -h, --help      display help for command
+
+Description:
+  After committing the workflow files to the dataset repository, the
+  backend lists the repo's parsed workflows via the GitHub Actions API
+  and reports any workflow that failed to parse as a `validation_warning`.
+  The CLI prints these warnings inline after deploy.
+
+  For fleet deploys (running `ci add` across many datasets in a loop),
+  pass `--no-validate` to skip the 2-3 second listing delay per dataset.
+  Workflow parseability is also caught at PR time by the YAML validation
+  test in this repo.
 ```
 
 ### admin doi create
@@ -519,5 +531,116 @@ Arguments:
 Options:
   --force     Force deletion of published datasets with DOIs (owner only)
   -h, --help  display help for command
+```
+
+### admin notify
+
+```bash
+Usage: nemar admin notify [options]
+
+Send a broadcast or per-user transactional email
+
+Options:
+  --to <group>          Broadcast group: all | admins | members
+  --user <username>     Send to exactly one user (mutually exclusive with --to)
+  --subject <text>      Email subject (required)
+  --body <text>         Email body (markdown; mutually exclusive with --body-file)
+  --body-file <path>    Read email body from file
+  --dry-run             Preview recipients without sending
+  -h, --help            display help for command
+
+Description:
+  Send admin announcements to a group or a single user. Exactly one of
+  --to (broadcast) or --user (per-user transactional) must be supplied.
+
+  Per-user sends ignore the recipient's announcements email preference
+  because they represent direct admin contact, not a broadcast. All sends
+  record an audit-log row; per-user sends record the recipient as
+  `user:<username>` so the audit trail distinguishes them from broadcasts.
+
+Examples:
+  $ nemar admin notify --to all --subject "v0.8.14 released" --body-file ./notes.md
+  $ nemar admin notify --to admins --subject "Stuck publication" --body "..."
+  $ nemar admin notify --user AlexWoods --subject "Sandbox fix" --body-file ./alex.md
+  $ nemar admin notify --user AlexWoods --subject "Ping" --body "..." --dry-run
+```
+
+### admin sync
+
+```bash
+Usage: nemar admin sync <subcommand>
+
+Manage nemar.org dataset metadata sync
+
+Subcommands:
+  run [dataset-id]    Sync one dataset (or all published if omitted)
+  status              Show sync status across all published datasets
+
+Description:
+  The backend mirrors dataset metadata to the nemar.org data explorer
+  across four tables: dataexplorer_dataset, dataexplorer_extra_dataset,
+  dataexplorer_dataset_channel_count, dataexplorer_supplementary_dataset.
+
+  Sync runs automatically on publication approval and on version-DOI
+  publish. Use `sync run` to force-refresh after manual fixes or to
+  recover from a failed sync. `sync status` reports the last sync time
+  and any persisted failure reason per dataset.
+
+Examples:
+  $ nemar admin sync run nm000132    # Sync one dataset
+  $ nemar admin sync run             # Sync all eligible
+  $ nemar admin sync status
+```
+
+### admin reindex
+
+```bash
+Usage: nemar admin reindex [options] [dataset-id]
+
+Refresh enrichment, nemar.org sync, and D1 metadata columns
+
+Arguments:
+  dataset-id                      Dataset ID (optional with bulk flags below)
+
+Options:
+  --all                           Reindex every published dataset
+  --missing-metadata              Reindex only datasets missing populated metadata columns
+  --stale [--older-than <days>]   Reindex datasets whose enrichment is older than N days
+  -h, --help                      display help for command
+
+Description:
+  Full reindex pipeline: re-runs the enrichment stages (seed -> enrich ->
+  validate) on .nemar/metadata.json, refreshes nemar.org via the sync
+  service, and updates the D1 metadata columns the catalog reads from.
+
+  Bulk modes process datasets serially with backend-side rate limiting,
+  so it is safe to run on weekends or off-peak.
+
+Examples:
+  $ nemar admin reindex nm000132
+  $ nemar admin reindex --all
+  $ nemar admin reindex --missing-metadata
+  $ nemar admin reindex --stale --older-than 30
+```
+
+### admin email-preferences
+
+```bash
+Usage: nemar admin email-preferences <subcommand>
+
+Manage a user's email notification preferences (admin override)
+
+Subcommands:
+  show <username>                  Display current preferences
+  update <username> [options]      Change one or more preferences
+
+Description:
+  Admin override for user-level email preferences. Normal users manage
+  their own via the web UI; this command is for support cases where a
+  user is locked out or needs an account-level change applied.
+
+Examples:
+  $ nemar admin email-preferences show alex
+  $ nemar admin email-preferences update alex --announcements off
 ```
 
