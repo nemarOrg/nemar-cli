@@ -12,7 +12,15 @@ on:
 
 env:
   # Centralized config: update these when URLs or versions change.
-  PROD_API_URL: https://api.nemar.org
+  #
+  # PROD_API_URL points at the workers.dev hostname rather than
+  # api.nemar.org. The custom domain sits behind Cloudflare's zone WAF,
+  # which 403s the multi-MB catalog POST from GitHub-runner IPs as a
+  # suspected bot. The workers.dev hostname bypasses zone WAF while
+  # still hitting the same Worker, D1, and Vectorize bindings. The
+  # /admin/catalog/sync route is already auth-gated by ADMIN_API_KEY,
+  # so this does not change the security posture.
+  PROD_API_URL: https://nemar-api.sccn-org.workers.dev
   DEV_API_URL: https://nemar-api-dev.sccn-org.workers.dev
   NEMAR_API_URL: https://nemar.org/api/dataexplorer/datapipeline
 
