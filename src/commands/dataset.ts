@@ -1660,6 +1660,10 @@ datasetCommand
   .option("--exclude <globs>", "Comma-separated exclude globs (e.g. sourcedata/**)")
   .option("--stimuli", "Include stimuli/ content (skipped by default; can be large)")
   .option("--derivatives", "Include derivatives/ content (skipped by default; can be large)")
+  .option(
+    "--skip-port-check",
+    "Skip the porting-in-progress check (use if falsely blocked on an OpenNeuro-sourced dataset)",
+  )
   .addHelpText(
     "after",
     `
@@ -1992,8 +1996,9 @@ Examples:
     // job is still mid-flight — the subsequent `git annex get` would fail
     // with a cryptic "remote unavailable" error. Bail early with a clear
     // retry hint. See nemarOrg/nemar-cli#460.
-    if (datasetInfo.source === "openneuro" && options.data !== false) {
+    if (!options.skipPortCheck && datasetInfo.source === "openneuro" && options.data !== false) {
       const marker = await detectImportMarker(absoluteOutput);
+      // "unknown" = git unavailable or non-git dir; skip port check and let git-annex handle it
       if (marker === "absent") {
         console.log();
         console.log(chalk.yellow("Porting still in progress."));
@@ -2002,13 +2007,14 @@ Examples:
             "  This dataset is being imported from OpenNeuro. Data files are not yet available.",
           ),
         );
+        console.log(chalk.dim("  The metadata-only clone is already at the path above."));
+        console.log(chalk.dim("  Wait 5–30 minutes (depending on dataset size), then run:"));
+        console.log(chalk.dim(`    cd ${absoluteOutput} && nemar dataset get`));
+        console.log(chalk.dim("  Run 'nemar dataset status <id>' to track porting progress."));
         console.log(
           chalk.dim(
-            "  The metadata-only clone is at the path above. Retry the download in ~5 minutes,",
+            "  Pass --skip-port-check to bypass this check if you are certain porting is complete.",
           ),
-        );
-        console.log(
-          chalk.dim(`  or run 'cd ${absoluteOutput} && nemar dataset get' once porting completes.`),
         );
         process.exit(1);
       }
@@ -3988,6 +3994,10 @@ datasetCommand
   .option("-j, --jobs <number>", "Parallel download streams", "4")
   .option("--stimuli", "Include stimuli/ content (skipped by default; can be large)")
   .option("--derivatives", "Include derivatives/ content (skipped by default; can be large)")
+  .option(
+    "--skip-port-check",
+    "Skip the porting-in-progress check (use if falsely blocked on an OpenNeuro-sourced dataset)",
+  )
   .addHelpText(
     "after",
     `
@@ -4031,10 +4041,12 @@ Examples:
     const getDatasetId = await getDatasetIdFromRemote(cwd);
     if (getDatasetId) {
       let dsInfo: Awaited<ReturnType<typeof getDataset>> | null = null;
+      let apiReachable = true;
       try {
         dsInfo = await getDataset(getDatasetId);
       } catch {
         // Dataset info fetch failed; proceed without creds (will use publicurl if public)
+        apiReachable = false;
       }
 
       // OpenNeuro-sourced datasets only get their git-annex S3 objects after
@@ -4043,19 +4055,43 @@ Examples:
       // job is still mid-flight — `git annex get` will fail with a cryptic
       // "remote unavailable" error. Bail early with a clear retry hint.
       // See nemarOrg/nemar-cli#460.
-      if (dsInfo?.source === "openneuro") {
-        const marker = await detectImportMarker(cwd);
-        if (marker === "absent") {
-          console.log(chalk.yellow("Porting still in progress."));
-          console.log(
-            chalk.dim(
-              "  This dataset is being imported from OpenNeuro. Data files are not yet available.",
-            ),
-          );
-          console.log(
-            chalk.dim(`  Retry in ~5 minutes, or run 'nemar dataset status' to check progress.`),
-          );
-          process.exit(1);
+      //
+      // When the API is unreachable, fall back to reading source from the local
+      // .nemar/metadata.json so the check still works offline.
+      if (!options.skipPortCheck) {
+        let isOpenNeuroDerived = dsInfo?.source === "openneuro";
+        if (!apiReachable && !isOpenNeuroDerived) {
+          const localMeta = join(cwd, ".nemar", "metadata.json");
+          if (existsSync(localMeta)) {
+            try {
+              const parsed = JSON.parse(readFileSync(localMeta, "utf-8")) as {
+                source?: string;
+              };
+              isOpenNeuroDerived = parsed.source === "openneuro";
+            } catch {
+              // Malformed local metadata; skip port check
+            }
+          }
+        }
+        if (isOpenNeuroDerived) {
+          const marker = await detectImportMarker(cwd);
+          // "unknown" = git unavailable or non-git dir; skip port check and let git-annex handle it
+          if (marker === "absent") {
+            console.log(chalk.yellow("Porting still in progress."));
+            console.log(
+              chalk.dim(
+                "  This dataset is being imported from OpenNeuro. Data files are not yet available.",
+              ),
+            );
+            console.log(chalk.dim("  Wait 5–30 minutes (depending on dataset size), then retry."));
+            console.log(chalk.dim("  Run 'nemar dataset status <id>' to track progress."));
+            console.log(
+              chalk.dim(
+                "  Pass --skip-port-check to bypass this check if you are certain porting is complete.",
+              ),
+            );
+            process.exit(1);
+          }
         }
       }
 

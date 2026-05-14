@@ -1606,10 +1606,18 @@ export async function countPendingDownload(
  * "remote not available" / "no known location" gibberish.
  *
  * Returns:
- *   - `present` when the commit exists in the local history
- *   - `absent` when the marker file is unknown to git (porting incomplete
+ *   - `present` when the most recent commit touching `.nemar/metadata.json`
+ *     is found in local history (non-empty `git log -1` output)
+ *   - `absent` when the file has never been committed (porting incomplete
  *     or this isn't an OpenNeuro-imported dataset)
  *   - `unknown` when git fails to run (not a repo, etc.)
+ *
+ * Forward-compatibility note: this marker is specific to the convention used
+ * by `import-openneuro.ts` (committing `.nemar/metadata.json` as the final
+ * import step). Any future mechanism that sets `source="openneuro"` in D1
+ * without following this commit convention will produce a false `absent`
+ * result. If that happens, add a `--skip-port-check` bypass or adjust the
+ * detection logic. TODO: track in nemarOrg/nemar-cli#460.
  *
  * See nemarOrg/nemar-cli#460 for the user-reported failure mode.
  */
@@ -1617,10 +1625,11 @@ export async function detectImportMarker(
   datasetPath: string,
 ): Promise<"present" | "absent" | "unknown"> {
   try {
-    // `git log -- <pathspec>` walks the repo's full history; if any commit
-    // ever touched `.nemar/metadata.json` we see at least one entry. An
-    // empty output means the file is unknown to git (porting did not
-    // commit it). `git log` exits 0 in both cases, so check stdout.
+    // `git log -1 -- <pathspec>` returns the most recent commit that touched
+    // `.nemar/metadata.json`. Non-empty output means the file exists in
+    // history (import completed). An empty result means the file has never
+    // been committed (porting did not finish). `git log` exits 0 in both
+    // cases, so check stdout length rather than exit code.
     const { stdout, exitCode } = await runCommand(
       ["git", "log", "-1", "--format=%H", "--", ".nemar/metadata.json"],
       { cwd: datasetPath },

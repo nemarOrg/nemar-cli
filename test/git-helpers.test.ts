@@ -246,4 +246,35 @@ describe("detectImportMarker", () => {
       cleanup(dir);
     }
   });
+
+  test("marker committed then deleted via git rm still returns 'present'", async () => {
+    // `git log -1 -- <path>` finds the most recent commit that touched the
+    // file, including deletion commits. Guards against a regression where a
+    // git rm + follow-up commit would mask an otherwise completed import.
+    const repo = makeRepo();
+    try {
+      writeFileSync(join(repo, "README.md"), "openneuro ds######");
+      git(repo, "add", "README.md");
+      git(repo, "commit", "-qm", "initial");
+
+      // Commit the marker (simulates a completed import)
+      mkdirSync(join(repo, ".nemar"));
+      writeFileSync(
+        join(repo, ".nemar", "metadata.json"),
+        JSON.stringify({ source: "openneuro" }),
+      );
+      git(repo, "add", ".nemar/metadata.json");
+      git(repo, "commit", "-qm", "Add NEMAR metadata (imported from OpenNeuro ds######)");
+
+      // Delete it in a subsequent commit
+      git(repo, "rm", "-q", ".nemar/metadata.json");
+      git(repo, "commit", "-qm", "Remove metadata");
+
+      // The marker was committed, so import was complete; result must be 'present'
+      const result = await detectImportMarker(repo);
+      expect(result).toBe("present");
+    } finally {
+      cleanup(repo);
+    }
+  });
 });
