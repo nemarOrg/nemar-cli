@@ -120,5 +120,6 @@ export interface Variables {
   // require auth on a flag (e.g., /datasets?mine=true) emit a token-specific
   // 401 instead of the generic "Authentication required" reply, so CLIs can
   // tell "no header sent" from "header sent but token invalid/expired".
-  authAttempted: boolean;
+  // Optional: routes that don't use optionalAuthMiddleware never set this.
+  authAttempted?: boolean;
 }

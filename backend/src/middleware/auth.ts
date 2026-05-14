@@ -169,6 +169,10 @@ export async function ownerMiddleware(c: AuthContext, next: Next) {
 export async function optionalAuthMiddleware(c: AuthContext, next: Next) {
   const authHeader = c.req.header("Authorization");
 
+  // Case-sensitive: "bearer" (lowercase) is treated as no auth attempted.
+  // The CLI always sends "Bearer" (capital B, src/lib/api.ts), so this is
+  // not a practical concern, but proxies that lowercase headers will silently
+  // degrade to unauthenticated rather than triggering the stale-token path.
   if (!authHeader || !authHeader.startsWith("Bearer ")) {
     c.set("authAttempted", false);
     await next();

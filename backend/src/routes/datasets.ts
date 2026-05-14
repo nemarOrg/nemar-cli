@@ -954,6 +954,18 @@ datasetRoutes.get("/:id", optionalAuthMiddleware, async (c) => {
             .first()
         : null;
       if (!isCollaborator) {
+        // If the caller sent a Bearer token that was rejected, give a
+        // re-login hint instead of "Dataset not found" — same bug class
+        // as nemarOrg/nemar-cli#447 but for the single-dataset route.
+        if (!user && c.get("authAttempted")) {
+          return c.json(
+            {
+              error:
+                "Your API key was rejected. Run 'nemar auth login' to re-authenticate, or 'nemar auth regenerate-key' if your key was revoked.",
+            },
+            401,
+          );
+        }
         return c.json({ error: "Dataset not found" }, 404);
       }
     }
