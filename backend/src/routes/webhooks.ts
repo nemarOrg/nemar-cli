@@ -127,13 +127,15 @@ export function validateEnrichmentRef(ref: unknown): string | null {
  *   - missing NEMAR_USERNAME or NEMAR_PASSWORD: skip with "no_credentials"
  *   - OpenNeuro dataset (`on`-prefix): skip with "openneuro" (nemar.org
  *     pipeline doesn't yet accept alternate_id; tracked in CLAUDE.md)
+ *   - Sandbox dataset (`xx`-prefix): skip with "sandbox" (blocked from
+ *     publishing; syncing would write a false-alarm failed row)
  *   - missing DOI string: skip with "no_doi" (Zenodo only; EZID always
  *     returns a DOI on success)
  *   - otherwise: trigger
  */
 export type NemarSyncDecision =
   | { trigger: true }
-  | { trigger: false; reason: "no_credentials" | "openneuro" | "no_doi" };
+  | { trigger: false; reason: "no_credentials" | "openneuro" | "sandbox" | "no_doi" };
 
 export function shouldSyncToNemarAfterVersionDoi(input: {
   datasetId: string;
@@ -146,6 +148,9 @@ export function shouldSyncToNemarAfterVersionDoi(input: {
   }
   if (input.datasetId.startsWith("on")) {
     return { trigger: false, reason: "openneuro" };
+  }
+  if (input.datasetId.startsWith("xx")) {
+    return { trigger: false, reason: "sandbox" };
   }
   if (!input.versionDoi) {
     return { trigger: false, reason: "no_doi" };
@@ -718,15 +723,18 @@ async function handleZenodoVersionDoi(
       nemarUsername: c.env.NEMAR_USERNAME,
       nemarPassword: c.env.NEMAR_PASSWORD,
     });
-    if (zenodoSyncDecision.trigger && published.doi) {
-      c.executionCtx.waitUntil(syncToNemarAfterVersionDoi(c.env, dataset, version, published.doi));
-    } else if (!zenodoSyncDecision.trigger) {
+    if (zenodoSyncDecision.trigger) {
+      // trigger: true guarantees versionDoi is non-null (no_doi guard in predicate)
+      c.executionCtx.waitUntil(syncToNemarAfterVersionDoi(c.env, dataset, version, published.doi!));
+    } else {
       if (zenodoSyncDecision.reason === "no_credentials") {
         console.warn("[webhook] NEMAR_USERNAME/PASSWORD not configured; skipping nemar.org sync");
       } else if (zenodoSyncDecision.reason === "openneuro") {
         console.info(
           `[webhook] Skipping nemar.org sync for OpenNeuro dataset ${dataset.dataset_id}`,
         );
+      } else if (zenodoSyncDecision.reason === "sandbox") {
+        console.info(`[webhook] Skipping nemar.org sync for sandbox dataset ${dataset.dataset_id}`);
       } else if (zenodoSyncDecision.reason === "no_doi") {
         console.warn(
           `[webhook] Skipping nemar.org sync for ${dataset.dataset_id}: Zenodo returned no DOI`,
