@@ -330,4 +330,70 @@ describe("approvePublication onProgress", () => {
     await approvePublication(DATASET, false);
     expect(fake.calls.length).toBe(2);
   });
+
+  // -------------------------------------------------------------------------
+  // Issue #477: notify_user failure must be non-fatal
+  // -------------------------------------------------------------------------
+
+  test("notify_user failure: orchestrator completes and returns warning (non-fatal)", async () => {
+    // Simulate a Resend outage: orchestrator completes all steps (including
+    // notify_user which recorded a failure) and returns HTTP 200 with a
+    // warning field. The notify_user step_result has status="failed".
+    const notifyErrMsg = "Resend API returned 503: service unavailable";
+    fake = startFakeApproveServer(DATASET, [
+      {
+        message: "Dataset published successfully",
+        dataset_id: DATASET,
+        status: "published",
+        step_results: [
+          { step: "ci_check", status: "completed", attempts: 1, duration_ms: 12 },
+          { step: "publish_doi", status: "completed", attempts: 1, duration_ms: 300 },
+          {
+            step: "notify_user",
+            status: "failed",
+            attempts: 1,
+            duration_ms: 50,
+            error: notifyErrMsg,
+          },
+        ],
+        steps_completed: [
+          "ci_check",
+          "enrichment_check",
+          "repo_public",
+          "s3_public_read",
+          "tag_protect",
+          "doi_create",
+          "update_metadata",
+          "update_readme",
+          "create_tag",
+          "create_release",
+          "upload_to_zenodo",
+          "publish_doi",
+          "version_doi",
+          "s3_lock",
+          "generate_archive",
+          "sync_nemar",
+          // notify_user is NOT in steps_completed because it failed
+        ],
+        warning: `Notification email failed: ${notifyErrMsg}`,
+      },
+    ]);
+    process.env.TEST_API_URL = fake.url;
+
+    // 1. Orchestrator must NOT throw — resolves despite notify_user failing.
+    const result = await approvePublication(DATASET, false);
+
+    // 2. Final status is "published" — publication completed.
+    expect(result.status).toBe("published");
+
+    // 3. notify_user step_result reflects the failure.
+    const notifyResult = result.step_results?.find((sr) => sr.step === "notify_user");
+    expect(notifyResult).toBeDefined();
+    expect(notifyResult?.status).toBe("failed");
+    expect(notifyResult?.error).toContain("Resend API");
+
+    // 4. Response includes the warning for operator visibility.
+    expect(result.warning).toBeDefined();
+    expect(result.warning).toContain("Notification email failed");
+  });
 });

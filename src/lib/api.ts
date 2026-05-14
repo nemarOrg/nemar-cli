@@ -1272,6 +1272,10 @@ export interface PublishApproveResponse {
   /** Legacy field — kept on the response type for back-compat but no
    *  longer populated by current servers. */
   s3_lock_offset?: number;
+  /** Non-fatal warning(s) from the orchestrator (e.g. notify_user email
+   *  failure, audit log failure). Publication succeeded; operator should
+   *  review and follow up manually. Multiple warnings are joined with " | ". */
+  warning?: string;
 }
 
 /**
