@@ -32,6 +32,7 @@ import {
   type EmailPreferences,
   type NemarMetadataPayload,
   ORCID_REGEX,
+  type PublishProgressInfo,
   type ReindexBulkOptions,
   type ReindexBulkResponse,
   type ReindexFilter,
@@ -1853,7 +1854,42 @@ After Approval:
         return;
       }
 
-      const spinner = ora("Running publication workflow (this may take a few minutes)...").start();
+      const initialSpinnerText = "Running publication workflow (this may take a few minutes)...";
+      const spinner = ora(initialSpinnerText).start();
+
+      // Most recent step label rendered into the spinner; kept on the
+      // outer scope so onRetry can restore the same line after the
+      // retry notice instead of falling back to the generic text.
+      let currentSpinnerText = initialSpinnerText;
+
+      /**
+       * Render the spinner line for a progress event. Shows the step
+       * position and, for s3_lock, a running locked/total ratio so the
+       * admin can see thousands-of-objects datasets making progress
+       * instead of staring at a static spinner for minutes. See #284.
+       */
+      function renderProgress(info: PublishProgressInfo): string {
+        const stepLabel = info.step.replace(/_/g, " ");
+        const head = `Step ${info.stepIndex}/${info.stepTotal}: ${stepLabel}`;
+        if (
+          info.step === "s3_lock" &&
+          info.s3LockLocked !== undefined &&
+          info.s3LockTotal !== undefined &&
+          info.s3LockTotal > 0
+        ) {
+          const pct = ((info.s3LockLocked / info.s3LockTotal) * 100).toFixed(1);
+          const resumeSuffix = info.s3LockResumed ? " (resumed)" : "";
+          return `${head} | Locking S3 objects: ${info.s3LockLocked}/${info.s3LockTotal} (${pct}%)${resumeSuffix}`;
+        }
+        if (info.step === "s3_lock" && info.s3LockLocked !== undefined) {
+          // Total not yet known (rare; first response before server has
+          // counted). Show running count without the denominator so the
+          // line still advances.
+          const resumeSuffix = info.s3LockResumed ? " (resumed)" : "";
+          return `${head} | Locking S3 objects: ${info.s3LockLocked}${resumeSuffix}`;
+        }
+        return head;
+      }
 
       try {
         const result = await approvePublication(
@@ -1872,7 +1908,11 @@ After Approval:
                 `  Retrying in ${Math.round(info.delayMs / 1000)}s (attempt ${info.attempt + 1}/${info.maxAttempts})...`,
               ),
             );
-            spinner.start("Running publication workflow (this may take a few minutes)...");
+            spinner.start(currentSpinnerText);
+          },
+          (info) => {
+            currentSpinnerText = renderProgress(info);
+            spinner.text = currentSpinnerText;
           },
         );
         spinner.succeed(result.message);

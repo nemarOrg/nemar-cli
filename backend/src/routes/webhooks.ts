@@ -1049,7 +1049,7 @@ webhooks.post("/llm-enrich", async (c) => {
     // Stage 1a: Compute sizes from S3 and formats from tree. s3Stats is
     // hoisted so the metadata-columns writer (post-cache, below) can reuse it
     // without re-querying S3.
-    let s3Stats: { totalSize: number; objectCount: number } | null = null;
+    let s3Stats: { totalSize: number; objectCount: number | undefined } | null = null;
     try {
       const { getDatasetS3Stats } = await import("../services/s3.js");
       s3Stats = await getDatasetS3Stats(
@@ -1063,13 +1063,15 @@ webhooks.post("/llm-enrich", async (c) => {
       );
 
       const sizeStr = formatBytes(s3Stats.totalSize);
-      seeded.sizes = [`${sizeStr} (${s3Stats.objectCount} files)`];
+      const countLabel =
+        s3Stats.objectCount !== undefined ? `${s3Stats.objectCount} files` : "files";
+      seeded.sizes = [`${sizeStr} (${countLabel})`];
 
       const extensions = extractExtensions(treePaths);
       if (extensions.length > 0) seeded.formats = extensions;
 
       console.log(
-        `[llm-enrich] Stage 1a (sizes): ${dataset_id} - ${sizeStr} (${s3Stats.objectCount} files), ${extensions.length} formats`,
+        `[llm-enrich] Stage 1a (sizes): ${dataset_id} - ${sizeStr} (${countLabel}), ${extensions.length} formats`,
       );
     } catch (sizeErr) {
       console.warn(
