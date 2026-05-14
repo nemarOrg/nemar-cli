@@ -31,15 +31,11 @@ export const broadcastRequestSchema = z
     path: ["to"],
   });
 
-export type SingleUserLookupError = "not_found" | "no_email" | "not_approved" | "unsubscribed";
+export type SingleUserLookupError = "not_found" | "no_email" | "not_approved";
 
-export interface SingleUserLookupResult {
-  ok: boolean;
-  email?: string;
-  user_id?: number;
-  username?: string;
-  error?: SingleUserLookupError;
-}
+export type SingleUserLookupResult =
+  | { ok: true; email: string; user_id: number; username: string }
+  | { ok: false; error: SingleUserLookupError; user_id?: number; username?: string };
 
 export interface BroadcastResult {
   broadcast_id: number;
