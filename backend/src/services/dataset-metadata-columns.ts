@@ -33,7 +33,7 @@ export interface MetadataColumnInputs {
   /** Raw contents of participants.tsv at the same ref, or null if absent. */
   participantsTsv: string | null;
   /** S3 size and object count, or null if the lookup failed/was skipped. */
-  s3Stats: { totalSize: number; objectCount: number } | null;
+  s3Stats: { totalSize: number; objectCount: number | undefined } | null;
 }
 
 /**
@@ -72,7 +72,7 @@ export function computeDatasetMetadataColumns(input: MetadataColumnInputs): Data
     age_min: ageMin,
     age_max: ageMax,
     file_size: input.s3Stats ? input.s3Stats.totalSize : null,
-    total_files: input.s3Stats ? input.s3Stats.objectCount : null,
+    total_files: input.s3Stats ? (input.s3Stats.objectCount ?? null) : null,
     tasks: tasksArr.length ? tasksArr.join(",") : null,
   };
 }
