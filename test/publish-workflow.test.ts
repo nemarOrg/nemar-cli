@@ -184,9 +184,11 @@ describe("publish workflow - user operations", () => {
       username: "test-user",
     });
 
-    const { stdout } = await runCli(["dataset", "publish", "status", "nm999999"], ctx);
+    const { stdout, exitCode } = await runCli(["dataset", "publish", "status", "nm999999"], ctx);
     // Backend may return "Dataset not found" (JSON 404) or generic 404 if route not deployed
     expect(stdout.includes("not found") || stdout.includes("404")).toBe(true);
+    // Must exit non-zero so scripts/CI can detect the failure (issue #94)
+    expect(exitCode).toBe(1);
   });
 
   test("publish request for non-existent dataset returns error", async () => {
@@ -199,8 +201,10 @@ describe("publish workflow - user operations", () => {
       username: "test-user",
     });
 
-    const { stdout } = await runCli(["dataset", "publish", "request", "nm999999"], ctx);
+    const { stdout, exitCode } = await runCli(["dataset", "publish", "request", "nm999999"], ctx);
     expect(stdout.includes("not found") || stdout.includes("404")).toBe(true);
+    // Must exit non-zero so scripts/CI can detect the failure (issue #94)
+    expect(exitCode).toBe(1);
   });
 
   test("publish resend for non-existent dataset returns error", async () => {
@@ -213,8 +217,37 @@ describe("publish workflow - user operations", () => {
       username: "test-user",
     });
 
-    const { stdout } = await runCli(["dataset", "publish", "resend", "nm999999"], ctx);
+    const { stdout, exitCode } = await runCli(["dataset", "publish", "resend", "nm999999"], ctx);
     expect(stdout.includes("not found") || stdout.includes("404")).toBe(true);
+    // Must exit non-zero so scripts/CI can detect the failure (issue #94)
+    expect(exitCode).toBe(1);
+  });
+
+  test("publish status with invalid api key exits non-zero (issue #94)", async () => {
+    // Uses a config with a clearly-invalid api key so isAuthenticated()
+    // passes but the API call fails. Verifies the catch block exits
+    // non-zero so callers (CI scripts) can detect the failure.
+    const ctx = createTestContext();
+    setTestConfig(ctx, {
+      apiKey: "nemar_invalid_key_for_exit_code_test_xxxxxxxxxxxx",
+      apiUrl: TEST_CONFIG.apiUrl,
+      username: "test-user",
+    });
+
+    const { exitCode } = await runCli(["dataset", "publish", "status", "nm000104"], ctx);
+    expect(exitCode).toBe(1);
+  });
+
+  test("publish request with invalid api key exits non-zero (issue #94)", async () => {
+    const ctx = createTestContext();
+    setTestConfig(ctx, {
+      apiKey: "nemar_invalid_key_for_exit_code_test_xxxxxxxxxxxx",
+      apiUrl: TEST_CONFIG.apiUrl,
+      username: "test-user",
+    });
+
+    const { exitCode } = await runCli(["dataset", "publish", "request", "nm000104"], ctx);
+    expect(exitCode).toBe(1);
   });
 });
 
