@@ -1892,10 +1892,13 @@ export interface BroadcastDryRunResponse {
 }
 
 /**
- * Send broadcast email to user group (admin only)
+ * Send broadcast email to a user group or a single user (admin only).
+ *
+ * `to` and `user` are mutually exclusive; provide exactly one.
  */
 export async function sendBroadcast(data: {
-  to: string;
+  to?: string;
+  user?: string;
   subject: string;
   body: string;
   dry_run?: boolean;

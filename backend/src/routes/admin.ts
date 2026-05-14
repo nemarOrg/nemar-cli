@@ -9,7 +9,12 @@ import { Hono } from "hono";
 import { z } from "zod";
 import { adminMiddleware, authMiddleware, ownerMiddleware } from "../middleware/auth";
 
-import { getBroadcastRecipients, sendBroadcast } from "../services/broadcast";
+import {
+  broadcastRequestSchema,
+  getBroadcastRecipientByUsername,
+  getBroadcastRecipients,
+  sendBroadcast,
+} from "../services/broadcast";
 import {
   type NemarCatalogRecord,
   importCatalogRecords,
@@ -5195,22 +5200,74 @@ adminRoutes.delete("/notices/:id", async (c) => {
 // Broadcast Emails
 // ============================================================================
 
-const broadcastSchema = z.object({
-  to: z.enum(["all", "admins", "members"]),
-  subject: z.string().min(1).max(200),
-  body: z.string().min(1).max(10000),
-  dry_run: z.boolean().optional().default(false),
-});
-
 /**
- * POST /admin/notify - Send broadcast email to user group
+ * POST /admin/notify - Send broadcast email to a user group or single user.
+ *
+ * Group send: { to: 'all'|'admins'|'members', ... }
+ * Per-user send: { user: '<username>', ... }
+ *
+ * 'to' and 'user' are mutually exclusive. Per-user sends ignore the
+ * announcements email preference (these are direct admin transactional
+ * messages, not broadcasts) but still require an approved account with an
+ * email on file. Audit log records the recipient as `user:<username>` so the
+ * group/transactional distinction is queryable post-hoc.
  */
-adminRoutes.post("/notify", zValidator("json", broadcastSchema), async (c) => {
+adminRoutes.post("/notify", zValidator("json", broadcastRequestSchema), async (c) => {
   const user = c.get("user");
   const db = c.env.DB;
   const body = c.req.valid("json");
 
-  const recipients = await getBroadcastRecipients(db, body.to);
+  // Per-user transactional path
+  if (body.user) {
+    const lookup = await getBroadcastRecipientByUsername(db, body.user);
+    if (!lookup.ok) {
+      switch (lookup.error) {
+        case "not_found":
+          return c.json({ error: `User not found: ${body.user}` }, 404);
+        case "not_approved":
+          return c.json({ error: `User '${body.user}' is not approved` }, 400);
+        case "no_email":
+          return c.json({ error: `User '${body.user}' has no email on file` }, 400);
+        default: {
+          const _exhaustive: never = lookup.error;
+          return c.json({ error: `Cannot send to '${body.user}': ${_exhaustive}` }, 400);
+        }
+      }
+    }
+
+    const auditGroup = `user:${lookup.username}` as const;
+
+    if (body.dry_run) {
+      return c.json({
+        dry_run: true,
+        recipient_group: auditGroup,
+        recipient_count: 1,
+        recipients: [lookup.email],
+      });
+    }
+
+    const { fromEmail, replyTo, isDev } = resolveEmailConfig(c.env);
+    const result = await sendBroadcast(
+      db,
+      c.env.RESEND_API_KEY,
+      fromEmail,
+      {
+        sentById: user.id,
+        group: auditGroup,
+        subject: body.subject,
+        bodyMarkdown: body.body,
+        recipients: [lookup.email],
+      },
+      replyTo,
+      isDev,
+    );
+
+    return c.json(result);
+  }
+
+  // Group broadcast path (existing behavior)
+  const group = body.to as "all" | "admins" | "members";
+  const recipients = await getBroadcastRecipients(db, group);
 
   if (recipients.length === 0) {
     return c.json({ error: "No recipients match the selected group" }, 404);
@@ -5219,7 +5276,7 @@ adminRoutes.post("/notify", zValidator("json", broadcastSchema), async (c) => {
   if (body.dry_run) {
     return c.json({
       dry_run: true,
-      recipient_group: body.to,
+      recipient_group: group,
       recipient_count: recipients.length,
       recipients,
     });
@@ -5232,7 +5289,7 @@ adminRoutes.post("/notify", zValidator("json", broadcastSchema), async (c) => {
     fromEmail,
     {
       sentById: user.id,
-      group: body.to,
+      group,
       subject: body.subject,
       bodyMarkdown: body.body,
       recipients,

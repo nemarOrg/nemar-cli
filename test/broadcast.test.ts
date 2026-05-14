@@ -5,7 +5,11 @@
  */
 
 import { describe, expect, test } from "bun:test";
-import { buildBroadcastHtml, markdownToEmailHtml } from "../backend/src/services/broadcast";
+import {
+  broadcastRequestSchema,
+  buildBroadcastHtml,
+  markdownToEmailHtml,
+} from "../backend/src/services/broadcast";
 
 describe("markdownToEmailHtml", () => {
   test("converts paragraph text", () => {
@@ -104,5 +108,79 @@ describe("buildBroadcastHtml", () => {
     const result = buildBroadcastHtml("<script>alert(1)</script>", "<p>Safe</p>");
     expect(result).toContain("&lt;script&gt;");
     expect(result).not.toContain("<script>alert");
+  });
+});
+
+describe("broadcastRequestSchema (issue #381)", () => {
+  test("accepts group-only request", () => {
+    const result = broadcastRequestSchema.safeParse({
+      to: "admins",
+      subject: "Hello",
+      body: "Body",
+    });
+    expect(result.success).toBe(true);
+  });
+
+  test("accepts user-only request", () => {
+    const result = broadcastRequestSchema.safeParse({
+      user: "alice",
+      subject: "Hi Alice",
+      body: "Body",
+    });
+    expect(result.success).toBe(true);
+  });
+
+  test("rejects when both 'to' and 'user' are provided", () => {
+    const result = broadcastRequestSchema.safeParse({
+      to: "admins",
+      user: "alice",
+      subject: "Hi",
+      body: "Body",
+    });
+    expect(result.success).toBe(false);
+    if (!result.success) {
+      expect(result.error.issues.some((i) => /mutually|exactly one/i.test(i.message))).toBe(
+        true,
+      );
+    }
+  });
+
+  test("rejects when neither 'to' nor 'user' is provided", () => {
+    const result = broadcastRequestSchema.safeParse({
+      subject: "Subj",
+      body: "Body",
+    });
+    expect(result.success).toBe(false);
+  });
+
+  test("rejects invalid group value", () => {
+    const result = broadcastRequestSchema.safeParse({
+      to: "nobody",
+      subject: "Subj",
+      body: "Body",
+    });
+    expect(result.success).toBe(false);
+  });
+
+  test("rejects empty username", () => {
+    const result = broadcastRequestSchema.safeParse({
+      user: "",
+      subject: "Subj",
+      body: "Body",
+    });
+    expect(result.success).toBe(false);
+  });
+
+  test("propagates dry_run flag", () => {
+    const result = broadcastRequestSchema.safeParse({
+      user: "bob",
+      subject: "Subj",
+      body: "Body",
+      dry_run: true,
+    });
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.data.dry_run).toBe(true);
+    }
   });
 });
