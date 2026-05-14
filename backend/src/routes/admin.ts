@@ -84,6 +84,7 @@ import {
   setRepoVisibility,
   syncWorkflowTemplates,
   triggerArchiveGeneration,
+  validateDeployedWorkflows,
 } from "../services/github";
 import { getDatasetsToken } from "../services/github-auth";
 import { revokeUserIamAccess } from "../services/iam";
@@ -2318,15 +2319,11 @@ adminRoutes.post("/datasets/:id/ci", async (c) => {
     return c.json({ error: "Invalid repository format" }, 500);
   }
 
-  // ?validate=false lets callers (e.g. --all fleet deploys) skip the 2.5 s
-  // post-deploy sleep + listing call. The tradeoff: YAML parse errors won't
-  // surface immediately; they'll appear on the dataset's next CI run instead.
-  const validateParam = c.req.query("validate");
-  const shouldValidate = validateParam !== "false";
-
-  const result = await deployWorkflows(repoName, await getDatasetsToken(c.env), {
-    validate: shouldValidate,
-  });
+  // Post-deploy parseability check moved out of the Worker (issue #472).
+  // The CLI polls POST /admin/datasets/:id/ci/validate after this returns.
+  // The legacy ?validate=false query param is accepted but ignored — old
+  // CLIs that sent it still get a successful, fast deploy.
+  const result = await deployWorkflows(repoName, await getDatasetsToken(c.env));
 
   if (!result.success) {
     return c.json(
@@ -2349,12 +2346,7 @@ adminRoutes.post("/datasets/:id/ci", async (c) => {
         "ci_workflows_deployed",
         "dataset",
         datasetId,
-        JSON.stringify({
-          deployed_by: adminUser.username,
-          ...(result.validationErrors && result.validationErrors.length > 0
-            ? { validation_warnings: result.validationErrors }
-            : {}),
-        }),
+        JSON.stringify({ deployed_by: adminUser.username }),
       )
       .run();
   } catch (auditError) {
@@ -2365,11 +2357,46 @@ adminRoutes.post("/datasets/:id/ci", async (c) => {
     message: "CI workflows deployed successfully",
     dataset_id: datasetId,
     workflows_deployed: result.deployed,
-    // Surface post-deploy validation results (best-effort; non-fatal).
-    // Empty/undefined means GitHub Actions can parse every deployed file.
-    ...(result.validationErrors && result.validationErrors.length > 0
-      ? { validation_warnings: result.validationErrors }
-      : {}),
+  });
+});
+
+/**
+ * POST /admin/datasets/:id/ci/validate - One-shot parseability probe.
+ *
+ * Called by the CLI after the deploy endpoint returns. The CLI handles the
+ * indexing-lag wait and retry on its own machine, keeping the Worker
+ * wall-clock budget out of the loop (issue #472).
+ *
+ * Returns valid/missing/errors for the workflows defined by the current
+ * template set. Best-effort: a 500 from GitHub or a transport error lands in
+ * `errors` rather than failing the response.
+ */
+adminRoutes.post("/datasets/:id/ci/validate", async (c) => {
+  const datasetId = c.req.param("id");
+  const db = c.env.DB;
+
+  const dataset = await db
+    .prepare("SELECT dataset_id, github_repo FROM datasets WHERE dataset_id = ?")
+    .bind(datasetId)
+    .first<{ dataset_id: string; github_repo: string | null }>();
+
+  if (!dataset) {
+    return c.json({ error: "Dataset not found" }, 404);
+  }
+  if (!dataset.github_repo) {
+    return c.json({ error: "Dataset has no GitHub repository" }, 400);
+  }
+  const repoName = dataset.github_repo.split("/")[1];
+  if (!repoName) {
+    return c.json({ error: "Invalid repository format" }, 500);
+  }
+
+  const result = await validateDeployedWorkflows(repoName, await getDatasetsToken(c.env));
+  return c.json({
+    dataset_id: datasetId,
+    valid: result.valid,
+    missing: result.missing,
+    errors: result.errors,
   });
 });
 

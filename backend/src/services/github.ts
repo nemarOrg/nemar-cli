@@ -1687,12 +1687,11 @@ jobs:
  * that's missing from the list is silently broken.
  *
  * Best-effort: returns `{ valid: [], missing: [...], errors: [...] }` and
- * never throws. Caller decides what to do — `deployWorkflows` records the
- * missing names but does NOT fail the deployment (transient indexing lag
- * on GitHub's side would otherwise produce false negatives).
+ * never throws. Pagination is not implemented — `per_page=100` covers the 6
+ * NEMAR workflows comfortably; extend here if `getWorkflowTemplates()` grows
+ * past 100 files.
  *
- * `expectedFilenames` are basenames (e.g. `bids-validation.yml`) as returned
- * by `deployedNames` in `deployWorkflows`.
+ * `expectedFilenames` are basenames (e.g. `bids-validation.yml`).
  */
 async function validateWorkflowsParseable(
   repo: string,
@@ -1763,35 +1762,18 @@ async function validateWorkflowsParseable(
  * (no partial deployment, unlike the prior per-file loop that could
  * half-succeed). Callers MUST check `success` — this function never throws.
  *
- * After a successful commit, calls `GET /actions/workflows` to verify each
- * deployed file is parseable by GitHub Actions. Missing files surface as
- * `validationErrors` (non-fatal — `success` stays true, since GitHub's
- * workflow index lags the commit by a few seconds and the most common
- * cause of a missing entry is transient). Callers should also inspect
- * `validationErrors` when `success` is true.
- *
- * Retry strategy: probes at `validateDelayMs` (default 2500 ms), and if
- * any workflow is still missing, retries once after `validateDelayMs * 2`
- * (default 5000 ms). A disabled (`state: disabled_manually`) workflow is
- * still listed by GitHub Actions and passes this check — presence means the
- * file is parseable; `state` is intentionally not checked here.
- *
- * @param options.validate - Set to false to skip the post-deploy check
- *   entirely. Use for fleet deploys where the per-dataset sleep would blow
- *   the Cloudflare Worker wall-clock budget. Tradeoff: YAML parse errors
- *   won't surface until the dataset's next CI run.
- * @param options.validateDelayMs - Initial wait before the first probe.
- *   Defaults to 2500 ms (empirically chosen for GitHub's indexing lag).
+ * Post-deploy parseability validation lives in `validateDeployedWorkflows()`
+ * and is driven by the CLI after this call returns (issue #472). Keeping the
+ * sleep + listing retry out of the Worker preserves the request wall-clock
+ * budget; the CLI polls on the user's machine instead.
  */
 export async function deployWorkflows(
   repo: string,
   pat: string,
-  options?: { validate?: boolean; validateDelayMs?: number },
 ): Promise<{
   success: boolean;
   errors: string[];
   deployed: string[];
-  validationErrors?: string[];
 }> {
   const workflows = getWorkflowTemplates();
   const files: TreeFile[] = workflows.map((w) => ({ path: w.path, content: w.content }));
@@ -1810,54 +1792,27 @@ export async function deployWorkflows(
     };
   }
 
-  // Best-effort post-deploy validation. Default: on. Tests can disable via
-  // `validate: false` so we don't hammer the GitHub API in test loops.
-  const shouldValidate = options?.validate ?? true;
-  if (!shouldValidate) {
-    return { success: true, errors: [], deployed: deployedNames };
-  }
+  return { success: true, errors: [], deployed: deployedNames };
+}
 
-  // Give GitHub a moment to index the new workflow files. Without this, the
-  // listing call frequently returns empty even when the files committed
-  // successfully. Tunable for tests.
-  //
-  // Retry strategy: probe at 2.5 s; if any workflow is still missing, wait
-  // another 5 s and try once more. GitHub's workflow index typically catches
-  // up within 3-4 s; two attempts cover the slow tail while keeping total
-  // worst-case wait under 10 s. Cap: 2 retries total.
-  const delayMs = options?.validateDelayMs ?? 2500;
-  const retryDelayMs = options?.validateDelayMs !== undefined ? options.validateDelayMs * 2 : 5000;
-
-  let validation = await (async () => {
-    if (delayMs > 0) {
-      await new Promise((resolve) => setTimeout(resolve, delayMs));
-    }
-    return validateWorkflowsParseable(repo, deployedNames, pat);
-  })();
-
-  if (validation.missing.length > 0 && validation.errors.length === 0) {
-    // First probe found missing workflows — could be indexing lag, not a parse
-    // error. Retry once after a longer wait before surfacing as a warning.
-    if (retryDelayMs > 0) {
-      await new Promise((resolve) => setTimeout(resolve, retryDelayMs));
-    }
-    validation = await validateWorkflowsParseable(repo, deployedNames, pat);
-  }
-
-  const validationErrors: string[] = [];
-  if (validation.missing.length > 0) {
-    validationErrors.push(
-      `Workflows committed but not listed by GitHub Actions (possible YAML parse error or indexing lag): ${validation.missing.join(", ")}`,
-    );
-  }
-  validationErrors.push(...validation.errors);
-
-  return {
-    success: true,
-    errors: [],
-    deployed: deployedNames,
-    validationErrors: validationErrors.length > 0 ? validationErrors : undefined,
-  };
+/**
+ * One-shot parseability probe for the workflows `deployWorkflows()` writes.
+ * Returns the listing diff against `getWorkflowTemplates()` so callers can
+ * surface which (if any) deployed files GitHub Actions failed to parse.
+ *
+ * No sleeps, no retries — the CLI orchestrates timing and retry (the whole
+ * point of issue #472 was getting the per-attempt sleep out of the Worker).
+ * Best-effort: never throws; transport / API errors land in `errors`.
+ */
+export async function validateDeployedWorkflows(
+  repo: string,
+  pat: string,
+): Promise<{ valid: string[]; missing: string[]; errors: string[] }> {
+  const expectedNames = getWorkflowTemplates().map((w) => {
+    const parts = w.path.split("/");
+    return parts[parts.length - 1] ?? w.path;
+  });
+  return validateWorkflowsParseable(repo, expectedNames, pat);
 }
 
 /**
