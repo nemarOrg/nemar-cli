@@ -3889,6 +3889,9 @@ Examples:
     } catch (error) {
       spinner.fail("Dataset not found");
       const msg = error instanceof Error ? error.message : String(error);
+      // Echo a plain stdout error so callers grepping stdout can see it
+      // (ora writes the spinner line to stderr).
+      console.log(chalk.red(`Error: Dataset ${datasetId} not found`));
       console.log(chalk.red(`  ${msg}`));
       process.exit(1);
     }
