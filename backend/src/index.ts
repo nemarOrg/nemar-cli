@@ -24,6 +24,7 @@ import { maintenanceMode } from "./middleware/maintenance";
 import { rateLimiter } from "./middleware/rateLimit";
 import { adminRoutes } from "./routes/admin";
 import { authRoutes } from "./routes/auth";
+import { dataRoutes } from "./routes/data";
 import { datasetRoutes } from "./routes/datasets";
 import { sandboxRoutes } from "./routes/sandbox";
 import { userRoutes } from "./routes/users";
@@ -111,6 +112,11 @@ api.route("/admin", adminRoutes);
 api.route("/datasets", datasetRoutes);
 api.route("/sandbox", sandboxRoutes);
 api.route("/webhooks", webhooks);
+// Path-based mount of the data sub-app so it's reachable on every hostname
+// (api.nemar.org, *.workers.dev dev fallback, etc.). The Worker also serves
+// the same handlers at the root path when the request hits data.nemar.org;
+// see the hostname fork in `app` below.
+api.route("/data", dataRoutes);
 
 // 404 handler
 api.notFound((c) => {
@@ -154,6 +160,19 @@ api.onError((err, c) => {
 // api.nemar.org/* (and *.workers.dev/*) at root and the legacy
 // api.osc.earth/nemar/* prefix.
 const app = new Hono<{ Bindings: Bindings; Variables: Variables }>();
+
+// data.nemar.org dispatches to the data sub-app at root, so the public
+// contract is `data.nemar.org/<id>/<version>/...` without a `/data/` prefix.
+// On every other hostname the same handlers are reachable under `/data/...`
+// via the path-based mount above.
+app.use("*", async (c, next) => {
+  const host = (c.req.header("host") ?? "").toLowerCase();
+  if (host === "data.nemar.org") {
+    return dataRoutes.fetch(c.req.raw, c.env, c.executionCtx);
+  }
+  return next();
+});
+
 app.route("/nemar", api);
 app.route("/", api);
 
