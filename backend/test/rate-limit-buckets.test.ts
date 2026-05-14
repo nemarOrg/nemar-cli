@@ -34,12 +34,21 @@ type AppEnv = { Bindings: Bindings; Variables: Variables };
 // --------------------------------------------------------------------------
 
 class InMemoryCache implements Cache {
-  private store = new Map<string, { body: string; headers: Record<string, string> }>();
+  private store = new Map<string, { body: string; headers: Record<string, string>; expiresAt: number }>();
+
+  // Injected clock so tests can advance time without real sleeps.
+  // Defaults to the real wall clock.
+  getNow: () => number = () => Date.now();
 
   async match(req: RequestInfo | URL): Promise<Response | undefined> {
     const url = req instanceof Request ? req.url : String(req);
     const entry = this.store.get(url);
     if (!entry) return undefined;
+    // Honour TTL: expired entries are invisible (matches CF Cache API behavior).
+    if (this.getNow() >= entry.expiresAt) {
+      this.store.delete(url);
+      return undefined;
+    }
     return new Response(entry.body, { headers: entry.headers });
   }
 
@@ -50,7 +59,11 @@ class InMemoryCache implements Cache {
     res.headers.forEach((v, k) => {
       headers[k] = v;
     });
-    this.store.set(url, { body, headers });
+    // Parse Cache-Control: max-age=N to compute expiry using the injected clock.
+    const cc = res.headers.get("Cache-Control") || "";
+    const maxAgeMatch = cc.match(/max-age=(\d+)/);
+    const maxAgeSec = maxAgeMatch ? Number.parseInt(maxAgeMatch[1], 10) : 60;
+    this.store.set(url, { body, headers, expiresAt: this.getNow() + maxAgeSec * 1000 });
   }
 
   async add(): Promise<void> {
@@ -119,7 +132,7 @@ describe("__selectBucket", () => {
     const sel = __selectBucket("/admin/publish/nm000110/approve", `Bearer ${VALID_TOKEN}`, "10.0.0.1");
     expect(sel.keyKind).toBe("token");
     expect(sel.rawKey).toBe(VALID_TOKEN);
-    expect(sel.maxRequests).toBe(__limits.AUTH_MAX_REQUESTS_AUTHED);
+    expect(sel.maxRequests).toBe(__limits.TOKEN_MAX_REQUESTS_AUTHED);
     expect(sel.maxRequests).toBeGreaterThan(__limits.MAX_REQUESTS);
   });
 
@@ -147,7 +160,7 @@ describe("__selectBucket", () => {
     // silently re-introduced.
     const sel = __selectBucket("/admin/users", `Bearer ${VALID_TOKEN}`, "10.0.0.1");
     expect(sel.keyKind).toBe("token");
-    expect(sel.maxRequests).toBe(__limits.AUTH_MAX_REQUESTS_AUTHED);
+    expect(sel.maxRequests).toBe(__limits.TOKEN_MAX_REQUESTS_AUTHED);
   });
 });
 
@@ -279,13 +292,13 @@ describe("rateLimiter end-to-end", () => {
 
     let okCount = 0;
     let rateLimitedCount = 0;
-    const total = __limits.AUTH_MAX_REQUESTS_AUTHED + 25;
+    const total = __limits.TOKEN_MAX_REQUESTS_AUTHED + 25;
     for (let i = 0; i < total; i++) {
       const res = await hit(app, env, "/admin/users", headers);
       if (res.status === 200) okCount++;
       else if (res.status === 429) rateLimitedCount++;
     }
-    expect(okCount).toBe(__limits.AUTH_MAX_REQUESTS_AUTHED);
+    expect(okCount).toBe(__limits.TOKEN_MAX_REQUESTS_AUTHED);
     expect(rateLimitedCount).toBe(25);
   });
 
@@ -314,5 +327,36 @@ describe("rateLimiter end-to-end", () => {
       const res = await hit(app, env, "/datasets", headers);
       expect(res.status).toBe(200);
     }
+  });
+
+  test("bucket resets after the TTL window expires", async () => {
+    // Exercise the window-expiry path: exhaust the IP bucket, advance
+    // the injected clock past WINDOW_SIZE seconds so cached entries are
+    // treated as expired, then confirm the client gets a fresh quota.
+    // This covers the TTL/window-reset code path that `beforeEach` clears
+    // globally but never exercises within a single window.
+    let fakeNow = Date.now();
+    ourCache.getNow = () => fakeNow;
+
+    const { app, env } = buildApp(PROD_ENV);
+    const headers = { "CF-Connecting-IP": "10.99.0.7" };
+
+    // Exhaust the unauthenticated IP bucket.
+    for (let i = 0; i < __limits.MAX_REQUESTS; i++) {
+      const res = await hit(app, env, "/datasets", headers);
+      expect(res.status).toBe(200);
+    }
+    // Next request must be rate-limited.
+    expect((await hit(app, env, "/datasets", headers)).status).toBe(429);
+
+    // Advance the clock past the 60s window so all cache entries expire.
+    fakeNow += (__limits.WINDOW_SIZE + 1) * 1000;
+
+    // The bucket is now expired; the client should get a fresh quota.
+    const resetRes = await hit(app, env, "/datasets", headers);
+    expect(resetRes.status).toBe(200);
+
+    // Restore the real clock for subsequent tests.
+    ourCache.getNow = () => Date.now();
   });
 });

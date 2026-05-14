@@ -8,14 +8,14 @@
  *   - Unauthenticated requests are keyed by IP and capped at 100/60s
  *     (`MAX_REQUESTS`).
  *   - Authenticated requests are keyed by the SHA-256 hash of the
- *     bearer token and capped at 500/60s (`AUTH_MAX_REQUESTS_AUTHED`).
+ *     bearer token and capped at 500/60s (`TOKEN_MAX_REQUESTS_AUTHED`).
  *     This is the fix for #275: admin orchestration that fans out into
  *     many sequential backend calls (publication approve, CI deploy
  *     loops) used to drown out the per-IP bucket every time several
  *     datasets shipped in quick succession. Per-token bucketing means
  *     one admin's batch can't starve another admin's quota, and the
  *     500/60s cap still bounds a malformed loop hammering the worker.
- *   - Auth endpoints (`/auth/*` listed in `AUTH_PATHS`) keep their
+ *   - Auth endpoints (the explicit set in `AUTH_PATHS`) keep their
  *     stricter 10/60s cap and stay keyed by IP — those run pre-auth so
  *     a token isn't available, and they need to resist password
  *     guessing across IPs without any single bucket being unbounded.
@@ -38,7 +38,7 @@ const MAX_REQUESTS = 100; // unauthenticated, per IP
 // queue of admin operations, and still 429s on a runaway loop (which is
 // the floor the limiter exists to provide). Not exposed as configuration
 // — the appropriate number lives in code review, not at runtime.
-const AUTH_MAX_REQUESTS_AUTHED = 500;
+const TOKEN_MAX_REQUESTS_AUTHED = 500;
 
 // Stricter limits for auth endpoints
 const AUTH_MAX_REQUESTS = 10;
@@ -96,7 +96,7 @@ export function __readBearerTokenFromHeader(authHeader: string | undefined): str
  * limit but raising the cap for authenticated buckets preserves the
  * floor without the floor being absent.
  */
-export interface BucketSelection {
+export interface __BucketSelection {
   keyKind: "auth-ip" | "ip" | "token";
   /** Pre-hash key material: the IP, or the raw bearer token. */
   rawKey: string;
@@ -107,13 +107,13 @@ export function __selectBucket(
   path: string,
   authHeader: string | undefined,
   ip: string,
-): BucketSelection {
-  if (AUTH_PATHS.some((p) => path.startsWith(p))) {
+): __BucketSelection {
+  if (AUTH_PATHS.some((p) => path === p || path.startsWith(p + "/") || path.startsWith(p + "?"))) {
     return { keyKind: "auth-ip", rawKey: ip, maxRequests: AUTH_MAX_REQUESTS };
   }
   const bearer = __readBearerTokenFromHeader(authHeader);
   if (bearer) {
-    return { keyKind: "token", rawKey: bearer, maxRequests: AUTH_MAX_REQUESTS_AUTHED };
+    return { keyKind: "token", rawKey: bearer, maxRequests: TOKEN_MAX_REQUESTS_AUTHED };
   }
   return { keyKind: "ip", rawKey: ip, maxRequests: MAX_REQUESTS };
 }
@@ -140,7 +140,10 @@ export async function rateLimiter(c: RateLimitContext, next: Next) {
   }
 
   const path = c.req.path;
-  const ip = c.req.header("CF-Connecting-IP") || c.req.header("X-Forwarded-For") || "unknown";
+  // Fall back to a random UUID instead of the shared "unknown" sentinel
+  // so headerless requests each get their own bucket rather than pooling.
+  const ip =
+    c.req.header("CF-Connecting-IP") || c.req.header("X-Forwarded-For") || crypto.randomUUID();
 
   const { keyKind, rawKey, maxRequests } = __selectBucket(path, c.req.header("Authorization"), ip);
 
@@ -215,7 +218,7 @@ export async function rateLimiter(c: RateLimitContext, next: Next) {
 // analysis flags any production code that tries to import them.
 export const __limits = {
   AUTH_MAX_REQUESTS,
-  AUTH_MAX_REQUESTS_AUTHED,
+  TOKEN_MAX_REQUESTS_AUTHED,
   MAX_REQUESTS,
   WINDOW_SIZE,
 };
