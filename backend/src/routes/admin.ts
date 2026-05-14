@@ -5333,6 +5333,9 @@ adminRoutes.post("/notify", zValidator("json", broadcastRequestSchema), async (c
       isDev,
     );
 
+    if (result.error === "email_service_unconfigured") {
+      return c.json({ error: "email_service_unconfigured" }, 500);
+    }
     return c.json(result);
   }
 
@@ -5369,5 +5372,8 @@ adminRoutes.post("/notify", zValidator("json", broadcastRequestSchema), async (c
     isDev,
   );
 
+  if (result.error === "email_service_unconfigured") {
+    return c.json({ error: "email_service_unconfigured" }, 500);
+  }
   return c.json(result);
 });
