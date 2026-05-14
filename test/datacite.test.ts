@@ -365,6 +365,113 @@ describe("buildDataCiteXml", () => {
       }),
     ).toThrow("publicationYear must be a valid number");
   });
+
+  // Issue #459: EZID validates against the DataCite kernel-4 XSD, which
+  // requires `<funderName>`, `<creatorName>`, and `<contributorName>` to
+  // each have at least one character. Whitespace-only or empty entries
+  // used to slip through and trip EZID's minLength check, taking the
+  // whole identifier down. The XML builder filters them out, and
+  // `bidsToDataCite` filters at the source so neither path emits
+  // schema-invalid output.
+
+  test("skips empty and whitespace-only funder entries (issue #459)", () => {
+    const metadata: DataCiteMetadata = {
+      identifier: "10.82901/NEMAR.FUNDERS",
+      creators: [{ name: "Test, Author" }],
+      titles: ["Test"],
+      publisher: "NEMAR",
+      publicationYear: 2026,
+      resourceTypeGeneral: "Dataset",
+      fundingReferences: [
+        { funderName: "NIH" },
+        { funderName: "   " },
+        { funderName: "" },
+      ],
+    };
+
+    const xml = buildDataCiteXml(metadata);
+
+    // Exactly one funderName element survived
+    const funderMatches = xml.match(/<funderName>/g) ?? [];
+    expect(funderMatches.length).toBe(1);
+    expect(xml).toContain("<funderName>NIH</funderName>");
+    // No empty/self-closing tag
+    expect(xml).not.toContain("<funderName></funderName>");
+    expect(xml).not.toContain("<funderName/>");
+  });
+
+  test("drops entire fundingReferences block when every entry is empty", () => {
+    const metadata: DataCiteMetadata = {
+      identifier: "10.82901/NEMAR.ALLEMPTY",
+      creators: [{ name: "Test, Author" }],
+      titles: ["Test"],
+      publisher: "NEMAR",
+      publicationYear: 2026,
+      resourceTypeGeneral: "Dataset",
+      fundingReferences: [{ funderName: "" }, { funderName: "  " }],
+    };
+
+    const xml = buildDataCiteXml(metadata);
+
+    expect(xml).not.toContain("<fundingReferences>");
+    expect(xml).not.toContain("<funderName");
+  });
+
+  test("skips contributors with empty or whitespace names (issue #459)", () => {
+    const metadata: DataCiteMetadata = {
+      identifier: "10.82901/NEMAR.CONTRIBS",
+      creators: [{ name: "Test, Author" }],
+      titles: ["Test"],
+      publisher: "NEMAR",
+      publicationYear: 2026,
+      resourceTypeGeneral: "Dataset",
+      contributors: [
+        {
+          name: "Real Curator",
+          contributorType: "DataCurator",
+          nameType: "Personal",
+        },
+        { name: "", contributorType: "Other", nameType: "Personal" },
+        { name: "   ", contributorType: "Other", nameType: "Personal" },
+      ],
+    };
+
+    const xml = buildDataCiteXml(metadata);
+
+    const contributorMatches = xml.match(/<contributorName/g) ?? [];
+    expect(contributorMatches.length).toBe(1);
+    expect(xml).toContain("Real Curator");
+    expect(xml).not.toContain("<contributorName></contributorName>");
+  });
+
+  test("throws when every creator name is empty (issue #459)", () => {
+    expect(() =>
+      buildDataCiteXml({
+        identifier: "10.82901/NEMAR.NOCREATORS",
+        creators: [{ name: "" }, { name: "   " }],
+        titles: ["Test"],
+        publisher: "NEMAR",
+        publicationYear: 2026,
+        resourceTypeGeneral: "Dataset",
+      }),
+    ).toThrow(/non-empty name/);
+  });
+
+  test("filters empty creator entries but keeps valid ones (issue #459)", () => {
+    const metadata: DataCiteMetadata = {
+      identifier: "10.82901/NEMAR.MIXEDCREATORS",
+      creators: [{ name: "Real, Author" }, { name: "" }, { name: "   " }],
+      titles: ["Test"],
+      publisher: "NEMAR",
+      publicationYear: 2026,
+      resourceTypeGeneral: "Dataset",
+    };
+
+    const xml = buildDataCiteXml(metadata);
+    const creatorMatches = xml.match(/<creatorName/g) ?? [];
+    expect(creatorMatches.length).toBe(1);
+    expect(xml).toContain("Real, Author");
+  });
 });
 
 describe("bidsToDataCite", () => {
@@ -512,6 +619,55 @@ describe("bidsToDataCite", () => {
     expect(metadata.fundingReferences).toHaveLength(2);
     expect(metadata.fundingReferences?.[0]?.funderName).toBe("NIH R01-NS12345");
     expect(metadata.fundingReferences?.[1]?.funderName).toBe("NSF BCS-9876543");
+  });
+
+  test("filters empty BIDS Funding entries at the source (issue #459)", () => {
+    const bids = {
+      Name: "Test",
+      Authors: ["Doe, John"],
+      Funding: ["NIH", "", "   ", "NSF"],
+    };
+
+    const metadata = bidsToDataCite("nm000103", "10.82901/NEMAR.ABC", bids);
+
+    // Only the two real funders survive
+    expect(metadata.fundingReferences).toHaveLength(2);
+    expect(metadata.fundingReferences?.[0]?.funderName).toBe("NIH");
+    expect(metadata.fundingReferences?.[1]?.funderName).toBe("NSF");
+
+    // And the downstream XML stays schema-valid
+    const xml = buildDataCiteXml(metadata);
+    expect(xml).not.toContain("<funderName></funderName>");
+    expect(xml).not.toContain("<funderName/>");
+  });
+
+  test("filters empty enrichment fundingInfo entries (issue #459)", () => {
+    const bids = { Name: "Test", Authors: ["Doe, John"] };
+    const enrichment = {
+      fundingInfo: [
+        { funderName: "Real Funder" },
+        { funderName: "" },
+        { funderName: "   " },
+      ],
+    };
+
+    const metadata = bidsToDataCite("nm000103", "10.82901/NEMAR.ABC", bids, enrichment);
+
+    expect(metadata.fundingReferences).toHaveLength(1);
+    expect(metadata.fundingReferences?.[0]?.funderName).toBe("Real Funder");
+  });
+
+  test("filters empty BIDS Authors entries at the source (issue #459)", () => {
+    const bids = {
+      Name: "Test",
+      Authors: ["Doe, John", "", "  ", "Smith, Jane"],
+    };
+
+    const metadata = bidsToDataCite("nm000103", "10.82901/NEMAR.ABC", bids);
+
+    expect(metadata.creators).toHaveLength(2);
+    expect(metadata.creators[0]?.name).toBe("Doe, John");
+    expect(metadata.creators[1]?.name).toBe("Smith, Jane");
   });
 
   test("prefers enrichment fundingInfo over BIDS Funding", () => {

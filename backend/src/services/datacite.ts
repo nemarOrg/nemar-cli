@@ -824,8 +824,21 @@ export function buildDataCiteXml(metadata: DataCiteMetadata): string {
   lines.push(`  <identifier identifierType="DOI">${escapeXml(metadata.identifier)}</identifier>`);
 
   // 2. Creators
+  //
+  // Issue #459: DataCite kernel-4 enforces `minLength=1` on `<creatorName>`.
+  // A creator object with an empty / whitespace `name` would emit
+  // `<creatorName/>` and trip EZID's XSD validation, taking the whole
+  // identifier down. The validation at the top of this function already
+  // requires at least one creator; the filter here just protects callers
+  // who pre-populated `creators` and whose pipeline produced a junk entry.
+  const validCreators = metadata.creators.filter(
+    (c) => typeof c.name === "string" && c.name.trim().length > 0,
+  );
+  if (validCreators.length === 0) {
+    throw new Error("DataCite XML: at least one creator with a non-empty name is required");
+  }
   lines.push("  <creators>");
-  for (const creator of metadata.creators) {
+  for (const creator of validCreators) {
     lines.push(buildCreatorXml(creator));
   }
   lines.push("  </creators>");
@@ -875,12 +888,19 @@ export function buildDataCiteXml(metadata: DataCiteMetadata): string {
   }
 
   // 7. Contributors
+  // Issue #459 defense: same `minLength=1` constraint on
+  // `<contributorName>`; drop entries with an empty/whitespace name.
   if (metadata.contributors && metadata.contributors.length > 0) {
-    lines.push("  <contributors>");
-    for (const contributor of metadata.contributors) {
-      lines.push(buildContributorXml(contributor));
+    const validContributors = metadata.contributors.filter(
+      (c) => typeof c.name === "string" && c.name.trim().length > 0,
+    );
+    if (validContributors.length > 0) {
+      lines.push("  <contributors>");
+      for (const contributor of validContributors) {
+        lines.push(buildContributorXml(contributor));
+      }
+      lines.push("  </contributors>");
     }
-    lines.push("  </contributors>");
   }
 
   // 8. Dates
@@ -1004,29 +1024,40 @@ export function buildDataCiteXml(metadata: DataCiteMetadata): string {
   }
 
   // 19. FundingReferences
+  //
+  // Issue #459: the kernel-4 XSD enforces `minLength=1` on `<funderName>`,
+  // so any entry whose normalized funderName is empty must be dropped
+  // before emitting. BIDS `Funding` is free-form and has historically
+  // included blank strings. Filter at the XML builder so a direct caller
+  // (not via `bidsToDataCite`) can't bypass the source-side filter.
   if (metadata.fundingReferences && metadata.fundingReferences.length > 0) {
-    lines.push("  <fundingReferences>");
-    for (const fund of metadata.fundingReferences) {
-      lines.push("    <fundingReference>");
-      lines.push(`      <funderName>${escapeXml(fund.funderName)}</funderName>`);
-      if (fund.funderIdentifier) {
-        const typeAttr = fund.funderIdentifierType
-          ? ` funderIdentifierType="${escapeXml(fund.funderIdentifierType)}"`
-          : "";
-        lines.push(
-          `      <funderIdentifier${typeAttr}>${escapeXml(fund.funderIdentifier)}</funderIdentifier>`,
-        );
+    const validFunders = metadata.fundingReferences.filter(
+      (f) => typeof f.funderName === "string" && f.funderName.trim().length > 0,
+    );
+    if (validFunders.length > 0) {
+      lines.push("  <fundingReferences>");
+      for (const fund of validFunders) {
+        lines.push("    <fundingReference>");
+        lines.push(`      <funderName>${escapeXml(fund.funderName.trim())}</funderName>`);
+        if (fund.funderIdentifier) {
+          const typeAttr = fund.funderIdentifierType
+            ? ` funderIdentifierType="${escapeXml(fund.funderIdentifierType)}"`
+            : "";
+          lines.push(
+            `      <funderIdentifier${typeAttr}>${escapeXml(fund.funderIdentifier)}</funderIdentifier>`,
+          );
+        }
+        if (fund.awardNumber) {
+          const uriAttr = fund.awardURI ? ` awardURI="${escapeXml(fund.awardURI)}"` : "";
+          lines.push(`      <awardNumber${uriAttr}>${escapeXml(fund.awardNumber)}</awardNumber>`);
+        }
+        if (fund.awardTitle) {
+          lines.push(`      <awardTitle>${escapeXml(fund.awardTitle)}</awardTitle>`);
+        }
+        lines.push("    </fundingReference>");
       }
-      if (fund.awardNumber) {
-        const uriAttr = fund.awardURI ? ` awardURI="${escapeXml(fund.awardURI)}"` : "";
-        lines.push(`      <awardNumber${uriAttr}>${escapeXml(fund.awardNumber)}</awardNumber>`);
-      }
-      if (fund.awardTitle) {
-        lines.push(`      <awardTitle>${escapeXml(fund.awardTitle)}</awardTitle>`);
-      }
-      lines.push("    </fundingReference>");
+      lines.push("  </fundingReferences>");
     }
-    lines.push("  </fundingReferences>");
   }
 
   // 20. RelatedItems - omitted for now; handled when needed via relatedIdentifiers
@@ -1257,11 +1288,16 @@ export function bidsToDataCite(
   enrichment?: DataCiteEnrichment,
   options?: { modalities?: string[] },
 ): DataCiteMetadata {
-  // Safely coerce fields from potentially untyped input
+  // Safely coerce fields from potentially untyped input.
+  //
+  // Issue #459: DataCite kernel-4 enforces `minLength=1` on `<creatorName>`.
+  // BIDS `Authors` is a free-form array; if any entry is empty or whitespace
+  // it must be dropped before reaching the XML builder, otherwise EZID
+  // rejects the document entirely.
   const rawAuthors = bidsDescription.Authors;
   const authorList: string[] = Array.isArray(rawAuthors)
-    ? rawAuthors.filter((a): a is string => typeof a === "string")
-    : typeof rawAuthors === "string"
+    ? rawAuthors.filter((a): a is string => typeof a === "string" && a.trim().length > 0)
+    : typeof rawAuthors === "string" && rawAuthors.trim().length > 0
       ? [rawAuthors]
       : [];
 
@@ -1430,7 +1466,10 @@ export function bidsToDataCite(
 
   // Add uploader as DataCurator if not already listed as an author.
   // uploaderName is a NEMAR username (not a formal name), so we use it as-is.
-  if (enrichment?.uploaderName) {
+  // Issue #459 defense: only attach the contributor when the name is
+  // non-empty; otherwise the XML builder would emit `<contributorName/>`
+  // and EZID would reject the document.
+  if (enrichment?.uploaderName && enrichment.uploaderName.trim().length > 0) {
     const uploaderLower = enrichment.uploaderName.toLowerCase();
     // Word-boundary match to avoid false positives (e.g., "li" matching "Elizabeth")
     const boundary = new RegExp(
@@ -1452,16 +1491,27 @@ export function bidsToDataCite(
   const alternateIdentifiers = [{ identifier: datasetId, type: "NEMAR" }];
 
   // Funding
+  //
+  // Issue #459: EZID's DataCite XML schema enforces `minLength=1` on
+  // `<funderName>`. BIDS `Funding` is a free-form string array, so it is
+  // legal upstream to record `[""]`, `["  "]`, or `["NIH", ""]`. Emitting
+  // those verbatim produces `<funderName/>` and EZID rejects the entire
+  // identifier. Filter out any entry whose trimmed funderName is empty
+  // before it can reach the XML builder.
   const fundingReferences: DataCiteFundingReference[] = [];
   if (enrichment?.fundingInfo) {
-    fundingReferences.push(...enrichment.fundingInfo);
+    for (const f of enrichment.fundingInfo) {
+      if (typeof f.funderName === "string" && f.funderName.trim().length > 0) {
+        fundingReferences.push(f);
+      }
+    }
   } else {
     const rawFunding = bidsDescription.Funding;
     const funding = Array.isArray(rawFunding)
-      ? rawFunding.filter((f): f is string => typeof f === "string")
+      ? rawFunding.filter((f): f is string => typeof f === "string" && f.trim().length > 0)
       : [];
     for (const f of funding) {
-      fundingReferences.push({ funderName: f });
+      fundingReferences.push({ funderName: f.trim() });
     }
   }
 
