@@ -198,9 +198,14 @@ function getStore(): Conf<StoreSchema> {
   });
   cachedStoreDir = dir;
 
-  // Run structural migrations once per dir. Re-entrant safe: the recursive
-  // getStore() call inside migrateConfig()/migrateApiUrl() short-circuits on
-  // the cache hit set above before this guard re-fires.
+  // Run structural migrations once per dir. Re-entrancy is gated by the
+  // cache-hit short-circuit at the top of this function (cachedStore is set
+  // a few lines above): the recursive getStore() call inside
+  // migrateConfig()/migrateApiUrl() hits that early return before this
+  // block can re-fire. migrationsRunForDirs additionally guards against
+  // the dir-flip-and-revisit case (e.g. tests that toggle NEMAR_CONFIG_DIR
+  // between two known paths) — migrations stay idempotent and don't
+  // re-execute when a previously-seen dir comes back into view.
   if (!migrationsRunForDirs.has(dir)) {
     migrationsRunForDirs.add(dir);
     migrateConfig();
@@ -208,6 +213,18 @@ function getStore(): Conf<StoreSchema> {
   }
 
   return cachedStore;
+}
+
+/**
+ * Drop the in-memory store cache. Tests that rely on bun's `--rerun-each` or
+ * that need a guaranteed-fresh Conf instance for a previously-seen dir can
+ * call this to force the next getStore() to rebuild and re-run migrations.
+ * Not exported for production use.
+ */
+export function __resetStoreCacheForTesting(): void {
+  cachedStore = null;
+  cachedStoreDir = null;
+  migrationsRunForDirs.clear();
 }
 
 const ACCOUNT_FIELDS: (keyof Config)[] = [
@@ -358,8 +375,8 @@ export function isSandboxCompleted(): boolean {
  */
 export function setConfig<K extends keyof Config>(key: K, value: Config[K]): void {
   const config = getStore();
-  const name = getActiveAccountName() || "default";
-  const accounts = getAccountsMap();
+  const name = (config.get("activeAccount") as string | undefined) || "default";
+  const accounts = (config.get("accounts") as Record<string, Config>) || {};
 
   if (!accounts[name]) {
     accounts[name] = { apiUrl: DEFAULT_API_URL };

@@ -119,10 +119,11 @@ describe("migrateApiUrl", () => {
   });
 
   test("only top-level field stale: accounts already clean, still drops the field", async () => {
-    // Distinct config dir so the module-level Conf store reload picks up
-    // fresh state; the previous tests already locked NEMAR_CONFIG_DIR for
-    // this process, so we drive migrateApiUrl directly with a hand-rolled
-    // store to exercise the branch.
+    // Overwrite the config file with a clean accounts map plus a stale
+    // top-level apiUrl. Conf.store re-reads from disk on every access, so
+    // migrateApiUrl() sees this freshly written snapshot even though the
+    // cached Conf instance was built for testDir in earlier tests. This
+    // exercises the "drop stale top-level only" branch in isolation.
     const { migrateApiUrl } = await import("../src/lib/config.ts");
     writeFileSync(
       configPath,
