@@ -84,6 +84,7 @@ import {
   configureS3Remote,
   copyToAnnexRemote,
   countPendingDownload,
+  detectImportMarker,
   dropFiles,
   dropUnusedAnnexObjects,
   enableS3Remote,
@@ -1983,6 +1984,34 @@ Examples:
       }
 
       spinner.succeed("Metadata cloned");
+    }
+
+    // OpenNeuro-sourced datasets only get their git-annex S3 objects after
+    // the import workflow's final push (which carries the .nemar/metadata.json
+    // commit). If the marker commit is missing locally, the porting matrix
+    // job is still mid-flight — the subsequent `git annex get` would fail
+    // with a cryptic "remote unavailable" error. Bail early with a clear
+    // retry hint. See nemarOrg/nemar-cli#460.
+    if (datasetInfo.source === "openneuro" && options.data !== false) {
+      const marker = await detectImportMarker(absoluteOutput);
+      if (marker === "absent") {
+        console.log();
+        console.log(chalk.yellow("Porting still in progress."));
+        console.log(
+          chalk.dim(
+            "  This dataset is being imported from OpenNeuro. Data files are not yet available.",
+          ),
+        );
+        console.log(
+          chalk.dim(
+            "  The metadata-only clone is at the path above. Retry the download in ~5 minutes,",
+          ),
+        );
+        console.log(
+          chalk.dim(`  or run 'cd ${absoluteOutput} && nemar dataset get' once porting completes.`),
+        );
+        process.exit(1);
+      }
     }
 
     // For private datasets, fetch temporary S3 download credentials
@@ -4006,6 +4035,28 @@ Examples:
         dsInfo = await getDataset(getDatasetId);
       } catch {
         // Dataset info fetch failed; proceed without creds (will use publicurl if public)
+      }
+
+      // OpenNeuro-sourced datasets only get their git-annex S3 objects after
+      // the import workflow's final push (which carries the .nemar/metadata.json
+      // commit). If the marker commit is missing locally, the porting matrix
+      // job is still mid-flight — `git annex get` will fail with a cryptic
+      // "remote unavailable" error. Bail early with a clear retry hint.
+      // See nemarOrg/nemar-cli#460.
+      if (dsInfo?.source === "openneuro") {
+        const marker = await detectImportMarker(cwd);
+        if (marker === "absent") {
+          console.log(chalk.yellow("Porting still in progress."));
+          console.log(
+            chalk.dim(
+              "  This dataset is being imported from OpenNeuro. Data files are not yet available.",
+            ),
+          );
+          console.log(
+            chalk.dim(`  Retry in ~5 minutes, or run 'nemar dataset status' to check progress.`),
+          );
+          process.exit(1);
+        }
       }
 
       if (dsInfo && dsInfo.visibility !== "public") {

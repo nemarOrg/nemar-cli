@@ -1594,6 +1594,45 @@ export async function countPendingDownload(
 }
 
 /**
+ * Check whether the local clone has the NEMAR metadata commit that
+ * `import-openneuro` emits as its final step before pushing
+ * (`Add NEMAR metadata (imported from OpenNeuro ds######)`).
+ *
+ * Used to detect "porting still in progress" on `nemar dataset get` /
+ * `download` against OpenNeuro-sourced datasets: if a user pulls before
+ * that commit lands (because the matrix import workflow is still running),
+ * the git-annex S3 objects may also not be fully copied. Emitting a clear
+ * warning is more useful than letting `git annex get` fail with the
+ * "remote not available" / "no known location" gibberish.
+ *
+ * Returns:
+ *   - `present` when the commit exists in the local history
+ *   - `absent` when the marker file is unknown to git (porting incomplete
+ *     or this isn't an OpenNeuro-imported dataset)
+ *   - `unknown` when git fails to run (not a repo, etc.)
+ *
+ * See nemarOrg/nemar-cli#460 for the user-reported failure mode.
+ */
+export async function detectImportMarker(
+  datasetPath: string,
+): Promise<"present" | "absent" | "unknown"> {
+  try {
+    // `git log -- <pathspec>` walks the repo's full history; if any commit
+    // ever touched `.nemar/metadata.json` we see at least one entry. An
+    // empty output means the file is unknown to git (porting did not
+    // commit it). `git log` exits 0 in both cases, so check stdout.
+    const { stdout, exitCode } = await runCommand(
+      ["git", "log", "-1", "--format=%H", "--", ".nemar/metadata.json"],
+      { cwd: datasetPath },
+    );
+    if (exitCode !== 0) return "unknown";
+    return stdout.trim().length > 0 ? "present" : "absent";
+  } catch {
+    return "unknown";
+  }
+}
+
+/**
  * Get data files from remote (S3) for a cloned dataset.
  *
  * When onProgress is provided, uses --json-progress to stream progress
