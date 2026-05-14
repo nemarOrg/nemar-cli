@@ -5228,8 +5228,10 @@ adminRoutes.post("/notify", zValidator("json", broadcastRequestSchema), async (c
           return c.json({ error: `User '${body.user}' is not approved` }, 400);
         case "no_email":
           return c.json({ error: `User '${body.user}' has no email on file` }, 400);
-        default:
-          return c.json({ error: `Cannot send to '${body.user}'` }, 400);
+        default: {
+          const _exhaustive: never = lookup.error;
+          return c.json({ error: `Cannot send to '${body.user}': ${_exhaustive}` }, 400);
+        }
       }
     }
 
@@ -5240,7 +5242,7 @@ adminRoutes.post("/notify", zValidator("json", broadcastRequestSchema), async (c
         dry_run: true,
         recipient_group: auditGroup,
         recipient_count: 1,
-        recipients: [lookup.email as string],
+        recipients: [lookup.email],
       });
     }
 
@@ -5254,7 +5256,7 @@ adminRoutes.post("/notify", zValidator("json", broadcastRequestSchema), async (c
         group: auditGroup,
         subject: body.subject,
         bodyMarkdown: body.body,
-        recipients: [lookup.email as string],
+        recipients: [lookup.email],
       },
       replyTo,
       isDev,
