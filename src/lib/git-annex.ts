@@ -1594,6 +1594,54 @@ export async function countPendingDownload(
 }
 
 /**
+ * Check whether the local clone has the NEMAR metadata commit that
+ * `import-openneuro` emits as its final step before pushing
+ * (`Add NEMAR metadata (imported from OpenNeuro ds######)`).
+ *
+ * Used to detect "porting still in progress" on `nemar dataset get` /
+ * `download` against OpenNeuro-sourced datasets: if a user pulls before
+ * that commit lands (because the matrix import workflow is still running),
+ * the git-annex S3 objects may also not be fully copied. Emitting a clear
+ * warning is more useful than letting `git annex get` fail with the
+ * "remote not available" / "no known location" gibberish.
+ *
+ * Returns:
+ *   - `present` when the most recent commit touching `.nemar/metadata.json`
+ *     is found in local history (non-empty `git log -1` output)
+ *   - `absent` when the file has never been committed (porting incomplete
+ *     or this isn't an OpenNeuro-imported dataset)
+ *   - `unknown` when git fails to run (not a repo, etc.)
+ *
+ * Forward-compatibility note: this marker is specific to the convention used
+ * by `import-openneuro.ts` (committing `.nemar/metadata.json` as the final
+ * import step). Any future mechanism that sets `source="openneuro"` in D1
+ * without following this commit convention will produce a false `absent`
+ * result. If that happens, add a `--skip-port-check` bypass or adjust the
+ * detection logic.
+ *
+ * See nemarOrg/nemar-cli#460 for the user-reported failure mode.
+ */
+export async function detectImportMarker(
+  datasetPath: string,
+): Promise<"present" | "absent" | "unknown"> {
+  try {
+    // `git log -1 -- <pathspec>` returns the most recent commit that touched
+    // `.nemar/metadata.json`. Non-empty output means the file exists in
+    // history (import completed). An empty result means the file has never
+    // been committed (porting did not finish). `git log` exits 0 in both
+    // cases, so check stdout length rather than exit code.
+    const { stdout, exitCode } = await runCommand(
+      ["git", "log", "-1", "--format=%H", "--", ".nemar/metadata.json"],
+      { cwd: datasetPath },
+    );
+    if (exitCode !== 0) return "unknown";
+    return stdout.trim().length > 0 ? "present" : "absent";
+  } catch {
+    return "unknown";
+  }
+}
+
+/**
  * Get data files from remote (S3) for a cloned dataset.
  *
  * When onProgress is provided, uses --json-progress to stream progress

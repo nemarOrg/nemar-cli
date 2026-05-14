@@ -5,19 +5,63 @@
  * Supports markdown body converted to styled HTML matching NEMAR email templates.
  */
 
+import { z } from "zod";
 import { applyDevWrap, parseEmailPreferences } from "./email";
 
 export type RecipientGroup = "all" | "admins" | "members";
+
+/**
+ * Value stored in `broadcast_emails.recipient_group`. Either a named group
+ * or a per-user target encoded as `user:<username>`.
+ */
+export type RecipientGroupOrUser = RecipientGroup | `user:${string}`;
+
+/**
+ * Zod schema for POST /admin/notify request bodies.
+ *
+ * Exactly one of `to` (group broadcast) or `user` (per-user transactional)
+ * must be present. Exposed from the service module so unit tests can
+ * exercise the mutual-exclusion refinement directly without spinning up
+ * a Hono test app.
+ */
+export const broadcastRequestSchema = z
+  .object({
+    to: z.enum(["all", "admins", "members"]).optional(),
+    user: z.string().min(3).max(30).optional(),
+    subject: z.string().min(1).max(200),
+    body: z.string().min(1).max(10000),
+    dry_run: z.boolean().optional().default(false),
+  })
+  .refine((value) => Boolean(value.to) !== Boolean(value.user), {
+    message: "Provide exactly one of 'to' (group) or 'user' (username)",
+    path: ["to"],
+  });
+
+export type SingleUserLookupError = "not_found" | "no_email" | "not_approved";
+
+export type SingleUserLookupResult =
+  | { ok: true; email: string; user_id: number; username: string }
+  | { ok: false; error: SingleUserLookupError; user_id?: number; username?: string };
 
 export interface BroadcastResult {
   broadcast_id: number;
   recipient_count: number;
   failure_count: number;
   failed_recipients: string[];
+  /** Set when the send was aborted before reaching Resend (e.g. missing key). */
+  error?: string;
 }
 
 interface UserRow {
   email: string;
+  email_preferences: string | null;
+}
+
+interface SingleUserRow {
+  id: number;
+  username: string;
+  email: string | null;
+  status: string;
   email_preferences: string | null;
 }
 
@@ -58,6 +102,43 @@ export async function getBroadcastRecipients(
       return prefs.announcements;
     })
     .map((r) => r.email);
+}
+
+/**
+ * Resolve a single user recipient by username.
+ *
+ * Returns either the resolved recipient (id, email, username) or a structured
+ * error describing why the user can't receive a transactional email. Callers
+ * map these errors to HTTP responses. Per-user transactional sends ignore the
+ * `announcements` email preference (this is direct admin contact, not a broadcast).
+ */
+export async function getBroadcastRecipientByUsername(
+  db: D1Database,
+  username: string,
+): Promise<SingleUserLookupResult> {
+  const row = await db
+    .prepare("SELECT id, username, email, status, email_preferences FROM users WHERE username = ?")
+    .bind(username)
+    .first<SingleUserRow>();
+
+  if (!row) {
+    return { ok: false, error: "not_found" };
+  }
+
+  if (row.status !== "approved") {
+    return { ok: false, error: "not_approved", user_id: row.id, username: row.username };
+  }
+
+  if (!row.email || !row.email.trim()) {
+    return { ok: false, error: "no_email", user_id: row.id, username: row.username };
+  }
+
+  return {
+    ok: true,
+    email: row.email,
+    user_id: row.id,
+    username: row.username,
+  };
 }
 
 /**
@@ -192,7 +273,7 @@ export async function sendBroadcast(
   fromEmail: string,
   params: {
     sentById: number;
-    group: RecipientGroup;
+    group: RecipientGroupOrUser;
     subject: string;
     bodyMarkdown: string;
     recipients: string[];
@@ -200,6 +281,24 @@ export async function sendBroadcast(
   replyTo?: string,
   isDev?: boolean,
 ): Promise<BroadcastResult> {
+  // Guard: Resend key must be non-empty before iterating recipients.
+  // A missing or blank key would silently record every recipient as a
+  // failure while returning 200 to the caller.
+  if (!resendApiKey || !resendApiKey.trim()) {
+    console.error("[broadcast] RESEND_API_KEY is not configured; aborting send", {
+      group: params.group,
+      subject: params.subject,
+      recipientCount: params.recipients.length,
+    });
+    return {
+      broadcast_id: -1,
+      recipient_count: 0,
+      failure_count: 0,
+      failed_recipients: [],
+      error: "email_service_unconfigured",
+    };
+  }
+
   const bodyHtml = markdownToEmailHtml(params.bodyMarkdown);
   const html = buildBroadcastHtml(params.subject, bodyHtml);
   const wrapped = applyDevWrap(params.subject, html, isDev);

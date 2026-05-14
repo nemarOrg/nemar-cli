@@ -31,6 +31,7 @@ import {
   type DatasetsListResponse,
   type NemarMetadataPayload,
   ORCID_REGEX,
+  PUBLICATION_STEPS,
   addCi,
   createDataset,
   errorDetail,
@@ -84,6 +85,7 @@ import {
   configureS3Remote,
   copyToAnnexRemote,
   countPendingDownload,
+  detectImportMarker,
   dropFiles,
   dropUnusedAnnexObjects,
   enableS3Remote,
@@ -1659,6 +1661,10 @@ datasetCommand
   .option("--exclude <globs>", "Comma-separated exclude globs (e.g. sourcedata/**)")
   .option("--stimuli", "Include stimuli/ content (skipped by default; can be large)")
   .option("--derivatives", "Include derivatives/ content (skipped by default; can be large)")
+  .option(
+    "--skip-port-check",
+    "Skip the porting-in-progress check (use if falsely blocked on an OpenNeuro-sourced dataset)",
+  )
   .addHelpText(
     "after",
     `
@@ -1983,6 +1989,36 @@ Examples:
       }
 
       spinner.succeed("Metadata cloned");
+    }
+
+    // OpenNeuro-sourced datasets only get their git-annex S3 objects after
+    // the import workflow's final push (which carries the .nemar/metadata.json
+    // commit). If the marker commit is missing locally, the porting matrix
+    // job is still mid-flight — the subsequent `git annex get` would fail
+    // with a cryptic "remote unavailable" error. Bail early with a clear
+    // retry hint. See nemarOrg/nemar-cli#460.
+    if (!options.skipPortCheck && datasetInfo.source === "openneuro" && options.data !== false) {
+      const marker = await detectImportMarker(absoluteOutput);
+      // "unknown" = git unavailable or non-git dir; skip port check and let git-annex handle it
+      if (marker === "absent") {
+        console.log();
+        console.log(chalk.yellow("Porting still in progress."));
+        console.log(
+          chalk.dim(
+            "  This dataset is being imported from OpenNeuro. Data files are not yet available.",
+          ),
+        );
+        console.log(chalk.dim("  The metadata-only clone is already at the path above."));
+        console.log(chalk.dim("  Wait 5–30 minutes (depending on dataset size), then run:"));
+        console.log(chalk.dim(`    cd ${absoluteOutput} && nemar dataset get`));
+        console.log(chalk.dim("  Run 'nemar dataset status <id>' to track porting progress."));
+        console.log(
+          chalk.dim(
+            "  Pass --skip-port-check to bypass this check if you are certain porting is complete.",
+          ),
+        );
+        process.exit(1);
+      }
     }
 
     // For private datasets, fetch temporary S3 download credentials
@@ -3656,6 +3692,7 @@ Examples:
         const msg = error instanceof Error ? error.message : String(error);
         console.log(chalk.dim(`  Error details: ${msg}`));
       }
+      process.exit(1);
     }
   });
 
@@ -3731,25 +3768,17 @@ Examples:
       }
 
       if (result.status === "approving") {
-        const steps = [
-          "ci_check",
-          "repo_public",
-          "s3_public_read",
-          "tag_protect",
-          "doi_create",
-          "update_metadata",
-          "update_readme",
-          "create_tag",
-          "create_release",
-          "upload_to_zenodo",
-          "publish_doi",
-          "s3_lock",
-          "generate_archive",
-          "notify_user",
-        ];
+        // Source of truth is `PUBLICATION_STEPS` in src/lib/api.ts, which
+        // mirrors the backend orchestrator. Showing fewer steps here than
+        // the backend actually runs (the legacy list missed
+        // enrichment_check, version_doi, sync_nemar) made the status
+        // display claim "all steps complete" while the backend was still
+        // running — exactly the visibility gap #284 calls out.
+        const steps = PUBLICATION_STEPS;
         const completed = result.steps_completed || [];
+        const total = steps.length;
         console.log("\n  Steps:");
-        for (const step of steps) {
+        steps.forEach((step, idx) => {
           const done = completed.includes(step);
           const isCurrent = result.current_step === step;
           const icon = done
@@ -3758,10 +3787,11 @@ Examples:
               ? chalk.yellow("[>]")
               : chalk.dim("[ ]");
           const label = step.replace(/_/g, " ");
+          const stepNum = `[${String(idx + 1).padStart(2, " ")}/${total}]`;
           console.log(
-            `    ${icon} ${label}${isCurrent && result.last_error ? chalk.red(` (error: ${result.last_error})`) : ""}`,
+            `    ${icon} ${chalk.dim(stepNum)} ${label}${isCurrent && result.last_error ? chalk.red(` (error: ${result.last_error})`) : ""}`,
           );
-        }
+        });
       }
 
       if (result.status === "published" && result.approved_at) {
@@ -3778,6 +3808,7 @@ Examples:
         const msg = error instanceof Error ? error.message : String(error);
         console.log(chalk.dim(`  Error details: ${msg}`));
       }
+      process.exit(1);
     }
   });
 
@@ -3827,6 +3858,7 @@ Examples:
         const msg = error instanceof Error ? error.message : String(error);
         console.log(chalk.dim(`  Error details: ${msg}`));
       }
+      process.exit(1);
     }
   });
 
@@ -3887,9 +3919,25 @@ Examples:
       datasetVisibility = dataset.visibility;
       spinner.succeed(`Found: ${dataset.name}`);
     } catch (error) {
-      spinner.fail("Dataset not found");
-      const msg = error instanceof Error ? error.message : String(error);
-      console.log(chalk.red(`  ${msg}`));
+      if (error instanceof ApiError && (error.statusCode === 404 || error.statusCode === 400)) {
+        spinner.fail(`Dataset ${datasetId} not found`);
+        console.log(chalk.red(`Error: Dataset ${datasetId} not found`));
+        console.log(chalk.dim(`  ${error.message}`));
+      } else if (
+        error instanceof ApiError &&
+        (error.statusCode === 401 || error.statusCode === 403)
+      ) {
+        spinner.fail("Not authorized");
+        console.log(chalk.red(`Error: Not authorized to access dataset ${datasetId}`));
+        console.log(chalk.dim("  Run 'nemar auth login' to authenticate."));
+      } else if (error instanceof ApiError) {
+        spinner.fail("Failed to resolve dataset");
+        console.log(chalk.red(`Error: ${error.message}`));
+      } else {
+        spinner.fail("Failed to resolve dataset");
+        const msg = error instanceof Error ? error.message : String(error);
+        console.log(chalk.red(`Error: ${msg}`));
+      }
       process.exit(1);
     }
 
@@ -3959,6 +4007,10 @@ datasetCommand
   .option("-j, --jobs <number>", "Parallel download streams", "4")
   .option("--stimuli", "Include stimuli/ content (skipped by default; can be large)")
   .option("--derivatives", "Include derivatives/ content (skipped by default; can be large)")
+  .option(
+    "--skip-port-check",
+    "Skip the porting-in-progress check (use if falsely blocked on an OpenNeuro-sourced dataset)",
+  )
   .addHelpText(
     "after",
     `
@@ -4002,10 +4054,68 @@ Examples:
     const getDatasetId = await getDatasetIdFromRemote(cwd);
     if (getDatasetId) {
       let dsInfo: Awaited<ReturnType<typeof getDataset>> | null = null;
+      let apiReachable = true;
       try {
         dsInfo = await getDataset(getDatasetId);
-      } catch {
-        // Dataset info fetch failed; proceed without creds (will use publicurl if public)
+      } catch (err) {
+        // Only fall through to offline mode for true network failures (statusCode 0).
+        // Auth and authorization failures must surface so the user can re-login;
+        // silencing them produced cryptic git-annex errors instead of "run nemar auth login".
+        if (err instanceof ApiError && err.statusCode !== 0) {
+          if (err.statusCode === 401 || err.statusCode === 403) {
+            console.log(chalk.red(`✖ ${err.message}`));
+            console.log(chalk.dim("  Run 'nemar auth login' or 'nemar auth regenerate-key'."));
+            process.exit(1);
+          }
+          throw err;
+        }
+        apiReachable = false;
+      }
+
+      // OpenNeuro-sourced datasets only get their git-annex S3 objects after
+      // the import workflow's final push (which carries the .nemar/metadata.json
+      // commit). If the marker commit is missing locally, the porting matrix
+      // job is still mid-flight — `git annex get` will fail with a cryptic
+      // "remote unavailable" error. Bail early with a clear retry hint.
+      // See nemarOrg/nemar-cli#460.
+      //
+      // When the API is unreachable, fall back to reading source from the local
+      // .nemar/metadata.json so the check still works offline.
+      if (!options.skipPortCheck) {
+        let isOpenNeuroDerived = dsInfo?.source === "openneuro";
+        if (!apiReachable && !isOpenNeuroDerived) {
+          const localMeta = join(cwd, ".nemar", "metadata.json");
+          if (existsSync(localMeta)) {
+            try {
+              const parsed = JSON.parse(readFileSync(localMeta, "utf-8")) as {
+                source?: string;
+              };
+              isOpenNeuroDerived = parsed.source === "openneuro";
+            } catch {
+              // Malformed local metadata; skip port check
+            }
+          }
+        }
+        if (isOpenNeuroDerived) {
+          const marker = await detectImportMarker(cwd);
+          // "unknown" = git unavailable or non-git dir; skip port check and let git-annex handle it
+          if (marker === "absent") {
+            console.log(chalk.yellow("Porting still in progress."));
+            console.log(
+              chalk.dim(
+                "  This dataset is being imported from OpenNeuro. Data files are not yet available.",
+              ),
+            );
+            console.log(chalk.dim("  Wait 5–30 minutes (depending on dataset size), then retry."));
+            console.log(chalk.dim("  Run 'nemar dataset status <id>' to track progress."));
+            console.log(
+              chalk.dim(
+                "  Pass --skip-port-check to bypass this check if you are certain porting is complete.",
+              ),
+            );
+            process.exit(1);
+          }
+        }
       }
 
       if (dsInfo && dsInfo.visibility !== "public") {

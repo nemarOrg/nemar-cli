@@ -234,7 +234,7 @@ export async function runDatasetSync(
   // S3 stats split: the nemar.org call accepts a fallback {0,0}, but the
   // metadata-column writer needs to know if the measurement is real (null on
   // failure) so it doesn't overwrite valid values with zeros.
-  let s3StatsForColumns: { totalSize: number; objectCount: number } | null = null;
+  let s3StatsForColumns: { totalSize: number; objectCount: number | undefined } | null = null;
   const [s3Stats, zipFileSize] = await Promise.all([
     getDatasetS3Stats(s3, datasetId)
       .then((r) => {
@@ -243,7 +243,7 @@ export async function runDatasetSync(
       })
       .catch((err) => {
         console.warn(`[reindex] S3 stats failed for ${datasetId}: ${err}`);
-        return { totalSize: 0, objectCount: 0 };
+        return { totalSize: 0, objectCount: 0 as number | undefined };
       }),
     getArchiveSize(s3, datasetId).catch((err) => {
       console.warn(`[reindex] Archive size failed for ${datasetId}: ${err}`);

@@ -214,15 +214,35 @@ async function* listObjectPages(
 /**
  * Get total size and object count for a dataset's S3 objects.
  * Uses S3 ListObjectsV2 for real file sizes (git tree shows symlink sizes for annexed files).
+ *
+ * @param maxPages - If provided, stop counting after this many LIST pages and
+ *   return `objectCount: undefined` to signal that the total is unknown. This
+ *   caps the Cloudflare Workers subrequest cost when called from within the
+ *   publish orchestrator (each LIST page = 1 subrequest). Callers that need
+ *   the authoritative total should pass `undefined` (default = unlimited).
+ *
+ * @warning When `maxPages` is exceeded, `totalSize` reflects only the pages
+ *   scanned — it is a partial sum, not the dataset's true total. Callers
+ *   MUST check whether `objectCount === undefined` before relying on
+ *   `totalSize` for anything that requires an accurate byte count (e.g. DOI
+ *   metadata, download size display). Discard or label it clearly if capped.
  */
 export async function getDatasetS3Stats(
   options: PresignedUrlOptions,
   datasetId: string,
-): Promise<{ totalSize: number; objectCount: number }> {
+  maxPages?: number,
+): Promise<{ totalSize: number; objectCount: number | undefined }> {
   let totalSize = 0;
   let objectCount = 0;
+  let pageCount = 0;
 
   for await (const xml of listObjectPages(options, `${datasetId}/objects/`)) {
+    pageCount++;
+    if (maxPages !== undefined && pageCount > maxPages) {
+      // Cap exceeded: return undefined so the caller knows the count is
+      // incomplete rather than silently returning a low number.
+      return { totalSize, objectCount: undefined };
+    }
     const contentMatches = xml.matchAll(
       /<Contents>[\s\S]*?<Size>(\d+)<\/Size>[\s\S]*?<\/Contents>/g,
     );

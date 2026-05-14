@@ -40,6 +40,13 @@ let treeCreateRemaining = 0;
 let bidsignoreExists = false;
 let bidsignoreContent = "";
 let bidsignoreBlobReadable = true;
+// Post-deploy workflow validation (issue #287): the listing handler reads
+// these so individual tests can express "GitHub Actions parsed file X but
+// not Y" without hand-rolling state.
+let actionsWorkflowsResponse: { workflows: Array<{ path?: string; name?: string }> } = {
+  workflows: [],
+};
+let actionsWorkflowsBehavior: "ok" | "server-error" = "ok";
 
 function resetState() {
   fake.reset();
@@ -54,6 +61,8 @@ function resetState() {
   bidsignoreExists = false;
   bidsignoreContent = "";
   bidsignoreBlobReadable = true;
+  actionsWorkflowsResponse = { workflows: [] };
+  actionsWorkflowsBehavior = "ok";
 }
 
 function setGithubApiOverride(url: string | undefined): void {
@@ -139,6 +148,15 @@ beforeAll(() => {
       json(201, { content: { sha: "blob0002" }, commit: { sha: nextCommitSha } }),
     [`GET /repos/nemarDatasets/${REPO}/contents/.nemar/metadata.json`]: () =>
       json(404, { message: "Not Found" }),
+    // Post-deploy workflow listing (issue #287): deployWorkflows calls this
+    // after committing to verify GitHub Actions can parse each file. Tests
+    // toggle `actionsWorkflowsResponse` to express the desired behavior.
+    [`GET /repos/nemarDatasets/${REPO}/actions/workflows`]: () => {
+      if (actionsWorkflowsBehavior === "server-error") {
+        return json(500, { message: "Internal Server Error" });
+      }
+      return json(200, actionsWorkflowsResponse);
+    },
   });
   setGithubApiOverride(fake.url);
 });
@@ -308,7 +326,8 @@ describe("commitFilesAsTree", () => {
 
 describe("deployWorkflows", () => {
   test("commits all workflow files in one tree-batched commit (4 calls)", async () => {
-    const result = await deployWorkflows(REPO, PAT);
+    // Disable post-deploy validation so we measure the commit path only.
+    const result = await deployWorkflows(REPO, PAT, { validate: false });
     expect(result.success).toBe(true);
     expect(result.errors).toEqual([]);
     const expectedNames = getWorkflowTemplates().map((w) => w.path.split("/").pop()!);
@@ -329,11 +348,93 @@ describe("deployWorkflows", () => {
 
   test("reports failure with a substantive error message", async () => {
     refUpdateBehavior = "conflict-always";
-    const result = await deployWorkflows(REPO, PAT);
+    const result = await deployWorkflows(REPO, PAT, { validate: false });
     expect(result.success).toBe(false);
     expect(result.errors).toHaveLength(1);
     expect(result.errors[0]).toMatch(/ref|fast forward|exhausted/i);
     expect(result.deployed).toEqual([]);
+  });
+
+  test("post-deploy validation: missing workflows surface as validationErrors after retry", async () => {
+    // Fake GitHub Actions index returns only ONE of the deployed workflows.
+    // The rest should land in validationErrors as "not listed" warnings.
+    // success stays true because validation is best-effort (issue #287).
+    //
+    // When the first probe finds missing workflows, deployWorkflows retries
+    // once (indexing lag mitigation). With validateDelayMs: 0 both delays are
+    // 0 so the retry is immediate; the fake still returns the partial list,
+    // so the warning surfaces after 2 listing calls (not 1).
+    const expected = getWorkflowTemplates().map((w) => w.path.split("/").pop()!);
+    const listedWorkflowPath = `.github/workflows/${expected[0]}`;
+    actionsWorkflowsResponse = {
+      workflows: [{ path: listedWorkflowPath, name: "first" }],
+    };
+
+    const result = await deployWorkflows(REPO, PAT, { validateDelayMs: 0 });
+    expect(result.success).toBe(true);
+    expect(result.errors).toEqual([]);
+    expect(result.deployed).toEqual(expected);
+    expect(result.validationErrors).toBeDefined();
+    // Every non-listed workflow filename should appear in the warning.
+    const warning = (result.validationErrors ?? []).join(" ");
+    for (const name of expected.slice(1)) {
+      expect(warning).toContain(name);
+    }
+    expect(warning).not.toContain(expected[0]);
+    // Retry strategy: 2 listing calls total (initial probe + one retry).
+    expect(
+      fake.countByMethodPath[`GET /repos/nemarDatasets/${REPO}/actions/workflows`],
+    ).toBe(2);
+  });
+
+  test("post-deploy validation: all workflows present -> no validationErrors, single listing call", async () => {
+    // When all workflows are listed on the first probe, no retry is needed.
+    // A workflow with state: "disabled_manually" would still be listed here
+    // and would pass this check — presence means parseable; state is
+    // intentionally not checked (see deployWorkflows JSDoc).
+    const expected = getWorkflowTemplates().map((w) => w.path.split("/").pop()!);
+    actionsWorkflowsResponse = {
+      workflows: expected.map((name) => ({
+        path: `.github/workflows/${name}`,
+        name,
+      })),
+    };
+
+    const result = await deployWorkflows(REPO, PAT, { validateDelayMs: 0 });
+    expect(result.success).toBe(true);
+    expect(result.validationErrors).toBeUndefined();
+    // No retry needed when all workflows are found on the first probe.
+    expect(
+      fake.countByMethodPath[`GET /repos/nemarDatasets/${REPO}/actions/workflows`],
+    ).toBe(1);
+  });
+
+  test("post-deploy validation: API error surfaces as best-effort warning, no retry", async () => {
+    // A 500 from /actions/workflows should NOT fail the deploy. The error
+    // text lands in validationErrors so admins can investigate.
+    // Unlike the "missing" case, API errors do not trigger a retry — an
+    // error on the listing call (non-2xx) indicates a server issue rather
+    // than GitHub indexing lag.
+    //
+    // 429 (rate-limit) is handled by githubFetchWithRetry internally (up to 3
+    // retries). Testing that path here would require the fake server to return
+    // 429 a specific number of times, which conflicts with the no-mock policy.
+    // The production 429 path is covered by rate-limit-retry.test.ts; exhausted
+    // retries surface in validationErrors as status 429.
+    actionsWorkflowsBehavior = "server-error";
+
+    const result = await deployWorkflows(REPO, PAT, { validateDelayMs: 0 });
+    expect(result.success).toBe(true);
+    expect(result.errors).toEqual([]);
+    expect(result.validationErrors).toBeDefined();
+    expect((result.validationErrors ?? []).join(" ")).toMatch(/500|validation/i);
+    // githubFetchWithRetry retries 5xx up to 3 times internally, so the
+    // listing endpoint is hit 3 times (all returning 500). deployWorkflows
+    // does NOT add an extra outer retry for API errors (only for "missing"
+    // workflows). Total: 3 calls from githubFetchWithRetry's own retries.
+    expect(
+      fake.countByMethodPath[`GET /repos/nemarDatasets/${REPO}/actions/workflows`],
+    ).toBe(3);
   });
 });
 

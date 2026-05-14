@@ -32,6 +32,7 @@ import {
   type EmailPreferences,
   type NemarMetadataPayload,
   ORCID_REGEX,
+  type PublishProgressInfo,
   type ReindexBulkOptions,
   type ReindexBulkResponse,
   type ReindexFilter,
@@ -661,10 +662,17 @@ ciCommand
   .description("Deploy CI workflows to a dataset repository (or all with --all)")
   .argument("[dataset-id]", "Dataset ID (e.g., nm000104)")
   .option("--all", "Deploy to all dataset repositories")
+  .option(
+    "--no-validate",
+    "Skip post-deploy parseability check (saves ~2.5 s per dataset; use for fleet deploys with --all)",
+  )
   .option(YES_OPTION, YES_DESCRIPTION)
   .option(NO_OPTION, NO_DESCRIPTION)
-  .action(async (datasetId, options: { all?: boolean } & ConfirmOptions) => {
+  .action(async (datasetId, options: { all?: boolean; validate?: boolean } & ConfirmOptions) => {
     if (!requireAuth()) return;
+
+    // Commander sets `validate: false` when the user passes `--no-validate`.
+    const skipValidate = options.validate === false;
 
     if (options.all) {
       const spinner = ora("Fetching dataset list...").start();
@@ -688,6 +696,9 @@ ciCommand
       console.log("  1. BIDS Validation (runs on PRs)");
       console.log("  2. Version Check (ensures version bump on PRs)");
       console.log("  3. PR Merge Handler (creates releases, publishes DOIs)");
+      if (skipValidate) {
+        console.log(chalk.dim("  (post-deploy parseability check disabled via --no-validate)"));
+      }
       console.log();
 
       const confirmResult = await confirm(
@@ -704,8 +715,15 @@ ciCommand
       for (const ds of datasets) {
         const dsSpinner = ora(`Deploying to ${ds.dataset_id}...`).start();
         try {
-          await addCi(ds.dataset_id);
-          dsSpinner.succeed(`${ds.dataset_id}: deployed`);
+          const r = await addCi(ds.dataset_id, { validate: !skipValidate });
+          if (r.validation_warnings && r.validation_warnings.length > 0) {
+            dsSpinner.warn(`${ds.dataset_id}: deployed (with warnings)`);
+            for (const w of r.validation_warnings) {
+              console.log(`    ${chalk.yellow("!")} ${w}`);
+            }
+          } else {
+            dsSpinner.succeed(`${ds.dataset_id}: deployed`);
+          }
           succeeded++;
         } catch (error) {
           const msg = error instanceof ApiError ? error.message : String(error);
@@ -731,6 +749,9 @@ ciCommand
     console.log("  1. BIDS Validation (runs on PRs)");
     console.log("  2. Version Check (ensures version bump on PRs)");
     console.log("  3. PR Merge Handler (creates releases, publishes DOIs)");
+    if (skipValidate) {
+      console.log(chalk.dim("  (post-deploy parseability check disabled via --no-validate)"));
+    }
     console.log();
 
     const confirmResult = await confirm(`Deploy CI workflows to ${datasetId}?`, options);
@@ -742,11 +763,18 @@ ciCommand
     const spinner = ora(`Deploying CI workflows to ${datasetId}...`).start();
 
     try {
-      const result = await addCi(datasetId);
+      const result = await addCi(datasetId, { validate: !skipValidate });
       spinner.succeed("CI workflows deployed");
       console.log();
       for (const workflow of result.workflows_deployed) {
         console.log(`  ${chalk.green("[x]")} ${workflow}`);
+      }
+      if (result.validation_warnings && result.validation_warnings.length > 0) {
+        console.log();
+        console.log(chalk.yellow("Validation warnings (best-effort; deploy succeeded):"));
+        for (const w of result.validation_warnings) {
+          console.log(`  ${chalk.yellow("!")} ${w}`);
+        }
       }
       console.log();
     } catch (error) {
@@ -1853,7 +1881,42 @@ After Approval:
         return;
       }
 
-      const spinner = ora("Running publication workflow (this may take a few minutes)...").start();
+      const initialSpinnerText = "Running publication workflow (this may take a few minutes)...";
+      const spinner = ora(initialSpinnerText).start();
+
+      // Most recent step label rendered into the spinner; kept on the
+      // outer scope so onRetry can restore the same line after the
+      // retry notice instead of falling back to the generic text.
+      let currentSpinnerText = initialSpinnerText;
+
+      /**
+       * Render the spinner line for a progress event. Shows the step
+       * position and, for s3_lock, a running locked/total ratio so the
+       * admin can see thousands-of-objects datasets making progress
+       * instead of staring at a static spinner for minutes. See #284.
+       */
+      function renderProgress(info: PublishProgressInfo): string {
+        const stepLabel = info.step.replace(/_/g, " ");
+        const head = `Step ${info.stepIndex}/${info.stepTotal}: ${stepLabel}`;
+        if (
+          info.step === "s3_lock" &&
+          info.s3LockLocked !== undefined &&
+          info.s3LockTotal !== undefined &&
+          info.s3LockTotal > 0
+        ) {
+          const pct = ((info.s3LockLocked / info.s3LockTotal) * 100).toFixed(1);
+          const resumeSuffix = info.s3LockResumed ? " (resumed)" : "";
+          return `${head} | Locking S3 objects: ${info.s3LockLocked}/${info.s3LockTotal} (${pct}%)${resumeSuffix}`;
+        }
+        if (info.step === "s3_lock" && info.s3LockLocked !== undefined) {
+          // Total not yet known (rare; first response before server has
+          // counted). Show running count without the denominator so the
+          // line still advances.
+          const resumeSuffix = info.s3LockResumed ? " (resumed)" : "";
+          return `${head} | Locking S3 objects: ${info.s3LockLocked}${resumeSuffix}`;
+        }
+        return head;
+      }
 
       try {
         const result = await approvePublication(
@@ -1872,7 +1935,11 @@ After Approval:
                 `  Retrying in ${Math.round(info.delayMs / 1000)}s (attempt ${info.attempt + 1}/${info.maxAttempts})...`,
               ),
             );
-            spinner.start("Running publication workflow (this may take a few minutes)...");
+            spinner.start(currentSpinnerText);
+          },
+          (info) => {
+            currentSpinnerText = renderProgress(info);
+            spinner.text = currentSpinnerText;
           },
         );
         spinner.succeed(result.message);
@@ -1909,6 +1976,12 @@ After Approval:
             console.log(`  ${chalk.green("[x]")} ${step.replace(/_/g, " ")}`);
           }
           console.log();
+        }
+
+        // Surface non-fatal orchestrator warnings (e.g. notify_user email
+        // failure) so operators know to follow up without re-running.
+        if (result.warning) {
+          console.log(chalk.yellow(`  Warning: ${result.warning}`));
         }
       } catch (error) {
         handleCommandError(error, spinner, "Failed to approve publication", {
@@ -2005,13 +2078,22 @@ adminCommand
         dataset = await getDataset(datasetId);
         spinner.succeed(`Found dataset: ${dataset.name}`);
       } catch (error) {
+        // Echo a plain stdout error after the spinner line (which goes to stderr)
+        // so callers grepping stdout can detect the failure reliably. Treat
+        // 400 (invalid id format) and 404 alike as "dataset not found" from
+        // the user's perspective: both mean we cannot load this dataset.
         if (error instanceof ApiError) {
           spinner.fail(error.message);
-          if (error.statusCode === 404) {
-            console.log(chalk.dim("  Dataset not found"));
+          if (error.statusCode === 404 || error.statusCode === 400) {
+            console.log(chalk.red(`Error: Dataset ${datasetId} not found`));
+            console.log(chalk.dim(`  ${error.message}`));
+          } else {
+            console.log(chalk.red(`Error: ${error.message}`));
           }
         } else {
           spinner.fail("Failed to fetch dataset");
+          const msg = error instanceof Error ? error.message : String(error);
+          console.log(chalk.red(`Error: Could not load dataset ${datasetId}: ${msg}`));
         }
         return;
       }
@@ -3231,8 +3313,9 @@ adminCommand.addCommand(noticeCommand);
 
 adminCommand
   .command("notify")
-  .description("Send a broadcast email to users")
-  .requiredOption("--to <group>", "Recipient group: all, admins, members")
+  .description("Send an email to a group or a single user")
+  .option("--to <group>", "Recipient group: all, admins, members")
+  .option("--user <username>", "Send to a single user by username")
   .requiredOption("--subject <text>", "Email subject line")
   .option("--body <text>", "Email body (markdown)")
   .option("--body-file <path>", "Read email body from file (markdown)")
@@ -3241,7 +3324,8 @@ adminCommand
   .option(NO_OPTION, NO_DESCRIPTION)
   .action(
     async (options: {
-      to: string;
+      to?: string;
+      user?: string;
       subject: string;
       body?: string;
       bodyFile?: string;
@@ -3254,7 +3338,17 @@ adminCommand
         process.exit(1);
       }
 
-      if (!["all", "admins", "members"].includes(options.to)) {
+      // Mutual exclusion: exactly one of --to or --user
+      if (options.to && options.user) {
+        console.error(chalk.red("--to and --user are mutually exclusive. Provide exactly one."));
+        process.exit(1);
+      }
+      if (!options.to && !options.user) {
+        console.error(chalk.red("Provide either --to <group> or --user <username>."));
+        process.exit(1);
+      }
+
+      if (options.to && !["all", "admins", "members"].includes(options.to)) {
         console.error(chalk.red(`Invalid group: ${options.to}. Use all, admins, or members.`));
         process.exit(1);
       }
@@ -3274,18 +3368,18 @@ adminCommand
         process.exit(1);
       }
 
+      const target = options.user ? `user:${options.user}` : (options.to as string);
+      const requestPayload = options.user
+        ? { user: options.user, subject: options.subject, body }
+        : { to: options.to as string, subject: options.subject, body };
+
       if (options.dryRun) {
         const spinner = ora("Checking recipients...").start();
         try {
-          const result = await sendBroadcast({
-            to: options.to,
-            subject: options.subject,
-            body,
-            dry_run: true,
-          });
+          const result = await sendBroadcast({ ...requestPayload, dry_run: true });
           if ("dry_run" in result) {
             spinner.succeed(
-              `Dry run: ${result.recipient_count} recipient(s) in group "${result.recipient_group}"`,
+              `Dry run: ${result.recipient_count} recipient(s) for "${result.recipient_group}"`,
             );
             console.log();
             for (const email of result.recipients) {
@@ -3299,39 +3393,41 @@ adminCommand
       }
 
       // Preview and confirm
-      console.log(chalk.bold("Broadcast email preview:"));
-      console.log(`  To: ${chalk.cyan(options.to)}`);
+      console.log(chalk.bold("Email preview:"));
+      console.log(`  To: ${chalk.cyan(target)}`);
       console.log(`  Subject: ${options.subject}`);
       console.log(`  Body: ${body.length > 100 ? `${body.substring(0, 100)}...` : body}`);
       console.log();
 
-      const confirmed = await confirm("Send this broadcast email?", options, false);
+      const confirmPrompt = options.user
+        ? `Send this email to ${options.user}?`
+        : "Send this broadcast email?";
+      const confirmed = await confirm(confirmPrompt, options, false);
       if (!confirmed) return;
 
-      const spinner = ora("Sending broadcast...").start();
+      const spinner = ora(
+        options.user ? `Sending to ${options.user}...` : "Sending broadcast...",
+      ).start();
       try {
-        const result = await sendBroadcast({
-          to: options.to,
-          subject: options.subject,
-          body,
-        });
+        const result = await sendBroadcast(requestPayload);
 
         if ("broadcast_id" in result) {
           if (result.failure_count > 0) {
             spinner.warn(
-              `Broadcast sent: ${result.recipient_count} delivered, ${result.failure_count} failed`,
+              `Email send: ${result.recipient_count} delivered, ${result.failure_count} failed`,
             );
             for (const email of result.failed_recipients) {
               console.log(chalk.red(`  Failed: ${email}`));
             }
           } else {
-            spinner.succeed(
-              `Broadcast sent to ${result.recipient_count} recipient(s) (ID: ${result.broadcast_id})`,
-            );
+            const label = options.user
+              ? `Email sent to ${options.user}`
+              : `Broadcast sent to ${result.recipient_count} recipient(s)`;
+            spinner.succeed(`${label} (ID: ${result.broadcast_id})`);
           }
         }
       } catch (err) {
-        handleCommandError(err, spinner, "Failed to send broadcast");
+        handleCommandError(err, spinner, "Failed to send email");
       }
     },
   );

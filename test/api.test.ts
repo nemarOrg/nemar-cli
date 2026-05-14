@@ -466,6 +466,41 @@ describe("Datasets API", () => {
       }
     });
 
+    test("GET /datasets?mine=true with no auth header returns 401 generic", async () => {
+      // Caller never logged in. Backend can't tell why they want --mine, so
+      // the generic "Authentication required" reply stands.
+      const { status, data } = await testRequest<{ error: string }>("/datasets?mine=true");
+      expect(status).toBe(401);
+      expect(data.error).toBe("Authentication required to view your datasets");
+    });
+
+    test("GET /datasets?mine=true with invalid bearer token returns 401 with re-login hint", async () => {
+      // This is the nemarOrg/nemar-cli#447 case: the CLI thinks it's logged
+      // in (config has an apiKey) but the backend can't resolve the key
+      // (revoked, rotated, wrong env). Generic "Authentication required"
+      // leaves the user stuck. The backend must direct them to re-login.
+      const { status, data } = await testRequest<{ error: string }>(
+        "/datasets?mine=true",
+        {},
+        // 32+ chars so optionalAuthMiddleware does the DB lookup; a hash that
+        // won't match any real token's api_key_hash.
+        "nemar_definitely_invalid_token_for_test_only_12345",
+      );
+      expect(status).toBe(401);
+      expect(data.error).toContain("rejected");
+      expect(data.error).toContain("nemar auth login");
+      // Must not fall through to the generic "no header" message.
+      expect(data.error).not.toContain("Authentication required");
+    });
+
+    test("GET /datasets?mine=true with valid user token returns 200", async () => {
+      const { status, data } = await testRequest<{
+        datasets: Array<{ dataset_id: string }>;
+      }>("/datasets?mine=true", {}, TEST_CONFIG.userApiKey);
+      expect(status).toBe(200);
+      expect(Array.isArray(data.datasets)).toBe(true);
+    });
+
     test("listing's latest_version agrees with /manifest for managed datasets", async () => {
       // Ground truth for what the hallu sync script previously read.
       // If the SQL subquery diverges from /manifest's ordering or source,
@@ -503,6 +538,24 @@ describe("Datasets API", () => {
       const { status } = await testRequest("/datasets/nm099998");
 
       expect(status).toBe(404);
+    });
+
+    test("GET /datasets/:id with invalid bearer token returns 401 with re-login hint for private datasets", async () => {
+      // Same bug class as #447: stale-token owner of a private dataset gets
+      // "Dataset not found" instead of a re-login hint. nm099999 is always
+      // private during dev/test, so a rejected token should see 401 + hint.
+      const { status, data } = await testRequest<{ error: string }>(
+        "/datasets/nm099999",
+        {},
+        // 32+ chars so optionalAuthMiddleware does the DB lookup; a hash
+        // that won't match any real token's api_key_hash.
+        "nemar_definitely_invalid_token_for_test_only_12345",
+      );
+      // nm099999 is private: stale token => 401 with re-login hint, not 404.
+      expect(status).toBe(401);
+      expect(data.error).toContain("rejected");
+      expect(data.error).toContain("nemar auth login");
+      expect(data.error).not.toContain("Authentication required");
     });
   });
 });
@@ -632,6 +685,24 @@ describe("DOI/Zenodo API", () => {
 
       // Returns 400 if fields missing, 401 if token invalid, or 500 if secret not configured
       expect([400, 401, 500]).toContain(response.status);
+    });
+  });
+
+  describe("POST /admin/notify", () => {
+    test("omitting both 'to' and 'user' returns 400", async () => {
+      // The broadcastRequestSchema Zod refinement rejects bodies that have
+      // neither the group ('to') nor the per-user ('user') field. This test
+      // exercises the HTTP layer so the refinement is confirmed wired up.
+      const { status, data } = await testRequest<{ error: unknown }>(
+        "/admin/notify",
+        {
+          method: "POST",
+          body: JSON.stringify({ subject: "Test", body: "Body" }),
+        },
+        TEST_CONFIG.adminApiKey,
+      );
+
+      expect(status).toBe(400);
     });
   });
 });
