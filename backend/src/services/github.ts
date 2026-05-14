@@ -1681,15 +1681,94 @@ jobs:
 }
 
 /**
+ * Validate that workflow files we just deployed are actually parseable by
+ * GitHub Actions. Calls `GET /repos/{org}/{repo}/actions/workflows`; GitHub
+ * only lists workflow YAML files it could parse, so any file we deployed
+ * that's missing from the list is silently broken.
+ *
+ * Best-effort: returns `{ valid: [], missing: [...], errors: [...] }` and
+ * never throws. Caller decides what to do — `deployWorkflows` records the
+ * missing names but does NOT fail the deployment (transient indexing lag
+ * on GitHub's side would otherwise produce false negatives).
+ *
+ * `expectedFilenames` are basenames (e.g. `bids-validation.yml`) as returned
+ * by `deployedNames` in `deployWorkflows`.
+ */
+async function validateWorkflowsParseable(
+  repo: string,
+  expectedFilenames: string[],
+  pat: string,
+): Promise<{ valid: string[]; missing: string[]; errors: string[] }> {
+  try {
+    const response = await githubFetchWithRetry(
+      `${GITHUB_API()}/repos/${ORG_NAME}/${repo}/actions/workflows?per_page=100`,
+      {
+        headers: {
+          Authorization: `Bearer ${pat}`,
+          Accept: "application/vnd.github.v3+json",
+          "User-Agent": "NEMAR-API",
+        },
+      },
+    );
+    if (!response.ok) {
+      const body = await response.text().catch(() => "");
+      return {
+        valid: [],
+        missing: [],
+        errors: [
+          `Workflow validation: GitHub API ${response.status} listing workflows: ${body.slice(0, 200)}`,
+        ],
+      };
+    }
+    const data = (await response.json()) as {
+      workflows?: Array<{ path?: string; name?: string }>;
+    };
+    const listed = new Set<string>();
+    for (const w of data.workflows ?? []) {
+      if (typeof w.path === "string") {
+        const parts = w.path.split("/");
+        const basename = parts[parts.length - 1];
+        if (basename) listed.add(basename);
+      }
+    }
+    const valid: string[] = [];
+    const missing: string[] = [];
+    for (const name of expectedFilenames) {
+      if (listed.has(name)) valid.push(name);
+      else missing.push(name);
+    }
+    return { valid, missing, errors: [] };
+  } catch (err) {
+    return {
+      valid: [],
+      missing: [],
+      errors: [`Workflow validation: ${err instanceof Error ? err.message : String(err)}`],
+    };
+  }
+}
+
+/**
  * Deploy every CI workflow template to a dataset repo in a single
  * tree-batched commit. All-or-nothing: on failure, `deployed` is empty
  * (no partial deployment, unlike the prior per-file loop that could
  * half-succeed). Callers MUST check `success` — this function never throws.
+ *
+ * After a successful commit, calls `GET /actions/workflows` to verify each
+ * deployed file is parseable by GitHub Actions. Missing files surface as
+ * `validationErrors` (non-fatal — `success` stays true, since GitHub's
+ * workflow index lags the commit by a few seconds and the most common
+ * cause of a missing entry is transient).
  */
 export async function deployWorkflows(
   repo: string,
   pat: string,
-): Promise<{ success: boolean; errors: string[]; deployed: string[] }> {
+  options?: { validate?: boolean; validateDelayMs?: number },
+): Promise<{
+  success: boolean;
+  errors: string[];
+  deployed: string[];
+  validationErrors?: string[];
+}> {
   const workflows = getWorkflowTemplates();
   const files: TreeFile[] = workflows.map((w) => ({ path: w.path, content: w.content }));
   const deployedNames = workflows.map((w) => {
@@ -1699,7 +1778,6 @@ export async function deployWorkflows(
 
   try {
     await commitFilesAsTree(repo, "main", files, "Add CI workflows", pat);
-    return { success: true, errors: [], deployed: deployedNames };
   } catch (err) {
     return {
       success: false,
@@ -1707,6 +1785,37 @@ export async function deployWorkflows(
       deployed: [],
     };
   }
+
+  // Best-effort post-deploy validation. Default: on. Tests can disable via
+  // `validate: false` so we don't hammer the GitHub API in test loops.
+  const shouldValidate = options?.validate ?? true;
+  if (!shouldValidate) {
+    return { success: true, errors: [], deployed: deployedNames };
+  }
+
+  // Give GitHub a moment to index the new workflow files. Without this, the
+  // listing call frequently returns empty even when the files committed
+  // successfully. Tunable for tests.
+  const delayMs = options?.validateDelayMs ?? 2500;
+  if (delayMs > 0) {
+    await new Promise((resolve) => setTimeout(resolve, delayMs));
+  }
+
+  const validation = await validateWorkflowsParseable(repo, deployedNames, pat);
+  const validationErrors: string[] = [];
+  if (validation.missing.length > 0) {
+    validationErrors.push(
+      `Workflows committed but not listed by GitHub Actions (possible YAML parse error or indexing lag): ${validation.missing.join(", ")}`,
+    );
+  }
+  validationErrors.push(...validation.errors);
+
+  return {
+    success: true,
+    errors: [],
+    deployed: deployedNames,
+    validationErrors: validationErrors.length > 0 ? validationErrors : undefined,
+  };
 }
 
 /**

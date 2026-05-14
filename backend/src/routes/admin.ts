@@ -2345,6 +2345,11 @@ adminRoutes.post("/datasets/:id/ci", async (c) => {
     message: "CI workflows deployed successfully",
     dataset_id: datasetId,
     workflows_deployed: result.deployed,
+    // Surface post-deploy validation results (best-effort; non-fatal).
+    // Empty/undefined means GitHub Actions can parse every deployed file.
+    ...(result.validationErrors && result.validationErrors.length > 0
+      ? { validation_warnings: result.validationErrors }
+      : {}),
   });
 });
 
