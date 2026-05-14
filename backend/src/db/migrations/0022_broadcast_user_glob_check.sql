@@ -11,6 +11,17 @@
 -- wildcard. Swap to GLOB so any future write that doesn't lowercase the
 -- prefix is rejected at the database boundary.
 --
+-- Note on `user:` with an empty suffix: `GLOB 'user:*'` matches zero or
+-- more trailing characters, so a literal `'user:'` value technically
+-- passes the CHECK. The DB does not enforce a minimum username length —
+-- that invariant lives in the application layer (signupSchema in
+-- backend/src/routes/auth.ts requires /^[a-zA-Z0-9_-]+$/ with length >= 3,
+-- and getBroadcastRecipientByUsername validates the username against the
+-- users table before constructing the prefix). Adding a
+-- `length(recipient_group) > 5` clause here would duplicate that check
+-- at the DB boundary at the cost of locking the migration to a specific
+-- username-length policy; we keep the CHECK minimal.
+--
 -- Same SQLite/D1 caveats as 0021: rebuild the table to swap the CHECK; no
 -- explicit BEGIN/COMMIT (D1 rejects them with error 7500 — the runtime
 -- already wraps each migration in a transaction); no foreign_keys PRAGMA

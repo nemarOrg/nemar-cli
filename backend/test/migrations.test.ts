@@ -517,3 +517,79 @@ describe("migration 0022 — broadcast_emails GLOB user:*", () => {
     expect(tbl).toBeNull();
   });
 });
+
+// ---------------------------------------------------------------------------
+// AUTOINCREMENT continuity across the chained 0021 + 0022 rebuild
+//
+// Each of 0021 and 0022 rebuilds the broadcast_emails table by creating
+// broadcast_emails_new, INSERT...SELECTing existing rows, dropping the
+// original, and renaming. SQLite tracks AUTOINCREMENT counters in the
+// hidden sqlite_sequence table; if either rebuild reset the counter, new
+// inserts after 0022 would collide with pre-existing ids. This block
+// seeds fixture rows BEFORE 0021 runs, applies both rebuilds, and
+// verifies the next insert gets max(id)+1 — exactly the scenario the
+// chained-rebuild concern from the #491 review was about.
+// ---------------------------------------------------------------------------
+
+describe("broadcast_emails AUTOINCREMENT across 0021 + 0022", () => {
+  let db: Database;
+
+  beforeAll(() => {
+    db = new Database(":memory:");
+    const files = getMigrationFiles();
+    // 0001-0020 build the schema and create broadcast_emails (0017).
+    const pre0021 = files.filter((f) => {
+      const num = Number.parseInt(f.split("_")[0], 10);
+      return num >= 1 && num <= 20;
+    });
+    for (const file of pre0021) {
+      execScript(db, readFileSync(join(MIGRATIONS_DIR, file), "utf-8"));
+    }
+    execInsert(
+      db,
+      `INSERT INTO users (id, username, email, password_hash, github_username, status)
+       VALUES (1, 'yahya', 'yahya@nemar.org', 'hash', 'yahya', 'approved')`,
+    );
+    // Insert 5 fixture rows. Each gets a sequential AUTOINCREMENT id (1..5)
+    // and bumps the sqlite_sequence counter to 5.
+    const insert = db.prepare(
+      `INSERT INTO broadcast_emails
+         (sent_by, recipient_group, subject, body_markdown, recipient_count, failure_count, failed_recipients, sent_at)
+       VALUES (1, 'all', $subject, 'Body.', 0, 0, '[]', $sent_at)`,
+    );
+    for (let i = 1; i <= 5; i++) {
+      insert.run({ $subject: `Pre-0021 row ${i}`, $sent_at: `2025-01-${String(i).padStart(2, "0")} 00:00:00` });
+    }
+    insert.finalize();
+    // Apply both rebuilds in order — the scenario the chained-rebuild
+    // concern was about.
+    execScript(db, readFileSync(join(MIGRATIONS_DIR, "0021_broadcast_user_recipient.sql"), "utf-8"));
+    execScript(db, readFileSync(join(MIGRATIONS_DIR, "0022_broadcast_user_glob_check.sql"), "utf-8"));
+  });
+
+  afterAll(() => {
+    db.close();
+  });
+
+  test("all 5 pre-0021 rows survive both rebuilds with original ids", () => {
+    const rows = db
+      .prepare("SELECT id, subject FROM broadcast_emails ORDER BY id")
+      .all() as { id: number; subject: string }[];
+    expect(rows).toHaveLength(5);
+    for (let i = 0; i < 5; i++) {
+      expect(rows[i].id).toBe(i + 1);
+      expect(rows[i].subject).toBe(`Pre-0021 row ${i + 1}`);
+    }
+  });
+
+  test("next insert after the chained rebuild gets id 6 (counter preserved)", () => {
+    execInsert(
+      db,
+      `INSERT INTO broadcast_emails (sent_by, recipient_group, subject, body_markdown, recipient_count, failure_count, failed_recipients, sent_at) VALUES (1, 'all', 'Post-rebuild row', 'Body.', 0, 0, '[]', '2026-07-01 00:00:00')`,
+    );
+    const row = db
+      .prepare("SELECT id FROM broadcast_emails WHERE subject = 'Post-rebuild row'")
+      .get() as { id: number };
+    expect(row.id).toBe(6);
+  });
+});
