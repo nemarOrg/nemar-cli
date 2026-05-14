@@ -452,6 +452,23 @@ datasetRoutes.get("/", optionalAuthMiddleware, async (c) => {
   if (mine) {
     // --mine: only managed datasets, no catalog
     if (!user) {
+      // Distinguish "no auth header sent" from "auth header sent but token
+      // invalid/expired/revoked". The latter is what trips CLI users who
+      // `nemar auth login` succeeded weeks ago and then had their token
+      // revoked or the backend rotated — `isAuthenticated()` is presence-only
+      // so the CLI happily fires the request and the user sees a vague
+      // "Authentication required" with no hint to re-login.
+      // See nemarOrg/nemar-cli#447.
+      const attempted = c.get("authAttempted");
+      if (attempted) {
+        return c.json(
+          {
+            error:
+              "Your API key was rejected. Run 'nemar auth login' to re-authenticate, or 'nemar auth regenerate-key' if your key was revoked.",
+          },
+          401,
+        );
+      }
       return c.json({ error: "Authentication required to view your datasets" }, 401);
     }
 
@@ -749,7 +766,17 @@ async function executeAndReturn(
           .prepare(
             `SELECT d.dataset_id, d.name, d.description, d.status, d.visibility,
                     d.github_repo, d.concept_doi, d.created_at, d.updated_at,
-                    u.username AS owner_username
+                    u.username AS owner_username,
+                    -- API contract: every list entry exposes latest_version
+                    -- (null when no minted DOI version yet) so callers
+                    -- (e.g. scripts/hallu-sync.sh) can rely on its presence
+                    -- without falling back to per-dataset /manifest calls.
+                    (
+                      SELECT version FROM dataset_versions dv
+                      WHERE dv.dataset_id = d.dataset_id
+                      ORDER BY created_at DESC
+                      LIMIT 1
+                    ) AS latest_version
              FROM datasets d
              JOIN users u ON d.owner_user_id = u.id
              WHERE d.status = 'active' AND (d.is_sandbox = 0 OR d.is_sandbox IS NULL)
@@ -937,6 +964,18 @@ datasetRoutes.get("/:id", optionalAuthMiddleware, async (c) => {
             .first()
         : null;
       if (!isCollaborator) {
+        // If the caller sent a Bearer token that was rejected, give a
+        // re-login hint instead of "Dataset not found" — same bug class
+        // as nemarOrg/nemar-cli#447 but for the single-dataset route.
+        if (!user && c.get("authAttempted")) {
+          return c.json(
+            {
+              error:
+                "Your API key was rejected. Run 'nemar auth login' to re-authenticate, or 'nemar auth regenerate-key' if your key was revoked.",
+            },
+            401,
+          );
+        }
         return c.json({ error: "Dataset not found" }, 404);
       }
     }

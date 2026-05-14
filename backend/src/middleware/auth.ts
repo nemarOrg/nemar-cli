@@ -6,7 +6,13 @@
 
 import type { Context, Next } from "hono";
 import { hashApiKey } from "../services/token";
-import { type AuthUser, type Bindings, type Variables, hasRole, parseRole } from "../types/bindings";
+import {
+  type AuthUser,
+  type Bindings,
+  type Variables,
+  hasRole,
+  parseRole,
+} from "../types/bindings";
 
 type AuthContext = Context<{ Bindings: Bindings; Variables: Variables }>;
 
@@ -150,21 +156,38 @@ export async function ownerMiddleware(c: AuthContext, next: Next) {
 }
 
 /**
- * Optional auth middleware - sets user if authenticated, but doesn't require it
+ * Optional auth middleware - sets user if authenticated, but doesn't require it.
+ *
+ * When an Authorization: Bearer header is provided but the token cannot be
+ * resolved to an approved user (revoked, expired, malformed, account not yet
+ * approved, etc.), the middleware sets `authAttempted=true` so downstream
+ * routes that require auth on a flag (e.g., `GET /datasets?mine=true`) can
+ * return a token-specific 401 instead of a generic "Authentication required"
+ * — which is indistinguishable from "no header sent" to a confused CLI user
+ * who thinks they're logged in (see nemarOrg/nemar-cli#447).
  */
 export async function optionalAuthMiddleware(c: AuthContext, next: Next) {
   const authHeader = c.req.header("Authorization");
 
+  // Case-sensitive: "bearer" (lowercase) is treated as no auth attempted.
+  // The CLI always sends "Bearer" (capital B, src/lib/api.ts), so this is
+  // not a practical concern, but proxies that lowercase headers will silently
+  // degrade to unauthenticated rather than triggering the stale-token path.
   if (!authHeader || !authHeader.startsWith("Bearer ")) {
+    c.set("authAttempted", false);
     await next();
     return;
   }
 
   const apiKey = authHeader.substring(7);
   if (!apiKey || apiKey.length < 32) {
+    // Malformed token — caller clearly intended to authenticate.
+    c.set("authAttempted", true);
     await next();
     return;
   }
+
+  c.set("authAttempted", true);
 
   const hashedKey = await hashApiKey(apiKey);
 
