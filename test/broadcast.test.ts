@@ -101,7 +101,7 @@ describe("buildBroadcastHtml", () => {
     expect(result).toContain("Test Subject");
     expect(result).toContain("<p>Body</p>");
     expect(result).toContain("NEMAR");
-    expect(result).toContain("osc.earth");
+    expect(result).toContain("nemar.org");
   });
 
   test("escapes subject HTML", () => {
