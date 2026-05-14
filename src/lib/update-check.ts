@@ -20,8 +20,16 @@ import chalk from "chalk";
 import { compareVersions } from "./semver.js";
 import { version as currentVersion } from "./version.js";
 
-const CONFIG_DIR = process.env.NEMAR_CONFIG_DIR || join(homedir(), ".config", "nemar");
-const CACHE_FILE = join(CONFIG_DIR, "update-check.json");
+// Resolve the config dir lazily on each call so tests that set
+// NEMAR_CONFIG_DIR in beforeAll aren't defeated by Bun's module cache
+// pinning the value at first import (same hazard as src/lib/config.ts
+// before #489 — see that file's getConfigDir for context).
+function getConfigDir(): string {
+  return process.env.NEMAR_CONFIG_DIR || join(homedir(), ".config", "nemar");
+}
+function getCacheFile(): string {
+  return join(getConfigDir(), "update-check.json");
+}
 const CACHE_TTL_MS = 24 * 60 * 60 * 1000;
 const NPM_URL = "https://registry.npmjs.org/nemar-cli/latest";
 const FETCH_TIMEOUT_MS = 5000;
@@ -46,8 +54,9 @@ function isNewerVersion(latest: string): boolean {
 
 function readCache(): UpdateCache | null {
   try {
-    if (!existsSync(CACHE_FILE)) return null;
-    const raw = readFileSync(CACHE_FILE, "utf-8");
+    const cacheFile = getCacheFile();
+    if (!existsSync(cacheFile)) return null;
+    const raw = readFileSync(cacheFile, "utf-8");
     const data = JSON.parse(raw) as UpdateCache;
     if (typeof data.checkedAt !== "number" || typeof data.latestVersion !== "string") return null;
     return data;
@@ -63,9 +72,9 @@ function readCache(): UpdateCache | null {
 
 function writeCache(latestVersion: string): void {
   try {
-    mkdirSync(CONFIG_DIR, { recursive: true });
+    mkdirSync(getConfigDir(), { recursive: true });
     const cache: UpdateCache = { checkedAt: Date.now(), latestVersion };
-    writeFileSync(CACHE_FILE, JSON.stringify(cache));
+    writeFileSync(getCacheFile(), JSON.stringify(cache));
   } catch (err) {
     if (process.env.VERBOSE) {
       process.stderr.write(
