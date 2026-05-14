@@ -205,6 +205,11 @@ describe("approvePublication onProgress", () => {
 
   test("emits s3_lock progress with running locked/total across pages", async () => {
     // Three-page s3_lock stream: 40 + 40 + 20 locked of 100 total.
+    //
+    // The final (non-hasMore) response MUST include s3_lock_total and
+    // s3_lock_batch_count — the backend always returns them on every
+    // s3_lock response including the last. Without them the CLI's running
+    // counter would read 80/100 at "complete" instead of 100/100. (#284)
     fake = startFakeApproveServer(DATASET, [
       {
         message: "S3 lock in progress: 40 locked in this batch",
@@ -226,6 +231,10 @@ describe("approvePublication onProgress", () => {
         s3_lock_batch_count: 40,
         hasMore: true,
       },
+      // Final response: no hasMore, no step field (falls through to overall
+      // success). Backend MUST return s3_lock_total and s3_lock_batch_count
+      // here so the CLI accumulates the last batch. This is the contract
+      // fixed by #284 — a fixture without these fields would hide the bug.
       {
         message: "Published",
         dataset_id: DATASET,

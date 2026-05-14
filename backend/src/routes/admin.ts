@@ -1947,7 +1947,7 @@ adminRoutes.get("/datasets/:id/files", async (c) => {
       );
       if (s3Stats.totalSize > totalSize) {
         totalSize = s3Stats.totalSize;
-        fileCount = s3Stats.objectCount;
+        fileCount = s3Stats.objectCount ?? fileCount;
       }
     } catch (s3Err) {
       console.warn(
@@ -2714,6 +2714,14 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
 
   // Track step start time for duration measurement
   let currentStepStartMs = 0;
+
+  // Captured at the end of the s3_lock step so the final success response
+  // can include the last-batch count. The CLI accumulates `s3_lock_batch_count`
+  // from every response (including the non-hasMore final one) to render the
+  // completed percentage; omitting it from the final response means the CLI's
+  // counter reads short by exactly the last batch. (#284)
+  let s3LockFinalTotal: number | undefined;
+  let s3LockFinalBatchCount: number | undefined;
 
   // Helper to set current step before execution. Non-fatal on failure.
   async function startStep(step: PublicationStep) {
@@ -3814,14 +3822,25 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
       // Count total objects once at the start of the s3_lock stream so the
       // CLI can render a real progress bar instead of just a running count
       // (#284). The CLI threads `s3_lock_total` back via the request body
-      // on every subsequent call so we don't re-count per page. The count
-      // sweep is bounded at ~ceil(total/1000) LIST subrequests (e.g.
-      // ~7 LISTs for 6500 objects), which is small next to the actual
-      // PutObjectRetention budget the orchestrator spends here.
+      // on every subsequent call so we don't re-count per page.
+      //
+      // Subrequest budget note: the counting sweep uses ceil(N/1000) LIST
+      // subrequests; for a 6500-object dataset that is ~7 LISTs on top of
+      // the 1 LIST + 100 PUTs from applyObjectLockBatch. The Workers Paid
+      // cap is 1000 subrequests, so we cap the sweep at 20 LISTs (20 000
+      // objects). If the dataset is larger the count is skipped and the CLI
+      // falls back to a running count without a denominator — better than
+      // risking a "Too many subrequests" failure on the first invocation.
+      const MAX_COUNT_LISTS = 20;
       let s3LockTotal = body.s3_lock_total;
       if (s3LockTotal === undefined && body.s3_lock_continuation_token === undefined) {
-        const stats = await getDatasetS3Stats(getS3Config(c.env), datasetId);
-        s3LockTotal = stats.objectCount;
+        const stats = await getDatasetS3Stats(getS3Config(c.env), datasetId, MAX_COUNT_LISTS);
+        // stats.objectCount is undefined when the cap was hit; leave
+        // s3LockTotal as undefined so the CLI shows "N locked" without a
+        // denominator rather than an incorrect percentage.
+        if (stats.objectCount !== undefined) {
+          s3LockTotal = stats.objectCount;
+        }
       }
 
       const lockResult = await applyObjectLockBatch(
@@ -3867,6 +3886,10 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
         });
       }
 
+      // Capture values for the final success response so the CLI's running
+      // counter reaches the true total (not short by the last batch).
+      s3LockFinalTotal = s3LockTotal;
+      s3LockFinalBatchCount = lockResult.locked;
       await updateProgress("s3_lock");
     } catch (err) {
       const msg = errorMessage(err);
@@ -4159,6 +4182,12 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
     status: "published",
     steps_completed: allSteps,
     step_results: stepResults,
+    // Always return the final s3_lock totals so the CLI's running counter
+    // reaches the true total. Without these the last batch is never counted
+    // and the progress display reads short by a full page (e.g. 3963/4963
+    // instead of 4963/4963) even when locking succeeded. (#284)
+    s3_lock_total: s3LockFinalTotal,
+    s3_lock_batch_count: s3LockFinalBatchCount,
     warning: auditLogFailed
       ? `Audit log write failed: ${auditLogError}. Publication succeeded but was not logged for compliance.`
       : undefined,
