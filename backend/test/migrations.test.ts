@@ -333,7 +333,11 @@ describe("migration 0021 — broadcast_emails user recipient", () => {
     }).toThrow();
   });
 
-  test("CHECK rejects 'Users:alex' (capital U — not matching LIKE 'user:%')", () => {
+  test("CHECK rejects 'Users:alex' (extra 's' makes prefix 'users:' not 'user:')", () => {
+    // Note: the rejection is from the prefix mismatch, NOT capital-U.
+    // SQLite/D1 evaluate LIKE case-insensitively, so 'User:alex' would
+    // pass this 0021 CHECK. Case sensitivity arrives in migration 0022
+    // (issue #488) via GLOB.
     expect(() => {
       execInsert(
         db,
@@ -408,6 +412,103 @@ describe("migration 0021 — broadcast_emails user recipient", () => {
   });
 
   test("no stale broadcast_emails_new table remains after migration", () => {
+    const tbl = db
+      .prepare(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='broadcast_emails_new'",
+      )
+      .get();
+    expect(tbl).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Migration 0022 — broadcast_emails GLOB user:* (issue #488)
+//
+// Applies 0001-0022 against a fresh in-memory database, seeds the user FK
+// row, and verifies the only behavioral change vs 0021: the CHECK is now
+// case-sensitive on the `user:` prefix, so 'User:alex' (capital U) is
+// rejected at write time. All 0021 invariants still hold under 0022 since
+// GLOB 'user:*' is a strict subset of LIKE 'user:%' for the values the
+// CLI actually produces (lowercase).
+// ---------------------------------------------------------------------------
+
+describe("migration 0022 — broadcast_emails GLOB user:*", () => {
+  let db: Database;
+
+  beforeAll(() => {
+    db = new Database(":memory:");
+    const files = getMigrationFiles();
+    const upTo0022 = files.filter((f) => {
+      const num = Number.parseInt(f.split("_")[0], 10);
+      return num >= 1 && num <= 22;
+    });
+    for (const file of upTo0022) {
+      const sql = readFileSync(join(MIGRATIONS_DIR, file), "utf-8");
+      execScript(db, sql);
+    }
+    execInsert(
+      db,
+      `INSERT INTO users (id, username, email, password_hash, github_username, status)
+       VALUES (1, 'yahya', 'yahya@nemar.org', 'hash', 'yahya', 'approved')`,
+    );
+  });
+
+  afterAll(() => {
+    db.close();
+  });
+
+  test("CHECK still accepts lowercase user:<username>", () => {
+    expect(() => {
+      execInsert(
+        db,
+        `INSERT INTO broadcast_emails (sent_by, recipient_group, subject, body_markdown, recipient_count, failure_count, failed_recipients, sent_at) VALUES (1, 'user:alex', 'Direct to alex', 'Hi.', 1, 0, '[]', '2026-06-01 00:00:00')`,
+      );
+    }).not.toThrow();
+  });
+
+  test("CHECK rejects 'User:alex' (capital U) — case-sensitive GLOB", () => {
+    // The whole point of 0022. Under 0021's LIKE this would have silently
+    // passed because SQLite/D1 LIKE is case-insensitive.
+    expect(() => {
+      execInsert(
+        db,
+        `INSERT INTO broadcast_emails (sent_by, recipient_group, subject, body_markdown, recipient_count, failure_count, failed_recipients, sent_at) VALUES (1, 'User:alex', 'Bad prefix', 'Body.', 0, 0, '[]', '2026-06-02 00:00:00')`,
+      );
+    }).toThrow();
+  });
+
+  test("CHECK rejects 'USER:alex' (all caps)", () => {
+    expect(() => {
+      execInsert(
+        db,
+        `INSERT INTO broadcast_emails (sent_by, recipient_group, subject, body_markdown, recipient_count, failure_count, failed_recipients, sent_at) VALUES (1, 'USER:alex', 'Bad prefix', 'Body.', 0, 0, '[]', '2026-06-03 00:00:00')`,
+      );
+    }).toThrow();
+  });
+
+  test("CHECK still accepts the original enum values", () => {
+    for (const group of ["all", "admins", "members"]) {
+      expect(() => {
+        execInsert(
+          db,
+          `INSERT INTO broadcast_emails (sent_by, recipient_group, subject, body_markdown, recipient_count, failure_count, failed_recipients, sent_at) VALUES (1, '${group}', 'Test ${group}', 'Body.', 0, 0, '[]', '2026-06-04 00:00:00')`,
+        );
+      }).not.toThrow();
+    }
+  });
+
+  test("indexes survive the second table rebuild", () => {
+    const idxs = db
+      .prepare(
+        "SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='broadcast_emails' ORDER BY name",
+      )
+      .all() as { name: string }[];
+    const names = idxs.map((r) => r.name);
+    expect(names).toContain("idx_broadcast_sent_at");
+    expect(names).toContain("idx_broadcast_sent_by");
+  });
+
+  test("no stale broadcast_emails_new table remains after 0022", () => {
     const tbl = db
       .prepare(
         "SELECT name FROM sqlite_master WHERE type='table' AND name='broadcast_emails_new'",
