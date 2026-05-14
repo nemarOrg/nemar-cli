@@ -191,36 +191,35 @@ describe("bids-ci - dataset ID detection", () => {
 // ============================================================================
 
 describe("bids-ci - push --pr", () => {
-  // Skipped: environment-sensitive (CI sees a different error string; local sees SIGTERM 143
-  // when the CLI spinner doesn't terminate cleanly under captured stderr). Behavior is correct
-  // but the assertions don't survive across environments. Tracked in #473.
-  test.skip("push --pr on main branch skips PR creation", async () => {
+  test("push --pr on main branch skips PR creation", async () => {
     const repoDir = await createTempAnnexRepo();
+    // Use a local bare repo as the remote so `git push` actually succeeds.
+    // The previous version pushed at github.com/nemarDatasets/test which
+    // either hung waiting for DNS+auth (local) or surfaced different error
+    // strings (CI) and only ever exercised the failure path, never the
+    // skip-PR-on-main logic the test name claims to verify.
+    const remoteDir = join(TMP_DIR, `remote-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`);
+    mkdirSync(remoteDir, { recursive: true });
+    await runCmd(["git", "init", "--bare"], remoteDir);
 
     // Create initial commit and rename branch to main
     writeFileSync(join(repoDir, "README.md"), "# Test\n");
     await runCmd(["git", "add", "README.md"], repoDir);
     await runCmd(["git", "commit", "-m", "init"], repoDir);
     await runCmd(["git", "branch", "-M", "main"], repoDir);
-
-    // Add a remote (push will fail, but PR logic should skip before that)
-    await runCmd(
-      ["git", "remote", "add", "origin", "https://github.com/nemarDatasets/test.git"],
-      repoDir,
-    );
+    await runCmd(["git", "remote", "add", "origin", remoteDir], repoDir);
 
     const { stdout, stderr, exitCode } = await runCli(["dataset", "push", "--pr", "--no-s3"], {
       cwd: repoDir,
     });
-    // Push will fail (no access to remote), but the --pr skip message should still show
-    // if git push succeeds. Since push fails, we just verify exit code
-    expect(exitCode).toBe(1);
-    // The error is about git push failing. Spinner writes to stderr; some environments
-    // route it to stdout. Check both.
-    const output = stdout + stderr;
-    expect(
-      output.includes("push failed") || output.includes("failed") || output.includes("fatal"),
-    ).toBe(true);
+
+    // Push succeeds against the bare remote; PR creation is then skipped
+    // because we're on main. The skip message is plain console.log, so it
+    // lands in stdout deterministically across TTY and CI.
+    expect(exitCode).toBe(0);
+    const output = (stdout + stderr).toLowerCase();
+    expect(output).toContain("skipping pr");
+    expect(output).toContain("already on main branch");
   });
 
   test("push --pr passes title and body to gh cli", async () => {

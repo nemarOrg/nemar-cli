@@ -12,10 +12,11 @@ const NEW_URL = "https://api.nemar.org";
 const SCCN_DEV_URL = "https://nemar-api-dev.sccn-org.workers.dev";
 const CUSTOM_URL = "https://api.example.com/nemar";
 
-// Module-level state in src/lib/config.ts captures NEMAR_CONFIG_DIR at first
-// import. Bun caches modules across tests, so we set up the config once,
-// import once, and assert all migration scenarios from one snapshot. A second
-// idempotency assertion calls the exported function directly.
+// src/lib/config.ts reads NEMAR_CONFIG_DIR lazily on each getStore() call
+// (issue #489: a previous module-load capture made test ordering matter).
+// Tests trigger migrations explicitly via migrateApiUrl() so the dir-aware
+// store cache rebuilds against this test's NEMAR_CONFIG_DIR regardless of
+// which test file imported src/lib/config.ts first.
 
 const testDir = join(tmpdir(), `nemar-cfg-migrate-${Date.now()}-${process.pid}`);
 const configPath = join(testDir, "config.json");
@@ -76,8 +77,11 @@ afterAll(() => {
 
 describe("migrateApiUrl", () => {
   test("first launch rewrites legacy URLs, drops top-level field, leaves live URLs alone", async () => {
-    // Module load runs migrateApiUrl() at top level.
-    await import("../src/lib/config.ts");
+    // Migrations are lazy; trigger them explicitly so this test is
+    // independent of whether another test file has already imported
+    // src/lib/config.ts.
+    const { migrateApiUrl } = await import("../src/lib/config.ts");
+    migrateApiUrl();
 
     const after = readConfig();
     const accounts = after.accounts ?? {};
@@ -115,10 +119,11 @@ describe("migrateApiUrl", () => {
   });
 
   test("only top-level field stale: accounts already clean, still drops the field", async () => {
-    // Distinct config dir so the module-level Conf store reload picks up
-    // fresh state; the previous tests already locked NEMAR_CONFIG_DIR for
-    // this process, so we drive migrateApiUrl directly with a hand-rolled
-    // store to exercise the branch.
+    // Overwrite the config file with a clean accounts map plus a stale
+    // top-level apiUrl. Conf.store re-reads from disk on every access, so
+    // migrateApiUrl() sees this freshly written snapshot even though the
+    // cached Conf instance was built for testDir in earlier tests. This
+    // exercises the "drop stale top-level only" branch in isolation.
     const { migrateApiUrl } = await import("../src/lib/config.ts");
     writeFileSync(
       configPath,
