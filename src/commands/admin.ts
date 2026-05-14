@@ -1878,13 +1878,15 @@ After Approval:
           info.s3LockTotal > 0
         ) {
           const pct = ((info.s3LockLocked / info.s3LockTotal) * 100).toFixed(1);
-          return `${head} | Locking S3 objects: ${info.s3LockLocked}/${info.s3LockTotal} (${pct}%)`;
+          const resumeSuffix = info.s3LockResumed ? " (resumed)" : "";
+          return `${head} | Locking S3 objects: ${info.s3LockLocked}/${info.s3LockTotal} (${pct}%)${resumeSuffix}`;
         }
         if (info.step === "s3_lock" && info.s3LockLocked !== undefined) {
           // Total not yet known (rare; first response before server has
           // counted). Show running count without the denominator so the
           // line still advances.
-          return `${head} | Locking S3 objects: ${info.s3LockLocked}`;
+          const resumeSuffix = info.s3LockResumed ? " (resumed)" : "";
+          return `${head} | Locking S3 objects: ${info.s3LockLocked}${resumeSuffix}`;
         }
         return head;
       }

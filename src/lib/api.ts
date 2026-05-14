@@ -1353,6 +1353,16 @@ export interface PublishProgressInfo {
   s3LockLocked?: number;
   /** Total S3 objects to lock, once known. */
   s3LockTotal?: number;
+  /**
+   * True when emitting s3_lock progress after a Worker retry. The outer
+   * retry loop (on 5xx/timeout) re-invokes the Worker with the persisted
+   * continuation token so locking resumes from the right page; however
+   * the visible counter can appear lower than the pre-retry value while
+   * the new invocation re-accumulates its batches. Setting this flag lets
+   * the CLI append "(resumed)" to the spinner line so the display is
+   * honest rather than misleading. (#284)
+   */
+  s3LockResumed?: boolean;
 }
 
 /**
@@ -1462,9 +1472,15 @@ export async function approvePublication(
   // s3_lock call and threaded back on every subsequent call so the
   // server doesn't have to re-count per page. See #284.
   let s3_lock_total: number | undefined;
-  // Running locked-objects count for the current run, accumulated across
-  // hasMore=true pages. Used to drive the s3_lock progress display.
+  // Running locked-objects count accumulated across all hasMore=true pages
+  // AND across outer retries. Kept at function scope so a Worker timeout
+  // mid-s3_lock doesn't reset the counter to 0 on retry.
   let s3LockLocked = 0;
+  // Set to true after the first outer-loop retry so s3_lock progress events
+  // can carry the s3LockResumed flag — the spinner text can then say
+  // "(resumed)" to clarify that the counter reflects pre-retry work plus
+  // new batches from the fresh Worker, not a fresh start from 0. (#284)
+  let s3LockIsResumed = false;
   let lastReportedStep: string | undefined;
   let useResume = resume;
   const accumulatedStepResults: StepResult[] = [];
@@ -1488,6 +1504,7 @@ export async function approvePublication(
       stepTotal: PUBLICATION_STEPS.length,
       s3LockLocked: s3Locked,
       s3LockTotal: s3Total,
+      s3LockResumed: step === "s3_lock" && s3LockIsResumed ? true : undefined,
     });
   }
 
@@ -1528,7 +1545,9 @@ export async function approvePublication(
         if (result.s3_lock_total !== undefined) {
           s3_lock_total = result.s3_lock_total;
         }
-        // Accumulate locked count across pages.
+        // Accumulate locked count across pages. s3LockLocked is at
+        // function scope so it persists across outer retries and the
+        // counter never resets mid-stream. (#284)
         if (result.s3_lock_batch_count !== undefined) {
           s3LockLocked += result.s3_lock_batch_count;
         }
@@ -1592,6 +1611,14 @@ export async function approvePublication(
       // Anything that succeeded in the failed attempt is already persisted
       // in D1; the next attempt must resume to skip it.
       useResume = true;
+      // If the failure happened during s3_lock (continuation token is set,
+      // meaning we were mid-stream), mark subsequent s3_lock progress events
+      // as resumed so the CLI can append "(resumed)" to the spinner line.
+      // The counter (s3LockLocked) is kept from before the failure so the
+      // display shows the true running total rather than appearing to restart.
+      if (s3_lock_continuation_token !== undefined) {
+        s3LockIsResumed = true;
+      }
     }
   }
 
