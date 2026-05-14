@@ -65,10 +65,17 @@ function normalizeApiUrl(raw: string): string {
 }
 
 /**
- * Standardized config directory: ~/.config/nemar/ on all platforms.
- * Overridden by NEMAR_CONFIG_DIR env var for test isolation.
+ * Resolve the config directory on each call. Read from NEMAR_CONFIG_DIR
+ * lazily (not captured at module load) so test files that set the env var
+ * in beforeAll always win, regardless of which test file imported this
+ * module first. See issue #489 for the test-ordering hazard the eager
+ * capture used to cause.
+ *
+ * Standardized default: ~/.config/nemar/ on all platforms.
  */
-const CONFIG_DIR = process.env.NEMAR_CONFIG_DIR || join(homedir(), ".config", "nemar");
+function getConfigDir(): string {
+  return process.env.NEMAR_CONFIG_DIR || join(homedir(), ".config", "nemar");
+}
 
 // Per-account configuration schema
 const accountSchema = z.object({
@@ -115,11 +122,11 @@ interface StoreSchema {
  *
  * Only runs once: if old config exists and new config does not.
  */
-function migrateConfigPath(): void {
+function migrateConfigPath(targetDir: string): void {
   // Skip migration when using a custom config dir (e.g., tests)
   if (process.env.NEMAR_CONFIG_DIR) return;
 
-  const newConfigFile = join(CONFIG_DIR, "config.json");
+  const newConfigFile = join(targetDir, "config.json");
   if (existsSync(newConfigFile)) return;
 
   const oldPaths: string[] = [];
@@ -136,7 +143,7 @@ function migrateConfigPath(): void {
   for (const oldPath of oldPaths) {
     if (existsSync(oldPath)) {
       try {
-        mkdirSync(CONFIG_DIR, { recursive: true });
+        mkdirSync(targetDir, { recursive: true });
         copyFileSync(oldPath, newConfigFile);
         console.error(
           `[nemar] Config migrated from ${oldPath} to ${newConfigFile}\n[nemar] You can safely remove the old file.`,
@@ -153,30 +160,55 @@ function migrateConfigPath(): void {
   }
 }
 
-// Migrate old config path before creating the Conf instance
-migrateConfigPath();
+/**
+ * Conf instance cache, keyed by the config dir that produced it. When the
+ * env var changes between calls (test isolation flips NEMAR_CONFIG_DIR), we
+ * detect the mismatch and rebuild against the new dir, then re-run schema
+ * migrations once for that dir.
+ */
+let cachedStore: Conf<StoreSchema> | null = null;
+let cachedStoreDir: string | null = null;
+const migrationsRunForDirs = new Set<string>();
 
-// Create configuration store with standardized path
-const config = new Conf<StoreSchema>({
-  projectName: "nemar",
-  schema: {
-    activeAccount: { type: "string" },
-    accounts: { type: "object" },
-    apiKey: { type: "string" },
-    // Top-level apiUrl is a legacy flat field consumed only by migrateConfig()
-    // when converting pre-multi-account configs. No schema default: with one,
-    // every Conf construction (i.e. every CLI start) merges the default into
-    // the on-disk store when the key is absent, fighting migrateApiUrl()'s
-    // cleanup. Without the default, once cleanup runs the field stays gone.
-    apiUrl: { type: "string" },
-    username: { type: "string" },
-    email: { type: "string" },
-    githubUsername: { type: "string" },
-    sandboxCompleted: { type: "boolean" },
-    sandboxDatasetId: { type: "string" },
-  },
-  cwd: CONFIG_DIR,
-});
+function getStore(): Conf<StoreSchema> {
+  const dir = getConfigDir();
+  if (cachedStore && cachedStoreDir === dir) return cachedStore;
+
+  migrateConfigPath(dir);
+
+  cachedStore = new Conf<StoreSchema>({
+    projectName: "nemar",
+    schema: {
+      activeAccount: { type: "string" },
+      accounts: { type: "object" },
+      apiKey: { type: "string" },
+      // Top-level apiUrl is a legacy flat field consumed only by migrateConfig()
+      // when converting pre-multi-account configs. No schema default: with one,
+      // every Conf construction (i.e. every CLI start) merges the default into
+      // the on-disk store when the key is absent, fighting migrateApiUrl()'s
+      // cleanup. Without the default, once cleanup runs the field stays gone.
+      apiUrl: { type: "string" },
+      username: { type: "string" },
+      email: { type: "string" },
+      githubUsername: { type: "string" },
+      sandboxCompleted: { type: "boolean" },
+      sandboxDatasetId: { type: "string" },
+    },
+    cwd: dir,
+  });
+  cachedStoreDir = dir;
+
+  // Run structural migrations once per dir. Re-entrant safe: the recursive
+  // getStore() call inside migrateConfig()/migrateApiUrl() short-circuits on
+  // the cache hit set above before this guard re-fires.
+  if (!migrationsRunForDirs.has(dir)) {
+    migrationsRunForDirs.add(dir);
+    migrateConfig();
+    migrateApiUrl();
+  }
+
+  return cachedStore;
+}
 
 const ACCOUNT_FIELDS: (keyof Config)[] = [
   "apiKey",
@@ -191,9 +223,11 @@ const ACCOUNT_FIELDS: (keyof Config)[] = [
 
 /**
  * Migrate legacy flat config to multi-account structure.
- * Called automatically on module load. Safe to call multiple times.
+ * Safe to call multiple times; auto-invoked from getStore() on first init
+ * for a given config dir.
  */
 export function migrateConfig(): void {
+  const config = getStore();
   // Already migrated if accounts exists and has entries
   const existing = config.get("accounts") as Record<string, Config> | undefined;
   if (existing && Object.keys(existing).length > 0) return;
@@ -222,9 +256,6 @@ export function migrateConfig(): void {
   }
 }
 
-// Run migration on module load
-migrateConfig();
-
 /**
  * Rewrite stored apiUrl entries that still point at a retired NEMAR backend
  * to DEFAULT_API_URL, and drop the leftover top-level apiUrl field that
@@ -241,6 +272,7 @@ migrateConfig();
  * continue rather than abort CLI startup.
  */
 export function migrateApiUrl(): void {
+  const config = getStore();
   const store = config.store as StoreSchema;
   const accounts = store.accounts;
   let changed = false;
@@ -290,20 +322,18 @@ export function migrateApiUrl(): void {
   }
 }
 
-migrateApiUrl();
-
 /**
  * Get the active account name
  */
 function getActiveAccountName(): string | undefined {
-  return config.get("activeAccount") as string | undefined;
+  return getStore().get("activeAccount") as string | undefined;
 }
 
 /**
  * Get the accounts map
  */
 function getAccountsMap(): Record<string, Config> {
-  return (config.get("accounts") as Record<string, Config>) || {};
+  return (getStore().get("accounts") as Record<string, Config>) || {};
 }
 
 /**
@@ -327,6 +357,7 @@ export function isSandboxCompleted(): boolean {
  * Set a configuration value on the active account
  */
 export function setConfig<K extends keyof Config>(key: K, value: Config[K]): void {
+  const config = getStore();
   const name = getActiveAccountName() || "default";
   const accounts = getAccountsMap();
 
@@ -347,7 +378,7 @@ export function deleteConfig<K extends keyof Config>(key: K): void {
   const accounts = getAccountsMap();
   if (accounts[active]) {
     delete (accounts[active] as Record<string, unknown>)[key];
-    config.set("accounts", accounts);
+    getStore().set("accounts", accounts);
   }
 }
 
@@ -356,6 +387,7 @@ export function deleteConfig<K extends keyof Config>(key: K): void {
  * If other accounts remain, switches to the first available.
  */
 export function clearConfig(): void {
+  const config = getStore();
   const active = getActiveAccountName();
   if (!active) {
     config.clear();
@@ -377,7 +409,7 @@ export function clearConfig(): void {
  * Clear all accounts and reset config entirely
  */
 export function clearAllConfig(): void {
-  config.clear();
+  getStore().clear();
 }
 
 /**
@@ -391,7 +423,7 @@ export function isAuthenticated(): boolean {
  * Get the configuration file path
  */
 export function getConfigPath(): string {
-  return config.path;
+  return getStore().path;
 }
 
 /**
@@ -413,6 +445,7 @@ export function getAccounts(): AccountInfo[] {
  * The account is keyed by username.
  */
 export function storeAccount(username: string, accountConfig: Config): void {
+  const config = getStore();
   const accounts = getAccountsMap();
   accounts[username] = accountConfig;
   config.store = { ...config.store, accounts, activeAccount: username };
@@ -423,6 +456,7 @@ export function storeAccount(username: string, accountConfig: Config): void {
  * Returns the account that was switched to, or null if not found.
  */
 export function switchAccount(identifier: string): Config | null {
+  const config = getStore();
   const accounts = getAccountsMap();
 
   // Try direct key match first (NEMAR username)
