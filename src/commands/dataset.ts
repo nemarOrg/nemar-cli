@@ -3657,6 +3657,7 @@ Examples:
         const msg = error instanceof Error ? error.message : String(error);
         console.log(chalk.dim(`  Error details: ${msg}`));
       }
+      process.exit(1);
     }
   });
 
@@ -3772,6 +3773,7 @@ Examples:
         const msg = error instanceof Error ? error.message : String(error);
         console.log(chalk.dim(`  Error details: ${msg}`));
       }
+      process.exit(1);
     }
   });
 
@@ -3821,6 +3823,7 @@ Examples:
         const msg = error instanceof Error ? error.message : String(error);
         console.log(chalk.dim(`  Error details: ${msg}`));
       }
+      process.exit(1);
     }
   });
 
