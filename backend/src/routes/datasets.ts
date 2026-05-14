@@ -831,18 +831,37 @@ datasetRoutes.get("/search", optionalAuthMiddleware, async (c) => {
   const trimmed = query.trim();
   const exactIdMatch = /^(nm|ds)\d{6}$/i.test(trimmed);
 
+  // Relevance floor for semantic results. bge-small cosine scores under
+  // ~0.65 against this catalog tend to be topic-adjacent noise rather
+  // than real matches (e.g. any EEG dataset coming back for "sleep eeg").
+  // Override per-request with ?min_score=0 to inspect the long tail.
+  const DEFAULT_MIN_SCORE = 0.65;
+  const minScoreParam = c.req.query("min_score");
+  const parsedMinScore = minScoreParam === undefined ? NaN : Number.parseFloat(minScoreParam);
+  const minScore = Number.isFinite(parsedMinScore)
+    ? Math.max(0, Math.min(parsedMinScore, 1))
+    : DEFAULT_MIN_SCORE;
+
   const applyModality = (rows: SearchResult[]): SearchResult[] => {
     if (!modality) return rows;
     const mod = modality.toLowerCase();
     return rows.filter((r) => r.modalities.toLowerCase().includes(mod));
   };
 
-  const respond = (rows: SearchResult[], method: string) =>
-    c.json({
-      results: applyModality(rows).slice(0, limit),
-      count: rows.length,
+  // textSearch hits have score=1.0 (no embedding ranking), so the score
+  // floor only filters semantic results in practice.
+  const applyMinScore = (rows: SearchResult[]): SearchResult[] =>
+    minScore <= 0 ? rows : rows.filter((r) => r.score >= minScore);
+
+  const respond = (rows: SearchResult[], method: string) => {
+    const filtered = applyModality(applyMinScore(rows));
+    return c.json({
+      results: filtered.slice(0, limit),
+      count: filtered.length,
       method,
+      min_score: minScore,
     });
+  };
 
   try {
     // Exact dataset-ID hits skip the embedding step entirely. Embeddings
