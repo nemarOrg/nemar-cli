@@ -491,25 +491,41 @@ export interface AddCiResponse {
   message: string;
   dataset_id: string;
   workflows_deployed: string[];
-  /** Non-empty when GitHub Actions could not parse one or more deployed files
-   *  (or when the post-deploy listing call failed). Non-fatal: the deploy
-   *  succeeded at the git level; these are best-effort warnings only. */
-  validation_warnings?: string[];
 }
 
 /**
  * Deploy CI workflows to a dataset repository (admin only).
  *
- * @param validate - When false, skip the post-deploy parseability check.
- *   Use for fleet deploys (--no-validate) where the 2.5 s Worker sleep per
- *   dataset would otherwise make bulk operations prohibitively slow.
+ * Returns immediately after the tree-batched commit; post-deploy
+ * parseability validation lives in `validateCi()` (issue #472).
  */
-export async function addCi(
-  datasetId: string,
-  options?: { validate?: boolean },
-): Promise<AddCiResponse> {
-  const qs = options?.validate === false ? "?validate=false" : "";
-  return request<AddCiResponse>(`/admin/datasets/${datasetId}/ci${qs}`, { method: "POST" }, true);
+export async function addCi(datasetId: string): Promise<AddCiResponse> {
+  return request<AddCiResponse>(`/admin/datasets/${datasetId}/ci`, { method: "POST" }, true);
+}
+
+export interface ValidateCiResponse {
+  dataset_id: string;
+  /** Workflow basenames GitHub Actions could parse. */
+  valid: string[];
+  /** Deployed workflow basenames not listed by GitHub Actions — either a YAML
+   *  parse error or transient indexing lag right after the deploy. */
+  missing: string[];
+  /** Transport / API errors from the listing call (5xx, network). The
+   *  validation is best-effort; an error here doesn't fail the deploy. */
+  errors: string[];
+}
+
+/**
+ * One-shot parseability probe for the latest CI workflow deploy.
+ * Callers (the CLI) handle the indexing-lag wait and retry locally so
+ * the Worker's wall-clock budget stays out of the loop (issue #472).
+ */
+export async function validateCi(datasetId: string): Promise<ValidateCiResponse> {
+  return request<ValidateCiResponse>(
+    `/admin/datasets/${datasetId}/ci/validate`,
+    { method: "POST" },
+    true,
+  );
 }
 
 export interface SyncCiResponse {

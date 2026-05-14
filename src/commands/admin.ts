@@ -73,6 +73,7 @@ import {
   syncDataset,
   updateDoi,
   updateEmailPreferences,
+  validateCi,
 } from "../lib/api.js";
 import { getConfig, isAuthenticated } from "../lib/config.js";
 import {
@@ -657,6 +658,63 @@ ciCommand
     }
   });
 
+/** Probe shape — see pollCiValidation. Exported for the unit test. */
+export type ValidationProbe = () => Promise<{
+  valid: string[];
+  missing: string[];
+  errors: string[];
+}>;
+
+/**
+ * Poll the validate endpoint after a CI deploy. GitHub's workflow index lags
+ * the commit by a few seconds; the previous design slept inside the Worker,
+ * which burned wall-clock budget. This runs the sleep + retry on the user's
+ * machine instead (issue #472).
+ *
+ * Default backoff: 2.5 s, then 5 s if anything is still missing. Returns the
+ * final validation result (or null if the poll itself errored out — also
+ * treated as a best-effort warning by the caller). `probe` and `delaysMs`
+ * are dependency-injected so the unit test can pass a fake probe and zero
+ * delays without spinning up a real backend.
+ */
+export async function pollCiValidation(
+  datasetId: string,
+  probe: ValidationProbe = async () => {
+    const r = await validateCi(datasetId);
+    return { valid: r.valid, missing: r.missing, errors: r.errors };
+  },
+  delaysMs: readonly number[] = [2500, 5000],
+): Promise<{ valid: string[]; missing: string[]; errors: string[] } | null> {
+  let last: { valid: string[]; missing: string[]; errors: string[] } | null = null;
+  for (const delay of delaysMs) {
+    if (delay > 0) await new Promise((resolve) => setTimeout(resolve, delay));
+    try {
+      last = await probe();
+      // Stop early when everything is parseable or the call itself failed
+      // (retrying a 500 just adds latency without new information).
+      if (last.missing.length === 0 || last.errors.length > 0) return last;
+    } catch {
+      // Network/API hiccup. Don't retry — the deploy succeeded, just skip
+      // the inline parseability warning.
+      return null;
+    }
+  }
+  return last;
+}
+
+function printValidationWarning(result: { missing: string[]; errors: string[] }): void {
+  console.log();
+  console.log(chalk.yellow("Validation warnings (best-effort; deploy succeeded):"));
+  if (result.missing.length > 0) {
+    console.log(
+      `  ${chalk.yellow("!")} Not listed by GitHub Actions (parse error or indexing lag): ${result.missing.join(", ")}`,
+    );
+  }
+  for (const e of result.errors) {
+    console.log(`  ${chalk.yellow("!")} ${e}`);
+  }
+}
+
 ciCommand
   .command("add")
   .description("Deploy CI workflows to a dataset repository (or all with --all)")
@@ -664,7 +722,7 @@ ciCommand
   .option("--all", "Deploy to all dataset repositories")
   .option(
     "--no-validate",
-    "Skip post-deploy parseability check (saves ~2.5 s per dataset; use for fleet deploys with --all)",
+    "Skip the post-deploy parseability poll on the single-dataset path. No-op for --all (fleet deploys always skip the poll).",
   )
   .option(YES_OPTION, YES_DESCRIPTION)
   .option(NO_OPTION, NO_DESCRIPTION)
@@ -696,9 +754,11 @@ ciCommand
       console.log("  1. BIDS Validation (runs on PRs)");
       console.log("  2. Version Check (ensures version bump on PRs)");
       console.log("  3. PR Merge Handler (creates releases, publishes DOIs)");
-      if (skipValidate) {
-        console.log(chalk.dim("  (post-deploy parseability check disabled via --no-validate)"));
-      }
+      console.log(
+        chalk.dim(
+          "  (post-deploy parseability poll skipped for --all; run 'nemar admin ci validate <id>' per dataset)",
+        ),
+      );
       console.log();
 
       const confirmResult = await confirm(
@@ -710,20 +770,20 @@ ciCommand
         return;
       }
 
+      // Fleet deploys always skip the parseability poll. With many datasets
+      // the per-dataset 2.5–7.5 s wait adds up; users running --all typically
+      // just want fast confirmation of commits. Admins can run
+      // `nemar admin ci validate <id>` on individual datasets afterward.
+      // skipValidate is intentionally unused here — --no-validate accepts but
+      // is a no-op on the fleet path (consistent with what the help text
+      // says).
       let succeeded = 0;
       let failed = 0;
       for (const ds of datasets) {
         const dsSpinner = ora(`Deploying to ${ds.dataset_id}...`).start();
         try {
-          const r = await addCi(ds.dataset_id, { validate: !skipValidate });
-          if (r.validation_warnings && r.validation_warnings.length > 0) {
-            dsSpinner.warn(`${ds.dataset_id}: deployed (with warnings)`);
-            for (const w of r.validation_warnings) {
-              console.log(`    ${chalk.yellow("!")} ${w}`);
-            }
-          } else {
-            dsSpinner.succeed(`${ds.dataset_id}: deployed`);
-          }
+          await addCi(ds.dataset_id);
+          dsSpinner.succeed(`${ds.dataset_id}: deployed`);
           succeeded++;
         } catch (error) {
           const msg = error instanceof ApiError ? error.message : String(error);
@@ -750,7 +810,7 @@ ciCommand
     console.log("  2. Version Check (ensures version bump on PRs)");
     console.log("  3. PR Merge Handler (creates releases, publishes DOIs)");
     if (skipValidate) {
-      console.log(chalk.dim("  (post-deploy parseability check disabled via --no-validate)"));
+      console.log(chalk.dim("  (post-deploy parseability poll disabled via --no-validate)"));
     }
     console.log();
 
@@ -762,23 +822,60 @@ ciCommand
 
     const spinner = ora(`Deploying CI workflows to ${datasetId}...`).start();
 
+    let result: Awaited<ReturnType<typeof addCi>>;
     try {
-      const result = await addCi(datasetId, { validate: !skipValidate });
-      spinner.succeed("CI workflows deployed");
-      console.log();
-      for (const workflow of result.workflows_deployed) {
-        console.log(`  ${chalk.green("[x]")} ${workflow}`);
-      }
-      if (result.validation_warnings && result.validation_warnings.length > 0) {
-        console.log();
-        console.log(chalk.yellow("Validation warnings (best-effort; deploy succeeded):"));
-        for (const w of result.validation_warnings) {
-          console.log(`  ${chalk.yellow("!")} ${w}`);
-        }
-      }
-      console.log();
+      result = await addCi(datasetId);
     } catch (error) {
       handleCommandError(error, spinner, "Failed to deploy CI workflows", {
+        404: "Dataset not found",
+      });
+      return;
+    }
+    spinner.succeed("CI workflows deployed");
+    console.log();
+    for (const workflow of result.workflows_deployed) {
+      console.log(`  ${chalk.green("[x]")} ${workflow}`);
+    }
+
+    if (!skipValidate) {
+      const validateSpinner = ora("Verifying GitHub Actions can parse the workflows...").start();
+      const validation = await pollCiValidation(datasetId);
+      if (!validation) {
+        validateSpinner.warn("Could not verify workflow parseability (deploy succeeded)");
+      } else if (validation.missing.length === 0 && validation.errors.length === 0) {
+        validateSpinner.succeed("All workflows parseable by GitHub Actions");
+      } else {
+        // missing.length > 0 and errors.length > 0 are independent: a 5xx on
+        // the listing call (errors) doesn't necessarily mean any workflow
+        // is missing. Be precise about which case is firing.
+        const warnMsg =
+          validation.missing.length > 0
+            ? "Some workflows missing from GitHub Actions listing"
+            : "Could not fully verify workflow parseability (GitHub API error)";
+        validateSpinner.warn(warnMsg);
+        printValidationWarning(validation);
+      }
+    }
+    console.log();
+  });
+
+ciCommand
+  .command("validate")
+  .description("Check whether GitHub Actions can parse the deployed CI workflows")
+  .argument("<dataset-id>", "Dataset ID (e.g., nm000104)")
+  .action(async (datasetId: string) => {
+    if (!requireAuth()) return;
+    const spinner = ora(`Validating CI workflows for ${datasetId}...`).start();
+    try {
+      const r = await validateCi(datasetId);
+      if (r.missing.length === 0 && r.errors.length === 0) {
+        spinner.succeed(`All ${r.valid.length} workflows parseable by GitHub Actions`);
+      } else {
+        spinner.warn("Some workflows missing or unreadable");
+        printValidationWarning({ missing: r.missing, errors: r.errors });
+      }
+    } catch (error) {
+      handleCommandError(error, spinner, "Failed to validate CI workflows", {
         404: "Dataset not found",
       });
     }
