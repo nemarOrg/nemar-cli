@@ -40,6 +40,13 @@ let treeCreateRemaining = 0;
 let bidsignoreExists = false;
 let bidsignoreContent = "";
 let bidsignoreBlobReadable = true;
+// Post-deploy workflow validation (issue #287): the listing handler reads
+// these so individual tests can express "GitHub Actions parsed file X but
+// not Y" without hand-rolling state.
+let actionsWorkflowsResponse: { workflows: Array<{ path?: string; name?: string }> } = {
+  workflows: [],
+};
+let actionsWorkflowsBehavior: "ok" | "server-error" = "ok";
 
 function resetState() {
   fake.reset();
@@ -54,6 +61,8 @@ function resetState() {
   bidsignoreExists = false;
   bidsignoreContent = "";
   bidsignoreBlobReadable = true;
+  actionsWorkflowsResponse = { workflows: [] };
+  actionsWorkflowsBehavior = "ok";
 }
 
 function setGithubApiOverride(url: string | undefined): void {
@@ -139,6 +148,15 @@ beforeAll(() => {
       json(201, { content: { sha: "blob0002" }, commit: { sha: nextCommitSha } }),
     [`GET /repos/nemarDatasets/${REPO}/contents/.nemar/metadata.json`]: () =>
       json(404, { message: "Not Found" }),
+    // Post-deploy workflow listing (issue #287): deployWorkflows calls this
+    // after committing to verify GitHub Actions can parse each file. Tests
+    // toggle `actionsWorkflowsResponse` to express the desired behavior.
+    [`GET /repos/nemarDatasets/${REPO}/actions/workflows`]: () => {
+      if (actionsWorkflowsBehavior === "server-error") {
+        return json(500, { message: "Internal Server Error" });
+      }
+      return json(200, actionsWorkflowsResponse);
+    },
   });
   setGithubApiOverride(fake.url);
 });
@@ -308,7 +326,8 @@ describe("commitFilesAsTree", () => {
 
 describe("deployWorkflows", () => {
   test("commits all workflow files in one tree-batched commit (4 calls)", async () => {
-    const result = await deployWorkflows(REPO, PAT);
+    // Disable post-deploy validation so we measure the commit path only.
+    const result = await deployWorkflows(REPO, PAT, { validate: false });
     expect(result.success).toBe(true);
     expect(result.errors).toEqual([]);
     const expectedNames = getWorkflowTemplates().map((w) => w.path.split("/").pop()!);
@@ -329,11 +348,64 @@ describe("deployWorkflows", () => {
 
   test("reports failure with a substantive error message", async () => {
     refUpdateBehavior = "conflict-always";
-    const result = await deployWorkflows(REPO, PAT);
+    const result = await deployWorkflows(REPO, PAT, { validate: false });
     expect(result.success).toBe(false);
     expect(result.errors).toHaveLength(1);
     expect(result.errors[0]).toMatch(/ref|fast forward|exhausted/i);
     expect(result.deployed).toEqual([]);
+  });
+
+  test("post-deploy validation: missing workflows surface as validationErrors", async () => {
+    // Fake GitHub Actions index returns only ONE of the deployed workflows.
+    // The rest should land in validationErrors as "not listed" warnings.
+    // success stays true because validation is best-effort (issue #287).
+    const expected = getWorkflowTemplates().map((w) => w.path.split("/").pop()!);
+    const listedWorkflowPath = `.github/workflows/${expected[0]}`;
+    actionsWorkflowsResponse = {
+      workflows: [{ path: listedWorkflowPath, name: "first" }],
+    };
+
+    const result = await deployWorkflows(REPO, PAT, { validateDelayMs: 0 });
+    expect(result.success).toBe(true);
+    expect(result.errors).toEqual([]);
+    expect(result.deployed).toEqual(expected);
+    expect(result.validationErrors).toBeDefined();
+    // Every non-listed workflow filename should appear in the warning.
+    const warning = (result.validationErrors ?? []).join(" ");
+    for (const name of expected.slice(1)) {
+      expect(warning).toContain(name);
+    }
+    expect(warning).not.toContain(expected[0]);
+    // The validation call was made exactly once.
+    expect(
+      fake.countByMethodPath[`GET /repos/nemarDatasets/${REPO}/actions/workflows`],
+    ).toBe(1);
+  });
+
+  test("post-deploy validation: all workflows present -> no validationErrors", async () => {
+    const expected = getWorkflowTemplates().map((w) => w.path.split("/").pop()!);
+    actionsWorkflowsResponse = {
+      workflows: expected.map((name) => ({
+        path: `.github/workflows/${name}`,
+        name,
+      })),
+    };
+
+    const result = await deployWorkflows(REPO, PAT, { validateDelayMs: 0 });
+    expect(result.success).toBe(true);
+    expect(result.validationErrors).toBeUndefined();
+  });
+
+  test("post-deploy validation: API error surfaces as best-effort warning", async () => {
+    // A 500 from /actions/workflows should NOT fail the deploy. The error
+    // text lands in validationErrors so admins can investigate.
+    actionsWorkflowsBehavior = "server-error";
+
+    const result = await deployWorkflows(REPO, PAT, { validateDelayMs: 0 });
+    expect(result.success).toBe(true);
+    expect(result.errors).toEqual([]);
+    expect(result.validationErrors).toBeDefined();
+    expect((result.validationErrors ?? []).join(" ")).toMatch(/500|validation/i);
   });
 });
 
