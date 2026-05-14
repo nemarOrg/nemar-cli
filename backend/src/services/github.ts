@@ -1700,6 +1700,9 @@ async function validateWorkflowsParseable(
   pat: string,
 ): Promise<{ valid: string[]; missing: string[]; errors: string[] }> {
   try {
+    // per_page=100 covers page 1 only (no pagination). NEMAR currently
+    // deploys 6 workflow templates; page 1 is always sufficient. Add
+    // pagination here if getWorkflowTemplates() ever grows past 100 files.
     const response = await githubFetchWithRetry(
       `${GITHUB_API()}/repos/${ORG_NAME}/${repo}/actions/workflows?per_page=100`,
       {
@@ -1712,6 +1715,10 @@ async function validateWorkflowsParseable(
     );
     if (!response.ok) {
       const body = await response.text().catch(() => "");
+      // Note: a 429 here is handled by githubFetchWithRetry for up to 3
+      // retries. If all retries are exhausted, !response.ok is true and the
+      // status (429) lands in the error message below. The deploy itself has
+      // already succeeded at this point, so we surface this as a warning.
       return {
         valid: [],
         missing: [],
@@ -1731,6 +1738,9 @@ async function validateWorkflowsParseable(
         if (basename) listed.add(basename);
       }
     }
+    // A workflow with state: "disabled_manually" is still listed here.
+    // Presence means GitHub Actions can parse the file; disabled state is
+    // irrelevant to parseability and is intentionally not checked.
     const valid: string[] = [];
     const missing: string[] = [];
     for (const name of expectedFilenames) {
@@ -1757,7 +1767,21 @@ async function validateWorkflowsParseable(
  * deployed file is parseable by GitHub Actions. Missing files surface as
  * `validationErrors` (non-fatal — `success` stays true, since GitHub's
  * workflow index lags the commit by a few seconds and the most common
- * cause of a missing entry is transient).
+ * cause of a missing entry is transient). Callers should also inspect
+ * `validationErrors` when `success` is true.
+ *
+ * Retry strategy: probes at `validateDelayMs` (default 2500 ms), and if
+ * any workflow is still missing, retries once after `validateDelayMs * 2`
+ * (default 5000 ms). A disabled (`state: disabled_manually`) workflow is
+ * still listed by GitHub Actions and passes this check — presence means the
+ * file is parseable; `state` is intentionally not checked here.
+ *
+ * @param options.validate - Set to false to skip the post-deploy check
+ *   entirely. Use for fleet deploys where the per-dataset sleep would blow
+ *   the Cloudflare Worker wall-clock budget. Tradeoff: YAML parse errors
+ *   won't surface until the dataset's next CI run.
+ * @param options.validateDelayMs - Initial wait before the first probe.
+ *   Defaults to 2500 ms (empirically chosen for GitHub's indexing lag).
  */
 export async function deployWorkflows(
   repo: string,
@@ -1796,12 +1820,30 @@ export async function deployWorkflows(
   // Give GitHub a moment to index the new workflow files. Without this, the
   // listing call frequently returns empty even when the files committed
   // successfully. Tunable for tests.
+  //
+  // Retry strategy: probe at 2.5 s; if any workflow is still missing, wait
+  // another 5 s and try once more. GitHub's workflow index typically catches
+  // up within 3-4 s; two attempts cover the slow tail while keeping total
+  // worst-case wait under 10 s. Cap: 2 retries total.
   const delayMs = options?.validateDelayMs ?? 2500;
-  if (delayMs > 0) {
-    await new Promise((resolve) => setTimeout(resolve, delayMs));
+  const retryDelayMs = options?.validateDelayMs !== undefined ? options.validateDelayMs * 2 : 5000;
+
+  let validation = await (async () => {
+    if (delayMs > 0) {
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
+    }
+    return validateWorkflowsParseable(repo, deployedNames, pat);
+  })();
+
+  if (validation.missing.length > 0 && validation.errors.length === 0) {
+    // First probe found missing workflows — could be indexing lag, not a parse
+    // error. Retry once after a longer wait before surfacing as a warning.
+    if (retryDelayMs > 0) {
+      await new Promise((resolve) => setTimeout(resolve, retryDelayMs));
+    }
+    validation = await validateWorkflowsParseable(repo, deployedNames, pat);
   }
 
-  const validation = await validateWorkflowsParseable(repo, deployedNames, pat);
   const validationErrors: string[] = [];
   if (validation.missing.length > 0) {
     validationErrors.push(

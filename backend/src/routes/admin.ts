@@ -2311,7 +2311,15 @@ adminRoutes.post("/datasets/:id/ci", async (c) => {
     return c.json({ error: "Invalid repository format" }, 500);
   }
 
-  const result = await deployWorkflows(repoName, await getDatasetsToken(c.env));
+  // ?validate=false lets callers (e.g. --all fleet deploys) skip the 2.5 s
+  // post-deploy sleep + listing call. The tradeoff: YAML parse errors won't
+  // surface immediately; they'll appear on the dataset's next CI run instead.
+  const validateParam = c.req.query("validate");
+  const shouldValidate = validateParam !== "false";
+
+  const result = await deployWorkflows(repoName, await getDatasetsToken(c.env), {
+    validate: shouldValidate,
+  });
 
   if (!result.success) {
     return c.json(
@@ -2334,7 +2342,12 @@ adminRoutes.post("/datasets/:id/ci", async (c) => {
         "ci_workflows_deployed",
         "dataset",
         datasetId,
-        JSON.stringify({ deployed_by: adminUser.username }),
+        JSON.stringify({
+          deployed_by: adminUser.username,
+          ...(result.validationErrors && result.validationErrors.length > 0
+            ? { validation_warnings: result.validationErrors }
+            : {}),
+        }),
       )
       .run();
   } catch (auditError) {
