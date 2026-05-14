@@ -687,6 +687,24 @@ describe("DOI/Zenodo API", () => {
       expect([400, 401, 500]).toContain(response.status);
     });
   });
+
+  describe("POST /admin/notify", () => {
+    test("omitting both 'to' and 'user' returns 400", async () => {
+      // The broadcastRequestSchema Zod refinement rejects bodies that have
+      // neither the group ('to') nor the per-user ('user') field. This test
+      // exercises the HTTP layer so the refinement is confirmed wired up.
+      const { status, data } = await testRequest<{ error: unknown }>(
+        "/admin/notify",
+        {
+          method: "POST",
+          body: JSON.stringify({ subject: "Test", body: "Body" }),
+        },
+        TEST_CONFIG.adminApiKey,
+      );
+
+      expect(status).toBe(400);
+    });
+  });
 });
 
 describe("Dataset Collaborators API", () => {
