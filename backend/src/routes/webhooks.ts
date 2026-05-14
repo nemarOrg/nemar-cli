@@ -117,6 +117,42 @@ export function validateEnrichmentRef(ref: unknown): string | null {
   return null;
 }
 
+/**
+ * Decide whether to trigger an nemar.org sync after a version-DOI publish.
+ *
+ * Pure helper so the EZID and Zenodo paths share one rule and we can pin
+ * the matrix in unit tests without spinning up the webhook harness.
+ *
+ * Rules (mirrors the prior inline EZID logic):
+ *   - missing NEMAR_USERNAME or NEMAR_PASSWORD: skip with "no_credentials"
+ *   - OpenNeuro dataset (`on`-prefix): skip with "openneuro" (nemar.org
+ *     pipeline doesn't yet accept alternate_id; tracked in CLAUDE.md)
+ *   - missing DOI string: skip with "no_doi" (Zenodo only; EZID always
+ *     returns a DOI on success)
+ *   - otherwise: trigger
+ */
+export type NemarSyncDecision =
+  | { trigger: true }
+  | { trigger: false; reason: "no_credentials" | "openneuro" | "no_doi" };
+
+export function shouldSyncToNemarAfterVersionDoi(input: {
+  datasetId: string;
+  versionDoi: string | null | undefined;
+  nemarUsername: string | null | undefined;
+  nemarPassword: string | null | undefined;
+}): NemarSyncDecision {
+  if (!input.nemarUsername || !input.nemarPassword) {
+    return { trigger: false, reason: "no_credentials" };
+  }
+  if (input.datasetId.startsWith("on")) {
+    return { trigger: false, reason: "openneuro" };
+  }
+  if (!input.versionDoi) {
+    return { trigger: false, reason: "no_doi" };
+  }
+  return { trigger: true };
+}
+
 const webhooks = new Hono<{ Bindings: Bindings }>();
 
 /**
@@ -433,20 +469,23 @@ async function handleEzidVersionDoi(
       );
     }
 
-    // Sync to nemar.org in the background (non-fatal, non-blocking)
-    const nemarUser = c.env.NEMAR_USERNAME;
-    const nemarPass = c.env.NEMAR_PASSWORD;
-    if (!nemarUser || !nemarPass) {
-      console.warn("[webhook] NEMAR_USERNAME/PASSWORD not configured; skipping nemar.org sync");
-    } else if (dataset.dataset_id.startsWith("on")) {
-      console.info(`[webhook] Skipping nemar.org sync for OpenNeuro dataset ${dataset.dataset_id}`);
-    }
-    if (nemarUser && nemarPass && !dataset.dataset_id.startsWith("on")) {
-      // Pass the freshly-minted DOI + version through as overrides so a D1
-      // read-after-write race (background waitUntil firing before the new
-      // dataset_versions row replicates) doesn't drop the version DOI
-      // from the nemar.org payload.
+    // Sync to nemar.org in the background (non-fatal, non-blocking).
+    // Pass the freshly-minted DOI + version through as overrides so a D1
+    // read-after-write race (background waitUntil firing before the new
+    // dataset_versions row replicates) doesn't drop the version DOI
+    // from the nemar.org payload.
+    const ezidSyncDecision = shouldSyncToNemarAfterVersionDoi({
+      datasetId: dataset.dataset_id,
+      versionDoi: result.doi,
+      nemarUsername: c.env.NEMAR_USERNAME,
+      nemarPassword: c.env.NEMAR_PASSWORD,
+    });
+    if (ezidSyncDecision.trigger) {
       c.executionCtx.waitUntil(syncToNemarAfterVersionDoi(c.env, dataset, version, result.doi));
+    } else if (ezidSyncDecision.reason === "no_credentials") {
+      console.warn("[webhook] NEMAR_USERNAME/PASSWORD not configured; skipping nemar.org sync");
+    } else if (ezidSyncDecision.reason === "openneuro") {
+      console.info(`[webhook] Skipping nemar.org sync for OpenNeuro dataset ${dataset.dataset_id}`);
     }
 
     return c.json({
@@ -665,6 +704,32 @@ async function handleZenodoVersionDoi(
         console.error(
           `[webhook] Manifest generation failed for ${dataset.dataset_id}@${version}:`,
           manifestErr,
+        );
+      }
+    }
+
+    // Issue #339: keep nemar.org in step with the latest version DOI.
+    // Mirrors the EZID path: non-fatal, runs in the background via
+    // waitUntil, and skips OpenNeuro datasets (alternate_id not yet
+    // supported by the nemar.org pipeline).
+    const zenodoSyncDecision = shouldSyncToNemarAfterVersionDoi({
+      datasetId: dataset.dataset_id,
+      versionDoi: published.doi ?? null,
+      nemarUsername: c.env.NEMAR_USERNAME,
+      nemarPassword: c.env.NEMAR_PASSWORD,
+    });
+    if (zenodoSyncDecision.trigger && published.doi) {
+      c.executionCtx.waitUntil(syncToNemarAfterVersionDoi(c.env, dataset, version, published.doi));
+    } else if (!zenodoSyncDecision.trigger) {
+      if (zenodoSyncDecision.reason === "no_credentials") {
+        console.warn("[webhook] NEMAR_USERNAME/PASSWORD not configured; skipping nemar.org sync");
+      } else if (zenodoSyncDecision.reason === "openneuro") {
+        console.info(
+          `[webhook] Skipping nemar.org sync for OpenNeuro dataset ${dataset.dataset_id}`,
+        );
+      } else if (zenodoSyncDecision.reason === "no_doi") {
+        console.warn(
+          `[webhook] Skipping nemar.org sync for ${dataset.dataset_id}: Zenodo returned no DOI`,
         );
       }
     }
