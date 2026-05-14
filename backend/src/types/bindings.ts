@@ -121,5 +121,5 @@ export interface Variables {
   // 401 instead of the generic "Authentication required" reply, so CLIs can
   // tell "no header sent" from "header sent but token invalid/expired".
   // Optional: routes that don't use optionalAuthMiddleware never set this.
-  authAttempted?: boolean;
+  authAttempted?: true;
 }
