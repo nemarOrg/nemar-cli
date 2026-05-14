@@ -78,6 +78,11 @@ MAINTENANCE_MODE = "read-only"
 # - OPENROUTER_API_KEY
 # - NEMAR_USERNAME
 # - NEMAR_PASSWORD
+# GitHub App credentials (epic #432, in soak -- GITHUB_ADMIN_PAT is the active fallback while any of these are unset)
+# - GITHUB_APP_ID                              (GitHub App numeric ID; replaces PAT for API auth once Phase 5 lands)
+# - GITHUB_APP_PRIVATE_KEY                     (PKCS#8 PEM private key for JWT signing)
+# - GITHUB_APP_INSTALLATION_ID_NEMAR_DATASETS  (installation ID on the nemarDatasets org)
+# - GITHUB_APP_INSTALLATION_ID_NEMAR_ORG       (installation ID on the nemarOrg org)
 
 # Development environment
 [env.dev]

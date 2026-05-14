@@ -145,9 +145,10 @@ jobs:
         run: |
           # Build the file list explicitly so new tests are picked up automatically
           # but the long-running e2e/sandbox suites stay scoped to their own jobs.
+          # Covers both CLI tests (test/) and backend tests (backend/test/).
           shopt -s nullglob
           files=()
-          for f in test/*.test.ts; do
+          for f in test/*.test.ts backend/test/*.test.ts; do
             base="$(basename "$f")"
             case "$base" in
               e2e-sandbox.test.ts|e2e-upload.test.ts|zenodo-sandbox.test.ts|ezid-sandbox.test.ts)
