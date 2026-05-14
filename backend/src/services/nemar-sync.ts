@@ -97,7 +97,7 @@ export interface NemarSyncSource {
   /** Pre-loaded version manifest from S3 (has accurate file sizes from annex keys) */
   manifest?: VersionManifest | null;
   /** S3 object stats (totalSize in bytes, objectCount) -- most accurate size source */
-  s3Stats?: { totalSize: number; objectCount: number } | null;
+  s3Stats?: { totalSize: number; objectCount: number | undefined } | null;
   /** Zip archive size in bytes from S3 archives/ prefix */
   zipFileSize?: number;
   /** GitHub repo creation date -- fallback when D1 dates are null (legacy datasets) */
