@@ -4057,8 +4057,18 @@ Examples:
       let apiReachable = true;
       try {
         dsInfo = await getDataset(getDatasetId);
-      } catch {
-        // Dataset info fetch failed; proceed without creds (will use publicurl if public)
+      } catch (err) {
+        // Only fall through to offline mode for true network failures (statusCode 0).
+        // Auth and authorization failures must surface so the user can re-login;
+        // silencing them produced cryptic git-annex errors instead of "run nemar auth login".
+        if (err instanceof ApiError && err.statusCode !== 0) {
+          if (err.statusCode === 401 || err.statusCode === 403) {
+            console.log(chalk.red(`✖ ${err.message}`));
+            console.log(chalk.dim("  Run 'nemar auth login' or 'nemar auth regenerate-key'."));
+            process.exit(1);
+          }
+          throw err;
+        }
         apiReachable = false;
       }
 

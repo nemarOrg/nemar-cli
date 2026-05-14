@@ -42,6 +42,8 @@ export interface BroadcastResult {
   recipient_count: number;
   failure_count: number;
   failed_recipients: string[];
+  /** Set when the send was aborted before reaching Resend (e.g. missing key). */
+  error?: string;
 }
 
 interface UserRow {
@@ -273,6 +275,24 @@ export async function sendBroadcast(
   replyTo?: string,
   isDev?: boolean,
 ): Promise<BroadcastResult> {
+  // Guard: Resend key must be non-empty before iterating recipients.
+  // A missing or blank key would silently record every recipient as a
+  // failure while returning 200 to the caller.
+  if (!resendApiKey || !resendApiKey.trim()) {
+    console.error("[broadcast] RESEND_API_KEY is not configured; aborting send", {
+      group: params.group,
+      subject: params.subject,
+      recipientCount: params.recipients.length,
+    });
+    return {
+      broadcast_id: -1,
+      recipient_count: 0,
+      failure_count: 0,
+      failed_recipients: [],
+      error: "email_service_unconfigured",
+    };
+  }
+
   const bodyHtml = markdownToEmailHtml(params.bodyMarkdown);
   const html = buildBroadcastHtml(params.subject, bodyHtml);
   const wrapped = applyDevWrap(params.subject, html, isDev);
