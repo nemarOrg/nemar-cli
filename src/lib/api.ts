@@ -1247,6 +1247,16 @@ export interface PublishApproveResponse {
    *  `s3_lock_offset` field as of #385.
    */
   s3_lock_continuation_token?: string;
+  /** Total object count under the dataset's `objects/` prefix, computed
+   *  once on the first s3_lock call. The CLI threads it back via the
+   *  request body on subsequent calls so progress reporting survives
+   *  across Worker invocations. See #284.
+   */
+  s3_lock_total?: number;
+  /** Number of objects locked in the most recent batch. The CLI sums
+   *  these across pages to render a running total against `s3_lock_total`.
+   */
+  s3_lock_batch_count?: number;
   /** Legacy field — kept on the response type for back-compat but no
    *  longer populated by current servers. */
   s3_lock_offset?: number;
@@ -1322,6 +1332,70 @@ export interface PublishRetryInfo {
 }
 
 /**
+ * Progress information emitted by `approvePublication` while the
+ * orchestrator runs. Two flavors:
+ *   - step transitions: `step` advances and `s3LockLocked`/`s3LockTotal`
+ *     are undefined.
+ *   - s3_lock pagination: `step === "s3_lock"` and the counters are set
+ *     after each batch response.
+ *
+ * `stepIndex` is 1-based against `stepTotal` so the CLI can render
+ * "Step 14/17: s3 lock" without re-deriving from a step list.
+ */
+export interface PublishProgressInfo {
+  /** Current step name as reported by the orchestrator (e.g. "s3_lock"). */
+  step: string;
+  /** 1-based position of this step in the orchestrator step list. */
+  stepIndex: number;
+  /** Total number of orchestrator steps. */
+  stepTotal: number;
+  /** Number of S3 objects locked so far across all pages this run. */
+  s3LockLocked?: number;
+  /** Total S3 objects to lock, once known. */
+  s3LockTotal?: number;
+}
+
+/**
+ * Ordered list of orchestrator step names, mirrored from
+ * `backend/src/routes/admin.ts`. Used both for `stepIndex`/`stepTotal`
+ * computation in `approvePublication` and to label progress in the CLI.
+ *
+ * The two lists must stay in sync; backend is the source of truth.
+ */
+export const PUBLICATION_STEPS = [
+  "ci_check",
+  "enrichment_check",
+  "repo_public",
+  "s3_public_read",
+  "tag_protect",
+  "doi_create",
+  "update_metadata",
+  "update_readme",
+  "create_tag",
+  "create_release",
+  "upload_to_zenodo",
+  "publish_doi",
+  "version_doi",
+  "s3_lock",
+  "generate_archive",
+  "sync_nemar",
+  "notify_user",
+] as const;
+
+/**
+ * Resolve a step name to its 1-based index in `PUBLICATION_STEPS`, or
+ * fall back to `stepsCompleted.length + 1` when the name isn't known
+ * (defensive for future steps the CLI hasn't shipped a label for).
+ */
+export function stepIndexFor(step: string | undefined, stepsCompleted: string[] = []): number {
+  if (step) {
+    const idx = (PUBLICATION_STEPS as readonly string[]).indexOf(step);
+    if (idx >= 0) return idx + 1;
+  }
+  return Math.min(stepsCompleted.length + 1, PUBLICATION_STEPS.length);
+}
+
+/**
  * Decide whether a failed `approvePublication` request is worth re-invoking
  * from a fresh Worker. The orchestrator persists progress in D1, so a
  * re-invocation skips already-completed steps and only re-attempts the one
@@ -1378,14 +1452,44 @@ export async function approvePublication(
   sandbox = false,
   skipCiCheck = false,
   onRetry?: (info: PublishRetryInfo) => void,
+  onProgress?: (info: PublishProgressInfo) => void,
 ): Promise<PublishApproveResponse> {
   const MAX_ATTEMPTS = 5;
   const RETRY_DELAY_MS = 10_000;
 
   let s3_lock_continuation_token: string | undefined;
+  // Total object count for s3_lock — computed by the server on the first
+  // s3_lock call and threaded back on every subsequent call so the
+  // server doesn't have to re-count per page. See #284.
+  let s3_lock_total: number | undefined;
+  // Running locked-objects count for the current run, accumulated across
+  // hasMore=true pages. Used to drive the s3_lock progress display.
+  let s3LockLocked = 0;
+  let lastReportedStep: string | undefined;
   let useResume = resume;
   const accumulatedStepResults: StepResult[] = [];
   let lastError: unknown;
+
+  /**
+   * Emit a progress event whenever the orchestrator's reported step
+   * changes (or s3_lock is making intra-step progress). Centralised so
+   * step-only events and s3_lock-batch events share the same dedup logic.
+   */
+  function emitProgress(
+    step: string,
+    stepsCompleted: string[],
+    s3Locked?: number,
+    s3Total?: number,
+  ) {
+    if (!onProgress) return;
+    onProgress({
+      step,
+      stepIndex: stepIndexFor(step, stepsCompleted),
+      stepTotal: PUBLICATION_STEPS.length,
+      s3LockLocked: s3Locked,
+      s3LockTotal: s3Total,
+    });
+  }
 
   for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
     try {
@@ -1407,6 +1511,7 @@ export async function approvePublication(
               resume: isFirstCall ? useResume : true,
               sandbox,
               s3_lock_continuation_token,
+              s3_lock_total,
               skip_ci_check: skipCiCheck,
             }),
           },
@@ -1416,6 +1521,32 @@ export async function approvePublication(
 
         if (result.step_results) {
           accumulatedStepResults.push(...result.step_results);
+        }
+
+        // Cache the server-computed total so the next request doesn't
+        // force a re-count. Server returns this in every s3_lock response.
+        if (result.s3_lock_total !== undefined) {
+          s3_lock_total = result.s3_lock_total;
+        }
+        // Accumulate locked count across pages.
+        if (result.s3_lock_batch_count !== undefined) {
+          s3LockLocked += result.s3_lock_batch_count;
+        }
+
+        // Emit progress when the current step changes or when s3_lock is
+        // paging. `result.step` is populated on hasMore responses; on the
+        // final non-paging response we fall back to the last completed
+        // step in `step_results` so the caller sees the last transition.
+        const currentStep =
+          result.step ?? result.step_results?.[result.step_results.length - 1]?.step;
+        if (currentStep && (currentStep !== lastReportedStep || currentStep === "s3_lock")) {
+          emitProgress(
+            currentStep,
+            result.steps_completed ?? [],
+            currentStep === "s3_lock" ? s3LockLocked : undefined,
+            currentStep === "s3_lock" ? s3_lock_total : undefined,
+          );
+          lastReportedStep = currentStep;
         }
 
         if (result.hasMore && result.s3_lock_continuation_token !== undefined) {
