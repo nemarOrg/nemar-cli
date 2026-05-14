@@ -718,9 +718,15 @@ describe("CLI Admin Revert", () => {
       ctx,
     );
 
-    // Should fail; either "not found" (if prereqs met) or "missing prerequisites" (in CI)
+    // Should fail; "not found" (if prereqs met and auth works), "prerequisites"
+    // (in CI without git-annex/datalad), or "not authenticated" (when the
+    // configured TEST_ADMIN_API_KEY is empty in the local dev environment).
     const output = (stdout + stderr).toLowerCase();
-    expect(output.includes("not found") || output.includes("prerequisites")).toBe(true);
+    expect(
+      output.includes("not found") ||
+        output.includes("prerequisites") ||
+        output.includes("not authenticated"),
+    ).toBe(true);
   });
 });
 
