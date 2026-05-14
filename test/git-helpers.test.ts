@@ -8,10 +8,11 @@
 
 import { describe, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  detectImportMarker,
   isWorkingTreeDirty,
   readLocalDatasetVersion,
   resolveUpstreamRef,
@@ -159,10 +160,7 @@ describe("readLocalDatasetVersion", () => {
   test("missing DatasetVersion field returns null without error", () => {
     const dir = mkdtempSync(join(tmpdir(), "nemar-no-version-"));
     try {
-      writeFileSync(
-        join(dir, "dataset_description.json"),
-        JSON.stringify({ Name: "Test" }),
-      );
+      writeFileSync(join(dir, "dataset_description.json"), JSON.stringify({ Name: "Test" }));
       const r = readLocalDatasetVersion(dir);
       expect(r).toEqual({ version: null });
     } finally {
@@ -181,6 +179,102 @@ describe("readLocalDatasetVersion", () => {
       expect(r).toEqual({ version: "1.2.3" });
     } finally {
       cleanup(dir);
+    }
+  });
+});
+
+describe("detectImportMarker", () => {
+  test("repo without .nemar/metadata.json returns 'absent'", async () => {
+    // Simulates a clone fetched mid-import: the importer hasn't pushed the
+    // final metadata commit yet, so the marker file isn't anywhere in
+    // history. This is the nemarOrg/nemar-cli#460 case.
+    const repo = makeRepo();
+    try {
+      writeFileSync(join(repo, "README.md"), "openneuro ds######");
+      git(repo, "add", "README.md");
+      git(repo, "commit", "-qm", "initial");
+      const result = await detectImportMarker(repo);
+      expect(result).toBe("absent");
+    } finally {
+      cleanup(repo);
+    }
+  });
+
+  test("repo with committed .nemar/metadata.json returns 'present'", async () => {
+    // A completed openneuro import always lands the metadata commit; the
+    // CLI must let the user proceed with `git annex get`.
+    const repo = makeRepo();
+    try {
+      writeFileSync(join(repo, "README.md"), "openneuro ds######");
+      git(repo, "add", "README.md");
+      git(repo, "commit", "-qm", "initial");
+      mkdirSync(join(repo, ".nemar"));
+      writeFileSync(join(repo, ".nemar", "metadata.json"), JSON.stringify({ source: "openneuro" }));
+      git(repo, "add", ".nemar/metadata.json");
+      git(repo, "commit", "-qm", "Add NEMAR metadata (imported from OpenNeuro ds######)");
+      const result = await detectImportMarker(repo);
+      expect(result).toBe("present");
+    } finally {
+      cleanup(repo);
+    }
+  });
+
+  test("file present in working tree but never committed returns 'absent'", async () => {
+    // Guards against a false-positive where a stray untracked .nemar/
+    // directory would mask an incomplete import.
+    const repo = makeRepo();
+    try {
+      writeFileSync(join(repo, "README.md"), "x");
+      git(repo, "add", "README.md");
+      git(repo, "commit", "-qm", "initial");
+      mkdirSync(join(repo, ".nemar"));
+      writeFileSync(join(repo, ".nemar", "metadata.json"), "{}");
+      // Deliberately do NOT git add/commit the file.
+      const result = await detectImportMarker(repo);
+      expect(result).toBe("absent");
+    } finally {
+      cleanup(repo);
+    }
+  });
+
+  test("non-git directory returns 'unknown'", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "nemar-marker-no-git-"));
+    try {
+      const result = await detectImportMarker(dir);
+      expect(result).toBe("unknown");
+    } finally {
+      cleanup(dir);
+    }
+  });
+
+  test("marker committed then deleted via git rm still returns 'present'", async () => {
+    // `git log -1 -- <path>` finds the most recent commit that touched the
+    // file, including deletion commits. Guards against a regression where a
+    // git rm + follow-up commit would mask an otherwise completed import.
+    const repo = makeRepo();
+    try {
+      writeFileSync(join(repo, "README.md"), "openneuro ds######");
+      git(repo, "add", "README.md");
+      git(repo, "commit", "-qm", "initial");
+
+      // Commit the marker (simulates a completed import)
+      mkdirSync(join(repo, ".nemar"));
+      writeFileSync(
+        join(repo, ".nemar", "metadata.json"),
+        JSON.stringify({ source: "openneuro" }),
+      );
+      git(repo, "add", ".nemar/metadata.json");
+      git(repo, "commit", "-qm", "Add NEMAR metadata (imported from OpenNeuro ds######)");
+
+      // Delete it in a subsequent commit
+      git(repo, "rm", "-q", ".nemar/metadata.json");
+      git(repo, "commit", "-qm", "Remove metadata");
+
+      // The marker was committed, so import was complete; result must be 'present'
+      const result = await detectImportMarker(repo);
+      expect(result).toBe("present");
+    } finally {
+      cleanup(repo);
     }
   });
 });
