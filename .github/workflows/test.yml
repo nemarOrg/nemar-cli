@@ -133,6 +133,9 @@ jobs:
       - name: Install dependencies
         run: bun install
 
+      - name: Install backend dependencies
+        run: cd backend && bun install
+
       - name: Run full unit suite (excluding e2e + sandbox suites)
         env:
           TEST_API_URL: https://nemar-api-dev.sccn-org.workers.dev
