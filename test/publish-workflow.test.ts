@@ -234,7 +234,7 @@ describe("publish workflow - user operations", () => {
       username: "test-user",
     });
 
-    const { exitCode } = await runCli(["dataset", "publish", "status", "nm000104"], ctx);
+    const { exitCode } = await runCli(["dataset", "publish", "status", "nm099999"], ctx);
     expect(exitCode).toBe(1);
   });
 
@@ -246,7 +246,19 @@ describe("publish workflow - user operations", () => {
       username: "test-user",
     });
 
-    const { exitCode } = await runCli(["dataset", "publish", "request", "nm000104"], ctx);
+    const { exitCode } = await runCli(["dataset", "publish", "request", "nm099999"], ctx);
+    expect(exitCode).toBe(1);
+  });
+
+  test("publish resend with invalid api key exits non-zero (issue #94)", async () => {
+    const ctx = createTestContext();
+    setTestConfig(ctx, {
+      apiKey: "nemar_invalid_key_for_exit_code_test_xxxxxxxxxxxx",
+      apiUrl: TEST_CONFIG.apiUrl,
+      username: "test-user",
+    });
+
+    const { exitCode } = await runCli(["dataset", "publish", "resend", "nm099999"], ctx);
     expect(exitCode).toBe(1);
   });
 });
