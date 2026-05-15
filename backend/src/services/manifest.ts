@@ -95,18 +95,29 @@ export async function generateManifest(
   // Get all blobs in the tree at this tag
   const entries = await getTreeAtRef(repo, tag, pat);
 
+  // Internal git plumbing — we never expose these to the manifest.
+  // The trailing `/` on `.git/` is intentional: a bare `.git` prefix would
+  // also match `.gitattributes` and `.gitignore`, both of which are legit
+  // BIDS-root files we DO want in the manifest. `.github/` is treated
+  // separately (workflows for the dataset repo, not dataset content).
+  function isInternal(entry: TreeEntry): boolean {
+    return entry.path.startsWith(".git/") || entry.path.startsWith(".github/");
+  }
+
   // Filter to potential annex pointer files (small blobs that could be pointers)
   // Annex pointers are typically < 500 bytes
   const pointerCandidates = entries.filter(
     (entry) =>
-      entry.size !== undefined &&
-      entry.size < 500 &&
-      entry.size > 20 &&
-      !entry.path.startsWith(".git") &&
-      !entry.path.startsWith(".github/"),
+      entry.size !== undefined && entry.size < 500 && entry.size > 20 && !isInternal(entry),
   );
 
   const files: Record<string, ManifestFile> = {};
+  // Pointer candidates whose `parseAnnexPointer` returned null — they're
+  // small regular git files (README, CHANGES, dataset_description.json on
+  // OpenNeuro mirrors are commonly <500 bytes), NOT annex pointers. They
+  // need to flow into the regular-files loop instead of being silently
+  // dropped (see nemarOrg/nemar-cli#509).
+  const nonAnnexCandidates: TreeEntry[] = [];
 
   // Resolve annex pointer candidates in parallel batches to avoid
   // sequential N+1 GitHub API calls (Cloudflare Workers have a
@@ -128,17 +139,21 @@ export async function generateManifest(
           size: extractSizeFromKey(key),
           checksum: `${extractHashAlgorithm(key)}:${extractChecksumFromKey(key)}`,
         };
+      } else {
+        nonAnnexCandidates.push(entry);
       }
     }
   }
 
-  // Also include non-annexed files (stored directly in git) for completeness
-  const regularFiles = entries.filter(
-    (entry) =>
-      !entry.path.startsWith(".git") &&
-      !entry.path.startsWith(".github/") &&
-      !pointerCandidates.some((p) => p.path === entry.path),
-  );
+  // Build the regular-files set: every git-tree entry that isn't internal
+  // plumbing, isn't already in `files` (resolved as annex), and isn't a
+  // size-range pointer candidate that actually WAS an annex pointer.
+  // The `nonAnnexCandidates` we collected above are deliberately included.
+  const pointerCandidatePaths = new Set(pointerCandidates.map((p) => p.path));
+  const regularFiles: TreeEntry[] = [
+    ...nonAnnexCandidates,
+    ...entries.filter((entry) => !isInternal(entry) && !pointerCandidatePaths.has(entry.path)),
+  ];
 
   for (const entry of regularFiles) {
     // Regular files stored in git (metadata, TSV, JSON, etc.)
