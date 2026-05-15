@@ -9,14 +9,7 @@
  */
 
 import type { ManifestFile, VersionManifest } from "./manifest";
-import { generatePresignedGetUrl } from "./s3";
-
-interface S3Options {
-  bucket: string;
-  region: string;
-  accessKeyId: string;
-  secretAccessKey: string;
-}
+import { type PresignedUrlOptions, generatePresignedGetUrl } from "./s3";
 
 export const VERSION_TAG_RE = /^v\d+\.\d+\.\d+$/;
 
@@ -24,16 +17,31 @@ export type ResolvedVersion =
   | { ok: true; version: string }
   | { ok: false; reason: "no_published_versions" | "invalid_version" };
 
-export interface DirectoryEntry {
-  name: string;
-  isDir: boolean;
-  size?: number;
-}
+export type DirectoryEntry =
+  | { kind: "file"; name: string; size: number }
+  | { kind: "dir"; name: string };
 
 export type ResolvedFile =
   | { kind: "file"; path: string; file: ManifestFile }
   | { kind: "directory"; path: string; children: DirectoryEntry[] }
   | { kind: "not_found" };
+
+/**
+ * Shape of one row in the public `manifest.json` response. Pinned as a
+ * named type because external clients (the eegdash viewer, third-party
+ * downloaders, future SDKs) depend on it; inline shapes are easy to drift
+ * silently in Phase 2/3 refactors.
+ */
+export interface PublicManifestEntry {
+  path: string;
+  size: number;
+  checksum_algorithm: string;
+  checksum: string;
+  url: string | null;
+  // Populated when url could not be built for this row; lets clients
+  // download the rest of the dataset instead of failing the whole listing.
+  error?: string;
+}
 
 /**
  * Map a version param ("latest" or "vX.Y.Z") to a concrete vX.Y.Z.
@@ -59,12 +67,20 @@ export async function resolveVersion(
   return { ok: true, version: versionParam };
 }
 
+// Reject literal `..` segments, empty segments, and absolute paths.
+// URL-encoded variants like `%2E%2E` reach the manifest lookup unchanged
+// and miss every key (the manifest is keyed by raw paths), so they fall
+// through to not_found by construction -- the URL-encoded traversal test
+// in test/data-route.unit.test.ts pins that contract.
+const FORBIDDEN_SEGMENTS = new Set(["", ".", "..", "__proto__", "constructor", "prototype"]);
+
 function normalizePath(rawPath: string): string | null {
   const stripped = rawPath.replace(/^\/+/, "").replace(/\/+$/, "");
   if (stripped === "") return "";
   const parts = stripped.split("/");
   for (const part of parts) {
-    if (part === "" || part === "." || part === ".." || part.startsWith("/")) return null;
+    if (FORBIDDEN_SEGMENTS.has(part)) return null;
+    if (part.startsWith("/")) return null;
   }
   return parts.join("/");
 }
@@ -72,12 +88,16 @@ function normalizePath(rawPath: string): string | null {
 /**
  * Map a bids-path inside a manifest to: a file (exact match), a directory
  * (any manifest entry has this as a prefix), or not_found.
+ *
+ * The root path of an empty manifest returns an empty directory rather
+ * than not_found, so the renderer can show a valid (empty) listing for a
+ * dataset that has a manifest but zero files.
  */
 export function resolveFile(manifest: VersionManifest, rawPath: string): ResolvedFile {
   const normalized = normalizePath(rawPath);
   if (normalized === null) return { kind: "not_found" };
 
-  if (normalized !== "" && manifest.files[normalized]) {
+  if (normalized !== "" && Object.hasOwn(manifest.files, normalized)) {
     return { kind: "file", path: normalized, file: manifest.files[normalized] };
   }
 
@@ -90,16 +110,18 @@ export function resolveFile(manifest: VersionManifest, rawPath: string): Resolve
     if (rest === "") continue;
     const slash = rest.indexOf("/");
     if (slash === -1) {
-      seen.set(rest, { name: rest, isDir: false, size: file.size });
+      seen.set(rest, { kind: "file", name: rest, size: file.size });
     } else {
       const name = rest.slice(0, slash);
-      if (!seen.has(name)) seen.set(name, { name, isDir: true });
+      if (!seen.has(name)) seen.set(name, { kind: "dir", name });
     }
   }
 
-  if (seen.size === 0) return { kind: "not_found" };
+  // Empty root of an empty manifest -> directory with no children, not 404.
+  if (seen.size === 0 && normalized !== "") return { kind: "not_found" };
+
   const children = [...seen.values()].sort((a, b) => {
-    if (a.isDir !== b.isDir) return a.isDir ? -1 : 1;
+    if (a.kind !== b.kind) return a.kind === "dir" ? -1 : 1;
     return a.name.localeCompare(b.name);
   });
   return { kind: "directory", path: normalized, children };
@@ -110,18 +132,27 @@ const ANNEX_KEY_RE = /^[A-Z0-9]+-s\d+--/;
 /**
  * Build the URL the Worker 302s to for a resolved file.
  *
- * Annex-backed files (key like `SHA256E-s12345--...edf`) -> presigned S3
- * GET against `<datasetId>/objects/<key>`. git-backed files
- * (`key: "git:<blob-sha>"`, used for small in-tree files like
- * dataset_description.json) -> raw.githubusercontent.com URL pinned to
- * the version tag.
+ * Annex-backed files (key like `SHA256E-s12345--...edf`, also `MD5E-`,
+ * `SHA1E-`, etc.) -> presigned S3 GET against `<datasetId>/objects/<key>`.
+ *
+ * git-backed files (`key: "git:<blob-sha>"`, used for small in-tree files
+ * like dataset_description.json) -> raw.githubusercontent.com URL pinned
+ * to the version tag.
+ *
+ * Implicit invariant for the git: branch: the dataset's GitHub repo must
+ * be public AND the version tag must exist on it. Both are guaranteed by
+ * the publication workflow today (publish-approve flips the repo to
+ * public before writing the D1 version row, which only happens after a
+ * successful tag push). If that invariant ever breaks, the 302 target
+ * itself returns 404 to the user with no Worker-side signal. Tracked as
+ * a Phase 3 follow-up on epic #449.
  */
 export async function buildRedirectUrl(args: {
   datasetId: string;
   version: string;
   bidsPath: string;
   file: ManifestFile;
-  s3Options: S3Options;
+  s3Options: PresignedUrlOptions;
   githubOrg: string;
   expiresIn?: number;
 }): Promise<string> {
@@ -149,8 +180,9 @@ export function escapeHtml(s: string): string {
 }
 
 export function humanSize(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes < 0) return "?";
   if (bytes < 1024) return `${bytes}`;
-  const units = ["K", "M", "G", "T"];
+  const units = ["K", "M", "G", "T", "P"];
   let value = bytes / 1024;
   let unit = 0;
   while (value >= 1024 && unit < units.length - 1) {
@@ -174,9 +206,9 @@ export function renderIndexHtml(args: {
     rows.push('<tr><td><a href="../">../</a></td><td class="size">-</td></tr>');
   }
   for (const e of entries) {
-    const href = `${encodeURIComponent(e.name)}${e.isDir ? "/" : ""}`;
-    const label = `${escapeHtml(e.name)}${e.isDir ? "/" : ""}`;
-    const size = e.isDir ? "-" : humanSize(e.size ?? 0);
+    const href = `${encodeURIComponent(e.name)}${e.kind === "dir" ? "/" : ""}`;
+    const label = `${escapeHtml(e.name)}${e.kind === "dir" ? "/" : ""}`;
+    const size = e.kind === "dir" ? "-" : humanSize(e.size);
     rows.push(`<tr><td><a href="${href}">${label}</a></td><td class="size">${size}</td></tr>`);
   }
   return `<!doctype html>

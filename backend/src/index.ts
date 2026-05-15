@@ -162,13 +162,18 @@ api.onError((err, c) => {
 const app = new Hono<{ Bindings: Bindings; Variables: Variables }>();
 
 // data.nemar.org dispatches to the data sub-app at root, so the public
-// contract is `data.nemar.org/<id>/<version>/...` without a `/data/` prefix.
-// On every other hostname the same handlers are reachable under `/data/...`
-// via the path-based mount above.
+// contract is `data.nemar.org/<id>/<version>/...` without a /data/ prefix.
+// We rewrite the URL to /data/<rest> and re-enter `api.fetch` so the
+// request inherits the full middleware stack (logger, secureHeaders, cors,
+// rateLimiter, maintenanceMode) and the global `api.onError` sanitizer.
+// Reading the hostname from c.req.url -- not the Host header -- prevents
+// a forged Host: from steering an api.nemar.org request into this branch.
 app.use("*", async (c, next) => {
-  const host = (c.req.header("host") ?? "").toLowerCase();
+  const host = new URL(c.req.url).hostname.toLowerCase();
   if (host === "data.nemar.org") {
-    return dataRoutes.fetch(c.req.raw, c.env, c.executionCtx);
+    const url = new URL(c.req.url);
+    url.pathname = `/data${url.pathname}`;
+    return api.fetch(new Request(url, c.req.raw), c.env, c.executionCtx);
   }
   return next();
 });
