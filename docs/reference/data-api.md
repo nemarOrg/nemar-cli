@@ -46,6 +46,28 @@ If neither, responds `404`.
 `Cache-Control: public, max-age=300` on file redirects, `max-age=60` on HTML
 indexes.
 
+File redirects also carry `Content-Length`, `Last-Modified` (the version's
+publication timestamp in RFC 1123 format), and `ETag` (the content
+checksum, quoted per RFC 7232 -- `"sha256:<hex>"` for git-annex files,
+`"git:<sha>"` for inline git content). Clients that skip the HEAD step
+can read the metadata from the redirect itself.
+
+### `HEAD /<datasetId>/<version>/<bids-path>`
+
+Returns `200` with `Content-Length`, `Last-Modified`, `ETag`, and
+`Cache-Control: public, max-age=300` headers and an empty body. Used
+by `rclone sync` and other HTTP-backend mirroring tools to detect
+file changes without transferring the file body.
+
+For directory paths, returns `200` with `Content-Type: text/html` and an
+empty body.
+
+For paths that don't exist in the requested version, returns `404` with
+an empty body. The tombstone walk (used on GET to surface a `last_seen_*`
+hint) is intentionally skipped on HEAD -- a sync against a divergent
+local copy fans out many HEAD requests, and the per-HEAD walk would
+amplify them into many S3 round-trips.
+
 ### `GET /<datasetId>/<version>/manifest.json`
 
 Responds `200` with a JSON array describing every file in the requested
@@ -264,10 +286,10 @@ comparison is only against `vN-1`; older versions are not consulted
 
 | Code | When |
 | --- | --- |
-| `200` | Manifest JSON, HTML index, dataset landing page (HTML or JSON) |
-| `302` | File path that resolves to backing-store bytes |
+| `200` | Manifest JSON, HTML index, dataset landing page (HTML or JSON), HEAD on existing file or directory |
+| `302` | GET on a file path that resolves to backing-store bytes |
 | `308` | `/<datasetId>/<version>` -> `/<datasetId>/<version>/` |
-| `404` | Dataset not found, private, unpublished, version not minted, file not in manifest, path traversal attempt. Includes `reason: "removed"` + `last_seen_*` when the path existed in a recent prior version |
+| `404` | Dataset not found, private, unpublished, version not minted, file not in manifest, path traversal attempt. Includes `reason: "removed"` + `last_seen_*` when the path existed in a recent prior version (GET only; HEAD returns bare 404) |
 
 The route deliberately does not distinguish "not found" from "exists but
 private". Private datasets are reached only via the existing

@@ -332,4 +332,90 @@ describe("data.nemar.org route (epic #449, phase 1)", async () => {
     expect(body.last_seen_version).toBeTruthy();
     expect(body.last_seen_url).toContain(removed.path);
   });
+
+  // ---------------------------------------------------------------------------
+  // Phase 4 (#498): rclone-compatible HEAD + metadata headers on file responses
+  // ---------------------------------------------------------------------------
+
+  test("HEAD on a file returns 200 with size, mtime, ETag, no body", async () => {
+    const manResp = await fetch(`${API}/data/${TEST_DATASET}/latest/manifest.json`, { headers });
+    const entries = (await manResp.json()) as Array<{
+      path: string;
+      size: number;
+      url: string | null;
+    }>;
+    const target =
+      entries.find((e) => e.path.endsWith("dataset_description.json") && e.url !== null) ??
+      entries.find((e) => e.url !== null);
+    expect(target).toBeDefined();
+    if (!target) return;
+
+    const head = await fetch(`${API}/data/${TEST_DATASET}/latest/${target.path}`, {
+      method: "HEAD",
+      headers,
+      redirect: "manual",
+    });
+    expect(head.status).toBe(200);
+    expect(head.headers.get("content-length")).toBe(String(target.size));
+    const lastModified = head.headers.get("last-modified");
+    expect(lastModified).toBeTruthy();
+    if (lastModified) {
+      // RFC 1123 dates parse cleanly via the Date constructor.
+      expect(Number.isNaN(new Date(lastModified).getTime())).toBe(false);
+    }
+    const etag = head.headers.get("etag");
+    expect(etag).toBeTruthy();
+    // Manifest checksum is "sha256:<hex>" / "md5:<hex>" / "sha1:<hex>" / "git:<sha>"; quoted per RFC 7232.
+    if (etag) expect(etag).toMatch(/^"(?:sha256:|md5:|sha1:|git:)/);
+    const buf = await head.arrayBuffer();
+    expect(buf.byteLength).toBe(0);
+  });
+
+  test("HEAD on a directory returns 200 with text/html, no body", async () => {
+    const head = await fetch(`${API}/data/${TEST_DATASET}/latest/`, {
+      method: "HEAD",
+      headers,
+    });
+    expect(head.status).toBe(200);
+    expect(head.headers.get("content-type")).toContain("text/html");
+    const buf = await head.arrayBuffer();
+    expect(buf.byteLength).toBe(0);
+  });
+
+  test("HEAD on a missing path returns 404 with no tombstone body", async () => {
+    // Tombstone walk is intentionally skipped on HEAD so rclone sync
+    // against a divergent local copy doesn't fan out N manifest fetches
+    // per missing file. Response is just 404 with no body.
+    const head = await fetch(`${API}/data/${TEST_DATASET}/latest/sub-zz/never.edf`, {
+      method: "HEAD",
+      headers,
+    });
+    expect(head.status).toBe(404);
+    const buf = await head.arrayBuffer();
+    expect(buf.byteLength).toBe(0);
+  });
+
+  test("GET 302 on a file carries Content-Length, Last-Modified, and ETag", async () => {
+    // Clients that skip the HEAD (rclone --http-no-head, custom downloaders)
+    // can read the metadata from the 302 itself. Cheap because all three
+    // come from the manifest entry already in hand.
+    const manResp = await fetch(`${API}/data/${TEST_DATASET}/latest/manifest.json`, { headers });
+    const entries = (await manResp.json()) as Array<{
+      path: string;
+      size: number;
+      url: string | null;
+    }>;
+    const target = entries.find((e) => e.url !== null);
+    expect(target).toBeDefined();
+    if (!target) return;
+
+    const r = await fetch(`${API}/data/${TEST_DATASET}/latest/${target.path}`, {
+      headers,
+      redirect: "manual",
+    });
+    expect(r.status).toBe(302);
+    expect(r.headers.get("content-length")).toBe(String(target.size));
+    expect(r.headers.get("last-modified")).toBeTruthy();
+    expect(r.headers.get("etag")).toBeTruthy();
+  });
 });

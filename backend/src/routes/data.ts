@@ -28,12 +28,13 @@ import {
   renderTombstone404Html,
   resolveFile,
   resolveVersion,
+  toHttpDate,
   toVersionTag,
 } from "../services/data-router";
 import { parseNemarMetadata } from "../services/datacite";
 import { isValidDatasetId } from "../services/datasetId";
 import { ORG_NAME } from "../services/github";
-import type { VersionManifest } from "../services/manifest";
+import type { ManifestFile, VersionManifest } from "../services/manifest";
 import { type PresignedUrlOptions, getManifest } from "../services/s3";
 import type { Bindings, Variables } from "../types/bindings";
 
@@ -280,7 +281,36 @@ async function loadVersionRows(env: Bindings, datasetId: string): Promise<Datase
 }
 
 /**
+ * Build the rclone-friendly file metadata headers for a manifest entry.
+ * Attached to both GET 302 and HEAD 200 responses so an rclone HTTP
+ * backend sync can size+mtime+ETag every file in one round-trip per
+ * file (HEAD), then deltas drive whether the GET happens at all.
+ *
+ * `ETag` carries the manifest checksum verbatim (already
+ * `"sha256:<hex>"` or `"git:<sha>"`) which is content-addressed and
+ * stable across re-publications of identical content. RFC 7232
+ * requires the value be quoted, hence the wrapping.
+ */
+function fileResponseHeaders(file: ManifestFile, createdIso: string): HeadersInit {
+  return {
+    "Content-Length": String(file.size),
+    "Last-Modified": toHttpDate(createdIso),
+    ETag: `"${file.checksum}"`,
+    "Cache-Control": "public, max-age=300",
+  };
+}
+
+/**
  * GET /<id>/<version>/<path> -> 302 to file bytes, or HTML directory listing.
+ * HEAD /<id>/<version>/<path> -> 200 with file metadata headers (no body),
+ * or 200 with text/html content-type (no body) for directories.
+ *
+ * HEAD lets the rclone HTTP backend resolve every file's size and mtime
+ * without following a redirect (rclone's HTTP backend does NOT follow
+ * HEAD redirects by default). The tombstone walk is intentionally
+ * skipped on HEAD: rclone fans out HEAD across every file it doesn't
+ * have locally, and a 10-version walk per missing-path HEAD would
+ * balloon a sync against a divergent local copy.
  */
 async function fileOrIndexHandler(
   env: Bindings,
@@ -289,6 +319,8 @@ async function fileOrIndexHandler(
   versionParam: string,
   rawPath: string,
 ): Promise<Response> {
+  const isHead = request.method === "HEAD";
+
   const dataset = await loadPublishedDataset(env, datasetId);
   if (!dataset) return notFound("Dataset not found");
 
@@ -297,6 +329,34 @@ async function fileOrIndexHandler(
 
   const manifest = await loadManifest(env, datasetId, resolved.version);
   if (!manifest) return notFound("Version not published");
+
+  const result = resolveFile(manifest, rawPath);
+
+  // HEAD branch: serve from `result` alone -- no D1 round-trip for
+  // picker/footer (HEAD doesn't render HTML chrome), no tombstone walk
+  // (rclone just needs the 404). Keeps `rclone sync` cheap per file.
+  if (isHead) {
+    if (result.kind === "file") {
+      return new Response(null, {
+        status: 200,
+        headers: fileResponseHeaders(result.file, manifest.created),
+      });
+    }
+    if (result.kind === "directory") {
+      return new Response(null, {
+        status: 200,
+        headers: {
+          "Content-Type": "text/html; charset=utf-8",
+          "Cache-Control": "public, max-age=60",
+        },
+      });
+    }
+    // not_found
+    return new Response(null, {
+      status: 404,
+      headers: { "Cache-Control": "public, max-age=60" },
+    });
+  }
 
   // One D1 round-trip for the picker, the "removed since" diff, and the
   // tombstone walk. The query is cheap and used by every render path
@@ -308,8 +368,6 @@ async function fileOrIndexHandler(
     version: tag,
     isCurrent: tag === resolved.version,
   }));
-
-  const result = resolveFile(manifest, rawPath);
 
   if (result.kind === "not_found") {
     // Tombstone lookup: walk older versions newest-first looking for the
@@ -346,13 +404,12 @@ async function fileOrIndexHandler(
       s3Options: s3OptionsFromEnv(env),
       githubOrg: ORG_NAME,
     });
-    return new Response(null, {
-      status: 302,
-      headers: {
-        Location: url,
-        "Cache-Control": "public, max-age=300",
-      },
-    });
+    // Surface size/mtime/ETag on the 302 itself for clients that skip
+    // the HEAD step (rclone with `--http-no-head`, custom downloaders).
+    // Cheap: all three are already in hand from the manifest entry.
+    const headers = new Headers(fileResponseHeaders(result.file, manifest.created));
+    headers.set("Location", url);
+    return new Response(null, { status: 302, headers });
   }
 
   if (result.kind === "directory") {
@@ -518,13 +575,23 @@ dataRoutes.get("/:datasetId/:version", async (c) => {
   return Response.redirect(url.toString(), 308);
 });
 
-dataRoutes.get("/:datasetId/:version/*", (c) => {
+// Register both GET and HEAD explicitly. Hono v4's auto-HEAD-from-GET
+// behavior would run the full GET handler and strip the body, which
+// (a) wastes a `buildRedirectUrl` S3 presign per HEAD and (b) returns
+// a 302 to rclone, whose HTTP backend does NOT follow HEAD redirects
+// by default. The HEAD branch inside fileOrIndexHandler short-circuits
+// to a 200 + metadata headers for files (or 200 + text/html for
+// directories) so `rclone sync :http:...` can size+mtime+ETag every
+// file in one cheap round-trip per file.
+const fileOrIndexRoute = (c: import("hono").Context<{ Bindings: Bindings }>) => {
   const { datasetId, version } = c.req.param();
   const prefix = `/${datasetId}/${version}/`;
   const idx = c.req.path.indexOf(prefix);
   const rawPath = idx === -1 ? "" : c.req.path.slice(idx + prefix.length);
   return fileOrIndexHandler(c.env, c.req.raw, datasetId, version, rawPath);
-});
+};
+dataRoutes.get("/:datasetId/:version/*", fileOrIndexRoute);
+dataRoutes.on("HEAD", "/:datasetId/:version/*", fileOrIndexRoute);
 
 /**
  * GET /<id> and /<id>/ -> sitemap-style landing page listing every
