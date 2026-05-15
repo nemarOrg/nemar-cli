@@ -24,6 +24,7 @@ import { maintenanceMode } from "./middleware/maintenance";
 import { rateLimiter } from "./middleware/rateLimit";
 import { adminRoutes } from "./routes/admin";
 import { authRoutes } from "./routes/auth";
+import { dataRoutes } from "./routes/data";
 import { datasetRoutes } from "./routes/datasets";
 import { sandboxRoutes } from "./routes/sandbox";
 import { userRoutes } from "./routes/users";
@@ -111,6 +112,11 @@ api.route("/admin", adminRoutes);
 api.route("/datasets", datasetRoutes);
 api.route("/sandbox", sandboxRoutes);
 api.route("/webhooks", webhooks);
+// Path-based mount of the data sub-app so it's reachable on every hostname
+// (api.nemar.org, *.workers.dev dev fallback, etc.). The Worker also serves
+// the same handlers at the root path when the request hits data.nemar.org;
+// see the hostname fork in `app` below.
+api.route("/data", dataRoutes);
 
 // 404 handler
 api.notFound((c) => {
@@ -154,6 +160,24 @@ api.onError((err, c) => {
 // api.nemar.org/* (and *.workers.dev/*) at root and the legacy
 // api.osc.earth/nemar/* prefix.
 const app = new Hono<{ Bindings: Bindings; Variables: Variables }>();
+
+// data.nemar.org dispatches to the data sub-app at root, so the public
+// contract is `data.nemar.org/<id>/<version>/...` without a /data/ prefix.
+// We rewrite the URL to /data/<rest> and re-enter `api.fetch` so the
+// request inherits the full middleware stack (logger, secureHeaders, cors,
+// rateLimiter, maintenanceMode) and the global `api.onError` sanitizer.
+// Reading the hostname from c.req.url -- not the Host header -- prevents
+// a forged Host: from steering an api.nemar.org request into this branch.
+app.use("*", async (c, next) => {
+  const host = new URL(c.req.url).hostname.toLowerCase();
+  if (host === "data.nemar.org") {
+    const url = new URL(c.req.url);
+    url.pathname = `/data${url.pathname}`;
+    return api.fetch(new Request(url, c.req.raw), c.env, c.executionCtx);
+  }
+  return next();
+});
+
 app.route("/nemar", api);
 app.route("/", api);
 

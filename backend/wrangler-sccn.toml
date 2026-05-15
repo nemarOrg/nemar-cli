@@ -6,12 +6,16 @@ main = "src/index.ts"
 compatibility_date = "2024-12-01"
 compatibility_flags = ["nodejs_compat"]
 
-# api.nemar.org is bound as a Workers Custom Domain.
+# api.nemar.org and data.nemar.org are bound as Workers Custom Domains.
 # custom_domain=true lets Cloudflare auto-manage DNS + TLS for the whole
 # hostname (no /* path pattern, no separate DNS record). Zone must live
-# on the same account.
+# on the same account. data.nemar.org serves the BIDS-shaped HTTPS access
+# layer for published datasets (epic #449); the same handlers are also
+# reachable at api.nemar.org/data/* and on the workers.dev dev hostname,
+# so dev testing does not require a separate dev custom domain.
 routes = [
-  { pattern = "api.nemar.org", custom_domain = true }
+  { pattern = "api.nemar.org", custom_domain = true },
+  { pattern = "data.nemar.org", custom_domain = true }
 ]
 # workers.dev fallback hostname so the worker stays reachable if the
 # custom domain ever misbehaves.
