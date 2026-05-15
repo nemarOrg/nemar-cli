@@ -173,22 +173,101 @@ phase.
 
 ### `GET /<datasetId>` and `GET /<datasetId>/`
 
-Phase 1 placeholder that points the caller at `latest/` and `latest/manifest.json`.
-A full version listing arrives in epic #449 phase 3 (#497).
+Dataset landing page. Content-negotiated: HTML for browsers, JSON for
+machine clients (default when no `Accept` is sent). The query parameter
+`?format=json` or `?format=html` overrides the `Accept` header.
+
+JSON shape:
+
+```json
+{
+  "dataset_id": "nm000103",
+  "latest": "v1.0.0",
+  "metadata_url": "/nm000103/metadata.json",
+  "versions": [
+    {
+      "version": "v1.0.0",
+      "doi": "10.82901/NEMAR.nm000103.v1.0.0",
+      "created_at": "2025-12-01T10:00:00Z",
+      "manifest_url": "/nm000103/v1.0.0/manifest.json",
+      "browse_url": "/nm000103/v1.0.0/"
+    }
+  ]
+}
+```
+
+Versions are newest-first. `latest` is `null` when the dataset row exists
+but no version has been minted yet (the page still returns `200`, with
+a "no published versions yet" notice in the HTML form).
+
+HTML rendering lists every version with its DOI, publication date, browse
+URL, and manifest URL.
+
+`Cache-Control: public, max-age=60`.
 
 ### `GET /<datasetId>/<version>`
 
 `308 Permanent Redirect` to `/<datasetId>/<version>/` so the relative `../`
 link in the rendered index resolves correctly.
 
+## Versioned UX
+
+### Version picker
+
+HTML directory listings include a version picker above the file table
+when the dataset has more than one published version. Each version is
+rendered as a sibling link that switches the version segment of the
+current URL while preserving the sub-path -- so switching versions on a
+deeply-nested directory lands on the same directory in the chosen
+version (or a tombstone 404, see below, if the path doesn't exist
+there).
+
+### File-removed tombstones
+
+When a file path 404s but the same path existed in an older published
+version, the response indicates the last version that contained it.
+
+JSON shape:
+
+```json
+{
+  "error": "File not found",
+  "reason": "removed",
+  "last_seen_version": "v1.0.0",
+  "last_seen_url": "https://data.nemar.org/nm000103/v1.0.0/sub-99/eeg/sub-99_task-rest_eeg.edf"
+}
+```
+
+A 404 without a tombstone (no `reason` field) means the path never
+existed in any of the most recent versions.
+
+The tombstone walk is capped at the **10 most recent older versions**.
+Older datasets can still be browsed manually from `/<datasetId>/` --
+the cap exists so a 404 on a long-removed path never fans out to
+dozens of manifest fetches. If a determined client needs deeper
+history, fetch `/<datasetId>/metadata.json` for the full version list
+and walk it explicitly.
+
+The HTML form of the same 404 (sent when `Accept: text/html`) renders
+a friendly page with a clickable link to the last-seen URL.
+
+### "Files removed since vN-1" footer
+
+Directory index pages compare their listing against the immediately
+prior published version. Names that existed in the prior version but
+are absent in the current one are rendered in a collapsible
+`<details>` footer with links to the prior version's URL. The
+comparison is only against `vN-1`; older versions are not consulted
+(use `metadata.json` for full history).
+
 ## Response codes
 
 | Code | When |
 | --- | --- |
-| `200` | Manifest JSON, HTML index, or `<datasetId>` placeholder |
+| `200` | Manifest JSON, HTML index, dataset landing page (HTML or JSON) |
 | `302` | File path that resolves to backing-store bytes |
 | `308` | `/<datasetId>/<version>` -> `/<datasetId>/<version>/` |
-| `404` | Dataset not found, private, unpublished, version not minted, file not in manifest, path traversal attempt |
+| `404` | Dataset not found, private, unpublished, version not minted, file not in manifest, path traversal attempt. Includes `reason: "removed"` + `last_seen_*` when the path existed in a recent prior version |
 
 The route deliberately does not distinguish "not found" from "exists but
 private". Private datasets are reached only via the existing
@@ -206,5 +285,4 @@ content-type on file responses.
 ## What this does not cover
 
 - Private and unpublished datasets. They stay on git-annex.
-- Tombstones for files removed between versions. Phase 3 (#497).
 - rclone-compatible delta sync. Phase 4 (#498), optional.

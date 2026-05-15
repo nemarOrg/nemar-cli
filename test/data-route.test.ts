@@ -123,7 +123,10 @@ describe("data.nemar.org route (epic #449, phase 1)", async () => {
   });
 
   test("dataset root (no version) returns a public landing page", async () => {
-    const r = await fetch(`${API}/data/${TEST_DATASET}`, { headers, redirect: "manual" });
+    const r = await fetch(`${API}/data/${TEST_DATASET}`, {
+      headers: { ...headers, Accept: "text/html" },
+      redirect: "manual",
+    });
     expect(r.status).toBe(200);
     expect(r.headers.get("content-type")).toContain("text/html");
     const body = await r.text();
@@ -209,5 +212,124 @@ describe("data.nemar.org route (epic #449, phase 1)", async () => {
     expect(r.status).toBe(404);
     const body = (await r.json()) as { error: string };
     expect(body.error).toBe("Dataset not found");
+  });
+
+  // ---------------------------------------------------------------------------
+  // Phase 3 (#497): sitemap landing page + tombstone 404s
+  // ---------------------------------------------------------------------------
+
+  test("dataset root: default Accept yields JSON with versions array", async () => {
+    // curl-like default (no Accept). The route picks JSON, surfacing the
+    // version list machine-readably without requiring an explicit
+    // ?format=json on the URL.
+    const r = await fetch(`${API}/data/${TEST_DATASET}`, { headers, redirect: "manual" });
+    expect(r.status).toBe(200);
+    expect(r.headers.get("content-type")).toContain("application/json");
+    const body = (await r.json()) as {
+      dataset_id: string;
+      latest: string | null;
+      metadata_url: string;
+      versions: Array<{
+        version: string;
+        manifest_url: string;
+        browse_url: string;
+        doi: string | null;
+        created_at: string | null;
+      }>;
+    };
+    expect(body.dataset_id).toBe(TEST_DATASET);
+    expect(body.versions.length).toBeGreaterThan(0);
+    expect(body.latest).toBe(body.versions[0].version);
+    expect(body.metadata_url).toBe(`/${TEST_DATASET}/metadata.json`);
+    expect(body.versions[0].manifest_url).toMatch(/^\/.*\/manifest\.json$/);
+  });
+
+  test("dataset root: ?format=json overrides browser Accept", async () => {
+    const r = await fetch(`${API}/data/${TEST_DATASET}?format=json`, {
+      headers: { ...headers, Accept: "text/html" },
+      redirect: "manual",
+    });
+    expect(r.status).toBe(200);
+    expect(r.headers.get("content-type")).toContain("application/json");
+  });
+
+  test("HTML index page includes the 'all versions' footer link", async () => {
+    const r = await fetch(`${API}/data/${TEST_DATASET}/latest/`, {
+      headers: { ...headers, Accept: "text/html" },
+    });
+    expect(r.status).toBe(200);
+    const body = await r.text();
+    expect(body).toContain(`href="/${TEST_DATASET}/"`);
+    expect(body).toContain("all versions");
+  });
+
+  test("nonexistent file path returns 404 JSON with no tombstone fields", async () => {
+    // sub-zz/never.edf has never existed in any version -> no tombstone.
+    const r = await fetchNoRedirect(`/data/${TEST_DATASET}/latest/sub-zz/never.edf`);
+    expect(r.status).toBe(404);
+    expect(r.headers.get("content-type")).toContain("application/json");
+    const body = (await r.json()) as {
+      error: string;
+      version?: string;
+      path?: string;
+      reason?: string;
+      last_seen_version?: string;
+    };
+    expect(body.error).toBe("File not found");
+    // version/path are always echoed so a JSON consumer doesn't need to
+    // re-parse the request URL to know what it asked for.
+    expect(body.version).toBeTruthy();
+    expect(body.path).toBe("sub-zz/never.edf");
+    expect(body.reason).toBeUndefined();
+    expect(body.last_seen_version).toBeUndefined();
+  });
+
+  test("nonexistent file path with Accept: text/html returns an HTML 404", async () => {
+    const r = await fetchNoRedirect(`/data/${TEST_DATASET}/latest/sub-zz/never.edf`);
+    // Re-issue with the right Accept header (fetchNoRedirect doesn't take one).
+    const html = await fetch(`${API}/data/${TEST_DATASET}/latest/sub-zz/never.edf`, {
+      headers: { ...headers, Accept: "text/html" },
+      redirect: "manual",
+    });
+    expect(r.status).toBe(404);
+    expect(html.status).toBe(404);
+    expect(html.headers.get("content-type")).toContain("text/html");
+    const body = await html.text();
+    expect(body).toContain("404");
+    expect(body).toContain("all versions");
+  });
+
+  // Tombstone E2E (reason: "removed") requires nm099999 to have at least
+  // two published versions where the second drops a path the first had.
+  // The standard e2e-test fixture is a single-version reset, so we skip
+  // this test when the precondition isn't met. Cross-referenced with the
+  // unit-test fixture in `multiVersionFixtures` which covers the same
+  // branch with hand-built manifests.
+  test("tombstone 404 (when fixture supports it)", async () => {
+    const manResp = await fetch(`${API}/data/${TEST_DATASET}/manifest`, { headers });
+    const list = (await manResp.json()) as { versions?: string[] };
+    if (!list.versions || list.versions.length < 2) {
+      console.log(`[skip] tombstone E2E: ${TEST_DATASET} needs >=2 versions, has ${list.versions?.length ?? 0}`);
+      return;
+    }
+    // Find a path present in v[N-1] but absent in v[N] = "latest".
+    const olderTag = list.versions[1].startsWith("v") ? list.versions[1] : `v${list.versions[1]}`;
+    const olderMan = await fetch(`${API}/data/${TEST_DATASET}/${olderTag}/manifest.json`, { headers });
+    if (!olderMan.ok) return;
+    const olderEntries = (await olderMan.json()) as Array<{ path: string }>;
+    const latestMan = await fetch(`${API}/data/${TEST_DATASET}/latest/manifest.json`, { headers });
+    if (!latestMan.ok) return;
+    const latestPaths = new Set(((await latestMan.json()) as Array<{ path: string }>).map((e) => e.path));
+    const removed = olderEntries.find((e) => !latestPaths.has(e.path));
+    if (!removed) {
+      console.log("[skip] tombstone E2E: no path was removed between latest and prior version");
+      return;
+    }
+    const r = await fetchNoRedirect(`/data/${TEST_DATASET}/latest/${removed.path}`);
+    expect(r.status).toBe(404);
+    const body = (await r.json()) as { error: string; reason?: string; last_seen_version?: string; last_seen_url?: string };
+    expect(body.reason).toBe("removed");
+    expect(body.last_seen_version).toBeTruthy();
+    expect(body.last_seen_url).toContain(removed.path);
   });
 });
