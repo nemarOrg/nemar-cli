@@ -13,13 +13,17 @@
 
 import { Hono } from "hono";
 import {
+  type DatasetRowForMetadata,
+  type DatasetVersionRow,
   type PublicManifestEntry,
+  buildDatasetMetadata,
   buildRedirectUrl,
   escapeHtml,
   renderIndexHtml,
   resolveFile,
   resolveVersion,
 } from "../services/data-router";
+import { parseNemarMetadata } from "../services/datacite";
 import { isValidDatasetId } from "../services/datasetId";
 import { ORG_NAME } from "../services/github";
 import type { VersionManifest } from "../services/manifest";
@@ -226,6 +230,101 @@ async function fileOrIndexHandler(
 dataRoutes.get("/:datasetId/:version/manifest.json", (c) => {
   const { datasetId, version } = c.req.param();
   return manifestJsonHandler(c.env, datasetId, version);
+});
+
+/**
+ * GET /<id>/metadata.json -> dataset-level neuroschema v0.3.0 document.
+ *
+ * Combines the D1 catalog row, the parsed nemar_metadata.json enrichment
+ * payload, and (when at least one version exists) a derived BIDS index from
+ * the latest version's S3 manifest. Public datasets only; private/unknown
+ * collapse to 404 with no existence leak. Partial-enrichment cases never
+ * 500: missing inputs degrade to null fields in the response.
+ *
+ * MUST be registered before `/:datasetId/:version` -- otherwise Hono's
+ * param-matching captures `metadata.json` as a version string.
+ */
+async function metadataJsonHandler(env: Bindings, datasetId: string): Promise<Response> {
+  const gate = await loadPublishedDataset(env, datasetId);
+  if (!gate) return notFound("Dataset not found");
+
+  const row = await env.DB.prepare(
+    `SELECT dataset_id, name, description, github_repo, concept_doi,
+            modalities, subject_count, age_min, age_max,
+            file_size, total_files, tasks, enrichment_json
+     FROM datasets
+     WHERE dataset_id = ?`,
+  )
+    .bind(datasetId)
+    .first<DatasetRowForMetadata & { enrichment_json: string | null }>();
+  if (!row) {
+    // Race between the visibility check and the second SELECT (deletion mid-request).
+    return notFound("Dataset not found");
+  }
+
+  const versionsResult = await env.DB.prepare(
+    "SELECT version, doi, created_at FROM dataset_versions WHERE dataset_id = ? ORDER BY created_at DESC",
+  )
+    .bind(datasetId)
+    .all<DatasetVersionRow>();
+  const versions = versionsResult.results ?? [];
+
+  let parsedEnrichment = null;
+  if (row.enrichment_json) {
+    try {
+      parsedEnrichment = parseNemarMetadata(JSON.parse(row.enrichment_json));
+    } catch (err) {
+      console.warn(
+        `[data] metadata.json: corrupt enrichment_json dataset=${datasetId}:`,
+        err instanceof Error ? err.message : String(err),
+      );
+    }
+  }
+
+  let latestManifest: VersionManifest | null = null;
+  if (versions.length > 0) {
+    const latest = versions[0];
+    const versionTag = latest.version.startsWith("v") ? latest.version : `v${latest.version}`;
+    latestManifest = await loadManifest(env, datasetId, versionTag);
+    if (!latestManifest) {
+      console.warn(
+        `[data] metadata.json: latest manifest unavailable dataset=${datasetId} version=${versionTag}; bids_index will be null`,
+      );
+    }
+  }
+
+  const payload = buildDatasetMetadata({
+    row: {
+      dataset_id: row.dataset_id,
+      name: row.name,
+      description: row.description,
+      github_repo: row.github_repo,
+      concept_doi: row.concept_doi,
+      modalities: row.modalities,
+      subject_count: row.subject_count,
+      age_min: row.age_min,
+      age_max: row.age_max,
+      file_size: row.file_size,
+      total_files: row.total_files,
+      tasks: row.tasks,
+    },
+    parsedEnrichment,
+    versions,
+    latestManifest,
+    githubOrg: ORG_NAME,
+  });
+
+  return new Response(JSON.stringify(payload), {
+    headers: {
+      "Content-Type": "application/json",
+      "Cache-Control": "public, max-age=60",
+    },
+  });
+}
+
+dataRoutes.get("/:datasetId/metadata.json", (c) => {
+  const { datasetId } = c.req.param();
+  return metadataJsonHandler(c.env, datasetId);
 });
 
 // Redirect /<id>/<version> -> /<id>/<version>/ so the relative `../` link in

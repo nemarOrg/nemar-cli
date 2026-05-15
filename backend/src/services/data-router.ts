@@ -8,6 +8,17 @@
  * for the "latest" lookup.
  */
 
+import type {
+  ContributorEntry,
+  FundingReferenceEntry,
+  NemarMetadata,
+  NemarMetadataV1,
+  NemarMetadataV2,
+  PipelineStage,
+  RelatedIdentifierEntry,
+  StructuredDate,
+  StructuredKeyword,
+} from "../../../shared/datacite-constants.js";
 import type { ManifestFile, VersionManifest } from "./manifest";
 import { type PresignedUrlOptions, generatePresignedGetUrl } from "./s3";
 
@@ -190,6 +201,452 @@ export function humanSize(bytes: number): string {
     unit++;
   }
   return `${value.toFixed(value < 10 ? 1 : 0)}${units[unit]}`;
+}
+
+// ===========================================================================
+// metadata.json builders (epic #449 phase 2)
+//
+// Composes a neuroschema v0.3.0 `dataset` document from the catalog row in
+// D1, the parsed nemar_metadata.json enrichment payload, the dataset_versions
+// list, and (optionally) the latest version's S3 manifest. All pure: no D1,
+// S3, or network access happens here; callers in routes/data.ts wire the I/O.
+//
+// The wire format mirrors `~/Documents/git/nemar/neuroschema/schema/core/dataset.schema.json`
+// (v0.3.0). NEMAR-specific aggregates that aren't part of the FAIR core
+// (version DOI list, derived BIDS subjects/sessions/tasks/runs tree) sit in
+// `extensions.nemar` per `schema/extensions/nemar.schema.json` which already
+// declares `additionalProperties: true`.
+// ===========================================================================
+
+export type DatasetSource = "openneuro" | "nemar" | "gin" | "other";
+
+export interface PersonAffiliation {
+  name: string;
+  identifier?: string | null;
+  scheme?: string | null;
+}
+
+export interface Person {
+  name: string;
+  name_type?: "Personal" | "Organizational" | null;
+  given_name?: string | null;
+  family_name?: string | null;
+  orcid?: string | null;
+  affiliations?: PersonAffiliation[];
+}
+
+export interface DatasetDemographics {
+  subjects_count: number;
+  age_min?: number | null;
+  age_max?: number | null;
+}
+
+export interface DatasetDataSummary {
+  total_files: number | null;
+  size_bytes: number | null;
+  size_human: string | null;
+}
+
+export interface DatasetProvenance {
+  latest_snapshot: string | null;
+  publish_date: string | null;
+}
+
+export interface DatasetExternalLinks {
+  dataset_doi: string | null;
+  github_url: string | null;
+}
+
+export interface DatasetFunding {
+  funder_name: string;
+  award_number?: string | null;
+  award_title?: string | null;
+  funder_identifier?: string | null;
+  funder_identifier_type?: string | null;
+  award_uri?: string | null;
+}
+
+export interface VersionEntry {
+  version: string;
+  doi: string;
+  created_at: string;
+  manifest_url: string;
+}
+
+export interface BidsIndexTaskNode {
+  runs: string[];
+}
+
+export interface BidsIndexModalityNode {
+  tasks: Record<string, BidsIndexTaskNode>;
+}
+
+export interface BidsIndexSubjectNode {
+  sessions: string[];
+  modalities: Record<string, BidsIndexModalityNode>;
+}
+
+export interface BidsIndex {
+  version: string;
+  subjects: Record<string, BidsIndexSubjectNode>;
+}
+
+export interface NemarExtensionBlock {
+  versions: VersionEntry[];
+  bids_index: BidsIndex | null;
+  pipeline_stage: PipelineStage | null;
+}
+
+export interface NeuroschemaDataset {
+  schema_version: "0.3.0";
+  doc_type: "dataset";
+  dataset_id: string;
+  name: string;
+  description: string | null;
+  source: DatasetSource;
+  recording_modality: string[];
+  bids_version: string | null;
+  license: string | null;
+  authors: Person[];
+  keywords: StructuredKeyword[];
+  related_identifiers: RelatedIdentifierEntry[];
+  contributors: ContributorEntry[];
+  dates: StructuredDate[];
+  rights: Array<{
+    rights: string;
+    rights_uri?: string | null;
+    rights_identifier?: string | null;
+    rights_identifier_scheme?: string | null;
+  }>;
+  language: string | null;
+  funding: DatasetFunding[];
+  tasks: string[];
+  datatypes: string[];
+  sessions: string[];
+  sessions_count: number | null;
+  demographics: DatasetDemographics | null;
+  data_summary: DatasetDataSummary | null;
+  provenance: DatasetProvenance;
+  external_links: DatasetExternalLinks;
+  extensions: { nemar: NemarExtensionBlock };
+}
+
+/**
+ * D1 row shape consumed by the builder. Mirrors the SELECT in
+ * routes/data.ts metadataJsonHandler.
+ */
+export interface DatasetRowForMetadata {
+  dataset_id: string;
+  name: string;
+  description: string | null;
+  github_repo: string | null;
+  concept_doi: string | null;
+  modalities: string | null;
+  subject_count: number | null;
+  age_min: number | null;
+  age_max: number | null;
+  file_size: number | null;
+  total_files: number | null;
+  tasks: string | null;
+}
+
+/**
+ * dataset_versions row shape (subset).
+ */
+export interface DatasetVersionRow {
+  version: string;
+  doi: string;
+  created_at: string;
+}
+
+/**
+ * Format bytes as a neuroschema-style `size_human` string (e.g. "1.15 GB",
+ * "450 MB", "120 KB"). Distinct from `humanSize` which is a compact form
+ * used by the HTML directory index. Null in, null out.
+ */
+export function formatBytes(bytes: number | null): string | null {
+  if (bytes === null) return null;
+  if (!Number.isFinite(bytes) || bytes < 0) return null;
+  if (bytes < 1024) return `${bytes} B`;
+  const units = ["KB", "MB", "GB", "TB", "PB"];
+  let value = bytes / 1024;
+  let unit = 0;
+  while (value >= 1024 && unit < units.length - 1) {
+    value /= 1024;
+    unit++;
+  }
+  return `${value.toFixed(value >= 100 ? 0 : 2)} ${units[unit]}`;
+}
+
+function splitCsv(value: string | null): string[] {
+  if (!value) return [];
+  return value
+    .split(",")
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0);
+}
+
+/**
+ * Flatten `NemarMetadata.authors` (a `Record<name, AuthorEnrichment*>`) into
+ * the neuroschema Person array. The map key is the author's display name.
+ * v1 enrichment's singular `affiliation: string` lifts to `affiliations: [{ name }]`.
+ *
+ * Returns [] when no enrichment is present, matching the contract that
+ * partial-enrichment cases never throw and never coerce missing data to
+ * placeholder values.
+ */
+export function buildPersonList(meta: NemarMetadata | null): Person[] {
+  if (!meta || !meta.authors) return [];
+  if (meta.version === "2.0") return buildPersonListV2(meta);
+  return buildPersonListV1(meta);
+}
+
+function buildPersonListV1(meta: NemarMetadataV1): Person[] {
+  if (!meta.authors) return [];
+  return Object.entries(meta.authors).map(([name, value]) => {
+    const person: Person = { name, name_type: "Personal" };
+    if (value.orcid) person.orcid = value.orcid;
+    if (value.affiliation) person.affiliations = [{ name: value.affiliation }];
+    return person;
+  });
+}
+
+function buildPersonListV2(meta: NemarMetadataV2): Person[] {
+  if (!meta.authors) return [];
+  return Object.entries(meta.authors).map(([name, value]) => {
+    const person: Person = { name, name_type: "Personal" };
+    if (value.orcid) person.orcid = value.orcid;
+    if (value.affiliations && value.affiliations.length > 0) {
+      person.affiliations = value.affiliations.map((a) => ({
+        name: a.name,
+        identifier: a.identifier ?? null,
+        scheme: a.scheme ?? null,
+      }));
+    }
+    return person;
+  });
+}
+
+const BIDS_SUB_RE = /^sub-[A-Za-z0-9]+$/;
+const BIDS_SES_RE = /^ses-[A-Za-z0-9]+$/;
+const BIDS_TASK_TOKEN_RE = /_task-([A-Za-z0-9]+)/;
+const BIDS_RUN_TOKEN_RE = /_run-([A-Za-z0-9]+)/;
+
+/**
+ * Derive a `subjects -> sessions -> modalities -> tasks -> runs` tree from a
+ * BIDS-shaped manifest by parsing every file path.
+ *
+ * Only paths rooted at the top level under `sub-<label>/` count. Derivatives,
+ * code directories, README/etc., and any non-conforming path are skipped
+ * silently so the tree reflects the BIDS raw view.
+ *
+ * Session labels in the tree omit the `ses-` prefix to match how BIDS
+ * tooling typically refers to sessions (the directory keeps the prefix; the
+ * label does not).
+ *
+ * Sets are converted to deterministically sorted arrays at the end so the
+ * response is byte-stable for cache-friendly clients.
+ */
+export function buildBidsIndex(
+  files: Record<string, ManifestFile>,
+): Record<string, BidsIndexSubjectNode> {
+  type Accum = {
+    sessions: Set<string>;
+    modalities: Map<string, Map<string, Set<string>>>;
+  };
+  const acc: Record<string, Accum> = {};
+
+  for (const path of Object.keys(files)) {
+    const parts = path.split("/");
+    if (parts.length < 3) continue;
+    const subject = parts[0];
+    if (!BIDS_SUB_RE.test(subject)) continue;
+
+    let modalityIdx = 1;
+    let sessionLabel: string | null = null;
+    if (BIDS_SES_RE.test(parts[1])) {
+      sessionLabel = parts[1].slice("ses-".length);
+      modalityIdx = 2;
+    }
+    if (modalityIdx >= parts.length - 1) continue;
+    const modality = parts[modalityIdx];
+    const filename = parts[parts.length - 1];
+    const taskMatch = filename.match(BIDS_TASK_TOKEN_RE);
+    if (!taskMatch) continue;
+    const task = taskMatch[1];
+    const runMatch = filename.match(BIDS_RUN_TOKEN_RE);
+
+    if (!acc[subject]) {
+      acc[subject] = { sessions: new Set(), modalities: new Map() };
+    }
+    if (sessionLabel !== null) acc[subject].sessions.add(sessionLabel);
+    if (!acc[subject].modalities.has(modality)) {
+      acc[subject].modalities.set(modality, new Map());
+    }
+    const tasksMap = acc[subject].modalities.get(modality);
+    if (!tasksMap) continue;
+    if (!tasksMap.has(task)) tasksMap.set(task, new Set());
+    if (runMatch) tasksMap.get(task)?.add(runMatch[1]);
+  }
+
+  const out: Record<string, BidsIndexSubjectNode> = {};
+  for (const subject of Object.keys(acc).sort()) {
+    const node = acc[subject];
+    const modalities: Record<string, BidsIndexModalityNode> = {};
+    for (const mod of [...node.modalities.keys()].sort()) {
+      const tasksMap = node.modalities.get(mod);
+      if (!tasksMap) continue;
+      const tasks: Record<string, BidsIndexTaskNode> = {};
+      for (const task of [...tasksMap.keys()].sort()) {
+        tasks[task] = { runs: [...(tasksMap.get(task) ?? [])].sort() };
+      }
+      modalities[mod] = { tasks };
+    }
+    out[subject] = {
+      sessions: [...node.sessions].sort(),
+      modalities,
+    };
+  }
+  return out;
+}
+
+/**
+ * Collect unique top-level session labels across all subjects (without the
+ * `ses-` prefix). Returns sorted output for byte stability.
+ */
+export function deriveSessions(files: Record<string, ManifestFile>): string[] {
+  const sessions = new Set<string>();
+  for (const path of Object.keys(files)) {
+    const parts = path.split("/");
+    if (parts.length < 3) continue;
+    if (!BIDS_SUB_RE.test(parts[0])) continue;
+    if (BIDS_SES_RE.test(parts[1])) sessions.add(parts[1].slice("ses-".length));
+  }
+  return [...sessions].sort();
+}
+
+/**
+ * Compose the full neuroschema dataset document. Pure: caller hands in the
+ * parsed enrichment, version rows, and (optional) latest manifest. Any
+ * missing input degrades to a null/empty field rather than aborting.
+ */
+export function buildDatasetMetadata(input: {
+  row: DatasetRowForMetadata;
+  parsedEnrichment: NemarMetadata | null;
+  versions: DatasetVersionRow[];
+  latestManifest: VersionManifest | null;
+  githubOrg: string;
+}): NeuroschemaDataset {
+  const { row, parsedEnrichment, versions, latestManifest, githubOrg } = input;
+
+  const modalitiesCsv = splitCsv(row.modalities);
+  const recordingModality = modalitiesCsv.map((m) => m.toUpperCase());
+  const datatypes = modalitiesCsv.map((m) => m.toLowerCase());
+
+  const v2 = parsedEnrichment && parsedEnrichment.version === "2.0" ? parsedEnrichment : null;
+  const v1 = parsedEnrichment && parsedEnrichment.version === "1.0" ? parsedEnrichment : null;
+
+  const description = row.description ?? v2?.description ?? v1?.description ?? null;
+  const license = v2?.license ?? null;
+  const keywords: StructuredKeyword[] = v2?.keywords ?? [];
+  const related: RelatedIdentifierEntry[] = v2?.related_identifiers ?? [];
+  const contributors: ContributorEntry[] = v2?.contributors ?? [];
+  const dates: StructuredDate[] = v2?.dates ?? [];
+  const funding: DatasetFunding[] = (v2?.funding_references ?? []).map(toDatasetFunding);
+
+  const sessionsList = latestManifest ? deriveSessions(latestManifest.files) : [];
+  const bidsIndex: BidsIndex | null = latestManifest
+    ? {
+        version: latestManifest.version,
+        subjects: buildBidsIndex(latestManifest.files),
+      }
+    : null;
+
+  const latestVersionRow = versions[0] ?? null;
+
+  return {
+    schema_version: "0.3.0",
+    doc_type: "dataset",
+    dataset_id: row.dataset_id,
+    name: row.name,
+    description,
+    source: "nemar",
+    recording_modality: recordingModality,
+    bids_version: null,
+    license,
+    authors: buildPersonList(parsedEnrichment),
+    keywords,
+    related_identifiers: related,
+    contributors,
+    dates,
+    rights: license
+      ? [
+          {
+            rights: license,
+            rights_uri: null,
+            rights_identifier: license,
+            rights_identifier_scheme: "SPDX",
+          },
+        ]
+      : [],
+    language: null,
+    funding,
+    tasks: splitCsv(row.tasks),
+    datatypes,
+    sessions: sessionsList,
+    sessions_count: sessionsList.length > 0 ? sessionsList.length : null,
+    demographics:
+      row.subject_count !== null
+        ? {
+            subjects_count: row.subject_count,
+            age_min: row.age_min,
+            age_max: row.age_max,
+          }
+        : null,
+    data_summary:
+      row.total_files !== null || row.file_size !== null
+        ? {
+            total_files: row.total_files,
+            size_bytes: row.file_size,
+            size_human: formatBytes(row.file_size),
+          }
+        : null,
+    provenance: {
+      latest_snapshot: latestVersionRow?.version ?? null,
+      publish_date: latestVersionRow?.created_at ?? null,
+    },
+    external_links: {
+      dataset_doi: row.concept_doi,
+      github_url: row.github_repo
+        ? row.github_repo.startsWith("http")
+          ? row.github_repo
+          : `https://github.com/${githubOrg}/${row.dataset_id}`
+        : null,
+    },
+    extensions: {
+      nemar: {
+        versions: versions.map((v) => ({
+          version: v.version,
+          doi: v.doi,
+          created_at: v.created_at,
+          manifest_url: `/${row.dataset_id}/v${v.version.replace(/^v/, "")}/manifest.json`,
+        })),
+        bids_index: bidsIndex,
+        pipeline_stage: v2?.pipeline_stage ?? null,
+      },
+    },
+  };
+}
+
+function toDatasetFunding(entry: FundingReferenceEntry): DatasetFunding {
+  return {
+    funder_name: entry.funder_name,
+    award_number: entry.award_number ?? null,
+    award_title: entry.award_title ?? null,
+    funder_identifier: entry.funder_identifier ?? null,
+    funder_identifier_type: entry.funder_identifier_type ?? null,
+    award_uri: entry.award_uri ?? null,
+  };
 }
 
 export function renderIndexHtml(args: {
