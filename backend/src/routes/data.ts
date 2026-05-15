@@ -28,6 +28,7 @@ import {
   renderTombstone404Html,
   resolveFile,
   resolveVersion,
+  toVersionTag,
 } from "../services/data-router";
 import { parseNemarMetadata } from "../services/datacite";
 import { isValidDatasetId } from "../services/datasetId";
@@ -79,7 +80,24 @@ async function loadManifest(
   datasetId: string,
   version: string,
 ): Promise<VersionManifest | null> {
-  const raw = await getManifest(s3OptionsFromEnv(env), datasetId, version);
+  // getManifest can throw on network/S3 errors. Phase 3 introduces hot
+  // call sites (tombstone walk fans out up to 10 fetches per 404,
+  // "removed since" footer fetches the prior version on every directory
+  // index render) where a transient S3 blip should degrade to "no
+  // tombstone hint / no footer" instead of 500ing the whole response.
+  // Phase 1 callers only ever fetched the requested version once, so the
+  // original "throw kills the request" behavior was acceptable; not so
+  // any more.
+  let raw: string | null;
+  try {
+    raw = await getManifest(s3OptionsFromEnv(env), datasetId, version);
+  } catch (err) {
+    console.error(
+      `[data] manifest fetch failed dataset=${datasetId} version=${version}:`,
+      err instanceof Error ? err.message : String(err),
+    );
+    return null;
+  }
   if (!raw) return null;
   let parsed: unknown;
   try {
@@ -105,18 +123,21 @@ async function loadManifest(
 }
 
 /**
- * Tombstone payload attached to a 404 when a path existed in an older
- * version but not in the requested one. Surfaces the last version that
- * still served the file so the client (or eegdash-viewer, or curl) can
- * follow up without crawling every version manifest.
+ * Extra fields attached to a file 404. Always includes `version` and
+ * `path` so a JSON consumer can self-describe the response without
+ * re-parsing the request URL. When the path was removed in a recent
+ * prior version, the `reason` + `last_seen_*` fields point the
+ * consumer at the URL that still serves the bytes.
  */
-interface TombstonePayload {
-  reason: "removed";
-  last_seen_version: string;
-  last_seen_url: string;
+interface FileNotFoundPayload {
+  version: string;
+  path: string;
+  reason?: "removed";
+  last_seen_version?: string;
+  last_seen_url?: string;
 }
 
-function notFound(message: string, payload?: TombstonePayload) {
+function notFound(message: string, payload?: FileNotFoundPayload) {
   const body = payload ? { error: message, ...payload } : { error: message };
   return new Response(JSON.stringify(body), {
     status: 404,
@@ -155,12 +176,14 @@ function fileNotFound(args: {
   }
   if (lastSeen) {
     return notFound("File not found", {
+      version,
+      path,
       reason: "removed",
       last_seen_version: lastSeen.version,
       last_seen_url: lastSeen.href,
     });
   }
-  return notFound("File not found");
+  return notFound("File not found", { version, path });
 }
 
 function parseChecksum(checksum: string): { algorithm: string; value: string } {
@@ -228,24 +251,32 @@ async function manifestJsonHandler(
 /**
  * Fetch every published version row for a dataset, newest-first.
  * Returns the same shape used by metadataJsonHandler and the landing
- * page. Empty array means "dataset exists but unpublished".
+ * page. Empty array means "dataset exists but unpublished" *or* the D1
+ * query threw -- callers cannot distinguish, by design.
+ *
+ * D1 errors are absorbed and returned as an empty array so that
+ * presentational features in `fileOrIndexHandler` (version picker,
+ * "removed since" footer, tombstone walk) cannot 500 a file redirect
+ * that would otherwise succeed. The landing page does need this data
+ * to do its job, but degrading to "empty version list" there is still
+ * better than a 500 -- the page can render a "no published versions"
+ * notice instead.
  */
 async function loadVersionRows(env: Bindings, datasetId: string): Promise<DatasetVersionRow[]> {
-  const result = await env.DB.prepare(
-    "SELECT version, doi, created_at FROM dataset_versions WHERE dataset_id = ? ORDER BY created_at DESC",
-  )
-    .bind(datasetId)
-    .all<DatasetVersionRow>();
-  return result.results ?? [];
-}
-
-/**
- * Normalize a dataset_versions.version field to a `v`-prefixed tag.
- * Older rows in D1 store the bare version (e.g. "1.0.0") while newer
- * rows store the tag form. Always coerce to tag form for routing.
- */
-function toVersionTag(raw: string): string {
-  return raw.startsWith("v") ? raw : `v${raw}`;
+  try {
+    const result = await env.DB.prepare(
+      "SELECT version, doi, created_at FROM dataset_versions WHERE dataset_id = ? ORDER BY created_at DESC",
+    )
+      .bind(datasetId)
+      .all<DatasetVersionRow>();
+    return result.results ?? [];
+  } catch (err) {
+    console.error(
+      `[data] dataset_versions query failed dataset=${datasetId}:`,
+      err instanceof Error ? err.message : String(err),
+    );
+    return [];
+  }
 }
 
 /**
@@ -431,7 +462,7 @@ async function metadataJsonHandler(env: Bindings, datasetId: string): Promise<Re
   let latestManifest: VersionManifest | null = null;
   if (versions.length > 0) {
     const latest = versions[0];
-    const versionTag = latest.version.startsWith("v") ? latest.version : `v${latest.version}`;
+    const versionTag = toVersionTag(latest.version);
     latestManifest = await loadManifest(env, datasetId, versionTag);
     if (!latestManifest) {
       console.warn(

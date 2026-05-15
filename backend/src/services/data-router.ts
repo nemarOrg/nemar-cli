@@ -687,6 +687,19 @@ export interface VersionPickerEntry {
   isCurrent: boolean;
 }
 
+/**
+ * Normalize a `dataset_versions.version` field to a `v`-prefixed tag.
+ *
+ * Older D1 rows store the bare version (e.g. `"1.0.0"`) while newer rows
+ * store the tag form (`"v1.0.0"`). Tag form is the canonical wire shape
+ * for the data.nemar.org route. Always coerce to tag form before
+ * routing or comparing -- a missed coercion produces malformed URLs
+ * (`/<id>/1.0.0/`) and breaks the tombstone walk's `indexOf` lookup.
+ */
+export function toVersionTag(raw: string): string {
+  return raw.startsWith("v") ? raw : `v${raw}`;
+}
+
 export function renderIndexHtml(args: {
   datasetId: string;
   version: string;
@@ -1027,7 +1040,7 @@ export function renderTombstone404Html(args: {
   const p = escapeHtml(path);
   const body = lastSeen
     ? `<p>This file was removed between versions. It was last present in <strong>${escapeHtml(lastSeen.version)}</strong>:</p>
-<p><a href="${lastSeen.href}">${escapeHtml(lastSeen.href)}</a></p>`
+<p><a href="${escapeHtml(lastSeen.href)}">${escapeHtml(lastSeen.href)}</a></p>`
     : `<p>No file at this path in <strong>${v}</strong>, and no record of it in any recent version.</p>`;
   return `<!doctype html>
 <html lang="en"><head>

@@ -30,6 +30,7 @@ import {
   renderTombstone404Html,
   resolveFile,
   resolveVersion,
+  toVersionTag,
 } from "../backend/src/services/data-router";
 import type { ManifestFile, VersionManifest } from "../backend/src/services/manifest";
 import type { NemarMetadataV1, NemarMetadataV2 } from "../shared/datacite-constants";
@@ -864,6 +865,32 @@ function multiVersionFixtures(): { v1: VersionManifest; v2: VersionManifest } {
   };
 }
 
+describe("toVersionTag", () => {
+  test("passes through tag-form versions unchanged", () => {
+    expect(toVersionTag("v1.0.0")).toBe("v1.0.0");
+    expect(toVersionTag("v12.345.6789")).toBe("v12.345.6789");
+  });
+
+  test("prepends v to bare numeric versions", () => {
+    // D1 has both tag-form ("v1.0.0", newer publishes) and bare-form
+    // ("1.0.0", legacy rows from earlier in epic #449) version strings.
+    // The route always wants tag-form -- this regression test pins the
+    // coercion contract so a fileOrIndexHandler that misses the coercion
+    // breaks indexOf on the version picker, the tombstone walk's
+    // `slice(currentIdx + 1)`, and the "removed since" diff in one shot.
+    expect(toVersionTag("1.0.0")).toBe("v1.0.0");
+    expect(toVersionTag("2.3.4")).toBe("v2.3.4");
+  });
+
+  test("does not double-prefix when input already starts with v", () => {
+    // Pin the asymmetric semantics: presence of a leading `v` is the
+    // only signal that suppresses prepending. The function is not a
+    // semver parser.
+    expect(toVersionTag("v1.0.0")).toBe("v1.0.0");
+    expect(toVersionTag(toVersionTag("1.0.0"))).toBe("v1.0.0");
+  });
+});
+
 describe("findLastSeenVersion", () => {
   test("returns the first older version that contains the path", async () => {
     const { v1 } = multiVersionFixtures();
@@ -1248,5 +1275,28 @@ describe("renderTombstone404Html", () => {
     });
     expect(html).not.toContain("<bad>");
     expect(html).toContain("&lt;bad&gt;");
+  });
+
+  test("escapes lastSeen.href in both the link text AND the href attribute", () => {
+    // Regression for the code-reviewer finding: the href attribute was
+    // previously interpolated raw, only the link text was escaped. A
+    // hostile last-seen URL (e.g. one constructed from a host that
+    // includes `"` somehow, or a deliberate downstream concatenation
+    // bug) must never break out of the href attribute.
+    const html = renderTombstone404Html({
+      datasetId: "nm099999",
+      version: "v2.0.0",
+      path: "x.edf",
+      lastSeen: {
+        version: "v1.0.0",
+        href: `https://data.nemar.org/nm099999/v1.0.0/x.edf"><script>alert(1)</script>`,
+      },
+    });
+    // The href attribute must not contain a raw `"` that closes it.
+    const hrefMatches = [...html.matchAll(/href="([^"]*)"/g)].map((m) => m[1]);
+    expect(hrefMatches.some((h) => h.includes("<script"))).toBe(false);
+    // The link text shows the escaped form.
+    expect(html).toContain("&lt;script&gt;");
+    expect(html).not.toContain("<script>");
   });
 });

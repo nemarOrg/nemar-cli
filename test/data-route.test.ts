@@ -268,8 +268,18 @@ describe("data.nemar.org route (epic #449, phase 1)", async () => {
     const r = await fetchNoRedirect(`/data/${TEST_DATASET}/latest/sub-zz/never.edf`);
     expect(r.status).toBe(404);
     expect(r.headers.get("content-type")).toContain("application/json");
-    const body = (await r.json()) as { error: string; reason?: string; last_seen_version?: string };
+    const body = (await r.json()) as {
+      error: string;
+      version?: string;
+      path?: string;
+      reason?: string;
+      last_seen_version?: string;
+    };
     expect(body.error).toBe("File not found");
+    // version/path are always echoed so a JSON consumer doesn't need to
+    // re-parse the request URL to know what it asked for.
+    expect(body.version).toBeTruthy();
+    expect(body.path).toBe("sub-zz/never.edf");
     expect(body.reason).toBeUndefined();
     expect(body.last_seen_version).toBeUndefined();
   });
