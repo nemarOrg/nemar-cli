@@ -9,7 +9,7 @@
 import { AwsClient } from "aws4fetch";
 import { isValidDatasetId } from "./datasetId.js";
 
-interface PresignedUrlOptions {
+export interface PresignedUrlOptions {
   bucket: string;
   region: string;
   accessKeyId: string;
@@ -342,7 +342,17 @@ export async function getManifest(
   const signed = await aws.sign(url, { method: "GET" });
   const response = await fetch(signed);
 
-  if (response.status === 404 || response.status === 403) return null;
+  if (response.status === 404) return null;
+  if (response.status === 403) {
+    // A correctly-configured backend should never see 403 on its own bucket.
+    // Treat as not-found for the caller (preserves existing contract), but
+    // log so a credentials regression doesn't silently turn every dataset
+    // into a public 404 on data.nemar.org.
+    console.error(
+      `[s3] getManifest 403 (likely credentials/permissions) dataset=${datasetId} version=${version}`,
+    );
+    return null;
+  }
   if (!response.ok) {
     throw new Error(`Failed to get manifest: HTTP ${response.status}`);
   }

@@ -1,0 +1,1104 @@
+/**
+ * Pure functions backing the `data.nemar.org` route (epic #449).
+ *
+ * Resolves a (datasetId, version, path) tuple against an in-memory
+ * VersionManifest into either a file 302 target or a directory listing.
+ * D1 / S3 / network access lives in the Hono handlers; everything here
+ * is synchronous and unit-testable, except resolveVersion which needs D1
+ * for the "latest" lookup.
+ */
+
+import type {
+  ContributorEntry,
+  FundingReferenceEntry,
+  NemarMetadata,
+  NemarMetadataV1,
+  NemarMetadataV2,
+  PipelineStage,
+  RelatedIdentifierEntry,
+  StructuredDate,
+  StructuredKeyword,
+} from "../../../shared/datacite-constants.js";
+import type { ManifestFile, VersionManifest } from "./manifest";
+import { type PresignedUrlOptions, generatePresignedGetUrl } from "./s3";
+
+export const VERSION_TAG_RE = /^v\d+\.\d+\.\d+$/;
+
+export type ResolvedVersion =
+  | { ok: true; version: string }
+  | { ok: false; reason: "no_published_versions" | "invalid_version" };
+
+export type DirectoryEntry =
+  | { kind: "file"; name: string; size: number }
+  | { kind: "dir"; name: string };
+
+export type ResolvedFile =
+  | { kind: "file"; path: string; file: ManifestFile }
+  | { kind: "directory"; path: string; children: DirectoryEntry[] }
+  | { kind: "not_found" };
+
+/**
+ * Shape of one row in the public `manifest.json` response. Pinned as a
+ * named type because external clients (the eegdash viewer, third-party
+ * downloaders, future SDKs) depend on it; inline shapes are easy to drift
+ * silently in Phase 2/3 refactors.
+ */
+export interface PublicManifestEntry {
+  path: string;
+  size: number;
+  checksum_algorithm: string;
+  checksum: string;
+  url: string | null;
+  // Populated when url could not be built for this row; lets clients
+  // download the rest of the dataset instead of failing the whole listing.
+  error?: string;
+}
+
+/**
+ * Map a version param ("latest" or "vX.Y.Z") to a concrete vX.Y.Z.
+ * Latest = most recent row in dataset_versions for that dataset.
+ */
+export async function resolveVersion(
+  db: D1Database,
+  datasetId: string,
+  versionParam: string,
+): Promise<ResolvedVersion> {
+  if (versionParam === "latest") {
+    const row = await db
+      .prepare(
+        "SELECT version FROM dataset_versions WHERE dataset_id = ? ORDER BY created_at DESC LIMIT 1",
+      )
+      .bind(datasetId)
+      .first<{ version: string }>();
+    if (!row) return { ok: false, reason: "no_published_versions" };
+    const v = row.version.startsWith("v") ? row.version : `v${row.version}`;
+    return { ok: true, version: v };
+  }
+  if (!VERSION_TAG_RE.test(versionParam)) return { ok: false, reason: "invalid_version" };
+  return { ok: true, version: versionParam };
+}
+
+// Reject literal `..` segments, empty segments, and absolute paths.
+// URL-encoded variants like `%2E%2E` reach the manifest lookup unchanged
+// and miss every key (the manifest is keyed by raw paths), so they fall
+// through to not_found by construction -- the URL-encoded traversal test
+// in test/data-route.unit.test.ts pins that contract.
+const FORBIDDEN_SEGMENTS = new Set(["", ".", "..", "__proto__", "constructor", "prototype"]);
+
+function normalizePath(rawPath: string): string | null {
+  const stripped = rawPath.replace(/^\/+/, "").replace(/\/+$/, "");
+  if (stripped === "") return "";
+  const parts = stripped.split("/");
+  for (const part of parts) {
+    if (FORBIDDEN_SEGMENTS.has(part)) return null;
+    if (part.startsWith("/")) return null;
+  }
+  return parts.join("/");
+}
+
+/**
+ * Map a bids-path inside a manifest to: a file (exact match), a directory
+ * (any manifest entry has this as a prefix), or not_found.
+ *
+ * The root path of an empty manifest returns an empty directory rather
+ * than not_found, so the renderer can show a valid (empty) listing for a
+ * dataset that has a manifest but zero files.
+ */
+export function resolveFile(manifest: VersionManifest, rawPath: string): ResolvedFile {
+  const normalized = normalizePath(rawPath);
+  if (normalized === null) return { kind: "not_found" };
+
+  if (normalized !== "" && Object.hasOwn(manifest.files, normalized)) {
+    return { kind: "file", path: normalized, file: manifest.files[normalized] };
+  }
+
+  const prefix = normalized === "" ? "" : `${normalized}/`;
+  const seen = new Map<string, DirectoryEntry>();
+
+  for (const [path, file] of Object.entries(manifest.files)) {
+    if (!path.startsWith(prefix)) continue;
+    const rest = path.slice(prefix.length);
+    if (rest === "") continue;
+    const slash = rest.indexOf("/");
+    if (slash === -1) {
+      seen.set(rest, { kind: "file", name: rest, size: file.size });
+    } else {
+      const name = rest.slice(0, slash);
+      if (!seen.has(name)) seen.set(name, { kind: "dir", name });
+    }
+  }
+
+  // Empty root of an empty manifest -> directory with no children, not 404.
+  if (seen.size === 0 && normalized !== "") return { kind: "not_found" };
+
+  const children = [...seen.values()].sort((a, b) => {
+    if (a.kind !== b.kind) return a.kind === "dir" ? -1 : 1;
+    return a.name.localeCompare(b.name);
+  });
+  return { kind: "directory", path: normalized, children };
+}
+
+const ANNEX_KEY_RE = /^[A-Z0-9]+-s\d+--/;
+
+/**
+ * Build the URL the Worker 302s to for a resolved file.
+ *
+ * Annex-backed files (key like `SHA256E-s12345--...edf`, also `MD5E-`,
+ * `SHA1E-`, etc.) -> presigned S3 GET against `<datasetId>/objects/<key>`.
+ *
+ * git-backed files (`key: "git:<blob-sha>"`, used for small in-tree files
+ * like dataset_description.json) -> raw.githubusercontent.com URL pinned
+ * to the version tag.
+ *
+ * Implicit invariant for the git: branch: the dataset's GitHub repo must
+ * be public AND the version tag must exist on it. Both are guaranteed by
+ * the publication workflow today (publish-approve flips the repo to
+ * public before writing the D1 version row, which only happens after a
+ * successful tag push). If that invariant ever breaks, the 302 target
+ * itself returns 404 to the user with no Worker-side signal. Tracked as
+ * a Phase 3 follow-up on epic #449.
+ */
+export async function buildRedirectUrl(args: {
+  datasetId: string;
+  version: string;
+  bidsPath: string;
+  file: ManifestFile;
+  s3Options: PresignedUrlOptions;
+  githubOrg: string;
+  expiresIn?: number;
+}): Promise<string> {
+  const { datasetId, version, bidsPath, file, s3Options, githubOrg, expiresIn } = args;
+  if (file.key.startsWith("git:")) {
+    const encoded = bidsPath.split("/").map(encodeURIComponent).join("/");
+    return `https://raw.githubusercontent.com/${githubOrg}/${datasetId}/${version}/${encoded}`;
+  }
+  if (!ANNEX_KEY_RE.test(file.key)) {
+    throw new Error(`Unrecognized manifest key format: ${file.key}`);
+  }
+  return generatePresignedGetUrl(s3Options, `${datasetId}/objects/${file.key}`, expiresIn ?? 3600);
+}
+
+const HTML_ESCAPES: Record<string, string> = {
+  "&": "&amp;",
+  "<": "&lt;",
+  ">": "&gt;",
+  '"': "&quot;",
+  "'": "&#39;",
+};
+
+export function escapeHtml(s: string): string {
+  return s.replace(/[&<>"']/g, (c) => HTML_ESCAPES[c]);
+}
+
+export function humanSize(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes < 0) return "?";
+  if (bytes < 1024) return `${bytes}`;
+  const units = ["K", "M", "G", "T", "P"];
+  let value = bytes / 1024;
+  let unit = 0;
+  while (value >= 1024 && unit < units.length - 1) {
+    value /= 1024;
+    unit++;
+  }
+  return `${value.toFixed(value < 10 ? 1 : 0)}${units[unit]}`;
+}
+
+/**
+ * Format an ISO 8601 timestamp as an RFC 1123 / RFC 7231 HTTP-date.
+ *
+ * Used for the `Last-Modified` header on file responses so HTTP
+ * clients (rclone HTTP backend, browsers, CDN caches) can do
+ * size+mtime delta detection without re-fetching the file body.
+ *
+ * `new Date(iso).toUTCString()` produces exactly the RFC 1123 shape
+ * (`"Fri, 15 May 2026 17:30:21 GMT"`) when the input parses. Malformed
+ * input falls through unchanged -- emitting a busted Last-Modified is
+ * harmless to the client (RFC 7231 says clients ignore unparseable
+ * values) and lets the file route stay 200 over a manifest with a
+ * malformed `created` field instead of crashing. The corrupt value
+ * is logged via `console.warn` so it shows up in `wrangler tail` --
+ * silent passthrough would hide manifest corruption from operators.
+ * Already-HTTP-date input passes through (defensive against a caller
+ * that did the conversion once already).
+ */
+export function toHttpDate(value: string): string {
+  if (value.endsWith(" GMT")) return value;
+  const d = new Date(value);
+  if (Number.isNaN(d.getTime())) {
+    console.warn(`[data-router] toHttpDate: unparseable value="${value}"`);
+    return value;
+  }
+  return d.toUTCString();
+}
+
+// ===========================================================================
+// metadata.json builders
+//
+// Composes a neuroschema v0.3.0 `dataset` document from the catalog row in
+// D1, the parsed nemar_metadata.json enrichment payload, the dataset_versions
+// list, and (optionally) the latest version's S3 manifest. All pure: no D1,
+// S3, or network access happens here; callers in routes/data.ts wire the I/O.
+//
+// The wire format mirrors `~/Documents/git/nemar/neuroschema/schema/core/dataset.schema.json`
+// (v0.3.0). NEMAR-specific aggregates that aren't part of the FAIR core
+// (version DOI list, derived BIDS subjects/sessions/tasks/runs tree) sit in
+// `extensions.nemar` per `schema/extensions/nemar.schema.json` which already
+// declares `additionalProperties: true`.
+// ===========================================================================
+
+export type DatasetSource = "openneuro" | "nemar" | "gin" | "other";
+
+export interface PersonAffiliation {
+  name: string;
+  identifier?: string | null;
+  scheme?: string | null;
+}
+
+export interface Person {
+  name: string;
+  name_type?: "Personal" | "Organizational" | null;
+  given_name?: string | null;
+  family_name?: string | null;
+  orcid?: string | null;
+  affiliations?: PersonAffiliation[];
+}
+
+export interface DatasetDemographics {
+  subjects_count: number;
+  age_min?: number | null;
+  age_max?: number | null;
+}
+
+export interface DatasetDataSummary {
+  total_files: number | null;
+  size_bytes: number | null;
+  size_human: string | null;
+}
+
+export interface DatasetProvenance {
+  latest_snapshot: string | null;
+  publish_date: string | null;
+}
+
+export interface DatasetExternalLinks {
+  dataset_doi: string | null;
+  github_url: string | null;
+}
+
+export interface DatasetFunding {
+  funder_name: string;
+  award_number?: string | null;
+  award_title?: string | null;
+  funder_identifier?: string | null;
+  funder_identifier_type?: string | null;
+  award_uri?: string | null;
+}
+
+export interface VersionEntry {
+  version: string;
+  doi: string;
+  created_at: string;
+  manifest_url: string;
+}
+
+export interface BidsIndexTaskNode {
+  runs: string[];
+}
+
+export interface BidsIndexModalityNode {
+  tasks: Record<string, BidsIndexTaskNode>;
+}
+
+export interface BidsIndexSubjectNode {
+  sessions: string[];
+  modalities: Record<string, BidsIndexModalityNode>;
+}
+
+export interface BidsIndex {
+  version: string;
+  subjects: Record<string, BidsIndexSubjectNode>;
+}
+
+export interface NemarExtensionBlock {
+  versions: VersionEntry[];
+  bids_index: BidsIndex | null;
+  pipeline_stage: PipelineStage | null;
+}
+
+export interface NeuroschemaDataset {
+  schema_version: "0.3.0";
+  doc_type: "dataset";
+  dataset_id: string;
+  name: string;
+  description: string | null;
+  source: DatasetSource;
+  recording_modality: string[];
+  bids_version: string | null;
+  license: string | null;
+  authors: Person[];
+  keywords: StructuredKeyword[];
+  related_identifiers: RelatedIdentifierEntry[];
+  contributors: ContributorEntry[];
+  dates: StructuredDate[];
+  rights: Array<{
+    rights: string;
+    rights_uri?: string | null;
+    rights_identifier?: string | null;
+    rights_identifier_scheme?: string | null;
+  }>;
+  language: string | null;
+  funding: DatasetFunding[];
+  tasks: string[];
+  datatypes: string[];
+  sessions: string[];
+  sessions_count: number | null;
+  demographics: DatasetDemographics | null;
+  data_summary: DatasetDataSummary | null;
+  provenance: DatasetProvenance;
+  external_links: DatasetExternalLinks;
+  extensions: { nemar: NemarExtensionBlock };
+}
+
+/**
+ * D1 row shape consumed by the builder. Mirrors the SELECT in
+ * routes/data.ts metadataJsonHandler.
+ */
+export interface DatasetRowForMetadata {
+  dataset_id: string;
+  name: string;
+  description: string | null;
+  github_repo: string | null;
+  concept_doi: string | null;
+  modalities: string | null;
+  subject_count: number | null;
+  age_min: number | null;
+  age_max: number | null;
+  file_size: number | null;
+  total_files: number | null;
+  tasks: string | null;
+}
+
+/**
+ * dataset_versions row shape (subset).
+ */
+export interface DatasetVersionRow {
+  version: string;
+  doi: string;
+  created_at: string;
+}
+
+/**
+ * Format bytes as a neuroschema-style `size_human` string. Distinct from
+ * `humanSize` which is a compact form used by the HTML directory index.
+ * Precision tiers, chosen to keep the human-readable string short while
+ * preserving useful resolution in the small-number tier:
+ *
+ *   value < 10   -> 2 decimals  ("1.15 GB",  "9.87 MB")
+ *   value < 100  -> 1 decimal   ("99.5 GB",  "12.3 MB")
+ *   value >= 100 -> 0 decimals  ("450 MB",   "150 GB")
+ *
+ * Null in, null out. Negative or non-finite input also returns null --
+ * callers receive an absent field rather than a noisy "0 B" placeholder.
+ */
+export function formatBytes(bytes: number | null): string | null {
+  if (bytes === null) return null;
+  if (!Number.isFinite(bytes) || bytes < 0) return null;
+  if (bytes < 1024) return `${bytes} B`;
+  const units = ["KB", "MB", "GB", "TB", "PB"];
+  let value = bytes / 1024;
+  let unit = 0;
+  while (value >= 1024 && unit < units.length - 1) {
+    value /= 1024;
+    unit++;
+  }
+  const decimals = value >= 100 ? 0 : value >= 10 ? 1 : 2;
+  return `${value.toFixed(decimals)} ${units[unit]}`;
+}
+
+function splitCsv(value: string | null): string[] {
+  if (!value) return [];
+  return value
+    .split(",")
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0);
+}
+
+/**
+ * Flatten `NemarMetadata.authors` (a `Record<name, AuthorEnrichment*>`) into
+ * the neuroschema Person array. The map key is the author's display name.
+ * v1 enrichment's singular `affiliation: string` lifts to `affiliations: [{ name }]`.
+ *
+ * Returns [] when no enrichment is present, matching the contract that
+ * partial-enrichment cases never throw and never coerce missing data to
+ * placeholder values.
+ */
+export function buildPersonList(meta: NemarMetadata | null): Person[] {
+  if (!meta || !meta.authors) return [];
+  if (meta.version === "2.0") return buildPersonListV2(meta);
+  return buildPersonListV1(meta);
+}
+
+function buildPersonListV1(meta: NemarMetadataV1): Person[] {
+  if (!meta.authors) return [];
+  return Object.entries(meta.authors).map(([name, value]) => {
+    const person: Person = { name, name_type: "Personal" };
+    if (value.orcid) person.orcid = value.orcid;
+    if (value.affiliation) person.affiliations = [{ name: value.affiliation }];
+    return person;
+  });
+}
+
+function buildPersonListV2(meta: NemarMetadataV2): Person[] {
+  if (!meta.authors) return [];
+  return Object.entries(meta.authors).map(([name, value]) => {
+    const person: Person = { name, name_type: "Personal" };
+    if (value.orcid) person.orcid = value.orcid;
+    if (value.affiliations && value.affiliations.length > 0) {
+      person.affiliations = value.affiliations.map((a) => ({
+        name: a.name,
+        identifier: a.identifier ?? null,
+        scheme: a.scheme ?? null,
+      }));
+    }
+    return person;
+  });
+}
+
+const BIDS_SUB_RE = /^sub-[A-Za-z0-9]+$/;
+const BIDS_SES_RE = /^ses-[A-Za-z0-9]+$/;
+const BIDS_TASK_TOKEN_RE = /_task-([A-Za-z0-9]+)/;
+const BIDS_RUN_TOKEN_RE = /_run-([A-Za-z0-9]+)/;
+
+/**
+ * Derive a `subjects -> sessions -> modalities -> tasks -> runs` tree from a
+ * BIDS-shaped manifest by parsing every file path.
+ *
+ * Only paths rooted at the top level under `sub-<label>/` count. Derivatives,
+ * code directories, README/etc., and any non-conforming path are skipped
+ * silently so the tree reflects the BIDS raw view.
+ *
+ * Session labels in the tree omit the `ses-` prefix to match how BIDS
+ * tooling typically refers to sessions (the directory keeps the prefix; the
+ * label does not).
+ *
+ * Sets are converted to deterministically sorted arrays at the end so the
+ * response is byte-stable for cache-friendly clients.
+ */
+export function buildBidsIndex(
+  files: Record<string, ManifestFile>,
+): Record<string, BidsIndexSubjectNode> {
+  type Accum = {
+    sessions: Set<string>;
+    modalities: Map<string, Map<string, Set<string>>>;
+  };
+  const acc: Record<string, Accum> = {};
+
+  for (const path of Object.keys(files)) {
+    const parts = path.split("/");
+    if (parts.length < 2) continue;
+    const subject = parts[0];
+    if (!BIDS_SUB_RE.test(subject)) continue;
+
+    let modalityIdx = 1;
+    let sessionLabel: string | null = null;
+    if (parts.length >= 3 && BIDS_SES_RE.test(parts[1])) {
+      sessionLabel = parts[1].slice("ses-".length);
+      modalityIdx = 2;
+    }
+
+    // Register the subject before considering modality/task. Task-less
+    // datatypes (anat, dwi, fmap) and session-level sidecars (sub-01_scans.tsv)
+    // are valid BIDS and the subject should still appear in the index even
+    // when the filename has no `_task-` token. The modalities map for such
+    // a subject can legitimately be empty.
+    if (!acc[subject]) {
+      acc[subject] = { sessions: new Set(), modalities: new Map() };
+    }
+    if (sessionLabel !== null) acc[subject].sessions.add(sessionLabel);
+
+    // No modality directory after the subject (or session) prefix -> the
+    // subject is registered but this path doesn't add a modality entry.
+    if (modalityIdx >= parts.length - 1) continue;
+    const modality = parts[modalityIdx];
+    const filename = parts[parts.length - 1];
+
+    if (!acc[subject].modalities.has(modality)) {
+      acc[subject].modalities.set(modality, new Map());
+    }
+    const tasksMap = acc[subject].modalities.get(modality);
+    if (!tasksMap) continue;
+
+    const taskMatch = filename.match(BIDS_TASK_TOKEN_RE);
+    if (!taskMatch) continue;
+    const task = taskMatch[1];
+    if (!tasksMap.has(task)) tasksMap.set(task, new Set());
+    const runMatch = filename.match(BIDS_RUN_TOKEN_RE);
+    if (runMatch) tasksMap.get(task)?.add(runMatch[1]);
+  }
+
+  const out: Record<string, BidsIndexSubjectNode> = {};
+  for (const subject of Object.keys(acc).sort()) {
+    const node = acc[subject];
+    const modalities: Record<string, BidsIndexModalityNode> = {};
+    for (const mod of [...node.modalities.keys()].sort()) {
+      const tasksMap = node.modalities.get(mod);
+      if (!tasksMap) continue;
+      const tasks: Record<string, BidsIndexTaskNode> = {};
+      for (const task of [...tasksMap.keys()].sort()) {
+        tasks[task] = { runs: [...(tasksMap.get(task) ?? [])].sort() };
+      }
+      modalities[mod] = { tasks };
+    }
+    out[subject] = {
+      sessions: [...node.sessions].sort(),
+      modalities,
+    };
+  }
+  return out;
+}
+
+/**
+ * Collect unique top-level session labels across all subjects (without the
+ * `ses-` prefix). Returns sorted output for byte stability.
+ */
+export function deriveSessions(files: Record<string, ManifestFile>): string[] {
+  const sessions = new Set<string>();
+  for (const path of Object.keys(files)) {
+    const parts = path.split("/");
+    if (parts.length < 3) continue;
+    if (!BIDS_SUB_RE.test(parts[0])) continue;
+    if (BIDS_SES_RE.test(parts[1])) sessions.add(parts[1].slice("ses-".length));
+  }
+  return [...sessions].sort();
+}
+
+/**
+ * Compose the full neuroschema dataset document. Pure: caller hands in the
+ * parsed enrichment, version rows, and (optional) latest manifest. Any
+ * missing input degrades to a null/empty field rather than aborting.
+ */
+export function buildDatasetMetadata(input: {
+  row: DatasetRowForMetadata;
+  parsedEnrichment: NemarMetadata | null;
+  versions: DatasetVersionRow[];
+  latestManifest: VersionManifest | null;
+  githubOrg: string;
+}): NeuroschemaDataset {
+  const { row, parsedEnrichment, versions, latestManifest, githubOrg } = input;
+
+  const modalitiesCsv = splitCsv(row.modalities);
+  const recordingModality = modalitiesCsv.map((m) => m.toUpperCase());
+  const datatypes = modalitiesCsv.map((m) => m.toLowerCase());
+
+  const v2 = parsedEnrichment && parsedEnrichment.version === "2.0" ? parsedEnrichment : null;
+  const v1 = parsedEnrichment && parsedEnrichment.version === "1.0" ? parsedEnrichment : null;
+
+  const description = row.description ?? v2?.description ?? v1?.description ?? null;
+  const license = v2?.license ?? null;
+  const keywords: StructuredKeyword[] = v2?.keywords ?? [];
+  const related: RelatedIdentifierEntry[] = v2?.related_identifiers ?? [];
+  const contributors: ContributorEntry[] = v2?.contributors ?? [];
+  const dates: StructuredDate[] = v2?.dates ?? [];
+  const funding: DatasetFunding[] = (v2?.funding_references ?? []).map(toDatasetFunding);
+
+  const sessionsList = latestManifest ? deriveSessions(latestManifest.files) : [];
+  // S3 version manifests store the version field bare (e.g. "1.0.0").
+  // Coerce to tag form for wire consistency with every other version
+  // field in the response and with the rest of the data.nemar.org
+  // contract (`/<id>/v1.0.0/...`).
+  const bidsIndex: BidsIndex | null = latestManifest
+    ? {
+        version: toVersionTag(latestManifest.version),
+        subjects: buildBidsIndex(latestManifest.files),
+      }
+    : null;
+
+  const latestVersionRow = versions[0] ?? null;
+
+  return {
+    schema_version: "0.3.0",
+    doc_type: "dataset",
+    dataset_id: row.dataset_id,
+    name: row.name,
+    description,
+    source: "nemar",
+    recording_modality: recordingModality,
+    bids_version: null,
+    license,
+    authors: buildPersonList(parsedEnrichment),
+    keywords,
+    related_identifiers: related,
+    contributors,
+    dates,
+    rights: license
+      ? [
+          {
+            rights: license,
+            rights_uri: null,
+            rights_identifier: license,
+            rights_identifier_scheme: "SPDX",
+          },
+        ]
+      : [],
+    language: null,
+    funding,
+    tasks: splitCsv(row.tasks),
+    datatypes,
+    sessions: sessionsList,
+    sessions_count: sessionsList.length > 0 ? sessionsList.length : null,
+    demographics:
+      row.subject_count !== null
+        ? {
+            subjects_count: row.subject_count,
+            age_min: row.age_min,
+            age_max: row.age_max,
+          }
+        : null,
+    data_summary:
+      row.total_files !== null || row.file_size !== null
+        ? {
+            total_files: row.total_files,
+            size_bytes: row.file_size,
+            size_human: formatBytes(row.file_size),
+          }
+        : null,
+    provenance: {
+      // Coerce to tag form to match every other version field on the
+      // wire (`extensions.nemar.versions[].version`,
+      // `bids_index.version`, the URL grammar). Legacy D1 rows store
+      // bare `1.0.0`; toVersionTag is a no-op for already-tagged rows.
+      latest_snapshot: latestVersionRow ? toVersionTag(latestVersionRow.version) : null,
+      publish_date: latestVersionRow?.created_at ?? null,
+    },
+    external_links: {
+      dataset_doi: row.concept_doi,
+      github_url: row.github_repo
+        ? row.github_repo.startsWith("http")
+          ? row.github_repo
+          : `https://github.com/${githubOrg}/${row.dataset_id}`
+        : null,
+    },
+    extensions: {
+      nemar: {
+        versions: versions.map((v) => {
+          const tag = toVersionTag(v.version);
+          return {
+            version: tag,
+            doi: v.doi,
+            created_at: v.created_at,
+            manifest_url: `/${row.dataset_id}/${tag}/manifest.json`,
+          };
+        }),
+        bids_index: bidsIndex,
+        pipeline_stage: v2?.pipeline_stage ?? null,
+      },
+    },
+  };
+}
+
+function toDatasetFunding(entry: FundingReferenceEntry): DatasetFunding {
+  return {
+    funder_name: entry.funder_name,
+    award_number: entry.award_number ?? null,
+    award_title: entry.award_title ?? null,
+    funder_identifier: entry.funder_identifier ?? null,
+    funder_identifier_type: entry.funder_identifier_type ?? null,
+    award_uri: entry.award_uri ?? null,
+  };
+}
+
+/**
+ * Removed-file note rendered both in the directory-index footer ("files
+ * removed since vN-1") and inline in a tombstone 404 page ("last seen in
+ * vN-1 at this URL"). Same shape works for both because both answer the
+ * same question: "where did this file go?".
+ */
+export interface RemovedSinceNote {
+  lastSeenVersion: string;
+  // Names that disappeared at this directory between lastSeenVersion and
+  // the rendered version. Each name is rendered with a link to the same
+  // path under lastSeenVersion. Empty array suppresses the footer.
+  names: string[];
+}
+
+export interface VersionPickerEntry {
+  version: string;
+  isCurrent: boolean;
+}
+
+/**
+ * Normalize a `dataset_versions.version` field to a `v`-prefixed tag.
+ *
+ * Older D1 rows store the bare version (e.g. `"1.0.0"`) while newer rows
+ * store the tag form (`"v1.0.0"`). Tag form is the canonical wire shape
+ * for the data.nemar.org route. Always coerce to tag form before
+ * routing or comparing -- a missed coercion produces malformed URLs
+ * (`/<id>/1.0.0/`) and breaks the tombstone walk's `indexOf` lookup.
+ */
+export function toVersionTag(raw: string): string {
+  return raw.startsWith("v") ? raw : `v${raw}`;
+}
+
+export function renderIndexHtml(args: {
+  datasetId: string;
+  version: string;
+  path: string;
+  entries: DirectoryEntry[];
+  availableVersions?: VersionPickerEntry[];
+  removedSinceNote?: RemovedSinceNote | null;
+}): string {
+  const { datasetId, version, path, entries, availableVersions, removedSinceNote } = args;
+  const display = path === "" ? "/" : `/${path}/`;
+  const title = `Index of /${datasetId}/${version}${display}`;
+  const rows: string[] = [];
+  if (path !== "") {
+    rows.push('<tr><td><a href="../">../</a></td><td class="size">-</td></tr>');
+  }
+  for (const e of entries) {
+    const href = `${encodeURIComponent(e.name)}${e.kind === "dir" ? "/" : ""}`;
+    const label = `${escapeHtml(e.name)}${e.kind === "dir" ? "/" : ""}`;
+    const size = e.kind === "dir" ? "-" : humanSize(e.size);
+    rows.push(`<tr><td><a href="${href}">${label}</a></td><td class="size">${size}</td></tr>`);
+  }
+
+  const idHref = encodeURIComponent(datasetId);
+  const versionPicker =
+    availableVersions && availableVersions.length > 1
+      ? renderVersionPicker(idHref, path, availableVersions)
+      : "";
+
+  const removedFooter =
+    removedSinceNote && removedSinceNote.names.length > 0
+      ? renderRemovedSinceFooter(idHref, path, removedSinceNote)
+      : "";
+
+  return `<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8">
+<title>${escapeHtml(title)}</title>
+<style>
+body{font-family:ui-monospace,Menlo,Consolas,monospace;margin:1.5em;max-width:80em}
+h1{font-size:1.05em;margin-bottom:.8em}
+nav.versions{font-size:.9em;color:#555;margin-bottom:.8em}
+nav.versions a{margin-right:.6em}
+nav.versions .current{font-weight:bold;color:#000;margin-right:.6em}
+table{border-collapse:collapse;width:100%}
+td{padding:.15em .8em;vertical-align:top}
+td.size{text-align:right;color:#555;white-space:nowrap}
+a{color:#06c;text-decoration:none}
+a:hover{text-decoration:underline}
+hr{margin-top:2em;border:0;border-top:1px solid #ccc}
+.foot{color:#888;font-size:.9em}
+details.removed{margin-top:1em;color:#555;font-size:.9em}
+details.removed summary{cursor:pointer}
+details.removed ul{margin:.4em 0 0;padding-left:1.2em}
+</style>
+</head><body>
+<h1>${escapeHtml(title)}</h1>
+${versionPicker}<table>${rows.join("")}</table>
+${removedFooter}<hr>
+<div class="foot">data.nemar.org &middot; <a href="manifest.json">manifest.json</a> &middot; <a href="/${idHref}/">all versions</a></div>
+</body></html>
+`;
+}
+
+/**
+ * Sibling-link version picker rendered above the directory table.
+ *
+ * Sibling links (not a <select>) keep the picker readable without
+ * JS and match the Apache-style table the rest of the page uses.
+ * Each link rewrites the version segment while preserving the
+ * current sub-path, so switching versions on a deeply-nested
+ * directory lands the user on the same directory in the chosen
+ * version (or a 404 with a tombstone if that path doesn't exist
+ * there -- which is exactly the signal the user wants).
+ */
+function renderVersionPicker(
+  idHref: string,
+  path: string,
+  versions: VersionPickerEntry[],
+): string {
+  // path is already a normalized BIDS path (no leading/trailing slashes).
+  // encodeURI preserves slashes between segments; the segments themselves
+  // come from manifest keys which are tightly constrained by BIDS naming.
+  const subPath = path === "" ? "" : `${encodeURI(path)}/`;
+  const items = versions
+    .map((v) => {
+      const label = escapeHtml(v.version);
+      if (v.isCurrent) return `<span class="current">${label}</span>`;
+      const href = `/${idHref}/${encodeURIComponent(v.version)}/${subPath}`;
+      return `<a href="${href}">${label}</a>`;
+    })
+    .join("");
+  return `<nav class="versions"><span>version:</span> ${items}</nav>\n`;
+}
+
+/**
+ * "Files removed since vN-1" footer rendered below the directory table.
+ *
+ * Each removed name links to the same name under the prior version, so
+ * the user can immediately fetch the file from the version where it
+ * still exists. Names are HTML-escaped and the href segments are
+ * percent-encoded for the same reason as the directory table.
+ */
+function renderRemovedSinceFooter(
+  idHref: string,
+  path: string,
+  note: RemovedSinceNote,
+): string {
+  const prevVersion = encodeURIComponent(note.lastSeenVersion);
+  const subPath = path === "" ? "" : `${encodeURI(path)}/`;
+  const items = note.names
+    .map((name) => {
+      const href = `/${idHref}/${prevVersion}/${subPath}${encodeURIComponent(name)}`;
+      return `<li><a href="${href}">${escapeHtml(name)}</a></li>`;
+    })
+    .join("");
+  return `<details class="removed"><summary>Files removed since ${escapeHtml(note.lastSeenVersion)} (${note.names.length})</summary><ul>${items}</ul></details>\n`;
+}
+
+/**
+ * Maximum number of older versions to consult when searching for the
+ * last version where a removed path existed. Bounds the worst-case
+ * fan-out of a 404: one D1 + S3 manifest fetch per version walked.
+ *
+ * The cap exists because tombstone responses are UX hinting, not
+ * exhaustive provenance -- if a file hasn't existed in the most recent
+ * 10 versions, telling the user "we don't know" (`reason: "not_found"`)
+ * is a better answer than "we burned 30 manifest fetches to find your
+ * answer". The /<id>/ landing page lists every version anyway, so a
+ * determined user can still find an old file by browsing.
+ */
+export const TOMBSTONE_LOOKBACK = 10;
+
+/**
+ * Walk older published versions newest-first looking for the first
+ * version that contains `path` (exact match). Returns the version tag
+ * (with leading `v`) on first hit, or null after the lookback cap.
+ *
+ * `loadManifest` is injected so the unit tests can hand in a Map-backed
+ * stub (per repo policy: no mocked S3 clients). At runtime it's the
+ * same `loadManifest` from routes/data.ts.
+ *
+ * `olderVersions` MUST be ordered newest-first. The caller is responsible
+ * for filtering out the current version and only passing what's older.
+ */
+export async function findLastSeenVersion(args: {
+  path: string;
+  olderVersions: string[];
+  loadManifest: (version: string) => Promise<VersionManifest | null>;
+  lookback?: number;
+}): Promise<{ version: string } | null> {
+  const cap = args.lookback ?? TOMBSTONE_LOOKBACK;
+  const walk = args.olderVersions.slice(0, cap);
+  for (const v of walk) {
+    const manifest = await args.loadManifest(v);
+    if (!manifest) continue;
+    if (Object.hasOwn(manifest.files, args.path)) return { version: v };
+  }
+  return null;
+}
+
+/**
+ * Compare the directory listing at `path` under the rendered version
+ * against the same listing under `priorVersion`. Returns the names that
+ * existed in the prior version but are absent now. Used to populate the
+ * "Files removed since vN-1" footer on directory index pages.
+ *
+ * Only direct children are compared. Subdirectories that disappeared
+ * appear as `dir` names; files that disappeared appear as `file` names.
+ * That distinction is intentionally lost in the rendered footer (both
+ * are just names with hrefs) -- it doesn't add value to say "directory
+ * sub-99/ was removed" when the user can click through and see.
+ */
+export function diffRemovedSince(
+  currentEntries: DirectoryEntry[],
+  priorManifest: VersionManifest,
+  path: string,
+): string[] {
+  const prior = resolveFile(priorManifest, path);
+  if (prior.kind !== "directory") return [];
+  const currentNames = new Set(currentEntries.map((e) => e.name));
+  const removed: string[] = [];
+  for (const child of prior.children) {
+    if (!currentNames.has(child.name)) removed.push(child.name);
+  }
+  return removed.sort();
+}
+
+/**
+ * Decide JSON vs HTML for the response based on Accept header and
+ * optional ?format= override. Defaults to JSON: API consumers (curl
+ * piped to jq, eegdash-viewer's fetch) are the primary audience for
+ * 404 bodies and the dataset landing page; browsers explicitly
+ * request text/html so they get the HTML page.
+ *
+ * The `?format=` query parameter is the explicit override -- useful
+ * when a user wants the JSON shape from a browser tab.
+ */
+export function pickResponseFormat(args: {
+  accept: string | null;
+  formatParam: string | null;
+}): "html" | "json" {
+  if (args.formatParam === "json") return "json";
+  if (args.formatParam === "html") return "html";
+  // text/html in the Accept header (with any q-value) -> HTML. This
+  // matches what every browser sends. Anything else (application/json,
+  // */*, no header) -> JSON.
+  if (args.accept && /\btext\/html\b/.test(args.accept)) return "html";
+  return "json";
+}
+
+export interface LandingVersion {
+  version: string;
+  doi: string | null;
+  created_at: string | null;
+  manifest_url: string;
+  browse_url: string;
+}
+
+export interface LandingPayload {
+  dataset_id: string;
+  latest: string | null;
+  metadata_url: string;
+  versions: LandingVersion[];
+}
+
+/**
+ * Build the JSON-form payload returned by `/<id>/` when the client
+ * asks for JSON. The HTML page renders the same data; keeping both
+ * paths fed by one builder means the two response shapes can't drift.
+ */
+export function buildLandingPayload(args: {
+  datasetId: string;
+  versionRows: DatasetVersionRow[];
+}): LandingPayload {
+  const { datasetId, versionRows } = args;
+  const versions: LandingVersion[] = versionRows.map((row) => {
+    const tag = row.version.startsWith("v") ? row.version : `v${row.version}`;
+    return {
+      version: tag,
+      doi: row.doi ?? null,
+      created_at: row.created_at ?? null,
+      manifest_url: `/${datasetId}/${tag}/manifest.json`,
+      browse_url: `/${datasetId}/${tag}/`,
+    };
+  });
+  return {
+    dataset_id: datasetId,
+    latest: versions.length > 0 ? versions[0].version : null,
+    metadata_url: `/${datasetId}/metadata.json`,
+    versions,
+  };
+}
+
+/**
+ * Render the HTML form of the dataset landing page (`/<id>/`). Lists
+ * every published version with its DOI and creation date, plus links
+ * to the per-version browse page, manifest, and sibling metadata.json.
+ *
+ * The "no published versions yet" branch keeps the same chrome so a
+ * machine consumer that happens to fetch HTML still gets a well-formed
+ * page with the dataset id and the metadata.json pointer.
+ */
+export function renderDatasetLandingHtml(payload: LandingPayload): string {
+  const id = escapeHtml(payload.dataset_id);
+  const idHref = encodeURIComponent(payload.dataset_id);
+  const metaHref = escapeHtml(payload.metadata_url);
+  const rows = payload.versions
+    .map((v, i) => {
+      const tag = escapeHtml(v.version);
+      const tagHref = encodeURIComponent(v.version);
+      const browseHref = `/${idHref}/${tagHref}/`;
+      const manifestHref = `/${idHref}/${tagHref}/manifest.json`;
+      const created = v.created_at ? escapeHtml(v.created_at.slice(0, 10)) : "-";
+      const doiCell = v.doi
+        ? `<a href="https://doi.org/${escapeHtml(v.doi)}">${escapeHtml(v.doi)}</a>`
+        : "-";
+      const latestMark = i === 0 ? ' <span class="latest">(latest)</span>' : "";
+      return `<tr><td><a href="${browseHref}">${tag}/</a>${latestMark}</td><td>${created}</td><td>${doiCell}</td><td><a href="${manifestHref}">manifest.json</a></td></tr>`;
+    })
+    .join("");
+  const emptyNotice =
+    payload.versions.length === 0
+      ? `<p class="empty">No published versions yet. <a href="${metaHref}">metadata.json</a> may still be populated from the catalog row.</p>`
+      : "";
+  const table =
+    payload.versions.length === 0
+      ? ""
+      : `<table><thead><tr><th>version</th><th>published</th><th>DOI</th><th>files</th></tr></thead><tbody>${rows}</tbody></table>`;
+  const latestShortcut =
+    payload.latest !== null
+      ? `<p class="shortcut">Latest: <a href="/${idHref}/latest/">/${id}/latest/</a> &middot; <a href="/${idHref}/latest/manifest.json">latest manifest.json</a></p>`
+      : "";
+  return `<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8">
+<title>${id}</title>
+<style>
+body{font-family:ui-monospace,Menlo,Consolas,monospace;margin:1.5em;max-width:80em}
+h1{font-size:1.2em;margin-bottom:.4em}
+table{border-collapse:collapse;width:100%;margin-top:.6em}
+th,td{padding:.25em .8em;text-align:left;vertical-align:top;border-bottom:1px solid #eee}
+th{color:#555;font-weight:normal}
+a{color:#06c;text-decoration:none}
+a:hover{text-decoration:underline}
+.latest{color:#070;font-weight:bold}
+.shortcut{color:#333;font-size:.95em}
+.empty{color:#888}
+hr{margin-top:2em;border:0;border-top:1px solid #ccc}
+.foot{color:#888;font-size:.9em}
+</style>
+</head><body>
+<h1>${id}</h1>
+${latestShortcut}${emptyNotice}${table}
+<hr>
+<div class="foot">data.nemar.org &middot; <a href="${metaHref}">metadata.json</a></div>
+</body></html>
+`;
+}
+
+/**
+ * Render an HTML 404 page for a file path. When `lastSeen` is provided
+ * the page tells the user the version where the file last existed and
+ * links to that URL. Without `lastSeen` it's a generic friendly 404.
+ *
+ * Mirrors the visual style of renderIndexHtml so a user clicking
+ * around the directory tree experiences a coherent UI.
+ */
+export function renderTombstone404Html(args: {
+  datasetId: string;
+  version: string;
+  path: string;
+  lastSeen: { version: string; href: string } | null;
+}): string {
+  const { datasetId, version, path, lastSeen } = args;
+  const id = escapeHtml(datasetId);
+  const idHref = encodeURIComponent(datasetId);
+  const v = escapeHtml(version);
+  const p = escapeHtml(path);
+  const body = lastSeen
+    ? `<p>This file was removed between versions. It was last present in <strong>${escapeHtml(lastSeen.version)}</strong>:</p>
+<p><a href="${escapeHtml(lastSeen.href)}">${escapeHtml(lastSeen.href)}</a></p>`
+    : `<p>No file at this path in <strong>${v}</strong>, and no record of it in any recent version.</p>`;
+  return `<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8">
+<title>404 - ${id}/${v}/${p}</title>
+<style>
+body{font-family:ui-monospace,Menlo,Consolas,monospace;margin:1.5em;max-width:80em}
+h1{font-size:1.05em;margin-bottom:.8em}
+a{color:#06c;text-decoration:none}
+a:hover{text-decoration:underline}
+hr{margin-top:2em;border:0;border-top:1px solid #ccc}
+.foot{color:#888;font-size:.9em}
+</style>
+</head><body>
+<h1>404 &middot; ${id}/${v}/${p}</h1>
+${body}
+<p><a href="/${idHref}/">all versions of ${id}</a></p>
+<hr>
+<div class="foot">data.nemar.org</div>
+</body></html>
+`;
+}

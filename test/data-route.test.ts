@@ -1,0 +1,427 @@
+/**
+ * E2E tests for the data.nemar.org route (epic #449, phase 1).
+ *
+ * Targets a deployed backend (set TEST_API_URL; defaults to api.nemar.org).
+ * Exercises the path-based mount at `<host>/data/...` so the same suite
+ * works on workers.dev (dev), api.nemar.org (prod fallback), and -- once
+ * DNS is in place -- via the data.nemar.org custom domain (which serves
+ * the same handlers at the root path).
+ *
+ * The suite assumes a public dataset with at least one published version
+ * exists. nm099999 is the canonical test dataset; tests skip gracefully
+ * if it is not currently published.
+ *
+ * Prod-traffic safeguard: if TEST_API_URL points at api.nemar.org, the
+ * suite skips itself unless TEST_ALLOW_PROD=1 is also set. Even though
+ * these tests are read-only, the default-to-prod posture is footgun-shaped
+ * for any contributor running `bun test` blindly.
+ */
+
+import { describe, expect, test } from "bun:test";
+import "./setup";
+import { TEST_CONFIG } from "./setup";
+
+const TEST_DATASET = process.env.TEST_DATA_DATASET ?? "nm099999";
+const API = TEST_CONFIG.apiUrl;
+const headers: Record<string, string> = TEST_CONFIG.bypassToken
+  ? { "X-Test-Bypass": TEST_CONFIG.bypassToken }
+  : {};
+const POINTS_AT_PROD = API.includes("api.nemar.org") || API.includes("data.nemar.org");
+const PROD_GUARD_ACTIVE = POINTS_AT_PROD && !process.env.TEST_ALLOW_PROD;
+
+async function fetchNoRedirect(path: string): Promise<Response> {
+  return fetch(`${API}${path}`, { redirect: "manual", headers });
+}
+
+interface ManifestSummary {
+  versions?: string[];
+}
+
+interface CatalogRow {
+  visibility?: string;
+}
+
+async function detectAvailable(): Promise<{ available: boolean; reason?: string }> {
+  const dsResp = await fetch(`${API}/datasets/${TEST_DATASET}`, { headers });
+  if (dsResp.status === 404) return { available: false, reason: "dataset not found" };
+  if (!dsResp.ok) return { available: false, reason: `dataset GET ${dsResp.status}` };
+  const ds = (await dsResp.json()) as CatalogRow;
+  if (ds.visibility !== "public")
+    return { available: false, reason: `visibility=${ds.visibility}` };
+
+  const manResp = await fetch(`${API}/datasets/${TEST_DATASET}/manifest`, { headers });
+  if (!manResp.ok) return { available: false, reason: `manifest list ${manResp.status}` };
+  const m = (await manResp.json()) as ManifestSummary;
+  if (!m.versions || m.versions.length === 0) {
+    return { available: false, reason: "no published versions" };
+  }
+  return { available: true };
+}
+
+describe("data.nemar.org route (epic #449, phase 1)", async () => {
+  if (PROD_GUARD_ACTIVE) {
+    test.skip("refusing to run against production without TEST_ALLOW_PROD=1", () => undefined);
+    return;
+  }
+
+  const { available, reason } = await detectAvailable();
+  if (!available) {
+    test.skip(`prerequisite missing: ${reason}`, () => undefined);
+    return;
+  }
+
+  test("nonexistent dataset returns 404 with structured error body", async () => {
+    const r = await fetchNoRedirect("/data/nm999000/latest/anything");
+    expect(r.status).toBe(404);
+    expect(r.headers.get("content-type")).toContain("application/json");
+    const body = (await r.json()) as { error: string };
+    expect(body.error).toBe("Dataset not found");
+  });
+
+  test("rejects bogus dataset IDs without leaking 5xx", async () => {
+    const r = await fetchNoRedirect("/data/totally-invalid-id/latest/x");
+    expect(r.status).toBe(404);
+  });
+
+  test("rejects bogus version strings", async () => {
+    const r = await fetchNoRedirect(`/data/${TEST_DATASET}/not-a-version/x`);
+    expect(r.status).toBe(404);
+  });
+
+  test("rejects path traversal", async () => {
+    const r = await fetchNoRedirect(`/data/${TEST_DATASET}/latest/../../../etc/passwd`);
+    expect(r.status).toBe(404);
+  });
+
+  test("manifest.json returns the published file index", async () => {
+    const r = await fetch(`${API}/data/${TEST_DATASET}/latest/manifest.json`, { headers });
+    expect(r.status).toBe(200);
+    expect(r.headers.get("content-type")).toContain("application/json");
+    const body = (await r.json()) as Array<{
+      path: string;
+      size: number;
+      checksum: string;
+      checksum_algorithm: string;
+      url: string | null;
+      error?: string;
+    }>;
+    expect(body.length).toBeGreaterThan(0);
+    expect(body[0]).toHaveProperty("path");
+    expect(body[0]).toHaveProperty("url");
+    // url should be a URL for healthy rows; null only when the per-row
+    // try/catch caught a buildRedirectUrl failure (e.g. unrecognized key).
+    if (body[0].url !== null) expect(body[0].url).toMatch(/^https:\/\//);
+  });
+
+  test("root index returns HTML with a manifest.json link", async () => {
+    const r = await fetch(`${API}/data/${TEST_DATASET}/latest/`, { headers });
+    expect(r.status).toBe(200);
+    expect(r.headers.get("content-type")).toContain("text/html");
+    const body = await r.text();
+    expect(body).toContain("Index of /");
+    expect(body).toContain("manifest.json");
+  });
+
+  test("dataset root (no version) returns a public landing page", async () => {
+    const r = await fetch(`${API}/data/${TEST_DATASET}`, {
+      headers: { ...headers, Accept: "text/html" },
+      redirect: "manual",
+    });
+    expect(r.status).toBe(200);
+    expect(r.headers.get("content-type")).toContain("text/html");
+    const body = await r.text();
+    expect(body).toContain("/latest/");
+    expect(body).toContain("/latest/manifest.json");
+  });
+
+  test("dataset root rejects unknown dataset ids before rendering HTML", async () => {
+    const r = await fetch(`${API}/data/nm999000`, { headers, redirect: "manual" });
+    expect(r.status).toBe(404);
+  });
+
+  test("file path 302s to a URL that resolves to the actual bytes", async () => {
+    const manResp = await fetch(`${API}/data/${TEST_DATASET}/latest/manifest.json`, { headers });
+    const entries = (await manResp.json()) as Array<{
+      path: string;
+      url: string | null;
+      size: number;
+    }>;
+    const target =
+      entries.find((e) => e.path.endsWith("dataset_description.json") && e.url !== null) ??
+      entries.find((e) => e.url !== null);
+    expect(target).toBeDefined();
+    if (!target?.url) return;
+
+    const redirect = await fetchNoRedirect(`/data/${TEST_DATASET}/latest/${target.path}`);
+    expect(redirect.status).toBe(302);
+    const location = redirect.headers.get("location");
+    expect(location).toBeDefined();
+    if (!location) return;
+    const fileResp = await fetch(location);
+    expect(fileResp.ok).toBe(true);
+    const bytes = new Uint8Array(await fileResp.arrayBuffer());
+    expect(bytes.byteLength).toBe(target.size);
+  });
+
+  test("anonymous (no Authorization header) behaves identically", async () => {
+    const r = await fetch(`${API}/data/${TEST_DATASET}/latest/manifest.json`, {
+      headers,
+    });
+    expect(r.status).toBe(200);
+  });
+
+  // ---------------------------------------------------------------------------
+  // Phase 2 (#496): metadata.json sibling endpoint
+  // ---------------------------------------------------------------------------
+
+  test("metadata.json returns a neuroschema-shaped dataset document", async () => {
+    const r = await fetch(`${API}/data/${TEST_DATASET}/metadata.json`, { headers });
+    expect(r.status).toBe(200);
+    expect(r.headers.get("content-type")).toContain("application/json");
+    expect(r.headers.get("cache-control")).toContain("max-age=60");
+
+    const body = (await r.json()) as {
+      schema_version: string;
+      doc_type: string;
+      dataset_id: string;
+      source: string;
+      authors: Array<{ name: string }>;
+      versions?: unknown;
+      extensions: {
+        nemar: {
+          versions: Array<{ version: string; doi: string; manifest_url: string }>;
+          bids_index: { version: string; subjects: Record<string, unknown> } | null;
+          pipeline_stage: string | null;
+        };
+      };
+    };
+
+    expect(body.schema_version).toBe("0.3.0");
+    expect(body.doc_type).toBe("dataset");
+    expect(body.dataset_id).toBe(TEST_DATASET);
+    expect(body.source).toBe("nemar");
+    expect(Array.isArray(body.authors)).toBe(true);
+    expect(body.extensions.nemar.versions.length).toBeGreaterThan(0);
+    // version field is always tag-form (v-prefixed) on the wire.
+    expect(body.extensions.nemar.versions[0].version).toMatch(/^v\d+\.\d+\.\d+$/);
+    expect(body.extensions.nemar.versions[0].manifest_url).toBe(
+      `/${TEST_DATASET}/${body.extensions.nemar.versions[0].version}/manifest.json`,
+    );
+  });
+
+  test("metadata.json 404s for unknown datasets without leaking existence", async () => {
+    const r = await fetch(`${API}/data/nm999000/metadata.json`, { headers });
+    expect(r.status).toBe(404);
+    const body = (await r.json()) as { error: string };
+    expect(body.error).toBe("Dataset not found");
+  });
+
+  // ---------------------------------------------------------------------------
+  // Phase 3 (#497): sitemap landing page + tombstone 404s
+  // ---------------------------------------------------------------------------
+
+  test("dataset root: default Accept yields JSON with versions array", async () => {
+    // curl-like default (no Accept). The route picks JSON, surfacing the
+    // version list machine-readably without requiring an explicit
+    // ?format=json on the URL.
+    const r = await fetch(`${API}/data/${TEST_DATASET}`, { headers, redirect: "manual" });
+    expect(r.status).toBe(200);
+    expect(r.headers.get("content-type")).toContain("application/json");
+    const body = (await r.json()) as {
+      dataset_id: string;
+      latest: string | null;
+      metadata_url: string;
+      versions: Array<{
+        version: string;
+        manifest_url: string;
+        browse_url: string;
+        doi: string | null;
+        created_at: string | null;
+      }>;
+    };
+    expect(body.dataset_id).toBe(TEST_DATASET);
+    expect(body.versions.length).toBeGreaterThan(0);
+    expect(body.latest).toBe(body.versions[0].version);
+    expect(body.metadata_url).toBe(`/${TEST_DATASET}/metadata.json`);
+    expect(body.versions[0].manifest_url).toMatch(/^\/.*\/manifest\.json$/);
+  });
+
+  test("dataset root: ?format=json overrides browser Accept", async () => {
+    const r = await fetch(`${API}/data/${TEST_DATASET}?format=json`, {
+      headers: { ...headers, Accept: "text/html" },
+      redirect: "manual",
+    });
+    expect(r.status).toBe(200);
+    expect(r.headers.get("content-type")).toContain("application/json");
+  });
+
+  test("HTML index page includes the 'all versions' footer link", async () => {
+    const r = await fetch(`${API}/data/${TEST_DATASET}/latest/`, {
+      headers: { ...headers, Accept: "text/html" },
+    });
+    expect(r.status).toBe(200);
+    const body = await r.text();
+    expect(body).toContain(`href="/${TEST_DATASET}/"`);
+    expect(body).toContain("all versions");
+  });
+
+  test("nonexistent file path returns 404 JSON with no tombstone fields", async () => {
+    // sub-zz/never.edf has never existed in any version -> no tombstone.
+    const r = await fetchNoRedirect(`/data/${TEST_DATASET}/latest/sub-zz/never.edf`);
+    expect(r.status).toBe(404);
+    expect(r.headers.get("content-type")).toContain("application/json");
+    const body = (await r.json()) as {
+      error: string;
+      version?: string;
+      path?: string;
+      reason?: string;
+      last_seen_version?: string;
+    };
+    expect(body.error).toBe("File not found");
+    // version/path are always echoed so a JSON consumer doesn't need to
+    // re-parse the request URL to know what it asked for.
+    expect(body.version).toBeTruthy();
+    expect(body.path).toBe("sub-zz/never.edf");
+    expect(body.reason).toBeUndefined();
+    expect(body.last_seen_version).toBeUndefined();
+  });
+
+  test("nonexistent file path with Accept: text/html returns an HTML 404", async () => {
+    const r = await fetchNoRedirect(`/data/${TEST_DATASET}/latest/sub-zz/never.edf`);
+    // Re-issue with the right Accept header (fetchNoRedirect doesn't take one).
+    const html = await fetch(`${API}/data/${TEST_DATASET}/latest/sub-zz/never.edf`, {
+      headers: { ...headers, Accept: "text/html" },
+      redirect: "manual",
+    });
+    expect(r.status).toBe(404);
+    expect(html.status).toBe(404);
+    expect(html.headers.get("content-type")).toContain("text/html");
+    const body = await html.text();
+    expect(body).toContain("404");
+    expect(body).toContain("all versions");
+  });
+
+  // Tombstone E2E (reason: "removed") requires nm099999 to have at least
+  // two published versions where the second drops a path the first had.
+  // The standard e2e-test fixture is a single-version reset, so we skip
+  // this test when the precondition isn't met. Cross-referenced with the
+  // unit-test fixture in `multiVersionFixtures` which covers the same
+  // branch with hand-built manifests.
+  test("tombstone 404 (when fixture supports it)", async () => {
+    const manResp = await fetch(`${API}/data/${TEST_DATASET}/manifest`, { headers });
+    const list = (await manResp.json()) as { versions?: string[] };
+    if (!list.versions || list.versions.length < 2) {
+      console.log(`[skip] tombstone E2E: ${TEST_DATASET} needs >=2 versions, has ${list.versions?.length ?? 0}`);
+      return;
+    }
+    // Find a path present in v[N-1] but absent in v[N] = "latest".
+    const olderTag = list.versions[1].startsWith("v") ? list.versions[1] : `v${list.versions[1]}`;
+    const olderMan = await fetch(`${API}/data/${TEST_DATASET}/${olderTag}/manifest.json`, { headers });
+    if (!olderMan.ok) return;
+    const olderEntries = (await olderMan.json()) as Array<{ path: string }>;
+    const latestMan = await fetch(`${API}/data/${TEST_DATASET}/latest/manifest.json`, { headers });
+    if (!latestMan.ok) return;
+    const latestPaths = new Set(((await latestMan.json()) as Array<{ path: string }>).map((e) => e.path));
+    const removed = olderEntries.find((e) => !latestPaths.has(e.path));
+    if (!removed) {
+      console.log("[skip] tombstone E2E: no path was removed between latest and prior version");
+      return;
+    }
+    const r = await fetchNoRedirect(`/data/${TEST_DATASET}/latest/${removed.path}`);
+    expect(r.status).toBe(404);
+    const body = (await r.json()) as { error: string; reason?: string; last_seen_version?: string; last_seen_url?: string };
+    expect(body.reason).toBe("removed");
+    expect(body.last_seen_version).toBeTruthy();
+    expect(body.last_seen_url).toContain(removed.path);
+  });
+
+  // ---------------------------------------------------------------------------
+  // Phase 4 (#498): rclone-compatible HEAD + metadata headers on file responses
+  // ---------------------------------------------------------------------------
+
+  test("HEAD on a file returns 200 with size, mtime, ETag, no body", async () => {
+    const manResp = await fetch(`${API}/data/${TEST_DATASET}/latest/manifest.json`, { headers });
+    const entries = (await manResp.json()) as Array<{
+      path: string;
+      size: number;
+      url: string | null;
+    }>;
+    const target =
+      entries.find((e) => e.path.endsWith("dataset_description.json") && e.url !== null) ??
+      entries.find((e) => e.url !== null);
+    expect(target).toBeDefined();
+    if (!target) return;
+
+    const head = await fetch(`${API}/data/${TEST_DATASET}/latest/${target.path}`, {
+      method: "HEAD",
+      headers,
+      redirect: "manual",
+    });
+    expect(head.status).toBe(200);
+    expect(head.headers.get("content-length")).toBe(String(target.size));
+    const lastModified = head.headers.get("last-modified");
+    expect(lastModified).toBeTruthy();
+    if (lastModified) {
+      // RFC 1123 dates parse cleanly via the Date constructor.
+      expect(Number.isNaN(new Date(lastModified).getTime())).toBe(false);
+    }
+    const etag = head.headers.get("etag");
+    expect(etag).toBeTruthy();
+    // Manifest checksum is "sha256:<hex>" / "md5:<hex>" / "sha1:<hex>" / "git:<sha>"; quoted per RFC 7232.
+    if (etag) expect(etag).toMatch(/^"(?:sha256:|md5:|sha1:|git:)/);
+    const buf = await head.arrayBuffer();
+    expect(buf.byteLength).toBe(0);
+  });
+
+  test("HEAD on a directory returns 200 with text/html, no body", async () => {
+    const head = await fetch(`${API}/data/${TEST_DATASET}/latest/`, {
+      method: "HEAD",
+      headers,
+    });
+    expect(head.status).toBe(200);
+    expect(head.headers.get("content-type")).toContain("text/html");
+    const buf = await head.arrayBuffer();
+    expect(buf.byteLength).toBe(0);
+  });
+
+  test("HEAD on a missing path returns 404 with no tombstone body", async () => {
+    // Tombstone walk is intentionally skipped on HEAD so rclone sync
+    // against a divergent local copy doesn't fan out N manifest fetches
+    // per missing file. Response is just 404 with no body.
+    const head = await fetch(`${API}/data/${TEST_DATASET}/latest/sub-zz/never.edf`, {
+      method: "HEAD",
+      headers,
+    });
+    expect(head.status).toBe(404);
+    const buf = await head.arrayBuffer();
+    expect(buf.byteLength).toBe(0);
+  });
+
+  test("GET 302 on a file carries Last-Modified and ETag (Content-Length intentionally omitted)", async () => {
+    // RFC 9110 §8.6: Content-Length on a 302 describes the (empty)
+    // message body, not the redirect target. Carrying the file's size
+    // on a no-body redirect can confuse intermediaries that mis-frame
+    // the response. The S3 target's GET response carries Content-Length
+    // accurately. Last-Modified and ETag remain on the 302 -- both are
+    // valid on redirects per RFC 9110 §8.8 and let some clients skip
+    // the HEAD step entirely.
+    const manResp = await fetch(`${API}/data/${TEST_DATASET}/latest/manifest.json`, { headers });
+    const entries = (await manResp.json()) as Array<{
+      path: string;
+      size: number;
+      url: string | null;
+    }>;
+    const target = entries.find((e) => e.url !== null);
+    expect(target).toBeDefined();
+    if (!target) return;
+
+    const r = await fetch(`${API}/data/${TEST_DATASET}/latest/${target.path}`, {
+      headers,
+      redirect: "manual",
+    });
+    expect(r.status).toBe(302);
+    expect(r.headers.get("last-modified")).toBeTruthy();
+    expect(r.headers.get("etag")).toBeTruthy();
+    expect(r.headers.get("location")).toBeTruthy();
+  });
+});
