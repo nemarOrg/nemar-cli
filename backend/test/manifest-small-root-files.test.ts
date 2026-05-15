@@ -64,7 +64,7 @@ describe("generateManifest — small root file handling (issue #509)", () => {
       size: 432,
       checksum: "git:sha-readme",
     });
-    expect(m.files["CHANGES"].key).toBe("git:sha-changes");
+    expect(m.files.CHANGES.key).toBe("git:sha-changes");
     expect(m.files[".gitattributes"].key).toBe("git:sha-gitattrs");
 
     // Annex pointer resolves to its parsed key
