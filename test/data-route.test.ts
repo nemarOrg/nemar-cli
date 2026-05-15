@@ -166,4 +166,48 @@ describe("data.nemar.org route (epic #449, phase 1)", async () => {
     });
     expect(r.status).toBe(200);
   });
+
+  // ---------------------------------------------------------------------------
+  // Phase 2 (#496): metadata.json sibling endpoint
+  // ---------------------------------------------------------------------------
+
+  test("metadata.json returns a neuroschema-shaped dataset document", async () => {
+    const r = await fetch(`${API}/data/${TEST_DATASET}/metadata.json`, { headers });
+    expect(r.status).toBe(200);
+    expect(r.headers.get("content-type")).toContain("application/json");
+    expect(r.headers.get("cache-control")).toContain("max-age=60");
+
+    const body = (await r.json()) as {
+      schema_version: string;
+      doc_type: string;
+      dataset_id: string;
+      source: string;
+      authors: Array<{ name: string }>;
+      versions?: unknown;
+      extensions: {
+        nemar: {
+          versions: Array<{ version: string; doi: string; manifest_url: string }>;
+          bids_index: { version: string; subjects: Record<string, unknown> } | null;
+          pipeline_stage: string | null;
+        };
+      };
+    };
+
+    expect(body.schema_version).toBe("0.3.0");
+    expect(body.doc_type).toBe("dataset");
+    expect(body.dataset_id).toBe(TEST_DATASET);
+    expect(body.source).toBe("nemar");
+    expect(Array.isArray(body.authors)).toBe(true);
+    expect(body.extensions.nemar.versions.length).toBeGreaterThan(0);
+    expect(body.extensions.nemar.versions[0].manifest_url).toBe(
+      `/${TEST_DATASET}/v${body.extensions.nemar.versions[0].version.replace(/^v/, "")}/manifest.json`,
+    );
+  });
+
+  test("metadata.json 404s for unknown datasets without leaking existence", async () => {
+    const r = await fetch(`${API}/data/nm999000/metadata.json`, { headers });
+    expect(r.status).toBe(404);
+    const body = (await r.json()) as { error: string };
+    expect(body.error).toBe("Dataset not found");
+  });
 });

@@ -11,14 +11,21 @@ import "./setup";
 
 import {
   VERSION_TAG_RE,
+  buildBidsIndex,
+  buildDatasetMetadata,
+  buildPersonList,
   buildRedirectUrl,
+  type DatasetRowForMetadata,
+  deriveSessions,
   escapeHtml,
+  formatBytes,
   humanSize,
   renderIndexHtml,
   resolveFile,
   resolveVersion,
 } from "../backend/src/services/data-router";
-import type { VersionManifest } from "../backend/src/services/manifest";
+import type { ManifestFile, VersionManifest } from "../backend/src/services/manifest";
+import type { NemarMetadataV1, NemarMetadataV2 } from "../shared/datacite-constants";
 
 function fixture(): VersionManifest {
   return {
@@ -378,5 +385,418 @@ describe("renderIndexHtml", () => {
       entries: [{ kind: "file", name: "a&b?c#d.txt", size: 1 }],
     });
     expect(html).toContain('href="a%26b%3Fc%23d.txt"');
+  });
+});
+
+// ===========================================================================
+// metadata.json builders (epic #449 phase 2)
+// ===========================================================================
+
+function manifestFile(key: string, size = 100): ManifestFile {
+  return { key, size, checksum: key };
+}
+
+function emptyRow(): DatasetRowForMetadata {
+  return {
+    dataset_id: "nm099999",
+    name: "Test Dataset",
+    description: null,
+    github_repo: null,
+    concept_doi: null,
+    modalities: null,
+    subject_count: null,
+    age_min: null,
+    age_max: null,
+    file_size: null,
+    total_files: null,
+    tasks: null,
+  };
+}
+
+describe("formatBytes", () => {
+  test("null in, null out", () => {
+    expect(formatBytes(null)).toBeNull();
+  });
+  test("renders human-readable units across three precision tiers", () => {
+    expect(formatBytes(0)).toBe("0 B");
+    expect(formatBytes(512)).toBe("512 B");
+    // < 10 -> 2 decimals
+    expect(formatBytes(1024)).toBe("1.00 KB");
+    expect(formatBytes(2048)).toBe("2.00 KB");
+    expect(formatBytes(1024 ** 2)).toBe("1.00 MB");
+    expect(formatBytes(1024 ** 3 * 1.5)).toBe("1.50 GB");
+    // [10, 100) -> 1 decimal
+    expect(formatBytes(1024 ** 3 * 12.345)).toBe("12.3 GB");
+    expect(formatBytes(1024 ** 2 * 99.5)).toBe("99.5 MB");
+    // >= 100 -> 0 decimals
+    expect(formatBytes(1024 ** 2 * 450)).toBe("450 MB");
+    expect(formatBytes(1024 ** 3 * 150)).toBe("150 GB");
+  });
+  test("guards bad inputs", () => {
+    expect(formatBytes(-1)).toBeNull();
+    expect(formatBytes(Number.NaN)).toBeNull();
+    expect(formatBytes(Number.POSITIVE_INFINITY)).toBeNull();
+  });
+});
+
+describe("buildPersonList", () => {
+  test("null enrichment -> empty list", () => {
+    expect(buildPersonList(null)).toEqual([]);
+  });
+
+  test("v2: map keyed by name -> Person array with affiliations", () => {
+    const meta: NemarMetadataV2 = {
+      version: "2.0",
+      authors: {
+        "Doe, Jane": {
+          orcid: "https://orcid.org/0000-0001-2345-6789",
+          affiliations: [
+            { name: "Acme University", identifier: "https://ror.org/abc", scheme: "ROR" },
+          ],
+        },
+        "Smith, John": {},
+      },
+    };
+    const people = buildPersonList(meta);
+    expect(people).toHaveLength(2);
+    const jane = people.find((p) => p.name === "Doe, Jane");
+    expect(jane?.orcid).toBe("https://orcid.org/0000-0001-2345-6789");
+    expect(jane?.affiliations).toEqual([
+      { name: "Acme University", identifier: "https://ror.org/abc", scheme: "ROR" },
+    ]);
+    const john = people.find((p) => p.name === "Smith, John");
+    expect(john?.orcid).toBeUndefined();
+    expect(john?.affiliations).toBeUndefined();
+    expect(john?.name_type).toBe("Personal");
+  });
+
+  test("v1: singular affiliation string lifts to affiliations[]", () => {
+    const meta: NemarMetadataV1 = {
+      version: "1.0",
+      authors: {
+        "Doe, Jane": { orcid: "0000-0001-2345-6789", affiliation: "Acme University" },
+      },
+    };
+    const people = buildPersonList(meta);
+    expect(people).toEqual([
+      {
+        name: "Doe, Jane",
+        name_type: "Personal",
+        orcid: "0000-0001-2345-6789",
+        affiliations: [{ name: "Acme University" }],
+      },
+    ]);
+  });
+});
+
+describe("buildBidsIndex", () => {
+  test("empty manifest -> empty subjects map", () => {
+    expect(buildBidsIndex({})).toEqual({});
+  });
+
+  test("single subject without session", () => {
+    const files = {
+      "sub-01/eeg/sub-01_task-rest_eeg.edf": manifestFile("SHA256E-s1--a.edf"),
+    };
+    expect(buildBidsIndex(files)).toEqual({
+      "sub-01": {
+        sessions: [],
+        modalities: { eeg: { tasks: { rest: { runs: [] } } } },
+      },
+    });
+  });
+
+  test("multi-session, multi-modality, multi-run, sorted output", () => {
+    const files = {
+      "sub-01/ses-baseline/eeg/sub-01_ses-baseline_task-rest_run-02_eeg.edf": manifestFile(
+        "SHA256E-s1--a.edf",
+      ),
+      "sub-01/ses-baseline/eeg/sub-01_ses-baseline_task-rest_run-01_eeg.edf": manifestFile(
+        "SHA256E-s2--b.edf",
+      ),
+      "sub-01/ses-followup/emg/sub-01_ses-followup_task-grip_emg.edf": manifestFile(
+        "SHA256E-s3--c.edf",
+      ),
+      "sub-02/ses-baseline/eeg/sub-02_ses-baseline_task-rest_eeg.edf": manifestFile(
+        "SHA256E-s4--d.edf",
+      ),
+    };
+    const idx = buildBidsIndex(files);
+    expect(Object.keys(idx)).toEqual(["sub-01", "sub-02"]);
+    expect(idx["sub-01"].sessions).toEqual(["baseline", "followup"]);
+    expect(Object.keys(idx["sub-01"].modalities)).toEqual(["eeg", "emg"]);
+    expect(idx["sub-01"].modalities.eeg.tasks.rest.runs).toEqual(["01", "02"]);
+    expect(idx["sub-01"].modalities.emg.tasks.grip.runs).toEqual([]);
+  });
+
+  test("non-BIDS paths skipped silently", () => {
+    const files = {
+      "README.md": manifestFile("git:abc"),
+      "dataset_description.json": manifestFile("git:def"),
+      "derivatives/preproc/sub-01/eeg/sub-01_task-rest_eeg.set": manifestFile("git:ghi"),
+      "code/run.sh": manifestFile("git:jkl"),
+      "sub-01/eeg/sub-01_task-rest_eeg.edf": manifestFile("SHA256E-s1--a.edf"),
+    };
+    const idx = buildBidsIndex(files);
+    expect(Object.keys(idx)).toEqual(["sub-01"]);
+    expect(idx["sub-01"].modalities.eeg.tasks.rest).toBeDefined();
+  });
+
+  test("sidecar JSON contributes to the index", () => {
+    const files = {
+      "sub-01/eeg/sub-01_task-rest_eeg.edf": manifestFile("SHA256E-s1--a.edf"),
+      "sub-01/eeg/sub-01_task-rest_eeg.json": manifestFile("git:abc"),
+      "sub-01/eeg/sub-01_task-rest_channels.tsv": manifestFile("git:def"),
+    };
+    const idx = buildBidsIndex(files);
+    expect(idx["sub-01"].modalities.eeg.tasks.rest.runs).toEqual([]);
+  });
+
+  test("task-less files still register the subject and modality (anat, dwi)", () => {
+    // Valid BIDS for anatomy, diffusion, fieldmaps -- no `_task-` token but
+    // the subject must still appear in the index. The modality entry exists
+    // with an empty tasks map; the task-less file itself doesn't add a task.
+    const files = {
+      "sub-01/anat/sub-01_T1w.nii.gz": manifestFile("SHA256E-s1--a.nii.gz"),
+      "sub-01/dwi/sub-01_dwi.nii.gz": manifestFile("SHA256E-s2--b.nii.gz"),
+    };
+    const idx = buildBidsIndex(files);
+    expect(Object.keys(idx)).toEqual(["sub-01"]);
+    expect(idx["sub-01"].sessions).toEqual([]);
+    expect(idx["sub-01"].modalities.anat).toEqual({ tasks: {} });
+    expect(idx["sub-01"].modalities.dwi).toEqual({ tasks: {} });
+  });
+
+  test("subject-level sidecar (sub-01/sub-01_scans.tsv) registers the subject", () => {
+    const files = {
+      "sub-01/sub-01_scans.tsv": manifestFile("git:abc"),
+      "sub-01/eeg/sub-01_task-rest_eeg.edf": manifestFile("SHA256E-s1--a.edf"),
+    };
+    const idx = buildBidsIndex(files);
+    expect(idx["sub-01"].modalities.eeg.tasks.rest).toBeDefined();
+  });
+
+  test("mixed session and flat layouts under one subject", () => {
+    // Longitudinal datasets sometimes keep a cross-session anatomy scan at
+    // the subject root while task data lives under session dirs.
+    const files = {
+      "sub-01/anat/sub-01_T1w.nii.gz": manifestFile("SHA256E-s1--a.nii.gz"),
+      "sub-01/ses-baseline/eeg/sub-01_ses-baseline_task-rest_eeg.edf": manifestFile(
+        "SHA256E-s2--b.edf",
+      ),
+    };
+    const idx = buildBidsIndex(files);
+    expect(idx["sub-01"].sessions).toEqual(["baseline"]);
+    expect(Object.keys(idx["sub-01"].modalities).sort()).toEqual(["anat", "eeg"]);
+    expect(idx["sub-01"].modalities.eeg.tasks.rest).toBeDefined();
+  });
+});
+
+describe("deriveSessions", () => {
+  test("collects unique sorted session labels (without ses- prefix)", () => {
+    const files = {
+      "sub-01/ses-baseline/eeg/sub-01_ses-baseline_task-rest_eeg.edf": manifestFile("k"),
+      "sub-02/ses-baseline/eeg/sub-02_ses-baseline_task-rest_eeg.edf": manifestFile("k"),
+      "sub-01/ses-followup/eeg/sub-01_ses-followup_task-rest_eeg.edf": manifestFile("k"),
+    };
+    expect(deriveSessions(files)).toEqual(["baseline", "followup"]);
+  });
+  test("no sessions when no ses- segment", () => {
+    expect(
+      deriveSessions({ "sub-01/eeg/sub-01_task-rest_eeg.edf": manifestFile("k") }),
+    ).toEqual([]);
+  });
+});
+
+describe("buildDatasetMetadata", () => {
+  test("no enrichment, no versions -> identity + empty arrays", () => {
+    const out = buildDatasetMetadata({
+      row: emptyRow(),
+      parsedEnrichment: null,
+      versions: [],
+      latestManifest: null,
+      githubOrg: "nemarDatasets",
+    });
+    expect(out.schema_version).toBe("0.3.0");
+    expect(out.doc_type).toBe("dataset");
+    expect(out.dataset_id).toBe("nm099999");
+    expect(out.source).toBe("nemar");
+    expect(out.authors).toEqual([]);
+    expect(out.keywords).toEqual([]);
+    expect(out.recording_modality).toEqual([]);
+    expect(out.tasks).toEqual([]);
+    expect(out.datatypes).toEqual([]);
+    expect(out.sessions).toEqual([]);
+    expect(out.sessions_count).toBeNull();
+    expect(out.demographics).toBeNull();
+    expect(out.data_summary).toBeNull();
+    expect(out.extensions.nemar.versions).toEqual([]);
+    expect(out.extensions.nemar.bids_index).toBeNull();
+    expect(out.extensions.nemar.pipeline_stage).toBeNull();
+    expect(out.provenance).toEqual({ latest_snapshot: null, publish_date: null });
+  });
+
+  test("full v2 enrichment + versions + manifest -> populated payload", () => {
+    const row: DatasetRowForMetadata = {
+      ...emptyRow(),
+      name: "HD-sEMG",
+      description: "Hand gesture EMG",
+      github_repo: "nm099999",
+      concept_doi: "10.82901/NEMAR.nm099999",
+      modalities: "emg",
+      subject_count: 20,
+      age_min: 18,
+      age_max: 65,
+      file_size: 1024 * 1024 * 1024 * 2,
+      total_files: 640,
+      tasks: "flexion,extension",
+    };
+    const enrichment: NemarMetadataV2 = {
+      version: "2.0",
+      pipeline_stage: "validated",
+      description: "Hand gesture EMG (full)",
+      license: "ODC-By-1.0",
+      authors: {
+        "Liu, Xiangyu": {
+          orcid: "https://orcid.org/0009-0001-0000-0000",
+          affiliations: [{ name: "Fudan", identifier: "https://ror.org/x", scheme: "ROR" }],
+        },
+      },
+      keywords: [
+        { term: "EMG" },
+        { term: "Electromyography", subject_scheme: "MeSH", classification_code: "D004576" },
+      ],
+      related_identifiers: [
+        { identifier: "10.1038/s41597-021-00883-1", identifier_type: "DOI", relation_type: "IsDescribedBy" },
+      ],
+      funding_references: [
+        { funder_name: "National Science Foundation", award_number: "2030859" },
+      ],
+      contributors: [{ name: "NEMAR", name_type: "Organizational", contributor_type: "HostingInstitution" }],
+      dates: [{ date: "2026-02-17", date_type: "Issued" }],
+    };
+    const manifest: VersionManifest = {
+      dataset_id: "nm099999",
+      version: "1.0.0",
+      doi: "10.82901/NEMAR.nm099999.v1.0.0",
+      concept_doi: "10.82901/NEMAR.nm099999",
+      created: "2026-05-15T00:00:00Z",
+      files: {
+        "dataset_description.json": manifestFile("git:abc", 480),
+        "sub-01/emg/sub-01_task-flexion_run-01_emg.edf": manifestFile("SHA256E-s1--a.edf"),
+        "sub-01/emg/sub-01_task-extension_emg.edf": manifestFile("SHA256E-s2--b.edf"),
+      },
+    };
+    const out = buildDatasetMetadata({
+      row,
+      parsedEnrichment: enrichment,
+      versions: [
+        { version: "1.0.0", doi: "10.82901/NEMAR.nm099999.v1.0.0", created_at: "2026-05-15T00:00:00Z" },
+      ],
+      latestManifest: manifest,
+      githubOrg: "nemarDatasets",
+    });
+    expect(out.name).toBe("HD-sEMG");
+    // Catalog description from D1 takes precedence over enrichment.description
+    expect(out.description).toBe("Hand gesture EMG");
+    expect(out.license).toBe("ODC-By-1.0");
+    expect(out.recording_modality).toEqual(["EMG"]);
+    expect(out.datatypes).toEqual(["emg"]);
+    expect(out.tasks).toEqual(["flexion", "extension"]);
+    expect(out.authors[0].name).toBe("Liu, Xiangyu");
+    expect(out.keywords).toHaveLength(2);
+    expect(out.related_identifiers).toHaveLength(1);
+    expect(out.contributors).toHaveLength(1);
+    expect(out.dates).toHaveLength(1);
+    expect(out.funding[0].funder_name).toBe("National Science Foundation");
+    expect(out.rights).toEqual([
+      {
+        rights: "ODC-By-1.0",
+        rights_uri: null,
+        rights_identifier: "ODC-By-1.0",
+        rights_identifier_scheme: "SPDX",
+      },
+    ]);
+    expect(out.demographics).toEqual({ subjects_count: 20, age_min: 18, age_max: 65 });
+    expect(out.data_summary?.total_files).toBe(640);
+    expect(out.data_summary?.size_human).toBe("2.00 GB");
+    expect(out.external_links).toEqual({
+      dataset_doi: "10.82901/NEMAR.nm099999",
+      github_url: "https://github.com/nemarDatasets/nm099999",
+    });
+    expect(out.provenance).toEqual({
+      latest_snapshot: "1.0.0",
+      publish_date: "2026-05-15T00:00:00Z",
+    });
+    expect(out.extensions.nemar.versions[0]).toEqual({
+      version: "1.0.0",
+      doi: "10.82901/NEMAR.nm099999.v1.0.0",
+      created_at: "2026-05-15T00:00:00Z",
+      manifest_url: "/nm099999/v1.0.0/manifest.json",
+    });
+    expect(out.extensions.nemar.bids_index?.version).toBe("1.0.0");
+    expect(out.extensions.nemar.bids_index?.subjects["sub-01"]).toBeDefined();
+    expect(out.extensions.nemar.pipeline_stage).toBe("validated");
+  });
+
+  test("versions present but manifest fetch failed -> bids_index null, versions still listed", () => {
+    const out = buildDatasetMetadata({
+      row: { ...emptyRow(), modalities: "eeg", tasks: "rest" },
+      parsedEnrichment: null,
+      versions: [{ version: "1.0.0", doi: "doi:x", created_at: "2026-05-15T00:00:00Z" }],
+      latestManifest: null,
+      githubOrg: "nemarDatasets",
+    });
+    expect(out.extensions.nemar.versions).toHaveLength(1);
+    expect(out.extensions.nemar.bids_index).toBeNull();
+    expect(out.sessions).toEqual([]);
+    expect(out.sessions_count).toBeNull();
+    expect(out.provenance.latest_snapshot).toBe("1.0.0");
+  });
+
+  test("v1 enrichment has no license -> license null, rights empty", () => {
+    const v1: NemarMetadataV1 = {
+      version: "1.0",
+      description: "v1 era",
+      authors: { "Doe, Jane": { orcid: "abc" } },
+    };
+    const out = buildDatasetMetadata({
+      row: emptyRow(),
+      parsedEnrichment: v1,
+      versions: [],
+      latestManifest: null,
+      githubOrg: "nemarDatasets",
+    });
+    expect(out.license).toBeNull();
+    expect(out.rights).toEqual([]);
+    // Description still falls back to the v1 enrichment when D1 is null.
+    expect(out.description).toBe("v1 era");
+    expect(out.authors[0].name).toBe("Doe, Jane");
+  });
+
+  test("description fallback: D1 null + v2 enrichment populates -> uses enrichment", () => {
+    const v2: NemarMetadataV2 = {
+      version: "2.0",
+      description: "from enrichment",
+    };
+    const out = buildDatasetMetadata({
+      row: { ...emptyRow(), description: null },
+      parsedEnrichment: v2,
+      versions: [],
+      latestManifest: null,
+      githubOrg: "nemarDatasets",
+    });
+    expect(out.description).toBe("from enrichment");
+  });
+
+  test("absolute github_repo URL passes through; bare repo name expands", () => {
+    const out = buildDatasetMetadata({
+      row: { ...emptyRow(), github_repo: "https://github.com/other-org/nm099999" },
+      parsedEnrichment: null,
+      versions: [],
+      latestManifest: null,
+      githubOrg: "nemarDatasets",
+    });
+    expect(out.external_links.github_url).toBe("https://github.com/other-org/nm099999");
   });
 });
