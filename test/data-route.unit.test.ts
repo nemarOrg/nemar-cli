@@ -417,13 +417,19 @@ describe("formatBytes", () => {
   test("null in, null out", () => {
     expect(formatBytes(null)).toBeNull();
   });
-  test("renders human-readable units", () => {
+  test("renders human-readable units across three precision tiers", () => {
     expect(formatBytes(0)).toBe("0 B");
     expect(formatBytes(512)).toBe("512 B");
+    // < 10 -> 2 decimals
     expect(formatBytes(1024)).toBe("1.00 KB");
     expect(formatBytes(2048)).toBe("2.00 KB");
     expect(formatBytes(1024 ** 2)).toBe("1.00 MB");
     expect(formatBytes(1024 ** 3 * 1.5)).toBe("1.50 GB");
+    // [10, 100) -> 1 decimal
+    expect(formatBytes(1024 ** 3 * 12.345)).toBe("12.3 GB");
+    expect(formatBytes(1024 ** 2 * 99.5)).toBe("99.5 MB");
+    // >= 100 -> 0 decimals
+    expect(formatBytes(1024 ** 2 * 450)).toBe("450 MB");
     expect(formatBytes(1024 ** 3 * 150)).toBe("150 GB");
   });
   test("guards bad inputs", () => {
@@ -546,11 +552,43 @@ describe("buildBidsIndex", () => {
     expect(idx["sub-01"].modalities.eeg.tasks.rest.runs).toEqual([]);
   });
 
-  test("missing task token rejects the row", () => {
+  test("task-less files still register the subject and modality (anat, dwi)", () => {
+    // Valid BIDS for anatomy, diffusion, fieldmaps -- no `_task-` token but
+    // the subject must still appear in the index. The modality entry exists
+    // with an empty tasks map; the task-less file itself doesn't add a task.
     const files = {
-      "sub-01/eeg/sub-01_eeg.edf": manifestFile("SHA256E-s1--a.edf"),
+      "sub-01/anat/sub-01_T1w.nii.gz": manifestFile("SHA256E-s1--a.nii.gz"),
+      "sub-01/dwi/sub-01_dwi.nii.gz": manifestFile("SHA256E-s2--b.nii.gz"),
     };
-    expect(buildBidsIndex(files)).toEqual({});
+    const idx = buildBidsIndex(files);
+    expect(Object.keys(idx)).toEqual(["sub-01"]);
+    expect(idx["sub-01"].sessions).toEqual([]);
+    expect(idx["sub-01"].modalities.anat).toEqual({ tasks: {} });
+    expect(idx["sub-01"].modalities.dwi).toEqual({ tasks: {} });
+  });
+
+  test("subject-level sidecar (sub-01/sub-01_scans.tsv) registers the subject", () => {
+    const files = {
+      "sub-01/sub-01_scans.tsv": manifestFile("git:abc"),
+      "sub-01/eeg/sub-01_task-rest_eeg.edf": manifestFile("SHA256E-s1--a.edf"),
+    };
+    const idx = buildBidsIndex(files);
+    expect(idx["sub-01"].modalities.eeg.tasks.rest).toBeDefined();
+  });
+
+  test("mixed session and flat layouts under one subject", () => {
+    // Longitudinal datasets sometimes keep a cross-session anatomy scan at
+    // the subject root while task data lives under session dirs.
+    const files = {
+      "sub-01/anat/sub-01_T1w.nii.gz": manifestFile("SHA256E-s1--a.nii.gz"),
+      "sub-01/ses-baseline/eeg/sub-01_ses-baseline_task-rest_eeg.edf": manifestFile(
+        "SHA256E-s2--b.edf",
+      ),
+    };
+    const idx = buildBidsIndex(files);
+    expect(idx["sub-01"].sessions).toEqual(["baseline"]);
+    expect(Object.keys(idx["sub-01"].modalities).sort()).toEqual(["anat", "eeg"]);
+    expect(idx["sub-01"].modalities.eeg.tasks.rest).toBeDefined();
   });
 });
 
@@ -714,6 +752,41 @@ describe("buildDatasetMetadata", () => {
     expect(out.sessions).toEqual([]);
     expect(out.sessions_count).toBeNull();
     expect(out.provenance.latest_snapshot).toBe("1.0.0");
+  });
+
+  test("v1 enrichment has no license -> license null, rights empty", () => {
+    const v1: NemarMetadataV1 = {
+      version: "1.0",
+      description: "v1 era",
+      authors: { "Doe, Jane": { orcid: "abc" } },
+    };
+    const out = buildDatasetMetadata({
+      row: emptyRow(),
+      parsedEnrichment: v1,
+      versions: [],
+      latestManifest: null,
+      githubOrg: "nemarDatasets",
+    });
+    expect(out.license).toBeNull();
+    expect(out.rights).toEqual([]);
+    // Description still falls back to the v1 enrichment when D1 is null.
+    expect(out.description).toBe("v1 era");
+    expect(out.authors[0].name).toBe("Doe, Jane");
+  });
+
+  test("description fallback: D1 null + v2 enrichment populates -> uses enrichment", () => {
+    const v2: NemarMetadataV2 = {
+      version: "2.0",
+      description: "from enrichment",
+    };
+    const out = buildDatasetMetadata({
+      row: { ...emptyRow(), description: null },
+      parsedEnrichment: v2,
+      versions: [],
+      latestManifest: null,
+      githubOrg: "nemarDatasets",
+    });
+    expect(out.description).toBe("from enrichment");
   });
 
   test("absolute github_repo URL passes through; bare repo name expands", () => {

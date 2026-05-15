@@ -204,7 +204,7 @@ export function humanSize(bytes: number): string {
 }
 
 // ===========================================================================
-// metadata.json builders (epic #449 phase 2)
+// metadata.json builders
 //
 // Composes a neuroschema v0.3.0 `dataset` document from the catalog row in
 // D1, the parsed nemar_metadata.json enrichment payload, the dataset_versions
@@ -360,9 +360,17 @@ export interface DatasetVersionRow {
 }
 
 /**
- * Format bytes as a neuroschema-style `size_human` string (e.g. "1.15 GB",
- * "450 MB", "120 KB"). Distinct from `humanSize` which is a compact form
- * used by the HTML directory index. Null in, null out.
+ * Format bytes as a neuroschema-style `size_human` string. Distinct from
+ * `humanSize` which is a compact form used by the HTML directory index.
+ * Precision tiers, chosen to keep the human-readable string short while
+ * preserving useful resolution in the small-number tier:
+ *
+ *   value < 10   -> 2 decimals  ("1.15 GB",  "9.87 MB")
+ *   value < 100  -> 1 decimal   ("99.5 GB",  "12.3 MB")
+ *   value >= 100 -> 0 decimals  ("450 MB",   "150 GB")
+ *
+ * Null in, null out. Negative or non-finite input also returns null --
+ * callers receive an absent field rather than a noisy "0 B" placeholder.
  */
 export function formatBytes(bytes: number | null): string | null {
   if (bytes === null) return null;
@@ -375,7 +383,8 @@ export function formatBytes(bytes: number | null): string | null {
     value /= 1024;
     unit++;
   }
-  return `${value.toFixed(value >= 100 ? 0 : 2)} ${units[unit]}`;
+  const decimals = value >= 100 ? 0 : value >= 10 ? 1 : 2;
+  return `${value.toFixed(decimals)} ${units[unit]}`;
 }
 
 function splitCsv(value: string | null): string[] {
@@ -458,34 +467,44 @@ export function buildBidsIndex(
 
   for (const path of Object.keys(files)) {
     const parts = path.split("/");
-    if (parts.length < 3) continue;
+    if (parts.length < 2) continue;
     const subject = parts[0];
     if (!BIDS_SUB_RE.test(subject)) continue;
 
     let modalityIdx = 1;
     let sessionLabel: string | null = null;
-    if (BIDS_SES_RE.test(parts[1])) {
+    if (parts.length >= 3 && BIDS_SES_RE.test(parts[1])) {
       sessionLabel = parts[1].slice("ses-".length);
       modalityIdx = 2;
     }
-    if (modalityIdx >= parts.length - 1) continue;
-    const modality = parts[modalityIdx];
-    const filename = parts[parts.length - 1];
-    const taskMatch = filename.match(BIDS_TASK_TOKEN_RE);
-    if (!taskMatch) continue;
-    const task = taskMatch[1];
-    const runMatch = filename.match(BIDS_RUN_TOKEN_RE);
 
+    // Register the subject before considering modality/task. Task-less
+    // datatypes (anat, dwi, fmap) and session-level sidecars (sub-01_scans.tsv)
+    // are valid BIDS and the subject should still appear in the index even
+    // when the filename has no `_task-` token. The modalities map for such
+    // a subject can legitimately be empty.
     if (!acc[subject]) {
       acc[subject] = { sessions: new Set(), modalities: new Map() };
     }
     if (sessionLabel !== null) acc[subject].sessions.add(sessionLabel);
+
+    // No modality directory after the subject (or session) prefix -> the
+    // subject is registered but this path doesn't add a modality entry.
+    if (modalityIdx >= parts.length - 1) continue;
+    const modality = parts[modalityIdx];
+    const filename = parts[parts.length - 1];
+
     if (!acc[subject].modalities.has(modality)) {
       acc[subject].modalities.set(modality, new Map());
     }
     const tasksMap = acc[subject].modalities.get(modality);
     if (!tasksMap) continue;
+
+    const taskMatch = filename.match(BIDS_TASK_TOKEN_RE);
+    if (!taskMatch) continue;
+    const task = taskMatch[1];
     if (!tasksMap.has(task)) tasksMap.set(task, new Set());
+    const runMatch = filename.match(BIDS_RUN_TOKEN_RE);
     if (runMatch) tasksMap.get(task)?.add(runMatch[1]);
   }
 

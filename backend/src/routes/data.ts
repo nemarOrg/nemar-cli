@@ -1,5 +1,5 @@
 /**
- * data.nemar.org route (epic #449, phase 1).
+ * data.nemar.org route (epic #449).
  *
  * Public, anonymous HTTPS access to every published dataset, BIDS-shaped.
  * The same sub-app is reachable via two paths:
@@ -258,7 +258,13 @@ async function metadataJsonHandler(env: Bindings, datasetId: string): Promise<Re
     .bind(datasetId)
     .first<DatasetRowForMetadata & { enrichment_json: string | null }>();
   if (!row) {
-    // Race between the visibility check and the second SELECT (deletion mid-request).
+    // The visibility gate just succeeded, so a null here means the row was
+    // deleted (or replaced) between the two reads -- an infra anomaly worth
+    // surfacing so it can be correlated with deletion events / D1 replica
+    // lag, not a normal traffic pattern.
+    console.warn(
+      `[data] metadata.json: row disappeared after visibility gate dataset=${datasetId}`,
+    );
     return notFound("Dataset not found");
   }
 
@@ -274,7 +280,10 @@ async function metadataJsonHandler(env: Bindings, datasetId: string): Promise<Re
     try {
       parsedEnrichment = parseNemarMetadata(JSON.parse(row.enrichment_json));
     } catch (err) {
-      console.warn(
+      // Persistent data corruption (pipeline wrote invalid JSON), not a
+      // transient issue. Surface at error level so it shows up in any future
+      // exception-aggregation pipeline.
+      console.error(
         `[data] metadata.json: corrupt enrichment_json dataset=${datasetId}:`,
         err instanceof Error ? err.message : String(err),
       );
