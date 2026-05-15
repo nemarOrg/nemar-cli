@@ -668,13 +668,34 @@ function toDatasetFunding(entry: FundingReferenceEntry): DatasetFunding {
   };
 }
 
+/**
+ * Removed-file note rendered both in the directory-index footer ("files
+ * removed since vN-1") and inline in a tombstone 404 page ("last seen in
+ * vN-1 at this URL"). Same shape works for both because both answer the
+ * same question: "where did this file go?".
+ */
+export interface RemovedSinceNote {
+  lastSeenVersion: string;
+  // Names that disappeared at this directory between lastSeenVersion and
+  // the rendered version. Each name is rendered with a link to the same
+  // path under lastSeenVersion. Empty array suppresses the footer.
+  names: string[];
+}
+
+export interface VersionPickerEntry {
+  version: string;
+  isCurrent: boolean;
+}
+
 export function renderIndexHtml(args: {
   datasetId: string;
   version: string;
   path: string;
   entries: DirectoryEntry[];
+  availableVersions?: VersionPickerEntry[];
+  removedSinceNote?: RemovedSinceNote | null;
 }): string {
-  const { datasetId, version, path, entries } = args;
+  const { datasetId, version, path, entries, availableVersions, removedSinceNote } = args;
   const display = path === "" ? "/" : `/${path}/`;
   const title = `Index of /${datasetId}/${version}${display}`;
   const rows: string[] = [];
@@ -687,6 +708,18 @@ export function renderIndexHtml(args: {
     const size = e.kind === "dir" ? "-" : humanSize(e.size);
     rows.push(`<tr><td><a href="${href}">${label}</a></td><td class="size">${size}</td></tr>`);
   }
+
+  const idHref = encodeURIComponent(datasetId);
+  const versionPicker =
+    availableVersions && availableVersions.length > 1
+      ? renderVersionPicker(idHref, path, availableVersions)
+      : "";
+
+  const removedFooter =
+    removedSinceNote && removedSinceNote.names.length > 0
+      ? renderRemovedSinceFooter(idHref, path, removedSinceNote)
+      : "";
+
   return `<!doctype html>
 <html lang="en"><head>
 <meta charset="utf-8">
@@ -694,6 +727,9 @@ export function renderIndexHtml(args: {
 <style>
 body{font-family:ui-monospace,Menlo,Consolas,monospace;margin:1.5em;max-width:80em}
 h1{font-size:1.05em;margin-bottom:.8em}
+nav.versions{font-size:.9em;color:#555;margin-bottom:.8em}
+nav.versions a{margin-right:.6em}
+nav.versions .current{font-weight:bold;color:#000;margin-right:.6em}
 table{border-collapse:collapse;width:100%}
 td{padding:.15em .8em;vertical-align:top}
 td.size{text-align:right;color:#555;white-space:nowrap}
@@ -701,12 +737,316 @@ a{color:#06c;text-decoration:none}
 a:hover{text-decoration:underline}
 hr{margin-top:2em;border:0;border-top:1px solid #ccc}
 .foot{color:#888;font-size:.9em}
+details.removed{margin-top:1em;color:#555;font-size:.9em}
+details.removed summary{cursor:pointer}
+details.removed ul{margin:.4em 0 0;padding-left:1.2em}
 </style>
 </head><body>
 <h1>${escapeHtml(title)}</h1>
-<table>${rows.join("")}</table>
+${versionPicker}<table>${rows.join("")}</table>
+${removedFooter}<hr>
+<div class="foot">data.nemar.org &middot; <a href="manifest.json">manifest.json</a> &middot; <a href="/${idHref}/">all versions</a></div>
+</body></html>
+`;
+}
+
+/**
+ * Sibling-link version picker rendered above the directory table.
+ *
+ * Sibling links (not a <select>) keep the picker readable without
+ * JS and match the Apache-style table the rest of the page uses.
+ * Each link rewrites the version segment while preserving the
+ * current sub-path, so switching versions on a deeply-nested
+ * directory lands the user on the same directory in the chosen
+ * version (or a 404 with a tombstone if that path doesn't exist
+ * there -- which is exactly the signal the user wants).
+ */
+function renderVersionPicker(
+  idHref: string,
+  path: string,
+  versions: VersionPickerEntry[],
+): string {
+  // path is already a normalized BIDS path (no leading/trailing slashes).
+  // encodeURI preserves slashes between segments; the segments themselves
+  // come from manifest keys which are tightly constrained by BIDS naming.
+  const subPath = path === "" ? "" : `${encodeURI(path)}/`;
+  const items = versions
+    .map((v) => {
+      const label = escapeHtml(v.version);
+      if (v.isCurrent) return `<span class="current">${label}</span>`;
+      const href = `/${idHref}/${encodeURIComponent(v.version)}/${subPath}`;
+      return `<a href="${href}">${label}</a>`;
+    })
+    .join("");
+  return `<nav class="versions"><span>version:</span> ${items}</nav>\n`;
+}
+
+/**
+ * "Files removed since vN-1" footer rendered below the directory table.
+ *
+ * Each removed name links to the same name under the prior version, so
+ * the user can immediately fetch the file from the version where it
+ * still exists. Names are HTML-escaped and the href segments are
+ * percent-encoded for the same reason as the directory table.
+ */
+function renderRemovedSinceFooter(
+  idHref: string,
+  path: string,
+  note: RemovedSinceNote,
+): string {
+  const prevVersion = encodeURIComponent(note.lastSeenVersion);
+  const subPath = path === "" ? "" : `${encodeURI(path)}/`;
+  const items = note.names
+    .map((name) => {
+      const href = `/${idHref}/${prevVersion}/${subPath}${encodeURIComponent(name)}`;
+      return `<li><a href="${href}">${escapeHtml(name)}</a></li>`;
+    })
+    .join("");
+  return `<details class="removed"><summary>Files removed since ${escapeHtml(note.lastSeenVersion)} (${note.names.length})</summary><ul>${items}</ul></details>\n`;
+}
+
+/**
+ * Maximum number of older versions to consult when searching for the
+ * last version where a removed path existed. Bounds the worst-case
+ * fan-out of a 404: one D1 + S3 manifest fetch per version walked.
+ *
+ * The cap exists because tombstone responses are UX hinting, not
+ * exhaustive provenance -- if a file hasn't existed in the most recent
+ * 10 versions, telling the user "we don't know" (`reason: "not_found"`)
+ * is a better answer than "we burned 30 manifest fetches to find your
+ * answer". The /<id>/ landing page lists every version anyway, so a
+ * determined user can still find an old file by browsing.
+ */
+export const TOMBSTONE_LOOKBACK = 10;
+
+/**
+ * Walk older published versions newest-first looking for the first
+ * version that contains `path` (exact match). Returns the version tag
+ * (with leading `v`) on first hit, or null after the lookback cap.
+ *
+ * `loadManifest` is injected so the unit tests can hand in a Map-backed
+ * stub (per repo policy: no mocked S3 clients). At runtime it's the
+ * same `loadManifest` from routes/data.ts.
+ *
+ * `olderVersions` MUST be ordered newest-first. The caller is responsible
+ * for filtering out the current version and only passing what's older.
+ */
+export async function findLastSeenVersion(args: {
+  path: string;
+  olderVersions: string[];
+  loadManifest: (version: string) => Promise<VersionManifest | null>;
+  lookback?: number;
+}): Promise<{ version: string } | null> {
+  const cap = args.lookback ?? TOMBSTONE_LOOKBACK;
+  const walk = args.olderVersions.slice(0, cap);
+  for (const v of walk) {
+    const manifest = await args.loadManifest(v);
+    if (!manifest) continue;
+    if (Object.hasOwn(manifest.files, args.path)) return { version: v };
+  }
+  return null;
+}
+
+/**
+ * Compare the directory listing at `path` under the rendered version
+ * against the same listing under `priorVersion`. Returns the names that
+ * existed in the prior version but are absent now. Used to populate the
+ * "Files removed since vN-1" footer on directory index pages.
+ *
+ * Only direct children are compared. Subdirectories that disappeared
+ * appear as `dir` names; files that disappeared appear as `file` names.
+ * That distinction is intentionally lost in the rendered footer (both
+ * are just names with hrefs) -- it doesn't add value to say "directory
+ * sub-99/ was removed" when the user can click through and see.
+ */
+export function diffRemovedSince(
+  currentEntries: DirectoryEntry[],
+  priorManifest: VersionManifest,
+  path: string,
+): string[] {
+  const prior = resolveFile(priorManifest, path);
+  if (prior.kind !== "directory") return [];
+  const currentNames = new Set(currentEntries.map((e) => e.name));
+  const removed: string[] = [];
+  for (const child of prior.children) {
+    if (!currentNames.has(child.name)) removed.push(child.name);
+  }
+  return removed.sort();
+}
+
+/**
+ * Decide JSON vs HTML for the response based on Accept header and
+ * optional ?format= override. Defaults to JSON: API consumers (curl
+ * piped to jq, eegdash-viewer's fetch) are the primary audience for
+ * 404 bodies and the dataset landing page; browsers explicitly
+ * request text/html so they get the HTML page.
+ *
+ * The `?format=` query parameter is the explicit override -- useful
+ * when a user wants the JSON shape from a browser tab.
+ */
+export function pickResponseFormat(args: {
+  accept: string | null;
+  formatParam: string | null;
+}): "html" | "json" {
+  if (args.formatParam === "json") return "json";
+  if (args.formatParam === "html") return "html";
+  // text/html in the Accept header (with any q-value) -> HTML. This
+  // matches what every browser sends. Anything else (application/json,
+  // */*, no header) -> JSON.
+  if (args.accept && /\btext\/html\b/.test(args.accept)) return "html";
+  return "json";
+}
+
+export interface LandingVersion {
+  version: string;
+  doi: string | null;
+  created_at: string | null;
+  manifest_url: string;
+  browse_url: string;
+}
+
+export interface LandingPayload {
+  dataset_id: string;
+  latest: string | null;
+  metadata_url: string;
+  versions: LandingVersion[];
+}
+
+/**
+ * Build the JSON-form payload returned by `/<id>/` when the client
+ * asks for JSON. The HTML page renders the same data; keeping both
+ * paths fed by one builder means the two response shapes can't drift.
+ */
+export function buildLandingPayload(args: {
+  datasetId: string;
+  versionRows: DatasetVersionRow[];
+}): LandingPayload {
+  const { datasetId, versionRows } = args;
+  const versions: LandingVersion[] = versionRows.map((row) => {
+    const tag = row.version.startsWith("v") ? row.version : `v${row.version}`;
+    return {
+      version: tag,
+      doi: row.doi ?? null,
+      created_at: row.created_at ?? null,
+      manifest_url: `/${datasetId}/${tag}/manifest.json`,
+      browse_url: `/${datasetId}/${tag}/`,
+    };
+  });
+  return {
+    dataset_id: datasetId,
+    latest: versions.length > 0 ? versions[0].version : null,
+    metadata_url: `/${datasetId}/metadata.json`,
+    versions,
+  };
+}
+
+/**
+ * Render the HTML form of the dataset landing page (`/<id>/`). Lists
+ * every published version with its DOI and creation date, plus links
+ * to the per-version browse page, manifest, and sibling metadata.json.
+ *
+ * The "no published versions yet" branch keeps the same chrome so a
+ * machine consumer that happens to fetch HTML still gets a well-formed
+ * page with the dataset id and the metadata.json pointer.
+ */
+export function renderDatasetLandingHtml(payload: LandingPayload): string {
+  const id = escapeHtml(payload.dataset_id);
+  const idHref = encodeURIComponent(payload.dataset_id);
+  const metaHref = escapeHtml(payload.metadata_url);
+  const rows = payload.versions
+    .map((v, i) => {
+      const tag = escapeHtml(v.version);
+      const tagHref = encodeURIComponent(v.version);
+      const browseHref = `/${idHref}/${tagHref}/`;
+      const manifestHref = `/${idHref}/${tagHref}/manifest.json`;
+      const created = v.created_at ? escapeHtml(v.created_at.slice(0, 10)) : "-";
+      const doiCell = v.doi
+        ? `<a href="https://doi.org/${escapeHtml(v.doi)}">${escapeHtml(v.doi)}</a>`
+        : "-";
+      const latestMark = i === 0 ? ' <span class="latest">(latest)</span>' : "";
+      return `<tr><td><a href="${browseHref}">${tag}/</a>${latestMark}</td><td>${created}</td><td>${doiCell}</td><td><a href="${manifestHref}">manifest.json</a></td></tr>`;
+    })
+    .join("");
+  const emptyNotice =
+    payload.versions.length === 0
+      ? `<p class="empty">No published versions yet. <a href="${metaHref}">metadata.json</a> may still be populated from the catalog row.</p>`
+      : "";
+  const table =
+    payload.versions.length === 0
+      ? ""
+      : `<table><thead><tr><th>version</th><th>published</th><th>DOI</th><th>files</th></tr></thead><tbody>${rows}</tbody></table>`;
+  const latestShortcut =
+    payload.latest !== null
+      ? `<p class="shortcut">Latest: <a href="/${idHref}/latest/">/${id}/latest/</a> &middot; <a href="/${idHref}/latest/manifest.json">latest manifest.json</a></p>`
+      : "";
+  return `<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8">
+<title>${id}</title>
+<style>
+body{font-family:ui-monospace,Menlo,Consolas,monospace;margin:1.5em;max-width:80em}
+h1{font-size:1.2em;margin-bottom:.4em}
+table{border-collapse:collapse;width:100%;margin-top:.6em}
+th,td{padding:.25em .8em;text-align:left;vertical-align:top;border-bottom:1px solid #eee}
+th{color:#555;font-weight:normal}
+a{color:#06c;text-decoration:none}
+a:hover{text-decoration:underline}
+.latest{color:#070;font-weight:bold}
+.shortcut{color:#333;font-size:.95em}
+.empty{color:#888}
+hr{margin-top:2em;border:0;border-top:1px solid #ccc}
+.foot{color:#888;font-size:.9em}
+</style>
+</head><body>
+<h1>${id}</h1>
+${latestShortcut}${emptyNotice}${table}
 <hr>
-<div class="foot">data.nemar.org &middot; <a href="manifest.json">manifest.json</a></div>
+<div class="foot">data.nemar.org &middot; <a href="${metaHref}">metadata.json</a></div>
+</body></html>
+`;
+}
+
+/**
+ * Render an HTML 404 page for a file path. When `lastSeen` is provided
+ * the page tells the user the version where the file last existed and
+ * links to that URL. Without `lastSeen` it's a generic friendly 404.
+ *
+ * Mirrors the visual style of renderIndexHtml so a user clicking
+ * around the directory tree experiences a coherent UI.
+ */
+export function renderTombstone404Html(args: {
+  datasetId: string;
+  version: string;
+  path: string;
+  lastSeen: { version: string; href: string } | null;
+}): string {
+  const { datasetId, version, path, lastSeen } = args;
+  const id = escapeHtml(datasetId);
+  const idHref = encodeURIComponent(datasetId);
+  const v = escapeHtml(version);
+  const p = escapeHtml(path);
+  const body = lastSeen
+    ? `<p>This file was removed between versions. It was last present in <strong>${escapeHtml(lastSeen.version)}</strong>:</p>
+<p><a href="${lastSeen.href}">${escapeHtml(lastSeen.href)}</a></p>`
+    : `<p>No file at this path in <strong>${v}</strong>, and no record of it in any recent version.</p>`;
+  return `<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8">
+<title>404 - ${id}/${v}/${p}</title>
+<style>
+body{font-family:ui-monospace,Menlo,Consolas,monospace;margin:1.5em;max-width:80em}
+h1{font-size:1.05em;margin-bottom:.8em}
+a{color:#06c;text-decoration:none}
+a:hover{text-decoration:underline}
+hr{margin-top:2em;border:0;border-top:1px solid #ccc}
+.foot{color:#888;font-size:.9em}
+</style>
+</head><body>
+<h1>404 &middot; ${id}/${v}/${p}</h1>
+${body}
+<p><a href="/${idHref}/">all versions of ${id}</a></p>
+<hr>
+<div class="foot">data.nemar.org</div>
 </body></html>
 `;
 }

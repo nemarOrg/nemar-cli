@@ -13,14 +13,21 @@ import {
   VERSION_TAG_RE,
   buildBidsIndex,
   buildDatasetMetadata,
+  buildLandingPayload,
   buildPersonList,
   buildRedirectUrl,
   type DatasetRowForMetadata,
+  type DatasetVersionRow,
   deriveSessions,
+  diffRemovedSince,
   escapeHtml,
+  findLastSeenVersion,
   formatBytes,
   humanSize,
+  pickResponseFormat,
+  renderDatasetLandingHtml,
   renderIndexHtml,
+  renderTombstone404Html,
   resolveFile,
   resolveVersion,
 } from "../backend/src/services/data-router";
@@ -798,5 +805,448 @@ describe("buildDatasetMetadata", () => {
       githubOrg: "nemarDatasets",
     });
     expect(out.external_links.github_url).toBe("https://github.com/other-org/nm099999");
+  });
+});
+
+// ===========================================================================
+// Phase 3 (#497): version picker, sitemap landing, tombstone 404s
+// ===========================================================================
+
+function multiVersionFixtures(): { v1: VersionManifest; v2: VersionManifest } {
+  const shared = {
+    "dataset_description.json": {
+      key: "git:shared",
+      size: 480,
+      checksum: "git:shared",
+    },
+    "sub-01/eeg/sub-01_task-rest_eeg.edf": {
+      key: "SHA256E-s100--a.edf",
+      size: 100,
+      checksum: "sha256:a",
+    },
+  };
+  return {
+    v1: {
+      dataset_id: "nm099999",
+      version: "1.0.0",
+      doi: null,
+      concept_doi: null,
+      created: "2026-01-01T00:00:00Z",
+      files: {
+        ...shared,
+        "sub-99/eeg/sub-99_task-rest_eeg.edf": {
+          key: "SHA256E-s200--b.edf",
+          size: 200,
+          checksum: "sha256:b",
+        },
+        "sub-99/eeg/sub-99_task-rest_eeg.json": {
+          key: "git:dropped",
+          size: 50,
+          checksum: "git:dropped",
+        },
+      },
+    },
+    v2: {
+      dataset_id: "nm099999",
+      version: "2.0.0",
+      doi: null,
+      concept_doi: null,
+      created: "2026-02-01T00:00:00Z",
+      files: {
+        ...shared,
+        "sub-02/eeg/sub-02_task-rest_eeg.edf": {
+          key: "SHA256E-s150--c.edf",
+          size: 150,
+          checksum: "sha256:c",
+        },
+      },
+    },
+  };
+}
+
+describe("findLastSeenVersion", () => {
+  test("returns the first older version that contains the path", async () => {
+    const { v1 } = multiVersionFixtures();
+    const loadManifest = async (v: string) => (v === "v1.0.0" ? v1 : null);
+    const hit = await findLastSeenVersion({
+      path: "sub-99/eeg/sub-99_task-rest_eeg.edf",
+      olderVersions: ["v1.0.0"],
+      loadManifest,
+    });
+    expect(hit).toEqual({ version: "v1.0.0" });
+  });
+
+  test("returns null when the path never existed in any older version", async () => {
+    const { v1 } = multiVersionFixtures();
+    const loadManifest = async (v: string) => (v === "v1.0.0" ? v1 : null);
+    const miss = await findLastSeenVersion({
+      path: "sub-zz/eeg/never.edf",
+      olderVersions: ["v1.0.0"],
+      loadManifest,
+    });
+    expect(miss).toBeNull();
+  });
+
+  test("walks newest-first, stops at the first hit (doesn't probe further)", async () => {
+    const { v1, v2 } = multiVersionFixtures();
+    const consulted: string[] = [];
+    const loadManifest = async (v: string) => {
+      consulted.push(v);
+      if (v === "v2.0.0") return v2;
+      if (v === "v1.0.0") return v1;
+      return null;
+    };
+    // Path exists in v2.0.0 (dataset_description.json is in shared) -> only v2 is consulted.
+    const hit = await findLastSeenVersion({
+      path: "dataset_description.json",
+      olderVersions: ["v2.0.0", "v1.0.0"],
+      loadManifest,
+    });
+    expect(hit).toEqual({ version: "v2.0.0" });
+    expect(consulted).toEqual(["v2.0.0"]);
+  });
+
+  test("respects the lookback cap and does not consult beyond it", async () => {
+    // 12-version chain; the path lives only in the oldest. With a cap of
+    // 10 the search should miss without ever loading the oldest manifest.
+    const consulted: string[] = [];
+    const versions = Array.from({ length: 12 }, (_, i) => `v${12 - i}.0.0`);
+    const oldest = versions[versions.length - 1];
+    const loadManifest = async (v: string): Promise<VersionManifest | null> => {
+      consulted.push(v);
+      if (v !== oldest) return { dataset_id: "x", version: v, doi: null, concept_doi: null, created: "", files: {} };
+      return {
+        dataset_id: "x",
+        version: v,
+        doi: null,
+        concept_doi: null,
+        created: "",
+        files: { "deep/ghost.txt": { key: "git:x", size: 1, checksum: "git:x" } },
+      };
+    };
+    const miss = await findLastSeenVersion({
+      path: "deep/ghost.txt",
+      olderVersions: versions,
+      loadManifest,
+      lookback: 10,
+    });
+    expect(miss).toBeNull();
+    expect(consulted).toHaveLength(10);
+    expect(consulted).not.toContain(oldest);
+  });
+
+  test("treats manifest fetch failures (null) as 'not present in that version' and continues", async () => {
+    const { v1 } = multiVersionFixtures();
+    const loadManifest = async (v: string) => {
+      if (v === "v2.0.0") return null;
+      if (v === "v1.0.0") return v1;
+      return null;
+    };
+    const hit = await findLastSeenVersion({
+      path: "sub-99/eeg/sub-99_task-rest_eeg.edf",
+      olderVersions: ["v2.0.0", "v1.0.0"],
+      loadManifest,
+    });
+    expect(hit).toEqual({ version: "v1.0.0" });
+  });
+});
+
+describe("diffRemovedSince", () => {
+  test("reports names present in prior but absent in current at the same path", () => {
+    const { v1 } = multiVersionFixtures();
+    // Current v2 root: only sub-01, sub-02, dataset_description.json (no sub-99/).
+    const currentChildren = [
+      { kind: "dir" as const, name: "sub-01" },
+      { kind: "dir" as const, name: "sub-02" },
+      { kind: "file" as const, name: "dataset_description.json", size: 480 },
+    ];
+    const removed = diffRemovedSince(currentChildren, v1, "");
+    expect(removed).toEqual(["sub-99"]);
+  });
+
+  test("returns empty when nothing changed (same listing)", () => {
+    const { v1 } = multiVersionFixtures();
+    const r1 = resolveFile(v1, "");
+    if (r1.kind !== "directory") throw new Error("fixture invariant");
+    const removed = diffRemovedSince(r1.children, v1, "");
+    expect(removed).toEqual([]);
+  });
+
+  test("returns empty when prior version doesn't have this path either", () => {
+    const { v2 } = multiVersionFixtures();
+    // Prior is v2 which has no sub-99/; checking that path returns empty.
+    const removed = diffRemovedSince([], v2, "sub-99/eeg");
+    expect(removed).toEqual([]);
+  });
+
+  test("sorts results alphabetically", () => {
+    const prior: VersionManifest = {
+      dataset_id: "nm099999",
+      version: "1.0.0",
+      doi: null,
+      concept_doi: null,
+      created: "",
+      files: {
+        "x/zeta.txt": { key: "git:z", size: 1, checksum: "git:z" },
+        "x/alpha.txt": { key: "git:a", size: 1, checksum: "git:a" },
+        "x/mid.txt": { key: "git:m", size: 1, checksum: "git:m" },
+      },
+    };
+    const removed = diffRemovedSince([], prior, "x");
+    expect(removed).toEqual(["alpha.txt", "mid.txt", "zeta.txt"]);
+  });
+});
+
+describe("pickResponseFormat", () => {
+  test("?format=json wins over Accept", () => {
+    expect(pickResponseFormat({ accept: "text/html", formatParam: "json" })).toBe("json");
+  });
+
+  test("?format=html wins over Accept", () => {
+    expect(pickResponseFormat({ accept: "application/json", formatParam: "html" })).toBe("html");
+  });
+
+  test("text/html in Accept (anywhere) -> html", () => {
+    expect(pickResponseFormat({ accept: "text/html", formatParam: null })).toBe("html");
+    expect(
+      pickResponseFormat({
+        accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        formatParam: null,
+      }),
+    ).toBe("html");
+  });
+
+  test("no Accept, no format param -> json (machine-default)", () => {
+    expect(pickResponseFormat({ accept: null, formatParam: null })).toBe("json");
+  });
+
+  test("application/json Accept -> json", () => {
+    expect(pickResponseFormat({ accept: "application/json", formatParam: null })).toBe("json");
+  });
+
+  test("'*/*' alone -> json (curl default)", () => {
+    expect(pickResponseFormat({ accept: "*/*", formatParam: null })).toBe("json");
+  });
+
+  test("unrecognized format param falls through to Accept", () => {
+    expect(pickResponseFormat({ accept: "text/html", formatParam: "xml" })).toBe("html");
+    expect(pickResponseFormat({ accept: null, formatParam: "xml" })).toBe("json");
+  });
+});
+
+describe("renderIndexHtml (Phase 3 extensions)", () => {
+  test("no availableVersions arg -> no version picker rendered (back-compat)", () => {
+    const html = renderIndexHtml({
+      datasetId: "nm099999",
+      version: "v1.0.0",
+      path: "",
+      entries: [{ kind: "dir", name: "sub-01" }],
+    });
+    expect(html).not.toContain('class="versions"');
+    expect(html).not.toContain('class="removed"');
+  });
+
+  test("single-version availableVersions does not render a picker", () => {
+    // Picker only adds value when there's somewhere to switch to.
+    const html = renderIndexHtml({
+      datasetId: "nm099999",
+      version: "v1.0.0",
+      path: "",
+      entries: [],
+      availableVersions: [{ version: "v1.0.0", isCurrent: true }],
+    });
+    expect(html).not.toContain('class="versions"');
+  });
+
+  test("multiple versions render the picker with the current version marked", () => {
+    const html = renderIndexHtml({
+      datasetId: "nm099999",
+      version: "v2.0.0",
+      path: "",
+      entries: [],
+      availableVersions: [
+        { version: "v2.0.0", isCurrent: true },
+        { version: "v1.0.0", isCurrent: false },
+      ],
+    });
+    expect(html).toContain('class="current">v2.0.0</span>');
+    expect(html).toContain('<a href="/nm099999/v1.0.0/">v1.0.0</a>');
+  });
+
+  test("picker preserves the current sub-path when switching versions", () => {
+    const html = renderIndexHtml({
+      datasetId: "nm099999",
+      version: "v2.0.0",
+      path: "sub-01/eeg",
+      entries: [],
+      availableVersions: [
+        { version: "v2.0.0", isCurrent: true },
+        { version: "v1.0.0", isCurrent: false },
+      ],
+    });
+    expect(html).toContain('<a href="/nm099999/v1.0.0/sub-01/eeg/">v1.0.0</a>');
+  });
+
+  test("removedSinceNote renders a details/summary footer with links to the prior version", () => {
+    const html = renderIndexHtml({
+      datasetId: "nm099999",
+      version: "v2.0.0",
+      path: "",
+      entries: [{ kind: "dir", name: "sub-01" }],
+      removedSinceNote: { lastSeenVersion: "v1.0.0", names: ["sub-99"] },
+    });
+    expect(html).toContain('<details class="removed">');
+    expect(html).toContain("Files removed since v1.0.0 (1)");
+    expect(html).toContain('<a href="/nm099999/v1.0.0/sub-99">sub-99</a>');
+  });
+
+  test("empty removedSinceNote.names suppresses the footer", () => {
+    const html = renderIndexHtml({
+      datasetId: "nm099999",
+      version: "v2.0.0",
+      path: "",
+      entries: [],
+      removedSinceNote: { lastSeenVersion: "v1.0.0", names: [] },
+    });
+    expect(html).not.toContain('class="removed"');
+  });
+
+  test("footer 'all versions' link points to /<id>/", () => {
+    const html = renderIndexHtml({
+      datasetId: "nm099999",
+      version: "v1.0.0",
+      path: "",
+      entries: [],
+    });
+    expect(html).toContain('<a href="/nm099999/">all versions</a>');
+  });
+
+  test("HTML-escapes the dataset id in the picker (defense in depth)", () => {
+    const html = renderIndexHtml({
+      datasetId: "nm099999",
+      version: "v1<bad>.0.0",
+      path: "",
+      entries: [],
+      availableVersions: [
+        { version: "v1<bad>.0.0", isCurrent: true },
+        { version: "v2.0.0", isCurrent: false },
+      ],
+    });
+    // Label is escaped in the current-version span.
+    expect(html).toContain("v1&lt;bad&gt;.0.0");
+    // No raw `<bad>` injected into the markup anywhere.
+    expect(html).not.toContain("<bad>");
+  });
+});
+
+describe("buildLandingPayload", () => {
+  test("normalizes bare versions to vX.Y.Z and builds canonical hrefs", () => {
+    const rows: DatasetVersionRow[] = [
+      { version: "2.0.0", doi: "10.0/v2", created_at: "2026-02-01T00:00:00Z" },
+      { version: "v1.0.0", doi: "10.0/v1", created_at: "2026-01-01T00:00:00Z" },
+    ];
+    const payload = buildLandingPayload({ datasetId: "nm099999", versionRows: rows });
+    expect(payload.dataset_id).toBe("nm099999");
+    expect(payload.latest).toBe("v2.0.0");
+    expect(payload.metadata_url).toBe("/nm099999/metadata.json");
+    expect(payload.versions).toHaveLength(2);
+    expect(payload.versions[0]).toEqual({
+      version: "v2.0.0",
+      doi: "10.0/v2",
+      created_at: "2026-02-01T00:00:00Z",
+      manifest_url: "/nm099999/v2.0.0/manifest.json",
+      browse_url: "/nm099999/v2.0.0/",
+    });
+    expect(payload.versions[1].version).toBe("v1.0.0");
+  });
+
+  test("empty version list -> latest=null and no rows", () => {
+    const payload = buildLandingPayload({ datasetId: "nm099999", versionRows: [] });
+    expect(payload.latest).toBeNull();
+    expect(payload.versions).toEqual([]);
+    expect(payload.metadata_url).toBe("/nm099999/metadata.json");
+  });
+});
+
+describe("renderDatasetLandingHtml", () => {
+  test("renders a row per version with browse, manifest, and DOI links", () => {
+    const payload = buildLandingPayload({
+      datasetId: "nm099999",
+      versionRows: [
+        { version: "v2.0.0", doi: "10.0/v2", created_at: "2026-02-01T00:00:00Z" },
+        { version: "v1.0.0", doi: "10.0/v1", created_at: "2026-01-01T00:00:00Z" },
+      ],
+    });
+    const html = renderDatasetLandingHtml(payload);
+    expect(html).toContain("<title>nm099999</title>");
+    expect(html).toContain('href="/nm099999/v2.0.0/"');
+    expect(html).toContain('href="/nm099999/v2.0.0/manifest.json"');
+    expect(html).toContain('href="https://doi.org/10.0/v2"');
+    expect(html).toContain("(latest)");
+    // Latest shortcut to /<id>/latest/
+    expect(html).toContain('href="/nm099999/latest/"');
+    // Created date trimmed to YYYY-MM-DD.
+    expect(html).toContain("2026-02-01");
+  });
+
+  test("empty version list -> 'no published versions' notice, no table", () => {
+    const html = renderDatasetLandingHtml(
+      buildLandingPayload({ datasetId: "nm099999", versionRows: [] }),
+    );
+    expect(html).toContain("No published versions yet");
+    expect(html).not.toContain("<table>");
+    // Latest shortcut is suppressed when there's no latest version.
+    expect(html).not.toContain('href="/nm099999/latest/"');
+  });
+
+  test("missing DOI renders '-' instead of a broken doi.org link", () => {
+    const html = renderDatasetLandingHtml(
+      buildLandingPayload({
+        datasetId: "nm099999",
+        versionRows: [{ version: "v1.0.0", doi: null as unknown as string, created_at: null as unknown as string }],
+      }),
+    );
+    expect(html).not.toContain("doi.org");
+  });
+});
+
+describe("renderTombstone404Html", () => {
+  test("with lastSeen renders the last-seen URL and version", () => {
+    const html = renderTombstone404Html({
+      datasetId: "nm099999",
+      version: "v2.0.0",
+      path: "sub-99/eeg/sub-99_task-rest_eeg.edf",
+      lastSeen: {
+        version: "v1.0.0",
+        href: "https://data.nemar.org/nm099999/v1.0.0/sub-99/eeg/sub-99_task-rest_eeg.edf",
+      },
+    });
+    expect(html).toContain("last present in <strong>v1.0.0</strong>");
+    expect(html).toContain(
+      "https://data.nemar.org/nm099999/v1.0.0/sub-99/eeg/sub-99_task-rest_eeg.edf",
+    );
+    expect(html).toContain('href="/nm099999/">all versions');
+  });
+
+  test("without lastSeen renders the generic 'no record' copy", () => {
+    const html = renderTombstone404Html({
+      datasetId: "nm099999",
+      version: "v2.0.0",
+      path: "sub-zz/never.edf",
+      lastSeen: null,
+    });
+    expect(html).toContain("no record of it in any recent version");
+    expect(html).not.toContain("last present in");
+  });
+
+  test("escapes hostile dataset/version/path inputs (defense in depth)", () => {
+    const html = renderTombstone404Html({
+      datasetId: "<bad>",
+      version: "<v>",
+      path: "<p>",
+      lastSeen: null,
+    });
+    expect(html).not.toContain("<bad>");
+    expect(html).toContain("&lt;bad&gt;");
   });
 });

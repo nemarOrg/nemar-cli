@@ -16,10 +16,16 @@ import {
   type DatasetRowForMetadata,
   type DatasetVersionRow,
   type PublicManifestEntry,
+  type VersionPickerEntry,
   buildDatasetMetadata,
+  buildLandingPayload,
   buildRedirectUrl,
-  escapeHtml,
+  diffRemovedSince,
+  findLastSeenVersion,
+  pickResponseFormat,
+  renderDatasetLandingHtml,
   renderIndexHtml,
+  renderTombstone404Html,
   resolveFile,
   resolveVersion,
 } from "../services/data-router";
@@ -98,11 +104,63 @@ async function loadManifest(
   return parsed as VersionManifest;
 }
 
-function notFound(message = "Not found") {
-  return new Response(JSON.stringify({ error: message }), {
+/**
+ * Tombstone payload attached to a 404 when a path existed in an older
+ * version but not in the requested one. Surfaces the last version that
+ * still served the file so the client (or eegdash-viewer, or curl) can
+ * follow up without crawling every version manifest.
+ */
+interface TombstonePayload {
+  reason: "removed";
+  last_seen_version: string;
+  last_seen_url: string;
+}
+
+function notFound(message: string, payload?: TombstonePayload) {
+  const body = payload ? { error: message, ...payload } : { error: message };
+  return new Response(JSON.stringify(body), {
     status: 404,
     headers: { "Content-Type": "application/json" },
   });
+}
+
+/**
+ * 404 for a file path that takes content negotiation into account.
+ *
+ * - Accept: text/html -> friendly HTML page, with the last-seen URL when known.
+ * - everything else -> JSON, with `reason: "removed"` + `last_seen_*` when known.
+ *
+ * The "what does an absent path mean?" decision is shared between JSON
+ * and HTML callers, so the format pick happens once at the route boundary
+ * and the rest of the handler is shape-agnostic.
+ */
+function fileNotFound(args: {
+  request: Request;
+  datasetId: string;
+  version: string;
+  path: string;
+  lastSeen: { version: string; href: string } | null;
+}): Response {
+  const { request, datasetId, version, path, lastSeen } = args;
+  const accept = request.headers.get("accept");
+  const formatParam = new URL(request.url).searchParams.get("format");
+  const fmt = pickResponseFormat({ accept, formatParam });
+
+  if (fmt === "html") {
+    const html = renderTombstone404Html({ datasetId, version, path, lastSeen });
+    return new Response(html, {
+      status: 404,
+      headers: { "Content-Type": "text/html; charset=utf-8" },
+    });
+  }
+  if (lastSeen) {
+    return notFound("File not found", {
+      reason: "removed",
+      last_seen_version: lastSeen.version,
+      last_seen_url: lastSeen.href,
+    });
+  }
+  return notFound("File not found");
 }
 
 function parseChecksum(checksum: string): { algorithm: string; value: string } {
@@ -168,10 +226,34 @@ async function manifestJsonHandler(
 }
 
 /**
+ * Fetch every published version row for a dataset, newest-first.
+ * Returns the same shape used by metadataJsonHandler and the landing
+ * page. Empty array means "dataset exists but unpublished".
+ */
+async function loadVersionRows(env: Bindings, datasetId: string): Promise<DatasetVersionRow[]> {
+  const result = await env.DB.prepare(
+    "SELECT version, doi, created_at FROM dataset_versions WHERE dataset_id = ? ORDER BY created_at DESC",
+  )
+    .bind(datasetId)
+    .all<DatasetVersionRow>();
+  return result.results ?? [];
+}
+
+/**
+ * Normalize a dataset_versions.version field to a `v`-prefixed tag.
+ * Older rows in D1 store the bare version (e.g. "1.0.0") while newer
+ * rows store the tag form. Always coerce to tag form for routing.
+ */
+function toVersionTag(raw: string): string {
+  return raw.startsWith("v") ? raw : `v${raw}`;
+}
+
+/**
  * GET /<id>/<version>/<path> -> 302 to file bytes, or HTML directory listing.
  */
 async function fileOrIndexHandler(
   env: Bindings,
+  request: Request,
   datasetId: string,
   versionParam: string,
   rawPath: string,
@@ -185,8 +267,44 @@ async function fileOrIndexHandler(
   const manifest = await loadManifest(env, datasetId, resolved.version);
   if (!manifest) return notFound("Version not published");
 
+  // One D1 round-trip for the picker, the "removed since" diff, and the
+  // tombstone walk. The query is cheap and used by every render path
+  // below; fetching once keeps the handler at a single dataset_versions
+  // read per request regardless of how many of those features fire.
+  const versionRows = await loadVersionRows(env, datasetId);
+  const versionTags = versionRows.map((r) => toVersionTag(r.version));
+  const availableVersions: VersionPickerEntry[] = versionTags.map((tag) => ({
+    version: tag,
+    isCurrent: tag === resolved.version,
+  }));
+
   const result = resolveFile(manifest, rawPath);
-  if (result.kind === "not_found") return notFound("File not found");
+
+  if (result.kind === "not_found") {
+    // Tombstone lookup: walk older versions newest-first looking for the
+    // first one that contained this exact path. Cheap when the path
+    // never existed (caps out at TOMBSTONE_LOOKBACK fetches) and useful
+    // when the path was removed in a recent version.
+    const currentIdx = versionTags.indexOf(resolved.version);
+    const olderVersions =
+      currentIdx === -1 ? versionTags.slice(1) : versionTags.slice(currentIdx + 1);
+    const lastSeen = await findLastSeenVersion({
+      path: rawPath.replace(/^\/+/, "").replace(/\/+$/, ""),
+      olderVersions,
+      loadManifest: (v) => loadManifest(env, datasetId, v),
+    });
+    const urlObj = new URL(request.url);
+    const lastSeenHref = lastSeen
+      ? `${urlObj.protocol}//${urlObj.host}/${datasetId}/${lastSeen.version}/${rawPath.replace(/^\/+/, "")}`
+      : null;
+    return fileNotFound({
+      request,
+      datasetId,
+      version: resolved.version,
+      path: rawPath,
+      lastSeen: lastSeen && lastSeenHref ? { version: lastSeen.version, href: lastSeenHref } : null,
+    });
+  }
 
   if (result.kind === "file") {
     const url = await buildRedirectUrl({
@@ -207,11 +325,31 @@ async function fileOrIndexHandler(
   }
 
   if (result.kind === "directory") {
+    // Compare this directory's listing against the immediately-prior
+    // version. The prior version is the next row in versionTags after
+    // the current one (rows are sorted newest-first). Skip the diff
+    // when there is no older version, or when the prior manifest
+    // isn't available -- the absence of a footer is harmless.
+    const currentIdx = versionTags.indexOf(resolved.version);
+    let removedSinceNote: { lastSeenVersion: string; names: string[] } | null = null;
+    if (currentIdx >= 0 && currentIdx < versionTags.length - 1) {
+      const priorVersion = versionTags[currentIdx + 1];
+      const priorManifest = await loadManifest(env, datasetId, priorVersion);
+      if (priorManifest) {
+        const removed = diffRemovedSince(result.children, priorManifest, result.path);
+        if (removed.length > 0) {
+          removedSinceNote = { lastSeenVersion: priorVersion, names: removed };
+        }
+      }
+    }
+
     const html = renderIndexHtml({
       datasetId,
       version: resolved.version,
       path: result.path,
       entries: result.children,
+      availableVersions,
+      removedSinceNote,
     });
     return new Response(html, {
       headers: {
@@ -354,28 +492,51 @@ dataRoutes.get("/:datasetId/:version/*", (c) => {
   const prefix = `/${datasetId}/${version}/`;
   const idx = c.req.path.indexOf(prefix);
   const rawPath = idx === -1 ? "" : c.req.path.slice(idx + prefix.length);
-  return fileOrIndexHandler(c.env, datasetId, version, rawPath);
+  return fileOrIndexHandler(c.env, c.req.raw, datasetId, version, rawPath);
 });
 
-// Phase 3 will replace these with a versions listing page. For now, gate
-// on dataset visibility and HTML-escape the interpolated id so we don't
-// reflect arbitrary user input into a `nemar.org`-subdomain HTML response.
-async function datasetRootResponse(env: Bindings, datasetId: string): Promise<Response> {
+/**
+ * GET /<id> and /<id>/ -> sitemap-style landing page listing every
+ * published version of the dataset.
+ *
+ * Content negotiation: HTML for browsers (Accept: text/html), JSON
+ * for everything else. The JSON shape is `LandingPayload` and is the
+ * machine entry point for "what versions does this dataset have?".
+ *
+ * Unknown / private datasets 404 with no existence leak (the same
+ * pattern loadPublishedDataset enforces everywhere else). A dataset
+ * that exists but has no published versions returns the landing page
+ * with an empty version list and an "unpublished" notice (status 200) --
+ * the row is real, just not ready to serve files yet.
+ */
+async function datasetRootResponse(env: Bindings, request: Request, datasetId: string): Promise<Response> {
   const dataset = await loadPublishedDataset(env, datasetId);
   if (!dataset) return notFound("Dataset not found");
-  const safe = escapeHtml(datasetId);
-  const href = encodeURIComponent(datasetId);
-  const html = `<!doctype html><meta charset="utf-8"><title>${safe}</title>
-<body style="font-family:ui-monospace,Menlo,monospace;margin:1.5em;max-width:60em">
-<h1 style="font-size:1.05em">${safe}</h1>
-<p>Append a version to browse files. Examples:</p>
-<ul>
-  <li><a href="${href}/latest/">${safe}/latest/</a></li>
-  <li><a href="${href}/latest/manifest.json">${safe}/latest/manifest.json</a></li>
-</ul>
-</body>`;
-  return new Response(html, { headers: { "Content-Type": "text/html; charset=utf-8" } });
+
+  const versionRows = await loadVersionRows(env, datasetId);
+  const payload = buildLandingPayload({ datasetId, versionRows });
+
+  const accept = request.headers.get("accept");
+  const formatParam = new URL(request.url).searchParams.get("format");
+  const fmt = pickResponseFormat({ accept, formatParam });
+
+  if (fmt === "json") {
+    return new Response(JSON.stringify(payload), {
+      headers: {
+        "Content-Type": "application/json",
+        "Cache-Control": "public, max-age=60",
+      },
+    });
+  }
+
+  const html = renderDatasetLandingHtml(payload);
+  return new Response(html, {
+    headers: {
+      "Content-Type": "text/html; charset=utf-8",
+      "Cache-Control": "public, max-age=60",
+    },
+  });
 }
 
-dataRoutes.get("/:datasetId", (c) => datasetRootResponse(c.env, c.req.param("datasetId")));
-dataRoutes.get("/:datasetId/", (c) => datasetRootResponse(c.env, c.req.param("datasetId")));
+dataRoutes.get("/:datasetId", (c) => datasetRootResponse(c.env, c.req.raw, c.req.param("datasetId")));
+dataRoutes.get("/:datasetId/", (c) => datasetRootResponse(c.env, c.req.raw, c.req.param("datasetId")));

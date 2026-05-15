@@ -217,6 +217,33 @@ https://data.nemar.org/<datasetId>/<version>/              # browsable HTML inde
 This path is **public datasets only**. Private and unpublished datasets stay
 on the existing `nemar dataset clone` / `nemar dataset get` flow.
 
+### Dataset landing page
+
+`https://data.nemar.org/<datasetId>/` lists every published version of the
+dataset with its DOI, browse URL, and `manifest.json` link. HTML for
+browsers, JSON for machine clients (the default when no `Accept` header
+is sent, or override with `?format=json`).
+
+### Removed files
+
+If a file path 404s but existed in an older published version, the 404
+body tells you the last version that contained it:
+
+```bash
+$ curl -s https://data.nemar.org/nm000103/v2.0.0/sub-99/eeg/sub-99_task-rest_eeg.edf | jq
+{
+  "error": "File not found",
+  "reason": "removed",
+  "last_seen_version": "v1.0.0",
+  "last_seen_url": "https://data.nemar.org/nm000103/v1.0.0/sub-99/eeg/sub-99_task-rest_eeg.edf"
+}
+```
+
+The walk goes back through the 10 most recent prior versions. For
+exhaustive history, fetch `metadata.json` which lists every version.
+Directory index pages also show a collapsible "Files removed since
+vN-1" footer when files were dropped between versions.
+
 ### Parallel downloaders
 
 Because the worker 302s to direct backing-store URLs, every mainstream
