@@ -199,3 +199,41 @@ The file may have been removed or moved. Try pulling the latest changes:
 git pull
 nemar dataset get <file>
 ```
+
+## HTTPS access via data.nemar.org
+
+Every published dataset is also reachable over plain HTTPS, with no
+nemar-cli, git-annex, or NEMAR account required:
+
+```
+https://data.nemar.org/<datasetId>/<version>/<bids-path>   # 302s to the file
+https://data.nemar.org/<datasetId>/latest/...              # resolves to most recent
+https://data.nemar.org/<datasetId>/<version>/manifest.json # JSON file index
+https://data.nemar.org/<datasetId>/<version>/              # browsable HTML index
+```
+
+`<version>` is either `latest` or an explicit `vX.Y.Z` tag.
+
+This path is **public datasets only**. Private and unpublished datasets stay
+on the existing `nemar dataset clone` / `nemar dataset get` flow.
+
+### Parallel downloaders
+
+Because the worker 302s to direct backing-store URLs, every mainstream
+parallel downloader works without a custom integration:
+
+| Tool | One-liner |
+| --- | --- |
+| `aria2c -j 16` | `curl -sL https://data.nemar.org/nm000103/latest/manifest.json \| jq -r '.[].url' \| aria2c -j 16 -i -` |
+| `wget --mirror` | `wget -r -np https://data.nemar.org/nm000103/latest/` |
+| `curl + xargs` | `xargs -P 16 -n 1 curl -O < urls.txt` |
+| `rclone copy` | `rclone copy --transfers 16 :http:data.nemar.org/nm000103/latest/ ./` |
+| Whole dataset zip | `aws s3 cp s3://nemar/nm000103/archives/v1.0.0.zip ./` (unchanged) |
+
+`manifest.json` carries the SHA-256 of each file, so parallel downloaders
+that support checksum verification can verify integrity for free.
+
+The same handlers are also reachable via the API hostname at
+`https://api.nemar.org/data/<datasetId>/<version>/...` -- useful for clients
+that already pin to the API origin. The custom `data.nemar.org` hostname is
+the canonical public contract.

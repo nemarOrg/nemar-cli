@@ -16,7 +16,7 @@ function GITHUB_API(): string {
   return override ?? "https://api.github.com";
 }
 // Dataset repos (nm000XXX) live in nemarDatasets org; tooling repos live in nemarOrg
-const ORG_NAME = "nemarDatasets";
+export const ORG_NAME = "nemarDatasets";
 
 /** Identity used for all backend-initiated commits and tags on dataset repos. */
 const NEMAR_COMMITTER = { name: "nemarAdmin", email: "nemarAdmin@osc.earth" };
