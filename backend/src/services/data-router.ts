@@ -602,9 +602,13 @@ export function buildDatasetMetadata(input: {
   const funding: DatasetFunding[] = (v2?.funding_references ?? []).map(toDatasetFunding);
 
   const sessionsList = latestManifest ? deriveSessions(latestManifest.files) : [];
+  // S3 version manifests store the version field bare (e.g. "1.0.0").
+  // Coerce to tag form for wire consistency with every other version
+  // field in the response and with the rest of the data.nemar.org
+  // contract (`/<id>/v1.0.0/...`).
   const bidsIndex: BidsIndex | null = latestManifest
     ? {
-        version: latestManifest.version,
+        version: toVersionTag(latestManifest.version),
         subjects: buildBidsIndex(latestManifest.files),
       }
     : null;
@@ -659,7 +663,11 @@ export function buildDatasetMetadata(input: {
           }
         : null,
     provenance: {
-      latest_snapshot: latestVersionRow?.version ?? null,
+      // Coerce to tag form to match every other version field on the
+      // wire (`extensions.nemar.versions[].version`,
+      // `bids_index.version`, the URL grammar). Legacy D1 rows store
+      // bare `1.0.0`; toVersionTag is a no-op for already-tagged rows.
+      latest_snapshot: latestVersionRow ? toVersionTag(latestVersionRow.version) : null,
       publish_date: latestVersionRow?.created_at ?? null,
     },
     external_links: {
@@ -672,12 +680,15 @@ export function buildDatasetMetadata(input: {
     },
     extensions: {
       nemar: {
-        versions: versions.map((v) => ({
-          version: v.version,
-          doi: v.doi,
-          created_at: v.created_at,
-          manifest_url: `/${row.dataset_id}/v${v.version.replace(/^v/, "")}/manifest.json`,
-        })),
+        versions: versions.map((v) => {
+          const tag = toVersionTag(v.version);
+          return {
+            version: tag,
+            doi: v.doi,
+            created_at: v.created_at,
+            manifest_url: `/${row.dataset_id}/${tag}/manifest.json`,
+          };
+        }),
         bids_index: bidsIndex,
         pipeline_stage: v2?.pipeline_stage ?? null,
       },

@@ -148,7 +148,7 @@ Wire format mirrors the core schema at
   "sessions_count": 1,
   "demographics": { "subjects_count": 50, "age_min": 18, "age_max": 65 },
   "data_summary": { "total_files": 1234, "size_bytes": 1234567890, "size_human": "1.15 GB" },
-  "provenance": { "latest_snapshot": "1.0.0", "publish_date": "2025-12-01T10:00:00Z" },
+  "provenance": { "latest_snapshot": "v1.0.0", "publish_date": "2025-12-01T10:00:00Z" },
   "external_links": {
     "dataset_doi": "10.82901/NEMAR.nm000103",
     "github_url": "https://github.com/nemarDatasets/nm000103"
@@ -157,14 +157,14 @@ Wire format mirrors the core schema at
     "nemar": {
       "versions": [
         {
-          "version": "1.0.0",
+          "version": "v1.0.0",
           "doi": "10.82901/NEMAR.nm000103.v1.0.0",
           "created_at": "2025-12-01T10:00:00Z",
           "manifest_url": "/nm000103/v1.0.0/manifest.json"
         }
       ],
       "bids_index": {
-        "version": "1.0.0",
+        "version": "v1.0.0",
         "subjects": {
           "sub-01": {
             "sessions": ["baseline"],

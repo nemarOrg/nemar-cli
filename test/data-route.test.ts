@@ -202,8 +202,10 @@ describe("data.nemar.org route (epic #449, phase 1)", async () => {
     expect(body.source).toBe("nemar");
     expect(Array.isArray(body.authors)).toBe(true);
     expect(body.extensions.nemar.versions.length).toBeGreaterThan(0);
+    // version field is always tag-form (v-prefixed) on the wire.
+    expect(body.extensions.nemar.versions[0].version).toMatch(/^v\d+\.\d+\.\d+$/);
     expect(body.extensions.nemar.versions[0].manifest_url).toBe(
-      `/${TEST_DATASET}/v${body.extensions.nemar.versions[0].version.replace(/^v/, "")}/manifest.json`,
+      `/${TEST_DATASET}/${body.extensions.nemar.versions[0].version}/manifest.json`,
     );
   });
 

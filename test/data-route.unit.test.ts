@@ -733,17 +733,22 @@ describe("buildDatasetMetadata", () => {
       dataset_doi: "10.82901/NEMAR.nm099999",
       github_url: "https://github.com/nemarDatasets/nm099999",
     });
+    // Every version field on the wire uses the v-prefixed tag form,
+    // regardless of whether the D1 row stored bare or tagged. Pinned
+    // here to prevent the cross-phase drift the epic review caught
+    // between buildLandingPayload (always tagged) and buildDatasetMetadata
+    // (previously emitted bare versions in some fields).
     expect(out.provenance).toEqual({
-      latest_snapshot: "1.0.0",
+      latest_snapshot: "v1.0.0",
       publish_date: "2026-05-15T00:00:00Z",
     });
     expect(out.extensions.nemar.versions[0]).toEqual({
-      version: "1.0.0",
+      version: "v1.0.0",
       doi: "10.82901/NEMAR.nm099999.v1.0.0",
       created_at: "2026-05-15T00:00:00Z",
       manifest_url: "/nm099999/v1.0.0/manifest.json",
     });
-    expect(out.extensions.nemar.bids_index?.version).toBe("1.0.0");
+    expect(out.extensions.nemar.bids_index?.version).toBe("v1.0.0");
     expect(out.extensions.nemar.bids_index?.subjects["sub-01"]).toBeDefined();
     expect(out.extensions.nemar.pipeline_stage).toBe("validated");
   });
@@ -760,7 +765,7 @@ describe("buildDatasetMetadata", () => {
     expect(out.extensions.nemar.bids_index).toBeNull();
     expect(out.sessions).toEqual([]);
     expect(out.sessions_count).toBeNull();
-    expect(out.provenance.latest_snapshot).toBe("1.0.0");
+    expect(out.provenance.latest_snapshot).toBe("v1.0.0");
   });
 
   test("v1 enrichment has no license -> license null, rights empty", () => {

@@ -589,7 +589,18 @@ dataRoutes.get("/:datasetId/:version", async (c) => {
   if (!dataset) return notFound("Dataset not found");
   const url = new URL(c.req.url);
   url.pathname = `${url.pathname.replace(/\/+$/, "")}/`;
-  return Response.redirect(url.toString(), 308);
+  // Response.redirect emits no Cache-Control. Without one, downstream
+  // caches apply heuristic TTLs (often very long for 308) and a
+  // client following the redirect repeatedly would still hit the
+  // Worker each time only because the URL changes. Pin to 300s for
+  // consistency with the rest of the route's caching matrix.
+  return new Response(null, {
+    status: 308,
+    headers: {
+      Location: url.toString(),
+      "Cache-Control": "public, max-age=300",
+    },
+  });
 });
 
 // Hono v4 auto-derives HEAD from the registered GET handler -- it
