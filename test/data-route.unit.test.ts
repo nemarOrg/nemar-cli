@@ -1312,11 +1312,25 @@ describe("toHttpDate", () => {
     expect(toHttpDate("2025-01-01T00:00:00Z")).toBe("Wed, 01 Jan 2025 00:00:00 GMT");
   });
 
-  test("passes through invalid input unchanged", () => {
+  test("passes through invalid input unchanged AND logs a warning", () => {
     // Manifest with a malformed `created` field shouldn't break the
     // file response; emit the bad value and let the client ignore it.
-    expect(toHttpDate("not-a-date")).toBe("not-a-date");
-    expect(toHttpDate("")).toBe("");
+    // But operators need to see this in `wrangler tail` -- silent
+    // passthrough would hide manifest corruption.
+    const originalWarn = console.warn;
+    const warned: unknown[][] = [];
+    console.warn = (...args: unknown[]) => {
+      warned.push(args);
+    };
+    try {
+      expect(toHttpDate("not-a-date")).toBe("not-a-date");
+      expect(toHttpDate("")).toBe("");
+      expect(warned).toHaveLength(2);
+      expect(String(warned[0][0])).toContain("toHttpDate");
+      expect(String(warned[0][0])).toContain("not-a-date");
+    } finally {
+      console.warn = originalWarn;
+    }
   });
 
   test("already-HTTP-date input passes through (defensive against double-conversion)", () => {

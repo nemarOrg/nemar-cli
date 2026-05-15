@@ -395,10 +395,14 @@ describe("data.nemar.org route (epic #449, phase 1)", async () => {
     expect(buf.byteLength).toBe(0);
   });
 
-  test("GET 302 on a file carries Content-Length, Last-Modified, and ETag", async () => {
-    // Clients that skip the HEAD (rclone --http-no-head, custom downloaders)
-    // can read the metadata from the 302 itself. Cheap because all three
-    // come from the manifest entry already in hand.
+  test("GET 302 on a file carries Last-Modified and ETag (Content-Length intentionally omitted)", async () => {
+    // RFC 9110 §8.6: Content-Length on a 302 describes the (empty)
+    // message body, not the redirect target. Carrying the file's size
+    // on a no-body redirect can confuse intermediaries that mis-frame
+    // the response. The S3 target's GET response carries Content-Length
+    // accurately. Last-Modified and ETag remain on the 302 -- both are
+    // valid on redirects per RFC 9110 §8.8 and let some clients skip
+    // the HEAD step entirely.
     const manResp = await fetch(`${API}/data/${TEST_DATASET}/latest/manifest.json`, { headers });
     const entries = (await manResp.json()) as Array<{
       path: string;
@@ -414,8 +418,8 @@ describe("data.nemar.org route (epic #449, phase 1)", async () => {
       redirect: "manual",
     });
     expect(r.status).toBe(302);
-    expect(r.headers.get("content-length")).toBe(String(target.size));
     expect(r.headers.get("last-modified")).toBeTruthy();
     expect(r.headers.get("etag")).toBeTruthy();
+    expect(r.headers.get("location")).toBeTruthy();
   });
 });

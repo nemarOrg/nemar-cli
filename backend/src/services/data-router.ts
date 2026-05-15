@@ -213,15 +213,21 @@ export function humanSize(bytes: number): string {
  * `new Date(iso).toUTCString()` produces exactly the RFC 1123 shape
  * (`"Fri, 15 May 2026 17:30:21 GMT"`) when the input parses. Malformed
  * input falls through unchanged -- emitting a busted Last-Modified is
- * harmless (clients ignore unparseable values) and lets the file route
- * stay 200 over a manifest with a malformed `created` field instead of
- * crashing. Already-HTTP-date input passes through (defensive against
- * a caller that did the conversion once already).
+ * harmless to the client (RFC 7231 says clients ignore unparseable
+ * values) and lets the file route stay 200 over a manifest with a
+ * malformed `created` field instead of crashing. The corrupt value
+ * is logged via `console.warn` so it shows up in `wrangler tail` --
+ * silent passthrough would hide manifest corruption from operators.
+ * Already-HTTP-date input passes through (defensive against a caller
+ * that did the conversion once already).
  */
 export function toHttpDate(value: string): string {
   if (value.endsWith(" GMT")) return value;
   const d = new Date(value);
-  if (Number.isNaN(d.getTime())) return value;
+  if (Number.isNaN(d.getTime())) {
+    console.warn(`[data-router] toHttpDate: unparseable value="${value}"`);
+    return value;
+  }
   return d.toUTCString();
 }
 

@@ -46,11 +46,13 @@ If neither, responds `404`.
 `Cache-Control: public, max-age=300` on file redirects, `max-age=60` on HTML
 indexes.
 
-File redirects also carry `Content-Length`, `Last-Modified` (the version's
-publication timestamp in RFC 1123 format), and `ETag` (the content
-checksum, quoted per RFC 7232 -- `"sha256:<hex>"` for git-annex files,
-`"git:<sha>"` for inline git content). Clients that skip the HEAD step
-can read the metadata from the redirect itself.
+File redirects also carry `Last-Modified` (the version's publication
+timestamp in RFC 1123 format) and `ETag` (the content checksum, quoted
+per RFC 7232 -- `"sha256:<hex>"` for git-annex files, `"git:<sha>"` for
+inline git content). `Content-Length` is intentionally omitted from the
+302 (per RFC 9110 §8.6 it describes the empty message body, not the
+redirect target) -- use `HEAD` if you need the size without following
+the redirect.
 
 ### `HEAD /<datasetId>/<version>/<bids-path>`
 

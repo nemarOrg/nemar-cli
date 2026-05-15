@@ -282,22 +282,37 @@ async function loadVersionRows(env: Bindings, datasetId: string): Promise<Datase
 
 /**
  * Build the rclone-friendly file metadata headers for a manifest entry.
- * Attached to both GET 302 and HEAD 200 responses so an rclone HTTP
- * backend sync can size+mtime+ETag every file in one round-trip per
- * file (HEAD), then deltas drive whether the GET happens at all.
  *
- * `ETag` carries the manifest checksum verbatim (already
- * `"sha256:<hex>"` or `"git:<sha>"`) which is content-addressed and
- * stable across re-publications of identical content. RFC 7232
- * requires the value be quoted, hence the wrapping.
+ * `ETag` is the manifest checksum verbatim (`"sha256:<hex>"` for
+ * git-annex files, `"git:<sha>"` for inline git content). Content-
+ * addressed and stable across re-publications of identical content.
+ * RFC 7232 requires the value be quoted, hence the wrapping.
+ *
+ * `withContentLength` controls whether `Content-Length` is emitted.
+ * Per RFC 9110 §8.6 the field describes the message body, not the
+ * resource. For a HEAD 200 with no body, `Content-Length: <size>`
+ * advertises what a subsequent GET would return -- standard and what
+ * every HTTP client (rclone, browsers, curl) expects on HEAD. For a
+ * GET 302 with no body, emitting `Content-Length: <size>` is a spec
+ * deviation: the message body is empty, the field would describe the
+ * redirect target. Some intermediaries can mis-frame a long-`Content-
+ * Length` 302 as a hung response, so the GET 302 branch deliberately
+ * omits it and relies on the redirect target's S3 GET to advertise
+ * size. `Last-Modified` and `ETag` remain on the 302 -- both are
+ * valid on redirects per RFC 9110 §8.8.
  */
-function fileResponseHeaders(file: ManifestFile, createdIso: string): HeadersInit {
-  return {
-    "Content-Length": String(file.size),
+function fileResponseHeaders(
+  file: ManifestFile,
+  createdIso: string,
+  withContentLength: boolean,
+): HeadersInit {
+  const base: Record<string, string> = {
     "Last-Modified": toHttpDate(createdIso),
     ETag: `"${file.checksum}"`,
     "Cache-Control": "public, max-age=300",
   };
+  if (withContentLength) base["Content-Length"] = String(file.size);
+  return base;
 }
 
 /**
@@ -339,7 +354,7 @@ async function fileOrIndexHandler(
     if (result.kind === "file") {
       return new Response(null, {
         status: 200,
-        headers: fileResponseHeaders(result.file, manifest.created),
+        headers: fileResponseHeaders(result.file, manifest.created, true),
       });
     }
     if (result.kind === "directory") {
@@ -404,10 +419,12 @@ async function fileOrIndexHandler(
       s3Options: s3OptionsFromEnv(env),
       githubOrg: ORG_NAME,
     });
-    // Surface size/mtime/ETag on the 302 itself for clients that skip
-    // the HEAD step (rclone with `--http-no-head`, custom downloaders).
-    // Cheap: all three are already in hand from the manifest entry.
-    const headers = new Headers(fileResponseHeaders(result.file, manifest.created));
+    // Surface mtime/ETag on the 302 itself for clients that skip the
+    // HEAD step (custom downloaders, conditional GET preflights).
+    // Content-Length is deliberately omitted from the 302 -- per RFC
+    // 9110 §8.6 it describes the (empty) message body, not the redirect
+    // target. The S3 target's GET response carries it accurately.
+    const headers = new Headers(fileResponseHeaders(result.file, manifest.created, false));
     headers.set("Location", url);
     return new Response(null, { status: 302, headers });
   }
@@ -575,23 +592,22 @@ dataRoutes.get("/:datasetId/:version", async (c) => {
   return Response.redirect(url.toString(), 308);
 });
 
-// Register both GET and HEAD explicitly. Hono v4's auto-HEAD-from-GET
-// behavior would run the full GET handler and strip the body, which
-// (a) wastes a `buildRedirectUrl` S3 presign per HEAD and (b) returns
-// a 302 to rclone, whose HTTP backend does NOT follow HEAD redirects
-// by default. The HEAD branch inside fileOrIndexHandler short-circuits
-// to a 200 + metadata headers for files (or 200 + text/html for
-// directories) so `rclone sync :http:...` can size+mtime+ETag every
-// file in one cheap round-trip per file.
-const fileOrIndexRoute = (c: import("hono").Context<{ Bindings: Bindings }>) => {
+// Hono v4 auto-derives HEAD from the registered GET handler -- it
+// re-dispatches the original Request (method still "HEAD") through
+// this handler and strips the body. The `isHead` branch inside
+// `fileOrIndexHandler` reads `request.method` and short-circuits to
+// a 200 + metadata headers for files (or 200 + text/html for
+// directories) without doing the buildRedirectUrl S3 presign or the
+// tombstone walk. So `rclone sync :http:...` can size+mtime+ETag
+// every file in one cheap round-trip per file. No explicit HEAD
+// route registration is needed.
+dataRoutes.get("/:datasetId/:version/*", (c) => {
   const { datasetId, version } = c.req.param();
   const prefix = `/${datasetId}/${version}/`;
   const idx = c.req.path.indexOf(prefix);
   const rawPath = idx === -1 ? "" : c.req.path.slice(idx + prefix.length);
   return fileOrIndexHandler(c.env, c.req.raw, datasetId, version, rawPath);
-};
-dataRoutes.get("/:datasetId/:version/*", fileOrIndexRoute);
-dataRoutes.on("HEAD", "/:datasetId/:version/*", fileOrIndexRoute);
+});
 
 /**
  * GET /<id> and /<id>/ -> sitemap-style landing page listing every
