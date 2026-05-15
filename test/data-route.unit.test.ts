@@ -30,6 +30,7 @@ import {
   renderTombstone404Html,
   resolveFile,
   resolveVersion,
+  toHttpDate,
   toVersionTag,
 } from "../backend/src/services/data-router";
 import type { ManifestFile, VersionManifest } from "../backend/src/services/manifest";
@@ -1298,5 +1299,162 @@ describe("renderTombstone404Html", () => {
     // The link text shows the escaped form.
     expect(html).toContain("&lt;script&gt;");
     expect(html).not.toContain("<script>");
+  });
+});
+
+// ===========================================================================
+// Phase 4 (#498): rclone-compatible listing + HEAD support
+// ===========================================================================
+
+describe("toHttpDate", () => {
+  test("converts ISO 8601 to RFC 1123 / RFC 7231 HTTP-date", () => {
+    expect(toHttpDate("2026-05-15T17:30:21Z")).toBe("Fri, 15 May 2026 17:30:21 GMT");
+    expect(toHttpDate("2025-01-01T00:00:00Z")).toBe("Wed, 01 Jan 2025 00:00:00 GMT");
+  });
+
+  test("passes through invalid input unchanged AND logs a warning", () => {
+    // Manifest with a malformed `created` field shouldn't break the
+    // file response; emit the bad value and let the client ignore it.
+    // But operators need to see this in `wrangler tail` -- silent
+    // passthrough would hide manifest corruption.
+    const originalWarn = console.warn;
+    const warned: unknown[][] = [];
+    console.warn = (...args: unknown[]) => {
+      warned.push(args);
+    };
+    try {
+      expect(toHttpDate("not-a-date")).toBe("not-a-date");
+      expect(toHttpDate("")).toBe("");
+      expect(warned).toHaveLength(2);
+      expect(String(warned[0][0])).toContain("toHttpDate");
+      expect(String(warned[0][0])).toContain("not-a-date");
+    } finally {
+      console.warn = originalWarn;
+    }
+  });
+
+  test("already-HTTP-date input passes through (defensive against double-conversion)", () => {
+    const httpDate = "Fri, 15 May 2026 17:30:21 GMT";
+    expect(toHttpDate(httpDate)).toBe(httpDate);
+  });
+
+  test("handles ISO with millisecond precision", () => {
+    // toUTCString drops sub-second precision; that's correct per HTTP-date spec.
+    expect(toHttpDate("2026-05-15T17:30:21.123Z")).toBe("Fri, 15 May 2026 17:30:21 GMT");
+  });
+});
+
+describe("renderIndexHtml rclone-parser compat (Phase 4)", () => {
+  // rclone's HTTP backend parses <a href="..."> tags to build a directory
+  // listing. It treats trailing-slash hrefs as subdirectories and bare
+  // names as files. Absolute hrefs (starting with `/`) and parent links
+  // (`../`) are filtered out. This test extracts the rclone-relevant
+  // hrefs from the rendered HTML and asserts they map exactly to the
+  // BIDS file/dir layout -- so the Phase 3 chrome (version picker,
+  // removed-since footer, all-versions link) doesn't accidentally
+  // surface as a "file" or "directory" entry to rclone.
+  function extractRcloneEntries(html: string): { dirs: string[]; files: string[] } {
+    const hrefs = [...html.matchAll(/href="([^"]+)"/g)].map((m) => m[1]);
+    const dirs: string[] = [];
+    const files: string[] = [];
+    for (const href of hrefs) {
+      // rclone-parser filters:
+      if (href.startsWith("/")) continue; // absolute -> ignored
+      if (href.startsWith("?") || href.startsWith("#")) continue;
+      if (/^https?:\/\//.test(href)) continue; // external -> ignored
+      if (href === "../") continue; // parent -> ignored
+      if (href.endsWith("/")) dirs.push(href);
+      else files.push(href);
+    }
+    return { dirs, files };
+  }
+
+  test("plain directory listing exposes only file/dir entries to rclone", () => {
+    const html = renderIndexHtml({
+      datasetId: "nm099999",
+      version: "v1.0.0",
+      path: "",
+      entries: [
+        { kind: "dir", name: "sub-01" },
+        { kind: "dir", name: "sub-02" },
+        { kind: "file", name: "dataset_description.json", size: 480 },
+        { kind: "file", name: "participants.tsv", size: 220 },
+      ],
+    });
+    const { dirs, files } = extractRcloneEntries(html);
+    expect(dirs.sort()).toEqual(["sub-01/", "sub-02/"]);
+    // manifest.json is a relative href in the footer; rclone WILL see
+    // it. Documented and acceptable (the route serves it as a real 200).
+    expect(files.sort()).toEqual(["dataset_description.json", "manifest.json", "participants.tsv"]);
+  });
+
+  test("version picker absolute-href links are filtered out by rclone parser", () => {
+    const html = renderIndexHtml({
+      datasetId: "nm099999",
+      version: "v2.0.0",
+      path: "",
+      entries: [{ kind: "file", name: "x.edf", size: 1 }],
+      availableVersions: [
+        { version: "v2.0.0", isCurrent: true },
+        { version: "v1.0.0", isCurrent: false },
+      ],
+    });
+    const { dirs, files } = extractRcloneEntries(html);
+    // No `v1.0.0/` directory leak from the picker.
+    expect(dirs).toEqual([]);
+    // x.edf is the only real file; manifest.json is the footer link.
+    expect(files.sort()).toEqual(["manifest.json", "x.edf"]);
+  });
+
+  test("removed-since footer hrefs do not appear as files to rclone", () => {
+    const html = renderIndexHtml({
+      datasetId: "nm099999",
+      version: "v2.0.0",
+      path: "",
+      entries: [{ kind: "dir", name: "sub-01" }],
+      removedSinceNote: { lastSeenVersion: "v1.0.0", names: ["sub-99", "old.tsv"] },
+    });
+    const { dirs, files } = extractRcloneEntries(html);
+    expect(dirs).toEqual(["sub-01/"]);
+    // sub-99 and old.tsv must NOT be in files -- they're rendered with
+    // absolute hrefs pointing at the prior version.
+    expect(files).not.toContain("sub-99");
+    expect(files).not.toContain("old.tsv");
+    expect(files).toEqual(["manifest.json"]);
+  });
+
+  test("nested directory still exposes only its children + parent link", () => {
+    const html = renderIndexHtml({
+      datasetId: "nm099999",
+      version: "v1.0.0",
+      path: "sub-01/eeg",
+      entries: [
+        { kind: "file", name: "sub-01_task-rest_eeg.edf", size: 12345 },
+        { kind: "file", name: "sub-01_task-rest_eeg.json", size: 220 },
+      ],
+    });
+    const { dirs, files } = extractRcloneEntries(html);
+    expect(dirs).toEqual([]);
+    expect(files.sort()).toEqual([
+      "manifest.json",
+      "sub-01_task-rest_eeg.edf",
+      "sub-01_task-rest_eeg.json",
+    ]);
+  });
+
+  test("URL-encoded names round-trip cleanly through the parser regex", () => {
+    // The renderer percent-encodes special chars in hrefs. rclone
+    // decodes them on its end. The parser regex here is naive but
+    // matches rclone's enough that we can confirm the href value
+    // isn't broken by escape conflicts.
+    const html = renderIndexHtml({
+      datasetId: "nm099999",
+      version: "v1.0.0",
+      path: "",
+      entries: [{ kind: "file", name: "a&b?c#d.txt", size: 1 }],
+    });
+    const { files } = extractRcloneEntries(html);
+    // Percent-encoded form is what's in the href attribute.
+    expect(files).toContain("a%26b%3Fc%23d.txt");
   });
 });
