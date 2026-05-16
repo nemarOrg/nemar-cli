@@ -123,6 +123,14 @@ export async function generatePresignedGetUrl(
 
   // Include X-Amz-Expires (and optional response-content-disposition) in the URL
   // BEFORE signing so aws4fetch canonicalises them into the signature.
+  //
+  // The disposition value MUST be URL-encoded here even though aws4fetch
+  // re-canonicalises searchParams later: the raw value contains `;`, `=`,
+  // `"`, and (for some filenames) `&`, all of which would derail URL/query
+  // parsing before aws4fetch ever sees them. The `new URL(url)` call inside
+  // aws4fetch decodes one layer back to the original string, which is then
+  // re-encoded for the SigV4 canonical form, so the on-wire URL and the
+  // canonical-string-to-sign agree.
   const queryParts = [`X-Amz-Expires=${expiresIn}`];
   if (responseContentDisposition) {
     queryParts.push(

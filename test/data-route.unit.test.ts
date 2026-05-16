@@ -324,6 +324,47 @@ describe("buildRedirectUrl", () => {
     expect(decoded).not.toContain('filename="SHA256E-');
   });
 
+  test("top-level annex file (no slash in bidsPath) still gets the right basename", async () => {
+    // Defends the `bidsPath.split("/").pop()` path against a future refactor
+    // that uses the wrong segment index. Today most root files are git: keyed,
+    // but #509 fixed cases where small root files like dataset_description.json
+    // can be annex pointers; the disposition path must work for them too.
+    const url = await buildRedirectUrl({
+      datasetId: "nm099999",
+      version: "v1.0.0",
+      bidsPath: "CHANGES",
+      file: { key: "SHA256E-s512--root.txt", size: 512, checksum: "sha256:root" },
+      s3Options,
+      githubOrg: "nemarDatasets",
+    });
+    const decoded = decodeURIComponent(url.replace(/\+/g, " "));
+    expect(decoded).toContain('filename="CHANGES"');
+  });
+
+  test("response-content-disposition is signed (appears before X-Amz-Signature in query order)", async () => {
+    // aws4fetch sorts canonical query params alphabetically; `r` < `X`, so
+    // response-content-disposition always sorts before X-Amz-Signature in
+    // the signed URL. Pinning this defends against a future presigner refactor
+    // that appends the param after signing (which would unsign it).
+    const url = await buildRedirectUrl({
+      datasetId: "nm099999",
+      version: "v1.0.0",
+      bidsPath: "sub-01/eeg/sub-01_task-rest_eeg.edf",
+      file: {
+        key: "SHA256E-s12345--deadbeef.edf",
+        size: 12345,
+        checksum: "sha256:deadbeef",
+      },
+      s3Options,
+      githubOrg: "nemarDatasets",
+    });
+    const dispoIdx = url.indexOf("response-content-disposition=");
+    const sigIdx = url.indexOf("X-Amz-Signature=");
+    expect(dispoIdx).toBeGreaterThan(-1);
+    expect(sigIdx).toBeGreaterThan(-1);
+    expect(dispoIdx).toBeLessThan(sigIdx);
+  });
+
   test("MD5E annex keys also presign (legacy OpenNeuro imports)", async () => {
     const url = await buildRedirectUrl({
       datasetId: "nm099999",
