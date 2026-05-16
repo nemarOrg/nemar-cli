@@ -703,10 +703,14 @@ async function qaHandler(
   });
 }
 
-dataRoutes.get("/:datasetId/qa", (c) => {
+dataRoutes.get("/:datasetId/qa", async (c) => {
   // Redirect /<id>/qa -> /<id>/qa/ for trailing-slash consistency with the
-  // version route. Same 308 + Cache-Control pattern as below.
+  // version route. Pre-check visibility so we don't echo a 308 Location for
+  // a private or nonexistent dataset (information disclosure parity with the
+  // version-route 308 handler).
   const { datasetId } = c.req.param();
+  const dataset = await loadPublishedDataset(c.env, datasetId);
+  if (!dataset) return notFound("Dataset not found");
   const url = new URL(c.req.url);
   url.pathname = `${url.pathname.replace(/\/+$/, "")}/`;
   return new Response(null, {
