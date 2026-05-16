@@ -13,6 +13,8 @@ import {
   VERSION_TAG_RE,
   buildBidsIndex,
   buildDatasetMetadata,
+  normalizeBidsPath,
+  qaListingToDirectory,
   buildLandingPayload,
   buildPersonList,
   buildRedirectUrl,
@@ -1463,3 +1465,192 @@ describe("renderIndexHtml rclone-parser compat (Phase 4)", () => {
     expect(files).toContain("a%26b%3Fc%23d.txt");
   });
 });
+
+describe("normalizeBidsPath (#511 traversal contract for QA route)", () => {
+  test("empty / root paths round-trip to empty string", () => {
+    expect(normalizeBidsPath("")).toBe("");
+    expect(normalizeBidsPath("/")).toBe("");
+    expect(normalizeBidsPath("///")).toBe("");
+  });
+
+  test("strips leading and trailing slashes", () => {
+    expect(normalizeBidsPath("sub-01/eeg")).toBe("sub-01/eeg");
+    expect(normalizeBidsPath("/sub-01/eeg/")).toBe("sub-01/eeg");
+    expect(normalizeBidsPath("//sub-01//eeg//")).toBeNull(); // empty interior segments reject
+  });
+
+  test("rejects path traversal", () => {
+    expect(normalizeBidsPath("..")).toBeNull();
+    expect(normalizeBidsPath("../etc/passwd")).toBeNull();
+    expect(normalizeBidsPath("sub-01/../sub-02")).toBeNull();
+  });
+
+  test("rejects prototype-pollution-shaped segments", () => {
+    expect(normalizeBidsPath("__proto__")).toBeNull();
+    expect(normalizeBidsPath("constructor/prototype")).toBeNull();
+    expect(normalizeBidsPath("a/__proto__/b")).toBeNull();
+  });
+
+  test("accepts BIDS-shaped paths with dots and underscores", () => {
+    expect(normalizeBidsPath("sub-01_task-rest_eeg.edf")).toBe("sub-01_task-rest_eeg.edf");
+    expect(normalizeBidsPath("sub-01/eeg/sub-01_task-rest_icaact.svg")).toBe(
+      "sub-01/eeg/sub-01_task-rest_icaact.svg",
+    );
+  });
+});
+
+describe("qaListingToDirectory (#511)", () => {
+  test("empty root listing returns an empty directory (not 404)", () => {
+    const r = qaListingToDirectory({
+      listing: { contents: [], commonPrefixes: [], truncated: false },
+      path: "",
+      absolutePrefix: "nm099999/qa/",
+    });
+    expect(r.kind).toBe("directory");
+    if (r.kind !== "directory") return;
+    expect(r.children).toEqual([]);
+    expect(r.path).toBe("");
+    expect(r.truncated).toBe(false);
+  });
+
+  test("empty non-root listing is 404", () => {
+    // The async wrapper resolveQaPath only gets here when the parent listing
+    // confirmed the directory exists, but we should still reject empty
+    // sub-listings — they shouldn't happen on a healthy tree.
+    const r = qaListingToDirectory({
+      listing: { contents: [], commonPrefixes: [], truncated: false },
+      path: "sub-01",
+      absolutePrefix: "nm099999/qa/sub-01/",
+    });
+    expect(r.kind).toBe("not_found");
+  });
+
+  test("partitions files and subdirectories with dirs sorted first", () => {
+    const r = qaListingToDirectory({
+      listing: {
+        contents: [
+          {
+            key: "nm099999/qa/dataqual.json",
+            size: 4321,
+            lastModified: "2026-05-14T00:00:00Z",
+          },
+          {
+            key: "nm099999/qa/nm099999_histogram.svg",
+            size: 22000,
+            lastModified: "2026-05-14T00:00:00Z",
+          },
+        ],
+        commonPrefixes: ["nm099999/qa/sub-001/", "nm099999/qa/sub-002/"],
+        truncated: false,
+      },
+      path: "",
+      absolutePrefix: "nm099999/qa/",
+    });
+    expect(r.kind).toBe("directory");
+    if (r.kind !== "directory") return;
+    expect(r.children.map((c) => `${c.name}${c.kind === "dir" ? "/" : ""}`)).toEqual([
+      "sub-001/",
+      "sub-002/",
+      "dataqual.json",
+      "nm099999_histogram.svg",
+    ]);
+  });
+
+  test("ignores Contents whose key is not directly under the prefix (placeholder defence)", () => {
+    // S3 sometimes returns a "directory placeholder" object whose key IS the
+    // prefix itself (e.g. created by `aws s3api put-object --key foo/`).
+    // Those entries have name === "" after the prefix strip and must be
+    // dropped from the directory listing.
+    const r = qaListingToDirectory({
+      listing: {
+        contents: [
+          {
+            key: "nm099999/qa/sub-001/",
+            size: 0,
+            lastModified: "2026-05-14T00:00:00Z",
+          },
+          {
+            key: "nm099999/qa/sub-001/eeg_summary.json",
+            size: 256,
+            lastModified: "2026-05-14T00:00:00Z",
+          },
+        ],
+        commonPrefixes: [],
+        truncated: false,
+      },
+      path: "sub-001",
+      absolutePrefix: "nm099999/qa/sub-001/",
+    });
+    expect(r.kind).toBe("directory");
+    if (r.kind !== "directory") return;
+    // The placeholder MUST be suppressed; the eeg_summary file MUST appear.
+    expect(r.children.map((c) => c.name)).toEqual(["eeg_summary.json"]);
+  });
+
+  test("ignores Contents nested deeper than one level (defence against missing delimiter)", () => {
+    // If a caller forgot delimiter=/, S3 returns the entire subtree under
+    // Contents. Our renderer is one-level; nested keys must be dropped (they
+    // would have been rolled into CommonPrefixes had the delimiter been set).
+    const r = qaListingToDirectory({
+      listing: {
+        contents: [
+          {
+            key: "nm099999/qa/dataqual.json",
+            size: 123,
+            lastModified: "2026-05-14T00:00:00Z",
+          },
+          {
+            key: "nm099999/qa/sub-001/eeg/foo.svg",
+            size: 1024,
+            lastModified: "2026-05-14T00:00:00Z",
+          },
+        ],
+        commonPrefixes: [],
+        truncated: false,
+      },
+      path: "",
+      absolutePrefix: "nm099999/qa/",
+    });
+    expect(r.kind).toBe("directory");
+    if (r.kind !== "directory") return;
+    expect(r.children.map((c) => c.name)).toEqual(["dataqual.json"]);
+  });
+
+  test("propagates the truncated flag so renderers can show a 'listing capped' affordance", () => {
+    const r = qaListingToDirectory({
+      listing: {
+        contents: [
+          { key: "nm099999/qa/x.json", size: 1, lastModified: "2026-05-14T00:00:00Z" },
+        ],
+        commonPrefixes: [],
+        truncated: true,
+      },
+      path: "",
+      absolutePrefix: "nm099999/qa/",
+    });
+    expect(r.kind).toBe("directory");
+    if (r.kind !== "directory") return;
+    expect(r.truncated).toBe(true);
+  });
+
+  test("deduplicates entries that appear in both Contents and CommonPrefixes", () => {
+    // This shouldn't happen on a real S3 response (a key can't be both a file
+    // and a prefix), but if S3 ever did emit overlap we should not double-list.
+    const r = qaListingToDirectory({
+      listing: {
+        contents: [
+          { key: "nm099999/qa/eeg", size: 0, lastModified: "2026-05-14T00:00:00Z" },
+        ],
+        commonPrefixes: ["nm099999/qa/eeg/"],
+        truncated: false,
+      },
+      path: "",
+      absolutePrefix: "nm099999/qa/",
+    });
+    expect(r.kind).toBe("directory");
+    if (r.kind !== "directory") return;
+    // Directory wins (added first, dedupe Set kicks in on the file).
+    expect(r.children.map((c) => `${c.name}/${c.kind}`)).toEqual(["eeg/dir"]);
+  });
+});
+

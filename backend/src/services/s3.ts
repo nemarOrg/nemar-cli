@@ -273,6 +273,78 @@ export async function listObjectKeys(
   return keys;
 }
 
+export interface S3ListEntry {
+  key: string;
+  size: number;
+  lastModified: string;
+}
+
+export interface S3ListResult {
+  contents: S3ListEntry[];
+  commonPrefixes: string[];
+  truncated: boolean;
+}
+
+/**
+ * One-level S3 listing with `delimiter=/`. Returns immediate-child objects in
+ * `contents` and immediate-child sub-directories in `commonPrefixes` (each
+ * already ends in `/`). Truncation is reported back so callers can decide
+ * whether to ignore, follow continuation, or render a "listing truncated"
+ * affordance.
+ *
+ * Unlike `listObjectPages`, this does a SINGLE round-trip — it is meant for
+ * interactive directory rendering (the data.nemar.org `/qa/*` route), not
+ * bulk enumeration. The route caller pages by setting `prefix` deeper.
+ */
+export async function listObjectsWithDelimiter(
+  options: PresignedUrlOptions,
+  prefix: string,
+  maxKeys = 1000,
+): Promise<S3ListResult> {
+  const { bucket, region } = options;
+  const aws = createS3Client(options);
+
+  const params = new URLSearchParams({
+    "list-type": "2",
+    prefix,
+    delimiter: "/",
+    "max-keys": String(maxKeys),
+  });
+  const url = `https://${bucket}.s3.${region}.amazonaws.com/?${params.toString()}`;
+  const signed = await aws.sign(url, { method: "GET" });
+  const res = await fetch(signed);
+  if (!res.ok) {
+    throw new Error(`Failed to list objects (prefix=${prefix}): HTTP ${res.status}`);
+  }
+  const xml = await res.text();
+  if (!xml.includes("<ListBucketResult")) {
+    throw new Error(`Unexpected S3 response (not ListBucketResult): ${xml.slice(0, 200)}`);
+  }
+
+  const contents: S3ListEntry[] = [];
+  const contentMatches = xml.matchAll(
+    /<Contents>[\s\S]*?<Key>([^<]+)<\/Key>[\s\S]*?<LastModified>([^<]+)<\/LastModified>[\s\S]*?<Size>(\d+)<\/Size>[\s\S]*?<\/Contents>/g,
+  );
+  for (const match of contentMatches) {
+    contents.push({
+      key: match[1],
+      lastModified: match[2],
+      size: Number.parseInt(match[3], 10),
+    });
+  }
+
+  const commonPrefixes: string[] = [];
+  const prefixMatches = xml.matchAll(
+    /<CommonPrefixes>\s*<Prefix>([^<]+)<\/Prefix>\s*<\/CommonPrefixes>/g,
+  );
+  for (const match of prefixMatches) {
+    commonPrefixes.push(match[1]);
+  }
+
+  const truncated = xml.includes("<IsTruncated>true</IsTruncated>");
+  return { contents, commonPrefixes, truncated };
+}
+
 // ---------------------------------------------------------------------------
 // Shared utilities
 // ---------------------------------------------------------------------------
