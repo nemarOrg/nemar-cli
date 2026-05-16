@@ -6,7 +6,15 @@
  * nemarDatasets repo with 'on' prefix ID.
  */
 
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import {
+  type Dirent,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import chalk from "chalk";
@@ -16,6 +24,7 @@ import {
   approvePublication,
   getUserCiStatus,
   importDataset,
+  reindexDataset,
   requestPublication,
 } from "./api.js";
 import {
@@ -208,9 +217,106 @@ function extractOpenNeuroDoi(bidsDesc: Record<string, unknown>): string | null {
 }
 
 /**
- * Seed .nemar/metadata.json with source information and IsIdenticalTo relation.
+ * Recording-modality detection from a BIDS dataset tree on disk.
+ *
+ * Scans the cloned dataset for sub-* directories and inspects each
+ * subject/session for BIDS datatype directories (eeg, meg, ieeg, emg, func,
+ * anat, dwi, fmap, perf, beh, micr, motion, nirs, pet). Returns the sorted,
+ * deduplicated set of datatypes found.
+ *
+ * Mirrors the server-side `detectModalitiesFromTree` (backend datacite.ts)
+ * but works from the filesystem rather than a GitHub tree response. Keeping
+ * the two in sync is intentional: the backend D1 columns and the CLI-seeded
+ * `.nemar/metadata.json` should agree on modality without one needing to
+ * import the other.
  */
-function seedMetadata(
+const BIDS_DATATYPES = [
+  "anat",
+  "beh",
+  "dwi",
+  "eeg",
+  "emg",
+  "fmap",
+  "func",
+  "ieeg",
+  "meg",
+  "micr",
+  "motion",
+  "nirs",
+  "perf",
+  "pet",
+];
+
+export function detectModalitiesFromDataset(datasetPath: string): string[] {
+  // Filesystem-failure paths return [] so an unreadable dataset doesn't abort
+  // the entire orchestrator inside seedMetadata. The downstream backend
+  // detectModalitiesFromTree pass re-derives this from the GitHub tree.
+  const found = new Set<string>();
+  let subjects: string[] = [];
+  try {
+    subjects = readdirSync(datasetPath, { withFileTypes: true })
+      .filter((e) => e.isDirectory() && e.name.startsWith("sub-"))
+      .map((e) => e.name);
+  } catch {
+    return [];
+  }
+  for (const sub of subjects) {
+    const subPath = join(datasetPath, sub);
+    let entries: Dirent[] = [];
+    try {
+      entries = readdirSync(subPath, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const e of entries) {
+      if (!e.isDirectory()) continue;
+      if (e.name.startsWith("ses-")) {
+        // ses-*/datatype/
+        let sesEntries: Dirent[] = [];
+        try {
+          sesEntries = readdirSync(join(subPath, e.name), { withFileTypes: true });
+        } catch {
+          continue;
+        }
+        for (const se of sesEntries) {
+          if (se.isDirectory() && BIDS_DATATYPES.includes(se.name)) found.add(se.name);
+        }
+      } else if (BIDS_DATATYPES.includes(e.name)) {
+        // sub-*/datatype/ (no session level)
+        found.add(e.name);
+      }
+    }
+  }
+  return [...found].sort();
+}
+
+/**
+ * Coerce a BIDS dataset_description.json `Funding` array into the v2 metadata
+ * `funding_references` shape. BIDS spec stores Funding as a list of free-text
+ * strings; we map each entry to a sparse FundingReferenceEntry with the text
+ * in funder_name. LLM enrichment (Stage 2a) can refine these later with NIH
+ * grant numbers, ROR IDs, etc.
+ */
+export function coerceFunding(bidsDesc: Record<string, unknown>): Array<{ funder_name: string }> {
+  const raw = bidsDesc.Funding;
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .filter((v): v is string => typeof v === "string" && v.trim().length > 0)
+    .map((funder_name) => ({ funder_name: funder_name.trim() }));
+}
+
+/**
+ * Seed .nemar/metadata.json with source information and IsIdenticalTo relation.
+ *
+ * Phase 2 of #512 expands the seeded fields beyond name/license/authors to
+ * cover bids_version, funding, recording_modality, and datatypes so that
+ * `data.nemar.org/<id>/metadata.json` returns useful values on freshly
+ * imported OpenNeuro datasets before any LLM enrichment runs. Subject count,
+ * tasks, ages, file size, and total_files come from the backend D1 metadata-
+ * columns block (`computeDatasetMetadataColumns`) which is triggered by the
+ * post-import reindex call at the end of importOpenNeuro().
+ */
+export function seedMetadata(
   datasetPath: string,
   nemarId: string,
   openneuroId: string,
@@ -232,7 +338,10 @@ function seedMetadata(
       ]
     : [];
 
-  const metadata = {
+  const modalities = detectModalitiesFromDataset(datasetPath);
+  const funding = coerceFunding(bidsDesc);
+
+  const metadata: Record<string, unknown> = {
     version: "2.0",
     dataset_id: nemarId,
     source: "openneuro",
@@ -246,6 +355,20 @@ function seedMetadata(
     related_identifiers: relatedIdentifiers,
     pipeline_stage: "seeded",
   };
+
+  // Optional fields only emitted when there's actual content. Suppressing
+  // empty arrays/strings keeps the seeded JSON small and makes "this field
+  // came from LLM enrichment, not from seeding" diff-friendly.
+  if (typeof bidsDesc.BIDSVersion === "string") metadata.bids_version = bidsDesc.BIDSVersion;
+  if (modalities.length > 0) metadata.recording_modality = modalities;
+  if (modalities.length > 0) metadata.datatypes = modalities;
+  if (funding.length > 0) metadata.funding_references = funding;
+  if (
+    typeof bidsDesc.Acknowledgements === "string" &&
+    bidsDesc.Acknowledgements.trim().length > 0
+  ) {
+    metadata.acknowledgements = bidsDesc.Acknowledgements.trim();
+  }
 
   writeFileSync(join(nemarDir, "metadata.json"), `${JSON.stringify(metadata, null, 2)}\n`);
 }
@@ -699,6 +822,35 @@ export async function importOpenNeuro(
   }
   if (approved) {
     approveSpinner.succeed("Publication approved");
+  }
+
+  // Phase 2 of #512: trigger LLM enrichment + D1 metadata-column population
+  // for the freshly imported dataset. Without this, on* datasets stay with
+  // NULL modalities/subject_count/tasks/etc in the catalog (the existing
+  // post-version-DOI sync skips on* because it can't push to nemar.org).
+  //
+  // Failure here is logged but non-fatal: the dataset is already published.
+  // Operators can re-run with `nemar admin reindex <id>` afterward.
+  const reindexSpinner = ora("Refreshing metadata + LLM enrichment...").start();
+  try {
+    const result = await reindexDataset(nemarId);
+    const enrichmentOk = result.enrichment?.status === "ok";
+    const colsOk = result.sync?.metadata_columns_written === true;
+    if (enrichmentOk && colsOk) {
+      reindexSpinner.succeed("Refreshed enrichment + metadata columns");
+    } else {
+      const parts: string[] = [];
+      if (!enrichmentOk) parts.push(`enrichment ${result.enrichment?.status ?? "missing"}`);
+      if (!colsOk) parts.push("metadata columns not written");
+      reindexSpinner.warn(
+        `Partial reindex: ${parts.join(", ")} (run 'nemar admin reindex ${nemarId}' to retry)`,
+      );
+    }
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    reindexSpinner.warn(
+      `Reindex failed (non-fatal): ${msg}. Run 'nemar admin reindex ${nemarId}' to retry.`,
+    );
   }
 
   // Summary

@@ -6,7 +6,7 @@
  * without requiring a git clone (used by web frontend).
  */
 
-import { type TreeEntry, getBlobContent, getTreeAtRef } from "./github";
+import { ORG_NAME, type TreeEntry, getBlobContent, getTreeAtRef } from "./github";
 
 export interface ManifestFile {
   key: string;
@@ -79,6 +79,22 @@ export function extractChecksumFromKey(key: string): string {
 }
 
 /**
+ * Optional behaviour switches for {@link generateManifest}. Kept optional and
+ * defaulted so production callers don't change.
+ */
+export interface GenerateManifestOptions {
+  /**
+   * When true, suppress the post-build canary that HEAD-checks `git:`-keyed
+   * paths against raw.githubusercontent.com (#503). Tests that mock the GitHub
+   * tree + blob layer with synthetic data pass `true` here — without it the
+   * canary would 404 against the real internet for fake repo/tag combinations
+   * and surface as test failures unrelated to what the test is exercising.
+   * Production callers (webhooks, admin publish flow) never set this.
+   */
+  skipGitBackedVerification?: boolean;
+}
+
+/**
  * Generate a version manifest by traversing the git tree at a tag
  * and resolving annex pointer files to their S3 keys.
  */
@@ -89,6 +105,7 @@ export async function generateManifest(
   datasetId: string,
   doi: string | null,
   conceptDoi: string | null,
+  options?: GenerateManifestOptions,
 ): Promise<VersionManifest> {
   const tag = version.startsWith("v") ? version : `v${version}`;
 
@@ -164,6 +181,19 @@ export async function generateManifest(
     };
   }
 
+  // Publisher canary (#503): the data.nemar.org Worker resolves git:-keyed
+  // entries by 302-redirecting to raw.githubusercontent.com pinned to this
+  // version tag. That target depends on (a) the repo being publicly readable
+  // and (b) the tag actually existing on GitHub with the manifested blobs.
+  // Today both hold by construction, but recovery scripts and retag flows
+  // could violate either invariant silently. Verify a small canary sample
+  // here so the failure shows up at publish time, not as a 404 on a user
+  // download. Throws on any non-200 — caller surfaces the message to the
+  // operator instead of writing a broken manifest.
+  if (!options?.skipGitBackedVerification) {
+    await verifyGitBackedFiles({ repo, tag, files });
+  }
+
   return {
     dataset_id: datasetId,
     version: version.replace(/^v/, ""),
@@ -172,4 +202,122 @@ export async function generateManifest(
     created: new Date().toISOString(),
     files,
   };
+}
+
+/**
+ * Typed error so admin / webhook callers can surface a clear "your manifest
+ * cannot resolve this file on GitHub" message without substring-matching.
+ */
+export class GitBackedFileMissingError extends Error {
+  constructor(
+    message: string,
+    public readonly checks: GitBackedFileCheckResult[],
+  ) {
+    super(message);
+    this.name = "GitBackedFileMissingError";
+  }
+}
+
+export interface GitBackedFileCheckResult {
+  path: string;
+  url: string;
+  status: number;
+  ok: boolean;
+}
+
+/**
+ * HEAD a small sample of `git:`-keyed files to confirm the version tag is
+ * visible to raw.githubusercontent.com and the manifested paths resolve.
+ *
+ * Sampling strategy: always check `dataset_description.json` if present
+ * (the canonical BIDS root file the website hits first), plus up to four
+ * additional `git:` entries chosen deterministically by path order. Total
+ * worst case is five subrequests, well within the Worker 50-subrequest
+ * budget shared with the rest of the publication pipeline.
+ *
+ * NOTE: when the manifest has zero `git:` entries (every file is annex-
+ * keyed; rare but possible for a derivatives-only dataset) this is a no-op.
+ *
+ * Exported for unit-testing the path-selection logic; the live HEAD branch
+ * is exercised end-to-end in test/publish-workflow.test.ts.
+ */
+export function selectGitBackedCanaries(
+  files: Record<string, ManifestFile>,
+  maxAdditional = 4,
+): string[] {
+  const gitPaths = Object.keys(files)
+    .filter((path) => files[path].key.startsWith("git:"))
+    .sort();
+  if (gitPaths.length === 0) return [];
+  const canaries: string[] = [];
+  if (gitPaths.includes("dataset_description.json")) {
+    canaries.push("dataset_description.json");
+  }
+  // Add up to `maxAdditional` more paths in deterministic order, excluding
+  // any already-added canary so we don't double-check the same blob.
+  for (const path of gitPaths) {
+    if (canaries.length >= 1 + maxAdditional) break;
+    if (!canaries.includes(path)) canaries.push(path);
+  }
+  return canaries;
+}
+
+async function verifyGitBackedFiles(args: {
+  repo: string;
+  tag: string;
+  files: Record<string, ManifestFile>;
+}): Promise<void> {
+  const { repo, tag, files } = args;
+  const canaries = selectGitBackedCanaries(files);
+  if (canaries.length === 0) return;
+
+  const checks = await Promise.all(
+    canaries.map(async (path): Promise<GitBackedFileCheckResult> => {
+      const url = `https://raw.githubusercontent.com/${ORG_NAME}/${repo}/${tag}/${path
+        .split("/")
+        .map(encodeURIComponent)
+        .join("/")}`;
+      // One retry with a 2-second backoff to absorb raw.githubusercontent.com
+      // CDN propagation lag after a fresh tag push. The publish workflow that
+      // calls generateManifest typically runs seconds after `git push --tags`,
+      // so the first HEAD can race the propagation. A single short retry
+      // catches that without inflating the Worker subrequest budget; a real
+      // missing-blob failure stays failed across both attempts.
+      let last: GitBackedFileCheckResult = { path, url, status: 0, ok: false };
+      for (let attempt = 0; attempt < 2; attempt++) {
+        try {
+          const res = await fetch(url, { method: "HEAD", redirect: "follow" });
+          last = { path, url, status: res.status, ok: res.ok };
+          if (res.ok) return last;
+        } catch (err) {
+          console.warn(
+            `[manifest] canary HEAD threw dataset=${repo} tag=${tag} path=${path} attempt=${attempt + 1}:`,
+            err instanceof Error ? err.message : String(err),
+          );
+          last = { path, url, status: 0, ok: false };
+        }
+        if (attempt === 0) {
+          await new Promise((r) => setTimeout(r, 2000));
+        }
+      }
+      return last;
+    }),
+  );
+
+  const failures = checks.filter((c) => !c.ok);
+  if (failures.length === 0) {
+    console.log(
+      `[manifest] git-backed canary OK dataset=${repo} tag=${tag} checked=${canaries.length}`,
+    );
+    return;
+  }
+
+  const summary = failures.map((f) => `${f.path} (HTTP ${f.status})`).join(", ");
+  console.error(
+    `[manifest] git-backed canary FAILED dataset=${repo} tag=${tag} failures=${summary}`,
+  );
+  throw new GitBackedFileMissingError(
+    `Manifest canary failed: ${failures.length}/${checks.length} git:-keyed files do not resolve on raw.githubusercontent.com at tag ${tag}. Failing paths: ${summary}. The version tag may not exist on GitHub yet, the repo may be private, or the blob may have been removed by a retag. Refusing to write a manifest that would 404 on data.nemar.org.`,
+    checks,
+  );
 }

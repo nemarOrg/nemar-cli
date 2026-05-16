@@ -91,12 +91,19 @@ export async function generatePresignedPutUrls(
 }
 
 /**
- * Generate presigned GET URL for downloading a file
+ * Generate presigned GET URL for downloading a file.
+ *
+ * `responseContentDisposition`, when set, becomes a `response-content-disposition`
+ * query parameter that S3 echoes back as the `Content-Disposition` response
+ * header. The value is URL-encoded and included in the SigV4 signature, so it
+ * cannot be tampered with after presigning. Used by the data.nemar.org route to
+ * force BIDS-shaped filenames despite content-addressed object names.
  */
 export async function generatePresignedGetUrl(
   options: PresignedUrlOptions,
   key: string,
   expiresIn = 3600,
+  responseContentDisposition?: string,
 ): Promise<string> {
   // Check both raw and URL-decoded forms to catch double-encoded traversal
   const decoded = decodeURIComponent(key);
@@ -114,8 +121,23 @@ export async function generatePresignedGetUrl(
   const { bucket, region } = options;
   const aws = createS3Client(options);
 
-  // Include X-Amz-Expires in URL BEFORE signing
-  const url = `https://${bucket}.s3.${region}.amazonaws.com/${key}?X-Amz-Expires=${expiresIn}`;
+  // Include X-Amz-Expires (and optional response-content-disposition) in the URL
+  // BEFORE signing so aws4fetch canonicalises them into the signature.
+  //
+  // The disposition value MUST be URL-encoded here even though aws4fetch
+  // re-canonicalises searchParams later: the raw value contains `;`, `=`,
+  // `"`, and (for some filenames) `&`, all of which would derail URL/query
+  // parsing before aws4fetch ever sees them. The `new URL(url)` call inside
+  // aws4fetch decodes one layer back to the original string, which is then
+  // re-encoded for the SigV4 canonical form, so the on-wire URL and the
+  // canonical-string-to-sign agree.
+  const queryParts = [`X-Amz-Expires=${expiresIn}`];
+  if (responseContentDisposition) {
+    queryParts.push(
+      `response-content-disposition=${encodeURIComponent(responseContentDisposition)}`,
+    );
+  }
+  const url = `https://${bucket}.s3.${region}.amazonaws.com/${key}?${queryParts.join("&")}`;
 
   const signedRequest = await aws.sign(url, {
     method: "GET",
@@ -271,6 +293,78 @@ export async function listObjectKeys(
   }
 
   return keys;
+}
+
+export interface S3ListEntry {
+  key: string;
+  size: number;
+  lastModified: string;
+}
+
+export interface S3ListResult {
+  contents: S3ListEntry[];
+  commonPrefixes: string[];
+  truncated: boolean;
+}
+
+/**
+ * One-level S3 listing with `delimiter=/`. Returns immediate-child objects in
+ * `contents` and immediate-child sub-directories in `commonPrefixes` (each
+ * already ends in `/`). Truncation is reported back so callers can decide
+ * whether to ignore, follow continuation, or render a "listing truncated"
+ * affordance.
+ *
+ * Unlike `listObjectPages`, this does a SINGLE round-trip — it is meant for
+ * interactive directory rendering (the data.nemar.org `/qa/*` route), not
+ * bulk enumeration. The route caller pages by setting `prefix` deeper.
+ */
+export async function listObjectsWithDelimiter(
+  options: PresignedUrlOptions,
+  prefix: string,
+  maxKeys = 1000,
+): Promise<S3ListResult> {
+  const { bucket, region } = options;
+  const aws = createS3Client(options);
+
+  const params = new URLSearchParams({
+    "list-type": "2",
+    prefix,
+    delimiter: "/",
+    "max-keys": String(maxKeys),
+  });
+  const url = `https://${bucket}.s3.${region}.amazonaws.com/?${params.toString()}`;
+  const signed = await aws.sign(url, { method: "GET" });
+  const res = await fetch(signed);
+  if (!res.ok) {
+    throw new Error(`Failed to list objects (prefix=${prefix}): HTTP ${res.status}`);
+  }
+  const xml = await res.text();
+  if (!xml.includes("<ListBucketResult")) {
+    throw new Error(`Unexpected S3 response (not ListBucketResult): ${xml.slice(0, 200)}`);
+  }
+
+  const contents: S3ListEntry[] = [];
+  const contentMatches = xml.matchAll(
+    /<Contents>[\s\S]*?<Key>([^<]+)<\/Key>[\s\S]*?<LastModified>([^<]+)<\/LastModified>[\s\S]*?<Size>(\d+)<\/Size>[\s\S]*?<\/Contents>/g,
+  );
+  for (const match of contentMatches) {
+    contents.push({
+      key: match[1],
+      lastModified: match[2],
+      size: Number.parseInt(match[3], 10),
+    });
+  }
+
+  const commonPrefixes: string[] = [];
+  const prefixMatches = xml.matchAll(
+    /<CommonPrefixes>\s*<Prefix>([^<]+)<\/Prefix>\s*<\/CommonPrefixes>/g,
+  );
+  for (const match of prefixMatches) {
+    commonPrefixes.push(match[1]);
+  }
+
+  const truncated = xml.includes("<IsTruncated>true</IsTruncated>");
+  return { contents, commonPrefixes, truncated };
 }
 
 // ---------------------------------------------------------------------------

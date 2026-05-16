@@ -4843,6 +4843,7 @@ adminRoutes.post("/datasets/:id/sync", async (c) => {
       ...(result.metadata_columns_error && {
         metadata_columns_error: result.metadata_columns_error,
       }),
+      ...(result.nemar_sync_skipped && { nemar_sync_skipped: true }),
     });
   } catch (err) {
     if (err instanceof DatasetReindexError) {
@@ -4905,8 +4906,18 @@ adminRoutes.post("/datasets/:id/reindex", async (c) => {
   if (!skipSync) {
     try {
       const sync = await runDatasetSync(c.env, datasetId);
+      // `nemar_sync_skipped` is set when the upstream push was intentionally
+      // suppressed (today: OpenNeuro datasets that have no alternate_id
+      // mapping). Map that to status="skipped" so callers can distinguish a
+      // real failure from a benign skip. Metadata columns are still written
+      // in the skip case, so we keep that field accurate.
+      const syncStatus: "ok" | "failed" | "skipped" = sync.nemar_sync_skipped
+        ? "skipped"
+        : sync.synced
+          ? "ok"
+          : "failed";
       result.sync = {
-        status: sync.synced ? "ok" : "failed",
+        status: syncStatus,
         errors: sync.errors,
         metadata_columns_written: sync.metadata_columns_written,
         ...(sync.metadata_columns_error && {
