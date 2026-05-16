@@ -141,14 +141,47 @@ export function resolveFile(manifest: VersionManifest, rawPath: string): Resolve
 const ANNEX_KEY_RE = /^[A-Z0-9]+-s\d+--/;
 
 /**
+ * Build an RFC 6266 `Content-Disposition: attachment` value with both a plain
+ * ASCII `filename=` (for older clients like wget < 1.16, IE) and an RFC 5987
+ * `filename*=UTF-8''...` extension so Unicode filenames survive across
+ * browsers, rclone, aria2c, and curl. Both forms describe the same name; RFC
+ * 6266 mandates the extended form wins where both are present.
+ *
+ * The disposition string is deliberately built with NO whitespace between
+ * tokens (RFC 6266 OWS is optional). The downstream S3 presigner sends this
+ * value through `URLSearchParams`, which form-encodes spaces as `+` rather
+ * than `%20`; that survives the SigV4 signature (it's stored on
+ * `this.url.searchParams`) but means a literal `+` could surface in the
+ * response header on some S3 paths. Omitting whitespace dodges the question.
+ *
+ * The plain form sanitises non-printable, non-ASCII, quote, backslash, and
+ * space to `_` so the quoted-string is well-formed AND has no characters
+ * that need form-encoding inside the query parameter. The extended form
+ * percent-encodes per RFC 5987 attr-char (encodeURIComponent leaves
+ * `! ' ( ) *` unescaped, which RFC 5987 forbids, so we fix those up).
+ */
+export function buildContentDisposition(filename: string): string {
+  const asciiSafe = filename.replace(/[^\x20-\x7E]/g, "_").replace(/[ "\\]/g, "_");
+  const utf8 = encodeURIComponent(filename).replace(
+    /['()*]/g,
+    (c) => `%${c.charCodeAt(0).toString(16).toUpperCase()}`,
+  );
+  return `attachment;filename="${asciiSafe}";filename*=UTF-8''${utf8}`;
+}
+
+/**
  * Build the URL the Worker 302s to for a resolved file.
  *
  * Annex-backed files (key like `SHA256E-s12345--...edf`, also `MD5E-`,
  * `SHA1E-`, etc.) -> presigned S3 GET against `<datasetId>/objects/<key>`.
+ * The presigned URL carries `response-content-disposition=attachment;
+ * filename="<bidsBasename>"` so S3 returns the BIDS-shaped filename on
+ * download instead of the content-addressed object name. See #513.
  *
  * git-backed files (`key: "git:<blob-sha>"`, used for small in-tree files
  * like dataset_description.json) -> raw.githubusercontent.com URL pinned
- * to the version tag.
+ * to the version tag. raw.githubusercontent.com responds with the BIDS
+ * basename naturally because the URL path ends with it.
  *
  * Implicit invariant for the git: branch: the dataset's GitHub repo must
  * be public AND the version tag must exist on it. Both are guaranteed by
@@ -156,7 +189,7 @@ const ANNEX_KEY_RE = /^[A-Z0-9]+-s\d+--/;
  * public before writing the D1 version row, which only happens after a
  * successful tag push). If that invariant ever breaks, the 302 target
  * itself returns 404 to the user with no Worker-side signal. Tracked as
- * a Phase 3 follow-up on epic #449.
+ * a publisher canary in #503.
  */
 export async function buildRedirectUrl(args: {
   datasetId: string;
@@ -175,7 +208,16 @@ export async function buildRedirectUrl(args: {
   if (!ANNEX_KEY_RE.test(file.key)) {
     throw new Error(`Unrecognized manifest key format: ${file.key}`);
   }
-  return generatePresignedGetUrl(s3Options, `${datasetId}/objects/${file.key}`, expiresIn ?? 3600);
+  // filter(Boolean) tolerates a trailing-slash bidsPath (which the manifest
+  // resolver strips today but a future caller might not). Without it, a path
+  // like "sub-01/eeg/" would land the full path as the filename.
+  const basename = bidsPath.split("/").filter(Boolean).pop() ?? bidsPath;
+  return generatePresignedGetUrl(
+    s3Options,
+    `${datasetId}/objects/${file.key}`,
+    expiresIn ?? 3600,
+    buildContentDisposition(basename),
+  );
 }
 
 const HTML_ESCAPES: Record<string, string> = {
@@ -813,11 +855,7 @@ ${removedFooter}<hr>
  * version (or a 404 with a tombstone if that path doesn't exist
  * there -- which is exactly the signal the user wants).
  */
-function renderVersionPicker(
-  idHref: string,
-  path: string,
-  versions: VersionPickerEntry[],
-): string {
+function renderVersionPicker(idHref: string, path: string, versions: VersionPickerEntry[]): string {
   // path is already a normalized BIDS path (no leading/trailing slashes).
   // encodeURI preserves slashes between segments; the segments themselves
   // come from manifest keys which are tightly constrained by BIDS naming.
@@ -841,11 +879,7 @@ function renderVersionPicker(
  * still exists. Names are HTML-escaped and the href segments are
  * percent-encoded for the same reason as the directory table.
  */
-function renderRemovedSinceFooter(
-  idHref: string,
-  path: string,
-  note: RemovedSinceNote,
-): string {
+function renderRemovedSinceFooter(idHref: string, path: string, note: RemovedSinceNote): string {
   const prevVersion = encodeURIComponent(note.lastSeenVersion);
   const subPath = path === "" ? "" : `${encodeURI(path)}/`;
   const items = note.names

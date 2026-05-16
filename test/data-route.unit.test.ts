@@ -12,6 +12,7 @@ import "./setup";
 import {
   VERSION_TAG_RE,
   buildBidsIndex,
+  buildContentDisposition,
   buildDatasetMetadata,
   buildLandingPayload,
   buildPersonList,
@@ -277,6 +278,111 @@ describe("buildRedirectUrl", () => {
     expect(url).toContain("X-Amz-Expires=3600");
   });
 
+  test("annex-keyed presigned URLs carry response-content-disposition with BIDS basename (#513)", async () => {
+    const url = await buildRedirectUrl({
+      datasetId: "nm000104",
+      version: "v2.0.0",
+      bidsPath: "sub-01438774/ses-1625258895/emg/sub-01438774_ses-1625258895_task-typing_emg.bdf",
+      file: {
+        key: "SHA256E-s197576448--c70cae6e4a043e2124d7e5ee94422d02.bdf",
+        size: 197576448,
+        checksum: "sha256:c70cae6e4a043e2124d7e5ee94422d02",
+      },
+      s3Options,
+      githubOrg: "nemarDatasets",
+    });
+    expect(url).toContain("response-content-disposition=");
+    // Decode the URL the way an HTTP client would. aws4fetch round-trips through
+    // URLSearchParams which may form-encode spaces as `+`; tolerate that here so
+    // the test stays robust regardless of the encoder choice.
+    const decoded = decodeURIComponent(url.replace(/\+/g, " "));
+    expect(decoded).toContain(
+      'attachment;filename="sub-01438774_ses-1625258895_task-typing_emg.bdf"',
+    );
+    expect(decoded).toContain(
+      "filename*=UTF-8''sub-01438774_ses-1625258895_task-typing_emg.bdf",
+    );
+    // Signature MUST cover the disposition param or S3 will reject the request.
+    expect(url).toContain("X-Amz-Signature=");
+  });
+
+  test("response-content-disposition uses BIDS basename, not the SHA-named key (#513)", async () => {
+    const url = await buildRedirectUrl({
+      datasetId: "nm099999",
+      version: "v1.0.0",
+      bidsPath: "sub-01/eeg/sub-01_task-rest_eeg.edf",
+      file: {
+        key: "SHA256E-s12345--deadbeef.edf",
+        size: 12345,
+        checksum: "sha256:deadbeef",
+      },
+      s3Options,
+      githubOrg: "nemarDatasets",
+    });
+    const decoded = decodeURIComponent(url.replace(/\+/g, " "));
+    expect(decoded).toContain('filename="sub-01_task-rest_eeg.edf"');
+    expect(decoded).not.toContain('filename="SHA256E-');
+  });
+
+  test("annex file with trailing-slash bidsPath still gets the right basename (defensive)", async () => {
+    // The manifest resolver normalizes trailing slashes today, but the
+    // basename derivation defends against a future caller that doesn't.
+    // Without the filter(Boolean), `"sub-01/eeg/".split("/").pop()` returns
+    // "" and the fallback would put the whole path in the filename.
+    const url = await buildRedirectUrl({
+      datasetId: "nm099999",
+      version: "v1.0.0",
+      bidsPath: "sub-01/eeg/sub-01_task-rest_eeg.edf/",
+      file: { key: "SHA256E-s10--abc.edf", size: 10, checksum: "sha256:abc" },
+      s3Options,
+      githubOrg: "nemarDatasets",
+    });
+    const decoded = decodeURIComponent(url.replace(/\+/g, " "));
+    expect(decoded).toContain('filename="sub-01_task-rest_eeg.edf"');
+    expect(decoded).not.toContain('filename="sub-01/eeg/');
+  });
+
+  test("top-level annex file (no slash in bidsPath) still gets the right basename", async () => {
+    // Defends the `bidsPath.split("/").pop()` path against a future refactor
+    // that uses the wrong segment index. Today most root files are git: keyed,
+    // but #509 fixed cases where small root files like dataset_description.json
+    // can be annex pointers; the disposition path must work for them too.
+    const url = await buildRedirectUrl({
+      datasetId: "nm099999",
+      version: "v1.0.0",
+      bidsPath: "CHANGES",
+      file: { key: "SHA256E-s512--root.txt", size: 512, checksum: "sha256:root" },
+      s3Options,
+      githubOrg: "nemarDatasets",
+    });
+    const decoded = decodeURIComponent(url.replace(/\+/g, " "));
+    expect(decoded).toContain('filename="CHANGES"');
+  });
+
+  test("response-content-disposition is signed (appears before X-Amz-Signature in query order)", async () => {
+    // aws4fetch sorts canonical query params alphabetically; `r` < `X`, so
+    // response-content-disposition always sorts before X-Amz-Signature in
+    // the signed URL. Pinning this defends against a future presigner refactor
+    // that appends the param after signing (which would unsign it).
+    const url = await buildRedirectUrl({
+      datasetId: "nm099999",
+      version: "v1.0.0",
+      bidsPath: "sub-01/eeg/sub-01_task-rest_eeg.edf",
+      file: {
+        key: "SHA256E-s12345--deadbeef.edf",
+        size: 12345,
+        checksum: "sha256:deadbeef",
+      },
+      s3Options,
+      githubOrg: "nemarDatasets",
+    });
+    const dispoIdx = url.indexOf("response-content-disposition=");
+    const sigIdx = url.indexOf("X-Amz-Signature=");
+    expect(dispoIdx).toBeGreaterThan(-1);
+    expect(sigIdx).toBeGreaterThan(-1);
+    expect(dispoIdx).toBeLessThan(sigIdx);
+  });
+
   test("MD5E annex keys also presign (legacy OpenNeuro imports)", async () => {
     const url = await buildRedirectUrl({
       datasetId: "nm099999",
@@ -321,6 +427,47 @@ describe("escapeHtml", () => {
     expect(escapeHtml('<script>alert("x")</script>&\'')).toBe(
       "&lt;script&gt;alert(&quot;x&quot;)&lt;/script&gt;&amp;&#39;",
     );
+  });
+});
+
+describe("buildContentDisposition", () => {
+  test("plain ASCII filename produces both plain and extended forms with no inter-token whitespace", () => {
+    const out = buildContentDisposition("sub-01_task-rest_eeg.edf");
+    expect(out).toBe(
+      "attachment;filename=\"sub-01_task-rest_eeg.edf\";filename*=UTF-8''sub-01_task-rest_eeg.edf",
+    );
+  });
+
+  test("non-ASCII filename: plain form replaces with _, extended form percent-encodes", () => {
+    const out = buildContentDisposition("müller-α.tsv");
+    expect(out).toContain('filename="m_ller-_.tsv"');
+    expect(out).toContain("filename*=UTF-8''m%C3%BCller-%CE%B1.tsv");
+  });
+
+  test("filename with quotes and backslashes is sanitised in the plain form", () => {
+    const out = buildContentDisposition('weird"file\\name.txt');
+    expect(out).toContain('filename="weird_file_name.txt"');
+    expect(out).toContain("filename*=UTF-8''weird%22file%5Cname.txt");
+  });
+
+  test("RFC 5987 attr-char fix-ups: ' ( ) * are percent-encoded in the extended form", () => {
+    const out = buildContentDisposition("a*b'c(d)e!.txt");
+    // encodeURIComponent leaves these unescaped; the helper must fix that up.
+    // `!` is in RFC 5987 attr-char (allowed unencoded); the others are not.
+    expect(out).toContain("filename*=UTF-8''a%2Ab%27c%28d%29e!.txt");
+  });
+
+  test("spaces in filename are replaced with _ in plain form, percent-encoded in extended form", () => {
+    const out = buildContentDisposition("my file.txt");
+    // No literal space in the plain form: avoids ambiguity when this value is
+    // later embedded in a URL query parameter that may form-encode space->`+`.
+    expect(out).toContain('filename="my_file.txt"');
+    expect(out).toContain("filename*=UTF-8''my%20file.txt");
+  });
+
+  test("disposition has no whitespace tokens at all (defends against query-param encoding drift)", () => {
+    const out = buildContentDisposition("sub-01_task-rest_eeg.edf");
+    expect(out).not.toContain(" ");
   });
 });
 
