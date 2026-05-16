@@ -27,6 +27,7 @@ import {
   renderIndexHtml,
   renderTombstone404Html,
   resolveFile,
+  resolveQaPath,
   resolveVersion,
   toHttpDate,
   toVersionTag,
@@ -35,7 +36,7 @@ import { parseNemarMetadata } from "../services/datacite";
 import { isValidDatasetId } from "../services/datasetId";
 import { ORG_NAME } from "../services/github";
 import type { ManifestFile, VersionManifest } from "../services/manifest";
-import { type PresignedUrlOptions, getManifest } from "../services/s3";
+import { type PresignedUrlOptions, generatePresignedGetUrl, getManifest } from "../services/s3";
 import type { Bindings, Variables } from "../types/bindings";
 
 export const dataRoutes = new Hono<{ Bindings: Bindings; Variables: Variables }>();
@@ -579,6 +580,157 @@ dataRoutes.get("/:datasetId/metadata.json", (c) => {
   return metadataJsonHandler(c.env, datasetId);
 });
 
+// ===========================================================================
+// QA artifact route: /<id>/qa/*  (see #511)
+//
+// Mirrors `/data/qumulo/openneuro/processed/<id>/` from SDSC Hallu into
+// `s3://nemar/<id>/qa/` via `scripts/hallu-qa-sync.sh` (hourly cron). This
+// route exposes that tree at `data.nemar.org/<id>/qa/...`:
+//
+//   GET /<id>/qa/                                 -> directory listing (root)
+//   GET /<id>/qa/dataqual.json                    -> 302 to presigned S3 GET
+//   GET /<id>/qa/sub-001/                         -> directory listing
+//   GET /<id>/qa/sub-001/eeg/foo_icaact.svg       -> 302 to presigned S3 GET
+//
+// Registered BEFORE `/:datasetId/:version/*` so the Hono router does not
+// interpret `qa` as a version param. The QA tree is NOT version-locked --
+// it reflects whichever pipeline run last published; the website expects
+// `/<id>/qa/...` not `/<id>/<v>/qa/...`. Phase 3 punts per-version QA.
+//
+// Visibility: same gate as the rest of this sub-app — public datasets
+// only. Private/unknown datasets 404 with no existence leak.
+//
+// Cache-Control: 300s — QA artifacts are stable per pipeline run; 5 min is
+// a reasonable client-side cache while leaving the website responsive to
+// post-sync refreshes.
+// ===========================================================================
+async function qaHandler(
+  env: Bindings,
+  request: Request,
+  datasetId: string,
+  rawPath: string,
+): Promise<Response> {
+  const dataset = await loadPublishedDataset(env, datasetId);
+  if (!dataset) return notFound("Dataset not found");
+
+  const s3 = s3OptionsFromEnv(env);
+  let resolved: Awaited<ReturnType<typeof resolveQaPath>>;
+  try {
+    resolved = await resolveQaPath({ s3Options: s3, datasetId, rawPath });
+  } catch (err) {
+    console.error(
+      `[data] QA resolve crashed dataset=${datasetId} path=${rawPath}:`,
+      err instanceof Error ? err.message : String(err),
+    );
+    return notFound("QA path not found");
+  }
+
+  if (resolved.kind === "not_found") {
+    return notFound("QA path not found");
+  }
+
+  const isHead = request.method === "HEAD";
+
+  if (resolved.kind === "file") {
+    if (isHead) {
+      // Mirror the version-route HEAD semantics: 200 with metadata headers,
+      // no presign round-trip required so rclone can size+mtime cheaply.
+      return new Response(null, {
+        status: 200,
+        headers: {
+          "Content-Length": String(resolved.size),
+          "Last-Modified": toHttpDate(resolved.lastModified),
+          ETag: `"${resolved.size}-${resolved.lastModified}"`,
+          "Cache-Control": "public, max-age=300",
+        },
+      });
+    }
+    // QA files in S3 already have BIDS-shaped keys (the sync mirrors paths
+    // directly under `<id>/qa/<bids-path>`), so the presigned URL basename
+    // is already the BIDS name. No Content-Disposition override needed
+    // here — that fix in #513 only applies to annex-keyed dataset files
+    // where the S3 key is content-addressed (`SHA256E-...`).
+    const url = await generatePresignedGetUrl(s3, resolved.key, 3600);
+    return new Response(null, {
+      status: 302,
+      headers: {
+        Location: url,
+        "Cache-Control": "public, max-age=300",
+        "Last-Modified": toHttpDate(resolved.lastModified),
+        ETag: `"${resolved.size}-${resolved.lastModified}"`,
+      },
+    });
+  }
+
+  // Directory listing.
+  const accept = request.headers.get("accept");
+  const formatParam = new URL(request.url).searchParams.get("format");
+  const fmt = pickResponseFormat({ accept, formatParam });
+
+  if (fmt === "json" || isHead) {
+    const body = {
+      dataset_id: datasetId,
+      path: resolved.path,
+      kind: "directory" as const,
+      children: resolved.children,
+      truncated: resolved.truncated,
+    };
+    return new Response(isHead ? null : JSON.stringify(body), {
+      status: 200,
+      headers: {
+        "Content-Type": "application/json",
+        "Cache-Control": "public, max-age=300",
+      },
+    });
+  }
+
+  const html = renderIndexHtml({
+    datasetId,
+    // The QA tree is not version-locked. Reuse the existing index renderer
+    // by passing a synthetic "qa" version label so the breadcrumb reads
+    // sensibly to humans. There is no version-picker UI to surface here.
+    version: "qa",
+    path: resolved.path,
+    entries: resolved.children,
+    availableVersions: [],
+    removedSinceNote: null,
+  });
+  return new Response(html, {
+    headers: {
+      "Content-Type": "text/html; charset=utf-8",
+      "Cache-Control": "public, max-age=300",
+    },
+  });
+}
+
+dataRoutes.get("/:datasetId/qa", async (c) => {
+  // Redirect /<id>/qa -> /<id>/qa/ for trailing-slash consistency with the
+  // version route. Pre-check visibility so we don't echo a 308 Location for
+  // a private or nonexistent dataset (information disclosure parity with the
+  // version-route 308 handler).
+  const { datasetId } = c.req.param();
+  const dataset = await loadPublishedDataset(c.env, datasetId);
+  if (!dataset) return notFound("Dataset not found");
+  const url = new URL(c.req.url);
+  url.pathname = `${url.pathname.replace(/\/+$/, "")}/`;
+  return new Response(null, {
+    status: 308,
+    headers: { Location: url.toString(), "Cache-Control": "public, max-age=300" },
+  });
+});
+
+dataRoutes.get("/:datasetId/qa/", (c) => {
+  return qaHandler(c.env, c.req.raw, c.req.param("datasetId"), "");
+});
+
+dataRoutes.get("/:datasetId/qa/*", (c) => {
+  const datasetId = c.req.param("datasetId");
+  const prefix = `/${datasetId}/qa/`;
+  const idx = c.req.path.indexOf(prefix);
+  const rawPath = idx === -1 ? "" : c.req.path.slice(idx + prefix.length);
+  return qaHandler(c.env, c.req.raw, datasetId, rawPath);
+});
+
 // Redirect /<id>/<version> -> /<id>/<version>/ so the relative `../` link in
 // the rendered index resolves correctly. Only redirect when the dataset is
 // actually public so we don't echo private/nonexistent ids back in a 308
@@ -634,7 +786,11 @@ dataRoutes.get("/:datasetId/:version/*", (c) => {
  * with an empty version list and an "unpublished" notice (status 200) --
  * the row is real, just not ready to serve files yet.
  */
-async function datasetRootResponse(env: Bindings, request: Request, datasetId: string): Promise<Response> {
+async function datasetRootResponse(
+  env: Bindings,
+  request: Request,
+  datasetId: string,
+): Promise<Response> {
   const dataset = await loadPublishedDataset(env, datasetId);
   if (!dataset) return notFound("Dataset not found");
 
@@ -663,5 +819,9 @@ async function datasetRootResponse(env: Bindings, request: Request, datasetId: s
   });
 }
 
-dataRoutes.get("/:datasetId", (c) => datasetRootResponse(c.env, c.req.raw, c.req.param("datasetId")));
-dataRoutes.get("/:datasetId/", (c) => datasetRootResponse(c.env, c.req.raw, c.req.param("datasetId")));
+dataRoutes.get("/:datasetId", (c) =>
+  datasetRootResponse(c.env, c.req.raw, c.req.param("datasetId")),
+);
+dataRoutes.get("/:datasetId/", (c) =>
+  datasetRootResponse(c.env, c.req.raw, c.req.param("datasetId")),
+);
