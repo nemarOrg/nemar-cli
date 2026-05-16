@@ -313,6 +313,13 @@ export async function runDatasetSync(
   // and surface the skip via the return value.
   let syncResult: { synced: boolean; errors: string[] };
   if (skipNemarSync) {
+    // Distinguish the on* skip from a real "synced: false" in the logs so
+    // operators correlating reindex runs can tell intentional skip from
+    // genuine failure. The metadata-columns block below still runs and
+    // produces its own log line — both lines together describe what happened.
+    console.log(
+      `[reindex] nemar.org sync skipped for ${datasetId} (OpenNeuro alternate_id mapping unavailable)`,
+    );
     syncResult = {
       synced: false,
       errors: ["nemar.org sync skipped: OpenNeuro dataset has no alternate_id mapping yet"],
