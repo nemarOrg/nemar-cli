@@ -161,6 +161,107 @@ describe("manifest - annex pointer parsing", () => {
 });
 
 // ============================================================================
+// Unit tests for the publisher canary helper (#503)
+// ============================================================================
+
+describe("manifest - selectGitBackedCanaries (#503)", () => {
+  const { selectGitBackedCanaries } = require("../backend/src/services/manifest");
+
+  function fixture(paths: string[]): Record<string, { key: string; size: number; checksum: string }> {
+    const files: Record<string, { key: string; size: number; checksum: string }> = {};
+    for (const p of paths) {
+      files[p] = { key: `git:${p}-sha`, size: 100, checksum: `git:${p}-sha` };
+    }
+    return files;
+  }
+
+  test("empty manifest returns no canaries (no-op short-circuit)", () => {
+    expect(selectGitBackedCanaries({})).toEqual([]);
+  });
+
+  test("manifest with only annex keys returns no canaries", () => {
+    expect(
+      selectGitBackedCanaries({
+        "sub-01/eeg/x.edf": {
+          key: "SHA256E-s12345--abc.edf",
+          size: 12345,
+          checksum: "sha256:abc",
+        },
+      }),
+    ).toEqual([]);
+  });
+
+  test("dataset_description.json is always included when present", () => {
+    const out = selectGitBackedCanaries(
+      fixture(["README", "CHANGES", "dataset_description.json", "participants.tsv"]),
+    );
+    expect(out).toContain("dataset_description.json");
+  });
+
+  test("sample is capped at 5 total (1 canonical + 4 additional)", () => {
+    const paths = [
+      "dataset_description.json",
+      "README",
+      "CHANGES",
+      "participants.tsv",
+      "sub-01_task-rest_events.tsv",
+      "sub-02_task-rest_events.tsv",
+      "sub-03_task-rest_events.tsv",
+      "sub-04_task-rest_events.tsv",
+    ];
+    const out = selectGitBackedCanaries(fixture(paths));
+    expect(out.length).toBeLessThanOrEqual(5);
+    expect(out).toContain("dataset_description.json");
+  });
+
+  test("selection is deterministic across multiple calls", () => {
+    const paths = [
+      "dataset_description.json",
+      "z-last.tsv",
+      "a-first.tsv",
+      "m-middle.tsv",
+      "README",
+      "CHANGES",
+    ];
+    const a = selectGitBackedCanaries(fixture(paths));
+    const b = selectGitBackedCanaries(fixture(paths));
+    expect(a).toEqual(b);
+  });
+
+  test("paths are sampled in sorted order so a tiny git: set is fully covered", () => {
+    const out = selectGitBackedCanaries(fixture(["b.json", "a.json", "c.json"]));
+    expect(out).toEqual(["a.json", "b.json", "c.json"]);
+  });
+
+  test("does not include annex-keyed entries even when there are few git: ones", () => {
+    const files: Record<string, { key: string; size: number; checksum: string }> = {
+      "dataset_description.json": {
+        key: "git:abc",
+        size: 100,
+        checksum: "git:abc",
+      },
+      "sub-01/eeg/x.edf": {
+        key: "SHA256E-s12345--abc.edf",
+        size: 12345,
+        checksum: "sha256:abc",
+      },
+      "sub-01/eeg/y.edf": {
+        key: "SHA256E-s23456--def.edf",
+        size: 23456,
+        checksum: "sha256:def",
+      },
+    };
+    expect(selectGitBackedCanaries(files)).toEqual(["dataset_description.json"]);
+  });
+
+  test("respects custom maxAdditional cap", () => {
+    const paths = ["a.json", "b.json", "c.json", "d.json", "e.json"];
+    expect(selectGitBackedCanaries(fixture(paths), 2)).toHaveLength(3);
+    expect(selectGitBackedCanaries(fixture(paths), 0)).toHaveLength(1);
+  });
+});
+
+// ============================================================================
 // CLI tests - help output
 // ============================================================================
 
