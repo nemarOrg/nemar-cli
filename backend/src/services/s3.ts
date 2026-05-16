@@ -91,12 +91,19 @@ export async function generatePresignedPutUrls(
 }
 
 /**
- * Generate presigned GET URL for downloading a file
+ * Generate presigned GET URL for downloading a file.
+ *
+ * `responseContentDisposition`, when set, becomes a `response-content-disposition`
+ * query parameter that S3 echoes back as the `Content-Disposition` response
+ * header. The value is URL-encoded and included in the SigV4 signature, so it
+ * cannot be tampered with after presigning. Used by the data.nemar.org route to
+ * force BIDS-shaped filenames despite content-addressed object names.
  */
 export async function generatePresignedGetUrl(
   options: PresignedUrlOptions,
   key: string,
   expiresIn = 3600,
+  responseContentDisposition?: string,
 ): Promise<string> {
   // Check both raw and URL-decoded forms to catch double-encoded traversal
   const decoded = decodeURIComponent(key);
@@ -114,8 +121,15 @@ export async function generatePresignedGetUrl(
   const { bucket, region } = options;
   const aws = createS3Client(options);
 
-  // Include X-Amz-Expires in URL BEFORE signing
-  const url = `https://${bucket}.s3.${region}.amazonaws.com/${key}?X-Amz-Expires=${expiresIn}`;
+  // Include X-Amz-Expires (and optional response-content-disposition) in the URL
+  // BEFORE signing so aws4fetch canonicalises them into the signature.
+  const queryParts = [`X-Amz-Expires=${expiresIn}`];
+  if (responseContentDisposition) {
+    queryParts.push(
+      `response-content-disposition=${encodeURIComponent(responseContentDisposition)}`,
+    );
+  }
+  const url = `https://${bucket}.s3.${region}.amazonaws.com/${key}?${queryParts.join("&")}`;
 
   const signedRequest = await aws.sign(url, {
     method: "GET",
