@@ -208,7 +208,10 @@ export async function buildRedirectUrl(args: {
   if (!ANNEX_KEY_RE.test(file.key)) {
     throw new Error(`Unrecognized manifest key format: ${file.key}`);
   }
-  const basename = bidsPath.split("/").pop() || bidsPath;
+  // filter(Boolean) tolerates a trailing-slash bidsPath (which the manifest
+  // resolver strips today but a future caller might not). Without it, a path
+  // like "sub-01/eeg/" would land the full path as the filename.
+  const basename = bidsPath.split("/").filter(Boolean).pop() ?? bidsPath;
   return generatePresignedGetUrl(
     s3Options,
     `${datasetId}/objects/${file.key}`,

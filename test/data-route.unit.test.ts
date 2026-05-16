@@ -324,6 +324,24 @@ describe("buildRedirectUrl", () => {
     expect(decoded).not.toContain('filename="SHA256E-');
   });
 
+  test("annex file with trailing-slash bidsPath still gets the right basename (defensive)", async () => {
+    // The manifest resolver normalizes trailing slashes today, but the
+    // basename derivation defends against a future caller that doesn't.
+    // Without the filter(Boolean), `"sub-01/eeg/".split("/").pop()` returns
+    // "" and the fallback would put the whole path in the filename.
+    const url = await buildRedirectUrl({
+      datasetId: "nm099999",
+      version: "v1.0.0",
+      bidsPath: "sub-01/eeg/sub-01_task-rest_eeg.edf/",
+      file: { key: "SHA256E-s10--abc.edf", size: 10, checksum: "sha256:abc" },
+      s3Options,
+      githubOrg: "nemarDatasets",
+    });
+    const decoded = decodeURIComponent(url.replace(/\+/g, " "));
+    expect(decoded).toContain('filename="sub-01_task-rest_eeg.edf"');
+    expect(decoded).not.toContain('filename="sub-01/eeg/');
+  });
+
   test("top-level annex file (no slash in bidsPath) still gets the right basename", async () => {
     // Defends the `bidsPath.split("/").pop()` path against a future refactor
     // that uses the wrong segment index. Today most root files are git: keyed,
