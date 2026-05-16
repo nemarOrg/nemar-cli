@@ -102,11 +102,6 @@ export async function runDatasetSync(
   options?: RunDatasetSyncOptions,
 ): Promise<DatasetSyncResult> {
   const db = env.DB;
-  const nemarUser = env.NEMAR_USERNAME;
-  const nemarPass = env.NEMAR_PASSWORD;
-  if (!nemarUser || !nemarPass) {
-    throw new DatasetReindexError("NEMAR_USERNAME / NEMAR_PASSWORD not configured", 500);
-  }
 
   const dataset = await db
     .prepare(
@@ -139,6 +134,21 @@ export async function runDatasetSync(
   // forever (#512). The skip flag is honoured below to suppress only the
   // nemar.org push; the metadata-columns block still runs.
   const skipNemarSync = datasetId.startsWith("on");
+
+  // Only the nemar.org push needs NEMAR creds. Defer the check so on*
+  // reindex works in test/staging envs where NEMAR_{USERNAME,PASSWORD} aren't
+  // set, and so the operator sees a 400 about an unsupported dataset prefix
+  // rather than a 500 about an unrelated configuration gap.
+  let nemarUser: string | undefined;
+  let nemarPass: string | undefined;
+  if (!skipNemarSync) {
+    nemarUser = env.NEMAR_USERNAME;
+    nemarPass = env.NEMAR_PASSWORD;
+    if (!nemarUser || !nemarPass) {
+      throw new DatasetReindexError("NEMAR_USERNAME / NEMAR_PASSWORD not configured", 500);
+    }
+  }
+
   if (datasetId.startsWith("xx")) {
     throw new DatasetReindexError(
       `Sandbox dataset ${datasetId} is not eligible for nemar.org sync`,
@@ -308,7 +318,10 @@ export async function runDatasetSync(
       errors: ["nemar.org sync skipped: OpenNeuro dataset has no alternate_id mapping yet"],
     };
   } else {
-    syncResult = await syncDatasetToNemar(nemarUser, nemarPass, {
+    // Non-skip branch: credentials were validated above (skipNemarSync is false).
+    // The non-null assertions are safe — if nemarUser/nemarPass were undefined
+    // we would have thrown DatasetReindexError before reaching this point.
+    syncResult = await syncDatasetToNemar(nemarUser!, nemarPass!, {
       datasetId,
       bidsDescription,
       nemarMetadata: nemarMeta,
