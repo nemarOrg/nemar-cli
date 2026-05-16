@@ -79,6 +79,22 @@ export function extractChecksumFromKey(key: string): string {
 }
 
 /**
+ * Optional behaviour switches for {@link generateManifest}. Kept optional and
+ * defaulted so production callers don't change.
+ */
+export interface GenerateManifestOptions {
+  /**
+   * When true, suppress the post-build canary that HEAD-checks `git:`-keyed
+   * paths against raw.githubusercontent.com (#503). Tests that mock the GitHub
+   * tree + blob layer with synthetic data pass `true` here — without it the
+   * canary would 404 against the real internet for fake repo/tag combinations
+   * and surface as test failures unrelated to what the test is exercising.
+   * Production callers (webhooks, admin publish flow) never set this.
+   */
+  skipGitBackedVerification?: boolean;
+}
+
+/**
  * Generate a version manifest by traversing the git tree at a tag
  * and resolving annex pointer files to their S3 keys.
  */
@@ -89,6 +105,7 @@ export async function generateManifest(
   datasetId: string,
   doi: string | null,
   conceptDoi: string | null,
+  options?: GenerateManifestOptions,
 ): Promise<VersionManifest> {
   const tag = version.startsWith("v") ? version : `v${version}`;
 
@@ -173,7 +190,9 @@ export async function generateManifest(
   // here so the failure shows up at publish time, not as a 404 on a user
   // download. Throws on any non-200 — caller surfaces the message to the
   // operator instead of writing a broken manifest.
-  await verifyGitBackedFiles({ repo, tag, files });
+  if (!options?.skipGitBackedVerification) {
+    await verifyGitBackedFiles({ repo, tag, files });
+  }
 
   return {
     dataset_id: datasetId,
