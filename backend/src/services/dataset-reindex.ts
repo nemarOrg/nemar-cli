@@ -85,11 +85,16 @@ function s3Cfg(env: Bindings) {
  * Gather upstream data and push it to nemar.org + refresh D1 metadata columns.
  *
  * Throws DatasetReindexError for caller-recoverable validation failures
- * (missing dataset row, OpenNeuro dataset, bad github_repo, missing creds)
- * so admin routes can map them to specific HTTP status codes. Re-throws the
- * underlying error (wrapped with context) when the initial GitHub tree fetch
- * fails. Once the tree is in hand, every downstream sub-step has its own
- * try/catch and is reported through the return value or D1 fields.
+ * (missing dataset row, sandbox xx* dataset, bad github_repo, missing creds)
+ * so admin routes can map them to specific HTTP status codes. OpenNeuro on*
+ * datasets are handled inline by skipping the nemar.org push and surfacing
+ * `nemar_sync_skipped: true` in the result — the metadata-columns block
+ * still runs because the catalog endpoint and data.nemar.org/<id>/metadata.json
+ * need those columns (#512).
+ *
+ * Re-throws the underlying error (wrapped with context) when the initial
+ * GitHub tree fetch fails. Once the tree is in hand, every downstream sub-step
+ * has its own try/catch and is reported through the return value or D1 fields.
  */
 export async function runDatasetSync(
   env: Bindings,
