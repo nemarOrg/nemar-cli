@@ -20,7 +20,12 @@ import type {
   StructuredKeyword,
 } from "../../../shared/datacite-constants.js";
 import type { ManifestFile, VersionManifest } from "./manifest";
-import { type PresignedUrlOptions, generatePresignedGetUrl } from "./s3";
+import {
+  type PresignedUrlOptions,
+  type S3ListResult,
+  generatePresignedGetUrl,
+  listObjectsWithDelimiter,
+} from "./s3";
 
 export const VERSION_TAG_RE = /^v\d+\.\d+\.\d+$/;
 
@@ -85,7 +90,8 @@ export async function resolveVersion(
 // in test/data-route.unit.test.ts pins that contract.
 const FORBIDDEN_SEGMENTS = new Set(["", ".", "..", "__proto__", "constructor", "prototype"]);
 
-function normalizePath(rawPath: string): string | null {
+// Exported so the QA route can use the same traversal-rejection contract.
+export function normalizeBidsPath(rawPath: string): string | null {
   const stripped = rawPath.replace(/^\/+/, "").replace(/\/+$/, "");
   if (stripped === "") return "";
   const parts = stripped.split("/");
@@ -94,6 +100,10 @@ function normalizePath(rawPath: string): string | null {
     if (part.startsWith("/")) return null;
   }
   return parts.join("/");
+}
+
+function normalizePath(rawPath: string): string | null {
+  return normalizeBidsPath(rawPath);
 }
 
 /**
@@ -141,14 +151,47 @@ export function resolveFile(manifest: VersionManifest, rawPath: string): Resolve
 const ANNEX_KEY_RE = /^[A-Z0-9]+-s\d+--/;
 
 /**
+ * Build an RFC 6266 `Content-Disposition: attachment` value with both a plain
+ * ASCII `filename=` (for older clients like wget < 1.16, IE) and an RFC 5987
+ * `filename*=UTF-8''...` extension so Unicode filenames survive across
+ * browsers, rclone, aria2c, and curl. Both forms describe the same name; RFC
+ * 6266 mandates the extended form wins where both are present.
+ *
+ * The disposition string is deliberately built with NO whitespace between
+ * tokens (RFC 6266 OWS is optional). The downstream S3 presigner sends this
+ * value through `URLSearchParams`, which form-encodes spaces as `+` rather
+ * than `%20`; that survives the SigV4 signature (it's stored on
+ * `this.url.searchParams`) but means a literal `+` could surface in the
+ * response header on some S3 paths. Omitting whitespace dodges the question.
+ *
+ * The plain form sanitises non-printable, non-ASCII, quote, backslash, and
+ * space to `_` so the quoted-string is well-formed AND has no characters
+ * that need form-encoding inside the query parameter. The extended form
+ * percent-encodes per RFC 5987 attr-char (encodeURIComponent leaves
+ * `! ' ( ) *` unescaped, which RFC 5987 forbids, so we fix those up).
+ */
+export function buildContentDisposition(filename: string): string {
+  const asciiSafe = filename.replace(/[^\x20-\x7E]/g, "_").replace(/[ "\\]/g, "_");
+  const utf8 = encodeURIComponent(filename).replace(
+    /['()*]/g,
+    (c) => `%${c.charCodeAt(0).toString(16).toUpperCase()}`,
+  );
+  return `attachment;filename="${asciiSafe}";filename*=UTF-8''${utf8}`;
+}
+
+/**
  * Build the URL the Worker 302s to for a resolved file.
  *
  * Annex-backed files (key like `SHA256E-s12345--...edf`, also `MD5E-`,
  * `SHA1E-`, etc.) -> presigned S3 GET against `<datasetId>/objects/<key>`.
+ * The presigned URL carries `response-content-disposition=attachment;
+ * filename="<bidsBasename>"` so S3 returns the BIDS-shaped filename on
+ * download instead of the content-addressed object name. See #513.
  *
  * git-backed files (`key: "git:<blob-sha>"`, used for small in-tree files
  * like dataset_description.json) -> raw.githubusercontent.com URL pinned
- * to the version tag.
+ * to the version tag. raw.githubusercontent.com responds with the BIDS
+ * basename naturally because the URL path ends with it.
  *
  * Implicit invariant for the git: branch: the dataset's GitHub repo must
  * be public AND the version tag must exist on it. Both are guaranteed by
@@ -156,7 +199,7 @@ const ANNEX_KEY_RE = /^[A-Z0-9]+-s\d+--/;
  * public before writing the D1 version row, which only happens after a
  * successful tag push). If that invariant ever breaks, the 302 target
  * itself returns 404 to the user with no Worker-side signal. Tracked as
- * a Phase 3 follow-up on epic #449.
+ * a publisher canary in #503.
  */
 export async function buildRedirectUrl(args: {
   datasetId: string;
@@ -175,7 +218,173 @@ export async function buildRedirectUrl(args: {
   if (!ANNEX_KEY_RE.test(file.key)) {
     throw new Error(`Unrecognized manifest key format: ${file.key}`);
   }
-  return generatePresignedGetUrl(s3Options, `${datasetId}/objects/${file.key}`, expiresIn ?? 3600);
+  // filter(Boolean) tolerates a trailing-slash bidsPath (which the manifest
+  // resolver strips today but a future caller might not). Without it, a path
+  // like "sub-01/eeg/" would land the full path as the filename.
+  const basename = bidsPath.split("/").filter(Boolean).pop() ?? bidsPath;
+  return generatePresignedGetUrl(
+    s3Options,
+    `${datasetId}/objects/${file.key}`,
+    expiresIn ?? 3600,
+    buildContentDisposition(basename),
+  );
+}
+
+// ===========================================================================
+// QA artifact resolver (data.nemar.org/<id>/qa/*, see #511)
+// ===========================================================================
+
+/**
+ * Result of resolving a `/<id>/qa/<path>` request against the S3-mirrored
+ * QA tree. The shape mirrors `ResolvedFile` (manifest-backed resolver) so
+ * callers can render directory listings with the same `DirectoryEntry`
+ * helper that the version route uses.
+ */
+export type ResolvedQaPath =
+  | { kind: "file"; key: string; size: number; lastModified: string }
+  | { kind: "directory"; path: string; children: DirectoryEntry[]; truncated: boolean }
+  | { kind: "not_found" };
+
+/**
+ * Map a per-dataset QA path to either a file (302 target) or a directory
+ * listing. The QA tree is not version-locked — it reflects whichever pipeline
+ * run last published to `s3://nemar/<id>/qa/*`, which is fine for Phase 3:
+ * the website expects `/<id>/qa/...` not `/<id>/<v>/qa/...`.
+ *
+ * Detection uses a single ListObjectsV2 with `delimiter=/` at the requested
+ * prefix:
+ *   - if the parent listing contains a Contents entry whose key matches
+ *     `<id>/qa/<path>` exactly → file
+ *   - else if it contains a CommonPrefix `<id>/qa/<path>/` → directory
+ *     (a second ListObjectsV2 enumerates one level of children)
+ *   - else → not_found
+ *
+ * Path normalisation reuses the BIDS-route rules so `..`, `__proto__`, etc.
+ * are rejected uniformly. The Worker passes the URL path through Hono's
+ * raw-path mode which keeps `%2E%2E` literal — these miss every S3 key by
+ * construction.
+ */
+export async function resolveQaPath(args: {
+  s3Options: PresignedUrlOptions;
+  datasetId: string;
+  rawPath: string;
+}): Promise<ResolvedQaPath> {
+  const { s3Options, datasetId, rawPath } = args;
+  const normalized = normalizeBidsPath(rawPath);
+  if (normalized === null) return { kind: "not_found" };
+
+  const rootPrefix = `${datasetId}/qa/`;
+
+  // Empty path -> directly list the root of the QA tree.
+  if (normalized === "") {
+    let listing: S3ListResult;
+    try {
+      listing = await listObjectsWithDelimiter(s3Options, rootPrefix);
+    } catch (err) {
+      console.error(`[data] QA root listing failed dataset=${datasetId}:`, err);
+      return { kind: "not_found" };
+    }
+    return qaListingToDirectory({ listing, path: "", absolutePrefix: rootPrefix });
+  }
+
+  const fullKey = `${rootPrefix}${normalized}`;
+
+  // First probe: list the parent prefix and check for an exact key match
+  // OR a CommonPrefix that adds a trailing slash (directory case).
+  const parentSlash = fullKey.lastIndexOf("/");
+  const parentPrefix = parentSlash === -1 ? rootPrefix : `${fullKey.slice(0, parentSlash)}/`;
+  let probe: S3ListResult;
+  try {
+    probe = await listObjectsWithDelimiter(s3Options, parentPrefix);
+  } catch (err) {
+    console.error(`[data] QA probe failed dataset=${datasetId} path=${normalized}:`, err);
+    return { kind: "not_found" };
+  }
+
+  // File: exact-key match in Contents.
+  for (const entry of probe.contents) {
+    if (entry.key === fullKey) {
+      return {
+        kind: "file",
+        key: entry.key,
+        size: entry.size,
+        lastModified: entry.lastModified,
+      };
+    }
+  }
+
+  // Directory: CommonPrefix matches `<fullKey>/`.
+  const dirPrefix = `${fullKey}/`;
+  if (probe.commonPrefixes.includes(dirPrefix)) {
+    let dirListing: S3ListResult;
+    try {
+      dirListing = await listObjectsWithDelimiter(s3Options, dirPrefix);
+    } catch (err) {
+      console.error(`[data] QA dir listing failed dataset=${datasetId} prefix=${dirPrefix}:`, err);
+      return { kind: "not_found" };
+    }
+    return qaListingToDirectory({
+      listing: dirListing,
+      path: normalized,
+      absolutePrefix: dirPrefix,
+    });
+  }
+
+  return { kind: "not_found" };
+}
+
+/**
+ * Pure: shape a one-level S3 listing into a `ResolvedQaPath` directory entry.
+ * Exported so the directory-rendering decision matrix (sort order, file vs
+ * dir partitioning, placeholder-object suppression, empty-root semantics)
+ * can be unit-tested without an S3 round-trip.
+ */
+export function qaListingToDirectory(args: {
+  listing: S3ListResult;
+  path: string;
+  absolutePrefix: string;
+}): ResolvedQaPath {
+  const { listing, path, absolutePrefix } = args;
+  const children: DirectoryEntry[] = [];
+
+  // Subdirectories first (sorted alphabetically), then files.
+  const seen = new Set<string>();
+  const dirs: DirectoryEntry[] = [];
+  for (const p of listing.commonPrefixes) {
+    if (!p.startsWith(absolutePrefix)) continue;
+    const rest = p.slice(absolutePrefix.length);
+    // S3 CommonPrefix always ends in the delimiter; strip the trailing `/`.
+    const name = rest.endsWith("/") ? rest.slice(0, -1) : rest;
+    if (!name || seen.has(name)) continue;
+    seen.add(name);
+    dirs.push({ kind: "dir", name });
+  }
+  const files: DirectoryEntry[] = [];
+  for (const entry of listing.contents) {
+    if (!entry.key.startsWith(absolutePrefix)) continue;
+    const name = entry.key.slice(absolutePrefix.length);
+    // Edge case: a Contents entry whose key IS the prefix (i.e. a "directory
+    // placeholder" object). Skip; it has no useful name.
+    if (!name || name.includes("/") || seen.has(name)) continue;
+    seen.add(name);
+    files.push({ kind: "file", name, size: entry.size });
+  }
+
+  children.push(
+    ...dirs.sort((a, b) => a.name.localeCompare(b.name)),
+    ...files.sort((a, b) => a.name.localeCompare(b.name)),
+  );
+
+  // An empty root listing is still a valid directory (the dataset may not
+  // have QA artifacts yet); only non-root empty listings are not_found.
+  if (path !== "" && children.length === 0) return { kind: "not_found" };
+
+  return {
+    kind: "directory",
+    path,
+    children,
+    truncated: listing.truncated,
+  };
 }
 
 const HTML_ESCAPES: Record<string, string> = {
@@ -813,11 +1022,7 @@ ${removedFooter}<hr>
  * version (or a 404 with a tombstone if that path doesn't exist
  * there -- which is exactly the signal the user wants).
  */
-function renderVersionPicker(
-  idHref: string,
-  path: string,
-  versions: VersionPickerEntry[],
-): string {
+function renderVersionPicker(idHref: string, path: string, versions: VersionPickerEntry[]): string {
   // path is already a normalized BIDS path (no leading/trailing slashes).
   // encodeURI preserves slashes between segments; the segments themselves
   // come from manifest keys which are tightly constrained by BIDS naming.
@@ -841,11 +1046,7 @@ function renderVersionPicker(
  * still exists. Names are HTML-escaped and the href segments are
  * percent-encoded for the same reason as the directory table.
  */
-function renderRemovedSinceFooter(
-  idHref: string,
-  path: string,
-  note: RemovedSinceNote,
-): string {
+function renderRemovedSinceFooter(idHref: string, path: string, note: RemovedSinceNote): string {
   const prevVersion = encodeURIComponent(note.lastSeenVersion);
   const subPath = path === "" ? "" : `${encodeURI(path)}/`;
   const items = note.names

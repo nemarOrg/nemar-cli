@@ -12,7 +12,10 @@ import "./setup";
 import {
   VERSION_TAG_RE,
   buildBidsIndex,
+  buildContentDisposition,
   buildDatasetMetadata,
+  normalizeBidsPath,
+  qaListingToDirectory,
   buildLandingPayload,
   buildPersonList,
   buildRedirectUrl,
@@ -277,6 +280,111 @@ describe("buildRedirectUrl", () => {
     expect(url).toContain("X-Amz-Expires=3600");
   });
 
+  test("annex-keyed presigned URLs carry response-content-disposition with BIDS basename (#513)", async () => {
+    const url = await buildRedirectUrl({
+      datasetId: "nm000104",
+      version: "v2.0.0",
+      bidsPath: "sub-01438774/ses-1625258895/emg/sub-01438774_ses-1625258895_task-typing_emg.bdf",
+      file: {
+        key: "SHA256E-s197576448--c70cae6e4a043e2124d7e5ee94422d02.bdf",
+        size: 197576448,
+        checksum: "sha256:c70cae6e4a043e2124d7e5ee94422d02",
+      },
+      s3Options,
+      githubOrg: "nemarDatasets",
+    });
+    expect(url).toContain("response-content-disposition=");
+    // Decode the URL the way an HTTP client would. aws4fetch round-trips through
+    // URLSearchParams which may form-encode spaces as `+`; tolerate that here so
+    // the test stays robust regardless of the encoder choice.
+    const decoded = decodeURIComponent(url.replace(/\+/g, " "));
+    expect(decoded).toContain(
+      'attachment;filename="sub-01438774_ses-1625258895_task-typing_emg.bdf"',
+    );
+    expect(decoded).toContain(
+      "filename*=UTF-8''sub-01438774_ses-1625258895_task-typing_emg.bdf",
+    );
+    // Signature MUST cover the disposition param or S3 will reject the request.
+    expect(url).toContain("X-Amz-Signature=");
+  });
+
+  test("response-content-disposition uses BIDS basename, not the SHA-named key (#513)", async () => {
+    const url = await buildRedirectUrl({
+      datasetId: "nm099999",
+      version: "v1.0.0",
+      bidsPath: "sub-01/eeg/sub-01_task-rest_eeg.edf",
+      file: {
+        key: "SHA256E-s12345--deadbeef.edf",
+        size: 12345,
+        checksum: "sha256:deadbeef",
+      },
+      s3Options,
+      githubOrg: "nemarDatasets",
+    });
+    const decoded = decodeURIComponent(url.replace(/\+/g, " "));
+    expect(decoded).toContain('filename="sub-01_task-rest_eeg.edf"');
+    expect(decoded).not.toContain('filename="SHA256E-');
+  });
+
+  test("annex file with trailing-slash bidsPath still gets the right basename (defensive)", async () => {
+    // The manifest resolver normalizes trailing slashes today, but the
+    // basename derivation defends against a future caller that doesn't.
+    // Without the filter(Boolean), `"sub-01/eeg/".split("/").pop()` returns
+    // "" and the fallback would put the whole path in the filename.
+    const url = await buildRedirectUrl({
+      datasetId: "nm099999",
+      version: "v1.0.0",
+      bidsPath: "sub-01/eeg/sub-01_task-rest_eeg.edf/",
+      file: { key: "SHA256E-s10--abc.edf", size: 10, checksum: "sha256:abc" },
+      s3Options,
+      githubOrg: "nemarDatasets",
+    });
+    const decoded = decodeURIComponent(url.replace(/\+/g, " "));
+    expect(decoded).toContain('filename="sub-01_task-rest_eeg.edf"');
+    expect(decoded).not.toContain('filename="sub-01/eeg/');
+  });
+
+  test("top-level annex file (no slash in bidsPath) still gets the right basename", async () => {
+    // Defends the `bidsPath.split("/").pop()` path against a future refactor
+    // that uses the wrong segment index. Today most root files are git: keyed,
+    // but #509 fixed cases where small root files like dataset_description.json
+    // can be annex pointers; the disposition path must work for them too.
+    const url = await buildRedirectUrl({
+      datasetId: "nm099999",
+      version: "v1.0.0",
+      bidsPath: "CHANGES",
+      file: { key: "SHA256E-s512--root.txt", size: 512, checksum: "sha256:root" },
+      s3Options,
+      githubOrg: "nemarDatasets",
+    });
+    const decoded = decodeURIComponent(url.replace(/\+/g, " "));
+    expect(decoded).toContain('filename="CHANGES"');
+  });
+
+  test("response-content-disposition is signed (appears before X-Amz-Signature in query order)", async () => {
+    // aws4fetch sorts canonical query params alphabetically; `r` < `X`, so
+    // response-content-disposition always sorts before X-Amz-Signature in
+    // the signed URL. Pinning this defends against a future presigner refactor
+    // that appends the param after signing (which would unsign it).
+    const url = await buildRedirectUrl({
+      datasetId: "nm099999",
+      version: "v1.0.0",
+      bidsPath: "sub-01/eeg/sub-01_task-rest_eeg.edf",
+      file: {
+        key: "SHA256E-s12345--deadbeef.edf",
+        size: 12345,
+        checksum: "sha256:deadbeef",
+      },
+      s3Options,
+      githubOrg: "nemarDatasets",
+    });
+    const dispoIdx = url.indexOf("response-content-disposition=");
+    const sigIdx = url.indexOf("X-Amz-Signature=");
+    expect(dispoIdx).toBeGreaterThan(-1);
+    expect(sigIdx).toBeGreaterThan(-1);
+    expect(dispoIdx).toBeLessThan(sigIdx);
+  });
+
   test("MD5E annex keys also presign (legacy OpenNeuro imports)", async () => {
     const url = await buildRedirectUrl({
       datasetId: "nm099999",
@@ -321,6 +429,47 @@ describe("escapeHtml", () => {
     expect(escapeHtml('<script>alert("x")</script>&\'')).toBe(
       "&lt;script&gt;alert(&quot;x&quot;)&lt;/script&gt;&amp;&#39;",
     );
+  });
+});
+
+describe("buildContentDisposition", () => {
+  test("plain ASCII filename produces both plain and extended forms with no inter-token whitespace", () => {
+    const out = buildContentDisposition("sub-01_task-rest_eeg.edf");
+    expect(out).toBe(
+      "attachment;filename=\"sub-01_task-rest_eeg.edf\";filename*=UTF-8''sub-01_task-rest_eeg.edf",
+    );
+  });
+
+  test("non-ASCII filename: plain form replaces with _, extended form percent-encodes", () => {
+    const out = buildContentDisposition("müller-α.tsv");
+    expect(out).toContain('filename="m_ller-_.tsv"');
+    expect(out).toContain("filename*=UTF-8''m%C3%BCller-%CE%B1.tsv");
+  });
+
+  test("filename with quotes and backslashes is sanitised in the plain form", () => {
+    const out = buildContentDisposition('weird"file\\name.txt');
+    expect(out).toContain('filename="weird_file_name.txt"');
+    expect(out).toContain("filename*=UTF-8''weird%22file%5Cname.txt");
+  });
+
+  test("RFC 5987 attr-char fix-ups: ' ( ) * are percent-encoded in the extended form", () => {
+    const out = buildContentDisposition("a*b'c(d)e!.txt");
+    // encodeURIComponent leaves these unescaped; the helper must fix that up.
+    // `!` is in RFC 5987 attr-char (allowed unencoded); the others are not.
+    expect(out).toContain("filename*=UTF-8''a%2Ab%27c%28d%29e!.txt");
+  });
+
+  test("spaces in filename are replaced with _ in plain form, percent-encoded in extended form", () => {
+    const out = buildContentDisposition("my file.txt");
+    // No literal space in the plain form: avoids ambiguity when this value is
+    // later embedded in a URL query parameter that may form-encode space->`+`.
+    expect(out).toContain('filename="my_file.txt"');
+    expect(out).toContain("filename*=UTF-8''my%20file.txt");
+  });
+
+  test("disposition has no whitespace tokens at all (defends against query-param encoding drift)", () => {
+    const out = buildContentDisposition("sub-01_task-rest_eeg.edf");
+    expect(out).not.toContain(" ");
   });
 });
 
@@ -1463,3 +1612,192 @@ describe("renderIndexHtml rclone-parser compat (Phase 4)", () => {
     expect(files).toContain("a%26b%3Fc%23d.txt");
   });
 });
+
+describe("normalizeBidsPath (#511 traversal contract for QA route)", () => {
+  test("empty / root paths round-trip to empty string", () => {
+    expect(normalizeBidsPath("")).toBe("");
+    expect(normalizeBidsPath("/")).toBe("");
+    expect(normalizeBidsPath("///")).toBe("");
+  });
+
+  test("strips leading and trailing slashes", () => {
+    expect(normalizeBidsPath("sub-01/eeg")).toBe("sub-01/eeg");
+    expect(normalizeBidsPath("/sub-01/eeg/")).toBe("sub-01/eeg");
+    expect(normalizeBidsPath("//sub-01//eeg//")).toBeNull(); // empty interior segments reject
+  });
+
+  test("rejects path traversal", () => {
+    expect(normalizeBidsPath("..")).toBeNull();
+    expect(normalizeBidsPath("../etc/passwd")).toBeNull();
+    expect(normalizeBidsPath("sub-01/../sub-02")).toBeNull();
+  });
+
+  test("rejects prototype-pollution-shaped segments", () => {
+    expect(normalizeBidsPath("__proto__")).toBeNull();
+    expect(normalizeBidsPath("constructor/prototype")).toBeNull();
+    expect(normalizeBidsPath("a/__proto__/b")).toBeNull();
+  });
+
+  test("accepts BIDS-shaped paths with dots and underscores", () => {
+    expect(normalizeBidsPath("sub-01_task-rest_eeg.edf")).toBe("sub-01_task-rest_eeg.edf");
+    expect(normalizeBidsPath("sub-01/eeg/sub-01_task-rest_icaact.svg")).toBe(
+      "sub-01/eeg/sub-01_task-rest_icaact.svg",
+    );
+  });
+});
+
+describe("qaListingToDirectory (#511)", () => {
+  test("empty root listing returns an empty directory (not 404)", () => {
+    const r = qaListingToDirectory({
+      listing: { contents: [], commonPrefixes: [], truncated: false },
+      path: "",
+      absolutePrefix: "nm099999/qa/",
+    });
+    expect(r.kind).toBe("directory");
+    if (r.kind !== "directory") return;
+    expect(r.children).toEqual([]);
+    expect(r.path).toBe("");
+    expect(r.truncated).toBe(false);
+  });
+
+  test("empty non-root listing is 404", () => {
+    // The async wrapper resolveQaPath only gets here when the parent listing
+    // confirmed the directory exists, but we should still reject empty
+    // sub-listings — they shouldn't happen on a healthy tree.
+    const r = qaListingToDirectory({
+      listing: { contents: [], commonPrefixes: [], truncated: false },
+      path: "sub-01",
+      absolutePrefix: "nm099999/qa/sub-01/",
+    });
+    expect(r.kind).toBe("not_found");
+  });
+
+  test("partitions files and subdirectories with dirs sorted first", () => {
+    const r = qaListingToDirectory({
+      listing: {
+        contents: [
+          {
+            key: "nm099999/qa/dataqual.json",
+            size: 4321,
+            lastModified: "2026-05-14T00:00:00Z",
+          },
+          {
+            key: "nm099999/qa/nm099999_histogram.svg",
+            size: 22000,
+            lastModified: "2026-05-14T00:00:00Z",
+          },
+        ],
+        commonPrefixes: ["nm099999/qa/sub-001/", "nm099999/qa/sub-002/"],
+        truncated: false,
+      },
+      path: "",
+      absolutePrefix: "nm099999/qa/",
+    });
+    expect(r.kind).toBe("directory");
+    if (r.kind !== "directory") return;
+    expect(r.children.map((c) => `${c.name}${c.kind === "dir" ? "/" : ""}`)).toEqual([
+      "sub-001/",
+      "sub-002/",
+      "dataqual.json",
+      "nm099999_histogram.svg",
+    ]);
+  });
+
+  test("ignores Contents whose key is not directly under the prefix (placeholder defence)", () => {
+    // S3 sometimes returns a "directory placeholder" object whose key IS the
+    // prefix itself (e.g. created by `aws s3api put-object --key foo/`).
+    // Those entries have name === "" after the prefix strip and must be
+    // dropped from the directory listing.
+    const r = qaListingToDirectory({
+      listing: {
+        contents: [
+          {
+            key: "nm099999/qa/sub-001/",
+            size: 0,
+            lastModified: "2026-05-14T00:00:00Z",
+          },
+          {
+            key: "nm099999/qa/sub-001/eeg_summary.json",
+            size: 256,
+            lastModified: "2026-05-14T00:00:00Z",
+          },
+        ],
+        commonPrefixes: [],
+        truncated: false,
+      },
+      path: "sub-001",
+      absolutePrefix: "nm099999/qa/sub-001/",
+    });
+    expect(r.kind).toBe("directory");
+    if (r.kind !== "directory") return;
+    // The placeholder MUST be suppressed; the eeg_summary file MUST appear.
+    expect(r.children.map((c) => c.name)).toEqual(["eeg_summary.json"]);
+  });
+
+  test("ignores Contents nested deeper than one level (defence against missing delimiter)", () => {
+    // If a caller forgot delimiter=/, S3 returns the entire subtree under
+    // Contents. Our renderer is one-level; nested keys must be dropped (they
+    // would have been rolled into CommonPrefixes had the delimiter been set).
+    const r = qaListingToDirectory({
+      listing: {
+        contents: [
+          {
+            key: "nm099999/qa/dataqual.json",
+            size: 123,
+            lastModified: "2026-05-14T00:00:00Z",
+          },
+          {
+            key: "nm099999/qa/sub-001/eeg/foo.svg",
+            size: 1024,
+            lastModified: "2026-05-14T00:00:00Z",
+          },
+        ],
+        commonPrefixes: [],
+        truncated: false,
+      },
+      path: "",
+      absolutePrefix: "nm099999/qa/",
+    });
+    expect(r.kind).toBe("directory");
+    if (r.kind !== "directory") return;
+    expect(r.children.map((c) => c.name)).toEqual(["dataqual.json"]);
+  });
+
+  test("propagates the truncated flag so renderers can show a 'listing capped' affordance", () => {
+    const r = qaListingToDirectory({
+      listing: {
+        contents: [
+          { key: "nm099999/qa/x.json", size: 1, lastModified: "2026-05-14T00:00:00Z" },
+        ],
+        commonPrefixes: [],
+        truncated: true,
+      },
+      path: "",
+      absolutePrefix: "nm099999/qa/",
+    });
+    expect(r.kind).toBe("directory");
+    if (r.kind !== "directory") return;
+    expect(r.truncated).toBe(true);
+  });
+
+  test("deduplicates entries that appear in both Contents and CommonPrefixes", () => {
+    // This shouldn't happen on a real S3 response (a key can't be both a file
+    // and a prefix), but if S3 ever did emit overlap we should not double-list.
+    const r = qaListingToDirectory({
+      listing: {
+        contents: [
+          { key: "nm099999/qa/eeg", size: 0, lastModified: "2026-05-14T00:00:00Z" },
+        ],
+        commonPrefixes: ["nm099999/qa/eeg/"],
+        truncated: false,
+      },
+      path: "",
+      absolutePrefix: "nm099999/qa/",
+    });
+    expect(r.kind).toBe("directory");
+    if (r.kind !== "directory") return;
+    // Directory wins (added first, dedupe Set kicks in on the file).
+    expect(r.children.map((c) => `${c.name}/${c.kind}`)).toEqual(["eeg/dir"]);
+  });
+});
+
