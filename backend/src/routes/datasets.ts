@@ -608,8 +608,16 @@ datasetRoutes.get("/", optionalAuthMiddleware, async (c) => {
   return executeAndReturn(c, db, unionQuery, allParams, { limit, offset });
 });
 
+// Escape SQLite LIKE wildcards in user input so a literal '%' or '_' in the
+// search term means itself rather than "match everything" / "match any
+// character". Paired with `ESCAPE '\\'` on every LIKE predicate that uses
+// these patterns. Exported for unit testing.
+export function escapeLikePattern(raw: string): string {
+  return raw.replace(/[\\%_]/g, "\\$&");
+}
+
 /** Build WHERE clauses for search/filter params */
-function buildFilterClauses(
+export function buildFilterClauses(
   params: (string | number)[],
   opts: {
     search?: string;
@@ -629,17 +637,17 @@ function buildFilterClauses(
     // populated with the id across the corpus (nm000103 had it, nm000166
     // did not), so relying on search_text alone produced 0 results for
     // any catalog row whose enrichment missed the id.
-    const pattern = `%${opts.search.toLowerCase()}%`;
+    const pattern = `%${escapeLikePattern(opts.search.toLowerCase())}%`;
     if (opts.managed) {
       clauses +=
-        " AND (LOWER(d.dataset_id) LIKE ?" +
-        " OR LOWER(COALESCE(d.source_id, '')) LIKE ?" +
-        " OR LOWER(d.name) LIKE ?" +
-        " OR LOWER(d.description) LIKE ?" +
-        " OR LOWER(COALESCE(c.search_text, '')) LIKE ?)";
+        " AND (LOWER(d.dataset_id) LIKE ? ESCAPE '\\'" +
+        " OR LOWER(COALESCE(d.source_id, '')) LIKE ? ESCAPE '\\'" +
+        " OR LOWER(d.name) LIKE ? ESCAPE '\\'" +
+        " OR LOWER(d.description) LIKE ? ESCAPE '\\'" +
+        " OR LOWER(COALESCE(c.search_text, '')) LIKE ? ESCAPE '\\')";
       params.push(pattern, pattern, pattern, pattern, pattern);
     } else {
-      clauses += " AND (LOWER(c.id) LIKE ? OR LOWER(c.search_text) LIKE ?)";
+      clauses += " AND (LOWER(c.id) LIKE ? ESCAPE '\\' OR LOWER(c.search_text) LIKE ? ESCAPE '\\')";
       params.push(pattern, pattern);
     }
   }
