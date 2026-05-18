@@ -54,12 +54,18 @@ WHERE (participants IS NULL OR participants = 0)
     WHERE d.dataset_id = nemar_catalog.id AND d.subject_count IS NOT NULL AND d.subject_count > 0
   );
 
--- age_min / age_max
+-- age_min / age_max: each is COALESCE-preserved independently, so a row
+-- with one bound already set (e.g. age_min=5, age_max NULL) still gets the
+-- other bound filled in from the datasets row.
 UPDATE nemar_catalog
-SET age_min = (SELECT d.age_min FROM datasets d WHERE d.dataset_id = nemar_catalog.id),
-    age_max = (SELECT d.age_max FROM datasets d WHERE d.dataset_id = nemar_catalog.id),
+SET age_min = COALESCE(NULLIF(age_min, 0), (
+      SELECT d.age_min FROM datasets d WHERE d.dataset_id = nemar_catalog.id
+    )),
+    age_max = COALESCE(NULLIF(age_max, 0), (
+      SELECT d.age_max FROM datasets d WHERE d.dataset_id = nemar_catalog.id
+    )),
     synced_at = datetime('now')
-WHERE (age_min IS NULL OR age_min = 0) AND (age_max IS NULL OR age_max = 0)
+WHERE ((age_min IS NULL OR age_min = 0) OR (age_max IS NULL OR age_max = 0))
   AND EXISTS (
     SELECT 1 FROM datasets d
     WHERE d.dataset_id = nemar_catalog.id

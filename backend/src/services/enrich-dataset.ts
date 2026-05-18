@@ -826,7 +826,9 @@ export async function enrichDataset(
           total_files: cols.total_files,
         });
       } catch (err) {
-        console.warn(
+        // console.error (not warn): a persistent failure here leaves the
+        // list endpoint cache stale for every freshly enriched dataset.
+        console.error(
           `[llm-enrich] nemar_catalog sync failed for ${datasetId}: ${errorMessage(err)}`,
         );
       }

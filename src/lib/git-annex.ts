@@ -117,7 +117,14 @@ export async function runCommand(
   if (timedOut) {
     return {
       stdout,
-      stderr: stderr || `Command timed out after ${Math.round((options.timeout ?? 0) / 1000)}s`,
+      // `timedOut === true` implies options.timeout was set (see the guard
+      // earlier in this function), so the cast is sound. Using a type-only
+      // assertion rather than `?? 0` keeps the original semantics: a future
+      // refactor that reaches this branch without a timeout configured will
+      // surface the bug as an obvious "NaN s" message rather than a silent
+      // "0s" misreport.
+      stderr:
+        stderr || `Command timed out after ${Math.round((options.timeout as number) / 1000)}s`,
       exitCode: exitCode ?? 1,
     };
   }

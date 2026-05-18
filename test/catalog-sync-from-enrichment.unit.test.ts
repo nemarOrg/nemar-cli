@@ -92,4 +92,12 @@ describe("formatFileSize", () => {
   test("scales into TB for very large datasets", () => {
     expect(formatFileSize(5 * 1024 ** 4)).toBe("5.00 TB");
   });
+
+  test("decimal cut-off at exactly 100 in the unit follows the >=100 rule", () => {
+    // The branch is `n >= 100 ? toFixed(0) : toFixed(2)`. Pin the boundary
+    // so a future tweak ("> 100" vs ">= 100") doesn't silently flip the
+    // displayed precision on values that sit on the line.
+    expect(formatFileSize(100 * 1024 * 1024 * 1024)).toBe("100 GB");
+    expect(formatFileSize(99.5 * 1024 * 1024 * 1024)).toBe("99.50 GB");
+  });
 });

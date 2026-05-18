@@ -406,7 +406,9 @@ export async function runDatasetSync(
         total_files: cols.total_files,
       });
     } catch (err) {
-      console.warn(`[reindex] nemar_catalog sync failed for ${datasetId}: ${errorMessage(err)}`);
+      // console.error (not warn): a persistent failure here leaves the
+      // list endpoint cache stale on every reindex.
+      console.error(`[reindex] nemar_catalog sync failed for ${datasetId}: ${errorMessage(err)}`);
     }
   } catch (colErr) {
     metadataColumnsError = errorMessage(colErr);
