@@ -132,3 +132,133 @@ export async function writeDatasetMetadataColumns(
   }
   return { changes };
 }
+
+/**
+ * Fields that the discover-page list endpoint projects from `nemar_catalog`.
+ * Kept in sync with the catalog table by the enrichment pipeline so the
+ * cached read path doesn't fall behind the source-of-truth `datasets` row.
+ */
+export interface CatalogSyncFields {
+  /** Optional title override (from enrichment.title); null preserves existing. */
+  name?: string | null;
+  description?: string | null;
+  modalities?: string | null;
+  participants?: number | null;
+  age_min?: number | null;
+  age_max?: number | null;
+  tasks?: string | null;
+  authors?: string | null;
+  license?: string | null;
+  file_size?: number | null;
+  file_size_formatted?: string | null;
+  total_files?: number | null;
+}
+
+/**
+ * Format a byte count as a short human-readable string (`"23.2 GB"`,
+ * `"4.31 GB"`). Mirrors the format the legacy nemar.org catalog uses for
+ * `file_size_formatted` so the column stays consistent.
+ */
+export function formatFileSize(bytes: number | null | undefined): string | null {
+  if (bytes == null || !Number.isFinite(bytes) || bytes <= 0) return null;
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  let i = 0;
+  let n = bytes;
+  while (n >= 1024 && i < units.length - 1) {
+    n /= 1024;
+    i++;
+  }
+  const fixed = i === 0 ? `${n}` : n >= 100 ? n.toFixed(0) : n.toFixed(2);
+  return `${fixed} ${units[i]}`;
+}
+
+/**
+ * Extract a comma-joined author string from an enrichment_json blob.
+ * The enrichment pipeline stores authors as `{ "First Last": { ... }, ... }`
+ * (object form, ORCID/affiliation as the value) for most datasets and an
+ * array of `{name, ...}` objects for some legacy rows. Returns null when
+ * the shape is unrecognized or empty so the COALESCE in
+ * syncNemarCatalogFromEnrichment preserves the existing value.
+ */
+export function authorsFromEnrichment(
+  enrichment: { authors?: unknown } | null | undefined,
+): string | null {
+  if (!enrichment) return null;
+  const raw = enrichment.authors;
+  if (raw == null) return null;
+  let names: string[] = [];
+  if (Array.isArray(raw)) {
+    names = raw
+      .map((a) => {
+        if (typeof a === "string") return a;
+        if (a && typeof a === "object" && "name" in a && typeof a.name === "string") return a.name;
+        return null;
+      })
+      .filter((n): n is string => Boolean(n?.trim()));
+  } else if (typeof raw === "object") {
+    names = Object.keys(raw as Record<string, unknown>).filter((n) => n.trim());
+  }
+  return names.length > 0 ? names.join(", ") : null;
+}
+
+/**
+ * Mirror the enrichment-derived metadata into `nemar_catalog` so the
+ * list-endpoint cache reads consistent values. The `datasets` row is the
+ * source of truth; this keeps the cached projection coherent.
+ *
+ * Uses the same COALESCE-preserve pattern as writeDatasetMetadataColumns:
+ * null inputs leave the existing column untouched. Updates `synced_at`
+ * so operators can spot stale rows.
+ *
+ * If no nemar_catalog row exists for the id, logs a warning and returns
+ * { changes: 0 }; catalog-sync.ts is responsible for the initial insert,
+ * not this path.
+ */
+export async function syncNemarCatalogFromEnrichment(
+  db: D1Database,
+  datasetId: string,
+  fields: CatalogSyncFields,
+): Promise<{ changes: number }> {
+  const result = await db
+    .prepare(
+      `UPDATE nemar_catalog
+       SET name = COALESCE(?, name),
+           description = COALESCE(?, description),
+           modalities = COALESCE(?, modalities),
+           participants = COALESCE(?, participants),
+           age_min = COALESCE(?, age_min),
+           age_max = COALESCE(?, age_max),
+           tasks = COALESCE(?, tasks),
+           authors = COALESCE(?, authors),
+           license = COALESCE(?, license),
+           file_size = COALESCE(?, file_size),
+           file_size_formatted = COALESCE(?, file_size_formatted),
+           total_files = COALESCE(?, total_files),
+           synced_at = datetime('now')
+       WHERE id = ?`,
+    )
+    .bind(
+      fields.name ?? null,
+      fields.description ?? null,
+      fields.modalities ?? null,
+      fields.participants ?? null,
+      fields.age_min ?? null,
+      fields.age_max ?? null,
+      fields.tasks ?? null,
+      fields.authors ?? null,
+      fields.license ?? null,
+      fields.file_size ?? null,
+      fields.file_size_formatted ?? null,
+      fields.total_files ?? null,
+      datasetId,
+    )
+    .run();
+
+  const changes = result.meta?.changes ?? 0;
+  if (changes === 0) {
+    console.warn(
+      `[catalog-sync] No nemar_catalog row for ${datasetId}; the list-endpoint cache will fall back to empty fields until catalog-sync inserts the row`,
+    );
+  }
+  return { changes };
+}

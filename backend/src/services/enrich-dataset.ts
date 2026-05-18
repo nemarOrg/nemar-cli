@@ -24,7 +24,10 @@ import {
   parseNemarMetadata,
 } from "./datacite.js";
 import {
+  authorsFromEnrichment,
   computeDatasetMetadataColumns,
+  formatFileSize,
+  syncNemarCatalogFromEnrichment,
   writeDatasetMetadataColumns,
 } from "./dataset-metadata-columns.js";
 import {
@@ -801,6 +804,34 @@ export async function enrichDataset(
       console.log(
         `[llm-enrich] Metadata columns: ${datasetId} - subjects=${cols.subject_count}, modalities=${cols.modalities}, files=${cols.total_files}`,
       );
+
+      // Mirror the same data into nemar_catalog (the list-endpoint read
+      // cache). authors comes from the LLM enrichment (object-keyed by
+      // name) and is the one field that doesn't live on `datasets`. Without
+      // this sync, an enriched dataset like nm000166 would render with
+      // empty modalities/participants/authors on the discover card even
+      // though the source-of-truth `datasets` row is fully populated.
+      try {
+        const license = typeof finalMetadata.license === "string" ? finalMetadata.license : null;
+        await syncNemarCatalogFromEnrichment(env.DB, datasetId, {
+          modalities: cols.modalities,
+          participants: cols.subject_count,
+          age_min: cols.age_min,
+          age_max: cols.age_max,
+          tasks: cols.tasks,
+          authors: authorsFromEnrichment(finalMetadata),
+          license,
+          file_size: cols.file_size,
+          file_size_formatted: formatFileSize(cols.file_size),
+          total_files: cols.total_files,
+        });
+      } catch (err) {
+        // console.error (not warn): a persistent failure here leaves the
+        // list endpoint cache stale for every freshly enriched dataset.
+        console.error(
+          `[llm-enrich] nemar_catalog sync failed for ${datasetId}: ${errorMessage(err)}`,
+        );
+      }
     } catch (err) {
       metadataColumnsError = errorMessage(err);
       console.error(`[llm-enrich] Failed to write metadata columns for ${datasetId}:`, err);
