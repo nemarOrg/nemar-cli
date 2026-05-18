@@ -37,6 +37,13 @@ export interface LocalDatasetRow {
   file_size: number | null;
   total_files: number | null;
   created_at: string | null;
+  /**
+   * datasets.published_at is set when a dataset is first published; distinct
+   * from created_at (upload timestamp). The list endpoint sorts by
+   * COALESCE(c.publish_date, c.created_date), so getting this column right
+   * matters for newest-first ordering.
+   */
+  published_at: string | null;
   source: string | null;
   source_id: string | null;
   is_sandbox: number | null;
@@ -123,7 +130,10 @@ export function buildCatalogRecordFromLocal(
     source_id: row.source_id,
     uploader: row.owner_username,
     created_date: row.created_at,
-    publish_date: row.created_at,
+    // publish_date prefers the actual published_at timestamp when set;
+    // pre-publish rows fall back to created_at so newest-first ordering
+    // doesn't drop them from the head of the list.
+    publish_date: row.published_at ?? row.created_at,
     search_text: searchText,
   };
 }
@@ -164,6 +174,7 @@ export async function syncCatalogFromLocal(db: D1Database): Promise<SyncCatalogF
               d.file_size,
               d.total_files,
               d.created_at,
+              d.published_at,
               d.source,
               d.source_id,
               d.is_sandbox,
@@ -196,16 +207,41 @@ export async function syncCatalogFromLocal(db: D1Database): Promise<SyncCatalogF
 
   for (let i = 0; i < records.length; i += BATCH_SIZE) {
     const batch = records.slice(i, i + BATCH_SIZE);
+    // UPSERT (not INSERT OR REPLACE) so columns this path doesn't manage --
+    // bids_version, sessions_count, latest_version, readme, is_processed --
+    // are preserved on rows that catalog-sync.ts populated from the legacy
+    // nemar.org pipeline. INSERT OR REPLACE would silently null them.
     const statements = batch.map((r) =>
       db
         .prepare(
-          `INSERT OR REPLACE INTO nemar_catalog (
+          `INSERT INTO nemar_catalog (
              id, name, description, modalities, participants, age_min, age_max,
              tasks, authors, doi, license, file_size, file_size_formatted,
              total_files, source, source_id, uploader, created_date,
              publish_date, search_text, synced_at
            )
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))`,
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+           ON CONFLICT(id) DO UPDATE SET
+             name = excluded.name,
+             description = excluded.description,
+             modalities = excluded.modalities,
+             participants = excluded.participants,
+             age_min = excluded.age_min,
+             age_max = excluded.age_max,
+             tasks = excluded.tasks,
+             authors = excluded.authors,
+             doi = excluded.doi,
+             license = excluded.license,
+             file_size = excluded.file_size,
+             file_size_formatted = excluded.file_size_formatted,
+             total_files = excluded.total_files,
+             source = excluded.source,
+             source_id = excluded.source_id,
+             uploader = excluded.uploader,
+             created_date = excluded.created_date,
+             publish_date = excluded.publish_date,
+             search_text = excluded.search_text,
+             synced_at = datetime('now')`,
         )
         .bind(
           r.id,

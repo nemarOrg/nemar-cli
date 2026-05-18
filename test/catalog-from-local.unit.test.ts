@@ -28,6 +28,7 @@ function row(over: Partial<LocalDatasetRow> = {}): LocalDatasetRow {
     file_size: 23154528416,
     total_files: 1024,
     created_at: "2026-04-08 08:32:30",
+    published_at: null,
     source: null,
     source_id: null,
     is_sandbox: 0,
@@ -104,6 +105,19 @@ describe("buildCatalogRecordFromLocal", () => {
     );
     expect(out.source).toBe("openneuro");
     expect(out.source_id).toBe("ds002718");
+  });
+
+  test("publish_date prefers published_at when set, falls back to created_at", () => {
+    expect(buildCatalogRecordFromLocal(row({ published_at: null }), null).publish_date).toBe(
+      "2026-04-08 08:32:30",
+    );
+    expect(
+      buildCatalogRecordFromLocal(row({ published_at: "2026-05-11 13:48:29" }), null).publish_date,
+    ).toBe("2026-05-11 13:48:29");
+    // created_date is always the upload time, never overridden.
+    expect(
+      buildCatalogRecordFromLocal(row({ published_at: "2026-05-11 13:48:29" }), null).created_date,
+    ).toBe("2026-04-08 08:32:30");
   });
 
   test("search_text is lowercase and includes id, source_id, name, authors, tasks, modalities", () => {
