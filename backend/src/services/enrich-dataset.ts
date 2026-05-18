@@ -313,7 +313,9 @@ export async function enrichDataset(
           .bind(bidsName, datasetId)
           .run();
       } catch (dbErr) {
-        console.error(`[llm-enrich] Failed to update BIDS Name in D1 for ${datasetId}:`, dbErr);
+        console.error(
+          `[llm-enrich] Failed to update BIDS Name in D1 for ${datasetId}: ${errorMessage(dbErr)}`,
+        );
       }
       const nemarUrl = `https://nemar.org/dataexplorer/detail?dataset_id=${datasetId}`;
       const repoResult = await setRepoDescription(repoName, bidsName, pat, nemarUrl);
