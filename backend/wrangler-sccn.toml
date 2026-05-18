@@ -59,11 +59,12 @@ invocation_logs = true
 # Environment variables
 [vars]
 ENVIRONMENT = "production"
-# Self-fetch target for runEnrichmentForDataset's `fetch(API_BASE_URL/webhooks/llm-enrich)`.
-# MUST be the workers.dev URL, not the custom domain (#523): Cloudflare Workers reject
-# self-fetches on a Worker's own custom-domain hostname (instant 522), but allow them on
-# the *.workers.dev hostname for the same Worker. Both routes hit identical code.
-API_BASE_URL = "https://nemar-api.sccn-org.workers.dev"
+# Public base URL used to build absolute links in outbound email
+# (verification, key-regeneration confirmation, etc.). The reindex enrichment
+# path used to self-fetch this URL, which Cloudflare rejected at the edge
+# with HTTP 522 (#523); that path now invokes enrichDataset() in-process so
+# this variable no longer constrains the choice of host.
+API_BASE_URL = "https://api.nemar.org"
 FRONTEND_URL = "https://nemar.org"
 AWS_REGION = "us-east-2"
 S3_BUCKET = "nemar"

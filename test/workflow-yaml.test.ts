@@ -8,7 +8,7 @@
 
 import { describe, expect, test } from "bun:test";
 import { parse } from "yaml";
-import { buildEnrichmentCommitPayload } from "../backend/src/routes/webhooks";
+import { buildEnrichmentCommitPayload } from "../backend/src/services/enrich-dataset";
 import { getWorkflowTemplates } from "../backend/src/services/github";
 
 describe("CI workflow templates", () => {
@@ -147,9 +147,25 @@ describe("CI workflow templates", () => {
     expect(versionDoi.content).toContain("|| HTTP_CODE=0");
     expect(versionDoi.content).toContain('[ "$HTTP_CODE" = "0" ]');
     // The Worker returns HTTP 200 with embedded *_error fields when a
-    // sub-step fails (commit/openrouter/doi/cache); the Action must surface
-    // these as warnings so a green check does not mask a silent failure.
-    expect(versionDoi.content).toMatch(/for field in commit_error openrouter_error/);
+    // non-fatal sub-step fails (commit, DOI sync, cache, bidsignore,
+    // metadata-columns write, GitHub issue creation); the Action must
+    // surface every one of these as warnings so a green check does not
+    // mask a silent failure. The list must stay in sync with
+    // ENRICHMENT_SUBERROR_FIELDS in services/dataset-reindex.ts and
+    // EnrichmentSuccessBody in services/enrich-dataset.ts. OpenRouter
+    // failures are fatal (Stage 2) and surface as HTTP 500, not as a
+    // 200 sub-error, so they are intentionally not in this list.
+    for (const field of [
+      "commit_error",
+      "doi_sync_error",
+      "cache_error",
+      "bidsignore_error",
+      "metadata_columns_error",
+      "issue_creation_error",
+    ]) {
+      expect(versionDoi.content).toContain(field);
+    }
+    expect(versionDoi.content).not.toContain("openrouter_error");
 
     // The refresh step must appear before the publish-DOI step.
     const refreshIdx = versionDoi.content.indexOf("Refresh enrichment from tag");

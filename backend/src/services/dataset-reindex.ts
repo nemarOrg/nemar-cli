@@ -8,9 +8,9 @@
  *   syncDatasetToNemar, and updates both the existing nemar_sync_* fields
  *   and the Phase 2 metadata columns + metadata_columns_error in D1.
  *
- * - runEnrichmentForDataset: forwards to the /webhooks/llm-enrich endpoint
- *   in-process via fetch using GITHUB_WEBHOOK_SECRET so callers do not need
- *   to re-implement the 800-line enrichment pipeline.
+ * - runEnrichmentForDataset: invokes enrichDataset() in services/enrich-dataset.ts
+ *   directly so callers reuse the full enrichment pipeline without an HTTP
+ *   round-trip (Cloudflare rejects Worker self-fetch at the edge; see #523).
  *
  * - buildReindexFilterQuery: pure SQL-builder for the bulk admin endpoint
  *   so the filter matrix is unit-testable without a D1 harness.
@@ -25,6 +25,7 @@ import {
   computeDatasetMetadataColumns,
   writeDatasetMetadataColumns,
 } from "./dataset-metadata-columns.js";
+import { enrichDataset } from "./enrich-dataset.js";
 import { getDatasetsToken } from "./github-auth.js";
 import { getBlobContent, getTreeAtRef } from "./github.js";
 import { syncDatasetToNemar } from "./nemar-sync.js";
@@ -420,13 +421,16 @@ export interface EnrichmentRunResult {
 }
 
 /**
- * Field names the /webhooks/llm-enrich handler uses to surface non-fatal
- * sub-step failures inside a 200 response body. Kept in sync with the
- * spread at webhooks.ts where the response is built.
+ * Field names that enrichDataset surfaces in a 200 response body when a
+ * non-fatal sub-step (commit, D1 cache write, EZID DOI sync, ...) fails.
+ * Kept in sync with the EnrichmentSuccessBody spread in enrich-dataset.ts
+ * and with the warning-emitting shell loop in services/github.ts. The OpenRouter
+ * call is intentionally not in this list: it's the load-bearing Stage 2,
+ * and any failure there aborts the pipeline with a 500 rather than a
+ * 200-with-warning.
  */
 const ENRICHMENT_SUBERROR_FIELDS = [
   "commit_error",
-  "openrouter_error",
   "doi_sync_error",
   "cache_error",
   "bidsignore_error",
@@ -451,14 +455,6 @@ export function extractEnrichmentSubErrors(body: unknown): string[] {
 }
 
 /**
- * Forward to /webhooks/llm-enrich in-process using the configured webhook
- * secret so admin-triggered reindex reuses the existing enrichment pipeline
- * end-to-end without extracting an 800-line handler.
- *
- * Defaults to ref="main" and force=true (admin paths always want a fresh
- * enrichment regardless of source_hash). The caller can override either.
- */
-/**
  * Heuristic: does the given ref look like a version tag (immutable)?
  * Matches `v` followed by a digit, the conventional shape for semver-style
  * release tags produced by pr-merge.yml. Tag refs must use client_commits=true
@@ -470,68 +466,51 @@ export function looksLikeTagRef(ref: string): boolean {
   return /^v\d/.test(ref);
 }
 
+/**
+ * Run the LLM enrichment pipeline for a dataset in-process by calling the
+ * extracted enrichDataset service function directly. Defaults to ref="main"
+ * and force=true (admin paths always want a fresh enrichment regardless of
+ * source_hash). The caller can override either.
+ *
+ * History (#523): previously this used `fetch(API_BASE_URL/webhooks/llm-enrich)`
+ * to forward to the webhook handler on the same Worker, but Cloudflare rejects
+ * Worker self-fetches at the edge with HTTP 522 (regardless of whether the
+ * target is the custom domain or *.workers.dev). The handler body now lives
+ * in services/enrich-dataset.ts and is invoked directly, so no HTTP round-trip
+ * is involved on the admin-reindex path.
+ */
 export async function runEnrichmentForDataset(
   env: Bindings,
   datasetId: string,
   options?: { ref?: string; clientCommits?: boolean },
 ): Promise<EnrichmentRunResult> {
   const ref = options?.ref ?? "main";
-  const token = env.GITHUB_WEBHOOK_SECRET;
-  if (!token) {
-    return { ok: false, error: "GITHUB_WEBHOOK_SECRET not configured", ref };
-  }
   if (!env.OPENROUTER_API_KEY) {
     return { ok: false, error: "OPENROUTER_API_KEY not configured", ref };
   }
-  if (!env.API_BASE_URL) {
-    return { ok: false, error: "API_BASE_URL not configured", ref };
-  }
 
-  // Tag refs are immutable; force client_commits=true so the Worker skips
-  // its commit path. If the explicit caller already opted into client_commits
-  // we honor that. Branch refs default to false unless the caller asked
-  // otherwise (mirroring the existing behavior).
+  // Tag refs are immutable; force client_commits=true so the inner pipeline
+  // skips its REST commit path. If the explicit caller already opted into
+  // client_commits we honor that. Branch refs default to false unless the
+  // caller asked otherwise (mirroring the existing behavior).
   const clientCommits = options?.clientCommits === true || looksLikeTagRef(ref);
 
-  // The webhook handler is on the same Worker; forwarding via API_BASE_URL
-  // (configured per environment in wrangler.toml) ensures dev hits the dev
-  // Worker and prod hits api.nemar.org. Cloudflare routes the request back
-  // to this Worker.
   try {
-    const res = await fetch(`${env.API_BASE_URL.replace(/\/$/, "")}/webhooks/llm-enrich`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "X-Webhook-Token": token,
-      },
-      body: JSON.stringify({
-        dataset_id: datasetId,
-        force: true,
-        ref,
-        client_commits: clientCommits,
-      }),
+    const outcome = await enrichDataset(env, {
+      datasetId,
+      force: true,
+      ref,
+      clientCommits,
     });
-    if (!res.ok) {
-      const text = await res.text().catch(() => "");
+    if (!outcome.ok) {
+      const detail = outcome.body.details ? `: ${outcome.body.details}` : "";
       return {
         ok: false,
-        error: `HTTP ${res.status}: ${text.slice(0, 200) || "(empty body)"}`,
+        error: `HTTP ${outcome.status}: ${outcome.body.error}${detail}`,
         ref,
       };
     }
-    // Parse the body explicitly so a malformed/gateway response is reported
-    // as a failure rather than silently treated as "everything OK".
-    let body: unknown;
-    try {
-      body = await res.json();
-    } catch (parseErr) {
-      return {
-        ok: false,
-        error: `Enrichment response body was not valid JSON: ${errorMessage(parseErr)}`,
-        ref,
-      };
-    }
-    const subErrors = extractEnrichmentSubErrors(body);
+    const subErrors = extractEnrichmentSubErrors(outcome.body);
     if (subErrors.length > 0) {
       return { ok: false, error: subErrors.join("; "), ref };
     }
