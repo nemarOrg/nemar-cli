@@ -1,6 +1,6 @@
 {
   "name": "nemar-api",
-  "version": "0.8.20-dev3",
+  "version": "0.8.20",
   "private": true,
   "scripts": {
     "dev": "wrangler dev",
