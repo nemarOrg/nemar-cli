@@ -255,20 +255,41 @@ declare -A DS_TO_ON
 load_canonical_mapping() {
   local offset=0 limit=200
   local fetched=0 total=-1
+  local curl_err jq_err
+  curl_err=$(mktemp)
+  jq_err=$(mktemp)
+  # The script runs under `set -euo pipefail`; the trap fires whether we
+  # break the loop on success or return on error.
+  trap 'rm -f "$curl_err" "$jq_err"' RETURN
 
   while :; do
     local resp
-    if ! resp=$(curl -fsS --max-time 30 "${API_BASE}/datasets?limit=${limit}&offset=${offset}" 2>/dev/null); then
-      log_error "Failed to fetch catalog mapping from ${API_BASE}/datasets at offset=${offset}"
+    # Capture curl stderr so DNS/TLS/timeout reasons land in the cron log.
+    # Without this, `2>/dev/null` masked the underlying transport reason
+    # and operators saw a generic "Failed to fetch" with no diagnostic.
+    if ! resp=$(curl -fsS --max-time 30 "${API_BASE}/datasets?limit=${limit}&offset=${offset}" 2>"$curl_err"); then
+      log_error "Failed to fetch catalog mapping from ${API_BASE}/datasets at offset=${offset}: $(cat "$curl_err")"
+      return 1
+    fi
+
+    # Structural sanity check: a non-array .datasets (e.g. null on a 429
+    # body that's still valid JSON) would let the jq filter below produce
+    # an empty result and silently truncate the mapping. Catch that here.
+    if ! printf '%s' "$resp" | jq -e '.datasets | type == "array"' >/dev/null 2>"$jq_err"; then
+      log_error "Unexpected /datasets shape at offset=${offset} (no .datasets array): $(cat "$jq_err" || true)"
+      log_error "Response head: $(printf '%s' "$resp" | head -c 200)"
       return 1
     fi
 
     local pairs
-    pairs=$(printf '%s' "$resp" | jq -r '
+    if ! pairs=$(printf '%s' "$resp" | jq -r '
       .datasets[]
       | select(.source_id != null and (.source_id | tostring | startswith("ds")))
       | "\(.source_id)\t\(.dataset_id)"
-    ')
+    ' 2>"$jq_err"); then
+      log_error "jq failed parsing /datasets at offset=${offset}: $(cat "$jq_err")"
+      return 1
+    fi
     if [[ -n "$pairs" ]]; then
       while IFS=$'\t' read -r src_id dst_id; do
         [[ -n "$src_id" && -n "$dst_id" ]] && DS_TO_ON["$src_id"]="$dst_id"
@@ -276,9 +297,19 @@ load_canonical_mapping() {
     fi
 
     local page_count
-    page_count=$(printf '%s' "$resp" | jq -r '.count // 0')
+    # `.count` MUST be present and numeric. An API shape change that drops
+    # it would otherwise terminate the loop after page 1 with silent success.
+    page_count=$(printf '%s' "$resp" | jq -r '.count // empty')
+    if [[ -z "$page_count" || ! "$page_count" =~ ^[0-9]+$ ]]; then
+      log_error "Unexpected /datasets shape at offset=${offset}: missing or non-numeric .count"
+      return 1
+    fi
     if (( total < 0 )); then
-      total=$(printf '%s' "$resp" | jq -r '.total_count // 0')
+      total=$(printf '%s' "$resp" | jq -r '.total_count // empty')
+      if [[ -z "$total" || ! "$total" =~ ^[0-9]+$ ]]; then
+        log_error "Unexpected /datasets shape at offset=${offset}: missing or non-numeric .total_count"
+        return 1
+      fi
     fi
     fetched=$((fetched + page_count))
     if (( page_count == 0 )) || (( fetched >= total )); then
