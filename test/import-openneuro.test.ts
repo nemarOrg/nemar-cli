@@ -15,6 +15,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  appendOpenNeuroProvenance,
   coerceFunding,
   decideSkipCiCheck,
   detectModalitiesFromDataset,
@@ -303,5 +304,60 @@ describe("seedMetadata (#512)", () => {
       require("node:fs").readFileSync(join(tmpRoot, ".nemar", "config.json"), "utf-8"),
     );
     expect(config.foo).toBe("bar");
+  });
+});
+
+describe("appendOpenNeuroProvenance (#535)", () => {
+  let tmpRoot: string;
+
+  beforeEach(() => {
+    tmpRoot = mkdtempSync(join(tmpdir(), "appendProvenance-"));
+  });
+
+  afterEach(() => {
+    rmSync(tmpRoot, { recursive: true, force: true });
+  });
+
+  function readReadme(): string {
+    return require("node:fs").readFileSync(join(tmpRoot, "README.md"), "utf-8");
+  }
+
+  test("creates README.md when none exists and inserts the provenance marker + section", () => {
+    appendOpenNeuroProvenance(tmpRoot, "ds000117", "10.18112/openneuro.ds000117.v1.0.0");
+    const out = readReadme();
+    expect(out).toContain("<!-- nemar:provenance -->");
+    expect(out).toContain("## Provenance");
+    expect(out).toContain("[ds000117](https://openneuro.org/datasets/ds000117)");
+    expect(out).toContain("10.18112/openneuro.ds000117.v1.0.0");
+  });
+
+  test("appends to an existing README without touching the original body", () => {
+    writeFileSync(join(tmpRoot, "README.md"), "# Existing\n\nUpstream description text.\n");
+    appendOpenNeuroProvenance(tmpRoot, "ds000117", null);
+    const out = readReadme();
+    expect(out.startsWith("# Existing\n\nUpstream description text.\n")).toBe(true);
+    expect(out).toContain("<!-- nemar:provenance -->");
+    expect(out).toContain("[ds000117]");
+    // No DOI line when openNeuroDoi is null
+    expect(out).not.toContain("doi.org");
+  });
+
+  test("idempotent: re-running does not duplicate the provenance block", () => {
+    appendOpenNeuroProvenance(tmpRoot, "ds000117", null);
+    const firstPass = readReadme();
+    appendOpenNeuroProvenance(tmpRoot, "ds000117", null);
+    appendOpenNeuroProvenance(tmpRoot, "ds000117", null);
+    expect(readReadme()).toBe(firstPass);
+    expect(readReadme().match(/<!-- nemar:provenance -->/g)?.length).toBe(1);
+  });
+
+  test("ensures a blank-line separator when the existing README doesn't end with newline", () => {
+    writeFileSync(join(tmpRoot, "README.md"), "# No trailing newline");
+    appendOpenNeuroProvenance(tmpRoot, "ds000117", null);
+    const out = readReadme();
+    // Existing content preserved
+    expect(out).toContain("# No trailing newline");
+    // Marker on its own paragraph, not glued to the heading
+    expect(out).toMatch(/# No trailing newline\n\n<!-- nemar:provenance -->/);
   });
 });
