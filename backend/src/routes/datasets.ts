@@ -583,6 +583,16 @@ datasetRoutes.get("/", optionalAuthMiddleware, async (c) => {
            NULL AS latest_version
     FROM nemar_catalog c
     WHERE c.id NOT IN (SELECT dataset_id FROM datasets WHERE status = 'active')
+      AND c.id NOT IN (
+        -- Hide ds* shadows when a managed on* mirror exists. The catalog row
+        -- keeps its OpenNeuro id (c.id = "ds002718"); the managed mirror
+        -- carries the canonical id (dataset_id = "on002718") and back-points
+        -- via source_id = "ds002718". Without this second NOT IN, every
+        -- mirrored ds row shows up twice in the list (once as canonical,
+        -- once as shadow).
+        SELECT source_id FROM datasets
+        WHERE status = 'active' AND source = 'openneuro' AND source_id IS NOT NULL
+      )
   `;
 
   // Owner filter for catalog datasets
@@ -837,7 +847,8 @@ datasetRoutes.get("/search", optionalAuthMiddleware, async (c) => {
   // Override per-request with ?min_score=0 to inspect the long tail.
   const DEFAULT_MIN_SCORE = 0.65;
   const minScoreParam = c.req.query("min_score");
-  const parsedMinScore = minScoreParam === undefined ? NaN : Number.parseFloat(minScoreParam);
+  const parsedMinScore =
+    minScoreParam === undefined ? Number.NaN : Number.parseFloat(minScoreParam);
   const minScore = Number.isFinite(parsedMinScore)
     ? Math.max(0, Math.min(parsedMinScore, 1))
     : DEFAULT_MIN_SCORE;
