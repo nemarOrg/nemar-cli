@@ -23,6 +23,8 @@ import type { Bindings } from "../types/bindings.js";
 import { parseNemarMetadata } from "./datacite.js";
 import {
   computeDatasetMetadataColumns,
+  formatFileSize,
+  syncNemarCatalogFromEnrichment,
   writeDatasetMetadataColumns,
 } from "./dataset-metadata-columns.js";
 import { enrichDataset } from "./enrich-dataset.js";
@@ -388,6 +390,26 @@ export async function runDatasetSync(
     console.log(
       `[reindex] Metadata columns refreshed for ${datasetId}: subjects=${cols.subject_count}, modalities=${cols.modalities}, files=${cols.total_files}`,
     );
+
+    // Mirror the BIDS-derived columns into nemar_catalog so the list-endpoint
+    // cache stays in sync. authors/license aren't refreshed here -- they
+    // come from the LLM enrichment, which runs on its own webhook path.
+    try {
+      await syncNemarCatalogFromEnrichment(db, datasetId, {
+        modalities: cols.modalities,
+        participants: cols.subject_count,
+        age_min: cols.age_min,
+        age_max: cols.age_max,
+        tasks: cols.tasks,
+        file_size: cols.file_size,
+        file_size_formatted: formatFileSize(cols.file_size),
+        total_files: cols.total_files,
+      });
+    } catch (err) {
+      // console.error (not warn): a persistent failure here leaves the
+      // list endpoint cache stale on every reindex.
+      console.error(`[reindex] nemar_catalog sync failed for ${datasetId}: ${errorMessage(err)}`);
+    }
   } catch (colErr) {
     metadataColumnsError = errorMessage(colErr);
     console.error(`[reindex] Failed to write metadata columns for ${datasetId}:`, colErr);
