@@ -55,6 +55,7 @@ import {
   validateMeshTerms,
   validateMetadata,
 } from "./llm-enrich.js";
+import { ensureParticipantsTsv } from "./participants-tsv.js";
 import { errorMessage, extractRepoName } from "./repo-metadata.js";
 import { extractExtensions, formatBytes, getDatasetS3Stats } from "./s3.js";
 
@@ -466,9 +467,16 @@ export async function enrichDataset(
     }
 
     // Stage 1c: Read participants.tsv so the metadata-columns writer below
-    // can populate subject_count and age range. Non-fatal: if the file is
-    // missing or unreadable, subject_count/age_min/age_max stay NULL in D1.
+    // can populate subject_count and age range. When the dataset shipped
+    // without one (BIDS treats it as RECOMMENDED, not REQUIRED, so the
+    // validator passes), auto-generate a placeholder from the sub-* dirs
+    // and queue it for the enrichment commit. This is the single point
+    // that catches both paths -- `nemar upload` (user forgot the file)
+    // and `--trust-upstream` OpenNeuro import (upstream itself lacks one,
+    // e.g. ds005262). Non-fatal: if subjects don't exist either, leave
+    // subject_count NULL in D1 rather than fabricate values.
     let participantsTsv: string | null = null;
+    let autoParticipantsToCommit: string | null = null;
     const participantsFile = tree.find((f) => f.path === "participants.tsv");
     if (participantsFile) {
       try {
@@ -476,6 +484,15 @@ export async function enrichDataset(
       } catch (partErr) {
         console.warn(
           `[llm-enrich] Failed to read participants.tsv for ${datasetId}, continuing: ${errorMessage(partErr)}`,
+        );
+      }
+    } else {
+      const ensured = ensureParticipantsTsv(tree);
+      if (ensured.contentToCommit) {
+        autoParticipantsToCommit = ensured.contentToCommit;
+        participantsTsv = ensured.contentToCommit;
+        console.log(
+          `[llm-enrich] Auto-generated placeholder participants.tsv for ${datasetId}: ${ensured.subjects.length} subjects (${ensured.subjects.slice(0, 3).join(", ")}${ensured.subjects.length > 3 ? ", ..." : ""})`,
         );
       }
     }
@@ -747,6 +764,12 @@ export async function enrichDataset(
       commitMode = "client";
     } else {
       try {
+        // Include the auto-generated participants.tsv in the same commit
+        // when stage 1c built one. Lands alongside .nemar/metadata.json
+        // so a publish triggered on the same head sees the file.
+        const additionalFiles = autoParticipantsToCommit
+          ? [{ path: "participants.tsv", content: autoParticipantsToCommit }]
+          : [];
         const result = await commitEnrichmentWithBidsignore(
           repoName,
           ref,
@@ -755,6 +778,7 @@ export async function enrichDataset(
           bidsignoreEntries,
           commitMessage,
           pat,
+          additionalFiles,
         );
         commitMode = result.commitMode;
         if (result.bidsignoreReadError) {
