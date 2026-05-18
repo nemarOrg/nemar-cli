@@ -1585,10 +1585,10 @@ jobs:
           fi
 
           # The Worker returns HTTP 200 with embedded *_error fields when
-          # individual sub-steps fail (commit, OpenRouter, DOI sync, cache).
-          # Surface these as warnings so a green checkmark does not mask a
-          # silently stale enrichment cycle.
-          for field in commit_error openrouter_error doi_sync_error cache_error bidsignore_error; do
+          # individual sub-steps fail (commit, DOI sync, cache). Surface
+          # these as warnings so a green checkmark does not mask a silently
+          # stale enrichment cycle.
+          for field in commit_error doi_sync_error cache_error bidsignore_error; do
             err=$(jq -r --arg f "$field" '.[$f] // empty' /tmp/llm-enrich-refresh.json 2>/dev/null)
             if [ -n "$err" ]; then
               echo "::warning::Enrichment refresh reported $field: $err"
