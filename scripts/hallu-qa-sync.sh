@@ -244,13 +244,59 @@ qa_tree_fingerprint() {
   fi
 }
 
+# ds* -> on* lookup table, populated once at startup by load_canonical_mapping.
+# Keyed by ds id (e.g. "ds002718"), value is the canonical on id ("on002718").
+declare -A DS_TO_ON
+
+# Fetch the full set of ds -> on mirror mappings from the catalog in one paginated
+# pass. Replaces per-dataset calls to /datasets/resolve/:id: the previous design
+# could hit hundreds of resolves in a sweep and tripped intermittent failures.
+# This runs once per script invocation and is safe to call before any sync work.
+load_canonical_mapping() {
+  local offset=0 limit=200
+  local fetched=0 total=-1
+
+  while :; do
+    local resp
+    if ! resp=$(curl -fsS --max-time 30 "${API_BASE}/datasets?limit=${limit}&offset=${offset}" 2>/dev/null); then
+      log_error "Failed to fetch catalog mapping from ${API_BASE}/datasets at offset=${offset}"
+      return 1
+    fi
+
+    local pairs
+    pairs=$(printf '%s' "$resp" | jq -r '
+      .datasets[]
+      | select(.source_id != null and (.source_id | tostring | startswith("ds")))
+      | "\(.source_id)\t\(.dataset_id)"
+    ')
+    if [[ -n "$pairs" ]]; then
+      while IFS=$'\t' read -r src_id dst_id; do
+        [[ -n "$src_id" && -n "$dst_id" ]] && DS_TO_ON["$src_id"]="$dst_id"
+      done <<<"$pairs"
+    fi
+
+    local page_count
+    page_count=$(printf '%s' "$resp" | jq -r '.count // 0')
+    if (( total < 0 )); then
+      total=$(printf '%s' "$resp" | jq -r '.total_count // 0')
+    fi
+    fetched=$((fetched + page_count))
+    if (( page_count == 0 )) || (( fetched >= total )); then
+      break
+    fi
+    offset=$((offset + limit))
+  done
+
+  log "Loaded ${#DS_TO_ON[@]} ds->on mirror mapping(s) from catalog"
+}
+
 # Translate a hallu directory name into the canonical S3 key prefix.
 #
 # nm*/on* directories already use canonical ids; we publish under the same id.
 # ds* directories are OpenNeuro shadows. When the catalog has an on* mirror
-# (resolve endpoint returns found=true), we publish under the on* id so the
-# canonical landing page at /dataset/on* sees the QA. ds* with no mirror yet
-# return empty -- the caller treats that as a skip.
+# (DS_TO_ON has an entry), we publish under the on* id so the canonical
+# landing page at /dataset/on* sees the QA. ds* with no mirror yet return
+# empty -- the caller treats that as a skip.
 resolve_canonical_id() {
   local source_id="$1"
 
@@ -259,21 +305,7 @@ resolve_canonical_id() {
     return 0
   fi
 
-  local resp
-  if ! resp=$(curl -fsS --max-time 10 "${API_BASE}/datasets/resolve/${source_id}" 2>/dev/null); then
-    log_error "  resolve failed: ${API_BASE}/datasets/resolve/${source_id}"
-    echo ""
-    return 1
-  fi
-
-  local found
-  found=$(printf '%s' "$resp" | jq -r '.found // false')
-  if [[ "$found" != "true" ]]; then
-    echo ""
-    return 0
-  fi
-
-  printf '%s' "$resp" | jq -r '.dataset_id'
+  echo "${DS_TO_ON[$source_id]:-}"
 }
 
 sync_dataset_qa() {
@@ -285,11 +317,12 @@ sync_dataset_qa() {
     return 0
   fi
 
-  # Resolve ds* -> on* (or identity for nm*/on*). Manifest is keyed by the
-  # source dir so per-directory fingerprints stay stable across renames; the
-  # S3 destination uses the canonical id.
+  # Resolve ds* -> on* (or identity for nm*/on*) via the in-memory mapping
+  # loaded once at startup. Manifest is keyed by the source dir so per-directory
+  # fingerprints stay stable across renames; the S3 destination uses the
+  # canonical id.
   local dest_id
-  dest_id=$(resolve_canonical_id "$source_id") || return 1
+  dest_id=$(resolve_canonical_id "$source_id")
   if [[ -z "$dest_id" ]]; then
     log_verbose "[SKIP] ${source_id}: no canonical mirror (ds* without on* in catalog)"
     return 0
@@ -352,6 +385,11 @@ main() {
 
   acquire_lock
   check_prerequisites
+
+  if ! load_canonical_mapping; then
+    log_error "Aborting: could not load ds->on mapping from catalog"
+    return 1
+  fi
 
   # Discover datasets: either one explicit argument or every nm/on/ds*-prefix
   # subdirectory of PROCESSED_DIR. ds* dirs are mapped to their on* canonical
