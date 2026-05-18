@@ -624,14 +624,23 @@ function buildFilterClauses(
   let clauses = "";
 
   if (opts.search) {
+    // Dataset ids (and the OpenNeuro source_id for mirrored rows) must be
+    // searchable directly. nemar_catalog.search_text was not consistently
+    // populated with the id across the corpus (nm000103 had it, nm000166
+    // did not), so relying on search_text alone produced 0 results for
+    // any catalog row whose enrichment missed the id.
+    const pattern = `%${opts.search.toLowerCase()}%`;
     if (opts.managed) {
       clauses +=
-        " AND (LOWER(d.name) LIKE ? OR LOWER(d.description) LIKE ? OR LOWER(COALESCE(c.search_text, '')) LIKE ?)";
-      const pattern = `%${opts.search.toLowerCase()}%`;
-      params.push(pattern, pattern, pattern);
+        " AND (LOWER(d.dataset_id) LIKE ?" +
+        " OR LOWER(COALESCE(d.source_id, '')) LIKE ?" +
+        " OR LOWER(d.name) LIKE ?" +
+        " OR LOWER(d.description) LIKE ?" +
+        " OR LOWER(COALESCE(c.search_text, '')) LIKE ?)";
+      params.push(pattern, pattern, pattern, pattern, pattern);
     } else {
-      clauses += " AND LOWER(c.search_text) LIKE ?";
-      params.push(`%${opts.search.toLowerCase()}%`);
+      clauses += " AND (LOWER(c.id) LIKE ? OR LOWER(c.search_text) LIKE ?)";
+      params.push(pattern, pattern);
     }
   }
 
@@ -837,7 +846,8 @@ datasetRoutes.get("/search", optionalAuthMiddleware, async (c) => {
   // Override per-request with ?min_score=0 to inspect the long tail.
   const DEFAULT_MIN_SCORE = 0.65;
   const minScoreParam = c.req.query("min_score");
-  const parsedMinScore = minScoreParam === undefined ? NaN : Number.parseFloat(minScoreParam);
+  const parsedMinScore =
+    minScoreParam === undefined ? Number.NaN : Number.parseFloat(minScoreParam);
   const minScore = Number.isFinite(parsedMinScore)
     ? Math.max(0, Math.min(parsedMinScore, 1))
     : DEFAULT_MIN_SCORE;
