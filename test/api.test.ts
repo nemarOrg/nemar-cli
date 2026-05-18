@@ -501,6 +501,25 @@ describe("Datasets API", () => {
       expect(Array.isArray(data.datasets)).toBe(true);
     });
 
+    test("listing hides ds* catalog shadows when an on* mirror exists", async () => {
+      // The catalog row keeps its OpenNeuro id (c.id = "ds002718"); the
+      // managed mirror carries the canonical id ("on002718") and back-points
+      // via source_id = "ds002718". Without the catalog query's second
+      // NOT IN clause, every mirrored ds* shows up twice in the list.
+      const { data } = await testRequest<{
+        datasets: Array<{ dataset_id: string; source?: string; source_id?: string | null }>;
+      }>("/datasets?limit=200");
+
+      const ids = new Set(data.datasets.map((d) => d.dataset_id));
+      const shadowed = data.datasets.filter((d) => {
+        if (!d.dataset_id.startsWith("on")) return false;
+        const dsCounterpart = `ds${d.dataset_id.slice(2)}`;
+        return ids.has(dsCounterpart);
+      });
+      // Each `on*` row in the list must NOT have its ds* counterpart alongside.
+      expect(shadowed).toEqual([]);
+    });
+
     test("listing's latest_version agrees with /manifest for managed datasets", async () => {
       // Ground truth for what the hallu sync script previously read.
       // If the SQL subquery diverges from /manifest's ordering or source,

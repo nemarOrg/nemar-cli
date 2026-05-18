@@ -855,8 +855,12 @@ describe("buildDatasetMetadata", () => {
       githubOrg: "nemarDatasets",
     });
     expect(out.name).toBe("HD-sEMG");
-    // Catalog description from D1 takes precedence over enrichment.description
-    expect(out.description).toBe("Hand gesture EMG");
+    // LLM-enriched description (v2.description) takes precedence over the
+    // catalog row's stored description. The catalog field is a fallback for
+    // datasets that have not been enriched yet, or a placeholder (e.g.,
+    // "Imported from OpenNeuro ds...") that must not survive a successful
+    // enrichment cycle. See #535.
+    expect(out.description).toBe("Hand gesture EMG (full)");
     expect(out.license).toBe("ODC-By-1.0");
     expect(out.recording_modality).toEqual(["EMG"]);
     expect(out.datatypes).toEqual(["emg"]);
@@ -950,6 +954,45 @@ describe("buildDatasetMetadata", () => {
       githubOrg: "nemarDatasets",
     });
     expect(out.description).toBe("from enrichment");
+  });
+
+  test("description priority: D1 'Imported from OpenNeuro' placeholder loses to v2 enrichment (#535)", () => {
+    // Pre-fix, the import-openneuro CLI seeded `datasets.description` with a
+    // placeholder string. `buildDatasetMetadata` used to short-circuit on
+    // any non-null row.description, so the placeholder survived even after
+    // a successful enrichment cycle wrote a real description to
+    // `enrichment_json`. Pin the new priority so a regression to the old
+    // ordering breaks this test.
+    const v2: NemarMetadataV2 = {
+      version: "2.0",
+      pipeline_stage: "validated",
+      description:
+        "A multimodal neuroimaging dataset comprising structural MRI, functional MRI, and EEG recordings during face-perception tasks.",
+    };
+    const out = buildDatasetMetadata({
+      row: { ...emptyRow(), description: "Imported from OpenNeuro ds000117" },
+      parsedEnrichment: v2,
+      versions: [],
+      latestManifest: null,
+      githubOrg: "nemarDatasets",
+    });
+    expect(out.description).toBe(v2.description);
+    expect(out.description).not.toContain("Imported from OpenNeuro");
+  });
+
+  test("description fallback: no enrichment at all -> falls through to D1 row.description", () => {
+    // The fallback path matters for newly-imported datasets whose
+    // enrichment cycle has not yet run. They have row.description set
+    // (whatever the importer wrote) but no parsedEnrichment yet. Make
+    // sure those rows still surface SOMETHING rather than null.
+    const out = buildDatasetMetadata({
+      row: { ...emptyRow(), description: "User-provided dataset description" },
+      parsedEnrichment: null,
+      versions: [],
+      latestManifest: null,
+      githubOrg: "nemarDatasets",
+    });
+    expect(out.description).toBe("User-provided dataset description");
   });
 
   test("absolute github_repo URL passes through; bare repo name expands", () => {
