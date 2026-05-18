@@ -58,7 +58,11 @@ describe("catalog-from-local SQL", () => {
     expect(source).toMatch(/synced_at = datetime\('now'\)/);
   });
 
-  test("SELECT pulls published_at, not just created_at", () => {
-    expect(source).toMatch(/d\.published_at/);
+  test("SELECT derives first_version_at from dataset_versions (no fictional d.published_at)", () => {
+    // datasets has no published_at column; publication is tracked via
+    // dataset_versions. Pin the correlated subquery so the SELECT can't
+    // regress to referencing a non-existent column.
+    expect(source).toMatch(/SELECT MIN\(dv\.created_at\)\s+FROM dataset_versions dv/);
+    expect(source).not.toMatch(/d\.published_at/);
   });
 });
