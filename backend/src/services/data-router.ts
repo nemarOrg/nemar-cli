@@ -802,7 +802,13 @@ export function buildDatasetMetadata(input: {
   const v2 = parsedEnrichment && parsedEnrichment.version === "2.0" ? parsedEnrichment : null;
   const v1 = parsedEnrichment && parsedEnrichment.version === "1.0" ? parsedEnrichment : null;
 
-  const description = row.description ?? v2?.description ?? v1?.description ?? null;
+  // Prefer the LLM-enriched description over the catalog row's stored value.
+  // On-import we seed `datasets.description` with a placeholder string (e.g.
+  // "Imported from OpenNeuro ds000117"); without this priority the placeholder
+  // would survive a successful enrichment cycle and the metadata.json endpoint
+  // would keep returning the placeholder forever (#535). Fall back to the row
+  // when no enrichment is present yet (newly-imported datasets).
+  const description = v2?.description ?? v1?.description ?? row.description ?? null;
   const license = v2?.license ?? null;
   const keywords: StructuredKeyword[] = v2?.keywords ?? [];
   const related: RelatedIdentifierEntry[] = v2?.related_identifiers ?? [];

@@ -374,6 +374,35 @@ export function seedMetadata(
 }
 
 /**
+ * Append a NEMAR provenance section to README.md (or create one) noting that
+ * this dataset is a mirror of an OpenNeuro dataset. The line is deterministic,
+ * available at import time, and intentionally separate from the LLM enrichment
+ * pipeline: provenance must be visible on GitHub for anyone browsing the repo
+ * regardless of whether enrichment has run yet. Idempotent — re-running the
+ * importer (or a later refresh) won't append a second copy.
+ */
+export function appendOpenNeuroProvenance(
+  datasetPath: string,
+  openneuroId: string,
+  openNeuroDoi: string | null,
+): void {
+  const readmePath = join(datasetPath, "README.md");
+  const marker = "<!-- nemar:provenance -->";
+  const openneuroUrl = `https://openneuro.org/datasets/${openneuroId}`;
+  const doiLine = openNeuroDoi ? `\n- DOI: [${openNeuroDoi}](https://doi.org/${openNeuroDoi})` : "";
+  const block = `${marker}\n## Provenance\n\nThis dataset is mirrored on NEMAR from OpenNeuro.\n\n- Source: [${openneuroId}](${openneuroUrl})${doiLine}\n`;
+
+  const existing = existsSync(readmePath) ? readFileSync(readmePath, "utf-8") : "";
+  if (existing.includes(marker)) {
+    // Already imported once; avoid duplicating the block on re-runs.
+    return;
+  }
+  const separator =
+    existing.length > 0 && !existing.endsWith("\n") ? "\n\n" : existing.length > 0 ? "\n" : "";
+  writeFileSync(readmePath, `${existing}${separator}${block}`);
+}
+
+/**
  * Copy a single object from a public HTTP URL to NEMAR S3.
  * Uses curl to stream from the public source (no AWS creds needed for read)
  * and pipes to aws s3 cp for the upload (uses NEMAR creds).
@@ -491,10 +520,14 @@ export async function importOpenNeuro(
   // Step 2: Create NEMAR dataset record + GitHub repo
   const createSpinner = ora("Creating NEMAR dataset record...").start();
   try {
+    // Intentionally do not seed a placeholder description here. OpenNeuro
+    // provenance is already encoded by `source: "openneuro"`, `source_id`,
+    // and the `on*` dataset_id prefix; the website renders the attribution
+    // from those fields. Seeding a placeholder string would overwrite the
+    // LLM-enriched description on every metadata.json read (#535).
     const result = await importDataset({
       dataset_id: nemarId,
       name: datasetName,
-      description: `Imported from OpenNeuro ${openneuroId}`,
       source: "openneuro",
       source_id: openneuroId,
     });
@@ -655,10 +688,14 @@ export async function importOpenNeuro(
     registerSpinner.succeed(`Registered ${regResult.success} files in git-annex`);
   }
 
-  // Step 6: Seed .nemar/metadata.json
+  // Step 6: Seed .nemar/metadata.json and append a deterministic OpenNeuro
+  // provenance section to README.md. Provenance is intentionally NOT routed
+  // through the LLM enrichment pipeline — it's known at import time and must
+  // be visible on the GitHub repo before any enrichment has run (#535).
   const metaSpinner = ora("Seeding metadata...").start();
   try {
     seedMetadata(datasetPath, nemarId, openneuroId, bidsDesc, openNeuroDoi);
+    appendOpenNeuroProvenance(datasetPath, openneuroId, openNeuroDoi);
   } catch (err) {
     metaSpinner.fail(
       `Failed to seed metadata: ${err instanceof Error ? err.message : String(err)}`,
@@ -666,8 +703,10 @@ export async function importOpenNeuro(
     process.exit(1);
   }
 
-  // Stage and commit the metadata
-  const addResult = await runCommand(["git", "add", ".nemar/metadata.json"], { cwd: datasetPath });
+  // Stage and commit the metadata + provenance README update
+  const addResult = await runCommand(["git", "add", ".nemar/metadata.json", "README.md"], {
+    cwd: datasetPath,
+  });
   if (addResult.exitCode !== 0) {
     metaSpinner.fail(`Failed to stage metadata: ${addResult.stderr.trim()}`);
     process.exit(1);
@@ -681,7 +720,7 @@ export async function importOpenNeuro(
     metaSpinner.fail(`Failed to commit metadata: ${commitResult.stderr.trim()}`);
     process.exit(1);
   }
-  metaSpinner.succeed("Seeded .nemar/metadata.json");
+  metaSpinner.succeed("Seeded .nemar/metadata.json and README provenance");
 
   // Step 7: Push OpenNeuro git history + metadata commit to nemarDatasets.
   // This is the initial push to a brand-new empty repo; no pre-pull needed
