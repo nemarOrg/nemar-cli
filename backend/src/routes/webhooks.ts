@@ -8,7 +8,6 @@
 import type { Context } from "hono";
 import { Hono } from "hono";
 
-import { bidsToDataCite, buildDataCiteXml } from "../services/datacite.js";
 import { runDatasetSync } from "../services/dataset-reindex.js";
 import { createEzidVersionDoi, parseDoiProvider } from "../services/doi.js";
 import { enrichDataset } from "../services/enrich-dataset.js";
@@ -708,12 +707,10 @@ async function handleZenodoVersionDoi(
 }
 
 /**
- * Trigger LLM-based metadata enrichment for a dataset
- *
- * Called by GitHub Actions when README.md or dataset_description.json changes.
- * Reads source files from GitHub, extracts metadata via OpenRouter,
- * merges with existing author ORCIDs, commits .nemar/metadata.json,
- * ensures .bidsignore includes .nemar/, and caches enrichment in D1.
+ * Trigger LLM-based metadata enrichment for a dataset. Called by GitHub
+ * Actions when README.md or dataset_description.json changes. Authenticates
+ * via X-Webhook-Token, validates the request shape, and delegates the
+ * pipeline work to enrichDataset() in services/enrich-dataset.ts.
  */
 webhooks.post("/llm-enrich", async (c) => {
   const token = c.req.header("X-Webhook-Token");

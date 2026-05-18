@@ -8,9 +8,9 @@
  *   syncDatasetToNemar, and updates both the existing nemar_sync_* fields
  *   and the Phase 2 metadata columns + metadata_columns_error in D1.
  *
- * - runEnrichmentForDataset: forwards to the /webhooks/llm-enrich endpoint
- *   in-process via fetch using GITHUB_WEBHOOK_SECRET so callers do not need
- *   to re-implement the 800-line enrichment pipeline.
+ * - runEnrichmentForDataset: invokes enrichDataset() in services/enrich-dataset.ts
+ *   directly so callers reuse the full enrichment pipeline without an HTTP
+ *   round-trip (Cloudflare rejects Worker self-fetch at the edge; see #523).
  *
  * - buildReindexFilterQuery: pure SQL-builder for the bulk admin endpoint
  *   so the filter matrix is unit-testable without a D1 harness.
@@ -421,13 +421,16 @@ export interface EnrichmentRunResult {
 }
 
 /**
- * Field names the /webhooks/llm-enrich handler uses to surface non-fatal
- * sub-step failures inside a 200 response body. Kept in sync with the
- * spread at webhooks.ts where the response is built.
+ * Field names that enrichDataset surfaces in a 200 response body when a
+ * non-fatal sub-step (commit, D1 cache write, EZID DOI sync, ...) fails.
+ * Kept in sync with the EnrichmentSuccessBody spread in enrich-dataset.ts
+ * and with the warning-emitting shell loop in services/github.ts. The OpenRouter
+ * call is intentionally not in this list: it's the load-bearing Stage 2,
+ * and any failure there aborts the pipeline with a 500 rather than a
+ * 200-with-warning.
  */
 const ENRICHMENT_SUBERROR_FIELDS = [
   "commit_error",
-  "openrouter_error",
   "doi_sync_error",
   "cache_error",
   "bidsignore_error",

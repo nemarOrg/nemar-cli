@@ -180,26 +180,47 @@ export async function enrichDataset(
   // pipeline operates on the right snapshot (e.g., release/v1.0.1 or v1.0.1).
   const ref = opts.ref ?? "main";
 
-  // Look up dataset in D1 (includes EZID/owner fields for DOI title sync)
-  const dataset = await env.DB.prepare(
-    `SELECT d.dataset_id, d.name, d.github_repo, d.enrichment_json,
-            d.ezid_identifier, d.is_sandbox,
-            u.username AS owner_username, u.orcid AS owner_orcid
-     FROM datasets d
-     LEFT JOIN users u ON d.owner_user_id = u.id
-     WHERE d.dataset_id = ?`,
-  )
-    .bind(datasetId)
-    .first<{
-      dataset_id: string;
-      name: string | null;
-      github_repo: string | null;
-      enrichment_json: string | null;
-      ezid_identifier: string | null;
-      is_sandbox: number | null;
-      owner_username: string | null;
-      owner_orcid: string | null;
-    }>();
+  // Look up dataset in D1 (includes EZID/owner fields for DOI title sync).
+  // Wrapped so a D1 transport or schema failure surfaces as a typed
+  // EnrichmentOutcome with the underlying message in `details`, instead of
+  // escaping to Hono's generic 500 handler which drops the diagnostic.
+  let dataset: {
+    dataset_id: string;
+    name: string | null;
+    github_repo: string | null;
+    enrichment_json: string | null;
+    ezid_identifier: string | null;
+    is_sandbox: number | null;
+    owner_username: string | null;
+    owner_orcid: string | null;
+  } | null;
+  try {
+    dataset = await env.DB.prepare(
+      `SELECT d.dataset_id, d.name, d.github_repo, d.enrichment_json,
+              d.ezid_identifier, d.is_sandbox,
+              u.username AS owner_username, u.orcid AS owner_orcid
+       FROM datasets d
+       LEFT JOIN users u ON d.owner_user_id = u.id
+       WHERE d.dataset_id = ?`,
+    )
+      .bind(datasetId)
+      .first<{
+        dataset_id: string;
+        name: string | null;
+        github_repo: string | null;
+        enrichment_json: string | null;
+        ezid_identifier: string | null;
+        is_sandbox: number | null;
+        owner_username: string | null;
+        owner_orcid: string | null;
+      }>();
+  } catch (err) {
+    return {
+      ok: false,
+      status: 500,
+      body: { error: "D1 lookup failed", details: errorMessage(err) },
+    };
+  }
 
   if (!dataset) {
     return { ok: false, status: 404, body: { error: "Dataset not found" } };
@@ -212,7 +233,18 @@ export async function enrichDataset(
     return { ok: false, status: 400, body: { error: "Invalid github_repo format" } };
   }
 
-  const pat = await getDatasetsToken(env);
+  // GitHub auth resolution can throw if neither App nor PAT is configured;
+  // mirror the D1 catch so the webhook caller gets a structured response.
+  let pat: string;
+  try {
+    pat = await getDatasetsToken(env);
+  } catch (err) {
+    return {
+      ok: false,
+      status: 500,
+      body: { error: "Failed to resolve GitHub auth", details: errorMessage(err) },
+    };
+  }
 
   console.log(
     `[llm-enrich] Starting ${datasetId} on ref="${ref}" (force=${forceReenrich}, client_commits=${clientCommits})`,
@@ -617,6 +649,15 @@ export async function enrichDataset(
         if (existingResp.ok) {
           const existing = (await existingResp.json()) as Array<{ title: string }>;
           alreadyReported = existing.some((i) => i.title === issueTitle);
+        } else {
+          // Token missing issues:read, repo not found, or GitHub 5xx. We
+          // fall through to issue creation rather than aborting, but log
+          // loudly because the de-duplication guard is now bypassed and
+          // repeated failures may file duplicate "Metadata validation
+          // failed" issues.
+          console.warn(
+            `[llm-enrich] Could not list existing issues for ${datasetId} (HTTP ${existingResp.status}); proceeding with issue creation may duplicate`,
+          );
         }
 
         if (alreadyReported) {
