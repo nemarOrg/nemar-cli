@@ -221,7 +221,7 @@ describe("seedMetadata (#512)", () => {
 
   function readMeta(): Record<string, unknown> {
     const path = join(tmpRoot, ".nemar", "metadata.json");
-    return JSON.parse(require("node:fs").readFileSync(path, "utf-8"));
+    return JSON.parse(readFileSync(path, "utf-8"));
   }
 
   test("minimal BIDS description: writes baseline fields only, no empty optionals", () => {
@@ -301,7 +301,7 @@ describe("seedMetadata (#512)", () => {
     // metadata.json appears, config.json survives.
     expect(readMeta().dataset_id).toBe("on000001");
     const config = JSON.parse(
-      require("node:fs").readFileSync(join(tmpRoot, ".nemar", "config.json"), "utf-8"),
+      readFileSync(join(tmpRoot, ".nemar", "config.json"), "utf-8"),
     );
     expect(config.foo).toBe("bar");
   });
