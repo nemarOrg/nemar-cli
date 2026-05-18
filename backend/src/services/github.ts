@@ -2634,6 +2634,23 @@ export async function commitEnrichmentWithBidsignore(
       for (const f of additionalFiles) {
         treeFiles.push({ path: f.path, content: f.content });
       }
+      // Guard against duplicate paths in the tree write. GitHub's tree API
+      // accepts duplicates but the behavior is last-wins, which silently
+      // discards earlier contents. Throwing instead of silently winning
+      // prevents a future caller from accidentally clobbering metadataPath
+      // or .bidsignore via additionalFiles.
+      const seen = new Set<string>();
+      for (const f of treeFiles) {
+        if (seen.has(f.path)) {
+          throw new EnrichmentCommitError(
+            `duplicate path '${f.path}' in commit tree`,
+            commitMode,
+            bidsignoreReadError,
+            null,
+          );
+        }
+        seen.add(f.path);
+      }
       await commitFilesAsTree(repo, branch, treeFiles, message, pat);
     } else {
       // Pass `branch` so a release/* or other non-main caller doesn't have

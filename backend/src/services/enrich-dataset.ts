@@ -491,8 +491,13 @@ export async function enrichDataset(
       if (ensured.contentToCommit) {
         autoParticipantsToCommit = ensured.contentToCommit;
         participantsTsv = ensured.contentToCommit;
+        // "pending commit": the in-memory content drives subject_count for
+        // this enrichment run, but the file isn't in the repo until the
+        // commit at the bottom of this function succeeds. If that commit
+        // fails, D1 will carry a subject_count derived from a file the
+        // repo doesn't have until the next sweep regenerates it.
         console.log(
-          `[llm-enrich] Auto-generated placeholder participants.tsv for ${datasetId}: ${ensured.subjects.length} subjects (${ensured.subjects.slice(0, 3).join(", ")}${ensured.subjects.length > 3 ? ", ..." : ""})`,
+          `[llm-enrich] Auto-generated placeholder participants.tsv for ${datasetId} (pending commit): ${ensured.subjects.length} subjects (${ensured.subjects.slice(0, 3).join(", ")}${ensured.subjects.length > 3 ? ", ..." : ""})`,
         );
       }
     }

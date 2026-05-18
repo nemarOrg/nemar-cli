@@ -81,6 +81,17 @@ describe("enumerateBidsSubjects", () => {
       enumerateBidsSubjects(tree("sub-NDARAC462DZH/eeg/x", "sub-NDARAE866UVF/eeg/x")),
     ).toEqual(["sub-NDARAC462DZH", "sub-NDARAE866UVF"]);
   });
+
+  test("rejects hyphenated-label subject ids (non-conformant per BIDS spec)", () => {
+    // BIDS defines `<label>` as ^[0-9a-zA-Z]+$ -- no hyphens. We intentionally
+    // skip such datasets rather than fabricate a partial participants.tsv;
+    // if you're hitting this, the upstream is already non-conformant and
+    // needs to fix labels first. Pinning the behavior so a future regex
+    // tweak can't silently start matching them.
+    expect(
+      enumerateBidsSubjects(tree("sub-PD-01/eeg/x", "sub-PD-02/eeg/x")),
+    ).toEqual([]);
+  });
 });
 
 describe("buildPlaceholderParticipantsTsv", () => {
