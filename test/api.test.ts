@@ -449,6 +449,25 @@ describe("Datasets API", () => {
       expect(typeof data.count).toBe("number");
     });
 
+    test("search matches managed dataset_id (nm*/on*) even when search_text omits it", async () => {
+      // Pick any active managed dataset from the unfiltered list, then assert
+      // that search=<its id> returns it. Previously the search clause only
+      // checked name/description/c.search_text, so any nm* whose enrichment
+      // failed to write the id into search_text vanished from search results.
+      const { data: all } = await testRequest<{
+        datasets: Array<{ dataset_id: string; source_type?: string }>;
+      }>("/datasets?limit=50");
+      const managed = all.datasets.find((d) => d.source_type === "managed");
+      if (!managed) return; // tolerated on empty/sandbox dev DBs
+
+      const { status, data } = await testRequest<{
+        datasets: Array<{ dataset_id: string }>;
+      }>(`/datasets?search=${encodeURIComponent(managed.dataset_id)}`);
+
+      expect(status).toBe(200);
+      expect(data.datasets.some((d) => d.dataset_id === managed.dataset_id)).toBe(true);
+    });
+
     test("listing entries expose latest_version (null when no minted version)", async () => {
       // The hallu sync script reads this field to skip the per-dataset
       // /manifest call. Every entry must include the key, even if null,
