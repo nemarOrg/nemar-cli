@@ -37,6 +37,8 @@ import {
   runEnrichmentForDataset,
 } from "../services/dataset-reindex";
 import { deleteDatasetCascade } from "../services/deletion";
+import { DOCTOR_CHECKS, getCheck, listChecks } from "../services/doctor/registry";
+import type { CheckContext, Finding } from "../services/doctor/types";
 import {
   type DoiProvider,
   type DoiResult,
@@ -4380,6 +4382,120 @@ adminRoutes.post("/datasets/:id/manifest/:version", async (c) => {
     const msg = errorMessage(err);
     return c.json({ error: `Manifest generation failed: ${msg}` }, 500);
   }
+});
+
+// ============================================================================
+// Admin Doctor: scan + fix stuck-dataset patterns
+// ============================================================================
+
+/**
+ * POST /admin/doctor/scan - Run diagnostic checks across datasets.
+ *
+ * Body (all optional):
+ *   - check: name of a single check (omit to run all)
+ *   - dataset_id: narrow the scan to one dataset
+ *
+ * Read-only. Returns findings per check.
+ */
+adminRoutes.post("/doctor/scan", async (c) => {
+  type ScanBody = { check?: string; dataset_id?: string };
+  const body = (await c.req.json<ScanBody>().catch(() => ({}))) as ScanBody;
+
+  let checks = DOCTOR_CHECKS;
+  if (body.check) {
+    const found = getCheck(body.check);
+    if (!found) {
+      return c.json({ error: `Unknown check: ${body.check}`, available: listChecks() }, 400);
+    }
+    checks = [found];
+  }
+
+  const ctx: CheckContext = {
+    db: c.env.DB,
+    s3: getS3Config(c.env),
+    githubPat: await getDatasetsToken(c.env),
+  };
+
+  const results: Record<string, { description: string; count: number; findings: Finding[] }> = {};
+  for (const check of checks) {
+    const findings = await check.scan(ctx, body.dataset_id);
+    results[check.name] = {
+      description: check.description,
+      count: findings.length,
+      findings,
+    };
+  }
+
+  return c.json({
+    scanned: checks.map((c) => c.name),
+    results,
+  });
+});
+
+/**
+ * POST /admin/doctor/fix - Apply a check's remediation.
+ *
+ * Body:
+ *   - check (required): name of the check
+ *   - dataset_id (optional): narrow to one dataset
+ *   - dry_run (optional, default false): list findings without writing
+ *
+ * Returns per-dataset fix results. Fixes are serial to bound worker memory
+ * and respect downstream rate limits (GitHub, S3, EZID).
+ */
+adminRoutes.post("/doctor/fix", async (c) => {
+  type FixBody = { check?: string; dataset_id?: string; dry_run?: boolean };
+  const body = (await c.req.json<FixBody>().catch(() => ({}))) as FixBody;
+
+  if (!body.check) {
+    return c.json({ error: "check is required", available: listChecks() }, 400);
+  }
+  const check = getCheck(body.check);
+  if (!check) {
+    return c.json({ error: `Unknown check: ${body.check}`, available: listChecks() }, 400);
+  }
+
+  const ctx: CheckContext = {
+    db: c.env.DB,
+    s3: getS3Config(c.env),
+    githubPat: await getDatasetsToken(c.env),
+  };
+
+  const findings = await check.scan(ctx, body.dataset_id);
+
+  if (body.dry_run) {
+    return c.json({
+      check: body.check,
+      dry_run: true,
+      would_fix: findings.length,
+      findings,
+    });
+  }
+
+  const results: Array<{
+    dataset_id: string;
+    version?: string;
+    status: "fixed" | "skipped" | "failed";
+    message?: string;
+    details?: Record<string, unknown>;
+  }> = [];
+  for (const finding of findings) {
+    const result = await check.fix(ctx, finding);
+    results.push({
+      dataset_id: finding.dataset_id,
+      version: finding.version,
+      ...result,
+    });
+  }
+
+  return c.json({
+    check: body.check,
+    total: findings.length,
+    fixed: results.filter((r) => r.status === "fixed").length,
+    skipped: results.filter((r) => r.status === "skipped").length,
+    failed: results.filter((r) => r.status === "failed").length,
+    results,
+  });
 });
 
 // ---------------------------------------------------------------------------
