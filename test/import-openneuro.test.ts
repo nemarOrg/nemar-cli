@@ -11,7 +11,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -319,7 +319,7 @@ describe("appendOpenNeuroProvenance (#535)", () => {
   });
 
   function readReadme(): string {
-    return require("node:fs").readFileSync(join(tmpRoot, "README.md"), "utf-8");
+    return readFileSync(join(tmpRoot, "README.md"), "utf-8");
   }
 
   test("creates README.md when none exists and inserts the provenance marker + section", () => {
