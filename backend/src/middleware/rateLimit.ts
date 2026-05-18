@@ -108,7 +108,7 @@ export function __selectBucket(
   authHeader: string | undefined,
   ip: string,
 ): __BucketSelection {
-  if (AUTH_PATHS.some((p) => path === p || path.startsWith(p + "/") || path.startsWith(p + "?"))) {
+  if (AUTH_PATHS.some((p) => path === p || path.startsWith(`${p}/`) || path.startsWith(`${p}?`))) {
     return { keyKind: "auth-ip", rawKey: ip, maxRequests: AUTH_MAX_REQUESTS };
   }
   const bearer = __readBearerTokenFromHeader(authHeader);
@@ -125,6 +125,56 @@ export function __selectBucket(
  * - Uses Cache API in production (no KV daily limits)
  * - Supports test bypass for CI/CD
  */
+/**
+ * Cached lookup: does this token belong to an admin or owner user?
+ *
+ * Bulk admin orchestration (`nemar admin reindex --missing-metadata`,
+ * release sweeps, mass-publish) routinely fans out beyond the 500/60s
+ * token bucket. Capping admins at the same per-token bucket as any other
+ * authenticated user makes those operations brittle and forces operators
+ * to add manual pacing.
+ *
+ * The lookup hits D1 once per token-and-window: results are memoized in
+ * caches.default for the rate-limit window (60s), so the hot path stays
+ * O(1) cache lookup. Cache misses fall through to a D1 SELECT joining
+ * tokens -> users. Failures (cache outage, D1 error) return false so we
+ * never accidentally grant unlimited quota.
+ */
+async function isPrivilegedToken(env: Bindings, hashedApiKey: string): Promise<boolean> {
+  const cacheKey = new Request(`https://rate-limit.internal/admin-flag:${hashedApiKey}`);
+  try {
+    const cache = caches.default;
+    const cached = await cache.match(cacheKey);
+    if (cached) {
+      const data = (await cached.json()) as { admin: boolean };
+      return data.admin === true;
+    }
+    const row = await env.DB.prepare(
+      `SELECT u.role FROM tokens t JOIN users u ON t.user_id = u.id
+       WHERE t.api_key_hash = ?
+         AND t.revoked_at IS NULL
+         AND (t.expires_at IS NULL OR t.expires_at > datetime('now'))`,
+    )
+      .bind(hashedApiKey)
+      .first<{ role: string | null }>();
+    const admin = row?.role === "admin" || row?.role === "owner";
+    const ttl = admin ? WINDOW_SIZE : Math.min(WINDOW_SIZE, 30);
+    await cache.put(
+      cacheKey,
+      new Response(JSON.stringify({ admin }), {
+        headers: {
+          "Content-Type": "application/json",
+          "Cache-Control": `max-age=${ttl}`,
+        },
+      }),
+    );
+    return admin;
+  } catch (err) {
+    console.warn(`[rate-limit] admin-flag lookup failed: ${(err as Error).message ?? err}`);
+    return false;
+  }
+}
+
 export async function rateLimiter(c: RateLimitContext, next: Next) {
   // Skip rate limiting in development
   if (c.env.ENVIRONMENT === "development") {
@@ -151,6 +201,18 @@ export async function rateLimiter(c: RateLimitContext, next: Next) {
   // re-hashes the same value to look the user up in D1. IP buckets use
   // the raw IP as the bucket key directly — no hashing needed.
   const bucketKeyValue = keyKind === "token" ? await hashApiKey(rawKey) : rawKey;
+
+  // Admin / owner tokens bypass the app-side limiter entirely. Bulk
+  // operations (mass reindex, release sweeps) routinely exceed the
+  // 500/60s token bucket; capping them produced opaque "Network error"
+  // failures in the CLI because requests dropped after the local
+  // limiter 429d. The CF-edge layer still enforces its own per-IP
+  // ceilings, so the floor isn't absent.
+  if (keyKind === "token" && (await isPrivilegedToken(c.env, bucketKeyValue))) {
+    c.header("X-RateLimit-Bucket", "admin-bypass");
+    await next();
+    return;
+  }
 
   // Cache API key. The URL just needs to be a unique, stable string —
   // we never actually `fetch()` it; it's a placeholder identity for
