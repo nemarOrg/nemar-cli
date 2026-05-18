@@ -8,7 +8,7 @@
 
 import { describe, expect, test } from "bun:test";
 import { parse } from "yaml";
-import { buildEnrichmentCommitPayload } from "../backend/src/routes/webhooks";
+import { buildEnrichmentCommitPayload } from "../backend/src/services/enrich-dataset";
 import { getWorkflowTemplates } from "../backend/src/services/github";
 
 describe("CI workflow templates", () => {
