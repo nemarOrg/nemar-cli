@@ -5175,6 +5175,36 @@ adminRoutes.post("/catalog/sync", async (c) => {
 });
 
 /**
+ * POST /admin/catalog/sync-local - Rebuild nemar_catalog from local D1 state.
+ *
+ * Reads datasets + enrichment_json directly (no HTTP to legacy nemar.org)
+ * and INSERTs OR REPLACEs every active public catalog row. Use this when:
+ *   - new datasets created via the in-process pipeline are missing from
+ *     the catalog (catalog-sync.ts pulls from legacy and doesn't see them);
+ *   - operators want a fresh cache rebuild without waiting for the legacy
+ *     cron;
+ *   - the legacy nemar.org datapipeline is offline.
+ *
+ * The hot path (enrichment + reindex) already calls
+ * syncNemarCatalogFromEnrichment to UPSERT individual rows; this endpoint
+ * is the bulk equivalent for occasional sweeps.
+ *
+ * Tracking: nemarOrg/nemar-cli#544 (retire legacy catalog-sync entirely
+ * once this path is the only ingestion).
+ */
+adminRoutes.post("/catalog/sync-local", async (c) => {
+  const { syncCatalogFromLocal } = await import("../services/catalog-from-local");
+  const t0 = Date.now();
+  const result = await syncCatalogFromLocal(c.env.DB);
+  return c.json({
+    scanned: result.scanned,
+    upserted: result.upserted,
+    errors: result.errors,
+    duration_ms: Date.now() - t0,
+  });
+});
+
+/**
  * GET /admin/catalog/status - Show catalog sync history
  */
 adminRoutes.get("/catalog/status", async (c) => {

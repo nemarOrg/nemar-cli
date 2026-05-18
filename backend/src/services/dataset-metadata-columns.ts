@@ -206,39 +206,50 @@ export function authorsFromEnrichment(
  * list-endpoint cache reads consistent values. The `datasets` row is the
  * source of truth; this keeps the cached projection coherent.
  *
- * Uses the same COALESCE-preserve pattern as writeDatasetMetadataColumns:
- * null inputs leave the existing column untouched. Updates `synced_at`
- * so operators can spot stale rows.
+ * UPSERT: a new dataset's first enrichment INSERTs the catalog row; every
+ * subsequent enrichment/reindex UPDATEs it. `name` is required because
+ * nemar_catalog.name is NOT NULL; other fields use COALESCE-preserve so
+ * null inputs leave existing values untouched on the UPDATE path.
  *
- * If no nemar_catalog row exists for the id, logs a warning and returns
- * { changes: 0 }; catalog-sync.ts is responsible for the initial insert,
- * not this path.
+ * `name` is also COALESCE-preserved on UPDATE so a caller that didn't get
+ * a fresh title from the LLM doesn't clobber a previously-better one.
+ *
+ * Replaces the prior UPDATE-only behavior which silently warned and
+ * returned changes=0 when the catalog row didn't exist (broken cache).
+ * The new pipeline created some datasets that never had a catalog row;
+ * see nemarOrg/nemar-cli#544.
  */
 export async function syncNemarCatalogFromEnrichment(
   db: D1Database,
   datasetId: string,
-  fields: CatalogSyncFields,
+  fields: CatalogSyncFields & { name: string },
 ): Promise<{ changes: number }> {
   const result = await db
     .prepare(
-      `UPDATE nemar_catalog
-       SET name = COALESCE(?, name),
-           description = COALESCE(?, description),
-           modalities = COALESCE(?, modalities),
-           participants = COALESCE(?, participants),
-           age_min = COALESCE(?, age_min),
-           age_max = COALESCE(?, age_max),
-           tasks = COALESCE(?, tasks),
-           authors = COALESCE(?, authors),
-           license = COALESCE(?, license),
-           file_size = COALESCE(?, file_size),
-           file_size_formatted = COALESCE(?, file_size_formatted),
-           total_files = COALESCE(?, total_files),
-           synced_at = datetime('now')
-       WHERE id = ?`,
+      `INSERT INTO nemar_catalog (
+         id, name, description, modalities, participants, age_min, age_max,
+         tasks, authors, license, file_size, file_size_formatted, total_files,
+         synced_at
+       )
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+       ON CONFLICT(id) DO UPDATE SET
+         name = COALESCE(excluded.name, nemar_catalog.name),
+         description = COALESCE(excluded.description, nemar_catalog.description),
+         modalities = COALESCE(excluded.modalities, nemar_catalog.modalities),
+         participants = COALESCE(excluded.participants, nemar_catalog.participants),
+         age_min = COALESCE(excluded.age_min, nemar_catalog.age_min),
+         age_max = COALESCE(excluded.age_max, nemar_catalog.age_max),
+         tasks = COALESCE(excluded.tasks, nemar_catalog.tasks),
+         authors = COALESCE(excluded.authors, nemar_catalog.authors),
+         license = COALESCE(excluded.license, nemar_catalog.license),
+         file_size = COALESCE(excluded.file_size, nemar_catalog.file_size),
+         file_size_formatted = COALESCE(excluded.file_size_formatted, nemar_catalog.file_size_formatted),
+         total_files = COALESCE(excluded.total_files, nemar_catalog.total_files),
+         synced_at = datetime('now')`,
     )
     .bind(
-      fields.name ?? null,
+      datasetId,
+      fields.name,
       fields.description ?? null,
       fields.modalities ?? null,
       fields.participants ?? null,
@@ -250,15 +261,9 @@ export async function syncNemarCatalogFromEnrichment(
       fields.file_size ?? null,
       fields.file_size_formatted ?? null,
       fields.total_files ?? null,
-      datasetId,
     )
     .run();
 
   const changes = result.meta?.changes ?? 0;
-  if (changes === 0) {
-    console.warn(
-      `[catalog-sync] No nemar_catalog row for ${datasetId}; the list-endpoint cache will fall back to empty fields until catalog-sync inserts the row`,
-    );
-  }
   return { changes };
 }
