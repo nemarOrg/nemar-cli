@@ -117,7 +117,7 @@ export async function runCommand(
   if (timedOut) {
     return {
       stdout,
-      stderr: stderr || `Command timed out after ${Math.round(options.timeout! / 1000)}s`,
+      stderr: stderr || `Command timed out after ${Math.round((options.timeout ?? 0) / 1000)}s`,
       exitCode: exitCode ?? 1,
     };
   }
