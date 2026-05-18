@@ -61,6 +61,11 @@ S3_BUCKET="${S3_BUCKET:-nemar}"
 S3_REGION="${S3_REGION:-us-east-2}"
 NEMAR_GROUP="${NEMAR_GROUP:-nemar}"
 SYNC_JOBS="${SYNC_JOBS:-4}"
+# Hallu directories are keyed by OpenNeuro id (ds*). When a ds* has been
+# mirrored as on* in the catalog, we upload its QA to the canonical on* key so
+# `data.nemar.org/on*/qa/*` serves it. The resolve endpoint translates
+# ds -> on; unmirrored ds* are skipped (no public landing page yet).
+API_BASE="${API_BASE:-https://api.nemar.org}"
 
 # Exclude pipeline internals (kept on hallu for debugging; not exposed publicly).
 # `code/` and `logs/` are run-time pipeline state, `*.mat` is raw MATLAB output
@@ -239,31 +244,80 @@ qa_tree_fingerprint() {
   fi
 }
 
-sync_dataset_qa() {
-  local dataset_id="$1"
-  local src="${PROCESSED_DIR}/${dataset_id}"
-  local dst="s3://${S3_BUCKET}/${dataset_id}/qa/"
+# Translate a hallu directory name into the canonical S3 key prefix.
+#
+# nm*/on* directories already use canonical ids; we publish under the same id.
+# ds* directories are OpenNeuro shadows. When the catalog has an on* mirror
+# (resolve endpoint returns found=true), we publish under the on* id so the
+# canonical landing page at /dataset/on* sees the QA. ds* with no mirror yet
+# return empty -- the caller treats that as a skip.
+resolve_canonical_id() {
+  local source_id="$1"
 
-  if [[ ! -d "$src" ]]; then
-    log_verbose "[SKIP] ${dataset_id}: no processed/ directory"
+  if [[ ! "$source_id" =~ ^ds[0-9]{6}$ ]]; then
+    echo "$source_id"
     return 0
   fi
+
+  local resp
+  if ! resp=$(curl -fsS --max-time 10 "${API_BASE}/datasets/resolve/${source_id}" 2>/dev/null); then
+    log_error "  resolve failed: ${API_BASE}/datasets/resolve/${source_id}"
+    echo ""
+    return 1
+  fi
+
+  local found
+  found=$(printf '%s' "$resp" | jq -r '.found // false')
+  if [[ "$found" != "true" ]]; then
+    echo ""
+    return 0
+  fi
+
+  printf '%s' "$resp" | jq -r '.dataset_id'
+}
+
+sync_dataset_qa() {
+  local source_id="$1"
+  local src="${PROCESSED_DIR}/${source_id}"
+
+  if [[ ! -d "$src" ]]; then
+    log_verbose "[SKIP] ${source_id}: no processed/ directory"
+    return 0
+  fi
+
+  # Resolve ds* -> on* (or identity for nm*/on*). Manifest is keyed by the
+  # source dir so per-directory fingerprints stay stable across renames; the
+  # S3 destination uses the canonical id.
+  local dest_id
+  dest_id=$(resolve_canonical_id "$source_id") || return 1
+  if [[ -z "$dest_id" ]]; then
+    log_verbose "[SKIP] ${source_id}: no canonical mirror (ds* without on* in catalog)"
+    return 0
+  fi
+
+  local dst="s3://${S3_BUCKET}/${dest_id}/qa/"
 
   local fingerprint
   fingerprint=$(qa_tree_fingerprint "$src")
   if [[ "$fingerprint" == "empty" ]]; then
-    log_verbose "[SKIP] ${dataset_id}: empty QA tree (no eligible files)"
+    log_verbose "[SKIP] ${source_id}: empty QA tree (no eligible files)"
     return 0
   fi
 
   local recorded_fingerprint
-  recorded_fingerprint=$(get_manifest_field "$dataset_id" "fingerprint")
-  if [[ "$recorded_fingerprint" == "$fingerprint" ]]; then
-    log_verbose "[SKIP] ${dataset_id}: QA tree unchanged (fingerprint=${fingerprint})"
+  recorded_fingerprint=$(get_manifest_field "$source_id" "fingerprint")
+  local recorded_dest
+  recorded_dest=$(get_manifest_field "$source_id" "dest_id")
+  if [[ "$recorded_fingerprint" == "$fingerprint" && "$recorded_dest" == "$dest_id" ]]; then
+    log_verbose "[SKIP] ${source_id}: QA tree unchanged (fingerprint=${fingerprint}, dest=${dest_id})"
     return 0
   fi
 
-  log "[SYNC] ${dataset_id}: ${recorded_fingerprint:-<new>} -> ${fingerprint}"
+  if [[ "$source_id" != "$dest_id" ]]; then
+    log "[SYNC] ${source_id} -> ${dest_id}: ${recorded_fingerprint:-<new>} -> ${fingerprint}"
+  else
+    log "[SYNC] ${source_id}: ${recorded_fingerprint:-<new>} -> ${fingerprint}"
+  fi
 
   # `aws s3 sync` is idempotent: it only uploads new / changed files. The
   # exclude flags mirror the fingerprint scope.
@@ -272,7 +326,7 @@ sync_dataset_qa() {
     --region "$S3_REGION" \
     --no-progress \
     "${EXCLUDES[@]}" 2>&1); then
-    log_error "[FAIL] ${dataset_id}: aws s3 sync exited non-zero"
+    log_error "[FAIL] ${source_id}: aws s3 sync exited non-zero"
     log_error "  ${sync_output}"
     return 1
   fi
@@ -280,10 +334,11 @@ sync_dataset_qa() {
   # Log the count of newly uploaded objects so operators see signal-not-noise.
   local upload_count
   upload_count=$(printf '%s\n' "$sync_output" | grep -c '^upload:' || true)
-  log "[OK] ${dataset_id}: synced ${upload_count} new/changed objects"
+  log "[OK] ${source_id} -> ${dest_id}: synced ${upload_count} new/changed objects"
   log_verbose "$sync_output"
 
-  update_manifest "$dataset_id" "fingerprint" "$fingerprint"
+  update_manifest "$source_id" "fingerprint" "$fingerprint"
+  update_manifest "$source_id" "dest_id" "$dest_id"
   return 0
 }
 
@@ -298,9 +353,10 @@ main() {
   acquire_lock
   check_prerequisites
 
-  # Discover datasets: either one explicit argument or every nm/on*-prefix
-  # subdirectory of PROCESSED_DIR. xx* sandbox datasets are skipped: they
-  # exist only for E2E testing and have no public catalog presence.
+  # Discover datasets: either one explicit argument or every nm/on/ds*-prefix
+  # subdirectory of PROCESSED_DIR. ds* dirs are mapped to their on* canonical
+  # id at upload time (see resolve_canonical_id). xx* sandbox datasets are
+  # skipped: they exist only for E2E testing and have no public catalog presence.
   local datasets=()
   if [[ -n "$SINGLE_DATASET" ]]; then
     datasets=("$SINGLE_DATASET")
@@ -309,7 +365,7 @@ main() {
       [[ -z "$d" ]] && continue
       datasets+=("$d")
     done < <(find "$PROCESSED_DIR" -mindepth 1 -maxdepth 1 -type d \
-      -regextype posix-extended -regex '.*/(nm|on)[0-9]{6}$' \
+      -regextype posix-extended -regex '.*/(nm|on|ds)[0-9]{6}$' \
       -printf '%f\n' | sort)
   fi
 
