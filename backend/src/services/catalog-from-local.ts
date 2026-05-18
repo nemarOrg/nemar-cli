@@ -38,12 +38,15 @@ export interface LocalDatasetRow {
   total_files: number | null;
   created_at: string | null;
   /**
-   * datasets.published_at is set when a dataset is first published; distinct
-   * from created_at (upload timestamp). The list endpoint sorts by
-   * COALESCE(c.publish_date, c.created_date), so getting this column right
-   * matters for newest-first ordering.
+   * First-version timestamp from dataset_versions.created_at (when the
+   * dataset earned its v1.0.0 row). Null for unpublished datasets;
+   * `buildCatalogRecordFromLocal` falls back to `created_at` when null
+   * so the list endpoint's COALESCE-driven sort still has a value.
+   *
+   * The legacy `datasets.published_at` column doesn't exist in D1;
+   * publication is tracked exclusively via dataset_versions.
    */
-  published_at: string | null;
+  first_version_at: string | null;
   source: string | null;
   source_id: string | null;
   is_sandbox: number | null;
@@ -130,10 +133,10 @@ export function buildCatalogRecordFromLocal(
     source_id: row.source_id,
     uploader: row.owner_username,
     created_date: row.created_at,
-    // publish_date prefers the actual published_at timestamp when set;
-    // pre-publish rows fall back to created_at so newest-first ordering
-    // doesn't drop them from the head of the list.
-    publish_date: row.published_at ?? row.created_at,
+    // publish_date prefers the first dataset_versions.created_at (the
+    // moment v1.0.0 was minted) when known; unpublished rows fall back to
+    // created_at so newest-first ordering still has a sortable value.
+    publish_date: row.first_version_at ?? row.created_at,
     search_text: searchText,
   };
 }
@@ -174,7 +177,11 @@ export async function syncCatalogFromLocal(db: D1Database): Promise<SyncCatalogF
               d.file_size,
               d.total_files,
               d.created_at,
-              d.published_at,
+              (
+                SELECT MIN(dv.created_at)
+                FROM dataset_versions dv
+                WHERE dv.dataset_id = d.dataset_id
+              ) AS first_version_at,
               d.source,
               d.source_id,
               d.is_sandbox,
