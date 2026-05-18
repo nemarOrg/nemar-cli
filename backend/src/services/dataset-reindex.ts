@@ -108,7 +108,7 @@ export async function runDatasetSync(
 
   const dataset = await db
     .prepare(
-      `SELECT d.dataset_id, d.github_repo, d.concept_doi, d.created_at,
+      `SELECT d.dataset_id, d.name, d.description, d.github_repo, d.concept_doi, d.created_at,
               u.username AS owner_username
        FROM datasets d
        LEFT JOIN users u ON d.owner_user_id = u.id
@@ -117,6 +117,8 @@ export async function runDatasetSync(
     .bind(datasetId)
     .first<{
       dataset_id: string;
+      name: string | null;
+      description: string | null;
       github_repo: string | null;
       concept_doi: string | null;
       created_at: string | null;
@@ -394,8 +396,13 @@ export async function runDatasetSync(
     // Mirror the BIDS-derived columns into nemar_catalog so the list-endpoint
     // cache stays in sync. authors/license aren't refreshed here -- they
     // come from the LLM enrichment, which runs on its own webhook path.
+    // `name` is required by the UPSERT (NOT NULL in the schema); we use the
+    // d1 row's name and let COALESCE preserve whatever the catalog has on
+    // the UPDATE path.
     try {
       await syncNemarCatalogFromEnrichment(db, datasetId, {
+        name: dataset.name ?? datasetId,
+        description: dataset.description ?? null,
         modalities: cols.modalities,
         participants: cols.subject_count,
         age_min: cols.age_min,

@@ -813,7 +813,19 @@ export async function enrichDataset(
       // though the source-of-truth `datasets` row is fully populated.
       try {
         const license = typeof finalMetadata.license === "string" ? finalMetadata.license : null;
+        // `name` and `description` prefer the enrichment-derived values
+        // (LLM may have polished them) and fall back to the D1 dataset
+        // row. UPSERT requires a non-null name because nemar_catalog.name
+        // is NOT NULL; the rest are COALESCE-preserved on the UPDATE path.
+        const catalogName =
+          (typeof finalMetadata.title === "string" && finalMetadata.title) ||
+          dataset.name ||
+          datasetId;
+        const catalogDescription =
+          (typeof finalMetadata.description === "string" && finalMetadata.description) || null;
         await syncNemarCatalogFromEnrichment(env.DB, datasetId, {
+          name: catalogName,
+          description: catalogDescription,
           modalities: cols.modalities,
           participants: cols.subject_count,
           age_min: cols.age_min,
