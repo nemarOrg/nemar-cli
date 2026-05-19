@@ -75,6 +75,7 @@ jobs:
       S3_BUCKET: nemar
     steps:
       - name: Validate inputs
+        id: validate
         run: |
           if [ -z "$DATASET_ID" ]; then
             echo "::error::Missing dataset_id"
@@ -93,9 +94,11 @@ jobs:
           echo "Inputs OK: dataset_id=${DATASET_ID} version=${VERSION}"
 
       - name: Checkout nemar-cli (for scripts/emit_manifest.py)
+        id: checkout
         uses: actions/checkout@v4
 
       - name: Set up Python
+        id: setup-python
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
@@ -110,6 +113,7 @@ jobs:
           repositories: ${{ env.DATASET_ID }}
 
       - name: Shallow-clone dataset repo at tag
+        id: clone
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
         run: |
@@ -121,6 +125,7 @@ jobs:
           echo "Cloned ${DATASET_ID}@${TAG} into /tmp/repo"
 
       - name: Emit manifest.json + summary.json
+        id: emit
         run: |
           set -euo pipefail
           mkdir -p /tmp/out
@@ -139,6 +144,7 @@ jobs:
             $CANARY_FLAG
 
       - name: Configure AWS credentials
+        id: aws-creds
         uses: aws-actions/configure-aws-credentials@v4
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
@@ -146,6 +152,7 @@ jobs:
           aws-region: us-east-2
 
       - name: Upload artifacts to S3
+        id: upload
         run: |
           set -euo pipefail
           MANIFEST_KEY="${DATASET_ID}/version/${TAG}.json"
@@ -162,6 +169,7 @@ jobs:
           echo "SUMMARY_URL=https://${S3_BUCKET}.s3.us-east-2.amazonaws.com/${SUMMARY_KEY}" >> "$GITHUB_ENV"
 
       - name: Build callback body
+        id: build-body
         if: success()
         env:
           WORKFLOW_RUN_ID: ${{ github.run_id }}
@@ -177,6 +185,7 @@ jobs:
             --out /tmp/out/callback.json
 
       - name: POST callback (manifest-ready)
+        id: post-success
         if: success()
         run: |
           set -euo pipefail
@@ -196,6 +205,51 @@ jobs:
           echo
           echo "Callback POSTed to $CALLBACK_URL"
 
+      - name: Identify failed step
+        id: failed-step
+        if: failure()
+        # Walk the substantive steps in order and emit the first one whose
+        # outcome is "failure". GitHub Actions doesn't expose the failing
+        # step name in any built-in context, so we read each prior step's
+        # outcome via `steps.<id>.outcome` and write the result to
+        # $GITHUB_ENV for the failure-callback body. Defaults to "unknown"
+        # if none of the tracked steps registered a failure (e.g. job
+        # timeout-minutes tripped between steps).
+        env:
+          OUTCOME_VALIDATE: ${{ steps.validate.outcome }}
+          OUTCOME_CHECKOUT: ${{ steps.checkout.outcome }}
+          OUTCOME_SETUP_PYTHON: ${{ steps.setup-python.outcome }}
+          OUTCOME_APP_TOKEN: ${{ steps.app-token.outcome }}
+          OUTCOME_CLONE: ${{ steps.clone.outcome }}
+          OUTCOME_EMIT: ${{ steps.emit.outcome }}
+          OUTCOME_AWS_CREDS: ${{ steps.aws-creds.outcome }}
+          OUTCOME_UPLOAD: ${{ steps.upload.outcome }}
+          OUTCOME_BUILD_BODY: ${{ steps.build-body.outcome }}
+          OUTCOME_POST_SUCCESS: ${{ steps.post-success.outcome }}
+        run: |
+          set -euo pipefail
+          FAILED_STEP="unknown"
+          for pair in \
+            "validate:$OUTCOME_VALIDATE" \
+            "checkout:$OUTCOME_CHECKOUT" \
+            "setup-python:$OUTCOME_SETUP_PYTHON" \
+            "app-token:$OUTCOME_APP_TOKEN" \
+            "clone:$OUTCOME_CLONE" \
+            "emit:$OUTCOME_EMIT" \
+            "aws-creds:$OUTCOME_AWS_CREDS" \
+            "upload:$OUTCOME_UPLOAD" \
+            "build-body:$OUTCOME_BUILD_BODY" \
+            "post-success:$OUTCOME_POST_SUCCESS"; do
+            name="${pair%%:*}"
+            outcome="${pair##*:}"
+            if [ "$outcome" = "failure" ]; then
+              FAILED_STEP="$name"
+              break
+            fi
+          done
+          echo "Identified failed step: $FAILED_STEP"
+          echo "FAILED_STEP=$FAILED_STEP" >> "$GITHUB_ENV"
+
       - name: POST failure callback (best-effort)
         if: failure()
         env:
@@ -206,18 +260,18 @@ jobs:
           # Best-effort signal to the Worker. Endpoint lands with Stream B;
           # 404 is tolerated in the interim, hence `|| true`.
           FAIL_URL="${CALLBACK_URL%/manifest-ready}/manifest-failed"
-          # The failed step name isn't directly exposed by the GitHub
-          # context; the workflow run URL is sufficient for an operator
-          # to triage. Use a dedicated helper script to avoid heredoc
-          # indentation issues inside the YAML block scalar.
+          # The failed step name is threaded via $GITHUB_ENV from the
+          # "Identify failed step" step above; defaults to "unknown" if no
+          # tracked step registered a failure outcome.
           python scripts/build_failure_body.py \
             --dataset-id "$DATASET_ID" \
             --version "$VERSION" \
             --workflow-run-id "$WORKFLOW_RUN_ID" \
             --workflow-run-url "$WORKFLOW_RUN_URL" \
+            --failed-step "${FAILED_STEP:-unknown}" \
             --out /tmp/fail.json
           curl -fsS --connect-timeout 10 --max-time 30 -X POST "$FAIL_URL" \
             -H "Content-Type: application/json" \
             -H "X-Webhook-Token: ${CALLBACK_TOKEN}" \
             --data @/tmp/fail.json || true
-          echo "Failure callback attempted at $FAIL_URL"
+          echo "Failure callback attempted at $FAIL_URL (failed_step=${FAILED_STEP:-unknown})"
