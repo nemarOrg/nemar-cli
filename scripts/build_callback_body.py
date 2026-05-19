@@ -23,6 +23,16 @@ def main() -> int:
     p.add_argument("--summary-url", required=True)
     p.add_argument("--totals-path", required=True)
     p.add_argument("--workflow-run-id", required=True)
+    # canary_skipped lets the Worker disambiguate "canary verified the
+    # raw.githubusercontent.com path" from "canary was skipped because the
+    # caller declared the repo private". Without this the Worker would
+    # silently treat both as equivalent.
+    p.add_argument(
+        "--canary-skipped",
+        default="false",
+        choices=("true", "false"),
+        help="Whether the canary HEAD checks were skipped (true|false)",
+    )
     p.add_argument("--out", required=True)
     args = p.parse_args()
 
@@ -34,6 +44,7 @@ def main() -> int:
         "summary_url": args.summary_url,
         "totals": totals,
         "workflow_run_id": args.workflow_run_id,
+        "canary_skipped": args.canary_skipped == "true",
     }
     Path(args.out).write_text(json.dumps(body))
     print(f"[build_callback_body] wrote {args.out}", flush=True)

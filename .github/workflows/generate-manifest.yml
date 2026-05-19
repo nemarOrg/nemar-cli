@@ -175,6 +175,14 @@ jobs:
           WORKFLOW_RUN_ID: ${{ github.run_id }}
         run: |
           set -euo pipefail
+          # Normalise SKIP_CANARY to the literal "true"/"false" strings the
+          # helper expects. The env value is sourced from either the
+          # repository_dispatch payload (Stream B) or workflow_dispatch
+          # input; both pass booleans as their string form.
+          CANARY_SKIPPED_FLAG="false"
+          if [ "$SKIP_CANARY" = "true" ]; then
+            CANARY_SKIPPED_FLAG="true"
+          fi
           python scripts/build_callback_body.py \
             --dataset-id "$DATASET_ID" \
             --version "$VERSION" \
@@ -182,6 +190,7 @@ jobs:
             --summary-url "$SUMMARY_URL" \
             --totals-path /tmp/out/totals.json \
             --workflow-run-id "$WORKFLOW_RUN_ID" \
+            --canary-skipped "$CANARY_SKIPPED_FLAG" \
             --out /tmp/out/callback.json
 
       - name: POST callback (manifest-ready)
