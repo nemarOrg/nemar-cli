@@ -482,13 +482,14 @@ export async function loadSummary(
 
   if (response.status === 404) return null;
   if (response.status === 403) {
-    // Mirror getManifest()'s 403-as-404 behavior: a correctly-configured
-    // backend should never see 403 on its own bucket, but if creds drift
-    // we don't want every dataset to look like a public 404 silently.
-    console.error(
-      `[s3] loadSummary 403 (likely credentials/permissions) dataset=${datasetId} version=${version}`,
+    // Diverges intentionally from getManifest()'s 403-as-404. A 403 on our
+    // own bucket means IAM/credential drift, not "summary not yet
+    // generated". Silently masking it would let an operator confuse a
+    // broken backend for a pre-backfill dataset. Surface as an error;
+    // the route's catch block turns it into a 500 (not a cacheable 404).
+    throw new Error(
+      `loadSummary 403 (credentials/permissions) for dataset=${datasetId} version=${version}`,
     );
-    return null;
   }
   if (!response.ok) {
     throw new Error(`Failed to get summary: HTTP ${response.status}`);
