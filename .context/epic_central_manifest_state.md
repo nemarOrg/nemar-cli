@@ -162,9 +162,9 @@ Ops sequence (USER STEP, BLOCKS Stream A merge):
 
 | # | Stream | Issue | Branch | Worktree | PR | Status |
 |---|---|---|---|---|---|---|
-| A | Generator | 556 + part of 558 | feature/issue-556-stream-a-generator | epic-central-manifest-stream-a | TBD | not started |
-| B | Worker dispatch | 557 (PR-1 worker side) | feature/issue-557-stream-b-worker | epic-central-manifest-stream-b | TBD | not started |
-| C | Serving + backfill | 558 (serve + backfill) | feature/issue-558-stream-c-serving | epic-central-manifest-stream-c | TBD | not started |
-| Z | Epic E2E + review | 559 | feature/issue-559-epic-central-manifest | epic-central-manifest | TBD | not started |
+| A | Generator | 556 + part of 558 | feature/issue-556-stream-a-generator | epic-central-manifest-stream-a | 560 (squashed 4318140) | merged into epic |
+| B | Worker dispatch | 557 (PR-1 worker side) | feature/issue-557-stream-b-worker | epic-central-manifest-stream-b | 562 (squashed b1624f1) | merged into epic |
+| C | Serving + backfill | 558 (serve + backfill) | feature/issue-558-stream-c-serving | epic-central-manifest-stream-c | 561 (squashed 2141c7d) | merged into epic |
+| Z | Epic E2E + review | 559 | feature/issue-559-epic-central-manifest | epic-central-manifest | TBD | epic→dev PR open |
 
-current_phase: design contract pinned; creating epic worktree, then three parallel sub-worktrees
+current_phase: epic→dev PR open; awaiting /review-pr + E2E + ops secrets
