@@ -97,7 +97,7 @@ Notes:
 
 `callback_token` is a Workers-side HMAC over `{dataset_id, version, nonce}` signed with `MANIFEST_CALLBACK_SECRET`. Validated server-side on callback; one-shot via a `manifest_jobs` row or just a 5-minute cache key.
 
-`skip_canary` (added during Stream A implementation) is the dispatch-path twin of `skipGitBackedVerification` on the inline `generateManifest()`. Worker sets `true` for private/sandbox repos where `raw.githubusercontent.com` cannot HEAD-check.
+`skip_canary` (added during Stream A implementation) is the dispatch-path twin of `skipGitBackedVerification` on the inline `generateManifest()`. Worker always sets `true` at publish time because the central workflow's `raw.githubusercontent.com` canary races GitHub Pages propagation; the canary is redundant when the publish webhook is the authoritative caller.
 
 ## Contract: callback (central workflow → worker)
 
