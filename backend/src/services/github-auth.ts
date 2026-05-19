@@ -330,3 +330,18 @@ export async function getDatasetsToken(env: Bindings): Promise<string> {
   const auth = getDatasetsAuth(env);
   return auth.kind === "app" ? await auth.getToken() : auth.token;
 }
+
+/** Auth for operations on the nemarOrg org. Used to fire
+ *  `repository_dispatch` events at the central `nemarOrg/nemar-cli` repo
+ *  for the manifest/archive central workflows (#557). Falls back to PAT
+ *  when App config is incomplete. */
+export function getNemarOrgAuth(env: Bindings): GitHubAuth {
+  return getDefaultGitHubAuth(env, resolveInstallationId(env, "nemarOrg"));
+}
+
+/** Bearer token for the nemarOrg org. App-minted tokens are cached
+ *  per-installation, so repeat calls in one request are cheap. */
+export async function getNemarOrgToken(env: Bindings): Promise<string> {
+  const auth = getNemarOrgAuth(env);
+  return auth.kind === "app" ? await auth.getToken() : auth.token;
+}
