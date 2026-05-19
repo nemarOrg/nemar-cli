@@ -73,6 +73,12 @@ S3_BUCKET = "nemar"
 # 403 and resolveEmailConfig logs once but does not propagate the failure.
 FROM_EMAIL = "NEMAR Archive <noreply@nemar.org>"
 REPLY_TO = "info@nemar.org"
+# Centralized manifest workflow flag (#557). Default OFF; flip to "true"
+# per-environment for staged rollout after dev soak. When OFF the worker
+# runs the legacy generateManifest() inline; when ON it dispatches a
+# repository_dispatch to nemarOrg/nemar-cli and awaits the callback.
+# Redeploy to change.
+MANIFEST_VIA_CENTRAL_WORKFLOW = "false"
 
 # Secrets (set via: npx cfman wrangler --account sccn secret put <NAME> -c backend/wrangler-sccn.toml)
 # - GITHUB_ADMIN_PAT
@@ -135,3 +141,9 @@ AWS_REGION = "us-east-2"
 S3_BUCKET = "nemar"
 FROM_EMAIL = "NEMAR Archive <noreply@nemar.org>"
 REPLY_TO = "info@nemar.org"
+# Centralized manifest workflow flag (#557). SCCN dev is the designated
+# soak target -- flip to "true" here first once MANIFEST_CALLBACK_SECRET
+# is set on both the Worker and nemarOrg/nemar-cli, then promote to prod
+# after a week of clean runs.
+# Redeploy to change.
+MANIFEST_VIA_CENTRAL_WORKFLOW = "false"

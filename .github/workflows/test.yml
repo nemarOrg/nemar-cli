@@ -34,6 +34,7 @@ jobs:
       cli: ${{ steps.filter.outputs.cli }}
       backend: ${{ steps.filter.outputs.backend }}
       tests: ${{ steps.filter.outputs.tests }}
+      scripts: ${{ steps.filter.outputs.scripts }}
     steps:
       - uses: actions/checkout@v4
       - uses: dorny/paths-filter@v3
@@ -48,6 +49,8 @@ jobs:
               - 'backend/**'
             tests:
               - 'test/**'
+            scripts:
+              - 'scripts/**'
 
   # Type check and lint - always runs on code changes
   lint:
@@ -163,6 +166,24 @@ jobs:
           fi
           echo "Running ${#files[@]} test files"
           bun test "${files[@]}"
+
+  # Python script tests - runs on scripts/ changes (#557, central manifest
+  # workflow). Pins the cross-phase contract between scripts/emit_manifest.py +
+  # build_callback_body.py + build_failure_body.py and the worker's
+  # validateManifestCallbackBody. Without this gate, drift in the Python
+  # output keys would only surface in production when the callback fires.
+  python-unit-test:
+    name: Python unit tests (scripts/)
+    runs-on: ubuntu-latest
+    needs: changes
+    if: needs.changes.outputs.scripts == 'true' || github.event_name == 'workflow_dispatch'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Run scripts tests
+        run: python scripts/test_emit_manifest.py
 
   # API integration tests - uses dev environment (no rate limiting)
   api-test:
