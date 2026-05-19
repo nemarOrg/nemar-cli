@@ -164,7 +164,31 @@ async function dispatchCentralManifestJob(
     .bind(args.datasetId, args.version, nonce, args.doi, args.conceptDoi, args.doiProvider)
     .run();
 
-  const callbackUrl = `${env.API_BASE_URL || "https://api.nemar.org"}/webhooks/manifest-ready`;
+  // Detect double-dispatch: if there are other still-'dispatched' rows
+  // for the same (dataset_id, version) but a different nonce, the
+  // publisher likely retried (or two callers raced). The UNIQUE
+  // constraint is on (dataset_id, version, nonce) so we don't collide
+  // at the DB layer, but operators should see a warning so duplicate
+  // workflow runs aren't a silent surprise.
+  try {
+    const supersessions = await env.DB.prepare(
+      `SELECT COUNT(*) as count FROM manifest_jobs
+       WHERE dataset_id = ? AND version = ? AND status = 'dispatched' AND nonce != ?`,
+    )
+      .bind(args.datasetId, args.version, nonce)
+      .first<{ count: number }>();
+    const olderCount = supersessions?.count ?? 0;
+    if (olderCount > 0) {
+      console.warn(
+        `[manifest-dispatch] superseding ${olderCount} older dispatched job(s) for ${args.datasetId}@${args.version}; possible publisher retry`,
+      );
+    }
+  } catch (err) {
+    // Detection is best-effort; never block dispatch on it.
+    console.warn("[manifest-dispatch] supersession check failed (non-fatal):", err);
+  }
+
+  const callbackUrl = `${env.API_BASE_URL}/webhooks/manifest-ready`;
 
   try {
     const pat = await getNemarOrgToken(env);
@@ -416,6 +440,12 @@ async function handleEzidVersionDoi(
           doi: result.doi,
           conceptDoi: dataset.concept_doi,
           doiProvider: "ezid",
+          // Published datasets ARE public at DOI-mint time, but the
+          // central workflow's raw.githubusercontent.com canary races
+          // GitHub Pages propagation. The publish webhook is the
+          // authoritative caller; Stream A's canary is duplicative.
+          // Twin of `skipGitBackedVerification` on the inline path.
+          skipCanary: true,
         });
         manifestDispatched = true;
       } catch (dispatchErr) {
@@ -551,18 +581,27 @@ async function handleEzidVersionDoi(
     // read-after-write race (background waitUntil firing before the new
     // dataset_versions row replicates) doesn't drop the version DOI
     // from the nemar.org payload.
-    const ezidSyncDecision = shouldSyncToNemarAfterVersionDoi({
-      datasetId: dataset.dataset_id,
-      versionDoi: result.doi,
-      nemarUsername: c.env.NEMAR_USERNAME,
-      nemarPassword: c.env.NEMAR_PASSWORD,
-    });
-    if (ezidSyncDecision.trigger) {
-      c.executionCtx.waitUntil(syncToNemarAfterVersionDoi(c.env, dataset, version, result.doi));
-    } else if (ezidSyncDecision.reason === "no_credentials") {
-      console.warn("[webhook] NEMAR_USERNAME/PASSWORD not configured; skipping nemar.org sync");
-    } else if (ezidSyncDecision.reason === "openneuro") {
-      console.info(`[webhook] Skipping nemar.org sync for OpenNeuro dataset ${dataset.dataset_id}`);
+    //
+    // Under centralFlow, the manifest/summary/dataset_versions row don't
+    // exist yet at this point -- the /webhooks/manifest-ready handler
+    // owns those writes. Skip the inline sync; manifest-ready will fire
+    // sync after the row insert lands.
+    if (!centralFlow) {
+      const ezidSyncDecision = shouldSyncToNemarAfterVersionDoi({
+        datasetId: dataset.dataset_id,
+        versionDoi: result.doi,
+        nemarUsername: c.env.NEMAR_USERNAME,
+        nemarPassword: c.env.NEMAR_PASSWORD,
+      });
+      if (ezidSyncDecision.trigger) {
+        c.executionCtx.waitUntil(syncToNemarAfterVersionDoi(c.env, dataset, version, result.doi));
+      } else if (ezidSyncDecision.reason === "no_credentials") {
+        console.warn("[webhook] NEMAR_USERNAME/PASSWORD not configured; skipping nemar.org sync");
+      } else if (ezidSyncDecision.reason === "openneuro") {
+        console.info(
+          `[webhook] Skipping nemar.org sync for OpenNeuro dataset ${dataset.dataset_id}`,
+        );
+      }
     }
 
     return c.json({
@@ -768,6 +807,12 @@ async function handleZenodoVersionDoi(
           doi: published.doi ?? null,
           conceptDoi: dataset.concept_doi,
           doiProvider: "zenodo",
+          // Published datasets ARE public at DOI-mint time, but the
+          // central workflow's raw.githubusercontent.com canary races
+          // GitHub Pages propagation. The publish webhook is the
+          // authoritative caller; Stream A's canary is duplicative.
+          // Twin of `skipGitBackedVerification` on the inline path.
+          skipCanary: true,
         });
         manifestDispatched = true;
       } catch (dispatchErr) {
@@ -813,28 +858,39 @@ async function handleZenodoVersionDoi(
     // Mirrors the EZID path: non-fatal, runs in the background via
     // waitUntil, and skips OpenNeuro datasets (alternate_id not yet
     // supported by the nemar.org pipeline).
-    const zenodoSyncDecision = shouldSyncToNemarAfterVersionDoi({
-      datasetId: dataset.dataset_id,
-      versionDoi: published.doi ?? null,
-      nemarUsername: c.env.NEMAR_USERNAME,
-      nemarPassword: c.env.NEMAR_PASSWORD,
-    });
-    if (zenodoSyncDecision.trigger) {
-      // trigger: true guarantees versionDoi is non-null (no_doi guard in predicate)
-      c.executionCtx.waitUntil(syncToNemarAfterVersionDoi(c.env, dataset, version, published.doi!));
-    } else {
-      if (zenodoSyncDecision.reason === "no_credentials") {
-        console.warn("[webhook] NEMAR_USERNAME/PASSWORD not configured; skipping nemar.org sync");
-      } else if (zenodoSyncDecision.reason === "openneuro") {
-        console.info(
-          `[webhook] Skipping nemar.org sync for OpenNeuro dataset ${dataset.dataset_id}`,
+    //
+    // Under centralFlow, the manifest/summary/dataset_versions row don't
+    // exist yet at this point -- the /webhooks/manifest-ready handler
+    // owns those writes. Skip the inline sync; manifest-ready will fire
+    // sync after the row insert lands.
+    if (!centralFlow) {
+      const zenodoSyncDecision = shouldSyncToNemarAfterVersionDoi({
+        datasetId: dataset.dataset_id,
+        versionDoi: published.doi ?? null,
+        nemarUsername: c.env.NEMAR_USERNAME,
+        nemarPassword: c.env.NEMAR_PASSWORD,
+      });
+      if (zenodoSyncDecision.trigger) {
+        // trigger: true guarantees versionDoi is non-null (no_doi guard in predicate)
+        c.executionCtx.waitUntil(
+          syncToNemarAfterVersionDoi(c.env, dataset, version, published.doi!),
         );
-      } else if (zenodoSyncDecision.reason === "sandbox") {
-        console.info(`[webhook] Skipping nemar.org sync for sandbox dataset ${dataset.dataset_id}`);
-      } else if (zenodoSyncDecision.reason === "no_doi") {
-        console.warn(
-          `[webhook] Skipping nemar.org sync for ${dataset.dataset_id}: Zenodo returned no DOI`,
-        );
+      } else {
+        if (zenodoSyncDecision.reason === "no_credentials") {
+          console.warn("[webhook] NEMAR_USERNAME/PASSWORD not configured; skipping nemar.org sync");
+        } else if (zenodoSyncDecision.reason === "openneuro") {
+          console.info(
+            `[webhook] Skipping nemar.org sync for OpenNeuro dataset ${dataset.dataset_id}`,
+          );
+        } else if (zenodoSyncDecision.reason === "sandbox") {
+          console.info(
+            `[webhook] Skipping nemar.org sync for sandbox dataset ${dataset.dataset_id}`,
+          );
+        } else if (zenodoSyncDecision.reason === "no_doi") {
+          console.warn(
+            `[webhook] Skipping nemar.org sync for ${dataset.dataset_id}: Zenodo returned no DOI`,
+          );
+        }
       }
     }
 
@@ -876,6 +932,12 @@ export interface ManifestCallbackBody {
   workflow_run_id?: string;
   workflow_run_url?: string;
   error_message?: string;
+  /** Stream A fix round: workflow echoes back the `skip_canary` dispatch
+   *  flag so operators can confirm the canary was disabled on this run.
+   *  Optional for back-compat with older Stream A runs that predate the
+   *  field. Logged on the manifest-ready handler; not persisted (no
+   *  column on manifest_jobs in migration 0025). */
+  canary_skipped?: boolean;
 }
 
 export function validateManifestCallbackBody(
@@ -1026,23 +1088,28 @@ webhooks.post("/manifest-ready", async (c) => {
   // inline in publish-version-doi). OR IGNORE makes this idempotent if
   // the legacy path already wrote the row (paranoid double-write
   // protection during the soak period).
+  //
+  // Critical: if this INSERT fails we MUST return 500 BEFORE flipping
+  // manifest_jobs.status to 'ready'. Otherwise the row stays missing,
+  // the job becomes unreplayable (status != 'dispatched' on retry), and
+  // the central workflow has no signal to retry from.
   const provider = job.doi_provider === "zenodo" ? "zenodo" : "ezid";
-  let dbError: string | undefined;
-  try {
-    if (job.doi) {
+  if (job.doi) {
+    try {
       await c.env.DB.prepare(
         "INSERT OR IGNORE INTO dataset_versions (dataset_id, version, doi, provider) VALUES (?, ?, ?, ?)",
       )
         .bind(body.dataset_id, body.version, job.doi, provider)
         .run();
-    } else {
-      console.warn(
-        `[manifest-ready] dataset=${body.dataset_id} version=${body.version} has no DOI on the manifest_jobs row; skipping dataset_versions insert`,
-      );
+    } catch (err) {
+      const dbError = errorMessage(err);
+      console.error("[manifest-ready] dataset_versions insert failed:", err);
+      return c.json({ error: "Failed to insert dataset_versions row", db_error: dbError }, 500);
     }
-  } catch (err) {
-    dbError = errorMessage(err);
-    console.error("[manifest-ready] dataset_versions insert failed:", err);
+  } else {
+    console.warn(
+      `[manifest-ready] dataset=${body.dataset_id} version=${body.version} has no DOI on the manifest_jobs row; skipping dataset_versions insert`,
+    );
   }
 
   // Mark the job as ready. We do this AFTER the insert so a failed
@@ -1059,16 +1126,73 @@ webhooks.post("/manifest-ready", async (c) => {
     console.error("[manifest-ready] manifest_jobs UPDATE to 'ready' failed:", err);
   }
 
+  // Issue #557: under centralFlow the EZID/Zenodo publish handlers
+  // intentionally skip the nemar.org sync because the
+  // dataset_versions row + manifest/summary on S3 don't exist yet
+  // when the DOI is minted. Fire the sync HERE, after the row insert
+  // lands, so the nemar.org payload sees the new version DOI.
+  // Non-fatal: log + carry on (legacy behavior).
+  if (job.doi) {
+    try {
+      const dataset = await c.env.DB.prepare(
+        "SELECT id, dataset_id, name, github_repo, concept_doi FROM datasets WHERE dataset_id = ?",
+      )
+        .bind(body.dataset_id)
+        .first<{
+          id: number;
+          dataset_id: string;
+          name: string;
+          github_repo: string | null;
+          concept_doi: string | null;
+        }>();
+      if (dataset) {
+        const syncDecision = shouldSyncToNemarAfterVersionDoi({
+          datasetId: dataset.dataset_id,
+          versionDoi: job.doi,
+          nemarUsername: c.env.NEMAR_USERNAME,
+          nemarPassword: c.env.NEMAR_PASSWORD,
+        });
+        if (syncDecision.trigger) {
+          c.executionCtx.waitUntil(
+            syncToNemarAfterVersionDoi(c.env, dataset, body.version, job.doi),
+          );
+        } else if (syncDecision.reason === "no_credentials") {
+          console.warn(
+            "[manifest-ready] NEMAR_USERNAME/PASSWORD not configured; skipping nemar.org sync",
+          );
+        } else if (syncDecision.reason === "openneuro") {
+          console.info(
+            `[manifest-ready] Skipping nemar.org sync for OpenNeuro dataset ${dataset.dataset_id}`,
+          );
+        } else if (syncDecision.reason === "sandbox") {
+          console.info(
+            `[manifest-ready] Skipping nemar.org sync for sandbox dataset ${dataset.dataset_id}`,
+          );
+        }
+      } else {
+        console.warn(
+          `[manifest-ready] dataset row not found for ${body.dataset_id}; skipping nemar.org sync`,
+        );
+      }
+    } catch (err) {
+      console.error("[manifest-ready] nemar.org sync scheduling failed (non-fatal):", err);
+    }
+  }
+
   const fileCount = body.totals?.files ?? 0;
+  // canary_skipped echoed back from Stream A so operators can grep
+  // confirmation that the dispatch-side skipCanary flag took effect.
+  // Absent on older Stream A runs that predate the field.
+  const canarySkipped =
+    typeof body.canary_skipped === "boolean" ? String(body.canary_skipped) : "(unset)";
   console.log(
-    `[manifest-ready] dataset=${body.dataset_id} version=${body.version} totals.files=${fileCount}`,
+    `[manifest-ready] dataset=${body.dataset_id} version=${body.version} totals.files=${fileCount} canary_skipped=${canarySkipped}`,
   );
 
   return c.json({
     ok: true,
     dataset_id: body.dataset_id,
     version: body.version,
-    ...(dbError && { db_error: dbError }),
   });
 });
 
@@ -1132,6 +1256,11 @@ webhooks.post("/manifest-failed", async (c) => {
 
   const errorMsg = body.error_message ?? "unknown error";
   const runUrl = body.workflow_run_url ?? null;
+  if (runUrl === null) {
+    console.warn(
+      `[manifest-failed] dataset=${body.dataset_id} version=${body.version} workflow_run_url=null; operator follow-up will need to grep recent Actions runs manually`,
+    );
+  }
   try {
     await c.env.DB.prepare(
       `UPDATE manifest_jobs
