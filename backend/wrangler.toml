@@ -65,6 +65,7 @@ MAINTENANCE_MODE = "read-only"
 # the legacy in-Worker generateManifest() path. When ON, it dispatches a
 # repository_dispatch event to nemarOrg/nemar-cli and the central
 # workflow uploads manifest+summary then calls back /webhooks/manifest-ready.
+# Redeploy to change.
 MANIFEST_VIA_CENTRAL_WORKFLOW = "false"
 
 # Secrets (set via: wrangler secret put <NAME>)
@@ -131,6 +132,7 @@ MAINTENANCE_MODE = "off"
 # Centralized manifest workflow flag (#557). Stays "false" by default;
 # dev is the soak target -- flip to "true" once Stream A is merged and
 # MANIFEST_CALLBACK_SECRET is set on both the Worker and nemarOrg/nemar-cli.
+# Redeploy to change.
 MANIFEST_VIA_CENTRAL_WORKFLOW = "false"
 # Note: Rate limiting is disabled in development
 
