@@ -2252,12 +2252,10 @@ export async function verifyManifestCallbackToken(
   secret: string,
 ): Promise<boolean> {
   if (!token || !secret) return false;
-  let expected: string;
-  try {
-    expected = await signManifestCallbackToken(payload, secret);
-  } catch {
-    return false;
-  }
+  // Crypto failures here mean MANIFEST_CALLBACK_SECRET is malformed; surface
+  // as 500 (via Hono's default error handler) not 401, so operators can
+  // distinguish "broken secret on worker" from "wrong token from caller".
+  const expected = await signManifestCallbackToken(payload, secret);
   const encoder = new TextEncoder();
   return constantTimeEqual(encoder.encode(token), encoder.encode(expected));
 }

@@ -482,10 +482,9 @@ export async function headVersionArtifact(
   if (response.status === 200) return true;
   if (response.status === 404) return false;
   if (response.status === 403) {
-    console.error(
-      `[s3] headVersionArtifact 403 (likely credentials/permissions) dataset=${datasetId} version=${version} suffix=${suffix}`,
+    throw new Error(
+      `headVersionArtifact 403: likely IAM credentials/permissions error for ${key}. Check AWS_ACCESS_KEY_ID on the Worker.`,
     );
-    return false;
   }
   throw new Error(`Failed to HEAD ${key}: HTTP ${response.status}`);
 }
