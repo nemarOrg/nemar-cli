@@ -58,6 +58,11 @@ jobs:
   manifest:
     name: Generate Manifest
     runs-on: ubuntu-latest
+    # Cap total runtime. GitHub-hosted runners default to 360 min which is
+    # far too generous: clone+walk+upload for a 250 GB dataset is well
+    # under 10 min, and the only failure mode that could legitimately
+    # eat hours is a hung curl callback (see --max-time on those steps).
+    timeout-minutes: 30
     env:
       DATASET_ID: ${{ github.event.client_payload.dataset_id || inputs.dataset_id }}
       VERSION: ${{ github.event.client_payload.version || inputs.version }}
@@ -181,7 +186,10 @@ jobs:
           fi
           # callback_token absence is expected for manual workflow_dispatch
           # runs; let the Worker decide whether to accept an unsigned call.
-          curl -fsS -X POST "$CALLBACK_URL" \
+          # --connect-timeout caps DNS+TCP handshake; --max-time caps the
+          # entire request including TLS + Worker response. Without these
+          # a hung Worker could pin a runner for hours.
+          curl -fsS --connect-timeout 10 --max-time 30 -X POST "$CALLBACK_URL" \
             -H "Content-Type: application/json" \
             -H "X-Webhook-Token: ${CALLBACK_TOKEN}" \
             --data @/tmp/out/callback.json
@@ -207,7 +215,7 @@ jobs:
             --workflow-run-id "$WORKFLOW_RUN_ID" \
             --workflow-run-url "$WORKFLOW_RUN_URL" \
             --out /tmp/fail.json
-          curl -fsS -X POST "$FAIL_URL" \
+          curl -fsS --connect-timeout 10 --max-time 30 -X POST "$FAIL_URL" \
             -H "Content-Type: application/json" \
             -H "X-Webhook-Token: ${CALLBACK_TOKEN}" \
             --data @/tmp/fail.json || true
