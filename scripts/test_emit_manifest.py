@@ -476,5 +476,186 @@ class DeriveSubjectsLengthGuardTests(unittest.TestCase):
         )
 
 
+class CallbackBodyRoundTripTests(unittest.TestCase):
+    """Pin the cross-phase contract between scripts/build_callback_body.py
+    and the Worker's validateManifestCallbackBody (in
+    backend/src/routes/webhooks.ts). If either side's expected field set
+    drifts, the callback POST 400s in production -- this test catches the
+    drift in CI before merge.
+
+    The corresponding Worker validator requires, for /webhooks/manifest-ready:
+        {dataset_id, version, manifest_url, summary_url, totals, workflow_run_id}
+    plus optional canary_skipped. The shape is documented in
+    .context/epic_central_manifest_state.md (callback contract).
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls._tmp = tempfile.TemporaryDirectory(prefix="emit-manifest-cb-")
+        cls.tmp = Path(cls._tmp.name)
+        cls.totals_path = cls.tmp / "totals.json"
+        cls.totals_path.write_text(
+            json.dumps({"files": 42, "bytes": 9999, "annex": 7, "git": 35})
+        )
+        cls.out = cls.tmp / "cb.json"
+        cls.proc = subprocess.run(
+            [
+                sys.executable,
+                str(HERE / "build_callback_body.py"),
+                "--dataset-id",
+                "nm099999",
+                "--version",
+                "1.0.0",
+                "--manifest-url",
+                "https://nemar.s3.us-east-2.amazonaws.com/nm099999/version/v1.0.0.json",
+                "--summary-url",
+                "https://nemar.s3.us-east-2.amazonaws.com/nm099999/version/v1.0.0-summary.json",
+                "--totals-path",
+                str(cls.totals_path),
+                "--workflow-run-id",
+                "424242",
+                "--canary-skipped",
+                "true",
+                "--out",
+                str(cls.out),
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        cls.body = json.loads(cls.out.read_text())
+
+    @classmethod
+    def tearDownClass(cls):
+        cls._tmp.cleanup()
+
+    def test_required_fields_present(self):
+        # These six are the exact required fields enforced by
+        # validateManifestCallbackBody in /webhooks/manifest-ready.
+        required = {
+            "dataset_id",
+            "version",
+            "manifest_url",
+            "summary_url",
+            "totals",
+            "workflow_run_id",
+        }
+        self.assertTrue(
+            required.issubset(set(self.body.keys())),
+            f"missing required: {required - set(self.body.keys())}",
+        )
+
+    def test_no_unexpected_fields(self):
+        # The full documented field set; canary_skipped is optional but
+        # produced by this script. Any new field here MUST also be added
+        # to backend/src/routes/webhooks.ts ManifestCallbackBody interface.
+        allowed = {
+            "dataset_id",
+            "version",
+            "manifest_url",
+            "summary_url",
+            "totals",
+            "workflow_run_id",
+            "canary_skipped",
+        }
+        extras = set(self.body.keys()) - allowed
+        self.assertFalse(extras, f"unexpected fields produced: {extras}")
+
+    def test_totals_shape(self):
+        totals = self.body["totals"]
+        self.assertEqual(set(totals.keys()), {"files", "bytes", "annex", "git"})
+        self.assertEqual(totals["files"], 42)
+        self.assertEqual(totals["annex"], 7)
+
+    def test_canary_skipped_boolean(self):
+        # The Python script accepts "true"/"false" string and emits an
+        # actual JSON boolean. Worker handler reads it as boolean.
+        self.assertIs(self.body["canary_skipped"], True)
+
+
+class FailureBodyRoundTripTests(unittest.TestCase):
+    """Pin the cross-phase contract for /webhooks/manifest-failed.
+
+    The Worker handler reads body.error_message and writes it to
+    manifest_jobs.error_message. Prior to the rename, this script emitted
+    `failed_step` instead, so every failure row recorded "unknown error"
+    regardless of which step died. This test ensures the rename stays.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls._tmp = tempfile.TemporaryDirectory(prefix="emit-manifest-fail-cb-")
+        cls.tmp = Path(cls._tmp.name)
+        cls.out = cls.tmp / "fail.json"
+        cls.proc = subprocess.run(
+            [
+                sys.executable,
+                str(HERE / "build_failure_body.py"),
+                "--dataset-id",
+                "nm099999",
+                "--version",
+                "1.0.0",
+                "--workflow-run-id",
+                "424242",
+                "--workflow-run-url",
+                "https://github.com/nemarOrg/nemar-cli/actions/runs/424242",
+                "--failed-step",
+                "clone",
+                "--out",
+                str(cls.out),
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        cls.body = json.loads(cls.out.read_text())
+
+    @classmethod
+    def tearDownClass(cls):
+        cls._tmp.cleanup()
+
+    def test_required_fields_present(self):
+        # /webhooks/manifest-failed requires only dataset_id+version per
+        # the validator, but the script ships the full diagnostic set so
+        # the DB row records workflow_run_id, run url, and the failed step.
+        required = {
+            "dataset_id",
+            "version",
+            "workflow_run_id",
+            "workflow_run_url",
+            "error_message",
+        }
+        self.assertTrue(
+            required.issubset(set(self.body.keys())),
+            f"missing required: {required - set(self.body.keys())}",
+        )
+
+    def test_no_unexpected_fields(self):
+        # The Worker's ManifestCallbackBody interface defines the
+        # full closed set; failure callback uses a subset. Drift here =
+        # 400 in production on the very first failure.
+        allowed = {
+            "dataset_id",
+            "version",
+            "workflow_run_id",
+            "workflow_run_url",
+            "error_message",
+        }
+        extras = set(self.body.keys()) - allowed
+        self.assertFalse(extras, f"unexpected fields produced: {extras}")
+
+    def test_failed_step_renamed_to_error_message(self):
+        # Regression guard: the old `failed_step` key broke the handler
+        # because the validator never reads it. Make sure it does not
+        # leak back into the output.
+        self.assertNotIn("failed_step", self.body)
+
+    def test_error_message_carries_failed_step(self):
+        # The renamed field embeds the failed step so DB rows record the
+        # actual point of failure, not the unhelpful "unknown error"
+        # sentinel.
+        self.assertEqual(self.body["error_message"], "failed at step: clone")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
