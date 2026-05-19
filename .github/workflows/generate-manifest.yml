@@ -202,6 +202,7 @@ jobs:
           WORKFLOW_RUN_ID: ${{ github.run_id }}
           WORKFLOW_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
+          set -euo pipefail
           # Best-effort signal to the Worker. Endpoint lands with Stream B;
           # 404 is tolerated in the interim, hence `|| true`.
           FAIL_URL="${CALLBACK_URL%/manifest-ready}/manifest-failed"
