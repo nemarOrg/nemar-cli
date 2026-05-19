@@ -217,5 +217,64 @@ class EmitManifestRealGitTests(unittest.TestCase):
         self.assertEqual(self.proc.returncode, 0, self.proc.stderr)
 
 
+class MalformedSymlinkFallthroughTests(unittest.TestCase):
+    """A symlink whose target is NOT a git-annex path must fall through to a
+    ``git:<sha>`` entry instead of being silently dropped or mis-keyed.
+
+    Production datasets occasionally contain symlinks to source code, docs,
+    or other non-annex files (e.g. derivatives pointing back at the raw
+    tree). Without explicit coverage a regression on parse_annex_key would
+    silently corrupt those manifest entries.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls._tmp = tempfile.TemporaryDirectory(prefix="emit-manifest-malformed-")
+        cls.tmp = Path(cls._tmp.name)
+        cls.repo = cls.tmp / "repo"
+        cls.out = cls.tmp / "out"
+
+        cls.repo.mkdir(parents=True, exist_ok=True)
+        git(cls.repo, "init", "-q", "-b", "main")
+        git(cls.repo, "config", "user.email", "test@nemar.local")
+        git(cls.repo, "config", "user.name", "Test")
+        git(cls.repo, "config", "commit.gpgsign", "false")
+
+        (cls.repo / "dataset_description.json").write_text(
+            json.dumps({"Name": "Bad", "BIDSVersion": "1.8.0", "DatasetType": "raw"}, indent=2)
+        )
+        (cls.repo / "README.md").write_text("# Bad symlink fixture\n")
+        # The bad symlink: target is a relative path, NOT an annex object.
+        bad_link = cls.repo / "shortcut.md"
+        os.symlink("../README.md", bad_link)
+
+        git(cls.repo, "add", "-A")
+        env = os.environ.copy()
+        env["GIT_AUTHOR_DATE"] = "2026-01-01T00:00:00Z"
+        env["GIT_COMMITTER_DATE"] = "2026-01-01T00:00:00Z"
+        subprocess.check_call(
+            ["git", "-C", str(cls.repo), "commit", "-q", "-m", "Bad symlink fixture"],
+            env=env,
+        )
+        git(cls.repo, "tag", "v0.0.0")
+        cls.proc = run_emit(cls.repo, cls.out)
+        cls.manifest = json.loads((cls.out / "manifest.json").read_text())
+
+    @classmethod
+    def tearDownClass(cls):
+        cls._tmp.cleanup()
+
+    def test_malformed_symlink_fallthrough(self):
+        meta = self.manifest["files"].get("shortcut.md")
+        self.assertIsNotNone(meta, "non-annex symlink missing from manifest")
+        self.assertTrue(
+            meta["key"].startswith("git:"),
+            f"non-annex symlink should fall through to git:<sha>, got key={meta['key']}",
+        )
+        # Size is whatever git stored for the symlink blob (the target
+        # string length), strictly positive.
+        self.assertGreater(meta["size"], 0)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
