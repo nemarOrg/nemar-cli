@@ -198,12 +198,31 @@ jobs:
           # --connect-timeout caps DNS+TCP handshake; --max-time caps the
           # entire request including TLS + Worker response. Without these
           # a hung Worker could pin a runner for hours.
-          curl -fsS --connect-timeout 10 --max-time 30 -X POST "$CALLBACK_URL" \
+          #
+          # On non-2xx we explicitly capture the body + status so the
+          # failure mode is unambiguous: the manifest IS on S3, but the
+          # Worker refused the callback (auth, schema mismatch, replay).
+          # The follow-on "Identify failed step" / failure-callback runs
+          # see this step's failure outcome and route the manifest-failed
+          # payload accordingly. Without this distinct annotation, an
+          # operator triaging the failure-callback couldn't tell whether
+          # the artifact upload itself had failed.
+          HTTP_STATUS=$(curl -sS -o /tmp/out/callback-response.txt \
+            -w "%{http_code}" \
+            --connect-timeout 10 --max-time 30 \
+            -X POST "$CALLBACK_URL" \
             -H "Content-Type: application/json" \
             -H "X-Webhook-Token: ${CALLBACK_TOKEN}" \
-            --data @/tmp/out/callback.json
-          echo
-          echo "Callback POSTed to $CALLBACK_URL"
+            --data @/tmp/out/callback.json) || HTTP_STATUS="000"
+          if [ "$HTTP_STATUS" -lt 200 ] || [ "$HTTP_STATUS" -ge 300 ]; then
+            echo "::error title=Callback rejected by Worker::Manifest artifacts uploaded to S3 successfully but the Worker callback at $CALLBACK_URL returned HTTP $HTTP_STATUS. This is NOT a manifest-generation failure; the S3 artifacts are valid. Likely causes: token mismatch, replay-guard hit, or schema drift. Response body follows."
+            echo "--- callback response body ---"
+            cat /tmp/out/callback-response.txt || true
+            echo
+            echo "--- end callback response body ---"
+            exit 1
+          fi
+          echo "Callback POSTed to $CALLBACK_URL (HTTP $HTTP_STATUS)"
 
       - name: Identify failed step
         id: failed-step
