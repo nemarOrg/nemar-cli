@@ -141,9 +141,10 @@ AWS_REGION = "us-east-2"
 S3_BUCKET = "nemar"
 FROM_EMAIL = "NEMAR Archive <noreply@nemar.org>"
 REPLY_TO = "info@nemar.org"
-# Centralized manifest workflow flag (#557). SCCN dev is the designated
-# soak target -- flip to "true" here first once MANIFEST_CALLBACK_SECRET
-# is set on both the Worker and nemarOrg/nemar-cli, then promote to prod
-# after a week of clean runs.
+# Centralized manifest workflow flag (#557, relocated to
+# nemarDatasets/.github in #564). SCCN dev is the designated soak target.
+# MANIFEST_CALLBACK_SECRET is set on both the Worker and nemarDatasets org
+# (visibility=all repos) as of 2026-05-18. Promote to prod after a week of
+# clean runs against this dev environment.
 # Redeploy to change.
-MANIFEST_VIA_CENTRAL_WORKFLOW = "false"
+MANIFEST_VIA_CENTRAL_WORKFLOW = "true"
