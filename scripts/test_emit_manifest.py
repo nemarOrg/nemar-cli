@@ -1,0 +1,221 @@
+#!/usr/bin/env python3
+"""
+Real-git integration test for scripts/emit_manifest.py.
+
+No mocks. We initialise an actual git repo in a tmp dir, commit a real
+BIDS-shaped tree (a dataset_description.json, a README, a couple of
+sub-XX/eeg/ files, and one real symlink mimicking a git-annex pointer),
+tag it v0.0.0, then invoke emit_manifest.py against it with the canary
+disabled and assert the JSON artifacts on disk match the documented shape.
+
+Run with either:
+    python3 scripts/test_emit_manifest.py
+    uv run python scripts/test_emit_manifest.py
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import subprocess
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+
+HERE = Path(__file__).resolve().parent
+EMIT = HERE / "emit_manifest.py"
+
+ANNEX_KEY = "SHA256E-s12345--abcdef0123456789.edf"
+ANNEX_REL_PATH = "sub-01/eeg/sub-01_task-rest_eeg.edf"
+ANNEX_TARGET = (
+    f"../../.git/annex/objects/aa/bb/{ANNEX_KEY}/{ANNEX_KEY}"
+)
+
+
+def git(repo: Path, *args: str) -> str:
+    return subprocess.check_output(["git", "-C", str(repo), *args], text=True)
+
+
+def setup_repo(repo: Path) -> None:
+    """Initialise a real BIDS-shaped git repo and tag it v0.0.0."""
+    repo.mkdir(parents=True, exist_ok=True)
+    git(repo, "init", "-q", "-b", "main")
+    git(repo, "config", "user.email", "test@nemar.local")
+    git(repo, "config", "user.name", "Test")
+    git(repo, "config", "commit.gpgsign", "false")
+
+    # dataset_description.json (BIDS root metadata)
+    (repo / "dataset_description.json").write_text(
+        json.dumps(
+            {"Name": "Test", "BIDSVersion": "1.8.0", "DatasetType": "raw"},
+            indent=2,
+        )
+    )
+    # README.md (BIDS root README)
+    (repo / "README.md").write_text("# Test dataset\n\nA real test dataset.\n")
+    # A regular per-subject EEG sidecar (git-tracked, not annexed)
+    (repo / "sub-01" / "eeg").mkdir(parents=True)
+    (repo / "sub-01" / "eeg" / "sub-01_task-rest_eeg.json").write_text(
+        json.dumps({"SamplingFrequency": 500}, indent=2)
+    )
+    # A second subject so derive_subjects has something to sort.
+    (repo / "sub-02" / "eeg").mkdir(parents=True)
+    (repo / "sub-02" / "eeg" / "sub-02_task-rest_eeg.json").write_text(
+        json.dumps({"SamplingFrequency": 500}, indent=2)
+    )
+
+    # A real annex-style symlink: the link target encodes the key.
+    annex_path = repo / ANNEX_REL_PATH
+    annex_path.parent.mkdir(parents=True, exist_ok=True)
+    os.symlink(ANNEX_TARGET, annex_path)
+
+    git(repo, "add", "-A")
+    # GIT_COMMITTER_DATE pinned so the tag SHA is reproducible across runs
+    env = os.environ.copy()
+    env["GIT_AUTHOR_DATE"] = "2026-01-01T00:00:00Z"
+    env["GIT_COMMITTER_DATE"] = "2026-01-01T00:00:00Z"
+    subprocess.check_call(
+        ["git", "-C", str(repo), "commit", "-q", "-m", "Initial dataset"],
+        env=env,
+    )
+    git(repo, "tag", "v0.0.0")
+
+
+def run_emit(repo: Path, out: Path) -> subprocess.CompletedProcess:
+    """Invoke emit_manifest.py against the tmp repo with canary disabled."""
+    return subprocess.run(
+        [
+            sys.executable,
+            str(EMIT),
+            "--dataset-id",
+            "nm099999",
+            "--version",
+            "0.0.0",
+            "--doi",
+            "10.82901/nemar.nm099999.v0.0.0",
+            "--concept-doi",
+            "10.82901/nemar.nm099999",
+            "--repo-dir",
+            str(repo),
+            "--out-dir",
+            str(out),
+            "--no-verify-canary",
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+
+class EmitManifestRealGitTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls._tmp = tempfile.TemporaryDirectory(prefix="emit-manifest-test-")
+        cls.tmp = Path(cls._tmp.name)
+        cls.repo = cls.tmp / "repo"
+        cls.out = cls.tmp / "out"
+        setup_repo(cls.repo)
+        cls.proc = run_emit(cls.repo, cls.out)
+        cls.manifest = json.loads((cls.out / "manifest.json").read_text())
+        cls.summary = json.loads((cls.out / "summary.json").read_text())
+
+    @classmethod
+    def tearDownClass(cls):
+        cls._tmp.cleanup()
+
+    # ---- output files exist -------------------------------------------------
+
+    def test_manifest_file_written(self):
+        self.assertTrue((self.out / "manifest.json").exists())
+
+    def test_summary_file_written(self):
+        self.assertTrue((self.out / "summary.json").exists())
+
+    def test_totals_file_written_for_workflow_callback(self):
+        # totals.json is read by scripts/build_callback_body.py inside the
+        # central workflow. Without it the callback step would 500.
+        totals_path = self.out / "totals.json"
+        self.assertTrue(totals_path.exists())
+        totals = json.loads(totals_path.read_text())
+        self.assertEqual(
+            set(totals.keys()),
+            {"files", "bytes", "annex", "git"},
+        )
+        self.assertEqual(totals["files"], len(self.manifest["files"]))
+        self.assertGreaterEqual(totals["annex"], 1)  # we committed an annex symlink
+
+    # ---- manifest shape -----------------------------------------------------
+
+    def test_manifest_top_level_keys(self):
+        self.assertEqual(
+            set(self.manifest.keys()),
+            {"dataset_id", "version", "doi", "concept_doi", "created", "files"},
+        )
+        self.assertEqual(self.manifest["dataset_id"], "nm099999")
+        # leading 'v' must be stripped from VersionManifest.version
+        self.assertEqual(self.manifest["version"], "0.0.0")
+        self.assertEqual(self.manifest["doi"], "10.82901/nemar.nm099999.v0.0.0")
+        self.assertEqual(self.manifest["concept_doi"], "10.82901/nemar.nm099999")
+        self.assertTrue(self.manifest["created"].endswith("Z"))
+
+    def test_dataset_description_is_git_keyed(self):
+        meta = self.manifest["files"].get("dataset_description.json")
+        self.assertIsNotNone(meta, "dataset_description.json missing from manifest")
+        self.assertTrue(meta["key"].startswith("git:"), f"unexpected key={meta['key']}")
+        self.assertEqual(meta["checksum"], meta["key"])
+        self.assertGreater(meta["size"], 0)
+
+    def test_annex_symlink_is_annex_keyed(self):
+        meta = self.manifest["files"].get(ANNEX_REL_PATH)
+        self.assertIsNotNone(meta, f"{ANNEX_REL_PATH} missing from manifest")
+        self.assertEqual(meta["key"], ANNEX_KEY)
+        self.assertEqual(meta["size"], 12345)
+        self.assertEqual(meta["checksum"], "sha256:abcdef0123456789")
+
+    def test_git_internals_excluded(self):
+        for path in self.manifest["files"].keys():
+            self.assertFalse(path.startswith(".git/"))
+            self.assertFalse(path.startswith(".github/"))
+
+    # ---- summary shape ------------------------------------------------------
+
+    def test_summary_schema_version(self):
+        self.assertEqual(self.summary["schema_version"], "1.0")
+
+    def test_summary_totals_files_match_manifest(self):
+        self.assertEqual(
+            self.summary["totals"]["files"],
+            len(self.manifest["files"]),
+        )
+
+    def test_summary_totals_bytes_is_sum_of_file_sizes(self):
+        expected = sum(int(m["size"]) for m in self.manifest["files"].values())
+        self.assertEqual(self.summary["totals"]["bytes"], expected)
+        # bytes must include the annex file's 12345
+        self.assertGreaterEqual(self.summary["totals"]["bytes"], 12345)
+
+    def test_summary_paths_sorted_and_complete(self):
+        self.assertEqual(self.summary["paths"], sorted(self.summary["paths"]))
+        self.assertEqual(set(self.summary["paths"]), set(self.manifest["files"].keys()))
+
+    def test_summary_subjects_derived_from_paths(self):
+        self.assertEqual(self.summary["subjects"], ["sub-01", "sub-02"])
+        self.assertEqual(self.summary["totals"]["subjects"], 2)
+
+    def test_summary_modalities_detected(self):
+        self.assertIn("eeg", self.summary["modalities"])
+
+    def test_summary_readme_path(self):
+        self.assertEqual(self.summary["readme"], {"path": "README.md"})
+
+    def test_summary_doi_passthrough(self):
+        self.assertEqual(self.summary["doi"], self.manifest["doi"])
+        self.assertEqual(self.summary["concept_doi"], self.manifest["concept_doi"])
+
+    def test_process_succeeded(self):
+        self.assertEqual(self.proc.returncode, 0, self.proc.stderr)
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2)
