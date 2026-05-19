@@ -1,7 +1,8 @@
 -- Migration 0025: manifest_jobs table for centralized manifest generation (#557).
 --
 -- Tracks in-flight repository_dispatch jobs sent to the central
--- `nemarOrg/nemar-cli` workflow. Each row binds a (dataset_id, version)
+-- `nemarDatasets/.github` workflow (relocated from `nemarOrg/nemar-cli`
+-- in #564). Each row binds a (dataset_id, version)
 -- to the nonce + HMAC callback token used to authenticate the eventual
 -- /webhooks/manifest-ready or /webhooks/manifest-failed POST.
 --

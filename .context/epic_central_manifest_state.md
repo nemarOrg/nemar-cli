@@ -131,20 +131,32 @@ Worker validates token, HEAD-checks both S3 URLs return 200, inserts `dataset_ve
 
 Flip per-environment for staged rollout. Start with `dev` (SCCN account), then prod after a week of clean runs.
 
-## Contract: central workflow secrets needed on `nemarOrg/nemar-cli`
+## Contract: central workflow secrets needed on `nemarDatasets`
 
-- `NEMAR_APP_ID` — GH App ID (already exists for nemarDatasets; need copy on nemarOrg)
-- `NEMAR_APP_PRIVATE_KEY` — App private key (same)
-- `AWS_ACCESS_KEY_ID` — S3 upload creds
-- `AWS_SECRET_ACCESS_KEY` — same
-- `MANIFEST_CALLBACK_SECRET` — symmetric secret matching Worker (for verifying `callback_token` round-trip)
+Relocated from `nemarOrg/nemar-cli` in #564 — Actions minutes now bill
+against the GitHub Team plan on `nemarDatasets`, not the constrained
+Free-plan tooling org. The workflow file lives at
+`nemarDatasets/.github/.github/workflows/generate-manifest.yml`.
 
-Ops sequence (USER STEP, BLOCKS Stream A merge):
-1. `gh secret set NEMAR_APP_ID --repo nemarOrg/nemar-cli`
-2. `gh secret set NEMAR_APP_PRIVATE_KEY --repo nemarOrg/nemar-cli < /tmp/nemar-app.pem`
-3. `gh secret set AWS_ACCESS_KEY_ID --repo nemarOrg/nemar-cli`
-4. `gh secret set AWS_SECRET_ACCESS_KEY --repo nemarOrg/nemar-cli`
-5. `gh secret set MANIFEST_CALLBACK_SECRET --repo nemarOrg/nemar-cli` (also `wrangler secret put` on worker)
+Required secrets at the nemarDatasets ORG level (visibility: all repos),
+so both the central `.github` repo and the dataset repos inherit them:
+
+- `NEMAR_APP_ID` — already present (Epic #432)
+- `NEMAR_APP_PRIVATE_KEY` — already present (Epic #432)
+- `AWS_ACCESS_KEY_ID` — already present (used by onboard-openneuro.yml)
+- `AWS_SECRET_ACCESS_KEY` — already present (used by onboard-openneuro.yml)
+- `MANIFEST_CALLBACK_SECRET` — NEW: symmetric secret matching Worker
+
+Ops sequence (USER STEP, BLOCKS flag flip):
+1. Verify the four already-present secrets are at ORG level (visibility:
+   all repos) — `gh secret list --org nemarDatasets`
+2. `gh secret set MANIFEST_CALLBACK_SECRET --org nemarDatasets --visibility all`
+   (use the same value as the Workers secret below)
+3. `npx cfman wrangler --account neuromechanist -c backend/wrangler.toml secret put MANIFEST_CALLBACK_SECRET`
+   then same for `--env dev`
+4. `npx cfman wrangler --account sccn -c backend/wrangler-sccn.toml secret put MANIFEST_CALLBACK_SECRET`
+   then same for `--env dev`
+5. Apply migration 0025 to D1 (both accounts, prod + dev)
 
 ## Acceptance for epic → dev PR
 

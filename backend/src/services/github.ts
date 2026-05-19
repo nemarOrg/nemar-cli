@@ -2099,18 +2099,22 @@ export async function triggerArchiveGeneration(
 }
 
 /** Central tooling repo where the manifest workflow lives. Targeted by
- *  `triggerManifestGeneration` regardless of the dataset's own repo. */
-export const CENTRAL_WORKFLOW_REPO = "nemarOrg/nemar-cli";
+ *  `triggerManifestGeneration` regardless of the dataset's own repo.
+ *  Relocated from `nemarOrg/nemar-cli` to `nemarDatasets/.github` (#564)
+ *  so Actions minutes bill against the dataset org's Team plan rather
+ *  than the constrained Free-plan tooling org. */
+export const CENTRAL_WORKFLOW_REPO = "nemarDatasets/.github";
 
 /**
  * Trigger central manifest generation via repository_dispatch on
- * `nemarOrg/nemar-cli` (NOT the dataset repo). The workflow checks out
- * the dataset repo's version tag, walks the tree, builds the manifest +
- * summary, uploads both to S3, and then POSTs back to `callback_url`.
+ * `nemarDatasets/.github` (NOT the individual dataset repo). The workflow
+ * checks out the dataset repo's version tag, walks the tree, builds the
+ * manifest + summary, uploads both to S3, and then POSTs back to
+ * `callback_url`.
  *
  * Mirrors `triggerArchiveGeneration` style for error handling. The `pat`
  * must be an App-installation token (or PAT fallback) authorized on the
- * nemarOrg org -- use `getNemarOrgToken()`.
+ * nemarDatasets org -- use `getDatasetsToken()`.
  *
  * `options.skipCanary` (default false) is the dispatch-path twin of the
  * inline `generateManifest()` `skipGitBackedVerification` option: when
