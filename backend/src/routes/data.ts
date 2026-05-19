@@ -527,14 +527,15 @@ async function summaryJsonHandler(
   }
 
   if (raw === null) {
-    // Negative-cache 404s briefly so a missing summary (e.g., pre-backfill
-    // dataset) doesn't repeatedly thrash S3 from edge caches, but stay
-    // short so a freshly-published summary shows up promptly.
+    // No negative caching: the primary consumer is the post-publish
+    // refresh, where a CDN-cached 404 from before Stream A's workflow
+    // wrote the summary would confuse publishers. `no-store` ensures a
+    // freshly-published summary becomes visible on the next request.
     return new Response(JSON.stringify({ error: "Summary not found for this version" }), {
       status: 404,
       headers: {
         "Content-Type": "application/json",
-        "Cache-Control": "public, max-age=60",
+        "Cache-Control": "no-store",
       },
     });
   }
