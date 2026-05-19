@@ -1059,14 +1059,23 @@ webhooks.post("/manifest-ready", async (c) => {
 
   let manifestPresent = false;
   let summaryPresent = false;
+  // Capture the error message separately so the 502 body can distinguish
+  // "S3 returned 404 (artifact really missing)" from "HEAD itself threw
+  // before getting a status (IAM/credentials/network)". Without this the
+  // operator-facing body just says "not found" even when the cause is a
+  // credential drift, which sends them on the wrong diagnostic trail.
+  let manifestHeadError: string | undefined;
+  let summaryHeadError: string | undefined;
   try {
     manifestPresent = await headVersionArtifact(s3Opts, body.dataset_id, body.version, "");
   } catch (err) {
+    manifestHeadError = err instanceof Error ? err.message : String(err);
     console.error("[manifest-ready] manifest HEAD failed:", err);
   }
   try {
     summaryPresent = await headVersionArtifact(s3Opts, body.dataset_id, body.version, "-summary");
   } catch (err) {
+    summaryHeadError = err instanceof Error ? err.message : String(err);
     console.error("[manifest-ready] summary HEAD failed:", err);
   }
 
@@ -1074,11 +1083,16 @@ webhooks.post("/manifest-ready", async (c) => {
     console.error(
       `[manifest-ready] S3 verification failed dataset=${body.dataset_id} version=${body.version} manifest=${manifestPresent} summary=${summaryPresent}`,
     );
+    const hadHeadError = manifestHeadError || summaryHeadError;
     return c.json(
       {
-        error: "S3 artifacts not found",
+        error: hadHeadError
+          ? "S3 HEAD check failed (credentials/permissions error -- not a missing artifact)"
+          : "S3 artifacts not found",
         manifest_present: manifestPresent,
         summary_present: summaryPresent,
+        ...(manifestHeadError && { manifest_head_error: manifestHeadError }),
+        ...(summaryHeadError && { summary_head_error: summaryHeadError }),
       },
       502,
     );
