@@ -486,7 +486,7 @@ dataRoutes.get("/:datasetId/:version/manifest.json", (c) => {
  * (epic #559, PR-1, issue #558).
  *
  * Sibling to manifest.json. Emitted by the central manifest-generation
- * workflow on `nemarOrg/nemar-cli` (Stream A) at S3 key
+ * workflow on `nemarDatasets/.github` (Stream A; relocated #564) at S3 key
  * `<id>/version/v<X.Y.Z>-summary.json`. Stream A's writer owns the shape
  * contract; this handler serves the bytes verbatim with no per-request
  * mutation (no presigned URLs, no field rewriting). That's why it gets a

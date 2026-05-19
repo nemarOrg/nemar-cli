@@ -12,7 +12,7 @@ import { runDatasetSync } from "../services/dataset-reindex.js";
 import { createEzidVersionDoi, parseDoiProvider } from "../services/doi.js";
 import { enrichDataset } from "../services/enrich-dataset.js";
 import { TEST_SHOULDER } from "../services/ezid.js";
-import { getDatasetsToken, getNemarOrgToken } from "../services/github-auth.js";
+import { getDatasetsToken } from "../services/github-auth.js";
 import {
   downloadReleaseArchive,
   signManifestCallbackToken,
@@ -191,7 +191,7 @@ async function dispatchCentralManifestJob(
   const callbackUrl = `${env.API_BASE_URL}/webhooks/manifest-ready`;
 
   try {
-    const pat = await getNemarOrgToken(env);
+    const pat = await getDatasetsToken(env);
     await triggerManifestGeneration(
       args.datasetId,
       args.version,

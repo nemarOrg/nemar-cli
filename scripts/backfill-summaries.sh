@@ -3,9 +3,9 @@
 # Backfill summary.json (and re-emit manifest.json) for the 5 datasets
 # recovered manually on 2026-05-18.
 #
-# This dispatches the central manifest-generation workflow (Stream A's
-# .github/workflows/generate-manifest.yml on nemarOrg/nemar-cli) once per
-# dataset. The workflow walks the dataset's git tree at the recorded
+# This dispatches the central manifest-generation workflow
+# (.github/workflows/generate-manifest.yml on nemarDatasets/.github) once
+# per dataset. The workflow walks the dataset's git tree at the recorded
 # version tag, builds manifest.json + summary.json, and uploads both to
 # s3://nemar/<id>/version/v<X.Y.Z>{,-summary}.json.
 #
@@ -14,13 +14,12 @@
 # dispatches so we don't hammer the central workflow.
 #
 # Prerequisites:
-#   - Stream A's generate-manifest.yml merged to nemarOrg/nemar-cli main
-#     (epic #559 PR-1)
-#   - All 5 secrets configured on nemarOrg/nemar-cli (see
-#     .context/epic_central_manifest_state.md "Contract: central workflow
-#     secrets" — NEMAR_APP_ID, NEMAR_APP_PRIVATE_KEY, AWS_*,
-#     MANIFEST_CALLBACK_SECRET)
-#   - gh CLI authenticated with workflow:write on nemarOrg/nemar-cli
+#   - generate-manifest.yml deployed to nemarDatasets/.github main
+#     (epic #559 PR-1; relocated #564)
+#   - Required secrets at nemarDatasets ORG level, visibility=all repos:
+#     NEMAR_APP_ID, NEMAR_APP_PRIVATE_KEY, AWS_ACCESS_KEY_ID,
+#     AWS_SECRET_ACCESS_KEY, MANIFEST_CALLBACK_SECRET
+#   - gh CLI authenticated with workflow:write on nemarDatasets/.github
 #
 # Usage:
 #   ./scripts/backfill-summaries.sh             # dispatch all
@@ -42,7 +41,7 @@ if ! gh auth status --hostname github.com &>/dev/null; then
   exit 1
 fi
 
-REPO="nemarOrg/nemar-cli"
+REPO="nemarDatasets/.github"
 WORKFLOW="generate-manifest.yml"
 SLEEP_BETWEEN=30
 
