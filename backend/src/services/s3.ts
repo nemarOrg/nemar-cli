@@ -455,6 +455,50 @@ export async function getManifest(
 }
 
 /**
+ * Get a summary.json sibling artifact from S3. Returns null if not found.
+ *
+ * Stored at: <datasetId>/version/v<version>-summary.json
+ *
+ * Companion to getManifest(); the central manifest-generation workflow
+ * (epic #559, PR-1) writes both manifest.json and summary.json in the same
+ * step. Summary is a static-passthrough artifact: the route serves whatever
+ * S3 has, no per-request mutation, no validation here (the writer owns the
+ * contract; the consumer-side route is shape-agnostic).
+ */
+export async function loadSummary(
+  options: PresignedUrlOptions,
+  datasetId: string,
+  version: string,
+): Promise<string | null> {
+  const { bucket, region } = options;
+  const aws = createS3Client(options);
+  const versionTag = version.startsWith("v") ? version : `v${version}`;
+  const key = `${datasetId}/version/${versionTag}-summary.json`;
+  const encodedKey = key.split("/").map(encodeURIComponent).join("/");
+  const url = `https://${bucket}.s3.${region}.amazonaws.com/${encodedKey}`;
+
+  const signed = await aws.sign(url, { method: "GET" });
+  const response = await fetch(signed);
+
+  if (response.status === 404) return null;
+  if (response.status === 403) {
+    // Diverges intentionally from getManifest()'s 403-as-404. A 403 on our
+    // own bucket means IAM/credential drift, not "summary not yet
+    // generated". Silently masking it would let an operator confuse a
+    // broken backend for a pre-backfill dataset. Surface as an error;
+    // the route's catch block turns it into a 500 (not a cacheable 404).
+    throw new Error(
+      `loadSummary 403 (credentials/permissions) for dataset=${datasetId} version=${version}`,
+    );
+  }
+  if (!response.ok) {
+    throw new Error(`Failed to get summary: HTTP ${response.status}`);
+  }
+
+  return response.text();
+}
+
+/**
  * List available manifest versions for a dataset.
  * Reads from the version/ prefix under the dataset's S3 directory.
  */
