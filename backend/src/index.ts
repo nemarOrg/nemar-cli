@@ -183,7 +183,7 @@ app.route("/", api);
 
 /**
  * Scheduled cleanup handler (Cloudflare Workers cron trigger).
- * Runs daily at 3 AM UTC (production only, see wrangler.toml [triggers]).
+ * Runs daily at 3 AM UTC (production only, see wrangler-sccn.toml [triggers]).
  *
  * - Sandbox (xx) datasets: delete after 14 days
  * - Stale nm datasets: private, no DOI, no active pub requests, inactive for 90 days

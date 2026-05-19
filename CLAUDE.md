@@ -45,12 +45,10 @@ The backend code (`ORG_NAME = "nemarDatasets"` in `backend/src/services/github.t
 ### Backend Infrastructure
 - **API URL:** `https://api.nemar.org` (canonical production, SCCN account)
 - **Workers URL:** `https://nemar-api.sccn-org.workers.dev` (SCCN account fallback for the same worker)
-- **Legacy URL:** `https://api.osc.earth/nemar` (personal account, MAINTENANCE_MODE=read-only buffer for old CLIs; sunset in Phase 11)
+- **Legacy URL:** `https://api.osc.earth/nemar` (retired personal account; sunset complete — old CLIs may still hit it briefly during migration, but it's not a deployment target)
 - **Platform:** Cloudflare Workers + D1 (SQLite)
-- **Cloudflare accounts:** Managed via `npx cfman wrangler --account <name>`
-  - `neuromechanist` - Personal account (current production)
-  - `sccn` - SCCN institutional account (migration target, Epic #314)
-- **Wrangler configs:** `backend/wrangler.toml` (personal), `backend/wrangler-sccn.toml` (SCCN)
+- **Cloudflare account:** SCCN only (personal/`neuromechanist` retired as of 2026-05-18). Use `npx cfman wrangler --account sccn` for all operations.
+- **Wrangler config:** `backend/wrangler-sccn.toml` (the only active config; the former personal-account `backend/wrangler.toml` was removed)
 
 ### S3 Bucket Structure
 ```
