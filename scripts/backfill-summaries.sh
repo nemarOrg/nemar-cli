@@ -51,6 +51,7 @@ SLEEP_BETWEEN=30
 # 2026-05-19 (Cloudflare D1 not directly queryable from the worktree;
 # the public catalog row is the same source of truth used by the central
 # workflow).
+# nm000104, nm000105, nm000107 excluded — not publicly listed in catalog as of 2026-05-19
 DATASETS=(
   "nm000103:2.0.0:10.82901/nemar.nm000103.v2.0.0:10.82901/nemar.nm000103"
   "nm000106:2.0.0:10.82901/nemar.nm000106.v2.0.0:10.82901/nemar.nm000106"
