@@ -9,6 +9,10 @@
  * surface here; D1 application is verified post-deploy via the
  * /webhooks/manifest-ready handler at e2e time.
  *
+ * Note: Runtime replay semantics (second callback with same nonce → 401)
+ * require live D1 + handler dispatch. Deferred to epic E2E (#559
+ * acceptance). This file pins the schema contract only.
+ *
  * Pairs with `manifest-callback-token.test.ts` (HMAC contract) and the
  * webhook handler integration in `backend/src/routes/webhooks.ts`.
  */
@@ -60,9 +64,13 @@ describe("migration 0025: manifest_jobs structure", () => {
   test("documents the three legal status values in a comment", () => {
     // Keeps the source of truth co-located with the schema; the worker
     // code reads/writes these exact strings, so they're an API surface.
-    expect(sql).toMatch(/dispatched/);
-    expect(sql).toMatch(/ready/);
-    expect(sql).toMatch(/failed/);
+    // Assert the DEFAULT value specifically (load-bearing constraint:
+    // a freshly-inserted row must be 'dispatched' so the manifest-ready
+    // status='dispatched' gate accepts the callback) and the documented
+    // enum comment appears verbatim. A regression that drops the
+    // comment or changes the default would fail here.
+    expect(sql).toMatch(/status TEXT NOT NULL DEFAULT 'dispatched'/);
+    expect(sql).toMatch(/dispatched \| ready \| failed/);
   });
 
   test("created_at defaults to datetime('now') -- queryable timeline", () => {
