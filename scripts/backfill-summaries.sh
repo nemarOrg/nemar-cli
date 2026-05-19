@@ -34,6 +34,14 @@ if [[ "${1:-}" == "--dry-run" ]]; then
   echo "=== DRY RUN MODE - No workflow dispatches will fire ==="
 fi
 
+# Fail fast on an unauthenticated gh CLI so the operator doesn't watch
+# every dispatch fail in sequence (each followed by a 30s sleep) only to
+# learn at the end that the token was expired.
+if ! gh auth status --hostname github.com &>/dev/null; then
+  echo "[backfill] ERROR: gh CLI not authenticated. Run: gh auth login" >&2
+  exit 1
+fi
+
 REPO="nemarOrg/nemar-cli"
 WORKFLOW="generate-manifest.yml"
 SLEEP_BETWEEN=30
@@ -52,6 +60,7 @@ DATASETS=(
 )
 
 FIRED=()
+WOULD_FIRE=()
 FAILED=()
 
 dispatch_one() {
@@ -71,7 +80,10 @@ dispatch_one() {
 
   if [[ "$DRY_RUN" == "true" ]]; then
     echo "[dry-run] ${cmd[*]}"
-    FIRED+=("$dataset_id@$version")
+    # Track separately so the final summary can't claim dispatches that
+    # never happened. A confused operator reading "Fired (5)" after a
+    # dry run is a real failure mode.
+    WOULD_FIRE+=("$dataset_id@$version")
     return 0
   fi
 
@@ -100,6 +112,14 @@ done
 
 echo
 echo "=== Summary ==="
+if [[ "$DRY_RUN" == "true" ]]; then
+  echo "Dry-run would fire (${#WOULD_FIRE[@]}):"
+  for d in "${WOULD_FIRE[@]}"; do echo "  - $d"; done
+  echo
+  echo "Re-run without --dry-run to dispatch."
+  exit 0
+fi
+
 echo "Fired (${#FIRED[@]}):"
 for d in "${FIRED[@]}"; do echo "  - $d"; done
 if [[ "${#FAILED[@]}" -gt 0 ]]; then
