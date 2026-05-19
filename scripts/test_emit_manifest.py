@@ -326,5 +326,122 @@ class ReadmeNoneTests(unittest.TestCase):
         self.assertEqual(self.summary["version"], self.manifest["version"])
 
 
+class ReadmePriorityTests(unittest.TestCase):
+    """When multiple README files exist at the BIDS root the priority order
+    is ``README``, then ``README.md``, then ``README.txt``. The first match
+    wins; later candidates are ignored even if also present.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls._tmp = tempfile.TemporaryDirectory(prefix="emit-manifest-readme-prio-")
+        cls.tmp = Path(cls._tmp.name)
+        cls.repo = cls.tmp / "repo"
+        cls.out = cls.tmp / "out"
+
+        cls.repo.mkdir(parents=True, exist_ok=True)
+        git(cls.repo, "init", "-q", "-b", "main")
+        git(cls.repo, "config", "user.email", "test@nemar.local")
+        git(cls.repo, "config", "user.name", "Test")
+        git(cls.repo, "config", "commit.gpgsign", "false")
+        (cls.repo / "dataset_description.json").write_text(
+            json.dumps({"Name": "Prio", "BIDSVersion": "1.8.0", "DatasetType": "raw"})
+        )
+        # Commit BOTH README and README.md. README must win because it is
+        # first in the candidates tuple.
+        (cls.repo / "README").write_text("plain README\n")
+        (cls.repo / "README.md").write_text("# markdown README\n")
+        git(cls.repo, "add", "-A")
+        env = os.environ.copy()
+        env["GIT_AUTHOR_DATE"] = "2026-01-01T00:00:00Z"
+        env["GIT_COMMITTER_DATE"] = "2026-01-01T00:00:00Z"
+        subprocess.check_call(
+            ["git", "-C", str(cls.repo), "commit", "-q", "-m", "Two READMEs fixture"],
+            env=env,
+        )
+        git(cls.repo, "tag", "v0.0.0")
+        cls.proc = run_emit(cls.repo, cls.out)
+        cls.summary = json.loads((cls.out / "summary.json").read_text())
+
+    @classmethod
+    def tearDownClass(cls):
+        cls._tmp.cleanup()
+
+    def test_readme_priority_picks_plain_README(self):
+        self.assertEqual(self.summary["readme"], {"path": "README"})
+
+
+class VersionVPrefixTests(unittest.TestCase):
+    """A caller may pass ``--version v0.0.0`` or ``--version 0.0.0``. Either
+    form must produce a manifest/summary with the bare ``"0.0.0"`` value.
+
+    The leading-v normalisation lives in emit_manifest.build_manifest()
+    (``bare_version = version.lstrip('v')``); a regression there would
+    break the documented VersionManifest shape and downstream S3 keys.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls._tmp = tempfile.TemporaryDirectory(prefix="emit-manifest-v-prefix-")
+        cls.tmp = Path(cls._tmp.name)
+        cls.repo = cls.tmp / "repo"
+        cls.out = cls.tmp / "out"
+
+        cls.repo.mkdir(parents=True, exist_ok=True)
+        git(cls.repo, "init", "-q", "-b", "main")
+        git(cls.repo, "config", "user.email", "test@nemar.local")
+        git(cls.repo, "config", "user.name", "Test")
+        git(cls.repo, "config", "commit.gpgsign", "false")
+        (cls.repo / "dataset_description.json").write_text(
+            json.dumps({"Name": "VPrefix", "BIDSVersion": "1.8.0", "DatasetType": "raw"})
+        )
+        (cls.repo / "README.md").write_text("# v-prefix fixture\n")
+        git(cls.repo, "add", "-A")
+        env = os.environ.copy()
+        env["GIT_AUTHOR_DATE"] = "2026-01-01T00:00:00Z"
+        env["GIT_COMMITTER_DATE"] = "2026-01-01T00:00:00Z"
+        subprocess.check_call(
+            ["git", "-C", str(cls.repo), "commit", "-q", "-m", "v-prefix fixture"],
+            env=env,
+        )
+        git(cls.repo, "tag", "v0.0.0")
+
+        # Run emit_manifest with --version v0.0.0 (leading v).
+        cls.proc = subprocess.run(
+            [
+                sys.executable,
+                str(EMIT),
+                "--dataset-id",
+                "nm099999",
+                "--version",
+                "v0.0.0",
+                "--doi",
+                "10.82901/nemar.nm099999.v0.0.0",
+                "--concept-doi",
+                "10.82901/nemar.nm099999",
+                "--repo-dir",
+                str(cls.repo),
+                "--out-dir",
+                str(cls.out),
+                "--no-verify-canary",
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        cls.manifest = json.loads((cls.out / "manifest.json").read_text())
+        cls.summary = json.loads((cls.out / "summary.json").read_text())
+
+    @classmethod
+    def tearDownClass(cls):
+        cls._tmp.cleanup()
+
+    def test_manifest_version_stripped(self):
+        self.assertEqual(self.manifest["version"], "0.0.0")
+
+    def test_summary_version_stripped(self):
+        self.assertEqual(self.summary["version"], "0.0.0")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
