@@ -8,7 +8,7 @@ manually on 2026-05-18: `nm000103`, `nm000106`, `nm000166`, `on004362`,
 
 `scripts/backfill-summaries.sh` is a thin dispatcher around
 `gh workflow run`. It triggers `generate-manifest.yml` (the central
-workflow on `nemarOrg/nemar-cli`) once per dataset with the recorded
+workflow on `nemarDatasets/.github`) once per dataset with the recorded
 version + DOI + concept DOI as inputs. The workflow walks the dataset's
 git tree at the version tag, builds both `manifest.json` and
 `summary.json`, and uploads them to
@@ -18,15 +18,15 @@ Re-running the script just overwrites the S3 objects; safe to retry.
 
 ## Prerequisites
 
-1. Stream A's `.github/workflows/generate-manifest.yml` is merged on
-   `nemarOrg/nemar-cli` main and exposes a `workflow_dispatch` trigger
-   with inputs `dataset_id`, `version`, `doi`, `concept_doi`.
-2. Repo secrets configured on `nemarOrg/nemar-cli`:
+1. `generate-manifest.yml` is deployed at `nemarDatasets/.github` main
+   and exposes a `workflow_dispatch` trigger with inputs `dataset_id`,
+   `version`, `doi`, `concept_doi`.
+2. Org-level secrets at `nemarDatasets` (visibility: all repos):
    `NEMAR_APP_ID`, `NEMAR_APP_PRIVATE_KEY`, `AWS_ACCESS_KEY_ID`,
    `AWS_SECRET_ACCESS_KEY`, `MANIFEST_CALLBACK_SECRET` (see
    `.context/epic_central_manifest_state.md` for the ops sequence).
 3. Local `gh` CLI authenticated with `workflow:write` on
-   `nemarOrg/nemar-cli`. Check with `gh auth status`.
+   `nemarDatasets/.github`. Check with `gh auth status`.
 
 ## Run
 
@@ -38,7 +38,7 @@ Re-running the script just overwrites the S3 objects; safe to retry.
 ./scripts/backfill-summaries.sh
 ```
 
-Watch progress with `gh run list --repo nemarOrg/nemar-cli --workflow generate-manifest.yml`.
+Watch progress with `gh run list --repo nemarDatasets/.github --workflow generate-manifest.yml`.
 
 ## Verify
 
