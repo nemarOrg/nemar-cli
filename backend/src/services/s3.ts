@@ -499,6 +499,41 @@ export async function loadSummary(
 }
 
 /**
+ * HEAD-check whether an S3 version artifact exists. Used by the
+ * /webhooks/manifest-ready callback to confirm the central workflow
+ * actually uploaded both manifest.json and summary.json before we
+ * commit the dataset_versions row. Suffix examples: "" (manifest) or
+ * "-summary" (summary sibling). Returns true on 200, false on 404, and
+ * throws on any other status (so a 5xx doesn't silently masquerade as
+ * "missing"). #557 Stream B.
+ */
+export async function headVersionArtifact(
+  options: PresignedUrlOptions,
+  datasetId: string,
+  version: string,
+  suffix: "" | "-summary" = "",
+): Promise<boolean> {
+  const { bucket, region } = options;
+  const aws = createS3Client(options);
+  const versionTag = version.startsWith("v") ? version : `v${version}`;
+  const key = `${datasetId}/version/${versionTag}${suffix}.json`;
+  const encodedKey = key.split("/").map(encodeURIComponent).join("/");
+  const url = `https://${bucket}.s3.${region}.amazonaws.com/${encodedKey}`;
+
+  const signed = await aws.sign(url, { method: "HEAD" });
+  const response = await fetch(signed);
+
+  if (response.status === 200) return true;
+  if (response.status === 404) return false;
+  if (response.status === 403) {
+    throw new Error(
+      `headVersionArtifact 403: likely IAM credentials/permissions error for ${key}. Check AWS_ACCESS_KEY_ID on the Worker.`,
+    );
+  }
+  throw new Error(`Failed to HEAD ${key}: HTTP ${response.status}`);
+}
+
+/**
  * List available manifest versions for a dataset.
  * Reads from the version/ prefix under the dataset's S3 directory.
  */

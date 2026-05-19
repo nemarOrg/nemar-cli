@@ -110,9 +110,15 @@ X-Webhook-Token: <callback_token from dispatch>
   "manifest_url": "https://nemar.s3.us-east-2.amazonaws.com/nm099999/version/v1.0.0.json",
   "summary_url": "https://nemar.s3.us-east-2.amazonaws.com/nm099999/version/v1.0.0-summary.json",
   "totals": { "files": ..., "bytes": ..., "annex": ..., "git": ... },
-  "workflow_run_id": "..."
+  "workflow_run_id": "...",
+  "canary_skipped": true | false   // optional; Stream A fix round
 }
 ```
+
+`canary_skipped` echoes the `skip_canary` dispatch flag (#557 Stream A
+fix round). Optional for back-compat with older Stream A runs; worker
+logs it in the manifest-ready handler but does not persist it (no
+column on `manifest_jobs` in migration 0025).
 
 Worker validates token, HEAD-checks both S3 URLs return 200, inserts `dataset_versions` row, mints DOI (if not already minted by the dispatching caller).
 

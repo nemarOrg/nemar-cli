@@ -12,11 +12,16 @@ import { runDatasetSync } from "../services/dataset-reindex.js";
 import { createEzidVersionDoi, parseDoiProvider } from "../services/doi.js";
 import { enrichDataset } from "../services/enrich-dataset.js";
 import { TEST_SHOULDER } from "../services/ezid.js";
-import { getDatasetsToken } from "../services/github-auth.js";
-import { downloadReleaseArchive } from "../services/github.js";
+import { getDatasetsToken, getNemarOrgToken } from "../services/github-auth.js";
+import {
+  downloadReleaseArchive,
+  signManifestCallbackToken,
+  triggerManifestGeneration,
+  verifyManifestCallbackToken,
+} from "../services/github.js";
 import { generateManifest } from "../services/manifest.js";
 import { errorMessage, extractRepoName, readRepoMetadata } from "../services/repo-metadata.js";
-import { uploadManifest } from "../services/s3.js";
+import { headVersionArtifact, uploadManifest } from "../services/s3.js";
 import * as zenodo from "../services/zenodo.js";
 import type { Bindings } from "../types/bindings.js";
 
@@ -97,6 +102,125 @@ export function shouldSyncToNemarAfterVersionDoi(input: {
     return { trigger: false, reason: "no_doi" };
   }
   return { trigger: true };
+}
+
+/**
+ * Returns true iff the central manifest workflow path (#557) is enabled
+ * for this Worker. Reads `MANIFEST_VIA_CENTRAL_WORKFLOW` from env and
+ * coerces to boolean: only the literal string "true" enables; anything
+ * else (including undefined, "false", "True", "1") stays on the legacy
+ * in-Worker generateManifest() path. Exported so tests can pin the
+ * coercion table.
+ */
+export function isCentralManifestWorkflowEnabled(env: Bindings): boolean {
+  return env.MANIFEST_VIA_CENTRAL_WORKFLOW === "true";
+}
+
+/**
+ * Dispatch a central manifest generation job and persist the
+ * `manifest_jobs` row so the eventual `/webhooks/manifest-ready`
+ * callback can find it. Returns the generated nonce + callback token
+ * for logging/observability.
+ *
+ * Throws if `MANIFEST_CALLBACK_SECRET` is unset (the central path is
+ * unsafe without it -- any caller could spoof the callback) or if the
+ * dispatch POST to GitHub fails. The D1 INSERT is best-effort: a
+ * UNIQUE collision on (dataset_id, version, nonce) is extraordinarily
+ * unlikely (UUID v4 nonce) but we re-raise so the caller surfaces it
+ * rather than silently leaking a job row mismatch.
+ */
+async function dispatchCentralManifestJob(
+  env: Bindings,
+  args: {
+    datasetId: string;
+    version: string;
+    doi: string | null;
+    conceptDoi: string | null;
+    doiProvider: "ezid" | "zenodo";
+    /** Disables Stream A's raw.githubusercontent.com canary check when
+     *  the dataset repo is private/unauthenticated-HEAD-incapable.
+     *  Twin of `skipGitBackedVerification` on the inline path. */
+    skipCanary?: boolean;
+  },
+): Promise<{ nonce: string; callbackToken: string }> {
+  if (!env.MANIFEST_CALLBACK_SECRET) {
+    throw new Error(
+      "MANIFEST_CALLBACK_SECRET is unset; refusing to dispatch central manifest workflow",
+    );
+  }
+  const nonce = crypto.randomUUID();
+  const callbackToken = await signManifestCallbackToken(
+    { datasetId: args.datasetId, version: args.version, nonce },
+    env.MANIFEST_CALLBACK_SECRET,
+  );
+
+  // Persist the job row BEFORE dispatch so a slow GitHub round-trip
+  // can't deliver the callback to a missing row. If dispatch fails
+  // below we mark the row as failed for observability.
+  await env.DB.prepare(
+    `INSERT INTO manifest_jobs (dataset_id, version, nonce, doi, concept_doi, doi_provider, status)
+     VALUES (?, ?, ?, ?, ?, ?, 'dispatched')`,
+  )
+    .bind(args.datasetId, args.version, nonce, args.doi, args.conceptDoi, args.doiProvider)
+    .run();
+
+  // Detect double-dispatch: if there are other still-'dispatched' rows
+  // for the same (dataset_id, version) but a different nonce, the
+  // publisher likely retried (or two callers raced). The UNIQUE
+  // constraint is on (dataset_id, version, nonce) so we don't collide
+  // at the DB layer, but operators should see a warning so duplicate
+  // workflow runs aren't a silent surprise.
+  try {
+    const supersessions = await env.DB.prepare(
+      `SELECT COUNT(*) as count FROM manifest_jobs
+       WHERE dataset_id = ? AND version = ? AND status = 'dispatched' AND nonce != ?`,
+    )
+      .bind(args.datasetId, args.version, nonce)
+      .first<{ count: number }>();
+    const olderCount = supersessions?.count ?? 0;
+    if (olderCount > 0) {
+      console.warn(
+        `[manifest-dispatch] superseding ${olderCount} older dispatched job(s) for ${args.datasetId}@${args.version}; possible publisher retry`,
+      );
+    }
+  } catch (err) {
+    // Detection is best-effort; never block dispatch on it.
+    console.warn("[manifest-dispatch] supersession check failed (non-fatal):", err);
+  }
+
+  const callbackUrl = `${env.API_BASE_URL}/webhooks/manifest-ready`;
+
+  try {
+    const pat = await getNemarOrgToken(env);
+    await triggerManifestGeneration(
+      args.datasetId,
+      args.version,
+      args.doi,
+      args.conceptDoi,
+      callbackToken,
+      callbackUrl,
+      pat,
+      { skipCanary: args.skipCanary ?? false },
+    );
+  } catch (err) {
+    const msg = errorMessage(err);
+    try {
+      await env.DB.prepare(
+        `UPDATE manifest_jobs SET status = 'failed', error_message = ?, completed_at = datetime('now')
+         WHERE dataset_id = ? AND version = ? AND nonce = ?`,
+      )
+        .bind(`dispatch failed: ${msg}`, args.datasetId, args.version, nonce)
+        .run();
+    } catch (d1Err) {
+      console.error("[webhook] manifest_jobs UPDATE after dispatch failure also failed:", d1Err);
+    }
+    throw err;
+  }
+
+  console.log(
+    `[manifest-dispatch] dataset=${args.datasetId} version=${args.version} provider=${args.doiProvider} nonce=${nonce}`,
+  );
+  return { nonce, callbackToken };
 }
 
 const webhooks = new Hono<{ Bindings: Bindings }>();
@@ -276,6 +400,7 @@ async function handleEzidVersionDoi(
     // DOI is now public and permanent. DB and manifest failures below are
     // non-fatal but must be surfaced in the response for operator awareness.
     let dbError: string | undefined;
+    const centralFlow = isCentralManifestWorkflowEnabled(c.env);
     try {
       await c.env.DB.prepare(
         "UPDATE datasets SET latest_version_doi = ?, updated_at = datetime('now') WHERE id = ?",
@@ -283,47 +408,83 @@ async function handleEzidVersionDoi(
         .bind(result.doi, dataset.id)
         .run();
 
-      await c.env.DB.prepare(
-        "INSERT OR IGNORE INTO dataset_versions (dataset_id, version, doi, provider) VALUES (?, ?, ?, 'ezid')",
-      )
-        .bind(dataset.dataset_id, version, result.doi)
-        .run();
+      if (!centralFlow) {
+        // Legacy path inserts the dataset_versions row inline. Under the
+        // central flow the /webhooks/manifest-ready callback owns the
+        // insert (so the row appears only once the manifest is on S3).
+        await c.env.DB.prepare(
+          "INSERT OR IGNORE INTO dataset_versions (dataset_id, version, doi, provider) VALUES (?, ?, ?, 'ezid')",
+        )
+          .bind(dataset.dataset_id, version, result.doi)
+          .run();
+      }
     } catch (err) {
       dbError = errorMessage(err);
       console.error(`[webhook] DOI ${result.doi} is PUBLIC but DB update failed:`, err);
     }
 
-    // Generate and upload version manifest
+    // Generate and upload version manifest.
+    //   - centralFlow=false: legacy in-Worker generateManifest() path.
+    //   - centralFlow=true:  dispatch repository_dispatch on
+    //     nemarOrg/nemar-cli; the central workflow uploads manifest +
+    //     summary to S3 and POSTs back to /webhooks/manifest-ready
+    //     which inserts the dataset_versions row.
     let manifestGenerated = false;
     let manifestErrorMsg: string | undefined;
-    try {
-      const manifest = await generateManifest(
-        repoName,
-        version,
-        pat,
-        dataset.dataset_id,
-        result.doi,
-        dataset.concept_doi,
-      );
+    let manifestDispatched = false;
+    if (centralFlow) {
+      try {
+        await dispatchCentralManifestJob(c.env, {
+          datasetId: dataset.dataset_id,
+          version,
+          doi: result.doi,
+          conceptDoi: dataset.concept_doi,
+          doiProvider: "ezid",
+          // Published datasets ARE public at DOI-mint time, but the
+          // central workflow's raw.githubusercontent.com canary races
+          // GitHub Pages propagation. The publish webhook is the
+          // authoritative caller; Stream A's canary is duplicative.
+          // Twin of `skipGitBackedVerification` on the inline path.
+          skipCanary: true,
+        });
+        manifestDispatched = true;
+      } catch (dispatchErr) {
+        manifestErrorMsg = errorMessage(dispatchErr);
+        console.error(
+          `[webhook] Central manifest dispatch failed for ${dataset.dataset_id}@${version}:`,
+          dispatchErr,
+        );
+      }
+    } else {
+      try {
+        const manifest = await generateManifest(
+          repoName,
+          version,
+          pat,
+          dataset.dataset_id,
+          result.doi,
+          dataset.concept_doi,
+        );
 
-      await uploadManifest(
-        {
-          bucket: c.env.S3_BUCKET,
-          region: c.env.AWS_REGION,
-          accessKeyId: c.env.AWS_ACCESS_KEY_ID,
-          secretAccessKey: c.env.AWS_SECRET_ACCESS_KEY,
-        },
-        dataset.dataset_id,
-        version,
-        JSON.stringify(manifest, null, 2),
-      );
-      manifestGenerated = true;
-    } catch (manifestErr) {
-      manifestErrorMsg = errorMessage(manifestErr);
-      console.error(
-        `[webhook] Manifest generation failed for ${dataset.dataset_id}@${version}:`,
-        manifestErr,
-      );
+        await uploadManifest(
+          {
+            bucket: c.env.S3_BUCKET,
+            region: c.env.AWS_REGION,
+            accessKeyId: c.env.AWS_ACCESS_KEY_ID,
+            secretAccessKey: c.env.AWS_SECRET_ACCESS_KEY,
+          },
+          dataset.dataset_id,
+          version,
+          JSON.stringify(manifest, null, 2),
+        );
+        manifestGenerated = true;
+      } catch (manifestErr) {
+        manifestErrorMsg = errorMessage(manifestErr);
+        console.error(
+          `[webhook] Manifest generation failed for ${dataset.dataset_id}@${version}:`,
+          manifestErr,
+        );
+      }
     }
 
     // Upload archive to Zenodo as draft backup (non-fatal)
@@ -420,18 +581,27 @@ async function handleEzidVersionDoi(
     // read-after-write race (background waitUntil firing before the new
     // dataset_versions row replicates) doesn't drop the version DOI
     // from the nemar.org payload.
-    const ezidSyncDecision = shouldSyncToNemarAfterVersionDoi({
-      datasetId: dataset.dataset_id,
-      versionDoi: result.doi,
-      nemarUsername: c.env.NEMAR_USERNAME,
-      nemarPassword: c.env.NEMAR_PASSWORD,
-    });
-    if (ezidSyncDecision.trigger) {
-      c.executionCtx.waitUntil(syncToNemarAfterVersionDoi(c.env, dataset, version, result.doi));
-    } else if (ezidSyncDecision.reason === "no_credentials") {
-      console.warn("[webhook] NEMAR_USERNAME/PASSWORD not configured; skipping nemar.org sync");
-    } else if (ezidSyncDecision.reason === "openneuro") {
-      console.info(`[webhook] Skipping nemar.org sync for OpenNeuro dataset ${dataset.dataset_id}`);
+    //
+    // Under centralFlow, the manifest/summary/dataset_versions row don't
+    // exist yet at this point -- the /webhooks/manifest-ready handler
+    // owns those writes. Skip the inline sync; manifest-ready will fire
+    // sync after the row insert lands.
+    if (!centralFlow) {
+      const ezidSyncDecision = shouldSyncToNemarAfterVersionDoi({
+        datasetId: dataset.dataset_id,
+        versionDoi: result.doi,
+        nemarUsername: c.env.NEMAR_USERNAME,
+        nemarPassword: c.env.NEMAR_PASSWORD,
+      });
+      if (ezidSyncDecision.trigger) {
+        c.executionCtx.waitUntil(syncToNemarAfterVersionDoi(c.env, dataset, version, result.doi));
+      } else if (ezidSyncDecision.reason === "no_credentials") {
+        console.warn("[webhook] NEMAR_USERNAME/PASSWORD not configured; skipping nemar.org sync");
+      } else if (ezidSyncDecision.reason === "openneuro") {
+        console.info(
+          `[webhook] Skipping nemar.org sync for OpenNeuro dataset ${dataset.dataset_id}`,
+        );
+      }
     }
 
     return c.json({
@@ -442,6 +612,7 @@ async function handleEzidVersionDoi(
       provider: "ezid",
       doi_url: `https://doi.org/${result.doi}`,
       manifest_generated: manifestGenerated,
+      manifest_dispatched: manifestDispatched,
       ...(zenodoBackup && { zenodo_backup: zenodoBackup }),
       ...(repoMeta.warnings.length > 0 && { metadata_warnings: repoMeta.warnings }),
       ...(dbError && { db_error: dbError }),
@@ -598,12 +769,16 @@ async function handleZenodoVersionDoi(
     // non-fatal but must be surfaced in the response for operator awareness.
     const baseUrl = sandbox ? "https://sandbox.zenodo.org" : "https://zenodo.org";
     let dbError: string | undefined;
+    const centralFlow = isCentralManifestWorkflowEnabled(c.env);
     try {
       await c.env.DB.prepare("UPDATE datasets SET zenodo_latest_version_id = ? WHERE id = ?")
         .bind(published.id.toString(), dataset.id)
         .run();
 
-      if (published.doi) {
+      if (!centralFlow && published.doi) {
+        // Legacy path inserts the dataset_versions row inline. Under the
+        // central flow the /webhooks/manifest-ready callback owns the
+        // insert (so the row appears only once the manifest is on S3).
         await c.env.DB.prepare(
           "INSERT OR IGNORE INTO dataset_versions (dataset_id, version, doi, provider) VALUES (?, ?, ?, 'zenodo')",
         )
@@ -618,11 +793,36 @@ async function handleZenodoVersionDoi(
       );
     }
 
-    // Generate and upload version manifest
+    // Generate and upload version manifest. See EZID path for the full
+    // contract; same legacy-vs-central branch here.
     let manifestGenerated = false;
     let manifestErrorMsg: string | undefined;
+    let manifestDispatched = false;
     const zenodoRepoName = dataset.github_repo ? extractRepoName(dataset.github_repo) : null;
-    if (zenodoRepoName) {
+    if (centralFlow) {
+      try {
+        await dispatchCentralManifestJob(c.env, {
+          datasetId: dataset.dataset_id,
+          version,
+          doi: published.doi ?? null,
+          conceptDoi: dataset.concept_doi,
+          doiProvider: "zenodo",
+          // Published datasets ARE public at DOI-mint time, but the
+          // central workflow's raw.githubusercontent.com canary races
+          // GitHub Pages propagation. The publish webhook is the
+          // authoritative caller; Stream A's canary is duplicative.
+          // Twin of `skipGitBackedVerification` on the inline path.
+          skipCanary: true,
+        });
+        manifestDispatched = true;
+      } catch (dispatchErr) {
+        manifestErrorMsg = errorMessage(dispatchErr);
+        console.error(
+          `[webhook] Central manifest dispatch failed for ${dataset.dataset_id}@${version}:`,
+          dispatchErr,
+        );
+      }
+    } else if (zenodoRepoName) {
       try {
         const manifest = await generateManifest(
           zenodoRepoName,
@@ -658,28 +858,39 @@ async function handleZenodoVersionDoi(
     // Mirrors the EZID path: non-fatal, runs in the background via
     // waitUntil, and skips OpenNeuro datasets (alternate_id not yet
     // supported by the nemar.org pipeline).
-    const zenodoSyncDecision = shouldSyncToNemarAfterVersionDoi({
-      datasetId: dataset.dataset_id,
-      versionDoi: published.doi ?? null,
-      nemarUsername: c.env.NEMAR_USERNAME,
-      nemarPassword: c.env.NEMAR_PASSWORD,
-    });
-    if (zenodoSyncDecision.trigger) {
-      // trigger: true guarantees versionDoi is non-null (no_doi guard in predicate)
-      c.executionCtx.waitUntil(syncToNemarAfterVersionDoi(c.env, dataset, version, published.doi!));
-    } else {
-      if (zenodoSyncDecision.reason === "no_credentials") {
-        console.warn("[webhook] NEMAR_USERNAME/PASSWORD not configured; skipping nemar.org sync");
-      } else if (zenodoSyncDecision.reason === "openneuro") {
-        console.info(
-          `[webhook] Skipping nemar.org sync for OpenNeuro dataset ${dataset.dataset_id}`,
+    //
+    // Under centralFlow, the manifest/summary/dataset_versions row don't
+    // exist yet at this point -- the /webhooks/manifest-ready handler
+    // owns those writes. Skip the inline sync; manifest-ready will fire
+    // sync after the row insert lands.
+    if (!centralFlow) {
+      const zenodoSyncDecision = shouldSyncToNemarAfterVersionDoi({
+        datasetId: dataset.dataset_id,
+        versionDoi: published.doi ?? null,
+        nemarUsername: c.env.NEMAR_USERNAME,
+        nemarPassword: c.env.NEMAR_PASSWORD,
+      });
+      if (zenodoSyncDecision.trigger) {
+        // trigger: true guarantees versionDoi is non-null (no_doi guard in predicate)
+        c.executionCtx.waitUntil(
+          syncToNemarAfterVersionDoi(c.env, dataset, version, published.doi!),
         );
-      } else if (zenodoSyncDecision.reason === "sandbox") {
-        console.info(`[webhook] Skipping nemar.org sync for sandbox dataset ${dataset.dataset_id}`);
-      } else if (zenodoSyncDecision.reason === "no_doi") {
-        console.warn(
-          `[webhook] Skipping nemar.org sync for ${dataset.dataset_id}: Zenodo returned no DOI`,
-        );
+      } else {
+        if (zenodoSyncDecision.reason === "no_credentials") {
+          console.warn("[webhook] NEMAR_USERNAME/PASSWORD not configured; skipping nemar.org sync");
+        } else if (zenodoSyncDecision.reason === "openneuro") {
+          console.info(
+            `[webhook] Skipping nemar.org sync for OpenNeuro dataset ${dataset.dataset_id}`,
+          );
+        } else if (zenodoSyncDecision.reason === "sandbox") {
+          console.info(
+            `[webhook] Skipping nemar.org sync for sandbox dataset ${dataset.dataset_id}`,
+          );
+        } else if (zenodoSyncDecision.reason === "no_doi") {
+          console.warn(
+            `[webhook] Skipping nemar.org sync for ${dataset.dataset_id}: Zenodo returned no DOI`,
+          );
+        }
       }
     }
 
@@ -691,6 +902,7 @@ async function handleZenodoVersionDoi(
       provider: "zenodo",
       zenodo_url: `${baseUrl}/records/${published.id}`,
       manifest_generated: manifestGenerated,
+      manifest_dispatched: manifestDispatched,
       ...(dbError && { db_error: dbError }),
       ...(manifestErrorMsg && { manifest_error: manifestErrorMsg }),
     });
@@ -705,6 +917,368 @@ async function handleZenodoVersionDoi(
     );
   }
 }
+
+/**
+ * Validate the manifest_ready / manifest_failed request body shape.
+ * Exported so unit tests can pin the validation table without spinning
+ * up the webhook harness.
+ */
+export interface ManifestCallbackBody {
+  dataset_id: string;
+  version: string;
+  manifest_url?: string;
+  summary_url?: string;
+  totals?: { files?: number; bytes?: number; annex?: number; git?: number };
+  workflow_run_id?: string;
+  workflow_run_url?: string;
+  error_message?: string;
+  /** Stream A fix round: workflow echoes back the `skip_canary` dispatch
+   *  flag so operators can confirm the canary was disabled on this run.
+   *  Optional for back-compat with older Stream A runs that predate the
+   *  field. Logged on the manifest-ready handler; not persisted (no
+   *  column on manifest_jobs in migration 0025). */
+  canary_skipped?: boolean;
+}
+
+export function validateManifestCallbackBody(
+  body: unknown,
+  required: ReadonlyArray<keyof ManifestCallbackBody>,
+): string | null {
+  if (!body || typeof body !== "object") return "Body must be a JSON object";
+  const b = body as Record<string, unknown>;
+  for (const field of required) {
+    if (b[field] === undefined || b[field] === null) {
+      return `Missing required field: ${field}`;
+    }
+  }
+  if (typeof b.dataset_id !== "string" || !b.dataset_id) {
+    return "dataset_id must be a non-empty string";
+  }
+  if (typeof b.version !== "string" || !b.version) {
+    return "version must be a non-empty string";
+  }
+  return null;
+}
+
+/**
+ * Callback handler for the central manifest workflow (#557, Stream A).
+ * Invoked by the GitHub Actions job once both manifest.json and
+ * summary.json are uploaded to S3. Validates the HMAC callback token
+ * the worker signed at dispatch time, HEAD-checks both S3 artifacts to
+ * confirm presence, then INSERTs the dataset_versions row that the
+ * legacy in-Worker path used to write inline.
+ *
+ * Idempotent on the dataset_versions INSERT via OR IGNORE; idempotent
+ * on the manifest_jobs row via status='dispatched' -> 'ready' transition
+ * gate. Replaying a callback for an already-completed job is a no-op
+ * (200 still returned to keep the workflow's exit happy).
+ */
+webhooks.post("/manifest-ready", async (c) => {
+  const token = c.req.header("X-Webhook-Token");
+  if (!token) {
+    return c.json({ error: "Missing X-Webhook-Token header" }, 401);
+  }
+
+  let body: ManifestCallbackBody;
+  try {
+    body = (await c.req.json()) as ManifestCallbackBody;
+  } catch {
+    return c.json({ error: "Invalid JSON in request body" }, 400);
+  }
+
+  const validationError = validateManifestCallbackBody(body, [
+    "dataset_id",
+    "version",
+    "manifest_url",
+    "summary_url",
+    "totals",
+    "workflow_run_id",
+  ]);
+  if (validationError) {
+    return c.json({ error: validationError }, 400);
+  }
+
+  if (!c.env.MANIFEST_CALLBACK_SECRET) {
+    console.error("[manifest-ready] MANIFEST_CALLBACK_SECRET is unset; rejecting callback");
+    return c.json({ error: "Server misconfigured: MANIFEST_CALLBACK_SECRET unset" }, 500);
+  }
+
+  // Find the in-flight job. Callback token is HMAC over (dataset_id,
+  // version, nonce); we must look up the row first to recover the nonce
+  // before we can verify the signature. Filter by status='dispatched'
+  // so a replay attack against a stale nonce can't reach the INSERT.
+  const job = await c.env.DB.prepare(
+    `SELECT id, nonce, doi, concept_doi, doi_provider, status
+     FROM manifest_jobs
+     WHERE dataset_id = ? AND version = ? AND status = 'dispatched'
+     ORDER BY created_at DESC LIMIT 1`,
+  )
+    .bind(body.dataset_id, body.version)
+    .first<{
+      id: number;
+      nonce: string;
+      doi: string | null;
+      concept_doi: string | null;
+      doi_provider: string | null;
+      status: string;
+    }>();
+
+  if (!job) {
+    // No dispatched job for this (dataset, version). Either we've
+    // already processed the callback, or the dispatch row was never
+    // written. Either way: don't trust the caller; 401.
+    console.warn(
+      `[manifest-ready] no dispatched manifest_jobs row for dataset=${body.dataset_id} version=${body.version}`,
+    );
+    return c.json({ error: "No in-flight manifest job for this dataset+version" }, 401);
+  }
+
+  const ok = await verifyManifestCallbackToken(
+    token,
+    { datasetId: body.dataset_id, version: body.version, nonce: job.nonce },
+    c.env.MANIFEST_CALLBACK_SECRET,
+  );
+  if (!ok) {
+    console.warn(
+      `[manifest-ready] callback token mismatch dataset=${body.dataset_id} version=${body.version}`,
+    );
+    return c.json({ error: "Invalid callback token" }, 401);
+  }
+
+  // HEAD-check both S3 artifacts. The workflow tells us the URLs but we
+  // verify by signed HEAD against our own bucket -- the contract is
+  // {datasetId}/version/v{X.Y.Z}.json and the sibling -summary.json
+  // key, so we don't need to trust the caller's manifest_url/summary_url
+  // for the HEAD. (We still record what the caller sent for audit.)
+  const s3Opts = {
+    bucket: c.env.S3_BUCKET,
+    region: c.env.AWS_REGION,
+    accessKeyId: c.env.AWS_ACCESS_KEY_ID,
+    secretAccessKey: c.env.AWS_SECRET_ACCESS_KEY,
+  };
+
+  let manifestPresent = false;
+  let summaryPresent = false;
+  try {
+    manifestPresent = await headVersionArtifact(s3Opts, body.dataset_id, body.version, "");
+  } catch (err) {
+    console.error("[manifest-ready] manifest HEAD failed:", err);
+  }
+  try {
+    summaryPresent = await headVersionArtifact(s3Opts, body.dataset_id, body.version, "-summary");
+  } catch (err) {
+    console.error("[manifest-ready] summary HEAD failed:", err);
+  }
+
+  if (!manifestPresent || !summaryPresent) {
+    console.error(
+      `[manifest-ready] S3 verification failed dataset=${body.dataset_id} version=${body.version} manifest=${manifestPresent} summary=${summaryPresent}`,
+    );
+    return c.json(
+      {
+        error: "S3 artifacts not found",
+        manifest_present: manifestPresent,
+        summary_present: summaryPresent,
+      },
+      502,
+    );
+  }
+
+  // Insert dataset_versions row (the contract piece that USED to live
+  // inline in publish-version-doi). OR IGNORE makes this idempotent if
+  // the legacy path already wrote the row (paranoid double-write
+  // protection during the soak period).
+  //
+  // Critical: if this INSERT fails we MUST return 500 BEFORE flipping
+  // manifest_jobs.status to 'ready'. Otherwise the row stays missing,
+  // the job becomes unreplayable (status != 'dispatched' on retry), and
+  // the central workflow has no signal to retry from.
+  const provider = job.doi_provider === "zenodo" ? "zenodo" : "ezid";
+  if (job.doi) {
+    try {
+      await c.env.DB.prepare(
+        "INSERT OR IGNORE INTO dataset_versions (dataset_id, version, doi, provider) VALUES (?, ?, ?, ?)",
+      )
+        .bind(body.dataset_id, body.version, job.doi, provider)
+        .run();
+    } catch (err) {
+      const dbError = errorMessage(err);
+      console.error("[manifest-ready] dataset_versions insert failed:", err);
+      return c.json({ error: "Failed to insert dataset_versions row", db_error: dbError }, 500);
+    }
+  } else {
+    console.warn(
+      `[manifest-ready] dataset=${body.dataset_id} version=${body.version} has no DOI on the manifest_jobs row; skipping dataset_versions insert`,
+    );
+  }
+
+  // Mark the job as ready. We do this AFTER the insert so a failed
+  // insert leaves the job in 'dispatched' for a retry / manual fix.
+  try {
+    await c.env.DB.prepare(
+      `UPDATE manifest_jobs
+       SET status = 'ready', completed_at = datetime('now')
+       WHERE id = ? AND status = 'dispatched'`,
+    )
+      .bind(job.id)
+      .run();
+  } catch (err) {
+    console.error("[manifest-ready] manifest_jobs UPDATE to 'ready' failed:", err);
+  }
+
+  // Issue #557: under centralFlow the EZID/Zenodo publish handlers
+  // intentionally skip the nemar.org sync because the
+  // dataset_versions row + manifest/summary on S3 don't exist yet
+  // when the DOI is minted. Fire the sync HERE, after the row insert
+  // lands, so the nemar.org payload sees the new version DOI.
+  // Non-fatal: log + carry on (legacy behavior).
+  if (job.doi) {
+    try {
+      const dataset = await c.env.DB.prepare(
+        "SELECT id, dataset_id, name, github_repo, concept_doi FROM datasets WHERE dataset_id = ?",
+      )
+        .bind(body.dataset_id)
+        .first<{
+          id: number;
+          dataset_id: string;
+          name: string;
+          github_repo: string | null;
+          concept_doi: string | null;
+        }>();
+      if (dataset) {
+        const syncDecision = shouldSyncToNemarAfterVersionDoi({
+          datasetId: dataset.dataset_id,
+          versionDoi: job.doi,
+          nemarUsername: c.env.NEMAR_USERNAME,
+          nemarPassword: c.env.NEMAR_PASSWORD,
+        });
+        if (syncDecision.trigger) {
+          c.executionCtx.waitUntil(
+            syncToNemarAfterVersionDoi(c.env, dataset, body.version, job.doi),
+          );
+        } else if (syncDecision.reason === "no_credentials") {
+          console.warn(
+            "[manifest-ready] NEMAR_USERNAME/PASSWORD not configured; skipping nemar.org sync",
+          );
+        } else if (syncDecision.reason === "openneuro") {
+          console.info(
+            `[manifest-ready] Skipping nemar.org sync for OpenNeuro dataset ${dataset.dataset_id}`,
+          );
+        } else if (syncDecision.reason === "sandbox") {
+          console.info(
+            `[manifest-ready] Skipping nemar.org sync for sandbox dataset ${dataset.dataset_id}`,
+          );
+        }
+      } else {
+        console.warn(
+          `[manifest-ready] dataset row not found for ${body.dataset_id}; skipping nemar.org sync`,
+        );
+      }
+    } catch (err) {
+      console.error("[manifest-ready] nemar.org sync scheduling failed (non-fatal):", err);
+    }
+  }
+
+  const fileCount = body.totals?.files ?? 0;
+  // canary_skipped echoed back from Stream A so operators can grep
+  // confirmation that the dispatch-side skipCanary flag took effect.
+  // Absent on older Stream A runs that predate the field.
+  const canarySkipped =
+    typeof body.canary_skipped === "boolean" ? String(body.canary_skipped) : "(unset)";
+  console.log(
+    `[manifest-ready] dataset=${body.dataset_id} version=${body.version} totals.files=${fileCount} canary_skipped=${canarySkipped}`,
+  );
+
+  return c.json({
+    ok: true,
+    dataset_id: body.dataset_id,
+    version: body.version,
+  });
+});
+
+/**
+ * Failure-callback handler for the central manifest workflow. Invoked
+ * when the workflow itself failed (build error, S3 upload error, etc.)
+ * before it could write artifacts. Updates the manifest_jobs row to
+ * status='failed' and records the workflow run URL for operator
+ * follow-up. Returns 200 best-effort so the central workflow doesn't
+ * see a 4xx and retry on its own.
+ */
+webhooks.post("/manifest-failed", async (c) => {
+  const token = c.req.header("X-Webhook-Token");
+  if (!token) {
+    return c.json({ error: "Missing X-Webhook-Token header" }, 401);
+  }
+
+  let body: ManifestCallbackBody;
+  try {
+    body = (await c.req.json()) as ManifestCallbackBody;
+  } catch {
+    return c.json({ error: "Invalid JSON in request body" }, 400);
+  }
+
+  const validationError = validateManifestCallbackBody(body, ["dataset_id", "version"]);
+  if (validationError) {
+    return c.json({ error: validationError }, 400);
+  }
+
+  if (!c.env.MANIFEST_CALLBACK_SECRET) {
+    console.error("[manifest-failed] MANIFEST_CALLBACK_SECRET is unset; rejecting callback");
+    return c.json({ error: "Server misconfigured: MANIFEST_CALLBACK_SECRET unset" }, 500);
+  }
+
+  const job = await c.env.DB.prepare(
+    `SELECT id, nonce, status FROM manifest_jobs
+     WHERE dataset_id = ? AND version = ? AND status = 'dispatched'
+     ORDER BY created_at DESC LIMIT 1`,
+  )
+    .bind(body.dataset_id, body.version)
+    .first<{ id: number; nonce: string; status: string }>();
+
+  if (!job) {
+    console.warn(
+      `[manifest-failed] no dispatched manifest_jobs row for dataset=${body.dataset_id} version=${body.version}`,
+    );
+    return c.json({ ok: true, no_job: true });
+  }
+
+  const ok = await verifyManifestCallbackToken(
+    token,
+    { datasetId: body.dataset_id, version: body.version, nonce: job.nonce },
+    c.env.MANIFEST_CALLBACK_SECRET,
+  );
+  if (!ok) {
+    console.warn(
+      `[manifest-failed] callback token mismatch dataset=${body.dataset_id} version=${body.version}`,
+    );
+    return c.json({ error: "Invalid callback token" }, 401);
+  }
+
+  const errorMsg = body.error_message ?? "unknown error";
+  const runUrl = body.workflow_run_url ?? null;
+  if (runUrl === null) {
+    console.warn(
+      `[manifest-failed] dataset=${body.dataset_id} version=${body.version} workflow_run_url=null; operator follow-up will need to grep recent Actions runs manually`,
+    );
+  }
+  try {
+    await c.env.DB.prepare(
+      `UPDATE manifest_jobs
+       SET status = 'failed', error_message = ?, workflow_run_url = ?, completed_at = datetime('now')
+       WHERE id = ? AND status = 'dispatched'`,
+    )
+      .bind(errorMsg, runUrl, job.id)
+      .run();
+  } catch (err) {
+    console.error("[manifest-failed] manifest_jobs UPDATE to 'failed' failed:", err);
+  }
+
+  console.error(
+    `[manifest-failed] dataset=${body.dataset_id} version=${body.version} error=${errorMsg} run_url=${runUrl ?? "(none)"}`,
+  );
+
+  return c.json({ ok: true, dataset_id: body.dataset_id, version: body.version });
+});
 
 /**
  * Trigger LLM-based metadata enrichment for a dataset. Called by GitHub
