@@ -454,7 +454,7 @@ class DeriveSubjectsLengthGuardTests(unittest.TestCase):
         # Import lazily so the import doesn't run for tests that exercise
         # the script as a subprocess.
         sys.path.insert(0, str(HERE))
-        import emit_manifest  # noqa: E402
+        import emit_manifest  # noqa: E402  # pyright: ignore[reportMissingImports]
 
         self.derive_subjects = emit_manifest.derive_subjects
 
