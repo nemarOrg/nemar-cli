@@ -34,6 +34,7 @@ import json
 import re
 import subprocess
 import sys
+import time
 import urllib.error
 import urllib.request
 from datetime import datetime, timezone
@@ -363,7 +364,6 @@ def verify_canaries(*, dataset_id: str, version: str, files: dict) -> None:
                 ok_status = 0
             if attempt == 0:
                 # Mirror the 2s backoff used in manifest.ts for CDN propagation.
-                import time
                 time.sleep(2)
         if not (200 <= ok_status < 400):
             failures.append((path, ok_status))
