@@ -45,6 +45,11 @@ from pathlib import Path
 ANNEX_TARGET_RE = re.compile(
     r"\.git/annex/objects/[A-Za-z0-9]+/[A-Za-z0-9]+/([^/]+)/\1$"
 )
+# Unlocked-mode annex pointer files: regular blobs whose content is
+# `/annex/objects/<KEY>` (no .git/ prefix, no trailing duplicate). This
+# mirrors the first branch of parseAnnexPointer() in
+# backend/src/services/manifest.ts.
+ANNEX_POINTER_CONTENT_RE = re.compile(r"^/annex/objects/(.+)$")
 KEY_SIZE_RE = re.compile(r"-s(\d+)--")
 KEY_CHECKSUM_RE = re.compile(r"--([a-fA-F0-9]+)")
 KEY_ALGO_RE = re.compile(r"^([A-Z0-9]+?)E?-s")
@@ -87,14 +92,54 @@ def parse_annex_key(symlink_target: str) -> str | None:
     return m.group(1) if m else None
 
 
+def parse_annex_pointer_content(content: str) -> str | None:
+    """Parse an unlocked-mode git-annex pointer blob and return the key.
+
+    Mirrors backend/src/services/manifest.ts:parseAnnexPointer(). Two
+    branches are checked, in order:
+
+      1. Plain pointer content: ``/annex/objects/<KEY>`` (one line, no
+         trailing slash, no .git/ prefix). This is what unlocked-mode
+         git-annex repos commit as regular 100644 blobs.
+      2. Symlink-target content: ``.git/annex/objects/XX/YY/<KEY>/<KEY>``.
+         Only relevant if someone hands us locked-mode symlink-target text
+         as a blob (defensive parity with the TS helper).
+
+    Returns the annex key, or None if neither pattern matches.
+    """
+    trimmed = content.strip()
+    m = ANNEX_POINTER_CONTENT_RE.match(trimmed)
+    if m:
+        return m.group(1)
+    # Fall through to the locked-mode symlink target form for safety.
+    m = ANNEX_TARGET_RE.search(trimmed)
+    return m.group(1) if m else None
+
+
 def extract_size_from_key(key: str) -> int:
     m = KEY_SIZE_RE.search(key)
-    return int(m.group(1)) if m else 0
+    if not m:
+        print(
+            f"[emit_manifest] warning: could not extract size from annex key {key!r}; "
+            f"defaulting to 0",
+            file=sys.stderr,
+            flush=True,
+        )
+        return 0
+    return int(m.group(1))
 
 
 def extract_checksum_from_key(key: str) -> str:
     m = KEY_CHECKSUM_RE.search(key)
-    return m.group(1) if m else ""
+    if not m:
+        print(
+            f"[emit_manifest] warning: could not extract checksum from annex key "
+            f"{key!r}; defaulting to empty string",
+            file=sys.stderr,
+            flush=True,
+        )
+        return ""
+    return m.group(1)
 
 
 def extract_algo_from_key(key: str) -> str:
@@ -104,7 +149,15 @@ def extract_algo_from_key(key: str) -> str:
     name is the prefix before it.
     """
     m = KEY_ALGO_RE.match(key)
-    return m.group(1).lower() if m else "sha256"
+    if not m:
+        print(
+            f"[emit_manifest] warning: could not extract hash algorithm from annex "
+            f"key {key!r}; defaulting to sha256",
+            file=sys.stderr,
+            flush=True,
+        )
+        return "sha256"
+    return m.group(1).lower()
 
 
 def build_manifest(
@@ -151,6 +204,30 @@ def build_manifest(
 
         if mode in ("100644", "100755", "120000"):
             size = int(run(["git", "-C", repo_dir, "cat-file", "-s", sha]).strip())
+            # Unlocked-mode (v7+) git-annex repos commit pointer files as
+            # regular blobs whose content is `/annex/objects/<KEY>`. If we
+            # naively keyed these as `git:<sha>` the manifest would record
+            # the ~80-byte pointer blob's size and SHA, not the real annex
+            # file. Mirrors the first branch of parseAnnexPointer() in
+            # backend/src/services/manifest.ts.
+            #
+            # Pointer blobs are always small (typically <100 bytes). Guard
+            # the cat-file blob read on size so we don't pull big text
+            # files (e.g. participants.tsv) into memory just to discard
+            # them. The 512-byte ceiling is generous; real pointer blobs
+            # rarely exceed ~120 bytes even with long extensions.
+            if mode in ("100644", "100755") and size <= 512:
+                content = run(["git", "-C", repo_dir, "cat-file", "blob", sha])
+                key = parse_annex_pointer_content(content)
+                if key:
+                    algo = extract_algo_from_key(key)
+                    files[path] = {
+                        "key": key,
+                        "size": extract_size_from_key(key),
+                        "checksum": f"{algo}:{extract_checksum_from_key(key)}",
+                    }
+                    continue
+
             files[path] = {
                 "key": f"git:{sha}",
                 "size": size,
