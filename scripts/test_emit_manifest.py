@@ -276,5 +276,55 @@ class MalformedSymlinkFallthroughTests(unittest.TestCase):
         self.assertGreater(meta["size"], 0)
 
 
+class ReadmeNoneTests(unittest.TestCase):
+    """A dataset without a README at the BIDS root must yield
+    ``summary["readme"] is None``. Contract: epic state doc, summary shape."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls._tmp = tempfile.TemporaryDirectory(prefix="emit-manifest-no-readme-")
+        cls.tmp = Path(cls._tmp.name)
+        cls.repo = cls.tmp / "repo"
+        cls.out = cls.tmp / "out"
+
+        cls.repo.mkdir(parents=True, exist_ok=True)
+        git(cls.repo, "init", "-q", "-b", "main")
+        git(cls.repo, "config", "user.email", "test@nemar.local")
+        git(cls.repo, "config", "user.name", "Test")
+        git(cls.repo, "config", "commit.gpgsign", "false")
+        (cls.repo / "dataset_description.json").write_text(
+            json.dumps({"Name": "NoReadme", "BIDSVersion": "1.8.0", "DatasetType": "raw"})
+        )
+        # Deliberately no README, README.md, README.txt.
+        git(cls.repo, "add", "-A")
+        env = os.environ.copy()
+        env["GIT_AUTHOR_DATE"] = "2026-01-01T00:00:00Z"
+        env["GIT_COMMITTER_DATE"] = "2026-01-01T00:00:00Z"
+        subprocess.check_call(
+            ["git", "-C", str(cls.repo), "commit", "-q", "-m", "No README fixture"],
+            env=env,
+        )
+        git(cls.repo, "tag", "v0.0.0")
+        cls.proc = run_emit(cls.repo, cls.out)
+        cls.summary = json.loads((cls.out / "summary.json").read_text())
+        cls.manifest = json.loads((cls.out / "manifest.json").read_text())
+
+    @classmethod
+    def tearDownClass(cls):
+        cls._tmp.cleanup()
+
+    def test_readme_none(self):
+        self.assertIsNone(self.summary["readme"])
+
+    def test_summary_passthrough_fields(self):
+        # dataset_id and version are mandatory pass-through fields per the
+        # documented summary contract. The base test class asserts DOI
+        # passthrough; this one asserts the simpler identity fields.
+        self.assertEqual(self.summary["dataset_id"], "nm099999")
+        self.assertEqual(self.summary["version"], "0.0.0")
+        self.assertEqual(self.summary["dataset_id"], self.manifest["dataset_id"])
+        self.assertEqual(self.summary["version"], self.manifest["version"])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
