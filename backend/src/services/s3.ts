@@ -455,6 +455,49 @@ export async function getManifest(
 }
 
 /**
+ * Get a summary.json sibling artifact from S3. Returns null if not found.
+ *
+ * Stored at: <datasetId>/version/v<version>-summary.json
+ *
+ * Companion to getManifest(); the central manifest-generation workflow
+ * (epic #559, PR-1) writes both manifest.json and summary.json in the same
+ * step. Summary is a static-passthrough artifact: the route serves whatever
+ * S3 has, no per-request mutation, no validation here (the writer owns the
+ * contract; the consumer-side route is shape-agnostic).
+ */
+export async function loadSummary(
+  options: PresignedUrlOptions,
+  datasetId: string,
+  version: string,
+): Promise<string | null> {
+  const { bucket, region } = options;
+  const aws = createS3Client(options);
+  const versionTag = version.startsWith("v") ? version : `v${version}`;
+  const key = `${datasetId}/version/${versionTag}-summary.json`;
+  const encodedKey = key.split("/").map(encodeURIComponent).join("/");
+  const url = `https://${bucket}.s3.${region}.amazonaws.com/${encodedKey}`;
+
+  const signed = await aws.sign(url, { method: "GET" });
+  const response = await fetch(signed);
+
+  if (response.status === 404) return null;
+  if (response.status === 403) {
+    // Mirror getManifest()'s 403-as-404 behavior: a correctly-configured
+    // backend should never see 403 on its own bucket, but if creds drift
+    // we don't want every dataset to look like a public 404 silently.
+    console.error(
+      `[s3] loadSummary 403 (likely credentials/permissions) dataset=${datasetId} version=${version}`,
+    );
+    return null;
+  }
+  if (!response.ok) {
+    throw new Error(`Failed to get summary: HTTP ${response.status}`);
+  }
+
+  return response.text();
+}
+
+/**
  * List available manifest versions for a dataset.
  * Reads from the version/ prefix under the dataset's S3 directory.
  */
