@@ -16,6 +16,16 @@
  *  - The handler is a static-passthrough: source has no presigned-URL
  *    injection (`buildRedirectUrl`) and no `generatePresignedGetUrl`
  *    call in its body. The summary contract is path-only by design.
+ *
+ * NOT covered here (intentional):
+ *  - 200-path `Cache-Control: public, max-age=300, s-maxage=86400, ...`
+ *    header. Requires both real S3 (an actual summary.json object) and
+ *    real D1 (a published dataset row that passes `loadPublishedDataset`).
+ *    Verified at epic-level by `nemar admin e2e-test --verbose` and by
+ *    the real-S3 conditional `test/s3-summary.test.ts` (which proves
+ *    `loadSummary` returns the bytes; the route then attaches the header
+ *    unconditionally, as the source assertion above guarantees no
+ *    branching can drop it).
  */
 
 import { describe, expect, test } from "bun:test";
@@ -74,7 +84,15 @@ describe("data summary route (#558)", () => {
     // site that registers summary.json is between the handler and the
     // next `function ...Handler` declaration.
     const restAfterStart = source.slice(startIdx);
-    const nextHandlerIdx = restAfterStart.indexOf("async function ", "async function ".length);
+    // Pass a character offset past the WHOLE declaration prefix
+    // `async function summaryJsonHandler`, not just `async function `.
+    // The shorter offset (15) lands inside the declaration's own prefix,
+    // which works today but would silently expand scope if a nested
+    // helper named `async function ...` were introduced.
+    const nextHandlerIdx = restAfterStart.indexOf(
+      "async function ",
+      "async function summaryJsonHandler".length,
+    );
     const handlerBody =
       nextHandlerIdx === -1 ? restAfterStart : restAfterStart.slice(0, nextHandlerIdx);
     expect(handlerBody.includes("buildRedirectUrl")).toBe(false);
