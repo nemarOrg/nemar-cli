@@ -27,12 +27,16 @@ def main() -> int:
     p.add_argument("--out", required=True)
     args = p.parse_args()
 
+    # The /webhooks/manifest-failed handler reads body.error_message and
+    # writes it to manifest_jobs.error_message. We pack the failed step
+    # name into this field so the DB row records which workflow step
+    # died, not the unhelpful sentinel "unknown error".
     body = {
         "dataset_id": args.dataset_id,
         "version": args.version,
         "workflow_run_id": args.workflow_run_id,
         "workflow_run_url": args.workflow_run_url,
-        "failed_step": args.failed_step,
+        "error_message": f"failed at step: {args.failed_step}",
     }
     Path(args.out).write_text(json.dumps(body))
     print(f"[build_failure_body] wrote {args.out}", flush=True)
