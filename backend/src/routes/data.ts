@@ -517,7 +517,13 @@ async function summaryJsonHandler(
       `[data] summary fetch failed dataset=${datasetId} version=${resolved.version}:`,
       err instanceof Error ? err.message : String(err),
     );
-    return notFound("Summary not found for this version");
+    // 5xx S3 outages, SigV4 failures, IAM drift (403 from loadSummary)
+    // must NOT collapse into a cacheable 404. Return an uncached 500 so
+    // an operator-side alert fires and the CDN doesn't pin the failure.
+    return new Response(JSON.stringify({ error: "Failed to retrieve summary" }), {
+      status: 500,
+      headers: { "Content-Type": "application/json" },
+    });
   }
 
   if (raw === null) {
