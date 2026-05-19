@@ -1,0 +1,214 @@
+name: Generate Manifest
+
+# Central manifest generator for NEMAR dataset versions.
+#
+# Replaces the in-Worker generateManifest() path (one GitHub API call per
+# annex pointer, exhausts the App's 12.5k/hr quota on large datasets) with
+# a git-tree walk on a managed runner. Reads the symlink-target blob via
+# `git cat-file` to extract annex keys without ever fetching annex content.
+#
+# Triggered by:
+#   - repository_dispatch[generate-manifest] from the Worker (production path)
+#   - workflow_dispatch                       (manual recovery / re-run)
+#
+# Artifacts uploaded:
+#   s3://nemar/<id>/version/v<X.Y.Z>.json          (manifest.json)
+#   s3://nemar/<id>/version/v<X.Y.Z>-summary.json  (summary.json)
+#
+# On success the workflow POSTs the callback contract documented in
+# .context/epic_central_manifest_state.md. On failure it best-effort POSTs
+# to /webhooks/manifest-failed (the endpoint lands with Stream B; a 404 is
+# acceptable in the interim).
+
+on:
+  repository_dispatch:
+    types: [generate-manifest]
+  workflow_dispatch:
+    inputs:
+      dataset_id:
+        description: "Dataset id (e.g. nm099999)"
+        required: true
+        type: string
+      version:
+        description: "Version (X.Y.Z, no leading v)"
+        required: true
+        type: string
+      doi:
+        description: "Version DOI (optional)"
+        required: false
+        type: string
+        default: ""
+      concept_doi:
+        description: "Concept DOI (optional)"
+        required: false
+        type: string
+        default: ""
+      callback_url:
+        description: "Callback URL (defaults to api.nemar.org)"
+        required: false
+        type: string
+        default: "https://api.nemar.org/webhooks/manifest-ready"
+      skip_canary:
+        description: "Skip raw.githubusercontent.com canary (for private repos)"
+        required: false
+        type: boolean
+        default: false
+
+jobs:
+  manifest:
+    name: Generate Manifest
+    runs-on: ubuntu-latest
+    env:
+      DATASET_ID: ${{ github.event.client_payload.dataset_id || inputs.dataset_id }}
+      VERSION: ${{ github.event.client_payload.version || inputs.version }}
+      DOI: ${{ github.event.client_payload.doi || inputs.doi }}
+      CONCEPT_DOI: ${{ github.event.client_payload.concept_doi || inputs.concept_doi }}
+      CALLBACK_URL: ${{ github.event.client_payload.callback_url || inputs.callback_url || 'https://api.nemar.org/webhooks/manifest-ready' }}
+      CALLBACK_TOKEN: ${{ github.event.client_payload.callback_token }}
+      SKIP_CANARY: ${{ github.event.client_payload.skip_canary || inputs.skip_canary || 'false' }}
+      AWS_DEFAULT_REGION: us-east-2
+      S3_BUCKET: nemar
+    steps:
+      - name: Validate inputs
+        run: |
+          if [ -z "$DATASET_ID" ]; then
+            echo "::error::Missing dataset_id"
+            exit 1
+          fi
+          if [ -z "$VERSION" ]; then
+            echo "::error::Missing version"
+            exit 1
+          fi
+          # Strip a stray leading v if the caller passed one; the script
+          # accepts either form, but downstream S3 keys are constructed
+          # from the bare version so normalise here.
+          VERSION="${VERSION#v}"
+          echo "VERSION=${VERSION}" >> "$GITHUB_ENV"
+          echo "TAG=v${VERSION}" >> "$GITHUB_ENV"
+          echo "Inputs OK: dataset_id=${DATASET_ID} version=${VERSION}"
+
+      - name: Checkout nemar-cli (for scripts/emit_manifest.py)
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Mint GH App installation token for dataset repo
+        id: app-token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.NEMAR_APP_ID }}
+          private-key: ${{ secrets.NEMAR_APP_PRIVATE_KEY }}
+          owner: nemarDatasets
+          repositories: ${{ env.DATASET_ID }}
+
+      - name: Shallow-clone dataset repo at tag
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          set -euo pipefail
+          rm -rf /tmp/repo
+          git clone --depth 1 --branch "$TAG" --no-checkout \
+            "https://x-access-token:${GH_TOKEN}@github.com/nemarDatasets/${DATASET_ID}.git" \
+            /tmp/repo
+          echo "Cloned ${DATASET_ID}@${TAG} into /tmp/repo"
+
+      - name: Emit manifest.json + summary.json
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/out
+          CANARY_FLAG="--verify-canary"
+          if [ "$SKIP_CANARY" = "true" ]; then
+            CANARY_FLAG="--no-verify-canary"
+            echo "::warning::Canary verification disabled (skip_canary=true); private repos cannot HEAD-check raw.githubusercontent.com"
+          fi
+          python scripts/emit_manifest.py \
+            --dataset-id "$DATASET_ID" \
+            --version "$VERSION" \
+            --doi "$DOI" \
+            --concept-doi "$CONCEPT_DOI" \
+            --repo-dir /tmp/repo \
+            --out-dir /tmp/out \
+            $CANARY_FLAG
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: us-east-2
+
+      - name: Upload artifacts to S3
+        run: |
+          set -euo pipefail
+          MANIFEST_KEY="${DATASET_ID}/version/${TAG}.json"
+          SUMMARY_KEY="${DATASET_ID}/version/${TAG}-summary.json"
+
+          aws s3 cp /tmp/out/manifest.json "s3://${S3_BUCKET}/${MANIFEST_KEY}" \
+            --content-type application/json \
+            --region us-east-2
+          aws s3 cp /tmp/out/summary.json "s3://${S3_BUCKET}/${SUMMARY_KEY}" \
+            --content-type application/json \
+            --region us-east-2
+
+          echo "MANIFEST_URL=https://${S3_BUCKET}.s3.us-east-2.amazonaws.com/${MANIFEST_KEY}" >> "$GITHUB_ENV"
+          echo "SUMMARY_URL=https://${S3_BUCKET}.s3.us-east-2.amazonaws.com/${SUMMARY_KEY}" >> "$GITHUB_ENV"
+
+      - name: Build callback body
+        if: success()
+        env:
+          WORKFLOW_RUN_ID: ${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          python scripts/build_callback_body.py \
+            --dataset-id "$DATASET_ID" \
+            --version "$VERSION" \
+            --manifest-url "$MANIFEST_URL" \
+            --summary-url "$SUMMARY_URL" \
+            --totals-path /tmp/out/totals.json \
+            --workflow-run-id "$WORKFLOW_RUN_ID" \
+            --out /tmp/out/callback.json
+
+      - name: POST callback (manifest-ready)
+        if: success()
+        run: |
+          set -euo pipefail
+          if [ -z "$CALLBACK_URL" ]; then
+            echo "No callback URL configured; skipping callback POST"
+            exit 0
+          fi
+          # callback_token absence is expected for manual workflow_dispatch
+          # runs; let the Worker decide whether to accept an unsigned call.
+          curl -fsS -X POST "$CALLBACK_URL" \
+            -H "Content-Type: application/json" \
+            -H "X-Webhook-Token: ${CALLBACK_TOKEN}" \
+            --data @/tmp/out/callback.json
+          echo
+          echo "Callback POSTed to $CALLBACK_URL"
+
+      - name: POST failure callback (best-effort)
+        if: failure()
+        env:
+          WORKFLOW_RUN_ID: ${{ github.run_id }}
+          WORKFLOW_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          # Best-effort signal to the Worker. Endpoint lands with Stream B;
+          # 404 is tolerated in the interim, hence `|| true`.
+          FAIL_URL="${CALLBACK_URL%/manifest-ready}/manifest-failed"
+          # The failed step name isn't directly exposed by the GitHub
+          # context; the workflow run URL is sufficient for an operator
+          # to triage. Use a dedicated helper script to avoid heredoc
+          # indentation issues inside the YAML block scalar.
+          python scripts/build_failure_body.py \
+            --dataset-id "$DATASET_ID" \
+            --version "$VERSION" \
+            --workflow-run-id "$WORKFLOW_RUN_ID" \
+            --workflow-run-url "$WORKFLOW_RUN_URL" \
+            --out /tmp/fail.json
+          curl -fsS -X POST "$FAIL_URL" \
+            -H "Content-Type: application/json" \
+            -H "X-Webhook-Token: ${CALLBACK_TOKEN}" \
+            --data @/tmp/fail.json || true
+          echo "Failure callback attempted at $FAIL_URL"
