@@ -443,5 +443,38 @@ class VersionVPrefixTests(unittest.TestCase):
         self.assertEqual(self.summary["version"], "0.0.0")
 
 
+class DeriveSubjectsLengthGuardTests(unittest.TestCase):
+    """Direct unit test for the ``len(head) > 4`` guard in
+    ``emit_manifest.derive_subjects``. A path like ``sub-/eeg/file.json``
+    has the prefix ``sub-`` but no actual subject identifier; without the
+    guard such a path would be silently emitted as the empty subject ``""``.
+    """
+
+    def setUp(self) -> None:
+        # Import lazily so the import doesn't run for tests that exercise
+        # the script as a subprocess.
+        sys.path.insert(0, str(HERE))
+        import emit_manifest  # noqa: E402
+
+        self.derive_subjects = emit_manifest.derive_subjects
+
+    def test_bare_sub_prefix_rejected(self):
+        self.assertEqual(self.derive_subjects(["sub-/eeg/file.json"]), [])
+
+    def test_valid_sub_accepted(self):
+        self.assertEqual(
+            self.derive_subjects(["sub-01/eeg/file.json", "sub-02/meg/file.json"]),
+            ["sub-01", "sub-02"],
+        )
+
+    def test_mixed_rejects_bare_keeps_valid(self):
+        self.assertEqual(
+            self.derive_subjects(
+                ["sub-/eeg/file.json", "sub-01/eeg/file.json", "sub-/meg/x.json"]
+            ),
+            ["sub-01"],
+        )
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
