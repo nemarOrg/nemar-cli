@@ -3002,7 +3002,7 @@ reindexCommand
   .option("--all", "Reindex every dataset with a GitHub repo")
   .option("--missing-metadata", "Reindex only datasets with NULL metadata columns")
   .option("--stale", "Reindex only datasets whose metadata is older than --older-than days")
-  .option("--older-than <days>", "Threshold for --stale (default: 30)", "30")
+  .option("--older-than <days>", "Threshold in days for --stale (default 30) or --missing-metadata recency guard (default 1 / 24h)", "30")
   .option("--skip-enrichment", "Skip the LLM enrichment step")
   .option("--skip-sync", "Skip the nemar.org sync + D1 column refresh step")
   .option("--ref <ref>", "Ref to enrich from (single-dataset only; default: main)")
