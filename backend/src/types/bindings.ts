@@ -54,6 +54,17 @@ export interface Bindings {
   GITHUB_APP_PRIVATE_KEY?: string; // PKCS#8 PEM
   GITHUB_APP_INSTALLATION_ID_NEMAR_DATASETS?: string;
   GITHUB_APP_INSTALLATION_ID_NEMAR_ORG?: string;
+
+  // Central manifest workflow (#557, relocated to nemarDatasets/.github
+  // in #564). When MANIFEST_VIA_CENTRAL_WORKFLOW is "true",
+  // publish-version-doi dispatches a repository_dispatch event at
+  // nemarDatasets/.github instead of running generateManifest() inline.
+  // The workflow uploads manifest.json + summary.json to S3 and POSTs
+  // back to /webhooks/manifest-ready with an HMAC-signed callback token.
+  // Default ("false" or unset) keeps the existing in-Worker path. Flip
+  // per-environment for staged rollout.
+  MANIFEST_VIA_CENTRAL_WORKFLOW?: string; // "true" enables central workflow path
+  MANIFEST_CALLBACK_SECRET?: string; // Workers secret; HMAC key for callback token
 }
 
 /** User roles in hierarchical order: owner > admin > member */

@@ -164,6 +164,12 @@ jobs:
           echo "Running ${#files[@]} test files"
           bun test "${files[@]}"
 
+  # Python script tests for scripts/emit_manifest.py + helpers ran here
+  # under #557 (the central manifest workflow). Those scripts now live in
+  # nemarDatasets/.github (#564) where the workflow itself runs; the
+  # python-unit-test job moved there as
+  # nemarDatasets/.github/.github/workflows/test-emit-manifest.yml.
+
   # API integration tests - uses dev environment (no rate limiting)
   api-test:
     runs-on: ubuntu-latest

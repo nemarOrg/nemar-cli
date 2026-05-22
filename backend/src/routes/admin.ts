@@ -4320,6 +4320,15 @@ adminRoutes.post("/datasets/:id/s3-lock", async (c) => {
  *
  * Traverses the git tree at the given version tag and generates a JSON manifest
  * mapping file paths to their S3 annex keys.
+ *
+ * Optional body `{ doi?: string }`: explicit version DOI. If omitted, the
+ * handler tries to read the DOI from the existing manifest.json on S3. Under
+ * the central manifest workflow (`MANIFEST_VIA_CENTRAL_WORKFLOW=true`),
+ * publish-time `dataset_versions` inserts happen on the `/webhooks/manifest-ready`
+ * callback path, so admin recovery of a stranded version may need to backfill
+ * the `dataset_versions` row here. The caller must supply `doi` explicitly
+ * when no manifest.json exists on S3 (or the existing manifest carries no
+ * DOI), because there is no inline DOI minting in this admin path.
  */
 adminRoutes.post("/datasets/:id/manifest/:version", async (c) => {
   const datasetId = c.req.param("id");
@@ -4330,9 +4339,16 @@ adminRoutes.post("/datasets/:id/manifest/:version", async (c) => {
   const body = await c.req.json<{ doi?: string }>().catch(() => ({}));
 
   const dataset = await db
-    .prepare("SELECT dataset_id, github_repo, concept_doi FROM datasets WHERE dataset_id = ?")
+    .prepare(
+      "SELECT dataset_id, github_repo, concept_doi, doi_provider FROM datasets WHERE dataset_id = ?",
+    )
     .bind(datasetId)
-    .first<{ dataset_id: string; github_repo: string | null; concept_doi: string | null }>();
+    .first<{
+      dataset_id: string;
+      github_repo: string | null;
+      concept_doi: string | null;
+      doi_provider: string | null;
+    }>();
 
   if (!dataset) {
     return c.json({ error: "Dataset not found" }, 404);
@@ -4372,11 +4388,47 @@ adminRoutes.post("/datasets/:id/manifest/:version", async (c) => {
 
     await uploadManifest(getS3Config(c.env), datasetId, version, JSON.stringify(manifest, null, 2));
 
+    // Backfill dataset_versions row if missing. Under the central manifest
+    // workflow (#557), publish-time inserts run on /webhooks/manifest-ready;
+    // a stranded version (manifest+S3 present, D1 row absent) needs this
+    // admin path to repair the gap. OR IGNORE keeps the legacy double-write
+    // path safe.
+    const versionDoiForRow = versionDoi ?? manifest.doi ?? null;
+    let dataset_versions_backfilled = false;
+    if (versionDoiForRow) {
+      const existing = await db
+        .prepare("SELECT doi FROM dataset_versions WHERE dataset_id = ? AND version = ?")
+        .bind(datasetId, version)
+        .first<{ doi: string }>();
+      if (!existing) {
+        const provider = dataset.doi_provider === "zenodo" ? "zenodo" : "ezid";
+        try {
+          await db
+            .prepare(
+              "INSERT OR IGNORE INTO dataset_versions (dataset_id, version, doi, provider) VALUES (?, ?, ?, ?)",
+            )
+            .bind(datasetId, version, versionDoiForRow, provider)
+            .run();
+          dataset_versions_backfilled = true;
+        } catch (err) {
+          console.error(
+            `[admin manifest regen] dataset_versions backfill failed for ${datasetId}@${version}:`,
+            err,
+          );
+        }
+      }
+    } else {
+      console.warn(
+        `[admin manifest regen] no DOI resolved for ${datasetId}@${version}; skipping dataset_versions backfill (caller must pass {doi: "..."} body to repair)`,
+      );
+    }
+
     return c.json({
       message: "Manifest generated and uploaded",
       dataset_id: datasetId,
       version: manifest.version,
       files_count: Object.keys(manifest.files).length,
+      dataset_versions_backfilled,
     });
   } catch (err) {
     const msg = errorMessage(err);

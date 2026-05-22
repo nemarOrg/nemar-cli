@@ -1,13 +1,13 @@
 {
   "name": "nemar-api",
-  "version": "0.8.27-dev0",
+  "version": "0.8.27-dev6",
   "private": true,
   "scripts": {
-    "dev": "wrangler dev",
-    "deploy": "wrangler deploy",
-    "deploy:dev": "wrangler deploy --env development",
-    "db:migrate": "wrangler d1 migrations apply nemar-db",
-    "db:migrate:local": "wrangler d1 migrations apply nemar-db --local",
+    "dev": "wrangler dev -c wrangler-sccn.toml --env dev",
+    "deploy": "wrangler deploy -c wrangler-sccn.toml",
+    "deploy:dev": "wrangler deploy -c wrangler-sccn.toml --env dev",
+    "db:migrate": "wrangler d1 migrations apply nemar-db -c wrangler-sccn.toml",
+    "db:migrate:local": "wrangler d1 migrations apply nemar-db -c wrangler-sccn.toml --local",
     "typecheck": "tsc --noEmit",
     "test": "bun test"
   },

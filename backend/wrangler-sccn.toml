@@ -73,6 +73,13 @@ S3_BUCKET = "nemar"
 # 403 and resolveEmailConfig logs once but does not propagate the failure.
 FROM_EMAIL = "NEMAR Archive <noreply@nemar.org>"
 REPLY_TO = "info@nemar.org"
+# Centralized manifest workflow flag (#557, relocated to
+# nemarDatasets/.github in #564). Default OFF; flip to "true"
+# per-environment for staged rollout after dev soak. When OFF the worker
+# runs the legacy generateManifest() inline; when ON it dispatches a
+# repository_dispatch to nemarDatasets/.github and awaits the callback.
+# Redeploy to change.
+MANIFEST_VIA_CENTRAL_WORKFLOW = "false"
 
 # Secrets (set via: npx cfman wrangler --account sccn secret put <NAME> -c backend/wrangler-sccn.toml)
 # - GITHUB_ADMIN_PAT
@@ -91,6 +98,10 @@ REPLY_TO = "info@nemar.org"
 # - NEMAR_PASSWORD
 # - ZENODO_API_KEY
 # - ZENODO_SANDBOX_API_KEY
+# - MANIFEST_CALLBACK_SECRET    (HMAC key for /webhooks/manifest-ready; must
+#                                match the org-level secret on nemarDatasets.
+#                                Required before MANIFEST_VIA_CENTRAL_WORKFLOW
+#                                can be flipped to "true" in any environment.)
 # GitHub App credentials (epic #432, in soak -- GITHUB_ADMIN_PAT is the active fallback while any of these are unset)
 # - GITHUB_APP_ID                              (GitHub App numeric ID; replaces PAT for API auth once Phase 5 lands)
 # - GITHUB_APP_PRIVATE_KEY                     (PKCS#8 PEM private key for JWT signing)
@@ -135,3 +146,10 @@ AWS_REGION = "us-east-2"
 S3_BUCKET = "nemar"
 FROM_EMAIL = "NEMAR Archive <noreply@nemar.org>"
 REPLY_TO = "info@nemar.org"
+# Centralized manifest workflow flag (#557, relocated to
+# nemarDatasets/.github in #564). SCCN dev is the designated soak target.
+# MANIFEST_CALLBACK_SECRET is set on both the Worker and nemarDatasets org
+# (visibility=all repos) as of 2026-05-18. Promote to prod after a week of
+# clean runs against this dev environment.
+# Redeploy to change.
+MANIFEST_VIA_CENTRAL_WORKFLOW = "true"

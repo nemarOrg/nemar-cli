@@ -576,9 +576,19 @@ export function buildReindexFilterQuery(
     return { sql: `${base} ORDER BY dataset_id`, params: [] };
   }
   if (filter === "missing-metadata") {
+    // Recency guard: skip rows we've already attempted in the last 24h.
+    // Without this, datasets whose upstream genuinely lacks a column we
+    // require (e.g. no participants.tsv -> subject_count stays NULL)
+    // re-match every sweep and get reindexed forever with no progress.
+    // 24h gives upstream time to ship a fix; operators who need to force
+    // an immediate retry can use `--all`.
+    const recencyDays = options?.olderThanDays ?? 1;
+    if (!Number.isFinite(recencyDays) || recencyDays < 0) {
+      throw new Error(`Invalid older_than_days: ${recencyDays}`);
+    }
     return {
-      sql: `${base} AND (subject_count IS NULL OR modalities IS NULL OR file_size IS NULL OR total_files IS NULL) ORDER BY dataset_id`,
-      params: [],
+      sql: `${base} AND (subject_count IS NULL OR modalities IS NULL OR file_size IS NULL OR total_files IS NULL) AND (metadata_updated_at IS NULL OR metadata_updated_at < datetime('now', ?)) ORDER BY dataset_id`,
+      params: [`-${recencyDays} days`],
     };
   }
   if (filter === "stale") {

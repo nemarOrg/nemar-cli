@@ -11,7 +11,10 @@
 # git-annex branch back to GitHub.
 #
 # Prerequisites:
-#   - AWS credentials in environment (AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY)
+#   - AWS credentials resolvable via the default chain
+#     (~/.aws/credentials mode 0600, or aws sso login). Long-lived
+#     AKIA keys in process env vars are rejected by the credentials
+#     guard; see docs/operations/access-policies.md (principles 5 + 6).
 #   - git-annex installed
 #   - SSH access to nemarDatasets GitHub org
 #
@@ -41,11 +44,12 @@ if [[ ${#DATASETS[@]} -eq 0 ]]; then
   exit 1
 fi
 
-# Verify AWS credentials
-if [[ -z "${AWS_ACCESS_KEY_ID:-}" || -z "${AWS_SECRET_ACCESS_KEY:-}" ]]; then
-  echo "ERROR: AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY must be set"
-  exit 1
-fi
+# Verify AWS credentials via shared guard (rejects long-lived AKIA* keys
+# in env, requires ~/.aws/credentials or aws sso login). See
+# docs/operations/access-policies.md (principles 5 + 6).
+# shellcheck source=lib/aws-creds-guard.sh
+. "$(dirname "${BASH_SOURCE[0]}")/lib/aws-creds-guard.sh"
+nemar_guard_aws_credentials || exit $?
 
 # Verify git-annex is installed
 if ! command -v git-annex &>/dev/null; then

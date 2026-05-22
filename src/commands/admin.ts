@@ -3002,7 +3002,10 @@ reindexCommand
   .option("--all", "Reindex every dataset with a GitHub repo")
   .option("--missing-metadata", "Reindex only datasets with NULL metadata columns")
   .option("--stale", "Reindex only datasets whose metadata is older than --older-than days")
-  .option("--older-than <days>", "Threshold for --stale (default: 30)", "30")
+  .option(
+    "--older-than <days>",
+    "Threshold in days. Default 30 for --stale, 1 (24h) for --missing-metadata recency guard.",
+  )
   .option("--skip-enrichment", "Skip the LLM enrichment step")
   .option("--skip-sync", "Skip the nemar.org sync + D1 column refresh step")
   .option("--ref <ref>", "Ref to enrich from (single-dataset only; default: main)")
@@ -3087,6 +3090,13 @@ reindexCommand
         skip_sync: options.skipSync === true,
         dry_run: options.dryRun === true,
       };
+      // --older-than default depends on the filter chosen.  Without an
+      // explicit value, --stale uses 30 days (the historical default)
+      // and --missing-metadata uses 1 day (the 24h recency guard added
+      // in #579).  Pinning a Commander-level default would always
+      // override the server-side branch defaults and hide the
+      // missing-metadata recency guard, so the default is resolved
+      // here based on filter.
       if (options.olderThan !== undefined) {
         const parsed = Number.parseInt(options.olderThan, 10);
         if (!Number.isFinite(parsed) || parsed < 0) {
@@ -3094,6 +3104,10 @@ reindexCommand
           process.exit(1);
         }
         bulkOpts.older_than_days = parsed;
+      } else if (filter === "missing-metadata") {
+        bulkOpts.older_than_days = 1;
+      } else if (filter === "stale") {
+        bulkOpts.older_than_days = 30;
       }
 
       const label = options.dryRun

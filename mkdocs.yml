@@ -73,6 +73,9 @@ nav:
   - Development:
       - Setup: development/setup.md
       - Zenodo Testing: development/zenodo-testing.md
+  - Operations:
+      - Access Policies: operations/access-policies.md
+      - Manifest Summary Backfill: operations/manifest-summary-backfill.md
 
 extra:
   social:

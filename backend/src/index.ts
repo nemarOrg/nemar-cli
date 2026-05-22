@@ -183,7 +183,7 @@ app.route("/", api);
 
 /**
  * Scheduled cleanup handler (Cloudflare Workers cron trigger).
- * Runs daily at 3 AM UTC (production only, see wrangler.toml [triggers]).
+ * Runs daily at 3 AM UTC (production only, see wrangler-sccn.toml [triggers]).
  *
  * - Sandbox (xx) datasets: delete after 14 days
  * - Stale nm datasets: private, no DOI, no active pub requests, inactive for 90 days
@@ -247,6 +247,29 @@ async function scheduledCleanup(env: Bindings): Promise<void> {
     } catch (err) {
       console.error("Scheduled cleanup: stale datasets query failed:", err);
     }
+  }
+
+  // 3. Stuck manifest_jobs detection (#557). The central workflow is
+  //    expected to call back within minutes; a row stuck in 'dispatched'
+  //    for more than an hour means the workflow timed out, was
+  //    cancelled, or the callback never landed. Operators page off
+  //    these log lines -- no D1 mutation here, just visibility.
+  try {
+    const stuck = await db
+      .prepare(
+        `SELECT dataset_id, version, created_at FROM manifest_jobs
+         WHERE status = 'dispatched' AND created_at < datetime('now', '-1 hour')`,
+      )
+      .all<{ dataset_id: string; version: string; created_at: string }>();
+
+    if (stuck.results && stuck.results.length > 0) {
+      console.error(
+        `[manifest-cleanup] ${stuck.results.length} stuck manifest_jobs rows:`,
+        stuck.results.map((r) => `${r.dataset_id}@${r.version} (${r.created_at})`).join(", "),
+      );
+    }
+  } catch (err) {
+    console.error("Scheduled cleanup: stuck manifest_jobs query failed:", err);
   }
 
   // Log summary to audit_log

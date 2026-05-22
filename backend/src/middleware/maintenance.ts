@@ -2,7 +2,8 @@
  * Maintenance-mode middleware
  *
  * Freezes the API during infrastructure migrations or incidents. Toggled via
- * the MAINTENANCE_MODE env var in wrangler.toml; redeploy to flip.
+ * the MAINTENANCE_MODE env var; add it to wrangler-sccn.toml [vars] (or
+ * [env.dev.vars] for dev only) and redeploy to flip. Unset = "off".
  */
 
 import type { Context, Next } from "hono";

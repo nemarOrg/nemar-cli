@@ -36,7 +36,12 @@ import { parseNemarMetadata } from "../services/datacite";
 import { isValidDatasetId } from "../services/datasetId";
 import { ORG_NAME } from "../services/github";
 import type { ManifestFile, VersionManifest } from "../services/manifest";
-import { type PresignedUrlOptions, generatePresignedGetUrl, getManifest } from "../services/s3";
+import {
+  type PresignedUrlOptions,
+  generatePresignedGetUrl,
+  getManifest,
+  loadSummary,
+} from "../services/s3";
 import type { Bindings, Variables } from "../types/bindings";
 
 export const dataRoutes = new Hono<{ Bindings: Bindings; Variables: Variables }>();
@@ -474,6 +479,78 @@ async function fileOrIndexHandler(
 dataRoutes.get("/:datasetId/:version/manifest.json", (c) => {
   const { datasetId, version } = c.req.param();
   return manifestJsonHandler(c.env, datasetId, version);
+});
+
+/**
+ * GET /<id>/<version>/summary.json -> static-passthrough summary artifact
+ * (epic #559, PR-1, issue #558).
+ *
+ * Sibling to manifest.json. Emitted by the central manifest-generation
+ * workflow on `nemarDatasets/.github` (Stream A; relocated #564) at S3 key
+ * `<id>/version/v<X.Y.Z>-summary.json`. Stream A's writer owns the shape
+ * contract; this handler serves the bytes verbatim with no per-request
+ * mutation (no presigned URLs, no field rewriting). That's why it gets a
+ * long s-maxage: every byte is deterministic from the published version.
+ *
+ * Cache policy diverges intentionally from manifest.json:
+ *  - manifest.json embeds per-request presigned URLs (1h S3 expiry) so it
+ *    must stay short-lived (max-age=60).
+ *  - summary.json is path-only and immutable for the (datasetId, version)
+ *    pair, so it gets s-maxage=86400 with stale-while-revalidate.
+ */
+async function summaryJsonHandler(
+  env: Bindings,
+  datasetId: string,
+  versionParam: string,
+): Promise<Response> {
+  const dataset = await loadPublishedDataset(env, datasetId);
+  if (!dataset) return notFound("Dataset not found");
+
+  const resolved = await resolveVersion(env.DB, datasetId, versionParam);
+  if (!resolved.ok) return notFound("Version not found");
+
+  let raw: string | null;
+  try {
+    raw = await loadSummary(s3OptionsFromEnv(env), datasetId, resolved.version);
+  } catch (err) {
+    console.error(
+      `[data] summary fetch failed dataset=${datasetId} version=${resolved.version}:`,
+      err instanceof Error ? err.message : String(err),
+    );
+    // 5xx S3 outages, SigV4 failures, IAM drift (403 from loadSummary)
+    // must NOT collapse into a cacheable 404. Return an uncached 500 so
+    // an operator-side alert fires and the CDN doesn't pin the failure.
+    return new Response(JSON.stringify({ error: "Failed to retrieve summary" }), {
+      status: 500,
+      headers: { "Content-Type": "application/json" },
+    });
+  }
+
+  if (raw === null) {
+    // No negative caching: the primary consumer is the post-publish
+    // refresh, where a CDN-cached 404 from before Stream A's workflow
+    // wrote the summary would confuse publishers. `no-store` ensures a
+    // freshly-published summary becomes visible on the next request.
+    return new Response(JSON.stringify({ error: "Summary not found for this version" }), {
+      status: 404,
+      headers: {
+        "Content-Type": "application/json",
+        "Cache-Control": "no-store",
+      },
+    });
+  }
+
+  return new Response(raw, {
+    headers: {
+      "Content-Type": "application/json",
+      "Cache-Control": "public, max-age=300, s-maxage=86400, stale-while-revalidate=86400",
+    },
+  });
+}
+
+dataRoutes.get("/:datasetId/:version/summary.json", (c) => {
+  const { datasetId, version } = c.req.param();
+  return summaryJsonHandler(c.env, datasetId, version);
 });
 
 /**

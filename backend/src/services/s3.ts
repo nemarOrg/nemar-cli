@@ -420,6 +420,12 @@ export async function uploadManifest(
 
 /**
  * Get a manifest from S3. Returns null if not found.
+ *
+ * Manifest objects are uploaded with public-read by the publication
+ * pipeline (data.nemar.org loads them on every dataset page hit).
+ * Fetch unsigned so a Worker-side AWS credentials outage does not also
+ * take down dataset browsing. Falls back to a signed GET if unsigned
+ * is rejected (private / pre-publish datasets).
  */
 export async function getManifest(
   options: PresignedUrlOptions,
@@ -427,23 +433,36 @@ export async function getManifest(
   version: string,
 ): Promise<string | null> {
   const { bucket, region } = options;
-  const aws = createS3Client(options);
   const versionTag = version.startsWith("v") ? version : `v${version}`;
   const key = `${datasetId}/version/${versionTag}.json`;
   const encodedKey = key.split("/").map(encodeURIComponent).join("/");
   const url = `https://${bucket}.s3.${region}.amazonaws.com/${encodedKey}`;
 
-  const signed = await aws.sign(url, { method: "GET" });
-  const response = await fetch(signed);
+  let response = await fetch(url);
+  if (response.status === 403) {
+    // Object exists but is not public-read (private dataset / pre-publish).
+    // Try a signed GET as fallback.
+    try {
+      const aws = createS3Client(options);
+      const signed = await aws.sign(url, { method: "GET" });
+      response = await fetch(signed);
+    } catch (err) {
+      console.error(
+        `[s3] getManifest signed-fallback failed dataset=${datasetId} version=${version}:`,
+        err instanceof Error ? err.message : String(err),
+      );
+      return null;
+    }
+  }
 
   if (response.status === 404) return null;
   if (response.status === 403) {
-    // A correctly-configured backend should never see 403 on its own bucket.
-    // Treat as not-found for the caller (preserves existing contract), but
-    // log so a credentials regression doesn't silently turn every dataset
-    // into a public 404 on data.nemar.org.
+    // Still 403 after the signed fallback: credentials are dead or IAM
+    // lacks GetObject on this private manifest. Preserves the legacy
+    // contract by returning null, but logs so an operator can tell
+    // "credentials regression" from "never published" in prod logs.
     console.error(
-      `[s3] getManifest 403 (likely credentials/permissions) dataset=${datasetId} version=${version}`,
+      `[s3] getManifest 403 after fallback (credentials/permissions) dataset=${datasetId} version=${version}`,
     );
     return null;
   }
@@ -452,6 +471,97 @@ export async function getManifest(
   }
 
   return response.text();
+}
+
+/**
+ * Get a summary.json sibling artifact from S3. Returns null if not found.
+ *
+ * Stored at: <datasetId>/version/v<version>-summary.json
+ *
+ * Companion to getManifest(); the central manifest-generation workflow
+ * (epic #559, PR-1) writes both manifest.json and summary.json in the same
+ * step. Summary is a static-passthrough artifact: the route serves whatever
+ * S3 has, no per-request mutation, no validation here (the writer owns the
+ * contract; the consumer-side route is shape-agnostic).
+ */
+export async function loadSummary(
+  options: PresignedUrlOptions,
+  datasetId: string,
+  version: string,
+): Promise<string | null> {
+  const { bucket, region } = options;
+  const versionTag = version.startsWith("v") ? version : `v${version}`;
+  const key = `${datasetId}/version/${versionTag}-summary.json`;
+  const encodedKey = key.split("/").map(encodeURIComponent).join("/");
+  const url = `https://${bucket}.s3.${region}.amazonaws.com/${encodedKey}`;
+
+  // Same public-read strategy as getManifest(): unsigned first so the
+  // route survives a Worker credentials outage; signed fallback for
+  // private / pre-publish summaries.
+  let response = await fetch(url);
+  if (response.status === 403) {
+    try {
+      const aws = createS3Client(options);
+      const signed = await aws.sign(url, { method: "GET" });
+      response = await fetch(signed);
+    } catch (err) {
+      throw new Error(
+        `loadSummary signed-fallback failed dataset=${datasetId} version=${version}: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+    }
+  }
+
+  if (response.status === 404) return null;
+  if (response.status === 403) {
+    // Still 403 after fallback. Diverges from getManifest()'s 403-as-null
+    // because /summary.json's 404 is briefly CDN-cached. Surface as a
+    // throw so the route returns 500 (uncached) and operator notices.
+    throw new Error(
+      `loadSummary 403 after fallback (credentials/permissions) for dataset=${datasetId} version=${version}`,
+    );
+  }
+  if (!response.ok) {
+    throw new Error(`Failed to get summary: HTTP ${response.status}`);
+  }
+
+  return response.text();
+}
+
+/**
+ * HEAD-check whether an S3 version artifact exists. Used by the
+ * /webhooks/manifest-ready callback to confirm the central workflow
+ * actually uploaded both manifest.json and summary.json before we
+ * commit the dataset_versions row. Suffix examples: "" (manifest) or
+ * "-summary" (summary sibling). Returns true on 200, false on 404, and
+ * throws on any other status (so a 5xx doesn't silently masquerade as
+ * "missing"). #557 Stream B.
+ */
+export async function headVersionArtifact(
+  options: PresignedUrlOptions,
+  datasetId: string,
+  version: string,
+  suffix: "" | "-summary" = "",
+): Promise<boolean> {
+  const { bucket, region } = options;
+  const aws = createS3Client(options);
+  const versionTag = version.startsWith("v") ? version : `v${version}`;
+  const key = `${datasetId}/version/${versionTag}${suffix}.json`;
+  const encodedKey = key.split("/").map(encodeURIComponent).join("/");
+  const url = `https://${bucket}.s3.${region}.amazonaws.com/${encodedKey}`;
+
+  const signed = await aws.sign(url, { method: "HEAD" });
+  const response = await fetch(signed);
+
+  if (response.status === 200) return true;
+  if (response.status === 404) return false;
+  if (response.status === 403) {
+    throw new Error(
+      `headVersionArtifact 403: likely IAM credentials/permissions error for ${key}. Check AWS_ACCESS_KEY_ID on the Worker.`,
+    );
+  }
+  throw new Error(`Failed to HEAD ${key}: HTTP ${response.status}`);
 }
 
 /**
