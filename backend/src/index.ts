@@ -24,7 +24,7 @@ import { maintenanceMode } from "./middleware/maintenance";
 import { rateLimiter } from "./middleware/rateLimit";
 import { adminRoutes } from "./routes/admin";
 import { authRoutes } from "./routes/auth";
-import { dataRoutes } from "./routes/data";
+import { catalogIndexResponse, dataRoutes } from "./routes/data";
 import { datasetRoutes } from "./routes/datasets";
 import { sandboxRoutes } from "./routes/sandbox";
 import { userRoutes } from "./routes/users";
@@ -118,6 +118,14 @@ api.route("/webhooks", webhooks);
 // see the hostname fork in `app` below.
 api.route("/data", dataRoutes);
 
+// Hono v4 sub-app quirk: `dataRoutes.get("/")` mounted at `/data` only
+// matches `/data` (no trailing slash). The trailing-slash form `/data/`
+// is the natural directory-style URL machine clients append, so register
+// the catalog handler directly here for that path. (The data.nemar.org
+// dispatcher above normalizes its own root case before forwarding, so
+// requests via the custom domain hit the sub-app form.)
+api.get("/data/", (c) => catalogIndexResponse(c.env, c.req.raw));
+
 // 404 handler
 api.notFound((c) => {
   return c.json(
@@ -172,7 +180,13 @@ app.use("*", async (c, next) => {
   const host = new URL(c.req.url).hostname.toLowerCase();
   if (host === "data.nemar.org") {
     const url = new URL(c.req.url);
-    url.pathname = `/data${url.pathname}`;
+    // Mounted-root quirk: Hono v4 sub-apps treat `/data` (no trailing
+    // slash) and `/data/` (trailing) as distinct match targets for
+    // `dataRoutes.get("/")`. Only the no-trailing form matches the
+    // mounted root, so naive `${"/data"}${"/"}` would 404 the most
+    // common public URL on this host (`data.nemar.org/`). Normalize
+    // the root path before prepending.
+    url.pathname = url.pathname === "/" ? "/data" : `/data${url.pathname}`;
     return api.fetch(new Request(url, c.req.raw), c.env, c.executionCtx);
   }
   return next();

@@ -504,4 +504,19 @@ describe("data.nemar.org catalog index (#584)", async () => {
     expect(r.status).toBe(200);
     expect(r.headers.get("content-type")).toContain("application/json");
   });
+
+  // Regression for v0.8.28: `dataRoutes.get("/")` mounted at `/data`
+  // only matches `/data` (no trailing slash) under Hono v4. The
+  // `/data/` form requires the api-level alias and the data.nemar.org
+  // dispatcher's root normalization. Cover both forms so a future
+  // routing refactor can't quietly break the public canonical URL.
+  test("both /data and /data/ return the catalog (trailing-slash regression)", async () => {
+    const noSlash = await fetch(`${API}/data?format=json`, { headers });
+    const trailing = await fetch(`${API}/data/?format=json`, { headers });
+    expect(noSlash.status).toBe(200);
+    expect(trailing.status).toBe(200);
+    const a = (await noSlash.json()) as { count: number };
+    const b = (await trailing.json()) as { count: number };
+    expect(a.count).toBe(b.count);
+  });
 });
