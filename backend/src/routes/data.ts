@@ -928,7 +928,7 @@ dataRoutes.get("/:datasetId/", (c) =>
  * starve monitoring of the 5xx signal. The response is not cached, so the
  * next request retries naturally once D1 recovers.
  */
-async function catalogIndexResponse(env: Bindings, request: Request): Promise<Response> {
+export async function catalogIndexResponse(env: Bindings, request: Request): Promise<Response> {
   const cfRay = request.headers.get("cf-ray") ?? "unknown";
   const accept = request.headers.get("accept");
   const formatParam = new URL(request.url).searchParams.get("format");
