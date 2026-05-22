@@ -420,6 +420,12 @@ export async function uploadManifest(
 
 /**
  * Get a manifest from S3. Returns null if not found.
+ *
+ * Manifest objects are uploaded with public-read by the publication
+ * pipeline (data.nemar.org loads them on every dataset page hit).
+ * Fetch unsigned so a Worker-side AWS credentials outage does not also
+ * take down dataset browsing. Falls back to a signed GET if unsigned
+ * is rejected (private / pre-publish datasets).
  */
 export async function getManifest(
   options: PresignedUrlOptions,
@@ -427,23 +433,36 @@ export async function getManifest(
   version: string,
 ): Promise<string | null> {
   const { bucket, region } = options;
-  const aws = createS3Client(options);
   const versionTag = version.startsWith("v") ? version : `v${version}`;
   const key = `${datasetId}/version/${versionTag}.json`;
   const encodedKey = key.split("/").map(encodeURIComponent).join("/");
   const url = `https://${bucket}.s3.${region}.amazonaws.com/${encodedKey}`;
 
-  const signed = await aws.sign(url, { method: "GET" });
-  const response = await fetch(signed);
+  let response = await fetch(url);
+  if (response.status === 403) {
+    // Object exists but is not public-read (private dataset / pre-publish).
+    // Try a signed GET as fallback.
+    try {
+      const aws = createS3Client(options);
+      const signed = await aws.sign(url, { method: "GET" });
+      response = await fetch(signed);
+    } catch (err) {
+      console.error(
+        `[s3] getManifest signed-fallback failed dataset=${datasetId} version=${version}:`,
+        err instanceof Error ? err.message : String(err),
+      );
+      return null;
+    }
+  }
 
   if (response.status === 404) return null;
   if (response.status === 403) {
-    // A correctly-configured backend should never see 403 on its own bucket.
-    // Treat as not-found for the caller (preserves existing contract), but
-    // log so a credentials regression doesn't silently turn every dataset
-    // into a public 404 on data.nemar.org.
+    // Still 403 after the signed fallback: credentials are dead or IAM
+    // lacks GetObject on this private manifest. Preserves the legacy
+    // contract by returning null, but logs so an operator can tell
+    // "credentials regression" from "never published" in prod logs.
     console.error(
-      `[s3] getManifest 403 (likely credentials/permissions) dataset=${datasetId} version=${version}`,
+      `[s3] getManifest 403 after fallback (credentials/permissions) dataset=${datasetId} version=${version}`,
     );
     return null;
   }
@@ -471,24 +490,36 @@ export async function loadSummary(
   version: string,
 ): Promise<string | null> {
   const { bucket, region } = options;
-  const aws = createS3Client(options);
   const versionTag = version.startsWith("v") ? version : `v${version}`;
   const key = `${datasetId}/version/${versionTag}-summary.json`;
   const encodedKey = key.split("/").map(encodeURIComponent).join("/");
   const url = `https://${bucket}.s3.${region}.amazonaws.com/${encodedKey}`;
 
-  const signed = await aws.sign(url, { method: "GET" });
-  const response = await fetch(signed);
+  // Same public-read strategy as getManifest(): unsigned first so the
+  // route survives a Worker credentials outage; signed fallback for
+  // private / pre-publish summaries.
+  let response = await fetch(url);
+  if (response.status === 403) {
+    try {
+      const aws = createS3Client(options);
+      const signed = await aws.sign(url, { method: "GET" });
+      response = await fetch(signed);
+    } catch (err) {
+      throw new Error(
+        `loadSummary signed-fallback failed dataset=${datasetId} version=${version}: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+    }
+  }
 
   if (response.status === 404) return null;
   if (response.status === 403) {
-    // Diverges intentionally from getManifest()'s 403-as-404. A 403 on our
-    // own bucket means IAM/credential drift, not "summary not yet
-    // generated". Silently masking it would let an operator confuse a
-    // broken backend for a pre-backfill dataset. Surface as an error;
-    // the route's catch block turns it into a 500 (not a cacheable 404).
+    // Still 403 after fallback. Diverges from getManifest()'s 403-as-null
+    // because /summary.json's 404 is briefly CDN-cached. Surface as a
+    // throw so the route returns 500 (uncached) and operator notices.
     throw new Error(
-      `loadSummary 403 (credentials/permissions) for dataset=${datasetId} version=${version}`,
+      `loadSummary 403 after fallback (credentials/permissions) for dataset=${datasetId} version=${version}`,
     );
   }
   if (!response.ok) {
