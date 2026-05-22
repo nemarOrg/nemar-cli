@@ -30,9 +30,13 @@ fi
 # Verify AWS credentials via shared guard (rejects long-lived AKIA*
 # keys in env). Requires ~/.aws/credentials or aws sso login. See
 # docs/operations/access-policies.md (principles 5 + 6).
-# shellcheck source=lib/aws-creds-guard.sh
-. "$(dirname "${BASH_SOURCE[0]}")/lib/aws-creds-guard.sh"
-nemar_guard_aws_credentials || exit $?
+# Skipped in dry-run mode so the preview path works on machines without
+# AWS credentials configured.
+if ! $DRY_RUN; then
+  # shellcheck source=lib/aws-creds-guard.sh
+  . "$(dirname "${BASH_SOURCE[0]}")/lib/aws-creds-guard.sh"
+  nemar_guard_aws_credentials || exit $?
+fi
 
 BUCKET="nemar"
 

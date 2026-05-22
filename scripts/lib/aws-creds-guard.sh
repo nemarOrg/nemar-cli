@@ -53,8 +53,20 @@ EOF
         echo "       Acceptable, but ~/.aws/credentials is preferred for repeatable runs." >&2
         ;;
       *)
-        echo "ERROR: AWS_ACCESS_KEY_ID env var has unrecognized prefix." >&2
-        echo "       Expected AKIA* (long-lived, REJECTED) or ASIA* (short-lived)." >&2
+        cat >&2 <<'EOF'
+ERROR: AWS_ACCESS_KEY_ID env var has unrecognized prefix.
+
+Expected AKIA* (long-lived, REJECTED) or ASIA* (short-lived STS).
+Real-world AWS access keys use exactly these two prefixes.
+
+Use one of these instead:
+  1. Put credentials in ~/.aws/credentials (mode 0600). Unset
+     AWS_ACCESS_KEY_ID + AWS_SECRET_ACCESS_KEY before re-running.
+  2. Mint short-lived STS credentials via `aws sso login` or
+     `aws-vault exec`.
+
+Reference: docs/operations/access-policies.md (principles 5 + 6).
+EOF
         return 2
         ;;
     esac
