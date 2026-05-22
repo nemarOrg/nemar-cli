@@ -91,9 +91,11 @@ them grant access to other AWS services beyond what's strictly
 required.
 
 When a policy needs STS (the Worker needs `sts:GetFederationToken`
-to mint temporary upload credentials for users), the STS permission
-is scoped to a specific federated-user name pattern that matches
-what the Worker actually uses (`upload-*`).
+to mint temporary credentials for users), the STS permission is
+scoped to specific federated-user name patterns that match what
+the Worker actually uses (`upload-*` for uploads, `dl-*` for
+downloads — both required because the Worker mints distinct
+federated sessions for each direction).
 
 **Why.** A credential leak (the failure mode this document exists
 to mitigate) is bounded by the leaked credential's scope. A
@@ -225,9 +227,10 @@ calls AWS for:
   `nemar dataset upload` (admin path).
 - Generating presigned GET URLs for private-dataset file downloads
   (`data.nemar.org/<id>/<v>/<path>` for non-public datasets).
-- Minting federated session tokens via `sts:GetFederationToken` so
-  the user's local `git-annex` can talk to S3 directly during
-  uploads (`nemar admin sandbox` flow).
+- Minting federated session tokens via `sts:GetFederationToken` for
+  both uploads (token name `upload-<dataset_id>`) and downloads
+  (token name `dl-<dataset_id>`). Used by `nemar admin sandbox`
+  (upload flow) and `nemar dataset download` for private datasets.
 - Updating the bucket policy when an admin publishes a dataset
   (`nemar admin make-public` flow uses `addPublicReadPolicy()` in
   `backend/src/services/s3.ts`, which GETs and PUTs the bucket
@@ -255,10 +258,13 @@ principle 2.
   "Version": "2012-10-17",
   "Statement": [
     {
-      "Sid": "FederationTokenForUploadFlow",
+      "Sid": "FederationTokenForUploadAndDownloadFlows",
       "Effect": "Allow",
       "Action": "sts:GetFederationToken",
-      "Resource": "arn:aws:sts::191754232783:federated-user/upload-*"
+      "Resource": [
+        "arn:aws:sts::191754232783:federated-user/upload-*",
+        "arn:aws:sts::191754232783:federated-user/dl-*"
+      ]
     },
     {
       "Sid": "BucketLevel",
@@ -346,10 +352,13 @@ data even via a Worker bug.
   "Version": "2012-10-17",
   "Statement": [
     {
-      "Sid": "FederationTokenForUploadFlow",
+      "Sid": "FederationTokenForUploadAndDownloadFlows",
       "Effect": "Allow",
       "Action": "sts:GetFederationToken",
-      "Resource": "arn:aws:sts::191754232783:federated-user/upload-*"
+      "Resource": [
+        "arn:aws:sts::191754232783:federated-user/upload-*",
+        "arn:aws:sts::191754232783:federated-user/dl-*"
+      ]
     },
     {
       "Sid": "BucketLevelList",
@@ -621,10 +630,13 @@ policy expands beyond it, AWS denies the excess.
       ]
     },
     {
-      "Sid": "BoundaryAllowSTSForUploadFederation",
+      "Sid": "BoundaryAllowSTSForUploadAndDownloadFlows",
       "Effect": "Allow",
       "Action": "sts:GetFederationToken",
-      "Resource": "arn:aws:sts::191754232783:federated-user/upload-*"
+      "Resource": [
+        "arn:aws:sts::191754232783:federated-user/upload-*",
+        "arn:aws:sts::191754232783:federated-user/dl-*"
+      ]
     }
   ]
 }
