@@ -19,6 +19,15 @@ on:
   #   gh workflow run npm-publish.yml --ref v0.8.2
   workflow_dispatch:
 
+# Serialize publishes per branch/tag ref. Multiple rapid pushes to the
+# same feature branch (typical for rapid review-fix iterations) used to
+# race in npm's eventual-consistency layer and surface as
+# `409 Conflict — Failed to save packument`. Cancelling in-progress
+# runs keeps only the latest push's publish active per ref.
+concurrency:
+  group: npm-publish-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   publish:
     runs-on: ubuntu-latest
