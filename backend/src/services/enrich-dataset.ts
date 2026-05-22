@@ -477,6 +477,8 @@ export async function enrichDataset(
     // subject_count NULL in D1 rather than fabricate values.
     let participantsTsv: string | null = null;
     let autoParticipantsToCommit: string | null = null;
+    // Case-sensitive by design — see comment in participants-tsv.ts.
+    // BIDS canonical filename is lowercase `participants.tsv`.
     const participantsFile = tree.find((f) => f.path === "participants.tsv");
     if (participantsFile) {
       try {

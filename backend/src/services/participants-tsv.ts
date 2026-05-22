@@ -102,6 +102,14 @@ export interface EnsureParticipantsTsvResult {
  * uses only the tree listing the caller already fetched.
  */
 export function ensureParticipantsTsv(tree: ReadonlyArray<TreeEntry>): EnsureParticipantsTsvResult {
+  // BIDS spec (1.x) mandates the canonical filename `participants.tsv` —
+  // lowercase, exactly that path. A dataset that ships `Participants.tsv`
+  // (e.g., from a Windows uploader that title-cases) is non-conformant by
+  // the spec; we do NOT treat that as "present" because doing so would
+  // leave the dataset with a non-canonical filename and break downstream
+  // tools that case-sensitively look for `participants.tsv`. Instead we
+  // generate the canonical file, and an admin can manually clean up any
+  // stray `Participants.tsv` if it exists.
   const alreadyPresent = tree.some((f) => f.path === "participants.tsv");
   const subjects = enumerateBidsSubjects(tree);
   if (alreadyPresent || subjects.length === 0) {
