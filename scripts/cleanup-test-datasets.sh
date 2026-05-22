@@ -6,7 +6,13 @@
 # Review the dataset lists carefully before running.
 #
 # Prerequisites:
-#   - AWS CLI configured with s3:BypassGovernanceRetention permission
+#   - AWS credentials resolvable via the default chain
+#     (~/.aws/credentials mode 0600, or aws sso login). Long-lived
+#     AKIA keys in env vars are rejected by the credentials guard.
+#     See docs/operations/access-policies.md (principles 5 + 6).
+#   - IAM user must have s3:BypassGovernanceRetention permission
+#     (the per-purpose runtime users do NOT have this — use a human-
+#     admin SSO session for this destructive script).
 #   - gh CLI authenticated with nemarDatasets org access
 #   - wrangler CLI for D1 operations
 #
@@ -20,6 +26,13 @@ if [[ "${1:-}" == "--dry-run" ]]; then
   DRY_RUN=true
   echo "=== DRY RUN MODE - No changes will be made ==="
 fi
+
+# Verify AWS credentials via shared guard (rejects long-lived AKIA*
+# keys in env). Requires ~/.aws/credentials or aws sso login. See
+# docs/operations/access-policies.md (principles 5 + 6).
+# shellcheck source=lib/aws-creds-guard.sh
+. "$(dirname "${BASH_SOURCE[0]}")/lib/aws-creds-guard.sh"
+nemar_guard_aws_credentials || exit $?
 
 BUCKET="nemar"
 

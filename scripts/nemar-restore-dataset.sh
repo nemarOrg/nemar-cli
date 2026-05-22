@@ -10,8 +10,8 @@
 # Version: 1.0.0
 #
 # Usage:
-#   export AWS_ACCESS_KEY_ID=<your-key>
-#   export AWS_SECRET_ACCESS_KEY=<your-secret>
+#   # Set up ~/.aws/credentials (mode 0600) with a long-lived AKIA key, OR
+#   # run `aws sso login` for a short-lived session, then:
 #   ./nemar-restore-dataset.sh <dataset_id> <version> <name> <zenodo_doi> <datalad_id>
 #
 # Example:
@@ -20,7 +20,9 @@
 #
 # Requirements:
 #   - git, git-annex, gh CLI, unzip, curl
-#   - AWS credentials in environment
+#   - AWS credentials resolvable via the AWS default chain
+#     (~/.aws/credentials, or aws sso login). Long-lived keys in env
+#     vars are rejected; see docs/operations/access-policies.md.
 #   - GitHub authentication via gh CLI
 #   - Zenodo archive downloaded to ARCHIVE_DIR
 #   - SSH access to GitHub (via multi-account SSH config)
@@ -170,10 +172,14 @@ check_prerequisites() {
         return 2
     fi
 
-    # Check AWS credentials
-    if [ -z "${AWS_ACCESS_KEY_ID:-}" ] || [ -z "${AWS_SECRET_ACCESS_KEY:-}" ]; then
-        log_error "AWS credentials not set in environment"
-        log_error "Please export AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY"
+    # Check AWS credentials via shared guard. Rejects long-lived AKIA*
+    # keys in env (security: env vars leak to child processes), requires
+    # either ~/.aws/credentials (mode 0600) or short-lived ASIA* from
+    # `aws sso login` / `aws-vault`. See docs/operations/access-policies.md
+    # (principles 5 + 6).
+    # shellcheck source=lib/aws-creds-guard.sh
+    . "$(dirname "${BASH_SOURCE[0]}")/lib/aws-creds-guard.sh"
+    if ! nemar_guard_aws_credentials; then
         return 2
     fi
 
@@ -617,9 +623,13 @@ main() {
         echo "    10.5281/zenodo.17613958 f9028a54-3d7e-4af0-994f-19dc40de6a0a"
         echo
         echo "Environment variables:"
-        echo "  AWS_ACCESS_KEY_ID         - AWS access key (required)"
-        echo "  AWS_SECRET_ACCESS_KEY     - AWS secret key (required)"
         echo "  ARCHIVE_DIR               - Directory with Zenodo archives (default: /tmp/restore)"
+        echo
+        echo "AWS credentials:"
+        echo "  Place a long-lived AKIA* key in ~/.aws/credentials (mode 0600), OR"
+        echo "  use a short-lived ASIA* session via 'aws sso login' / 'aws-vault'."
+        echo "  Long-lived keys in process env vars are REJECTED by the credentials"
+        echo "  guard. See docs/operations/access-policies.md (principles 5 + 6)."
         echo "  WORK_BASE_DIR             - Working directory (default: \$ARCHIVE_DIR/restore_work)"
         echo "  GITHUB_ORG                - GitHub organization (default: nemarDatasets)"
         echo "  SSH_HOST                  - SSH host for GitHub (default: github.com)"
