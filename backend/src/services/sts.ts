@@ -104,9 +104,16 @@ export function generateUploadPolicy(bucket: string, datasetId: string): string 
         Resource: `arn:aws:s3:::${bucket}/${datasetId}/objects/*`,
       },
       {
+        // git-annex's `initremote` always calls CreateBucket on the
+        // configured S3 remote, even when the bucket already exists.
+        // AWS treats CreateBucket on an existing-and-owned bucket as a
+        // no-op (returns 200 with the existing bucket's location), but
+        // the action still needs to be authorized on the IAM user AND
+        // the federation session. Scoped to our single bucket so the
+        // federated session cannot create other buckets in the account.
         Sid: "AllowBucketAccess",
         Effect: "Allow",
-        Action: "s3:ListBucket",
+        Action: ["s3:ListBucket", "s3:CreateBucket", "s3:GetBucketLocation"],
         Resource: `arn:aws:s3:::${bucket}`,
       },
     ],

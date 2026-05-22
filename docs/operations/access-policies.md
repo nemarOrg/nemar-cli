@@ -232,7 +232,8 @@ principle 2.
         "s3:ListBucket",
         "s3:GetBucketLocation",
         "s3:GetBucketPolicy",
-        "s3:PutBucketPolicy"
+        "s3:PutBucketPolicy",
+        "s3:CreateBucket"
       ],
       "Resource": "arn:aws:s3:::nemar"
     },
@@ -267,6 +268,11 @@ Notable choices:
   legal holds (`PutObjectLegalHold`).
 - `s3:PutObjectAcl` is intentionally absent. The codebase has zero
   call sites for it; making-public goes through the bucket policy.
+- `s3:CreateBucket` is present at bucket level because git-annex's
+  `initremote` calls `CreateBucket` even when the bucket exists.
+  Scoped to `arn:aws:s3:::nemar` (the only bucket), so a federated
+  session — or a leaked IAM user — cannot create new buckets.
+  Returns 200 no-op against the existing bucket.
 
 **Federation policy at session-mint time.** The federation policy
 passed by the Worker (`generateUploadPolicy()` in
@@ -317,9 +323,11 @@ data even via a Worker bug.
         "s3:ListBucket",
         "s3:GetBucketLocation",
         "s3:GetBucketPolicy",
-        "s3:PutBucketPolicy"
+        "s3:PutBucketPolicy",
+        "s3:CreateBucket"
       ],
       "Resource": "arn:aws:s3:::nemar",
+      "//": "s3:CreateBucket is a no-op since the nemar bucket already exists, but git-annex initremote calls it during dataset uploads (see federation policy comment in backend/src/services/sts.ts).",
       "Condition": {
         "StringLike": {
           "s3:prefix": [
