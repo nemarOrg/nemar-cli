@@ -62,8 +62,13 @@ if (response.status === 403) {                // not public-read
 ```
 
 This pattern is implemented in `backend/src/services/s3.ts` for
-`getManifest()` and `loadSummary()` after the 2026-05-22 incident.
-The same pattern must be used by every new public-serving code path.
+`getManifest()` and `loadSummary()` as of PR #570 (merged
+2026-05-22 after the credential-quarantine outage). The same
+pattern must be used by every new public-serving code path. Other
+S3-touching helpers in the same file (`generatePresignedGetUrl`,
+`buildRedirectUrl`) still sign unconditionally because they serve
+mixed public-and-private paths; a follow-up will route public
+datasets through unsigned URLs there too.
 
 **Why.** `data.nemar.org` is the canonical public face of NEMAR. It
 must keep serving when the Worker's AWS credentials are revoked,
@@ -150,15 +155,29 @@ JSON to attach.
 
 | User | Where the key lives | Scope summary |
 |---|---|---|
-| `nemar-worker-prod` | Workers secret on SCCN `nemar-api` | Full S3 R/W on `nemar/*` + `sts:GetFederationToken` |
-| `nemar-worker-dev` | Workers secret on SCCN `nemar-api-dev` | Same scope, restricted to sandbox + staging keys |
-| `nemar-actions` | `nemarDatasets` org secret + `nemarOrg/nemar-cli` repo secret | S3 R/W on `nemar/*` only (no STS) |
+| `nemar-worker-prod` | Workers secret on SCCN `nemar-api` | Full S3 R/W on `nemar/*` + bucket policy + Object Lock + `sts:GetFederationToken` |
+| `nemar-worker-dev` | Workers secret on SCCN `nemar-api-dev` | Same scope, restricted to `xx*` / `staging/*` / `nm099999/*` |
+| `nemar-actions-datasets` | `nemarDatasets` org secret (visibility: ALL) | S3 R/W on `nemar/*` only (no STS) |
+| `nemar-actions-cli` | `nemarOrg/nemar-cli` repo secret | S3 R/W on `nemar/*` only (no STS) |
 | `nemar-hallu-readonly` | SDSC Hallu server local config | S3 ReadOnly on `nemar/*` only |
 
-All four users carry a permissions boundary that denies `iam:*`,
-`organizations:*`, and `account:*` so a future policy change cannot
-escalate beyond bucket scope. The boundary policy is documented in
-[appendix A](#appendix-a-permissions-boundary) below.
+The `nemar-actions` workload is split into two users because the
+two destinations have **distinct trust boundaries**: the
+`nemarDatasets` org secret is visible to every dataset repo
+(including future repos a malicious contributor could compromise),
+while the `nemarOrg/nemar-cli` repo secret is scoped to maintainers
+of the tooling repo. A single key would mean a dataset-repo
+compromise grants the attacker write access to nemar-cli CI and
+vice versa. Two keys with identical policies still isolate the
+blast radius.
+
+All five users carry a permissions boundary that confines them to
+the `nemar` bucket and the `upload-*` federated user pattern at
+service-scope level. The boundary is a **service-scope ceiling, not
+a read/write ceiling** — `nemar-hallu-readonly`'s read-only promise
+is enforced by its inline policy, not by the boundary. The
+boundary policy is documented in [appendix A](#appendix-a-permissions-boundary)
+below.
 
 ---
 
@@ -174,10 +193,12 @@ calls AWS for:
 - Minting federated session tokens via `sts:GetFederationToken` so
   the user's local `git-annex` can talk to S3 directly during
   uploads (`nemar admin sandbox` flow).
-- Setting per-object public-read ACLs when an admin publishes a
-  dataset (`nemar admin make-public` flow).
-- Setting S3 Object Lock when a dataset's DOI is minted
-  (`nemar admin s3 lock`).
+- Updating the bucket policy when an admin publishes a dataset
+  (`nemar admin make-public` flow uses `addPublicReadPolicy()` in
+  `backend/src/services/s3.ts`, which GETs and PUTs the bucket
+  policy — NOT per-object ACLs).
+- Applying S3 Object Lock retention + legal hold when a DOI is
+  minted (`nemar admin s3 lock` flow, `applyObjectLockBatch()`).
 - Signed fallback for `getManifest()` / `loadSummary()` on private
   datasets per principle 2.
 
@@ -209,7 +230,9 @@ principle 2.
       "Effect": "Allow",
       "Action": [
         "s3:ListBucket",
-        "s3:GetBucketLocation"
+        "s3:GetBucketLocation",
+        "s3:GetBucketPolicy",
+        "s3:PutBucketPolicy"
       ],
       "Resource": "arn:aws:s3:::nemar"
     },
@@ -221,16 +244,29 @@ principle 2.
         "s3:GetObjectAttributes",
         "s3:HeadObject",
         "s3:PutObject",
-        "s3:PutObjectAcl",
         "s3:DeleteObject",
         "s3:GetObjectLegalHold",
-        "s3:PutObjectLegalHold"
+        "s3:PutObjectLegalHold",
+        "s3:GetObjectRetention",
+        "s3:PutObjectRetention"
       ],
       "Resource": "arn:aws:s3:::nemar/*"
     }
   ]
 }
 ```
+
+Notable choices:
+
+- `s3:GetBucketPolicy` + `s3:PutBucketPolicy` are at bucket level
+  (not object level) because `addPublicReadPolicy()` mutates the
+  whole bucket policy in one call rather than per-object ACLs.
+- `s3:PutObjectRetention` is required separately from
+  `s3:PutObjectLegalHold`. The Object Lock flow uses both
+  GOVERNANCE-mode retention (`PutObjectRetention`) and per-object
+  legal holds (`PutObjectLegalHold`).
+- `s3:PutObjectAcl` is intentionally absent. The codebase has zero
+  call sites for it; making-public goes through the bucket policy.
 
 **Federation policy at session-mint time.** The federation policy
 passed by the Worker (`generateUploadPolicy()` in
@@ -277,7 +313,12 @@ data even via a Worker bug.
     {
       "Sid": "BucketLevelList",
       "Effect": "Allow",
-      "Action": ["s3:ListBucket", "s3:GetBucketLocation"],
+      "Action": [
+        "s3:ListBucket",
+        "s3:GetBucketLocation",
+        "s3:GetBucketPolicy",
+        "s3:PutBucketPolicy"
+      ],
       "Resource": "arn:aws:s3:::nemar",
       "Condition": {
         "StringLike": {
@@ -297,8 +338,11 @@ data even via a Worker bug.
         "s3:GetObjectAttributes",
         "s3:HeadObject",
         "s3:PutObject",
-        "s3:PutObjectAcl",
-        "s3:DeleteObject"
+        "s3:DeleteObject",
+        "s3:GetObjectLegalHold",
+        "s3:PutObjectLegalHold",
+        "s3:GetObjectRetention",
+        "s3:PutObjectRetention"
       ],
       "Resource": [
         "arn:aws:s3:::nemar/xx*",
@@ -310,14 +354,20 @@ data even via a Worker bug.
 }
 ```
 
+The Object Lock actions are present on dev too because
+`nemar admin e2e-test` exercises all 10 publish pipeline steps
+including the lock step against `nm099999`. Bucket policy actions
+are present so the e2e make-public step works against test
+datasets.
+
 **Rotation cadence.** Quarterly, same protocol as prod.
 
 ---
 
-### `nemar-actions`
+### `nemar-actions-datasets`
 
-**Purpose.** GitHub Actions workflows that need to read or write
-S3. There are three consumers:
+**Purpose.** GitHub Actions workflows running in the
+`nemarDatasets` org that need S3 read/write. Consumers:
 
 - `nemarDatasets/.github/.github/workflows/onboard-openneuro.yml`
   copies dataset blobs from OpenNeuro S3 into `nemar/` during
@@ -329,22 +379,18 @@ S3. There are three consumers:
   `backend/src/services/github.ts`:
   - `pr-merge.yml` cleans up `nemar/staging/*` on PR close.
   - `generate-archive.yml` writes `nemar/<id>/archives/v<X.Y.Z>.zip`.
-- `nemarOrg/nemar-cli/.github/workflows/test.yml` integration
-  tests exercise the upload path against the dev backend.
 
-None of these workflows mint federated tokens — that's strictly a
-Worker concern. So this user has **no STS permission at all**.
+None of these workflows mint federated tokens, change bucket
+policy, or touch Object Lock — those are strictly Worker concerns.
 
 **Where the key lives.**
 
 - `nemarDatasets` org-level secret `AWS_ACCESS_KEY_ID` (visibility:
   ALL repos) and `AWS_SECRET_ACCESS_KEY` (same visibility).
-- `nemarOrg/nemar-cli` repo-level secret `AWS_ACCESS_KEY_ID` and
-  `AWS_SECRET_ACCESS_KEY`.
 
-The same key value lives in both locations because both run the
-same kind of workload (read/write S3, no federation). If the
-workloads diverge later, split into two users.
+This key is visible to every dataset repo in the `nemarDatasets`
+org. That's a wider trust surface than the nemar-cli CI key
+(separate user below).
 
 **Inline policy.**
 
@@ -374,15 +420,51 @@ workloads diverge later, split into two users.
 }
 ```
 
-Note the deliberate omissions vs. `nemar-worker-prod`:
+Deliberate omissions vs. `nemar-worker-prod`:
 
 - No `sts:GetFederationToken`. Workflows never federate.
-- No `s3:PutObjectAcl`. Workflows don't change object visibility;
-  the make-public flow runs through the Worker.
-- No `s3:PutObjectLegalHold`. Object Lock is a Worker concern.
+- No `s3:GetBucketPolicy` / `s3:PutBucketPolicy`. The make-public
+  flow runs through the Worker.
+- No `s3:PutObjectLegalHold` / `s3:PutObjectRetention`. Object Lock
+  is a Worker concern.
 
-**Rotation cadence.** Quarterly. Both the org-level secret and the
-nemar-cli repo secret are updated in the same maintenance window.
+**Rotation cadence.** Quarterly.
+
+---
+
+### `nemar-actions-cli`
+
+**Purpose.** GitHub Actions workflows running in `nemarOrg/nemar-cli`
+that need S3 read/write. Consumer:
+
+- `nemarOrg/nemar-cli/.github/workflows/test.yml` integration
+  tests (`api-test`, `e2e-upload`, `e2e-sandbox`, `unit-test-all`)
+  exercise upload/download paths against the dev backend. They
+  read and write sandbox-prefix objects directly.
+
+Identical policy to `nemar-actions-datasets`, but a **separate IAM
+user** so the two trust boundaries are isolated:
+
+- A dataset-repo compromise (someone gets repo write on any
+  `nemarDatasets/nmXXXXXX` repo) leaks the `nemar-actions-datasets`
+  key but cannot read or rotate the `nemar-actions-cli` key.
+- A nemar-cli CI compromise (a malicious test PR exfiltrating
+  secrets in a workflow run) leaks the `nemar-actions-cli` key
+  but cannot read the `nemar-actions-datasets` key.
+
+**Where the key lives.**
+
+- `nemarOrg/nemar-cli` repo-level secret `AWS_ACCESS_KEY_ID` and
+  `AWS_SECRET_ACCESS_KEY`.
+
+**Inline policy.** Identical content to `nemar-actions-datasets`
+above. See [appendix C](#appendix-c-shared-actions-policy) for
+the canonical JSON used by both users.
+
+**Rotation cadence.** Quarterly. Both action users are typically
+rotated in the same maintenance window, but each retains its own
+2-slot rotation independence so one can be rolled back without the
+other.
 
 ---
 
@@ -413,6 +495,8 @@ not in a managed runtime that supports secrets injection.
       "Action": [
         "s3:GetObject",
         "s3:GetObjectAttributes",
+        "s3:GetObjectLegalHold",
+        "s3:GetObjectRetention",
         "s3:HeadObject",
         "s3:ListBucket",
         "s3:GetBucketLocation"
@@ -426,8 +510,16 @@ not in a managed runtime that supports secrets injection.
 }
 ```
 
-Strictly read-only. No `PutObject`, no `DeleteObject`. A leak of
-this key cannot cause data loss.
+`s3:GetObjectLegalHold` and `s3:GetObjectRetention` are included so
+the sync script can read the lock status of objects without
+needing a separate IAM update if a future feature inspects lock
+state. They are inert read-only — including them costs nothing.
+
+Strictly read-only otherwise. No `PutObject`, no `DeleteObject`,
+no bucket policy actions. A leak of this key cannot cause data
+loss; the operator-side enforcement (no write actions in the
+inline policy) is what guarantees this, NOT the permissions
+boundary (see Appendix A note).
 
 **Rotation cadence.** Yearly is sufficient given the read-only
 scope. Rotate immediately on any sign of compromise.
@@ -436,7 +528,7 @@ scope. Rotate immediately on any sign of compromise.
 
 ## Appendix A: Permissions boundary
 
-All four IAM users should carry the following customer-managed
+All five IAM users should carry the following customer-managed
 permissions boundary policy (call it `nemar-bucket-boundary`).
 A permissions boundary is a ceiling — even if a future inline
 policy expands beyond it, AWS denies the excess.
@@ -469,19 +561,47 @@ actual operations they need) while guaranteeing that even a
 misconfigured inline policy cannot escape the `nemar` bucket or
 mint anything beyond `upload-*` federated tokens.
 
+**What the boundary does NOT enforce.** The boundary is a
+service-scope ceiling — it confines users to S3 on the nemar
+bucket + scoped STS. It does NOT enforce read-vs-write at the
+object level. That means:
+
+- `nemar-hallu-readonly`'s read-only guarantee comes from its
+  inline policy, not the boundary. If a future change accidentally
+  adds `s3:DeleteObject` to its inline policy, the boundary will
+  allow it (since `s3:*` is the boundary's S3 reach).
+- Auditing `nemar-hallu-readonly`'s actual write-immunity means
+  auditing the inline policy, not just verifying boundary
+  attachment.
+
+If stronger write-tier enforcement is needed, add a permissions
+boundary specifically for read-only users that omits write actions
+(e.g., `nemar-readonly-boundary` with `s3:Get*` + `s3:List*` only,
+no `s3:Put*` / `s3:Delete*`). Out of scope for the current
+revision; track as a follow-up.
+
 ---
 
 ## Appendix B: Provisioning checklist
 
-For each of the four users, when first creating them (or
+For each of the five users, when first creating them (or
 re-creating after a security incident):
 
 - [ ] IAM → Users → Create user → name from the catalog above
 - [ ] Skip console access (programmatic only)
+- [ ] Verify no console password exists:
+      `aws iam get-login-profile --user-name <name>` should return
+      `NoSuchEntity` (a successful response means the user can sign in
+      to the AWS console, which violates the programmatic-only rule)
+- [ ] Tag the user with `purpose=<short tag>` and
+      `rotation-due=<YYYY-MM-DD>` for audit
+- [ ] Attach the `nemar-bucket-boundary` permissions boundary BEFORE
+      the inline policy (the boundary attachment is a separate API
+      call; if you reverse the order, there is a brief window where
+      the user has the inline-policy reach without the ceiling)
 - [ ] Attach the inline policy from this document (don't paraphrase
       — copy the JSON exactly so future audits can grep for the Sid
       strings)
-- [ ] Attach the `nemar-bucket-boundary` permissions boundary
 - [ ] Create one access key (slot 1)
 - [ ] Save the access key + secret key to the destination's secret
       store immediately (Workers secret, GH secret, server file)
