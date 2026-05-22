@@ -2753,6 +2753,15 @@ export async function commitEnrichmentWithBidsignore(
   bidsignoreEntriesToIgnore: string[],
   message: string,
   pat: string,
+  /**
+   * Optional additional files to commit in the same tree write. Used by the
+   * enrichment pipeline to land an auto-generated participants.tsv alongside
+   * .nemar/metadata.json when the dataset shipped without one (see
+   * `ensureParticipantsTsv` in participants-tsv.ts). When non-empty, forces
+   * a batched tree commit even if .bidsignore didn't change so all files land
+   * in one commit.
+   */
+  additionalFiles: ReadonlyArray<{ path: string; content: string }> = [],
 ): Promise<EnrichmentCommitResult> {
   let bidsignoreUpdated = false;
   let bidsignoreContent = "";
@@ -2776,19 +2785,39 @@ export async function commitEnrichmentWithBidsignore(
     bidsignoreUpdated = false;
   }
 
-  const commitMode: "batched" | "single" = bidsignoreUpdated ? "batched" : "single";
+  // Batched mode covers .bidsignore changes AND any additional files the
+  // caller requested. Single-file mode is reserved for the metadata-only case.
+  const commitMode: "batched" | "single" =
+    bidsignoreUpdated || additionalFiles.length > 0 ? "batched" : "single";
   try {
     if (commitMode === "batched") {
-      await commitFilesAsTree(
-        repo,
-        branch,
-        [
-          { path: metadataPath, content: metadataContent },
-          { path: ".bidsignore", content: bidsignoreContent },
-        ],
-        message,
-        pat,
-      );
+      const treeFiles: Array<{ path: string; content: string }> = [
+        { path: metadataPath, content: metadataContent },
+      ];
+      if (bidsignoreUpdated) {
+        treeFiles.push({ path: ".bidsignore", content: bidsignoreContent });
+      }
+      for (const f of additionalFiles) {
+        treeFiles.push({ path: f.path, content: f.content });
+      }
+      // Guard against duplicate paths in the tree write. GitHub's tree API
+      // accepts duplicates but the behavior is last-wins, which silently
+      // discards earlier contents. Throwing instead of silently winning
+      // prevents a future caller from accidentally clobbering metadataPath
+      // or .bidsignore via additionalFiles.
+      const seen = new Set<string>();
+      for (const f of treeFiles) {
+        if (seen.has(f.path)) {
+          throw new EnrichmentCommitError(
+            `duplicate path '${f.path}' in commit tree`,
+            commitMode,
+            bidsignoreReadError,
+            null,
+          );
+        }
+        seen.add(f.path);
+      }
+      await commitFilesAsTree(repo, branch, treeFiles, message, pat);
     } else {
       // Pass `branch` so a release/* or other non-main caller doesn't have
       // its single-file commit silently land on the default branch.

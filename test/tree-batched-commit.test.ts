@@ -510,6 +510,91 @@ describe("commitEnrichmentWithBidsignore (admin + webhook enrichment path)", () 
     ).toBe(1);
   }, 15_000);
 
+  test("additionalFiles non-empty + bidsignore unchanged -> batched commit, extra file in tree", async () => {
+    // The enrichment pipeline auto-generates participants.tsv when the
+    // dataset ships without one, then passes it via additionalFiles so it
+    // lands in the same commit as .nemar/metadata.json. Pre-existing
+    // bidsignore-up-to-date case was single-file; the new path forces
+    // batched mode even when bidsignore didn't change.
+    bidsignoreExists = true;
+    bidsignoreContent = ".nemar/\n";
+    const participantsContent = "participant_id\tage\tsex\nsub-01\tn/a\tn/a\n";
+    const result = await commitEnrichmentWithBidsignore(
+      REPO,
+      BRANCH,
+      META_PATH,
+      META,
+      ENTRIES,
+      "Update NEMAR metadata enrichment",
+      PAT,
+      [{ path: "participants.tsv", content: participantsContent }],
+    );
+    expect(result.commitMode).toBe("batched");
+    expect(result.bidsignoreUpdated).toBe(false);
+    const treeBody = lastBody<{ tree: Array<{ path: string; content: string }> }>(
+      "POST",
+      `/repos/nemarDatasets/${REPO}/git/trees`,
+    );
+    const paths = (treeBody?.tree ?? []).map((t) => t.path).sort();
+    // metadata + participants.tsv; .bidsignore stays out because it's
+    // unchanged. The contents API path must NOT have been used.
+    expect(paths).toEqual(["participants.tsv", META_PATH].sort());
+    const partEntry = treeBody?.tree.find((t) => t.path === "participants.tsv");
+    expect(partEntry?.content).toBe(participantsContent);
+    expect(
+      fake.countByMethodPath[`PUT /repos/nemarDatasets/${REPO}/contents/${META_PATH}`],
+    ).toBe(undefined);
+  });
+
+  test("additionalFiles non-empty + bidsignore needs update -> all three files batched", async () => {
+    bidsignoreExists = false;
+    const participantsContent = "participant_id\tage\tsex\nsub-01\tn/a\tn/a\n";
+    const result = await commitEnrichmentWithBidsignore(
+      REPO,
+      BRANCH,
+      META_PATH,
+      META,
+      ENTRIES,
+      "Update NEMAR metadata enrichment",
+      PAT,
+      [{ path: "participants.tsv", content: participantsContent }],
+    );
+    expect(result.commitMode).toBe("batched");
+    expect(result.bidsignoreUpdated).toBe(true);
+    const treeBody = lastBody<{ tree: Array<{ path: string; content: string }> }>(
+      "POST",
+      `/repos/nemarDatasets/${REPO}/git/trees`,
+    );
+    const paths = (treeBody?.tree ?? []).map((t) => t.path).sort();
+    expect(paths).toEqual([".bidsignore", "participants.tsv", META_PATH].sort());
+  });
+
+  test("additionalFiles colliding with metadataPath throws EnrichmentCommitError", async () => {
+    // Defensive guard: GitHub's tree API accepts duplicate paths with
+    // last-wins semantics. Catching it explicitly here prevents a future
+    // caller from silently clobbering .nemar/metadata.json via
+    // additionalFiles.
+    bidsignoreExists = true;
+    bidsignoreContent = ".nemar/\n";
+    let caught: unknown;
+    try {
+      await commitEnrichmentWithBidsignore(
+        REPO,
+        BRANCH,
+        META_PATH,
+        META,
+        ENTRIES,
+        "Update NEMAR metadata enrichment",
+        PAT,
+        [{ path: META_PATH, content: "oops, duplicate" }],
+      );
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).toBeInstanceOf(EnrichmentCommitError);
+    expect((caught as EnrichmentCommitError).message).toContain("duplicate path");
+  });
+
   test("commit failure throws EnrichmentCommitError carrying commitMode='batched'", async () => {
     bidsignoreExists = false;
     refUpdateBehavior = "conflict-always";
