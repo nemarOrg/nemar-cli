@@ -319,17 +319,10 @@ data even via a Worker bug.
     {
       "Sid": "BucketLevelList",
       "Effect": "Allow",
-      "Action": [
-        "s3:ListBucket",
-        "s3:GetBucketLocation",
-        "s3:GetBucketPolicy",
-        "s3:PutBucketPolicy",
-        "s3:CreateBucket"
-      ],
+      "Action": "s3:ListBucket",
       "Resource": "arn:aws:s3:::nemar",
-      "//": "s3:CreateBucket is a no-op since the nemar bucket already exists, but git-annex initremote calls it during dataset uploads (see federation policy comment in backend/src/services/sts.ts).",
       "Condition": {
-        "StringLike": {
+        "StringLikeIfExists": {
           "s3:prefix": [
             "xx*",
             "staging/*",
@@ -337,6 +330,17 @@ data even via a Worker bug.
           ]
         }
       }
+    },
+    {
+      "Sid": "BucketOps",
+      "Effect": "Allow",
+      "Action": [
+        "s3:GetBucketLocation",
+        "s3:CreateBucket",
+        "s3:GetBucketPolicy",
+        "s3:PutBucketPolicy"
+      ],
+      "Resource": "arn:aws:s3:::nemar"
     },
     {
       "Sid": "ObjectReadWriteSandbox",
@@ -362,11 +366,26 @@ data even via a Worker bug.
 }
 ```
 
-The Object Lock actions are present on dev too because
-`nemar admin e2e-test` exercises all 10 publish pipeline steps
-including the lock step against `nm099999`. Bucket policy actions
-are present so the e2e make-public step works against test
-datasets.
+Three notable choices specific to dev:
+
+- The `BucketListWithOptionalPrefix` statement uses
+  `StringLikeIfExists` rather than `StringLike`. `s3:HeadBucket`
+  (which git-annex calls during `initremote`) maps to the
+  `s3:ListBucket` action but sends NO `s3:prefix` context. With a
+  plain `StringLike`, the condition would fail for HeadBucket, the
+  statement wouldn't match, git-annex would assume the bucket
+  doesn't exist, and would fall through to `s3:CreateBucket` —
+  which returns `BucketAlreadyOwnedByYou` (409) and breaks the
+  upload. `StringLikeIfExists` matches the condition only when
+  the context key is present, so HeadBucket passes and prefix-
+  scoped `s3:ListObjectsV2` still gets restricted.
+- Bucket-level actions other than `s3:ListBucket` live in their
+  own unconditioned statement (`BucketOps`). They don't accept a
+  prefix context, so a conditional statement would be unmatchable.
+- Object Lock actions and bucket policy actions are present
+  because `nemar admin e2e-test` exercises all 10 publish pipeline
+  steps (including the lock step and the make-public step) against
+  `nm099999`.
 
 **Rotation cadence.** Quarterly, same protocol as prod.
 
