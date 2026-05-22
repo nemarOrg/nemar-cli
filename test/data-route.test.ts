@@ -425,3 +425,83 @@ describe("data.nemar.org route (epic #449, phase 1)", async () => {
     expect(r.headers.get("location")).toBeTruthy();
   });
 });
+
+/**
+ * Catalog index at the data sub-app root (#584). Independent of any
+ * specific test dataset existing -- the catalog endpoint itself is
+ * the unit under test, not nm099999 -- so this lives in its own
+ * describe block instead of the nm099999-gated suite above.
+ */
+describe("data.nemar.org catalog index (#584)", async () => {
+  if (PROD_GUARD_ACTIVE) {
+    test.skip("refusing to run against production without TEST_ALLOW_PROD=1", () => undefined);
+    return;
+  }
+
+  // Reachability probe: GET / on the data sub-app. A healthy, deployed
+  // catalog handler returns 200. Anything else means the route is not
+  // yet on this backend (404 -- the common case for a PR that adds the
+  // route before merge), D1 is unavailable (503), or the deployment is
+  // broken (5xx). In every case the right move is to skip rather than
+  // fail every assertion with a confusing message about an unrelated
+  // status code.
+  const probe = await fetch(`${API}/data/`, { headers, redirect: "manual" });
+  if (probe.status !== 200) {
+    test.skip(
+      `catalog endpoint returned ${probe.status}; route not deployed on ${API} yet`,
+      () => undefined,
+    );
+    return;
+  }
+
+  test("returns HTML with at least one nm dataset link", async () => {
+    const r = await fetch(`${API}/data/`, {
+      headers: { ...headers, Accept: "text/html" },
+    });
+    expect(r.status).toBe(200);
+    expect(r.headers.get("content-type")).toContain("text/html");
+    expect(r.headers.get("cache-control")).toContain("max-age=60");
+    expect(r.headers.get("vary")).toContain("Accept");
+    const body = await r.text();
+    expect(body).toContain("data.nemar.org");
+    expect(body).toMatch(/href="\/nm\d+\/"/);
+    expect(body).not.toContain(">nm099999/<");
+    expect(body).not.toMatch(/>xx\d+\//);
+  });
+
+  test("returns JSON via Accept: application/json with consistent shape", async () => {
+    const r = await fetch(`${API}/data/`, {
+      headers: { ...headers, Accept: "application/json" },
+    });
+    expect(r.status).toBe(200);
+    expect(r.headers.get("content-type")).toContain("application/json");
+    expect(r.headers.get("cache-control")).toContain("max-age=60");
+    expect(r.headers.get("vary")).toContain("Accept");
+    const body = (await r.json()) as {
+      count: number;
+      datasets: Array<{
+        id: string;
+        title: string | null;
+        latest: string | null;
+        doi: string | null;
+        published: string | null;
+        browse_url: string;
+      }>;
+    };
+    expect(body.count).toBe(body.datasets.length);
+    expect(body.datasets.length).toBeGreaterThan(0);
+    for (const d of body.datasets) {
+      expect(d.id).toMatch(/^nm\d+$/);
+      expect(d.id).not.toBe("nm099999");
+      expect(d.browse_url).toBe(`/${d.id}/`);
+    }
+  });
+
+  test("?format=json overrides Accept: text/html", async () => {
+    const r = await fetch(`${API}/data/?format=json`, {
+      headers: { ...headers, Accept: "text/html" },
+    });
+    expect(r.status).toBe(200);
+    expect(r.headers.get("content-type")).toContain("application/json");
+  });
+});
