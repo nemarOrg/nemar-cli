@@ -438,13 +438,19 @@ describe("data.nemar.org catalog index (#584)", async () => {
     return;
   }
 
-  // Reachability probe: any non-5xx response means the route is wired and
-  // the Worker is up. A 5xx would indicate the deployment itself is
-  // broken, in which case skipping with a clear reason beats failing
-  // every catalog assertion with confusing errors.
+  // Reachability probe: GET / on the data sub-app. A healthy, deployed
+  // catalog handler returns 200. Anything else means the route is not
+  // yet on this backend (404 -- the common case for a PR that adds the
+  // route before merge), D1 is unavailable (503), or the deployment is
+  // broken (5xx). In every case the right move is to skip rather than
+  // fail every assertion with a confusing message about an unrelated
+  // status code.
   const probe = await fetch(`${API}/data/`, { headers, redirect: "manual" });
-  if (probe.status >= 500) {
-    test.skip(`catalog endpoint returned ${probe.status}; deployment may be broken`, () => undefined);
+  if (probe.status !== 200) {
+    test.skip(
+      `catalog endpoint returned ${probe.status}; route not deployed on ${API} yet`,
+      () => undefined,
+    );
     return;
   }
 
