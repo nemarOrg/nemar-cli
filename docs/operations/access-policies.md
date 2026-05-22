@@ -125,24 +125,59 @@ verified on the new one. Storing both keys' raw values in the same
 location after the rotation completes (the old key value should be
 discarded after deletion).
 
-### 5. No long-lived keys in `~/.aws/credentials`
+### 5. No long-lived keys on personal/interactive machines
 
 For personal CLI work (administrators running `nemar admin ...`,
 ad-hoc S3 operations, the `nemar-tools/credentials.sh` publishing
 flow), use AWS SSO or `aws-vault` to mint short-lived credentials
 on demand. Do not commit a long-lived `AKIA*` access key to your
-local `~/.aws/credentials` plaintext.
+laptop's `~/.aws/credentials` plaintext.
 
-**Why.** Any file under your home directory is exposed to every
-process you run, every shell extension you install, every editor
-plugin with filesystem access. The 2026-05-22 quarantine fired
-because a long-lived key reached a place AWS scanned. SSO sessions
-expire automatically; even if they leak, the blast radius is
-hours, not the lifetime of the key.
+Server-side service accounts (the SDSC Hallu cron user, future
+unattended workers) are a different story — they need long-lived
+keys because there's no human present to refresh an SSO session.
+For those, principle 6 below applies.
+
+**Why.** Any file under a developer's home directory is exposed to
+every process they run, every shell extension they install, every
+editor plugin with filesystem access. The 2026-05-22 quarantine
+fired because a long-lived key reached a place AWS scanned. SSO
+sessions expire automatically; even if they leak, the blast
+radius is hours, not the lifetime of the key.
 
 **Not okay.** Hardcoding access keys in `nemar-tools/credentials.sh`
-or any shell config. Sharing access keys between your personal AWS
-CLI sessions and any service runtime.
+or any shell config on a developer laptop. Sharing access keys
+between your personal AWS CLI sessions and any service runtime.
+
+### 6. Service-account credentials in single-tenant locations only
+
+Server-side service credentials (Hallu sync cron, future unattended
+workers) must live in a path owned by the service-account user, on a
+filesystem that no other user can read. Concretely:
+
+- The cron user's own `~/.aws/credentials` (mode 0600) on a local
+  filesystem.
+- Never in any shared workspace such as `/data/qumulo/...`,
+  `/scratch/...`, project-shared NFS, or anywhere the directory's
+  permissions don't strictly enforce single-user read.
+- Never in a path other team members could `cat` even briefly.
+
+The credentials file itself must be `chmod 600` and owned by the
+service-account user. The parent directory must be `chmod 700` or
+the credentials file is readable to anyone in the user's primary
+group.
+
+**Why.** A shared filesystem leak is permanent: every user on the
+machine, every backup that captures that directory, every team
+member with sudo can read the key. AWS's compromise detection
+won't necessarily catch this kind of slow leak. A single-tenant
+home directory at least scopes the leak surface to one user
+account.
+
+**Not okay.** Placing service credentials in any path that begins
+with `/data/`, `/scratch/`, `/projects/`, `/shared/`, or another
+multi-tenant prefix on a server. Symlinking from `~/.aws/credentials`
+to such a path.
 
 ---
 
@@ -504,11 +539,23 @@ it never writes back to S3.
 
 **Where the key lives.**
 
-- `/data/qumulo/openneuro/nemar-cli/.aws/credentials` on the Hallu
-  server (or wherever the cron's `AWS_PROFILE` resolves).
+- `/home/<cron-user>/.aws/credentials` (mode `0600`) on the Hallu
+  server. As of 2026-05-22 the cron runs as `yahya`, so the path
+  is `/home/yahya/.aws/credentials`. If the cron user changes,
+  the credentials must move with it.
 
 The key is server-local because the cron runs on Hallu hardware,
-not in a managed runtime that supports secrets injection.
+not in a managed runtime that supports secrets injection. Per
+principle 6, the credentials file MUST live in the cron user's
+own home directory — never in `/data/qumulo/...` or any other
+shared SDSC workspace, even if those paths are convenient for
+the script.
+
+If the cron script needs to read from a shared script path
+(e.g., `/data/qumulo/openneuro/nemar-cli/scripts/hallu-sync.sh`)
+and shell into the AWS CLI, AWS automatically resolves
+`~/.aws/credentials` for the user the script runs as. No
+shared-path credential file is needed.
 
 **Inline policy.**
 
