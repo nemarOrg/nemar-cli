@@ -1266,6 +1266,133 @@ ${latestShortcut}${emptyNotice}${table}
 }
 
 /**
+ * Catalog index types — used by `GET /` on data.nemar.org to list every
+ * publicly-hosted dataset. One row per dataset (not per version); the
+ * landing page at `/<id>/` is the next click and expands into versions.
+ */
+export interface CatalogIndexRow {
+  dataset_id: string;
+  name: string | null;
+  concept_doi: string | null;
+  latest_version: string | null;
+  latest_published_at: string | null;
+}
+
+export interface CatalogIndexEntry {
+  id: string;
+  title: string | null;
+  latest: string | null;
+  doi: string | null;
+  published: string | null;
+  browse_url: string;
+}
+
+export interface CatalogIndexPayload {
+  count: number;
+  datasets: CatalogIndexEntry[];
+}
+
+/**
+ * Per-id gate used by the catalog index. The route's SQL already
+ * filters at the query layer (`visibility='public' AND dataset_id NOT
+ * LIKE 'xx%' AND dataset_id <> 'nm099999'`); this is the same predicate
+ * expressed in TS so the pure payload builder can re-assert it without
+ * needing a D1 binding, and tests can exercise the filter directly.
+ * Defense in depth: a future schema change that loosens the SQL won't
+ * silently leak sandbox or test-only ids into the public index.
+ */
+export function isPublicCatalogId(id: string): boolean {
+  if (id.startsWith("xx")) return false;
+  if (id === "nm099999") return false;
+  return true;
+}
+
+/**
+ * Build the JSON-form payload returned by `GET /` when the client asks
+ * for JSON. Mirrors the relationship between `buildLandingPayload` and
+ * `renderDatasetLandingHtml`: a single builder feeds both the HTML and
+ * the JSON response so the two shapes can't drift.
+ *
+ * Filtering: rows that fail `isPublicCatalogId` are dropped, and the
+ * result is sorted by `dataset_id` ascending so the page is stable
+ * regardless of the SQL ORDER BY. The `latest` field is normalized to
+ * a `vX.Y.Z` tag via `toVersionTag` so it matches the on-disk version
+ * directory name (`/<id>/<tag>/`).
+ */
+export function buildCatalogIndexPayload(args: {
+  rows: CatalogIndexRow[];
+}): CatalogIndexPayload {
+  const datasets: CatalogIndexEntry[] = args.rows
+    .filter((r) => isPublicCatalogId(r.dataset_id))
+    .map((r) => ({
+      id: r.dataset_id,
+      title: r.name && r.name.trim() !== "" ? r.name : null,
+      latest: r.latest_version ? toVersionTag(r.latest_version) : null,
+      doi: r.concept_doi,
+      published: r.latest_published_at,
+      browse_url: `/${r.dataset_id}/`,
+    }))
+    .sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+  return { count: datasets.length, datasets };
+}
+
+/**
+ * Render the HTML form of the catalog index served at `data.nemar.org/`.
+ * Visual style matches `renderDatasetLandingHtml`: monospace, narrow
+ * chrome, subtle row formatting, footer with "data.nemar.org". Each
+ * row links to `/<id>/` which is the existing per-dataset landing.
+ *
+ * Empty catalog branch keeps the same chrome so a machine consumer that
+ * happens to fetch HTML still gets a well-formed page with a stable
+ * structure (no surprise 404 / blank body).
+ */
+export function renderCatalogIndexHtml(payload: CatalogIndexPayload): string {
+  const rows = payload.datasets
+    .map((d) => {
+      const id = escapeHtml(d.id);
+      const idHref = encodeURIComponent(d.id);
+      const title = d.title ? escapeHtml(d.title) : "-";
+      const latest = d.latest ? escapeHtml(d.latest) : "-";
+      const doiCell = d.doi
+        ? `<a href="https://doi.org/${escapeHtml(d.doi)}">${escapeHtml(d.doi)}</a>`
+        : "-";
+      const published = d.published ? escapeHtml(d.published.slice(0, 10)) : "-";
+      return `<tr><td><a href="/${idHref}/">${id}/</a></td><td>${title}</td><td>${latest}</td><td>${doiCell}</td><td>${published}</td></tr>`;
+    })
+    .join("");
+  const table =
+    payload.datasets.length === 0
+      ? `<p class="empty">No publicly-hosted datasets yet.</p>`
+      : `<table><thead><tr><th>dataset</th><th>title</th><th>latest</th><th>DOI</th><th>published</th></tr></thead><tbody>${rows}</tbody></table>`;
+  const summary = `<p class="shortcut">${payload.count} dataset${payload.count === 1 ? "" : "s"} hosted. Click an id to see all versions, or jump straight to <code>/&lt;id&gt;/latest/</code>.</p>`;
+  return `<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8">
+<title>data.nemar.org</title>
+<style>
+body{font-family:ui-monospace,Menlo,Consolas,monospace;margin:1.5em;max-width:80em}
+h1{font-size:1.2em;margin-bottom:.4em}
+table{border-collapse:collapse;width:100%;margin-top:.6em}
+th,td{padding:.25em .8em;text-align:left;vertical-align:top;border-bottom:1px solid #eee}
+th{color:#555;font-weight:normal}
+a{color:#06c;text-decoration:none}
+a:hover{text-decoration:underline}
+.shortcut{color:#333;font-size:.95em}
+.empty{color:#888}
+code{font-size:.95em}
+hr{margin-top:2em;border:0;border-top:1px solid #ccc}
+.foot{color:#888;font-size:.9em}
+</style>
+</head><body>
+<h1>data.nemar.org</h1>
+${summary}${table}
+<hr>
+<div class="foot">data.nemar.org &middot; <a href="/?format=json">json</a></div>
+</body></html>
+`;
+}
+
+/**
  * Render an HTML 404 page for a file path. When `lastSeen` is provided
  * the page tells the user the version where the file last existed and
  * links to that URL. Without `lastSeen` it's a generic friendly 404.

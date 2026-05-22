@@ -13,16 +13,19 @@
 
 import { Hono } from "hono";
 import {
+  type CatalogIndexRow,
   type DatasetRowForMetadata,
   type DatasetVersionRow,
   type PublicManifestEntry,
   type VersionPickerEntry,
+  buildCatalogIndexPayload,
   buildDatasetMetadata,
   buildLandingPayload,
   buildRedirectUrl,
   diffRemovedSince,
   findLastSeenVersion,
   pickResponseFormat,
+  renderCatalogIndexHtml,
   renderDatasetLandingHtml,
   renderIndexHtml,
   renderTombstone404Html,
@@ -902,3 +905,72 @@ dataRoutes.get("/:datasetId", (c) =>
 dataRoutes.get("/:datasetId/", (c) =>
   datasetRootResponse(c.env, c.req.raw, c.req.param("datasetId")),
 );
+
+/**
+ * GET / -> catalog index of every publicly-hosted dataset.
+ *
+ * The SQL filter is the source of truth for "what data.nemar.org
+ * serves": `visibility='public'` matches the predicate that
+ * `loadPublishedDataset` enforces on every per-id route, so a dataset
+ * that appears in this index is guaranteed to be browseable. The
+ * NOT LIKE 'xx%' / != 'nm099999' clauses strip sandbox-training and
+ * E2E-test ids (those exist as public for technical reasons but are
+ * not real data). `buildCatalogIndexPayload` re-asserts the id filter
+ * in pure TS as defense in depth.
+ *
+ * Per-dataset metadata: title from `datasets.name`, concept DOI from
+ * `datasets.concept_doi`, latest version + publish date pulled from
+ * `dataset_versions` via a correlated subquery (one row per dataset).
+ * Content negotiation matches the rest of the route.
+ */
+async function catalogIndexResponse(env: Bindings, request: Request): Promise<Response> {
+  let rows: CatalogIndexRow[] = [];
+  try {
+    const result = await env.DB.prepare(
+      `SELECT
+         d.dataset_id,
+         d.name,
+         d.concept_doi,
+         (SELECT version FROM dataset_versions dv
+            WHERE dv.dataset_id = d.dataset_id
+            ORDER BY dv.created_at DESC LIMIT 1) AS latest_version,
+         (SELECT created_at FROM dataset_versions dv
+            WHERE dv.dataset_id = d.dataset_id
+            ORDER BY dv.created_at DESC LIMIT 1) AS latest_published_at
+       FROM datasets d
+       WHERE d.visibility = 'public'
+         AND d.dataset_id NOT LIKE 'xx%'
+         AND d.dataset_id <> 'nm099999'
+       ORDER BY d.dataset_id`,
+    ).all<CatalogIndexRow>();
+    rows = result.results ?? [];
+  } catch (err) {
+    console.error(
+      "[data] catalog index query failed:",
+      err instanceof Error ? err.message : String(err),
+    );
+  }
+
+  const payload = buildCatalogIndexPayload({ rows });
+  const accept = request.headers.get("accept");
+  const formatParam = new URL(request.url).searchParams.get("format");
+  const fmt = pickResponseFormat({ accept, formatParam });
+
+  if (fmt === "json") {
+    return new Response(JSON.stringify(payload), {
+      headers: {
+        "Content-Type": "application/json",
+        "Cache-Control": "public, max-age=60",
+      },
+    });
+  }
+
+  return new Response(renderCatalogIndexHtml(payload), {
+    headers: {
+      "Content-Type": "text/html; charset=utf-8",
+      "Cache-Control": "public, max-age=60",
+    },
+  });
+}
+
+dataRoutes.get("/", (c) => catalogIndexResponse(c.env, c.req.raw));

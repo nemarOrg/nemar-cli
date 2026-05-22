@@ -12,6 +12,7 @@ import "./setup";
 import {
   VERSION_TAG_RE,
   buildBidsIndex,
+  buildCatalogIndexPayload,
   buildContentDisposition,
   buildDatasetMetadata,
   normalizeBidsPath,
@@ -19,6 +20,7 @@ import {
   buildLandingPayload,
   buildPersonList,
   buildRedirectUrl,
+  type CatalogIndexRow,
   type DatasetRowForMetadata,
   type DatasetVersionRow,
   deriveSessions,
@@ -27,7 +29,9 @@ import {
   findLastSeenVersion,
   formatBytes,
   humanSize,
+  isPublicCatalogId,
   pickResponseFormat,
+  renderCatalogIndexHtml,
   renderDatasetLandingHtml,
   renderIndexHtml,
   renderTombstone404Html,
@@ -1841,6 +1845,172 @@ describe("qaListingToDirectory (#511)", () => {
     if (r.kind !== "directory") return;
     // Directory wins (added first, dedupe Set kicks in on the file).
     expect(r.children.map((c) => `${c.name}/${c.kind}`)).toEqual(["eeg/dir"]);
+  });
+});
+
+describe("isPublicCatalogId (#584)", () => {
+  test("accepts a real nm dataset id", () => {
+    expect(isPublicCatalogId("nm000132")).toBe(true);
+  });
+  test("rejects the nm099999 e2e test dataset", () => {
+    expect(isPublicCatalogId("nm099999")).toBe(false);
+  });
+  test("rejects xx-prefix sandbox ids", () => {
+    expect(isPublicCatalogId("xx000001")).toBe(false);
+    expect(isPublicCatalogId("xx999999")).toBe(false);
+  });
+});
+
+describe("buildCatalogIndexPayload (#584)", () => {
+  const baseRow: CatalogIndexRow = {
+    dataset_id: "nm000132",
+    name: "EEG Pilot",
+    concept_doi: "10.82901/NEMAR.nm000132",
+    latest_version: "1.0.0",
+    latest_published_at: "2026-05-12T10:00:00Z",
+  };
+
+  test("maps SQL rows to entries with normalized version tag and browse_url", () => {
+    const out = buildCatalogIndexPayload({ rows: [baseRow] });
+    expect(out.count).toBe(1);
+    expect(out.datasets).toHaveLength(1);
+    const entry = out.datasets[0];
+    expect(entry.id).toBe("nm000132");
+    expect(entry.title).toBe("EEG Pilot");
+    expect(entry.latest).toBe("v1.0.0");
+    expect(entry.doi).toBe("10.82901/NEMAR.nm000132");
+    expect(entry.published).toBe("2026-05-12T10:00:00Z");
+    expect(entry.browse_url).toBe("/nm000132/");
+  });
+
+  test("filters out xx and nm099999 even if SQL leaks them", () => {
+    const out = buildCatalogIndexPayload({
+      rows: [
+        baseRow,
+        { ...baseRow, dataset_id: "nm099999" },
+        { ...baseRow, dataset_id: "xx000005" },
+      ],
+    });
+    expect(out.count).toBe(1);
+    expect(out.datasets[0].id).toBe("nm000132");
+  });
+
+  test("sorts datasets by id ascending regardless of input order", () => {
+    const out = buildCatalogIndexPayload({
+      rows: [
+        { ...baseRow, dataset_id: "nm000200" },
+        { ...baseRow, dataset_id: "nm000103" },
+        { ...baseRow, dataset_id: "nm000132" },
+      ],
+    });
+    expect(out.datasets.map((d) => d.id)).toEqual(["nm000103", "nm000132", "nm000200"]);
+  });
+
+  test("preserves nulls when version/title/doi are missing", () => {
+    const out = buildCatalogIndexPayload({
+      rows: [
+        {
+          dataset_id: "nm000400",
+          name: "",
+          concept_doi: null,
+          latest_version: null,
+          latest_published_at: null,
+        },
+      ],
+    });
+    expect(out.datasets[0]).toEqual({
+      id: "nm000400",
+      title: null,
+      latest: null,
+      doi: null,
+      published: null,
+      browse_url: "/nm000400/",
+    });
+  });
+
+  test("empty input yields zero count + empty list", () => {
+    const out = buildCatalogIndexPayload({ rows: [] });
+    expect(out).toEqual({ count: 0, datasets: [] });
+  });
+});
+
+describe("renderCatalogIndexHtml (#584)", () => {
+  test("renders one row per dataset with a link to /<id>/", () => {
+    const html = renderCatalogIndexHtml({
+      count: 2,
+      datasets: [
+        {
+          id: "nm000103",
+          title: "HBN-EEG NC",
+          latest: "v1.0.0",
+          doi: "10.82901/NEMAR.nm000103",
+          published: "2026-04-01T00:00:00Z",
+          browse_url: "/nm000103/",
+        },
+        {
+          id: "nm000132",
+          title: null,
+          latest: null,
+          doi: null,
+          published: null,
+          browse_url: "/nm000132/",
+        },
+      ],
+    });
+    expect(html).toContain('<a href="/nm000103/">nm000103/</a>');
+    expect(html).toContain("HBN-EEG NC");
+    expect(html).toContain("v1.0.0");
+    expect(html).toContain('href="https://doi.org/10.82901/NEMAR.nm000103"');
+    expect(html).toContain("2026-04-01");
+    expect(html).toContain('<a href="/nm000132/">nm000132/</a>');
+    expect(html).toContain("2 datasets hosted");
+  });
+
+  test("singular phrasing for count==1", () => {
+    const html = renderCatalogIndexHtml({
+      count: 1,
+      datasets: [
+        {
+          id: "nm000103",
+          title: "Solo",
+          latest: "v1.0.0",
+          doi: null,
+          published: null,
+          browse_url: "/nm000103/",
+        },
+      ],
+    });
+    expect(html).toContain("1 dataset hosted");
+    expect(html).not.toContain("1 datasets hosted");
+  });
+
+  test("empty catalog renders the empty notice instead of an empty table", () => {
+    const html = renderCatalogIndexHtml({ count: 0, datasets: [] });
+    expect(html).toContain("No publicly-hosted datasets yet.");
+    expect(html).not.toContain("<table>");
+  });
+
+  test("html-escapes dataset titles to block injection", () => {
+    const html = renderCatalogIndexHtml({
+      count: 1,
+      datasets: [
+        {
+          id: "nm000999",
+          title: "<script>alert(1)</script>",
+          latest: null,
+          doi: null,
+          published: null,
+          browse_url: "/nm000999/",
+        },
+      ],
+    });
+    expect(html).not.toContain("<script>alert(1)</script>");
+    expect(html).toContain("&lt;script&gt;alert(1)&lt;/script&gt;");
+  });
+
+  test("links to the json form in the footer", () => {
+    const html = renderCatalogIndexHtml({ count: 0, datasets: [] });
+    expect(html).toContain('<a href="/?format=json">json</a>');
   });
 });
 
