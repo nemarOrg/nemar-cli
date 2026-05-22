@@ -19,6 +19,7 @@ import type {
   StructuredDate,
   StructuredKeyword,
 } from "../../../shared/datacite-constants.js";
+import { isValidDatasetId } from "./datasetId";
 import type { ManifestFile, VersionManifest } from "./manifest";
 import {
   type PresignedUrlOptions,
@@ -1266,9 +1267,14 @@ ${latestShortcut}${emptyNotice}${table}
 }
 
 /**
- * Catalog index types — used by `GET /` on data.nemar.org to list every
- * publicly-hosted dataset. One row per dataset (not per version); the
- * landing page at `/<id>/` is the next click and expands into versions.
+ * Catalog index types — the public JSON shape served by `GET /` on
+ * data.nemar.org. One row per dataset; per-version expansion lives on
+ * the per-id landing page that each row links to.
+ *
+ * Invariant maintained by `buildCatalogIndexPayload`: `count` always
+ * equals `datasets.length`. `count` is on the wire so JSON consumers
+ * can read it without parsing the array; do not construct payloads
+ * outside the builder.
  */
 export interface CatalogIndexRow {
   dataset_id: string;
@@ -1292,16 +1298,27 @@ export interface CatalogIndexPayload {
   datasets: CatalogIndexEntry[];
 }
 
+export interface CatalogIndexBuildResult {
+  payload: CatalogIndexPayload;
+  droppedIds: string[];
+}
+
 /**
  * Per-id gate used by the catalog index. The route's SQL already
- * filters at the query layer (`visibility='public' AND dataset_id NOT
- * LIKE 'xx%' AND dataset_id <> 'nm099999'`); this is the same predicate
- * expressed in TS so the pure payload builder can re-assert it without
- * needing a D1 binding, and tests can exercise the filter directly.
- * Defense in depth: a future schema change that loosens the SQL won't
- * silently leak sandbox or test-only ids into the public index.
+ * filters at the query layer; this is the same predicate expressed in
+ * TS so the pure payload builder can re-assert it without a D1 binding,
+ * and tests can exercise the filter directly. Defense in depth: a
+ * future schema change that loosens the SQL won't silently leak
+ * sandbox, test-only, or malformed ids into the public index.
+ *
+ * The `isValidDatasetId` call enforces the canonical id shape (e.g.
+ * `nm000132`), which the route handler relies on when concatenating
+ * the id into URL paths and `href=` attributes — a malformed id
+ * slipping through here would produce a broken link or, in theory,
+ * a markup injection vector.
  */
 export function isPublicCatalogId(id: string): boolean {
+  if (!isValidDatasetId(id)) return false;
   if (id.startsWith("xx")) return false;
   if (id === "nm099999") return false;
   return true;
@@ -1313,17 +1330,25 @@ export function isPublicCatalogId(id: string): boolean {
  * `renderDatasetLandingHtml`: a single builder feeds both the HTML and
  * the JSON response so the two shapes can't drift.
  *
- * Filtering: rows that fail `isPublicCatalogId` are dropped, and the
- * result is sorted by `dataset_id` ascending so the page is stable
- * regardless of the SQL ORDER BY. The `latest` field is normalized to
- * a `vX.Y.Z` tag via `toVersionTag` so it matches the on-disk version
- * directory name (`/<id>/<tag>/`).
+ * `latest` is normalized to a `vX.Y.Z` tag via `toVersionTag` so it
+ * matches the on-disk version directory name (`/<id>/<tag>/`). The
+ * ascending sort by id is asserted here so the page is stable even if
+ * the SQL ORDER BY is later changed or dropped.
+ *
+ * `droppedIds` lets the caller log a warning when the SQL filter and
+ * the TS filter disagree — that's a signal of schema drift, not a
+ * routine case, and silently dropping rows would hide the bug.
  */
 export function buildCatalogIndexPayload(args: {
   rows: CatalogIndexRow[];
-}): CatalogIndexPayload {
+}): CatalogIndexBuildResult {
+  const droppedIds: string[] = [];
   const datasets: CatalogIndexEntry[] = args.rows
-    .filter((r) => isPublicCatalogId(r.dataset_id))
+    .filter((r) => {
+      if (isPublicCatalogId(r.dataset_id)) return true;
+      droppedIds.push(r.dataset_id);
+      return false;
+    })
     .map((r) => ({
       id: r.dataset_id,
       title: r.name && r.name.trim() !== "" ? r.name : null,
@@ -1333,18 +1358,22 @@ export function buildCatalogIndexPayload(args: {
       browse_url: `/${r.dataset_id}/`,
     }))
     .sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
-  return { count: datasets.length, datasets };
+  return {
+    payload: { count: datasets.length, datasets },
+    droppedIds,
+  };
 }
 
 /**
  * Render the HTML form of the catalog index served at `data.nemar.org/`.
- * Visual style matches `renderDatasetLandingHtml`: monospace, narrow
- * chrome, subtle row formatting, footer with "data.nemar.org". Each
- * row links to `/<id>/` which is the existing per-dataset landing.
+ * Shares the CSS baseline of `renderDatasetLandingHtml` (monospace,
+ * narrow chrome, footer with "data.nemar.org"); the per-id landing
+ * additionally styles a `.latest` highlight that doesn't apply here.
+ * Each row links to `/<id>/` which is the existing per-dataset landing.
  *
- * Empty catalog branch keeps the same chrome so a machine consumer that
- * happens to fetch HTML still gets a well-formed page with a stable
- * structure (no surprise 404 / blank body).
+ * Empty-catalog branch keeps the same chrome so a machine consumer that
+ * fetches HTML still gets a well-formed page with a stable structure
+ * (no surprise 404 or blank body).
  */
 export function renderCatalogIndexHtml(payload: CatalogIndexPayload): string {
   const rows = payload.datasets
@@ -1356,7 +1385,11 @@ export function renderCatalogIndexHtml(payload: CatalogIndexPayload): string {
       const doiCell = d.doi
         ? `<a href="https://doi.org/${escapeHtml(d.doi)}">${escapeHtml(d.doi)}</a>`
         : "-";
-      const published = d.published ? escapeHtml(d.published.slice(0, 10)) : "-";
+      // Slice yields "" for an empty input string and a malformed
+      // (non-ISO) value also degrades cleanly; either way fall back
+      // to "-" rather than rendering an empty cell.
+      const publishedSlice = d.published ? d.published.slice(0, 10) : "";
+      const published = publishedSlice ? escapeHtml(publishedSlice) : "-";
       return `<tr><td><a href="/${idHref}/">${id}/</a></td><td>${title}</td><td>${latest}</td><td>${doiCell}</td><td>${published}</td></tr>`;
     })
     .join("");

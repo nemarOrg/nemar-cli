@@ -1848,7 +1848,7 @@ describe("qaListingToDirectory (#511)", () => {
   });
 });
 
-describe("isPublicCatalogId (#584)", () => {
+describe("isPublicCatalogId (#584) — rejects sandbox, test, and malformed ids", () => {
   test("accepts a real nm dataset id", () => {
     expect(isPublicCatalogId("nm000132")).toBe(true);
   });
@@ -1859,9 +1859,16 @@ describe("isPublicCatalogId (#584)", () => {
     expect(isPublicCatalogId("xx000001")).toBe(false);
     expect(isPublicCatalogId("xx999999")).toBe(false);
   });
+  test("rejects ids that don't match the canonical (nm|xx|on)NNNNNN shape", () => {
+    expect(isPublicCatalogId("nm132")).toBe(false);
+    expect(isPublicCatalogId("nm000132a")).toBe(false);
+    expect(isPublicCatalogId("../etc/passwd")).toBe(false);
+    expect(isPublicCatalogId('nm000132"><script>')).toBe(false);
+    expect(isPublicCatalogId("")).toBe(false);
+  });
 });
 
-describe("buildCatalogIndexPayload (#584)", () => {
+describe("buildCatalogIndexPayload (#584) — SQL row to payload mapping", () => {
   const baseRow: CatalogIndexRow = {
     dataset_id: "nm000132",
     name: "EEG Pilot",
@@ -1871,10 +1878,11 @@ describe("buildCatalogIndexPayload (#584)", () => {
   };
 
   test("maps SQL rows to entries with normalized version tag and browse_url", () => {
-    const out = buildCatalogIndexPayload({ rows: [baseRow] });
-    expect(out.count).toBe(1);
-    expect(out.datasets).toHaveLength(1);
-    const entry = out.datasets[0];
+    const { payload, droppedIds } = buildCatalogIndexPayload({ rows: [baseRow] });
+    expect(payload.count).toBe(1);
+    expect(payload.datasets).toHaveLength(1);
+    expect(droppedIds).toEqual([]);
+    const entry = payload.datasets[0];
     expect(entry.id).toBe("nm000132");
     expect(entry.title).toBe("EEG Pilot");
     expect(entry.latest).toBe("v1.0.0");
@@ -1883,31 +1891,33 @@ describe("buildCatalogIndexPayload (#584)", () => {
     expect(entry.browse_url).toBe("/nm000132/");
   });
 
-  test("filters out xx and nm099999 even if SQL leaks them", () => {
-    const out = buildCatalogIndexPayload({
+  test("filters out xx, nm099999, and malformed ids — and surfaces them in droppedIds", () => {
+    const { payload, droppedIds } = buildCatalogIndexPayload({
       rows: [
         baseRow,
         { ...baseRow, dataset_id: "nm099999" },
         { ...baseRow, dataset_id: "xx000005" },
+        { ...baseRow, dataset_id: "nm132" },
       ],
     });
-    expect(out.count).toBe(1);
-    expect(out.datasets[0].id).toBe("nm000132");
+    expect(payload.count).toBe(1);
+    expect(payload.datasets[0].id).toBe("nm000132");
+    expect(droppedIds.sort()).toEqual(["nm099999", "nm132", "xx000005"]);
   });
 
   test("sorts datasets by id ascending regardless of input order", () => {
-    const out = buildCatalogIndexPayload({
+    const { payload } = buildCatalogIndexPayload({
       rows: [
         { ...baseRow, dataset_id: "nm000200" },
         { ...baseRow, dataset_id: "nm000103" },
         { ...baseRow, dataset_id: "nm000132" },
       ],
     });
-    expect(out.datasets.map((d) => d.id)).toEqual(["nm000103", "nm000132", "nm000200"]);
+    expect(payload.datasets.map((d) => d.id)).toEqual(["nm000103", "nm000132", "nm000200"]);
   });
 
   test("preserves nulls when version/title/doi are missing", () => {
-    const out = buildCatalogIndexPayload({
+    const { payload } = buildCatalogIndexPayload({
       rows: [
         {
           dataset_id: "nm000400",
@@ -1918,7 +1928,7 @@ describe("buildCatalogIndexPayload (#584)", () => {
         },
       ],
     });
-    expect(out.datasets[0]).toEqual({
+    expect(payload.datasets[0]).toEqual({
       id: "nm000400",
       title: null,
       latest: null,
@@ -1928,13 +1938,14 @@ describe("buildCatalogIndexPayload (#584)", () => {
     });
   });
 
-  test("empty input yields zero count + empty list", () => {
+  test("empty input yields zero count + empty list + empty dropped", () => {
     const out = buildCatalogIndexPayload({ rows: [] });
-    expect(out).toEqual({ count: 0, datasets: [] });
+    expect(out.payload).toEqual({ count: 0, datasets: [] });
+    expect(out.droppedIds).toEqual([]);
   });
 });
 
-describe("renderCatalogIndexHtml (#584)", () => {
+describe("renderCatalogIndexHtml (#584) — HTML escaping and edge cases", () => {
   test("renders one row per dataset with a link to /<id>/", () => {
     const html = renderCatalogIndexHtml({
       count: 2,
@@ -2011,6 +2022,43 @@ describe("renderCatalogIndexHtml (#584)", () => {
   test("links to the json form in the footer", () => {
     const html = renderCatalogIndexHtml({ count: 0, datasets: [] });
     expect(html).toContain('<a href="/?format=json">json</a>');
+  });
+
+  test("html-escapes the DOI value so a quote in the doi can't break out of the href", () => {
+    const html = renderCatalogIndexHtml({
+      count: 1,
+      datasets: [
+        {
+          id: "nm000999",
+          title: "ok",
+          latest: null,
+          doi: '10.82901/bad"doi',
+          published: null,
+          browse_url: "/nm000999/",
+        },
+      ],
+    });
+    // The raw double-quote must not appear inside the rendered href.
+    expect(html).not.toContain('href="https://doi.org/10.82901/bad"doi"');
+    expect(html).toContain('href="https://doi.org/10.82901/bad&quot;doi"');
+  });
+
+  test("renders '-' for malformed or empty published values, not an empty cell", () => {
+    const html = renderCatalogIndexHtml({
+      count: 1,
+      datasets: [
+        {
+          id: "nm000999",
+          title: "ok",
+          latest: null,
+          doi: null,
+          published: "",
+          browse_url: "/nm000999/",
+        },
+      ],
+    });
+    // The published cell is the last <td> of the row.
+    expect(html).toMatch(/<td>-<\/td><\/tr>/);
   });
 });
 

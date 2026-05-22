@@ -13,6 +13,7 @@
 
 import { Hono } from "hono";
 import {
+  type CatalogIndexBuildResult,
   type CatalogIndexRow,
   type DatasetRowForMetadata,
   type DatasetVersionRow,
@@ -881,11 +882,15 @@ async function datasetRootResponse(
   const formatParam = new URL(request.url).searchParams.get("format");
   const fmt = pickResponseFormat({ accept, formatParam });
 
+  // Vary: Accept tells shared caches that the response body depends on
+  // the Accept header, so a browser request (HTML) and a machine request
+  // (JSON) don't poison each other's cached copy at the same URL.
   if (fmt === "json") {
     return new Response(JSON.stringify(payload), {
       headers: {
         "Content-Type": "application/json",
         "Cache-Control": "public, max-age=60",
+        Vary: "Accept",
       },
     });
   }
@@ -895,6 +900,7 @@ async function datasetRootResponse(
     headers: {
       "Content-Type": "text/html; charset=utf-8",
       "Cache-Control": "public, max-age=60",
+      Vary: "Accept",
     },
   });
 }
@@ -909,22 +915,26 @@ dataRoutes.get("/:datasetId/", (c) =>
 /**
  * GET / -> catalog index of every publicly-hosted dataset.
  *
- * The SQL filter is the source of truth for "what data.nemar.org
- * serves": `visibility='public'` matches the predicate that
- * `loadPublishedDataset` enforces on every per-id route, so a dataset
- * that appears in this index is guaranteed to be browseable. The
- * NOT LIKE 'xx%' / != 'nm099999' clauses strip sandbox-training and
- * E2E-test ids (those exist as public for technical reasons but are
- * not real data). `buildCatalogIndexPayload` re-asserts the id filter
- * in pure TS as defense in depth.
+ * SQL filter (`visibility='public' AND dataset_id NOT LIKE 'xx%' AND
+ * dataset_id <> 'nm099999'`) mirrors the predicate `loadPublishedDataset`
+ * enforces on every per-id route, with `xx*` and the E2E-test id stripped.
+ * `buildCatalogIndexPayload` re-asserts the id filter (including a strict
+ * `isValidDatasetId` shape check) in pure TS as defense in depth, so a
+ * malformed id can never reach the renderer or an `href=` attribute.
  *
- * Per-dataset metadata: title from `datasets.name`, concept DOI from
- * `datasets.concept_doi`, latest version + publish date pulled from
- * `dataset_versions` via a correlated subquery (one row per dataset).
- * Content negotiation matches the rest of the route.
+ * D1 failure path returns 503 with `Retry-After`, not a 200 with an empty
+ * list. The whole response *is* the D1 result here, so silently degrading
+ * to "no datasets hosted" would misrepresent system state to humans and
+ * starve monitoring of the 5xx signal. The response is not cached, so the
+ * next request retries naturally once D1 recovers.
  */
 async function catalogIndexResponse(env: Bindings, request: Request): Promise<Response> {
-  let rows: CatalogIndexRow[] = [];
+  const cfRay = request.headers.get("cf-ray") ?? "unknown";
+  const accept = request.headers.get("accept");
+  const formatParam = new URL(request.url).searchParams.get("format");
+  const fmt = pickResponseFormat({ accept, formatParam });
+
+  let rows: CatalogIndexRow[] | null = null;
   try {
     const result = await env.DB.prepare(
       `SELECT
@@ -946,30 +956,65 @@ async function catalogIndexResponse(env: Bindings, request: Request): Promise<Re
     rows = result.results ?? [];
   } catch (err) {
     console.error(
-      "[data] catalog index query failed:",
-      err instanceof Error ? err.message : String(err),
+      `[data] catalog index D1 query failed cf-ray=${cfRay}:`,
+      err instanceof Error ? (err.stack ?? err.message) : String(err),
     );
   }
 
-  const payload = buildCatalogIndexPayload({ rows });
-  const accept = request.headers.get("accept");
-  const formatParam = new URL(request.url).searchParams.get("format");
-  const fmt = pickResponseFormat({ accept, formatParam });
+  if (rows === null) {
+    return catalogUnavailableResponse(fmt);
+  }
+
+  const built: CatalogIndexBuildResult = buildCatalogIndexPayload({ rows });
+  if (built.droppedIds.length > 0) {
+    // SQL and TS filters disagree -> schema drift, not a routine case.
+    console.warn(
+      `[data] catalog index dropped ${built.droppedIds.length} ids that SQL accepted: ${built.droppedIds.join(",")}`,
+    );
+  }
 
   if (fmt === "json") {
-    return new Response(JSON.stringify(payload), {
+    return new Response(JSON.stringify(built.payload), {
       headers: {
         "Content-Type": "application/json",
         "Cache-Control": "public, max-age=60",
+        Vary: "Accept",
       },
     });
   }
 
-  return new Response(renderCatalogIndexHtml(payload), {
+  return new Response(renderCatalogIndexHtml(built.payload), {
     headers: {
       "Content-Type": "text/html; charset=utf-8",
       "Cache-Control": "public, max-age=60",
+      Vary: "Accept",
     },
+  });
+}
+
+function catalogUnavailableResponse(fmt: "html" | "json"): Response {
+  const baseHeaders = {
+    "Retry-After": "30",
+    Vary: "Accept",
+  };
+  if (fmt === "json") {
+    return new Response(JSON.stringify({ error: "catalog_unavailable" }), {
+      status: 503,
+      headers: { ...baseHeaders, "Content-Type": "application/json" },
+    });
+  }
+  const html = `<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>data.nemar.org</title>
+<style>body{font-family:ui-monospace,Menlo,Consolas,monospace;margin:1.5em;max-width:60em}h1{font-size:1.1em}.foot{color:#888;font-size:.9em;margin-top:2em}</style>
+</head><body>
+<h1>Catalog temporarily unavailable</h1>
+<p>The dataset catalog could not be loaded right now. Please try again in a few seconds.</p>
+<div class="foot">data.nemar.org</div>
+</body></html>
+`;
+  return new Response(html, {
+    status: 503,
+    headers: { ...baseHeaders, "Content-Type": "text/html; charset=utf-8" },
   });
 }
 
