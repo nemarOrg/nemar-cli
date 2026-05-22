@@ -30,14 +30,33 @@ describe("buildReindexFilterQuery", () => {
 
   test("filter=missing-metadata predicates every NULL column", () => {
     const q = buildReindexFilterQuery("missing-metadata");
-    expect(q.params).toEqual([]);
+    // Default recency guard: skip rows attempted in the last 24h so a
+    // dataset whose upstream genuinely lacks a column doesn't loop.
+    expect(q.params).toEqual(["-1 days"]);
     expect(q.sql).toContain("subject_count IS NULL");
     expect(q.sql).toContain("modalities IS NULL");
     expect(q.sql).toContain("file_size IS NULL");
     expect(q.sql).toContain("total_files IS NULL");
-    // The predicates are OR'd so any single NULL field triggers a match.
+    expect(q.sql).toContain("metadata_updated_at IS NULL");
+    expect(q.sql).toContain("metadata_updated_at < datetime('now', ?)");
+    // The NULL predicates are OR'd so any single NULL field triggers a match.
     const between = q.sql.split("subject_count IS NULL")[1] ?? "";
     expect(between.toUpperCase()).toContain(" OR ");
+  });
+
+  test("filter=missing-metadata honors olderThanDays override (operator force-retry)", () => {
+    expect(buildReindexFilterQuery("missing-metadata", { olderThanDays: 0 }).params).toEqual([
+      "-0 days",
+    ]);
+    expect(buildReindexFilterQuery("missing-metadata", { olderThanDays: 7 }).params).toEqual([
+      "-7 days",
+    ]);
+  });
+
+  test("filter=missing-metadata rejects negative recency", () => {
+    expect(() => buildReindexFilterQuery("missing-metadata", { olderThanDays: -1 })).toThrow(
+      /Invalid older_than_days/,
+    );
   });
 
   test("filter=stale uses default 30 days when not overridden", () => {
