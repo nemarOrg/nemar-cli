@@ -2,8 +2,10 @@
  * BIDS Validator Service
  *
  * Wraps the BIDS validator (via Deno subprocess) to validate datasets.
- * Uses Deno's --reload flag to ensure the latest validator is fetched from JSR
- * when the cached version is stale (older than 7 days) or when explicitly requested.
+ * The validator version is pinned exactly via `validator-version.json` so the
+ * CLI and the per-dataset CI workflow always resolve the same release (see
+ * issue #586). The weekly `bump-validator.yml` workflow opens a PR when JSR
+ * publishes a newer 2.x release.
  *
  * Requirements:
  * - Deno must be installed (https://deno.com)
@@ -14,9 +16,11 @@ import { existsSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { spawn } from "bun";
+import validatorPin from "../../validator-version.json" with { type: "json" };
 
-const VALIDATOR_JSR_SPECIFIER = "jsr:@bids/validator@^2";
-const STALE_THRESHOLD_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
+export const VALIDATOR_VERSION = validatorPin.version;
+const VALIDATOR_JSR_SPECIFIER = `${validatorPin.specifier}@${VALIDATOR_VERSION}`;
+const STALE_THRESHOLD_MS = 24 * 60 * 60 * 1000; // 1 day — pin changes weekly via bump-validator.yml
 
 /**
  * BIDS validation issue from the validator
