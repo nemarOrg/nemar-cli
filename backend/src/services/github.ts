@@ -1407,218 +1407,10 @@ jobs:
         run: node /tmp/stream-archive.js
 `;
 
-  // LLM Metadata Enrichment workflow. Template version: 2 (epic #417 phase 1).
-  //
-  // The Action sends \`client_commits: true\` in the webhook payload. When the
-  // Worker honors the flag (current backend), it returns the metadata commit
-  // payload in the response and the Action commits with its own GITHUB_TOKEN,
-  // off the shared admin PAT. When the flag is ignored (older backend), the
-  // Worker commits itself; the Action notices the absence of \`client_commits\`
-  // in the response and skips local commit, falling through to the
-  // worker-side behavior.
-  //
-  // The workflow triggers on both \`main\` (normal edits) and \`release/**\`
-  // branches (release PRs). On a release branch the Action passes the current
-  // ref to the webhook so enrichment reads + commits on the right snapshot;
-  // this ensures the merge commit (and the tag created from it) already
-  // contain a fresh \`.nemar/metadata.json\` when version-doi.yml mints the DOI.
-  const llmEnrichment = `name: LLM Metadata Enrichment
-
-on:
-  push:
-    branches:
-      - main
-      - 'release/**'
-    paths:
-      - 'README.md'
-      - 'dataset_description.json'
-      - '.nemar/metadata.json'
-  workflow_dispatch:
-
-jobs:
-  enrich:
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    steps:
-      - name: Mint App installation token
-        id: app-token
-        uses: actions/create-github-app-token@v1
-        with:
-          app-id: \${{ secrets.NEMAR_APP_ID }}
-          private-key: \${{ secrets.NEMAR_APP_PRIVATE_KEY }}
-          owner: nemarDatasets
-          repositories: \${{ github.event.repository.name }}
-
-      - name: Checkout repository
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 1
-          ref: \${{ github.ref_name }}
-          token: \${{ steps.app-token.outputs.token }}
-
-      - name: Trigger enrichment and commit locally if asked
-        env:
-          NEMAR_WEBHOOK_TOKEN: \${{ secrets.NEMAR_WEBHOOK_TOKEN }}
-        run: |
-          REPO_NAME="\${{ github.event.repository.name }}"
-          BRANCH_REF="\${{ github.ref_name }}"
-
-          # Skip if webhook token not configured
-          if [ -z "$NEMAR_WEBHOOK_TOKEN" ]; then
-            echo "NEMAR_WEBHOOK_TOKEN not configured, skipping LLM enrichment"
-            exit 0
-          fi
-
-          # Force re-enrichment on manual workflow_dispatch and on every
-          # release-branch push. Release pushes only change the Version field
-          # in dataset_description.json, so the source_hash short-circuit
-          # would otherwise skip the run; we want a fresh enrichment baked
-          # into the release PR before merge.
-          FORCE="false"
-          case "$BRANCH_REF" in
-            release/*) FORCE="true" ;;
-          esac
-          if [ "\${{ github.event_name }}" = "workflow_dispatch" ]; then
-            FORCE="true"
-          fi
-
-          echo "Triggering LLM enrichment for $REPO_NAME on ref=$BRANCH_REF (force=$FORCE)"
-
-          # Capture full response (no trailing-newline stripping) so jq can
-          # parse the body. The Worker returns 200 even when commit_error
-          # is populated; non-2xx is reserved for hard failures.
-          #
-          # Retry 5xx and curl-level failures up to 3 times with linear
-          # backoff. 4xx is terminal (config error: bad token, missing
-          # dataset row, malformed payload) and won't be helped by retry.
-          # After exhausting retries, exit 1 so the run shows red — burying
-          # enrichment failures behind ::warning silently desyncs D1 from
-          # the repo, which we cannot afford during the OpenNeuro mass-
-          # import. Issue #598. Pairs with Worker-side #596 self-heal.
-          BODY_FILE=$(mktemp)
-          HTTP_CODE=0
-          for attempt in 1 2 3; do
-            HTTP_CODE=$(curl -sS -o "$BODY_FILE" -w "%{http_code}" -X POST \\
-              "https://api.nemar.org/webhooks/llm-enrich" \\
-              -H "Content-Type: application/json" \\
-              -H "X-Webhook-Token: $NEMAR_WEBHOOK_TOKEN" \\
-              -d "{\\"dataset_id\\": \\"$REPO_NAME\\", \\"force\\": $FORCE, \\"client_commits\\": true, \\"ref\\": \\"$BRANCH_REF\\"}") || HTTP_CODE=0
-            echo "attempt $attempt: HTTP $HTTP_CODE"
-            cat "$BODY_FILE"
-            echo
-            if [ "$HTTP_CODE" -ge 200 ] && [ "$HTTP_CODE" -lt 300 ]; then
-              break
-            fi
-            # 401 is treated as transient (retried) rather than terminal:
-            # during a NEMAR_WEBHOOK_TOKEN rotation the first request can
-            # race the new value's propagation across all Workers
-            # instances, and a brief carve-out lets the rotation window
-            # heal itself. Persistent 401 still exits 1 via the
-            # post-loop check. Code-review #599 fix.
-            if [ "$HTTP_CODE" -ge 400 ] && [ "$HTTP_CODE" -lt 500 ] && [ "$HTTP_CODE" -ne 401 ]; then
-              echo "::error::Worker returned $HTTP_CODE (4xx is terminal - check NEMAR_WEBHOOK_TOKEN, dataset_id, and payload shape)"
-              rm -f "$BODY_FILE"
-              exit 1
-            fi
-            if [ "$attempt" -lt 3 ]; then
-              echo "::warning::attempt $attempt: HTTP $HTTP_CODE (transient); retrying in $((attempt * 5))s"
-              sleep $((attempt * 5))
-            fi
-          done
-
-          if [ "$HTTP_CODE" -lt 200 ] || [ "$HTTP_CODE" -ge 300 ]; then
-            echo "::error::LLM enrichment failed after 3 attempts (HTTP $HTTP_CODE). D1 enrichment_json is stale for this dataset; rerun this workflow once the upstream issue is resolved."
-            rm -f "$BODY_FILE"
-            exit 1
-          fi
-
-          # If the Worker honored client_commits, apply the returned payload.
-          # Older Workers ignore the flag and have already committed themselves;
-          # in that case client_commits will be missing/false and we no-op.
-          CLIENT_COMMITS=$(jq -r '.client_commits // false' "$BODY_FILE")
-          if [ "$CLIENT_COMMITS" != "true" ]; then
-            echo "Worker committed metadata server-side; nothing to write locally."
-            rm -f "$BODY_FILE"
-            exit 0
-          fi
-
-          # Validate the payload contains everything we need before touching
-          # the working tree. \`jq -e\` exits non-zero on missing/null fields
-          # so we never write the literal string "null" over real metadata.
-          if ! jq -e '.metadata_path' "$BODY_FILE" > /dev/null; then
-            echo "::error::client_commits=true but metadata_path missing; refusing to write"
-            rm -f "$BODY_FILE"
-            exit 1
-          fi
-          if ! jq -e '.metadata_content' "$BODY_FILE" > /dev/null; then
-            echo "::error::client_commits=true but metadata_content missing; refusing to write"
-            rm -f "$BODY_FILE"
-            exit 1
-          fi
-          if ! jq -e '.commit_message' "$BODY_FILE" > /dev/null; then
-            echo "::error::client_commits=true but commit_message missing; refusing to write"
-            rm -f "$BODY_FILE"
-            exit 1
-          fi
-
-          METADATA_PATH=$(jq -r '.metadata_path' "$BODY_FILE")
-          COMMIT_MESSAGE=$(jq -r '.commit_message' "$BODY_FILE")
-
-          mkdir -p "$(dirname "$METADATA_PATH")"
-          jq -r '.metadata_content' "$BODY_FILE" > "$METADATA_PATH"
-
-          # Validate the file we just wrote is non-empty and parseable JSON.
-          if [ ! -s "$METADATA_PATH" ] || ! jq empty "$METADATA_PATH" 2>/dev/null; then
-            echo "::error::metadata_content was empty or not JSON; reverting"
-            rm -f "$METADATA_PATH"
-            rm -f "$BODY_FILE"
-            exit 1
-          fi
-
-          # Ensure each requested bidsignore entry is present exactly once.
-          touch .bidsignore
-          while IFS= read -r entry; do
-            [ -z "$entry" ] && continue
-            grep -qxF "$entry" .bidsignore || echo "$entry" >> .bidsignore
-          done < <(jq -r '.bidsignore_entries[]?' "$BODY_FILE")
-
-          rm -f "$BODY_FILE"
-
-          git config user.name "nemar-publish-bot"
-          git config user.email "nemar-publish-bot@users.noreply.github.com"
-          git add "$METADATA_PATH" .bidsignore
-
-          if git diff --cached --quiet; then
-            echo "Metadata already up-to-date; nothing to commit."
-            exit 0
-          fi
-
-          git commit -m "$COMMIT_MESSAGE [skip ci]"
-
-          # Concurrent enrichment runs can race on the push. Retry rebase+push
-          # a few times with jitter; on final failure raise an error so the
-          # run is RED and operators are alerted. The Worker's D1 cache was
-          # already updated, so a missing repo commit will desync until the
-          # next README/dataset_description push triggers re-enrichment.
-          # Push to whichever ref triggered this run (main or release/*).
-          pushed=0
-          for attempt in 1 2 3; do
-            if git pull --rebase origin "$BRANCH_REF" && git push origin "HEAD:$BRANCH_REF"; then
-              pushed=1
-              break
-            fi
-            echo "::warning::push attempt $attempt failed (see git output above); retrying in $((attempt * 2))s"
-            sleep $((attempt * 2))
-          done
-
-          if [ "$pushed" != "1" ]; then
-            echo "::error::Action-side metadata commit could not be pushed after 3 attempts; D1 cache is ahead of the repo for this enrichment cycle"
-            exit 1
-          fi
-          echo "Action-side metadata commit applied."
-`;
-
+  // llm-enrichment.yml relocated to nemarDatasets/.github/.github/workflows/run-enrichment.yml
+  // and triggered via repository_dispatch from POST /webhooks/github. Phase 1 of
+  // epic #601 / sub-issue #602. Existing dataset repos are cleaned by
+  // scripts/strip-per-repo-llm-enrichment.ts.
   // Version DOI workflow: publishes a DOI then triggers archive generation.
   // Fires on any v* tag push (from pr-merge create-release, manual tags, or admin tags).
   const versionDoi = `name: Version DOI
@@ -1787,7 +1579,6 @@ jobs:
     { path: ".github/workflows/version-check.yml", content: versionCheck },
     { path: ".github/workflows/pr-merge.yml", content: prMerge },
     { path: ".github/workflows/generate-archive.yml", content: generateArchive },
-    { path: ".github/workflows/llm-enrichment.yml", content: llmEnrichment },
     { path: ".github/workflows/version-doi.yml", content: versionDoi },
   ];
 }
@@ -2266,6 +2057,54 @@ export async function triggerManifestGeneration(
   if (!response.ok) {
     const error = await response.text();
     throw new Error(`Failed to trigger manifest generation: HTTP ${response.status} - ${error}`);
+  }
+}
+
+/**
+ * Trigger the central LLM-enrichment workflow on `nemarDatasets/.github` via
+ * `repository_dispatch[run-enrichment]`. The workflow mints a per-repo App
+ * token scoped to `datasetId`, checks out that repo at `ref`, POSTs to
+ * `/webhooks/llm-enrich`, and commits the returned `.nemar/metadata.json`
+ * back to the dataset repo. No callback handshake — the workflow's POST to
+ * `/webhooks/llm-enrich` IS the round-trip that updates D1.
+ *
+ * Wraps the same dispatch shape as `triggerManifestGeneration`; differs only
+ * in the event_type and the (much simpler) client_payload. The `pat` must
+ * carry write access on `nemarDatasets/.github`'s dispatch endpoint — use
+ * `getDatasetsToken()`.
+ *
+ * Phase 1 of epic #601 (sub-issue #602). The legacy per-repo
+ * `llm-enrichment.yml` is removed in the same PR; existing dataset repos are
+ * stripped via `scripts/strip-per-repo-llm-enrichment.ts` as the final
+ * cutover step.
+ */
+export async function triggerEnrichmentRun(
+  datasetId: string,
+  ref: string,
+  force: boolean,
+  pat: string,
+): Promise<void> {
+  const response = await fetch(`${GITHUB_API()}/repos/${CENTRAL_WORKFLOW_REPO}/dispatches`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${pat}`,
+      Accept: "application/vnd.github.v3+json",
+      "User-Agent": "NEMAR-API",
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      event_type: "run-enrichment",
+      client_payload: {
+        dataset_id: datasetId,
+        ref,
+        force,
+      },
+    }),
+  });
+
+  if (!response.ok) {
+    const error = await response.text();
+    throw new Error(`Failed to trigger enrichment run: HTTP ${response.status} - ${error}`);
   }
 }
 

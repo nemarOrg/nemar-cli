@@ -73,61 +73,14 @@ describe("CI workflow templates", () => {
     ]);
   });
 
-  test("llm-enrichment opts into client_commits and has write permission", () => {
-    // Phase 5 contract: the Action sends client_commits:true so the Worker
-    // returns the metadata payload and skips its own commit. The Action
-    // commits with the per-repo GITHUB_TOKEN, moving the REST traffic off
-    // the shared admin PAT.
+  test("llm-enrichment.yml is no longer shipped per-repo (centralized, #602)", () => {
+    // The template is relocated to
+    // `nemarDatasets/.github/.github/workflows/run-enrichment.yml` and
+    // triggered via the Worker's /webhooks/github push handler. A future
+    // edit that adds it back to deployWorkflows() would defeat the
+    // centralization; pin the absence.
     const llm = templates.find((t) => t.path.endsWith("llm-enrichment.yml"));
-    expect(llm).toBeDefined();
-    if (!llm) return;
-    expect(llm.content).toContain("\\\"client_commits\\\": true");
-    expect(llm.content).toContain("actions/checkout@v4");
-    // permissions should be job-scoped, not workflow-scoped, so future jobs
-    // added to this template don't silently inherit write.
-    const parsed = parse(llm.content) as {
-      permissions?: unknown;
-      jobs: Record<string, { permissions?: { contents?: string } }>;
-    };
-    expect(parsed.permissions).toBeUndefined();
-    expect(parsed.jobs.enrich.permissions?.contents).toBe("write");
-    // Worker-fallback path: when client_commits is missing/false in the
-    // response (older backend), the Action must skip the local commit.
-    expect(llm.content).toMatch(/client_commits.*\/\/\s*false/);
-  });
-
-  test("llm-enrichment triggers on release branches and passes ref through (epic #417 phase 1)", () => {
-    const llm = templates.find((t) => t.path.endsWith("llm-enrichment.yml"));
-    expect(llm).toBeDefined();
-    if (!llm) return;
-
-    const parsed = parse(llm.content) as {
-      on: { push?: { branches?: string[]; paths?: string[] } };
-    };
-    // Trigger must cover release/** branches so the release PR re-enriches
-    // before merge, baking fresh .nemar/metadata.json into the merge commit
-    // (and therefore into the tag created by pr-merge.yml).
-    expect(parsed.on.push?.branches).toEqual(["main", "release/**"]);
-    // .nemar/metadata.json change must also re-trigger so a hand-edit reflects.
-    expect(parsed.on.push?.paths).toContain(".nemar/metadata.json");
-
-    // The Action must pass ref to the webhook so the Worker reads from the
-    // right snapshot (main, release/v*, etc.) instead of always "main".
-    expect(llm.content).toContain('\\"ref\\": \\"$BRANCH_REF\\"');
-    expect(llm.content).toContain('BRANCH_REF="${{ github.ref_name }}"');
-
-    // Release-branch pushes must force re-enrichment so the source_hash
-    // short-circuit doesn't skip a Version-only bump.
-    expect(llm.content).toMatch(/case "\$BRANCH_REF" in\s*\n\s*release\/\*\) FORCE="true"/);
-
-    // The commit-back path must push to the branch that triggered the run,
-    // not always to main.
-    expect(llm.content).toContain('git push origin "HEAD:$BRANCH_REF"');
-    expect(llm.content).toContain('git pull --rebase origin "$BRANCH_REF"');
-
-    // Checkout must use the triggering ref (not the default branch) so the
-    // local working tree matches what we're about to commit back to.
-    expect(llm.content).toContain("ref: ${{ github.ref_name }}");
+    expect(llm).toBeUndefined();
   });
 
   test("version-doi.yml refreshes enrichment before minting (epic #417 phase 1)", () => {
@@ -176,45 +129,6 @@ describe("CI workflow templates", () => {
     expect(publishIdx).toBeGreaterThan(refreshIdx);
   });
 
-  test("llm-enrichment.yml retries transient failures and fails loud on persistent errors (issue #598)", () => {
-    const llm = templates.find((t) => t.path.endsWith("llm-enrichment.yml"));
-    expect(llm).toBeDefined();
-    if (!llm) return;
-    // Network/DNS/TLS failure normalises to HTTP_CODE=0; the retry loop
-    // must treat 0 as transient (falls through 2xx / 4xx checks into the
-    // retry branch). Without `|| HTTP_CODE=0` the variable would stay
-    // empty and the numeric comparisons would error out the step under
-    // `set -e`.
-    expect(llm.content).toContain("|| HTTP_CODE=0");
-    // Retry loop is the new contract: 3 attempts with linear backoff,
-    // 4xx terminal (except 401 — see carve-out below), persistent 5xx/0
-    // exits 1 (issue #598).
-    expect(llm.content).toMatch(/for attempt in 1 2 3; do/);
-    expect(llm.content).toContain('"$HTTP_CODE" -lt 500');
-    expect(llm.content).toContain('"$HTTP_CODE" -ge 400');
-    expect(llm.content).toContain("(4xx is terminal");
-    expect(llm.content).toContain("LLM enrichment failed after 3 attempts");
-    // 401 carve-out: NEMAR_WEBHOOK_TOKEN rotation across Workers
-    // instances can produce a brief 401 race that retry covers. Without
-    // the `-ne 401` guard, a rotation concurrent with a backfill would
-    // silently abort every in-flight workflow at attempt 1. Code-review
-    // #599 fix.
-    expect(llm.content).toContain('"$HTTP_CODE" -ne 401');
-    // The terminal failure branch must explicitly exit 1 — not exit 0,
-    // not omit the exit code. Anchor on the post-loop block to catch a
-    // future edit that removes the exit while keeping the message.
-    const postLoopMatch = llm.content.match(
-      /LLM enrichment failed after 3 attempts[\s\S]{0,200}?exit 1/,
-    );
-    expect(postLoopMatch).not.toBeNull();
-    // The terminal branch must exit 1, not 0 — buried failures during
-    // the OpenNeuro mass-import was the original symptom.
-    expect(llm.content).not.toContain("LLM enrichment failed (HTTP $HTTP_CODE) - this is non-blocking");
-    // Push-retry warnings should still point operators at the git output
-    // they need to read instead of being opaque.
-    expect(llm.content).toContain("(see git output above)");
-  });
-
   test("generate-archive workflow pins archiver to v7", () => {
     // Guards against a future hand-edit dropping the archiver version pin.
     // archiver v8 is ESM-only and breaks the require()-style streaming
@@ -235,7 +149,10 @@ describe("CI workflow templates", () => {
     // repo scope and no static GITHUB_TOKEN. Parsed YAML so input values
     // are pinned exactly (a copy-pasted hardcoded `repositories:` would
     // still pass a substring check; this catches it).
-    const writeTemplates = ["pr-merge.yml", "llm-enrichment.yml", "version-doi.yml"];
+    // llm-enrichment.yml was removed in #602 (centralized); the central
+    // workflow on nemarDatasets/.github has its own App-token discipline
+    // and is reviewed separately.
+    const writeTemplates = ["pr-merge.yml", "version-doi.yml"];
     for (const name of writeTemplates) {
       const tpl = templates.find((t) => t.path.endsWith(name));
       expect(tpl, `${name} missing from templates`).toBeDefined();
