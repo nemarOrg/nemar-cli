@@ -35,8 +35,11 @@ survives any individual maintainer leaving.
    - **Repository permissions**:
      - Contents: **Read & write**
      - Actions: **Read & write** (Read for orchestrator CI checks;
-       Write so dataset-repo CI can dispatch `generate-archive` via
-       `gh api .../dispatches`)
+       Write so the central workflows on `nemarDatasets/.github` can
+       `repository_dispatch` to each other — e.g. `run-version-doi.yml`
+       dispatching `generate-archive` against `nemarDatasets/.github`.
+       Phase 3 of centralization epic #601 moved these dispatches off
+       the dataset repos onto `.github`.)
      - Administration: **Read & write** (needed for branch / tag
        protection rulesets and visibility flips)
      - Issues: **Read & write** (BIDS-validation issue creation flow)
