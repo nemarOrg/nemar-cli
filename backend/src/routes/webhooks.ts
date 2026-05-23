@@ -9,6 +9,7 @@ import type { Context } from "hono";
 import { Hono } from "hono";
 
 import { runDatasetSync } from "../services/dataset-reindex.js";
+import { isValidDatasetId } from "../services/datasetId.js";
 import { createEzidVersionDoi, parseDoiProvider } from "../services/doi.js";
 import { enrichDataset } from "../services/enrich-dataset.js";
 import { TEST_SHOULDER } from "../services/ezid.js";
@@ -16,12 +17,14 @@ import { getDatasetsToken } from "../services/github-auth.js";
 import {
   downloadReleaseArchive,
   signManifestCallbackToken,
+  triggerEnrichmentRun,
   triggerManifestGeneration,
   verifyManifestCallbackToken,
 } from "../services/github.js";
 import { generateManifest } from "../services/manifest.js";
 import { errorMessage, extractRepoName, readRepoMetadata } from "../services/repo-metadata.js";
 import { headVersionArtifact, uploadManifest } from "../services/s3.js";
+import { verifyGitHubWebhookSignature } from "../services/webhook-signature.js";
 import * as zenodo from "../services/zenodo.js";
 import type { Bindings } from "../types/bindings.js";
 
@@ -1344,6 +1347,200 @@ webhooks.post("/llm-enrich", async (c) => {
     ref: body.ref,
   });
   return c.json(outcome.body, outcome.status);
+});
+
+// ─── GitHub App webhook receiver ────────────────────────────────────────────
+//
+// The nemar-publish-bot App is configured to deliver `push` events from every
+// dataset repo under `nemarDatasets` to this endpoint. We decode the event,
+// filter it down to enrichment-relevant pushes, and dispatch the central
+// `run-enrichment` workflow on `nemarDatasets/.github`.
+//
+// Phase 1 of epic #601 / sub-issue #602. Until the strip script runs, the
+// per-repo `llm-enrichment.yml` will continue to fire on the same push; both
+// pipelines hit `/webhooks/llm-enrich`, where the `source_hash` guard makes
+// the duplicate a Stage-2 no-op.
+
+/** Paths whose change should trigger an enrichment run. The set matches the
+ *  `paths` filter on the legacy per-repo workflow so the centralization is a
+ *  drop-in trigger replacement. */
+const ENRICHMENT_TRIGGER_PATHS: ReadonlySet<string> = new Set([
+  "README.md",
+  "dataset_description.json",
+  ".nemar/metadata.json",
+]);
+
+interface PushEventCommit {
+  added?: string[];
+  modified?: string[];
+  removed?: string[];
+}
+
+interface PushEventPayload {
+  ref?: string;
+  repository?: {
+    name?: string;
+    owner?: { login?: string };
+  };
+  commits?: PushEventCommit[];
+  head_commit?: PushEventCommit | null;
+  deleted?: boolean;
+}
+
+/** Decide whether a push event should fan out to the enrichment workflow.
+ *
+ *  Exported for unit testing — keep this pure (no env, no I/O) so the
+ *  webhook-github tests can pin the filter table without spinning up a
+ *  Hono harness. */
+export function shouldDispatchEnrichment(
+  event: PushEventPayload,
+):
+  | { dispatch: false; reason: string }
+  | { dispatch: true; datasetId: string; ref: string; force: boolean } {
+  if (event.deleted) return { dispatch: false, reason: "branch_deleted" };
+
+  const owner = event.repository?.owner?.login;
+  if (owner !== "nemarDatasets") {
+    return { dispatch: false, reason: "wrong_owner" };
+  }
+
+  const datasetId = event.repository?.name;
+  if (!datasetId || !isValidDatasetId(datasetId)) {
+    return { dispatch: false, reason: "not_a_dataset_repo" };
+  }
+
+  const ref = event.ref ?? "";
+  let refName: string;
+  let force: boolean;
+  if (ref === "refs/heads/main") {
+    refName = "main";
+    force = false;
+  } else if (ref.startsWith("refs/heads/release/")) {
+    refName = ref.slice("refs/heads/".length);
+    // Release-branch pushes only touch the Version field in
+    // dataset_description.json, so the source_hash short-circuit would
+    // otherwise skip the run. Force the re-enrichment so the release PR
+    // carries fresh `.nemar/metadata.json`. Mirrors the legacy per-repo
+    // workflow's FORCE="true" on release/*.
+    force = true;
+  } else {
+    return { dispatch: false, reason: "ref_not_main_or_release" };
+  }
+
+  const touched = new Set<string>();
+  // `commits[]` lists every commit in the push; `head_commit` is the tip and
+  // may carry paths the commits-array entries don't (force-push edge case).
+  // Union them so a path mentioned only on the tip isn't missed.
+  const sources: Array<PushEventCommit | null | undefined> = [
+    ...(event.commits ?? []),
+    event.head_commit ?? null,
+  ];
+  for (const c of sources) {
+    if (!c) continue;
+    for (const p of c.added ?? []) touched.add(p);
+    for (const p of c.modified ?? []) touched.add(p);
+    for (const p of c.removed ?? []) touched.add(p);
+  }
+  let matched = false;
+  for (const p of touched) {
+    if (ENRICHMENT_TRIGGER_PATHS.has(p)) {
+      matched = true;
+      break;
+    }
+  }
+  if (!matched) return { dispatch: false, reason: "no_enrichment_paths_touched" };
+
+  return { dispatch: true, datasetId, ref: refName, force };
+}
+
+/**
+ * POST /webhooks/github — entry point for GitHub App webhook deliveries.
+ *
+ * Verifies the HMAC-SHA256 signature in `X-Hub-Signature-256` against
+ * `GITHUB_WEBHOOK_SECRET`, then inspects the event. Today we only act on
+ * `push` events; other event types respond 200 so we can subscribe to more
+ * event types in the App config later without redeploying the Worker.
+ *
+ * Always responds 200 (or 401 on bad signature) so GitHub doesn't retry on
+ * filter-misses. The response body indicates whether a dispatch happened so
+ * operators can correlate with GitHub Actions runs.
+ *
+ * Errors during dispatch (e.g. rate limit, transient 5xx from GitHub) are
+ * logged and surfaced in the response body but DO NOT 5xx the webhook — a
+ * retried delivery would just duplicate the dispatch attempt, and the App's
+ * single-delivery-per-event guarantee plus the workflow's source_hash guard
+ * make a missed-dispatch self-heal on the next push.
+ */
+webhooks.post("/github", async (c) => {
+  const rawBody = await c.req.text();
+  const signature = c.req.header("X-Hub-Signature-256");
+  const eventType = c.req.header("X-GitHub-Event");
+  const deliveryId = c.req.header("X-GitHub-Delivery") ?? "";
+
+  if (!c.env.GITHUB_WEBHOOK_SECRET) {
+    console.error("[github-webhook] GITHUB_WEBHOOK_SECRET is unset; rejecting delivery");
+    return c.json({ error: "Server misconfigured" }, 500);
+  }
+
+  const sigOk = await verifyGitHubWebhookSignature(
+    rawBody,
+    signature ?? null,
+    c.env.GITHUB_WEBHOOK_SECRET,
+  );
+  if (!sigOk) {
+    console.warn(`[github-webhook] invalid signature on delivery ${deliveryId} event=${eventType}`);
+    return c.json({ error: "Invalid signature" }, 401);
+  }
+
+  // Only `push` is wired today. Other events (pull_request, release, …) land
+  // here without action so the App can subscribe to them in advance of any
+  // future centralization phase.
+  if (eventType !== "push") {
+    return c.json({ ok: true, dispatched: false, reason: "event_ignored", event: eventType });
+  }
+
+  let payload: PushEventPayload;
+  try {
+    payload = JSON.parse(rawBody) as PushEventPayload;
+  } catch (err) {
+    console.warn(
+      `[github-webhook] push delivery ${deliveryId} had unparseable JSON: ${err instanceof Error ? err.message : String(err)}`,
+    );
+    return c.json({ ok: true, dispatched: false, reason: "unparseable_payload" });
+  }
+
+  const decision = shouldDispatchEnrichment(payload);
+  if (!decision.dispatch) {
+    return c.json({ ok: true, dispatched: false, reason: decision.reason });
+  }
+
+  try {
+    const pat = await getDatasetsToken(c.env);
+    await triggerEnrichmentRun(decision.datasetId, decision.ref, decision.force, pat);
+    console.log(
+      `[github-webhook] dispatched run-enrichment for ${decision.datasetId}@${decision.ref} force=${decision.force} delivery=${deliveryId}`,
+    );
+    return c.json({
+      ok: true,
+      dispatched: true,
+      dataset_id: decision.datasetId,
+      ref: decision.ref,
+      force: decision.force,
+    });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error(
+      `[github-webhook] dispatch failed for ${decision.datasetId}@${decision.ref} delivery=${deliveryId}: ${msg}`,
+    );
+    return c.json({
+      ok: true,
+      dispatched: false,
+      reason: "dispatch_failed",
+      error: msg,
+      dataset_id: decision.datasetId,
+      ref: decision.ref,
+    });
+  }
 });
 
 export default webhooks;
