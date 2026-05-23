@@ -92,19 +92,13 @@ describe("CI workflow templates", () => {
     expect(versionDoi).toBeUndefined();
   });
 
-  test("generate-archive workflow pins archiver to v7", () => {
-    // Guards against a future hand-edit dropping the archiver version pin.
-    // archiver v8 is ESM-only and breaks the require()-style streaming
-    // script, throwing "archiver is not a function" at runtime.
+  test("generate-archive.yml is no longer shipped per-repo (centralized, #608)", () => {
+    // The template is relocated to
+    // `nemarDatasets/.github/.github/workflows/run-generate-archive.yml`.
+    // The archiver-v7 pin still matters but is now reviewed on that
+    // workflow's PR; pin the absence here so a re-shipment is caught.
     const archive = templates.find((t) => t.path.endsWith("generate-archive.yml"));
-    expect(archive).toBeDefined();
-    expect(archive?.content).toMatch(/'archiver@\^?7\./);
-    // Reject the bare unpinned form on the install line specifically.
-    const installLine = archive?.content
-      .split("\n")
-      .find((l) => /npm install.*archiver/.test(l));
-    expect(installLine).toBeDefined();
-    expect(installLine).not.toMatch(/\barchiver\b(?!@)/);
+    expect(archive).toBeUndefined();
   });
 
   test("migrated templates mint App tokens and never reference secrets.GITHUB_TOKEN", () => {
@@ -172,14 +166,11 @@ describe("CI workflow templates", () => {
   });
 
   test("read-only / AWS-only templates stay on the auto-token (no App-token step)", () => {
-    // bids-validation + version-check do no writes; generate-archive writes
-    // only to S3 (AWS creds, not GitHub). Adding an App-token step there
-    // would force an org-secret prerequisite for no benefit.
-    const readOnlyTemplates = [
-      "bids-validation.yml",
-      "version-check.yml",
-      "generate-archive.yml",
-    ];
+    // bids-validation + version-check do no writes and need no App token.
+    // generate-archive.yml (#608) was removed when centralized — its
+    // central counterpart on nemarDatasets/.github DOES mint an App token
+    // (to check out the target dataset repo), which is reviewed there.
+    const readOnlyTemplates = ["bids-validation.yml", "version-check.yml"];
     for (const name of readOnlyTemplates) {
       const tpl = templates.find((t) => t.path.endsWith(name));
       expect(tpl, `${name} missing from templates`).toBeDefined();
