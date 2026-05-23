@@ -142,11 +142,14 @@ export interface Variables {
   /** Set by `webSessionMiddleware` (#569) when a valid `nemar_session`
    *  cookie resolves to an active row. Distinct from `user` (bearer
    *  API token auth) — a single request can carry both in principle,
-   *  though in practice the dashboard never sends a bearer header. */
+   *  though in practice the dashboard never sends a bearer header.
+   *  `role` is validated against the `UserRole` union at the DB
+   *  boundary; `null` means the row's role column held an unknown
+   *  value. */
   webUser?: {
     id: number;
     email: string;
-    role: string | null;
+    role: UserRole | null;
     status: string;
   };
   /** Internal: the matched web_sessions row. Used by `/auth/me` to
@@ -155,7 +158,7 @@ export interface Variables {
   webSession?: {
     id: number;
     user_id: number;
-    remember: number;
+    remember: boolean;
     expires_at: string;
     last_used_at: string;
   };

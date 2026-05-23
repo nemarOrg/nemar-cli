@@ -105,12 +105,13 @@ export function constantTimeEqualHex(a: string, b: string): boolean {
 
 /**
  * Mask the local-part of an email so the response can echo it back
- * without leaking whether it's a previously-seen address.
- *   "yahya@ieee.org"        -> "y***@ieee.org"
+ * without leaking whether it's a previously-seen address. Format is
+ * `first char + '*' * (length-1) + domain`.
+ *   "yahya@ieee.org"        -> "y****@ieee.org"
  *   "y@ieee.org"            -> "*@ieee.org"
  *   "ab@ieee.org"           -> "a*@ieee.org"
  * The domain is preserved verbatim — most users navigate by it, and
- * the spec's example "y***@ieee.org" implies the domain is visible.
+ * the spec's example implies the domain is visible.
  */
 export function maskEmail(email: string): string {
   const at = email.lastIndexOf("@");

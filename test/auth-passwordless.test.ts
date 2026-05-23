@@ -231,17 +231,17 @@ describe.skipIf(PROD_GUARD_ACTIVE)("passwordless email-code auth (#569)", () => 
     expect(r.status).toBe(200);
   });
 
-  test("masked email format matches spec example", async () => {
-    // y***@ieee.org for a 5-char local part. Our impl produces one
-    // leading visible char plus N-1 asterisks.
-    const email = "yahya@ieee.org";
+  test("masked email format: first char + N-1 stars + @domain", async () => {
+    // Synthetic address — avoids creating live test rows against any
+    // real account. Five-char local part exercises the >1-char branch
+    // of maskEmail.
+    const email = `mask-${Date.now()}@example.test`; // local part > 1
     const r = await requestCode(email);
-    if (r.status !== 200) {
-      // Could be 429 if a previous test happened to use this exact
-      // address. Treat as a soft check: only assert when we got the
-      // happy path.
-      return;
-    }
-    expect(r.body.masked_email).toBe("y****@ieee.org");
+    expect(r.status).toBe(200);
+    const masked = r.body.masked_email;
+    // First char preserved, rest replaced by stars, domain verbatim.
+    expect(masked.startsWith("m")).toBe(true);
+    expect(masked).toMatch(/^m\*+@example\.test$/);
+    expect(masked.length).toBe(email.length); // same total length
   });
 });
