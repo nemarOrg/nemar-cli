@@ -57,8 +57,11 @@ async function seedWebUser(
 function freshEmail(label: string): string {
   // Unique per run so per-email rate limits and code rotation can't
   // leak between tests. The `.test` TLD stays out of the real email
-  // reachable space; the dev backend's Resend send will fail and
-  // log, which is fine — the route doesn't propagate send failures.
+  // reachable space; the dev Workers' Resend config delivers test
+  // addresses through Resend's test mode. NOTE: `/code/request` does
+  // propagate Resend failures — on a hard send error it rolls back
+  // the `auth_codes` row and returns 503, so tests against a
+  // mis-configured RESEND_API_KEY will see 503 here, not silent ok.
   return `pl-${label}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}@nemar.test`;
 }
 
@@ -300,15 +303,20 @@ describe.skipIf(PROD_GUARD_ACTIVE)("passwordless email-code auth (#569)", () => 
     expect(v.status).toBe(401);
 
     // Admin-side proof that no row was created. /admin/users supports a
-    // status filter; the unregistered email shouldn't appear in any
-    // status bucket. Scanning the most-recent 'pending' rows is enough
-    // because freshEmail() guarantees a unique address for this run.
-    const pending = await fetch(`${API}/admin/users?status=pending`, {
-      headers: { Authorization: `Bearer ${TEST_CONFIG.adminApiKey}`, ...baseHeaders },
-    });
-    expect(pending.status).toBe(200);
-    const pendingBody = (await pending.json()) as { users: Array<{ email: string }> };
-    expect(pendingBody.users.find((u) => u.email === email)).toBeUndefined();
+    // status filter; the unregistered email shouldn't appear in ANY
+    // status bucket. Scan all four ('pending', 'verified', 'approved',
+    // 'revoked') so a future regression that inserts with a different
+    // default status would still be caught — the original #595
+    // acceptance criterion is `SELECT COUNT(*) WHERE email = ?` = 0,
+    // not "no pending row".
+    for (const bucket of ["pending", "verified", "approved", "revoked"] as const) {
+      const r = await fetch(`${API}/admin/users?status=${bucket}`, {
+        headers: { Authorization: `Bearer ${TEST_CONFIG.adminApiKey}`, ...baseHeaders },
+      });
+      expect(r.status).toBe(200);
+      const body = (await r.json()) as { users: Array<{ email: string }> };
+      expect(body.users.find((u) => u.email === email)).toBeUndefined();
+    }
   });
 
   // -----------------------------------------------------------------
@@ -349,5 +357,72 @@ describe.skipIf(PROD_GUARD_ACTIVE)("passwordless email-code auth (#569)", () => 
     // unauthenticated requests.
     const r = await fetch(`${API}/datasets?mine=true`, { headers: baseHeaders });
     expect(r.status).toBe(401);
+  });
+
+  test("cookie auth: pending cookie is rejected on /datasets?mine=true", async () => {
+    // The cookie path in `resolveCookieUser` hard-gates on
+    // status='approved'. Pending and verified users CAN still get a
+    // cookie out of /code/verify (the dashboard uses /auth/me to
+    // render the onboarding screen for them), but they must NOT be
+    // accepted on user-mutating routes. Without this test, a future
+    // refactor that relaxes the gate to also accept 'verified' or
+    // 'pending' would land silently.
+    const email = freshEmail("cookie572-pending");
+    await seedWebUser(email, "pending");
+
+    const req = await requestCode(email);
+    expect(req.status).toBe(200);
+    const code = req.body.dev_code as string;
+    expect(typeof code).toBe("string");
+    const v = await verifyCode(email, code, true);
+    // /code/verify happily issues a session for a pending user (the
+    // dashboard's `/auth/me` reads it to render onboarding) — assert
+    // the cookie is set so the next step exercises a real session.
+    expect(v.status).toBe(200);
+    const m = v.setCookie?.match(/nemar_session=([^;]+)/);
+    expect(m).toBeTruthy();
+    const cookieValue = m?.[1] as string;
+
+    const mine = await fetch(`${API}/datasets?mine=true`, {
+      headers: { ...baseHeaders, Cookie: `nemar_session=${cookieValue}` },
+    });
+    expect(mine.status).toBe(401);
+  });
+
+  test("cookie auth: bearer wins when both bearer and cookie are sent", async () => {
+    // The middleware's documented order is "Bearer first, cookie
+    // second". Send a valid cookie for user A alongside the existing
+    // TEST_USER_API_KEY bearer (user B). The /users/me response must
+    // identify user B, NOT user A — proving bearer short-circuits the
+    // cookie path. Without this test, a future refactor that falls
+    // through to cookie on bearer failure would be undetectable.
+    if (!TEST_CONFIG.userApiKey) {
+      console.warn("[#572 bearer-wins] TEST_USER_API_KEY unset; skipping bearer-wins assertion");
+      return;
+    }
+
+    const cookieEmail = freshEmail("cookie572-bearerwins");
+    await seedWebUser(cookieEmail, "approved");
+    const req = await requestCode(cookieEmail);
+    const code = req.body.dev_code as string;
+    const v = await verifyCode(cookieEmail, code, true);
+    const m = v.setCookie?.match(/nemar_session=([^;]+)/);
+    expect(m).toBeTruthy();
+    const cookieValue = m?.[1] as string;
+
+    // /users/me uses `authMiddleware` and returns the resolved user's
+    // email — perfect identity probe.
+    const me = await fetch(`${API}/users/me`, {
+      headers: {
+        ...baseHeaders,
+        Authorization: `Bearer ${TEST_CONFIG.userApiKey}`,
+        Cookie: `nemar_session=${cookieValue}`,
+      },
+    });
+    expect(me.status).toBe(200);
+    const meBody = (await me.json()) as { user: { email: string } };
+    // Bearer must win — the returned email must NOT be the
+    // cookie holder's seeded address.
+    expect(meBody.user.email).not.toBe(cookieEmail);
   });
 });

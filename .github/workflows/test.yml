@@ -62,6 +62,10 @@ jobs:
               - 'backend/src/middleware/webSession.ts'
               - 'backend/src/middleware/auth.ts'
               - 'backend/src/routes/auth-web.ts'
+              # admin.ts hosts the /admin/test-fixtures/seed-web-user
+              # endpoint the passwordless suite depends on; if the
+              # fixture changes alone, the suite must still run.
+              - 'backend/src/routes/admin.ts'
               - 'backend/src/db/migrations/0026_passwordless_auth.sql'
               - 'backend/src/db/migrations/0015_email_preferences.sql'
               - 'backend/src/db/migrations/0017_broadcast_emails.sql'
@@ -399,4 +403,9 @@ jobs:
         env:
           TEST_API_URL: https://nemar-api-dev.sccn-org.workers.dev
           TEST_BYPASS_TOKEN: ${{ secrets.TEST_BYPASS_TOKEN }}
+          # Required by the #595 / #572 cases: `seedWebUser` and the
+          # no-row-created admin /users lookup both authenticate as
+          # admin via TEST_ADMIN_API_KEY. Without it the helper 401s
+          # before the test body runs.
+          TEST_ADMIN_API_KEY: ${{ secrets.TEST_ADMIN_API_KEY }}
         run: bun test test/auth-passwordless.test.ts

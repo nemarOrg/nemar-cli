@@ -5688,30 +5688,45 @@ adminRoutes.post(
     const desiredStatus = status ?? "pending";
     const db = c.env.DB;
 
-    await db
-      .prepare("INSERT OR IGNORE INTO users (email, status, signup_source) VALUES (?, ?, 'web')")
-      .bind(email, desiredStatus)
-      .run();
-
-    // If the caller asked for a specific status and the row pre-existed
-    // with a different value, bring it in line so the fixture is
-    // deterministic across reruns. Idempotent for the common case
-    // where the row already has the desired status.
-    if (status) {
+    try {
       await db
-        .prepare("UPDATE users SET status = ? WHERE email = ?")
-        .bind(desiredStatus, email)
+        .prepare("INSERT OR IGNORE INTO users (email, status, signup_source) VALUES (?, ?, 'web')")
+        .bind(email, desiredStatus)
         .run();
-    }
 
-    const row = await db
-      .prepare("SELECT id, email, status FROM users WHERE email = ? LIMIT 1")
-      .bind(email)
-      .first<{ id: number; email: string; status: string }>();
-    if (!row) {
-      // Insert failed and no pre-existing row — schema or constraint issue.
+      // If the caller asked for a specific status and the row pre-existed
+      // with a different value, bring it in line so the fixture is
+      // deterministic across reruns. Idempotent for the common case
+      // where the row already has the desired status.
+      if (status) {
+        const upd = await db
+          .prepare("UPDATE users SET status = ? WHERE email = ?")
+          .bind(desiredStatus, email)
+          .run();
+        // Defend against a silent status mismatch: if the UPDATE matched
+        // 0 rows (e.g., the email normalised differently between the
+        // INSERT and UPDATE), the caller would silently get back a row
+        // with the pre-existing status and the dependent tests would
+        // 401 with a confusing "user is pending" failure mode rather
+        // than a clear seed error. Surface it loudly here.
+        if ((upd.meta?.changes ?? 0) === 0) {
+          console.error("[seed-web-user] UPDATE matched 0 rows for email", email);
+          return c.json({ error: "Failed to set requested status; row missing post-insert" }, 500);
+        }
+      }
+
+      const row = await db
+        .prepare("SELECT id, email, status FROM users WHERE email = ? LIMIT 1")
+        .bind(email)
+        .first<{ id: number; email: string; status: string }>();
+      if (!row) {
+        // Insert failed and no pre-existing row — schema or constraint issue.
+        return c.json({ error: "Failed to seed user" }, 500);
+      }
+      return c.json({ user: row });
+    } catch (err) {
+      console.error("[seed-web-user] D1 error", err);
       return c.json({ error: "Failed to seed user" }, 500);
     }
-    return c.json({ user: row });
   },
 );

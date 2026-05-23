@@ -43,46 +43,57 @@ async function resolveCookieUser(c: AuthContext): Promise<AuthUser | null> {
   const cookieIdRaw = parseCookieHeader(cookieHeader, COOKIE_NAME);
   if (!cookieIdRaw) return null;
 
-  const cookieHash = await hashCookieId(cookieIdRaw);
+  // Wrap the D1 lookup in a try/catch so a transient backend failure
+  // degrades to "no cookie auth" instead of bubbling a 500 through
+  // `api.onError`. Without this, a brief D1 hiccup turns
+  // `GET /datasets` into a 500 for every browser that happens to be
+  // carrying a `nemar_session` cookie — even though the route has a
+  // valid anonymous branch. Mirrors `webSessionMiddleware`.
+  try {
+    const cookieHash = await hashCookieId(cookieIdRaw);
 
-  const row = await c.env.DB.prepare(
-    `SELECT u.id, u.username, u.email, u.github_username, u.role, u.orcid, u.status
-       FROM web_sessions ws
-       JOIN users u ON u.id = ws.user_id
-      WHERE ws.cookie_id_hash = ?
-        AND ws.revoked_at IS NULL
-        AND ws.expires_at > datetime('now')
-      LIMIT 1`,
-  )
-    .bind(cookieHash)
-    .first<{
-      id: number;
-      username: string | null;
-      email: string;
-      github_username: string | null;
-      role: string | null;
-      orcid: string | null;
-      status: string;
-    }>();
-  if (!row) return null;
-  if (row.status !== "approved") return null;
+    const row = await c.env.DB.prepare(
+      `SELECT u.id, u.username, u.email, u.github_username, u.role, u.orcid, u.status
+         FROM web_sessions ws
+         JOIN users u ON u.id = ws.user_id
+        WHERE ws.cookie_id_hash = ?
+          AND ws.revoked_at IS NULL
+          AND ws.expires_at > datetime('now')
+        LIMIT 1`,
+    )
+      .bind(cookieHash)
+      .first<{
+        id: number;
+        username: string | null;
+        email: string;
+        github_username: string | null;
+        role: string | null;
+        orcid: string | null;
+        status: string;
+      }>();
+    if (!row) return null;
+    if (row.status !== "approved") return null;
 
-  const role = parseRole(row.role, row.username ?? row.email);
-  if (role === null) return null;
+    const role = parseRole(row.role, row.username ?? row.email);
+    if (role === null) return null;
 
-  return {
-    id: row.id,
-    // Web-only signups (#569) may have NULL username / github_username
-    // until admin onboarding lifts them to a full account. Routes that
-    // only need `id` / `role` / `email` work as-is; routes that strictly
-    // require a GitHub login (e.g. repo creation) will fail naturally
-    // when they reach the GitHub API call.
-    username: row.username ?? "",
-    email: row.email,
-    github_username: row.github_username ?? "",
-    role,
-    orcid: row.orcid || undefined,
-  };
+    return {
+      id: row.id,
+      // Web-only signups (#569) may have NULL username / github_username
+      // until admin onboarding lifts them to a full account. Routes
+      // that only need `id` / `role` / `email` work as-is; routes that
+      // strictly require a GitHub login (e.g. repo creation) will
+      // fail naturally when they reach the GitHub API call.
+      username: row.username ?? "",
+      email: row.email,
+      github_username: row.github_username ?? "",
+      role,
+      orcid: row.orcid || undefined,
+    };
+  } catch (err) {
+    console.error("[auth] resolveCookieUser: cookie lookup failed", err);
+    return null;
+  }
 }
 
 /**
