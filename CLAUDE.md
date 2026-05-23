@@ -65,6 +65,18 @@ s3://nemar/staging/pr-{n}/{datasetId}/objects/   # PR staging area
 3. **Backend Integration** - Cloudflare Workers/D1 for user database, API token management
 4. **Storage Integration** - GitHub (metadata), S3 (data files), Zenodo (DOI)
 
+### Web-Dashboard Auth (#569)
+
+CLI keeps password + API-token. Dashboard (currently at `nemar.org`, moving to `app.nemar.org` per nemarOrg/website#46) uses passwordless email-code:
+
+- `POST /auth/code/request` — emails a 6-digit code. Per-email rate limit 1/min, 5/hour (counted from `auth_codes.created_at`). In `ENVIRONMENT=development|test` the response includes `dev_code` so tests can finish without an inbox; production must never see this field.
+- `POST /auth/code/verify` — Origin-allow-listed, returns `{ user }`, sets `nemar_session` HttpOnly + Secure + SameSite=Lax cookie.
+- `POST /auth/logout` / `GET /auth/me` — cookie-bearing.
+
+Cookie domain is env-driven via `WEB_SESSION_COOKIE_DOMAIN` (prod: `app.nemar.org`, dev: host-only). Flip the prod value at the website#46 cutover; no code change.
+
+Web-only signups land as `signup_source='web'`, `status='pending'`, `username`/`github_username`/`password_hash` all NULL until admin onboarding fills them in (migration 0026 dropped those columns' NOT NULL; existing CLI rows backfilled to `signup_source='cli'`).
+
 ### User Flow
 1. User signs up (username, email, password) -> email verification -> admin approval
 2. Admin approves -> system generates API token, S3 credentials, GitHub PAT
