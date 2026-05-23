@@ -693,3 +693,51 @@ export async function sendPublicationApprovedEmail(
     isDev,
   );
 }
+
+/**
+ * Send a 6-digit passwordless sign-in code to the web dashboard user
+ * (#569). The code is the user-facing secret; the email is the only
+ * channel that delivers it. Templates intentionally include "didn't
+ * request this? ignore" footer to dissuade panic when an attacker
+ * triggers a request against someone else's email.
+ */
+export async function sendPasswordlessCodeEmail(
+  to: string,
+  code: string,
+  resendApiKey: string,
+  fromEmail: string,
+  replyTo?: string,
+  isDev?: boolean,
+): Promise<void> {
+  const html = `
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+</head>
+<body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; line-height: 1.6; color: #333; max-width: 600px; margin: 0 auto; padding: 20px;">
+  <h1 style="color: #2563eb;">Your NEMAR sign-in code</h1>
+
+  <p>Use the code below to finish signing in:</p>
+
+  <p style="text-align: center; margin: 30px 0;">
+    <span style="display: inline-block; font-family: 'SF Mono', Menlo, Consolas, monospace; font-size: 32px; letter-spacing: 8px; padding: 16px 24px; background-color: #f4f4f5; border-radius: 8px; color: #111;">
+      ${escapeHtml(code)}
+    </span>
+  </p>
+
+  <p style="color: #666; font-size: 14px;">This code expires in 10 minutes. After 5 incorrect attempts the code is invalidated; request a new one if that happens.</p>
+
+  <hr style="border: none; border-top: 1px solid #eee; margin: 30px 0;">
+
+  <p style="color: #999; font-size: 12px;">
+    <a href="https://nemar.org" style="color: #999;">NEMAR</a> - Neuroelectromagnetic Data Archive and Tools Resource<br>
+    Didn't request this? You can safely ignore this email. Your account has not been changed.
+  </p>
+</body>
+</html>
+  `;
+
+  await sendEmail(to, `NEMAR sign-in code: ${code}`, html, resendApiKey, fromEmail, replyTo, isDev);
+}

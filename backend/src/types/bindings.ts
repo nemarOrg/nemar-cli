@@ -28,6 +28,12 @@ export interface Bindings {
   /** Reply-To address (e.g. "info@nemar.org") when FROM is a no-reply mailbox.
    *  Omitted when unset/empty. */
   REPLY_TO?: string;
+  /** Domain attribute for the web-dashboard session cookie (#569).
+   *  Set to "app.nemar.org" in production and left empty in dev so
+   *  the cookie is host-only for *.workers.dev. The dashboard moves
+   *  to app.nemar.org per nemarOrg/website#46; flip this env var at
+   *  cutover without redeploying code. */
+  WEB_SESSION_COOKIE_DOMAIN?: string;
 
   // Secrets
   GITHUB_ADMIN_PAT: string;
@@ -133,4 +139,29 @@ export interface Variables {
   // tell "no header sent" from "header sent but token invalid/expired".
   // Optional: routes that don't use optionalAuthMiddleware never set this.
   authAttempted?: true;
+  /** Set by `webSessionMiddleware` (#569) when a valid `nemar_session`
+   *  cookie resolves to an active row. Distinct from `user` (bearer
+   *  API token auth) — a single request can carry both in principle,
+   *  though in practice the dashboard never sends a bearer header. */
+  webUser?: {
+    id: number;
+    email: string;
+    role: string | null;
+    status: string;
+  };
+  /** Internal: the matched web_sessions row. Used by `/auth/me` to
+   *  decide whether to slide the expiry, and by `/auth/logout` to
+   *  revoke the row. */
+  webSession?: {
+    id: number;
+    user_id: number;
+    remember: number;
+    expires_at: string;
+    last_used_at: string;
+  };
+  /** The raw cookie value as it arrived on the wire (the
+   *  base64url-encoded 256-bit token, before hashing). Routes that
+   *  need to write a fresh Set-Cookie use this when sliding the
+   *  expiry — the value itself is unchanged. */
+  webSessionCookieId?: string;
 }

@@ -49,6 +49,15 @@ const AUTH_PATHS = [
   "/auth/retrieve-key",
   "/auth/request-key-regeneration",
   "/auth/confirm-key-regeneration",
+  // Web-dashboard passwordless flow (#569). The route handler also
+  // enforces a per-email rate limit (1/min, 5/hour) — the per-IP cap
+  // here is the outer floor against flooding from a single network.
+  // /auth/me is intentionally NOT in this list: the dashboard polls
+  // it on every navigation and should hit the standard token/IP
+  // bucket, not the stricter auth bucket.
+  "/auth/code/request",
+  "/auth/code/verify",
+  "/auth/logout",
 ];
 
 type RateLimitContext = Context<{ Bindings: Bindings; Variables: Variables }>;
