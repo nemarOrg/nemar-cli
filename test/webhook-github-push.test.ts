@@ -220,6 +220,40 @@ describe("shouldDispatchEnrichment", () => {
     });
   });
 
+  describe("force-push behavior", () => {
+    test("force push that touches README.md still dispatches", () => {
+      // GitHub's push event for a force-push carries `forced: true` AND
+      // the `commits`/`head_commit` arrays reflect the new history. The
+      // decision function shouldn't gate on `forced` — it should fall
+      // through to the path-union logic on the post-force-push state.
+      // Cross-PR review of epic #601 flagged the missing coverage.
+      const decision = shouldDispatchEnrichment(
+        pushEvent({
+          forced: true,
+          commits: [{ modified: ["README.md"] }],
+          head_commit: { modified: ["README.md"] },
+        }),
+      );
+      expect(decision.dispatch).toBe(true);
+    });
+
+    test("force push that rewrites history without touching enrichment paths does not dispatch", () => {
+      // Same `forced: true` flag, but the post-force-push commits don't
+      // change README / dataset_description / .nemar/metadata.json — so
+      // no enrichment is needed. Confirms `forced` is not an
+      // unconditional dispatch signal.
+      const decision = shouldDispatchEnrichment(
+        pushEvent({
+          forced: true,
+          commits: [{ modified: ["sub-01/eeg/sub-01_task-rest_eeg.bdf"] }],
+          head_commit: { modified: ["sub-01/eeg/sub-01_task-rest_eeg.bdf"] },
+        }),
+      );
+      expect(decision.dispatch).toBe(false);
+      if (!decision.dispatch) expect(decision.reason).toBe("no_enrichment_paths_touched");
+    });
+  });
+
   describe("dataset id prefixes", () => {
     test("accepts nm-prefix repos", () => {
       const decision = shouldDispatchEnrichment(

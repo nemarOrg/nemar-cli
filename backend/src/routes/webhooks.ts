@@ -1430,6 +1430,13 @@ interface PushEventPayload {
   commits?: PushEventCommit[];
   head_commit?: PushEventCommit | null;
   deleted?: boolean;
+  /** Set when the push rewrote history. We don't use this for filtering
+   *  (the `commits`/`head_commit` union below already produces the
+   *  correct touched-path set whether or not history was rewritten), but
+   *  the field is part of GitHub's push-event payload and is modelled
+   *  here so the type matches reality and to anchor the force-push test
+   *  cases in `webhook-github-push.test.ts`. */
+  forced?: boolean;
 }
 
 /** Decide whether a push event should fan out to the enrichment workflow.
