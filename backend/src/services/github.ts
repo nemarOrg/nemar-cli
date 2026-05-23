@@ -5,7 +5,10 @@
  * creating/deleting repositories, and applying branch protection.
  */
 
+import validatorPin from "../../../validator-version.json" with { type: "json" };
 import { HttpError } from "./retry";
+
+const VALIDATOR_VERSION = validatorPin.version;
 
 // NEMAR_GITHUB_API_URL is a test-only override that points at a local
 // Bun.serve fake. Stored on globalThis because the Workers runtime has no
@@ -916,7 +919,7 @@ jobs:
         run: |
           mkdir -p .nemar
           grep -qxF '.nemar/' .bidsignore 2>/dev/null || echo '.nemar/' >> .bidsignore
-          deno run -A jsr:@bids/validator . --json > .nemar/validation.json || true
+          deno run -A jsr:@bids/validator@${VALIDATOR_VERSION} . --json > .nemar/validation.json || true
           cat .nemar/validation.json
 
       - name: Collect git-annex pointer files
