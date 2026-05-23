@@ -177,6 +177,110 @@ describe("Secondary rate limit detection", () => {
 
     expect(res.status).toBe(403);
     expect(recordedSleeps).toEqual([]);
+  });
+});
+
+// 401 refresh path (issue #596): stale App-installation tokens should
+// self-heal after one fresh-mint retry. Separate from the rate-limit
+// suite because the trigger is auth, not throttling, but it lives here
+// so both transient-retry paths share fixtures.
+describe("401 refresh-token-on-401", () => {
+  test("401 then 200 retries once with the refreshed bearer", async () => {
+    const seen: string[] = [];
+    nextHandler = (req, idx) => {
+      seen.push(req.headers.get("Authorization") ?? "");
+      if (idx === 0) {
+        return new Response(JSON.stringify({ message: "Bad credentials" }), {
+          status: 401,
+          headers: plainHeaders(),
+        });
+      }
+      return new Response(JSON.stringify({ ok: true }), { status: 200, headers: plainHeaders() });
+    };
+
+    let refreshCount = 0;
+    const res = await githubFetchWithRetry(
+      `${fake.url}${PATH}`,
+      { method: "GET", headers: { Authorization: "Bearer stale-token" } },
+      {
+        sleepFn: recordingSleep,
+        refreshTokenOn401: async () => {
+          refreshCount += 1;
+          return "fresh-token";
+        },
+      },
+    );
+
+    expect(res.status).toBe(200);
+    expect(refreshCount).toBe(1);
+    expect(callIndex).toBe(2);
+    // No backoff sleep on the auth-refresh retry; it fires immediately.
+    expect(recordedSleeps).toEqual([]);
+    expect(seen).toEqual(["Bearer stale-token", "Bearer fresh-token"]);
+  });
+
+  test("second 401 after refresh is terminal", async () => {
+    nextHandler = (_req, _idx) =>
+      new Response(JSON.stringify({ message: "Bad credentials" }), {
+        status: 401,
+        headers: plainHeaders(),
+      });
+
+    let refreshCount = 0;
+    const res = await githubFetchWithRetry(
+      `${fake.url}${PATH}`,
+      { method: "GET", headers: { Authorization: "Bearer stale-token" } },
+      {
+        sleepFn: recordingSleep,
+        refreshTokenOn401: async () => {
+          refreshCount += 1;
+          return "fresh-token";
+        },
+      },
+    );
+
+    expect(res.status).toBe(401);
+    expect(refreshCount).toBe(1);
+    expect(callIndex).toBe(2);
+  });
+
+  test("401 without refresher is terminal (no retry)", async () => {
+    nextHandler = (_req, _idx) =>
+      new Response(JSON.stringify({ message: "Bad credentials" }), {
+        status: 401,
+        headers: plainHeaders(),
+      });
+
+    const res = await githubFetchWithRetry(
+      `${fake.url}${PATH}`,
+      { method: "GET", headers: { Authorization: "Bearer stale-token" } },
+      { sleepFn: recordingSleep },
+    );
+
+    expect(res.status).toBe(401);
+    expect(callIndex).toBe(1);
+  });
+
+  test("refresher that throws falls back to returning the original 401", async () => {
+    nextHandler = (_req, _idx) =>
+      new Response(JSON.stringify({ message: "Bad credentials" }), {
+        status: 401,
+        headers: plainHeaders(),
+      });
+
+    const res = await githubFetchWithRetry(
+      `${fake.url}${PATH}`,
+      { method: "GET", headers: { Authorization: "Bearer stale-token" } },
+      {
+        sleepFn: recordingSleep,
+        refreshTokenOn401: async () => {
+          throw new Error("App key rotation in progress");
+        },
+      },
+    );
+
+    expect(res.status).toBe(401);
+    expect(callIndex).toBe(1);
     expect(callIndex).toBe(1);
   });
 });
