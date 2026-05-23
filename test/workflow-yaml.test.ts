@@ -176,17 +176,28 @@ describe("CI workflow templates", () => {
     expect(publishIdx).toBeGreaterThan(refreshIdx);
   });
 
-  test("llm-enrichment.yml guards curl-level failures and includes failure context (epic #417 phase 1)", () => {
+  test("llm-enrichment.yml retries transient failures and fails loud on persistent errors (issue #598)", () => {
     const llm = templates.find((t) => t.path.endsWith("llm-enrichment.yml"));
     expect(llm).toBeDefined();
     if (!llm) return;
-    // Network/DNS/TLS failure should fall through to the warning branch
-    // instead of leaving HTTP_CODE empty (which bash coerces to 0 and would
-    // bypass the >= 400 check, yielding a silent green step).
+    // Network/DNS/TLS failure normalises to HTTP_CODE=0; the retry loop
+    // must treat 0 as transient (falls through 2xx / 4xx checks into the
+    // retry branch). Without `|| HTTP_CODE=0` the variable would stay
+    // empty and the numeric comparisons would error out the step under
+    // `set -e`.
     expect(llm.content).toContain("|| HTTP_CODE=0");
-    expect(llm.content).toContain('[ "$HTTP_CODE" = "0" ]');
-    // Push-retry warnings should point operators at the git output they
-    // need to read instead of being opaque.
+    // Retry loop is the new contract: 3 attempts with linear backoff,
+    // 4xx terminal, persistent 5xx/0 exits 1 (issue #598).
+    expect(llm.content).toMatch(/for attempt in 1 2 3; do/);
+    expect(llm.content).toContain('"$HTTP_CODE" -lt 500');
+    expect(llm.content).toContain('"$HTTP_CODE" -ge 400');
+    expect(llm.content).toContain("(4xx is terminal");
+    expect(llm.content).toContain("LLM enrichment failed after 3 attempts");
+    // The terminal branch must exit 1, not 0 — buried failures during
+    // the OpenNeuro mass-import was the original symptom.
+    expect(llm.content).not.toContain("LLM enrichment failed (HTTP $HTTP_CODE) - this is non-blocking");
+    // Push-retry warnings should still point operators at the git output
+    // they need to read instead of being opaque.
     expect(llm.content).toContain("(see git output above)");
   });
 
