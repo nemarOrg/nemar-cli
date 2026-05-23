@@ -164,6 +164,14 @@ export async function githubFetchWithRetry(
     lowRemainingThreshold?: number;
     maxThrottleMs?: number;
     sleepFn?: (ms: number) => Promise<void>;
+    /** Optional bearer-token refresher. Called exactly once after a 401
+     *  response; the returned token replaces the Authorization header on
+     *  the retry. Use this when the bearer is a GitHub App installation
+     *  token: a stale cache, key rotation, or a momentary upstream auth
+     *  blip can produce a one-off 401 that a fresh mint clears. The
+     *  refresher should invalidate any token cache itself; a 401 on the
+     *  retry is treated as terminal. Issue #596. */
+    refreshTokenOn401?: () => Promise<string>;
   },
 ): Promise<Response> {
   const maxAttempts = options?.maxAttempts ?? 3;
@@ -173,6 +181,14 @@ export async function githubFetchWithRetry(
   const lowRemainingThreshold = options?.lowRemainingThreshold ?? 50;
   const maxThrottleMs = options?.maxThrottleMs ?? 60_000;
   const sleep = options?.sleepFn ?? defaultSleep;
+  const refreshTokenOn401 = options?.refreshTokenOn401;
+  // Tracks whether the 401-refresh path has been exercised; we permit
+  // exactly one fresh-mint retry per call regardless of `maxAttempts`.
+  let authRefreshUsed = false;
+  // Mutable copy of init so the 401 path can rewrite Authorization
+  // without reassigning the function parameter (biome
+  // lint/style/noParameterAssign).
+  let currentInit: RequestInit = init;
 
   let parsedPath = url;
   try {
@@ -213,7 +229,7 @@ export async function githubFetchWithRetry(
   let lastError: unknown;
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     try {
-      const response = await fetch(url, init);
+      const response = await fetch(url, currentInit);
 
       const snapshot = parseRateLimitHeaders(response);
       if (snapshot) {
@@ -259,6 +275,71 @@ export async function githubFetchWithRetry(
         retryAfterMs,
         secondary,
       });
+
+      // One-shot token refresh on 401 when caller wires a refresher.
+      // Sits before the generic transient retry path because 401 isn't
+      // otherwise retried — we want a single fresh-mint attempt and then
+      // for a persistent 401 to bubble up as a real auth failure.
+      //
+      // The refresh-on-401 path gets its own guaranteed retry slot,
+      // independent of `maxAttempts`. Without this guarantee a 401 on
+      // the final attempt (e.g. attempt 3 after two 404-propagation
+      // retries on `retryOn404: true` callers) would refresh + continue,
+      // exit the loop, and fall through to the `throw lastError` path
+      // with `lastError === undefined` — leaking an opaque "exhausted
+      // attempts" error to the caller instead of returning a clean 401
+      // / refreshed-200. Code-review #597 fix.
+      if (response.status === 401 && refreshTokenOn401 && !authRefreshUsed) {
+        authRefreshUsed = true;
+        let freshToken: string;
+        try {
+          freshToken = await refreshTokenOn401();
+        } catch (err) {
+          console.warn(
+            `[github] ${method} ${parsedPath} 401 refresh failed: ${err instanceof Error ? err.message : String(err)}; returning the original 401`,
+          );
+          return response;
+        }
+        // Rebuild headers with the new bearer. Preserve every other header
+        // the caller set (Accept, User-Agent, Content-Type, X-GitHub-Api-
+        // Version, etc.) so retry semantics stay identical apart from auth.
+        const refreshedHeaders = new Headers(currentInit.headers);
+        refreshedHeaders.set("Authorization", `Bearer ${freshToken}`);
+        currentInit = { ...currentInit, headers: refreshedHeaders };
+        console.warn(
+          `[github] ${method} ${parsedPath} attempt ${attempt} -> HTTP 401, refreshed App token and retrying immediately`,
+        );
+        if (attempt >= maxAttempts) {
+          // Issue the refreshed request inline so it definitely gets a
+          // chance to run; without this `continue` would hit the loop
+          // boundary and bypass the retry entirely.
+          try {
+            const refreshedResponse = await fetch(url, currentInit);
+            const refreshedSnapshot = parseRateLimitHeaders(refreshedResponse);
+            if (refreshedSnapshot) {
+              const existing = rateLimitState.get(refreshedSnapshot.resource);
+              if (!existing || refreshedSnapshot.resetEpoch >= existing.resetEpoch) {
+                rateLimitState.set(refreshedSnapshot.resource, refreshedSnapshot);
+              }
+            }
+            emitRateLimitLog({
+              method,
+              path: parsedPath,
+              status: refreshedResponse.status,
+              attempt: attempt + 1,
+              maxAttempts,
+              snapshot: refreshedSnapshot,
+              retryAfterMs: null,
+              secondary: false,
+            });
+            return refreshedResponse;
+          } catch (err) {
+            lastError = err;
+            throw err;
+          }
+        }
+        continue;
+      }
 
       const transient =
         response.status >= 500 ||
@@ -1407,24 +1488,49 @@ jobs:
           # Capture full response (no trailing-newline stripping) so jq can
           # parse the body. The Worker returns 200 even when commit_error
           # is populated; non-2xx is reserved for hard failures.
+          #
+          # Retry 5xx and curl-level failures up to 3 times with linear
+          # backoff. 4xx is terminal (config error: bad token, missing
+          # dataset row, malformed payload) and won't be helped by retry.
+          # After exhausting retries, exit 1 so the run shows red — burying
+          # enrichment failures behind ::warning silently desyncs D1 from
+          # the repo, which we cannot afford during the OpenNeuro mass-
+          # import. Issue #598. Pairs with Worker-side #596 self-heal.
           BODY_FILE=$(mktemp)
-          HTTP_CODE=$(curl -sS -o "$BODY_FILE" -w "%{http_code}" -X POST \\
-            "https://api.nemar.org/webhooks/llm-enrich" \\
-            -H "Content-Type: application/json" \\
-            -H "X-Webhook-Token: $NEMAR_WEBHOOK_TOKEN" \\
-            -d "{\\"dataset_id\\": \\"$REPO_NAME\\", \\"force\\": $FORCE, \\"client_commits\\": true, \\"ref\\": \\"$BRANCH_REF\\"}") || HTTP_CODE=0
+          HTTP_CODE=0
+          for attempt in 1 2 3; do
+            HTTP_CODE=$(curl -sS -o "$BODY_FILE" -w "%{http_code}" -X POST \\
+              "https://api.nemar.org/webhooks/llm-enrich" \\
+              -H "Content-Type: application/json" \\
+              -H "X-Webhook-Token: $NEMAR_WEBHOOK_TOKEN" \\
+              -d "{\\"dataset_id\\": \\"$REPO_NAME\\", \\"force\\": $FORCE, \\"client_commits\\": true, \\"ref\\": \\"$BRANCH_REF\\"}") || HTTP_CODE=0
+            echo "attempt $attempt: HTTP $HTTP_CODE"
+            cat "$BODY_FILE"
+            echo
+            if [ "$HTTP_CODE" -ge 200 ] && [ "$HTTP_CODE" -lt 300 ]; then
+              break
+            fi
+            # 401 is treated as transient (retried) rather than terminal:
+            # during a NEMAR_WEBHOOK_TOKEN rotation the first request can
+            # race the new value's propagation across all Workers
+            # instances, and a brief carve-out lets the rotation window
+            # heal itself. Persistent 401 still exits 1 via the
+            # post-loop check. Code-review #599 fix.
+            if [ "$HTTP_CODE" -ge 400 ] && [ "$HTTP_CODE" -lt 500 ] && [ "$HTTP_CODE" -ne 401 ]; then
+              echo "::error::Worker returned $HTTP_CODE (4xx is terminal - check NEMAR_WEBHOOK_TOKEN, dataset_id, and payload shape)"
+              rm -f "$BODY_FILE"
+              exit 1
+            fi
+            if [ "$attempt" -lt 3 ]; then
+              echo "::warning::attempt $attempt: HTTP $HTTP_CODE (transient); retrying in $((attempt * 5))s"
+              sleep $((attempt * 5))
+            fi
+          done
 
-          echo "HTTP $HTTP_CODE"
-          cat "$BODY_FILE"
-          echo
-
-          # Treat curl-level failure (HTTP_CODE=0 from a fallback) the same as
-          # an HTTP 5xx so a network outage surfaces as a visible warning
-          # instead of a silent green step.
-          if [ "$HTTP_CODE" -ge 400 ] || [ "$HTTP_CODE" = "0" ]; then
-            echo "::warning::LLM enrichment failed (HTTP $HTTP_CODE) - this is non-blocking"
+          if [ "$HTTP_CODE" -lt 200 ] || [ "$HTTP_CODE" -ge 300 ]; then
+            echo "::error::LLM enrichment failed after 3 attempts (HTTP $HTTP_CODE). D1 enrichment_json is stale for this dataset; rerun this workflow once the upstream issue is resolved."
             rm -f "$BODY_FILE"
-            exit 0
+            exit 1
           fi
 
           # If the Worker honored client_commits, apply the returned payload.
@@ -2282,8 +2388,18 @@ export interface TreeEntry {
 /**
  * Get the recursive git tree at a given ref (tag, branch, or commit SHA).
  * Returns all entries (blobs and trees) in the repository at that ref.
+ *
+ * `refreshTokenOn401` (optional): when set, a one-off 401 from GitHub
+ * triggers a fresh-mint of the bearer token before the call is retried
+ * exactly once. Wire from `getDatasetsTokenWithRefresher` to make this
+ * call self-heal across stale App-installation-token caches. Issue #596.
  */
-export async function getTreeAtRef(repo: string, ref: string, pat: string): Promise<TreeEntry[]> {
+export async function getTreeAtRef(
+  repo: string,
+  ref: string,
+  pat: string,
+  refreshTokenOn401?: () => Promise<string>,
+): Promise<TreeEntry[]> {
   // First resolve the ref to a commit SHA. retryOn404: callers that pass a
   // ref they just created (a tag we wrote, "main" right after a merge) will
   // see GitHub briefly 404 the new ref while caches catch up; we retry those.
@@ -2296,7 +2412,7 @@ export async function getTreeAtRef(repo: string, ref: string, pat: string): Prom
         "User-Agent": "NEMAR-API",
       },
     },
-    { retryOn404: true },
+    { retryOn404: true, refreshTokenOn401 },
   );
 
   if (!refResponse.ok) {
@@ -2319,6 +2435,7 @@ export async function getTreeAtRef(repo: string, ref: string, pat: string): Prom
         "User-Agent": "NEMAR-API",
       },
     },
+    { refreshTokenOn401 },
   );
 
   if (!treeResponse.ok) {
@@ -2336,8 +2453,17 @@ export async function getTreeAtRef(repo: string, ref: string, pat: string): Prom
 /**
  * Get the content of a blob by SHA. Returns the decoded text content.
  * Uses the blob API to get base64-encoded content.
+ *
+ * `refreshTokenOn401` mirrors `getTreeAtRef`'s parameter — wire it from
+ * `getDatasetsTokenWithRefresher` so the call self-heals from a one-off
+ * stale-App-token 401. Issue #596.
  */
-export async function getBlobContent(repo: string, blobSha: string, pat: string): Promise<string> {
+export async function getBlobContent(
+  repo: string,
+  blobSha: string,
+  pat: string,
+  refreshTokenOn401?: () => Promise<string>,
+): Promise<string> {
   // retryOn404: blob SHA came from a tree we just resolved, so 404 indicates
   // propagation lag, not a missing object.
   const response = await githubFetchWithRetry(
@@ -2349,7 +2475,7 @@ export async function getBlobContent(repo: string, blobSha: string, pat: string)
         "User-Agent": "NEMAR-API",
       },
     },
-    { retryOn404: true },
+    { retryOn404: true, refreshTokenOn401 },
   );
 
   if (!response.ok) {

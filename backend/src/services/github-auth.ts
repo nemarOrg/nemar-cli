@@ -37,6 +37,16 @@ export function __seedInstallationTokenCacheForTests(
   installationTokenCache.set(installationId, { token, expiresAt: expiresAt as EpochMs });
 }
 
+/** Drop a single installation's cached token so the next `getInstallationToken`
+ *  call mints a fresh one. Use after observing a 401 from GitHub on a call
+ *  that used this installation's token — the cache may be holding a value
+ *  that GitHub no longer recognises (key rotation, App reinstall, momentary
+ *  upstream auth blip). Pair with one retry; if the retry still 401s, the
+ *  failure is structural and should bubble up. Issue #596. */
+export function invalidateInstallationToken(installationId: number): void {
+  installationTokenCache.delete(installationId);
+}
+
 // ---------------------------------------------------------------------
 // JWT signing (behavioral mirror of scripts/verify-github-app.ts).
 //
@@ -329,4 +339,31 @@ export function getDatasetsAuth(env: Bindings): GitHubAuth {
 export async function getDatasetsToken(env: Bindings): Promise<string> {
   const auth = getDatasetsAuth(env);
   return auth.kind === "app" ? await auth.getToken() : auth.token;
+}
+
+/** Bundle of `{ token, refresh }` for callers that want a token plus a
+ *  way to recover from a 401 by minting a fresh one. `refresh` invalidates
+ *  the installation token cache (for App auth) and returns a new token;
+ *  for PAT auth there is no cache to bust, so `refresh` just re-reads the
+ *  same PAT. Wire `refresh` into `githubFetchWithRetry`'s
+ *  `refreshTokenOn401` option to make any GitHub call self-heal from a
+ *  one-off stale-token 401. Issue #596. */
+export async function getDatasetsTokenWithRefresher(
+  env: Bindings,
+): Promise<{ token: string; refresh: () => Promise<string> }> {
+  const auth = getDatasetsAuth(env);
+  if (auth.kind === "app") {
+    return {
+      token: await auth.getToken(),
+      refresh: async () => {
+        invalidateInstallationToken(auth.installationId);
+        return await auth.getToken();
+      },
+    };
+  }
+  // PAT path: no cache to invalidate, but expose the same shape so
+  // callers don't branch on auth kind. The refresh is a no-op that
+  // returns the same token; a 401 here means the PAT itself is bad,
+  // which won't be helped by re-reading it.
+  return { token: auth.token, refresh: async () => auth.token };
 }
