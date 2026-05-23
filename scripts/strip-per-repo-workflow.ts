@@ -37,6 +37,7 @@ const API_BASE = "https://api.nemar.org";
 const WORKFLOW_ISSUE_MAP: Record<string, string> = {
   "llm-enrichment.yml": "602",
   "version-doi.yml": "606",
+  "generate-archive.yml": "608",
 };
 
 interface Args {
