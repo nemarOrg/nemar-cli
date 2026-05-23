@@ -1488,24 +1488,49 @@ jobs:
           # Capture full response (no trailing-newline stripping) so jq can
           # parse the body. The Worker returns 200 even when commit_error
           # is populated; non-2xx is reserved for hard failures.
+          #
+          # Retry 5xx and curl-level failures up to 3 times with linear
+          # backoff. 4xx is terminal (config error: bad token, missing
+          # dataset row, malformed payload) and won't be helped by retry.
+          # After exhausting retries, exit 1 so the run shows red — burying
+          # enrichment failures behind ::warning silently desyncs D1 from
+          # the repo, which we cannot afford during the OpenNeuro mass-
+          # import. Issue #598. Pairs with Worker-side #596 self-heal.
           BODY_FILE=$(mktemp)
-          HTTP_CODE=$(curl -sS -o "$BODY_FILE" -w "%{http_code}" -X POST \\
-            "https://api.nemar.org/webhooks/llm-enrich" \\
-            -H "Content-Type: application/json" \\
-            -H "X-Webhook-Token: $NEMAR_WEBHOOK_TOKEN" \\
-            -d "{\\"dataset_id\\": \\"$REPO_NAME\\", \\"force\\": $FORCE, \\"client_commits\\": true, \\"ref\\": \\"$BRANCH_REF\\"}") || HTTP_CODE=0
+          HTTP_CODE=0
+          for attempt in 1 2 3; do
+            HTTP_CODE=$(curl -sS -o "$BODY_FILE" -w "%{http_code}" -X POST \\
+              "https://api.nemar.org/webhooks/llm-enrich" \\
+              -H "Content-Type: application/json" \\
+              -H "X-Webhook-Token: $NEMAR_WEBHOOK_TOKEN" \\
+              -d "{\\"dataset_id\\": \\"$REPO_NAME\\", \\"force\\": $FORCE, \\"client_commits\\": true, \\"ref\\": \\"$BRANCH_REF\\"}") || HTTP_CODE=0
+            echo "attempt $attempt: HTTP $HTTP_CODE"
+            cat "$BODY_FILE"
+            echo
+            if [ "$HTTP_CODE" -ge 200 ] && [ "$HTTP_CODE" -lt 300 ]; then
+              break
+            fi
+            # 401 is treated as transient (retried) rather than terminal:
+            # during a NEMAR_WEBHOOK_TOKEN rotation the first request can
+            # race the new value's propagation across all Workers
+            # instances, and a brief carve-out lets the rotation window
+            # heal itself. Persistent 401 still exits 1 via the
+            # post-loop check. Code-review #599 fix.
+            if [ "$HTTP_CODE" -ge 400 ] && [ "$HTTP_CODE" -lt 500 ] && [ "$HTTP_CODE" -ne 401 ]; then
+              echo "::error::Worker returned $HTTP_CODE (4xx is terminal - check NEMAR_WEBHOOK_TOKEN, dataset_id, and payload shape)"
+              rm -f "$BODY_FILE"
+              exit 1
+            fi
+            if [ "$attempt" -lt 3 ]; then
+              echo "::warning::attempt $attempt: HTTP $HTTP_CODE (transient); retrying in $((attempt * 5))s"
+              sleep $((attempt * 5))
+            fi
+          done
 
-          echo "HTTP $HTTP_CODE"
-          cat "$BODY_FILE"
-          echo
-
-          # Treat curl-level failure (HTTP_CODE=0 from a fallback) the same as
-          # an HTTP 5xx so a network outage surfaces as a visible warning
-          # instead of a silent green step.
-          if [ "$HTTP_CODE" -ge 400 ] || [ "$HTTP_CODE" = "0" ]; then
-            echo "::warning::LLM enrichment failed (HTTP $HTTP_CODE) - this is non-blocking"
+          if [ "$HTTP_CODE" -lt 200 ] || [ "$HTTP_CODE" -ge 300 ]; then
+            echo "::error::LLM enrichment failed after 3 attempts (HTTP $HTTP_CODE). D1 enrichment_json is stale for this dataset; rerun this workflow once the upstream issue is resolved."
             rm -f "$BODY_FILE"
-            exit 0
+            exit 1
           fi
 
           # If the Worker honored client_commits, apply the returned payload.
