@@ -1429,7 +1429,13 @@ jobs:
             if [ "$HTTP_CODE" -ge 200 ] && [ "$HTTP_CODE" -lt 300 ]; then
               break
             fi
-            if [ "$HTTP_CODE" -ge 400 ] && [ "$HTTP_CODE" -lt 500 ]; then
+            # 401 is treated as transient (retried) rather than terminal:
+            # during a NEMAR_WEBHOOK_TOKEN rotation the first request can
+            # race the new value's propagation across all Workers
+            # instances, and a brief carve-out lets the rotation window
+            # heal itself. Persistent 401 still exits 1 via the
+            # post-loop check. Code-review #599 fix.
+            if [ "$HTTP_CODE" -ge 400 ] && [ "$HTTP_CODE" -lt 500 ] && [ "$HTTP_CODE" -ne 401 ]; then
               echo "::error::Worker returned $HTTP_CODE (4xx is terminal - check NEMAR_WEBHOOK_TOKEN, dataset_id, and payload shape)"
               rm -f "$BODY_FILE"
               exit 1

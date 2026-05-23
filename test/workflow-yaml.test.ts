@@ -187,12 +187,26 @@ describe("CI workflow templates", () => {
     // `set -e`.
     expect(llm.content).toContain("|| HTTP_CODE=0");
     // Retry loop is the new contract: 3 attempts with linear backoff,
-    // 4xx terminal, persistent 5xx/0 exits 1 (issue #598).
+    // 4xx terminal (except 401 — see carve-out below), persistent 5xx/0
+    // exits 1 (issue #598).
     expect(llm.content).toMatch(/for attempt in 1 2 3; do/);
     expect(llm.content).toContain('"$HTTP_CODE" -lt 500');
     expect(llm.content).toContain('"$HTTP_CODE" -ge 400');
     expect(llm.content).toContain("(4xx is terminal");
     expect(llm.content).toContain("LLM enrichment failed after 3 attempts");
+    // 401 carve-out: NEMAR_WEBHOOK_TOKEN rotation across Workers
+    // instances can produce a brief 401 race that retry covers. Without
+    // the `-ne 401` guard, a rotation concurrent with a backfill would
+    // silently abort every in-flight workflow at attempt 1. Code-review
+    // #599 fix.
+    expect(llm.content).toContain('"$HTTP_CODE" -ne 401');
+    // The terminal failure branch must explicitly exit 1 — not exit 0,
+    // not omit the exit code. Anchor on the post-loop block to catch a
+    // future edit that removes the exit while keeping the message.
+    const postLoopMatch = llm.content.match(
+      /LLM enrichment failed after 3 attempts[\s\S]{0,200}?exit 1/,
+    );
+    expect(postLoopMatch).not.toBeNull();
     // The terminal branch must exit 1, not 0 — buried failures during
     // the OpenNeuro mass-import was the original symptom.
     expect(llm.content).not.toContain("LLM enrichment failed (HTTP $HTTP_CODE) - this is non-blocking");
