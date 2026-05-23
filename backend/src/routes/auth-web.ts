@@ -112,22 +112,37 @@ authWebRoutes.post("/code/request", zValidator("json", emailSchema), async (c) =
   const db = c.env.DB;
 
   try {
-    // Lazy user create with INSERT OR IGNORE so two concurrent
-    // first-time requests for the same email don't race into a UNIQUE
-    // constraint violation. INSERT OR IGNORE returns a no-op for the
-    // loser, which is correct (the row already exists).
-    await db
-      .prepare(
-        "INSERT OR IGNORE INTO users (email, status, signup_source) VALUES (?, 'pending', 'web')",
-      )
-      .bind(email)
-      .run();
-
+    // #595: only ever email a code to an address that already has a
+    // users row. Previously this endpoint INSERT-OR-IGNOREd a phantom
+    // 'pending'/'web' row for any valid-looking email and shipped a
+    // code, so a typo'd address still triggered a real Resend send
+    // ("you have a NEMAR account") and littered the users table with
+    // rows that could never sign in. Account creation now flows
+    // through the CLI (`nemar auth signup`) exclusively; the dashboard
+    // hint points typo'd users at docs.nemar.org/installation.
+    //
+    // Option B from #595 (silent skip): respond with the same 200 +
+    // masked_email shape whether the email is registered or not, but
+    // omit the email send. Pros: no account-enumeration channel via
+    // status code, and timing is consistent because we exit early
+    // BEFORE any code generation / hashing work. Cons: typo'd emails
+    // silently fail; the dashboard surfaces an "if your email is on
+    // file, you'll get a code shortly" copy and a CTA pointing typo'd
+    // users at the CLI sign-up (companion issue on nemarOrg/website).
     const existing = await db
       .prepare("SELECT status FROM users WHERE email = ? LIMIT 1")
       .bind(email)
       .first<{ status: string }>();
-    if (existing?.status === "revoked") {
+
+    if (!existing) {
+      return c.json(
+        isDevOrTest(c.env)
+          ? { ok: true, masked_email: maskEmail(email), dev_skip: "unregistered" }
+          : { ok: true, masked_email: maskEmail(email) },
+      );
+    }
+
+    if (existing.status === "revoked") {
       // Don't tip off the requester (no enumeration leak). The masked
       // response is the same 200 shape as the success path.
       return c.json(
