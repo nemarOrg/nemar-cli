@@ -34,6 +34,7 @@ jobs:
       cli: ${{ steps.filter.outputs.cli }}
       backend: ${{ steps.filter.outputs.backend }}
       tests: ${{ steps.filter.outputs.tests }}
+      email: ${{ steps.filter.outputs.email }}
     steps:
       - uses: actions/checkout@v4
       - uses: dorny/paths-filter@v3
@@ -48,6 +49,24 @@ jobs:
               - 'backend/**'
             tests:
               - 'test/**'
+            # Email + passwordless auth surface (#569 / #572 / #595).
+            # Gates the passwordless-auth-test job below — that suite
+            # triggers real Resend API calls and burns the daily quota,
+            # so it must not run on unrelated PRs. Keep this list in
+            # lockstep with the modules that produce or consume the
+            # passwordless cookie / email send paths.
+            email:
+              - 'backend/src/services/email.ts'
+              - 'backend/src/services/auth-code.ts'
+              - 'backend/src/services/web-session.ts'
+              - 'backend/src/middleware/webSession.ts'
+              - 'backend/src/middleware/auth.ts'
+              - 'backend/src/routes/auth-web.ts'
+              - 'backend/src/db/migrations/0026_passwordless_auth.sql'
+              - 'backend/src/db/migrations/0015_email_preferences.sql'
+              - 'backend/src/db/migrations/0017_broadcast_emails.sql'
+              - 'test/auth-passwordless.test.ts'
+              - '.github/workflows/test.yml'
 
   # Type check and lint - always runs on code changes
   lint:
@@ -345,11 +364,19 @@ jobs:
   # Passwordless email-code auth tests - only on PRs/pushes to main.
   # Each run triggers real Resend API calls (even to .test addresses),
   # so running on every dev PR exhausts the daily email quota quickly.
+  #
+  # Path-gated on the `email` filter so PRs that don't touch the
+  # passwordless or email surface (the vast majority of nemar-cli
+  # changes) skip the suite entirely. Without the filter, a backend
+  # change in any unrelated file would re-trigger this job on the dev
+  # branch and burn the daily Resend quota even though no email code
+  # was touched. The main-branch / PR-base-main gate stays in place as
+  # a second backstop.
   passwordless-auth-test:
     runs-on: ubuntu-latest
     needs: changes
     if: |
-      (needs.changes.outputs.cli == 'true' || needs.changes.outputs.tests == 'true' || needs.changes.outputs.backend == 'true') &&
+      needs.changes.outputs.email == 'true' &&
       (github.ref == 'refs/heads/main' || github.base_ref == 'main')
     steps:
       - name: Checkout code

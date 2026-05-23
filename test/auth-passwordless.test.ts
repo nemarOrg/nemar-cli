@@ -1,5 +1,5 @@
 /**
- * E2E tests for the passwordless email-code auth flow (#569).
+ * E2E tests for the passwordless email-code auth flow (#569, #572, #595).
  *
  * Targets a deployed backend (set TEST_API_URL; defaults to api.nemar.org).
  * In development environments the /auth/code/request endpoint echoes the
@@ -13,6 +13,14 @@
  * Although the tests only touch ephemeral email addresses and the
  * passwordless surface, the cookie endpoints set real sessions and
  * the per-email rate-limit table would accumulate junk rows.
+ *
+ * Seeding: #595 made /auth/code/request a no-op for emails without a
+ * users row. To keep the flow tests deterministic, each test that needs
+ * a registered email POSTs to `/admin/test-fixtures/seed-web-user` (an
+ * admin-token-gated, non-prod-only fixture endpoint) before requesting
+ * the code. The seed creates a `signup_source='web'`, `status='pending'`
+ * row that exactly mirrors what the legacy INSERT-OR-IGNORE path used
+ * to produce, so the rest of the assertions are unchanged.
  */
 
 import { describe, expect, test } from "bun:test";
@@ -27,6 +35,24 @@ const PROD_GUARD_ACTIVE = POINTS_AT_PROD && !process.env.TEST_ALLOW_PROD;
 const baseHeaders: Record<string, string> = TEST_CONFIG.bypassToken
   ? { "X-Test-Bypass": TEST_CONFIG.bypassToken }
   : {};
+
+async function seedWebUser(
+  email: string,
+  status?: "pending" | "verified" | "approved" | "revoked",
+): Promise<void> {
+  const r = await fetch(`${API}/admin/test-fixtures/seed-web-user`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${TEST_CONFIG.adminApiKey}`,
+      ...baseHeaders,
+    },
+    body: JSON.stringify(status ? { email, status } : { email }),
+  });
+  if (r.status !== 200) {
+    throw new Error(`seedWebUser failed (${r.status}): ${await r.text()}`);
+  }
+}
 
 function freshEmail(label: string): string {
   // Unique per run so per-email rate limits and code rotation can't
@@ -81,6 +107,7 @@ async function verifyCode(
 describe.skipIf(PROD_GUARD_ACTIVE)("passwordless email-code auth (#569)", () => {
   test("happy path: request -> verify -> /me -> logout -> /me null", async () => {
     const email = freshEmail("happy");
+    await seedWebUser(email);
 
     const req = await requestCode(email);
     expect(req.status).toBe(200);
@@ -131,6 +158,7 @@ describe.skipIf(PROD_GUARD_ACTIVE)("passwordless email-code auth (#569)", () => 
 
   test("re-request rotates: first code stops working, second works", async () => {
     const email = freshEmail("rotate");
+    await seedWebUser(email);
     const first = await requestCode(email);
     expect(first.status).toBe(200);
     const firstCode = first.body.dev_code as string;
@@ -170,6 +198,7 @@ describe.skipIf(PROD_GUARD_ACTIVE)("passwordless email-code auth (#569)", () => 
 
   test("5 wrong attempts invalidates the code", async () => {
     const email = freshEmail("attempts");
+    await seedWebUser(email);
     const req = await requestCode(email);
     expect(req.status).toBe(200);
     const realCode = req.body.dev_code as string;
@@ -190,6 +219,7 @@ describe.skipIf(PROD_GUARD_ACTIVE)("passwordless email-code auth (#569)", () => 
 
   test("verify rejects disallowed Origin", async () => {
     const email = freshEmail("origin");
+    await seedWebUser(email);
     const req = await requestCode(email);
     const code = req.body.dev_code as string;
     const r = await verifyCode(email, code, false, "https://evil.example");
@@ -198,6 +228,7 @@ describe.skipIf(PROD_GUARD_ACTIVE)("passwordless email-code auth (#569)", () => 
 
   test("verify rejects missing Origin", async () => {
     const email = freshEmail("noorigin");
+    await seedWebUser(email);
     const req = await requestCode(email);
     const code = req.body.dev_code as string;
     const r = await fetch(`${API}/auth/code/verify`, {
@@ -210,6 +241,7 @@ describe.skipIf(PROD_GUARD_ACTIVE)("passwordless email-code auth (#569)", () => 
 
   test("per-email rate limit: 2 requests within 60s returns 429", async () => {
     const email = freshEmail("ratelimit");
+    await seedWebUser(email);
     const first = await requestCode(email);
     expect(first.status).toBe(200);
     const second = await requestCode(email);
@@ -234,7 +266,9 @@ describe.skipIf(PROD_GUARD_ACTIVE)("passwordless email-code auth (#569)", () => 
   test("masked email format: first char + N-1 stars + @domain", async () => {
     // Synthetic address — avoids creating live test rows against any
     // real account. Five-char local part exercises the >1-char branch
-    // of maskEmail.
+    // of maskEmail. Doubles as coverage for the #595 unregistered-skip
+    // path: this email is never seeded, so the response must still
+    // shape-match the success contract even though no row was created.
     const email = `mask-${Date.now()}@example.test`; // local part > 1
     const r = await requestCode(email);
     expect(r.status).toBe(200);
@@ -243,5 +277,77 @@ describe.skipIf(PROD_GUARD_ACTIVE)("passwordless email-code auth (#569)", () => 
     expect(masked.startsWith("m")).toBe(true);
     expect(masked).toMatch(/^m\*+@example\.test$/);
     expect(masked.length).toBe(email.length); // same total length
+  });
+
+  // -----------------------------------------------------------------
+  // #595 — /code/request must not create a phantom user or send an
+  // email when the address is not already registered.
+  // -----------------------------------------------------------------
+  test("unregistered email: 200 + masked, no dev_code, no users row", async () => {
+    const email = freshEmail("unreg");
+
+    const r = await requestCode(email);
+    expect(r.status).toBe(200);
+    expect(r.body.ok).toBe(true);
+    expect(r.body.masked_email).toMatch(/^[a-z]\*+@nemar\.test$/);
+    // Dev-only signal that the gate fired (production response omits
+    // dev_skip entirely; dev_code must NEVER be present here).
+    expect(r.body.dev_code).toBeUndefined();
+    expect(r.body.dev_skip).toBe("unregistered");
+
+    // The verify endpoint should refuse — no code was ever issued.
+    const v = await verifyCode(email, "000000", false);
+    expect(v.status).toBe(401);
+
+    // Admin-side proof that no row was created. /admin/users supports a
+    // status filter; the unregistered email shouldn't appear in any
+    // status bucket. Scanning the most-recent 'pending' rows is enough
+    // because freshEmail() guarantees a unique address for this run.
+    const pending = await fetch(`${API}/admin/users?status=pending`, {
+      headers: { Authorization: `Bearer ${TEST_CONFIG.adminApiKey}`, ...baseHeaders },
+    });
+    expect(pending.status).toBe(200);
+    const pendingBody = (await pending.json()) as { users: Array<{ email: string }> };
+    expect(pendingBody.users.find((u) => u.email === email)).toBeUndefined();
+  });
+
+  // -----------------------------------------------------------------
+  // #572 — cookie auth on user-scoped routes.
+  // -----------------------------------------------------------------
+  test("cookie auth: /datasets?mine=true accepts nemar_session", async () => {
+    const email = freshEmail("cookie572");
+    // Seed directly as 'approved' so the cookie path in authMiddleware
+    // (status='approved' gate) accepts it. The fixture is dev-only so
+    // this can't be used to short-circuit production approval.
+    await seedWebUser(email, "approved");
+
+    const req = await requestCode(email);
+    expect(req.status).toBe(200);
+    const code = req.body.dev_code as string;
+    expect(typeof code).toBe("string");
+    const v = await verifyCode(email, code, true);
+    expect(v.status).toBe(200);
+    const m = v.setCookie?.match(/nemar_session=([^;]+)/);
+    expect(m).toBeTruthy();
+    const cookieValue = m?.[1] as string;
+
+    // GET /datasets?mine=true with cookie only (no Authorization
+    // header). Pre-#572 this returned 401 "Authentication required to
+    // view your datasets" because the bearer-only middleware never saw
+    // the cookie.
+    const mine = await fetch(`${API}/datasets?mine=true`, {
+      headers: { ...baseHeaders, Cookie: `nemar_session=${cookieValue}` },
+    });
+    expect(mine.status).toBe(200);
+    const mineBody = (await mine.json()) as { datasets: unknown[] };
+    expect(Array.isArray(mineBody.datasets)).toBe(true);
+  });
+
+  test("cookie auth: no cookie + no bearer still 401s /datasets?mine=true", async () => {
+    // Negative control for the #572 change: removing the cookie path
+    // must not loosen the bearer-only behaviour for completely
+    // unauthenticated requests.
+    const r = await fetch(`${API}/datasets?mine=true`, { headers: baseHeaders });
+    expect(r.status).toBe(401);
   });
 });
