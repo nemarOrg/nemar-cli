@@ -101,31 +101,33 @@ describe("CI workflow templates", () => {
     expect(archive).toBeUndefined();
   });
 
-  test("migrated templates mint App tokens and never reference secrets.GITHUB_TOKEN", () => {
-    // Each migrated template authenticates as the App with least-privilege
-    // repo scope and no static GITHUB_TOKEN. Parsed YAML so input values
-    // are pinned exactly (a copy-pasted hardcoded `repositories:` would
-    // still pass a substring check; this catches it).
-    // llm-enrichment.yml (#602) and version-doi.yml (#606) were removed
-    // when centralized to nemarDatasets/.github; their central counterparts
-    // have their own App-token discipline reviewed separately.
-    const writeTemplates = ["pr-merge.yml"];
-    for (const name of writeTemplates) {
+  test("shim templates mint App tokens and never reference secrets.GITHUB_TOKEN", () => {
+    // Each shim template authenticates as the App and dispatches to
+    // nemarDatasets/.github; the token must be scoped to `.github` (where
+    // the dispatch lands) NOT to the current repo. The central workflow
+    // mints its own per-dataset token internally for the checkout step.
+    // Phases #602/#606/#608 already removed their per-repo templates;
+    // Phase 4 (#610) replaces bids-validation.yml + pr-merge.yml with
+    // shims that follow this contract.
+    const shimTemplates = ["pr-merge.yml", "bids-validation.yml"];
+    for (const name of shimTemplates) {
       const tpl = templates.find((t) => t.path.endsWith(name));
       expect(tpl, `${name} missing from templates`).toBeDefined();
       if (!tpl) continue;
       expect(tpl.content).not.toContain("secrets.GITHUB_TOKEN");
 
-      const parsed = parse(tpl.content) as { jobs: Record<string, { steps: Array<Record<string, unknown>> }> };
+      const parsed = parse(tpl.content) as {
+        jobs: Record<string, { steps: Array<Record<string, unknown>> }>;
+      };
       for (const [jobName, job] of Object.entries(parsed.jobs)) {
         const mintIdx = job.steps.findIndex(
           (s) => s.uses === "actions/create-github-app-token@v1",
         );
-        // Not every job in a migrated template mints (e.g. pr-merge's
+        // Not every job in a shim template mints (e.g. pr-merge's
         // cleanup-staging job uses AWS only). Only check when present.
         if (mintIdx < 0) continue;
         // Ordering: mint must be the first step so subsequent
-        // checkout/`gh` calls can reference its outputs.
+        // dispatch calls can reference its outputs.
         expect(
           mintIdx,
           `${name}:${jobName} app-token step must be first (was index ${mintIdx})`,
@@ -134,7 +136,11 @@ describe("CI workflow templates", () => {
         expect(mintWith["app-id"]).toBe("${{ secrets.NEMAR_APP_ID }}");
         expect(mintWith["private-key"]).toBe("${{ secrets.NEMAR_APP_PRIVATE_KEY }}");
         expect(mintWith.owner).toBe("nemarDatasets");
-        expect(mintWith.repositories).toBe("${{ github.event.repository.name }}");
+        // Phase 4 contract: shims mint a token scoped to .github (so they
+        // can call repos/.github/dispatches), not the current dataset repo.
+        // The central workflows on .github mint their own per-dataset
+        // tokens for actual writes against the target repo.
+        expect(mintWith.repositories).toBe(".github");
 
         // Any GH_TOKEN env in the rest of the job's steps must reference
         // the minted token, not a stale `secrets.GITHUB_TOKEN` left behind.
@@ -148,6 +154,27 @@ describe("CI workflow templates", () => {
     }
   });
 
+  test("shim templates dispatch to nemarDatasets/.github (centralization endstate)", () => {
+    // The bids-validation and pr-merge shims must hit
+    // repos/nemarDatasets/.github/dispatches with the right event_type so
+    // the central workflows on .github receive the request. A future edit
+    // that points the dispatch back at the dataset repo would undo the
+    // centralization without obvious symptoms (the legacy workflows have
+    // been stripped from dataset repos).
+    const shimContracts: Array<{ name: string; eventType: string }> = [
+      { name: "bids-validation.yml", eventType: "run-bids-validation" },
+      { name: "pr-merge.yml", eventType: "run-pr-merge" },
+    ];
+    for (const { name, eventType } of shimContracts) {
+      const tpl = templates.find((t) => t.path.endsWith(name));
+      expect(tpl, `${name} missing from templates`).toBeDefined();
+      if (!tpl) continue;
+      expect(tpl.content).toContain('"repos/nemarDatasets/.github/dispatches"');
+      expect(tpl.content).toContain(`event_type=${eventType}`);
+      expect(tpl.content).toContain('"client_payload[dataset_id]=$DATASET_ID"');
+    }
+  });
+
   // The "App-token in BOTH jobs" contract for version-doi was specific to
   // the per-repo template. With Phase 2 centralization (#606) the
   // equivalent invariant lives in the run-version-doi.yml on
@@ -155,22 +182,26 @@ describe("CI workflow templates", () => {
   // removed rather than asserting a property of a template that no longer
   // ships from this repo.
 
-  test("CLI and bids-validation template pin the same @bids/validator version (issue #586)", () => {
+  test("CLI BIDS validator pin stays in lockstep with the version-of-record", () => {
+    // After Phase 4 (#610) the per-repo bids-validation.yml is a shim
+    // and no longer contains the validator version — the central
+    // run-bids-validation.yml on nemarDatasets/.github runs the
+    // validator. The validator-version.json pin remains the source of
+    // truth that the CLI runtime uses; this assertion stays so a future
+    // CLI change can't drift from the pin file.
     expect(VALIDATOR_VERSION).toBe(validatorPin.version);
     expect(VALIDATOR_VERSION).toMatch(/^\d+\.\d+\.\d+$/);
-    const tpl = templates.find((t) => t.path.endsWith("bids-validation.yml"));
-    expect(tpl, "bids-validation.yml missing from templates").toBeDefined();
-    if (!tpl) return;
-    expect(tpl.content).toContain(`jsr:@bids/validator@${VALIDATOR_VERSION}`);
-    expect(tpl.content).not.toMatch(/jsr:@bids\/validator(?!@\d)/);
   });
 
   test("read-only / AWS-only templates stay on the auto-token (no App-token step)", () => {
-    // bids-validation + version-check do no writes and need no App token.
-    // generate-archive.yml (#608) was removed when centralized — its
-    // central counterpart on nemarDatasets/.github DOES mint an App token
-    // (to check out the target dataset repo), which is reviewed there.
-    const readOnlyTemplates = ["bids-validation.yml", "version-check.yml"];
+    // version-check does no writes and needs no App token. bids-validation
+    // (#610) and generate-archive (#608) WERE in this list pre-Phase 4
+    // but now require App-token steps — the bids-validation shim mints
+    // one to dispatch to .github; generate-archive moved off-repo
+    // entirely. pr-merge's `cleanup-staging` job uses AWS only too but
+    // lives in the same template as the dispatch shim and is excluded
+    // via the mintIdx < 0 short-circuit in the shim-templates test above.
+    const readOnlyTemplates = ["version-check.yml"];
     for (const name of readOnlyTemplates) {
       const tpl = templates.find((t) => t.path.endsWith(name));
       expect(tpl, `${name} missing from templates`).toBeDefined();

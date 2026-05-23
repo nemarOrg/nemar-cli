@@ -975,6 +975,16 @@ export async function getWorkflowRuns(
  */
 export function getWorkflowTemplates(): Array<{ path: string; content: string }> {
   // BIDS Validation workflow
+  // BIDS Validation shim — Phase 4 of epic #601 (sub-issue #610).
+  //
+  // GitHub's `pull_request` events fire only on the repo where the PR lives,
+  // so we can't relocate the validator workflow directly like Phases 1-3.
+  // This shim fires `repository_dispatch[run-bids-validation]` at
+  // `nemarDatasets/.github`, where `run-bids-validation.yml` runs the actual
+  // deno validator and posts the result back as a `check-run` on this
+  // dataset repo's PR. The shim itself does ~5 seconds of work (mint token
+  // + dispatch) and shows up as a quick green check on the PR alongside the
+  // central workflow's check-run.
   const bidsValidation = `name: BIDS Validation
 
 on:
@@ -985,74 +995,44 @@ on:
   workflow_dispatch:
 
 jobs:
-  validate:
-    name: bids-validation
+  dispatch:
+    name: Dispatch central BIDS validation
     runs-on: ubuntu-latest
+    timeout-minutes: 2
+    permissions: {}
     steps:
-      - uses: actions/checkout@v4
-
-      - name: Setup Deno
-        uses: denoland/setup-deno@v2
+      - name: Mint App token scoped to .github
+        id: app-token
+        uses: actions/create-github-app-token@v1
         with:
-          deno-version: v2.x
+          app-id: \${{ secrets.NEMAR_APP_ID }}
+          private-key: \${{ secrets.NEMAR_APP_PRIVATE_KEY }}
+          owner: nemarDatasets
+          # The dispatch target is the .github repo; the token needs
+          # actions:write on .github. The central workflow mints a
+          # separate per-dataset token internally for the checkout step.
+          repositories: .github
 
-      - name: Run BIDS validator
+      - name: Dispatch run-bids-validation
+        env:
+          GH_TOKEN: \${{ steps.app-token.outputs.token }}
         run: |
-          mkdir -p .nemar
-          grep -qxF '.nemar/' .bidsignore 2>/dev/null || echo '.nemar/' >> .bidsignore
-          deno run -A jsr:@bids/validator@${VALIDATOR_VERSION} . --json > .nemar/validation.json || true
-          cat .nemar/validation.json
-
-      - name: Collect git-annex pointer files
-        run: |
-          # Find symlinks (annex pointers in locked repos)
-          find . -type l -not -path './.git/*' -printf '/%P\\n' > /tmp/annex-files.txt 2>/dev/null || true
-          # Find small files with annex pointer content (unlocked repos)
-          find . -type f -not -path './.git/*' -size -1k -exec grep -l '^/annex/objects/' {} + 2>/dev/null | sed 's|^\\./|/|' >> /tmp/annex-files.txt || true
-          sort -u /tmp/annex-files.txt -o /tmp/annex-files.txt
-          ANNEX_COUNT=$(wc -l < /tmp/annex-files.txt | tr -d ' ')
-          if [ "$ANNEX_COUNT" -gt 0 ]; then
-            echo "Found $ANNEX_COUNT git-annex pointer file(s) (errors from these will be filtered)"
-          fi
-
-      - name: Check validation result
-        run: |
-          if [ ! -f .nemar/validation.json ] || ! jq empty .nemar/validation.json 2>/dev/null; then
-            echo "::error::BIDS validator failed to produce valid output"
-            exit 1
-          fi
-
-          # Convert annex file list to JSON array for jq filtering
-          if [ -s /tmp/annex-files.txt ]; then
-            jq -R -s 'split("\\n") | map(select(length > 0))' /tmp/annex-files.txt > /tmp/annex-files.json
-          else
-            echo '[]' > /tmp/annex-files.json
-          fi
-
-          # Filter out errors from git-annex pointer files
-          REAL_ERRORS=$(jq --slurpfile annexed /tmp/annex-files.json \
-            '[.issues.issues[] | select(.severity == "error") | select(.location as $loc | ($annexed[0] | index($loc)) | not)] | length' \
-            .nemar/validation.json)
-          ANNEX_ERRORS=$(jq --slurpfile annexed /tmp/annex-files.json \
-            '[.issues.issues[] | select(.severity == "error") | select(.location as $loc | ($annexed[0] | index($loc)) | . != null)] | length' \
-            .nemar/validation.json)
-
-          if [ "$ANNEX_ERRORS" -gt 0 ]; then
-            echo "::notice::Skipped $ANNEX_ERRORS error(s) from git-annex pointer files (not real data)"
-          fi
-
-          if [ "$REAL_ERRORS" -gt 0 ]; then
-            echo "::error::BIDS validation found $REAL_ERRORS error(s)"
-            jq --slurpfile annexed /tmp/annex-files.json \
-              '[.issues.issues[] | select(.severity == "error") | select(.location as $loc | ($annexed[0] | index($loc)) | not)][]' \
-              .nemar/validation.json
-            exit 1
-          fi
-          WARNINGS=$(jq '[.issues.issues[] | select(.severity == "warning")] | length' .nemar/validation.json)
-          echo "BIDS validation passed ($WARNINGS warning(s), $ANNEX_ERRORS annex pointer error(s) skipped)"
+          set -euo pipefail
+          DATASET_ID="\${{ github.event.repository.name }}"
+          # On pull_request events the head is the PR's head; on push
+          # events it's the pushed commit. Fall back so both shapes work.
+          HEAD_SHA="\${{ github.event.pull_request.head.sha || github.sha }}"
+          REF="\${{ github.event.pull_request.head.ref || github.ref_name }}"
+          PR_NUMBER="\${{ github.event.pull_request.number || '' }}"
+          echo "Dispatching run-bids-validation for $DATASET_ID @ $HEAD_SHA (ref=$REF, PR=$PR_NUMBER)"
+          gh api "repos/nemarDatasets/.github/dispatches" \\
+            -f event_type=run-bids-validation \\
+            -f "client_payload[dataset_id]=$DATASET_ID" \\
+            -f "client_payload[ref]=$REF" \\
+            -f "client_payload[head_sha]=$HEAD_SHA" \\
+            -f "client_payload[pr_number]=$PR_NUMBER"
 `;
 
-  // Version Check workflow
   const versionCheck = `name: Version Check
 
 on:
@@ -1093,6 +1073,15 @@ jobs:
 `;
 
   // PR Merge Handler workflow
+  // PR Merge shim — Phase 4 of epic #601 (sub-issue #610).
+  //
+  // `pull_request_target: closed` events fire only on the dataset repo
+  // where the PR lives. The `create-release` half of the legacy
+  // pr-merge.yml is now a thin dispatch to `nemarDatasets/.github` which
+  // does the tag + release cutting via `run-pr-merge.yml`. The
+  // `cleanup-staging` job stays inline here because it's AWS-only and
+  // centralizing it would just add a network hop without consolidating
+  // logic.
   const prMerge = `name: PR Merge Handler
 
 on:
@@ -1100,67 +1089,42 @@ on:
     types: [closed]
     branches: [main]
 
-permissions:
-  contents: write
-
 jobs:
-  create-release:
-    name: Create Release
+  dispatch-release:
+    name: Dispatch central release creation
     if: github.event.pull_request.merged == true
     runs-on: ubuntu-latest
-    outputs:
-      version: \${{ steps.version.outputs.version }}
-      release_created: \${{ steps.create_release.outputs.created }}
+    timeout-minutes: 2
+    permissions: {}
     steps:
-      - name: Mint App installation token
+      - name: Mint App token scoped to .github
         id: app-token
         uses: actions/create-github-app-token@v1
         with:
           app-id: \${{ secrets.NEMAR_APP_ID }}
           private-key: \${{ secrets.NEMAR_APP_PRIVATE_KEY }}
           owner: nemarDatasets
-          repositories: \${{ github.event.repository.name }}
+          repositories: .github
 
-      - uses: actions/checkout@v4
-        with:
-          token: \${{ steps.app-token.outputs.token }}
-
-      - name: Get version
-        id: version
-        run: |
-          VERSION=$(jq -r '.Version // "1.0.0"' dataset_description.json)
-          echo "version=$VERSION" >> $GITHUB_OUTPUT
-          echo "Version: $VERSION"
-
-      - name: Check if tag exists
-        id: check_tag
-        run: |
-          if git rev-parse "v\${{ steps.version.outputs.version }}" >/dev/null 2>&1; then
-            echo "exists=true" >> $GITHUB_OUTPUT
-          else
-            echo "exists=false" >> $GITHUB_OUTPUT
-          fi
-
-      - name: Create tag and release
-        id: create_release
-        if: steps.check_tag.outputs.exists == 'false'
+      - name: Dispatch run-pr-merge
         env:
           GH_TOKEN: \${{ steps.app-token.outputs.token }}
-          PR_NUMBER: \${{ github.event.pull_request.number }}
         run: |
-          git config user.name "nemar-publish-bot"
-          git config user.email "nemar-publish-bot@users.noreply.github.com"
-          VERSION="\${{ steps.version.outputs.version }}"
-          git tag -a "v$VERSION" -m "Release v$VERSION"
-          git push origin "v$VERSION"
-          gh release create "v$VERSION" --title "v$VERSION" \\
-            --notes "Release v$VERSION from PR #\${PR_NUMBER}"
-          echo "created=true" >> $GITHUB_OUTPUT
+          set -euo pipefail
+          DATASET_ID="\${{ github.event.repository.name }}"
+          PR_NUMBER="\${{ github.event.pull_request.number }}"
+          echo "Dispatching run-pr-merge for $DATASET_ID (PR #$PR_NUMBER)"
+          gh api "repos/nemarDatasets/.github/dispatches" \\
+            -f event_type=run-pr-merge \\
+            -f "client_payload[dataset_id]=$DATASET_ID" \\
+            -f "client_payload[pr_number]=$PR_NUMBER"
 
   cleanup-staging:
     name: Cleanup Staging (runs on merge or close)
     if: always()
     runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions: {}
     steps:
       - name: Remove staging data for this PR/branch
         env:
