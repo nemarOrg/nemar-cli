@@ -361,5 +361,47 @@ describe("shouldDispatchVersionDoi", () => {
       expect(decision.dispatch).toBe(false);
       if (!decision.dispatch) expect(decision.reason).toBe("wrong_owner");
     });
+
+    test("does not dispatch when the repository object lacks an owner field", () => {
+      // Defensive guard against malformed payloads / a future GitHub API
+      // change. Parallel to the enrichment-side coverage; pin both so a
+      // refactor can't accidentally break one while keeping the other.
+      const decision = shouldDispatchVersionDoi(
+        tagPushEvent({ repository: { name: "nm099999" } } as Partial<Parameters<typeof shouldDispatchVersionDoi>[0]>),
+      );
+      expect(decision.dispatch).toBe(false);
+      if (!decision.dispatch) expect(decision.reason).toBe("wrong_owner");
+    });
+  });
+
+  describe("dispatch-handler reason picker", () => {
+    test("on tag push, falls through enrichment's ref bail to version-doi's reason", () => {
+      // Smoke test for the picker at /webhooks/github: when enrichment
+      // rejects a tag push with the generic `ref_not_main_or_release`, the
+      // operator-facing reason should expose version-doi's more specific
+      // ref-shape verdict instead. We don't drive the Hono handler here
+      // (that requires env wiring); we assert the two decision outputs
+      // line up with the picker's invariant.
+      const tagOnDataset = tagPushEvent({ ref: "refs/tags/vfoo" });
+      const enrichmentDecision = shouldDispatchEnrichment(tagOnDataset);
+      const versionDoiDecision = shouldDispatchVersionDoi(tagOnDataset);
+
+      // Both decisions reject this payload.
+      expect(enrichmentDecision.dispatch).toBe(false);
+      expect(versionDoiDecision.dispatch).toBe(false);
+      if (enrichmentDecision.dispatch || versionDoiDecision.dispatch) return;
+
+      // Enrichment bails at the ref category, version-doi at the ref shape.
+      expect(enrichmentDecision.reason).toBe("ref_not_main_or_release");
+      expect(versionDoiDecision.reason).toBe("ref_not_version_tag");
+
+      // The handler's picker should surface version-doi's reason (more
+      // informative for an operator debugging a tag-shape bug).
+      const surfaced =
+        enrichmentDecision.reason === "ref_not_main_or_release"
+          ? versionDoiDecision.reason
+          : enrichmentDecision.reason;
+      expect(surfaced).toBe("ref_not_version_tag");
+    });
   });
 });

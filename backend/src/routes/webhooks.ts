@@ -726,6 +726,49 @@ async function handleZenodoVersionDoi(
     return c.json({ error: `Zenodo ${sandbox ? "sandbox " : ""}API key not configured` }, 500);
   }
 
+  // Idempotency guard for duplicate version-DOI dispatches. Phase 2
+  // centralization (#606) introduces a brief cutover window where both the
+  // legacy per-repo version-doi.yml AND the new central run-version-doi.yml
+  // fire on the same tag push. The EZID path catches "already exists" via
+  // doi.ts:createEzidVersionDoi, but Zenodo's `createNewVersion` has no
+  // such guard — a second call would mint a duplicate draft and, on
+  // publish, a permanent second DOI for the same dataset version.
+  //
+  // Short-circuit here if D1 already records a version DOI for this
+  // (dataset_id, version). The dataset_versions row is written on
+  // successful publish at the end of this handler, so a successful first
+  // dispatch blocks any subsequent dispatch (whether from the cutover
+  // window or from an operator retry).
+  try {
+    const existing = await c.env.DB.prepare(
+      "SELECT doi FROM dataset_versions WHERE dataset_id = ? AND version = ?",
+    )
+      .bind(dataset.dataset_id, version)
+      .first<{ doi: string | null }>();
+    if (existing?.doi) {
+      console.log(
+        `[publish-version-doi] zenodo: ${dataset.dataset_id} ${version} already has DOI ${existing.doi}; short-circuiting to prevent duplicate mint`,
+      );
+      return c.json(
+        {
+          version_doi: existing.doi,
+          dataset_id: dataset.dataset_id,
+          version,
+          skipped: true,
+          reason: "already_published",
+        },
+        200,
+      );
+    }
+  } catch (lookupErr) {
+    // A read failure is non-fatal — we'd rather risk a duplicate mint
+    // (rare, detectable, manually correctable) than block legitimate
+    // publishes on a transient D1 hiccup. Log loudly and continue.
+    console.warn(
+      `[publish-version-doi] zenodo: dataset_versions lookup failed for ${dataset.dataset_id} ${version}: ${lookupErr instanceof Error ? lookupErr.message : String(lookupErr)}; proceeding without idempotency guard`,
+    );
+  }
+
   try {
     // Create a new version from the concept deposition
     const conceptId = Number.parseInt(dataset.zenodo_concept_id);
@@ -1562,11 +1605,15 @@ webhooks.post("/github", async (c) => {
 
   if (!enrichmentDecision.dispatch && !versionDoiDecision.dispatch) {
     // Surface whichever reason is more specific. The enrichment path's
-    // reasons are richer (no_enrichment_paths_touched, ref_not_main_or_
-    // release, …); version-doi only contributes when the enrichment path
-    // bailed at the ref check.
+    // reasons are richer (no_enrichment_paths_touched, wrong_owner, …)
+    // but it bails at `ref_not_main_or_release` for any tag-shaped ref,
+    // hiding the more useful `ref_not_version_tag` from version-doi.
+    // When enrichment's reason is the generic ref-category bail, prefer
+    // version-doi's reason; otherwise keep enrichment's. Code-review #607.
     const reason =
-      enrichmentDecision.dispatch === false ? enrichmentDecision.reason : versionDoiDecision.reason;
+      enrichmentDecision.reason === "ref_not_main_or_release"
+        ? versionDoiDecision.reason
+        : enrichmentDecision.reason;
     return c.json({ ok: true, dispatched: false, reason });
   }
 
