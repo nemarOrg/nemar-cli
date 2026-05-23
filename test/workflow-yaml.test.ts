@@ -83,50 +83,13 @@ describe("CI workflow templates", () => {
     expect(llm).toBeUndefined();
   });
 
-  test("version-doi.yml refreshes enrichment before minting (epic #417 phase 1)", () => {
+  test("version-doi.yml is no longer shipped per-repo (centralized, #606)", () => {
+    // The template is relocated to
+    // `nemarDatasets/.github/.github/workflows/run-version-doi.yml` and
+    // triggered via the Worker's /webhooks/github tag-push handler. Pin
+    // the absence so a future edit can't accidentally re-ship it.
     const versionDoi = templates.find((t) => t.path.endsWith("version-doi.yml"));
-    expect(versionDoi).toBeDefined();
-    if (!versionDoi) return;
-
-    // The defensive refresh step must call llm-enrich with the tag as ref
-    // and force=true, and it must be tolerant of failure so a transient
-    // outage does not block DOI publication. client_commits=true keeps the
-    // Worker from attempting a (doomed) commit against an immutable tag.
-    expect(versionDoi.content).toContain("Refresh enrichment from tag");
-    expect(versionDoi.content).toContain("continue-on-error: true");
-    expect(versionDoi.content).toContain('\\"force\\": true');
-    expect(versionDoi.content).toContain('\\"client_commits\\": true');
-    expect(versionDoi.content).toContain('\\"ref\\": \\"$TAG\\"');
-    // Curl-level failure must fall through to the warning branch, not a
-    // silent green step.
-    expect(versionDoi.content).toContain("|| HTTP_CODE=0");
-    expect(versionDoi.content).toContain('[ "$HTTP_CODE" = "0" ]');
-    // The Worker returns HTTP 200 with embedded *_error fields when a
-    // non-fatal sub-step fails (commit, DOI sync, cache, bidsignore,
-    // metadata-columns write, GitHub issue creation); the Action must
-    // surface every one of these as warnings so a green check does not
-    // mask a silent failure. The list must stay in sync with
-    // ENRICHMENT_SUBERROR_FIELDS in services/dataset-reindex.ts and
-    // EnrichmentSuccessBody in services/enrich-dataset.ts. OpenRouter
-    // failures are fatal (Stage 2) and surface as HTTP 500, not as a
-    // 200 sub-error, so they are intentionally not in this list.
-    for (const field of [
-      "commit_error",
-      "doi_sync_error",
-      "cache_error",
-      "bidsignore_error",
-      "metadata_columns_error",
-      "issue_creation_error",
-    ]) {
-      expect(versionDoi.content).toContain(field);
-    }
-    expect(versionDoi.content).not.toContain("openrouter_error");
-
-    // The refresh step must appear before the publish-DOI step.
-    const refreshIdx = versionDoi.content.indexOf("Refresh enrichment from tag");
-    const publishIdx = versionDoi.content.indexOf("Publish version DOI");
-    expect(refreshIdx).toBeGreaterThan(0);
-    expect(publishIdx).toBeGreaterThan(refreshIdx);
+    expect(versionDoi).toBeUndefined();
   });
 
   test("generate-archive workflow pins archiver to v7", () => {
@@ -149,10 +112,10 @@ describe("CI workflow templates", () => {
     // repo scope and no static GITHUB_TOKEN. Parsed YAML so input values
     // are pinned exactly (a copy-pasted hardcoded `repositories:` would
     // still pass a substring check; this catches it).
-    // llm-enrichment.yml was removed in #602 (centralized); the central
-    // workflow on nemarDatasets/.github has its own App-token discipline
-    // and is reviewed separately.
-    const writeTemplates = ["pr-merge.yml", "version-doi.yml"];
+    // llm-enrichment.yml (#602) and version-doi.yml (#606) were removed
+    // when centralized to nemarDatasets/.github; their central counterparts
+    // have their own App-token discipline reviewed separately.
+    const writeTemplates = ["pr-merge.yml"];
     for (const name of writeTemplates) {
       const tpl = templates.find((t) => t.path.endsWith(name));
       expect(tpl, `${name} missing from templates`).toBeDefined();
@@ -191,16 +154,12 @@ describe("CI workflow templates", () => {
     }
   });
 
-  test("version-doi spawns the App-token step in BOTH jobs", () => {
-    // version-doi has two jobs; each does its own write and needs its own
-    // installation token. If a future refactor coalesces jobs, this test
-    // documents the contract.
-    const versionDoi = templates.find((t) => t.path.endsWith("version-doi.yml"));
-    expect(versionDoi).toBeDefined();
-    if (!versionDoi) return;
-    const appTokenCount = (versionDoi.content.match(/actions\/create-github-app-token@v1/g) || []).length;
-    expect(appTokenCount).toBe(2);
-  });
+  // The "App-token in BOTH jobs" contract for version-doi was specific to
+  // the per-repo template. With Phase 2 centralization (#606) the
+  // equivalent invariant lives in the run-version-doi.yml on
+  // nemarDatasets/.github and is reviewed in that PR; this test is
+  // removed rather than asserting a property of a template that no longer
+  // ships from this repo.
 
   test("CLI and bids-validation template pin the same @bids/validator version (issue #586)", () => {
     expect(VALIDATOR_VERSION).toBe(validatorPin.version);

@@ -1,29 +1,24 @@
 #!/usr/bin/env bun
 /**
- * One-time cleanup: delete `.github/workflows/llm-enrichment.yml` from every
- * dataset repo under `nemarDatasets`. Phase 1 of epic #601 (sub-issue #602).
+ * One-time cleanup: delete a per-repo workflow file from every dataset
+ * repo under `nemarDatasets`. Phase 1 (#602) used this to remove
+ * `llm-enrichment.yml`; Phase 2 (#606) uses it to remove `version-doi.yml`;
+ * later phases of epic #601 will use it for the remaining per-repo
+ * workflows as each centralizes onto `nemarDatasets/.github`.
  *
- * After this runs, the legacy per-repo enrichment workflow no longer fires —
- * the central `run-enrichment.yml` on `nemarDatasets/.github` (dispatched
- * from the Worker's `/webhooks/github` push handler) is the only path.
- *
- * Cutover order matters. This script is step 4:
- *   1. `nemarDatasets/.github` PR adds the central workflow (idle).
- *   2. nemar-cli PR adds `/webhooks/github` + `triggerEnrichmentRun`.
- *   3. Operator configures the App webhook URL → api.nemar.org/webhooks/github
- *      so push events actually arrive at the Worker.
- *   4. THIS SCRIPT — sweep the per-repo file from every dataset repo.
- *   5. Verify with a real push on `nm099999`; expect exactly one central
- *      workflow run, no per-repo run, `enrichment_json` populated in D1.
+ * Cutover order matters. This script is step 4: after the central
+ * workflow lands, the Worker dispatcher ships, and the App webhook is
+ * pointed at /webhooks/github.
  *
  * Idempotent — repos that already have the file removed are skipped.
  * Logged per-repo. Concurrency 5 to keep within GitHub's secondary-rate
  * thresholds for content writes.
  *
  * Usage:
- *   bun run scripts/strip-per-repo-llm-enrichment.ts                  # all datasets
- *   bun run scripts/strip-per-repo-llm-enrichment.ts --dry-run        # report only, no writes
- *   bun run scripts/strip-per-repo-llm-enrichment.ts nm000132 nm000154  # subset
+ *   bun run scripts/strip-per-repo-workflow.ts                                  # default: llm-enrichment.yml, all datasets
+ *   bun run scripts/strip-per-repo-workflow.ts --workflow version-doi.yml      # phase 2: sweep version-doi
+ *   bun run scripts/strip-per-repo-workflow.ts --dry-run                        # report only, no writes
+ *   bun run scripts/strip-per-repo-workflow.ts --workflow X.yml nm000132        # one repo
  *
  * Auth: uses the `gh` CLI's stored token via `gh auth token`. The token
  * must have `repo` scope on `nemarDatasets`. This is operator-driven, not
@@ -31,25 +26,50 @@
  * to delete a deprecated file.
  */
 
-const TARGET_PATH = ".github/workflows/llm-enrichment.yml";
+const DEFAULT_WORKFLOW = "llm-enrichment.yml";
 const ORG = "nemarDatasets";
-const COMMIT_MESSAGE =
-  "chore(ci): remove llm-enrichment.yml (centralized on nemarDatasets/.github, #602)";
 const CONCURRENCY = 5;
 const API_BASE = "https://api.nemar.org";
 
+/** Map a centralized-workflow basename to its sub-issue number, so the
+ *  commit message anchors back to the PR that justified the removal.
+ *  New phases append their entry here as they centralize. */
+const WORKFLOW_ISSUE_MAP: Record<string, string> = {
+  "llm-enrichment.yml": "602",
+  "version-doi.yml": "606",
+};
+
 interface Args {
   dryRun: boolean;
+  workflow: string;
+  issue: string | null;
   datasets: string[];
 }
 
 function parseArgs(argv: string[]): Args {
-  const args: Args = { dryRun: false, datasets: [] };
-  for (const a of argv) {
+  const args: Args = { dryRun: false, workflow: DEFAULT_WORKFLOW, issue: null, datasets: [] };
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i];
     if (a === "--dry-run" || a === "-n") args.dryRun = true;
     else if (a === "--help" || a === "-h") {
       printHelp();
       process.exit(0);
+    } else if (a === "--workflow") {
+      const v = argv[++i];
+      if (!v) {
+        console.error("--workflow requires a value");
+        process.exit(1);
+      }
+      // Accept either a basename ("version-doi.yml") or a full
+      // .github/workflows/<name> path; normalize to basename.
+      args.workflow = v.replace(/^\.github\/workflows\//, "");
+    } else if (a === "--issue") {
+      const v = argv[++i];
+      if (!v) {
+        console.error("--issue requires a value");
+        process.exit(1);
+      }
+      args.issue = v;
     } else if (a.startsWith("-")) {
       console.error(`Unknown flag: ${a}`);
       printHelp();
@@ -58,14 +78,24 @@ function parseArgs(argv: string[]): Args {
       args.datasets.push(a);
     }
   }
+  if (!args.issue) {
+    args.issue = WORKFLOW_ISSUE_MAP[args.workflow] ?? null;
+  }
   return args;
 }
 
 function printHelp(): void {
-  console.log(`Usage: strip-per-repo-llm-enrichment.ts [--dry-run] [dataset-id ...]
+  console.log(`Usage: strip-per-repo-workflow.ts [--workflow <basename>] [--dry-run] [--issue <N>] [dataset-id ...]
 
-Deletes .github/workflows/llm-enrichment.yml from each dataset repo under
-nemarDatasets/. Phase 1 of epic #601 / sub-issue #602.
+Deletes .github/workflows/<workflow> from each dataset repo under
+nemarDatasets/. Defaults to llm-enrichment.yml (Phase 1 of epic #601).
+
+Flags:
+  --workflow <name>   Workflow file basename to remove (default: llm-enrichment.yml).
+                      You can also pass the full .github/workflows/<name> path.
+  --dry-run, -n       Report what would be deleted, don't write anything.
+  --issue <N>         Sub-issue number for the commit message anchor.
+                      Defaults to the phase appropriate for the workflow.
 
 If no dataset IDs are given, lists every dataset via the NEMAR API and
 operates on all of them. Idempotent — repos where the file is already
@@ -117,8 +147,8 @@ interface ContentsResponse {
   type?: string;
 }
 
-async function getFileSha(repo: string, token: string): Promise<string | null> {
-  const res = await fetch(`https://api.github.com/repos/${ORG}/${repo}/contents/${TARGET_PATH}`, {
+async function getFileSha(repo: string, targetPath: string, token: string): Promise<string | null> {
+  const res = await fetch(`https://api.github.com/repos/${ORG}/${repo}/contents/${targetPath}`, {
     headers: {
       Authorization: `Bearer ${token}`,
       Accept: "application/vnd.github+json",
@@ -136,8 +166,14 @@ async function getFileSha(repo: string, token: string): Promise<string | null> {
   return body.sha;
 }
 
-async function deleteFile(repo: string, sha: string, token: string): Promise<void> {
-  const res = await fetch(`https://api.github.com/repos/${ORG}/${repo}/contents/${TARGET_PATH}`, {
+async function deleteFile(
+  repo: string,
+  targetPath: string,
+  sha: string,
+  commitMessage: string,
+  token: string,
+): Promise<void> {
+  const res = await fetch(`https://api.github.com/repos/${ORG}/${repo}/contents/${targetPath}`, {
     method: "DELETE",
     headers: {
       Authorization: `Bearer ${token}`,
@@ -146,7 +182,7 @@ async function deleteFile(repo: string, sha: string, token: string): Promise<voi
       "Content-Type": "application/json",
     },
     body: JSON.stringify({
-      message: COMMIT_MESSAGE,
+      message: commitMessage,
       sha,
       // No `branch` field: GitHub deletes from the default branch, which
       // is `main` for every dataset repo by convention. If a repo's
@@ -169,16 +205,22 @@ interface RepoResult {
   message?: string;
 }
 
-async function processRepo(repo: string, token: string, dryRun: boolean): Promise<RepoResult> {
+async function processRepo(
+  repo: string,
+  targetPath: string,
+  commitMessage: string,
+  token: string,
+  dryRun: boolean,
+): Promise<RepoResult> {
   try {
-    const sha = await getFileSha(repo, token);
+    const sha = await getFileSha(repo, targetPath, token);
     if (sha === null) {
       return { repo, status: "absent" };
     }
     if (dryRun) {
       return { repo, status: "skipped", message: `would DELETE sha=${sha.slice(0, 7)}` };
     }
-    await deleteFile(repo, sha, token);
+    await deleteFile(repo, targetPath, sha, commitMessage, token);
     return { repo, status: "deleted", message: `removed sha=${sha.slice(0, 7)}` };
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
@@ -215,12 +257,20 @@ async function runPool<T>(items: T[], worker: (it: T) => Promise<RepoResult>, co
 
 async function main(): Promise<void> {
   const args = parseArgs(process.argv.slice(2));
+  const targetPath = `.github/workflows/${args.workflow}`;
+  const issueAnchor = args.issue ? `, #${args.issue}` : "";
+  const commitMessage = `chore(ci): remove ${args.workflow} (centralized on nemarDatasets/.github${issueAnchor})`;
+
   const token = await ghToken();
   const datasets = args.datasets.length > 0 ? args.datasets : await listAllDatasetIds();
   console.log(
-    `Stripping ${TARGET_PATH} from ${datasets.length} dataset repo(s) under ${ORG} (concurrency ${CONCURRENCY}${args.dryRun ? ", DRY RUN" : ""}).`,
+    `Stripping ${targetPath} from ${datasets.length} dataset repo(s) under ${ORG} (concurrency ${CONCURRENCY}${args.dryRun ? ", DRY RUN" : ""}).`,
   );
-  const results = await runPool(datasets, (id) => processRepo(id, token, args.dryRun), CONCURRENCY);
+  const results = await runPool(
+    datasets,
+    (id) => processRepo(id, targetPath, commitMessage, token, args.dryRun),
+    CONCURRENCY,
+  );
 
   const summary: Record<RepoResult["status"], number> = {
     deleted: 0,
