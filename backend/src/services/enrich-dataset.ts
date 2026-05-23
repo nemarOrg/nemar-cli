@@ -38,7 +38,7 @@ import {
 } from "./doi-orcid-discovery.js";
 import { buildOrcidEnrichment, resolveEzidAuth } from "./doi.js";
 import { extractDoi, updateIdentifier } from "./ezid.js";
-import { getDatasetsToken } from "./github-auth.js";
+import { getDatasetsToken, getDatasetsTokenWithRefresher } from "./github-auth.js";
 import {
   EnrichmentCommitError,
   commitEnrichmentWithBidsignore,
@@ -239,9 +239,14 @@ export async function enrichDataset(
 
   // GitHub auth resolution can throw if neither App nor PAT is configured;
   // mirror the D1 catch so the webhook caller gets a structured response.
+  // We use the refresher variant so the first round of GitHub reads can
+  // self-heal from a one-off stale-App-token 401. Issue #596.
   let pat: string;
+  let refreshGitHubToken: () => Promise<string>;
   try {
-    pat = await getDatasetsToken(env);
+    const auth = await getDatasetsTokenWithRefresher(env);
+    pat = auth.token;
+    refreshGitHubToken = auth.refresh;
   } catch (err) {
     return {
       ok: false,
@@ -267,7 +272,7 @@ export async function enrichDataset(
   }
 
   try {
-    const tree = await getTreeAtRef(repoName, ref, pat);
+    const tree = await getTreeAtRef(repoName, ref, pat, refreshGitHubToken);
 
     const readmeFile = tree.find(
       (f) => f.path === "README.md" || f.path === "README" || f.path === "readme.md",
@@ -279,12 +284,12 @@ export async function enrichDataset(
         body: { error: "No README found in repository", skipped: true },
       };
     }
-    const readmeContent = await getBlobContent(repoName, readmeFile.sha, pat);
+    const readmeContent = await getBlobContent(repoName, readmeFile.sha, pat, refreshGitHubToken);
 
     let bidsDescription: Record<string, unknown> = {};
     const descFile = tree.find((f) => f.path === "dataset_description.json");
     if (descFile) {
-      const descContent = await getBlobContent(repoName, descFile.sha, pat);
+      const descContent = await getBlobContent(repoName, descFile.sha, pat, refreshGitHubToken);
       try {
         bidsDescription = JSON.parse(descContent) as Record<string, unknown>;
       } catch (parseErr) {
@@ -338,7 +343,12 @@ export async function enrichDataset(
       tree.find((f) => f.path === ".nemar/metadata.json") ||
       tree.find((f) => f.path === "nemar_metadata.json");
     if (nemarMetaFile) {
-      const nemarContent = await getBlobContent(repoName, nemarMetaFile.sha, pat);
+      const nemarContent = await getBlobContent(
+        repoName,
+        nemarMetaFile.sha,
+        pat,
+        refreshGitHubToken,
+      );
       try {
         const parsed = parseNemarMetadata(JSON.parse(nemarContent));
         if (parsed?.version === "2.0") {
@@ -482,7 +492,12 @@ export async function enrichDataset(
     const participantsFile = tree.find((f) => f.path === "participants.tsv");
     if (participantsFile) {
       try {
-        participantsTsv = await getBlobContent(repoName, participantsFile.sha, pat);
+        participantsTsv = await getBlobContent(
+          repoName,
+          participantsFile.sha,
+          pat,
+          refreshGitHubToken,
+        );
       } catch (partErr) {
         console.warn(
           `[llm-enrich] Failed to read participants.tsv for ${datasetId}, continuing: ${errorMessage(partErr)}`,
