@@ -73,6 +73,13 @@ S3_BUCKET = "nemar"
 # 403 and resolveEmailConfig logs once but does not propagate the failure.
 FROM_EMAIL = "NEMAR Archive <noreply@nemar.org>"
 REPLY_TO = "info@nemar.org"
+# Web-dashboard session cookie Domain attribute (#569). Pinned to
+# app.nemar.org because nemarOrg/website#46 moves the authenticated
+# dashboard to that subdomain. Until cutover the dashboard lives at
+# nemar.org and this cookie will not actually be sent from there —
+# that's fine; the cookie is only useful once the frontend ships at
+# app.nemar.org. Flip via redeploy if a different host wins.
+WEB_SESSION_COOKIE_DOMAIN = "app.nemar.org"
 # Centralized manifest workflow flag (#557, relocated to
 # nemarDatasets/.github in #564). Default OFF; flip to "true"
 # per-environment for staged rollout after dev soak. When OFF the worker
@@ -146,6 +153,10 @@ AWS_REGION = "us-east-2"
 S3_BUCKET = "nemar"
 FROM_EMAIL = "NEMAR Archive <noreply@nemar.org>"
 REPLY_TO = "info@nemar.org"
+# Web-dashboard session cookie Domain (#569). Empty in dev so the
+# cookie is host-only for nemar-api-dev.sccn-org.workers.dev — any
+# explicit value would refuse to scope to a workers.dev hostname.
+WEB_SESSION_COOKIE_DOMAIN = ""
 # Centralized manifest workflow flag (#557, relocated to
 # nemarDatasets/.github in #564). SCCN dev is the designated soak target.
 # MANIFEST_CALLBACK_SECRET is set on both the Worker and nemarDatasets org

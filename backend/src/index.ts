@@ -24,6 +24,7 @@ import { maintenanceMode } from "./middleware/maintenance";
 import { rateLimiter } from "./middleware/rateLimit";
 import { adminRoutes } from "./routes/admin";
 import { authRoutes } from "./routes/auth";
+import { authWebRoutes } from "./routes/auth-web";
 import { catalogIndexResponse, dataRoutes } from "./routes/data";
 import { datasetRoutes } from "./routes/datasets";
 import { sandboxRoutes } from "./routes/sandbox";
@@ -107,6 +108,10 @@ api.get("/notices", optionalAuthMiddleware, async (c) => {
 
 // Mount route handlers
 api.route("/auth", authRoutes);
+// Web-dashboard auth (#569). Mounted at the same /auth prefix as the
+// CLI flow; no path overlap with authRoutes (existing /signup, /login,
+// /verify, etc. vs new /code/request, /code/verify, /logout, /me).
+api.route("/auth", authWebRoutes);
 api.route("/users", userRoutes);
 api.route("/admin", adminRoutes);
 api.route("/datasets", datasetRoutes);
