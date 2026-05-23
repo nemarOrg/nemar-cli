@@ -46,8 +46,9 @@ function timingSafeEqual(a: string, b: string): boolean {
 /**
  * Validate a `ref` value supplied to the /webhooks/llm-enrich endpoint.
  * The ref is interpolated into GitHub API URL fragments and into the shell
- * payload emitted by llm-enrichment.yml, so the allowed characters are
- * intentionally narrow.
+ * payload emitted by the central `run-enrichment.yml` on
+ * `nemarDatasets/.github` (Phase 1 of #601), so the allowed characters
+ * are intentionally narrow.
  *
  * Returns null when the ref is acceptable. Otherwise returns a human-readable
  * error string suitable for a 400 response body. Exported so unit tests can
