@@ -175,6 +175,20 @@ describe("CI workflow templates", () => {
     }
   });
 
+  test("bids-validation shim interpolates VALIDATOR_VERSION into the dispatch payload", () => {
+    // Code-review #12 fix: the central workflow has no way to know which
+    // validator version the CLI is currently pinned to, so the shim must
+    // pass it as a client_payload field. The literal value lives in
+    // validator-version.json and propagates through src/lib/bids-validator.ts
+    // -> VALIDATOR_VERSION -> the shim's template-literal interpolation.
+    const tpl = templates.find((t) => t.path.endsWith("bids-validation.yml"));
+    expect(tpl, "bids-validation.yml missing from templates").toBeDefined();
+    if (!tpl) return;
+    // The shim must include the field, AND the value must match the pin.
+    expect(tpl.content).toMatch(/client_payload\[validator_version\]=[0-9]+\.[0-9]+\.[0-9]+/);
+    expect(tpl.content).toContain(`client_payload[validator_version]=${VALIDATOR_VERSION}`);
+  });
+
   // The "App-token in BOTH jobs" contract for version-doi was specific to
   // the per-repo template. With Phase 2 centralization (#606) the
   // equivalent invariant lives in the run-version-doi.yml on

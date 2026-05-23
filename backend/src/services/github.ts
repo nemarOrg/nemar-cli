@@ -1030,7 +1030,8 @@ jobs:
             -f "client_payload[dataset_id]=$DATASET_ID" \\
             -f "client_payload[ref]=$REF" \\
             -f "client_payload[head_sha]=$HEAD_SHA" \\
-            -f "client_payload[pr_number]=$PR_NUMBER"
+            -f "client_payload[pr_number]=$PR_NUMBER" \\
+            -f "client_payload[validator_version]=${VALIDATOR_VERSION}"
 `;
 
   const versionCheck = `name: Version Check
