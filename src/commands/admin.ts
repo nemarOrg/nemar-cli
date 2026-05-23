@@ -1428,14 +1428,37 @@ doiCommand
         console.log();
         console.log(chalk.cyan("--- Running LLM enrichment pipeline (CI workflow) ---"));
 
-        const llmSpinner = ora("Triggering llm-enrichment workflow...").start();
+        const llmSpinner = ora("Triggering run-enrichment workflow...").start();
         try {
           const { spawn: bunSpawn } = await import("bun");
           const repo = dataset.github_repo;
+          // Phase 1 of centralization (#602): the enrichment workflow now
+          // lives at nemarDatasets/.github/.github/workflows/run-enrichment.yml.
+          // We trigger it with the target dataset_id in the workflow_dispatch
+          // inputs; the central workflow mints a per-repo App token, checks
+          // out the dataset repo, and hands off to /webhooks/llm-enrich the
+          // same way the legacy per-repo workflow did.
+          const CENTRAL_WORKFLOW_REPO = "nemarDatasets/.github";
+          const CENTRAL_WORKFLOW_FILE = "run-enrichment.yml";
 
           // Trigger the workflow
           const trigger = bunSpawn({
-            cmd: ["gh", "workflow", "run", "llm-enrichment.yml", "--repo", repo, "--ref", "main"],
+            cmd: [
+              "gh",
+              "workflow",
+              "run",
+              CENTRAL_WORKFLOW_FILE,
+              "--repo",
+              CENTRAL_WORKFLOW_REPO,
+              "--ref",
+              "main",
+              "-f",
+              `dataset_id=${datasetId}`,
+              "-f",
+              "ref=main",
+              "-f",
+              "force=true",
+            ],
             stdout: "pipe",
             stderr: "pipe",
           });
@@ -1448,7 +1471,9 @@ doiCommand
           llmSpinner.text = "Waiting for workflow to register...";
           await new Promise((r) => setTimeout(r, 3000));
 
-          // Poll for completion
+          // Poll for completion. Filter runs by the dataset_id we just
+          // dispatched against — multiple datasets share the central
+          // workflow so we can't just look at the latest run.
           llmSpinner.text = "Polling workflow status...";
           const maxAttempts = 60; // 5 minutes at 5s intervals
           let conclusion = "";
@@ -1460,13 +1485,13 @@ doiCommand
                 "run",
                 "list",
                 "--repo",
-                repo,
+                CENTRAL_WORKFLOW_REPO,
                 "--workflow",
-                "llm-enrichment.yml",
+                CENTRAL_WORKFLOW_FILE,
                 "-L",
-                "1",
+                "10",
                 "--json",
-                "databaseId,status,conclusion",
+                "databaseId,status,conclusion,displayTitle,event",
               ],
               stdout: "pipe",
               stderr: "pipe",
@@ -1486,15 +1511,29 @@ doiCommand
             }
 
             try {
-              const runs = JSON.parse(pollOut.trim());
+              const runs = JSON.parse(pollOut.trim()) as Array<{
+                databaseId: number;
+                status: string;
+                conclusion: string | null;
+                displayTitle?: string;
+                event?: string;
+              }>;
               consecutiveFailures = 0;
-              if (runs.length > 0) {
-                const run = runs[0];
-                if (run.status === "completed") {
-                  conclusion = run.conclusion || "unknown";
+              // Multiple datasets can share the central workflow, so picking
+              // runs[0] outright is unsafe — a concurrent push-triggered
+              // dispatch would shadow ours. Filter to the most recent
+              // workflow_dispatch (which is how this CLI dispatches) and
+              // accept the small race where two operators run `nemar admin
+              // enrich` within seconds of each other. Centralization
+              // followup: include a correlation ID once GitHub exposes
+              // dispatch->run_id linkage.
+              const ours = runs.find((r) => r.event === "workflow_dispatch");
+              if (ours) {
+                if (ours.status === "completed") {
+                  conclusion = ours.conclusion || "unknown";
                   break;
                 }
-                llmSpinner.text = `Workflow ${run.status}... (${attempt * 5}s)`;
+                llmSpinner.text = `Workflow ${ours.status}... (${attempt * 5}s)`;
               }
             } catch (parseErr) {
               consecutiveFailures++;

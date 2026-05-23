@@ -125,6 +125,24 @@ describe("shouldDispatchEnrichment", () => {
       if (!decision.dispatch) expect(decision.reason).toBe("wrong_owner");
     });
 
+    test("does not dispatch when the repository object lacks an owner field", () => {
+      // Malformed payload guard (and future-proofing if GitHub ever ships a
+      // push event without owner): the missing-owner case must fall through
+      // the same code path as the wrong-owner case so we don't accidentally
+      // dispatch on a payload we can't fully validate. Code-review #605.
+      const decision = shouldDispatchEnrichment(
+        pushEvent({ repository: { name: "nm099999" } } as Partial<Parameters<typeof shouldDispatchEnrichment>[0]>),
+      );
+      expect(decision.dispatch).toBe(false);
+      if (!decision.dispatch) expect(decision.reason).toBe("wrong_owner");
+    });
+
+    test("does not dispatch when the repository object is missing entirely", () => {
+      const decision = shouldDispatchEnrichment(pushEvent({ repository: undefined }));
+      expect(decision.dispatch).toBe(false);
+      if (!decision.dispatch) expect(decision.reason).toBe("wrong_owner");
+    });
+
     test("does not dispatch when the repo name is not a dataset id", () => {
       const decision = shouldDispatchEnrichment(
         pushEvent({ repository: { name: ".github", owner: { login: "nemarDatasets" } } }),

@@ -76,13 +76,22 @@ async function ghToken(): Promise<string> {
   // Operator-driven script; we rely on the same token they use for `gh`.
   // Reading the token via the CLI keeps the script free of explicit env
   // var contracts and surfaces any auth misconfig immediately.
+  //
+  // Check the exit code (not just the trimmed stdout) so an env where
+  // `gh` is missing from PATH, or where the user isn't logged in, fails
+  // loud with a useful stderr-derived message instead of proceeding to
+  // 401 every API call. Code-review #605 fix.
   const proc = Bun.spawn(["gh", "auth", "token"], { stdout: "pipe", stderr: "pipe" });
-  const out = await new Response(proc.stdout).text();
-  await proc.exited;
+  const [out, err, code] = await Promise.all([
+    new Response(proc.stdout).text(),
+    new Response(proc.stderr).text(),
+    proc.exited,
+  ]);
   const token = out.trim();
-  if (!token) {
+  if (code !== 0 || !token) {
+    const stderr = err.trim() || "(empty stderr)";
     throw new Error(
-      "gh auth token returned empty. Run `gh auth login` and retry, or set the token in your shell.",
+      `gh auth token failed (exit ${code}): ${stderr}. Run \`gh auth login\` and retry, or set the token in your shell.`,
     );
   }
   return token;
