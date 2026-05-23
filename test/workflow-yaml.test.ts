@@ -10,6 +10,8 @@ import { describe, expect, test } from "bun:test";
 import { parse } from "yaml";
 import { buildEnrichmentCommitPayload } from "../backend/src/services/enrich-dataset";
 import { getWorkflowTemplates } from "../backend/src/services/github";
+import { VALIDATOR_VERSION } from "../src/lib/bids-validator";
+import validatorPin from "../validator-version.json" with { type: "json" };
 
 describe("CI workflow templates", () => {
   const templates = getWorkflowTemplates();
@@ -256,6 +258,16 @@ describe("CI workflow templates", () => {
     if (!versionDoi) return;
     const appTokenCount = (versionDoi.content.match(/actions\/create-github-app-token@v1/g) || []).length;
     expect(appTokenCount).toBe(2);
+  });
+
+  test("CLI and bids-validation template pin the same @bids/validator version (issue #586)", () => {
+    expect(VALIDATOR_VERSION).toBe(validatorPin.version);
+    expect(VALIDATOR_VERSION).toMatch(/^\d+\.\d+\.\d+$/);
+    const tpl = templates.find((t) => t.path.endsWith("bids-validation.yml"));
+    expect(tpl, "bids-validation.yml missing from templates").toBeDefined();
+    if (!tpl) return;
+    expect(tpl.content).toContain(`jsr:@bids/validator@${VALIDATOR_VERSION}`);
+    expect(tpl.content).not.toMatch(/jsr:@bids\/validator(?!@\d)/);
   });
 
   test("read-only / AWS-only templates stay on the auto-token (no App-token step)", () => {
