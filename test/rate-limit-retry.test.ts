@@ -281,7 +281,54 @@ describe("401 refresh-token-on-401", () => {
 
     expect(res.status).toBe(401);
     expect(callIndex).toBe(1);
-    expect(callIndex).toBe(1);
+    expect(recordedSleeps).toEqual([]);
+  });
+
+  test("401 on the final attempt still gets a guaranteed refresh slot", async () => {
+    // Reviewer call-out: without the maxAttempts boundary fix, the
+    // `continue` after a refresh on the last attempt exited the loop
+    // and fell through to `throw lastError` with lastError undefined,
+    // leaking an opaque "exhausted attempts" error instead of returning
+    // the refreshed 200.
+    nextHandler = (_req, idx) => {
+      // First two attempts: 503 (transient retry). Final attempt: 401
+      // (refresh fires). Refreshed-inline attempt: 200.
+      if (idx === 0 || idx === 1) {
+        return new Response(JSON.stringify({ message: "Service Unavailable" }), {
+          status: 503,
+          headers: plainHeaders(),
+        });
+      }
+      if (idx === 2) {
+        return new Response(JSON.stringify({ message: "Bad credentials" }), {
+          status: 401,
+          headers: plainHeaders(),
+        });
+      }
+      return new Response(JSON.stringify({ ok: true }), { status: 200, headers: plainHeaders() });
+    };
+
+    let refreshCount = 0;
+    const res = await githubFetchWithRetry(
+      `${fake.url}${PATH}`,
+      { method: "GET", headers: { Authorization: "Bearer stale-token" } },
+      {
+        sleepFn: recordingSleep,
+        delayMs: 50,
+        maxAttempts: 3,
+        refreshTokenOn401: async () => {
+          refreshCount += 1;
+          return "fresh-token";
+        },
+      },
+    );
+
+    expect(res.status).toBe(200);
+    expect(refreshCount).toBe(1);
+    // 2 transient retries + 1 final attempt + 1 refresh-on-final = 4 total.
+    expect(callIndex).toBe(4);
+    // Two 50ms sleeps from the 503 retries; no sleep around the refresh.
+    expect(recordedSleeps).toEqual([50, 50]);
   });
 });
 

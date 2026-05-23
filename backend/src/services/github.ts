@@ -280,6 +280,15 @@ export async function githubFetchWithRetry(
       // Sits before the generic transient retry path because 401 isn't
       // otherwise retried — we want a single fresh-mint attempt and then
       // for a persistent 401 to bubble up as a real auth failure.
+      //
+      // The refresh-on-401 path gets its own guaranteed retry slot,
+      // independent of `maxAttempts`. Without this guarantee a 401 on
+      // the final attempt (e.g. attempt 3 after two 404-propagation
+      // retries on `retryOn404: true` callers) would refresh + continue,
+      // exit the loop, and fall through to the `throw lastError` path
+      // with `lastError === undefined` — leaking an opaque "exhausted
+      // attempts" error to the caller instead of returning a clean 401
+      // / refreshed-200. Code-review #597 fix.
       if (response.status === 401 && refreshTokenOn401 && !authRefreshUsed) {
         authRefreshUsed = true;
         let freshToken: string;
@@ -300,6 +309,35 @@ export async function githubFetchWithRetry(
         console.warn(
           `[github] ${method} ${parsedPath} attempt ${attempt} -> HTTP 401, refreshed App token and retrying immediately`,
         );
+        if (attempt >= maxAttempts) {
+          // Issue the refreshed request inline so it definitely gets a
+          // chance to run; without this `continue` would hit the loop
+          // boundary and bypass the retry entirely.
+          try {
+            const refreshedResponse = await fetch(url, currentInit);
+            const refreshedSnapshot = parseRateLimitHeaders(refreshedResponse);
+            if (refreshedSnapshot) {
+              const existing = rateLimitState.get(refreshedSnapshot.resource);
+              if (!existing || refreshedSnapshot.resetEpoch >= existing.resetEpoch) {
+                rateLimitState.set(refreshedSnapshot.resource, refreshedSnapshot);
+              }
+            }
+            emitRateLimitLog({
+              method,
+              path: parsedPath,
+              status: refreshedResponse.status,
+              attempt: attempt + 1,
+              maxAttempts,
+              snapshot: refreshedSnapshot,
+              retryAfterMs: null,
+              secondary: false,
+            });
+            return refreshedResponse;
+          } catch (err) {
+            lastError = err;
+            throw err;
+          }
+        }
         continue;
       }
 
