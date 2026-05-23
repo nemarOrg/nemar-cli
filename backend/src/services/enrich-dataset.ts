@@ -75,8 +75,10 @@ export interface EnrichmentCommitPayload {
 
 /**
  * Canonical shape of the commit payload returned to an Action that opted into
- * `client_commits: true`. The Action's jq script in llm-enrichment.yml reads
- * these exact field names.
+ * `client_commits: true`. The Action's jq script in
+ * `nemarDatasets/.github/.github/workflows/run-enrichment.yml` (Phase 1 of
+ * #601) reads these exact field names; `run-version-doi.yml`'s defensive
+ * pre-DOI refresh step does too.
  */
 export function buildEnrichmentCommitPayload(
   metadataContent: string,
@@ -175,9 +177,11 @@ export async function enrichDataset(
 
   const datasetId = opts.datasetId;
   const forceReenrich = opts.force === true;
-  // When true, the caller (typically the llm-enrichment.yml Action) will
-  // write the metadata commit using its own GITHUB_TOKEN; the Worker just
-  // returns the would-be commit payload and skips the admin-PAT REST commit.
+  // When true, the caller (the central `run-enrichment.yml` Action on
+  // `nemarDatasets/.github`, or the `run-version-doi.yml` pre-DOI refresh
+  // step) will write the metadata commit using its own per-repo App token;
+  // the Worker just returns the would-be commit payload and skips the
+  // admin-PAT REST commit. Phase 1 of #601.
   const clientCommits = opts.clientCommits === true;
   // Branch or ref to read from / commit to. Defaults to "main" for back-compat.
   // Release-branch and tag-driven enrichment pass the current ref so the

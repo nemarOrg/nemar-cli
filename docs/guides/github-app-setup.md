@@ -35,11 +35,19 @@ survives any individual maintainer leaving.
    - **Repository permissions**:
      - Contents: **Read & write**
      - Actions: **Read & write** (Read for orchestrator CI checks;
-       Write so dataset-repo CI can dispatch `generate-archive` via
-       `gh api .../dispatches`)
+       Write so the central workflows on `nemarDatasets/.github` can
+       `repository_dispatch` to each other — e.g. `run-version-doi.yml`
+       dispatching `generate-archive` against `nemarDatasets/.github`.
+       Phase 3 of centralization epic #601 moved these dispatches off
+       the dataset repos onto `.github`.)
      - Administration: **Read & write** (needed for branch / tag
        protection rulesets and visibility flips)
      - Issues: **Read & write** (BIDS-validation issue creation flow)
+     - Checks: **Read & write** (Phase 4 of #601: central
+       `run-bids-validation.yml` on nemarDatasets/.github posts
+       `check-runs` to each dataset repo's PR via the GitHub Checks API.
+       Without this, the central workflow's `gh api ... /check-runs`
+       calls return 403 and the PR loses its validation check.)
      - Metadata: **Read-only** (always required)
      - Pull requests: **Read & write**
      - Workflows: **Read & write** (CI workflow deploy)
@@ -200,6 +208,11 @@ via `actions/create-github-app-token@v1` so all CI writes carry the
 
 - [ ] App permissions show **Actions: Read & write** and the update is
       accepted on both org installations.
+- [ ] App permissions show **Checks: Read & write** (added in Phase 4 of
+      epic nemarOrg/nemar-cli#601 for the central `run-bids-validation`
+      workflow's check-run posts). The grant must be re-accepted on the
+      `nemarOrg` and `nemarDatasets` installations after the App
+      definition changes.
 - [ ] `NEMAR_APP_ID` and `NEMAR_APP_PRIVATE_KEY` exist as org secrets on
       `nemarDatasets`.
 - [ ] At least one dataset repo's most recent `pr-merge`,

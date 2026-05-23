@@ -73,185 +73,61 @@ describe("CI workflow templates", () => {
     ]);
   });
 
-  test("llm-enrichment opts into client_commits and has write permission", () => {
-    // Phase 5 contract: the Action sends client_commits:true so the Worker
-    // returns the metadata payload and skips its own commit. The Action
-    // commits with the per-repo GITHUB_TOKEN, moving the REST traffic off
-    // the shared admin PAT.
+  test("llm-enrichment.yml is no longer shipped per-repo (centralized, #602)", () => {
+    // The template is relocated to
+    // `nemarDatasets/.github/.github/workflows/run-enrichment.yml` and
+    // triggered via the Worker's /webhooks/github push handler. A future
+    // edit that adds it back to deployWorkflows() would defeat the
+    // centralization; pin the absence.
     const llm = templates.find((t) => t.path.endsWith("llm-enrichment.yml"));
-    expect(llm).toBeDefined();
-    if (!llm) return;
-    expect(llm.content).toContain("\\\"client_commits\\\": true");
-    expect(llm.content).toContain("actions/checkout@v4");
-    // permissions should be job-scoped, not workflow-scoped, so future jobs
-    // added to this template don't silently inherit write.
-    const parsed = parse(llm.content) as {
-      permissions?: unknown;
-      jobs: Record<string, { permissions?: { contents?: string } }>;
-    };
-    expect(parsed.permissions).toBeUndefined();
-    expect(parsed.jobs.enrich.permissions?.contents).toBe("write");
-    // Worker-fallback path: when client_commits is missing/false in the
-    // response (older backend), the Action must skip the local commit.
-    expect(llm.content).toMatch(/client_commits.*\/\/\s*false/);
+    expect(llm).toBeUndefined();
   });
 
-  test("llm-enrichment triggers on release branches and passes ref through (epic #417 phase 1)", () => {
-    const llm = templates.find((t) => t.path.endsWith("llm-enrichment.yml"));
-    expect(llm).toBeDefined();
-    if (!llm) return;
-
-    const parsed = parse(llm.content) as {
-      on: { push?: { branches?: string[]; paths?: string[] } };
-    };
-    // Trigger must cover release/** branches so the release PR re-enriches
-    // before merge, baking fresh .nemar/metadata.json into the merge commit
-    // (and therefore into the tag created by pr-merge.yml).
-    expect(parsed.on.push?.branches).toEqual(["main", "release/**"]);
-    // .nemar/metadata.json change must also re-trigger so a hand-edit reflects.
-    expect(parsed.on.push?.paths).toContain(".nemar/metadata.json");
-
-    // The Action must pass ref to the webhook so the Worker reads from the
-    // right snapshot (main, release/v*, etc.) instead of always "main".
-    expect(llm.content).toContain('\\"ref\\": \\"$BRANCH_REF\\"');
-    expect(llm.content).toContain('BRANCH_REF="${{ github.ref_name }}"');
-
-    // Release-branch pushes must force re-enrichment so the source_hash
-    // short-circuit doesn't skip a Version-only bump.
-    expect(llm.content).toMatch(/case "\$BRANCH_REF" in\s*\n\s*release\/\*\) FORCE="true"/);
-
-    // The commit-back path must push to the branch that triggered the run,
-    // not always to main.
-    expect(llm.content).toContain('git push origin "HEAD:$BRANCH_REF"');
-    expect(llm.content).toContain('git pull --rebase origin "$BRANCH_REF"');
-
-    // Checkout must use the triggering ref (not the default branch) so the
-    // local working tree matches what we're about to commit back to.
-    expect(llm.content).toContain("ref: ${{ github.ref_name }}");
-  });
-
-  test("version-doi.yml refreshes enrichment before minting (epic #417 phase 1)", () => {
+  test("version-doi.yml is no longer shipped per-repo (centralized, #606)", () => {
+    // The template is relocated to
+    // `nemarDatasets/.github/.github/workflows/run-version-doi.yml` and
+    // triggered via the Worker's /webhooks/github tag-push handler. Pin
+    // the absence so a future edit can't accidentally re-ship it.
     const versionDoi = templates.find((t) => t.path.endsWith("version-doi.yml"));
-    expect(versionDoi).toBeDefined();
-    if (!versionDoi) return;
-
-    // The defensive refresh step must call llm-enrich with the tag as ref
-    // and force=true, and it must be tolerant of failure so a transient
-    // outage does not block DOI publication. client_commits=true keeps the
-    // Worker from attempting a (doomed) commit against an immutable tag.
-    expect(versionDoi.content).toContain("Refresh enrichment from tag");
-    expect(versionDoi.content).toContain("continue-on-error: true");
-    expect(versionDoi.content).toContain('\\"force\\": true');
-    expect(versionDoi.content).toContain('\\"client_commits\\": true');
-    expect(versionDoi.content).toContain('\\"ref\\": \\"$TAG\\"');
-    // Curl-level failure must fall through to the warning branch, not a
-    // silent green step.
-    expect(versionDoi.content).toContain("|| HTTP_CODE=0");
-    expect(versionDoi.content).toContain('[ "$HTTP_CODE" = "0" ]');
-    // The Worker returns HTTP 200 with embedded *_error fields when a
-    // non-fatal sub-step fails (commit, DOI sync, cache, bidsignore,
-    // metadata-columns write, GitHub issue creation); the Action must
-    // surface every one of these as warnings so a green check does not
-    // mask a silent failure. The list must stay in sync with
-    // ENRICHMENT_SUBERROR_FIELDS in services/dataset-reindex.ts and
-    // EnrichmentSuccessBody in services/enrich-dataset.ts. OpenRouter
-    // failures are fatal (Stage 2) and surface as HTTP 500, not as a
-    // 200 sub-error, so they are intentionally not in this list.
-    for (const field of [
-      "commit_error",
-      "doi_sync_error",
-      "cache_error",
-      "bidsignore_error",
-      "metadata_columns_error",
-      "issue_creation_error",
-    ]) {
-      expect(versionDoi.content).toContain(field);
-    }
-    expect(versionDoi.content).not.toContain("openrouter_error");
-
-    // The refresh step must appear before the publish-DOI step.
-    const refreshIdx = versionDoi.content.indexOf("Refresh enrichment from tag");
-    const publishIdx = versionDoi.content.indexOf("Publish version DOI");
-    expect(refreshIdx).toBeGreaterThan(0);
-    expect(publishIdx).toBeGreaterThan(refreshIdx);
+    expect(versionDoi).toBeUndefined();
   });
 
-  test("llm-enrichment.yml retries transient failures and fails loud on persistent errors (issue #598)", () => {
-    const llm = templates.find((t) => t.path.endsWith("llm-enrichment.yml"));
-    expect(llm).toBeDefined();
-    if (!llm) return;
-    // Network/DNS/TLS failure normalises to HTTP_CODE=0; the retry loop
-    // must treat 0 as transient (falls through 2xx / 4xx checks into the
-    // retry branch). Without `|| HTTP_CODE=0` the variable would stay
-    // empty and the numeric comparisons would error out the step under
-    // `set -e`.
-    expect(llm.content).toContain("|| HTTP_CODE=0");
-    // Retry loop is the new contract: 3 attempts with linear backoff,
-    // 4xx terminal (except 401 — see carve-out below), persistent 5xx/0
-    // exits 1 (issue #598).
-    expect(llm.content).toMatch(/for attempt in 1 2 3; do/);
-    expect(llm.content).toContain('"$HTTP_CODE" -lt 500');
-    expect(llm.content).toContain('"$HTTP_CODE" -ge 400');
-    expect(llm.content).toContain("(4xx is terminal");
-    expect(llm.content).toContain("LLM enrichment failed after 3 attempts");
-    // 401 carve-out: NEMAR_WEBHOOK_TOKEN rotation across Workers
-    // instances can produce a brief 401 race that retry covers. Without
-    // the `-ne 401` guard, a rotation concurrent with a backfill would
-    // silently abort every in-flight workflow at attempt 1. Code-review
-    // #599 fix.
-    expect(llm.content).toContain('"$HTTP_CODE" -ne 401');
-    // The terminal failure branch must explicitly exit 1 — not exit 0,
-    // not omit the exit code. Anchor on the post-loop block to catch a
-    // future edit that removes the exit while keeping the message.
-    const postLoopMatch = llm.content.match(
-      /LLM enrichment failed after 3 attempts[\s\S]{0,200}?exit 1/,
-    );
-    expect(postLoopMatch).not.toBeNull();
-    // The terminal branch must exit 1, not 0 — buried failures during
-    // the OpenNeuro mass-import was the original symptom.
-    expect(llm.content).not.toContain("LLM enrichment failed (HTTP $HTTP_CODE) - this is non-blocking");
-    // Push-retry warnings should still point operators at the git output
-    // they need to read instead of being opaque.
-    expect(llm.content).toContain("(see git output above)");
-  });
-
-  test("generate-archive workflow pins archiver to v7", () => {
-    // Guards against a future hand-edit dropping the archiver version pin.
-    // archiver v8 is ESM-only and breaks the require()-style streaming
-    // script, throwing "archiver is not a function" at runtime.
+  test("generate-archive.yml is no longer shipped per-repo (centralized, #608)", () => {
+    // The template is relocated to
+    // `nemarDatasets/.github/.github/workflows/run-generate-archive.yml`.
+    // The archiver-v7 pin still matters but is now reviewed on that
+    // workflow's PR; pin the absence here so a re-shipment is caught.
     const archive = templates.find((t) => t.path.endsWith("generate-archive.yml"));
-    expect(archive).toBeDefined();
-    expect(archive?.content).toMatch(/'archiver@\^?7\./);
-    // Reject the bare unpinned form on the install line specifically.
-    const installLine = archive?.content
-      .split("\n")
-      .find((l) => /npm install.*archiver/.test(l));
-    expect(installLine).toBeDefined();
-    expect(installLine).not.toMatch(/\barchiver\b(?!@)/);
+    expect(archive).toBeUndefined();
   });
 
-  test("migrated templates mint App tokens and never reference secrets.GITHUB_TOKEN", () => {
-    // Each migrated template authenticates as the App with least-privilege
-    // repo scope and no static GITHUB_TOKEN. Parsed YAML so input values
-    // are pinned exactly (a copy-pasted hardcoded `repositories:` would
-    // still pass a substring check; this catches it).
-    const writeTemplates = ["pr-merge.yml", "llm-enrichment.yml", "version-doi.yml"];
-    for (const name of writeTemplates) {
+  test("shim templates mint App tokens and never reference secrets.GITHUB_TOKEN", () => {
+    // Each shim template authenticates as the App and dispatches to
+    // nemarDatasets/.github; the token must be scoped to `.github` (where
+    // the dispatch lands) NOT to the current repo. The central workflow
+    // mints its own per-dataset token internally for the checkout step.
+    // Phases #602/#606/#608 already removed their per-repo templates;
+    // Phase 4 (#610) replaces bids-validation.yml + pr-merge.yml with
+    // shims that follow this contract.
+    const shimTemplates = ["pr-merge.yml", "bids-validation.yml"];
+    for (const name of shimTemplates) {
       const tpl = templates.find((t) => t.path.endsWith(name));
       expect(tpl, `${name} missing from templates`).toBeDefined();
       if (!tpl) continue;
       expect(tpl.content).not.toContain("secrets.GITHUB_TOKEN");
 
-      const parsed = parse(tpl.content) as { jobs: Record<string, { steps: Array<Record<string, unknown>> }> };
+      const parsed = parse(tpl.content) as {
+        jobs: Record<string, { steps: Array<Record<string, unknown>> }>;
+      };
       for (const [jobName, job] of Object.entries(parsed.jobs)) {
         const mintIdx = job.steps.findIndex(
           (s) => s.uses === "actions/create-github-app-token@v1",
         );
-        // Not every job in a migrated template mints (e.g. pr-merge's
+        // Not every job in a shim template mints (e.g. pr-merge's
         // cleanup-staging job uses AWS only). Only check when present.
         if (mintIdx < 0) continue;
         // Ordering: mint must be the first step so subsequent
-        // checkout/`gh` calls can reference its outputs.
+        // dispatch calls can reference its outputs.
         expect(
           mintIdx,
           `${name}:${jobName} app-token step must be first (was index ${mintIdx})`,
@@ -260,7 +136,11 @@ describe("CI workflow templates", () => {
         expect(mintWith["app-id"]).toBe("${{ secrets.NEMAR_APP_ID }}");
         expect(mintWith["private-key"]).toBe("${{ secrets.NEMAR_APP_PRIVATE_KEY }}");
         expect(mintWith.owner).toBe("nemarDatasets");
-        expect(mintWith.repositories).toBe("${{ github.event.repository.name }}");
+        // Phase 4 contract: shims mint a token scoped to .github (so they
+        // can call repos/.github/dispatches), not the current dataset repo.
+        // The central workflows on .github mint their own per-dataset
+        // tokens for actual writes against the target repo.
+        expect(mintWith.repositories).toBe(".github");
 
         // Any GH_TOKEN env in the rest of the job's steps must reference
         // the minted token, not a stale `secrets.GITHUB_TOKEN` left behind.
@@ -274,36 +154,68 @@ describe("CI workflow templates", () => {
     }
   });
 
-  test("version-doi spawns the App-token step in BOTH jobs", () => {
-    // version-doi has two jobs; each does its own write and needs its own
-    // installation token. If a future refactor coalesces jobs, this test
-    // documents the contract.
-    const versionDoi = templates.find((t) => t.path.endsWith("version-doi.yml"));
-    expect(versionDoi).toBeDefined();
-    if (!versionDoi) return;
-    const appTokenCount = (versionDoi.content.match(/actions\/create-github-app-token@v1/g) || []).length;
-    expect(appTokenCount).toBe(2);
+  test("shim templates dispatch to nemarDatasets/.github (centralization endstate)", () => {
+    // The bids-validation and pr-merge shims must hit
+    // repos/nemarDatasets/.github/dispatches with the right event_type so
+    // the central workflows on .github receive the request. A future edit
+    // that points the dispatch back at the dataset repo would undo the
+    // centralization without obvious symptoms (the legacy workflows have
+    // been stripped from dataset repos).
+    const shimContracts: Array<{ name: string; eventType: string }> = [
+      { name: "bids-validation.yml", eventType: "run-bids-validation" },
+      { name: "pr-merge.yml", eventType: "run-pr-merge" },
+    ];
+    for (const { name, eventType } of shimContracts) {
+      const tpl = templates.find((t) => t.path.endsWith(name));
+      expect(tpl, `${name} missing from templates`).toBeDefined();
+      if (!tpl) continue;
+      expect(tpl.content).toContain('"repos/nemarDatasets/.github/dispatches"');
+      expect(tpl.content).toContain(`event_type=${eventType}`);
+      expect(tpl.content).toContain('"client_payload[dataset_id]=$DATASET_ID"');
+    }
   });
 
-  test("CLI and bids-validation template pin the same @bids/validator version (issue #586)", () => {
-    expect(VALIDATOR_VERSION).toBe(validatorPin.version);
-    expect(VALIDATOR_VERSION).toMatch(/^\d+\.\d+\.\d+$/);
+  test("bids-validation shim interpolates VALIDATOR_VERSION into the dispatch payload", () => {
+    // Code-review #12 fix: the central workflow has no way to know which
+    // validator version the CLI is currently pinned to, so the shim must
+    // pass it as a client_payload field. The literal value lives in
+    // validator-version.json and propagates through src/lib/bids-validator.ts
+    // -> VALIDATOR_VERSION -> the shim's template-literal interpolation.
     const tpl = templates.find((t) => t.path.endsWith("bids-validation.yml"));
     expect(tpl, "bids-validation.yml missing from templates").toBeDefined();
     if (!tpl) return;
-    expect(tpl.content).toContain(`jsr:@bids/validator@${VALIDATOR_VERSION}`);
-    expect(tpl.content).not.toMatch(/jsr:@bids\/validator(?!@\d)/);
+    // The shim must include the field, AND the value must match the pin.
+    expect(tpl.content).toMatch(/client_payload\[validator_version\]=[0-9]+\.[0-9]+\.[0-9]+/);
+    expect(tpl.content).toContain(`client_payload[validator_version]=${VALIDATOR_VERSION}`);
+  });
+
+  // The "App-token in BOTH jobs" contract for version-doi was specific to
+  // the per-repo template. With Phase 2 centralization (#606) the
+  // equivalent invariant lives in the run-version-doi.yml on
+  // nemarDatasets/.github and is reviewed in that PR; this test is
+  // removed rather than asserting a property of a template that no longer
+  // ships from this repo.
+
+  test("CLI BIDS validator pin stays in lockstep with the version-of-record", () => {
+    // After Phase 4 (#610) the per-repo bids-validation.yml is a shim
+    // and no longer contains the validator version — the central
+    // run-bids-validation.yml on nemarDatasets/.github runs the
+    // validator. The validator-version.json pin remains the source of
+    // truth that the CLI runtime uses; this assertion stays so a future
+    // CLI change can't drift from the pin file.
+    expect(VALIDATOR_VERSION).toBe(validatorPin.version);
+    expect(VALIDATOR_VERSION).toMatch(/^\d+\.\d+\.\d+$/);
   });
 
   test("read-only / AWS-only templates stay on the auto-token (no App-token step)", () => {
-    // bids-validation + version-check do no writes; generate-archive writes
-    // only to S3 (AWS creds, not GitHub). Adding an App-token step there
-    // would force an org-secret prerequisite for no benefit.
-    const readOnlyTemplates = [
-      "bids-validation.yml",
-      "version-check.yml",
-      "generate-archive.yml",
-    ];
+    // version-check does no writes and needs no App token. bids-validation
+    // (#610) and generate-archive (#608) WERE in this list pre-Phase 4
+    // but now require App-token steps — the bids-validation shim mints
+    // one to dispatch to .github; generate-archive moved off-repo
+    // entirely. pr-merge's `cleanup-staging` job uses AWS only too but
+    // lives in the same template as the dispatch shim and is excluded
+    // via the mintIdx < 0 short-circuit in the shim-templates test above.
+    const readOnlyTemplates = ["version-check.yml"];
     for (const name of readOnlyTemplates) {
       const tpl = templates.find((t) => t.path.endsWith(name));
       expect(tpl, `${name} missing from templates`).toBeDefined();

@@ -3698,8 +3698,9 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
   // Step: version_doi - Create version DOI record and manifest via webhook
   // This creates the version DOI record and manifest directly (same logic as
   // the publish-version-doi webhook). We can't self-fetch in Cloudflare Workers,
-  // so we call the service functions directly. The CI workflow (version-doi.yml)
-  // serves as a fallback for PR/patch scenarios.
+  // so we call the service functions directly. The central run-version-doi.yml
+  // (Phase 2 of #601, on nemarDatasets/.github) serves as the
+  // tag-push-triggered counterpart for PR/patch scenarios.
   if (stepsToRun.includes("version_doi")) {
     try {
       await startStep("version_doi");

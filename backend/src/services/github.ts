@@ -975,6 +975,16 @@ export async function getWorkflowRuns(
  */
 export function getWorkflowTemplates(): Array<{ path: string; content: string }> {
   // BIDS Validation workflow
+  // BIDS Validation shim — Phase 4 of epic #601 (sub-issue #610).
+  //
+  // GitHub's `pull_request` events fire only on the repo where the PR lives,
+  // so we can't relocate the validator workflow directly like Phases 1-3.
+  // This shim fires `repository_dispatch[run-bids-validation]` at
+  // `nemarDatasets/.github`, where `run-bids-validation.yml` runs the actual
+  // deno validator and posts the result back as a `check-run` on this
+  // dataset repo's PR. The shim itself does ~5 seconds of work (mint token
+  // + dispatch) and shows up as a quick green check on the PR alongside the
+  // central workflow's check-run.
   const bidsValidation = `name: BIDS Validation
 
 on:
@@ -985,74 +995,45 @@ on:
   workflow_dispatch:
 
 jobs:
-  validate:
-    name: bids-validation
+  dispatch:
+    name: Dispatch central BIDS validation
     runs-on: ubuntu-latest
+    timeout-minutes: 2
+    permissions: {}
     steps:
-      - uses: actions/checkout@v4
-
-      - name: Setup Deno
-        uses: denoland/setup-deno@v2
+      - name: Mint App token scoped to .github
+        id: app-token
+        uses: actions/create-github-app-token@v1
         with:
-          deno-version: v2.x
+          app-id: \${{ secrets.NEMAR_APP_ID }}
+          private-key: \${{ secrets.NEMAR_APP_PRIVATE_KEY }}
+          owner: nemarDatasets
+          # The dispatch target is the .github repo; the token needs
+          # actions:write on .github. The central workflow mints a
+          # separate per-dataset token internally for the checkout step.
+          repositories: .github
 
-      - name: Run BIDS validator
+      - name: Dispatch run-bids-validation
+        env:
+          GH_TOKEN: \${{ steps.app-token.outputs.token }}
         run: |
-          mkdir -p .nemar
-          grep -qxF '.nemar/' .bidsignore 2>/dev/null || echo '.nemar/' >> .bidsignore
-          deno run -A jsr:@bids/validator@${VALIDATOR_VERSION} . --json > .nemar/validation.json || true
-          cat .nemar/validation.json
-
-      - name: Collect git-annex pointer files
-        run: |
-          # Find symlinks (annex pointers in locked repos)
-          find . -type l -not -path './.git/*' -printf '/%P\\n' > /tmp/annex-files.txt 2>/dev/null || true
-          # Find small files with annex pointer content (unlocked repos)
-          find . -type f -not -path './.git/*' -size -1k -exec grep -l '^/annex/objects/' {} + 2>/dev/null | sed 's|^\\./|/|' >> /tmp/annex-files.txt || true
-          sort -u /tmp/annex-files.txt -o /tmp/annex-files.txt
-          ANNEX_COUNT=$(wc -l < /tmp/annex-files.txt | tr -d ' ')
-          if [ "$ANNEX_COUNT" -gt 0 ]; then
-            echo "Found $ANNEX_COUNT git-annex pointer file(s) (errors from these will be filtered)"
-          fi
-
-      - name: Check validation result
-        run: |
-          if [ ! -f .nemar/validation.json ] || ! jq empty .nemar/validation.json 2>/dev/null; then
-            echo "::error::BIDS validator failed to produce valid output"
-            exit 1
-          fi
-
-          # Convert annex file list to JSON array for jq filtering
-          if [ -s /tmp/annex-files.txt ]; then
-            jq -R -s 'split("\\n") | map(select(length > 0))' /tmp/annex-files.txt > /tmp/annex-files.json
-          else
-            echo '[]' > /tmp/annex-files.json
-          fi
-
-          # Filter out errors from git-annex pointer files
-          REAL_ERRORS=$(jq --slurpfile annexed /tmp/annex-files.json \
-            '[.issues.issues[] | select(.severity == "error") | select(.location as $loc | ($annexed[0] | index($loc)) | not)] | length' \
-            .nemar/validation.json)
-          ANNEX_ERRORS=$(jq --slurpfile annexed /tmp/annex-files.json \
-            '[.issues.issues[] | select(.severity == "error") | select(.location as $loc | ($annexed[0] | index($loc)) | . != null)] | length' \
-            .nemar/validation.json)
-
-          if [ "$ANNEX_ERRORS" -gt 0 ]; then
-            echo "::notice::Skipped $ANNEX_ERRORS error(s) from git-annex pointer files (not real data)"
-          fi
-
-          if [ "$REAL_ERRORS" -gt 0 ]; then
-            echo "::error::BIDS validation found $REAL_ERRORS error(s)"
-            jq --slurpfile annexed /tmp/annex-files.json \
-              '[.issues.issues[] | select(.severity == "error") | select(.location as $loc | ($annexed[0] | index($loc)) | not)][]' \
-              .nemar/validation.json
-            exit 1
-          fi
-          WARNINGS=$(jq '[.issues.issues[] | select(.severity == "warning")] | length' .nemar/validation.json)
-          echo "BIDS validation passed ($WARNINGS warning(s), $ANNEX_ERRORS annex pointer error(s) skipped)"
+          set -euo pipefail
+          DATASET_ID="\${{ github.event.repository.name }}"
+          # On pull_request events the head is the PR's head; on push
+          # events it's the pushed commit. Fall back so both shapes work.
+          HEAD_SHA="\${{ github.event.pull_request.head.sha || github.sha }}"
+          REF="\${{ github.event.pull_request.head.ref || github.ref_name }}"
+          PR_NUMBER="\${{ github.event.pull_request.number || '' }}"
+          echo "Dispatching run-bids-validation for $DATASET_ID @ $HEAD_SHA (ref=$REF, PR=$PR_NUMBER)"
+          gh api "repos/nemarDatasets/.github/dispatches" \\
+            -f event_type=run-bids-validation \\
+            -f "client_payload[dataset_id]=$DATASET_ID" \\
+            -f "client_payload[ref]=$REF" \\
+            -f "client_payload[head_sha]=$HEAD_SHA" \\
+            -f "client_payload[pr_number]=$PR_NUMBER" \\
+            -f "client_payload[validator_version]=${VALIDATOR_VERSION}"
 `;
 
-  // Version Check workflow
   const versionCheck = `name: Version Check
 
 on:
@@ -1093,6 +1074,15 @@ jobs:
 `;
 
   // PR Merge Handler workflow
+  // PR Merge shim — Phase 4 of epic #601 (sub-issue #610).
+  //
+  // `pull_request_target: closed` events fire only on the dataset repo
+  // where the PR lives. The `create-release` half of the legacy
+  // pr-merge.yml is now a thin dispatch to `nemarDatasets/.github` which
+  // does the tag + release cutting via `run-pr-merge.yml`. The
+  // `cleanup-staging` job stays inline here because it's AWS-only and
+  // centralizing it would just add a network hop without consolidating
+  // logic.
   const prMerge = `name: PR Merge Handler
 
 on:
@@ -1100,67 +1090,42 @@ on:
     types: [closed]
     branches: [main]
 
-permissions:
-  contents: write
-
 jobs:
-  create-release:
-    name: Create Release
+  dispatch-release:
+    name: Dispatch central release creation
     if: github.event.pull_request.merged == true
     runs-on: ubuntu-latest
-    outputs:
-      version: \${{ steps.version.outputs.version }}
-      release_created: \${{ steps.create_release.outputs.created }}
+    timeout-minutes: 2
+    permissions: {}
     steps:
-      - name: Mint App installation token
+      - name: Mint App token scoped to .github
         id: app-token
         uses: actions/create-github-app-token@v1
         with:
           app-id: \${{ secrets.NEMAR_APP_ID }}
           private-key: \${{ secrets.NEMAR_APP_PRIVATE_KEY }}
           owner: nemarDatasets
-          repositories: \${{ github.event.repository.name }}
+          repositories: .github
 
-      - uses: actions/checkout@v4
-        with:
-          token: \${{ steps.app-token.outputs.token }}
-
-      - name: Get version
-        id: version
-        run: |
-          VERSION=$(jq -r '.Version // "1.0.0"' dataset_description.json)
-          echo "version=$VERSION" >> $GITHUB_OUTPUT
-          echo "Version: $VERSION"
-
-      - name: Check if tag exists
-        id: check_tag
-        run: |
-          if git rev-parse "v\${{ steps.version.outputs.version }}" >/dev/null 2>&1; then
-            echo "exists=true" >> $GITHUB_OUTPUT
-          else
-            echo "exists=false" >> $GITHUB_OUTPUT
-          fi
-
-      - name: Create tag and release
-        id: create_release
-        if: steps.check_tag.outputs.exists == 'false'
+      - name: Dispatch run-pr-merge
         env:
           GH_TOKEN: \${{ steps.app-token.outputs.token }}
-          PR_NUMBER: \${{ github.event.pull_request.number }}
         run: |
-          git config user.name "nemar-publish-bot"
-          git config user.email "nemar-publish-bot@users.noreply.github.com"
-          VERSION="\${{ steps.version.outputs.version }}"
-          git tag -a "v$VERSION" -m "Release v$VERSION"
-          git push origin "v$VERSION"
-          gh release create "v$VERSION" --title "v$VERSION" \\
-            --notes "Release v$VERSION from PR #\${PR_NUMBER}"
-          echo "created=true" >> $GITHUB_OUTPUT
+          set -euo pipefail
+          DATASET_ID="\${{ github.event.repository.name }}"
+          PR_NUMBER="\${{ github.event.pull_request.number }}"
+          echo "Dispatching run-pr-merge for $DATASET_ID (PR #$PR_NUMBER)"
+          gh api "repos/nemarDatasets/.github/dispatches" \\
+            -f event_type=run-pr-merge \\
+            -f "client_payload[dataset_id]=$DATASET_ID" \\
+            -f "client_payload[pr_number]=$PR_NUMBER"
 
   cleanup-staging:
     name: Cleanup Staging (runs on merge or close)
     if: always()
     runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions: {}
     steps:
       - name: Remove staging data for this PR/branch
         env:
@@ -1176,619 +1141,25 @@ jobs:
           aws s3 rm --recursive "s3://nemar/staging/pr-\${PR_NUMBER}/" 2>/dev/null || true
 `;
 
-  // Generate Archive workflow (triggered via repository_dispatch)
-  // Streams files directly from S3 into a zip and uploads via multipart,
-  // so disk usage is constant regardless of dataset size.
-  const generateArchive = `name: Generate Archive
-
-on:
-  repository_dispatch:
-    types: [generate-archive]
-
-jobs:
-  archive:
-    name: Generate Dataset Archive
-    runs-on: ubuntu-latest
-    env:
-      DATASET_ID: \${{ github.event.client_payload.dataset_id }}
-      VERSION: \${{ github.event.client_payload.version }}
-    steps:
-      - name: Validate inputs
-        run: |
-          if [ -z "\$DATASET_ID" ]; then
-            echo "::error::Missing dataset_id in client_payload"
-            exit 1
-          fi
-          if [ -z "\$VERSION" ]; then
-            echo "::error::Missing version in client_payload"
-            exit 1
-          fi
-
-      - uses: actions/checkout@v4
-        with:
-          ref: v\${{ github.event.client_payload.version }}
-
-      - uses: actions/setup-node@v4
-        with:
-          node-version: "20"
-
-      - name: Install streaming dependencies
-        run: |
-          mkdir -p /tmp/archive-deps
-          cd /tmp/archive-deps
-          npm init -y > /dev/null
-          # Pin to v7: v8+ is ESM-only, require() no longer returns the factory.
-          npm install --no-save 'archiver@^7.0.1' @aws-sdk/client-s3 @aws-sdk/lib-storage
-
-      - name: Write archive script
-        run: |
-          cat > /tmp/stream-archive.js << 'ARCHIVE_SCRIPT'
-          var fs = require("fs");
-          var path = require("path");
-          var S3Client = require("@aws-sdk/client-s3").S3Client;
-          var Upload = require("@aws-sdk/lib-storage").Upload;
-          var archiver = require("archiver");
-          var PassThrough = require("stream").PassThrough;
-          var https = require("https");
-          var http = require("http");
-
-          var DATASET_ID = process.env.DATASET_ID;
-          var VERSION = process.env.VERSION;
-          var BUCKET = "nemar";
-          var REGION = process.env.AWS_DEFAULT_REGION || "us-east-2";
-          var S3_BASE = "https://" + BUCKET + ".s3." + REGION + ".amazonaws.com";
-
-          function resolveAnnexKey(filePath) {
-            try {
-              var stat = fs.lstatSync(filePath);
-              if (stat.isSymbolicLink()) {
-                var target = fs.readlinkSync(filePath);
-                var m = target.match(/([^\\/]+)\\/\\1$/);
-                if (m) return m[1];
-                var m2 = target.match(/\\/annex\\/objects\\/(.+)$/);
-                if (m2) return m2[1];
-              } else if (stat.isFile() && stat.size < 500 && stat.size > 20) {
-                var content = fs.readFileSync(filePath, "utf8").trim();
-                var m3 = content.match(/^\\/annex\\/objects\\/(.+)$/);
-                if (m3) return m3[1];
-              }
-            } catch (e) {
-              console.warn("  resolveAnnexKey failed for " + filePath + ": " + e.message);
-            }
-            return null;
-          }
-
-          function fetchUrl(url) {
-            return new Promise(function (resolve, reject) {
-              var mod = url.indexOf("https") === 0 ? https : http;
-              mod
-                .get(url, function (res) {
-                  if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
-                    fetchUrl(res.headers.location).then(resolve).catch(reject);
-                    return;
-                  }
-                  if (res.statusCode !== 200) {
-                    res.resume();
-                    reject(new Error("HTTP " + res.statusCode + " for " + url));
-                    return;
-                  }
-                  resolve(res);
-                })
-                .on("error", reject);
-            });
-          }
-
-          function walkDir(dir, base) {
-            base = base || "";
-            var result = [];
-            var entries = fs.readdirSync(dir, { withFileTypes: true });
-            for (var i = 0; i < entries.length; i++) {
-              var entry = entries[i];
-              if (entry.name === ".git" || entry.name === ".github" || entry.name === "node_modules") continue;
-              var rel = base ? base + "/" + entry.name : entry.name;
-              var full = path.join(dir, entry.name);
-              if (entry.isDirectory()) {
-                result = result.concat(walkDir(full, rel));
-              } else {
-                result.push({ rel: rel, full: full });
-              }
-            }
-            return result;
-          }
-
-          async function main() {
-            console.log("Streaming archive for " + DATASET_ID + " v" + VERSION);
-
-            var archive = archiver("zip", { zlib: { level: 1 } });
-            var passThrough = new PassThrough();
-            archive.pipe(passThrough);
-
-            archive.on("warning", function (err) {
-              console.warn("Archive warning:", err.message);
-            });
-            archive.on("error", function (err) {
-              console.error("Archive error:", err.message);
-              process.exitCode = 1;
-            });
-            passThrough.on("error", function (err) {
-              console.error("Stream error:", err.message);
-              process.exitCode = 1;
-            });
-
-            var s3 = new S3Client({ region: REGION });
-            var s3Key = DATASET_ID + "/archives/v" + VERSION + ".zip";
-
-            var upload = new Upload({
-              client: s3,
-              params: {
-                Bucket: BUCKET,
-                Key: s3Key,
-                Body: passThrough,
-                ContentType: "application/zip",
-              },
-              queueSize: 4,
-              partSize: 100 * 1024 * 1024,
-            });
-
-            var uploadDone = upload.done().catch(function (err) {
-              console.error("S3 Upload error:", err.message);
-              process.exitCode = 1;
-              throw err;
-            });
-
-            var files = walkDir(".");
-            console.log("Found " + files.length + " files");
-
-            var annexed = 0;
-            var regular = 0;
-            var skipped = 0;
-
-            for (var i = 0; i < files.length; i++) {
-              var rel = files[i].rel;
-              var full = files[i].full;
-              var annexKey = resolveAnnexKey(full);
-
-              try {
-                var entryDone = new Promise(function (resolve, reject) {
-                  archive.once("entry", resolve);
-                  archive.once("error", reject);
-                });
-                if (annexKey) {
-                  var url = S3_BASE + "/" + DATASET_ID + "/objects/" + encodeURIComponent(annexKey);
-                  var stream = await fetchUrl(url);
-                  archive.append(stream, { name: rel });
-                } else {
-                  archive.append(fs.createReadStream(full), { name: rel });
-                }
-                await entryDone;
-                if (annexKey) annexed++;
-                else regular++;
-              } catch (err) {
-                skipped++;
-                if (skipped <= 10) {
-                  console.warn("  Skipping " + rel + ": " + err.message);
-                } else if (skipped === 11) {
-                  console.warn("  (suppressing further skip warnings)");
-                }
-              }
-
-              if ((annexed + regular + skipped) % 100 === 0) {
-                console.log("  Progress: " + (annexed + regular + skipped) + "/" + files.length);
-              }
-            }
-
-            await archive.finalize();
-            await uploadDone;
-
-            console.log("Archive complete: " + annexed + " annexed + " + regular + " regular + " + skipped + " skipped");
-            console.log("Uploaded to s3://" + BUCKET + "/" + s3Key);
-            if (skipped > 0) {
-              console.warn("WARNING: " + skipped + " annexed files were not found in S3");
-            }
-          }
-
-          process.on("unhandledRejection", function (err) {
-            console.error("Unhandled rejection:", err);
-            process.exitCode = 1;
-          });
-
-          main().catch(function (err) {
-            console.error("Fatal:", err);
-            process.exitCode = 1;
-          });
-          ARCHIVE_SCRIPT
-
-      - name: Stream archive to S3
-        env:
-          AWS_ACCESS_KEY_ID: \${{ secrets.AWS_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: \${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          AWS_DEFAULT_REGION: us-east-2
-          NODE_PATH: /tmp/archive-deps/node_modules
-        run: node /tmp/stream-archive.js
-`;
-
-  // LLM Metadata Enrichment workflow. Template version: 2 (epic #417 phase 1).
-  //
-  // The Action sends \`client_commits: true\` in the webhook payload. When the
-  // Worker honors the flag (current backend), it returns the metadata commit
-  // payload in the response and the Action commits with its own GITHUB_TOKEN,
-  // off the shared admin PAT. When the flag is ignored (older backend), the
-  // Worker commits itself; the Action notices the absence of \`client_commits\`
-  // in the response and skips local commit, falling through to the
-  // worker-side behavior.
-  //
-  // The workflow triggers on both \`main\` (normal edits) and \`release/**\`
-  // branches (release PRs). On a release branch the Action passes the current
-  // ref to the webhook so enrichment reads + commits on the right snapshot;
-  // this ensures the merge commit (and the tag created from it) already
-  // contain a fresh \`.nemar/metadata.json\` when version-doi.yml mints the DOI.
-  const llmEnrichment = `name: LLM Metadata Enrichment
-
-on:
-  push:
-    branches:
-      - main
-      - 'release/**'
-    paths:
-      - 'README.md'
-      - 'dataset_description.json'
-      - '.nemar/metadata.json'
-  workflow_dispatch:
-
-jobs:
-  enrich:
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    steps:
-      - name: Mint App installation token
-        id: app-token
-        uses: actions/create-github-app-token@v1
-        with:
-          app-id: \${{ secrets.NEMAR_APP_ID }}
-          private-key: \${{ secrets.NEMAR_APP_PRIVATE_KEY }}
-          owner: nemarDatasets
-          repositories: \${{ github.event.repository.name }}
-
-      - name: Checkout repository
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 1
-          ref: \${{ github.ref_name }}
-          token: \${{ steps.app-token.outputs.token }}
-
-      - name: Trigger enrichment and commit locally if asked
-        env:
-          NEMAR_WEBHOOK_TOKEN: \${{ secrets.NEMAR_WEBHOOK_TOKEN }}
-        run: |
-          REPO_NAME="\${{ github.event.repository.name }}"
-          BRANCH_REF="\${{ github.ref_name }}"
-
-          # Skip if webhook token not configured
-          if [ -z "$NEMAR_WEBHOOK_TOKEN" ]; then
-            echo "NEMAR_WEBHOOK_TOKEN not configured, skipping LLM enrichment"
-            exit 0
-          fi
-
-          # Force re-enrichment on manual workflow_dispatch and on every
-          # release-branch push. Release pushes only change the Version field
-          # in dataset_description.json, so the source_hash short-circuit
-          # would otherwise skip the run; we want a fresh enrichment baked
-          # into the release PR before merge.
-          FORCE="false"
-          case "$BRANCH_REF" in
-            release/*) FORCE="true" ;;
-          esac
-          if [ "\${{ github.event_name }}" = "workflow_dispatch" ]; then
-            FORCE="true"
-          fi
-
-          echo "Triggering LLM enrichment for $REPO_NAME on ref=$BRANCH_REF (force=$FORCE)"
-
-          # Capture full response (no trailing-newline stripping) so jq can
-          # parse the body. The Worker returns 200 even when commit_error
-          # is populated; non-2xx is reserved for hard failures.
-          #
-          # Retry 5xx and curl-level failures up to 3 times with linear
-          # backoff. 4xx is terminal (config error: bad token, missing
-          # dataset row, malformed payload) and won't be helped by retry.
-          # After exhausting retries, exit 1 so the run shows red — burying
-          # enrichment failures behind ::warning silently desyncs D1 from
-          # the repo, which we cannot afford during the OpenNeuro mass-
-          # import. Issue #598. Pairs with Worker-side #596 self-heal.
-          BODY_FILE=$(mktemp)
-          HTTP_CODE=0
-          for attempt in 1 2 3; do
-            HTTP_CODE=$(curl -sS -o "$BODY_FILE" -w "%{http_code}" -X POST \\
-              "https://api.nemar.org/webhooks/llm-enrich" \\
-              -H "Content-Type: application/json" \\
-              -H "X-Webhook-Token: $NEMAR_WEBHOOK_TOKEN" \\
-              -d "{\\"dataset_id\\": \\"$REPO_NAME\\", \\"force\\": $FORCE, \\"client_commits\\": true, \\"ref\\": \\"$BRANCH_REF\\"}") || HTTP_CODE=0
-            echo "attempt $attempt: HTTP $HTTP_CODE"
-            cat "$BODY_FILE"
-            echo
-            if [ "$HTTP_CODE" -ge 200 ] && [ "$HTTP_CODE" -lt 300 ]; then
-              break
-            fi
-            # 401 is treated as transient (retried) rather than terminal:
-            # during a NEMAR_WEBHOOK_TOKEN rotation the first request can
-            # race the new value's propagation across all Workers
-            # instances, and a brief carve-out lets the rotation window
-            # heal itself. Persistent 401 still exits 1 via the
-            # post-loop check. Code-review #599 fix.
-            if [ "$HTTP_CODE" -ge 400 ] && [ "$HTTP_CODE" -lt 500 ] && [ "$HTTP_CODE" -ne 401 ]; then
-              echo "::error::Worker returned $HTTP_CODE (4xx is terminal - check NEMAR_WEBHOOK_TOKEN, dataset_id, and payload shape)"
-              rm -f "$BODY_FILE"
-              exit 1
-            fi
-            if [ "$attempt" -lt 3 ]; then
-              echo "::warning::attempt $attempt: HTTP $HTTP_CODE (transient); retrying in $((attempt * 5))s"
-              sleep $((attempt * 5))
-            fi
-          done
-
-          if [ "$HTTP_CODE" -lt 200 ] || [ "$HTTP_CODE" -ge 300 ]; then
-            echo "::error::LLM enrichment failed after 3 attempts (HTTP $HTTP_CODE). D1 enrichment_json is stale for this dataset; rerun this workflow once the upstream issue is resolved."
-            rm -f "$BODY_FILE"
-            exit 1
-          fi
-
-          # If the Worker honored client_commits, apply the returned payload.
-          # Older Workers ignore the flag and have already committed themselves;
-          # in that case client_commits will be missing/false and we no-op.
-          CLIENT_COMMITS=$(jq -r '.client_commits // false' "$BODY_FILE")
-          if [ "$CLIENT_COMMITS" != "true" ]; then
-            echo "Worker committed metadata server-side; nothing to write locally."
-            rm -f "$BODY_FILE"
-            exit 0
-          fi
-
-          # Validate the payload contains everything we need before touching
-          # the working tree. \`jq -e\` exits non-zero on missing/null fields
-          # so we never write the literal string "null" over real metadata.
-          if ! jq -e '.metadata_path' "$BODY_FILE" > /dev/null; then
-            echo "::error::client_commits=true but metadata_path missing; refusing to write"
-            rm -f "$BODY_FILE"
-            exit 1
-          fi
-          if ! jq -e '.metadata_content' "$BODY_FILE" > /dev/null; then
-            echo "::error::client_commits=true but metadata_content missing; refusing to write"
-            rm -f "$BODY_FILE"
-            exit 1
-          fi
-          if ! jq -e '.commit_message' "$BODY_FILE" > /dev/null; then
-            echo "::error::client_commits=true but commit_message missing; refusing to write"
-            rm -f "$BODY_FILE"
-            exit 1
-          fi
-
-          METADATA_PATH=$(jq -r '.metadata_path' "$BODY_FILE")
-          COMMIT_MESSAGE=$(jq -r '.commit_message' "$BODY_FILE")
-
-          mkdir -p "$(dirname "$METADATA_PATH")"
-          jq -r '.metadata_content' "$BODY_FILE" > "$METADATA_PATH"
-
-          # Validate the file we just wrote is non-empty and parseable JSON.
-          if [ ! -s "$METADATA_PATH" ] || ! jq empty "$METADATA_PATH" 2>/dev/null; then
-            echo "::error::metadata_content was empty or not JSON; reverting"
-            rm -f "$METADATA_PATH"
-            rm -f "$BODY_FILE"
-            exit 1
-          fi
-
-          # Ensure each requested bidsignore entry is present exactly once.
-          touch .bidsignore
-          while IFS= read -r entry; do
-            [ -z "$entry" ] && continue
-            grep -qxF "$entry" .bidsignore || echo "$entry" >> .bidsignore
-          done < <(jq -r '.bidsignore_entries[]?' "$BODY_FILE")
-
-          rm -f "$BODY_FILE"
-
-          git config user.name "nemar-publish-bot"
-          git config user.email "nemar-publish-bot@users.noreply.github.com"
-          git add "$METADATA_PATH" .bidsignore
-
-          if git diff --cached --quiet; then
-            echo "Metadata already up-to-date; nothing to commit."
-            exit 0
-          fi
-
-          git commit -m "$COMMIT_MESSAGE [skip ci]"
-
-          # Concurrent enrichment runs can race on the push. Retry rebase+push
-          # a few times with jitter; on final failure raise an error so the
-          # run is RED and operators are alerted. The Worker's D1 cache was
-          # already updated, so a missing repo commit will desync until the
-          # next README/dataset_description push triggers re-enrichment.
-          # Push to whichever ref triggered this run (main or release/*).
-          pushed=0
-          for attempt in 1 2 3; do
-            if git pull --rebase origin "$BRANCH_REF" && git push origin "HEAD:$BRANCH_REF"; then
-              pushed=1
-              break
-            fi
-            echo "::warning::push attempt $attempt failed (see git output above); retrying in $((attempt * 2))s"
-            sleep $((attempt * 2))
-          done
-
-          if [ "$pushed" != "1" ]; then
-            echo "::error::Action-side metadata commit could not be pushed after 3 attempts; D1 cache is ahead of the repo for this enrichment cycle"
-            exit 1
-          fi
-          echo "Action-side metadata commit applied."
-`;
-
-  // Version DOI workflow: publishes a DOI then triggers archive generation.
-  // Fires on any v* tag push (from pr-merge create-release, manual tags, or admin tags).
-  const versionDoi = `name: Version DOI
-
-on:
-  push:
-    tags: ['v*']
-
-permissions:
-  contents: write
-
-jobs:
-  publish-doi:
-    name: Publish Version DOI
-    runs-on: ubuntu-latest
-    steps:
-      - name: Mint App installation token
-        id: app-token
-        uses: actions/create-github-app-token@v1
-        with:
-          app-id: \${{ secrets.NEMAR_APP_ID }}
-          private-key: \${{ secrets.NEMAR_APP_PRIVATE_KEY }}
-          owner: nemarDatasets
-          repositories: \${{ github.event.repository.name }}
-
-      - name: Create release if missing
-        env:
-          GH_TOKEN: \${{ steps.app-token.outputs.token }}
-        run: |
-          TAG="\${{ github.ref_name }}"
-          # Create release if it doesn't already exist (e.g., manual tag push)
-          gh release view "$TAG" --repo "\${{ github.repository }}" > /dev/null 2>&1 || \\
-            gh release create "$TAG" --repo "\${{ github.repository }}" \\
-              --title "$TAG" --notes "Release $TAG"
-
-      - name: Refresh enrichment from tag (defensive)
-        env:
-          NEMAR_WEBHOOK_TOKEN: \${{ secrets.NEMAR_WEBHOOK_TOKEN }}
-        continue-on-error: true
-        run: |
-          # Belt-and-suspenders: refresh D1 enrichment_json from the tag's
-          # snapshot before the version DOI is minted. This covers cases
-          # where llm-enrichment.yml didn't run on the release branch
-          # (manual tags, legacy repos). Non-fatal: on failure we still
-          # publish the DOI from whatever metadata is in the tag.
-          # client_commits=true tells the Worker to return the payload
-          # without attempting a commit; tags are immutable and the Worker
-          # would otherwise hit a 404 when probing the (nonexistent) branch.
-          # The D1 cache update happens regardless of commit attempt.
-          DATASET_ID="\${{ github.event.repository.name }}"
-          TAG="\${{ github.ref_name }}"
-
-          if [ -z "$NEMAR_WEBHOOK_TOKEN" ]; then
-            echo "NEMAR_WEBHOOK_TOKEN not configured, skipping enrichment refresh"
-            exit 0
-          fi
-
-          echo "Refreshing enrichment for $DATASET_ID from tag $TAG"
-
-          HTTP_CODE=$(curl -sS -o /tmp/llm-enrich-refresh.json -w "%{http_code}" -X POST \\
-            "https://api.nemar.org/webhooks/llm-enrich" \\
-            -H "Content-Type: application/json" \\
-            -H "X-Webhook-Token: $NEMAR_WEBHOOK_TOKEN" \\
-            -d "{\\"dataset_id\\": \\"$DATASET_ID\\", \\"force\\": true, \\"client_commits\\": true, \\"ref\\": \\"$TAG\\"}") || HTTP_CODE=0
-
-          echo "HTTP $HTTP_CODE"
-          cat /tmp/llm-enrich-refresh.json 2>/dev/null || true
-          echo
-
-          if [ "$HTTP_CODE" -ge 400 ] || [ "$HTTP_CODE" = "0" ]; then
-            echo "::warning::Pre-DOI enrichment refresh failed (HTTP $HTTP_CODE) - continuing with existing metadata"
-            exit 0
-          fi
-
-          # The Worker returns HTTP 200 with embedded *_error fields when
-          # individual sub-steps fail (commit, DOI sync, D1 cache, .bidsignore,
-          # metadata columns write, GitHub issue creation). Surface these as
-          # warnings so a green checkmark does not mask a silently stale
-          # enrichment cycle. Field list mirrors ENRICHMENT_SUBERROR_FIELDS
-          # in services/dataset-reindex.ts and EnrichmentSuccessBody in
-          # services/enrich-dataset.ts.
-          for field in commit_error doi_sync_error cache_error bidsignore_error metadata_columns_error issue_creation_error; do
-            err=$(jq -r --arg f "$field" '.[$f] // empty' /tmp/llm-enrich-refresh.json 2>/dev/null)
-            if [ -n "$err" ]; then
-              echo "::warning::Enrichment refresh reported $field: $err"
-            fi
-          done
-
-      - name: Publish version DOI
-        env:
-          NEMAR_WEBHOOK_TOKEN: \${{ secrets.NEMAR_WEBHOOK_TOKEN }}
-        run: |
-          DATASET_ID="\${{ github.event.repository.name }}"
-          TAG="\${{ github.ref_name }}"
-          VERSION="\${TAG#v}"
-          RELEASE_URL="https://github.com/\${{ github.repository }}/releases/tag/$TAG"
-
-          echo "Publishing DOI for $DATASET_ID version $VERSION"
-
-          if [ -z "$NEMAR_WEBHOOK_TOKEN" ]; then
-            echo "NEMAR_WEBHOOK_TOKEN not configured, skipping DOI publish"
-            exit 0
-          fi
-
-          RESPONSE=$(curl -s -w "\\n%{http_code}" -X POST \\
-            "https://api.nemar.org/webhooks/publish-version-doi" \\
-            -H "Content-Type: application/json" \\
-            -H "X-Webhook-Token: $NEMAR_WEBHOOK_TOKEN" \\
-            -d "{
-              \\"dataset_id\\": \\"$DATASET_ID\\",
-              \\"version\\": \\"$VERSION\\",
-              \\"release_url\\": \\"$RELEASE_URL\\"
-            }")
-
-          HTTP_CODE=$(echo "$RESPONSE" | tail -1)
-          BODY=$(echo "$RESPONSE" | head -n -1)
-
-          echo "Response: $BODY"
-
-          if [ "$HTTP_CODE" -ge 400 ]; then
-            if echo "$BODY" | jq -e '.skipped == true' > /dev/null 2>&1; then
-              echo "Skipped: No concept DOI exists for this dataset"
-              exit 0
-            fi
-            echo "::error::Failed to publish DOI (HTTP $HTTP_CODE)"
-            exit 1
-          fi
-
-          DOI=$(echo "$BODY" | jq -r '.version_doi // empty')
-          if [ -n "$DOI" ]; then
-            echo "Version DOI published: $DOI"
-          fi
-
-  trigger-archive:
-    name: Trigger Archive Generation
-    needs: publish-doi
-    runs-on: ubuntu-latest
-    steps:
-      - name: Mint App installation token
-        id: app-token
-        uses: actions/create-github-app-token@v1
-        with:
-          app-id: \${{ secrets.NEMAR_APP_ID }}
-          private-key: \${{ secrets.NEMAR_APP_PRIVATE_KEY }}
-          owner: nemarDatasets
-          repositories: \${{ github.event.repository.name }}
-
-      - name: Dispatch archive generation
-        env:
-          GH_TOKEN: \${{ steps.app-token.outputs.token }}
-        run: |
-          DATASET_ID="\${{ github.event.repository.name }}"
-          TAG="\${{ github.ref_name }}"
-          VERSION="\${TAG#v}"
-
-          echo "Triggering archive generation for $DATASET_ID v$VERSION"
-
-          gh api "repos/\${{ github.repository }}/dispatches" \\
-            -f event_type=generate-archive \\
-            -f "client_payload[dataset_id]=$DATASET_ID" \\
-            -f "client_payload[version]=$VERSION"
-`;
+  // generate-archive.yml relocated to nemarDatasets/.github/.github/workflows/run-generate-archive.yml
+  // and triggered via repository_dispatch from the Worker (`triggerArchiveGeneration` above
+  // now targets `nemarDatasets/.github` rather than the dataset repo). Phase 3 of epic #601 /
+  // sub-issue #608. Existing dataset repos are cleaned via scripts/strip-per-repo-workflow.ts
+  // --workflow generate-archive.yml.
+
+  // llm-enrichment.yml relocated to nemarDatasets/.github/.github/workflows/run-enrichment.yml
+  // and triggered via repository_dispatch from POST /webhooks/github. Phase 1 of
+  // epic #601 / sub-issue #602. Existing dataset repos are cleaned by
+  // scripts/strip-per-repo-llm-enrichment.ts.
+  // version-doi.yml relocated to nemarDatasets/.github/.github/workflows/run-version-doi.yml
+  // and triggered via repository_dispatch from POST /webhooks/github on tag pushes.
+  // Phase 2 of epic #601 / sub-issue #606. Existing dataset repos are cleaned via
+  // scripts/strip-per-repo-workflow.ts --workflow .github/workflows/version-doi.yml.
 
   return [
     { path: ".github/workflows/bids-validation.yml", content: bidsValidation },
     { path: ".github/workflows/version-check.yml", content: versionCheck },
     { path: ".github/workflows/pr-merge.yml", content: prMerge },
-    { path: ".github/workflows/generate-archive.yml", content: generateArchive },
-    { path: ".github/workflows/llm-enrichment.yml", content: llmEnrichment },
-    { path: ".github/workflows/version-doi.yml", content: versionDoi },
   ];
 }
 
@@ -2172,9 +1543,17 @@ export async function syncWorkflowTemplates(
 
 /**
  * Trigger archive generation via repository_dispatch event.
- * Sends dataset_id and version in the client_payload. The generate-archive
- * workflow checks out the version tag, retrieves git-annex data, creates a zip,
- * and uploads to S3 at {datasetId}/archives/v{version}.zip.
+ *
+ * Phase 3 of centralization epic #601 (sub-issue #608): the workflow now
+ * lives at `nemarDatasets/.github/.github/workflows/run-generate-archive.yml`
+ * and dispatches use the central repo, NOT the dataset repo. The legacy
+ * `repo` parameter is preserved in the signature for callsite stability
+ * (CLI + admin endpoints pass the dataset repo name); it's no longer used
+ * to address the dispatch target, only logged for traceability.
+ *
+ * client_payload shape stays compatible: `dataset_id`, `version`, `public`.
+ * The central workflow mints a per-repo App token scoped to `dataset_id`
+ * and checks out the dataset repo at `v$VERSION`.
  */
 export async function triggerArchiveGeneration(
   repo: string,
@@ -2183,7 +1562,14 @@ export async function triggerArchiveGeneration(
   pat: string,
   options?: { public?: boolean },
 ): Promise<void> {
-  const response = await fetch(`${GITHUB_API()}/repos/${ORG_NAME}/${repo}/dispatches`, {
+  // Sanity check the legacy parameter so callsites that still pass the
+  // dataset's own repo name don't drift from the dataset_id payload.
+  if (repo !== datasetId) {
+    console.warn(
+      `[generate-archive] repo (${repo}) and datasetId (${datasetId}) differ; dispatching with dataset_id=${datasetId}`,
+    );
+  }
+  const response = await fetch(`${GITHUB_API()}/repos/${CENTRAL_WORKFLOW_REPO}/dispatches`, {
     method: "POST",
     headers: {
       Authorization: `Bearer ${pat}`,
@@ -2266,6 +1652,96 @@ export async function triggerManifestGeneration(
   if (!response.ok) {
     const error = await response.text();
     throw new Error(`Failed to trigger manifest generation: HTTP ${response.status} - ${error}`);
+  }
+}
+
+/**
+ * Trigger the central version-DOI workflow on `nemarDatasets/.github` via
+ * `repository_dispatch[run-version-doi]`. The workflow mints a per-repo App
+ * token scoped to `datasetId`, checks out that repo at the tag, refreshes
+ * enrichment, POSTs to `/webhooks/publish-version-doi`, and dispatches
+ * generate-archive against the target dataset repo. No callback handshake —
+ * `/webhooks/publish-version-doi` itself is the round-trip that updates D1
+ * (and is idempotent on the version-DOI ledger so a duplicate dispatch
+ * during the Phase 2 cutover window is safe).
+ *
+ * Mirrors `triggerEnrichmentRun` and `triggerManifestGeneration`. The `pat`
+ * must carry write access on `nemarDatasets/.github`'s dispatch endpoint —
+ * use `getDatasetsToken()`. Phase 2 of epic #601 (sub-issue #606).
+ */
+export async function triggerVersionDoiRun(
+  datasetId: string,
+  tag: string,
+  pat: string,
+): Promise<void> {
+  const response = await fetch(`${GITHUB_API()}/repos/${CENTRAL_WORKFLOW_REPO}/dispatches`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${pat}`,
+      Accept: "application/vnd.github.v3+json",
+      "User-Agent": "NEMAR-API",
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      event_type: "run-version-doi",
+      client_payload: {
+        dataset_id: datasetId,
+        tag,
+      },
+    }),
+  });
+
+  if (!response.ok) {
+    const error = await response.text();
+    throw new Error(`Failed to trigger version-doi run: HTTP ${response.status} - ${error}`);
+  }
+}
+
+/**
+ * Trigger the central LLM-enrichment workflow on `nemarDatasets/.github` via
+ * `repository_dispatch[run-enrichment]`. The workflow mints a per-repo App
+ * token scoped to `datasetId`, checks out that repo at `ref`, POSTs to
+ * `/webhooks/llm-enrich`, and commits the returned `.nemar/metadata.json`
+ * back to the dataset repo. No callback handshake — the workflow's POST to
+ * `/webhooks/llm-enrich` IS the round-trip that updates D1.
+ *
+ * Wraps the same dispatch shape as `triggerManifestGeneration`; differs only
+ * in the event_type and the (much simpler) client_payload. The `pat` must
+ * carry write access on `nemarDatasets/.github`'s dispatch endpoint — use
+ * `getDatasetsToken()`.
+ *
+ * Phase 1 of epic #601 (sub-issue #602). The legacy per-repo
+ * `llm-enrichment.yml` is removed in the same PR; existing dataset repos are
+ * stripped via `scripts/strip-per-repo-llm-enrichment.ts` as the final
+ * cutover step.
+ */
+export async function triggerEnrichmentRun(
+  datasetId: string,
+  ref: string,
+  force: boolean,
+  pat: string,
+): Promise<void> {
+  const response = await fetch(`${GITHUB_API()}/repos/${CENTRAL_WORKFLOW_REPO}/dispatches`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${pat}`,
+      Accept: "application/vnd.github.v3+json",
+      "User-Agent": "NEMAR-API",
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      event_type: "run-enrichment",
+      client_payload: {
+        dataset_id: datasetId,
+        ref,
+        force,
+      },
+    }),
+  });
+
+  if (!response.ok) {
+    const error = await response.text();
+    throw new Error(`Failed to trigger enrichment run: HTTP ${response.status} - ${error}`);
   }
 }
 

@@ -164,14 +164,22 @@ describe("ensureWorkflowsDeployed", () => {
 
   test("some missing: tree commit with only the missing files", async () => {
     const templates = getWorkflowTemplates();
-    presentPaths = templates.slice(0, 3).map((t) => t.path);
-    const missing = templates.slice(3);
+    // Compute the split dynamically rather than hardcoding "first 3 / rest".
+    // After Phase 4 of centralization (#601) the template count is 3; the
+    // pre-Phase-4 hardcoded `slice(0, 3) / slice(3)` produced an empty
+    // `missing` set and the test stopped exercising the tree-commit
+    // path. Keep "leave at least one missing" as the contract so the
+    // test remains meaningful regardless of how many templates ship.
+    expect(templates.length).toBeGreaterThanOrEqual(2);
+    const presentCount = templates.length - 1;
+    presentPaths = templates.slice(0, presentCount).map((t) => t.path);
+    const missing = templates.slice(presentCount);
 
     const result = await ensureWorkflowsDeployed(REPO, BRANCH, PAT);
 
     expect(result.errors).toEqual([]);
     expect(result.deployed.length).toBe(missing.length);
-    expect(result.alreadyPresent.length).toBe(3);
+    expect(result.alreadyPresent.length).toBe(presentCount);
     expect(result.listFailed).toBe(false);
 
     expect(lastTreeBody).not.toBeNull();

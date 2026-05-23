@@ -446,10 +446,14 @@ Three notable choices specific to dev:
 - `nemarDatasets/.github/.github/workflows/generate-manifest.yml`
   writes `nemar/<id>/version/v<X.Y.Z>.json` and
   `nemar/<id>/version/v<X.Y.Z>-summary.json` after a publish.
+- `nemarDatasets/.github/.github/workflows/run-generate-archive.yml`
+  writes `nemar/<id>/archives/v<X.Y.Z>.zip` after a DOI mint. Triggered
+  by `repository_dispatch[generate-archive]` from the Worker's
+  `triggerArchiveGeneration` helper or from the `trigger-archive` job
+  of `run-version-doi.yml`. Phase 3 of centralization epic #601.
 - Per-dataset workflows shipped via `getWorkflowTemplates()` in
   `backend/src/services/github.ts`:
   - `pr-merge.yml` cleans up `nemar/staging/*` on PR close.
-  - `generate-archive.yml` writes `nemar/<id>/archives/v<X.Y.Z>.zip`.
 
 None of these workflows mint federated tokens, change bucket
 policy, or touch Object Lock — those are strictly Worker concerns.
