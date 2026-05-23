@@ -1411,175 +1411,16 @@ jobs:
   // and triggered via repository_dispatch from POST /webhooks/github. Phase 1 of
   // epic #601 / sub-issue #602. Existing dataset repos are cleaned by
   // scripts/strip-per-repo-llm-enrichment.ts.
-  // Version DOI workflow: publishes a DOI then triggers archive generation.
-  // Fires on any v* tag push (from pr-merge create-release, manual tags, or admin tags).
-  const versionDoi = `name: Version DOI
-
-on:
-  push:
-    tags: ['v*']
-
-permissions:
-  contents: write
-
-jobs:
-  publish-doi:
-    name: Publish Version DOI
-    runs-on: ubuntu-latest
-    steps:
-      - name: Mint App installation token
-        id: app-token
-        uses: actions/create-github-app-token@v1
-        with:
-          app-id: \${{ secrets.NEMAR_APP_ID }}
-          private-key: \${{ secrets.NEMAR_APP_PRIVATE_KEY }}
-          owner: nemarDatasets
-          repositories: \${{ github.event.repository.name }}
-
-      - name: Create release if missing
-        env:
-          GH_TOKEN: \${{ steps.app-token.outputs.token }}
-        run: |
-          TAG="\${{ github.ref_name }}"
-          # Create release if it doesn't already exist (e.g., manual tag push)
-          gh release view "$TAG" --repo "\${{ github.repository }}" > /dev/null 2>&1 || \\
-            gh release create "$TAG" --repo "\${{ github.repository }}" \\
-              --title "$TAG" --notes "Release $TAG"
-
-      - name: Refresh enrichment from tag (defensive)
-        env:
-          NEMAR_WEBHOOK_TOKEN: \${{ secrets.NEMAR_WEBHOOK_TOKEN }}
-        continue-on-error: true
-        run: |
-          # Belt-and-suspenders: refresh D1 enrichment_json from the tag's
-          # snapshot before the version DOI is minted. This covers cases
-          # where llm-enrichment.yml didn't run on the release branch
-          # (manual tags, legacy repos). Non-fatal: on failure we still
-          # publish the DOI from whatever metadata is in the tag.
-          # client_commits=true tells the Worker to return the payload
-          # without attempting a commit; tags are immutable and the Worker
-          # would otherwise hit a 404 when probing the (nonexistent) branch.
-          # The D1 cache update happens regardless of commit attempt.
-          DATASET_ID="\${{ github.event.repository.name }}"
-          TAG="\${{ github.ref_name }}"
-
-          if [ -z "$NEMAR_WEBHOOK_TOKEN" ]; then
-            echo "NEMAR_WEBHOOK_TOKEN not configured, skipping enrichment refresh"
-            exit 0
-          fi
-
-          echo "Refreshing enrichment for $DATASET_ID from tag $TAG"
-
-          HTTP_CODE=$(curl -sS -o /tmp/llm-enrich-refresh.json -w "%{http_code}" -X POST \\
-            "https://api.nemar.org/webhooks/llm-enrich" \\
-            -H "Content-Type: application/json" \\
-            -H "X-Webhook-Token: $NEMAR_WEBHOOK_TOKEN" \\
-            -d "{\\"dataset_id\\": \\"$DATASET_ID\\", \\"force\\": true, \\"client_commits\\": true, \\"ref\\": \\"$TAG\\"}") || HTTP_CODE=0
-
-          echo "HTTP $HTTP_CODE"
-          cat /tmp/llm-enrich-refresh.json 2>/dev/null || true
-          echo
-
-          if [ "$HTTP_CODE" -ge 400 ] || [ "$HTTP_CODE" = "0" ]; then
-            echo "::warning::Pre-DOI enrichment refresh failed (HTTP $HTTP_CODE) - continuing with existing metadata"
-            exit 0
-          fi
-
-          # The Worker returns HTTP 200 with embedded *_error fields when
-          # individual sub-steps fail (commit, DOI sync, D1 cache, .bidsignore,
-          # metadata columns write, GitHub issue creation). Surface these as
-          # warnings so a green checkmark does not mask a silently stale
-          # enrichment cycle. Field list mirrors ENRICHMENT_SUBERROR_FIELDS
-          # in services/dataset-reindex.ts and EnrichmentSuccessBody in
-          # services/enrich-dataset.ts.
-          for field in commit_error doi_sync_error cache_error bidsignore_error metadata_columns_error issue_creation_error; do
-            err=$(jq -r --arg f "$field" '.[$f] // empty' /tmp/llm-enrich-refresh.json 2>/dev/null)
-            if [ -n "$err" ]; then
-              echo "::warning::Enrichment refresh reported $field: $err"
-            fi
-          done
-
-      - name: Publish version DOI
-        env:
-          NEMAR_WEBHOOK_TOKEN: \${{ secrets.NEMAR_WEBHOOK_TOKEN }}
-        run: |
-          DATASET_ID="\${{ github.event.repository.name }}"
-          TAG="\${{ github.ref_name }}"
-          VERSION="\${TAG#v}"
-          RELEASE_URL="https://github.com/\${{ github.repository }}/releases/tag/$TAG"
-
-          echo "Publishing DOI for $DATASET_ID version $VERSION"
-
-          if [ -z "$NEMAR_WEBHOOK_TOKEN" ]; then
-            echo "NEMAR_WEBHOOK_TOKEN not configured, skipping DOI publish"
-            exit 0
-          fi
-
-          RESPONSE=$(curl -s -w "\\n%{http_code}" -X POST \\
-            "https://api.nemar.org/webhooks/publish-version-doi" \\
-            -H "Content-Type: application/json" \\
-            -H "X-Webhook-Token: $NEMAR_WEBHOOK_TOKEN" \\
-            -d "{
-              \\"dataset_id\\": \\"$DATASET_ID\\",
-              \\"version\\": \\"$VERSION\\",
-              \\"release_url\\": \\"$RELEASE_URL\\"
-            }")
-
-          HTTP_CODE=$(echo "$RESPONSE" | tail -1)
-          BODY=$(echo "$RESPONSE" | head -n -1)
-
-          echo "Response: $BODY"
-
-          if [ "$HTTP_CODE" -ge 400 ]; then
-            if echo "$BODY" | jq -e '.skipped == true' > /dev/null 2>&1; then
-              echo "Skipped: No concept DOI exists for this dataset"
-              exit 0
-            fi
-            echo "::error::Failed to publish DOI (HTTP $HTTP_CODE)"
-            exit 1
-          fi
-
-          DOI=$(echo "$BODY" | jq -r '.version_doi // empty')
-          if [ -n "$DOI" ]; then
-            echo "Version DOI published: $DOI"
-          fi
-
-  trigger-archive:
-    name: Trigger Archive Generation
-    needs: publish-doi
-    runs-on: ubuntu-latest
-    steps:
-      - name: Mint App installation token
-        id: app-token
-        uses: actions/create-github-app-token@v1
-        with:
-          app-id: \${{ secrets.NEMAR_APP_ID }}
-          private-key: \${{ secrets.NEMAR_APP_PRIVATE_KEY }}
-          owner: nemarDatasets
-          repositories: \${{ github.event.repository.name }}
-
-      - name: Dispatch archive generation
-        env:
-          GH_TOKEN: \${{ steps.app-token.outputs.token }}
-        run: |
-          DATASET_ID="\${{ github.event.repository.name }}"
-          TAG="\${{ github.ref_name }}"
-          VERSION="\${TAG#v}"
-
-          echo "Triggering archive generation for $DATASET_ID v$VERSION"
-
-          gh api "repos/\${{ github.repository }}/dispatches" \\
-            -f event_type=generate-archive \\
-            -f "client_payload[dataset_id]=$DATASET_ID" \\
-            -f "client_payload[version]=$VERSION"
-`;
+  // version-doi.yml relocated to nemarDatasets/.github/.github/workflows/run-version-doi.yml
+  // and triggered via repository_dispatch from POST /webhooks/github on tag pushes.
+  // Phase 2 of epic #601 / sub-issue #606. Existing dataset repos are cleaned via
+  // scripts/strip-per-repo-workflow.ts --workflow .github/workflows/version-doi.yml.
 
   return [
     { path: ".github/workflows/bids-validation.yml", content: bidsValidation },
     { path: ".github/workflows/version-check.yml", content: versionCheck },
     { path: ".github/workflows/pr-merge.yml", content: prMerge },
     { path: ".github/workflows/generate-archive.yml", content: generateArchive },
-    { path: ".github/workflows/version-doi.yml", content: versionDoi },
   ];
 }
 
@@ -2057,6 +1898,48 @@ export async function triggerManifestGeneration(
   if (!response.ok) {
     const error = await response.text();
     throw new Error(`Failed to trigger manifest generation: HTTP ${response.status} - ${error}`);
+  }
+}
+
+/**
+ * Trigger the central version-DOI workflow on `nemarDatasets/.github` via
+ * `repository_dispatch[run-version-doi]`. The workflow mints a per-repo App
+ * token scoped to `datasetId`, checks out that repo at the tag, refreshes
+ * enrichment, POSTs to `/webhooks/publish-version-doi`, and dispatches
+ * generate-archive against the target dataset repo. No callback handshake —
+ * `/webhooks/publish-version-doi` itself is the round-trip that updates D1
+ * (and is idempotent on the version-DOI ledger so a duplicate dispatch
+ * during the Phase 2 cutover window is safe).
+ *
+ * Mirrors `triggerEnrichmentRun` and `triggerManifestGeneration`. The `pat`
+ * must carry write access on `nemarDatasets/.github`'s dispatch endpoint —
+ * use `getDatasetsToken()`. Phase 2 of epic #601 (sub-issue #606).
+ */
+export async function triggerVersionDoiRun(
+  datasetId: string,
+  tag: string,
+  pat: string,
+): Promise<void> {
+  const response = await fetch(`${GITHUB_API()}/repos/${CENTRAL_WORKFLOW_REPO}/dispatches`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${pat}`,
+      Accept: "application/vnd.github.v3+json",
+      "User-Agent": "NEMAR-API",
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      event_type: "run-version-doi",
+      client_payload: {
+        dataset_id: datasetId,
+        tag,
+      },
+    }),
+  });
+
+  if (!response.ok) {
+    const error = await response.text();
+    throw new Error(`Failed to trigger version-doi run: HTTP ${response.status} - ${error}`);
   }
 }
 

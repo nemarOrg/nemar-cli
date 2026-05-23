@@ -19,6 +19,7 @@ import {
   signManifestCallbackToken,
   triggerEnrichmentRun,
   triggerManifestGeneration,
+  triggerVersionDoiRun,
   verifyManifestCallbackToken,
 } from "../services/github.js";
 import { generateManifest } from "../services/manifest.js";
@@ -1453,6 +1454,48 @@ export function shouldDispatchEnrichment(
   return { dispatch: true, datasetId, ref: refName, force };
 }
 
+/** Strict version-tag pattern: `v` + semver core + optional pre-release of
+ *  the shapes the project's `scripts/bump-version.sh` actually emits
+ *  (`-rc<N>`, `-alpha<N>`, `-beta<N>`, with `<N>` optional). Tighter than
+ *  the legacy `tags: ['v*']` glob so a typo'd `vfoo` or unrelated `vlatest`
+ *  tag doesn't cause an accidental DOI mint. Phase 2 of #601 / #606. */
+const VERSION_TAG_REF_RE = /^refs\/tags\/(v\d+\.\d+\.\d+(?:-(?:rc|alpha|beta)\d*)?)$/;
+
+/** Decide whether a push event should fan out to the version-DOI workflow.
+ *
+ *  Filter rules (parallel to `shouldDispatchEnrichment`, exported for unit
+ *  testing):
+ *    - same owner (`nemarDatasets`) + dataset id (`isValidDatasetId`) gate
+ *    - `ref` matches `^refs/tags/v<semver>$` per VERSION_TAG_REF_RE
+ *    - `deleted` is falsy (tag deletes must NOT mint a new DOI)
+ *
+ *  Returns the bare tag (sans `refs/tags/` prefix) on the happy path so
+ *  callers can pass it straight to `triggerVersionDoiRun`. Phase 2 of #601.
+ */
+export function shouldDispatchVersionDoi(
+  event: PushEventPayload,
+): { dispatch: false; reason: string } | { dispatch: true; datasetId: string; tag: string } {
+  if (event.deleted) return { dispatch: false, reason: "tag_deleted" };
+
+  const owner = event.repository?.owner?.login;
+  if (owner !== "nemarDatasets") {
+    return { dispatch: false, reason: "wrong_owner" };
+  }
+
+  const datasetId = event.repository?.name;
+  if (!datasetId || !isValidDatasetId(datasetId)) {
+    return { dispatch: false, reason: "not_a_dataset_repo" };
+  }
+
+  const ref = event.ref ?? "";
+  const match = VERSION_TAG_REF_RE.exec(ref);
+  if (!match) {
+    return { dispatch: false, reason: "ref_not_version_tag" };
+  }
+
+  return { dispatch: true, datasetId, tag: match[1] };
+}
+
 /**
  * POST /webhooks/github — entry point for GitHub App webhook deliveries.
  *
@@ -1509,38 +1552,80 @@ webhooks.post("/github", async (c) => {
     return c.json({ ok: true, dispatched: false, reason: "unparseable_payload" });
   }
 
-  const decision = shouldDispatchEnrichment(payload);
-  if (!decision.dispatch) {
-    return c.json({ ok: true, dispatched: false, reason: decision.reason });
+  // Evaluate both decision functions. A given push delivery should only
+  // match one (branch pushes carry no tag ref; tag pushes carry no branch
+  // ref), but evaluating both keeps the handler symmetric for future
+  // phases of #601 and makes the response shape stable for observability
+  // tooling.
+  const enrichmentDecision = shouldDispatchEnrichment(payload);
+  const versionDoiDecision = shouldDispatchVersionDoi(payload);
+
+  if (!enrichmentDecision.dispatch && !versionDoiDecision.dispatch) {
+    // Surface whichever reason is more specific. The enrichment path's
+    // reasons are richer (no_enrichment_paths_touched, ref_not_main_or_
+    // release, …); version-doi only contributes when the enrichment path
+    // bailed at the ref check.
+    const reason =
+      enrichmentDecision.dispatch === false ? enrichmentDecision.reason : versionDoiDecision.reason;
+    return c.json({ ok: true, dispatched: false, reason });
   }
 
-  try {
-    const pat = await getDatasetsToken(c.env);
-    await triggerEnrichmentRun(decision.datasetId, decision.ref, decision.force, pat);
-    console.log(
-      `[github-webhook] dispatched run-enrichment for ${decision.datasetId}@${decision.ref} force=${decision.force} delivery=${deliveryId}`,
-    );
-    return c.json({
-      ok: true,
-      dispatched: true,
-      dataset_id: decision.datasetId,
-      ref: decision.ref,
-      force: decision.force,
-    });
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    console.error(
-      `[github-webhook] dispatch failed for ${decision.datasetId}@${decision.ref} delivery=${deliveryId}: ${msg}`,
-    );
-    return c.json({
-      ok: true,
-      dispatched: false,
-      reason: "dispatch_failed",
-      error: msg,
-      dataset_id: decision.datasetId,
-      ref: decision.ref,
-    });
+  const pat = await getDatasetsToken(c.env);
+  const dispatched: Record<string, unknown> = {};
+  const errors: Record<string, string> = {};
+
+  if (enrichmentDecision.dispatch) {
+    try {
+      await triggerEnrichmentRun(
+        enrichmentDecision.datasetId,
+        enrichmentDecision.ref,
+        enrichmentDecision.force,
+        pat,
+      );
+      console.log(
+        `[github-webhook] dispatched run-enrichment for ${enrichmentDecision.datasetId}@${enrichmentDecision.ref} force=${enrichmentDecision.force} delivery=${deliveryId}`,
+      );
+      dispatched.enrichment = {
+        dataset_id: enrichmentDecision.datasetId,
+        ref: enrichmentDecision.ref,
+        force: enrichmentDecision.force,
+      };
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error(
+        `[github-webhook] enrichment dispatch failed for ${enrichmentDecision.datasetId}@${enrichmentDecision.ref} delivery=${deliveryId}: ${msg}`,
+      );
+      errors.enrichment = msg;
+    }
   }
+
+  if (versionDoiDecision.dispatch) {
+    try {
+      await triggerVersionDoiRun(versionDoiDecision.datasetId, versionDoiDecision.tag, pat);
+      console.log(
+        `[github-webhook] dispatched run-version-doi for ${versionDoiDecision.datasetId}@${versionDoiDecision.tag} delivery=${deliveryId}`,
+      );
+      dispatched.version_doi = {
+        dataset_id: versionDoiDecision.datasetId,
+        tag: versionDoiDecision.tag,
+      };
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error(
+        `[github-webhook] version-doi dispatch failed for ${versionDoiDecision.datasetId}@${versionDoiDecision.tag} delivery=${deliveryId}: ${msg}`,
+      );
+      errors.version_doi = msg;
+    }
+  }
+
+  const anyDispatched = Object.keys(dispatched).length > 0;
+  const anyErrors = Object.keys(errors).length > 0;
+  return c.json({
+    ok: true,
+    dispatched: anyDispatched,
+    ...(anyDispatched ? { runs: dispatched } : {}),
+    ...(anyErrors ? { errors } : {}),
+  });
 });
 
 export default webhooks;

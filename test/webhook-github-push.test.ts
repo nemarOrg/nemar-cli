@@ -14,9 +14,26 @@
 
 import { describe, expect, test } from "bun:test";
 import "./setup";
-import { shouldDispatchEnrichment } from "../backend/src/routes/webhooks";
+import {
+  shouldDispatchEnrichment,
+  shouldDispatchVersionDoi,
+} from "../backend/src/routes/webhooks";
 
 type PushPayload = Parameters<typeof shouldDispatchEnrichment>[0];
+
+function tagPushEvent(overrides: Partial<PushPayload> = {}): PushPayload {
+  return {
+    ref: "refs/tags/v1.0.0",
+    repository: {
+      name: "nm099999",
+      owner: { login: "nemarDatasets" },
+    },
+    commits: [],
+    head_commit: null,
+    deleted: false,
+    ...overrides,
+  };
+}
 
 function pushEvent(overrides: Partial<PushPayload> = {}): PushPayload {
   return {
@@ -223,6 +240,126 @@ describe("shouldDispatchEnrichment", () => {
         pushEvent({ repository: { name: "xx000001", owner: { login: "nemarDatasets" } } }),
       );
       expect(decision.dispatch).toBe(true);
+    });
+  });
+});
+
+// shouldDispatchVersionDoi is the Phase 2 sibling that fans out to the
+// run-version-doi workflow on tag pushes. Same owner/dataset-id guards as
+// the enrichment path but with a strict version-tag regex on the ref.
+describe("shouldDispatchVersionDoi", () => {
+  describe("happy paths", () => {
+    test("dispatches on a v-prefixed semver tag push", () => {
+      const decision = shouldDispatchVersionDoi(tagPushEvent());
+      expect(decision.dispatch).toBe(true);
+      if (decision.dispatch) {
+        expect(decision.datasetId).toBe("nm099999");
+        expect(decision.tag).toBe("v1.0.0");
+      }
+    });
+
+    test("dispatches on a release-candidate tag", () => {
+      const decision = shouldDispatchVersionDoi(
+        tagPushEvent({ ref: "refs/tags/v1.2.3-rc1" }),
+      );
+      expect(decision.dispatch).toBe(true);
+      if (decision.dispatch) expect(decision.tag).toBe("v1.2.3-rc1");
+    });
+
+    test("dispatches on an alpha tag (no trailing number)", () => {
+      const decision = shouldDispatchVersionDoi(
+        tagPushEvent({ ref: "refs/tags/v0.1.0-alpha" }),
+      );
+      expect(decision.dispatch).toBe(true);
+      if (decision.dispatch) expect(decision.tag).toBe("v0.1.0-alpha");
+    });
+
+    test("dispatches on a beta tag with a number", () => {
+      const decision = shouldDispatchVersionDoi(
+        tagPushEvent({ ref: "refs/tags/v2.0.0-beta3" }),
+      );
+      expect(decision.dispatch).toBe(true);
+      if (decision.dispatch) expect(decision.tag).toBe("v2.0.0-beta3");
+    });
+
+    test("accepts on-prefix dataset repos", () => {
+      const decision = shouldDispatchVersionDoi(
+        tagPushEvent({
+          repository: { name: "on002778", owner: { login: "nemarDatasets" } },
+        }),
+      );
+      expect(decision.dispatch).toBe(true);
+    });
+  });
+
+  describe("non-dispatch paths", () => {
+    test("does not dispatch when the tag was deleted", () => {
+      const decision = shouldDispatchVersionDoi(tagPushEvent({ deleted: true }));
+      expect(decision.dispatch).toBe(false);
+      if (!decision.dispatch) expect(decision.reason).toBe("tag_deleted");
+    });
+
+    test("does not dispatch on a branch push (no refs/tags/ prefix)", () => {
+      const decision = shouldDispatchVersionDoi(
+        tagPushEvent({ ref: "refs/heads/main" }),
+      );
+      expect(decision.dispatch).toBe(false);
+      if (!decision.dispatch) expect(decision.reason).toBe("ref_not_version_tag");
+    });
+
+    test("does not dispatch on a tag missing the v prefix", () => {
+      const decision = shouldDispatchVersionDoi(
+        tagPushEvent({ ref: "refs/tags/1.0.0" }),
+      );
+      expect(decision.dispatch).toBe(false);
+      if (!decision.dispatch) expect(decision.reason).toBe("ref_not_version_tag");
+    });
+
+    test("does not dispatch on a non-semver tag", () => {
+      const decision = shouldDispatchVersionDoi(
+        tagPushEvent({ ref: "refs/tags/vfoo" }),
+      );
+      expect(decision.dispatch).toBe(false);
+      if (!decision.dispatch) expect(decision.reason).toBe("ref_not_version_tag");
+    });
+
+    test("does not dispatch on a tag with too few version components", () => {
+      const decision = shouldDispatchVersionDoi(
+        tagPushEvent({ ref: "refs/tags/v1.0" }),
+      );
+      expect(decision.dispatch).toBe(false);
+      if (!decision.dispatch) expect(decision.reason).toBe("ref_not_version_tag");
+    });
+
+    test("does not dispatch on an unsupported pre-release suffix", () => {
+      // We only allow rc/alpha/beta — `v1.0.0-snapshot` is rejected.
+      const decision = shouldDispatchVersionDoi(
+        tagPushEvent({ ref: "refs/tags/v1.0.0-snapshot" }),
+      );
+      expect(decision.dispatch).toBe(false);
+      if (!decision.dispatch) expect(decision.reason).toBe("ref_not_version_tag");
+    });
+
+    test("does not dispatch when the owner is not nemarDatasets", () => {
+      const decision = shouldDispatchVersionDoi(
+        tagPushEvent({ repository: { name: "nm099999", owner: { login: "nemarOrg" } } }),
+      );
+      expect(decision.dispatch).toBe(false);
+      if (!decision.dispatch) expect(decision.reason).toBe("wrong_owner");
+    });
+
+    test("does not dispatch when the repo name is not a dataset id", () => {
+      const decision = shouldDispatchVersionDoi(
+        tagPushEvent({ repository: { name: ".github", owner: { login: "nemarDatasets" } } }),
+      );
+      expect(decision.dispatch).toBe(false);
+      if (!decision.dispatch) expect(decision.reason).toBe("not_a_dataset_repo");
+    });
+
+    test("does not dispatch when repository is missing entirely", () => {
+      const decision = shouldDispatchVersionDoi(tagPushEvent({ repository: undefined }));
+      expect(decision.dispatch).toBe(false);
+      if (!decision.dispatch) expect(decision.reason).toBe("wrong_owner");
     });
   });
 });
