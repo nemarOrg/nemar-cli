@@ -45,7 +45,7 @@ import {
   maybeSlideExpiry,
   revokeSession,
 } from "../services/web-session";
-import type { Bindings, Variables } from "../types/bindings";
+import { type Bindings, type UserRole, type Variables, parseRole } from "../types/bindings";
 
 export const authWebRoutes = new Hono<{ Bindings: Bindings; Variables: Variables }>();
 
@@ -89,9 +89,12 @@ function userStatusForDashboard(internal: string): "active" | "pending" | null {
 }
 
 /**
- * Shape the public user payload returned by /verify and /me.
+ * Shape the public user payload returned by /verify and /me. `role`
+ * is the validated `UserRole` from the DB; null falls back to
+ * 'member' for the dashboard payload so the frontend always sees a
+ * value it can switch on.
  */
-function publicUser(row: { id: number; email: string; role: string | null; status: string }) {
+function publicUser(row: { id: number; email: string; role: UserRole | null; status: string }) {
   return {
     id: row.id,
     email: row.email,
@@ -109,46 +112,24 @@ authWebRoutes.post("/code/request", zValidator("json", emailSchema), async (c) =
   const db = c.env.DB;
 
   try {
-    // Per-email rate limit. Counted before any row insert so a flood
-    // of requests against one address can't outrun the bucket.
-    const minuteCount = await db
+    // Lazy user create with INSERT OR IGNORE so two concurrent
+    // first-time requests for the same email don't race into a UNIQUE
+    // constraint violation. INSERT OR IGNORE returns a no-op for the
+    // loser, which is correct (the row already exists).
+    await db
       .prepare(
-        `SELECT COUNT(*) AS n FROM auth_codes
-          WHERE email = ? AND created_at > datetime('now','-1 minute')`,
+        "INSERT OR IGNORE INTO users (email, status, signup_source) VALUES (?, 'pending', 'web')",
       )
       .bind(email)
-      .first<{ n: number }>();
-    if ((minuteCount?.n ?? 0) >= PER_MINUTE_LIMIT) {
-      return c.json({ error: "Too many requests. Try again in a minute." }, 429);
-    }
-    const hourCount = await db
-      .prepare(
-        `SELECT COUNT(*) AS n FROM auth_codes
-          WHERE email = ? AND created_at > datetime('now','-1 hour')`,
-      )
-      .bind(email)
-      .first<{ n: number }>();
-    if ((hourCount?.n ?? 0) >= PER_HOUR_LIMIT) {
-      return c.json({ error: "Too many requests. Try again later." }, 429);
-    }
+      .run();
 
-    // Create the user lazily if absent. signup_source='web' marks the
-    // row as needing onboarding to fill in username/github_username
-    // before it can be approved. Existing users (CLI signup or
-    // earlier web signup) are not modified here.
     const existing = await db
-      .prepare("SELECT id, status FROM users WHERE email = ? LIMIT 1")
+      .prepare("SELECT status FROM users WHERE email = ? LIMIT 1")
       .bind(email)
-      .first<{ id: number; status: string }>();
-    if (!existing) {
-      await db
-        .prepare(`INSERT INTO users (email, status, signup_source) VALUES (?, 'pending', 'web')`)
-        .bind(email)
-        .run();
-    } else if (existing.status === "revoked") {
-      // Don't tip off the requester (no enumeration leak), just don't
-      // mail a code and don't return 200-but-no-email. The masked
-      // response is still 200 to look identical to the success path.
+      .first<{ status: string }>();
+    if (existing?.status === "revoked") {
+      // Don't tip off the requester (no enumeration leak). The masked
+      // response is the same 200 shape as the success path.
       return c.json(
         isDevOrTest(c.env)
           ? { ok: true, masked_email: maskEmail(email), dev_skip: "revoked" }
@@ -156,32 +137,63 @@ authWebRoutes.post("/code/request", zValidator("json", emailSchema), async (c) =
       );
     }
 
-    // Rotate any active code for this email before inserting a new
-    // one — keeps "I clicked twice" UX from getting the wrong code,
-    // but invalidates the in-flight code so an attacker can't race.
-    await db
-      .prepare(
-        `UPDATE auth_codes SET used_at = datetime('now')
-          WHERE email = ? AND used_at IS NULL`,
-      )
-      .bind(email)
-      .run();
-
     const code = generateAuthCode();
     const codeHash = await hashAuthCode(code, c.env);
     const expiresAt = new Date(Date.now() + CODE_TTL_MINUTES * 60 * 1000).toISOString();
+
+    // Atomic rate-limited INSERT. SELECT-then-INSERT had a race window
+    // where two concurrent requests both passed the gate before either
+    // wrote a row. `INSERT … SELECT … WHERE (count subquery) < limit`
+    // is a single D1 statement; under SQLite's serialised write
+    // semantics only one of two concurrent requests can satisfy the
+    // WHERE, the other's `changes()` returns 0.
+    const insertResult = await db
+      .prepare(
+        `INSERT INTO auth_codes (email, code_hash, expires_at)
+         SELECT ?, ?, ?
+         WHERE (SELECT COUNT(*) FROM auth_codes
+                 WHERE email = ?
+                   AND created_at > datetime('now','-1 minute')) < ?
+           AND (SELECT COUNT(*) FROM auth_codes
+                 WHERE email = ?
+                   AND created_at > datetime('now','-1 hour')) < ?`,
+      )
+      .bind(email, codeHash, expiresAt, email, PER_MINUTE_LIMIT, email, PER_HOUR_LIMIT)
+      .run();
+    if ((insertResult.meta?.changes ?? 0) === 0) {
+      return c.json({ error: "Too many requests. Try again later." }, 429);
+    }
+    const newCodeId = insertResult.meta?.last_row_id ?? 0;
+
+    // Invalidate any earlier active codes for this email so a previous
+    // in-flight code can't still verify. Excludes the just-inserted
+    // row by id so we never invalidate our own code.
     await db
-      .prepare("INSERT INTO auth_codes (email, code_hash, expires_at) VALUES (?, ?, ?)")
-      .bind(email, codeHash, expiresAt)
+      .prepare(
+        `UPDATE auth_codes SET used_at = datetime('now')
+          WHERE email = ? AND used_at IS NULL AND id != ?`,
+      )
+      .bind(email, newCodeId)
       .run();
 
-    // Best-effort email send. Mirrors auth.ts:269 — a failed send
-    // does not propagate; the user can request another code.
+    // Email send. A failure here means the user has no way to receive
+    // the code — returning 200 would silently strand them. Roll the
+    // auth_codes row back so the per-minute cap doesn't punish the
+    // retry, and surface 503 so the frontend can retry / show a
+    // useful error rather than wait for a code that never arrives.
     try {
       const { fromEmail, replyTo, isDev } = resolveEmailConfig(c.env);
       await sendPasswordlessCodeEmail(email, code, c.env.RESEND_API_KEY, fromEmail, replyTo, isDev);
     } catch (emailError) {
       console.error("[auth-web] failed to send passwordless code email", emailError);
+      await db
+        .prepare("DELETE FROM auth_codes WHERE id = ?")
+        .bind(newCodeId)
+        .run()
+        .catch((cleanupErr) =>
+          console.error("[auth-web] failed to roll back auth_codes row", cleanupErr),
+        );
+      return c.json({ error: "Could not deliver sign-in code; try again shortly." }, 503);
     }
 
     const body: Record<string, unknown> = {
@@ -250,25 +262,49 @@ authWebRoutes.post("/code/verify", zValidator("json", verifySchema), async (c) =
       return c.json({ error: "Invalid or expired code" }, 401);
     }
 
-    // Mark code consumed.
-    await db
-      .prepare(`UPDATE auth_codes SET used_at = datetime('now') WHERE id = ?`)
+    // Consume the code via a conditional UPDATE that succeeds only
+    // while `used_at IS NULL`. Two parallel verifies that both pass
+    // the hash compare would otherwise both issue sessions; the
+    // conditional update lets exactly one win and the other gets 401.
+    const consumeResult = await db
+      .prepare("UPDATE auth_codes SET used_at = datetime('now') WHERE id = ? AND used_at IS NULL")
       .bind(row.id)
       .run();
+    if ((consumeResult.meta?.changes ?? 0) === 0) {
+      // Lost the race to a concurrent verify, or another path
+      // invalidated the code between SELECT and here. Refuse without
+      // leaking the cause.
+      return c.json({ error: "Invalid or expired code" }, 401);
+    }
 
-    const user = await db
+    const userRow = await db
       .prepare("SELECT id, email, role, status FROM users WHERE email = ? LIMIT 1")
       .bind(email)
       .first<{ id: number; email: string; role: string | null; status: string }>();
-    if (!user) {
+    if (!userRow) {
       // Should be impossible — /code/request creates the row. Treat
       // as a server-side anomaly.
       console.error(`[auth-web] /code/verify: code matched for ${email} but no users row found`);
       return c.json({ error: "Account not found" }, 500);
     }
-    if (user.status === "revoked") {
+    if (userRow.status === "revoked") {
       return c.json({ error: "Account revoked" }, 403);
     }
+    const user = {
+      id: userRow.id,
+      email: userRow.email,
+      role: parseRole(userRow.role, userRow.email),
+      status: userRow.status,
+    };
+
+    // Mark email as verified — the user just proved they control the
+    // inbox by repeating a code that was emailed to them. This is the
+    // web-flow analogue of the CLI's email verification step. NOOP for
+    // users already at email_verified=1.
+    await db
+      .prepare("UPDATE users SET email_verified = 1 WHERE email = ? AND email_verified = 0")
+      .bind(email)
+      .run();
 
     const userAgent = c.req.header("User-Agent") ?? null;
     const ip =
@@ -310,7 +346,15 @@ authWebRoutes.post("/logout", webSessionMiddleware, async (c) => {
   }
 
   const cookieIdRaw = c.var.webSessionCookieId ?? null;
-  await revokeSession(c.env, cookieIdRaw);
+  // Always clear the cookie client-side, even if the server-side
+  // revoke fails (D1 transient, etc.). The user asked to sign out;
+  // we honour that locally and log the server-side failure so an
+  // operator can clean up the lingering web_sessions row later.
+  try {
+    await revokeSession(c.env, cookieIdRaw);
+  } catch (err) {
+    console.error("[auth-web] /logout: revokeSession failed; clearing cookie anyway", err);
+  }
 
   c.header("Set-Cookie", buildClearedSessionCookie(c.env.WEB_SESSION_COOKIE_DOMAIN || undefined));
   return c.json({ ok: true });

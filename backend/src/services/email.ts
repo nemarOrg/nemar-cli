@@ -739,5 +739,8 @@ export async function sendPasswordlessCodeEmail(
 </html>
   `;
 
-  await sendEmail(to, `NEMAR sign-in code: ${code}`, html, resendApiKey, fromEmail, replyTo, isDev);
+  // Generic subject — keeping the code out of the subject line means
+  // it doesn't get echoed into provider-side / client-side mail logs
+  // that often retain subjects long after the body is purged.
+  await sendEmail(to, "Your NEMAR sign-in code", html, resendApiKey, fromEmail, replyTo, isDev);
 }

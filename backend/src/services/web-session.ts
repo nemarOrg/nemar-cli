@@ -16,7 +16,7 @@
  * brute-forced offline.
  */
 
-import type { Bindings } from "../types/bindings";
+import { type Bindings, type UserRole, parseRole } from "../types/bindings";
 
 export const COOKIE_NAME = "nemar_session";
 
@@ -31,9 +31,14 @@ const REMEMBER_TTL_MS = 30 * 24 * 60 * 60 * 1000;
  *  every dashboard request — most calls just bump last_used_at. */
 const SLIDING_REFRESH_THRESHOLD_MS = 7 * 24 * 60 * 60 * 1000;
 
-/** Origin allow-list for cookie-issuing/mutating routes. Mirrors the
- *  CORS callback in `index.ts`. Localhost is allowed without a port
- *  check because dev tools commonly bind to ephemeral ports. */
+/** Origin allow-list for cookie-issuing/mutating routes.
+ *
+ *  Narrower than the CORS callback in `index.ts` on purpose: the
+ *  CORS layer's `*.osc.earth` allowance was for the legacy api.osc.earth
+ *  buffer; the web dashboard only lives on nemar.org / app.nemar.org,
+ *  so accepting cookies via osc.earth domains is just attack surface
+ *  with no real consumer. Localhost is allowed without a port check
+ *  because dev tools commonly bind to ephemeral ports. */
 export function isAllowedOrigin(origin: string | null | undefined): boolean {
   if (!origin) return false;
   let url: URL;
@@ -45,7 +50,6 @@ export function isAllowedOrigin(origin: string | null | undefined): boolean {
   const h = url.hostname.toLowerCase();
   if (h === "localhost" || h === "127.0.0.1") return true;
   if (h === "nemar.org" || h.endsWith(".nemar.org")) return true;
-  if (h === "osc.earth" || h.endsWith(".osc.earth")) return true;
   return false;
 }
 
@@ -115,7 +119,10 @@ export function buildClearedSessionCookie(domain: string | undefined): string {
 export interface WebSessionRow {
   id: number;
   user_id: number;
-  remember: number; // 0 or 1
+  /** Boolean here, even though D1 stores 0/1 — the conversion happens
+   *  at the read boundary in `findSessionByCookieId` so consumers
+   *  never have to remember the SQLite convention. */
+  remember: boolean;
   expires_at: string; // ISO-ish
   last_used_at: string;
 }
@@ -123,7 +130,11 @@ export interface WebSessionRow {
 export interface WebSessionUser {
   id: number;
   email: string;
-  role: string | null;
+  /** Validated via `parseRole` at the DB boundary so downstream
+   *  comparisons against the `UserRole` union are type-safe. `null`
+   *  means the role column held an unrecognised value; treat as no
+   *  role rather than guess. */
+  role: UserRole | null;
   status: string;
 }
 
@@ -136,6 +147,10 @@ export async function findSessionByCookieId(
 ): Promise<{ session: WebSessionRow; user: WebSessionUser } | null> {
   if (!cookieIdRaw) return null;
   const cookieHash = await hashCookieId(cookieIdRaw);
+  // `u.status != 'revoked'` retires sessions for users an admin
+  // revoked after the cookie was issued. Without it, a stale cookie
+  // resolves to a valid login until the cookie expires or /auth/logout
+  // lands.
   const row = await env.DB.prepare(
     `SELECT ws.id, ws.user_id, ws.remember, ws.expires_at, ws.last_used_at,
             u.email, u.role, u.status
@@ -144,6 +159,7 @@ export async function findSessionByCookieId(
       WHERE ws.cookie_id_hash = ?
         AND ws.revoked_at IS NULL
         AND ws.expires_at > datetime('now')
+        AND u.status != 'revoked'
       LIMIT 1`,
   )
     .bind(cookieHash)
@@ -171,14 +187,14 @@ export async function findSessionByCookieId(
     session: {
       id: row.id,
       user_id: row.user_id,
-      remember: row.remember,
+      remember: row.remember === 1,
       expires_at: row.expires_at,
       last_used_at: row.last_used_at,
     },
     user: {
       id: row.user_id,
       email: row.email,
-      role: row.role,
+      role: parseRole(row.role, row.email),
       status: row.status,
     },
   };
