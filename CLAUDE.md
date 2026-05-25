@@ -50,6 +50,14 @@ The backend code (`ORG_NAME = "nemarDatasets"` in `backend/src/services/github.t
 - **Cloudflare account:** SCCN only (personal/`neuromechanist` retired as of 2026-05-18). Use `npx cfman wrangler --account sccn` for all operations.
 - **Wrangler config:** `backend/wrangler-sccn.toml` (the only active config; the former personal-account `backend/wrangler.toml` was removed)
 
+### Public Browser Sites
+Two user-facing dataset browsers exist during the cutover; **prefer ww2 for new references**.
+
+- **`https://ww2.nemar.org`** — **current beta browser** (Astro SSR, lives in `nemarOrg/website`). Dataset pages at `ww2.nemar.org/dataset/<id>`. Reads `api.nemar.org` and `data.nemar.org` directly; does not depend on the legacy datapipeline.
+- **`https://nemar.org/dataexplorer/...`** — **legacy PHP site**. Backed by the `dataexplorer_*` tables on `nemar.org/api/dataexplorer/datapipeline`, which `nemar admin sync run` populates. Still public, slated for replacement by ww2.
+- **Implication for on\* datasets:** `nemar admin sync` intentionally skips on\*-prefix datasets (alternate_id mapping pending, issue #339), so they render on ww2.nemar.org but the legacy `nemar.org/dataexplorer` detail page is empty until that ships. The archive zip download link in the legacy UI is driven by `zip_file_size` on the datapipeline row, so even an existing S3 archive won't surface there for on\* datasets.
+- **Default in docs/comments:** when something says "the website," "the browser," or "the UI" without further qualification, mean ww2.nemar.org. Name `nemar.org` explicitly only when referring to the legacy dataexplorer, the datapipeline tables, or the `nemar.org` DOI landing target.
+
 ### S3 Bucket Structure
 ```
 s3://nemar/{datasetId}/
