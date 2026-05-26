@@ -1625,7 +1625,7 @@ export async function triggerManifestGeneration(
   callbackToken: string,
   callbackUrl: string,
   pat: string,
-  options?: { skipCanary?: boolean },
+  options?: { skipCanary?: boolean; skipCallback?: boolean },
 ): Promise<void> {
   const response = await fetch(`${GITHUB_API()}/repos/${CENTRAL_WORKFLOW_REPO}/dispatches`, {
     method: "POST",
@@ -1645,6 +1645,11 @@ export async function triggerManifestGeneration(
         callback_token: callbackToken,
         callback_url: callbackUrl,
         skip_canary: options?.skipCanary ?? false,
+        // skip_callback=true is for manual backfill — the Worker has no
+        // in-flight manifest_jobs row to validate against, so the workflow
+        // skips its POST to /webhooks/manifest-ready. The workflow still
+        // writes manifest.json + summary.json to S3 normally.
+        skip_callback: options?.skipCallback ?? false,
       },
     }),
   });

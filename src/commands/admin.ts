@@ -39,6 +39,7 @@ import {
   type ReindexOptions,
   type ReindexResponse,
   type StepResult,
+  type SummaryVersionCoverage,
   addCi,
   applyS3Lock,
   approvePublication,
@@ -51,6 +52,7 @@ import {
   deleteDataset,
   deleteNotice,
   denyPublication,
+  dispatchManifest,
   errorDetail,
   finalizeDataset,
   getCiStatus,
@@ -58,6 +60,7 @@ import {
   getDatasetFiles,
   getDoiInfo,
   getEmailPreferences,
+  getSummaryCoverage,
   getSyncStatus,
   listAdminNotices,
   listDatasets,
@@ -3581,3 +3584,191 @@ adminCommand
       }
     },
   );
+
+// ============================================================================
+// nemar admin summary check  (epic #618 / phase 2 #620)
+// ============================================================================
+
+/**
+ * The dispatch path runs sequentially with a small delay between calls so a
+ * bulk backfill doesn't burst GitHub's `repository_dispatch` rate limit
+ * (documented at 500 events/hour per repo — sustained that's ~7.2 s between
+ * calls). 1.5 s is well under that ceiling but lets a ~150-version backfill
+ * finish in ~4 min instead of ~18 min at the sustained rate. The generator
+ * itself runs in the runner pool, so server-side concurrency is bounded by
+ * GitHub Actions queueing — we don't need additional throttling for the
+ * workflow execution itself.
+ */
+const DISPATCH_THROTTLE_MS = 1500;
+
+function formatState(state: SummaryVersionCoverage["state"]): string {
+  switch (state.kind) {
+    case "ok":
+      return chalk.green(`ok    ${state.schema_version}`);
+    case "stale":
+      return chalk.yellow(`stale ${state.schema_version}`);
+    case "missing":
+      return chalk.red("missing");
+    case "error":
+      return chalk.red(`error ${state.status || "?"}: ${state.message}`);
+  }
+}
+
+function isStale(state: SummaryVersionCoverage["state"]): boolean {
+  return state.kind === "stale" || state.kind === "missing";
+}
+
+const summaryCommand = new Command("summary").description(
+  "summary.json coverage across published dataset versions",
+);
+
+summaryCommand
+  .command("check")
+  .description("Report which (dataset_id, version) pairs have stale or missing summary.json")
+  .option("--fix", "Dispatch generate-manifest for every stale/missing version")
+  .option("--id <id>", "Limit to a single dataset_id")
+  .option("--only-stale", "Print only rows that are not ok (suppresses ok rows)")
+  .option("--json", "Emit the full report as JSON instead of a table")
+  .option(YES_OPTION, YES_DESCRIPTION)
+  .option(NO_OPTION, NO_DESCRIPTION)
+  .action(
+    async (
+      options: {
+        fix?: boolean;
+        id?: string;
+        onlyStale?: boolean;
+        json?: boolean;
+      } & ConfirmOptions,
+    ) => {
+      if (!requireAuth()) return;
+
+      const spinner = ora("Building coverage report...").start();
+      let report: Awaited<ReturnType<typeof getSummaryCoverage>>;
+      try {
+        report = await getSummaryCoverage();
+      } catch (err) {
+        handleCommandError(err, spinner, "Failed to fetch coverage report");
+        return;
+      }
+      spinner.succeed(
+        `Coverage: target=schema ${report.target_schema}, versions=${report.totals.versions}`,
+      );
+
+      let rows = report.versions;
+      if (options.id) {
+        rows = rows.filter((r) => r.dataset_id === options.id);
+        if (rows.length === 0) {
+          console.log(chalk.yellow(`No rows for dataset_id=${options.id}`));
+          return;
+        }
+      }
+
+      if (options.json) {
+        // Re-emit with the same totals so the JSON consumer (cron workflow)
+        // doesn't have to re-aggregate.
+        console.log(
+          JSON.stringify(
+            options.id ? { ...report, versions: rows, totals: recomputeTotals(rows) } : report,
+            null,
+            2,
+          ),
+        );
+        return;
+      }
+
+      const printable = options.onlyStale ? rows.filter((r) => r.state.kind !== "ok") : rows;
+      if (printable.length === 0) {
+        console.log(chalk.green("All versions at target schema — no drift."));
+      } else {
+        const idWidth = Math.max(...printable.map((r) => r.dataset_id.length), 10);
+        const verWidth = Math.max(...printable.map((r) => r.version.length), 7);
+        for (const r of printable) {
+          console.log(
+            `  ${r.dataset_id.padEnd(idWidth)}  ${r.version.padEnd(verWidth)}  ${formatState(r.state)}`,
+          );
+        }
+      }
+
+      // Print the totals after the per-row dump so they're the last thing on
+      // screen — the operator's eye lands there for the go/no-go decision.
+      const totals = options.id ? recomputeTotals(rows) : report.totals;
+      console.log();
+      console.log(
+        `  Total: ${totals.versions}  ${chalk.green(`ok=${totals.ok}`)}  ` +
+          `${chalk.yellow(`stale=${totals.stale}`)}  ${chalk.red(`missing=${totals.missing}`)}  ` +
+          `${chalk.red(`error=${totals.error}`)}`,
+      );
+
+      if (!options.fix) {
+        if (totals.stale + totals.missing > 0) {
+          console.log(
+            chalk.dim(
+              `\nRun with --fix to dispatch generate-manifest for the ${totals.stale + totals.missing} drifted version(s).`,
+            ),
+          );
+        }
+        return;
+      }
+
+      const toDispatch = rows.filter((r) => isStale(r.state));
+      if (toDispatch.length === 0) {
+        console.log(chalk.green("\nNothing to dispatch."));
+        return;
+      }
+
+      const confirmResult = await confirm(
+        `Dispatch generate-manifest for ${toDispatch.length} version(s)? Each dispatch queues a runner job on nemarDatasets/.github.`,
+        options,
+      );
+      if (confirmResult !== "confirmed") {
+        console.log(chalk.dim(confirmResult === "declined" ? "Skipped" : "Cancelled"));
+        return;
+      }
+
+      let dispatched = 0;
+      let failed = 0;
+      console.log();
+      for (const [idx, r] of toDispatch.entries()) {
+        const ds = `${r.dataset_id}@${r.version}`;
+        const dSpinner = ora(`[${idx + 1}/${toDispatch.length}] dispatching ${ds}...`).start();
+        try {
+          await dispatchManifest(r.dataset_id, r.version);
+          dSpinner.succeed(`[${idx + 1}/${toDispatch.length}] dispatched ${ds}`);
+          dispatched++;
+        } catch (err) {
+          dSpinner.fail(`[${idx + 1}/${toDispatch.length}] ${ds}: ${errorDetail(err)}`);
+          failed++;
+        }
+        // Throttle so a bulk backfill doesn't burst GitHub's dispatch rate
+        // limit. Skipped on the last iteration.
+        if (idx < toDispatch.length - 1) {
+          await new Promise((resolve) => setTimeout(resolve, DISPATCH_THROTTLE_MS));
+        }
+      }
+
+      console.log();
+      console.log(
+        failed === 0
+          ? chalk.green(`All ${dispatched} dispatches succeeded.`)
+          : chalk.yellow(`${dispatched} succeeded, ${failed} failed.`),
+      );
+      console.log(
+        chalk.dim(
+          "Workflow runs will appear on https://github.com/nemarDatasets/.github/actions. Re-run `nemar admin summary check` once they complete to verify drift cleared.",
+        ),
+      );
+      if (failed > 0) process.exitCode = 1;
+    },
+  );
+
+function recomputeTotals(rows: SummaryVersionCoverage[]) {
+  return {
+    versions: rows.length,
+    ok: rows.filter((r) => r.state.kind === "ok").length,
+    stale: rows.filter((r) => r.state.kind === "stale").length,
+    missing: rows.filter((r) => r.state.kind === "missing").length,
+    error: rows.filter((r) => r.state.kind === "error").length,
+  };
+}
+
+adminCommand.addCommand(summaryCommand);
