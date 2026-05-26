@@ -5797,21 +5797,36 @@ adminRoutes.post("/manifest/dispatch", zValidator("json", dispatchManifestSchema
     return c.json({ error: `No published version row for ${dataset_id}@${version}` }, 404);
   }
 
+  // Token fetch is intentionally OUTSIDE the try/catch below so a programming
+  // error here (e.g. renamed env var, App-auth failure) surfaces as 500 with
+  // its real message instead of being collapsed into a 502 "Dispatch failed"
+  // that points the operator at GitHub instead of at our config.
+  const pat = await getDatasetsToken(c.env);
+
+  // Hard invariant pinning the security note: callback_token / callback_url
+  // are safe to leave empty ONLY when skip_callback is true (the workflow
+  // won't validate the token, so a real secret would just leak into runner
+  // logs). If a future refactor flips skipCallback to false here the
+  // assertion fires loudly instead of silently dispatching with empty
+  // credentials. Mirrors the comment on `triggerManifestGeneration`'s
+  // `skipCallback` option in services/github.ts.
+  const skipCallback = true;
+  const callbackToken = "";
+  const callbackUrl = "";
+  if (!skipCallback && (callbackToken === "" || callbackUrl === "")) {
+    throw new Error("internal: empty callback_token/callback_url requires skipCallback=true");
+  }
+
   try {
-    const pat = await getDatasetsToken(c.env);
     await triggerManifestGeneration(
       dataset_id,
       version,
       row.doi,
       row.concept_doi,
-      // callback_token + callback_url are unused when skip_callback=true,
-      // but the workflow still echoes them into its summary log. Pass
-      // empty strings so the dispatch payload doesn't leak our real
-      // HMAC secret material for a flow that won't validate it.
-      "",
-      "",
+      callbackToken,
+      callbackUrl,
       pat,
-      { skipCanary: skip_canary ?? false, skipCallback: true },
+      { skipCanary: skip_canary ?? false, skipCallback },
     );
     return c.json({ dispatched: true, dataset_id, version });
   } catch (err) {

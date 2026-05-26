@@ -3591,9 +3591,13 @@ adminCommand
 
 /**
  * The dispatch path runs sequentially with a small delay between calls so a
- * bulk backfill doesn't burst GitHub's repository_dispatch rate limit. The
- * generator itself runs in the runner pool so concurrency on the server side
- * is bounded by GitHub-Actions queueing, not by us.
+ * bulk backfill doesn't burst GitHub's `repository_dispatch` rate limit
+ * (documented at 500 events/hour per repo — sustained that's ~7.2 s between
+ * calls). 1.5 s is well under that ceiling but lets a ~150-version backfill
+ * finish in ~4 min instead of ~18 min at the sustained rate. The generator
+ * itself runs in the runner pool, so server-side concurrency is bounded by
+ * GitHub Actions queueing — we don't need additional throttling for the
+ * workflow execution itself.
  */
 const DISPATCH_THROTTLE_MS = 1500;
 

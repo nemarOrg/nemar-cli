@@ -47,15 +47,21 @@ export interface CoverageReport {
   versions: VersionCoverage[];
 }
 
+/**
+ * The schema version the manifest generator currently emits (per
+ * nemarDatasets/.github#15, epic #618 phase 1). Bump this when a new
+ * schema lands in production; consumers go red only against the new
+ * target, not against the previous one.
+ */
 const TARGET_SCHEMA = "1.1";
 const DATA_BASE = "https://data.nemar.org";
 const FETCH_TIMEOUT_MS = 8_000;
 const MAX_CONCURRENT = 8;
 
 /**
- * Sentinel value the manifest generator currently emits. We compare with
- * semver-aware logic so the report doesn't go red the moment Phase 1 of
- * a future schema bump (1.2, 2.0) lands in production.
+ * Semver-aware schema comparison so the report doesn't go red the moment
+ * a future schema bump (1.2, 2.0) lands in production but before we've
+ * updated `TARGET_SCHEMA` here. Anything ≥ target is treated as ok.
  */
 function compareSchemas(have: string, want: string): "ok" | "stale" {
   const [hMajor = 0, hMinor = 0] = have.split(".").map((n) => Number.parseInt(n, 10) || 0);
@@ -66,6 +72,12 @@ function compareSchemas(have: string, want: string): "ok" | "stale" {
 }
 
 export async function listAllPublishedVersions(env: Bindings): Promise<VersionRow[]> {
+  // Filter intentionally only excludes sandbox (`xx*`) and the disposable
+  // E2E test id (`nm099999`). Both `nm*` and `on*` prefixes are included —
+  // on* are OpenNeuro-mirrored datasets that ARE served via data.nemar.org
+  // and SHOULD have summary.json (see memory note feedback_catalog_includes_on_prefix).
+  // Do NOT tighten this to `nm` only, even if a sibling sync (e.g.
+  // `nemar admin sync run`, which skips on*) suggests otherwise.
   const result = await env.DB.prepare(
     `SELECT v.dataset_id, v.version, v.doi, d.concept_doi
        FROM dataset_versions v
@@ -97,7 +109,14 @@ export async function probeSummary(
 
   const ctrl = new AbortController();
   const timeoutId = setTimeout(() => ctrl.abort(), FETCH_TIMEOUT_MS);
-  signal?.addEventListener("abort", () => ctrl.abort(), { once: true });
+  // Honor a caller-supplied signal that is *already aborted* at call time,
+  // not just one that aborts later — otherwise a pre-aborted outer signal
+  // would let the fetch run for the full timeout window.
+  if (signal?.aborted) {
+    ctrl.abort();
+  } else {
+    signal?.addEventListener("abort", () => ctrl.abort(), { once: true });
+  }
 
   try {
     const res = await fetch(url, { signal: ctrl.signal });
@@ -123,9 +142,12 @@ export async function probeSummary(
 
 /**
  * Map version rows to their schema state, with bounded parallelism. The
- * MAX_CONCURRENT cap protects data.nemar.org's rate limiter (123 dataset
- * fetches in tight sequence would otherwise hit 429 on the catalog
- * endpoint we share with public traffic).
+ * MAX_CONCURRENT cap protects data.nemar.org's rate limiter — fanning all
+ * N published *versions* (currently ~150 across nm + on) in tight sequence
+ * would otherwise hit 429 on the same endpoint public traffic uses. The
+ * `out[i] = ...` (index assignment, not push) is load-bearing: the CLI
+ * table and the cron's markdown report assume the output preserves the
+ * input row order.
  */
 async function probeAll(rows: VersionRow[], signal?: AbortSignal): Promise<VersionCoverage[]> {
   const out: VersionCoverage[] = new Array(rows.length);
