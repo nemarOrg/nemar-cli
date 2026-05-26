@@ -40,6 +40,7 @@ import { parseNemarMetadata } from "../services/datacite";
 import { isValidDatasetId } from "../services/datasetId";
 import { ORG_NAME } from "../services/github";
 import type { ManifestFile, VersionManifest } from "../services/manifest";
+import { buildPageBundle } from "../services/page-bundle";
 import {
   type PresignedUrlOptions,
   generatePresignedGetUrl,
@@ -659,6 +660,64 @@ async function metadataJsonHandler(env: Bindings, datasetId: string): Promise<Re
 dataRoutes.get("/:datasetId/metadata.json", (c) => {
   const { datasetId } = c.req.param();
   return metadataJsonHandler(c.env, datasetId);
+});
+
+/**
+ * GET /<id>/page-bundle.json?v=<version>
+ *
+ * One-RTT bundle of everything the dataset detail page needs at SSR time:
+ * landing (versions, latest), enriched metadata (neuroschema), summary
+ * (path-only, with embedded README at schema 1.1), and the catalog row.
+ *
+ * Designed for `ww2.nemar.org` to collapse its current 4-parallel SSR +
+ * 2-deferred-client fetch waterfall to one. The website still renders the
+ * BIDS tree progressively from `summary.paths` (nemarOrg/website#64).
+ *
+ * Cache policy:
+ * - `complete=true` -> long s-maxage (the same dataset+version returns the
+ *   same payload until a new publish updates either metadata or summary).
+ * - `complete=false` (any upstream failed) -> `no-store` so a transient
+ *   blip isn't pinned at the edge with stale-while-revalidate.
+ *
+ * MUST be registered before `/:datasetId/:version` so Hono doesn't treat
+ * `page-bundle.json` as a version param.
+ *
+ * Epic #618 / phase 3 (#621).
+ */
+async function pageBundleHandler(
+  env: Bindings,
+  datasetId: string,
+  versionParam: string | null,
+): Promise<Response> {
+  const gate = await loadPublishedDataset(env, datasetId);
+  if (!gate) return notFound("Dataset not found");
+
+  let bundle: Awaited<ReturnType<typeof buildPageBundle>>;
+  try {
+    bundle = await buildPageBundle(env, datasetId, versionParam);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error(`[data] page-bundle assembly crashed dataset=${datasetId}:`, msg);
+    return new Response(JSON.stringify({ error: "Failed to build page bundle" }), {
+      status: 500,
+      headers: { "Content-Type": "application/json", "Cache-Control": "no-store" },
+    });
+  }
+
+  return new Response(JSON.stringify(bundle), {
+    headers: {
+      "Content-Type": "application/json",
+      "Cache-Control": bundle.complete
+        ? "public, max-age=60, s-maxage=300, stale-while-revalidate=86400"
+        : "no-store",
+    },
+  });
+}
+
+dataRoutes.get("/:datasetId/page-bundle.json", (c) => {
+  const { datasetId } = c.req.param();
+  const version = new URL(c.req.url).searchParams.get("v");
+  return pageBundleHandler(c.env, datasetId, version);
 });
 
 // ===========================================================================
