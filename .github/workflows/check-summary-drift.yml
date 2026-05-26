@@ -1,7 +1,10 @@
 name: Check summary.json drift
 
 # Weekly verification that every published dataset version has summary.json
-# at the current target schema (1.1). Opens an issue when drift is detected
+# at the current target schema (the runtime value is read from the
+# /admin/summary/coverage response — don't hardcode the version here, the
+# constant lives in backend/src/services/manifest-coverage.ts TARGET_SCHEMA).
+# Opens an issue when drift is detected
 # so a human can decide whether to backfill via
 # `nemar admin summary check --fix`.
 #
@@ -72,6 +75,14 @@ jobs:
                   report = json.load(f)
               totals = report["totals"]
               drift = totals["stale"] + totals["missing"] + totals["error"]
+              # majority_errored: when more than half the catalog's versions
+              # report `kind=error`, the failure mode is almost certainly an
+              # S3-route or IAM problem, NOT individual stale summaries.
+              # `--fix` would dispatch workflows that all succeed at writing
+              # to S3 without clearing the alert (operators chase the wrong
+              # thing for a week). Surface this distinctly so a separate
+              # P1 issue gets opened instead of edits-piling-up on the P2.
+              majority_errored = totals["error"] >= max(1, totals["versions"] // 2)
               with open(os.environ["GITHUB_OUTPUT"], "a") as out:
                   out.write(f"target_schema={report['target_schema']}\n")
                   out.write(f"versions={totals['versions']}\n")
@@ -80,6 +91,7 @@ jobs:
                   out.write(f"missing={totals['missing']}\n")
                   out.write(f"error={totals['error']}\n")
                   out.write(f"drift={drift}\n")
+                  out.write(f"majority_errored={'true' if majority_errored else 'false'}\n")
           except Exception as e:
               traceback.print_exc()
               with open(os.environ["GITHUB_OUTPUT"], "a") as out:
@@ -161,7 +173,11 @@ jobs:
           gh label create P2 --force >/dev/null 2>&1 || true
 
       - name: Open / update drift issue
-        if: fromJSON(steps.fetch.outputs.drift) > 0
+        # Skip when majority_errored is true — that case opens its own P1
+        # issue below ("probe broken") with a different remediation path.
+        # Opening BOTH would just spam the operator with two issues for
+        # the same root cause.
+        if: fromJSON(steps.fetch.outputs.drift) > 0 && steps.fetch.outputs.majority_errored != 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           DRIFT: ${{ steps.fetch.outputs.drift }}
@@ -181,6 +197,30 @@ jobs:
           else
             gh issue create --title "$TITLE" --body "$ISSUE_BODY" --label "drift,P2"
           fi
+
+      - name: Open / update probe-broken issue
+        # Fires when more than half the catalog's versions classify as
+        # `error` — almost certainly an S3 route or IAM problem affecting
+        # the read path, NOT individual stale summaries. `--fix` would
+        # dispatch workflows that write to S3 successfully but never
+        # clear the alert (the route still can't read what was written).
+        # Separate P1 issue with the right remediation guidance.
+        if: fromJSON(steps.fetch.outputs.drift) > 0 && steps.fetch.outputs.majority_errored == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ERROR_COUNT: ${{ steps.fetch.outputs.error }}
+          VERSIONS: ${{ steps.fetch.outputs.versions }}
+          ISSUE_BODY: ${{ steps.body.outputs.body }}
+        run: |
+          TITLE="summary.json probe failing for majority of versions (${ERROR_COUNT}/${VERSIONS})"
+          BODY=$'## Probe is failing for most versions\n\n'"$ISSUE_BODY"$'\n\n---\n\n**This is likely a `/<id>/<v>/summary.json` route or S3 IAM problem, NOT a backfill problem.** `nemar admin summary check --fix` will dispatch workflows that succeed at writing to S3 but the read path will keep returning error. Triage:\n\n1. Hit `https://data.nemar.org/<a-known-published-id>/v1.0.0/summary.json` directly. If it 5xx, that confirms route/IAM.\n2. Check the Worker error log for `[data] summary fetch failed`.\n3. Verify `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` Workers secrets are set + valid (`npx cfman wrangler --account sccn secret list -c backend/wrangler-sccn.toml`).\n\nTriggering workflow run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}'
+          EXISTING=$(gh issue list --label "drift,P1" --state open --search "summary.json probe failing" --json number --jq '.[0].number' || echo "")
+          if [ -n "$EXISTING" ]; then
+            gh issue edit "$EXISTING" --title "$TITLE" --body "$BODY"
+          else
+            gh issue create --title "$TITLE" --body "$BODY" --label "drift,P1"
+          fi
+          exit 1  # Red badge — operator action required.
 
       - name: Open / update report-broken issue
         # Fires when the fetch step couldn't classify the result at all

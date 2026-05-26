@@ -5750,6 +5750,14 @@ adminRoutes.post(
 adminRoutes.get("/summary/coverage", async (c) => {
   try {
     const report = await buildCoverageReport(c.env);
+    // no-store on every response: the weekly drift cron and on-demand
+    // operator CLI both pull this through the same Cloudflare edge POP that
+    // would otherwise apply heuristic TTL to a 200. A cached coverage report
+    // can silently mask a real drift week (cron sees yesterday's "all green"
+    // when probes failed for half the catalog). Phase 3's page-bundle is
+    // meticulous about no-store on partial failure; the coverage endpoint
+    // — which feeds page-bundle's repair loop — must match that discipline.
+    c.header("Cache-Control", "no-store, must-revalidate");
     return c.json(report);
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);

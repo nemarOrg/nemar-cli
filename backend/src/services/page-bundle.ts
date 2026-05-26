@@ -3,20 +3,30 @@
  *
  * Returns one JSON payload combining landing + metadata + summary + catalog
  * row so the website can render the dataset detail page with a single HTTP
- * round-trip. Today the website fans out 4 parallel SSR fetches and 2 deferred
- * client fetches; this bundle collapses everything the page needs (except
- * the BIDS tree, which is rendered progressively from `summary.paths`) to
- * one call.
+ * round-trip. The website's current 4-parallel-SSR + 2-deferred-client
+ * waterfall stays in place until the consumer cutover ships (companion
+ * nemarOrg/website#63); this endpoint is additive in the meantime.
  *
- * Each upstream is fetched with `Promise.allSettled` so a single component
- * failure doesn't blank the whole bundle. The caller (data.ts route) inspects
- * the returned `complete` flag to decide on cache headers — `complete=false`
- * gets `no-store` so a transient failure isn't pinned at the edge.
+ * The BIDS tree is rendered progressively from `summary.paths` (companion
+ * nemarOrg/website#64) and isn't materialized here.
+ *
+ * `readme.content` (embedded markdown, schema 1.1) is present in the bundle's
+ * `summary` payload ONLY for versions whose summary.json has been regenerated
+ * since the schema bump. Existing pre-bump versions still ship schema 1.0
+ * with `readme: {path}` only — `nemar admin summary check --fix` does the
+ * one-shot backfill that populates `readme.content` everywhere.
+ *
+ * The three S3/D1 fanouts (metadata, summary, catalog) are wrapped in
+ * `Promise.allSettled` so a single component failure doesn't blank the
+ * whole bundle. Landing is fetched eagerly above the fanout because we
+ * need the version list to know what summary to fetch; a D1 failure there
+ * propagates and the outer route returns 500 + no-store. The `complete`
+ * flag drives the cache-header decision — `complete=false` gets `no-store`
+ * so a partial-failure response can't be pinned at the CF edge.
  *
  * Epic #618 / phase 3 (#621). Companion: nemarOrg/website#63/#64/#65.
  */
 import type { Bindings } from "../types/bindings";
-import { parseNemarMetadata } from "./datacite";
 import {
   type DatasetVersionRow,
   type LandingPayload,
@@ -24,6 +34,7 @@ import {
   buildDatasetMetadata,
   buildLandingPayload,
 } from "./data-router";
+import { parseNemarMetadata } from "./datacite";
 import { ORG_NAME } from "./github";
 import { type PresignedUrlOptions, loadSummary } from "./s3";
 
@@ -39,9 +50,7 @@ export interface CatalogRow {
   github_repo: string | null;
 }
 
-export type PageBundleComponent<T> =
-  | { ok: true; data: T }
-  | { ok: false; error: string };
+export type PageBundleComponent<T> = { ok: true; data: T } | { ok: false; error: string };
 
 export interface PageBundle {
   dataset_id: string;
@@ -70,10 +79,7 @@ export interface PageBundle {
  * gates the whole bundle on `loadPublishedDataset` so a null here would
  * indicate a row that disappeared mid-request (rare, infra-level).
  */
-async function loadCatalogRow(
-  env: Bindings,
-  datasetId: string,
-): Promise<CatalogRow | null> {
+async function loadCatalogRow(env: Bindings, datasetId: string): Promise<CatalogRow | null> {
   return env.DB.prepare(
     `SELECT d.dataset_id, d.name, d.description, d.concept_doi, d.github_repo,
             d.modalities, d.tasks,
@@ -236,10 +242,7 @@ export function pickVersion(
   return versionRows[0].version;
 }
 
-export function settled<T>(
-  result: PromiseSettledResult<T>,
-  label: string,
-): PageBundleComponent<T> {
+export function settled<T>(result: PromiseSettledResult<T>, label: string): PageBundleComponent<T> {
   if (result.status === "fulfilled") {
     return { ok: true, data: result.value };
   }
@@ -264,9 +267,12 @@ export function settled<T>(
  *     (S3 had no summary.json for a published version — backfill needed)
  *
  * Cache poisoning class: returning `true` for any partial-failure case would
- * let the caller cache an empty/broken bundle for the full SWR window. See
- * `[website_partial_cache_poisoning]` memory for the prior incident this
- * predicate's correctness prevents.
+ * let the caller cache an empty/broken bundle for the full SWR window. The
+ * prior class of incident on ww2.nemar.org's SSR partials (transient upstream
+ * failures returning 200 with the success Cache-Control, pinning empty
+ * "no description" / "manifest unavailable" HTML at the CF edge for up to
+ * 24h via stale-while-revalidate) is exactly what this predicate's
+ * correctness prevents at the bundle layer.
  */
 export function isBundleComplete(input: {
   landing: PageBundleComponent<unknown>;
@@ -315,18 +321,16 @@ export async function buildPageBundle(
   const summaryPromise: Promise<unknown> =
     versionForSummary === null
       ? Promise.resolve(null) // no published version yet
-      : loadSummary(s3OptionsFromEnv(env), datasetId, versionForSummary).then(
-          (raw) => {
-            if (raw === null) return null;
-            try {
-              return JSON.parse(raw);
-            } catch (err) {
-              throw new Error(
-                `summary.json is not valid JSON (dataset=${datasetId} version=${versionForSummary} s3_key=${datasetId}/version/v${versionForSummary.replace(/^v/, "")}-summary.json): ${err instanceof Error ? err.message : String(err)}`,
-              );
-            }
-          },
-        );
+      : loadSummary(s3OptionsFromEnv(env), datasetId, versionForSummary).then((raw) => {
+          if (raw === null) return null;
+          try {
+            return JSON.parse(raw);
+          } catch (err) {
+            throw new Error(
+              `summary.json is not valid JSON (dataset=${datasetId} version=${versionForSummary} s3_key=${datasetId}/version/v${versionForSummary.replace(/^v/, "")}-summary.json): ${err instanceof Error ? err.message : String(err)}`,
+            );
+          }
+        });
 
   const [metadataResult, summaryResult, catalogResult] = await Promise.allSettled([
     loadEnrichedMetadata(env, datasetId, versionRows),
@@ -348,8 +352,7 @@ export async function buildPageBundle(
   const metadata: PageBundleComponent<NeuroschemaDataset> = metadataComponent.ok
     ? { ok: true, data: metadataComponent.data.metadata }
     : metadataComponent;
-  const enrichmentDegraded =
-    metadataComponent.ok && metadataComponent.data.enrichment_degraded;
+  const enrichmentDegraded = metadataComponent.ok && metadataComponent.data.enrichment_degraded;
 
   const landing: PageBundleComponent<LandingPayload> = { ok: true, data: landingPayload };
 

@@ -121,8 +121,11 @@ describe("probeSummary schema classification", () => {
     }) as typeof fetch;
     try {
       await probeSummary("nm000999", "1.0.0");
-      expect(capturedUrl).toBe(
-        "https://data.nemar.org/nm000999/v1.0.0/summary.json",
+      // Probe URL carries a `?_cb=<ts>` to defeat the data.nemar.org CDN
+      // s-maxage=86400 + SWR=86400 (otherwise `--fix verify` would read
+      // stale schema for up to 48h). Assert the path + the cache-bust shape.
+      expect(capturedUrl).toMatch(
+        /^https:\/\/data\.nemar\.org\/nm000999\/v1\.0\.0\/summary\.json\?_cb=\d+$/,
       );
     } finally {
       globalThis.fetch = original;
@@ -138,9 +141,34 @@ describe("probeSummary schema classification", () => {
     }) as typeof fetch;
     try {
       await probeSummary("nm000999", "v1.0.0");
-      expect(capturedUrl).toBe(
-        "https://data.nemar.org/nm000999/v1.0.0/summary.json",
+      expect(capturedUrl).toMatch(
+        /^https:\/\/data\.nemar\.org\/nm000999\/v1\.0\.0\/summary\.json\?_cb=\d+$/,
       );
+    } finally {
+      globalThis.fetch = original;
+    }
+  });
+
+  test("each call emits a fresh cache-bust value", async () => {
+    // Per-request `_cb` value: two probes back-to-back must NOT collide on
+    // the same cached entry. If a future "optimization" memoizes `_cb` to a
+    // module constant or a hashed (id, version) tuple, the CDN cache for
+    // that exact URL would be hit again and the bug we're defending against
+    // resurfaces.
+    const seenUrls: string[] = [];
+    const original = globalThis.fetch;
+    globalThis.fetch = (async (input: RequestInfo | URL) => {
+      seenUrls.push(typeof input === "string" ? input : input.toString());
+      return new Response(JSON.stringify({ schema_version: "1.1" }), { status: 200 });
+    }) as typeof fetch;
+    try {
+      await probeSummary("nm000999", "1.0.0");
+      // Date.now() is millisecond-precision; ensure the two calls land in
+      // different milliseconds (Bun's setImmediate-equivalent is fast).
+      await new Promise((resolve) => setTimeout(resolve, 2));
+      await probeSummary("nm000999", "1.0.0");
+      expect(seenUrls).toHaveLength(2);
+      expect(seenUrls[0]).not.toBe(seenUrls[1]);
     } finally {
       globalThis.fetch = original;
     }

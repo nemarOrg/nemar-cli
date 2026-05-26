@@ -78,11 +78,20 @@ export async function listAllPublishedVersions(env: Bindings): Promise<VersionRo
   // and SHOULD have summary.json (see memory note feedback_catalog_includes_on_prefix).
   // Do NOT tighten this to `nm` only, even if a sibling sync (e.g.
   // `nemar admin sync run`, which skips on*) suggests otherwise.
+  //
+  // `visibility='public'` is load-bearing: the probe path below fetches
+  // `data.nemar.org/<id>/<v>/summary.json`, and that route gates on
+  // `loadPublishedDataset` (which 404s every non-public dataset). Without
+  // this filter, every PRIVATE-but-published dataset (e.g. nm000103-nm000107
+  // are intentionally private in prod) would classify as `missing` and
+  // trigger `--fix` to regenerate an S3 artifact that nobody can read.
+  // Mirror the public-only predicate that every public data route enforces.
   const result = await env.DB.prepare(
     `SELECT v.dataset_id, v.version, v.doi, d.concept_doi
        FROM dataset_versions v
        JOIN datasets d ON d.dataset_id = v.dataset_id
-       WHERE d.dataset_id NOT LIKE 'xx%'
+       WHERE d.visibility = 'public'
+         AND d.dataset_id NOT LIKE 'xx%'
          AND d.dataset_id != 'nm099999'
        ORDER BY v.dataset_id, v.version`,
   ).all<VersionRow>();
@@ -105,7 +114,16 @@ export async function probeSummary(
   // Versions in D1 are stored without the "v" prefix (e.g. "1.0.0").
   // data.nemar.org path uses "v1.0.0".
   const v = version.startsWith("v") ? version : `v${version}`;
-  const url = `${DATA_BASE}/${encodeURIComponent(datasetId)}/${encodeURIComponent(v)}/summary.json`;
+  // Cache-bust the data.nemar.org URL: summaryJsonHandler ships
+  // `s-maxage=86400, stale-while-revalidate=86400`, so without busting we'd
+  // see up to 48 h of stale schema_version after a successful `--fix`
+  // dispatch finishes. The CLI's "re-run check to verify drift cleared"
+  // guidance is a lie if the probe reads from a 24 h-cached CDN copy.
+  // Per-request unique param defeats the edge cache entirely; this endpoint
+  // is admin-only and runs at most weekly (cron) + on-demand (operator),
+  // so the cache-miss cost is acceptable.
+  const cb = Date.now();
+  const url = `${DATA_BASE}/${encodeURIComponent(datasetId)}/${encodeURIComponent(v)}/summary.json?_cb=${cb}`;
 
   const ctrl = new AbortController();
   const timeoutId = setTimeout(() => ctrl.abort(), FETCH_TIMEOUT_MS);
