@@ -30,8 +30,22 @@ survives any individual maintainer leaving.
 2. Fill in:
    - **GitHub App name**: `nemar-publish-bot`
    - **Homepage URL**: `https://github.com/nemarOrg/nemar-cli`
-   - **Webhook**: uncheck **Active**. Webhooks are delivered via the
-     existing repo-level secret, not the App.
+   - **Webhook**: check **Active**.
+     - **Webhook URL**: `https://api.nemar.org/webhooks/github`
+     - **Webhook secret**: a random value (e.g., `openssl rand -hex 32`).
+       Store this exact value as the Cloudflare Worker secret
+       `GITHUB_WEBHOOK_SECRET` (`wrangler secret put GITHUB_WEBHOOK_SECRET`).
+       The Worker uses it as the HMAC secret for verifying
+       `X-Hub-Signature-256` on push deliveries.
+     - Under **Subscribe to events** (further down the form), tick
+       **Push**. This is the only event the Worker acts on today;
+       `shouldDispatchEnrichment` / `shouldDispatchVersionDoi` in
+       `backend/src/routes/webhooks.ts` gate on it. The App receiver
+       was added in Phase 1 of centralization epic #601 — without
+       Active webhook + Push event subscription, central
+       `run-version-doi.yml` and `run-enrichment.yml` will never
+       receive their `repository_dispatch` from tag and main pushes,
+       and DOIs silently never mint.
    - **Repository permissions**:
      - Contents: **Read & write**
      - Actions: **Read & write** (Read for orchestrator CI checks;
@@ -192,6 +206,30 @@ via `actions/create-github-app-token@v1` so all CI writes carry the
    - `NEMAR_APP_ID` — the same numeric App ID stored in 1Password.
    - `NEMAR_APP_PRIVATE_KEY` — the PKCS#8 PEM, pasted in full
      (BEGIN/END lines included).
+   - `NEMAR_WEBHOOK_TOKEN` — bearer token sent as `X-Webhook-Token` by
+     `run-version-doi.yml` (calling `/webhooks/publish-version-doi`) and
+     `run-enrichment.yml` (calling `/webhooks/llm-enrich`). Set the
+     **same value** as the Cloudflare Worker secret `NEMAR_WEBHOOK_TOKEN`
+     (`wrangler secret put NEMAR_WEBHOOK_TOKEN`).
+
+   ### Webhook secrets — the two-secret model
+
+   The Worker uses two separate secrets, each with a distinct purpose.
+   They MAY hold the same value but no longer must (since the
+   secret-untangle landing on this PR); rotate independently going forward.
+
+   | Secret | Stored on | Purpose |
+   | --- | --- | --- |
+   | `GITHUB_WEBHOOK_SECRET` | Worker secret + App webhook config | HMAC for `/webhooks/github` (App push deliveries). Rotate by setting on Worker AND on the App's webhook secret field. |
+   | `NEMAR_WEBHOOK_TOKEN` | Worker secret + `nemarDatasets` org Actions secret | Bearer token for `/webhooks/publish-version-doi` and `/webhooks/llm-enrich`. Rotate by setting on the Worker AND on the org secret. |
+
+   Historical note: before the secret-untangle, both endpoints read
+   `GITHUB_WEBHOOK_SECRET`, so the org secret and Worker secret had to
+   match the App webhook secret. Rotating one without the others 401'd
+   every DOI mint until the value was re-synced. The endpoints now
+   prefer `NEMAR_WEBHOOK_TOKEN` and fall back to `GITHUB_WEBHOOK_SECRET`
+   only if the new var is unset — set the new Worker secret to drop
+   the coupling.
 
 3. **Refresh existing dataset repos** so they pick up the new workflow
    templates with the App-token step:
@@ -213,12 +251,20 @@ via `actions/create-github-app-token@v1` so all CI writes carry the
       workflow's check-run posts). The grant must be re-accepted on the
       `nemarOrg` and `nemarDatasets` installations after the App
       definition changes.
-- [ ] `NEMAR_APP_ID` and `NEMAR_APP_PRIVATE_KEY` exist as org secrets on
-      `nemarDatasets`.
+- [ ] `NEMAR_APP_ID`, `NEMAR_APP_PRIVATE_KEY`, and `NEMAR_WEBHOOK_TOKEN`
+      exist as org secrets on `nemarDatasets`.
 - [ ] At least one dataset repo's most recent `pr-merge`,
       `llm-enrichment`, or `version-doi` workflow run shows the
       "Mint App installation token" step succeeding, and subsequent
       writes are attributed to `nemar-publish-bot[bot]` in the run log.
+- [ ] App webhook is **Active**, URL is `https://api.nemar.org/webhooks/github`,
+      webhook secret matches Worker `GITHUB_WEBHOOK_SECRET`, and
+      **Push** is checked under Subscribe to events.
+- [ ] After pushing a version tag on any dataset repo, the central
+      `nemarDatasets/.github` shows a `run-version-doi` run with
+      `event=repository_dispatch` (not just manual `workflow_dispatch`).
+- [ ] `NEMAR_WEBHOOK_TOKEN` exists as a Worker secret AND as the
+      `nemarDatasets` org Actions secret with the same value.
 
 ## Cross-references
 

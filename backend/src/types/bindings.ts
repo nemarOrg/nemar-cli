@@ -46,7 +46,8 @@ export interface Bindings {
   EZID_PASSWORD: string;
   EZID_SANDBOX_USERNAME?: string; // EZID test account (for --sandbox)
   EZID_SANDBOX_PASSWORD?: string;
-  GITHUB_WEBHOOK_SECRET?: string; // Optional - for GitHub Actions webhook auth
+  GITHUB_WEBHOOK_SECRET?: string; // HMAC secret for /webhooks/github signature verification (GitHub App push deliveries)
+  NEMAR_WEBHOOK_TOKEN?: string; // Bearer token for /publish-version-doi and /llm-enrich (X-Webhook-Token header from dataset workflows)
   TEST_BYPASS_TOKEN?: string; // Optional - for CI/CD rate limit bypass
   ENCRYPTION_KEY?: string; // For encrypting stored credentials
   OPENROUTER_API_KEY?: string; // For LLM-based metadata enrichment
