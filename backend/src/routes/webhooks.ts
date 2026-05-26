@@ -234,14 +234,16 @@ const webhooks = new Hono<{ Bindings: Bindings }>();
  * Publish a version DOI for a dataset
  *
  * Called by GitHub Actions when a new release is created.
- * Requires X-Webhook-Token header matching GITHUB_WEBHOOK_SECRET.
+ * Requires X-Webhook-Token header matching NEMAR_WEBHOOK_TOKEN (falls back
+ * to GITHUB_WEBHOOK_SECRET during the secret-untangle rollout — both held
+ * the same value historically, see docs/guides/github-app-setup.md).
  *
  * Routes to EZID or Zenodo based on dataset's doi_provider setting.
  */
 webhooks.post("/publish-version-doi", async (c) => {
   // Validate webhook token
   const token = c.req.header("X-Webhook-Token");
-  const expectedToken = c.env.GITHUB_WEBHOOK_SECRET;
+  const expectedToken = c.env.NEMAR_WEBHOOK_TOKEN ?? c.env.GITHUB_WEBHOOK_SECRET;
 
   // If webhook secret not configured OR token doesn't match, reject as unauthorized
   // Treat missing secret as "no valid token exists" for better security
@@ -1350,7 +1352,9 @@ webhooks.post("/manifest-failed", async (c) => {
  */
 webhooks.post("/llm-enrich", async (c) => {
   const token = c.req.header("X-Webhook-Token");
-  const expectedToken = c.env.GITHUB_WEBHOOK_SECRET;
+  // Same secret-untangle as /publish-version-doi: prefer NEMAR_WEBHOOK_TOKEN,
+  // fall back to the historically-shared GITHUB_WEBHOOK_SECRET.
+  const expectedToken = c.env.NEMAR_WEBHOOK_TOKEN ?? c.env.GITHUB_WEBHOOK_SECRET;
 
   if (!expectedToken || !token || !timingSafeEqual(token, expectedToken)) {
     return c.json({ error: "Invalid webhook token" }, 401);
