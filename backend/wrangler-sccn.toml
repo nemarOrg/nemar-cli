@@ -1,5 +1,5 @@
 # NEMAR API - SCCN Cloudflare account, canonical production config.
-# Multi-account deploys use cfman; see CLAUDE.md.
+# Multi-account deploys use cfman; see AGENTS.md (CLAUDE.md imports it).
 
 name = "nemar-api"
 main = "src/index.ts"
@@ -95,7 +95,8 @@ MANIFEST_VIA_CENTRAL_WORKFLOW = "false"
 # - ENCRYPTION_KEY          (AES-GCM key -- MUST be identical to personal account; mismatch makes stored credentials undecryptable)
 # - RESEND_API_KEY
 # - TEST_BYPASS_TOKEN
-# - GITHUB_WEBHOOK_SECRET
+# - GITHUB_WEBHOOK_SECRET  (HMAC for GitHub App push webhooks; per #622)
+# - NEMAR_WEBHOOK_TOKEN    (bearer for dataset-workflow callbacks: /publish-version-doi, /llm-enrich; per #622. Without this, those routes fall back to GITHUB_WEBHOOK_SECRET — works in prod, breaks fresh dev/test installs.)
 # - EZID_USERNAME
 # - EZID_PASSWORD
 # - EZID_SANDBOX_USERNAME

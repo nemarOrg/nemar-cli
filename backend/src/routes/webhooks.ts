@@ -247,7 +247,18 @@ webhooks.post("/publish-version-doi", async (c) => {
 
   // If webhook secret not configured OR token doesn't match, reject as unauthorized
   // Treat missing secret as "no valid token exists" for better security
-  if (!expectedToken || !token || !timingSafeEqual(token, expectedToken)) {
+  if (!expectedToken) {
+    // Distinguish "operator misconfiguration" (no secret set or empty string)
+    // from "real token mismatch" so an on-call doesn't spend hours chasing
+    // an invalid-token alert when the actual fix is `wrangler secret put`.
+    // `??` only falls through on null/undefined; an empty string sticks and
+    // produces the same 401 as a real mismatch without this log.
+    console.error(
+      "[publish-version-doi] no webhook secret configured (NEMAR_WEBHOOK_TOKEN/GITHUB_WEBHOOK_SECRET both unset or empty)",
+    );
+    return c.json({ error: "Invalid webhook token" }, 401);
+  }
+  if (!token || !timingSafeEqual(token, expectedToken)) {
     return c.json({ error: "Invalid webhook token" }, 401);
   }
 
@@ -1356,7 +1367,15 @@ webhooks.post("/llm-enrich", async (c) => {
   // fall back to the historically-shared GITHUB_WEBHOOK_SECRET.
   const expectedToken = c.env.NEMAR_WEBHOOK_TOKEN ?? c.env.GITHUB_WEBHOOK_SECRET;
 
-  if (!expectedToken || !token || !timingSafeEqual(token, expectedToken)) {
+  if (!expectedToken) {
+    // Diagnostic log to distinguish "operator misconfiguration" from "real
+    // token mismatch" — same rationale as /publish-version-doi above.
+    console.error(
+      "[llm-enrich] no webhook secret configured (NEMAR_WEBHOOK_TOKEN/GITHUB_WEBHOOK_SECRET both unset or empty)",
+    );
+    return c.json({ error: "Invalid webhook token" }, 401);
+  }
+  if (!token || !timingSafeEqual(token, expectedToken)) {
     return c.json({ error: "Invalid webhook token" }, 401);
   }
 
