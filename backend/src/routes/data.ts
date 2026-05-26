@@ -679,8 +679,10 @@ dataRoutes.get("/:datasetId/metadata.json", (c) => {
  * - `complete=false` (any upstream failed) -> `no-store` so a transient
  *   blip isn't pinned at the edge with stale-while-revalidate.
  *
- * MUST be registered before `/:datasetId/:version` so Hono doesn't treat
- * `page-bundle.json` as a version param.
+ * MUST be registered before any `/:datasetId/:version/*` route (and before
+ * the bare `/:datasetId/:version/*` catch-all near the bottom of this file)
+ * so Hono doesn't treat `page-bundle.json` as a `:version` param. Same
+ * registration-order rule that `metadata.json` and `qa` follow above.
  *
  * Epic #618 / phase 3 (#621).
  */

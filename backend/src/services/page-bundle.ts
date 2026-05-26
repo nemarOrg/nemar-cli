@@ -50,6 +50,14 @@ export interface PageBundle {
   complete: boolean;
   landing: PageBundleComponent<LandingPayload>;
   metadata: PageBundleComponent<NeuroschemaDataset>;
+  /**
+   * True when enrichment_json existed but couldn't be parsed. Metadata is
+   * still present (deterministic columns + version list), but enriched
+   * fields like description, authors, related_identifiers may be incomplete.
+   * Independent of `metadata.ok`: metadata.ok=false means the entire load
+   * failed; enrichment_degraded=true means it loaded with reduced fidelity.
+   */
+  enrichment_degraded: boolean;
   summary: PageBundleComponent<unknown>;
   catalog_row: PageBundleComponent<CatalogRow | null>;
 }
@@ -89,36 +97,46 @@ function s3OptionsFromEnv(env: Bindings): PresignedUrlOptions {
 }
 
 /**
- * Mirror of the private `loadVersionRows` in `routes/data.ts`. Duplicated
- * rather than refactored-shared because data.ts uses it for landing while
- * this service consumes it pre-fanned. If they ever diverge the test for
- * complete-bundle ordering should catch it.
+ * Same SELECT as the private `loadVersionRows` in `routes/data.ts`, but with
+ * NO try/catch swallow — a D1 failure here MUST propagate so the outer
+ * `pageBundleHandler` returns 500 + `no-store`. The data.ts version returns
+ * `[]` on D1 failure because its caller (landing) renders an empty-versions
+ * page; here, an empty array silently flips the bundle to a `complete=true`
+ * "no versions exist" response that gets cached with the success policy.
+ * That would pin a D1-outage lie at the CF edge for `s-maxage=300,
+ * stale-while-revalidate=86400`. Hard-fail instead.
  */
 async function loadVersionRowsForBundle(
   env: Bindings,
   datasetId: string,
 ): Promise<DatasetVersionRow[]> {
-  try {
-    const result = await env.DB.prepare(
-      "SELECT version, doi, created_at FROM dataset_versions WHERE dataset_id = ? ORDER BY created_at DESC",
-    )
-      .bind(datasetId)
-      .all<DatasetVersionRow>();
-    return result.results ?? [];
-  } catch (err) {
-    console.error(
-      `[page-bundle] dataset_versions query failed dataset=${datasetId}:`,
-      err instanceof Error ? err.message : String(err),
-    );
-    return [];
-  }
+  const result = await env.DB.prepare(
+    "SELECT version, doi, created_at FROM dataset_versions WHERE dataset_id = ? ORDER BY created_at DESC",
+  )
+    .bind(datasetId)
+    .all<DatasetVersionRow>();
+  return result.results ?? [];
+}
+
+interface EnrichedMetadataResult {
+  metadata: NeuroschemaDataset;
+  /**
+   * True when the dataset's `enrichment_json` column was non-null but
+   * couldn't be parsed. The bundle still ships a (partially-populated)
+   * metadata payload using the row's deterministic columns, but the
+   * website should treat enriched fields (description, authors, related
+   * identifiers) as unreliable. Operators should grep server logs for
+   * `[page-bundle] corrupt enrichment_json` to find the affected
+   * dataset and re-run the enrichment workflow.
+   */
+  enrichment_degraded: boolean;
 }
 
 async function loadEnrichedMetadata(
   env: Bindings,
   datasetId: string,
   versionRows: DatasetVersionRow[],
-): Promise<NeuroschemaDataset> {
+): Promise<EnrichedMetadataResult> {
   const row = await env.DB.prepare(
     `SELECT dataset_id, name, description, github_repo, concept_doi,
             modalities, subject_count, age_min, age_max,
@@ -149,13 +167,20 @@ async function loadEnrichedMetadata(
   }
 
   let parsedEnrichment = null;
+  let enrichmentDegraded = false;
   if (row.enrichment_json) {
     try {
       parsedEnrichment = parseNemarMetadata(JSON.parse(row.enrichment_json));
     } catch (err) {
-      // Corrupt enrichment is logged but doesn't block the bundle — the
-      // page can still render with the catalog-row fallbacks the website
-      // already does.
+      // Corrupt enrichment_json is a real data-integrity bug (the LLM
+      // pipeline wrote invalid JSON or the schema parser rejected a known
+      // shape). The bundle still ships using the row's deterministic columns
+      // — failing the publish over a malformed enrichment payload would be
+      // worse UX — but we surface the degraded state to the website via
+      // `enrichment_degraded` so it can render a "metadata may be incomplete"
+      // indicator if it wants to. Also visible to ops via the structured
+      // log line; grep for `[page-bundle] corrupt enrichment_json`.
+      enrichmentDegraded = true;
       console.error(
         `[page-bundle] corrupt enrichment_json dataset=${datasetId}:`,
         err instanceof Error ? err.message : String(err),
@@ -168,7 +193,7 @@ async function loadEnrichedMetadata(
   // `metadata.bids_index` would be unused work. Cuts a multi-MB S3 read
   // off every page-bundle response. Consumers that need bids_index can
   // hit /<id>/metadata.json directly.
-  return buildDatasetMetadata({
+  const metadata = buildDatasetMetadata({
     row: {
       dataset_id: row.dataset_id,
       // Mirror routes/data.ts metadataJsonHandler: name is NOT NULL on the
@@ -192,6 +217,7 @@ async function loadEnrichedMetadata(
     latestManifest: null,
     githubOrg: ORG_NAME,
   });
+  return { metadata, enrichment_degraded: enrichmentDegraded };
 }
 
 export function pickVersion(
@@ -224,12 +250,52 @@ export function settled<T>(
 }
 
 /**
+ * Pure predicate driving the cache-header decision in `pageBundleHandler`.
+ * Exported so the truth table can be pinned by unit tests without
+ * stubbing D1 or S3.
+ *
+ * Truth table:
+ *   - landing not built (would have thrown above this point; included for
+ *     completeness): false
+ *   - any of metadata/summary/catalog fan-in failed: false
+ *   - all ok AND no published version: true (summary.data is null by design)
+ *   - all ok AND published version AND summary.data present: true
+ *   - all ok AND published version AND summary.data null: false
+ *     (S3 had no summary.json for a published version — backfill needed)
+ *
+ * Cache poisoning class: returning `true` for any partial-failure case would
+ * let the caller cache an empty/broken bundle for the full SWR window. See
+ * `[website_partial_cache_poisoning]` memory for the prior incident this
+ * predicate's correctness prevents.
+ */
+export function isBundleComplete(input: {
+  landing: PageBundleComponent<unknown>;
+  metadata: PageBundleComponent<unknown>;
+  summary: PageBundleComponent<unknown>;
+  catalogRow: PageBundleComponent<unknown>;
+  resolvedVersion: string | null;
+}): boolean {
+  const { landing, metadata, summary, catalogRow, resolvedVersion } = input;
+  if (!landing.ok || !metadata.ok || !summary.ok || !catalogRow.ok) return false;
+  if (resolvedVersion === null) return true; // no version, no summary expected
+  return summary.data !== null;
+}
+
+/**
  * Build the bundle. Caller MUST gate visibility (loadPublishedDataset) before
  * invoking — this function trusts the dataset exists and is publicly served.
  *
  * `versionParam` is the raw `?v=` value the consumer requested; it may be
  * with or without a leading `v`. If unknown or absent, we resolve to landing's
  * latest version.
+ *
+ * Failure model: only the three S3/D1 fan-in components (metadata, summary,
+ * catalog) are wrapped in `Promise.allSettled`. The eager `versionRows`
+ * fetch above the fanout is intentionally NOT wrapped — a D1 failure there
+ * means we cannot construct a valid bundle at all, so it propagates and the
+ * outer `pageBundleHandler` returns 500 + no-store. Landing is built
+ * synchronously from versionRows; if that ever starts throwing, the same
+ * propagation applies.
  */
 export async function buildPageBundle(
   env: Bindings,
@@ -237,8 +303,8 @@ export async function buildPageBundle(
   versionParam: string | null,
 ): Promise<PageBundle> {
   // landing is cheap (one D1 query); compute it eagerly so we know which
-  // version to ask the summary endpoint for. Everything else fans out in
-  // parallel against the resolved version.
+  // version to ask the summary endpoint for. D1 failure here MUST propagate
+  // — see loadVersionRowsForBundle docstring.
   const versionRows = await loadVersionRowsForBundle(env, datasetId);
   const landingPayload = buildLandingPayload({ datasetId, versionRows });
   const resolvedVersion = pickVersion(versionParam, versionRows);
@@ -256,7 +322,7 @@ export async function buildPageBundle(
               return JSON.parse(raw);
             } catch (err) {
               throw new Error(
-                `summary.json is not valid JSON (dataset=${datasetId} version=${versionForSummary}): ${err instanceof Error ? err.message : String(err)}`,
+                `summary.json is not valid JSON (dataset=${datasetId} version=${versionForSummary} s3_key=${datasetId}/version/v${versionForSummary.replace(/^v/, "")}-summary.json): ${err instanceof Error ? err.message : String(err)}`,
               );
             }
           },
@@ -268,35 +334,33 @@ export async function buildPageBundle(
     loadCatalogRow(env, datasetId),
   ]);
 
-  const metadata = settled(metadataResult, `metadata dataset=${datasetId}`);
+  const metadataComponent = settled(metadataResult, `metadata dataset=${datasetId}`);
   const summary = settled(
     summaryResult,
     `summary dataset=${datasetId} version=${resolvedVersion ?? "n/a"}`,
   );
   const catalogRow = settled(catalogResult, `catalog dataset=${datasetId}`);
 
-  // Landing is built synchronously above; wrap as an `ok` component so the
-  // bundle shape stays uniform for consumers.
-  const landing: PageBundleComponent<LandingPayload> = { ok: true, data: landingPayload };
+  // Unwrap the {metadata, enrichment_degraded} envelope. When metadataResult
+  // rejected, metadataComponent.ok is false and we don't have the inner
+  // envelope; ship enrichment_degraded=false since we have no data to be
+  // degraded.
+  const metadata: PageBundleComponent<NeuroschemaDataset> = metadataComponent.ok
+    ? { ok: true, data: metadataComponent.data.metadata }
+    : metadataComponent;
+  const enrichmentDegraded =
+    metadataComponent.ok && metadataComponent.data.enrichment_degraded;
 
-  // `complete` drives the caller's cache decision. Missing summary is OK when
-  // the dataset has no published versions (resolvedVersion=null + summary
-  // ok=true with data=null is the expected shape). Anything else with ok=false
-  // taints the bundle.
-  const complete =
-    landing.ok &&
-    metadata.ok &&
-    summary.ok &&
-    catalogRow.ok &&
-    (resolvedVersion === null || summary.data !== null);
+  const landing: PageBundleComponent<LandingPayload> = { ok: true, data: landingPayload };
 
   return {
     dataset_id: datasetId,
     version: resolvedVersion,
     served_at: new Date().toISOString(),
-    complete,
+    complete: isBundleComplete({ landing, metadata, summary, catalogRow, resolvedVersion }),
     landing,
     metadata,
+    enrichment_degraded: enrichmentDegraded,
     summary,
     catalog_row: catalogRow,
   };

@@ -13,6 +13,7 @@
 import { describe, expect, test } from "bun:test";
 
 import {
+  isBundleComplete,
   type PageBundleComponent,
   pickVersion,
   settled,
@@ -94,5 +95,103 @@ describe("settled", () => {
     const out: PageBundleComponent<unknown> = settled(r, "summary");
     expect(out.ok).toBe(true);
     if (out.ok) expect(out.data).toBeNull();
+  });
+});
+
+describe("isBundleComplete", () => {
+  const ok = <T>(data: T): PageBundleComponent<T> => ({ ok: true, data });
+  const fail = (error: string): PageBundleComponent<never> => ({ ok: false, error });
+
+  test("all ok + published version + summary present -> true", () => {
+    expect(
+      isBundleComplete({
+        landing: ok({}),
+        metadata: ok({}),
+        summary: ok({ schema_version: "1.1" }),
+        catalogRow: ok({}),
+        resolvedVersion: "1.0.0",
+      }),
+    ).toBe(true);
+  });
+
+  test("all ok + no published version + summary null -> true (healthy unpublished)", () => {
+    // The bundle for a dataset with zero published versions ships summary
+    // ok=true data=null on purpose; complete=true means "this IS the truth,
+    // safe to cache."
+    expect(
+      isBundleComplete({
+        landing: ok({}),
+        metadata: ok({}),
+        summary: ok(null),
+        catalogRow: ok({}),
+        resolvedVersion: null,
+      }),
+    ).toBe(true);
+  });
+
+  test("all ok + published version + summary null -> false (S3 gap = backfill needed)", () => {
+    // Caching this with the success header for 24h SWR would lock in a
+    // broken bundle for any visitor at the affected PoP. The whole purpose
+    // of this predicate is to flip this case to no-store.
+    expect(
+      isBundleComplete({
+        landing: ok({}),
+        metadata: ok({}),
+        summary: ok(null),
+        catalogRow: ok({}),
+        resolvedVersion: "1.0.0",
+      }),
+    ).toBe(false);
+  });
+
+  test("landing failed -> false", () => {
+    // Today landing can only fail by exception (which throws past the
+    // bundle assembler entirely), but pin the contract anyway in case a
+    // future refactor moves landing into the allSettled fanout.
+    expect(
+      isBundleComplete({
+        landing: fail("nope"),
+        metadata: ok({}),
+        summary: ok({}),
+        catalogRow: ok({}),
+        resolvedVersion: "1.0.0",
+      }),
+    ).toBe(false);
+  });
+
+  test("metadata failed -> false", () => {
+    expect(
+      isBundleComplete({
+        landing: ok({}),
+        metadata: fail("D1 timeout"),
+        summary: ok({ schema_version: "1.1" }),
+        catalogRow: ok({}),
+        resolvedVersion: "1.0.0",
+      }),
+    ).toBe(false);
+  });
+
+  test("summary failed -> false (with version)", () => {
+    expect(
+      isBundleComplete({
+        landing: ok({}),
+        metadata: ok({}),
+        summary: fail("S3 503"),
+        catalogRow: ok({}),
+        resolvedVersion: "1.0.0",
+      }),
+    ).toBe(false);
+  });
+
+  test("catalog failed -> false", () => {
+    expect(
+      isBundleComplete({
+        landing: ok({}),
+        metadata: ok({}),
+        summary: ok({ schema_version: "1.1" }),
+        catalogRow: fail("D1 error"),
+        resolvedVersion: "1.0.0",
+      }),
+    ).toBe(false);
   });
 });
