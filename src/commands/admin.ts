@@ -3618,6 +3618,27 @@ function isStale(state: SummaryVersionCoverage["state"]): boolean {
   return state.kind === "stale" || state.kind === "missing";
 }
 
+/**
+ * Convert a shell-style glob to an anchored RegExp.
+ *
+ *   `*` → `.*`  (any run of any chars)
+ *   `?` → `.`   (one of any char)
+ *
+ * Every other regex metacharacter is escaped, so a literal `.` in a glob
+ * (e.g. `on00*.draft`) is treated as a literal `.`, not "any char". We do
+ * NOT support character classes (`[abc]`) or brace expansion (`{a,b}`) —
+ * if the operator needs that, they can fall back to `--id` per-target.
+ *
+ * Anchored with `^...$` so `on*` matches `on007315` but not `xon007315`.
+ */
+export function globToRegExp(glob: string): RegExp {
+  // Escape regex metacharacters except `*` and `?`. The character class
+  // here is the regex spec's metachar set minus the two we treat specially.
+  const escaped = glob.replace(/[.+^${}()|[\]\\]/g, "\\$&");
+  const pattern = escaped.replace(/\*/g, ".*").replace(/\?/g, ".");
+  return new RegExp(`^${pattern}$`);
+}
+
 const summaryCommand = new Command("summary").description(
   "summary.json coverage across published dataset versions",
 );
@@ -3626,7 +3647,11 @@ summaryCommand
   .command("check")
   .description("Report which (dataset_id, version) pairs have stale or missing summary.json")
   .option("--fix", "Dispatch generate-manifest for every stale/missing version")
-  .option("--id <id>", "Limit to a single dataset_id")
+  .option("--id <id>", "Limit to a single dataset_id (exact match)")
+  .option(
+    "--match <glob>",
+    "Limit to dataset_ids matching a glob pattern: `*` matches any run of chars, `?` matches one char. Examples: `on*`, `nm00010?`, `*99999`. Can be combined with --id (id wins if both passed).",
+  )
   .option("--only-stale", "Print only rows that are not ok (suppresses ok rows)")
   .option("--json", "Emit the full report as JSON instead of a table")
   .option(YES_OPTION, YES_DESCRIPTION)
@@ -3636,6 +3661,7 @@ summaryCommand
       options: {
         fix?: boolean;
         id?: string;
+        match?: string;
         onlyStale?: boolean;
         json?: boolean;
       } & ConfirmOptions,
@@ -3655,12 +3681,23 @@ summaryCommand
       );
 
       let rows = report.versions;
+      let filterLabel: string | null = null;
       if (options.id) {
         rows = rows.filter((r) => r.dataset_id === options.id);
+        filterLabel = `dataset_id=${options.id}`;
         if (rows.length === 0) {
-          console.log(chalk.yellow(`No rows for dataset_id=${options.id}`));
+          console.log(chalk.yellow(`No rows for ${filterLabel}`));
           return;
         }
+      } else if (options.match) {
+        const re = globToRegExp(options.match);
+        rows = rows.filter((r) => re.test(r.dataset_id));
+        filterLabel = `--match ${options.match}`;
+        if (rows.length === 0) {
+          console.log(chalk.yellow(`No rows match ${filterLabel}`));
+          return;
+        }
+        console.log(chalk.dim(`Scoped to ${rows.length} version(s) matching ${options.match}`));
       }
 
       if (options.json) {
@@ -3668,7 +3705,7 @@ summaryCommand
         // doesn't have to re-aggregate.
         console.log(
           JSON.stringify(
-            options.id ? { ...report, versions: rows, totals: recomputeTotals(rows) } : report,
+            filterLabel ? { ...report, versions: rows, totals: recomputeTotals(rows) } : report,
             null,
             2,
           ),
@@ -3691,7 +3728,7 @@ summaryCommand
 
       // Print the totals after the per-row dump so they're the last thing on
       // screen — the operator's eye lands there for the go/no-go decision.
-      const totals = options.id ? recomputeTotals(rows) : report.totals;
+      const totals = filterLabel ? recomputeTotals(rows) : report.totals;
       console.log();
       console.log(
         `  Total: ${totals.versions}  ${chalk.green(`ok=${totals.ok}`)}  ` +
@@ -3716,8 +3753,9 @@ summaryCommand
         return;
       }
 
+      const scopeHint = filterLabel ? ` (scoped to ${filterLabel})` : "";
       const confirmResult = await confirm(
-        `Dispatch generate-manifest for ${toDispatch.length} version(s)? Each dispatch queues a runner job on nemarDatasets/.github.`,
+        `Dispatch generate-manifest for ${toDispatch.length} version(s)${scopeHint}? Each dispatch queues a runner job on nemarDatasets/.github.`,
         options,
       );
       if (confirmResult !== "confirmed") {
