@@ -2103,3 +2103,63 @@ export async function sendBroadcast(data: {
     true,
   );
 }
+
+// ============================================================================
+// Summary coverage (epic #618 / phase 2 #620)
+// ============================================================================
+
+export type SummarySchemaState =
+  | { kind: "ok"; schema_version: string }
+  | { kind: "stale"; schema_version: string }
+  | { kind: "missing" }
+  | { kind: "error"; status: number; message: string };
+
+export interface SummaryVersionCoverage {
+  dataset_id: string;
+  version: string;
+  doi: string;
+  concept_doi: string | null;
+  state: SummarySchemaState;
+}
+
+export interface SummaryCoverageReport {
+  generated_at: string;
+  target_schema: string;
+  totals: {
+    versions: number;
+    ok: number;
+    stale: number;
+    missing: number;
+    error: number;
+  };
+  versions: SummaryVersionCoverage[];
+}
+
+export async function getSummaryCoverage(): Promise<SummaryCoverageReport> {
+  return request<SummaryCoverageReport>("/admin/summary/coverage", {}, true);
+}
+
+export interface DispatchManifestResponse {
+  dispatched: boolean;
+  dataset_id: string;
+  version: string;
+}
+
+export async function dispatchManifest(
+  datasetId: string,
+  version: string,
+  options?: { skipCanary?: boolean },
+): Promise<DispatchManifestResponse> {
+  return request<DispatchManifestResponse>(
+    "/admin/manifest/dispatch",
+    {
+      method: "POST",
+      body: JSON.stringify({
+        dataset_id: datasetId,
+        version,
+        skip_canary: options?.skipCanary ?? false,
+      }),
+    },
+    true,
+  );
+}

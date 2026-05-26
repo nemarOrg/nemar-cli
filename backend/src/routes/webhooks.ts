@@ -234,18 +234,31 @@ const webhooks = new Hono<{ Bindings: Bindings }>();
  * Publish a version DOI for a dataset
  *
  * Called by GitHub Actions when a new release is created.
- * Requires X-Webhook-Token header matching GITHUB_WEBHOOK_SECRET.
+ * Requires X-Webhook-Token header matching NEMAR_WEBHOOK_TOKEN (falls back
+ * to GITHUB_WEBHOOK_SECRET during the secret-untangle rollout — both held
+ * the same value historically, see docs/guides/github-app-setup.md).
  *
  * Routes to EZID or Zenodo based on dataset's doi_provider setting.
  */
 webhooks.post("/publish-version-doi", async (c) => {
   // Validate webhook token
   const token = c.req.header("X-Webhook-Token");
-  const expectedToken = c.env.GITHUB_WEBHOOK_SECRET;
+  const expectedToken = c.env.NEMAR_WEBHOOK_TOKEN ?? c.env.GITHUB_WEBHOOK_SECRET;
 
   // If webhook secret not configured OR token doesn't match, reject as unauthorized
   // Treat missing secret as "no valid token exists" for better security
-  if (!expectedToken || !token || !timingSafeEqual(token, expectedToken)) {
+  if (!expectedToken) {
+    // Distinguish "operator misconfiguration" (no secret set or empty string)
+    // from "real token mismatch" so an on-call doesn't spend hours chasing
+    // an invalid-token alert when the actual fix is `wrangler secret put`.
+    // `??` only falls through on null/undefined; an empty string sticks and
+    // produces the same 401 as a real mismatch without this log.
+    console.error(
+      "[publish-version-doi] no webhook secret configured (NEMAR_WEBHOOK_TOKEN/GITHUB_WEBHOOK_SECRET both unset or empty)",
+    );
+    return c.json({ error: "Invalid webhook token" }, 401);
+  }
+  if (!token || !timingSafeEqual(token, expectedToken)) {
     return c.json({ error: "Invalid webhook token" }, 401);
   }
 
@@ -1350,9 +1363,19 @@ webhooks.post("/manifest-failed", async (c) => {
  */
 webhooks.post("/llm-enrich", async (c) => {
   const token = c.req.header("X-Webhook-Token");
-  const expectedToken = c.env.GITHUB_WEBHOOK_SECRET;
+  // Same secret-untangle as /publish-version-doi: prefer NEMAR_WEBHOOK_TOKEN,
+  // fall back to the historically-shared GITHUB_WEBHOOK_SECRET.
+  const expectedToken = c.env.NEMAR_WEBHOOK_TOKEN ?? c.env.GITHUB_WEBHOOK_SECRET;
 
-  if (!expectedToken || !token || !timingSafeEqual(token, expectedToken)) {
+  if (!expectedToken) {
+    // Diagnostic log to distinguish "operator misconfiguration" from "real
+    // token mismatch" — same rationale as /publish-version-doi above.
+    console.error(
+      "[llm-enrich] no webhook secret configured (NEMAR_WEBHOOK_TOKEN/GITHUB_WEBHOOK_SECRET both unset or empty)",
+    );
+    return c.json({ error: "Invalid webhook token" }, 401);
+  }
+  if (!token || !timingSafeEqual(token, expectedToken)) {
     return c.json({ error: "Invalid webhook token" }, 401);
   }
 

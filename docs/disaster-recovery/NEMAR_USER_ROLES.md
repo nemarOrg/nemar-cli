@@ -230,7 +230,7 @@ Future automation could:
 
 **For Technical Documentation:**
 - See: NEMAR_RESTORATION_GUIDE.md
-- See: Repository CLAUDE.md files
+- See: Repository AGENTS.md files (CLAUDE.md is a thin adapter that imports AGENTS.md)
 
 ---
 

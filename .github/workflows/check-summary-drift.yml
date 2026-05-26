@@ -1,0 +1,248 @@
+name: Check summary.json drift
+
+# Weekly verification that every published dataset version has summary.json
+# at the current target schema (the runtime value is read from the
+# /admin/summary/coverage response — don't hardcode the version here, the
+# constant lives in backend/src/services/manifest-coverage.ts TARGET_SCHEMA).
+# Opens an issue when drift is detected
+# so a human can decide whether to backfill via
+# `nemar admin summary check --fix`.
+#
+# Epic #618 / phase 2 (#620).
+
+on:
+  schedule:
+    # Mondays 09:00 UTC. Picks a time that's after the weekend's hallu sync
+    # but before the start of the US workday so drift surfaces early.
+    - cron: '0 9 * * 1'
+  workflow_dispatch:
+
+env:
+  PROD_API_URL: https://nemar-api.sccn-org.workers.dev
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      issues: write
+    steps:
+      - name: Fetch coverage report
+        id: fetch
+        env:
+          ADMIN_API_KEY: ${{ secrets.PROD_ADMIN_API_KEY }}
+        run: |
+          HTTP_CODE=$(curl -s -o /tmp/coverage.json -w "%{http_code}" \
+            "${{ env.PROD_API_URL }}/admin/summary/coverage" \
+            -H "Authorization: Bearer $ADMIN_API_KEY" \
+            --max-time 60)
+
+          # Always seed sentinel outputs so downstream `fromJSON(...)` never
+          # evaluates against an empty string (which silently skips the step
+          # in GitHub Actions). A backend regression or payload-shape change
+          # surfaces explicitly as drift=-1 → "report broken" issue.
+          {
+            echo "target_schema=unknown"
+            echo "versions=0"
+            echo "ok=0"
+            echo "stale=0"
+            echo "missing=0"
+            echo "error=0"
+            echo "drift=-1"
+            echo "fetch_error="
+          } >> "$GITHUB_OUTPUT"
+
+          if [ "$HTTP_CODE" -ne 200 ]; then
+            echo "::error::Coverage endpoint returned HTTP $HTTP_CODE"
+            head -c 1024 /tmp/coverage.json || true
+            echo "fetch_error=Coverage endpoint returned HTTP $HTTP_CODE" >> "$GITHUB_OUTPUT"
+            exit 0  # do NOT fail the step — let the "report broken" branch open an issue
+          fi
+
+          python3 -m json.tool < /tmp/coverage.json | head -20 || true
+          echo "---"
+
+          # Parse + emit totals. On ANY exception (truncated body, missing
+          # keys, non-JSON 200 from a misconfigured edge), keep the sentinel
+          # outputs and write a fetch_error message so the "report broken"
+          # branch fires. Without this guard, a KeyError here would crash
+          # the step and skip every downstream conditional — drift goes
+          # silently unreported.
+          python3 << 'PYEOF'
+          import json, os, sys, traceback
+          try:
+              with open("/tmp/coverage.json") as f:
+                  report = json.load(f)
+              totals = report["totals"]
+              drift = totals["stale"] + totals["missing"] + totals["error"]
+              # majority_errored: when more than half the catalog's versions
+              # report `kind=error`, the failure mode is almost certainly an
+              # S3-route or IAM problem, NOT individual stale summaries.
+              # `--fix` would dispatch workflows that all succeed at writing
+              # to S3 without clearing the alert (operators chase the wrong
+              # thing for a week). Surface this distinctly so a separate
+              # P1 issue gets opened instead of edits-piling-up on the P2.
+              majority_errored = totals["error"] >= max(1, totals["versions"] // 2)
+              with open(os.environ["GITHUB_OUTPUT"], "a") as out:
+                  out.write(f"target_schema={report['target_schema']}\n")
+                  out.write(f"versions={totals['versions']}\n")
+                  out.write(f"ok={totals['ok']}\n")
+                  out.write(f"stale={totals['stale']}\n")
+                  out.write(f"missing={totals['missing']}\n")
+                  out.write(f"error={totals['error']}\n")
+                  out.write(f"drift={drift}\n")
+                  out.write(f"majority_errored={'true' if majority_errored else 'false'}\n")
+          except Exception as e:
+              traceback.print_exc()
+              with open(os.environ["GITHUB_OUTPUT"], "a") as out:
+                  out.write(f"fetch_error=coverage payload malformed: {e}\n")
+              sys.exit(0)  # fall through to the report-broken branch
+          PYEOF
+
+      - name: Build issue body
+        if: fromJSON(steps.fetch.outputs.drift) > 0
+        id: body
+        run: |
+          python3 << 'PYEOF'
+          import json, os
+          with open("/tmp/coverage.json") as f:
+              report = json.load(f)
+
+          lines = [
+              f"## summary.json drift detected ({report['generated_at']})",
+              "",
+              f"- target schema: **{report['target_schema']}**",
+              f"- total versions: **{report['totals']['versions']}**",
+              f"- ok: **{report['totals']['ok']}**",
+              f"- stale: **{report['totals']['stale']}**",
+              f"- missing: **{report['totals']['missing']}**",
+              f"- error: **{report['totals']['error']}**",
+              "",
+              "### Drifted versions",
+              "",
+              "| dataset_id | version | state | detail |",
+              "| --- | --- | --- | --- |",
+          ]
+          for r in report["versions"]:
+              s = r["state"]
+              if s["kind"] == "ok":
+                  continue
+              if s["kind"] == "stale":
+                  detail = f"schema {s['schema_version']}"
+              elif s["kind"] == "missing":
+                  detail = "summary.json absent"
+              else:
+                  detail = f"HTTP {s.get('status', '?')}: {s.get('message', '')}"
+              lines.append(f"| {r['dataset_id']} | {r['version']} | {s['kind']} | {detail} |")
+
+          lines += [
+              "",
+              "### Fix",
+              "",
+              "```",
+              "nemar admin summary check --fix --yes",
+              "```",
+              "",
+              "Or scope to a single dataset:",
+              "",
+              "```",
+              "nemar admin summary check --id <dataset_id> --fix --yes",
+              "```",
+              "",
+              "Dispatches re-run `generate-manifest` on `nemarDatasets/.github` for each drifted version. Re-run this workflow (or `nemar admin summary check`) after they complete to confirm drift cleared.",
+          ]
+
+          body = "\n".join(lines)
+          # Use heredoc-style multi-line GITHUB_OUTPUT.
+          delim = "EOF_BODY"
+          with open(os.environ["GITHUB_OUTPUT"], "a") as out:
+              out.write(f"body<<{delim}\n{body}\n{delim}\n")
+          PYEOF
+
+      - name: Ensure issue labels exist
+        if: fromJSON(steps.fetch.outputs.drift) != 0
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # `drift` is a workflow-specific label that may not exist yet on a
+          # fresh repo; `P2` is the project's standard priority label. Create
+          # both idempotently so `gh issue create` below doesn't fail closed
+          # with "could not add label" on the first run.
+          gh label create drift --color FBCA04 --description "summary.json drift detected by the weekly cron" --force >/dev/null 2>&1 || true
+          gh label create P1 --force >/dev/null 2>&1 || true
+          gh label create P2 --force >/dev/null 2>&1 || true
+
+      - name: Open / update drift issue
+        # Skip when majority_errored is true — that case opens its own P1
+        # issue below ("probe broken") with a different remediation path.
+        # Opening BOTH would just spam the operator with two issues for
+        # the same root cause.
+        if: fromJSON(steps.fetch.outputs.drift) > 0 && steps.fetch.outputs.majority_errored != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          DRIFT: ${{ steps.fetch.outputs.drift }}
+          STALE: ${{ steps.fetch.outputs.stale }}
+          MISSING: ${{ steps.fetch.outputs.missing }}
+          ERROR_COUNT: ${{ steps.fetch.outputs.error }}
+          ISSUE_BODY: ${{ steps.body.outputs.body }}
+        run: |
+          TITLE="summary.json drift: ${DRIFT} version(s) need backfill"
+          # Reuse the most recent open drift issue if one exists; otherwise open a fresh one.
+          EXISTING=$(gh issue list --label "drift" --state open --search "summary.json drift" --json number --jq '.[0].number' || echo "")
+          if [ -n "$EXISTING" ]; then
+            # Update both title and body so the count in the title doesn't
+            # rot when subsequent runs change how many versions are drifted.
+            gh issue edit "$EXISTING" --title "$TITLE" --body "$ISSUE_BODY"
+            echo "Updated existing drift issue #$EXISTING"
+          else
+            gh issue create --title "$TITLE" --body "$ISSUE_BODY" --label "drift,P2"
+          fi
+
+      - name: Open / update probe-broken issue
+        # Fires when more than half the catalog's versions classify as
+        # `error` — almost certainly an S3 route or IAM problem affecting
+        # the read path, NOT individual stale summaries. `--fix` would
+        # dispatch workflows that write to S3 successfully but never
+        # clear the alert (the route still can't read what was written).
+        # Separate P1 issue with the right remediation guidance.
+        if: fromJSON(steps.fetch.outputs.drift) > 0 && steps.fetch.outputs.majority_errored == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ERROR_COUNT: ${{ steps.fetch.outputs.error }}
+          VERSIONS: ${{ steps.fetch.outputs.versions }}
+          ISSUE_BODY: ${{ steps.body.outputs.body }}
+        run: |
+          TITLE="summary.json probe failing for majority of versions (${ERROR_COUNT}/${VERSIONS})"
+          BODY=$'## Probe is failing for most versions\n\n'"$ISSUE_BODY"$'\n\n---\n\n**This is likely a `/<id>/<v>/summary.json` route or S3 IAM problem, NOT a backfill problem.** `nemar admin summary check --fix` will dispatch workflows that succeed at writing to S3 but the read path will keep returning error. Triage:\n\n1. Hit `https://data.nemar.org/<a-known-published-id>/v1.0.0/summary.json` directly. If it 5xx, that confirms route/IAM.\n2. Check the Worker error log for `[data] summary fetch failed`.\n3. Verify `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` Workers secrets are set + valid (`npx cfman wrangler --account sccn secret list -c backend/wrangler-sccn.toml`).\n\nTriggering workflow run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}'
+          EXISTING=$(gh issue list --label "drift,P1" --state open --search "summary.json probe failing" --json number --jq '.[0].number' || echo "")
+          if [ -n "$EXISTING" ]; then
+            gh issue edit "$EXISTING" --title "$TITLE" --body "$BODY"
+          else
+            gh issue create --title "$TITLE" --body "$BODY" --label "drift,P1"
+          fi
+          exit 1  # Red badge — operator action required.
+
+      - name: Open / update report-broken issue
+        # Fires when the fetch step couldn't classify the result at all
+        # (5xx from the coverage endpoint, payload schema regression, etc.).
+        # We DELIBERATELY DO NOT roll up into the drift issue: a broken
+        # report and an existing drift are two different operator alerts.
+        if: fromJSON(steps.fetch.outputs.drift) == -1
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          FETCH_ERROR: ${{ steps.fetch.outputs.fetch_error }}
+        run: |
+          TITLE="summary.json drift cron broken"
+          BODY=$'## Coverage endpoint or payload broken\n\n'"$FETCH_ERROR"$'\n\nThe weekly summary.json drift cron could not parse a coverage report. Run `nemar admin summary check --json` manually to triage. Triggering workflow run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}'
+          EXISTING=$(gh issue list --label "drift,P1" --state open --search "summary.json drift cron broken" --json number --jq '.[0].number' || echo "")
+          if [ -n "$EXISTING" ]; then
+            gh issue edit "$EXISTING" --title "$TITLE" --body "$BODY"
+          else
+            gh issue create --title "$TITLE" --body "$BODY" --label "drift,P1"
+          fi
+          exit 1  # Surface the breakage in the workflow's red badge too.
+
+      - name: Report clean
+        if: fromJSON(steps.fetch.outputs.drift) == 0
+        run: |
+          echo "No drift detected. All ${{ steps.fetch.outputs.versions }} versions at schema ${{ steps.fetch.outputs.target_schema }}."

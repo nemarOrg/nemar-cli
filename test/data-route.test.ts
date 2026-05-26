@@ -217,6 +217,80 @@ describe("data.nemar.org route (epic #449, phase 1)", async () => {
   });
 
   // ---------------------------------------------------------------------------
+  // Epic #618 / phase 3 (#621): page-bundle endpoint
+  // ---------------------------------------------------------------------------
+
+  test("page-bundle.json returns landing+metadata+summary+catalog in one payload", async () => {
+    const r = await fetch(`${API}/data/${TEST_DATASET}/page-bundle.json`, { headers });
+    expect(r.status).toBe(200);
+    expect(r.headers.get("content-type")).toContain("application/json");
+
+    const body = (await r.json()) as {
+      dataset_id: string;
+      version: string | null;
+      complete: boolean;
+      landing: { ok: boolean };
+      metadata: { ok: boolean };
+      summary: { ok: boolean; data?: unknown };
+      catalog_row: { ok: boolean };
+      enrichment_degraded: boolean;
+    };
+
+    expect(body.dataset_id).toBe(TEST_DATASET);
+    expect(body.landing.ok).toBe(true);
+    expect(body.metadata.ok).toBe(true);
+    expect(body.summary.ok).toBe(true);
+    expect(body.catalog_row.ok).toBe(true);
+    expect(typeof body.enrichment_degraded).toBe("boolean");
+  });
+
+  // Cache-poisoning regression guard: a `complete=true` response MUST carry the
+  // long s-maxage policy, and a `complete=false` response MUST be no-store. The
+  // partial-cache-poisoning class previously hit ww2.nemar.org's SSR partials
+  // (transient upstream failures returning 200 with success Cache-Control got
+  // pinned at the CF edge for up to 24h via stale-while-revalidate). The
+  // page-bundle's `isBundleComplete` predicate is what defends against that;
+  // assert the wire contract end-to-end so a refactor can't silently flip it.
+  test("page-bundle.json: Cache-Control matches the complete flag", async () => {
+    const r = await fetch(`${API}/data/${TEST_DATASET}/page-bundle.json`, { headers });
+    expect(r.status).toBe(200);
+    const body = (await r.json()) as { complete: boolean };
+    const cacheControl = r.headers.get("cache-control") ?? "";
+
+    if (body.complete) {
+      // Success branch: long edge cache + SWR. Exact policy is allowed to
+      // evolve, but it MUST be cacheable and MUST NOT be no-store.
+      expect(cacheControl).toContain("s-maxage");
+      expect(cacheControl).not.toContain("no-store");
+    } else {
+      // Partial-failure branch: no-store is non-negotiable. Anything else
+      // re-opens the partial-cache-poisoning class.
+      expect(cacheControl).toContain("no-store");
+    }
+  });
+
+  test("page-bundle.json: ?v=<unknown> falls back to landing.latest (no 404)", async () => {
+    // The bundle deliberately recovers from a typo'd version rather than
+    // 404-ing the whole page; the consumer reads `version` from the body
+    // and can render "version not found, showing latest" UX.
+    const r = await fetch(
+      `${API}/data/${TEST_DATASET}/page-bundle.json?v=v999.999.999`,
+      { headers },
+    );
+    expect(r.status).toBe(200);
+    const body = (await r.json()) as { version: string | null; complete: boolean };
+    // landing.latest is what's served; version field is non-null and not the bogus input.
+    expect(body.version).not.toBe("999.999.999");
+    expect(body.version).not.toBeNull();
+    expect(body.complete).toBe(true);
+  });
+
+  test("page-bundle.json 404s for unknown datasets without leaking existence", async () => {
+    const r = await fetch(`${API}/data/nm999000/page-bundle.json`, { headers });
+    expect(r.status).toBe(404);
+  });
+
+  // ---------------------------------------------------------------------------
   // Phase 3 (#497): sitemap landing page + tombstone 404s
   // ---------------------------------------------------------------------------
 
