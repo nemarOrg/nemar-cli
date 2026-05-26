@@ -1,0 +1,146 @@
+name: Check summary.json drift
+
+# Weekly verification that every published dataset version has summary.json
+# at the current target schema (1.1). Opens an issue when drift is detected
+# so a human can decide whether to backfill via
+# `nemar admin summary check --fix`.
+#
+# Epic #618 / phase 2 (#620).
+
+on:
+  schedule:
+    # Mondays 09:00 UTC. Picks a time that's after the weekend's hallu sync
+    # but before the start of the US workday so drift surfaces early.
+    - cron: '0 9 * * 1'
+  workflow_dispatch:
+
+env:
+  PROD_API_URL: https://nemar-api.sccn-org.workers.dev
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      issues: write
+    steps:
+      - name: Fetch coverage report
+        id: fetch
+        env:
+          ADMIN_API_KEY: ${{ secrets.PROD_ADMIN_API_KEY }}
+        run: |
+          HTTP_CODE=$(curl -s -o /tmp/coverage.json -w "%{http_code}" \
+            "${{ env.PROD_API_URL }}/admin/summary/coverage" \
+            -H "Authorization: Bearer $ADMIN_API_KEY" \
+            --max-time 60)
+
+          if [ "$HTTP_CODE" -ne 200 ]; then
+            echo "::error::Coverage endpoint returned HTTP $HTTP_CODE"
+            cat /tmp/coverage.json
+            exit 1
+          fi
+
+          python3 -m json.tool < /tmp/coverage.json | head -20
+          echo "---"
+
+          # Emit totals as workflow outputs for downstream conditionals.
+          python3 << 'PYEOF'
+          import json, os
+          with open("/tmp/coverage.json") as f:
+              report = json.load(f)
+          totals = report["totals"]
+          drift = totals["stale"] + totals["missing"] + totals["error"]
+          with open(os.environ["GITHUB_OUTPUT"], "a") as out:
+              out.write(f"target_schema={report['target_schema']}\n")
+              out.write(f"versions={totals['versions']}\n")
+              out.write(f"ok={totals['ok']}\n")
+              out.write(f"stale={totals['stale']}\n")
+              out.write(f"missing={totals['missing']}\n")
+              out.write(f"error={totals['error']}\n")
+              out.write(f"drift={drift}\n")
+          PYEOF
+
+      - name: Build issue body
+        if: fromJSON(steps.fetch.outputs.drift) > 0
+        id: body
+        run: |
+          python3 << 'PYEOF'
+          import json, os
+          with open("/tmp/coverage.json") as f:
+              report = json.load(f)
+
+          lines = [
+              f"## summary.json drift detected ({report['generated_at']})",
+              "",
+              f"- target schema: **{report['target_schema']}**",
+              f"- total versions: **{report['totals']['versions']}**",
+              f"- ok: **{report['totals']['ok']}**",
+              f"- stale: **{report['totals']['stale']}**",
+              f"- missing: **{report['totals']['missing']}**",
+              f"- error: **{report['totals']['error']}**",
+              "",
+              "### Drifted versions",
+              "",
+              "| dataset_id | version | state | detail |",
+              "| --- | --- | --- | --- |",
+          ]
+          for r in report["versions"]:
+              s = r["state"]
+              if s["kind"] == "ok":
+                  continue
+              if s["kind"] == "stale":
+                  detail = f"schema {s['schema_version']}"
+              elif s["kind"] == "missing":
+                  detail = "summary.json absent"
+              else:
+                  detail = f"HTTP {s.get('status', '?')}: {s.get('message', '')}"
+              lines.append(f"| {r['dataset_id']} | {r['version']} | {s['kind']} | {detail} |")
+
+          lines += [
+              "",
+              "### Fix",
+              "",
+              "```",
+              "nemar admin summary check --fix --yes",
+              "```",
+              "",
+              "Or scope to a single dataset:",
+              "",
+              "```",
+              "nemar admin summary check --id <dataset_id> --fix --yes",
+              "```",
+              "",
+              "Dispatches re-run `generate-manifest` on `nemarDatasets/.github` for each drifted version. Re-run this workflow (or `nemar admin summary check`) after they complete to confirm drift cleared.",
+          ]
+
+          body = "\n".join(lines)
+          # Use heredoc-style multi-line GITHUB_OUTPUT.
+          delim = "EOF_BODY"
+          with open(os.environ["GITHUB_OUTPUT"], "a") as out:
+              out.write(f"body<<{delim}\n{body}\n{delim}\n")
+          PYEOF
+
+      - name: Open / update drift issue
+        if: fromJSON(steps.fetch.outputs.drift) > 0
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          DRIFT: ${{ steps.fetch.outputs.drift }}
+          STALE: ${{ steps.fetch.outputs.stale }}
+          MISSING: ${{ steps.fetch.outputs.missing }}
+          ERROR_COUNT: ${{ steps.fetch.outputs.error }}
+          ISSUE_BODY: ${{ steps.body.outputs.body }}
+        run: |
+          TITLE="summary.json drift: ${DRIFT} version(s) need backfill"
+          # Reuse the most recent open drift issue if one exists; otherwise open a fresh one.
+          EXISTING=$(gh issue list --label "drift" --state open --search "summary.json drift" --json number --jq '.[0].number' || echo "")
+          if [ -n "$EXISTING" ]; then
+            gh issue edit "$EXISTING" --body "$ISSUE_BODY"
+            echo "Updated existing drift issue #$EXISTING"
+          else
+            gh issue create --title "$TITLE" --body "$ISSUE_BODY" --label "drift,P2"
+          fi
+
+      - name: Report clean
+        if: fromJSON(steps.fetch.outputs.drift) == 0
+        run: |
+          echo "No drift detected. All ${{ steps.fetch.outputs.versions }} versions at schema ${{ steps.fetch.outputs.target_schema }}."

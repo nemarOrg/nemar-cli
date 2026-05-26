@@ -86,11 +86,13 @@ import {
   setRepoVisibility,
   syncWorkflowTemplates,
   triggerArchiveGeneration,
+  triggerManifestGeneration,
   validateDeployedWorkflows,
 } from "../services/github";
 import { getDatasetsToken } from "../services/github-auth";
 import { revokeUserIamAccess } from "../services/iam";
 import { generateManifest } from "../services/manifest";
+import { buildCoverageReport } from "../services/manifest-coverage";
 import { syncDatasetToNemar } from "../services/nemar-sync";
 import { createNotice, deleteNotice, listAllNotices } from "../services/notices";
 import {
@@ -5731,3 +5733,90 @@ adminRoutes.post(
     }
   },
 );
+
+/**
+ * GET /admin/summary/coverage
+ *
+ * Reports which published (dataset_id, version) pairs have summary.json
+ * at the current target schema (1.1) vs which are stale or missing.
+ * Powers `nemar admin summary check` and the weekly drift cron.
+ *
+ * Read-only: walks the version table and probes data.nemar.org for the
+ * schema string. Bounded parallelism keeps us within data.nemar.org's
+ * rate limit. No GitHub API calls.
+ *
+ * Epic #618 / phase 2 (#620).
+ */
+adminRoutes.get("/summary/coverage", async (c) => {
+  try {
+    const report = await buildCoverageReport(c.env);
+    return c.json(report);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error("[summary/coverage] failed:", msg);
+    return c.json({ error: `Failed to build coverage report: ${msg}` }, 500);
+  }
+});
+
+const dispatchManifestSchema = z.object({
+  dataset_id: z.string().min(1),
+  version: z.string().min(1),
+  skip_canary: z.boolean().optional(),
+});
+
+/**
+ * POST /admin/manifest/dispatch
+ *
+ * Fires `repository_dispatch[generate-manifest]` at `nemarDatasets/.github`
+ * for a specific (dataset_id, version) pair WITHOUT seeding a manifest_jobs
+ * row. The workflow runs with `skip_callback: true` so it just regenerates
+ * manifest.json + summary.json on S3 without trying to phone back to a
+ * non-existent in-flight job.
+ *
+ * Use case: backfill stale summary.json schema versions, or manually
+ * re-run after a generator change. Looks up `doi` + `concept_doi` from
+ * D1 so the caller only needs (dataset_id, version).
+ *
+ * Epic #618 / phase 2 (#620). Sibling: `triggerManifestGeneration` in
+ * webhooks.ts handles the live-publish path with the full HMAC handshake.
+ */
+adminRoutes.post("/manifest/dispatch", zValidator("json", dispatchManifestSchema), async (c) => {
+  const { dataset_id, version, skip_canary } = c.req.valid("json");
+
+  const row = await c.env.DB.prepare(
+    `SELECT v.doi, d.concept_doi
+         FROM dataset_versions v
+         JOIN datasets d ON d.dataset_id = v.dataset_id
+         WHERE v.dataset_id = ? AND v.version = ?
+         LIMIT 1`,
+  )
+    .bind(dataset_id, version)
+    .first<{ doi: string; concept_doi: string | null }>();
+
+  if (!row) {
+    return c.json({ error: `No published version row for ${dataset_id}@${version}` }, 404);
+  }
+
+  try {
+    const pat = await getDatasetsToken(c.env);
+    await triggerManifestGeneration(
+      dataset_id,
+      version,
+      row.doi,
+      row.concept_doi,
+      // callback_token + callback_url are unused when skip_callback=true,
+      // but the workflow still echoes them into its summary log. Pass
+      // empty strings so the dispatch payload doesn't leak our real
+      // HMAC secret material for a flow that won't validate it.
+      "",
+      "",
+      pat,
+      { skipCanary: skip_canary ?? false, skipCallback: true },
+    );
+    return c.json({ dispatched: true, dataset_id, version });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error(`[manifest/dispatch] failed dataset=${dataset_id} version=${version}:`, msg);
+    return c.json({ error: `Dispatch failed: ${msg}` }, 502);
+  }
+});
