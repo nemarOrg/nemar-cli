@@ -195,6 +195,71 @@ phase.
 
 `Cache-Control: public, max-age=60`.
 
+### `GET /<datasetId>/page-bundle.json?v=<version>`
+
+Returns landing + metadata + summary + catalog row in one JSON payload so
+SSR consumers can render the dataset detail page from a single HTTP fetch
+instead of fanning out 4 parallel requests + 2 deferred client fetches.
+
+Query parameter `v` is optional; absent or unknown values fall back to
+`landing.latest` rather than returning 404 (the consumer can render a
+"version not found, showing latest" UI from the bundle's own `version`
+field).
+
+```json
+{
+  "dataset_id": "on005505",
+  "version": "1.0.0",
+  "served_at": "2026-05-26T18:30:00.000Z",
+  "complete": true,
+  "landing": { "ok": true, "data": { "latest": "v1.0.0", "versions": [...] } },
+  "metadata": { "ok": true, "data": { /* same shape as /metadata.json */ } },
+  "enrichment_degraded": false,
+  "summary": { "ok": true, "data": { /* same shape as /<v>/summary.json */ } },
+  "catalog_row": {
+    "ok": true,
+    "data": {
+      "dataset_id": "on005505",
+      "name": "...",
+      "description": "...",
+      "license": "CC-BY-SA 4.0",
+      "modalities": "eeg",
+      "tasks": "rest,RestingState",
+      "authors": "...",
+      "concept_doi": "10.82901/nemar.on005505",
+      "github_repo": "nemarDatasets/on005505"
+    }
+  }
+}
+```
+
+**Component wrapping.** Each upstream is returned as a tagged union:
+
+- `{ ok: true, data: ... }` — fetched successfully (or, for `summary` on an
+  unpublished dataset, `{ ok: true, data: null }` by design).
+- `{ ok: false, error: "<message>" }` — that upstream failed; the bundle
+  still ships so the consumer can render whichever components succeeded.
+
+**`complete` flag and cache policy.** When all four components are `ok`
+AND (no version is published OR the summary fetch returned non-null),
+`complete: true` and the response carries
+`Cache-Control: public, max-age=60, s-maxage=300, stale-while-revalidate=86400`.
+Otherwise `complete: false` and the response is `Cache-Control: no-store`
+so a transient upstream blip is not pinned at the CF edge for 24 h. The
+truth table is pinned by `isBundleComplete` in
+`backend/src/services/page-bundle.ts` and verified by `test/page-bundle.unit.test.ts`.
+
+**`enrichment_degraded` flag.** True when `enrichment_json` existed but
+couldn't be parsed (LLM pipeline corruption); metadata is still present
+using the row's deterministic columns, but enriched fields like
+description, authors, related_identifiers may be incomplete. Consumers
+can surface a "metadata may be incomplete" indicator.
+
+**Not included** in the bundle: the BIDS tree (HTML). Consumers render
+that progressively from `summary.paths` to keep the bundle small. The
+full `bids_index` is still served by `/<datasetId>/metadata.json` for
+consumers that need the structured form.
+
 ### `GET /<datasetId>` and `GET /<datasetId>/`
 
 Dataset landing page. Content-negotiated: HTML for browsers, JSON for
