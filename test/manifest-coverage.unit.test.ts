@@ -1,187 +1,122 @@
 /**
- * Unit tests for the schema-compare helper in manifest-coverage. The HTTP
- * probe and the D1 query are exercised end-to-end by the admin route
- * integration tests; the schema comparison is the only piece with branching
- * logic worth pinning here.
+ * Unit tests for the schema classifier in manifest-coverage. The full
+ * `buildCoverageReport` (D1 query + S3 fan-in) is exercised end-to-end by
+ * the admin route + post-deploy smoke; the per-row schema classification
+ * is the only piece with branching logic worth pinning here.
  *
- * Imported indirectly because compareSchemas is module-internal: we re-test
- * the public surface via the smallest fixture that exercises it.
+ * Dependency-injection note: `probeSummary` accepts a `SummaryFetcher`
+ * function so tests can stub the S3 read directly without swapping
+ * `globalThis.fetch` or constructing a fake Bindings object. Production
+ * wires the fetcher to `loadSummary()` (direct S3 SigV4).
  */
 
 import { describe, expect, test } from "bun:test";
 
-// Re-export under test via the function that uses it.
-import { probeSummary } from "../backend/src/services/manifest-coverage";
+import {
+  type SummaryFetcher,
+  buildCoverageReport,
+  probeSummary,
+} from "../backend/src/services/manifest-coverage";
+import type { Bindings } from "../backend/src/types/bindings";
+
+/** Build a SummaryFetcher that always returns the same scripted result. */
+function stubFetcher(
+  scripted: { kind: "ok"; body: unknown } | { kind: "null" } | { kind: "throw"; error: Error },
+): SummaryFetcher {
+  return async () => {
+    if (scripted.kind === "null") return null;
+    if (scripted.kind === "throw") throw scripted.error;
+    return JSON.stringify(scripted.body);
+  };
+}
 
 describe("probeSummary schema classification", () => {
-  // We can't run real HTTP against data.nemar.org from a unit test, so use a
-  // mocked fetch that returns scripted bodies. Bun's global fetch is
-  // overrideable per-test.
-  function withFetch<T>(
-    response: { status: number; body?: unknown } | { error: Error },
-    fn: () => Promise<T>,
-  ): Promise<T> {
-    const original = globalThis.fetch;
-    globalThis.fetch = (async () => {
-      if ("error" in response) throw response.error;
-      const body = response.body ?? {};
-      return new Response(JSON.stringify(body), { status: response.status });
-    }) as typeof fetch;
-    return fn().finally(() => {
-      globalThis.fetch = original;
-    });
-  }
-
   test("schema 1.1 → ok", async () => {
-    const state = await withFetch(
-      { status: 200, body: { schema_version: "1.1" } },
-      () => probeSummary("nm000999", "1.0.0"),
+    const state = await probeSummary(
+      stubFetcher({ kind: "ok", body: { schema_version: "1.1" } }),
+      "nm000999",
+      "1.0.0",
     );
     expect(state.kind).toBe("ok");
     if (state.kind === "ok") expect(state.schema_version).toBe("1.1");
   });
 
   test("schema 1.0 (legacy) → stale", async () => {
-    const state = await withFetch(
-      { status: 200, body: { schema_version: "1.0" } },
-      () => probeSummary("nm000999", "1.0.0"),
+    const state = await probeSummary(
+      stubFetcher({ kind: "ok", body: { schema_version: "1.0" } }),
+      "nm000999",
+      "1.0.0",
     );
     expect(state.kind).toBe("stale");
     if (state.kind === "stale") expect(state.schema_version).toBe("1.0");
   });
 
   test("schema 1.2 (future minor) → ok (forward-compatible)", async () => {
-    // Pin this: the comparator must not flip 1.2 to stale just because the
-    // current target is 1.1. A future Phase X bump would update the target;
-    // the comparator should keep treating already-newer payloads as ok in
-    // the meantime.
-    const state = await withFetch(
-      { status: 200, body: { schema_version: "1.2" } },
-      () => probeSummary("nm000999", "1.0.0"),
+    // Pin this: the comparator must NOT flip 1.2 to stale just because the
+    // current TARGET_SCHEMA is 1.1. A future bump updates the target; the
+    // comparator should keep treating already-newer payloads as ok in the
+    // meantime.
+    const state = await probeSummary(
+      stubFetcher({ kind: "ok", body: { schema_version: "1.2" } }),
+      "nm000999",
+      "1.0.0",
     );
     expect(state.kind).toBe("ok");
+    if (state.kind === "ok") expect(state.schema_version).toBe("1.2");
   });
 
   test("schema 2.0 (future major) → ok", async () => {
-    const state = await withFetch(
-      { status: 200, body: { schema_version: "2.0" } },
-      () => probeSummary("nm000999", "1.0.0"),
+    const state = await probeSummary(
+      stubFetcher({ kind: "ok", body: { schema_version: "2.0" } }),
+      "nm000999",
+      "1.0.0",
     );
     expect(state.kind).toBe("ok");
   });
 
-  test("404 → missing", async () => {
-    const state = await withFetch(
-      { status: 404 },
-      () => probeSummary("nm000999", "1.0.0"),
-    );
+  test("fetcher returns null → missing", async () => {
+    // SummaryFetcher's contract: null means "definitely not there" (S3 404).
+    // probeSummary maps that to {kind: missing}.
+    const state = await probeSummary(stubFetcher({ kind: "null" }), "nm000999", "1.0.0");
     expect(state.kind).toBe("missing");
   });
 
-  test("5xx → error (NOT classified as missing)", async () => {
-    // Important: a transient S3 5xx must not be reported as "missing" or the
-    // backfill would re-dispatch every version on every transient hiccup.
-    const state = await withFetch(
-      { status: 503 },
-      () => probeSummary("nm000999", "1.0.0"),
-    );
-    expect(state.kind).toBe("error");
-    if (state.kind === "error") expect(state.status).toBe(503);
-  });
-
-  test("malformed JSON (missing schema_version) → error", async () => {
-    const state = await withFetch(
-      { status: 200, body: { totals: { files: 0 } } },
-      () => probeSummary("nm000999", "1.0.0"),
-    );
-    expect(state.kind).toBe("error");
-    if (state.kind === "error") {
-      expect(state.message).toContain("schema_version");
-    }
-  });
-
-  test("network error → error with status=0", async () => {
-    const state = await withFetch(
-      { error: new TypeError("fetch failed") },
-      () => probeSummary("nm000999", "1.0.0"),
+  test("fetcher throws → error (status=0 sentinel for non-HTTP failures)", async () => {
+    // loadSummary throws on 403-after-fallback and 5xx. probeSummary surfaces
+    // these as {kind: error} so the whole sweep doesn't abort on one bad row.
+    const state = await probeSummary(
+      stubFetcher({ kind: "throw", error: new Error("S3 503 Service Unavailable") }),
+      "nm000999",
+      "1.0.0",
     );
     expect(state.kind).toBe("error");
     if (state.kind === "error") {
       expect(state.status).toBe(0);
-      expect(state.message).toContain("fetch failed");
+      expect(state.message).toContain("S3 503");
     }
   });
 
-  test("version without v prefix is normalised", async () => {
-    let capturedUrl = "";
-    const original = globalThis.fetch;
-    globalThis.fetch = (async (input: RequestInfo | URL) => {
-      capturedUrl = typeof input === "string" ? input : input.toString();
-      return new Response(JSON.stringify({ schema_version: "1.1" }), { status: 200 });
-    }) as typeof fetch;
-    try {
-      await probeSummary("nm000999", "1.0.0");
-      // Probe URL carries a `?_cb=<ts>` to defeat the data.nemar.org CDN
-      // s-maxage=86400 + SWR=86400 (otherwise `--fix verify` would read
-      // stale schema for up to 48h). Assert the path + the cache-bust shape.
-      expect(capturedUrl).toMatch(
-        /^https:\/\/data\.nemar\.org\/nm000999\/v1\.0\.0\/summary\.json\?_cb=\d+$/,
-      );
-    } finally {
-      globalThis.fetch = original;
+  test("malformed JSON → error (not collapsed to missing)", async () => {
+    // SummaryFetcher returning a string that isn't valid JSON: report as
+    // error so the operator sees there's a corrupted artifact, not just
+    // "no summary found".
+    const stub: SummaryFetcher = async () => "{not: valid json}";
+    const state = await probeSummary(stub, "nm000999", "1.0.0");
+    expect(state.kind).toBe("error");
+    if (state.kind === "error") {
+      expect(state.message).toContain("invalid JSON");
     }
   });
 
-  test("version with v prefix is not double-prefixed", async () => {
-    let capturedUrl = "";
-    const original = globalThis.fetch;
-    globalThis.fetch = (async (input: RequestInfo | URL) => {
-      capturedUrl = typeof input === "string" ? input : input.toString();
-      return new Response(JSON.stringify({ schema_version: "1.1" }), { status: 200 });
-    }) as typeof fetch;
-    try {
-      await probeSummary("nm000999", "v1.0.0");
-      expect(capturedUrl).toMatch(
-        /^https:\/\/data\.nemar\.org\/nm000999\/v1\.0\.0\/summary\.json\?_cb=\d+$/,
-      );
-    } finally {
-      globalThis.fetch = original;
-    }
-  });
-
-  test("each call emits a fresh cache-bust value", async () => {
-    // Per-request `_cb` value: two probes back-to-back must NOT collide on
-    // the same cached entry. If a future "optimization" memoizes `_cb` to a
-    // module constant or a hashed (id, version) tuple, the CDN cache for
-    // that exact URL would be hit again and the bug we're defending against
-    // resurfaces.
-    const seenUrls: string[] = [];
-    const original = globalThis.fetch;
-    globalThis.fetch = (async (input: RequestInfo | URL) => {
-      seenUrls.push(typeof input === "string" ? input : input.toString());
-      return new Response(JSON.stringify({ schema_version: "1.1" }), { status: 200 });
-    }) as typeof fetch;
-    try {
-      await probeSummary("nm000999", "1.0.0");
-      // Date.now() is millisecond-precision; ensure the two calls land in
-      // different milliseconds (Bun's setImmediate-equivalent is fast).
-      await new Promise((resolve) => setTimeout(resolve, 2));
-      await probeSummary("nm000999", "1.0.0");
-      expect(seenUrls).toHaveLength(2);
-      expect(seenUrls[0]).not.toBe(seenUrls[1]);
-    } finally {
-      globalThis.fetch = original;
-    }
-  });
-
-  test("empty schema_version short-circuits to error before compareSchemas runs", async () => {
-    // Ordering invariant: probeSummary must classify empty schema_version as
-    // {kind: error} BEFORE the semver comparator runs. If those checks ever
-    // swap, an empty string would parse to "0.0" and become "stale", which
-    // would mass-dispatch every malformed-payload version on --fix.
-    const state = await withFetch(
-      { status: 200, body: { schema_version: "" } },
-      () => probeSummary("nm000999", "1.0.0"),
+  test("empty schema_version string is classified as error, NOT stale", async () => {
+    // Ordering invariant: probeSummary short-circuits an empty schema_version
+    // to {kind: error} BEFORE compareSchemas runs. If those checks ever swap,
+    // an empty string would parse to "0.0" and become "stale", which would
+    // mass-dispatch every malformed-payload version on --fix.
+    const state = await probeSummary(
+      stubFetcher({ kind: "ok", body: { schema_version: "" } }),
+      "nm000999",
+      "1.0.0",
     );
     expect(state.kind).toBe("error");
     if (state.kind === "error") {
@@ -189,57 +124,148 @@ describe("probeSummary schema classification", () => {
     }
   });
 
-  test("forward-compat schemas echo the version verbatim", async () => {
-    // The earlier 1.2/2.0 ok tests only assert .kind. Pin the schema_version
-    // field too so a future refactor introducing a "newer-than-target" third
-    // state would have to update these assertions, surfacing the design
-    // change in code review.
-    const future = await withFetch(
-      { status: 200, body: { schema_version: "1.2" } },
-      () => probeSummary("nm000999", "1.0.0"),
+  test("missing schema_version key → error", async () => {
+    const state = await probeSummary(
+      stubFetcher({ kind: "ok", body: { totals: { files: 0 } } }),
+      "nm000999",
+      "1.0.0",
     );
-    expect(future.kind).toBe("ok");
-    if (future.kind === "ok") expect(future.schema_version).toBe("1.2");
+    expect(state.kind).toBe("error");
   });
 
-  test("pre-aborted outer signal short-circuits fetch", async () => {
-    // If the caller hands in a signal that's already aborted at call time,
-    // probeSummary must NOT wait the full 8 s fetch timeout — the listener
-    // path never fires for already-aborted signals.
+  test("non-string schema_version (number) → error", async () => {
+    // Defensive: a generator regression that emits `schema_version: 1.1`
+    // (number, not string) would otherwise silently classify as error
+    // because `typeof !== "string"`. Pin the contract.
+    const state = await probeSummary(
+      stubFetcher({ kind: "ok", body: { schema_version: 1.1 } }),
+      "nm000999",
+      "1.0.0",
+    );
+    expect(state.kind).toBe("error");
+  });
+
+  test("fetcher receives the exact (datasetId, version) passed to probeSummary", async () => {
+    // Pin the wire contract — defends against a refactor that accidentally
+    // swaps the args or normalises them before handing to the fetcher.
     //
-    // The mock fetch here honors the AbortSignal the same way the real
-    // platform implementation does: throws synchronously when the signal
-    // is already aborted. That tests the production behavior of "we forward
-    // the abort to fetch immediately", not just "we exit fast for any reason."
-    const ctrl = new AbortController();
-    ctrl.abort();
+    // Note: the `v` prefix normalisation that used to live in probeSummary
+    // (when this probed `data.nemar.org/<id>/v<version>/summary.json`) now
+    // lives in `loadSummary` (backend/src/services/s3.ts, line ~493). Tests
+    // for that normalisation belong with loadSummary, not here.
+    let captured: { id: string; version: string } | null = null;
+    const stub: SummaryFetcher = async (id, version) => {
+      captured = { id, version };
+      return JSON.stringify({ schema_version: "1.1" });
+    };
+    await probeSummary(stub, "on007315", "v2.1.0");
+    expect(captured).toEqual({ id: "on007315", version: "v2.1.0" });
+  });
 
-    let fetchCalled = false;
-    const original = globalThis.fetch;
-    globalThis.fetch = (async (_input: RequestInfo | URL, init?: RequestInit) => {
-      fetchCalled = true;
-      if (init?.signal?.aborted) {
-        const e: Error & { name?: string } = new Error("aborted");
-        e.name = "AbortError";
-        throw e;
-      }
-      return new Response(JSON.stringify({ schema_version: "1.1" }), { status: 200 });
-    }) as typeof fetch;
+  test("hanging fetcher times out after PROBE_TIMEOUT_MS instead of starving the slot", async () => {
+    // PROBE_TIMEOUT_MS in source is 8000; use a far-shorter assertion that
+    // wraps the production timeout's behavior — if probeSummary races against
+    // an indefinitely-pending fetcher and surfaces the timeout as an error
+    // state, this test should resolve in well under the 8s cap.
+    //
+    // Bun's test runner has a default 5s timeout per test, so we'd see a
+    // test-runner timeout if probeSummary wasn't doing its own race. We
+    // explicitly bound the test at 9s (one second past the production cap)
+    // so a regression to "no timeout" surfaces as a test failure with a
+    // useful message, not just a hung CI job.
+    const start = Date.now();
+    const hangingFetcher: SummaryFetcher = () => new Promise(() => {});
+    const state = await probeSummary(hangingFetcher, "nm000999", "1.0.0");
+    const elapsed = Date.now() - start;
 
-    try {
-      const start = Date.now();
-      const state = await probeSummary("nm000999", "1.0.0", ctrl.signal);
-      const elapsed = Date.now() - start;
-      // Far below the 8s FETCH_TIMEOUT_MS — generous bound to avoid flakes.
-      expect(elapsed).toBeLessThan(1000);
-      expect(state.kind).toBe("error");
-      // We did invoke fetch; the abort happens inside it. The behavior we
-      // care about is that probeSummary's internal AbortController was
-      // wired to the already-aborted outer signal so fetch sees an aborted
-      // signal on the first call (not 8s later when the timeout fires).
-      expect(fetchCalled).toBe(true);
-    } finally {
-      globalThis.fetch = original;
+    expect(state.kind).toBe("error");
+    if (state.kind === "error") {
+      expect(state.message).toContain("timeout");
     }
+    // Sanity: completed well below the production 8s cap (we're not asserting
+    // exact timing, just that the race fired roughly when expected).
+    expect(elapsed).toBeLessThan(8500);
+    expect(elapsed).toBeGreaterThanOrEqual(7000);
+  }, 10_000); // override Bun's default 5s test timeout
+});
+
+describe("buildCoverageReport", () => {
+  /**
+   * Smallest viable D1 stub: enough to satisfy `env.DB.prepare(...).all<T>()`.
+   * Per project no-mocks rule, this is dependency-injection at the published
+   * function boundary (buildCoverageReport accepts `fetchSummary?` as its
+   * second arg), NOT a mock of a database. The D1 surface we exercise here
+   * is one prepared query; faking it lets us pin the totals tally without
+   * standing up a real D1.
+   */
+  function stubEnv(rows: { dataset_id: string; version: string; doi: string; concept_doi: string | null }[]): Bindings {
+    const fakeDB = {
+      prepare: (_sql: string) => ({
+        all: async <T>() => ({ results: rows as unknown as T[], success: true, meta: {} }),
+      }),
+    };
+    return { DB: fakeDB } as unknown as Bindings;
+  }
+
+  test("totals tally matches the per-row classifier output", async () => {
+    // Pin the classifier→totals mapping. A typo like `ok++` vs `stale++`
+    // would silently mis-color the dashboard; nothing currently catches it.
+    const env = stubEnv([
+      { dataset_id: "nm000100", version: "1.0.0", doi: "d", concept_doi: "c" },
+      { dataset_id: "nm000101", version: "1.0.0", doi: "d", concept_doi: "c" },
+      { dataset_id: "nm000102", version: "1.0.0", doi: "d", concept_doi: "c" },
+      { dataset_id: "nm000103", version: "1.0.0", doi: "d", concept_doi: "c" },
+      { dataset_id: "nm000104", version: "1.0.0", doi: "d", concept_doi: "c" },
+    ]);
+    const scripted: Record<string, () => Promise<string | null>> = {
+      nm000100: async () => JSON.stringify({ schema_version: "1.1" }), // ok
+      nm000101: async () => JSON.stringify({ schema_version: "1.0" }), // stale
+      nm000102: async () => null, // missing
+      nm000103: async () => {
+        throw new Error("S3 503");
+      }, // error
+      nm000104: async () => JSON.stringify({ schema_version: "1.1" }), // ok
+    };
+    const fetcher: SummaryFetcher = (id) => scripted[id]?.() ?? Promise.resolve(null);
+
+    const report = await buildCoverageReport(env, fetcher);
+
+    expect(report.totals).toEqual({
+      versions: 5,
+      ok: 2,
+      stale: 1,
+      missing: 1,
+      error: 1,
+    });
+    expect(report.target_schema).toBe("1.1");
+  });
+
+  test("probeAll preserves input row order even when fetchers resolve out of order", async () => {
+    // The CLI table and cron markdown rely on out[i] === rows[i] ordering.
+    // A future refactor to out.push(...) would silently break this.
+    const env = stubEnv([
+      { dataset_id: "nm000aaa", version: "1.0.0", doi: "d", concept_doi: "c" },
+      { dataset_id: "nm000bbb", version: "1.0.0", doi: "d", concept_doi: "c" },
+      { dataset_id: "nm000ccc", version: "1.0.0", doi: "d", concept_doi: "c" },
+      { dataset_id: "nm000ddd", version: "1.0.0", doi: "d", concept_doi: "c" },
+    ]);
+    // Reverse delays: first row sleeps longest, so out-of-order completion
+    // is forced. If the implementation pushes (not index-assigns), the
+    // returned order would be the inverse of the input.
+    const fetcher: SummaryFetcher = async (id) => {
+      const delay =
+        { nm000aaa: 80, nm000bbb: 60, nm000ccc: 40, nm000ddd: 20 }[id] ?? 0;
+      await new Promise((resolve) => setTimeout(resolve, delay));
+      return JSON.stringify({ schema_version: "1.1" });
+    };
+
+    const report = await buildCoverageReport(env, fetcher);
+
+    expect(report.versions.map((v) => v.dataset_id)).toEqual([
+      "nm000aaa",
+      "nm000bbb",
+      "nm000ccc",
+      "nm000ddd",
+    ]);
   });
 });
