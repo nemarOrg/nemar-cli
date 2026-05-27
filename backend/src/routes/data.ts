@@ -441,6 +441,51 @@ async function fileOrIndexHandler(
   }
 
   if (result.kind === "directory") {
+    // JSON content negotiation runs BEFORE the removed-since diff so the
+    // JSON path doesn't pay an extra D1 round-trip + manifest fetch it
+    // doesn't need. Follows the same `pickResponseFormat` + early-return
+    // approach as `qaHandler` and `datasetRootResponse` further down,
+    // though `qaHandler` additionally folds HEAD into its JSON branch
+    // (HEAD on this directory route stays text/html — see line ~371 —
+    // for rclone-style consumers that ignore Accept).
+    //
+    // Shape note: the QA equivalent carries `truncated` because its
+    // resolver is backed by a paged S3 ListObjectsV2. The manifest-
+    // backed `resolveFile` here materialises every child up-front, so
+    // a `truncated` field would always be false — omitting it
+    // deliberately rather than emitting a permanent-`false`.
+    //
+    // `Vary: "Accept"` is required: HTML and JSON share the same URL,
+    // and a shared cache without Vary in its key would mix them. The
+    // `?format=` variant sidesteps the issue because the URL differs,
+    // but `Accept`-only requests need it.
+    //
+    // Programmatic consumers (the website's tree UI primarily — see
+    // nemarOrg/website#76 for the pivot off summary.json) get the same
+    // `result.children` shape the HTML renderer consumes, no parallel
+    // serializer to drift out of sync. Issue #636.
+    const accept = request.headers.get("accept");
+    const formatParam = new URL(request.url).searchParams.get("format");
+    const fmt = pickResponseFormat({ accept, formatParam });
+
+    if (fmt === "json") {
+      const body = {
+        dataset_id: datasetId,
+        version: resolved.version,
+        path: result.path,
+        kind: "directory" as const,
+        children: result.children,
+      };
+      return new Response(JSON.stringify(body), {
+        status: 200,
+        headers: {
+          "Content-Type": "application/json",
+          "Cache-Control": "public, max-age=60",
+          Vary: "Accept",
+        },
+      });
+    }
+
     // Compare this directory's listing against the immediately-prior
     // version. The prior version is the next row in versionTags after
     // the current one (rows are sorted newest-first). Skip the diff
@@ -471,6 +516,7 @@ async function fileOrIndexHandler(
       headers: {
         "Content-Type": "text/html; charset=utf-8",
         "Cache-Control": "public, max-age=60",
+        Vary: "Accept",
       },
     });
   }
@@ -822,6 +868,7 @@ async function qaHandler(
       headers: {
         "Content-Type": "application/json",
         "Cache-Control": "public, max-age=300",
+        Vary: "Accept",
       },
     });
   }
@@ -841,6 +888,7 @@ async function qaHandler(
     headers: {
       "Content-Type": "text/html; charset=utf-8",
       "Cache-Control": "public, max-age=300",
+      Vary: "Accept",
     },
   });
 }
