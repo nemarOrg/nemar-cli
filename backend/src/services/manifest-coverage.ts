@@ -63,6 +63,17 @@ const TARGET_SCHEMA = "1.1";
 const MAX_CONCURRENT = 8;
 
 /**
+ * Per-probe wall-clock cap. loadSummary uses `await fetch(url)` twice (unsigned,
+ * signed fallback) with no built-in timeout. Cloudflare Workers `fetch` is
+ * bounded by the platform's ~30 s subrequest cap, but a slow-loris S3 edge
+ * could occupy one of the 8 worker slots until that cap fires. Cap the
+ * per-row probe ourselves so a degraded S3 partition doesn't starve the
+ * fan-out: 8 s is generous for an S3 GET of a 50–500 KB summary, well above
+ * the median (~700 ms direct curl seen in prod smoke).
+ */
+const PROBE_TIMEOUT_MS = 8_000;
+
+/**
  * Pluggable "fetch one summary.json's raw text" function. The production
  * wiring builds this from `Bindings` to call `loadSummary()` (direct S3
  * SigV4). Tests inject a stub so probeSummary can be unit-tested without
@@ -155,7 +166,21 @@ export async function probeSummary(
   version: string,
 ): Promise<SchemaState> {
   try {
-    const raw = await fetchSummary(datasetId, version);
+    // Per-probe timeout via Promise.race. loadSummary doesn't accept an
+    // AbortSignal today, so we can't cancel the underlying fetch — the
+    // timeout only frees up *this* worker slot in probeAll while the
+    // orphaned fetch runs to completion in the background. The platform
+    // subrequest cap eventually reclaims that. Real fix is plumbing an
+    // AbortSignal through loadSummary; tracked as a follow-up.
+    const raw = await Promise.race([
+      fetchSummary(datasetId, version),
+      new Promise<never>((_, reject) =>
+        setTimeout(
+          () => reject(new Error(`probe timeout after ${PROBE_TIMEOUT_MS}ms`)),
+          PROBE_TIMEOUT_MS,
+        ),
+      ),
+    ]);
     if (raw === null) return { kind: "missing" };
     let body: { schema_version?: unknown };
     try {
@@ -219,13 +244,20 @@ async function probeAll(
  * `fetchSummary` is exposed as an optional parameter so callers (mainly
  * tests) can stub the S3 read. Production callers should omit it; the
  * `defaultSummaryFetcher(env)` wiring is the one production cares about.
+ *
+ * Default-arg evaluation note: we deliberately build the fetcher inside the
+ * function body instead of as a parameter default. A parameter default like
+ * `fetchSummary = defaultSummaryFetcher(env)` would run on every call even
+ * when the caller passes a stub — cheap today but a footgun if the default
+ * factory ever does real work.
  */
 export async function buildCoverageReport(
   env: Bindings,
-  fetchSummary: SummaryFetcher = defaultSummaryFetcher(env),
+  fetchSummary?: SummaryFetcher,
 ): Promise<CoverageReport> {
+  const fetcher = fetchSummary ?? defaultSummaryFetcher(env);
   const rows = await listAllPublishedVersions(env);
-  const versions = await probeAll(rows, fetchSummary);
+  const versions = await probeAll(rows, fetcher);
 
   const totals = {
     versions: versions.length,
