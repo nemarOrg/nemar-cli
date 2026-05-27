@@ -512,6 +512,9 @@ datasetRoutes.get("/", optionalAuthMiddleware, async (c) => {
     });
     query += buildSortClause(sort);
 
+    // Authed --mine path: response carries the caller's private datasets,
+    // never share at the edge. See #639 + the public-path comment below.
+    c.header("Cache-Control", "private, no-store");
     return executeAndReturn(c, db, query, params, { limit, offset });
   }
 
@@ -615,6 +618,20 @@ datasetRoutes.get("/", optionalAuthMiddleware, async (c) => {
   const unionQuery = `${managedQuery} UNION ALL ${catalogQuery}${buildSortClause(sort, true)}`;
   const allParams = [...managedParams, ...catalogParams];
 
+  // CF edge cache: anonymous list responses are identical for all callers
+  // (no private rows leak — the SQL already filters visibility), so share
+  // them at the edge. Authed callers may have additional visibility into
+  // private rows their owner / collaborator / admin status grants, so
+  // their responses stay private + no-store. Without this header every
+  // SSR call from the website's Worker pool hits origin + decrements the
+  // per-IP rate-limit bucket; a handful of concurrent visitors of ww2 then
+  // trips the cap (#639). Catalog mutations are rare, so s-maxage of 5 min
+  // + SWR is plenty fresh.
+  if (user) {
+    c.header("Cache-Control", "private, no-store");
+  } else {
+    c.header("Cache-Control", "public, max-age=30, s-maxage=300, stale-while-revalidate=600");
+  }
   return executeAndReturn(c, db, unionQuery, allParams, { limit, offset });
 });
 
@@ -984,6 +1001,13 @@ datasetRoutes.get("/resolve/:sourceId", optionalAuthMiddleware, async (c) => {
         owner_username: string;
       }>();
 
+    // CF edge cache: the query is restricted to `visibility = 'public'`
+    // and `status = 'active'`, so the response is identical for any
+    // caller regardless of auth — safe to share at the edge. The
+    // canonical-resolve mapping changes only when a dataset is
+    // re-published, which is rare; s-maxage of 5 min + SWR is plenty.
+    // Issue #639.
+    c.header("Cache-Control", "public, max-age=30, s-maxage=300, stale-while-revalidate=600");
     if (!match) {
       return c.json({ found: false });
     }
@@ -1067,6 +1091,16 @@ datasetRoutes.get("/:id", optionalAuthMiddleware, async (c) => {
     }
   }
 
+  // CF edge cache only for anonymous traffic. Authed responses may include
+  // private-dataset rows scoped to the caller's permissions — must stay
+  // private + no-store so the edge doesn't share one user's view with
+  // another. See the list handler at line ~431 for the same pattern + the
+  // rationale (#639: Worker-egress IP pooling on the website SSR path).
+  if (user) {
+    c.header("Cache-Control", "private, no-store");
+  } else {
+    c.header("Cache-Control", "public, max-age=30, s-maxage=300, stale-while-revalidate=600");
+  }
   return c.json({ dataset });
 });
 
