@@ -31,20 +31,24 @@ const WINDOW_SIZE = 60; // seconds
 // inside a Cloudflare Worker (@astrojs/cloudflare); those requests share a
 // small pool of CF egress IPs, so a handful of concurrent visitors of
 // ww2.nemar.org are bucketed as one client by the per-IP keyer and trip
-// the cap. Cloudflare bot management at the zone level is the actual
-// primary control against abuse; this middleware is the secondary floor
-// against runaway loops. Bumped 100 → 500 in #639 along with adding
-// Cache-Control to the three dataset GET endpoints (which is the real
-// architectural fix; this cap raise is defense-in-depth).
+// the cap. This middleware is the secondary floor against runaway loops;
+// if Cloudflare bot management is enabled at the zone level it is the
+// primary control against abuse. Bumped 100 → 500 in #639 along with
+// adding Cache-Control to the three dataset GET endpoints (which is the
+// real architectural fix; this cap raise is defense-in-depth).
 const MAX_REQUESTS = 500;
 // Authenticated bucket. Originally sized for the heaviest single admin
 // orchestration: `nemar admin publish approve` on a 6500-object dataset
-// reaches ~165 sequential subrequests (1 LIST + 100 PUTs per page × ~65
-// pages) plus the surrounding orchestrator steps. 1000/60s gives ~6×
-// headroom over the heaviest single approve and comfortably absorbs
-// back-to-back queues across multiple admins / multiple datasets. Bumped
-// 500 → 1000 in #639. Not exposed as configuration — the appropriate
-// number lives in code review, not at runtime.
+// makes ~65 sequential CLI→Worker HTTP calls (one batch per ~100-object
+// page) plus the surrounding orchestrator steps — call it ~165 total
+// requests counting orchestrator overhead. (Each Worker invocation
+// itself fans out internally to ~120 sub-fetches against S3/D1; that's
+// a separate budget governed by CF's per-invocation subrequest cap and
+// is unrelated to this token-bucket count.) 1000/60s gives ~6× headroom
+// over the heaviest single approve and comfortably absorbs back-to-back
+// queues across multiple admins / multiple datasets. Bumped 500 → 1000
+// in #639. Not exposed as configuration — the appropriate number lives
+// in code review, not at runtime.
 const TOKEN_MAX_REQUESTS_AUTHED = 1000;
 
 // Stricter limits for auth endpoints
