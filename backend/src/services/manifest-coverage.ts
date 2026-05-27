@@ -10,12 +10,18 @@
  * `nemar admin summary check` and the weekly cron) and inform which
  * versions need a backfill dispatch.
  *
- * Why query data.nemar.org instead of trusting D1: the manifest workflow
- * writes summary.json to S3 directly. D1 only records that the version
- * exists; it does not track summary schema version. The single source of
- * truth for "what schema is currently published" is the artifact itself.
+ * Why read S3 directly (via loadSummary) instead of fetching through
+ * data.nemar.org: the data.nemar.org/<id>/<v>/summary.json route is
+ * served by the SAME Worker that hosts /admin/summary/coverage. Fanning
+ * out 8 concurrent fetches across 130 versions against our own Worker
+ * triggers Cloudflare Worker-to-Worker subrequest behavior that times
+ * out (HTTP 522) under load — observed end-to-end on first post-deploy
+ * smoke. Reading the S3 object directly via SigV4 bypasses CF and the
+ * self-call entirely; this is the same code path Phase 3's page-bundle
+ * already uses for its summary fan-in.
  */
 import type { Bindings } from "../types/bindings";
+import { type PresignedUrlOptions, loadSummary } from "./s3";
 
 export type SchemaState =
   | { kind: "ok"; schema_version: string }
@@ -54,9 +60,45 @@ export interface CoverageReport {
  * target, not against the previous one.
  */
 const TARGET_SCHEMA = "1.1";
-const DATA_BASE = "https://data.nemar.org";
-const FETCH_TIMEOUT_MS = 8_000;
 const MAX_CONCURRENT = 8;
+
+/**
+ * Per-probe wall-clock cap. loadSummary uses `await fetch(url)` twice (unsigned,
+ * signed fallback) with no built-in timeout. Cloudflare Workers `fetch` is
+ * bounded by the platform's ~30 s subrequest cap, but a slow-loris S3 edge
+ * could occupy one of the 8 worker slots until that cap fires. Cap the
+ * per-row probe ourselves so a degraded S3 partition doesn't starve the
+ * fan-out: 8 s is generous for an S3 GET of a 50–500 KB summary, well above
+ * the median (~700 ms direct curl seen in prod smoke).
+ */
+const PROBE_TIMEOUT_MS = 8_000;
+
+/**
+ * Pluggable "fetch one summary.json's raw text" function. The production
+ * wiring builds this from `Bindings` to call `loadSummary()` (direct S3
+ * SigV4). Tests inject a stub so probeSummary can be unit-tested without
+ * any real S3 or Bindings setup. Mirrors the dependency-injection seam
+ * the page-bundle service uses for the same reason.
+ *
+ * Returns null when the summary does not exist (S3 404); throws on any
+ * other I/O / permission failure so probeSummary can classify it as
+ * `kind: "error"`.
+ */
+export type SummaryFetcher = (datasetId: string, version: string) => Promise<string | null>;
+
+function s3OptionsFromEnv(env: Bindings): PresignedUrlOptions {
+  return {
+    bucket: env.S3_BUCKET,
+    region: env.AWS_REGION,
+    accessKeyId: env.AWS_ACCESS_KEY_ID,
+    secretAccessKey: env.AWS_SECRET_ACCESS_KEY,
+  };
+}
+
+function defaultSummaryFetcher(env: Bindings): SummaryFetcher {
+  const opts = s3OptionsFromEnv(env);
+  return (datasetId, version) => loadSummary(opts, datasetId, version);
+}
 
 /**
  * Semver-aware schema comparison so the report doesn't go red the moment
@@ -99,50 +141,57 @@ export async function listAllPublishedVersions(env: Bindings): Promise<VersionRo
 }
 
 /**
- * Fetch summary.json for one (dataset_id, version) and classify its schema.
+ * Read summary.json for one (dataset_id, version) and classify its schema.
+ *
+ * `fetchSummary` is dependency-injected so this function can be unit-tested
+ * without any S3 / Bindings setup. Production wires it via
+ * `defaultSummaryFetcher(env)` which calls `loadSummary()` (direct S3
+ * SigV4 read, NOT through the data.nemar.org CDN-fronted Worker route).
  *
  * Errors are returned, not thrown — the caller wants a complete report
- * even when individual fetches fail (network glitch, S3 IAM drift). A
- * thrown exception here would abort the whole sweep and turn a single
+ * even when individual reads fail (S3 IAM drift, transient 5xx, network).
+ * A thrown exception here would abort the whole sweep and turn a single
  * flaky read into a blank dashboard.
+ *
+ * Cache-busting note: previous implementation fetched the data.nemar.org
+ * route and had to append `?_cb=<ts>` to defeat its 24h s-maxage. This
+ * implementation reads S3 directly so there is no CDN cache to bust —
+ * every read is a fresh SigV4 (unauthenticated for public objects, signed
+ * fallback for private). loadSummary's existing 403 / 404 / 5xx handling
+ * is the contract.
  */
 export async function probeSummary(
+  fetchSummary: SummaryFetcher,
   datasetId: string,
   version: string,
-  signal?: AbortSignal,
 ): Promise<SchemaState> {
-  // Versions in D1 are stored without the "v" prefix (e.g. "1.0.0").
-  // data.nemar.org path uses "v1.0.0".
-  const v = version.startsWith("v") ? version : `v${version}`;
-  // Cache-bust the data.nemar.org URL: summaryJsonHandler ships
-  // `s-maxage=86400, stale-while-revalidate=86400`, so without busting we'd
-  // see up to 48 h of stale schema_version after a successful `--fix`
-  // dispatch finishes. The CLI's "re-run check to verify drift cleared"
-  // guidance is a lie if the probe reads from a 24 h-cached CDN copy.
-  // Per-request unique param defeats the edge cache entirely; this endpoint
-  // is admin-only and runs at most weekly (cron) + on-demand (operator),
-  // so the cache-miss cost is acceptable.
-  const cb = Date.now();
-  const url = `${DATA_BASE}/${encodeURIComponent(datasetId)}/${encodeURIComponent(v)}/summary.json?_cb=${cb}`;
-
-  const ctrl = new AbortController();
-  const timeoutId = setTimeout(() => ctrl.abort(), FETCH_TIMEOUT_MS);
-  // Honor a caller-supplied signal that is *already aborted* at call time,
-  // not just one that aborts later — otherwise a pre-aborted outer signal
-  // would let the fetch run for the full timeout window.
-  if (signal?.aborted) {
-    ctrl.abort();
-  } else {
-    signal?.addEventListener("abort", () => ctrl.abort(), { once: true });
-  }
-
   try {
-    const res = await fetch(url, { signal: ctrl.signal });
-    if (res.status === 404) return { kind: "missing" };
-    if (!res.ok) {
-      return { kind: "error", status: res.status, message: `HTTP ${res.status}` };
+    // Per-probe timeout via Promise.race. loadSummary doesn't accept an
+    // AbortSignal today, so we can't cancel the underlying fetch — the
+    // timeout only frees up *this* worker slot in probeAll while the
+    // orphaned fetch runs to completion in the background. The platform
+    // subrequest cap eventually reclaims that. Real fix is plumbing an
+    // AbortSignal through loadSummary; tracked as a follow-up.
+    const raw = await Promise.race([
+      fetchSummary(datasetId, version),
+      new Promise<never>((_, reject) =>
+        setTimeout(
+          () => reject(new Error(`probe timeout after ${PROBE_TIMEOUT_MS}ms`)),
+          PROBE_TIMEOUT_MS,
+        ),
+      ),
+    ]);
+    if (raw === null) return { kind: "missing" };
+    let body: { schema_version?: unknown };
+    try {
+      body = JSON.parse(raw) as { schema_version?: unknown };
+    } catch (parseErr) {
+      return {
+        kind: "error",
+        status: 200,
+        message: `invalid JSON: ${parseErr instanceof Error ? parseErr.message : String(parseErr)}`,
+      };
     }
-    const body = (await res.json()) as { schema_version?: unknown };
     const schema = typeof body.schema_version === "string" ? body.schema_version : "";
     if (!schema) {
       return { kind: "error", status: 200, message: "missing schema_version" };
@@ -151,23 +200,29 @@ export async function probeSummary(
       ? { kind: "ok", schema_version: schema }
       : { kind: "stale", schema_version: schema };
   } catch (err) {
+    // loadSummary throws on 403-after-fallback and 5xx. Surface as
+    // {kind: "error"} with the underlying message so the report can still
+    // render and the operator can grep for it. status=0 here is the
+    // "not an HTTP status" sentinel for thrown-from-fetch failures, matching
+    // the network-error tests below.
     const message = err instanceof Error ? err.message : String(err);
     return { kind: "error", status: 0, message };
-  } finally {
-    clearTimeout(timeoutId);
   }
 }
 
 /**
  * Map version rows to their schema state, with bounded parallelism. The
- * MAX_CONCURRENT cap protects data.nemar.org's rate limiter — fanning all
- * N published *versions* (currently ~150 across nm + on) in tight sequence
- * would otherwise hit 429 on the same endpoint public traffic uses. The
+ * MAX_CONCURRENT cap is a courtesy to S3 — fanning all N published
+ * *versions* (currently ~150 across nm + on) in tight sequence is fine
+ * for S3 itself but produces a long tail when one of them is slow. The
  * `out[i] = ...` (index assignment, not push) is load-bearing: the CLI
  * table and the cron's markdown report assume the output preserves the
  * input row order.
  */
-async function probeAll(rows: VersionRow[], signal?: AbortSignal): Promise<VersionCoverage[]> {
+async function probeAll(
+  rows: VersionRow[],
+  fetchSummary: SummaryFetcher,
+): Promise<VersionCoverage[]> {
   const out: VersionCoverage[] = new Array(rows.length);
   let cursor = 0;
 
@@ -176,7 +231,7 @@ async function probeAll(rows: VersionRow[], signal?: AbortSignal): Promise<Versi
       const i = cursor++;
       if (i >= rows.length) return;
       const row = rows[i];
-      out[i] = { ...row, state: await probeSummary(row.dataset_id, row.version, signal) };
+      out[i] = { ...row, state: await probeSummary(fetchSummary, row.dataset_id, row.version) };
     }
   }
 
@@ -185,12 +240,24 @@ async function probeAll(rows: VersionRow[], signal?: AbortSignal): Promise<Versi
   return out;
 }
 
+/**
+ * `fetchSummary` is exposed as an optional parameter so callers (mainly
+ * tests) can stub the S3 read. Production callers should omit it; the
+ * `defaultSummaryFetcher(env)` wiring is the one production cares about.
+ *
+ * Default-arg evaluation note: we deliberately build the fetcher inside the
+ * function body instead of as a parameter default. A parameter default like
+ * `fetchSummary = defaultSummaryFetcher(env)` would run on every call even
+ * when the caller passes a stub — cheap today but a footgun if the default
+ * factory ever does real work.
+ */
 export async function buildCoverageReport(
   env: Bindings,
-  signal?: AbortSignal,
+  fetchSummary?: SummaryFetcher,
 ): Promise<CoverageReport> {
+  const fetcher = fetchSummary ?? defaultSummaryFetcher(env);
   const rows = await listAllPublishedVersions(env);
-  const versions = await probeAll(rows, signal);
+  const versions = await probeAll(rows, fetcher);
 
   const totals = {
     versions: versions.length,
