@@ -237,21 +237,24 @@ describe("rateLimiter end-to-end", () => {
     expect(rateLimitedCount).toBe(0);
   });
 
-  test("unauthenticated client still 429s at the legacy IP cap", async () => {
+  test("unauthenticated client still 429s once the IP cap is exhausted", async () => {
     const { app, env } = buildApp(PROD_ENV);
     const headers = { "CF-Connecting-IP": "10.99.0.2" };
 
     let okCount = 0;
     let rateLimitedCount = 0;
-    for (let i = 0; i < 150; i++) {
+    // Loop the cap + a fixed overrun. Mirrors the authed-bucket test
+    // pattern so the assertion stays correct when MAX_REQUESTS changes
+    // (most recently 100 → 500 in #639).
+    const total = __limits.MAX_REQUESTS + 25;
+    for (let i = 0; i < total; i++) {
       const res = await hit(app, env, "/datasets", headers);
       if (res.status === 200) okCount++;
       else if (res.status === 429) rateLimitedCount++;
     }
-    // The unauth cap is exactly the original MAX_REQUESTS — anything
-    // beyond that should be rejected.
+    // The unauth cap is exactly MAX_REQUESTS — anything beyond should 429.
     expect(okCount).toBe(__limits.MAX_REQUESTS);
-    expect(rateLimitedCount).toBe(150 - __limits.MAX_REQUESTS);
+    expect(rateLimitedCount).toBe(25);
   });
 
   test("two authenticated clients on the same IP don't share a bucket", async () => {

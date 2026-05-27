@@ -429,6 +429,12 @@ datasetRoutes.post(
  * Response includes total_count, limit, offset for client-side pagination
  */
 datasetRoutes.get("/", optionalAuthMiddleware, async (c) => {
+  // Safe Cache-Control default: every early-return error path inherits
+  // no-store. The single success branch that's actually shareable
+  // (anonymous browsing of the union catalog) overrides this below with
+  // a `public + Vary: Authorization` block. Hono replaces same-named
+  // headers, so the later set wins. Issue #639.
+  c.header("Cache-Control", "no-store");
   const mine = c.req.query("mine") === "true";
   const status = c.req.query("status") || "active";
   const rawLimit = Number.parseInt(c.req.query("limit") ?? "", 10);
@@ -512,6 +518,9 @@ datasetRoutes.get("/", optionalAuthMiddleware, async (c) => {
     });
     query += buildSortClause(sort);
 
+    // --mine path is always authed and per-user; the no-store default
+    // set at the top of the handler is the right header here. See #639
+    // + the union-path Vary block below for the anonymous-shareable case.
     return executeAndReturn(c, db, query, params, { limit, offset });
   }
 
@@ -615,6 +624,27 @@ datasetRoutes.get("/", optionalAuthMiddleware, async (c) => {
   const unionQuery = `${managedQuery} UNION ALL ${catalogQuery}${buildSortClause(sort, true)}`;
   const allParams = [...managedParams, ...catalogParams];
 
+  // CF edge cache: anonymous list responses are identical for all callers
+  // (no private rows leak — the SQL already filters visibility), so share
+  // them at the edge. Authed callers may have additional visibility into
+  // private rows their owner / collaborator / admin status grants, so
+  // their responses stay no-store (the handler-top default). Without the
+  // public branch every SSR call from the website's Worker pool hits
+  // origin + decrements the per-IP rate-limit bucket; a handful of
+  // concurrent visitors of ww2 then trips the cap (#639). Catalog
+  // mutations are rare, so s-maxage of 5 min + SWR is plenty fresh.
+  //
+  // `Vary: Authorization` is required: anonymous and authed callers share
+  // the same URL; without Vary an intermediate cache could serve a cached
+  // anonymous response to an authed user (or vice versa). CF honors
+  // `private` directives natively and won't store authed responses
+  // regardless, but Vary is the RFC-correct way to tell every cache on
+  // the path (corp proxies, browser cache) that the response key
+  // includes the Authorization header.
+  if (!user) {
+    c.header("Cache-Control", "public, max-age=30, s-maxage=300, stale-while-revalidate=600");
+    c.header("Vary", "Authorization");
+  }
   return executeAndReturn(c, db, unionQuery, allParams, { limit, offset });
 });
 
@@ -959,6 +989,12 @@ datasetRoutes.get("/search", optionalAuthMiddleware, async (c) => {
  * Always returns 200 (except on validation or server errors).
  */
 datasetRoutes.get("/resolve/:sourceId", optionalAuthMiddleware, async (c) => {
+  // Safe default: validation 400s + the catch's 500 emit no-store. The
+  // success branch below overrides for the resolved-match case only —
+  // an unresolved `{ found: false }` doesn't get cached either, because
+  // a dataset could publish moments later and we don't want CF to keep
+  // serving the negative answer through the s-maxage + SWR window.
+  c.header("Cache-Control", "no-store");
   const sourceId = c.req.param("sourceId");
 
   if (!/^ds\d{6}$/.test(sourceId)) {
@@ -985,9 +1021,19 @@ datasetRoutes.get("/resolve/:sourceId", optionalAuthMiddleware, async (c) => {
       }>();
 
     if (!match) {
+      // Negative result stays no-store (handler default). A dataset
+      // could publish moments later; CF holding `found: false` for the
+      // s-maxage window would mask that for everyone.
       return c.json({ found: false });
     }
 
+    // CF edge cache: the query is restricted to `visibility = 'public'`
+    // and `status = 'active'`, so the response is identical for any
+    // caller regardless of auth — safe to share at the edge. The
+    // canonical-resolve mapping changes only when a dataset is
+    // re-published, which is rare; s-maxage of 5 min + SWR is plenty.
+    // Issue #639.
+    c.header("Cache-Control", "public, max-age=30, s-maxage=300, stale-while-revalidate=600");
     return c.json({
       found: true,
       dataset_id: match.dataset_id,
@@ -1010,6 +1056,11 @@ datasetRoutes.get("/resolve/:sourceId", optionalAuthMiddleware, async (c) => {
  * - Private datasets: accessible to owner, admin, or collaborator
  */
 datasetRoutes.get("/:id", optionalAuthMiddleware, async (c) => {
+  // Safe Cache-Control default: every early-return error path (400 /
+  // 404 / 401) inherits no-store. The anonymous-success branch overrides
+  // below with `public + Vary: Authorization`. Hono replaces same-named
+  // headers, so the later set wins. Issue #639.
+  c.header("Cache-Control", "no-store");
   const datasetId = c.req.param("id");
   const user = c.get("user");
   const db = c.env.DB;
@@ -1067,6 +1118,17 @@ datasetRoutes.get("/:id", optionalAuthMiddleware, async (c) => {
     }
   }
 
+  // CF edge cache only for anonymous traffic. Authed responses may
+  // include private datasets that this user can see (owner, collaborator,
+  // admin) — they stay no-store (the handler default). `Vary: Authorization`
+  // tells intermediate caches the response key depends on the auth
+  // header, so an anonymous cached response is never served to an authed
+  // caller and vice versa. See the list handler at line ~431 for the
+  // matching pattern + the Worker-egress-IP-pooling rationale (#639).
+  if (!user) {
+    c.header("Cache-Control", "public, max-age=30, s-maxage=300, stale-while-revalidate=600");
+    c.header("Vary", "Authorization");
+  }
   return c.json({ dataset });
 });
 
