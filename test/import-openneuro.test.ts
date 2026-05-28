@@ -15,10 +15,10 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
-  appendOpenNeuroProvenance,
   coerceFunding,
   decideSkipCiCheck,
   detectModalitiesFromDataset,
+  ensureReadmeMd,
   seedMetadata,
 } from "../src/lib/import-openneuro";
 
@@ -307,57 +307,99 @@ describe("seedMetadata (#512)", () => {
   });
 });
 
-describe("appendOpenNeuroProvenance (#535)", () => {
+describe("ensureReadmeMd (#642)", () => {
   let tmpRoot: string;
 
   beforeEach(() => {
-    tmpRoot = mkdtempSync(join(tmpdir(), "appendProvenance-"));
+    tmpRoot = mkdtempSync(join(tmpdir(), "readmeMd-"));
   });
 
   afterEach(() => {
     rmSync(tmpRoot, { recursive: true, force: true });
   });
 
-  function readReadme(): string {
-    return readFileSync(join(tmpRoot, "README.md"), "utf-8");
+  function readFile(name: string): string {
+    return readFileSync(join(tmpRoot, name), "utf-8");
+  }
+  function exists(name: string): boolean {
+    try {
+      readFileSync(join(tmpRoot, name));
+      return true;
+    } catch {
+      return false;
+    }
   }
 
-  test("creates README.md when none exists and inserts the provenance marker + section", () => {
-    appendOpenNeuroProvenance(tmpRoot, "ds000117", "10.18112/openneuro.ds000117.v1.0.0");
-    const out = readReadme();
+  test("README with no extension → renamed to README.md, content untouched", () => {
+    const body = "# Loneliness EEG\n\nFull upstream methods, paradigm, citation...\n";
+    writeFileSync(join(tmpRoot, "README"), body);
+
+    const outcome = ensureReadmeMd(tmpRoot, "ds007827", "10.18112/openneuro.ds007827.v1.0.0");
+
+    expect(outcome).toEqual({ kind: "renamed", from: "README", to: "README.md" });
+    expect(exists("README")).toBe(false);
+    expect(readFile("README.md")).toBe(body);
+  });
+
+  test("README.md exists → kept as-is, never overwritten with a stub", () => {
+    const body = "# Existing project README\n\nReal content.\n";
+    writeFileSync(join(tmpRoot, "README.md"), body);
+
+    const outcome = ensureReadmeMd(tmpRoot, "ds007827", "10.18112/openneuro.ds007827.v1.0.0");
+
+    expect(outcome).toEqual({ kind: "kept", path: "README.md" });
+    expect(readFile("README.md")).toBe(body);
+  });
+
+  test("README.rst exists → kept, no README.md is created", () => {
+    const body = "Project README\n==============\n\nrst content\n";
+    writeFileSync(join(tmpRoot, "README.rst"), body);
+
+    const outcome = ensureReadmeMd(tmpRoot, "ds007827", null);
+
+    expect(outcome).toEqual({ kind: "kept", path: "README.rst" });
+    expect(readFile("README.rst")).toBe(body);
+    expect(exists("README.md")).toBe(false);
+  });
+
+  test("README.txt exists → kept, no README.md is created", () => {
+    writeFileSync(join(tmpRoot, "README.txt"), "plaintext readme\n");
+
+    const outcome = ensureReadmeMd(tmpRoot, "ds007827", null);
+
+    expect(outcome).toEqual({ kind: "kept", path: "README.txt" });
+    expect(exists("README.md")).toBe(false);
+  });
+
+  test("no README of any shape → fallback stub written to README.md with DOI", () => {
+    const outcome = ensureReadmeMd(tmpRoot, "ds000117", "10.18112/openneuro.ds000117.v1.0.0");
+
+    expect(outcome).toEqual({ kind: "created", path: "README.md" });
+    const out = readFile("README.md");
     expect(out).toContain("<!-- nemar:provenance -->");
-    expect(out).toContain("## Provenance");
     expect(out).toContain("[ds000117](https://openneuro.org/datasets/ds000117)");
     expect(out).toContain("10.18112/openneuro.ds000117.v1.0.0");
   });
 
-  test("appends to an existing README without touching the original body", () => {
-    writeFileSync(join(tmpRoot, "README.md"), "# Existing\n\nUpstream description text.\n");
-    appendOpenNeuroProvenance(tmpRoot, "ds000117", null);
-    const out = readReadme();
-    expect(out.startsWith("# Existing\n\nUpstream description text.\n")).toBe(true);
+  test("no README + no DOI → fallback stub omits the DOI line", () => {
+    const outcome = ensureReadmeMd(tmpRoot, "ds000117", null);
+
+    expect(outcome.kind).toBe("created");
+    const out = readFile("README.md");
     expect(out).toContain("<!-- nemar:provenance -->");
-    expect(out).toContain("[ds000117]");
-    // No DOI line when openNeuroDoi is null
     expect(out).not.toContain("doi.org");
   });
 
-  test("idempotent: re-running does not duplicate the provenance block", () => {
-    appendOpenNeuroProvenance(tmpRoot, "ds000117", null);
-    const firstPass = readReadme();
-    appendOpenNeuroProvenance(tmpRoot, "ds000117", null);
-    appendOpenNeuroProvenance(tmpRoot, "ds000117", null);
-    expect(readReadme()).toBe(firstPass);
-    expect(readReadme().match(/<!-- nemar:provenance -->/g)?.length).toBe(1);
-  });
+  test("idempotent on re-run after rename: README.md is kept, no double-write", () => {
+    writeFileSync(join(tmpRoot, "README"), "original body\n");
 
-  test("ensures a blank-line separator when the existing README doesn't end with newline", () => {
-    writeFileSync(join(tmpRoot, "README.md"), "# No trailing newline");
-    appendOpenNeuroProvenance(tmpRoot, "ds000117", null);
-    const out = readReadme();
-    // Existing content preserved
-    expect(out).toContain("# No trailing newline");
-    // Marker on its own paragraph, not glued to the heading
-    expect(out).toMatch(/# No trailing newline\n\n<!-- nemar:provenance -->/);
+    const first = ensureReadmeMd(tmpRoot, "ds000117", null);
+    const firstContent = readFile("README.md");
+    const second = ensureReadmeMd(tmpRoot, "ds000117", null);
+    const secondContent = readFile("README.md");
+
+    expect(first.kind).toBe("renamed");
+    expect(second).toEqual({ kind: "kept", path: "README.md" });
+    expect(secondContent).toBe(firstContent);
   });
 });

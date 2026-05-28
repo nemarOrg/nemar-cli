@@ -415,28 +415,52 @@ export async function enrichDataset(
       .map((b) => b.toString(16).padStart(2, "0"))
       .join("");
 
-    // Guard: skip re-enrichment if metadata is already validated and sources unchanged
-    if (existingMetadata?.pipeline_stage === "validated" && !forceReenrich) {
-      if (existingMetadata.source_hash === sourceHash) {
-        console.log(`[llm-enrich] Skipping ${datasetId}: already validated and sources unchanged`);
+    // Guard: skip re-enrichment when sources are unchanged.
+    //
+    // The original guard fired only at `pipeline_stage === "validated"`.
+    // For datasets that never reach validated (Stage 3 fails or returns
+    // `valid: false` past MAX_CORRECTIONS), it left the door open for an
+    // infinite loop: Haiku's non-deterministic prose meant
+    // `.nemar/metadata.json` differed on every run, the push webhook
+    // re-fired, and enrichment burned ~60 runs/hr until disabled (#643).
+    //
+    // We now short-circuit at BOTH "validated" and "enriched" when
+    // source_hash matches. The push trigger no longer includes
+    // `.nemar/metadata.json` (see ENRICHMENT_TRIGGER_PATHS in
+    // routes/webhooks.ts), but this guard is defense-in-depth in case a
+    // README/dataset_description push arrives a second time before the
+    // source actually changes.
+    const cachedStages: ReadonlySet<string> = new Set(["validated", "enriched"]);
+    if (
+      existingMetadata?.pipeline_stage &&
+      cachedStages.has(existingMetadata.pipeline_stage) &&
+      !forceReenrich
+    ) {
+      if (
+        existingMetadata.source_hash !== undefined &&
+        existingMetadata.source_hash === sourceHash
+      ) {
+        console.log(
+          `[llm-enrich] Skipping ${datasetId}: stage="${existingMetadata.pipeline_stage}" and sources unchanged`,
+        );
         return {
           ok: true,
           status: 200,
           body: {
-            message: "Metadata already validated and sources unchanged",
+            message: "Metadata already up-to-date and sources unchanged",
             dataset_id: datasetId,
             skipped: true,
-            pipeline_stage: "validated",
+            pipeline_stage: existingMetadata.pipeline_stage,
           },
         };
       }
       if (existingMetadata.source_hash === undefined) {
         console.log(
-          `[llm-enrich] Re-enriching ${datasetId}: no source_hash in existing validated metadata (migration)`,
+          `[llm-enrich] Re-enriching ${datasetId}: no source_hash in existing ${existingMetadata.pipeline_stage} metadata (migration)`,
         );
       } else {
         console.log(
-          `[llm-enrich] Re-enriching ${datasetId}: sources changed since last validation`,
+          `[llm-enrich] Re-enriching ${datasetId}: sources changed since last ${existingMetadata.pipeline_stage} run`,
         );
       }
     }
