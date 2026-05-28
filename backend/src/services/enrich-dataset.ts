@@ -140,6 +140,73 @@ export type EnrichmentOutcome =
   | { ok: true; status: 200; body: EnrichmentSuccessBody | EnrichmentSkippedBody }
   | { ok: false; status: 400 | 404 | 422 | 500; body: EnrichmentErrorBody };
 
+/** Pipeline stages whose metadata is considered "cached" enough to short-circuit
+ *  on unchanged sources. `"seeded"` is intentionally excluded — a seeded-only
+ *  record hasn't had its LLM passes yet, so a re-trigger should run them. */
+const CACHED_PIPELINE_STAGES: ReadonlySet<string> = new Set(["validated", "enriched"]);
+
+/** Decision returned by {@link decideSkipEnrichment}.
+ *
+ *  - `skip:true` — the pipeline should return early with a 200 "skipped"
+ *    response; `reason` is the human-readable log line.
+ *  - `skip:false` — the pipeline should run; `proceedReason` (when present)
+ *    is the human-readable log line explaining why the guard let it
+ *    through. Both fields are optional so callers can log only when there
+ *    is something interesting to log. */
+export type SkipEnrichmentDecision =
+  | { skip: true; reason: string }
+  | { skip: false; proceedReason?: string };
+
+/** Pure decision helper for the source-hash skip guard in {@link enrichDataset}.
+ *
+ *  Exported for unit testing — the production callsite passes the runtime
+ *  hash and the `existingMetadata` fields from `.nemar/metadata.json`. The
+ *  three skip-relevant inputs (`pipelineStage`, `existingSourceHash`,
+ *  `currentSourceHash`) plus `forceReenrich` produce a deterministic
+ *  decision; pinning the table here prevents a future refactor from
+ *  silently re-opening the #643 self-fire loop.
+ *
+ *  Rules:
+ *   - `forceReenrich` always proceeds (manual recovery / release flow).
+ *   - No `pipelineStage`, or a stage outside {@link CACHED_PIPELINE_STAGES}
+ *     (e.g., `"seeded"`), proceeds.
+ *   - `existingSourceHash === undefined` proceeds with a "migration" reason —
+ *     covers the one-time backfill case where pre-#643 records lack the
+ *     field. Once the next run writes a hash, this branch stops firing.
+ *   - Matching hash on a cached stage skips; mismatched hash proceeds with a
+ *     "sources changed" reason. */
+export function decideSkipEnrichment(args: {
+  pipelineStage: string | undefined;
+  existingSourceHash: string | undefined;
+  currentSourceHash: string;
+  forceReenrich: boolean;
+}): SkipEnrichmentDecision {
+  const { pipelineStage, existingSourceHash, currentSourceHash, forceReenrich } = args;
+
+  if (forceReenrich) {
+    return { skip: false, proceedReason: "force=true requested" };
+  }
+  if (!pipelineStage || !CACHED_PIPELINE_STAGES.has(pipelineStage)) {
+    return { skip: false };
+  }
+  if (existingSourceHash === undefined) {
+    return {
+      skip: false,
+      proceedReason: `no source_hash in existing ${pipelineStage} metadata (migration)`,
+    };
+  }
+  if (existingSourceHash === currentSourceHash) {
+    return {
+      skip: true,
+      reason: `stage="${pipelineStage}" and sources unchanged`,
+    };
+  }
+  return {
+    skip: false,
+    proceedReason: `sources changed since last ${pipelineStage} run`,
+  };
+}
+
 /**
  * Run the full LLM-driven metadata enrichment pipeline for a single dataset.
  *
@@ -415,30 +482,28 @@ export async function enrichDataset(
       .map((b) => b.toString(16).padStart(2, "0"))
       .join("");
 
-    // Guard: skip re-enrichment if metadata is already validated and sources unchanged
-    if (existingMetadata?.pipeline_stage === "validated" && !forceReenrich) {
-      if (existingMetadata.source_hash === sourceHash) {
-        console.log(`[llm-enrich] Skipping ${datasetId}: already validated and sources unchanged`);
-        return {
-          ok: true,
-          status: 200,
-          body: {
-            message: "Metadata already validated and sources unchanged",
-            dataset_id: datasetId,
-            skipped: true,
-            pipeline_stage: "validated",
-          },
-        };
-      }
-      if (existingMetadata.source_hash === undefined) {
-        console.log(
-          `[llm-enrich] Re-enriching ${datasetId}: no source_hash in existing validated metadata (migration)`,
-        );
-      } else {
-        console.log(
-          `[llm-enrich] Re-enriching ${datasetId}: sources changed since last validation`,
-        );
-      }
+    // Guard: skip re-enrichment when sources are unchanged.
+    const skipDecision = decideSkipEnrichment({
+      pipelineStage: existingMetadata?.pipeline_stage,
+      existingSourceHash: existingMetadata?.source_hash,
+      currentSourceHash: sourceHash,
+      forceReenrich,
+    });
+    if (skipDecision.skip) {
+      console.log(`[llm-enrich] Skipping ${datasetId}: ${skipDecision.reason}`);
+      return {
+        ok: true,
+        status: 200,
+        body: {
+          message: "Metadata already up-to-date and sources unchanged",
+          dataset_id: datasetId,
+          skipped: true,
+          pipeline_stage: existingMetadata?.pipeline_stage,
+        },
+      };
+    }
+    if (skipDecision.proceedReason) {
+      console.log(`[llm-enrich] Re-enriching ${datasetId}: ${skipDecision.proceedReason}`);
     }
 
     // Stage 1: Seed from BIDS (deterministic, no LLM call)

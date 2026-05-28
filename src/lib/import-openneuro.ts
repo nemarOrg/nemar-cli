@@ -13,6 +13,7 @@ import {
   mkdtempSync,
   readFileSync,
   readdirSync,
+  renameSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -374,32 +375,94 @@ export function seedMetadata(
 }
 
 /**
- * Append a NEMAR provenance section to README.md (or create one) noting that
- * this dataset is a mirror of an OpenNeuro dataset. The line is deterministic,
- * available at import time, and intentionally separate from the LLM enrichment
- * pipeline: provenance must be visible on GitHub for anyone browsing the repo
- * regardless of whether enrichment has run yet. Idempotent — re-running the
- * importer (or a later refresh) won't append a second copy.
+ * Outcome of {@link ensureReadmeMd} so the caller can stage the right paths.
+ *
+ * - `renamed`: an upstream `README` (no extension) was renamed to `README.md`
+ *   so GitHub renders it. The on-disk move has been done with `renameSync`;
+ *   the caller must follow up with `git add README.md README` (or
+ *   equivalent) so the index records both the deletion of the old path and
+ *   the addition of the new one.
+ * - `kept`: an upstream README already had a recognised renderable extension
+ *   (`.md`, `.rst`, `.txt`, ...). We do not touch the file or its content.
+ * - `created`: no README of any shape existed upstream, so a provenance-only
+ *   stub was written to `README.md` as a last-resort fallback. The caller
+ *   should `git add README.md`.
  */
-export function appendOpenNeuroProvenance(
+export type ReadmeOutcome =
+  | { kind: "renamed"; from: "README"; to: "README.md" }
+  | { kind: "kept"; path: string }
+  | { kind: "created"; path: "README.md" };
+
+/** Detect any README file regardless of case (`README`, `Readme.md`, `readme`).
+ *  Case-insensitive on purpose: on case-insensitive filesystems (macOS APFS,
+ *  Windows NTFS) `writeFileSync('README.md', ...)` would silently overwrite
+ *  an upstream `Readme.md` if we missed it during the scan. The `/i` keeps
+ *  the fallback branch from ever clobbering real content. */
+const README_FILENAME_REGEX = /^README(\.[A-Za-z0-9]+)?$/i;
+
+/**
+ * Decide what to do with the imported repo's README file.
+ *
+ * Rule (from nemarOrg/nemar-cli#642):
+ * - If the upstream ships `README` with no extension, rename it to
+ *   `README.md` so GitHub renders it. Do NOT modify the content.
+ *   Skipped (treated as `kept`) if a `README.md` already exists alongside
+ *   — we never clobber an upstream-authored `.md`.
+ * - If the upstream ships `README.md`, `README.rst`, `README.txt`, or any
+ *   other suffixed variant, leave it alone. We don't second-guess the
+ *   upstream author's choice; provenance is also captured in
+ *   `.nemar/metadata.json` via `IsDescribedBy` / `IsIdenticalTo`, and the
+ *   browser surfaces it from there.
+ * - If no README exists at all, write a small provenance-only stub so the
+ *   dataset page still has something to render. OpenNeuro datasets
+ *   normally ship a README of some form, so this fallback should be rare.
+ *
+ * When the upstream contains multiple README variants (e.g., both `README`
+ * and `README.md`) we prefer the already-suffixed file: leaving it untouched
+ * is always safe; renaming the bare `README` over it could destroy
+ * authored content.
+ *
+ * Pure on filesystem state — no git operations, no network. The caller is
+ * responsible for staging the returned paths.
+ */
+export function ensureReadmeMd(
   datasetPath: string,
   openneuroId: string,
   openNeuroDoi: string | null,
-): void {
-  const readmePath = join(datasetPath, "README.md");
+): ReadmeOutcome {
+  const entries = readdirSync(datasetPath, { withFileTypes: true });
+  const readmeEntries = entries.filter((e) => e.isFile() && README_FILENAME_REGEX.test(e.name));
+
+  // Prefer any README with an extension over bare `README`. Two reasons:
+  // (1) a `*.md` / `*.rst` is already renderable and renaming over it would
+  //     destroy content; (2) `entries.filter` returns OS-listing order which
+  //     is non-deterministic on some filesystems — picking a stable
+  //     preference rule removes the order dependence.
+  const suffixed = readmeEntries.find((e) => e.name.includes("."));
+  if (suffixed) {
+    return { kind: "kept", path: suffixed.name };
+  }
+
+  const bare = readmeEntries.find((e) => !e.name.includes("."));
+  if (bare) {
+    // Bare README (any case) — rename to canonical `README.md` so GitHub
+    // renders it. The collision case was handled by the `suffixed` branch
+    // above; if we get here, no `.md`/`.rst`/etc. exists, so rename is safe.
+    renameSync(join(datasetPath, bare.name), join(datasetPath, "README.md"));
+    return { kind: "renamed", from: "README", to: "README.md" };
+  }
+
+  // No README upstream — write a deterministic provenance-only stub. Provenance
+  // is independently encoded in `.nemar/metadata.json` (IsDescribedBy /
+  // IsIdenticalTo + source/source_id columns), so the browser can render
+  // upstream attribution even without this file. The stub exists so a casual
+  // visitor browsing the GitHub repo still sees where the data came from.
   const marker = "<!-- nemar:provenance -->";
   const openneuroUrl = `https://openneuro.org/datasets/${openneuroId}`;
   const doiLine = openNeuroDoi ? `\n- DOI: [${openNeuroDoi}](https://doi.org/${openNeuroDoi})` : "";
   const block = `${marker}\n## Provenance\n\nThis dataset is mirrored on NEMAR from OpenNeuro.\n\n- Source: [${openneuroId}](${openneuroUrl})${doiLine}\n`;
-
-  const existing = existsSync(readmePath) ? readFileSync(readmePath, "utf-8") : "";
-  if (existing.includes(marker)) {
-    // Already imported once; avoid duplicating the block on re-runs.
-    return;
-  }
-  const separator =
-    existing.length > 0 && !existing.endsWith("\n") ? "\n\n" : existing.length > 0 ? "\n" : "";
-  writeFileSync(readmePath, `${existing}${separator}${block}`);
+  writeFileSync(join(datasetPath, "README.md"), block);
+  return { kind: "created", path: "README.md" };
 }
 
 /**
@@ -688,14 +751,17 @@ export async function importOpenNeuro(
     registerSpinner.succeed(`Registered ${regResult.success} files in git-annex`);
   }
 
-  // Step 6: Seed .nemar/metadata.json and append a deterministic OpenNeuro
-  // provenance section to README.md. Provenance is intentionally NOT routed
-  // through the LLM enrichment pipeline — it's known at import time and must
-  // be visible on the GitHub repo before any enrichment has run (#535).
+  // Step 6: Seed .nemar/metadata.json and normalize the README extension so
+  // GitHub renders it (#642). Content is never modified — if the upstream
+  // already ships README.md / README.rst / etc. we leave it alone; if it
+  // ships plain `README` we just rename it. Provenance is captured in
+  // .nemar/metadata.json (IsDescribedBy / IsIdenticalTo), so the website
+  // doesn't need a provenance block inside README to attribute upstream.
   const metaSpinner = ora("Seeding metadata...").start();
+  let readmeOutcome: ReadmeOutcome;
   try {
     seedMetadata(datasetPath, nemarId, openneuroId, bidsDesc, openNeuroDoi);
-    appendOpenNeuroProvenance(datasetPath, openneuroId, openNeuroDoi);
+    readmeOutcome = ensureReadmeMd(datasetPath, openneuroId, openNeuroDoi);
   } catch (err) {
     metaSpinner.fail(
       `Failed to seed metadata: ${err instanceof Error ? err.message : String(err)}`,
@@ -703,8 +769,17 @@ export async function importOpenNeuro(
     process.exit(1);
   }
 
-  // Stage and commit the metadata + provenance README update
-  const addResult = await runCommand(["git", "add", ".nemar/metadata.json", "README.md"], {
+  // Stage `.nemar/metadata.json` plus whatever the README step produced.
+  // `renamed` needs both paths so git records the rename rather than
+  // treating it as a delete-then-add. `kept` adds nothing for README
+  // (the file already tracked, unchanged). `created` adds the new stub.
+  const pathsToStage = [".nemar/metadata.json"];
+  if (readmeOutcome.kind === "renamed") {
+    pathsToStage.push("README", "README.md");
+  } else if (readmeOutcome.kind === "created") {
+    pathsToStage.push("README.md");
+  }
+  const addResult = await runCommand(["git", "add", ...pathsToStage], {
     cwd: datasetPath,
   });
   if (addResult.exitCode !== 0) {
@@ -720,7 +795,13 @@ export async function importOpenNeuro(
     metaSpinner.fail(`Failed to commit metadata: ${commitResult.stderr.trim()}`);
     process.exit(1);
   }
-  metaSpinner.succeed("Seeded .nemar/metadata.json and README provenance");
+  const readmeNote =
+    readmeOutcome.kind === "renamed"
+      ? "renamed README -> README.md"
+      : readmeOutcome.kind === "kept"
+        ? `kept upstream ${readmeOutcome.path}`
+        : "wrote provenance stub README.md (no upstream README)";
+  metaSpinner.succeed(`Seeded .nemar/metadata.json (${readmeNote})`);
 
   // Step 7: Push OpenNeuro git history + metadata commit to nemarDatasets.
   // This is the initial push to a brand-new empty repo; no pre-pull needed
