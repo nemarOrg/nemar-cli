@@ -393,7 +393,12 @@ export type ReadmeOutcome =
   | { kind: "kept"; path: string }
   | { kind: "created"; path: "README.md" };
 
-const README_FILENAME_REGEX = /^README(\.[A-Za-z0-9]+)?$/;
+/** Detect any README file regardless of case (`README`, `Readme.md`, `readme`).
+ *  Case-insensitive on purpose: on case-insensitive filesystems (macOS APFS,
+ *  Windows NTFS) `writeFileSync('README.md', ...)` would silently overwrite
+ *  an upstream `Readme.md` if we missed it during the scan. The `/i` keeps
+ *  the fallback branch from ever clobbering real content. */
+const README_FILENAME_REGEX = /^README(\.[A-Za-z0-9]+)?$/i;
 
 /**
  * Decide what to do with the imported repo's README file.
@@ -401,16 +406,21 @@ const README_FILENAME_REGEX = /^README(\.[A-Za-z0-9]+)?$/;
  * Rule (from nemarOrg/nemar-cli#642):
  * - If the upstream ships `README` with no extension, rename it to
  *   `README.md` so GitHub renders it. Do NOT modify the content.
+ *   Skipped (treated as `kept`) if a `README.md` already exists alongside
+ *   — we never clobber an upstream-authored `.md`.
  * - If the upstream ships `README.md`, `README.rst`, `README.txt`, or any
  *   other suffixed variant, leave it alone. We don't second-guess the
  *   upstream author's choice; provenance is also captured in
  *   `.nemar/metadata.json` via `IsDescribedBy` / `IsIdenticalTo`, and the
  *   browser surfaces it from there.
  * - If no README exists at all, write a small provenance-only stub so the
- *   dataset page still has something to render. This branch is the
- *   genuine "nothing upstream" fallback — OpenNeuro datasets are
- *   BIDS-compliant and always ship a README, so it should not fire in
- *   practice.
+ *   dataset page still has something to render. OpenNeuro datasets
+ *   normally ship a README of some form, so this fallback should be rare.
+ *
+ * When the upstream contains multiple README variants (e.g., both `README`
+ * and `README.md`) we prefer the already-suffixed file: leaving it untouched
+ * is always safe; renaming the bare `README` over it could destroy
+ * authored content.
  *
  * Pure on filesystem state — no git operations, no network. The caller is
  * responsible for staging the returned paths.
@@ -421,14 +431,25 @@ export function ensureReadmeMd(
   openNeuroDoi: string | null,
 ): ReadmeOutcome {
   const entries = readdirSync(datasetPath, { withFileTypes: true });
-  const readmeEntry = entries.find((e) => e.isFile() && README_FILENAME_REGEX.test(e.name));
+  const readmeEntries = entries.filter((e) => e.isFile() && README_FILENAME_REGEX.test(e.name));
 
-  if (readmeEntry) {
-    if (readmeEntry.name === "README") {
-      renameSync(join(datasetPath, "README"), join(datasetPath, "README.md"));
-      return { kind: "renamed", from: "README", to: "README.md" };
-    }
-    return { kind: "kept", path: readmeEntry.name };
+  // Prefer any README with an extension over bare `README`. Two reasons:
+  // (1) a `*.md` / `*.rst` is already renderable and renaming over it would
+  //     destroy content; (2) `entries.filter` returns OS-listing order which
+  //     is non-deterministic on some filesystems — picking a stable
+  //     preference rule removes the order dependence.
+  const suffixed = readmeEntries.find((e) => e.name.includes("."));
+  if (suffixed) {
+    return { kind: "kept", path: suffixed.name };
+  }
+
+  const bare = readmeEntries.find((e) => !e.name.includes("."));
+  if (bare) {
+    // Bare README (any case) — rename to canonical `README.md` so GitHub
+    // renders it. The collision case was handled by the `suffixed` branch
+    // above; if we get here, no `.md`/`.rst`/etc. exists, so rename is safe.
+    renameSync(join(datasetPath, bare.name), join(datasetPath, "README.md"));
+    return { kind: "renamed", from: "README", to: "README.md" };
   }
 
   // No README upstream — write a deterministic provenance-only stub. Provenance

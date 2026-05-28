@@ -402,4 +402,78 @@ describe("ensureReadmeMd (#642)", () => {
     expect(second).toEqual({ kind: "kept", path: "README.md" });
     expect(secondContent).toBe(firstContent);
   });
+
+  test("Readme.md (mixed case) → kept; fallback never overwrites case variant", () => {
+    // Case-sensitivity regression. If the regex misses `Readme.md`, the
+    // fallback would `writeFileSync('README.md', stub)` and clobber the
+    // upstream-authored file on a case-insensitive FS. The `/i` flag on
+    // README_FILENAME_REGEX prevents this.
+    const body = "# Mixed-case upstream README\n";
+    writeFileSync(join(tmpRoot, "Readme.md"), body);
+
+    const outcome = ensureReadmeMd(tmpRoot, "ds000117", null);
+
+    expect(outcome).toEqual({ kind: "kept", path: "Readme.md" });
+    expect(readFile("Readme.md")).toBe(body);
+  });
+
+  test("readme (lowercase, no extension) → kept-as-renamed, content preserved", () => {
+    // Lowercase bare README is unusual but legal upstream; we still want
+    // to canonicalize to `README.md` so GitHub renders it.
+    const body = "lowercase readme body\n";
+    writeFileSync(join(tmpRoot, "readme"), body);
+
+    const outcome = ensureReadmeMd(tmpRoot, "ds000117", null);
+
+    expect(outcome).toEqual({ kind: "renamed", from: "README", to: "README.md" });
+    expect(readFile("README.md")).toBe(body);
+  });
+
+  test("both README (bare) and README.md present → prefer .md, no rename", () => {
+    // Collision case. `entries.find()` order is OS-dependent; without an
+    // explicit preference rule, a Linux scan could rename `README` over
+    // the existing `README.md` and destroy upstream content. The
+    // preference rule (`suffixed` branch first) makes this deterministic.
+    const bare = "stale bare README content (would be lost without the fix)\n";
+    const md = "# Real upstream README.md\n\nAuthored markdown content.\n";
+    writeFileSync(join(tmpRoot, "README"), bare);
+    writeFileSync(join(tmpRoot, "README.md"), md);
+
+    const outcome = ensureReadmeMd(tmpRoot, "ds000117", null);
+
+    expect(outcome).toEqual({ kind: "kept", path: "README.md" });
+    expect(readFile("README.md")).toBe(md);
+    // Bare README is left in place; the import flow doesn't stage it,
+    // so it won't end up in the commit. Existing git tracking (if any)
+    // is preserved.
+    expect(readFile("README")).toBe(bare);
+  });
+
+  test("README.MD (uppercase ext) → kept, never collides with stub fallback", () => {
+    const body = "uppercase-ext README\n";
+    writeFileSync(join(tmpRoot, "README.MD"), body);
+
+    const outcome = ensureReadmeMd(tmpRoot, "ds000117", null);
+
+    expect(outcome).toEqual({ kind: "kept", path: "README.MD" });
+    expect(readFile("README.MD")).toBe(body);
+  });
+
+  test("READMEx → not a README, fallback creates stub (regex anchors)", () => {
+    // Regression pin: the regex anchors must not match similar names.
+    writeFileSync(join(tmpRoot, "READMEx"), "not a README\n");
+
+    const outcome = ensureReadmeMd(tmpRoot, "ds000117", null);
+
+    expect(outcome).toEqual({ kind: "created", path: "README.md" });
+    expect(readFile("READMEx")).toBe("not a README\n");
+  });
+
+  test("README.md.bak → not a README, fallback creates stub", () => {
+    writeFileSync(join(tmpRoot, "README.md.bak"), "backup file\n");
+
+    const outcome = ensureReadmeMd(tmpRoot, "ds000117", null);
+
+    expect(outcome).toEqual({ kind: "created", path: "README.md" });
+  });
 });
