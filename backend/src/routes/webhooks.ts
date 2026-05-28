@@ -1429,13 +1429,20 @@ webhooks.post("/llm-enrich", async (c) => {
 // pipelines hit `/webhooks/llm-enrich`, where the `source_hash` guard makes
 // the duplicate a Stage-2 no-op.
 
-/** Paths whose change should trigger an enrichment run. The set matches the
- *  `paths` filter on the legacy per-repo workflow so the centralization is a
- *  drop-in trigger replacement. */
+/** Paths whose change should trigger an enrichment run.
+ *
+ *  Includes only sources that *feed* enrichment (README + BIDS description).
+ *  Crucially excludes `.nemar/metadata.json` — that file IS the enrichment
+ *  output, written by `nemar-publish-bot` on every successful run. Listing
+ *  it here turned every enrichment commit into a fresh trigger and Haiku's
+ *  non-deterministic prose ensured the file always looked "changed" to the
+ *  push filter, so the pipeline self-fired forever (#643, observed on
+ *  on007827: ~60 runs/hr, ~$0.01 OpenRouter each, until manually disabled).
+ *  Manual recovery / re-enrichment is still available via
+ *  `workflow_dispatch` on `nemarDatasets/.github/run-enrichment.yml`. */
 const ENRICHMENT_TRIGGER_PATHS: ReadonlySet<string> = new Set([
   "README.md",
   "dataset_description.json",
-  ".nemar/metadata.json",
 ]);
 
 interface PushEventCommit {

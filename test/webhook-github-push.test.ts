@@ -71,11 +71,31 @@ describe("shouldDispatchEnrichment", () => {
       expect(decision.dispatch).toBe(true);
     });
 
-    test("dispatches when main-branch push touches .nemar/metadata.json", () => {
+    test("does NOT dispatch when only .nemar/metadata.json changed (#643)", () => {
+      // `.nemar/metadata.json` is the enrichment output, not an input.
+      // Treating it as a trigger turned every enrichment commit into a
+      // fresh enrichment run — observed on on007827, ~60 runs/hr until
+      // disabled manually. The filter now ignores this path.
       const decision = shouldDispatchEnrichment(
         pushEvent({
           commits: [{ modified: [".nemar/metadata.json"] }],
           head_commit: { modified: [".nemar/metadata.json"] },
+        }),
+      );
+      expect(decision.dispatch).toBe(false);
+      if (!decision.dispatch) {
+        expect(decision.reason).toBe("no_enrichment_paths_touched");
+      }
+    });
+
+    test("DOES dispatch when README and .nemar/metadata.json both changed", () => {
+      // The metadata-only filter must not gate out pushes that ALSO touch
+      // a real source (e.g. user edited README and the bot committed an
+      // updated metadata.json in the same push).
+      const decision = shouldDispatchEnrichment(
+        pushEvent({
+          commits: [{ modified: ["README.md", ".nemar/metadata.json"] }],
+          head_commit: { modified: ["README.md", ".nemar/metadata.json"] },
         }),
       );
       expect(decision.dispatch).toBe(true);
