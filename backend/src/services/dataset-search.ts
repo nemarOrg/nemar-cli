@@ -17,6 +17,9 @@ export interface SearchResult {
   tasks: string;
   authors: string;
   score: number;
+  /** FTS5 highlight (#646 Phase 3 hybrid). Additive-optional; ignored by
+   *  existing CLI/website clients. */
+  snippet?: string;
 }
 
 /**
@@ -189,4 +192,167 @@ export async function textSearch(
     authors: row.authors || "",
     score: 1.0, // No relevance ranking for LIKE search
   }));
+}
+
+// ---------------------------------------------------------------------------
+// #646 Phase 3 (READ_FROM_DATASETS): id-only Vectorize + D1 hydration, FTS5
+// lexical search, and reciprocal-rank-fusion hybrid. These run alongside the
+// flag-off paths above and read from the `datasets` source of truth.
+// ---------------------------------------------------------------------------
+
+/** Build a comma-joined `?` placeholder list for a SQL `IN (...)`. Bounded to
+ *  D1's safe range (and the topK ceiling); throws outside 1..100. */
+export function buildInPlaceholders(n: number): string {
+  if (!Number.isInteger(n) || n < 1 || n > 100) {
+    throw new Error(`buildInPlaceholders: n must be an integer in 1..100, got ${n}`);
+  }
+  return new Array(n).fill("?").join(",");
+}
+
+/** Build an injection-safe FTS5 MATCH expression: tokenize to alphanumerics
+ *  (dropping all FTS5 operator chars), quote each token and prefix-match it,
+ *  OR them for recall. Returns null when there is nothing to match. */
+export function buildFtsMatch(query: string): string | null {
+  const tokens = query
+    .toLowerCase()
+    .split(/[^a-z0-9]+/i)
+    .filter((t) => t.length >= 2);
+  if (tokens.length === 0) return null;
+  return tokens.map((t) => `"${t}"*`).join(" OR ");
+}
+
+interface HydrateRow {
+  id: string;
+  name: string | null;
+  modalities: string | null;
+  participants: number | null;
+  doi: string | null;
+  tasks: string | null;
+  authors: string | null;
+}
+
+const toResult = (row: HydrateRow, score: number, snippet?: string): SearchResult => ({
+  id: row.id,
+  name: row.name || "",
+  modalities: row.modalities || "",
+  participants: row.participants || 0,
+  doi: row.doi || "",
+  tasks: row.tasks || "",
+  authors: row.authors || "",
+  score,
+  ...(snippet ? { snippet } : {}),
+});
+
+/** Hydrate ordered dataset ids from the `datasets` source of truth, preserving
+ *  the input ranking and dropping ids with no live row. The actual bug fix:
+ *  display fields come from the row, not stale Vectorize metadata. */
+export async function hydrateDatasetsByIds(db: D1Database, ids: string[]): Promise<SearchResult[]> {
+  if (ids.length === 0) return [];
+  const results = await db
+    .prepare(
+      `SELECT d.dataset_id AS id, d.name, d.modalities, d.subject_count AS participants,
+              d.concept_doi AS doi, d.tasks, d.authors
+       FROM datasets d
+       WHERE d.dataset_id IN (${buildInPlaceholders(ids.length)})`,
+    )
+    .bind(...ids)
+    .all<HydrateRow>();
+  const byId = new Map((results.results || []).map((r) => [r.id, r]));
+  return ids
+    .map((id) => byId.get(id))
+    .filter((r): r is HydrateRow => Boolean(r))
+    .map((row) => toResult(row, 0));
+}
+
+/** Exact dataset-id lookup from `datasets` for the search exact-id tier.
+ *  Public + active only (the search endpoint is anonymous), so it can't leak a
+ *  private/archived row. */
+export async function lookupDatasetById(
+  db: D1Database,
+  datasetId: string,
+): Promise<SearchResult | null> {
+  const row = await db
+    .prepare(
+      `SELECT d.dataset_id AS id, d.name, d.modalities, d.subject_count AS participants,
+              d.concept_doi AS doi, d.tasks, d.authors
+       FROM datasets d
+       WHERE d.dataset_id = ? AND d.status = 'active'
+         AND (d.is_sandbox = 0 OR d.is_sandbox IS NULL) AND d.visibility = 'public'
+       LIMIT 1`,
+    )
+    .bind(datasetId)
+    .first<HydrateRow>();
+  return row ? toResult(row, 1.0) : null;
+}
+
+/** Semantic search, id-only: query Vectorize with `returnMetadata:'none'`
+ *  (lifts the topK ceiling to 100), then hydrate from `datasets` by id and
+ *  re-attach the vector scores in rank order. */
+export async function semanticSearchHydrated(
+  ai: Ai,
+  vectorize: VectorizeIndex,
+  db: D1Database,
+  query: string,
+  topK = 20,
+): Promise<SearchResult[]> {
+  const k = Math.min(Math.max(topK, 1), 100);
+  const embedding = await ai.run(EMBEDDING_MODEL, { text: [query] });
+  const embeddingData = "data" in embedding ? embedding.data : undefined;
+  if (!embeddingData?.[0]) {
+    throw new Error("Failed to generate query embedding");
+  }
+  const results = await vectorize.query(embeddingData[0], { topK: k, returnMetadata: "none" });
+  const ranked = results.matches.map((m) => ({ id: m.id, score: Math.round(m.score * 100) / 100 }));
+  if (ranked.length === 0) return [];
+  const scoreById = new Map(ranked.map((r) => [r.id, r.score]));
+  const hydrated = await hydrateDatasetsByIds(
+    db,
+    ranked.map((r) => r.id),
+  );
+  return hydrated.map((r) => ({ ...r, score: scoreById.get(r.id) ?? 0 }));
+}
+
+/** FTS5 lexical search over `datasets_fts` (bm25 ranking + readme snippet),
+ *  hydrating display fields from the joined `datasets` row. */
+export async function ftsSearch(
+  db: D1Database,
+  query: string,
+  limit = 20,
+): Promise<SearchResult[]> {
+  const match = buildFtsMatch(query);
+  if (!match) return [];
+  const results = await db
+    .prepare(
+      `SELECT d.dataset_id AS id, d.name, d.modalities, d.subject_count AS participants,
+              d.concept_doi AS doi, d.tasks, d.authors,
+              snippet(datasets_fts, 5, '<mark>', '</mark>', '…', 12) AS snippet
+       FROM datasets_fts
+       JOIN datasets d ON d.id = datasets_fts.rowid
+       WHERE datasets_fts MATCH ?
+         AND d.status = 'active' AND (d.is_sandbox = 0 OR d.is_sandbox IS NULL)
+         AND d.visibility = 'public'
+       ORDER BY bm25(datasets_fts)
+       LIMIT ?`,
+    )
+    .bind(match, limit)
+    .all<HydrateRow & { snippet: string | null }>();
+  return (results.results || []).map((row) => toResult(row, 1.0, row.snippet || undefined));
+}
+
+/** Reciprocal-rank fusion of semantic + lexical result lists (k=60). Dedups by
+ *  id, keeps the FTS snippet, and sorts by fused score. */
+export function rrfFuse(semantic: SearchResult[], lexical: SearchResult[], k = 60): SearchResult[] {
+  const fused = new Map<string, number>();
+  const byId = new Map<string, SearchResult>();
+  for (const list of [semantic, lexical]) {
+    list.forEach((r, i) => {
+      fused.set(r.id, (fused.get(r.id) ?? 0) + 1 / (k + i + 1));
+      const existing = byId.get(r.id);
+      if (!existing) byId.set(r.id, { ...r });
+      else if (!existing.snippet && r.snippet) existing.snippet = r.snippet;
+    });
+  }
+  return Array.from(byId.values())
+    .map((r) => ({ ...r, score: Math.round((fused.get(r.id) ?? 0) * 10000) / 10000 }))
+    .sort((a, b) => b.score - a.score);
 }
