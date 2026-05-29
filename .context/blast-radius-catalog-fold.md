@@ -33,7 +33,7 @@ until Phase 3 flips reads onto `datasets`.
 | 4 | `services/deletion.ts` `deleteDatasetCascade` | Admin DELETE on a folded id drops the projection (reappears next list) while firing a 404 GitHub delete | Refuse when the row's `owner_user_id === SYSTEM_USER_ID` |
 | 5 | `services/catalog-from-local.ts` `syncCatalogFromLocal` (active+public SELECT) | Re-projects folded rows back into `nemar_catalog`, clobbering the real `uploader` with `nemar-system` (circular) | `AND d.owner_user_id != ?` |
 | 6 | `index.ts` stale-`nm` cleanup cron | Defense-in-depth only — `visibility='private'` already excludes public folded rows | `AND owner_user_id != ?` (guards a hypothetical future private sentinel row) |
-| 7 | **User-side:** broadcast recipients (`services/broadcast.ts:92` `status='approved'`), `approved_users` stat, admin-notify fan-out (`email.ts:130`) | The sentinel **user** row would be emailed / counted as a real approved user | Sentinel user created with `status='revoked'` in 0027 — excluded from every `status='approved'` enumeration with zero extra code |
+| 7 | **User-side:** broadcast recipients (`services/broadcast.ts:93` `status='approved'`), `approved_users` stat, admin-notify fan-out (`email.ts:130`) | The sentinel **user** row would be emailed / counted as a real approved user | Sentinel user created with `status='revoked'` in 0027 — excluded from every `status='approved'` enumeration with zero extra code |
 
 ## SAFE BY DESIGN (no change needed — documented so reviewers don't re-flag)
 
@@ -70,7 +70,8 @@ until Phase 3 flips reads onto `datasets`.
 
 ## Summary
 
-26 dataset/user touch-points reviewed. **7 guarded in Phase 1** (6 dataset-side
-+ 1 user-side via the `revoked` sentinel status); the rest are safe by design.
-The single highest-risk site is the list endpoint (#1/#2) — without it the fold
-is a visible wire regression rather than a dormant expansion.
+The two enumerated sections above cover the touch-points that matter: **7 sites
+guarded in Phase 1** (6 dataset-side + 1 user-side via the `revoked` sentinel
+status) and the ~11 sites that are safe by design. The single highest-risk site
+is the list endpoint (#1/#2) — without it the fold is a visible wire regression
+rather than a dormant expansion.

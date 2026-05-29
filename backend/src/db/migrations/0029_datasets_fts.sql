@@ -17,6 +17,12 @@
 -- ! BACKUP RUNBOOK: `wrangler d1 export` fails on a DB containing a virtual
 --   table. Before any export: DROP TABLE datasets_fts, export, then recreate
 --   from this file (cheap at ~600 rows).
+--
+-- ! MANUAL-FIX RUNBOOK: application writes go through the D1 binding and fire
+--   these triggers, but an ad-hoc UPDATE from the Cloudflare D1 console can
+--   bypass them and leave the index stale. After any direct console UPDATE to
+--   name/description/authors/tasks/modalities/readme, rebuild the index:
+--     INSERT INTO datasets_fts(datasets_fts) VALUES('rebuild');
 
 CREATE VIRTUAL TABLE IF NOT EXISTS datasets_fts USING fts5(
   name, description, authors, tasks, modalities, readme,

@@ -3,10 +3,17 @@
 -- (a) + (b) seed the new columns added in 0027 for MANAGED rows from data
 --     that already exists (enrichment_json + the row's nemar_catalog cache),
 --     COALESCE-preserving any value already present (idempotent on re-run).
+--     NOTE: this is a one-time seed. Keeping datasets.authors/readme current
+--     after each enrichment run is Phase 2's job (#648 adds the write path);
+--     until then a row enriched AFTER this migration carries its migration-time
+--     value in datasets.* while the live value lives in nemar_catalog.
 -- (c) FOLDS legacy catalog-only rows from nemar_catalog INTO datasets under
 --     the sentinel owner (-1), so `datasets` becomes the single source of
---     truth. The fold carries BOTH dedup guards from the live list endpoint
---     (routes/datasets.ts:594-603) so mirrored rows never double-list.
+--     truth. The fold carries both dedup guards from the live list endpoint
+--     (equivalent in intent to routes/datasets.ts:604-616; the owner_user_id
+--     != ? qualifier from the live route is omitted here because the sentinel
+--     rows are being inserted by THIS migration and don't exist yet when the
+--     WHERE is evaluated) so mirrored rows never double-list.
 --
 -- Read paths still serve these folded rows from nemar_catalog this phase
 -- (code-side dormancy guards keep them out of the managed branch), so this
@@ -49,15 +56,23 @@ WHERE dataset_id IN (SELECT id FROM nemar_catalog);
 
 ------------------------------------------------------------------
 -- (c) FOLD legacy catalog-only rows into datasets (sentinel owner -1).
---     BOTH dedup guards, mirroring routes/datasets.ts:594-603:
+--     BOTH dedup guards (equivalent in intent to routes/datasets.ts:604-616):
 --       1. skip ids that are already an active managed dataset;
 --       2. skip ds* shadows of a managed on* mirror (the mirror carries the
 --          canonical on* id and back-points via source_id = "ds...").
 --     concept_doi is folded from c.doi so the legacy DOI is preserved on the
 --     source of truth for Phase 3 (read paths still serve c.doi from
 --     nemar_catalog this phase). embedding_dirty=1: these rows have no vector
---     yet (drained by the Phase-4 cron). INSERT OR IGNORE guards against a
---     dataset_id that exists only in a non-active state.
+--     yet (drained by the Phase-4 cron).
+--     INSERT OR IGNORE additionally drops any catalog id that collides with a
+--     dataset_id present only in a NON-active state (archived/deleted) -- guard
+--     1 filters on status='active' so it wouldn't catch those, and the UNIQUE
+--     constraint on dataset_id would otherwise error. Such a collision means a
+--     deleted managed dataset left a stale nemar_catalog row; post-apply, run
+--     the verification query below to surface any:
+--       SELECT c.id FROM nemar_catalog c
+--       JOIN datasets d ON d.dataset_id = c.id AND d.status != 'active'
+--       WHERE c.id NOT IN (SELECT dataset_id FROM datasets WHERE status='active');
 ------------------------------------------------------------------
 INSERT OR IGNORE INTO datasets (
   dataset_id, name, description, owner_user_id, status, visibility, is_sandbox,
