@@ -9,6 +9,7 @@ import { Hono } from "hono";
 import { z } from "zod";
 import { adminMiddleware, authMiddleware, ownerMiddleware } from "../middleware/auth";
 
+import { SYSTEM_USER_ID } from "../lib/constants";
 import {
   type RecipientGroup,
   type RecipientGroupOrUser,
@@ -825,7 +826,11 @@ adminRoutes.get("/stats", async (c) => {
       (SELECT COUNT(*) FROM users WHERE status = 'verified') as verified_users,
       (SELECT COUNT(*) FROM users WHERE status = 'approved') as approved_users,
       (SELECT COUNT(*) FROM users WHERE status = 'revoked') as revoked_users,
-      (SELECT COUNT(*) FROM datasets) as total_datasets,
+      -- total_datasets counts real managed datasets only; folded legacy
+      -- catalog rows (owner = SYSTEM_USER_ID, #646) are reported separately so
+      -- the headline count isn't inflated by ~180 cache projections.
+      (SELECT COUNT(*) FROM datasets WHERE owner_user_id != ${SYSTEM_USER_ID}) as total_datasets,
+      (SELECT COUNT(*) FROM datasets WHERE owner_user_id = ${SYSTEM_USER_ID}) as catalog_datasets,
       (SELECT COUNT(*) FROM tokens WHERE revoked_at IS NULL) as active_tokens
   `,
     )

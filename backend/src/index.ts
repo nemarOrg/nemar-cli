@@ -19,6 +19,7 @@ import { secureHeaders } from "hono/secure-headers";
 // keeps both in lockstep and asserts equality post-bump, so drift between
 // the two manifests fails the bump rather than silently shipping.
 import pkg from "../../package.json" with { type: "json" };
+import { SYSTEM_USER_ID } from "./lib/constants";
 import { optionalAuthMiddleware } from "./middleware/auth";
 import { maintenanceMode } from "./middleware/maintenance";
 import { rateLimiter } from "./middleware/rateLimit";
@@ -255,11 +256,15 @@ async function scheduledCleanup(env: Bindings): Promise<void> {
   const remaining = MAX_DELETIONS_PER_RUN - results.length;
   if (remaining > 0) {
     try {
+      // owner_user_id != SYSTEM_USER_ID is defense-in-depth: folded legacy
+      // catalog rows (#646) are public, so visibility='private' already
+      // excludes them, but the explicit guard keeps a future private sentinel
+      // row from ever being auto-deleted by this cron.
       const staleRows = await db
         .prepare(
-          "SELECT dataset_id FROM datasets WHERE dataset_id LIKE 'nm%' AND COALESCE(last_activity_at, created_at) < datetime('now', '-90 days') AND status = 'active' AND concept_doi IS NULL AND visibility = 'private' AND dataset_id NOT IN (SELECT dataset_id FROM publication_requests WHERE status NOT IN ('published', 'denied')) LIMIT ?",
+          "SELECT dataset_id FROM datasets WHERE dataset_id LIKE 'nm%' AND COALESCE(last_activity_at, created_at) < datetime('now', '-90 days') AND status = 'active' AND concept_doi IS NULL AND visibility = 'private' AND owner_user_id != ? AND dataset_id NOT IN (SELECT dataset_id FROM publication_requests WHERE status NOT IN ('published', 'denied')) LIMIT ?",
         )
-        .bind(remaining)
+        .bind(SYSTEM_USER_ID, remaining)
         .all<{ dataset_id: string }>();
 
       await deleteRows(staleRows.results);

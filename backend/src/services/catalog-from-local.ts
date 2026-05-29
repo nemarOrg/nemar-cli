@@ -16,6 +16,7 @@
  *   external dependency.
  */
 
+import { SYSTEM_USER_ID } from "../lib/constants.js";
 import { authorsFromEnrichment, formatFileSize } from "./dataset-metadata-columns.js";
 
 const BATCH_SIZE = 10;
@@ -152,7 +153,10 @@ export interface SyncCatalogFromLocalResult {
  * from local data. Idempotent; safe to re-run.
  *
  * Skips sandbox (xx*) and private datasets to match the policy used by
- * migration 0024 and the list-endpoint visibility filter.
+ * migration 0024 and the list-endpoint visibility filter. Also skips folded
+ * legacy catalog rows (owner = SYSTEM_USER_ID, #646): they are themselves
+ * cache projections, so re-projecting them back into nemar_catalog would be
+ * circular and would clobber the real uploader with 'nemar-system'.
  *
  * Batches D1 statements to stay under the bound-parameter ceiling.
  * INSERT OR REPLACE rebuilds the row from scratch on every call, which
@@ -191,8 +195,10 @@ export async function syncCatalogFromLocal(db: D1Database): Promise<SyncCatalogF
        LEFT JOIN users u ON u.id = d.owner_user_id
        WHERE d.status = 'active'
          AND d.visibility = 'public'
-         AND (d.is_sandbox = 0 OR d.is_sandbox IS NULL)`,
+         AND (d.is_sandbox = 0 OR d.is_sandbox IS NULL)
+         AND d.owner_user_id != ?`,
     )
+    .bind(SYSTEM_USER_ID)
     .all<LocalDatasetRow>();
 
   result.scanned = rows.results.length;
