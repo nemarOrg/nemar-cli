@@ -53,6 +53,76 @@ export async function semanticSearch(
   }));
 }
 
+export interface DatasetEmbedRow {
+  name?: string | null;
+  modalities?: string | null;
+  tasks?: string | null;
+  authors?: string | null;
+  readme?: string | null;
+}
+
+/**
+ * Build the embedding text for a `datasets` row. Mirrors catalog-sync's
+ * buildEmbeddingText so vectors stay consistent across both writers.
+ */
+export function buildDatasetEmbedText(row: DatasetEmbedRow): string {
+  return [
+    row.name ?? "",
+    row.modalities ? `Modalities: ${row.modalities}` : "",
+    row.tasks ? `Tasks: ${row.tasks}` : "",
+    row.authors ? `Authors: ${row.authors}` : "",
+    row.readme ? row.readme.slice(0, 1000) : "",
+  ]
+    .filter(Boolean)
+    .join("\n");
+}
+
+/**
+ * Re-embed a single dataset's Vectorize vector from its current `datasets`
+ * row (#646 Phase 2). Id-only model: the vector carries empty metadata, so a
+ * full upsert atomically clears any stale 6-field metadata and search results
+ * hydrate their facts from D1 at query time.
+ *
+ * Fire-once + fully guarded: returns without throwing when AI/Vectorize are
+ * unconfigured, the row is missing, or any step fails -- so it can be awaited
+ * inline at the enrich/reindex hooks without ever failing the request.
+ */
+export async function reembedDatasetVector(
+  db: D1Database,
+  ai: Ai | undefined,
+  vectorize: VectorizeIndex | undefined,
+  datasetId: string,
+): Promise<void> {
+  if (!ai || !vectorize) {
+    console.log(`[reembed] AI/Vectorize not configured, skipping ${datasetId}`);
+    return;
+  }
+  try {
+    const row = await db
+      .prepare("SELECT name, modalities, tasks, authors, readme FROM datasets WHERE dataset_id = ?")
+      .bind(datasetId)
+      .first<DatasetEmbedRow>();
+    if (!row) {
+      console.warn(`[reembed] No datasets row for ${datasetId}, skipping`);
+      return;
+    }
+    const text = buildDatasetEmbedText(row);
+    if (!text.trim()) return;
+
+    const embedding = await ai.run(EMBEDDING_MODEL, { text: [text] });
+    const values = "data" in embedding ? embedding.data?.[0] : undefined;
+    if (!values) {
+      console.error(`[reembed] Empty embedding for ${datasetId}`);
+      return;
+    }
+    await vectorize.upsert([{ id: datasetId, values, metadata: {} }]);
+  } catch (err) {
+    console.error(
+      `[reembed] Failed for ${datasetId}: ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
+}
+
 /**
  * Fallback text search using D1 LIKE queries on the nemar_catalog table.
  * Used when Vectorize is not available or for exact substring matching.

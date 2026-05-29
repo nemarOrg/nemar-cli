@@ -133,6 +133,71 @@ export async function writeDatasetMetadataColumns(
   return { changes };
 }
 
+/** Max readme length stored on `datasets.readme` (matches the 0028 fold's substr). */
+const README_MAX = 8192;
+
+/**
+ * Fact columns written directly to the `datasets` source of truth by the
+ * enrichment/reindex hooks (#646 Phase 2 dual-write). Complements
+ * writeDatasetMetadataColumns (which owns subject_count/modalities/age/
+ * file_size/total_files/tasks) -- no column overlap. Every field is optional
+ * and COALESCE-preserved, so a hook that lacks a value (e.g. reindex has no
+ * LLM authors) leaves the existing column untouched. `name`/`description` are
+ * preserved too: a reindex without a fresh LLM title must not clobber a better
+ * one. While both stores are live this phase, syncNemarCatalogFromEnrichment
+ * still mirrors the same data into nemar_catalog in parallel.
+ */
+export interface DatasetCatalogFields {
+  name?: string | null;
+  description?: string | null;
+  authors?: string | null;
+  license?: string | null;
+  readme?: string | null;
+  bids_version?: string | null;
+  /** No BIDS-native managed extraction yet (#657); reindex/enrich pass null. */
+  sessions_count?: number | null;
+}
+
+export async function writeDatasetCatalogFields(
+  db: D1Database,
+  datasetId: string,
+  fields: DatasetCatalogFields,
+): Promise<{ changes: number }> {
+  const readme = fields.readme != null ? fields.readme.slice(0, README_MAX) : null;
+  const result = await db
+    .prepare(
+      `UPDATE datasets
+       SET name = COALESCE(?, name),
+           description = COALESCE(?, description),
+           authors = COALESCE(?, authors),
+           license = COALESCE(?, license),
+           readme = COALESCE(?, readme),
+           bids_version = COALESCE(?, bids_version),
+           sessions_count = COALESCE(?, sessions_count),
+           updated_at = datetime('now')
+       WHERE dataset_id = ?`,
+    )
+    .bind(
+      fields.name ?? null,
+      fields.description ?? null,
+      fields.authors ?? null,
+      fields.license ?? null,
+      readme,
+      fields.bids_version ?? null,
+      fields.sessions_count ?? null,
+      datasetId,
+    )
+    .run();
+
+  const changes = result.meta?.changes ?? 0;
+  if (changes === 0) {
+    console.warn(
+      `[catalog-fields] No rows updated for ${datasetId} - dataset may have been deleted or renamed`,
+    );
+  }
+  return { changes };
+}
+
 /**
  * Fields that the discover-page list endpoint projects from `nemar_catalog`.
  * Kept in sync with the catalog table by the enrichment pipeline so the
