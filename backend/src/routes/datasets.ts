@@ -7,6 +7,7 @@
 import { zValidator } from "@hono/zod-validator";
 import { Hono } from "hono";
 import { z } from "zod";
+import { SYSTEM_USER_ID } from "../lib/constants";
 import { authMiddleware, optionalAuthMiddleware } from "../middleware/auth";
 import { cliVersionGuard } from "../middleware/cliVersion";
 import { type SearchResult, semanticSearch, textSearch } from "../services/dataset-search";
@@ -524,8 +525,12 @@ datasetRoutes.get("/", optionalAuthMiddleware, async (c) => {
     return executeAndReturn(c, db, query, params, { limit, offset });
   }
 
-  // Public catalog: UNION managed datasets + catalog-only
-  const managedParams: (string | number)[] = [status];
+  // Public catalog: UNION managed datasets + catalog-only.
+  // SYSTEM_USER_ID excludes folded legacy catalog rows (#646 Phase 1): they
+  // live in `datasets` now but are still served from nemar_catalog by the
+  // catalog-only branch below, so the managed branch must skip them or they
+  // double-list with the wrong doi/owner/source_type.
+  const managedParams: (string | number)[] = [status, SYSTEM_USER_ID];
   let managedQuery = `
     SELECT d.dataset_id, d.dataset_id AS id, d.name, d.description, d.status, d.visibility,
            d.github_repo, d.concept_doi, d.concept_doi AS doi, d.created_at, d.updated_at,
@@ -549,6 +554,7 @@ datasetRoutes.get("/", optionalAuthMiddleware, async (c) => {
     JOIN users u ON d.owner_user_id = u.id
     LEFT JOIN nemar_catalog c ON c.id = d.dataset_id
     WHERE d.status = ?
+      AND d.owner_user_id != ?
       AND (d.is_sandbox = 0 OR d.is_sandbox IS NULL)
   `;
 
@@ -575,8 +581,12 @@ datasetRoutes.get("/", optionalAuthMiddleware, async (c) => {
     managed: true,
   });
 
-  // Catalog-only datasets (not in managed datasets table)
-  const catalogParams: (string | number)[] = [];
+  // Catalog-only datasets (not in managed datasets table).
+  // Both dedup subqueries below exclude SYSTEM_USER_ID so a folded legacy
+  // row (now present in `datasets` with owner=-1) does NOT suppress its own
+  // nemar_catalog source row — the 180 folded rows keep being served from
+  // here exactly as before the fold (#646 Phase 1, byte-stable).
+  const catalogParams: (string | number)[] = [SYSTEM_USER_ID, SYSTEM_USER_ID];
   let catalogQuery = `
     SELECT c.id AS dataset_id, c.id, c.name, c.description, NULL AS status, 'public' AS visibility,
            NULL AS github_repo, NULL AS concept_doi, c.doi, COALESCE(c.publish_date, c.created_date) AS created_at, NULL AS updated_at,
@@ -591,16 +601,18 @@ datasetRoutes.get("/", optionalAuthMiddleware, async (c) => {
            'catalog' AS source_type,
            NULL AS latest_version
     FROM nemar_catalog c
-    WHERE c.id NOT IN (SELECT dataset_id FROM datasets WHERE status = 'active')
+    WHERE c.id NOT IN (SELECT dataset_id FROM datasets WHERE status = 'active' AND owner_user_id != ?)
       AND c.id NOT IN (
         -- Hide ds* shadows when a managed on* mirror exists. The catalog row
         -- keeps its OpenNeuro id (c.id = "ds002718"); the managed mirror
         -- carries the canonical id (dataset_id = "on002718") and back-points
         -- via source_id = "ds002718". Without this second NOT IN, every
         -- mirrored ds row shows up twice in the list (once as canonical,
-        -- once as shadow).
+        -- once as shadow). owner_user_id != ? keeps folded sentinel rows out
+        -- of the shadow set so they don't suppress their own catalog source.
         SELECT source_id FROM datasets
         WHERE status = 'active' AND source = 'openneuro' AND source_id IS NOT NULL
+          AND owner_user_id != ?
       )
   `;
 

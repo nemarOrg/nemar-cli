@@ -9,15 +9,11 @@
  * catches the most likely refactor mistakes.
  */
 
+import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { describe, expect, test } from "bun:test";
 
-const SOURCE_PATH = join(
-  import.meta.dir,
-  "..",
-  "backend/src/services/catalog-from-local.ts",
-);
+const SOURCE_PATH = join(import.meta.dir, "..", "backend/src/services/catalog-from-local.ts");
 const source = readFileSync(SOURCE_PATH, "utf8");
 
 describe("catalog-from-local SQL", () => {
@@ -64,5 +60,14 @@ describe("catalog-from-local SQL", () => {
     // regress to referencing a non-existent column.
     expect(source).toMatch(/SELECT MIN\(dv\.created_at\)\s+FROM dataset_versions dv/);
     expect(source).not.toMatch(/d\.published_at/);
+  });
+
+  test("excludes folded sentinel rows so the rebuild can't clobber their uploader (#646)", () => {
+    // Folded legacy catalog rows (owner = SYSTEM_USER_ID) are themselves cache
+    // projections; re-projecting them back into nemar_catalog would be circular
+    // and would overwrite the real uploader with 'nemar-system'. If this guard
+    // is ever dropped, ~180 catalog cards lose their attribution.
+    expect(source).toMatch(/AND d\.owner_user_id != \?/);
+    expect(source).toContain(".bind(SYSTEM_USER_ID)");
   });
 });
