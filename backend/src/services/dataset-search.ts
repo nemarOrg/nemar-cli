@@ -59,6 +59,8 @@ export interface DatasetEmbedRow {
   tasks?: string | null;
   authors?: string | null;
   readme?: string | null;
+  subject_count?: number | null;
+  concept_doi?: string | null;
 }
 
 /**
@@ -78,10 +80,30 @@ export function buildDatasetEmbedText(row: DatasetEmbedRow): string {
 }
 
 /**
+ * Build the Vectorize metadata for a `datasets` row. These are the six display
+ * fields semanticSearch() reads off `match.metadata.*` today, so re-embedding
+ * with the CURRENT row values is what actually fixes the stale-vector bug
+ * (e.g. nm000156 returning an old title). Phase 3 switches reads to id-only +
+ * D1 hydration and drops this metadata; until then it must stay populated or
+ * semantic results render blank.
+ */
+export function buildDatasetVectorMetadata(row: DatasetEmbedRow): Record<string, string | number> {
+  return {
+    name: row.name ?? "",
+    modalities: row.modalities ?? "",
+    participants: row.subject_count ?? 0,
+    doi: row.concept_doi ?? "",
+    tasks: row.tasks ?? "",
+    authors: row.authors ?? "",
+  };
+}
+
+/**
  * Re-embed a single dataset's Vectorize vector from its current `datasets`
- * row (#646 Phase 2). Id-only model: the vector carries empty metadata, so a
- * full upsert atomically clears any stale 6-field metadata and search results
- * hydrate their facts from D1 at query time.
+ * row (#646 Phase 2). Writes FRESH 6-field metadata (the fields semanticSearch
+ * reads) so a re-embed both refreshes the vector and corrects stale display
+ * metadata. The metadata removal + id-only hydration lands atomically in
+ * Phase 3 (it can't be cleared here while semanticSearch still reads metadata).
  *
  * Fire-once + fully guarded: returns without throwing when AI/Vectorize are
  * unconfigured, the row is missing, or any step fails -- so it can be awaited
@@ -99,7 +121,9 @@ export async function reembedDatasetVector(
   }
   try {
     const row = await db
-      .prepare("SELECT name, modalities, tasks, authors, readme FROM datasets WHERE dataset_id = ?")
+      .prepare(
+        "SELECT name, modalities, tasks, authors, readme, subject_count, concept_doi FROM datasets WHERE dataset_id = ?",
+      )
       .bind(datasetId)
       .first<DatasetEmbedRow>();
     if (!row) {
@@ -107,7 +131,10 @@ export async function reembedDatasetVector(
       return;
     }
     const text = buildDatasetEmbedText(row);
-    if (!text.trim()) return;
+    if (!text.trim()) {
+      console.warn(`[reembed] Empty embed text for ${datasetId} (all fields blank), skipping`);
+      return;
+    }
 
     const embedding = await ai.run(EMBEDDING_MODEL, { text: [text] });
     const values = "data" in embedding ? embedding.data?.[0] : undefined;
@@ -115,7 +142,7 @@ export async function reembedDatasetVector(
       console.error(`[reembed] Empty embedding for ${datasetId}`);
       return;
     }
-    await vectorize.upsert([{ id: datasetId, values, metadata: {} }]);
+    await vectorize.upsert([{ id: datasetId, values, metadata: buildDatasetVectorMetadata(row) }]);
   } catch (err) {
     console.error(
       `[reembed] Failed for ${datasetId}: ${err instanceof Error ? err.message : String(err)}`,

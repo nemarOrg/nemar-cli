@@ -395,12 +395,22 @@ export async function runDatasetSync(
       `[reindex] Metadata columns refreshed for ${datasetId}: subjects=${cols.subject_count}, modalities=${cols.modalities}, files=${cols.total_files}`,
     );
 
-    // Mirror the BIDS-derived columns into nemar_catalog so the list-endpoint
-    // cache stays in sync. authors/license aren't refreshed here -- they
-    // come from the LLM enrichment, which runs on its own webhook path.
-    // `name` is required by the UPSERT (NOT NULL in the schema); we use the
-    // d1 row's name and let COALESCE preserve whatever the catalog has on
-    // the UPDATE path.
+    // #646 Phase 2 dual-write -- SOURCE OF TRUTH FIRST. A reindex refreshes the
+    // BIDS-derived readme + bids_version; name/description/authors/license are
+    // null -> COALESCE-preserved (they are owned by the LLM enrich path, not
+    // reindex). A failure here diverges `datasets` from nemar_catalog, so let
+    // it propagate to the outer catch (-> metadataColumnsError, persisted +
+    // surfaced) rather than swallow it.
+    const bidsVersion =
+      typeof bidsDescription.BIDSVersion === "string" ? bidsDescription.BIDSVersion : null;
+    await writeDatasetCatalogFields(db, datasetId, {
+      readme: readme || null, // empty (no README) -> preserve existing
+      bids_version: bidsVersion,
+    });
+
+    // nemar_catalog read-cache mirror (parallel safety net until Phase 3).
+    // Non-fatal: a stale cache row doesn't corrupt the source of truth. authors/
+    // license aren't refreshed here (LLM-owned). `name` is required (NOT NULL).
     try {
       await syncNemarCatalogFromEnrichment(db, datasetId, {
         name: dataset.name ?? datasetId,
@@ -414,29 +424,12 @@ export async function runDatasetSync(
         file_size_formatted: formatFileSize(cols.file_size),
         total_files: cols.total_files,
       });
-
-      // #646 Phase 2 dual-write: mirror onto the `datasets` source of truth.
-      // authors/license are omitted (null -> COALESCE-preserved); they come
-      // from the LLM enrichment path, not reindex. name/description/readme/
-      // bids_version are refreshed. Then re-embed the vector. The
-      // nemar_catalog write above stays as the parallel safety net.
-      const bidsVersion =
-        typeof bidsDescription.BIDSVersion === "string" ? bidsDescription.BIDSVersion : null;
-      await writeDatasetCatalogFields(db, datasetId, {
-        name: dataset.name ?? datasetId,
-        description: dataset.description ?? null,
-        readme: readme || null, // empty (no README) -> preserve existing
-        bids_version: bidsVersion,
-      });
-      // Guarded fire-once re-embed (never throws); no-op if AI/Vectorize unset.
-      await reembedDatasetVector(db, env.AI, env.VECTORIZE, datasetId);
     } catch (err) {
-      // console.error (not warn): a persistent failure here leaves the
-      // list endpoint cache / vector stale on every reindex.
-      console.error(
-        `[reindex] catalog dual-write / re-embed failed for ${datasetId}: ${errorMessage(err)}`,
-      );
+      console.error(`[reindex] nemar_catalog sync failed for ${datasetId}: ${errorMessage(err)}`);
     }
+
+    // Best-effort re-embed (internally guarded, never throws).
+    await reembedDatasetVector(db, env.AI, env.VECTORIZE, datasetId);
   } catch (colErr) {
     metadataColumnsError = errorMessage(colErr);
     console.error(`[reindex] Failed to write metadata columns for ${datasetId}:`, colErr);
