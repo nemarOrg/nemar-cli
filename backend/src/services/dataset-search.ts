@@ -309,6 +309,14 @@ export async function semanticSearchHydrated(
     db,
     ranked.map((r) => r.id),
   );
+  // Vector ids with no live `datasets` row are dropped (correct: a vector for a
+  // deleted dataset must not surface). Log when it happens so index drift /
+  // stale vectors are observable rather than silently shrinking results.
+  if (hydrated.length < ranked.length) {
+    console.warn(
+      `[search] ${ranked.length - hydrated.length}/${ranked.length} vector ids had no datasets row (stale vectors or recent deletes)`,
+    );
+  }
   return hydrated.map((r) => ({ ...r, score: scoreById.get(r.id) ?? 0 }));
 }
 

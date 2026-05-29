@@ -1088,19 +1088,28 @@ datasetRoutes.get("/search", optionalAuthMiddleware, async (c) => {
   // RRF. min_score is a cosine floor so it's applied to the semantic component
   // BEFORE fusion; finalize() therefore does NOT re-floor the fused scores.
   if (isReadFromDatasetsEnabled(c.env)) {
-    const finalize = (rows: SearchResult[], method: string) =>
-      c.json({
-        results: applyModality(rows).slice(0, limit),
-        count: applyModality(rows).length,
+    const finalize = (rows: SearchResult[], method: string) => {
+      const filtered = applyModality(rows);
+      return c.json({
+        results: filtered.slice(0, limit),
+        count: filtered.length,
         method,
         min_score: minScore,
       });
+    };
     try {
       if (exactIdMatch) {
         const idHit = await lookupDatasetById(db, trimmed.toLowerCase());
         if (idHit) return finalize([idHit], "exact_id");
       }
-      const lexical = await ftsSearch(db, trimmed, limit * 2);
+      // Tier-specific log so a failure here is distinguishable from the
+      // semantic/hydration tiers; re-throw so the outer catch still degrades.
+      const lexical = await ftsSearch(db, trimmed, limit * 2).catch((ftsErr) => {
+        console.error(
+          `[search] FTS tier failed: ${ftsErr instanceof Error ? ftsErr.message : String(ftsErr)}`,
+        );
+        throw ftsErr;
+      });
       if (!c.env.AI || !c.env.VECTORIZE) {
         return finalize(lexical, "text");
       }
@@ -1119,7 +1128,9 @@ datasetRoutes.get("/search", optionalAuthMiddleware, async (c) => {
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       console.error("Dataset search (datasets path) failed:", msg);
-      if (msg.includes("no such table")) {
+      // Only the expected missing-FTS-table case degrades to "unavailable";
+      // any other structural error is a real 500 (don't mask it).
+      if (msg.includes("no such table: datasets_fts")) {
         return c.json({ results: [], count: 0, method: "unavailable" });
       }
       return c.json({ error: "Search failed", details: msg }, 500);
