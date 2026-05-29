@@ -26,6 +26,7 @@
  *
  * Epic #618 / phase 3 (#621). Companion: nemarOrg/website#63/#64/#65.
  */
+import { isReadFromDatasetsEnabled } from "../lib/flags";
 import type { Bindings } from "../types/bindings";
 import {
   type DatasetVersionRow,
@@ -80,6 +81,19 @@ export interface PageBundle {
  * indicate a row that disappeared mid-request (rare, infra-level).
  */
 async function loadCatalogRow(env: Bindings, datasetId: string): Promise<CatalogRow | null> {
+  // #646 Phase 3: read license/authors from the `datasets` source of truth.
+  if (isReadFromDatasetsEnabled(env)) {
+    return env.DB.prepare(
+      `SELECT d.dataset_id, d.name, d.description, d.concept_doi, d.github_repo,
+              d.modalities, d.tasks, d.license, d.authors
+         FROM datasets d
+         WHERE d.dataset_id = ?
+         LIMIT 1`,
+    )
+      .bind(datasetId)
+      .first<CatalogRow>();
+  }
+  // Flag off: legacy path -- license/authors still come from the cache.
   return env.DB.prepare(
     `SELECT d.dataset_id, d.name, d.description, d.concept_doi, d.github_repo,
             d.modalities, d.tasks,
