@@ -4718,6 +4718,20 @@ adminRoutes.delete("/datasets/:id", async (c) => {
     return c.json({ error: "Dataset not found" }, 404);
   }
 
+  // Folded legacy catalog rows (#646) are cache projections owned by the
+  // sentinel system user, with no GitHub repo / S3 of their own; they reappear
+  // from nemar_catalog on the next list. Refuse here with a clear 400.
+  // deleteDatasetCascade also refuses (defense-in-depth for other callers).
+  if (dataset.owner_user_id === SYSTEM_USER_ID) {
+    return c.json(
+      {
+        error: `"${datasetId}" is a system catalog entry (owner=nemar-system) and cannot be deleted here; remove it from nemar_catalog instead.`,
+        dataset_id: datasetId,
+      },
+      400,
+    );
+  }
+
   // Permission check: published datasets require owner role
   const hasDoiOrPublished = dataset.concept_doi !== null || dataset.visibility === "public";
   if (hasDoiOrPublished) {

@@ -53,9 +53,12 @@ export async function deleteDatasetCascade(
 
   // Refuse folded legacy catalog rows (#646): they are cache projections from
   // nemar_catalog owned by the sentinel system user, with no GitHub repo or
-  // S3 objects of their own. Deleting one only drops the projection (it
-  // reappears on the next list/fold) while attempting a 404 GitHub delete.
-  // The real fix is to remove the source row from nemar_catalog.
+  // S3 objects of their own. Deleting the datasets row would only drop the
+  // projection while attempting a 404 GitHub delete; the source row remains in
+  // nemar_catalog, so the dataset keeps appearing in GET /datasets via the
+  // catalog-only branch. The real fix is to remove the nemar_catalog row.
+  // ownerRow is null when the dataset doesn't exist: optional-chaining lets it
+  // fall through to the cascade, which no-ops correctly on a missing row.
   const ownerRow = await db
     .prepare("SELECT owner_user_id FROM datasets WHERE dataset_id = ?")
     .bind(datasetId)
