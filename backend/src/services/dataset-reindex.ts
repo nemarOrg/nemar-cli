@@ -25,8 +25,10 @@ import {
   computeDatasetMetadataColumns,
   formatFileSize,
   syncNemarCatalogFromEnrichment,
+  writeDatasetCatalogFields,
   writeDatasetMetadataColumns,
 } from "./dataset-metadata-columns.js";
+import { reembedDatasetVector } from "./dataset-search.js";
 import { enrichDataset } from "./enrich-dataset.js";
 import { getDatasetsToken } from "./github-auth.js";
 import { getBlobContent, getTreeAtRef } from "./github.js";
@@ -412,10 +414,28 @@ export async function runDatasetSync(
         file_size_formatted: formatFileSize(cols.file_size),
         total_files: cols.total_files,
       });
+
+      // #646 Phase 2 dual-write: mirror onto the `datasets` source of truth.
+      // authors/license are omitted (null -> COALESCE-preserved); they come
+      // from the LLM enrichment path, not reindex. name/description/readme/
+      // bids_version are refreshed. Then re-embed the vector. The
+      // nemar_catalog write above stays as the parallel safety net.
+      const bidsVersion =
+        typeof bidsDescription.BIDSVersion === "string" ? bidsDescription.BIDSVersion : null;
+      await writeDatasetCatalogFields(db, datasetId, {
+        name: dataset.name ?? datasetId,
+        description: dataset.description ?? null,
+        readme: readme || null, // empty (no README) -> preserve existing
+        bids_version: bidsVersion,
+      });
+      // Guarded fire-once re-embed (never throws); no-op if AI/Vectorize unset.
+      await reembedDatasetVector(db, env.AI, env.VECTORIZE, datasetId);
     } catch (err) {
       // console.error (not warn): a persistent failure here leaves the
-      // list endpoint cache stale on every reindex.
-      console.error(`[reindex] nemar_catalog sync failed for ${datasetId}: ${errorMessage(err)}`);
+      // list endpoint cache / vector stale on every reindex.
+      console.error(
+        `[reindex] catalog dual-write / re-embed failed for ${datasetId}: ${errorMessage(err)}`,
+      );
     }
   } catch (colErr) {
     metadataColumnsError = errorMessage(colErr);

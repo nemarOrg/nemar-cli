@@ -28,8 +28,10 @@ import {
   computeDatasetMetadataColumns,
   formatFileSize,
   syncNemarCatalogFromEnrichment,
+  writeDatasetCatalogFields,
   writeDatasetMetadataColumns,
 } from "./dataset-metadata-columns.js";
+import { reembedDatasetVector } from "./dataset-search.js";
 import {
   discoverOrcidsFromReferencedDois,
   extractDoisFromBids,
@@ -887,11 +889,28 @@ export async function enrichDataset(
           file_size_formatted: formatFileSize(cols.file_size),
           total_files: cols.total_files,
         });
+
+        // #646 Phase 2 dual-write: mirror the same facts onto the `datasets`
+        // source of truth (the columns nemar_catalog held but datasets didn't
+        // yet) and re-embed the vector. The nemar_catalog write above stays as
+        // the parallel safety net until Phase 3 flips reads onto `datasets`.
+        const bidsVersion =
+          typeof bidsDescription.BIDSVersion === "string" ? bidsDescription.BIDSVersion : null;
+        await writeDatasetCatalogFields(env.DB, datasetId, {
+          name: catalogName,
+          description: catalogDescription,
+          authors: authorsFromEnrichment(finalMetadata),
+          license,
+          readme: readmeContent || null, // empty README -> preserve existing
+          bids_version: bidsVersion,
+        });
+        // Guarded fire-once re-embed (never throws); no-op if AI/Vectorize unset.
+        await reembedDatasetVector(env.DB, env.AI, env.VECTORIZE, datasetId);
       } catch (err) {
         // console.error (not warn): a persistent failure here leaves the
-        // list endpoint cache stale for every freshly enriched dataset.
+        // list endpoint cache / vector stale for every freshly enriched dataset.
         console.error(
-          `[llm-enrich] nemar_catalog sync failed for ${datasetId}: ${errorMessage(err)}`,
+          `[llm-enrich] catalog dual-write / re-embed failed for ${datasetId}: ${errorMessage(err)}`,
         );
       }
     } catch (err) {
