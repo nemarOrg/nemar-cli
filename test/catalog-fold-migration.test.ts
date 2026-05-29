@@ -141,6 +141,14 @@ function buildDb(): Database {
   return db;
 }
 
+// Schema-only DB for tests that seed their own edge-case rows before the fold.
+function blankDb(): Database {
+  const db = new Database(":memory:");
+  db.exec("PRAGMA foreign_keys = ON;");
+  db.exec(BASE_SCHEMA);
+  return db;
+}
+
 function applyExpand(db: Database) {
   db.exec(M0027);
   db.exec(M0028);
@@ -274,15 +282,98 @@ describe("0028 fold + backfill", () => {
     expect(n).toBe(5); // 3 managed + 2 folded
   });
 
-  test("re-running 0028 is idempotent and COALESCE-preserves existing values", () => {
-    db.exec("UPDATE datasets SET authors = 'MANUAL OVERRIDE' WHERE dataset_id = 'nm000200'");
+  test("re-running 0028 is idempotent and COALESCE-preserves step-(a) and step-(b) values", () => {
+    // authors is filled by step (a) from enrichment_json; readme by step (b)
+    // from nemar_catalog. Both must survive a re-run unchanged.
+    db.exec(
+      "UPDATE datasets SET authors = 'MANUAL OVERRIDE', readme = 'CUSTOM README' WHERE dataset_id = 'nm000200'",
+    );
     db.exec(M0028); // second run
-    const r = db.query("SELECT authors FROM datasets WHERE dataset_id='nm000200'").get() as {
+    const r = db
+      .query("SELECT authors, readme FROM datasets WHERE dataset_id='nm000200'")
+      .get() as {
       authors: string;
+      readme: string;
     };
-    expect(r.authors).toBe("MANUAL OVERRIDE"); // not clobbered
+    expect(r.authors).toBe("MANUAL OVERRIDE"); // step (a) not clobbered
+    expect(r.readme).toBe("CUSTOM README"); // step (b) not clobbered
     const n = (db.query("SELECT COUNT(*) AS n FROM datasets").get() as { n: number }).n;
     expect(n).toBe(5); // no duplicate folds
+  });
+
+  test("folds publish_date via the COALESCE(publish_date, created_date, now) fallback", () => {
+    const d = blankDb();
+    d.exec(
+      "INSERT INTO nemar_catalog (id, name, publish_date, created_date) VALUES ('ds777777', 'PD Fallback', NULL, '2020-01-01')",
+    );
+    applyExpand(d);
+    const r = d.query("SELECT publish_date FROM datasets WHERE dataset_id='ds777777'").get() as {
+      publish_date: string;
+    };
+    expect(r.publish_date).toBe("2020-01-01"); // fell back to created_date, not datetime('now')
+  });
+
+  test("INSERT OR IGNORE skips a catalog id that collides with a NON-active managed dataset", () => {
+    const d = blankDb();
+    d.exec(
+      "INSERT INTO users (id, username, email, status) VALUES (10,'alice','a@x.org','approved')",
+    );
+    // An archived managed dataset that guard 1 (status='active') would NOT catch.
+    d.exec(
+      "INSERT INTO datasets (dataset_id, name, owner_user_id, status, visibility) VALUES ('ds555555','Archived',10,'archived','private')",
+    );
+    d.exec("INSERT INTO nemar_catalog (id, name) VALUES ('ds555555','Catalog Collide')");
+    applyExpand(d);
+    const rows = d
+      .query("SELECT owner_user_id, status FROM datasets WHERE dataset_id='ds555555'")
+      .all() as Array<{ owner_user_id: number; status: string }>;
+    expect(rows.length).toBe(1); // not double-inserted
+    expect(rows[0].owner_user_id).toBe(10); // the archived row, not a sentinel fold
+    expect(rows[0].status).toBe("archived");
+  });
+
+  test("truncates a long readme to 8 KB on fold", () => {
+    const d = blankDb();
+    const longReadme = "x".repeat(10_000);
+    d.exec("INSERT INTO nemar_catalog (id, name, readme) VALUES ('ds888888','Long Readme', ?)", [
+      longReadme,
+    ]);
+    applyExpand(d);
+    const r = d
+      .query("SELECT LENGTH(readme) AS len FROM datasets WHERE dataset_id='ds888888'")
+      .get() as {
+      len: number;
+    };
+    expect(r.len).toBe(8192);
+  });
+});
+
+describe("admin /stats count split", () => {
+  test("total_datasets excludes folded rows; catalog_datasets counts them", () => {
+    const db = buildDb();
+    applyExpand(db);
+    // Mirrors the two subqueries added to routes/admin.ts GET /admin/stats.
+    const r = db
+      .query(
+        `SELECT
+           (SELECT COUNT(*) FROM datasets WHERE owner_user_id != ${SYSTEM_USER_ID}) AS total_datasets,
+           (SELECT COUNT(*) FROM datasets WHERE owner_user_id = ${SYSTEM_USER_ID}) AS catalog_datasets`,
+      )
+      .get() as { total_datasets: number; catalog_datasets: number };
+    expect(r.total_datasets).toBe(3); // managed only
+    expect(r.catalog_datasets).toBe(2); // folded only
+
+    // Anti-regression pin: the real handler must keep the split.
+    const adminSrc = readFileSync(
+      join(import.meta.dir, "..", "backend/src/routes/admin.ts"),
+      "utf8",
+    );
+    expect(adminSrc).toContain(
+      "FROM datasets WHERE owner_user_id != ${SYSTEM_USER_ID}) as total_datasets",
+    );
+    expect(adminSrc).toContain(
+      "FROM datasets WHERE owner_user_id = ${SYSTEM_USER_ID}) as catalog_datasets",
+    );
   });
 });
 
@@ -323,8 +414,8 @@ describe("dormancy guards keep GET /datasets byte-stable", () => {
 
   test("real handler retains the owner_user_id guards (anti-regression pin)", () => {
     const src = readFileSync(join(import.meta.dir, "..", "backend/src/routes/datasets.ts"), "utf8");
-    // managed branch excludes the sentinel
-    expect(src).toMatch(/WHERE d\.status = \?\s*\n\s*AND d\.owner_user_id != \?/);
+    // managed branch excludes the sentinel (\s+ tolerates one-line or wrapped form)
+    expect(src).toMatch(/WHERE d\.status = \?\s+AND d\.owner_user_id != \?/);
     // both catalog dedup subqueries exclude the sentinel
     const guards = src.match(/owner_user_id != \?/g) ?? [];
     expect(guards.length).toBeGreaterThanOrEqual(3);
@@ -404,6 +495,19 @@ describe("0029 FTS5 index + triggers", () => {
       embedding_dirty: number;
     };
     expect(r.embedding_dirty).toBe(1);
+  });
+
+  test("updating embedding_dirty alone does NOT re-fire the trigger (OF-list scoping)", () => {
+    // The embed_dirty trigger's inner UPDATE touches only embedding_dirty,
+    // which is absent from its OF list, so a direct write must not be forced
+    // back to 1. Use sentinel value 7 that a (wrong) re-fire would clobber to 1.
+    db.exec("UPDATE datasets SET embedding_dirty = 7 WHERE dataset_id = 'nm000200'");
+    const r = db
+      .query("SELECT embedding_dirty FROM datasets WHERE dataset_id='nm000200'")
+      .get() as {
+      embedding_dirty: number;
+    };
+    expect(r.embedding_dirty).toBe(7);
   });
 
   test("trigger bodies use uppercase BEGIN...END (workers-sdk#10998 remote-apply guard)", () => {
