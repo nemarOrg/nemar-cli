@@ -10,9 +10,12 @@
 
 import { Database } from "bun:sqlite";
 import { describe, expect, test } from "bun:test";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { writeDatasetCatalogFields } from "../backend/src/services/dataset-metadata-columns";
 import {
   buildDatasetEmbedText,
+  buildDatasetVectorMetadata,
   reembedDatasetVector,
 } from "../backend/src/services/dataset-search";
 
@@ -103,10 +106,70 @@ describe("writeDatasetCatalogFields", () => {
     expect(row.len).toBe(8192);
   });
 
+  test("writes every field through (guards against bind-order transposition)", async () => {
+    const db = seededDb();
+    await writeDatasetCatalogFields(realD1(db), "nm000200", {
+      name: "Fresh Title",
+      description: "fresh desc",
+      authors: "Fresh Author",
+      license: "MIT",
+      readme: "fresh readme",
+      bids_version: "1.9.0",
+      sessions_count: 7,
+    });
+    const row = db
+      .query(
+        "SELECT name, description, authors, license, readme, bids_version, sessions_count FROM datasets WHERE dataset_id='nm000200'",
+      )
+      .get() as Record<string, unknown>;
+    expect(row).toEqual({
+      name: "Fresh Title",
+      description: "fresh desc",
+      authors: "Fresh Author",
+      license: "MIT",
+      readme: "fresh readme",
+      bids_version: "1.9.0",
+      sessions_count: 7,
+    });
+  });
+
   test("reports changes=0 for an unknown dataset (no silent write)", async () => {
     const db = seededDb();
     const res = await writeDatasetCatalogFields(realD1(db), "does-not-exist", { authors: "X" });
     expect(res.changes).toBe(0);
+  });
+});
+
+describe("buildDatasetVectorMetadata", () => {
+  test("emits the six fields semanticSearch reads, mapping subject_count/concept_doi", () => {
+    expect(
+      buildDatasetVectorMetadata({
+        name: "EEG Study",
+        modalities: "eeg,emg",
+        tasks: "rest",
+        authors: "Ada",
+        subject_count: 12,
+        concept_doi: "doi:10.x/y",
+      }),
+    ).toEqual({
+      name: "EEG Study",
+      modalities: "eeg,emg",
+      participants: 12,
+      doi: "doi:10.x/y",
+      tasks: "rest",
+      authors: "Ada",
+    });
+  });
+
+  test("defaults missing fields ('' for strings, 0 for participants) so search cards never get undefined", () => {
+    expect(buildDatasetVectorMetadata({ name: "Only Name" })).toEqual({
+      name: "Only Name",
+      modalities: "",
+      participants: 0,
+      doi: "",
+      tasks: "",
+      authors: "",
+    });
   });
 });
 
@@ -144,5 +207,35 @@ describe("reembedDatasetVector guard", () => {
     await expect(
       reembedDatasetVector({} as unknown as D1Database, undefined, undefined, "nm000200"),
     ).resolves.toBeUndefined();
+  });
+});
+
+describe("hook wiring (dual-write anti-regression pins)", () => {
+  const enrichSrc = readFileSync(
+    join(import.meta.dir, "..", "backend/src/services/enrich-dataset.ts"),
+    "utf8",
+  );
+  const reindexSrc = readFileSync(
+    join(import.meta.dir, "..", "backend/src/services/dataset-reindex.ts"),
+    "utf8",
+  );
+
+  for (const [name, src] of [
+    ["enrich-dataset", enrichSrc],
+    ["dataset-reindex", reindexSrc],
+  ] as const) {
+    test(`${name} dual-writes datasets + keeps the nemar_catalog safety net + re-embeds`, () => {
+      // Phase 2 must write the datasets source of truth AND keep the
+      // nemar_catalog mirror AND re-embed. If a future change drops the
+      // datasets write or removes the safety net before Phase 3, fail loudly.
+      expect(src).toContain("writeDatasetCatalogFields(");
+      expect(src).toContain("syncNemarCatalogFromEnrichment(");
+      expect(src).toContain("reembedDatasetVector(");
+    });
+  }
+
+  test("both hooks guard an empty README with `|| null` (can't clobber stored readme)", () => {
+    expect(enrichSrc).toContain("readmeContent || null");
+    expect(reindexSrc).toContain("readme || null");
   });
 });
