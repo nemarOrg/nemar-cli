@@ -72,6 +72,13 @@ export interface Bindings {
   // per-environment for staged rollout.
   MANIFEST_VIA_CENTRAL_WORKFLOW?: string; // "true" enables central workflow path
   MANIFEST_CALLBACK_SECRET?: string; // Workers secret; HMAC key for callback token
+
+  // Dataset-store consolidation read flag (#646 Phase 3). When "true", the
+  // list/search/page-bundle read paths read from the `datasets` source of truth
+  // (single-table list, FTS5 lexical, id-only Vectorize + D1 hydration) instead
+  // of the nemar_catalog cache. Default ("false"/unset) keeps the cache path.
+  // Flip per-environment for staged rollout (dev first).
+  READ_FROM_DATASETS?: string; // "true" reads from datasets; see isReadFromDatasetsEnabled
 }
 
 /** User roles in hierarchical order: owner > admin > member */

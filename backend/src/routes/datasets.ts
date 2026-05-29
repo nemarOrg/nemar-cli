@@ -8,9 +8,19 @@ import { zValidator } from "@hono/zod-validator";
 import { Hono } from "hono";
 import { z } from "zod";
 import { SYSTEM_USER_ID } from "../lib/constants";
+import { isReadFromDatasetsEnabled } from "../lib/flags";
 import { authMiddleware, optionalAuthMiddleware } from "../middleware/auth";
 import { cliVersionGuard } from "../middleware/cliVersion";
-import { type SearchResult, semanticSearch, textSearch } from "../services/dataset-search";
+import {
+  type SearchResult,
+  buildFtsMatch,
+  ftsSearch,
+  lookupDatasetById,
+  rrfFuse,
+  semanticSearch,
+  semanticSearchHydrated,
+  textSearch,
+} from "../services/dataset-search";
 import { generateDatasetId, isValidDatasetId } from "../services/datasetId";
 import {
   getAdminEmailsForCategory,
@@ -479,7 +489,43 @@ datasetRoutes.get("/", optionalAuthMiddleware, async (c) => {
       return c.json({ error: "Authentication required to view your datasets" }, 401);
     }
 
-    let query = `
+    const params: (string | number)[] = [status, user.id];
+    let query: string;
+    if (isReadFromDatasetsEnabled(c.env)) {
+      // #646 Phase 3: read managed facts from the `datasets` source of truth
+      // (no nemar_catalog JOIN). Same 22-column ?mine wire shape.
+      query = `
+      SELECT d.dataset_id, d.name, d.description, d.status, d.visibility,
+             d.github_repo, d.concept_doi, d.created_at, d.updated_at,
+             u.username AS owner_username, d.nemar_sync_status,
+             d.source, d.source_id,
+             COALESCE(d.modalities, '') AS modalities,
+             COALESCE(d.subject_count, 0) AS participants,
+             COALESCE(d.tasks, '') AS tasks,
+             COALESCE(d.authors, '') AS authors,
+             COALESCE(d.file_size, 0) AS file_size,
+             COALESCE(d.file_size_formatted, '') AS file_size_formatted,
+             'managed' AS source_type,
+             (
+               SELECT version FROM dataset_versions dv
+               WHERE dv.dataset_id = d.dataset_id
+               ORDER BY created_at DESC
+               LIMIT 1
+             ) AS latest_version
+      FROM datasets d
+      JOIN users u ON d.owner_user_id = u.id
+      WHERE d.status = ? AND d.owner_user_id = ?
+    `;
+      query += buildDatasetFilterClauses(params, {
+        search,
+        modality,
+        author,
+        task,
+        hasDoi,
+        recent,
+      });
+    } else {
+      query = `
       SELECT d.dataset_id, d.name, d.description, d.status, d.visibility,
              d.github_repo, d.concept_doi, d.created_at, d.updated_at,
              u.username AS owner_username, d.nemar_sync_status,
@@ -506,22 +552,65 @@ datasetRoutes.get("/", optionalAuthMiddleware, async (c) => {
       LEFT JOIN nemar_catalog c ON c.id = d.dataset_id
       WHERE d.status = ? AND d.owner_user_id = ?
     `;
-    const params: (string | number)[] = [status, user.id];
-
-    query += buildFilterClauses(params, {
-      search,
-      modality,
-      author,
-      task,
-      hasDoi,
-      recent,
-      managed: true,
-    });
+      query += buildFilterClauses(params, {
+        search,
+        modality,
+        author,
+        task,
+        hasDoi,
+        recent,
+        managed: true,
+      });
+    }
     query += buildSortClause(sort);
 
     // --mine path is always authed and per-user; the no-store default
     // set at the top of the handler is the right header here. See #639
     // + the union-path Vary block below for the anonymous-shareable case.
+    return executeAndReturn(c, db, query, params, { limit, offset });
+  }
+
+  // #646 Phase 3: single-table read from `datasets` (no UNION, no nemar_catalog
+  // JOIN). Folded catalog rows are first-class here, discriminated by the
+  // sentinel owner; same 24-column wire shape as the UNION path below.
+  if (isReadFromDatasetsEnabled(c.env)) {
+    const params: (string | number)[] = [status];
+    let query = `
+    SELECT d.dataset_id, d.dataset_id AS id, d.name, d.description, d.status, d.visibility,
+           d.github_repo, d.concept_doi, d.concept_doi AS doi, d.created_at, d.updated_at,
+           COALESCE(d.uploader, u.username) AS owner_username, d.nemar_sync_status,
+           d.source, d.source_id,
+           COALESCE(d.modalities, '') AS modalities,
+           COALESCE(d.subject_count, 0) AS participants,
+           COALESCE(d.tasks, '') AS tasks,
+           COALESCE(d.authors, '') AS authors,
+           COALESCE(d.file_size, 0) AS file_size,
+           COALESCE(d.file_size_formatted, '') AS file_size_formatted,
+           CASE WHEN d.owner_user_id = ${SYSTEM_USER_ID} THEN 'catalog' ELSE 'managed' END AS source_type,
+           (
+             SELECT version FROM dataset_versions dv
+             WHERE dv.dataset_id = d.dataset_id
+             ORDER BY created_at DESC
+             LIMIT 1
+           ) AS latest_version
+    FROM datasets d
+    LEFT JOIN users u ON d.owner_user_id = u.id
+    WHERE d.status = ?
+      AND (d.is_sandbox = 0 OR d.is_sandbox IS NULL)
+  `;
+    if (!user || !hasRole(user.role, "admin")) {
+      query += " AND d.visibility = 'public'";
+    }
+    if (owner) {
+      query += " AND COALESCE(d.uploader, u.username) = ?";
+      params.push(owner);
+    }
+    query += buildDatasetFilterClauses(params, { search, modality, author, task, hasDoi, recent });
+    query += buildSortClause(sort);
+    if (!user) {
+      c.header("Cache-Control", "public, max-age=30, s-maxage=300, stale-while-revalidate=600");
+      c.header("Vary", "Authorization");
+    }
     return executeAndReturn(c, db, query, params, { limit, offset });
   }
 
@@ -751,6 +840,68 @@ export function buildFilterClauses(
   return clauses;
 }
 
+/**
+ * #646 Phase 3 filter clauses for the single-table `datasets` list (flag ON).
+ * Reads d.* only (no nemar_catalog), and routes free-text `search` through the
+ * FTS5 index (`d.id IN (SELECT rowid FROM datasets_fts WHERE … MATCH …)`) plus
+ * dataset_id/source_id LIKE, replacing the old `c.search_text` LIKE.
+ */
+export function buildDatasetFilterClauses(
+  params: (string | number)[],
+  opts: {
+    search?: string;
+    modality?: string;
+    author?: string;
+    task?: string;
+    hasDoi?: boolean;
+    recent?: number;
+  },
+): string {
+  let clauses = "";
+
+  if (opts.search) {
+    const pattern = `%${escapeLikePattern(opts.search.toLowerCase())}%`;
+    const match = buildFtsMatch(opts.search);
+    if (match) {
+      clauses +=
+        " AND (LOWER(d.dataset_id) LIKE ? ESCAPE '\\'" +
+        " OR LOWER(COALESCE(d.source_id, '')) LIKE ? ESCAPE '\\'" +
+        " OR d.id IN (SELECT rowid FROM datasets_fts WHERE datasets_fts MATCH ?))";
+      params.push(pattern, pattern, match);
+    } else {
+      // No FTS-usable tokens (e.g. all punctuation): fall back to id/name LIKE.
+      clauses +=
+        " AND (LOWER(d.dataset_id) LIKE ? ESCAPE '\\'" +
+        " OR LOWER(COALESCE(d.source_id, '')) LIKE ? ESCAPE '\\'" +
+        " OR LOWER(d.name) LIKE ? ESCAPE '\\'" +
+        " OR LOWER(COALESCE(d.description, '')) LIKE ? ESCAPE '\\')";
+      params.push(pattern, pattern, pattern, pattern);
+    }
+  }
+
+  if (opts.modality) {
+    clauses += " AND LOWER(COALESCE(d.modalities, '')) LIKE ?";
+    params.push(`%${opts.modality.toLowerCase()}%`);
+  }
+  if (opts.author) {
+    clauses += " AND LOWER(COALESCE(d.authors, '')) LIKE ?";
+    params.push(`%${opts.author.toLowerCase()}%`);
+  }
+  if (opts.task) {
+    clauses += " AND LOWER(COALESCE(d.tasks, '')) LIKE ?";
+    params.push(`%${opts.task.toLowerCase()}%`);
+  }
+  if (opts.hasDoi) {
+    clauses += " AND (d.concept_doi IS NOT NULL AND d.concept_doi != '')";
+  }
+  if (opts.recent) {
+    clauses += " AND d.created_at > datetime('now', ?)";
+    params.push(`-${opts.recent} days`);
+  }
+
+  return clauses;
+}
+
 function buildSortClause(sort: string, forUnion = false): string {
   // For JOIN queries, qualify with table alias to avoid ambiguity.
   // For UNION queries, use the output column name (no prefix).
@@ -932,6 +1083,59 @@ datasetRoutes.get("/search", optionalAuthMiddleware, async (c) => {
       min_score: minScore,
     });
   };
+
+  // #646 Phase 3 hybrid path: exact-id -> (semantic id-only ∪ FTS5) fused by
+  // RRF. min_score is a cosine floor so it's applied to the semantic component
+  // BEFORE fusion; finalize() therefore does NOT re-floor the fused scores.
+  if (isReadFromDatasetsEnabled(c.env)) {
+    const finalize = (rows: SearchResult[], method: string) => {
+      const filtered = applyModality(rows);
+      return c.json({
+        results: filtered.slice(0, limit),
+        count: filtered.length,
+        method,
+        min_score: minScore,
+      });
+    };
+    try {
+      if (exactIdMatch) {
+        const idHit = await lookupDatasetById(db, trimmed.toLowerCase());
+        if (idHit) return finalize([idHit], "exact_id");
+      }
+      // Tier-specific log so a failure here is distinguishable from the
+      // semantic/hydration tiers; re-throw so the outer catch still degrades.
+      const lexical = await ftsSearch(db, trimmed, limit * 2).catch((ftsErr) => {
+        console.error(
+          `[search] FTS tier failed: ${ftsErr instanceof Error ? ftsErr.message : String(ftsErr)}`,
+        );
+        throw ftsErr;
+      });
+      if (!c.env.AI || !c.env.VECTORIZE) {
+        return finalize(lexical, "text");
+      }
+      let semantic: SearchResult[] = [];
+      try {
+        semantic = await semanticSearchHydrated(c.env.AI, c.env.VECTORIZE, db, trimmed, limit * 2);
+      } catch (embErr) {
+        console.error("[search] semantic tier failed, using FTS only:", embErr);
+        return finalize(lexical, "text_fallback");
+      }
+      const semanticFiltered = applyMinScore(semantic);
+      if (semanticFiltered.length === 0) {
+        return finalize(lexical, "text_fallback");
+      }
+      return finalize(rrfFuse(semanticFiltered, lexical), "semantic");
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error("Dataset search (datasets path) failed:", msg);
+      // Only the expected missing-FTS-table case degrades to "unavailable";
+      // any other structural error is a real 500 (don't mask it).
+      if (msg.includes("no such table: datasets_fts")) {
+        return c.json({ results: [], count: 0, method: "unavailable" });
+      }
+      return c.json({ error: "Search failed", details: msg }, 500);
+    }
+  }
 
   try {
     // Exact dataset-ID hits skip the embedding step entirely. Embeddings
