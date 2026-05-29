@@ -25,8 +25,10 @@ import {
   computeDatasetMetadataColumns,
   formatFileSize,
   syncNemarCatalogFromEnrichment,
+  writeDatasetCatalogFields,
   writeDatasetMetadataColumns,
 } from "./dataset-metadata-columns.js";
+import { reembedDatasetVector } from "./dataset-search.js";
 import { enrichDataset } from "./enrich-dataset.js";
 import { getDatasetsToken } from "./github-auth.js";
 import { getBlobContent, getTreeAtRef } from "./github.js";
@@ -393,12 +395,22 @@ export async function runDatasetSync(
       `[reindex] Metadata columns refreshed for ${datasetId}: subjects=${cols.subject_count}, modalities=${cols.modalities}, files=${cols.total_files}`,
     );
 
-    // Mirror the BIDS-derived columns into nemar_catalog so the list-endpoint
-    // cache stays in sync. authors/license aren't refreshed here -- they
-    // come from the LLM enrichment, which runs on its own webhook path.
-    // `name` is required by the UPSERT (NOT NULL in the schema); we use the
-    // d1 row's name and let COALESCE preserve whatever the catalog has on
-    // the UPDATE path.
+    // #646 Phase 2 dual-write -- SOURCE OF TRUTH FIRST. A reindex refreshes the
+    // BIDS-derived readme + bids_version; name/description/authors/license are
+    // null -> COALESCE-preserved (they are owned by the LLM enrich path, not
+    // reindex). A failure here diverges `datasets` from nemar_catalog, so let
+    // it propagate to the outer catch (-> metadataColumnsError, persisted +
+    // surfaced) rather than swallow it.
+    const bidsVersion =
+      typeof bidsDescription.BIDSVersion === "string" ? bidsDescription.BIDSVersion : null;
+    await writeDatasetCatalogFields(db, datasetId, {
+      readme: readme || null, // empty (no README) -> preserve existing
+      bids_version: bidsVersion,
+    });
+
+    // nemar_catalog read-cache mirror (parallel safety net until Phase 3).
+    // Non-fatal: a stale cache row doesn't corrupt the source of truth. authors/
+    // license aren't refreshed here (LLM-owned). `name` is required (NOT NULL).
     try {
       await syncNemarCatalogFromEnrichment(db, datasetId, {
         name: dataset.name ?? datasetId,
@@ -413,10 +425,11 @@ export async function runDatasetSync(
         total_files: cols.total_files,
       });
     } catch (err) {
-      // console.error (not warn): a persistent failure here leaves the
-      // list endpoint cache stale on every reindex.
       console.error(`[reindex] nemar_catalog sync failed for ${datasetId}: ${errorMessage(err)}`);
     }
+
+    // Best-effort re-embed (internally guarded, never throws).
+    await reembedDatasetVector(db, env.AI, env.VECTORIZE, datasetId);
   } catch (colErr) {
     metadataColumnsError = errorMessage(colErr);
     console.error(`[reindex] Failed to write metadata columns for ${datasetId}:`, colErr);

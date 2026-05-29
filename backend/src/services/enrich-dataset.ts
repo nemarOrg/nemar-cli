@@ -28,8 +28,10 @@ import {
   computeDatasetMetadataColumns,
   formatFileSize,
   syncNemarCatalogFromEnrichment,
+  writeDatasetCatalogFields,
   writeDatasetMetadataColumns,
 } from "./dataset-metadata-columns.js";
+import { reembedDatasetVector } from "./dataset-search.js";
 import {
   discoverOrcidsFromReferencedDois,
   extractDoisFromBids,
@@ -855,45 +857,58 @@ export async function enrichDataset(
         `[llm-enrich] Metadata columns: ${datasetId} - subjects=${cols.subject_count}, modalities=${cols.modalities}, files=${cols.total_files}`,
       );
 
-      // Mirror the same data into nemar_catalog (the list-endpoint read
-      // cache). authors comes from the LLM enrichment (object-keyed by
-      // name) and is the one field that doesn't live on `datasets`. Without
-      // this sync, an enriched dataset like nm000166 would render with
-      // empty modalities/participants/authors on the discover card even
-      // though the source-of-truth `datasets` row is fully populated.
+      const license = typeof finalMetadata.license === "string" ? finalMetadata.license : null;
+      // Prefer the LLM-polished title; fall back to null (NOT the dataset id)
+      // so COALESCE preserves the existing/BIDS name when the LLM produced no
+      // title. description is null-preserved the same way.
+      const enrichedTitle =
+        (typeof finalMetadata.title === "string" && finalMetadata.title) || null;
+      const enrichedDescription =
+        (typeof finalMetadata.description === "string" && finalMetadata.description) || null;
+      const enrichedAuthors = authorsFromEnrichment(finalMetadata);
+      const bidsVersion =
+        typeof bidsDescription.BIDSVersion === "string" ? bidsDescription.BIDSVersion : null;
+
+      // #646 Phase 2 dual-write -- SOURCE OF TRUTH FIRST. A failure here means
+      // `datasets` diverges from nemar_catalog, so we deliberately let it
+      // propagate to the outer catch (-> metadataColumnsError, persisted on the
+      // row and surfaced in the response) rather than swallow it.
+      await writeDatasetCatalogFields(env.DB, datasetId, {
+        name: enrichedTitle,
+        description: enrichedDescription,
+        authors: enrichedAuthors,
+        license,
+        readme: readmeContent || null, // empty README -> preserve existing
+        bids_version: bidsVersion,
+      });
+
+      // nemar_catalog read-cache mirror (parallel safety net until Phase 3).
+      // Non-fatal: a stale cache row doesn't corrupt the source of truth, so a
+      // failure here is logged but not propagated. `name` is required (NOT NULL
+      // in nemar_catalog) so it falls back to the dataset id.
       try {
-        const license = typeof finalMetadata.license === "string" ? finalMetadata.license : null;
-        // `name` and `description` prefer the enrichment-derived values
-        // (LLM may have polished them) and fall back to the D1 dataset
-        // row. UPSERT requires a non-null name because nemar_catalog.name
-        // is NOT NULL; the rest are COALESCE-preserved on the UPDATE path.
-        const catalogName =
-          (typeof finalMetadata.title === "string" && finalMetadata.title) ||
-          dataset.name ||
-          datasetId;
-        const catalogDescription =
-          (typeof finalMetadata.description === "string" && finalMetadata.description) || null;
         await syncNemarCatalogFromEnrichment(env.DB, datasetId, {
-          name: catalogName,
-          description: catalogDescription,
+          name: enrichedTitle || dataset.name || datasetId,
+          description: enrichedDescription,
           modalities: cols.modalities,
           participants: cols.subject_count,
           age_min: cols.age_min,
           age_max: cols.age_max,
           tasks: cols.tasks,
-          authors: authorsFromEnrichment(finalMetadata),
+          authors: enrichedAuthors,
           license,
           file_size: cols.file_size,
           file_size_formatted: formatFileSize(cols.file_size),
           total_files: cols.total_files,
         });
       } catch (err) {
-        // console.error (not warn): a persistent failure here leaves the
-        // list endpoint cache stale for every freshly enriched dataset.
         console.error(
           `[llm-enrich] nemar_catalog sync failed for ${datasetId}: ${errorMessage(err)}`,
         );
       }
+
+      // Best-effort re-embed (internally guarded, never throws).
+      await reembedDatasetVector(env.DB, env.AI, env.VECTORIZE, datasetId);
     } catch (err) {
       metadataColumnsError = errorMessage(err);
       console.error(`[llm-enrich] Failed to write metadata columns for ${datasetId}:`, err);
