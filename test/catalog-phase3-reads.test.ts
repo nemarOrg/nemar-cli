@@ -12,6 +12,7 @@ import { beforeEach, describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { isReadFromDatasetsEnabled } from "../backend/src/lib/flags";
+import { buildDatasetFilterClauses } from "../backend/src/routes/datasets";
 import {
   type SearchResult,
   buildFtsMatch,
@@ -101,7 +102,8 @@ function searchDb(): Database {
        'A study of motor imagery using electroencephalography during sleep cycles','doi:10/mi', NULL),
     ('nm000301','Private EEG Study','desc',10,'active','private',0, 5,'eeg','rest','Bob','private readme','doi:10/p', NULL),
     ('xx000001','Sandbox EEG','desc',10,'active','public',1, 2,'eeg','imagery','Carol','sandbox readme', NULL, NULL),
-    ('ds000246','Folded MEG Dataset',NULL,-1,'active','public',0, 12,'meg','rest','Niels Bohr','meg readme','doi:10/folded','OpenNeuro');
+    ('ds000246','Folded MEG Dataset',NULL,-1,'active','public',0, 12,'meg','rest','Niels Bohr','meg readme','doi:10/folded','OpenNeuro'),
+    ('nm000302','Archived Public EEG','desc',10,'archived','public',0, 3,'eeg','rest','X','archived readme','doi:10/arch', NULL);
   `);
   return db;
 }
@@ -239,6 +241,71 @@ describe("lookupDatasetById", () => {
     expect((await lookupDatasetById(realD1(db), "nm000300"))?.id).toBe("nm000300");
     expect(await lookupDatasetById(realD1(db), "nm000301")).toBeNull(); // private
     expect(await lookupDatasetById(realD1(db), "xx000001")).toBeNull(); // sandbox
+    expect(await lookupDatasetById(realD1(db), "nm000302")).toBeNull(); // archived (public)
+  });
+});
+
+describe("buildDatasetFilterClauses (flag-ON list filters over d.*)", () => {
+  test("search routes through FTS subquery + id/source_id LIKE (3 params)", () => {
+    const params: (string | number)[] = [];
+    const clause = buildDatasetFilterClauses(params, { search: "motor imagery" });
+    expect(clause).toContain("datasets_fts MATCH ?");
+    expect((clause.match(/LIKE \? ESCAPE/g) || []).length).toBe(2);
+    expect(params).toEqual(["%motor imagery%", "%motor imagery%", '"motor"* OR "imagery"*']);
+  });
+
+  test("search with no FTS-usable tokens falls back to 4 LIKE params", () => {
+    const params: (string | number)[] = [];
+    const clause = buildDatasetFilterClauses(params, { search: "a b" }); // <2-char tokens
+    expect(clause).not.toContain("datasets_fts MATCH");
+    expect((clause.match(/LIKE \? ESCAPE/g) || []).length).toBe(4);
+    expect(params.length).toBe(4);
+  });
+
+  test("modality/author/task/recent push one param each; hasDoi pushes none", () => {
+    const params: (string | number)[] = [];
+    buildDatasetFilterClauses(params, {
+      modality: "eeg",
+      author: "ada",
+      task: "rest",
+      hasDoi: true,
+      recent: 30,
+    });
+    expect(params).toEqual(["%eeg%", "%ada%", "%rest%", "-30 days"]);
+  });
+});
+
+describe("flag-ON list discriminator (source_type + owner_username)", () => {
+  test("folded rows are 'catalog' w/ uploader; managed are 'managed' w/ username; private/sandbox excluded", () => {
+    // Mirrors the load-bearing expressions of the flag-ON GET /datasets SELECT.
+    const db = searchDb();
+    const rows = db
+      .query(
+        `SELECT d.dataset_id,
+                CASE WHEN d.owner_user_id = -1 THEN 'catalog' ELSE 'managed' END AS source_type,
+                COALESCE(d.uploader, u.username) AS owner_username,
+                d.concept_doi AS doi
+         FROM datasets d LEFT JOIN users u ON d.owner_user_id = u.id
+         WHERE d.status='active' AND (d.is_sandbox=0 OR d.is_sandbox IS NULL) AND d.visibility='public'`,
+      )
+      .all() as Array<{
+      dataset_id: string;
+      source_type: string;
+      owner_username: string | null;
+      doi: string | null;
+    }>;
+    const byId = new Map(rows.map((r) => [r.dataset_id, r]));
+    expect(byId.get("ds000246")).toEqual({
+      dataset_id: "ds000246",
+      source_type: "catalog",
+      owner_username: "OpenNeuro", // d.uploader
+      doi: "doi:10/folded",
+    });
+    expect(byId.get("nm000300")?.source_type).toBe("managed");
+    expect(byId.get("nm000300")?.owner_username).toBe("alice"); // u.username (uploader null)
+    expect(byId.has("nm000301")).toBe(false); // private
+    expect(byId.has("xx000001")).toBe(false); // sandbox
+    expect(byId.has("nm000302")).toBe(false); // archived
   });
 });
 
@@ -253,6 +320,7 @@ describe("migration 0030 backfill (managed authors/license from cache)", () => {
       VALUES
       ('nm000400','Needs Backfill',10,'active','public',NULL,NULL),
       ('nm000401','Has Authors',10,'active','public','Existing Author',NULL),
+      ('nm000402','No Catalog Row',10,'active','public',NULL,NULL),
       ('ds000999','Folded',-1,'active','public','Folded Author','CC0');
       INSERT INTO nemar_catalog (id, name, authors, license) VALUES
       ('nm000400','Needs Backfill','Cached Author','CC-BY'),
@@ -267,6 +335,7 @@ describe("migration 0030 backfill (managed authors/license from cache)", () => {
       };
     expect(get("nm000400")).toEqual({ authors: "Cached Author", license: "CC-BY" }); // filled
     expect(get("nm000401").authors).toBe("Existing Author"); // preserved
+    expect(get("nm000402").authors).toBeNull(); // no catalog row -> untouched
     expect(get("ds000999").authors).toBe("Folded Author"); // sentinel untouched (owner=-1)
   });
 });
@@ -296,7 +365,7 @@ describe("flag-gated read sites (anti-regression source pins)", () => {
     expect(pageBundleSrc).toContain("LEFT JOIN nemar_catalog c"); // old loadCatalogRow path
   });
 
-  test("flag-ON list keeps the 24-column shape + source_type discriminator", () => {
+  test("flag-ON list keeps the 23-key shape + source_type discriminator", () => {
     expect(datasetsSrc).toContain("d.concept_doi AS doi");
     expect(datasetsSrc).toContain("THEN 'catalog' ELSE 'managed' END AS source_type");
     expect(datasetsSrc).toContain("COALESCE(d.uploader, u.username) AS owner_username");
