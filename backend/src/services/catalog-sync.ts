@@ -1,9 +1,10 @@
 /**
  * Catalog Sync Service
  *
- * Pulls the full dataset catalog from nemar.org's datapipeline API
- * and upserts it into the local D1 nemar_catalog table. Optionally
- * generates embeddings via Workers AI and indexes into Vectorize.
+ * Pulls the full dataset catalog from nemar.org's datapipeline API and folds
+ * it into the `datasets` source of truth (#646). New/changed rows are marked
+ * embedding_dirty=1 so the scheduled drain re-embeds them into the id-only
+ * Vectorize index.
  *
  * The nemar.org read API requires no authentication.
  * API: GET https://nemar.org/api/dataexplorer/datapipeline/records
@@ -15,7 +16,6 @@ import { SYSTEM_USER_ID } from "../lib/constants.js";
 const NEMAR_API_BASE = "https://nemar.org/api/dataexplorer/datapipeline";
 const FETCH_TIMEOUT_MS = 30_000;
 const BATCH_SIZE = 10; // D1 batch limit for bound parameters
-const EMBEDDING_MODEL = "@cf/baai/bge-small-en-v1.5";
 
 /** Raw record from the nemar.org dataexplorer_dataset table */
 export interface NemarCatalogRecord {
@@ -53,15 +53,10 @@ interface NemarRecordsResponse {
 }
 
 export interface CatalogSyncResult {
+  /** Number of records folded into the `datasets` source of truth. */
   recordsSynced: number;
-  recordsIndexed: number;
   errors: string[];
   durationMs: number;
-  // #646 Phase 5: true when the nemar_catalog cache write was intentionally
-  // skipped because this env reads from `datasets` (READ_FROM_DATASETS on).
-  // Lets callers (the CI guard, the admin response) tell an intentional skip
-  // apart from a genuine zero-records sync (recordsSynced === 0 in both cases).
-  cacheWriteSkipped?: boolean;
 }
 
 /**
@@ -108,22 +103,6 @@ export async function fetchNemarCatalog(): Promise<NemarCatalogRecord[]> {
   return records;
 }
 
-/**
- * Build a pre-computed lowercase search text from record fields.
- * Used as a LIKE fallback when Vectorize is unavailable.
- */
-function buildSearchText(record: NemarCatalogRecord): string {
-  const parts = [
-    record.id,
-    record.name,
-    record.Authors,
-    record.tasks,
-    record.modalities,
-    record.readme?.slice(0, 500),
-  ].filter(Boolean);
-  return parts.join(" ").toLowerCase();
-}
-
 /** Determine the source and source_id for deduplication */
 function classifySource(record: NemarCatalogRecord): { source: string; sourceId: string | null } {
   if (record.id.startsWith("ds")) {
@@ -136,11 +115,9 @@ function classifySource(record: NemarCatalogRecord): { source: string; sourceId:
 }
 
 /**
- * #646 Phase 4: fold catalog records into the `datasets` source of truth.
- * Since Phase 5 the parallel nemar_catalog write is flag-gated (skipped when
- * READ_FROM_DATASETS is on); this fold is then the only write. Phase 6 removes
- * the cache entirely. New/changed rows get embedding_dirty=1 so the drain cron
- * re-embeds them.
+ * #646: fold catalog records into the `datasets` source of truth -- the only
+ * catalog write (the nemar_catalog cache was dropped in Phase 6). New/changed
+ * rows get embedding_dirty=1 so the drain cron re-embeds them.
  *
  * Dedup mirrors the 0028 fold: a record that is already an active managed
  * dataset, or a ds* shadow of a managed on* mirror, is skipped (without dedup
@@ -214,7 +191,7 @@ export async function upsertCatalogRecordsToDatasets(
         .bind(
           record.id,
           record.name,
-          record.readme?.slice(0, 500) || null, // description = readme[:500] (mirrors nemar_catalog)
+          record.readme?.slice(0, 500) || null, // description = readme[:500]
           SYSTEM_USER_ID,
           source,
           sourceId,
@@ -246,8 +223,8 @@ export async function upsertCatalogRecordsToDatasets(
   }
   if (upserted < survivors.length) {
     // Some survivors collided with a NON-active managed row and were no-oped by
-    // the guard. nemar_catalog still has them; this is the expected dual-store
-    // gap for those ids, surfaced so divergence isn't silent.
+    // the guard (managed facts/ownership must not be clobbered by legacy ingest).
+    // Surfaced so the gap isn't silent.
     console.warn(
       `[catalog-sync] ${survivors.length - upserted}/${survivors.length} catalog records did not fold into datasets (managed-row collisions)`,
     );
@@ -256,139 +233,14 @@ export async function upsertCatalogRecordsToDatasets(
 }
 
 /**
- * Sync catalog records into D1 nemar_catalog table.
- * Uses INSERT OR REPLACE for upsert behavior.
+ * Run a full catalog sync: fetch from nemar.org and fold into the `datasets`
+ * source of truth. Sets embedding_dirty=1 on new/changed rows so the scheduled
+ * drain re-embeds them (#646).
  */
-async function syncToD1(db: D1Database, records: NemarCatalogRecord[]): Promise<number> {
-  let synced = 0;
-
-  for (let i = 0; i < records.length; i += BATCH_SIZE) {
-    const batch = records.slice(i, i + BATCH_SIZE);
-    const statements = batch.map((record) => {
-      const { source, sourceId } = classifySource(record);
-      return db
-        .prepare(
-          `INSERT OR REPLACE INTO nemar_catalog
-           (id, name, description, modalities, participants, age_min, age_max,
-            tasks, authors, doi, license, bids_version, file_size,
-            file_size_formatted, total_files, sessions_count, latest_version,
-            publish_date, created_date, uploader, readme, source, source_id,
-            is_processed, search_text, synced_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))`,
-        )
-        .bind(
-          record.id,
-          record.name,
-          record.readme?.slice(0, 500) || null,
-          record.modalities || null,
-          record.participants || 0,
-          record.age_min || 0,
-          record.age_max || 0,
-          record.tasks || null,
-          record.Authors || null,
-          record.DatasetDOI || null,
-          record.License || null,
-          record.BIDSVersion || null,
-          record.file_size || 0,
-          record.byte_size_format || null,
-          record.totalFiles || 0,
-          record.sessionsNum || 0,
-          record.latestSnapshot || null,
-          record.publishDate || null,
-          record.created || null,
-          record.uploader || null,
-          record.readme || null,
-          source,
-          sourceId,
-          record.processed || 0,
-          buildSearchText(record),
-        );
-    });
-
-    await db.batch(statements);
-    synced += batch.length;
-  }
-
-  return synced;
-}
-
-/**
- * Build embedding text for a catalog record.
- * Combines title, description, modalities, tasks, and authors
- * into a single string for semantic embedding.
- */
-function buildEmbeddingText(record: NemarCatalogRecord): string {
-  const parts = [
-    record.name,
-    record.modalities ? `Modalities: ${record.modalities}` : "",
-    record.tasks ? `Tasks: ${record.tasks}` : "",
-    record.Authors ? `Authors: ${record.Authors}` : "",
-    record.readme?.slice(0, 1000) || "",
-  ].filter(Boolean);
-  return parts.join("\n");
-}
-
-/**
- * Generate embeddings and upsert into Vectorize index.
- * Processes records in batches to stay within Workers AI limits.
- */
-async function syncToVectorize(
-  ai: Ai,
-  vectorize: VectorizeIndex,
-  records: NemarCatalogRecord[],
-): Promise<number> {
-  let indexed = 0;
-  const VECTOR_BATCH = 20;
-
-  for (let i = 0; i < records.length; i += VECTOR_BATCH) {
-    const batch = records.slice(i, i + VECTOR_BATCH);
-    const texts = batch.map(buildEmbeddingText);
-
-    // Workers AI supports batch embedding
-    const embeddings = await ai.run(EMBEDDING_MODEL, { text: texts });
-    const embeddingData = "data" in embeddings ? embeddings.data : undefined;
-    if (!embeddingData || embeddingData.length !== batch.length) {
-      console.error(
-        `[catalog-sync] Embedding batch mismatch: expected ${batch.length}, got ${embeddingData?.length ?? 0}`,
-      );
-      continue;
-    }
-
-    const vectors: VectorizeVector[] = batch.map((record, j) => ({
-      id: record.id,
-      values: embeddingData[j],
-      metadata: {
-        name: record.name,
-        modalities: record.modalities || "",
-        participants: record.participants || 0,
-        doi: record.DatasetDOI || "",
-        tasks: record.tasks || "",
-        authors: record.Authors || "",
-      },
-    }));
-
-    await vectorize.upsert(vectors);
-    indexed += vectors.length;
-  }
-
-  return indexed;
-}
-
-/**
- * Run a full catalog sync: fetch from nemar.org, upsert into D1 and Vectorize.
- */
-export async function syncCatalog(
-  db: D1Database,
-  ai?: Ai,
-  vectorize?: VectorizeIndex,
-  // #646 Phase 5: when true (env reads from `datasets`), skip the nemar_catalog
-  // cache write -- the datasets fold below is the source of truth.
-  readFromDatasets = false,
-): Promise<CatalogSyncResult> {
+export async function syncCatalog(db: D1Database): Promise<CatalogSyncResult> {
   const startTime = Date.now();
   const errors: string[] = [];
   let recordsSynced = 0;
-  let recordsIndexed = 0;
 
   // Start sync log
   const logResult = await db
@@ -402,56 +254,20 @@ export async function syncCatalog(
     const records = await fetchNemarCatalog();
     console.log(`[catalog-sync] Fetched ${records.length} records`);
 
-    // Upsert into D1
-    // nemar_catalog cache write -- skipped where this env reads from `datasets`
-    // (#646 Phase 5). The datasets fold below is the source of truth.
-    if (!readFromDatasets) {
-      recordsSynced = await syncToD1(db, records);
-      console.log(`[catalog-sync] Synced ${recordsSynced} records to D1`);
-    } else {
-      // Log the skip so recordsSynced === 0 isn't mistaken for a failed sync.
-      console.log(
-        "[catalog-sync] nemar_catalog cache write skipped (READ_FROM_DATASETS on); datasets fold is the source of truth",
-      );
-    }
-
-    // #646 Phase 4 dual-write: fold into the datasets source of truth.
-    // Non-fatal. When the flag is on this is the ONLY write; when off, it runs
-    // alongside the nemar_catalog read cache above.
-    try {
-      const folded = await upsertCatalogRecordsToDatasets(db, records);
-      console.log(`[catalog-sync] Folded ${folded} records into datasets`);
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      console.error("[catalog-sync] datasets fold failed:", msg);
-      errors.push(`datasets fold: ${msg}`);
-    }
-
-    // Index into Vectorize (if bindings available)
-    if (ai && vectorize) {
-      try {
-        recordsIndexed = await syncToVectorize(ai, vectorize, records);
-        console.log(`[catalog-sync] Indexed ${recordsIndexed} records in Vectorize`);
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        console.error("[catalog-sync] Vectorize indexing failed:", msg);
-        errors.push(`Vectorize: ${msg}`);
-        // Non-fatal: D1 sync succeeded, search will fall back to LIKE
-      }
-    } else {
-      console.log("[catalog-sync] Vectorize not configured, skipping embedding");
-    }
+    // Fold into the datasets source of truth (the only catalog write). Sets
+    // embedding_dirty=1 on new/changed rows for the scheduled re-embed.
+    recordsSynced = await upsertCatalogRecordsToDatasets(db, records);
+    console.log(`[catalog-sync] Folded ${recordsSynced} records into datasets`);
 
     // Update sync log
     await db
       .prepare(
         `UPDATE catalog_sync_log
          SET status = 'completed', completed_at = datetime('now'),
-             records_synced = ?, records_indexed = ?,
-             errors = ?
+             records_synced = ?, errors = ?
          WHERE id = ?`,
       )
-      .bind(recordsSynced, recordsIndexed, errors.length > 0 ? errors.join("; ") : null, logId)
+      .bind(recordsSynced, errors.length > 0 ? errors.join("; ") : null, logId)
       .run();
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
@@ -477,29 +293,22 @@ export async function syncCatalog(
 
   return {
     recordsSynced,
-    recordsIndexed,
     errors,
     durationMs: Date.now() - startTime,
-    cacheWriteSkipped: readFromDatasets,
   };
 }
 
 /**
- * Import pre-fetched catalog records into D1 and optionally Vectorize.
+ * Import pre-fetched catalog records into the `datasets` source of truth.
  * Called by the admin endpoint when the GitHub Action POSTs records.
  */
 export async function importCatalogRecords(
   db: D1Database,
   records: NemarCatalogRecord[],
-  ai?: Ai,
-  vectorize?: VectorizeIndex,
-  // #646 Phase 5: when true, skip the nemar_catalog cache write (see syncCatalog).
-  readFromDatasets = false,
 ): Promise<CatalogSyncResult> {
   const startTime = Date.now();
   const errors: string[] = [];
   let recordsSynced = 0;
-  let recordsIndexed = 0;
 
   const logResult = await db
     .prepare("INSERT INTO catalog_sync_log (status) VALUES ('running')")
@@ -509,49 +318,19 @@ export async function importCatalogRecords(
   try {
     console.log(`[catalog-sync] Importing ${records.length} pre-fetched records`);
 
-    // nemar_catalog cache write -- skipped where this env reads from `datasets`
-    // (#646 Phase 5). The datasets fold below is the source of truth.
-    if (!readFromDatasets) {
-      recordsSynced = await syncToD1(db, records);
-      console.log(`[catalog-sync] Synced ${recordsSynced} records to D1`);
-    } else {
-      // Log the skip so recordsSynced === 0 isn't mistaken for a failed sync.
-      console.log(
-        "[catalog-sync] nemar_catalog cache write skipped (READ_FROM_DATASETS on); datasets fold is the source of truth",
-      );
-    }
-
-    // #646 Phase 4 dual-write: fold into the datasets source of truth.
-    // Non-fatal. When the flag is on this is the ONLY write; when off, it runs
-    // alongside the nemar_catalog read cache above.
-    try {
-      const folded = await upsertCatalogRecordsToDatasets(db, records);
-      console.log(`[catalog-sync] Folded ${folded} records into datasets`);
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      console.error("[catalog-sync] datasets fold failed:", msg);
-      errors.push(`datasets fold: ${msg}`);
-    }
-
-    if (ai && vectorize) {
-      try {
-        recordsIndexed = await syncToVectorize(ai, vectorize, records);
-        console.log(`[catalog-sync] Indexed ${recordsIndexed} records in Vectorize`);
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        console.error("[catalog-sync] Vectorize indexing failed:", msg);
-        errors.push(`Vectorize: ${msg}`);
-      }
-    }
+    // Fold into the datasets source of truth (the only catalog write). Sets
+    // embedding_dirty=1 on new/changed rows for the scheduled re-embed.
+    recordsSynced = await upsertCatalogRecordsToDatasets(db, records);
+    console.log(`[catalog-sync] Folded ${recordsSynced} records into datasets`);
 
     await db
       .prepare(
         `UPDATE catalog_sync_log
          SET status = 'completed', completed_at = datetime('now'),
-             records_synced = ?, records_indexed = ?, errors = ?
+             records_synced = ?, errors = ?
          WHERE id = ?`,
       )
-      .bind(recordsSynced, recordsIndexed, errors.length > 0 ? errors.join("; ") : null, logId)
+      .bind(recordsSynced, errors.length > 0 ? errors.join("; ") : null, logId)
       .run();
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
@@ -577,9 +356,7 @@ export async function importCatalogRecords(
 
   return {
     recordsSynced,
-    recordsIndexed,
     errors,
     durationMs: Date.now() - startTime,
-    cacheWriteSkipped: readFromDatasets,
   };
 }

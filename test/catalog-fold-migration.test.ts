@@ -155,27 +155,20 @@ function applyExpand(db: Database) {
   db.exec(M0029);
 }
 
-// Reproduces the guarded list query from routes/datasets.ts (managed UNION
-// catalog), with the Phase-1 dormancy guards, so we can assert the folded
-// rows stay dormant. The source-string pins below ensure the real handler
-// keeps these guards.
+// Reproduces the single-table list query from routes/datasets.ts (#646): after
+// the 0028 fold, catalog rows live in `datasets` under the sentinel owner and
+// are discriminated by source_type. The fold itself already deduped the ds*
+// shadows (guard 2), so the read needs no UNION and no NOT-IN guards. This
+// asserts the folded data lists each id once with the right source_type.
 const GUARDED_LIST = `
-  SELECT d.dataset_id AS id, 'managed' AS source_type, d.concept_doi AS doi
+  SELECT d.dataset_id AS id,
+         CASE WHEN d.owner_user_id = ${SYSTEM_USER_ID} THEN 'catalog' ELSE 'managed' END AS source_type,
+         d.concept_doi AS doi
   FROM datasets d
-  JOIN users u ON d.owner_user_id = u.id
+  LEFT JOIN users u ON d.owner_user_id = u.id
   WHERE d.status = 'active'
-    AND d.owner_user_id != ${SYSTEM_USER_ID}
     AND (d.is_sandbox = 0 OR d.is_sandbox IS NULL)
     AND d.visibility = 'public'
-  UNION ALL
-  SELECT c.id AS id, 'catalog' AS source_type, c.doi AS doi
-  FROM nemar_catalog c
-  WHERE c.id NOT IN (SELECT dataset_id FROM datasets WHERE status = 'active' AND owner_user_id != ${SYSTEM_USER_ID})
-    AND c.id NOT IN (
-      SELECT source_id FROM datasets
-      WHERE status = 'active' AND source = 'openneuro' AND source_id IS NOT NULL
-        AND owner_user_id != ${SYSTEM_USER_ID}
-    )
 `;
 
 describe("0027 sentinel user", () => {
@@ -412,13 +405,14 @@ describe("dormancy guards keep GET /datasets byte-stable", () => {
     expect(ids.sort()).toEqual(["ds999999", "nm000200", "nm000201", "on002718", "on999998"]);
   });
 
-  test("real handler retains the owner_user_id guards (anti-regression pin)", () => {
+  test("real handler reads single-table with the sentinel discriminator (anti-regression pin)", () => {
     const src = readFileSync(join(import.meta.dir, "..", "backend/src/routes/datasets.ts"), "utf8");
-    // managed branch excludes the sentinel (\s+ tolerates one-line or wrapped form)
-    expect(src).toMatch(/WHERE d\.status = \?\s+AND d\.owner_user_id != \?/);
-    // both catalog dedup subqueries exclude the sentinel
-    const guards = src.match(/owner_user_id != \?/g) ?? [];
-    expect(guards.length).toBeGreaterThanOrEqual(3);
+    // #646 contract (#652): the list is a single SELECT over `datasets`,
+    // discriminated by the sentinel owner -- no UNION, no nemar_catalog catalog
+    // branch, no NOT-IN dedup guards (the 0028 fold did the dedup).
+    expect(src).toContain("THEN 'catalog' ELSE 'managed' END AS source_type");
+    expect(src).not.toContain("UNION ALL");
+    expect(src).not.toContain("FROM nemar_catalog c");
   });
 });
 

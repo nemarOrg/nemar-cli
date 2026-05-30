@@ -11,8 +11,8 @@
  *     (sqlite_sequence only tracks the max positive rowid), so the next real
  *     user keeps getting the next natural id,
  *   - identical compile-time value across dev and prod, so SQL guards
- *     (`owner_user_id != SYSTEM_USER_ID`) and the Phase-3 source_type
- *     discriminator are deterministic.
+ *     (`owner_user_id != SYSTEM_USER_ID`) and the source_type discriminator
+ *     are deterministic.
  *
  * Use this to discriminate folded "catalog" rows from real "managed" rows:
  *   source_type = owner_user_id = SYSTEM_USER_ID ? 'catalog' : 'managed'.

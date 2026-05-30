@@ -87,9 +87,6 @@ WEB_SESSION_COOKIE_DOMAIN = "app.nemar.org"
 # repository_dispatch to nemarDatasets/.github and awaits the callback.
 # Redeploy to change.
 MANIFEST_VIA_CENTRAL_WORKFLOW = "false"
-# #646 Phase 3: read from the datasets source of truth. Stays "false" in prod
-# until a separate production cutover; flipped "true" only in dev for now.
-READ_FROM_DATASETS = "false"
 
 # Secrets (set via: npx cfman wrangler --account sccn secret put <NAME> -c backend/wrangler-sccn.toml)
 # - GITHUB_ADMIN_PAT
@@ -168,6 +165,3 @@ WEB_SESSION_COOKIE_DOMAIN = ""
 # clean runs against this dev environment.
 # Redeploy to change.
 MANIFEST_VIA_CENTRAL_WORKFLOW = "true"
-# #646 Phase 3: dev reads from the datasets source of truth (FTS5 + id-only
-# Vectorize hydration). Dev is the validation surface for the consolidation.
-READ_FROM_DATASETS = "true"

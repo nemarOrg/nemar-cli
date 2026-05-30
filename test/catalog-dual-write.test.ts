@@ -1,11 +1,11 @@
 /**
- * Phase 2 dual-write tests (#646 / #648).
+ * Catalog metadata-write tests (#646 / #648, contracted in #652).
  *
  * Exercises the real functions against a real in-memory SQLite engine via a
  * thin D1 adapter that FORWARDS every call to bun:sqlite (no canned responses,
  * no faked behavior — the SQL and data are real). This tests the actual
- * COALESCE-preserve UPDATE, the readme 8 KB truncation, and the embed-text
- * builder, rather than pinning source strings.
+ * COALESCE-preserve UPDATE on the `datasets` source of truth, the readme 8 KB
+ * truncation, and the embed-text builder, rather than pinning source strings.
  */
 
 import { Database } from "bun:sqlite";
@@ -15,7 +15,6 @@ import { join } from "node:path";
 import { writeDatasetCatalogFields } from "../backend/src/services/dataset-metadata-columns";
 import {
   buildDatasetEmbedText,
-  buildDatasetVectorMetadata,
   reembedDatasetVector,
 } from "../backend/src/services/dataset-search";
 
@@ -140,39 +139,6 @@ describe("writeDatasetCatalogFields", () => {
   });
 });
 
-describe("buildDatasetVectorMetadata", () => {
-  test("emits the six fields semanticSearch reads, mapping subject_count/concept_doi", () => {
-    expect(
-      buildDatasetVectorMetadata({
-        name: "EEG Study",
-        modalities: "eeg,emg",
-        tasks: "rest",
-        authors: "Ada",
-        subject_count: 12,
-        concept_doi: "doi:10.x/y",
-      }),
-    ).toEqual({
-      name: "EEG Study",
-      modalities: "eeg,emg",
-      participants: 12,
-      doi: "doi:10.x/y",
-      tasks: "rest",
-      authors: "Ada",
-    });
-  });
-
-  test("defaults missing fields ('' for strings, 0 for participants) so search cards never get undefined", () => {
-    expect(buildDatasetVectorMetadata({ name: "Only Name" })).toEqual({
-      name: "Only Name",
-      modalities: "",
-      participants: 0,
-      doi: "",
-      tasks: "",
-      authors: "",
-    });
-  });
-});
-
 describe("buildDatasetEmbedText", () => {
   test("joins all present fields with labels", () => {
     expect(
@@ -210,7 +176,7 @@ describe("reembedDatasetVector guard", () => {
   });
 });
 
-describe("hook wiring (dual-write anti-regression pins)", () => {
+describe("hook wiring (anti-regression pins)", () => {
   const enrichSrc = readFileSync(
     join(import.meta.dir, "..", "backend/src/services/enrich-dataset.ts"),
     "utf8",
@@ -224,13 +190,13 @@ describe("hook wiring (dual-write anti-regression pins)", () => {
     ["enrich-dataset", enrichSrc],
     ["dataset-reindex", reindexSrc],
   ] as const) {
-    test(`${name} dual-writes datasets + keeps the nemar_catalog safety net + re-embeds`, () => {
-      // Phase 2 must write the datasets source of truth AND keep the
-      // nemar_catalog mirror AND re-embed. If a future change drops the
-      // datasets write or removes the safety net before Phase 3, fail loudly.
+    test(`${name} writes the datasets source of truth + re-embeds, and no longer touches nemar_catalog`, () => {
+      // #646 contract (#652): the hooks write `datasets` and re-embed only.
+      // The nemar_catalog mirror is gone -- fail loudly if it ever returns.
       expect(src).toContain("writeDatasetCatalogFields(");
-      expect(src).toContain("syncNemarCatalogFromEnrichment(");
       expect(src).toContain("reembedDatasetVector(");
+      expect(src).not.toContain("syncNemarCatalogFromEnrichment(");
+      expect(src).not.toContain("nemar_catalog");
     });
   }
 

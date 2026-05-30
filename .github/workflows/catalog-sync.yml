@@ -124,15 +124,15 @@ jobs:
             exit 1
           fi
 
+          # #646: records_synced counts actual D1 row changes folded into the
+          # `datasets` source of truth (the nemar_catalog cache is gone). SQLite
+          # marks an `ON CONFLICT DO UPDATE` as changes=1 even when the values are
+          # unchanged, so a full re-sync of N existing rows returns N, not 0; a
+          # real sync therefore always folds >0 rows.
           SYNCED=$(echo "$RESPONSE" | python3 -c "import sys,json; print(json.load(sys.stdin).get('records_synced',0))")
-          INDEXED=$(echo "$RESPONSE" | python3 -c "import sys,json; print(json.load(sys.stdin).get('records_indexed',0))")
-          # #646 Phase 5: the backend skips the nemar_catalog cache write once an
-          # env reads from `datasets` (records_synced is then 0 by design). Treat
-          # that signalled skip as success so the post-cutover cron doesn't false-alarm.
-          SKIPPED=$(echo "$RESPONSE" | python3 -c "import sys,json; print(json.load(sys.stdin).get('cache_write_skipped',False))")
-          echo "Synced: $SYNCED, Indexed: $INDEXED, CacheWriteSkipped: $SKIPPED"
+          echo "Synced: $SYNCED"
 
-          if [ "$SYNCED" -eq 0 ] && [ "$SKIPPED" != "True" ]; then
+          if [ "$SYNCED" -eq 0 ]; then
             echo "::error::Production sync reported 0 records synced"
             exit 1
           fi
