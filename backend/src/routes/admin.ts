@@ -829,7 +829,7 @@ adminRoutes.get("/stats", async (c) => {
       (SELECT COUNT(*) FROM users WHERE status = 'revoked') as revoked_users,
       -- total_datasets counts real managed datasets only; folded legacy
       -- catalog rows (owner = SYSTEM_USER_ID, #646) are reported separately so
-      -- the headline count isn't inflated by ~180 cache projections.
+      -- the headline count isn't inflated by the ~180 folded legacy catalog rows.
       (SELECT COUNT(*) FROM datasets WHERE owner_user_id != ${SYSTEM_USER_ID}) as total_datasets,
       (SELECT COUNT(*) FROM datasets WHERE owner_user_id = ${SYSTEM_USER_ID}) as catalog_datasets,
       (SELECT COUNT(*) FROM tokens WHERE revoked_at IS NULL) as active_tokens
@@ -5371,9 +5371,12 @@ adminRoutes.get("/catalog/status", async (c) => {
   const db = c.env.DB;
 
   try {
+    // #646: records_indexed is no longer written (vectors are re-embedded
+    // lazily by the embedding_dirty drain cron, not counted during sync), so
+    // it's dropped from the status projection.
     const logs = await db
       .prepare(
-        `SELECT id, started_at, completed_at, records_synced, records_indexed, errors, status
+        `SELECT id, started_at, completed_at, records_synced, errors, status
          FROM catalog_sync_log
          ORDER BY started_at DESC
          LIMIT 10`,
@@ -5383,7 +5386,6 @@ adminRoutes.get("/catalog/status", async (c) => {
         started_at: string;
         completed_at: string | null;
         records_synced: number;
-        records_indexed: number;
         errors: string | null;
         status: string;
       }>();
@@ -5403,7 +5405,10 @@ adminRoutes.get("/catalog/status", async (c) => {
     });
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    if (msg.includes("no such table")) {
+    // Narrow the graceful path to a missing catalog_sync_log (the only
+    // optional table here). A missing `datasets` is a real infra failure and
+    // must surface as a 500, not a misleading "not initialized" 200.
+    if (msg.includes("no such table: catalog_sync_log")) {
       return c.json({
         catalog_size: 0,
         recent_syncs: [],

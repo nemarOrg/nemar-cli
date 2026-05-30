@@ -18,8 +18,8 @@ export interface SearchResult {
   tasks: string;
   authors: string;
   score: number;
-  /** FTS5 highlight (#646 Phase 3 hybrid). Additive-optional; ignored by
-   *  existing CLI/website clients. */
+  /** FTS5 highlight (#646). Additive-optional; ignored by existing CLI/website
+   *  clients. */
   snippet?: string;
 }
 

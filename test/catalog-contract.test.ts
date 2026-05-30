@@ -69,7 +69,35 @@ CREATE TABLE datasets (id INTEGER PRIMARY KEY AUTOINCREMENT, dataset_id TEXT NOT
 CREATE TABLE catalog_sync_log (id INTEGER PRIMARY KEY AUTOINCREMENT, started_at TEXT NOT NULL DEFAULT (datetime('now')),
   completed_at TEXT, records_synced INTEGER DEFAULT 0, records_indexed INTEGER DEFAULT 0, errors TEXT,
   status TEXT NOT NULL DEFAULT 'running');
+CREATE TABLE dataset_versions (id INTEGER PRIMARY KEY AUTOINCREMENT, dataset_id TEXT NOT NULL,
+  version TEXT, created_at TEXT NOT NULL DEFAULT (datetime('now')));
 `;
+
+// The production single-table GET /datasets list SELECT, copied verbatim from
+// routes/datasets.ts so a regression in the alias mapping (the highest-risk
+// part of #652: subject_count->participants, the COALESCE defaults, the
+// sentinel source_type discriminator, COALESCE(uploader,username)) is caught.
+const LIST_SELECT = `
+  SELECT d.dataset_id, d.dataset_id AS id, d.name, d.description, d.status, d.visibility,
+         d.github_repo, d.concept_doi, d.concept_doi AS doi, d.created_at, d.updated_at,
+         COALESCE(d.uploader, u.username) AS owner_username, d.nemar_sync_status,
+         d.source, d.source_id,
+         COALESCE(d.modalities, '') AS modalities,
+         COALESCE(d.subject_count, 0) AS participants,
+         COALESCE(d.tasks, '') AS tasks,
+         COALESCE(d.authors, '') AS authors,
+         COALESCE(d.file_size, 0) AS file_size,
+         COALESCE(d.file_size_formatted, '') AS file_size_formatted,
+         CASE WHEN d.owner_user_id = -1 THEN 'catalog' ELSE 'managed' END AS source_type,
+         (
+           SELECT version FROM dataset_versions dv
+           WHERE dv.dataset_id = d.dataset_id
+           ORDER BY created_at DESC LIMIT 1
+         ) AS latest_version
+  FROM datasets d
+  LEFT JOIN users u ON d.owner_user_id = u.id
+  WHERE d.status = 'active' AND (d.is_sandbox = 0 OR d.is_sandbox IS NULL)
+  ORDER BY d.dataset_id`;
 
 function freshDb(): Database {
   const db = new Database(":memory:");
@@ -120,6 +148,69 @@ describe("legacy ingest folds into datasets (no nemar_catalog table)", () => {
       .get() as { owner_user_id: number; embedding_dirty: number } | null;
     expect(row?.owner_user_id).toBe(-1); // sentinel-owned folded catalog row
     expect(row?.embedding_dirty).toBe(1); // queued for the re-embed cron
+  });
+
+  test("a record colliding with an active managed dataset does NOT fold (recordsSynced=0)", async () => {
+    const db = freshDb();
+    db.run("INSERT INTO users (id, username, email) VALUES (10, 'alice', 'alice@example.org')");
+    db.run(
+      "INSERT INTO datasets (dataset_id, name, owner_user_id, status, visibility) VALUES ('ds000222','Managed',10,'active','public')",
+    );
+    const result = await importCatalogRecords(realD1(db), [rec("ds000222")]);
+    expect(result.recordsSynced).toBe(0); // the ON CONFLICT WHERE owner=-1 guard no-ops it
+    const owner = db
+      .query("SELECT owner_user_id FROM datasets WHERE dataset_id='ds000222'")
+      .get() as { owner_user_id: number };
+    expect(owner.owner_user_id).toBe(10); // managed row + ownership untouched
+  });
+});
+
+describe("single-table list query: byte-stable alias mapping", () => {
+  test("managed + folded rows project the right participants/source_type/owner_username", () => {
+    const db = freshDb();
+    db.run("INSERT INTO users (id, username, email) VALUES (10, 'alice', 'alice@example.org')");
+    // Managed row: owner=alice, subject_count -> participants, uploader NULL.
+    db.run(
+      `INSERT INTO datasets
+         (dataset_id, name, owner_user_id, status, visibility, subject_count, modalities,
+          file_size, file_size_formatted, concept_doi)
+       VALUES ('nm000300','Managed EEG',10,'active','public',12,'eeg',1024,'1 KB','doi:10/m')`,
+    );
+    db.run("INSERT INTO dataset_versions (dataset_id, version) VALUES ('nm000300','1.0.0')");
+    // Folded catalog row: sentinel owner, human name preserved in uploader.
+    db.run(
+      `INSERT INTO datasets
+         (dataset_id, name, owner_user_id, status, visibility, subject_count, modalities, uploader)
+       VALUES ('ds000400','Folded EEG',-1,'active','public',7,'emg','OpenNeuro')`,
+    );
+
+    const rows = db.query(LIST_SELECT).all() as Array<{
+      id: string;
+      participants: number;
+      modalities: string;
+      file_size_formatted: string;
+      source_type: string;
+      owner_username: string;
+      latest_version: string | null;
+    }>;
+    const by = new Map(rows.map((r) => [r.id, r]));
+
+    expect(by.get("nm000300")).toMatchObject({
+      participants: 12, // d.subject_count AS participants
+      modalities: "eeg",
+      file_size_formatted: "1 KB",
+      source_type: "managed",
+      owner_username: "alice", // COALESCE(uploader, username) -> username
+      latest_version: "1.0.0",
+    });
+    expect(by.get("ds000400")).toMatchObject({
+      participants: 7,
+      modalities: "emg",
+      file_size_formatted: "", // COALESCE(NULL, '') default
+      source_type: "catalog", // sentinel discriminator
+      owner_username: "OpenNeuro", // COALESCE(uploader, ...) -> uploader
+      latest_version: null,
+    });
   });
 });
 

@@ -346,7 +346,7 @@ describe("Phase 4 wiring (source pins)", () => {
     expect(admin).toContain("AND dataset_id > ?");
   });
 
-  test("catalog ingest dual-writes datasets alongside nemar_catalog", () => {
+  test("catalog ingest folds into datasets (the only catalog write after #652)", () => {
     expect(read("backend/src/services/catalog-sync.ts")).toContain(
       "upsertCatalogRecordsToDatasets(db, records)",
     );
