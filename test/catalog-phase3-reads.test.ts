@@ -11,7 +11,6 @@ import { Database } from "bun:sqlite";
 import { beforeEach, describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { isReadFromDatasetsEnabled } from "../backend/src/lib/flags";
 import { buildDatasetFilterClauses } from "../backend/src/routes/datasets";
 import {
   type SearchResult,
@@ -188,15 +187,6 @@ describe("rrfFuse", () => {
   });
 });
 
-describe("isReadFromDatasetsEnabled", () => {
-  test("only the literal 'true' enables", () => {
-    expect(isReadFromDatasetsEnabled({ READ_FROM_DATASETS: "true" })).toBe(true);
-    expect(isReadFromDatasetsEnabled({ READ_FROM_DATASETS: "false" })).toBe(false);
-    expect(isReadFromDatasetsEnabled({ READ_FROM_DATASETS: "1" })).toBe(false);
-    expect(isReadFromDatasetsEnabled({})).toBe(false);
-  });
-});
-
 describe("ftsSearch (FTS5 over datasets_fts)", () => {
   let db: Database;
   beforeEach(() => {
@@ -340,7 +330,7 @@ describe("migration 0030 backfill (managed authors/license from cache)", () => {
   });
 });
 
-describe("flag-gated read sites (anti-regression source pins)", () => {
+describe("read sites (anti-regression source pins)", () => {
   const datasetsSrc = readFileSync(
     join(import.meta.dir, "..", "backend/src/routes/datasets.ts"),
     "utf8",
@@ -349,25 +339,15 @@ describe("flag-gated read sites (anti-regression source pins)", () => {
     join(import.meta.dir, "..", "backend/src/services/page-bundle.ts"),
     "utf8",
   );
-  const searchSrc = readFileSync(
-    join(import.meta.dir, "..", "backend/src/services/dataset-search.ts"),
-    "utf8",
-  );
 
-  test("list + search + page-bundle branch on the flag", () => {
-    expect(datasetsSrc).toContain("isReadFromDatasetsEnabled(c.env)");
-    expect(pageBundleSrc).toContain("isReadFromDatasetsEnabled(env)");
-  });
-
-  test("flag-OFF paths remain unchanged (cache reads intact)", () => {
-    expect(searchSrc).toContain('returnMetadata: "all"'); // old semanticSearch metadata path
-    expect(searchSrc).toContain("FROM nemar_catalog"); // old textSearch
-    expect(pageBundleSrc).toContain("LEFT JOIN nemar_catalog c"); // old loadCatalogRow path
-  });
-
-  test("flag-ON list keeps the 23-key shape + source_type discriminator", () => {
+  test("list keeps the source_type discriminator + uploader-aware owner_username", () => {
     expect(datasetsSrc).toContain("d.concept_doi AS doi");
     expect(datasetsSrc).toContain("THEN 'catalog' ELSE 'managed' END AS source_type");
     expect(datasetsSrc).toContain("COALESCE(d.uploader, u.username) AS owner_username");
+  });
+
+  test("page-bundle reads license/authors from datasets, not the dropped cache", () => {
+    expect(pageBundleSrc).toContain("d.modalities, d.tasks, d.license, d.authors");
+    expect(pageBundleSrc).not.toContain("LEFT JOIN nemar_catalog");
   });
 });
