@@ -6,6 +6,8 @@
  * Uses fetch directly for Cloudflare Workers compatibility.
  */
 
+import { STALENESS_LIMIT_DAYS } from "./staleness";
+
 /** Fallback sender when FROM_EMAIL env var is unset. */
 export const DEFAULT_FROM_EMAIL = "NEMAR <nemar@osc.earth>";
 const RESEND_API_URL = "https://api.resend.com/emails";
@@ -748,8 +750,8 @@ export async function sendPasswordlessCodeEmail(
 /**
  * Warn a dataset owner that their private, unpublished dataset is approaching
  * the 90-day inactivity deadline and will be removed unless they act (#662).
- * Sent at 30/14/7/2/1 days remaining; `isFinal` toggles the urgent styling
- * used for the last (1-day) notice.
+ * Sent at 30/14/7/2/1 days remaining; the 1-day notice uses urgent red styling
+ * and a "Final notice" subject prefix (when `daysLeft` is 1 or less).
  */
 export async function sendStalenessWarningEmail(
   to: string,
@@ -777,7 +779,7 @@ export async function sendStalenessWarningEmail(
 
   <p>Your NEMAR dataset <strong>${escapeHtml(datasetId)}</strong>${
     datasetName ? ` (${escapeHtml(datasetName)})` : ""
-  } is private, has no DOI, and has had no activity for nearly 90 days.</p>
+  } is private, has no DOI, and has had no activity for over ${STALENESS_LIMIT_DAYS - daysLeft} days (approaching the 90-day removal deadline).</p>
 
   <p>Under NEMAR's cleanup policy it is scheduled for removal on
      <strong>${escapeHtml(deletionDate)}</strong> (in ${escapeHtml(dayLabel)})
@@ -814,21 +816,29 @@ export async function sendStalenessWarningEmail(
 }
 
 /**
- * Notify admins that a stale dataset has passed its 90-day deadline after the
- * owner was warned and took no action (#662). The cron deliberately does NOT
- * auto-delete `nm` datasets; this email asks an admin to delete manually so a
- * human always confirms removal of real archive data.
+ * Notify admins that a stale dataset has passed its 90-day deadline (#662).
+ * The cron deliberately does NOT auto-delete `nm` datasets; this email asks an
+ * admin to delete manually so a human always confirms removal of real archive
+ * data. `warnStageReached` is the owner's last delivered warning stage (in
+ * days remaining), or null if no warning was delivered, so the body can state
+ * accurately how far the runway actually progressed. Returns the number of
+ * admin recipients the message was successfully delivered to.
  */
 export async function sendStalenessAdminReviewEmail(
   adminEmails: string[],
   datasetId: string,
   datasetName: string,
   ownerEmail: string | null,
+  warnStageReached: number | null,
   resendApiKey: string,
   fromEmail: string,
   replyTo?: string,
   isDev?: boolean,
-): Promise<void> {
+): Promise<number> {
+  const warningSummary =
+    warnStageReached !== null
+      ? `The most recent warning delivered to the owner was the ${escapeHtml(String(warnStageReached))}-day notice.`
+      : "No warning was delivered to the owner (check <code>staleness_warn_stage</code> in D1 before deleting).";
   const html = `
 <!DOCTYPE html>
 <html>
@@ -845,9 +855,9 @@ export async function sendStalenessAdminReviewEmail(
 
   <p>The owner${
     ownerEmail ? ` (${escapeHtml(ownerEmail)})` : ""
-  } was warned at 30, 14, 7, 2, and 1 days and took no action. The cron does
-  <strong>not</strong> auto-delete <code>nm</code> datasets &mdash; deletion is a
-  manual admin step so a human always confirms it.</p>
+  } was sent removal warnings as the deadline approached. ${warningSummary} The
+  cron does <strong>not</strong> auto-delete <code>nm</code> datasets &mdash;
+  deletion is a manual admin step so a human always confirms it.</p>
 
   <h2 style="color: #333; font-size: 18px; margin-top: 30px;">Action Required</h2>
   <p>Review the dataset, then keep or delete it:</p>
@@ -864,6 +874,7 @@ export async function sendStalenessAdminReviewEmail(
 </html>
   `;
 
+  let delivered = 0;
   for (const adminEmail of adminEmails) {
     try {
       await sendEmail(
@@ -875,8 +886,10 @@ export async function sendStalenessAdminReviewEmail(
         replyTo,
         isDev,
       );
+      delivered++;
     } catch (error) {
       console.error(`Failed to send staleness review email to ${adminEmail}:`, error);
     }
   }
+  return delivered;
 }

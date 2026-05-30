@@ -75,23 +75,41 @@ describe("staleness emails write the right request to Resend", () => {
     expect(String(captured[0].body.subject)).toContain("1 day");
   });
 
-  test("admin review email fans out to every admin once", async () => {
-    await sendStalenessAdminReviewEmail(
+  test("admin review email fans out to every admin once and reports delivery count", async () => {
+    const delivered = await sendStalenessAdminReviewEmail(
       ["admin1@nemar.org", "admin2@nemar.org"],
       "nm000111",
       "ISRUC-Sleep",
       "owner@example.org",
+      1,
       "test-key",
       "NEMAR <nemar@nemar.org>",
     );
 
+    expect(delivered).toBe(2);
     expect(captured).toHaveLength(2);
-    expect(captured.map((c) => c.body.to)).toEqual([
-      ["admin1@nemar.org"],
-      ["admin2@nemar.org"],
-    ]);
+    expect(captured.map((c) => c.body.to)).toEqual([["admin1@nemar.org"], ["admin2@nemar.org"]]);
+    // The dataset id is in the subject so the admin knows what to act on.
+    expect(String(captured[0].body.subject)).toContain("nm000111");
     // The action the admin must take is in the body.
     expect(String(captured[0].body.html)).toContain("nemar admin delete-dataset");
+  });
+
+  test("admin review email reports zero delivered when every send fails", async () => {
+    // Make the captured fetch fail so we exercise the per-recipient catch and
+    // the delivered-count return the cron relies on to gate state advancement.
+    globalThis.fetch = (async () =>
+      new Response(JSON.stringify({ message: "boom" }), { status: 500 })) as typeof fetch;
+    const delivered = await sendStalenessAdminReviewEmail(
+      ["admin1@nemar.org"],
+      "nm000111",
+      "ISRUC-Sleep",
+      null,
+      null,
+      "test-key",
+      "NEMAR <nemar@nemar.org>",
+    );
+    expect(delivered).toBe(0);
   });
 });
 

@@ -297,8 +297,12 @@ async function scheduledCleanup(env: Bindings): Promise<void> {
       .run();
     staleness.reset = resetRes.meta.changes ?? 0;
 
-    // Candidates inside the warning window, most urgent (oldest) first.
+    // Candidates inside the warning window, oldest (most urgent) first.
+    // Already-handled past-deadline rows (admins already notified) are excluded
+    // so a growing awaiting-deletion backlog can't fill the LIMIT and starve a
+    // newly-past-deadline dataset out of ever reaching an admin.
     const MAX_STALE_EMAILS_PER_RUN = 30;
+    const staleLimit = `-${STALENESS_LIMIT_DAYS} days`;
     const candidates = await db
       .prepare(
         `SELECT d.dataset_id, d.name,
@@ -314,10 +318,14 @@ async function scheduledCleanup(env: Bindings): Promise<void> {
             AND d.dataset_id NOT IN (
               SELECT dataset_id FROM publication_requests WHERE status NOT IN ('published','denied')
             )
+            AND NOT (
+              COALESCE(d.last_activity_at, d.created_at) < datetime('now', ?)
+              AND d.staleness_admin_notified_at IS NOT NULL
+            )
           ORDER BY effective_activity ASC
           LIMIT ?`,
       )
-      .bind(warnWindow, MAX_STALE_EMAILS_PER_RUN)
+      .bind(warnWindow, staleLimit, MAX_STALE_EMAILS_PER_RUN)
       .all<{
         dataset_id: string;
         name: string;
@@ -330,65 +338,110 @@ async function scheduledCleanup(env: Bindings): Promise<void> {
     if (candidates.results.length > 0) {
       const emailCfg = resolveEmailConfig(env);
       const canEmail = Boolean(env.RESEND_API_KEY);
-      const adminEmails = canEmail ? await getAdminEmailsForCategory(db, "announcements") : [];
+      if (!canEmail) {
+        console.error(
+          "Scheduled cleanup: RESEND_API_KEY is not set — staleness notifications are skipped and will retry next run.",
+        );
+      }
+      // Fetch admin emails in its own boundary: a D1 hiccup here must not abort
+      // the per-dataset owner warnings below.
+      let adminEmails: string[] = [];
+      if (canEmail) {
+        try {
+          adminEmails = await getAdminEmailsForCategory(db, "publication_request");
+        } catch (err) {
+          console.error("Scheduled cleanup: failed to fetch admin emails:", err);
+        }
+      }
 
       for (const row of candidates.results) {
-        const daysLeft = daysUntilDeletion(row.effective_activity, now);
+        // Per-row boundary: a single failing row must not abandon the rest.
+        try {
+          const daysLeft = daysUntilDeletion(row.effective_activity, now);
 
-        if (daysLeft <= 0) {
-          // Past the deadline: notify admins once to delete manually.
-          if (!row.admin_notified_at) {
-            if (canEmail && adminEmails.length > 0) {
-              await sendStalenessAdminReviewEmail(
-                adminEmails,
-                row.dataset_id,
-                row.name,
-                row.owner_email,
-                env.RESEND_API_KEY,
-                emailCfg.fromEmail,
-                emailCfg.replyTo,
-                emailCfg.isDev,
-              ).catch((err) =>
-                console.error(
-                  `Scheduled cleanup: admin review email failed for ${row.dataset_id}:`,
-                  err,
-                ),
-              );
+          if (daysLeft <= 0) {
+            // Past the deadline: notify admins once, then leave it for a manual
+            // `nemar admin delete-dataset`. Advance the flag ONLY when an admin
+            // was actually reached, so a transient send failure or a missing
+            // RESEND key retries next run instead of silently burying the
+            // dataset (the failure mode that lost nm000111/116/117 one step up).
+            if (!row.admin_notified_at) {
+              let handled = false;
+              if (!canEmail) {
+                // Infra missing — leave unflagged so the next run retries.
+              } else if (adminEmails.length === 0) {
+                // No admins exist to notify; advance so we don't loop forever.
+                handled = true;
+              } else {
+                const delivered = await sendStalenessAdminReviewEmail(
+                  adminEmails,
+                  row.dataset_id,
+                  row.name,
+                  row.owner_email,
+                  row.warn_stage,
+                  env.RESEND_API_KEY,
+                  emailCfg.fromEmail,
+                  emailCfg.replyTo,
+                  emailCfg.isDev,
+                );
+                handled = delivered > 0;
+              }
+              if (handled) {
+                await db
+                  .prepare(
+                    "UPDATE datasets SET staleness_admin_notified_at = datetime('now') WHERE dataset_id = ?",
+                  )
+                  .bind(row.dataset_id)
+                  .run();
+                staleness.adminNotified++;
+              }
             }
-            await db
-              .prepare(
-                "UPDATE datasets SET staleness_admin_notified_at = datetime('now') WHERE dataset_id = ?",
-              )
-              .bind(row.dataset_id)
-              .run();
-            staleness.adminNotified++;
+            continue;
           }
-          continue;
-        }
 
-        // Inside the window: email the owner once per threshold crossed.
-        const stage = warningStageForDaysLeft(daysLeft);
-        if (stage !== null && stage !== row.warn_stage) {
-          if (canEmail && row.owner_email) {
-            await sendStalenessWarningEmail(
-              row.owner_email,
-              row.dataset_id,
-              row.name,
-              daysLeft,
-              deletionDate(row.effective_activity),
-              env.RESEND_API_KEY,
-              emailCfg.fromEmail,
-              emailCfg.replyTo,
-              emailCfg.isDev,
-            ).catch((err) =>
-              console.error(`Scheduled cleanup: warning email failed for ${row.dataset_id}:`, err),
-            );
+          // Inside the window: email the owner once per threshold crossed.
+          // Advance the stage ONLY when the warning was actually delivered (or
+          // there is no owner address to reach), so a Resend outage retries.
+          const stage = warningStageForDaysLeft(daysLeft);
+          if (stage !== null && stage !== row.warn_stage) {
+            let handled = false;
+            if (!canEmail) {
+              // Infra missing — leave the stage so the next run retries.
+            } else if (!row.owner_email) {
+              // No address to warn; advance so we move on (admins still get the
+              // day-0 notice). Nothing to retry.
+              handled = true;
+            } else {
+              try {
+                await sendStalenessWarningEmail(
+                  row.owner_email,
+                  row.dataset_id,
+                  row.name,
+                  daysLeft,
+                  deletionDate(row.effective_activity),
+                  env.RESEND_API_KEY,
+                  emailCfg.fromEmail,
+                  emailCfg.replyTo,
+                  emailCfg.isDev,
+                );
+                handled = true;
+              } catch (err) {
+                console.error(
+                  `Scheduled cleanup: warning email failed for ${row.dataset_id}:`,
+                  err,
+                );
+              }
+            }
+            if (handled) {
+              await db
+                .prepare("UPDATE datasets SET staleness_warn_stage = ? WHERE dataset_id = ?")
+                .bind(stage, row.dataset_id)
+                .run();
+              staleness.warned++;
+            }
           }
-          await db
-            .prepare("UPDATE datasets SET staleness_warn_stage = ? WHERE dataset_id = ?")
-            .bind(stage, row.dataset_id)
-            .run();
-          staleness.warned++;
+        } catch (err) {
+          console.error(`Scheduled cleanup: failed processing ${row.dataset_id}:`, err);
         }
       }
     }

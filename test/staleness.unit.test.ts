@@ -45,6 +45,13 @@ describe("ageInDays", () => {
   test("returns 0 for an unparseable timestamp", () => {
     expect(ageInDays("not-a-date", nowAfter(50))).toBe(0);
   });
+
+  test("parses ISO-8601 (T-separated) timestamps too, as UTC", () => {
+    // D1 normally returns the SQLite space form, but guard the ISO form in
+    // case a column ever holds it — must still be read as UTC, not local.
+    expect(ageInDays("2026-01-01T12:00:00", nowAfter(90))).toBe(90);
+    expect(ageInDays("2026-01-01T12:00:00Z", nowAfter(90))).toBe(90);
+  });
 });
 
 describe("daysUntilDeletion", () => {
