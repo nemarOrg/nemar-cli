@@ -10,7 +10,7 @@ import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { upsertCatalogRecordsToDatasets } from "../backend/src/services/catalog-sync";
-import { reembedDatasetVector } from "../backend/src/services/dataset-search";
+import { drainEmbeddingDirty, reembedDatasetVector } from "../backend/src/services/dataset-search";
 
 const MIG = join(import.meta.dir, "..", "backend/src/db/migrations");
 
@@ -192,6 +192,103 @@ describe("upsertCatalogRecordsToDatasets", () => {
       len: number;
     };
     expect(r.len).toBe(8192);
+  });
+
+  test("description = readme[:500], independent of the 8 KB readme cap", async () => {
+    const db = seeded();
+    await upsertCatalogRecordsToDatasets(realD1(db), [
+      rec({ id: "ds000902", readme: "a".repeat(600) }),
+    ]);
+    const r = db
+      .query(
+        "SELECT LENGTH(readme) AS rl, LENGTH(description) AS dl FROM datasets WHERE dataset_id='ds000902'",
+      )
+      .get() as { rl: number; dl: number };
+    expect(r.rl).toBe(600); // under the 8 KB cap
+    expect(r.dl).toBe(500); // description truncated to 500
+  });
+
+  test("maps every NemarCatalogRecord field to the right datasets column (bind-order guard)", async () => {
+    const db = db0027();
+    await upsertCatalogRecordsToDatasets(realD1(db), [
+      rec({
+        id: "ds123456",
+        name: "Mapped Name",
+        readme: "Mapped Readme Body",
+        participants: 42,
+        modalities: "eeg,meg",
+        age_min: 5,
+        age_max: 65,
+        file_size: 12345,
+        totalFiles: 99,
+        tasks: "rest,oddball",
+        Authors: "Mapped Author",
+        License: "CC-BY-4.0",
+        BIDSVersion: "1.9.1",
+        sessionsNum: 7,
+        publishDate: "2023-03-03",
+        uploader: "Mapped Uploader",
+        byte_size_format: "12.3 KB",
+        DatasetDOI: "doi:10/mapped",
+        created: "2021-01-01",
+      }),
+    ]);
+    const row = db
+      .query(
+        `SELECT name, description, subject_count, modalities, age_min, age_max, file_size, total_files,
+                tasks, authors, license, bids_version, sessions_count, publish_date, uploader,
+                file_size_formatted, concept_doi, created_at, source, source_id
+         FROM datasets WHERE dataset_id='ds123456'`,
+      )
+      .get() as Record<string, unknown>;
+    expect(row).toEqual({
+      name: "Mapped Name",
+      description: "Mapped Readme Body",
+      subject_count: 42,
+      modalities: "eeg,meg",
+      age_min: 5,
+      age_max: 65,
+      file_size: 12345,
+      total_files: 99,
+      tasks: "rest,oddball",
+      authors: "Mapped Author",
+      license: "CC-BY-4.0",
+      bids_version: "1.9.1",
+      sessions_count: 7,
+      publish_date: "2023-03-03",
+      uploader: "Mapped Uploader",
+      file_size_formatted: "12.3 KB",
+      concept_doi: "doi:10/mapped",
+      created_at: "2021-01-01",
+      source: "openneuro", // ds* -> openneuro, source_id = id
+      source_id: "ds123456",
+    });
+  });
+
+  test("nm* catalog-only record gets source='nemar.org' and source_id=NULL", async () => {
+    const db = db0027();
+    await upsertCatalogRecordsToDatasets(realD1(db), [rec({ id: "nm999900" })]);
+    const row = db
+      .query("SELECT source, source_id FROM datasets WHERE dataset_id='nm999900'")
+      .get() as { source: string; source_id: string | null };
+    expect(row).toEqual({ source: "nemar.org", source_id: null });
+  });
+});
+
+describe("drainEmbeddingDirty guard", () => {
+  test("returns {0,0} and does not embed when AI/Vectorize are unset", async () => {
+    const db = db0027();
+    db.exec(
+      "INSERT INTO datasets (dataset_id, name, owner_user_id, status, visibility, embedding_dirty) VALUES ('nm111','X',10,'active','public',1)",
+    );
+    expect(await drainEmbeddingDirty(realD1(db), undefined, undefined, 50)).toEqual({
+      scanned: 0,
+      embedded: 0,
+    });
+    const r = db.query("SELECT embedding_dirty FROM datasets WHERE dataset_id='nm111'").get() as {
+      embedding_dirty: number;
+    };
+    expect(r.embedding_dirty).toBe(1); // untouched
   });
 });
 
