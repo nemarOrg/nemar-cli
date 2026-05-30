@@ -126,9 +126,13 @@ jobs:
 
           SYNCED=$(echo "$RESPONSE" | python3 -c "import sys,json; print(json.load(sys.stdin).get('records_synced',0))")
           INDEXED=$(echo "$RESPONSE" | python3 -c "import sys,json; print(json.load(sys.stdin).get('records_indexed',0))")
-          echo "Synced: $SYNCED, Indexed: $INDEXED"
+          # #646 Phase 5: the backend skips the nemar_catalog cache write once an
+          # env reads from `datasets` (records_synced is then 0 by design). Treat
+          # that signalled skip as success so the post-cutover cron doesn't false-alarm.
+          SKIPPED=$(echo "$RESPONSE" | python3 -c "import sys,json; print(json.load(sys.stdin).get('cache_write_skipped',False))")
+          echo "Synced: $SYNCED, Indexed: $INDEXED, CacheWriteSkipped: $SKIPPED"
 
-          if [ "$SYNCED" -eq 0 ]; then
+          if [ "$SYNCED" -eq 0 ] && [ "$SKIPPED" != "True" ]; then
             echo "::error::Production sync reported 0 records synced"
             exit 1
           fi

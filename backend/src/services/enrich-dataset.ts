@@ -909,6 +909,10 @@ export async function enrichDataset(
             `[llm-enrich] nemar_catalog sync failed for ${datasetId}: ${errorMessage(err)}`,
           );
         }
+      } else {
+        console.log(
+          `[llm-enrich] nemar_catalog cache write skipped for ${datasetId} (READ_FROM_DATASETS on)`,
+        );
       }
 
       // Best-effort re-embed (internally guarded, never throws).

@@ -9,6 +9,7 @@ import { Database } from "bun:sqlite";
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+import { syncCatalogFromLocal } from "../backend/src/services/catalog-from-local";
 import { importCatalogRecords } from "../backend/src/services/catalog-sync";
 
 const MIG = join(import.meta.dir, "..", "backend/src/db/migrations");
@@ -72,6 +73,8 @@ CREATE TABLE nemar_catalog (id TEXT PRIMARY KEY, name TEXT NOT NULL, description
 CREATE TABLE catalog_sync_log (id INTEGER PRIMARY KEY AUTOINCREMENT, started_at TEXT NOT NULL DEFAULT (datetime('now')),
   completed_at TEXT, records_synced INTEGER DEFAULT 0, records_indexed INTEGER DEFAULT 0, errors TEXT,
   status TEXT NOT NULL DEFAULT 'running');
+CREATE TABLE dataset_versions (id INTEGER PRIMARY KEY AUTOINCREMENT, dataset_id TEXT NOT NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')));
 `;
 
 function freshDb(): Database {
@@ -131,6 +134,37 @@ describe("catalog ingest dual-write gating", () => {
   });
 });
 
+describe("local cache rebuild gating (syncCatalogFromLocal)", () => {
+  // Seed one public, active, non-sentinel dataset that the rebuild should pick up.
+  function seedPublicDataset(db: Database, id: string): void {
+    db.run("INSERT INTO users (id, username, email) VALUES (10, 'alice', 'alice@example.org')");
+    db.run(
+      `INSERT INTO datasets (dataset_id, name, owner_user_id, status, visibility, is_sandbox, modalities, tasks)
+       VALUES (?, ?, 10, 'active', 'public', 0, 'eeg', 'rest')`,
+      [id, `DS ${id}`],
+    );
+  }
+
+  test("flag ON: skips the rebuild entirely, leaves nemar_catalog untouched", async () => {
+    const db = freshDb();
+    seedPublicDataset(db, "ds000333");
+    const result = await syncCatalogFromLocal(realD1(db), true);
+    expect(result.skipped).toBe(true);
+    expect(result.scanned).toBe(0);
+    expect(result.upserted).toBe(0);
+    expect(count(db, "SELECT COUNT(*) AS n FROM nemar_catalog")).toBe(0); // cache untouched
+  });
+
+  test("flag OFF: rebuilds nemar_catalog from the datasets source of truth", async () => {
+    const db = freshDb();
+    seedPublicDataset(db, "ds000444");
+    const result = await syncCatalogFromLocal(realD1(db), false);
+    expect(result.skipped ?? false).toBe(false);
+    expect(result.scanned).toBe(1);
+    expect(count(db, "SELECT COUNT(*) AS n FROM nemar_catalog WHERE id='ds000444'")).toBe(1);
+  });
+});
+
 describe("Phase 5 wiring (source pins)", () => {
   const read = (p: string) => readFileSync(join(import.meta.dir, "..", p), "utf8");
 
@@ -149,10 +183,21 @@ describe("Phase 5 wiring (source pins)", () => {
     expect(read("backend/src/services/dataset-reindex.ts")).toContain("writeDatasetCatalogFields(");
   });
 
-  test("admin /catalog/sync passes the flag to both catalog-sync entry points", () => {
+  test("admin threads the flag to every catalog ingest entry point", () => {
     const admin = read("backend/src/routes/admin.ts");
+    // syncCatalog + importCatalogRecords (/catalog/sync) + syncCatalogFromLocal
+    // (/catalog/sync-local) -- three gated call sites since Phase 5.
     expect(
       (admin.match(/isReadFromDatasetsEnabled\(c\.env\)/g) || []).length,
-    ).toBeGreaterThanOrEqual(2);
+    ).toBeGreaterThanOrEqual(3);
+  });
+
+  test("enrich + reindex log the skip path instead of failing silently", () => {
+    for (const f of [
+      "backend/src/services/enrich-dataset.ts",
+      "backend/src/services/dataset-reindex.ts",
+    ]) {
+      expect(read(f)).toMatch(/cache write skipped.*READ_FROM_DATASETS on/);
+    }
   });
 });
