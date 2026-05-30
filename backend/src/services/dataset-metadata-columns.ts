@@ -144,8 +144,7 @@ const README_MAX = 8192;
  * and COALESCE-preserved, so a hook that lacks a value (e.g. reindex has no
  * LLM authors) leaves the existing column untouched. `name`/`description` are
  * preserved too: a reindex without a fresh LLM title must not clobber a better
- * one. While both stores are live this phase, syncNemarCatalogFromEnrichment
- * still mirrors the same data into nemar_catalog in parallel.
+ * one. `datasets` is the single source of truth (#646).
  */
 export interface DatasetCatalogFields {
   name?: string | null;
@@ -199,27 +198,6 @@ export async function writeDatasetCatalogFields(
 }
 
 /**
- * Fields that the discover-page list endpoint projects from `nemar_catalog`.
- * Kept in sync with the catalog table by the enrichment pipeline so the
- * cached read path doesn't fall behind the source-of-truth `datasets` row.
- */
-export interface CatalogSyncFields {
-  /** Optional title override (from enrichment.title); null preserves existing. */
-  name?: string | null;
-  description?: string | null;
-  modalities?: string | null;
-  participants?: number | null;
-  age_min?: number | null;
-  age_max?: number | null;
-  tasks?: string | null;
-  authors?: string | null;
-  license?: string | null;
-  file_size?: number | null;
-  file_size_formatted?: string | null;
-  total_files?: number | null;
-}
-
-/**
  * Format a byte count as a short human-readable string (`"23.2 GB"`,
  * `"4.31 GB"`). Mirrors the format the legacy nemar.org catalog uses for
  * `file_size_formatted` so the column stays consistent.
@@ -243,7 +221,7 @@ export function formatFileSize(bytes: number | null | undefined): string | null 
  * (object form, ORCID/affiliation as the value) for most datasets and an
  * array of `{name, ...}` objects for some legacy rows. Returns null when
  * the shape is unrecognized or empty so the COALESCE in
- * syncNemarCatalogFromEnrichment preserves the existing value.
+ * writeDatasetCatalogFields preserves the existing value.
  */
 export function authorsFromEnrichment(
   enrichment: { authors?: unknown } | null | undefined,
@@ -264,71 +242,4 @@ export function authorsFromEnrichment(
     names = Object.keys(raw as Record<string, unknown>).filter((n) => n.trim());
   }
   return names.length > 0 ? names.join(", ") : null;
-}
-
-/**
- * Mirror the enrichment-derived metadata into `nemar_catalog` so the
- * list-endpoint cache reads consistent values. The `datasets` row is the
- * source of truth; this keeps the cached projection coherent.
- *
- * UPSERT: a new dataset's first enrichment INSERTs the catalog row; every
- * subsequent enrichment/reindex UPDATEs it. `name` is required because
- * nemar_catalog.name is NOT NULL; other fields use COALESCE-preserve so
- * null inputs leave existing values untouched on the UPDATE path.
- *
- * `name` is also COALESCE-preserved on UPDATE so a caller that didn't get
- * a fresh title from the LLM doesn't clobber a previously-better one.
- *
- * Replaces the prior UPDATE-only behavior which silently warned and
- * returned changes=0 when the catalog row didn't exist (broken cache).
- * The new pipeline created some datasets that never had a catalog row;
- * see nemarOrg/nemar-cli#544.
- */
-export async function syncNemarCatalogFromEnrichment(
-  db: D1Database,
-  datasetId: string,
-  fields: CatalogSyncFields & { name: string },
-): Promise<{ changes: number }> {
-  const result = await db
-    .prepare(
-      `INSERT INTO nemar_catalog (
-         id, name, description, modalities, participants, age_min, age_max,
-         tasks, authors, license, file_size, file_size_formatted, total_files,
-         synced_at
-       )
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
-       ON CONFLICT(id) DO UPDATE SET
-         name = COALESCE(excluded.name, nemar_catalog.name),
-         description = COALESCE(excluded.description, nemar_catalog.description),
-         modalities = COALESCE(excluded.modalities, nemar_catalog.modalities),
-         participants = COALESCE(excluded.participants, nemar_catalog.participants),
-         age_min = COALESCE(excluded.age_min, nemar_catalog.age_min),
-         age_max = COALESCE(excluded.age_max, nemar_catalog.age_max),
-         tasks = COALESCE(excluded.tasks, nemar_catalog.tasks),
-         authors = COALESCE(excluded.authors, nemar_catalog.authors),
-         license = COALESCE(excluded.license, nemar_catalog.license),
-         file_size = COALESCE(excluded.file_size, nemar_catalog.file_size),
-         file_size_formatted = COALESCE(excluded.file_size_formatted, nemar_catalog.file_size_formatted),
-         total_files = COALESCE(excluded.total_files, nemar_catalog.total_files),
-         synced_at = datetime('now')`,
-    )
-    .bind(
-      datasetId,
-      fields.name,
-      fields.description ?? null,
-      fields.modalities ?? null,
-      fields.participants ?? null,
-      fields.age_min ?? null,
-      fields.age_max ?? null,
-      fields.tasks ?? null,
-      fields.authors ?? null,
-      fields.license ?? null,
-      fields.file_size ?? null,
-      fields.file_size_formatted ?? null,
-      fields.total_files ?? null,
-    )
-    .run();
-
-  const changes = result.meta?.changes ?? 0;
-  return { changes };
 }

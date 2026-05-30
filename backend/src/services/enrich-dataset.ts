@@ -16,7 +16,6 @@
  */
 
 import type { NemarMetadataV2 } from "../../../shared/datacite-constants.js";
-import { isReadFromDatasetsEnabled } from "../lib/flags.js";
 import type { Bindings } from "../types/bindings.js";
 import {
   bidsToDataCite,
@@ -27,8 +26,6 @@ import {
 import {
   authorsFromEnrichment,
   computeDatasetMetadataColumns,
-  formatFileSize,
-  syncNemarCatalogFromEnrichment,
   writeDatasetCatalogFields,
   writeDatasetMetadataColumns,
 } from "./dataset-metadata-columns.js";
@@ -870,10 +867,10 @@ export async function enrichDataset(
       const bidsVersion =
         typeof bidsDescription.BIDSVersion === "string" ? bidsDescription.BIDSVersion : null;
 
-      // #646 Phase 2 dual-write -- SOURCE OF TRUTH FIRST. A failure here means
-      // `datasets` diverges from nemar_catalog, so we deliberately let it
-      // propagate to the outer catch (-> metadataColumnsError, persisted on the
-      // row and surfaced in the response) rather than swallow it.
+      // #646: write the metadata columns on the `datasets` source of truth. A
+      // failure here is a real error, so we deliberately let it propagate to the
+      // outer catch (-> metadataColumnsError, persisted on the row and surfaced
+      // in the response) rather than swallow it.
       await writeDatasetCatalogFields(env.DB, datasetId, {
         name: enrichedTitle,
         description: enrichedDescription,
@@ -882,38 +879,6 @@ export async function enrichDataset(
         readme: readmeContent || null, // empty README -> preserve existing
         bids_version: bidsVersion,
       });
-
-      // nemar_catalog read-cache mirror -- ONLY while this env still reads from
-      // the cache (#646 Phase 5). Where READ_FROM_DATASETS is on (dev), reads
-      // come from `datasets`, so the cache write is skipped; prod keeps it fresh
-      // until its cutover. Phase 6 deletes this block + the cache outright.
-      // Non-fatal: a stale cache row doesn't corrupt the source of truth.
-      if (!isReadFromDatasetsEnabled(env)) {
-        try {
-          await syncNemarCatalogFromEnrichment(env.DB, datasetId, {
-            name: enrichedTitle || dataset.name || datasetId,
-            description: enrichedDescription,
-            modalities: cols.modalities,
-            participants: cols.subject_count,
-            age_min: cols.age_min,
-            age_max: cols.age_max,
-            tasks: cols.tasks,
-            authors: enrichedAuthors,
-            license,
-            file_size: cols.file_size,
-            file_size_formatted: formatFileSize(cols.file_size),
-            total_files: cols.total_files,
-          });
-        } catch (err) {
-          console.error(
-            `[llm-enrich] nemar_catalog sync failed for ${datasetId}: ${errorMessage(err)}`,
-          );
-        }
-      } else {
-        console.log(
-          `[llm-enrich] nemar_catalog cache write skipped for ${datasetId} (READ_FROM_DATASETS on)`,
-        );
-      }
 
       // Best-effort re-embed (internally guarded, never throws).
       await reembedDatasetVector(env.DB, env.AI, env.VECTORIZE, datasetId);

@@ -8,7 +8,6 @@ import { zValidator } from "@hono/zod-validator";
 import { Hono } from "hono";
 import { z } from "zod";
 import { SYSTEM_USER_ID } from "../lib/constants";
-import { isReadFromDatasetsEnabled } from "../lib/flags";
 import { authMiddleware, optionalAuthMiddleware } from "../middleware/auth";
 import { cliVersionGuard } from "../middleware/cliVersion";
 import {
@@ -17,9 +16,7 @@ import {
   ftsSearch,
   lookupDatasetById,
   rrfFuse,
-  semanticSearch,
   semanticSearchHydrated,
-  textSearch,
 } from "../services/dataset-search";
 import { generateDatasetId, isValidDatasetId } from "../services/datasetId";
 import {
@@ -424,8 +421,9 @@ datasetRoutes.post(
 /**
  * GET /datasets - List datasets (unified catalog)
  *
- * Merges managed datasets (D1) with the nemar.org catalog for a complete listing.
- * Managed datasets take precedence for deduplication (LEFT JOIN on nemar_catalog).
+ * Single-table read from the `datasets` source of truth (#646). Managed and
+ * folded legacy-catalog rows coexist in one table, discriminated by the
+ * sentinel owner; source_type distinguishes them in the response.
  *
  * Visibility rules:
  * - --mine flag: show only the authenticated user's managed datasets (private + public + sandbox)
@@ -490,11 +488,11 @@ datasetRoutes.get("/", optionalAuthMiddleware, async (c) => {
     }
 
     const params: (string | number)[] = [status, user.id];
-    let query: string;
-    if (isReadFromDatasetsEnabled(c.env)) {
-      // #646 Phase 3: read managed facts from the `datasets` source of truth
-      // (no nemar_catalog JOIN). Same 22-column ?mine wire shape.
-      query = `
+    // Read managed facts from the `datasets` source of truth (#646). 22-column
+    // ?mine wire shape. latest_version is the most recently minted DOI version
+    // (null when none); scripts/hallu-sync.sh reads it to skip the per-dataset
+    // /manifest call, so keep the ordering in sync with /datasets/:id/manifest.
+    let query = `
       SELECT d.dataset_id, d.name, d.description, d.status, d.visibility,
              d.github_repo, d.concept_doi, d.created_at, d.updated_at,
              u.username AS owner_username, d.nemar_sync_status,
@@ -516,52 +514,14 @@ datasetRoutes.get("/", optionalAuthMiddleware, async (c) => {
       JOIN users u ON d.owner_user_id = u.id
       WHERE d.status = ? AND d.owner_user_id = ?
     `;
-      query += buildDatasetFilterClauses(params, {
-        search,
-        modality,
-        author,
-        task,
-        hasDoi,
-        recent,
-      });
-    } else {
-      query = `
-      SELECT d.dataset_id, d.name, d.description, d.status, d.visibility,
-             d.github_repo, d.concept_doi, d.created_at, d.updated_at,
-             u.username AS owner_username, d.nemar_sync_status,
-             d.source, d.source_id,
-             COALESCE(c.modalities, '') AS modalities,
-             COALESCE(c.participants, 0) AS participants,
-             COALESCE(c.tasks, '') AS tasks,
-             COALESCE(c.authors, '') AS authors,
-             COALESCE(c.file_size, 0) AS file_size,
-             COALESCE(c.file_size_formatted, '') AS file_size_formatted,
-             'managed' AS source_type,
-             -- latest_version: most recently minted DOI version for the dataset
-             -- (null when none). scripts/hallu-sync.sh reads this to skip the
-             -- per-dataset /manifest call; keep the ordering in sync with what
-             -- /datasets/:id/manifest reports.
-             (
-               SELECT version FROM dataset_versions dv
-               WHERE dv.dataset_id = d.dataset_id
-               ORDER BY created_at DESC
-               LIMIT 1
-             ) AS latest_version
-      FROM datasets d
-      JOIN users u ON d.owner_user_id = u.id
-      LEFT JOIN nemar_catalog c ON c.id = d.dataset_id
-      WHERE d.status = ? AND d.owner_user_id = ?
-    `;
-      query += buildFilterClauses(params, {
-        search,
-        modality,
-        author,
-        task,
-        hasDoi,
-        recent,
-        managed: true,
-      });
-    }
+    query += buildDatasetFilterClauses(params, {
+      search,
+      modality,
+      author,
+      task,
+      hasDoi,
+      recent,
+    });
     query += buildSortClause(sort);
 
     // --mine path is always authed and per-user; the no-store default
@@ -570,12 +530,12 @@ datasetRoutes.get("/", optionalAuthMiddleware, async (c) => {
     return executeAndReturn(c, db, query, params, { limit, offset });
   }
 
-  // #646 Phase 3: single-table read from `datasets` (no UNION, no nemar_catalog
-  // JOIN). Folded catalog rows are first-class here, discriminated by the
-  // sentinel owner; same 24-column wire shape as the UNION path below.
-  if (isReadFromDatasetsEnabled(c.env)) {
-    const params: (string | number)[] = [status];
-    let query = `
+  // Single-table read from the `datasets` source of truth (#646). Folded legacy
+  // catalog rows are first-class here, discriminated by the sentinel owner
+  // (source_type='catalog'); managed datasets are source_type='managed'.
+  // 24-column wire shape, byte-stable with the pre-consolidation UNION path.
+  const params: (string | number)[] = [status];
+  let query = `
     SELECT d.dataset_id, d.dataset_id AS id, d.name, d.description, d.status, d.visibility,
            d.github_repo, d.concept_doi, d.concept_doi AS doi, d.created_at, d.updated_at,
            COALESCE(d.uploader, u.username) AS owner_username, d.nemar_sync_status,
@@ -598,132 +558,15 @@ datasetRoutes.get("/", optionalAuthMiddleware, async (c) => {
     WHERE d.status = ?
       AND (d.is_sandbox = 0 OR d.is_sandbox IS NULL)
   `;
-    if (!user || !hasRole(user.role, "admin")) {
-      query += " AND d.visibility = 'public'";
-    }
-    if (owner) {
-      query += " AND COALESCE(d.uploader, u.username) = ?";
-      params.push(owner);
-    }
-    query += buildDatasetFilterClauses(params, { search, modality, author, task, hasDoi, recent });
-    query += buildSortClause(sort);
-    if (!user) {
-      c.header("Cache-Control", "public, max-age=30, s-maxage=300, stale-while-revalidate=600");
-      c.header("Vary", "Authorization");
-    }
-    return executeAndReturn(c, db, query, params, { limit, offset });
+  if (!user || !hasRole(user.role, "admin")) {
+    query += " AND d.visibility = 'public'";
   }
-
-  // Public catalog: UNION managed datasets + catalog-only.
-  // SYSTEM_USER_ID excludes folded legacy catalog rows (#646 Phase 1): they
-  // live in `datasets` now but are still served from nemar_catalog by the
-  // catalog-only branch below, so the managed branch must skip them or they
-  // double-list with the wrong doi/owner/source_type.
-  const managedParams: (string | number)[] = [status, SYSTEM_USER_ID];
-  let managedQuery = `
-    SELECT d.dataset_id, d.dataset_id AS id, d.name, d.description, d.status, d.visibility,
-           d.github_repo, d.concept_doi, d.concept_doi AS doi, d.created_at, d.updated_at,
-           u.username AS owner_username, d.nemar_sync_status,
-           d.source, d.source_id,
-           COALESCE(c.modalities, '') AS modalities,
-           COALESCE(c.participants, 0) AS participants,
-           COALESCE(c.tasks, '') AS tasks,
-           COALESCE(c.authors, '') AS authors,
-           COALESCE(c.file_size, 0) AS file_size,
-           COALESCE(c.file_size_formatted, '') AS file_size_formatted,
-           'managed' AS source_type,
-           -- latest_version: same contract as the managed-mine branch above.
-           (
-             SELECT version FROM dataset_versions dv
-             WHERE dv.dataset_id = d.dataset_id
-             ORDER BY created_at DESC
-             LIMIT 1
-           ) AS latest_version
-    FROM datasets d
-    JOIN users u ON d.owner_user_id = u.id
-    LEFT JOIN nemar_catalog c ON c.id = d.dataset_id
-    WHERE d.status = ?
-      AND d.owner_user_id != ?
-      AND (d.is_sandbox = 0 OR d.is_sandbox IS NULL)
-  `;
-
-  // Visibility filter for managed datasets
-  if (!user) {
-    managedQuery += " AND d.visibility = 'public'";
-  } else if (!hasRole(user.role, "admin")) {
-    managedQuery += " AND d.visibility = 'public'";
-  }
-
-  // Owner filter for managed datasets
   if (owner) {
-    managedQuery += " AND u.username = ?";
-    managedParams.push(owner);
+    query += " AND COALESCE(d.uploader, u.username) = ?";
+    params.push(owner);
   }
-
-  managedQuery += buildFilterClauses(managedParams, {
-    search,
-    modality,
-    author,
-    task,
-    hasDoi,
-    recent,
-    managed: true,
-  });
-
-  // Catalog-only datasets (not in managed datasets table).
-  // Both dedup subqueries below exclude SYSTEM_USER_ID so a folded legacy
-  // row (now present in `datasets` with owner=-1) does NOT suppress its own
-  // nemar_catalog source row — the 180 folded rows keep being served from
-  // here exactly as before the fold (#646 Phase 1, byte-stable).
-  const catalogParams: (string | number)[] = [SYSTEM_USER_ID, SYSTEM_USER_ID];
-  let catalogQuery = `
-    SELECT c.id AS dataset_id, c.id, c.name, c.description, NULL AS status, 'public' AS visibility,
-           NULL AS github_repo, NULL AS concept_doi, c.doi, COALESCE(c.publish_date, c.created_date) AS created_at, NULL AS updated_at,
-           c.uploader AS owner_username, NULL AS nemar_sync_status,
-           NULL AS source, NULL AS source_id,
-           COALESCE(c.modalities, '') AS modalities,
-           COALESCE(c.participants, 0) AS participants,
-           COALESCE(c.tasks, '') AS tasks,
-           COALESCE(c.authors, '') AS authors,
-           COALESCE(c.file_size, 0) AS file_size,
-           COALESCE(c.file_size_formatted, '') AS file_size_formatted,
-           'catalog' AS source_type,
-           NULL AS latest_version
-    FROM nemar_catalog c
-    WHERE c.id NOT IN (SELECT dataset_id FROM datasets WHERE status = 'active' AND owner_user_id != ?)
-      AND c.id NOT IN (
-        -- Hide ds* shadows when a managed on* mirror exists. The catalog row
-        -- keeps its OpenNeuro id (c.id = "ds002718"); the managed mirror
-        -- carries the canonical id (dataset_id = "on002718") and back-points
-        -- via source_id = "ds002718". Without this second NOT IN, every
-        -- mirrored ds row shows up twice in the list (once as canonical,
-        -- once as shadow). owner_user_id != ? keeps folded sentinel rows out
-        -- of the shadow set so they don't suppress their own catalog source.
-        SELECT source_id FROM datasets
-        WHERE status = 'active' AND source = 'openneuro' AND source_id IS NOT NULL
-          AND owner_user_id != ?
-      )
-  `;
-
-  // Owner filter for catalog datasets
-  if (owner) {
-    catalogQuery += " AND c.uploader = ?";
-    catalogParams.push(owner);
-  }
-
-  catalogQuery += buildFilterClauses(catalogParams, {
-    search,
-    modality,
-    author,
-    task,
-    hasDoi,
-    recent,
-    managed: false,
-  });
-
-  // Combine with UNION ALL
-  const unionQuery = `${managedQuery} UNION ALL ${catalogQuery}${buildSortClause(sort, true)}`;
-  const allParams = [...managedParams, ...catalogParams];
+  query += buildDatasetFilterClauses(params, { search, modality, author, task, hasDoi, recent });
+  query += buildSortClause(sort);
 
   // CF edge cache: anonymous list responses are identical for all callers
   // (no private rows leak — the SQL already filters visibility), so share
@@ -746,7 +589,7 @@ datasetRoutes.get("/", optionalAuthMiddleware, async (c) => {
     c.header("Cache-Control", "public, max-age=30, s-maxage=300, stale-while-revalidate=600");
     c.header("Vary", "Authorization");
   }
-  return executeAndReturn(c, db, unionQuery, allParams, { limit, offset });
+  return executeAndReturn(c, db, query, params, { limit, offset });
 });
 
 // Escape SQLite LIKE wildcards in user input so a literal '%' or '_' in the
@@ -757,91 +600,8 @@ export function escapeLikePattern(raw: string): string {
   return raw.replace(/[\\%_]/g, "\\$&");
 }
 
-/** Build WHERE clauses for search/filter params */
-export function buildFilterClauses(
-  params: (string | number)[],
-  opts: {
-    search?: string;
-    modality?: string;
-    author?: string;
-    task?: string;
-    hasDoi?: boolean;
-    recent?: number;
-    managed: boolean;
-  },
-): string {
-  let clauses = "";
-
-  if (opts.search) {
-    // Dataset ids (and the OpenNeuro source_id for mirrored rows) must be
-    // searchable directly. nemar_catalog.search_text was not consistently
-    // populated with the id across the corpus (nm000103 had it, nm000166
-    // did not), so relying on search_text alone produced 0 results for
-    // any catalog row whose enrichment missed the id.
-    const pattern = `%${escapeLikePattern(opts.search.toLowerCase())}%`;
-    if (opts.managed) {
-      clauses +=
-        " AND (LOWER(d.dataset_id) LIKE ? ESCAPE '\\'" +
-        " OR LOWER(COALESCE(d.source_id, '')) LIKE ? ESCAPE '\\'" +
-        " OR LOWER(d.name) LIKE ? ESCAPE '\\'" +
-        " OR LOWER(d.description) LIKE ? ESCAPE '\\'" +
-        " OR LOWER(COALESCE(c.search_text, '')) LIKE ? ESCAPE '\\')";
-      params.push(pattern, pattern, pattern, pattern, pattern);
-    } else {
-      clauses += " AND (LOWER(c.id) LIKE ? ESCAPE '\\' OR LOWER(c.search_text) LIKE ? ESCAPE '\\')";
-      params.push(pattern, pattern);
-    }
-  }
-
-  if (opts.modality) {
-    if (opts.managed) {
-      clauses += " AND LOWER(COALESCE(c.modalities, '')) LIKE ?";
-    } else {
-      clauses += " AND LOWER(c.modalities) LIKE ?";
-    }
-    params.push(`%${opts.modality.toLowerCase()}%`);
-  }
-
-  if (opts.author) {
-    if (opts.managed) {
-      clauses += " AND LOWER(COALESCE(c.authors, '')) LIKE ?";
-    } else {
-      clauses += " AND LOWER(c.authors) LIKE ?";
-    }
-    params.push(`%${opts.author.toLowerCase()}%`);
-  }
-
-  if (opts.task) {
-    if (opts.managed) {
-      clauses += " AND LOWER(COALESCE(c.tasks, '')) LIKE ?";
-    } else {
-      clauses += " AND LOWER(c.tasks) LIKE ?";
-    }
-    params.push(`%${opts.task.toLowerCase()}%`);
-  }
-
-  if (opts.hasDoi) {
-    if (opts.managed) {
-      clauses += " AND (d.concept_doi IS NOT NULL AND d.concept_doi != '')";
-    } else {
-      clauses += " AND (c.doi IS NOT NULL AND c.doi != '')";
-    }
-  }
-
-  if (opts.recent) {
-    if (opts.managed) {
-      clauses += " AND d.created_at > datetime('now', ?)";
-    } else {
-      clauses += " AND c.publish_date > datetime('now', ?)";
-    }
-    params.push(`-${opts.recent} days`);
-  }
-
-  return clauses;
-}
-
 /**
- * #646 Phase 3 filter clauses for the single-table `datasets` list (flag ON).
+ * #646 filter clauses for the single-table `datasets` list.
  * Reads d.* only (no nemar_catalog), and routes free-text `search` through the
  * FTS5 index (`d.id IN (SELECT rowid FROM datasets_fts WHERE … MATCH …)`) plus
  * dataset_id/source_id LIKE, replacing the old `c.search_text` LIKE.
@@ -902,22 +662,18 @@ export function buildDatasetFilterClauses(
   return clauses;
 }
 
-function buildSortClause(sort: string, forUnion = false): string {
-  // For JOIN queries, qualify with table alias to avoid ambiguity.
-  // For UNION queries, use the output column name (no prefix).
-  const dateCol = forUnion ? "created_at" : "d.created_at";
-  const nameCol = forUnion ? "name" : "d.name";
+function buildSortClause(sort: string): string {
   switch (sort) {
     case "oldest":
-      return ` ORDER BY ${dateCol} ASC`;
+      return " ORDER BY d.created_at ASC";
     case "name":
-      return ` ORDER BY ${nameCol} ASC`;
+      return " ORDER BY d.name ASC";
     case "participants":
       return " ORDER BY participants DESC";
     case "size":
       return " ORDER BY file_size DESC";
     default:
-      return ` ORDER BY ${dateCol} DESC`;
+      return " ORDER BY d.created_at DESC";
   }
 }
 
@@ -977,8 +733,10 @@ async function executeAndReturn(
   } catch (dbError) {
     const msg = dbError instanceof Error ? dbError.message : String(dbError);
 
-    // Graceful fallback: if nemar_catalog table doesn't exist yet (migration
-    // 0018 not applied), fall back to the basic datasets-only query.
+    // Permanent defense-in-depth net (#646): the main query no longer touches
+    // nemar_catalog (dropped in Phase 6), but if any code path ever hits a
+    // missing-catalog error, degrade to the basic datasets-only query instead
+    // of 500ing.
     if (msg.includes("no such table: nemar_catalog")) {
       console.warn("[datasets] nemar_catalog table not found, falling back to basic query");
       try {
@@ -1069,13 +827,15 @@ datasetRoutes.get("/search", optionalAuthMiddleware, async (c) => {
     return rows.filter((r) => r.modalities.toLowerCase().includes(mod));
   };
 
-  // textSearch hits have score=1.0 (no embedding ranking), so the score
-  // floor only filters semantic results in practice.
+  // FTS5/exact hits carry score=1.0, so this cosine floor only filters the
+  // semantic component. Applied BEFORE RRF fusion; finalize() does not re-floor
+  // the fused scores.
   const applyMinScore = (rows: SearchResult[]): SearchResult[] =>
     minScore <= 0 ? rows : rows.filter((r) => r.score >= minScore);
 
-  const respond = (rows: SearchResult[], method: string) => {
-    const filtered = applyModality(applyMinScore(rows));
+  // #646 hybrid path: exact-id -> (semantic id-only ∪ FTS5) fused by RRF.
+  const finalize = (rows: SearchResult[], method: string) => {
+    const filtered = applyModality(rows);
     return c.json({
       results: filtered.slice(0, limit),
       count: filtered.length,
@@ -1083,116 +843,43 @@ datasetRoutes.get("/search", optionalAuthMiddleware, async (c) => {
       min_score: minScore,
     });
   };
-
-  // #646 Phase 3 hybrid path: exact-id -> (semantic id-only ∪ FTS5) fused by
-  // RRF. min_score is a cosine floor so it's applied to the semantic component
-  // BEFORE fusion; finalize() therefore does NOT re-floor the fused scores.
-  if (isReadFromDatasetsEnabled(c.env)) {
-    const finalize = (rows: SearchResult[], method: string) => {
-      const filtered = applyModality(rows);
-      return c.json({
-        results: filtered.slice(0, limit),
-        count: filtered.length,
-        method,
-        min_score: minScore,
-      });
-    };
-    try {
-      if (exactIdMatch) {
-        const idHit = await lookupDatasetById(db, trimmed.toLowerCase());
-        if (idHit) return finalize([idHit], "exact_id");
-      }
-      // Tier-specific log so a failure here is distinguishable from the
-      // semantic/hydration tiers; re-throw so the outer catch still degrades.
-      const lexical = await ftsSearch(db, trimmed, limit * 2).catch((ftsErr) => {
-        console.error(
-          `[search] FTS tier failed: ${ftsErr instanceof Error ? ftsErr.message : String(ftsErr)}`,
-        );
-        throw ftsErr;
-      });
-      if (!c.env.AI || !c.env.VECTORIZE) {
-        return finalize(lexical, "text");
-      }
-      let semantic: SearchResult[] = [];
-      try {
-        semantic = await semanticSearchHydrated(c.env.AI, c.env.VECTORIZE, db, trimmed, limit * 2);
-      } catch (embErr) {
-        console.error("[search] semantic tier failed, using FTS only:", embErr);
-        return finalize(lexical, "text_fallback");
-      }
-      const semanticFiltered = applyMinScore(semantic);
-      if (semanticFiltered.length === 0) {
-        return finalize(lexical, "text_fallback");
-      }
-      return finalize(rrfFuse(semanticFiltered, lexical), "semantic");
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      console.error("Dataset search (datasets path) failed:", msg);
-      // Only the expected missing-FTS-table case degrades to "unavailable";
-      // any other structural error is a real 500 (don't mask it).
-      if (msg.includes("no such table: datasets_fts")) {
-        return c.json({ results: [], count: 0, method: "unavailable" });
-      }
-      return c.json({ error: "Search failed", details: msg }, 500);
-    }
-  }
-
   try {
-    // Exact dataset-ID hits skip the embedding step entirely. Embeddings
-    // can't match literal IDs, so we always try this first.
     if (exactIdMatch) {
-      const idHit = await textSearch(db, trimmed, 1);
-      if (idHit.length > 0) {
-        return respond(idHit, "exact_id");
-      }
+      const idHit = await lookupDatasetById(db, trimmed.toLowerCase());
+      if (idHit) return finalize([idHit], "exact_id");
     }
-
-    const hasVectorize = Boolean(c.env.AI && c.env.VECTORIZE);
-    if (!hasVectorize) {
-      console.warn("[search] AI or VECTORIZE binding not available, using text search");
-      const rows = await textSearch(db, trimmed, limit * 2);
-      return respond(rows, "text");
+    // Tier-specific log so a failure here is distinguishable from the
+    // semantic/hydration tiers; re-throw so the outer catch still degrades.
+    const lexical = await ftsSearch(db, trimmed, limit * 2).catch((ftsErr) => {
+      console.error(
+        `[search] FTS tier failed: ${ftsErr instanceof Error ? ftsErr.message : String(ftsErr)}`,
+      );
+      throw ftsErr;
+    });
+    if (!c.env.AI || !c.env.VECTORIZE) {
+      return finalize(lexical, "text");
     }
-
-    const semantic = await semanticSearch(c.env.AI!, c.env.VECTORIZE!, trimmed, limit * 2);
-
-    // Vectorize can return zero hits when the index is empty or when the
-    // query has no semantic signal (e.g. a literal ID). In those cases the
-    // D1 LIKE search still finds real matches against the catalog.
-    if (semantic.length === 0) {
-      const rows = await textSearch(db, trimmed, limit * 2);
-      return respond(rows, "text_fallback");
+    let semantic: SearchResult[] = [];
+    try {
+      semantic = await semanticSearchHydrated(c.env.AI, c.env.VECTORIZE, db, trimmed, limit * 2);
+    } catch (embErr) {
+      console.error("[search] semantic tier failed, using FTS only:", embErr);
+      return finalize(lexical, "text_fallback");
     }
-
-    // Merge in text matches the semantic search missed, preserving the
-    // ranked semantic order at the head of the list.
-    const textRows = await textSearch(db, trimmed, limit * 2);
-    if (textRows.length > 0) {
-      const seen = new Set(semantic.map((r) => r.id));
-      for (const row of textRows) {
-        if (!seen.has(row.id)) {
-          semantic.push(row);
-          seen.add(row.id);
-        }
-      }
+    const semanticFiltered = applyMinScore(semantic);
+    if (semanticFiltered.length === 0) {
+      return finalize(lexical, "text_fallback");
     }
-
-    return respond(semantic, "semantic");
+    return finalize(rrfFuse(semanticFiltered, lexical), "semantic");
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     console.error("Dataset search failed:", msg);
-
-    // Last-ditch fall back to text search on any unexpected failure.
-    try {
-      const rows = await textSearch(db, trimmed, limit);
-      return respond(rows, "text_fallback");
-    } catch (fallbackErr) {
-      const fallbackMsg = fallbackErr instanceof Error ? fallbackErr.message : String(fallbackErr);
-      if (fallbackMsg.includes("no such table")) {
-        return c.json({ results: [], count: 0, method: "unavailable" });
-      }
-      return c.json({ error: "Search failed", details: msg }, 500);
+    // Only the expected missing-FTS-table case degrades to "unavailable";
+    // any other structural error is a real 500 (don't mask it).
+    if (msg.includes("no such table: datasets_fts")) {
+      return c.json({ results: [], count: 0, method: "unavailable" });
     }
+    return c.json({ error: "Search failed", details: msg }, 500);
   }
 });
 
