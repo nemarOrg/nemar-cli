@@ -31,7 +31,20 @@ import { sandboxRoutes } from "./routes/sandbox";
 import { userRoutes } from "./routes/users";
 import webhooks from "./routes/webhooks";
 import { deleteDatasetCascade } from "./services/deletion";
+import {
+  getAdminEmailsForCategory,
+  resolveEmailConfig,
+  sendStalenessAdminReviewEmail,
+  sendStalenessWarningEmail,
+} from "./services/email";
 import { getActiveNotices } from "./services/notices";
+import {
+  FIRST_WARNING_DAYS,
+  STALENESS_LIMIT_DAYS,
+  daysUntilDeletion,
+  deletionDate,
+  warningStageForDaysLeft,
+} from "./services/staleness";
 import type { Bindings, Variables } from "./types/bindings";
 
 // Create the API app with all routes
@@ -204,11 +217,16 @@ app.route("/", api);
  * Scheduled cleanup handler (Cloudflare Workers cron trigger).
  * Runs daily at 3 AM UTC (production only, see wrangler-sccn.toml [triggers]).
  *
- * - Sandbox (xx) datasets: delete after 14 days
- * - Stale nm datasets: private, no DOI, no active pub requests, inactive for 90 days
+ * - Sandbox (xx) datasets: delete after 14 days (disposable, auto-deleted).
+ * - Stale nm datasets: private, no DOI, no active pub requests, inactive 90 days.
+ *   These are NEVER auto-deleted (#662). The cron emails the owner an escalating
+ *   warning runway (30/14/7/2/1 days) and, at the deadline, asks admins to
+ *   delete manually via `nemar admin delete-dataset`. Real archive data is only
+ *   ever removed by a deliberate human action.
  */
 async function scheduledCleanup(env: Bindings): Promise<void> {
   const db = env.DB;
+  const now = new Date();
   const results: Array<{
     dataset_id: string;
     success: boolean;
@@ -251,21 +269,131 @@ async function scheduledCleanup(env: Bindings): Promise<void> {
     console.error("Scheduled cleanup: sandbox query failed:", err);
   }
 
-  // 2. Stale nm datasets: unpublished, no DOI, inactive for 90 days
-  const remaining = MAX_DELETIONS_PER_RUN - results.length;
-  if (remaining > 0) {
-    try {
-      const staleRows = await db
-        .prepare(
-          "SELECT dataset_id FROM datasets WHERE dataset_id LIKE 'nm%' AND COALESCE(last_activity_at, created_at) < datetime('now', '-90 days') AND status = 'active' AND concept_doi IS NULL AND visibility = 'private' AND dataset_id NOT IN (SELECT dataset_id FROM publication_requests WHERE status NOT IN ('published', 'denied')) LIMIT ?",
-        )
-        .bind(remaining)
-        .all<{ dataset_id: string }>();
+  // 2. Stale nm datasets: warn the owner on an escalating runway, then hand
+  //    off to admins for a manual delete. The cron NEVER auto-deletes nm
+  //    datasets (#662) — removing real archive data always needs a human.
+  const staleness = { warned: 0, adminNotified: 0, reset: 0 };
+  // Datasets become warning candidates once within FIRST_WARNING_DAYS of the
+  // 90-day deadline, i.e. inactive for at least (90 - 30) days.
+  const warnWindow = `-${STALENESS_LIMIT_DAYS - FIRST_WARNING_DAYS} days`;
+  try {
+    // Reset tracking for anything no longer stale (fresh activity, a DOI, a
+    // pending pub request, or made public) so a later cycle re-warns cleanly.
+    const resetRes = await db
+      .prepare(
+        `UPDATE datasets
+            SET staleness_warn_stage = NULL, staleness_admin_notified_at = NULL
+          WHERE (staleness_warn_stage IS NOT NULL OR staleness_admin_notified_at IS NOT NULL)
+            AND NOT (
+              dataset_id LIKE 'nm%' AND status = 'active' AND concept_doi IS NULL
+              AND visibility = 'private'
+              AND COALESCE(last_activity_at, created_at) < datetime('now', ?)
+              AND dataset_id NOT IN (
+                SELECT dataset_id FROM publication_requests WHERE status NOT IN ('published','denied')
+              )
+            )`,
+      )
+      .bind(warnWindow)
+      .run();
+    staleness.reset = resetRes.meta.changes ?? 0;
 
-      await deleteRows(staleRows.results);
-    } catch (err) {
-      console.error("Scheduled cleanup: stale datasets query failed:", err);
+    // Candidates inside the warning window, most urgent (oldest) first.
+    const MAX_STALE_EMAILS_PER_RUN = 30;
+    const candidates = await db
+      .prepare(
+        `SELECT d.dataset_id, d.name,
+                COALESCE(d.last_activity_at, d.created_at) AS effective_activity,
+                d.staleness_warn_stage AS warn_stage,
+                d.staleness_admin_notified_at AS admin_notified_at,
+                u.email AS owner_email
+           FROM datasets d
+           LEFT JOIN users u ON u.id = d.owner_user_id
+          WHERE d.dataset_id LIKE 'nm%' AND d.status = 'active' AND d.concept_doi IS NULL
+            AND d.visibility = 'private'
+            AND COALESCE(d.last_activity_at, d.created_at) < datetime('now', ?)
+            AND d.dataset_id NOT IN (
+              SELECT dataset_id FROM publication_requests WHERE status NOT IN ('published','denied')
+            )
+          ORDER BY effective_activity ASC
+          LIMIT ?`,
+      )
+      .bind(warnWindow, MAX_STALE_EMAILS_PER_RUN)
+      .all<{
+        dataset_id: string;
+        name: string;
+        effective_activity: string;
+        warn_stage: number | null;
+        admin_notified_at: string | null;
+        owner_email: string | null;
+      }>();
+
+    if (candidates.results.length > 0) {
+      const emailCfg = resolveEmailConfig(env);
+      const canEmail = Boolean(env.RESEND_API_KEY);
+      const adminEmails = canEmail ? await getAdminEmailsForCategory(db, "announcements") : [];
+
+      for (const row of candidates.results) {
+        const daysLeft = daysUntilDeletion(row.effective_activity, now);
+
+        if (daysLeft <= 0) {
+          // Past the deadline: notify admins once to delete manually.
+          if (!row.admin_notified_at) {
+            if (canEmail && adminEmails.length > 0) {
+              await sendStalenessAdminReviewEmail(
+                adminEmails,
+                row.dataset_id,
+                row.name,
+                row.owner_email,
+                env.RESEND_API_KEY,
+                emailCfg.fromEmail,
+                emailCfg.replyTo,
+                emailCfg.isDev,
+              ).catch((err) =>
+                console.error(
+                  `Scheduled cleanup: admin review email failed for ${row.dataset_id}:`,
+                  err,
+                ),
+              );
+            }
+            await db
+              .prepare(
+                "UPDATE datasets SET staleness_admin_notified_at = datetime('now') WHERE dataset_id = ?",
+              )
+              .bind(row.dataset_id)
+              .run();
+            staleness.adminNotified++;
+          }
+          continue;
+        }
+
+        // Inside the window: email the owner once per threshold crossed.
+        const stage = warningStageForDaysLeft(daysLeft);
+        if (stage !== null && stage !== row.warn_stage) {
+          if (canEmail && row.owner_email) {
+            await sendStalenessWarningEmail(
+              row.owner_email,
+              row.dataset_id,
+              row.name,
+              daysLeft,
+              deletionDate(row.effective_activity),
+              env.RESEND_API_KEY,
+              emailCfg.fromEmail,
+              emailCfg.replyTo,
+              emailCfg.isDev,
+            ).catch((err) =>
+              console.error(`Scheduled cleanup: warning email failed for ${row.dataset_id}:`, err),
+            );
+          }
+          await db
+            .prepare("UPDATE datasets SET staleness_warn_stage = ? WHERE dataset_id = ?")
+            .bind(stage, row.dataset_id)
+            .run();
+          staleness.warned++;
+        }
+      }
     }
+  } catch (err) {
+    console.error("Scheduled cleanup: stale dataset warning failed:", err);
   }
 
   // 3. Stuck manifest_jobs detection (#557). The central workflow is
@@ -291,18 +419,21 @@ async function scheduledCleanup(env: Bindings): Promise<void> {
     console.error("Scheduled cleanup: stuck manifest_jobs query failed:", err);
   }
 
-  // Log summary to audit_log
+  // Log summary to audit_log. `deleted`/`failed` cover only sandbox (xx)
+  // datasets now; nm datasets are warned, not deleted, by this job.
   const deleted = results.filter((r) => r.success).length;
   const failed = results.filter((r) => !r.success).length;
   try {
     await db
       .prepare("INSERT INTO audit_log (action, details) VALUES (?, ?)")
-      .bind("scheduled_cleanup", JSON.stringify({ deleted, failed, datasets: results }))
+      .bind("scheduled_cleanup", JSON.stringify({ deleted, failed, datasets: results, staleness }))
       .run();
   } catch (err) {
     console.error("Scheduled cleanup: failed to write audit log:", err);
   }
-  console.log(`Scheduled cleanup: ${deleted} deleted, ${failed} failed`);
+  console.log(
+    `Scheduled cleanup: ${deleted} deleted, ${failed} failed; staleness warned=${staleness.warned} adminNotified=${staleness.adminNotified} reset=${staleness.reset}`,
+  );
 }
 
 export default {

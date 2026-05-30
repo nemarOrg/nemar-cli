@@ -744,3 +744,139 @@ export async function sendPasswordlessCodeEmail(
   // that often retain subjects long after the body is purged.
   await sendEmail(to, "Your NEMAR sign-in code", html, resendApiKey, fromEmail, replyTo, isDev);
 }
+
+/**
+ * Warn a dataset owner that their private, unpublished dataset is approaching
+ * the 90-day inactivity deadline and will be removed unless they act (#662).
+ * Sent at 30/14/7/2/1 days remaining; `isFinal` toggles the urgent styling
+ * used for the last (1-day) notice.
+ */
+export async function sendStalenessWarningEmail(
+  to: string,
+  datasetId: string,
+  datasetName: string,
+  daysLeft: number,
+  deletionDate: string,
+  resendApiKey: string,
+  fromEmail: string,
+  replyTo?: string,
+  isDev?: boolean,
+): Promise<void> {
+  const isFinal = daysLeft <= 1;
+  const accent = isFinal ? "#dc2626" : "#f59e0b";
+  const dayLabel = daysLeft === 1 ? "1 day" : `${daysLeft} days`;
+  const html = `
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+</head>
+<body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; line-height: 1.6; color: #333; max-width: 600px; margin: 0 auto; padding: 20px;">
+  <h1 style="color: ${accent};">${isFinal ? "Final notice: " : ""}Your dataset will be removed in ${escapeHtml(dayLabel)}</h1>
+
+  <p>Your NEMAR dataset <strong>${escapeHtml(datasetId)}</strong>${
+    datasetName ? ` (${escapeHtml(datasetName)})` : ""
+  } is private, has no DOI, and has had no activity for nearly 90 days.</p>
+
+  <p>Under NEMAR's cleanup policy it is scheduled for removal on
+     <strong>${escapeHtml(deletionDate)}</strong> (in ${escapeHtml(dayLabel)})
+     unless you act. <strong>Removal deletes the GitHub repository, the stored
+     data, and all records.</strong></p>
+
+  <h2 style="color: #333; font-size: 18px; margin-top: 30px;">How to keep this dataset</h2>
+  <p>Do any one of the following before the deadline:</p>
+  <ul>
+    <li>Request publication (recommended): <code style="background:#f4f4f5;padding:2px 6px;border-radius:4px;">nemar dataset publish request ${escapeHtml(datasetId)}</code></li>
+    <li>Push an update or new version so the dataset is no longer inactive.</li>
+    <li>Reply to this email and ask the NEMAR admins to keep it.</li>
+  </ul>
+
+  <p style="color: #666; font-size: 14px;">A dataset with a DOI, or one that is published, is never auto-removed.</p>
+
+  <hr style="border: none; border-top: 1px solid #eee; margin: 30px 0;">
+  <p style="color: #999; font-size: 12px;">
+    <a href="https://nemar.org" style="color: #999;">NEMAR</a> - Neuroelectromagnetic Data Archive and Tools Resource
+  </p>
+</body>
+</html>
+  `;
+
+  await sendEmail(
+    to,
+    `${isFinal ? "[NEMAR] Final notice: " : "[NEMAR] Action needed: "}${datasetId} will be removed in ${dayLabel}`,
+    html,
+    resendApiKey,
+    fromEmail,
+    replyTo,
+    isDev,
+  );
+}
+
+/**
+ * Notify admins that a stale dataset has passed its 90-day deadline after the
+ * owner was warned and took no action (#662). The cron deliberately does NOT
+ * auto-delete `nm` datasets; this email asks an admin to delete manually so a
+ * human always confirms removal of real archive data.
+ */
+export async function sendStalenessAdminReviewEmail(
+  adminEmails: string[],
+  datasetId: string,
+  datasetName: string,
+  ownerEmail: string | null,
+  resendApiKey: string,
+  fromEmail: string,
+  replyTo?: string,
+  isDev?: boolean,
+): Promise<void> {
+  const html = `
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+</head>
+<body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; line-height: 1.6; color: #333; max-width: 600px; margin: 0 auto; padding: 20px;">
+  <h1 style="color: #dc2626;">Stale dataset awaiting manual review</h1>
+
+  <p>Dataset <strong>${escapeHtml(datasetId)}</strong>${
+    datasetName ? ` (${escapeHtml(datasetName)})` : ""
+  } is private, has no DOI, and has been inactive past the 90-day cleanup deadline.</p>
+
+  <p>The owner${
+    ownerEmail ? ` (${escapeHtml(ownerEmail)})` : ""
+  } was warned at 30, 14, 7, 2, and 1 days and took no action. The cron does
+  <strong>not</strong> auto-delete <code>nm</code> datasets &mdash; deletion is a
+  manual admin step so a human always confirms it.</p>
+
+  <h2 style="color: #333; font-size: 18px; margin-top: 30px;">Action Required</h2>
+  <p>Review the dataset, then keep or delete it:</p>
+  <div style="background: #f4f4f5; padding: 16px; border-radius: 8px; font-family: monospace; font-size: 14px; margin: 16px 0;">
+    <span style="color: #dc2626;">nemar admin delete-dataset</span> ${escapeHtml(datasetId)}
+  </div>
+  <p style="color: #666; font-size: 14px;">To keep it instead, help the owner publish it or mint a DOI; either removes it from cleanup permanently.</p>
+
+  <hr style="border: none; border-top: 1px solid #eee; margin: 30px 0;">
+  <p style="color: #999; font-size: 12px;">
+    <a href="https://nemar.org" style="color: #999;">NEMAR</a> - Neuroelectromagnetic Data Archive and Tools Resource
+  </p>
+</body>
+</html>
+  `;
+
+  for (const adminEmail of adminEmails) {
+    try {
+      await sendEmail(
+        adminEmail,
+        `[NEMAR] Stale dataset past deadline: ${datasetId} (awaiting manual deletion)`,
+        html,
+        resendApiKey,
+        fromEmail,
+        replyTo,
+        isDev,
+      );
+    } catch (error) {
+      console.error(`Failed to send staleness review email to ${adminEmail}:`, error);
+    }
+  }
+}
