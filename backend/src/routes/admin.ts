@@ -4964,6 +4964,28 @@ adminRoutes.post(
           source_id,
         )
         .run();
+
+      // #646: if this on* mirror's OpenNeuro source was already folded into
+      // `datasets` as a sentinel catalog row (dataset_id = source_id), remove
+      // that shadow so it doesn't double-list next to the new managed mirror.
+      // The 0028 fold dedups shadows whose on* mirror already existed at
+      // migration time; a mirror imported AFTER the fold needs this cleanup.
+      // Non-fatal: the import already succeeded; a stale shadow only mis-lists.
+      if (source_id) {
+        try {
+          const shadow = await db
+            .prepare("DELETE FROM datasets WHERE owner_user_id = ? AND dataset_id = ?")
+            .bind(SYSTEM_USER_ID, source_id)
+            .run();
+          if ((shadow.meta?.changes ?? 0) > 0) {
+            console.log(
+              `[import] removed folded catalog shadow ${source_id} superseded by managed mirror ${dataset_id}`,
+            );
+          }
+        } catch (shadowErr) {
+          console.error(`[import] failed to remove folded catalog shadow ${source_id}:`, shadowErr);
+        }
+      }
     } catch (error) {
       console.error("Failed to insert dataset record:", error);
       const dbMsg = error instanceof Error ? error.message : String(error);

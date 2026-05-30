@@ -45,7 +45,7 @@ describe("buildDatasetFilterClauses search clause", () => {
     expect(clauses).toContain("LOWER(COALESCE(d.authors, '')) LIKE ?");
     expect(clauses).toContain("LOWER(COALESCE(d.tasks, '')) LIKE ?");
     expect(clauses).toContain("d.concept_doi IS NOT NULL");
-    expect(clauses).toContain("d.created_at > datetime('now', ?)");
+    expect(clauses).toContain("COALESCE(d.publish_date, d.created_at) > datetime('now', ?)");
     expect(params).toEqual(["%eeg%", "%ada%", "%rest%", "-30 days"]);
   });
 

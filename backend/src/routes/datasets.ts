@@ -655,7 +655,10 @@ export function buildDatasetFilterClauses(
     clauses += " AND (d.concept_doi IS NOT NULL AND d.concept_doi != '')";
   }
   if (opts.recent) {
-    clauses += " AND d.created_at > datetime('now', ?)";
+    // #646: folded catalog rows carry publish_date (from nemar.org); managed
+    // rows leave it NULL so this falls through to created_at. Preserves the old
+    // UNION's per-branch recency (catalog = publish_date, managed = created_at).
+    clauses += " AND COALESCE(d.publish_date, d.created_at) > datetime('now', ?)";
     params.push(`-${opts.recent} days`);
   }
 
@@ -735,10 +738,15 @@ async function executeAndReturn(
 
     // Permanent defense-in-depth net (#646): the main query no longer touches
     // nemar_catalog (dropped in Phase 6), but if any code path ever hits a
-    // missing-catalog error, degrade to the basic datasets-only query instead
-    // of 500ing.
-    if (msg.includes("no such table: nemar_catalog")) {
-      console.warn("[datasets] nemar_catalog table not found, falling back to basic query");
+    // missing-catalog error -- or a missing datasets_fts (the search filter
+    // injects an FTS subquery) -- degrade to the basic datasets-only query
+    // instead of 500ing, matching the /datasets/search endpoint's graceful
+    // degradation rather than failing the whole list.
+    if (
+      msg.includes("no such table: nemar_catalog") ||
+      msg.includes("no such table: datasets_fts")
+    ) {
+      console.warn(`[datasets] missing catalog/FTS table (${msg}), falling back to basic query`);
       try {
         const fallback = await db
           .prepare(

@@ -514,3 +514,46 @@ describe("0029 FTS5 index + triggers", () => {
     expect(ddl).not.toMatch(/\bend\b/);
   });
 });
+
+// #646: the single-table list dropped the read-time NOT-IN dedup in favour of
+// fold-time dedup (migration 0028). A ds* catalog row folded BEFORE its on*
+// mirror was imported would then double-list, since 0028 only dedups shadows
+// whose mirror already existed. POST /admin/datasets/import cleans up the
+// stale sentinel shadow; these tests pin that contract.
+describe("post-import shadow cleanup keeps the single-table list deduped", () => {
+  function seeded(): Database {
+    const db = blankDb();
+    db.exec(M0027); // consolidation columns + the sentinel user (id = -1)
+    db.exec("INSERT INTO users (id, username, email) VALUES (10, 'alice', 'alice@x.org')");
+    // ds002718 folded as a sentinel shadow; its on* mirror imported afterwards.
+    db.exec(
+      "INSERT INTO datasets (dataset_id, name, owner_user_id, status, visibility, source) VALUES ('ds002718','Folded shadow',-1,'active','public','openneuro')",
+    );
+    db.exec(
+      "INSERT INTO datasets (dataset_id, name, owner_user_id, status, visibility, source, source_id) VALUES ('on002718','Managed mirror',10,'active','public','openneuro','ds002718')",
+    );
+    return db;
+  }
+
+  const listIds = (db: Database) =>
+    (db.query(GUARDED_LIST).all() as Array<{ id: string }>).map((r) => r.id).sort();
+
+  test("without cleanup the folded shadow double-lists next to the managed mirror", () => {
+    expect(listIds(seeded())).toEqual(["ds002718", "on002718"]);
+  });
+
+  test("the import-handler cleanup DELETE removes the shadow (mirror lists once)", () => {
+    const db = seeded();
+    // Mirrors the DELETE the import handler runs after inserting the on* mirror.
+    db.query("DELETE FROM datasets WHERE owner_user_id = ? AND dataset_id = ?").run(
+      SYSTEM_USER_ID,
+      "ds002718",
+    );
+    expect(listIds(db)).toEqual(["on002718"]);
+  });
+
+  test("admin import handler wires the shadow cleanup (source pin)", () => {
+    const admin = readFileSync(join(import.meta.dir, "..", "backend/src/routes/admin.ts"), "utf8");
+    expect(admin).toMatch(/DELETE FROM datasets WHERE owner_user_id = \? AND dataset_id = \?/);
+  });
+});
