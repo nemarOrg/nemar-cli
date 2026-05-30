@@ -10,6 +10,7 @@ import { z } from "zod";
 import { adminMiddleware, authMiddleware, ownerMiddleware } from "../middleware/auth";
 
 import { SYSTEM_USER_ID } from "../lib/constants";
+import { isReadFromDatasetsEnabled } from "../lib/flags";
 import {
   type RecipientGroup,
   type RecipientGroupOrUser,
@@ -5346,21 +5347,36 @@ adminRoutes.post("/catalog/sync", async (c) => {
       );
     }
 
-    const result = await importCatalogRecords(c.env.DB, validRecords, c.env.AI, c.env.VECTORIZE);
+    const result = await importCatalogRecords(
+      c.env.DB,
+      validRecords,
+      c.env.AI,
+      c.env.VECTORIZE,
+      isReadFromDatasetsEnabled(c.env),
+    );
     return c.json({
       records_synced: result.recordsSynced,
       records_indexed: result.recordsIndexed,
       errors: result.errors,
+      // #646 Phase 5: lets the CI guard distinguish an intentional cache skip
+      // (env reads from `datasets`) from a genuine zero-records sync.
+      cache_write_skipped: result.cacheWriteSkipped ?? false,
       duration_ms: result.durationMs,
     });
   }
 
   // No records provided; try fetching directly (will fail in Workers due to GET+body)
-  const result = await syncCatalog(c.env.DB, c.env.AI, c.env.VECTORIZE);
+  const result = await syncCatalog(
+    c.env.DB,
+    c.env.AI,
+    c.env.VECTORIZE,
+    isReadFromDatasetsEnabled(c.env),
+  );
   return c.json({
     records_synced: result.recordsSynced,
     records_indexed: result.recordsIndexed,
     errors: result.errors,
+    cache_write_skipped: result.cacheWriteSkipped ?? false,
     duration_ms: result.durationMs,
   });
 });
@@ -5386,11 +5402,15 @@ adminRoutes.post("/catalog/sync", async (c) => {
 adminRoutes.post("/catalog/sync-local", async (c) => {
   const { syncCatalogFromLocal } = await import("../services/catalog-from-local");
   const t0 = Date.now();
-  const result = await syncCatalogFromLocal(c.env.DB);
+  // #646 Phase 5: a bulk rebuild projects `datasets` back into nemar_catalog.
+  // When this env reads from `datasets`, that cache is never consulted, so the
+  // rebuild is skipped entirely (see syncCatalogFromLocal).
+  const result = await syncCatalogFromLocal(c.env.DB, isReadFromDatasetsEnabled(c.env));
   return c.json({
     scanned: result.scanned,
     upserted: result.upserted,
     errors: result.errors,
+    cache_write_skipped: result.skipped ?? false,
     duration_ms: Date.now() - t0,
   });
 });

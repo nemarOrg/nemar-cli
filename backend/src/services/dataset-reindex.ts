@@ -19,6 +19,7 @@
  * webhooks.ts:syncToNemarAfterVersionDoi and admin.ts:/datasets/:id/sync.
  */
 
+import { isReadFromDatasetsEnabled } from "../lib/flags.js";
 import type { Bindings } from "../types/bindings.js";
 import { parseNemarMetadata } from "./datacite.js";
 import {
@@ -408,24 +409,31 @@ export async function runDatasetSync(
       bids_version: bidsVersion,
     });
 
-    // nemar_catalog read-cache mirror (parallel safety net until Phase 3).
-    // Non-fatal: a stale cache row doesn't corrupt the source of truth. authors/
-    // license aren't refreshed here (LLM-owned). `name` is required (NOT NULL).
-    try {
-      await syncNemarCatalogFromEnrichment(db, datasetId, {
-        name: dataset.name ?? datasetId,
-        description: dataset.description ?? null,
-        modalities: cols.modalities,
-        participants: cols.subject_count,
-        age_min: cols.age_min,
-        age_max: cols.age_max,
-        tasks: cols.tasks,
-        file_size: cols.file_size,
-        file_size_formatted: formatFileSize(cols.file_size),
-        total_files: cols.total_files,
-      });
-    } catch (err) {
-      console.error(`[reindex] nemar_catalog sync failed for ${datasetId}: ${errorMessage(err)}`);
+    // nemar_catalog read-cache mirror -- ONLY while this env still reads the
+    // cache (#646 Phase 5). Skipped where READ_FROM_DATASETS is on (dev reads
+    // `datasets`); prod keeps it fresh until cutover. Phase 6 deletes it.
+    // Non-fatal: a stale cache row doesn't corrupt the source of truth.
+    if (!isReadFromDatasetsEnabled(env)) {
+      try {
+        await syncNemarCatalogFromEnrichment(db, datasetId, {
+          name: dataset.name ?? datasetId,
+          description: dataset.description ?? null,
+          modalities: cols.modalities,
+          participants: cols.subject_count,
+          age_min: cols.age_min,
+          age_max: cols.age_max,
+          tasks: cols.tasks,
+          file_size: cols.file_size,
+          file_size_formatted: formatFileSize(cols.file_size),
+          total_files: cols.total_files,
+        });
+      } catch (err) {
+        console.error(`[reindex] nemar_catalog sync failed for ${datasetId}: ${errorMessage(err)}`);
+      }
+    } else {
+      console.log(
+        `[reindex] nemar_catalog cache write skipped for ${datasetId} (READ_FROM_DATASETS on)`,
+      );
     }
 
     // Best-effort re-embed (internally guarded, never throws).

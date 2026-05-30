@@ -57,6 +57,11 @@ export interface CatalogSyncResult {
   recordsIndexed: number;
   errors: string[];
   durationMs: number;
+  // #646 Phase 5: true when the nemar_catalog cache write was intentionally
+  // skipped because this env reads from `datasets` (READ_FROM_DATASETS on).
+  // Lets callers (the CI guard, the admin response) tell an intentional skip
+  // apart from a genuine zero-records sync (recordsSynced === 0 in both cases).
+  cacheWriteSkipped?: boolean;
 }
 
 /**
@@ -131,14 +136,15 @@ function classifySource(record: NemarCatalogRecord): { source: string; sourceId:
 }
 
 /**
- * #646 Phase 4: fold catalog records into the `datasets` source of truth,
- * alongside the nemar_catalog write (which stays as the flag-off safety net
- * until Phase 5/6). New/changed rows get embedding_dirty=1 so the drain cron
+ * #646 Phase 4: fold catalog records into the `datasets` source of truth.
+ * Since Phase 5 the parallel nemar_catalog write is flag-gated (skipped when
+ * READ_FROM_DATASETS is on); this fold is then the only write. Phase 6 removes
+ * the cache entirely. New/changed rows get embedding_dirty=1 so the drain cron
  * re-embeds them.
  *
  * Dedup mirrors the 0028 fold: a record that is already an active managed
- * dataset, or a ds* shadow of a managed on* mirror, is skipped (the Phase-3
- * single-table list has no dedup, so a folded shadow would double-list).
+ * dataset, or a ds* shadow of a managed on* mirror, is skipped (without dedup
+ * a folded shadow would double-list alongside the managed row in the catalog).
  *
  * The `ON CONFLICT(dataset_id) DO UPDATE ... WHERE owner_user_id = SENTINEL`
  * guard means a catalog record colliding with a MANAGED dataset is a no-op:
@@ -375,6 +381,9 @@ export async function syncCatalog(
   db: D1Database,
   ai?: Ai,
   vectorize?: VectorizeIndex,
+  // #646 Phase 5: when true (env reads from `datasets`), skip the nemar_catalog
+  // cache write -- the datasets fold below is the source of truth.
+  readFromDatasets = false,
 ): Promise<CatalogSyncResult> {
   const startTime = Date.now();
   const errors: string[] = [];
@@ -394,11 +403,21 @@ export async function syncCatalog(
     console.log(`[catalog-sync] Fetched ${records.length} records`);
 
     // Upsert into D1
-    recordsSynced = await syncToD1(db, records);
-    console.log(`[catalog-sync] Synced ${recordsSynced} records to D1`);
+    // nemar_catalog cache write -- skipped where this env reads from `datasets`
+    // (#646 Phase 5). The datasets fold below is the source of truth.
+    if (!readFromDatasets) {
+      recordsSynced = await syncToD1(db, records);
+      console.log(`[catalog-sync] Synced ${recordsSynced} records to D1`);
+    } else {
+      // Log the skip so recordsSynced === 0 isn't mistaken for a failed sync.
+      console.log(
+        "[catalog-sync] nemar_catalog cache write skipped (READ_FROM_DATASETS on); datasets fold is the source of truth",
+      );
+    }
 
-    // #646 Phase 4 dual-write: also fold into the datasets source of truth
-    // (non-fatal; nemar_catalog above is the flag-off safety net).
+    // #646 Phase 4 dual-write: fold into the datasets source of truth.
+    // Non-fatal. When the flag is on this is the ONLY write; when off, it runs
+    // alongside the nemar_catalog read cache above.
     try {
       const folded = await upsertCatalogRecordsToDatasets(db, records);
       console.log(`[catalog-sync] Folded ${folded} records into datasets`);
@@ -461,6 +480,7 @@ export async function syncCatalog(
     recordsIndexed,
     errors,
     durationMs: Date.now() - startTime,
+    cacheWriteSkipped: readFromDatasets,
   };
 }
 
@@ -473,6 +493,8 @@ export async function importCatalogRecords(
   records: NemarCatalogRecord[],
   ai?: Ai,
   vectorize?: VectorizeIndex,
+  // #646 Phase 5: when true, skip the nemar_catalog cache write (see syncCatalog).
+  readFromDatasets = false,
 ): Promise<CatalogSyncResult> {
   const startTime = Date.now();
   const errors: string[] = [];
@@ -487,11 +509,21 @@ export async function importCatalogRecords(
   try {
     console.log(`[catalog-sync] Importing ${records.length} pre-fetched records`);
 
-    recordsSynced = await syncToD1(db, records);
-    console.log(`[catalog-sync] Synced ${recordsSynced} records to D1`);
+    // nemar_catalog cache write -- skipped where this env reads from `datasets`
+    // (#646 Phase 5). The datasets fold below is the source of truth.
+    if (!readFromDatasets) {
+      recordsSynced = await syncToD1(db, records);
+      console.log(`[catalog-sync] Synced ${recordsSynced} records to D1`);
+    } else {
+      // Log the skip so recordsSynced === 0 isn't mistaken for a failed sync.
+      console.log(
+        "[catalog-sync] nemar_catalog cache write skipped (READ_FROM_DATASETS on); datasets fold is the source of truth",
+      );
+    }
 
-    // #646 Phase 4 dual-write: also fold into the datasets source of truth
-    // (non-fatal; nemar_catalog above is the flag-off safety net).
+    // #646 Phase 4 dual-write: fold into the datasets source of truth.
+    // Non-fatal. When the flag is on this is the ONLY write; when off, it runs
+    // alongside the nemar_catalog read cache above.
     try {
       const folded = await upsertCatalogRecordsToDatasets(db, records);
       console.log(`[catalog-sync] Folded ${folded} records into datasets`);
@@ -548,5 +580,6 @@ export async function importCatalogRecords(
     recordsIndexed,
     errors,
     durationMs: Date.now() - startTime,
+    cacheWriteSkipped: readFromDatasets,
   };
 }

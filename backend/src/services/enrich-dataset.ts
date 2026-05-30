@@ -16,6 +16,7 @@
  */
 
 import type { NemarMetadataV2 } from "../../../shared/datacite-constants.js";
+import { isReadFromDatasetsEnabled } from "../lib/flags.js";
 import type { Bindings } from "../types/bindings.js";
 import {
   bidsToDataCite,
@@ -882,28 +883,35 @@ export async function enrichDataset(
         bids_version: bidsVersion,
       });
 
-      // nemar_catalog read-cache mirror (parallel safety net until Phase 3).
-      // Non-fatal: a stale cache row doesn't corrupt the source of truth, so a
-      // failure here is logged but not propagated. `name` is required (NOT NULL
-      // in nemar_catalog) so it falls back to the dataset id.
-      try {
-        await syncNemarCatalogFromEnrichment(env.DB, datasetId, {
-          name: enrichedTitle || dataset.name || datasetId,
-          description: enrichedDescription,
-          modalities: cols.modalities,
-          participants: cols.subject_count,
-          age_min: cols.age_min,
-          age_max: cols.age_max,
-          tasks: cols.tasks,
-          authors: enrichedAuthors,
-          license,
-          file_size: cols.file_size,
-          file_size_formatted: formatFileSize(cols.file_size),
-          total_files: cols.total_files,
-        });
-      } catch (err) {
-        console.error(
-          `[llm-enrich] nemar_catalog sync failed for ${datasetId}: ${errorMessage(err)}`,
+      // nemar_catalog read-cache mirror -- ONLY while this env still reads from
+      // the cache (#646 Phase 5). Where READ_FROM_DATASETS is on (dev), reads
+      // come from `datasets`, so the cache write is skipped; prod keeps it fresh
+      // until its cutover. Phase 6 deletes this block + the cache outright.
+      // Non-fatal: a stale cache row doesn't corrupt the source of truth.
+      if (!isReadFromDatasetsEnabled(env)) {
+        try {
+          await syncNemarCatalogFromEnrichment(env.DB, datasetId, {
+            name: enrichedTitle || dataset.name || datasetId,
+            description: enrichedDescription,
+            modalities: cols.modalities,
+            participants: cols.subject_count,
+            age_min: cols.age_min,
+            age_max: cols.age_max,
+            tasks: cols.tasks,
+            authors: enrichedAuthors,
+            license,
+            file_size: cols.file_size,
+            file_size_formatted: formatFileSize(cols.file_size),
+            total_files: cols.total_files,
+          });
+        } catch (err) {
+          console.error(
+            `[llm-enrich] nemar_catalog sync failed for ${datasetId}: ${errorMessage(err)}`,
+          );
+        }
+      } else {
+        console.log(
+          `[llm-enrich] nemar_catalog cache write skipped for ${datasetId} (READ_FROM_DATASETS on)`,
         );
       }
 

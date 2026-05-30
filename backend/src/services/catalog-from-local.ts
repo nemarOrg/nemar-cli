@@ -146,6 +146,10 @@ export interface SyncCatalogFromLocalResult {
   scanned: number;
   upserted: number;
   errors: Array<{ dataset_id: string; error: string }>;
+  // #646 Phase 5: true when the rebuild was skipped because this env reads from
+  // `datasets` (READ_FROM_DATASETS on) -- nemar_catalog is never consulted, so
+  // re-projecting `datasets` back into it would be a write to an unread cache.
+  skipped?: boolean;
 }
 
 /**
@@ -163,8 +167,23 @@ export interface SyncCatalogFromLocalResult {
  * is the right behavior for a "cache rebuild from source" sweep; for
  * the hot path (enrichment + reindex), syncNemarCatalogFromEnrichment
  * uses COALESCE-preserve UPSERT instead.
+ *
+ * #646 Phase 5: when `readFromDatasets` is true (this env reads from the
+ * `datasets` source of truth) the whole rebuild is skipped -- nemar_catalog is
+ * not consulted, so projecting `datasets` back into it would be wasted work.
+ * Phase 6 removes the cache and this path entirely.
  */
-export async function syncCatalogFromLocal(db: D1Database): Promise<SyncCatalogFromLocalResult> {
+export async function syncCatalogFromLocal(
+  db: D1Database,
+  readFromDatasets = false,
+): Promise<SyncCatalogFromLocalResult> {
+  if (readFromDatasets) {
+    console.log(
+      "[catalog-from-local] rebuild skipped (READ_FROM_DATASETS on); nemar_catalog is not consulted",
+    );
+    return { scanned: 0, upserted: 0, errors: [], skipped: true };
+  }
+
   const result: SyncCatalogFromLocalResult = { scanned: 0, upserted: 0, errors: [] };
 
   const rows = await db
