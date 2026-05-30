@@ -108,19 +108,20 @@ export function buildDatasetVectorMetadata(row: DatasetEmbedRow): Record<string,
  * metadata. The metadata removal + id-only hydration lands atomically in
  * Phase 3 (it can't be cleared here while semanticSearch still reads metadata).
  *
- * Fire-once + fully guarded: returns without throwing when AI/Vectorize are
- * unconfigured, the row is missing, or any step fails -- so it can be awaited
- * inline at the enrich/reindex hooks without ever failing the request.
+ * Fire-once + fully guarded: returns false without throwing when AI/Vectorize
+ * are unconfigured, the row is missing, or any step fails -- so it can be
+ * awaited inline at the enrich/reindex hooks without ever failing the request.
+ * Returns true only when the vector was upserted and the dirty flag cleared.
  */
 export async function reembedDatasetVector(
   db: D1Database,
   ai: Ai | undefined,
   vectorize: VectorizeIndex | undefined,
   datasetId: string,
-): Promise<void> {
+): Promise<boolean> {
   if (!ai || !vectorize) {
     console.log(`[reembed] AI/Vectorize not configured, skipping ${datasetId}`);
-    return;
+    return false;
   }
   try {
     const row = await db
@@ -131,25 +132,81 @@ export async function reembedDatasetVector(
       .first<DatasetEmbedRow>();
     if (!row) {
       console.warn(`[reembed] No datasets row for ${datasetId}, skipping`);
-      return;
+      return false;
     }
     const text = buildDatasetEmbedText(row);
     if (!text.trim()) {
       console.warn(`[reembed] Empty embed text for ${datasetId} (all fields blank), skipping`);
-      return;
+      return false;
     }
 
     const embedding = await ai.run(EMBEDDING_MODEL, { text: [text] });
     const values = "data" in embedding ? embedding.data?.[0] : undefined;
     if (!values) {
       console.error(`[reembed] Empty embedding for ${datasetId}`);
-      return;
+      return false;
     }
     await vectorize.upsert([{ id: datasetId, values, metadata: buildDatasetVectorMetadata(row) }]);
+    // #646 Phase 4: the vector is now fresh, so clear the dirty flag. A failed
+    // embed above leaves embedding_dirty=1 for the next drain. embedding_dirty
+    // is in no trigger OF list, so this UPDATE doesn't re-fire the triggers.
+    await db
+      .prepare("UPDATE datasets SET embedding_dirty = 0 WHERE dataset_id = ?")
+      .bind(datasetId)
+      .run();
+    return true;
   } catch (err) {
     console.error(
       `[reembed] Failed for ${datasetId}: ${err instanceof Error ? err.message : String(err)}`,
     );
+    return false;
+  }
+}
+
+/**
+ * #646 Phase 4 drain: re-embed the datasets whose vectors are stale
+ * (embedding_dirty=1), oldest-updated first, up to `limit`. Each successful
+ * reembedDatasetVector clears the flag; failures stay dirty for the next run.
+ * Used by the scheduled() cron. Fully guarded (never throws).
+ */
+export async function drainEmbeddingDirty(
+  db: D1Database,
+  ai: Ai | undefined,
+  vectorize: VectorizeIndex | undefined,
+  limit = 50,
+): Promise<{ scanned: number; embedded: number }> {
+  if (!ai || !vectorize) {
+    return { scanned: 0, embedded: 0 };
+  }
+  try {
+    // Only embed searchable rows. A private/archived/sandbox dataset can be
+    // marked dirty by the metadata trigger; embedding it would put it in the
+    // (public) Vectorize index. They stay dirty until they become public.
+    const rows = await db
+      .prepare(
+        `SELECT dataset_id FROM datasets
+         WHERE embedding_dirty = 1
+           AND status = 'active' AND visibility = 'public'
+           AND (is_sandbox = 0 OR is_sandbox IS NULL)
+         ORDER BY updated_at LIMIT ?`,
+      )
+      .bind(limit)
+      .all<{ dataset_id: string }>();
+    const ids = (rows.results || []).map((r) => r.dataset_id);
+    let embedded = 0;
+    const failed: string[] = [];
+    for (const id of ids) {
+      if (await reembedDatasetVector(db, ai, vectorize, id)) embedded++;
+      else failed.push(id);
+    }
+    console.log(`[embed-cron] drained ${embedded}/${ids.length} dirty vectors`);
+    if (failed.length > 0) {
+      console.warn(`[embed-cron] ${failed.length} ids failed to embed: ${failed.join(", ")}`);
+    }
+    return { scanned: ids.length, embedded };
+  } catch (err) {
+    console.error(`[embed-cron] drain failed: ${err instanceof Error ? err.message : String(err)}`);
+    return { scanned: 0, embedded: 0 };
   }
 }
 
@@ -245,7 +302,9 @@ const toResult = (row: HydrateRow, score: number, snippet?: string): SearchResul
 
 /** Hydrate ordered dataset ids from the `datasets` source of truth, preserving
  *  the input ranking and dropping ids with no live row. The actual bug fix:
- *  display fields come from the row, not stale Vectorize metadata. */
+ *  display fields come from the row, not stale Vectorize metadata. Filters to
+ *  public/active/non-sandbox so a stale or mistakenly-embedded vector for a
+ *  private/archived row can never surface in the (anonymous) search. */
 export async function hydrateDatasetsByIds(db: D1Database, ids: string[]): Promise<SearchResult[]> {
   if (ids.length === 0) return [];
   const results = await db
@@ -253,7 +312,9 @@ export async function hydrateDatasetsByIds(db: D1Database, ids: string[]): Promi
       `SELECT d.dataset_id AS id, d.name, d.modalities, d.subject_count AS participants,
               d.concept_doi AS doi, d.tasks, d.authors
        FROM datasets d
-       WHERE d.dataset_id IN (${buildInPlaceholders(ids.length)})`,
+       WHERE d.dataset_id IN (${buildInPlaceholders(ids.length)})
+         AND d.status = 'active' AND d.visibility = 'public'
+         AND (d.is_sandbox = 0 OR d.is_sandbox IS NULL)`,
     )
     .bind(...ids)
     .all<HydrateRow>();

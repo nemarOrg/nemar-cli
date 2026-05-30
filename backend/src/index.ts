@@ -31,6 +31,7 @@ import { datasetRoutes } from "./routes/datasets";
 import { sandboxRoutes } from "./routes/sandbox";
 import { userRoutes } from "./routes/users";
 import webhooks from "./routes/webhooks";
+import { drainEmbeddingDirty } from "./services/dataset-search";
 import { deleteDatasetCascade } from "./services/deletion";
 import { getActiveNotices } from "./services/notices";
 import type { Bindings, Variables } from "./types/bindings";
@@ -315,5 +316,8 @@ export default {
   async scheduled(event: ScheduledEvent, env: Bindings, ctx: ExecutionContext) {
     // Catalog sync runs via GitHub Action, not Worker cron
     ctx.waitUntil(scheduledCleanup(env));
+    // #646 Phase 4: drain stale vectors (embedding_dirty=1) — the backstop for
+    // changes that don't go through the inline enrich/reindex re-embed.
+    ctx.waitUntil(drainEmbeddingDirty(env.DB, env.AI, env.VECTORIZE));
   },
 };

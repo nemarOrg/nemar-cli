@@ -201,12 +201,12 @@ describe("buildDatasetEmbedText", () => {
 });
 
 describe("reembedDatasetVector guard", () => {
-  test("returns without throwing (and without touching the DB) when AI/Vectorize are unset", async () => {
+  test("returns false without throwing (and without touching the DB) when AI/Vectorize are unset", async () => {
     // The guard returns before any DB/AI/Vectorize use, so passing undefined
     // bindings + a never-touched db is a real early-return, not a mock.
     await expect(
       reembedDatasetVector({} as unknown as D1Database, undefined, undefined, "nm000200"),
-    ).resolves.toBeUndefined();
+    ).resolves.toBe(false);
   });
 });
 

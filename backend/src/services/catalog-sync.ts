@@ -10,6 +10,8 @@
  * Body (as JSON in GET): {"table_name":"dataexplorer_dataset","start":0,"limit":N}
  */
 
+import { SYSTEM_USER_ID } from "../lib/constants.js";
+
 const NEMAR_API_BASE = "https://nemar.org/api/dataexplorer/datapipeline";
 const FETCH_TIMEOUT_MS = 30_000;
 const BATCH_SIZE = 10; // D1 batch limit for bound parameters
@@ -126,6 +128,125 @@ function classifySource(record: NemarCatalogRecord): { source: string; sourceId:
     return { source: "nemar.org", sourceId: null };
   }
   return { source: "nemar.org", sourceId: null };
+}
+
+/**
+ * #646 Phase 4: fold catalog records into the `datasets` source of truth,
+ * alongside the nemar_catalog write (which stays as the flag-off safety net
+ * until Phase 5/6). New/changed rows get embedding_dirty=1 so the drain cron
+ * re-embeds them.
+ *
+ * Dedup mirrors the 0028 fold: a record that is already an active managed
+ * dataset, or a ds* shadow of a managed on* mirror, is skipped (the Phase-3
+ * single-table list has no dedup, so a folded shadow would double-list).
+ *
+ * The `ON CONFLICT(dataset_id) DO UPDATE ... WHERE owner_user_id = SENTINEL`
+ * guard means a catalog record colliding with a MANAGED dataset is a no-op:
+ * managed facts and ownership are never clobbered by the legacy ingest.
+ */
+export async function upsertCatalogRecordsToDatasets(
+  db: D1Database,
+  records: NemarCatalogRecord[],
+): Promise<number> {
+  if (records.length === 0) return 0;
+
+  const [managedRows, shadowRows] = await Promise.all([
+    db
+      .prepare("SELECT dataset_id FROM datasets WHERE owner_user_id != ? AND status = 'active'")
+      .bind(SYSTEM_USER_ID)
+      .all<{ dataset_id: string }>(),
+    db
+      .prepare(
+        "SELECT source_id FROM datasets WHERE owner_user_id != ? AND status = 'active' AND source = 'openneuro' AND source_id IS NOT NULL",
+      )
+      .bind(SYSTEM_USER_ID)
+      .all<{ source_id: string }>(),
+  ]);
+  const managedIds = new Set((managedRows.results || []).map((r) => r.dataset_id));
+  const shadowIds = new Set((shadowRows.results || []).map((r) => r.source_id));
+  const survivors = records.filter((r) => !managedIds.has(r.id) && !shadowIds.has(r.id));
+  if (survivors.length === 0) return 0;
+
+  let upserted = 0;
+  for (let i = 0; i < survivors.length; i += BATCH_SIZE) {
+    const batch = survivors.slice(i, i + BATCH_SIZE);
+    const statements = batch.map((record) => {
+      const { source, sourceId } = classifySource(record);
+      return db
+        .prepare(
+          `INSERT INTO datasets (
+             dataset_id, name, description, owner_user_id, status, visibility, is_sandbox,
+             source, source_id, subject_count, modalities, age_min, age_max, file_size,
+             total_files, tasks, authors, license, readme, bids_version, sessions_count,
+             publish_date, uploader, file_size_formatted, concept_doi, created_at, updated_at, embedding_dirty)
+           VALUES (?, ?, ?, ?, 'active', 'public', 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), 1)
+           ON CONFLICT(dataset_id) DO UPDATE SET
+             name = excluded.name,
+             description = excluded.description,
+             source = excluded.source,
+             source_id = excluded.source_id,
+             subject_count = excluded.subject_count,
+             modalities = excluded.modalities,
+             age_min = excluded.age_min,
+             age_max = excluded.age_max,
+             file_size = excluded.file_size,
+             total_files = excluded.total_files,
+             tasks = excluded.tasks,
+             authors = excluded.authors,
+             license = excluded.license,
+             readme = excluded.readme,
+             bids_version = excluded.bids_version,
+             sessions_count = excluded.sessions_count,
+             publish_date = excluded.publish_date,
+             uploader = excluded.uploader,
+             file_size_formatted = excluded.file_size_formatted,
+             concept_doi = excluded.concept_doi,
+             updated_at = datetime('now'),
+             embedding_dirty = 1
+           WHERE datasets.owner_user_id = ${SYSTEM_USER_ID}`,
+        )
+        .bind(
+          record.id,
+          record.name,
+          record.readme?.slice(0, 500) || null, // description = readme[:500] (mirrors nemar_catalog)
+          SYSTEM_USER_ID,
+          source,
+          sourceId,
+          record.participants || 0,
+          record.modalities || null,
+          record.age_min || 0,
+          record.age_max || 0,
+          record.file_size || 0,
+          record.totalFiles || 0,
+          record.tasks || null,
+          record.Authors || null,
+          record.License || null,
+          record.readme?.slice(0, 8192) || null, // datasets.readme capped at 8 KB
+          record.BIDSVersion || null,
+          record.sessionsNum || 0,
+          record.publishDate || null,
+          record.uploader || null,
+          record.byte_size_format || null,
+          record.DatasetDOI || null,
+          record.created || null,
+        );
+    });
+    const batchResults = await db.batch(statements);
+    // Count actual writes: an INSERT or a sentinel UPDATE reports changes=1; a
+    // collision with a managed row (the WHERE owner=-1 guard) reports changes=0.
+    for (const r of batchResults) {
+      upserted += (r as { meta?: { changes?: number } }).meta?.changes ?? 0;
+    }
+  }
+  if (upserted < survivors.length) {
+    // Some survivors collided with a NON-active managed row and were no-oped by
+    // the guard. nemar_catalog still has them; this is the expected dual-store
+    // gap for those ids, surfaced so divergence isn't silent.
+    console.warn(
+      `[catalog-sync] ${survivors.length - upserted}/${survivors.length} catalog records did not fold into datasets (managed-row collisions)`,
+    );
+  }
+  return upserted;
 }
 
 /**
@@ -276,6 +397,17 @@ export async function syncCatalog(
     recordsSynced = await syncToD1(db, records);
     console.log(`[catalog-sync] Synced ${recordsSynced} records to D1`);
 
+    // #646 Phase 4 dual-write: also fold into the datasets source of truth
+    // (non-fatal; nemar_catalog above is the flag-off safety net).
+    try {
+      const folded = await upsertCatalogRecordsToDatasets(db, records);
+      console.log(`[catalog-sync] Folded ${folded} records into datasets`);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error("[catalog-sync] datasets fold failed:", msg);
+      errors.push(`datasets fold: ${msg}`);
+    }
+
     // Index into Vectorize (if bindings available)
     if (ai && vectorize) {
       try {
@@ -357,6 +489,17 @@ export async function importCatalogRecords(
 
     recordsSynced = await syncToD1(db, records);
     console.log(`[catalog-sync] Synced ${recordsSynced} records to D1`);
+
+    // #646 Phase 4 dual-write: also fold into the datasets source of truth
+    // (non-fatal; nemar_catalog above is the flag-off safety net).
+    try {
+      const folded = await upsertCatalogRecordsToDatasets(db, records);
+      console.log(`[catalog-sync] Folded ${folded} records into datasets`);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error("[catalog-sync] datasets fold failed:", msg);
+      errors.push(`datasets fold: ${msg}`);
+    }
 
     if (ai && vectorize) {
       try {

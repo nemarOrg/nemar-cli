@@ -37,6 +37,7 @@ import {
   runDatasetSync,
   runEnrichmentForDataset,
 } from "../services/dataset-reindex";
+import { reembedDatasetVector } from "../services/dataset-search";
 import { deleteDatasetCascade } from "../services/deletion";
 import { DOCTOR_CHECKS, getCheck, listChecks } from "../services/doctor/registry";
 import type { CheckContext, Finding } from "../services/doctor/types";
@@ -5437,6 +5438,66 @@ adminRoutes.get("/catalog/status", async (c) => {
     }
     return c.json({ error: "Failed to query catalog status", details: msg }, 500);
   }
+});
+
+/**
+ * POST /admin/vectorize/reindex-all - Re-embed datasets' vectors from the
+ * `datasets` source of truth (#646 Phase 4). Fixes the stale-vector backlog.
+ *
+ * Keyset-paginated to stay within Worker limits: pass `after` = the previous
+ * response's `last_id` and repeat until `has_more` is false.
+ * Body: { limit?: number (1..500, default 200), after?: string, dry_run?: boolean }
+ */
+adminRoutes.post("/vectorize/reindex-all", async (c) => {
+  if (!c.env.AI || !c.env.VECTORIZE) {
+    return c.json({ error: "AI or VECTORIZE binding not configured" }, 400);
+  }
+  let body: { limit?: number; after?: string; dry_run?: boolean } = {};
+  try {
+    body = await c.req.json();
+  } catch {
+    // empty body is fine; defaults apply
+  }
+  const limit = Math.min(Math.max(Number(body.limit) || 200, 1), 500);
+  const after = typeof body.after === "string" ? body.after : "";
+  const startedAt = Date.now();
+
+  const rows = await c.env.DB.prepare(
+    `SELECT dataset_id FROM datasets
+     WHERE status = 'active' AND visibility = 'public'
+       AND (is_sandbox = 0 OR is_sandbox IS NULL)
+       AND dataset_id > ?
+     ORDER BY dataset_id
+     LIMIT ?`,
+  )
+    .bind(after, limit)
+    .all<{ dataset_id: string }>();
+  const ids = (rows.results ?? []).map((r) => r.dataset_id);
+  const lastId = ids.at(-1) ?? after;
+  const hasMore = ids.length === limit;
+
+  if (body.dry_run === true) {
+    return c.json({
+      dry_run: true,
+      total: ids.length,
+      last_id: lastId,
+      has_more: hasMore,
+      elapsed_ms: Date.now() - startedAt,
+    });
+  }
+
+  let embedded = 0;
+  for (const id of ids) {
+    if (await reembedDatasetVector(c.env.DB, c.env.AI, c.env.VECTORIZE, id)) embedded++;
+  }
+  return c.json({
+    scanned: ids.length,
+    embedded,
+    failed: ids.length - embedded,
+    last_id: lastId,
+    has_more: hasMore,
+    elapsed_ms: Date.now() - startedAt,
+  });
 });
 
 // ============================================================================

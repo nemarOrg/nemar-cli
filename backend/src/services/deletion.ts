@@ -23,6 +23,8 @@ export interface DeletionSteps {
     s3PermsDeleted: number;
     error?: string;
   };
+  /** #646 Phase 4: Vectorize vector removal (skipped when VECTORIZE unbound). */
+  vectorize: { success: boolean; skipped?: boolean; error?: string };
 }
 
 export interface DeletionResult {
@@ -74,6 +76,7 @@ export async function deleteDatasetCascade(
     github: { success: false },
     s3: { deleted: 0, failed: [], skipped: false },
     d1: { success: false, versionsDeleted: 0, pubRequestsDeleted: 0, s3PermsDeleted: 0 },
+    vectorize: { success: false },
   };
 
   // Step 1: Delete GitHub repository
@@ -134,6 +137,21 @@ export async function deleteDatasetCascade(
   } catch (err) {
     steps.d1.error = err instanceof Error ? err.message : String(err);
     warnings.push(`D1 cleanup failed: ${steps.d1.error}`);
+  }
+
+  // Step 4: remove the Vectorize vector (#646 Phase 4) so a deleted dataset
+  // can't surface as an orphan that the id-only hydration then drops. Guarded +
+  // non-fatal: a Vectorize blip shouldn't block the rest of the cascade.
+  if (!env.VECTORIZE) {
+    steps.vectorize.skipped = true;
+  } else {
+    try {
+      await env.VECTORIZE.deleteByIds([datasetId]);
+      steps.vectorize.success = true;
+    } catch (err) {
+      steps.vectorize.error = err instanceof Error ? err.message : String(err);
+      warnings.push(`Vectorize deletion failed: ${steps.vectorize.error}`);
+    }
   }
 
   return {

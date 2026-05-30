@@ -21,6 +21,8 @@ interface DeleteResponse {
     github: { success: boolean; error?: string };
     s3: { deleted: number; failed: Array<{ key: string; error: string }>; skipped?: boolean };
     d1: { success: boolean; versionsDeleted: number; pubRequestsDeleted: number; error?: string };
+    // #646 Phase 4: Vectorize vector removal (skipped when VECTORIZE unbound).
+    vectorize?: { success: boolean; skipped?: boolean; error?: string };
   };
   warnings: string[];
 }
