@@ -10,6 +10,7 @@ import { z } from "zod";
 import { adminMiddleware, authMiddleware, ownerMiddleware } from "../middleware/auth";
 
 import { SYSTEM_USER_ID } from "../lib/constants";
+import { isReadFromDatasetsEnabled } from "../lib/flags";
 import {
   type RecipientGroup,
   type RecipientGroupOrUser,
@@ -5346,7 +5347,13 @@ adminRoutes.post("/catalog/sync", async (c) => {
       );
     }
 
-    const result = await importCatalogRecords(c.env.DB, validRecords, c.env.AI, c.env.VECTORIZE);
+    const result = await importCatalogRecords(
+      c.env.DB,
+      validRecords,
+      c.env.AI,
+      c.env.VECTORIZE,
+      isReadFromDatasetsEnabled(c.env),
+    );
     return c.json({
       records_synced: result.recordsSynced,
       records_indexed: result.recordsIndexed,
@@ -5356,7 +5363,12 @@ adminRoutes.post("/catalog/sync", async (c) => {
   }
 
   // No records provided; try fetching directly (will fail in Workers due to GET+body)
-  const result = await syncCatalog(c.env.DB, c.env.AI, c.env.VECTORIZE);
+  const result = await syncCatalog(
+    c.env.DB,
+    c.env.AI,
+    c.env.VECTORIZE,
+    isReadFromDatasetsEnabled(c.env),
+  );
   return c.json({
     records_synced: result.recordsSynced,
     records_indexed: result.recordsIndexed,

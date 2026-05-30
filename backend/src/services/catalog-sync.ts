@@ -375,6 +375,9 @@ export async function syncCatalog(
   db: D1Database,
   ai?: Ai,
   vectorize?: VectorizeIndex,
+  // #646 Phase 5: when true (env reads from `datasets`), skip the nemar_catalog
+  // cache write -- the datasets fold below is the source of truth.
+  readFromDatasets = false,
 ): Promise<CatalogSyncResult> {
   const startTime = Date.now();
   const errors: string[] = [];
@@ -394,8 +397,12 @@ export async function syncCatalog(
     console.log(`[catalog-sync] Fetched ${records.length} records`);
 
     // Upsert into D1
-    recordsSynced = await syncToD1(db, records);
-    console.log(`[catalog-sync] Synced ${recordsSynced} records to D1`);
+    // nemar_catalog cache write -- skipped where this env reads from `datasets`
+    // (#646 Phase 5). The datasets fold below is the source of truth.
+    if (!readFromDatasets) {
+      recordsSynced = await syncToD1(db, records);
+      console.log(`[catalog-sync] Synced ${recordsSynced} records to D1`);
+    }
 
     // #646 Phase 4 dual-write: also fold into the datasets source of truth
     // (non-fatal; nemar_catalog above is the flag-off safety net).
@@ -473,6 +480,8 @@ export async function importCatalogRecords(
   records: NemarCatalogRecord[],
   ai?: Ai,
   vectorize?: VectorizeIndex,
+  // #646 Phase 5: when true, skip the nemar_catalog cache write (see syncCatalog).
+  readFromDatasets = false,
 ): Promise<CatalogSyncResult> {
   const startTime = Date.now();
   const errors: string[] = [];
@@ -487,8 +496,12 @@ export async function importCatalogRecords(
   try {
     console.log(`[catalog-sync] Importing ${records.length} pre-fetched records`);
 
-    recordsSynced = await syncToD1(db, records);
-    console.log(`[catalog-sync] Synced ${recordsSynced} records to D1`);
+    // nemar_catalog cache write -- skipped where this env reads from `datasets`
+    // (#646 Phase 5). The datasets fold below is the source of truth.
+    if (!readFromDatasets) {
+      recordsSynced = await syncToD1(db, records);
+      console.log(`[catalog-sync] Synced ${recordsSynced} records to D1`);
+    }
 
     // #646 Phase 4 dual-write: also fold into the datasets source of truth
     // (non-fatal; nemar_catalog above is the flag-off safety net).
