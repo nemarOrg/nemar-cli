@@ -179,19 +179,29 @@ export async function drainEmbeddingDirty(
     return { scanned: 0, embedded: 0 };
   }
   try {
+    // Only embed searchable rows. A private/archived/sandbox dataset can be
+    // marked dirty by the metadata trigger; embedding it would put it in the
+    // (public) Vectorize index. They stay dirty until they become public.
     const rows = await db
       .prepare(
-        "SELECT dataset_id FROM datasets WHERE embedding_dirty = 1 ORDER BY updated_at LIMIT ?",
+        `SELECT dataset_id FROM datasets
+         WHERE embedding_dirty = 1
+           AND status = 'active' AND visibility = 'public'
+           AND (is_sandbox = 0 OR is_sandbox IS NULL)
+         ORDER BY updated_at LIMIT ?`,
       )
       .bind(limit)
       .all<{ dataset_id: string }>();
     const ids = (rows.results || []).map((r) => r.dataset_id);
     let embedded = 0;
+    const failed: string[] = [];
     for (const id of ids) {
       if (await reembedDatasetVector(db, ai, vectorize, id)) embedded++;
+      else failed.push(id);
     }
-    if (ids.length > 0) {
-      console.log(`[embed-cron] drained ${embedded}/${ids.length} dirty vectors`);
+    console.log(`[embed-cron] drained ${embedded}/${ids.length} dirty vectors`);
+    if (failed.length > 0) {
+      console.warn(`[embed-cron] ${failed.length} ids failed to embed: ${failed.join(", ")}`);
     }
     return { scanned: ids.length, embedded };
   } catch (err) {
@@ -292,7 +302,9 @@ const toResult = (row: HydrateRow, score: number, snippet?: string): SearchResul
 
 /** Hydrate ordered dataset ids from the `datasets` source of truth, preserving
  *  the input ranking and dropping ids with no live row. The actual bug fix:
- *  display fields come from the row, not stale Vectorize metadata. */
+ *  display fields come from the row, not stale Vectorize metadata. Filters to
+ *  public/active/non-sandbox so a stale or mistakenly-embedded vector for a
+ *  private/archived row can never surface in the (anonymous) search. */
 export async function hydrateDatasetsByIds(db: D1Database, ids: string[]): Promise<SearchResult[]> {
   if (ids.length === 0) return [];
   const results = await db
@@ -300,7 +312,9 @@ export async function hydrateDatasetsByIds(db: D1Database, ids: string[]): Promi
       `SELECT d.dataset_id AS id, d.name, d.modalities, d.subject_count AS participants,
               d.concept_doi AS doi, d.tasks, d.authors
        FROM datasets d
-       WHERE d.dataset_id IN (${buildInPlaceholders(ids.length)})`,
+       WHERE d.dataset_id IN (${buildInPlaceholders(ids.length)})
+         AND d.status = 'active' AND d.visibility = 'public'
+         AND (d.is_sandbox = 0 OR d.is_sandbox IS NULL)`,
     )
     .bind(...ids)
     .all<HydrateRow>();

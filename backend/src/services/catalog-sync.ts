@@ -231,8 +231,20 @@ export async function upsertCatalogRecordsToDatasets(
           record.created || null,
         );
     });
-    await db.batch(statements);
-    upserted += batch.length;
+    const batchResults = await db.batch(statements);
+    // Count actual writes: an INSERT or a sentinel UPDATE reports changes=1; a
+    // collision with a managed row (the WHERE owner=-1 guard) reports changes=0.
+    for (const r of batchResults) {
+      upserted += (r as { meta?: { changes?: number } }).meta?.changes ?? 0;
+    }
+  }
+  if (upserted < survivors.length) {
+    // Some survivors collided with a NON-active managed row and were no-oped by
+    // the guard. nemar_catalog still has them; this is the expected dual-store
+    // gap for those ids, surfaced so divergence isn't silent.
+    console.warn(
+      `[catalog-sync] ${survivors.length - upserted}/${survivors.length} catalog records did not fold into datasets (managed-row collisions)`,
+    );
   }
   return upserted;
 }
