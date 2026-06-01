@@ -185,7 +185,14 @@ jobs:
             exit 1
           fi
           echo "Running ${#files[@]} test files"
-          bun test "${files[@]}"
+          # --retry=2 re-runs an individual failing test up to twice. This suite
+          # exercises ~1600 tests against the LIVE dev backend (real AWS STS,
+          # network, D1), so a handful flake transiently per run on infra hiccups
+          # (a different ~2 each time). Per-test retry rides over transient
+          # failures while a genuinely broken test still fails all 3 attempts --
+          # so real regressions are not masked. Surgical: only the failing test
+          # re-runs, not the whole suite.
+          bun test --retry=2 "${files[@]}"
 
   # Python script tests for scripts/emit_manifest.py + helpers ran here
   # under #557 (the central manifest workflow). Those scripts now live in
