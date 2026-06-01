@@ -165,3 +165,8 @@ WEB_SESSION_COOKIE_DOMAIN = ""
 # clean runs against this dev environment.
 # Redeploy to change.
 MANIFEST_VIA_CENTRAL_WORKFLOW = "true"
+# Automated publication pre-screen (#666). Enabled on SCCN dev as the soak
+# target: a publish request that passes BIDS readiness dispatches
+# run-prescreen on nemarDatasets/.github. Requires the PRESCREEN_CALLBACK_SECRET
+# Worker secret (set on dev). Prod stays unset (dark) until promoted.
+PRESCREEN_ENABLED = "true"
