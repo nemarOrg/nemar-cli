@@ -1750,6 +1750,51 @@ export async function triggerEnrichmentRun(
   }
 }
 
+/**
+ * Trigger the publication pre-screen workflow on `nemarDatasets/.github` via
+ * `repository_dispatch[run-prescreen]` (issue #666). The workflow mints a
+ * per-repo App token, checks out the dataset metadata, runs `claude -p` to
+ * judge README / dataset_description / declared-data completeness, opens a
+ * GitHub issue on the dataset repo when it blocks, and POSTs a verdict to
+ * `callbackUrl` (/webhooks/prescreen-result) carrying `callbackToken`.
+ *
+ * Mirrors `triggerEnrichmentRun`'s dispatch shape. `pat` must carry write
+ * access on the central repo's dispatch endpoint -- use `getDatasetsToken()`.
+ */
+export async function triggerPrescreenRun(
+  datasetId: string,
+  ref: string,
+  requestId: number,
+  callbackToken: string,
+  callbackUrl: string,
+  pat: string,
+): Promise<void> {
+  const response = await fetch(`${GITHUB_API()}/repos/${CENTRAL_WORKFLOW_REPO}/dispatches`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${pat}`,
+      Accept: "application/vnd.github.v3+json",
+      "User-Agent": "NEMAR-API",
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      event_type: "run-prescreen",
+      client_payload: {
+        dataset_id: datasetId,
+        ref,
+        request_id: requestId,
+        callback_token: callbackToken,
+        callback_url: callbackUrl,
+      },
+    }),
+  });
+
+  if (!response.ok) {
+    const error = await response.text();
+    throw new Error(`Failed to trigger prescreen run: HTTP ${response.status} - ${error}`);
+  }
+}
+
 // ============================================================================
 // Manifest callback HMAC tokens
 // ============================================================================
@@ -1850,6 +1895,64 @@ export async function verifyManifestCallbackToken(
   // as 500 (via Hono's default error handler) not 401, so operators can
   // distinguish "broken secret on worker" from "wrong token from caller".
   const expected = await signManifestCallbackToken(payload, secret);
+  const encoder = new TextEncoder();
+  return constantTimeEqual(encoder.encode(token), encoder.encode(expected));
+}
+
+// ============================================================================
+// Pre-screen callback HMAC tokens (issue #666)
+// ============================================================================
+//
+// Same one-shot HMAC handshake as the manifest callback above, signed over
+// {dataset_id, request_id, nonce}. The Worker stores the nonce on the
+// publication_requests row at dispatch time and puts the token in the
+// dispatch client_payload; the workflow echoes it back in X-Webhook-Token.
+// Single-use is enforced by the row's prescreen_status='pending' -> done
+// flip, not the HMAC itself.
+
+export interface PrescreenCallbackPayload {
+  datasetId: string;
+  requestId: number;
+  nonce: string;
+}
+
+/** Canonical payload encoding -- pinned so signer and verifier agree. */
+function encodePrescreenCallbackPayload(payload: PrescreenCallbackPayload): string {
+  return `${payload.datasetId}\n${payload.requestId}\n${payload.nonce}`;
+}
+
+/** Sign a pre-screen callback payload with HMAC-SHA256 (hex digest). */
+export async function signPrescreenCallbackToken(
+  payload: PrescreenCallbackPayload,
+  secret: string,
+): Promise<string> {
+  if (!secret) {
+    throw new Error("signPrescreenCallbackToken: secret is required");
+  }
+  const encoder = new TextEncoder();
+  const key = await crypto.subtle.importKey(
+    "raw",
+    encoder.encode(secret),
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign"],
+  );
+  const signature = await crypto.subtle.sign(
+    "HMAC",
+    key,
+    encoder.encode(encodePrescreenCallbackPayload(payload)),
+  );
+  return toHex(signature);
+}
+
+/** Verify a pre-screen callback token (constant-time). */
+export async function verifyPrescreenCallbackToken(
+  token: string,
+  payload: PrescreenCallbackPayload,
+  secret: string,
+): Promise<boolean> {
+  if (!token || !secret) return false;
+  const expected = await signPrescreenCallbackToken(payload, secret);
   const encoder = new TextEncoder();
   return constantTimeEqual(encoder.encode(token), encoder.encode(expected));
 }

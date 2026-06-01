@@ -29,6 +29,8 @@ import {
   getFileContent,
   getWorkflowRuns,
   setRepoVisibility,
+  signPrescreenCallbackToken,
+  triggerPrescreenRun,
 } from "../services/github";
 import { getDatasetsToken } from "../services/github-auth";
 import {
@@ -84,6 +86,8 @@ const BLOCK_MESSAGES: Record<string, string> = {
     "BIDS validation has not run yet. Please wait for CI to complete, then re-request publication.",
   bids_validation_in_progress:
     "BIDS validation is currently running. Please wait for it to complete, then re-request publication.",
+  prescreen_failed:
+    "The automated pre-screen found missing publication essentials (data, README, or dataset_description). See the issue opened on your dataset repository, address the gaps, then re-request publication.",
 };
 
 /**
@@ -1987,6 +1991,7 @@ datasetRoutes.post("/:id/publish/request", authMiddleware, async (c) => {
     console.warn(`[publish-request] Skipping CI checks for ${datasetId}: no GitHub repo`);
   }
 
+  let prId: number | null = requestId ?? null;
   if (requestId) {
     // Update existing blocked request
     if (blocked) {
@@ -2007,12 +2012,13 @@ datasetRoutes.post("/:id/publish/request", authMiddleware, async (c) => {
     }
   } else {
     // Create new publication request
-    await db
+    const inserted = await db
       .prepare(
-        "INSERT INTO publication_requests (dataset_id, requested_by, status, block_reason) VALUES (?, ?, ?, ?)",
+        "INSERT INTO publication_requests (dataset_id, requested_by, status, block_reason) VALUES (?, ?, ?, ?) RETURNING id",
       )
       .bind(datasetId, currentUser.id, blocked ? "blocked" : "requested", blockReason)
-      .run();
+      .first<{ id: number }>();
+    prId = inserted?.id ?? null;
   }
 
   if (blocked) {
@@ -2026,6 +2032,56 @@ datasetRoutes.post("/:id/publish/request", authMiddleware, async (c) => {
       },
       422,
     );
+  }
+
+  // Dispatch the automated pre-screen (issue #666). Async + feature-flagged:
+  // the request is already 'requested', so a dispatch failure must not 500
+  // the call -- we log it and leave the row as a normal pending request.
+  // The verdict arrives later at /webhooks/prescreen-result.
+  if (
+    prId !== null &&
+    repoName &&
+    pat &&
+    c.env.PRESCREEN_ENABLED === "true" &&
+    c.env.PRESCREEN_CALLBACK_SECRET
+  ) {
+    try {
+      const nonce = crypto.randomUUID();
+      const callbackToken = await signPrescreenCallbackToken(
+        { datasetId, requestId: prId, nonce },
+        c.env.PRESCREEN_CALLBACK_SECRET,
+      );
+      await db
+        .prepare(
+          "UPDATE publication_requests SET prescreen_status = 'pending', prescreen_nonce = ?, prescreen_issue_url = NULL, prescreen_at = NULL, updated_at = datetime('now') WHERE id = ?",
+        )
+        .bind(nonce, prId)
+        .run();
+      await triggerPrescreenRun(
+        datasetId,
+        "main",
+        prId,
+        callbackToken,
+        `${c.env.API_BASE_URL}/webhooks/prescreen-result`,
+        pat,
+      );
+    } catch (err) {
+      console.error(
+        `[publish-request] prescreen dispatch failed for ${datasetId} (non-fatal):`,
+        err instanceof Error ? err.message : err,
+      );
+      // Don't strand the row in 'pending' with no workflow behind it.
+      try {
+        await db
+          .prepare(
+            "UPDATE publication_requests SET prescreen_status = NULL, prescreen_nonce = NULL WHERE id = ?",
+          )
+          .bind(prId)
+          .run();
+      } catch (resetErr) {
+        console.error(`[publish-request] prescreen reset failed for ${datasetId}:`, resetErr);
+      }
+    }
   }
 
   // Notify admins who have publication_request notifications enabled

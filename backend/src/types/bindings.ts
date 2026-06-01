@@ -72,6 +72,15 @@ export interface Bindings {
   // per-environment for staged rollout.
   MANIFEST_VIA_CENTRAL_WORKFLOW?: string; // "true" enables central workflow path
   MANIFEST_CALLBACK_SECRET?: string; // Workers secret; HMAC key for callback token
+
+  // Publication pre-screen (issue #666). When PRESCREEN_ENABLED is "true",
+  // a publication request that passes BIDS readiness dispatches
+  // repository_dispatch[run-prescreen] at nemarDatasets/.github, which runs
+  // `claude -p` and POSTs a verdict to /webhooks/prescreen-result with an
+  // HMAC-signed token. Default (unset/"false") keeps the request flow
+  // unchanged so a deploy does not silently enable screening.
+  PRESCREEN_ENABLED?: string; // "true" enables the dispatch on publish request
+  PRESCREEN_CALLBACK_SECRET?: string; // Workers secret; HMAC key for prescreen callback
 }
 
 /** User roles in hierarchical order: owner > admin > member */
