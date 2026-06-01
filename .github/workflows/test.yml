@@ -96,41 +96,12 @@ jobs:
         run: bun run lint
 
   # Unit tests - runs on CLI or test changes
-  unit-test:
-    runs-on: ubuntu-latest
-    needs: changes
-    if: needs.changes.outputs.cli == 'true' || needs.changes.outputs.tests == 'true'
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Setup Bun
-        uses: oven-sh/setup-bun@v2
-        with:
-          bun-version: latest
-
-      - name: Setup Deno
-        uses: denoland/setup-deno@v2
-        with:
-          deno-version: v2.x
-
-      - name: Install dependencies
-        run: bun install
-
-      - name: Run CLI unit tests
-        env:
-          # Use dev API - no rate limiting
-          TEST_API_URL: https://nemar-api-dev.sccn-org.workers.dev
-          TEST_ADMIN_API_KEY: ${{ secrets.TEST_ADMIN_API_KEY }}
-          TEST_USER_API_KEY: ${{ secrets.TEST_USER_API_KEY }}
-        run: bun test test/cli.test.ts
-
-  # Full unit suite gate: runs every test/*.test.ts on every PR to dev/main
-  # so failures cannot silently land. Excludes the longer e2e/sandbox suites
-  # (e2e-sandbox, e2e-upload, zenodo-sandbox, ezid-sandbox) which already
-  # have dedicated jobs and external service requirements. Required check
-  # for landing changes that touch src/ or test/.
-  unit-test-all:
+  # Tier 1 (REQUIRED on dev + main): pure, deterministic tests with no network.
+  # Auto-classified as every non-e2e file that does NOT hit the live backend
+  # (no testRequest / TEST_API_URL / runCli) -- new tests route themselves, no
+  # renames. Fast (~1 min) and never flaky, so this is the gate for landing
+  # into dev. See docs/operations/access-policies.md for the tiering rationale.
+  unit-pure:
     runs-on: ubuntu-latest
     needs: changes
     if: needs.changes.outputs.cli == 'true' || needs.changes.outputs.tests == 'true' || needs.changes.outputs.backend == 'true'
@@ -159,39 +130,80 @@ jobs:
       - name: Install backend dependencies
         run: cd backend && bun install
 
-      - name: Run full unit suite (excluding e2e + sandbox suites)
-        env:
-          TEST_API_URL: https://nemar-api-dev.sccn-org.workers.dev
-          TEST_ADMIN_API_KEY: ${{ secrets.TEST_ADMIN_API_KEY }}
-          TEST_USER_API_KEY: ${{ secrets.TEST_USER_API_KEY }}
-          TEST_BYPASS_TOKEN: ${{ secrets.TEST_BYPASS_TOKEN }}
+      - name: Run pure unit tests (no live backend)
         run: |
-          # Build the file list explicitly so new tests are picked up automatically
-          # but the long-running e2e/sandbox suites stay scoped to their own jobs.
-          # Covers both CLI tests (test/) and backend tests (backend/test/).
+          # Deliberately no TEST_API_URL / secrets: these tests don't touch the
+          # backend, so a misclassified file fails loudly here instead of
+          # silently flaking in the wrong tier.
           shopt -s nullglob
           files=()
           for f in test/*.test.ts backend/test/*.test.ts; do
             base="$(basename "$f")"
             case "$base" in
-              e2e-sandbox.test.ts|e2e-upload.test.ts|zenodo-sandbox.test.ts|ezid-sandbox.test.ts|auth-passwordless.test.ts)
-                echo "Skipping $base (has dedicated job)";;
-              *)
-                files+=("$f");;
+              e2e-sandbox.test.ts|e2e-upload.test.ts|zenodo-sandbox.test.ts|ezid-sandbox.test.ts|auth-passwordless.test.ts) continue;;
             esac
+            if grep -Eq 'testRequest|TEST_API_URL|runCli\(' "$f"; then continue; fi
+            files+=("$f")
           done
-          if [ ${#files[@]} -eq 0 ]; then
-            echo "No test files matched" >&2
-            exit 1
-          fi
-          echo "Running ${#files[@]} test files"
-          # --retry=2 re-runs an individual failing test up to twice. This suite
-          # exercises ~1600 tests against the LIVE dev backend (real AWS STS,
-          # network, D1), so a handful flake transiently per run on infra hiccups
-          # (a different ~2 each time). Per-test retry rides over transient
-          # failures while a genuinely broken test still fails all 3 attempts --
-          # so real regressions are not masked. Surgical: only the failing test
-          # re-runs, not the whole suite.
+          if [ ${#files[@]} -eq 0 ]; then echo "No pure test files matched" >&2; exit 1; fi
+          echo "Running ${#files[@]} pure test files"
+          bun test "${files[@]}"
+
+  # Tier 2 (SOFT on dev, REQUIRED on main): integration tests that hit the LIVE
+  # dev backend (real AWS STS / D1 / network). These flake transiently (a
+  # different ~2 of ~1600 each run), so --retry=2 rides over infra hiccups while
+  # a genuinely broken test still fails all 3 attempts. NOT a required check on
+  # dev (a transient flake must not block a PR); the dev->main gate makes it
+  # required, and nightly-tests.yml provides scheduled hard coverage + issue.
+  integration-dev:
+    runs-on: ubuntu-latest
+    needs: changes
+    if: needs.changes.outputs.cli == 'true' || needs.changes.outputs.tests == 'true' || needs.changes.outputs.backend == 'true'
+    env:
+      TEST_API_URL: https://nemar-api-dev.sccn-org.workers.dev
+      TEST_ADMIN_API_KEY: ${{ secrets.TEST_ADMIN_API_KEY }}
+      TEST_USER_API_KEY: ${{ secrets.TEST_USER_API_KEY }}
+      TEST_BYPASS_TOKEN: ${{ secrets.TEST_BYPASS_TOKEN }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Setup Deno
+        uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.x
+
+      - name: Install git-annex
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y git-annex
+
+      - name: Install dependencies
+        run: bun install
+
+      - name: Install backend dependencies
+        run: cd backend && bun install
+
+      - name: Run live-backend integration tests (--retry for transient flakes)
+        run: |
+          # Every non-e2e file that DOES hit the live dev backend, including
+          # cli.test.ts (runCli spawns the binary against the backend).
+          shopt -s nullglob
+          files=()
+          for f in test/*.test.ts backend/test/*.test.ts; do
+            base="$(basename "$f")"
+            case "$base" in
+              e2e-sandbox.test.ts|e2e-upload.test.ts|zenodo-sandbox.test.ts|ezid-sandbox.test.ts|auth-passwordless.test.ts) continue;;
+            esac
+            if grep -Eq 'testRequest|TEST_API_URL|runCli\(' "$f"; then files+=("$f"); fi
+          done
+          if [ ${#files[@]} -eq 0 ]; then echo "No integration test files matched" >&2; exit 1; fi
+          echo "Running ${#files[@]} integration test files"
           bun test --retry=2 "${files[@]}"
 
   # Python script tests for scripts/emit_manifest.py + helpers ran here

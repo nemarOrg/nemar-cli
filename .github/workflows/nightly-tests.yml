@@ -1,0 +1,123 @@
+name: Nightly Tests
+
+# Scheduled hard coverage for the dev branch (nemarOrg/nemar-cli CI tiering).
+#
+# The per-PR gate into dev is intentionally light: only Tier 1 (pure, no-network
+# tests) is required, and the Tier 2 live-backend integration tests run with
+# --retry=2 / non-blocking so a transient AWS/D1/network flake can't block a PR.
+# This nightly job is the backstop: it runs the FULL suite against the dev
+# backend once a day and opens (or refreshes) a tracking issue on failure, so a
+# real regression that slipped past the light gate is caught before dev -> main.
+#
+# NOTE: scheduled workflows only fire from the repository's DEFAULT branch
+# (main), so the daily cron activates once this file reaches main. Until then
+# (and any time), trigger it by hand with the "Run workflow" button
+# (workflow_dispatch). It always checks out and tests `dev`.
+
+on:
+  schedule:
+    - cron: "0 10 * * *" # 10:00 UTC daily (~03:00 PT, off-hours)
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: nightly-tests
+  cancel-in-progress: false
+
+jobs:
+  nightly:
+    name: Full suite against dev
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      TEST_API_URL: https://nemar-api-dev.sccn-org.workers.dev
+      TEST_ADMIN_API_KEY: ${{ secrets.TEST_ADMIN_API_KEY }}
+      TEST_USER_API_KEY: ${{ secrets.TEST_USER_API_KEY }}
+      TEST_BYPASS_TOKEN: ${{ secrets.TEST_BYPASS_TOKEN }}
+    steps:
+      - name: Checkout dev
+        uses: actions/checkout@v4
+        with:
+          ref: dev
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Setup Deno
+        uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.x
+
+      - name: Install git-annex
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y git-annex
+
+      - name: Install dependencies
+        run: bun install
+
+      - name: Install backend dependencies
+        run: cd backend && bun install
+
+      - name: Run full suite against dev
+        run: |
+          # Everything (pure + integration + sandbox e2e) against the dev
+          # backend, with --retry=2 so the issue only opens on PERSISTENT
+          # failures, not a single transient flake. e2e-upload is excluded: it
+          # creates persistent GitHub repos/datasets that need manual teardown,
+          # so it is unsuitable for an unattended daily run (revisit once its
+          # teardown is automated).
+          shopt -s nullglob
+          files=()
+          for f in test/*.test.ts backend/test/*.test.ts; do
+            base="$(basename "$f")"
+            case "$base" in
+              e2e-upload.test.ts) echo "Skipping $base (creates persistent resources)"; continue;;
+            esac
+            files+=("$f")
+          done
+          if [ ${#files[@]} -eq 0 ]; then echo "No test files matched" >&2; exit 1; fi
+          echo "Running ${#files[@]} test files against dev"
+          bun test --retry=2 "${files[@]}"
+
+      - name: Open or refresh dev-health issue on failure
+        if: failure()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          TITLE="Nightly tests failing on dev"
+          RUN_URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          TODAY="$(date -u +%F)"
+          # Best-effort label (don't fail the step if it already exists / can't be made).
+          gh label create ci-nightly --color B60205 --description "Nightly dev-suite failures" 2>/dev/null || true
+          EXISTING=$(gh issue list --repo "${{ github.repository }}" --state open \
+            --search "$TITLE in:title" --json number --jq '.[0].number // empty' || true)
+          if [ -n "$EXISTING" ]; then
+            {
+              echo "Still failing on ${TODAY}."
+              echo
+              echo "Run: ${RUN_URL}"
+            } | gh issue comment "$EXISTING" --repo "${{ github.repository }}" --body-file -
+            echo "Refreshed issue #${EXISTING}"
+          else
+            {
+              echo "The nightly full-suite run against the **dev** backend failed."
+              echo "This blocks a clean \`dev\` -> \`main\` integration; please triage."
+              echo
+              echo "- Date (UTC): ${TODAY}"
+              echo "- Run: ${RUN_URL}"
+              echo
+              echo "Note: the run uses \`--retry=2\`, so a failure here means a test failed all 3 attempts (a persistent regression or a hard-down dependency), not a single transient flake."
+            } | gh issue create --repo "${{ github.repository }}" \
+                  --title "$TITLE" --label ci-nightly --body-file - || \
+            {
+              echo "The nightly full-suite run against the dev backend failed. Run: ${RUN_URL}" \
+                | gh issue create --repo "${{ github.repository }}" --title "$TITLE" --body-file -
+            }
+          fi
