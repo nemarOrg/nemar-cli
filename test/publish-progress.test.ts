@@ -14,6 +14,9 @@
  * policy) so the request/response contract is exercised end-to-end.
  */
 
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from "bun:test";
 import "./setup";
 import {
@@ -141,8 +144,15 @@ function startFakeApproveServer(
 const DATASET = "nm099284";
 let fake: FakeApproveServer | null = null;
 const originalTestApiUrl = process.env.TEST_API_URL;
+// Isolate config writes to a throwaway dir. setConfig() persists to disk, and
+// without this it would clobber the developer's real ~/.config/nemar/config.json
+// apiKey (this actually happened: it overwrote a live admin key mid-run).
+const originalConfigDir = process.env.NEMAR_CONFIG_DIR;
+let tmpConfigDir: string | null = null;
 
 beforeAll(() => {
+  tmpConfigDir = mkdtempSync(join(tmpdir(), "nemar-test-config-"));
+  process.env.NEMAR_CONFIG_DIR = tmpConfigDir;
   // Set an apiKey so request(..., authenticated=true) won't bail before
   // making the call. The fake doesn't validate the token.
   setConfig("apiKey", "test-token-284");
@@ -168,6 +178,13 @@ afterEach(async () => {
 afterAll(() => {
   if (originalTestApiUrl === undefined) delete process.env.TEST_API_URL;
   else process.env.TEST_API_URL = originalTestApiUrl;
+  // Restore the real config dir and remove the throwaway one.
+  if (originalConfigDir === undefined) delete process.env.NEMAR_CONFIG_DIR;
+  else process.env.NEMAR_CONFIG_DIR = originalConfigDir;
+  if (tmpConfigDir) {
+    rmSync(tmpConfigDir, { recursive: true, force: true });
+    tmpConfigDir = null;
+  }
 });
 
 describe("approvePublication onProgress", () => {

@@ -51,6 +51,12 @@ describe("signPrescreenCallbackToken", () => {
     expect(base).not.toBe(diffDataset);
   });
 
+  test("changes when the secret changes", async () => {
+    const a = await signPrescreenCallbackToken(PAYLOAD, SECRET);
+    const b = await signPrescreenCallbackToken(PAYLOAD, "different-secret");
+    expect(a).not.toBe(b);
+  });
+
   test("throws on empty secret -- guards against missing env config", async () => {
     expect(signPrescreenCallbackToken(PAYLOAD, "")).rejects.toThrow(/secret is required/);
   });

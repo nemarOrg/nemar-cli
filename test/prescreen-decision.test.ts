@@ -32,6 +32,22 @@ describe("validatePrescreenCallbackBody", () => {
     ).toBeNull();
   });
 
+  test("accepts verdict 'error' (workflow could not complete)", () => {
+    expect(validatePrescreenCallbackBody({ ...ok, verdict: "error" })).toBeNull();
+  });
+
+  test("accepts request_id 0 and -1 (integer guard, not truthy guard)", () => {
+    expect(validatePrescreenCallbackBody({ ...ok, request_id: 0 })).toBeNull();
+    expect(validatePrescreenCallbackBody({ ...ok, request_id: -1 })).toBeNull();
+  });
+
+  test("rejects NaN / Infinity request_id", () => {
+    expect(validatePrescreenCallbackBody({ ...ok, request_id: Number.NaN })).toMatch(/request_id/);
+    expect(validatePrescreenCallbackBody({ ...ok, request_id: Number.POSITIVE_INFINITY })).toMatch(
+      /request_id/,
+    );
+  });
+
   test("rejects non-object bodies", () => {
     expect(validatePrescreenCallbackBody(null)).toMatch(/JSON object/);
     expect(validatePrescreenCallbackBody("x")).toMatch(/JSON object/);
@@ -98,5 +114,20 @@ describe("decidePrescreenOutcome", () => {
     const r = decidePrescreenOutcome("pass", [], null);
     expect(r.blocked).toBe(false);
     expect(r.reasons).toEqual([]);
+  });
+
+  test("verdict=block with null S3 stays blocked and preserves reasons", () => {
+    const r = decidePrescreenOutcome("block", ["README missing"], null);
+    expect(r.blocked).toBe(true);
+    expect(r.reasons).toEqual(["README missing"]);
+  });
+
+  test("an 's3'-matching workflow reason is not duplicated by the empty-prefix check", () => {
+    const r = decidePrescreenOutcome("block", ["S3 prefix is empty"], {
+      totalSize: 0,
+      objectCount: 0,
+    });
+    expect(r.blocked).toBe(true);
+    expect(r.reasons).toEqual(["S3 prefix is empty"]);
   });
 });

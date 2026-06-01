@@ -1280,7 +1280,9 @@ webhooks.post("/manifest-ready", async (c) => {
 export interface PrescreenCallbackBody {
   dataset_id: string;
   request_id: number;
-  verdict: "pass" | "block";
+  // "error" = the workflow could not complete (install/claude/parse failure);
+  // the Worker resets the screen so the request falls back to manual review.
+  verdict: "pass" | "block" | "error";
   reasons?: string[];
   issue_url?: string;
   workflow_run_id?: string;
@@ -1296,8 +1298,8 @@ export function validatePrescreenCallbackBody(body: unknown): string | null {
   if (typeof b.request_id !== "number" || !Number.isInteger(b.request_id)) {
     return "request_id must be an integer";
   }
-  if (b.verdict !== "pass" && b.verdict !== "block") {
-    return "verdict must be 'pass' or 'block'";
+  if (b.verdict !== "pass" && b.verdict !== "block" && b.verdict !== "error") {
+    return "verdict must be 'pass', 'block', or 'error'";
   }
   if (
     b.reasons !== undefined &&
@@ -1414,6 +1416,25 @@ webhooks.post("/prescreen-result", async (c) => {
     return c.json({ error: "Invalid callback token" }, 401);
   }
 
+  // verdict="error": the workflow could not complete. Don't block on an
+  // infrastructure failure -- reset the screen to NULL so the request falls
+  // back to normal admin review (status stays 'requested'). No S3 check, no
+  // email. Gated on 'pending' so it's still one-shot.
+  if (body.verdict === "error") {
+    const res = await c.env.DB.prepare(
+      `UPDATE publication_requests
+          SET prescreen_status = NULL, prescreen_nonce = NULL,
+              prescreen_at = datetime('now'), updated_at = datetime('now')
+        WHERE id = ? AND prescreen_status = 'pending'`,
+    )
+      .bind(request.id)
+      .run();
+    console.warn(
+      `[prescreen-result] dataset=${body.dataset_id} request_id=${request.id} verdict=error; reset to manual review (changes=${res.meta.changes})`,
+    );
+    return c.json({ ok: true, dataset_id: body.dataset_id, blocked: false, reset: true });
+  }
+
   // Independent server-side S3 presence check. Capped at one page (1000
   // objects) -- we only need to distinguish "empty" from "non-empty", not
   // the full count. A read error leaves s3=null so we trust the workflow.
@@ -1437,7 +1458,7 @@ webhooks.post("/prescreen-result", async (c) => {
   const issueUrl = body.issue_url ?? null;
 
   if (blocked) {
-    await c.env.DB.prepare(
+    const res = await c.env.DB.prepare(
       `UPDATE publication_requests
           SET status = 'blocked', block_reason = 'prescreen_failed',
               prescreen_status = 'failed', prescreen_issue_url = ?,
@@ -1447,7 +1468,10 @@ webhooks.post("/prescreen-result", async (c) => {
       .bind(issueUrl, request.id)
       .run();
 
-    try {
+    // Only email if THIS call did the transition. Guards against a duplicate
+    // email if two callbacks race past the 'pending' read (the second sees
+    // changes=0 because the first already flipped the row).
+    if (res.meta.changes > 0) {
       const { fromEmail, replyTo, isDev } = resolveEmailConfig(c.env);
       c.executionCtx.waitUntil(
         sendPublicationBlockedEmail(
@@ -1460,10 +1484,15 @@ webhooks.post("/prescreen-result", async (c) => {
           fromEmail,
           replyTo,
           isDev,
-        ),
+        ).catch((emailErr) => {
+          // waitUntil swallows rejections to the runtime log; catch here so the
+          // failure is attributable and the dataset id is in the message.
+          console.error(
+            `[prescreen-result] block email send failed for ${body.dataset_id}:`,
+            emailErr,
+          );
+        }),
       );
-    } catch (emailErr) {
-      console.error("[prescreen-result] failed to schedule block email:", emailErr);
     }
   } else {
     await c.env.DB.prepare(

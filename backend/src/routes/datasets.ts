@@ -2002,10 +2002,12 @@ datasetRoutes.post("/:id/publish/request", authMiddleware, async (c) => {
         .bind(blockReason, requestId)
         .run();
     } else {
-      // Unblock: transition to requested
+      // Unblock: transition to requested. Also clear any prior pre-screen
+      // state so a re-request gets a clean screen (and a disabled-feature
+      // re-request doesn't leave a stale 'failed'/nonce on a 'requested' row).
       await db
         .prepare(
-          "UPDATE publication_requests SET status = 'requested', block_reason = NULL, updated_at = datetime('now') WHERE id = ?",
+          "UPDATE publication_requests SET status = 'requested', block_reason = NULL, prescreen_status = NULL, prescreen_nonce = NULL, prescreen_issue_url = NULL, updated_at = datetime('now') WHERE id = ?",
         )
         .bind(requestId)
         .run();
@@ -2019,6 +2021,11 @@ datasetRoutes.post("/:id/publish/request", authMiddleware, async (c) => {
       .bind(datasetId, currentUser.id, blocked ? "blocked" : "requested", blockReason)
       .first<{ id: number }>();
     prId = inserted?.id ?? null;
+    if (prId === null) {
+      console.warn(
+        `[publish-request] INSERT ... RETURNING id returned no id for ${datasetId}; pre-screen will not run`,
+      );
+    }
   }
 
   if (blocked) {
@@ -2152,6 +2159,7 @@ datasetRoutes.get("/:id/publish/status", authMiddleware, async (c) => {
       denied_at: string | null;
       denied_reason: string | null;
       block_reason: string | null;
+      prescreen_issue_url: string | null;
       steps_completed: string;
       current_step: string | null;
       last_error: string | null;
@@ -2183,6 +2191,11 @@ datasetRoutes.get("/:id/publish/status", authMiddleware, async (c) => {
           message: BLOCK_MESSAGES[request.block_reason || ""] || "Publication request blocked.",
           ci_url: `https://github.com/nemarDatasets/${repoName}/actions`,
         }
+      : {}),
+    // Surface the pre-screen issue so `nemar dataset publish status` shows the
+    // fix list even if the block email was missed.
+    ...(request.block_reason === "prescreen_failed" && request.prescreen_issue_url
+      ? { prescreen_issue_url: request.prescreen_issue_url }
       : {}),
     steps_completed: JSON.parse(request.steps_completed || "[]"),
     current_step: request.current_step,
