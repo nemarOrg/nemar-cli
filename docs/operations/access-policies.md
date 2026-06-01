@@ -513,9 +513,10 @@ Deliberate omissions vs. `nemar-worker-prod`:
 that need S3 read/write. Consumer:
 
 - `nemarOrg/nemar-cli/.github/workflows/test.yml` integration
-  tests (`api-test`, `e2e-upload`, `e2e-sandbox`, `unit-test-all`)
-  exercise upload/download paths against the dev backend. They
-  read and write sandbox-prefix objects directly.
+  tests (`api-test`, `e2e-upload`, `e2e-sandbox`, `integration-dev`)
+  and `nightly-tests.yml` exercise upload/download paths against the
+  dev backend. They read and write sandbox-prefix objects directly.
+  (`unit-pure` is network-free and needs no S3 access.)
 
 Identical policy to `nemar-actions-datasets`, but a **separate IAM
 user** so the two trust boundaries are isolated:
