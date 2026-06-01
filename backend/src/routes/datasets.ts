@@ -29,6 +29,8 @@ import {
   getFileContent,
   getWorkflowRuns,
   setRepoVisibility,
+  signPrescreenCallbackToken,
+  triggerPrescreenRun,
 } from "../services/github";
 import { getDatasetsToken } from "../services/github-auth";
 import {
@@ -84,6 +86,8 @@ const BLOCK_MESSAGES: Record<string, string> = {
     "BIDS validation has not run yet. Please wait for CI to complete, then re-request publication.",
   bids_validation_in_progress:
     "BIDS validation is currently running. Please wait for it to complete, then re-request publication.",
+  prescreen_failed:
+    "The automated pre-screen found missing publication essentials (data, README, or dataset_description). See the issue opened on your dataset repository, address the gaps, then re-request publication.",
 };
 
 /**
@@ -1987,6 +1991,7 @@ datasetRoutes.post("/:id/publish/request", authMiddleware, async (c) => {
     console.warn(`[publish-request] Skipping CI checks for ${datasetId}: no GitHub repo`);
   }
 
+  let prId: number | null = requestId ?? null;
   if (requestId) {
     // Update existing blocked request
     if (blocked) {
@@ -1997,22 +2002,30 @@ datasetRoutes.post("/:id/publish/request", authMiddleware, async (c) => {
         .bind(blockReason, requestId)
         .run();
     } else {
-      // Unblock: transition to requested
+      // Unblock: transition to requested. Also clear any prior pre-screen
+      // state so a re-request gets a clean screen (and a disabled-feature
+      // re-request doesn't leave a stale 'failed'/nonce on a 'requested' row).
       await db
         .prepare(
-          "UPDATE publication_requests SET status = 'requested', block_reason = NULL, updated_at = datetime('now') WHERE id = ?",
+          "UPDATE publication_requests SET status = 'requested', block_reason = NULL, prescreen_status = NULL, prescreen_nonce = NULL, prescreen_issue_url = NULL, updated_at = datetime('now') WHERE id = ?",
         )
         .bind(requestId)
         .run();
     }
   } else {
     // Create new publication request
-    await db
+    const inserted = await db
       .prepare(
-        "INSERT INTO publication_requests (dataset_id, requested_by, status, block_reason) VALUES (?, ?, ?, ?)",
+        "INSERT INTO publication_requests (dataset_id, requested_by, status, block_reason) VALUES (?, ?, ?, ?) RETURNING id",
       )
       .bind(datasetId, currentUser.id, blocked ? "blocked" : "requested", blockReason)
-      .run();
+      .first<{ id: number }>();
+    prId = inserted?.id ?? null;
+    if (prId === null) {
+      console.warn(
+        `[publish-request] INSERT ... RETURNING id returned no id for ${datasetId}; pre-screen will not run`,
+      );
+    }
   }
 
   if (blocked) {
@@ -2026,6 +2039,56 @@ datasetRoutes.post("/:id/publish/request", authMiddleware, async (c) => {
       },
       422,
     );
+  }
+
+  // Dispatch the automated pre-screen (issue #666). Async + feature-flagged:
+  // the request is already 'requested', so a dispatch failure must not 500
+  // the call -- we log it and leave the row as a normal pending request.
+  // The verdict arrives later at /webhooks/prescreen-result.
+  if (
+    prId !== null &&
+    repoName &&
+    pat &&
+    c.env.PRESCREEN_ENABLED === "true" &&
+    c.env.PRESCREEN_CALLBACK_SECRET
+  ) {
+    try {
+      const nonce = crypto.randomUUID();
+      const callbackToken = await signPrescreenCallbackToken(
+        { datasetId, requestId: prId, nonce },
+        c.env.PRESCREEN_CALLBACK_SECRET,
+      );
+      await db
+        .prepare(
+          "UPDATE publication_requests SET prescreen_status = 'pending', prescreen_nonce = ?, prescreen_issue_url = NULL, prescreen_at = NULL, updated_at = datetime('now') WHERE id = ?",
+        )
+        .bind(nonce, prId)
+        .run();
+      await triggerPrescreenRun(
+        datasetId,
+        "main",
+        prId,
+        callbackToken,
+        `${c.env.API_BASE_URL}/webhooks/prescreen-result`,
+        pat,
+      );
+    } catch (err) {
+      console.error(
+        `[publish-request] prescreen dispatch failed for ${datasetId} (non-fatal):`,
+        err instanceof Error ? err.message : err,
+      );
+      // Don't strand the row in 'pending' with no workflow behind it.
+      try {
+        await db
+          .prepare(
+            "UPDATE publication_requests SET prescreen_status = NULL, prescreen_nonce = NULL WHERE id = ?",
+          )
+          .bind(prId)
+          .run();
+      } catch (resetErr) {
+        console.error(`[publish-request] prescreen reset failed for ${datasetId}:`, resetErr);
+      }
+    }
   }
 
   // Notify admins who have publication_request notifications enabled
@@ -2096,6 +2159,7 @@ datasetRoutes.get("/:id/publish/status", authMiddleware, async (c) => {
       denied_at: string | null;
       denied_reason: string | null;
       block_reason: string | null;
+      prescreen_issue_url: string | null;
       steps_completed: string;
       current_step: string | null;
       last_error: string | null;
@@ -2127,6 +2191,11 @@ datasetRoutes.get("/:id/publish/status", authMiddleware, async (c) => {
           message: BLOCK_MESSAGES[request.block_reason || ""] || "Publication request blocked.",
           ci_url: `https://github.com/nemarDatasets/${repoName}/actions`,
         }
+      : {}),
+    // Surface the pre-screen issue so `nemar dataset publish status` shows the
+    // fix list even if the block email was missed.
+    ...(request.block_reason === "prescreen_failed" && request.prescreen_issue_url
+      ? { prescreen_issue_url: request.prescreen_issue_url }
       : {}),
     steps_completed: JSON.parse(request.steps_completed || "[]"),
     current_step: request.current_step,
