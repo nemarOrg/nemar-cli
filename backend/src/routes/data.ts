@@ -46,6 +46,7 @@ import {
   generatePresignedGetUrl,
   getArchiveUrl,
   getManifest,
+  headArchive,
   loadSummary,
 } from "../services/s3";
 import type { Bindings, Variables } from "../types/bindings";
@@ -940,10 +941,29 @@ dataRoutes.get("/:datasetId/:version", async (c) => {
   if (version.endsWith(".zip")) {
     const resolved = await resolveVersion(c.env.DB, datasetId, version.slice(0, -4));
     if (!resolved.ok) return notFound("Version not found");
-    const archiveUrl = await getArchiveUrl(s3OptionsFromEnv(c.env), datasetId, resolved.version);
+    const s3 = s3OptionsFromEnv(c.env);
+    // HEAD first: the archive is generated asynchronously after publish, so a
+    // download click in that window would otherwise 302 to a presigned URL
+    // that dumps an S3 NoSuchKey XML error. Return a clean 404 instead. A
+    // credentials/5xx error throws -> 503. (#670, review)
+    let present: boolean;
+    try {
+      present = await headArchive(s3, datasetId, resolved.version);
+    } catch (err) {
+      console.error(`[data] archive HEAD failed for ${datasetId} ${resolved.version}:`, err);
+      return c.json({ error: "Unable to check archive availability" }, 503);
+    }
+    if (!present) {
+      return notFound(
+        "Archive not yet available for this version (generation may still be in progress)",
+      );
+    }
+    const archiveUrl = await getArchiveUrl(s3, datasetId, resolved.version);
+    // no-store: the Location carries a presigned, time-limited S3 URL; don't
+    // let a CDN serve one shared signed URL to many clients.
     return new Response(null, {
       status: 302,
-      headers: { Location: archiveUrl, "Cache-Control": "public, max-age=300" },
+      headers: { Location: archiveUrl, "Cache-Control": "no-store" },
     });
   }
 

@@ -56,7 +56,7 @@ describe("stepIndexFor", () => {
     expect(stepIndexFor(undefined, overlong)).toBe(PUBLICATION_STEPS.length);
   });
 
-  test("PUBLICATION_STEPS list is the expected 17 backend steps", () => {
+  test("PUBLICATION_STEPS list is the expected 16 backend steps", () => {
     // Locks in the contract: the CLI's list must match
     // `allSteps` in backend/src/routes/admin.ts. Update both together.
     expect(PUBLICATION_STEPS).toEqual([
@@ -275,7 +275,7 @@ describe("approvePublication onProgress", () => {
     expect(s3Events[0].s3LockTotal).toBe(100);
     expect(s3Events[1].s3LockLocked).toBe(80);
     expect(s3Events[2].s3LockLocked).toBe(100);
-    // stepIndex stays anchored on the s3_lock position (14/17) the whole
+    // stepIndex stays anchored on the s3_lock position (14/16) the whole
     // time so the spinner doesn't jump backwards as completed steps fall
     // off the steps_completed window.
     for (const e of s3Events) {
@@ -387,7 +387,6 @@ describe("approvePublication onProgress", () => {
           "publish_doi",
           "version_doi",
           "s3_lock",
-          "generate_archive",
           "sync_nemar",
           // notify_user is NOT in steps_completed because it failed
         ],
