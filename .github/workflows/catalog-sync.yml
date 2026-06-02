@@ -124,9 +124,13 @@ jobs:
             exit 1
           fi
 
+          # #646: records_synced counts actual D1 row changes folded into the
+          # `datasets` source of truth (the nemar_catalog cache is gone). SQLite
+          # marks an `ON CONFLICT DO UPDATE` as changes=1 even when the values are
+          # unchanged, so a full re-sync of N existing rows returns N, not 0; a
+          # real sync therefore always folds >0 rows.
           SYNCED=$(echo "$RESPONSE" | python3 -c "import sys,json; print(json.load(sys.stdin).get('records_synced',0))")
-          INDEXED=$(echo "$RESPONSE" | python3 -c "import sys,json; print(json.load(sys.stdin).get('records_indexed',0))")
-          echo "Synced: $SYNCED, Indexed: $INDEXED"
+          echo "Synced: $SYNCED"
 
           if [ "$SYNCED" -eq 0 ]; then
             echo "::error::Production sync reported 0 records synced"

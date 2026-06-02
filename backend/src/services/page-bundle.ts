@@ -80,12 +80,11 @@ export interface PageBundle {
  * indicate a row that disappeared mid-request (rare, infra-level).
  */
 async function loadCatalogRow(env: Bindings, datasetId: string): Promise<CatalogRow | null> {
+  // #646: license/authors come from the `datasets` source of truth.
   return env.DB.prepare(
     `SELECT d.dataset_id, d.name, d.description, d.concept_doi, d.github_repo,
-            d.modalities, d.tasks,
-            c.license, c.authors
+            d.modalities, d.tasks, d.license, d.authors
        FROM datasets d
-       LEFT JOIN nemar_catalog c ON c.id = d.dataset_id
        WHERE d.dataset_id = ?
        LIMIT 1`,
   )

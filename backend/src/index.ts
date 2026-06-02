@@ -30,6 +30,7 @@ import { datasetRoutes } from "./routes/datasets";
 import { sandboxRoutes } from "./routes/sandbox";
 import { userRoutes } from "./routes/users";
 import webhooks from "./routes/webhooks";
+import { drainEmbeddingDirty } from "./services/dataset-search";
 import { deleteDatasetCascade } from "./services/deletion";
 import {
   getAdminEmailsForCategory,
@@ -272,6 +273,8 @@ async function scheduledCleanup(env: Bindings): Promise<void> {
   // 2. Stale nm datasets: warn the owner on an escalating runway, then hand
   //    off to admins for a manual delete. The cron NEVER auto-deletes nm
   //    datasets (#662) — removing real archive data always needs a human.
+  //    Folded legacy catalog rows (#646) are excluded by the LIKE 'nm%' +
+  //    visibility='private' filters below (sentinel rows are ds*/on* + public).
   const staleness = { warned: 0, adminNotified: 0, reset: 0 };
   // Datasets become warning candidates once within FIRST_WARNING_DAYS of the
   // 90-day deadline, i.e. inactive for at least (90 - 30) days.
@@ -494,5 +497,8 @@ export default {
   async scheduled(event: ScheduledEvent, env: Bindings, ctx: ExecutionContext) {
     // Catalog sync runs via GitHub Action, not Worker cron
     ctx.waitUntil(scheduledCleanup(env));
+    // #646 Phase 4: drain stale vectors (embedding_dirty=1) — the backstop for
+    // changes that don't go through the inline enrich/reindex re-embed.
+    ctx.waitUntil(drainEmbeddingDirty(env.DB, env.AI, env.VECTORIZE));
   },
 };

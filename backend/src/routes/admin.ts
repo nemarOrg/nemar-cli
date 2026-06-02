@@ -9,6 +9,7 @@ import { Hono } from "hono";
 import { z } from "zod";
 import { adminMiddleware, authMiddleware, ownerMiddleware } from "../middleware/auth";
 
+import { SYSTEM_USER_ID } from "../lib/constants";
 import {
   type RecipientGroup,
   type RecipientGroupOrUser,
@@ -36,6 +37,7 @@ import {
   runDatasetSync,
   runEnrichmentForDataset,
 } from "../services/dataset-reindex";
+import { reembedDatasetVector } from "../services/dataset-search";
 import { deleteDatasetCascade } from "../services/deletion";
 import { DOCTOR_CHECKS, getCheck, listChecks } from "../services/doctor/registry";
 import type { CheckContext, Finding } from "../services/doctor/types";
@@ -823,7 +825,11 @@ adminRoutes.get("/stats", async (c) => {
       (SELECT COUNT(*) FROM users WHERE status = 'verified') as verified_users,
       (SELECT COUNT(*) FROM users WHERE status = 'approved') as approved_users,
       (SELECT COUNT(*) FROM users WHERE status = 'revoked') as revoked_users,
-      (SELECT COUNT(*) FROM datasets) as total_datasets,
+      -- total_datasets counts real managed datasets only; folded legacy
+      -- catalog rows (owner = SYSTEM_USER_ID, #646) are reported separately so
+      -- the headline count isn't inflated by the ~180 folded legacy catalog rows.
+      (SELECT COUNT(*) FROM datasets WHERE owner_user_id != ${SYSTEM_USER_ID}) as total_datasets,
+      (SELECT COUNT(*) FROM datasets WHERE owner_user_id = ${SYSTEM_USER_ID}) as catalog_datasets,
       (SELECT COUNT(*) FROM tokens WHERE revoked_at IS NULL) as active_tokens
   `,
     )
@@ -4701,6 +4707,20 @@ adminRoutes.delete("/datasets/:id", async (c) => {
     return c.json({ error: "Dataset not found" }, 404);
   }
 
+  // Folded legacy catalog rows (#646) are sentinel-owned, with no GitHub repo /
+  // S3 of their own, and are re-created from the upstream nemar.org catalog on
+  // the next catalog sync, so deleting one here is futile. Refuse with a clear
+  // 400. deleteDatasetCascade also refuses (defense-in-depth for other callers).
+  if (dataset.owner_user_id === SYSTEM_USER_ID) {
+    return c.json(
+      {
+        error: `"${datasetId}" is a system catalog entry (owner=nemar-system) managed by the nemar.org catalog sync and cannot be deleted here.`,
+        dataset_id: datasetId,
+      },
+      400,
+    );
+  }
+
   // Permission check: published datasets require owner role
   const hasDoiOrPublished = dataset.concept_doi !== null || dataset.visibility === "public";
   if (hasDoiOrPublished) {
@@ -4932,6 +4952,28 @@ adminRoutes.post(
           source_id,
         )
         .run();
+
+      // #646: if this on* mirror's OpenNeuro source was already folded into
+      // `datasets` as a sentinel catalog row (dataset_id = source_id), remove
+      // that shadow so it doesn't double-list next to the new managed mirror.
+      // The 0028 fold dedups shadows whose on* mirror already existed at
+      // migration time; a mirror imported AFTER the fold needs this cleanup.
+      // Non-fatal: the import already succeeded; a stale shadow only mis-lists.
+      if (source_id) {
+        try {
+          const shadow = await db
+            .prepare("DELETE FROM datasets WHERE owner_user_id = ? AND dataset_id = ?")
+            .bind(SYSTEM_USER_ID, source_id)
+            .run();
+          if ((shadow.meta?.changes ?? 0) > 0) {
+            console.log(
+              `[import] removed folded catalog shadow ${source_id} superseded by managed mirror ${dataset_id}`,
+            );
+          }
+        } catch (shadowErr) {
+          console.error(`[import] failed to remove folded catalog shadow ${source_id}:`, shadowErr);
+        }
+      }
     } catch (error) {
       console.error("Failed to insert dataset record:", error);
       const dbMsg = error instanceof Error ? error.message : String(error);
@@ -5278,11 +5320,12 @@ adminRoutes.get("/sync/status", async (c) => {
 // ============================================================================
 
 /**
- * POST /admin/catalog/sync - Import pre-fetched catalog records into D1 + Vectorize
+ * POST /admin/catalog/sync - Fold pre-fetched catalog records into `datasets`
  *
  * The nemar.org API requires GET with a JSON body, which Workers' fetch()
  * rejects. The GitHub Action fetches the catalog and POSTs records here.
- * Accepts { records: NemarCatalogRecord[] } in the request body.
+ * Accepts { records: NemarCatalogRecord[] } in the request body. New/changed
+ * rows are marked embedding_dirty=1 for the scheduled re-embed.
  */
 adminRoutes.post("/catalog/sync", async (c) => {
   const body = await c.req.json<{ records?: unknown[] }>();
@@ -5314,52 +5357,20 @@ adminRoutes.post("/catalog/sync", async (c) => {
       );
     }
 
-    const result = await importCatalogRecords(c.env.DB, validRecords, c.env.AI, c.env.VECTORIZE);
+    const result = await importCatalogRecords(c.env.DB, validRecords);
     return c.json({
       records_synced: result.recordsSynced,
-      records_indexed: result.recordsIndexed,
       errors: result.errors,
       duration_ms: result.durationMs,
     });
   }
 
   // No records provided; try fetching directly (will fail in Workers due to GET+body)
-  const result = await syncCatalog(c.env.DB, c.env.AI, c.env.VECTORIZE);
+  const result = await syncCatalog(c.env.DB);
   return c.json({
     records_synced: result.recordsSynced,
-    records_indexed: result.recordsIndexed,
     errors: result.errors,
     duration_ms: result.durationMs,
-  });
-});
-
-/**
- * POST /admin/catalog/sync-local - Rebuild nemar_catalog from local D1 state.
- *
- * Reads datasets + enrichment_json directly (no HTTP to legacy nemar.org)
- * and INSERTs OR REPLACEs every active public catalog row. Use this when:
- *   - new datasets created via the in-process pipeline are missing from
- *     the catalog (catalog-sync.ts pulls from legacy and doesn't see them);
- *   - operators want a fresh cache rebuild without waiting for the legacy
- *     cron;
- *   - the legacy nemar.org datapipeline is offline.
- *
- * The hot path (enrichment + reindex) already calls
- * syncNemarCatalogFromEnrichment to UPSERT individual rows; this endpoint
- * is the bulk equivalent for occasional sweeps.
- *
- * Tracking: nemarOrg/nemar-cli#544 (retire legacy catalog-sync entirely
- * once this path is the only ingestion).
- */
-adminRoutes.post("/catalog/sync-local", async (c) => {
-  const { syncCatalogFromLocal } = await import("../services/catalog-from-local");
-  const t0 = Date.now();
-  const result = await syncCatalogFromLocal(c.env.DB);
-  return c.json({
-    scanned: result.scanned,
-    upserted: result.upserted,
-    errors: result.errors,
-    duration_ms: Date.now() - t0,
   });
 });
 
@@ -5370,9 +5381,12 @@ adminRoutes.get("/catalog/status", async (c) => {
   const db = c.env.DB;
 
   try {
+    // #646: records_indexed is no longer written (vectors are re-embedded
+    // lazily by the embedding_dirty drain cron, not counted during sync), so
+    // it's dropped from the status projection.
     const logs = await db
       .prepare(
-        `SELECT id, started_at, completed_at, records_synced, records_indexed, errors, status
+        `SELECT id, started_at, completed_at, records_synced, errors, status
          FROM catalog_sync_log
          ORDER BY started_at DESC
          LIMIT 10`,
@@ -5382,13 +5396,17 @@ adminRoutes.get("/catalog/status", async (c) => {
         started_at: string;
         completed_at: string | null;
         records_synced: number;
-        records_indexed: number;
         errors: string | null;
         status: string;
       }>();
 
+    // #646: the catalog is now the folded legacy rows in `datasets` (the
+    // sentinel-owned source-of-truth rows), not the dropped nemar_catalog table.
     const catalogCount = await db
-      .prepare("SELECT COUNT(*) AS count FROM nemar_catalog")
+      .prepare(
+        "SELECT COUNT(*) AS count FROM datasets WHERE owner_user_id = ? AND status = 'active'",
+      )
+      .bind(SYSTEM_USER_ID)
       .first<{ count: number }>();
 
     return c.json({
@@ -5397,15 +5415,78 @@ adminRoutes.get("/catalog/status", async (c) => {
     });
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    if (msg.includes("no such table")) {
+    // Narrow the graceful path to a missing catalog_sync_log (the only
+    // optional table here). A missing `datasets` is a real infra failure and
+    // must surface as a 500, not a misleading "not initialized" 200.
+    if (msg.includes("no such table: catalog_sync_log")) {
       return c.json({
         catalog_size: 0,
         recent_syncs: [],
-        message: "Catalog not initialized (migration 0018 pending)",
+        message: "catalog_sync_log not initialized",
       });
     }
     return c.json({ error: "Failed to query catalog status", details: msg }, 500);
   }
+});
+
+/**
+ * POST /admin/vectorize/reindex-all - Re-embed datasets' vectors from the
+ * `datasets` source of truth (#646 Phase 4). Fixes the stale-vector backlog.
+ *
+ * Keyset-paginated to stay within Worker limits: pass `after` = the previous
+ * response's `last_id` and repeat until `has_more` is false.
+ * Body: { limit?: number (1..500, default 200), after?: string, dry_run?: boolean }
+ */
+adminRoutes.post("/vectorize/reindex-all", async (c) => {
+  if (!c.env.AI || !c.env.VECTORIZE) {
+    return c.json({ error: "AI or VECTORIZE binding not configured" }, 400);
+  }
+  let body: { limit?: number; after?: string; dry_run?: boolean } = {};
+  try {
+    body = await c.req.json();
+  } catch {
+    // empty body is fine; defaults apply
+  }
+  const limit = Math.min(Math.max(Number(body.limit) || 200, 1), 500);
+  const after = typeof body.after === "string" ? body.after : "";
+  const startedAt = Date.now();
+
+  const rows = await c.env.DB.prepare(
+    `SELECT dataset_id FROM datasets
+     WHERE status = 'active' AND visibility = 'public'
+       AND (is_sandbox = 0 OR is_sandbox IS NULL)
+       AND dataset_id > ?
+     ORDER BY dataset_id
+     LIMIT ?`,
+  )
+    .bind(after, limit)
+    .all<{ dataset_id: string }>();
+  const ids = (rows.results ?? []).map((r) => r.dataset_id);
+  const lastId = ids.at(-1) ?? after;
+  const hasMore = ids.length === limit;
+
+  if (body.dry_run === true) {
+    return c.json({
+      dry_run: true,
+      total: ids.length,
+      last_id: lastId,
+      has_more: hasMore,
+      elapsed_ms: Date.now() - startedAt,
+    });
+  }
+
+  let embedded = 0;
+  for (const id of ids) {
+    if (await reembedDatasetVector(c.env.DB, c.env.AI, c.env.VECTORIZE, id)) embedded++;
+  }
+  return c.json({
+    scanned: ids.length,
+    embedded,
+    failed: ids.length - embedded,
+    last_id: lastId,
+    has_more: hasMore,
+    elapsed_ms: Date.now() - startedAt,
+  });
 });
 
 // ============================================================================

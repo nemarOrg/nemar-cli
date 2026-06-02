@@ -1,19 +1,21 @@
 /**
  * Catalog Sync Service
  *
- * Pulls the full dataset catalog from nemar.org's datapipeline API
- * and upserts it into the local D1 nemar_catalog table. Optionally
- * generates embeddings via Workers AI and indexes into Vectorize.
+ * Pulls the full dataset catalog from nemar.org's datapipeline API and folds
+ * it into the `datasets` source of truth (#646). New/changed rows are marked
+ * embedding_dirty=1 so the scheduled drain re-embeds them into the id-only
+ * Vectorize index.
  *
  * The nemar.org read API requires no authentication.
  * API: GET https://nemar.org/api/dataexplorer/datapipeline/records
  * Body (as JSON in GET): {"table_name":"dataexplorer_dataset","start":0,"limit":N}
  */
 
+import { SYSTEM_USER_ID } from "../lib/constants.js";
+
 const NEMAR_API_BASE = "https://nemar.org/api/dataexplorer/datapipeline";
 const FETCH_TIMEOUT_MS = 30_000;
 const BATCH_SIZE = 10; // D1 batch limit for bound parameters
-const EMBEDDING_MODEL = "@cf/baai/bge-small-en-v1.5";
 
 /** Raw record from the nemar.org dataexplorer_dataset table */
 export interface NemarCatalogRecord {
@@ -51,8 +53,8 @@ interface NemarRecordsResponse {
 }
 
 export interface CatalogSyncResult {
+  /** Number of records folded into the `datasets` source of truth. */
   recordsSynced: number;
-  recordsIndexed: number;
   errors: string[];
   durationMs: number;
 }
@@ -101,22 +103,6 @@ export async function fetchNemarCatalog(): Promise<NemarCatalogRecord[]> {
   return records;
 }
 
-/**
- * Build a pre-computed lowercase search text from record fields.
- * Used as a LIKE fallback when Vectorize is unavailable.
- */
-function buildSearchText(record: NemarCatalogRecord): string {
-  const parts = [
-    record.id,
-    record.name,
-    record.Authors,
-    record.tasks,
-    record.modalities,
-    record.readme?.slice(0, 500),
-  ].filter(Boolean);
-  return parts.join(" ").toLowerCase();
-}
-
 /** Determine the source and source_id for deduplication */
 function classifySource(record: NemarCatalogRecord): { source: string; sourceId: string | null } {
   if (record.id.startsWith("ds")) {
@@ -129,136 +115,148 @@ function classifySource(record: NemarCatalogRecord): { source: string; sourceId:
 }
 
 /**
- * Sync catalog records into D1 nemar_catalog table.
- * Uses INSERT OR REPLACE for upsert behavior.
+ * #646: fold catalog records into the `datasets` source of truth -- the only
+ * catalog write (the nemar_catalog cache was dropped in Phase 6). New/changed
+ * rows get embedding_dirty=1 so the drain cron re-embeds them.
+ *
+ * Dedup mirrors the 0028 fold: a record that is already an active managed
+ * dataset, or a ds* shadow of a managed on* mirror, is skipped (without dedup
+ * a folded shadow would double-list alongside the managed row in the catalog).
+ *
+ * The `ON CONFLICT(dataset_id) DO UPDATE ... WHERE owner_user_id = SENTINEL`
+ * guard means a catalog record colliding with a MANAGED dataset is a no-op:
+ * managed facts and ownership are never clobbered by the legacy ingest.
  */
-async function syncToD1(db: D1Database, records: NemarCatalogRecord[]): Promise<number> {
-  let synced = 0;
+export async function upsertCatalogRecordsToDatasets(
+  db: D1Database,
+  records: NemarCatalogRecord[],
+): Promise<{ upserted: number; failed: string[] }> {
+  if (records.length === 0) return { upserted: 0, failed: [] };
 
-  for (let i = 0; i < records.length; i += BATCH_SIZE) {
-    const batch = records.slice(i, i + BATCH_SIZE);
+  const [managedRows, shadowRows] = await Promise.all([
+    db
+      .prepare("SELECT dataset_id FROM datasets WHERE owner_user_id != ? AND status = 'active'")
+      .bind(SYSTEM_USER_ID)
+      .all<{ dataset_id: string }>(),
+    db
+      .prepare(
+        "SELECT source_id FROM datasets WHERE owner_user_id != ? AND status = 'active' AND source = 'openneuro' AND source_id IS NOT NULL",
+      )
+      .bind(SYSTEM_USER_ID)
+      .all<{ source_id: string }>(),
+  ]);
+  const managedIds = new Set((managedRows.results || []).map((r) => r.dataset_id));
+  const shadowIds = new Set((shadowRows.results || []).map((r) => r.source_id));
+  const survivors = records.filter((r) => !managedIds.has(r.id) && !shadowIds.has(r.id));
+  if (survivors.length === 0) return { upserted: 0, failed: [] };
+
+  let upserted = 0;
+  let failedCount = 0;
+  const failed: string[] = [];
+  for (let i = 0; i < survivors.length; i += BATCH_SIZE) {
+    const batch = survivors.slice(i, i + BATCH_SIZE);
     const statements = batch.map((record) => {
       const { source, sourceId } = classifySource(record);
       return db
         .prepare(
-          `INSERT OR REPLACE INTO nemar_catalog
-           (id, name, description, modalities, participants, age_min, age_max,
-            tasks, authors, doi, license, bids_version, file_size,
-            file_size_formatted, total_files, sessions_count, latest_version,
-            publish_date, created_date, uploader, readme, source, source_id,
-            is_processed, search_text, synced_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))`,
+          `INSERT INTO datasets (
+             dataset_id, name, description, owner_user_id, status, visibility, is_sandbox,
+             source, source_id, subject_count, modalities, age_min, age_max, file_size,
+             total_files, tasks, authors, license, readme, bids_version, sessions_count,
+             publish_date, uploader, file_size_formatted, concept_doi, created_at, updated_at, embedding_dirty)
+           VALUES (?, ?, ?, ?, 'active', 'public', 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), 1)
+           ON CONFLICT(dataset_id) DO UPDATE SET
+             name = excluded.name,
+             description = excluded.description,
+             source = excluded.source,
+             source_id = excluded.source_id,
+             subject_count = excluded.subject_count,
+             modalities = excluded.modalities,
+             age_min = excluded.age_min,
+             age_max = excluded.age_max,
+             file_size = excluded.file_size,
+             total_files = excluded.total_files,
+             tasks = excluded.tasks,
+             authors = excluded.authors,
+             license = excluded.license,
+             readme = excluded.readme,
+             bids_version = excluded.bids_version,
+             sessions_count = excluded.sessions_count,
+             publish_date = excluded.publish_date,
+             uploader = excluded.uploader,
+             file_size_formatted = excluded.file_size_formatted,
+             concept_doi = excluded.concept_doi,
+             updated_at = datetime('now'),
+             embedding_dirty = 1
+           WHERE datasets.owner_user_id = ${SYSTEM_USER_ID}`,
         )
         .bind(
           record.id,
           record.name,
-          record.readme?.slice(0, 500) || null,
-          record.modalities || null,
-          record.participants || 0,
-          record.age_min || 0,
-          record.age_max || 0,
-          record.tasks || null,
-          record.Authors || null,
-          record.DatasetDOI || null,
-          record.License || null,
-          record.BIDSVersion || null,
-          record.file_size || 0,
-          record.byte_size_format || null,
-          record.totalFiles || 0,
-          record.sessionsNum || 0,
-          record.latestSnapshot || null,
-          record.publishDate || null,
-          record.created || null,
-          record.uploader || null,
-          record.readme || null,
+          record.readme?.slice(0, 500) || null, // description = readme[:500]
+          SYSTEM_USER_ID,
           source,
           sourceId,
-          record.processed || 0,
-          buildSearchText(record),
+          record.participants || 0,
+          record.modalities || null,
+          record.age_min || 0,
+          record.age_max || 0,
+          record.file_size || 0,
+          record.totalFiles || 0,
+          record.tasks || null,
+          record.Authors || null,
+          record.License || null,
+          record.readme?.slice(0, 8192) || null, // datasets.readme capped at 8 KB
+          record.BIDSVersion || null,
+          record.sessionsNum || 0,
+          record.publishDate || null,
+          record.uploader || null,
+          record.byte_size_format || null,
+          record.DatasetDOI || null,
+          record.created || null,
         );
     });
-
-    await db.batch(statements);
-    synced += batch.length;
-  }
-
-  return synced;
-}
-
-/**
- * Build embedding text for a catalog record.
- * Combines title, description, modalities, tasks, and authors
- * into a single string for semantic embedding.
- */
-function buildEmbeddingText(record: NemarCatalogRecord): string {
-  const parts = [
-    record.name,
-    record.modalities ? `Modalities: ${record.modalities}` : "",
-    record.tasks ? `Tasks: ${record.tasks}` : "",
-    record.Authors ? `Authors: ${record.Authors}` : "",
-    record.readme?.slice(0, 1000) || "",
-  ].filter(Boolean);
-  return parts.join("\n");
-}
-
-/**
- * Generate embeddings and upsert into Vectorize index.
- * Processes records in batches to stay within Workers AI limits.
- */
-async function syncToVectorize(
-  ai: Ai,
-  vectorize: VectorizeIndex,
-  records: NemarCatalogRecord[],
-): Promise<number> {
-  let indexed = 0;
-  const VECTOR_BATCH = 20;
-
-  for (let i = 0; i < records.length; i += VECTOR_BATCH) {
-    const batch = records.slice(i, i + VECTOR_BATCH);
-    const texts = batch.map(buildEmbeddingText);
-
-    // Workers AI supports batch embedding
-    const embeddings = await ai.run(EMBEDDING_MODEL, { text: texts });
-    const embeddingData = "data" in embeddings ? embeddings.data : undefined;
-    if (!embeddingData || embeddingData.length !== batch.length) {
-      console.error(
-        `[catalog-sync] Embedding batch mismatch: expected ${batch.length}, got ${embeddingData?.length ?? 0}`,
-      );
-      continue;
+    try {
+      const batchResults = await db.batch(statements);
+      // Count one per statement that wrote a row: an INSERT or sentinel UPDATE
+      // reports changes>0; a managed-row collision (the WHERE owner=-1 guard)
+      // reports changes=0. Do NOT sum raw `changes` -- the datasets_fts5
+      // triggers inflate it by the per-row shadow-table writes (#646).
+      for (const r of batchResults) {
+        if (((r as { meta?: { changes?: number } }).meta?.changes ?? 0) > 0) upserted++;
+      }
+    } catch (err) {
+      // A single bad record (or a transient D1 error) must NOT abort the rest of
+      // the import (#646 review): skip this batch, record it, keep folding the
+      // remaining ones. The caller surfaces `failed` into catalog_sync_log.
+      const msg = err instanceof Error ? err.message : String(err);
+      const ids = batch.map((r) => r.id).join(", ");
+      console.error(`[catalog-sync] batch at offset ${i} failed (${batch.length} records): ${msg}`);
+      failed.push(`${ids}: ${msg}`);
+      failedCount += batch.length;
     }
-
-    const vectors: VectorizeVector[] = batch.map((record, j) => ({
-      id: record.id,
-      values: embeddingData[j],
-      metadata: {
-        name: record.name,
-        modalities: record.modalities || "",
-        participants: record.participants || 0,
-        doi: record.DatasetDOI || "",
-        tasks: record.tasks || "",
-        authors: record.Authors || "",
-      },
-    }));
-
-    await vectorize.upsert(vectors);
-    indexed += vectors.length;
   }
-
-  return indexed;
+  const collisions = survivors.length - upserted - failedCount;
+  if (collisions > 0) {
+    // Some survivors collided with a NON-active managed row and were no-oped by
+    // the guard (managed facts/ownership must not be clobbered by legacy ingest).
+    // Surfaced so the gap isn't silent.
+    console.warn(
+      `[catalog-sync] ${collisions}/${survivors.length} catalog records did not fold into datasets (managed-row collisions)`,
+    );
+  }
+  return { upserted, failed };
 }
 
 /**
- * Run a full catalog sync: fetch from nemar.org, upsert into D1 and Vectorize.
+ * Run a full catalog sync: fetch from nemar.org and fold into the `datasets`
+ * source of truth. Sets embedding_dirty=1 on new/changed rows so the scheduled
+ * drain re-embeds them (#646).
  */
-export async function syncCatalog(
-  db: D1Database,
-  ai?: Ai,
-  vectorize?: VectorizeIndex,
-): Promise<CatalogSyncResult> {
+export async function syncCatalog(db: D1Database): Promise<CatalogSyncResult> {
   const startTime = Date.now();
   const errors: string[] = [];
   let recordsSynced = 0;
-  let recordsIndexed = 0;
 
   // Start sync log
   const logResult = await db
@@ -272,35 +270,22 @@ export async function syncCatalog(
     const records = await fetchNemarCatalog();
     console.log(`[catalog-sync] Fetched ${records.length} records`);
 
-    // Upsert into D1
-    recordsSynced = await syncToD1(db, records);
-    console.log(`[catalog-sync] Synced ${recordsSynced} records to D1`);
-
-    // Index into Vectorize (if bindings available)
-    if (ai && vectorize) {
-      try {
-        recordsIndexed = await syncToVectorize(ai, vectorize, records);
-        console.log(`[catalog-sync] Indexed ${recordsIndexed} records in Vectorize`);
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        console.error("[catalog-sync] Vectorize indexing failed:", msg);
-        errors.push(`Vectorize: ${msg}`);
-        // Non-fatal: D1 sync succeeded, search will fall back to LIKE
-      }
-    } else {
-      console.log("[catalog-sync] Vectorize not configured, skipping embedding");
-    }
+    // Fold into the datasets source of truth (the only catalog write). Sets
+    // embedding_dirty=1 on new/changed rows for the scheduled re-embed.
+    const folded = await upsertCatalogRecordsToDatasets(db, records);
+    recordsSynced = folded.upserted;
+    if (folded.failed.length > 0) errors.push(...folded.failed);
+    console.log(`[catalog-sync] Folded ${recordsSynced} records into datasets`);
 
     // Update sync log
     await db
       .prepare(
         `UPDATE catalog_sync_log
          SET status = 'completed', completed_at = datetime('now'),
-             records_synced = ?, records_indexed = ?,
-             errors = ?
+             records_synced = ?, errors = ?
          WHERE id = ?`,
       )
-      .bind(recordsSynced, recordsIndexed, errors.length > 0 ? errors.join("; ") : null, logId)
+      .bind(recordsSynced, errors.length > 0 ? errors.join("; ") : null, logId)
       .run();
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
@@ -326,26 +311,22 @@ export async function syncCatalog(
 
   return {
     recordsSynced,
-    recordsIndexed,
     errors,
     durationMs: Date.now() - startTime,
   };
 }
 
 /**
- * Import pre-fetched catalog records into D1 and optionally Vectorize.
+ * Import pre-fetched catalog records into the `datasets` source of truth.
  * Called by the admin endpoint when the GitHub Action POSTs records.
  */
 export async function importCatalogRecords(
   db: D1Database,
   records: NemarCatalogRecord[],
-  ai?: Ai,
-  vectorize?: VectorizeIndex,
 ): Promise<CatalogSyncResult> {
   const startTime = Date.now();
   const errors: string[] = [];
   let recordsSynced = 0;
-  let recordsIndexed = 0;
 
   const logResult = await db
     .prepare("INSERT INTO catalog_sync_log (status) VALUES ('running')")
@@ -355,28 +336,21 @@ export async function importCatalogRecords(
   try {
     console.log(`[catalog-sync] Importing ${records.length} pre-fetched records`);
 
-    recordsSynced = await syncToD1(db, records);
-    console.log(`[catalog-sync] Synced ${recordsSynced} records to D1`);
-
-    if (ai && vectorize) {
-      try {
-        recordsIndexed = await syncToVectorize(ai, vectorize, records);
-        console.log(`[catalog-sync] Indexed ${recordsIndexed} records in Vectorize`);
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        console.error("[catalog-sync] Vectorize indexing failed:", msg);
-        errors.push(`Vectorize: ${msg}`);
-      }
-    }
+    // Fold into the datasets source of truth (the only catalog write). Sets
+    // embedding_dirty=1 on new/changed rows for the scheduled re-embed.
+    const folded = await upsertCatalogRecordsToDatasets(db, records);
+    recordsSynced = folded.upserted;
+    if (folded.failed.length > 0) errors.push(...folded.failed);
+    console.log(`[catalog-sync] Folded ${recordsSynced} records into datasets`);
 
     await db
       .prepare(
         `UPDATE catalog_sync_log
          SET status = 'completed', completed_at = datetime('now'),
-             records_synced = ?, records_indexed = ?, errors = ?
+             records_synced = ?, errors = ?
          WHERE id = ?`,
       )
-      .bind(recordsSynced, recordsIndexed, errors.length > 0 ? errors.join("; ") : null, logId)
+      .bind(recordsSynced, errors.length > 0 ? errors.join("; ") : null, logId)
       .run();
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
@@ -402,7 +376,6 @@ export async function importCatalogRecords(
 
   return {
     recordsSynced,
-    recordsIndexed,
     errors,
     durationMs: Date.now() - startTime,
   };
