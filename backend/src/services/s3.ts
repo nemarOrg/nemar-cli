@@ -7,6 +7,14 @@
  */
 
 import { AwsClient } from "aws4fetch";
+import {
+  type BucketPolicy,
+  MAX_BUCKET_POLICY_BYTES,
+  addPrivateDataset,
+  isDatasetPrivate,
+  policyByteSize,
+  removePrivateDataset,
+} from "./bucket-policy.js";
 import { isValidDatasetId } from "./datasetId.js";
 
 export interface PresignedUrlOptions {
@@ -22,18 +30,9 @@ interface GenerateUrlsParams {
   expiresIn?: number; // seconds, default 3600 (1 hour)
 }
 
-interface S3PolicyStatement {
-  Sid?: string;
-  Effect: string;
-  Principal: string | { [key: string]: string | string[] };
-  Action: string | string[];
-  Resource: string | string[];
-}
-
-interface S3BucketPolicy {
-  Version: string;
-  Statement: S3PolicyStatement[];
-}
+// Bucket-policy shape and pure transforms live in ./bucket-policy.ts. The
+// public-access model is documented there: a single public-by-default Allow
+// with a NotResource carve-out for private (and staging) prefixes.
 
 /**
  * Create an AWS client for S3 operations
@@ -784,9 +783,7 @@ export async function applyObjectLockBatch(
  * Get the current S3 bucket policy
  * Returns null if no policy is set
  */
-export async function getBucketPolicy(
-  options: PresignedUrlOptions,
-): Promise<S3BucketPolicy | null> {
+export async function getBucketPolicy(options: PresignedUrlOptions): Promise<BucketPolicy | null> {
   const { bucket, region } = options;
   const aws = createS3Client(options);
   const url = `https://${bucket}.s3.${region}.amazonaws.com/?policy`;
@@ -807,63 +804,27 @@ export async function getBucketPolicy(
 }
 
 /**
- * Add a public read statement to the bucket policy for a specific dataset
- *
- * This allows anyone to download files from the dataset prefix without authentication.
- * Creates a new statement with unique Sid for the dataset.
- *
- * Note: S3 bucket policies have a 20KB size limit (~100 datasets max)
+ * Overwrite the bucket policy with the given document.
  */
-export async function addPublicReadPolicy(
-  options: PresignedUrlOptions,
-  datasetId: string,
-): Promise<void> {
-  if (!isValidDatasetId(datasetId)) {
-    throw new Error(`Invalid dataset ID for bucket policy: "${datasetId}"`);
+async function putBucketPolicy(options: PresignedUrlOptions, policy: BucketPolicy): Promise<void> {
+  const size = policyByteSize(policy);
+  if (size > MAX_BUCKET_POLICY_BYTES) {
+    // Should be unreachable in the deny-list model (the policy scales with the
+    // small private set), but guard so we fail loudly rather than let AWS
+    // reject the PUT with an opaque MalformedPolicy error.
+    throw new Error(
+      `Bucket policy would be ${size} bytes, exceeding the ${MAX_BUCKET_POLICY_BYTES}-byte limit`,
+    );
   }
+
   const { bucket, region } = options;
   const aws = createS3Client(options);
-
-  // Fetch current policy or create new one
-  let policy = await getBucketPolicy(options);
-  if (!policy) {
-    policy = {
-      Version: "2012-10-17",
-      Statement: [],
-    };
-  }
-
-  const sid = `PublicReadDataset_${datasetId}`;
-
-  // Check if statement already exists (idempotent)
-  const existingIndex = policy.Statement.findIndex((s: { Sid?: string }) => s.Sid === sid);
-
-  if (existingIndex >= 0) {
-    // Already exists, no change needed
-    return;
-  }
-
-  // Add new public read statement
-  const newStatement = {
-    Sid: sid,
-    Effect: "Allow",
-    Principal: "*",
-    Action: "s3:GetObject",
-    Resource: `arn:aws:s3:::${bucket}/${datasetId}/*`,
-  };
-
-  policy.Statement.push(newStatement);
-
-  // Put updated policy
-  const policyJson = JSON.stringify(policy);
   const url = `https://${bucket}.s3.${region}.amazonaws.com/?policy`;
 
   const signed = await aws.sign(url, {
     method: "PUT",
-    body: policyJson,
-    headers: {
-      "Content-Type": "application/json",
-    },
+    body: JSON.stringify(policy),
+    headers: { "Content-Type": "application/json" },
   });
 
   const response = await fetch(signed);
@@ -874,72 +835,97 @@ export async function addPublicReadPolicy(
 }
 
 /**
- * Remove public read statement from the bucket policy for a specific dataset
+ * Apply a private/public transition to the bucket policy, then verify the
+ * change persisted (read-after-write) and retry on a lost update.
  *
- * This reverts a dataset to private by removing its public access statement.
- * Idempotent: returns successfully if statement doesn't exist.
+ * The bucket policy is a single shared document mutated read-modify-write, so
+ * two concurrent transitions can clobber each other. The private direction is
+ * leak-sensitive (a dropped carve-out makes objects publicly readable), so we
+ * re-read and retry until the policy reflects the intended state.
  */
-export async function removePublicReadPolicy(
+async function transitionDatasetVisibility(
   options: PresignedUrlOptions,
   datasetId: string,
+  makePrivate: boolean,
 ): Promise<void> {
   if (!isValidDatasetId(datasetId)) {
     throw new Error(`Invalid dataset ID for bucket policy: "${datasetId}"`);
   }
-  const { bucket, region } = options;
-  const aws = createS3Client(options);
+  const { bucket } = options;
 
-  // Fetch current policy
-  const policy = await getBucketPolicy(options);
-  if (!policy) {
-    // No policy exists, nothing to remove
-    return;
+  const MAX_ATTEMPTS = 3;
+  let lastSeen: boolean | null = null;
+  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+    const current = await getBucketPolicy(options);
+
+    // Fast path: already in the desired state. Avoids a needless policy
+    // rewrite (and the concurrent-write race it would invite) on idempotent
+    // calls, e.g. deleting an already-public dataset.
+    if (isDatasetPrivate(current, bucket, datasetId) === makePrivate) {
+      return;
+    }
+
+    const next = makePrivate
+      ? addPrivateDataset(current, bucket, datasetId)
+      : removePrivateDataset(current, bucket, datasetId);
+    await putBucketPolicy(options, next);
+
+    // Read-after-write: confirm the carve-out reflects the intended state.
+    const verifyPolicy = await getBucketPolicy(options);
+    lastSeen = isDatasetPrivate(verifyPolicy, bucket, datasetId);
+    if (lastSeen === makePrivate) {
+      return;
+    }
+    console.warn(
+      `[s3] Bucket-policy ${makePrivate ? "private" : "public"} transition for ${datasetId} ` +
+        `did not persist (attempt ${attempt}/${MAX_ATTEMPTS}); likely a concurrent update, retrying`,
+    );
   }
 
-  const sid = `PublicReadDataset_${datasetId}`;
-
-  // Filter out the statement for this dataset
-  const originalLength = policy.Statement.length;
-  policy.Statement = policy.Statement.filter((s: { Sid?: string }) => s.Sid !== sid);
-
-  // If no statement was removed, return early (idempotent)
-  if (policy.Statement.length === originalLength) {
-    return;
-  }
-
-  // Put updated policy
-  const policyJson = JSON.stringify(policy);
-  const url = `https://${bucket}.s3.${region}.amazonaws.com/?policy`;
-
-  const signed = await aws.sign(url, {
-    method: "PUT",
-    body: policyJson,
-    headers: {
-      "Content-Type": "application/json",
-    },
-  });
-
-  const response = await fetch(signed);
-  if (!response.ok) {
-    const errorText = await response.text();
-    throw new Error(`Failed to update bucket policy: HTTP ${response.status} - ${errorText}`);
-  }
+  throw new Error(
+    `Failed to mark ${datasetId} ${makePrivate ? "private" : "public"} after ${MAX_ATTEMPTS} attempts ` +
+      `(last observed private=${lastSeen}); concurrent bucket-policy update suspected`,
+  );
 }
 
 /**
- * Check if a dataset has public read access in the bucket policy
+ * Carve a dataset out of public access (make its objects non-public).
+ *
+ * Used at dataset creation and when reverting a dataset to private. Adds the
+ * dataset's prefix to the public-read statement's NotResource list; private
+ * objects then remain readable only via the existing IAM identity policies.
+ */
+export async function markDatasetPrivate(
+  options: PresignedUrlOptions,
+  datasetId: string,
+): Promise<void> {
+  await transitionDatasetVisibility(options, datasetId, true);
+}
+
+/**
+ * Grant a dataset public read access (remove its private carve-out).
+ *
+ * Used when publishing / making a repo public. Removes the dataset's prefix
+ * from the public-read statement's NotResource list so anonymous GetObject is
+ * allowed. Idempotent. Also used by deletion cleanup to drop a stale carve-out.
+ */
+export async function markDatasetPublic(
+  options: PresignedUrlOptions,
+  datasetId: string,
+): Promise<void> {
+  await transitionDatasetVisibility(options, datasetId, false);
+}
+
+/**
+ * Check whether a dataset currently has public read access (no private
+ * carve-out in the bucket policy).
  */
 export async function hasPublicRead(
   options: PresignedUrlOptions,
   datasetId: string,
 ): Promise<boolean> {
   const policy = await getBucketPolicy(options);
-  if (!policy) {
-    return false;
-  }
-
-  const sid = `PublicReadDataset_${datasetId}`;
-  return policy.Statement.some((s: { Sid?: string }) => s.Sid === sid);
+  return !isDatasetPrivate(policy, options.bucket, datasetId);
 }
 
 /**

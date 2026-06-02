@@ -103,13 +103,13 @@ import {
 } from "../services/repo-metadata";
 import { withRetry } from "../services/retry";
 import {
-  addPublicReadPolicy,
   applyObjectLockBatch,
   deleteDatasetObjects,
   getArchiveSize,
   getDatasetS3Stats,
   getManifest,
-  removePublicReadPolicy,
+  markDatasetPrivate,
+  markDatasetPublic,
   uploadManifest,
 } from "../services/s3";
 import {
@@ -2076,10 +2076,10 @@ adminRoutes.patch("/datasets/:id/visibility", zValidator("json", visibilitySchem
   // Update S3 bucket policy based on visibility
   try {
     if (visibility === "public") {
-      await addPublicReadPolicy(getS3Config(c.env), datasetId);
+      await markDatasetPublic(getS3Config(c.env), datasetId);
     } else {
-      // Remove public read access when reverting to private
-      await removePublicReadPolicy(getS3Config(c.env), datasetId);
+      // Carve the dataset back out of public access when reverting to private
+      await markDatasetPrivate(getS3Config(c.env), datasetId);
     }
   } catch (s3Error) {
     const s3Msg = s3Error instanceof Error ? s3Error.message : String(s3Error);
@@ -2118,9 +2118,10 @@ adminRoutes.patch("/datasets/:id/visibility", zValidator("json", visibilitySchem
     try {
       const s3Opts = getS3Config(c.env);
       if (visibility === "public") {
-        await removePublicReadPolicy(s3Opts, datasetId);
+        // We had granted public access; revert by re-carving it out
+        await markDatasetPrivate(s3Opts, datasetId);
       } else {
-        await addPublicReadPolicy(s3Opts, datasetId);
+        await markDatasetPublic(s3Opts, datasetId);
       }
       s3Reverted = true;
     } catch (s3RevertError) {
@@ -2600,7 +2601,8 @@ adminRoutes.post("/publish/:id/deny", zValidator("json", denySchema), async (c) 
  * Steps:
  *  1. ci_check - Verify CI exists and is passing (deploy if missing)
  *  2. repo_public - Make repository public
- *  3. s3_public_read - Add public read S3 bucket policy for dataset
+ *  3. s3_public_read - Grant public read by removing the dataset's private
+ *      carve-out from the bucket policy (see services/bucket-policy.ts)
  *  4. tag_protect - Apply tag protection rules (prevent version tag deletion)
  *  5. doi_create - Create concept DOI if not exists
  *  6. update_metadata - Update dataset_description.json with DOI
@@ -3007,7 +3009,7 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
       await startStep("s3_public_read");
 
       const { attempts: s3PublicAttempts } = await withRetry(
-        () => addPublicReadPolicy(getS3Config(c.env), datasetId),
+        () => markDatasetPublic(getS3Config(c.env), datasetId),
         "s3_public_read",
       );
 
