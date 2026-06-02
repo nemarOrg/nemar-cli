@@ -11,7 +11,7 @@ import type { Bindings } from "../types/bindings.js";
 import { isValidDatasetId } from "./datasetId.js";
 import { getDatasetsToken } from "./github-auth.js";
 import { deleteRepository } from "./github.js";
-import { type DeleteResult, deleteDatasetObjects } from "./s3.js";
+import { type DeleteResult, deleteDatasetObjects, markDatasetPublic } from "./s3.js";
 
 export interface DeletionSteps {
   github: { success: boolean; error?: string };
@@ -91,13 +91,13 @@ export async function deleteDatasetCascade(
   if (options.skipS3) {
     steps.s3.skipped = true;
   } else {
+    const s3Options = {
+      bucket: env.S3_BUCKET,
+      region: env.AWS_REGION,
+      accessKeyId: env.AWS_ACCESS_KEY_ID,
+      secretAccessKey: env.AWS_SECRET_ACCESS_KEY,
+    };
     try {
-      const s3Options = {
-        bucket: env.S3_BUCKET,
-        region: env.AWS_REGION,
-        accessKeyId: env.AWS_ACCESS_KEY_ID,
-        secretAccessKey: env.AWS_SECRET_ACCESS_KEY,
-      };
       const s3Result = await deleteDatasetObjects(
         s3Options,
         datasetId,
@@ -112,6 +112,17 @@ export async function deleteDatasetCascade(
       const msg = err instanceof Error ? err.message : String(err);
       warnings.push(`S3 deletion failed: ${msg}`);
       steps.s3.failed.push({ key: `${datasetId}/*`, error: msg });
+    }
+
+    // Drop the dataset's private carve-out from the bucket policy so it does
+    // not linger after the prefix is gone. Best-effort: a stale carve-out is
+    // harmless (it keeps a now-empty prefix private), so a failure here must
+    // not fail the deletion.
+    try {
+      await markDatasetPublic(s3Options, datasetId);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      warnings.push(`Bucket-policy carve-out cleanup failed: ${msg}`);
     }
   }
 

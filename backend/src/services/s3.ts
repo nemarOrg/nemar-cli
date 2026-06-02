@@ -7,6 +7,14 @@
  */
 
 import { AwsClient } from "aws4fetch";
+import {
+  type BucketPolicy,
+  MAX_BUCKET_POLICY_BYTES,
+  addPrivateDataset,
+  isDatasetPrivate,
+  policyByteSize,
+  removePrivateDataset,
+} from "./bucket-policy.js";
 import { isValidDatasetId } from "./datasetId.js";
 
 export interface PresignedUrlOptions {
@@ -22,18 +30,9 @@ interface GenerateUrlsParams {
   expiresIn?: number; // seconds, default 3600 (1 hour)
 }
 
-interface S3PolicyStatement {
-  Sid?: string;
-  Effect: string;
-  Principal: string | { [key: string]: string | string[] };
-  Action: string | string[];
-  Resource: string | string[];
-}
-
-interface S3BucketPolicy {
-  Version: string;
-  Statement: S3PolicyStatement[];
-}
+// Bucket-policy shape and pure transforms live in ./bucket-policy.ts. The
+// public-access model is documented there: a single public-by-default Allow
+// with a NotResource carve-out for private (and staging) prefixes.
 
 /**
  * Create an AWS client for S3 operations
@@ -784,9 +783,7 @@ export async function applyObjectLockBatch(
  * Get the current S3 bucket policy
  * Returns null if no policy is set
  */
-export async function getBucketPolicy(
-  options: PresignedUrlOptions,
-): Promise<S3BucketPolicy | null> {
+export async function getBucketPolicy(options: PresignedUrlOptions): Promise<BucketPolicy | null> {
   const { bucket, region } = options;
   const aws = createS3Client(options);
   const url = `https://${bucket}.s3.${region}.amazonaws.com/?policy`;
@@ -803,67 +800,38 @@ export async function getBucketPolicy(
   }
 
   const policyText = await response.text();
-  return JSON.parse(policyText);
+  try {
+    return JSON.parse(policyText);
+  } catch (parseErr) {
+    const msg = parseErr instanceof Error ? parseErr.message : String(parseErr);
+    throw new Error(
+      `Failed to parse bucket policy for "${bucket}": ${msg} (body: ${policyText.slice(0, 200)})`,
+    );
+  }
 }
 
 /**
- * Add a public read statement to the bucket policy for a specific dataset
- *
- * This allows anyone to download files from the dataset prefix without authentication.
- * Creates a new statement with unique Sid for the dataset.
- *
- * Note: S3 bucket policies have a 20KB size limit (~100 datasets max)
+ * Overwrite the bucket policy with the given document.
  */
-export async function addPublicReadPolicy(
-  options: PresignedUrlOptions,
-  datasetId: string,
-): Promise<void> {
-  if (!isValidDatasetId(datasetId)) {
-    throw new Error(`Invalid dataset ID for bucket policy: "${datasetId}"`);
+async function putBucketPolicy(options: PresignedUrlOptions, policy: BucketPolicy): Promise<void> {
+  const size = policyByteSize(policy);
+  if (size > MAX_BUCKET_POLICY_BYTES) {
+    // Should be unreachable in the deny-list model (the policy scales with the
+    // small private set), but guard so we fail loudly rather than let AWS
+    // reject the PUT with an opaque MalformedPolicy error.
+    throw new Error(
+      `Bucket policy would be ${size} bytes, exceeding the ${MAX_BUCKET_POLICY_BYTES}-byte limit`,
+    );
   }
+
   const { bucket, region } = options;
   const aws = createS3Client(options);
-
-  // Fetch current policy or create new one
-  let policy = await getBucketPolicy(options);
-  if (!policy) {
-    policy = {
-      Version: "2012-10-17",
-      Statement: [],
-    };
-  }
-
-  const sid = `PublicReadDataset_${datasetId}`;
-
-  // Check if statement already exists (idempotent)
-  const existingIndex = policy.Statement.findIndex((s: { Sid?: string }) => s.Sid === sid);
-
-  if (existingIndex >= 0) {
-    // Already exists, no change needed
-    return;
-  }
-
-  // Add new public read statement
-  const newStatement = {
-    Sid: sid,
-    Effect: "Allow",
-    Principal: "*",
-    Action: "s3:GetObject",
-    Resource: `arn:aws:s3:::${bucket}/${datasetId}/*`,
-  };
-
-  policy.Statement.push(newStatement);
-
-  // Put updated policy
-  const policyJson = JSON.stringify(policy);
   const url = `https://${bucket}.s3.${region}.amazonaws.com/?policy`;
 
   const signed = await aws.sign(url, {
     method: "PUT",
-    body: policyJson,
-    headers: {
-      "Content-Type": "application/json",
-    },
+    body: JSON.stringify(policy),
+    headers: { "Content-Type": "application/json" },
   });
 
   const response = await fetch(signed);
@@ -874,72 +842,109 @@ export async function addPublicReadPolicy(
 }
 
 /**
- * Remove public read statement from the bucket policy for a specific dataset
+ * Apply a private/public transition to the bucket policy, then verify the
+ * change persisted (read-after-write) and retry on a lost update.
  *
- * This reverts a dataset to private by removing its public access statement.
- * Idempotent: returns successfully if statement doesn't exist.
+ * The bucket policy is a single shared document mutated read-modify-write, so
+ * two concurrent transitions can clobber each other. The private direction is
+ * leak-sensitive (a dropped carve-out makes objects publicly readable), so we
+ * re-read and retry until the policy reflects the intended state.
  */
-export async function removePublicReadPolicy(
+async function transitionDatasetVisibility(
   options: PresignedUrlOptions,
   datasetId: string,
+  makePrivate: boolean,
 ): Promise<void> {
   if (!isValidDatasetId(datasetId)) {
     throw new Error(`Invalid dataset ID for bucket policy: "${datasetId}"`);
   }
-  const { bucket, region } = options;
-  const aws = createS3Client(options);
+  const { bucket } = options;
 
-  // Fetch current policy
-  const policy = await getBucketPolicy(options);
-  if (!policy) {
-    // No policy exists, nothing to remove
-    return;
+  const MAX_ATTEMPTS = 3;
+  let lastSeen: boolean | null = null;
+  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+    const current = await getBucketPolicy(options);
+
+    // Fast path: already in the desired state. Avoids a needless policy
+    // rewrite (and the concurrent-write race it would invite) on idempotent
+    // calls, e.g. deleting an already-public dataset.
+    if (isDatasetPrivate(current, bucket, datasetId) === makePrivate) {
+      return;
+    }
+
+    const next = makePrivate
+      ? addPrivateDataset(current, bucket, datasetId)
+      : removePrivateDataset(current, bucket, datasetId);
+    try {
+      await putBucketPolicy(options, next);
+    } catch (putErr) {
+      const msg = putErr instanceof Error ? putErr.message : String(putErr);
+      throw new Error(
+        `Bucket-policy ${makePrivate ? "private" : "public"} write for ${datasetId} failed ` +
+          `(attempt ${attempt}/${MAX_ATTEMPTS}): ${msg}`,
+      );
+    }
+
+    // Read-after-write: confirm the carve-out reflects the intended state.
+    const verifyPolicy = await getBucketPolicy(options);
+    lastSeen = isDatasetPrivate(verifyPolicy, bucket, datasetId);
+    if (lastSeen === makePrivate) {
+      return;
+    }
+    console.warn(
+      `[s3] Bucket-policy ${makePrivate ? "private" : "public"} transition for ${datasetId} ` +
+        `did not persist (attempt ${attempt}/${MAX_ATTEMPTS}); likely a concurrent update, retrying`,
+    );
   }
 
-  const sid = `PublicReadDataset_${datasetId}`;
-
-  // Filter out the statement for this dataset
-  const originalLength = policy.Statement.length;
-  policy.Statement = policy.Statement.filter((s: { Sid?: string }) => s.Sid !== sid);
-
-  // If no statement was removed, return early (idempotent)
-  if (policy.Statement.length === originalLength) {
-    return;
-  }
-
-  // Put updated policy
-  const policyJson = JSON.stringify(policy);
-  const url = `https://${bucket}.s3.${region}.amazonaws.com/?policy`;
-
-  const signed = await aws.sign(url, {
-    method: "PUT",
-    body: policyJson,
-    headers: {
-      "Content-Type": "application/json",
-    },
-  });
-
-  const response = await fetch(signed);
-  if (!response.ok) {
-    const errorText = await response.text();
-    throw new Error(`Failed to update bucket policy: HTTP ${response.status} - ${errorText}`);
-  }
+  throw new Error(
+    `Failed to mark ${datasetId} ${makePrivate ? "private" : "public"} after ${MAX_ATTEMPTS} attempts ` +
+      `(last observed private=${lastSeen}); concurrent bucket-policy update suspected`,
+  );
 }
 
 /**
- * Check if a dataset has public read access in the bucket policy
+ * Carve a dataset out of public access (make its objects non-public).
+ *
+ * Used at dataset creation and when reverting a dataset to private. Adds the
+ * dataset's prefix to the public-read statement's NotResource list; private
+ * objects then remain readable only via the existing IAM identity policies.
+ */
+export async function markDatasetPrivate(
+  options: PresignedUrlOptions,
+  datasetId: string,
+): Promise<void> {
+  await transitionDatasetVisibility(options, datasetId, true);
+}
+
+/**
+ * Grant a dataset public read access (remove its private carve-out).
+ *
+ * Used when publishing / making a repo public. Removes the dataset's prefix
+ * from the public-read statement's NotResource list so anonymous GetObject is
+ * allowed. Idempotent. Also used by deletion cleanup to drop a stale carve-out.
+ */
+export async function markDatasetPublic(
+  options: PresignedUrlOptions,
+  datasetId: string,
+): Promise<void> {
+  await transitionDatasetVisibility(options, datasetId, false);
+}
+
+/**
+ * Check whether a dataset currently has public read access (no private
+ * carve-out in the bucket policy).
+ *
+ * Note the public-by-default semantics: a dataset is "public" whenever it is
+ * not carved out, so a missing/empty policy reports `true` (the inverse of the
+ * old allow-list model, where no policy meant not-public).
  */
 export async function hasPublicRead(
   options: PresignedUrlOptions,
   datasetId: string,
 ): Promise<boolean> {
   const policy = await getBucketPolicy(options);
-  if (!policy) {
-    return false;
-  }
-
-  const sid = `PublicReadDataset_${datasetId}`;
-  return policy.Statement.some((s: { Sid?: string }) => s.Sid === sid);
+  return !isDatasetPrivate(policy, options.bucket, datasetId);
 }
 
 /**
@@ -955,6 +960,63 @@ export async function getArchiveUrl(
   const versionTag = version.startsWith("v") ? version : `v${version}`;
   const key = `${datasetId}/archives/${versionTag}.zip`;
   return generatePresignedGetUrl(options, key, expiresIn);
+}
+
+/**
+ * HEAD the archive zip object. true = present, false = 404 (e.g. archive
+ * generation still in flight after a fresh publish). Throws on 403
+ * (credentials) or other non-404 errors so the caller can 503 rather than
+ * 302 to a presigned URL that would dump an S3 NoSuchKey XML error (#670).
+ */
+export async function headArchive(
+  options: PresignedUrlOptions,
+  datasetId: string,
+  version: string,
+): Promise<boolean> {
+  const { bucket, region } = options;
+  const aws = createS3Client(options);
+  const versionTag = version.startsWith("v") ? version : `v${version}`;
+  const key = `${datasetId}/archives/${versionTag}.zip`;
+  const encodedKey = key.split("/").map(encodeURIComponent).join("/");
+  const url = `https://${bucket}.s3.${region}.amazonaws.com/${encodedKey}`;
+
+  // The first HEAD from a cold Worker isolate intermittently fails with a
+  // transient network error or 5xx; retry so a download click doesn't fail on
+  // the first try. 200 => present, 404 => absent.
+  const MAX_ATTEMPTS = 4;
+  let lastStatus = 0;
+  let lastError = "";
+  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+    let status: number;
+    try {
+      const signed = await aws.sign(url, { method: "HEAD" });
+      status = (await fetch(signed)).status;
+    } catch (err) {
+      lastError = err instanceof Error ? err.message : String(err);
+      continue; // network error: retry
+    }
+    if (status === 200) return true;
+    if (status === 404) return false;
+    lastStatus = status;
+    lastError = `HTTP ${status}`;
+    // Retry transient 5xx and an ambiguous 403 (a cold S3 edge can 403
+    // transiently; a missing object also 403s when the Worker creds lack
+    // s3:ListBucket). Break immediately on any other 4xx (a real client bug).
+    if (status !== 403 && status < 500) break;
+  }
+
+  // A persistent 403 means the archive is missing (no s3:ListBucket to get a
+  // 404) or the credentials are wrong; either way it is not downloadable, so
+  // report "not available" (the caller returns a clean 404) rather than 503ing
+  // the user. Log for operators -- a genuine credentials outage also breaks
+  // the manifest/summary routes, so it will not go unnoticed.
+  if (lastStatus === 403) {
+    console.warn(
+      `headArchive: persistent 403 for ${key} (missing archive without s3:ListBucket, or credentials issue); treating as not available`,
+    );
+    return false;
+  }
+  throw new Error(`Failed to HEAD ${key} after ${MAX_ATTEMPTS} attempts: ${lastError}`);
 }
 
 // ---------------------------------------------------------------------------

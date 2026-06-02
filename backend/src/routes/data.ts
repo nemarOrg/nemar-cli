@@ -44,7 +44,9 @@ import { buildPageBundle } from "../services/page-bundle";
 import {
   type PresignedUrlOptions,
   generatePresignedGetUrl,
+  getArchiveUrl,
   getManifest,
+  headArchive,
   loadSummary,
 } from "../services/s3";
 import type { Bindings, Variables } from "../types/bindings";
@@ -926,9 +928,45 @@ dataRoutes.get("/:datasetId/qa/*", (c) => {
 // actually public so we don't echo private/nonexistent ids back in a 308
 // Location header.
 dataRoutes.get("/:datasetId/:version", async (c) => {
-  const { datasetId } = c.req.param();
+  const { datasetId, version } = c.req.param();
   const dataset = await loadPublishedDataset(c.env, datasetId);
   if (!dataset) return notFound("Dataset not found");
+
+  // Archive zip download: /<id>/<version>.zip -> 302 to the presigned S3
+  // archive (stored at <id>/archives/v<version>.zip). The website's
+  // archiveZipUrl() links here (nemarOrg/website src/lib/data-api.ts) and
+  // expects the Worker to resolve+presign. Without this branch the request
+  // falls through to the 308 below, then resolveVersion("v1.0.0.zip") fails
+  // the version regex and 404s even though the archive exists. (#670)
+  if (version.endsWith(".zip")) {
+    const resolved = await resolveVersion(c.env.DB, datasetId, version.slice(0, -4));
+    if (!resolved.ok) return notFound("Version not found");
+    const s3 = s3OptionsFromEnv(c.env);
+    // HEAD first: the archive is generated asynchronously after publish, so a
+    // download click in that window would otherwise 302 to a presigned URL
+    // that dumps an S3 NoSuchKey XML error. Return a clean 404 instead. A
+    // credentials/5xx error throws -> 503. (#670, review)
+    let present: boolean;
+    try {
+      present = await headArchive(s3, datasetId, resolved.version);
+    } catch (err) {
+      console.error(`[data] archive HEAD failed for ${datasetId} ${resolved.version}:`, err);
+      return c.json({ error: "Unable to check archive availability" }, 503);
+    }
+    if (!present) {
+      return notFound(
+        "Archive not yet available for this version (generation may still be in progress)",
+      );
+    }
+    const archiveUrl = await getArchiveUrl(s3, datasetId, resolved.version);
+    // no-store: the Location carries a presigned, time-limited S3 URL; don't
+    // let a CDN serve one shared signed URL to many clients.
+    return new Response(null, {
+      status: 302,
+      headers: { Location: archiveUrl, "Cache-Control": "no-store" },
+    });
+  }
+
   const url = new URL(c.req.url);
   url.pathname = `${url.pathname.replace(/\/+$/, "")}/`;
   // Response.redirect emits no Cache-Control. Without one, downstream
@@ -956,6 +994,15 @@ dataRoutes.get("/:datasetId/:version", async (c) => {
 // route registration is needed.
 dataRoutes.get("/:datasetId/:version/*", (c) => {
   const { datasetId, version } = c.req.param();
+  // Trailing-slash archive form (/<id>/<version>.zip/) -> redirect to the
+  // canonical no-slash URL, which the /:datasetId/:version handler presigns.
+  // (#670 -- otherwise resolveVersion("v1.0.0.zip") 404s here.)
+  if (version.endsWith(".zip")) {
+    return new Response(null, {
+      status: 308,
+      headers: { Location: `/${datasetId}/${version}`, "Cache-Control": "public, max-age=300" },
+    });
+  }
   const prefix = `/${datasetId}/${version}/`;
   const idx = c.req.path.indexOf(prefix);
   const rawPath = idx === -1 ? "" : c.req.path.slice(idx + prefix.length);

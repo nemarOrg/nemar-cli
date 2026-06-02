@@ -87,7 +87,6 @@ import {
   removeCollaborator,
   setRepoVisibility,
   syncWorkflowTemplates,
-  triggerArchiveGeneration,
   triggerManifestGeneration,
   validateDeployedWorkflows,
 } from "../services/github";
@@ -105,13 +104,13 @@ import {
 } from "../services/repo-metadata";
 import { withRetry } from "../services/retry";
 import {
-  addPublicReadPolicy,
   applyObjectLockBatch,
   deleteDatasetObjects,
   getArchiveSize,
   getDatasetS3Stats,
   getManifest,
-  removePublicReadPolicy,
+  markDatasetPrivate,
+  markDatasetPublic,
   uploadManifest,
 } from "../services/s3";
 import {
@@ -156,7 +155,6 @@ type PublicationStep =
   | "publish_doi"
   | "version_doi"
   | "s3_lock"
-  | "generate_archive"
   | "sync_nemar"
   | "notify_user";
 
@@ -2082,10 +2080,10 @@ adminRoutes.patch("/datasets/:id/visibility", zValidator("json", visibilitySchem
   // Update S3 bucket policy based on visibility
   try {
     if (visibility === "public") {
-      await addPublicReadPolicy(getS3Config(c.env), datasetId);
+      await markDatasetPublic(getS3Config(c.env), datasetId);
     } else {
-      // Remove public read access when reverting to private
-      await removePublicReadPolicy(getS3Config(c.env), datasetId);
+      // Carve the dataset back out of public access when reverting to private
+      await markDatasetPrivate(getS3Config(c.env), datasetId);
     }
   } catch (s3Error) {
     const s3Msg = s3Error instanceof Error ? s3Error.message : String(s3Error);
@@ -2124,9 +2122,10 @@ adminRoutes.patch("/datasets/:id/visibility", zValidator("json", visibilitySchem
     try {
       const s3Opts = getS3Config(c.env);
       if (visibility === "public") {
-        await removePublicReadPolicy(s3Opts, datasetId);
+        // We had granted public access; revert by re-carving it out
+        await markDatasetPrivate(s3Opts, datasetId);
       } else {
-        await addPublicReadPolicy(s3Opts, datasetId);
+        await markDatasetPublic(s3Opts, datasetId);
       }
       s3Reverted = true;
     } catch (s3RevertError) {
@@ -2606,7 +2605,8 @@ adminRoutes.post("/publish/:id/deny", zValidator("json", denySchema), async (c) 
  * Steps:
  *  1. ci_check - Verify CI exists and is passing (deploy if missing)
  *  2. repo_public - Make repository public
- *  3. s3_public_read - Add public read S3 bucket policy for dataset
+ *  3. s3_public_read - Grant public read by removing the dataset's private
+ *      carve-out from the bucket policy (see services/bucket-policy.ts)
  *  4. tag_protect - Apply tag protection rules (prevent version tag deletion)
  *  5. doi_create - Create concept DOI if not exists
  *  6. update_metadata - Update dataset_description.json with DOI
@@ -2616,9 +2616,12 @@ adminRoutes.post("/publish/:id/deny", zValidator("json", denySchema), async (c) 
  * 10. upload_to_zenodo - Upload release archive to Zenodo
  * 11. publish_doi - Publish the Zenodo DOI (permanent and irreversible!)
  * 12. s3_lock - Apply S3 Object Lock (Governance mode)
- * 13. generate_archive - Trigger archive zip generation (async, non-blocking)
- * 14. sync_nemar - Sync metadata to nemar.org datapipeline (non-fatal)
- * 15. notify_user - Send publication confirmation email
+ * 13. sync_nemar - Sync metadata to nemar.org datapipeline (non-fatal)
+ * 14. notify_user - Send publication confirmation email
+ *
+ * (Archive zip generation is NOT an orchestrator step -- the central
+ * run-version-doi.yml workflow dispatches generate-archive after the version
+ * DOI mint; see #670.)
  *
  * Body: { resume?: boolean } - if true, skip already-completed steps
  */
@@ -2702,7 +2705,6 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
     "publish_doi", // Permanent and irreversible!
     "version_doi",
     "s3_lock",
-    "generate_archive",
     "sync_nemar",
     "notify_user",
   ] as const;
@@ -3013,7 +3015,7 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
       await startStep("s3_public_read");
 
       const { attempts: s3PublicAttempts } = await withRetry(
-        () => addPublicReadPolicy(getS3Config(c.env), datasetId),
+        () => markDatasetPublic(getS3Config(c.env), datasetId),
         "s3_public_read",
       );
 
@@ -3975,28 +3977,14 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
     }
   }
 
-  // Step: Generate archive (async via GitHub Actions; non-blocking)
-  if (stepsToRun.includes("generate_archive")) {
-    try {
-      await startStep("generate_archive");
-
-      const vtResult = await getVersionTag("generate_archive");
-      if (vtResult instanceof Response) {
-        console.warn(`[publish] Could not get version tag for archive generation of ${datasetId}`);
-        await updateProgress("generate_archive", "Could not resolve version tag");
-      } else {
-        await triggerArchiveGeneration(repoName, datasetId, vtResult.version, pat, {
-          public: true,
-        });
-        await updateProgress("generate_archive");
-      }
-    } catch (err) {
-      const msg = errorMessage(err);
-      // Archive generation is non-critical; log warning but continue
-      console.warn(`[publish] Archive generation trigger failed for ${datasetId}: ${msg}`);
-      await updateProgress("generate_archive", msg);
-    }
-  }
+  // NOTE (#670): the archive is generated by the central run-version-doi.yml
+  // workflow, which always dispatches `generate-archive` after minting the
+  // version DOI. The `create_tag` step above pushes the `v*` tag, which fires
+  // the GitHub App push webhook -> triggerVersionDoiRun -> run-version-doi.yml
+  // -> generate-archive. A separate orchestrator-side `generate_archive` step
+  // used to ALSO dispatch here, producing two redundant Generate Archive runs
+  // per publish; it was removed (run-generate-archive.yml also gained an
+  // S3 skip-if-exists guard as defense-in-depth).
 
   // Step 14: Sync metadata to nemar.org datapipeline
   if (stepsToRun.includes("sync_nemar")) {
