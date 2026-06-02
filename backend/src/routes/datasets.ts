@@ -34,11 +34,11 @@ import {
 } from "../services/github";
 import { getDatasetsToken } from "../services/github-auth";
 import {
-  addPublicReadPolicy,
   generateDatasetUploadUrls,
   getManifest,
   listManifests,
-  removePublicReadPolicy,
+  markDatasetPrivate,
+  markDatasetPublic,
 } from "../services/s3";
 import { generateDownloadPolicy, generateUploadPolicy, getFederationToken } from "../services/sts";
 import { type Bindings, type Variables, hasRole } from "../types/bindings";
@@ -247,6 +247,32 @@ datasetRoutes.post(
       const datasetId = existingIncomplete.dataset_id;
       const githubRepo = existingIncomplete.github_repo;
 
+      // Ensure the resumed dataset is still carved out of public access before
+      // re-issuing upload URLs (idempotent; covers rows created before this
+      // invariant existed or whose carve-out was lost). Fail closed.
+      try {
+        await markDatasetPrivate(
+          {
+            bucket: c.env.S3_BUCKET,
+            region: c.env.AWS_REGION,
+            accessKeyId: c.env.AWS_ACCESS_KEY_ID,
+            secretAccessKey: c.env.AWS_SECRET_ACCESS_KEY,
+          },
+          datasetId,
+        );
+      } catch (s3Error) {
+        const s3Msg = s3Error instanceof Error ? s3Error.message : String(s3Error);
+        console.error(`Failed to mark resumed dataset ${datasetId} private:`, s3Msg);
+        return c.json(
+          {
+            error: "Failed to secure dataset storage",
+            dataset_id: datasetId,
+            note: "Could not confirm the dataset's S3 storage is private, so upload was not resumed. Retry shortly; an administrator should check the bucket policy if this persists.",
+          },
+          500,
+        );
+      }
+
       // Generate fresh presigned URLs for the resumed upload
       const { urls: uploadUrls, error: urlError } = await generateUploadUrlsForFiles(
         c.env,
@@ -358,6 +384,35 @@ datasetRoutes.post(
     }
 
     // NOTE: Branch protection is applied in the finalize endpoint after initial upload
+
+    // Carve the new dataset out of public access BEFORE issuing any upload
+    // URL. The bucket is public-by-default; objects are anonymously readable
+    // unless their prefix is listed private in the bucket policy. We must add
+    // that carve-out before the client can upload anything, so fail closed
+    // here rather than hand out upload URLs for an un-secured prefix.
+    try {
+      await markDatasetPrivate(
+        {
+          bucket: c.env.S3_BUCKET,
+          region: c.env.AWS_REGION,
+          accessKeyId: c.env.AWS_ACCESS_KEY_ID,
+          secretAccessKey: c.env.AWS_SECRET_ACCESS_KEY,
+        },
+        datasetId,
+      );
+    } catch (s3Error) {
+      const s3Msg = s3Error instanceof Error ? s3Error.message : String(s3Error);
+      console.error(`Failed to mark new dataset ${datasetId} private:`, s3Msg);
+      return c.json(
+        {
+          error: "Failed to secure dataset storage",
+          dataset_id: datasetId,
+          github_repo: githubRepo.full_name,
+          note: "The GitHub repository was created but the dataset's S3 storage could not be marked private, so upload was not started. Retry `nemar dataset upload`; an administrator should check the bucket policy if this persists.",
+        },
+        500,
+      );
+    }
 
     // Generate presigned URLs for data files using backend credentials
     const { urls: uploadUrls, error: urlError } = await generateUploadUrlsForFiles(
@@ -2622,9 +2677,9 @@ datasetRoutes.post("/:id/publish", authMiddleware, async (c) => {
     );
   }
 
-  // Step 2: Update S3 bucket policy for public read
+  // Step 2: Grant public read by removing the dataset's private carve-out
   try {
-    await addPublicReadPolicy(
+    await markDatasetPublic(
       {
         bucket: c.env.S3_BUCKET,
         region: c.env.AWS_REGION,
@@ -2681,7 +2736,7 @@ datasetRoutes.post("/:id/publish", authMiddleware, async (c) => {
 
     let s3Reverted = false;
     try {
-      await removePublicReadPolicy(
+      await markDatasetPrivate(
         {
           bucket: c.env.S3_BUCKET,
           region: c.env.AWS_REGION,
