@@ -2478,8 +2478,28 @@ Examples:
     const totalCount = response.total_count ?? response.count;
 
     if (options.json) {
-      console.log(JSON.stringify({ datasets, total_count: totalCount, limit, offset }, null, 2));
+      console.log(
+        JSON.stringify(
+          {
+            datasets,
+            total_count: totalCount,
+            limit,
+            offset,
+            fallback: response.fallback,
+            warning: response.warning,
+          },
+          null,
+          2,
+        ),
+      );
       return;
+    }
+
+    // Surface backend degradation (catalog/FTS/consolidation column unavailable):
+    // filters were NOT applied and catalog datasets are missing, so the result is
+    // not what was asked for. Make it loud rather than a silent unfiltered list (#646).
+    if (response.warning) {
+      console.log(chalk.yellow(`\n⚠ ${response.warning}`));
     }
 
     if (datasets.length === 0) {

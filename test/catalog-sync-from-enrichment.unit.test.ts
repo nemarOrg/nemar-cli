@@ -1,17 +1,14 @@
 /**
- * Unit tests for the catalog-sync helpers in
+ * Unit tests for the pure metadata helpers in
  * backend/src/services/dataset-metadata-columns.ts.
  *
- * Covers the two pure functions:
+ * Covers:
  *   - authorsFromEnrichment: extract a CSV author string from either the
  *     object-keyed form ({"Name": {orcid, ...}, ...}) the enrichment
  *     pipeline emits today, or the legacy array-of-objects form some older
  *     rows still carry.
- *   - formatFileSize: byte count -> human-readable string used to populate
- *     nemar_catalog.file_size_formatted.
- *
- * The third export (syncNemarCatalogFromEnrichment) is integration-tested
- * via the api.test.ts /datasets list assertions; it depends on D1.
+ *   - formatFileSize: byte count -> human-readable string for the
+ *     datasets.file_size_formatted column.
  */
 
 import { describe, expect, test } from "bun:test";

@@ -1,66 +1,57 @@
 /**
  * Unit tests for the dataset list endpoint's search WHERE-clause builder.
  *
- * These tests are deterministic (no DB) and verify which columns the
- * search LIKE pattern is matched against. The integration test in
- * api.test.ts cannot reliably exercise the original bug -- it picks
- * whichever managed dataset is first in the test DB, which may happen
- * to have an id baked into c.search_text. This unit test pins the
- * contract directly: dataset_id (and source_id for managed openneuro
- * mirrors) MUST appear in the LIKE clause regardless of search_text
- * state, and c.id MUST appear for the catalog branch.
+ * Deterministic (no DB): verifies which columns the search pattern is matched
+ * against on the single-table `datasets` read (#646). The contract: dataset_id
+ * (and source_id for openneuro mirrors) MUST appear in the LIKE clause, and
+ * free-text routes through the FTS5 index, regardless of any precomputed state.
  */
 
 import { describe, expect, test } from "bun:test";
-import { buildFilterClauses, escapeLikePattern } from "../backend/src/routes/datasets";
+import { buildDatasetFilterClauses, escapeLikePattern } from "../backend/src/routes/datasets";
 
-describe("buildFilterClauses search clause", () => {
-  test("managed branch includes dataset_id and source_id columns", () => {
+describe("buildDatasetFilterClauses search clause", () => {
+  test("search includes dataset_id + source_id LIKE and routes free-text through FTS5", () => {
     const params: (string | number)[] = [];
-    const clauses = buildFilterClauses(params, { search: "nm000166", managed: true });
-    expect(clauses).toContain("LOWER(d.dataset_id) LIKE ?");
-    expect(clauses).toContain("LOWER(COALESCE(d.source_id, '')) LIKE ?");
-    expect(clauses).toContain("LOWER(d.name) LIKE ?");
-    expect(clauses).toContain("LOWER(d.description) LIKE ?");
-    expect(clauses).toContain("LOWER(COALESCE(c.search_text, '')) LIKE ?");
+    const clauses = buildDatasetFilterClauses(params, { search: "nm000166" });
+    expect(clauses).toContain("LOWER(d.dataset_id) LIKE ? ESCAPE '\\'");
+    expect(clauses).toContain("LOWER(COALESCE(d.source_id, '')) LIKE ? ESCAPE '\\'");
+    expect(clauses).toContain(
+      "d.id IN (SELECT rowid FROM datasets_fts WHERE datasets_fts MATCH ?)",
+    );
+    // pattern (dataset_id), pattern (source_id), FTS match expression
+    expect(params).toEqual(["%nm000166%", "%nm000166%", '"nm000166"*']);
   });
 
-  test("managed branch binds the same lowercased pattern across all five columns", () => {
+  test("punctuation-only search (no FTS tokens) falls back to id/name/description LIKE", () => {
     const params: (string | number)[] = [];
-    buildFilterClauses(params, { search: "NM000166", managed: true });
-    expect(params).toEqual([
-      "%nm000166%",
-      "%nm000166%",
-      "%nm000166%",
-      "%nm000166%",
-      "%nm000166%",
-    ]);
+    const clauses = buildDatasetFilterClauses(params, { search: "!!" });
+    expect(clauses).toContain("LOWER(d.name) LIKE ? ESCAPE '\\'");
+    expect(clauses).toContain("LOWER(COALESCE(d.description, '')) LIKE ? ESCAPE '\\'");
+    expect(clauses).not.toContain("datasets_fts");
+    expect(params).toEqual(["%!!%", "%!!%", "%!!%", "%!!%"]);
   });
 
-  test("catalog branch includes c.id alongside c.search_text", () => {
+  test("modality/author/task/hasDoi/recent filter on d.* columns", () => {
     const params: (string | number)[] = [];
-    const clauses = buildFilterClauses(params, { search: "ds002718", managed: false });
-    expect(clauses).toContain("LOWER(c.id) LIKE ?");
-    expect(clauses).toContain("LOWER(c.search_text) LIKE ?");
-    expect(params).toEqual(["%ds002718%", "%ds002718%"]);
+    const clauses = buildDatasetFilterClauses(params, {
+      modality: "EEG",
+      author: "Ada",
+      task: "rest",
+      hasDoi: true,
+      recent: 30,
+    });
+    expect(clauses).toContain("LOWER(COALESCE(d.modalities, '')) LIKE ?");
+    expect(clauses).toContain("LOWER(COALESCE(d.authors, '')) LIKE ?");
+    expect(clauses).toContain("LOWER(COALESCE(d.tasks, '')) LIKE ?");
+    expect(clauses).toContain("d.concept_doi IS NOT NULL");
+    expect(clauses).toContain("COALESCE(d.publish_date, d.created_at) > datetime('now', ?)");
+    expect(params).toEqual(["%eeg%", "%ada%", "%rest%", "-30 days"]);
   });
 
-  test("every LIKE predicate carries an ESCAPE clause", () => {
-    // SQLite needs ESCAPE on every LIKE that consumes an escaped pattern,
-    // otherwise the backslash is treated as a literal and the predicate
-    // becomes "match a name containing backslash plus %".
-    const managed = buildFilterClauses([], { search: "x", managed: true });
-    const catalog = buildFilterClauses([], { search: "x", managed: false });
-    // Count LIKE-with-ESCAPE clauses: 5 on managed (id, source_id, name,
-    // description, search_text), 2 on catalog (id, search_text). If a LIKE
-    // ever ships without ESCAPE, count drops and this test fails loudly.
-    expect(managed.split("LIKE ? ESCAPE '\\'").length - 1).toBe(5);
-    expect(catalog.split("LIKE ? ESCAPE '\\'").length - 1).toBe(2);
-  });
-
-  test("no search returns empty clauses (nothing pushed)", () => {
+  test("no filters returns empty clauses (nothing pushed)", () => {
     const params: (string | number)[] = [];
-    const clauses = buildFilterClauses(params, { managed: true });
+    const clauses = buildDatasetFilterClauses(params, {});
     expect(clauses).toBe("");
     expect(params).toEqual([]);
   });

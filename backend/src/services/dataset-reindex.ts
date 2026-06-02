@@ -23,10 +23,10 @@ import type { Bindings } from "../types/bindings.js";
 import { parseNemarMetadata } from "./datacite.js";
 import {
   computeDatasetMetadataColumns,
-  formatFileSize,
-  syncNemarCatalogFromEnrichment,
+  writeDatasetCatalogFields,
   writeDatasetMetadataColumns,
 } from "./dataset-metadata-columns.js";
+import { reembedDatasetVector } from "./dataset-search.js";
 import { enrichDataset } from "./enrich-dataset.js";
 import { getDatasetsToken } from "./github-auth.js";
 import { getBlobContent, getTreeAtRef } from "./github.js";
@@ -393,30 +393,20 @@ export async function runDatasetSync(
       `[reindex] Metadata columns refreshed for ${datasetId}: subjects=${cols.subject_count}, modalities=${cols.modalities}, files=${cols.total_files}`,
     );
 
-    // Mirror the BIDS-derived columns into nemar_catalog so the list-endpoint
-    // cache stays in sync. authors/license aren't refreshed here -- they
-    // come from the LLM enrichment, which runs on its own webhook path.
-    // `name` is required by the UPSERT (NOT NULL in the schema); we use the
-    // d1 row's name and let COALESCE preserve whatever the catalog has on
-    // the UPDATE path.
-    try {
-      await syncNemarCatalogFromEnrichment(db, datasetId, {
-        name: dataset.name ?? datasetId,
-        description: dataset.description ?? null,
-        modalities: cols.modalities,
-        participants: cols.subject_count,
-        age_min: cols.age_min,
-        age_max: cols.age_max,
-        tasks: cols.tasks,
-        file_size: cols.file_size,
-        file_size_formatted: formatFileSize(cols.file_size),
-        total_files: cols.total_files,
-      });
-    } catch (err) {
-      // console.error (not warn): a persistent failure here leaves the
-      // list endpoint cache stale on every reindex.
-      console.error(`[reindex] nemar_catalog sync failed for ${datasetId}: ${errorMessage(err)}`);
-    }
+    // #646: write metadata columns on the `datasets` source of truth. A reindex
+    // refreshes the BIDS-derived readme + bids_version; name/description/authors/
+    // license are null -> COALESCE-preserved (they are owned by the LLM enrich
+    // path, not reindex). A failure here is a real error, so let it propagate to
+    // the outer catch (-> metadataColumnsError, persisted + surfaced).
+    const bidsVersion =
+      typeof bidsDescription.BIDSVersion === "string" ? bidsDescription.BIDSVersion : null;
+    await writeDatasetCatalogFields(db, datasetId, {
+      readme: readme || null, // empty (no README) -> preserve existing
+      bids_version: bidsVersion,
+    });
+
+    // Best-effort re-embed (internally guarded, never throws).
+    await reembedDatasetVector(db, env.AI, env.VECTORIZE, datasetId);
   } catch (colErr) {
     metadataColumnsError = errorMessage(colErr);
     console.error(`[reindex] Failed to write metadata columns for ${datasetId}:`, colErr);

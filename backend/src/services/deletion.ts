@@ -6,6 +6,7 @@
  * admin DELETE endpoint and the scheduled cleanup cron.
  */
 
+import { SYSTEM_USER_ID } from "../lib/constants.js";
 import type { Bindings } from "../types/bindings.js";
 import { isValidDatasetId } from "./datasetId.js";
 import { getDatasetsToken } from "./github-auth.js";
@@ -22,6 +23,8 @@ export interface DeletionSteps {
     s3PermsDeleted: number;
     error?: string;
   };
+  /** #646 Phase 4: Vectorize vector removal (skipped when VECTORIZE unbound). */
+  vectorize: { success: boolean; skipped?: boolean; error?: string };
 }
 
 export interface DeletionResult {
@@ -50,11 +53,29 @@ export async function deleteDatasetCascade(
     throw new Error(`Invalid dataset ID: "${datasetId}"`);
   }
 
+  // Refuse folded legacy catalog rows (#646): they are sentinel-owned with no
+  // GitHub repo or S3 objects of their own, and the upstream nemar.org catalog
+  // sync re-folds them into `datasets` on its next run, so deleting one here
+  // would only drop it until the next sweep re-creates it. The real fix is to
+  // remove the dataset from the upstream nemar.org catalog.
+  // ownerRow is null when the dataset doesn't exist: optional-chaining lets it
+  // fall through to the cascade, which no-ops correctly on a missing row.
+  const ownerRow = await db
+    .prepare("SELECT owner_user_id FROM datasets WHERE dataset_id = ?")
+    .bind(datasetId)
+    .first<{ owner_user_id: number }>();
+  if (ownerRow?.owner_user_id === SYSTEM_USER_ID) {
+    throw new Error(
+      `Refusing to delete system catalog dataset "${datasetId}" (owner=nemar-system); it is managed by the nemar.org catalog sync.`,
+    );
+  }
+
   const warnings: string[] = [];
   const steps: DeletionSteps = {
     github: { success: false },
     s3: { deleted: 0, failed: [], skipped: false },
     d1: { success: false, versionsDeleted: 0, pubRequestsDeleted: 0, s3PermsDeleted: 0 },
+    vectorize: { success: false },
   };
 
   // Step 1: Delete GitHub repository
@@ -126,6 +147,21 @@ export async function deleteDatasetCascade(
   } catch (err) {
     steps.d1.error = err instanceof Error ? err.message : String(err);
     warnings.push(`D1 cleanup failed: ${steps.d1.error}`);
+  }
+
+  // Step 4: remove the Vectorize vector (#646 Phase 4) so a deleted dataset
+  // can't surface as an orphan that the id-only hydration then drops. Guarded +
+  // non-fatal: a Vectorize blip shouldn't block the rest of the cascade.
+  if (!env.VECTORIZE) {
+    steps.vectorize.skipped = true;
+  } else {
+    try {
+      await env.VECTORIZE.deleteByIds([datasetId]);
+      steps.vectorize.success = true;
+    } catch (err) {
+      steps.vectorize.error = err instanceof Error ? err.message : String(err);
+      warnings.push(`Vectorize deletion failed: ${steps.vectorize.error}`);
+    }
   }
 
   return {
