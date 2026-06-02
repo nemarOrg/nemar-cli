@@ -3,6 +3,7 @@ import {
   type BucketPolicy,
   addPrivateDataset,
   buildPublicAccessPolicy,
+  derivePublicPrefixes,
   ensurePublicAccessStatement,
   isDatasetPrivate,
   listPrivateDatasets,
@@ -119,6 +120,23 @@ describe("removePrivateDataset", () => {
     policy = removePrivateDataset(policy, BUCKET, "nm000111");
     expect(publicStatement(policy).NotResource).toEqual([stagingArn()]);
   });
+
+  test("from a null policy yields a staging-only public statement", () => {
+    const policy = removePrivateDataset(null, BUCKET, "nm000111");
+    expect(publicStatement(policy).NotResource).toEqual([stagingArn()]);
+    expect(isDatasetPrivate(policy, BUCKET, "nm000111")).toBe(false);
+  });
+});
+
+describe("policy Version handling", () => {
+  test("add/removePrivateDataset injects the default Version when input has none", () => {
+    const noVersion: BucketPolicy = {
+      Version: "",
+      Statement: [buildPublicAccessPolicy(BUCKET, ["nm000111"]).Statement[0]],
+    };
+    expect(addPrivateDataset(noVersion, BUCKET, "nm000112").Version).toBe("2012-10-17");
+    expect(removePrivateDataset(noVersion, BUCKET, "nm000111").Version).toBe("2012-10-17");
+  });
 });
 
 describe("statement preservation", () => {
@@ -151,6 +169,77 @@ describe("ensurePublicAccessStatement", () => {
     const before = buildPublicAccessPolicy(BUCKET, ["nm000111", "nm000116"]);
     const after = ensurePublicAccessStatement(before, BUCKET);
     expect(new Set(listPrivateDatasets(after, BUCKET))).toEqual(new Set(["nm000111", "nm000116"]));
+  });
+
+  test("on a legacy allow-list policy carves out only staging and keeps legacy statements", () => {
+    // Bucket state just before migration: two datasets already published
+    // (legacy per-dataset Allow), no PUBLIC_ACCESS_SID statement yet.
+    const legacy = legacyAllowPolicy(["nm000103", "nm000104"]);
+    const result = ensurePublicAccessStatement(legacy, BUCKET);
+    expect(publicStatement(result).NotResource).toEqual([stagingArn()]);
+    // Legacy statements are preserved (withPrivateSet keeps non-PUBLIC_ACCESS_SID entries).
+    expect(result.Statement.some((s) => s.Sid === "PublicReadDataset_nm000103")).toBe(true);
+  });
+});
+
+function legacyAllowPolicy(publicIds: string[]): BucketPolicy {
+  return {
+    Version: "2012-10-17",
+    Statement: publicIds.map((id) => ({
+      Sid: `PublicReadDataset_${id}`,
+      Effect: "Allow" as const,
+      Principal: "*" as const,
+      Action: "s3:GetObject",
+      Resource: prefixArn(BUCKET, id),
+    })),
+  };
+}
+
+describe("derivePublicPrefixes (migration source-of-truth)", () => {
+  const allPrefixes = ["nm000103", "nm000104", "nm000111", STAGING_PREFIX];
+
+  test("null policy -> nothing public", () => {
+    expect(derivePublicPrefixes(null, BUCKET, allPrefixes).size).toBe(0);
+  });
+
+  test("legacy allow-list -> public = datasets named by Allow statements", () => {
+    const legacy = legacyAllowPolicy(["nm000103", "nm000104"]);
+    const pub = derivePublicPrefixes(legacy, BUCKET, allPrefixes);
+    expect(pub).toEqual(new Set(["nm000103", "nm000104"]));
+    // nm000111 (no Allow) is private; staging is never public.
+    expect(pub.has("nm000111")).toBe(false);
+    expect(pub.has(STAGING_PREFIX)).toBe(false);
+  });
+
+  test("already-migrated policy -> public = everything not carved out", () => {
+    const migrated = buildPublicAccessPolicy(BUCKET, ["nm000111"]);
+    const pub = derivePublicPrefixes(migrated, BUCKET, allPrefixes);
+    expect(pub).toEqual(new Set(["nm000103", "nm000104"]));
+  });
+
+  test("supports the AWS object principal form { AWS: '*' }", () => {
+    const policy: BucketPolicy = {
+      Version: "2012-10-17",
+      Statement: [
+        {
+          Sid: "PublicReadDataset_nm000103",
+          Effect: "Allow",
+          Principal: { AWS: "*" },
+          Action: ["s3:GetObject"],
+          Resource: prefixArn(BUCKET, "nm000103"),
+        },
+      ],
+    };
+    expect(derivePublicPrefixes(policy, BUCKET, allPrefixes)).toEqual(new Set(["nm000103"]));
+  });
+
+  test("migration round-trip preserves equal access (legacy -> new policy)", () => {
+    const legacy = legacyAllowPolicy(["nm000103", "nm000104"]);
+    const publicSet = derivePublicPrefixes(legacy, BUCKET, allPrefixes);
+    const privateIds = allPrefixes.filter((p) => p !== STAGING_PREFIX && !publicSet.has(p));
+    const migrated = buildPublicAccessPolicy(BUCKET, privateIds);
+    for (const id of publicSet) expect(isDatasetPrivate(migrated, BUCKET, id)).toBe(false);
+    for (const id of privateIds) expect(isDatasetPrivate(migrated, BUCKET, id)).toBe(true);
   });
 });
 

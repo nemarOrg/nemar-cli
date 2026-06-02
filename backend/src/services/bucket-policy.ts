@@ -28,15 +28,25 @@
  * so they are unit-testable. The S3 get/put wrappers live in s3.ts.
  */
 
-export interface PolicyStatement {
+type PolicyPrincipal = "*" | { [key: string]: string | string[] };
+type PolicyCondition = Record<string, Record<string, string | string[]>>;
+
+interface BasePolicyStatement {
   Sid?: string;
   Effect: "Allow" | "Deny";
-  Principal?: "*" | { [key: string]: string | string[] };
+  Principal?: PolicyPrincipal;
   Action: string | string[];
-  Resource?: string | string[];
-  NotResource?: string | string[];
-  Condition?: Record<string, Record<string, string | string[]>>;
+  Condition?: PolicyCondition;
 }
+
+/**
+ * A bucket-policy statement. AWS rejects a statement that sets both `Resource`
+ * and `NotResource` (MalformedPolicy), so the type makes them mutually
+ * exclusive: every statement carries exactly one of them.
+ */
+export type PolicyStatement =
+  | (BasePolicyStatement & { Resource: string | string[]; NotResource?: never })
+  | (BasePolicyStatement & { NotResource: string | string[]; Resource?: never });
 
 export interface BucketPolicy {
   Version: string;
@@ -114,6 +124,13 @@ export function buildPublicAccessPolicy(
 /**
  * Read the set of private dataset ids out of an existing policy's public-read
  * statement. Returns an empty array if the statement is absent.
+ *
+ * Reads only the `NotResource` list of the `PUBLIC_ACCESS_SID` statement and
+ * ignores its `Effect`/`Principal`. This is intentional and self-healing:
+ * `addPrivateDataset` / `removePrivateDataset` always rewrite the statement to
+ * the canonical `Allow Principal:* GetObject` form via
+ * `buildPublicAccessStatement`, so a hand-edited live policy is corrected on
+ * the next transition.
  */
 export function listPrivateDatasets(policy: BucketPolicy | null, bucket: string): string[] {
   if (!policy) return [];
@@ -125,6 +142,52 @@ export function listPrivateDatasets(policy: BucketPolicy | null, bucket: string)
     if (id !== null && id !== STAGING_PREFIX) ids.push(id);
   }
   return ids;
+}
+
+/**
+ * Derive the set of prefixes that are publicly readable under a given policy,
+ * used by the one-time migration to preserve equal access.
+ *
+ * Handles both shapes so the migration is idempotent:
+ *  - an already-migrated policy (has the `PUBLIC_ACCESS_SID` NotResource
+ *    statement): public = every prefix not carved out as private,
+ *  - a legacy allow-list policy (per-dataset `Allow Principal:* GetObject`
+ *    statements): public = the datasets named by those statements' resources.
+ *
+ * `null` policy means nothing is public.
+ */
+export function derivePublicPrefixes(
+  policy: BucketPolicy | null,
+  bucket: string,
+  allPrefixes: string[],
+): Set<string> {
+  const pub = new Set<string>();
+  if (!policy) return pub;
+
+  for (const s of policy.Statement) {
+    if (s.Sid === PUBLIC_ACCESS_SID) {
+      // Already migrated: public = everything not carved out as private.
+      const priv = new Set(listPrivateDatasets(policy, bucket));
+      for (const p of allPrefixes) {
+        if (p !== STAGING_PREFIX && !priv.has(p)) pub.add(p);
+      }
+      continue;
+    }
+
+    const principalIsPublic =
+      s.Principal === "*" ||
+      (typeof s.Principal === "object" &&
+        s.Principal !== null &&
+        Object.values(s.Principal).some((v) => v === "*" || (Array.isArray(v) && v.includes("*"))));
+    const actions = Array.isArray(s.Action) ? s.Action : [s.Action];
+    if (s.Effect === "Allow" && principalIsPublic && actions.includes("s3:GetObject")) {
+      for (const r of toArray(s.Resource)) {
+        const id = prefixIdFromArn(bucket, r);
+        if (id !== null && id !== STAGING_PREFIX) pub.add(id);
+      }
+    }
+  }
+  return pub;
 }
 
 /** True if the dataset's prefix is carved out (private) in the policy. */

@@ -800,7 +800,14 @@ export async function getBucketPolicy(options: PresignedUrlOptions): Promise<Buc
   }
 
   const policyText = await response.text();
-  return JSON.parse(policyText);
+  try {
+    return JSON.parse(policyText);
+  } catch (parseErr) {
+    const msg = parseErr instanceof Error ? parseErr.message : String(parseErr);
+    throw new Error(
+      `Failed to parse bucket policy for "${bucket}": ${msg} (body: ${policyText.slice(0, 200)})`,
+    );
+  }
 }
 
 /**
@@ -868,7 +875,15 @@ async function transitionDatasetVisibility(
     const next = makePrivate
       ? addPrivateDataset(current, bucket, datasetId)
       : removePrivateDataset(current, bucket, datasetId);
-    await putBucketPolicy(options, next);
+    try {
+      await putBucketPolicy(options, next);
+    } catch (putErr) {
+      const msg = putErr instanceof Error ? putErr.message : String(putErr);
+      throw new Error(
+        `Bucket-policy ${makePrivate ? "private" : "public"} write for ${datasetId} failed ` +
+          `(attempt ${attempt}/${MAX_ATTEMPTS}): ${msg}`,
+      );
+    }
 
     // Read-after-write: confirm the carve-out reflects the intended state.
     const verifyPolicy = await getBucketPolicy(options);
@@ -919,6 +934,10 @@ export async function markDatasetPublic(
 /**
  * Check whether a dataset currently has public read access (no private
  * carve-out in the bucket policy).
+ *
+ * Note the public-by-default semantics: a dataset is "public" whenever it is
+ * not carved out, so a missing/empty policy reports `true` (the inverse of the
+ * old allow-list model, where no policy meant not-public).
  */
 export async function hasPublicRead(
   options: PresignedUrlOptions,

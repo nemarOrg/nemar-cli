@@ -24,17 +24,22 @@
  */
 
 import { execFileSync } from "node:child_process";
+import { writeFileSync } from "node:fs";
 import {
   type BucketPolicy,
-  buildPublicAccessPolicy,
+  type PolicyStatement,
+  buildPublicAccessStatement,
+  derivePublicPrefixes,
   listPrivateDatasets,
   MAX_BUCKET_POLICY_BYTES,
   policyByteSize,
-  prefixIdFromArn,
   PUBLIC_ACCESS_SID,
   STAGING_PREFIX,
   isDatasetPrivate,
 } from "../backend/src/services/bucket-policy.ts";
+
+const POLICY_VERSION = "2012-10-17";
+const LEGACY_SID_PREFIX = "PublicReadDataset_";
 
 interface Args {
   bucket: string;
@@ -102,44 +107,15 @@ function listTopLevelPrefixes(bucket: string): string[] {
 }
 
 /**
- * Derive the set of prefixes that are publicly readable under the CURRENT
- * policy. Handles both the legacy allow-list (per-dataset `Allow` statements)
- * and an already-migrated NotResource statement (so re-runs are idempotent).
+ * Statements that are neither the new public-read statement nor a legacy
+ * per-dataset `Allow` carve-out (e.g. an unrelated cross-account grant or a
+ * Deny). The migration must preserve these verbatim rather than drop them.
  */
-function currentPublicPrefixes(
-  policy: BucketPolicy | null,
-  bucket: string,
-  allPrefixes: string[],
-): Set<string> {
-  const pub = new Set<string>();
-  if (!policy) return pub;
-
-  for (const s of policy.Statement) {
-    if (s.Sid === PUBLIC_ACCESS_SID) {
-      // Already migrated: public = everything not carved out as private.
-      const priv = new Set(listPrivateDatasets(policy, bucket));
-      for (const p of allPrefixes) {
-        if (p !== STAGING_PREFIX && !priv.has(p)) pub.add(p);
-      }
-      continue;
-    }
-
-    const principalIsPublic =
-      s.Principal === "*" ||
-      (typeof s.Principal === "object" &&
-        s.Principal !== null &&
-        Object.values(s.Principal).some((v) => v === "*" || (Array.isArray(v) && v.includes("*"))));
-    const actions = Array.isArray(s.Action) ? s.Action : [s.Action];
-    if (s.Effect === "Allow" && principalIsPublic && actions.includes("s3:GetObject")) {
-      const resources =
-        s.Resource === undefined ? [] : Array.isArray(s.Resource) ? s.Resource : [s.Resource];
-      for (const r of resources) {
-        const id = prefixIdFromArn(bucket, r);
-        if (id !== null && id !== STAGING_PREFIX) pub.add(id);
-      }
-    }
-  }
-  return pub;
+function basePolicyStatements(policy: BucketPolicy | null): PolicyStatement[] {
+  if (!policy) return [];
+  return policy.Statement.filter(
+    (s) => s.Sid !== PUBLIC_ACCESS_SID && !(s.Sid?.startsWith(LEGACY_SID_PREFIX) ?? false),
+  );
 }
 
 function main(): void {
@@ -151,7 +127,7 @@ function main(): void {
 
   const current = getCurrentPolicy(bucket);
   const allPrefixes = listTopLevelPrefixes(bucket).sort();
-  const publicSet = currentPublicPrefixes(current, bucket, allPrefixes);
+  const publicSet = derivePublicPrefixes(current, bucket, allPrefixes);
 
   // Anything that is not currently public becomes a private carve-out. This is
   // the strict equal-access rule: anonymous callers that could not read a
@@ -159,12 +135,18 @@ function main(): void {
   // statement, so drop it from the per-dataset list.
   const privateIds = allPrefixes.filter((p) => p !== STAGING_PREFIX && !publicSet.has(p));
 
-  const newPolicy = buildPublicAccessPolicy(bucket, privateIds);
+  // Preserve any unrelated statements that already exist on the live policy.
+  const preserved = basePolicyStatements(current);
+  const newPolicy: BucketPolicy = {
+    Version: current?.Version ?? POLICY_VERSION,
+    Statement: [buildPublicAccessStatement(bucket, privateIds), ...preserved],
+  };
   const size = policyByteSize(newPolicy);
 
   console.log(`Top-level prefixes : ${allPrefixes.length}`);
   console.log(`Currently public   : ${publicSet.size}`);
   console.log(`Private carve-outs : ${privateIds.length} (+ staging)`);
+  console.log(`Preserved statements: ${preserved.length}`);
   console.log(`New policy size    : ${size} / ${MAX_BUCKET_POLICY_BYTES} bytes`);
   console.log("");
 
@@ -213,16 +195,38 @@ function main(): void {
   }
 
   const tmp = `/tmp/nemar-bucket-policy-${bucket}.json`;
-  execFileSync("bash", ["-c", `cat > ${tmp}`], { input: JSON.stringify(newPolicy) });
-  aws(["s3api", "put-bucket-policy", "--bucket", bucket, "--policy", `file://${tmp}`]);
+  writeFileSync(tmp, JSON.stringify(newPolicy));
+  try {
+    aws(["s3api", "put-bucket-policy", "--bucket", bucket, "--policy", `file://${tmp}`]);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error(`Failed to write the new policy to S3: ${msg}`);
+    console.error(
+      `The intended policy is at ${tmp}; the bucket is UNCHANGED (old policy still active).`,
+    );
+    process.exit(1);
+  }
   console.log("Policy written. Verifying read-back...");
 
   const after = getCurrentPolicy(bucket);
+  if (after === null) {
+    console.error("VERIFY FAILED: could not read the policy back after writing (got null).");
+    console.error("Check GetBucketPolicy permissions and the live policy manually.");
+    process.exit(1);
+  }
   const afterPrivate = new Set(listPrivateDatasets(after, bucket));
-  const ok =
-    afterPrivate.size === privateIds.length && privateIds.every((id) => afterPrivate.has(id));
-  if (!ok) {
+  const intended = new Set(privateIds);
+  const missing = [...intended].filter((id) => !afterPrivate.has(id));
+  const extra = [...afterPrivate].filter((id) => !intended.has(id));
+  if (missing.length > 0 || extra.length > 0) {
     console.error("VERIFY FAILED: read-back private set does not match the intended set.");
+    if (missing.length > 0) {
+      console.error(`  LEAKED (expected private, not carved out): ${missing.join(", ")}`);
+      console.error("  IMMEDIATE ACTION: check anonymous access to the above prefixes.");
+    }
+    if (extra.length > 0) {
+      console.error(`  EXTRA (carved out but not intended): ${extra.join(", ")}`);
+    }
     process.exit(1);
   }
   console.log(`Verified: ${afterPrivate.size} private carve-outs live. Migration complete.`);
