@@ -218,10 +218,12 @@ export async function upsertCatalogRecordsToDatasets(
     });
     try {
       const batchResults = await db.batch(statements);
-      // Count actual writes: an INSERT or a sentinel UPDATE reports changes=1; a
-      // collision with a managed row (the WHERE owner=-1 guard) reports changes=0.
+      // Count one per statement that wrote a row: an INSERT or sentinel UPDATE
+      // reports changes>0; a managed-row collision (the WHERE owner=-1 guard)
+      // reports changes=0. Do NOT sum raw `changes` -- the datasets_fts5
+      // triggers inflate it by the per-row shadow-table writes (#646).
       for (const r of batchResults) {
-        upserted += (r as { meta?: { changes?: number } }).meta?.changes ?? 0;
+        if (((r as { meta?: { changes?: number } }).meta?.changes ?? 0) > 0) upserted++;
       }
     } catch (err) {
       // A single bad record (or a transient D1 error) must NOT abort the rest of
