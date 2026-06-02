@@ -962,6 +962,36 @@ export async function getArchiveUrl(
   return generatePresignedGetUrl(options, key, expiresIn);
 }
 
+/**
+ * HEAD the archive zip object. true = present, false = 404 (e.g. archive
+ * generation still in flight after a fresh publish). Throws on 403
+ * (credentials) or other non-404 errors so the caller can 503 rather than
+ * 302 to a presigned URL that would dump an S3 NoSuchKey XML error (#670).
+ */
+export async function headArchive(
+  options: PresignedUrlOptions,
+  datasetId: string,
+  version: string,
+): Promise<boolean> {
+  const { bucket, region } = options;
+  const aws = createS3Client(options);
+  const versionTag = version.startsWith("v") ? version : `v${version}`;
+  const key = `${datasetId}/archives/${versionTag}.zip`;
+  const encodedKey = key.split("/").map(encodeURIComponent).join("/");
+  const url = `https://${bucket}.s3.${region}.amazonaws.com/${encodedKey}`;
+
+  const signed = await aws.sign(url, { method: "HEAD" });
+  const response = await fetch(signed);
+  if (response.status === 200) return true;
+  if (response.status === 404) return false;
+  if (response.status === 403) {
+    throw new Error(
+      `headArchive 403: likely IAM credentials/permissions error for ${key}. Check AWS_ACCESS_KEY_ID on the Worker.`,
+    );
+  }
+  throw new Error(`Failed to HEAD ${key}: HTTP ${response.status}`);
+}
+
 // ---------------------------------------------------------------------------
 // Object deletion
 // ---------------------------------------------------------------------------
