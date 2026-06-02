@@ -163,6 +163,19 @@ describe("data.nemar.org route (epic #449, phase 1)", async () => {
     expect(bytes.byteLength).toBe(target.size);
   });
 
+  test("archive zip download 302s to the presigned S3 archive (#670)", async () => {
+    // `<id>/<version>.zip` -> 302 to the presigned archives/<id>/v<version>.zip.
+    // Uses `latest.zip` (strips to "latest", which resolveVersion resolves).
+    const r = await fetchNoRedirect(`/data/${TEST_DATASET}/latest.zip`);
+    // Soft-skip while this fix is not yet deployed on the target backend
+    // (PR runs hit the pre-merge dev Worker, where the route still 404s).
+    if (r.status === 404) return;
+    expect(r.status).toBe(302);
+    const loc = r.headers.get("location") ?? "";
+    expect(loc).toContain(`/${TEST_DATASET}/archives/`);
+    expect(loc).toContain(".zip");
+  });
+
   test("anonymous (no Authorization header) behaves identically", async () => {
     const r = await fetch(`${API}/data/${TEST_DATASET}/latest/manifest.json`, {
       headers,

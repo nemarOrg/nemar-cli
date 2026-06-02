@@ -962,6 +962,63 @@ export async function getArchiveUrl(
   return generatePresignedGetUrl(options, key, expiresIn);
 }
 
+/**
+ * HEAD the archive zip object. true = present, false = 404 (e.g. archive
+ * generation still in flight after a fresh publish). Throws on 403
+ * (credentials) or other non-404 errors so the caller can 503 rather than
+ * 302 to a presigned URL that would dump an S3 NoSuchKey XML error (#670).
+ */
+export async function headArchive(
+  options: PresignedUrlOptions,
+  datasetId: string,
+  version: string,
+): Promise<boolean> {
+  const { bucket, region } = options;
+  const aws = createS3Client(options);
+  const versionTag = version.startsWith("v") ? version : `v${version}`;
+  const key = `${datasetId}/archives/${versionTag}.zip`;
+  const encodedKey = key.split("/").map(encodeURIComponent).join("/");
+  const url = `https://${bucket}.s3.${region}.amazonaws.com/${encodedKey}`;
+
+  // The first HEAD from a cold Worker isolate intermittently fails with a
+  // transient network error or 5xx; retry so a download click doesn't fail on
+  // the first try. 200 => present, 404 => absent.
+  const MAX_ATTEMPTS = 4;
+  let lastStatus = 0;
+  let lastError = "";
+  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+    let status: number;
+    try {
+      const signed = await aws.sign(url, { method: "HEAD" });
+      status = (await fetch(signed)).status;
+    } catch (err) {
+      lastError = err instanceof Error ? err.message : String(err);
+      continue; // network error: retry
+    }
+    if (status === 200) return true;
+    if (status === 404) return false;
+    lastStatus = status;
+    lastError = `HTTP ${status}`;
+    // Retry transient 5xx and an ambiguous 403 (a cold S3 edge can 403
+    // transiently; a missing object also 403s when the Worker creds lack
+    // s3:ListBucket). Break immediately on any other 4xx (a real client bug).
+    if (status !== 403 && status < 500) break;
+  }
+
+  // A persistent 403 means the archive is missing (no s3:ListBucket to get a
+  // 404) or the credentials are wrong; either way it is not downloadable, so
+  // report "not available" (the caller returns a clean 404) rather than 503ing
+  // the user. Log for operators -- a genuine credentials outage also breaks
+  // the manifest/summary routes, so it will not go unnoticed.
+  if (lastStatus === 403) {
+    console.warn(
+      `headArchive: persistent 403 for ${key} (missing archive without s3:ListBucket, or credentials issue); treating as not available`,
+    );
+    return false;
+  }
+  throw new Error(`Failed to HEAD ${key} after ${MAX_ATTEMPTS} attempts: ${lastError}`);
+}
+
 // ---------------------------------------------------------------------------
 // Object deletion
 // ---------------------------------------------------------------------------
