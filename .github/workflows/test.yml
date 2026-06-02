@@ -142,7 +142,7 @@ jobs:
           for f in test/*.test.ts backend/test/*.test.ts; do
             base="$(basename "$f")"
             case "$base" in
-              e2e-sandbox.test.ts|e2e-upload.test.ts|zenodo-sandbox.test.ts|ezid-sandbox.test.ts|auth-passwordless.test.ts) continue;;
+              e2e-sandbox.test.ts|e2e-upload.test.ts|zenodo-sandbox.test.ts|ezid.test.ts|ezid-sandbox.test.ts|auth-passwordless.test.ts) continue;;
             esac
             if grep -Eq 'testRequest|TEST_API_URL|runCli\(' "$f"; then continue; fi
             files+=("$f")
@@ -200,7 +200,7 @@ jobs:
           for f in test/*.test.ts backend/test/*.test.ts; do
             base="$(basename "$f")"
             case "$base" in
-              e2e-sandbox.test.ts|e2e-upload.test.ts|zenodo-sandbox.test.ts|ezid-sandbox.test.ts|auth-passwordless.test.ts) continue;;
+              e2e-sandbox.test.ts|e2e-upload.test.ts|zenodo-sandbox.test.ts|ezid.test.ts|ezid-sandbox.test.ts|auth-passwordless.test.ts) continue;;
             esac
             if grep -Eq 'testRequest|TEST_API_URL|runCli\(' "$f"; then files+=("$f"); fi
           done
