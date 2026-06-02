@@ -74,7 +74,6 @@ describe("stepIndexFor", () => {
       "publish_doi",
       "version_doi",
       "s3_lock",
-      "generate_archive",
       "sync_nemar",
       "notify_user",
     ]);
