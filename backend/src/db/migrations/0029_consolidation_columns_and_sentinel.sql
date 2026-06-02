@@ -7,8 +7,8 @@
 -- loosening a NOT NULL / changing a type, and the negative-id sentinel
 -- (below) deliberately avoids touching owner_user_id at all.
 --
--- The fold of legacy catalog-only rows and the backfill happen in 0028;
--- the FTS5 index + triggers in 0029. Existing read paths keep reading
+-- The fold of legacy catalog-only rows and the backfill happen in 0030;
+-- the FTS5 index + triggers in 0031. Existing read paths keep reading
 -- nemar_catalog this phase (with dormancy guards added in code so the
 -- folded rows stay invisible to GET /datasets until Phase 3).
 
@@ -17,7 +17,7 @@
 -- the columns with no datasets home yet are added here.
 ALTER TABLE datasets ADD COLUMN authors TEXT;
 ALTER TABLE datasets ADD COLUMN license TEXT;
-ALTER TABLE datasets ADD COLUMN readme TEXT;              -- truncated to 8 KB on write (0028)
+ALTER TABLE datasets ADD COLUMN readme TEXT;              -- truncated to 8 KB on write (0030)
 ALTER TABLE datasets ADD COLUMN bids_version TEXT;
 ALTER TABLE datasets ADD COLUMN sessions_count INTEGER;
 ALTER TABLE datasets ADD COLUMN publish_date TEXT;
@@ -38,7 +38,7 @@ CREATE INDEX IF NOT EXISTS idx_datasets_embedding_dirty ON datasets(embedding_di
 --     rowid only), so real signups keep their natural ids.
 -- Migration 0026 dropped the NOT NULL on username/password_hash/github_username,
 -- so an email+username-only system row is valid. owner_user_id's FK to
--- users(id) is satisfied because this row exists before the 0028 fold runs.
+-- users(id) is satisfied because this row exists before the 0030 fold runs.
 --
 -- status='revoked' (NOT 'approved') is deliberate: it keeps this non-login
 -- system account out of every "active user" enumeration for free, with no

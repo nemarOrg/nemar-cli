@@ -1,6 +1,6 @@
 -- Dataset-store consolidation, Phase 1 / expand step 2 (#646, #647).
 --
--- (a) + (b) seed the new columns added in 0027 for MANAGED rows from data
+-- (a) + (b) seed the new columns added in 0029 for MANAGED rows from data
 --     that already exists (enrichment_json + the row's nemar_catalog cache),
 --     COALESCE-preserving any value already present (idempotent on re-run).
 --     NOTE: this is a one-time seed. Keeping datasets.authors/readme current
