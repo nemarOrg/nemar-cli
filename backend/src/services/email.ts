@@ -635,6 +635,80 @@ export async function sendPublicationDeniedEmail(
 }
 
 /**
+ * Notify a user that the automated pre-screen blocked their publication
+ * request (issue #666). Unlike a manual denial, this is a self-serve gate:
+ * the listed gaps are the publisher-minimum checks, and a fix + re-request
+ * re-runs them automatically.
+ */
+export async function sendPublicationBlockedEmail(
+  to: string,
+  username: string,
+  datasetId: string,
+  reasons: string[],
+  issueUrl: string | null,
+  resendApiKey: string,
+  fromEmail: string,
+  replyTo?: string,
+  isDev?: boolean,
+): Promise<void> {
+  const reasonItems =
+    reasons.length > 0
+      ? reasons.map((r) => `<li>${escapeHtml(r)}</li>`).join("")
+      : "<li>The dataset did not meet the minimum publication requirements.</li>";
+  const issueBlock = issueUrl
+    ? `<p>Details and step-by-step fixes are in the tracking issue on your dataset repository:</p>
+  <p><a href="${escapeHtml(issueUrl)}" style="color: #2563eb;">${escapeHtml(issueUrl)}</a></p>`
+    : "";
+  const html = `
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+</head>
+<body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; line-height: 1.6; color: #333; max-width: 600px; margin: 0 auto; padding: 20px;">
+  <h1 style="color: #f59e0b;">Publication on hold: ${escapeHtml(datasetId)}</h1>
+
+  <p>Hello ${escapeHtml(username)},</p>
+
+  <p>Thanks for submitting <strong>${escapeHtml(datasetId)}</strong> for publication on NEMAR.
+  NEMAR is a <strong>publisher, not a peer reviewer</strong>; we don't evaluate scientific merit.
+  We only check that each dataset carries the bare minimum so others can find, understand, and reuse it.
+  The automated pre-screen flagged the following before this could go to an admin:</p>
+
+  <ul style="background-color: #fef3c7; padding: 16px 16px 16px 36px; border-radius: 8px; margin: 16px 0; border-left: 4px solid #f59e0b;">
+    ${reasonItems}
+  </ul>
+
+  ${issueBlock}
+
+  <p>After addressing these, re-request publication and the checks will re-run automatically:</p>
+  <div style="background: #f4f4f5; padding: 16px; border-radius: 8px; font-family: monospace; font-size: 14px; margin: 16px 0;">
+    nemar dataset publish request ${escapeHtml(datasetId)}
+  </div>
+
+  <p style="font-size: 13px; color: #666;">If you believe this was flagged in error, reply to this email and we'll take a look.</p>
+
+  <hr style="border: none; border-top: 1px solid #eee; margin: 30px 0;">
+  <p style="color: #999; font-size: 12px;">
+    <a href="https://nemar.org" style="color: #999;">NEMAR</a> - Neuroelectromagnetic Data Archive and Tools Resource
+  </p>
+</body>
+</html>
+  `;
+
+  await sendEmail(
+    to,
+    `Publication on hold: ${datasetId}`,
+    html,
+    resendApiKey,
+    fromEmail,
+    replyTo,
+    isDev,
+  );
+}
+
+/**
  * Notify user that their dataset has been published
  */
 export async function sendPublicationApprovedEmail(

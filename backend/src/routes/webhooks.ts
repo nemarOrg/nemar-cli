@@ -11,6 +11,7 @@ import { Hono } from "hono";
 import { runDatasetSync } from "../services/dataset-reindex.js";
 import { isValidDatasetId } from "../services/datasetId.js";
 import { createEzidVersionDoi, parseDoiProvider } from "../services/doi.js";
+import { resolveEmailConfig, sendPublicationBlockedEmail } from "../services/email.js";
 import { enrichDataset } from "../services/enrich-dataset.js";
 import { TEST_SHOULDER } from "../services/ezid.js";
 import { getDatasetsToken } from "../services/github-auth.js";
@@ -21,10 +22,11 @@ import {
   triggerManifestGeneration,
   triggerVersionDoiRun,
   verifyManifestCallbackToken,
+  verifyPrescreenCallbackToken,
 } from "../services/github.js";
 import { generateManifest } from "../services/manifest.js";
 import { errorMessage, extractRepoName, readRepoMetadata } from "../services/repo-metadata.js";
-import { headVersionArtifact, uploadManifest } from "../services/s3.js";
+import { getDatasetS3Stats, headVersionArtifact, uploadManifest } from "../services/s3.js";
 import { verifyGitHubWebhookSignature } from "../services/webhook-signature.js";
 import * as zenodo from "../services/zenodo.js";
 import type { Bindings } from "../types/bindings.js";
@@ -1269,6 +1271,245 @@ webhooks.post("/manifest-ready", async (c) => {
     dataset_id: body.dataset_id,
     version: body.version,
   });
+});
+
+// ============================================================================
+// Publication pre-screen callback (issue #666)
+// ============================================================================
+
+export interface PrescreenCallbackBody {
+  dataset_id: string;
+  request_id: number;
+  // "error" = the workflow could not complete (install/claude/parse failure);
+  // the Worker resets the screen so the request falls back to manual review.
+  verdict: "pass" | "block" | "error";
+  reasons?: string[];
+  issue_url?: string;
+  workflow_run_id?: string;
+}
+
+/** Validate the run-prescreen workflow's callback body. */
+export function validatePrescreenCallbackBody(body: unknown): string | null {
+  if (!body || typeof body !== "object") return "Body must be a JSON object";
+  const b = body as Record<string, unknown>;
+  if (typeof b.dataset_id !== "string" || !b.dataset_id) {
+    return "dataset_id must be a non-empty string";
+  }
+  if (typeof b.request_id !== "number" || !Number.isInteger(b.request_id)) {
+    return "request_id must be an integer";
+  }
+  if (b.verdict !== "pass" && b.verdict !== "block" && b.verdict !== "error") {
+    return "verdict must be 'pass', 'block', or 'error'";
+  }
+  if (
+    b.reasons !== undefined &&
+    (!Array.isArray(b.reasons) || b.reasons.some((r) => typeof r !== "string"))
+  ) {
+    return "reasons must be an array of strings";
+  }
+  if (b.issue_url !== undefined && typeof b.issue_url !== "string") {
+    return "issue_url must be a string";
+  }
+  return null;
+}
+
+/**
+ * Combine the `claude -p` verdict with an independent server-side S3 check.
+ * The workflow judges README/metadata/declared-data quality; the Worker has
+ * the AWS credentials to confirm the blobs actually landed. We only treat a
+ * literally empty objects/ prefix as "missing data" -- `objectCount` is
+ * `undefined` when the page-count cap was hit (i.e. *many* objects), which is
+ * emphatically not missing. An S3 read error yields `s3 = null` so infra
+ * blips never produce a false block. Pure function: no I/O, fully testable.
+ */
+export interface PrescreenS3Presence {
+  totalSize: number;
+  objectCount: number | undefined;
+}
+export function decidePrescreenOutcome(
+  verdict: "pass" | "block",
+  reasons: string[],
+  s3: PrescreenS3Presence | null,
+): { blocked: boolean; reasons: string[] } {
+  const out = [...reasons];
+  let blocked = verdict === "block";
+  const s3Missing = !!s3 && s3.totalSize === 0 && s3.objectCount === 0;
+  if (s3Missing) {
+    blocked = true;
+    if (!out.some((r) => /no data|s3|storage/i.test(r))) {
+      out.push("No data files were found in storage for this dataset.");
+    }
+  }
+  return { blocked, reasons: out };
+}
+
+/**
+ * Callback handler for the run-prescreen workflow. The workflow has already
+ * judged the dataset and (on block) opened a GitHub issue; this endpoint
+ * verifies the HMAC token, runs the independent S3 presence check, and
+ * records the outcome on the publication_requests row -- flipping it to
+ * 'blocked' (+ emailing the requester) or marking the screen 'passed'.
+ *
+ * One-shot: gated on prescreen_status='pending', so a replayed callback for
+ * an already-resolved request finds no row and 401s.
+ */
+webhooks.post("/prescreen-result", async (c) => {
+  const token = c.req.header("X-Webhook-Token");
+  if (!token) {
+    return c.json({ error: "Missing X-Webhook-Token header" }, 401);
+  }
+
+  let body: PrescreenCallbackBody;
+  try {
+    body = (await c.req.json()) as PrescreenCallbackBody;
+  } catch {
+    return c.json({ error: "Invalid JSON in request body" }, 400);
+  }
+
+  const validationError = validatePrescreenCallbackBody(body);
+  if (validationError) {
+    return c.json({ error: validationError }, 400);
+  }
+
+  if (!c.env.PRESCREEN_CALLBACK_SECRET) {
+    console.error("[prescreen-result] PRESCREEN_CALLBACK_SECRET is unset; rejecting callback");
+    return c.json({ error: "Server misconfigured: PRESCREEN_CALLBACK_SECRET unset" }, 500);
+  }
+
+  // Recover the nonce + requester from the in-flight row. Filter on
+  // prescreen_status='pending' so a replay against a resolved request can't
+  // re-trigger the block/email.
+  const request = await c.env.DB.prepare(
+    `SELECT pr.id, pr.dataset_id, pr.prescreen_nonce, pr.requested_by,
+            u.username AS requested_by_username, u.email AS requested_by_email
+       FROM publication_requests pr
+       JOIN users u ON pr.requested_by = u.id
+      WHERE pr.id = ? AND pr.dataset_id = ? AND pr.prescreen_status = 'pending'
+      LIMIT 1`,
+  )
+    .bind(body.request_id, body.dataset_id)
+    .first<{
+      id: number;
+      dataset_id: string;
+      prescreen_nonce: string | null;
+      requested_by: number;
+      requested_by_username: string;
+      requested_by_email: string;
+    }>();
+
+  if (!request || !request.prescreen_nonce) {
+    console.warn(
+      `[prescreen-result] no pending prescreen for request_id=${body.request_id} dataset=${body.dataset_id}`,
+    );
+    return c.json({ error: "No in-flight pre-screen for this request" }, 401);
+  }
+
+  const ok = await verifyPrescreenCallbackToken(
+    token,
+    { datasetId: body.dataset_id, requestId: request.id, nonce: request.prescreen_nonce },
+    c.env.PRESCREEN_CALLBACK_SECRET,
+  );
+  if (!ok) {
+    console.warn(
+      `[prescreen-result] callback token mismatch request_id=${body.request_id} dataset=${body.dataset_id}`,
+    );
+    return c.json({ error: "Invalid callback token" }, 401);
+  }
+
+  // verdict="error": the workflow could not complete. Don't block on an
+  // infrastructure failure -- reset the screen to NULL so the request falls
+  // back to normal admin review (status stays 'requested'). No S3 check, no
+  // email. Gated on 'pending' so it's still one-shot.
+  if (body.verdict === "error") {
+    const res = await c.env.DB.prepare(
+      `UPDATE publication_requests
+          SET prescreen_status = NULL, prescreen_nonce = NULL,
+              prescreen_at = datetime('now'), updated_at = datetime('now')
+        WHERE id = ? AND prescreen_status = 'pending'`,
+    )
+      .bind(request.id)
+      .run();
+    console.warn(
+      `[prescreen-result] dataset=${body.dataset_id} request_id=${request.id} verdict=error; reset to manual review (changes=${res.meta.changes})`,
+    );
+    return c.json({ ok: true, dataset_id: body.dataset_id, blocked: false, reset: true });
+  }
+
+  // Independent server-side S3 presence check. Capped at one page (1000
+  // objects) -- we only need to distinguish "empty" from "non-empty", not
+  // the full count. A read error leaves s3=null so we trust the workflow.
+  let s3: PrescreenS3Presence | null = null;
+  try {
+    s3 = await getDatasetS3Stats(
+      {
+        bucket: c.env.S3_BUCKET,
+        region: c.env.AWS_REGION,
+        accessKeyId: c.env.AWS_ACCESS_KEY_ID,
+        secretAccessKey: c.env.AWS_SECRET_ACCESS_KEY,
+      },
+      body.dataset_id,
+      1,
+    );
+  } catch (err) {
+    console.error(`[prescreen-result] S3 stats failed for ${body.dataset_id} (non-fatal):`, err);
+  }
+
+  const { blocked, reasons } = decidePrescreenOutcome(body.verdict, body.reasons ?? [], s3);
+  const issueUrl = body.issue_url ?? null;
+
+  if (blocked) {
+    const res = await c.env.DB.prepare(
+      `UPDATE publication_requests
+          SET status = 'blocked', block_reason = 'prescreen_failed',
+              prescreen_status = 'failed', prescreen_issue_url = ?,
+              prescreen_at = datetime('now'), updated_at = datetime('now')
+        WHERE id = ? AND prescreen_status = 'pending'`,
+    )
+      .bind(issueUrl, request.id)
+      .run();
+
+    // Only email if THIS call did the transition. Guards against a duplicate
+    // email if two callbacks race past the 'pending' read (the second sees
+    // changes=0 because the first already flipped the row).
+    if (res.meta.changes > 0) {
+      const { fromEmail, replyTo, isDev } = resolveEmailConfig(c.env);
+      c.executionCtx.waitUntil(
+        sendPublicationBlockedEmail(
+          request.requested_by_email,
+          request.requested_by_username,
+          body.dataset_id,
+          reasons,
+          issueUrl,
+          c.env.RESEND_API_KEY,
+          fromEmail,
+          replyTo,
+          isDev,
+        ).catch((emailErr) => {
+          // waitUntil swallows rejections to the runtime log; catch here so the
+          // failure is attributable and the dataset id is in the message.
+          console.error(
+            `[prescreen-result] block email send failed for ${body.dataset_id}:`,
+            emailErr,
+          );
+        }),
+      );
+    }
+  } else {
+    await c.env.DB.prepare(
+      `UPDATE publication_requests
+          SET prescreen_status = 'passed', prescreen_at = datetime('now'),
+              updated_at = datetime('now')
+        WHERE id = ? AND prescreen_status = 'pending'`,
+    )
+      .bind(request.id)
+      .run();
+  }
+
+  console.log(
+    `[prescreen-result] dataset=${body.dataset_id} request_id=${request.id} verdict=${body.verdict} blocked=${blocked} s3_objects=${s3 ? (s3.objectCount ?? "capped") : "unknown"}`,
+  );
+
+  return c.json({ ok: true, dataset_id: body.dataset_id, blocked });
 });
 
 /**

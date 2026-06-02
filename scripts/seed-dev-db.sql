@@ -41,8 +41,21 @@ SELECT id, 'nm099999', 'read_write', id FROM users WHERE username = 'test-admin'
 INSERT OR IGNORE INTO user_s3_permissions (user_id, s3_prefix, permission, granted_by)
 SELECT id, 'nm099999', 'read_write', id FROM users WHERE username = 'test-user';
 
+-- Collaborator access for test-user on nm099999.
+-- The upload/download-credentials endpoints authorize a non-owner/non-admin by
+-- requiring BOTH a dataset_collaborators row AND a user_s3_permissions row, so
+-- the user_s3_permissions grant above is not sufficient on its own. Without
+-- this row the iam-removal collaborator tests 403 (test/iam-removal.test.ts).
+INSERT OR IGNORE INTO dataset_collaborators (dataset_id, user_id, granted_by, access_type)
+SELECT d.id, u.id, owner.id, 'invited'
+FROM datasets d
+JOIN users u ON u.username = 'test-user'
+JOIN users owner ON owner.username = 'test-admin'
+WHERE d.dataset_id = 'nm099999';
+
 -- Verification: confirm seed data exists (check counts manually if unexpected)
 SELECT 'users' AS tbl, COUNT(*) AS n FROM users WHERE username LIKE 'test-%';
 SELECT 'tokens' AS tbl, COUNT(*) AS n FROM tokens WHERE api_key_prefix LIKE 'nemar_test_%';
 SELECT 'datasets' AS tbl, COUNT(*) AS n FROM datasets WHERE dataset_id = 'nm099999';
 SELECT 'permissions' AS tbl, COUNT(*) AS n FROM user_s3_permissions WHERE s3_prefix = 'nm099999';
+SELECT 'collaborators' AS tbl, COUNT(*) AS n FROM dataset_collaborators dc JOIN datasets d ON dc.dataset_id = d.id WHERE d.dataset_id = 'nm099999';

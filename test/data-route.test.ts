@@ -565,7 +565,9 @@ describe("data.nemar.org catalog index (#584)", async () => {
     expect(body.count).toBe(body.datasets.length);
     expect(body.datasets.length).toBeGreaterThan(0);
     for (const d of body.datasets) {
-      expect(d.id).toMatch(/^nm\d+$/);
+      // Catalog lists both nm and on (OpenNeuro-imported) datasets; only
+      // xx* and nm099999 are excluded. See feedback: do not tighten to nm-only.
+      expect(d.id).toMatch(/^(nm|on)\d+$/);
       expect(d.id).not.toBe("nm099999");
       expect(d.browse_url).toBe(`/${d.id}/`);
     }
