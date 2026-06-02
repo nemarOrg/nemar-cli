@@ -3,7 +3,7 @@
  *
  * Unlike the source-string pins used for older migrations (D1 wasn't reachable
  * from a Bun unit test), bun:sqlite ships JSON1 + FTS5, so we apply the ACTUAL
- * migration files (0027/0028/0029) against an in-memory SQLite seeded to mirror
+ * migration files (0029/0030/0031) against an in-memory SQLite seeded to mirror
  * prod's managed + catalog shape, then assert the fold, backfill, FTS5 index,
  * triggers, and the read-path dormancy guards behave correctly.
  *
@@ -26,9 +26,9 @@ import { SYSTEM_USER_ID } from "../backend/src/lib/constants";
 
 const MIGRATIONS_DIR = join(import.meta.dir, "..", "backend/src/db/migrations");
 const migration = (name: string) => readFileSync(join(MIGRATIONS_DIR, name), "utf8");
-const M0027 = migration("0027_consolidation_columns_and_sentinel.sql");
-const M0028 = migration("0028_backfill_and_fold_catalog.sql");
-const M0029 = migration("0029_datasets_fts.sql");
+const M0029 = migration("0029_consolidation_columns_and_sentinel.sql");
+const M0030 = migration("0030_backfill_and_fold_catalog.sql");
+const M0031 = migration("0031_datasets_fts.sql");
 
 // Pre-0027 schema slice that the migrations + list query touch.
 const BASE_SCHEMA = `
@@ -150,9 +150,9 @@ function blankDb(): Database {
 }
 
 function applyExpand(db: Database) {
-  db.exec(M0027);
-  db.exec(M0028);
   db.exec(M0029);
+  db.exec(M0030);
+  db.exec(M0031);
 }
 
 // Reproduces the single-table list query from routes/datasets.ts (#646): after
@@ -281,7 +281,7 @@ describe("0028 fold + backfill", () => {
     db.exec(
       "UPDATE datasets SET authors = 'MANUAL OVERRIDE', readme = 'CUSTOM README' WHERE dataset_id = 'nm000200'",
     );
-    db.exec(M0028); // second run
+    db.exec(M0030); // second run
     const r = db
       .query("SELECT authors, readme FROM datasets WHERE dataset_id='nm000200'")
       .get() as {
@@ -505,11 +505,11 @@ describe("0029 FTS5 index + triggers", () => {
   });
 
   test("trigger bodies use uppercase BEGIN...END (workers-sdk#10998 remote-apply guard)", () => {
-    expect(M0029).toMatch(/AFTER INSERT ON datasets BEGIN/);
-    expect(M0029).toMatch(/AFTER DELETE ON datasets BEGIN/);
-    expect(M0029).toMatch(/AFTER UPDATE OF [^\n]+ ON datasets BEGIN/);
+    expect(M0031).toMatch(/AFTER INSERT ON datasets BEGIN/);
+    expect(M0031).toMatch(/AFTER DELETE ON datasets BEGIN/);
+    expect(M0031).toMatch(/AFTER UPDATE OF [^\n]+ ON datasets BEGIN/);
     // No lowercase begin/end in the DDL itself (comments are stripped first).
-    const ddl = M0029.replace(/--[^\n]*/g, "");
+    const ddl = M0031.replace(/--[^\n]*/g, "");
     expect(ddl).not.toMatch(/\bbegin\b/);
     expect(ddl).not.toMatch(/\bend\b/);
   });
@@ -523,7 +523,7 @@ describe("0029 FTS5 index + triggers", () => {
 describe("post-import shadow cleanup keeps the single-table list deduped", () => {
   function seeded(): Database {
     const db = blankDb();
-    db.exec(M0027); // consolidation columns + the sentinel user (id = -1)
+    db.exec(M0029); // consolidation columns + the sentinel user (id = -1)
     db.exec("INSERT INTO users (id, username, email) VALUES (10, 'alice', 'alice@x.org')");
     // ds002718 folded as a sentinel shadow; its on* mirror imported afterwards.
     db.exec(

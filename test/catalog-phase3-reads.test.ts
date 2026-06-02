@@ -91,8 +91,8 @@ function searchDb(): Database {
   const db = new Database(":memory:");
   db.exec("PRAGMA foreign_keys = ON;");
   db.exec(BASE_SCHEMA);
-  db.exec(sql("0027_consolidation_columns_and_sentinel.sql"));
-  db.exec(sql("0029_datasets_fts.sql"));
+  db.exec(sql("0029_consolidation_columns_and_sentinel.sql"));
+  db.exec(sql("0031_datasets_fts.sql"));
   db.exec(`
     INSERT INTO datasets (dataset_id, name, description, owner_user_id, status, visibility, is_sandbox,
       subject_count, modalities, tasks, authors, readme, concept_doi, uploader)
@@ -304,7 +304,7 @@ describe("migration 0030 backfill (managed authors/license from cache)", () => {
     const db = new Database(":memory:");
     db.exec("PRAGMA foreign_keys = ON;");
     db.exec(BASE_SCHEMA);
-    db.exec(sql("0027_consolidation_columns_and_sentinel.sql")); // adds authors/license cols + sentinel user
+    db.exec(sql("0029_consolidation_columns_and_sentinel.sql")); // adds authors/license cols + sentinel user
     db.exec(`
       INSERT INTO datasets (dataset_id, name, owner_user_id, status, visibility, authors, license)
       VALUES
@@ -317,7 +317,7 @@ describe("migration 0030 backfill (managed authors/license from cache)", () => {
       ('nm000401','Has Authors','Should Not Win','MIT'),
       ('ds000999','Folded','Should Not Touch Sentinel','GPL');
     `);
-    db.exec(sql("0030_backfill_managed_authors_license.sql"));
+    db.exec(sql("0032_backfill_managed_authors_license.sql"));
     const get = (id: string) =>
       db.query("SELECT authors, license FROM datasets WHERE dataset_id=?").get(id) as {
         authors: string | null;

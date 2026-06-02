@@ -68,7 +68,7 @@ function db0027(): Database {
   const db = new Database(":memory:");
   db.exec("PRAGMA foreign_keys = ON;");
   db.exec(BASE_SCHEMA);
-  db.exec(readFileSync(join(MIG, "0027_consolidation_columns_and_sentinel.sql"), "utf8"));
+  db.exec(readFileSync(join(MIG, "0029_consolidation_columns_and_sentinel.sql"), "utf8"));
   return db;
 }
 

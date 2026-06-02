@@ -105,7 +105,7 @@ function freshDb(): Database {
   db.exec(SCHEMA);
   // 0027 adds the consolidation columns (uploader, readme, bids_version,
   // sessions_count, embedding_dirty, ...) + the sentinel user.
-  db.exec(readFileSync(join(MIG, "0027_consolidation_columns_and_sentinel.sql"), "utf8"));
+  db.exec(readFileSync(join(MIG, "0029_consolidation_columns_and_sentinel.sql"), "utf8"));
   return db;
 }
 
@@ -215,8 +215,8 @@ describe("single-table list query: byte-stable alias mapping", () => {
 });
 
 describe("contract: the cache, the flag, and the dead writers are gone", () => {
-  test("migration 0031 drops nemar_catalog", () => {
-    const m = readFileSync(join(MIG, "0031_drop_nemar_catalog.sql"), "utf8");
+  test("migration 0033 drops nemar_catalog", () => {
+    const m = readFileSync(join(MIG, "0033_drop_nemar_catalog.sql"), "utf8");
     expect(m).toMatch(/DROP TABLE IF EXISTS nemar_catalog/i);
   });
 
