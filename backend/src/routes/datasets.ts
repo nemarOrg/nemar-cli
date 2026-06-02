@@ -797,15 +797,20 @@ async function executeAndReturn(
 
     // Permanent defense-in-depth net (#646): the main query no longer touches
     // nemar_catalog (dropped in Phase 6), but if any code path ever hits a
-    // missing-catalog error -- or a missing datasets_fts (the search filter
-    // injects an FTS subquery) -- degrade to the basic datasets-only query
-    // instead of 500ing, matching the /datasets/search endpoint's graceful
-    // degradation rather than failing the whole list.
+    // missing-catalog error, a missing datasets_fts (the search filter injects
+    // an FTS subquery), or a missing consolidation column (this Worker deployed
+    // before migrations 0029-0033 applied -- a cutover-order slip), degrade to
+    // the basic datasets-only query (which selects only pre-consolidation
+    // columns) instead of 500ing, matching the /datasets/search endpoint's
+    // graceful degradation rather than failing the whole list.
     if (
       msg.includes("no such table: nemar_catalog") ||
-      msg.includes("no such table: datasets_fts")
+      msg.includes("no such table: datasets_fts") ||
+      msg.includes("no such column")
     ) {
-      console.warn(`[datasets] missing catalog/FTS table (${msg}), falling back to basic query`);
+      console.warn(
+        `[datasets] missing catalog/FTS table or consolidation column (${msg}); falling back to basic query`,
+      );
       try {
         const fallback = await db
           .prepare(

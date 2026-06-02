@@ -130,8 +130,8 @@ function classifySource(record: NemarCatalogRecord): { source: string; sourceId:
 export async function upsertCatalogRecordsToDatasets(
   db: D1Database,
   records: NemarCatalogRecord[],
-): Promise<number> {
-  if (records.length === 0) return 0;
+): Promise<{ upserted: number; failed: string[] }> {
+  if (records.length === 0) return { upserted: 0, failed: [] };
 
   const [managedRows, shadowRows] = await Promise.all([
     db
@@ -148,9 +148,11 @@ export async function upsertCatalogRecordsToDatasets(
   const managedIds = new Set((managedRows.results || []).map((r) => r.dataset_id));
   const shadowIds = new Set((shadowRows.results || []).map((r) => r.source_id));
   const survivors = records.filter((r) => !managedIds.has(r.id) && !shadowIds.has(r.id));
-  if (survivors.length === 0) return 0;
+  if (survivors.length === 0) return { upserted: 0, failed: [] };
 
   let upserted = 0;
+  let failedCount = 0;
+  const failed: string[] = [];
   for (let i = 0; i < survivors.length; i += BATCH_SIZE) {
     const batch = survivors.slice(i, i + BATCH_SIZE);
     const statements = batch.map((record) => {
@@ -214,22 +216,34 @@ export async function upsertCatalogRecordsToDatasets(
           record.created || null,
         );
     });
-    const batchResults = await db.batch(statements);
-    // Count actual writes: an INSERT or a sentinel UPDATE reports changes=1; a
-    // collision with a managed row (the WHERE owner=-1 guard) reports changes=0.
-    for (const r of batchResults) {
-      upserted += (r as { meta?: { changes?: number } }).meta?.changes ?? 0;
+    try {
+      const batchResults = await db.batch(statements);
+      // Count actual writes: an INSERT or a sentinel UPDATE reports changes=1; a
+      // collision with a managed row (the WHERE owner=-1 guard) reports changes=0.
+      for (const r of batchResults) {
+        upserted += (r as { meta?: { changes?: number } }).meta?.changes ?? 0;
+      }
+    } catch (err) {
+      // A single bad record (or a transient D1 error) must NOT abort the rest of
+      // the import (#646 review): skip this batch, record it, keep folding the
+      // remaining ones. The caller surfaces `failed` into catalog_sync_log.
+      const msg = err instanceof Error ? err.message : String(err);
+      const ids = batch.map((r) => r.id).join(", ");
+      console.error(`[catalog-sync] batch at offset ${i} failed (${batch.length} records): ${msg}`);
+      failed.push(`${ids}: ${msg}`);
+      failedCount += batch.length;
     }
   }
-  if (upserted < survivors.length) {
+  const collisions = survivors.length - upserted - failedCount;
+  if (collisions > 0) {
     // Some survivors collided with a NON-active managed row and were no-oped by
     // the guard (managed facts/ownership must not be clobbered by legacy ingest).
     // Surfaced so the gap isn't silent.
     console.warn(
-      `[catalog-sync] ${survivors.length - upserted}/${survivors.length} catalog records did not fold into datasets (managed-row collisions)`,
+      `[catalog-sync] ${collisions}/${survivors.length} catalog records did not fold into datasets (managed-row collisions)`,
     );
   }
-  return upserted;
+  return { upserted, failed };
 }
 
 /**
@@ -256,7 +270,9 @@ export async function syncCatalog(db: D1Database): Promise<CatalogSyncResult> {
 
     // Fold into the datasets source of truth (the only catalog write). Sets
     // embedding_dirty=1 on new/changed rows for the scheduled re-embed.
-    recordsSynced = await upsertCatalogRecordsToDatasets(db, records);
+    const folded = await upsertCatalogRecordsToDatasets(db, records);
+    recordsSynced = folded.upserted;
+    if (folded.failed.length > 0) errors.push(...folded.failed);
     console.log(`[catalog-sync] Folded ${recordsSynced} records into datasets`);
 
     // Update sync log
@@ -320,7 +336,9 @@ export async function importCatalogRecords(
 
     // Fold into the datasets source of truth (the only catalog write). Sets
     // embedding_dirty=1 on new/changed rows for the scheduled re-embed.
-    recordsSynced = await upsertCatalogRecordsToDatasets(db, records);
+    const folded = await upsertCatalogRecordsToDatasets(db, records);
+    recordsSynced = folded.upserted;
+    if (folded.failed.length > 0) errors.push(...folded.failed);
     console.log(`[catalog-sync] Folded ${recordsSynced} records into datasets`);
 
     await db

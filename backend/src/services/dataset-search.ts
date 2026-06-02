@@ -148,10 +148,47 @@ export async function drainEmbeddingDirty(
     if (failed.length > 0) {
       console.warn(`[embed-cron] ${failed.length} ids failed to embed: ${failed.join(", ")}`);
     }
+    // Record a summary so persistent drain failures / embedding drift are
+    // admin-queryable via audit_log, not just visible in Worker console logs
+    // (#646 review). Only when there was work, to avoid a daily no-op row.
+    if (ids.length > 0 || failed.length > 0) {
+      await writeEmbedDrainAudit(db, { scanned: ids.length, embedded, failed });
+    }
     return { scanned: ids.length, embedded };
   } catch (err) {
-    console.error(`[embed-cron] drain failed: ${err instanceof Error ? err.message : String(err)}`);
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error(`[embed-cron] drain failed: ${msg}`);
+    await writeEmbedDrainAudit(db, { scanned: 0, embedded: 0, error: msg });
     return { scanned: 0, embedded: 0 };
+  }
+}
+
+/**
+ * Guarded audit-log write for the embed drain. drainEmbeddingDirty never
+ * throws, so this swallows its own errors (logging them) rather than bubbling.
+ */
+async function writeEmbedDrainAudit(
+  db: D1Database,
+  details: { scanned: number; embedded: number; failed?: string[]; error?: string },
+): Promise<void> {
+  try {
+    await db
+      .prepare("INSERT INTO audit_log (action, details) VALUES (?, ?)")
+      .bind(
+        "embed_drain",
+        JSON.stringify({
+          scanned: details.scanned,
+          embedded: details.embedded,
+          failed: details.failed?.length ?? 0,
+          failed_ids: details.failed?.slice(0, 20) ?? [],
+          error: details.error,
+        }),
+      )
+      .run();
+  } catch (err) {
+    console.error(
+      `[embed-cron] failed to write drain audit log: ${err instanceof Error ? err.message : String(err)}`,
+    );
   }
 }
 

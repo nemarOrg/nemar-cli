@@ -657,6 +657,11 @@ export interface DatasetsListResponse {
   total_count: number;
   limit: number;
   offset: number;
+  // Set by the backend when the list query degraded to a basic datasets-only
+  // result (catalog/FTS table or consolidation column missing). When present,
+  // filters were NOT applied and catalog datasets are NOT included (#646).
+  fallback?: boolean;
+  warning?: string;
 }
 
 export interface DatasetListFilters {

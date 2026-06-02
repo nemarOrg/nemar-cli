@@ -117,7 +117,7 @@ describe("upsertCatalogRecordsToDatasets", () => {
 
   test("inserts a new catalog row as folded (owner=-1, dirty=1, public/active)", async () => {
     const db = seeded();
-    const n = await upsertCatalogRecordsToDatasets(realD1(db), [
+    const { upserted: n } = await upsertCatalogRecordsToDatasets(realD1(db), [
       rec({ id: "ds000900", Authors: "New A" }),
     ]);
     expect(n).toBe(1);
@@ -153,7 +153,7 @@ describe("upsertCatalogRecordsToDatasets", () => {
 
   test("skips records that are an active managed dataset (dedup)", async () => {
     const db = seeded();
-    const n = await upsertCatalogRecordsToDatasets(realD1(db), [
+    const { upserted: n } = await upsertCatalogRecordsToDatasets(realD1(db), [
       rec({ id: "nm000500", Authors: "HIJACK" }),
     ]);
     expect(n).toBe(0);
@@ -165,7 +165,7 @@ describe("upsertCatalogRecordsToDatasets", () => {
 
   test("skips ds* shadows of a managed on* mirror (dedup)", async () => {
     const db = seeded();
-    const n = await upsertCatalogRecordsToDatasets(realD1(db), [rec({ id: "ds000600" })]);
+    const { upserted: n } = await upsertCatalogRecordsToDatasets(realD1(db), [rec({ id: "ds000600" })]);
     expect(n).toBe(0);
     expect(db.query("SELECT 1 FROM datasets WHERE dataset_id='ds000600'").get()).toBeNull();
   });
