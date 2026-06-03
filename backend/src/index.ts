@@ -30,6 +30,7 @@ import { datasetRoutes } from "./routes/datasets";
 import { sandboxRoutes } from "./routes/sandbox";
 import { userRoutes } from "./routes/users";
 import webhooks from "./routes/webhooks";
+import { zarrDataRoutes } from "./routes/zarr-data";
 import { drainEmbeddingDirty } from "./services/dataset-search";
 import { deleteDatasetCascade } from "./services/deletion";
 import {
@@ -208,9 +209,20 @@ app.use("*", async (c, next) => {
     url.pathname = url.pathname === "/" ? "/data" : `/data${url.pathname}`;
     return api.fetch(new Request(url, c.req.raw), c.env, c.executionCtx);
   }
+  // zarr.nemar.org is the authoritative browser gateway for the Zarr serving
+  // copies. It dispatches to a self-contained sub-app (its own restricted-origin
+  // CORS, Range pass-through, and edge caching) rather than the api middleware
+  // stack -- the global cors() allows *.nemar.org broadly, but the zarr host
+  // must scope CORS tightly and expose Range/ETag headers zarrita needs.
+  if (host === "zarr.nemar.org") {
+    return zarrDataRoutes.fetch(c.req.raw, c.env, c.executionCtx);
+  }
   return next();
 });
 
+// Dev / workers.dev access to the zarr proxy (prod uses the zarr.nemar.org host
+// fork above). Must precede the catch-all api mount.
+app.route("/zarrproxy", zarrDataRoutes);
 app.route("/nemar", api);
 app.route("/", api);
 

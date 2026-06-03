@@ -15,7 +15,11 @@ compatibility_flags = ["nodejs_compat"]
 # so dev testing does not require a separate dev custom domain.
 routes = [
   { pattern = "api.nemar.org", custom_domain = true },
-  { pattern = "data.nemar.org", custom_domain = true }
+  { pattern = "data.nemar.org", custom_domain = true },
+  # zarr.nemar.org: authoritative browser gateway for the Zarr serving copies
+  # (epic #684). Self-contained sub-app with restricted-origin CORS + Range +
+  # edge cache; dev reaches the same handlers at <workers.dev>/zarrproxy/*.
+  { pattern = "zarr.nemar.org", custom_domain = true }
 ]
 # workers.dev fallback hostname so the worker stays reachable if the
 # custom domain ever misbehaves.
