@@ -216,6 +216,20 @@ describe("buildDatasetFilterClauses license clause", () => {
     expect(params).toEqual([]);
   });
 
+  test("accumulates params correctly alongside a preceding modality clause", () => {
+    // Guards the shared-params spread: each tier must push as a flat value, so a
+    // combined modality + license filter binds ["%eeg%", "public"], never a
+    // nested ["%eeg%", ["public"]] that would corrupt the binding.
+    const params: (string | number)[] = [];
+    const clause = buildDatasetFilterClauses(params, {
+      modality: "eeg",
+      licenseTiers: ["public"],
+    });
+    expect(clause).toContain("LOWER(COALESCE(d.modalities, '')) LIKE ?");
+    expect(clause).toContain("d.license_tier IN (?)");
+    expect(params).toEqual(["%eeg%", "public"]);
+  });
+
   test("filters real rows by tier end-to-end", () => {
     const db = dbWith0029();
     LICENSE_FIXTURE.forEach(([value], i) => {

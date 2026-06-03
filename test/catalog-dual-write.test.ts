@@ -66,8 +66,8 @@ function seededDb(): Database {
   const db = new Database(":memory:");
   db.exec(SCHEMA);
   db.exec(
-    `INSERT INTO datasets (dataset_id, name, description, authors, license, readme, bids_version, sessions_count, updated_at)
-     VALUES ('nm000200', 'Old Name', 'old desc', 'Existing Author', 'CC0', 'old readme', '1.0.0', 2, '2020-01-01')`,
+    `INSERT INTO datasets (dataset_id, name, description, authors, license, license_tier, readme, bids_version, sessions_count, updated_at)
+     VALUES ('nm000200', 'Old Name', 'old desc', 'Existing Author', 'CC0', 'public', 'old readme', '1.0.0', 2, '2020-01-01')`,
   );
   return db;
 }
@@ -86,12 +86,13 @@ describe("writeDatasetCatalogFields", () => {
     expect(res.changes).toBe(1);
     const row = db
       .query(
-        "SELECT name, description, authors, license, readme, bids_version FROM datasets WHERE dataset_id='nm000200'",
+        "SELECT name, description, authors, license, license_tier, readme, bids_version FROM datasets WHERE dataset_id='nm000200'",
       )
       .get() as Record<string, unknown>;
     expect(row.authors).toBe("New Author");
     expect(row.bids_version).toBe("1.8.0");
     expect(row.license).toBe("CC0"); // preserved
+    expect(row.license_tier).toBe("public"); // preserved (null license -> COALESCE keeps tier)
     expect(row.name).toBe("Old Name"); // preserved
     expect(row.description).toBe("old desc"); // preserved
     expect(row.readme).toBe("old readme"); // preserved
@@ -119,7 +120,7 @@ describe("writeDatasetCatalogFields", () => {
     });
     const row = db
       .query(
-        "SELECT name, description, authors, license, readme, bids_version, sessions_count FROM datasets WHERE dataset_id='nm000200'",
+        "SELECT name, description, authors, license, license_tier, readme, bids_version, sessions_count FROM datasets WHERE dataset_id='nm000200'",
       )
       .get() as Record<string, unknown>;
     expect(row).toEqual({
@@ -127,6 +128,7 @@ describe("writeDatasetCatalogFields", () => {
       description: "fresh desc",
       authors: "Fresh Author",
       license: "MIT",
+      license_tier: "unknown", // derived from "MIT" (#653)
       readme: "fresh readme",
       bids_version: "1.9.0",
       sessions_count: 7,

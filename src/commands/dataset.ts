@@ -2441,6 +2441,30 @@ Examples:
       process.exit(1);
     }
 
+    // Validate --license tiers up front. The API tolerantly drops unknown
+    // tokens (so the website degrades gracefully), which would silently return
+    // an unfiltered list on a CLI typo -- so fail fast here instead. Mirror of
+    // backend/src/lib/license.ts LICENSE_TIERS (#653).
+    if (options.license) {
+      const VALID_LICENSE_TIERS = [
+        "public",
+        "attribution",
+        "sharealike",
+        "noncommercial",
+        "noderiv",
+        "unknown",
+      ];
+      const bad = options.license
+        .split(",")
+        .map((t: string) => t.trim().toLowerCase())
+        .filter((t: string) => t && !VALID_LICENSE_TIERS.includes(t));
+      if (bad.length > 0) {
+        console.log(chalk.red(`Error: invalid license tier(s): ${bad.join(", ")}`));
+        console.log(`Valid tiers: ${VALID_LICENSE_TIERS.join(", ")}`);
+        process.exit(1);
+      }
+    }
+
     // Parse pagination
     const limit = options.all ? 200 : Math.min(Number.parseInt(options.limit, 10) || 20, 200);
     let offset = 0;

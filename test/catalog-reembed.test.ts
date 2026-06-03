@@ -240,7 +240,7 @@ describe("upsertCatalogRecordsToDatasets", () => {
     const row = db
       .query(
         `SELECT name, description, subject_count, modalities, age_min, age_max, file_size, total_files,
-                tasks, authors, license, bids_version, sessions_count, publish_date, uploader,
+                tasks, authors, license, license_tier, bids_version, sessions_count, publish_date, uploader,
                 file_size_formatted, concept_doi, created_at, source, source_id
          FROM datasets WHERE dataset_id='ds123456'`,
       )
@@ -257,6 +257,7 @@ describe("upsertCatalogRecordsToDatasets", () => {
       tasks: "rest,oddball",
       authors: "Mapped Author",
       license: "CC-BY-4.0",
+      license_tier: "attribution", // derived from "CC-BY-4.0" (#653)
       bids_version: "1.9.1",
       sessions_count: 7,
       publish_date: "2023-03-03",
@@ -276,6 +277,42 @@ describe("upsertCatalogRecordsToDatasets", () => {
       .query("SELECT source, source_id FROM datasets WHERE dataset_id='nm999900'")
       .get() as { source: string; source_id: string | null };
     expect(row).toEqual({ source: "nemar.org", source_id: null });
+  });
+
+  // A lazy D1 shim: the pre-batch SELECTs succeed (empty), and batch() rejects
+  // with a chosen error -- mimicking real D1, where a missing-column error
+  // surfaces at execution, not at prepare (bun:sqlite prepares eagerly, so it
+  // can't reproduce the catch path). Exercises the #653 structural-error guard.
+  function lazyBatchRejectD1(batchError: string): D1Database {
+    const stmt = {
+      bind: () => stmt,
+      all: () => Promise.resolve({ results: [] }),
+      first: () => Promise.resolve(null),
+      run: () => Promise.resolve({ success: true, meta: { changes: 0 } }),
+    };
+    return {
+      prepare: () => stmt,
+      batch: () => Promise.reject(new Error(batchError)),
+    } as unknown as D1Database;
+  }
+
+  test("re-throws a structural error (missing column) instead of silently dropping the batch", () => {
+    // A schema/deploy mismatch fails every batch identically; swallowing it would
+    // report a `completed` run with 0 upserts. It must surface loudly (#653).
+    const db = lazyBatchRejectD1("D1_ERROR: no such column: license_tier");
+    expect(upsertCatalogRecordsToDatasets(db, [rec({ id: "ds000001" })])).rejects.toThrow(
+      /no such column/i,
+    );
+  });
+
+  test("still skips-and-continues on a transient (non-structural) batch error", async () => {
+    const db = lazyBatchRejectD1("Network connection reset");
+    const { upserted, failed } = await upsertCatalogRecordsToDatasets(db, [
+      rec({ id: "ds000002" }),
+    ]);
+    expect(upserted).toBe(0);
+    expect(failed).toHaveLength(1);
+    expect(failed[0]).toContain("ds000002");
   });
 });
 

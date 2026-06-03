@@ -229,10 +229,20 @@ export async function upsertCatalogRecordsToDatasets(
         if (((r as { meta?: { changes?: number } }).meta?.changes ?? 0) > 0) upserted++;
       }
     } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      // A STRUCTURAL error (missing column/table) is not a bad record -- it will
+      // fail EVERY batch identically, so swallowing it would silently drop the
+      // whole catalog while reporting a `completed` run with 0 upserts (#653
+      // review). That is exactly the "no silent failures" trap: re-throw so the
+      // outer syncCatalog marks the run `failed` and the mismatch is loud. This
+      // is the deploy-before-migrate window (e.g. license_tier added in 0034) or
+      // any schema drift. Migrate-then-deploy makes it rare, not impossible.
+      if (/no such (column|table)/i.test(msg)) {
+        throw err;
+      }
       // A single bad record (or a transient D1 error) must NOT abort the rest of
       // the import (#646 review): skip this batch, record it, keep folding the
       // remaining ones. The caller surfaces `failed` into catalog_sync_log.
-      const msg = err instanceof Error ? err.message : String(err);
       const ids = batch.map((r) => r.id).join(", ");
       console.error(`[catalog-sync] batch at offset ${i} failed (${batch.length} records): ${msg}`);
       failed.push(`${ids}: ${msg}`);

@@ -326,7 +326,12 @@ datasetRoutes.post(
     for (let attempt = 0; ; attempt++) {
       datasetId = await generateDatasetId(db, !!sandbox);
       try {
-        // Claim the ID early with a minimal INSERT to close the TOCTOU gap
+        // Claim the ID early with a minimal INSERT to close the TOCTOU gap.
+        // license/license_tier are intentionally omitted: no license is known
+        // at upload time, so license_tier rests on its NOT NULL DEFAULT
+        // 'unknown' (0034) until enrichment sets the real value via
+        // writeDatasetCatalogFields. If `license` is ever added here, add
+        // license_tier alongside it or the tier will stay stale (#653).
         await db
           .prepare(
             `INSERT INTO datasets (dataset_id, name, description, owner_user_id, github_repo, is_sandbox, visibility)
@@ -553,7 +558,7 @@ datasetRoutes.get("/", optionalAuthMiddleware, async (c) => {
     }
 
     const params: (string | number)[] = [status, user.id];
-    // Read managed facts from the `datasets` source of truth (#646). 23-column
+    // Read managed facts from the `datasets` source of truth (#646). 22-column
     // ?mine wire shape. latest_version is the most recently minted DOI version
     // (null when none); scripts/hallu-sync.sh reads it to skip the per-dataset
     // /manifest call, so keep the ordering in sync with /datasets/:id/manifest.
@@ -600,7 +605,7 @@ datasetRoutes.get("/", optionalAuthMiddleware, async (c) => {
   // Single-table read from the `datasets` source of truth (#646). Folded legacy
   // catalog rows are first-class here, discriminated by the sentinel owner
   // (source_type='catalog'); managed datasets are source_type='managed'.
-  // 25-column wire shape, byte-stable with the pre-consolidation UNION path
+  // 24-column wire shape, byte-stable with the pre-consolidation UNION path
   // plus the #653 `license` column.
   const params: (string | number)[] = [status];
   let query = `
