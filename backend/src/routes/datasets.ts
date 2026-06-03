@@ -8,6 +8,7 @@ import { zValidator } from "@hono/zod-validator";
 import { Hono } from "hono";
 import { z } from "zod";
 import { SYSTEM_USER_ID } from "../lib/constants";
+import { type LicenseTier, parseLicenseTierFilter } from "../lib/license";
 import { authMiddleware, optionalAuthMiddleware } from "../middleware/auth";
 import { cliVersionGuard } from "../middleware/cliVersion";
 import {
@@ -325,7 +326,12 @@ datasetRoutes.post(
     for (let attempt = 0; ; attempt++) {
       datasetId = await generateDatasetId(db, !!sandbox);
       try {
-        // Claim the ID early with a minimal INSERT to close the TOCTOU gap
+        // Claim the ID early with a minimal INSERT to close the TOCTOU gap.
+        // license/license_tier are intentionally omitted: no license is known
+        // at upload time, so license_tier rests on its NOT NULL DEFAULT
+        // 'unknown' (0034) until enrichment sets the real value via
+        // writeDatasetCatalogFields. If `license` is ever added here, add
+        // license_tier alongside it or the tier will stay stale (#653).
         await db
           .prepare(
             `INSERT INTO datasets (dataset_id, name, description, owner_user_id, github_repo, is_sandbox, visibility)
@@ -521,6 +527,11 @@ datasetRoutes.get("/", optionalAuthMiddleware, async (c) => {
   const hasDoi = c.req.query("has_doi") === "true";
   const recentParam = c.req.query("recent");
   const recent = recentParam ? Number.parseInt(recentParam, 10) : undefined;
+  // #653: comma-separated license tiers, OR semantics. Invalid tokens are
+  // dropped; an empty result means "no license filter". Filters on the derived
+  // datasets.license_tier column so it covers the whole catalog, not just the
+  // page the website already fetched.
+  const licenseTiers = parseLicenseTierFilter(c.req.query("license"));
   const sort = c.req.query("sort") || "newest";
 
   if (mine) {
@@ -560,6 +571,7 @@ datasetRoutes.get("/", optionalAuthMiddleware, async (c) => {
              COALESCE(d.subject_count, 0) AS participants,
              COALESCE(d.tasks, '') AS tasks,
              COALESCE(d.authors, '') AS authors,
+             COALESCE(d.license, '') AS license,
              COALESCE(d.file_size, 0) AS file_size,
              COALESCE(d.file_size_formatted, '') AS file_size_formatted,
              'managed' AS source_type,
@@ -580,6 +592,7 @@ datasetRoutes.get("/", optionalAuthMiddleware, async (c) => {
       task,
       hasDoi,
       recent,
+      licenseTiers,
     });
     query += buildSortClause(sort);
 
@@ -592,7 +605,8 @@ datasetRoutes.get("/", optionalAuthMiddleware, async (c) => {
   // Single-table read from the `datasets` source of truth (#646). Folded legacy
   // catalog rows are first-class here, discriminated by the sentinel owner
   // (source_type='catalog'); managed datasets are source_type='managed'.
-  // 24-column wire shape, byte-stable with the pre-consolidation UNION path.
+  // 24-column wire shape, byte-stable with the pre-consolidation UNION path
+  // plus the #653 `license` column.
   const params: (string | number)[] = [status];
   let query = `
     SELECT d.dataset_id, d.dataset_id AS id, d.name, d.description, d.status, d.visibility,
@@ -603,6 +617,7 @@ datasetRoutes.get("/", optionalAuthMiddleware, async (c) => {
            COALESCE(d.subject_count, 0) AS participants,
            COALESCE(d.tasks, '') AS tasks,
            COALESCE(d.authors, '') AS authors,
+           COALESCE(d.license, '') AS license,
            COALESCE(d.file_size, 0) AS file_size,
            COALESCE(d.file_size_formatted, '') AS file_size_formatted,
            CASE WHEN d.owner_user_id = ${SYSTEM_USER_ID} THEN 'catalog' ELSE 'managed' END AS source_type,
@@ -624,7 +639,15 @@ datasetRoutes.get("/", optionalAuthMiddleware, async (c) => {
     query += " AND COALESCE(d.uploader, u.username) = ?";
     params.push(owner);
   }
-  query += buildDatasetFilterClauses(params, { search, modality, author, task, hasDoi, recent });
+  query += buildDatasetFilterClauses(params, {
+    search,
+    modality,
+    author,
+    task,
+    hasDoi,
+    recent,
+    licenseTiers,
+  });
   query += buildSortClause(sort);
 
   // CF edge cache: anonymous list responses are identical for all callers
@@ -674,6 +697,7 @@ export function buildDatasetFilterClauses(
     task?: string;
     hasDoi?: boolean;
     recent?: number;
+    licenseTiers?: LicenseTier[];
   },
 ): string {
   let clauses = "";
@@ -709,6 +733,14 @@ export function buildDatasetFilterClauses(
   if (opts.task) {
     clauses += " AND LOWER(COALESCE(d.tasks, '')) LIKE ?";
     params.push(`%${opts.task.toLowerCase()}%`);
+  }
+  if (opts.licenseTiers && opts.licenseTiers.length > 0) {
+    // OR across tiers = IN (...). Tiers are pre-validated against LICENSE_TIERS
+    // by parseLicenseTierFilter, so they're a safe, bounded placeholder list.
+    // license_tier is NOT NULL (migration 0034), so no NULL branch is needed.
+    const placeholders = opts.licenseTiers.map(() => "?").join(", ");
+    clauses += ` AND d.license_tier IN (${placeholders})`;
+    params.push(...opts.licenseTiers);
   }
   if (opts.hasDoi) {
     clauses += " AND (d.concept_doi IS NOT NULL AND d.concept_doi != '')";

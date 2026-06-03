@@ -2381,6 +2381,10 @@ datasetCommand
   .option("--modality <type>", "Filter by modality (eeg, emg, meg, etc.)")
   .option("--author <name>", "Filter by author name")
   .option("--task <name>", "Filter by task name")
+  .option(
+    "--license <tiers>",
+    "Filter by license tier(s), comma-separated: public, attribution, sharealike, noncommercial, noderiv, unknown",
+  )
   .option("--doi", "Show only datasets with DOIs")
   .option("--recent [days]", "Show recently published datasets")
   .option("--sort <order>", "Sort: newest, oldest, name, participants, size", "newest")
@@ -2419,6 +2423,7 @@ Examples:
   $ nemar dataset list --mine                  # Your datasets
   $ nemar dataset list --owner yahya           # Datasets by 'yahya'
   $ nemar dataset list --modality eeg          # EEG datasets only
+  $ nemar dataset list --license public,attribution  # Permissive licenses
   $ nemar dataset list --search "motor"        # Search by keyword
   $ nemar dataset list --doi --sort size       # Published, by size
   $ nemar dataset search "resting state EEG"   # Semantic search`,
@@ -2434,6 +2439,30 @@ Examples:
       console.log(chalk.red("Error: Not authenticated"));
       console.log("Run 'nemar auth login' to see your datasets");
       process.exit(1);
+    }
+
+    // Validate --license tiers up front. The API tolerantly drops unknown
+    // tokens (so the website degrades gracefully), which would silently return
+    // an unfiltered list on a CLI typo -- so fail fast here instead. Mirror of
+    // backend/src/lib/license.ts LICENSE_TIERS (#653).
+    if (options.license) {
+      const VALID_LICENSE_TIERS = [
+        "public",
+        "attribution",
+        "sharealike",
+        "noncommercial",
+        "noderiv",
+        "unknown",
+      ];
+      const bad = options.license
+        .split(",")
+        .map((t: string) => t.trim().toLowerCase())
+        .filter((t: string) => t && !VALID_LICENSE_TIERS.includes(t));
+      if (bad.length > 0) {
+        console.log(chalk.red(`Error: invalid license tier(s): ${bad.join(", ")}`));
+        console.log(`Valid tiers: ${VALID_LICENSE_TIERS.join(", ")}`);
+        process.exit(1);
+      }
     }
 
     // Parse pagination
@@ -2456,6 +2485,7 @@ Examples:
         modality: options.modality,
         author: options.author,
         task: options.task,
+        license: options.license,
         hasDoi: !!options.doi,
         recent: options.recent ? Number.parseInt(options.recent, 10) || 30 : undefined,
         sort: options.sort,
