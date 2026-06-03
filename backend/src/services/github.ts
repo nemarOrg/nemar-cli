@@ -1593,6 +1593,54 @@ export async function triggerArchiveGeneration(
   }
 }
 
+/**
+ * Trigger Zarr serving-copy generation via repository_dispatch (epic #684).
+ *
+ * Sibling to `triggerArchiveGeneration`: dispatches `generate-zarr` on the
+ * central `nemarDatasets/.github` repo (NOT the dataset repo). The central
+ * `run-generate-zarr.yml` workflow mints a per-repo App token, checks out the
+ * dataset repo at `ref` (with full history), diffs HEAD against the
+ * last-converted commit recorded in `s3://nemar/<id>/zarr/index.json`, converts
+ * only the changed recordings with biosigIO, writes the per-recording stores to
+ * `s3://nemar/<id>/zarr/...` (latest-only), and POSTs back to
+ * `/webhooks/zarr-ready`.
+ *
+ * `ref` is a branch name (`main`) or a commit SHA. `full=true` forces a
+ * whole-tree conversion (first conversion / backfill / recovery), bypassing the
+ * incremental diff. The client_payload deliberately carries no file list -- the
+ * workflow self-diffs, which avoids the repository_dispatch payload-size cap on
+ * large datasets and self-heals a missed dispatch on the next push.
+ */
+export async function triggerZarrGeneration(
+  datasetId: string,
+  ref: string,
+  pat: string,
+  options?: { full?: boolean },
+): Promise<void> {
+  const response = await fetch(`${GITHUB_API()}/repos/${CENTRAL_WORKFLOW_REPO}/dispatches`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${pat}`,
+      Accept: "application/vnd.github.v3+json",
+      "User-Agent": "NEMAR-API",
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      event_type: "generate-zarr",
+      client_payload: {
+        dataset_id: datasetId,
+        ref,
+        full: options?.full ?? false,
+      },
+    }),
+  });
+
+  if (!response.ok) {
+    const error = await response.text();
+    throw new Error(`Failed to trigger zarr generation: HTTP ${response.status} - ${error}`);
+  }
+}
+
 /** Central tooling repo where the manifest workflow lives. Targeted by
  *  `triggerManifestGeneration` regardless of the dataset's own repo.
  *  Relocated from `nemarOrg/nemar-cli` to `nemarDatasets/.github` (#564)

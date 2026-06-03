@@ -8,6 +8,7 @@
 import type { Context } from "hono";
 import { Hono } from "hono";
 
+import { purgeCacheUrls, zarrPurgeTargets } from "../services/cloudflare.js";
 import { runDatasetSync } from "../services/dataset-reindex.js";
 import { isValidDatasetId } from "../services/datasetId.js";
 import { createEzidVersionDoi, parseDoiProvider } from "../services/doi.js";
@@ -21,6 +22,7 @@ import {
   triggerEnrichmentRun,
   triggerManifestGeneration,
   triggerVersionDoiRun,
+  triggerZarrGeneration,
   verifyManifestCallbackToken,
   verifyPrescreenCallbackToken,
 } from "../services/github.js";
@@ -1818,6 +1820,84 @@ export function shouldDispatchVersionDoi(
   return { dispatch: true, datasetId, tag: match[1] };
 }
 
+/** Source-data file extensions whose change should rebuild a recording's Zarr
+ *  serving copy (epic #684). Primary recording containers plus the companion
+ *  files that carry their samples/markers (EEGLAB `.fdt`; the BrainVision
+ *  `.vhdr`/`.vmrk`/`.eeg` triplet), so a change confined to a companion still
+ *  triggers a reconversion of its recording. Compared lowercase. */
+const ZARR_DATA_EXTENSIONS: ReadonlySet<string> = new Set([
+  "set",
+  "fdt", // EEGLAB
+  "edf",
+  "bdf", // European Data Format (+)
+  "vhdr",
+  "vmrk",
+  "eeg", // BrainVision triplet
+  "fif", // MEG / Elekta-Neuromag FIFF
+]);
+
+/** True if a BIDS path is a recording data file (or its companion) or a curated
+ *  `_events.tsv` sidecar. A `_events.tsv` change must refresh the sibling
+ *  recording's embedded events; a CTF `.ds` recording is a directory, so any
+ *  file under `*.ds/` counts. Exported for unit testing. */
+export function isZarrTriggerPath(p: string): boolean {
+  if (p.endsWith("_events.tsv")) return true;
+  if (p.includes(".ds/")) return true;
+  const dot = p.lastIndexOf(".");
+  if (dot === -1) return false;
+  return ZARR_DATA_EXTENSIONS.has(p.slice(dot + 1).toLowerCase());
+}
+
+/** Decide whether a push event should fan out to the Zarr-generation workflow.
+ *
+ *  Parallels `shouldDispatchEnrichment` (same owner/dataset gate, same
+ *  touched-path union over `commits[]` + `head_commit`), but:
+ *    - fires ONLY on `refs/heads/main` -- the Zarr copy is latest-only and
+ *      tracks main's HEAD; data lands on main after a PR merge. Release-branch
+ *      and tag pushes don't carry merged data.
+ *    - matches a recording data file / companion / `_events.tsv` instead of the
+ *      README/dataset_description enrichment paths.
+ *
+ *  Returns no file list: the workflow self-diffs HEAD against the last-converted
+ *  commit recorded in `index.json`, so a giant PR can't overflow the dispatch
+ *  payload and a missed delivery self-heals on the next data push. Exported for
+ *  unit testing -- keep pure (no env, no I/O). */
+export function shouldDispatchZarr(
+  event: PushEventPayload,
+): { dispatch: false; reason: string } | { dispatch: true; datasetId: string; ref: string } {
+  if (event.deleted) return { dispatch: false, reason: "branch_deleted" };
+
+  const owner = event.repository?.owner?.login;
+  if (owner !== "nemarDatasets") {
+    return { dispatch: false, reason: "wrong_owner" };
+  }
+
+  const datasetId = event.repository?.name;
+  if (!datasetId || !isValidDatasetId(datasetId)) {
+    return { dispatch: false, reason: "not_a_dataset_repo" };
+  }
+
+  if (event.ref !== "refs/heads/main") {
+    return { dispatch: false, reason: "ref_not_main" };
+  }
+
+  const touched = new Set<string>();
+  const sources: Array<PushEventCommit | null | undefined> = [
+    ...(event.commits ?? []),
+    event.head_commit ?? null,
+  ];
+  for (const c of sources) {
+    if (!c) continue;
+    for (const p of c.added ?? []) touched.add(p);
+    for (const p of c.modified ?? []) touched.add(p);
+    for (const p of c.removed ?? []) touched.add(p);
+  }
+  for (const p of touched) {
+    if (isZarrTriggerPath(p)) return { dispatch: true, datasetId, ref: "main" };
+  }
+  return { dispatch: false, reason: "no_data_or_events_paths_touched" };
+}
+
 /**
  * POST /webhooks/github — entry point for GitHub App webhook deliveries.
  *
@@ -1881,14 +1961,17 @@ webhooks.post("/github", async (c) => {
   // tooling.
   const enrichmentDecision = shouldDispatchEnrichment(payload);
   const versionDoiDecision = shouldDispatchVersionDoi(payload);
+  const zarrDecision = shouldDispatchZarr(payload);
 
-  if (!enrichmentDecision.dispatch && !versionDoiDecision.dispatch) {
+  if (!enrichmentDecision.dispatch && !versionDoiDecision.dispatch && !zarrDecision.dispatch) {
     // Surface whichever reason is more specific. The enrichment path's
     // reasons are richer (no_enrichment_paths_touched, wrong_owner, …)
     // but it bails at `ref_not_main_or_release` for any tag-shaped ref,
     // hiding the more useful `ref_not_version_tag` from version-doi.
     // When enrichment's reason is the generic ref-category bail, prefer
     // version-doi's reason; otherwise keep enrichment's. Code-review #607.
+    // (zarr matches a strict subset of enrichment's main-ref pushes, so its
+    // reason is never the more-specific one here.)
     const reason =
       enrichmentDecision.reason === "ref_not_main_or_release"
         ? versionDoiDecision.reason
@@ -1944,6 +2027,22 @@ webhooks.post("/github", async (c) => {
     }
   }
 
+  if (zarrDecision.dispatch) {
+    try {
+      await triggerZarrGeneration(zarrDecision.datasetId, zarrDecision.ref, pat);
+      console.log(
+        `[github-webhook] dispatched run-generate-zarr for ${zarrDecision.datasetId}@${zarrDecision.ref} delivery=${deliveryId}`,
+      );
+      dispatched.zarr = { dataset_id: zarrDecision.datasetId, ref: zarrDecision.ref };
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error(
+        `[github-webhook] zarr dispatch failed for ${zarrDecision.datasetId}@${zarrDecision.ref} delivery=${deliveryId}: ${msg}`,
+      );
+      errors.zarr = msg;
+    }
+  }
+
   const anyDispatched = Object.keys(dispatched).length > 0;
   const anyErrors = Object.keys(errors).length > 0;
   return c.json({
@@ -1951,6 +2050,144 @@ webhooks.post("/github", async (c) => {
     dispatched: anyDispatched,
     ...(anyDispatched ? { runs: dispatched } : {}),
     ...(anyErrors ? { errors } : {}),
+  });
+});
+
+/**
+ * POST /webhooks/zarr-ready — callback from nemarDatasets/.github
+ * `run-generate-zarr.yml` once a dataset's Zarr serving copy has been
+ * (re)built and synced to `s3://nemar/<id>/zarr/...` (epic #684 / Stream C).
+ *
+ * Authenticated with the shared `X-Webhook-Token` (NEMAR_WEBHOOK_TOKEN), same
+ * as /publish-version-doi. Records the latest-only conversion state on the
+ * `datasets` row (status, store count, index ETag, source commit, timestamp)
+ * and best-effort purges the small shared cache objects (index.json + each
+ * changed store's zarr.json) so the viewer sees added/removed stores promptly;
+ * the bulk chunk objects ride the edge TTL + ETag revalidation.
+ *
+ * Idempotent: replaying a callback re-writes the same row state and re-purges
+ * the same URLs (both harmless). Always 200 on a valid token + body so the
+ * workflow's fire-and-forget POST doesn't see a retryable error.
+ */
+interface ZarrReadyBody {
+  dataset_id: string;
+  status?: "ready" | "failed";
+  store_count?: number;
+  index_etag?: string;
+  commit?: string;
+  converted?: string[];
+  removed?: string[];
+  error?: string;
+}
+
+webhooks.post("/zarr-ready", async (c) => {
+  const token = c.req.header("X-Webhook-Token");
+  const expectedToken = c.env.NEMAR_WEBHOOK_TOKEN ?? c.env.GITHUB_WEBHOOK_SECRET;
+  if (!expectedToken) {
+    console.error(
+      "[zarr-ready] no webhook secret configured (NEMAR_WEBHOOK_TOKEN/GITHUB_WEBHOOK_SECRET both unset or empty)",
+    );
+    return c.json({ error: "Invalid webhook token" }, 401);
+  }
+  if (!token || !timingSafeEqual(token, expectedToken)) {
+    return c.json({ error: "Invalid webhook token" }, 401);
+  }
+
+  let body: ZarrReadyBody;
+  try {
+    body = (await c.req.json()) as ZarrReadyBody;
+  } catch {
+    return c.json({ error: "Invalid JSON in request body" }, 400);
+  }
+
+  if (typeof body.dataset_id !== "string" || !isValidDatasetId(body.dataset_id)) {
+    return c.json({ error: "dataset_id must be a valid dataset id" }, 400);
+  }
+  const status = body.status === "failed" ? "failed" : "ready";
+
+  // Persist latest-only conversion state. On failure keep the prior
+  // store_count/etag/commit (a failed rebuild shouldn't erase the last good
+  // copy's bookkeeping) and only flip the status + stamp converted_at.
+  let changed = 0;
+  try {
+    if (status === "ready") {
+      const result = await c.env.DB.prepare(
+        `UPDATE datasets
+         SET zarr_status = 'ready',
+             zarr_converted_at = datetime('now'),
+             zarr_store_count = ?,
+             zarr_index_etag = ?,
+             zarr_source_commit = ?
+         WHERE dataset_id = ?`,
+      )
+        .bind(
+          typeof body.store_count === "number" ? body.store_count : null,
+          body.index_etag ?? null,
+          body.commit ?? null,
+          body.dataset_id,
+        )
+        .run();
+      changed = result.meta.changes ?? 0;
+    } else {
+      const result = await c.env.DB.prepare(
+        "UPDATE datasets SET zarr_status = 'failed' WHERE dataset_id = ?",
+      )
+        .bind(body.dataset_id)
+        .run();
+      changed = result.meta.changes ?? 0;
+    }
+  } catch (err) {
+    console.error(
+      `[zarr-ready] D1 update failed dataset=${body.dataset_id}:`,
+      err instanceof Error ? err.message : String(err),
+    );
+    return c.json({ error: "Failed to record zarr state" }, 500);
+  }
+
+  // A callback for a dataset that isn't in D1 (deleted, or never registered)
+  // matches zero rows and persists nothing. Surface it as a 404 instead of a
+  // 200 that silently drops the state -- mirrors the prescreen-result
+  // meta.changes guard. The workflow logs the 404 for an operator to chase.
+  if (changed === 0) {
+    console.error(`[zarr-ready] UPDATE matched 0 rows dataset=${body.dataset_id} -- not in D1`);
+    return c.json({ error: "Dataset not found" }, 404);
+  }
+
+  // Best-effort cache purge of the freshness-sensitive shared objects. Wrapped
+  // so a malformed `converted` entry (a non-string would make `.trim()` throw)
+  // can't break the always-200 contract; purgeCacheUrls itself never throws.
+  let purge: Awaited<ReturnType<typeof purgeCacheUrls>> | undefined;
+  if (status === "ready") {
+    try {
+      const targets = zarrPurgeTargets(c.env, body.dataset_id, body.converted ?? []);
+      if (targets.length === 0 && !c.env.ZARR_CACHE_BASE_URL) {
+        console.warn(
+          `[zarr-ready] ZARR_CACHE_BASE_URL unset; cache purge skipped dataset=${body.dataset_id}`,
+        );
+      }
+      purge = await purgeCacheUrls(c.env, targets);
+      if (!purge.ok) {
+        console.warn(
+          `[zarr-ready] cache purge incomplete dataset=${body.dataset_id}: ${purge.detail ?? "unknown"}`,
+        );
+      }
+    } catch (err) {
+      console.warn(
+        `[zarr-ready] cache purge threw dataset=${body.dataset_id}:`,
+        err instanceof Error ? err.message : String(err),
+      );
+    }
+  }
+
+  console.log(
+    `[zarr-ready] dataset=${body.dataset_id} status=${status} stores=${body.store_count ?? "?"} converted=${body.converted?.length ?? 0} removed=${body.removed?.length ?? 0} purged=${purge?.submitted ?? 0}`,
+  );
+
+  return c.json({
+    ok: true,
+    dataset_id: body.dataset_id,
+    status,
+    ...(purge ? { cache_purge: { ok: purge.ok, submitted: purge.submitted } } : {}),
   });
 });
 
