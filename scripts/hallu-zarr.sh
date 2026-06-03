@@ -13,11 +13,13 @@
 #           1. reconcile -- enqueue every public dataset whose latest version
 #              isn't converted yet, and reset any `inprogress` job left by a
 #              crashed/rebooted run back to `pending`.
-#           2. drain     -- claim the oldest job, download a fresh copy into a
-#              scratch dir via `nemar dataset download`, convert it with the
-#              biosigIO driver (generate_zarr.py --local), push the stores to S3,
-#              `rm -rf` the scratch copy, and mark the job done (or fail w/
-#              backoff). Repeat until the queue is empty (or --limit).
+#           2. drain     -- claim the oldest job, clone the dataset's metadata
+#              only (`nemar dataset download --no-data`, seconds), let the
+#              biosigIO driver STREAM each recording's annex blob from
+#              s3://nemar/<id>/objects/<key> just-in-time -> convert -> push, then
+#              `rm -rf` the scratch copy and mark the job done (or fail w/
+#              backoff). Repeat until the queue is empty (or --limit). Streaming
+#              starts converting immediately and never holds the whole dataset.
 #         flock keeps a single long backfill draining across hourly cron ticks
 #         (a later tick finds the lock held and exits). As long as the box is on,
 #         the cron fires and the queue resumes exactly where it left off.
@@ -110,16 +112,20 @@ convert_dataset() {
   local cb="$WORK_DIR/$id.callback.json"
   log "[$id] start (version=${version:-?})"
 
+  # Metadata-only clone (git history + annex pointers, no content -- seconds, not
+  # the whole 18 GB). The driver then STREAMS each recording's annex blob from
+  # s3://nemar/<id>/objects/<key> just-in-time, converts, pushes, and moves on,
+  # so we start converting immediately and never hold the whole dataset on disk.
   rm -rf "$dir"
-  if ! nemar dataset download "$id" -o "$dir" -j 8 >>"$LOG_FILE" 2>&1; then
-    err "[$id] download failed"
+  if ! nemar dataset download "$id" --no-data -o "$dir" >>"$LOG_FILE" 2>&1; then
+    err "[$id] metadata clone failed"
     rm -rf "$dir"
     return 1
   fi
 
   local rc=0
   VIRTUAL_ENV="$VENV_DIR" "$VENV_DIR/bin/python" "$DRIVER" \
-    --dataset-id "$id" --repo-dir "$dir" --local \
+    --dataset-id "$id" --repo-dir "$dir" \
     --bucket "$S3_BUCKET" --region "$AWS_REGION" $FULL \
     --callback-out "$cb" >>"$LOG_FILE" 2>&1 || rc=$?
 
