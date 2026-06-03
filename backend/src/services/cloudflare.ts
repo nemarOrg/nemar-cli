@@ -39,6 +39,16 @@ function chunk<T>(items: T[], size: number): T[][] {
 }
 
 /**
+ * Filter a URL list to absolute http(s) URLs and de-duplicate, preserving
+ * first-seen order. Exported so the dedup/filter contract is unit-testable
+ * without a network call (the live purge_cache HTTP path is not mock-tested per
+ * the repo no-mock policy).
+ */
+export function normalizePurgeUrls(urls: string[]): string[] {
+  return [...new Set(urls.filter((u) => u && /^https?:\/\//.test(u)))];
+}
+
+/**
  * Purge a set of absolute URLs from the Cloudflare edge cache.
  *
  * No-ops (returns `ok: true`) when the integration is unconfigured
@@ -47,7 +57,7 @@ function chunk<T>(items: T[], size: number): T[][] {
  * than erroring. Never throws.
  */
 export async function purgeCacheUrls(env: Bindings, urls: string[]): Promise<PurgeResult> {
-  const unique = [...new Set(urls.filter((u) => u && /^https?:\/\//.test(u)))];
+  const unique = normalizePurgeUrls(urls);
   if (unique.length === 0) return { ok: true, submitted: 0 };
 
   if (!env.CLOUDFLARE_API_TOKEN || !env.CLOUDFLARE_ZONE_ID) {

@@ -59,6 +59,14 @@ describe("isZarrTriggerPath", () => {
     expect(isZarrTriggerPath("sub-01/meg/sub-01_task-x_meg.ds/sub-01_task-x_meg.meg4")).toBe(true);
   });
 
+  test("does NOT match a bare .ds directory entry with no trailing slash", () => {
+    // GitHub push events list files, not directories, so a `.ds` recording
+    // surfaces as the files under it (which carry `.ds/`). Pin the bare-dir
+    // path's current behavior (false) so a change to the `.ds/` check is
+    // explicit rather than silent.
+    expect(isZarrTriggerPath("sub-01/meg/sub-01_task-x_meg.ds")).toBe(false);
+  });
+
   test("does NOT match metadata / sidecar JSON / README / other tsv", () => {
     for (const p of [
       "dataset_description.json",
@@ -170,5 +178,25 @@ describe("shouldDispatchZarr", () => {
     );
     expect(d.dispatch).toBe(false);
     if (!d.dispatch) expect(d.reason).toBe("not_a_dataset_repo");
+  });
+
+  test("rejects when repository is missing entirely (malformed payload guard)", () => {
+    const d = shouldDispatchZarr(dataPush({ repository: undefined }));
+    expect(d.dispatch).toBe(false);
+    if (!d.dispatch) expect(d.reason).toBe("wrong_owner");
+  });
+
+  test("rejects when repository object lacks an owner field", () => {
+    const d = shouldDispatchZarr(dataPush({ repository: { name: "nm099999" } }));
+    expect(d.dispatch).toBe(false);
+    if (!d.dispatch) expect(d.reason).toBe("wrong_owner");
+  });
+
+  test("does NOT dispatch when commits is empty and head_commit is null", () => {
+    // GitHub edge case (webhook re-delivery / no-diff push): the path union
+    // must short-circuit cleanly to no-dispatch, never throw on the null tip.
+    const d = shouldDispatchZarr(dataPush({ commits: [], head_commit: null }));
+    expect(d.dispatch).toBe(false);
+    if (!d.dispatch) expect(d.reason).toBe("no_data_or_events_paths_touched");
   });
 });

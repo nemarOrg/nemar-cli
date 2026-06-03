@@ -10,7 +10,11 @@
 
 import { describe, expect, test } from "bun:test";
 import "./setup";
-import { purgeCacheUrls, zarrPurgeTargets } from "../backend/src/services/cloudflare";
+import {
+  normalizePurgeUrls,
+  purgeCacheUrls,
+  zarrPurgeTargets,
+} from "../backend/src/services/cloudflare";
 import type { Bindings } from "../backend/src/types/bindings";
 
 function env(overrides: Partial<Bindings> = {}): Bindings {
@@ -53,6 +57,32 @@ describe("zarrPurgeTargets", () => {
       ["", "  "],
     );
     expect(targets).toEqual(["https://zarr.nemar.org/nm000104/zarr/index.json"]);
+  });
+
+  test("strips leading/trailing slashes so the URL has no double slash", () => {
+    const targets = zarrPurgeTargets(
+      env({ ZARR_CACHE_BASE_URL: "https://zarr.nemar.org" }),
+      "nm000104",
+      ["/sub-01/eeg/sub-01_task-rest_eeg.zarr/"],
+    );
+    expect(targets[1]).toBe(
+      "https://zarr.nemar.org/nm000104/zarr/sub-01/eeg/sub-01_task-rest_eeg.zarr/zarr.json",
+    );
+  });
+});
+
+describe("normalizePurgeUrls", () => {
+  test("keeps only absolute http(s) URLs", () => {
+    expect(
+      normalizePurgeUrls(["https://a/x", "http://b/y", "ftp://c/z", "/rel", "", "not a url"]),
+    ).toEqual(["https://a/x", "http://b/y"]);
+  });
+
+  test("de-duplicates while preserving first-seen order", () => {
+    expect(normalizePurgeUrls(["https://a/x", "https://b/y", "https://a/x"])).toEqual([
+      "https://a/x",
+      "https://b/y",
+    ]);
   });
 });
 

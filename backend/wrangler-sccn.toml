@@ -87,6 +87,13 @@ WEB_SESSION_COOKIE_DOMAIN = "app.nemar.org"
 # repository_dispatch to nemarDatasets/.github and awaits the callback.
 # Redeploy to change.
 MANIFEST_VIA_CENTRAL_WORKFLOW = "false"
+# Zarr serving copy (epic #684). Base URL of the Cloudflare-cached zarr host the
+# browser viewer reads and /webhooks/zarr-ready purges. Inert (purge no-ops, with
+# a logged "skipped" detail) until CLOUDFLARE_ZONE_ID + the CLOUDFLARE_API_TOKEN
+# secret below are also provisioned at CDN setup; safe to point at the intended
+# host meanwhile.
+ZARR_CACHE_BASE_URL = "https://zarr.nemar.org"
+# CLOUDFLARE_ZONE_ID = "<SCCN zone id for zarr.nemar.org>"  # uncomment + set at CDN provisioning
 
 # Secrets (set via: npx cfman wrangler --account sccn secret put <NAME> -c backend/wrangler-sccn.toml)
 # - GITHUB_ADMIN_PAT
@@ -110,6 +117,10 @@ MANIFEST_VIA_CENTRAL_WORKFLOW = "false"
 #                                match the org-level secret on nemarDatasets.
 #                                Required before MANIFEST_VIA_CENTRAL_WORKFLOW
 #                                can be flipped to "true" in any environment.)
+# - CLOUDFLARE_API_TOKEN   (epic #684; scoped token with Zone.Cache Purge on the SCCN zone, used by
+#                           /webhooks/zarr-ready cache purge. WARNING: same name as wrangler's own
+#                           deploy-auth env var -- unset it from the shell before `secret put`, e.g.
+#                           env -u CLOUDFLARE_API_TOKEN npx cfman wrangler --account sccn secret put CLOUDFLARE_API_TOKEN -c backend/wrangler-sccn.toml)
 # GitHub App credentials (epic #432, in soak -- GITHUB_ADMIN_PAT is the active fallback while any of these are unset)
 # - GITHUB_APP_ID                              (GitHub App numeric ID; replaces PAT for API auth once Phase 5 lands)
 # - GITHUB_APP_PRIVATE_KEY                     (PKCS#8 PEM private key for JWT signing)
@@ -154,6 +165,9 @@ AWS_REGION = "us-east-2"
 S3_BUCKET = "nemar"
 FROM_EMAIL = "NEMAR Archive <noreply@nemar.org>"
 REPLY_TO = "info@nemar.org"
+# Zarr cache host is prod-only; empty in dev so /webhooks/zarr-ready logs
+# "purge skipped" instead of purging the prod zone from a dev deploy (#684).
+ZARR_CACHE_BASE_URL = ""
 # Web-dashboard session cookie Domain (#569). Empty in dev so the
 # cookie is host-only for nemar-api-dev.sccn-org.workers.dev — any
 # explicit value would refuse to scope to a workers.dev hostname.

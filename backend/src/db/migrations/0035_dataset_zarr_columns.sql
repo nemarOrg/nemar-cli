@@ -28,7 +28,12 @@
 -- is a plain ADD COLUMN that touches neither the lexical index nor the
 -- embedding vectors.
 
-ALTER TABLE datasets ADD COLUMN zarr_status TEXT;
+-- CHECK pins the enum the way migration 0014 does for nemar_sync_status (a
+-- NULL value passes CHECK, so "never converted" stays representable). Keeps a
+-- stray status string out of the column so the idx_datasets_zarr_status scans
+-- below stay meaningful.
+ALTER TABLE datasets ADD COLUMN zarr_status TEXT
+  CHECK (zarr_status IN ('pending', 'ready', 'failed'));
 ALTER TABLE datasets ADD COLUMN zarr_converted_at TEXT;
 ALTER TABLE datasets ADD COLUMN zarr_store_count INTEGER;
 ALTER TABLE datasets ADD COLUMN zarr_index_etag TEXT;

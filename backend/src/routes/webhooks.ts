@@ -2108,9 +2108,10 @@ webhooks.post("/zarr-ready", async (c) => {
   // Persist latest-only conversion state. On failure keep the prior
   // store_count/etag/commit (a failed rebuild shouldn't erase the last good
   // copy's bookkeeping) and only flip the status + stamp converted_at.
+  let changed = 0;
   try {
     if (status === "ready") {
-      await c.env.DB.prepare(
+      const result = await c.env.DB.prepare(
         `UPDATE datasets
          SET zarr_status = 'ready',
              zarr_converted_at = datetime('now'),
@@ -2126,10 +2127,14 @@ webhooks.post("/zarr-ready", async (c) => {
           body.dataset_id,
         )
         .run();
+      changed = result.meta.changes ?? 0;
     } else {
-      await c.env.DB.prepare("UPDATE datasets SET zarr_status = 'failed' WHERE dataset_id = ?")
+      const result = await c.env.DB.prepare(
+        "UPDATE datasets SET zarr_status = 'failed' WHERE dataset_id = ?",
+      )
         .bind(body.dataset_id)
         .run();
+      changed = result.meta.changes ?? 0;
     }
   } catch (err) {
     console.error(
@@ -2139,14 +2144,37 @@ webhooks.post("/zarr-ready", async (c) => {
     return c.json({ error: "Failed to record zarr state" }, 500);
   }
 
-  // Best-effort cache purge of the freshness-sensitive shared objects.
+  // A callback for a dataset that isn't in D1 (deleted, or never registered)
+  // matches zero rows and persists nothing. Surface it as a 404 instead of a
+  // 200 that silently drops the state -- mirrors the prescreen-result
+  // meta.changes guard. The workflow logs the 404 for an operator to chase.
+  if (changed === 0) {
+    console.error(`[zarr-ready] UPDATE matched 0 rows dataset=${body.dataset_id} -- not in D1`);
+    return c.json({ error: "Dataset not found" }, 404);
+  }
+
+  // Best-effort cache purge of the freshness-sensitive shared objects. Wrapped
+  // so a malformed `converted` entry (a non-string would make `.trim()` throw)
+  // can't break the always-200 contract; purgeCacheUrls itself never throws.
   let purge: Awaited<ReturnType<typeof purgeCacheUrls>> | undefined;
   if (status === "ready") {
-    const targets = zarrPurgeTargets(c.env, body.dataset_id, body.converted ?? []);
-    purge = await purgeCacheUrls(c.env, targets);
-    if (!purge.ok) {
+    try {
+      const targets = zarrPurgeTargets(c.env, body.dataset_id, body.converted ?? []);
+      if (targets.length === 0 && !c.env.ZARR_CACHE_BASE_URL) {
+        console.warn(
+          `[zarr-ready] ZARR_CACHE_BASE_URL unset; cache purge skipped dataset=${body.dataset_id}`,
+        );
+      }
+      purge = await purgeCacheUrls(c.env, targets);
+      if (!purge.ok) {
+        console.warn(
+          `[zarr-ready] cache purge incomplete dataset=${body.dataset_id}: ${purge.detail ?? "unknown"}`,
+        );
+      }
+    } catch (err) {
       console.warn(
-        `[zarr-ready] cache purge incomplete dataset=${body.dataset_id}: ${purge.detail ?? "unknown"}`,
+        `[zarr-ready] cache purge threw dataset=${body.dataset_id}:`,
+        err instanceof Error ? err.message : String(err),
       );
     }
   }
