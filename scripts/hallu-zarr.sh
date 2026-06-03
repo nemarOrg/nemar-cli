@@ -116,8 +116,16 @@ setup() {
   if [[ ! -x "$VENV_DIR/bin/python" ]]; then
     uv venv -q "$VENV_DIR"
   fi
-  # Idempotent: uv pip install is a no-op when satisfied.
-  VIRTUAL_ENV="$VENV_DIR" uv pip install -q "$BIOSIGIO_SPEC" 2>&1 | tail -2 || true
+  # Install biosigIO from the driver repo's manifest so the pin is single-sourced
+  # with the Actions workflow (scripts/zarr/requirements.txt). Fall back to the
+  # inline spec if an older clone predates the manifest. Idempotent: uv pip
+  # install is a no-op when already satisfied.
+  local req="$DRIVER_REPO/scripts/zarr/requirements.txt"
+  if [[ -f "$req" ]]; then
+    VIRTUAL_ENV="$VENV_DIR" uv pip install -q -r "$req" 2>&1 | tail -2 || true
+  else
+    VIRTUAL_ENV="$VENV_DIR" uv pip install -q "$BIOSIGIO_SPEC" 2>&1 | tail -2 || true
+  fi
 }
 
 DRIVER="$DRIVER_REPO/scripts/zarr/generate_zarr.py"
