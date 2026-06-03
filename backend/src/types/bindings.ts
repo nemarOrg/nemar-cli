@@ -81,6 +81,17 @@ export interface Bindings {
   // unchanged so a deploy does not silently enable screening.
   PRESCREEN_ENABLED?: string; // "true" enables the dispatch on publish request
   PRESCREEN_CALLBACK_SECRET?: string; // Workers secret; HMAC key for prescreen callback
+
+  // Zarr serving copy (epic #684). The conversion runs in
+  // nemarDatasets/.github run-generate-zarr.yml and POSTs back to
+  // /webhooks/zarr-ready (authenticated with NEMAR_WEBHOOK_TOKEN). The browser
+  // viewer reads the per-recording Zarr stores through a Cloudflare-cached host
+  // fronting the public S3 zarr prefix; the callback purges the small shared
+  // objects (index.json, a store's zarr.json) on re-conversion. All optional:
+  // unset => the trigger/callback still work, the purge degrades to TTL-only.
+  ZARR_CACHE_BASE_URL?: string; // e.g. "https://zarr.nemar.org" (cache host, no trailing slash needed)
+  CLOUDFLARE_API_TOKEN?: string; // Workers secret; scoped token with Zone.Cache Purge on the SCCN zone
+  CLOUDFLARE_ZONE_ID?: string; // SCCN zone id for the cache host
 }
 
 /** User roles in hierarchical order: owner > admin > member */
