@@ -14,6 +14,7 @@
  * "not populated yet" from "really zero".
  */
 
+import { licenseTier } from "../lib/license.js";
 import { detectModalitiesFromTree } from "./datacite.js";
 import { extractTasks, parseParticipantsTsv } from "./nemar-sync.js";
 
@@ -163,6 +164,11 @@ export async function writeDatasetCatalogFields(
   fields: DatasetCatalogFields,
 ): Promise<{ changes: number }> {
   const readme = fields.readme != null ? fields.readme.slice(0, README_MAX) : null;
+  // Derive the license tier from the same value being written so license and
+  // license_tier never drift (#653). Bound as NULL when no license is supplied,
+  // so the COALESCE preserves the existing tier rather than clobbering it to
+  // 'unknown' on a license-less update.
+  const licenseTierValue = fields.license != null ? licenseTier(fields.license) : null;
   const result = await db
     .prepare(
       `UPDATE datasets
@@ -170,6 +176,7 @@ export async function writeDatasetCatalogFields(
            description = COALESCE(?, description),
            authors = COALESCE(?, authors),
            license = COALESCE(?, license),
+           license_tier = COALESCE(?, license_tier),
            readme = COALESCE(?, readme),
            bids_version = COALESCE(?, bids_version),
            sessions_count = COALESCE(?, sessions_count),
@@ -181,6 +188,7 @@ export async function writeDatasetCatalogFields(
       fields.description ?? null,
       fields.authors ?? null,
       fields.license ?? null,
+      licenseTierValue,
       readme,
       fields.bids_version ?? null,
       fields.sessions_count ?? null,

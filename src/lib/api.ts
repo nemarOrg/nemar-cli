@@ -634,6 +634,10 @@ export interface Dataset {
   participants?: number;
   tasks?: string;
   authors?: string;
+  /** Free-text license string (e.g. "CC0", "CC-BY-4.0"), or "" when unknown.
+      Added in #653; older backends omit it. The website derives a permissiveness
+      tier from this for filtering/coloring. */
+  license?: string;
   file_size?: number;
   file_size_formatted?: string;
   /** 'managed' = in D1 datasets table, 'catalog' = nemar.org only */
@@ -672,6 +676,9 @@ export interface DatasetListFilters {
   task?: string;
   hasDoi?: boolean;
   recent?: number;
+  /** Comma-separated license tiers (public, attribution, sharealike,
+      noncommercial, noderiv, unknown), OR semantics. #653. */
+  license?: string;
   sort?: "newest" | "oldest" | "name" | "participants" | "size";
   limit?: number;
   offset?: number;
@@ -732,6 +739,7 @@ export async function listDatasets(
   if (filters.modality) params.set("modality", filters.modality);
   if (filters.author) params.set("author", filters.author);
   if (filters.task) params.set("task", filters.task);
+  if (filters.license) params.set("license", filters.license);
   if (filters.hasDoi) params.set("has_doi", "true");
   if (filters.recent) params.set("recent", String(filters.recent));
   if (filters.sort) params.set("sort", filters.sort);
