@@ -14,12 +14,15 @@
 #              isn't converted yet, and reset any `inprogress` job left by a
 #              crashed/rebooted run back to `pending`.
 #           2. drain     -- claim the oldest job, clone the dataset's metadata
-#              only (`nemar dataset download --no-data`, seconds), let the
-#              biosigIO driver STREAM each recording's annex blob from
-#              s3://nemar/<id>/objects/<key> just-in-time -> convert -> push, then
-#              `rm -rf` the scratch copy and mark the job done (or fail w/
-#              backoff). Repeat until the queue is empty (or --limit). Streaming
-#              starts converting immediately and never holds the whole dataset.
+#              only (`nemar dataset download --no-data`, seconds), then the
+#              biosigIO driver STREAMs each recording's annex blob from
+#              s3://nemar/<id>/objects/<key> just-in-time -> convert -> push,
+#              JOBS recordings in PARALLEL (ProcessPoolExecutor), onto NVMe
+#              scratch; `rm -rf` the scratch copy and mark the job done (or fail
+#              w/ backoff). Repeat until the queue is empty (or --limit).
+#              Streaming + parallelism start converting immediately, never hold
+#              the whole dataset, and saturate Hallu's cores on the CPU-bound
+#              resample/compress.
 #         flock keeps a single long backfill draining across hourly cron ticks
 #         (a later tick finds the lock held and exits). As long as the box is on,
 #         the cron fires and the queue resumes exactly where it left off.
@@ -46,8 +49,18 @@ done
 export PATH
 
 # --- Config (environment-overridable) ----------------------------------------
-WORK_DIR="${ZARR_WORK_DIR:-/data/projects/yahya/nemar/tmp}"
+# WORK_DIR is the EPHEMERAL per-recording scratch and MUST be fast local disk:
+# the driver streams each annex blob here and builds the temp Zarr store before
+# upload, and N parallel workers hammer it at once. On Hallu that is a dedicated
+# NVMe (/mnt/local, ~950 GB) -- NOT the NFS /data/projects (which would serialize
+# the parallel writers). STATE_DIR (queue db, venv, driver clone) stays on the
+# persistent NFS so it survives reboots; only the hot I/O path is on NVMe.
+WORK_DIR="${ZARR_WORK_DIR:-/mnt/local/zarr-scratch}"
 STATE_DIR="${ZARR_STATE_DIR:-/data/projects/yahya/nemar}"
+# Recordings convert in parallel (ProcessPoolExecutor in the driver). Conversion
+# is CPU-bound (resample + zstd); Hallu has 32 cores. Cap so N concurrent
+# multi-GB recordings stay within NVMe scratch + RAM (5-10 is the sweet spot).
+JOBS="${ZARR_JOBS:-6}"
 DRIVER_REPO="${ZARR_DRIVER_REPO:-${STATE_DIR}/dotgithub}"   # clone of nemarDatasets/.github
 VENV_DIR="${ZARR_VENV_DIR:-${STATE_DIR}/.zarr-venv}"
 BIOSIGIO_SPEC="${BIOSIGIO_SPEC:-biosigio[zarr,meg]>=1.1.2}"
@@ -89,6 +102,9 @@ err() { echo "[$(date -u '+%Y-%m-%d %H:%M:%S UTC')] ERROR: $*" | tee -a "$LOG_FI
 safe_rm() { [[ -n "${1:-}" && -e "$1" ]] || return 0; chmod -R u+w "$1" 2>/dev/null; rm -rf "$1"; }
 
 mkdir -p "$WORK_DIR" "$STATE_DIR"
+# The driver's tempfile.TemporaryDirectory() (per-recording materialize + store)
+# follows TMPDIR; pin it to the NVMe scratch, not the system default.
+export TMPDIR="$WORK_DIR"
 
 # --- One-time setup: driver repo + biosigIO venv ------------------------------
 setup() {
@@ -131,7 +147,7 @@ convert_dataset() {
   VIRTUAL_ENV="$VENV_DIR" "$VENV_DIR/bin/python" "$DRIVER" \
     --dataset-id "$id" --repo-dir "$dir" \
     --bucket "$S3_BUCKET" --region "$AWS_REGION" $FULL \
-    --callback-out "$cb" >>"$LOG_FILE" 2>&1 || rc=$?
+    --jobs "$JOBS" --callback-out "$cb" >>"$LOG_FILE" 2>&1 || rc=$?
 
   if [[ "$rc" -eq 0 && -f "$cb" && -n "$NEMAR_WEBHOOK_TOKEN" ]]; then
     curl -sS --connect-timeout 10 --max-time 30 -X POST "$CALLBACK_URL" \
