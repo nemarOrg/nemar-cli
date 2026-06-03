@@ -56,14 +56,20 @@ LOCK_FILE="${ZARR_LOCK_FILE:-${STATE_DIR}/.nm-zarr.lock}"
 # when it is empty (the viewer reads index.json, not D1, so the callback is only
 # D1 bookkeeping).
 NEMAR_WEBHOOK_TOKEN="${NEMAR_WEBHOOK_TOKEN:-}"
+# Conversion manifest: per-dataset {version, converted_utc}. A dataset whose
+# latest published version is already recorded here is skipped (no re-download),
+# so a backfill makes steady progress across hourly runs and never redoes work.
+MANIFEST_FILE="${ZARR_MANIFEST_FILE:-${STATE_DIR}/.nm-zarr-manifest.json}"
 
 ONLY_DATASET=""
 FULL=""
+FORCE=""
 LIMIT="${ZARR_LIMIT:-0}"
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --dataset) ONLY_DATASET="$2"; shift 2 ;;
     --full) FULL="--full"; shift ;;
+    --force) FORCE=1; shift ;;          # ignore the manifest; reconvert anyway
     --limit) LIMIT="$2"; shift 2 ;;
     *) echo "Unknown arg: $1" >&2; exit 2 ;;
   esac
@@ -73,6 +79,15 @@ log() { echo "[$(date -u '+%Y-%m-%d %H:%M:%S UTC')] $*" | tee -a "$LOG_FILE"; }
 err() { echo "[$(date -u '+%Y-%m-%d %H:%M:%S UTC')] ERROR: $*" | tee -a "$LOG_FILE" >&2; }
 
 mkdir -p "$WORK_DIR" "$STATE_DIR"
+
+# --- Conversion manifest helpers (atomic jq read/write) -----------------------
+[[ -s "$MANIFEST_FILE" ]] || echo '{}' > "$MANIFEST_FILE"
+manifest_version() { jq -r --arg id "$1" '.[$id].version // ""' "$MANIFEST_FILE" 2>/dev/null; }
+manifest_set() {
+  local tmp; tmp="$(mktemp)"
+  jq --arg id "$1" --arg v "$2" --arg t "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" \
+    '.[$id] = {version: $v, converted_utc: $t}' "$MANIFEST_FILE" > "$tmp" && mv "$tmp" "$MANIFEST_FILE"
+}
 
 # --- Single-instance lock -----------------------------------------------------
 exec 9>"$LOCK_FILE"
@@ -99,7 +114,7 @@ DRIVER="$DRIVER_REPO/scripts/zarr/generate_zarr.py"
 
 # --- Per-dataset: download -> convert -> push -> CLEANUP -----------------------
 convert_dataset() {
-  local id="$1"
+  local id="$1" version="${2:-}"
   local dir="$WORK_DIR/$id"
   local cb="$WORK_DIR/$id.callback.json"
   log "[$id] start"
@@ -127,15 +142,23 @@ convert_dataset() {
   # EPHEMERAL: always reclaim the scratch copy, success or failure. The store
   # is on S3; we never keep a local copy.
   rm -rf "$dir" "$cb"
-  if [[ "$rc" -eq 0 ]]; then log "[$id] done"; else err "[$id] driver rc=$rc"; fi
+  if [[ "$rc" -eq 0 ]]; then
+    [[ -n "$version" ]] && manifest_set "$id" "$version"
+    log "[$id] done (version=${version:-?})"
+  else
+    err "[$id] driver rc=$rc"
+  fi
   return "$rc"
 }
 
 # --- Dataset list (public nm/on only) -----------------------------------------
 list_public_datasets() {
   curl -sS --max-time 60 "${API_BASE}/datasets?limit=1000" 2>/dev/null \
-    | jq -r '.datasets[]? | select(.visibility=="public") | .dataset_id' 2>/dev/null \
-    | grep -E '^(nm|on)[0-9]{6}$' | grep -v '^nm099999$' || true
+    | jq -r '.datasets[]?
+        | select(.visibility=="public")
+        | select(.dataset_id | test("^(nm|on)[0-9]{6}$"))
+        | select(.dataset_id != "nm099999")
+        | "\(.dataset_id)\t\(.latest_version // "")"' 2>/dev/null || true
 }
 
 setup
@@ -144,19 +167,30 @@ if [[ -z "$DRIVER" || ! -f "$DRIVER" ]]; then
 fi
 
 if [[ -n "$ONLY_DATASET" ]]; then
-  convert_dataset "$ONLY_DATASET"
+  v="$(curl -sS --max-time 30 "${API_BASE}/datasets/${ONLY_DATASET}" 2>/dev/null \
+        | jq -r '.dataset.latest_version // ""' 2>/dev/null)"
+  convert_dataset "$ONLY_DATASET" "$v"
   exit $?
 fi
 
-n=0
-while read -r id; do
+# Queue: walk every public dataset, skip those whose latest version is already
+# converted (manifest), convert the rest. The lock means a long backfill keeps
+# draining across hourly ticks (a later tick finds the lock held and exits);
+# --limit caps a single run so progress persists incrementally in the manifest
+# and a killed run resumes where it stopped. Per-dataset cleanup keeps disk
+# bounded to one dataset at a time regardless of how deep the queue is.
+n=0; skipped=0
+while IFS=$'\t' read -r id version; do
   [[ -z "$id" ]] && continue
-  convert_dataset "$id" || true
+  if [[ -z "$FORCE" && -n "$version" && "$(manifest_version "$id")" == "$version" ]]; then
+    skipped=$((skipped + 1)); continue
+  fi
+  convert_dataset "$id" "$version" || true
   n=$((n + 1))
   if [[ "$LIMIT" -gt 0 && "$n" -ge "$LIMIT" ]]; then
-    log "reached --limit $LIMIT; stopping this run"
+    log "reached --limit $LIMIT; stopping (more pending; next run continues)"
     break
   fi
 done < <(list_public_datasets)
 
-log "run complete: processed $n dataset(s)"
+log "run complete: converted $n, skipped $skipped up-to-date"
