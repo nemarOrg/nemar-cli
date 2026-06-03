@@ -157,10 +157,10 @@ async function serve(c: Context<{ Bindings: Bindings }>, isHead: boolean) {
   return res;
 }
 
-zarrDataRoutes.get("/:datasetId/zarr/*", (c) => serve(c, false));
-// Hono derives HEAD from GET, re-dispatching the original (method still HEAD)
-// request; `serve` reads c.req.method via the isHead flag below.
-zarrDataRoutes.on("HEAD", "/:datasetId/zarr/*", (c) => serve(c, true));
+// Hono auto-derives HEAD from the GET handler, re-dispatching the original
+// request with method still "HEAD"; serve() reads that to skip the body and do
+// an upstream HEAD instead of fetching bytes.
+zarrDataRoutes.get("/:datasetId/zarr/*", (c) => serve(c, c.req.method === "HEAD"));
 
 // Friendly root so a bare zarr.nemar.org/ doesn't 404 confusingly.
 zarrDataRoutes.get("/", (c) =>
