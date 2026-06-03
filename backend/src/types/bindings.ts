@@ -92,6 +92,11 @@ export interface Bindings {
   ZARR_CACHE_BASE_URL?: string; // e.g. "https://zarr.nemar.org" (cache host, no trailing slash needed)
   CLOUDFLARE_API_TOKEN?: string; // Workers secret; scoped token with Zone.Cache Purge on the SCCN zone
   CLOUDFLARE_ZONE_ID?: string; // SCCN zone id for the cache host
+  // "true" re-enables the event-driven Actions auto-dispatch on a data/events
+  // push. Default (unset) keeps it OFF: the SDSC Hallu cron is the conversion
+  // engine (Actions can't sustain bulk/backfill). run-generate-zarr.yml stays
+  // available for manual workflow_dispatch recovery either way.
+  ZARR_AUTODISPATCH?: string;
 }
 
 /** User roles in hierarchical order: owner > admin > member */

@@ -57,33 +57,52 @@ edge**, not by locking the data:
   cross-origin in a browser, while the open S3 data remains downloadable. This is
   what makes `zarr.nemar.org` the single authoritative HTTP gateway for viewing.
 
-### Cloudflare zone config (SCCN)
+### Implementation: a Worker proxy (`zarr.nemar.org`)
 
-Host: `zarr.nemar.org`, proxied (orange-cloud) → origin `nemar.s3.us-east-2.amazonaws.com`.
+`zarr.nemar.org` is bound as a Workers Custom Domain on the same nemar-api Worker
+(`backend/wrangler-sccn.toml` routes, alongside api/data.nemar.org). The hostname
+fork in `backend/src/index.ts` dispatches it to a self-contained sub-app,
+`backend/src/routes/zarr-data.ts`, which:
 
-1. **CORS (Response Header Transform Rule)** on `zarr.nemar.org`:
-   - `Access-Control-Allow-Origin`: reflect/allow only
-     `https://ww2.nemar.org`, `https://nemar.org`, `https://app.nemar.org`
-     (+ `http://localhost:4321` in a dev-only rule).
-   - `Access-Control-Allow-Methods: GET, HEAD`
-   - `Access-Control-Allow-Headers: Range`
-   - `Access-Control-Expose-Headers: ETag, Content-Length, Content-Range, Accept-Ranges`
-   - Handle `OPTIONS` preflight (204).
-2. **Cache Rules**:
-   - Chunk objects (`*.zarr/*` excluding `*/zarr.json`): `Cache-Control: public,
-     max-age=86400` (long; bulk read path). Cache everything; respect Range.
-   - `index.json` and `*/zarr.json`: short TTL (e.g. 60s). These change on
-     re-conversion and are actively purged (below), so the TTL is the safety net.
-3. The S3 origin objects are public, so no origin auth/signing is needed
-   (edge→origin is server-side; no CORS involved there).
+- **Gates** to PUBLIC datasets (D1 `visibility='public'`); private data is never
+  browser-streamable.
+- **CORS restricted to NEMAR origins** (`*.nemar.org` + `localhost`): reflects an
+  allowed `Origin`, omits `Access-Control-Allow-Origin` for anyone else (so
+  OpenNeuro etc. can't cross-origin stream our chunks), exposes
+  `ETag, Content-Length, Content-Range, Accept-Ranges`, allows `Range`, answers
+  `OPTIONS` (204).
+- **Proxies** the public S3 object (`https://<bucket>.s3.<region>.amazonaws.com/<id>/zarr/<path>`)
+  server-side and **passes `Range` through** (206 for sharded level-0 reads).
+- **Edge-caches** full-object GETs via the Workers Cache API (`caches.default`):
+  `Cache-Control max-age=86400` on chunk objects (the bulk path; immutable per
+  conversion), `max-age=60` on `index.json` / `zarr.json` (re-conversion surfaces
+  within a minute). Range responses pass through uncached.
 
-> Staleness model: chunk objects sit on a stable key + long TTL. On
-> re-conversion the bytes change in place; `/webhooks/zarr-ready` purges
-> `index.json` + each changed store's `zarr.json` so the viewer discovers
-> added/removed/changed stores immediately, and chunk staleness is bounded by
-> the chunk TTL (re-conversions are rare and targeted). A zero-stale upgrade
-> (commit-hashed store prefix, or Enterprise prefix purge) is possible later
-> without changing the viewer (it reads whatever `index.json` points at).
+Dev/workers.dev reaches the same handlers at `<worker>/zarrproxy/<id>/zarr/<path>`
+(the `zarr.nemar.org` custom domain only exists in the prod env).
+
+The S3 origin objects are public-read (deny-list policy), so the Worker fetches
+them without signing; the browser only ever talks to `zarr.nemar.org` and never
+sees an S3 CORS header (there is none — that's the point).
+
+> Staleness model: chunks sit on a stable key + long TTL (immutable per
+> conversion). On the rare in-place re-conversion, `/webhooks/zarr-ready` purges
+> `index.json` + each changed store's `zarr.json` **once `CLOUDFLARE_API_TOKEN` +
+> `CLOUDFLARE_ZONE_ID` are set** (the zone purge API also clears the Worker
+> Cache-API entries for the custom domain); until then it's TTL-only, which is
+> fine (60 s metadata, 1 day chunks). A zero-stale upgrade (commit-hashed store
+> prefix) is possible later without changing the viewer.
+
+> Privacy flip: the public-dataset gate is checked only on a cache MISS, so a
+> dataset flipped public->private can still serve already-cached chunks to a
+> NEMAR origin until their TTL (≤1 day) expires. Low risk (only NEMAR origins,
+> and the dataset page no longer offers the viewer), but `make-private` should
+> also purge `<id>/zarr/*` once cache-purge is wired.
+
+> Cost note: a Worker proxy bills one Worker request per chunk (cache hits still
+> invoke the Worker). If viewing volume grows, switch to a non-Worker
+> proxied-subdomain + Cache Rules + a CORS Transform Rule (zero Worker cost) —
+> the viewer URL is unchanged. This needs a zone-scoped token / dashboard.
 
 ## Backend wiring (this repo)
 

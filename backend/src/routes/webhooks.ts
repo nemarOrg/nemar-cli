@@ -2028,18 +2028,30 @@ webhooks.post("/github", async (c) => {
   }
 
   if (zarrDecision.dispatch) {
-    try {
-      await triggerZarrGeneration(zarrDecision.datasetId, zarrDecision.ref, pat);
+    // The Hallu cron is the Zarr conversion engine (the GitHub Actions path
+    // can't sustain bulk/backfill -- a large dataset stalls past the 120-min
+    // cap; epic #684). Auto-dispatch is therefore OFF by default; set
+    // ZARR_AUTODISPATCH="true" to re-enable the event-driven Actions path. The
+    // run-generate-zarr.yml workflow stays available for manual
+    // workflow_dispatch recovery regardless.
+    if (c.env.ZARR_AUTODISPATCH !== "true") {
       console.log(
-        `[github-webhook] dispatched run-generate-zarr for ${zarrDecision.datasetId}@${zarrDecision.ref} delivery=${deliveryId}`,
+        `[github-webhook] zarr autodispatch off (Hallu cron owns conversion); skipping ${zarrDecision.datasetId}@${zarrDecision.ref} delivery=${deliveryId}`,
       );
-      dispatched.zarr = { dataset_id: zarrDecision.datasetId, ref: zarrDecision.ref };
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      console.error(
-        `[github-webhook] zarr dispatch failed for ${zarrDecision.datasetId}@${zarrDecision.ref} delivery=${deliveryId}: ${msg}`,
-      );
-      errors.zarr = msg;
+    } else {
+      try {
+        await triggerZarrGeneration(zarrDecision.datasetId, zarrDecision.ref, pat);
+        console.log(
+          `[github-webhook] dispatched run-generate-zarr for ${zarrDecision.datasetId}@${zarrDecision.ref} delivery=${deliveryId}`,
+        );
+        dispatched.zarr = { dataset_id: zarrDecision.datasetId, ref: zarrDecision.ref };
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        console.error(
+          `[github-webhook] zarr dispatch failed for ${zarrDecision.datasetId}@${zarrDecision.ref} delivery=${deliveryId}: ${msg}`,
+        );
+        errors.zarr = msg;
+      }
     }
   }
 
