@@ -69,6 +69,8 @@ function db0027(): Database {
   db.exec("PRAGMA foreign_keys = ON;");
   db.exec(BASE_SCHEMA);
   db.exec(readFileSync(join(MIG, "0029_consolidation_columns_and_sentinel.sql"), "utf8"));
+  // 0034 adds license_tier, which the fold INSERT now writes (#653).
+  db.exec(readFileSync(join(MIG, "0034_license_tier.sql"), "utf8"));
   return db;
 }
 
@@ -165,7 +167,9 @@ describe("upsertCatalogRecordsToDatasets", () => {
 
   test("skips ds* shadows of a managed on* mirror (dedup)", async () => {
     const db = seeded();
-    const { upserted: n } = await upsertCatalogRecordsToDatasets(realD1(db), [rec({ id: "ds000600" })]);
+    const { upserted: n } = await upsertCatalogRecordsToDatasets(realD1(db), [
+      rec({ id: "ds000600" }),
+    ]);
     expect(n).toBe(0);
     expect(db.query("SELECT 1 FROM datasets WHERE dataset_id='ds000600'").get()).toBeNull();
   });

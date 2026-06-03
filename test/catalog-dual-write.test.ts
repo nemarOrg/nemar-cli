@@ -55,6 +55,7 @@ CREATE TABLE datasets (
   description TEXT,
   authors TEXT,
   license TEXT,
+  license_tier TEXT NOT NULL DEFAULT 'unknown',
   readme TEXT,
   bids_version TEXT,
   sessions_count INTEGER,

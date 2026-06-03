@@ -106,6 +106,8 @@ function freshDb(): Database {
   // 0027 adds the consolidation columns (uploader, readme, bids_version,
   // sessions_count, embedding_dirty, ...) + the sentinel user.
   db.exec(readFileSync(join(MIG, "0029_consolidation_columns_and_sentinel.sql"), "utf8"));
+  // 0034 adds license_tier, which the fold INSERT now writes (#653).
+  db.exec(readFileSync(join(MIG, "0034_license_tier.sql"), "utf8"));
   return db;
 }
 
