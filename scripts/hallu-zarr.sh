@@ -31,8 +31,10 @@
 #   ./hallu-zarr.sh                      # reconcile + drain the queue
 #   ./hallu-zarr.sh --limit 20           # cap datasets per run (paced)
 #   ./hallu-zarr.sh --dataset nm000132   # one dataset now (bypasses the queue)
-#   ./hallu-zarr.sh --dataset nm000132 --full
 #   ./hallu-zarr.sh --stats              # print queue status and exit
+#
+# Every conversion wipes s3://<id>/zarr/ and rebuilds the whole dataset (the
+# driver's --clean), so the serving copy always mirrors the current dataset.
 #
 # Crontab (sibling of hallu-sync, offset to :30):
 #   30 * * * * /path/to/nemar-cli/scripts/hallu-zarr.sh >> /data/projects/yahya/nemar/.nm-zarr-cron.log 2>&1
@@ -81,13 +83,11 @@ LOCK_FILE="${ZARR_LOCK_FILE:-${STATE_DIR}/.nm-zarr.lock}"
 NEMAR_WEBHOOK_TOKEN="${NEMAR_WEBHOOK_TOKEN:-}"
 
 ONLY_DATASET=""
-FULL=""
 LIMIT="${ZARR_LIMIT:-0}"
 STATS_ONLY=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --dataset) ONLY_DATASET="$2"; shift 2 ;;
-    --full) FULL="--full"; shift ;;
     --limit) LIMIT="$2"; shift 2 ;;
     --stats) STATS_ONLY=1; shift ;;
     *) echo "Unknown arg: $1" >&2; exit 2 ;;
@@ -144,9 +144,13 @@ convert_dataset() {
   fi
 
   local rc=0
+  # --clean: wipe s3://<id>/zarr/ then full-rebuild, so the serving copy mirrors
+  # the current dataset exactly (no orphaned stores / stale groups). With
+  # streaming + JOBS-way parallelism a whole-dataset rebuild is cheap enough that
+  # we always remake rather than reason about incremental diffs.
   VIRTUAL_ENV="$VENV_DIR" "$VENV_DIR/bin/python" "$DRIVER" \
     --dataset-id "$id" --repo-dir "$dir" \
-    --bucket "$S3_BUCKET" --region "$AWS_REGION" $FULL \
+    --bucket "$S3_BUCKET" --region "$AWS_REGION" --clean \
     --jobs "$JOBS" --callback-out "$cb" >>"$LOG_FILE" 2>&1 || rc=$?
 
   if [[ "$rc" -eq 0 && -f "$cb" && -n "$NEMAR_WEBHOOK_TOKEN" ]]; then
