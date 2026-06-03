@@ -84,6 +84,10 @@ done
 log() { echo "[$(date -u '+%Y-%m-%d %H:%M:%S UTC')] $*" | tee -a "$LOG_FILE"; }
 err() { echo "[$(date -u '+%Y-%m-%d %H:%M:%S UTC')] ERROR: $*" | tee -a "$LOG_FILE" >&2; }
 
+# git-annex marks object files (and their dirs) read-only, so a plain `rm -rf`
+# fails with EPERM. Make the tree writable first, then remove.
+safe_rm() { [[ -n "${1:-}" && -e "$1" ]] || return 0; chmod -R u+w "$1" 2>/dev/null; rm -rf "$1"; }
+
 mkdir -p "$WORK_DIR" "$STATE_DIR"
 
 # --- One-time setup: driver repo + biosigIO venv ------------------------------
@@ -116,10 +120,10 @@ convert_dataset() {
   # the whole 18 GB). The driver then STREAMS each recording's annex blob from
   # s3://nemar/<id>/objects/<key> just-in-time, converts, pushes, and moves on,
   # so we start converting immediately and never hold the whole dataset on disk.
-  rm -rf "$dir"
+  safe_rm "$dir"
   if ! nemar dataset download "$id" --no-data -o "$dir" >>"$LOG_FILE" 2>&1; then
     err "[$id] metadata clone failed"
-    rm -rf "$dir"
+    safe_rm "$dir"
     return 1
   fi
 
@@ -137,7 +141,7 @@ convert_dataset() {
   fi
 
   # EPHEMERAL: always reclaim the scratch copy, success or failure.
-  rm -rf "$dir" "$cb"
+  safe_rm "$dir"; rm -f "$cb"
   if [[ "$rc" -eq 0 ]]; then log "[$id] done"; else err "[$id] driver rc=$rc"; fi
   return "$rc"
 }
