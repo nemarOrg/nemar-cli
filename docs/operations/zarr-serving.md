@@ -93,6 +93,12 @@ sees an S3 CORS header (there is none — that's the point).
 > fine (60 s metadata, 1 day chunks). A zero-stale upgrade (commit-hashed store
 > prefix) is possible later without changing the viewer.
 
+> Privacy flip: the public-dataset gate is checked only on a cache MISS, so a
+> dataset flipped public->private can still serve already-cached chunks to a
+> NEMAR origin until their TTL (≤1 day) expires. Low risk (only NEMAR origins,
+> and the dataset page no longer offers the viewer), but `make-private` should
+> also purge `<id>/zarr/*` once cache-purge is wired.
+
 > Cost note: a Worker proxy bills one Worker request per chunk (cache hits still
 > invoke the Worker). If viewing volume grows, switch to a non-Worker
 > proxied-subdomain + Cache Rules + a CORS Transform Rule (zero Worker cost) —

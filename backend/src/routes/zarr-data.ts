@@ -115,13 +115,22 @@ async function serve(c: Context<{ Bindings: Bindings }>, isHead: boolean) {
   if (!isHead && !range) {
     const hit = await cache.match(cacheKey);
     if (hit) {
+      // The Cache API ignores `Vary: Origin`, so one entry serves every origin.
+      // Re-apply CORS per request: DELETE the priming requester's ACAO first
+      // (corsHeaders omits ACAO for a blocked origin, so the loop wouldn't
+      // overwrite a stale allowed value), then set the current origin's headers.
       const h = new Headers(hit.headers);
+      h.delete("Access-Control-Allow-Origin");
       for (const [k, v] of Object.entries(cors)) h.set(k, v);
       return new Response(hit.body, { status: hit.status, headers: h });
     }
   }
 
   // Gate on cache miss only (a cached object was already gated when first stored).
+  // This per-request D1 read on cache misses mirrors the data.nemar.org route's
+  // loadPublishedDataset gate (both data-plane hosts bypass the api rate limiter
+  // by design); the non-Worker cache-rule migration noted in the runbook removes
+  // the Worker + D1 from the hot path entirely if viewing volume warrants it.
   if (!(await isPublicDataset(c.env, datasetId))) {
     return c.body(null, 404, cors);
   }
