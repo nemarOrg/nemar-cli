@@ -839,6 +839,92 @@ adminRoutes.get("/stats", async (c) => {
 });
 
 /**
+ * POST /admin/datasets/archive-sweep?limit=N — one-time/periodic backfill that
+ * seeds the archive_status / archive_size columns (migration 0036) from S3 for
+ * the observability dashboard (epic #695). Going-forward writes land via
+ * /webhooks/archive-ready; this seeds historical archives that predate it.
+ *
+ * Bounded per invocation (default 50, max 200) to stay under the Worker
+ * subrequest cap — getArchiveSize LISTs `<id>/archives/` once per dataset. Run
+ * repeatedly until `remaining` reaches 0. Idempotent: only rows never checked
+ * (archive_checked_at IS NULL) are candidates, so a re-run picks up where it
+ * left off.
+ */
+adminRoutes.post("/datasets/archive-sweep", async (c) => {
+  const db = c.env.DB;
+  const limitRaw = Number.parseInt(c.req.query("limit") || "50", 10);
+  const limit = Number.isFinite(limitRaw) ? Math.min(Math.max(limitRaw, 1), 200) : 50;
+
+  // Candidates: real (non-catalog), public, non-sandbox datasets we have never
+  // checked for an archive. Public-only because archives are a published-data
+  // concern and the data-plane download is public-only (loadPublishedDataset).
+  const candidateRows = await db
+    .prepare(
+      `SELECT dataset_id FROM datasets
+       WHERE owner_user_id != ${SYSTEM_USER_ID}
+         AND (is_sandbox = 0 OR is_sandbox IS NULL)
+         AND visibility = 'public'
+         AND archive_checked_at IS NULL
+       ORDER BY dataset_id
+       LIMIT ?`,
+    )
+    .bind(limit)
+    .all<{ dataset_id: string }>();
+  const candidates = candidateRows.results ?? [];
+
+  const s3 = getS3Config(c.env);
+  let ready = 0;
+  let absent = 0;
+  const errors: { dataset_id: string; error: string }[] = [];
+
+  for (const { dataset_id } of candidates) {
+    try {
+      const size = await getArchiveSize(s3, dataset_id);
+      if (size > 0) {
+        await db
+          .prepare(
+            "UPDATE datasets SET archive_status = 'ready', archive_size = ?, archive_checked_at = datetime('now') WHERE dataset_id = ?",
+          )
+          .bind(size, dataset_id)
+          .run();
+        ready++;
+      } else {
+        // Checked, no archive on S3: stamp checked_at so the sweep won't rescan,
+        // but leave archive_status NULL (absence is not a 'failed' generation).
+        // The dashboard treats a published dataset with status != 'ready' as
+        // "missing archive".
+        await db
+          .prepare("UPDATE datasets SET archive_checked_at = datetime('now') WHERE dataset_id = ?")
+          .bind(dataset_id)
+          .run();
+        absent++;
+      }
+    } catch (err) {
+      errors.push({ dataset_id, error: err instanceof Error ? err.message : String(err) });
+    }
+  }
+
+  const remainingRow = await db
+    .prepare(
+      `SELECT COUNT(*) as n FROM datasets
+       WHERE owner_user_id != ${SYSTEM_USER_ID}
+         AND (is_sandbox = 0 OR is_sandbox IS NULL)
+         AND visibility = 'public'
+         AND archive_checked_at IS NULL`,
+    )
+    .first<{ n: number }>();
+
+  return c.json({
+    ok: true,
+    checked: candidates.length,
+    ready,
+    absent,
+    errors,
+    remaining: remainingRow?.n ?? 0,
+  });
+});
+
+/**
  * GET /admin/audit - Get audit log
  */
 adminRoutes.get("/audit", async (c) => {

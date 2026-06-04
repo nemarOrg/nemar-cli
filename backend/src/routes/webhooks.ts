@@ -2203,4 +2203,101 @@ webhooks.post("/zarr-ready", async (c) => {
   });
 });
 
+/**
+ * POST /webhooks/archive-ready — callback from nemarDatasets/.github
+ * `run-generate-archive.yml` once a dataset's downloadable zip archive has been
+ * (re)built and uploaded to `s3://nemar/<id>/archives/v<version>.zip`
+ * (epic #695, dashboard.nemar.org/observability).
+ *
+ * Mirror of /zarr-ready: same shared `X-Webhook-Token` (NEMAR_WEBHOOK_TOKEN)
+ * auth, records the latest-only archive state on the `datasets` row, 404s a
+ * callback whose dataset isn't in D1, and always 200s on a valid token + body
+ * so the workflow's fire-and-forget POST doesn't see a retryable error. No
+ * cache purge: archives are served via a presigned S3 302 with `no-store`
+ * (data.ts), so there is no shared edge object to invalidate.
+ *
+ * Idempotent: replaying re-writes the same row state.
+ */
+interface ArchiveReadyBody {
+  dataset_id: string;
+  status?: "ready" | "failed";
+  /** Bytes of the generated zip; persisted to datasets.archive_size on 'ready'. */
+  size?: number;
+  /** The published version the archive was built for (logged, not stored). */
+  version?: string;
+  error?: string;
+}
+
+webhooks.post("/archive-ready", async (c) => {
+  const token = c.req.header("X-Webhook-Token");
+  const expectedToken = c.env.NEMAR_WEBHOOK_TOKEN ?? c.env.GITHUB_WEBHOOK_SECRET;
+  if (!expectedToken) {
+    console.error(
+      "[archive-ready] no webhook secret configured (NEMAR_WEBHOOK_TOKEN/GITHUB_WEBHOOK_SECRET both unset or empty)",
+    );
+    return c.json({ error: "Invalid webhook token" }, 401);
+  }
+  if (!token || !timingSafeEqual(token, expectedToken)) {
+    return c.json({ error: "Invalid webhook token" }, 401);
+  }
+
+  let body: ArchiveReadyBody;
+  try {
+    body = (await c.req.json()) as ArchiveReadyBody;
+  } catch {
+    return c.json({ error: "Invalid JSON in request body" }, 400);
+  }
+
+  if (typeof body.dataset_id !== "string" || !isValidDatasetId(body.dataset_id)) {
+    return c.json({ error: "dataset_id must be a valid dataset id" }, 400);
+  }
+  const status = body.status === "failed" ? "failed" : "ready";
+
+  // Persist latest-only archive state. On failure keep the prior archive_size
+  // (a failed rebuild shouldn't erase the last good zip's size) and only flip
+  // the status + stamp checked_at.
+  let changed = 0;
+  try {
+    if (status === "ready") {
+      const result = await c.env.DB.prepare(
+        `UPDATE datasets
+         SET archive_status = 'ready',
+             archive_checked_at = datetime('now'),
+             archive_size = ?
+         WHERE dataset_id = ?`,
+      )
+        .bind(typeof body.size === "number" ? body.size : null, body.dataset_id)
+        .run();
+      changed = result.meta.changes ?? 0;
+    } else {
+      const result = await c.env.DB.prepare(
+        "UPDATE datasets SET archive_status = 'failed', archive_checked_at = datetime('now') WHERE dataset_id = ?",
+      )
+        .bind(body.dataset_id)
+        .run();
+      changed = result.meta.changes ?? 0;
+    }
+  } catch (err) {
+    console.error(
+      `[archive-ready] D1 update failed dataset=${body.dataset_id}:`,
+      err instanceof Error ? err.message : String(err),
+    );
+    return c.json({ error: "Failed to record archive state" }, 500);
+  }
+
+  // A callback for a dataset that isn't in D1 (deleted, or never registered)
+  // matches zero rows and persists nothing. Surface it as a 404 instead of a
+  // silent 200 -- mirrors the zarr-ready / prescreen-result guards.
+  if (changed === 0) {
+    console.error(`[archive-ready] UPDATE matched 0 rows dataset=${body.dataset_id} -- not in D1`);
+    return c.json({ error: "Dataset not found" }, 404);
+  }
+
+  console.log(
+    `[archive-ready] dataset=${body.dataset_id} status=${status} size=${body.size ?? "?"} version=${body.version ?? "?"}`,
+  );
+
+  return c.json({ ok: true, dataset_id: body.dataset_id, status });
+});
+
 export default webhooks;
