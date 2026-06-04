@@ -21,6 +21,7 @@
 
 import type { Context } from "hono";
 import { Hono } from "hono";
+import { recordAccess, zarrObjectType } from "../services/access-metrics";
 import { normalizeBidsPath } from "../services/data-router";
 import { isValidDatasetId } from "../services/datasetId";
 import type { Bindings } from "../types/bindings.js";
@@ -122,6 +123,12 @@ async function serve(c: Context<{ Bindings: Bindings }>, isHead: boolean) {
       const h = new Headers(hit.headers);
       h.delete("Access-Control-Allow-Origin");
       for (const [k, v] of Object.entries(cors)) h.set(k, v);
+      recordAccess(c.env, {
+        datasetId,
+        source: "zarr",
+        detail: zarrObjectType(key),
+        bytes: Number(hit.headers.get("content-length")) || 0,
+      });
       return new Response(hit.body, { status: hit.status, headers: h });
     }
   }
@@ -157,6 +164,16 @@ async function serve(c: Context<{ Bindings: Bindings }>, isHead: boolean) {
 
   const body = isHead ? null : upstream.body;
   const res = new Response(body, { status: upstream.status, headers });
+
+  // Count served bytes (full objects and Range chunks; skip HEAD probes).
+  if (!isHead && (upstream.status === 200 || upstream.status === 206)) {
+    recordAccess(c.env, {
+      datasetId,
+      source: "zarr",
+      detail: zarrObjectType(key),
+      bytes: Number(headers.get("content-length")) || 0,
+    });
+  }
 
   // Cache full-object 200 GETs at the edge. clone() so the body is still
   // streamable to the client while waitUntil writes the cache copy.

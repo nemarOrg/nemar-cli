@@ -12,6 +12,12 @@ export interface Bindings {
   AI?: Ai;
   VECTORIZE?: VectorizeIndex;
 
+  // Analytics Engine: write-only data-plane access counters (epic #695).
+  // One data point per served archive download / zarr read; read by the
+  // observability dashboard via the AE SQL API. Optional: recordAccess()
+  // no-ops when the binding is absent (dev/test, or before provisioning).
+  ANALYTICS?: AnalyticsEngineDataset;
+
   // Environment variables
   ENVIRONMENT: "production" | "development" | "staging" | "test";
   API_BASE_URL: string;
