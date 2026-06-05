@@ -55,6 +55,12 @@ export interface PublicManifestEntry {
   checksum_algorithm: string;
   checksum: string;
   url: string | null;
+  // Stable, same-origin contract URL for the bytes (#615). Unlike `url`
+  // (a 1h-presigned S3 GET for annex files), `bytes_url` is durable: a
+  // consumer can persist it and re-fetch later. annex -> the per-file
+  // data-plane route (302s to freshly-presigned bytes); git -> the same
+  // raw.githubusercontent URL as `url`. Always present; never expires.
+  bytes_url: string;
   // Populated when url could not be built for this row; lets clients
   // download the rest of the dataset instead of failing the whole listing.
   error?: string;
@@ -229,6 +235,53 @@ export async function buildRedirectUrl(args: {
     expiresIn ?? 3600,
     buildContentDisposition(basename),
   );
+}
+
+/**
+ * Public base URL for the per-file data plane, derived from the request URL.
+ *
+ * `data.nemar.org` serves the data sub-app at the root (the host fork in
+ * `index.ts` rewrites `/<path>` -> `/data/<path>` internally), so its public
+ * URLs carry NO `/data` prefix. Every other host (`api.nemar.org`, the
+ * `*.workers.dev` dev fallback) reaches the same sub-app via the `/data`
+ * path-mount, so their public URLs DO need it. Mirrors the exact host
+ * condition in `index.ts`, so a `bytes_url` built on this base is fetchable on
+ * whichever host actually served the manifest.
+ */
+export function dataPlaneBaseUrl(reqUrl: string): string {
+  const u = new URL(reqUrl);
+  return u.hostname === "data.nemar.org" ? u.origin : `${u.origin}/data`;
+}
+
+/**
+ * Build the STABLE `bytes_url` for a manifest entry (#615).
+ *
+ * Unlike `url` (for annex files a presigned S3 GET that expires in ~1h),
+ * `bytes_url` is durable — a consumer can persist it and re-fetch later:
+ *  - annex-backed files -> the per-file data-plane route
+ *    `<base>/<id>/<version>/<bids_relpath>`, which 302s to bytes that are
+ *    re-presigned on each request, so there is no expiry to manage.
+ *  - git-backed files -> the raw.githubusercontent.com URL pinned to the tag,
+ *    identical to `url` (already stable).
+ *
+ * `base` is the public data-plane base from `dataPlaneBaseUrl()` (origin, plus
+ * the `/data` mount prefix on every host except data.nemar.org), so the annex
+ * URL is fetchable on the host that served the manifest.
+ */
+export function buildBytesUrl(args: {
+  base: string;
+  githubOrg: string;
+  datasetId: string;
+  version: string;
+  bidsPath: string;
+  key: string;
+}): string {
+  const { base, githubOrg, datasetId, version, bidsPath, key } = args;
+  const encoded = bidsPath.split("/").filter(Boolean).map(encodeURIComponent).join("/");
+  if (key.startsWith("git:")) {
+    return `https://raw.githubusercontent.com/${githubOrg}/${datasetId}/${version}/${encoded}`;
+  }
+  return `${base}/${datasetId}/${version}/${encoded}`;
 }
 
 // ===========================================================================

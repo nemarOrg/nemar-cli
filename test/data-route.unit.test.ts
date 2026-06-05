@@ -12,8 +12,10 @@ import "./setup";
 import {
   VERSION_TAG_RE,
   buildBidsIndex,
+  buildBytesUrl,
   buildCatalogIndexPayload,
   buildContentDisposition,
+  dataPlaneBaseUrl,
   buildDatasetMetadata,
   normalizeBidsPath,
   qaListingToDirectory,
@@ -425,6 +427,84 @@ describe("buildRedirectUrl", () => {
         githubOrg: "nemarDatasets",
       }),
     ).rejects.toThrow(/Unrecognized manifest key/);
+  });
+});
+
+describe("dataPlaneBaseUrl", () => {
+  test("data.nemar.org serves the data plane at root -> no /data prefix", () => {
+    // The host fork in index.ts rewrites this request to /data internally,
+    // so c.req.url carries /data, but the PUBLIC base must not.
+    expect(dataPlaneBaseUrl("https://data.nemar.org/data/nm099999/v1.0.0/manifest.json")).toBe(
+      "https://data.nemar.org",
+    );
+  });
+
+  test("api.nemar.org reaches the data plane via the /data mount -> keep prefix", () => {
+    expect(dataPlaneBaseUrl("https://api.nemar.org/data/nm099999/v1.0.0/manifest.json")).toBe(
+      "https://api.nemar.org/data",
+    );
+  });
+
+  test("workers.dev dev fallback also needs the /data prefix", () => {
+    expect(
+      dataPlaneBaseUrl("https://nemar-api.sccn-org.workers.dev/data/nm099999/v1.0.0/manifest.json"),
+    ).toBe("https://nemar-api.sccn-org.workers.dev/data");
+  });
+});
+
+describe("buildBytesUrl", () => {
+  const common = {
+    base: "https://data.nemar.org",
+    githubOrg: "nemarDatasets",
+    datasetId: "nm099999",
+    version: "v1.0.0",
+  };
+
+  test("annex keys -> per-file route URL under the supplied data-plane base", () => {
+    const url = buildBytesUrl({
+      ...common,
+      bidsPath: "sub-01/eeg/sub-01_task-rest_eeg.edf",
+      key: "SHA256E-s124573612--abc123.edf",
+    });
+    expect(url).toBe(
+      "https://data.nemar.org/nm099999/v1.0.0/sub-01/eeg/sub-01_task-rest_eeg.edf",
+    );
+  });
+
+  test("git keys -> raw.githubusercontent URL pinned to the tag (== url)", () => {
+    const url = buildBytesUrl({
+      ...common,
+      bidsPath: "dataset_description.json",
+      key: "git:abc123",
+    });
+    expect(url).toBe(
+      "https://raw.githubusercontent.com/nemarDatasets/nm099999/v1.0.0/dataset_description.json",
+    );
+  });
+
+  test("path segments are URL-encoded but slashes preserved", () => {
+    const url = buildBytesUrl({
+      ...common,
+      bidsPath: "sub-01/eeg/sub-01_task-rest events.tsv",
+      key: "git:zzz",
+    });
+    expect(url).toBe(
+      "https://raw.githubusercontent.com/nemarDatasets/nm099999/v1.0.0/sub-01/eeg/sub-01_task-rest%20events.tsv",
+    );
+  });
+
+  test("annex bytes_url keeps the /data prefix on non-canonical hosts", () => {
+    // base comes from dataPlaneBaseUrl, which carries /data off data.nemar.org;
+    // the resulting URL must be fetchable on that host (it 404s without /data).
+    const url = buildBytesUrl({
+      ...common,
+      base: "https://nemar-api.sccn-org.workers.dev/data",
+      bidsPath: "sub-01/eeg/x.set",
+      key: "MD5E-s100--def.set",
+    });
+    expect(url).toBe(
+      "https://nemar-api.sccn-org.workers.dev/data/nm099999/v1.0.0/sub-01/eeg/x.set",
+    );
   });
 });
 
