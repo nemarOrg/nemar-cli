@@ -12,6 +12,7 @@
  */
 
 import { Hono } from "hono";
+import { recordAccess } from "../services/access-metrics";
 import {
   type CatalogIndexBuildResult,
   type CatalogIndexRow,
@@ -959,6 +960,11 @@ dataRoutes.get("/:datasetId/:version", async (c) => {
       );
     }
     const archiveUrl = await getArchiveUrl(s3, datasetId, resolved.version);
+    // Count the download (not HEAD probes). bytes=0: the Worker 302s to S3 and
+    // never streams the archive, so it can't measure transferred bytes.
+    if (c.req.method === "GET") {
+      recordAccess(c.env, { datasetId, source: "archive", detail: resolved.version });
+    }
     // no-store: the Location carries a presigned, time-limited S3 URL; don't
     // let a CDN serve one shared signed URL to many clients.
     return new Response(null, {

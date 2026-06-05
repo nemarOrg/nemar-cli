@@ -45,6 +45,16 @@ binding = "AI"
 binding = "VECTORIZE"
 index_name = "nemar-dataset-index"
 
+# Analytics Engine: per-request data-plane access counters (epic #695,
+# dashboard.nemar.org/observability). One write-only data point per served
+# archive download / zarr read, tagged with dataset_id + bytes. The
+# observability dashboard reads this dataset via the account-scoped AE SQL API
+# (no binding needed for reads). Optional in code (recordAccess no-ops when the
+# binding is absent), so a deploy without it still serves data-plane traffic.
+[[analytics_engine_datasets]]
+binding = "ANALYTICS"
+dataset = "nemar_access_metrics"
+
 # Workers Observability (Workers Paid plan).
 # Captures invocation logs (inbound request shape, response status, duration,
 # subrequest count) and console.log output for searchable runtime telemetry.
@@ -151,6 +161,12 @@ binding = "AI"
 [[env.dev.vectorize]]
 binding = "VECTORIZE"
 index_name = "nemar-dataset-index-dev"
+
+# Analytics Engine for dev (not inherited from top-level). Separate dataset so
+# dev data-plane traffic does not pollute the prod access metrics.
+[[env.dev.analytics_engine_datasets]]
+binding = "ANALYTICS"
+dataset = "nemar_access_metrics_dev"
 
 # Observability for dev (not inherited from top-level)
 [env.dev.observability]
