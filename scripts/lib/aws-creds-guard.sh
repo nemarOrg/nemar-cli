@@ -3,7 +3,7 @@
 # AWS credentials guard for nemar-cli admin scripts.
 #
 # Enforces the access-policies rules documented at
-# docs/operations/access-policies.md (principles 5 and 6):
+# https://docs.nemar.org/admin/operations/access-policies/ (principles 5 and 6):
 #
 # - Long-lived `AKIA*` keys must never live in process environment
 #   variables. They belong in `~/.aws/credentials` (mode 0600) where the
@@ -44,7 +44,7 @@ Use one of these instead:
   2. Mint short-lived STS credentials (ASIA*) via `aws sso login` or
      `aws-vault exec`. Those expire on their own.
 
-Reference: docs/operations/access-policies.md (principles 5 + 6).
+Reference: https://docs.nemar.org/admin/operations/access-policies/ (principles 5 + 6).
 EOF
         return 2
         ;;
@@ -65,7 +65,7 @@ Use one of these instead:
   2. Mint short-lived STS credentials via `aws sso login` or
      `aws-vault exec`.
 
-Reference: docs/operations/access-policies.md (principles 5 + 6).
+Reference: https://docs.nemar.org/admin/operations/access-policies/ (principles 5 + 6).
 EOF
         return 2
         ;;
@@ -87,7 +87,7 @@ ERROR: No AWS credentials available to this script.
 Set up one of:
   - ~/.aws/credentials (mode 0600) with a long-lived AKIA key. Used
     by service-account runtimes (cron, headless). See
-    docs/operations/access-policies.md principle 6.
+    https://docs.nemar.org/admin/operations/access-policies/ principle 6.
   - aws sso login (short-lived, preferred for interactive admin use).
 
 This script will not proceed without a verified identity.

@@ -47,7 +47,7 @@ fi
 
 # Verify AWS credentials via shared guard. Rejects long-lived AKIA*
 # keys in env (security risk). Requires ~/.aws/credentials or aws sso
-# login. See docs/operations/access-policies.md (principles 5 + 6).
+# login. See https://docs.nemar.org/admin/operations/access-policies/ (principles 5 + 6).
 # Skipped in dry-run mode so the preview path works on machines without
 # AWS credentials configured (e.g., CI preview, fresh laptop).
 if ! $DRY_RUN; then

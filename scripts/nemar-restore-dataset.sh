@@ -22,7 +22,7 @@
 #   - git, git-annex, gh CLI, unzip, curl
 #   - AWS credentials resolvable via the AWS default chain
 #     (~/.aws/credentials, or aws sso login). Long-lived keys in env
-#     vars are rejected; see docs/operations/access-policies.md.
+#     vars are rejected; see https://docs.nemar.org/admin/operations/access-policies/.
 #   - GitHub authentication via gh CLI
 #   - Zenodo archive downloaded to ARCHIVE_DIR
 #   - SSH access to GitHub (via multi-account SSH config)
@@ -175,7 +175,7 @@ check_prerequisites() {
     # Check AWS credentials via shared guard. Rejects long-lived AKIA*
     # keys in env (security: env vars leak to child processes), requires
     # either ~/.aws/credentials (mode 0600) or short-lived ASIA* from
-    # `aws sso login` / `aws-vault`. See docs/operations/access-policies.md
+    # `aws sso login` / `aws-vault`. See https://docs.nemar.org/admin/operations/access-policies/
     # (principles 5 + 6).
     # shellcheck source=lib/aws-creds-guard.sh
     . "$(dirname "${BASH_SOURCE[0]}")/lib/aws-creds-guard.sh"
@@ -629,7 +629,7 @@ main() {
         echo "  Place a long-lived AKIA* key in ~/.aws/credentials (mode 0600), OR"
         echo "  use a short-lived ASIA* session via 'aws sso login' / 'aws-vault'."
         echo "  Long-lived keys in process env vars are REJECTED by the credentials"
-        echo "  guard. See docs/operations/access-policies.md (principles 5 + 6)."
+        echo "  guard. See https://docs.nemar.org/admin/operations/access-policies/ (principles 5 + 6)."
         echo "  WORK_BASE_DIR             - Working directory (default: \$ARCHIVE_DIR/restore_work)"
         echo "  GITHUB_ORG                - GitHub organization (default: nemarDatasets)"
         echo "  SSH_HOST                  - SSH host for GitHub (default: github.com)"
