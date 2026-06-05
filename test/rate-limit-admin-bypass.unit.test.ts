@@ -8,6 +8,7 @@
 
 import { describe, expect, test } from "bun:test";
 import {
+  __limits,
   __readBearerTokenFromHeader,
   __selectBucket,
 } from "../backend/src/middleware/rateLimit";
@@ -57,5 +58,37 @@ describe("__selectBucket", () => {
     const r = __selectBucket("/admin/datasets", "Bearer short", "1.2.3.4");
     expect(r.keyKind).toBe("ip");
     expect(r.maxRequests).toBe(500);
+  });
+
+  test("public data-plane paths get the generous data-ip bucket, IP-keyed", () => {
+    // data.nemar.org/<id>/<v>/<path> is rewritten to /data/<...> in index.ts.
+    for (const path of [
+      "/data",
+      "/data/",
+      "/data/nm000132",
+      "/data/nm000132/1.0.0/sub-01/eeg/sub-01_task-rest_eeg.edf",
+      "/data/nm000132/metadata.json",
+      "/nemar/data/nm000132/1.0.0/manifest.json",
+    ]) {
+      const r = __selectBucket(path, undefined, "1.2.3.4");
+      expect(r.keyKind).toBe("data-ip");
+      expect(r.maxRequests).toBe(__limits.DATA_MAX_REQUESTS);
+      expect(r.rawKey).toBe("1.2.3.4");
+    }
+  });
+
+  test("data-plane bucket wins even when a valid bearer is present (public read)", () => {
+    const r = __selectBucket("/data/nm000132/1.0.0/x.edf", `Bearer ${VALID_TOKEN}`, "1.2.3.4");
+    expect(r.keyKind).toBe("data-ip");
+    expect(r.rawKey).toBe("1.2.3.4");
+  });
+
+  test("the management API at /datasets is NOT mistaken for the data plane", () => {
+    // Anchored regex must not let /datasets/* leak into the generous bucket.
+    const anon = __selectBucket("/datasets", undefined, "1.2.3.4");
+    expect(anon.keyKind).toBe("ip");
+    expect(anon.maxRequests).toBe(500);
+    const authed = __selectBucket("/datasets/nm000132", `Bearer ${VALID_TOKEN}`, "1.2.3.4");
+    expect(authed.keyKind).toBe("token");
   });
 });
