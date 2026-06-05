@@ -592,7 +592,8 @@ async function summaryJsonHandler(
     // an operator-side alert fires and the CDN doesn't pin the failure.
     return new Response(JSON.stringify({ error: "Failed to retrieve summary" }), {
       status: 500,
-      headers: { "Content-Type": "application/json" },
+      // Uncached: a transient S3/SigV4/IAM failure must not be CDN-pinned.
+      headers: { "Content-Type": "application/json", "Cache-Control": "no-store" },
     });
   }
 
@@ -658,7 +659,7 @@ async function recordsJsonHandler(
     // operator-side alert fires and the CDN doesn't pin the failure.
     return new Response(JSON.stringify({ error: "Failed to retrieve records" }), {
       status: 500,
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", "Cache-Control": "no-store" },
     });
   }
 

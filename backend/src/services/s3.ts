@@ -570,21 +570,20 @@ export async function loadRecords(
  * HEAD-check whether an S3 version artifact exists. Used by the
  * /webhooks/manifest-ready callback to confirm the central workflow
  * actually uploaded both manifest.json and summary.json before we
- * commit the dataset_versions row. Suffix examples: "" (manifest) or
- * "-summary" (summary sibling). Returns true on 200, false on 404, and
- * throws on any other status (so a 5xx doesn't silently masquerade as
- * "missing"). #557 Stream B.
+ * commit the dataset_versions row. Suffix examples: "" (manifest),
+ * "-summary" (summary sibling), or "-records" (records sibling, #615).
+ * Returns true on 200, false on 404, and throws on any other status (so a
+ * 5xx doesn't silently masquerade as "missing"). #557 Stream B.
  */
 export async function headVersionArtifact(
   options: PresignedUrlOptions,
   datasetId: string,
   version: string,
-  suffix: "" | "-summary" = "",
+  suffix: "" | "-summary" | "-records" = "",
 ): Promise<boolean> {
   const { bucket, region } = options;
   const aws = createS3Client(options);
-  const versionTag = version.startsWith("v") ? version : `v${version}`;
-  const key = `${datasetId}/version/${versionTag}${suffix}.json`;
+  const key = versionArtifactKey(datasetId, version, suffix);
   const encodedKey = key.split("/").map(encodeURIComponent).join("/");
   const url = `https://${bucket}.s3.${region}.amazonaws.com/${encodedKey}`;
 
