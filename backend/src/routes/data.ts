@@ -50,6 +50,7 @@ import {
   getArchiveUrl,
   getManifest,
   headArchive,
+  loadRecords,
   loadSummary,
 } from "../services/s3";
 import type { Bindings, Variables } from "../types/bindings";
@@ -591,7 +592,8 @@ async function summaryJsonHandler(
     // an operator-side alert fires and the CDN doesn't pin the failure.
     return new Response(JSON.stringify({ error: "Failed to retrieve summary" }), {
       status: 500,
-      headers: { "Content-Type": "application/json" },
+      // Uncached: a transient S3/SigV4/IAM failure must not be CDN-pinned.
+      headers: { "Content-Type": "application/json", "Cache-Control": "no-store" },
     });
   }
 
@@ -620,6 +622,72 @@ async function summaryJsonHandler(
 dataRoutes.get("/:datasetId/:version/summary.json", (c) => {
   const { datasetId, version } = c.req.param();
   return summaryJsonHandler(c.env, datasetId, version);
+});
+
+/**
+ * GET /<id>/<version>/records.json -> static-passthrough records artifact (#615).
+ *
+ * Sibling to summary.json. Emitted by the central generate-records workflow
+ * on `nemarDatasets/.github` at S3 key `<id>/version/v<X.Y.Z>-records.json`
+ * (an array of neuroschema v0.3.0 `record` docs, one per primary signal
+ * file). The emitter owns the shape contract; this handler serves the bytes
+ * verbatim. Same cache policy as summary.json: immutable per (id, version),
+ * so a long s-maxage; a missing artifact is `no-store` 404 (no negative
+ * caching) so a freshly-published records.json appears on the next request.
+ */
+async function recordsJsonHandler(
+  env: Bindings,
+  datasetId: string,
+  versionParam: string,
+): Promise<Response> {
+  const dataset = await loadPublishedDataset(env, datasetId);
+  if (!dataset) return notFound("Dataset not found");
+
+  const resolved = await resolveVersion(env.DB, datasetId, versionParam);
+  if (!resolved.ok) return notFound("Version not found");
+
+  let raw: string | null;
+  try {
+    raw = await loadRecords(s3OptionsFromEnv(env), datasetId, resolved.version);
+  } catch (err) {
+    console.error(
+      `[data] records fetch failed dataset=${datasetId} version=${resolved.version}:`,
+      err instanceof Error ? err.message : String(err),
+    );
+    // 5xx S3 outages, SigV4 failures, IAM drift (403 from loadRecords) must
+    // NOT collapse into a cacheable 404. Return an uncached 500 so an
+    // operator-side alert fires and the CDN doesn't pin the failure.
+    return new Response(JSON.stringify({ error: "Failed to retrieve records" }), {
+      status: 500,
+      headers: { "Content-Type": "application/json", "Cache-Control": "no-store" },
+    });
+  }
+
+  if (raw === null) {
+    // No negative caching: records.json is generated asynchronously after
+    // the version tag (it can lag the publish, esp. before the records
+    // workflow runs). `no-store` ensures a freshly-published records.json
+    // becomes visible on the next request rather than serving a pinned 404.
+    return new Response(JSON.stringify({ error: "Records not found for this version" }), {
+      status: 404,
+      headers: {
+        "Content-Type": "application/json",
+        "Cache-Control": "no-store",
+      },
+    });
+  }
+
+  return new Response(raw, {
+    headers: {
+      "Content-Type": "application/json",
+      "Cache-Control": "public, max-age=300, s-maxage=86400, stale-while-revalidate=86400",
+    },
+  });
+}
+
+dataRoutes.get("/:datasetId/:version/records.json", (c) => {
+  const { datasetId, version } = c.req.param();
+  return recordsJsonHandler(c.env, datasetId, version);
 });
 
 /**

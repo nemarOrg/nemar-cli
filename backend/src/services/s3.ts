@@ -473,30 +473,41 @@ export async function getManifest(
 }
 
 /**
- * Get a summary.json sibling artifact from S3. Returns null if not found.
- *
- * Stored at: <datasetId>/version/v<version>-summary.json
- *
- * Companion to getManifest(); the central manifest-generation workflow
- * (epic #559, PR-1) writes both manifest.json and summary.json in the same
- * step. Summary is a static-passthrough artifact: the route serves whatever
- * S3 has, no per-request mutation, no validation here (the writer owns the
- * contract; the consumer-side route is shape-agnostic).
+ * Build the S3 object key for a per-version JSON artifact. The suffix
+ * selects the sibling: "" = the canonical manifest (`version/v<X>.json`),
+ * "-summary" = the summary sibling (#559), "-records" = the records sibling
+ * (#615). Pure + exported so the key contract is unit-testable without S3.
  */
-export async function loadSummary(
+export function versionArtifactKey(
+  datasetId: string,
+  version: string,
+  suffix: "" | "-summary" | "-records",
+): string {
+  const versionTag = version.startsWith("v") ? version : `v${version}`;
+  return `${datasetId}/version/${versionTag}${suffix}.json`;
+}
+
+/**
+ * Shared loader for a per-version JSON sibling artifact (summary/records).
+ * Same public-read strategy as getManifest(): unsigned-fetch-first so the
+ * route survives a Worker-credentials outage; signed 403 fallback for
+ * private / pre-publish artifacts. 404 -> null. A 403 that survives the
+ * fallback throws, so the route returns an uncached 500 instead of letting
+ * the CDN pin a transient failure as a 404 (these endpoints' 404s are
+ * briefly CDN-cached).
+ */
+async function loadVersionJson(
   options: PresignedUrlOptions,
   datasetId: string,
   version: string,
+  suffix: "-summary" | "-records",
+  label: string,
 ): Promise<string | null> {
   const { bucket, region } = options;
-  const versionTag = version.startsWith("v") ? version : `v${version}`;
-  const key = `${datasetId}/version/${versionTag}-summary.json`;
+  const key = versionArtifactKey(datasetId, version, suffix);
   const encodedKey = key.split("/").map(encodeURIComponent).join("/");
   const url = `https://${bucket}.s3.${region}.amazonaws.com/${encodedKey}`;
 
-  // Same public-read strategy as getManifest(): unsigned first so the
-  // route survives a Worker credentials outage; signed fallback for
-  // private / pre-publish summaries.
   let response = await fetch(url);
   if (response.status === 403) {
     try {
@@ -505,7 +516,7 @@ export async function loadSummary(
       response = await fetch(signed);
     } catch (err) {
       throw new Error(
-        `loadSummary signed-fallback failed dataset=${datasetId} version=${version}: ${
+        `${label} signed-fallback failed dataset=${datasetId} version=${version}: ${
           err instanceof Error ? err.message : String(err)
         }`,
       );
@@ -514,39 +525,65 @@ export async function loadSummary(
 
   if (response.status === 404) return null;
   if (response.status === 403) {
-    // Still 403 after fallback. Diverges from getManifest()'s 403-as-null
-    // because /summary.json's 404 is briefly CDN-cached. Surface as a
-    // throw so the route returns 500 (uncached) and operator notices.
     throw new Error(
-      `loadSummary 403 after fallback (credentials/permissions) for dataset=${datasetId} version=${version}`,
+      `${label} 403 after fallback (credentials/permissions) for dataset=${datasetId} version=${version}`,
     );
   }
   if (!response.ok) {
-    throw new Error(`Failed to get summary: HTTP ${response.status}`);
+    throw new Error(`Failed to get ${label}: HTTP ${response.status}`);
   }
 
   return response.text();
 }
 
 /**
+ * Get a summary.json sibling artifact from S3. Returns null if not found.
+ * Stored at `<datasetId>/version/v<version>-summary.json`; written by the
+ * central manifest-generation workflow (epic #559) alongside manifest.json.
+ * Static-passthrough: the route serves the bytes verbatim (the writer owns
+ * the shape contract).
+ */
+export async function loadSummary(
+  options: PresignedUrlOptions,
+  datasetId: string,
+  version: string,
+): Promise<string | null> {
+  return loadVersionJson(options, datasetId, version, "-summary", "loadSummary");
+}
+
+/**
+ * Get a records.json sibling artifact from S3 (#615). Returns null if not
+ * found. Stored at `<datasetId>/version/v<version>-records.json`; written by
+ * the central generate-records workflow alongside manifest/summary. Like
+ * loadSummary it is a static-passthrough artifact (the emitter owns the
+ * neuroschema-record array shape).
+ */
+export async function loadRecords(
+  options: PresignedUrlOptions,
+  datasetId: string,
+  version: string,
+): Promise<string | null> {
+  return loadVersionJson(options, datasetId, version, "-records", "loadRecords");
+}
+
+/**
  * HEAD-check whether an S3 version artifact exists. Used by the
  * /webhooks/manifest-ready callback to confirm the central workflow
  * actually uploaded both manifest.json and summary.json before we
- * commit the dataset_versions row. Suffix examples: "" (manifest) or
- * "-summary" (summary sibling). Returns true on 200, false on 404, and
- * throws on any other status (so a 5xx doesn't silently masquerade as
- * "missing"). #557 Stream B.
+ * commit the dataset_versions row. Suffix examples: "" (manifest),
+ * "-summary" (summary sibling), or "-records" (records sibling, #615).
+ * Returns true on 200, false on 404, and throws on any other status (so a
+ * 5xx doesn't silently masquerade as "missing"). #557 Stream B.
  */
 export async function headVersionArtifact(
   options: PresignedUrlOptions,
   datasetId: string,
   version: string,
-  suffix: "" | "-summary" = "",
+  suffix: "" | "-summary" | "-records" = "",
 ): Promise<boolean> {
   const { bucket, region } = options;
   const aws = createS3Client(options);
-  const versionTag = version.startsWith("v") ? version : `v${version}`;
-  const key = `${datasetId}/version/${versionTag}${suffix}.json`;
+  const key = versionArtifactKey(datasetId, version, suffix);
   const encodedKey = key.split("/").map(encodeURIComponent).join("/");
   const url = `https://${bucket}.s3.${region}.amazonaws.com/${encodedKey}`;
 
