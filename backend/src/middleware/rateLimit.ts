@@ -128,7 +128,11 @@ export function __readBearerTokenFromHeader(authHeader: string | undefined): str
  *    (500/60s). Admin orchestration (`publish approve`, CI deploy
  *    sweeps) fits here; per-token bucketing means one admin's batch
  *    can't 429 another admin's batch through the shared IP pool.
- *  - `ip` for everything else (100/60s, the legacy cap).
+ *  - `data-ip` for the public read data plane (`/data/*`, `/nemar/data/*`).
+ *    10000/60s, IP-keyed. Checked before the bearer branch because the data
+ *    plane is anonymous-by-design; a tokened request to a public file is
+ *    still charged to the (generous) IP bucket, not the tighter token bucket.
+ *  - `ip` for everything else (the unauthenticated cap).
  *
  * Admin endpoints used to be entirely exempt; that gave an admin
  * running a malformed loop unbounded access to the worker. Keeping the
