@@ -25,6 +25,7 @@ import {
   buildDatasetMetadata,
   buildLandingPayload,
   buildRedirectUrl,
+  dataPlaneBaseUrl,
   diffRemovedSince,
   findLastSeenVersion,
   pickResponseFormat,
@@ -227,9 +228,10 @@ async function manifestJsonHandler(
   if (!manifest) return notFound("Version not published");
 
   const s3Options = s3OptionsFromEnv(env);
-  // Scheme+host the manifest was served from; bytes_url stays on the same
-  // origin the client is already talking to (data.nemar.org in prod).
-  const origin = new URL(reqUrl).origin;
+  // Public data-plane base the bytes_url must be fetchable on: bare origin on
+  // data.nemar.org, origin + "/data" on api.nemar.org / workers.dev. See
+  // dataPlaneBaseUrl — it mirrors the host fork in index.ts.
+  const dataBase = dataPlaneBaseUrl(reqUrl);
   const entries: PublicManifestEntry[] = await Promise.all(
     Object.entries(manifest.files).map(async ([path, file]): Promise<PublicManifestEntry> => {
       const checksum = parseChecksum(file.checksum);
@@ -239,7 +241,7 @@ async function manifestJsonHandler(
         checksum_algorithm: checksum.algorithm,
         checksum: checksum.value,
         bytes_url: buildBytesUrl({
-          origin,
+          base: dataBase,
           githubOrg: ORG_NAME,
           datasetId,
           version: resolved.version,

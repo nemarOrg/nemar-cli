@@ -15,6 +15,7 @@ import {
   buildBytesUrl,
   buildCatalogIndexPayload,
   buildContentDisposition,
+  dataPlaneBaseUrl,
   buildDatasetMetadata,
   normalizeBidsPath,
   qaListingToDirectory,
@@ -429,15 +430,37 @@ describe("buildRedirectUrl", () => {
   });
 });
 
+describe("dataPlaneBaseUrl", () => {
+  test("data.nemar.org serves the data plane at root -> no /data prefix", () => {
+    // The host fork in index.ts rewrites this request to /data internally,
+    // so c.req.url carries /data, but the PUBLIC base must not.
+    expect(dataPlaneBaseUrl("https://data.nemar.org/data/nm099999/v1.0.0/manifest.json")).toBe(
+      "https://data.nemar.org",
+    );
+  });
+
+  test("api.nemar.org reaches the data plane via the /data mount -> keep prefix", () => {
+    expect(dataPlaneBaseUrl("https://api.nemar.org/data/nm099999/v1.0.0/manifest.json")).toBe(
+      "https://api.nemar.org/data",
+    );
+  });
+
+  test("workers.dev dev fallback also needs the /data prefix", () => {
+    expect(
+      dataPlaneBaseUrl("https://nemar-api.sccn-org.workers.dev/data/nm099999/v1.0.0/manifest.json"),
+    ).toBe("https://nemar-api.sccn-org.workers.dev/data");
+  });
+});
+
 describe("buildBytesUrl", () => {
   const common = {
-    origin: "https://data.nemar.org",
+    base: "https://data.nemar.org",
     githubOrg: "nemarDatasets",
     datasetId: "nm099999",
     version: "v1.0.0",
   };
 
-  test("annex keys -> stable same-origin per-file route URL (no /data prefix)", () => {
+  test("annex keys -> per-file route URL under the supplied data-plane base", () => {
     const url = buildBytesUrl({
       ...common,
       bidsPath: "sub-01/eeg/sub-01_task-rest_eeg.edf",
@@ -470,15 +493,17 @@ describe("buildBytesUrl", () => {
     );
   });
 
-  test("origin carries through for non-prod hosts", () => {
+  test("annex bytes_url keeps the /data prefix on non-canonical hosts", () => {
+    // base comes from dataPlaneBaseUrl, which carries /data off data.nemar.org;
+    // the resulting URL must be fetchable on that host (it 404s without /data).
     const url = buildBytesUrl({
       ...common,
-      origin: "https://nemar-api.sccn-org.workers.dev",
+      base: "https://nemar-api.sccn-org.workers.dev/data",
       bidsPath: "sub-01/eeg/x.set",
       key: "MD5E-s100--def.set",
     });
     expect(url).toBe(
-      "https://nemar-api.sccn-org.workers.dev/nm099999/v1.0.0/sub-01/eeg/x.set",
+      "https://nemar-api.sccn-org.workers.dev/data/nm099999/v1.0.0/sub-01/eeg/x.set",
     );
   });
 });
