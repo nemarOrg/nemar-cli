@@ -2210,11 +2210,15 @@ webhooks.post("/zarr-ready", async (c) => {
  * (epic #695, dashboard.nemar.org/observability).
  *
  * Mirror of /zarr-ready: same shared `X-Webhook-Token` (NEMAR_WEBHOOK_TOKEN)
- * auth, records the latest-only archive state on the `datasets` row, 404s a
- * callback whose dataset isn't in D1, and always 200s on a valid token + body
- * so the workflow's fire-and-forget POST doesn't see a retryable error. No
- * cache purge: archives are served via a presigned S3 302 with `no-store`
- * (data.ts), so there is no shared edge object to invalidate.
+ * auth, records the latest-only archive state on the `datasets` row. No cache
+ * purge: archives are served via a presigned S3 302 with `no-store` (data.ts),
+ * so there is no shared edge object to invalidate.
+ *
+ * Responses: 200 once state is recorded; 400 for a bad body or a missing/unknown
+ * `status` (deliberately STRICTER than /zarr-ready -- a missing status must NOT
+ * silently mark an archive 'ready', which would poison the dashboard's
+ * "% with archive"); 404 when the dataset isn't in D1 (surfaces a stale callback
+ * to operators rather than swallowing it).
  *
  * Idempotent: replaying re-writes the same row state.
  */
@@ -2251,7 +2255,15 @@ webhooks.post("/archive-ready", async (c) => {
   if (typeof body.dataset_id !== "string" || !isValidDatasetId(body.dataset_id)) {
     return c.json({ error: "dataset_id must be a valid dataset id" }, 400);
   }
-  const status = body.status === "failed" ? "failed" : "ready";
+  // Require an explicit status: a missing/unknown value must not default to
+  // 'ready' (that would mark a failed generation as having an archive).
+  if (body.status !== "ready" && body.status !== "failed") {
+    return c.json({ error: "status must be 'ready' or 'failed'" }, 400);
+  }
+  const status = body.status;
+  if (status === "failed" && body.error) {
+    console.error(`[archive-ready] workflow failure dataset=${body.dataset_id}: ${body.error}`);
+  }
 
   // Persist latest-only archive state. On failure keep the prior archive_size
   // (a failed rebuild shouldn't erase the last good zip's size) and only flip

@@ -47,6 +47,10 @@ describe("zarrObjectType", () => {
   test("everything else is a chunk", () => {
     expect(zarrObjectType("nm000132/zarr/sub-01_task-rest_eeg.zarr/data/c/0/0/0")).toBe("chunk");
   });
+
+  test("a chunk merely ending in index.json is not the store index (slash-anchored)", () => {
+    expect(zarrObjectType("nm000132/zarr/store.zarr/foo_index.json")).toBe("chunk");
+  });
 });
 
 describe("recordAccess", () => {

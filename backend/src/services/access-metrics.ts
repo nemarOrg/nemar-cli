@@ -60,8 +60,10 @@ export function buildAccessDataPoint(event: AccessEvent): AnalyticsEngineDataPoi
  * metadata; everything else (chunks under `c/...`) -> chunk.
  */
 export function zarrObjectType(key: string): string {
-  if (key.endsWith("index.json")) return "index";
-  if (key.endsWith("zarr.json")) return "metadata";
+  // Slash-anchored to match cacheControlFor() in zarr-data.ts and to avoid
+  // misclassifying a hypothetical chunk like `..._index.json` as the store index.
+  if (key.endsWith("/index.json")) return "index";
+  if (key.endsWith("/zarr.json")) return "metadata";
   return "chunk";
 }
 

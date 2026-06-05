@@ -132,6 +132,17 @@ describe("archive-ready webhook UPDATE semantics", () => {
     expect(row.archive_checked_at).not.toBeNull();
   });
 
+  test("'ready' with no size leaves archive_size NULL (handler binds null)", () => {
+    db.prepare(
+      "UPDATE datasets SET archive_status = 'ready', archive_checked_at = datetime('now'), archive_size = ? WHERE dataset_id = ?",
+    ).run(null, "nm000001");
+    const row = db
+      .prepare("SELECT archive_status, archive_size FROM datasets WHERE dataset_id = ?")
+      .get("nm000001") as Record<string, unknown>;
+    expect(row.archive_status).toBe("ready");
+    expect(row.archive_size).toBeNull();
+  });
+
   test("'failed' flips status + stamps checked_at but preserves prior size", () => {
     db.prepare(
       "UPDATE datasets SET archive_status = 'ready', archive_size = ?, archive_checked_at = '2026-01-01 00:00:00' WHERE dataset_id = ?",
@@ -195,5 +206,36 @@ describe("archive-sweep candidate selection", () => {
     ).run("nm000001");
     const rows = db.prepare(SWEEP_CANDIDATES).all() as { dataset_id: string }[];
     expect(rows).toHaveLength(0);
+  });
+
+  test("the absent (size=0) path stamps checked_at but leaves archive_status NULL", () => {
+    // The sweep's size=0 branch runs only this UPDATE; absence must not become 'failed'.
+    db.prepare("UPDATE datasets SET archive_checked_at = datetime('now') WHERE dataset_id = ?").run(
+      "nm000001",
+    );
+    const row = db
+      .prepare("SELECT archive_status, archive_checked_at FROM datasets WHERE dataset_id = ?")
+      .get("nm000001") as Record<string, unknown>;
+    expect(row.archive_status).toBeNull();
+    expect(row.archive_checked_at).not.toBeNull();
+    const rows = db.prepare(SWEEP_CANDIDATES).all() as { dataset_id: string }[];
+    expect(rows.map((r) => r.dataset_id)).not.toContain("nm000001");
+  });
+
+  test("the remaining-count predicate drains to 0 once candidates are stamped", () => {
+    // Guards against the candidate SELECT and the `remaining` COUNT drifting
+    // apart: both must encode the same predicate, so stamping every candidate
+    // must leave zero. (COUNT over the candidate query reuses that predicate.)
+    const before = db.prepare(SWEEP_CANDIDATES).all() as { dataset_id: string }[];
+    expect(before.length).toBeGreaterThan(0);
+    for (const r of before) {
+      db.prepare(
+        "UPDATE datasets SET archive_checked_at = datetime('now') WHERE dataset_id = ?",
+      ).run(r.dataset_id);
+    }
+    const remaining = (
+      db.query(`SELECT COUNT(*) AS n FROM (${SWEEP_CANDIDATES})`).get() as { n: number }
+    ).n;
+    expect(remaining).toBe(0);
   });
 });

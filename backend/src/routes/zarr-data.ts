@@ -123,6 +123,9 @@ async function serve(c: Context<{ Bindings: Bindings }>, isHead: boolean) {
       const h = new Headers(hit.headers);
       h.delete("Access-Control-Allow-Origin");
       for (const [k, v] of Object.entries(cors)) h.set(k, v);
+      // The event count is exact; bytes fall back to 0 if the cached entry has
+      // no content-length (the Cache API may not preserve it) -- acceptable, the
+      // read side treats double1 as best-effort bytes, not an event count.
       recordAccess(c.env, {
         datasetId,
         source: "zarr",
