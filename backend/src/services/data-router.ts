@@ -237,51 +237,42 @@ export async function buildRedirectUrl(args: {
   );
 }
 
-/**
- * Public base URL for the per-file data plane, derived from the request URL.
- *
- * `data.nemar.org` serves the data sub-app at the root (the host fork in
- * `index.ts` rewrites `/<path>` -> `/data/<path>` internally), so its public
- * URLs carry NO `/data` prefix. Every other host (`api.nemar.org`, the
- * `*.workers.dev` dev fallback) reaches the same sub-app via the `/data`
- * path-mount, so their public URLs DO need it. Mirrors the exact host
- * condition in `index.ts`, so a `bytes_url` built on this base is fetchable on
- * whichever host actually served the manifest.
- */
-export function dataPlaneBaseUrl(reqUrl: string): string {
-  const u = new URL(reqUrl);
-  return u.hostname === "data.nemar.org" ? u.origin : `${u.origin}/data`;
-}
+// Canonical public data origin for bytes_url (#615). bytes_url is a STABLE,
+// storable contract URL, so it is host-invariant: always the canonical
+// data.nemar.org regardless of which host (data.nemar.org, api.nemar.org/data,
+// or a *.workers.dev dev fallback) actually served the manifest. data.nemar.org
+// is the public data host and is always reachable, so the URL resolves from
+// anywhere. This also keeps the served manifest in lockstep with the build-time
+// raw S3 manifest, which hardcodes the same host (emit_manifest.py:bytes_url_for
+// on nemarDatasets/.github). Per-host fetchability is irrelevant: the presigned
+// `url` field is what dev/CLI flows fetch; bytes_url is the durable reference.
+const DATA_NEMAR_ORIGIN = "https://data.nemar.org";
 
 /**
- * Build the STABLE `bytes_url` for a manifest entry (#615).
+ * Build the STABLE, host-invariant `bytes_url` for a manifest entry (#615).
  *
  * Unlike `url` (for annex files a presigned S3 GET that expires in ~1h),
- * `bytes_url` is durable — a consumer can persist it and re-fetch later:
- *  - annex-backed files -> the per-file data-plane route
- *    `<base>/<id>/<version>/<bids_relpath>`, which 302s to bytes that are
- *    re-presigned on each request, so there is no expiry to manage.
+ * `bytes_url` is durable — a consumer can persist it and re-fetch later from
+ * anywhere:
+ *  - annex-backed files -> the canonical per-file data-plane route
+ *    `https://data.nemar.org/<id>/<version>/<bids_relpath>`, which 302s to
+ *    bytes that are re-presigned on each request (no expiry).
  *  - git-backed files -> the raw.githubusercontent.com URL pinned to the tag,
  *    identical to `url` (already stable).
- *
- * `base` is the public data-plane base from `dataPlaneBaseUrl()` (origin, plus
- * the `/data` mount prefix on every host except data.nemar.org), so the annex
- * URL is fetchable on the host that served the manifest.
  */
 export function buildBytesUrl(args: {
-  base: string;
   githubOrg: string;
   datasetId: string;
   version: string;
   bidsPath: string;
   key: string;
 }): string {
-  const { base, githubOrg, datasetId, version, bidsPath, key } = args;
+  const { githubOrg, datasetId, version, bidsPath, key } = args;
   const encoded = bidsPath.split("/").filter(Boolean).map(encodeURIComponent).join("/");
   if (key.startsWith("git:")) {
     return `https://raw.githubusercontent.com/${githubOrg}/${datasetId}/${version}/${encoded}`;
   }
-  return `${base}/${datasetId}/${version}/${encoded}`;
+  return `${DATA_NEMAR_ORIGIN}/${datasetId}/${version}/${encoded}`;
 }
 
 // ===========================================================================
