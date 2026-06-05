@@ -55,6 +55,12 @@ export interface PublicManifestEntry {
   checksum_algorithm: string;
   checksum: string;
   url: string | null;
+  // Stable, same-origin contract URL for the bytes (#615). Unlike `url`
+  // (a 1h-presigned S3 GET for annex files), `bytes_url` is durable: a
+  // consumer can persist it and re-fetch later. annex -> the per-file
+  // data-plane route (302s to freshly-presigned bytes); git -> the same
+  // raw.githubusercontent URL as `url`. Always present; never expires.
+  bytes_url: string;
   // Populated when url could not be built for this row; lets clients
   // download the rest of the dataset instead of failing the whole listing.
   error?: string;
@@ -229,6 +235,38 @@ export async function buildRedirectUrl(args: {
     expiresIn ?? 3600,
     buildContentDisposition(basename),
   );
+}
+
+/**
+ * Build the STABLE, same-origin `bytes_url` for a manifest entry (#615).
+ *
+ * Unlike `url` (for annex files a presigned S3 GET that expires in ~1h),
+ * `bytes_url` is durable — a consumer can persist it and re-fetch later:
+ *  - annex-backed files -> the per-file data-plane route
+ *    `<origin>/<id>/<version>/<bids_relpath>`, which 302s to bytes that are
+ *    re-presigned on each request, so there is no expiry to manage.
+ *  - git-backed files -> the raw.githubusercontent.com URL pinned to the tag,
+ *    identical to `url` (already stable).
+ *
+ * `origin` is the scheme+host the manifest was served from (e.g.
+ * `https://data.nemar.org`). The path is rebuilt from `<id>/<version>/<path>`,
+ * NOT from the Worker's internal `/data`-prefixed URL, so it matches the public
+ * data.nemar.org contract regardless of which host served the manifest.
+ */
+export function buildBytesUrl(args: {
+  origin: string;
+  githubOrg: string;
+  datasetId: string;
+  version: string;
+  bidsPath: string;
+  key: string;
+}): string {
+  const { origin, githubOrg, datasetId, version, bidsPath, key } = args;
+  const encoded = bidsPath.split("/").filter(Boolean).map(encodeURIComponent).join("/");
+  if (key.startsWith("git:")) {
+    return `https://raw.githubusercontent.com/${githubOrg}/${datasetId}/${version}/${encoded}`;
+  }
+  return `${origin}/${datasetId}/${version}/${encoded}`;
 }
 
 // ===========================================================================

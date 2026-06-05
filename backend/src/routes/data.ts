@@ -20,6 +20,7 @@ import {
   type DatasetVersionRow,
   type PublicManifestEntry,
   type VersionPickerEntry,
+  buildBytesUrl,
   buildCatalogIndexPayload,
   buildDatasetMetadata,
   buildLandingPayload,
@@ -214,6 +215,7 @@ async function manifestJsonHandler(
   env: Bindings,
   datasetId: string,
   versionParam: string,
+  reqUrl: string,
 ): Promise<Response> {
   const dataset = await loadPublishedDataset(env, datasetId);
   if (!dataset) return notFound("Dataset not found");
@@ -225,6 +227,9 @@ async function manifestJsonHandler(
   if (!manifest) return notFound("Version not published");
 
   const s3Options = s3OptionsFromEnv(env);
+  // Scheme+host the manifest was served from; bytes_url stays on the same
+  // origin the client is already talking to (data.nemar.org in prod).
+  const origin = new URL(reqUrl).origin;
   const entries: PublicManifestEntry[] = await Promise.all(
     Object.entries(manifest.files).map(async ([path, file]): Promise<PublicManifestEntry> => {
       const checksum = parseChecksum(file.checksum);
@@ -233,6 +238,14 @@ async function manifestJsonHandler(
         size: file.size,
         checksum_algorithm: checksum.algorithm,
         checksum: checksum.value,
+        bytes_url: buildBytesUrl({
+          origin,
+          githubOrg: ORG_NAME,
+          datasetId,
+          version: resolved.version,
+          bidsPath: path,
+          key: file.key,
+        }),
       };
       try {
         const url = await buildRedirectUrl({
@@ -532,7 +545,7 @@ async function fileOrIndexHandler(
 
 dataRoutes.get("/:datasetId/:version/manifest.json", (c) => {
   const { datasetId, version } = c.req.param();
-  return manifestJsonHandler(c.env, datasetId, version);
+  return manifestJsonHandler(c.env, datasetId, version, c.req.url);
 });
 
 /**

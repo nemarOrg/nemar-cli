@@ -12,6 +12,7 @@ import "./setup";
 import {
   VERSION_TAG_RE,
   buildBidsIndex,
+  buildBytesUrl,
   buildCatalogIndexPayload,
   buildContentDisposition,
   buildDatasetMetadata,
@@ -425,6 +426,60 @@ describe("buildRedirectUrl", () => {
         githubOrg: "nemarDatasets",
       }),
     ).rejects.toThrow(/Unrecognized manifest key/);
+  });
+});
+
+describe("buildBytesUrl", () => {
+  const common = {
+    origin: "https://data.nemar.org",
+    githubOrg: "nemarDatasets",
+    datasetId: "nm099999",
+    version: "v1.0.0",
+  };
+
+  test("annex keys -> stable same-origin per-file route URL (no /data prefix)", () => {
+    const url = buildBytesUrl({
+      ...common,
+      bidsPath: "sub-01/eeg/sub-01_task-rest_eeg.edf",
+      key: "SHA256E-s124573612--abc123.edf",
+    });
+    expect(url).toBe(
+      "https://data.nemar.org/nm099999/v1.0.0/sub-01/eeg/sub-01_task-rest_eeg.edf",
+    );
+  });
+
+  test("git keys -> raw.githubusercontent URL pinned to the tag (== url)", () => {
+    const url = buildBytesUrl({
+      ...common,
+      bidsPath: "dataset_description.json",
+      key: "git:abc123",
+    });
+    expect(url).toBe(
+      "https://raw.githubusercontent.com/nemarDatasets/nm099999/v1.0.0/dataset_description.json",
+    );
+  });
+
+  test("path segments are URL-encoded but slashes preserved", () => {
+    const url = buildBytesUrl({
+      ...common,
+      bidsPath: "sub-01/eeg/sub-01_task-rest events.tsv",
+      key: "git:zzz",
+    });
+    expect(url).toBe(
+      "https://raw.githubusercontent.com/nemarDatasets/nm099999/v1.0.0/sub-01/eeg/sub-01_task-rest%20events.tsv",
+    );
+  });
+
+  test("origin carries through for non-prod hosts", () => {
+    const url = buildBytesUrl({
+      ...common,
+      origin: "https://nemar-api.sccn-org.workers.dev",
+      bidsPath: "sub-01/eeg/x.set",
+      key: "MD5E-s100--def.set",
+    });
+    expect(url).toBe(
+      "https://nemar-api.sccn-org.workers.dev/nm099999/v1.0.0/sub-01/eeg/x.set",
+    );
   });
 });
 
