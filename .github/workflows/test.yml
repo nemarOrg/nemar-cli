@@ -4,17 +4,11 @@ on:
   push:
     branches: [main, dev]
     paths-ignore:
-      - 'docs/**'
       - '*.md'
-      - 'mkdocs.yml'
-      - '.github/workflows/docs.yml'
   pull_request:
     branches: [main, dev]
     paths-ignore:
-      - 'docs/**'
       - '*.md'
-      - 'mkdocs.yml'
-      - '.github/workflows/docs.yml'
 
 # Permissions needed for dorny/paths-filter to access PR files
 permissions:
