@@ -240,7 +240,7 @@ const webhooks = new Hono<{ Bindings: Bindings }>();
  * Called by GitHub Actions when a new release is created.
  * Requires X-Webhook-Token header matching NEMAR_WEBHOOK_TOKEN (falls back
  * to GITHUB_WEBHOOK_SECRET during the secret-untangle rollout — both held
- * the same value historically, see docs/guides/github-app-setup.md).
+ * the same value historically, see https://docs.nemar.org/admin/github-app-setup/).
  *
  * Routes to EZID or Zenodo based on dataset's doi_provider setting.
  */

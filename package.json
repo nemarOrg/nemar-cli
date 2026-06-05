@@ -16,9 +16,6 @@
     "format": "biome format --write src/",
     "typecheck": "tsc --noEmit",
     "prepublishOnly": "bun run build",
-    "docs:generate": "bun run scripts/generate-docs.ts",
-    "docs:serve": "mkdocs serve",
-    "docs:build": "mkdocs build",
     "prepare": "husky",
     "deploy": "wrangler deploy",
     "preview": "wrangler dev"

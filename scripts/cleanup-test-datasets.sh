@@ -9,7 +9,7 @@
 #   - AWS credentials resolvable via the default chain
 #     (~/.aws/credentials mode 0600, or aws sso login). Long-lived
 #     AKIA keys in env vars are rejected by the credentials guard.
-#     See docs/operations/access-policies.md (principles 5 + 6).
+#     See https://docs.nemar.org/admin/operations/access-policies/ (principles 5 + 6).
 #   - IAM user must have s3:BypassGovernanceRetention permission
 #     (the per-purpose runtime users do NOT have this — use a human-
 #     admin SSO session for this destructive script).
@@ -29,7 +29,7 @@ fi
 
 # Verify AWS credentials via shared guard (rejects long-lived AKIA*
 # keys in env). Requires ~/.aws/credentials or aws sso login. See
-# docs/operations/access-policies.md (principles 5 + 6).
+# https://docs.nemar.org/admin/operations/access-policies/ (principles 5 + 6).
 # Skipped in dry-run mode so the preview path works on machines without
 # AWS credentials configured.
 if ! $DRY_RUN; then
