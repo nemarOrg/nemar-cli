@@ -27,6 +27,7 @@ import {
   switchAction,
 } from "./commands/auth.js";
 import { datasetCommand } from "./commands/dataset.js";
+import { doctorCommand } from "./commands/doctor.js";
 import { sandboxCommand } from "./commands/sandbox.js";
 import { IS_DEV_BUILD, MaintenanceError, errorDetail } from "./lib/api.js";
 import { NO_DESCRIPTION, NO_OPTION, YES_DESCRIPTION, YES_OPTION } from "./lib/confirm.js";
@@ -59,7 +60,7 @@ Examples:
   $ nemar dataset download nm000104
 
 Documentation:
-  https://nemar-cli.pages.dev
+  https://docs.nemar.org
 
 Support:
   https://github.com/nemarOrg/nemar-cli/issues`,
@@ -70,6 +71,7 @@ program.addCommand(authCommand);
 program.addCommand(datasetCommand);
 program.addCommand(sandboxCommand);
 program.addCommand(adminCommand);
+program.addCommand(doctorCommand);
 
 // ============================================================================
 // Root-level shortcuts (convenience aliases)

@@ -51,6 +51,7 @@ import {
   confirm,
 } from "../lib/confirm.js";
 import { addVerboseHelp } from "../lib/help.js";
+import { warnMissingPrerequisites } from "../lib/prerequisites.js";
 import {
   configureSSHForGitHub,
   generateSSHKey,
@@ -212,6 +213,10 @@ Examples:
 export async function signupAction(): Promise<void> {
   console.log(chalk.cyan("NEMAR Account Registration"));
   console.log(chalk.dim("Create an account to upload and manage datasets\n"));
+
+  // Non-fatal heads-up about external tools needed for upload/validation, so
+  // users (especially on Windows) learn what to install before they get there.
+  await warnMissingPrerequisites();
 
   // Collect user information
   const answers = await inquirer.prompt([
