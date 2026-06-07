@@ -9,7 +9,7 @@ import { Hono } from "hono";
 import { z } from "zod";
 import { adminMiddleware, authMiddleware, ownerMiddleware } from "../middleware/auth";
 
-import { USER_TOMBSTONE_MASK_SQL, maskedDeletedEmail } from "../db/user-tombstone";
+import { tombstoneUserStatement } from "../db/user-tombstone";
 import { SYSTEM_USER_ID } from "../lib/constants";
 import {
   type RecipientGroup,
@@ -808,7 +808,7 @@ adminRoutes.post("/revoke/:username", async (c) => {
 });
 
 /**
- * DELETE /admin/users/:id - Tombstone (soft-delete) a user. Owner-only.
+ * DELETE /admin/users/by-id/:id - Tombstone (soft-delete) a user. Owner-only.
  *
  * Keyed by integer id because web signups have username = NULL (migration 0026).
  * This is a soft delete, NOT a hard DELETE: the row is kept (so its id is never
@@ -831,11 +831,11 @@ adminRoutes.delete("/users/by-id/:id", ownerMiddleware, async (c) => {
   const adminUser = c.get("user");
 
   const id = Number.parseInt(c.req.param("id"), 10);
-  if (!Number.isInteger(id) || id <= 0) {
-    return c.json({ error: "User id must be a positive integer" }, 400);
-  }
-  if (id === SYSTEM_USER_ID) {
-    return c.json({ error: "The system account cannot be deleted" }, 400);
+  // Reject non-positive ids AND the system sentinel in one guard. (id <= 0
+  // already covers SYSTEM_USER_ID = -1 today; the explicit term keeps the guard
+  // correct if the sentinel is ever made a positive value.)
+  if (!Number.isInteger(id) || id <= 0 || id === SYSTEM_USER_ID) {
+    return c.json({ error: "Invalid or non-deletable user id" }, 400);
   }
   if (id === adminUser.id) {
     return c.json({ error: "Cannot delete your own account" }, 400);
@@ -892,22 +892,32 @@ adminRoutes.delete("/users/by-id/:id", ownerMiddleware, async (c) => {
   // is deprecated and rows generally have aws_iam_username NULL, but if one is
   // set we must not leave live keys behind. Non-fatal: recorded, never blocks.
   let iamWarning: string | null = null;
-  if (target.aws_iam_username && target.aws_access_key_id_encrypted && c.env.ENCRYPTION_KEY) {
-    try {
-      const accessKeyId = await decrypt(target.aws_access_key_id_encrypted, c.env.ENCRYPTION_KEY);
-      const result = await revokeUserIamAccess(
-        {
-          accessKeyId: c.env.AWS_ACCESS_KEY_ID,
-          secretAccessKey: c.env.AWS_SECRET_ACCESS_KEY,
-          region: c.env.AWS_REGION,
-        },
-        target.aws_iam_username,
-        accessKeyId,
+  if (target.aws_iam_username && target.aws_access_key_id_encrypted) {
+    if (!c.env.ENCRYPTION_KEY) {
+      // Creds exist but we can't decrypt them to revoke — surface loudly rather
+      // than silently leave live IAM keys behind (the columns are still nulled
+      // by the mask below, but the AWS-side keys would remain active).
+      iamWarning = "ENCRYPTION_KEY not configured; live IAM credentials were NOT revoked";
+      console.error(
+        `[delete-user] ENCRYPTION_KEY missing for id=${id}; live IAM creds NOT revoked`,
       );
-      if (result.errors.length > 0) iamWarning = result.errors.join("; ");
-    } catch (error) {
-      iamWarning = errorMessage(error);
-      console.error(`[delete-user] IAM revoke failed for id=${id}:`, iamWarning);
+    } else {
+      try {
+        const accessKeyId = await decrypt(target.aws_access_key_id_encrypted, c.env.ENCRYPTION_KEY);
+        const result = await revokeUserIamAccess(
+          {
+            accessKeyId: c.env.AWS_ACCESS_KEY_ID,
+            secretAccessKey: c.env.AWS_SECRET_ACCESS_KEY,
+            region: c.env.AWS_REGION,
+          },
+          target.aws_iam_username,
+          accessKeyId,
+        );
+        if (result.errors.length > 0) iamWarning = result.errors.join("; ");
+      } catch (error) {
+        iamWarning = errorMessage(error);
+        console.error(`[delete-user] IAM revoke failed for id=${id}:`, iamWarning);
+      }
     }
   }
 
@@ -916,12 +926,20 @@ adminRoutes.delete("/users/by-id/:id", ownerMiddleware, async (c) => {
   let reposRemoved = 0;
   const failedRemovals: string[] = [];
   if (originalGithub) {
-    const collaborations = await db
-      .prepare(
-        "SELECT d.github_repo FROM dataset_collaborators dc JOIN datasets d ON dc.dataset_id = d.id WHERE dc.user_id = ?",
-      )
-      .bind(id)
-      .all<{ github_repo: string | null }>();
+    // Non-fatal: if the lookup itself fails (D1 hiccup) skip GitHub cleanup. The
+    // batch below still clears the dataset_collaborators rows, and the tombstone
+    // must not be blocked by a best-effort step.
+    let collaborations: { results: { github_repo: string | null }[] | null } = { results: [] };
+    try {
+      collaborations = await db
+        .prepare(
+          "SELECT d.github_repo FROM dataset_collaborators dc JOIN datasets d ON dc.dataset_id = d.id WHERE dc.user_id = ?",
+        )
+        .bind(id)
+        .all<{ github_repo: string | null }>();
+    } catch (error) {
+      console.error(`[delete-user] collaborations lookup failed for id=${id}:`, error);
+    }
     for (const collab of collaborations.results || []) {
       const repoName = collab.github_repo?.split("/")[1];
       if (!repoName) continue;
@@ -937,61 +955,84 @@ adminRoutes.delete("/users/by-id/:id", ownerMiddleware, async (c) => {
 
   // PII mask + tombstone + credential revocation in a single db.batch(): D1
   // wraps a batch in one implicit transaction (all statements commit, or all
-  // roll back on any failure), so the email mask and the `deleted_at` stamp can
-  // never half-apply and leave an auth-resolvable row. `AND deleted_at IS NULL` on
-  // the mask makes it idempotent. The placeholder email embeds the PK (globally
+  // roll back on any failure — see Cloudflare D1 docs, "Batched statements are
+  // SQL transactions"), so the email mask and the `deleted_at` stamp can never
+  // half-apply and leave an auth-resolvable row. `AND deleted_at IS NULL` on the
+  // mask makes it idempotent. The placeholder email embeds the PK (globally
   // unique, never reused under AUTOINCREMENT) so the email UNIQUE constraint
   // can't be hit, and .invalid (RFC 6761) can never be a real/deliverable
   // address. web_sessions are revoked explicitly because a soft delete does NOT
   // trigger their ON DELETE CASCADE; collaborator + S3-permission rows likewise.
-  const maskedEmail = maskedDeletedEmail(target.id);
-  const batch = await db.batch([
-    db.prepare(USER_TOMBSTONE_MASK_SQL).bind(maskedEmail, id),
-    db
-      .prepare(
-        "UPDATE tokens SET revoked_at = datetime('now') WHERE user_id = ? AND revoked_at IS NULL",
-      )
-      .bind(id),
-    db
-      .prepare(
-        "UPDATE web_sessions SET revoked_at = datetime('now') WHERE user_id = ? AND revoked_at IS NULL",
-      )
-      .bind(id),
-    db.prepare("DELETE FROM dataset_collaborators WHERE user_id = ?").bind(id),
-    db.prepare("DELETE FROM user_s3_permissions WHERE user_id = ?").bind(id),
-    // Expire any outstanding passwordless login codes for the original email so
-    // a code issued just before deletion can't be submitted (it would otherwise
-    // be consumed and then cleanly denied — this avoids even that round-trip).
-    db
-      .prepare(
-        "UPDATE auth_codes SET used_at = datetime('now') WHERE email = ? AND used_at IS NULL",
-      )
-      .bind(originalEmail),
-  ]);
+  // A batch failure rolls back atomically and is reported as a clear 500 so the
+  // caller knows the user was NOT deleted and can retry (idempotent).
+  let batch: D1Result[];
+  try {
+    batch = await db.batch([
+      tombstoneUserStatement(db, id),
+      db
+        .prepare(
+          "UPDATE tokens SET revoked_at = datetime('now') WHERE user_id = ? AND revoked_at IS NULL",
+        )
+        .bind(id),
+      db
+        .prepare(
+          "UPDATE web_sessions SET revoked_at = datetime('now') WHERE user_id = ? AND revoked_at IS NULL",
+        )
+        .bind(id),
+      db.prepare("DELETE FROM dataset_collaborators WHERE user_id = ?").bind(id),
+      db.prepare("DELETE FROM user_s3_permissions WHERE user_id = ?").bind(id),
+      // Expire any outstanding passwordless login codes for the original email so
+      // a code issued just before deletion can't be submitted (it would otherwise
+      // be consumed and then cleanly denied — this avoids even that round-trip).
+      db
+        .prepare(
+          "UPDATE auth_codes SET used_at = datetime('now') WHERE email = ? AND used_at IS NULL",
+        )
+        .bind(originalEmail),
+    ]);
+  } catch (error) {
+    console.error(`[delete-user] tombstone batch failed for id=${id}:`, error);
+    return c.json(
+      {
+        error: "Tombstone transaction failed; user was NOT deleted. Retry or contact an operator.",
+        detail: errorMessage(error),
+      },
+      500,
+    );
+  }
   const tokensRevoked = batch[1]?.meta.changes ?? 0;
   const sessionsRevoked = batch[2]?.meta.changes ?? 0;
 
   // Audit log (audit_log.user_id has no cascade, so the row survives). resource_id
   // is the non-PII integer id and details carries NO original username/email —
   // the whole point of the tombstone is to erase that PII (see migration 0037).
-  await db
-    .prepare(
-      "INSERT INTO audit_log (user_id, action, resource_type, resource_id, details) VALUES (?, 'user_deleted', 'user', ?, ?)",
-    )
-    .bind(
-      adminUser.id,
-      String(id),
-      JSON.stringify({
-        // Non-PII actor id (the row's user_id is the same); avoids retaining the
-        // admin's username if they are themselves tombstoned later.
-        deleted_by_id: adminUser.id,
-        tokens_revoked: tokensRevoked,
-        sessions_revoked: sessionsRevoked,
-        repos_removed: reposRemoved,
-        masked: true,
-      }),
-    )
-    .run();
+  // A failed audit write must NOT 500 the already-committed tombstone (that would
+  // mislead the caller into thinking the delete failed); log the gap instead.
+  try {
+    await db
+      .prepare(
+        "INSERT INTO audit_log (user_id, action, resource_type, resource_id, details) VALUES (?, 'user_deleted', 'user', ?, ?)",
+      )
+      .bind(
+        adminUser.id,
+        String(id),
+        JSON.stringify({
+          // Non-PII actor id (the row's user_id is the same); avoids retaining the
+          // admin's username if they are themselves tombstoned later.
+          deleted_by_id: adminUser.id,
+          tokens_revoked: tokensRevoked,
+          sessions_revoked: sessionsRevoked,
+          repos_removed: reposRemoved,
+          masked: true,
+        }),
+      )
+      .run();
+  } catch (error) {
+    console.error(
+      `[delete-user] audit_log insert failed for id=${id} (tombstone committed):`,
+      error,
+    );
+  }
 
   return c.json({
     deleted: true,
@@ -1224,9 +1265,10 @@ adminRoutes.post("/datasets/zarr-sweep", async (c) => {
   const errors: { dataset_id: string; error: string }[] = [];
 
   for (const { dataset_id } of candidates) {
-    // ONE signed GET of <id>/zarr/index.json. null = not converted (404). A 403
-    // or bad JSON throws (recorded below), keeping the row a candidate rather
-    // than mis-stamping it absent — see getZarrIndex.
+    // ONE signed GET of <id>/zarr/index.json. Returns null on 404 OR 403 (both
+    // treated as absent -> stamp checked, see getZarrIndex); only a non-2xx infra
+    // error or bad JSON throws, which is recorded below and keeps the row a
+    // candidate for the next run (not mis-stamped absent).
     let index: Awaited<ReturnType<typeof getZarrIndex>>;
     try {
       index = await getZarrIndex(s3, dataset_id);

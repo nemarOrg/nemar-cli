@@ -27,6 +27,17 @@ export function maskedDeletedEmail(id: number): string {
  * dead, and stamps `deleted_at` (the canonical soft-delete discriminator every
  * auth/list query filters on).
  */
+/**
+ * The tombstone mask as a bound D1 statement. Wrapping it hides the positional
+ * bind order (`[maskedEmail, id]`) so a caller can't accidentally reverse the
+ * args and mask the wrong row (or 0 rows). This is the only way the endpoint
+ * should issue the mask; the raw SQL constant stays exported for the behavioral
+ * test (which runs it against bun:sqlite, a different driver API).
+ */
+export function tombstoneUserStatement(db: D1Database, id: number): D1PreparedStatement {
+  return db.prepare(USER_TOMBSTONE_MASK_SQL).bind(maskedDeletedEmail(id), id);
+}
+
 export const USER_TOMBSTONE_MASK_SQL = `UPDATE users
    SET email = ?,
        username = NULL,

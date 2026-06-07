@@ -61,20 +61,40 @@ CREATE TABLE web_sessions (
   revoked_at TEXT,
   expires_at TEXT NOT NULL DEFAULT (datetime('now', '+30 days'))
 );
+CREATE TABLE auth_codes (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  email TEXT NOT NULL,
+  code_hash TEXT NOT NULL,
+  used_at TEXT,
+  expires_at TEXT NOT NULL DEFAULT (datetime('now', '+10 minutes'))
+);
 `;
 
 function seed(db: Database) {
+  // Populate every column the mask is supposed to null/rewrite, so an assertion
+  // can prove the mask actually cleared it (a column NULL in the seed would pass
+  // even if the mask SQL typo'd its name).
   db.run(
-    `INSERT INTO users (id, username, email, password_hash, github_username, status, email_verified, role, orcid, description, aws_iam_username, aws_access_key_id_encrypted)
-     VALUES (42, 'testuser', 'real@example.com', 'argon2hash', 'ghuser', 'approved', 1, 'member', '0000-0001', 'a bio', 'iam-user', 'enc-key')`,
+    `INSERT INTO users (id, username, email, password_hash, github_username, status, email_verified,
+        verification_token, verification_expires_at, role, orcid, description,
+        aws_iam_username, aws_access_key_id_encrypted, aws_secret_access_key_encrypted)
+     VALUES (42, 'testuser', 'real@example.com', 'argon2hash', 'ghuser', 'approved', 1,
+        'verifytok', '2099-01-01T00:00:00Z', 'member', '0000-0001', 'a bio',
+        'iam-user', 'enc-key-id', 'enc-secret')`,
   );
   db.run("INSERT INTO tokens (user_id, api_key_hash, revoked_at) VALUES (42, 'tokenhash', NULL)");
   db.run(
     "INSERT INTO web_sessions (user_id, cookie_id_hash, revoked_at) VALUES (42, 'cookiehash', NULL)",
   );
+  // An outstanding (unused) login code issued for the original email.
+  db.run(
+    "INSERT INTO auth_codes (email, code_hash, used_at) VALUES ('real@example.com', 'codehash', NULL)",
+  );
 }
 
-function tombstone(db: Database, id: number) {
+// Mirrors the endpoint's tombstone batch (admin.ts). Uses the SHARED mask SQL so
+// the security-critical statement can't drift from production.
+function tombstone(db: Database, id: number, originalEmail = "real@example.com") {
   db.query(USER_TOMBSTONE_MASK_SQL).run(maskedDeletedEmail(id), id);
   db.query(
     "UPDATE tokens SET revoked_at = datetime('now') WHERE user_id = ? AND revoked_at IS NULL",
@@ -82,6 +102,9 @@ function tombstone(db: Database, id: number) {
   db.query(
     "UPDATE web_sessions SET revoked_at = datetime('now') WHERE user_id = ? AND revoked_at IS NULL",
   ).run(id);
+  db.query(
+    "UPDATE auth_codes SET used_at = datetime('now') WHERE email = ? AND used_at IS NULL",
+  ).run(originalEmail);
 }
 
 describe("user tombstone (soft delete)", () => {
@@ -102,7 +125,7 @@ describe("user tombstone (soft delete)", () => {
     tombstone(db, 42);
     const row = db
       .query(
-        "SELECT email, username, github_username, password_hash, orcid, description, email_preferences, email_verified, aws_iam_username, aws_access_key_id_encrypted, status, deleted_at, revoked_at FROM users WHERE id = 42",
+        "SELECT email, username, github_username, password_hash, orcid, description, email_preferences, email_verified, verification_token, verification_expires_at, aws_iam_username, aws_access_key_id_encrypted, aws_secret_access_key_encrypted, status, deleted_at, revoked_at FROM users WHERE id = 42",
       )
       .get() as Record<string, unknown>;
     expect(row.email).toBe("deleted+42@deleted.invalid");
@@ -113,8 +136,11 @@ describe("user tombstone (soft delete)", () => {
     expect(row.description).toBeNull();
     expect(row.email_preferences).toBeNull();
     expect(row.email_verified).toBe(0);
+    expect(row.verification_token).toBeNull();
+    expect(row.verification_expires_at).toBeNull();
     expect(row.aws_iam_username).toBeNull();
     expect(row.aws_access_key_id_encrypted).toBeNull();
+    expect(row.aws_secret_access_key_encrypted).toBeNull();
     expect(row.status).toBe("revoked");
     expect(row.deleted_at).not.toBeNull();
     expect(row.revoked_at).not.toBeNull();
@@ -127,6 +153,29 @@ describe("user tombstone (soft delete)", () => {
     };
     expect(tok.revoked_at).not.toBeNull();
     expect(sess.revoked_at).not.toBeNull();
+  });
+
+  test("expires outstanding login codes for the original email", () => {
+    tombstone(db, 42);
+    const code = db
+      .query("SELECT used_at FROM auth_codes WHERE email = 'real@example.com'")
+      .get() as { used_at: string | null };
+    expect(code.used_at).not.toBeNull();
+  });
+
+  test("two tombstones produce distinct masked emails (no UNIQUE collision)", () => {
+    db.run(
+      "INSERT INTO users (id, username, email, status) VALUES (43, 'u43', 'u43@example.com', 'approved')",
+    );
+    tombstone(db, 42);
+    expect(() => tombstone(db, 43, "u43@example.com")).not.toThrow();
+    const emails = db.query("SELECT email FROM users WHERE id IN (42, 43) ORDER BY id").all() as {
+      email: string;
+    }[];
+    expect(emails.map((e) => e.email)).toEqual([
+      "deleted+42@deleted.invalid",
+      "deleted+43@deleted.invalid",
+    ]);
   });
 
   test("frees the original email/username/github for re-signup (UNIQUE-safe)", () => {

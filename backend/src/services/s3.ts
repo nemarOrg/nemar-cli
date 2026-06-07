@@ -643,7 +643,11 @@ export async function getArchiveSize(
 
 /** Latest-only zarr conversion facts read from `<id>/zarr/index.json`. */
 export interface ZarrIndexInfo {
-  /** Number of `.zarr` stores the converter wrote (its authoritative count). */
+  /**
+   * Number of `.zarr` stores the converter wrote (its authoritative count).
+   * null when index.json exists but lacks a numeric `store_count` (e.g. an older
+   * converter); the row is still recorded 'ready' with a NULL count.
+   */
   storeCount: number | null;
   /** Source dataset commit the conversion was built from. */
   sourceCommit: string | null;
@@ -660,14 +664,17 @@ export interface ZarrIndexInfo {
  * zarr-sweep backfill to reconcile the stale zarr_status column from S3.
  *
  * Returns the parsed facts on 200, null on 404/403 (not converted). A 403 is
- * treated as absent (not thrown) to MATCH headArchive/headObject: with the
- * Worker's S3 creds (which lack s3:ListBucket), a missing object returns 403
- * (AccessDenied), not 404. Throwing on 403 would make the sweep never converge —
- * every legitimately-zarr-less public dataset would error on every run instead
- * of being stamped checked. Any OTHER non-2xx still throws (a true infra
- * failure, recorded per-dataset). The "creds globally broken -> mass-mark
- * absent" risk is bounded by the operator inspecting the sweep's ready/absent
- * counts before draining (a known-converted dataset coming back absent flags it).
+ * treated as absent (not thrown), following the same rationale as `headArchive`:
+ * with the Worker's S3 creds (which lack s3:ListBucket), a missing object returns
+ * 403 (AccessDenied), not 404. Throwing on 403 would make the sweep never
+ * converge — every legitimately-zarr-less public dataset would error on every run
+ * instead of being stamped checked. (Unlike `headArchive`, which retries a 403
+ * before treating it as absent, this does a single GET; and unlike
+ * `headVersionArtifact`, which throws on 403, this returns null.) Any OTHER
+ * non-2xx still throws (a true infra failure, recorded per-dataset). The "creds
+ * globally broken -> mass-mark absent" risk is bounded by the operator inspecting
+ * the sweep's ready/absent counts before draining (a known-converted dataset
+ * coming back absent flags it).
  */
 export async function getZarrIndex(
   options: PresignedUrlOptions,
