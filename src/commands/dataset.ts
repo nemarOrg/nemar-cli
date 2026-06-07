@@ -33,7 +33,9 @@ import {
   ORCID_REGEX,
   PUBLICATION_STEPS,
   addCi,
+  approveAccessRequest,
   createDataset,
+  denyAccessRequest,
   errorDetail,
   getCurrentUser,
   getDataset,
@@ -42,6 +44,7 @@ import {
   getUserCiStatus,
   getVersionHistory,
   inviteCollaborator,
+  listAccessRequests,
   listCollaborators,
   listDatasets,
   listManifestVersions,
@@ -3544,11 +3547,21 @@ Examples:
 
     try {
       const result = await requestDatasetAccess(datasetId);
-      spinner.succeed(result.message);
-      console.log();
-      console.log(`  GitHub: https://github.com/${result.github_repo}`);
-      console.log();
-      console.log(chalk.dim("You can now push data to this dataset via git-annex."));
+      if (result.action === "requested") {
+        // Private dataset: queued for owner approval.
+        spinner.succeed(result.message);
+        console.log();
+        console.log(
+          chalk.dim("The owner will be notified. You'll be able to push once they approve."),
+        );
+      } else {
+        // Public dataset: nothing to grant.
+        spinner.info(result.message);
+        if (result.github_repo) {
+          console.log();
+          console.log(`  GitHub: https://github.com/${result.github_repo}`);
+        }
+      }
     } catch (error) {
       if (error instanceof ApiError) {
         spinner.fail(error.message);
@@ -3678,6 +3691,176 @@ Examples:
       process.exit(1);
     }
   });
+
+// ============================================================================
+// Access Requests (owner/admin)
+// ============================================================================
+
+const accessCommand = new Command("access").description(
+  "Review and decide collaborator access requests (owner/admin)",
+);
+
+accessCommand
+  .command("list")
+  .description("List access requests for a dataset")
+  .argument("<dataset-id>", "Dataset ID (e.g., nm000104)")
+  .option("--status <status>", "Filter by status: pending, approved, or denied", "pending")
+  .option("--json", "Output as JSON for scripting")
+  .addHelpText(
+    "after",
+    `
+Description:
+  List users who have requested collaborator access to a private dataset.
+  Only the dataset owner or an admin can view requests. Defaults to pending.
+
+Examples:
+  $ nemar dataset access list nm000104
+  $ nemar dataset access list nm000104 --status approved`,
+  )
+  .action(async (datasetId, options) => {
+    if (!isAuthenticated()) {
+      console.log(chalk.red("Error: Not authenticated"));
+      console.log("Run 'nemar auth login' first");
+      process.exit(1);
+    }
+
+    const status = options.status as string;
+    if (!["pending", "approved", "denied"].includes(status)) {
+      console.log(chalk.red("Error: --status must be one of pending, approved, denied"));
+      process.exit(1);
+    }
+
+    const spinner = ora(`Fetching access requests for ${datasetId}...`).start();
+
+    try {
+      const result = await listAccessRequests(
+        datasetId,
+        status as "pending" | "approved" | "denied",
+      );
+      spinner.stop();
+
+      if (options.json) {
+        console.log(JSON.stringify(result, null, 2));
+        return;
+      }
+
+      console.log();
+      console.log(
+        chalk.bold(`Access requests for ${datasetId} (${result.status}): ${result.count}`),
+      );
+      console.log();
+
+      if (result.requests.length === 0) {
+        console.log(chalk.dim("  None."));
+        console.log();
+        return;
+      }
+
+      const header = ["Username", "GitHub", "Status", "Requested"].join("  ");
+      console.log(chalk.dim(`  ${header}`));
+      console.log(chalk.dim(`  ${"-".repeat(header.length)}`));
+      for (const req of result.requests) {
+        const reqDate = new Date(req.created_at).toLocaleDateString();
+        const row = [
+          req.username.padEnd(10),
+          `@${req.github_username}`.padEnd(15),
+          req.status.padEnd(10),
+          reqDate,
+        ].join("  ");
+        console.log(`  ${row}`);
+      }
+      console.log();
+      if (result.status === "pending" && result.count > 0) {
+        console.log(
+          chalk.dim(`Approve with: nemar dataset access approve <username> ${datasetId}`),
+        );
+      }
+    } catch (error) {
+      if (error instanceof ApiError) {
+        spinner.fail(error.message);
+      } else {
+        spinner.fail("Failed to fetch access requests");
+        console.log(chalk.red(`  ${(error as Error).message}`));
+      }
+      process.exit(1);
+    }
+  });
+
+accessCommand
+  .command("approve")
+  .description("Approve a pending access request")
+  .argument("<username>", "Username to approve")
+  .argument("<dataset-id>", "Dataset ID (e.g., nm000104)")
+  .addHelpText(
+    "after",
+    `
+Description:
+  Grant a user collaborator (write) access after they requested it.
+  Only the dataset owner or an admin can approve.
+
+Examples:
+  $ nemar dataset access approve johndoe nm000104`,
+  )
+  .action(async (username, datasetId) => {
+    if (!isAuthenticated()) {
+      console.log(chalk.red("Error: Not authenticated"));
+      console.log("Run 'nemar auth login' first");
+      process.exit(1);
+    }
+
+    const spinner = ora(`Approving ${username} for ${datasetId}...`).start();
+    try {
+      const result = await approveAccessRequest(datasetId, username);
+      spinner.succeed(result.message);
+    } catch (error) {
+      if (error instanceof ApiError) {
+        spinner.fail(error.message);
+      } else {
+        spinner.fail("Failed to approve access request");
+        console.log(chalk.red(`  ${(error as Error).message}`));
+      }
+      process.exit(1);
+    }
+  });
+
+accessCommand
+  .command("deny")
+  .description("Deny a pending access request")
+  .argument("<username>", "Username to deny")
+  .argument("<dataset-id>", "Dataset ID (e.g., nm000104)")
+  .addHelpText(
+    "after",
+    `
+Description:
+  Reject a pending access request. The user is not granted access and may
+  request again later. Only the dataset owner or an admin can deny.
+
+Examples:
+  $ nemar dataset access deny johndoe nm000104`,
+  )
+  .action(async (username, datasetId) => {
+    if (!isAuthenticated()) {
+      console.log(chalk.red("Error: Not authenticated"));
+      console.log("Run 'nemar auth login' first");
+      process.exit(1);
+    }
+
+    const spinner = ora(`Denying ${username} for ${datasetId}...`).start();
+    try {
+      const result = await denyAccessRequest(datasetId, username);
+      spinner.succeed(result.message);
+    } catch (error) {
+      if (error instanceof ApiError) {
+        spinner.fail(error.message);
+      } else {
+        spinner.fail("Failed to deny access request");
+        console.log(chalk.red(`  ${(error as Error).message}`));
+      }
+      process.exit(1);
+    }
+  });
+
+datasetCommand.addCommand(accessCommand);
 
 // ============================================================================
 // Publication Workflow
@@ -4456,8 +4639,12 @@ Examples:
             spinner.succeed("Upload credentials received");
           } catch (credError) {
             // The backend returns 403 when the user is authenticated but is not
-            // a NEMAR collaborator on this dataset. Detect that, auto-call
-            // request-access once, and retry — public datasets auto-approve.
+            // a NEMAR collaborator on this dataset. Detect that and call
+            // request-access once. Under the publish-gated model (epic #713)
+            // this no longer auto-grants: a public dataset needs an invite (or a
+            // PR), and a private dataset queues a request for the owner to
+            // approve — so the push cannot complete in this run; we report the
+            // next step instead of retrying credentials that will still 403.
             const isCollaboratorError =
               credError instanceof ApiError &&
               credError.statusCode === 403 &&
@@ -4465,38 +4652,27 @@ Examples:
             if (isCollaboratorError) {
               spinner.text = "Requesting collaborator access...";
               try {
-                await requestDatasetAccess(pushDatasetId);
-                pushCreds = await requestUploadCredentials(pushDatasetId);
-                spinner.succeed("Granted collaborator access; upload credentials received");
-              } catch (retryError) {
-                // Distinguish a real permission denial (retry is also a 4xx)
-                // from a transient backend failure (5xx, network, parse). Only
-                // the former should suggest `request-access`; the latter is a
-                // service issue the user can't fix that way.
-                const retryIs4xx =
-                  retryError instanceof ApiError &&
-                  retryError.statusCode >= 400 &&
-                  retryError.statusCode < 500;
-                spinner.fail(`Could not get upload credentials: ${errorDetail(credError)}`);
-                console.log(
-                  chalk.dim(`  Tried request-access automatically: ${errorDetail(retryError)}`),
-                );
-                if (retryIs4xx) {
-                  credPermissionDenied = true;
+                const accessResult = await requestDatasetAccess(pushDatasetId);
+                if (accessResult.action === "requested") {
+                  spinner.fail("Upload requires collaborator access");
                   console.log(
                     chalk.yellow(
-                      `  Run 'nemar dataset request-access ${pushDatasetId}' and retry this push.`,
+                      `  Access request submitted for ${pushDatasetId}; the owner must approve it before you can push. Retry once approved.`,
                     ),
                   );
                 } else {
+                  spinner.fail("Upload requires write access");
                   console.log(
                     chalk.yellow(
-                      "  The credentials service is unavailable; retry the push in a moment.",
+                      `  ${pushDatasetId} is public; ask the owner to invite you ('nemar dataset invite') for write access, or fork and open a PR.`,
                     ),
                   );
-                  s3PushFailed = true;
                 }
+              } catch (retryError) {
+                spinner.fail(`Could not request access: ${errorDetail(credError)}`);
+                console.log(chalk.dim(`  request-access failed: ${errorDetail(retryError)}`));
               }
+              credPermissionDenied = true;
             } else {
               spinner.warn(
                 `Could not get upload credentials: ${errorDetail(credError)}. Falling back to environment credentials.`,

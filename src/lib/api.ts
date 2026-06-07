@@ -1117,14 +1117,20 @@ export async function updateDoi(
 // ============================================================================
 
 export interface RequestAccessResponse {
+  /**
+   * "none"      - public dataset; nothing granted (already world-readable)
+   * "requested" - private dataset; a pending request was queued for the owner
+   */
+  action: "none" | "requested";
   message: string;
   dataset_id: string;
-  github_repo: string;
+  github_repo?: string;
 }
 
 /**
- * Request collaborator access to a dataset (requires authentication)
- * Auto-grants for public repos
+ * Request collaborator access to a dataset (requires authentication).
+ * Publish-gated: public datasets grant nothing; private datasets queue a
+ * request for the owner to approve.
  */
 export async function requestDatasetAccess(datasetId: string): Promise<RequestAccessResponse> {
   return request<RequestAccessResponse>(
@@ -1132,6 +1138,70 @@ export async function requestDatasetAccess(datasetId: string): Promise<RequestAc
     {
       method: "POST",
     },
+    true,
+  );
+}
+
+export interface AccessRequest {
+  username: string;
+  github_username: string;
+  status: "pending" | "approved" | "denied";
+  created_at: string;
+  decided_at: string | null;
+}
+
+export interface ListAccessRequestsResponse {
+  dataset_id: string;
+  status: string;
+  requests: AccessRequest[];
+  count: number;
+}
+
+/**
+ * List access requests for a dataset (owner/admin only). Defaults to pending.
+ */
+export async function listAccessRequests(
+  datasetId: string,
+  status?: "pending" | "approved" | "denied",
+): Promise<ListAccessRequestsResponse> {
+  const qs = status ? `?status=${status}` : "";
+  return request<ListAccessRequestsResponse>(
+    `/datasets/${datasetId}/access-requests${qs}`,
+    {},
+    true,
+  );
+}
+
+export interface DecideAccessRequestResponse {
+  message: string;
+  dataset_id: string;
+  username: string;
+}
+
+/**
+ * Approve a pending access request (owner/admin only).
+ */
+export async function approveAccessRequest(
+  datasetId: string,
+  username: string,
+): Promise<DecideAccessRequestResponse> {
+  return request<DecideAccessRequestResponse>(
+    `/datasets/${datasetId}/access-requests/${username}/approve`,
+    { method: "POST" },
+    true,
+  );
+}
+
+/**
+ * Deny a pending access request (owner/admin only).
+ */
+export async function denyAccessRequest(
+  datasetId: string,
+  username: string,
+): Promise<DecideAccessRequestResponse> {
+  return request<DecideAccessRequestResponse>(
+    `/datasets/${datasetId}/access-requests/${username}/deny`,
+    { method: "POST" },
     true,
   );
 }
