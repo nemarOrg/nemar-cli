@@ -154,12 +154,15 @@ interface FileNotFoundPayload {
   last_seen_url?: string;
 }
 
-function notFound(message: string, payload?: FileNotFoundPayload) {
+function notFound(message: string, payload?: FileNotFoundPayload, noStore = false) {
   const body = payload ? { error: message, ...payload } : { error: message };
-  return new Response(JSON.stringify(body), {
-    status: 404,
-    headers: { "Content-Type": "application/json" },
-  });
+  const headers: Record<string, string> = { "Content-Type": "application/json" };
+  // The JSON-artifact handlers (summary/records) opt into no-store on their
+  // "dataset/version not found" early-exits so those 404s are never CDN-pinned
+  // while the version row or artifact is still being written asynchronously
+  // after a publish (matching the artifact-not-found path in the same handlers).
+  if (noStore) headers["Cache-Control"] = "no-store";
+  return new Response(JSON.stringify(body), { status: 404, headers });
 }
 
 /**
@@ -567,10 +570,10 @@ async function summaryJsonHandler(
   versionParam: string,
 ): Promise<Response> {
   const dataset = await loadPublishedDataset(env, datasetId);
-  if (!dataset) return notFound("Dataset not found");
+  if (!dataset) return notFound("Dataset not found", undefined, true);
 
   const resolved = await resolveVersion(env.DB, datasetId, versionParam);
-  if (!resolved.ok) return notFound("Version not found");
+  if (!resolved.ok) return notFound("Version not found", undefined, true);
 
   let raw: string | null;
   try {
@@ -634,10 +637,10 @@ async function recordsJsonHandler(
   versionParam: string,
 ): Promise<Response> {
   const dataset = await loadPublishedDataset(env, datasetId);
-  if (!dataset) return notFound("Dataset not found");
+  if (!dataset) return notFound("Dataset not found", undefined, true);
 
   const resolved = await resolveVersion(env.DB, datasetId, versionParam);
-  if (!resolved.ok) return notFound("Version not found");
+  if (!resolved.ok) return notFound("Version not found", undefined, true);
 
   let raw: string | null;
   try {
