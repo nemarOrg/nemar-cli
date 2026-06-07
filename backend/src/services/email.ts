@@ -129,7 +129,7 @@ export async function getAdminEmailsForCategory(
 ): Promise<string[]> {
   const result = await db
     .prepare(
-      "SELECT email, email_preferences FROM users WHERE role IN ('owner', 'admin') AND status = 'approved'",
+      "SELECT email, email_preferences FROM users WHERE role IN ('owner', 'admin') AND status = 'approved' AND deleted_at IS NULL",
     )
     .all<AdminRow>();
 

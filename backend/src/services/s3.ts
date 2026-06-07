@@ -641,6 +641,83 @@ export async function getArchiveSize(
   return maxSize;
 }
 
+/** Latest-only zarr conversion facts read from `<id>/zarr/index.json`. */
+export interface ZarrIndexInfo {
+  /**
+   * Number of `.zarr` stores the converter wrote (its authoritative count).
+   * null when index.json exists but lacks a numeric `store_count` (e.g. an older
+   * converter); the row is still recorded 'ready' with a NULL count.
+   */
+  storeCount: number | null;
+  /** Source dataset commit the conversion was built from. */
+  sourceCommit: string | null;
+  /** ETag of index.json, mirrors what /webhooks/zarr-ready stores. */
+  etag: string | null;
+}
+
+/**
+ * Read a dataset's zarr catalog at `s3://<bucket>/<id>/zarr/index.json`, the
+ * signal of "is this dataset converted?". The converter (generate_zarr.py)
+ * writes index.json only when stores exist, with a top-level integer
+ * `store_count` + `source_commit`, so a 200 means converted and the count is
+ * authoritative (no need to LIST `.zarr` prefixes). Used by the admin
+ * zarr-sweep backfill to reconcile the stale zarr_status column from S3.
+ *
+ * Returns the parsed facts on 200, null on 404/403 (not converted). A 403 is
+ * treated as absent (not thrown), following the same rationale as `headArchive`:
+ * with the Worker's S3 creds (which lack s3:ListBucket), a missing object returns
+ * 403 (AccessDenied), not 404. Throwing on 403 would make the sweep never
+ * converge — every legitimately-zarr-less public dataset would error on every run
+ * instead of being stamped checked. (Unlike `headArchive`, which retries a 403
+ * before treating it as absent, this does a single GET; and unlike
+ * `headVersionArtifact`, which throws on 403, this returns null.) Any OTHER
+ * non-2xx still throws (a true infra failure, recorded per-dataset). The "creds
+ * globally broken -> mass-mark absent" risk is bounded by the operator inspecting
+ * the sweep's ready/absent counts before draining (a known-converted dataset
+ * coming back absent flags it).
+ */
+export async function getZarrIndex(
+  options: PresignedUrlOptions,
+  datasetId: string,
+): Promise<ZarrIndexInfo | null> {
+  const { bucket, region } = options;
+  const key = `${datasetId}/zarr/index.json`;
+  const encodedKey = key.split("/").map(encodeURIComponent).join("/");
+  const url = `https://${bucket}.s3.${region}.amazonaws.com/${encodedKey}`;
+
+  // Signed GET: works whether or not the public-read carve-out is in place for
+  // this prefix, and a present object always 200s with valid Worker creds.
+  const aws = createS3Client(options);
+  const signed = await aws.sign(url, { method: "GET" });
+  const response = await fetch(signed);
+
+  if (response.status === 404) return null;
+  if (response.status === 403) {
+    // Missing object without s3:ListBucket, or a creds issue. Treat as absent
+    // (mirrors headArchive); the sweep stamps zarr_checked_at and moves on.
+    console.warn(`getZarrIndex: 403 for ${key} (missing-without-ListBucket or creds) — absent`);
+    return null;
+  }
+  if (!response.ok) {
+    throw new Error(`getZarrIndex ${response.status} for ${key} (infra failure)`);
+  }
+
+  const etag = response.headers.get("etag");
+  let parsed: { store_count?: unknown; source_commit?: unknown };
+  try {
+    parsed = (await response.json()) as { store_count?: unknown; source_commit?: unknown };
+  } catch (err) {
+    throw new Error(
+      `getZarrIndex: ${key} is not valid JSON: ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
+  return {
+    storeCount: typeof parsed.store_count === "number" ? parsed.store_count : null,
+    sourceCommit: typeof parsed.source_commit === "string" ? parsed.source_commit : null,
+    etag,
+  };
+}
+
 /**
  * Apply S3 Object Lock (Governance mode) to all objects under a dataset's
  * objects/ prefix. Uses a 100-year retention period to effectively make

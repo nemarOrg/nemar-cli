@@ -130,7 +130,7 @@ authWebRoutes.post("/code/request", zValidator("json", emailSchema), async (c) =
     // file, you'll get a code shortly" copy and a CTA pointing typo'd
     // users at the CLI sign-up (companion issue on nemarOrg/website).
     const existing = await db
-      .prepare("SELECT status FROM users WHERE email = ? LIMIT 1")
+      .prepare("SELECT status FROM users WHERE email = ? AND deleted_at IS NULL LIMIT 1")
       .bind(email)
       .first<{ status: string }>();
 
@@ -293,14 +293,18 @@ authWebRoutes.post("/code/verify", zValidator("json", verifySchema), async (c) =
     }
 
     const userRow = await db
-      .prepare("SELECT id, email, role, status FROM users WHERE email = ? LIMIT 1")
+      .prepare(
+        "SELECT id, email, role, status FROM users WHERE email = ? AND deleted_at IS NULL LIMIT 1",
+      )
       .bind(email)
       .first<{ id: number; email: string; role: string | null; status: string }>();
     if (!userRow) {
-      // Should be impossible — /code/request creates the row. Treat
-      // as a server-side anomaly.
-      console.error(`[auth-web] /code/verify: code matched for ${email} but no users row found`);
-      return c.json({ error: "Account not found" }, 500);
+      // No live users row for a matched code. Normally impossible
+      // (/code/request creates the row), but it now happens cleanly when the
+      // account was tombstoned after a code was issued: the masked email no
+      // longer matches the original, and deleted_at excludes the row. Deny
+      // (the tombstone also expires outstanding codes; this is belt-and-suspenders).
+      return c.json({ error: "Account not found" }, 403);
     }
     if (userRow.status === "revoked") {
       return c.json({ error: "Account revoked" }, 403);

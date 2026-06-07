@@ -202,7 +202,9 @@ async function isPrivilegedToken(env: Bindings, hashedApiKey: string): Promise<b
       `SELECT u.role FROM tokens t JOIN users u ON t.user_id = u.id
        WHERE t.api_key_hash = ?
          AND t.revoked_at IS NULL
-         AND (t.expires_at IS NULL OR t.expires_at > datetime('now'))`,
+         AND (t.expires_at IS NULL OR t.expires_at > datetime('now'))
+         AND u.status = 'approved'
+         AND u.deleted_at IS NULL`,
     )
       .bind(hashedApiKey)
       .first<{ role: string | null }>();
