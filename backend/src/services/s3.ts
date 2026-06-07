@@ -659,12 +659,15 @@ export interface ZarrIndexInfo {
  * authoritative (no need to LIST `.zarr` prefixes). Used by the admin
  * zarr-sweep backfill to reconcile the stale zarr_status column from S3.
  *
- * Returns the parsed facts on 200, null on 404 (not converted). A 403 or any
- * other status THROWS rather than reporting "absent": index.json for a public
- * dataset is publicly readable, so a 403 means a credentials/permission problem,
- * and the sweep stamps a sticky `zarr_checked_at` on absence — mismarking 200+
- * converted datasets as "no zarr" because creds broke would be far worse than a
- * surfaced per-dataset error that keeps the row a candidate for the next run.
+ * Returns the parsed facts on 200, null on 404/403 (not converted). A 403 is
+ * treated as absent (not thrown) to MATCH headArchive/headObject: with the
+ * Worker's S3 creds (which lack s3:ListBucket), a missing object returns 403
+ * (AccessDenied), not 404. Throwing on 403 would make the sweep never converge —
+ * every legitimately-zarr-less public dataset would error on every run instead
+ * of being stamped checked. Any OTHER non-2xx still throws (a true infra
+ * failure, recorded per-dataset). The "creds globally broken -> mass-mark
+ * absent" risk is bounded by the operator inspecting the sweep's ready/absent
+ * counts before draining (a known-converted dataset coming back absent flags it).
  */
 export async function getZarrIndex(
   options: PresignedUrlOptions,
@@ -682,10 +685,14 @@ export async function getZarrIndex(
   const response = await fetch(signed);
 
   if (response.status === 404) return null;
+  if (response.status === 403) {
+    // Missing object without s3:ListBucket, or a creds issue. Treat as absent
+    // (mirrors headArchive); the sweep stamps zarr_checked_at and moves on.
+    console.warn(`getZarrIndex: 403 for ${key} (missing-without-ListBucket or creds) — absent`);
+    return null;
+  }
   if (!response.ok) {
-    throw new Error(
-      `getZarrIndex ${response.status} for ${key} (creds/permissions?) — not treating as absent`,
-    );
+    throw new Error(`getZarrIndex ${response.status} for ${key} (infra failure)`);
   }
 
   const etag = response.headers.get("etag");

@@ -295,7 +295,9 @@ adminRoutes.post(
 
     // Find target user
     const target = await db
-      .prepare("SELECT id, username, role, status FROM users WHERE username = ?")
+      .prepare(
+        "SELECT id, username, role, status FROM users WHERE username = ? AND deleted_at IS NULL",
+      )
       .bind(username)
       .first<{ id: number; username: string; role: string | null; status: string }>();
 
@@ -406,7 +408,9 @@ adminRoutes.post("/approve/:username", async (c) => {
 
   // Find user
   const user = await db
-    .prepare("SELECT id, username, email, github_username, status FROM users WHERE username = ?")
+    .prepare(
+      "SELECT id, username, email, github_username, status FROM users WHERE username = ? AND deleted_at IS NULL",
+    )
     .bind(username)
     .first<{
       id: number;
@@ -528,7 +532,7 @@ adminRoutes.post("/revoke/:username", async (c) => {
     .prepare(`
       SELECT id, username, email, github_username, status, role,
              aws_iam_username, aws_access_key_id_encrypted
-      FROM users WHERE username = ?
+      FROM users WHERE username = ? AND deleted_at IS NULL
     `)
     .bind(username)
     .first<{
@@ -877,10 +881,12 @@ adminRoutes.delete("/users/by-id/:id", ownerMiddleware, async (c) => {
     }
   }
 
-  // Capture the github handle BEFORE masking (masking nulls it; needed for the
-  // best-effort collaborator removal below). We deliberately retain NO other PII
-  // anywhere — not even in the audit row — so a tombstone truly erases it.
+  // Capture the github handle + email BEFORE masking (masking nulls/rewrites
+  // them). github is needed for collaborator removal; email is used ONLY to
+  // expire outstanding login codes (auth_codes is keyed by the original email).
+  // Neither is stored anywhere afterward — a tombstone truly erases the PII.
   const originalGithub = target.github_username;
+  const originalEmail = target.email;
 
   // Best-effort IAM cleanup if (legacy) per-user IAM creds exist. Per-user IAM
   // is deprecated and rows generally have aws_iam_username NULL, but if one is
@@ -929,9 +935,10 @@ adminRoutes.delete("/users/by-id/:id", ownerMiddleware, async (c) => {
     }
   }
 
-  // Atomic PII mask + tombstone + credential revocation, in a single D1 batch so
-  // the email mask and the `deleted_at` stamp commit together (a half-applied
-  // delete must never leave an auth-resolvable row). `AND deleted_at IS NULL` on
+  // PII mask + tombstone + credential revocation in a single db.batch(): D1
+  // wraps a batch in one implicit transaction (all statements commit, or all
+  // roll back on any failure), so the email mask and the `deleted_at` stamp can
+  // never half-apply and leave an auth-resolvable row. `AND deleted_at IS NULL` on
   // the mask makes it idempotent. The placeholder email embeds the PK (globally
   // unique, never reused under AUTOINCREMENT) so the email UNIQUE constraint
   // can't be hit, and .invalid (RFC 6761) can never be a real/deliverable
@@ -952,6 +959,14 @@ adminRoutes.delete("/users/by-id/:id", ownerMiddleware, async (c) => {
       .bind(id),
     db.prepare("DELETE FROM dataset_collaborators WHERE user_id = ?").bind(id),
     db.prepare("DELETE FROM user_s3_permissions WHERE user_id = ?").bind(id),
+    // Expire any outstanding passwordless login codes for the original email so
+    // a code issued just before deletion can't be submitted (it would otherwise
+    // be consumed and then cleanly denied — this avoids even that round-trip).
+    db
+      .prepare(
+        "UPDATE auth_codes SET used_at = datetime('now') WHERE email = ? AND used_at IS NULL",
+      )
+      .bind(originalEmail),
   ]);
   const tokensRevoked = batch[1]?.meta.changes ?? 0;
   const sessionsRevoked = batch[2]?.meta.changes ?? 0;
@@ -967,7 +982,9 @@ adminRoutes.delete("/users/by-id/:id", ownerMiddleware, async (c) => {
       adminUser.id,
       String(id),
       JSON.stringify({
-        deleted_by: adminUser.username,
+        // Non-PII actor id (the row's user_id is the same); avoids retaining the
+        // admin's username if they are themselves tombstoned later.
+        deleted_by_id: adminUser.id,
         tokens_revoked: tokensRevoked,
         sessions_revoked: sessionsRevoked,
         repos_removed: reposRemoved,
