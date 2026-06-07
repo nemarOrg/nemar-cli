@@ -9,6 +9,7 @@ import { Hono } from "hono";
 import { z } from "zod";
 import { adminMiddleware, authMiddleware, ownerMiddleware } from "../middleware/auth";
 
+import { USER_TOMBSTONE_MASK_SQL, maskedDeletedEmail } from "../db/user-tombstone";
 import { SYSTEM_USER_ID } from "../lib/constants";
 import {
   type RecipientGroup,
@@ -109,6 +110,7 @@ import {
   getArchiveSize,
   getDatasetS3Stats,
   getManifest,
+  getZarrIndex,
   markDatasetPrivate,
   markDatasetPublic,
   uploadManifest,
@@ -201,6 +203,12 @@ adminRoutes.get("/users", async (c) => {
   const conditions: string[] = [];
   const params: string[] = [];
 
+  // Hide tombstoned (soft-deleted) users by default; ?include_deleted=true lets
+  // an admin audit them (they show as masked deleted+<id>@deleted.invalid rows).
+  if (c.req.query("include_deleted") !== "true") {
+    conditions.push("deleted_at IS NULL");
+  }
+
   if (status) {
     conditions.push("status = ?");
     params.push(status);
@@ -250,6 +258,7 @@ adminRoutes.get("/users/:username", async (c) => {
       (SELECT COUNT(*) FROM tokens WHERE user_id = u.id AND revoked_at IS NULL) as active_tokens
     FROM users u
     WHERE u.username = ?
+      AND u.deleted_at IS NULL
   `,
     )
     .bind(username)
@@ -310,7 +319,9 @@ adminRoutes.post(
     // Protect against removing the last owner
     if (oldRole === "owner" && newRole !== "owner") {
       const ownerCount = await db
-        .prepare("SELECT COUNT(*) as count FROM users WHERE role = 'owner' AND status = 'approved'")
+        .prepare(
+          "SELECT COUNT(*) as count FROM users WHERE role = 'owner' AND status = 'approved' AND deleted_at IS NULL",
+        )
         .first<{ count: number }>();
       if (ownerCount && ownerCount.count <= 1) {
         return c.json({ error: "Cannot remove the last owner" }, 400);
@@ -793,6 +804,195 @@ adminRoutes.post("/revoke/:username", async (c) => {
 });
 
 /**
+ * DELETE /admin/users/:id - Tombstone (soft-delete) a user. Owner-only.
+ *
+ * Keyed by integer id because web signups have username = NULL (migration 0026).
+ * This is a soft delete, NOT a hard DELETE: the row is kept (so its id is never
+ * reused and audit_log / ownership references stay valid), but the PII columns
+ * are masked, `deleted_at` is stamped, and all credentials are revoked. The
+ * masked email is a collision-safe `deleted+<id>@deleted.invalid` placeholder
+ * keyed on the PK, which frees the original email/username/github for a future
+ * re-signup while satisfying the UNIQUE constraints. `deleted_at` is the
+ * soft-delete discriminator every auth/list query filters on; status is also
+ * flipped to 'revoked' so existing status-pinned queries treat the row as dead.
+ *
+ * Guards: never the system sentinel (id <= 0), never self, never the last owner.
+ * Idempotent: re-deleting an already-tombstoned user is a 200 no-op.
+ *
+ * Keyed `by-id` (not :username) so it can address web signups (NULL username)
+ * and so it can never be confused with the username-keyed GET/POST user routes.
+ */
+adminRoutes.delete("/users/by-id/:id", ownerMiddleware, async (c) => {
+  const db = c.env.DB;
+  const adminUser = c.get("user");
+
+  const id = Number.parseInt(c.req.param("id"), 10);
+  if (!Number.isInteger(id) || id <= 0) {
+    return c.json({ error: "User id must be a positive integer" }, 400);
+  }
+  if (id === SYSTEM_USER_ID) {
+    return c.json({ error: "The system account cannot be deleted" }, 400);
+  }
+  if (id === adminUser.id) {
+    return c.json({ error: "Cannot delete your own account" }, 400);
+  }
+
+  const target = await db
+    .prepare(
+      `SELECT id, username, email, github_username, role, status, deleted_at,
+              aws_iam_username, aws_access_key_id_encrypted
+       FROM users WHERE id = ?`,
+    )
+    .bind(id)
+    .first<{
+      id: number;
+      username: string | null;
+      email: string | null;
+      github_username: string | null;
+      role: string | null;
+      status: string;
+      deleted_at: string | null;
+      aws_iam_username: string | null;
+      aws_access_key_id_encrypted: string | null;
+    }>();
+
+  if (!target) {
+    return c.json({ error: "User not found" }, 404);
+  }
+
+  // Idempotent: already tombstoned -> 200 no-op (no re-mask, no error).
+  if (target.deleted_at) {
+    return c.json({ deleted: true, already_deleted: true, id: target.id });
+  }
+
+  // Last-owner protection (a deleted owner must not strand the org without one).
+  if (target.role === "owner") {
+    const owners = await db
+      .prepare(
+        "SELECT COUNT(*) as count FROM users WHERE role = 'owner' AND status = 'approved' AND deleted_at IS NULL",
+      )
+      .first<{ count: number }>();
+    if (owners && owners.count <= 1) {
+      return c.json({ error: "Cannot delete the last owner" }, 400);
+    }
+  }
+
+  // Capture the github handle BEFORE masking (masking nulls it; needed for the
+  // best-effort collaborator removal below). We deliberately retain NO other PII
+  // anywhere — not even in the audit row — so a tombstone truly erases it.
+  const originalGithub = target.github_username;
+
+  // Best-effort IAM cleanup if (legacy) per-user IAM creds exist. Per-user IAM
+  // is deprecated and rows generally have aws_iam_username NULL, but if one is
+  // set we must not leave live keys behind. Non-fatal: recorded, never blocks.
+  let iamWarning: string | null = null;
+  if (target.aws_iam_username && target.aws_access_key_id_encrypted && c.env.ENCRYPTION_KEY) {
+    try {
+      const accessKeyId = await decrypt(target.aws_access_key_id_encrypted, c.env.ENCRYPTION_KEY);
+      const result = await revokeUserIamAccess(
+        {
+          accessKeyId: c.env.AWS_ACCESS_KEY_ID,
+          secretAccessKey: c.env.AWS_SECRET_ACCESS_KEY,
+          region: c.env.AWS_REGION,
+        },
+        target.aws_iam_username,
+        accessKeyId,
+      );
+      if (result.errors.length > 0) iamWarning = result.errors.join("; ");
+    } catch (error) {
+      iamWarning = errorMessage(error);
+      console.error(`[delete-user] IAM revoke failed for id=${id}:`, iamWarning);
+    }
+  }
+
+  // Best-effort GitHub collaborator removal (mirrors revoke). Uses the captured
+  // github_username because masking nulls it below.
+  let reposRemoved = 0;
+  const failedRemovals: string[] = [];
+  if (originalGithub) {
+    const collaborations = await db
+      .prepare(
+        "SELECT d.github_repo FROM dataset_collaborators dc JOIN datasets d ON dc.dataset_id = d.id WHERE dc.user_id = ?",
+      )
+      .bind(id)
+      .all<{ github_repo: string | null }>();
+    for (const collab of collaborations.results || []) {
+      const repoName = collab.github_repo?.split("/")[1];
+      if (!repoName) continue;
+      try {
+        await removeCollaborator(repoName, originalGithub, await getDatasetsToken(c.env));
+        reposRemoved++;
+      } catch (error) {
+        console.error(`[delete-user] failed to remove from ${collab.github_repo}:`, error);
+        if (collab.github_repo) failedRemovals.push(collab.github_repo);
+      }
+    }
+  }
+
+  // Atomic PII mask + tombstone + credential revocation, in a single D1 batch so
+  // the email mask and the `deleted_at` stamp commit together (a half-applied
+  // delete must never leave an auth-resolvable row). `AND deleted_at IS NULL` on
+  // the mask makes it idempotent. The placeholder email embeds the PK (globally
+  // unique, never reused under AUTOINCREMENT) so the email UNIQUE constraint
+  // can't be hit, and .invalid (RFC 6761) can never be a real/deliverable
+  // address. web_sessions are revoked explicitly because a soft delete does NOT
+  // trigger their ON DELETE CASCADE; collaborator + S3-permission rows likewise.
+  const maskedEmail = maskedDeletedEmail(target.id);
+  const batch = await db.batch([
+    db.prepare(USER_TOMBSTONE_MASK_SQL).bind(maskedEmail, id),
+    db
+      .prepare(
+        "UPDATE tokens SET revoked_at = datetime('now') WHERE user_id = ? AND revoked_at IS NULL",
+      )
+      .bind(id),
+    db
+      .prepare(
+        "UPDATE web_sessions SET revoked_at = datetime('now') WHERE user_id = ? AND revoked_at IS NULL",
+      )
+      .bind(id),
+    db.prepare("DELETE FROM dataset_collaborators WHERE user_id = ?").bind(id),
+    db.prepare("DELETE FROM user_s3_permissions WHERE user_id = ?").bind(id),
+  ]);
+  const tokensRevoked = batch[1]?.meta.changes ?? 0;
+  const sessionsRevoked = batch[2]?.meta.changes ?? 0;
+
+  // Audit log (audit_log.user_id has no cascade, so the row survives). resource_id
+  // is the non-PII integer id and details carries NO original username/email —
+  // the whole point of the tombstone is to erase that PII (see migration 0037).
+  await db
+    .prepare(
+      "INSERT INTO audit_log (user_id, action, resource_type, resource_id, details) VALUES (?, 'user_deleted', 'user', ?, ?)",
+    )
+    .bind(
+      adminUser.id,
+      String(id),
+      JSON.stringify({
+        deleted_by: adminUser.username,
+        tokens_revoked: tokensRevoked,
+        sessions_revoked: sessionsRevoked,
+        repos_removed: reposRemoved,
+        masked: true,
+      }),
+    )
+    .run();
+
+  return c.json({
+    deleted: true,
+    id: target.id,
+    steps: {
+      tokens_revoked: tokensRevoked,
+      sessions_revoked: sessionsRevoked,
+      collaborators_cleared: true,
+      s3_perms_cleared: true,
+      github_repos_removed: reposRemoved,
+      failed_removals: failedRemovals.length > 0 ? failedRemovals : undefined,
+      iam_warning: iamWarning ?? undefined,
+    },
+    masked: true,
+  });
+});
+
+/**
  * POST /admin/regenerate-iam/:username - Deprecated
  *
  * Per-user IAM credentials are no longer used. S3 access is managed through
@@ -820,11 +1020,11 @@ adminRoutes.get("/stats", async (c) => {
     .prepare(
       `
     SELECT
-      (SELECT COUNT(*) FROM users) as total_users,
-      (SELECT COUNT(*) FROM users WHERE status = 'pending') as pending_users,
-      (SELECT COUNT(*) FROM users WHERE status = 'verified') as verified_users,
-      (SELECT COUNT(*) FROM users WHERE status = 'approved') as approved_users,
-      (SELECT COUNT(*) FROM users WHERE status = 'revoked') as revoked_users,
+      (SELECT COUNT(*) FROM users WHERE deleted_at IS NULL) as total_users,
+      (SELECT COUNT(*) FROM users WHERE status = 'pending' AND deleted_at IS NULL) as pending_users,
+      (SELECT COUNT(*) FROM users WHERE status = 'verified' AND deleted_at IS NULL) as verified_users,
+      (SELECT COUNT(*) FROM users WHERE status = 'approved' AND deleted_at IS NULL) as approved_users,
+      (SELECT COUNT(*) FROM users WHERE status = 'revoked' AND deleted_at IS NULL) as revoked_users,
       -- total_datasets counts real managed datasets only; folded legacy
       -- catalog rows (owner = SYSTEM_USER_ID, #646) are reported separately so
       -- the headline count isn't inflated by the ~180 folded legacy catalog rows.
@@ -944,6 +1144,133 @@ adminRoutes.post("/datasets/archive-sweep", async (c) => {
   if (candidates.length > 0 && errors.length === candidates.length) {
     console.error(
       `[archive-sweep] all ${candidates.length} candidates failed; first: ${errors[0]?.error}`,
+    );
+  }
+  return c.json({
+    ok: errors.length === 0,
+    checked: candidates.length,
+    ready,
+    absent,
+    errors,
+    remaining: remainingRow?.n ?? null,
+  });
+});
+
+/**
+ * POST /admin/datasets/zarr-sweep?limit=N — one-time/periodic backfill that
+ * reconciles the datasets.zarr_status column (migration 0035) from S3 truth for
+ * the observability dashboard (epic #695). The Hallu backfill cron wrote zarr
+ * stores to S3 but never POSTed /webhooks/zarr-ready, so ~213 already-converted
+ * public datasets sit at zarr_status NULL while the viewer streams them fine.
+ * This is the zarr analogue of /datasets/archive-sweep; the going-forward fix is
+ * a /webhooks/zarr-ready POST from the Hallu driver.
+ *
+ * Bounded per invocation (default 50, max 200): getZarrIndex does ONE signed GET
+ * of `<id>/zarr/index.json` per dataset (cheaper than a LIST). Idempotent via
+ * the zarr_checked_at column (migration 0038): only rows never confirmed by the
+ * webhook AND never checked by the sweep are candidates, so an absent-zarr
+ * dataset is stamped once and never rescanned. Run until `remaining` reaches 0.
+ */
+adminRoutes.post("/datasets/zarr-sweep", async (c) => {
+  const db = c.env.DB;
+  const limitRaw = Number.parseInt(c.req.query("limit") || "50", 10);
+  const limit = Number.isFinite(limitRaw) ? Math.min(Math.max(limitRaw, 1), 200) : 50;
+
+  // Candidates: real (non-catalog), public, non-sandbox datasets whose zarr
+  // state is still unknown — neither the webhook (zarr_status) nor a prior sweep
+  // (zarr_checked_at) has touched them. Public-only because zarr.nemar.org only
+  // serves public datasets (zarr-data.ts). Mirrors archive-sweep's candidacy.
+  let candidates: { dataset_id: string }[];
+  try {
+    const candidateRows = await db
+      .prepare(
+        `SELECT dataset_id FROM datasets
+         WHERE owner_user_id != ${SYSTEM_USER_ID}
+           AND (is_sandbox = 0 OR is_sandbox IS NULL)
+           AND visibility = 'public'
+           AND zarr_status IS NULL
+           AND zarr_checked_at IS NULL
+         ORDER BY dataset_id
+         LIMIT ?`,
+      )
+      .bind(limit)
+      .all<{ dataset_id: string }>();
+    candidates = candidateRows.results ?? [];
+  } catch (err) {
+    console.error("[zarr-sweep] candidate query failed:", err);
+    return c.json({ error: "Failed to query sweep candidates (is migration 0038 applied?)" }, 500);
+  }
+
+  const s3 = getS3Config(c.env);
+  let ready = 0;
+  let absent = 0;
+  const errors: { dataset_id: string; error: string }[] = [];
+
+  for (const { dataset_id } of candidates) {
+    // ONE signed GET of <id>/zarr/index.json. null = not converted (404). A 403
+    // or bad JSON throws (recorded below), keeping the row a candidate rather
+    // than mis-stamping it absent — see getZarrIndex.
+    let index: Awaited<ReturnType<typeof getZarrIndex>>;
+    try {
+      index = await getZarrIndex(s3, dataset_id);
+    } catch (err) {
+      errors.push({ dataset_id, error: `s3: ${err instanceof Error ? err.message : String(err)}` });
+      continue;
+    }
+    try {
+      if (index) {
+        // Converted: record latest-only state, mirroring /webhooks/zarr-ready.
+        // zarr_converted_at is left untouched (we don't know the true backfill
+        // time and won't fabricate one); zarr_status='ready' is the truth signal
+        // the dashboard reads. ETag + source_commit are seeded for free.
+        await db
+          .prepare(
+            `UPDATE datasets
+             SET zarr_status = 'ready',
+                 zarr_store_count = ?,
+                 zarr_index_etag = COALESCE(?, zarr_index_etag),
+                 zarr_source_commit = COALESCE(?, zarr_source_commit),
+                 zarr_checked_at = datetime('now')
+             WHERE dataset_id = ?`,
+          )
+          .bind(index.storeCount, index.etag, index.sourceCommit, dataset_id)
+          .run();
+        ready++;
+      } else {
+        // No index.json: stamp checked so the sweep won't rescan, but leave
+        // zarr_status NULL (absence is not a 'failed' conversion).
+        await db
+          .prepare("UPDATE datasets SET zarr_checked_at = datetime('now') WHERE dataset_id = ?")
+          .bind(dataset_id)
+          .run();
+        absent++;
+      }
+    } catch (err) {
+      errors.push({
+        dataset_id,
+        error: `d1${index ? ` (stores=${index.storeCount})` : ""}: ${err instanceof Error ? err.message : String(err)}`,
+      });
+    }
+  }
+
+  const remainingRow = await db
+    .prepare(
+      `SELECT COUNT(*) as n FROM datasets
+       WHERE owner_user_id != ${SYSTEM_USER_ID}
+         AND (is_sandbox = 0 OR is_sandbox IS NULL)
+         AND visibility = 'public'
+         AND zarr_status IS NULL
+         AND zarr_checked_at IS NULL`,
+    )
+    .first<{ n: number }>()
+    .catch((err) => {
+      console.error("[zarr-sweep] remaining count failed:", err);
+      return null;
+    });
+
+  if (candidates.length > 0 && errors.length === candidates.length) {
+    console.error(
+      `[zarr-sweep] all ${candidates.length} candidates failed; first: ${errors[0]?.error}`,
     );
   }
   return c.json({

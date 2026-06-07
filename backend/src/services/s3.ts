@@ -641,6 +641,69 @@ export async function getArchiveSize(
   return maxSize;
 }
 
+/** Latest-only zarr conversion facts read from `<id>/zarr/index.json`. */
+export interface ZarrIndexInfo {
+  /** Number of `.zarr` stores the converter wrote (its authoritative count). */
+  storeCount: number | null;
+  /** Source dataset commit the conversion was built from. */
+  sourceCommit: string | null;
+  /** ETag of index.json, mirrors what /webhooks/zarr-ready stores. */
+  etag: string | null;
+}
+
+/**
+ * Read a dataset's zarr catalog at `s3://<bucket>/<id>/zarr/index.json`, the
+ * signal of "is this dataset converted?". The converter (generate_zarr.py)
+ * writes index.json only when stores exist, with a top-level integer
+ * `store_count` + `source_commit`, so a 200 means converted and the count is
+ * authoritative (no need to LIST `.zarr` prefixes). Used by the admin
+ * zarr-sweep backfill to reconcile the stale zarr_status column from S3.
+ *
+ * Returns the parsed facts on 200, null on 404 (not converted). A 403 or any
+ * other status THROWS rather than reporting "absent": index.json for a public
+ * dataset is publicly readable, so a 403 means a credentials/permission problem,
+ * and the sweep stamps a sticky `zarr_checked_at` on absence — mismarking 200+
+ * converted datasets as "no zarr" because creds broke would be far worse than a
+ * surfaced per-dataset error that keeps the row a candidate for the next run.
+ */
+export async function getZarrIndex(
+  options: PresignedUrlOptions,
+  datasetId: string,
+): Promise<ZarrIndexInfo | null> {
+  const { bucket, region } = options;
+  const key = `${datasetId}/zarr/index.json`;
+  const encodedKey = key.split("/").map(encodeURIComponent).join("/");
+  const url = `https://${bucket}.s3.${region}.amazonaws.com/${encodedKey}`;
+
+  // Signed GET: works whether or not the public-read carve-out is in place for
+  // this prefix, and a present object always 200s with valid Worker creds.
+  const aws = createS3Client(options);
+  const signed = await aws.sign(url, { method: "GET" });
+  const response = await fetch(signed);
+
+  if (response.status === 404) return null;
+  if (!response.ok) {
+    throw new Error(
+      `getZarrIndex ${response.status} for ${key} (creds/permissions?) — not treating as absent`,
+    );
+  }
+
+  const etag = response.headers.get("etag");
+  let parsed: { store_count?: unknown; source_commit?: unknown };
+  try {
+    parsed = (await response.json()) as { store_count?: unknown; source_commit?: unknown };
+  } catch (err) {
+    throw new Error(
+      `getZarrIndex: ${key} is not valid JSON: ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
+  return {
+    storeCount: typeof parsed.store_count === "number" ? parsed.store_count : null,
+    sourceCommit: typeof parsed.source_commit === "string" ? parsed.source_commit : null,
+    etag,
+  };
+}
+
 /**
  * Apply S3 Object Lock (Governance mode) to all objects under a dataset's
  * objects/ prefix. Uses a 100-year retention period to effectively make

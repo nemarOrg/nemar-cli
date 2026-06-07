@@ -1730,7 +1730,9 @@ datasetRoutes.post("/:id/invite", authMiddleware, zValidator("json", inviteSchem
 
   // Find the user to invite
   const invitee = await db
-    .prepare("SELECT id, username, github_username, status FROM users WHERE username = ?")
+    .prepare(
+      "SELECT id, username, github_username, status FROM users WHERE username = ? AND deleted_at IS NULL",
+    )
     .bind(username)
     .first<{ id: number; username: string; github_username: string; status: string }>();
 

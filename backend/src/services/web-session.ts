@@ -160,6 +160,7 @@ export async function findSessionByCookieId(
         AND ws.revoked_at IS NULL
         AND ws.expires_at > datetime('now')
         AND u.status != 'revoked'
+        AND u.deleted_at IS NULL
       LIMIT 1`,
   )
     .bind(cookieHash)

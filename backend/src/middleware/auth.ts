@@ -59,6 +59,7 @@ async function resolveCookieUser(c: AuthContext): Promise<AuthUser | null> {
         WHERE ws.cookie_id_hash = ?
           AND ws.revoked_at IS NULL
           AND ws.expires_at > datetime('now')
+          AND u.deleted_at IS NULL
         LIMIT 1`,
     )
       .bind(cookieHash)
@@ -146,6 +147,7 @@ export async function authMiddleware(c: AuthContext, next: Next) {
       WHERE t.api_key_hash = ?
         AND t.revoked_at IS NULL
         AND (t.expires_at IS NULL OR t.expires_at > datetime('now'))
+        AND u.deleted_at IS NULL
     `,
     )
       .bind(hashedKey)
@@ -321,6 +323,7 @@ export async function optionalAuthMiddleware(c: AuthContext, next: Next) {
     WHERE t.api_key_hash = ?
       AND t.revoked_at IS NULL
       AND u.status = 'approved'
+      AND u.deleted_at IS NULL
   `,
   )
     .bind(hashedKey)

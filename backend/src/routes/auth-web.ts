@@ -130,7 +130,7 @@ authWebRoutes.post("/code/request", zValidator("json", emailSchema), async (c) =
     // file, you'll get a code shortly" copy and a CTA pointing typo'd
     // users at the CLI sign-up (companion issue on nemarOrg/website).
     const existing = await db
-      .prepare("SELECT status FROM users WHERE email = ? LIMIT 1")
+      .prepare("SELECT status FROM users WHERE email = ? AND deleted_at IS NULL LIMIT 1")
       .bind(email)
       .first<{ status: string }>();
 
@@ -293,7 +293,9 @@ authWebRoutes.post("/code/verify", zValidator("json", verifySchema), async (c) =
     }
 
     const userRow = await db
-      .prepare("SELECT id, email, role, status FROM users WHERE email = ? LIMIT 1")
+      .prepare(
+        "SELECT id, email, role, status FROM users WHERE email = ? AND deleted_at IS NULL LIMIT 1",
+      )
       .bind(email)
       .first<{ id: number; email: string; role: string | null; status: string }>();
     if (!userRow) {
