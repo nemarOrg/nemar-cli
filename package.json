@@ -1,6 +1,6 @@
 {
   "name": "nemar-cli",
-  "version": "0.8.47",
+  "version": "0.8.48-dev5",
   "description": "CLI for NEMAR (Neuroelectromagnetic Data Archive and Tools Resource) dataset management",
   "type": "module",
   "main": "dist/index.js",
@@ -16,10 +16,8 @@
     "format": "biome format --write src/",
     "typecheck": "tsc --noEmit",
     "prepublishOnly": "bun run build",
-    "docs:generate": "bun run scripts/generate-docs.ts",
-    "docs:serve": "mkdocs serve",
-    "docs:build": "mkdocs build",
     "prepare": "husky",
+    "postinstall": "bun scripts/postinstall-check.mjs",
     "deploy": "wrangler deploy",
     "preview": "wrangler dev"
   },
@@ -41,12 +39,13 @@
   "bugs": {
     "url": "https://github.com/nemarOrg/nemar-cli/issues"
   },
-  "homepage": "https://nemar-cli.pages.dev",
+  "homepage": "https://docs.nemar.org",
   "engines": {
     "bun": ">=1.0.0"
   },
   "files": [
     "dist",
+    "scripts/postinstall-check.mjs",
     "README.md",
     "LICENSE"
   ],

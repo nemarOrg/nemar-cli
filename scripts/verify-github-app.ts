@@ -210,7 +210,7 @@ function printUsage(): void {
   );
   console.error("");
   console.error("  --app-id        Numeric GitHub App ID from the App settings page.");
-  console.error("  --private-key   Path to PKCS#8 PEM file (see docs/guides/github-app-setup.md).");
+  console.error("  --private-key   Path to PKCS#8 PEM file (see https://docs.nemar.org/admin/github-app-setup/).");
   console.error("");
   console.error("Override expected orgs via NEMAR_VERIFY_LOGINS=org1,org2 (case-insensitive).");
 }

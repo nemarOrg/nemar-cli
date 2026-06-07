@@ -163,6 +163,14 @@ authRoutes.post("/signup", zValidator("json", signupSchema), async (c) => {
       );
     }
 
+    // NOTE: the signup de-dup checks below (username / email / github_username)
+    // deliberately do NOT filter `deleted_at IS NULL` — they must see ALL rows,
+    // including tombstones, to honor the UNIQUE constraints. Re-signup with a
+    // deleted user's old email/username/github is enabled by the tombstone
+    // MASKING (email -> deleted+<id>@deleted.invalid, username/github -> NULL),
+    // which frees those values, NOT by excluding deleted rows here. See the
+    // DELETE /admin/users/by-id/:id tombstone + migration 0037.
+
     // Check if username already exists
     const existingUsername = await db
       .prepare("SELECT id FROM users WHERE username = ?")
@@ -348,6 +356,7 @@ authRoutes.get("/verify", async (c) => {
     SELECT id, username, email, github_username, description, status, verification_expires_at
     FROM users
     WHERE verification_token = ?
+      AND deleted_at IS NULL
   `,
     )
     .bind(token)
@@ -538,6 +547,7 @@ authRoutes.post("/login", zValidator("json", loginSchema), async (c) => {
     WHERE t.api_key_hash = ?
       AND t.revoked_at IS NULL
       AND (t.expires_at IS NULL OR t.expires_at > datetime('now'))
+      AND u.deleted_at IS NULL
   `,
     )
     .bind(hashedKey)
@@ -599,7 +609,7 @@ authRoutes.post("/resend-verification", zValidator("json", resendSchema), async 
 
   // Find user
   const user = await db
-    .prepare("SELECT id, username, status FROM users WHERE email = ?")
+    .prepare("SELECT id, username, status FROM users WHERE email = ? AND deleted_at IS NULL")
     .bind(email)
     .first<{ id: number; username: string; status: string }>();
 
@@ -668,7 +678,9 @@ authRoutes.post("/retrieve-key", zValidator("json", retrieveKeySchema), async (c
 
   // Find user by email
   const user = await db
-    .prepare("SELECT id, username, email, password_hash, status FROM users WHERE email = ?")
+    .prepare(
+      "SELECT id, username, email, password_hash, status FROM users WHERE email = ? AND deleted_at IS NULL",
+    )
     .bind(email)
     .first<{
       id: number;
@@ -793,7 +805,7 @@ authRoutes.post("/request-key-regeneration", zValidator("json", regenRequestSche
 
   // Find user
   const user = await db
-    .prepare("SELECT id, username, email, status FROM users WHERE email = ?")
+    .prepare("SELECT id, username, email, status FROM users WHERE email = ? AND deleted_at IS NULL")
     .bind(email)
     .first<{ id: number; username: string; email: string; status: string }>();
 
@@ -862,7 +874,7 @@ authRoutes.get("/confirm-key-regeneration", async (c) => {
   const user = await db
     .prepare(
       `SELECT id, username, email, status, verification_expires_at
-       FROM users WHERE verification_token = ?`,
+       FROM users WHERE verification_token = ? AND deleted_at IS NULL`,
     )
     .bind(token)
     .first<{

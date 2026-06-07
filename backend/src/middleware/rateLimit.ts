@@ -51,6 +51,25 @@ const MAX_REQUESTS = 500;
 // in code review, not at runtime.
 const TOKEN_MAX_REQUESTS_AUTHED = 1000;
 
+// Public read data-plane bucket (`data.nemar.org/*`, which the host fork in
+// index.ts rewrites to `/data/*`; also reachable as `/nemar/data/*`). These
+// endpoints are read-only, anonymous, CDN-cacheable, and never stream bytes
+// through the Worker — the per-file route 302-redirects to a presigned S3 URL
+// or raw.githubusercontent.com, so the actual download egress is on S3/GitHub,
+// not here. A parallel client (e.g. `nemar-py --jobs 16` on its HTTPS backend,
+// or `rclone`) legitimately bursts hundreds of per-file 302s for one dataset
+// and was tripping the 500/60s anonymous IP floor (#615 follow-up; Bruno's
+// `data.nemar.org` 429 reports). Give the data plane its own much larger
+// IP-keyed bucket so a real downloader runs unthrottled while a runaway loop
+// is still bounded (a scraper can't make unbounded Worker invocations), and so
+// data-plane traffic and the write/management API can't starve each other —
+// the same isolation rationale as the per-token bucket in #275.
+const DATA_MAX_REQUESTS = 10000;
+// Matches the data sub-app mount: `/data`, `/data/...`, and the `/nemar`
+// path-mount forms. Deliberately anchored with `(\/|$)` so it does NOT match
+// the management API at `/datasets/*` (that keeps the standard ip/token cap).
+const DATA_PATH_RE = /^\/(nemar\/)?data(\/|$)/;
+
 // Stricter limits for auth endpoints
 const AUTH_MAX_REQUESTS = 10;
 const AUTH_PATHS = [
@@ -109,7 +128,11 @@ export function __readBearerTokenFromHeader(authHeader: string | undefined): str
  *    (500/60s). Admin orchestration (`publish approve`, CI deploy
  *    sweeps) fits here; per-token bucketing means one admin's batch
  *    can't 429 another admin's batch through the shared IP pool.
- *  - `ip` for everything else (100/60s, the legacy cap).
+ *  - `data-ip` for the public read data plane (`/data/*`, `/nemar/data/*`).
+ *    10000/60s, IP-keyed. Checked before the bearer branch because the data
+ *    plane is anonymous-by-design; a tokened request to a public file is
+ *    still charged to the (generous) IP bucket, not the tighter token bucket.
+ *  - `ip` for everything else (the unauthenticated cap).
  *
  * Admin endpoints used to be entirely exempt; that gave an admin
  * running a malformed loop unbounded access to the worker. Keeping the
@@ -117,7 +140,7 @@ export function __readBearerTokenFromHeader(authHeader: string | undefined): str
  * floor without the floor being absent.
  */
 export interface __BucketSelection {
-  keyKind: "auth-ip" | "ip" | "token";
+  keyKind: "auth-ip" | "ip" | "token" | "data-ip";
   /** Pre-hash key material: the IP, or the raw bearer token. */
   rawKey: string;
   maxRequests: number;
@@ -130,6 +153,12 @@ export function __selectBucket(
 ): __BucketSelection {
   if (AUTH_PATHS.some((p) => path === p || path.startsWith(`${p}/`) || path.startsWith(`${p}?`))) {
     return { keyKind: "auth-ip", rawKey: ip, maxRequests: AUTH_MAX_REQUESTS };
+  }
+  // Public read data plane gets its own generous IP bucket before the bearer
+  // check: it is anonymous-by-design (no token), and even a tokened request to
+  // a public file should not be charged against the tighter token bucket.
+  if (DATA_PATH_RE.test(path)) {
+    return { keyKind: "data-ip", rawKey: ip, maxRequests: DATA_MAX_REQUESTS };
   }
   const bearer = __readBearerTokenFromHeader(authHeader);
   if (bearer) {
@@ -173,7 +202,9 @@ async function isPrivilegedToken(env: Bindings, hashedApiKey: string): Promise<b
       `SELECT u.role FROM tokens t JOIN users u ON t.user_id = u.id
        WHERE t.api_key_hash = ?
          AND t.revoked_at IS NULL
-         AND (t.expires_at IS NULL OR t.expires_at > datetime('now'))`,
+         AND (t.expires_at IS NULL OR t.expires_at > datetime('now'))
+         AND u.status = 'approved'
+         AND u.deleted_at IS NULL`,
     )
       .bind(hashedApiKey)
       .first<{ role: string | null }>();
@@ -308,5 +339,6 @@ export const __limits = {
   AUTH_MAX_REQUESTS,
   TOKEN_MAX_REQUESTS_AUTHED,
   MAX_REQUESTS,
+  DATA_MAX_REQUESTS,
   WINDOW_SIZE,
 };

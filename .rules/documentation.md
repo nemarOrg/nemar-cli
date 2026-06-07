@@ -1,4 +1,6 @@
-# Documentation Standards (MkDocs)
+# Documentation Standards
+
+> NEMAR's user-facing docs now live in their own repo, [nemarOrg/docs](https://github.com/nemarOrg/docs) (Astro Starlight), published at https://docs.nemar.org. This repo no longer hosts a docs site. The tool-specific setup below is retained only as general doc-writing guidance; do not reintroduce a MkDocs/Python pipeline here.
 
 ## Core Philosophy: Write for Your Future Self
 **Good docs** answer questions before they're asked.

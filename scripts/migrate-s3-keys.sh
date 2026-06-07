@@ -19,7 +19,7 @@
 #   - AWS credentials resolvable via the default chain
 #     (~/.aws/credentials mode 0600, or aws sso login). Long-lived
 #     AKIA keys in process env vars are rejected by the credentials
-#     guard; see docs/operations/access-policies.md (principles 5 + 6).
+#     guard; see https://docs.nemar.org/admin/operations/access-policies/ (principles 5 + 6).
 #   - git-annex installed
 #   - SSH access to nemarDatasets GitHub org
 #
@@ -51,7 +51,7 @@ fi
 
 # Verify AWS credentials via shared guard (rejects long-lived AKIA* keys
 # in env, requires ~/.aws/credentials or aws sso login). See
-# docs/operations/access-policies.md (principles 5 + 6).
+# https://docs.nemar.org/admin/operations/access-policies/ (principles 5 + 6).
 # shellcheck source=lib/aws-creds-guard.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib/aws-creds-guard.sh"
 nemar_guard_aws_credentials || exit $?

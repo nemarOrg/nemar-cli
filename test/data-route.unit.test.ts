@@ -10,19 +10,18 @@ import { describe, expect, test } from "bun:test";
 import "./setup";
 
 import {
-  VERSION_TAG_RE,
-  buildBidsIndex,
-  buildCatalogIndexPayload,
-  buildContentDisposition,
-  buildDatasetMetadata,
-  normalizeBidsPath,
-  qaListingToDirectory,
-  buildLandingPayload,
-  buildPersonList,
-  buildRedirectUrl,
   type CatalogIndexRow,
   type DatasetRowForMetadata,
   type DatasetVersionRow,
+  VERSION_TAG_RE,
+  buildBidsIndex,
+  buildBytesUrl,
+  buildCatalogIndexPayload,
+  buildContentDisposition,
+  buildDatasetMetadata,
+  buildLandingPayload,
+  buildPersonList,
+  buildRedirectUrl,
   deriveSessions,
   diffRemovedSince,
   escapeHtml,
@@ -30,7 +29,9 @@ import {
   formatBytes,
   humanSize,
   isPublicCatalogId,
+  normalizeBidsPath,
   pickResponseFormat,
+  qaListingToDirectory,
   renderCatalogIndexHtml,
   renderDatasetLandingHtml,
   renderIndexHtml,
@@ -305,9 +306,7 @@ describe("buildRedirectUrl", () => {
     expect(decoded).toContain(
       'attachment;filename="sub-01438774_ses-1625258895_task-typing_emg.bdf"',
     );
-    expect(decoded).toContain(
-      "filename*=UTF-8''sub-01438774_ses-1625258895_task-typing_emg.bdf",
-    );
+    expect(decoded).toContain("filename*=UTF-8''sub-01438774_ses-1625258895_task-typing_emg.bdf");
     // Signature MUST cover the disposition param or S3 will reject the request.
     expect(url).toContain("X-Amz-Signature=");
   });
@@ -425,6 +424,58 @@ describe("buildRedirectUrl", () => {
         githubOrg: "nemarDatasets",
       }),
     ).rejects.toThrow(/Unrecognized manifest key/);
+  });
+});
+
+describe("buildBytesUrl", () => {
+  const common = {
+    githubOrg: "nemarDatasets",
+    datasetId: "nm099999",
+    version: "v1.0.0",
+  };
+
+  test("annex keys -> canonical data.nemar.org per-file route URL", () => {
+    const url = buildBytesUrl({
+      ...common,
+      bidsPath: "sub-01/eeg/sub-01_task-rest_eeg.edf",
+      key: "SHA256E-s124573612--abc123.edf",
+    });
+    expect(url).toBe("https://data.nemar.org/nm099999/v1.0.0/sub-01/eeg/sub-01_task-rest_eeg.edf");
+  });
+
+  test("git keys -> raw.githubusercontent URL pinned to the tag (== url)", () => {
+    const url = buildBytesUrl({
+      ...common,
+      bidsPath: "dataset_description.json",
+      key: "git:abc123",
+    });
+    expect(url).toBe(
+      "https://raw.githubusercontent.com/nemarDatasets/nm099999/v1.0.0/dataset_description.json",
+    );
+  });
+
+  test("path segments are URL-encoded but slashes preserved", () => {
+    const url = buildBytesUrl({
+      ...common,
+      bidsPath: "sub-01/eeg/sub-01_task-rest events.tsv",
+      key: "git:zzz",
+    });
+    expect(url).toBe(
+      "https://raw.githubusercontent.com/nemarDatasets/nm099999/v1.0.0/sub-01/eeg/sub-01_task-rest%20events.tsv",
+    );
+  });
+
+  test("annex bytes_url is host-invariant (always canonical data.nemar.org)", () => {
+    // #615: bytes_url is a stable, storable contract URL, so it never depends on
+    // the request host (it takes no request URL) -- it can't drift to
+    // api.nemar.org/<workers.dev>. data.nemar.org is the public host, reachable
+    // from anywhere; matches the build-time raw S3 manifest (emit_manifest.py).
+    const url = buildBytesUrl({
+      ...common,
+      bidsPath: "sub-01/eeg/x.set",
+      key: "MD5E-s100--def.set",
+    });
+    expect(url).toBe("https://data.nemar.org/nm099999/v1.0.0/sub-01/eeg/x.set");
   });
 });
 
@@ -670,18 +721,14 @@ describe("buildBidsIndex", () => {
 
   test("multi-session, multi-modality, multi-run, sorted output", () => {
     const files = {
-      "sub-01/ses-baseline/eeg/sub-01_ses-baseline_task-rest_run-02_eeg.edf": manifestFile(
-        "SHA256E-s1--a.edf",
-      ),
-      "sub-01/ses-baseline/eeg/sub-01_ses-baseline_task-rest_run-01_eeg.edf": manifestFile(
-        "SHA256E-s2--b.edf",
-      ),
-      "sub-01/ses-followup/emg/sub-01_ses-followup_task-grip_emg.edf": manifestFile(
-        "SHA256E-s3--c.edf",
-      ),
-      "sub-02/ses-baseline/eeg/sub-02_ses-baseline_task-rest_eeg.edf": manifestFile(
-        "SHA256E-s4--d.edf",
-      ),
+      "sub-01/ses-baseline/eeg/sub-01_ses-baseline_task-rest_run-02_eeg.edf":
+        manifestFile("SHA256E-s1--a.edf"),
+      "sub-01/ses-baseline/eeg/sub-01_ses-baseline_task-rest_run-01_eeg.edf":
+        manifestFile("SHA256E-s2--b.edf"),
+      "sub-01/ses-followup/emg/sub-01_ses-followup_task-grip_emg.edf":
+        manifestFile("SHA256E-s3--c.edf"),
+      "sub-02/ses-baseline/eeg/sub-02_ses-baseline_task-rest_eeg.edf":
+        manifestFile("SHA256E-s4--d.edf"),
     };
     const idx = buildBidsIndex(files);
     expect(Object.keys(idx)).toEqual(["sub-01", "sub-02"]);
@@ -743,9 +790,8 @@ describe("buildBidsIndex", () => {
     // the subject root while task data lives under session dirs.
     const files = {
       "sub-01/anat/sub-01_T1w.nii.gz": manifestFile("SHA256E-s1--a.nii.gz"),
-      "sub-01/ses-baseline/eeg/sub-01_ses-baseline_task-rest_eeg.edf": manifestFile(
-        "SHA256E-s2--b.edf",
-      ),
+      "sub-01/ses-baseline/eeg/sub-01_ses-baseline_task-rest_eeg.edf":
+        manifestFile("SHA256E-s2--b.edf"),
     };
     const idx = buildBidsIndex(files);
     expect(idx["sub-01"].sessions).toEqual(["baseline"]);
@@ -764,9 +810,9 @@ describe("deriveSessions", () => {
     expect(deriveSessions(files)).toEqual(["baseline", "followup"]);
   });
   test("no sessions when no ses- segment", () => {
-    expect(
-      deriveSessions({ "sub-01/eeg/sub-01_task-rest_eeg.edf": manifestFile("k") }),
-    ).toEqual([]);
+    expect(deriveSessions({ "sub-01/eeg/sub-01_task-rest_eeg.edf": manifestFile("k") })).toEqual(
+      [],
+    );
   });
 });
 
@@ -829,12 +875,16 @@ describe("buildDatasetMetadata", () => {
         { term: "Electromyography", subject_scheme: "MeSH", classification_code: "D004576" },
       ],
       related_identifiers: [
-        { identifier: "10.1038/s41597-021-00883-1", identifier_type: "DOI", relation_type: "IsDescribedBy" },
+        {
+          identifier: "10.1038/s41597-021-00883-1",
+          identifier_type: "DOI",
+          relation_type: "IsDescribedBy",
+        },
       ],
-      funding_references: [
-        { funder_name: "National Science Foundation", award_number: "2030859" },
+      funding_references: [{ funder_name: "National Science Foundation", award_number: "2030859" }],
+      contributors: [
+        { name: "NEMAR", name_type: "Organizational", contributor_type: "HostingInstitution" },
       ],
-      contributors: [{ name: "NEMAR", name_type: "Organizational", contributor_type: "HostingInstitution" }],
       dates: [{ date: "2026-02-17", date_type: "Issued" }],
     };
     const manifest: VersionManifest = {
@@ -853,7 +903,11 @@ describe("buildDatasetMetadata", () => {
       row,
       parsedEnrichment: enrichment,
       versions: [
-        { version: "1.0.0", doi: "10.82901/NEMAR.nm099999.v1.0.0", created_at: "2026-05-15T00:00:00Z" },
+        {
+          version: "1.0.0",
+          doi: "10.82901/NEMAR.nm099999.v1.0.0",
+          created_at: "2026-05-15T00:00:00Z",
+        },
       ],
       latestManifest: manifest,
       githubOrg: "nemarDatasets",
@@ -1143,7 +1197,15 @@ describe("findLastSeenVersion", () => {
     const oldest = versions[versions.length - 1];
     const loadManifest = async (v: string): Promise<VersionManifest | null> => {
       consulted.push(v);
-      if (v !== oldest) return { dataset_id: "x", version: v, doi: null, concept_doi: null, created: "", files: {} };
+      if (v !== oldest)
+        return {
+          dataset_id: "x",
+          version: v,
+          doi: null,
+          concept_doi: null,
+          created: "",
+          files: {},
+        };
       return {
         dataset_id: "x",
         version: v,
@@ -1432,7 +1494,13 @@ describe("renderDatasetLandingHtml", () => {
     const html = renderDatasetLandingHtml(
       buildLandingPayload({
         datasetId: "nm099999",
-        versionRows: [{ version: "v1.0.0", doi: null as unknown as string, created_at: null as unknown as string }],
+        versionRows: [
+          {
+            version: "v1.0.0",
+            doi: null as unknown as string,
+            created_at: null as unknown as string,
+          },
+        ],
       }),
     );
     expect(html).not.toContain("doi.org");
@@ -1813,9 +1881,7 @@ describe("qaListingToDirectory (#511)", () => {
   test("propagates the truncated flag so renderers can show a 'listing capped' affordance", () => {
     const r = qaListingToDirectory({
       listing: {
-        contents: [
-          { key: "nm099999/qa/x.json", size: 1, lastModified: "2026-05-14T00:00:00Z" },
-        ],
+        contents: [{ key: "nm099999/qa/x.json", size: 1, lastModified: "2026-05-14T00:00:00Z" }],
         commonPrefixes: [],
         truncated: true,
       },
@@ -1832,9 +1898,7 @@ describe("qaListingToDirectory (#511)", () => {
     // and a prefix), but if S3 ever did emit overlap we should not double-list.
     const r = qaListingToDirectory({
       listing: {
-        contents: [
-          { key: "nm099999/qa/eeg", size: 0, lastModified: "2026-05-14T00:00:00Z" },
-        ],
+        contents: [{ key: "nm099999/qa/eeg", size: 0, lastModified: "2026-05-14T00:00:00Z" }],
         commonPrefixes: ["nm099999/qa/eeg/"],
         truncated: false,
       },
@@ -2061,4 +2125,3 @@ describe("renderCatalogIndexHtml (#584) — HTML escaping and edge cases", () =>
     expect(html).toMatch(/<td>-<\/td><\/tr>/);
   });
 });
-

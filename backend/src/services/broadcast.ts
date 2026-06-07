@@ -90,7 +90,7 @@ export async function getBroadcastRecipients(
   const result = await db
     .prepare(
       `SELECT email, email_preferences FROM users
-       WHERE status = 'approved' ${roleFilter}`,
+       WHERE status = 'approved' AND deleted_at IS NULL ${roleFilter}`,
     )
     .all<UserRow>();
 
@@ -117,7 +117,9 @@ export async function getBroadcastRecipientByUsername(
   username: string,
 ): Promise<SingleUserLookupResult> {
   const row = await db
-    .prepare("SELECT id, username, email, status, email_preferences FROM users WHERE username = ?")
+    .prepare(
+      "SELECT id, username, email, status, email_preferences FROM users WHERE username = ? AND deleted_at IS NULL",
+    )
     .bind(username)
     .first<SingleUserRow>();
 

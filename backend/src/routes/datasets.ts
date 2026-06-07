@@ -1730,7 +1730,9 @@ datasetRoutes.post("/:id/invite", authMiddleware, zValidator("json", inviteSchem
 
   // Find the user to invite
   const invitee = await db
-    .prepare("SELECT id, username, github_username, status FROM users WHERE username = ?")
+    .prepare(
+      "SELECT id, username, github_username, status FROM users WHERE username = ? AND deleted_at IS NULL",
+    )
     .bind(username)
     .first<{ id: number; username: string; github_username: string; status: string }>();
 
@@ -1857,7 +1859,7 @@ datasetRoutes.get("/:id/collaborators", authMiddleware, async (c) => {
       `SELECT u.username, u.github_username, dc.access_type, dc.granted_at,
               g.username as granted_by_username
        FROM dataset_collaborators dc
-       JOIN users u ON dc.user_id = u.id
+       JOIN users u ON dc.user_id = u.id AND u.deleted_at IS NULL
        LEFT JOIN users g ON dc.granted_by = g.id
        WHERE dc.dataset_id = ?
        ORDER BY dc.granted_at DESC`,

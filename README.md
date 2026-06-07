@@ -1,12 +1,14 @@
 # NEMAR CLI
 
 [![License: CC BY-NC-ND 4.0](https://img.shields.io/badge/License-CC%20BY--NC--ND%204.0-lightgrey.svg)](https://creativecommons.org/licenses/by-nc-nd/4.0/)
-[![Documentation](https://img.shields.io/badge/docs-nemar--cli.pages.dev-blue)](https://nemar-cli.pages.dev)
+[![Documentation](https://img.shields.io/badge/docs-docs.nemar.org-blue)](https://docs.nemar.org)
 [![Tests](https://github.com/nemarOrg/nemar-cli/actions/workflows/test.yml/badge.svg)](https://github.com/nemarOrg/nemar-cli/actions/workflows/test.yml)
 
 Command-line interface for [NEMAR](https://nemar.org) (Neuroelectromagnetic Data Archive and Tools Resource) dataset management.
 
-**[Documentation](https://nemar-cli.pages.dev)** | [Quick Start](https://nemar-cli.pages.dev/getting-started/quickstart/) | [Commands](https://nemar-cli.pages.dev/commands/)
+**[Documentation](https://docs.nemar.org)** | [Quick Start](https://docs.nemar.org/cli/getting-started/quickstart/) | [Commands](https://docs.nemar.org/cli/commands/)
+
+> Documentation now lives in its own repository, [nemarOrg/docs](https://github.com/nemarOrg/docs) (Astro Starlight), and is published at [docs.nemar.org](https://docs.nemar.org).
 
 ## Features
 
@@ -435,7 +437,7 @@ RUN_ZENODO_TESTS=true TEST_DATASET_ID=nm099999 bun test test/zenodo-sandbox.test
 - Deposition lifecycle (create → upload → publish)
 - File uploads with checksum verification
 
-See [docs/development/zenodo-testing.md](docs/development/zenodo-testing.md) for comprehensive guide.
+See [the Zenodo testing guide](https://docs.nemar.org/develop/zenodo-testing/) for a comprehensive walkthrough.
 
 ## Environment Variables
 
