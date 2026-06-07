@@ -93,9 +93,14 @@ const TOOL_CHECKS: Record<string, ToolCheck> = {
   },
 };
 
-/** Required tools per command (kept narrow; validation checks Deno separately). */
+/**
+ * Required tools per command. `deno` is included for `upload` (it drives BIDS
+ * validation) so the pre-flight prerequisite check is consistent with deno's
+ * `required: true` in TOOL_CHECKS; the upload path also checks it inline via
+ * checkDenoInstalled() for a validation-specific message.
+ */
 const COMMAND_TOOLS: Record<NemarCommand, string[]> = {
-  upload: ["git-annex", "gh", "aws"],
+  upload: ["git-annex", "gh", "aws", "deno"],
   download: ["gh"],
   clone: ["git", "gh"],
   push: ["git-annex", "gh"],
