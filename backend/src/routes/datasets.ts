@@ -5,7 +5,7 @@
  */
 
 import { zValidator } from "@hono/zod-validator";
-import { Hono } from "hono";
+import { type Context, Hono } from "hono";
 import { z } from "zod";
 import { SYSTEM_USER_ID } from "../lib/constants";
 import { type LicenseTier, parseLicenseTierFilter } from "../lib/license";
@@ -23,6 +23,7 @@ import { generateDatasetId, isValidDatasetId } from "../services/datasetId";
 import {
   getAdminEmailsForCategory,
   resolveEmailConfig,
+  sendAccessRequestEmail,
   sendPublicationRequestEmail,
 } from "../services/email";
 import {
@@ -67,6 +68,89 @@ function extractRepoName(githubRepo: string): string | null {
     return null;
   }
   return parts[1];
+}
+
+type GrantResult = { ok: true } | { ok: false; stage: "github" | "db" | "s3"; error: unknown };
+
+/**
+ * Grant a user collaborator (push) access to a dataset repo, shared by the
+ * `invite` and access-request `approve` flows.
+ *
+ * Order matters and differs from the old inline code: the GitHub grant happens
+ * first, then the `dataset_collaborators` row is written **before** the S3
+ * permission and is treated as FATAL. That row is the index used to later
+ * remove the collaborator (on revoke / make-private reconcile); writing S3
+ * access without it would leave an unremovable grant. Both DB writes are
+ * idempotent (INSERT OR IGNORE) so re-approving is safe.
+ */
+async function grantCollaborator(
+  env: Bindings,
+  db: D1Database,
+  opts: {
+    repoName: string;
+    datasetPk: number;
+    datasetId: string;
+    granteeUserId: number;
+    granteeGithubUsername: string;
+    grantedBy: number;
+    accessType: "requested" | "invited";
+  },
+): Promise<GrantResult> {
+  try {
+    await addCollaborator(
+      opts.repoName,
+      opts.granteeGithubUsername,
+      "push",
+      await getDatasetsToken(env),
+    );
+  } catch (error) {
+    console.error("Failed to add collaborator on GitHub:", error);
+    return { ok: false, stage: "github", error };
+  }
+
+  // dataset_collaborators FIRST and FATAL: it is the removal index.
+  try {
+    await db
+      .prepare(
+        "INSERT OR IGNORE INTO dataset_collaborators (dataset_id, user_id, granted_by, access_type) VALUES (?, ?, ?, ?)",
+      )
+      .bind(opts.datasetPk, opts.granteeUserId, opts.grantedBy, opts.accessType)
+      .run();
+  } catch (error) {
+    console.error("CRITICAL: Failed to record collaborator in database:", error);
+    return { ok: false, stage: "db", error };
+  }
+
+  // S3 permission: sole authorization source for uploads.
+  try {
+    await db
+      .prepare(
+        "INSERT OR IGNORE INTO user_s3_permissions (user_id, s3_prefix, permission, granted_by) VALUES (?, ?, 'read_write', ?)",
+      )
+      .bind(opts.granteeUserId, opts.datasetId, opts.grantedBy)
+      .run();
+  } catch (error) {
+    console.error("CRITICAL: Failed to grant S3 permission for", opts.datasetId, error);
+    return { ok: false, stage: "s3", error };
+  }
+
+  // Audit log (non-fatal).
+  try {
+    await db
+      .prepare(
+        "INSERT INTO audit_log (user_id, action, resource_type, resource_id, details) VALUES (?, 'dataset_access_granted', 'dataset', ?, ?)",
+      )
+      .bind(
+        opts.grantedBy,
+        opts.datasetId,
+        JSON.stringify({ grantee_user_id: opts.granteeUserId, access_type: opts.accessType }),
+      )
+      .run();
+  } catch (error) {
+    console.error("Failed to write audit log:", error);
+  }
+
+  return { ok: true };
 }
 
 // File schema for upload requests
@@ -1572,8 +1656,13 @@ datasetRoutes.post("/:id/finalize", authMiddleware, async (c) => {
 /**
  * POST /datasets/:id/request-access - Request collaborator access to a dataset
  *
- * Auto-grants access for public repos. User can then push data via git-annex.
- * For metadata-only changes, users can fork and PR without this.
+ * Publish-gated (epic #713):
+ *  - PUBLIC dataset  -> grant nothing; the data is already world-readable.
+ *    Contributions go through PRs; write access is granted by the owner via
+ *    `invite`. Returns { action: 'none' }.
+ *  - PRIVATE dataset -> record a pending access request and notify the owner;
+ *    the owner/admin approves or denies. No auto-grant. Returns
+ *    { action: 'requested' }.
  */
 datasetRoutes.post("/:id/request-access", authMiddleware, async (c) => {
   const datasetId = c.req.param("id");
@@ -1583,7 +1672,7 @@ datasetRoutes.post("/:id/request-access", authMiddleware, async (c) => {
   // Get dataset info
   const dataset = await db
     .prepare(
-      "SELECT id, dataset_id, name, github_repo, owner_user_id FROM datasets WHERE dataset_id = ?",
+      "SELECT id, dataset_id, name, github_repo, owner_user_id, visibility FROM datasets WHERE dataset_id = ?",
     )
     .bind(datasetId)
     .first<{
@@ -1592,6 +1681,7 @@ datasetRoutes.post("/:id/request-access", authMiddleware, async (c) => {
       name: string;
       github_repo: string | null;
       owner_user_id: number;
+      visibility: string;
     }>();
 
   if (!dataset) {
@@ -1617,72 +1707,75 @@ datasetRoutes.post("/:id/request-access", authMiddleware, async (c) => {
     return c.json({ error: "You are the owner of this dataset" }, 409);
   }
 
-  // Extract repo name with defensive check
-  const repoName = extractRepoName(dataset.github_repo);
-  if (!repoName) {
-    console.error(`Invalid github_repo format: ${dataset.github_repo}`);
-    return c.json({ error: "Dataset has invalid GitHub repository configuration" }, 500);
+  // PUBLIC: nothing to grant. Public repos are world-readable; write access is
+  // granted by the owner via `invite`, and metadata changes go through PRs. The
+  // old behavior auto-granted push + S3 to anyone here, which was meaningless on
+  // public data and the main authorization hole on private data.
+  if (dataset.visibility === "public") {
+    return c.json({
+      action: "none",
+      message: `${dataset.name} is public and already readable by anyone. To contribute, fork and open a pull request, or ask the owner to invite you for write access.`,
+      dataset_id: datasetId,
+      github_repo: dataset.github_repo,
+    });
   }
 
-  // Add as collaborator on GitHub
-  try {
-    await addCollaborator(repoName, user.github_username, "push", await getDatasetsToken(c.env));
-  } catch (error) {
-    console.error("Failed to add collaborator on GitHub:", error);
-    return c.json({ error: "Failed to grant access on GitHub" }, 500);
-  }
-
-  // Record in our database
+  // PRIVATE (fail-closed for any non-'public' value): queue a request for the
+  // owner to approve. Upsert so a re-request after a denial returns to pending.
   try {
     await db
       .prepare(
-        "INSERT INTO dataset_collaborators (dataset_id, user_id, access_type) VALUES (?, ?, 'requested')",
+        `INSERT INTO access_requests (dataset_id, user_id, status)
+         VALUES (?, ?, 'pending')
+         ON CONFLICT (dataset_id, user_id)
+         DO UPDATE SET status = 'pending', created_at = CURRENT_TIMESTAMP, decided_at = NULL, decided_by = NULL`,
       )
       .bind(dataset.id, user.id)
       .run();
-  } catch (dbError) {
-    // GitHub succeeded but DB failed -- log but continue to S3 permission
-    console.error("Failed to record collaborator in database:", dbError);
+  } catch (error) {
+    console.error("Failed to record access request:", error);
+    return c.json({ error: "Failed to submit access request" }, 500);
   }
 
-  // S3 permission is critical: sole authorization source for uploads.
-  // Must not be swallowed in a shared catch block.
+  // Notify the owner (best-effort; the request is durable via the CLI either way).
   try {
-    await db
-      .prepare(
-        "INSERT OR IGNORE INTO user_s3_permissions (user_id, s3_prefix, permission, granted_by) VALUES (?, ?, 'read_write', ?)",
-      )
-      .bind(user.id, datasetId, user.id)
-      .run();
-  } catch (s3Error) {
-    console.error("CRITICAL: Failed to grant S3 permission for", datasetId, s3Error);
-    return c.json(
-      {
-        error: "Failed to configure S3 upload permission",
-        message:
-          "GitHub access was granted but S3 upload permission could not be set. Contact an administrator.",
-        dataset_id: datasetId,
-      },
-      500,
-    );
+    const owner = await db
+      .prepare("SELECT email FROM users WHERE id = ? AND deleted_at IS NULL")
+      .bind(dataset.owner_user_id)
+      .first<{ email: string }>();
+    if (owner?.email) {
+      const { fromEmail, replyTo, isDev } = resolveEmailConfig(c.env);
+      await sendAccessRequestEmail(
+        owner.email,
+        datasetId,
+        dataset.name,
+        user.username,
+        c.env.RESEND_API_KEY,
+        fromEmail,
+        replyTo,
+        isDev,
+      );
+    }
+  } catch (emailError) {
+    console.error("Failed to send access request notification:", emailError);
   }
 
   // Audit log (non-critical)
   try {
     await db
       .prepare(
-        "INSERT INTO audit_log (user_id, action, resource_type, resource_id, details) VALUES (?, 'dataset_access_granted', 'dataset', ?, ?)",
+        "INSERT INTO audit_log (user_id, action, resource_type, resource_id, details) VALUES (?, 'dataset_access_requested', 'dataset', ?, ?)",
       )
-      .bind(user.id, datasetId, JSON.stringify({ access_type: "requested" }))
+      .bind(user.id, datasetId, JSON.stringify({ status: "pending" }))
       .run();
   } catch (logError) {
     console.error("Failed to write audit log:", logError);
   }
 
   return c.json({
-    message: `Access granted to ${dataset.name}`,
+    action: "requested",
+    message: `Access request submitted for ${dataset.name}. The owner will review it.`,
     dataset_id: datasetId,
-    github_repo: dataset.github_repo,
   });
 });
 
@@ -1766,68 +1859,244 @@ datasetRoutes.post("/:id/invite", authMiddleware, zValidator("json", inviteSchem
     return c.json({ error: "Dataset has invalid GitHub repository configuration" }, 500);
   }
 
-  // Add as collaborator on GitHub
-  try {
-    await addCollaborator(repoName, invitee.github_username, "push", await getDatasetsToken(c.env));
-  } catch (error) {
-    console.error("Failed to add collaborator on GitHub:", error);
-    return c.json({ error: "Failed to grant access on GitHub" }, 500);
-  }
-
-  // Record in our database
-  try {
-    await db
-      .prepare(
-        "INSERT INTO dataset_collaborators (dataset_id, user_id, granted_by, access_type) VALUES (?, ?, ?, 'invited')",
-      )
-      .bind(dataset.id, invitee.id, currentUser.id)
-      .run();
-  } catch (dbError) {
-    // GitHub succeeded but DB failed -- log but continue to S3 permission
-    console.error("Failed to record collaborator in database:", dbError);
-  }
-
-  // S3 permission is critical: sole authorization source for uploads.
-  try {
-    await db
-      .prepare(
-        "INSERT OR IGNORE INTO user_s3_permissions (user_id, s3_prefix, permission, granted_by) VALUES (?, ?, 'read_write', ?)",
-      )
-      .bind(invitee.id, datasetId, currentUser.id)
-      .run();
-  } catch (s3Error) {
-    console.error("CRITICAL: Failed to grant S3 permission for", datasetId, s3Error);
+  // Grant push access (GitHub + dataset_collaborators + S3), shared with approve.
+  const grant = await grantCollaborator(c.env, db, {
+    repoName,
+    datasetPk: dataset.id,
+    datasetId,
+    granteeUserId: invitee.id,
+    granteeGithubUsername: invitee.github_username,
+    grantedBy: currentUser.id,
+    accessType: "invited",
+  });
+  if (!grant.ok) {
+    if (grant.stage === "github") {
+      return c.json({ error: "Failed to grant access on GitHub" }, 500);
+    }
     return c.json(
       {
-        error: "Failed to configure S3 upload permission",
+        error: "Failed to configure access",
         message:
-          "GitHub access was granted but S3 upload permission could not be set. Contact an administrator.",
+          "GitHub access was granted but the access record or S3 upload permission could not be set. Contact an administrator.",
         dataset_id: datasetId,
       },
       500,
     );
   }
 
-  // Audit log (non-critical)
+  return c.json({
+    message: `User '${username}' invited to ${dataset.name}`,
+    dataset_id: datasetId,
+    invitee: username,
+  });
+});
+
+/**
+ * GET /datasets/:id/access-requests - List access requests (owner/admin only)
+ *
+ * Defaults to pending; pass ?status=approved|denied to see decided ones.
+ */
+datasetRoutes.get("/:id/access-requests", authMiddleware, async (c) => {
+  const datasetId = c.req.param("id");
+  const currentUser = c.get("user");
+  const db = c.env.DB;
+
+  const dataset = await db
+    .prepare("SELECT id, owner_user_id FROM datasets WHERE dataset_id = ?")
+    .bind(datasetId)
+    .first<{ id: number; owner_user_id: number }>();
+
+  if (!dataset) {
+    return c.json({ error: "Dataset not found" }, 404);
+  }
+
+  if (dataset.owner_user_id !== currentUser.id && !hasRole(currentUser.role, "admin")) {
+    return c.json({ error: "Only dataset owner or admin can view access requests" }, 403);
+  }
+
+  const requested = c.req.query("status");
+  const status =
+    requested === "approved" || requested === "denied" || requested === "pending"
+      ? requested
+      : "pending";
+
+  const rows = await db
+    .prepare(
+      `SELECT u.username, u.github_username, ar.status, ar.created_at, ar.decided_at
+       FROM access_requests ar
+       JOIN users u ON ar.user_id = u.id
+       WHERE ar.dataset_id = ? AND ar.status = ? AND u.deleted_at IS NULL
+       ORDER BY ar.created_at ASC`,
+    )
+    .bind(dataset.id, status)
+    .all();
+
+  const requests = rows.results ?? [];
+  return c.json({ dataset_id: datasetId, status, requests, count: requests.length });
+});
+
+/**
+ * Shared owner/admin guard + dataset/requester/pending-request resolution for
+ * the approve and deny endpoints. Returns a typed error response or the
+ * resolved rows.
+ */
+async function resolveAccessRequest(
+  c: Context<{ Bindings: Bindings; Variables: Variables }>,
+): Promise<
+  | { error: Response }
+  | {
+      dataset: { id: number; dataset_id: string; name: string; github_repo: string | null };
+      requester: { id: number; username: string; github_username: string };
+    }
+> {
+  const datasetId = c.req.param("id");
+  const username = c.req.param("username");
+  const currentUser = c.get("user");
+  const db = c.env.DB;
+
+  const dataset = await db
+    .prepare(
+      "SELECT id, dataset_id, name, github_repo, owner_user_id FROM datasets WHERE dataset_id = ?",
+    )
+    .bind(datasetId)
+    .first<{
+      id: number;
+      dataset_id: string;
+      name: string;
+      github_repo: string | null;
+      owner_user_id: number;
+    }>();
+
+  if (!dataset) {
+    return { error: c.json({ error: "Dataset not found" }, 404) };
+  }
+
+  if (dataset.owner_user_id !== currentUser.id && !hasRole(currentUser.role, "admin")) {
+    return {
+      error: c.json({ error: "Only dataset owner or admin can decide access requests" }, 403),
+    };
+  }
+
+  const requester = await db
+    .prepare(
+      "SELECT id, username, github_username FROM users WHERE username = ? AND deleted_at IS NULL",
+    )
+    .bind(username)
+    .first<{ id: number; username: string; github_username: string }>();
+
+  if (!requester) {
+    return { error: c.json({ error: `User '${username}' not found` }, 404) };
+  }
+
+  const reqRow = await db
+    .prepare("SELECT status FROM access_requests WHERE dataset_id = ? AND user_id = ?")
+    .bind(dataset.id, requester.id)
+    .first<{ status: string }>();
+
+  if (!reqRow || reqRow.status !== "pending") {
+    return { error: c.json({ error: `No pending access request from '${username}'` }, 404) };
+  }
+
+  return { dataset, requester };
+}
+
+/**
+ * POST /datasets/:id/access-requests/:username/approve - grant the request
+ * (owner/admin only). Creates the collaborator + S3 permission.
+ */
+datasetRoutes.post("/:id/access-requests/:username/approve", authMiddleware, async (c) => {
+  const datasetId = c.req.param("id");
+  const username = c.req.param("username");
+  const currentUser = c.get("user");
+  const db = c.env.DB;
+
+  const resolved = await resolveAccessRequest(c);
+  if ("error" in resolved) return resolved.error;
+  const { dataset, requester } = resolved;
+
+  if (!dataset.github_repo) {
+    return c.json({ error: "Dataset has no GitHub repository" }, 400);
+  }
+  const repoName = extractRepoName(dataset.github_repo);
+  if (!repoName) {
+    console.error(`Invalid github_repo format: ${dataset.github_repo}`);
+    return c.json({ error: "Dataset has invalid GitHub repository configuration" }, 500);
+  }
+
+  const grant = await grantCollaborator(c.env, db, {
+    repoName,
+    datasetPk: dataset.id,
+    datasetId,
+    granteeUserId: requester.id,
+    granteeGithubUsername: requester.github_username,
+    grantedBy: currentUser.id,
+    accessType: "requested",
+  });
+  if (!grant.ok) {
+    if (grant.stage === "github") {
+      return c.json({ error: "Failed to grant access on GitHub" }, 500);
+    }
+    return c.json(
+      {
+        error: "Failed to configure access",
+        message:
+          "GitHub access was granted but the access record or S3 upload permission could not be set. Contact an administrator.",
+        dataset_id: datasetId,
+      },
+      500,
+    );
+  }
+
+  await db
+    .prepare(
+      "UPDATE access_requests SET status = 'approved', decided_at = CURRENT_TIMESTAMP, decided_by = ? WHERE dataset_id = ? AND user_id = ?",
+    )
+    .bind(currentUser.id, dataset.id, requester.id)
+    .run();
+
+  return c.json({
+    message: `Access approved for '${username}' on ${dataset.name}`,
+    dataset_id: datasetId,
+    username,
+  });
+});
+
+/**
+ * POST /datasets/:id/access-requests/:username/deny - reject the request
+ * (owner/admin only). No GitHub/S3 grant; the user may request again later.
+ */
+datasetRoutes.post("/:id/access-requests/:username/deny", authMiddleware, async (c) => {
+  const datasetId = c.req.param("id");
+  const username = c.req.param("username");
+  const currentUser = c.get("user");
+  const db = c.env.DB;
+
+  const resolved = await resolveAccessRequest(c);
+  if ("error" in resolved) return resolved.error;
+  const { dataset, requester } = resolved;
+
+  await db
+    .prepare(
+      "UPDATE access_requests SET status = 'denied', decided_at = CURRENT_TIMESTAMP, decided_by = ? WHERE dataset_id = ? AND user_id = ?",
+    )
+    .bind(currentUser.id, dataset.id, requester.id)
+    .run();
+
   try {
     await db
       .prepare(
-        "INSERT INTO audit_log (user_id, action, resource_type, resource_id, details) VALUES (?, 'dataset_access_granted', 'dataset', ?, ?)",
+        "INSERT INTO audit_log (user_id, action, resource_type, resource_id, details) VALUES (?, 'dataset_access_denied', 'dataset', ?, ?)",
       )
-      .bind(
-        currentUser.id,
-        datasetId,
-        JSON.stringify({ invitee: username, access_type: "invited" }),
-      )
+      .bind(currentUser.id, datasetId, JSON.stringify({ requester: username }))
       .run();
   } catch (logError) {
     console.error("Failed to write audit log:", logError);
   }
 
   return c.json({
-    message: `User '${username}' invited to ${dataset.name}`,
+    message: `Access denied for '${username}' on ${dataset.name}`,
     dataset_id: datasetId,
-    invitee: username,
+    username,
   });
 });
 
