@@ -2432,18 +2432,21 @@ export function computeCollaboratorActions(opts: {
   const ownerLogin = opts.ownerLogin ? opts.ownerLogin.toLowerCase() : null;
   const skip = new Set((opts.skipLogins ?? []).map((s) => s.toLowerCase()));
 
-  const desired = new Map<string, "push" | "maintain">();
-  if (ownerLogin) desired.set(ownerLogin, "maintain");
+  // Keyed by lowercased login for case-insensitive matching, but carrying the
+  // ORIGINAL-case login so grants/output use the canonical GitHub username.
+  const desired = new Map<string, { login: string; role: "push" | "maintain" }>();
+  if (opts.ownerLogin && ownerLogin)
+    desired.set(ownerLogin, { login: opts.ownerLogin, role: "maintain" });
   for (const w of opts.approvedWriters) {
     const l = w.toLowerCase();
-    if (l && l !== ownerLogin) desired.set(l, "push");
+    if (l && l !== ownerLogin) desired.set(l, { login: w, role: "push" });
   }
 
   const currentByLogin = new Map(opts.current.map((c) => [c.login.toLowerCase(), c]));
   const toAdd: CollaboratorActions["toAdd"] = [];
   const toPromote: CollaboratorActions["toPromote"] = [];
-  for (const [login, role] of desired) {
-    const cur = currentByLogin.get(login);
+  for (const [key, { login, role }] of desired) {
+    const cur = currentByLogin.get(key);
     if (!cur) {
       toAdd.push({ login, role });
     } else if (roleRank(cur.role_name) < roleRank(role)) {
@@ -2560,6 +2563,9 @@ export async function reconcileCollaborators(
       result.errors.push(`remove ${login}: ${errText(e)}`);
     }
   }
+  if (result.errors.length > 0) {
+    console.error(`[reconcile-collaborators] ${opts.repo}: ${result.errors.join("; ")}`);
+  }
   return result;
 }
 
@@ -2626,14 +2632,17 @@ export function isRequiredCheckGreen(
  * Green-gate: is the required BIDS check green on a repo's default-branch HEAD?
  * Used to skip applying protection to a repo whose latest validation is red or
  * missing (so we never brick PRs). Reads check-runs + the legacy combined
- * status; any fetch failure is treated as NOT green (fail-closed).
+ * status. Returns a tri-state so callers can distinguish a genuinely red/missing
+ * check from a transient GitHub fetch failure (both fail-closed, but the latter
+ * is logged and surfaced as `fetch_error` so it can be retried, not mistaken for
+ * a broken BIDS pipeline).
  */
 export async function checkRunGreenOnDefaultHead(
   repo: string,
   branch: string,
   required: RequiredCheck,
   pat: string,
-): Promise<boolean> {
+): Promise<{ green: boolean; reason: "green" | "red" | "fetch_error" }> {
   const headers = ghHeaders(pat);
   let checkRuns: Array<{ name: string; conclusion: string | null; app_id?: number | null }> = [];
   try {
@@ -2642,18 +2651,26 @@ export async function checkRunGreenOnDefaultHead(
       { headers },
       { retryOn404: true },
     );
-    if (r.ok) {
-      const d = (await r.json()) as {
-        check_runs?: Array<{ name: string; conclusion: string | null; app?: { id?: number } }>;
-      };
-      checkRuns = (d.check_runs ?? []).map((c) => ({
-        name: c.name,
-        conclusion: c.conclusion,
-        app_id: c.app?.id ?? null,
-      }));
+    if (!r.ok) {
+      console.error(
+        `[green-gate] check-runs fetch for ${repo}@${branch} returned HTTP ${r.status}; treating as not-green (fetch_error)`,
+      );
+      return { green: false, reason: "fetch_error" };
     }
-  } catch {
-    return false;
+    const d = (await r.json()) as {
+      check_runs?: Array<{ name: string; conclusion: string | null; app?: { id?: number } }>;
+    };
+    checkRuns = (d.check_runs ?? []).map((c) => ({
+      name: c.name,
+      conclusion: c.conclusion,
+      app_id: c.app?.id ?? null,
+    }));
+  } catch (e) {
+    console.error(
+      `[green-gate] check-runs fetch failed for ${repo}@${branch} (treating as not-green):`,
+      e,
+    );
+    return { green: false, reason: "fetch_error" };
   }
   let statuses: Array<{ context: string; state: string }> = [];
   try {
@@ -2666,10 +2683,14 @@ export async function checkRunGreenOnDefaultHead(
       const d = (await r.json()) as { statuses?: Array<{ context: string; state: string }> };
       statuses = d.statuses ?? [];
     }
-  } catch {
-    /* statuses optional */
+  } catch (e) {
+    console.error(
+      `[green-gate] combined-status fetch failed for ${repo}@${branch} (continuing on check-runs only):`,
+      e,
+    );
   }
-  return isRequiredCheckGreen(required, checkRuns, statuses);
+  const green = isRequiredCheckGreen(required, checkRuns, statuses);
+  return { green, reason: green ? "green" : "red" };
 }
 
 type StepStatus = "ok" | "skipped" | "failed";
@@ -2717,27 +2738,39 @@ export async function ensureRepoToSpec(
     if (r.ok) {
       const info = (await r.json()) as { default_branch?: string };
       defaultBranch = info.default_branch || "main";
+    } else {
+      console.error(
+        `[repo-spec] repo info fetch for ${repo} returned HTTP ${r.status}; defaulting branch to 'main'`,
+      );
     }
-  } catch {
-    /* default to main */
+  } catch (e) {
+    console.error(
+      `[repo-spec] repo info fetch failed for ${repo}, defaulting branch to 'main':`,
+      e,
+    );
   }
 
   if (opts.dryRun) {
     steps.plan = { status: "ok", detail: `${opts.visibility}, default=${defaultBranch}` };
     if (isPublic) {
-      const green = await checkRunGreenOnDefaultHead(repo, defaultBranch, bidsCheck, pat);
-      steps.branch_ruleset = green
+      const g = await checkRunGreenOnDefaultHead(repo, defaultBranch, bidsCheck, pat);
+      steps.branch_ruleset = g.green
         ? { status: "ok", detail: "would apply" }
-        : { status: "skipped", detail: "RED_REQUIRED_CHECK" };
+        : {
+            status: "skipped",
+            detail: g.reason === "fetch_error" ? "FETCH_ERROR" : "RED_REQUIRED_CHECK",
+          };
     } else {
       steps.branch_ruleset = { status: "skipped", detail: "private: no ruleset" };
     }
     if (opts.collaborators) {
-      let current: DirectCollaborator[] = [];
+      let current: DirectCollaborator[];
       try {
         current = await listDirectCollaborators(repo, pat);
       } catch (e) {
+        // Cannot read the ledger -> the plan would be wrong; stop here.
         steps.collaborators = { status: "failed", detail: errText(e) };
+        return { repo, visibility: opts.visibility, defaultBranch, steps };
       }
       const a = computeCollaboratorActions({
         current,
@@ -2797,9 +2830,12 @@ export async function ensureRepoToSpec(
     if (!workflowsOk) {
       steps.branch_ruleset = { status: "skipped", detail: "workflows not deployed" };
     } else {
-      const green = await checkRunGreenOnDefaultHead(repo, "main", bidsCheck, pat);
-      if (!green) {
-        steps.branch_ruleset = { status: "skipped", detail: "RED_REQUIRED_CHECK" };
+      const g = await checkRunGreenOnDefaultHead(repo, "main", bidsCheck, pat);
+      if (!g.green) {
+        steps.branch_ruleset = {
+          status: "skipped",
+          detail: g.reason === "fetch_error" ? "FETCH_ERROR" : "RED_REQUIRED_CHECK",
+        };
       } else {
         try {
           await ensureBranchRuleset(repo, pat, { checks: deriveContexts(repo), strict: false });

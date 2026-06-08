@@ -104,7 +104,7 @@ import {
   readBidsDescription,
   readRepoMetadata,
 } from "../services/repo-metadata";
-import { resolveRepoCollaborators } from "../services/repo-spec";
+import { mirrorReconcileRemovals, resolveRepoCollaborators } from "../services/repo-spec";
 import { withRetry } from "../services/retry";
 import {
   applyObjectLockBatch,
@@ -2711,21 +2711,11 @@ adminRoutes.patch("/datasets/:id/visibility", zValidator("json", visibilitySchem
       refreshProtection: visibility === "public",
       collaborators: { ownerLogin, approvedWriters },
     });
-    const removed = specEnforcement.reconcile?.removed ?? [];
-    if (removed.length > 0) {
-      const placeholders = removed.map(() => "?").join(",");
-      await db
-        .prepare(
-          `DELETE FROM dataset_collaborators
-             WHERE dataset_id = (SELECT id FROM datasets WHERE dataset_id = ?)
-               AND user_id IN (SELECT id FROM users WHERE github_username IN (${placeholders}))`,
-        )
-        .bind(datasetId, ...removed)
-        .run();
-    }
   } catch (specError) {
     console.error(`Repo-spec enforcement failed for ${datasetId} (non-fatal):`, specError);
   }
+  // Mirror reconcile removals into D1 (own try/catch; flags a divergence).
+  await mirrorReconcileRemovals(db, datasetId, specEnforcement?.reconcile?.removed);
 
   // Audit log (non-fatal but warn user if fails)
   let auditLogFailed = false;
@@ -3537,28 +3527,27 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
       // Enforce the published-repo spec (epic #713): lock main (ruleset,
       // green-gated) + reconcile collaborators. Non-fatal; visibility is
       // already public + verified above.
+      let publishSpec: Awaited<ReturnType<typeof ensureRepoToSpec>> | undefined;
       try {
         const { ownerLogin, approvedWriters } = await resolveRepoCollaborators(db, datasetId);
-        const spec = await ensureRepoToSpec(repoName, pat, {
+        publishSpec = await ensureRepoToSpec(repoName, pat, {
           visibility: "public",
           refreshProtection: true,
           collaborators: { ownerLogin, approvedWriters },
         });
-        const removed = spec.reconcile?.removed ?? [];
-        if (removed.length > 0) {
-          const placeholders = removed.map(() => "?").join(",");
-          await db
-            .prepare(
-              `DELETE FROM dataset_collaborators
-                 WHERE dataset_id = (SELECT id FROM datasets WHERE dataset_id = ?)
-                   AND user_id IN (SELECT id FROM users WHERE github_username IN (${placeholders}))`,
-            )
-            .bind(datasetId, ...removed)
-            .run();
+        // Surface a non-green/failed protection step in the bulk-approval log,
+        // since the orchestrator response does not carry the per-step detail.
+        const offSteps = Object.entries(publishSpec.steps)
+          .filter(([, s]) => s.status !== "ok")
+          .map(([k, s]) => `${k}=${s.status}${s.detail ? `(${s.detail})` : ""}`);
+        if (offSteps.length > 0) {
+          console.warn(`[repo-spec] ${datasetId} enforcement non-ok steps: ${offSteps.join(", ")}`);
         }
       } catch (specError) {
         console.error(`Repo-spec enforcement failed for ${datasetId} (non-fatal):`, specError);
       }
+      // Mirror reconcile removals into D1 (own try/catch; flags a divergence).
+      await mirrorReconcileRemovals(db, datasetId, publishSpec?.reconcile?.removed);
 
       await updateProgress("repo_public");
     } catch (err) {

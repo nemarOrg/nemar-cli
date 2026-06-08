@@ -44,7 +44,7 @@ import {
   triggerPrescreenRun,
 } from "../services/github";
 import { getDatasetsToken } from "../services/github-auth";
-import { resolveRepoCollaborators } from "../services/repo-spec";
+import { mirrorReconcileRemovals, resolveRepoCollaborators } from "../services/repo-spec";
 import {
   generateDatasetUploadUrls,
   getManifest,
@@ -1645,7 +1645,7 @@ datasetRoutes.post("/:id/finalize", authMiddleware, async (c) => {
         pat,
       );
       if (rec.errors.length > 0) {
-        warnings.push(`Collaborator reconcile had ${rec.errors.length} error(s)`);
+        warnings.push(`Collaborator reconcile: ${rec.errors.join("; ")}`);
       }
     } catch (error) {
       console.error("Failed to reconcile collaborators on finalize:", error);
@@ -3064,21 +3064,11 @@ datasetRoutes.post("/:id/publish", authMiddleware, async (c) => {
       refreshProtection: true,
       collaborators: { ownerLogin, approvedWriters },
     });
-    // Reconcile dropped these GitHub grants; mirror the removal in D1.
-    const removed = specEnforcement.reconcile?.removed ?? [];
-    if (removed.length > 0) {
-      const placeholders = removed.map(() => "?").join(",");
-      await db
-        .prepare(
-          `DELETE FROM dataset_collaborators WHERE dataset_id = ? AND user_id IN (
-             SELECT id FROM users WHERE github_username IN (${placeholders}))`,
-        )
-        .bind(dataset.id, ...removed)
-        .run();
-    }
   } catch (specError) {
     console.error(`Repo-spec enforcement failed for ${datasetId} (non-fatal):`, specError);
   }
+  // Mirror reconcile removals into D1 (own try/catch; flags a divergence).
+  await mirrorReconcileRemovals(db, datasetId, specEnforcement?.reconcile?.removed);
 
   // Step 4: Audit log
   await db
