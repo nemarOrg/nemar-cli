@@ -1,6 +1,6 @@
 {
   "name": "nemar-cli",
-  "version": "0.8.49-dev1",
+  "version": "0.8.49-dev2",
   "description": "CLI for NEMAR (Neuroelectromagnetic Data Archive and Tools Resource) dataset management",
   "type": "module",
   "main": "dist/index.js",
