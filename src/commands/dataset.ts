@@ -4669,8 +4669,7 @@ Examples:
                   );
                 }
               } catch (retryError) {
-                spinner.fail(`Could not request access: ${errorDetail(credError)}`);
-                console.log(chalk.dim(`  request-access failed: ${errorDetail(retryError)}`));
+                spinner.fail(`Could not request access: ${errorDetail(retryError)}`);
               }
               credPermissionDenied = true;
             } else {
