@@ -931,6 +931,37 @@ export async function getWorkflowRuns(
 }
 
 /**
+ * Bash for the `version-check` workflow's core assertion (epic #713, phase #718):
+ * the PR's `Version` must be valid semver `X.Y.Z` AND a strict increment over
+ * `main`'s version. Reads `$PR_VERSION` and `$MAIN_VERSION` from the env (the
+ * workflow extracts them with jq); exits 1 with a `::error::` on a bad/equal/
+ * downgraded version. A non-semver `$MAIN_VERSION` (e.g. a first version, where
+ * main has no `Version` field) is treated as `0.0.0`. Exported so the exact
+ * script is run in tests (`backend/test/version-check.test.ts`).
+ *
+ * Pure field comparison (no `sort -V`) so it is portable across the GitHub
+ * ubuntu runner and local test shells.
+ */
+export const VERSION_COMPARE_SNIPPET = `if ! [[ "$PR_VERSION" =~ ^[0-9]{1,9}\\.[0-9]{1,9}\\.[0-9]{1,9}$ ]]; then
+  echo "::error::Version '$PR_VERSION' in dataset_description.json is not valid semver (expected X.Y.Z). Use 'nemar dataset release' to set it."
+  exit 1
+fi
+MAIN_SEMVER="$MAIN_VERSION"
+[[ "$MAIN_SEMVER" =~ ^[0-9]{1,9}\\.[0-9]{1,9}\\.[0-9]{1,9}$ ]] || MAIN_SEMVER="0.0.0"
+IFS=. read -r PMAJ PMIN PPAT <<< "$PR_VERSION"
+IFS=. read -r MMAJ MMIN MPAT <<< "$MAIN_SEMVER"
+GT=0
+if [ "$PMAJ" -gt "$MMAJ" ]; then GT=1
+elif [ "$PMAJ" -eq "$MMAJ" ] && [ "$PMIN" -gt "$MMIN" ]; then GT=1
+elif [ "$PMAJ" -eq "$MMAJ" ] && [ "$PMIN" -eq "$MMIN" ] && [ "$PPAT" -gt "$MPAT" ]; then GT=1
+fi
+if [ "$GT" -ne 1 ]; then
+  echo "::error::Version must be a strict increment over the main version $MAIN_SEMVER (got '$PR_VERSION'). Use 'nemar dataset release' to bump."
+  exit 1
+fi
+echo "Version check passed: $MAIN_SEMVER -> $PR_VERSION"`;
+
+/**
  * Deploy GitHub Actions workflow files to a dataset repository
  */
 export function getWorkflowTemplates(): Array<{ path: string; content: string }> {
@@ -1011,26 +1042,22 @@ jobs:
 
       - name: Check version bump
         run: |
-          # Get version from PR branch
+          # PR-branch version
           PR_VERSION=$(jq -r '.Version // "0.0.0"' dataset_description.json)
 
-          # Get version from main branch
+          # main-branch version
           git fetch origin main
           git checkout origin/main -- dataset_description.json 2>/dev/null || echo '{}' > dataset_description.json
           MAIN_VERSION=$(jq -r '.Version // "0.0.0"' dataset_description.json)
-
-          # Restore PR version
           git checkout HEAD -- dataset_description.json
 
           echo "Main version: $MAIN_VERSION"
           echo "PR version: $PR_VERSION"
 
-          if [ "$PR_VERSION" == "$MAIN_VERSION" ]; then
-            echo "::error::Version not bumped. Update 'Version' field in dataset_description.json"
-            exit 1
-          fi
-
-          echo "Version check passed: $MAIN_VERSION -> $PR_VERSION"
+          # Require valid semver X.Y.Z that strictly increments over main.
+${VERSION_COMPARE_SNIPPET.split("\n")
+  .map((l) => `          ${l}`)
+  .join("\n")}
 `;
 
   // PR Merge Handler workflow
