@@ -53,6 +53,8 @@ import {
   deleteNotice,
   denyPublication,
   dispatchManifest,
+  enforceBulk,
+  enforceDataset,
   errorDetail,
   finalizeDataset,
   getCiStatus,
@@ -60,6 +62,7 @@ import {
   getDatasetFiles,
   getDoiInfo,
   getEmailPreferences,
+  getFleetDrift,
   getSummaryCoverage,
   getSyncStatus,
   listAdminNotices,
@@ -3034,6 +3037,156 @@ function printReindexLine(r: ReindexResponse, opts?: { showRef?: boolean }): voi
     console.log(chalk.red(`    metadata columns: ${r.sync.metadata_columns_error}`));
   }
 }
+
+// ============================================================================
+// Fleet governance (epic #713)
+// ============================================================================
+
+const fleetCommand = new Command("fleet").description(
+  "Governance drift reporting and enforcement (epic #713)",
+);
+
+fleetCommand
+  .command("drift")
+  .description("Report dataset repos that are off the governance spec")
+  .option("--prefix <prefix>", "Filter datasets by id prefix (e.g. nm, on)")
+  .option("--visibility <vis>", "Filter by visibility: public or private")
+  .option("--limit <n>", "Max repos to scan (default 25, max 50)", "25")
+  .option("--json", "Output raw JSON")
+  .action(async (options) => {
+    if (!isAuthenticated()) {
+      console.log(chalk.red("Error: Not authenticated"));
+      process.exit(1);
+    }
+    if (options.visibility && !["public", "private"].includes(options.visibility)) {
+      console.log(chalk.red("Error: --visibility must be public or private"));
+      process.exit(1);
+    }
+    const spinner = ora("Scanning fleet for drift...").start();
+    try {
+      const r = await getFleetDrift({
+        prefix: options.prefix,
+        visibility: options.visibility,
+        limit: Number.parseInt(options.limit, 10) || 25,
+      });
+      spinner.stop();
+      if (options.json) {
+        console.log(JSON.stringify(r, null, 2));
+        return;
+      }
+      console.log();
+      console.log(chalk.bold(`Fleet drift (scanned ${r.scanned}):`));
+      const order = [
+        "PUBLIC_UNPROTECTED",
+        "RED_REQUIRED_CHECK",
+        "CONTEXT_NAME_MISMATCH",
+        "MISSING_REQUIRED_WORKFLOW",
+        "PRIVATE_WITH_STRAY_READ",
+        "DEFAULT_BRANCH_OUTLIER",
+        "DEPRECATED_WORKFLOW_PRESENT",
+        "COMPLIANT",
+      ];
+      for (const b of order) {
+        const ids = r.buckets[b];
+        if (!ids || ids.length === 0) continue;
+        const color = b === "COMPLIANT" ? chalk.green : chalk.yellow;
+        console.log(`  ${color(b.padEnd(28))} ${ids.length}`);
+        if (b !== "COMPLIANT") {
+          const shown = ids.slice(0, 20).join(", ");
+          console.log(
+            chalk.dim(`    ${shown}${ids.length > 20 ? ` ... +${ids.length - 20}` : ""}`),
+          );
+        }
+      }
+      console.log();
+    } catch (error) {
+      if (error instanceof ApiError) spinner.fail(error.message);
+      else {
+        spinner.fail("Failed to scan fleet");
+        console.log(chalk.red(`  ${(error as Error).message}`));
+      }
+      process.exit(1);
+    }
+  });
+
+fleetCommand
+  .command("enforce")
+  .description("Bring dataset repos to the governance spec (single or --all). Dry-run by default.")
+  .argument("[dataset-id]", "Dataset to enforce (omit when using --all)")
+  .option("--all", "Bulk enforce across a filtered set (owner-only)")
+  .option("--apply", "Actually apply changes (default is a dry run)")
+  .option("--prefix <prefix>", "Bulk: filter by id prefix")
+  .option("--visibility <vis>", "Bulk: filter by visibility (public|private)")
+  .option("--limit <n>", "Bulk: max repos (default 25, max 50)", "25")
+  .option("--json", "Output raw JSON")
+  .action(async (datasetId, options) => {
+    if (!isAuthenticated()) {
+      console.log(chalk.red("Error: Not authenticated"));
+      process.exit(1);
+    }
+    if (!datasetId && !options.all) {
+      console.log(chalk.red("Error: provide a dataset-id or use --all"));
+      process.exit(1);
+    }
+    if (datasetId && options.all) {
+      console.log(chalk.red("Error: provide a dataset-id OR --all, not both"));
+      process.exit(1);
+    }
+    const dryRun = !options.apply;
+    const tag = dryRun ? "[dry-run] " : "";
+    const spinner = ora(`${tag}Enforcing spec...`).start();
+    try {
+      if (datasetId) {
+        const r = await enforceDataset(datasetId, dryRun);
+        spinner.succeed(`${tag}${datasetId} (${r.result.visibility})`);
+        if (options.json) {
+          console.log(JSON.stringify(r, null, 2));
+          return;
+        }
+        for (const [step, s] of Object.entries(r.result.steps)) {
+          const color =
+            s.status === "ok" ? chalk.green : s.status === "skipped" ? chalk.yellow : chalk.red;
+          console.log(
+            `  ${color(s.status.padEnd(8))} ${step}${s.detail ? chalk.dim(` (${s.detail})`) : ""}`,
+          );
+        }
+      } else {
+        const r = await enforceBulk({
+          prefix: options.prefix,
+          visibility: options.visibility,
+          limit: Number.parseInt(options.limit, 10) || 25,
+          dryRun,
+        });
+        spinner.succeed(`${tag}processed ${r.count} repo(s)`);
+        if (options.json) {
+          console.log(JSON.stringify(r, null, 2));
+          return;
+        }
+        for (const res of r.results) {
+          if (res.error) {
+            console.log(`  ${chalk.red("error")}  ${res.dataset_id}: ${res.error}`);
+            continue;
+          }
+          const off = Object.entries(res.steps ?? {})
+            .filter(([, s]) => s.status !== "ok")
+            .map(([k, s]) => `${k}=${s.status}`);
+          const label = off.length ? chalk.yellow("drift") : chalk.green("ok");
+          console.log(
+            `  ${label}    ${res.dataset_id}${off.length ? chalk.dim(` (${off.join(", ")})`) : ""}`,
+          );
+        }
+      }
+    } catch (error) {
+      if (error instanceof ApiError) spinner.fail(error.message);
+      else {
+        spinner.fail("Enforcement failed");
+        console.log(chalk.red(`  ${(error as Error).message}`));
+      }
+      process.exit(1);
+    }
+  });
+
+adminCommand.addCommand(fleetCommand);
 
 const reindexCommand = new Command("reindex").description(
   "Refresh dataset metadata: enrichment + nemar.org sync + first-class D1 columns",

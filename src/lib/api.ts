@@ -1117,14 +1117,20 @@ export async function updateDoi(
 // ============================================================================
 
 export interface RequestAccessResponse {
+  /**
+   * "none"      - public dataset; nothing granted (already world-readable)
+   * "requested" - private dataset; a pending request was queued for the owner
+   */
+  action: "none" | "requested";
   message: string;
   dataset_id: string;
-  github_repo: string;
+  github_repo?: string;
 }
 
 /**
- * Request collaborator access to a dataset (requires authentication)
- * Auto-grants for public repos
+ * Request collaborator access to a dataset (requires authentication).
+ * Publish-gated: public datasets grant nothing; private datasets queue a
+ * request for the owner to approve.
  */
 export async function requestDatasetAccess(datasetId: string): Promise<RequestAccessResponse> {
   return request<RequestAccessResponse>(
@@ -1132,6 +1138,70 @@ export async function requestDatasetAccess(datasetId: string): Promise<RequestAc
     {
       method: "POST",
     },
+    true,
+  );
+}
+
+export interface AccessRequest {
+  username: string;
+  github_username: string;
+  status: "pending" | "approved" | "denied";
+  created_at: string;
+  decided_at: string | null;
+}
+
+export interface ListAccessRequestsResponse {
+  dataset_id: string;
+  status: string;
+  requests: AccessRequest[];
+  count: number;
+}
+
+/**
+ * List access requests for a dataset (owner/admin only). Defaults to pending.
+ */
+export async function listAccessRequests(
+  datasetId: string,
+  status?: "pending" | "approved" | "denied",
+): Promise<ListAccessRequestsResponse> {
+  const qs = status ? `?status=${status}` : "";
+  return request<ListAccessRequestsResponse>(
+    `/datasets/${datasetId}/access-requests${qs}`,
+    {},
+    true,
+  );
+}
+
+export interface DecideAccessRequestResponse {
+  message: string;
+  dataset_id: string;
+  username: string;
+}
+
+/**
+ * Approve a pending access request (owner/admin only).
+ */
+export async function approveAccessRequest(
+  datasetId: string,
+  username: string,
+): Promise<DecideAccessRequestResponse> {
+  return request<DecideAccessRequestResponse>(
+    `/datasets/${datasetId}/access-requests/${username}/approve`,
+    { method: "POST" },
+    true,
+  );
+}
+
+/**
+ * Deny a pending access request (owner/admin only).
+ */
+export async function denyAccessRequest(
+  datasetId: string,
+  username: string,
+): Promise<DecideAccessRequestResponse> {
+  return request<DecideAccessRequestResponse>(
+    `/datasets/${datasetId}/access-requests/${username}/deny`,
+    { method: "POST" },
     true,
   );
 }
@@ -1990,6 +2060,80 @@ export async function reindexBulk(
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ filter, ...(options ?? {}) }),
+    },
+    true,
+  );
+}
+
+// ============================================================================
+// Fleet governance (epic #713)
+// ============================================================================
+
+export interface FleetDriftResponse {
+  scanned: number;
+  limit: number;
+  counts: Record<string, number>;
+  buckets: Record<string, string[]>;
+  repos: Array<{ dataset_id: string; buckets: string[] }>;
+}
+
+export async function getFleetDrift(opts?: {
+  prefix?: string;
+  visibility?: "public" | "private";
+  limit?: number;
+}): Promise<FleetDriftResponse> {
+  const qs = new URLSearchParams();
+  if (opts?.prefix) qs.set("prefix", opts.prefix);
+  if (opts?.visibility) qs.set("visibility", opts.visibility);
+  if (opts?.limit) qs.set("limit", String(opts.limit));
+  const suffix = qs.toString() ? `?${qs.toString()}` : "";
+  return request<FleetDriftResponse>(`/admin/fleet/drift${suffix}`, {}, true);
+}
+
+export interface EnforceResponse {
+  dataset_id: string;
+  dry_run: boolean;
+  result: {
+    visibility: string;
+    defaultBranch: string;
+    steps: Record<string, { status: string; detail?: string }>;
+  };
+}
+
+export async function enforceDataset(datasetId: string, dryRun: boolean): Promise<EnforceResponse> {
+  return request<EnforceResponse>(
+    `/admin/datasets/${datasetId}/enforce`,
+    { method: "POST", body: JSON.stringify({ dry_run: dryRun }) },
+    true,
+  );
+}
+
+export interface EnforceBulkResponse {
+  dry_run: boolean;
+  count: number;
+  results: Array<{
+    dataset_id: string;
+    steps?: Record<string, { status: string; detail?: string }>;
+    error?: string;
+  }>;
+}
+
+export async function enforceBulk(opts: {
+  prefix?: string;
+  visibility?: "public" | "private";
+  limit?: number;
+  dryRun: boolean;
+}): Promise<EnforceBulkResponse> {
+  return request<EnforceBulkResponse>(
+    "/admin/datasets/enforce/bulk",
+    {
+      method: "POST",
+      body: JSON.stringify({
+        prefix: opts.prefix,
+        visibility: opts.visibility,
+        limit: opts.limit,
+        dry_run: opts.dryRun,
+      }),
     },
     true,
   );
