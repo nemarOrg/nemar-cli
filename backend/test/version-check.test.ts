@@ -48,6 +48,17 @@ describe("VERSION_COMPARE_SNIPPET", () => {
     }
   });
 
+  test("rejects a Version with an embedded newline (no multi-line bypass)", async () => {
+    // A `$`-anchored grep would match the first line ("1.0.2") and pass; the
+    // bash [[ =~ ]] anchors to the whole string and rejects it.
+    expect(await runCompare("1.0.2\njunk", "1.0.1")).not.toBe(0);
+    expect(await runCompare("1.0.2\n1.0.1", "1.0.1")).not.toBe(0);
+  });
+
+  test("rejects absurdly large components (digit cap, avoids bash arithmetic error)", async () => {
+    expect(await runCompare("1234567890.0.0", "1.0.0")).not.toBe(0);
+  });
+
   test("first version (X.Y.Z over default 0.0.0) passes", async () => {
     expect(await runCompare("1.0.0", "0.0.0")).toBe(0);
     expect(await runCompare("0.1.0", "0.0.0")).toBe(0);

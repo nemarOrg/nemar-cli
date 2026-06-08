@@ -942,12 +942,12 @@ export async function getWorkflowRuns(
  * Pure field comparison (no `sort -V`) so it is portable across the GitHub
  * ubuntu runner and local test shells.
  */
-export const VERSION_COMPARE_SNIPPET = `if ! printf '%s' "$PR_VERSION" | grep -qE '^[0-9]+\\.[0-9]+\\.[0-9]+$'; then
+export const VERSION_COMPARE_SNIPPET = `if ! [[ "$PR_VERSION" =~ ^[0-9]{1,9}\\.[0-9]{1,9}\\.[0-9]{1,9}$ ]]; then
   echo "::error::Version '$PR_VERSION' in dataset_description.json is not valid semver (expected X.Y.Z). Use 'nemar dataset release' to set it."
   exit 1
 fi
 MAIN_SEMVER="$MAIN_VERSION"
-printf '%s' "$MAIN_SEMVER" | grep -qE '^[0-9]+\\.[0-9]+\\.[0-9]+$' || MAIN_SEMVER="0.0.0"
+[[ "$MAIN_SEMVER" =~ ^[0-9]{1,9}\\.[0-9]{1,9}\\.[0-9]{1,9}$ ]] || MAIN_SEMVER="0.0.0"
 IFS=. read -r PMAJ PMIN PPAT <<< "$PR_VERSION"
 IFS=. read -r MMAJ MMIN MPAT <<< "$MAIN_SEMVER"
 GT=0
