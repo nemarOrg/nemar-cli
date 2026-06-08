@@ -663,46 +663,6 @@ export async function ensureMainBranch(
 }
 
 /**
- * Apply branch protection rules to main branch
- *
- * Configuration:
- * - Owner can self-merge (no external approval required)
- * - BIDS validation and version check must pass
- * - Admins can bypass if needed
- * - No force pushes or deletions
- */
-export async function applyBranchProtection(repo: string, pat: string): Promise<boolean> {
-  const response = await fetch(
-    `${GITHUB_API()}/repos/${ORG_NAME}/${repo}/branches/main/protection`,
-    {
-      method: "PUT",
-      headers: {
-        Authorization: `Bearer ${pat}`,
-        Accept: "application/vnd.github.v3+json",
-        "User-Agent": "NEMAR-API",
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        required_pull_request_reviews: {
-          required_approving_review_count: 0, // Owner can self-merge
-          dismiss_stale_reviews: true,
-        },
-        enforce_admins: false, // Admins can bypass if needed
-        required_status_checks: {
-          strict: true,
-          contexts: ["bids-validation", "version-check"],
-        },
-        restrictions: null,
-        allow_force_pushes: false,
-        allow_deletions: false,
-      }),
-    },
-  );
-
-  return response.ok;
-}
-
-/**
  * Enable auto-merge for a repository
  */
 export async function enableAutoMerge(repo: string, pat: string): Promise<boolean> {
@@ -971,6 +931,37 @@ export async function getWorkflowRuns(
 }
 
 /**
+ * Bash for the `version-check` workflow's core assertion (epic #713, phase #718):
+ * the PR's `Version` must be valid semver `X.Y.Z` AND a strict increment over
+ * `main`'s version. Reads `$PR_VERSION` and `$MAIN_VERSION` from the env (the
+ * workflow extracts them with jq); exits 1 with a `::error::` on a bad/equal/
+ * downgraded version. A non-semver `$MAIN_VERSION` (e.g. a first version, where
+ * main has no `Version` field) is treated as `0.0.0`. Exported so the exact
+ * script is run in tests (`backend/test/version-check.test.ts`).
+ *
+ * Pure field comparison (no `sort -V`) so it is portable across the GitHub
+ * ubuntu runner and local test shells.
+ */
+export const VERSION_COMPARE_SNIPPET = `if ! [[ "$PR_VERSION" =~ ^[0-9]{1,9}\\.[0-9]{1,9}\\.[0-9]{1,9}$ ]]; then
+  echo "::error::Version '$PR_VERSION' in dataset_description.json is not valid semver (expected X.Y.Z). Use 'nemar dataset release' to set it."
+  exit 1
+fi
+MAIN_SEMVER="$MAIN_VERSION"
+[[ "$MAIN_SEMVER" =~ ^[0-9]{1,9}\\.[0-9]{1,9}\\.[0-9]{1,9}$ ]] || MAIN_SEMVER="0.0.0"
+IFS=. read -r PMAJ PMIN PPAT <<< "$PR_VERSION"
+IFS=. read -r MMAJ MMIN MPAT <<< "$MAIN_SEMVER"
+GT=0
+if [ "$PMAJ" -gt "$MMAJ" ]; then GT=1
+elif [ "$PMAJ" -eq "$MMAJ" ] && [ "$PMIN" -gt "$MMIN" ]; then GT=1
+elif [ "$PMAJ" -eq "$MMAJ" ] && [ "$PMIN" -eq "$MMIN" ] && [ "$PPAT" -gt "$MPAT" ]; then GT=1
+fi
+if [ "$GT" -ne 1 ]; then
+  echo "::error::Version must be a strict increment over the main version $MAIN_SEMVER (got '$PR_VERSION'). Use 'nemar dataset release' to bump."
+  exit 1
+fi
+echo "Version check passed: $MAIN_SEMVER -> $PR_VERSION"`;
+
+/**
  * Deploy GitHub Actions workflow files to a dataset repository
  */
 export function getWorkflowTemplates(): Array<{ path: string; content: string }> {
@@ -1051,26 +1042,22 @@ jobs:
 
       - name: Check version bump
         run: |
-          # Get version from PR branch
+          # PR-branch version
           PR_VERSION=$(jq -r '.Version // "0.0.0"' dataset_description.json)
 
-          # Get version from main branch
+          # main-branch version
           git fetch origin main
           git checkout origin/main -- dataset_description.json 2>/dev/null || echo '{}' > dataset_description.json
           MAIN_VERSION=$(jq -r '.Version // "0.0.0"' dataset_description.json)
-
-          # Restore PR version
           git checkout HEAD -- dataset_description.json
 
           echo "Main version: $MAIN_VERSION"
           echo "PR version: $PR_VERSION"
 
-          if [ "$PR_VERSION" == "$MAIN_VERSION" ]; then
-            echo "::error::Version not bumped. Update 'Version' field in dataset_description.json"
-            exit 1
-          fi
-
-          echo "Version check passed: $MAIN_VERSION -> $PR_VERSION"
+          # Require valid semver X.Y.Z that strictly increments over main.
+${VERSION_COMPARE_SNIPPET.split("\n")
+  .map((l) => `          ${l}`)
+  .join("\n")}
 `;
 
   // PR Merge Handler workflow
@@ -2223,6 +2210,778 @@ export async function applyTagProtection(repo: string, pat: string): Promise<voi
     response.status,
     snippet,
   );
+}
+
+/**
+ * NEMAR GitHub App id (`nemar-publish-bot`). Required status checks are pinned
+ * to this integration so only a check-run posted by the App satisfies them
+ * (spoof-resistant), and the App is a ruleset bypass actor so its automation
+ * (enrichment commit-to-main, version-DOI / pr-merge `v*` tag pushes) is not
+ * blocked by the PR rule that gates humans. Epic #713.
+ */
+export const NEMAR_APP_ID = 3679074;
+
+/** Ruleset name for dataset-repo branch protection (the idempotent upsert key). */
+export const BRANCH_RULESET_NAME = "NEMAR branch protection";
+
+/**
+ * Dataset repos created before the centralized-BIDS migration (#601) that still
+ * run the OLD inline `bids-validation.yml`, whose check-run is literally named
+ * `bids-validation`. Everything else is on the central shim that posts
+ * `Run BIDS Validation`.
+ */
+const LEGACY_INLINE_BIDS_REPOS = new Set(["nm000103", "nm000105", "nm000106", "nm000107"]);
+
+/**
+ * A required status check. `integration_id` pins the check to a specific
+ * GitHub App so only that App's check-run satisfies it (spoof-resistant); omit
+ * it to accept the check from any source.
+ */
+export interface RequiredCheck {
+  context: string;
+  integration_id?: number;
+}
+
+/**
+ * Required status checks for a dataset repo's branch protection (published model
+ * = BIDS green + version bump). Two checks:
+ *  - BIDS: central-flow repos require `Run BIDS Validation`, posted cross-repo by
+ *    the NEMAR App, so it is pinned to the App. The four legacy-inline repos still
+ *    emit `bids-validation` from github-actions (not the App), so it is unpinned.
+ *  - `version-check`: emitted by github-actions in the dataset repo; unpinned.
+ */
+export function deriveContexts(repo: string): RequiredCheck[] {
+  const bids: RequiredCheck = LEGACY_INLINE_BIDS_REPOS.has(repo)
+    ? { context: "bids-validation" }
+    : { context: "Run BIDS Validation", integration_id: NEMAR_APP_ID };
+  return [bids, { context: "version-check" }];
+}
+
+export interface BranchRulesetPayload {
+  name: string;
+  target: "branch";
+  enforcement: "active";
+  conditions: { ref_name: { include: string[]; exclude: string[] } };
+  bypass_actors: Array<{ actor_id: number; actor_type: string; bypass_mode: string }>;
+  rules: Array<Record<string, unknown>>;
+}
+
+/**
+ * Build the branch-ruleset payload. Pure (no network) so it is unit-testable.
+ *
+ * - `~DEFAULT_BRANCH` tracks the repo's default branch (robust to main/master).
+ * - PR rule with 0 required reviews: a solo author self-merges once checks are
+ *   green (GitHub forbids self-approval, so requiring >=1 review would deadlock
+ *   single-author datasets).
+ * - Required checks carry per-check `integration_id` pinning (see `deriveContexts`);
+ *   `strict` off by default (a detached cross-repo App check-run is never
+ *   re-triggered by GitHub's up-to-date logic, so `strict:true` would deadlock);
+ *   `do_not_enforce_on_create` so a brand-new repo's first push is not blocked
+ *   before any check has reported.
+ * - `bypass_actors`: the NEMAR App (commit-to-main + tag pushes) and org admins
+ *   (break-glass).
+ */
+export function buildBranchRulesetPayload(opts: {
+  checks: RequiredCheck[];
+  strict?: boolean;
+}): BranchRulesetPayload {
+  return {
+    name: BRANCH_RULESET_NAME,
+    target: "branch",
+    enforcement: "active",
+    conditions: { ref_name: { include: ["~DEFAULT_BRANCH"], exclude: [] } },
+    bypass_actors: [
+      { actor_id: NEMAR_APP_ID, actor_type: "Integration", bypass_mode: "always" },
+      { actor_id: 1, actor_type: "OrganizationAdmin", bypass_mode: "always" },
+    ],
+    rules: [
+      {
+        type: "pull_request",
+        parameters: {
+          required_approving_review_count: 0,
+          dismiss_stale_reviews_on_push: true,
+          require_code_owner_review: false,
+          require_last_push_approval: false,
+          required_review_thread_resolution: false,
+        },
+      },
+      {
+        type: "required_status_checks",
+        parameters: {
+          strict_required_status_checks_policy: opts.strict ?? false,
+          do_not_enforce_on_create: true,
+          required_status_checks: opts.checks.map((c) =>
+            c.integration_id === undefined
+              ? { context: c.context }
+              : { context: c.context, integration_id: c.integration_id },
+          ),
+        },
+      },
+      { type: "non_fast_forward" },
+      { type: "deletion" },
+    ],
+  };
+}
+
+/**
+ * Idempotently apply the NEMAR branch ruleset to a dataset repo's default
+ * branch. GET-first so the create-vs-update decision is unambiguous (POST-then-
+ * treat-422 would conflate a name collision with a payload validation error):
+ * list the repo's own rulesets (`includes_parents=false`, so an org-inherited
+ * ruleset of the same name can't be mistaken for this one), PUT to converge if
+ * one named `BRANCH_RULESET_NAME` exists, otherwise POST to create. A 422 on
+ * either write is therefore a genuine validation error and is surfaced verbatim.
+ * `dryRun` returns the payload without any network call.
+ *
+ * Worst case ~2 sequential calls plus `githubFetchWithRetry` backoff on a fresh
+ * visibility flip (the rulesets endpoint can transiently 404 while ACLs
+ * propagate, same as `applyTagProtection`).
+ *
+ * NOTE (Phase 2, #713): this primitive is intentionally not yet wired into any
+ * lifecycle hook. Phase 3 (#717) calls it from make-public (green-gated) and
+ * removes it at make-private.
+ */
+export async function ensureBranchRuleset(
+  repo: string,
+  pat: string,
+  opts: { checks: RequiredCheck[]; strict?: boolean; dryRun?: boolean },
+): Promise<{ action: "created" | "updated" | "dryRun"; payload: BranchRulesetPayload }> {
+  const payload = buildBranchRulesetPayload({ checks: opts.checks, strict: opts.strict });
+  if (opts.dryRun) {
+    return { action: "dryRun", payload };
+  }
+
+  const headers = {
+    Authorization: `Bearer ${pat}`,
+    Accept: "application/vnd.github.v3+json",
+    "User-Agent": "NEMAR-API",
+    "Content-Type": "application/json",
+  };
+  const rulesetsUrl = `${GITHUB_API()}/repos/${ORG_NAME}/${repo}/rulesets`;
+
+  // List the repo's OWN rulesets only (exclude org/enterprise-inherited ones, so
+  // a same-named inherited ruleset is never PUT by mistake).
+  const listResp = await githubFetchWithRetry(
+    `${rulesetsUrl}?includes_parents=false`,
+    { method: "GET", headers },
+    { retryOn404: true },
+  );
+  if (!listResp.ok) {
+    const body = await listResp.text().catch(() => "<failed to read body>");
+    throw new HttpError(
+      `Branch ruleset list failed for ${repo}: HTTP ${listResp.status}: ${body.slice(0, 300)}`,
+      listResp.status,
+      body.slice(0, 300),
+    );
+  }
+  const rulesets = (await listResp.json()) as Array<{ id: number; name: string }>;
+  const existing = rulesets.find((r) => r.name === BRANCH_RULESET_NAME);
+
+  const write = await githubFetchWithRetry(
+    existing ? `${rulesetsUrl}/${existing.id}` : rulesetsUrl,
+    { method: existing ? "PUT" : "POST", headers, body: JSON.stringify(payload) },
+    { retryOn404: true },
+  );
+  if (write.ok) {
+    return { action: existing ? "updated" : "created", payload };
+  }
+
+  const body = await write.text().catch(() => "<failed to read body>");
+  throw new HttpError(
+    `Branch ruleset ${existing ? "update" : "create"} failed for ${repo}: HTTP ${write.status}: ${body.slice(0, 300)}`,
+    write.status,
+    body.slice(0, 300),
+  );
+}
+
+// ===========================================================================
+// Repo-to-spec enforcement (epic #713, phase #717)
+// ===========================================================================
+
+function errText(e: unknown): string {
+  return e instanceof Error ? e.message : String(e);
+}
+
+function ghHeaders(pat: string): Record<string, string> {
+  return {
+    Authorization: `Bearer ${pat}`,
+    Accept: "application/vnd.github.v3+json",
+    "User-Agent": "NEMAR-API",
+  };
+}
+
+/** GitHub collaborator role ranks, low to high. */
+const ROLE_RANK: Record<string, number> = {
+  pull: 1,
+  read: 1,
+  triage: 2,
+  push: 3,
+  write: 3,
+  maintain: 4,
+  admin: 5,
+};
+function roleRank(role: string): number {
+  return ROLE_RANK[role] ?? 1;
+}
+
+export interface DirectCollaborator {
+  login: string;
+  role_name: string;
+}
+
+export interface CollaboratorActions {
+  toAdd: Array<{ login: string; role: "push" | "maintain" }>;
+  toPromote: Array<{ login: string; role: "push" | "maintain" }>;
+  toRemove: string[];
+}
+
+/**
+ * Pure diff of a repo's CURRENT direct collaborators against the desired set
+ * derived from the D1 ledger: owner -> maintain, approved writers -> push.
+ *
+ * - Owner always retained (never removed/demoted).
+ * - Writers promoted to push only if currently below push; never demoted (a
+ *   collaborator who already has maintain keeps it).
+ * - Any other direct grant (a stray read, a manual non-ledger add) is removed,
+ *   unless its login is in `skipLogins`. On a public repo this includes the
+ *   meaningless direct `read` grants.
+ *
+ * Comparison is case-insensitive on login; the original-case login is used for
+ * the removal list so the GitHub API call matches.
+ */
+export function computeCollaboratorActions(opts: {
+  current: DirectCollaborator[];
+  visibility: "public" | "private";
+  ownerLogin: string | null;
+  approvedWriters: string[];
+  skipLogins?: string[];
+}): CollaboratorActions {
+  const ownerLogin = opts.ownerLogin ? opts.ownerLogin.toLowerCase() : null;
+  const skip = new Set((opts.skipLogins ?? []).map((s) => s.toLowerCase()));
+
+  // Keyed by lowercased login for case-insensitive matching, but carrying the
+  // ORIGINAL-case login so grants/output use the canonical GitHub username.
+  const desired = new Map<string, { login: string; role: "push" | "maintain" }>();
+  if (opts.ownerLogin && ownerLogin)
+    desired.set(ownerLogin, { login: opts.ownerLogin, role: "maintain" });
+  for (const w of opts.approvedWriters) {
+    const l = w.toLowerCase();
+    if (l && l !== ownerLogin) desired.set(l, { login: w, role: "push" });
+  }
+
+  const currentByLogin = new Map(opts.current.map((c) => [c.login.toLowerCase(), c]));
+  const toAdd: CollaboratorActions["toAdd"] = [];
+  const toPromote: CollaboratorActions["toPromote"] = [];
+  for (const [key, { login, role }] of desired) {
+    const cur = currentByLogin.get(key);
+    if (!cur) {
+      toAdd.push({ login, role });
+    } else if (roleRank(cur.role_name) < roleRank(role)) {
+      toPromote.push({ login, role });
+    }
+  }
+
+  const toRemove: string[] = [];
+  for (const c of opts.current) {
+    const login = c.login.toLowerCase();
+    if (desired.has(login) || skip.has(login) || login === ownerLogin) continue;
+    toRemove.push(c.login);
+  }
+
+  return { toAdd, toPromote, toRemove };
+}
+
+/**
+ * List a repo's DIRECT collaborators (affiliation=direct). Never uses the
+ * `/collaborators/{user}/permission` endpoint, which returns a baseline `read`
+ * for ANY user on a public repo and would make every reconcile a false diff.
+ */
+export async function listDirectCollaborators(
+  repo: string,
+  pat: string,
+): Promise<DirectCollaborator[]> {
+  const out: DirectCollaborator[] = [];
+  const headers = ghHeaders(pat);
+  let page = 1;
+  while (true) {
+    const r = await githubFetchWithRetry(
+      `${GITHUB_API()}/repos/${ORG_NAME}/${repo}/collaborators?affiliation=direct&per_page=100&page=${page}`,
+      { headers },
+      { retryOn404: true },
+    );
+    if (!r.ok) {
+      const b = await r.text().catch(() => "<failed to read body>");
+      throw new HttpError(
+        `List collaborators failed for ${repo}: HTTP ${r.status}: ${b.slice(0, 200)}`,
+        r.status,
+        b.slice(0, 200),
+      );
+    }
+    const items = (await r.json()) as Array<{ login: string; role_name?: string }>;
+    if (items.length === 0) break;
+    out.push(...items.map((c) => ({ login: c.login, role_name: c.role_name ?? "read" })));
+    if (items.length < 100) break;
+    page++;
+  }
+  return out;
+}
+
+export interface CollaboratorReconcileResult {
+  added: string[];
+  promoted: string[];
+  removed: string[];
+  errors: string[];
+}
+
+/**
+ * Reconcile a repo's direct collaborators to the ledger-derived desired set.
+ * Never throws; collects per-action errors. See `computeCollaboratorActions`.
+ */
+export async function reconcileCollaborators(
+  opts: {
+    repo: string;
+    visibility: "public" | "private";
+    ownerLogin: string | null;
+    approvedWriters: string[];
+    skipLogins?: string[];
+  },
+  pat: string,
+): Promise<CollaboratorReconcileResult> {
+  const result: CollaboratorReconcileResult = { added: [], promoted: [], removed: [], errors: [] };
+  let current: DirectCollaborator[];
+  try {
+    current = await listDirectCollaborators(opts.repo, pat);
+  } catch (e) {
+    result.errors.push(`list: ${errText(e)}`);
+    return result;
+  }
+  const actions = computeCollaboratorActions({
+    current,
+    visibility: opts.visibility,
+    ownerLogin: opts.ownerLogin,
+    approvedWriters: opts.approvedWriters,
+    skipLogins: opts.skipLogins,
+  });
+
+  for (const a of actions.toAdd) {
+    try {
+      (await addCollaborator(opts.repo, a.login, a.role, pat))
+        ? result.added.push(a.login)
+        : result.errors.push(`add ${a.login}`);
+    } catch (e) {
+      result.errors.push(`add ${a.login}: ${errText(e)}`);
+    }
+  }
+  for (const a of actions.toPromote) {
+    try {
+      (await addCollaborator(opts.repo, a.login, a.role, pat))
+        ? result.promoted.push(a.login)
+        : result.errors.push(`promote ${a.login}`);
+    } catch (e) {
+      result.errors.push(`promote ${a.login}: ${errText(e)}`);
+    }
+  }
+  for (const login of actions.toRemove) {
+    try {
+      (await removeCollaborator(opts.repo, login, pat))
+        ? result.removed.push(login)
+        : result.errors.push(`remove ${login}`);
+    } catch (e) {
+      result.errors.push(`remove ${login}: ${errText(e)}`);
+    }
+  }
+  if (result.errors.length > 0) {
+    console.error(`[reconcile-collaborators] ${opts.repo}: ${result.errors.join("; ")}`);
+  }
+  return result;
+}
+
+/** Delete the NEMAR branch ruleset if present (un-publish). No-op if absent. */
+export async function removeBranchRuleset(repo: string, pat: string): Promise<boolean> {
+  const headers = ghHeaders(pat);
+  const rulesetsUrl = `${GITHUB_API()}/repos/${ORG_NAME}/${repo}/rulesets`;
+  const list = await githubFetchWithRetry(
+    `${rulesetsUrl}?includes_parents=false`,
+    { method: "GET", headers },
+    { retryOn404: true },
+  );
+  if (!list.ok) {
+    if (list.status === 404) return false;
+    const b = await list.text().catch(() => "<failed to read body>");
+    throw new HttpError(
+      `Branch ruleset list failed for ${repo}: HTTP ${list.status}: ${b.slice(0, 200)}`,
+      list.status,
+      b.slice(0, 200),
+    );
+  }
+  const rulesets = (await list.json()) as Array<{ id: number; name: string }>;
+  const existing = rulesets.find((r) => r.name === BRANCH_RULESET_NAME);
+  if (!existing) return false;
+  const del = await githubFetchWithRetry(
+    `${rulesetsUrl}/${existing.id}`,
+    { method: "DELETE", headers },
+    { retryOn404: true },
+  );
+  if (del.ok || del.status === 404) return true;
+  const b = await del.text().catch(() => "<failed to read body>");
+  throw new HttpError(
+    `Branch ruleset delete failed for ${repo}: HTTP ${del.status}: ${b.slice(0, 200)}`,
+    del.status,
+    b.slice(0, 200),
+  );
+}
+
+/**
+ * Read the NEMAR branch ruleset on a repo (for drift reporting): whether it is
+ * present and which required status-check contexts it enforces. Returns
+ * `{ present:false, contexts:[] }` when absent. Read-only.
+ */
+export async function getBranchRulesetInfo(
+  repo: string,
+  pat: string,
+): Promise<{ present: boolean; contexts: string[] }> {
+  const headers = ghHeaders(pat);
+  const rulesetsUrl = `${GITHUB_API()}/repos/${ORG_NAME}/${repo}/rulesets`;
+  const list = await githubFetchWithRetry(
+    `${rulesetsUrl}?includes_parents=false`,
+    { method: "GET", headers },
+    { retryOn404: true },
+  );
+  if (!list.ok) return { present: false, contexts: [] };
+  const rulesets = (await list.json()) as Array<{ id: number; name: string }>;
+  const existing = rulesets.find((r) => r.name === BRANCH_RULESET_NAME);
+  if (!existing) return { present: false, contexts: [] };
+
+  // Fetch the full ruleset to read its required_status_checks contexts.
+  const detail = await githubFetchWithRetry(
+    `${rulesetsUrl}/${existing.id}`,
+    { method: "GET", headers },
+    { retryOn404: true },
+  );
+  if (!detail.ok) {
+    // Ruleset exists but its detail couldn't be read; throw so the drift
+    // gatherer's per-call .catch absorbs it (a transient error must not surface
+    // as an empty-contexts CONTEXT_NAME_MISMATCH).
+    const b = await detail.text().catch(() => "<failed to read body>");
+    throw new HttpError(
+      `Branch ruleset detail fetch failed for ${repo}: HTTP ${detail.status}: ${b.slice(0, 200)}`,
+      detail.status,
+      b.slice(0, 200),
+    );
+  }
+  const d = (await detail.json()) as {
+    rules?: Array<{
+      type: string;
+      parameters?: { required_status_checks?: Array<{ context: string }> };
+    }>;
+  };
+  const rule = (d.rules ?? []).find((r) => r.type === "required_status_checks");
+  const contexts = (rule?.parameters?.required_status_checks ?? []).map((c) => c.context);
+  return { present: true, contexts };
+}
+
+/** List a repo's `.github/workflows` filenames (drift reporting). [] if none. */
+export async function listRepoWorkflows(repo: string, pat: string): Promise<string[]> {
+  const r = await githubFetchWithRetry(
+    `${GITHUB_API()}/repos/${ORG_NAME}/${repo}/contents/.github/workflows`,
+    { headers: ghHeaders(pat) },
+    { retryOn404: true },
+  );
+  if (!r.ok) return [];
+  const items = (await r.json()) as Array<{ name?: string; type?: string }>;
+  return items.filter((i) => i.type === "file" && i.name).map((i) => i.name as string);
+}
+
+/** A repo's default branch (defaults to "main" if it can't be read). */
+export async function getRepoDefaultBranch(repo: string, pat: string): Promise<string> {
+  const r = await githubFetchWithRetry(
+    `${GITHUB_API()}/repos/${ORG_NAME}/${repo}`,
+    { headers: ghHeaders(pat) },
+    { retryOn404: true },
+  );
+  if (!r.ok) return "main";
+  const info = (await r.json()) as { default_branch?: string };
+  return info.default_branch || "main";
+}
+
+/**
+ * Pure green-gate predicate: is the required check satisfied on a commit, given
+ * its check-runs and legacy commit statuses? Green = a matching check-run
+ * (by name, and by App `integration_id` when the required check is pinned) with
+ * conclusion success/neutral/skipped, or a matching commit status with
+ * state=success. Missing or failing => not green.
+ */
+export function isRequiredCheckGreen(
+  required: RequiredCheck,
+  checkRuns: Array<{ name: string; conclusion: string | null; app_id?: number | null }>,
+  statuses: Array<{ context: string; state: string }>,
+): boolean {
+  const green = new Set(["success", "neutral", "skipped"]);
+  const matched = checkRuns.some(
+    (cr) =>
+      cr.name === required.context &&
+      (required.integration_id === undefined || cr.app_id === required.integration_id) &&
+      cr.conclusion !== null &&
+      green.has(cr.conclusion),
+  );
+  if (matched) return true;
+  return statuses.some((s) => s.context === required.context && s.state === "success");
+}
+
+/**
+ * Green-gate: is the required BIDS check green on a repo's default-branch HEAD?
+ * Used to skip applying protection to a repo whose latest validation is red or
+ * missing (so we never brick PRs). Reads check-runs + the legacy combined
+ * status. Returns a tri-state so callers can distinguish a genuinely red/missing
+ * check from a transient GitHub fetch failure (both fail-closed, but the latter
+ * is logged and surfaced as `fetch_error` so it can be retried, not mistaken for
+ * a broken BIDS pipeline).
+ */
+export async function checkRunGreenOnDefaultHead(
+  repo: string,
+  branch: string,
+  required: RequiredCheck,
+  pat: string,
+): Promise<{ green: boolean; reason: "green" | "red" | "fetch_error" }> {
+  const headers = ghHeaders(pat);
+  let checkRuns: Array<{ name: string; conclusion: string | null; app_id?: number | null }> = [];
+  try {
+    const r = await githubFetchWithRetry(
+      `${GITHUB_API()}/repos/${ORG_NAME}/${repo}/commits/${branch}/check-runs?per_page=100`,
+      { headers },
+      { retryOn404: true },
+    );
+    if (!r.ok) {
+      console.error(
+        `[green-gate] check-runs fetch for ${repo}@${branch} returned HTTP ${r.status}; treating as not-green (fetch_error)`,
+      );
+      return { green: false, reason: "fetch_error" };
+    }
+    const d = (await r.json()) as {
+      check_runs?: Array<{ name: string; conclusion: string | null; app?: { id?: number } }>;
+    };
+    checkRuns = (d.check_runs ?? []).map((c) => ({
+      name: c.name,
+      conclusion: c.conclusion,
+      app_id: c.app?.id ?? null,
+    }));
+  } catch (e) {
+    console.error(
+      `[green-gate] check-runs fetch failed for ${repo}@${branch} (treating as not-green):`,
+      e,
+    );
+    return { green: false, reason: "fetch_error" };
+  }
+  let statuses: Array<{ context: string; state: string }> = [];
+  try {
+    const r = await githubFetchWithRetry(
+      `${GITHUB_API()}/repos/${ORG_NAME}/${repo}/commits/${branch}/status`,
+      { headers },
+      { retryOn404: true },
+    );
+    if (r.ok) {
+      const d = (await r.json()) as { statuses?: Array<{ context: string; state: string }> };
+      statuses = d.statuses ?? [];
+    }
+  } catch (e) {
+    console.error(
+      `[green-gate] combined-status fetch failed for ${repo}@${branch} (continuing on check-runs only):`,
+      e,
+    );
+  }
+  const green = isRequiredCheckGreen(required, checkRuns, statuses);
+  return { green, reason: green ? "green" : "red" };
+}
+
+type StepStatus = "ok" | "skipped" | "failed";
+export interface RepoSpecResult {
+  repo: string;
+  visibility: "public" | "private";
+  defaultBranch: string;
+  steps: Record<string, { status: StepStatus; detail?: string }>;
+  reconcile?: CollaboratorReconcileResult;
+}
+
+/**
+ * The single idempotent enforcement point: bring a dataset repo to its target
+ * spec for the given publish state. PUBLIC = locked main (branch + tag ruleset,
+ * green-gated) + workflows + collaborator reconcile; PRIVATE = open push (NO
+ * branch ruleset) + workflows + reconcile. Each step records a structured
+ * status; no cross-step rollback. `dryRun` computes the plan without mutating.
+ *
+ * D1-free by design: the caller resolves `collaborators.ownerLogin` (from
+ * `datasets.owner_user_id`) and `approvedWriters` (from `dataset_collaborators`)
+ * and passes them in.
+ */
+export async function ensureRepoToSpec(
+  repo: string,
+  pat: string,
+  opts: {
+    visibility: "public" | "private";
+    collaborators?: { ownerLogin: string | null; approvedWriters: string[]; skipLogins?: string[] };
+    dryRun?: boolean;
+  },
+): Promise<RepoSpecResult> {
+  const steps: RepoSpecResult["steps"] = {};
+  const isPublic = opts.visibility === "public";
+  const bidsCheck = deriveContexts(repo)[0];
+
+  // 1. Capture the default branch.
+  let defaultBranch = "main";
+  try {
+    const r = await githubFetchWithRetry(
+      `${GITHUB_API()}/repos/${ORG_NAME}/${repo}`,
+      { headers: ghHeaders(pat) },
+      { retryOn404: true },
+    );
+    if (r.ok) {
+      const info = (await r.json()) as { default_branch?: string };
+      defaultBranch = info.default_branch || "main";
+    } else {
+      console.error(
+        `[repo-spec] repo info fetch for ${repo} returned HTTP ${r.status}; defaulting branch to 'main'`,
+      );
+    }
+  } catch (e) {
+    console.error(
+      `[repo-spec] repo info fetch failed for ${repo}, defaulting branch to 'main':`,
+      e,
+    );
+  }
+
+  if (opts.dryRun) {
+    steps.plan = { status: "ok", detail: `${opts.visibility}, default=${defaultBranch}` };
+    if (isPublic) {
+      const g = await checkRunGreenOnDefaultHead(repo, defaultBranch, bidsCheck, pat);
+      steps.branch_ruleset = g.green
+        ? { status: "ok", detail: "would apply" }
+        : {
+            status: "skipped",
+            detail: g.reason === "fetch_error" ? "FETCH_ERROR" : "RED_REQUIRED_CHECK",
+          };
+    } else {
+      steps.branch_ruleset = { status: "skipped", detail: "private: no ruleset" };
+    }
+    if (opts.collaborators) {
+      let current: DirectCollaborator[];
+      try {
+        current = await listDirectCollaborators(repo, pat);
+      } catch (e) {
+        // Cannot read the ledger -> the plan would be wrong; stop here.
+        steps.collaborators = { status: "failed", detail: errText(e) };
+        return { repo, visibility: opts.visibility, defaultBranch, steps };
+      }
+      const a = computeCollaboratorActions({
+        current,
+        visibility: opts.visibility,
+        ownerLogin: opts.collaborators.ownerLogin,
+        approvedWriters: opts.collaborators.approvedWriters,
+        skipLogins: opts.collaborators.skipLogins,
+      });
+      steps.collaborators = {
+        status: "ok",
+        detail: `+${a.toAdd.length} ^${a.toPromote.length} -${a.toRemove.length}`,
+      };
+    }
+    return { repo, visibility: opts.visibility, defaultBranch, steps };
+  }
+
+  // 2. Default branch must be main.
+  try {
+    const r = await ensureMainBranch(repo, pat);
+    steps.main_branch = {
+      status: "ok",
+      detail: r.renamed ? `renamed from ${r.previousBranch}` : "main",
+    };
+    if (r.renamed) defaultBranch = "main";
+  } catch (e) {
+    steps.main_branch = { status: "failed", detail: errText(e) };
+  }
+
+  // 3. Workflows must be deployed before protection can require their checks.
+  let workflowsOk = true;
+  try {
+    const wr = await ensureWorkflowsDeployed(repo, "main", pat);
+    if (wr.errors.length > 0) {
+      workflowsOk = false;
+      steps.workflows = { status: "failed", detail: wr.errors.join("; ") };
+    } else {
+      steps.workflows = {
+        status: "ok",
+        detail: `deployed ${wr.deployed.length}, present ${wr.alreadyPresent.length}`,
+      };
+    }
+  } catch (e) {
+    workflowsOk = false;
+    steps.workflows = { status: "failed", detail: errText(e) };
+  }
+
+  // 4. Auto-merge (so green PRs land without manual button-press).
+  try {
+    await enableAutoMerge(repo, pat);
+    steps.auto_merge = { status: "ok" };
+  } catch (e) {
+    steps.auto_merge = { status: "failed", detail: errText(e) };
+  }
+
+  // 5. Branch protection — PUBLIC only, green-gated; PRIVATE removes any ruleset.
+  if (isPublic) {
+    if (!workflowsOk) {
+      steps.branch_ruleset = { status: "skipped", detail: "workflows not deployed" };
+    } else {
+      const g = await checkRunGreenOnDefaultHead(repo, defaultBranch, bidsCheck, pat);
+      if (!g.green) {
+        steps.branch_ruleset = {
+          status: "skipped",
+          detail: g.reason === "fetch_error" ? "FETCH_ERROR" : "RED_REQUIRED_CHECK",
+        };
+      } else {
+        try {
+          await ensureBranchRuleset(repo, pat, { checks: deriveContexts(repo), strict: false });
+          steps.branch_ruleset = { status: "ok" };
+        } catch (e) {
+          steps.branch_ruleset = { status: "failed", detail: errText(e) };
+        }
+        try {
+          await applyTagProtection(repo, pat);
+          steps.tag_ruleset = { status: "ok" };
+        } catch (e) {
+          steps.tag_ruleset = { status: "failed", detail: errText(e) };
+        }
+      }
+    }
+  } else {
+    try {
+      const removed = await removeBranchRuleset(repo, pat);
+      steps.branch_ruleset = {
+        status: "ok",
+        detail: removed ? "removed (private)" : "none (private)",
+      };
+    } catch (e) {
+      steps.branch_ruleset = { status: "failed", detail: errText(e) };
+    }
+  }
+
+  // 6. Collaborators (when the caller resolved the ledger).
+  let reconcile: CollaboratorReconcileResult | undefined;
+  if (opts.collaborators) {
+    reconcile = await reconcileCollaborators(
+      {
+        repo,
+        visibility: opts.visibility,
+        ownerLogin: opts.collaborators.ownerLogin,
+        approvedWriters: opts.collaborators.approvedWriters,
+        skipLogins: opts.collaborators.skipLogins,
+      },
+      pat,
+    );
+    steps.collaborators = {
+      status: reconcile.errors.length ? "failed" : "ok",
+      detail: `+${reconcile.added.length} ^${reconcile.promoted.length} -${reconcile.removed.length}${reconcile.errors.length ? ` errors:${reconcile.errors.length}` : ""}`,
+    };
+  }
+
+  return { repo, visibility: opts.visibility, defaultBranch, steps, reconcile };
 }
 
 /**

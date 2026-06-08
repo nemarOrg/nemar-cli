@@ -142,6 +142,16 @@ ssh mcm "zsh -i -c 'nemar admin users'"
 5. **Commit:** Atomic, <50 chars, no emojis, no co-author tags
 6. **PR:** Reference context and issue
 
+### Epic / multi-phase development (REQUIRED)
+For any multi-phase feature (an epic with sub-issues, phased delivery, or anything spanning more than one PR), you MUST drive it with the **`/project:epic-dev`** skill (`project:epic-dev`). Do not hand-roll the epic/sprint flow. The skill owns: epic + sub-issue creation and linking (`gh sub-issue`), the epic/phase git-worktree structure, per-phase plan -> implement -> PR -> `/review-pr` -> squash-merge cycle, and the `.claude/epic.local.md` state file that tracks `current_phase`.
+
+- Start a new epic: `/project:epic-dev <description>`
+- Advance to the next phase: `/project:epic-dev --next-phase`
+- Resume mid-phase: `/project:epic-dev --resume`
+- Finalize (epic -> integration branch): `/project:epic-dev --finalize`
+
+Keep the state file current; never let GitHub issues/PRs and `.claude/epic.local.md` drift. Use `/project:epic-status` to inspect state. Phase PRs squash-merge into the epic branch; the epic branch merges into `dev` (the integration branch) at finalize.
+
 ## Version Bumping and Release
 
 **Never edit package.json version manually.** The release pipeline is fully

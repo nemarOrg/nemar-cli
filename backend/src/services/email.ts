@@ -579,6 +579,64 @@ export async function sendPublicationRequestEmail(
 }
 
 /**
+ * Notify a dataset owner that a user has requested collaborator access to their
+ * (private/unpublished) dataset and is awaiting approval.
+ */
+export async function sendAccessRequestEmail(
+  ownerEmail: string,
+  datasetId: string,
+  datasetName: string,
+  requesterUsername: string,
+  resendApiKey: string,
+  fromEmail: string,
+  replyTo?: string,
+  isDev?: boolean,
+): Promise<void> {
+  const html = `
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+</head>
+<body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; line-height: 1.6; color: #333; max-width: 600px; margin: 0 auto; padding: 20px;">
+  <h1 style="color: #2563eb;">Access Request</h1>
+
+  <p>User <strong>${escapeHtml(requesterUsername)}</strong> has requested collaborator access to your dataset <strong>${escapeHtml(datasetName)}</strong> (<strong>${escapeHtml(datasetId)}</strong>).</p>
+
+  <h2 style="color: #333; font-size: 18px; margin-top: 30px;">Action Required</h2>
+  <p>Approve or deny the request:</p>
+
+  <div style="background: #f4f4f5; padding: 16px; border-radius: 8px; font-family: monospace; font-size: 14px; margin: 16px 0;">
+    <span style="color: #16a34a;">nemar dataset access approve</span> ${escapeHtml(requesterUsername)} ${escapeHtml(datasetId)}<br>
+    <span style="color: #dc2626;">nemar dataset access deny</span> ${escapeHtml(requesterUsername)} ${escapeHtml(datasetId)}
+  </div>
+
+  <p style="color: #666; font-size: 14px;">
+    To see all pending requests:<br>
+    <code style="background: #f4f4f5; padding: 2px 6px; border-radius: 4px;">nemar dataset access list ${escapeHtml(datasetId)}</code>
+  </p>
+
+  <hr style="border: none; border-top: 1px solid #eee; margin: 30px 0;">
+  <p style="color: #999; font-size: 12px;">
+    <a href="https://nemar.org" style="color: #999;">NEMAR</a> - Neuroelectromagnetic Data Archive and Tools Resource
+  </p>
+</body>
+</html>
+  `;
+
+  await sendEmail(
+    ownerEmail,
+    `[NEMAR] Access request: ${datasetId} by ${requesterUsername}`,
+    html,
+    resendApiKey,
+    fromEmail,
+    replyTo,
+    isDev,
+  );
+}
+
+/**
  * Notify user that their publication request was denied
  */
 export async function sendPublicationDeniedEmail(

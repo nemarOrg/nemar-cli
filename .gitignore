@@ -55,3 +55,4 @@ wrangler.jsonc
 !.dev.vars.example
 !.env.example
 .claude/*.local.md
+.claude/*.local.md.done

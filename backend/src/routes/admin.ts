@@ -69,6 +69,11 @@ import {
   updateIdentifier as ezidUpdateIdentifier,
 } from "../services/ezid";
 import {
+  type DriftBucket,
+  classifyDatasetDrift,
+  gatherRepoDriftState,
+} from "../services/fleet-drift";
+import {
   type GitHubRepo,
   addCollaborator,
   checkWorkflowExists,
@@ -81,6 +86,7 @@ import {
   deleteRepository,
   deployWorkflows,
   downloadReleaseArchive,
+  ensureRepoToSpec,
   getBlobContent,
   getMainBranchSha,
   getTreeAtRef,
@@ -103,6 +109,7 @@ import {
   readBidsDescription,
   readRepoMetadata,
 } from "../services/repo-metadata";
+import { mirrorReconcileRemovals, resolveRepoCollaborators } from "../services/repo-spec";
 import { withRetry } from "../services/retry";
 import {
   applyObjectLockBatch,
@@ -674,13 +681,17 @@ adminRoutes.post("/revoke/:username", async (c) => {
     .bind(finalStatus, user.id)
     .run();
 
-  // Remove from datasets they have access to (tracked in dataset_collaborators)
+  // Remove from every dataset repo they touch: collaborator grants
+  // (dataset_collaborators) UNION repos they own (datasets.owner_user_id).
+  // Owner-owned repos were previously never removed (epic #713 gap).
   const collaborations = await db
     .prepare(
-      "SELECT dc.id, d.github_repo FROM dataset_collaborators dc JOIN datasets d ON dc.dataset_id = d.id WHERE dc.user_id = ?",
+      `SELECT d.github_repo FROM dataset_collaborators dc JOIN datasets d ON dc.dataset_id = d.id WHERE dc.user_id = ?
+       UNION
+       SELECT github_repo FROM datasets WHERE owner_user_id = ?`,
     )
-    .bind(user.id)
-    .all<{ id: number; github_repo: string | null }>();
+    .bind(user.id, user.id)
+    .all<{ github_repo: string | null }>();
 
   let reposRemoved = 0;
   const failedRemovals: string[] = [];
@@ -933,9 +944,11 @@ adminRoutes.delete("/users/by-id/:id", ownerMiddleware, async (c) => {
     try {
       collaborations = await db
         .prepare(
-          "SELECT d.github_repo FROM dataset_collaborators dc JOIN datasets d ON dc.dataset_id = d.id WHERE dc.user_id = ?",
+          `SELECT d.github_repo FROM dataset_collaborators dc JOIN datasets d ON dc.dataset_id = d.id WHERE dc.user_id = ?
+           UNION
+           SELECT github_repo FROM datasets WHERE owner_user_id = ?`,
         )
-        .bind(id)
+        .bind(id, id)
         .all<{ github_repo: string | null }>();
     } catch (error) {
       console.error(`[delete-user] collaborations lookup failed for id=${id}:`, error);
@@ -2691,6 +2704,23 @@ adminRoutes.patch("/datasets/:id/visibility", zValidator("json", visibilitySchem
     return revertVisibilityChanges(msg);
   }
 
+  // Enforce the target repo spec for the new visibility (epic #713): public ->
+  // lock main (branch + tag ruleset, green-gated) + reconcile collaborators;
+  // private -> remove the branch ruleset + reconcile. Non-fatal: visibility is
+  // already changed at GitHub/S3/D1.
+  let specEnforcement: Awaited<ReturnType<typeof ensureRepoToSpec>> | undefined;
+  try {
+    const { ownerLogin, approvedWriters } = await resolveRepoCollaborators(db, datasetId);
+    specEnforcement = await ensureRepoToSpec(repoName, pat, {
+      visibility,
+      collaborators: { ownerLogin, approvedWriters },
+    });
+  } catch (specError) {
+    console.error(`Repo-spec enforcement failed for ${datasetId} (non-fatal):`, specError);
+  }
+  // Mirror reconcile removals into D1 (own try/catch; flags a divergence).
+  await mirrorReconcileRemovals(db, datasetId, specEnforcement?.reconcile?.removed);
+
   // Audit log (non-fatal but warn user if fails)
   let auditLogFailed = false;
   let auditLogError: string | undefined;
@@ -2723,10 +2753,190 @@ adminRoutes.patch("/datasets/:id/visibility", zValidator("json", visibilitySchem
     message: `Repository visibility set to ${visibility}`,
     dataset_id: datasetId,
     visibility,
+    spec_enforcement: specEnforcement?.steps,
     warning: auditLogFailed
       ? `Audit log write failed: ${auditLogError}. Operation succeeded but was not logged for compliance.`
       : undefined,
   });
+});
+
+// ============================================================================
+// Fleet governance (epic #713)
+// ============================================================================
+
+/**
+ * GET /admin/fleet/drift - Report dataset repos that are off the governance
+ * spec. Read-only; gathers live GitHub state per repo (sequential, to respect
+ * the shared App rate limit) and classifies into drift buckets. Filter with
+ * ?prefix=nm, ?visibility=public|private, ?limit=N (default 25, max 50).
+ */
+adminRoutes.get("/fleet/drift", async (c) => {
+  const db = c.env.DB;
+  const prefix = c.req.query("prefix");
+  const visFilter = c.req.query("visibility");
+  const limit = Math.min(Math.max(Number.parseInt(c.req.query("limit") ?? "25", 10) || 25, 1), 50);
+
+  const clauses: string[] = ["github_repo IS NOT NULL", "dataset_id != 'nm099999'"];
+  const binds: unknown[] = [];
+  if (prefix) {
+    clauses.push("dataset_id LIKE ?");
+    binds.push(`${prefix}%`);
+  }
+  if (visFilter === "public" || visFilter === "private") {
+    clauses.push("visibility = ?");
+    binds.push(visFilter);
+  }
+
+  const rows = await db
+    .prepare(
+      `SELECT dataset_id, github_repo, visibility FROM datasets
+        WHERE ${clauses.join(" AND ")} ORDER BY dataset_id LIMIT ?`,
+    )
+    .bind(...binds, limit)
+    .all<{ dataset_id: string; github_repo: string; visibility: string }>();
+
+  const datasets = rows.results ?? [];
+  const pat = await getDatasetsToken(c.env);
+  const buckets: Partial<Record<DriftBucket, string[]>> = {};
+  const repos: Array<{ dataset_id: string; buckets: DriftBucket[] }> = [];
+
+  for (const d of datasets) {
+    const repoName = d.github_repo.split("/")[1];
+    if (!repoName) continue;
+    const visibility = d.visibility === "public" ? "public" : "private";
+    let result: DriftBucket[];
+    try {
+      result = classifyDatasetDrift(await gatherRepoDriftState(repoName, visibility, pat));
+    } catch (e) {
+      console.error(`[fleet/drift] gather failed for ${d.dataset_id}:`, e);
+      continue;
+    }
+    repos.push({ dataset_id: d.dataset_id, buckets: result });
+    for (const b of result) {
+      const list = buckets[b] ?? [];
+      list.push(d.dataset_id);
+      buckets[b] = list;
+    }
+  }
+
+  const counts = Object.fromEntries(Object.entries(buckets).map(([k, v]) => [k, v.length]));
+  return c.json({ scanned: datasets.length, limit, counts, buckets, repos });
+});
+
+const enforceSchema = z.object({ dry_run: z.boolean().optional() });
+
+/**
+ * POST /admin/datasets/:id/enforce - Bring one dataset repo to spec via
+ * ensureRepoToSpec (public locks + reconciles; private removes the ruleset +
+ * reconciles). `dry_run` defaults to TRUE (must pass `dry_run:false` to apply),
+ * matching the bulk endpoint so a bare `{}` body never mutates.
+ */
+adminRoutes.post("/datasets/:id/enforce", zValidator("json", enforceSchema), async (c) => {
+  const datasetId = c.req.param("id");
+  const dryRun = c.req.valid("json").dry_run !== false;
+  const db = c.env.DB;
+
+  const dataset = await db
+    .prepare("SELECT github_repo, visibility FROM datasets WHERE dataset_id = ?")
+    .bind(datasetId)
+    .first<{ github_repo: string | null; visibility: string }>();
+  if (!dataset) return c.json({ error: "Dataset not found" }, 404);
+  if (!dataset.github_repo) return c.json({ error: "Dataset has no GitHub repository" }, 400);
+  const repoName = dataset.github_repo.split("/")[1];
+  if (!repoName) return c.json({ error: "Invalid repository format" }, 500);
+
+  const visibility = dataset.visibility === "public" ? "public" : "private";
+  const pat = await getDatasetsToken(c.env);
+  const { ownerLogin, approvedWriters } = await resolveRepoCollaborators(db, datasetId);
+
+  let result: Awaited<ReturnType<typeof ensureRepoToSpec>>;
+  try {
+    result = await ensureRepoToSpec(repoName, pat, {
+      visibility,
+      collaborators: { ownerLogin, approvedWriters },
+      dryRun: dryRun,
+    });
+  } catch (e) {
+    return c.json(
+      { error: "Enforcement failed", details: e instanceof Error ? e.message : String(e) },
+      500,
+    );
+  }
+
+  if (!dryRun) await mirrorReconcileRemovals(db, datasetId, result.reconcile?.removed);
+  return c.json({ dataset_id: datasetId, dry_run: dryRun, result });
+});
+
+const enforceBulkSchema = z.object({
+  prefix: z.string().optional(),
+  visibility: z.enum(["public", "private"]).optional(),
+  limit: z.number().int().min(1).max(50).optional(),
+  dry_run: z.boolean().optional(),
+});
+
+/**
+ * POST /admin/datasets/enforce/bulk - Run ensureRepoToSpec across a filtered set
+ * SEQUENTIALLY (shared App rate limit). `dry_run` defaults to TRUE; pass
+ * `dry_run:false` to actually apply. Always excludes nm099999. Owner-only.
+ */
+adminRoutes.post("/datasets/enforce/bulk", zValidator("json", enforceBulkSchema), async (c) => {
+  if (c.get("user").role !== "owner") {
+    return c.json({ error: "Only the NEMAR owner can bulk-enforce" }, 403);
+  }
+  const db = c.env.DB;
+  const { prefix, visibility, limit, dry_run } = c.req.valid("json");
+  const dryRun = dry_run !== false; // default to a dry run
+  const cap = limit ?? 25;
+
+  const clauses: string[] = ["github_repo IS NOT NULL", "dataset_id != 'nm099999'"];
+  const binds: unknown[] = [];
+  if (prefix) {
+    clauses.push("dataset_id LIKE ?");
+    binds.push(`${prefix}%`);
+  }
+  if (visibility) {
+    clauses.push("visibility = ?");
+    binds.push(visibility);
+  }
+
+  const rows = await db
+    .prepare(
+      `SELECT dataset_id, github_repo, visibility FROM datasets
+        WHERE ${clauses.join(" AND ")} ORDER BY dataset_id LIMIT ?`,
+    )
+    .bind(...binds, cap)
+    .all<{ dataset_id: string; github_repo: string; visibility: string }>();
+
+  const datasets = rows.results ?? [];
+  const pat = await getDatasetsToken(c.env);
+  const results: Array<{
+    dataset_id: string;
+    steps?: Record<string, { status: string; detail?: string }>;
+    error?: string;
+  }> = [];
+
+  for (const d of datasets) {
+    const repoName = d.github_repo.split("/")[1];
+    if (!repoName) {
+      results.push({ dataset_id: d.dataset_id, error: "invalid repo format" });
+      continue;
+    }
+    const vis = d.visibility === "public" ? "public" : "private";
+    try {
+      const { ownerLogin, approvedWriters } = await resolveRepoCollaborators(db, d.dataset_id);
+      const spec = await ensureRepoToSpec(repoName, pat, {
+        visibility: vis,
+        collaborators: { ownerLogin, approvedWriters },
+        dryRun: dryRun,
+      });
+      if (!dryRun) await mirrorReconcileRemovals(db, d.dataset_id, spec.reconcile?.removed);
+      results.push({ dataset_id: d.dataset_id, steps: spec.steps });
+    } catch (e) {
+      results.push({ dataset_id: d.dataset_id, error: e instanceof Error ? e.message : String(e) });
+    }
+  }
+
+  return c.json({ dry_run: dryRun, count: datasets.length, results });
 });
 
 // ============================================================================
@@ -3496,6 +3706,30 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
           500,
         );
       }
+
+      // Enforce the published-repo spec (epic #713): lock main (ruleset,
+      // green-gated) + reconcile collaborators. Non-fatal; visibility is
+      // already public + verified above.
+      let publishSpec: Awaited<ReturnType<typeof ensureRepoToSpec>> | undefined;
+      try {
+        const { ownerLogin, approvedWriters } = await resolveRepoCollaborators(db, datasetId);
+        publishSpec = await ensureRepoToSpec(repoName, pat, {
+          visibility: "public",
+          collaborators: { ownerLogin, approvedWriters },
+        });
+        // Surface a non-green/failed protection step in the bulk-approval log,
+        // since the orchestrator response does not carry the per-step detail.
+        const offSteps = Object.entries(publishSpec.steps)
+          .filter(([, s]) => s.status !== "ok")
+          .map(([k, s]) => `${k}=${s.status}${s.detail ? `(${s.detail})` : ""}`);
+        if (offSteps.length > 0) {
+          console.warn(`[repo-spec] ${datasetId} enforcement non-ok steps: ${offSteps.join(", ")}`);
+        }
+      } catch (specError) {
+        console.error(`Repo-spec enforcement failed for ${datasetId} (non-fatal):`, specError);
+      }
+      // Mirror reconcile removals into D1 (own try/catch; flags a divergence).
+      await mirrorReconcileRemovals(db, datasetId, publishSpec?.reconcile?.removed);
 
       await updateProgress("repo_public");
     } catch (err) {
