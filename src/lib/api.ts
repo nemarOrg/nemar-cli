@@ -2066,6 +2066,80 @@ export async function reindexBulk(
 }
 
 // ============================================================================
+// Fleet governance (epic #713)
+// ============================================================================
+
+export interface FleetDriftResponse {
+  scanned: number;
+  limit: number;
+  counts: Record<string, number>;
+  buckets: Record<string, string[]>;
+  repos: Array<{ dataset_id: string; buckets: string[] }>;
+}
+
+export async function getFleetDrift(opts?: {
+  prefix?: string;
+  visibility?: "public" | "private";
+  limit?: number;
+}): Promise<FleetDriftResponse> {
+  const qs = new URLSearchParams();
+  if (opts?.prefix) qs.set("prefix", opts.prefix);
+  if (opts?.visibility) qs.set("visibility", opts.visibility);
+  if (opts?.limit) qs.set("limit", String(opts.limit));
+  const suffix = qs.toString() ? `?${qs.toString()}` : "";
+  return request<FleetDriftResponse>(`/admin/fleet/drift${suffix}`, {}, true);
+}
+
+export interface EnforceResponse {
+  dataset_id: string;
+  dry_run: boolean;
+  result: {
+    visibility: string;
+    defaultBranch: string;
+    steps: Record<string, { status: string; detail?: string }>;
+  };
+}
+
+export async function enforceDataset(datasetId: string, dryRun: boolean): Promise<EnforceResponse> {
+  return request<EnforceResponse>(
+    `/admin/datasets/${datasetId}/enforce`,
+    { method: "POST", body: JSON.stringify({ dry_run: dryRun }) },
+    true,
+  );
+}
+
+export interface EnforceBulkResponse {
+  dry_run: boolean;
+  count: number;
+  results: Array<{
+    dataset_id: string;
+    steps?: Record<string, { status: string; detail?: string }>;
+    error?: string;
+  }>;
+}
+
+export async function enforceBulk(opts: {
+  prefix?: string;
+  visibility?: "public" | "private";
+  limit?: number;
+  dryRun: boolean;
+}): Promise<EnforceBulkResponse> {
+  return request<EnforceBulkResponse>(
+    "/admin/datasets/enforce/bulk",
+    {
+      method: "POST",
+      body: JSON.stringify({
+        prefix: opts.prefix,
+        visibility: opts.visibility,
+        limit: opts.limit,
+        dry_run: opts.dryRun,
+      }),
+    },
+    true,
+  );
+}
+
+// ============================================================================
 // Email Preferences
 // ============================================================================
 

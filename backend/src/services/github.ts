@@ -2632,6 +2632,79 @@ export async function removeBranchRuleset(repo: string, pat: string): Promise<bo
 }
 
 /**
+ * Read the NEMAR branch ruleset on a repo (for drift reporting): whether it is
+ * present and which required status-check contexts it enforces. Returns
+ * `{ present:false, contexts:[] }` when absent. Read-only.
+ */
+export async function getBranchRulesetInfo(
+  repo: string,
+  pat: string,
+): Promise<{ present: boolean; contexts: string[] }> {
+  const headers = ghHeaders(pat);
+  const rulesetsUrl = `${GITHUB_API()}/repos/${ORG_NAME}/${repo}/rulesets`;
+  const list = await githubFetchWithRetry(
+    `${rulesetsUrl}?includes_parents=false`,
+    { method: "GET", headers },
+    { retryOn404: true },
+  );
+  if (!list.ok) return { present: false, contexts: [] };
+  const rulesets = (await list.json()) as Array<{ id: number; name: string }>;
+  const existing = rulesets.find((r) => r.name === BRANCH_RULESET_NAME);
+  if (!existing) return { present: false, contexts: [] };
+
+  // Fetch the full ruleset to read its required_status_checks contexts.
+  const detail = await githubFetchWithRetry(
+    `${rulesetsUrl}/${existing.id}`,
+    { method: "GET", headers },
+    { retryOn404: true },
+  );
+  if (!detail.ok) {
+    // Ruleset exists but its detail couldn't be read; throw so the drift
+    // gatherer's per-call .catch absorbs it (a transient error must not surface
+    // as an empty-contexts CONTEXT_NAME_MISMATCH).
+    const b = await detail.text().catch(() => "<failed to read body>");
+    throw new HttpError(
+      `Branch ruleset detail fetch failed for ${repo}: HTTP ${detail.status}: ${b.slice(0, 200)}`,
+      detail.status,
+      b.slice(0, 200),
+    );
+  }
+  const d = (await detail.json()) as {
+    rules?: Array<{
+      type: string;
+      parameters?: { required_status_checks?: Array<{ context: string }> };
+    }>;
+  };
+  const rule = (d.rules ?? []).find((r) => r.type === "required_status_checks");
+  const contexts = (rule?.parameters?.required_status_checks ?? []).map((c) => c.context);
+  return { present: true, contexts };
+}
+
+/** List a repo's `.github/workflows` filenames (drift reporting). [] if none. */
+export async function listRepoWorkflows(repo: string, pat: string): Promise<string[]> {
+  const r = await githubFetchWithRetry(
+    `${GITHUB_API()}/repos/${ORG_NAME}/${repo}/contents/.github/workflows`,
+    { headers: ghHeaders(pat) },
+    { retryOn404: true },
+  );
+  if (!r.ok) return [];
+  const items = (await r.json()) as Array<{ name?: string; type?: string }>;
+  return items.filter((i) => i.type === "file" && i.name).map((i) => i.name as string);
+}
+
+/** A repo's default branch (defaults to "main" if it can't be read). */
+export async function getRepoDefaultBranch(repo: string, pat: string): Promise<string> {
+  const r = await githubFetchWithRetry(
+    `${GITHUB_API()}/repos/${ORG_NAME}/${repo}`,
+    { headers: ghHeaders(pat) },
+    { retryOn404: true },
+  );
+  if (!r.ok) return "main";
+  const info = (await r.json()) as { default_branch?: string };
+  return info.default_branch || "main";
+}
+
+/**
  * Pure green-gate predicate: is the required check satisfied on a commit, given
  * its check-runs and legacy commit statuses? Green = a matching check-run
  * (by name, and by App `integration_id` when the required check is pinned) with
