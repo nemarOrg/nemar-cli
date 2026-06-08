@@ -2414,6 +2414,488 @@ export async function ensureBranchRuleset(
   );
 }
 
+// ===========================================================================
+// Repo-to-spec enforcement (epic #713, phase #717)
+// ===========================================================================
+
+function errText(e: unknown): string {
+  return e instanceof Error ? e.message : String(e);
+}
+
+function ghHeaders(pat: string): Record<string, string> {
+  return {
+    Authorization: `Bearer ${pat}`,
+    Accept: "application/vnd.github.v3+json",
+    "User-Agent": "NEMAR-API",
+  };
+}
+
+/** GitHub collaborator role ranks, low to high. */
+const ROLE_RANK: Record<string, number> = {
+  pull: 1,
+  read: 1,
+  triage: 2,
+  push: 3,
+  write: 3,
+  maintain: 4,
+  admin: 5,
+};
+function roleRank(role: string): number {
+  return ROLE_RANK[role] ?? 1;
+}
+
+export interface DirectCollaborator {
+  login: string;
+  role_name: string;
+}
+
+export interface CollaboratorActions {
+  toAdd: Array<{ login: string; role: "push" | "maintain" }>;
+  toPromote: Array<{ login: string; role: "push" | "maintain" }>;
+  toRemove: string[];
+}
+
+/**
+ * Pure diff of a repo's CURRENT direct collaborators against the desired set
+ * derived from the D1 ledger: owner -> maintain, approved writers -> push.
+ *
+ * - Owner always retained (never removed/demoted).
+ * - Writers promoted to push only if currently below push; never demoted (a
+ *   collaborator who already has maintain keeps it).
+ * - Any other direct grant (a stray read, a manual non-ledger add) is removed,
+ *   unless its login is in `skipLogins`. On a public repo this includes the
+ *   meaningless direct `read` grants.
+ *
+ * Comparison is case-insensitive on login; the original-case login is used for
+ * the removal list so the GitHub API call matches.
+ */
+export function computeCollaboratorActions(opts: {
+  current: DirectCollaborator[];
+  visibility: "public" | "private";
+  ownerLogin: string | null;
+  approvedWriters: string[];
+  skipLogins?: string[];
+}): CollaboratorActions {
+  const ownerLogin = opts.ownerLogin ? opts.ownerLogin.toLowerCase() : null;
+  const skip = new Set((opts.skipLogins ?? []).map((s) => s.toLowerCase()));
+
+  const desired = new Map<string, "push" | "maintain">();
+  if (ownerLogin) desired.set(ownerLogin, "maintain");
+  for (const w of opts.approvedWriters) {
+    const l = w.toLowerCase();
+    if (l && l !== ownerLogin) desired.set(l, "push");
+  }
+
+  const currentByLogin = new Map(opts.current.map((c) => [c.login.toLowerCase(), c]));
+  const toAdd: CollaboratorActions["toAdd"] = [];
+  const toPromote: CollaboratorActions["toPromote"] = [];
+  for (const [login, role] of desired) {
+    const cur = currentByLogin.get(login);
+    if (!cur) {
+      toAdd.push({ login, role });
+    } else if (roleRank(cur.role_name) < roleRank(role)) {
+      toPromote.push({ login, role });
+    }
+  }
+
+  const toRemove: string[] = [];
+  for (const c of opts.current) {
+    const login = c.login.toLowerCase();
+    if (desired.has(login) || skip.has(login) || login === ownerLogin) continue;
+    toRemove.push(c.login);
+  }
+
+  return { toAdd, toPromote, toRemove };
+}
+
+/**
+ * List a repo's DIRECT collaborators (affiliation=direct). Never uses the
+ * `/collaborators/{user}/permission` endpoint, which returns a baseline `read`
+ * for ANY user on a public repo and would make every reconcile a false diff.
+ */
+export async function listDirectCollaborators(
+  repo: string,
+  pat: string,
+): Promise<DirectCollaborator[]> {
+  const out: DirectCollaborator[] = [];
+  const headers = ghHeaders(pat);
+  let page = 1;
+  while (true) {
+    const r = await githubFetchWithRetry(
+      `${GITHUB_API()}/repos/${ORG_NAME}/${repo}/collaborators?affiliation=direct&per_page=100&page=${page}`,
+      { headers },
+      { retryOn404: true },
+    );
+    if (!r.ok) {
+      const b = await r.text().catch(() => "<failed to read body>");
+      throw new HttpError(
+        `List collaborators failed for ${repo}: HTTP ${r.status}: ${b.slice(0, 200)}`,
+        r.status,
+        b.slice(0, 200),
+      );
+    }
+    const items = (await r.json()) as Array<{ login: string; role_name?: string }>;
+    if (items.length === 0) break;
+    out.push(...items.map((c) => ({ login: c.login, role_name: c.role_name ?? "read" })));
+    if (items.length < 100) break;
+    page++;
+  }
+  return out;
+}
+
+export interface CollaboratorReconcileResult {
+  added: string[];
+  promoted: string[];
+  removed: string[];
+  errors: string[];
+}
+
+/**
+ * Reconcile a repo's direct collaborators to the ledger-derived desired set.
+ * Never throws; collects per-action errors. See `computeCollaboratorActions`.
+ */
+export async function reconcileCollaborators(
+  opts: {
+    repo: string;
+    visibility: "public" | "private";
+    ownerLogin: string | null;
+    approvedWriters: string[];
+    skipLogins?: string[];
+  },
+  pat: string,
+): Promise<CollaboratorReconcileResult> {
+  const result: CollaboratorReconcileResult = { added: [], promoted: [], removed: [], errors: [] };
+  let current: DirectCollaborator[];
+  try {
+    current = await listDirectCollaborators(opts.repo, pat);
+  } catch (e) {
+    result.errors.push(`list: ${errText(e)}`);
+    return result;
+  }
+  const actions = computeCollaboratorActions({
+    current,
+    visibility: opts.visibility,
+    ownerLogin: opts.ownerLogin,
+    approvedWriters: opts.approvedWriters,
+    skipLogins: opts.skipLogins,
+  });
+
+  for (const a of actions.toAdd) {
+    try {
+      (await addCollaborator(opts.repo, a.login, a.role, pat))
+        ? result.added.push(a.login)
+        : result.errors.push(`add ${a.login}`);
+    } catch (e) {
+      result.errors.push(`add ${a.login}: ${errText(e)}`);
+    }
+  }
+  for (const a of actions.toPromote) {
+    try {
+      (await addCollaborator(opts.repo, a.login, a.role, pat))
+        ? result.promoted.push(a.login)
+        : result.errors.push(`promote ${a.login}`);
+    } catch (e) {
+      result.errors.push(`promote ${a.login}: ${errText(e)}`);
+    }
+  }
+  for (const login of actions.toRemove) {
+    try {
+      (await removeCollaborator(opts.repo, login, pat))
+        ? result.removed.push(login)
+        : result.errors.push(`remove ${login}`);
+    } catch (e) {
+      result.errors.push(`remove ${login}: ${errText(e)}`);
+    }
+  }
+  return result;
+}
+
+/** Delete the NEMAR branch ruleset if present (un-publish). No-op if absent. */
+export async function removeBranchRuleset(repo: string, pat: string): Promise<boolean> {
+  const headers = ghHeaders(pat);
+  const rulesetsUrl = `${GITHUB_API()}/repos/${ORG_NAME}/${repo}/rulesets`;
+  const list = await githubFetchWithRetry(
+    `${rulesetsUrl}?includes_parents=false`,
+    { method: "GET", headers },
+    { retryOn404: true },
+  );
+  if (!list.ok) {
+    if (list.status === 404) return false;
+    const b = await list.text().catch(() => "<failed to read body>");
+    throw new HttpError(
+      `Branch ruleset list failed for ${repo}: HTTP ${list.status}: ${b.slice(0, 200)}`,
+      list.status,
+      b.slice(0, 200),
+    );
+  }
+  const rulesets = (await list.json()) as Array<{ id: number; name: string }>;
+  const existing = rulesets.find((r) => r.name === BRANCH_RULESET_NAME);
+  if (!existing) return false;
+  const del = await githubFetchWithRetry(
+    `${rulesetsUrl}/${existing.id}`,
+    { method: "DELETE", headers },
+    { retryOn404: true },
+  );
+  if (del.ok || del.status === 404) return true;
+  const b = await del.text().catch(() => "<failed to read body>");
+  throw new HttpError(
+    `Branch ruleset delete failed for ${repo}: HTTP ${del.status}: ${b.slice(0, 200)}`,
+    del.status,
+    b.slice(0, 200),
+  );
+}
+
+/**
+ * Pure green-gate predicate: is the required check satisfied on a commit, given
+ * its check-runs and legacy commit statuses? Green = a matching check-run
+ * (by name, and by App `integration_id` when the required check is pinned) with
+ * conclusion success/neutral/skipped, or a matching commit status with
+ * state=success. Missing or failing => not green.
+ */
+export function isRequiredCheckGreen(
+  required: RequiredCheck,
+  checkRuns: Array<{ name: string; conclusion: string | null; app_id?: number | null }>,
+  statuses: Array<{ context: string; state: string }>,
+): boolean {
+  const green = new Set(["success", "neutral", "skipped"]);
+  const matched = checkRuns.some(
+    (cr) =>
+      cr.name === required.context &&
+      (required.integration_id === undefined || cr.app_id === required.integration_id) &&
+      cr.conclusion !== null &&
+      green.has(cr.conclusion),
+  );
+  if (matched) return true;
+  return statuses.some((s) => s.context === required.context && s.state === "success");
+}
+
+/**
+ * Green-gate: is the required BIDS check green on a repo's default-branch HEAD?
+ * Used to skip applying protection to a repo whose latest validation is red or
+ * missing (so we never brick PRs). Reads check-runs + the legacy combined
+ * status; any fetch failure is treated as NOT green (fail-closed).
+ */
+export async function checkRunGreenOnDefaultHead(
+  repo: string,
+  branch: string,
+  required: RequiredCheck,
+  pat: string,
+): Promise<boolean> {
+  const headers = ghHeaders(pat);
+  let checkRuns: Array<{ name: string; conclusion: string | null; app_id?: number | null }> = [];
+  try {
+    const r = await githubFetchWithRetry(
+      `${GITHUB_API()}/repos/${ORG_NAME}/${repo}/commits/${branch}/check-runs?per_page=100`,
+      { headers },
+      { retryOn404: true },
+    );
+    if (r.ok) {
+      const d = (await r.json()) as {
+        check_runs?: Array<{ name: string; conclusion: string | null; app?: { id?: number } }>;
+      };
+      checkRuns = (d.check_runs ?? []).map((c) => ({
+        name: c.name,
+        conclusion: c.conclusion,
+        app_id: c.app?.id ?? null,
+      }));
+    }
+  } catch {
+    return false;
+  }
+  let statuses: Array<{ context: string; state: string }> = [];
+  try {
+    const r = await githubFetchWithRetry(
+      `${GITHUB_API()}/repos/${ORG_NAME}/${repo}/commits/${branch}/status`,
+      { headers },
+      { retryOn404: true },
+    );
+    if (r.ok) {
+      const d = (await r.json()) as { statuses?: Array<{ context: string; state: string }> };
+      statuses = d.statuses ?? [];
+    }
+  } catch {
+    /* statuses optional */
+  }
+  return isRequiredCheckGreen(required, checkRuns, statuses);
+}
+
+type StepStatus = "ok" | "skipped" | "failed";
+export interface RepoSpecResult {
+  repo: string;
+  visibility: "public" | "private";
+  defaultBranch: string;
+  steps: Record<string, { status: StepStatus; detail?: string }>;
+  reconcile?: CollaboratorReconcileResult;
+}
+
+/**
+ * The single idempotent enforcement point: bring a dataset repo to its target
+ * spec for the given publish state. PUBLIC = locked main (branch + tag ruleset,
+ * green-gated) + workflows + collaborator reconcile; PRIVATE = open push (NO
+ * branch ruleset) + workflows + reconcile. Each step records a structured
+ * status; no cross-step rollback. `dryRun` computes the plan without mutating.
+ *
+ * D1-free by design: the caller resolves `collaborators.ownerLogin` (from
+ * `datasets.owner_user_id`) and `approvedWriters` (from `dataset_collaborators`)
+ * and passes them in.
+ */
+export async function ensureRepoToSpec(
+  repo: string,
+  pat: string,
+  opts: {
+    visibility: "public" | "private";
+    collaborators?: { ownerLogin: string | null; approvedWriters: string[]; skipLogins?: string[] };
+    refreshProtection?: boolean;
+    dryRun?: boolean;
+  },
+): Promise<RepoSpecResult> {
+  const steps: RepoSpecResult["steps"] = {};
+  const isPublic = opts.visibility === "public";
+  const bidsCheck = deriveContexts(repo)[0];
+
+  // 1. Capture the default branch.
+  let defaultBranch = "main";
+  try {
+    const r = await githubFetchWithRetry(
+      `${GITHUB_API()}/repos/${ORG_NAME}/${repo}`,
+      { headers: ghHeaders(pat) },
+      { retryOn404: true },
+    );
+    if (r.ok) {
+      const info = (await r.json()) as { default_branch?: string };
+      defaultBranch = info.default_branch || "main";
+    }
+  } catch {
+    /* default to main */
+  }
+
+  if (opts.dryRun) {
+    steps.plan = { status: "ok", detail: `${opts.visibility}, default=${defaultBranch}` };
+    if (isPublic) {
+      const green = await checkRunGreenOnDefaultHead(repo, defaultBranch, bidsCheck, pat);
+      steps.branch_ruleset = green
+        ? { status: "ok", detail: "would apply" }
+        : { status: "skipped", detail: "RED_REQUIRED_CHECK" };
+    } else {
+      steps.branch_ruleset = { status: "skipped", detail: "private: no ruleset" };
+    }
+    if (opts.collaborators) {
+      let current: DirectCollaborator[] = [];
+      try {
+        current = await listDirectCollaborators(repo, pat);
+      } catch (e) {
+        steps.collaborators = { status: "failed", detail: errText(e) };
+      }
+      const a = computeCollaboratorActions({
+        current,
+        visibility: opts.visibility,
+        ownerLogin: opts.collaborators.ownerLogin,
+        approvedWriters: opts.collaborators.approvedWriters,
+        skipLogins: opts.collaborators.skipLogins,
+      });
+      steps.collaborators = {
+        status: "ok",
+        detail: `+${a.toAdd.length} ^${a.toPromote.length} -${a.toRemove.length}`,
+      };
+    }
+    return { repo, visibility: opts.visibility, defaultBranch, steps };
+  }
+
+  // 2. Default branch must be main.
+  try {
+    const r = await ensureMainBranch(repo, pat);
+    steps.main_branch = {
+      status: "ok",
+      detail: r.renamed ? `renamed from ${r.previousBranch}` : "main",
+    };
+    if (r.renamed) defaultBranch = "main";
+  } catch (e) {
+    steps.main_branch = { status: "failed", detail: errText(e) };
+  }
+
+  // 3. Workflows must be deployed before protection can require their checks.
+  let workflowsOk = true;
+  try {
+    const wr = await ensureWorkflowsDeployed(repo, "main", pat);
+    if (wr.errors.length > 0) {
+      workflowsOk = false;
+      steps.workflows = { status: "failed", detail: wr.errors.join("; ") };
+    } else {
+      steps.workflows = {
+        status: "ok",
+        detail: `deployed ${wr.deployed.length}, present ${wr.alreadyPresent.length}`,
+      };
+    }
+  } catch (e) {
+    workflowsOk = false;
+    steps.workflows = { status: "failed", detail: errText(e) };
+  }
+
+  // 4. Auto-merge (so green PRs land without manual button-press).
+  try {
+    await enableAutoMerge(repo, pat);
+    steps.auto_merge = { status: "ok" };
+  } catch (e) {
+    steps.auto_merge = { status: "failed", detail: errText(e) };
+  }
+
+  // 5. Branch protection — PUBLIC only, green-gated; PRIVATE removes any ruleset.
+  if (isPublic) {
+    if (!workflowsOk) {
+      steps.branch_ruleset = { status: "skipped", detail: "workflows not deployed" };
+    } else {
+      const green = await checkRunGreenOnDefaultHead(repo, "main", bidsCheck, pat);
+      if (!green) {
+        steps.branch_ruleset = { status: "skipped", detail: "RED_REQUIRED_CHECK" };
+      } else {
+        try {
+          await ensureBranchRuleset(repo, pat, { checks: deriveContexts(repo), strict: false });
+          steps.branch_ruleset = { status: "ok" };
+        } catch (e) {
+          steps.branch_ruleset = { status: "failed", detail: errText(e) };
+        }
+        try {
+          await applyTagProtection(repo, pat);
+          steps.tag_ruleset = { status: "ok" };
+        } catch (e) {
+          steps.tag_ruleset = { status: "failed", detail: errText(e) };
+        }
+      }
+    }
+  } else {
+    try {
+      const removed = await removeBranchRuleset(repo, pat);
+      steps.branch_ruleset = {
+        status: "ok",
+        detail: removed ? "removed (private)" : "none (private)",
+      };
+    } catch (e) {
+      steps.branch_ruleset = { status: "failed", detail: errText(e) };
+    }
+  }
+
+  // 6. Collaborators (when the caller resolved the ledger).
+  let reconcile: CollaboratorReconcileResult | undefined;
+  if (opts.collaborators) {
+    reconcile = await reconcileCollaborators(
+      {
+        repo,
+        visibility: opts.visibility,
+        ownerLogin: opts.collaborators.ownerLogin,
+        approvedWriters: opts.collaborators.approvedWriters,
+        skipLogins: opts.collaborators.skipLogins,
+      },
+      pat,
+    );
+    steps.collaborators = {
+      status: reconcile.errors.length ? "failed" : "ok",
+      detail: `+${reconcile.added.length} ^${reconcile.promoted.length} -${reconcile.removed.length}${reconcile.errors.length ? ` errors:${reconcile.errors.length}` : ""}`,
+    };
+  }
+
+  return { repo, visibility: opts.visibility, defaultBranch, steps, reconcile };
+}
+
 /**
  * Get the latest commit SHA on a branch.
  *
