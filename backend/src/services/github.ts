@@ -670,6 +670,13 @@ export async function ensureMainBranch(
  * - BIDS validation and version check must pass
  * - Admins can bypass if needed
  * - No force pushes or deletions
+ *
+ * @deprecated Superseded by `ensureBranchRuleset` (epic #713). This uses the
+ * legacy `/branches/main/protection` API with hardcoded contexts
+ * `["bids-validation","version-check"]` that the post-#601 central flow no
+ * longer emits, and it cannot exempt the NEMAR App from the PR rule. It is left
+ * untouched here because its only caller is `finalize` (private repos); the
+ * rewire to call `ensureBranchRuleset` at make-public happens in Phase 3 (#717).
  */
 export async function applyBranchProtection(repo: string, pat: string): Promise<boolean> {
   const response = await fetch(
@@ -2222,6 +2229,188 @@ export async function applyTagProtection(repo: string, pat: string): Promise<voi
     `Tag protection failed for ${repo}: HTTP ${response.status}: ${snippet}`,
     response.status,
     snippet,
+  );
+}
+
+/**
+ * NEMAR GitHub App id (`nemar-publish-bot`). Required status checks are pinned
+ * to this integration so only a check-run posted by the App satisfies them
+ * (spoof-resistant), and the App is a ruleset bypass actor so its automation
+ * (enrichment commit-to-main, version-DOI / pr-merge `v*` tag pushes) is not
+ * blocked by the PR rule that gates humans. Epic #713.
+ */
+export const NEMAR_APP_ID = 3679074;
+
+/** Ruleset name for dataset-repo branch protection (the idempotent upsert key). */
+export const BRANCH_RULESET_NAME = "NEMAR branch protection";
+
+/**
+ * Dataset repos created before the centralized-BIDS migration (#601) that still
+ * run the OLD inline `bids-validation.yml`, whose check-run is literally named
+ * `bids-validation`. Everything else is on the central shim that posts
+ * `Run BIDS Validation`.
+ */
+const LEGACY_INLINE_BIDS_REPOS = new Set(["nm000103", "nm000105", "nm000106", "nm000107"]);
+
+/**
+ * A required status check. `integration_id` pins the check to a specific
+ * GitHub App so only that App's check-run satisfies it (spoof-resistant); omit
+ * it to accept the check from any source.
+ */
+export interface RequiredCheck {
+  context: string;
+  integration_id?: number;
+}
+
+/**
+ * Required status checks for a dataset repo's branch protection (published model
+ * = BIDS green + version bump). Two checks:
+ *  - BIDS: central-flow repos require `Run BIDS Validation`, posted cross-repo by
+ *    the NEMAR App, so it is pinned to the App. The four legacy-inline repos still
+ *    emit `bids-validation` from github-actions (not the App), so it is unpinned.
+ *  - `version-check`: emitted by github-actions in the dataset repo; unpinned.
+ */
+export function deriveContexts(repo: string): RequiredCheck[] {
+  const bids: RequiredCheck = LEGACY_INLINE_BIDS_REPOS.has(repo)
+    ? { context: "bids-validation" }
+    : { context: "Run BIDS Validation", integration_id: NEMAR_APP_ID };
+  return [bids, { context: "version-check" }];
+}
+
+export interface BranchRulesetPayload {
+  name: string;
+  target: "branch";
+  enforcement: "active";
+  conditions: { ref_name: { include: string[]; exclude: string[] } };
+  bypass_actors: Array<{ actor_id: number; actor_type: string; bypass_mode: string }>;
+  rules: Array<Record<string, unknown>>;
+}
+
+/**
+ * Build the branch-ruleset payload. Pure (no network) so it is unit-testable.
+ *
+ * - `~DEFAULT_BRANCH` tracks the repo's default branch (robust to main/master).
+ * - PR rule with 0 required reviews: a solo author self-merges once checks are
+ *   green (GitHub forbids self-approval, so requiring >=1 review would deadlock
+ *   single-author datasets).
+ * - Required checks carry per-check `integration_id` pinning (see `deriveContexts`);
+ *   `strict` off by default (a detached cross-repo App check-run is never
+ *   re-triggered by GitHub's up-to-date logic, so `strict:true` would deadlock);
+ *   `do_not_enforce_on_create` so a brand-new repo's first push is not blocked
+ *   before any check has reported.
+ * - `bypass_actors`: the NEMAR App (commit-to-main + tag pushes) and org admins
+ *   (break-glass).
+ */
+export function buildBranchRulesetPayload(opts: {
+  checks: RequiredCheck[];
+  strict?: boolean;
+}): BranchRulesetPayload {
+  return {
+    name: BRANCH_RULESET_NAME,
+    target: "branch",
+    enforcement: "active",
+    conditions: { ref_name: { include: ["~DEFAULT_BRANCH"], exclude: [] } },
+    bypass_actors: [
+      { actor_id: NEMAR_APP_ID, actor_type: "Integration", bypass_mode: "always" },
+      { actor_id: 1, actor_type: "OrganizationAdmin", bypass_mode: "always" },
+    ],
+    rules: [
+      {
+        type: "pull_request",
+        parameters: {
+          required_approving_review_count: 0,
+          dismiss_stale_reviews_on_push: true,
+          require_code_owner_review: false,
+          require_last_push_approval: false,
+          required_review_thread_resolution: false,
+        },
+      },
+      {
+        type: "required_status_checks",
+        parameters: {
+          strict_required_status_checks_policy: opts.strict ?? false,
+          do_not_enforce_on_create: true,
+          required_status_checks: opts.checks.map((c) =>
+            c.integration_id === undefined
+              ? { context: c.context }
+              : { context: c.context, integration_id: c.integration_id },
+          ),
+        },
+      },
+      { type: "non_fast_forward" },
+      { type: "deletion" },
+    ],
+  };
+}
+
+/**
+ * Idempotently apply the NEMAR branch ruleset to a dataset repo's default
+ * branch. GET-first so the create-vs-update decision is unambiguous (POST-then-
+ * treat-422 would conflate a name collision with a payload validation error):
+ * list the repo's own rulesets (`includes_parents=false`, so an org-inherited
+ * ruleset of the same name can't be mistaken for this one), PUT to converge if
+ * one named `BRANCH_RULESET_NAME` exists, otherwise POST to create. A 422 on
+ * either write is therefore a genuine validation error and is surfaced verbatim.
+ * `dryRun` returns the payload without any network call.
+ *
+ * Worst case ~2 sequential calls plus `githubFetchWithRetry` backoff on a fresh
+ * visibility flip (the rulesets endpoint can transiently 404 while ACLs
+ * propagate, same as `applyTagProtection`).
+ *
+ * NOTE (Phase 2, #713): this primitive is intentionally not yet wired into any
+ * lifecycle hook. Phase 3 (#717) calls it from make-public (green-gated) and
+ * removes it at make-private.
+ */
+export async function ensureBranchRuleset(
+  repo: string,
+  pat: string,
+  opts: { checks: RequiredCheck[]; strict?: boolean; dryRun?: boolean },
+): Promise<{ action: "created" | "updated" | "dryRun"; payload: BranchRulesetPayload }> {
+  const payload = buildBranchRulesetPayload({ checks: opts.checks, strict: opts.strict });
+  if (opts.dryRun) {
+    return { action: "dryRun", payload };
+  }
+
+  const headers = {
+    Authorization: `Bearer ${pat}`,
+    Accept: "application/vnd.github.v3+json",
+    "User-Agent": "NEMAR-API",
+    "Content-Type": "application/json",
+  };
+  const rulesetsUrl = `${GITHUB_API()}/repos/${ORG_NAME}/${repo}/rulesets`;
+
+  // List the repo's OWN rulesets only (exclude org/enterprise-inherited ones, so
+  // a same-named inherited ruleset is never PUT by mistake).
+  const listResp = await githubFetchWithRetry(
+    `${rulesetsUrl}?includes_parents=false`,
+    { method: "GET", headers },
+    { retryOn404: true },
+  );
+  if (!listResp.ok) {
+    const body = await listResp.text().catch(() => "<failed to read body>");
+    throw new HttpError(
+      `Branch ruleset list failed for ${repo}: HTTP ${listResp.status}: ${body.slice(0, 300)}`,
+      listResp.status,
+      body.slice(0, 300),
+    );
+  }
+  const rulesets = (await listResp.json()) as Array<{ id: number; name: string }>;
+  const existing = rulesets.find((r) => r.name === BRANCH_RULESET_NAME);
+
+  const write = await githubFetchWithRetry(
+    existing ? `${rulesetsUrl}/${existing.id}` : rulesetsUrl,
+    { method: existing ? "PUT" : "POST", headers, body: JSON.stringify(payload) },
+    { retryOn404: true },
+  );
+  if (write.ok) {
+    return { action: existing ? "updated" : "created", payload };
+  }
+
+  const body = await write.text().catch(() => "<failed to read body>");
+  throw new HttpError(
+    `Branch ruleset ${existing ? "update" : "create"} failed for ${repo}: HTTP ${write.status}: ${body.slice(0, 300)}`,
+    write.status,
+    body.slice(0, 300),
   );
 }
 
