@@ -117,7 +117,13 @@ async function grantCollaborator(
       .bind(opts.datasetPk, opts.granteeUserId, opts.grantedBy, opts.accessType)
       .run();
   } catch (error) {
-    console.error("CRITICAL: Failed to record collaborator in database:", error);
+    console.error(
+      "CRITICAL: Failed to record collaborator for",
+      opts.datasetId,
+      opts.granteeGithubUsername,
+      "(GitHub access already granted; retry is idempotent):",
+      error,
+    );
     return { ok: false, stage: "db", error };
   }
 
@@ -130,8 +136,33 @@ async function grantCollaborator(
       .bind(opts.granteeUserId, opts.datasetId, opts.grantedBy)
       .run();
   } catch (error) {
-    console.error("CRITICAL: Failed to grant S3 permission for", opts.datasetId, error);
+    console.error(
+      "CRITICAL: Failed to grant S3 permission for",
+      opts.datasetId,
+      opts.granteeGithubUsername,
+      "(GitHub + collaborator row exist; retry is idempotent):",
+      error,
+    );
     return { ok: false, stage: "s3", error };
+  }
+
+  // Resolve any pending access request for this user, so the owner's queue does
+  // not keep showing a request that was satisfied via invite or approve.
+  // Best-effort: the grant itself already succeeded.
+  try {
+    await db
+      .prepare(
+        "UPDATE access_requests SET status = 'approved', decided_at = CURRENT_TIMESTAMP, decided_by = ? WHERE dataset_id = ? AND user_id = ? AND status = 'pending'",
+      )
+      .bind(opts.grantedBy, opts.datasetPk, opts.granteeUserId)
+      .run();
+  } catch (error) {
+    console.error(
+      "Failed to resolve pending access request for",
+      opts.datasetId,
+      opts.granteeGithubUsername,
+      error,
+    );
   }
 
   // Audit log (non-fatal).
@@ -1720,6 +1751,20 @@ datasetRoutes.post("/:id/request-access", authMiddleware, async (c) => {
     });
   }
 
+  // If a request is already pending, do not reset created_at or re-notify the
+  // owner on a repeat call; just acknowledge it.
+  const priorRequest = await db
+    .prepare("SELECT status FROM access_requests WHERE dataset_id = ? AND user_id = ?")
+    .bind(dataset.id, user.id)
+    .first<{ status: string }>();
+  if (priorRequest?.status === "pending") {
+    return c.json({
+      action: "requested",
+      message: `Your access request for ${dataset.name} is already pending the owner's review.`,
+      dataset_id: datasetId,
+    });
+  }
+
   // PRIVATE (fail-closed for any non-'public' value): queue a request for the
   // owner to approve. Upsert so a re-request after a denial returns to pending.
   try {
@@ -1946,7 +1991,7 @@ async function resolveAccessRequest(
   | { error: Response }
   | {
       dataset: { id: number; dataset_id: string; name: string; github_repo: string | null };
-      requester: { id: number; username: string; github_username: string };
+      requester: { id: number; username: string; github_username: string | null; status: string };
     }
 > {
   const datasetId = c.req.param("id");
@@ -1979,10 +2024,10 @@ async function resolveAccessRequest(
 
   const requester = await db
     .prepare(
-      "SELECT id, username, github_username FROM users WHERE username = ? AND deleted_at IS NULL",
+      "SELECT id, username, github_username, status FROM users WHERE username = ? AND deleted_at IS NULL",
     )
     .bind(username)
-    .first<{ id: number; username: string; github_username: string }>();
+    .first<{ id: number; username: string; github_username: string | null; status: string }>();
 
   if (!requester) {
     return { error: c.json({ error: `User '${username}' not found` }, 404) };
@@ -2014,6 +2059,17 @@ datasetRoutes.post("/:id/access-requests/:username/approve", authMiddleware, asy
   if ("error" in resolved) return resolved.error;
   const { dataset, requester } = resolved;
 
+  // The requester must be a usable grant target: approved + a linked GitHub
+  // account. Web-only signups (migration 0026) can have a NULL github_username;
+  // granting to an empty username would make a phantom GitHub collaborator that
+  // can never be removed. Mirrors the invite endpoint's status guard.
+  if (requester.status !== "approved") {
+    return c.json({ error: `User '${username}' is not an approved account` }, 400);
+  }
+  if (!requester.github_username) {
+    return c.json({ error: `User '${username}' has no linked GitHub account` }, 400);
+  }
+
   if (!dataset.github_repo) {
     return c.json({ error: "Dataset has no GitHub repository" }, 400);
   }
@@ -2023,6 +2079,8 @@ datasetRoutes.post("/:id/access-requests/:username/approve", authMiddleware, asy
     return c.json({ error: "Dataset has invalid GitHub repository configuration" }, 500);
   }
 
+  // grantCollaborator also flips the pending access_requests row to 'approved'
+  // (best-effort) once the grant lands, so no separate UPDATE is needed here.
   const grant = await grantCollaborator(c.env, db, {
     repoName,
     datasetPk: dataset.id,
@@ -2036,23 +2094,19 @@ datasetRoutes.post("/:id/access-requests/:username/approve", authMiddleware, asy
     if (grant.stage === "github") {
       return c.json({ error: "Failed to grant access on GitHub" }, 500);
     }
+    // GitHub grant landed but a DB write failed; the request stays pending and a
+    // retry is safe (the grants are idempotent).
     return c.json(
       {
         error: "Failed to configure access",
         message:
-          "GitHub access was granted but the access record or S3 upload permission could not be set. Contact an administrator.",
+          "GitHub access was granted but the access record or S3 upload permission could not be set. Retry this approve once; the grant is idempotent.",
         dataset_id: datasetId,
+        username,
       },
       500,
     );
   }
-
-  await db
-    .prepare(
-      "UPDATE access_requests SET status = 'approved', decided_at = CURRENT_TIMESTAMP, decided_by = ? WHERE dataset_id = ? AND user_id = ?",
-    )
-    .bind(currentUser.id, dataset.id, requester.id)
-    .run();
 
   return c.json({
     message: `Access approved for '${username}' on ${dataset.name}`,
