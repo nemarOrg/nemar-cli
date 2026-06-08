@@ -770,6 +770,59 @@ describe("CLI Dataset Collaborator Commands", () => {
     });
   });
 
+  describe("nemar dataset access", () => {
+    test("group --help lists list/approve/deny", async () => {
+      const { stdout, exitCode } = await runCli(["dataset", "access", "--help"]);
+
+      expect(exitCode).toBe(0);
+      expect(stdout).toContain("list");
+      expect(stdout).toContain("approve");
+      expect(stdout).toContain("deny");
+    });
+
+    test("list --help shows the dataset-id arg and status option", async () => {
+      const { stdout, exitCode } = await runCli(["dataset", "access", "list", "--help"]);
+
+      expect(exitCode).toBe(0);
+      expect(stdout).toContain("dataset-id");
+      expect(stdout).toContain("--status");
+    });
+
+    test("approve --help shows username and dataset-id args", async () => {
+      const { stdout, exitCode } = await runCli(["dataset", "access", "approve", "--help"]);
+
+      expect(exitCode).toBe(0);
+      expect(stdout).toContain("username");
+      expect(stdout).toContain("dataset-id");
+    });
+
+    test("list requires authentication", async () => {
+      const ctx = createTestContext();
+
+      const { stdout } = await runCli(["dataset", "access", "list", "nm000001"], ctx);
+
+      expect(stdout).toContain("Not authenticated");
+    });
+
+    test("list rejects an invalid --status value before any network call", async () => {
+      const ctx = createTestContext();
+      setTestConfig(ctx, {
+        apiKey: TEST_CONFIG.userApiKey,
+        apiUrl: TEST_CONFIG.apiUrl,
+        username: "test-user",
+      });
+
+      const { stdout, stderr, exitCode } = await runCli(
+        ["dataset", "access", "list", "nm000001", "--status", "bogus"],
+        ctx,
+      );
+
+      expect(exitCode).not.toBe(0);
+      const output = (stdout + stderr).toLowerCase();
+      expect(output).toContain("status must be one of");
+    });
+  });
+
   describe("nemar dataset invite", () => {
     test("--help shows options", async () => {
       const { stdout, exitCode } = await runCli(["dataset", "invite", "--help"]);

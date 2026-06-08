@@ -186,6 +186,24 @@ describe("migration 0039 — access_requests", () => {
     expect(count.n).toBe(1);
   });
 
+  test("re-request upsert also resets an 'approved' row back to pending", () => {
+    // The ON CONFLICT clause fires unconditionally, so it resets an approved
+    // row too. In the live flow this is guarded earlier by the
+    // dataset_collaborators 409 check (an approved user is already a
+    // collaborator), so request-access never reaches the upsert for them. This
+    // pins the SQL behavior so a future change to that guard is a conscious one.
+    db.prepare(UPSERT_SQL).run(1, 2);
+    db.prepare(
+      "UPDATE access_requests SET status='approved', decided_at=CURRENT_TIMESTAMP, decided_by=1 WHERE dataset_id=1 AND user_id=2",
+    ).run();
+    db.prepare(UPSERT_SQL).run(1, 2);
+    const row = db
+      .prepare("SELECT status, decided_by FROM access_requests WHERE dataset_id=1 AND user_id=2")
+      .get() as { status: string; decided_by: number | null };
+    expect(row.status).toBe("pending");
+    expect(row.decided_by).toBeNull();
+  });
+
   test("deleting the dataset cascades the request away", () => {
     execInsert(db, "INSERT INTO access_requests (dataset_id, user_id) VALUES (1, 2)");
     db.prepare("DELETE FROM datasets WHERE id = 1").run();
