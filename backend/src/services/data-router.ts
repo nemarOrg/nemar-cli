@@ -1057,7 +1057,7 @@ details.removed ul{margin:.4em 0 0;padding-left:1.2em}
 <h1>${escapeHtml(title)}</h1>
 ${versionPicker}<table>${rows.join("")}</table>
 ${removedFooter}<hr>
-<div class="foot">data.nemar.org &middot; <a href="manifest.json">manifest.json</a> &middot; <a href="/${idHref}/">all versions</a></div>
+<div class="foot">data.nemar.org &middot; <a href="manifest.json">manifest.json</a> &middot; <a href="records.json">records.json</a> &middot; <a href="/${idHref}/">all versions</a></div>
 </body></html>
 `;
 }
@@ -1263,12 +1263,13 @@ export function renderDatasetLandingHtml(payload: LandingPayload): string {
       const tagHref = encodeURIComponent(v.version);
       const browseHref = `/${idHref}/${tagHref}/`;
       const manifestHref = `/${idHref}/${tagHref}/manifest.json`;
+      const recordsHref = `/${idHref}/${tagHref}/records.json`;
       const created = v.created_at ? escapeHtml(v.created_at.slice(0, 10)) : "-";
       const doiCell = v.doi
         ? `<a href="https://doi.org/${escapeHtml(v.doi)}">${escapeHtml(v.doi)}</a>`
         : "-";
       const latestMark = i === 0 ? ' <span class="latest">(latest)</span>' : "";
-      return `<tr><td><a href="${browseHref}">${tag}/</a>${latestMark}</td><td>${created}</td><td>${doiCell}</td><td><a href="${manifestHref}">manifest.json</a></td></tr>`;
+      return `<tr><td><a href="${browseHref}">${tag}/</a>${latestMark}</td><td>${created}</td><td>${doiCell}</td><td><a href="${manifestHref}">manifest.json</a> &middot; <a href="${recordsHref}">records.json</a></td></tr>`;
     })
     .join("");
   const emptyNotice =
@@ -1281,7 +1282,7 @@ export function renderDatasetLandingHtml(payload: LandingPayload): string {
       : `<table><thead><tr><th>version</th><th>published</th><th>DOI</th><th>files</th></tr></thead><tbody>${rows}</tbody></table>`;
   const latestShortcut =
     payload.latest !== null
-      ? `<p class="shortcut">Latest: <a href="/${idHref}/latest/">/${id}/latest/</a> &middot; <a href="/${idHref}/latest/manifest.json">latest manifest.json</a></p>`
+      ? `<p class="shortcut">Latest: <a href="/${idHref}/latest/">/${id}/latest/</a> &middot; <a href="/${idHref}/latest/manifest.json">latest manifest.json</a> &middot; <a href="/${idHref}/latest/records.json">latest records.json</a></p>`
       : "";
   return `<!doctype html>
 <html lang="en"><head>

@@ -1652,9 +1652,14 @@ describe("renderIndexHtml rclone-parser compat (Phase 4)", () => {
     });
     const { dirs, files } = extractRcloneEntries(html);
     expect(dirs.sort()).toEqual(["sub-01/", "sub-02/"]);
-    // manifest.json is a relative href in the footer; rclone WILL see
-    // it. Documented and acceptable (the route serves it as a real 200).
-    expect(files.sort()).toEqual(["dataset_description.json", "manifest.json", "participants.tsv"]);
+    // manifest.json + records.json are relative hrefs in the footer; rclone
+    // WILL see them. Documented and acceptable (the route serves both as 200s).
+    expect(files.sort()).toEqual([
+      "dataset_description.json",
+      "manifest.json",
+      "participants.tsv",
+      "records.json",
+    ]);
   });
 
   test("version picker absolute-href links are filtered out by rclone parser", () => {
@@ -1671,8 +1676,8 @@ describe("renderIndexHtml rclone-parser compat (Phase 4)", () => {
     const { dirs, files } = extractRcloneEntries(html);
     // No `v1.0.0/` directory leak from the picker.
     expect(dirs).toEqual([]);
-    // x.edf is the only real file; manifest.json is the footer link.
-    expect(files.sort()).toEqual(["manifest.json", "x.edf"]);
+    // x.edf is the only real file; manifest.json + records.json are footer links.
+    expect(files.sort()).toEqual(["manifest.json", "records.json", "x.edf"]);
   });
 
   test("removed-since footer hrefs do not appear as files to rclone", () => {
@@ -1689,7 +1694,7 @@ describe("renderIndexHtml rclone-parser compat (Phase 4)", () => {
     // absolute hrefs pointing at the prior version.
     expect(files).not.toContain("sub-99");
     expect(files).not.toContain("old.tsv");
-    expect(files).toEqual(["manifest.json"]);
+    expect(files).toEqual(["manifest.json", "records.json"]);
   });
 
   test("nested directory still exposes only its children + parent link", () => {
@@ -1706,6 +1711,7 @@ describe("renderIndexHtml rclone-parser compat (Phase 4)", () => {
     expect(dirs).toEqual([]);
     expect(files.sort()).toEqual([
       "manifest.json",
+      "records.json",
       "sub-01_task-rest_eeg.edf",
       "sub-01_task-rest_eeg.json",
     ]);
