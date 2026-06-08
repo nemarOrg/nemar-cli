@@ -1638,18 +1638,22 @@ datasetRoutes.post("/:id/finalize", authMiddleware, async (c) => {
     // Ensure the owner holds maintain on their repo (the create-time grant is
     // non-fatal and can silently fail). Private reconcile: owner=maintain +
     // ledger writers=push, no ruleset.
+    let finalizeRemoved: string[] | undefined;
     try {
       const { ownerLogin, approvedWriters } = await resolveRepoCollaborators(db, datasetId);
       const rec = await reconcileCollaborators(
         { repo: datasetId, visibility: "private", ownerLogin, approvedWriters },
         pat,
       );
+      finalizeRemoved = rec.removed;
       if (rec.errors.length > 0) {
         warnings.push(`Collaborator reconcile: ${rec.errors.join("; ")}`);
       }
     } catch (error) {
       console.error("Failed to reconcile collaborators on finalize:", error);
     }
+    // Mirror any reconcile removals into D1 (own try/catch; flags a divergence).
+    await mirrorReconcileRemovals(db, datasetId, finalizeRemoved);
 
     // Update dataset timestamp (status remains 'active' per schema constraint)
     await db
@@ -3061,7 +3065,6 @@ datasetRoutes.post("/:id/publish", authMiddleware, async (c) => {
     const { ownerLogin, approvedWriters } = await resolveRepoCollaborators(db, datasetId);
     specEnforcement = await ensureRepoToSpec(repoName, pat, {
       visibility: "public",
-      refreshProtection: true,
       collaborators: { ownerLogin, approvedWriters },
     });
   } catch (specError) {

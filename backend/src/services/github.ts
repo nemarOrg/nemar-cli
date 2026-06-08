@@ -2819,7 +2819,6 @@ export async function ensureRepoToSpec(
   opts: {
     visibility: "public" | "private";
     collaborators?: { ownerLogin: string | null; approvedWriters: string[]; skipLogins?: string[] };
-    refreshProtection?: boolean;
     dryRun?: boolean;
   },
 ): Promise<RepoSpecResult> {
@@ -2930,7 +2929,7 @@ export async function ensureRepoToSpec(
     if (!workflowsOk) {
       steps.branch_ruleset = { status: "skipped", detail: "workflows not deployed" };
     } else {
-      const g = await checkRunGreenOnDefaultHead(repo, "main", bidsCheck, pat);
+      const g = await checkRunGreenOnDefaultHead(repo, defaultBranch, bidsCheck, pat);
       if (!g.green) {
         steps.branch_ruleset = {
           status: "skipped",

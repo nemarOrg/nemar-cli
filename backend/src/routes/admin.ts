@@ -2713,7 +2713,6 @@ adminRoutes.patch("/datasets/:id/visibility", zValidator("json", visibilitySchem
     const { ownerLogin, approvedWriters } = await resolveRepoCollaborators(db, datasetId);
     specEnforcement = await ensureRepoToSpec(repoName, pat, {
       visibility,
-      refreshProtection: visibility === "public",
       collaborators: { ownerLogin, approvedWriters },
     });
   } catch (specError) {
@@ -2854,7 +2853,6 @@ adminRoutes.post("/datasets/:id/enforce", zValidator("json", enforceSchema), asy
   try {
     result = await ensureRepoToSpec(repoName, pat, {
       visibility,
-      refreshProtection: visibility === "public",
       collaborators: { ownerLogin, approvedWriters },
       dryRun: dryRun,
     });
@@ -2928,7 +2926,6 @@ adminRoutes.post("/datasets/enforce/bulk", zValidator("json", enforceBulkSchema)
       const { ownerLogin, approvedWriters } = await resolveRepoCollaborators(db, d.dataset_id);
       const spec = await ensureRepoToSpec(repoName, pat, {
         visibility: vis,
-        refreshProtection: vis === "public",
         collaborators: { ownerLogin, approvedWriters },
         dryRun: dryRun,
       });
@@ -3718,7 +3715,6 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
         const { ownerLogin, approvedWriters } = await resolveRepoCollaborators(db, datasetId);
         publishSpec = await ensureRepoToSpec(repoName, pat, {
           visibility: "public",
-          refreshProtection: true,
           collaborators: { ownerLogin, approvedWriters },
         });
         // Surface a non-green/failed protection step in the bulk-approval log,
