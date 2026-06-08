@@ -2658,7 +2658,17 @@ export async function getBranchRulesetInfo(
     { method: "GET", headers },
     { retryOn404: true },
   );
-  if (!detail.ok) return { present: true, contexts: [] };
+  if (!detail.ok) {
+    // Ruleset exists but its detail couldn't be read; throw so the drift
+    // gatherer's per-call .catch absorbs it (a transient error must not surface
+    // as an empty-contexts CONTEXT_NAME_MISMATCH).
+    const b = await detail.text().catch(() => "<failed to read body>");
+    throw new HttpError(
+      `Branch ruleset detail fetch failed for ${repo}: HTTP ${detail.status}: ${b.slice(0, 200)}`,
+      detail.status,
+      b.slice(0, 200),
+    );
+  }
   const d = (await detail.json()) as {
     rules?: Array<{
       type: string;

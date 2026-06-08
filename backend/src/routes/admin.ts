@@ -2769,13 +2769,13 @@ adminRoutes.patch("/datasets/:id/visibility", zValidator("json", visibilitySchem
  * GET /admin/fleet/drift - Report dataset repos that are off the governance
  * spec. Read-only; gathers live GitHub state per repo (sequential, to respect
  * the shared App rate limit) and classifies into drift buckets. Filter with
- * ?prefix=nm, ?visibility=public|private, ?limit=N (default 25, max 100).
+ * ?prefix=nm, ?visibility=public|private, ?limit=N (default 25, max 50).
  */
 adminRoutes.get("/fleet/drift", async (c) => {
   const db = c.env.DB;
   const prefix = c.req.query("prefix");
   const visFilter = c.req.query("visibility");
-  const limit = Math.min(Math.max(Number.parseInt(c.req.query("limit") ?? "25", 10) || 25, 1), 100);
+  const limit = Math.min(Math.max(Number.parseInt(c.req.query("limit") ?? "25", 10) || 25, 1), 50);
 
   const clauses: string[] = ["github_repo IS NOT NULL", "dataset_id != 'nm099999'"];
   const binds: unknown[] = [];
@@ -2829,11 +2829,12 @@ const enforceSchema = z.object({ dry_run: z.boolean().optional() });
 /**
  * POST /admin/datasets/:id/enforce - Bring one dataset repo to spec via
  * ensureRepoToSpec (public locks + reconciles; private removes the ruleset +
- * reconciles). `dry_run` plans without mutating.
+ * reconciles). `dry_run` defaults to TRUE (must pass `dry_run:false` to apply),
+ * matching the bulk endpoint so a bare `{}` body never mutates.
  */
 adminRoutes.post("/datasets/:id/enforce", zValidator("json", enforceSchema), async (c) => {
   const datasetId = c.req.param("id");
-  const { dry_run } = c.req.valid("json");
+  const dryRun = c.req.valid("json").dry_run !== false;
   const db = c.env.DB;
 
   const dataset = await db
@@ -2855,7 +2856,7 @@ adminRoutes.post("/datasets/:id/enforce", zValidator("json", enforceSchema), asy
       visibility,
       refreshProtection: visibility === "public",
       collaborators: { ownerLogin, approvedWriters },
-      dryRun: dry_run,
+      dryRun: dryRun,
     });
   } catch (e) {
     return c.json(
@@ -2864,14 +2865,14 @@ adminRoutes.post("/datasets/:id/enforce", zValidator("json", enforceSchema), asy
     );
   }
 
-  if (!dry_run) await mirrorReconcileRemovals(db, datasetId, result.reconcile?.removed);
-  return c.json({ dataset_id: datasetId, dry_run: Boolean(dry_run), result });
+  if (!dryRun) await mirrorReconcileRemovals(db, datasetId, result.reconcile?.removed);
+  return c.json({ dataset_id: datasetId, dry_run: dryRun, result });
 });
 
 const enforceBulkSchema = z.object({
   prefix: z.string().optional(),
   visibility: z.enum(["public", "private"]).optional(),
-  limit: z.number().int().min(1).max(100).optional(),
+  limit: z.number().int().min(1).max(50).optional(),
   dry_run: z.boolean().optional(),
 });
 

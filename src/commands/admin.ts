@@ -3051,7 +3051,7 @@ fleetCommand
   .description("Report dataset repos that are off the governance spec")
   .option("--prefix <prefix>", "Filter datasets by id prefix (e.g. nm, on)")
   .option("--visibility <vis>", "Filter by visibility: public or private")
-  .option("--limit <n>", "Max repos to scan (default 25, max 100)", "25")
+  .option("--limit <n>", "Max repos to scan (default 25, max 50)", "25")
   .option("--json", "Output raw JSON")
   .action(async (options) => {
     if (!isAuthenticated()) {
@@ -3117,7 +3117,7 @@ fleetCommand
   .option("--apply", "Actually apply changes (default is a dry run)")
   .option("--prefix <prefix>", "Bulk: filter by id prefix")
   .option("--visibility <vis>", "Bulk: filter by visibility (public|private)")
-  .option("--limit <n>", "Bulk: max repos (default 25, max 100)", "25")
+  .option("--limit <n>", "Bulk: max repos (default 25, max 50)", "25")
   .option("--json", "Output raw JSON")
   .action(async (datasetId, options) => {
     if (!isAuthenticated()) {
