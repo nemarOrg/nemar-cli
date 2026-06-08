@@ -81,6 +81,7 @@ import {
   deleteRepository,
   deployWorkflows,
   downloadReleaseArchive,
+  ensureRepoToSpec,
   getBlobContent,
   getMainBranchSha,
   getTreeAtRef,
@@ -103,6 +104,7 @@ import {
   readBidsDescription,
   readRepoMetadata,
 } from "../services/repo-metadata";
+import { resolveRepoCollaborators } from "../services/repo-spec";
 import { withRetry } from "../services/retry";
 import {
   applyObjectLockBatch,
@@ -674,13 +676,17 @@ adminRoutes.post("/revoke/:username", async (c) => {
     .bind(finalStatus, user.id)
     .run();
 
-  // Remove from datasets they have access to (tracked in dataset_collaborators)
+  // Remove from every dataset repo they touch: collaborator grants
+  // (dataset_collaborators) UNION repos they own (datasets.owner_user_id).
+  // Owner-owned repos were previously never removed (epic #713 gap).
   const collaborations = await db
     .prepare(
-      "SELECT dc.id, d.github_repo FROM dataset_collaborators dc JOIN datasets d ON dc.dataset_id = d.id WHERE dc.user_id = ?",
+      `SELECT d.github_repo FROM dataset_collaborators dc JOIN datasets d ON dc.dataset_id = d.id WHERE dc.user_id = ?
+       UNION
+       SELECT github_repo FROM datasets WHERE owner_user_id = ?`,
     )
-    .bind(user.id)
-    .all<{ id: number; github_repo: string | null }>();
+    .bind(user.id, user.id)
+    .all<{ github_repo: string | null }>();
 
   let reposRemoved = 0;
   const failedRemovals: string[] = [];
@@ -933,9 +939,11 @@ adminRoutes.delete("/users/by-id/:id", ownerMiddleware, async (c) => {
     try {
       collaborations = await db
         .prepare(
-          "SELECT d.github_repo FROM dataset_collaborators dc JOIN datasets d ON dc.dataset_id = d.id WHERE dc.user_id = ?",
+          `SELECT d.github_repo FROM dataset_collaborators dc JOIN datasets d ON dc.dataset_id = d.id WHERE dc.user_id = ?
+           UNION
+           SELECT github_repo FROM datasets WHERE owner_user_id = ?`,
         )
-        .bind(id)
+        .bind(id, id)
         .all<{ github_repo: string | null }>();
     } catch (error) {
       console.error(`[delete-user] collaborations lookup failed for id=${id}:`, error);
@@ -2691,6 +2699,34 @@ adminRoutes.patch("/datasets/:id/visibility", zValidator("json", visibilitySchem
     return revertVisibilityChanges(msg);
   }
 
+  // Enforce the target repo spec for the new visibility (epic #713): public ->
+  // lock main (branch + tag ruleset, green-gated) + reconcile collaborators;
+  // private -> remove the branch ruleset + reconcile. Non-fatal: visibility is
+  // already changed at GitHub/S3/D1.
+  let specEnforcement: Awaited<ReturnType<typeof ensureRepoToSpec>> | undefined;
+  try {
+    const { ownerLogin, approvedWriters } = await resolveRepoCollaborators(db, datasetId);
+    specEnforcement = await ensureRepoToSpec(repoName, pat, {
+      visibility,
+      refreshProtection: visibility === "public",
+      collaborators: { ownerLogin, approvedWriters },
+    });
+    const removed = specEnforcement.reconcile?.removed ?? [];
+    if (removed.length > 0) {
+      const placeholders = removed.map(() => "?").join(",");
+      await db
+        .prepare(
+          `DELETE FROM dataset_collaborators
+             WHERE dataset_id = (SELECT id FROM datasets WHERE dataset_id = ?)
+               AND user_id IN (SELECT id FROM users WHERE github_username IN (${placeholders}))`,
+        )
+        .bind(datasetId, ...removed)
+        .run();
+    }
+  } catch (specError) {
+    console.error(`Repo-spec enforcement failed for ${datasetId} (non-fatal):`, specError);
+  }
+
   // Audit log (non-fatal but warn user if fails)
   let auditLogFailed = false;
   let auditLogError: string | undefined;
@@ -2723,6 +2759,7 @@ adminRoutes.patch("/datasets/:id/visibility", zValidator("json", visibilitySchem
     message: `Repository visibility set to ${visibility}`,
     dataset_id: datasetId,
     visibility,
+    spec_enforcement: specEnforcement?.steps,
     warning: auditLogFailed
       ? `Audit log write failed: ${auditLogError}. Operation succeeded but was not logged for compliance.`
       : undefined,
@@ -3495,6 +3532,32 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
           },
           500,
         );
+      }
+
+      // Enforce the published-repo spec (epic #713): lock main (ruleset,
+      // green-gated) + reconcile collaborators. Non-fatal; visibility is
+      // already public + verified above.
+      try {
+        const { ownerLogin, approvedWriters } = await resolveRepoCollaborators(db, datasetId);
+        const spec = await ensureRepoToSpec(repoName, pat, {
+          visibility: "public",
+          refreshProtection: true,
+          collaborators: { ownerLogin, approvedWriters },
+        });
+        const removed = spec.reconcile?.removed ?? [];
+        if (removed.length > 0) {
+          const placeholders = removed.map(() => "?").join(",");
+          await db
+            .prepare(
+              `DELETE FROM dataset_collaborators
+                 WHERE dataset_id = (SELECT id FROM datasets WHERE dataset_id = ?)
+                   AND user_id IN (SELECT id FROM users WHERE github_username IN (${placeholders}))`,
+            )
+            .bind(datasetId, ...removed)
+            .run();
+        }
+      } catch (specError) {
+        console.error(`Repo-spec enforcement failed for ${datasetId} (non-fatal):`, specError);
       }
 
       await updateProgress("repo_public");

@@ -663,53 +663,6 @@ export async function ensureMainBranch(
 }
 
 /**
- * Apply branch protection rules to main branch
- *
- * Configuration:
- * - Owner can self-merge (no external approval required)
- * - BIDS validation and version check must pass
- * - Admins can bypass if needed
- * - No force pushes or deletions
- *
- * @deprecated Superseded by `ensureBranchRuleset` (epic #713). This uses the
- * legacy `/branches/main/protection` API with hardcoded contexts
- * `["bids-validation","version-check"]` that the post-#601 central flow no
- * longer emits, and it cannot exempt the NEMAR App from the PR rule. It is left
- * untouched here because its only caller is `finalize` (private repos); the
- * rewire to call `ensureBranchRuleset` at make-public happens in Phase 3 (#717).
- */
-export async function applyBranchProtection(repo: string, pat: string): Promise<boolean> {
-  const response = await fetch(
-    `${GITHUB_API()}/repos/${ORG_NAME}/${repo}/branches/main/protection`,
-    {
-      method: "PUT",
-      headers: {
-        Authorization: `Bearer ${pat}`,
-        Accept: "application/vnd.github.v3+json",
-        "User-Agent": "NEMAR-API",
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        required_pull_request_reviews: {
-          required_approving_review_count: 0, // Owner can self-merge
-          dismiss_stale_reviews: true,
-        },
-        enforce_admins: false, // Admins can bypass if needed
-        required_status_checks: {
-          strict: true,
-          contexts: ["bids-validation", "version-check"],
-        },
-        restrictions: null,
-        allow_force_pushes: false,
-        allow_deletions: false,
-      }),
-    },
-  );
-
-  return response.ok;
-}
-
-/**
  * Enable auto-merge for a repository
  */
 export async function enableAutoMerge(repo: string, pat: string): Promise<boolean> {

@@ -29,20 +29,22 @@ import {
 import {
   type GitHubRepo,
   addCollaborator,
-  applyBranchProtection,
   checkWorkflowExists,
   createRepository,
   deployWorkflows,
   enableAutoMerge,
   ensureMainBranch,
+  ensureRepoToSpec,
   ensureWorkflowsDeployed,
   getFileContent,
   getWorkflowRuns,
+  reconcileCollaborators,
   setRepoVisibility,
   signPrescreenCallbackToken,
   triggerPrescreenRun,
 } from "../services/github";
 import { getDatasetsToken } from "../services/github-auth";
+import { resolveRepoCollaborators } from "../services/repo-spec";
 import {
   generateDatasetUploadUrls,
   getManifest,
@@ -1621,15 +1623,9 @@ datasetRoutes.post("/:id/finalize", authMiddleware, async (c) => {
       warnings.push(`GitHub workflow deployment failed: ${msg}`);
     }
 
-    // Apply branch protection (requires workflows to be deployed first for status checks)
-    try {
-      await applyBranchProtection(datasetId, pat);
-    } catch (error) {
-      console.error("Failed to apply branch protection:", error);
-      warnings.push(
-        "Branch protection could not be applied; direct pushes to main may be possible",
-      );
-    }
+    // No branch protection here (epic #713): a newly finalized dataset is
+    // PRIVATE/unpublished and must stay open-push for curation. Protection is
+    // applied at make-public and removed at make-private, not at creation.
 
     // Enable auto-merge
     try {
@@ -1637,6 +1633,22 @@ datasetRoutes.post("/:id/finalize", authMiddleware, async (c) => {
     } catch (error) {
       console.error("Failed to enable auto-merge:", error);
       warnings.push("Auto-merge could not be enabled; PRs will need manual merging");
+    }
+
+    // Ensure the owner holds maintain on their repo (the create-time grant is
+    // non-fatal and can silently fail). Private reconcile: owner=maintain +
+    // ledger writers=push, no ruleset.
+    try {
+      const { ownerLogin, approvedWriters } = await resolveRepoCollaborators(db, datasetId);
+      const rec = await reconcileCollaborators(
+        { repo: datasetId, visibility: "private", ownerLogin, approvedWriters },
+        pat,
+      );
+      if (rec.errors.length > 0) {
+        warnings.push(`Collaborator reconcile had ${rec.errors.length} error(s)`);
+      }
+    } catch (error) {
+      console.error("Failed to reconcile collaborators on finalize:", error);
     }
 
     // Update dataset timestamp (status remains 'active' per schema constraint)
@@ -3039,6 +3051,35 @@ datasetRoutes.post("/:id/publish", authMiddleware, async (c) => {
     );
   }
 
+  // Step 3.5: Enforce the published-repo spec (epic #713): lock main (branch +
+  // tag ruleset, green-gated), deploy workflows, reconcile collaborators
+  // (owner=maintain, ledger writers=push, strip stray read). Non-fatal: the
+  // dataset is already public at GitHub/S3/D1; a failed step just means
+  // protection may need a retry (surfaced in the response for visibility).
+  let specEnforcement: Awaited<ReturnType<typeof ensureRepoToSpec>> | undefined;
+  try {
+    const { ownerLogin, approvedWriters } = await resolveRepoCollaborators(db, datasetId);
+    specEnforcement = await ensureRepoToSpec(repoName, pat, {
+      visibility: "public",
+      refreshProtection: true,
+      collaborators: { ownerLogin, approvedWriters },
+    });
+    // Reconcile dropped these GitHub grants; mirror the removal in D1.
+    const removed = specEnforcement.reconcile?.removed ?? [];
+    if (removed.length > 0) {
+      const placeholders = removed.map(() => "?").join(",");
+      await db
+        .prepare(
+          `DELETE FROM dataset_collaborators WHERE dataset_id = ? AND user_id IN (
+             SELECT id FROM users WHERE github_username IN (${placeholders}))`,
+        )
+        .bind(dataset.id, ...removed)
+        .run();
+    }
+  } catch (specError) {
+    console.error(`Repo-spec enforcement failed for ${datasetId} (non-fatal):`, specError);
+  }
+
   // Step 4: Audit log
   await db
     .prepare(`
@@ -3063,5 +3104,6 @@ datasetRoutes.post("/:id/publish", authMiddleware, async (c) => {
     dataset_id: datasetId,
     github_url: `https://github.com/${dataset.github_repo}`,
     s3_url: `https://${c.env.S3_BUCKET}.s3.${c.env.AWS_REGION}.amazonaws.com/${datasetId}/`,
+    spec_enforcement: specEnforcement?.steps,
   });
 });
