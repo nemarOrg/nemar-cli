@@ -125,4 +125,53 @@ describe("computeCollaboratorActions", () => {
     expect(a.toAdd).toEqual([{ login: "bob", role: "push" }]);
     expect(a.toRemove).toEqual(["ghost"]);
   });
+
+  test("owner who is an org admin is never added (already admin via org)", () => {
+    const a = computeCollaboratorActions({
+      current: [],
+      visibility: "public",
+      ownerLogin: "neuromechanist",
+      approvedWriters: [],
+      orgAdmins: ["neuromechanist"],
+    });
+    expect(a.toAdd).toEqual([]);
+    expect(a.toPromote).toEqual([]);
+    expect(a.toRemove).toEqual([]);
+  });
+
+  test("org-admin writer is excluded from add/promote (case-insensitive)", () => {
+    const a = computeCollaboratorActions({
+      current: [cur("bob", "read")],
+      visibility: "private",
+      ownerLogin: "alice",
+      approvedWriters: ["Bob"],
+      orgAdmins: ["BOB"],
+    });
+    // alice (non-admin owner) still added; bob excluded entirely.
+    expect(a.toAdd).toEqual([{ login: "alice", role: "maintain" }]);
+    expect(a.toPromote).toEqual([]);
+    expect(a.toRemove).toEqual([]);
+  });
+
+  test("org admin with a stray direct grant is not removed", () => {
+    const a = computeCollaboratorActions({
+      current: [cur("alice", "maintain"), cur("orgowner", "admin")],
+      visibility: "public",
+      ownerLogin: "alice",
+      approvedWriters: [],
+      orgAdmins: ["orgowner"],
+    });
+    expect(a.toRemove).toEqual([]);
+  });
+
+  test("non-admin owner still added when orgAdmins is supplied but excludes them", () => {
+    const a = computeCollaboratorActions({
+      current: [],
+      visibility: "public",
+      ownerLogin: "pierregtch",
+      approvedWriters: [],
+      orgAdmins: ["neuromechanist", "nemaradmin"],
+    });
+    expect(a.toAdd).toEqual([{ login: "pierregtch", role: "maintain" }]);
+  });
 });
