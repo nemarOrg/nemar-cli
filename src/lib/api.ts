@@ -2139,6 +2139,25 @@ export async function enforceBulk(opts: {
   );
 }
 
+export interface RevalidateResponse {
+  dataset_id: string;
+  head_sha: string | null;
+  triggered_by?: "sync" | "dispatch";
+  skipped?: string;
+}
+
+export async function revalidateDataset(
+  datasetId: string,
+  force = false,
+): Promise<RevalidateResponse> {
+  const qs = force ? "?force=true" : "";
+  return request<RevalidateResponse>(
+    `/admin/datasets/${datasetId}/revalidate${qs}`,
+    { method: "POST" },
+    true,
+  );
+}
+
 // ============================================================================
 // Email Preferences
 // ============================================================================

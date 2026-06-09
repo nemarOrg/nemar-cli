@@ -72,6 +72,7 @@ import {
   publishDataset,
   reindexBulk,
   reindexDataset,
+  revalidateDataset,
   revokeUser,
   sendBroadcast,
   submitEnrichment,
@@ -91,6 +92,7 @@ import {
   confirm,
   confirmWithInput,
 } from "../lib/confirm.js";
+import { CLI_LIVE_DATASETS, selectRevalidateTargets } from "../lib/fleet.js";
 import {
   checkDownloadPrerequisites,
   cloneDataset,
@@ -3184,6 +3186,172 @@ fleetCommand
       }
       process.exit(1);
     }
+  });
+
+const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
+
+/**
+ * Poll the green-gated enforce dry-run until the required BIDS check is green on
+ * main HEAD (`branch_ruleset.status === "ok"`) or the timeout elapses. Used by
+ * single-dataset revalidate to wait out the in-flight central validation.
+ * Returns "green" or "timeout" (timeout == still red or still running).
+ */
+async function pollEnforceGreen(
+  datasetId: string,
+  timeoutMs: number,
+  intervalMs: number,
+): Promise<"green" | "timeout"> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    try {
+      const r = await enforceDataset(datasetId, true);
+      if (r.result?.steps?.branch_ruleset?.status === "ok") return "green";
+    } catch {
+      // transient (cold worker / propagation) — keep polling
+    }
+    await sleep(intervalMs);
+  }
+  return "timeout";
+}
+
+fleetCommand
+  .command("revalidate")
+  .description(
+    "Re-run BIDS validation on main HEAD for unprotected datasets, then optionally enforce (epic #713)",
+  )
+  .argument("[dataset-id]", "Dataset to revalidate (omit when using --all/--prefix)")
+  .option("--all", "Revalidate across unprotected public datasets")
+  .option("--prefix <prefix>", "Filter by id prefix (with --all), e.g. nm000 / on")
+  .option("--enforce", "After a dataset goes green, run enforce (dry-run unless --apply)")
+  .option("--apply", "With --enforce, actually apply the ruleset (default is a dry run)")
+  .option("--force", "Override the live-dataset guard (nm000103-107)")
+  .option("--limit <n>", "Max repos for --all/--prefix (default 25)", "25")
+  .option("--json", "Output raw JSON")
+  .action(async (datasetId, options) => {
+    if (!isAuthenticated()) {
+      console.log(chalk.red("Error: Not authenticated"));
+      process.exit(1);
+    }
+    const isBulk = Boolean(options.all || (!datasetId && options.prefix));
+    if (!datasetId && !isBulk) {
+      console.log(chalk.red("Error: provide a dataset-id, or --all/--prefix"));
+      process.exit(1);
+    }
+
+    // Resolve targets.
+    let targets: string[];
+    if (datasetId) {
+      targets = [datasetId];
+    } else {
+      const spinner = ora("Fetching dataset list...").start();
+      try {
+        const res = await listDatasets({ limit: 1000 });
+        const cap = Number.parseInt(options.limit, 10) || 25;
+        targets = selectRevalidateTargets(res.datasets, { prefix: options.prefix }).slice(0, cap);
+        spinner.succeed(`${targets.length} target(s)`);
+      } catch (error) {
+        handleCommandError(error, spinner, "Failed to fetch datasets");
+        return;
+      }
+    }
+
+    const doEnforce = Boolean(options.enforce);
+    const doApply = Boolean(options.apply);
+    const tally = { revalidated: 0, green: 0, locked: 0, stillRed: 0, skipped: 0, errors: 0 };
+    const raw: unknown[] = [];
+
+    // Bulk: trigger all first (sequential dispatch is self-pacing), drain, then
+    // a single enforce pass — mirrors the manual rollout sweep, far faster than
+    // polling each repo for minutes. Single: trigger + poll for the live result.
+    const triggered: string[] = [];
+    let i = 0;
+    for (const id of targets) {
+      i++;
+      if (CLI_LIVE_DATASETS.has(id) && !options.force) {
+        console.log(`  [${i}/${targets.length}] ${chalk.dim(`${id}: skip (live; use --force)`)}`);
+        tally.skipped++;
+        continue;
+      }
+      try {
+        const rv = await revalidateDataset(id, options.force);
+        raw.push(rv);
+        if (rv.skipped) {
+          console.log(`  [${i}/${targets.length}] ${id}: ${chalk.dim(`skipped (${rv.skipped})`)}`);
+          tally.skipped++;
+        } else {
+          tally.revalidated++;
+          triggered.push(id);
+          console.log(
+            `  [${i}/${targets.length}] ${id}: ${chalk.cyan(`revalidating (${rv.triggered_by})`)}`,
+          );
+        }
+      } catch (error) {
+        tally.errors++;
+        console.log(
+          `  [${i}/${targets.length}] ${id}: ${chalk.red(error instanceof ApiError ? error.message : String(error))}`,
+        );
+      }
+      if (i < targets.length) await sleep(4000); // pace the App dispatch limit
+    }
+
+    if (doEnforce && triggered.length > 0) {
+      if (datasetId) {
+        // Single: poll until green (or 5 min), then optionally lock.
+        const id = triggered[0];
+        const sp = ora(`Waiting for ${id} validation to land...`).start();
+        const g = await pollEnforceGreen(id, 5 * 60_000, 15_000);
+        if (g !== "green") {
+          sp.warn(`${id}: not green within 5m (real errors or still running)`);
+          tally.stillRed++;
+        } else {
+          tally.green++;
+          if (!doApply) {
+            sp.succeed(`${id}: green (would lock; pass --apply)`);
+          } else {
+            const en = await enforceDataset(id, false);
+            if (en.result?.steps?.branch_ruleset?.status === "ok") {
+              sp.succeed(`${id}: LOCKED`);
+              tally.locked++;
+            } else {
+              sp.warn(`${id}: enforce ${en.result?.steps?.branch_ruleset?.status ?? "?"}`);
+            }
+          }
+        }
+      } else {
+        // Bulk: drain, then one enforce pass over the triggered set.
+        const sp = ora("Waiting ~90s for validations to drain...").start();
+        await sleep(90_000);
+        sp.text = "Enforcing green datasets...";
+        for (const id of triggered) {
+          try {
+            const probe = await enforceDataset(id, true);
+            if (probe.result?.steps?.branch_ruleset?.status !== "ok") {
+              tally.stillRed++;
+              continue;
+            }
+            tally.green++;
+            if (doApply) {
+              const en = await enforceDataset(id, false);
+              if (en.result?.steps?.branch_ruleset?.status === "ok") tally.locked++;
+            }
+          } catch {
+            tally.errors++;
+          }
+        }
+        sp.stop();
+      }
+    }
+
+    if (options.json) {
+      console.log(JSON.stringify({ tally, raw }, null, 2));
+      return;
+    }
+    console.log();
+    console.log(
+      chalk.cyan(
+        `Done: revalidated=${tally.revalidated} green=${tally.green} locked=${tally.locked} still-red=${tally.stillRed} skipped=${tally.skipped} errors=${tally.errors}`,
+      ),
+    );
   });
 
 adminCommand.addCommand(fleetCommand);
