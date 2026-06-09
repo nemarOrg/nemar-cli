@@ -1798,6 +1798,61 @@ export async function triggerEnrichmentRun(
 }
 
 /**
+ * Pure builder for the `run-bids-validation` repository_dispatch payload sent to
+ * `nemarDatasets/.github`. Mirrors the per-repo shim's dispatch
+ * (`getWorkflowTemplates`) so a manual re-validation produces the same central
+ * check-run. Extracted as a pure function so the shape is unit-testable without
+ * a network call. `pr_number` is empty for branch-level (non-PR) revalidation.
+ */
+export function buildBidsValidationDispatch(
+  datasetId: string,
+  headSha: string,
+  ref = "main",
+): { event_type: string; client_payload: Record<string, string> } {
+  return {
+    event_type: "run-bids-validation",
+    client_payload: {
+      dataset_id: datasetId,
+      ref,
+      head_sha: headSha,
+      pr_number: "",
+      validator_version: VALIDATOR_VERSION,
+    },
+  };
+}
+
+/**
+ * Trigger central BIDS validation on a dataset's branch HEAD by dispatching
+ * `run-bids-validation` at `nemarDatasets/.github` (same path the per-repo shim
+ * takes). Used by the `revalidate` admin flow to re-post a `Run BIDS Validation`
+ * check-run on `main` HEAD when the shim is already deployed (so `ci/sync` is a
+ * no-op). `pat` must carry dispatch access on the central repo -- use
+ * `getDatasetsToken()`. Mirrors `triggerEnrichmentRun`'s error handling.
+ */
+export async function triggerBidsValidation(
+  datasetId: string,
+  headSha: string,
+  pat: string,
+  ref = "main",
+): Promise<void> {
+  const response = await fetch(`${GITHUB_API()}/repos/${CENTRAL_WORKFLOW_REPO}/dispatches`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${pat}`,
+      Accept: "application/vnd.github.v3+json",
+      "User-Agent": "NEMAR-API",
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(buildBidsValidationDispatch(datasetId, headSha, ref)),
+  });
+
+  if (!response.ok) {
+    const error = await response.text();
+    throw new Error(`Failed to trigger BIDS validation: HTTP ${response.status} - ${error}`);
+  }
+}
+
+/**
  * Trigger the publication pre-screen workflow on `nemarDatasets/.github` via
  * `repository_dispatch[run-prescreen]` (issue #666). The workflow mints a
  * per-repo App token, checks out the dataset metadata, runs `claude -p` to

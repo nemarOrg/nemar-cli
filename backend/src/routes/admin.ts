@@ -89,12 +89,14 @@ import {
   downloadReleaseArchive,
   ensureRepoToSpec,
   getBlobContent,
+  getBranchRulesetInfo,
   getMainBranchSha,
   getTreeAtRef,
   getWorkflowRuns,
   removeCollaborator,
   setRepoVisibility,
   syncWorkflowTemplates,
+  triggerBidsValidation,
   triggerManifestGeneration,
   validateDeployedWorkflows,
 } from "../services/github";
@@ -2877,6 +2879,98 @@ adminRoutes.post("/datasets/:id/enforce", zValidator("json", enforceSchema), asy
 
   if (!dryRun) await mirrorReconcileRemovals(db, datasetId, result.reconcile?.removed);
   return c.json({ dataset_id: datasetId, dry_run: dryRun, result });
+});
+
+/**
+ * POST /admin/datasets/:id/revalidate - Re-run central BIDS validation on the
+ * dataset's `main` HEAD so a fresh `Run BIDS Validation` check-run lands there
+ * (the enforce green-gate only reads HEAD; a `[skip ci]` metadata commit leaves
+ * it uncovered). Unifies the two cases the manual #713 rollout handled by hand:
+ *   - inline workflow still present -> `syncWorkflowTemplates` commits the shim,
+ *     and that push auto-triggers validation;
+ *   - shim already deployed -> `triggerBidsValidation` dispatches it directly.
+ * Already-protected repos are skipped (locked => no re-validation needed).
+ * Live datasets are refused without `?force=true` (mirrors ci/sync, #730).
+ * The CLI polls the resulting check-run, then runs `enforce` for the greens.
+ */
+adminRoutes.post("/datasets/:id/revalidate", async (c) => {
+  const datasetId = c.req.param("id");
+  const db = c.env.DB;
+  const adminUser = c.get("user");
+  const force = c.req.query("force") === "true";
+
+  if (isLiveDataset(datasetId) && !force) {
+    return c.json(
+      { error: `Refusing to revalidate live dataset ${datasetId}. Pass ?force=true to override.` },
+      403,
+    );
+  }
+
+  const dataset = await db
+    .prepare("SELECT github_repo FROM datasets WHERE dataset_id = ?")
+    .bind(datasetId)
+    .first<{ github_repo: string | null }>();
+  if (!dataset) return c.json({ error: "Dataset not found" }, 404);
+  if (!dataset.github_repo) return c.json({ error: "Dataset has no GitHub repository" }, 400);
+  const repoName = dataset.github_repo.split("/")[1];
+  if (!repoName) return c.json({ error: "Invalid repository format" }, 500);
+
+  const pat = await getDatasetsToken(c.env);
+
+  // Skip-if-locked: a protected repo is already green-gated; no need to churn it.
+  try {
+    const ruleset = await getBranchRulesetInfo(repoName, pat);
+    if (ruleset.present && !force) {
+      const headSha = await getMainBranchSha(repoName, "main", pat).catch(() => null);
+      return c.json({ dataset_id: datasetId, skipped: "already_protected", head_sha: headSha });
+    }
+  } catch (e) {
+    // Non-fatal: if we can't read the ruleset, fall through and revalidate.
+    console.error(`[revalidate] ruleset check failed for ${datasetId}:`, e);
+  }
+
+  let triggeredBy: "sync" | "dispatch";
+  let headSha: string;
+  try {
+    // Ensure the central shim is deployed. If it was inline, the sync commit
+    // auto-triggers validation; re-read HEAD to point the caller at the new sha.
+    const sync = await syncWorkflowTemplates(repoName, "main", pat);
+    if (sync.errors.length > 0) {
+      return c.json({ error: "Workflow sync failed", details: sync.errors.join("; ") }, 502);
+    }
+    if (sync.committed) {
+      triggeredBy = "sync";
+      headSha = await getMainBranchSha(repoName, "main", pat);
+    } else {
+      triggeredBy = "dispatch";
+      headSha = await getMainBranchSha(repoName, "main", pat);
+      await triggerBidsValidation(datasetId, headSha, pat);
+    }
+  } catch (e) {
+    return c.json(
+      { error: "Revalidation failed", details: e instanceof Error ? e.message : String(e) },
+      500,
+    );
+  }
+
+  try {
+    await db
+      .prepare(
+        "INSERT INTO audit_log (user_id, action, resource_type, resource_id, details) VALUES (?, ?, ?, ?, ?)",
+      )
+      .bind(
+        adminUser.id,
+        "ci_revalidate",
+        "dataset",
+        datasetId,
+        JSON.stringify({ by: adminUser.username, triggered_by: triggeredBy, head_sha: headSha }),
+      )
+      .run();
+  } catch (auditError) {
+    console.error("Audit log write failed for revalidate:", auditError);
+  }
+
+  return c.json({ dataset_id: datasetId, head_sha: headSha, triggered_by: triggeredBy });
 });
 
 const enforceBulkSchema = z.object({
