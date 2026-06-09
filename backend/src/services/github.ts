@@ -2552,11 +2552,13 @@ export async function listDirectCollaborators(
 }
 
 /**
- * List the lowercased logins of nemarDatasets org owners/admins. These users
- * already have admin on every repo via org membership; the collaborator
- * reconcile uses this to avoid pointlessly (and unsuccessfully) trying to add
- * them as direct collaborators. Best-effort: a single page of `role=admin`
- * members covers the handful of NEMAR org admins; callers treat a throw as
+ * List the lowercased logins of nemarDatasets org Owners. GitHub's members API
+ * spells the Owner role `role=admin` (the historical name), and Owners are
+ * exactly the accounts that inherit `admin` on every repo in the org. The
+ * collaborator reconcile uses this to avoid pointlessly (and unsuccessfully)
+ * trying to grant them a direct collaborator role — GitHub 422s any attempt to
+ * assign a permission lower than the admin they already hold. Best-effort: a
+ * single page covers the handful of NEMAR org Owners; callers treat a throw as
  * "unknown" and lean on `addCollaborator`'s benign-422 handling instead.
  */
 export async function listOrgAdmins(pat: string): Promise<Set<string>> {
