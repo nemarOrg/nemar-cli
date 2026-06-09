@@ -464,7 +464,19 @@ export async function addCollaborator(
     },
   );
 
-  return response.ok || response.status === 204;
+  if (response.ok || response.status === 204) return true;
+  // GitHub 422s when the target already holds a HIGHER permission via org
+  // membership (an org owner/admin cannot be assigned the lower `maintain`/
+  // `push`): "Cannot assign <user> permission of <role>". The post-condition
+  // ("user has at least `permission`") is already satisfied, so treat it as a
+  // benign no-op rather than a failure. The reconcile normally excludes org
+  // admins up front (see listOrgAdmins); this guards the path where that
+  // lookup failed.
+  if (response.status === 422) {
+    const body = await response.text().catch(() => "");
+    if (/Cannot assign .+ permission of/i.test(body)) return true;
+  }
+  return false;
 }
 
 /**
@@ -2455,18 +2467,30 @@ export function computeCollaboratorActions(opts: {
   ownerLogin: string | null;
   approvedWriters: string[];
   skipLogins?: string[];
+  /**
+   * Lowercased logins of nemarDatasets org owners/admins. They already hold
+   * admin on every repo via org membership, so we never grant, promote, or
+   * strip a direct collaborator entry for them: GitHub 422s any attempt to
+   * assign them a permission LOWER than admin ("Cannot assign X permission of
+   * maintain"), and the grant would be redundant anyway.
+   */
+  orgAdmins?: string[];
 }): CollaboratorActions {
   const ownerLogin = opts.ownerLogin ? opts.ownerLogin.toLowerCase() : null;
   const skip = new Set((opts.skipLogins ?? []).map((s) => s.toLowerCase()));
+  const orgAdmins = new Set((opts.orgAdmins ?? []).map((s) => s.toLowerCase()));
 
   // Keyed by lowercased login for case-insensitive matching, but carrying the
   // ORIGINAL-case login so grants/output use the canonical GitHub username.
+  // Org owners/admins are excluded outright: they already have admin via org
+  // membership, so a collaborator grant is both redundant and rejected by
+  // GitHub with a 422.
   const desired = new Map<string, { login: string; role: "push" | "maintain" }>();
-  if (opts.ownerLogin && ownerLogin)
+  if (opts.ownerLogin && ownerLogin && !orgAdmins.has(ownerLogin))
     desired.set(ownerLogin, { login: opts.ownerLogin, role: "maintain" });
   for (const w of opts.approvedWriters) {
     const l = w.toLowerCase();
-    if (l && l !== ownerLogin) desired.set(l, { login: w, role: "push" });
+    if (l && l !== ownerLogin && !orgAdmins.has(l)) desired.set(l, { login: w, role: "push" });
   }
 
   const currentByLogin = new Map(opts.current.map((c) => [c.login.toLowerCase(), c]));
@@ -2484,7 +2508,8 @@ export function computeCollaboratorActions(opts: {
   const toRemove: string[] = [];
   for (const c of opts.current) {
     const login = c.login.toLowerCase();
-    if (desired.has(login) || skip.has(login) || login === ownerLogin) continue;
+    if (desired.has(login) || skip.has(login) || login === ownerLogin || orgAdmins.has(login))
+      continue;
     toRemove.push(c.login);
   }
 
@@ -2526,6 +2551,40 @@ export async function listDirectCollaborators(
   return out;
 }
 
+/**
+ * List the lowercased logins of nemarDatasets org owners/admins. These users
+ * already have admin on every repo via org membership; the collaborator
+ * reconcile uses this to avoid pointlessly (and unsuccessfully) trying to add
+ * them as direct collaborators. Best-effort: a single page of `role=admin`
+ * members covers the handful of NEMAR org admins; callers treat a throw as
+ * "unknown" and lean on `addCollaborator`'s benign-422 handling instead.
+ */
+export async function listOrgAdmins(pat: string): Promise<Set<string>> {
+  const out = new Set<string>();
+  const headers = ghHeaders(pat);
+  let page = 1;
+  while (true) {
+    const r = await githubFetchWithRetry(
+      `${GITHUB_API()}/orgs/${ORG_NAME}/members?role=admin&per_page=100&page=${page}`,
+      { headers },
+    );
+    if (!r.ok) {
+      const b = await r.text().catch(() => "<failed to read body>");
+      throw new HttpError(
+        `List org admins failed for ${ORG_NAME}: HTTP ${r.status}: ${b.slice(0, 200)}`,
+        r.status,
+        b.slice(0, 200),
+      );
+    }
+    const items = (await r.json()) as Array<{ login: string }>;
+    if (items.length === 0) break;
+    for (const m of items) out.add(m.login.toLowerCase());
+    if (items.length < 100) break;
+    page++;
+  }
+  return out;
+}
+
 export interface CollaboratorReconcileResult {
   added: string[];
   promoted: string[];
@@ -2555,12 +2614,22 @@ export async function reconcileCollaborators(
     result.errors.push(`list: ${errText(e)}`);
     return result;
   }
+  // Org owners/admins already hold admin via org membership; never try to add
+  // them as collaborators. Best-effort — on failure we fall back to
+  // addCollaborator's benign-422 handling.
+  let orgAdmins: string[] = [];
+  try {
+    orgAdmins = [...(await listOrgAdmins(pat))];
+  } catch (e) {
+    console.error(`[reconcile] listOrgAdmins failed for ${opts.repo}: ${errText(e)}`);
+  }
   const actions = computeCollaboratorActions({
     current,
     visibility: opts.visibility,
     ownerLogin: opts.ownerLogin,
     approvedWriters: opts.approvedWriters,
     skipLogins: opts.skipLogins,
+    orgAdmins,
   });
 
   for (const a of actions.toAdd) {
@@ -2871,12 +2940,19 @@ export async function ensureRepoToSpec(
         steps.collaborators = { status: "failed", detail: errText(e) };
         return { repo, visibility: opts.visibility, defaultBranch, steps };
       }
+      let orgAdmins: string[] = [];
+      try {
+        orgAdmins = [...(await listOrgAdmins(pat))];
+      } catch (e) {
+        console.error(`[repo-spec] listOrgAdmins failed for ${repo} (dry-run): ${errText(e)}`);
+      }
       const a = computeCollaboratorActions({
         current,
         visibility: opts.visibility,
         ownerLogin: opts.collaborators.ownerLogin,
         approvedWriters: opts.collaborators.approvedWriters,
         skipLogins: opts.collaborators.skipLogins,
+        orgAdmins,
       });
       steps.collaborators = {
         status: "ok",
