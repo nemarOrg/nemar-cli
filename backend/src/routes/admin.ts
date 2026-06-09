@@ -3044,6 +3044,18 @@ adminRoutes.post("/datasets/:id/ci", async (c) => {
   const db = c.env.DB;
   const adminUser = c.get("user");
 
+  // Deploying workflows commits to the repo's main branch (same class of
+  // mutation as ci/sync). Live datasets hold real data; refuse without an
+  // explicit override.
+  if (isLiveDataset(datasetId) && c.req.query("force") !== "true") {
+    return c.json(
+      {
+        error: `Refusing to modify live dataset ${datasetId}. Pass ?force=true to override.`,
+      },
+      403,
+    );
+  }
+
   const dataset = await db
     .prepare("SELECT dataset_id, github_repo FROM datasets WHERE dataset_id = ?")
     .bind(datasetId)
