@@ -3200,18 +3200,20 @@ async function pollEnforceGreen(
   datasetId: string,
   timeoutMs: number,
   intervalMs: number,
-): Promise<"green" | "timeout"> {
+): Promise<{ status: "green" } | { status: "timeout"; detail: string }> {
   const deadline = Date.now() + timeoutMs;
+  let lastDetail = "no probe completed";
   while (Date.now() < deadline) {
     try {
-      const r = await enforceDataset(datasetId, true);
-      if (r.result?.steps?.branch_ruleset?.status === "ok") return "green";
-    } catch {
-      // transient (cold worker / propagation) — keep polling
+      const br = (await enforceDataset(datasetId, true)).result?.steps?.branch_ruleset;
+      if (br?.status === "ok") return { status: "green" };
+      if (br?.detail) lastDetail = br.detail; // e.g. RED_REQUIRED_CHECK / FETCH_ERROR
+    } catch (e) {
+      lastDetail = e instanceof ApiError ? e.message : String(e);
     }
     await sleep(intervalMs);
   }
-  return "timeout";
+  return { status: "timeout", detail: lastDetail };
 }
 
 fleetCommand
@@ -3245,10 +3247,17 @@ fleetCommand
     } else {
       const spinner = ora("Fetching dataset list...").start();
       try {
-        const res = await listDatasets({ limit: 1000 });
+        // The /datasets endpoint caps a page at 200, so paginate to cover the
+        // whole fleet (a higher nm/on prefix would otherwise be silently missed).
+        const all: { dataset_id: string; visibility?: string }[] = [];
+        for (let offset = 0; ; offset += 200) {
+          const res = await listDatasets({ limit: 200, offset });
+          all.push(...res.datasets);
+          if (res.datasets.length < 200 || all.length >= res.total_count) break;
+        }
         const cap = Number.parseInt(options.limit, 10) || 25;
-        targets = selectRevalidateTargets(res.datasets, { prefix: options.prefix }).slice(0, cap);
-        spinner.succeed(`${targets.length} target(s)`);
+        targets = selectRevalidateTargets(all, { prefix: options.prefix }).slice(0, cap);
+        spinner.succeed(`${targets.length} target(s) (from ${all.length} datasets)`);
       } catch (error) {
         handleCommandError(error, spinner, "Failed to fetch datasets");
         return;
@@ -3300,8 +3309,8 @@ fleetCommand
         const id = triggered[0];
         const sp = ora(`Waiting for ${id} validation to land...`).start();
         const g = await pollEnforceGreen(id, 5 * 60_000, 15_000);
-        if (g !== "green") {
-          sp.warn(`${id}: not green within 5m (real errors or still running)`);
+        if (g.status !== "green") {
+          sp.warn(`${id}: not green within 5m — last: ${g.detail} (real errors or still running)`);
           tally.stillRed++;
         } else {
           tally.green++;

@@ -2935,6 +2935,12 @@ adminRoutes.post("/datasets/:id/revalidate", async (c) => {
     // Ensure the central shim is deployed. If it was inline, the sync commit
     // auto-triggers validation; re-read HEAD to point the caller at the new sha.
     const sync = await syncWorkflowTemplates(repoName, "main", pat);
+    if (sync.listFailed) {
+      return c.json(
+        { error: "Workflow listing failed (transient?)", details: sync.errors.join("; ") },
+        502,
+      );
+    }
     if (sync.errors.length > 0) {
       return c.json({ error: "Workflow sync failed", details: sync.errors.join("; ") }, 502);
     }
