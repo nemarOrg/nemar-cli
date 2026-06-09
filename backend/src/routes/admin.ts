@@ -9,6 +9,7 @@ import { Hono } from "hono";
 import { z } from "zod";
 import { adminMiddleware, authMiddleware, ownerMiddleware } from "../middleware/auth";
 
+import { LIVE_DATASETS, isLiveDataset } from "../constants";
 import { tombstoneUserStatement } from "../db/user-tombstone";
 import { SYSTEM_USER_ID } from "../lib/constants";
 import {
@@ -2836,6 +2837,17 @@ adminRoutes.post("/datasets/:id/enforce", zValidator("json", enforceSchema), asy
   const dryRun = c.req.valid("json").dry_run !== false;
   const db = c.env.DB;
 
+  // Live datasets hold real data; refuse to APPLY governance changes to them
+  // without an explicit override. Dry-run (read-only) is always allowed.
+  if (!dryRun && isLiveDataset(datasetId) && c.req.query("force") !== "true") {
+    return c.json(
+      {
+        error: `Refusing to enforce live dataset ${datasetId}. Pass ?force=true to override.`,
+      },
+      403,
+    );
+  }
+
   const dataset = await db
     .prepare("SELECT github_repo, visibility FROM datasets WHERE dataset_id = ?")
     .bind(datasetId)
@@ -2888,7 +2900,15 @@ adminRoutes.post("/datasets/enforce/bulk", zValidator("json", enforceBulkSchema)
   const dryRun = dry_run !== false; // default to a dry run
   const cap = limit ?? 25;
 
-  const clauses: string[] = ["github_repo IS NOT NULL", "dataset_id != 'nm099999'"];
+  // Never bulk-mutate the test dataset or any LIVE production dataset. The
+  // values are compile-time constants (no user input), so inlining them is
+  // injection-safe and mirrors the existing nm099999 literal.
+  const liveList = [...LIVE_DATASETS].map((id) => `'${id}'`).join(", ");
+  const clauses: string[] = [
+    "github_repo IS NOT NULL",
+    "dataset_id != 'nm099999'",
+    `dataset_id NOT IN (${liveList})`,
+  ];
   const binds: unknown[] = [];
   if (prefix) {
     clauses.push("dataset_id LIKE ?");
@@ -3024,6 +3044,18 @@ adminRoutes.post("/datasets/:id/ci", async (c) => {
   const db = c.env.DB;
   const adminUser = c.get("user");
 
+  // Deploying workflows commits to the repo's main branch (same class of
+  // mutation as ci/sync). Live datasets hold real data; refuse without an
+  // explicit override.
+  if (isLiveDataset(datasetId) && c.req.query("force") !== "true") {
+    return c.json(
+      {
+        error: `Refusing to modify live dataset ${datasetId}. Pass ?force=true to override.`,
+      },
+      403,
+    );
+  }
+
   const dataset = await db
     .prepare("SELECT dataset_id, github_repo FROM datasets WHERE dataset_id = ?")
     .bind(datasetId)
@@ -3139,6 +3171,17 @@ adminRoutes.post("/datasets/:id/ci/sync", async (c) => {
   const datasetId = c.req.param("id");
   const db = c.env.DB;
   const adminUser = c.get("user");
+
+  // ci/sync commits to the repo's main branch (overwrites workflow files).
+  // Live datasets hold real data; refuse without an explicit override.
+  if (isLiveDataset(datasetId) && c.req.query("force") !== "true") {
+    return c.json(
+      {
+        error: `Refusing to modify live dataset ${datasetId}. Pass ?force=true to override.`,
+      },
+      403,
+    );
+  }
 
   const dataset = await db
     .prepare("SELECT dataset_id, github_repo FROM datasets WHERE dataset_id = ?")
