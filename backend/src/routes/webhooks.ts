@@ -2330,23 +2330,31 @@ webhooks.post("/archive-ready", async (c) => {
     return c.json({ error: "Dataset not found" }, 404);
   }
 
-  // Bounded auto-retry: re-dispatch a fresh archive build now. Best-effort -- a
-  // failed re-dispatch is logged but must not 500 the workflow's callback, whose
-  // job (recording state) already succeeded above. Phase 2 deletes the partial on
-  // failure, so no force flag is needed; the count was already incremented above.
+  // Bounded auto-retry: re-dispatch a fresh archive build. Fire-and-forget via
+  // waitUntil (like the other post-write side-effects in this file) so a slow
+  // GitHub /dispatches call can't delay or time out the workflow's callback --
+  // the state write above already succeeded, and the count was already
+  // incremented. Phase 2 deletes the partial on failure, so no force flag.
   if (retry?.retry && body.version) {
-    try {
-      const pat = await getDatasetsToken(c.env);
-      await triggerArchiveGeneration(body.dataset_id, body.dataset_id, body.version, pat);
-      console.log(
-        `[archive-ready] auto-retry dispatched dataset=${body.dataset_id} version=${body.version} attempt=${retry.nextCount}/${MAX_ARCHIVE_RETRIES}`,
-      );
-    } catch (err) {
-      console.error(
-        `[archive-ready] auto-retry dispatch failed dataset=${body.dataset_id}:`,
-        err instanceof Error ? err.message : String(err),
-      );
-    }
+    const retryDatasetId = body.dataset_id;
+    const retryVersion = body.version;
+    const retryAttempt = retry.nextCount;
+    c.executionCtx.waitUntil(
+      (async () => {
+        try {
+          const pat = await getDatasetsToken(c.env);
+          await triggerArchiveGeneration(retryDatasetId, retryDatasetId, retryVersion, pat);
+          console.log(
+            `[archive-ready] auto-retry dispatched dataset=${retryDatasetId} version=${retryVersion} attempt=${retryAttempt}/${MAX_ARCHIVE_RETRIES}`,
+          );
+        } catch (err) {
+          console.error(
+            `[archive-ready] auto-retry dispatch failed dataset=${retryDatasetId}:`,
+            err instanceof Error ? err.message : String(err),
+          );
+        }
+      })(),
+    );
   }
 
   console.log(

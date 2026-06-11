@@ -141,6 +141,12 @@ export async function archiveRetrySweep(env: Bindings): Promise<void> {
       continue;
     }
     try {
+      // Dispatch first, then record the attempt. If the UPDATE throws (transient
+      // D1 error) after a successful dispatch, the count isn't incremented and
+      // the row may be re-dispatched on a later sweep -- at-least-once, bounded:
+      // the dispatched run's archive-ready callback re-stamps the row, and the
+      // cap is still enforced. The inverse order (increment then dispatch) would
+      // instead drop attempts when the dispatch fails, which is worse.
       await triggerArchiveGeneration(row.dataset_id, row.dataset_id, version, pat);
       await env.DB.prepare(
         `UPDATE datasets
