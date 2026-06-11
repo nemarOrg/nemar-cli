@@ -8,6 +8,7 @@
 import type { Context } from "hono";
 import { Hono } from "hono";
 
+import { MAX_ARCHIVE_RETRIES, decideArchiveRetry } from "../services/archive-retry.js";
 import { purgeCacheUrls, zarrPurgeTargets } from "../services/cloudflare.js";
 import { runDatasetSync } from "../services/dataset-reindex.js";
 import { isValidDatasetId } from "../services/datasetId.js";
@@ -19,6 +20,7 @@ import { getDatasetsToken } from "../services/github-auth.js";
 import {
   downloadReleaseArchive,
   signManifestCallbackToken,
+  triggerArchiveGeneration,
   triggerEnrichmentRun,
   triggerManifestGeneration,
   triggerVersionDoiRun,
@@ -2141,6 +2143,12 @@ webhooks.post("/zarr-ready", async (c) => {
         .run();
       changed = result.meta.changes ?? 0;
     } else {
+      // Record failure for the observability dashboard only -- do NOT auto-retry
+      // zarr here. Conversion is owned by the hourly Hallu cron (workflow
+      // autodispatch is intentionally off), which re-attempts on its own
+      // schedule; many zarr failures are the mixed-rate EDF/BDF reader bug
+      // (#737) that a re-dispatch wouldn't fix. This is the deliberate contrast
+      // with the archive-ready auto-retry (epic #736, Phase 3 decision).
       const result = await c.env.DB.prepare(
         "UPDATE datasets SET zarr_status = 'failed' WHERE dataset_id = ?",
       )
@@ -2267,23 +2275,41 @@ webhooks.post("/archive-ready", async (c) => {
 
   // Persist latest-only archive state. On failure keep the prior archive_size
   // (a failed rebuild shouldn't erase the last good zip's size) and only flip
-  // the status + stamp checked_at.
+  // the status + stamp checked_at. A 'failed' callback also drives the bounded
+  // auto-retry (epic #736, Phase 3): re-dispatch generation while under the cap,
+  // counting dispatches in archive_retry_count (reset to 0 on 'ready'). The
+  // daily archiveRetrySweep is the backstop. See services/archive-retry.ts.
   let changed = 0;
+  let retry: ReturnType<typeof decideArchiveRetry> | null = null;
   try {
     if (status === "ready") {
       const result = await c.env.DB.prepare(
         `UPDATE datasets
          SET archive_status = 'ready',
              archive_checked_at = datetime('now'),
-             archive_size = ?
+             archive_size = ?,
+             archive_retry_count = 0
          WHERE dataset_id = ?`,
       )
         .bind(typeof body.size === "number" ? body.size : null, body.dataset_id)
         .run();
       changed = result.meta.changes ?? 0;
     } else {
+      // Read the current dispatch count to decide whether to re-dispatch. The
+      // count is NOT advanced here -- it is incremented only after a successful
+      // dispatch (in the waitUntil below), so a failed dispatch can't consume a
+      // retry slot. Matches archiveRetrySweep's dispatch-then-increment order.
+      const row = await c.env.DB.prepare(
+        "SELECT archive_retry_count FROM datasets WHERE dataset_id = ?",
+      )
+        .bind(body.dataset_id)
+        .first<{ archive_retry_count: number }>();
+      retry = decideArchiveRetry("failed", row?.archive_retry_count ?? 0, body.version);
       const result = await c.env.DB.prepare(
-        "UPDATE datasets SET archive_status = 'failed', archive_checked_at = datetime('now') WHERE dataset_id = ?",
+        `UPDATE datasets
+         SET archive_status = 'failed',
+             archive_checked_at = datetime('now')
+         WHERE dataset_id = ?`,
       )
         .bind(body.dataset_id)
         .run();
@@ -2305,8 +2331,126 @@ webhooks.post("/archive-ready", async (c) => {
     return c.json({ error: "Dataset not found" }, 404);
   }
 
+  // Bounded auto-retry: re-dispatch a fresh archive build, fire-and-forget via
+  // waitUntil (like the other post-write side-effects in this file) so a slow
+  // GitHub /dispatches call can't delay or time out the workflow's callback. The
+  // retry-count increment happens HERE, only after a successful dispatch
+  // (mirrors archiveRetrySweep) -- a failed dispatch (GitHub 422 / rate-limit)
+  // must not consume a retry slot, which would otherwise exhaust the cap without
+  // ever running an archive. Phase 2 deletes the partial on failure, so no force.
+  if (retry?.retry && body.version) {
+    const retryDatasetId = body.dataset_id;
+    const retryVersion = body.version;
+    const retryAttempt = retry.nextCount;
+    c.executionCtx.waitUntil(
+      (async () => {
+        try {
+          const pat = await getDatasetsToken(c.env);
+          await triggerArchiveGeneration(retryDatasetId, retryDatasetId, retryVersion, pat);
+          await c.env.DB.prepare("UPDATE datasets SET archive_retry_count = ? WHERE dataset_id = ?")
+            .bind(retryAttempt, retryDatasetId)
+            .run();
+          console.log(
+            `[archive-ready] auto-retry dispatched dataset=${retryDatasetId} version=${retryVersion} attempt=${retryAttempt}/${MAX_ARCHIVE_RETRIES}`,
+          );
+        } catch (err) {
+          console.error(
+            `[archive-ready] auto-retry dispatch failed dataset=${retryDatasetId} (retry slot not consumed):`,
+            err instanceof Error ? err.message : String(err),
+          );
+        }
+      })(),
+    );
+  }
+
   console.log(
-    `[archive-ready] dataset=${body.dataset_id} status=${status} size=${body.size ?? "?"} version=${body.version ?? "?"}`,
+    `[archive-ready] dataset=${body.dataset_id} status=${status} size=${body.size ?? "?"} version=${body.version ?? "?"}${retry ? ` retry=${retry.reason} count=${retry.nextCount}` : ""}`,
+  );
+
+  return c.json({ ok: true, dataset_id: body.dataset_id, status });
+});
+
+/**
+ * POST /webhooks/records-ready — callback from nemarDatasets/.github
+ * `generate-records.yml` once a dataset version's records.json has been built and
+ * uploaded to `s3://nemar/<id>/version/v<version>-records.json` (epic #736 Phase 5
+ * / #742). Until now the workflow was never dispatched on publish and had no
+ * callback, so records.json 404'd for every dataset.
+ *
+ * Mirror of /archive-ready: same `X-Webhook-Token` (NEMAR_WEBHOOK_TOKEN) auth,
+ * records the latest-only records state on the `datasets` row. The records.json
+ * artifact is served from S3 directly (loadRecords), so this column is
+ * observability-only -- no serving dependency, and (unlike archive) no retry.
+ *
+ * Responses: 200 once state is recorded; 400 for a bad body or missing/unknown
+ * `status`; 404 when the dataset isn't in D1. Idempotent.
+ */
+interface RecordsReadyBody {
+  dataset_id: string;
+  status?: "ready" | "failed";
+  /** The published version the records were built for (logged, not stored). */
+  version?: string;
+  error?: string;
+}
+
+webhooks.post("/records-ready", async (c) => {
+  const token = c.req.header("X-Webhook-Token");
+  const expectedToken = c.env.NEMAR_WEBHOOK_TOKEN ?? c.env.GITHUB_WEBHOOK_SECRET;
+  if (!expectedToken) {
+    console.error(
+      "[records-ready] no webhook secret configured (NEMAR_WEBHOOK_TOKEN/GITHUB_WEBHOOK_SECRET both unset or empty)",
+    );
+    return c.json({ error: "Invalid webhook token" }, 401);
+  }
+  if (!token || !timingSafeEqual(token, expectedToken)) {
+    return c.json({ error: "Invalid webhook token" }, 401);
+  }
+
+  let body: RecordsReadyBody;
+  try {
+    body = (await c.req.json()) as RecordsReadyBody;
+  } catch {
+    return c.json({ error: "Invalid JSON in request body" }, 400);
+  }
+
+  if (typeof body.dataset_id !== "string" || !isValidDatasetId(body.dataset_id)) {
+    return c.json({ error: "dataset_id must be a valid dataset id" }, 400);
+  }
+  // Require an explicit status: a missing/unknown value must not default to
+  // 'ready' (that would mark a failed generation as having records).
+  if (body.status !== "ready" && body.status !== "failed") {
+    return c.json({ error: "status must be 'ready' or 'failed'" }, 400);
+  }
+  const status = body.status;
+  if (status === "failed" && body.error) {
+    console.error(`[records-ready] workflow failure dataset=${body.dataset_id}: ${body.error}`);
+  }
+
+  let changed = 0;
+  try {
+    const result = await c.env.DB.prepare(
+      "UPDATE datasets SET records_status = ?, records_checked_at = datetime('now') WHERE dataset_id = ?",
+    )
+      .bind(status, body.dataset_id)
+      .run();
+    changed = result.meta.changes ?? 0;
+  } catch (err) {
+    console.error(
+      `[records-ready] D1 update failed dataset=${body.dataset_id}:`,
+      err instanceof Error ? err.message : String(err),
+    );
+    return c.json({ error: "Failed to record records state" }, 500);
+  }
+
+  // A callback for a dataset that isn't in D1 (deleted, or never registered)
+  // matches zero rows; surface it as a 404 rather than a silent 200.
+  if (changed === 0) {
+    console.error(`[records-ready] UPDATE matched 0 rows dataset=${body.dataset_id} -- not in D1`);
+    return c.json({ error: "Dataset not found" }, 404);
+  }
+
+  console.log(
+    `[records-ready] dataset=${body.dataset_id} status=${status} version=${body.version ?? "?"}`,
   );
 
   return c.json({ ok: true, dataset_id: body.dataset_id, status });

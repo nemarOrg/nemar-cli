@@ -124,6 +124,7 @@ import {
   markDatasetPrivate,
   markDatasetPublic,
   uploadManifest,
+  waitForPublicPropagation,
 } from "../services/s3";
 import {
   type ZenodoDeposition,
@@ -3461,9 +3462,10 @@ adminRoutes.post("/publish/:id/deny", zValidator("json", denySchema), async (c) 
  *
  * Steps:
  *  1. ci_check - Verify CI exists and is passing (deploy if missing)
- *  2. repo_public - Make repository public
- *  3. s3_public_read - Grant public read by removing the dataset's private
- *      carve-out from the bucket policy (see services/bucket-policy.ts)
+ *  2. s3_public_read - Grant public read by removing the dataset's private
+ *      carve-out from the bucket policy (see services/bucket-policy.ts). Runs
+ *      first among the mutations (epic #736, Phase 4) for propagation lead time.
+ *  3. repo_public - Make repository public
  *  4. tag_protect - Apply tag protection rules (prevent version tag deletion)
  *  5. doi_create - Create concept DOI if not exists
  *  6. update_metadata - Update dataset_description.json with DOI
@@ -3550,8 +3552,11 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
   const allSteps: readonly PublicationStep[] = [
     "ci_check",
     "enrichment_check",
-    "repo_public",
+    // Flip S3 public as early as possible (epic #736, Phase 4 / #741): it is the
+    // first mutation after the validation gates, so the bucket-policy change has
+    // the most time to propagate before create_tag fires generate-archive.
     "s3_public_read",
+    "repo_public",
     "tag_protect",
     "doi_create",
     "update_metadata",
@@ -3778,7 +3783,71 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
     }
   }
 
-  // Step 3: Make repo public
+  // Add the S3 public-read bucket policy (deny-list removal). Runs as the FIRST
+  // mutation after the validation gates (epic #736, Phase 4 / #741) so the
+  // bucket-policy change has the most time to propagate before create_tag fires
+  // generate-archive.
+  if (stepsToRun.includes("s3_public_read")) {
+    try {
+      await startStep("s3_public_read");
+
+      const { attempts: s3PublicAttempts } = await withRetry(
+        () => markDatasetPublic(getS3Config(c.env), datasetId),
+        "s3_public_read",
+      );
+
+      // Non-fatal propagation gate: confirm a real blob is actually anonymously
+      // readable, so a stuck/slow propagation is surfaced rather than silently
+      // assumed (the nm000111 failure mode). Run it via waitUntil
+      // (fire-and-forget) so its bounded poll (~10s) overlaps the subsequent
+      // publish steps instead of adding serial latency toward the Worker
+      // wall-clock limit -- the gate is observability-only and the cascade
+      // proceeds regardless (Phase 1's signed reads removed the hard dependency).
+      c.executionCtx.waitUntil(
+        (async () => {
+          try {
+            const propagation = await waitForPublicPropagation(getS3Config(c.env), datasetId);
+            if (propagation.checked && !propagation.propagated) {
+              console.warn(
+                `[publish] s3_public_read: public access not yet propagated for ${datasetId} after ${propagation.attempts} probes (key=${propagation.key})`,
+              );
+            } else {
+              console.log(
+                `[publish] s3_public_read: propagation ${
+                  propagation.checked
+                    ? `confirmed in ${propagation.attempts} probe(s)`
+                    : "skipped (no annexed objects)"
+                } for ${datasetId}`,
+              );
+            }
+          } catch (gateErr) {
+            console.warn(
+              `[publish] s3_public_read: propagation probe errored for ${datasetId} (non-fatal):`,
+              gateErr instanceof Error ? gateErr.message : String(gateErr),
+            );
+          }
+        })(),
+      );
+
+      await updateProgress("s3_public_read", undefined, s3PublicAttempts);
+    } catch (err) {
+      const msg = errorMessage(err);
+      console.error(`[publish] S3 public read policy failed for ${datasetId}:`, err);
+      await updateProgress("s3_public_read", msg);
+      return c.json(
+        {
+          error: `S3 public read policy failed: ${msg}`,
+          step: "s3_public_read",
+          steps_completed: completed,
+          step_results: stepResults,
+        },
+        500,
+      );
+    }
+  }
+
+  // Make the repository public (runs after the S3 public flip; the two are
+  // independent, S3 goes first for propagation lead time).
   if (stepsToRun.includes("repo_public")) {
     try {
       await startStep("repo_public");
@@ -3890,34 +3959,7 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
     }
   }
 
-  // Step 3: Add S3 public read bucket policy
-  if (stepsToRun.includes("s3_public_read")) {
-    try {
-      await startStep("s3_public_read");
-
-      const { attempts: s3PublicAttempts } = await withRetry(
-        () => markDatasetPublic(getS3Config(c.env), datasetId),
-        "s3_public_read",
-      );
-
-      await updateProgress("s3_public_read", undefined, s3PublicAttempts);
-    } catch (err) {
-      const msg = errorMessage(err);
-      console.error(`[publish] S3 public read policy failed for ${datasetId}:`, err);
-      await updateProgress("s3_public_read", msg);
-      return c.json(
-        {
-          error: `S3 public read policy failed: ${msg}`,
-          step: "s3_public_read",
-          steps_completed: completed,
-          step_results: stepResults,
-        },
-        500,
-      );
-    }
-  }
-
-  // Step 4: Tag protection (before DOI to prevent tag manipulation)
+  // Tag protection (before DOI to prevent tag manipulation)
   // Idempotent: applyTagProtection treats 422 (rule already exists) as
   // success and throws HttpError with status + body on terminal failure.
   // No inline withRetry: githubFetchWithRetry inside applyTagProtection

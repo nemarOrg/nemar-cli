@@ -1,0 +1,19 @@
+-- Auto-retry bookkeeping for failed archive generation (epic #736, Phase 3 / #740).
+--
+-- /webhooks/archive-ready records archive_status='failed' (migration 0036) when
+-- nemarDatasets/.github run-generate-archive.yml fails, but until now nothing
+-- re-dispatched -- a failed archive sat failed until a human noticed (the
+-- nm000111 incident). Phase 3 adds a bounded auto-retry: the archive-ready
+-- webhook re-dispatches immediately (fast self-heal during a publish) and a
+-- daily sweep (Worker scheduled handler) backstops failures whose callback never
+-- arrived or whose retry chain broke.
+--
+-- This counter is the number of retry dispatches the system has made for the
+-- latest archive. It is incremented at the moment a retry is DISPATCHED (by the
+-- webhook or the sweep), capped at MAX_ARCHIVE_RETRIES (src/services/archive-retry.ts)
+-- so a genuinely-broken dataset (e.g. missing annex data) is not re-dispatched
+-- forever, and reset to 0 on a 'ready' callback.
+--
+-- NOT NULL DEFAULT 0 so every existing row starts un-retried. Not in datasets_fts
+-- or the embed-dirty trigger OF lists: a plain ADD COLUMN, no lexical/vector churn.
+ALTER TABLE datasets ADD COLUMN archive_retry_count INTEGER NOT NULL DEFAULT 0;
