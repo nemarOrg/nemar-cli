@@ -12,9 +12,14 @@
 -- (no serving dependency).
 --
 -- Columns:
---   records_status      'pending' -> dispatched, not yet confirmed
---                       'ready'   -> records.json present on S3 (webhook confirmed)
+--   records_status      'ready'   -> records.json present on S3 (webhook confirmed)
 --                       'failed'  -> generation workflow reported a failure
+--                       'pending' -> RESERVED for a future dispatch-time write;
+--                                    Phase 5 only writes ready/failed via the
+--                                    records-ready callback (mirrors archive 0036,
+--                                    whose CHECK also pins 'pending' but doesn't
+--                                    write it). NULL stays distinguishable as
+--                                    "never generated / not yet checked".
 --                       NULL      -> unknown (never generated / not yet checked)
 --   records_checked_at  ISO-8601 UTC of the last records-ready callback.
 --
