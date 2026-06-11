@@ -8,6 +8,7 @@
 import type { Context } from "hono";
 import { Hono } from "hono";
 
+import { MAX_ARCHIVE_RETRIES, decideArchiveRetry } from "../services/archive-retry.js";
 import { purgeCacheUrls, zarrPurgeTargets } from "../services/cloudflare.js";
 import { runDatasetSync } from "../services/dataset-reindex.js";
 import { isValidDatasetId } from "../services/datasetId.js";
@@ -19,6 +20,7 @@ import { getDatasetsToken } from "../services/github-auth.js";
 import {
   downloadReleaseArchive,
   signManifestCallbackToken,
+  triggerArchiveGeneration,
   triggerEnrichmentRun,
   triggerManifestGeneration,
   triggerVersionDoiRun,
@@ -2141,6 +2143,12 @@ webhooks.post("/zarr-ready", async (c) => {
         .run();
       changed = result.meta.changes ?? 0;
     } else {
+      // Record failure for the observability dashboard only -- do NOT auto-retry
+      // zarr here. Conversion is owned by the hourly Hallu cron (workflow
+      // autodispatch is intentionally off), which re-attempts on its own
+      // schedule; many zarr failures are the mixed-rate EDF/BDF reader bug
+      // (#737) that a re-dispatch wouldn't fix. This is the deliberate contrast
+      // with the archive-ready auto-retry (epic #736, Phase 3 decision).
       const result = await c.env.DB.prepare(
         "UPDATE datasets SET zarr_status = 'failed' WHERE dataset_id = ?",
       )
@@ -2267,25 +2275,42 @@ webhooks.post("/archive-ready", async (c) => {
 
   // Persist latest-only archive state. On failure keep the prior archive_size
   // (a failed rebuild shouldn't erase the last good zip's size) and only flip
-  // the status + stamp checked_at.
+  // the status + stamp checked_at. A 'failed' callback also drives the bounded
+  // auto-retry (epic #736, Phase 3): re-dispatch generation while under the cap,
+  // counting dispatches in archive_retry_count (reset to 0 on 'ready'). The
+  // daily archiveRetrySweep is the backstop. See services/archive-retry.ts.
   let changed = 0;
+  let retry: ReturnType<typeof decideArchiveRetry> | null = null;
   try {
     if (status === "ready") {
       const result = await c.env.DB.prepare(
         `UPDATE datasets
          SET archive_status = 'ready',
              archive_checked_at = datetime('now'),
-             archive_size = ?
+             archive_size = ?,
+             archive_retry_count = 0
          WHERE dataset_id = ?`,
       )
         .bind(typeof body.size === "number" ? body.size : null, body.dataset_id)
         .run();
       changed = result.meta.changes ?? 0;
     } else {
-      const result = await c.env.DB.prepare(
-        "UPDATE datasets SET archive_status = 'failed', archive_checked_at = datetime('now') WHERE dataset_id = ?",
+      // Read the current dispatch count so the decision (and the increment it
+      // implies) tracks retries dispatched, not failed callbacks received.
+      const row = await c.env.DB.prepare(
+        "SELECT archive_retry_count FROM datasets WHERE dataset_id = ?",
       )
         .bind(body.dataset_id)
+        .first<{ archive_retry_count: number }>();
+      retry = decideArchiveRetry("failed", row?.archive_retry_count ?? 0, body.version);
+      const result = await c.env.DB.prepare(
+        `UPDATE datasets
+         SET archive_status = 'failed',
+             archive_checked_at = datetime('now'),
+             archive_retry_count = ?
+         WHERE dataset_id = ?`,
+      )
+        .bind(retry.nextCount, body.dataset_id)
         .run();
       changed = result.meta.changes ?? 0;
     }
@@ -2305,8 +2330,27 @@ webhooks.post("/archive-ready", async (c) => {
     return c.json({ error: "Dataset not found" }, 404);
   }
 
+  // Bounded auto-retry: re-dispatch a fresh archive build now. Best-effort -- a
+  // failed re-dispatch is logged but must not 500 the workflow's callback, whose
+  // job (recording state) already succeeded above. Phase 2 deletes the partial on
+  // failure, so no force flag is needed; the count was already incremented above.
+  if (retry?.retry && body.version) {
+    try {
+      const pat = await getDatasetsToken(c.env);
+      await triggerArchiveGeneration(body.dataset_id, body.dataset_id, body.version, pat);
+      console.log(
+        `[archive-ready] auto-retry dispatched dataset=${body.dataset_id} version=${body.version} attempt=${retry.nextCount}/${MAX_ARCHIVE_RETRIES}`,
+      );
+    } catch (err) {
+      console.error(
+        `[archive-ready] auto-retry dispatch failed dataset=${body.dataset_id}:`,
+        err instanceof Error ? err.message : String(err),
+      );
+    }
+  }
+
   console.log(
-    `[archive-ready] dataset=${body.dataset_id} status=${status} size=${body.size ?? "?"} version=${body.version ?? "?"}`,
+    `[archive-ready] dataset=${body.dataset_id} status=${status} size=${body.size ?? "?"} version=${body.version ?? "?"}${retry ? ` retry=${retry.reason} count=${retry.nextCount}` : ""}`,
   );
 
   return c.json({ ok: true, dataset_id: body.dataset_id, status });
