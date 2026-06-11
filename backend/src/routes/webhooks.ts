@@ -2295,8 +2295,10 @@ webhooks.post("/archive-ready", async (c) => {
         .run();
       changed = result.meta.changes ?? 0;
     } else {
-      // Read the current dispatch count so the decision (and the increment it
-      // implies) tracks retries dispatched, not failed callbacks received.
+      // Read the current dispatch count to decide whether to re-dispatch. The
+      // count is NOT advanced here -- it is incremented only after a successful
+      // dispatch (in the waitUntil below), so a failed dispatch can't consume a
+      // retry slot. Matches archiveRetrySweep's dispatch-then-increment order.
       const row = await c.env.DB.prepare(
         "SELECT archive_retry_count FROM datasets WHERE dataset_id = ?",
       )
@@ -2306,11 +2308,10 @@ webhooks.post("/archive-ready", async (c) => {
       const result = await c.env.DB.prepare(
         `UPDATE datasets
          SET archive_status = 'failed',
-             archive_checked_at = datetime('now'),
-             archive_retry_count = ?
+             archive_checked_at = datetime('now')
          WHERE dataset_id = ?`,
       )
-        .bind(retry.nextCount, body.dataset_id)
+        .bind(body.dataset_id)
         .run();
       changed = result.meta.changes ?? 0;
     }
@@ -2330,11 +2331,13 @@ webhooks.post("/archive-ready", async (c) => {
     return c.json({ error: "Dataset not found" }, 404);
   }
 
-  // Bounded auto-retry: re-dispatch a fresh archive build. Fire-and-forget via
+  // Bounded auto-retry: re-dispatch a fresh archive build, fire-and-forget via
   // waitUntil (like the other post-write side-effects in this file) so a slow
-  // GitHub /dispatches call can't delay or time out the workflow's callback --
-  // the state write above already succeeded, and the count was already
-  // incremented. Phase 2 deletes the partial on failure, so no force flag.
+  // GitHub /dispatches call can't delay or time out the workflow's callback. The
+  // retry-count increment happens HERE, only after a successful dispatch
+  // (mirrors archiveRetrySweep) -- a failed dispatch (GitHub 422 / rate-limit)
+  // must not consume a retry slot, which would otherwise exhaust the cap without
+  // ever running an archive. Phase 2 deletes the partial on failure, so no force.
   if (retry?.retry && body.version) {
     const retryDatasetId = body.dataset_id;
     const retryVersion = body.version;
@@ -2344,12 +2347,15 @@ webhooks.post("/archive-ready", async (c) => {
         try {
           const pat = await getDatasetsToken(c.env);
           await triggerArchiveGeneration(retryDatasetId, retryDatasetId, retryVersion, pat);
+          await c.env.DB.prepare("UPDATE datasets SET archive_retry_count = ? WHERE dataset_id = ?")
+            .bind(retryAttempt, retryDatasetId)
+            .run();
           console.log(
             `[archive-ready] auto-retry dispatched dataset=${retryDatasetId} version=${retryVersion} attempt=${retryAttempt}/${MAX_ARCHIVE_RETRIES}`,
           );
         } catch (err) {
           console.error(
-            `[archive-ready] auto-retry dispatch failed dataset=${retryDatasetId}:`,
+            `[archive-ready] auto-retry dispatch failed dataset=${retryDatasetId} (retry slot not consumed):`,
             err instanceof Error ? err.message : String(err),
           );
         }

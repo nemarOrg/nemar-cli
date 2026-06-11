@@ -3797,33 +3797,37 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
       );
 
       // Non-fatal propagation gate: confirm a real blob is actually anonymously
-      // readable before advancing, so a stuck/slow propagation is surfaced
-      // rather than silently advancing while blobs still 403 to the public (the
-      // nm000111 failure mode). On timeout we warn and proceed -- blocking a
-      // publish on AWS eventual consistency is the wrong tradeoff, and Phase 1's
-      // signed reads removed the hard dependency.
-      try {
-        const propagation = await waitForPublicPropagation(getS3Config(c.env), datasetId);
-        if (propagation.checked && !propagation.propagated) {
-          console.warn(
-            `[publish] s3_public_read: public access not yet propagated for ${datasetId} after ${propagation.attempts} probes (key=${propagation.key}); proceeding (non-fatal)`,
-          );
-        } else {
-          console.log(
-            `[publish] s3_public_read: propagation ${
-              propagation.checked
-                ? `confirmed in ${propagation.attempts} probe(s)`
-                : "skipped (no annexed objects)"
-            } for ${datasetId}`,
-          );
-        }
-      } catch (gateErr) {
-        // The gate must never fail the publish; the flip itself already succeeded.
-        console.warn(
-          `[publish] s3_public_read: propagation probe errored for ${datasetId} (non-fatal):`,
-          gateErr instanceof Error ? gateErr.message : String(gateErr),
-        );
-      }
+      // readable, so a stuck/slow propagation is surfaced rather than silently
+      // assumed (the nm000111 failure mode). Run it via waitUntil
+      // (fire-and-forget) so its bounded poll (~10s) overlaps the subsequent
+      // publish steps instead of adding serial latency toward the Worker
+      // wall-clock limit -- the gate is observability-only and the cascade
+      // proceeds regardless (Phase 1's signed reads removed the hard dependency).
+      c.executionCtx.waitUntil(
+        (async () => {
+          try {
+            const propagation = await waitForPublicPropagation(getS3Config(c.env), datasetId);
+            if (propagation.checked && !propagation.propagated) {
+              console.warn(
+                `[publish] s3_public_read: public access not yet propagated for ${datasetId} after ${propagation.attempts} probes (key=${propagation.key})`,
+              );
+            } else {
+              console.log(
+                `[publish] s3_public_read: propagation ${
+                  propagation.checked
+                    ? `confirmed in ${propagation.attempts} probe(s)`
+                    : "skipped (no annexed objects)"
+                } for ${datasetId}`,
+              );
+            }
+          } catch (gateErr) {
+            console.warn(
+              `[publish] s3_public_read: propagation probe errored for ${datasetId} (non-fatal):`,
+              gateErr instanceof Error ? gateErr.message : String(gateErr),
+            );
+          }
+        })(),
+      );
 
       await updateProgress("s3_public_read", undefined, s3PublicAttempts);
     } catch (err) {
