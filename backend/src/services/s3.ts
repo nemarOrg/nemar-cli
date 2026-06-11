@@ -1134,6 +1134,96 @@ export async function headArchive(
 }
 
 // ---------------------------------------------------------------------------
+// Public-access propagation gate (epic #736, Phase 4 / #741)
+// ---------------------------------------------------------------------------
+
+/**
+ * Extract the first object `<Key>` from an S3 ListBucketResult XML page. Pure;
+ * returns null when the page has no `<Contents>` (empty prefix). Reuses the
+ * `<Contents>…<Key>` shape already parsed in `getArchiveSize`.
+ */
+export function firstObjectKeyFromListXml(xml: string): string | null {
+  const m = xml.match(/<Contents>[\s\S]*?<Key>([^<]+)<\/Key>/);
+  return m ? m[1] : null;
+}
+
+/** Outcome of a public-access propagation probe. */
+export interface PublicPropagationResult {
+  /** false when the dataset has no annexed objects to probe. */
+  checked: boolean;
+  /** true once an anonymous HEAD of a real blob returned 200. */
+  propagated: boolean;
+  /** Number of anonymous HEAD attempts made. */
+  attempts: number;
+  /** The probed object key (null when nothing was found to probe). */
+  key: string | null;
+}
+
+/**
+ * After `markDatasetPublic`, confirm a real blob is actually anonymously
+ * readable. The deny-list removal is a bucket-policy change with AWS
+ * eventual-consistency lag; this bounded poll surfaces a slow/stuck propagation
+ * instead of the publish silently advancing while blobs still 403 to the public
+ * (the nm000111 failure mode).
+ *
+ * Best-effort and NON-fatal -- the caller logs the result and proceeds: by the
+ * time the tag push fires generate-archive (several steps later) propagation has
+ * completed in practice, and Phase 1's signed reads removed the hard dependency
+ * regardless. Probes with an UNSIGNED HEAD; a signed request would always 200
+ * and would not test *public* access.
+ */
+export async function waitForPublicPropagation(
+  options: PresignedUrlOptions,
+  datasetId: string,
+  opts?: { maxAttempts?: number; delayMs?: number },
+): Promise<PublicPropagationResult> {
+  const maxAttempts = opts?.maxAttempts ?? 6;
+  const delayMs = opts?.delayMs ?? 2000;
+  const { bucket, region } = options;
+
+  // Grab any one blob under objects/ to probe (the first page is enough).
+  let key: string | null = null;
+  try {
+    for await (const xml of listObjectPages(options, `${datasetId}/objects/`)) {
+      key = firstObjectKeyFromListXml(xml);
+      break;
+    }
+  } catch (err) {
+    console.warn(
+      `[public-propagation] could not list objects for ${datasetId}: ${
+        err instanceof Error ? err.message : String(err)
+      }`,
+    );
+    return { checked: false, propagated: false, attempts: 0, key: null };
+  }
+
+  if (!key) {
+    // No annexed objects (everything is in git) -> nothing to propagate.
+    return { checked: false, propagated: false, attempts: 0, key: null };
+  }
+
+  const encodedKey = key.split("/").map(encodeURIComponent).join("/");
+  const url = `https://${bucket}.s3.${region}.amazonaws.com/${encodedKey}`;
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    let status = 0;
+    try {
+      status = (await fetch(url, { method: "HEAD" })).status;
+    } catch {
+      // Transient network error from a cold isolate: fall through to retry.
+    }
+    if (status === 200) {
+      return { checked: true, propagated: true, attempts: attempt, key };
+    }
+    if (attempt < maxAttempts) {
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
+    }
+  }
+
+  return { checked: true, propagated: false, attempts: maxAttempts, key };
+}
+
+// ---------------------------------------------------------------------------
 // Object deletion
 // ---------------------------------------------------------------------------
 

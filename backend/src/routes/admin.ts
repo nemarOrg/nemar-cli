@@ -124,6 +124,7 @@ import {
   markDatasetPrivate,
   markDatasetPublic,
   uploadManifest,
+  waitForPublicPropagation,
 } from "../services/s3";
 import {
   type ZenodoDeposition,
@@ -3550,8 +3551,11 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
   const allSteps: readonly PublicationStep[] = [
     "ci_check",
     "enrichment_check",
-    "repo_public",
+    // Flip S3 public as early as possible (epic #736, Phase 4 / #741): it is the
+    // first mutation after the validation gates, so the bucket-policy change has
+    // the most time to propagate before create_tag fires generate-archive.
     "s3_public_read",
+    "repo_public",
     "tag_protect",
     "doi_create",
     "update_metadata",
@@ -3890,7 +3894,8 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
     }
   }
 
-  // Step 3: Add S3 public read bucket policy
+  // Add S3 public-read bucket policy (deny-list removal). Runs first among the
+  // mutations (epic #736, Phase 4) so it has the most time to propagate.
   if (stepsToRun.includes("s3_public_read")) {
     try {
       await startStep("s3_public_read");
@@ -3899,6 +3904,35 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
         () => markDatasetPublic(getS3Config(c.env), datasetId),
         "s3_public_read",
       );
+
+      // Non-fatal propagation gate: confirm a real blob is actually anonymously
+      // readable before advancing, so a stuck/slow propagation is surfaced
+      // rather than silently advancing while blobs still 403 to the public (the
+      // nm000111 failure mode). On timeout we warn and proceed -- blocking a
+      // publish on AWS eventual consistency is the wrong tradeoff, and Phase 1's
+      // signed reads removed the hard dependency.
+      try {
+        const propagation = await waitForPublicPropagation(getS3Config(c.env), datasetId);
+        if (propagation.checked && !propagation.propagated) {
+          console.warn(
+            `[publish] s3_public_read: public access not yet propagated for ${datasetId} after ${propagation.attempts} probes (key=${propagation.key}); proceeding (non-fatal)`,
+          );
+        } else {
+          console.log(
+            `[publish] s3_public_read: propagation ${
+              propagation.checked
+                ? `confirmed in ${propagation.attempts} probe(s)`
+                : "skipped (no annexed objects)"
+            } for ${datasetId}`,
+          );
+        }
+      } catch (gateErr) {
+        // The gate must never fail the publish; the flip itself already succeeded.
+        console.warn(
+          `[publish] s3_public_read: propagation probe errored for ${datasetId} (non-fatal):`,
+          gateErr instanceof Error ? gateErr.message : String(gateErr),
+        );
+      }
 
       await updateProgress("s3_public_read", undefined, s3PublicAttempts);
     } catch (err) {
