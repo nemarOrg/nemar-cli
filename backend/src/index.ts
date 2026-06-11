@@ -31,6 +31,7 @@ import { sandboxRoutes } from "./routes/sandbox";
 import { userRoutes } from "./routes/users";
 import webhooks from "./routes/webhooks";
 import { zarrDataRoutes } from "./routes/zarr-data";
+import { archiveRetrySweep } from "./services/archive-retry";
 import { drainEmbeddingDirty } from "./services/dataset-search";
 import { deleteDatasetCascade } from "./services/deletion";
 import {
@@ -512,5 +513,8 @@ export default {
     // #646 Phase 4: drain stale vectors (embedding_dirty=1) — the backstop for
     // changes that don't go through the inline enrich/reindex re-embed.
     ctx.waitUntil(drainEmbeddingDirty(env.DB, env.AI, env.VECTORIZE));
+    // #736 Phase 3: backstop re-dispatch of still-failed archive generations
+    // whose webhook retry chain broke (e.g. a lost archive-ready callback).
+    ctx.waitUntil(archiveRetrySweep(env));
   },
 };
