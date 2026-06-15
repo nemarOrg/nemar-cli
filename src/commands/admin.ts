@@ -2756,6 +2756,14 @@ adminCommand
     "--trust-upstream",
     "If BIDS validation does not register within the bounded poll, fall back to skip_ci_check=true at approval. OpenNeuro data is pre-validated upstream so this is the recommended setting for OpenNeuro imports (#431).",
   )
+  .option(
+    "--phase <phase>",
+    "Run a single import phase in-process (prepare|copy|finalize) for the sharded CI workflow. State passes between phases via S3 staging. Implies in-process execution.",
+  )
+  .option(
+    "--shard <i/N>",
+    "Copy-phase only: process shard i of N (0-indexed), e.g. 0/8. Required with --phase copy.",
+  )
   .action(
     async (
       openneuroIds: string,
@@ -2764,6 +2772,8 @@ adminCommand
         dir?: string;
         skipData?: boolean;
         trustUpstream?: boolean;
+        phase?: string;
+        shard?: string;
       },
     ) => {
       if (!requireAuth()) return;
@@ -2783,9 +2793,58 @@ adminCommand
         }
       }
 
-      if ((options.dir || options.skipData) && !options.local) {
-        console.error(chalk.red("--dir and --skip-data require --local flag"));
+      if ((options.dir || options.skipData) && !options.local && !options.phase) {
+        console.error(chalk.red("--dir and --skip-data require --local or --phase"));
         process.exit(1);
+      }
+
+      // Single-phase execution for the sharded CI workflow (prepare/copy/finalize).
+      if (options.phase) {
+        const validPhases = ["prepare", "copy", "finalize"];
+        if (!validPhases.includes(options.phase)) {
+          console.error(
+            chalk.red(`Invalid --phase "${options.phase}". Expected prepare|copy|finalize.`),
+          );
+          process.exit(1);
+        }
+        if (ids.length > 1) {
+          console.error(chalk.red("--phase only supports a single dataset ID"));
+          process.exit(1);
+        }
+        if (options.shard && options.phase !== "copy") {
+          console.error(chalk.red("--shard is only valid with --phase copy"));
+          process.exit(1);
+        }
+        if (options.phase === "copy" && !options.shard) {
+          console.error(chalk.red("--phase copy requires --shard i/N (e.g. --shard 0/8)"));
+          process.exit(1);
+        }
+
+        const { prepareImport, copyShard, finalizeImport } = await import(
+          "../lib/import-openneuro.js"
+        );
+        const { parseShardArg } = await import("../lib/s3-server-copy.js");
+        const opts = {
+          workDir: options.dir,
+          skipData: options.skipData,
+          trustUpstream: options.trustUpstream,
+          persistStaging: true,
+        };
+        try {
+          if (options.phase === "prepare") {
+            await prepareImport(ids[0], opts);
+          } else if (options.phase === "copy") {
+            // biome-ignore lint/style/noNonNullAssertion: guarded above (copy requires --shard)
+            await copyShard(ids[0], parseShardArg(options.shard!), opts);
+          } else {
+            await finalizeImport(ids[0], opts);
+          }
+        } catch (error) {
+          const msg = error instanceof Error ? error.message : String(error);
+          console.error(chalk.red(`\n[${options.phase}] failed: ${msg}`));
+          process.exit(1);
+        }
+        return;
       }
 
       if (options.local) {

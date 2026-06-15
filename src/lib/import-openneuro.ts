@@ -41,10 +41,26 @@ import {
   pushToGitHub,
   runCommand,
 } from "./git-annex.js";
+import {
+  type CopyItem,
+  type ImportManifest,
+  type ImportManifestItem,
+  batchServerSideCopy,
+  cleanupStaging,
+  filterAlreadyCopied,
+  keyInShard,
+  listExistingObjects,
+  parseS3Url,
+  readManifestFromS3,
+  writeManifestToS3,
+} from "./s3-server-copy.js";
 
 const OPENNEURO_ORG = "OpenNeuroDatasets";
 const S3_BUCKET = "nemar";
 const S3_REGION = "us-east-2";
+/** Default parallel server-side copies per shard. Higher than the old 8 because
+ *  the runner is no longer the byte bottleneck (copies stay on AWS's backbone). */
+const COPY_CONCURRENCY = 16;
 
 interface ImportOptions {
   workDir?: string;
@@ -57,6 +73,13 @@ interface ImportOptions {
    * (see nemarOrg/nemar-cli#431).
    */
   trustUpstream?: boolean;
+  /**
+   * Persist the import manifest (and read it back) via S3 staging, so the
+   * prepare/copy/finalize phases can run as separate GitHub Actions jobs that
+   * don't share a filesystem. The single-process driver leaves this off and
+   * passes the manifest in memory.
+   */
+  persistStaging?: boolean;
 }
 
 /**
@@ -466,97 +489,57 @@ export function ensureReadmeMd(
 }
 
 /**
- * Copy a single object from a public HTTP URL to NEMAR S3.
- * Uses curl to stream from the public source (no AWS creds needed for read)
- * and pipes to aws s3 cp for the upload (uses NEMAR creds).
- * This avoids the 403 that happens when aws s3 cp tries to use NEMAR creds
- * to read from a different account's bucket.
+ * Build manifest items from the git-annex whereis map. Each annexed file maps
+ * to its OpenNeuro S3 source (parsed for server-side copy) plus the raw http
+ * URL (kept for the curl fallback) and the flat NEMAR destination URI. Keys
+ * with no usable source at all are skipped (returned count).
  */
-async function s3Copy(
-  sourceUrl: string,
-  destUri: string,
-  region: string,
-): Promise<{ success: boolean; error?: string }> {
-  const result = await runCommand(
-    ["bash", "-c", `curl -sfL '${sourceUrl}' | aws s3 cp - '${destUri}' --region '${region}'`],
-    {},
-  );
-  if (result.exitCode !== 0) {
-    return { success: false, error: result.stderr.trim() };
-  }
-  return { success: true };
-}
-
-/**
- * Copy objects from OpenNeuro S3 to NEMAR S3 in parallel batches.
- */
-async function batchS3Copy(
-  items: Array<{ key: string; sourceUrl: string; destUri: string }>,
-  region: string,
-  concurrency: number,
-  onProgress?: (copied: number, total: number, currentKey: string) => void,
-): Promise<{ copied: number; failed: Array<{ key: string; error: string }> }> {
-  let copied = 0;
-  const failed: Array<{ key: string; error: string }> = [];
-
-  for (let i = 0; i < items.length; i += concurrency) {
-    const batch = items.slice(i, i + concurrency);
-    const results = await Promise.allSettled(
-      batch.map(async (item) => {
-        const result = await s3Copy(item.sourceUrl, item.destUri, region);
-        if (!result.success) {
-          throw new Error(result.error || "Unknown S3 copy error");
-        }
-        return item.key;
-      }),
-    );
-
-    for (let j = 0; j < results.length; j++) {
-      const result = results[j];
-      if (result.status === "fulfilled") {
-        copied++;
-      } else {
-        failed.push({ key: batch[j].key, error: result.reason?.message || "Unknown error" });
-      }
+function buildManifestItems(
+  keyUrlMap: Map<string, string>,
+  nemarId: string,
+): { items: ImportManifestItem[]; skipped: number } {
+  const items: ImportManifestItem[] = [];
+  let skipped = 0;
+  for (const [key, url] of keyUrlMap) {
+    const source = parseS3Url(url);
+    const httpUrl = url.startsWith("http") ? url : null;
+    if (!source && !httpUrl) {
+      skipped++;
+      continue;
     }
-
-    onProgress?.(copied, items.length, batch[batch.length - 1].key);
+    items.push({
+      key,
+      sourceUrl: httpUrl,
+      source,
+      destUri: `s3://${S3_BUCKET}/${nemarId}/objects/${key}`,
+    });
   }
-
-  return { copied, failed };
+  return { items, skipped };
 }
 
 /**
- * Import an OpenNeuro dataset into NEMAR.
- *
- * Steps:
- * 1. Clone OpenNeuro dataset (maps ds###### -> on######)
- * 2. Create NEMAR dataset record + GitHub repo via API (empty repo, no main yet)
- * 3. Enable OpenNeuro S3 remote and build key-to-URL map
- * 4. Reconfigure git remote to nemarDatasets
- * 5. Set up NEMAR S3 remote, copy data S3-to-S3, register keys
- * 6. Seed .nemar/metadata.json
- * 7. Push OpenNeuro git history + metadata commit to nemarDatasets (creates remote main)
- * 8. Deploy CI workflows via API — must run AFTER step 7 because the GitHub
- *    Contents API requires the target branch to exist (#450)
- * 9. Bounded poll for a BIDS validation workflow run to register (#431)
- * 10. Request and approve publication (with retry)
+ * Phase 1 (prepare): clone OpenNeuro, create the NEMAR record + repo, build the
+ * key->source manifest, configure remotes (recording the nemar-s3 uuid in the
+ * git-annex branch), seed metadata, and push `main`. Does NOT copy data or
+ * publish — those are the copy/finalize phases. Returns the manifest (also
+ * written to S3 staging when `persistStaging`, so a separate copy/finalize job
+ * can read it). CI deploy is deferred to finalize (#450: Contents API needs the
+ * branch to exist).
  */
-export async function importOpenNeuro(
+export async function prepareImport(
   openneuroId: string,
   options: ImportOptions = {},
-): Promise<void> {
+): Promise<ImportManifest> {
   const nemarId = mapDatasetId(openneuroId);
   const workDir = options.workDir || mkdtempSync(join(tmpdir(), `nemar-import-${nemarId}-`));
   const datasetPath = join(workDir, nemarId);
 
-  console.log(chalk.cyan(`\nImporting OpenNeuro dataset ${openneuroId} -> ${nemarId}\n`));
+  console.log(chalk.cyan(`\n[prepare] ${openneuroId} -> ${nemarId}\n`));
   console.log(chalk.dim(`Working directory: ${workDir}`));
 
   // Step 1: Clone OpenNeuro dataset
   const cloneSpinner = ora("Cloning OpenNeuro dataset...").start();
   const openneuroUrl = `https://github.com/${OPENNEURO_ORG}/${openneuroId}.git`;
-
   const cloneResult = await cloneDataset(openneuroUrl, datasetPath);
   if (!cloneResult.success) {
     cloneSpinner.fail(`Failed to clone: ${cloneResult.error}`);
@@ -605,11 +588,6 @@ export async function importOpenNeuro(
     }
   }
 
-  // CI workflow deployment is deferred until AFTER the initial push (step 8 below).
-  // The GitHub Contents API requires the target branch to exist; on a freshly
-  // created empty repo `commitFilesAsTree(repo, "main", ...)` 404s on the
-  // branch lookup. See #450 for the regression history.
-
   // Step 3: Enable OpenNeuro S3 remote and build key-to-URL map
   let keyUrlMap = new Map<string, string>();
   if (!options.skipData) {
@@ -648,8 +626,6 @@ export async function importOpenNeuro(
 
   // Step 4: Reconfigure git remote to nemarDatasets
   const remoteSpinner = ora("Configuring NEMAR remote...").start();
-
-  // Remove the OpenNeuro origin
   const removeResult = await runCommand(["git", "remote", "remove", "origin"], {
     cwd: datasetPath,
   });
@@ -657,8 +633,6 @@ export async function importOpenNeuro(
     remoteSpinner.fail(`Failed to remove OpenNeuro remote: ${removeResult.stderr.trim()}`);
     process.exit(1);
   }
-
-  // Add nemarDatasets origin
   const nemarRepoUrl = `git@github.com:nemarDatasets/${nemarId}.git`;
   const remoteResult = await configureGitHubRemote(datasetPath, nemarRepoUrl, "origin");
   if (!remoteResult.success) {
@@ -667,96 +641,42 @@ export async function importOpenNeuro(
   }
   remoteSpinner.succeed("Configured NEMAR remote");
 
-  // Step 5: Set up NEMAR S3 remote, copy data S3-to-S3, register keys
+  // Step 5: Configure the NEMAR S3 special remote. This records the nemar-s3
+  // uuid in the git-annex branch so the finalize phase (a fresh clone, possibly
+  // on another runner) enables the SAME remote and registers keys against the
+  // SAME uuid. No data is copied here — that's the copy phase.
+  let nemarUuid = "";
+  let items: ImportManifestItem[] = [];
   if (!options.skipData && keyUrlMap.size > 0) {
     const s3Spinner = ora("Setting up NEMAR S3 remote...").start();
     const s3Creds = resolveS3Credentials();
-
     const s3Result = await configureS3Remote(
       datasetPath,
-      {
-        name: "nemar-s3",
-        bucket: S3_BUCKET,
-        prefix: `${nemarId}/objects`,
-        region: S3_REGION,
-      },
+      { name: "nemar-s3", bucket: S3_BUCKET, prefix: `${nemarId}/objects`, region: S3_REGION },
       s3Creds,
     );
     if (!s3Result.success) {
       s3Spinner.fail(`Failed to configure S3 remote: ${s3Result.error}`);
       process.exit(1);
     }
-
-    // Get NEMAR remote UUID for setpresentkey
-    const nemarUuid = await getRemoteUuid(datasetPath, "nemar-s3");
-    if (!nemarUuid) {
+    const uuid = await getRemoteUuid(datasetPath, "nemar-s3");
+    if (!uuid) {
       s3Spinner.fail("Failed to get NEMAR S3 remote UUID");
       process.exit(1);
     }
+    nemarUuid = uuid;
     s3Spinner.succeed("Configured NEMAR S3 remote");
 
-    // Build copy items: source HTTP URLs and flat destination paths (no hash dirs)
-    const copySpinner = ora("Preparing S3-to-S3 copy...").start();
-
-    const copyItems: Array<{ key: string; sourceUrl: string; destUri: string }> = [];
-    const skipped: string[] = [];
-
-    for (const [key, httpUrl] of keyUrlMap) {
-      if (!httpUrl.startsWith("http")) {
-        skipped.push(key);
-        continue;
-      }
-      const destUri = `s3://${S3_BUCKET}/${nemarId}/objects/${key}`;
-      copyItems.push({ key, sourceUrl: httpUrl, destUri });
+    const built = buildManifestItems(keyUrlMap, nemarId);
+    items = built.items;
+    if (built.skipped > 0) {
+      console.log(chalk.yellow(`  Skipped ${built.skipped} keys (no usable source URL)`));
     }
-
-    if (skipped.length > 0) {
-      console.log(chalk.yellow(`  Skipped ${skipped.length} keys (no source URL)`));
-    }
-
-    copySpinner.succeed(`Prepared ${copyItems.length} files for S3-to-S3 copy`);
-
-    // Execute S3-to-S3 copy in parallel batches
-    const s3CopySpinner = ora(`Copying ${copyItems.length} files to NEMAR S3...`).start();
-    const copyResult = await batchS3Copy(copyItems, S3_REGION, 8, (copied, total) => {
-      s3CopySpinner.text = `Copying files to NEMAR S3... ${copied}/${total}`;
-    });
-
-    if (copyResult.failed.length > 0) {
-      console.error(chalk.red(`\n  Failed to copy ${copyResult.failed.length} files:`));
-      for (const f of copyResult.failed.slice(0, 5)) {
-        console.error(chalk.red(`    ${f.key}: ${f.error}`));
-      }
-      if (copyResult.failed.length > 5) {
-        console.error(chalk.red(`    ... and ${copyResult.failed.length - 5} more`));
-      }
-      s3CopySpinner.fail(
-        `${copyResult.failed.length} of ${copyItems.length} files failed to copy. Re-run to retry.`,
-      );
-      process.exit(1);
-    }
-    s3CopySpinner.succeed(`Copied ${copyResult.copied} files to NEMAR S3`);
-
-    // Register all copied keys with git-annex
-    const registerSpinner = ora("Registering files in git-annex...").start();
-    const failedKeys = new Set(copyResult.failed.map((f) => f.key));
-    const copiedKeys = copyItems
-      .filter((item) => !failedKeys.has(item.key))
-      .map((item) => item.key);
-
-    const regResult = await batchSetKeysPresent(datasetPath, copiedKeys, nemarUuid);
-    if (regResult.failed > 0) {
-      console.log(chalk.yellow(`  ${regResult.failed} keys failed to register (non-fatal)`));
-    }
-    registerSpinner.succeed(`Registered ${regResult.success} files in git-annex`);
+    console.log(chalk.dim(`  Prepared ${items.length} files for server-side copy`));
   }
 
   // Step 6: Seed .nemar/metadata.json and normalize the README extension so
-  // GitHub renders it (#642). Content is never modified — if the upstream
-  // already ships README.md / README.rst / etc. we leave it alone; if it
-  // ships plain `README` we just rename it. Provenance is captured in
-  // .nemar/metadata.json (IsDescribedBy / IsIdenticalTo), so the website
-  // doesn't need a provenance block inside README to attribute upstream.
+  // GitHub renders it (#642). Content is never modified.
   const metaSpinner = ora("Seeding metadata...").start();
   let readmeOutcome: ReadmeOutcome;
   try {
@@ -768,25 +688,17 @@ export async function importOpenNeuro(
     );
     process.exit(1);
   }
-
-  // Stage `.nemar/metadata.json` plus whatever the README step produced.
-  // `renamed` needs both paths so git records the rename rather than
-  // treating it as a delete-then-add. `kept` adds nothing for README
-  // (the file already tracked, unchanged). `created` adds the new stub.
   const pathsToStage = [".nemar/metadata.json"];
   if (readmeOutcome.kind === "renamed") {
     pathsToStage.push("README", "README.md");
   } else if (readmeOutcome.kind === "created") {
     pathsToStage.push("README.md");
   }
-  const addResult = await runCommand(["git", "add", ...pathsToStage], {
-    cwd: datasetPath,
-  });
+  const addResult = await runCommand(["git", "add", ...pathsToStage], { cwd: datasetPath });
   if (addResult.exitCode !== 0) {
     metaSpinner.fail(`Failed to stage metadata: ${addResult.stderr.trim()}`);
     process.exit(1);
   }
-
   const commitResult = await runCommand(
     ["git", "commit", "-m", `Add NEMAR metadata (imported from OpenNeuro ${openneuroId})`],
     { cwd: datasetPath },
@@ -803,16 +715,10 @@ export async function importOpenNeuro(
         : "wrote provenance stub README.md (no upstream README)";
   metaSpinner.succeed(`Seeded .nemar/metadata.json (${readmeNote})`);
 
-  // Step 7: Push OpenNeuro git history + metadata commit to nemarDatasets.
-  // This is the initial push to a brand-new empty repo; no pre-pull needed
-  // (and previously a pre-pull broke the import — see #450).
-  //
-  // A non-fatal `warning` from pushToGitHub means the main branch landed but
-  // the git-annex branch did NOT. That is a hard fail for OpenNeuro imports:
-  // a published dataset whose git-annex branch is missing cannot be cloned
-  // (clients can't resolve where annexed blobs live). The dataset would look
-  // fine in GitHub but be functionally broken for every downstream user.
-  // (Reviewer note for nemarOrg/nemar-cli#451.)
+  // Step 7: Push main + the git-annex branch (now carrying the nemar-s3 remote
+  // config). Data blobs are copied in the next phase; finalize re-pushes the
+  // git-annex branch once keys are registered. A `warning` (main landed but the
+  // git-annex branch did not) is a hard fail — the dataset would be uncloneable.
   const pushSpinner = ora("Pushing to nemarDatasets...").start();
   const pushResult = await pushToGitHub(datasetPath, "origin");
   if (!pushResult.success) {
@@ -826,6 +732,165 @@ export async function importOpenNeuro(
     process.exit(1);
   }
   pushSpinner.succeed("Pushed to nemarDatasets");
+
+  const manifest: ImportManifest = { openneuroId, nemarId, nemarUuid, items };
+  if (options.persistStaging) {
+    await writeManifestToS3(manifest, S3_BUCKET, S3_REGION);
+    console.log(chalk.dim(`  Wrote import manifest to s3://${S3_BUCKET}/${nemarId}/staging/`));
+  }
+  console.log(chalk.green(`[prepare] done: ${nemarId} (${items.length} files to copy)`));
+  return manifest;
+}
+
+/**
+ * Phase 2 (copy, sharded): server-side copy this shard's slice of the manifest
+ * from OpenNeuro S3 to NEMAR S3, resuming past objects already present at the
+ * destination. Pure S3 — no git, no filesystem state. Re-running a shard is
+ * safe and resumes (already-copied objects are skipped). Exits non-zero on any
+ * copy failure with a resumable message.
+ */
+export async function copyShard(
+  openneuroId: string,
+  shard: { index: number; count: number },
+  options: ImportOptions = {},
+  inMemoryManifest?: ImportManifest,
+): Promise<void> {
+  const nemarId = mapDatasetId(openneuroId);
+  const manifest = inMemoryManifest ?? (await readManifestFromS3(nemarId, S3_BUCKET, S3_REGION));
+  const tag = `copy ${shard.index}/${shard.count}`;
+
+  if (options.skipData || manifest.items.length === 0) {
+    console.log(chalk.dim(`[${tag}] no data to copy`));
+    return;
+  }
+
+  const shardItems: CopyItem[] = manifest.items
+    .filter((it) => keyInShard(it.key, shard.index, shard.count))
+    .map((it) => ({ key: it.key, source: it.source, httpUrl: it.sourceUrl, destUri: it.destUri }));
+
+  if (shardItems.length === 0) {
+    console.log(chalk.dim(`[${tag}] empty shard`));
+    return;
+  }
+
+  // Resume: skip objects already present at the destination.
+  const existing = await listExistingObjects(S3_BUCKET, `${nemarId}/objects/`, S3_REGION);
+  const { toCopy, skipped } = filterAlreadyCopied(shardItems, existing);
+  if (skipped.length > 0) {
+    console.log(chalk.dim(`[${tag}] skipped ${skipped.length} already present`));
+  }
+  if (toCopy.length === 0) {
+    console.log(chalk.green(`[${tag}] nothing to copy (all ${skipped.length} present)`));
+    return;
+  }
+
+  const spinner = ora(`[${tag}] copying ${toCopy.length} files...`).start();
+  const result = await batchServerSideCopy(toCopy, S3_REGION, COPY_CONCURRENCY, (done, total) => {
+    spinner.text = `[${tag}] ${done}/${total}`;
+  });
+
+  if (result.fellBack > 0) {
+    console.log(
+      chalk.yellow(`  ${result.fellBack} objects needed the curl fallback (check S3 permissions)`),
+    );
+  }
+  if (result.failed.length > 0) {
+    spinner.fail(`[${tag}] ${result.failed.length} of ${toCopy.length} files failed`);
+    for (const f of result.failed.slice(0, 5)) {
+      console.error(chalk.red(`    ${f.key}: ${f.error}`));
+    }
+    if (result.failed.length > 5) {
+      console.error(chalk.red(`    ... and ${result.failed.length - 5} more`));
+    }
+    console.error(chalk.red("Re-run this shard to resume (already-copied objects are skipped)."));
+    process.exit(1);
+  }
+  spinner.succeed(`[${tag}] copied ${result.copied}, skipped ${skipped.length}`);
+}
+
+/**
+ * Phase 3 (finalize): verify every manifest object landed at the destination
+ * (re-listing catches a missing/cancelled copy shard), re-clone, register the
+ * copied keys with git-annex against the nemar-s3 remote, push the git-annex
+ * branch, deploy CI, and publish. Reuses the publish/approve/reindex tail.
+ */
+export async function finalizeImport(
+  openneuroId: string,
+  options: ImportOptions = {},
+  inMemoryManifest?: ImportManifest,
+): Promise<void> {
+  const nemarId = mapDatasetId(openneuroId);
+  const manifest = inMemoryManifest ?? (await readManifestFromS3(nemarId, S3_BUCKET, S3_REGION));
+  const workDir = options.workDir || mkdtempSync(join(tmpdir(), `nemar-finalize-${nemarId}-`));
+  // Distinct from prepare's clone dir so a shared --dir doesn't collide.
+  const datasetPath = join(workDir, `${nemarId}-finalize`);
+
+  console.log(chalk.cyan(`\n[finalize] ${openneuroId} -> ${nemarId}\n`));
+
+  const hasData = !options.skipData && manifest.items.length > 0;
+  if (hasData) {
+    // Verify all data landed by re-listing the destination against the manifest.
+    const verifySpinner = ora("Verifying copied data...").start();
+    const existing = await listExistingObjects(S3_BUCKET, `${nemarId}/objects/`, S3_REGION);
+    const missing = manifest.items.filter((it) => !existing.has(it.key));
+    if (missing.length > 0) {
+      verifySpinner.fail(
+        `${missing.length} of ${manifest.items.length} objects missing at the destination. Re-run the copy phase (a shard likely failed or was cancelled) before finalizing.`,
+      );
+      process.exit(1);
+    }
+    verifySpinner.succeed(`Verified ${manifest.items.length} objects present`);
+
+    // Re-clone, enable nemar-s3 (reuses the prepare uuid), register keys, push.
+    const cloneSpinner = ora("Re-cloning for git-annex finalize...").start();
+    const cloneResult = await cloneDataset(
+      `git@github.com:nemarDatasets/${nemarId}.git`,
+      datasetPath,
+    );
+    if (!cloneResult.success) {
+      cloneSpinner.fail(`Failed to clone ${nemarId}: ${cloneResult.error}`);
+      process.exit(1);
+    }
+    cloneSpinner.succeed(`Cloned ${nemarId}`);
+
+    const s3Creds = resolveS3Credentials();
+    const s3Result = await configureS3Remote(
+      datasetPath,
+      { name: "nemar-s3", bucket: S3_BUCKET, prefix: `${nemarId}/objects`, region: S3_REGION },
+      s3Creds,
+    );
+    if (!s3Result.success) {
+      console.error(chalk.red(`Failed to enable S3 remote: ${s3Result.error}`));
+      process.exit(1);
+    }
+    const nemarUuid = await getRemoteUuid(datasetPath, "nemar-s3");
+    if (!nemarUuid) {
+      console.error(chalk.red("Failed to get NEMAR S3 remote UUID on finalize clone"));
+      process.exit(1);
+    }
+
+    const registerSpinner = ora("Registering files in git-annex...").start();
+    const keys = manifest.items.map((it) => it.key);
+    const regResult = await batchSetKeysPresent(datasetPath, keys, nemarUuid);
+    if (regResult.failed > 0) {
+      console.log(chalk.yellow(`  ${regResult.failed} keys failed to register (non-fatal)`));
+    }
+    registerSpinner.succeed(`Registered ${regResult.success} files in git-annex`);
+
+    const pushSpinner = ora("Pushing git-annex branch...").start();
+    const pushResult = await pushToGitHub(datasetPath, "origin");
+    if (!pushResult.success) {
+      pushSpinner.fail(`Failed to push git-annex branch: ${pushResult.error}`);
+      process.exit(1);
+    }
+    if (pushResult.warning) {
+      pushSpinner.fail(
+        `git-annex branch push failed: ${pushResult.warning}. Aborting — published dataset would be uncloneable.`,
+      );
+      process.exit(1);
+    }
+    pushSpinner.succeed("Pushed git-annex branch");
+  }
 
   // Step 8: Deploy CI workflows now that remote main exists.
   // addCi failure is fatal: --trust-upstream bypasses validation lookup,
@@ -973,8 +1038,29 @@ export async function importOpenNeuro(
     );
   }
 
+  if (options.persistStaging) {
+    await cleanupStaging(nemarId, S3_BUCKET, S3_REGION);
+  }
+
   // Summary
   console.log(chalk.green(`\nImport and publish complete: ${openneuroId} -> ${nemarId}`));
   console.log(chalk.dim(`  GitHub: https://github.com/nemarDatasets/${nemarId}`));
   console.log(chalk.dim(`  Working dir: ${datasetPath}`));
+}
+
+/**
+ * Single-process import driver — unchanged external behavior. Runs prepare ->
+ * copy (one shard = all keys) -> finalize in one process, passing the manifest
+ * in memory (no S3 staging round-trip). This is the `--local` path and the
+ * shape the test/dev workflow exercises.
+ */
+export async function importOpenNeuro(
+  openneuroId: string,
+  options: ImportOptions = {},
+): Promise<void> {
+  const manifest = await prepareImport(openneuroId, options);
+  if (!options.skipData) {
+    await copyShard(openneuroId, { index: 0, count: 1 }, options, manifest);
+  }
+  await finalizeImport(openneuroId, options, manifest);
 }
