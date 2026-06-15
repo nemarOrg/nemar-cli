@@ -19,10 +19,14 @@ const wf = parse(
     {
       "timeout-minutes"?: number;
       if?: string;
+      needs?: string | string[];
       strategy?: { "max-parallel"?: number; "fail-fast"?: boolean; matrix?: unknown };
     }
   >;
 };
+
+const asNeeds = (n: string | string[] | undefined): string[] =>
+  n === undefined ? [] : Array.isArray(n) ? n : [n];
 
 describe("onboard-openneuro workflow", () => {
   test("has prepare, copy, finalize jobs", () => {
@@ -42,5 +46,15 @@ describe("onboard-openneuro workflow", () => {
   test("finalize runs per-dataset even if a copy shard failed", () => {
     expect(wf.jobs.finalize.if).toContain("cancelled");
     expect(wf.jobs.finalize.strategy?.["fail-fast"]).toBe(false);
+  });
+
+  test("phase dependency graph is wired (prepare -> copy -> finalize)", () => {
+    // Without these, copy/finalize could run before their inputs exist (e.g.
+    // finalize reading an incomplete manifest while copy shards are still going).
+    expect(asNeeds(wf.jobs.copy.needs)).toContain("prepare");
+    expect(asNeeds(wf.jobs.finalize.needs)).toContain("copy");
+    // Both also need parse-ids for their matrix.
+    expect(asNeeds(wf.jobs.copy.needs)).toContain("parse-ids");
+    expect(asNeeds(wf.jobs.finalize.needs)).toContain("parse-ids");
   });
 });

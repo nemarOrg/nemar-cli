@@ -154,7 +154,14 @@ export async function curlStreamCopy(
   region: string,
 ): Promise<{ success: boolean; error?: string }> {
   const result = await runCommand(
-    ["bash", "-c", `curl -sfL '${sourceUrl}' | aws s3 cp - '${destUri}' --region '${region}'`],
+    // `set -o pipefail` so a curl failure (e.g. a 403 / empty body) fails the
+    // pipeline instead of letting `aws s3 cp -` upload a 0-byte object and exit
+    // 0 (which would register a corrupt blob as a successful copy).
+    [
+      "bash",
+      "-c",
+      `set -o pipefail; curl -sfL '${sourceUrl}' | aws s3 cp - '${destUri}' --region '${region}'`,
+    ],
     {},
   );
   if (result.exitCode !== 0) {
@@ -256,12 +263,25 @@ export async function listExistingObjects(
   }
   const trimmed = result.stdout.trim();
   if (!trimmed) return out;
-  let parsed: { Contents?: Array<{ Key?: string; Size?: number }> };
+  let parsed: {
+    Contents?: Array<{ Key?: string; Size?: number }>;
+    IsTruncated?: boolean;
+    NextContinuationToken?: string;
+  };
   try {
     parsed = JSON.parse(trimmed);
   } catch (err) {
     throw new Error(
       `list-objects-v2 returned unparseable JSON for ${prefix}: ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
+  // The AWS CLI v2 auto-paginates list-objects-v2 and merges all pages, so a
+  // truncated result means auto-pagination was disabled (CLI v1, --no-paginate,
+  // or a config override). Fail loudly rather than return a partial view that
+  // would make the finalize completeness check pass on an incomplete dataset.
+  if (parsed.IsTruncated === true || parsed.NextContinuationToken) {
+    throw new Error(
+      `list-objects-v2 returned a truncated page for ${prefix} (auto-pagination disabled?). Refusing to proceed on a partial destination view.`,
     );
   }
   for (const obj of parsed.Contents ?? []) {
@@ -279,7 +299,12 @@ export async function listExistingObjects(
  * already present at the destination. An item is skipped when its key is
  * present AND (no expected size map given, OR the present size matches the
  * expected size). Presence-only is correct for OpenNeuro's immutable
- * content-addressed blobs; the optional size check catches truncated partials.
+ * content-addressed blobs (server-side copy is atomic and the curl fallback
+ * uses pipefail, so no 0-byte partials reach S3).
+ *
+ * NOTE: `expectedSizes` is currently NOT populated by `copyShard` (the manifest
+ * carries no sizes), so the size-check path is dormant. It exists for a future
+ * caller that wants to defend against partial blobs from a non-atomic source.
  */
 export function filterAlreadyCopied(
   items: CopyItem[],
@@ -380,13 +405,19 @@ async function putJson(value: unknown, uri: string, region: string): Promise<voi
   }
 }
 
-/** Read a JSON value from an S3 key via `aws s3 cp - -` to stdout. */
+/** Read a JSON value from an S3 key via `aws s3 cp <uri> -` to stdout. */
 async function getJson<T>(uri: string, region: string): Promise<T> {
   const result = await runCommand(["aws", "s3", "cp", uri, "-", "--region", region], {});
   if (result.exitCode !== 0) {
     throw new Error(`Failed to read ${uri}: ${result.stderr.trim()}`);
   }
-  return JSON.parse(result.stdout) as T;
+  try {
+    return JSON.parse(result.stdout) as T;
+  } catch (err) {
+    throw new Error(
+      `Failed to parse JSON from ${uri} (corrupt or truncated staging object): ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
 }
 
 export async function writeManifestToS3(
@@ -410,9 +441,14 @@ export async function cleanupStaging(
   bucket: string,
   region: string,
 ): Promise<void> {
-  // Best-effort: a leftover staging prefix is harmless; don't fail the import.
-  await runCommand(
+  // Best-effort: a leftover staging prefix is harmless (re-import overwrites the
+  // manifest); don't fail the import, but do surface a non-zero exit so the
+  // operator can sweep it (e.g. creds expired during a long run).
+  const result = await runCommand(
     ["aws", "s3", "rm", `s3://${bucket}/${nemarId}/staging/`, "--recursive", "--region", region],
     {},
   );
+  if (result.exitCode !== 0) {
+    console.warn(`  Staging cleanup failed (non-fatal): ${result.stderr.trim()}`);
+  }
 }

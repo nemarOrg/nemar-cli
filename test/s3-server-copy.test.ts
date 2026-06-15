@@ -163,4 +163,14 @@ describe("filterAlreadyCopied", () => {
     expect(toCopy.map((i) => i.key)).toEqual(["a", "c"]);
     expect(skipped).toEqual(["b"]);
   });
+
+  test("present key absent from a provided expectedSizes map is still skipped", () => {
+    // expectedSizes given but missing this key (e.g. added after manifest build):
+    // no expected size to compare against -> presence wins, skip.
+    const existing = new Map([["a", 100]]);
+    const expected = new Map<string, number>(); // "a" not present
+    const { toCopy, skipped } = filterAlreadyCopied([mk("a")], existing, expected);
+    expect(toCopy).toEqual([]);
+    expect(skipped).toEqual(["a"]);
+  });
 });

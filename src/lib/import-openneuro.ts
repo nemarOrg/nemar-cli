@@ -868,12 +868,30 @@ export async function finalizeImport(
       console.error(chalk.red("Failed to get NEMAR S3 remote UUID on finalize clone"));
       process.exit(1);
     }
+    // The finalize re-clone must resolve the SAME nemar-s3 uuid prepare created
+    // (enableremote reuses it from the pushed git-annex branch). A mismatch would
+    // register keys against a remote clones can't discover -> blobs unfindable.
+    if (manifest.nemarUuid && nemarUuid !== manifest.nemarUuid) {
+      console.error(
+        chalk.red(
+          `nemar-s3 uuid mismatch (prepare=${manifest.nemarUuid} finalize=${nemarUuid}). Aborting to avoid registering keys against the wrong remote.`,
+        ),
+      );
+      process.exit(1);
+    }
 
     const registerSpinner = ora("Registering files in git-annex...").start();
     const keys = manifest.items.map((it) => it.key);
     const regResult = await batchSetKeysPresent(datasetPath, keys, nemarUuid);
     if (regResult.failed > 0) {
-      console.log(chalk.yellow(`  ${regResult.failed} keys failed to register (non-fatal)`));
+      // Registration is the mechanism by which clones know a blob is in S3.
+      // A failure here would leave the data physically present but invisible to
+      // git-annex (uncloneable), so it's fatal. Finalize is idempotent — re-run
+      // to retry (re-clone, re-register, re-push).
+      registerSpinner.fail(
+        `${regResult.failed} of ${keys.length} git-annex key registrations failed. Aborting before publish — those blobs would be unfindable for clones. Re-run finalize to retry.`,
+      );
+      process.exit(1);
     }
     registerSpinner.succeed(`Registered ${regResult.success} files in git-annex`);
 

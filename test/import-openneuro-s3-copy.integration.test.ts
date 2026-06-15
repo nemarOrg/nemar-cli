@@ -12,6 +12,7 @@ import { afterAll, describe, expect, test } from "bun:test";
 import { runCommand } from "../src/lib/git-annex";
 import {
   type CopyItem,
+  batchServerSideCopy,
   filterAlreadyCopied,
   listExistingObjects,
   parseS3Url,
@@ -24,15 +25,24 @@ const PREFIX = "xx000001/objects/";
 const TEST_NAME = "_phase1_sscopy_test";
 const DEST_KEY = `${PREFIX}${TEST_NAME}`;
 const DEST_URI = `s3://${BUCKET}/${DEST_KEY}`;
+const BATCH_NAME = "_phase1_batch_ok";
+const BATCH_URI = `s3://${BUCKET}/${PREFIX}${BATCH_NAME}`;
 // Small, public, verified 747-byte object.
 const SOURCE_URL = "s3://openneuro.org/ds004395/dataset_description.json";
+const SOURCE_REF = {
+  bucket: "openneuro.org",
+  key: "ds004395/dataset_description.json",
+  region: "us-east-1",
+};
 
 const hasCreds = !!(process.env.AWS_ACCESS_KEY_ID && process.env.AWS_SECRET_ACCESS_KEY);
 const describeS3 = hasCreds ? describe : describe.skip;
 
 describeS3("server-side S3 copy (real)", () => {
   afterAll(async () => {
-    await runCommand(["aws", "s3", "rm", DEST_URI, "--region", DEST_REGION], {});
+    for (const uri of [DEST_URI, BATCH_URI]) {
+      await runCommand(["aws", "s3", "rm", uri, "--region", DEST_REGION], {});
+    }
   });
 
   test("copies a public OpenNeuro object server-side and resume skips it", async () => {
@@ -52,5 +62,32 @@ describeS3("server-side S3 copy (real)", () => {
     const { toCopy, skipped } = filterAlreadyCopied([item], existing);
     expect(toCopy).toEqual([]);
     expect(skipped).toEqual([TEST_NAME]);
+  });
+
+  test("batchServerSideCopy copies a real item and reports it", async () => {
+    const item: CopyItem = {
+      key: BATCH_NAME,
+      source: { ...SOURCE_REF },
+      httpUrl: null,
+      destUri: BATCH_URI,
+    };
+    const result = await batchServerSideCopy([item], DEST_REGION, 2);
+    expect(result.copied).toBe(1);
+    expect(result.fellBack).toBe(0);
+    expect(result.failed).toHaveLength(0);
+  });
+
+  test("batchServerSideCopy accumulates failed[] on a bad source with no fallback", async () => {
+    const item: CopyItem = {
+      key: "_phase1_batch_missing",
+      source: { bucket: "openneuro.org", key: "ds004395/__no_such_file__", region: "us-east-1" },
+      httpUrl: null, // no curl fallback available
+      destUri: `s3://${BUCKET}/${PREFIX}_phase1_batch_missing`,
+    };
+    // attempts=1 to fail fast (no retries, no fallback).
+    const result = await batchServerSideCopy([item], DEST_REGION, 1, undefined, 1);
+    expect(result.copied).toBe(0);
+    expect(result.failed).toHaveLength(1);
+    expect(result.failed[0].key).toBe("_phase1_batch_missing");
   });
 });

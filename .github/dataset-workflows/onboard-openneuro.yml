@@ -42,6 +42,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       matrix: ${{ steps.parse.outputs.matrix }}
+      shards: ${{ steps.parse.outputs.shards }}
     steps:
       - name: Parse dataset IDs and dedup against existing nemarDatasets repos
         id: parse
@@ -105,7 +106,13 @@ jobs:
 
           JSON=$(printf '%s\n' "${kept[@]}" | jq -R . | jq -s -c .)
           echo "matrix={\"dataset_id\":$JSON}" >> "$GITHUB_OUTPUT"
-          echo "Will import (${#kept[@]}): ${kept[*]}"
+
+          # Emit the shard index list [0..SHARDS-1] derived from env.SHARDS, so
+          # the copy matrix and the --shard denominator share ONE source of truth.
+          SHARD_JSON=$(seq 0 $((SHARDS - 1)) | jq -R 'tonumber' | jq -s -c .)
+          echo "shards=$SHARD_JSON" >> "$GITHUB_OUTPUT"
+
+          echo "Will import (${#kept[@]}): ${kept[*]} across ${SHARDS} copy shards"
           if [ ${#skipped[@]} -gt 0 ]; then
             echo "Skipped (${#skipped[@]}, already on nemarDatasets): ${skipped[*]}"
           fi
@@ -155,8 +162,9 @@ jobs:
       max-parallel: 20
       matrix:
         dataset_id: ${{ fromJson(needs.parse-ids.outputs.matrix).dataset_id }}
-        # Must match env.SHARDS (8). Each leg copies its hash slice of keys.
-        shard: [0, 1, 2, 3, 4, 5, 6, 7]
+        # Shard index list derived from env.SHARDS by parse-ids (single source of
+        # truth with the --shard denominator below). Each leg copies its slice.
+        shard: ${{ fromJson(needs.parse-ids.outputs.shards) }}
     steps:
       - name: Install bun
         uses: oven-sh/setup-bun@v2
