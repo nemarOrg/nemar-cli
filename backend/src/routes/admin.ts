@@ -148,6 +148,7 @@ import {
   isValidRole,
   parseRole,
 } from "../types/bindings";
+import { isCentralManifestWorkflowEnabled, publishEzidVersionDoiViaCentral } from "./webhooks";
 
 /**
  * Valid publication workflow step names.
@@ -4681,111 +4682,141 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
           console.info(`[publish] version_doi skipped for ${datasetId}: no concept DOI`);
           await updateProgress("version_doi");
         } else {
-          // Read BIDS + NEMAR metadata from the release tag
-          const repoMeta = await readRepoMetadata(
-            repoName,
-            pat,
-            undefined,
-            freshDataset.name,
-            `v${version}`,
-          );
-          for (const w of repoMeta.warnings) {
-            console.warn("[publish:version_doi]", w);
-          }
-
-          // Query existing version DOIs for concept DOI HasVersion relations
-          const versionRows = await db
-            .prepare("SELECT doi FROM dataset_versions WHERE dataset_id = ?")
-            .bind(datasetId)
-            .all<{ doi: string }>();
-          const existingVersionDois = versionRows.results.map((r) => r.doi);
-
-          // Auto-detect sandbox from EZID test shoulder prefix
+          // Auto-detect sandbox from EZID test shoulder prefix (both paths).
           const sandboxPrefix = TEST_SHOULDER.replace(/^doi:/, "").split("/")[0];
           const isSandboxDoi = freshDataset.ezid_identifier.includes(sandboxPrefix);
 
-          const result = await createEzidVersionDoi(
-            {
-              EZID_USERNAME: c.env.EZID_USERNAME,
-              EZID_PASSWORD: c.env.EZID_PASSWORD,
-              EZID_SANDBOX_USERNAME: c.env.EZID_SANDBOX_USERNAME,
-              EZID_SANDBOX_PASSWORD: c.env.EZID_SANDBOX_PASSWORD,
-            },
-            {
-              datasetId,
-              conceptIdentifier: freshDataset.ezid_identifier,
+          if (isCentralManifestWorkflowEnabled(c.env)) {
+            // Central flow (#751): cheap O(1) mint + dispatch. No inline
+            // generateManifest (the file-count wall) and no inline
+            // dataset_versions insert — /webhooks/manifest-ready owns the row
+            // once the dispatched manifest job uploads to S3, the same single
+            // owner as the tag-triggered webhook path.
+            const minted = await publishEzidVersionDoiViaCentral(c.env, {
+              dataset: freshDataset,
+              repoName,
               version,
-              bidsDescription: repoMeta.bidsDescription,
-              githubRepo: freshDataset.github_repo || `nemarDatasets/${repoName}`,
               sandbox: isSandboxDoi,
-              existingVersionDois,
-              enrichment: repoMeta.enrichment,
-            },
-          );
-
-          // Surface warnings from DOI creation (e.g., concept DOI HasVersion update failed)
-          if (result.warnings?.length) {
-            for (const w of result.warnings) {
-              console.warn(`[publish:version_doi] ${w}`);
+              pat,
+              requestSource: "admin",
+            });
+            if (minted.warnings?.length) {
+              for (const w of minted.warnings) {
+                console.warn(`[publish:version_doi] ${w}`);
+              }
             }
-          }
+            console.log(`[publish] Version DOI dispatched for ${datasetId}: ${minted.doi}`);
+            await updateProgress(
+              "version_doi",
+              minted.warnings?.length
+                ? `DOI created (${minted.doi}) but: ${minted.warnings.join("; ")}`
+                : undefined,
+            );
+          } else {
+            // LEGACY inline path (centralFlow disabled, e.g. prod before the
+            // #751 cutover). Reads the full repo tree and generates the manifest
+            // inline; retained unchanged for the pre-cutover env.
+            const repoMeta = await readRepoMetadata(
+              repoName,
+              pat,
+              undefined,
+              freshDataset.name,
+              `v${version}`,
+            );
+            for (const w of repoMeta.warnings) {
+              console.warn("[publish:version_doi]", w);
+            }
 
-          // DOI is now public and permanent. DB and manifest failures below are
-          // non-fatal but must be surfaced for operator awareness.
-          let dbError: string | undefined;
-          try {
-            await db
-              .prepare(
-                "UPDATE datasets SET latest_version_doi = ?, updated_at = datetime('now') WHERE id = ?",
-              )
-              .bind(result.doi, freshDataset.id)
-              .run();
+            // Query existing version DOIs for concept DOI HasVersion relations
+            const versionRows = await db
+              .prepare("SELECT doi FROM dataset_versions WHERE dataset_id = ?")
+              .bind(datasetId)
+              .all<{ doi: string }>();
+            const existingVersionDois = versionRows.results.map((r) => r.doi);
 
-            await db
-              .prepare(
-                "INSERT OR IGNORE INTO dataset_versions (dataset_id, version, doi, provider) VALUES (?, ?, ?, 'ezid')",
-              )
-              .bind(datasetId, version, result.doi)
-              .run();
-          } catch (err) {
-            dbError = errorMessage(err);
-            console.error(
-              `[publish] DOI ${result.doi} is PUBLIC but DB update failed for ${datasetId}:`,
-              err,
+            const result = await createEzidVersionDoi(
+              {
+                EZID_USERNAME: c.env.EZID_USERNAME,
+                EZID_PASSWORD: c.env.EZID_PASSWORD,
+                EZID_SANDBOX_USERNAME: c.env.EZID_SANDBOX_USERNAME,
+                EZID_SANDBOX_PASSWORD: c.env.EZID_SANDBOX_PASSWORD,
+              },
+              {
+                datasetId,
+                conceptIdentifier: freshDataset.ezid_identifier,
+                version,
+                bidsDescription: repoMeta.bidsDescription,
+                githubRepo: freshDataset.github_repo || `nemarDatasets/${repoName}`,
+                sandbox: isSandboxDoi,
+                existingVersionDois,
+                enrichment: repoMeta.enrichment,
+              },
+            );
+
+            // Surface warnings from DOI creation (e.g., concept DOI HasVersion update failed)
+            if (result.warnings?.length) {
+              for (const w of result.warnings) {
+                console.warn(`[publish:version_doi] ${w}`);
+              }
+            }
+
+            // DOI is now public and permanent. DB and manifest failures below are
+            // non-fatal but must be surfaced for operator awareness.
+            let dbError: string | undefined;
+            try {
+              await db
+                .prepare(
+                  "UPDATE datasets SET latest_version_doi = ?, updated_at = datetime('now') WHERE id = ?",
+                )
+                .bind(result.doi, freshDataset.id)
+                .run();
+
+              await db
+                .prepare(
+                  "INSERT OR IGNORE INTO dataset_versions (dataset_id, version, doi, provider) VALUES (?, ?, ?, 'ezid')",
+                )
+                .bind(datasetId, version, result.doi)
+                .run();
+            } catch (err) {
+              dbError = errorMessage(err);
+              console.error(
+                `[publish] DOI ${result.doi} is PUBLIC but DB update failed for ${datasetId}:`,
+                err,
+              );
+            }
+
+            // Generate and upload version manifest (proceeds regardless of DB failure)
+            const manifest = await generateManifest(
+              repoName,
+              version,
+              pat,
+              datasetId,
+              result.doi,
+              freshDataset.concept_doi,
+            );
+
+            await uploadManifest(
+              {
+                bucket: c.env.S3_BUCKET,
+                region: c.env.AWS_REGION,
+                accessKeyId: c.env.AWS_ACCESS_KEY_ID,
+                secretAccessKey: c.env.AWS_SECRET_ACCESS_KEY,
+              },
+              datasetId,
+              version,
+              JSON.stringify(manifest, null, 2),
+            );
+
+            console.log(`[publish] Version DOI created for ${datasetId}: ${result.doi}`);
+            const issues = [
+              ...(dbError ? [`DB update failed: ${dbError}`] : []),
+              ...(result.warnings || []),
+            ];
+            await updateProgress(
+              "version_doi",
+              issues.length ? `DOI created (${result.doi}) but: ${issues.join("; ")}` : undefined,
             );
           }
-
-          // Generate and upload version manifest (proceeds regardless of DB failure)
-          const manifest = await generateManifest(
-            repoName,
-            version,
-            pat,
-            datasetId,
-            result.doi,
-            freshDataset.concept_doi,
-          );
-
-          await uploadManifest(
-            {
-              bucket: c.env.S3_BUCKET,
-              region: c.env.AWS_REGION,
-              accessKeyId: c.env.AWS_ACCESS_KEY_ID,
-              secretAccessKey: c.env.AWS_SECRET_ACCESS_KEY,
-            },
-            datasetId,
-            version,
-            JSON.stringify(manifest, null, 2),
-          );
-
-          console.log(`[publish] Version DOI created for ${datasetId}: ${result.doi}`);
-          const issues = [
-            ...(dbError ? [`DB update failed: ${dbError}`] : []),
-            ...(result.warnings || []),
-          ];
-          await updateProgress(
-            "version_doi",
-            issues.length ? `DOI created (${result.doi}) but: ${issues.join("; ")}` : undefined,
-          );
         }
       }
     } catch (err) {
