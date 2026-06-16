@@ -40,6 +40,7 @@ import {
   sendStalenessAdminReviewEmail,
   sendStalenessWarningEmail,
 } from "./services/email";
+import { runImportRecovery } from "./services/import-recovery";
 import { getActiveNotices } from "./services/notices";
 import {
   FIRST_WARNING_DAYS,
@@ -488,6 +489,46 @@ async function scheduledCleanup(env: Bindings): Promise<void> {
     console.error("Scheduled cleanup: stuck manifest_jobs query failed:", err);
   }
 
+  // 4. Stuck import_jobs (#754). An import row in an in-flight state that
+  //    hasn't advanced in 6h means the workflow hit the 6h runner cap, crashed,
+  //    or the report job / callback was lost (the on004395 orphan signature).
+  //    Mark it failed, then run the SAME rollback-or-quarantine decision as the
+  //    webhook so the orphan is surfaced (and, behind the flag, cleaned) instead
+  //    of left silent. Backstop for when even the `report` job was cancelled.
+  let importsSwept = 0;
+  try {
+    const stuckImports = await db
+      .prepare(
+        `SELECT dataset_id FROM import_jobs
+         WHERE status IN ('preparing', 'copying', 'finalizing')
+           AND updated_at < datetime('now', '-6 hours')
+         LIMIT ?`,
+      )
+      .bind(MAX_DELETIONS_PER_RUN)
+      .all<{ dataset_id: string }>();
+    for (const row of stuckImports.results ?? []) {
+      try {
+        const upd = await db
+          .prepare(
+            `UPDATE import_jobs
+               SET status = 'failed', last_error = 'stuck > 6h (scheduled sweep)',
+                   completed_at = datetime('now'), updated_at = datetime('now')
+             WHERE dataset_id = ? AND status IN ('preparing', 'copying', 'finalizing')`,
+          )
+          .bind(row.dataset_id)
+          .run();
+        if (upd.meta.changes > 0) {
+          await runImportRecovery(db, env, row.dataset_id);
+          importsSwept++;
+        }
+      } catch (err) {
+        console.error(`[import-sweep] recovery for ${row.dataset_id} failed:`, err);
+      }
+    }
+  } catch (err) {
+    console.error("Scheduled cleanup: stuck import_jobs query failed:", err);
+  }
+
   // Log summary to audit_log. `deleted`/`failed` cover only sandbox (xx)
   // datasets now; nm datasets are warned, not deleted, by this job.
   const deleted = results.filter((r) => r.success).length;
@@ -495,13 +536,16 @@ async function scheduledCleanup(env: Bindings): Promise<void> {
   try {
     await db
       .prepare("INSERT INTO audit_log (action, details) VALUES (?, ?)")
-      .bind("scheduled_cleanup", JSON.stringify({ deleted, failed, datasets: results, staleness }))
+      .bind(
+        "scheduled_cleanup",
+        JSON.stringify({ deleted, failed, datasets: results, staleness, importsSwept }),
+      )
       .run();
   } catch (err) {
     console.error("Scheduled cleanup: failed to write audit log:", err);
   }
   console.log(
-    `Scheduled cleanup: ${deleted} deleted, ${failed} failed; staleness warned=${staleness.warned} adminNotified=${staleness.adminNotified} reset=${staleness.reset}`,
+    `Scheduled cleanup: ${deleted} deleted, ${failed} failed; staleness warned=${staleness.warned} adminNotified=${staleness.adminNotified} reset=${staleness.reset}; importsSwept=${importsSwept}`,
   );
 }
 

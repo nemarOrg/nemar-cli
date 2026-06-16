@@ -63,6 +63,7 @@ import {
   getDoiInfo,
   getEmailPreferences,
   getFleetDrift,
+  getImportStatus,
   getSummaryCoverage,
   getSyncStatus,
   listAdminNotices,
@@ -72,8 +73,10 @@ import {
   publishDataset,
   reindexBulk,
   reindexDataset,
+  retryImport,
   revalidateDataset,
   revokeUser,
+  rollbackImport,
   sendBroadcast,
   submitEnrichment,
   syncCi,
@@ -3061,6 +3064,125 @@ syncCommand
   });
 
 adminCommand.addCommand(syncCommand);
+
+// ============================================================================
+// Import jobs (issue #754)
+// ============================================================================
+
+const importCommand = new Command("import").description("View and recover OpenNeuro import jobs");
+
+importCommand
+  .command("status")
+  .description("Show OpenNeuro import job state (failed/quarantined first)")
+  .argument("[dataset-id]", "Filter to one dataset id (e.g., on007523)")
+  .option("-s, --status <status>", "Filter by status (failed, quarantined, copying, ...)")
+  .action(async (datasetId: string | undefined, options: { status?: string }) => {
+    if (!requireAuth()) return;
+
+    const spinner = ora("Fetching import status...").start();
+    try {
+      const result = await getImportStatus(options.status);
+      spinner.stop();
+
+      let rows = result.imports;
+      if (datasetId) rows = rows.filter((r) => r.dataset_id === datasetId);
+
+      const counts = result.by_status;
+      console.log(chalk.bold(`\nImport Jobs (${result.total})\n`));
+      console.log(
+        `  ${chalk.yellow(`in-flight ${(counts.preparing ?? 0) + (counts.copying ?? 0) + (counts.finalizing ?? 0)}`)}  ${chalk.green(`complete ${counts.complete ?? 0}`)}  ${chalk.red(`failed ${counts.failed ?? 0}`)}  ${chalk.red(`quarantined ${counts.quarantined ?? 0}`)}  ${chalk.dim(`rolled_back ${counts.rolled_back ?? 0}`)}\n`,
+      );
+
+      if (rows.length === 0) {
+        console.log(chalk.dim("  No import jobs match."));
+        return;
+      }
+
+      console.log(
+        chalk.dim(
+          `  ${"ID".padEnd(12)} ${"Source".padEnd(12)} ${"Stage".padEnd(10)} ${"Status".padEnd(12)} ${"Updated".padEnd(20)}`,
+        ),
+      );
+      console.log(chalk.dim(`  ${"─".repeat(70)}`));
+      for (const r of rows) {
+        const color =
+          r.status === "complete"
+            ? chalk.green
+            : r.status === "failed" || r.status === "quarantined"
+              ? chalk.red
+              : r.status === "rolled_back"
+                ? chalk.dim
+                : chalk.yellow;
+        const updated = r.updated_at ? new Date(r.updated_at).toLocaleString() : "-";
+        console.log(
+          `  ${r.dataset_id.padEnd(12)} ${(r.source_id || "-").padEnd(12)} ${r.stage.padEnd(10)} ${color(r.status.padEnd(12))} ${updated}`,
+        );
+        if (r.last_error) console.log(chalk.red(`    ${r.last_error}`));
+        if (r.workflow_run_url) console.log(chalk.dim(`    run: ${r.workflow_run_url}`));
+      }
+    } catch (err) {
+      spinner.fail("Failed to fetch import status");
+      console.error(chalk.red(errorDetail(err)));
+    }
+  });
+
+importCommand
+  .command("rollback")
+  .description("Roll back a failed/quarantined import (deletes repo + S3 + D1)")
+  .argument("<dataset-id>", "NEMAR dataset id (e.g., on007523)")
+  .action(async (datasetId: string) => {
+    if (!requireAuth()) return;
+
+    const { proceed } = await inquirer.prompt([
+      {
+        type: "confirm",
+        name: "proceed",
+        message: chalk.red(
+          `Roll back import ${datasetId}? This deletes the GitHub repo, S3 objects, and D1 records. This cannot be undone.`,
+        ),
+        default: false,
+      },
+    ]);
+    if (!proceed) {
+      console.log(chalk.dim("Cancelled."));
+      return;
+    }
+
+    const spinner = ora(`Rolling back ${datasetId}...`).start();
+    try {
+      const result = await rollbackImport(datasetId);
+      if (result.warnings.length > 0) {
+        spinner.warn(`Rolled back ${datasetId} with warnings`);
+        for (const w of result.warnings) console.log(chalk.yellow(`  - ${w}`));
+      } else {
+        spinner.succeed(`Rolled back ${datasetId}`);
+      }
+    } catch (err) {
+      spinner.fail(`Failed to roll back ${datasetId}`);
+      console.error(chalk.red(errorDetail(err)));
+    }
+  });
+
+importCommand
+  .command("retry")
+  .description("Reset a failed/quarantined import to 'preparing' for re-dispatch")
+  .argument("<dataset-id>", "NEMAR dataset id (e.g., on007523)")
+  .action(async (datasetId: string) => {
+    if (!requireAuth()) return;
+
+    const spinner = ora(`Resetting ${datasetId}...`).start();
+    try {
+      await retryImport(datasetId);
+      spinner.succeed(
+        `${datasetId} reset to 'preparing'. Re-run the onboard-openneuro workflow to retry.`,
+      );
+    } catch (err) {
+      spinner.fail(`Failed to reset ${datasetId}`);
+      console.error(chalk.red(errorDetail(err)));
+    }
+  });
+
+adminCommand.addCommand(importCommand);
 
 // ============================================================================
 // Reindex (epic #417 phase 3): refresh enrichment + nemar.org sync +
