@@ -13,7 +13,6 @@ import { purgeCacheUrls, zarrPurgeTargets } from "../services/cloudflare.js";
 import { runDatasetSync } from "../services/dataset-reindex.js";
 import { isValidDatasetId } from "../services/datasetId.js";
 import { createEzidVersionDoi, parseDoiProvider } from "../services/doi.js";
-import { resolveEmailConfig, sendPublicationBlockedEmail } from "../services/email.js";
 import { enrichDataset } from "../services/enrich-dataset.js";
 import { TEST_SHOULDER } from "../services/ezid.js";
 import { getDatasetsToken } from "../services/github-auth.js";
@@ -1843,13 +1842,21 @@ export function isDataShortageReason(reason: string): boolean {
   );
 }
 
+/**
+ * Decide whether the pre-screen result should be surfaced as an advisory
+ * concern. `flagged` only FLAGS (the screen found a gap) -- it never blocks
+ * publication (#756); the handler records it as prescreen_status='concern'. The
+ * S3-authority logic is unchanged: storage with real blobs refutes a
+ * data-shortage reason (and can clear an all-data-shortage flag), an empty
+ * prefix adds one.
+ */
 export function decidePrescreenOutcome(
   verdict: "pass" | "block",
   reasons: string[],
   s3: PrescreenS3Presence | null,
-): { blocked: boolean; reasons: string[] } {
+): { flagged: boolean; reasons: string[] } {
   let out = [...reasons];
-  let blocked = verdict === "block";
+  let flagged = verdict === "block";
 
   const s3Missing = !!s3 && s3.totalSize === 0 && s3.objectCount === 0;
   // objectCount === undefined => first-page cap hit => many objects => present.
@@ -1857,20 +1864,20 @@ export function decidePrescreenOutcome(
 
   if (s3Present) {
     // Storage confirms real blobs: any data-shortage reason is a false
-    // negative. Drop those; keep README/metadata reasons. Downgrade to pass
-    // only when the block carried data-shortage reason(s) that ALL got
-    // stripped -- never silently clear a reasonless or non-data block.
+    // negative. Drop those; keep README/metadata reasons. Clear the flag only
+    // when it carried data-shortage reason(s) that ALL got stripped -- never
+    // silently clear a reasonless or non-data flag.
     const kept = out.filter((r) => !isDataShortageReason(r));
-    if (blocked && kept.length === 0 && out.length > 0) blocked = false;
+    if (flagged && kept.length === 0 && out.length > 0) flagged = false;
     out = kept;
   } else if (s3Missing) {
-    blocked = true;
+    flagged = true;
     if (!out.some((r) => /no data|\bs3\b|storage/i.test(r))) {
       out.push("No data files were found in storage for this dataset.");
     }
   }
 
-  return { blocked, reasons: out };
+  return { flagged, reasons: out };
 }
 
 /**
@@ -1984,58 +1991,37 @@ webhooks.post("/prescreen-result", async (c) => {
     console.error(`[prescreen-result] S3 stats failed for ${body.dataset_id} (non-fatal):`, err);
   }
 
-  const { blocked, reasons } = decidePrescreenOutcome(body.verdict, body.reasons ?? [], s3);
+  const { flagged, reasons } = decidePrescreenOutcome(body.verdict, body.reasons ?? [], s3);
   // Audit the S3 override: if the authoritative S3 check changed the workflow's
-  // verdict (e.g. cleared an annex-blind false block, #753), record what was
-  // dropped so a downgrade-to-pass is never silent or untraceable.
-  const finalVerdict = blocked ? "block" : "pass";
-  if (body.verdict !== finalVerdict) {
+  // raw verdict (e.g. cleared an annex-blind false flag, #753), record what was
+  // dropped so the change is never silent.
+  const effectiveVerdict = flagged ? "block" : "pass";
+  if (body.verdict !== effectiveVerdict) {
     const stripped = (body.reasons ?? []).filter((r) => !reasons.includes(r));
     console.log(
-      `[prescreen-result] S3 override for ${body.dataset_id}: ${body.verdict} -> ${finalVerdict}; stripped=${JSON.stringify(stripped)} s3_size=${s3?.totalSize ?? "unknown"}`,
+      `[prescreen-result] S3 override for ${body.dataset_id}: ${body.verdict} -> ${effectiveVerdict}; stripped=${JSON.stringify(stripped)} s3_size=${s3?.totalSize ?? "unknown"}`,
     );
   }
-  const issueUrl = body.issue_url ?? null;
+  // `|| null` (not `?? null`): the advisory workflow sends issue_url="" now, and
+  // we want NULL in the column, not an empty string.
+  const issueUrl = body.issue_url || null;
 
-  if (blocked) {
-    const res = await c.env.DB.prepare(
+  let res: D1Result;
+  if (flagged) {
+    // Advisory (#756): record the concern but DO NOT block. The request stays in
+    // the normal admin-review queue; the concern + reasons are surfaced in the
+    // publish-status views. No status flip, no block email, no repo issue (the
+    // workflow no longer opens one). Real blockers (BIDS) keep status='blocked'.
+    res = await c.env.DB.prepare(
       `UPDATE publication_requests
-          SET status = 'blocked', block_reason = 'prescreen_failed',
-              prescreen_status = 'failed', prescreen_issue_url = ?,
+          SET prescreen_status = 'concern', prescreen_reasons = ?, prescreen_issue_url = ?,
               prescreen_at = datetime('now'), updated_at = datetime('now')
         WHERE id = ? AND prescreen_status = 'pending'`,
     )
-      .bind(issueUrl, request.id)
+      .bind(JSON.stringify(reasons), issueUrl, request.id)
       .run();
-
-    // Only email if THIS call did the transition. Guards against a duplicate
-    // email if two callbacks race past the 'pending' read (the second sees
-    // changes=0 because the first already flipped the row).
-    if (res.meta.changes > 0) {
-      const { fromEmail, replyTo, isDev } = resolveEmailConfig(c.env);
-      c.executionCtx.waitUntil(
-        sendPublicationBlockedEmail(
-          request.requested_by_email,
-          request.requested_by_username,
-          body.dataset_id,
-          reasons,
-          issueUrl,
-          c.env.RESEND_API_KEY,
-          fromEmail,
-          replyTo,
-          isDev,
-        ).catch((emailErr) => {
-          // waitUntil swallows rejections to the runtime log; catch here so the
-          // failure is attributable and the dataset id is in the message.
-          console.error(
-            `[prescreen-result] block email send failed for ${body.dataset_id}:`,
-            emailErr,
-          );
-        }),
-      );
-    }
   } else {
-    await c.env.DB.prepare(
+    res = await c.env.DB.prepare(
       `UPDATE publication_requests
           SET prescreen_status = 'passed', prescreen_at = datetime('now'),
               updated_at = datetime('now')
@@ -2044,12 +2030,23 @@ webhooks.post("/prescreen-result", async (c) => {
       .bind(request.id)
       .run();
   }
+  if (res.meta.changes === 0) {
+    // One-shot guard: the screen was no longer 'pending' (a duplicate/late
+    // callback). Harmless, but log so a double-dispatch is explicable.
+    console.warn(
+      `[prescreen-result] no-op for ${body.dataset_id} request_id=${request.id}: prescreen_status was not 'pending' (duplicate callback?)`,
+    );
+  }
 
   console.log(
-    `[prescreen-result] dataset=${body.dataset_id} request_id=${request.id} verdict=${body.verdict} blocked=${blocked} s3_objects=${s3 ? (s3.objectCount ?? "capped") : "unknown"}`,
+    `[prescreen-result] dataset=${body.dataset_id} request_id=${request.id} verdict=${body.verdict} prescreen_status=${flagged ? "concern" : "passed"} s3_objects=${s3 ? (s3.objectCount ?? "capped") : "unknown"}`,
   );
 
-  return c.json({ ok: true, dataset_id: body.dataset_id, blocked });
+  return c.json({
+    ok: true,
+    dataset_id: body.dataset_id,
+    prescreen_status: flagged ? "concern" : "passed",
+  });
 });
 
 /**

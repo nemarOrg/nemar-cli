@@ -1319,6 +1319,10 @@ export interface PublishStatusResponse {
   last_error?: string | null;
   updated_at?: string;
   message?: string;
+  block_reason?: string | null;
+  // Non-blocking pre-screen advisory (#756): present when the screen flagged a
+  // concern. The request is NOT blocked by this.
+  advisory?: { source: "prescreen"; reasons: string[]; issue_url?: string };
 }
 
 export interface PublishRequestsResponse {
@@ -1332,6 +1336,9 @@ export interface PublishRequestsResponse {
     steps_completed: string[];
     current_step: string | null;
     last_error: string | null;
+    prescreen_status?: string | null;
+    prescreen_reasons?: string | null;
+    prescreen_issue_url?: string | null;
   }>;
   count: number;
 }

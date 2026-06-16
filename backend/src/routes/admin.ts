@@ -3404,6 +3404,9 @@ adminRoutes.get("/publish/requests", async (c) => {
       steps_completed: string;
       current_step: string | null;
       last_error: string | null;
+      prescreen_status: string | null;
+      prescreen_reasons: string | null;
+      prescreen_issue_url: string | null;
     }>();
 
   return c.json({

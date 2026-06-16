@@ -1,0 +1,14 @@
+-- Migration 0045: prescreen_reasons for the advisory pre-screen (#756,
+-- epic #749 Phase 7).
+--
+-- The publication pre-screen (#666) used to flip the request to
+-- status='blocked' + block_reason='prescreen_failed' and open a "Block:" issue
+-- on the dataset repo -- a hard block admins overrode anyway, which masked REAL
+-- blockers (bids_validation_failed also uses status='blocked'). Phase 7 makes it
+-- a non-blocking advisory: the result is recorded as prescreen_status='concern'
+-- with the reasons here, surfaced in the publish-status views, and the request
+-- stays in the normal admin-review queue. Reasons are persisted inline (a JSON
+-- array) so the status views don't need the GitHub issue that #756 removes.
+--
+-- Additive nullable column; publication_requests is not FTS-backed.
+ALTER TABLE publication_requests ADD COLUMN prescreen_reasons TEXT;

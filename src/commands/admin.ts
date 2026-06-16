@@ -1861,6 +1861,19 @@ Examples:
             `    ${chalk.yellow(">")} ${req.current_step.replace(/_/g, " ")}${req.last_error ? chalk.red(` (${req.last_error})`) : ""}`,
           );
         }
+        // Non-blocking pre-screen advisory (#756): a concern for the admin to
+        // weigh before approving, NOT a block.
+        if (req.prescreen_status === "concern") {
+          let reasons: string[] = [];
+          try {
+            const parsed = JSON.parse(req.prescreen_reasons || "[]");
+            if (Array.isArray(parsed)) reasons = parsed.filter((x) => typeof x === "string");
+          } catch {
+            // malformed -> show the flag without inline reasons
+          }
+          const summary = reasons.length ? reasons.join("; ") : "see pre-screen";
+          console.log(`    ${chalk.yellow("! pre-screen advisory:")} ${chalk.dim(summary)}`);
+        }
       }
       console.log();
     } catch (error) {
