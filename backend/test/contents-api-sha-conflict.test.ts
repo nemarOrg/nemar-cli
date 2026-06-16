@@ -24,11 +24,13 @@ describe("isContentsApiShaConflict", () => {
   });
 
   test("422 message substring fallback when the body is not JSON", () => {
-    expect(isContentsApiShaConflict(422, "sha mismatch")).toBe(true);
+    expect(isContentsApiShaConflict(422, "Update does not match base")).toBe(true);
     expect(isContentsApiShaConflict(422, "totally unrelated 422 text")).toBe(false);
   });
 
-  test("422 for an UNRELATED reason is NOT a conflict (don't retry)", () => {
+  test("422 for an UNRELATED reason is NOT a conflict (no bare-'sha' over-match)", () => {
+    // These all contain "sha" but are not stale-SHA conflicts: must NOT retry.
+    expect(isContentsApiShaConflict(422, '{"message":"Invalid sha for author"}')).toBe(false);
     expect(isContentsApiShaConflict(422, '{"message":"committer email must be verified"}')).toBe(
       false,
     );

@@ -721,7 +721,10 @@ export function isContentsApiShaConflict(status: number, bodyText: string): bool
     // Fall through to substring match.
   }
   const msg = parsed?.message ?? bodyText;
-  return /sha|does not match|not a fast forward/i.test(msg);
+  // Match the known stale-SHA 422 phrases, NOT a bare "sha" (which appears in
+  // unrelated 422s, e.g. "Invalid sha for author"). The 409 arm already covers
+  // the blob-sha conflict unambiguously.
+  return /does not match|not a fast forward/i.test(msg);
 }
 
 export async function createOrUpdateFile(
@@ -807,6 +810,9 @@ export async function createOrUpdateFile(
     }
     throw new Error(`GitHub API error ${response.status} committing ${path}: ${body}`);
   }
+  // Unreachable: every iteration returns, continues, or throws (mirrors
+  // commitFilesAsTree). Guards against a future refactor silently returning void.
+  throw new Error(`createOrUpdateFile: unreachable end-of-function for ${repo}/${path}`);
 }
 
 /**
