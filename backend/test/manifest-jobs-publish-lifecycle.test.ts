@@ -144,30 +144,41 @@ describe("migration 0042: manifest_jobs publish lifecycle", () => {
       .run("on005385", "1.0.0");
     expect(ready.changes).toBe(1);
     expect(
-      (db.prepare("SELECT status FROM manifest_jobs WHERE nonce = 'nonce-a'").get() as { status: string })
-        .status,
+      (
+        db.prepare("SELECT status FROM manifest_jobs WHERE nonce = 'nonce-a'").get() as {
+          status: string;
+        }
+      ).status,
     ).toBe("ready");
   });
 
   test("version-doi-status SELECT returns the latest row; nothing for unknown", () => {
     // Two attempts for the same (dataset, version): the newer one wins.
     insertAccepted(db, "on005385", "1.0.0", "old", "10.x/concept", "2026-06-15 10:00:00");
-    db.prepare("UPDATE manifest_jobs SET status = 'failed', error_message = 'first try' WHERE nonce = 'old'").run();
+    db.prepare(
+      "UPDATE manifest_jobs SET status = 'failed', error_message = 'first try' WHERE nonce = 'old'",
+    ).run();
     insertAccepted(db, "on005385", "1.0.0", "new", "10.x/concept", "2026-06-15 11:00:00");
-    db.prepare("UPDATE manifest_jobs SET status = 'ready', doi = '10.x/v1' WHERE nonce = 'new'").run();
+    db.prepare(
+      "UPDATE manifest_jobs SET status = 'ready', doi = '10.x/v1' WHERE nonce = 'new'",
+    ).run();
 
     const latest = db
       .prepare(
         `SELECT status, doi, error_message FROM manifest_jobs
          WHERE dataset_id = ? AND version = ? ORDER BY created_at DESC LIMIT 1`,
       )
-      .get("on005385", "1.0.0") as { status: string; doi: string | null; error_message: string | null };
+      .get("on005385", "1.0.0") as {
+      status: string;
+      doi: string | null;
+      error_message: string | null;
+    };
     expect(latest.status).toBe("ready");
     expect(latest.doi).toBe("10.x/v1");
 
     const unknown = db
       .prepare(
-        `SELECT status FROM manifest_jobs WHERE dataset_id = ? AND version = ? ORDER BY created_at DESC LIMIT 1`,
+        "SELECT status FROM manifest_jobs WHERE dataset_id = ? AND version = ? ORDER BY created_at DESC LIMIT 1",
       )
       .get("on999999", "1.0.0");
     expect(unknown).toBeNull();
@@ -187,5 +198,35 @@ describe("migration 0042: manifest_jobs publish lifecycle", () => {
     insertAccepted(db, "on005385", "1.0.0", "live", "10.x/concept", "2026-06-15 11:00:00");
     const hit = db.prepare(inflightSql).get("on005385", "1.0.0") as { status: string };
     expect(hit.status).toBe("accepted");
+  });
+
+  test("status endpoint version normalization: a leading v/V is stripped before the lookup", () => {
+    // The status handler queries manifest_jobs with the bare X.Y.Z, but the CI
+    // workflow passes the v-prefixed tag. Mirror the handler's normalization.
+    insertAccepted(db, "on005385", "1.0.0", "nonce-v", "10.x/concept");
+    for (const raw of ["v1.0.0", "V1.0.0", "1.0.0"]) {
+      const version = raw.replace(/^[vV]/, "");
+      const row = db
+        .prepare(
+          "SELECT status FROM manifest_jobs WHERE dataset_id = ? AND version = ? ORDER BY created_at DESC LIMIT 1",
+        )
+        .get("on005385", version) as { status: string } | null;
+      expect(row?.status).toBe("accepted");
+    }
+  });
+
+  test("admin/CLI fresh dispatched insert records request_source='admin' and a non-null doi", () => {
+    // The non-promote branch of dispatchCentralManifestJob (admin path) inserts a
+    // dispatched row directly with the minted DOI and request_source.
+    db.prepare(
+      `INSERT INTO manifest_jobs (dataset_id, version, nonce, doi, concept_doi, doi_provider, status, request_source)
+       VALUES (?, ?, ?, ?, ?, 'ezid', 'dispatched', 'admin')`,
+    ).run("nm000132", "1.0.0", "nonce-admin", "10.x/v1", "10.x/concept");
+    const row = db
+      .prepare("SELECT request_source, doi, status FROM manifest_jobs WHERE nonce = 'nonce-admin'")
+      .get() as { request_source: string; doi: string; status: string };
+    expect(row.request_source).toBe("admin");
+    expect(row.doi).toBe("10.x/v1");
+    expect(row.status).toBe("dispatched");
   });
 });

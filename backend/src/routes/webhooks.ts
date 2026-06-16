@@ -152,16 +152,22 @@ async function dispatchCentralManifestJob(
      *  the dataset repo is private/unauthenticated-HEAD-incapable.
      *  Twin of `skipGitBackedVerification` on the inline path. */
     skipCanary?: boolean;
-    /** Which version-DOI path owns this row (observability + re-drive
-     *  recognition). Recorded in manifest_jobs.request_source. */
-    requestSource?: "webhook" | "admin";
-    /** When set, an `accepted` row for (datasetId, version, promoteNonce)
-     *  already exists (created synchronously by the async publish path so
-     *  the 202 has a durable handle). Promote it to `dispatched` in place
-     *  instead of inserting a fresh row, reusing its nonce so the callback
-     *  token still verifies. */
-    promoteNonce?: string;
-  },
+  } & (
+    | {
+        /** Promote an existing `accepted` row (async publish path): UPDATE it to
+         *  `dispatched` in place, reusing its nonce so the callback token still
+         *  verifies. request_source was already set at accept time. */
+        promoteNonce: string;
+        requestSource?: never;
+      }
+    | {
+        /** Fresh insert (synchronous callers): INSERT a new `dispatched` row. */
+        promoteNonce?: never;
+        /** Which version-DOI path owns this row (observability + re-drive
+         *  recognition). Recorded in manifest_jobs.request_source. */
+        requestSource?: "webhook" | "admin";
+      }
+  ),
 ): Promise<{ nonce: string; callbackToken: string }> {
   if (!env.MANIFEST_CALLBACK_SECRET) {
     throw new Error(
@@ -180,7 +186,7 @@ async function dispatchCentralManifestJob(
   if (args.promoteNonce) {
     // Promote the pre-created `accepted` row in place (carries the minted DOI
     // now that the EZID mint has run). manifest-ready filters status='dispatched'.
-    await env.DB.prepare(
+    const promoted = await env.DB.prepare(
       `UPDATE manifest_jobs
        SET status = 'dispatched', doi = ?, concept_doi = ?, doi_provider = ?
        WHERE dataset_id = ? AND version = ? AND nonce = ? AND status = 'accepted'`,
@@ -194,6 +200,15 @@ async function dispatchCentralManifestJob(
         args.promoteNonce,
       )
       .run();
+    if (promoted.meta.changes === 0) {
+      // The accepted row is gone or already left 'accepted' (cleanup cron, or a
+      // re-drive race). Dispatching now would fire a workflow whose callback can
+      // never find a 'dispatched' row for this nonce — it would poll forever.
+      // Throw so the residual's catch records a terminal `failed` state instead.
+      throw new Error(
+        `promote matched 0 rows for ${args.datasetId}@${args.version} nonce=${args.promoteNonce}; accepted row missing or already promoted`,
+      );
+    }
   } else {
     await env.DB.prepare(
       `INSERT INTO manifest_jobs (dataset_id, version, nonce, doi, concept_doi, doi_provider, status, request_source)
@@ -413,17 +428,25 @@ webhooks.get("/version-doi-status", async (c) => {
   }
   const version = rawVersion.replace(/^[vV]/, "");
 
-  const job = await c.env.DB.prepare(
-    `SELECT status, doi, error_message FROM manifest_jobs
-     WHERE dataset_id = ? AND version = ? ORDER BY created_at DESC LIMIT 1`,
-  )
-    .bind(datasetId, version)
-    .first<{ status: string; doi: string | null; error_message: string | null }>();
+  let job: { status: string; doi: string | null; error_message: string | null } | null;
+  try {
+    job = await c.env.DB.prepare(
+      `SELECT status, doi, error_message FROM manifest_jobs
+       WHERE dataset_id = ? AND version = ? ORDER BY created_at DESC LIMIT 1`,
+    )
+      .bind(datasetId, version)
+      .first<{ status: string; doi: string | null; error_message: string | null }>();
+  } catch (dbErr) {
+    // Distinguish a DB outage from "no row yet" so the CI log doesn't read a
+    // transient D1 failure as a stuck publish. 503 -> the poller keeps retrying.
+    console.error(`[version-doi-status] D1 query failed for ${datasetId}@${version}:`, dbErr);
+    return c.json({ error: "Database unavailable", details: errorMessage(dbErr) }, 503);
+  }
 
   if (!job) {
-    // No row yet (residual hasn't inserted the accepted row) — tell the poller
-    // to keep waiting rather than treating absence as terminal.
-    return c.json({ dataset_id: datasetId, version, status: "unknown" });
+    // No row yet (the accepted row insert hasn't landed / replicated) — tell the
+    // poller to keep waiting rather than treating absence as terminal.
+    return c.json({ dataset_id: datasetId, version, status: "unknown", outcome: "wait" });
   }
 
   return c.json({
@@ -659,10 +682,16 @@ async function maybeZenodoBackup(
   return { backup, error };
 }
 
+/** Lifecycle of a manifest_jobs row (migration 0042). `unknown` is the
+ *  synthetic status the status endpoint returns when no row exists yet. */
+export type ManifestJobStatus = "accepted" | "dispatched" | "ready" | "failed" | "unknown";
+
 /** Idempotency: only short-circuit a duplicate publish while a prior attempt is
  *  still in flight (accepted | dispatched). Terminal states (ready | failed)
  *  allow a deliberate re-drive (e.g. remediation). Pure for testing. */
-export function shouldShortCircuitInflightPublish(existing: { status: string } | null): boolean {
+export function shouldShortCircuitInflightPublish(
+  existing: { status: ManifestJobStatus | string } | null,
+): boolean {
   return existing != null && (existing.status === "accepted" || existing.status === "dispatched");
 }
 
@@ -670,7 +699,7 @@ export function shouldShortCircuitInflightPublish(existing: { status: string } |
  *  `ready` = published (success); `failed` = terminal; everything else
  *  (unknown / accepted / dispatched) = keep polling. */
 export function versionDoiPollOutcome(
-  status: string | null | undefined,
+  status: ManifestJobStatus | string | null | undefined,
 ): "success" | "fail" | "wait" {
   if (status === "ready") return "success";
   if (status === "failed") return "fail";
@@ -777,13 +806,30 @@ async function handleEzidVersionDoiAsync(
 
   c.executionCtx.waitUntil(
     runEzidVersionDoiResidual(c.env, { dataset, version, sandbox, repoName, nonce }).catch(
-      (err) => {
+      async (err) => {
         // runEzidVersionDoiResidual records failure on the row itself; this is the
         // last-resort guard so an unexpected throw can't reject the waitUntil.
         console.error(
           `[publish-version-doi] residual crashed for ${dataset.dataset_id}@${version}:`,
           err,
         );
+        // If the residual's own failed-mark UPDATE also threw, the row is stuck
+        // non-terminal (accepted/dispatched) and the poller would wait to its CI
+        // timeout. Try once more to record a terminal state. `status != 'ready'`
+        // guards against clobbering a row that succeeded between throw and catch.
+        try {
+          await c.env.DB.prepare(
+            `UPDATE manifest_jobs SET status = 'failed', error_message = ?, completed_at = datetime('now')
+             WHERE dataset_id = ? AND version = ? AND nonce = ? AND status != 'ready'`,
+          )
+            .bind(errorMessage(err), dataset.dataset_id, version, nonce)
+            .run();
+        } catch (d1Err) {
+          console.error(
+            `[publish-version-doi] last-resort failed-mark also failed for ${dataset.dataset_id}@${version}:`,
+            d1Err,
+          );
+        }
       },
     ),
   );
@@ -829,7 +875,7 @@ async function runEzidVersionDoiResidual(
       conceptDoi: dataset.concept_doi,
       doiProvider: "ezid",
       skipCanary: true,
-      requestSource: "webhook",
+      // request_source was set to 'webhook' on the accepted row at accept time.
       promoteNonce: nonce,
     });
 
