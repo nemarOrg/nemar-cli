@@ -3151,7 +3151,12 @@ importCommand
     const spinner = ora(`Rolling back ${datasetId}...`).start();
     try {
       const result = await rollbackImport(datasetId);
-      if (result.warnings.length > 0) {
+      if (!result.rolled_back) {
+        spinner.fail(
+          `Rollback incomplete for ${datasetId} (kept quarantined); retry after fixing:`,
+        );
+        for (const w of result.warnings) console.log(chalk.red(`  - ${w}`));
+      } else if (result.warnings.length > 0) {
         spinner.warn(`Rolled back ${datasetId} with warnings`);
         for (const w of result.warnings) console.log(chalk.yellow(`  - ${w}`));
       } else {

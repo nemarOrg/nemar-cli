@@ -145,14 +145,21 @@ async function markImportStatus(
   status: ImportStatus,
   lastError: string,
 ): Promise<void> {
-  await db
-    .prepare(
-      `UPDATE import_jobs
-         SET status = ?, last_error = ?, completed_at = datetime('now'), updated_at = datetime('now')
-       WHERE dataset_id = ?`,
-    )
-    .bind(status, lastError, datasetId)
-    .run();
+  // Never throw out of recovery: on a D1 hiccup the row stays visible as
+  // `failed` in the admin view (not a silent orphan), and the audit/alert
+  // writes below still run.
+  try {
+    await db
+      .prepare(
+        `UPDATE import_jobs
+           SET status = ?, last_error = ?, completed_at = datetime('now'), updated_at = datetime('now')
+         WHERE dataset_id = ?`,
+      )
+      .bind(status, lastError, datasetId)
+      .run();
+  } catch (err) {
+    console.error(`[import-recovery] markImportStatus(${status}) failed for ${datasetId}:`, err);
+  }
 }
 
 /**
@@ -173,7 +180,9 @@ export async function runImportRecovery(
   const row = await db
     .prepare(
       `SELECT d.visibility, d.concept_doi, d.latest_version_doi, d.owner_user_id,
-              (SELECT COUNT(*) FROM dataset_versions v WHERE v.dataset_id = d.dataset_id) AS version_count
+              (SELECT COUNT(*) FROM dataset_versions v WHERE v.dataset_id = d.dataset_id) AS version_count,
+              EXISTS(SELECT 1 FROM publication_requests pr
+                     WHERE pr.dataset_id = d.dataset_id AND pr.status = 'published') AS published
          FROM datasets d WHERE d.dataset_id = ?`,
     )
     .bind(datasetId)
@@ -183,6 +192,7 @@ export async function runImportRecovery(
       latest_version_doi: string | null;
       owner_user_id: number | null;
       version_count: number;
+      published: number;
     }>();
 
   const state: ImportGuardState = row
@@ -193,7 +203,9 @@ export async function runImportRecovery(
         latestVersionDoi: row.latest_version_doi,
         versionCount: row.version_count,
         ownerUserId: row.owner_user_id,
-        importReachedComplete: false,
+        // A finalized import published the dataset (publication_requests row),
+        // a durable signal that survives even if DOI/version aren't minted yet.
+        importReachedComplete: row.published === 1,
       }
     : {
         exists: false,
@@ -210,13 +222,19 @@ export async function runImportRecovery(
   if (decision.action === "rollback" && isAutoRollbackEnabled(env)) {
     try {
       const result = await deleteDatasetCascade(db, env, datasetId, {});
-      const warn = result.warnings.length ? `; warnings=${result.warnings.join("; ")}` : "";
-      await markImportStatus(
-        db,
-        datasetId,
-        "rolled_back",
-        `auto-rollback: ${decision.reason}${warn}`,
-      );
+      if (!result.deleted) {
+        // Partial cascade (a D1/GitHub/S3 step failed): the orphan may still
+        // exist, so do NOT mark rolled_back (that would hide it). Quarantine so
+        // it stays surfaced + alerted for a human to finish.
+        const warn = result.warnings.join("; ");
+        const msg = `auto-rollback incomplete (partial cascade): ${warn}`;
+        await markImportStatus(db, datasetId, "quarantined", msg);
+        await writeAudit(db, "import_rollback_failed", datasetId, { decision, result });
+        await alertAdmins(db, env, datasetId, msg, job);
+        console.error(`[import-recovery] partial cascade for ${datasetId}; quarantined: ${warn}`);
+        return "quarantined";
+      }
+      await markImportStatus(db, datasetId, "rolled_back", `auto-rollback: ${decision.reason}`);
       await writeAudit(db, "import_auto_rollback", datasetId, { decision, result });
       console.log(`[import-recovery] auto-rolled-back orphan ${datasetId} (${decision.reason})`);
       return "rolled_back";

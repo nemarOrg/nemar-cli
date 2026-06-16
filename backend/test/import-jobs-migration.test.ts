@@ -145,12 +145,29 @@ describe("migration 0044: import_jobs", () => {
     expect(read(db, "on000001").status).toBe("preparing");
     transition(db, "on000001", "copy", "copying");
     expect(read(db, "on000001").status).toBe("copying");
+    // in-flight statuses leave completed_at NULL (the CASE only stamps terminal)
+    expect(read(db, "on000001").completed_at).toBeNull();
     transition(db, "on000001", "finalize", "finalizing");
     expect(read(db, "on000001").status).toBe("finalizing");
+    expect(read(db, "on000001").completed_at).toBeNull();
     transition(db, "on000001", "finalize", "complete");
     const row = read(db, "on000001");
     expect(row.status).toBe("complete");
     expect(row.completed_at).not.toBeNull();
+  });
+
+  test("`rolled_back` is sticky: stray `failed`/`copying` can't revive it; `preparing` resets it", () => {
+    preparing(db, "on000001");
+    transition(db, "on000001", "copy", "failed");
+    // rolled_back (what runImportRecovery does on a clean cascade)
+    db.prepare("UPDATE import_jobs SET status='rolled_back' WHERE dataset_id=?").run("on000001");
+    transition(db, "on000001", "copy", "failed");
+    expect(read(db, "on000001").status).toBe("rolled_back");
+    transition(db, "on000001", "copy", "copying");
+    expect(read(db, "on000001").status).toBe("rolled_back");
+    // re-import (preparing) intentionally resets even a rolled_back receipt
+    preparing(db, "on000001");
+    expect(read(db, "on000001").status).toBe("preparing");
   });
 
   test("terminal `complete` is sticky: a later `failed` cannot regress it", () => {

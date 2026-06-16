@@ -6335,10 +6335,14 @@ adminRoutes.get("/imports", async (c) => {
     .bind(...params)
     .all<{ status: string }>();
   const results = rows.results ?? [];
+  // by_status is always a FLEET-WIDE count (independent of the ?status= filter)
+  // so the CLI summary line isn't misleading when a filter is applied.
+  const counts = await db
+    .prepare("SELECT status, COUNT(*) AS n FROM import_jobs GROUP BY status")
+    .all<{ status: string; n: number }>();
   const by_status: Record<string, number> = {};
-  for (const s of IMPORT_STATUSES) {
-    by_status[s] = results.filter((r) => r.status === s).length;
-  }
+  for (const s of IMPORT_STATUSES) by_status[s] = 0;
+  for (const row of counts.results ?? []) by_status[row.status] = row.n;
   return c.json({ imports: results, total: results.length, by_status });
 });
 
@@ -6392,6 +6396,24 @@ adminRoutes.post("/imports/:id/rollback", async (c) => {
       { error: `Rollback cascade failed: ${err instanceof Error ? err.message : String(err)}` },
       500,
     );
+  }
+  if (!result.deleted) {
+    // Partial cascade: leave the row quarantined (surfaced) rather than claim a
+    // clean rollback. The operator sees the warnings and can retry.
+    await db
+      .prepare(
+        `UPDATE import_jobs SET status = 'quarantined', last_error = ?, updated_at = datetime('now')
+         WHERE dataset_id = ?`,
+      )
+      .bind(`manual rollback incomplete: ${result.warnings.join("; ")}`, datasetId)
+      .run();
+    return c.json({
+      ok: false,
+      dataset_id: datasetId,
+      rolled_back: false,
+      steps: result.steps,
+      warnings: result.warnings,
+    });
   }
   await db
     .prepare(

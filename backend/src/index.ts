@@ -494,7 +494,10 @@ async function scheduledCleanup(env: Bindings): Promise<void> {
   //    or the report job / callback was lost (the on004395 orphan signature).
   //    Mark it failed, then run the SAME rollback-or-quarantine decision as the
   //    webhook so the orphan is surfaced (and, behind the flag, cleaned) instead
-  //    of left silent. Backstop for when even the `report` job was cancelled.
+  //    of left silent. This is the durable backstop for the cases the report
+  //    job can't cover: a whole-run operator-cancel (GitHub doesn't start a
+  //    queued `if: always()` job), every callback failing, or the webhook's
+  //    waitUntil recovery being dropped on Worker eviction.
   let importsSwept = 0;
   try {
     const stuckImports = await db
