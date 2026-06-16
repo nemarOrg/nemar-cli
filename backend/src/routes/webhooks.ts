@@ -152,6 +152,15 @@ async function dispatchCentralManifestJob(
      *  the dataset repo is private/unauthenticated-HEAD-incapable.
      *  Twin of `skipGitBackedVerification` on the inline path. */
     skipCanary?: boolean;
+    /** Which version-DOI path owns this row (observability + re-drive
+     *  recognition). Recorded in manifest_jobs.request_source. */
+    requestSource?: "webhook" | "admin";
+    /** When set, an `accepted` row for (datasetId, version, promoteNonce)
+     *  already exists (created synchronously by the async publish path so
+     *  the 202 has a durable handle). Promote it to `dispatched` in place
+     *  instead of inserting a fresh row, reusing its nonce so the callback
+     *  token still verifies. */
+    promoteNonce?: string;
   },
 ): Promise<{ nonce: string; callbackToken: string }> {
   if (!env.MANIFEST_CALLBACK_SECRET) {
@@ -159,21 +168,48 @@ async function dispatchCentralManifestJob(
       "MANIFEST_CALLBACK_SECRET is unset; refusing to dispatch central manifest workflow",
     );
   }
-  const nonce = crypto.randomUUID();
+  const nonce = args.promoteNonce ?? crypto.randomUUID();
   const callbackToken = await signManifestCallbackToken(
     { datasetId: args.datasetId, version: args.version, nonce },
     env.MANIFEST_CALLBACK_SECRET,
   );
 
-  // Persist the job row BEFORE dispatch so a slow GitHub round-trip
-  // can't deliver the callback to a missing row. If dispatch fails
-  // below we mark the row as failed for observability.
-  await env.DB.prepare(
-    `INSERT INTO manifest_jobs (dataset_id, version, nonce, doi, concept_doi, doi_provider, status)
-     VALUES (?, ?, ?, ?, ?, ?, 'dispatched')`,
-  )
-    .bind(args.datasetId, args.version, nonce, args.doi, args.conceptDoi, args.doiProvider)
-    .run();
+  // Persist the dispatched state BEFORE dispatch so a slow GitHub round-trip
+  // can't deliver the callback to a missing/un-dispatched row. If dispatch
+  // fails below we mark the row as failed for observability.
+  if (args.promoteNonce) {
+    // Promote the pre-created `accepted` row in place (carries the minted DOI
+    // now that the EZID mint has run). manifest-ready filters status='dispatched'.
+    await env.DB.prepare(
+      `UPDATE manifest_jobs
+       SET status = 'dispatched', doi = ?, concept_doi = ?, doi_provider = ?
+       WHERE dataset_id = ? AND version = ? AND nonce = ? AND status = 'accepted'`,
+    )
+      .bind(
+        args.doi,
+        args.conceptDoi,
+        args.doiProvider,
+        args.datasetId,
+        args.version,
+        args.promoteNonce,
+      )
+      .run();
+  } else {
+    await env.DB.prepare(
+      `INSERT INTO manifest_jobs (dataset_id, version, nonce, doi, concept_doi, doi_provider, status, request_source)
+       VALUES (?, ?, ?, ?, ?, ?, 'dispatched', ?)`,
+    )
+      .bind(
+        args.datasetId,
+        args.version,
+        nonce,
+        args.doi,
+        args.conceptDoi,
+        args.doiProvider,
+        args.requestSource ?? null,
+      )
+      .run();
+  }
 
   // Detect double-dispatch: if there are other still-'dispatched' rows
   // for the same (dataset_id, version) but a different nonce, the
@@ -349,9 +385,486 @@ webhooks.post("/publish-version-doi", async (c) => {
 });
 
 /**
- * Handle EZID version DOI creation: reads BIDS metadata, mints DOI, updates DB, and generates version manifest.
+ * Poll the status of an async version-DOI publish (#751).
+ *
+ * The run-version-doi.yml "Publish version DOI" step POSTs /publish-version-doi
+ * (which returns 202 under the central flow) then polls this endpoint until the
+ * latest manifest_jobs row for (dataset_id, version) reaches `ready` (published)
+ * or `failed`, instead of holding a 60s synchronous curl. Token-authed the same
+ * way as /publish-version-doi.
+ */
+webhooks.get("/version-doi-status", async (c) => {
+  const token = c.req.header("X-Webhook-Token");
+  const expectedToken = c.env.NEMAR_WEBHOOK_TOKEN ?? c.env.GITHUB_WEBHOOK_SECRET;
+  if (!expectedToken) {
+    console.error(
+      "[version-doi-status] no webhook secret configured (NEMAR_WEBHOOK_TOKEN/GITHUB_WEBHOOK_SECRET both unset or empty)",
+    );
+    return c.json({ error: "Invalid webhook token" }, 401);
+  }
+  if (!token || !timingSafeEqual(token, expectedToken)) {
+    return c.json({ error: "Invalid webhook token" }, 401);
+  }
+
+  const datasetId = c.req.query("dataset_id");
+  const rawVersion = c.req.query("version");
+  if (!datasetId || !rawVersion) {
+    return c.json({ error: "Missing required query params: dataset_id, version" }, 400);
+  }
+  const version = rawVersion.replace(/^[vV]/, "");
+
+  const job = await c.env.DB.prepare(
+    `SELECT status, doi, error_message FROM manifest_jobs
+     WHERE dataset_id = ? AND version = ? ORDER BY created_at DESC LIMIT 1`,
+  )
+    .bind(datasetId, version)
+    .first<{ status: string; doi: string | null; error_message: string | null }>();
+
+  if (!job) {
+    // No row yet (residual hasn't inserted the accepted row) — tell the poller
+    // to keep waiting rather than treating absence as terminal.
+    return c.json({ dataset_id: datasetId, version, status: "unknown" });
+  }
+
+  return c.json({
+    dataset_id: datasetId,
+    version,
+    status: job.status,
+    outcome: versionDoiPollOutcome(job.status),
+    ...(job.doi && { version_doi: job.doi }),
+    ...(job.error_message && { error_message: job.error_message }),
+  });
+});
+
+/** Dataset shape needed to mint an EZID version DOI (shared by the webhook
+ *  async residual and the admin orchestrator). */
+export interface EzidVersionDoiDataset {
+  id: number;
+  dataset_id: string;
+  name: string;
+  github_repo: string | null;
+  concept_doi: string | null;
+  ezid_identifier: string | null;
+}
+
+/**
+ * Shared EZID version-DOI mint core: cheap O(1) metadata read (Contents API),
+ * existing-version-DOI lookup for the concept HasVersion set, idempotent EZID
+ * mint, and latest_version_doi update. Does NOT insert dataset_versions or
+ * generate the manifest — under the central flow `/webhooks/manifest-ready`
+ * owns the row insert once the dispatched manifest job uploads to S3.
+ */
+export async function mintEzidVersionDoi(
+  env: Bindings,
+  params: {
+    dataset: EzidVersionDoiDataset;
+    repoName: string;
+    version: string;
+    sandbox: boolean;
+    pat: string;
+  },
+): Promise<{ doi: string; warnings?: string[] }> {
+  const { dataset, repoName, version, sandbox, pat } = params;
+  if (!dataset.ezid_identifier) {
+    throw new Error(`Dataset ${dataset.dataset_id} has no EZID identifier`);
+  }
+
+  // O(1) metadata read so the mint can't scale with file count (the #751 wall).
+  const repoMeta = await readRepoMetadata(repoName, pat, undefined, dataset.name, `v${version}`, {
+    useContentsApi: true,
+  });
+  for (const w of repoMeta.warnings) {
+    console.warn("[version-doi]", w);
+  }
+
+  const versionRows = await env.DB.prepare("SELECT doi FROM dataset_versions WHERE dataset_id = ?")
+    .bind(dataset.dataset_id)
+    .all<{ doi: string }>();
+  const existingVersionDois = versionRows.results.map((r) => r.doi);
+
+  const result = await createEzidVersionDoi(
+    {
+      EZID_USERNAME: env.EZID_USERNAME,
+      EZID_PASSWORD: env.EZID_PASSWORD,
+      EZID_SANDBOX_USERNAME: env.EZID_SANDBOX_USERNAME,
+      EZID_SANDBOX_PASSWORD: env.EZID_SANDBOX_PASSWORD,
+    },
+    {
+      datasetId: dataset.dataset_id,
+      conceptIdentifier: dataset.ezid_identifier,
+      version,
+      bidsDescription: repoMeta.bidsDescription,
+      githubRepo: dataset.github_repo || `nemarDatasets/${repoName}`,
+      sandbox,
+      existingVersionDois,
+      enrichment: repoMeta.enrichment,
+    },
+  );
+
+  await env.DB.prepare(
+    "UPDATE datasets SET latest_version_doi = ?, updated_at = datetime('now') WHERE id = ?",
+  )
+    .bind(result.doi, dataset.id)
+    .run();
+
+  return { doi: result.doi, warnings: result.warnings };
+}
+
+/**
+ * Publish an EZID version DOI via the central manifest flow: mint the DOI then
+ * dispatch the central manifest job. Used by the admin orchestrator's
+ * version_doi step (#751) so it stops generating the manifest inline (O(files));
+ * `/webhooks/manifest-ready` then owns the dataset_versions insert. Synchronous
+ * (no accepted-row/poll dance) — the admin orchestrator isn't on a curl budget.
+ */
+export async function publishEzidVersionDoiViaCentral(
+  env: Bindings,
+  params: {
+    dataset: EzidVersionDoiDataset;
+    repoName: string;
+    version: string;
+    sandbox: boolean;
+    pat: string;
+    requestSource: "webhook" | "admin";
+  },
+): Promise<{ doi: string; warnings?: string[] }> {
+  const { dataset, repoName, version, sandbox, pat, requestSource } = params;
+  const minted = await mintEzidVersionDoi(env, { dataset, repoName, version, sandbox, pat });
+  await dispatchCentralManifestJob(env, {
+    datasetId: dataset.dataset_id,
+    version,
+    doi: minted.doi,
+    conceptDoi: dataset.concept_doi,
+    doiProvider: "ezid",
+    skipCanary: true,
+    requestSource,
+  });
+  return minted;
+}
+
+/**
+ * Best-effort Zenodo backup of the release archive. Non-fatal: logs and returns
+ * the outcome rather than throwing. `skipOpenNeuro` skips the (O(bytes),
+ * impossible-for-large) download for `on`-prefix datasets — the async path
+ * passes true; the legacy path passes false to preserve prior behavior.
+ */
+async function maybeZenodoBackup(
+  env: Bindings,
+  params: {
+    dataset: {
+      id: number;
+      dataset_id: string;
+      name: string;
+      github_repo: string | null;
+      concept_doi: string | null;
+    };
+    version: string;
+    sandbox: boolean;
+    repoName: string;
+    pat: string;
+    skipOpenNeuro: boolean;
+  },
+): Promise<{ backup?: string; error?: string }> {
+  const { dataset, version, sandbox, repoName, pat, skipOpenNeuro } = params;
+  if (skipOpenNeuro && dataset.dataset_id.startsWith("on")) {
+    console.info(`[version-doi] Zenodo backup skipped for OpenNeuro dataset ${dataset.dataset_id}`);
+    return {};
+  }
+  let backup: string | undefined;
+  let error: string | undefined;
+  try {
+    const zenodoToken = sandbox ? env.ZENODO_SANDBOX_API_KEY : env.ZENODO_API_KEY;
+    if (!zenodoToken) {
+      console.info(
+        `[version-doi] Zenodo backup skipped for ${dataset.dataset_id}: no ${sandbox ? "sandbox " : ""}API key configured`,
+      );
+      return {};
+    }
+    if (!dataset.github_repo) {
+      console.info(
+        `[version-doi] Zenodo backup skipped for ${dataset.dataset_id}: no GitHub repo configured`,
+      );
+      return {};
+    }
+    const tag = `v${version}`;
+    const archiveData = await downloadReleaseArchive(repoName, tag, pat);
+
+    // Check if dataset already has a Zenodo backup deposition
+    const row = await env.DB.prepare("SELECT zenodo_concept_id FROM datasets WHERE id = ?")
+      .bind(dataset.id)
+      .first<{ zenodo_concept_id: string | null }>();
+
+    let depositionId = row?.zenodo_concept_id
+      ? Number.parseInt(row.zenodo_concept_id, 10)
+      : Number.NaN;
+
+    if (Number.isNaN(depositionId)) {
+      const deposition = await zenodo.createDeposition(
+        {
+          title: `${dataset.name} (NEMAR backup archive)`,
+          description: `Backup archive for NEMAR dataset ${dataset.dataset_id}. Primary DOI: ${dataset.concept_doi}`,
+          creators: [{ name: "NEMAR" }],
+          keywords: ["BIDS", "neuroscience", "NEMAR", "backup"],
+          version,
+        },
+        zenodoToken,
+        sandbox,
+      );
+      depositionId = deposition.id;
+      await env.DB.prepare(
+        "UPDATE datasets SET zenodo_concept_id = ?, updated_at = datetime('now') WHERE id = ?",
+      )
+        .bind(String(depositionId), dataset.id)
+        .run();
+    } else {
+      const newVersion = await zenodo.createNewVersion(depositionId, zenodoToken, sandbox);
+      depositionId = newVersion.id;
+      await zenodo.updateDepositionMetadata(
+        depositionId,
+        {
+          title: `${dataset.name} (NEMAR backup archive)`,
+          description: `Backup archive v${version}`,
+          creators: [{ name: "NEMAR" }],
+          version,
+        },
+        zenodoToken,
+        sandbox,
+      );
+    }
+
+    const deposition = await zenodo.getDeposition(depositionId, zenodoToken, sandbox);
+    if (deposition.links.bucket) {
+      await zenodo.uploadFile(
+        depositionId,
+        deposition.links.bucket,
+        `${dataset.dataset_id}-v${version}.zip`,
+        archiveData,
+        zenodoToken,
+        sandbox,
+      );
+      backup = `Zenodo draft #${depositionId}`;
+    } else {
+      console.warn(
+        `[version-doi] Zenodo deposition #${depositionId} has no bucket URL; file upload skipped`,
+      );
+      error = `Zenodo deposition #${depositionId} has no bucket URL`;
+    }
+  } catch (zenodoErr) {
+    error = errorMessage(zenodoErr);
+    console.error(
+      `[version-doi] Zenodo backup failed for ${dataset.dataset_id}@${version} (non-fatal):`,
+      zenodoErr,
+    );
+  }
+  return { backup, error };
+}
+
+/** Idempotency: only short-circuit a duplicate publish while a prior attempt is
+ *  still in flight (accepted | dispatched). Terminal states (ready | failed)
+ *  allow a deliberate re-drive (e.g. remediation). Pure for testing. */
+export function shouldShortCircuitInflightPublish(existing: { status: string } | null): boolean {
+  return existing != null && (existing.status === "accepted" || existing.status === "dispatched");
+}
+
+/** Map a manifest_jobs status to the CI poller's decision. Pure for testing.
+ *  `ready` = published (success); `failed` = terminal; everything else
+ *  (unknown / accepted / dispatched) = keep polling. */
+export function versionDoiPollOutcome(
+  status: string | null | undefined,
+): "success" | "fail" | "wait" {
+  if (status === "ready") return "success";
+  if (status === "failed") return "fail";
+  return "wait";
+}
+
+/**
+ * Handle EZID version DOI creation. Routes to the async (202 + poll) path when
+ * the central manifest workflow is enabled, else the legacy synchronous path.
  */
 async function handleEzidVersionDoi(
+  c: WebhookContext,
+  dataset: {
+    id: number;
+    dataset_id: string;
+    name: string;
+    description: string | null;
+    github_repo: string | null;
+    concept_doi: string | null;
+    ezid_identifier: string | null;
+  },
+  version: string,
+  releaseUrl: string,
+  sandbox: boolean,
+) {
+  if (isCentralManifestWorkflowEnabled(c.env)) {
+    return handleEzidVersionDoiAsync(c, dataset, version, sandbox);
+  }
+  return handleEzidVersionDoiLegacy(c, dataset, version, releaseUrl, sandbox);
+}
+
+/**
+ * Async EZID version-DOI publish (#751): validate cheaply, create an `accepted`
+ * manifest_jobs row, return 202, and run the heavy residual (cheap metadata read
+ * + idempotent EZID mint + central manifest dispatch + Zenodo) off the request
+ * path via waitUntil. The CI workflow polls /webhooks/version-doi-status until
+ * ready/failed instead of holding the publish on a 60s curl.
+ */
+async function handleEzidVersionDoiAsync(
+  c: WebhookContext,
+  dataset: {
+    id: number;
+    dataset_id: string;
+    name: string;
+    description: string | null;
+    github_repo: string | null;
+    concept_doi: string | null;
+    ezid_identifier: string | null;
+  },
+  version: string,
+  sandbox: boolean,
+) {
+  if (!dataset.ezid_identifier) {
+    return c.json({ error: "No EZID identifier found for this dataset.", skipped: true }, 200);
+  }
+  if (!dataset.github_repo) {
+    return c.json({ error: "Dataset has no GitHub repository" }, 400);
+  }
+  const repoName = extractRepoName(dataset.github_repo);
+  if (!repoName) {
+    return c.json({ error: "Invalid github_repo format" }, 400);
+  }
+  if (!c.env.MANIFEST_CALLBACK_SECRET) {
+    console.error(
+      "[publish-version-doi] MANIFEST_CALLBACK_SECRET unset; cannot run central version-DOI flow",
+    );
+    return c.json({ error: "Server misconfigured: MANIFEST_CALLBACK_SECRET unset" }, 500);
+  }
+
+  // Idempotency: don't start a second publish while one is in flight.
+  const inflight = await c.env.DB.prepare(
+    `SELECT id, status FROM manifest_jobs
+     WHERE dataset_id = ? AND version = ? AND status IN ('accepted', 'dispatched')
+     ORDER BY created_at DESC LIMIT 1`,
+  )
+    .bind(dataset.dataset_id, version)
+    .first<{ id: number; status: string }>();
+  if (shouldShortCircuitInflightPublish(inflight)) {
+    return c.json(
+      { accepted: true, status: inflight?.status, version, note: "publish already in flight" },
+      202,
+    );
+  }
+
+  // Durable handle for the 202: poll + failure paths need a row immediately.
+  const nonce = crypto.randomUUID();
+  try {
+    await c.env.DB.prepare(
+      `INSERT INTO manifest_jobs (dataset_id, version, nonce, doi, concept_doi, doi_provider, status, request_source)
+       VALUES (?, ?, ?, NULL, ?, 'ezid', 'accepted', 'webhook')`,
+    )
+      .bind(dataset.dataset_id, version, nonce, dataset.concept_doi)
+      .run();
+  } catch (err) {
+    console.error(
+      `[publish-version-doi] failed to create accepted job row for ${dataset.dataset_id}@${version}:`,
+      err,
+    );
+    return c.json(
+      { error: "Failed to enqueue version DOI publish", details: errorMessage(err) },
+      500,
+    );
+  }
+
+  c.executionCtx.waitUntil(
+    runEzidVersionDoiResidual(c.env, { dataset, version, sandbox, repoName, nonce }).catch(
+      (err) => {
+        // runEzidVersionDoiResidual records failure on the row itself; this is the
+        // last-resort guard so an unexpected throw can't reject the waitUntil.
+        console.error(
+          `[publish-version-doi] residual crashed for ${dataset.dataset_id}@${version}:`,
+          err,
+        );
+      },
+    ),
+  );
+
+  return c.json(
+    {
+      accepted: true,
+      status: "accepted",
+      version,
+      message: "Version DOI publish accepted; poll /webhooks/version-doi-status",
+    },
+    202,
+  );
+}
+
+/**
+ * The heavy residual of the async EZID publish, run via waitUntil. On any
+ * failure it records `failed` + error_message on the accepted row so the CI
+ * poller sees a terminal state instead of polling to timeout.
+ */
+async function runEzidVersionDoiResidual(
+  env: Bindings,
+  params: {
+    dataset: EzidVersionDoiDataset;
+    version: string;
+    sandbox: boolean;
+    repoName: string;
+    nonce: string;
+  },
+): Promise<void> {
+  const { dataset, version, sandbox, repoName, nonce } = params;
+  try {
+    const pat = await getDatasetsToken(env);
+    const minted = await mintEzidVersionDoi(env, { dataset, repoName, version, sandbox, pat });
+
+    // Promote the accepted row -> dispatched and trigger the central manifest
+    // workflow. manifest-ready inserts the dataset_versions row + flips the data
+    // plane to published once the manifest lands on S3.
+    await dispatchCentralManifestJob(env, {
+      datasetId: dataset.dataset_id,
+      version,
+      doi: minted.doi,
+      conceptDoi: dataset.concept_doi,
+      doiProvider: "ezid",
+      skipCanary: true,
+      requestSource: "webhook",
+      promoteNonce: nonce,
+    });
+
+    // Non-fatal backup; OpenNeuro skipped (O(bytes); Phase 3 archive policy).
+    await maybeZenodoBackup(env, { dataset, version, sandbox, repoName, pat, skipOpenNeuro: true });
+  } catch (err) {
+    const msg = errorMessage(err);
+    console.error(
+      `[publish-version-doi] residual failed for ${dataset.dataset_id}@${version}:`,
+      err,
+    );
+    try {
+      await env.DB.prepare(
+        `UPDATE manifest_jobs SET status = 'failed', error_message = ?, completed_at = datetime('now')
+         WHERE dataset_id = ? AND version = ? AND nonce = ?`,
+      )
+        .bind(msg, dataset.dataset_id, version, nonce)
+        .run();
+    } catch (d1Err) {
+      console.error(
+        `[publish-version-doi] failed to mark job failed for ${dataset.dataset_id}@${version}:`,
+        d1Err,
+      );
+    }
+  }
+}
+
+/**
+ * LEGACY synchronous EZID version-DOI path (used when the central manifest
+ * workflow is disabled, e.g. prod before the #751 cutover): reads BIDS metadata
+ * via the full repo tree, mints the DOI, updates DB, and generates the manifest
+ * inline. Retained unchanged for the pre-cutover env; removable after the prod
+ * MANIFEST_VIA_CENTRAL_WORKFLOW flip soaks.
+ */
+async function handleEzidVersionDoiLegacy(
   c: WebhookContext,
   dataset: {
     id: number;
@@ -511,94 +1024,16 @@ async function handleEzidVersionDoi(
       }
     }
 
-    // Upload archive to Zenodo as draft backup (non-fatal)
-    let zenodoBackup: string | undefined;
-    let zenodoBackupError: string | undefined;
-    try {
-      const zenodoToken = sandbox ? c.env.ZENODO_SANDBOX_API_KEY : c.env.ZENODO_API_KEY;
-      if (!zenodoToken) {
-        console.info(
-          `[webhook] Zenodo backup skipped for ${dataset.dataset_id}: no ${sandbox ? "sandbox " : ""}API key configured`,
-        );
-      } else if (!dataset.github_repo) {
-        console.info(
-          `[webhook] Zenodo backup skipped for ${dataset.dataset_id}: no GitHub repo configured`,
-        );
-      }
-      if (zenodoToken && dataset.github_repo) {
-        const tag = `v${version}`;
-        const archiveData = await downloadReleaseArchive(repoName, tag, pat);
-
-        // Check if dataset already has a Zenodo backup deposition
-        const row = await c.env.DB.prepare("SELECT zenodo_concept_id FROM datasets WHERE id = ?")
-          .bind(dataset.id)
-          .first<{ zenodo_concept_id: string | null }>();
-
-        let depositionId = row?.zenodo_concept_id
-          ? Number.parseInt(row.zenodo_concept_id, 10)
-          : Number.NaN;
-
-        if (Number.isNaN(depositionId)) {
-          // Create initial Zenodo draft deposition
-          const deposition = await zenodo.createDeposition(
-            {
-              title: `${dataset.name} (NEMAR backup archive)`,
-              description: `Backup archive for NEMAR dataset ${dataset.dataset_id}. Primary DOI: ${dataset.concept_doi}`,
-              creators: [{ name: "NEMAR" }],
-              keywords: ["BIDS", "neuroscience", "NEMAR", "backup"],
-              version,
-            },
-            zenodoToken,
-            sandbox,
-          );
-          depositionId = deposition.id;
-          await c.env.DB.prepare(
-            "UPDATE datasets SET zenodo_concept_id = ?, updated_at = datetime('now') WHERE id = ?",
-          )
-            .bind(String(depositionId), dataset.id)
-            .run();
-        } else {
-          // Create a new version draft from existing deposition
-          const newVersion = await zenodo.createNewVersion(depositionId, zenodoToken, sandbox);
-          depositionId = newVersion.id;
-          await zenodo.updateDepositionMetadata(
-            depositionId,
-            {
-              title: `${dataset.name} (NEMAR backup archive)`,
-              description: `Backup archive v${version}`,
-              creators: [{ name: "NEMAR" }],
-              version,
-            },
-            zenodoToken,
-            sandbox,
-          );
-        }
-
-        const deposition = await zenodo.getDeposition(depositionId, zenodoToken, sandbox);
-        if (deposition.links.bucket) {
-          await zenodo.uploadFile(
-            depositionId,
-            deposition.links.bucket,
-            `${dataset.dataset_id}-v${version}.zip`,
-            archiveData,
-            zenodoToken,
-            sandbox,
-          );
-          zenodoBackup = `Zenodo draft #${depositionId}`;
-        } else {
-          console.warn(
-            `[webhook] Zenodo deposition #${depositionId} has no bucket URL; file upload skipped`,
-          );
-          zenodoBackupError = `Zenodo deposition #${depositionId} has no bucket URL`;
-        }
-      }
-    } catch (zenodoErr) {
-      zenodoBackupError = errorMessage(zenodoErr);
-      console.error(
-        `[webhook] Zenodo backup failed for ${dataset.dataset_id}@${version} (non-fatal):`,
-        zenodoErr,
-      );
-    }
+    // Upload archive to Zenodo as draft backup (non-fatal). Shared with the
+    // async path; skipOpenNeuro=false preserves the legacy "backup all" behavior.
+    const { backup: zenodoBackup, error: zenodoBackupError } = await maybeZenodoBackup(c.env, {
+      dataset,
+      version,
+      sandbox,
+      repoName,
+      pat,
+      skipOpenNeuro: false,
+    });
 
     // Sync to nemar.org in the background (non-fatal, non-blocking).
     // Pass the freshly-minted DOI + version through as overrides so a D1
