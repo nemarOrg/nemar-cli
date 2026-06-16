@@ -120,4 +120,31 @@ describe("migration 0043: archive_skip_reason", () => {
     expect(row.file_size).toBe(730_000_000_000);
     expect(row.total_files).toBe(11000);
   });
+
+  test("archive-ready 'ready' clears a stale skip_reason (size-reduced re-publish)", () => {
+    insertDataset(db, "on005752");
+    // previously skipped (oversized)
+    db.prepare(
+      "UPDATE datasets SET archive_skip_reason = 'oversized', archive_checked_at = datetime('now') WHERE dataset_id = ?",
+    ).run("on005752");
+    // a real zip now lands -> the 'ready' UPDATE must null the stale reason
+    db.prepare(
+      `UPDATE datasets
+       SET archive_status = 'ready', archive_checked_at = datetime('now'),
+           archive_size = ?, archive_retry_count = 0, archive_skip_reason = NULL
+       WHERE dataset_id = ?`,
+    ).run(500, "on005752");
+    const row = db
+      .prepare(
+        "SELECT archive_status, archive_skip_reason, archive_size FROM datasets WHERE dataset_id = ?",
+      )
+      .get("on005752") as {
+      archive_status: string;
+      archive_skip_reason: string | null;
+      archive_size: number;
+    };
+    expect(row.archive_status).toBe("ready");
+    expect(row.archive_skip_reason).toBeNull();
+    expect(row.archive_size).toBe(500);
+  });
 });

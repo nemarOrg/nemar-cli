@@ -1179,7 +1179,8 @@ adminRoutes.post("/datasets/archive-sweep", async (c) => {
       if (size > 0) {
         await db
           .prepare(
-            "UPDATE datasets SET archive_status = 'ready', archive_size = ?, archive_checked_at = datetime('now') WHERE dataset_id = ?",
+            // Clear any stale archive_skip_reason: a real zip exists (#752).
+            "UPDATE datasets SET archive_status = 'ready', archive_size = ?, archive_checked_at = datetime('now'), archive_skip_reason = NULL WHERE dataset_id = ?",
           )
           .bind(size, dataset_id)
           .run();
@@ -1209,11 +1210,12 @@ adminRoutes.post("/datasets/archive-sweep", async (c) => {
         }
       }
     } catch (err) {
-      // S3 confirmed the size; only the D1 write failed. Note that so a re-run's
-      // duplicate entry is explicable.
+      // S3 confirmed the size; only the D1 write failed. Note the branch (ready
+      // vs skip/absent) + size so a re-run's duplicate entry is explicable and a
+      // dropped archive_skip_reason write is attributable, not masked as "ready".
       errors.push({
         dataset_id,
-        error: `d1 (s3 size=${size}): ${err instanceof Error ? err.message : String(err)}`,
+        error: `d1 write [${size > 0 ? "ready" : "skip/absent"}] (s3 size=${size}): ${err instanceof Error ? err.message : String(err)}`,
       });
     }
   }

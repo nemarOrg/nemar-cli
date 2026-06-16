@@ -2769,11 +2769,15 @@ webhooks.post("/archive-ready", async (c) => {
   try {
     if (status === "ready") {
       const result = await c.env.DB.prepare(
+        // Clear archive_skip_reason: a real zip now exists, so a stale skip from
+        // an earlier (larger) version must not keep the UI on the direct-download
+        // recipe (#752).
         `UPDATE datasets
          SET archive_status = 'ready',
              archive_checked_at = datetime('now'),
              archive_size = ?,
-             archive_retry_count = 0
+             archive_retry_count = 0,
+             archive_skip_reason = NULL
          WHERE dataset_id = ?`,
       )
         .bind(typeof body.size === "number" ? body.size : null, body.dataset_id)
@@ -2826,7 +2830,9 @@ webhooks.post("/archive-ready", async (c) => {
   // matches zero rows and persists nothing. Surface it as a 404 instead of a
   // silent 200 -- mirrors the zarr-ready / prescreen-result guards.
   if (changed === 0) {
-    console.error(`[archive-ready] UPDATE matched 0 rows dataset=${body.dataset_id} -- not in D1`);
+    console.error(
+      `[archive-ready] UPDATE matched 0 rows dataset=${body.dataset_id} status=${status} -- not in D1`,
+    );
     return c.json({ error: "Dataset not found" }, 404);
   }
 
