@@ -1801,30 +1801,70 @@ export function validatePrescreenCallbackBody(body: unknown): string | null {
 /**
  * Combine the `claude -p` verdict with an independent server-side S3 check.
  * The workflow judges README/metadata/declared-data quality; the Worker has
- * the AWS credentials to confirm the blobs actually landed. We only treat a
- * literally empty objects/ prefix as "missing data" -- `objectCount` is
- * `undefined` when the page-count cap was hit (i.e. *many* objects), which is
- * emphatically not missing. An S3 read error yields `s3 = null` so infra
- * blips never produce a false block. Pure function: no I/O, fully testable.
+ * the AWS credentials and is the source of truth for whether the data blobs
+ * actually landed. The S3 check is therefore authoritative on the DATA
+ * question in BOTH directions:
+ *   - empty objects/ prefix -> add a "missing data" block (catches a workflow
+ *     that passed but the blobs never uploaded);
+ *   - real blobs present -> a "no real data / too small" verdict was a false
+ *     negative (e.g. the workflow's git-tree heuristic was annex-blind for
+ *     symlink-stored annex content, #753), so strip the data-shortage reasons
+ *     and, if that was the ONLY reason to block, downgrade to pass.
+ * Non-data reasons (missing README / Name / Authors) the Worker cannot judge,
+ * so they always stand. `objectCount` is `undefined` when the page-count cap
+ * was hit (i.e. *many* objects), which is emphatically data-present. An S3
+ * read error yields `s3 = null` so infra blips never flip the verdict either
+ * way. Pure function: no I/O, fully testable.
  */
 export interface PrescreenS3Presence {
   totalSize: number;
   objectCount: number | undefined;
 }
+
+/**
+ * A pre-screen block reason the authoritative S3 data check can refute. Covers
+ * the workflow's data-shortage phrasings ("no real data", "too small",
+ * "0 annexed files", "binary data ... not found") plus the synthetic storage
+ * reason this function adds on an empty prefix.
+ */
+export function isDataShortageReason(reason: string): boolean {
+  // Whole-word `annex`/`0 ... files` (not bare substrings) so a non-data block
+  // reason that merely contains those letters isn't silently stripped. `s3` is
+  // word-bounded for the same reason. No bare `storage`: the only storage
+  // phrasing is the synthetic reason this module adds in the (mutually
+  // exclusive) s3Missing branch, which never reaches the stripping path.
+  return /no (real )?data|too small|implausibl|\b0 (annexed |data )?files\b|binary data|\bannexed?\b|\bs3\b/i.test(
+    reason,
+  );
+}
+
 export function decidePrescreenOutcome(
   verdict: "pass" | "block",
   reasons: string[],
   s3: PrescreenS3Presence | null,
 ): { blocked: boolean; reasons: string[] } {
-  const out = [...reasons];
+  let out = [...reasons];
   let blocked = verdict === "block";
+
   const s3Missing = !!s3 && s3.totalSize === 0 && s3.objectCount === 0;
-  if (s3Missing) {
+  // objectCount === undefined => first-page cap hit => many objects => present.
+  const s3Present = !!s3 && (s3.totalSize > 0 || s3.objectCount === undefined);
+
+  if (s3Present) {
+    // Storage confirms real blobs: any data-shortage reason is a false
+    // negative. Drop those; keep README/metadata reasons. Downgrade to pass
+    // only when the block carried data-shortage reason(s) that ALL got
+    // stripped -- never silently clear a reasonless or non-data block.
+    const kept = out.filter((r) => !isDataShortageReason(r));
+    if (blocked && kept.length === 0 && out.length > 0) blocked = false;
+    out = kept;
+  } else if (s3Missing) {
     blocked = true;
-    if (!out.some((r) => /no data|s3|storage/i.test(r))) {
+    if (!out.some((r) => /no data|\bs3\b|storage/i.test(r))) {
       out.push("No data files were found in storage for this dataset.");
     }
   }
+
   return { blocked, reasons: out };
 }
 
@@ -1940,6 +1980,16 @@ webhooks.post("/prescreen-result", async (c) => {
   }
 
   const { blocked, reasons } = decidePrescreenOutcome(body.verdict, body.reasons ?? [], s3);
+  // Audit the S3 override: if the authoritative S3 check changed the workflow's
+  // verdict (e.g. cleared an annex-blind false block, #753), record what was
+  // dropped so a downgrade-to-pass is never silent or untraceable.
+  const finalVerdict = blocked ? "block" : "pass";
+  if (body.verdict !== finalVerdict) {
+    const stripped = (body.reasons ?? []).filter((r) => !reasons.includes(r));
+    console.log(
+      `[prescreen-result] S3 override for ${body.dataset_id}: ${body.verdict} -> ${finalVerdict}; stripped=${JSON.stringify(stripped)} s3_size=${s3?.totalSize ?? "unknown"}`,
+    );
+  }
   const issueUrl = body.issue_url ?? null;
 
   if (blocked) {
