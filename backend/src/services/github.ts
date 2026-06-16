@@ -704,6 +704,29 @@ export async function enableAutoMerge(repo: string, pat: string): Promise<boolea
  * would silently land its commit on `main` regardless of the branch it
  * was invoked for.
  */
+/**
+ * Detect a GitHub Contents-API stale-SHA conflict on an update PUT. When the
+ * `sha` we sent no longer matches the current blob (a concurrent write landed
+ * first), GitHub returns 409; some paths surface it as 422 with a
+ * sha/"does not match"/"fast forward" message. Either is safe to retry by
+ * refetching the SHA. Pure; match the message, not just the status.
+ */
+export function isContentsApiShaConflict(status: number, bodyText: string): boolean {
+  if (status === 409) return true;
+  if (status !== 422) return false;
+  let parsed: { message?: string } | null = null;
+  try {
+    parsed = JSON.parse(bodyText) as { message?: string };
+  } catch {
+    // Fall through to substring match.
+  }
+  const msg = parsed?.message ?? bodyText;
+  // Match the known stale-SHA 422 phrases, NOT a bare "sha" (which appears in
+  // unrelated 422s, e.g. "Invalid sha for author"). The 409 arm already covers
+  // the blob-sha conflict unambiguously.
+  return /does not match|not a fast forward/i.test(msg);
+}
+
 export async function createOrUpdateFile(
   repo: string,
   path: string,
@@ -713,66 +736,83 @@ export async function createOrUpdateFile(
   branch?: string,
 ): Promise<void> {
   const branchQuery = branch ? `?ref=${encodeURIComponent(branch)}` : "";
-  // First, try to get the file to see if it exists (need SHA for update)
-  let sha: string | undefined;
-  let getResponse: Response;
-  try {
-    getResponse = await fetch(
-      `${GITHUB_API()}/repos/${ORG_NAME}/${repo}/contents/${path}${branchQuery}`,
-      {
+  const encoded = btoa(
+    Array.from(new TextEncoder().encode(content), (b) => String.fromCharCode(b)).join(""),
+  );
+
+  // Retry on a stale-SHA conflict: a concurrent writer (e.g. another enrichment
+  // run, #755) can advance the blob between our GET-sha and PUT. Refetch the
+  // current SHA and re-PUT -- last-writer-wins, no non-fast-forward failure.
+  const maxAttempts = 3;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    // Get the current blob SHA (needed to update; absent => create).
+    let sha: string | undefined;
+    let getResponse: Response;
+    try {
+      getResponse = await fetch(
+        `${GITHUB_API()}/repos/${ORG_NAME}/${repo}/contents/${path}${branchQuery}`,
+        {
+          headers: {
+            Authorization: `Bearer ${pat}`,
+            Accept: "application/vnd.github.v3+json",
+            "User-Agent": "NEMAR-API",
+          },
+        },
+      );
+    } catch (err) {
+      throw new Error(
+        `Network error checking ${path}: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+
+    if (getResponse.ok) {
+      const existing = await getResponse.json<{ sha: string }>();
+      sha = existing.sha;
+    } else if (getResponse.status !== 404) {
+      const body = await getResponse.text().catch(() => "");
+      throw new Error(`GitHub API error ${getResponse.status} checking ${path}: ${body}`);
+    }
+
+    // Create or update the file.
+    let response: Response;
+    try {
+      response = await fetch(`${GITHUB_API()}/repos/${ORG_NAME}/${repo}/contents/${path}`, {
+        method: "PUT",
         headers: {
           Authorization: `Bearer ${pat}`,
           Accept: "application/vnd.github.v3+json",
           "User-Agent": "NEMAR-API",
+          "Content-Type": "application/json",
         },
-      },
-    );
-  } catch (err) {
-    throw new Error(
-      `Network error checking ${path}: ${err instanceof Error ? err.message : String(err)}`,
-    );
-  }
+        body: JSON.stringify({
+          message,
+          content: encoded,
+          ...(sha ? { sha } : {}),
+          ...(branch ? { branch } : {}),
+          committer: NEMAR_COMMITTER,
+          author: NEMAR_COMMITTER,
+        }),
+      });
+    } catch (err) {
+      throw new Error(
+        `Network error committing ${path}: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
 
-  if (getResponse.ok) {
-    const existing = await getResponse.json<{ sha: string }>();
-    sha = existing.sha;
-  } else if (getResponse.status !== 404) {
-    const body = await getResponse.text().catch(() => "");
-    throw new Error(`GitHub API error ${getResponse.status} checking ${path}: ${body}`);
-  }
+    if (response.ok || response.status === 201) return;
 
-  // Create or update the file
-  let response: Response;
-  try {
-    response = await fetch(`${GITHUB_API()}/repos/${ORG_NAME}/${repo}/contents/${path}`, {
-      method: "PUT",
-      headers: {
-        Authorization: `Bearer ${pat}`,
-        Accept: "application/vnd.github.v3+json",
-        "User-Agent": "NEMAR-API",
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        message,
-        content: btoa(
-          Array.from(new TextEncoder().encode(content), (b) => String.fromCharCode(b)).join(""),
-        ),
-        ...(sha ? { sha } : {}),
-        ...(branch ? { branch } : {}),
-        committer: NEMAR_COMMITTER,
-        author: NEMAR_COMMITTER,
-      }),
-    });
-  } catch (err) {
-    throw new Error(
-      `Network error committing ${path}: ${err instanceof Error ? err.message : String(err)}`,
-    );
-  }
-
-  if (!response.ok && response.status !== 201) {
     const body = await response.text().catch(() => "");
+    if (isContentsApiShaConflict(response.status, body) && attempt < maxAttempts) {
+      console.warn(
+        `[github] createOrUpdateFile sha conflict on ${repo}/${path}@${branch ?? "default"} (attempt ${attempt}/${maxAttempts}); refetching`,
+      );
+      continue;
+    }
     throw new Error(`GitHub API error ${response.status} committing ${path}: ${body}`);
   }
+  // Unreachable: every iteration returns, continues, or throws (mirrors
+  // commitFilesAsTree). Guards against a future refactor silently returning void.
+  throw new Error(`createOrUpdateFile: unreachable end-of-function for ${repo}/${path}`);
 }
 
 /**
