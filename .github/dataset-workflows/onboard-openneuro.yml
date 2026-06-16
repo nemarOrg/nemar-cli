@@ -146,6 +146,23 @@ jobs:
           AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
         run: nemar admin import-openneuro "$DATASET_ID" --phase prepare --trust-upstream
+      # Import-state tracking (#754). The `preparing` row is seeded server-side
+      # by /admin/datasets/import; here we record the copy transition. All
+      # callbacks are best-effort -- the scheduled sweep + report job are the
+      # backstops, so a callback hiccup never fails the import.
+      - name: Mark import copying
+        if: success()
+        env:
+          DATASET_ID: ${{ matrix.dataset_id }}
+          NEMAR_WEBHOOK_TOKEN: ${{ secrets.NEMAR_WEBHOOK_TOKEN }}
+          SHARDS: ${{ env.SHARDS }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          on_id="on${DATASET_ID#ds}"
+          curl -fsS -X POST "https://api.nemar.org/webhooks/import-state" \
+            -H "X-Webhook-Token: $NEMAR_WEBHOOK_TOKEN" -H "Content-Type: application/json" \
+            -d "{\"dataset_id\":\"$on_id\",\"source\":\"openneuro\",\"source_id\":\"$DATASET_ID\",\"stage\":\"copy\",\"status\":\"copying\",\"shards_total\":${SHARDS:-8},\"workflow_run_url\":\"$RUN_URL\"}" \
+            || echo "::warning::import-state copying callback failed for $on_id (non-fatal; sweep covers it)"
 
   copy:
     needs: [parse-ids, prepare]
@@ -206,6 +223,17 @@ jobs:
         env:
           NEMAR_API_KEY: ${{ secrets.NEMAR_ADMIN_API_KEY }}
         run: nemar auth login --key "$NEMAR_API_KEY"
+      - name: Mark import finalizing
+        env:
+          DATASET_ID: ${{ matrix.dataset_id }}
+          NEMAR_WEBHOOK_TOKEN: ${{ secrets.NEMAR_WEBHOOK_TOKEN }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          on_id="on${DATASET_ID#ds}"
+          curl -fsS -X POST "https://api.nemar.org/webhooks/import-state" \
+            -H "X-Webhook-Token: $NEMAR_WEBHOOK_TOKEN" -H "Content-Type: application/json" \
+            -d "{\"dataset_id\":\"$on_id\",\"source\":\"openneuro\",\"source_id\":\"$DATASET_ID\",\"stage\":\"finalize\",\"status\":\"finalizing\",\"workflow_run_url\":\"$RUN_URL\"}" \
+            || echo "::warning::import-state finalizing callback failed for $on_id (non-fatal; sweep covers it)"
       - name: Finalize import
         # --trust-upstream: skip_ci_check fallback at publication time when the
         # bounded poll observes CI deployed but no validation workflow_run
@@ -218,3 +246,55 @@ jobs:
           AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
         run: nemar admin import-openneuro "$DATASET_ID" --phase finalize --trust-upstream
+      - name: Mark import complete
+        if: success()
+        env:
+          DATASET_ID: ${{ matrix.dataset_id }}
+          NEMAR_WEBHOOK_TOKEN: ${{ secrets.NEMAR_WEBHOOK_TOKEN }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          on_id="on${DATASET_ID#ds}"
+          curl -fsS -X POST "https://api.nemar.org/webhooks/import-state" \
+            -H "X-Webhook-Token: $NEMAR_WEBHOOK_TOKEN" -H "Content-Type: application/json" \
+            -d "{\"dataset_id\":\"$on_id\",\"source\":\"openneuro\",\"source_id\":\"$DATASET_ID\",\"stage\":\"finalize\",\"status\":\"complete\",\"workflow_run_url\":\"$RUN_URL\"}" \
+            || echo "::warning::import-state complete callback failed for $on_id (non-fatal; report/sweep covers it)"
+
+  # Terminal-failure detector (#754). Runs even when copy/finalize were
+  # cancelled (the 6h-cap incident) or skipped, which the per-job success steps
+  # above cannot. POSTs `failed` for every attempted dataset; the backend's
+  # monotonic sticky upsert makes that a no-op for any dataset that already
+  # reached `complete`, so only genuinely-stuck imports are failed (and then
+  # quarantined / rolled back). Skipped entirely on a fully-finalized run.
+  report:
+    needs: [parse-ids, prepare, copy, finalize]
+    if: ${{ always() && needs.parse-ids.result == 'success' }}
+    runs-on: ubuntu-latest
+    strategy:
+      matrix: ${{ fromJson(needs.parse-ids.outputs.matrix) }}
+      fail-fast: false
+    steps:
+      - name: Report terminal import state
+        env:
+          DATASET_ID: ${{ matrix.dataset_id }}
+          NEMAR_WEBHOOK_TOKEN: ${{ secrets.NEMAR_WEBHOOK_TOKEN }}
+          PREP: ${{ needs.prepare.result }}
+          COPY: ${{ needs.copy.result }}
+          FIN: ${{ needs.finalize.result }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          if [ "$FIN" = "success" ]; then
+            echo "All datasets finalized (finalize=success); no terminal report needed."
+            exit 0
+          fi
+          on_id="on${DATASET_ID#ds}"
+          # Coarse stage label from the aggregate job results. The pass/fail
+          # decision is the backend's: this `failed` no-ops for any dataset that
+          # already reached `complete` via the monotonic sticky upsert.
+          if   [ "$PREP" != "success" ]; then stage=prepare
+          elif [ "$COPY" != "success" ]; then stage=copy
+          else stage=finalize
+          fi
+          curl -fsS -X POST "https://api.nemar.org/webhooks/import-state" \
+            -H "X-Webhook-Token: $NEMAR_WEBHOOK_TOKEN" -H "Content-Type: application/json" \
+            -d "{\"dataset_id\":\"$on_id\",\"source\":\"openneuro\",\"source_id\":\"$DATASET_ID\",\"stage\":\"$stage\",\"status\":\"failed\",\"error_message\":\"terminal: prepare=$PREP copy=$COPY finalize=$FIN\",\"workflow_run_url\":\"$RUN_URL\"}" \
+            || echo "::warning::import-state report callback failed for $on_id (non-fatal; sweep covers it)"
