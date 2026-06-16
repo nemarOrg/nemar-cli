@@ -41,6 +41,9 @@ describe("isDataShortageReason", () => {
       "README.md is missing or empty",
       "dataset_description.json is missing Authors",
       "Name field is missing",
+      // bare 'storage'/'annex' substrings must not over-match (#753 review)
+      "README documents only the storage layout and download steps",
+      "Dataset name references an annexure not included in the description",
     ]) {
       expect(isDataShortageReason(r)).toBe(false);
     }
@@ -91,6 +94,22 @@ describe("decidePrescreenOutcome", () => {
     const r = decidePrescreenOutcome("block", ["README is empty boilerplate"], present);
     expect(r.blocked).toBe(true);
     expect(r.reasons).toEqual(["README is empty boilerplate"]);
+  });
+
+  test("block with NO reasons + S3 present -> stays blocked (never silently unblock a reasonless block)", () => {
+    const r = decidePrescreenOutcome("block", [], present);
+    expect(r.blocked).toBe(true);
+    expect(r.reasons).toEqual([]);
+  });
+
+  test("block with a 'storage'/'annex' substring in a non-data reason + S3 present -> still blocked", () => {
+    const r = decidePrescreenOutcome(
+      "block",
+      ["README documents only the storage layout and download steps"],
+      present,
+    );
+    expect(r.blocked).toBe(true);
+    expect(r.reasons).toEqual(["README documents only the storage layout and download steps"]);
   });
 
   test("pass + S3 empty -> blocked with a synthetic storage reason (workflow passed, blobs missing)", () => {

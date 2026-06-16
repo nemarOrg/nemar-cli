@@ -1828,7 +1828,12 @@ export interface PrescreenS3Presence {
  * reason this function adds on an empty prefix.
  */
 export function isDataShortageReason(reason: string): boolean {
-  return /no (real )?data|too small|implausibl|0 .*files|binary data|annex|\bs3\b|storage/i.test(
+  // Whole-word `annex`/`0 ... files` (not bare substrings) so a non-data block
+  // reason that merely contains those letters isn't silently stripped. `s3` is
+  // word-bounded for the same reason. No bare `storage`: the only storage
+  // phrasing is the synthetic reason this module adds in the (mutually
+  // exclusive) s3Missing branch, which never reaches the stripping path.
+  return /no (real )?data|too small|implausibl|\b0 (annexed |data )?files\b|binary data|\bannexed?\b|\bs3\b/i.test(
     reason,
   );
 }
@@ -1847,10 +1852,12 @@ export function decidePrescreenOutcome(
 
   if (s3Present) {
     // Storage confirms real blobs: any data-shortage reason is a false
-    // negative. Drop those; keep README/metadata reasons. Unblock only when
-    // nothing but data-shortage reasons remained.
-    out = out.filter((r) => !isDataShortageReason(r));
-    if (blocked && out.length === 0) blocked = false;
+    // negative. Drop those; keep README/metadata reasons. Downgrade to pass
+    // only when the block carried data-shortage reason(s) that ALL got
+    // stripped -- never silently clear a reasonless or non-data block.
+    const kept = out.filter((r) => !isDataShortageReason(r));
+    if (blocked && kept.length === 0 && out.length > 0) blocked = false;
+    out = kept;
   } else if (s3Missing) {
     blocked = true;
     if (!out.some((r) => /no data|\bs3\b|storage/i.test(r))) {
@@ -1973,6 +1980,16 @@ webhooks.post("/prescreen-result", async (c) => {
   }
 
   const { blocked, reasons } = decidePrescreenOutcome(body.verdict, body.reasons ?? [], s3);
+  // Audit the S3 override: if the authoritative S3 check changed the workflow's
+  // verdict (e.g. cleared an annex-blind false block, #753), record what was
+  // dropped so a downgrade-to-pass is never silent or untraceable.
+  const finalVerdict = blocked ? "block" : "pass";
+  if (body.verdict !== finalVerdict) {
+    const stripped = (body.reasons ?? []).filter((r) => !reasons.includes(r));
+    console.log(
+      `[prescreen-result] S3 override for ${body.dataset_id}: ${body.verdict} -> ${finalVerdict}; stripped=${JSON.stringify(stripped)} s3_size=${s3?.totalSize ?? "unknown"}`,
+    );
+  }
   const issueUrl = body.issue_url ?? null;
 
   if (blocked) {
