@@ -2351,7 +2351,7 @@ datasetRoutes.post("/:id/publish/request", authMiddleware, async (c) => {
       // re-request doesn't leave a stale 'failed'/nonce on a 'requested' row).
       await db
         .prepare(
-          "UPDATE publication_requests SET status = 'requested', block_reason = NULL, prescreen_status = NULL, prescreen_nonce = NULL, prescreen_issue_url = NULL, updated_at = datetime('now') WHERE id = ?",
+          "UPDATE publication_requests SET status = 'requested', block_reason = NULL, prescreen_status = NULL, prescreen_nonce = NULL, prescreen_issue_url = NULL, prescreen_reasons = NULL, updated_at = datetime('now') WHERE id = ?",
         )
         .bind(requestId)
         .run();
@@ -2425,7 +2425,7 @@ datasetRoutes.post("/:id/publish/request", authMiddleware, async (c) => {
       try {
         await db
           .prepare(
-            "UPDATE publication_requests SET prescreen_status = NULL, prescreen_nonce = NULL WHERE id = ?",
+            "UPDATE publication_requests SET prescreen_status = NULL, prescreen_nonce = NULL, prescreen_reasons = NULL WHERE id = ?",
           )
           .bind(prId)
           .run();
@@ -2503,6 +2503,8 @@ datasetRoutes.get("/:id/publish/status", authMiddleware, async (c) => {
       denied_at: string | null;
       denied_reason: string | null;
       block_reason: string | null;
+      prescreen_status: string | null;
+      prescreen_reasons: string | null;
       prescreen_issue_url: string | null;
       steps_completed: string;
       current_step: string | null;
@@ -2521,6 +2523,25 @@ datasetRoutes.get("/:id/publish/status", authMiddleware, async (c) => {
 
   const repoName = request.github_repo?.split("/")[1];
 
+  // Pre-screen is advisory (#756): when it flagged a concern, surface it as a
+  // non-blocking advisory (the request is NOT blocked by it). Real blockers keep
+  // status='blocked' with a BLOCK_MESSAGE below.
+  let prescreenAdvisory: { source: "prescreen"; reasons: string[]; issue_url?: string } | undefined;
+  if (request.prescreen_status === "concern") {
+    let reasons: string[] = [];
+    try {
+      const parsed = JSON.parse(request.prescreen_reasons || "[]");
+      if (Array.isArray(parsed)) reasons = parsed.filter((r) => typeof r === "string");
+    } catch {
+      // malformed reasons JSON -> empty list (the advisory flag still shows)
+    }
+    prescreenAdvisory = {
+      source: "prescreen",
+      reasons,
+      ...(request.prescreen_issue_url ? { issue_url: request.prescreen_issue_url } : {}),
+    };
+  }
+
   return c.json({
     dataset_id: datasetId,
     status: request.status,
@@ -2536,11 +2557,7 @@ datasetRoutes.get("/:id/publish/status", authMiddleware, async (c) => {
           ci_url: `https://github.com/nemarDatasets/${repoName}/actions`,
         }
       : {}),
-    // Surface the pre-screen issue so `nemar dataset publish status` shows the
-    // fix list even if the block email was missed.
-    ...(request.block_reason === "prescreen_failed" && request.prescreen_issue_url
-      ? { prescreen_issue_url: request.prescreen_issue_url }
-      : {}),
+    ...(prescreenAdvisory ? { advisory: prescreenAdvisory } : {}),
     steps_completed: JSON.parse(request.steps_completed || "[]"),
     current_step: request.current_step,
     last_error: request.last_error,
