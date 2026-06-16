@@ -307,11 +307,32 @@ export async function buildPageBundle(
   datasetId: string,
   versionParam: string | null,
 ): Promise<PageBundle> {
-  // landing is cheap (one D1 query); compute it eagerly so we know which
+  // landing is cheap (two small D1 queries); compute it eagerly so we know which
   // version to ask the summary endpoint for. D1 failure here MUST propagate
   // — see loadVersionRowsForBundle docstring.
   const versionRows = await loadVersionRowsForBundle(env, datasetId);
-  const landingPayload = buildLandingPayload({ datasetId, versionRows });
+  // Latest-only archive state (#752) so the bundle's landing payload carries the
+  // skip/ready signal, matching the /<id>/ landing route (data.ts).
+  const archiveRow = await env.DB.prepare(
+    "SELECT archive_status, archive_size, archive_skip_reason FROM datasets WHERE dataset_id = ?",
+  )
+    .bind(datasetId)
+    .first<{
+      archive_status: string | null;
+      archive_size: number | null;
+      archive_skip_reason: string | null;
+    }>();
+  const landingPayload = buildLandingPayload({
+    datasetId,
+    versionRows,
+    archive: archiveRow
+      ? {
+          status: archiveRow.archive_status,
+          size: archiveRow.archive_size,
+          skip_reason: archiveRow.archive_skip_reason,
+        }
+      : undefined,
+  });
   const resolvedVersion = pickVersion(versionParam, versionRows);
 
   // Narrow `resolvedVersion` to a non-null local so the TS flow analyzer

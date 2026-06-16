@@ -77,10 +77,16 @@ async function loadPublishedDataset(env: Bindings, datasetId: string) {
     return null;
   }
   const row = await env.DB.prepare(
-    "SELECT dataset_id, visibility FROM datasets WHERE dataset_id = ?",
+    "SELECT dataset_id, visibility, archive_status, archive_size, archive_skip_reason FROM datasets WHERE dataset_id = ?",
   )
     .bind(datasetId)
-    .first<{ dataset_id: string; visibility: string }>();
+    .first<{
+      dataset_id: string;
+      visibility: string;
+      archive_status: string | null;
+      archive_size: number | null;
+      archive_skip_reason: string | null;
+    }>();
   if (!row) {
     console.log(`[data] reject: not in catalog datasetId=${datasetId}`);
     return null;
@@ -1117,7 +1123,15 @@ async function datasetRootResponse(
   if (!dataset) return notFound("Dataset not found");
 
   const versionRows = await loadVersionRows(env, datasetId);
-  const payload = buildLandingPayload({ datasetId, versionRows });
+  const payload = buildLandingPayload({
+    datasetId,
+    versionRows,
+    archive: {
+      status: dataset.archive_status,
+      size: dataset.archive_size,
+      skip_reason: dataset.archive_skip_reason,
+    },
+  });
 
   const accept = request.headers.get("accept");
   const formatParam = new URL(request.url).searchParams.get("format");

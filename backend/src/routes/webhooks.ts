@@ -2713,12 +2713,16 @@ webhooks.post("/zarr-ready", async (c) => {
  */
 interface ArchiveReadyBody {
   dataset_id: string;
-  status?: "ready" | "failed";
+  status?: "ready" | "failed" | "skipped";
   /** Bytes of the generated zip; persisted to datasets.archive_size on 'ready'. */
   size?: number;
   /** The published version the archive was built for (logged, not stored). */
   version?: string;
   error?: string;
+  /** Why archive generation was skipped (status='skipped', #752). Persisted to
+   *  datasets.archive_skip_reason; its presence is what marks a dataset
+   *  "archive skipped" (archive_status stays NULL). */
+  reason?: string;
 }
 
 webhooks.post("/archive-ready", async (c) => {
@@ -2746,8 +2750,8 @@ webhooks.post("/archive-ready", async (c) => {
   }
   // Require an explicit status: a missing/unknown value must not default to
   // 'ready' (that would mark a failed generation as having an archive).
-  if (body.status !== "ready" && body.status !== "failed") {
-    return c.json({ error: "status must be 'ready' or 'failed'" }, 400);
+  if (body.status !== "ready" && body.status !== "failed" && body.status !== "skipped") {
+    return c.json({ error: "status must be 'ready', 'failed', or 'skipped'" }, 400);
   }
   const status = body.status;
   if (status === "failed" && body.error) {
@@ -2765,14 +2769,32 @@ webhooks.post("/archive-ready", async (c) => {
   try {
     if (status === "ready") {
       const result = await c.env.DB.prepare(
+        // Clear archive_skip_reason: a real zip now exists, so a stale skip from
+        // an earlier (larger) version must not keep the UI on the direct-download
+        // recipe (#752).
         `UPDATE datasets
          SET archive_status = 'ready',
              archive_checked_at = datetime('now'),
              archive_size = ?,
-             archive_retry_count = 0
+             archive_retry_count = 0,
+             archive_skip_reason = NULL
          WHERE dataset_id = ?`,
       )
         .bind(typeof body.size === "number" ? body.size : null, body.dataset_id)
+        .run();
+      changed = result.meta.changes ?? 0;
+    } else if (status === "skipped") {
+      // Over the size/file-count policy (#752): the workflow built no zip and
+      // steers users to direct download. Record the reason; leave archive_status
+      // NULL (skipped is intentional, NOT a failed generation -> no auto-retry).
+      const result = await c.env.DB.prepare(
+        `UPDATE datasets
+         SET archive_skip_reason = ?,
+             archive_status = NULL,
+             archive_checked_at = datetime('now')
+         WHERE dataset_id = ?`,
+      )
+        .bind(body.reason ?? "archive skipped (size policy)", body.dataset_id)
         .run();
       changed = result.meta.changes ?? 0;
     } else {
@@ -2808,7 +2830,9 @@ webhooks.post("/archive-ready", async (c) => {
   // matches zero rows and persists nothing. Surface it as a 404 instead of a
   // silent 200 -- mirrors the zarr-ready / prescreen-result guards.
   if (changed === 0) {
-    console.error(`[archive-ready] UPDATE matched 0 rows dataset=${body.dataset_id} -- not in D1`);
+    console.error(
+      `[archive-ready] UPDATE matched 0 rows dataset=${body.dataset_id} status=${status} -- not in D1`,
+    );
     return c.json({ error: "Dataset not found" }, 404);
   }
 

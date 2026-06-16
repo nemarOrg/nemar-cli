@@ -1,0 +1,25 @@
+-- Migration 0043: archive_skip_reason for the >100GB skip-archive policy
+-- (epic #749, Phase 3 / #752).
+--
+-- run-generate-archive.yml has a 60-min cap and no size guard, so large
+-- datasets stream forever and get cancelled mid-zip (on007523 478GB cancelled
+-- at ~24%; on005752 680GB / on007524 321GB never produced a zip). Phase 3
+-- preflights the version manifest totals and, over threshold, SKIPS the zip and
+-- steers users to the range-resumable per-file direct download
+-- (data.nemar.org/<id>/<v>/manifest.json bytes_url).
+--
+-- Representing "skipped": rather than widen the 0036 CHECK on archive_status
+-- (which is `IN ('pending','ready','failed')` and cannot be ALTERed in place --
+-- adding a value would require recreating the central `datasets` table along
+-- with its datasets_fts external-content table + triggers, a high-risk op), we
+-- add a nullable reason column. A dataset is "archive skipped" iff
+-- archive_skip_reason IS NOT NULL; archive_status stays NULL for those rows.
+--
+--   archive_skip_reason  human-readable reason the archive was skipped
+--                        (e.g. "dataset 680.0 GB exceeds 100 GB archive limit"),
+--                        set by /webhooks/archive-ready status='skipped' and the
+--                        admin archive-sweep. NULL = not skipped.
+--
+-- Plain ADD COLUMN like 0036/0040-0042; not in datasets_fts or the embed-dirty
+-- trigger OF lists, so this touches neither the lexical index nor embeddings.
+ALTER TABLE datasets ADD COLUMN archive_skip_reason TEXT;
