@@ -2002,14 +2002,17 @@ webhooks.post("/prescreen-result", async (c) => {
       `[prescreen-result] S3 override for ${body.dataset_id}: ${body.verdict} -> ${effectiveVerdict}; stripped=${JSON.stringify(stripped)} s3_size=${s3?.totalSize ?? "unknown"}`,
     );
   }
-  const issueUrl = body.issue_url ?? null;
+  // `|| null` (not `?? null`): the advisory workflow sends issue_url="" now, and
+  // we want NULL in the column, not an empty string.
+  const issueUrl = body.issue_url || null;
 
+  let res: D1Result;
   if (flagged) {
     // Advisory (#756): record the concern but DO NOT block. The request stays in
     // the normal admin-review queue; the concern + reasons are surfaced in the
     // publish-status views. No status flip, no block email, no repo issue (the
     // workflow no longer opens one). Real blockers (BIDS) keep status='blocked'.
-    await c.env.DB.prepare(
+    res = await c.env.DB.prepare(
       `UPDATE publication_requests
           SET prescreen_status = 'concern', prescreen_reasons = ?, prescreen_issue_url = ?,
               prescreen_at = datetime('now'), updated_at = datetime('now')
@@ -2018,7 +2021,7 @@ webhooks.post("/prescreen-result", async (c) => {
       .bind(JSON.stringify(reasons), issueUrl, request.id)
       .run();
   } else {
-    await c.env.DB.prepare(
+    res = await c.env.DB.prepare(
       `UPDATE publication_requests
           SET prescreen_status = 'passed', prescreen_at = datetime('now'),
               updated_at = datetime('now')
@@ -2026,6 +2029,13 @@ webhooks.post("/prescreen-result", async (c) => {
     )
       .bind(request.id)
       .run();
+  }
+  if (res.meta.changes === 0) {
+    // One-shot guard: the screen was no longer 'pending' (a duplicate/late
+    // callback). Harmless, but log so a double-dispatch is explicable.
+    console.warn(
+      `[prescreen-result] no-op for ${body.dataset_id} request_id=${request.id}: prescreen_status was not 'pending' (duplicate callback?)`,
+    );
   }
 
   console.log(

@@ -212,8 +212,11 @@ const BLOCK_MESSAGES: Record<string, string> = {
     "BIDS validation has not run yet. Please wait for CI to complete, then re-request publication.",
   bids_validation_in_progress:
     "BIDS validation is currently running. Please wait for it to complete, then re-request publication.",
+  // Legacy only: the pre-screen no longer blocks (#756), so new rows never get
+  // this block_reason. Kept (without the now-removed repo-issue reference) so a
+  // pre-deploy 'blocked' row still renders a sensible message until re-request.
   prescreen_failed:
-    "The automated pre-screen found missing publication essentials (data, README, or dataset_description). See the issue opened on your dataset repository, address the gaps, then re-request publication.",
+    "The automated pre-screen flagged missing publication essentials (data, README, or dataset_description). Address the gaps and re-request publication; the pre-screen now runs as a non-blocking advisory.",
 };
 
 /**
@@ -2404,7 +2407,7 @@ datasetRoutes.post("/:id/publish/request", authMiddleware, async (c) => {
       );
       await db
         .prepare(
-          "UPDATE publication_requests SET prescreen_status = 'pending', prescreen_nonce = ?, prescreen_issue_url = NULL, prescreen_at = NULL, updated_at = datetime('now') WHERE id = ?",
+          "UPDATE publication_requests SET prescreen_status = 'pending', prescreen_nonce = ?, prescreen_issue_url = NULL, prescreen_reasons = NULL, prescreen_at = NULL, updated_at = datetime('now') WHERE id = ?",
         )
         .bind(nonce, prId)
         .run();
@@ -2532,8 +2535,9 @@ datasetRoutes.get("/:id/publish/status", authMiddleware, async (c) => {
     try {
       const parsed = JSON.parse(request.prescreen_reasons || "[]");
       if (Array.isArray(parsed)) reasons = parsed.filter((r) => typeof r === "string");
-    } catch {
+    } catch (err) {
       // malformed reasons JSON -> empty list (the advisory flag still shows)
+      console.error(`[publish-status] malformed prescreen_reasons for ${datasetId}:`, err);
     }
     prescreenAdvisory = {
       source: "prescreen",

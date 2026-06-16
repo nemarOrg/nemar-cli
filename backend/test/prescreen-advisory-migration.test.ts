@@ -99,4 +99,54 @@ describe("migration 0045 + advisory pre-screen SQL", () => {
     expect(row.prescreen_status).toBeNull();
     expect(row.prescreen_reasons).toBeNull();
   });
+
+  // The `passed` branch (mirrors webhooks.ts) must also never touch status.
+  const PASSED_SQL = `UPDATE publication_requests
+     SET prescreen_status = 'passed', prescreen_at = datetime('now'), updated_at = datetime('now')
+   WHERE id = ? AND prescreen_status = 'pending'`;
+
+  test("passed branch -> prescreen_status='passed' but status stays 'requested'", () => {
+    const id = insertPendingRequest(db, "nm000001");
+    const r = db.prepare(PASSED_SQL).run(id);
+    expect(r.changes).toBe(1);
+    const row = read(db, id);
+    expect(row.prescreen_status).toBe("passed");
+    expect(row.status).toBe("requested");
+    expect(row.block_reason).toBeNull();
+  });
+
+  test("passed branch is one-shot too (replay -> changes=0)", () => {
+    const id = insertPendingRequest(db, "nm000001");
+    db.prepare(PASSED_SQL).run(id);
+    expect(db.prepare(PASSED_SQL).run(id).changes).toBe(0);
+  });
+});
+
+// Mirrors the prescreen_reasons parse in datasets.ts / the CLIs: malformed or
+// non-array JSON degrades to [] (the advisory flag still shows), never throws.
+function parseReasons(raw: string | null): string[] {
+  let reasons: string[] = [];
+  try {
+    const parsed = JSON.parse(raw || "[]");
+    if (Array.isArray(parsed)) reasons = parsed.filter((r) => typeof r === "string");
+  } catch {
+    // degrade to []
+  }
+  return reasons;
+}
+
+describe("prescreen_reasons parse (advisory surfacing)", () => {
+  test("valid JSON string array round-trips", () => {
+    expect(parseReasons(JSON.stringify(["a", "b"]))).toEqual(["a", "b"]);
+  });
+  test("non-string array members are filtered", () => {
+    expect(parseReasons('["a", 7, null, "b"]')).toEqual(["a", "b"]);
+  });
+  test("malformed JSON -> [] (no throw)", () => {
+    expect(parseReasons("not json")).toEqual([]);
+  });
+  test("null / non-array -> []", () => {
+    expect(parseReasons(null)).toEqual([]);
+    expect(parseReasons('{"x":1}')).toEqual([]);
+  });
 });
