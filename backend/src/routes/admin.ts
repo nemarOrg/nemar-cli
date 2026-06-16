@@ -12,6 +12,7 @@ import { adminMiddleware, authMiddleware, ownerMiddleware } from "../middleware/
 import { LIVE_DATASETS, isLiveDataset } from "../constants";
 import { tombstoneUserStatement } from "../db/user-tombstone";
 import { SYSTEM_USER_ID } from "../lib/constants";
+import { shouldSkipArchive } from "../services/archive-policy";
 import {
   type RecipientGroup,
   type RecipientGroupOrUser,
@@ -1136,11 +1137,13 @@ adminRoutes.post("/datasets/archive-sweep", async (c) => {
   // concern and the data-plane download is public-only (loadPublishedDataset).
   // A bare throw here (e.g. migration 0036 not yet applied) would surface a
   // contextless 500, so handle it explicitly.
-  let candidates: { dataset_id: string }[];
+  let candidates: { dataset_id: string; file_size: number | null; total_files: number | null }[];
   try {
     const candidateRows = await db
       .prepare(
-        `SELECT dataset_id FROM datasets
+        // file_size/total_files (migration 0020) let us mark an oversized dataset
+        // with no archive as 'skipped' (#752) instead of just 'absent'.
+        `SELECT dataset_id, file_size, total_files FROM datasets
          WHERE owner_user_id != ${SYSTEM_USER_ID}
            AND (is_sandbox = 0 OR is_sandbox IS NULL)
            AND visibility = 'public'
@@ -1149,7 +1152,7 @@ adminRoutes.post("/datasets/archive-sweep", async (c) => {
          LIMIT ?`,
       )
       .bind(limit)
-      .all<{ dataset_id: string }>();
+      .all<{ dataset_id: string; file_size: number | null; total_files: number | null }>();
     candidates = candidateRows.results ?? [];
   } catch (err) {
     console.error("[archive-sweep] candidate query failed:", err);
@@ -1159,9 +1162,10 @@ adminRoutes.post("/datasets/archive-sweep", async (c) => {
   const s3 = getS3Config(c.env);
   let ready = 0;
   let absent = 0;
+  let skipped = 0;
   const errors: { dataset_id: string; error: string }[] = [];
 
-  for (const { dataset_id } of candidates) {
+  for (const { dataset_id, file_size, total_files } of candidates) {
     // Separate try/catch per phase so an error is attributed to the operation
     // that failed (S3 LIST vs D1 write), not lumped together.
     let size: number;
@@ -1181,15 +1185,28 @@ adminRoutes.post("/datasets/archive-sweep", async (c) => {
           .run();
         ready++;
       } else {
-        // Checked, no archive on S3: stamp checked_at so the sweep won't rescan,
-        // but leave archive_status NULL (absence is not a 'failed' generation).
-        // The dashboard treats a published dataset with status != 'ready' as
-        // "missing archive".
-        await db
-          .prepare("UPDATE datasets SET archive_checked_at = datetime('now') WHERE dataset_id = ?")
-          .bind(dataset_id)
-          .run();
-        absent++;
+        // Checked, no archive on S3. If the dataset is over the size policy
+        // (#752), record WHY no zip exists (archive_skip_reason) so the UI shows
+        // the direct-download recipe instead of "missing archive". Otherwise it's
+        // genuinely absent: stamp checked_at, leave archive_status NULL.
+        const decision = shouldSkipArchive({ totalBytes: file_size, totalFiles: total_files });
+        if (decision.skip) {
+          await db
+            .prepare(
+              "UPDATE datasets SET archive_skip_reason = ?, archive_checked_at = datetime('now') WHERE dataset_id = ?",
+            )
+            .bind(decision.reason ?? "archive skipped (size policy)", dataset_id)
+            .run();
+          skipped++;
+        } else {
+          await db
+            .prepare(
+              "UPDATE datasets SET archive_checked_at = datetime('now') WHERE dataset_id = ?",
+            )
+            .bind(dataset_id)
+            .run();
+          absent++;
+        }
       }
     } catch (err) {
       // S3 confirmed the size; only the D1 write failed. Note that so a re-run's
@@ -1227,6 +1244,7 @@ adminRoutes.post("/datasets/archive-sweep", async (c) => {
     checked: candidates.length,
     ready,
     absent,
+    skipped,
     errors,
     remaining: remainingRow?.n ?? null,
   });
