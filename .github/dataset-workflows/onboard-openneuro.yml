@@ -3,12 +3,21 @@
 # This workflow imports OpenNeuro datasets into NEMAR.
 # Deploy to: nemarDatasets/.github/workflows/onboard-openneuro.yml
 #
-# Creates the NEMAR dataset record, GitHub repo, copies annexed data
-# directly from OpenNeuro S3 to NEMAR S3 (no local download), seeds
-# .nemar/metadata.json, and pushes to nemarDatasets.
+# Three phases per dataset (nemarOrg/nemar-cli#750):
+#   prepare  - clone OpenNeuro, create the NEMAR record + repo, build the
+#              key->source manifest (staged to S3), seed metadata, push main.
+#   copy     - server-side copy OpenNeuro S3 -> NEMAR S3, SHARDED across N
+#              parallel jobs and resumable (already-copied objects are skipped).
+#              Bytes stay on AWS's backbone; the runner is not the bottleneck,
+#              so multi-TB datasets finish well within the per-job timeout.
+#   finalize - verify all objects landed, register git-annex keys, push the
+#              git-annex branch, deploy CI, and publish.
+#
+# copy/finalize run with `if: ${{ !cancelled() }}` so a failure for one dataset
+# (or one shard) doesn't block the others; finalize's re-list verification gates
+# correctness per dataset.
 #
 # Trigger manually with a comma-separated list of OpenNeuro dataset IDs.
-# Each dataset is processed in parallel via matrix strategy.
 
 name: Onboard OpenNeuro Dataset
 
@@ -20,11 +29,20 @@ on:
         required: true
         type: string
 
+# Prevent two simultaneous dispatches from clobbering each other's S3 staging.
+concurrency:
+  group: onboard-openneuro-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  SHARDS: "8"
+
 jobs:
   parse-ids:
     runs-on: ubuntu-latest
     outputs:
       matrix: ${{ steps.parse.outputs.matrix }}
+      shards: ${{ steps.parse.outputs.shards }}
     steps:
       - name: Parse dataset IDs and dedup against existing nemarDatasets repos
         id: parse
@@ -88,49 +106,115 @@ jobs:
 
           JSON=$(printf '%s\n' "${kept[@]}" | jq -R . | jq -s -c .)
           echo "matrix={\"dataset_id\":$JSON}" >> "$GITHUB_OUTPUT"
-          echo "Will import (${#kept[@]}): ${kept[*]}"
+
+          # Emit the shard index list [0..SHARDS-1] derived from env.SHARDS, so
+          # the copy matrix and the --shard denominator share ONE source of truth.
+          SHARD_JSON=$(seq 0 $((SHARDS - 1)) | jq -R 'tonumber' | jq -s -c .)
+          echo "shards=$SHARD_JSON" >> "$GITHUB_OUTPUT"
+
+          echo "Will import (${#kept[@]}): ${kept[*]} across ${SHARDS} copy shards"
           if [ ${#skipped[@]} -gt 0 ]; then
             echo "Skipped (${#skipped[@]}, already on nemarDatasets): ${skipped[*]}"
           fi
 
-  onboard:
+  prepare:
     needs: parse-ids
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     strategy:
       matrix: ${{ fromJson(needs.parse-ids.outputs.matrix) }}
       fail-fast: false
     steps:
       - name: Install git-annex
         run: sudo apt-get update && sudo apt-get install -y git-annex
-
       - name: Configure git
         run: |
           git config --global user.email "actions@github.com"
           git config --global user.name "GitHub Actions"
-
       - name: Install bun
         uses: oven-sh/setup-bun@v2
-
       - name: Install nemar CLI
         run: bun install -g nemar-cli
-
       - name: Authenticate nemar CLI
         env:
           NEMAR_API_KEY: ${{ secrets.NEMAR_ADMIN_API_KEY }}
         run: nemar auth login --key "$NEMAR_API_KEY"
-
-      - name: Import dataset
+      - name: Prepare import
         env:
           DATASET_ID: ${{ matrix.dataset_id }}
           GH_TOKEN: ${{ secrets.NEMAR_GITHUB_PAT }}
           AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-        # --local: run import in-process. --trust-upstream: skip_ci_check
-        # fallback at publication time when the bounded poll observes the
-        # CI was deployed but no validation workflow_run registered within
-        # the window. Safe for OpenNeuro because data is already BIDS-
-        # validated upstream. The flag does NOT bypass:
-        #   - CI deploy failure (still aborts; missing workflows == no safety net)
-        #   - persistent polling errors (still aborts; never observed state)
-        # See nemarOrg/nemar-cli#431 for the design rationale.
-        run: nemar admin import-openneuro "$DATASET_ID" --local --trust-upstream
+        run: nemar admin import-openneuro "$DATASET_ID" --phase prepare --trust-upstream
+
+  copy:
+    needs: [parse-ids, prepare]
+    # Run even if a prepare leg failed: per-dataset isolation. copyShard reads
+    # the manifest from S3; datasets whose prepare failed have none and that
+    # shard fails harmlessly while the rest proceed.
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    # Server-side copies stay on AWS's backbone; 350 min (< the 360 hard cap)
+    # is ample headroom per shard for even multi-TB datasets.
+    timeout-minutes: 350
+    strategy:
+      fail-fast: false
+      max-parallel: 20
+      matrix:
+        dataset_id: ${{ fromJson(needs.parse-ids.outputs.matrix).dataset_id }}
+        # Shard index list derived from env.SHARDS by parse-ids (single source of
+        # truth with the --shard denominator below). Each leg copies its slice.
+        shard: ${{ fromJson(needs.parse-ids.outputs.shards) }}
+    steps:
+      - name: Install bun
+        uses: oven-sh/setup-bun@v2
+      - name: Install nemar CLI
+        run: bun install -g nemar-cli
+      - name: Authenticate nemar CLI
+        env:
+          NEMAR_API_KEY: ${{ secrets.NEMAR_ADMIN_API_KEY }}
+        run: nemar auth login --key "$NEMAR_API_KEY"
+      - name: Copy shard
+        env:
+          DATASET_ID: ${{ matrix.dataset_id }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        run: nemar admin import-openneuro "$DATASET_ID" --phase copy --shard "${{ matrix.shard }}/${{ env.SHARDS }}" --trust-upstream
+
+  finalize:
+    needs: [parse-ids, copy]
+    # Run even if some copy shards failed: finalize's re-list verification gates
+    # each dataset independently, so complete datasets still publish.
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    strategy:
+      matrix: ${{ fromJson(needs.parse-ids.outputs.matrix) }}
+      fail-fast: false
+    steps:
+      - name: Install git-annex
+        run: sudo apt-get update && sudo apt-get install -y git-annex
+      - name: Configure git
+        run: |
+          git config --global user.email "actions@github.com"
+          git config --global user.name "GitHub Actions"
+      - name: Install bun
+        uses: oven-sh/setup-bun@v2
+      - name: Install nemar CLI
+        run: bun install -g nemar-cli
+      - name: Authenticate nemar CLI
+        env:
+          NEMAR_API_KEY: ${{ secrets.NEMAR_ADMIN_API_KEY }}
+        run: nemar auth login --key "$NEMAR_API_KEY"
+      - name: Finalize import
+        # --trust-upstream: skip_ci_check fallback at publication time when the
+        # bounded poll observes CI deployed but no validation workflow_run
+        # registered within the window. Safe for OpenNeuro (BIDS-validated
+        # upstream). Does NOT bypass CI deploy failure or persistent poll errors.
+        # See nemarOrg/nemar-cli#431.
+        env:
+          DATASET_ID: ${{ matrix.dataset_id }}
+          GH_TOKEN: ${{ secrets.NEMAR_GITHUB_PAT }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        run: nemar admin import-openneuro "$DATASET_ID" --phase finalize --trust-upstream
