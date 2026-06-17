@@ -13,6 +13,7 @@ import {
   mkdtempSync,
   readFileSync,
   readdirSync,
+  readlinkSync,
   renameSync,
   writeFileSync,
 } from "node:fs";
@@ -195,6 +196,111 @@ function mapDatasetId(openneuroId: string): string {
     );
   }
   return `on${match[1]}`;
+}
+
+/**
+ * True for dataset-level metadata files that NEMAR policy keeps in git and
+ * never annexes. Mirrors the `annex.largefiles` exclusion in the validated
+ * upload workflow (`*.tsv|*.json|*.md|*.txt|*.yml|*.yaml`, `README*`,
+ * `LICENSE*`, `CHANGES*`, `.bidsignore`, `.gitignore`). Case-insensitive on the
+ * name prefixes to match `ensureReadmeMd`'s tolerance.
+ */
+export function isNeverAnnexedMetadata(filename: string): boolean {
+  const lower = filename.toLowerCase();
+  if (lower.startsWith("readme") || lower.startsWith("license") || lower.startsWith("changes")) {
+    return true;
+  }
+  if (lower === ".bidsignore" || lower === ".gitignore") return true;
+  return /\.(tsv|json|md|txt|yml|yaml)$/.test(lower);
+}
+
+/**
+ * Find dataset-ROOT metadata files that are git-annex symlinks.
+ *
+ * Most OpenNeuro datasets keep small metadata in git, but some annex even
+ * `dataset_description.json` / `README` / `CHANGES` (e.g. ds007964). A plain
+ * clone leaves those as dangling annex symlinks, so reading them fails and the
+ * committed tree would carry annex pointers instead of JSON. We scan only the
+ * root (bounded fetch; per-subject sidecars stay annexed like data) for
+ * symlinks that point into `.git/annex/objects` and match the never-annex
+ * policy. Returns the sorted file names. Filesystem errors degrade to [].
+ */
+export function findAnnexedRootMetadata(datasetPath: string): string[] {
+  let entries: Dirent[];
+  try {
+    entries = readdirSync(datasetPath, { withFileTypes: true });
+  } catch (err) {
+    // A missing dir is a precondition the caller surfaces with a clearer error
+    // (readBidsDescription); any other fs failure (e.g. EACCES) should not be
+    // silently turned into "no annexed metadata", so re-throw it.
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code === "ENOENT" || code === "ENOTDIR") return [];
+    throw new Error(
+      `Cannot scan ${datasetPath} for annexed metadata: ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
+  const found: string[] = [];
+  for (const e of entries) {
+    if (!e.isSymbolicLink()) continue;
+    if (!isNeverAnnexedMetadata(e.name)) continue;
+    try {
+      const target = readlinkSync(join(datasetPath, e.name));
+      if (target.includes("annex/objects")) found.push(e.name);
+    } catch {
+      // Unreadable symlink — skip; a genuinely missing required file surfaces
+      // later in readBidsDescription with a precise error.
+    }
+  }
+  return found.sort();
+}
+
+/**
+ * Fetch the content of any annexed root metadata files from the public
+ * OpenNeuro remote and convert them to regular git blobs, so prepare can read
+ * `dataset_description.json` and downstream tree-readers (website, enrichment,
+ * DataCite) get real JSON rather than an annex pointer. No-op for the common
+ * case where the metadata is already committed in git. See #768.
+ *
+ * Sequence (validated against ds007964): enableremote s3-PUBLIC -> annex get ->
+ * annex unannex -> stage with annex.largefiles=nothing (so the repo's largefiles
+ * rules can't re-annex them on the next add). Returns the un-annexed file names.
+ */
+export async function ensureRootMetadataUnannexed(datasetPath: string): Promise<string[]> {
+  const annexed = findAnnexedRootMetadata(datasetPath);
+  if (annexed.length === 0) return [];
+
+  const enable = await runCommand(["git", "annex", "enableremote", "s3-PUBLIC"], {
+    cwd: datasetPath,
+  });
+  if (enable.exitCode !== 0) {
+    throw new Error(
+      `Failed to enable s3-PUBLIC remote to fetch annexed metadata (${annexed.join(", ")}): ${enable.stderr.trim()}`,
+    );
+  }
+  const get = await runCommand(["git", "annex", "get", ...annexed], { cwd: datasetPath });
+  if (get.exitCode !== 0) {
+    throw new Error(
+      `Failed to fetch annexed metadata content (${annexed.join(", ")}) from OpenNeuro S3: ${get.stderr.trim()}`,
+    );
+  }
+  const unannex = await runCommand(["git", "annex", "unannex", ...annexed], { cwd: datasetPath });
+  if (unannex.exitCode !== 0) {
+    throw new Error(
+      `Failed to un-annex metadata (${annexed.join(", ")}): ${unannex.stderr.trim()}`,
+    );
+  }
+  const add = await runCommand(["git", "-c", "annex.largefiles=nothing", "add", ...annexed], {
+    cwd: datasetPath,
+  });
+  if (add.exitCode !== 0) {
+    // unannex already converted these to regular files on disk; they are just
+    // not staged. Give the exact recovery command so a transient failure (e.g.
+    // an index.lock) is fixable without re-cloning.
+    throw new Error(
+      `Failed to stage un-annexed metadata (${annexed.join(", ")}): ${add.stderr.trim()}. The files are already regular files on disk; recover with: git -C ${datasetPath} -c annex.largefiles=nothing add ${annexed.join(" ")}`,
+    );
+  }
+  return annexed;
 }
 
 /**
@@ -554,6 +660,29 @@ export async function prepareImport(
     process.exit(1);
   }
 
+  // Some OpenNeuro datasets annex their dataset-level metadata
+  // (dataset_description.json, README, CHANGES; e.g. ds007964). A plain clone
+  // leaves those as dangling annex symlinks, so the read below would fail and
+  // the committed tree would carry pointers instead of JSON. Fetch + un-annex
+  // the root metadata first so it lands as regular git blobs. No-op for the
+  // common case. See #768.
+  const metaFixSpinner = ora("Normalizing dataset metadata...").start();
+  try {
+    const unannexed = await ensureRootMetadataUnannexed(datasetPath);
+    if (unannexed.length > 0) {
+      metaFixSpinner.succeed(
+        `Un-annexed ${unannexed.length} metadata file(s): ${unannexed.join(", ")}`,
+      );
+    } else {
+      metaFixSpinner.stop();
+    }
+  } catch (err) {
+    metaFixSpinner.fail(
+      `Failed to normalize annexed metadata: ${err instanceof Error ? err.message : String(err)}`,
+    );
+    process.exit(1);
+  }
+
   // Read BIDS metadata and extract OpenNeuro DOI once for reuse
   const bidsDesc = readBidsDescription(datasetPath);
   const datasetName = (bidsDesc.Name as string) || openneuroId;
@@ -688,6 +817,11 @@ export async function prepareImport(
     );
     process.exit(1);
   }
+  // Any metadata un-annexed above (ensureRootMetadataUnannexed) is already
+  // staged as a regular blob with annex disabled and is picked up by the
+  // pathspec-less `git commit` below. It is deliberately NOT added to
+  // pathsToStage: a plain `git add` here would re-annex it per the repo's
+  // largefiles policy, undoing the un-annex.
   const pathsToStage = [".nemar/metadata.json"];
   if (readmeOutcome.kind === "renamed") {
     pathsToStage.push("README", "README.md");
@@ -842,10 +976,14 @@ export async function finalizeImport(
     verifySpinner.succeed(`Verified ${manifest.items.length} objects present`);
 
     // Re-clone, enable nemar-s3 (reuses the prepare uuid), register keys, push.
+    // useGitHubToken: this runs on a CI runner that has GH_TOKEN (HTTPS App
+    // token) but no SSH key, so a raw `git@github.com:` clone of the private
+    // NEMAR repo fails with "Permission denied (publickey)" (#768).
     const cloneSpinner = ora("Re-cloning for git-annex finalize...").start();
     const cloneResult = await cloneDataset(
       `git@github.com:nemarDatasets/${nemarId}.git`,
       datasetPath,
+      { useGitHubToken: true },
     );
     if (!cloneResult.success) {
       cloneSpinner.fail(`Failed to clone ${nemarId}: ${cloneResult.error}`);

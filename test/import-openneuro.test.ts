@@ -11,7 +11,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -19,6 +19,8 @@ import {
   decideSkipCiCheck,
   detectModalitiesFromDataset,
   ensureReadmeMd,
+  findAnnexedRootMetadata,
+  isNeverAnnexedMetadata,
   seedMetadata,
 } from "../src/lib/import-openneuro";
 
@@ -300,9 +302,7 @@ describe("seedMetadata (#512)", () => {
     seedMetadata(tmpRoot, "on000001", "ds000001", { Name: "x" }, null);
     // metadata.json appears, config.json survives.
     expect(readMeta().dataset_id).toBe("on000001");
-    const config = JSON.parse(
-      readFileSync(join(tmpRoot, ".nemar", "config.json"), "utf-8"),
-    );
+    const config = JSON.parse(readFileSync(join(tmpRoot, ".nemar", "config.json"), "utf-8"));
     expect(config.foo).toBe("bar");
   });
 });
@@ -475,5 +475,121 @@ describe("ensureReadmeMd (#642)", () => {
     const outcome = ensureReadmeMd(tmpRoot, "ds000117", null);
 
     expect(outcome).toEqual({ kind: "created", path: "README.md" });
+  });
+});
+
+describe("isNeverAnnexedMetadata (#768)", () => {
+  test("dataset-level metadata files match NEMAR never-annex policy", () => {
+    for (const name of [
+      "dataset_description.json",
+      "participants.tsv",
+      "participants.json",
+      "task-rsvp_events.json",
+      "README",
+      "README.md",
+      "README.txt",
+      "Readme.rst",
+      "LICENSE",
+      "license.txt",
+      "CHANGES",
+      "CHANGES.md",
+      ".bidsignore",
+      ".gitignore",
+      "config.yml",
+      "config.yaml",
+    ]) {
+      expect(isNeverAnnexedMetadata(name)).toBe(true);
+    }
+  });
+
+  test("data files are NOT metadata (stay annexed)", () => {
+    for (const name of [
+      "sub-01_task-rsvp_eeg.edf",
+      "sub-01_task-rsvp_eeg.set",
+      "data.fif",
+      "recording.bdf",
+      "scan.nii.gz",
+      "blob.bin",
+    ]) {
+      expect(isNeverAnnexedMetadata(name)).toBe(false);
+    }
+  });
+
+  test("uppercase extensions are matched (policy is case-insensitive)", () => {
+    for (const name of ["dataset.JSON", "participants.TSV", "config.YAML", "notes.TXT"]) {
+      expect(isNeverAnnexedMetadata(name)).toBe(true);
+    }
+  });
+
+  test("CHANGELOG is not CHANGES — prefix rule is prefix-only", () => {
+    // `changelog` is a different file and must NOT be un-annexed by the prefix
+    // rule; `changeslog.bin` documents that the rule is prefix-anchored, not
+    // word-boundary-anchored.
+    expect(isNeverAnnexedMetadata("CHANGELOG")).toBe(false);
+    expect(isNeverAnnexedMetadata("changelog")).toBe(false);
+    expect(isNeverAnnexedMetadata("changeslog.bin")).toBe(true);
+  });
+});
+
+describe("findAnnexedRootMetadata (#768)", () => {
+  let tmpRoot: string;
+
+  beforeEach(() => {
+    tmpRoot = mkdtempSync(join(tmpdir(), "annexed-meta-"));
+  });
+  afterEach(() => {
+    rmSync(tmpRoot, { recursive: true, force: true });
+  });
+
+  // A git-annex locked file is a symlink whose target embeds the annex object
+  // path. We reproduce that shape exactly (the target need not resolve — a
+  // freshly cloned, un-fetched annex file is a *dangling* symlink, which is the
+  // ds007964 failure case).
+  const annexLink = (name: string) =>
+    symlinkSync(
+      ".git/annex/objects/Qx/QV/SHA256E-s603--deadbeef.json/SHA256E-s603--deadbeef.json",
+      join(tmpRoot, name),
+    );
+
+  test("detects annexed root metadata symlinks (dangling), sorted", () => {
+    annexLink("dataset_description.json");
+    annexLink("README.txt");
+    annexLink("CHANGES");
+    expect(findAnnexedRootMetadata(tmpRoot)).toEqual([
+      "CHANGES",
+      "README.txt",
+      "dataset_description.json",
+    ]);
+  });
+
+  test("ignores regular metadata files already committed in git", () => {
+    writeFileSync(join(tmpRoot, "dataset_description.json"), "{}\n");
+    writeFileSync(join(tmpRoot, "participants.tsv"), "id\n");
+    expect(findAnnexedRootMetadata(tmpRoot)).toEqual([]);
+  });
+
+  test("mixed: only annexed metadata is returned, regular files left alone", () => {
+    // The realistic ds007964 shape: some metadata annexed, some plain git.
+    annexLink("dataset_description.json");
+    writeFileSync(join(tmpRoot, "participants.tsv"), "id\n");
+    writeFileSync(join(tmpRoot, "README.md"), "# readme\n");
+    expect(findAnnexedRootMetadata(tmpRoot)).toEqual(["dataset_description.json"]);
+  });
+
+  test("ignores annexed DATA symlinks (only metadata is un-annexed)", () => {
+    symlinkSync(
+      ".git/annex/objects/aa/bb/SHA256E-s1--x.edf/SHA256E-s1--x.edf",
+      join(tmpRoot, "sub-01_eeg.edf"),
+    );
+    expect(findAnnexedRootMetadata(tmpRoot)).toEqual([]);
+  });
+
+  test("ignores symlinks that do not point into the annex", () => {
+    symlinkSync("../somewhere/dataset_description.json", join(tmpRoot, "dataset_description.json"));
+    expect(findAnnexedRootMetadata(tmpRoot)).toEqual([]);
+  });
+
+  test("missing directory degrades to empty list", () => {
+    expect(findAnnexedRootMetadata(join(tmpRoot, "does-not-exist"))).toEqual([]);
   });
 });
