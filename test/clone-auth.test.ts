@@ -31,8 +31,10 @@ describe("resolveGitHubCloneAuth", () => {
     expect(r.credentialHelper).toBeUndefined();
   });
 
-  test("SSH URL + malformed token (empty / whitespace) -> SSH passthrough", () => {
-    for (const bad of ["", "   ", "tok en", "tok\nen", "\t"]) {
+  test("SSH URL + malformed token (empty / whitespace / single-quote) -> SSH passthrough", () => {
+    // A single quote would break out of the printf credential helper's quoting,
+    // so it's rejected the same as whitespace rather than emitting a broken helper.
+    for (const bad of ["", "   ", "tok en", "tok\nen", "\t", "tok'en", "'"]) {
       const r = resolveGitHubCloneAuth(ssh, bad);
       expect(r.url).toBe(ssh);
       expect(r.credentialHelper).toBeUndefined();

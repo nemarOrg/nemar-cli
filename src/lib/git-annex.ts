@@ -1465,8 +1465,9 @@ export function githubTokenCredentialHelper(token: string): string {
  * fails with "Permission denied (publickey)" (nemarOrg/nemar-cli#768). Without a
  * usable token the SSH URL is returned unchanged so a developer's own key still
  * works. Non-SSH URLs (e.g. the public OpenNeuro HTTPS clone) pass through
- * untouched. A malformed token (empty or containing whitespace) is treated as
- * "no token" so a broken credential helper is never baked into the clone.
+ * untouched. A malformed token (empty, containing whitespace, or containing a
+ * single quote that would break out of the `printf` helper string) is treated
+ * as "no token" so a broken credential helper is never baked into the clone.
  */
 export function resolveGitHubCloneAuth(
   repoUrl: string,
@@ -1474,7 +1475,9 @@ export function resolveGitHubCloneAuth(
 ): { url: string; credentialHelper?: string } {
   if (!repoUrl.startsWith("git@github.com:")) return { url: repoUrl };
   const trimmed = token?.trim();
-  if (!trimmed || /\s/.test(trimmed)) return { url: repoUrl };
+  // Whitespace or a single quote means the token can't be safely embedded in the
+  // printf credential helper; treat as no token rather than emit a broken helper.
+  if (!trimmed || /[\s']/.test(trimmed)) return { url: repoUrl };
   const repoPath = repoUrl.replace("git@github.com:", "");
   return {
     url: `https://github.com/${repoPath}`,
@@ -1502,13 +1505,26 @@ export async function cloneDataset(
     let credentialHelper: string | undefined;
     if (options.useGitHubToken) {
       let token = process.env.GH_TOKEN?.trim() || null;
+      let ghError: string | undefined;
       if (!token) {
         const gh = await getGitHubToken();
         token = gh.token;
+        ghError = gh.error;
       }
       const auth = resolveGitHubCloneAuth(repoUrl, token);
       cloneUrl = auth.url;
       credentialHelper = auth.credentialHelper;
+      // For a private SSH URL the whole point of useGitHubToken is to avoid the
+      // raw SSH clone that fails on a keyless CI runner (#768). If we could not
+      // build a credential helper (no/malformed token), fail loudly here instead
+      // of falling back to SSH and surfacing a cryptic "Permission denied
+      // (publickey)" three steps later.
+      if (repoUrl.startsWith("git@github.com:") && !credentialHelper) {
+        return {
+          success: false,
+          error: `No usable GitHub token for authenticated clone of ${repoUrl} (GH_TOKEN unset/malformed${ghError ? `; gh CLI: ${ghError}` : ""}). Set GH_TOKEN on this runner.`,
+        };
+      }
     }
 
     // Inject the credential helper via GIT_CONFIG_* (not argv/URL) so the token
@@ -1532,12 +1548,20 @@ export async function cloneDataset(
     }
 
     // Persist the credential helper so subsequent pushes to origin authenticate;
-    // the GIT_CONFIG_* env above only covered the clone process itself.
+    // the GIT_CONFIG_* env above only covered the clone process itself. If this
+    // write fails the later push would fail with a misleading auth error, so
+    // surface it here.
     if (credentialHelper) {
-      await runCommand(
+      const { exitCode: cfgCode, stderr: cfgStderr } = await runCommand(
         ["git", "config", "credential.https://github.com.helper", credentialHelper],
         { cwd: outputPath },
       );
+      if (cfgCode !== 0) {
+        return {
+          success: false,
+          error: `Cloned but failed to persist the credential helper (later pushes would fail to authenticate): ${cfgStderr.trim() || "git config returned non-zero"}`,
+        };
+      }
     }
 
     // Initialize git-annex in the cloned repo
@@ -1564,7 +1588,7 @@ export async function cloneDataset(
 
     return { success: true };
   } catch (e) {
-    return { success: false, error: (e as Error).message };
+    return { success: false, error: e instanceof Error ? e.message : String(e) };
   }
 }
 

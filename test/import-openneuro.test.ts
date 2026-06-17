@@ -514,6 +514,21 @@ describe("isNeverAnnexedMetadata (#768)", () => {
       expect(isNeverAnnexedMetadata(name)).toBe(false);
     }
   });
+
+  test("uppercase extensions are matched (policy is case-insensitive)", () => {
+    for (const name of ["dataset.JSON", "participants.TSV", "config.YAML", "notes.TXT"]) {
+      expect(isNeverAnnexedMetadata(name)).toBe(true);
+    }
+  });
+
+  test("CHANGELOG is not CHANGES — prefix rule is prefix-only", () => {
+    // `changelog` is a different file and must NOT be un-annexed by the prefix
+    // rule; `changeslog.bin` documents that the rule is prefix-anchored, not
+    // word-boundary-anchored.
+    expect(isNeverAnnexedMetadata("CHANGELOG")).toBe(false);
+    expect(isNeverAnnexedMetadata("changelog")).toBe(false);
+    expect(isNeverAnnexedMetadata("changeslog.bin")).toBe(true);
+  });
 });
 
 describe("findAnnexedRootMetadata (#768)", () => {
@@ -551,6 +566,14 @@ describe("findAnnexedRootMetadata (#768)", () => {
     writeFileSync(join(tmpRoot, "dataset_description.json"), "{}\n");
     writeFileSync(join(tmpRoot, "participants.tsv"), "id\n");
     expect(findAnnexedRootMetadata(tmpRoot)).toEqual([]);
+  });
+
+  test("mixed: only annexed metadata is returned, regular files left alone", () => {
+    // The realistic ds007964 shape: some metadata annexed, some plain git.
+    annexLink("dataset_description.json");
+    writeFileSync(join(tmpRoot, "participants.tsv"), "id\n");
+    writeFileSync(join(tmpRoot, "README.md"), "# readme\n");
+    expect(findAnnexedRootMetadata(tmpRoot)).toEqual(["dataset_description.json"]);
   });
 
   test("ignores annexed DATA symlinks (only metadata is un-annexed)", () => {

@@ -9,7 +9,6 @@
 import {
   type Dirent,
   existsSync,
-  lstatSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -230,8 +229,15 @@ export function findAnnexedRootMetadata(datasetPath: string): string[] {
   let entries: Dirent[];
   try {
     entries = readdirSync(datasetPath, { withFileTypes: true });
-  } catch {
-    return [];
+  } catch (err) {
+    // A missing dir is a precondition the caller surfaces with a clearer error
+    // (readBidsDescription); any other fs failure (e.g. EACCES) should not be
+    // silently turned into "no annexed metadata", so re-throw it.
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code === "ENOENT" || code === "ENOTDIR") return [];
+    throw new Error(
+      `Cannot scan ${datasetPath} for annexed metadata: ${err instanceof Error ? err.message : String(err)}`,
+    );
   }
   const found: string[] = [];
   for (const e of entries) {
@@ -287,8 +293,11 @@ export async function ensureRootMetadataUnannexed(datasetPath: string): Promise<
     cwd: datasetPath,
   });
   if (add.exitCode !== 0) {
+    // unannex already converted these to regular files on disk; they are just
+    // not staged. Give the exact recovery command so a transient failure (e.g.
+    // an index.lock) is fixable without re-cloning.
     throw new Error(
-      `Failed to stage un-annexed metadata (${annexed.join(", ")}): ${add.stderr.trim()}`,
+      `Failed to stage un-annexed metadata (${annexed.join(", ")}): ${add.stderr.trim()}. The files are already regular files on disk; recover with: git -C ${datasetPath} -c annex.largefiles=nothing add ${annexed.join(" ")}`,
     );
   }
   return annexed;
@@ -808,6 +817,11 @@ export async function prepareImport(
     );
     process.exit(1);
   }
+  // Any metadata un-annexed above (ensureRootMetadataUnannexed) is already
+  // staged as a regular blob with annex disabled and is picked up by the
+  // pathspec-less `git commit` below. It is deliberately NOT added to
+  // pathsToStage: a plain `git add` here would re-annex it per the repo's
+  // largefiles policy, undoing the un-annex.
   const pathsToStage = [".nemar/metadata.json"];
   if (readmeOutcome.kind === "renamed") {
     pathsToStage.push("README", "README.md");
