@@ -4000,6 +4000,18 @@ Examples:
         console.log(`\n  ${chalk.red("Reason:")} ${result.denied_reason}`);
       }
 
+      // Non-blocking pre-screen advisory (#756): a concern to address, but it
+      // does NOT block the request (yellow, not red).
+      if (result.advisory?.source === "prescreen") {
+        console.log(`\n  ${chalk.yellow("Pre-screen advisory")} ${chalk.dim("(non-blocking):")}`);
+        for (const reason of result.advisory.reasons) {
+          console.log(`    ${chalk.yellow("-")} ${reason}`);
+        }
+        if (result.advisory.issue_url) {
+          console.log(chalk.dim(`    ${result.advisory.issue_url}`));
+        }
+      }
+
       if (result.status === "approving") {
         // Source of truth is `PUBLICATION_STEPS` in src/lib/api.ts, which
         // mirrors the backend orchestrator. Showing fewer steps here than

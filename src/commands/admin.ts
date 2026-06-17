@@ -63,6 +63,7 @@ import {
   getDoiInfo,
   getEmailPreferences,
   getFleetDrift,
+  getImportStatus,
   getSummaryCoverage,
   getSyncStatus,
   listAdminNotices,
@@ -72,8 +73,10 @@ import {
   publishDataset,
   reindexBulk,
   reindexDataset,
+  retryImport,
   revalidateDataset,
   revokeUser,
+  rollbackImport,
   sendBroadcast,
   submitEnrichment,
   syncCi,
@@ -1858,6 +1861,19 @@ Examples:
             `    ${chalk.yellow(">")} ${req.current_step.replace(/_/g, " ")}${req.last_error ? chalk.red(` (${req.last_error})`) : ""}`,
           );
         }
+        // Non-blocking pre-screen advisory (#756): a concern for the admin to
+        // weigh before approving, NOT a block.
+        if (req.prescreen_status === "concern") {
+          let reasons: string[] = [];
+          try {
+            const parsed = JSON.parse(req.prescreen_reasons || "[]");
+            if (Array.isArray(parsed)) reasons = parsed.filter((x) => typeof x === "string");
+          } catch {
+            // malformed -> show the flag without inline reasons
+          }
+          const summary = reasons.length ? reasons.join("; ") : "see pre-screen";
+          console.log(`    ${chalk.yellow("! pre-screen advisory:")} ${chalk.dim(summary)}`);
+        }
       }
       console.log();
     } catch (error) {
@@ -2756,6 +2772,14 @@ adminCommand
     "--trust-upstream",
     "If BIDS validation does not register within the bounded poll, fall back to skip_ci_check=true at approval. OpenNeuro data is pre-validated upstream so this is the recommended setting for OpenNeuro imports (#431).",
   )
+  .option(
+    "--phase <phase>",
+    "Run a single import phase in-process (prepare|copy|finalize) for the sharded CI workflow. State passes between phases via S3 staging. Implies in-process execution.",
+  )
+  .option(
+    "--shard <i/N>",
+    "Copy-phase only: process shard i of N (0-indexed), e.g. 0/8. Required with --phase copy.",
+  )
   .action(
     async (
       openneuroIds: string,
@@ -2764,6 +2788,8 @@ adminCommand
         dir?: string;
         skipData?: boolean;
         trustUpstream?: boolean;
+        phase?: string;
+        shard?: string;
       },
     ) => {
       if (!requireAuth()) return;
@@ -2783,9 +2809,58 @@ adminCommand
         }
       }
 
-      if ((options.dir || options.skipData) && !options.local) {
-        console.error(chalk.red("--dir and --skip-data require --local flag"));
+      if ((options.dir || options.skipData) && !options.local && !options.phase) {
+        console.error(chalk.red("--dir and --skip-data require --local or --phase"));
         process.exit(1);
+      }
+
+      // Single-phase execution for the sharded CI workflow (prepare/copy/finalize).
+      if (options.phase) {
+        const validPhases = ["prepare", "copy", "finalize"];
+        if (!validPhases.includes(options.phase)) {
+          console.error(
+            chalk.red(`Invalid --phase "${options.phase}". Expected prepare|copy|finalize.`),
+          );
+          process.exit(1);
+        }
+        if (ids.length > 1) {
+          console.error(chalk.red("--phase only supports a single dataset ID"));
+          process.exit(1);
+        }
+        if (options.shard && options.phase !== "copy") {
+          console.error(chalk.red("--shard is only valid with --phase copy"));
+          process.exit(1);
+        }
+        if (options.phase === "copy" && !options.shard) {
+          console.error(chalk.red("--phase copy requires --shard i/N (e.g. --shard 0/8)"));
+          process.exit(1);
+        }
+
+        const { prepareImport, copyShard, finalizeImport } = await import(
+          "../lib/import-openneuro.js"
+        );
+        const { parseShardArg } = await import("../lib/s3-server-copy.js");
+        const opts = {
+          workDir: options.dir,
+          skipData: options.skipData,
+          trustUpstream: options.trustUpstream,
+          persistStaging: true,
+        };
+        try {
+          if (options.phase === "prepare") {
+            await prepareImport(ids[0], opts);
+          } else if (options.phase === "copy") {
+            // biome-ignore lint/style/noNonNullAssertion: guarded above (copy requires --shard)
+            await copyShard(ids[0], parseShardArg(options.shard!), opts);
+          } else {
+            await finalizeImport(ids[0], opts);
+          }
+        } catch (error) {
+          const msg = error instanceof Error ? error.message : String(error);
+          console.error(chalk.red(`\n[${options.phase}] failed: ${msg}`));
+          process.exit(1);
+        }
+        return;
       }
 
       if (options.local) {
@@ -3002,6 +3077,130 @@ syncCommand
   });
 
 adminCommand.addCommand(syncCommand);
+
+// ============================================================================
+// Import jobs (issue #754)
+// ============================================================================
+
+const importCommand = new Command("import").description("View and recover OpenNeuro import jobs");
+
+importCommand
+  .command("status")
+  .description("Show OpenNeuro import job state (failed/quarantined first)")
+  .argument("[dataset-id]", "Filter to one dataset id (e.g., on007523)")
+  .option("-s, --status <status>", "Filter by status (failed, quarantined, copying, ...)")
+  .action(async (datasetId: string | undefined, options: { status?: string }) => {
+    if (!requireAuth()) return;
+
+    const spinner = ora("Fetching import status...").start();
+    try {
+      const result = await getImportStatus(options.status);
+      spinner.stop();
+
+      let rows = result.imports;
+      if (datasetId) rows = rows.filter((r) => r.dataset_id === datasetId);
+
+      const counts = result.by_status;
+      console.log(chalk.bold(`\nImport Jobs (${result.total})\n`));
+      console.log(
+        `  ${chalk.yellow(`in-flight ${(counts.preparing ?? 0) + (counts.copying ?? 0) + (counts.finalizing ?? 0)}`)}  ${chalk.green(`complete ${counts.complete ?? 0}`)}  ${chalk.red(`failed ${counts.failed ?? 0}`)}  ${chalk.red(`quarantined ${counts.quarantined ?? 0}`)}  ${chalk.dim(`rolled_back ${counts.rolled_back ?? 0}`)}\n`,
+      );
+
+      if (rows.length === 0) {
+        console.log(chalk.dim("  No import jobs match."));
+        return;
+      }
+
+      console.log(
+        chalk.dim(
+          `  ${"ID".padEnd(12)} ${"Source".padEnd(12)} ${"Stage".padEnd(10)} ${"Status".padEnd(12)} ${"Updated".padEnd(20)}`,
+        ),
+      );
+      console.log(chalk.dim(`  ${"─".repeat(70)}`));
+      for (const r of rows) {
+        const color =
+          r.status === "complete"
+            ? chalk.green
+            : r.status === "failed" || r.status === "quarantined"
+              ? chalk.red
+              : r.status === "rolled_back"
+                ? chalk.dim
+                : chalk.yellow;
+        const updated = r.updated_at ? new Date(r.updated_at).toLocaleString() : "-";
+        console.log(
+          `  ${r.dataset_id.padEnd(12)} ${(r.source_id || "-").padEnd(12)} ${r.stage.padEnd(10)} ${color(r.status.padEnd(12))} ${updated}`,
+        );
+        if (r.last_error) console.log(chalk.red(`    ${r.last_error}`));
+        if (r.workflow_run_url) console.log(chalk.dim(`    run: ${r.workflow_run_url}`));
+      }
+    } catch (err) {
+      spinner.fail("Failed to fetch import status");
+      console.error(chalk.red(errorDetail(err)));
+    }
+  });
+
+importCommand
+  .command("rollback")
+  .description("Roll back a failed/quarantined import (deletes repo + S3 + D1)")
+  .argument("<dataset-id>", "NEMAR dataset id (e.g., on007523)")
+  .action(async (datasetId: string) => {
+    if (!requireAuth()) return;
+
+    const { proceed } = await inquirer.prompt([
+      {
+        type: "confirm",
+        name: "proceed",
+        message: chalk.red(
+          `Roll back import ${datasetId}? This deletes the GitHub repo, S3 objects, and D1 records. This cannot be undone.`,
+        ),
+        default: false,
+      },
+    ]);
+    if (!proceed) {
+      console.log(chalk.dim("Cancelled."));
+      return;
+    }
+
+    const spinner = ora(`Rolling back ${datasetId}...`).start();
+    try {
+      const result = await rollbackImport(datasetId);
+      if (!result.rolled_back) {
+        spinner.fail(
+          `Rollback incomplete for ${datasetId} (kept quarantined); retry after fixing:`,
+        );
+        for (const w of result.warnings) console.log(chalk.red(`  - ${w}`));
+      } else if (result.warnings.length > 0) {
+        spinner.warn(`Rolled back ${datasetId} with warnings`);
+        for (const w of result.warnings) console.log(chalk.yellow(`  - ${w}`));
+      } else {
+        spinner.succeed(`Rolled back ${datasetId}`);
+      }
+    } catch (err) {
+      spinner.fail(`Failed to roll back ${datasetId}`);
+      console.error(chalk.red(errorDetail(err)));
+    }
+  });
+
+importCommand
+  .command("retry")
+  .description("Reset a failed/quarantined import to 'preparing' for re-dispatch")
+  .argument("<dataset-id>", "NEMAR dataset id (e.g., on007523)")
+  .action(async (datasetId: string) => {
+    if (!requireAuth()) return;
+
+    const spinner = ora(`Resetting ${datasetId}...`).start();
+    try {
+      await retryImport(datasetId);
+      spinner.succeed(
+        `${datasetId} reset to 'preparing'. Re-run the onboard-openneuro workflow to retry.`,
+      );
+    } catch (err) {
+      spinner.fail(`Failed to reset ${datasetId}`);
+      console.error(chalk.red(errorDetail(err)));
+    }
+  });
+
+adminCommand.addCommand(importCommand);
 
 // ============================================================================
 // Reindex (epic #417 phase 3): refresh enrichment + nemar.org sync +

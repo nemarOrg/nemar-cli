@@ -458,6 +458,63 @@ export async function sendAdminNotificationEmail(
 }
 
 /**
+ * Alert admins that an OpenNeuro import failed and was quarantined (#754).
+ * Sent on a terminal import failure that left an orphan; the admin reviews it
+ * in `nemar admin import status` and clears it with `nemar admin import
+ * rollback <id>` (or it is auto-rolled-back when IMPORT_AUTO_ROLLBACK is on).
+ * Best-effort: per-recipient try/catch like sendAdminNotificationEmail.
+ */
+export async function sendImportQuarantineEmail(
+  adminEmails: string[],
+  details: {
+    datasetId: string;
+    sourceId: string;
+    stage: string;
+    reason: string;
+    workflowRunUrl: string | null;
+  },
+  resendApiKey: string,
+  fromEmail: string,
+  replyTo?: string,
+  isDev?: boolean,
+): Promise<void> {
+  const runRow = details.workflowRunUrl
+    ? `<tr><td style="padding:8px 12px;border:1px solid #e5e7eb;background:#f9fafb;font-weight:bold;">Workflow run</td><td style="padding:8px 12px;border:1px solid #e5e7eb;"><a href="${escapeHtml(details.workflowRunUrl)}" style="color:#2563eb;">${escapeHtml(details.workflowRunUrl)}</a></td></tr>`
+    : "";
+  const html = `
+<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"></head>
+<body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; line-height: 1.6; color: #333; max-width: 600px; margin: 0 auto; padding: 20px;">
+  <h1 style="color: #dc2626;">Import quarantined</h1>
+  <p>An OpenNeuro import failed and was quarantined so it would not leave a silent orphan. Review it and decide whether to roll it back (delete the empty repo + partial S3 + D1 row) or retry.</p>
+  <table style="border-collapse: collapse; width: 100%; margin: 16px 0;">
+    <tr><td style="padding:8px 12px;border:1px solid #e5e7eb;background:#f9fafb;font-weight:bold;">Dataset</td><td style="padding:8px 12px;border:1px solid #e5e7eb;">${escapeHtml(details.datasetId)} (from ${escapeHtml(details.sourceId)})</td></tr>
+    <tr><td style="padding:8px 12px;border:1px solid #e5e7eb;background:#f9fafb;font-weight:bold;">Failed stage</td><td style="padding:8px 12px;border:1px solid #e5e7eb;">${escapeHtml(details.stage)}</td></tr>
+    <tr><td style="padding:8px 12px;border:1px solid #e5e7eb;background:#f9fafb;font-weight:bold;">Reason</td><td style="padding:8px 12px;border:1px solid #e5e7eb;">${escapeHtml(details.reason)}</td></tr>
+    ${runRow}
+  </table>
+  <p style="font-family: monospace; background:#f3f4f6; padding:12px; border-radius:6px;">nemar admin import status ${escapeHtml(details.datasetId)}<br>nemar admin import rollback ${escapeHtml(details.datasetId)}</p>
+</body>
+</html>`;
+  for (const adminEmail of adminEmails) {
+    try {
+      await sendEmail(
+        adminEmail,
+        `NEMAR import quarantined: ${details.datasetId}`,
+        html,
+        resendApiKey,
+        fromEmail,
+        replyTo,
+        isDev,
+      );
+    } catch (error) {
+      console.error(`Failed to send import-quarantine alert to ${adminEmail}:`, error);
+    }
+  }
+}
+
+/**
  * Send revocation notification
  */
 export async function sendRevocationEmail(

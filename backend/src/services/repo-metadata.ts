@@ -7,7 +7,7 @@
 
 import type { DataCiteEnrichment } from "./datacite.js";
 import { nemarMetadataToEnrichment, parseNemarMetadata } from "./datacite.js";
-import { getBlobContent, getTreeAtRef } from "./github.js";
+import { getBlobContent, getFileContent, getTreeAtRef } from "./github.js";
 
 /**
  * Extract the repo name (e.g., "nm000104") from a "org/repo" string.
@@ -74,6 +74,16 @@ export interface RepoMetadataResult {
  * Read both dataset_description.json and nemar_metadata.json from a GitHub repo.
  * Combines them into BIDS description and DataCite enrichment.
  * Returns warnings for any non-fatal errors encountered.
+ *
+ * Two fetch strategies (same files, same parsing — only how the raw content is
+ * obtained differs):
+ *   - default: one recursive `getTreeAtRef` then `getBlobContent` per file.
+ *     O(files) — the whole tree is fetched just to locate two files. Fine for
+ *     small repos; the cost wall for 10k-file OpenNeuro imports.
+ *   - `options.useContentsApi`: fetch the two files directly via the Contents
+ *     API (`getFileContent`). O(1) regardless of file count. Used by the
+ *     version-DOI publish paths (epic #749 / #751) so the read can't blow the
+ *     CI step's curl budget. Opt-in so existing callers keep identical behavior.
  */
 export async function readRepoMetadata(
   repoName: string,
@@ -81,36 +91,52 @@ export async function readRepoMetadata(
   baseEnrichment?: DataCiteEnrichment,
   fallbackName?: string,
   ref = "main",
+  options?: { useContentsApi?: boolean },
 ): Promise<RepoMetadataResult> {
   const warnings: string[] = [];
   let bidsDescription: Record<string, unknown> = fallbackName ? { Name: fallbackName } : {};
   let enrichment = baseEnrichment;
 
   try {
-    const tree = await getTreeAtRef(repoName, ref, pat);
+    let descContent: string | null;
+    let nemarContent: string | null;
+
+    if (options?.useContentsApi) {
+      // O(1): address the two files by path; no whole-tree walk.
+      descContent = await getFileContent(repoName, "dataset_description.json", pat, ref);
+      nemarContent =
+        (await getFileContent(repoName, ".nemar/metadata.json", pat, ref)) ??
+        (await getFileContent(repoName, "nemar_metadata.json", pat, ref));
+    } else {
+      const tree = await getTreeAtRef(repoName, ref, pat);
+      const descFile = tree.find((f) => f.path === "dataset_description.json");
+      descContent = descFile ? await getBlobContent(repoName, descFile.sha, pat) : null;
+      const nemarMetaFile =
+        tree.find((f) => f.path === ".nemar/metadata.json") ||
+        tree.find((f) => f.path === "nemar_metadata.json");
+      nemarContent = nemarMetaFile ? await getBlobContent(repoName, nemarMetaFile.sha, pat) : null;
+    }
 
     // Read dataset_description.json
-    const descFile = tree.find((f) => f.path === "dataset_description.json");
-    if (descFile) {
-      const content = await getBlobContent(repoName, descFile.sha, pat);
-      const parsed = JSON.parse(content);
+    if (descContent) {
+      const parsed = JSON.parse(descContent);
       if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
         bidsDescription = parsed as Record<string, unknown>;
       }
     }
 
     // Read enrichment metadata (.nemar/metadata.json first, fall back to nemar_metadata.json)
-    const nemarMetaFile =
-      tree.find((f) => f.path === ".nemar/metadata.json") ||
-      tree.find((f) => f.path === "nemar_metadata.json");
-    if (nemarMetaFile) {
+    if (nemarContent) {
       try {
-        const nemarContent = await getBlobContent(repoName, nemarMetaFile.sha, pat);
         const nemarRaw = JSON.parse(nemarContent);
         const nemarParsed = parseNemarMetadata(nemarRaw);
         if (nemarParsed) {
           enrichment = nemarMetadataToEnrichment(nemarParsed, enrichment);
-        } else if (nemarRaw && typeof nemarRaw === "object" && (nemarRaw as Record<string, unknown>).version) {
+        } else if (
+          nemarRaw &&
+          typeof nemarRaw === "object" &&
+          (nemarRaw as Record<string, unknown>).version
+        ) {
           warnings.push(
             `Enrichment metadata has unrecognized version '${(nemarRaw as Record<string, unknown>).version}'; supported: 1.0, 2.0`,
           );
