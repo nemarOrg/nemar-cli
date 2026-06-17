@@ -72,20 +72,30 @@ export async function runCommand(
   options: {
     cwd?: string;
     env?: Record<string, string>;
+    /**
+     * Names to remove from the child's environment entirely. Setting a var to
+     * "" is NOT the same as unsetting it: git-annex signs S3 requests when
+     * AWS_ACCESS_KEY_ID is present (even empty) and only falls back to anonymous
+     * access when it is absent. Used to fetch annexed metadata from OpenNeuro's
+     * public bucket without NEMAR's CI creds (#768).
+     */
+    unsetEnv?: string[];
     /** Kill the process after this many milliseconds */
     timeout?: number;
   } = {},
 ): Promise<{ stdout: string; stderr: string; exitCode: number }> {
+  const childEnv: Record<string, string | undefined> = {
+    ...process.env,
+    GIT_TERMINAL_PROMPT: "0",
+    ...options.env,
+  };
+  for (const key of options.unsetEnv ?? []) delete childEnv[key];
   const proc = spawn({
     cmd,
     cwd: options.cwd,
     stdout: "pipe",
     stderr: "pipe",
-    env: {
-      ...process.env,
-      GIT_TERMINAL_PROMPT: "0",
-      ...options.env,
-    },
+    env: childEnv,
   });
 
   let timedOut = false;
