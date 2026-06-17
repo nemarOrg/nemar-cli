@@ -264,20 +264,33 @@ export function findAnnexedRootMetadata(datasetPath: string): string[] {
  * Sequence (validated against ds007964): enableremote s3-PUBLIC -> annex get ->
  * annex unannex -> stage with annex.largefiles=nothing (so the repo's largefiles
  * rules can't re-annex them on the next add). Returns the un-annexed file names.
+ *
+ * The S3 reads run with NEMAR's AWS creds stripped (`unsetEnv`): OpenNeuro's
+ * bucket is public, but a request *signed* as the CI `nemar-actions-datasets`
+ * identity is denied by that user's IAM permissions boundary. git-annex only
+ * reads anonymously when the AWS_* vars are absent. This mirrors how the data
+ * copy reaches OpenNeuro (anonymous public read), decoupled from the NEMAR
+ * transfer identity. See #768.
  */
+const OPENNEURO_ANON_UNSET = ["AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN"];
+
 export async function ensureRootMetadataUnannexed(datasetPath: string): Promise<string[]> {
   const annexed = findAnnexedRootMetadata(datasetPath);
   if (annexed.length === 0) return [];
 
   const enable = await runCommand(["git", "annex", "enableremote", "s3-PUBLIC"], {
     cwd: datasetPath,
+    unsetEnv: OPENNEURO_ANON_UNSET,
   });
   if (enable.exitCode !== 0) {
     throw new Error(
       `Failed to enable s3-PUBLIC remote to fetch annexed metadata (${annexed.join(", ")}): ${enable.stderr.trim()}`,
     );
   }
-  const get = await runCommand(["git", "annex", "get", ...annexed], { cwd: datasetPath });
+  const get = await runCommand(["git", "annex", "get", ...annexed], {
+    cwd: datasetPath,
+    unsetEnv: OPENNEURO_ANON_UNSET,
+  });
   if (get.exitCode !== 0) {
     throw new Error(
       `Failed to fetch annexed metadata content (${annexed.join(", ")}) from OpenNeuro S3: ${get.stderr.trim()}`,
