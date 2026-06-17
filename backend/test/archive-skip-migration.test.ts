@@ -52,27 +52,33 @@ describe("migration 0043: archive_skip_reason", () => {
     expect(row.archive_status).toBeNull();
   });
 
-  test("archive-ready 'skipped' UPDATE sets reason + leaves archive_status NULL", () => {
+  test("archive-ready 'skipped' UPDATE sets reason, NULLs status, resets retry_count", () => {
     insertDataset(db, "on005752");
+    // Simulate a prior failed-retry history (#736) that the skip must clear.
+    db.prepare("UPDATE datasets SET archive_retry_count = 3 WHERE dataset_id = ?").run("on005752");
     const r = db
       .prepare(
         `UPDATE datasets
-         SET archive_skip_reason = ?, archive_status = NULL, archive_checked_at = datetime('now')
+         SET archive_skip_reason = ?, archive_status = NULL, archive_retry_count = 0, archive_checked_at = datetime('now')
          WHERE dataset_id = ?`,
       )
       .run("dataset 680.0 GB exceeds 100.0 GB archive limit; use direct download", "on005752");
     expect(r.changes).toBe(1);
     const row = db
       .prepare(
-        "SELECT archive_skip_reason, archive_status, archive_checked_at FROM datasets WHERE dataset_id = ?",
+        "SELECT archive_skip_reason, archive_status, archive_retry_count, archive_checked_at FROM datasets WHERE dataset_id = ?",
       )
       .get("on005752") as {
       archive_skip_reason: string;
       archive_status: string | null;
+      archive_retry_count: number;
       archive_checked_at: string;
     };
     expect(row.archive_skip_reason).toContain("exceeds");
     expect(row.archive_status).toBeNull();
+    // Cross-epic (#736+#749): a skip clears the retry counter so a later
+    // failed archive isn't wrongly capped.
+    expect(row.archive_retry_count).toBe(0);
     expect(row.archive_checked_at).not.toBeNull();
   });
 
