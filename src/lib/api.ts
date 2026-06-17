@@ -1319,6 +1319,10 @@ export interface PublishStatusResponse {
   last_error?: string | null;
   updated_at?: string;
   message?: string;
+  block_reason?: string | null;
+  // Non-blocking pre-screen advisory (#756): present when the screen flagged a
+  // concern. The request is NOT blocked by this.
+  advisory?: { source: "prescreen"; reasons: string[]; issue_url?: string };
 }
 
 export interface PublishRequestsResponse {
@@ -1332,6 +1336,9 @@ export interface PublishRequestsResponse {
     steps_completed: string[];
     current_step: string | null;
     last_error: string | null;
+    prescreen_status?: string | null;
+    prescreen_reasons?: string | null;
+    prescreen_issue_url?: string | null;
   }>;
   count: number;
 }
@@ -1991,6 +1998,46 @@ export async function syncDataset(datasetId: string): Promise<SyncDatasetRespons
 
 export async function getSyncStatus(): Promise<SyncStatusResponse> {
   return request<SyncStatusResponse>("/admin/sync/status", {}, true);
+}
+
+// ============================================================================
+// Import jobs (issue #754)
+// ============================================================================
+
+export interface ImportJobRow {
+  dataset_id: string;
+  source: string;
+  source_id: string;
+  stage: string;
+  status: string;
+  last_error: string | null;
+  workflow_run_url: string | null;
+  created_at: string;
+  updated_at: string;
+  completed_at: string | null;
+}
+
+export interface ImportStatusResponse {
+  imports: ImportJobRow[];
+  total: number;
+  by_status: Record<string, number>;
+}
+
+export async function getImportStatus(status?: string): Promise<ImportStatusResponse> {
+  const q = status ? `?status=${encodeURIComponent(status)}` : "";
+  return request<ImportStatusResponse>(`/admin/imports${q}`, {}, true);
+}
+
+export async function rollbackImport(
+  datasetId: string,
+): Promise<{ ok: boolean; dataset_id: string; rolled_back: boolean; warnings: string[] }> {
+  return request(`/admin/imports/${datasetId}/rollback`, { method: "POST" }, true);
+}
+
+export async function retryImport(
+  datasetId: string,
+): Promise<{ ok: boolean; dataset_id: string; status: string }> {
+  return request(`/admin/imports/${datasetId}/retry`, { method: "POST" }, true);
 }
 
 // ============================================================================

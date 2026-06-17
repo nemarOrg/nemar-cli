@@ -80,18 +80,18 @@ describe("validatePrescreenCallbackBody", () => {
 describe("decidePrescreenOutcome", () => {
   test("verdict=block blocks regardless of S3", () => {
     const r = decidePrescreenOutcome("block", ["README empty"], { totalSize: 999, objectCount: 5 });
-    expect(r.blocked).toBe(true);
+    expect(r.flagged).toBe(true);
     expect(r.reasons).toEqual(["README empty"]);
   });
 
   test("verdict=pass with real S3 data passes", () => {
     const r = decidePrescreenOutcome("pass", [], { totalSize: 1_000_000, objectCount: 42 });
-    expect(r.blocked).toBe(false);
+    expect(r.flagged).toBe(false);
   });
 
   test("verdict=pass but empty S3 prefix -> blocked with appended reason", () => {
     const r = decidePrescreenOutcome("pass", [], { totalSize: 0, objectCount: 0 });
-    expect(r.blocked).toBe(true);
+    expect(r.flagged).toBe(true);
     expect(r.reasons.length).toBe(1);
     expect(r.reasons[0]).toMatch(/storage/i);
   });
@@ -101,24 +101,24 @@ describe("decidePrescreenOutcome", () => {
       totalSize: 0,
       objectCount: 0,
     });
-    expect(r.blocked).toBe(true);
+    expect(r.flagged).toBe(true);
     expect(r.reasons).toEqual(["No data files found in storage."]);
   });
 
   test("objectCount=undefined (page cap hit = many objects) is NOT treated as missing", () => {
     const r = decidePrescreenOutcome("pass", [], { totalSize: 5_000_000, objectCount: undefined });
-    expect(r.blocked).toBe(false);
+    expect(r.flagged).toBe(false);
   });
 
   test("null S3 (read error) never forces a block on a passing verdict", () => {
     const r = decidePrescreenOutcome("pass", [], null);
-    expect(r.blocked).toBe(false);
+    expect(r.flagged).toBe(false);
     expect(r.reasons).toEqual([]);
   });
 
   test("verdict=block with null S3 stays blocked and preserves reasons", () => {
     const r = decidePrescreenOutcome("block", ["README missing"], null);
-    expect(r.blocked).toBe(true);
+    expect(r.flagged).toBe(true);
     expect(r.reasons).toEqual(["README missing"]);
   });
 
@@ -127,7 +127,7 @@ describe("decidePrescreenOutcome", () => {
       totalSize: 0,
       objectCount: 0,
     });
-    expect(r.blocked).toBe(true);
+    expect(r.flagged).toBe(true);
     expect(r.reasons).toEqual(["S3 prefix is empty"]);
   });
 });

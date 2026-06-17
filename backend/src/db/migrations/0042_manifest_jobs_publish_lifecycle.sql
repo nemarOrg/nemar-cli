@@ -1,0 +1,32 @@
+-- Migration 0042: extend manifest_jobs to model the WHOLE version-DOI publish
+-- (epic #749, Phase 2 / #751).
+--
+-- Before this, manifest_jobs only tracked the manifest-generation leg
+-- (dispatched -> ready|failed, see 0025). The version-DOI publish itself ran
+-- synchronously inside /webhooks/publish-version-doi: a recursive whole-repo
+-- getTreeAtRef metadata read + EZID mint + (prod) inline generateManifest +
+-- Zenodo release-archive download, all before the HTTP response. That blew the
+-- CI step's 60s curl budget for high-file-count datasets (on005385 3265 files,
+-- on005752 11000 files) -- file-count-bound, deterministic.
+--
+-- Phase 2 makes publish return 202 immediately and run the residual off the
+-- request path (waitUntil), with the CI workflow polling for completion. The
+-- manifest_jobs row now represents that full lifecycle, so its status enum
+-- widens from {dispatched, ready, failed} to:
+--
+--   accepted   -> row created, 202 returned, residual not yet run
+--   dispatched -> EZID minted + central manifest job dispatched to Actions
+--                 (unchanged meaning; /webhooks/manifest-ready transitions
+--                  dispatched -> ready and inserts the dataset_versions row)
+--   ready      -> manifest + summary on S3, dataset_versions row inserted,
+--                 data plane published (unchanged)
+--   failed     -> any terminal failure, with error_message (unchanged)
+--
+-- The `status` column is plain TEXT with no CHECK constraint (see 0025), so the
+-- two new lifecycle values need no DDL change to the column itself.
+--
+-- request_source records which path owns the row so the two version-DOI callers
+-- (the tag-triggered webhook and the admin-approve orchestrator's version_doi
+-- step) are distinguishable in observability and so a re-drive can recognise an
+-- in-flight publish for the same (dataset_id, version).
+ALTER TABLE manifest_jobs ADD COLUMN request_source TEXT;  -- 'webhook' | 'admin'

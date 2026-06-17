@@ -88,6 +88,14 @@ export interface Bindings {
   PRESCREEN_ENABLED?: string; // "true" enables the dispatch on publish request
   PRESCREEN_CALLBACK_SECRET?: string; // Workers secret; HMAC key for prescreen callback
 
+  // Import recovery (issue #754). onboard-openneuro.yml POSTs import state to
+  // /webhooks/import-state (bearer NEMAR_WEBHOOK_TOKEN). On a terminal failure
+  // an unambiguous orphan (private, no DOI, no versions, never completed) is
+  // QUARANTINED + admins alerted by default; set IMPORT_AUTO_ROLLBACK="true" to
+  // instead auto-delete it via deleteDatasetCascade. Default (unset/"false")
+  // keeps deletion a human action, mirroring the #663 stale-cron remediation.
+  IMPORT_AUTO_ROLLBACK?: string; // "true" enables auto-rollback of orphaned imports
+
   // Zarr serving copy (epic #684). The conversion runs in
   // nemarDatasets/.github run-generate-zarr.yml and POSTs back to
   // /webhooks/zarr-ready (authenticated with NEMAR_WEBHOOK_TOKEN). The browser

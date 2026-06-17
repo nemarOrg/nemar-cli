@@ -8,17 +8,18 @@
 import type { Context } from "hono";
 import { Hono } from "hono";
 
+import { MAX_ARCHIVE_RETRIES, decideArchiveRetry } from "../services/archive-retry.js";
 import { purgeCacheUrls, zarrPurgeTargets } from "../services/cloudflare.js";
 import { runDatasetSync } from "../services/dataset-reindex.js";
 import { isValidDatasetId } from "../services/datasetId.js";
 import { createEzidVersionDoi, parseDoiProvider } from "../services/doi.js";
-import { resolveEmailConfig, sendPublicationBlockedEmail } from "../services/email.js";
 import { enrichDataset } from "../services/enrich-dataset.js";
 import { TEST_SHOULDER } from "../services/ezid.js";
 import { getDatasetsToken } from "../services/github-auth.js";
 import {
   downloadReleaseArchive,
   signManifestCallbackToken,
+  triggerArchiveGeneration,
   triggerEnrichmentRun,
   triggerManifestGeneration,
   triggerVersionDoiRun,
@@ -26,6 +27,11 @@ import {
   verifyManifestCallbackToken,
   verifyPrescreenCallbackToken,
 } from "../services/github.js";
+import {
+  IMPORT_STATUSES,
+  type ImportStatus,
+  runImportRecovery,
+} from "../services/import-recovery.js";
 import { generateManifest } from "../services/manifest.js";
 import { errorMessage, extractRepoName, readRepoMetadata } from "../services/repo-metadata.js";
 import { getDatasetS3Stats, headVersionArtifact, uploadManifest } from "../services/s3.js";
@@ -150,28 +156,79 @@ async function dispatchCentralManifestJob(
      *  the dataset repo is private/unauthenticated-HEAD-incapable.
      *  Twin of `skipGitBackedVerification` on the inline path. */
     skipCanary?: boolean;
-  },
+  } & (
+    | {
+        /** Promote an existing `accepted` row (async publish path): UPDATE it to
+         *  `dispatched` in place, reusing its nonce so the callback token still
+         *  verifies. request_source was already set at accept time. */
+        promoteNonce: string;
+        requestSource?: never;
+      }
+    | {
+        /** Fresh insert (synchronous callers): INSERT a new `dispatched` row. */
+        promoteNonce?: never;
+        /** Which version-DOI path owns this row (observability + re-drive
+         *  recognition). Recorded in manifest_jobs.request_source. */
+        requestSource?: "webhook" | "admin";
+      }
+  ),
 ): Promise<{ nonce: string; callbackToken: string }> {
   if (!env.MANIFEST_CALLBACK_SECRET) {
     throw new Error(
       "MANIFEST_CALLBACK_SECRET is unset; refusing to dispatch central manifest workflow",
     );
   }
-  const nonce = crypto.randomUUID();
+  const nonce = args.promoteNonce ?? crypto.randomUUID();
   const callbackToken = await signManifestCallbackToken(
     { datasetId: args.datasetId, version: args.version, nonce },
     env.MANIFEST_CALLBACK_SECRET,
   );
 
-  // Persist the job row BEFORE dispatch so a slow GitHub round-trip
-  // can't deliver the callback to a missing row. If dispatch fails
-  // below we mark the row as failed for observability.
-  await env.DB.prepare(
-    `INSERT INTO manifest_jobs (dataset_id, version, nonce, doi, concept_doi, doi_provider, status)
-     VALUES (?, ?, ?, ?, ?, ?, 'dispatched')`,
-  )
-    .bind(args.datasetId, args.version, nonce, args.doi, args.conceptDoi, args.doiProvider)
-    .run();
+  // Persist the dispatched state BEFORE dispatch so a slow GitHub round-trip
+  // can't deliver the callback to a missing/un-dispatched row. If dispatch
+  // fails below we mark the row as failed for observability.
+  if (args.promoteNonce) {
+    // Promote the pre-created `accepted` row in place (carries the minted DOI
+    // now that the EZID mint has run). manifest-ready filters status='dispatched'.
+    const promoted = await env.DB.prepare(
+      `UPDATE manifest_jobs
+       SET status = 'dispatched', doi = ?, concept_doi = ?, doi_provider = ?
+       WHERE dataset_id = ? AND version = ? AND nonce = ? AND status = 'accepted'`,
+    )
+      .bind(
+        args.doi,
+        args.conceptDoi,
+        args.doiProvider,
+        args.datasetId,
+        args.version,
+        args.promoteNonce,
+      )
+      .run();
+    if (promoted.meta.changes === 0) {
+      // The accepted row is gone or already left 'accepted' (cleanup cron, or a
+      // re-drive race). Dispatching now would fire a workflow whose callback can
+      // never find a 'dispatched' row for this nonce — it would poll forever.
+      // Throw so the residual's catch records a terminal `failed` state instead.
+      throw new Error(
+        `promote matched 0 rows for ${args.datasetId}@${args.version} nonce=${args.promoteNonce}; accepted row missing or already promoted`,
+      );
+    }
+  } else {
+    await env.DB.prepare(
+      `INSERT INTO manifest_jobs (dataset_id, version, nonce, doi, concept_doi, doi_provider, status, request_source)
+       VALUES (?, ?, ?, ?, ?, ?, 'dispatched', ?)`,
+    )
+      .bind(
+        args.datasetId,
+        args.version,
+        nonce,
+        args.doi,
+        args.conceptDoi,
+        args.doiProvider,
+        args.requestSource ?? null,
+      )
+      .run();
+  }
 
   // Detect double-dispatch: if there are other still-'dispatched' rows
   // for the same (dataset_id, version) but a different nonce, the
@@ -347,9 +404,517 @@ webhooks.post("/publish-version-doi", async (c) => {
 });
 
 /**
- * Handle EZID version DOI creation: reads BIDS metadata, mints DOI, updates DB, and generates version manifest.
+ * Poll the status of an async version-DOI publish (#751).
+ *
+ * The run-version-doi.yml "Publish version DOI" step POSTs /publish-version-doi
+ * (which returns 202 under the central flow) then polls this endpoint until the
+ * latest manifest_jobs row for (dataset_id, version) reaches `ready` (published)
+ * or `failed`, instead of holding a 60s synchronous curl. Token-authed the same
+ * way as /publish-version-doi.
+ */
+webhooks.get("/version-doi-status", async (c) => {
+  const token = c.req.header("X-Webhook-Token");
+  const expectedToken = c.env.NEMAR_WEBHOOK_TOKEN ?? c.env.GITHUB_WEBHOOK_SECRET;
+  if (!expectedToken) {
+    console.error(
+      "[version-doi-status] no webhook secret configured (NEMAR_WEBHOOK_TOKEN/GITHUB_WEBHOOK_SECRET both unset or empty)",
+    );
+    return c.json({ error: "Invalid webhook token" }, 401);
+  }
+  if (!token || !timingSafeEqual(token, expectedToken)) {
+    return c.json({ error: "Invalid webhook token" }, 401);
+  }
+
+  const datasetId = c.req.query("dataset_id");
+  const rawVersion = c.req.query("version");
+  if (!datasetId || !rawVersion) {
+    return c.json({ error: "Missing required query params: dataset_id, version" }, 400);
+  }
+  const version = rawVersion.replace(/^[vV]/, "");
+
+  let job: { status: string; doi: string | null; error_message: string | null } | null;
+  try {
+    job = await c.env.DB.prepare(
+      `SELECT status, doi, error_message FROM manifest_jobs
+       WHERE dataset_id = ? AND version = ? ORDER BY created_at DESC LIMIT 1`,
+    )
+      .bind(datasetId, version)
+      .first<{ status: string; doi: string | null; error_message: string | null }>();
+  } catch (dbErr) {
+    // Distinguish a DB outage from "no row yet" so the CI log doesn't read a
+    // transient D1 failure as a stuck publish. 503 -> the poller keeps retrying.
+    console.error(`[version-doi-status] D1 query failed for ${datasetId}@${version}:`, dbErr);
+    return c.json({ error: "Database unavailable", details: errorMessage(dbErr) }, 503);
+  }
+
+  if (!job) {
+    // No row yet (the accepted row insert hasn't landed / replicated) — tell the
+    // poller to keep waiting rather than treating absence as terminal.
+    return c.json({ dataset_id: datasetId, version, status: "unknown", outcome: "wait" });
+  }
+
+  return c.json({
+    dataset_id: datasetId,
+    version,
+    status: job.status,
+    outcome: versionDoiPollOutcome(job.status),
+    ...(job.doi && { version_doi: job.doi }),
+    ...(job.error_message && { error_message: job.error_message }),
+  });
+});
+
+/** Dataset shape needed to mint an EZID version DOI (shared by the webhook
+ *  async residual and the admin orchestrator). */
+export interface EzidVersionDoiDataset {
+  id: number;
+  dataset_id: string;
+  name: string;
+  github_repo: string | null;
+  concept_doi: string | null;
+  ezid_identifier: string | null;
+}
+
+/**
+ * Shared EZID version-DOI mint core: cheap O(1) metadata read (Contents API),
+ * existing-version-DOI lookup for the concept HasVersion set, idempotent EZID
+ * mint, and latest_version_doi update. Does NOT insert dataset_versions or
+ * generate the manifest — under the central flow `/webhooks/manifest-ready`
+ * owns the row insert once the dispatched manifest job uploads to S3.
+ */
+export async function mintEzidVersionDoi(
+  env: Bindings,
+  params: {
+    dataset: EzidVersionDoiDataset;
+    repoName: string;
+    version: string;
+    sandbox: boolean;
+    pat: string;
+  },
+): Promise<{ doi: string; warnings?: string[] }> {
+  const { dataset, repoName, version, sandbox, pat } = params;
+  if (!dataset.ezid_identifier) {
+    throw new Error(`Dataset ${dataset.dataset_id} has no EZID identifier`);
+  }
+
+  // O(1) metadata read so the mint can't scale with file count (the #751 wall).
+  const repoMeta = await readRepoMetadata(repoName, pat, undefined, dataset.name, `v${version}`, {
+    useContentsApi: true,
+  });
+  for (const w of repoMeta.warnings) {
+    console.warn("[version-doi]", w);
+  }
+
+  const versionRows = await env.DB.prepare("SELECT doi FROM dataset_versions WHERE dataset_id = ?")
+    .bind(dataset.dataset_id)
+    .all<{ doi: string }>();
+  const existingVersionDois = versionRows.results.map((r) => r.doi);
+
+  const result = await createEzidVersionDoi(
+    {
+      EZID_USERNAME: env.EZID_USERNAME,
+      EZID_PASSWORD: env.EZID_PASSWORD,
+      EZID_SANDBOX_USERNAME: env.EZID_SANDBOX_USERNAME,
+      EZID_SANDBOX_PASSWORD: env.EZID_SANDBOX_PASSWORD,
+    },
+    {
+      datasetId: dataset.dataset_id,
+      conceptIdentifier: dataset.ezid_identifier,
+      version,
+      bidsDescription: repoMeta.bidsDescription,
+      githubRepo: dataset.github_repo || `nemarDatasets/${repoName}`,
+      sandbox,
+      existingVersionDois,
+      enrichment: repoMeta.enrichment,
+    },
+  );
+
+  await env.DB.prepare(
+    "UPDATE datasets SET latest_version_doi = ?, updated_at = datetime('now') WHERE id = ?",
+  )
+    .bind(result.doi, dataset.id)
+    .run();
+
+  return { doi: result.doi, warnings: result.warnings };
+}
+
+/**
+ * Publish an EZID version DOI via the central manifest flow: mint the DOI then
+ * dispatch the central manifest job. Used by the admin orchestrator's
+ * version_doi step (#751) so it stops generating the manifest inline (O(files));
+ * `/webhooks/manifest-ready` then owns the dataset_versions insert. Synchronous
+ * (no accepted-row/poll dance) — the admin orchestrator isn't on a curl budget.
+ */
+export async function publishEzidVersionDoiViaCentral(
+  env: Bindings,
+  params: {
+    dataset: EzidVersionDoiDataset;
+    repoName: string;
+    version: string;
+    sandbox: boolean;
+    pat: string;
+    requestSource: "webhook" | "admin";
+  },
+): Promise<{ doi: string; warnings?: string[] }> {
+  const { dataset, repoName, version, sandbox, pat, requestSource } = params;
+  const minted = await mintEzidVersionDoi(env, { dataset, repoName, version, sandbox, pat });
+  await dispatchCentralManifestJob(env, {
+    datasetId: dataset.dataset_id,
+    version,
+    doi: minted.doi,
+    conceptDoi: dataset.concept_doi,
+    doiProvider: "ezid",
+    skipCanary: true,
+    requestSource,
+  });
+  return minted;
+}
+
+/**
+ * Best-effort Zenodo backup of the release archive. Non-fatal: logs and returns
+ * the outcome rather than throwing. `skipOpenNeuro` skips the (O(bytes),
+ * impossible-for-large) download for `on`-prefix datasets — the async path
+ * passes true; the legacy path passes false to preserve prior behavior.
+ */
+async function maybeZenodoBackup(
+  env: Bindings,
+  params: {
+    dataset: {
+      id: number;
+      dataset_id: string;
+      name: string;
+      github_repo: string | null;
+      concept_doi: string | null;
+    };
+    version: string;
+    sandbox: boolean;
+    repoName: string;
+    pat: string;
+    skipOpenNeuro: boolean;
+  },
+): Promise<{ backup?: string; error?: string }> {
+  const { dataset, version, sandbox, repoName, pat, skipOpenNeuro } = params;
+  if (skipOpenNeuro && dataset.dataset_id.startsWith("on")) {
+    console.info(`[version-doi] Zenodo backup skipped for OpenNeuro dataset ${dataset.dataset_id}`);
+    return {};
+  }
+  let backup: string | undefined;
+  let error: string | undefined;
+  try {
+    const zenodoToken = sandbox ? env.ZENODO_SANDBOX_API_KEY : env.ZENODO_API_KEY;
+    if (!zenodoToken) {
+      console.info(
+        `[version-doi] Zenodo backup skipped for ${dataset.dataset_id}: no ${sandbox ? "sandbox " : ""}API key configured`,
+      );
+      return {};
+    }
+    if (!dataset.github_repo) {
+      console.info(
+        `[version-doi] Zenodo backup skipped for ${dataset.dataset_id}: no GitHub repo configured`,
+      );
+      return {};
+    }
+    const tag = `v${version}`;
+    const archiveData = await downloadReleaseArchive(repoName, tag, pat);
+
+    // Check if dataset already has a Zenodo backup deposition
+    const row = await env.DB.prepare("SELECT zenodo_concept_id FROM datasets WHERE id = ?")
+      .bind(dataset.id)
+      .first<{ zenodo_concept_id: string | null }>();
+
+    let depositionId = row?.zenodo_concept_id
+      ? Number.parseInt(row.zenodo_concept_id, 10)
+      : Number.NaN;
+
+    if (Number.isNaN(depositionId)) {
+      const deposition = await zenodo.createDeposition(
+        {
+          title: `${dataset.name} (NEMAR backup archive)`,
+          description: `Backup archive for NEMAR dataset ${dataset.dataset_id}. Primary DOI: ${dataset.concept_doi}`,
+          creators: [{ name: "NEMAR" }],
+          keywords: ["BIDS", "neuroscience", "NEMAR", "backup"],
+          version,
+        },
+        zenodoToken,
+        sandbox,
+      );
+      depositionId = deposition.id;
+      await env.DB.prepare(
+        "UPDATE datasets SET zenodo_concept_id = ?, updated_at = datetime('now') WHERE id = ?",
+      )
+        .bind(String(depositionId), dataset.id)
+        .run();
+    } else {
+      const newVersion = await zenodo.createNewVersion(depositionId, zenodoToken, sandbox);
+      depositionId = newVersion.id;
+      await zenodo.updateDepositionMetadata(
+        depositionId,
+        {
+          title: `${dataset.name} (NEMAR backup archive)`,
+          description: `Backup archive v${version}`,
+          creators: [{ name: "NEMAR" }],
+          version,
+        },
+        zenodoToken,
+        sandbox,
+      );
+    }
+
+    const deposition = await zenodo.getDeposition(depositionId, zenodoToken, sandbox);
+    if (deposition.links.bucket) {
+      await zenodo.uploadFile(
+        depositionId,
+        deposition.links.bucket,
+        `${dataset.dataset_id}-v${version}.zip`,
+        archiveData,
+        zenodoToken,
+        sandbox,
+      );
+      backup = `Zenodo draft #${depositionId}`;
+    } else {
+      console.warn(
+        `[version-doi] Zenodo deposition #${depositionId} has no bucket URL; file upload skipped`,
+      );
+      error = `Zenodo deposition #${depositionId} has no bucket URL`;
+    }
+  } catch (zenodoErr) {
+    error = errorMessage(zenodoErr);
+    console.error(
+      `[version-doi] Zenodo backup failed for ${dataset.dataset_id}@${version} (non-fatal):`,
+      zenodoErr,
+    );
+  }
+  return { backup, error };
+}
+
+/** Lifecycle of a manifest_jobs row (migration 0042). `unknown` is the
+ *  synthetic status the status endpoint returns when no row exists yet. */
+export type ManifestJobStatus = "accepted" | "dispatched" | "ready" | "failed" | "unknown";
+
+/** Idempotency: only short-circuit a duplicate publish while a prior attempt is
+ *  still in flight (accepted | dispatched). Terminal states (ready | failed)
+ *  allow a deliberate re-drive (e.g. remediation). Pure for testing. */
+export function shouldShortCircuitInflightPublish(
+  existing: { status: ManifestJobStatus | string } | null,
+): boolean {
+  return existing != null && (existing.status === "accepted" || existing.status === "dispatched");
+}
+
+/** Map a manifest_jobs status to the CI poller's decision. Pure for testing.
+ *  `ready` = published (success); `failed` = terminal; everything else
+ *  (unknown / accepted / dispatched) = keep polling. */
+export function versionDoiPollOutcome(
+  status: ManifestJobStatus | string | null | undefined,
+): "success" | "fail" | "wait" {
+  if (status === "ready") return "success";
+  if (status === "failed") return "fail";
+  return "wait";
+}
+
+/**
+ * Handle EZID version DOI creation. Routes to the async (202 + poll) path when
+ * the central manifest workflow is enabled, else the legacy synchronous path.
  */
 async function handleEzidVersionDoi(
+  c: WebhookContext,
+  dataset: {
+    id: number;
+    dataset_id: string;
+    name: string;
+    description: string | null;
+    github_repo: string | null;
+    concept_doi: string | null;
+    ezid_identifier: string | null;
+  },
+  version: string,
+  releaseUrl: string,
+  sandbox: boolean,
+) {
+  if (isCentralManifestWorkflowEnabled(c.env)) {
+    return handleEzidVersionDoiAsync(c, dataset, version, sandbox);
+  }
+  return handleEzidVersionDoiLegacy(c, dataset, version, releaseUrl, sandbox);
+}
+
+/**
+ * Async EZID version-DOI publish (#751): validate cheaply, create an `accepted`
+ * manifest_jobs row, return 202, and run the heavy residual (cheap metadata read
+ * + idempotent EZID mint + central manifest dispatch + Zenodo) off the request
+ * path via waitUntil. The CI workflow polls /webhooks/version-doi-status until
+ * ready/failed instead of holding the publish on a 60s curl.
+ */
+async function handleEzidVersionDoiAsync(
+  c: WebhookContext,
+  dataset: {
+    id: number;
+    dataset_id: string;
+    name: string;
+    description: string | null;
+    github_repo: string | null;
+    concept_doi: string | null;
+    ezid_identifier: string | null;
+  },
+  version: string,
+  sandbox: boolean,
+) {
+  if (!dataset.ezid_identifier) {
+    return c.json({ error: "No EZID identifier found for this dataset.", skipped: true }, 200);
+  }
+  if (!dataset.github_repo) {
+    return c.json({ error: "Dataset has no GitHub repository" }, 400);
+  }
+  const repoName = extractRepoName(dataset.github_repo);
+  if (!repoName) {
+    return c.json({ error: "Invalid github_repo format" }, 400);
+  }
+  if (!c.env.MANIFEST_CALLBACK_SECRET) {
+    console.error(
+      "[publish-version-doi] MANIFEST_CALLBACK_SECRET unset; cannot run central version-DOI flow",
+    );
+    return c.json({ error: "Server misconfigured: MANIFEST_CALLBACK_SECRET unset" }, 500);
+  }
+
+  // Idempotency: don't start a second publish while one is in flight.
+  const inflight = await c.env.DB.prepare(
+    `SELECT id, status FROM manifest_jobs
+     WHERE dataset_id = ? AND version = ? AND status IN ('accepted', 'dispatched')
+     ORDER BY created_at DESC LIMIT 1`,
+  )
+    .bind(dataset.dataset_id, version)
+    .first<{ id: number; status: string }>();
+  if (shouldShortCircuitInflightPublish(inflight)) {
+    return c.json(
+      { accepted: true, status: inflight?.status, version, note: "publish already in flight" },
+      202,
+    );
+  }
+
+  // Durable handle for the 202: poll + failure paths need a row immediately.
+  const nonce = crypto.randomUUID();
+  try {
+    await c.env.DB.prepare(
+      `INSERT INTO manifest_jobs (dataset_id, version, nonce, doi, concept_doi, doi_provider, status, request_source)
+       VALUES (?, ?, ?, NULL, ?, 'ezid', 'accepted', 'webhook')`,
+    )
+      .bind(dataset.dataset_id, version, nonce, dataset.concept_doi)
+      .run();
+  } catch (err) {
+    console.error(
+      `[publish-version-doi] failed to create accepted job row for ${dataset.dataset_id}@${version}:`,
+      err,
+    );
+    return c.json(
+      { error: "Failed to enqueue version DOI publish", details: errorMessage(err) },
+      500,
+    );
+  }
+
+  c.executionCtx.waitUntil(
+    runEzidVersionDoiResidual(c.env, { dataset, version, sandbox, repoName, nonce }).catch(
+      async (err) => {
+        // runEzidVersionDoiResidual records failure on the row itself; this is the
+        // last-resort guard so an unexpected throw can't reject the waitUntil.
+        console.error(
+          `[publish-version-doi] residual crashed for ${dataset.dataset_id}@${version}:`,
+          err,
+        );
+        // If the residual's own failed-mark UPDATE also threw, the row is stuck
+        // non-terminal (accepted/dispatched) and the poller would wait to its CI
+        // timeout. Try once more to record a terminal state. `status != 'ready'`
+        // guards against clobbering a row that succeeded between throw and catch.
+        try {
+          await c.env.DB.prepare(
+            `UPDATE manifest_jobs SET status = 'failed', error_message = ?, completed_at = datetime('now')
+             WHERE dataset_id = ? AND version = ? AND nonce = ? AND status != 'ready'`,
+          )
+            .bind(errorMessage(err), dataset.dataset_id, version, nonce)
+            .run();
+        } catch (d1Err) {
+          console.error(
+            `[publish-version-doi] last-resort failed-mark also failed for ${dataset.dataset_id}@${version}:`,
+            d1Err,
+          );
+        }
+      },
+    ),
+  );
+
+  return c.json(
+    {
+      accepted: true,
+      status: "accepted",
+      version,
+      message: "Version DOI publish accepted; poll /webhooks/version-doi-status",
+    },
+    202,
+  );
+}
+
+/**
+ * The heavy residual of the async EZID publish, run via waitUntil. On any
+ * failure it records `failed` + error_message on the accepted row so the CI
+ * poller sees a terminal state instead of polling to timeout.
+ */
+async function runEzidVersionDoiResidual(
+  env: Bindings,
+  params: {
+    dataset: EzidVersionDoiDataset;
+    version: string;
+    sandbox: boolean;
+    repoName: string;
+    nonce: string;
+  },
+): Promise<void> {
+  const { dataset, version, sandbox, repoName, nonce } = params;
+  try {
+    const pat = await getDatasetsToken(env);
+    const minted = await mintEzidVersionDoi(env, { dataset, repoName, version, sandbox, pat });
+
+    // Promote the accepted row -> dispatched and trigger the central manifest
+    // workflow. manifest-ready inserts the dataset_versions row + flips the data
+    // plane to published once the manifest lands on S3.
+    await dispatchCentralManifestJob(env, {
+      datasetId: dataset.dataset_id,
+      version,
+      doi: minted.doi,
+      conceptDoi: dataset.concept_doi,
+      doiProvider: "ezid",
+      skipCanary: true,
+      // request_source was set to 'webhook' on the accepted row at accept time.
+      promoteNonce: nonce,
+    });
+
+    // Non-fatal backup; OpenNeuro skipped (O(bytes); Phase 3 archive policy).
+    await maybeZenodoBackup(env, { dataset, version, sandbox, repoName, pat, skipOpenNeuro: true });
+  } catch (err) {
+    const msg = errorMessage(err);
+    console.error(
+      `[publish-version-doi] residual failed for ${dataset.dataset_id}@${version}:`,
+      err,
+    );
+    try {
+      await env.DB.prepare(
+        `UPDATE manifest_jobs SET status = 'failed', error_message = ?, completed_at = datetime('now')
+         WHERE dataset_id = ? AND version = ? AND nonce = ?`,
+      )
+        .bind(msg, dataset.dataset_id, version, nonce)
+        .run();
+    } catch (d1Err) {
+      console.error(
+        `[publish-version-doi] failed to mark job failed for ${dataset.dataset_id}@${version}:`,
+        d1Err,
+      );
+    }
+  }
+}
+
+/**
+ * LEGACY synchronous EZID version-DOI path (used when the central manifest
+ * workflow is disabled, e.g. prod before the #751 cutover): reads BIDS metadata
+ * via the full repo tree, mints the DOI, updates DB, and generates the manifest
+ * inline. Retained unchanged for the pre-cutover env; removable after the prod
+ * MANIFEST_VIA_CENTRAL_WORKFLOW flip soaks.
+ */
+async function handleEzidVersionDoiLegacy(
   c: WebhookContext,
   dataset: {
     id: number;
@@ -509,94 +1074,16 @@ async function handleEzidVersionDoi(
       }
     }
 
-    // Upload archive to Zenodo as draft backup (non-fatal)
-    let zenodoBackup: string | undefined;
-    let zenodoBackupError: string | undefined;
-    try {
-      const zenodoToken = sandbox ? c.env.ZENODO_SANDBOX_API_KEY : c.env.ZENODO_API_KEY;
-      if (!zenodoToken) {
-        console.info(
-          `[webhook] Zenodo backup skipped for ${dataset.dataset_id}: no ${sandbox ? "sandbox " : ""}API key configured`,
-        );
-      } else if (!dataset.github_repo) {
-        console.info(
-          `[webhook] Zenodo backup skipped for ${dataset.dataset_id}: no GitHub repo configured`,
-        );
-      }
-      if (zenodoToken && dataset.github_repo) {
-        const tag = `v${version}`;
-        const archiveData = await downloadReleaseArchive(repoName, tag, pat);
-
-        // Check if dataset already has a Zenodo backup deposition
-        const row = await c.env.DB.prepare("SELECT zenodo_concept_id FROM datasets WHERE id = ?")
-          .bind(dataset.id)
-          .first<{ zenodo_concept_id: string | null }>();
-
-        let depositionId = row?.zenodo_concept_id
-          ? Number.parseInt(row.zenodo_concept_id, 10)
-          : Number.NaN;
-
-        if (Number.isNaN(depositionId)) {
-          // Create initial Zenodo draft deposition
-          const deposition = await zenodo.createDeposition(
-            {
-              title: `${dataset.name} (NEMAR backup archive)`,
-              description: `Backup archive for NEMAR dataset ${dataset.dataset_id}. Primary DOI: ${dataset.concept_doi}`,
-              creators: [{ name: "NEMAR" }],
-              keywords: ["BIDS", "neuroscience", "NEMAR", "backup"],
-              version,
-            },
-            zenodoToken,
-            sandbox,
-          );
-          depositionId = deposition.id;
-          await c.env.DB.prepare(
-            "UPDATE datasets SET zenodo_concept_id = ?, updated_at = datetime('now') WHERE id = ?",
-          )
-            .bind(String(depositionId), dataset.id)
-            .run();
-        } else {
-          // Create a new version draft from existing deposition
-          const newVersion = await zenodo.createNewVersion(depositionId, zenodoToken, sandbox);
-          depositionId = newVersion.id;
-          await zenodo.updateDepositionMetadata(
-            depositionId,
-            {
-              title: `${dataset.name} (NEMAR backup archive)`,
-              description: `Backup archive v${version}`,
-              creators: [{ name: "NEMAR" }],
-              version,
-            },
-            zenodoToken,
-            sandbox,
-          );
-        }
-
-        const deposition = await zenodo.getDeposition(depositionId, zenodoToken, sandbox);
-        if (deposition.links.bucket) {
-          await zenodo.uploadFile(
-            depositionId,
-            deposition.links.bucket,
-            `${dataset.dataset_id}-v${version}.zip`,
-            archiveData,
-            zenodoToken,
-            sandbox,
-          );
-          zenodoBackup = `Zenodo draft #${depositionId}`;
-        } else {
-          console.warn(
-            `[webhook] Zenodo deposition #${depositionId} has no bucket URL; file upload skipped`,
-          );
-          zenodoBackupError = `Zenodo deposition #${depositionId} has no bucket URL`;
-        }
-      }
-    } catch (zenodoErr) {
-      zenodoBackupError = errorMessage(zenodoErr);
-      console.error(
-        `[webhook] Zenodo backup failed for ${dataset.dataset_id}@${version} (non-fatal):`,
-        zenodoErr,
-      );
-    }
+    // Upload archive to Zenodo as draft backup (non-fatal). Shared with the
+    // async path; skipOpenNeuro=false preserves the legacy "backup all" behavior.
+    const { backup: zenodoBackup, error: zenodoBackupError } = await maybeZenodoBackup(c.env, {
+      dataset,
+      version,
+      sandbox,
+      repoName,
+      pat,
+      skipOpenNeuro: false,
+    });
 
     // Sync to nemar.org in the background (non-fatal, non-blocking).
     // Pass the freshly-minted DOI + version through as overrides so a D1
@@ -1318,31 +1805,79 @@ export function validatePrescreenCallbackBody(body: unknown): string | null {
 /**
  * Combine the `claude -p` verdict with an independent server-side S3 check.
  * The workflow judges README/metadata/declared-data quality; the Worker has
- * the AWS credentials to confirm the blobs actually landed. We only treat a
- * literally empty objects/ prefix as "missing data" -- `objectCount` is
- * `undefined` when the page-count cap was hit (i.e. *many* objects), which is
- * emphatically not missing. An S3 read error yields `s3 = null` so infra
- * blips never produce a false block. Pure function: no I/O, fully testable.
+ * the AWS credentials and is the source of truth for whether the data blobs
+ * actually landed. The S3 check is therefore authoritative on the DATA
+ * question in BOTH directions:
+ *   - empty objects/ prefix -> add a "missing data" block (catches a workflow
+ *     that passed but the blobs never uploaded);
+ *   - real blobs present -> a "no real data / too small" verdict was a false
+ *     negative (e.g. the workflow's git-tree heuristic was annex-blind for
+ *     symlink-stored annex content, #753), so strip the data-shortage reasons
+ *     and, if that was the ONLY reason to block, downgrade to pass.
+ * Non-data reasons (missing README / Name / Authors) the Worker cannot judge,
+ * so they always stand. `objectCount` is `undefined` when the page-count cap
+ * was hit (i.e. *many* objects), which is emphatically data-present. An S3
+ * read error yields `s3 = null` so infra blips never flip the verdict either
+ * way. Pure function: no I/O, fully testable.
  */
 export interface PrescreenS3Presence {
   totalSize: number;
   objectCount: number | undefined;
 }
+
+/**
+ * A pre-screen block reason the authoritative S3 data check can refute. Covers
+ * the workflow's data-shortage phrasings ("no real data", "too small",
+ * "0 annexed files", "binary data ... not found") plus the synthetic storage
+ * reason this function adds on an empty prefix.
+ */
+export function isDataShortageReason(reason: string): boolean {
+  // Whole-word `annex`/`0 ... files` (not bare substrings) so a non-data block
+  // reason that merely contains those letters isn't silently stripped. `s3` is
+  // word-bounded for the same reason. No bare `storage`: the only storage
+  // phrasing is the synthetic reason this module adds in the (mutually
+  // exclusive) s3Missing branch, which never reaches the stripping path.
+  return /no (real )?data|too small|implausibl|\b0 (annexed |data )?files\b|binary data|\bannexed?\b|\bs3\b/i.test(
+    reason,
+  );
+}
+
+/**
+ * Decide whether the pre-screen result should be surfaced as an advisory
+ * concern. `flagged` only FLAGS (the screen found a gap) -- it never blocks
+ * publication (#756); the handler records it as prescreen_status='concern'. The
+ * S3-authority logic is unchanged: storage with real blobs refutes a
+ * data-shortage reason (and can clear an all-data-shortage flag), an empty
+ * prefix adds one.
+ */
 export function decidePrescreenOutcome(
   verdict: "pass" | "block",
   reasons: string[],
   s3: PrescreenS3Presence | null,
-): { blocked: boolean; reasons: string[] } {
-  const out = [...reasons];
-  let blocked = verdict === "block";
+): { flagged: boolean; reasons: string[] } {
+  let out = [...reasons];
+  let flagged = verdict === "block";
+
   const s3Missing = !!s3 && s3.totalSize === 0 && s3.objectCount === 0;
-  if (s3Missing) {
-    blocked = true;
-    if (!out.some((r) => /no data|s3|storage/i.test(r))) {
+  // objectCount === undefined => first-page cap hit => many objects => present.
+  const s3Present = !!s3 && (s3.totalSize > 0 || s3.objectCount === undefined);
+
+  if (s3Present) {
+    // Storage confirms real blobs: any data-shortage reason is a false
+    // negative. Drop those; keep README/metadata reasons. Clear the flag only
+    // when it carried data-shortage reason(s) that ALL got stripped -- never
+    // silently clear a reasonless or non-data flag.
+    const kept = out.filter((r) => !isDataShortageReason(r));
+    if (flagged && kept.length === 0 && out.length > 0) flagged = false;
+    out = kept;
+  } else if (s3Missing) {
+    flagged = true;
+    if (!out.some((r) => /no data|\bs3\b|storage/i.test(r))) {
       out.push("No data files were found in storage for this dataset.");
     }
   }
-  return { blocked, reasons: out };
+
+  return { flagged, reasons: out };
 }
 
 /**
@@ -1456,48 +1991,37 @@ webhooks.post("/prescreen-result", async (c) => {
     console.error(`[prescreen-result] S3 stats failed for ${body.dataset_id} (non-fatal):`, err);
   }
 
-  const { blocked, reasons } = decidePrescreenOutcome(body.verdict, body.reasons ?? [], s3);
-  const issueUrl = body.issue_url ?? null;
+  const { flagged, reasons } = decidePrescreenOutcome(body.verdict, body.reasons ?? [], s3);
+  // Audit the S3 override: if the authoritative S3 check changed the workflow's
+  // raw verdict (e.g. cleared an annex-blind false flag, #753), record what was
+  // dropped so the change is never silent.
+  const effectiveVerdict = flagged ? "block" : "pass";
+  if (body.verdict !== effectiveVerdict) {
+    const stripped = (body.reasons ?? []).filter((r) => !reasons.includes(r));
+    console.log(
+      `[prescreen-result] S3 override for ${body.dataset_id}: ${body.verdict} -> ${effectiveVerdict}; stripped=${JSON.stringify(stripped)} s3_size=${s3?.totalSize ?? "unknown"}`,
+    );
+  }
+  // `|| null` (not `?? null`): the advisory workflow sends issue_url="" now, and
+  // we want NULL in the column, not an empty string.
+  const issueUrl = body.issue_url || null;
 
-  if (blocked) {
-    const res = await c.env.DB.prepare(
+  let res: D1Result;
+  if (flagged) {
+    // Advisory (#756): record the concern but DO NOT block. The request stays in
+    // the normal admin-review queue; the concern + reasons are surfaced in the
+    // publish-status views. No status flip, no block email, no repo issue (the
+    // workflow no longer opens one). Real blockers (BIDS) keep status='blocked'.
+    res = await c.env.DB.prepare(
       `UPDATE publication_requests
-          SET status = 'blocked', block_reason = 'prescreen_failed',
-              prescreen_status = 'failed', prescreen_issue_url = ?,
+          SET prescreen_status = 'concern', prescreen_reasons = ?, prescreen_issue_url = ?,
               prescreen_at = datetime('now'), updated_at = datetime('now')
         WHERE id = ? AND prescreen_status = 'pending'`,
     )
-      .bind(issueUrl, request.id)
+      .bind(JSON.stringify(reasons), issueUrl, request.id)
       .run();
-
-    // Only email if THIS call did the transition. Guards against a duplicate
-    // email if two callbacks race past the 'pending' read (the second sees
-    // changes=0 because the first already flipped the row).
-    if (res.meta.changes > 0) {
-      const { fromEmail, replyTo, isDev } = resolveEmailConfig(c.env);
-      c.executionCtx.waitUntil(
-        sendPublicationBlockedEmail(
-          request.requested_by_email,
-          request.requested_by_username,
-          body.dataset_id,
-          reasons,
-          issueUrl,
-          c.env.RESEND_API_KEY,
-          fromEmail,
-          replyTo,
-          isDev,
-        ).catch((emailErr) => {
-          // waitUntil swallows rejections to the runtime log; catch here so the
-          // failure is attributable and the dataset id is in the message.
-          console.error(
-            `[prescreen-result] block email send failed for ${body.dataset_id}:`,
-            emailErr,
-          );
-        }),
-      );
-    }
   } else {
-    await c.env.DB.prepare(
+    res = await c.env.DB.prepare(
       `UPDATE publication_requests
           SET prescreen_status = 'passed', prescreen_at = datetime('now'),
               updated_at = datetime('now')
@@ -1506,12 +2030,23 @@ webhooks.post("/prescreen-result", async (c) => {
       .bind(request.id)
       .run();
   }
+  if (res.meta.changes === 0) {
+    // One-shot guard: the screen was no longer 'pending' (a duplicate/late
+    // callback). Harmless, but log so a double-dispatch is explicable.
+    console.warn(
+      `[prescreen-result] no-op for ${body.dataset_id} request_id=${request.id}: prescreen_status was not 'pending' (duplicate callback?)`,
+    );
+  }
 
   console.log(
-    `[prescreen-result] dataset=${body.dataset_id} request_id=${request.id} verdict=${body.verdict} blocked=${blocked} s3_objects=${s3 ? (s3.objectCount ?? "capped") : "unknown"}`,
+    `[prescreen-result] dataset=${body.dataset_id} request_id=${request.id} verdict=${body.verdict} prescreen_status=${flagged ? "concern" : "passed"} s3_objects=${s3 ? (s3.objectCount ?? "capped") : "unknown"}`,
   );
 
-  return c.json({ ok: true, dataset_id: body.dataset_id, blocked });
+  return c.json({
+    ok: true,
+    dataset_id: body.dataset_id,
+    prescreen_status: flagged ? "concern" : "passed",
+  });
 });
 
 /**
@@ -1596,6 +2131,173 @@ webhooks.post("/manifest-failed", async (c) => {
   );
 
   return c.json({ ok: true, dataset_id: body.dataset_id, version: body.version });
+});
+
+// ============================================================================
+// Import state callback (issue #754)
+// ============================================================================
+
+export interface ImportStateBody {
+  dataset_id: string;
+  source: string;
+  source_id: string;
+  stage: string; // prepare | copy | finalize
+  status: string; // one of IMPORT_STATUSES
+  error_message?: string;
+  workflow_run_url?: string;
+  shards_total?: number;
+}
+
+/** Validate the onboard-openneuro.yml import-state callback body. */
+export function validateImportStateBody(body: unknown): string | null {
+  if (!body || typeof body !== "object") return "Body must be a JSON object";
+  const b = body as Record<string, unknown>;
+  if (typeof b.dataset_id !== "string" || !b.dataset_id) {
+    return "dataset_id must be a non-empty string";
+  }
+  if (typeof b.source !== "string" || !b.source) return "source must be a non-empty string";
+  if (typeof b.source_id !== "string" || !b.source_id)
+    return "source_id must be a non-empty string";
+  if (typeof b.stage !== "string" || !b.stage) return "stage must be a non-empty string";
+  if (typeof b.status !== "string" || !IMPORT_STATUSES.includes(b.status as ImportStatus)) {
+    return `status must be one of: ${IMPORT_STATUSES.join(", ")}`;
+  }
+  if (b.error_message !== undefined && typeof b.error_message !== "string") {
+    return "error_message must be a string";
+  }
+  if (b.workflow_run_url !== undefined && typeof b.workflow_run_url !== "string") {
+    return "workflow_run_url must be a string";
+  }
+  if (
+    b.shards_total !== undefined &&
+    (typeof b.shards_total !== "number" || !Number.isInteger(b.shards_total))
+  ) {
+    return "shards_total must be an integer";
+  }
+  return null;
+}
+
+/**
+ * Import-state callback from onboard-openneuro.yml (#754). Bearer-authed with
+ * NEMAR_WEBHOOK_TOKEN. Upserts the single import_jobs row per dataset_id. A
+ * `preparing` POST unconditionally (re)seeds the row so a re-import after
+ * rollback self-heals; every other transition is monotonic and never regresses
+ * past a terminal state. On a landed terminal `failed`, the rollback-or-
+ * quarantine decision runs in the background (waitUntil) so the callback
+ * returns promptly.
+ */
+webhooks.post("/import-state", async (c) => {
+  const token = c.req.header("X-Webhook-Token");
+  // Same secret-untangle as /llm-enrich: prefer NEMAR_WEBHOOK_TOKEN, fall back
+  // to the historically-shared GITHUB_WEBHOOK_SECRET.
+  const expectedToken = c.env.NEMAR_WEBHOOK_TOKEN ?? c.env.GITHUB_WEBHOOK_SECRET;
+  if (!expectedToken) {
+    console.error(
+      "[import-state] no webhook secret configured (NEMAR_WEBHOOK_TOKEN/GITHUB_WEBHOOK_SECRET both unset)",
+    );
+    return c.json({ error: "Invalid webhook token" }, 401);
+  }
+  if (!token || !timingSafeEqual(token, expectedToken)) {
+    return c.json({ error: "Invalid webhook token" }, 401);
+  }
+
+  let body: ImportStateBody;
+  try {
+    body = (await c.req.json()) as ImportStateBody;
+  } catch {
+    return c.json({ error: "Invalid JSON in request body" }, 400);
+  }
+
+  const validationError = validateImportStateBody(body);
+  if (validationError) return c.json({ error: validationError }, 400);
+  if (!isValidDatasetId(body.dataset_id)) {
+    return c.json({ error: `Invalid dataset_id: ${body.dataset_id}` }, 400);
+  }
+
+  const status = body.status as ImportStatus;
+  const stage = body.stage;
+  const runUrl = body.workflow_run_url ?? null;
+  const shardsTotal = body.shards_total ?? null;
+  const errorMsg = body.error_message ?? null;
+
+  try {
+    if (status === "preparing") {
+      // A fresh import attempt: unconditionally (re)seed the row, clearing any
+      // prior terminal state so a re-import after rollback/quarantine heals.
+      await c.env.DB.prepare(
+        `INSERT INTO import_jobs
+           (dataset_id, source, source_id, stage, status, shards_total, workflow_run_url,
+            last_error, completed_at, created_at, updated_at)
+         VALUES (?, ?, ?, ?, 'preparing', ?, ?, NULL, NULL, datetime('now'), datetime('now'))
+         ON CONFLICT(dataset_id) DO UPDATE SET
+           source = excluded.source, source_id = excluded.source_id,
+           stage = excluded.stage, status = 'preparing',
+           shards_total = COALESCE(excluded.shards_total, import_jobs.shards_total),
+           workflow_run_url = COALESCE(excluded.workflow_run_url, import_jobs.workflow_run_url),
+           last_error = NULL, completed_at = NULL, updated_at = datetime('now')`,
+      )
+        .bind(body.dataset_id, body.source, body.source_id, stage, shardsTotal, runUrl)
+        .run();
+    } else {
+      // Monotonic: `failed` may upgrade an in-flight row; complete/rolled_back/
+      // quarantined are sticky (the WHERE refuses a regressing update). The
+      // 9th bind feeds the completed_at CASE on a fresh insert.
+      await c.env.DB.prepare(
+        `INSERT INTO import_jobs
+           (dataset_id, source, source_id, stage, status, shards_total, workflow_run_url,
+            last_error, completed_at, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?,
+                 CASE WHEN ? IN ('complete','failed','quarantined','rolled_back')
+                      THEN datetime('now') ELSE NULL END,
+                 datetime('now'), datetime('now'))
+         ON CONFLICT(dataset_id) DO UPDATE SET
+           stage = excluded.stage, status = excluded.status,
+           shards_total = COALESCE(excluded.shards_total, import_jobs.shards_total),
+           workflow_run_url = COALESCE(excluded.workflow_run_url, import_jobs.workflow_run_url),
+           last_error = excluded.last_error,
+           completed_at = CASE WHEN excluded.status IN ('complete','failed','quarantined','rolled_back')
+                               THEN datetime('now') ELSE import_jobs.completed_at END,
+           updated_at = datetime('now')
+         WHERE import_jobs.status NOT IN ('complete','rolled_back','quarantined')`,
+      )
+        .bind(
+          body.dataset_id,
+          body.source,
+          body.source_id,
+          stage,
+          status,
+          shardsTotal,
+          runUrl,
+          errorMsg,
+          status,
+        )
+        .run();
+    }
+  } catch (err) {
+    console.error(`[import-state] upsert failed for ${body.dataset_id}:`, err);
+    return c.json({ error: "Failed to record import state" }, 500);
+  }
+
+  // On a landed terminal failure, run the rollback-or-quarantine decision. Only
+  // when the row is actually `failed` now (the monotonic guard may have refused
+  // to regress a row that already reached complete).
+  if (status === "failed") {
+    const cur = await c.env.DB.prepare("SELECT status FROM import_jobs WHERE dataset_id = ?")
+      .bind(body.dataset_id)
+      .first<{ status: string }>();
+    if (cur?.status === "failed") {
+      c.executionCtx.waitUntil(
+        runImportRecovery(c.env.DB, c.env, body.dataset_id).catch((err) =>
+          console.error(`[import-state] recovery failed for ${body.dataset_id}:`, err),
+        ),
+      );
+    }
+  }
+
+  console.log(
+    `[import-state] dataset=${body.dataset_id} stage=${stage} status=${status}${errorMsg ? ` error=${errorMsg}` : ""}`,
+  );
+  return c.json({ ok: true, dataset_id: body.dataset_id, status });
 });
 
 /**
@@ -2141,6 +2843,12 @@ webhooks.post("/zarr-ready", async (c) => {
         .run();
       changed = result.meta.changes ?? 0;
     } else {
+      // Record failure for the observability dashboard only -- do NOT auto-retry
+      // zarr here. Conversion is owned by the hourly Hallu cron (workflow
+      // autodispatch is intentionally off), which re-attempts on its own
+      // schedule; many zarr failures are the mixed-rate EDF/BDF reader bug
+      // (#737) that a re-dispatch wouldn't fix. This is the deliberate contrast
+      // with the archive-ready auto-retry (epic #736, Phase 3 decision).
       const result = await c.env.DB.prepare(
         "UPDATE datasets SET zarr_status = 'failed' WHERE dataset_id = ?",
       )
@@ -2224,12 +2932,16 @@ webhooks.post("/zarr-ready", async (c) => {
  */
 interface ArchiveReadyBody {
   dataset_id: string;
-  status?: "ready" | "failed";
+  status?: "ready" | "failed" | "skipped";
   /** Bytes of the generated zip; persisted to datasets.archive_size on 'ready'. */
   size?: number;
   /** The published version the archive was built for (logged, not stored). */
   version?: string;
   error?: string;
+  /** Why archive generation was skipped (status='skipped', #752). Persisted to
+   *  datasets.archive_skip_reason; its presence is what marks a dataset
+   *  "archive skipped" (archive_status stays NULL). */
+  reason?: string;
 }
 
 webhooks.post("/archive-ready", async (c) => {
@@ -2257,8 +2969,8 @@ webhooks.post("/archive-ready", async (c) => {
   }
   // Require an explicit status: a missing/unknown value must not default to
   // 'ready' (that would mark a failed generation as having an archive).
-  if (body.status !== "ready" && body.status !== "failed") {
-    return c.json({ error: "status must be 'ready' or 'failed'" }, 400);
+  if (body.status !== "ready" && body.status !== "failed" && body.status !== "skipped") {
+    return c.json({ error: "status must be 'ready', 'failed', or 'skipped'" }, 400);
   }
   const status = body.status;
   if (status === "failed" && body.error) {
@@ -2267,23 +2979,63 @@ webhooks.post("/archive-ready", async (c) => {
 
   // Persist latest-only archive state. On failure keep the prior archive_size
   // (a failed rebuild shouldn't erase the last good zip's size) and only flip
-  // the status + stamp checked_at.
+  // the status + stamp checked_at. A 'failed' callback also drives the bounded
+  // auto-retry (epic #736, Phase 3): re-dispatch generation while under the cap,
+  // counting dispatches in archive_retry_count (reset to 0 on 'ready'). The
+  // daily archiveRetrySweep is the backstop. See services/archive-retry.ts.
   let changed = 0;
+  let retry: ReturnType<typeof decideArchiveRetry> | null = null;
   try {
     if (status === "ready") {
       const result = await c.env.DB.prepare(
+        // Clear archive_skip_reason: a real zip now exists, so a stale skip from
+        // an earlier (larger) version must not keep the UI on the direct-download
+        // recipe (#752).
         `UPDATE datasets
          SET archive_status = 'ready',
              archive_checked_at = datetime('now'),
-             archive_size = ?
+             archive_size = ?,
+             archive_retry_count = 0,
+             archive_skip_reason = NULL
          WHERE dataset_id = ?`,
       )
         .bind(typeof body.size === "number" ? body.size : null, body.dataset_id)
         .run();
       changed = result.meta.changes ?? 0;
-    } else {
+    } else if (status === "skipped") {
+      // Over the size/file-count policy (#752): the workflow built no zip and
+      // steers users to direct download. Record the reason; leave archive_status
+      // NULL (skipped is intentional, NOT a failed generation -> no auto-retry).
+      // Reset archive_retry_count too (cross-epic with #736): a skip is a clean
+      // state transition, so a prior failed-retry history must not block a future
+      // auto-retry if the dataset later shrinks and a `failed` arrives.
       const result = await c.env.DB.prepare(
-        "UPDATE datasets SET archive_status = 'failed', archive_checked_at = datetime('now') WHERE dataset_id = ?",
+        `UPDATE datasets
+         SET archive_skip_reason = ?,
+             archive_status = NULL,
+             archive_retry_count = 0,
+             archive_checked_at = datetime('now')
+         WHERE dataset_id = ?`,
+      )
+        .bind(body.reason ?? "archive skipped (size policy)", body.dataset_id)
+        .run();
+      changed = result.meta.changes ?? 0;
+    } else {
+      // Read the current dispatch count to decide whether to re-dispatch. The
+      // count is NOT advanced here -- it is incremented only after a successful
+      // dispatch (in the waitUntil below), so a failed dispatch can't consume a
+      // retry slot. Matches archiveRetrySweep's dispatch-then-increment order.
+      const row = await c.env.DB.prepare(
+        "SELECT archive_retry_count FROM datasets WHERE dataset_id = ?",
+      )
+        .bind(body.dataset_id)
+        .first<{ archive_retry_count: number }>();
+      retry = decideArchiveRetry("failed", row?.archive_retry_count ?? 0, body.version);
+      const result = await c.env.DB.prepare(
+        `UPDATE datasets
+         SET archive_status = 'failed',
+             archive_checked_at = datetime('now')
+         WHERE dataset_id = ?`,
       )
         .bind(body.dataset_id)
         .run();
@@ -2301,12 +3053,132 @@ webhooks.post("/archive-ready", async (c) => {
   // matches zero rows and persists nothing. Surface it as a 404 instead of a
   // silent 200 -- mirrors the zarr-ready / prescreen-result guards.
   if (changed === 0) {
-    console.error(`[archive-ready] UPDATE matched 0 rows dataset=${body.dataset_id} -- not in D1`);
+    console.error(
+      `[archive-ready] UPDATE matched 0 rows dataset=${body.dataset_id} status=${status} -- not in D1`,
+    );
+    return c.json({ error: "Dataset not found" }, 404);
+  }
+
+  // Bounded auto-retry: re-dispatch a fresh archive build, fire-and-forget via
+  // waitUntil (like the other post-write side-effects in this file) so a slow
+  // GitHub /dispatches call can't delay or time out the workflow's callback. The
+  // retry-count increment happens HERE, only after a successful dispatch
+  // (mirrors archiveRetrySweep) -- a failed dispatch (GitHub 422 / rate-limit)
+  // must not consume a retry slot, which would otherwise exhaust the cap without
+  // ever running an archive. Phase 2 deletes the partial on failure, so no force.
+  if (retry?.retry && body.version) {
+    const retryDatasetId = body.dataset_id;
+    const retryVersion = body.version;
+    const retryAttempt = retry.nextCount;
+    c.executionCtx.waitUntil(
+      (async () => {
+        try {
+          const pat = await getDatasetsToken(c.env);
+          await triggerArchiveGeneration(retryDatasetId, retryDatasetId, retryVersion, pat);
+          await c.env.DB.prepare("UPDATE datasets SET archive_retry_count = ? WHERE dataset_id = ?")
+            .bind(retryAttempt, retryDatasetId)
+            .run();
+          console.log(
+            `[archive-ready] auto-retry dispatched dataset=${retryDatasetId} version=${retryVersion} attempt=${retryAttempt}/${MAX_ARCHIVE_RETRIES}`,
+          );
+        } catch (err) {
+          console.error(
+            `[archive-ready] auto-retry dispatch failed dataset=${retryDatasetId} (retry slot not consumed):`,
+            err instanceof Error ? err.message : String(err),
+          );
+        }
+      })(),
+    );
+  }
+
+  console.log(
+    `[archive-ready] dataset=${body.dataset_id} status=${status} size=${body.size ?? "?"} version=${body.version ?? "?"}${retry ? ` retry=${retry.reason} count=${retry.nextCount}` : ""}`,
+  );
+
+  return c.json({ ok: true, dataset_id: body.dataset_id, status });
+});
+
+/**
+ * POST /webhooks/records-ready — callback from nemarDatasets/.github
+ * `generate-records.yml` once a dataset version's records.json has been built and
+ * uploaded to `s3://nemar/<id>/version/v<version>-records.json` (epic #736 Phase 5
+ * / #742). Until now the workflow was never dispatched on publish and had no
+ * callback, so records.json 404'd for every dataset.
+ *
+ * Mirror of /archive-ready: same `X-Webhook-Token` (NEMAR_WEBHOOK_TOKEN) auth,
+ * records the latest-only records state on the `datasets` row. The records.json
+ * artifact is served from S3 directly (loadRecords), so this column is
+ * observability-only -- no serving dependency, and (unlike archive) no retry.
+ *
+ * Responses: 200 once state is recorded; 400 for a bad body or missing/unknown
+ * `status`; 404 when the dataset isn't in D1. Idempotent.
+ */
+interface RecordsReadyBody {
+  dataset_id: string;
+  status?: "ready" | "failed";
+  /** The published version the records were built for (logged, not stored). */
+  version?: string;
+  error?: string;
+}
+
+webhooks.post("/records-ready", async (c) => {
+  const token = c.req.header("X-Webhook-Token");
+  const expectedToken = c.env.NEMAR_WEBHOOK_TOKEN ?? c.env.GITHUB_WEBHOOK_SECRET;
+  if (!expectedToken) {
+    console.error(
+      "[records-ready] no webhook secret configured (NEMAR_WEBHOOK_TOKEN/GITHUB_WEBHOOK_SECRET both unset or empty)",
+    );
+    return c.json({ error: "Invalid webhook token" }, 401);
+  }
+  if (!token || !timingSafeEqual(token, expectedToken)) {
+    return c.json({ error: "Invalid webhook token" }, 401);
+  }
+
+  let body: RecordsReadyBody;
+  try {
+    body = (await c.req.json()) as RecordsReadyBody;
+  } catch {
+    return c.json({ error: "Invalid JSON in request body" }, 400);
+  }
+
+  if (typeof body.dataset_id !== "string" || !isValidDatasetId(body.dataset_id)) {
+    return c.json({ error: "dataset_id must be a valid dataset id" }, 400);
+  }
+  // Require an explicit status: a missing/unknown value must not default to
+  // 'ready' (that would mark a failed generation as having records).
+  if (body.status !== "ready" && body.status !== "failed") {
+    return c.json({ error: "status must be 'ready' or 'failed'" }, 400);
+  }
+  const status = body.status;
+  if (status === "failed" && body.error) {
+    console.error(`[records-ready] workflow failure dataset=${body.dataset_id}: ${body.error}`);
+  }
+
+  let changed = 0;
+  try {
+    const result = await c.env.DB.prepare(
+      "UPDATE datasets SET records_status = ?, records_checked_at = datetime('now') WHERE dataset_id = ?",
+    )
+      .bind(status, body.dataset_id)
+      .run();
+    changed = result.meta.changes ?? 0;
+  } catch (err) {
+    console.error(
+      `[records-ready] D1 update failed dataset=${body.dataset_id}:`,
+      err instanceof Error ? err.message : String(err),
+    );
+    return c.json({ error: "Failed to record records state" }, 500);
+  }
+
+  // A callback for a dataset that isn't in D1 (deleted, or never registered)
+  // matches zero rows; surface it as a 404 rather than a silent 200.
+  if (changed === 0) {
+    console.error(`[records-ready] UPDATE matched 0 rows dataset=${body.dataset_id} -- not in D1`);
     return c.json({ error: "Dataset not found" }, 404);
   }
 
   console.log(
-    `[archive-ready] dataset=${body.dataset_id} status=${status} size=${body.size ?? "?"} version=${body.version ?? "?"}`,
+    `[records-ready] dataset=${body.dataset_id} status=${status} version=${body.version ?? "?"}`,
   );
 
   return c.json({ ok: true, dataset_id: body.dataset_id, status });
