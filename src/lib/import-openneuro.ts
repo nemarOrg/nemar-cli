@@ -272,7 +272,20 @@ export function findAnnexedRootMetadata(datasetPath: string): string[] {
  * copy reaches OpenNeuro (anonymous public read), decoupled from the NEMAR
  * transfer identity. See #768.
  */
-const OPENNEURO_ANON_UNSET = ["AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN"];
+// Every var the AWS credential chain consults, so git-annex falls all the way
+// back to anonymous access (the only mode OpenNeuro's public bucket allows for a
+// non-OpenNeuro principal). Static keys are what CI uses today; the profile /
+// OIDC / container vars keep this correct if CI ever switches credential models.
+const OPENNEURO_ANON_UNSET = [
+  "AWS_ACCESS_KEY_ID",
+  "AWS_SECRET_ACCESS_KEY",
+  "AWS_SESSION_TOKEN",
+  "AWS_PROFILE",
+  "AWS_WEB_IDENTITY_TOKEN_FILE",
+  "AWS_ROLE_ARN",
+  "AWS_CONTAINER_CREDENTIALS_RELATIVE_URI",
+  "AWS_CONTAINER_CREDENTIALS_FULL_URI",
+];
 
 export async function ensureRootMetadataUnannexed(datasetPath: string): Promise<string[]> {
   const annexed = findAnnexedRootMetadata(datasetPath);
@@ -284,7 +297,7 @@ export async function ensureRootMetadataUnannexed(datasetPath: string): Promise<
   });
   if (enable.exitCode !== 0) {
     throw new Error(
-      `Failed to enable s3-PUBLIC remote to fetch annexed metadata (${annexed.join(", ")}): ${enable.stderr.trim()}`,
+      `Failed to enable s3-PUBLIC remote to fetch annexed metadata (${annexed.join(", ")}): ${enable.stderr.trim() || enable.stdout.trim() || `exit ${enable.exitCode}`}`,
     );
   }
   const get = await runCommand(["git", "annex", "get", ...annexed], {
@@ -293,7 +306,17 @@ export async function ensureRootMetadataUnannexed(datasetPath: string): Promise<
   });
   if (get.exitCode !== 0) {
     throw new Error(
-      `Failed to fetch annexed metadata content (${annexed.join(", ")}) from OpenNeuro S3: ${get.stderr.trim()}`,
+      `Failed to fetch annexed metadata content (${annexed.join(", ")}) from OpenNeuro S3: ${get.stderr.trim() || get.stdout.trim() || `exit ${get.exitCode}`}`,
+    );
+  }
+  // `git annex get` can exit 0 while some files fail to download. Verify each
+  // requested file's content is now present (its symlink resolves) before
+  // unannex, so a partial anonymous-fetch denial surfaces here with a precise
+  // message instead of a later, cryptic "dataset_description.json not found".
+  const stillMissing = annexed.filter((f) => !existsSync(join(datasetPath, f)));
+  if (stillMissing.length > 0) {
+    throw new Error(
+      `git annex get exited 0 but content is still absent for: ${stillMissing.join(", ")} (likely an anonymous-fetch denial from OpenNeuro S3).`,
     );
   }
   const unannex = await runCommand(["git", "annex", "unannex", ...annexed], { cwd: datasetPath });
@@ -734,6 +757,11 @@ export async function prepareImport(
   let keyUrlMap = new Map<string, string>();
   if (!options.skipData) {
     const whereisSpinner = ora("Mapping annexed files from OpenNeuro S3...").start();
+    // No unsetEnv here (unlike the metadata fetch above): enableremote only
+    // records the remote config and getAnnexWhereisAll reads location metadata
+    // from the local git-annex branch — neither fetches object CONTENT from S3,
+    // so neither signs a GET that the CI IAM boundary would deny (#768). The
+    // whole on* fleet imported through this call with CI creds present.
     const enableResult = await runCommand(["git", "annex", "enableremote", "s3-PUBLIC"], {
       cwd: datasetPath,
     });
