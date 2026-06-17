@@ -138,6 +138,10 @@ describe("migration 0046 + zarr-ready handler SQL", () => {
      SET zarr_status='failed', zarr_errors=?, zarr_failure_count=?, zarr_deterministic=?,
          zarr_data_failures=?, zarr_failed_at=datetime('now')
      WHERE dataset_id=?`;
+  const CONVERTING_SQL = `UPDATE datasets
+     SET zarr_status='pending', zarr_errors=NULL, zarr_failure_count=NULL,
+         zarr_deterministic=NULL, zarr_data_failures=NULL, zarr_failed_at=NULL
+     WHERE dataset_id=?`;
   const row = () =>
     db.query("SELECT * FROM datasets WHERE dataset_id='on007523'").get() as Record<string, unknown>;
 
@@ -201,6 +205,28 @@ describe("migration 0046 + zarr-ready handler SQL", () => {
     expect(r.zarr_errors).toBe(4);
     expect(r.zarr_deterministic).toBe(1);
     expect(r.zarr_failed_at).not.toBeNull();
+  });
+
+  test("converting signal sets pending (Processing) + clears prior failure detail", () => {
+    // A dataset that previously failed, now being re-converted: the in-progress
+    // signal flips it to 'pending' (the dashboard's Processing tile) and clears
+    // the stale failure detail so it doesn't show as failed while converting.
+    const fail = zarrFailureColumns({ errors: 3, deterministic: false });
+    db.run(FAILED_SQL, [
+      fail.errors,
+      fail.failureCount,
+      fail.deterministic,
+      fail.dataFailuresJson,
+      "on007523",
+    ]);
+    expect(row().zarr_status).toBe("failed");
+
+    db.run(CONVERTING_SQL, ["on007523"]);
+    const r = row();
+    expect(r.zarr_status).toBe("pending");
+    expect(r.zarr_errors).toBeNull();
+    expect(r.zarr_data_failures).toBeNull();
+    expect(r.zarr_failed_at).toBeNull();
   });
 
   test("clean ready run clears zarr_failed_at", () => {

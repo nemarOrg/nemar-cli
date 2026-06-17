@@ -2791,7 +2791,11 @@ interface ZarrDataFailure {
 
 interface ZarrReadyBody {
   dataset_id: string;
-  status?: "ready" | "failed";
+  // 'converting' is the live in-progress signal the Hallu driver POSTs when it
+  // starts a dataset, so the dashboard's "Processing" tile reflects conversions
+  // actually running (the cron has no Actions dispatch to set it). 'ready' /
+  // 'failed' are the terminal outcomes. See #774.
+  status?: "ready" | "failed" | "converting";
   store_count?: number;
   index_etag?: string;
   commit?: string;
@@ -2883,19 +2887,40 @@ webhooks.post("/zarr-ready", async (c) => {
   if (typeof body.dataset_id !== "string" || !isValidDatasetId(body.dataset_id)) {
     return c.json({ error: "dataset_id must be a valid dataset id" }, 400);
   }
-  const status = body.status === "failed" ? "failed" : "ready";
+  const status =
+    body.status === "failed" ? "failed" : body.status === "converting" ? "converting" : "ready";
 
   // Persist latest-only conversion state. On failure keep the prior
   // store_count/etag/commit (a failed rebuild shouldn't erase the last good
   // copy's bookkeeping) and only flip the status + stamp converted_at.
   // Failure detail for the observability dashboard (#774). Recorded on BOTH
-  // branches: a 'ready' run can be partial (some recordings failed) and a
-  // 'failed' run is a total failure. `zarr_failed_at` is stamped only when this
+  // terminal branches: a 'ready' run can be partial (some recordings failed) and
+  // a 'failed' run is a total failure. `zarr_failed_at` is stamped only when this
   // run had errors, so a clean run clears the detail.
   const f = zarrFailureColumns(body);
   let changed = 0;
   try {
-    if (status === "ready") {
+    if (status === "converting") {
+      // In-progress signal (#774): the Hallu driver POSTs this when it starts a
+      // dataset so the dashboard "Processing" tile reflects live conversions.
+      // Mark zarr_status='pending' (the dashboard's processing state) and clear
+      // any prior failure detail -- this is a fresh attempt in flight. Leave the
+      // last-good store_count/etag/commit untouched. A terminal ready/failed
+      // callback overwrites this when the conversion finishes.
+      const result = await c.env.DB.prepare(
+        `UPDATE datasets
+         SET zarr_status = 'pending',
+             zarr_errors = NULL,
+             zarr_failure_count = NULL,
+             zarr_deterministic = NULL,
+             zarr_data_failures = NULL,
+             zarr_failed_at = NULL
+         WHERE dataset_id = ?`,
+      )
+        .bind(body.dataset_id)
+        .run();
+      changed = result.meta.changes ?? 0;
+    } else if (status === "ready") {
       const result = await c.env.DB.prepare(
         `UPDATE datasets
          SET zarr_status = 'ready',
