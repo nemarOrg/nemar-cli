@@ -2783,6 +2783,12 @@ webhooks.post("/github", async (c) => {
  * the same URLs (both harmless). Always 200 on a valid token + body so the
  * workflow's fire-and-forget POST doesn't see a retryable error.
  */
+interface ZarrDataFailure {
+  path?: string;
+  code?: string;
+  reason?: string;
+}
+
 interface ZarrReadyBody {
   dataset_id: string;
   status?: "ready" | "failed";
@@ -2792,6 +2798,51 @@ interface ZarrReadyBody {
   converted?: string[];
   removed?: string[];
   error?: string;
+  // Failure detail (#774). The converter now reports these on EVERY callback,
+  // including a total failure (status='failed') which previously sent none.
+  errors?: number; // recordings that failed this run (0 = clean)
+  failed?: string[]; // their source paths
+  failure_count?: number; // subset that are TYPED data failures
+  data_failures?: ZarrDataFailure[]; // typed failures [{path, code, reason}]
+  deterministic?: boolean; // all failures are typed data failures (won't retry)
+}
+
+/**
+ * Derive the Zarr failure-tracking columns persisted by /webhooks/zarr-ready
+ * (#774). A 'ready' run can still be PARTIAL (errors>0 while the index has the
+ * stores that converted); a 'failed' run is a total failure. `hadErrors` drives
+ * `zarr_failed_at`, so a clean run clears the failure detail and the dashboard
+ * can sort/filter recent failures. Defensive against missing/garbage fields so
+ * the always-200 callback contract holds.
+ */
+export function zarrFailureColumns(body: {
+  errors?: number;
+  failure_count?: number;
+  deterministic?: boolean;
+  data_failures?: unknown;
+}): {
+  errors: number;
+  failureCount: number;
+  deterministic: 0 | 1;
+  dataFailuresJson: string | null;
+  hadErrors: boolean;
+} {
+  const errors =
+    typeof body.errors === "number" && Number.isFinite(body.errors)
+      ? Math.max(0, Math.trunc(body.errors))
+      : 0;
+  const dataFailures = Array.isArray(body.data_failures) ? body.data_failures : [];
+  const failureCount =
+    typeof body.failure_count === "number" && Number.isFinite(body.failure_count)
+      ? Math.max(0, Math.trunc(body.failure_count))
+      : dataFailures.length;
+  return {
+    errors,
+    failureCount,
+    deterministic: body.deterministic === true ? 1 : 0,
+    dataFailuresJson: dataFailures.length > 0 ? JSON.stringify(dataFailures) : null,
+    hadErrors: errors > 0,
+  };
 }
 
 webhooks.post("/zarr-ready", async (c) => {
@@ -2822,6 +2873,11 @@ webhooks.post("/zarr-ready", async (c) => {
   // Persist latest-only conversion state. On failure keep the prior
   // store_count/etag/commit (a failed rebuild shouldn't erase the last good
   // copy's bookkeeping) and only flip the status + stamp converted_at.
+  // Failure detail for the observability dashboard (#774). Recorded on BOTH
+  // branches: a 'ready' run can be partial (some recordings failed) and a
+  // 'failed' run is a total failure. `zarr_failed_at` is stamped only when this
+  // run had errors, so a clean run clears the detail.
+  const f = zarrFailureColumns(body);
   let changed = 0;
   try {
     if (status === "ready") {
@@ -2831,13 +2887,23 @@ webhooks.post("/zarr-ready", async (c) => {
              zarr_converted_at = datetime('now'),
              zarr_store_count = ?,
              zarr_index_etag = ?,
-             zarr_source_commit = ?
+             zarr_source_commit = ?,
+             zarr_errors = ?,
+             zarr_failure_count = ?,
+             zarr_deterministic = ?,
+             zarr_data_failures = ?,
+             zarr_failed_at = CASE WHEN ? = 1 THEN datetime('now') ELSE NULL END
          WHERE dataset_id = ?`,
       )
         .bind(
           typeof body.store_count === "number" ? body.store_count : null,
           body.index_etag ?? null,
           body.commit ?? null,
+          f.errors,
+          f.failureCount,
+          f.deterministic,
+          f.dataFailuresJson,
+          f.hadErrors ? 1 : 0,
           body.dataset_id,
         )
         .run();
@@ -2848,11 +2914,20 @@ webhooks.post("/zarr-ready", async (c) => {
       // autodispatch is intentionally off), which re-attempts on its own
       // schedule; many zarr failures are the mixed-rate EDF/BDF reader bug
       // (#737) that a re-dispatch wouldn't fix. This is the deliberate contrast
-      // with the archive-ready auto-retry (epic #736, Phase 3 decision).
+      // with the archive-ready auto-retry (epic #736, Phase 3 decision). Keep
+      // the prior store_count/etag/commit (a failed rebuild shouldn't erase the
+      // last good copy's bookkeeping) and only flip status + the failure detail.
       const result = await c.env.DB.prepare(
-        "UPDATE datasets SET zarr_status = 'failed' WHERE dataset_id = ?",
+        `UPDATE datasets
+         SET zarr_status = 'failed',
+             zarr_errors = ?,
+             zarr_failure_count = ?,
+             zarr_deterministic = ?,
+             zarr_data_failures = ?,
+             zarr_failed_at = datetime('now')
+         WHERE dataset_id = ?`,
       )
-        .bind(body.dataset_id)
+        .bind(f.errors, f.failureCount, f.deterministic, f.dataFailuresJson, body.dataset_id)
         .run();
       changed = result.meta.changes ?? 0;
     }
