@@ -95,12 +95,15 @@ REPLY_TO = "info@nemar.org"
 # app.nemar.org. Flip via redeploy if a different host wins.
 WEB_SESSION_COOKIE_DOMAIN = "app.nemar.org"
 # Centralized manifest workflow flag (#557, relocated to
-# nemarDatasets/.github in #564). Default OFF; flip to "true"
-# per-environment for staged rollout after dev soak. When OFF the worker
-# runs the legacy generateManifest() inline; when ON it dispatches a
-# repository_dispatch to nemarDatasets/.github and awaits the callback.
-# Redeploy to change.
-MANIFEST_VIA_CENTRAL_WORKFLOW = "false"
+# nemarDatasets/.github in #564). When OFF the worker runs the legacy
+# generateManifest()/version-DOI inline (synchronous, file-count-bound — times
+# out the run-version-doi CI enqueue on large datasets like the 9TB on004395);
+# when ON it returns 202 and dispatches a repository_dispatch to
+# nemarDatasets/.github, awaiting the /webhooks/manifest-ready callback.
+# Set to "true" for prod after the staged rollout was verified on
+# on005385/on005752 (#751); kept here (not just on the live Worker) so a
+# dev->main backend deploy can't silently revert it. Redeploy to change.
+MANIFEST_VIA_CENTRAL_WORKFLOW = "true"
 # Zarr serving copy (epic #684). Base URL of the Cloudflare-cached zarr host the
 # browser viewer reads and /webhooks/zarr-ready purges. Inert (purge no-ops, with
 # a logged "skipped" detail) until CLOUDFLARE_ZONE_ID + the CLOUDFLARE_API_TOKEN
