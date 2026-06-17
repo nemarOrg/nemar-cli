@@ -17,6 +17,7 @@ import {
   IMPORTED_SOURCE_IDS_QUERY,
   bucketActiveImports,
   diffNewDatasets,
+  discoverOpenNeuroDatasets,
   keepByModality,
   parseDatasetsPage,
 } from "../src/services/openneuro-discovery";
@@ -163,7 +164,7 @@ describe("dedup queries (real bun:sqlite)", () => {
       join(import.meta.dir, "..", "src/db/migrations/0044_import_jobs.sql"),
       "utf8",
     );
-    db.run(m0044);
+    db.exec(m0044); // exec (not run): the migration is multi-statement
   });
 
   test("IMPORTED_SOURCE_IDS_QUERY returns only openneuro source_ids", () => {
@@ -188,5 +189,59 @@ describe("dedup queries (real bun:sqlite)", () => {
     const { inFlight, terminal } = bucketActiveImports(rows);
     expect([...inFlight].sort()).toEqual(["ds1", "ds4"]);
     expect([...terminal]).toEqual(["ds2"]);
+  });
+});
+
+describe("discoverOpenNeuroDatasets pagination (injected fetch, real Responses)", () => {
+  // Build a real GraphQL-page Response from dataset specs. No mock library:
+  // a plain function returning genuine Response objects, testing the real loop.
+  const node = (id: string, modalities: string[]) => ({
+    node: { id, latestSnapshot: { tag: "1.0.0", summary: { modalities } } },
+  });
+  const pageResponse = (
+    edges: ReturnType<typeof node>[],
+    hasNextPage: boolean,
+    endCursor: string | null,
+  ) =>
+    new Response(
+      JSON.stringify({ data: { datasets: { pageInfo: { hasNextPage, endCursor }, edges } } }),
+      { status: 200, headers: { "Content-Type": "application/json" } },
+    );
+
+  test("follows the cursor across pages and filters by modality", async () => {
+    const pages = [
+      pageResponse([node("ds1", ["eeg"]), node("ds2", ["mri"])], true, "C1"),
+      pageResponse([node("ds3", ["meg"]), node("ds4", ["eeg", "mri"])], false, null),
+    ];
+    let i = 0;
+    const got = await discoverOpenNeuroDatasets({ fetchImpl: async () => pages[i++] });
+    expect(i).toBe(2); // both pages fetched
+    expect(got.map((d) => d.id)).toEqual(["ds1", "ds3", "ds4"]); // ds2 (mri-only) dropped
+  });
+
+  test("a mid-scan GraphQL error THROWS instead of ending the scan silently", async () => {
+    const pages = [
+      pageResponse([node("ds1", ["eeg"])], true, "C1"),
+      new Response(JSON.stringify({ data: null, errors: [{ message: "rate limited" }] }), {
+        status: 200,
+      }),
+    ];
+    let i = 0;
+    await expect(discoverOpenNeuroDatasets({ fetchImpl: async () => pages[i++] })).rejects.toThrow(
+      /errors on page 1: rate limited/,
+    );
+  });
+
+  test("hitting the maxPages cap with more pages THROWS (never silently truncates)", async () => {
+    // Every page claims another page -> the cap, not the API, stops the scan.
+    const fetchImpl = async () => pageResponse([node("dsX", ["eeg"])], true, "NEXT");
+    await expect(discoverOpenNeuroDatasets({ fetchImpl, maxPages: 2 })).rejects.toThrow(
+      /maxPages cap \(2\)/,
+    );
+  });
+
+  test("a non-2xx HTTP response THROWS", async () => {
+    const fetchImpl = async () => new Response("upstream down", { status: 503 });
+    await expect(discoverOpenNeuroDatasets({ fetchImpl })).rejects.toThrow(/HTTP 503 on page 0/);
   });
 });

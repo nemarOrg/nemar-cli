@@ -19,8 +19,10 @@ const OPENNEURO_GRAPHQL_URL = "https://openneuro.org/crn/graphql";
 /** NEMAR is a neuroelectromagnetic archive: EEG, MEG, iEEG, EMG (incl. mixed). */
 export const NEMAR_MODALITIES = new Set(["eeg", "meg", "ieeg", "emg"]);
 
-/** Safety cap so a runaway pagination can't hammer the API; ~50 pages * 100 = 5k. */
-const DEFAULT_MAX_PAGES = 60;
+/** Safety cap so a runaway pagination can't hammer the API; ~200 pages * 100 =
+ *  20k, ample headroom over OpenNeuro's ~6k datasets. discoverOpenNeuroDatasets
+ *  THROWS if the cap is actually hit, so it can never silently truncate. */
+const DEFAULT_MAX_PAGES = 200;
 const PAGE_SIZE = 100;
 
 export interface DiscoveredDataset {
@@ -125,8 +127,10 @@ export async function discoverOpenNeuroDatasets(opts?: {
   const maxPages = opts?.maxPages ?? DEFAULT_MAX_PAGES;
   const out: DiscoveredDataset[] = [];
   let after: string | null = null;
+  let hasMore = false;
 
-  for (let page = 0; page < maxPages; page++) {
+  let page = 0;
+  for (; page < maxPages; page++) {
     const res = await doFetch(OPENNEURO_GRAPHQL_URL, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -134,14 +138,34 @@ export async function discoverOpenNeuroDatasets(opts?: {
       signal: opts?.signal,
     });
     if (!res.ok) {
-      throw new Error(`OpenNeuro GraphQL returned HTTP ${res.status}`);
+      throw new Error(`OpenNeuro GraphQL returned HTTP ${res.status} on page ${page}`);
     }
-    const { datasets, hasNextPage, endCursor } = parseDatasetsPage(await res.json());
+    const json: unknown = await res.json();
+    // A GraphQL error is HTTP 200 with an `errors` array (data null). Surface it
+    // instead of letting parseDatasetsPage read it as an empty TERMINAL page --
+    // that would silently end the scan and return a partial list (#779 review).
+    const errors = isRecord(json) && Array.isArray(json.errors) ? json.errors : null;
+    if (errors) {
+      const msg = errors
+        .map((e) => (isRecord(e) && typeof e.message === "string" ? e.message : "unknown"))
+        .join("; ");
+      throw new Error(`OpenNeuro GraphQL returned errors on page ${page}: ${msg}`);
+    }
+    const { datasets, hasNextPage, endCursor } = parseDatasetsPage(json);
     for (const d of datasets) {
       if (keepByModality(d.modalities)) out.push(d);
     }
-    if (!hasNextPage || !endCursor) break;
+    hasMore = hasNextPage && endCursor !== null;
+    if (!hasMore) break;
     after = endCursor;
+  }
+  // `hasMore` is still true only if the cap stopped us (a clean end breaks with
+  // hasMore=false). A truncated scan silently misses datasets -- fail loud so the
+  // cap (or the query) gets fixed rather than under-importing (#779 review).
+  if (hasMore) {
+    throw new Error(
+      `discoverOpenNeuroDatasets hit the maxPages cap (${maxPages}) with more pages available; raise DEFAULT_MAX_PAGES`,
+    );
   }
   return out;
 }
@@ -150,17 +174,23 @@ export async function discoverOpenNeuroDatasets(opts?: {
 export const IMPORTED_SOURCE_IDS_QUERY =
   "SELECT source_id FROM datasets WHERE source = 'openneuro' AND source_id IS NOT NULL";
 
-/** Active-import scan query (status bucketed by bucketActiveImports). */
-export const ACTIVE_IMPORTS_QUERY =
-  "SELECT source_id, status FROM import_jobs WHERE source_id IS NOT NULL";
+/** Active-import scan query (status bucketed by bucketActiveImports). import_jobs.source_id is NOT NULL. */
+export const ACTIVE_IMPORTS_QUERY = "SELECT source_id, status FROM import_jobs";
 
 /**
  * OpenNeuro source ids already imported into NEMAR (the ds###### behind every
- * `on######` mirror). The primary dedup set.
+ * `on######` mirror). The primary dedup set. A D1 error re-throws (an empty set
+ * would silently defeat the dedup and re-import everything) with the source
+ * named so it isn't lost in the Hono dispatch stack (#779 review).
  */
 export async function getImportedSourceIds(db: D1Database): Promise<Set<string>> {
-  const rows = await db.prepare(IMPORTED_SOURCE_IDS_QUERY).all<{ source_id: string }>();
-  return new Set((rows.results ?? []).map((r) => r.source_id));
+  try {
+    const rows = await db.prepare(IMPORTED_SOURCE_IDS_QUERY).all<{ source_id: string }>();
+    return new Set((rows.results ?? []).map((r) => r.source_id));
+  } catch (err) {
+    console.error("[openneuro-discovery] getImportedSourceIds D1 query failed:", err);
+    throw err;
+  }
 }
 
 /**
@@ -191,8 +221,15 @@ export function bucketActiveImports(rows: Array<{ source_id: string; status: str
 export async function getActiveImportSourceIds(
   db: D1Database,
 ): Promise<{ inFlight: Set<string>; terminal: Set<string> }> {
-  const rows = await db.prepare(ACTIVE_IMPORTS_QUERY).all<{ source_id: string; status: string }>();
-  return bucketActiveImports(rows.results ?? []);
+  try {
+    const rows = await db
+      .prepare(ACTIVE_IMPORTS_QUERY)
+      .all<{ source_id: string; status: string }>();
+    return bucketActiveImports(rows.results ?? []);
+  } catch (err) {
+    console.error("[openneuro-discovery] getActiveImportSourceIds D1 query failed:", err);
+    throw err;
+  }
 }
 
 function isRecord(v: unknown): v is Record<string, unknown> {
