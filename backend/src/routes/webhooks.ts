@@ -3006,10 +3006,14 @@ webhooks.post("/archive-ready", async (c) => {
       // Over the size/file-count policy (#752): the workflow built no zip and
       // steers users to direct download. Record the reason; leave archive_status
       // NULL (skipped is intentional, NOT a failed generation -> no auto-retry).
+      // Reset archive_retry_count too (cross-epic with #736): a skip is a clean
+      // state transition, so a prior failed-retry history must not block a future
+      // auto-retry if the dataset later shrinks and a `failed` arrives.
       const result = await c.env.DB.prepare(
         `UPDATE datasets
          SET archive_skip_reason = ?,
              archive_status = NULL,
+             archive_retry_count = 0,
              archive_checked_at = datetime('now')
          WHERE dataset_id = ?`,
       )
