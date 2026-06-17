@@ -2832,15 +2832,30 @@ export function zarrFailureColumns(body: {
       ? Math.max(0, Math.trunc(body.errors))
       : 0;
   const dataFailures = Array.isArray(body.data_failures) ? body.data_failures : [];
-  const failureCount =
+  const rawFailureCount =
     typeof body.failure_count === "number" && Number.isFinite(body.failure_count)
       ? Math.max(0, Math.trunc(body.failure_count))
       : dataFailures.length;
+  // Typed data failures are a SUBSET of total errors; clamp so a converter bug
+  // (or a missing failure_count) can never render "3 data failures of 1 error".
+  const failureCount = Math.min(rawFailureCount, errors);
+  // Store only the known fields, length-capped: the values are display-only on
+  // the dashboard and `datasets` is heavily queried, so a malformed/huge
+  // data_failures item must not bloat the row's TEXT column.
+  const sanitized = dataFailures.map((item) => {
+    if (typeof item !== "object" || item === null) return {};
+    const i = item as Record<string, unknown>;
+    return {
+      ...(typeof i.path === "string" ? { path: i.path.slice(0, 512) } : {}),
+      ...(typeof i.code === "string" ? { code: i.code.slice(0, 64) } : {}),
+      ...(typeof i.reason === "string" ? { reason: i.reason.slice(0, 256) } : {}),
+    };
+  });
   return {
     errors,
     failureCount,
     deterministic: body.deterministic === true ? 1 : 0,
-    dataFailuresJson: dataFailures.length > 0 ? JSON.stringify(dataFailures) : null,
+    dataFailuresJson: sanitized.length > 0 ? JSON.stringify(sanitized) : null,
     hadErrors: errors > 0,
   };
 }

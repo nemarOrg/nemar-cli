@@ -76,6 +76,30 @@ describe("zarrFailureColumns (#774)", () => {
     expect(f.deterministic).toBe(0); // only boolean true counts
     expect(f.dataFailuresJson).toBeNull();
   });
+
+  test("failure_count is clamped to total errors (data failures are a subset)", () => {
+    // Converter bug / missing failure_count must not render "3 data of 1 error".
+    expect(zarrFailureColumns({ errors: 1, failure_count: 3 }).failureCount).toBe(1);
+    expect(
+      zarrFailureColumns({ errors: 1, data_failures: [{ code: "a" }, { code: "b" }] }).failureCount,
+    ).toBe(1);
+  });
+
+  test("data_failures items are sanitized to known fields + length-capped", () => {
+    const f = zarrFailureColumns({
+      errors: 2,
+      data_failures: [
+        { path: "p", code: "c", reason: "r", junk: { huge: "x".repeat(99999) } },
+        "not-an-object",
+        { code: "x".repeat(200) },
+      ],
+    });
+    const parsed = JSON.parse(f.dataFailuresJson as string);
+    expect(parsed).toHaveLength(3);
+    expect(parsed[0]).toEqual({ path: "p", code: "c", reason: "r" }); // junk dropped
+    expect(parsed[1]).toEqual({}); // non-object -> empty
+    expect(parsed[2].code.length).toBe(64); // capped
+  });
 });
 
 describe("migration 0046 + zarr-ready handler SQL", () => {
