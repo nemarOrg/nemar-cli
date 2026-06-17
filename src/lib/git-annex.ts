@@ -1448,23 +1448,96 @@ export async function checkDownloadPrerequisites(): Promise<DownloadPrerequisite
 }
 
 /**
- * Clone a dataset from GitHub
+ * GitHub credential-helper config value that authenticates HTTPS git operations
+ * with a token as the `x-access-token` user. Same shape `configureGitHubRemote`
+ * persists; centralised so the clone path and the remote path can't drift.
+ */
+export function githubTokenCredentialHelper(token: string): string {
+  return `!printf 'username=x-access-token\\npassword=${token}'`;
+}
+
+/**
+ * Pure resolution of how to clone a GitHub repo given an optional token.
+ *
+ * A `git@github.com:` URL is rewritten to HTTPS and authenticated with the
+ * token when one is supplied; the finalize phase of the OpenNeuro import runs
+ * on a CI runner that has an HTTPS App token but no SSH key, so a raw SSH clone
+ * fails with "Permission denied (publickey)" (nemarOrg/nemar-cli#768). Without a
+ * usable token the SSH URL is returned unchanged so a developer's own key still
+ * works. Non-SSH URLs (e.g. the public OpenNeuro HTTPS clone) pass through
+ * untouched. A malformed token (empty or containing whitespace) is treated as
+ * "no token" so a broken credential helper is never baked into the clone.
+ */
+export function resolveGitHubCloneAuth(
+  repoUrl: string,
+  token: string | null,
+): { url: string; credentialHelper?: string } {
+  if (!repoUrl.startsWith("git@github.com:")) return { url: repoUrl };
+  const trimmed = token?.trim();
+  if (!trimmed || /\s/.test(trimmed)) return { url: repoUrl };
+  const repoPath = repoUrl.replace("git@github.com:", "");
+  return {
+    url: `https://github.com/${repoPath}`,
+    credentialHelper: githubTokenCredentialHelper(trimmed),
+  };
+}
+
+/**
+ * Clone a dataset from GitHub.
+ *
+ * With `useGitHubToken`, a private `git@github.com:` repo is cloned over HTTPS
+ * authenticated by `GH_TOKEN` (or a local `gh` token). The token is injected via
+ * `GIT_CONFIG_*` env for the clone (never argv) and then persisted into the
+ * cloned repo's config so a later push to the same origin authenticates too.
+ * Used by the OpenNeuro import's finalize phase, which runs on a CI runner with
+ * an HTTPS App token but no SSH key (nemarOrg/nemar-cli#768).
  */
 export async function cloneDataset(
   repoUrl: string,
   outputPath: string,
+  options: { useGitHubToken?: boolean } = {},
 ): Promise<{ success: boolean; error?: string }> {
   try {
+    let cloneUrl = repoUrl;
+    let credentialHelper: string | undefined;
+    if (options.useGitHubToken) {
+      let token = process.env.GH_TOKEN?.trim() || null;
+      if (!token) {
+        const gh = await getGitHubToken();
+        token = gh.token;
+      }
+      const auth = resolveGitHubCloneAuth(repoUrl, token);
+      cloneUrl = auth.url;
+      credentialHelper = auth.credentialHelper;
+    }
+
+    // Inject the credential helper via GIT_CONFIG_* (not argv/URL) so the token
+    // never lands in a process listing or CI command echo.
+    const cloneEnv = credentialHelper
+      ? {
+          GIT_CONFIG_COUNT: "1",
+          GIT_CONFIG_KEY_0: "credential.https://github.com.helper",
+          GIT_CONFIG_VALUE_0: credentialHelper,
+        }
+      : undefined;
+
     // Clone with git
-    const { stderr: cloneStderr, exitCode: cloneExitCode } = await runCommand([
-      "git",
-      "clone",
-      repoUrl,
-      outputPath,
-    ]);
+    const { stderr: cloneStderr, exitCode: cloneExitCode } = await runCommand(
+      ["git", "clone", cloneUrl, outputPath],
+      cloneEnv ? { env: cloneEnv } : {},
+    );
 
     if (cloneExitCode !== 0) {
       return { success: false, error: cloneStderr.trim() || "Failed to clone dataset" };
+    }
+
+    // Persist the credential helper so subsequent pushes to origin authenticate;
+    // the GIT_CONFIG_* env above only covered the clone process itself.
+    if (credentialHelper) {
+      await runCommand(
+        ["git", "config", "credential.https://github.com.helper", credentialHelper],
+        { cwd: outputPath },
+      );
     }
 
     // Initialize git-annex in the cloned repo
