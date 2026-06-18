@@ -1897,7 +1897,12 @@ datasetRoutes.post("/:id/invite", authMiddleware, zValidator("json", inviteSchem
   // Find the user to invite, by email (#578) or username. The email path uses
   // structured error codes the dashboard maps to UX copy; the username path
   // keeps its original messages for the CLI.
-  let invitee: { id: number; username: string; github_username: string; status: string } | null;
+  let invitee: {
+    id: number;
+    username: string;
+    github_username: string | null;
+    status: string;
+  } | null;
   if (email) {
     invitee = await db
       .prepare(
@@ -1938,6 +1943,21 @@ datasetRoutes.post("/:id/invite", authMiddleware, zValidator("json", inviteSchem
     }
   }
   const inviteeLabel = invitee.username;
+
+  // Web-only signups (migration 0026) can have a NULL github_username. Granting
+  // to an empty GitHub handle would create a phantom repo collaborator that
+  // can't be removed, so surface an actionable error instead of an opaque 500
+  // from the GitHub grant step.
+  if (!invitee.github_username) {
+    return c.json(
+      {
+        error: "user_no_github",
+        message:
+          "This person has a NEMAR account but hasn't linked a GitHub account yet. Ask them to complete their profile before inviting.",
+      },
+      409,
+    );
+  }
 
   // Check if already a collaborator
   const existing = await db
@@ -2339,15 +2359,29 @@ datasetRoutes.delete("/:id/collaborators/:username", authMiddleware, async (c) =
     }
   }
 
-  // Authoritative revocation: drop the membership + per-dataset S3 permission.
-  await db
-    .prepare("DELETE FROM dataset_collaborators WHERE dataset_id = ? AND user_id = ?")
-    .bind(dataset.id, target.id)
-    .run();
-  await db
-    .prepare("DELETE FROM user_s3_permissions WHERE user_id = ? AND s3_prefix = ?")
-    .bind(target.id, datasetId)
-    .run();
+  // Authoritative revocation, S3 permission FIRST (the upload gate) then the
+  // membership index. A throw on either is fatal -> 500 with the membership
+  // still consistent (the S3 row is gone first, so the user can't upload even
+  // if the membership delete is retried). changes=0 on the S3 delete is a
+  // benign idempotent case (no row -> no access), logged for visibility.
+  try {
+    const s3Del = await db
+      .prepare("DELETE FROM user_s3_permissions WHERE user_id = ? AND s3_prefix = ?")
+      .bind(target.id, datasetId)
+      .run();
+    if ((s3Del.meta.changes ?? 0) === 0) {
+      console.warn(
+        `[collaborators] no user_s3_permissions row for user=${target.id} prefix=${datasetId} (already absent)`,
+      );
+    }
+    await db
+      .prepare("DELETE FROM dataset_collaborators WHERE dataset_id = ? AND user_id = ?")
+      .bind(dataset.id, target.id)
+      .run();
+  } catch (err) {
+    console.error(`[collaborators] DB removal failed for ${datasetId}/${targetUsername}:`, err);
+    return c.json({ error: "Failed to remove collaborator access" }, 500);
+  }
 
   // Audit log (non-fatal).
   try {
@@ -2440,9 +2474,15 @@ datasetRoutes.delete("/:id", authMiddleware, async (c) => {
   // Draft-only guards (pure decision in evaluateDraftDeletability). A failure
   // returns 403 not_deletable with the specific reason so the dashboard can
   // explain why the action is unavailable.
+  // Block on a request the pipeline/admin is actively engaged with: 'requested'
+  // (awaiting admin) or 'approving' (orchestrator running). 'blocked' is
+  // deliberately NOT here -- a blocked request is a user-stalled CI failure the
+  // owner owns, and letting them discard that draft is the whole point of #575.
+  // ('approved' is not a real status; the valid set is requested/approving/
+  // published/denied/blocked.)
   const activePubReq = await db
     .prepare(
-      "SELECT COUNT(*) AS count FROM publication_requests WHERE dataset_id = ? AND status IN ('requested', 'approving', 'approved')",
+      "SELECT COUNT(*) AS count FROM publication_requests WHERE dataset_id = ? AND status IN ('requested', 'approving')",
     )
     .bind(datasetId)
     .first<{ count: number }>();
@@ -2480,8 +2520,14 @@ datasetRoutes.delete("/:id", authMiddleware, async (c) => {
   }
 
   // 204 on a clean cascade; 207 (with the partial result) if a step failed so
-  // the dashboard can surface what was left behind.
+  // the dashboard can surface what was left behind. A delete can be "deleted"
+  // yet carry non-fatal warnings (e.g. Vectorize / bucket-policy cleanup); the
+  // 204 can't carry a body, so log them (they're also persisted in the audit
+  // row) rather than dropping them silently.
   if (result.deleted) {
+    if (result.warnings.length > 0) {
+      console.warn(`[owner-delete] ${datasetId} deleted with non-fatal warnings:`, result.warnings);
+    }
     return c.body(null, 204);
   }
   return c.json(result, 207);
