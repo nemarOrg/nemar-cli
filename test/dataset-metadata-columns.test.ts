@@ -9,7 +9,11 @@
 
 import { describe, expect, test } from "bun:test";
 import { computeDatasetMetadataColumns } from "../backend/src/services/dataset-metadata-columns";
-import { extractTasks } from "../backend/src/services/nemar-sync";
+import {
+  countSessionDirs,
+  countSubjectDirs,
+  extractTasks,
+} from "../backend/src/services/nemar-sync";
 
 const TASK_PATHS = [
   "sub-01/eeg/sub-01_task-rest_eeg.set",
@@ -69,18 +73,85 @@ describe("computeDatasetMetadataColumns", () => {
     expect(cols.modalities).toBe("anat,eeg,emg");
   });
 
-  test("missing participantsTsv leaves subject_count/age fields null", () => {
+  test("missing participantsTsv still counts subjects from sub-* dirs, leaves age null (#759)", () => {
+    // subject_count derives from the tree's sub-* directories, so a dataset
+    // with no participants.tsv still reports the right count; only age (which
+    // lives in participants.tsv) is null.
     const cols = computeDatasetMetadataColumns({
-      treePaths: TASK_PATHS,
+      treePaths: TASK_PATHS, // sub-01, sub-02
       participantsTsv: null,
       s3Stats: { totalSize: 100, objectCount: 1 },
     });
-    expect(cols.subject_count).toBeNull();
+    expect(cols.subject_count).toBe(2);
     expect(cols.age_min).toBeNull();
     expect(cols.age_max).toBeNull();
     expect(cols.modalities).toBe("eeg");
     expect(cols.file_size).toBe(100);
     expect(cols.total_files).toBe(1);
+  });
+
+  test("roster larger than released subjects counts sub-* dirs, not participants.tsv rows (#759)", () => {
+    // on005752 regression: participants.tsv is an enrolled roster (5 rows here)
+    // but only 2 sub-* directories carry data. subject_count must be 2, not 5.
+    const roster = [
+      "participant_id\tage",
+      "sub-01\t25",
+      "sub-02\t30",
+      "sub-03\t40",
+      "sub-04\t22",
+      "sub-05\t31",
+    ].join("\n");
+    const cols = computeDatasetMetadataColumns({
+      treePaths: [
+        "sub-01/eeg/sub-01_task-rest_eeg.set",
+        "sub-02/eeg/sub-02_task-rest_eeg.set",
+      ],
+      participantsTsv: roster,
+      s3Stats: null,
+    });
+    expect(cols.subject_count).toBe(2);
+    // age range still comes from the full participants.tsv.
+    expect(cols.age_min).toBe(22);
+    expect(cols.age_max).toBe(40);
+  });
+
+  test("subject with data but absent from participants.tsv still counts (#759)", () => {
+    const roster = ["participant_id\tage", "sub-01\t25", "sub-02\t30"].join("\n");
+    const cols = computeDatasetMetadataColumns({
+      treePaths: [
+        "sub-01/eeg/sub-01_task-rest_eeg.set",
+        "sub-02/eeg/sub-02_task-rest_eeg.set",
+        "sub-03/eeg/sub-03_task-rest_eeg.set", // has data, missing from roster
+      ],
+      participantsTsv: roster,
+      s3Stats: null,
+    });
+    expect(cols.subject_count).toBe(3);
+  });
+
+  test("derivatives and session-nested paths do not inflate subject_count (#759)", () => {
+    const cols = computeDatasetMetadataColumns({
+      treePaths: [
+        "sub-01/ses-01/eeg/sub-01_ses-01_task-rest_eeg.set",
+        "sub-01/ses-02/eeg/sub-01_ses-02_task-rest_eeg.set", // same subject, 2nd session
+        "sub-02/ses-01/eeg/sub-02_ses-01_task-rest_eeg.set",
+        "derivatives/pipeline/sub-99/eeg/sub-99_desc-clean_eeg.set", // derivative, excluded
+      ],
+      participantsTsv: null,
+      s3Stats: null,
+    });
+    expect(cols.subject_count).toBe(2);
+  });
+
+  test("empty tree falls back to participants.tsv row count (#759)", () => {
+    // When no sub-* directories are resolvable (e.g. the placeholder-participants
+    // path), the participants.tsv row count is the only available signal.
+    const cols = computeDatasetMetadataColumns({
+      treePaths: [],
+      participantsTsv: PARTICIPANTS_FULL,
+      s3Stats: null,
+    });
+    expect(cols.subject_count).toBe(2);
   });
 
   test("missing s3Stats leaves file_size and total_files null", () => {
@@ -228,6 +299,68 @@ describe("extractTasks contract (string[] input)", () => {
     // accepting only TreeEntry[], this would fail to compile.
     const paths = ["sub-01/eeg/sub-01_task-rest_eeg.set"] as const;
     expect(extractTasks(paths)).toEqual(["rest"]);
+  });
+});
+
+describe("countSubjectDirs (#759)", () => {
+  test("counts distinct root-level sub-* directories", () => {
+    expect(
+      countSubjectDirs([
+        "sub-01/eeg/sub-01_task-rest_eeg.set",
+        "sub-01/eeg/sub-01_task-rest_eeg.fdt", // same subject
+        "sub-02/eeg/sub-02_task-rest_eeg.set",
+        "sub-03/anat/sub-03_T1w.nii.gz",
+      ]),
+    ).toBe(3);
+  });
+
+  test("ignores derivatives sub-* dirs (anchored to path start)", () => {
+    expect(
+      countSubjectDirs([
+        "sub-01/eeg/sub-01_eeg.set",
+        "derivatives/pipeline/sub-01/eeg/sub-01_desc-clean_eeg.set",
+        "code/sub-99_helper.py",
+      ]),
+    ).toBe(1);
+  });
+
+  test("returns 0 when no sub-* directories are present", () => {
+    expect(countSubjectDirs(["README.md", "dataset_description.json", "participants.tsv"])).toBe(0);
+  });
+
+  test("requires a trailing slash so a bare sub-* file is not counted", () => {
+    expect(countSubjectDirs(["sub-01", "sub-02_notadir.txt"])).toBe(0);
+  });
+
+  test("dedupes a subject that appears across sessions", () => {
+    expect(
+      countSubjectDirs([
+        "sub-01/ses-01/eeg/sub-01_ses-01_eeg.set",
+        "sub-01/ses-02/eeg/sub-01_ses-02_eeg.set",
+      ]),
+    ).toBe(1);
+  });
+});
+
+describe("countSessionDirs (#657)", () => {
+  test("counts distinct ses-* labels across subjects", () => {
+    expect(
+      countSessionDirs([
+        "sub-01/ses-01/eeg/sub-01_ses-01_eeg.set",
+        "sub-01/ses-02/eeg/sub-01_ses-02_eeg.set",
+        "sub-02/ses-01/eeg/sub-02_ses-01_eeg.set", // ses-01 again -> deduped
+      ]),
+    ).toBe(2);
+  });
+
+  test("returns 0 for a single-session dataset with no ses-* layer", () => {
+    expect(
+      countSessionDirs(["sub-01/eeg/sub-01_task-rest_eeg.set", "sub-02/eeg/sub-02_task-rest_eeg.set"]),
+    ).toBe(0);
+  });
+
+  test("requires the ses- segment to be a directory (bounded by slashes)", () => {
+    expect(countSessionDirs(["sub-01/eeg/sub-01_ses-01_eeg.set"])).toBe(0);
   });
 });
 

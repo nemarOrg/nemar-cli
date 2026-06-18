@@ -331,13 +331,40 @@ function countEventFiles(tree: TreeEntry[]): number {
   return tree.filter((e) => e.type === "blob" && e.path.endsWith("_events.tsv")).length;
 }
 
-function countSessions(tree: TreeEntry[]): number {
+/**
+ * Count BIDS sessions as the number of distinct `ses-<label>` directories in
+ * the dataset tree (#657). Session labels are deduplicated globally, so two
+ * subjects that both have `ses-01` count it once. A dataset with no `ses-*`
+ * layer (single implied session) returns 0; callers decide how to treat that.
+ */
+export function countSessionDirs(paths: readonly string[]): number {
   const sessions = new Set<string>();
-  for (const entry of tree) {
-    const match = entry.path.match(/\/ses-([^/]+)\//);
+  for (const p of paths) {
+    const match = p.match(/\/ses-([^/]+)\//);
     if (match) sessions.add(match[1]);
   }
   return sessions.size;
+}
+
+/**
+ * Count BIDS subjects as the number of distinct root-level `sub-<label>`
+ * directories present in the dataset tree. This is the BIDS-canonical subject
+ * set and the correct basis for `subject_count` (#759).
+ *
+ * The participants.tsv row count is NOT used here because it can be an enrolled
+ * roster far larger than the subjects actually released — on005752 had 1859
+ * participants.tsv rows but only 251 `sub-*` directories with data. A subject
+ * with data but absent from participants.tsv still counts; a roster row with no
+ * `sub-*` directory does not. Derivatives (`derivatives/.../sub-*`) are excluded
+ * by anchoring the match to the start of the path.
+ */
+export function countSubjectDirs(paths: readonly string[]): number {
+  const subjects = new Set<string>();
+  for (const p of paths) {
+    const match = p.match(/^sub-([^/]+)\//);
+    if (match) subjects.add(match[1]);
+  }
+  return subjects.size;
 }
 
 /**
@@ -411,11 +438,15 @@ function buildDataexplorerDataset(
     name: (bd.Name as string) || src.datasetId,
     publishDate: published,
     onBrainlife: 0,
-    sessionsNum: countSessions(src.tree),
+    sessionsNum: countSessionDirs(src.tree.map((e) => e.path)),
     file_size: Math.round(fileSize),
     byte_size_format: formatBytes(fileSize),
     totalFiles: totalFileCount(src.tree),
-    participants: participants.count,
+    // BIDS-canonical subject count from sub-* dirs (#759); fall back to the
+    // participants.tsv row count when the tree has no resolvable subjects --
+    // which also covers an upstream tree-fetch failure (empty src.tree), where
+    // both this and participants.count may legitimately be 0.
+    participants: countSubjectDirs(src.tree.map((e) => e.path)) || participants.count,
     age_min: participants.ageMin ?? 0,
     age_max: participants.ageMax ?? 0,
     BIDSVersion: (bd.BIDSVersion as string) || "",

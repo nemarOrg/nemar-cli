@@ -30,7 +30,7 @@ import { reembedDatasetVector } from "./dataset-search.js";
 import { enrichDataset } from "./enrich-dataset.js";
 import { getDatasetsToken } from "./github-auth.js";
 import { getBlobContent, getTreeAtRef } from "./github.js";
-import { syncDatasetToNemar } from "./nemar-sync.js";
+import { countSessionDirs, syncDatasetToNemar } from "./nemar-sync.js";
 import { errorMessage } from "./repo-metadata.js";
 import { getArchiveSize, getDatasetS3Stats, getManifest } from "./s3.js";
 
@@ -400,9 +400,13 @@ export async function runDatasetSync(
     // the outer catch (-> metadataColumnsError, persisted + surfaced).
     const bidsVersion =
       typeof bidsDescription.BIDSVersion === "string" ? bidsDescription.BIDSVersion : null;
+    // BIDS-native sessions_count from ses-* dirs (#657). 0 (no session layer)
+    // -> null so COALESCE preserves any backfilled value rather than writing 0.
+    const sessionsCount = tree.length ? countSessionDirs(tree.map((f) => f.path)) || null : null;
     await writeDatasetCatalogFields(db, datasetId, {
       readme: readme || null, // empty (no README) -> preserve existing
       bids_version: bidsVersion,
+      sessions_count: sessionsCount,
     });
 
     // Best-effort re-embed (internally guarded, never throws).
