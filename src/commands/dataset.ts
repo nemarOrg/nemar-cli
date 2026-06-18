@@ -4000,6 +4000,26 @@ Examples:
         console.log(`\n  ${chalk.red("Reason:")} ${result.denied_reason}`);
       }
 
+      // Blocked requests: surface WHY (e.g. BIDS validation pending/failed) plus
+      // the CI link and what to do next (#428). A pending/in-progress block now
+      // clears automatically once CI goes green (daily sweep), but the user can
+      // re-request to retry immediately.
+      if (result.status === "blocked") {
+        if (result.message) {
+          console.log(`\n  ${chalk.red("Blocked:")} ${result.message}`);
+        } else if (result.block_reason) {
+          console.log(`\n  ${chalk.red("Blocked:")} ${result.block_reason}`);
+        }
+        if (result.ci_url) {
+          console.log(`  ${chalk.dim("CI:")} ${result.ci_url}`);
+        }
+        console.log(
+          chalk.dim(
+            `  This re-checks automatically once CI passes; or re-run 'nemar dataset publish request ${datasetId}' to retry now.`,
+          ),
+        );
+      }
+
       // Non-blocking pre-screen advisory (#756): a concern to address, but it
       // does NOT block the request (yellow, not red).
       if (result.advisory?.source === "prescreen") {
