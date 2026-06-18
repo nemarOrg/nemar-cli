@@ -122,6 +122,10 @@ ZARR_CACHE_BASE_URL = "https://zarr.nemar.org"
 # silently flip it (the #773 lesson). Prod-only anyway (dev has no cron triggers
 # and stays "false" below).
 AUTO_IMPORT_ENABLED = "true"
+# Pacing macro: minutes between auto-imports. 25 -> ~one import every 30 min (the
+# gate sits just under the 30-min cron tick). Tunable live (wrangler deploy or the
+# dashboard) without a code change -- raise it to throttle back if a run misbehaves.
+AUTO_IMPORT_MIN_INTERVAL_MIN = "25"
 
 # Secrets (set via: npx cfman wrangler --account sccn secret put <NAME> -c backend/wrangler-sccn.toml)
 # - GITHUB_ADMIN_PAT
@@ -216,6 +220,7 @@ MANIFEST_VIA_CENTRAL_WORKFLOW = "true"
 # Auto-import flag (#775). Dev has no cron triggers, so this never runs in dev;
 # present only for binding consistency.
 AUTO_IMPORT_ENABLED = "false"
+AUTO_IMPORT_MIN_INTERVAL_MIN = "25"
 # Automated publication pre-screen (#666). Enabled on SCCN dev as the soak
 # target: a publish request that passes BIDS readiness dispatches
 # run-prescreen on nemarDatasets/.github. Requires the PRESCREEN_CALLBACK_SECRET
