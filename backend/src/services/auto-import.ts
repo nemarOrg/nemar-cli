@@ -21,8 +21,27 @@ import {
 
 /** The cron schedule that drives the tick (must match wrangler-sccn.toml). */
 export const AUTO_IMPORT_CRON = "*/30 * * * *";
-/** Pace: at most one dispatch per ~90 min (the cron fires every 30, the gate skips 2/3). */
-const MIN_INTERVAL_MS = 90 * 60 * 1000;
+/**
+ * Default pace (minutes) when the AUTO_IMPORT_MIN_INTERVAL_MIN macro is unset or
+ * invalid. 25 is just UNDER the 30-min cron tick so each tick clears the gate
+ * (a dispatch lands a few seconds after a tick -> the next tick is ~30 min later
+ * -> >= 25 -> fires) for a ~30-min cadence; a flat 30 would slip to ~60 on tick
+ * alignment. Faster than the original 90 is safe: discovery + dedup are D1-only
+ * (no GitHub on the check), so the rate limit that motivated the slow pace doesn't
+ * apply. RAISE the macro to slow imports down live (no deploy) if a run misbehaves.
+ */
+const DEFAULT_MIN_INTERVAL_MIN = 25;
+
+/**
+ * Resolve the dispatch gate (ms) from the AUTO_IMPORT_MIN_INTERVAL_MIN env macro,
+ * falling back to the default. Tunable at runtime so the pace can be retuned (or
+ * throttled back) without a code change. Exported for testing.
+ */
+export function resolveMinIntervalMs(env: Pick<Bindings, "AUTO_IMPORT_MIN_INTERVAL_MIN">): number {
+  const raw = Number(env.AUTO_IMPORT_MIN_INTERVAL_MIN);
+  const minutes = Number.isFinite(raw) && raw > 0 ? raw : DEFAULT_MIN_INTERVAL_MIN;
+  return minutes * 60 * 1000;
+}
 /** Bounded retries: after this many auto-dispatches a failed dataset is parked. */
 const MAX_AUTO_ATTEMPTS = 3;
 /** Backoff before re-picking a freshly-failed dataset. */
@@ -147,7 +166,7 @@ export async function autoImportTick(env: Bindings): Promise<void> {
   const gate = decideAutoImportGate({
     lastDispatchAt: last?.timestamp ?? null,
     now,
-    minIntervalMs: MIN_INTERVAL_MS,
+    minIntervalMs: resolveMinIntervalMs(env),
   });
   if (!gate.proceed) {
     console.log(`[auto-import] gated: ${gate.reason}`);

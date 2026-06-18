@@ -17,12 +17,13 @@ import {
   mapToNemarId,
   parseSqliteUtc,
   pickNextDataset,
+  resolveMinIntervalMs,
 } from "../src/services/auto-import";
 import { triggerOpenNeuroOnboard } from "../src/services/github";
 import type { DiscoveredDataset } from "../src/services/openneuro-discovery";
 
 const ds = (id: string): DiscoveredDataset => ({ id, latestTag: "1.0.0", modalities: ["eeg"] });
-const NINETY_MIN = 90 * 60 * 1000;
+const GATE_MS = 25 * 60 * 1000;
 
 describe("mapToNemarId", () => {
   test("ds###### -> on######; rejects bad shapes", () => {
@@ -44,28 +45,43 @@ describe("parseSqliteUtc", () => {
   });
 });
 
+describe("resolveMinIntervalMs (tunable pacing macro)", () => {
+  test("parses a valid AUTO_IMPORT_MIN_INTERVAL_MIN to ms", () => {
+    expect(resolveMinIntervalMs({ AUTO_IMPORT_MIN_INTERVAL_MIN: "45" })).toBe(45 * 60 * 1000);
+    expect(resolveMinIntervalMs({ AUTO_IMPORT_MIN_INTERVAL_MIN: "90" })).toBe(90 * 60 * 1000);
+  });
+  test("falls back to the 25-min default when unset/invalid/non-positive", () => {
+    const def = 25 * 60 * 1000;
+    expect(resolveMinIntervalMs({})).toBe(def);
+    expect(resolveMinIntervalMs({ AUTO_IMPORT_MIN_INTERVAL_MIN: undefined })).toBe(def);
+    expect(resolveMinIntervalMs({ AUTO_IMPORT_MIN_INTERVAL_MIN: "abc" })).toBe(def);
+    expect(resolveMinIntervalMs({ AUTO_IMPORT_MIN_INTERVAL_MIN: "0" })).toBe(def);
+    expect(resolveMinIntervalMs({ AUTO_IMPORT_MIN_INTERVAL_MIN: "-5" })).toBe(def);
+  });
+});
+
 describe("decideAutoImportGate", () => {
   const now = Date.parse("2026-06-17T12:00:00Z");
   test("never dispatched -> proceed", () => {
     expect(
-      decideAutoImportGate({ lastDispatchAt: null, now, minIntervalMs: NINETY_MIN }).proceed,
+      decideAutoImportGate({ lastDispatchAt: null, now, minIntervalMs: GATE_MS }).proceed,
     ).toBe(true);
   });
-  test("< 90 min since last -> gated", () => {
-    const last = "2026-06-17 11:00:00"; // 60 min ago
+  test("< 25 min since last -> gated", () => {
+    const last = "2026-06-17 11:50:00"; // 10 min ago
     expect(
-      decideAutoImportGate({ lastDispatchAt: last, now, minIntervalMs: NINETY_MIN }).proceed,
+      decideAutoImportGate({ lastDispatchAt: last, now, minIntervalMs: GATE_MS }).proceed,
     ).toBe(false);
   });
-  test(">= 90 min since last -> proceed", () => {
-    const last = "2026-06-17 10:00:00"; // 120 min ago
+  test(">= 25 min since last -> proceed", () => {
+    const last = "2026-06-17 11:30:00"; // 30 min ago (one cron tick)
     expect(
-      decideAutoImportGate({ lastDispatchAt: last, now, minIntervalMs: NINETY_MIN }).proceed,
+      decideAutoImportGate({ lastDispatchAt: last, now, minIntervalMs: GATE_MS }).proceed,
     ).toBe(true);
   });
   test("unparseable last -> proceed (fail open, don't stall forever)", () => {
     expect(
-      decideAutoImportGate({ lastDispatchAt: "garbage", now, minIntervalMs: NINETY_MIN }).proceed,
+      decideAutoImportGate({ lastDispatchAt: "garbage", now, minIntervalMs: GATE_MS }).proceed,
     ).toBe(true);
   });
 });
@@ -155,9 +171,9 @@ describe("AUTO_IMPORT_GATE_QUERY against a real audit_log", () => {
     const gate = decideAutoImportGate({
       lastDispatchAt: row?.timestamp ?? null,
       now: Date.parse("2026-06-17T12:00:00Z"),
-      minIntervalMs: NINETY_MIN,
+      minIntervalMs: GATE_MS,
     });
-    expect(gate.proceed).toBe(true); // 120 min elapsed
+    expect(gate.proceed).toBe(true); // 120 min elapsed >= 25 min gate
   });
 });
 
