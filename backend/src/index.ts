@@ -562,7 +562,12 @@ export default {
     if (event.cron === AUTO_IMPORT_CRON) {
       ctx.waitUntil(
         autoImportTick(env).catch((err) =>
-          console.error("[auto-import] tick failed:", err instanceof Error ? err.message : err),
+          // Log the stack on an unattended tick so the failing call is locatable
+          // in Workers logs, not just the message (#784 review).
+          console.error(
+            "[auto-import] tick failed:",
+            err instanceof Error ? (err.stack ?? err.message) : err,
+          ),
         ),
       );
       return;

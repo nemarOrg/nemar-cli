@@ -118,10 +118,10 @@ ZARR_CACHE_BASE_URL = "https://zarr.nemar.org"
 # CLOUDFLARE_ZONE_ID = "<SCCN zone id for zarr.nemar.org>"  # uncomment + set at CDN provisioning
 # Automatic OpenNeuro import (#775). When "true" the */30 cron tick discovers new
 # OpenNeuro datasets and imports+publishes one every ~90 min; OFF = the tick
-# no-ops. Ships dark; flip to "true" on prod to activate. Pinned per-env so a
-# deploy can't silently flip it (the #773 lesson). Prod-only anyway (dev has no
-# cron triggers).
-AUTO_IMPORT_ENABLED = "false"
+# no-ops. ACTIVATED on prod (#775 finalize). Pinned per-env so a deploy can't
+# silently flip it (the #773 lesson). Prod-only anyway (dev has no cron triggers
+# and stays "false" below).
+AUTO_IMPORT_ENABLED = "true"
 
 # Secrets (set via: npx cfman wrangler --account sccn secret put <NAME> -c backend/wrangler-sccn.toml)
 # - GITHUB_ADMIN_PAT

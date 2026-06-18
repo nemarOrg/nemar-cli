@@ -151,6 +151,16 @@ export async function discoverOpenNeuroDatasets(opts?: {
         .join("; ");
       throw new Error(`OpenNeuro GraphQL returned errors on page ${page}: ${msg}`);
     }
+    // A `{ data: { datasets: null } }` body (no `errors` array) is a partial
+    // success that parseDatasetsPage would read as an empty TERMINAL page --
+    // silently ending the scan and making dedup think nothing is new. Distinguish
+    // a missing connection (throw) from a legitimately empty edges list (#784 review).
+    const data = isRecord(json) ? json.data : undefined;
+    if (!isRecord(data) || !isRecord(data.datasets)) {
+      throw new Error(
+        `OpenNeuro GraphQL returned no data.datasets on page ${page}: ${JSON.stringify(json).slice(0, 200)}`,
+      );
+    }
     const { datasets, hasNextPage, endCursor } = parseDatasetsPage(json);
     for (const d of datasets) {
       if (keepByModality(d.modalities)) out.push(d);
@@ -186,7 +196,13 @@ export const ACTIVE_IMPORTS_QUERY = "SELECT source_id, status FROM import_jobs";
 export async function getImportedSourceIds(db: D1Database): Promise<Set<string>> {
   try {
     const rows = await db.prepare(IMPORTED_SOURCE_IDS_QUERY).all<{ source_id: string }>();
-    return new Set((rows.results ?? []).map((r) => r.source_id));
+    // D1 can return success with a null `results` (not an exception); treating it
+    // as [] would empty the dedup set and re-import every existing mirror, so
+    // throw instead -- same guard as loadFailedJobInfo (#784 review).
+    if (!rows.results) {
+      throw new Error("getImportedSourceIds: D1 returned null results");
+    }
+    return new Set(rows.results.map((r) => r.source_id));
   } catch (err) {
     console.error("[openneuro-discovery] getImportedSourceIds D1 query failed:", err);
     throw err;
@@ -225,7 +241,12 @@ export async function getActiveImportSourceIds(
     const rows = await db
       .prepare(ACTIVE_IMPORTS_QUERY)
       .all<{ source_id: string; status: string }>();
-    return bucketActiveImports(rows.results ?? []);
+    // Null results would empty the in-flight/terminal sets and let a mid-import
+    // dataset be re-dispatched -- throw rather than treat it as [] (#784 review).
+    if (!rows.results) {
+      throw new Error("getActiveImportSourceIds: D1 returned null results");
+    }
+    return bucketActiveImports(rows.results);
   } catch (err) {
     console.error("[openneuro-discovery] getActiveImportSourceIds D1 query failed:", err);
     throw err;

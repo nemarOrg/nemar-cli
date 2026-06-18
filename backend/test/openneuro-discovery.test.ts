@@ -244,4 +244,15 @@ describe("discoverOpenNeuroDatasets pagination (injected fetch, real Responses)"
     const fetchImpl = async () => new Response("upstream down", { status: 503 });
     await expect(discoverOpenNeuroDatasets({ fetchImpl })).rejects.toThrow(/HTTP 503 on page 0/);
   });
+
+  test("a 200 with data.datasets=null (no errors array) THROWS, not a silent empty scan", async () => {
+    // GraphQL partial success: the connection field is null but there is no
+    // `errors` array. parseDatasetsPage would read it as an empty terminal page;
+    // discover must throw so dedup never mistakes it for "nothing new" (#784).
+    const fetchImpl = async () =>
+      new Response(JSON.stringify({ data: { datasets: null } }), { status: 200 });
+    await expect(discoverOpenNeuroDatasets({ fetchImpl })).rejects.toThrow(
+      /no data\.datasets on page 0/,
+    );
+  });
 });
