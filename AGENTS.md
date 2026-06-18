@@ -52,6 +52,18 @@ The backend code (`ORG_NAME = "nemarDatasets"` in `backend/src/services/github.t
 - **Cloudflare account:** SCCN only (personal/`neuromechanist` retired as of 2026-05-18). Use `npx cfman wrangler --account sccn` for all operations.
 - **Wrangler config:** `backend/wrangler-sccn.toml` (the only active config; the former personal-account `backend/wrangler.toml` was removed)
 
+### Database backup & disaster recovery (#655 / epic #794)
+- D1 (`nemar-db`) is backed up hourly to the **private** repo `nemarOrg/nemar-db-backup`
+  (GitHub Actions cron; git history = point-in-time recovery). It is the only stateful CF
+  resource backed up; Vectorize is rebuildable (`nemar admin reindex`), Analytics Engine is telemetry.
+- **fts5 gotcha:** `wrangler d1 export` refuses any DB with an fts5 virtual table
+  (`datasets_fts`). The backup works around it by exporting each real table with `--table` and
+  recreating the index from `sqlite_master` on restore. Do NOT expect a plain whole-DB export to work.
+- **Restore (DR):** `scripts/restore-remote.sh --target <db> --execute` (guarded, verifies
+  sha256 + row counts; refuses prod without `--force-prod`). **Run the Worker locally against a
+  real snapshot:** `scripts/run-local.sh --nemar-cli <path>` (loads the backup into a local
+  miniflare D1, then `wrangler dev`). Both live in `nemarOrg/nemar-db-backup`.
+
 ### Public Browser Sites
 Two user-facing dataset browsers exist during the cutover; **prefer ww2 for new references**.
 
