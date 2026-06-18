@@ -20,6 +20,7 @@ import {
   semanticSearchHydrated,
 } from "../services/dataset-search";
 import { generateDatasetId, isValidDatasetId } from "../services/datasetId";
+import { deleteDatasetCascade } from "../services/deletion";
 import {
   getAdminEmailsForCategory,
   resolveEmailConfig,
@@ -39,6 +40,7 @@ import {
   getFileContent,
   getWorkflowRuns,
   reconcileCollaborators,
+  removeCollaborator,
   setRepoVisibility,
   signPrescreenCallbackToken,
   triggerPrescreenRun,
@@ -1848,13 +1850,20 @@ datasetRoutes.post("/:id/request-access", authMiddleware, async (c) => {
  *
  * Works for both public and private repos.
  */
-const inviteSchema = z.object({
-  username: z.string().min(1, "Username is required"),
-});
+// Invite by username (CLI) or email (dashboard, #578), mutually exclusive.
+// Exported for unit testing the mutual-exclusion contract.
+export const inviteSchema = z
+  .object({
+    username: z.string().min(1).optional(),
+    email: z.string().email().optional(),
+  })
+  .refine((d) => (d.username ? 1 : 0) + (d.email ? 1 : 0) === 1, {
+    message: "Provide exactly one of 'username' or 'email'",
+  });
 
 datasetRoutes.post("/:id/invite", authMiddleware, zValidator("json", inviteSchema), async (c) => {
   const datasetId = c.req.param("id");
-  const { username } = c.req.valid("json");
+  const { username, email } = c.req.valid("json");
   const currentUser = c.get("user");
   const db = c.env.DB;
 
@@ -1885,21 +1894,50 @@ datasetRoutes.post("/:id/invite", authMiddleware, zValidator("json", inviteSchem
     return c.json({ error: "Dataset has no GitHub repository" }, 400);
   }
 
-  // Find the user to invite
-  const invitee = await db
-    .prepare(
-      "SELECT id, username, github_username, status FROM users WHERE username = ? AND deleted_at IS NULL",
-    )
-    .bind(username)
-    .first<{ id: number; username: string; github_username: string; status: string }>();
-
-  if (!invitee) {
-    return c.json({ error: `User '${username}' not found` }, 404);
+  // Find the user to invite, by email (#578) or username. The email path uses
+  // structured error codes the dashboard maps to UX copy; the username path
+  // keeps its original messages for the CLI.
+  let invitee: { id: number; username: string; github_username: string; status: string } | null;
+  if (email) {
+    invitee = await db
+      .prepare(
+        "SELECT id, username, github_username, status FROM users WHERE LOWER(email) = LOWER(?) AND deleted_at IS NULL",
+      )
+      .bind(email)
+      .first<{ id: number; username: string; github_username: string; status: string }>();
+    if (!invitee) {
+      return c.json(
+        {
+          error: "user_not_found",
+          message: "This person doesn't have a NEMAR account yet — ask them to sign up first.",
+        },
+        404,
+      );
+    }
+    if (invitee.status !== "approved") {
+      return c.json(
+        {
+          error: "user_pending_approval",
+          message: "This person has a NEMAR account but is not approved yet.",
+        },
+        409,
+      );
+    }
+  } else {
+    invitee = await db
+      .prepare(
+        "SELECT id, username, github_username, status FROM users WHERE username = ? AND deleted_at IS NULL",
+      )
+      .bind(username)
+      .first<{ id: number; username: string; github_username: string; status: string }>();
+    if (!invitee) {
+      return c.json({ error: `User '${username}' not found` }, 404);
+    }
+    if (invitee.status !== "approved") {
+      return c.json({ error: `User '${username}' is not approved yet` }, 400);
+    }
   }
-
-  if (invitee.status !== "approved") {
-    return c.json({ error: `User '${username}' is not approved yet` }, 400);
-  }
+  const inviteeLabel = invitee.username;
 
   // Check if already a collaborator
   const existing = await db
@@ -1908,12 +1946,12 @@ datasetRoutes.post("/:id/invite", authMiddleware, zValidator("json", inviteSchem
     .first();
 
   if (existing) {
-    return c.json({ error: `User '${username}' already has access to this dataset` }, 409);
+    return c.json({ error: `User '${inviteeLabel}' already has access to this dataset` }, 409);
   }
 
   // Check if invitee is the owner
   if (dataset.owner_user_id === invitee.id) {
-    return c.json({ error: `User '${username}' is the owner of this dataset` }, 409);
+    return c.json({ error: `User '${inviteeLabel}' is the owner of this dataset` }, 409);
   }
 
   // Extract repo name with defensive check
@@ -1949,9 +1987,9 @@ datasetRoutes.post("/:id/invite", authMiddleware, zValidator("json", inviteSchem
   }
 
   return c.json({
-    message: `User '${username}' invited to ${dataset.name}`,
+    message: `User '${inviteeLabel}' invited to ${dataset.name}`,
     dataset_id: datasetId,
-    invitee: username,
+    invitee: inviteeLabel,
   });
 });
 
@@ -2214,6 +2252,239 @@ datasetRoutes.get("/:id/collaborators", authMiddleware, async (c) => {
     collaborators: collaborators.results,
     count: collaborators.results.length,
   });
+});
+
+/**
+ * DELETE /datasets/:id/collaborators/:username - Remove a collaborator (#577).
+ *
+ * Owner or admin only. Removes the dataset_collaborators row + the per-dataset
+ * S3 permission (the authoritative upload gate) and revokes GitHub push.
+ * 404 if the user is not a collaborator on this dataset; 403 if not owner/admin.
+ */
+datasetRoutes.delete("/:id/collaborators/:username", authMiddleware, async (c) => {
+  const datasetId = c.req.param("id");
+  const targetUsername = c.req.param("username");
+  const currentUser = c.get("user");
+  const db = c.env.DB;
+
+  const dataset = await db
+    .prepare("SELECT id, owner_user_id, github_repo FROM datasets WHERE dataset_id = ?")
+    .bind(datasetId)
+    .first<{ id: number; owner_user_id: number; github_repo: string | null }>();
+
+  if (!dataset) {
+    return c.json({ error: "Dataset not found" }, 404);
+  }
+
+  if (dataset.owner_user_id !== currentUser.id && !hasRole(currentUser.role, "admin")) {
+    return c.json({ error: "Only dataset owner or admin can remove collaborators" }, 403);
+  }
+
+  const target = await db
+    .prepare(
+      "SELECT id, username, github_username FROM users WHERE username = ? AND deleted_at IS NULL",
+    )
+    .bind(targetUsername)
+    .first<{ id: number; username: string; github_username: string | null }>();
+
+  if (!target) {
+    return c.json({ error: "not_found", message: `User '${targetUsername}' not found` }, 404);
+  }
+
+  // Removing the owner is out of scope (owner transfer is its own flow).
+  if (target.id === dataset.owner_user_id) {
+    return c.json(
+      { error: "cannot_remove_owner", message: "The dataset owner cannot be removed." },
+      400,
+    );
+  }
+
+  // The dataset_collaborators row is the membership index; 404 if absent.
+  const membership = await db
+    .prepare("SELECT id FROM dataset_collaborators WHERE dataset_id = ? AND user_id = ?")
+    .bind(dataset.id, target.id)
+    .first<{ id: number }>();
+
+  if (!membership) {
+    return c.json(
+      {
+        error: "not_found",
+        message: `User '${targetUsername}' is not a collaborator on this dataset`,
+      },
+      404,
+    );
+  }
+
+  // Revoke GitHub push first (best-effort): a stale GitHub grant is far less
+  // dangerous than leaving the S3/collaborator rows in place, which are the real
+  // upload authorization removed below. Log but don't fail on a GitHub hiccup.
+  const repoName = dataset.github_repo ? extractRepoName(dataset.github_repo) : null;
+  if (repoName && target.github_username) {
+    try {
+      const ok = await removeCollaborator(
+        repoName,
+        target.github_username,
+        await getDatasetsToken(c.env),
+      );
+      if (!ok) {
+        console.warn(
+          `[collaborators] GitHub removal returned not-ok for ${target.github_username} on ${repoName}`,
+        );
+      }
+    } catch (err) {
+      console.error(
+        `[collaborators] GitHub removal failed for ${datasetId}/${targetUsername}:`,
+        err,
+      );
+    }
+  }
+
+  // Authoritative revocation: drop the membership + per-dataset S3 permission.
+  await db
+    .prepare("DELETE FROM dataset_collaborators WHERE dataset_id = ? AND user_id = ?")
+    .bind(dataset.id, target.id)
+    .run();
+  await db
+    .prepare("DELETE FROM user_s3_permissions WHERE user_id = ? AND s3_prefix = ?")
+    .bind(target.id, datasetId)
+    .run();
+
+  // Audit log (non-fatal).
+  try {
+    await db
+      .prepare(
+        "INSERT INTO audit_log (user_id, action, resource_type, resource_id, details) VALUES (?, 'dataset_collaborator_removed', 'dataset', ?, ?)",
+      )
+      .bind(
+        currentUser.id,
+        datasetId,
+        JSON.stringify({ removed_user_id: target.id, removed_username: target.username }),
+      )
+      .run();
+  } catch (err) {
+    console.error("Failed to write collaborator-removal audit log:", err);
+  }
+
+  return c.body(null, 204);
+});
+
+export type DraftDeletability = { deletable: true } | { deletable: false; reason: string };
+
+/**
+ * Pure draft-deletability guard for owner-callable DELETE /datasets/:id (#575).
+ * A dataset is an owner-deletable draft only when it is private, has no concept
+ * DOI, and has no active publication request. Returns the reason the first
+ * failing guard trips so the dashboard can explain the disabled action.
+ */
+export function evaluateDraftDeletability(args: {
+  visibility: string | null;
+  conceptDoi: string | null;
+  activePubRequests: number;
+}): DraftDeletability {
+  if (args.visibility !== "private") {
+    return {
+      deletable: false,
+      reason: "Dataset is public; deleting a published dataset is an admin operation.",
+    };
+  }
+  if (args.conceptDoi !== null) {
+    return {
+      deletable: false,
+      reason: "Dataset has a concept DOI; deleting it is an admin operation.",
+    };
+  }
+  if (args.activePubRequests > 0) {
+    return {
+      deletable: false,
+      reason: "Dataset has an active publication request; deny or complete it first.",
+    };
+  }
+  return { deletable: true };
+}
+
+/**
+ * DELETE /datasets/:id - Owner-callable draft delete (#575).
+ *
+ * Self-service deletion for the dashboard. Allowed for the owner (or an admin)
+ * only when the dataset is an unpublished draft: private, no concept DOI, and no
+ * active publication request. Published datasets stay on the admin path
+ * (DELETE /admin/datasets/:id), which owns the DOI-lifecycle conversation.
+ * Returns 403 not_deletable (+ reason) when a guard trips, 204 on success.
+ */
+datasetRoutes.delete("/:id", authMiddleware, async (c) => {
+  const datasetId = c.req.param("id");
+  const currentUser = c.get("user");
+  const db = c.env.DB;
+
+  const dataset = await db
+    .prepare(
+      "SELECT id, name, owner_user_id, visibility, concept_doi FROM datasets WHERE dataset_id = ?",
+    )
+    .bind(datasetId)
+    .first<{
+      id: number;
+      name: string;
+      owner_user_id: number;
+      visibility: string | null;
+      concept_doi: string | null;
+    }>();
+
+  if (!dataset) {
+    return c.json({ error: "Dataset not found" }, 404);
+  }
+
+  if (dataset.owner_user_id !== currentUser.id && !hasRole(currentUser.role, "admin")) {
+    return c.json({ error: "Only the dataset owner or an admin can delete this dataset" }, 403);
+  }
+
+  // Draft-only guards (pure decision in evaluateDraftDeletability). A failure
+  // returns 403 not_deletable with the specific reason so the dashboard can
+  // explain why the action is unavailable.
+  const activePubReq = await db
+    .prepare(
+      "SELECT COUNT(*) AS count FROM publication_requests WHERE dataset_id = ? AND status IN ('requested', 'approving', 'approved')",
+    )
+    .bind(datasetId)
+    .first<{ count: number }>();
+  const deletability = evaluateDraftDeletability({
+    visibility: dataset.visibility,
+    conceptDoi: dataset.concept_doi,
+    activePubRequests: activePubReq?.count ?? 0,
+  });
+  if (!deletability.deletable) {
+    return c.json({ error: "not_deletable", reason: deletability.reason }, 403);
+  }
+
+  const result = await deleteDatasetCascade(db, c.env, datasetId, {});
+
+  // Audit log (best-effort).
+  try {
+    await db
+      .prepare("INSERT INTO audit_log (action, user_id, details) VALUES (?, ?, ?)")
+      .bind(
+        "dataset_deleted",
+        currentUser.id,
+        JSON.stringify({
+          dataset_id: datasetId,
+          dataset_name: dataset.name,
+          owner_user_id: dataset.owner_user_id,
+          via: "owner_draft_delete",
+          steps: result.steps,
+          warnings: result.warnings,
+        }),
+      )
+      .run();
+  } catch (err) {
+    console.error("Failed to write owner-delete audit log:", err);
+    result.warnings.push("Audit log write failed");
+  }
+
+  // 204 on a clean cascade; 207 (with the partial result) if a step failed so
+  // the dashboard can surface what was left behind.
+  if (result.deleted) {
+    return c.body(null, 204);
+  }
+  return c.json(result, 207);
 });
 
 // ============================================================================
