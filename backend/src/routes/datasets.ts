@@ -747,8 +747,9 @@ datasetRoutes.get("/", optionalAuthMiddleware, async (c) => {
   // Single-table read from the `datasets` source of truth (#646). Folded legacy
   // catalog rows are first-class here, discriminated by the sentinel owner
   // (source_type='catalog'); managed datasets are source_type='managed'.
-  // 24-column wire shape, byte-stable with the pre-consolidation UNION path
-  // plus the #653 `license` column.
+  // 27-column wire shape: the pre-consolidation UNION path + #653 `license` +
+  // the #804 citation counts (num_citations / num_dataset_citations /
+  // num_datapaper_citations).
   const params: (string | number)[] = [status];
   let query = `
     SELECT d.dataset_id, d.dataset_id AS id, d.name, d.description, d.status, d.visibility,
@@ -762,6 +763,9 @@ datasetRoutes.get("/", optionalAuthMiddleware, async (c) => {
            COALESCE(d.license, '') AS license,
            COALESCE(d.file_size, 0) AS file_size,
            COALESCE(d.file_size_formatted, '') AS file_size_formatted,
+           COALESCE(d.num_citations, 0) AS num_citations,
+           COALESCE(d.num_dataset_citations, 0) AS num_dataset_citations,
+           COALESCE(d.num_datapaper_citations, 0) AS num_datapaper_citations,
            CASE WHEN d.owner_user_id = ${SYSTEM_USER_ID} THEN 'catalog' ELSE 'managed' END AS source_type,
            (
              SELECT version FROM dataset_versions dv
@@ -908,6 +912,9 @@ function buildSortClause(sort: string): string {
       return " ORDER BY participants DESC";
     case "size":
       return " ORDER BY file_size DESC";
+    case "citations":
+      // Most-cited first; ties fall back to newest so the order is stable (#804).
+      return " ORDER BY COALESCE(d.num_citations, 0) DESC, d.created_at DESC";
     default:
       return " ORDER BY d.created_at DESC";
   }
