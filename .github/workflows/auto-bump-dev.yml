@@ -2,12 +2,17 @@ name: Auto Bump Dev
 
 # Increments the `-devN` suffix on `dev` after every push that adds real
 # code, so every commit on the dev branch carries a fresh pre-release
-# version. The clean version + tag is still owned by auto-tag.yml when dev
-# eventually merges into main.
+# version. The bump is FOLDED into the merged commit (via amend + force-push)
+# rather than added as a standalone "chore: bump" commit, so a regular
+# dev -> main merge doesn't drag a trail of bump commits into main's history.
+# The clean version + tag is still owned by auto-tag.yml when dev eventually
+# merges into main.
 #
 # Skip conditions:
-#   - HEAD commit was authored by nemar-bot (prevents loop on our own
-#     bump-and-push).
+#   - HEAD commit was COMMITTED by nemar-bot — the amended/force-pushed result
+#     of this job carries nemar-bot as committer (author stays the PR author),
+#     which is how we avoid re-bumping our own force-push.
+#   - HEAD commit was authored by nemar-bot (legacy standalone-bump path).
 #   - HEAD commit message starts with "chore: bump version to" (catches
 #     manual bumps and the sync-dev.yml bump).
 #   - HEAD commit message contains "[skip-bump]" (escape hatch).
@@ -17,10 +22,9 @@ name: Auto Bump Dev
 #   - If no `-devN` suffix, log and exit (dev should always carry one;
 #     missing means a release just merged and sync-dev hasn't fired yet,
 #     or someone is mid-release).
-#   - Otherwise bump to `-dev(N+1)` via scripts/bump-version.sh.
-#   - Push as nemar-bot. The commit message starts with the standard
-#     "chore: bump version to ..." prefix so this workflow self-filters
-#     on the next push event.
+#   - Otherwise bump to `-dev(N+1)` via scripts/bump-version.sh, then fold that
+#     bump into the merged commit (reset --soft + commit --amend) and
+#     force-push (with-lease) as nemar-bot, so no standalone bump commit lands.
 
 on:
   push:
@@ -32,9 +36,15 @@ permissions:
 jobs:
   bump:
     # Filter out the bot's own commits and explicit opt-outs at the job
-    # level so we never even spin up a runner for those events.
+    # level so we never even spin up a runner for those events. The
+    # committer-email check is what breaks the loop after this job amends the
+    # merged commit and force-pushes: that force-push re-fires the push event,
+    # but the amended commit's committer is nemar-bot (author stays the original
+    # PR author), so we skip it. The author + message checks stay for the legacy
+    # standalone-bump path and manual/[skip-bump] cases.
     if: |
       github.event.head_commit.author.email != 'nemar-bot@users.noreply.github.com'
+      && github.event.head_commit.committer.email != 'nemar-bot@users.noreply.github.com'
       && !startsWith(github.event.head_commit.message, 'chore: bump version to')
       && !contains(github.event.head_commit.message, '[skip-bump]')
     runs-on: ubuntu-latest
@@ -85,7 +95,7 @@ jobs:
           git config user.name "nemar-bot"
           git config user.email "nemar-bot@users.noreply.github.com"
 
-      - name: Run bump script
+      - name: Bump version and fold it into the merged commit
         if: steps.compute.outputs.skip == 'false'
         env:
           # bump-version.sh -> git commit triggers husky pre-commit which
@@ -93,15 +103,34 @@ jobs:
           # here and the bump is mechanical, so disable husky. Matches the
           # existing pattern in sync-dev.yml and auto-tag.yml (see #454).
           HUSKY: '0'
-        run: ./scripts/bump-version.sh "${{ steps.compute.outputs.arg }}"
-
-      - name: Push bump commit
-        if: steps.compute.outputs.skip == 'false'
         run: |
-          # bump-version.sh has already created the commit; push it.
-          # If a parallel push raced us, abort: the next push will
-          # trigger this workflow again from the new HEAD.
-          git push origin dev || {
-            echo "::warning::push to dev rejected (likely a concurrent push); skipping"
+          # bump-version.sh edits package.json (+ backend/package.json lockstep),
+          # rebuilds to verify, and commits a standalone "chore: bump" commit.
+          # We then FOLD that commit into the just-merged feature commit so the
+          # version bump rides on it instead of adding a standalone history
+          # entry (keeps dev -> main history clean; dev -> main is a regular
+          # merge). `git reset --soft HEAD~1` drops the bump commit but keeps its
+          # staged package.json changes; `git commit --amend` merges them into
+          # the feature commit (author preserved; committer becomes nemar-bot,
+          # which is what the job-level committer filter keys off to avoid
+          # re-bumping the force-pushed result).
+          BEFORE=$(git rev-parse HEAD)
+          ./scripts/bump-version.sh "${{ steps.compute.outputs.arg }}"
+          AFTER=$(git rev-parse HEAD)
+          if [ "$BEFORE" = "$AFTER" ]; then
+            echo "::warning::bump-version.sh made no commit (version unchanged); nothing to fold"
+            exit 0
+          fi
+          git reset --soft HEAD~1
+          git commit --amend --no-edit
+          # --force-with-lease=dev:$BEFORE: only replace dev if it is STILL the
+          # exact commit we checked out ($BEFORE = the merged feature commit).
+          # The explicit expected-OID form doesn't depend on a remote-tracking
+          # ref (the checkout is shallow). If a concurrent merge moved dev, the
+          # lease fails and we skip rather than clobber — the next push
+          # re-triggers from the new HEAD. Requires allow_force_pushes on dev
+          # (the bot pushes with AUTO_TAG_PAT).
+          git push --force-with-lease=dev:"$BEFORE" origin dev || {
+            echo "::warning::force-push to dev rejected (concurrent push, or force-push disabled on dev); skipping"
             exit 0
           }
