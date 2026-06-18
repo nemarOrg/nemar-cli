@@ -26,8 +26,13 @@ routes = [
 workers_dev = true
 
 # Scheduled cleanup: daily at 3 AM UTC
+# Two schedules share the scheduled() handler (it branches on event.cron):
+#   "0 3 * * *"    daily cleanup/sweeps
+#   "*/30 * * * *" auto-import tick (#775) -- self-gates to ~90 min, so the
+#                  off-ticks are a single cheap D1 query. Prod only; [env.dev]
+#                  has no [triggers], so auto-import never runs in dev.
 [triggers]
-crons = ["0 3 * * *"]
+crons = ["0 3 * * *", "*/30 * * * *"]
 
 # D1 Database (SCCN account)
 [[d1_databases]]
@@ -111,6 +116,12 @@ MANIFEST_VIA_CENTRAL_WORKFLOW = "true"
 # host meanwhile.
 ZARR_CACHE_BASE_URL = "https://zarr.nemar.org"
 # CLOUDFLARE_ZONE_ID = "<SCCN zone id for zarr.nemar.org>"  # uncomment + set at CDN provisioning
+# Automatic OpenNeuro import (#775). When "true" the */30 cron tick discovers new
+# OpenNeuro datasets and imports+publishes one every ~90 min; OFF = the tick
+# no-ops. Ships dark; flip to "true" on prod to activate. Pinned per-env so a
+# deploy can't silently flip it (the #773 lesson). Prod-only anyway (dev has no
+# cron triggers).
+AUTO_IMPORT_ENABLED = "false"
 
 # Secrets (set via: npx cfman wrangler --account sccn secret put <NAME> -c backend/wrangler-sccn.toml)
 # - GITHUB_ADMIN_PAT
@@ -202,6 +213,9 @@ WEB_SESSION_COOKIE_DOMAIN = ""
 # clean runs against this dev environment.
 # Redeploy to change.
 MANIFEST_VIA_CENTRAL_WORKFLOW = "true"
+# Auto-import flag (#775). Dev has no cron triggers, so this never runs in dev;
+# present only for binding consistency.
+AUTO_IMPORT_ENABLED = "false"
 # Automated publication pre-screen (#666). Enabled on SCCN dev as the soak
 # target: a publish request that passes BIDS readiness dispatches
 # run-prescreen on nemarDatasets/.github. Requires the PRESCREEN_CALLBACK_SECRET

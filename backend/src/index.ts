@@ -32,6 +32,7 @@ import { userRoutes } from "./routes/users";
 import webhooks from "./routes/webhooks";
 import { zarrDataRoutes } from "./routes/zarr-data";
 import { archiveRetrySweep } from "./services/archive-retry";
+import { AUTO_IMPORT_CRON, autoImportTick } from "./services/auto-import";
 import { drainEmbeddingDirty } from "./services/dataset-search";
 import { deleteDatasetCascade } from "./services/deletion";
 import {
@@ -555,6 +556,14 @@ async function scheduledCleanup(env: Bindings): Promise<void> {
 export default {
   fetch: app.fetch,
   async scheduled(event: ScheduledEvent, env: Bindings, ctx: ExecutionContext) {
+    // Two cron schedules share this handler; branch on which one fired so the
+    // daily jobs don't run on the frequent auto-import tick (#775). The
+    // frequent tick self-gates to ~90 min, so it's cheap on the off-ticks.
+    if (event.cron === AUTO_IMPORT_CRON) {
+      ctx.waitUntil(autoImportTick(env));
+      return;
+    }
+    // Daily (0 3 * * *):
     // Catalog sync runs via GitHub Action, not Worker cron
     ctx.waitUntil(scheduledCleanup(env));
     // #646 Phase 4: drain stale vectors (embedding_dirty=1) — the backstop for
