@@ -443,7 +443,9 @@ function buildDataexplorerDataset(
     byte_size_format: formatBytes(fileSize),
     totalFiles: totalFileCount(src.tree),
     // BIDS-canonical subject count from sub-* dirs (#759); fall back to the
-    // participants.tsv row count only when the tree has no resolvable subjects.
+    // participants.tsv row count when the tree has no resolvable subjects --
+    // which also covers an upstream tree-fetch failure (empty src.tree), where
+    // both this and participants.count may legitimately be 0.
     participants: countSubjectDirs(src.tree.map((e) => e.path)) || participants.count,
     age_min: participants.ageMin ?? 0,
     age_max: participants.ageMax ?? 0,
