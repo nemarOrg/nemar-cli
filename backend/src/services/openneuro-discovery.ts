@@ -16,8 +16,15 @@
 
 const OPENNEURO_GRAPHQL_URL = "https://openneuro.org/crn/graphql";
 
-/** NEMAR is a neuroelectromagnetic archive: EEG, MEG, iEEG, EMG (incl. mixed). */
-export const NEMAR_MODALITIES = new Set(["eeg", "meg", "ieeg", "emg"]);
+/**
+ * NEMAR's in-scope BIDS modalities (matched against OpenNeuro's `summary.modalities`,
+ * which reliably tags these). EEG, MEG, iEEG, EMG are the core electromagnetic
+ * signals; NEMAR is also the home for MoBI (Mobile Brain/Body Imaging), so `motion`
+ * is in scope, and fNIRS (`nirs`) is included as a neighbouring biosignal. A dataset
+ * is in scope if it has ANY of these (mixed datasets qualify). EMG isn't tagged on
+ * OpenNeuro yet (kept here so it's caught the moment it is).
+ */
+export const NEMAR_MODALITIES = new Set(["eeg", "meg", "ieeg", "emg", "nirs", "motion"]);
 
 /** Safety cap so a runaway pagination can't hammer the API; ~200 pages * 100 =
  *  20k, ample headroom over OpenNeuro's ~6k datasets. discoverOpenNeuroDatasets
