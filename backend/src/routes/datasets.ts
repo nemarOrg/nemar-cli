@@ -87,6 +87,26 @@ type GrantResult = { ok: true } | { ok: false; stage: "github" | "db" | "s3"; er
  * access without it would leave an unremovable grant. Both DB writes are
  * idempotent (INSERT OR IGNORE) so re-approving is safe.
  */
+/**
+ * True when `userId` is a collaborator on the dataset identified by its public
+ * string id. Centralizes the owner/admin-bypass authorization check shared by
+ * GET /:id, POST /:id/upload-credentials, and POST /:id/download-credentials
+ * (#190).
+ */
+async function isDatasetCollaborator(
+  db: D1Database,
+  datasetId: string,
+  userId: number,
+): Promise<boolean> {
+  const row = await db
+    .prepare(
+      "SELECT 1 FROM dataset_collaborators dc JOIN datasets d ON dc.dataset_id = d.id WHERE d.dataset_id = ? AND dc.user_id = ?",
+    )
+    .bind(datasetId, userId)
+    .first();
+  return row !== null;
+}
+
 async function grantCollaborator(
   env: Bindings,
   db: D1Database,
@@ -1290,12 +1310,7 @@ datasetRoutes.post(
 
     if (dataset.owner_user_id !== user.id && !hasRole(user.role, "admin")) {
       // Check if user is a collaborator
-      const isCollaborator = await db
-        .prepare(
-          "SELECT 1 FROM dataset_collaborators dc JOIN datasets d ON dc.dataset_id = d.id WHERE d.dataset_id = ? AND dc.user_id = ?",
-        )
-        .bind(datasetId, user.id)
-        .first();
+      const isCollaborator = await isDatasetCollaborator(db, datasetId, user.id);
 
       if (!isCollaborator) {
         return c.json(
@@ -1386,12 +1401,7 @@ datasetRoutes.post(
     }
 
     if (dataset.owner_user_id !== user.id && !hasRole(user.role, "admin")) {
-      const isCollaborator = await db
-        .prepare(
-          "SELECT 1 FROM dataset_collaborators dc JOIN datasets d ON dc.dataset_id = d.id WHERE d.dataset_id = ? AND dc.user_id = ?",
-        )
-        .bind(datasetId, user.id)
-        .first();
+      const isCollaborator = await isDatasetCollaborator(db, datasetId, user.id);
 
       if (!isCollaborator) {
         return c.json(
@@ -1508,12 +1518,7 @@ datasetRoutes.post(
 
     // Owner or admin can always download; otherwise check collaborator status
     if (dataset.owner_user_id !== user.id && !hasRole(user.role, "admin")) {
-      const isCollaborator = await db
-        .prepare(
-          "SELECT 1 FROM dataset_collaborators dc JOIN datasets d ON dc.dataset_id = d.id WHERE d.dataset_id = ? AND dc.user_id = ?",
-        )
-        .bind(datasetId, user.id)
-        .first();
+      const isCollaborator = await isDatasetCollaborator(db, datasetId, user.id);
 
       if (!isCollaborator) {
         return c.json(
