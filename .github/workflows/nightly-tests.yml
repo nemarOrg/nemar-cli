@@ -78,12 +78,26 @@ jobs:
             base="$(basename "$f")"
             case "$base" in
               e2e-upload.test.ts) echo "Skipping $base (creates persistent resources)"; continue;;
+              # e2e-sandbox drives the npm-GLOBAL `nemar` binary (its beforeAll
+              # `bun install -g nemar-cli@<tag>` under an isolated HOME). That
+              # only works in the dedicated e2e-sandbox job, which puts bun's
+              # global bin on PATH; in this full-suite run `nemar` isn't on PATH,
+              # so every command exits 127 (#672). The dedicated job covers it.
+              e2e-sandbox.test.ts) echo "Skipping $base (needs the dedicated e2e-sandbox job's global CLI install)"; continue;;
             esac
             files+=("$f")
           done
           if [ ${#files[@]} -eq 0 ]; then echo "No test files matched" >&2; exit 1; fi
           echo "Running ${#files[@]} test files against dev"
-          bun test --retry=2 "${files[@]}"
+          # --timeout 30000 (vs Bun's 5000ms default): the full-suite run is the
+          # heaviest load, and two things spike past 5s under that contention —
+          # live dev-backend requests on a cold D1 read replica, and the CLI
+          # tests that spawn `bun run src/index.ts` (a full transpile of the
+          # module graph per invocation). At 5s those surfaced as "timed out
+          # after 5000ms" and exit-143 SIGTERMs (#672); the endpoints/CLI are
+          # actually fast (sub-second to a few seconds), so 30s asserts
+          # correctness without tripping on cold-start latency.
+          bun test --retry=2 --timeout 30000 "${files[@]}"
 
       - name: Open or refresh dev-health issue on failure
         if: failure()
