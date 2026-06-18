@@ -55,6 +55,7 @@ import {
   validateMeshTerms,
   validateMetadata,
 } from "./llm-enrich.js";
+import { countSessionDirs } from "./nemar-sync.js";
 import { ensureParticipantsTsv } from "./participants-tsv.js";
 import { errorMessage, extractRepoName } from "./repo-metadata.js";
 import { extractExtensions, formatBytes, getDatasetS3Stats } from "./s3.js";
@@ -931,6 +932,9 @@ export async function enrichDataset(
       const enrichedAuthors = authorsFromEnrichment(finalMetadata);
       const bidsVersion =
         typeof bidsDescription.BIDSVersion === "string" ? bidsDescription.BIDSVersion : null;
+      // BIDS-native sessions_count from ses-* dirs (#657). 0 (no session layer)
+      // -> null so COALESCE preserves any backfilled value rather than writing 0.
+      const sessionsCount = treePaths.length ? countSessionDirs(treePaths) || null : null;
 
       // #646: write the metadata columns on the `datasets` source of truth. A
       // failure here is a real error, so we deliberately let it propagate to the
@@ -943,6 +947,7 @@ export async function enrichDataset(
         license,
         readme: readmeContent || null, // empty README -> preserve existing
         bids_version: bidsVersion,
+        sessions_count: sessionsCount,
       });
 
       // Best-effort re-embed (internally guarded, never throws).
