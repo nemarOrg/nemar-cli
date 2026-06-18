@@ -82,18 +82,35 @@ export async function sweepBlockedBidsValidationRequests(
   const result: BlockedSweepResult = { scanned: 0, unblocked: 0, reblocked: 0, errors: 0 };
 
   const placeholders = BIDS_VALIDATION_BLOCK_REASONS.map(() => "?").join(", ");
-  const rows = await db
-    .prepare(
-      `SELECT pr.id, pr.dataset_id, pr.block_reason, d.github_repo
-         FROM publication_requests pr
-         JOIN datasets d ON d.dataset_id = pr.dataset_id
-        WHERE pr.status = 'blocked'
-          AND pr.block_reason IN (${placeholders})
-        ORDER BY pr.updated_at ASC
-        LIMIT ?`,
-    )
-    .bind(...BIDS_VALIDATION_BLOCK_REASONS, limit)
-    .all<{ id: number; dataset_id: string; block_reason: string; github_repo: string | null }>();
+  // Guard the initial query so a D1 outage / schema drift surfaces as errors>0
+  // in the cron tally rather than an all-zero result indistinguishable from
+  // "nothing to do". This keeps the "never throws" contract honest.
+  let rows: {
+    results: Array<{
+      id: number;
+      dataset_id: string;
+      block_reason: string;
+      github_repo: string | null;
+    }>;
+  };
+  try {
+    rows = await db
+      .prepare(
+        `SELECT pr.id, pr.dataset_id, pr.block_reason, d.github_repo
+           FROM publication_requests pr
+           JOIN datasets d ON d.dataset_id = pr.dataset_id
+          WHERE pr.status = 'blocked'
+            AND pr.block_reason IN (${placeholders})
+          ORDER BY pr.updated_at ASC
+          LIMIT ?`,
+      )
+      .bind(...BIDS_VALIDATION_BLOCK_REASONS, limit)
+      .all<{ id: number; dataset_id: string; block_reason: string; github_repo: string | null }>();
+  } catch (err) {
+    result.errors++;
+    console.error(`[publish-sweep] initial query failed; sweep aborted: ${errMsg(err)}`);
+    return result;
+  }
 
   if (rows.results.length === 0) return result;
 
@@ -101,6 +118,9 @@ export async function sweepBlockedBidsValidationRequests(
   try {
     pat = await getDatasetsToken(env);
   } catch (err) {
+    // Auth failure with rows pending is a real error, not a no-op: count it so
+    // a broken token surfaces in the audit log instead of reading as "clean".
+    result.errors++;
     console.error(
       `[publish-sweep] could not resolve datasets token; skipping sweep: ${errMsg(err)}`,
     );
@@ -128,37 +148,51 @@ export async function sweepBlockedBidsValidationRequests(
       continue;
     }
 
-    if (action.kind === "unblock") {
-      // Guard on status='blocked' so a concurrent re-request can't be clobbered.
-      const upd = await db
-        .prepare(
-          `UPDATE publication_requests
-              SET status = 'requested', block_reason = NULL, updated_at = datetime('now')
-            WHERE id = ? AND status = 'blocked'`,
-        )
-        .bind(row.id)
-        .run();
-      if ((upd.meta.changes ?? 0) > 0) {
-        result.unblocked++;
-        console.log(
-          `[publish-sweep] ${row.dataset_id}: BIDS validation now green; request ${row.id} unblocked -> requested`,
-        );
+    try {
+      if (action.kind === "unblock") {
+        // Mirror the interactive re-request unblock (routes/datasets.ts): also
+        // clear stale prescreen state so a previously-screened request doesn't
+        // surface a phantom advisory after the sweep moves it back to
+        // 'requested'. Guard on status='blocked' so a concurrent re-request
+        // can't be clobbered.
+        const upd = await db
+          .prepare(
+            `UPDATE publication_requests
+                SET status = 'requested', block_reason = NULL,
+                    prescreen_status = NULL, prescreen_nonce = NULL,
+                    prescreen_issue_url = NULL, prescreen_reasons = NULL,
+                    updated_at = datetime('now')
+              WHERE id = ? AND status = 'blocked'`,
+          )
+          .bind(row.id)
+          .run();
+        if ((upd.meta.changes ?? 0) > 0) {
+          result.unblocked++;
+          console.log(
+            `[publish-sweep] ${row.dataset_id}: BIDS validation now green; request ${row.id} unblocked -> requested`,
+          );
+        }
+      } else if (action.kind === "reblock" && row.block_reason !== action.blockReason) {
+        const upd = await db
+          .prepare(
+            `UPDATE publication_requests
+                SET block_reason = ?, updated_at = datetime('now')
+              WHERE id = ? AND status = 'blocked'`,
+          )
+          .bind(action.blockReason, row.id)
+          .run();
+        if ((upd.meta.changes ?? 0) > 0) {
+          result.reblocked++;
+          console.log(
+            `[publish-sweep] ${row.dataset_id}: BIDS validation failing; request ${row.id} block_reason -> ${action.blockReason}`,
+          );
+        }
       }
-    } else if (action.kind === "reblock" && row.block_reason !== action.blockReason) {
-      const upd = await db
-        .prepare(
-          `UPDATE publication_requests
-              SET block_reason = ?, updated_at = datetime('now')
-            WHERE id = ? AND status = 'blocked'`,
-        )
-        .bind(action.blockReason, row.id)
-        .run();
-      if ((upd.meta.changes ?? 0) > 0) {
-        result.reblocked++;
-        console.log(
-          `[publish-sweep] ${row.dataset_id}: BIDS validation failing; request ${row.id} block_reason -> ${action.blockReason}`,
-        );
-      }
+    } catch (err) {
+      // A transient D1 error on one row must not abort the whole sweep: count
+      // it and move on so the remaining rows are still processed.
+      result.errors++;
+      console.error(`[publish-sweep] DB update failed for ${row.dataset_id}: ${errMsg(err)}`);
     }
   }
 
