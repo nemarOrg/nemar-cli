@@ -28,12 +28,17 @@ describe("keepByModality", () => {
     expect(keepByModality(["meg"])).toBe(true);
     expect(keepByModality(["ieeg"])).toBe(true);
     expect(keepByModality(["emg"])).toBe(true);
+    expect(keepByModality(["nirs"])).toBe(true); // fNIRS
+    expect(keepByModality(["motion"])).toBe(true); // MoBI
+    expect(keepByModality(["eeg", "motion"])).toBe(true); // MoBI eeg+motion
     expect(keepByModality(["eeg", "mri"])).toBe(true); // mixed
+    expect(keepByModality(["MOTION"])).toBe(true); // case-insensitive
     expect(keepByModality(["EEG"])).toBe(true); // case-insensitive
   });
 
   test("out-of-scope / empty / garbage rejected", () => {
     expect(keepByModality(["mri"])).toBe(false);
+    expect(keepByModality(["pet"])).toBe(false);
     expect(keepByModality(["bold", "anat"])).toBe(false);
     expect(keepByModality([])).toBe(false);
     // @ts-expect-error defensive against non-array
