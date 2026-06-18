@@ -1838,6 +1838,39 @@ export async function triggerEnrichmentRun(
 }
 
 /**
+ * Dispatch the `onboard-openneuro` workflow on `nemarDatasets/.github` to import
+ * one or more OpenNeuro datasets (epic #775). Same repository_dispatch shape as
+ * `triggerEnrichmentRun`; the workflow's parse-ids reads
+ * `client_payload.openneuro_ids`. `pat` must carry dispatch write on
+ * `nemarDatasets/.github` -- use `getDatasetsToken()`. `fetchImpl` defaults to
+ * the global fetch (injectable for tests).
+ */
+export async function triggerOpenNeuroOnboard(
+  openneuroIds: string,
+  pat: string,
+  fetchImpl: typeof fetch = fetch,
+): Promise<void> {
+  const response = await fetchImpl(`${GITHUB_API()}/repos/${CENTRAL_WORKFLOW_REPO}/dispatches`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${pat}`,
+      Accept: "application/vnd.github.v3+json",
+      "User-Agent": "NEMAR-API",
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      event_type: "onboard-openneuro",
+      client_payload: { openneuro_ids: openneuroIds },
+    }),
+  });
+
+  if (!response.ok) {
+    const error = await response.text();
+    throw new Error(`Failed to trigger OpenNeuro onboard: HTTP ${response.status} - ${error}`);
+  }
+}
+
+/**
  * Pure builder for the `run-bids-validation` repository_dispatch payload sent to
  * `nemarDatasets/.github`. Mirrors the per-repo shim's dispatch
  * (`getWorkflowTemplates`) so a manual re-validation produces the same central
