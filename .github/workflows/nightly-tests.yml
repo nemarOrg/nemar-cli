@@ -78,6 +78,12 @@ jobs:
             base="$(basename "$f")"
             case "$base" in
               e2e-upload.test.ts) echo "Skipping $base (creates persistent resources)"; continue;;
+              # e2e-sandbox drives the npm-GLOBAL `nemar` binary (its beforeAll
+              # `bun install -g nemar-cli@<tag>` under an isolated HOME). That
+              # only works in the dedicated e2e-sandbox job, which puts bun's
+              # global bin on PATH; in this full-suite run `nemar` isn't on PATH,
+              # so every command exits 127 (#672). The dedicated job covers it.
+              e2e-sandbox.test.ts) echo "Skipping $base (needs the dedicated e2e-sandbox job's global CLI install)"; continue;;
             esac
             files+=("$f")
           done
