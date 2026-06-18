@@ -112,8 +112,13 @@ async function loadFailedJobInfo(db: D1Database): Promise<FailedJobInfo> {
       "SELECT source_id, auto_attempts, updated_at FROM import_jobs WHERE status = 'failed' AND source_id IS NOT NULL",
     )
     .all<{ source_id: string; auto_attempts: number | null; updated_at: string }>();
+  if (!rows.results) {
+    // A null results set (D1 anomaly) would make every retry-capped dataset look
+    // fresh and bypass the bounded-retry cap -- abort the tick instead (#780 review).
+    throw new Error("[auto-import] loadFailedJobInfo: D1 returned null results");
+  }
   const map: FailedJobInfo = new Map();
-  for (const r of rows.results ?? []) {
+  for (const r of rows.results) {
     map.set(r.source_id, { autoAttempts: r.auto_attempts ?? 0, updatedAt: r.updated_at });
   }
   return map;
@@ -125,6 +130,12 @@ async function loadFailedJobInfo(db: D1Database): Promise<FailedJobInfo> {
  * runs every ~90 min). Dispatches one dataset and records it in audit_log (which
  * is both the gate source and the Phase-3 activity feed).
  */
+/** Gate-source query: the last auto-import dispatch time (audit_log.timestamp,
+ *  NOT created_at -- the column is `timestamp` since migration 0001). Exported
+ *  so a test runs the real SQL and locks the column name. */
+export const AUTO_IMPORT_GATE_QUERY =
+  "SELECT timestamp FROM audit_log WHERE action = 'auto_import_dispatch' ORDER BY id DESC LIMIT 1";
+
 export async function autoImportTick(env: Bindings): Promise<void> {
   if (env.AUTO_IMPORT_ENABLED !== "true") {
     console.log("[auto-import] disabled (AUTO_IMPORT_ENABLED != 'true'); skipping");
@@ -132,17 +143,20 @@ export async function autoImportTick(env: Bindings): Promise<void> {
   }
   const now = Date.now();
 
-  const last = await env.DB.prepare(
-    "SELECT created_at FROM audit_log WHERE action = 'auto_import_dispatch' ORDER BY id DESC LIMIT 1",
-  ).first<{ created_at: string }>();
+  const last = await env.DB.prepare(AUTO_IMPORT_GATE_QUERY).first<{ timestamp: string }>();
   const gate = decideAutoImportGate({
-    lastDispatchAt: last?.created_at ?? null,
+    lastDispatchAt: last?.timestamp ?? null,
     now,
     minIntervalMs: MIN_INTERVAL_MS,
   });
   if (!gate.proceed) {
     console.log(`[auto-import] gated: ${gate.reason}`);
     return;
+  }
+  if (gate.reason.startsWith("unparseable")) {
+    // Fail-open is deliberate (don't stall forever), but an unparseable
+    // last-dispatch timestamp is a data anomaly worth surfacing at error level.
+    console.error(`[auto-import] ${gate.reason} (last="${last?.timestamp}"); proceeding`);
   }
 
   const discovered = await discoverOpenNeuroDatasets();
@@ -169,22 +183,15 @@ export async function autoImportTick(env: Bindings): Promise<void> {
     return;
   }
 
-  // Dispatch first; only on success do we bump the retry counter + record the
-  // dispatch (which advances the gate). A failed dispatch leaves the gate so the
-  // next tick retries.
-  const token = await getDatasetsToken(env);
-  await triggerOpenNeuroOnboard(picked.id, token);
-
   const priorAttempts = jobInfo.get(picked.id)?.autoAttempts ?? 0;
-  if (jobInfo.has(picked.id)) {
-    // Re-dispatch of a failed dataset: bump auto_attempts (the workflow's
-    // preparing-upsert doesn't touch this column, so it persists across retries).
-    await env.DB.prepare(
-      "UPDATE import_jobs SET auto_attempts = auto_attempts + 1, updated_at = datetime('now') WHERE dataset_id = ?",
-    )
-      .bind(datasetId)
-      .run();
-  }
+
+  // RESERVE THE SLOT BEFORE DISPATCHING. Writing the audit_log gate row first
+  // means a failure anywhere after this can't let the next tick (30 min) re-pick
+  // the same dataset before its import registers as in-flight -- which would
+  // double-dispatch and, since we auto-publish, risk a duplicate version DOI. If
+  // the gate write itself throws we never dispatch (the tick aborts loudly). If
+  // the gate is set but the dispatch fails, the dataset simply waits for the next
+  // ~90-min window. (#780 review)
   await env.DB.prepare(
     "INSERT INTO audit_log (action, resource_id, details) VALUES ('auto_import_dispatch', ?, ?)",
   )
@@ -198,6 +205,25 @@ export async function autoImportTick(env: Bindings): Promise<void> {
       }),
     )
     .run();
+
+  // Bump the bounded-retry counter for a re-dispatched failed dataset (survives
+  // the workflow's preparing-upsert, which doesn't touch this column). A 0-row
+  // no-op means the cap wouldn't advance -- surface it.
+  if (jobInfo.has(picked.id)) {
+    const upd = await env.DB.prepare(
+      "UPDATE import_jobs SET auto_attempts = auto_attempts + 1, updated_at = datetime('now') WHERE dataset_id = ?",
+    )
+      .bind(datasetId)
+      .run();
+    if ((upd.meta.changes ?? 0) === 0) {
+      console.error(
+        `[auto-import] auto_attempts UPDATE matched 0 rows for ${datasetId} (${picked.id}); retry cap may not advance`,
+      );
+    }
+  }
+
+  const token = await getDatasetsToken(env);
+  await triggerOpenNeuroOnboard(picked.id, token);
   console.log(
     `[auto-import] dispatched ${picked.id} -> ${datasetId} (attempt ${priorAttempts + 1}, ${candidates.length} candidates)`,
   );

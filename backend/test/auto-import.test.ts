@@ -11,6 +11,7 @@ import { beforeEach, describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import {
+  AUTO_IMPORT_GATE_QUERY,
   type FailedJobInfo,
   decideAutoImportGate,
   mapToNemarId,
@@ -134,6 +135,29 @@ describe("triggerOpenNeuroOnboard (injected fetch, real Response)", () => {
     const fetchImpl = (async () =>
       new Response("forbidden", { status: 403 })) as unknown as typeof fetch;
     await expect(triggerOpenNeuroOnboard("ds1", "tok", fetchImpl)).rejects.toThrow(/HTTP 403/);
+  });
+});
+
+describe("AUTO_IMPORT_GATE_QUERY against a real audit_log", () => {
+  // Regression guard: the column is `timestamp` (migration 0001), not
+  // `created_at` -- the wrong name made the gate query throw and the tick never
+  // fire. Run the real query against the real audit_log shape.
+  test("reads the latest auto_import_dispatch timestamp and feeds the gate", () => {
+    const db = new Database(":memory:");
+    db.run(
+      "CREATE TABLE audit_log (id INTEGER PRIMARY KEY AUTOINCREMENT, timestamp TEXT NOT NULL DEFAULT (datetime('now')), user_id INTEGER, action TEXT NOT NULL, resource_type TEXT, resource_id TEXT, details TEXT, ip_address TEXT)",
+    );
+    db.run(
+      "INSERT INTO audit_log (timestamp, action, resource_id) VALUES ('2026-06-17 10:00:00','auto_import_dispatch','ds1'), ('2026-06-17 11:00:00','other','x')",
+    );
+    const row = db.query(AUTO_IMPORT_GATE_QUERY).get() as { timestamp: string } | null;
+    expect(row?.timestamp).toBe("2026-06-17 10:00:00"); // the dispatch row, not 'other'
+    const gate = decideAutoImportGate({
+      lastDispatchAt: row?.timestamp ?? null,
+      now: Date.parse("2026-06-17T12:00:00Z"),
+      minIntervalMs: NINETY_MIN,
+    });
+    expect(gate.proceed).toBe(true); // 120 min elapsed
   });
 });
 

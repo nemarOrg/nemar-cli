@@ -560,7 +560,11 @@ export default {
     // daily jobs don't run on the frequent auto-import tick (#775). The
     // frequent tick self-gates to ~90 min, so it's cheap on the off-ticks.
     if (event.cron === AUTO_IMPORT_CRON) {
-      ctx.waitUntil(autoImportTick(env));
+      ctx.waitUntil(
+        autoImportTick(env).catch((err) =>
+          console.error("[auto-import] tick failed:", err instanceof Error ? err.message : err),
+        ),
+      );
       return;
     }
     // Daily (0 3 * * *):
