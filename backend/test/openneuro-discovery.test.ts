@@ -219,7 +219,7 @@ describe("discoverOpenNeuroDatasets pagination (injected fetch, real Responses)"
     expect(got.map((d) => d.id)).toEqual(["ds1", "ds3", "ds4"]); // ds2 (mri-only) dropped
   });
 
-  test("a mid-scan GraphQL error THROWS instead of ending the scan silently", async () => {
+  test("a mid-scan GraphQL error with NO usable data THROWS instead of ending the scan silently", async () => {
     const pages = [
       pageResponse([node("ds1", ["eeg"])], true, "C1"),
       new Response(JSON.stringify({ data: null, errors: [{ message: "rate limited" }] }), {
@@ -228,8 +228,38 @@ describe("discoverOpenNeuroDatasets pagination (injected fetch, real Responses)"
     ];
     let i = 0;
     await expect(discoverOpenNeuroDatasets({ fetchImpl: async () => pages[i++] })).rejects.toThrow(
-      /errors on page 1: rate limited/,
+      /no usable data.datasets on page 1: rate limited/,
     );
+  });
+
+  test("a PARTIAL errors array (valid data.datasets + per-dataset field error) does NOT throw", async () => {
+    // OpenNeuro returns HTTP 200 with valid `data.datasets` AND an `errors` array
+    // when one dataset's latestSnapshot 404s (path [...,"latestSnapshot"]). The scan
+    // must proceed -- skipping only the broken dataset -- not abort the whole import.
+    // This is the real-world bug that left auto-import dead despite real candidates.
+    const pages = [
+      new Response(
+        JSON.stringify({
+          data: {
+            datasets: {
+              pageInfo: { hasNextPage: true, endCursor: "C1" },
+              // ds1 valid; ds2's snapshot resolution failed -> field nulled.
+              edges: [node("ds1", ["eeg"]), { node: { id: "ds2", latestSnapshot: null } }],
+            },
+          },
+          errors: [
+            { message: "Not Found", path: ["datasets", "edges", 1, "node", "latestSnapshot"] },
+          ],
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      ),
+      pageResponse([node("ds3", ["meg"])], false, null),
+    ];
+    let i = 0;
+    const got = await discoverOpenNeuroDatasets({ fetchImpl: async () => pages[i++] });
+    expect(i).toBe(2); // pagination continued past the partial-error page
+    // ds1 + ds3 kept; ds2 (null snapshot -> no modalities) skipped, not fatal.
+    expect(got.map((d) => d.id)).toEqual(["ds1", "ds3"]);
   });
 
   test("hitting the maxPages cap with more pages THROWS (never silently truncates)", async () => {
@@ -252,7 +282,7 @@ describe("discoverOpenNeuroDatasets pagination (injected fetch, real Responses)"
     const fetchImpl = async () =>
       new Response(JSON.stringify({ data: { datasets: null } }), { status: 200 });
     await expect(discoverOpenNeuroDatasets({ fetchImpl })).rejects.toThrow(
-      /no data\.datasets on page 0/,
+      /no usable data\.datasets on page 0/,
     );
   });
 });
