@@ -21,8 +21,16 @@ import {
 
 /** The cron schedule that drives the tick (must match wrangler-sccn.toml). */
 export const AUTO_IMPORT_CRON = "*/30 * * * *";
-/** Pace: at most one dispatch per ~90 min (the cron fires every 30, the gate skips 2/3). */
-const MIN_INTERVAL_MS = 90 * 60 * 1000;
+/**
+ * Pace: ~one import every 30 min, i.e. one per cron tick. The gate is set just
+ * UNDER the 30-min cron period so each tick clears it (a dispatch lands a few
+ * seconds after a tick, so the next tick is ~30 min later -> >= 25 min -> fires);
+ * a flat 30-min gate would instead miss that tick and pace at ~60 min. It still
+ * blocks an accidental sub-25-min double-fire. Faster than the original 90 min is
+ * safe: discovery + dedup are D1-only (no GitHub on the check), so the rate limit
+ * that motivated the slow pace doesn't apply.
+ */
+const MIN_INTERVAL_MS = 25 * 60 * 1000;
 /** Bounded retries: after this many auto-dispatches a failed dataset is parked. */
 const MAX_AUTO_ATTEMPTS = 3;
 /** Backoff before re-picking a freshly-failed dataset. */
