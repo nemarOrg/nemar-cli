@@ -79,6 +79,11 @@ export interface Bindings {
   MANIFEST_VIA_CENTRAL_WORKFLOW?: string; // "true" enables central workflow path
   MANIFEST_CALLBACK_SECRET?: string; // Workers secret; HMAC key for callback token
 
+  // Automatic OpenNeuro import (#775). When "true" the */30 cron tick discovers
+  // new OpenNeuro datasets and imports+publishes one every ~90 min; OFF/unset
+  // = the tick no-ops. Prod-only (dev has no cron triggers).
+  AUTO_IMPORT_ENABLED?: string;
+
   // Publication pre-screen (issue #666). When PRESCREEN_ENABLED is "true",
   // a publication request that passes BIDS readiness dispatches
   // repository_dispatch[run-prescreen] at nemarDatasets/.github, which runs

@@ -1,0 +1,17 @@
+-- Migration 0047: auto_attempts on import_jobs for the automatic-import
+-- resilience (epic #775, Phase 2).
+--
+-- The paced auto-import loop dispatches one new OpenNeuro dataset every ~90 min.
+-- When an import fails, the loop must bound how many times it re-dispatches that
+-- dataset (so a permanently-broken dataset doesn't get retried forever) and
+-- rotate it to the back of the queue (so it never wedges the trickle). This
+-- counter tracks per-dataset auto-dispatch attempts; pickNextDataset
+-- (services/auto-import.ts) excludes a failed dataset once auto_attempts reaches
+-- the cap and orders fresh datasets ahead of failed ones.
+--
+-- Survives the import_jobs preparing-upsert (POST /admin/datasets/import and
+-- /webhooks/import-state status='preparing') -- those reset status/last_error
+-- but NOT this column, so the retry budget persists across re-imports.
+--
+-- Plain ADD COLUMN; import_jobs is not FTS-backed and not in any trigger OF list.
+ALTER TABLE import_jobs ADD COLUMN auto_attempts INTEGER NOT NULL DEFAULT 0;
