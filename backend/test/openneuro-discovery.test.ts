@@ -106,11 +106,19 @@ describe("parseDatasetsPage", () => {
   });
 
   test("non-object / error payload -> empty terminal page", () => {
-    expect(parseDatasetsPage(null)).toEqual({ datasets: [], hasNextPage: false, endCursor: null });
+    expect(parseDatasetsPage(null)).toEqual({
+      datasets: [],
+      hasNextPage: false,
+      endCursor: null,
+      count: null,
+      edgeCount: 0,
+    });
     expect(parseDatasetsPage({ errors: [{ message: "boom" }] })).toEqual({
       datasets: [],
       hasNextPage: false,
       endCursor: null,
+      count: null,
+      edgeCount: 0,
     });
   });
 });
@@ -289,5 +297,46 @@ describe("discoverOpenNeuroDatasets pagination (injected fetch, real Responses)"
     await expect(discoverOpenNeuroDatasets({ fetchImpl })).rejects.toThrow(
       /no usable data\.datasets on page 0/,
     );
+  });
+
+  // A page WITH OpenNeuro's pageInfo.count (the total). The completeness guard
+  // cross-checks scanned edges against this total.
+  const pageWithCount = (
+    edges: ReturnType<typeof node>[],
+    count: number,
+    hasNextPage: boolean,
+    endCursor: string | null,
+  ) =>
+    new Response(
+      JSON.stringify({
+        data: { datasets: { pageInfo: { count, hasNextPage, endCursor }, edges } },
+      }),
+      { status: 200, headers: { "Content-Type": "application/json" } },
+    );
+
+  test("THROWS if pagination ends far below pageInfo.count (silent-truncation guard)", async () => {
+    // OpenNeuro reports 1000 total but the connection claims no next page after 3
+    // edges -> a truncated scan. Must fail loud, not import a 3-of-1000 slice.
+    const fetchImpl = async () =>
+      pageWithCount(
+        [node("ds1", ["eeg"]), node("ds2", ["meg"]), node("ds3", ["nirs"])],
+        1000,
+        false,
+        null,
+      );
+    await expect(discoverOpenNeuroDatasets({ fetchImpl })).rejects.toThrow(
+      /truncated: scanned 3 of ~1000/,
+    );
+  });
+
+  test("full coverage (scanned ~= pageInfo.count) does NOT throw", async () => {
+    // 2 pages, 4 datasets, count=4 -> complete; the guard passes.
+    const pages = [
+      pageWithCount([node("ds1", ["eeg"]), node("ds2", ["meg"])], 4, true, "C1"),
+      pageWithCount([node("ds3", ["ieeg"]), node("ds4", ["motion"])], 4, false, null),
+    ];
+    let i = 0;
+    const got = await discoverOpenNeuroDatasets({ fetchImpl: async () => pages[i++] });
+    expect(got.map((d) => d.id)).toEqual(["ds1", "ds2", "ds3", "ds4"]); // incl. motion
   });
 });
