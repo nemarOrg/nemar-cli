@@ -43,6 +43,7 @@ import {
 } from "./services/email";
 import { runImportRecovery } from "./services/import-recovery";
 import { getActiveNotices } from "./services/notices";
+import { sweepBlockedBidsValidationRequests } from "./services/publication-sweep";
 import {
   FIRST_WARNING_DAYS,
   STALENESS_LIMIT_DAYS,
@@ -533,6 +534,18 @@ async function scheduledCleanup(env: Bindings): Promise<void> {
     console.error("Scheduled cleanup: stuck import_jobs query failed:", err);
   }
 
+  // 5. Re-evaluate publication requests blocked on BIDS validation (#428). A
+  //    request blocked while CI was pending/running never re-checked itself when
+  //    CI later went green, so requests sat in 'blocked' indefinitely. Re-read
+  //    the latest run for each and transition: green -> 'requested', failing ->
+  //    'bids_validation_failed'. Defense-in-depth; never throws.
+  let blockedSweep = { scanned: 0, unblocked: 0, reblocked: 0, errors: 0 };
+  try {
+    blockedSweep = await sweepBlockedBidsValidationRequests(env);
+  } catch (err) {
+    console.error("Scheduled cleanup: blocked publication-request sweep failed:", err);
+  }
+
   // Log summary to audit_log. `deleted`/`failed` cover only sandbox (xx)
   // datasets now; nm datasets are warned, not deleted, by this job.
   const deleted = results.filter((r) => r.success).length;
@@ -542,14 +555,21 @@ async function scheduledCleanup(env: Bindings): Promise<void> {
       .prepare("INSERT INTO audit_log (action, details) VALUES (?, ?)")
       .bind(
         "scheduled_cleanup",
-        JSON.stringify({ deleted, failed, datasets: results, staleness, importsSwept }),
+        JSON.stringify({
+          deleted,
+          failed,
+          datasets: results,
+          staleness,
+          importsSwept,
+          blockedSweep,
+        }),
       )
       .run();
   } catch (err) {
     console.error("Scheduled cleanup: failed to write audit log:", err);
   }
   console.log(
-    `Scheduled cleanup: ${deleted} deleted, ${failed} failed; staleness warned=${staleness.warned} adminNotified=${staleness.adminNotified} reset=${staleness.reset}; importsSwept=${importsSwept}`,
+    `Scheduled cleanup: ${deleted} deleted, ${failed} failed; staleness warned=${staleness.warned} adminNotified=${staleness.adminNotified} reset=${staleness.reset}; importsSwept=${importsSwept}; blockedSweep unblocked=${blockedSweep.unblocked} reblocked=${blockedSweep.reblocked} errors=${blockedSweep.errors}`,
   );
 }
 

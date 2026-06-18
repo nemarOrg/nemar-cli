@@ -1320,6 +1320,9 @@ export interface PublishStatusResponse {
   updated_at?: string;
   message?: string;
   block_reason?: string | null;
+  // Present when status='blocked': link to the dataset repo's Actions tab so the
+  // user can see the BIDS validation run (#428).
+  ci_url?: string;
   // Non-blocking pre-screen advisory (#756): present when the screen flagged a
   // concern. The request is NOT blocked by this.
   advisory?: { source: "prescreen"; reasons: string[]; issue_url?: string };
