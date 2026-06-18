@@ -141,24 +141,35 @@ export async function discoverOpenNeuroDatasets(opts?: {
       throw new Error(`OpenNeuro GraphQL returned HTTP ${res.status} on page ${page}`);
     }
     const json: unknown = await res.json();
-    // A GraphQL error is HTTP 200 with an `errors` array (data null). Surface it
-    // instead of letting parseDatasetsPage read it as an empty TERMINAL page --
-    // that would silently end the scan and return a partial list (#779 review).
+    // GraphQL can return HTTP 200 with an `errors` array. Two very different cases:
+    //   (a) FATAL: `data.datasets` is null/missing -> no usable page, surface it so
+    //       the scan fails loud instead of silently truncating (#779/#784).
+    //   (b) PARTIAL: `data.datasets` is present but some per-dataset field errored
+    //       (OpenNeuro returns `{message:"Not Found", path:[...,"latestSnapshot"]}`
+    //       for a dataset whose snapshot is gone). That dataset's node still comes
+    //       back with the field nulled; parseDatasetsPage already skips nodes with
+    //       no usable snapshot, so the OTHER datasets on the page are fine. Throwing
+    //       here would abort the whole scan on one broken dataset and import nothing
+    //       (the bug that left auto-import dead despite real candidates). Log + go on.
     const errors = isRecord(json) && Array.isArray(json.errors) ? json.errors : null;
+    const data = isRecord(json) ? json.data : undefined;
+    const hasUsableConnection = isRecord(data) && isRecord(data.datasets);
+    if (!hasUsableConnection) {
+      const detail = errors
+        ? errors
+            .map((e) => (isRecord(e) && typeof e.message === "string" ? e.message : "unknown"))
+            .join("; ")
+        : JSON.stringify(json).slice(0, 200);
+      throw new Error(
+        `OpenNeuro GraphQL returned no usable data.datasets on page ${page}: ${detail}`,
+      );
+    }
     if (errors) {
       const msg = errors
         .map((e) => (isRecord(e) && typeof e.message === "string" ? e.message : "unknown"))
         .join("; ");
-      throw new Error(`OpenNeuro GraphQL returned errors on page ${page}: ${msg}`);
-    }
-    // A `{ data: { datasets: null } }` body (no `errors` array) is a partial
-    // success that parseDatasetsPage would read as an empty TERMINAL page --
-    // silently ending the scan and making dedup think nothing is new. Distinguish
-    // a missing connection (throw) from a legitimately empty edges list (#784 review).
-    const data = isRecord(json) ? json.data : undefined;
-    if (!isRecord(data) || !isRecord(data.datasets)) {
-      throw new Error(
-        `OpenNeuro GraphQL returned no data.datasets on page ${page}: ${JSON.stringify(json).slice(0, 200)}`,
+      console.warn(
+        `[openneuro-discovery] page ${page} has ${errors.length} partial field error(s) (proceeding with valid data): ${msg.slice(0, 300)}`,
       );
     }
     const { datasets, hasNextPage, endCursor } = parseDatasetsPage(json);
