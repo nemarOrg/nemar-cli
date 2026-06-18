@@ -16,8 +16,15 @@
 
 const OPENNEURO_GRAPHQL_URL = "https://openneuro.org/crn/graphql";
 
-/** NEMAR is a neuroelectromagnetic archive: EEG, MEG, iEEG, EMG (incl. mixed). */
-export const NEMAR_MODALITIES = new Set(["eeg", "meg", "ieeg", "emg"]);
+/**
+ * NEMAR's in-scope BIDS modalities (matched against OpenNeuro's `summary.modalities`,
+ * which reliably tags these). EEG, MEG, iEEG, EMG are the core electromagnetic
+ * signals; NEMAR is also the home for MoBI (Mobile Brain/Body Imaging), so `motion`
+ * is in scope, and fNIRS (`nirs`) is included as a neighbouring biosignal. A dataset
+ * is in scope if it has ANY of these (mixed datasets qualify). EMG isn't tagged on
+ * OpenNeuro yet (kept here so it's caught the moment it is).
+ */
+export const NEMAR_MODALITIES = new Set(["eeg", "meg", "ieeg", "emg", "nirs", "motion"]);
 
 /** Safety cap so a runaway pagination can't hammer the API; ~200 pages * 100 =
  *  20k, ample headroom over OpenNeuro's ~6k datasets. discoverOpenNeuroDatasets
@@ -51,6 +58,10 @@ interface DatasetsPage {
   datasets: DiscoveredDataset[];
   hasNextPage: boolean;
   endCursor: string | null;
+  /** OpenNeuro's reported TOTAL dataset count (pageInfo.count), or null if absent. */
+  count: number | null;
+  /** Raw number of edges returned on THIS page (for the coverage cross-check). */
+  edgeCount: number;
 }
 
 /**
@@ -86,6 +97,8 @@ export function parseDatasetsPage(json: unknown): DatasetsPage {
     datasets,
     hasNextPage: pageInfo.hasNextPage === true,
     endCursor: typeof pageInfo.endCursor === "string" ? pageInfo.endCursor : null,
+    count: typeof pageInfo.count === "number" ? pageInfo.count : null,
+    edgeCount: edges.length,
   };
 }
 
@@ -107,10 +120,19 @@ export function diffNewDatasets(
 
 const DATASETS_QUERY = `query Datasets($after: String) {
   datasets(first: ${PAGE_SIZE}, after: $after) {
-    pageInfo { hasNextPage endCursor }
+    pageInfo { count hasNextPage endCursor }
     edges { node { id latestSnapshot { tag summary { modalities } } } }
   }
 }`;
+
+/**
+ * Minimum fraction of OpenNeuro's reported total (`pageInfo.count`) the scan must
+ * actually cover. If pagination silently ends early (a page wrongly reports
+ * `hasNextPage:false`, or any truncation), the scan would import only the slice it
+ * saw -- so we fail loud below this. 0.9 tolerates datasets added/removed mid-scan
+ * while still catching any real truncation (which always drops coverage far lower).
+ */
+const MIN_COVERAGE = 0.9;
 
 /**
  * Discover every in-scope OpenNeuro dataset via the GraphQL API (no GitHub).
@@ -128,6 +150,10 @@ export async function discoverOpenNeuroDatasets(opts?: {
   const out: DiscoveredDataset[] = [];
   let after: string | null = null;
   let hasMore = false;
+  // Coverage tracking: OpenNeuro reports the total dataset count in pageInfo.count;
+  // we sum the edges we actually see and cross-check at the end (see MIN_COVERAGE).
+  let expectedTotal: number | null = null;
+  let scannedTotal = 0;
 
   let page = 0;
   for (; page < maxPages; page++) {
@@ -172,7 +198,9 @@ export async function discoverOpenNeuroDatasets(opts?: {
         `[openneuro-discovery] page ${page} has ${errors.length} partial field error(s) (proceeding with valid data): ${msg.slice(0, 300)}`,
       );
     }
-    const { datasets, hasNextPage, endCursor } = parseDatasetsPage(json);
+    const { datasets, hasNextPage, endCursor, count, edgeCount } = parseDatasetsPage(json);
+    if (expectedTotal === null && count !== null) expectedTotal = count;
+    scannedTotal += edgeCount;
     for (const d of datasets) {
       if (keepByModality(d.modalities)) out.push(d);
     }
@@ -188,6 +216,19 @@ export async function discoverOpenNeuroDatasets(opts?: {
       `discoverOpenNeuroDatasets hit the maxPages cap (${maxPages}) with more pages available; raise DEFAULT_MAX_PAGES`,
     );
   }
+  // Completeness guard: cross-check the datasets we actually scanned against
+  // OpenNeuro's reported total (pageInfo.count). If a page wrongly reported
+  // hasNextPage:false (or any silent truncation), we'd return only the slice we
+  // saw and dedup would think "few new datasets" -- so fail loud instead of
+  // importing a partial view. (Skipped when count is absent, e.g. older API.)
+  if (expectedTotal !== null && scannedTotal < Math.floor(expectedTotal * MIN_COVERAGE)) {
+    throw new Error(
+      `discoverOpenNeuroDatasets truncated: scanned ${scannedTotal} of ~${expectedTotal} OpenNeuro datasets across ${page + 1} page(s); refusing to import a partial slice (pagination ended early)`,
+    );
+  }
+  console.log(
+    `[openneuro-discovery] scan complete: ${page + 1} page(s), scanned ${scannedTotal}/${expectedTotal ?? "?"} datasets, ${out.length} in-scope`,
+  );
   return out;
 }
 
