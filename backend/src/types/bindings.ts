@@ -79,10 +79,14 @@ export interface Bindings {
   MANIFEST_VIA_CENTRAL_WORKFLOW?: string; // "true" enables central workflow path
   MANIFEST_CALLBACK_SECRET?: string; // Workers secret; HMAC key for callback token
 
-  // Automatic OpenNeuro import (#775). When "true" the */30 cron tick discovers
-  // new OpenNeuro datasets and imports+publishes one every ~90 min; OFF/unset
-  // = the tick no-ops. Prod-only (dev has no cron triggers).
+  // Automatic OpenNeuro import (#775). When "true" the cron tick discovers new
+  // OpenNeuro datasets and imports+publishes one per gate window; OFF/unset = the
+  // tick no-ops. Prod-only (dev has no cron triggers).
   AUTO_IMPORT_ENABLED?: string;
+  // Dispatch pacing macro (minutes between auto-imports). Tunable live so the
+  // pace can be retuned/throttled without a deploy; unset/invalid -> code default
+  // (25 min -> ~30-min cadence on the 30-min cron tick).
+  AUTO_IMPORT_MIN_INTERVAL_MIN?: string;
 
   // Publication pre-screen (issue #666). When PRESCREEN_ENABLED is "true",
   // a publication request that passes BIDS readiness dispatches

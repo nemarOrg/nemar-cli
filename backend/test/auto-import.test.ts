@@ -17,6 +17,7 @@ import {
   mapToNemarId,
   parseSqliteUtc,
   pickNextDataset,
+  resolveMinIntervalMs,
 } from "../src/services/auto-import";
 import { triggerOpenNeuroOnboard } from "../src/services/github";
 import type { DiscoveredDataset } from "../src/services/openneuro-discovery";
@@ -41,6 +42,21 @@ describe("parseSqliteUtc", () => {
     expect(parseSqliteUtc("2026-06-17T12:00:00Z")).toBe(Date.parse("2026-06-17T12:00:00Z"));
     expect(parseSqliteUtc(null)).toBeNull();
     expect(parseSqliteUtc("not-a-date")).toBeNull();
+  });
+});
+
+describe("resolveMinIntervalMs (tunable pacing macro)", () => {
+  test("parses a valid AUTO_IMPORT_MIN_INTERVAL_MIN to ms", () => {
+    expect(resolveMinIntervalMs({ AUTO_IMPORT_MIN_INTERVAL_MIN: "45" })).toBe(45 * 60 * 1000);
+    expect(resolveMinIntervalMs({ AUTO_IMPORT_MIN_INTERVAL_MIN: "90" })).toBe(90 * 60 * 1000);
+  });
+  test("falls back to the 25-min default when unset/invalid/non-positive", () => {
+    const def = 25 * 60 * 1000;
+    expect(resolveMinIntervalMs({})).toBe(def);
+    expect(resolveMinIntervalMs({ AUTO_IMPORT_MIN_INTERVAL_MIN: undefined })).toBe(def);
+    expect(resolveMinIntervalMs({ AUTO_IMPORT_MIN_INTERVAL_MIN: "abc" })).toBe(def);
+    expect(resolveMinIntervalMs({ AUTO_IMPORT_MIN_INTERVAL_MIN: "0" })).toBe(def);
+    expect(resolveMinIntervalMs({ AUTO_IMPORT_MIN_INTERVAL_MIN: "-5" })).toBe(def);
   });
 });
 
