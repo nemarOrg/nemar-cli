@@ -741,6 +741,23 @@ export async function initOrEnableSpecialRemote(
  * with publicurl for credential-free downloads and autoenable=true so clones
  * automatically enable it.
  */
+/**
+ * Build the AWS credential env subset for a git-annex S3 invocation, or
+ * undefined when no credentials are supplied (anonymous access). Only the
+ * credential keys are returned — `runCommand` already merges `process.env`, so
+ * callers pass this as the bare `env` option (and those that pre-merge for
+ * null-filtering spread it over `process.env` themselves). Extracted from the
+ * three S3 data paths per #190.
+ */
+export function awsCredentialEnv(credentials?: S3Credentials): Record<string, string> | undefined {
+  if (!credentials) return undefined;
+  return {
+    AWS_ACCESS_KEY_ID: credentials.accessKeyId,
+    AWS_SECRET_ACCESS_KEY: credentials.secretAccessKey,
+    ...(credentials.sessionToken ? { AWS_SESSION_TOKEN: credentials.sessionToken } : {}),
+  };
+}
+
 export async function configureS3Remote(
   path: string,
   config: S3RemoteConfig,
@@ -819,14 +836,7 @@ export async function enableS3Remote(
   credentials?: S3Credentials,
 ): Promise<{ success: boolean; enabled: boolean; error?: string }> {
   try {
-    const env: Record<string, string> = {};
-    if (credentials) {
-      env.AWS_ACCESS_KEY_ID = credentials.accessKeyId;
-      env.AWS_SECRET_ACCESS_KEY = credentials.secretAccessKey;
-      if (credentials.sessionToken) {
-        env.AWS_SESSION_TOKEN = credentials.sessionToken;
-      }
-    }
+    const env = awsCredentialEnv(credentials) ?? {};
 
     const { stderr, exitCode } = await runCommand(["git", "annex", "enableremote", remoteName], {
       cwd: path,
@@ -1781,14 +1791,7 @@ export async function getDatasetData(
   const extraArgs = options.extraArgs ?? [];
   const useProgress = Boolean(options.onProgress);
 
-  const env: Record<string, string> = {};
-  if (options.credentials) {
-    env.AWS_ACCESS_KEY_ID = options.credentials.accessKeyId;
-    env.AWS_SECRET_ACCESS_KEY = options.credentials.secretAccessKey;
-    if (options.credentials.sessionToken) {
-      env.AWS_SESSION_TOKEN = options.credentials.sessionToken;
-    }
-  }
+  const env = awsCredentialEnv(options.credentials) ?? {};
 
   const mergedEnv = Object.fromEntries(
     Object.entries({ ...process.env, ...env }).filter((e): e is [string, string] => e[1] != null),
@@ -2158,13 +2161,7 @@ export async function copyToAnnexRemote(
   try {
     const args = ["git", "annex", "copy", "--to", remoteName, "-J", jobs.toString(), "."];
 
-    const env: Record<string, string> | undefined = credentials
-      ? {
-          AWS_ACCESS_KEY_ID: credentials.accessKeyId,
-          AWS_SECRET_ACCESS_KEY: credentials.secretAccessKey,
-          ...(credentials.sessionToken ? { AWS_SESSION_TOKEN: credentials.sessionToken } : {}),
-        }
-      : undefined;
+    const env = awsCredentialEnv(credentials);
 
     const { stdout, stderr, exitCode } = await runCommand(args, { cwd: datasetPath, env });
 
