@@ -83,7 +83,15 @@ jobs:
           done
           if [ ${#files[@]} -eq 0 ]; then echo "No test files matched" >&2; exit 1; fi
           echo "Running ${#files[@]} test files against dev"
-          bun test --retry=2 "${files[@]}"
+          # --timeout 30000 (vs Bun's 5000ms default): the full-suite run is the
+          # heaviest load, and two things spike past 5s under that contention —
+          # live dev-backend requests on a cold D1 read replica, and the CLI
+          # tests that spawn `bun run src/index.ts` (a full transpile of the
+          # module graph per invocation). At 5s those surfaced as "timed out
+          # after 5000ms" and exit-143 SIGTERMs (#672); the endpoints/CLI are
+          # actually fast (sub-second to a few seconds), so 30s asserts
+          # correctness without tripping on cold-start latency.
+          bun test --retry=2 --timeout 30000 "${files[@]}"
 
       - name: Open or refresh dev-health issue on failure
         if: failure()
