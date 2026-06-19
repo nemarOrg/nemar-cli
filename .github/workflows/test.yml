@@ -200,7 +200,11 @@ jobs:
           done
           if [ ${#files[@]} -eq 0 ]; then echo "No integration test files matched" >&2; exit 1; fi
           echo "Running ${#files[@]} integration test files"
-          bun test --retry=2 "${files[@]}"
+          # --timeout 30000 (vs 5000ms default): these hit the live dev backend
+          # and spawn the CLI via `bun run src/index.ts`; cold D1 reads and the
+          # per-invocation transpile can momentarily exceed 5s, surfacing as
+          # 5000ms timeouts / exit-143 SIGTERMs rather than real failures (#672).
+          bun test --retry=2 --timeout 30000 "${files[@]}"
 
   # Python script tests for scripts/emit_manifest.py + helpers ran here
   # under #557 (the central manifest workflow). Those scripts now live in
@@ -236,7 +240,11 @@ jobs:
           TEST_API_URL: https://nemar-api-dev.sccn-org.workers.dev
           TEST_ADMIN_API_KEY: ${{ secrets.TEST_ADMIN_API_KEY }}
           TEST_USER_API_KEY: ${{ secrets.TEST_USER_API_KEY }}
-        run: bun test test/api.test.ts
+        # --timeout 20000 (vs 5000ms default): api.test.ts hits the live dev
+        # backend; a cold D1 read replica occasionally pushes a request past 5s
+        # (e.g. the DOI-info / doi/concept tests, #672). The endpoints are fast
+        # in isolation, so 20s asserts correctness without cold-start flake.
+        run: bun test --timeout 20000 test/api.test.ts
 
   # E2E Sandbox tests - installs CLI from npm and runs against sandbox
   # Runs on PRs to dev (basic) and main (comprehensive)

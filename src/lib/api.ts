@@ -932,6 +932,13 @@ export interface UploadCredentialsResponse {
 }
 
 /**
+ * Download credentials share the exact STS-credentials shape as upload (#190);
+ * the alias keeps the download return type self-documenting without duplicating
+ * the interface.
+ */
+export type DownloadCredentialsResponse = UploadCredentialsResponse;
+
+/**
  * Request temporary STS credentials for direct S3 upload via AWS CLI.
  * Throws on failure; callers should fall back to presigned URLs.
  */
@@ -958,8 +965,8 @@ export async function requestUploadCredentials(
 export async function requestDownloadCredentials(
   datasetId: string,
   durationSeconds?: number,
-): Promise<UploadCredentialsResponse> {
-  return request<UploadCredentialsResponse>(
+): Promise<DownloadCredentialsResponse> {
+  return request<DownloadCredentialsResponse>(
     `/datasets/${datasetId}/download-credentials`,
     {
       method: "POST",
@@ -1320,6 +1327,9 @@ export interface PublishStatusResponse {
   updated_at?: string;
   message?: string;
   block_reason?: string | null;
+  // Present when status='blocked': link to the dataset repo's Actions tab so the
+  // user can see the BIDS validation run (#428).
+  ci_url?: string;
   // Non-blocking pre-screen advisory (#756): present when the screen flagged a
   // concern. The request is NOT blocked by this.
   advisory?: { source: "prescreen"; reasons: string[]; issue_url?: string };

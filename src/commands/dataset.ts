@@ -1492,6 +1492,34 @@ function formatProgressBar(
  * Downloads directly from OpenNeuro's public S3 bucket.
  * Primary: AWS CLI (fast). Fallback: direct HTTPS (slower, no extra deps).
  */
+/**
+ * Fetch read-only S3 download credentials for a private dataset, or undefined
+ * for a public one (which needs none). Shared by the download and clone
+ * commands (#190). On failure it prints the auth-guidance and exits — neither
+ * command can proceed without credentials. Spinner text/messages match the
+ * prior inline blocks exactly. (The `get` command keeps its own flow: it does
+ * an auth check before fetching.)
+ */
+async function fetchPrivateDatasetCreds(
+  datasetId: string,
+  visibility: string,
+): Promise<ReturnType<typeof toS3Credentials> | undefined> {
+  if (visibility === "public") return undefined;
+  const spinner = ora("Requesting download credentials...").start();
+  try {
+    const creds = await requestDownloadCredentials(datasetId);
+    spinner.succeed("Download credentials received (2h expiry)");
+    return toS3Credentials(creds.credentials);
+  } catch (error) {
+    spinner.fail("Failed to get download credentials");
+    console.log(chalk.red(`  ${(error as Error).message}`));
+    console.log(
+      chalk.dim("Private datasets require authentication. Run 'nemar auth login' first."),
+    );
+    process.exit(1);
+  }
+}
+
 async function handleOpenNeuroDownload(
   datasetId: string,
   options: { output?: string; jobs?: string; data?: boolean },
@@ -2024,24 +2052,8 @@ Examples:
       }
     }
 
-    // For private datasets, fetch temporary S3 download credentials
-    let downloadCreds: Awaited<ReturnType<typeof requestDownloadCredentials>> | null = null;
-    if (datasetInfo.visibility !== "public") {
-      spinner = ora("Requesting download credentials...").start();
-      try {
-        downloadCreds = await requestDownloadCredentials(effectiveId);
-        spinner.succeed("Download credentials received (2h expiry)");
-      } catch (error) {
-        spinner.fail("Failed to get download credentials");
-        console.log(chalk.red(`  ${(error as Error).message}`));
-        console.log(
-          chalk.dim("Private datasets require authentication. Run 'nemar auth login' first."),
-        );
-        process.exit(1);
-      }
-    }
-
-    const s3Creds = downloadCreds ? toS3Credentials(downloadCreds.credentials) : undefined;
+    // For private datasets, fetch temporary S3 download credentials.
+    const s3Creds = await fetchPrivateDatasetCreds(effectiveId, datasetInfo.visibility);
 
     // Enable S3 remote if available (new datasets have it; old ones use web URLs)
     const s3Enable = await enableS3Remote(absoluteOutput, "nemar-s3", s3Creds);
@@ -2086,7 +2098,7 @@ Examples:
         console.log(chalk.red(`Failed to download data files: ${getResult.error}`));
         console.log(chalk.dim("The dataset was cloned but data files are not available locally."));
         console.log(chalk.dim(`You can try again with: cd ${absoluteOutput} && nemar dataset get`));
-        if (downloadCreds) {
+        if (s3Creds) {
           await clearAnnexCredentials(absoluteOutput);
         }
         process.exit(1);
@@ -2109,7 +2121,7 @@ Examples:
     }
 
     // Clear cached S3 credentials so future operations request fresh tokens
-    if (downloadCreds) {
+    if (s3Creds) {
       await clearAnnexCredentials(absoluteOutput);
     }
 
@@ -4000,6 +4012,26 @@ Examples:
         console.log(`\n  ${chalk.red("Reason:")} ${result.denied_reason}`);
       }
 
+      // Blocked requests: surface WHY (e.g. BIDS validation pending/failed) plus
+      // the CI link and what to do next (#428). A pending/in-progress block now
+      // clears automatically once CI goes green (daily sweep), but the user can
+      // re-request to retry immediately.
+      if (result.status === "blocked") {
+        if (result.message) {
+          console.log(`\n  ${chalk.red("Blocked:")} ${result.message}`);
+        } else if (result.block_reason) {
+          console.log(`\n  ${chalk.red("Blocked:")} ${result.block_reason}`);
+        }
+        if (result.ci_url) {
+          console.log(`  ${chalk.dim("CI:")} ${result.ci_url}`);
+        }
+        console.log(
+          chalk.dim(
+            `  This re-checks automatically once CI passes; or re-run 'nemar dataset publish request ${datasetId}' to retry now.`,
+          ),
+        );
+      }
+
       // Non-blocking pre-screen advisory (#756): a concern to address, but it
       // does NOT block the request (yellow, not red).
       if (result.advisory?.source === "prescreen") {
@@ -4192,26 +4224,8 @@ Examples:
       process.exit(1);
     }
 
-    // For private datasets, fetch temporary S3 download credentials
-    let cloneDownloadCreds: Awaited<ReturnType<typeof requestDownloadCredentials>> | null = null;
-    if (datasetVisibility !== "public") {
-      spinner = ora("Requesting download credentials...").start();
-      try {
-        cloneDownloadCreds = await requestDownloadCredentials(datasetId);
-        spinner.succeed("Download credentials received (2h expiry)");
-      } catch (error) {
-        spinner.fail("Failed to get download credentials");
-        console.log(chalk.red(`  ${(error as Error).message}`));
-        console.log(
-          chalk.dim("Private datasets require authentication. Run 'nemar auth login' first."),
-        );
-        process.exit(1);
-      }
-    }
-
-    const cloneS3Creds = cloneDownloadCreds
-      ? toS3Credentials(cloneDownloadCreds.credentials)
-      : undefined;
+    // For private datasets, fetch temporary S3 download credentials.
+    const cloneS3Creds = await fetchPrivateDatasetCreds(datasetId, datasetVisibility);
 
     spinner = ora("Cloning dataset...").start();
     const result = await cloneDataset(repoUrl, outputPath);
@@ -4232,7 +4246,7 @@ Examples:
     }
 
     // Clear cached credentials to prevent stale STS tokens
-    if (cloneDownloadCreds) {
+    if (cloneS3Creds) {
       await clearAnnexCredentials(outputPath);
     }
 

@@ -52,6 +52,18 @@ The backend code (`ORG_NAME = "nemarDatasets"` in `backend/src/services/github.t
 - **Cloudflare account:** SCCN only (personal/`neuromechanist` retired as of 2026-05-18). Use `npx cfman wrangler --account sccn` for all operations.
 - **Wrangler config:** `backend/wrangler-sccn.toml` (the only active config; the former personal-account `backend/wrangler.toml` was removed)
 
+### Database backup & disaster recovery (#655 / epic #794)
+- D1 (`nemar-db`) is backed up hourly to the **private** repo `nemarOrg/nemar-db-backup`
+  (GitHub Actions cron; git history = point-in-time recovery). It is the only stateful CF
+  resource backed up; Vectorize is rebuildable (`nemar admin reindex`), Analytics Engine is telemetry.
+- **fts5 gotcha:** `wrangler d1 export` refuses any DB with an fts5 virtual table
+  (`datasets_fts`). The backup works around it by exporting each real table with `--table` and
+  recreating the index from `sqlite_master` on restore. Do NOT expect a plain whole-DB export to work.
+- **Restore (DR):** `scripts/restore-remote.sh --target <db> --execute` (guarded, verifies
+  sha256 + row counts; refuses prod without `--force-prod`). **Run the Worker locally against a
+  real snapshot:** `scripts/run-local.sh --nemar-cli <path>` (loads the backup into a local
+  miniflare D1, then `wrangler dev`). Both live in `nemarOrg/nemar-db-backup`.
+
 ### Public Browser Sites
 Two user-facing dataset browsers exist during the cutover; **prefer ww2 for new references**.
 
@@ -349,19 +361,22 @@ nemar auth regenerate-key     # Request new API key
 # Dataset Management
 nemar dataset validate        # Validate BIDS dataset
 nemar dataset upload          # Upload dataset to NEMAR
-nemar dataset download        # Download a dataset
+nemar dataset download        # Download a dataset (NEMAR or OpenNeuro)
 nemar dataset status          # Check dataset status
 nemar dataset list            # List datasets (--mine for own)
+nemar dataset search          # Search datasets (semantic matching)
 nemar dataset release         # Create version bump PR
 nemar dataset update          # Push local changes via PR
 nemar dataset request-access  # Request collaborator access
+nemar dataset access          # Review collaborator access requests (owner/admin)
 nemar dataset invite          # Invite collaborator
 nemar dataset collaborators   # List collaborators
 nemar dataset publish request # Request publication
 nemar dataset publish status  # Check publication status
+nemar dataset publish resend  # Resend publication request to admins
 nemar dataset clone           # Clone dataset (metadata only)
 nemar dataset get             # Download annexed data files
-nemar dataset save            # Stage and commit changes
+nemar dataset commit          # Stage and commit changes (alias: save)
 nemar dataset push            # Push commits and data
 nemar dataset drop            # Free local copies of annexed files
 nemar dataset ci              # Check BIDS validation CI status
@@ -377,12 +392,15 @@ nemar admin users             # List users
 nemar admin approve           # Approve pending user
 nemar admin revoke            # Revoke user access
 nemar admin role              # Change user role (owner only)
+nemar admin notify            # Email a group or a single user
 nemar admin s3 regenerate-iam # Regenerate AWS credentials
 nemar admin s3 lock           # Apply S3 Object Lock
 nemar admin repo public       # Make repo public
 nemar admin repo private      # Make repo private
 nemar admin ci check          # Check CI workflow status
 nemar admin ci add            # Deploy CI workflows
+nemar admin ci sync           # Sync deployed CI workflows to current templates
+nemar admin ci validate       # Check GitHub Actions can parse deployed CI workflows
 nemar admin doi create        # Create concept DOI
 nemar admin doi info          # Get DOI info
 nemar admin doi update        # Update DOI metadata
@@ -393,17 +411,38 @@ nemar admin publish deny      # Deny publication request
 nemar admin revert            # Revert dataset to previous version
 nemar admin make-public       # Publish dataset (permanent)
 nemar admin delete-dataset    # Delete dataset and all resources
+nemar admin bulk-delete       # Delete multiple phantom/orphaned datasets (owner only)
 nemar admin sync run          # Sync dataset metadata to nemar.org (legacy dataexplorer)
 nemar admin sync status       # Show nemar.org sync status
 nemar admin reindex <id>      # Refresh enrichment + nemar.org sync + D1 metadata columns
 nemar admin reindex --all     # Bulk; also --missing-metadata, --stale [--older-than N]
+nemar admin summary           # summary.json coverage across published versions
 nemar admin email-preferences show    # Show email notification preferences
 nemar admin email-preferences update  # Update email notification preferences
+nemar admin e2e-test          # Run end-to-end test against nm099999
+
+# Admin: OpenNeuro import + quarantine recovery (issue #754)
+nemar admin import-openneuro <ids>    # Import OpenNeuro dataset(s) into NEMAR
+nemar admin import status [id]        # Show import job state (failed/quarantined first; -s to filter)
+nemar admin import rollback <id>      # Roll back a failed/quarantined import (deletes repo + S3 + D1)
+nemar admin import retry <id>         # Reset a failed/quarantined import to 'preparing' for re-dispatch
+
+# Admin: governance fleet (epic #713)
+nemar admin fleet drift               # Report repos off the governance spec
+nemar admin fleet enforce [id]        # Bring repos to spec (single or --all; dry-run by default)
+nemar admin fleet revalidate [id]     # Re-run BIDS validation on main HEAD, then optionally enforce
+
+# Admin: system notices
+nemar admin notice set        # Create a system notice shown to CLI users
+nemar admin notice list       # List all notices (including expired)
+nemar admin notice clear <id> # Delete a notice by ID
 
 # Root-level shortcuts
+nemar doctor                  # Check required tools (git, git-annex, gh, aws, deno)
 nemar login                   # Alias for auth login
 nemar logout                  # Alias for auth logout
 nemar signup                  # Alias for auth signup
+nemar register                # Alias for auth signup
 nemar whoami                  # Alias for auth status
 nemar switch                  # Alias for auth switch
 ```

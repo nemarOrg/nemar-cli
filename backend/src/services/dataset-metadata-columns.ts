@@ -16,7 +16,7 @@
 
 import { licenseTier } from "../lib/license.js";
 import { detectModalitiesFromTree } from "./datacite.js";
-import { extractTasks, parseParticipantsTsv } from "./nemar-sync.js";
+import { countSubjectDirs, extractTasks, parseParticipantsTsv } from "./nemar-sync.js";
 
 export interface DatasetMetadataColumns {
   subject_count: number | null;
@@ -40,8 +40,11 @@ export interface MetadataColumnInputs {
 /**
  * Pure transformation from collected inputs to the column shape.
  *
- * - subject_count / age_min / age_max derive from participants.tsv via
- *   `parseParticipantsTsv` (`backend/src/services/nemar-sync.ts:257`).
+ * - subject_count is the count of root-level `sub-*` directories in the tree
+ *   via `countSubjectDirs` (the BIDS-canonical subject set, #759), falling back
+ *   to the participants.tsv row count only when the tree has no resolvable
+ *   subjects. age_min / age_max derive from participants.tsv via
+ *   `parseParticipantsTsv` (`backend/src/services/nemar-sync.ts`).
  * - modalities sorts the output of `detectModalitiesFromTree`
  *   (`backend/src/services/datacite.ts:1066`) into a deterministic CSV.
  * - tasks delegates to `extractTasks` (`backend/src/services/nemar-sync.ts:343`)
@@ -55,17 +58,27 @@ export function computeDatasetMetadataColumns(input: MetadataColumnInputs): Data
     : [];
   const tasksArr = input.treePaths.length ? extractTasks(input.treePaths) : [];
 
-  let subjectCount: number | null = null;
+  // subject_count: prefer the BIDS-canonical count of root-level sub-* dirs in
+  // the tree (#759). participants.tsv is an enrolled roster that can be far
+  // larger than the released subjects (on005752: 1859 rows vs 251 sub-* dirs),
+  // so it is only the fallback when the tree has no resolvable subjects (e.g.
+  // the placeholder-participants path). age_min/age_max still come from
+  // participants.tsv, which carries the per-subject demographics.
+  const subjectDirCount = input.treePaths.length ? countSubjectDirs(input.treePaths) : 0;
+
   let ageMin: number | null = null;
   let ageMax: number | null = null;
+  let participantsRowCount = 0;
   if (input.participantsTsv) {
     const stats = parseParticipantsTsv(input.participantsTsv);
-    // parseParticipantsTsv returns count=0 for files with no rows; treat
-    // an empty participants.tsv as "no data" rather than "zero subjects".
-    subjectCount = stats.count > 0 ? stats.count : null;
+    participantsRowCount = stats.count;
     ageMin = stats.ageMin;
     ageMax = stats.ageMax;
   }
+  // count=0 maps to null so the column reflects "not populated yet" rather than
+  // "really zero subjects".
+  const subjectCount: number | null =
+    subjectDirCount > 0 ? subjectDirCount : participantsRowCount > 0 ? participantsRowCount : null;
 
   return {
     subject_count: subjectCount,
@@ -154,7 +167,12 @@ export interface DatasetCatalogFields {
   license?: string | null;
   readme?: string | null;
   bids_version?: string | null;
-  /** No BIDS-native managed extraction yet (#657); reindex/enrich pass null. */
+  /**
+   * Distinct `ses-*` directory count from the BIDS tree, computed by the
+   * enrich/reindex hooks via `countSessionDirs` (#657). Null when the dataset
+   * has no `ses-*` layer, so COALESCE preserves any value backfilled from the
+   * legacy catalog rather than overwriting it with 0.
+   */
   sessions_count?: number | null;
 }
 

@@ -18,11 +18,40 @@ import { spawn } from "bun";
 import {
   ANNEX_REMOTE_EXISTS_RE,
   annexRemoteExists,
+  awsCredentialEnv,
   getAnnexS3Remotes,
   initOrEnableSpecialRemote,
   markInheritedOpenNeuroRemotesIgnored,
   selectAnnexS3Remote,
 } from "../src/lib/git-annex";
+
+describe("awsCredentialEnv (#190)", () => {
+  test("returns undefined when no credentials are given (anonymous access)", () => {
+    expect(awsCredentialEnv(undefined)).toBeUndefined();
+  });
+
+  test("maps access key + secret, omitting the session token when absent", () => {
+    expect(awsCredentialEnv({ accessKeyId: "AKIA", secretAccessKey: "secret" })).toEqual({
+      AWS_ACCESS_KEY_ID: "AKIA",
+      AWS_SECRET_ACCESS_KEY: "secret",
+    });
+  });
+
+  test("includes AWS_SESSION_TOKEN when the credential carries one (STS)", () => {
+    expect(
+      awsCredentialEnv({ accessKeyId: "AKIA", secretAccessKey: "secret", sessionToken: "tok" }),
+    ).toEqual({
+      AWS_ACCESS_KEY_ID: "AKIA",
+      AWS_SECRET_ACCESS_KEY: "secret",
+      AWS_SESSION_TOKEN: "tok",
+    });
+  });
+
+  test("does not spread process.env (runCommand merges it) — only the credential keys", () => {
+    const env = awsCredentialEnv({ accessKeyId: "AKIA", secretAccessKey: "secret" });
+    expect(Object.keys(env ?? {}).sort()).toEqual(["AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY"]);
+  });
+});
 
 const TMP_DIR = join(import.meta.dir, ".test-annex-remote");
 
