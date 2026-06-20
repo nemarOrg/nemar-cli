@@ -3740,8 +3740,9 @@ const emailPrefsCommand = new Command("email-preferences").description(
 
 emailPrefsCommand
   .command("show")
-  .description("Show current email notification preferences")
-  .action(async () => {
+  .description("Show email notification preferences")
+  .option("--user <username>", "(owner only) show another user's preferences")
+  .action(async (options: { user?: string }) => {
     if (!isAuthenticated()) {
       console.error(chalk.red("Not authenticated. Run: nemar auth login"));
       process.exit(1);
@@ -3749,8 +3750,9 @@ emailPrefsCommand
 
     const spinner = ora("Fetching email preferences...").start();
     try {
-      const prefs = await getEmailPreferences();
-      spinner.succeed("Email notification preferences:");
+      const prefs = await getEmailPreferences(options.user);
+      const whose = prefs.username ? `${prefs.username}'s` : "Your";
+      spinner.succeed(`${whose} email notification preferences:`);
       console.log();
 
       const categories: Array<{ key: keyof EmailPreferences; label: string }> = [
@@ -3780,12 +3782,14 @@ emailPrefsCommand
   .option("--publication-request <bool>", "Enable/disable publication request notifications")
   .option("--announcements <bool>", "Enable/disable announcement emails")
   .option("--all <bool>", "Enable/disable all notifications")
+  .option("--user <username>", "(owner only) update another user's preferences")
   .action(
     async (options: {
       userApproval?: string;
       publicationRequest?: string;
       announcements?: string;
       all?: string;
+      user?: string;
     }) => {
       if (!isAuthenticated()) {
         console.error(chalk.red("Not authenticated. Run: nemar auth login"));
@@ -3831,8 +3835,9 @@ emailPrefsCommand
 
       const spinner = ora("Updating email preferences...").start();
       try {
-        const result = await updateEmailPreferences(updates);
-        spinner.succeed("Email preferences updated:");
+        const result = await updateEmailPreferences(updates, options.user);
+        const whose = result.username ? `${result.username}'s` : "Your";
+        spinner.succeed(`${whose} email preferences updated:`);
         console.log();
         console.log(
           `  User approval:        ${result.user_approval ? chalk.green("enabled") : chalk.dim("disabled")}`,

@@ -2225,15 +2225,23 @@ export interface EmailPreferences {
   announcements: boolean;
 }
 
-export async function getEmailPreferences(): Promise<EmailPreferences> {
-  return request<EmailPreferences>("/admin/email-preferences", {}, true);
+/** Preferences plus whose they are (the backend echoes the resolved username). */
+export type EmailPreferencesResult = EmailPreferences & { username?: string };
+
+/** `targetUser` (owner-only) reads another user's preferences; omit for self. */
+export async function getEmailPreferences(targetUser?: string): Promise<EmailPreferencesResult> {
+  const qs = targetUser ? `?user=${encodeURIComponent(targetUser)}` : "";
+  return request<EmailPreferencesResult>(`/admin/email-preferences${qs}`, {}, true);
 }
 
+/** `targetUser` (owner-only) updates another user's preferences; omit for self. */
 export async function updateEmailPreferences(
   prefs: Partial<EmailPreferences>,
-): Promise<EmailPreferences> {
-  return request<EmailPreferences>(
-    "/admin/email-preferences",
+  targetUser?: string,
+): Promise<EmailPreferencesResult> {
+  const qs = targetUser ? `?user=${encodeURIComponent(targetUser)}` : "";
+  return request<EmailPreferencesResult>(
+    `/admin/email-preferences${qs}`,
     {
       method: "PUT",
       headers: { "Content-Type": "application/json" },

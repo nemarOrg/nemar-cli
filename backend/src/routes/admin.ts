@@ -6640,36 +6640,70 @@ const emailPreferencesSchema = z.object({
 });
 
 /**
- * GET /admin/email-preferences - Get current user's email notification preferences
+ * Resolve whose email preferences a request targets. With no `?user=`, it's the
+ * caller (any admin manages their own). With `?user=<username>` it's that user --
+ * but only an OWNER may manage someone else's (admins manage only themselves).
+ * Pure resolution + a typed error result so the two handlers stay DRY.
+ */
+export async function resolveEmailPrefsTarget(
+  db: D1Database,
+  requester: { id: number; username: string; role: string | null },
+  requested: string | undefined,
+): Promise<{ id: number; username: string } | { error: string; status: 403 | 404 }> {
+  if (!requested || requested === requester.username) {
+    return { id: requester.id, username: requester.username };
+  }
+  if (requester.role !== "owner") {
+    return { error: "Only owners can manage other users' email preferences", status: 403 };
+  }
+  const target = await db
+    .prepare("SELECT id, username FROM users WHERE username = ? AND deleted_at IS NULL")
+    .bind(requested)
+    .first<{ id: number; username: string }>();
+  if (!target) {
+    return { error: `User not found: ${requested}`, status: 404 };
+  }
+  return { id: target.id, username: target.username };
+}
+
+/**
+ * GET /admin/email-preferences[?user=<username>] - Get email notification
+ * preferences for the caller, or (owner-only) for another user via `?user=`.
  */
 adminRoutes.get("/email-preferences", async (c) => {
   const user = c.get("user");
   const db = c.env.DB;
+  const target = await resolveEmailPrefsTarget(db, user, c.req.query("user"));
+  if ("error" in target) return c.json({ error: target.error }, target.status);
 
   const row = await db
     .prepare("SELECT email_preferences FROM users WHERE id = ?")
-    .bind(user.id)
+    .bind(target.id)
     .first<{ email_preferences: string | null }>();
 
   if (!row) {
     return c.json({ error: "User not found" }, 404);
   }
 
-  return c.json(parseEmailPreferences(row.email_preferences));
+  return c.json({ ...parseEmailPreferences(row.email_preferences), username: target.username });
 });
 
 /**
- * PUT /admin/email-preferences - Update current user's email notification preferences
+ * PUT /admin/email-preferences[?user=<username>] - Update email notification
+ * preferences for the caller, or (owner-only) for another user via `?user=`.
  */
 adminRoutes.put("/email-preferences", zValidator("json", emailPreferencesSchema), async (c) => {
   const user = c.get("user");
   const db = c.env.DB;
   const body = c.req.valid("json");
 
+  const target = await resolveEmailPrefsTarget(db, user, c.req.query("user"));
+  if ("error" in target) return c.json({ error: target.error }, target.status);
+
   // Load existing preferences
   const row = await db
     .prepare("SELECT email_preferences FROM users WHERE id = ?")
-    .bind(user.id)
+    .bind(target.id)
     .first<{ email_preferences: string | null }>();
 
   const current = parseEmailPreferences(row?.email_preferences ?? null);
@@ -6682,10 +6716,20 @@ adminRoutes.put("/email-preferences", zValidator("json", emailPreferencesSchema)
 
   await db
     .prepare("UPDATE users SET email_preferences = ? WHERE id = ?")
-    .bind(JSON.stringify(updated), user.id)
+    .bind(JSON.stringify(updated), target.id)
     .run();
 
-  return c.json(updated);
+  // Audit who changed whose prefs when an owner edits another user (#808 follow-up).
+  if (target.id !== user.id) {
+    await db
+      .prepare(
+        "INSERT INTO audit_log (user_id, action, resource_type, resource_id, details) VALUES (?, 'email_preferences_updated', 'user', ?, ?)",
+      )
+      .bind(user.id, String(target.id), JSON.stringify({ target: target.username, updated }))
+      .run();
+  }
+
+  return c.json({ ...updated, username: target.username });
 });
 
 // ============================================================================
