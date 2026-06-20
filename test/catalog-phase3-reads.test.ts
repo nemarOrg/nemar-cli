@@ -104,6 +104,15 @@ function searchDb(): Database {
     ('ds000246','Folded MEG Dataset',NULL,-1,'active','public',0, 12,'meg','rest','Niels Bohr','meg readme','doi:10/folded','OpenNeuro'),
     ('nm000302','Archived Public EEG','desc',10,'archived','public',0, 3,'eeg','rest','X','archived readme','doi:10/arch', NULL);
   `);
+  // An OpenNeuro mirror: managed `on######` row carrying its source id. Its
+  // NEMAR id appears in none of the FTS text, so it is reachable ONLY via the
+  // exact-id lookup (the #808 fix). Separate INSERT to set source/source_id.
+  db.exec(`
+    INSERT INTO datasets (dataset_id, name, description, owner_user_id, status, visibility, is_sandbox,
+      subject_count, modalities, tasks, authors, readme, concept_doi, uploader, source, source_id)
+    VALUES ('on005342','EEG offline online motor imagery','d',10,'active','public',0, 21,'eeg','imagery',
+      'Zed','readme','doi:10/on005342','OpenNeuro','openneuro','ds005342');
+  `);
   return db;
 }
 
@@ -232,6 +241,22 @@ describe("lookupDatasetById", () => {
     expect(await lookupDatasetById(realD1(db), "nm000301")).toBeNull(); // private
     expect(await lookupDatasetById(realD1(db), "xx000001")).toBeNull(); // sandbox
     expect(await lookupDatasetById(realD1(db), "nm000302")).toBeNull(); // archived (public)
+  });
+
+  test("resolves an on###### mirror by its own id (#808: id not in FTS text)", async () => {
+    const db = searchDb();
+    expect((await lookupDatasetById(realD1(db), "on005342"))?.id).toBe("on005342");
+  });
+
+  test("resolves an OpenNeuro source id (ds######) to its managed mirror (#808)", async () => {
+    const db = searchDb();
+    // ds005342's legacy shadow was deleted at import; the mirror carries it as source_id.
+    expect((await lookupDatasetById(realD1(db), "ds005342"))?.id).toBe("on005342");
+  });
+
+  test("still resolves a legacy catalog row by its own ds id", async () => {
+    const db = searchDb();
+    expect((await lookupDatasetById(realD1(db), "ds000246"))?.id).toBe("ds000246");
   });
 });
 

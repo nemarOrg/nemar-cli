@@ -1041,8 +1041,11 @@ async function executeAndReturn(
  * GET /datasets/search - Semantic dataset search
  *
  * Combines three strategies:
- *  - Exact dataset-ID lookup (nm###### / ds######) via D1, since embeddings
- *    cannot meaningfully match literal IDs.
+ *  - Exact dataset-ID lookup (nm###### / on###### managed mirrors / ds######
+ *    legacy or OpenNeuro source) via D1, since embeddings and the FTS index
+ *    (name/description/authors/tasks/modalities/readme) do not cover the id, so
+ *    a literal id query would otherwise miss -- notably every `on######` mirror,
+ *    whose NEMAR-assigned id appears in none of its OpenNeuro-sourced text.
  *  - Vectorize semantic similarity (when bindings are configured).
  *  - D1 LIKE text search as a fallback, also used to backfill semantic
  *    results when Vectorize returns no hits.
@@ -1060,7 +1063,12 @@ datasetRoutes.get("/search", optionalAuthMiddleware, async (c) => {
   const modality = c.req.query("modality");
   const db = c.env.DB;
   const trimmed = query.trim();
-  const exactIdMatch = /^(nm|ds)\d{6}$/i.test(trimmed);
+  // Match every NEMAR id shape: nm (native), on (OpenNeuro mirror), and ds
+  // (legacy catalog OR an OpenNeuro source id whose mirror is on######). `on`
+  // was missing here, so `on######` ids fell through to FTS/semantic, which
+  // don't index the id -> zero results (#808). lookupDatasetById resolves both
+  // dataset_id and source_id, so `ds######` finds the on mirror too.
+  const exactIdMatch = /^(nm|on|ds)\d{6}$/i.test(trimmed);
 
   // Relevance floor for semantic results. bge-small cosine scores under
   // ~0.65 against this catalog tend to be topic-adjacent noise rather
