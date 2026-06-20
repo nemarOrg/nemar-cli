@@ -21,9 +21,30 @@ import {
   awsCredentialEnv,
   getAnnexS3Remotes,
   initOrEnableSpecialRemote,
+  isNonFastForwardPush,
   markInheritedOpenNeuroRemotesIgnored,
   selectAnnexS3Remote,
 } from "../src/lib/git-annex";
+
+describe("isNonFastForwardPush (#808 finalize push race)", () => {
+  test("detects git's non-fast-forward rejection wording", () => {
+    // The exact stderr from the on005342 finalize failure.
+    const realStderr =
+      "To https://github.com/nemarDatasets/on005342.git\n" +
+      " ! [rejected]        main -> main (fetch first)\n" +
+      "error: failed to push some refs to 'https://github.com/nemarDatasets/on005342.git'\n" +
+      "hint: Updates were rejected because the remote contains work that you do not\n" +
+      "hint: have locally.";
+    expect(isNonFastForwardPush(realStderr)).toBe(true);
+    expect(isNonFastForwardPush("! [rejected] (non-fast-forward)")).toBe(true);
+  });
+
+  test("does NOT match unrelated push failures (so they fail loud, no pointless rebase)", () => {
+    expect(isNonFastForwardPush("Permission denied (publickey).")).toBe(false);
+    expect(isNonFastForwardPush("remote: Repository not found.")).toBe(false);
+    expect(isNonFastForwardPush("")).toBe(false);
+  });
+});
 
 describe("awsCredentialEnv (#190)", () => {
   test("returns undefined when no credentials are given (anonymous access)", () => {
