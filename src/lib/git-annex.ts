@@ -1376,9 +1376,12 @@ export async function pushToGitHub(
     const baseBranch = branchToPush.includes(":")
       ? branchToPush.slice(branchToPush.indexOf(":") + 1)
       : branchToPush;
-    const canRebase = !branchToPush.startsWith("adjusted/");
+    // Detached HEAD (HEAD:main) has no local branch to rebase, and adjusted
+    // (DataLad) branches must not be rebased -- both keep the plain push behavior.
+    const canRebase = !branchToPush.startsWith("adjusted/") && branchToPush !== "HEAD:main";
     let mainStderr = "";
     let pushed = false;
+    let rebaseCycles = 0;
     for (let attempt = 0; attempt <= PUSH_REBASE_RETRIES; attempt++) {
       const res = await runCommand(["git", "push", "-u", remoteName, branchToPush], { cwd: path });
       if (res.exitCode === 0) {
@@ -1392,7 +1395,13 @@ export async function pushToGitHub(
       // Integrate the remote's new commits, then retry. A fresh import clone has
       // no local commits on this branch, so the rebase is a clean fast-forward;
       // a caller with real local commits gets them replayed onto the remote tip.
-      await runCommand(["git", "fetch", remoteName], { cwd: path });
+      const fetchRes = await runCommand(["git", "fetch", remoteName], { cwd: path });
+      if (fetchRes.exitCode !== 0) {
+        return {
+          success: false,
+          error: `Push rejected (non-fast-forward) and the retry fetch of ${remoteName} failed: ${fetchRes.stderr.trim() || `exit ${fetchRes.exitCode}`}. Cannot integrate remote commits.`,
+        };
+      }
       const rebase = await runCommand(["git", "rebase", `${remoteName}/${baseBranch}`], {
         cwd: path,
       });
@@ -1403,10 +1412,15 @@ export async function pushToGitHub(
           error: `Push rejected: ${remoteName}/${baseBranch} has diverging commits and auto-rebase failed: ${rebase.stderr.trim()}`,
         };
       }
+      rebaseCycles++;
     }
 
     if (!pushed) {
-      return { success: false, error: mainStderr.trim() || "Failed to push to GitHub" };
+      const note =
+        rebaseCycles > 0
+          ? ` (still rejected after ${rebaseCycles} fetch+rebase retry cycle(s))`
+          : "";
+      return { success: false, error: `${mainStderr.trim() || "Failed to push to GitHub"}${note}` };
     }
 
     // Push git-annex branch (critical for cloning)

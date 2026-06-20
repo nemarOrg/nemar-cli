@@ -306,24 +306,45 @@ export async function ensureRootMetadataUnannexed(
   const unreachable: string[] = [];
   for (const file of annexed) {
     const url = openNeuroCurrentUrl(openneuroId, file);
+    let bytes: Buffer;
     try {
       const res = await fetch(url);
       if (!res.ok) {
         unreachable.push(`${file} (HTTP ${res.status})`);
         continue;
       }
-      const bytes = Buffer.from(await res.arrayBuffer());
-      const dest = join(datasetPath, file);
+      bytes = Buffer.from(await res.arrayBuffer());
+    } catch (err) {
+      // A network/fetch error reaching OpenNeuro -- treat as upstream-unreachable.
+      unreachable.push(
+        `${file} (fetch failed: ${err instanceof Error ? err.message : String(err)})`,
+      );
+      continue;
+    }
+    // A 200 with an empty body is a truncated/garbage response, not real
+    // metadata; an empty dataset_description.json would later blow up JSON.parse
+    // with a misleading "failed to parse" -- reject it here instead.
+    if (bytes.length === 0) {
+      unreachable.push(`${file} (HTTP 200 but empty body)`);
+      continue;
+    }
+    // Writing to local disk: a failure here is a NEMAR-side problem (disk/perms),
+    // NOT an OpenNeuro access issue, so fail loud + distinctly rather than letting
+    // it masquerade as the upstream marker below.
+    const dest = join(datasetPath, file);
+    try {
       rmSync(dest, { force: true }); // drop the annex symlink before writing the blob
       writeFileSync(dest, bytes);
-    } catch (err) {
-      unreachable.push(`${file} (${err instanceof Error ? err.message : String(err)})`);
+    } catch (writeErr) {
+      throw new Error(
+        `Failed to write fetched metadata ${file} to ${dest} (local error, not OpenNeuro): ${writeErr instanceof Error ? writeErr.message : String(writeErr)}`,
+      );
     }
   }
 
   if (unreachable.length > 0) {
     throw new Error(
-      `${OPENNEURO_UPSTREAM_MARKER} cannot fetch metadata from OpenNeuro: ${unreachable.join(", ")}. These objects are not anonymously readable and NEMAR has no signed OpenNeuro login. This is an OpenNeuro-side access problem, not a NEMAR import bug.`,
+      `${OPENNEURO_UPSTREAM_MARKER} cannot fetch metadata from OpenNeuro: ${unreachable.join(", ")}. These objects are not anonymously readable and NEMAR has no signed OpenNeuro login. This is an OpenNeuro-side access problem, not a NEMAR import bug. (Any files that did fetch are left as regular files on disk, unstaged.)`,
     );
   }
 
