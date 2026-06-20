@@ -552,9 +552,6 @@ export async function removeCollaboratorFromAllRepos(
 }
 
 /**
- * Create a new repository in the org
- */
-/**
  * GitHub rejects a repo `description` containing control characters with a 422
  * ("description control characters are not allowed") -- some OpenNeuro dataset
  * descriptions carry stray newlines/tabs/control bytes, which crashed the
@@ -906,7 +903,12 @@ export async function setRepoDescription(
 ): Promise<{ ok: boolean; status: number; error?: string }> {
   let response: Response;
   try {
-    const payload: { description: string; homepage?: string } = { description };
+    // Sanitize for the same 422 createRepository guards against: callers pass a
+    // BIDS Name / dataset name that can carry control chars (enrich-dataset,
+    // publish-approval), which GitHub rejects on PATCH too.
+    const payload: { description: string; homepage?: string } = {
+      description: sanitizeRepoDescription(description),
+    };
     if (homepage !== undefined) payload.homepage = homepage;
     response = await fetch(`${GITHUB_API()}/repos/${ORG_NAME}/${repo}`, {
       method: "PATCH",
