@@ -30,6 +30,7 @@ import {
 import {
   IMPORT_STATUSES,
   type ImportStatus,
+  OPENNEURO_UPSTREAM_MARKER,
   runImportRecovery,
 } from "../services/import-recovery.js";
 import { generateManifest } from "../services/manifest.js";
@@ -2254,7 +2255,19 @@ webhooks.post("/import-state", async (c) => {
            stage = excluded.stage, status = excluded.status,
            shards_total = COALESCE(excluded.shards_total, import_jobs.shards_total),
            workflow_run_url = COALESCE(excluded.workflow_run_url, import_jobs.workflow_run_url),
-           last_error = excluded.last_error,
+           -- Sticky upstream marker (#808): once a prepare leg records the
+           -- OpenNeuro-inaccessible marker, the doomed copy/finalize legs that
+           -- still run under \`if: !cancelled()\` MUST NOT clobber it with their
+           -- generic terminal error (or the finalizing POST's NULL). classifyRecovery
+           -- reads last_error, so keeping the marker guarantees the quarantine is
+           -- classified \`upstream_inaccessible\` regardless of POST ordering vs the
+           -- async waitUntil recovery. A fresh attempt clears it via the 'preparing'
+           -- branch above ([ ] are literal in SQLite LIKE, not wildcards).
+           last_error = CASE
+             WHEN import_jobs.last_error LIKE '%${OPENNEURO_UPSTREAM_MARKER}%'
+                  AND COALESCE(excluded.last_error, '') NOT LIKE '%${OPENNEURO_UPSTREAM_MARKER}%'
+             THEN import_jobs.last_error
+             ELSE excluded.last_error END,
            completed_at = CASE WHEN excluded.status IN ('complete','failed','quarantined','rolled_back')
                                THEN datetime('now') ELSE import_jobs.completed_at END,
            updated_at = datetime('now')
