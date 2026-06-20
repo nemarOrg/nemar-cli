@@ -42,7 +42,7 @@ import {
   sendStalenessAdminReviewEmail,
   sendStalenessWarningEmail,
 } from "./services/email";
-import { runImportRecovery } from "./services/import-recovery";
+import { OPENNEURO_UPSTREAM_MARKER, runImportRecovery } from "./services/import-recovery";
 import { getActiveNotices } from "./services/notices";
 import { sweepBlockedBidsValidationRequests } from "./services/publication-sweep";
 import {
@@ -516,8 +516,17 @@ async function scheduledCleanup(env: Bindings): Promise<void> {
       try {
         const upd = await db
           .prepare(
+            // Preserve a sticky upstream marker (#808): a row can be in-flight
+            // here yet already carry the OpenNeuro-inaccessible marker (a racing
+            // finalize POST moved it off `failed` before the webhook's dropped
+            // waitUntil recovery ran -- the very eviction case this sweep backstops).
+            // Overwriting it would make runImportRecovery below misclassify the
+            // upstream failure as a generic stuck import. [ ] are literal in LIKE.
             `UPDATE import_jobs
-               SET status = 'failed', last_error = 'stuck > 6h (scheduled sweep)',
+               SET status = 'failed',
+                   last_error = CASE
+                     WHEN last_error LIKE '%${OPENNEURO_UPSTREAM_MARKER}%' THEN last_error
+                     ELSE 'stuck > 6h (scheduled sweep)' END,
                    completed_at = datetime('now'), updated_at = datetime('now')
              WHERE dataset_id = ? AND status IN ('preparing', 'copying', 'finalizing')`,
           )

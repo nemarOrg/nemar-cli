@@ -61,6 +61,17 @@ const TRANSITION_SQL = `INSERT INTO import_jobs
    updated_at = datetime('now')
  WHERE import_jobs.status NOT IN ('complete','rolled_back','quarantined')`;
 
+// Mirrors the stuck-import sweep UPDATE in index.ts (scheduled cleanup #754).
+// It marks an in-flight row `failed` before running recovery, but must preserve
+// a sticky upstream marker (#808) so recovery still classifies it correctly.
+const SWEEP_SQL = `UPDATE import_jobs
+   SET status = 'failed',
+       last_error = CASE
+         WHEN last_error LIKE '%${OPENNEURO_UPSTREAM_MARKER}%' THEN last_error
+         ELSE 'stuck > 6h (scheduled sweep)' END,
+       completed_at = datetime('now'), updated_at = datetime('now')
+ WHERE dataset_id = ? AND status IN ('preparing', 'copying', 'finalizing')`;
+
 function preparing(db: Database, id: string): void {
   db.prepare(PREPARING_SQL).run(id, "openneuro", `ds${id.slice(2)}`, "prepare", 8, null);
 }
@@ -256,6 +267,28 @@ describe("migration 0044: import_jobs", () => {
       transitionErr(db, "on000001", "copy", "failed", "transient copy error");
       transitionErr(db, "on000001", "copy", "failed", "later copy error");
       expect(read(db, "on000001").last_error).toBe("later copy error");
+    });
+
+    test("stuck-import sweep preserves a marker carried by an in-flight row", () => {
+      // A racing finalize POST left the row `finalizing` with the marker still in
+      // last_error (the webhook's waitUntil recovery was dropped on eviction).
+      preparing(db, "on000001");
+      transitionErr(db, "on000001", "prepare", "failed", marker);
+      transitionErr(db, "on000001", "finalize", "finalizing", null);
+      expect(read(db, "on000001").status).toBe("finalizing");
+      expect(read(db, "on000001").last_error).toContain(OPENNEURO_UPSTREAM_MARKER);
+      // Sweep marks it failed but must NOT clobber the marker.
+      db.prepare(SWEEP_SQL).run("on000001");
+      const row = read(db, "on000001");
+      expect(row.status).toBe("failed");
+      expect(row.last_error).toContain(OPENNEURO_UPSTREAM_MARKER);
+    });
+
+    test("stuck-import sweep stamps the generic message when no marker present", () => {
+      preparing(db, "on000001");
+      transitionErr(db, "on000001", "copy", "copying", null);
+      db.prepare(SWEEP_SQL).run("on000001");
+      expect(read(db, "on000001").last_error).toBe("stuck > 6h (scheduled sweep)");
     });
   });
 
