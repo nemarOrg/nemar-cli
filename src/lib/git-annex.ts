@@ -2974,6 +2974,13 @@ export async function getAnnexWhereisAll(datasetPath: string): Promise<Map<strin
     env: { ...process.env, GIT_TERMINAL_PROMPT: "0" },
   });
 
+  // Drain stderr CONCURRENTLY with stdout. git-annex can emit a stderr line per
+  // file (offline remote, URL check) -- on a 66k-file dataset that exceeds the
+  // ~64KB OS pipe buffer, and if we only read stderr AFTER the stdout loop the
+  // child blocks writing stderr while we block reading stdout (deadlock). The
+  // promise reads stderr in the background; we await it after the loop.
+  const stderrPromise = new Response(proc.stderr).text();
+
   const keyUrlMap = new Map<string, string>();
   const decoder = new TextDecoder();
   let pending = "";
@@ -2997,9 +3004,7 @@ export async function getAnnexWhereisAll(datasetPath: string): Promise<Map<strin
     extractWhereisKeyUrl(pending, keyUrlMap);
   }
 
-  // stderr is a small end-of-run summary (the "whereis: N failed" line); read it
-  // after draining stdout. Safe from pipe-deadlock because it stays tiny.
-  const stderr = (await new Response(proc.stderr).text()).trim();
+  const stderr = (await stderrPromise).trim();
   const exitCode = await proc.exited;
   if (exitCode !== 0 && !sawOutput) {
     throw new Error(`git annex whereis failed: ${stderr}`);
