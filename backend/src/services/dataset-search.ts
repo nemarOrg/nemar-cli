@@ -273,16 +273,21 @@ export async function lookupDatasetById(
   db: D1Database,
   datasetId: string,
 ): Promise<SearchResult | null> {
+  // Match the dataset_id OR the source_id: an OpenNeuro source id (e.g.
+  // ds005342) resolves to its managed mirror (on005342) even though the legacy
+  // ds shadow row was deleted at import. Prefer a managed row (owner != -1) over
+  // a legacy catalog shadow if both somehow match.
   const row = await db
     .prepare(
       `SELECT d.dataset_id AS id, d.name, d.modalities, d.subject_count AS participants,
               d.concept_doi AS doi, d.tasks, d.authors
        FROM datasets d
-       WHERE d.dataset_id = ? AND d.status = 'active'
+       WHERE (d.dataset_id = ? OR d.source_id = ?) AND d.status = 'active'
          AND (d.is_sandbox = 0 OR d.is_sandbox IS NULL) AND d.visibility = 'public'
+       ORDER BY (d.owner_user_id != -1) DESC
        LIMIT 1`,
     )
-    .bind(datasetId)
+    .bind(datasetId, datasetId)
     .first<HydrateRow>();
   return row ? toResult(row, 1.0) : null;
 }
