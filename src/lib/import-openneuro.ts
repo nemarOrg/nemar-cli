@@ -256,6 +256,24 @@ export function findAnnexedRootMetadata(datasetPath: string): string[] {
 }
 
 /**
+ * Distinct, greppable marker for "this import failed because OpenNeuro's own data
+ * is unreachable" (objects not anonymously public + no signed login) vs a NEMAR
+ * bug. Surfaces in the prepare error + workflow log so these datasets are
+ * understood and can be collected into a tracking list. (#808)
+ */
+export const OPENNEURO_UPSTREAM_MARKER = "[openneuro-upstream-inaccessible]";
+
+/**
+ * Public CURRENT-version URL for a root file in an OpenNeuro dataset's S3 mirror.
+ * git-annex records a VERSIONED url that anonymous reads can't fetch; the current
+ * object by path is what OpenNeuro serves publicly. Exported for tests.
+ */
+export function openNeuroCurrentUrl(openneuroId: string, relPath: string): string {
+  const encoded = relPath.split("/").map(encodeURIComponent).join("/");
+  return `https://s3.amazonaws.com/openneuro.org/${openneuroId}/${encoded}`;
+}
+
+/**
  * Fetch the content of any annexed root metadata files from the public
  * OpenNeuro remote and convert them to regular git blobs, so prepare can read
  * `dataset_description.json` and downstream tree-readers (website, enrichment,
@@ -278,24 +296,6 @@ export function findAnnexedRootMetadata(datasetPath: string): string[] {
  * distinctly-marked OPENNEURO_UPSTREAM_MARKER error: an OpenNeuro-side problem,
  * not a NEMAR bug, and greppable so these datasets can be listed later.
  */
-/**
- * Distinct, greppable marker for "this import failed because OpenNeuro's own data
- * is unreachable" (objects not anonymously public + no signed login) vs a NEMAR
- * bug. Surfaces in the prepare error + workflow log so these datasets are
- * understood and can be collected into a tracking list. (#808)
- */
-export const OPENNEURO_UPSTREAM_MARKER = "[openneuro-upstream-inaccessible]";
-
-/**
- * Public CURRENT-version URL for a root file in an OpenNeuro dataset's S3 mirror.
- * git-annex records a VERSIONED url that anonymous reads can't fetch; the current
- * object by path is what OpenNeuro serves publicly. Exported for tests.
- */
-export function openNeuroCurrentUrl(openneuroId: string, relPath: string): string {
-  const encoded = relPath.split("/").map(encodeURIComponent).join("/");
-  return `https://s3.amazonaws.com/openneuro.org/${openneuroId}/${encoded}`;
-}
-
 export async function ensureRootMetadataUnannexed(
   datasetPath: string,
   openneuroId: string,
