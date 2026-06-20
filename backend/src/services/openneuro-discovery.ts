@@ -14,6 +14,8 @@
  * calls them, the 90-min gate, the pick-one ordering, and the dispatch are Phase 2.
  */
 
+import { SYSTEM_USER_ID } from "../lib/constants";
+
 const OPENNEURO_GRAPHQL_URL = "https://openneuro.org/crn/graphql";
 
 /**
@@ -232,18 +234,34 @@ export async function discoverOpenNeuroDatasets(opts?: {
   return out;
 }
 
-/** Imported-source-id dedup query (exported so the test runs the real SQL). */
-export const IMPORTED_SOURCE_IDS_QUERY =
-  "SELECT source_id FROM datasets WHERE source = 'openneuro' AND source_id IS NOT NULL";
+/**
+ * Imported-source-id dedup query (exported so the test runs the real SQL).
+ *
+ * MUST exclude the folded legacy OpenNeuro CATALOG SHADOW rows (migration 0028,
+ * #646): those are `owner_user_id = SYSTEM_USER_ID (-1)`, `source = 'openneuro'`,
+ * `dataset_id = source_id = ds######` browse-only pointers to OpenNeuro datasets
+ * NEMAR has NOT imported. Counting them as "imported" makes discovery dedup the
+ * entire un-imported backlog away (candidates -> 0, engine idle) -- the 2026-06-20
+ * stall. Only a REAL managed `on######` mirror (owner != SYSTEM_USER_ID) means a
+ * dataset is actually imported; the import bootstrap (POST /admin/datasets/import
+ * in admin.ts) deletes the ds shadow when it creates the managed on###### row, so
+ * this never excludes a genuinely-imported dataset. Analogous to catalog-sync.ts's
+ * own shadow dedup (which additionally filters status='active'; here every managed
+ * mirror blocks re-import regardless of status, which is what we want).
+ */
+export const IMPORTED_SOURCE_IDS_QUERY = `SELECT source_id FROM datasets WHERE source = 'openneuro' AND source_id IS NOT NULL AND owner_user_id != ${SYSTEM_USER_ID}`;
 
 /** Active-import scan query (status bucketed by bucketActiveImports). import_jobs.source_id is NOT NULL. */
 export const ACTIVE_IMPORTS_QUERY = "SELECT source_id, status FROM import_jobs";
 
 /**
- * OpenNeuro source ids already imported into NEMAR (the ds###### behind every
- * `on######` mirror). The primary dedup set. A D1 error re-throws (an empty set
- * would silently defeat the dedup and re-import everything) with the source
- * named so it isn't lost in the Hono dispatch stack (#779 review).
+ * OpenNeuro source ids already imported into NEMAR as a REAL managed `on######`
+ * mirror (the ds###### behind it). The primary dedup set. Excludes the folded
+ * legacy catalog shadow rows (owner = SYSTEM_USER_ID) -- see
+ * IMPORTED_SOURCE_IDS_QUERY: they are un-imported browse pointers, not imports.
+ * A D1 error re-throws (an empty set would silently defeat the dedup and
+ * re-import everything) with the source named so it isn't lost in the Hono
+ * dispatch stack (#779 review).
  */
 export async function getImportedSourceIds(db: D1Database): Promise<Set<string>> {
   try {

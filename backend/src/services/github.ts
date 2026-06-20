@@ -552,8 +552,23 @@ export async function removeCollaboratorFromAllRepos(
 }
 
 /**
- * Create a new repository in the org
+ * GitHub rejects a repo `description` containing control characters with a 422
+ * ("description control characters are not allowed") -- some OpenNeuro dataset
+ * descriptions carry stray newlines/tabs/control bytes, which crashed the
+ * onboard import at repo-create (e.g. ds005815). A repo description is a
+ * single-line cosmetic field, so collapse all control chars (incl. tab/newline)
+ * to spaces, squeeze runs, trim, and cap at GitHub's ~350-char limit. This is
+ * the GitHub-side label only; the dataset's real description is untouched.
  */
+export function sanitizeRepoDescription(description: string): string {
+  const cleaned = description
+    // biome-ignore lint/suspicious/noControlCharactersInRegex: stripping control chars is the point
+    .replace(/[\u0000-\u001F\u007F]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  return cleaned.length > 350 ? `${cleaned.slice(0, 349)}…` : cleaned;
+}
+
 export async function createRepository(
   name: string,
   description: string,
@@ -570,7 +585,7 @@ export async function createRepository(
     },
     body: JSON.stringify({
       name,
-      description,
+      description: sanitizeRepoDescription(description),
       private: isPrivate,
       auto_init: false, // We push the first commit from CLI
       has_issues: true,
@@ -888,7 +903,12 @@ export async function setRepoDescription(
 ): Promise<{ ok: boolean; status: number; error?: string }> {
   let response: Response;
   try {
-    const payload: { description: string; homepage?: string } = { description };
+    // Sanitize for the same 422 createRepository guards against: callers pass a
+    // BIDS Name / dataset name that can carry control chars (enrich-dataset,
+    // publish-approval), which GitHub rejects on PATCH too.
+    const payload: { description: string; homepage?: string } = {
+      description: sanitizeRepoDescription(description),
+    };
     if (homepage !== undefined) payload.homepage = homepage;
     response = await fetch(`${GITHUB_API()}/repos/${ORG_NAME}/${repo}`, {
       method: "PATCH",

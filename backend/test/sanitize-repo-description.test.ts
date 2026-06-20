@@ -1,0 +1,39 @@
+import { describe, expect, test } from "bun:test";
+import { sanitizeRepoDescription } from "../src/services/github";
+
+describe("sanitizeRepoDescription (#754 import: GitHub 422 'control characters not allowed')", () => {
+  test("collapses control characters (newline/tab/CR/NUL/DEL) to a single space", () => {
+    expect(sanitizeRepoDescription("line one\nline two")).toBe("line one line two");
+    expect(sanitizeRepoDescription("a\t\tb")).toBe("a b");
+    expect(sanitizeRepoDescription("a\r\n\x00\x7fb")).toBe("a b");
+  });
+
+  test("leaves a clean single-line description untouched", () => {
+    const ok = "EEG dataset of visual oddball task (32 subjects)";
+    expect(sanitizeRepoDescription(ok)).toBe(ok);
+  });
+
+  test("trims and squeezes surrounding/embedded whitespace", () => {
+    expect(sanitizeRepoDescription("  padded   description  ")).toBe("padded description");
+  });
+
+  test("empty / all-control-char input collapses to an empty string", () => {
+    expect(sanitizeRepoDescription("")).toBe("");
+    expect(sanitizeRepoDescription("\n\r\t\x00\x1f\x7f")).toBe("");
+  });
+
+  test("caps at GitHub's ~350-char limit with an ellipsis", () => {
+    const long = "x".repeat(500);
+    const out = sanitizeRepoDescription(long);
+    expect(out.length).toBe(350);
+    expect(out.endsWith("…")).toBe(true);
+  });
+
+  test("a short description with control chars no longer trips the 422 (regression)", () => {
+    // The ds005815 shape: real text broken by stray control bytes.
+    const out = sanitizeRepoDescription("PsiConnect resting-state EEG");
+    expect(out).toBe("PsiConnect resting-state EEG");
+    // biome-ignore lint/suspicious/noControlCharactersInRegex: asserting none remain
+    expect(/[\u0000-\u001F\u007F]/.test(out)).toBe(false);
+  });
+});

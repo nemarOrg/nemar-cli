@@ -170,8 +170,11 @@ describe("dedup queries (real bun:sqlite)", () => {
 
   beforeEach(() => {
     db = new Database(":memory:");
-    // datasets slice the dedup query touches.
-    db.run("CREATE TABLE datasets (dataset_id TEXT PRIMARY KEY, source TEXT, source_id TEXT);");
+    // datasets slice the dedup query touches (incl. owner_user_id, used to
+    // exclude folded catalog shadow rows).
+    db.run(
+      "CREATE TABLE datasets (dataset_id TEXT PRIMARY KEY, source TEXT, source_id TEXT, owner_user_id INTEGER);",
+    );
     // The ACTUAL import_jobs migration (0044).
     const m0044 = readFileSync(
       join(import.meta.dir, "..", "src/db/migrations/0044_import_jobs.sql"),
@@ -180,13 +183,21 @@ describe("dedup queries (real bun:sqlite)", () => {
     db.exec(m0044); // exec (not run): the migration is multi-statement
   });
 
-  test("IMPORTED_SOURCE_IDS_QUERY returns only openneuro source_ids", () => {
+  test("IMPORTED_SOURCE_IDS_QUERY returns only real managed openneuro source_ids (excludes catalog shadows)", () => {
     db.run(
-      "INSERT INTO datasets (dataset_id, source, source_id) VALUES ('on000132','openneuro','ds000132'), ('on007964','openneuro','ds007964'), ('nm000200','nemar.org',NULL), ('on999','openneuro',NULL);",
+      `INSERT INTO datasets (dataset_id, source, source_id, owner_user_id) VALUES
+        ('on000132','openneuro','ds000132',15),  -- real managed import
+        ('on007964','openneuro','ds007964',15),  -- real managed import
+        ('ds000246','openneuro','ds000246',-1),  -- folded CATALOG SHADOW: must be excluded (#646)
+        ('ds001785','openneuro','ds001785',-1),  -- folded CATALOG SHADOW: must be excluded
+        ('nm000200','nemar.org',NULL,15),        -- not openneuro
+        ('on999','openneuro',NULL,15);           -- openneuro but no source_id`,
     );
     const ids = (db.query(IMPORTED_SOURCE_IDS_QUERY).all() as { source_id: string }[]).map(
       (r) => r.source_id,
     );
+    // ds000246 / ds001785 (owner=-1 catalog shadows) are NOT counted as imported,
+    // so discovery will pick them up as candidates -- the 2026-06-20 stall fix.
     expect(ids.sort()).toEqual(["ds000132", "ds007964"]);
   });
 
