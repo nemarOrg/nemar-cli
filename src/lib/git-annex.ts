@@ -2926,56 +2926,99 @@ export async function collectFileManifest(datasetPath: string): Promise<{
  * Get git-annex keys and their known URLs for files in the current tree.
  * Returns a Map of key -> source S3 URL (first HTTP/S3 URL found).
  */
-export async function getAnnexWhereisAll(datasetPath: string): Promise<Map<string, string>> {
-  // Use "-- ." instead of "--all" to only process files in the current tree.
-  // "--all" includes orphaned keys from old git history that may have no location
-  // info, causing spurious failures (e.g., ds000117 had 718 orphan key failures).
-  const result = await runCommand(["git", "annex", "whereis", "--json", "--", "."], {
-    cwd: datasetPath,
-  });
-  if (result.exitCode !== 0 && !result.stdout.trim()) {
-    throw new Error(`git annex whereis failed: ${result.stderr.trim()}`);
+/**
+ * Parse one `git annex whereis --json` line and record its key -> first usable
+ * (http/s3) source URL into `keyUrlMap`. Pure + exported so the streaming reader
+ * and tests share the exact extraction. Malformed JSON is skipped silently.
+ */
+export function extractWhereisKeyUrl(line: string, keyUrlMap: Map<string, string>): void {
+  const trimmed = line.trim();
+  if (!trimmed) return;
+  try {
+    const entry = JSON.parse(trimmed);
+    const key = entry.key;
+    if (!key) return;
+    // Collect URLs from all whereis entries (trusted + untrusted).
+    const whereis = [...(entry.whereis || []), ...(entry.untrusted || [])];
+    for (const remote of whereis) {
+      if (!Array.isArray(remote.urls)) continue;
+      for (const url of remote.urls) {
+        if (typeof url === "string" && (url.startsWith("http") || url.startsWith("s3://"))) {
+          keyUrlMap.set(key, url);
+          break;
+        }
+      }
+      if (keyUrlMap.has(key)) break;
+    }
+  } catch (err) {
+    if (err instanceof SyntaxError) return;
+    console.error(
+      `Warning: failed to process whereis entry: ${err instanceof Error ? err.message : String(err)}`,
+    );
   }
-  if (result.exitCode !== 0) {
+}
+
+export async function getAnnexWhereisAll(datasetPath: string): Promise<Map<string, string>> {
+  // STREAM the output, never buffering it whole. A large dataset (e.g. ds006110
+  // = 66k annexed files) emits ~100MB+ of JSON; collecting that into one string
+  // (the old runCommand path) spiked memory and got the 2-core import runner
+  // OOM-killed mid-"Mapping annexed files" ("operation canceled"), file-count-
+  // bound (#808). Reading line-by-line keeps only the compact key->URL map in
+  // memory. "-- ." (not "--all") skips orphaned keys from old history (ds000117
+  // had 718 such spurious failures).
+  const proc = spawn({
+    cmd: ["git", "annex", "whereis", "--json", "--", "."],
+    cwd: datasetPath,
+    stdout: "pipe",
+    stderr: "pipe",
+    env: { ...process.env, GIT_TERMINAL_PROMPT: "0" },
+  });
+
+  // Drain stderr CONCURRENTLY with stdout. git-annex can emit a stderr line per
+  // file (offline remote, URL check) -- on a 66k-file dataset that exceeds the
+  // ~64KB OS pipe buffer, and if we only read stderr AFTER the stdout loop the
+  // child blocks writing stderr while we block reading stdout (deadlock). The
+  // promise reads stderr in the background; we await it after the loop.
+  const stderrPromise = new Response(proc.stderr).text();
+
+  const keyUrlMap = new Map<string, string>();
+  const decoder = new TextDecoder();
+  let pending = "";
+  let sawOutput = false;
+  for await (const chunk of proc.stdout as AsyncIterable<Uint8Array>) {
+    pending += decoder.decode(chunk, { stream: true });
+    let nl = pending.indexOf("\n");
+    while (nl !== -1) {
+      const line = pending.slice(0, nl);
+      pending = pending.slice(nl + 1);
+      if (line.trim()) {
+        sawOutput = true;
+        extractWhereisKeyUrl(line, keyUrlMap);
+      }
+      nl = pending.indexOf("\n");
+    }
+  }
+  pending += decoder.decode();
+  if (pending.trim()) {
+    sawOutput = true;
+    extractWhereisKeyUrl(pending, keyUrlMap);
+  }
+
+  const stderr = (await stderrPromise).trim();
+  const exitCode = await proc.exited;
+  if (exitCode !== 0 && !sawOutput) {
+    throw new Error(`git annex whereis failed: ${stderr}`);
+  }
+  if (exitCode !== 0) {
     // Only tolerate the expected "whereis: N failed" pattern (files with no
     // known location). Any other non-zero exit is an unexpected error.
-    const failMatch = result.stderr.match(/whereis:\s*(\d+)\s*failed/);
+    const failMatch = stderr.match(/whereis:\s*(\d+)\s*failed/);
     if (failMatch) {
       console.warn(
         `  Warning: ${failMatch[1]} files had no location info (continuing with available files)`,
       );
     } else {
-      throw new Error(
-        `git annex whereis failed (exit ${result.exitCode}): ${result.stderr.trim()}`,
-      );
-    }
-  }
-
-  const keyUrlMap = new Map<string, string>();
-  for (const line of result.stdout.split("\n")) {
-    if (!line.trim()) continue;
-    try {
-      const entry = JSON.parse(line);
-      const key = entry.key;
-      if (!key) continue;
-
-      // Collect URLs from all whereis entries
-      const whereis = [...(entry.whereis || []), ...(entry.untrusted || [])];
-      for (const remote of whereis) {
-        if (!Array.isArray(remote.urls)) continue;
-        for (const url of remote.urls) {
-          if (typeof url === "string" && (url.startsWith("http") || url.startsWith("s3://"))) {
-            keyUrlMap.set(key, url);
-            break;
-          }
-        }
-        if (keyUrlMap.has(key)) break;
-      }
-    } catch (err) {
-      if (err instanceof SyntaxError) continue;
-      console.error(
-        `Warning: failed to process whereis entry: ${err instanceof Error ? err.message : String(err)}`,
-      );
+      throw new Error(`git annex whereis failed (exit ${exitCode}): ${stderr}`);
     }
   }
 

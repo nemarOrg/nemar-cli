@@ -19,12 +19,48 @@ import {
   ANNEX_REMOTE_EXISTS_RE,
   annexRemoteExists,
   awsCredentialEnv,
+  extractWhereisKeyUrl,
   getAnnexS3Remotes,
   initOrEnableSpecialRemote,
   isNonFastForwardPush,
   markInheritedOpenNeuroRemotesIgnored,
   selectAnnexS3Remote,
 } from "../src/lib/git-annex";
+
+describe("extractWhereisKeyUrl (#808 streaming whereis mapping)", () => {
+  const run = (line: string): Map<string, string> => {
+    const m = new Map<string, string>();
+    extractWhereisKeyUrl(line, m);
+    return m;
+  };
+
+  test("maps key -> first http/s3 url from whereis remotes", () => {
+    const line = JSON.stringify({
+      key: "SHA256E-s5--abc.edf",
+      whereis: [{ urls: ["https://s3.amazonaws.com/openneuro.org/ds1/a.edf?versionId=x"] }],
+    });
+    expect(run(line).get("SHA256E-s5--abc.edf")).toBe(
+      "https://s3.amazonaws.com/openneuro.org/ds1/a.edf?versionId=x",
+    );
+  });
+
+  test("falls back to untrusted remotes and accepts s3:// urls", () => {
+    const line = JSON.stringify({
+      key: "k2",
+      whereis: [{ urls: ["not-a-url"] }],
+      untrusted: [{ urls: ["s3://openneuro.org/ds1/b.edf"] }],
+    });
+    expect(run(line).get("k2")).toBe("s3://openneuro.org/ds1/b.edf");
+  });
+
+  test("skips entries with no key, no usable url, blank lines, and malformed JSON", () => {
+    expect(run("").size).toBe(0);
+    expect(run("   ").size).toBe(0);
+    expect(run("{not json").size).toBe(0); // SyntaxError swallowed, no throw
+    expect(run(JSON.stringify({ whereis: [{ urls: ["https://x/y"] }] })).size).toBe(0); // no key
+    expect(run(JSON.stringify({ key: "k3", whereis: [{ urls: ["ftp://x/y"] }] })).size).toBe(0); // no http/s3
+  });
+});
 
 describe("isNonFastForwardPush (#808 finalize push race)", () => {
   test("detects git's non-fast-forward rejection wording", () => {

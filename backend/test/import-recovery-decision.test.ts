@@ -6,7 +6,12 @@
 
 import { describe, expect, test } from "bun:test";
 import { SYSTEM_USER_ID } from "../src/lib/constants";
-import { type ImportGuardState, decideImportRecovery } from "../src/services/import-recovery";
+import {
+  type ImportGuardState,
+  OPENNEURO_UPSTREAM_MARKER,
+  classifyRecovery,
+  decideImportRecovery,
+} from "../src/services/import-recovery";
 
 // The on004395 orphan signature: private, no DOI, no versions, never completed.
 function orphan(): ImportGuardState {
@@ -73,5 +78,24 @@ describe("decideImportRecovery", () => {
       { ...orphan(), versionCount: 3 },
     ];
     for (const s of states) expect(decideImportRecovery(s).action).toBe("quarantine");
+  });
+});
+
+describe("classifyRecovery (#808 upstream-inaccessible override)", () => {
+  test("upstream marker in last_error -> quarantine upstream_inaccessible (overrides rollback)", () => {
+    // The orphan would normally roll back; the upstream marker forces a distinct,
+    // listable quarantine instead (OpenNeuro-side problem, not a NEMAR bug).
+    const lastErr = `${OPENNEURO_UPSTREAM_MARKER} cannot fetch metadata from OpenNeuro: README (HTTP 403)`;
+    expect(classifyRecovery(lastErr, orphan())).toEqual({
+      action: "quarantine",
+      reason: "upstream_inaccessible",
+    });
+  });
+
+  test("no marker -> defers to decideImportRecovery", () => {
+    expect(classifyRecovery("terminal: prepare=failure copy=skipped", orphan())).toEqual(
+      decideImportRecovery(orphan()),
+    );
+    expect(classifyRecovery(null, { ...orphan(), exists: false }).reason).toBe("not_found_dataset");
   });
 });
