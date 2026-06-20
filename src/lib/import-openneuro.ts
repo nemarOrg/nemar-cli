@@ -15,6 +15,7 @@ import {
   readdirSync,
   readlinkSync,
   renameSync,
+  rmSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -261,77 +262,81 @@ export function findAnnexedRootMetadata(datasetPath: string): string[] {
  * DataCite) get real JSON rather than an annex pointer. No-op for the common
  * case where the metadata is already committed in git. See #768.
  *
- * Sequence (validated against ds007964): enableremote s3-PUBLIC -> annex get ->
- * annex unannex -> stage with annex.largefiles=nothing (so the repo's largefiles
- * rules can't re-annex them on the next add). Returns the un-annexed file names.
+ * Mechanism (#808): fetch each file's CURRENT content by path from OpenNeuro's
+ * public S3 mirror and replace the annex symlink with a real blob. We do NOT use
+ * `git annex get`: git-annex resolves the key to OpenNeuro's recorded VERSIONED
+ * url (`?versionId=...`), which an anonymous reader cannot fetch (it needs
+ * `s3:GetObjectVersion`) even when the current object is public -- and NEMAR has
+ * no signed OpenNeuro login (the s3-PUBLIC remote is `public=no`, so any signed
+ * request uses NEMAR's identity, which OpenNeuro rejects). The current object by
+ * path is the canonical metadata OpenNeuro serves; re-blobbing it directly also
+ * sidesteps OpenNeuro annex key/content drift (no SHA verification needed).
+ * Returns the un-annexed file names. No-op when nothing is annexed.
  *
- * The S3 reads run with NEMAR's AWS creds stripped (`unsetEnv`): OpenNeuro's
- * bucket is public, but a request *signed* as the CI `nemar-actions-datasets`
- * identity is denied by that user's IAM permissions boundary. git-annex only
- * reads anonymously when the AWS_* vars are absent. This mirrors how the data
- * copy reaches OpenNeuro (anonymous public read), decoupled from the NEMAR
- * transfer identity. See #768.
+ * If a file's current object is itself not anonymously readable (e.g. ds007541
+ * -> 403), there is no way to fetch it without a signed login, so we throw a
+ * distinctly-marked OPENNEURO_UPSTREAM_MARKER error: an OpenNeuro-side problem,
+ * not a NEMAR bug, and greppable so these datasets can be listed later.
  */
-// Every var the AWS credential chain consults, so git-annex falls all the way
-// back to anonymous access (the only mode OpenNeuro's public bucket allows for a
-// non-OpenNeuro principal). Static keys are what CI uses today; the profile /
-// OIDC / container vars keep this correct if CI ever switches credential models.
-const OPENNEURO_ANON_UNSET = [
-  "AWS_ACCESS_KEY_ID",
-  "AWS_SECRET_ACCESS_KEY",
-  "AWS_SESSION_TOKEN",
-  "AWS_PROFILE",
-  "AWS_WEB_IDENTITY_TOKEN_FILE",
-  "AWS_ROLE_ARN",
-  "AWS_CONTAINER_CREDENTIALS_RELATIVE_URI",
-  "AWS_CONTAINER_CREDENTIALS_FULL_URI",
-];
+/**
+ * Distinct, greppable marker for "this import failed because OpenNeuro's own data
+ * is unreachable" (objects not anonymously public + no signed login) vs a NEMAR
+ * bug. Surfaces in the prepare error + workflow log so these datasets are
+ * understood and can be collected into a tracking list. (#808)
+ */
+export const OPENNEURO_UPSTREAM_MARKER = "[openneuro-upstream-inaccessible]";
 
-export async function ensureRootMetadataUnannexed(datasetPath: string): Promise<string[]> {
+/**
+ * Public CURRENT-version URL for a root file in an OpenNeuro dataset's S3 mirror.
+ * git-annex records a VERSIONED url that anonymous reads can't fetch; the current
+ * object by path is what OpenNeuro serves publicly. Exported for tests.
+ */
+export function openNeuroCurrentUrl(openneuroId: string, relPath: string): string {
+  const encoded = relPath.split("/").map(encodeURIComponent).join("/");
+  return `https://s3.amazonaws.com/openneuro.org/${openneuroId}/${encoded}`;
+}
+
+export async function ensureRootMetadataUnannexed(
+  datasetPath: string,
+  openneuroId: string,
+): Promise<string[]> {
   const annexed = findAnnexedRootMetadata(datasetPath);
   if (annexed.length === 0) return [];
 
-  const enable = await runCommand(["git", "annex", "enableremote", "s3-PUBLIC"], {
-    cwd: datasetPath,
-    unsetEnv: OPENNEURO_ANON_UNSET,
-  });
-  if (enable.exitCode !== 0) {
+  const unreachable: string[] = [];
+  for (const file of annexed) {
+    const url = openNeuroCurrentUrl(openneuroId, file);
+    try {
+      const res = await fetch(url);
+      if (!res.ok) {
+        unreachable.push(`${file} (HTTP ${res.status})`);
+        continue;
+      }
+      const bytes = Buffer.from(await res.arrayBuffer());
+      const dest = join(datasetPath, file);
+      rmSync(dest, { force: true }); // drop the annex symlink before writing the blob
+      writeFileSync(dest, bytes);
+    } catch (err) {
+      unreachable.push(`${file} (${err instanceof Error ? err.message : String(err)})`);
+    }
+  }
+
+  if (unreachable.length > 0) {
     throw new Error(
-      `Failed to enable s3-PUBLIC remote to fetch annexed metadata (${annexed.join(", ")}): ${enable.stderr.trim() || enable.stdout.trim() || `exit ${enable.exitCode}`}`,
+      `${OPENNEURO_UPSTREAM_MARKER} cannot fetch metadata from OpenNeuro: ${unreachable.join(", ")}. These objects are not anonymously readable and NEMAR has no signed OpenNeuro login. This is an OpenNeuro-side access problem, not a NEMAR import bug.`,
     );
   }
-  const get = await runCommand(["git", "annex", "get", ...annexed], {
-    cwd: datasetPath,
-    unsetEnv: OPENNEURO_ANON_UNSET,
-  });
-  if (get.exitCode !== 0) {
-    throw new Error(
-      `Failed to fetch annexed metadata content (${annexed.join(", ")}) from OpenNeuro S3: ${get.stderr.trim() || get.stdout.trim() || `exit ${get.exitCode}`}`,
-    );
-  }
-  // `git annex get` can exit 0 while some files fail to download. Verify each
-  // requested file's content is now present (its symlink resolves) before
-  // unannex, so a partial anonymous-fetch denial surfaces here with a precise
-  // message instead of a later, cryptic "dataset_description.json not found".
-  const stillMissing = annexed.filter((f) => !existsSync(join(datasetPath, f)));
-  if (stillMissing.length > 0) {
-    throw new Error(
-      `git annex get exited 0 but content is still absent for: ${stillMissing.join(", ")} (likely an anonymous-fetch denial from OpenNeuro S3).`,
-    );
-  }
-  const unannex = await runCommand(["git", "annex", "unannex", ...annexed], { cwd: datasetPath });
-  if (unannex.exitCode !== 0) {
-    throw new Error(
-      `Failed to un-annex metadata (${annexed.join(", ")}): ${unannex.stderr.trim()}`,
-    );
-  }
+
+  // The files were annex symlinks; replacing the worktree file + adding with
+  // annex.largefiles=nothing converts them to regular git blobs in the index
+  // (the repo's largefiles rules can't re-annex them).
   const add = await runCommand(["git", "-c", "annex.largefiles=nothing", "add", ...annexed], {
     cwd: datasetPath,
   });
   if (add.exitCode !== 0) {
-    // unannex already converted these to regular files on disk; they are just
-    // not staged. Give the exact recovery command so a transient failure (e.g.
-    // an index.lock) is fixable without re-cloning.
+    // The files are already regular files on disk; they are just not staged.
+    // Give the exact recovery command so a transient failure (e.g. an
+    // index.lock) is fixable without re-cloning.
     throw new Error(
       `Failed to stage un-annexed metadata (${annexed.join(", ")}): ${add.stderr.trim()}. The files are already regular files on disk; recover with: git -C ${datasetPath} -c annex.largefiles=nothing add ${annexed.join(" ")}`,
     );
@@ -704,7 +709,7 @@ export async function prepareImport(
   // common case. See #768.
   const metaFixSpinner = ora("Normalizing dataset metadata...").start();
   try {
-    const unannexed = await ensureRootMetadataUnannexed(datasetPath);
+    const unannexed = await ensureRootMetadataUnannexed(datasetPath, openneuroId);
     if (unannexed.length > 0) {
       metaFixSpinner.succeed(
         `Un-annexed ${unannexed.length} metadata file(s): ${unannexed.join(", ")}`,
