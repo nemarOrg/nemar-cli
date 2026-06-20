@@ -15,12 +15,14 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSyn
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  OPENNEURO_UPSTREAM_MARKER,
   coerceFunding,
   decideSkipCiCheck,
   detectModalitiesFromDataset,
   ensureReadmeMd,
   findAnnexedRootMetadata,
   isNeverAnnexedMetadata,
+  openNeuroCurrentUrl,
   seedMetadata,
 } from "../src/lib/import-openneuro";
 
@@ -591,5 +593,27 @@ describe("findAnnexedRootMetadata (#768)", () => {
 
   test("missing directory degrades to empty list", () => {
     expect(findAnnexedRootMetadata(join(tmpRoot, "does-not-exist"))).toEqual([]);
+  });
+});
+
+describe("openNeuroCurrentUrl (#808)", () => {
+  test("builds the public CURRENT-by-path S3 url (not git-annex's versioned url)", () => {
+    expect(openNeuroCurrentUrl("ds007541", "dataset_description.json")).toBe(
+      "https://s3.amazonaws.com/openneuro.org/ds007541/dataset_description.json",
+    );
+    // No ?versionId= -- the versioned object needs s3:GetObjectVersion, which
+    // anonymous reads can't do; the current object by path is what is public.
+    expect(openNeuroCurrentUrl("ds006159", "README")).not.toContain("versionId");
+  });
+
+  test("url-encodes path segments but keeps the slash separators", () => {
+    expect(openNeuroCurrentUrl("ds000001", "sub-01/eeg/a b.tsv")).toBe(
+      "https://s3.amazonaws.com/openneuro.org/ds000001/sub-01/eeg/a%20b.tsv",
+    );
+  });
+
+  test("OPENNEURO_UPSTREAM_MARKER is a stable, greppable token", () => {
+    // Listing/triage greps for this exact token; keep it constant.
+    expect(OPENNEURO_UPSTREAM_MARKER).toBe("[openneuro-upstream-inaccessible]");
   });
 });
