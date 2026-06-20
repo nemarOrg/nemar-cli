@@ -13,6 +13,7 @@ import { Database } from "bun:sqlite";
 import { beforeEach, describe, expect, test } from "bun:test";
 import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
+import { OPENNEURO_UPSTREAM_MARKER } from "../src/services/import-recovery";
 
 const MIGRATIONS_DIR = join(import.meta.dir, "../src/db/migrations");
 
@@ -50,11 +51,26 @@ const TRANSITION_SQL = `INSERT INTO import_jobs
    stage = excluded.stage, status = excluded.status,
    shards_total = COALESCE(excluded.shards_total, import_jobs.shards_total),
    workflow_run_url = COALESCE(excluded.workflow_run_url, import_jobs.workflow_run_url),
-   last_error = excluded.last_error,
+   last_error = CASE
+     WHEN import_jobs.last_error LIKE '%${OPENNEURO_UPSTREAM_MARKER}%'
+          AND COALESCE(excluded.last_error, '') NOT LIKE '%${OPENNEURO_UPSTREAM_MARKER}%'
+     THEN import_jobs.last_error
+     ELSE excluded.last_error END,
    completed_at = CASE WHEN excluded.status IN ('complete','failed','quarantined','rolled_back')
                        THEN datetime('now') ELSE import_jobs.completed_at END,
    updated_at = datetime('now')
  WHERE import_jobs.status NOT IN ('complete','rolled_back','quarantined')`;
+
+// Mirrors the stuck-import sweep UPDATE in index.ts (scheduled cleanup #754).
+// It marks an in-flight row `failed` before running recovery, but must preserve
+// a sticky upstream marker (#808) so recovery still classifies it correctly.
+const SWEEP_SQL = `UPDATE import_jobs
+   SET status = 'failed',
+       last_error = CASE
+         WHEN last_error LIKE '%${OPENNEURO_UPSTREAM_MARKER}%' THEN last_error
+         ELSE 'stuck > 6h (scheduled sweep)' END,
+       completed_at = datetime('now'), updated_at = datetime('now')
+ WHERE dataset_id = ? AND status IN ('preparing', 'copying', 'finalizing')`;
 
 function preparing(db: Database, id: string): void {
   db.prepare(PREPARING_SQL).run(id, "openneuro", `ds${id.slice(2)}`, "prepare", 8, null);
@@ -69,6 +85,28 @@ function transition(db: Database, id: string, stage: string, status: string): vo
     8,
     null,
     status === "failed" ? "boom" : null,
+    status,
+  );
+}
+// Like transition() but with an explicit last_error, to exercise the sticky
+// upstream-marker CASE (#808). A NULL lastError mirrors the finalizing POST,
+// which carries no error_message.
+function transitionErr(
+  db: Database,
+  id: string,
+  stage: string,
+  status: string,
+  lastError: string | null,
+): void {
+  db.prepare(TRANSITION_SQL).run(
+    id,
+    "openneuro",
+    `ds${id.slice(2)}`,
+    stage,
+    status,
+    8,
+    null,
+    lastError,
     status,
   );
 }
@@ -185,6 +223,73 @@ describe("migration 0044: import_jobs", () => {
     expect(row.status).toBe("failed");
     expect(row.last_error).toBe("boom");
     expect(row.completed_at).not.toBeNull();
+  });
+
+  describe("#808 sticky upstream marker in last_error", () => {
+    const marker = `${OPENNEURO_UPSTREAM_MARKER} OpenNeuro objects not anonymously readable`;
+
+    test("a later generic `failed` POST cannot clobber the marker", () => {
+      // prepare records the marker; the doomed copy/report leg then POSTs a
+      // generic terminal error while the row is still non-terminal (the race
+      // the async waitUntil recovery loses). The marker must survive so
+      // classifyRecovery still reads it.
+      preparing(db, "on000001");
+      transitionErr(db, "on000001", "prepare", "failed", marker);
+      expect(read(db, "on000001").last_error).toContain(OPENNEURO_UPSTREAM_MARKER);
+      transitionErr(db, "on000001", "copy", "failed", "terminal: prepare=failure copy=failure");
+      expect(read(db, "on000001").last_error).toContain(OPENNEURO_UPSTREAM_MARKER);
+    });
+
+    test("the finalizing POST's NULL last_error cannot erase the marker", () => {
+      preparing(db, "on000001");
+      transitionErr(db, "on000001", "prepare", "failed", marker);
+      // "Mark import finalizing" carries no error_message -> excluded.last_error NULL
+      transitionErr(db, "on000001", "finalize", "finalizing", null);
+      expect(read(db, "on000001").last_error).toContain(OPENNEURO_UPSTREAM_MARKER);
+    });
+
+    test("a newer POST that also carries the marker is allowed through", () => {
+      preparing(db, "on000001");
+      transitionErr(db, "on000001", "prepare", "failed", marker);
+      transitionErr(db, "on000001", "prepare", "failed", `${marker} (run 2)`);
+      expect(read(db, "on000001").last_error).toBe(`${marker} (run 2)`);
+    });
+
+    test("stickiness is per-attempt: a `preparing` reset clears the marker", () => {
+      preparing(db, "on000001");
+      transitionErr(db, "on000001", "prepare", "failed", marker);
+      preparing(db, "on000001");
+      expect(read(db, "on000001").last_error).toBeNull();
+    });
+
+    test("a normal (no-marker) error is overwritten as before", () => {
+      preparing(db, "on000001");
+      transitionErr(db, "on000001", "copy", "failed", "transient copy error");
+      transitionErr(db, "on000001", "copy", "failed", "later copy error");
+      expect(read(db, "on000001").last_error).toBe("later copy error");
+    });
+
+    test("stuck-import sweep preserves a marker carried by an in-flight row", () => {
+      // A racing finalize POST left the row `finalizing` with the marker still in
+      // last_error (the webhook's waitUntil recovery was dropped on eviction).
+      preparing(db, "on000001");
+      transitionErr(db, "on000001", "prepare", "failed", marker);
+      transitionErr(db, "on000001", "finalize", "finalizing", null);
+      expect(read(db, "on000001").status).toBe("finalizing");
+      expect(read(db, "on000001").last_error).toContain(OPENNEURO_UPSTREAM_MARKER);
+      // Sweep marks it failed but must NOT clobber the marker.
+      db.prepare(SWEEP_SQL).run("on000001");
+      const row = read(db, "on000001");
+      expect(row.status).toBe("failed");
+      expect(row.last_error).toContain(OPENNEURO_UPSTREAM_MARKER);
+    });
+
+    test("stuck-import sweep stamps the generic message when no marker present", () => {
+      preparing(db, "on000001");
+      transitionErr(db, "on000001", "copy", "copying", null);
+      db.prepare(SWEEP_SQL).run("on000001");
+      expect(read(db, "on000001").last_error).toBe("stuck > 6h (scheduled sweep)");
+    });
   });
 
   test("quarantined is sticky vs a stray transition, but a `preparing` reset re-imports", () => {
