@@ -1313,6 +1313,18 @@ export async function saveDataset(
 /**
  * Push metadata to GitHub
  */
+/**
+ * True when `git push` was rejected because the remote ref advanced since our
+ * clone/fetch (non-fast-forward). The cure is fetch + rebase + retry, not a hard
+ * fail. Matches git's stderr wording across versions. Exported for testing.
+ */
+export function isNonFastForwardPush(stderr: string): boolean {
+  return /\[rejected\]|fetch first|non-fast-forward|Updates were rejected/i.test(stderr);
+}
+
+/** How many fetch+rebase+retry cycles to attempt on a non-fast-forward push. */
+const PUSH_REBASE_RETRIES = 3;
+
 export async function pushToGitHub(
   path: string,
   remoteName = "origin",
@@ -1354,13 +1366,46 @@ export async function pushToGitHub(
       }
     }
 
-    // Push current branch
-    const { stderr: mainStderr, exitCode: mainExitCode } = await runCommand(
-      ["git", "push", "-u", remoteName, branchToPush],
-      { cwd: path },
-    );
+    // Push current branch. On a non-fast-forward rejection -- the remote
+    // advanced between our clone and this push, e.g. the async LLM-enrichment
+    // workflow committing `.nemar/metadata.json` to main right after an import's
+    // first push (the on005342 finalize race) -- integrate the remote commits
+    // and retry. Bounded so a genuine divergence still fails loud. Adjusted
+    // (DataLad) branches keep the original behavior: rebasing a git-annex
+    // adjusted branch is unsafe.
+    const baseBranch = branchToPush.includes(":")
+      ? branchToPush.slice(branchToPush.indexOf(":") + 1)
+      : branchToPush;
+    const canRebase = !branchToPush.startsWith("adjusted/");
+    let mainStderr = "";
+    let pushed = false;
+    for (let attempt = 0; attempt <= PUSH_REBASE_RETRIES; attempt++) {
+      const res = await runCommand(["git", "push", "-u", remoteName, branchToPush], { cwd: path });
+      if (res.exitCode === 0) {
+        pushed = true;
+        break;
+      }
+      mainStderr = res.stderr;
+      if (!canRebase || attempt === PUSH_REBASE_RETRIES || !isNonFastForwardPush(res.stderr)) {
+        break;
+      }
+      // Integrate the remote's new commits, then retry. A fresh import clone has
+      // no local commits on this branch, so the rebase is a clean fast-forward;
+      // a caller with real local commits gets them replayed onto the remote tip.
+      await runCommand(["git", "fetch", remoteName], { cwd: path });
+      const rebase = await runCommand(["git", "rebase", `${remoteName}/${baseBranch}`], {
+        cwd: path,
+      });
+      if (rebase.exitCode !== 0) {
+        await runCommand(["git", "rebase", "--abort"], { cwd: path });
+        return {
+          success: false,
+          error: `Push rejected: ${remoteName}/${baseBranch} has diverging commits and auto-rebase failed: ${rebase.stderr.trim()}`,
+        };
+      }
+    }
 
-    if (mainExitCode !== 0) {
+    if (!pushed) {
       return { success: false, error: mainStderr.trim() || "Failed to push to GitHub" };
     }
 
