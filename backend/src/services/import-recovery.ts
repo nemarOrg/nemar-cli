@@ -62,8 +62,20 @@ export type ImportRecoveryDecision =
         | "reached_complete"
         | "has_doi"
         | "made_public"
-        | "has_version";
+        | "has_version"
+        | "upstream_inaccessible";
     };
+
+/**
+ * Marker the import CLI emits (and the onboard prepare step forwards into the
+ * import-state callback's error_message) when OpenNeuro's own data can't be
+ * fetched -- objects not anonymously readable and NEMAR has no signed OpenNeuro
+ * login. Mirrors OPENNEURO_UPSTREAM_MARKER in src/lib/import-openneuro.ts (kept
+ * in sync deliberately; the CLI and Worker don't share a module). When present
+ * in last_error, recovery records a distinct `upstream_inaccessible` quarantine
+ * so these OpenNeuro-side failures are listable, not mistaken for NEMAR bugs.
+ */
+export const OPENNEURO_UPSTREAM_MARKER = "[openneuro-upstream-inaccessible]";
 
 /**
  * Decide rollback vs quarantine. Auto-rollback fires ONLY for the unambiguous
@@ -82,6 +94,24 @@ export function decideImportRecovery(s: ImportGuardState): ImportRecoveryDecisio
   if (s.visibility !== "private") return { action: "quarantine", reason: "made_public" };
   if (s.versionCount > 0) return { action: "quarantine", reason: "has_version" };
   return { action: "rollback", reason: "unambiguous_orphan" };
+}
+
+/**
+ * Final recovery decision: an OpenNeuro upstream-inaccessibility (the CLI's
+ * marker forwarded into last_error by the onboard prepare callback) overrides
+ * the leftover-state classification -- always quarantine with a distinct,
+ * listable `upstream_inaccessible` reason rather than roll back or mislabel it
+ * as a generic prepare miss, since it is an OpenNeuro-side problem, not a NEMAR
+ * bug. Otherwise defer to decideImportRecovery. Pure -- no I/O.
+ */
+export function classifyRecovery(
+  lastError: string | null,
+  state: ImportGuardState,
+): ImportRecoveryDecision {
+  if ((lastError ?? "").includes(OPENNEURO_UPSTREAM_MARKER)) {
+    return { action: "quarantine", reason: "upstream_inaccessible" };
+  }
+  return decideImportRecovery(state);
 }
 
 function isAutoRollbackEnabled(env: Bindings): boolean {
@@ -173,9 +203,16 @@ export async function runImportRecovery(
   datasetId: string,
 ): Promise<"rolled_back" | "quarantined"> {
   const job = await db
-    .prepare("SELECT source_id, stage, workflow_run_url FROM import_jobs WHERE dataset_id = ?")
+    .prepare(
+      "SELECT source_id, stage, workflow_run_url, last_error FROM import_jobs WHERE dataset_id = ?",
+    )
     .bind(datasetId)
-    .first<{ source_id: string | null; stage: string | null; workflow_run_url: string | null }>();
+    .first<{
+      source_id: string | null;
+      stage: string | null;
+      workflow_run_url: string | null;
+      last_error: string | null;
+    }>();
 
   const row = await db
     .prepare(
@@ -217,7 +254,7 @@ export async function runImportRecovery(
         importReachedComplete: false,
       };
 
-  const decision = decideImportRecovery(state);
+  const decision = classifyRecovery(job?.last_error ?? null, state);
 
   if (decision.action === "rollback" && isAutoRollbackEnabled(env)) {
     try {
