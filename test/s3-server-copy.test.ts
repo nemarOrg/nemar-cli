@@ -89,6 +89,8 @@ describe("isAccessDeniedError (#822 fail-fast)", () => {
       true,
     );
     expect(isAccessDeniedError("download failed: ... Forbidden")).toBe(true);
+    // bare human-readable form (no parenthesized code) also matches
+    expect(isAccessDeniedError("fatal error: Access Denied")).toBe(true);
   });
 
   test("does not match transient/other errors (those still get retried)", () => {

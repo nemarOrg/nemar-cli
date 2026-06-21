@@ -178,7 +178,9 @@ export async function curlStreamCopy(
  * "An error occurred (AccessDenied) ... Forbidden" / HTTP 403 wording (#822).
  */
 export function isAccessDeniedError(stderr: string): boolean {
-  return /AccessDenied|\bForbidden\b|\b403\b/i.test(stderr);
+  // `Access ?Denied` covers both the parenthesized error code (`AccessDenied`)
+  // and the human-readable message (`Access Denied`) the AWS CLI emits.
+  return /Access ?Denied|\bForbidden\b|\b403\b/i.test(stderr);
 }
 
 /**
