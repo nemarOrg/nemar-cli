@@ -61,15 +61,18 @@ export interface MetadataColumnInputs {
 /**
  * Pure transformation from collected inputs to the column shape.
  *
- * - subject_count is the count of root-level `sub-*` directories in the tree
- *   via `countSubjectDirs` (the BIDS-canonical subject set, #759), falling back
- *   to the participants.tsv row count only when the tree has no resolvable
- *   subjects. age_min / age_max derive from participants.tsv via
- *   `parseParticipantsTsv` (`backend/src/services/nemar-sync.ts`).
- * - modalities sorts the output of `detectModalitiesFromTree`
- *   (`backend/src/services/datacite.ts:1066`) into a deterministic CSV.
- * - tasks delegates to `extractTasks` (`backend/src/services/nemar-sync.ts:343`)
- *   which already sorts and deduplicates.
+ * The truncation-immune `getBidsTreeStats` overrides (#827, #820) take
+ * precedence over the `treePaths`-derived values when supplied, since a
+ * truncated git tree can drop every raw `sub-*` path:
+ * - subject_count: the `subjectCount` override when > 0; else the count of
+ *   root-level `sub-*` dirs via `countSubjectDirs` (#759); else the
+ *   participants.tsv row count. age_min / age_max derive from participants.tsv
+ *   via `parseParticipantsTsv` (`backend/src/services/nemar-sync.ts`).
+ * - modalities: the `modalities` override when non-empty; else
+ *   `detectModalitiesFromTree` (`backend/src/services/datacite.ts`), sorted CSV.
+ * - tasks: the `tasks` override UNIONed with `extractTasks(treePaths)`
+ *   (`backend/src/services/nemar-sync.ts`) so neither a missed sample subject
+ *   nor a truncated tree loses one; else just the tree-path tasks. Sorted, deduped.
  * - file_size / total_files mirror `getDatasetS3Stats` output
  *   (`backend/src/services/s3.ts:218`).
  */
