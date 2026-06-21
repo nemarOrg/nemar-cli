@@ -2325,12 +2325,15 @@ export async function detectModalitiesAtRef(
       { headers: ghHeaders },
       { refreshTokenOn401 },
     );
-    // A single bad subject must not sink the whole detection: skip and continue.
+    // All-or-nothing: a sampled subtree that still fails after retries makes the
+    // result UNTRUSTWORTHY (a partial set would silently under-report and then
+    // override the path-list detector, persisting wrong modalities). Throw so
+    // the caller falls back to detecting from the tree paths instead.
     if (!subResponse.ok) {
-      console.warn(
-        `[modalities] subtree fetch failed for ${repo} ${subj.path}: ${subResponse.status}`,
+      throw new HttpError(
+        `Failed to read subtree for ${repo} ${subj.path}: HTTP ${subResponse.status}`,
+        subResponse.status,
       );
-      continue;
     }
     const sub = await subResponse.json<{ tree: TreeEntry[] }>();
     for (const m of modalitiesFromSubjectSubtree(sub.tree.map((e) => e.path))) found.add(m);
