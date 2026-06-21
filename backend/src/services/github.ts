@@ -2230,14 +2230,14 @@ export async function getTreeAtRef(
   return tree.tree.filter((entry) => entry.type === "blob");
 }
 
-/** Max `sub-*` subjects sampled by detectModalitiesAtRef (bounds API calls). */
+/** Max `sub-*` subjects sampled by getBidsTreeStats (bounds API calls). */
 const MAX_SUBJECTS_FOR_MODALITY = 25;
 
 /**
  * Evenly sample up to `max` items, always including the first and last. Used to
- * bound the per-subject tree fetches in detectModalitiesAtRef while still
- * spreading the sample across the subject list (so a modality present only in
- * later subjects is more likely to be seen than first-N sampling would).
+ * bound the per-subject tree fetches in getBidsTreeStats while still spreading
+ * the sample across the subject list (so a modality/task present only in later
+ * subjects is more likely to be seen than first-N sampling would).
  */
 export function sampleEvenly<T>(items: T[], max: number): T[] {
   if (items.length <= max) return items;
@@ -2266,23 +2266,49 @@ export function modalitiesFromSubjectSubtree(relPaths: string[]): string[] {
 }
 
 /**
- * Truncation-immune modality detection (#820). GitHub caps the recursive git
- * tree (~100k entries / 7MB) and a large `derivatives/` tree (which sorts
- * before the raw subject dirs) can fill the whole response, so `getTreeAtRef`
- * silently drops every raw `sub-<id>/<datatype>/` path -- on006110 came back
- * `anat,func` (from fmriprep derivatives) with `eeg` missing. This walks ONLY
- * the raw BIDS structure instead: the root tree (non-recursive) to find `sub-*`
- * dirs, then a bounded, evenly-spread sample of those subjects' subtrees (each
- * small, never truncated, since derivatives live outside the subject dirs).
- * Returns the sorted datatype set, or [] for a non-BIDS layout (no root
- * `sub-*`), so callers fall back to the path-list detector.
+ * BIDS task labels found in a subject's subtree filenames, matching
+ * `extractTasks`'s `_task-<label>` regex (kept in sync; github.ts can't import
+ * nemar-sync without a cycle). Pure; unit-tested.
  */
-export async function detectModalitiesAtRef(
+export function tasksFromSubjectSubtree(relPaths: string[]): string[] {
+  const found = new Set<string>();
+  for (const p of relPaths) {
+    const m = p.match(/_task-([^_./]+)/);
+    if (m) found.add(m[1]);
+  }
+  return [...found];
+}
+
+/** Truncation-immune BIDS metadata derived from the raw subject tree. */
+export interface BidsTreeStats {
+  /** Sorted raw datatype dirs (modalities). Sampled across subjects. */
+  modalities: string[];
+  /** COMPLETE count of root-level `sub-*` dirs (not sampled). */
+  subjectCount: number;
+  /** Sorted task labels. Sampled across subjects (union with tree paths upstream). */
+  tasks: string[];
+}
+
+/**
+ * Truncation-immune BIDS stats (#820, #827). GitHub caps the recursive git tree
+ * (~100k entries / 7MB) and a large `derivatives/` tree (which sorts before the
+ * raw subject dirs) can fill the whole response, so `getTreeAtRef` silently
+ * drops every raw `sub-<id>/<datatype>/` path -- on006110 came back `anat,func`
+ * (from fmriprep derivatives) with `eeg` missing AND subject_count NULL. This
+ * walks ONLY the raw BIDS structure: the root tree (non-recursive) gives the
+ * COMPLETE `sub-*` list (subjectCount), then a bounded, evenly-spread sample of
+ * those subjects' subtrees (each small, never truncated, since derivatives live
+ * outside the subject dirs) gives modalities + tasks. Returns zeros/[] for a
+ * non-BIDS layout (no root `sub-*`) so callers fall back to the path-list
+ * detectors. All-or-nothing on subtree fetch failure (a partial sample would
+ * silently under-report and then override the path-list result).
+ */
+export async function getBidsTreeStats(
   repo: string,
   ref: string,
   pat: string,
   refreshTokenOn401?: () => Promise<string>,
-): Promise<string[]> {
+): Promise<BidsTreeStats> {
   const ghHeaders = {
     Authorization: `Bearer ${pat}`,
     Accept: "application/vnd.github.v3+json",
@@ -2316,9 +2342,10 @@ export async function detectModalitiesAtRef(
   }
   const root = await rootResponse.json<{ tree: TreeEntry[] }>();
   const subjectDirs = root.tree.filter((e) => e.type === "tree" && e.path.startsWith("sub-"));
-  if (subjectDirs.length === 0) return [];
+  if (subjectDirs.length === 0) return { modalities: [], subjectCount: 0, tasks: [] };
 
-  const found = new Set<string>();
+  const mods = new Set<string>();
+  const tasks = new Set<string>();
   for (const subj of sampleEvenly(subjectDirs, MAX_SUBJECTS_FOR_MODALITY)) {
     const subResponse = await githubFetchWithRetry(
       `${GITHUB_API()}/repos/${ORG_NAME}/${repo}/git/trees/${subj.sha}?recursive=1`,
@@ -2327,8 +2354,7 @@ export async function detectModalitiesAtRef(
     );
     // All-or-nothing: a sampled subtree that still fails after retries makes the
     // result UNTRUSTWORTHY (a partial set would silently under-report and then
-    // override the path-list detector, persisting wrong modalities). Throw so
-    // the caller falls back to detecting from the tree paths instead.
+    // override the path-list detector). Throw so the caller falls back.
     if (!subResponse.ok) {
       throw new HttpError(
         `Failed to read subtree for ${repo} ${subj.path}: HTTP ${subResponse.status}`,
@@ -2336,9 +2362,15 @@ export async function detectModalitiesAtRef(
       );
     }
     const sub = await subResponse.json<{ tree: TreeEntry[] }>();
-    for (const m of modalitiesFromSubjectSubtree(sub.tree.map((e) => e.path))) found.add(m);
+    const paths = sub.tree.map((e) => e.path);
+    for (const m of modalitiesFromSubjectSubtree(paths)) mods.add(m);
+    for (const t of tasksFromSubjectSubtree(paths)) tasks.add(t);
   }
-  return [...found].sort();
+  return {
+    modalities: [...mods].sort(),
+    subjectCount: subjectDirs.length,
+    tasks: [...tasks].sort(),
+  };
 }
 
 /**
