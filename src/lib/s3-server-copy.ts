@@ -171,6 +171,17 @@ export async function curlStreamCopy(
 }
 
 /**
+ * True when an `aws s3 cp` stderr indicates the SOURCE read was denied (the CI
+ * identity lacks s3:GetObject on the OpenNeuro bucket). Such a failure is
+ * deterministic, so retrying it 3x with exponential backoff is pure waste --
+ * the caller fails fast to the curl fallback instead. Matches the AWS CLI's
+ * "An error occurred (AccessDenied) ... Forbidden" / HTTP 403 wording (#822).
+ */
+export function isAccessDeniedError(stderr: string): boolean {
+  return /AccessDenied|\bForbidden\b|\b403\b/i.test(stderr);
+}
+
+/**
  * Copy items in parallel batches, server-side first with bounded retry, then a
  * one-shot curl fallback per object. Collects failures and returns them (never
  * exits the process mid-stream — the caller decides). `fellBack` counts objects
@@ -194,6 +205,10 @@ export async function batchServerSideCopy(
         const r = await serverSideS3Copy(item.source, item.destUri, destRegion);
         if (r.success) return "ok";
         lastError = r.error ?? "unknown server-side copy error";
+        // AccessDenied on the source is deterministic (the CI identity can't
+        // GetObject on the OpenNeuro bucket; #822) -- don't burn the remaining
+        // retries + exponential backoff, drop to the curl fallback immediately.
+        if (isAccessDeniedError(lastError)) break;
         if (attempt < attempts) {
           await new Promise((res) => setTimeout(res, attempt * attempt * 1000));
         }
