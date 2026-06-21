@@ -1797,7 +1797,7 @@ export function validatePrescreenCallbackBody(body: unknown): string | null {
   ) {
     return "reasons must be an array of strings";
   }
-  if (b.issue_url !== undefined && typeof b.issue_url !== "string") {
+  if (b.issue_url !== undefined && b.issue_url !== null && typeof b.issue_url !== "string") {
     return "issue_url must be a string";
   }
   return null;
