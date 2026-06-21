@@ -35,6 +35,13 @@ export interface MetadataColumnInputs {
   participantsTsv: string | null;
   /** S3 size and object count, or null if the lookup failed/was skipped. */
   s3Stats: { totalSize: number; objectCount: number | undefined } | null;
+  /**
+   * Modalities resolved truncation-immune via `detectModalitiesAtRef` (#820).
+   * When provided (non-empty) this is authoritative and replaces detection from
+   * `treePaths` -- which can be a truncated git tree missing every raw
+   * `sub-<id>/<datatype>/` path. Omit/empty to fall back to the path-list detector.
+   */
+  modalities?: string[];
 }
 
 /**
@@ -53,9 +60,13 @@ export interface MetadataColumnInputs {
  *   (`backend/src/services/s3.ts:218`).
  */
 export function computeDatasetMetadataColumns(input: MetadataColumnInputs): DatasetMetadataColumns {
-  const modalitiesArr = input.treePaths.length
-    ? [...detectModalitiesFromTree(input.treePaths)].sort()
-    : [];
+  // Prefer the truncation-immune walk result (#820); fall back to detecting
+  // from the (possibly truncated) tree path list when it wasn't supplied.
+  const modalitiesArr = input.modalities?.length
+    ? [...new Set(input.modalities)].sort()
+    : input.treePaths.length
+      ? [...detectModalitiesFromTree(input.treePaths)].sort()
+      : [];
   const tasksArr = input.treePaths.length ? extractTasks(input.treePaths) : [];
 
   // subject_count: prefer the BIDS-canonical count of root-level sub-* dirs in

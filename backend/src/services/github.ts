@@ -6,6 +6,7 @@
  */
 
 import validatorPin from "../../../validator-version.json" with { type: "json" };
+import { BIDS_DATATYPES } from "./datacite";
 import { HttpError } from "./retry";
 
 const VALIDATOR_VERSION = validatorPin.version;
@@ -2227,6 +2228,114 @@ export async function getTreeAtRef(
   }
 
   return tree.tree.filter((entry) => entry.type === "blob");
+}
+
+/** Max `sub-*` subjects sampled by detectModalitiesAtRef (bounds API calls). */
+const MAX_SUBJECTS_FOR_MODALITY = 25;
+
+/**
+ * Evenly sample up to `max` items, always including the first and last. Used to
+ * bound the per-subject tree fetches in detectModalitiesAtRef while still
+ * spreading the sample across the subject list (so a modality present only in
+ * later subjects is more likely to be seen than first-N sampling would).
+ */
+export function sampleEvenly<T>(items: T[], max: number): T[] {
+  if (items.length <= max) return items;
+  const out: T[] = [];
+  const step = (items.length - 1) / (max - 1);
+  for (let i = 0; i < max; i++) out.push(items[Math.round(i * step)]);
+  return out;
+}
+
+/**
+ * Datatypes found in ONE subject's subtree, where paths are RELATIVE to the
+ * subject directory: a datatype dir sits directly under the subject
+ * (`eeg/...`) or under a session (`ses-01/eeg/...`). Pure; unit-tested.
+ */
+export function modalitiesFromSubjectSubtree(relPaths: string[]): string[] {
+  const found = new Set<string>();
+  for (const p of relPaths) {
+    const parts = p.split("/");
+    if (BIDS_DATATYPES.has(parts[0])) {
+      found.add(parts[0]);
+    } else if (parts.length >= 2 && parts[0].startsWith("ses-") && BIDS_DATATYPES.has(parts[1])) {
+      found.add(parts[1]);
+    }
+  }
+  return [...found];
+}
+
+/**
+ * Truncation-immune modality detection (#820). GitHub caps the recursive git
+ * tree (~100k entries / 7MB) and a large `derivatives/` tree (which sorts
+ * before the raw subject dirs) can fill the whole response, so `getTreeAtRef`
+ * silently drops every raw `sub-<id>/<datatype>/` path -- on006110 came back
+ * `anat,func` (from fmriprep derivatives) with `eeg` missing. This walks ONLY
+ * the raw BIDS structure instead: the root tree (non-recursive) to find `sub-*`
+ * dirs, then a bounded, evenly-spread sample of those subjects' subtrees (each
+ * small, never truncated, since derivatives live outside the subject dirs).
+ * Returns the sorted datatype set, or [] for a non-BIDS layout (no root
+ * `sub-*`), so callers fall back to the path-list detector.
+ */
+export async function detectModalitiesAtRef(
+  repo: string,
+  ref: string,
+  pat: string,
+  refreshTokenOn401?: () => Promise<string>,
+): Promise<string[]> {
+  const ghHeaders = {
+    Authorization: `Bearer ${pat}`,
+    Accept: "application/vnd.github.v3+json",
+    "User-Agent": "NEMAR-API",
+  };
+  const refResponse = await githubFetchWithRetry(
+    `${GITHUB_API()}/repos/${ORG_NAME}/${repo}/commits/${ref}`,
+    { headers: ghHeaders },
+    { retryOn404: true, refreshTokenOn401 },
+  );
+  if (!refResponse.ok) {
+    throw new HttpError(
+      `Failed to resolve ref '${ref}': HTTP ${refResponse.status}`,
+      refResponse.status,
+    );
+  }
+  const commit = await refResponse.json<{ commit: { tree: { sha: string } } }>();
+  const rootSha = commit.commit.tree.sha;
+
+  // Root tree, NON-recursive: cheap, never truncated, lists every top-level dir.
+  const rootResponse = await githubFetchWithRetry(
+    `${GITHUB_API()}/repos/${ORG_NAME}/${repo}/git/trees/${rootSha}`,
+    { headers: ghHeaders },
+    { refreshTokenOn401 },
+  );
+  if (!rootResponse.ok) {
+    throw new HttpError(
+      `Failed to get root tree: HTTP ${rootResponse.status}`,
+      rootResponse.status,
+    );
+  }
+  const root = await rootResponse.json<{ tree: TreeEntry[] }>();
+  const subjectDirs = root.tree.filter((e) => e.type === "tree" && e.path.startsWith("sub-"));
+  if (subjectDirs.length === 0) return [];
+
+  const found = new Set<string>();
+  for (const subj of sampleEvenly(subjectDirs, MAX_SUBJECTS_FOR_MODALITY)) {
+    const subResponse = await githubFetchWithRetry(
+      `${GITHUB_API()}/repos/${ORG_NAME}/${repo}/git/trees/${subj.sha}?recursive=1`,
+      { headers: ghHeaders },
+      { refreshTokenOn401 },
+    );
+    // A single bad subject must not sink the whole detection: skip and continue.
+    if (!subResponse.ok) {
+      console.warn(
+        `[modalities] subtree fetch failed for ${repo} ${subj.path}: ${subResponse.status}`,
+      );
+      continue;
+    }
+    const sub = await subResponse.json<{ tree: TreeEntry[] }>();
+    for (const m of modalitiesFromSubjectSubtree(sub.tree.map((e) => e.path))) found.add(m);
+  }
+  return [...found].sort();
 }
 
 /**

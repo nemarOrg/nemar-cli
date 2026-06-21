@@ -1049,7 +1049,9 @@ export function buildDataCiteXml(metadata: DataCiteMetadata): string {
         }
         if (typeof fund.awardNumber === "string" && fund.awardNumber.trim().length > 0) {
           const uriAttr = fund.awardURI ? ` awardURI="${escapeXml(fund.awardURI)}"` : "";
-          lines.push(`      <awardNumber${uriAttr}>${escapeXml(fund.awardNumber.trim())}</awardNumber>`);
+          lines.push(
+            `      <awardNumber${uriAttr}>${escapeXml(fund.awardNumber.trim())}</awardNumber>`,
+          );
         }
         if (typeof fund.awardTitle === "string" && fund.awardTitle.trim().length > 0) {
           lines.push(`      <awardTitle>${escapeXml(fund.awardTitle.trim())}</awardTitle>`);
@@ -1094,30 +1096,63 @@ export interface BidsDatasetDescription {
  * Scans for datatype directories (eeg/, meg/, emg/, func/, ieeg/, etc.)
  * in the standard BIDS structure: sub-XX/[ses-XX/]datatype/.
  */
+/** BIDS raw datatype directory names (the modality facets we surface). */
+export const BIDS_DATATYPES = new Set([
+  "eeg",
+  "meg",
+  "ieeg",
+  "emg",
+  "func",
+  "anat",
+  "dwi",
+  "fmap",
+  "perf",
+  "pet",
+  "micr",
+  "nirs",
+  "motion",
+  "beh",
+]);
+
+/**
+ * Top-level directories that hold non-raw data. A datatype-named folder inside
+ * any of these is NOT a dataset modality: `sourcedata/emg/` is raw vendor
+ * material, a `derivatives/fmriprep/sub-<id>/func/` folder is computed output,
+ * `code/` is scripts. Counting them produced phantom modalities (#820: on002094
+ * reported `emg` solely from `sourcedata/emg/`).
+ */
+const NON_RAW_TOP_DIRS = new Set(["derivatives", "sourcedata", "code"]);
+
+/**
+ * True when `parts[i]` is a BIDS datatype directory in valid raw position:
+ * directly under a `sub-<label>` or `ses-<label>` segment, and not under a
+ * non-raw top-level dir. This is the BIDS spec layout
+ * `sub-<label>/[ses-<label>/]<datatype>/`, so it rejects both the false
+ * positives above and stray matches like a subject literally named `sub-emg`
+ * (the segment must equal the datatype exactly). Shared by the path-list and
+ * the tree-walk detectors so they agree.
+ */
+export function isDatatypeInBidsPosition(parts: string[], i: number): boolean {
+  if (!BIDS_DATATYPES.has(parts[i])) return false;
+  if (NON_RAW_TOP_DIRS.has(parts[0])) return false;
+  const parent = parts[i - 1];
+  return parent !== undefined && (parent.startsWith("sub-") || parent.startsWith("ses-"));
+}
+
+/**
+ * Detect dataset modalities from a list of file paths. Only counts a datatype
+ * directory in valid raw BIDS position (see {@link isDatatypeInBidsPosition}),
+ * so `sourcedata/`/`derivatives/`/`code/` folders don't create phantom
+ * modalities (#820). Note: when `paths` comes from a truncated git tree the
+ * raw `sub-*` paths may be missing entirely; callers that need
+ * truncation-immune results use `detectModalitiesAtRef` (github.ts) instead.
+ */
 export function detectModalitiesFromTree(paths: string[]): string[] {
-  const bidsDataTypes = new Set([
-    "eeg",
-    "meg",
-    "ieeg",
-    "emg",
-    "func",
-    "anat",
-    "dwi",
-    "fmap",
-    "perf",
-    "pet",
-    "micr",
-    "nirs",
-    "motion",
-    "beh",
-  ]);
   const found = new Set<string>();
   for (const p of paths) {
     const parts = p.split("/");
-    for (const part of parts) {
-      if (bidsDataTypes.has(part)) {
-        found.add(part);
-      }
+    for (let i = 1; i < parts.length; i++) {
+      if (isDatatypeInBidsPosition(parts, i)) found.add(parts[i]);
     }
   }
   return [...found];
