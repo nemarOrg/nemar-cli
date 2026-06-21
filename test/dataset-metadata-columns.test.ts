@@ -64,6 +64,52 @@ describe("computeDatasetMetadataColumns", () => {
     expect(cols.tasks).toBe("music,rest"); // sorted
   });
 
+  describe("#827 truncation-immune overrides (subjectCount / tasks / modalities)", () => {
+    // Simulates a truncated tree: treePaths has only derivatives (raw sub-*/ dropped),
+    // so the path-list detectors under-report. The walk overrides supply the truth.
+    const TRUNCATED_DERIV_ONLY = [
+      "derivatives/fmriprep/sub-01/func/sub-01_task-rest_bold.nii.gz",
+      "derivatives/fmriprep/sub-01/anat/sub-01_T1w.nii.gz",
+    ];
+
+    test("subjectCount override wins over the (truncated) tree count", () => {
+      const cols = computeDatasetMetadataColumns({
+        treePaths: TRUNCATED_DERIV_ONLY, // countSubjectDirs sees 0 raw sub-*/
+        participantsTsv: null,
+        s3Stats: null,
+        subjectCount: 65,
+      });
+      expect(cols.subject_count).toBe(65);
+    });
+
+    test("modalities + tasks overrides union/replace the truncated tree result", () => {
+      const cols = computeDatasetMetadataColumns({
+        treePaths: TRUNCATED_DERIV_ONLY, // tree would give modalities=[] (deriv excluded), tasks=[rest]
+        participantsTsv: null,
+        s3Stats: null,
+        modalities: ["anat", "eeg", "func"],
+        tasks: ["movie", "music"],
+      });
+      expect(cols.modalities).toBe("anat,eeg,func");
+      // tasks UNION: walk tasks (movie,music) + tree-path task (rest), sorted.
+      expect(cols.tasks).toBe("movie,music,rest");
+    });
+
+    test("zero/empty overrides fall back to the tree-path detectors", () => {
+      const cols = computeDatasetMetadataColumns({
+        treePaths: ["sub-01/eeg/sub-01_task-rest_eeg.set"],
+        participantsTsv: null,
+        s3Stats: null,
+        subjectCount: 0,
+        modalities: [],
+        tasks: [],
+      });
+      expect(cols.subject_count).toBe(1);
+      expect(cols.modalities).toBe("eeg");
+      expect(cols.tasks).toBe("rest");
+    });
+  });
+
   test("multi-modality serializes as sorted comma-separated lowercase", () => {
     const cols = computeDatasetMetadataColumns({
       treePaths: MULTI_MODALITY_PATHS,
@@ -102,10 +148,7 @@ describe("computeDatasetMetadataColumns", () => {
       "sub-05\t31",
     ].join("\n");
     const cols = computeDatasetMetadataColumns({
-      treePaths: [
-        "sub-01/eeg/sub-01_task-rest_eeg.set",
-        "sub-02/eeg/sub-02_task-rest_eeg.set",
-      ],
+      treePaths: ["sub-01/eeg/sub-01_task-rest_eeg.set", "sub-02/eeg/sub-02_task-rest_eeg.set"],
       participantsTsv: roster,
       s3Stats: null,
     });
@@ -355,7 +398,10 @@ describe("countSessionDirs (#657)", () => {
 
   test("returns 0 for a single-session dataset with no ses-* layer", () => {
     expect(
-      countSessionDirs(["sub-01/eeg/sub-01_task-rest_eeg.set", "sub-02/eeg/sub-02_task-rest_eeg.set"]),
+      countSessionDirs([
+        "sub-01/eeg/sub-01_task-rest_eeg.set",
+        "sub-02/eeg/sub-02_task-rest_eeg.set",
+      ]),
     ).toBe(0);
   });
 

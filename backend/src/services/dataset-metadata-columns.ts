@@ -36,12 +36,26 @@ export interface MetadataColumnInputs {
   /** S3 size and object count, or null if the lookup failed/was skipped. */
   s3Stats: { totalSize: number; objectCount: number | undefined } | null;
   /**
-   * Modalities resolved truncation-immune via `detectModalitiesAtRef` (#820).
+   * Modalities resolved truncation-immune via `getBidsTreeStats` (#820).
    * When provided (non-empty) this is authoritative and replaces detection from
    * `treePaths` -- which can be a truncated git tree missing every raw
    * `sub-<id>/<datatype>/` path. Omit/empty to fall back to the path-list detector.
    */
   modalities?: string[];
+  /**
+   * Complete root-level `sub-*` count from `getBidsTreeStats` (#827). The
+   * truncated `treePaths` can drop every raw subject dir (on006110 -> NULL), so
+   * when provided (> 0) this wins over `countSubjectDirs(treePaths)`. Omit/0 to
+   * fall back to the tree-path count (then participants.tsv).
+   */
+  subjectCount?: number;
+  /**
+   * Task labels from `getBidsTreeStats` (#827, sampled subjects). UNIONed with
+   * the tree-path tasks rather than replacing them: the sample can miss a task
+   * present only in unsampled subjects, and the (possibly truncated) tree still
+   * carries derivative task labels, so union never loses one.
+   */
+  tasks?: string[];
 }
 
 /**
@@ -67,7 +81,12 @@ export function computeDatasetMetadataColumns(input: MetadataColumnInputs): Data
     : input.treePaths.length
       ? [...detectModalitiesFromTree(input.treePaths)].sort()
       : [];
-  const tasksArr = input.treePaths.length ? extractTasks(input.treePaths) : [];
+  // tasks: union the truncation-immune walk result (#827) with the tree-path
+  // tasks so neither a missed sample subject nor a truncated tree loses one.
+  const treeTasks = input.treePaths.length ? extractTasks(input.treePaths) : [];
+  const tasksArr = input.tasks?.length
+    ? [...new Set([...input.tasks, ...treeTasks])].sort()
+    : treeTasks;
 
   // subject_count: prefer the BIDS-canonical count of root-level sub-* dirs in
   // the tree (#759). participants.tsv is an enrolled roster that can be far
@@ -75,7 +94,15 @@ export function computeDatasetMetadataColumns(input: MetadataColumnInputs): Data
   // so it is only the fallback when the tree has no resolvable subjects (e.g.
   // the placeholder-participants path). age_min/age_max still come from
   // participants.tsv, which carries the per-subject demographics.
-  const subjectDirCount = input.treePaths.length ? countSubjectDirs(input.treePaths) : 0;
+  // Prefer the complete walk count (#827): the truncated treePaths can drop
+  // every raw sub-* dir (on006110 -> 0/NULL). Fall back to the tree-path count
+  // (then participants.tsv) only when the walk didn't supply one.
+  const subjectDirCount =
+    input.subjectCount && input.subjectCount > 0
+      ? input.subjectCount
+      : input.treePaths.length
+        ? countSubjectDirs(input.treePaths)
+        : 0;
 
   let ageMin: number | null = null;
   let ageMax: number | null = null;
