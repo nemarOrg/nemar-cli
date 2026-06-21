@@ -29,7 +29,7 @@ import {
 import { reembedDatasetVector } from "./dataset-search.js";
 import { enrichDataset } from "./enrich-dataset.js";
 import { getDatasetsToken } from "./github-auth.js";
-import { getBlobContent, getTreeAtRef } from "./github.js";
+import { detectModalitiesAtRef, getBlobContent, getTreeAtRef } from "./github.js";
 import { countSessionDirs, syncDatasetToNemar } from "./nemar-sync.js";
 import { errorMessage } from "./repo-metadata.js";
 import { getArchiveSize, getDatasetS3Stats, getManifest } from "./s3.js";
@@ -382,10 +382,25 @@ export async function runDatasetSync(
   let metadataColumnsError: string | undefined;
   let metadataColumnsWritten = false;
   try {
+    // Resolve modalities truncation-immune (#820): the recursive `tree` above
+    // can be truncated on large datasets (derivatives/ fills the cap, dropping
+    // raw sub-*/<datatype>/), which mis-categorized on006110 as `anat,func`
+    // with `eeg` missing. detectModalitiesAtRef walks only the raw BIDS tree.
+    // A failure falls back to detecting from the (possibly truncated) tree.
+    let modalitiesOverride: string[] | undefined;
+    try {
+      const walked = await detectModalitiesAtRef(repoName, "main", pat);
+      if (walked.length) modalitiesOverride = walked;
+    } catch (err) {
+      console.warn(
+        `[reindex] modality walk failed for ${datasetId}; using tree paths: ${errorMessage(err)}`,
+      );
+    }
     const cols = computeDatasetMetadataColumns({
       treePaths: tree.map((f) => f.path),
       participantsTsv,
       s3Stats: s3StatsForColumns,
+      modalities: modalitiesOverride,
     });
     await writeDatasetMetadataColumns(db, datasetId, cols);
     metadataColumnsWritten = true;

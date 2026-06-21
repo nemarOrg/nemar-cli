@@ -7,6 +7,7 @@ import { describe, expect, test } from "bun:test";
 import {
   type CopyItem,
   filterAlreadyCopied,
+  isAccessDeniedError,
   keyInShard,
   parseS3Url,
   parseShardArg,
@@ -74,6 +75,31 @@ describe("parseS3Url", () => {
     expect(parseS3Url("")).toBeNull();
     expect(parseS3Url("not a url")).toBeNull();
     expect(parseS3Url("s3://bucket-only")).toBeNull();
+  });
+});
+
+describe("isAccessDeniedError (#822 fail-fast)", () => {
+  test("matches the AWS CLI access-denied wordings", () => {
+    expect(
+      isAccessDeniedError(
+        "fatal error: An error occurred (AccessDenied) when calling the CopyObject operation: Access Denied",
+      ),
+    ).toBe(true);
+    expect(isAccessDeniedError("An error occurred (403) when calling the HeadObject operation")).toBe(
+      true,
+    );
+    expect(isAccessDeniedError("download failed: ... Forbidden")).toBe(true);
+    // bare human-readable form (no parenthesized code) also matches
+    expect(isAccessDeniedError("fatal error: Access Denied")).toBe(true);
+  });
+
+  test("does not match transient/other errors (those still get retried)", () => {
+    expect(isAccessDeniedError("Could not connect to the endpoint URL")).toBe(false);
+    expect(isAccessDeniedError("An error occurred (SlowDown) ... reduce your request rate")).toBe(
+      false,
+    );
+    expect(isAccessDeniedError("aws exit 255")).toBe(false);
+    expect(isAccessDeniedError("")).toBe(false);
   });
 });
 
