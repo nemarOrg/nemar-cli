@@ -1,6 +1,6 @@
 {
   "name": "nemar-api",
-  "version": "0.8.69-dev1",
+  "version": "0.8.69",
   "private": true,
   "scripts": {
     "dev": "wrangler dev -c wrangler-sccn.toml --env dev",
