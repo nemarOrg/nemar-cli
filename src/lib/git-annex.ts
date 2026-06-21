@@ -2958,7 +2958,9 @@ export function extractWhereisKeyUrl(line: string, keyUrlMap: Map<string, string
   }
 }
 
-export async function getAnnexWhereisAll(datasetPath: string): Promise<Map<string, string>> {
+export async function getAnnexWhereisAll(
+  datasetPath: string,
+): Promise<{ urlMap: Map<string, string>; fileCount: number }> {
   // STREAM the output, never buffering it whole. A large dataset (e.g. ds006110
   // = 66k annexed files) emits ~100MB+ of JSON; collecting that into one string
   // (the old runCommand path) spiked memory and got the 2-core import runner
@@ -2985,6 +2987,11 @@ export async function getAnnexWhereisAll(datasetPath: string): Promise<Map<strin
   const decoder = new TextDecoder();
   let pending = "";
   let sawOutput = false;
+  // One whereis --json line == one annexed file (with or without a usable URL).
+  // fileCount counts them so the import can tell "no annexed data at all" from
+  // "annexed data exists but none mapped to a copyable URL" (#828): the latter
+  // must not publish an empty dataset.
+  let fileCount = 0;
   for await (const chunk of proc.stdout as AsyncIterable<Uint8Array>) {
     pending += decoder.decode(chunk, { stream: true });
     let nl = pending.indexOf("\n");
@@ -2993,6 +3000,7 @@ export async function getAnnexWhereisAll(datasetPath: string): Promise<Map<strin
       pending = pending.slice(nl + 1);
       if (line.trim()) {
         sawOutput = true;
+        fileCount++;
         extractWhereisKeyUrl(line, keyUrlMap);
       }
       nl = pending.indexOf("\n");
@@ -3001,6 +3009,7 @@ export async function getAnnexWhereisAll(datasetPath: string): Promise<Map<strin
   pending += decoder.decode();
   if (pending.trim()) {
     sawOutput = true;
+    fileCount++;
     extractWhereisKeyUrl(pending, keyUrlMap);
   }
 
@@ -3022,7 +3031,7 @@ export async function getAnnexWhereisAll(datasetPath: string): Promise<Map<strin
     }
   }
 
-  return keyUrlMap;
+  return { urlMap: keyUrlMap, fileCount };
 }
 
 /**
