@@ -796,9 +796,25 @@ export async function prepareImport(
       process.exit(1);
     }
 
-    keyUrlMap = await getAnnexWhereisAll(datasetPath);
+    const whereis = await getAnnexWhereisAll(datasetPath);
+    keyUrlMap = whereis.urlMap;
 
     if (keyUrlMap.size === 0) {
+      // Empty-manifest publish guard (#828): if the dataset HAS annexed files
+      // (whereis emitted records) but NONE mapped to a copyable URL, we'd
+      // otherwise skip the copy and publish a dataset with no data -- the
+      // signature of the 7 pre-fix phantom imports (on007720 etc.). Fail the
+      // import so it quarantines for review instead. Only a dataset that
+      // genuinely has zero annexed files (fileCount === 0, e.g. a metadata-only
+      // dataset) is allowed through with no data copy.
+      if (whereis.fileCount > 0) {
+        whereisSpinner.fail(
+          `${whereis.fileCount} annexed file(s) present but none had a copyable source URL`,
+        );
+        throw new Error(
+          `Import aborted: ${nemarId} has ${whereis.fileCount} annexed file(s) but git-annex whereis mapped 0 to a copyable source (likely the content's only location is a remote NEMAR can't read). Refusing to publish a dataset with no data. Investigate the upstream annex remotes before retrying.`,
+        );
+      }
       whereisSpinner.warn("No annexed files found, skipping data copy");
     } else {
       whereisSpinner.succeed(`Found ${keyUrlMap.size} annexed files`);
@@ -1029,6 +1045,35 @@ export async function finalizeImport(
   console.log(chalk.cyan(`\n[finalize] ${openneuroId} -> ${nemarId}\n`));
 
   const hasData = !options.skipData && manifest.items.length > 0;
+  // Empty-manifest publish guard (#828, defense-in-depth for the prepare guard):
+  // an empty manifest with !skipData means no data was copied. Before publishing,
+  // confirm the dataset GENUINELY has no annexed data -- a dataset WITH annexed
+  // files but an empty manifest is the phantom-publish signature (on007720 etc.,
+  // published empty pre-fix). Catches a manual finalize re-run against a stale
+  // pre-guard empty manifest. A truly metadata-only dataset (0 annexed files)
+  // passes through and publishes with no data, as intended.
+  if (!options.skipData && manifest.items.length === 0) {
+    const guardSpinner = ora("Confirming dataset has no annexed data...").start();
+    const cloneResult = await cloneDataset(
+      `git@github.com:nemarDatasets/${nemarId}.git`,
+      datasetPath,
+      { useGitHubToken: true },
+    );
+    if (!cloneResult.success) {
+      guardSpinner.fail(
+        `Failed to clone ${nemarId} for the empty-manifest check: ${cloneResult.error}`,
+      );
+      process.exit(1);
+    }
+    const { fileCount } = await getAnnexWhereisAll(datasetPath);
+    if (fileCount > 0) {
+      guardSpinner.fail(`${fileCount} annexed file(s) but the import manifest is empty`);
+      throw new Error(
+        `Finalize aborted: ${nemarId} has ${fileCount} annexed file(s) but the import manifest is empty (no data was copied). Refusing to publish a dataset with no data. Re-run prepare + copy; if the data is genuinely unfetchable this should quarantine, not publish.`,
+      );
+    }
+    guardSpinner.succeed("Confirmed metadata-only dataset (no annexed data)");
+  }
   if (hasData) {
     // Verify all data landed by re-listing the destination against the manifest.
     const verifySpinner = ora("Verifying copied data...").start();

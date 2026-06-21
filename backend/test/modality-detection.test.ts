@@ -10,7 +10,11 @@
 
 import { describe, expect, test } from "bun:test";
 import { detectModalitiesFromTree, isDatatypeInBidsPosition } from "../src/services/datacite";
-import { modalitiesFromSubjectSubtree, sampleEvenly } from "../src/services/github";
+import {
+  modalitiesFromSubjectSubtree,
+  sampleEvenly,
+  tasksFromSubjectSubtree,
+} from "../src/services/github";
 
 describe("detectModalitiesFromTree (BIDS-position aware)", () => {
   test("raw datatype dirs under sub-* are counted", () => {
@@ -83,6 +87,26 @@ describe("modalitiesFromSubjectSubtree (paths relative to a subject dir)", () =>
     // Within ONE subject's subtree there is no derivatives/, so eeg is present.
     const rel = ["anat/sub-1_T1w.nii.gz", "func/sub-1_bold.nii.gz", "eeg/sub-1_eeg.set"];
     expect(modalitiesFromSubjectSubtree(rel).sort()).toEqual(["anat", "eeg", "func"]);
+  });
+});
+
+describe("tasksFromSubjectSubtree (#827, paths relative to a subject dir)", () => {
+  test("extracts distinct task labels from filenames", () => {
+    const rel = [
+      "eeg/sub-01_task-rest_eeg.set",
+      "eeg/sub-01_task-meditation_eeg.set",
+      "ses-02/eeg/sub-01_ses-02_task-rest_eeg.set",
+      "sub-01_scans.tsv",
+    ];
+    expect(tasksFromSubjectSubtree(rel).sort()).toEqual(["meditation", "rest"]);
+  });
+  test("no task tokens -> empty", () => {
+    expect(tasksFromSubjectSubtree(["anat/sub-01_T1w.nii.gz"])).toEqual([]);
+  });
+  test("stops at the first _ or . delimiter", () => {
+    expect(tasksFromSubjectSubtree(["func/sub-01_task-twoback_run-1_bold.nii.gz"])).toEqual([
+      "twoback",
+    ]);
   });
 });
 
