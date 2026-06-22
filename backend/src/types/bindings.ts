@@ -60,6 +60,16 @@ export interface Bindings {
   NEMAR_USERNAME?: string; // nemar.org datapipeline API credentials
   NEMAR_PASSWORD?: string;
 
+  // ORCID SSO (#832). Confidential OAuth client; login works on the free
+  // Public API tier (no Member API needed). All optional: when CLIENT_ID /
+  // CLIENT_SECRET are unset the /auth/orcid/* routes degrade to a clear
+  // "unavailable" redirect instead of erroring.
+  ORCID_CLIENT_ID?: string;
+  ORCID_CLIENT_SECRET?: string;
+  // Base host for ORCID OAuth, no trailing slash. Defaults to
+  // https://orcid.org in production and https://sandbox.orcid.org elsewhere.
+  ORCID_API_BASE?: string;
+
   // GitHub App credentials. Optional during the migration (#432); the
   // Worker falls back to GITHUB_ADMIN_PAT when any of these are unset.
   // Phase 5 will drop the PAT and make these required.
