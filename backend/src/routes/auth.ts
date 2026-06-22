@@ -17,6 +17,7 @@ import {
 } from "../services/email";
 import { validateGitHubUsername } from "../services/github";
 import { getDatasetsToken } from "../services/github-auth";
+import { fetchOrcidName, orcidPubBase } from "../services/orcid-auth";
 import { hashPassword, validatePasswordStrength, verifyPassword } from "../services/password";
 import {
   generateApiKey,
@@ -137,17 +138,34 @@ const signupSchema = z.object({
       "Please provide a brief description of why you need NEMAR access (at least 20 characters)",
     )
     .max(500, "Description must be at most 500 characters"),
+  // ORCID is now required: it's the canonical source for the user's name (#835).
   orcid: z
     .string()
-    .regex(/^\d{4}-\d{4}-\d{4}-\d{3}[\dX]$/, "ORCID must be in format 0000-0000-0000-000X")
-    .optional(),
+    .regex(/^\d{4}-\d{4}-\d{4}-\d{3}[\dX]$/, "ORCID must be in format 0000-0000-0000-000X"),
+  affiliation: z.string().max(200, "Affiliation must be at most 200 characters").optional(),
+  // city/country required for US export-control / sanctions screening (#835).
+  city: z.string().min(1, "City is required").max(120, "City must be at most 120 characters"),
+  country: z
+    .string()
+    .min(1, "Country is required")
+    .max(120, "Country must be at most 120 characters"),
 });
 
 /**
  * POST /auth/signup - Register a new user
  */
 authRoutes.post("/signup", zValidator("json", signupSchema), async (c) => {
-  const { username, email, password, github_username, description, orcid } = c.req.valid("json");
+  const {
+    username,
+    email,
+    password,
+    github_username,
+    description,
+    orcid,
+    affiliation,
+    city,
+    country,
+  } = c.req.valid("json");
   const db = c.env.DB;
 
   try {
@@ -236,14 +254,28 @@ authRoutes.post("/signup", zValidator("json", signupSchema), async (c) => {
     const verificationToken = generateVerificationToken();
     const verificationExpires = generateExpirationTimestamp(24); // 24 hours
 
+    // ORCID is canonical for the name: pull given/family from the public record
+    // rather than asking the user to type it. Best-effort — a hidden-name record
+    // or transient failure just leaves the name null for later backfill.
+    let givenName: string | null = null;
+    let familyName: string | null = null;
+    try {
+      const n = await fetchOrcidName(orcid, orcidPubBase(c.env));
+      givenName = n.given;
+      familyName = n.family;
+    } catch (nameErr) {
+      console.warn(`[signup] ORCID name fetch failed for ${orcid}`, nameErr);
+    }
+
     // Insert user
     await db
       .prepare(
         `
       INSERT INTO users (
         username, email, password_hash, github_username, description,
-        verification_token, verification_expires_at, orcid
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        verification_token, verification_expires_at, orcid,
+        given_name, family_name, affiliation, city, country
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `,
       )
       .bind(
@@ -254,7 +286,12 @@ authRoutes.post("/signup", zValidator("json", signupSchema), async (c) => {
         description,
         verificationToken,
         verificationExpires,
-        orcid || null,
+        orcid,
+        givenName,
+        familyName,
+        affiliation || null,
+        city,
+        country,
       )
       .run();
 
