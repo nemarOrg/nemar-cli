@@ -322,14 +322,34 @@ export async function signupAction(): Promise<void> {
     {
       type: "input",
       name: "orcid",
-      message: "ORCID iD (optional, e.g. 0000-0002-1825-0097):",
+      message: "ORCID iD (e.g. 0000-0002-1825-0097):",
       validate: (input) => {
-        if (!input || input.trim() === "") return true;
-        if (!/^\d{4}-\d{4}-\d{4}-\d{3}[\dX]$/.test(input.trim())) {
+        const v = input?.trim();
+        if (!v) return "ORCID iD is required — it's how NEMAR gets your name";
+        if (!/^\d{4}-\d{4}-\d{4}-\d{3}[\dX]$/.test(v)) {
           return "ORCID must be in format 0000-0000-0000-000X";
         }
         return true;
       },
+    },
+    {
+      type: "input",
+      name: "affiliation",
+      message: "Affiliation / institution (optional):",
+      validate: (input) =>
+        !input || input.trim().length <= 200 ? true : "Affiliation must be at most 200 characters",
+    },
+    {
+      type: "input",
+      name: "city",
+      message: "City (required for export-control screening):",
+      validate: (input) => (input?.trim() ? true : "City is required"),
+    },
+    {
+      type: "input",
+      name: "country",
+      message: "Country (required for export-control screening):",
+      validate: (input) => (input?.trim() ? true : "Country is required"),
     },
     {
       type: "input",
@@ -358,7 +378,10 @@ export async function signupAction(): Promise<void> {
       password: answers.password,
       github_username: answers.github_username,
       description: answers.description.trim(),
-      orcid: answers.orcid?.trim() || undefined,
+      orcid: answers.orcid.trim(),
+      affiliation: answers.affiliation?.trim() || undefined,
+      city: answers.city.trim(),
+      country: answers.country.trim(),
     });
 
     spinner.succeed("Account created");

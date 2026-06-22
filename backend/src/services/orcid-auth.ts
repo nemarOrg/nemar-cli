@@ -248,6 +248,57 @@ export function decideVerifiedFlag(
 }
 
 // ---------------------------------------------------------------------
+// public-record name lookup (#835)
+//
+// ORCID is the canonical source for a researcher's name. The /authenticate
+// token body only carries the full `name`, not the given/family split, so to
+// store structured names we read the public record (no client creds needed).
+// ---------------------------------------------------------------------
+
+/** Public ORCID API host for reading a record. No auth required. Mirrors the
+ *  sandbox/prod split of the OAuth base. */
+export function orcidPubBase(env: Bindings): string {
+  const base =
+    env.ORCID_API_BASE?.trim() ||
+    (env.ENVIRONMENT === "production" ? "https://orcid.org" : "https://sandbox.orcid.org");
+  return base.includes("sandbox") ? "https://pub.sandbox.orcid.org" : "https://pub.orcid.org";
+}
+
+export interface OrcidName {
+  given: string | null;
+  family: string | null;
+}
+
+/** Read the public given/family name for an ORCID iD. Best-effort: returns
+ *  nulls when the record hides its name; throws only on a transport/HTTP error
+ *  so callers can log and continue without a name. `pubBase` lets tests point
+ *  at a local Bun.serve. */
+export async function fetchOrcidName(
+  orcid: string,
+  pubBase: string,
+  fetchFn: typeof fetch = fetch,
+): Promise<OrcidName> {
+  const res = await fetchFn(`${pubBase}/v3.0/${orcid}/personal-details`, {
+    headers: { Accept: "application/json" },
+  });
+  if (!res.ok) {
+    throw new Error(`ORCID personal-details ${orcid} -> HTTP ${res.status}`);
+  }
+  const json = (await res.json()) as {
+    name?: {
+      "given-names"?: { value?: unknown } | null;
+      "family-name"?: { value?: unknown } | null;
+    } | null;
+  };
+  const name = json.name ?? null;
+  const pick = (v: unknown): string | null => (typeof v === "string" && v.trim() ? v.trim() : null);
+  return {
+    given: name ? pick(name["given-names"]?.value) : null,
+    family: name ? pick(name["family-name"]?.value) : null,
+  };
+}
+
+// ---------------------------------------------------------------------
 // pending-signup token (brand-new ORCID, no NEMAR account yet)
 //
 // ORCID gives us a verified iD + name but no email, and users.email is

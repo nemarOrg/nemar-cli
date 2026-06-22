@@ -185,7 +185,12 @@ export interface SignupRequest {
   password: string;
   github_username: string;
   description: string;
-  orcid?: string;
+  /** Required (#835): canonical source for the user's name. */
+  orcid: string;
+  affiliation?: string;
+  /** Required for export-control screening (#835). */
+  city: string;
+  country: string;
 }
 
 export interface SignupResponse {

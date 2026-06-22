@@ -35,8 +35,10 @@ import {
   decodeState,
   encodeState,
   exchangeCodeForOrcid,
+  fetchOrcidName,
   generateCsrf,
   getOrcidConfig,
+  orcidPubBase,
   safeNextPath,
   signPending,
   verifyPending,
@@ -60,6 +62,20 @@ const emailSchema = z.object({
     .email()
     .max(320)
     .transform((e) => e.trim().toLowerCase()),
+});
+
+// Finalize a brand-new ORCID signup. Mirrors the CLI signup's required fields
+// (#835): city/country are required for export-control screening, affiliation
+// optional. Name comes from ORCID, never the form.
+const finalizeSchema = z.object({
+  email: z
+    .string()
+    .email()
+    .max(320)
+    .transform((e) => e.trim().toLowerCase()),
+  affiliation: z.string().max(200).optional(),
+  city: z.string().min(1, "City is required").max(120),
+  country: z.string().min(1, "Country is required").max(120),
 });
 
 // ------------------------------- helpers -------------------------------
@@ -155,12 +171,45 @@ async function linkIdentity(
   ]);
 }
 
+/** Run a best-effort promise after the response is sent, so an external ORCID
+ *  fetch never adds latency to (or risks timing out) the auth response. Falls
+ *  back to fire-and-forget if no ExecutionContext is available (e.g. tests). */
+function afterResponse(
+  c: { executionCtx?: { waitUntil(p: Promise<unknown>): void } },
+  p: Promise<unknown>,
+): void {
+  try {
+    c.executionCtx?.waitUntil(p);
+  } catch {
+    void p;
+  }
+}
+
 async function touchIdentityLogin(env: Bindings, orcid: string): Promise<void> {
   await env.DB.prepare(
     "UPDATE oauth_identities SET last_login_at = datetime('now') WHERE provider = 'orcid' AND provider_subject = ?",
   )
     .bind(orcid)
     .run();
+}
+
+/** Dynamic name backfill (#835): ORCID is canonical, so on every ORCID
+ *  login/link/signup we refresh given/family name from the public record.
+ *  COALESCE keeps an existing value when ORCID hides the name (fetch -> null),
+ *  so a privacy-restricted record never wipes a good name. Best-effort: a
+ *  fetch/DB failure is logged, never blocks the sign-in. */
+async function refreshUserName(env: Bindings, userId: number, orcid: string): Promise<void> {
+  try {
+    const { given, family } = await fetchOrcidName(orcid, orcidPubBase(env));
+    if (!given && !family) return;
+    await env.DB.prepare(
+      "UPDATE users SET given_name = COALESCE(?, given_name), family_name = COALESCE(?, family_name) WHERE id = ?",
+    )
+      .bind(given, family, userId)
+      .run();
+  } catch (err) {
+    console.warn(`[auth-orcid] name refresh failed for user ${userId} (${orcid})`, err);
+  }
 }
 
 function clientIp(c: { req: { header: (k: string) => string | undefined } }): string | null {
@@ -252,6 +301,7 @@ authOrcidRoutes.get("/orcid/callback", webSessionMiddleware, async (c) => {
       if (outcome === "conflict") return fail("orcid_linked_other", state.next);
       if (outcome === "already_linked") {
         await touchIdentityLogin(c.env, orcid);
+        afterResponse(c, refreshUserName(c.env, webUser.id, orcid));
         return redirect(`${frontend}${state.next}`, [clearState]);
       }
       // link_new: refuse a second, different ORCID on one account.
@@ -264,6 +314,7 @@ authOrcidRoutes.get("/orcid/callback", webSessionMiddleware, async (c) => {
         return fail("orcid_already_have", state.next);
       }
       await linkIdentity(c.env, webUser.id, orcid, name);
+      afterResponse(c, refreshUserName(c.env, webUser.id, orcid));
       return redirect(`${frontend}${state.next}`, [clearState]);
     }
 
@@ -281,6 +332,7 @@ authOrcidRoutes.get("/orcid/callback", webSessionMiddleware, async (c) => {
         "orcid",
       );
       await touchIdentityLogin(c.env, orcid);
+      afterResponse(c, refreshUserName(c.env, user.id, orcid));
       const session = buildSessionCookie(cookieIdRaw, { domain, maxAgeSeconds });
       const next = state.next !== "/" ? state.next : "/dashboard";
       return redirect(`${frontend}${next}`, [clearState, session]);
@@ -308,7 +360,7 @@ authOrcidRoutes.get("/orcid/callback", webSessionMiddleware, async (c) => {
   }
 });
 
-authOrcidRoutes.post("/orcid/finalize", zValidator("json", emailSchema), async (c) => {
+authOrcidRoutes.post("/orcid/finalize", zValidator("json", finalizeSchema), async (c) => {
   if (!isAllowedOrigin(c.req.header("Origin"))) {
     return c.json({ error: "Origin not allowed" }, 403);
   }
@@ -328,7 +380,7 @@ authOrcidRoutes.post("/orcid/finalize", zValidator("json", emailSchema), async (
       return c.json({ error: "orcid_pending_expired" }, 401);
     }
 
-    const { email } = c.req.valid("json");
+    const { email, affiliation, city, country } = c.req.valid("json");
 
     // Email collision: never auto-link onto an existing account (takeover
     // vector). Make the user sign in with their existing method, then link
@@ -363,10 +415,11 @@ authOrcidRoutes.post("/orcid/finalize", zValidator("json", emailSchema), async (
     // review is the email-ownership gate before approval. A dedicated
     // email-verification step for ORCID-first signups is tracked in #44.
     const insert = await c.env.DB.prepare(
-      `INSERT INTO users (email, orcid, orcid_verified, status, email_verified, signup_source)
-       VALUES (?, ?, 1, 'pending', 0, 'web')`,
+      `INSERT INTO users (email, orcid, orcid_verified, status, email_verified, signup_source,
+         affiliation, city, country)
+       VALUES (?, ?, 1, 'pending', 0, 'web', ?, ?, ?)`,
     )
-      .bind(email, pending.orcid)
+      .bind(email, pending.orcid, affiliation || null, city, country)
       .run();
     const userId = insert.meta?.last_row_id;
     if (!userId) {
@@ -410,6 +463,8 @@ authOrcidRoutes.post("/orcid/finalize", zValidator("json", emailSchema), async (
     c.header("Set-Cookie", buildSessionCookie(cookieIdRaw, { domain, maxAgeSeconds }), {
       append: true,
     });
+    // Canonical name from ORCID, after the response (best-effort; never blocks signup).
+    afterResponse(c, refreshUserName(c.env, userId, pending.orcid));
     return c.json({
       user: { id: userId, email, role: "member", status: "pending" },
     });
