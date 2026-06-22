@@ -81,6 +81,13 @@ describe("encodeState / decodeState", () => {
     expect(decodeState(encodeState({ csrf: "", mode: "login", next: "/" }))).toBeNull();
     expect(decodeState(null)).toBeNull();
   });
+  test("rejects a non-string csrf in an attacker-crafted cookie", () => {
+    const raw = btoa(JSON.stringify({ csrf: 0, mode: "login", next: "/" }))
+      .replace(/\+/g, "-")
+      .replace(/\//g, "_")
+      .replace(/=/g, "");
+    expect(decodeState(raw)).toBeNull();
+  });
 });
 
 describe("safeNextPath", () => {
@@ -90,6 +97,10 @@ describe("safeNextPath", () => {
     expect(safeNextPath("https://evil.com")).toBe("/");
     expect(safeNextPath("/a\\b")).toBe("/");
     expect(safeNextPath(null)).toBe("/");
+  });
+  test("rejects percent-encoded open-redirect bypass, keeps benign encoding raw", () => {
+    expect(safeNextPath("/%2F%2Fevil.com")).toBe("/"); // decodes to //evil.com
+    expect(safeNextPath("/valid%20path")).toBe("/valid%20path"); // raw value preserved
   });
 });
 
@@ -123,6 +134,28 @@ describe("decideVerifiedFlag", () => {
       needsAdminReview: true,
     });
   });
+  test("normalizes a URI-format discovered value before comparing", () => {
+    // The DOI-enrichment pipeline stores iDs as full URIs; these must compare
+    // equal to a bare verified iD, not falsely trigger admin review.
+    expect(
+      decideVerifiedFlag("https://orcid.org/0000-0002-1825-0097", "0000-0002-1825-0097"),
+    ).toEqual({ setUsersOrcid: null, orcidVerified: 1, needsAdminReview: false });
+    expect(
+      decideVerifiedFlag("https://orcid.org/0000-0002-1825-0097", "0000-0001-5109-353X"),
+    ).toEqual({ setUsersOrcid: null, orcidVerified: 0, needsAdminReview: true });
+  });
+  test("treats a garbage or empty existing value as absent", () => {
+    expect(decideVerifiedFlag("not-an-orcid", "0000-0002-1825-0097")).toEqual({
+      setUsersOrcid: "0000-0002-1825-0097",
+      orcidVerified: 1,
+      needsAdminReview: false,
+    });
+    expect(decideVerifiedFlag("", "0000-0002-1825-0097")).toEqual({
+      setUsersOrcid: "0000-0002-1825-0097",
+      orcidVerified: 1,
+      needsAdminReview: false,
+    });
+  });
 });
 
 describe("signPending / verifyPending", () => {
@@ -154,6 +187,35 @@ describe("signPending / verifyPending", () => {
       SECRET,
     );
     expect(await verifyPending(expired, SECRET, Date.now())).toBeNull();
+  });
+  test("rejects structurally malformed tokens", async () => {
+    expect(await verifyPending("nodothere", SECRET, Date.now())).toBeNull();
+    expect(await verifyPending(".abc", SECRET, Date.now())).toBeNull();
+    expect(await verifyPending(null, SECRET, Date.now())).toBeNull();
+  });
+  test("rejects a valid-HMAC token whose payload carries a malformed iD", async () => {
+    // A leaked secret must still not let an arbitrary iD through: the decode
+    // path re-validates the ORCID iD shape.
+    const token = await signPending(
+      { orcid: "not-an-orcid", name: null, exp: Date.now() + 60_000 },
+      SECRET,
+    );
+    expect(await verifyPending(token, SECRET, Date.now())).toBeNull();
+  });
+  test("round-trips a null name (ORCID withheld it)", async () => {
+    const token = await signPending(
+      { orcid: "0000-0002-1825-0097", name: null, exp: Date.now() + 60_000 },
+      SECRET,
+    );
+    const out = await verifyPending(token, SECRET, Date.now());
+    expect(out?.orcid).toBe("0000-0002-1825-0097");
+    expect(out?.name).toBeNull();
+  });
+  test("treats now === exp as still valid; now > exp as expired", async () => {
+    const exp = Date.now() + 5_000;
+    const token = await signPending({ orcid: "0000-0002-1825-0097", name: null, exp }, SECRET);
+    expect(await verifyPending(token, SECRET, exp)).not.toBeNull();
+    expect(await verifyPending(token, SECRET, exp + 1)).toBeNull();
   });
 });
 
@@ -200,9 +262,15 @@ describe("exchangeCodeForOrcid", () => {
       async fetch(req) {
         const url = new URL(req.url);
         if (req.method === "POST" && url.pathname === "/oauth/token") {
-          // Assert the exchange posts form-encoded grant params.
+          // Assert the exchange posts form-encoded grant params plus the
+          // confidential-client credentials (ORCID 401s without them).
           const form = new URLSearchParams(await req.text());
-          if (form.get("grant_type") !== "authorization_code" || !form.get("code")) {
+          if (
+            form.get("grant_type") !== "authorization_code" ||
+            !form.get("code") ||
+            !form.get("client_id") ||
+            !form.get("client_secret")
+          ) {
             return new Response("bad request", { status: 400 });
           }
           return new Response(JSON.stringify(next.body), {
@@ -235,6 +303,15 @@ describe("exchangeCodeForOrcid", () => {
     next = { status: 200, body: { orcid: "0000-0002-1825-0097", name: "   " } };
     const out = await exchangeCodeForOrcid(cfg(), "the-code", "https://app.nemar.org/cb");
     expect(out.name).toBeNull();
+  });
+
+  test("normalizes a URI-format orcid in the token response to the bare iD", async () => {
+    next = {
+      status: 200,
+      body: { orcid: "https://orcid.org/0000-0002-1825-0097", name: "Ada" },
+    };
+    const out = await exchangeCodeForOrcid(cfg(), "the-code", "https://app.nemar.org/cb");
+    expect(out.orcid).toBe("0000-0002-1825-0097");
   });
 
   test("throws on a non-ok response", async () => {

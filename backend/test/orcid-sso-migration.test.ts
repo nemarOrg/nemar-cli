@@ -81,6 +81,22 @@ describe("migration 0050_orcid_sso", () => {
     db.close();
   });
 
+  test("UNIQUE(provider, provider_subject) also rejects a same-user double insert", () => {
+    const db = freshDb();
+    const u = insertUser(db, "g@nemar.test");
+    db.prepare(
+      "INSERT INTO oauth_identities (user_id, provider, provider_subject) VALUES (?, 'orcid', '0000-0003-1111-2222')",
+    ).run(u);
+    expect(() =>
+      db
+        .prepare(
+          "INSERT INTO oauth_identities (user_id, provider, provider_subject) VALUES (?, 'orcid', '0000-0003-1111-2222')",
+        )
+        .run(u),
+    ).toThrow();
+    db.close();
+  });
+
   test("provider CHECK rejects a non-'orcid' provider", () => {
     const db = freshDb();
     const u1 = insertUser(db, "c@nemar.test");
