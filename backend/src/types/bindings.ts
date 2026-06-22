@@ -22,6 +22,12 @@ export interface Bindings {
   ENVIRONMENT: "production" | "development" | "staging" | "test";
   API_BASE_URL: string;
   FRONTEND_URL: string;
+  /** Authenticated app origin (e.g. https://app.nemar.org), no trailing slash.
+   *  Distinct from FRONTEND_URL (the marketing apex): ORCID browser redirects
+   *  and the session/pending cookies are scoped to the app host, so the OAuth
+   *  redirect_uri and post-login landings must target this origin, not the
+   *  apex. Defaults to https://app.nemar.org when unset. */
+  APP_BASE_URL?: string;
   AWS_REGION: string;
   S3_BUCKET: string;
   /** Undefined is treated as "off". See backend/src/types/maintenance.ts. */

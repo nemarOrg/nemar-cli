@@ -64,8 +64,12 @@ const emailSchema = z.object({
 
 // ------------------------------- helpers -------------------------------
 
-function frontendBase(env: Bindings): string {
-  return (env.FRONTEND_URL || "https://app.nemar.org").replace(/\/+$/, "");
+/** Authenticated app origin for OAuth redirects + post-login landings. Uses
+ *  APP_BASE_URL, NOT FRONTEND_URL: the latter is the marketing apex
+ *  (https://nemar.org), but the ORCID redirect_uri and the session/pending
+ *  cookies are scoped to the app host (https://app.nemar.org). */
+function appBase(env: Bindings): string {
+  return (env.APP_BASE_URL?.trim() || "https://app.nemar.org").replace(/\/+$/, "");
 }
 
 function cookieDomain(env: Bindings): string | undefined {
@@ -170,7 +174,7 @@ function clientIp(c: { req: { header: (k: string) => string | undefined } }): st
 // ------------------------------- routes --------------------------------
 
 authOrcidRoutes.get("/orcid/start", (c) => {
-  const frontend = frontendBase(c.env);
+  const frontend = appBase(c.env);
   const url = new URL(c.req.url);
   const mode: OauthMode = url.searchParams.get("mode") === "link" ? "link" : "login";
   const next = safeNextPath(url.searchParams.get("next"));
@@ -194,7 +198,7 @@ authOrcidRoutes.get("/orcid/start", (c) => {
 });
 
 authOrcidRoutes.get("/orcid/callback", webSessionMiddleware, async (c) => {
-  const frontend = frontendBase(c.env);
+  const frontend = appBase(c.env);
   const domain = cookieDomain(c.env);
   const clearState = clearCookie(STATE_COOKIE_NAME, domain);
   const url = new URL(c.req.url);

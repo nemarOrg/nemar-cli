@@ -85,6 +85,12 @@ ENVIRONMENT = "production"
 # this variable no longer constrains the choice of host.
 API_BASE_URL = "https://api.nemar.org"
 FRONTEND_URL = "https://nemar.org"
+# Authenticated app origin for ORCID OAuth redirects + post-login landings
+# (#832). Distinct from FRONTEND_URL (marketing apex): the session/pending
+# cookies and the ORCID redirect_uri are scoped to the app host. The ORCID
+# production app's registered redirect URI MUST equal
+# "${APP_BASE_URL}/auth/orcid/callback" (i.e. https://app.nemar.org/auth/orcid/callback).
+APP_BASE_URL = "https://app.nemar.org"
 AWS_REGION = "us-east-2"
 S3_BUCKET = "nemar"
 # Sender + reply-to for Resend emails. The domain in FROM_EMAIL must be
@@ -199,6 +205,11 @@ invocation_logs = true
 ENVIRONMENT = "development"
 API_BASE_URL = "https://nemar-api-dev.sccn-org.workers.dev"
 FRONTEND_URL = "https://nemar.org"
+# Authenticated app origin for the ORCID *sandbox* flow (#832). Set to the
+# frontend origin you run sandbox testing against (http://localhost:4321 for
+# local dev, or a *.pages.dev preview). Must equal the redirect URI registered
+# on the sandbox ORCID app; sandbox permits http/localhost.
+APP_BASE_URL = "http://localhost:4321"
 AWS_REGION = "us-east-2"
 S3_BUCKET = "nemar"
 FROM_EMAIL = "NEMAR Archive <noreply@nemar.org>"
