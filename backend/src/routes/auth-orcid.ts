@@ -35,8 +35,10 @@ import {
   decodeState,
   encodeState,
   exchangeCodeForOrcid,
+  fetchOrcidName,
   generateCsrf,
   getOrcidConfig,
+  orcidPubBase,
   safeNextPath,
   signPending,
   verifyPending,
@@ -153,6 +155,8 @@ async function linkIdentity(
     ).bind(userId, orcid, name),
     reconcileUsers,
   ]);
+
+  await refreshUserName(env, userId, orcid);
 }
 
 async function touchIdentityLogin(env: Bindings, orcid: string): Promise<void> {
@@ -161,6 +165,25 @@ async function touchIdentityLogin(env: Bindings, orcid: string): Promise<void> {
   )
     .bind(orcid)
     .run();
+}
+
+/** Dynamic name backfill (#835): ORCID is canonical, so on every ORCID
+ *  login/link/signup we refresh given/family name from the public record.
+ *  COALESCE keeps an existing value when ORCID hides the name (fetch -> null),
+ *  so a privacy-restricted record never wipes a good name. Best-effort: a
+ *  fetch/DB failure is logged, never blocks the sign-in. */
+async function refreshUserName(env: Bindings, userId: number, orcid: string): Promise<void> {
+  try {
+    const { given, family } = await fetchOrcidName(orcid, orcidPubBase(env));
+    if (!given && !family) return;
+    await env.DB.prepare(
+      "UPDATE users SET given_name = COALESCE(?, given_name), family_name = COALESCE(?, family_name) WHERE id = ?",
+    )
+      .bind(given, family, userId)
+      .run();
+  } catch (err) {
+    console.warn(`[auth-orcid] name refresh failed for user ${userId} (${orcid})`, err);
+  }
 }
 
 function clientIp(c: { req: { header: (k: string) => string | undefined } }): string | null {
@@ -252,6 +275,7 @@ authOrcidRoutes.get("/orcid/callback", webSessionMiddleware, async (c) => {
       if (outcome === "conflict") return fail("orcid_linked_other", state.next);
       if (outcome === "already_linked") {
         await touchIdentityLogin(c.env, orcid);
+        await refreshUserName(c.env, webUser.id, orcid);
         return redirect(`${frontend}${state.next}`, [clearState]);
       }
       // link_new: refuse a second, different ORCID on one account.
@@ -281,6 +305,7 @@ authOrcidRoutes.get("/orcid/callback", webSessionMiddleware, async (c) => {
         "orcid",
       );
       await touchIdentityLogin(c.env, orcid);
+      await refreshUserName(c.env, user.id, orcid);
       const session = buildSessionCookie(cookieIdRaw, { domain, maxAgeSeconds });
       const next = state.next !== "/" ? state.next : "/dashboard";
       return redirect(`${frontend}${next}`, [clearState, session]);
@@ -397,6 +422,9 @@ authOrcidRoutes.post("/orcid/finalize", zValidator("json", emailSchema), async (
       c.header("Set-Cookie", clearPending);
       return c.json({ error: "orcid_already_linked" }, 409);
     }
+
+    // Canonical name from ORCID (best-effort; never blocks signup).
+    await refreshUserName(c.env, userId, pending.orcid);
 
     const { cookieIdRaw, maxAgeSeconds } = await issueSession(
       c.env,
