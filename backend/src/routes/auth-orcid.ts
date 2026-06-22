@@ -298,7 +298,10 @@ authOrcidRoutes.get("/orcid/callback", webSessionMiddleware, async (c) => {
       domain,
       maxAgeSeconds: Math.floor(PENDING_TTL_MS / 1000),
     });
-    return redirect(`${frontend}/signup?orcid=1`, [clearState, pendingCookie]);
+    // Hand off to the email-collection page. It lives under /auth (an app-host
+    // route) so the Domain=app.nemar.org pending cookie is actually sent to it;
+    // the public /signup page is not app-scoped. See website#128.
+    return redirect(`${frontend}/auth/orcid/complete`, [clearState, pendingCookie]);
   } catch (err) {
     console.error("[auth-orcid] callback failed after token exchange", err);
     return fail("orcid_error");
