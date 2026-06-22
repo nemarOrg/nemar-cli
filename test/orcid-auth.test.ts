@@ -14,6 +14,7 @@ import {
   decodeState,
   encodeState,
   exchangeCodeForOrcid,
+  fetchOrcidName,
   getOrcidConfig,
   isValidOrcidId,
   normalizeOrcidId,
@@ -326,5 +327,67 @@ describe("exchangeCodeForOrcid", () => {
     await expect(
       exchangeCodeForOrcid(cfg(), "the-code", "https://app.nemar.org/cb"),
     ).rejects.toThrow();
+  });
+});
+
+describe("fetchOrcidName", () => {
+  let server: ReturnType<typeof Bun.serve>;
+  let base: string;
+  let next: { status: number; body: unknown };
+
+  beforeAll(() => {
+    server = Bun.serve({
+      port: 0,
+      fetch(req) {
+        const url = new URL(req.url);
+        if (req.method === "GET" && url.pathname.endsWith("/personal-details")) {
+          return new Response(JSON.stringify(next.body), {
+            status: next.status,
+            headers: { "Content-Type": "application/json" },
+          });
+        }
+        return new Response("not found", { status: 404 });
+      },
+    });
+    base = `http://localhost:${server.port}`;
+  });
+
+  afterAll(() => server.stop(true));
+
+  test("extracts given + family from the public record", async () => {
+    next = {
+      status: 200,
+      body: {
+        name: {
+          "given-names": { value: "Ada" },
+          "family-name": { value: "Lovelace" },
+        },
+      },
+    };
+    expect(await fetchOrcidName("0000-0002-1825-0097", base)).toEqual({
+      given: "Ada",
+      family: "Lovelace",
+    });
+  });
+
+  test("returns nulls when the record hides its name", async () => {
+    next = { status: 200, body: { name: null } };
+    expect(await fetchOrcidName("0000-0002-1825-0097", base)).toEqual({
+      given: null,
+      family: null,
+    });
+  });
+
+  test("returns nulls for blank/missing name parts", async () => {
+    next = { status: 200, body: { name: { "given-names": { value: "  " } } } };
+    expect(await fetchOrcidName("0000-0002-1825-0097", base)).toEqual({
+      given: null,
+      family: null,
+    });
+  });
+
+  test("throws on a non-ok response", async () => {
+    next = { status: 404, body: { error: "not found" } };
+    await expect(fetchOrcidName("0000-0002-1825-0097", base)).rejects.toThrow();
   });
 });
