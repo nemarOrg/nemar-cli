@@ -24,6 +24,7 @@ import { maintenanceMode } from "./middleware/maintenance";
 import { rateLimiter } from "./middleware/rateLimit";
 import { adminRoutes } from "./routes/admin";
 import { authRoutes } from "./routes/auth";
+import { authOrcidRoutes } from "./routes/auth-orcid";
 import { authWebRoutes } from "./routes/auth-web";
 import { catalogIndexResponse, dataRoutes } from "./routes/data";
 import { datasetRoutes } from "./routes/datasets";
@@ -132,6 +133,8 @@ api.route("/auth", authRoutes);
 // CLI flow; no path overlap with authRoutes (existing /signup, /login,
 // /verify, etc. vs new /code/request, /code/verify, /logout, /me).
 api.route("/auth", authWebRoutes);
+// ORCID SSO (#832). Same /auth prefix; new paths under /auth/orcid/*.
+api.route("/auth", authOrcidRoutes);
 api.route("/users", userRoutes);
 api.route("/admin", adminRoutes);
 api.route("/datasets", datasetRoutes);
