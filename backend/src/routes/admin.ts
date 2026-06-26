@@ -9,6 +9,7 @@ import { Hono } from "hono";
 import { z } from "zod";
 import { adminMiddleware, authMiddleware, ownerMiddleware } from "../middleware/auth";
 
+import { datasetLandingUrl, datasetVersionLandingUrl } from "../../../shared/datacite-constants.js";
 import { LIVE_DATASETS, isLiveDataset } from "../constants";
 import { tombstoneUserStatement } from "../db/user-tombstone";
 import { SYSTEM_USER_ID } from "../lib/constants";
@@ -2124,7 +2125,7 @@ adminRoutes.post("/datasets/:id/doi/update", zValidator("json", updateDoiSchema)
 
       const metadata = bidsToDataCite(datasetId, doi, bidsDesc, enrichment);
       updateOptions.dataciteXml = buildDataCiteXml(metadata);
-      updateOptions.target = `https://nemar.org/dataexplorer/detail?dataset_id=${datasetId}`;
+      updateOptions.target = datasetLandingUrl(datasetId);
       metadataRefreshed = true;
     }
 
@@ -2132,7 +2133,7 @@ adminRoutes.post("/datasets/:id/doi/update", zValidator("json", updateDoiSchema)
     if (body.status) {
       if (body.status === "public" && dataset.ezid_status === "reserved") {
         updateOptions.status = "public";
-        updateOptions.target = `https://nemar.org/dataexplorer/detail?dataset_id=${datasetId}`;
+        updateOptions.target = datasetLandingUrl(datasetId);
       } else if (body.status === "unavailable") {
         updateOptions.status = "unavailable";
       }
@@ -2197,7 +2198,7 @@ adminRoutes.post("/datasets/:id/doi/update", zValidator("json", updateDoiSchema)
           const vMetadata = bidsToDataCite(datasetId, vDoi, bidsDesc, vEnrichment);
           vMetadata.version = ver.version;
           const vXml = buildDataCiteXml(vMetadata);
-          const vTarget = `https://nemar.org/dataexplorer/detail?dataset_id=${datasetId}&version=${ver.version}`;
+          const vTarget = datasetVersionLandingUrl(datasetId, ver.version);
           await ezidUpdateIdentifier(auth, versionIdentifier, {
             dataciteXml: vXml,
             target: vTarget,
@@ -4507,7 +4508,7 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
       if (vtResult instanceof Response) return vtResult;
       const { version, tag, datasetDesc } = vtResult;
 
-      const nemarUrl = `https://nemar.org/dataexplorer/detail?dataset_id=${datasetId}`;
+      const nemarUrl = datasetLandingUrl(datasetId);
       const archiveLine = `**Download:** [${tag}.zip](https://github.com/nemarDatasets/${repoName}/archive/refs/tags/${tag}.zip)`;
       const sections = [
         `# ${dataset.name} - Version ${version}`,
@@ -4572,7 +4573,7 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
         }
 
         const auth = resolveEzidAuth(c.env, sandbox || !!dataset.is_sandbox);
-        const target = `https://nemar.org/dataexplorer/detail?dataset_id=${datasetId}`;
+        const target = datasetLandingUrl(datasetId);
         await ezidMakePublic(auth, dataset.ezid_identifier, target);
 
         // Update EZID status in D1

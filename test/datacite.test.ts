@@ -1468,7 +1468,7 @@ describe("seedFromBids", () => {
     expect(githubEntry?.relation_type).toBe("IsDescribedBy");
 
     const nemarEntry = seeded.related_identifiers?.find(
-      (r) => r.identifier === "https://nemar.org/dataexplorer/detail?dataset_id=nm000108",
+      (r) => r.identifier === "https://nemar.org/dataset/nm000108",
     );
     expect(nemarEntry).toBeDefined();
     expect(nemarEntry?.identifier_type).toBe("URL");

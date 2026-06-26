@@ -186,3 +186,25 @@ export interface NemarMetadataV2 {
 
 /** Union of both versions. */
 export type NemarMetadata = NemarMetadataV1 | NemarMetadataV2;
+
+// ---------------------------------------------------------------------------
+// Dataset landing URLs (DOI _target + enrichment links)
+// ---------------------------------------------------------------------------
+
+/**
+ * Canonical NEMAR dataset landing URL used as the DOI `_target` and in
+ * enrichment/README links. Permanent and provider-agnostic; today
+ * `nemar.org/dataset/<id>` forwards to `ww2.nemar.org/dataset/<id>`.
+ * Replaces the retired legacy `nemar.org/dataexplorer/detail?dataset_id=<id>`.
+ */
+export function datasetLandingUrl(datasetId: string): string {
+  return `https://nemar.org/dataset/${datasetId}`;
+}
+
+/**
+ * Version-specific landing URL. `version` is the plain semver string (e.g.
+ * `1.1.0`); the `?v=v<version>` form is what the ww2 dataset page honors.
+ */
+export function datasetVersionLandingUrl(datasetId: string, version: string): string {
+  return `https://nemar.org/dataset/${datasetId}?v=v${version}`;
+}
