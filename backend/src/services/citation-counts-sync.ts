@@ -16,7 +16,7 @@
 
 const MANIFEST_URL = "https://dashboard.nemar.org/citations/api/index.json";
 const FETCH_TIMEOUT_MS = 30_000;
-const BATCH_SIZE = 10; // D1 bound-parameter batch limit (mirrors catalog-sync)
+const BATCH_SIZE = 10; // D1 bound-parameter batch limit
 
 export interface CitationCountRow {
   dataset_id: string;

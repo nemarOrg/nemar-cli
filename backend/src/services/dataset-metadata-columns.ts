@@ -7,7 +7,7 @@
  *
  * Source data is reused from existing helpers — see references on each
  * field — so the two callers (the LLM enrichment webhook and the
- * post-version-DOI nemar.org sync) compute identical values.
+ * post-version-DOI metadata refresh) compute identical values.
  *
  * NULL semantics: when an input is missing, the corresponding output field
  * is null rather than 0/"" so downstream queries can distinguish
@@ -15,8 +15,8 @@
  */
 
 import { licenseTier } from "../lib/license.js";
+import { countSubjectDirs, extractTasks, parseParticipantsTsv } from "./bids-tree.js";
 import { detectModalitiesFromTree } from "./datacite.js";
-import { countSubjectDirs, extractTasks, parseParticipantsTsv } from "./nemar-sync.js";
 
 export interface DatasetMetadataColumns {
   subject_count: number | null;
@@ -67,11 +67,11 @@ export interface MetadataColumnInputs {
  * - subject_count: the `subjectCount` override when > 0; else the count of
  *   root-level `sub-*` dirs via `countSubjectDirs` (#759); else the
  *   participants.tsv row count. age_min / age_max derive from participants.tsv
- *   via `parseParticipantsTsv` (`backend/src/services/nemar-sync.ts`).
+ *   via `parseParticipantsTsv` (`backend/src/services/bids-tree.ts`).
  * - modalities: the `modalities` override when non-empty; else
  *   `detectModalitiesFromTree` (`backend/src/services/datacite.ts`), sorted CSV.
  * - tasks: the `tasks` override UNIONed with `extractTasks(treePaths)`
- *   (`backend/src/services/nemar-sync.ts`) so neither a missed sample subject
+ *   (`backend/src/services/bids-tree.ts`) so neither a missed sample subject
  *   nor a truncated tree loses one; else just the tree-path tasks. Sorted, deduped.
  * - file_size / total_files mirror `getDatasetS3Stats` output
  *   (`backend/src/services/s3.ts:218`).

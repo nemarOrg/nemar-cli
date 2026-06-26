@@ -63,8 +63,6 @@ export interface Bindings {
   TEST_BYPASS_TOKEN?: string; // Optional - for CI/CD rate limit bypass
   ENCRYPTION_KEY?: string; // For encrypting stored credentials
   OPENROUTER_API_KEY?: string; // For LLM-based metadata enrichment
-  NEMAR_USERNAME?: string; // nemar.org datapipeline API credentials
-  NEMAR_PASSWORD?: string;
 
   // ORCID SSO (#832). Confidential OAuth client; login works on the free
   // Public API tier (no Member API needed). All optional: when CLIENT_ID /

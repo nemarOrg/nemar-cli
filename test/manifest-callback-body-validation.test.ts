@@ -7,8 +7,7 @@
  * so a future regression that, e.g., accepts an empty dataset_id or a
  * non-object body can't reach the D1 layer.
  *
- * Mirrors the test pattern used for `validateEnrichmentRef` and
- * `shouldSyncToNemarAfterVersionDoi`: real assertions, no mocks.
+ * Mirrors the test pattern used for `validateEnrichmentRef`: real assertions, no mocks.
  */
 
 import { describe, expect, test } from "bun:test";
