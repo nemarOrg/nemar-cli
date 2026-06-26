@@ -15,8 +15,7 @@
  * structured EnrichmentRunResult without re-implementing the matrix.
  */
 
-import type { NemarMetadataV2 } from "../../../shared/datacite-constants.js";
-import { datasetLandingUrl } from "../../../shared/datacite-constants.js";
+import { type NemarMetadataV2, datasetLandingUrl } from "../../../shared/datacite-constants.js";
 import type { Bindings } from "../types/bindings.js";
 import {
   bidsToDataCite,
