@@ -11,6 +11,7 @@ import {
   type NemarMetadataV2,
   type RelatedIdentifierEntry,
   type StructuredKeyword,
+  datasetLandingUrl,
   isValidRelationType,
 } from "../../../shared/datacite-constants.js";
 
@@ -369,7 +370,7 @@ export function seedFromBids(
         relation_type: "IsDescribedBy",
       });
     }
-    const nemarUrl = `https://nemar.org/dataexplorer/detail?dataset_id=${datasetId}`;
+    const nemarUrl = datasetLandingUrl(datasetId);
     if (!relatedIds.some((r) => r.identifier === nemarUrl)) {
       relatedIds.push({
         identifier: nemarUrl,

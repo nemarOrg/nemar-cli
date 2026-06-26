@@ -5,6 +5,7 @@
  * Each dataset has its own doi_provider; existing Zenodo datasets keep working.
  */
 
+import { datasetLandingUrl, datasetVersionLandingUrl } from "../../../shared/datacite-constants.js";
 import type { BidsDatasetDescription, DataCiteEnrichment } from "./datacite";
 import { bidsToDataCite, buildDataCiteXml } from "./datacite";
 import {
@@ -189,7 +190,7 @@ async function createEzidConceptDoi(
   const dataciteXml = buildDataCiteXml(metadata);
 
   // DOI landing page: always the NEMAR website (not GitHub)
-  const target = `https://nemar.org/dataexplorer/detail?dataset_id=${options.datasetId}`;
+  const target = datasetLandingUrl(options.datasetId);
 
   let identifier: EzidIdentifier;
   try {
@@ -298,7 +299,7 @@ export async function createEzidVersionDoi(
   const dataciteXml = buildDataCiteXml(metadata);
 
   // Version DOI landing page: NEMAR website with version param (not GitHub release)
-  const target = `https://nemar.org/dataexplorer/detail?dataset_id=${opts.datasetId}&version=${opts.version}`;
+  const target = datasetVersionLandingUrl(opts.datasetId, opts.version);
 
   let identifier: EzidIdentifier;
   try {

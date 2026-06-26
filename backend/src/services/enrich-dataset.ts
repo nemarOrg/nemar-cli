@@ -16,6 +16,7 @@
  */
 
 import type { NemarMetadataV2 } from "../../../shared/datacite-constants.js";
+import { datasetLandingUrl } from "../../../shared/datacite-constants.js";
 import type { Bindings } from "../types/bindings.js";
 import {
   bidsToDataCite,
@@ -398,7 +399,7 @@ export async function enrichDataset(
           `[llm-enrich] Failed to update BIDS Name in D1 for ${datasetId}: ${errorMessage(dbErr)}`,
         );
       }
-      const nemarUrl = `https://nemar.org/dataexplorer/detail?dataset_id=${datasetId}`;
+      const nemarUrl = datasetLandingUrl(datasetId);
       const repoResult = await setRepoDescription(repoName, bidsName, pat, nemarUrl);
       if (!repoResult.ok) {
         console.error(
