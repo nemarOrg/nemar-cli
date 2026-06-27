@@ -1052,14 +1052,7 @@ async function handleEzidVersionDoiLegacy(
     // here -- the /webhooks/manifest-ready handler triggers the refresh after
     // the row insert lands.
     if (!centralFlow) {
-      c.executionCtx.waitUntil(
-        refreshDatasetMetadata(c.env, dataset.dataset_id).catch((err) =>
-          console.error(
-            `[webhook] metadata refresh failed for ${dataset.dataset_id} (non-fatal):`,
-            err,
-          ),
-        ),
-      );
+      c.executionCtx.waitUntil(refreshMetadataAfterVersionDoi(c.env, dataset.dataset_id));
     }
 
     return c.json({
@@ -1087,6 +1080,34 @@ async function handleEzidVersionDoiLegacy(
       },
       500,
     );
+  }
+}
+
+/**
+ * Background metadata-columns refresh after a version DOI is published.
+ * Non-fatal: the DOI is already minted, this is downstream cleanup. On a
+ * pre-refresh throw (e.g. a transient GitHub auth / tree-fetch failure, before
+ * refreshDatasetMetadata reaches its own metadata_columns_error write) the
+ * error is recorded to D1 so operators don't read a stale "success". (The
+ * legacy nemar.org sync this replaced was removed in epic #837.)
+ */
+async function refreshMetadataAfterVersionDoi(env: Bindings, datasetId: string): Promise<void> {
+  try {
+    await refreshDatasetMetadata(env, datasetId);
+  } catch (err) {
+    const msg = errorMessage(err);
+    console.error(`[webhook] metadata refresh failed for ${datasetId} (non-fatal):`, msg);
+    try {
+      await env.DB.prepare(
+        "UPDATE datasets SET metadata_columns_error = ?, updated_at = datetime('now') WHERE dataset_id = ?",
+      )
+        .bind(`metadata refresh threw before columns write: ${msg}`, datasetId)
+        .run();
+    } catch (d1Err) {
+      console.warn(
+        `[webhook] Failed to record metadata refresh error in D1 for ${datasetId}: ${d1Err}`,
+      );
+    }
   }
 }
 
@@ -1303,14 +1324,7 @@ async function handleZenodoVersionDoi(
     // non-fatal. Under centralFlow the dataset_versions row doesn't exist yet
     // here -- manifest-ready triggers the refresh after the row insert lands.
     if (!centralFlow) {
-      c.executionCtx.waitUntil(
-        refreshDatasetMetadata(c.env, dataset.dataset_id).catch((err) =>
-          console.error(
-            `[webhook] metadata refresh failed for ${dataset.dataset_id} (non-fatal):`,
-            err,
-          ),
-        ),
-      );
+      c.executionCtx.waitUntil(refreshMetadataAfterVersionDoi(c.env, dataset.dataset_id));
     }
 
     return c.json({
@@ -1564,14 +1578,7 @@ webhooks.post("/manifest-ready", async (c) => {
   // columns HERE, after the row insert lands. (The legacy nemar.org sync was
   // removed in epic #837.) Background + non-fatal.
   if (job.doi) {
-    c.executionCtx.waitUntil(
-      refreshDatasetMetadata(c.env, body.dataset_id).catch((err) =>
-        console.error(
-          `[manifest-ready] metadata refresh failed for ${body.dataset_id} (non-fatal):`,
-          err,
-        ),
-      ),
-    );
+    c.executionCtx.waitUntil(refreshMetadataAfterVersionDoi(c.env, body.dataset_id));
   }
 
   const fileCount = body.totals?.files ?? 0;
