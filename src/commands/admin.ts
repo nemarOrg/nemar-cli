@@ -14,7 +14,6 @@
  * - nemar admin doi create/info/update/enrich - DOI management
  * - nemar admin publish list/deny/approve - Publication workflow
  * - nemar admin revert             - Revert dataset to a previous version
- * - nemar admin sync run/status    - nemar.org datapipeline sync
  * - nemar admin email-preferences show/update - Email notification opt-out
  * - nemar admin notice list/set/clear - System notice management
  * - nemar admin notify              - Send broadcast email to users
@@ -65,7 +64,6 @@ import {
   getFleetDrift,
   getImportStatus,
   getSummaryCoverage,
-  getSyncStatus,
   listAdminNotices,
   listDatasets,
   listPublishRequests,
@@ -80,7 +78,6 @@ import {
   sendBroadcast,
   submitEnrichment,
   syncCi,
-  syncDataset,
   updateDoi,
   updateEmailPreferences,
   validateCi,
@@ -2995,90 +2992,6 @@ Examples:
   });
 
 // ============================================================================
-// nemar.org Datapipeline Sync (Admin Only)
-// ============================================================================
-
-const syncCommand = new Command("sync").description(
-  "Sync dataset metadata to nemar.org datapipeline",
-);
-
-syncCommand
-  .command("run")
-  .description("Sync a dataset to nemar.org")
-  .argument("<dataset-id>", "Dataset ID (e.g., nm000103)")
-  .action(async (datasetId: string) => {
-    if (!requireAuth()) return;
-
-    const spinner = ora(`Syncing ${datasetId} to nemar.org...`).start();
-    try {
-      const result = await syncDataset(datasetId);
-      if (result.synced) {
-        spinner.succeed(`${datasetId} synced to nemar.org`);
-      } else {
-        spinner.warn(`${datasetId} sync completed with errors:`);
-        for (const err of result.errors) {
-          console.log(chalk.red(`  - ${err}`));
-        }
-      }
-    } catch (err) {
-      spinner.fail(`Failed to sync ${datasetId}`);
-      console.error(chalk.red(errorDetail(err)));
-    }
-  });
-
-syncCommand
-  .command("status")
-  .description("Show nemar.org sync status for all published datasets")
-  .action(async () => {
-    if (!requireAuth()) return;
-
-    const spinner = ora("Fetching sync status...").start();
-    try {
-      const result = await getSyncStatus();
-      spinner.stop();
-
-      console.log(chalk.bold(`\nnemar.org Sync Status (${result.total} datasets)\n`));
-      console.log(
-        `  Synced: ${chalk.green(result.synced)}  Failed: ${chalk.red(result.failed)}  Pending: ${chalk.yellow(result.pending)}\n`,
-      );
-
-      if (result.datasets.length === 0) {
-        console.log(chalk.dim("  No published datasets found."));
-        return;
-      }
-
-      // Table header
-      console.log(
-        chalk.dim(
-          `  ${"ID".padEnd(12)} ${"Name".padEnd(40)} ${"Status".padEnd(10)} ${"Last Sync".padEnd(20)}`,
-        ),
-      );
-      console.log(chalk.dim(`  ${"─".repeat(85)}`));
-
-      for (const d of result.datasets) {
-        const status = d.nemar_sync_status || "pending";
-        const statusColor =
-          status === "synced" ? chalk.green : status === "failed" ? chalk.red : chalk.yellow;
-        const syncAt = d.nemar_sync_at ? new Date(d.nemar_sync_at).toLocaleDateString() : "-";
-        const rawName = d.name || d.dataset_id;
-        const name = rawName.length > 38 ? `${rawName.substring(0, 35)}...` : rawName;
-
-        console.log(
-          `  ${d.dataset_id.padEnd(12)} ${name.padEnd(40)} ${statusColor(status.padEnd(10))} ${syncAt}`,
-        );
-        if (d.nemar_sync_error) {
-          console.log(chalk.red(`    Error: ${d.nemar_sync_error}`));
-        }
-      }
-    } catch (err) {
-      spinner.fail("Failed to fetch sync status");
-      console.error(chalk.red(errorDetail(err)));
-    }
-  });
-
-adminCommand.addCommand(syncCommand);
-
-// ============================================================================
 // Import jobs (issue #754)
 // ============================================================================
 
@@ -3231,9 +3144,6 @@ function printReindexLine(r: ReindexResponse, opts?: { showRef?: boolean }): voi
   const ref = opts?.showRef && r.enrichment.ref ? chalk.dim(`@${r.enrichment.ref}`) : "";
   console.log(`  ${r.dataset_id.padEnd(12)} ${enr}${ref}  ${sync}  ${cols}`);
   if (r.enrichment.error) console.log(chalk.red(`    enrichment: ${r.enrichment.error}`));
-  if (r.sync.errors?.length) {
-    for (const e of r.sync.errors) console.log(chalk.red(`    sync: ${e}`));
-  }
   if (r.sync.metadata_columns_error) {
     console.log(chalk.red(`    metadata columns: ${r.sync.metadata_columns_error}`));
   }

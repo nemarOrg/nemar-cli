@@ -17,6 +17,7 @@
 
 import { type NemarMetadataV2, datasetLandingUrl } from "../../../shared/datacite-constants.js";
 import type { Bindings } from "../types/bindings.js";
+import { countSessionDirs } from "./bids-tree.js";
 import {
   bidsToDataCite,
   buildDataCiteXml,
@@ -55,7 +56,6 @@ import {
   validateMeshTerms,
   validateMetadata,
 } from "./llm-enrich.js";
-import { countSessionDirs } from "./nemar-sync.js";
 import { ensureParticipantsTsv } from "./participants-tsv.js";
 import { errorMessage, extractRepoName } from "./repo-metadata.js";
 import { extractExtensions, formatBytes, getDatasetS3Stats } from "./s3.js";

@@ -2267,8 +2267,8 @@ export function modalitiesFromSubjectSubtree(relPaths: string[]): string[] {
 
 /**
  * BIDS task labels found in a subject's subtree filenames, matching
- * `extractTasks`'s `_task-<label>` regex (kept in sync; github.ts can't import
- * nemar-sync without a cycle). Pure; unit-tested.
+ * `extractTasks`'s `_task-<label>` regex in bids-tree.ts (kept in sync).
+ * Pure; unit-tested.
  */
 export function tasksFromSubjectSubtree(relPaths: string[]): string[] {
   const found = new Set<string>();

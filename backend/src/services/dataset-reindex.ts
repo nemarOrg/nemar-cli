@@ -1,12 +1,12 @@
 /**
  * Dataset reindex helpers (epic #417 phase 3).
  *
- * Two reusable building blocks plus a SQL-filter helper for bulk reindex:
+ * Three reusable building blocks:
  *
- * - runDatasetSync: gathers tree + participants.tsv + S3 stats + manifest
- *   for a dataset, pushes to the nemar.org datapipeline via
- *   syncDatasetToNemar, and updates both the existing nemar_sync_* fields
- *   and the Phase 2 metadata columns + metadata_columns_error in D1.
+ * - refreshDatasetMetadata: gathers the GitHub tree + dataset_description.json +
+ *   README + participants.tsv + S3 stats for a dataset and refreshes the Phase 2
+ *   metadata columns + catalog fields + Vectorize embedding in D1. (The legacy
+ *   nemar.org datapipeline push was removed in epic #837 Phase 3.)
  *
  * - runEnrichmentForDataset: invokes enrichDataset() in services/enrich-dataset.ts
  *   directly so callers reuse the full enrichment pipeline without an HTTP
@@ -14,13 +14,10 @@
  *
  * - buildReindexFilterQuery: pure SQL-builder for the bulk admin endpoint
  *   so the filter matrix is unit-testable without a D1 harness.
- *
- * Replaces the duplicated sync flow previously inlined in
- * webhooks.ts:syncToNemarAfterVersionDoi and admin.ts:/datasets/:id/sync.
  */
 
 import type { Bindings } from "../types/bindings.js";
-import { parseNemarMetadata } from "./datacite.js";
+import { countSessionDirs } from "./bids-tree.js";
 import {
   computeDatasetMetadataColumns,
   writeDatasetCatalogFields,
@@ -30,27 +27,17 @@ import { reembedDatasetVector } from "./dataset-search.js";
 import { enrichDataset } from "./enrich-dataset.js";
 import { getDatasetsToken } from "./github-auth.js";
 import { getBidsTreeStats, getBlobContent, getTreeAtRef } from "./github.js";
-import { countSessionDirs, syncDatasetToNemar } from "./nemar-sync.js";
 import { errorMessage } from "./repo-metadata.js";
-import { getArchiveSize, getDatasetS3Stats, getManifest } from "./s3.js";
+import { getDatasetS3Stats } from "./s3.js";
 
-export interface DatasetSyncResult {
-  synced: boolean;
-  errors: string[];
+export interface RefreshMetadataResult {
   metadata_columns_written: boolean;
   metadata_columns_error?: string;
-  /**
-   * True when the nemar.org sync was intentionally skipped (e.g. OpenNeuro
-   * datasets that don't yet have an `alternate_id` mapping). The metadata
-   * columns block still runs in that case; only the upstream push is
-   * suppressed. `synced` is false and `errors` carries the skip reason.
-   */
-  nemar_sync_skipped?: boolean;
 }
 
 /**
- * Typed error class so admin routes can map runDatasetSync failures to the
- * right HTTP status without substring-matching error messages. Status codes
+ * Typed error class so admin routes can map refreshDatasetMetadata failures to
+ * the right HTTP status without substring-matching error messages. Status codes
  * are intentionally narrow: 400 for caller-side issues (bad dataset config),
  * 404 when the dataset row is missing, 500 for upstream / config failures.
  */
@@ -64,17 +51,6 @@ export class DatasetReindexError extends Error {
   }
 }
 
-export interface RunDatasetSyncOptions {
-  /**
-   * Fallback version DOI to use when the most-recent dataset_versions row is
-   * not yet visible (D1 read-after-write race). Set by the webhook caller
-   * that just minted this DOI in the same request.
-   */
-  versionDoiOverride?: string;
-  /** Companion override for versionDoiOverride. */
-  versionOverride?: string;
-}
-
 function s3Cfg(env: Bindings) {
   return {
     bucket: env.S3_BUCKET,
@@ -85,45 +61,26 @@ function s3Cfg(env: Bindings) {
 }
 
 /**
- * Gather upstream data and push it to nemar.org + refresh D1 metadata columns.
+ * Gather upstream data and refresh D1 metadata columns + catalog fields +
+ * Vectorize embedding for a dataset.
  *
  * Throws DatasetReindexError for caller-recoverable validation failures
- * (missing dataset row, sandbox xx* dataset, bad github_repo, missing creds)
- * so admin routes can map them to specific HTTP status codes. OpenNeuro on*
- * datasets are handled inline by skipping the nemar.org push and surfacing
- * `nemar_sync_skipped: true` in the result — the metadata-columns block
- * still runs because the catalog endpoint and data.nemar.org/<id>/metadata.json
- * need those columns (#512).
- *
- * Re-throws the underlying error (wrapped with context) when the initial
- * GitHub tree fetch fails. Once the tree is in hand, every downstream sub-step
- * has its own try/catch and is reported through the return value or D1 fields.
+ * (missing dataset row, sandbox xx* dataset, bad github_repo) so admin routes
+ * can map them to specific HTTP status codes. Re-throws the underlying error
+ * (wrapped with context) when the initial GitHub tree fetch fails. Once the
+ * tree is in hand, every downstream sub-step has its own try/catch and is
+ * reported through the return value or the metadata_columns_error D1 field.
  */
-export async function runDatasetSync(
+export async function refreshDatasetMetadata(
   env: Bindings,
   datasetId: string,
-  options?: RunDatasetSyncOptions,
-): Promise<DatasetSyncResult> {
+): Promise<RefreshMetadataResult> {
   const db = env.DB;
 
   const dataset = await db
-    .prepare(
-      `SELECT d.dataset_id, d.name, d.description, d.github_repo, d.concept_doi, d.created_at,
-              u.username AS owner_username
-       FROM datasets d
-       LEFT JOIN users u ON d.owner_user_id = u.id
-       WHERE d.dataset_id = ?`,
-    )
+    .prepare("SELECT dataset_id, github_repo FROM datasets WHERE dataset_id = ?")
     .bind(datasetId)
-    .first<{
-      dataset_id: string;
-      name: string | null;
-      description: string | null;
-      github_repo: string | null;
-      concept_doi: string | null;
-      created_at: string | null;
-      owner_username: string | null;
-    }>();
+    .first<{ dataset_id: string; github_repo: string | null }>();
 
   if (!dataset) {
     throw new DatasetReindexError(`Dataset not found: ${datasetId}`, 404);
@@ -131,34 +88,8 @@ export async function runDatasetSync(
   if (!dataset.github_repo) {
     throw new DatasetReindexError(`Dataset has no GitHub repository: ${datasetId}`, 400);
   }
-  // OpenNeuro datasets can't push to nemar.org yet (the datapipeline needs an
-  // alternate_id mapping that doesn't exist), but they CAN have their D1
-  // metadata columns refreshed from the same GitHub tree + participants.tsv we
-  // would have used. Previously this throw blocked everything, so on* datasets
-  // returned NULL for modalities / subject_count / tasks in the catalog
-  // forever (#512). The skip flag is honoured below to suppress only the
-  // nemar.org push; the metadata-columns block still runs.
-  const skipNemarSync = datasetId.startsWith("on");
-
-  // Only the nemar.org push needs NEMAR creds. Defer the check so on*
-  // reindex works in test/staging envs where NEMAR_{USERNAME,PASSWORD} aren't
-  // set, and so the operator sees a 400 about an unsupported dataset prefix
-  // rather than a 500 about an unrelated configuration gap.
-  let nemarUser: string | undefined;
-  let nemarPass: string | undefined;
-  if (!skipNemarSync) {
-    nemarUser = env.NEMAR_USERNAME;
-    nemarPass = env.NEMAR_PASSWORD;
-    if (!nemarUser || !nemarPass) {
-      throw new DatasetReindexError("NEMAR_USERNAME / NEMAR_PASSWORD not configured", 500);
-    }
-  }
-
   if (datasetId.startsWith("xx")) {
-    throw new DatasetReindexError(
-      `Sandbox dataset ${datasetId} is not eligible for nemar.org sync`,
-      400,
-    );
+    throw new DatasetReindexError(`Sandbox dataset ${datasetId} is not eligible for reindex`, 400);
   }
 
   const repoParts = dataset.github_repo.split("/");
@@ -167,8 +98,8 @@ export async function runDatasetSync(
     throw new DatasetReindexError(`Invalid github_repo format: ${dataset.github_repo}`, 400);
   }
   // Wrap so a GitHub-auth failure surfaces as a DatasetReindexError; bulk
-  // callers (admin reindex endpoint) update nemar_sync_status only on
-  // typed throws — an unguarded throw here would skip that status write.
+  // callers (admin reindex endpoint) report typed throws — an unguarded throw
+  // here would be a generic 500.
   let pat: string;
   try {
     pat = await getDatasetsToken(env);
@@ -190,7 +121,7 @@ export async function runDatasetSync(
     );
   }
 
-  // dataset_description.json + README + .nemar/metadata.json for the nemar.org payload.
+  // dataset_description.json -> bids_version; README -> catalog readme field.
   let bidsDescription: Record<string, unknown> = {};
   const bidsFile = tree.find((f) => f.path === "dataset_description.json");
   if (bidsFile) {
@@ -203,11 +134,6 @@ export async function runDatasetSync(
     }
   }
   const readmeFile = tree.find((f) => f.path === "README" || f.path === "README.md");
-  // Mirror the dataset_description.json / .nemar/metadata.json catch pattern:
-  // an unguarded throw here used to escape runDatasetSync entirely, skipping
-  // both the nemar_sync_status update and the metadata-columns write — so a
-  // transient GitHub error would leave D1 holding stale status with no
-  // record that the sync was attempted.
   let readme = "";
   if (readmeFile) {
     try {
@@ -216,69 +142,15 @@ export async function runDatasetSync(
       console.warn(`[reindex] Failed to read README for ${datasetId}: ${errorMessage(err)}`);
     }
   }
-  let nemarMeta = null;
-  const nemarMetaFile = tree.find((f) => f.path === ".nemar/metadata.json");
-  if (nemarMetaFile) {
-    try {
-      const raw = JSON.parse(await getBlobContent(repoName, nemarMetaFile.sha, pat));
-      const parsed = parseNemarMetadata(raw);
-      if (parsed?.version === "2.0") nemarMeta = parsed;
-    } catch (err) {
-      console.warn(
-        `[reindex] Failed to parse .nemar/metadata.json for ${datasetId}: ${errorMessage(err)}`,
-      );
-    }
-  }
 
-  // Latest version + publication info from D1.
-  const [latestVersion, pubRequest, repoInfo] = await Promise.all([
-    db
-      .prepare(
-        "SELECT version, doi, created_at FROM dataset_versions WHERE dataset_id = ? ORDER BY created_at DESC LIMIT 1",
-      )
-      .bind(datasetId)
-      .first<{ version: string; doi: string; created_at: string }>(),
-    db
-      .prepare(
-        "SELECT approved_at FROM publication_requests WHERE dataset_id = ? AND status = 'published' ORDER BY approved_at DESC LIMIT 1",
-      )
-      .bind(datasetId)
-      .first<{ approved_at: string | null }>(),
-    fetch(`https://api.github.com/repos/nemarDatasets/${repoName}`, {
-      headers: { Authorization: `token ${pat}`, Accept: "application/vnd.github.v3+json" },
-    })
-      .then(async (r) => {
-        if (!r.ok) {
-          console.warn(`[reindex] GitHub repo info for ${repoName}: HTTP ${r.status}`);
-          return null;
-        }
-        return r.json() as Promise<{ created_at?: string }>;
-      })
-      .catch((err) => {
-        console.warn(`[reindex] GitHub repo info fetch failed for ${repoName}: ${err}`);
-        return null;
-      }),
-  ]);
-
-  // S3 stats split: the nemar.org call accepts a fallback {0,0}, but the
-  // metadata-column writer needs to know if the measurement is real (null on
-  // failure) so it doesn't overwrite valid values with zeros.
+  // S3 stats: null on failure so the metadata-column writer doesn't overwrite
+  // valid values with zeros.
   let s3StatsForColumns: { totalSize: number; objectCount: number | undefined } | null = null;
-  const [s3Stats, zipFileSize] = await Promise.all([
-    getDatasetS3Stats(s3, datasetId)
-      .then((r) => {
-        s3StatsForColumns = r;
-        return r;
-      })
-      .catch((err) => {
-        console.warn(`[reindex] S3 stats failed for ${datasetId}: ${err}`);
-        return { totalSize: 0, objectCount: 0 as number | undefined };
-      }),
-    getArchiveSize(s3, datasetId).catch((err) => {
-      console.warn(`[reindex] Archive size failed for ${datasetId}: ${err}`);
-      return 0;
-    }),
-  ]);
+  try {
+    s3StatsForColumns = await getDatasetS3Stats(s3, datasetId);
+  } catch (err) {
+    console.warn(`[reindex] S3 stats failed for ${datasetId}: ${err}`);
+  }
 
   // participants.tsv for subject_count/age fields.
   let participantsTsv: string | null = null;
@@ -293,92 +165,7 @@ export async function runDatasetSync(
     }
   }
 
-  // Version manifest from S3 (accurate annex sizes).
-  let manifest = null;
-  if (latestVersion?.version) {
-    try {
-      const raw = await getManifest(s3, datasetId, latestVersion.version);
-      if (raw) {
-        try {
-          manifest = JSON.parse(raw);
-        } catch (parseErr) {
-          console.warn(
-            `[reindex] Manifest JSON corrupted for ${datasetId} v${latestVersion.version}: ${parseErr}`,
-          );
-        }
-      }
-    } catch (err) {
-      console.warn(`[reindex] Failed to fetch manifest from S3 for ${datasetId}: ${err}`);
-    }
-  }
-
-  // Push to nemar.org. Skipped wholesale for OpenNeuro datasets — the
-  // datapipeline can't accept them yet (no alternate_id mapping) so we leave
-  // nemar_sync_status untouched, fall through to the metadata-columns block,
-  // and surface the skip via the return value.
-  let syncResult: { synced: boolean; errors: string[] };
-  if (skipNemarSync) {
-    // Distinguish the on* skip from a real "synced: false" in the logs so
-    // operators correlating reindex runs can tell intentional skip from
-    // genuine failure. The metadata-columns block below still runs and
-    // produces its own log line — both lines together describe what happened.
-    console.log(
-      `[reindex] nemar.org sync skipped for ${datasetId} (OpenNeuro alternate_id mapping unavailable)`,
-    );
-    syncResult = {
-      synced: false,
-      errors: ["nemar.org sync skipped: OpenNeuro dataset has no alternate_id mapping yet"],
-    };
-  } else {
-    // Non-skip branch: credentials were validated above (skipNemarSync is false).
-    // The non-null assertions are safe — if nemarUser/nemarPass were undefined
-    // we would have thrown DatasetReindexError before reaching this point.
-    syncResult = await syncDatasetToNemar(nemarUser!, nemarPass!, {
-      datasetId,
-      bidsDescription,
-      nemarMetadata: nemarMeta,
-      readme,
-      tree,
-      conceptDoi: dataset.concept_doi,
-      // Fall back to the caller-supplied overrides when the D1 versions row is
-      // not yet visible. This covers the webhook path where the version row
-      // was just inserted in the same request and the post-DOI sync runs via
-      // waitUntil before D1 read-after-write replication catches up.
-      latestVersionDoi: latestVersion?.doi || options?.versionDoiOverride || null,
-      latestVersion: latestVersion?.version || options?.versionOverride || null,
-      versionCreatedAt: latestVersion?.created_at || null,
-      ownerUsername: dataset.owner_username || "unknown",
-      createdAt: dataset.created_at || null,
-      publishDate: pubRequest?.approved_at || null,
-      repoName,
-      pat,
-      manifest,
-      s3Stats,
-      zipFileSize,
-      repoCreatedAt: repoInfo?.created_at || null,
-    });
-
-    // Persist nemar.org sync status. Guard against transient D1 errors so a
-    // hiccup here doesn't unwind past the metadata-columns block below, which
-    // is the only path that records its own failure into D1.
-    try {
-      await db
-        .prepare(
-          `UPDATE datasets SET nemar_sync_status = ?, nemar_sync_at = CASE WHEN ? = 'synced' THEN datetime('now') ELSE nemar_sync_at END, nemar_sync_error = ?, updated_at = datetime('now') WHERE dataset_id = ?`,
-        )
-        .bind(
-          syncResult.synced ? "synced" : "failed",
-          syncResult.synced ? "synced" : "failed",
-          syncResult.errors.length ? syncResult.errors.join("; ") : null,
-          datasetId,
-        )
-        .run();
-    } catch (statusErr) {
-      console.error(`[reindex] Failed to persist nemar_sync_status for ${datasetId}:`, statusErr);
-    }
-  }
-
-  // Refresh Phase 2 metadata columns. Failure here doesn't fail the sync.
+  // Refresh Phase 2 metadata columns + catalog fields + embedding.
   let metadataColumnsError: string | undefined;
   let metadataColumnsWritten = false;
   try {
@@ -439,7 +226,7 @@ export async function runDatasetSync(
   try {
     await db
       .prepare(
-        `UPDATE datasets SET metadata_columns_error = ?, updated_at = datetime('now') WHERE dataset_id = ?`,
+        "UPDATE datasets SET metadata_columns_error = ?, updated_at = datetime('now') WHERE dataset_id = ?",
       )
       .bind(metadataColumnsError ?? null, datasetId)
       .run();
@@ -450,11 +237,8 @@ export async function runDatasetSync(
   }
 
   return {
-    synced: syncResult.synced,
-    errors: syncResult.errors,
     metadata_columns_written: metadataColumnsWritten,
     metadata_columns_error: metadataColumnsError,
-    ...(skipNemarSync ? { nemar_sync_skipped: true } : {}),
   };
 }
 
@@ -579,12 +363,11 @@ export function buildReindexFilterQuery(
   filter: ReindexFilter,
   options?: ReindexFilterOptions,
 ): { sql: string; params: unknown[] } {
-  // Excludes xx% datasets (sandbox/throwaway, not eligible for nemar.org sync
-  // — see dataset deletion/publish handlers for the same short-circuit). on%
-  // datasets ARE included now: runDatasetSync skips the nemar.org push for
-  // them but still refreshes D1 metadata columns + LLM enrichment, which is
-  // what the catalog endpoint and data.nemar.org/<id>/metadata.json need
-  // (#512). The skip flag surfaces in the result for operator visibility.
+  // Excludes xx% datasets (sandbox/throwaway, not eligible for reindex — see
+  // dataset deletion/publish handlers for the same short-circuit). nm% and on%
+  // datasets are both refreshed: refreshDatasetMetadata recomputes their D1
+  // metadata columns + LLM enrichment, which the catalog endpoint and
+  // data.nemar.org/<id>/metadata.json need (#512).
   const base =
     "SELECT dataset_id FROM datasets WHERE github_repo IS NOT NULL AND dataset_id NOT LIKE 'xx%'";
   if (filter === "all") {
