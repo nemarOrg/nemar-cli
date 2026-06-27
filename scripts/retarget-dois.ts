@@ -38,6 +38,7 @@
 
 import { execFileSync } from "node:child_process";
 import { type EzidAuth, getIdentifier, updateIdentifier } from "../backend/src/services/ezid.js";
+import { isRetryable } from "../backend/src/services/retry.js";
 import { datasetLandingUrl, datasetVersionLandingUrl } from "../shared/datacite-constants.js";
 
 const SCCN_ACCOUNT_ID = "da8d7a2a8680dab01592bbbc6f67f12c";
@@ -152,9 +153,10 @@ async function withRetry<T>(fn: () => Promise<T>, label: string, attempts = 3): 
       return await fn();
     } catch (err) {
       lastErr = err;
-      const msg = err instanceof Error ? err.message : String(err);
-      // Retry transient (network / 5xx) only; a 4xx (bad identifier) won't fix itself.
-      if (/40[0-9]/.test(msg) && !/429/.test(msg)) break;
+      // Use the project's structural classifier (HttpError.status / status-prefixed
+      // message) so a 4xx stops early while a dataset id like "nm000401" never
+      // false-matches a "401". Idempotent re-runs recover anything not retried.
+      if (!isRetryable(err)) break;
       await new Promise((r) => setTimeout(r, 500 * 2 ** i));
     }
   }
