@@ -98,6 +98,9 @@ describe("Authentication API", () => {
           password: "TestPassword123!",
           github_username: "octocat",
           description: "I need NEMAR access for testing and research purposes.",
+          orcid: "0000-0002-1825-0097",
+          city: "San Diego",
+          country: "United States",
         }),
       });
 
@@ -114,6 +117,9 @@ describe("Authentication API", () => {
           password: "TestPassword123!",
           github_username: "octocat",
           description: "I need NEMAR access for testing and research purposes.",
+          orcid: "0000-0002-1825-0097",
+          city: "San Diego",
+          country: "United States",
         }),
       });
 
@@ -130,6 +136,9 @@ describe("Authentication API", () => {
           password: "TestPassword123!",
           github_username: "test-user-gh",
           description: "I need NEMAR access for testing and research purposes.",
+          orcid: "0000-0002-1825-0097",
+          city: "San Diego",
+          country: "United States",
         }),
       });
 
@@ -146,6 +155,9 @@ describe("Authentication API", () => {
           password: "weak",
           github_username: "octocat",
           description: "I need NEMAR access for testing and research purposes.",
+          orcid: "0000-0002-1825-0097",
+          city: "San Diego",
+          country: "United States",
         }),
       });
 
@@ -161,6 +173,9 @@ describe("Authentication API", () => {
           password: "TestPassword123!",
           github_username: "octocat",
           description: "I need NEMAR access for testing and research purposes.",
+          orcid: "0000-0002-1825-0097",
+          city: "San Diego",
+          country: "United States",
         }),
       });
 
@@ -175,6 +190,9 @@ describe("Authentication API", () => {
           email: "unique@example.com",
           password: "TestPassword123!",
           github_username: "octocat",
+          orcid: "0000-0002-1825-0097",
+          city: "San Diego",
+          country: "United States",
         }),
       });
 
@@ -190,6 +208,9 @@ describe("Authentication API", () => {
           password: "TestPassword123!",
           github_username: "octocat",
           description: "Too short",
+          orcid: "0000-0002-1825-0097",
+          city: "San Diego",
+          country: "United States",
         }),
       });
 
