@@ -94,15 +94,78 @@ Examples:
 // Login
 // ============================================================================
 
+/**
+ * Decide how `nemar auth login` should treat a credential already on disk.
+ *
+ * The gate used to be `isAuthenticated()` alone, which only answers "is *a*
+ * key string stored?" — true even when that key was revoked or expired
+ * server-side (e.g. after `nemar auth regenerate-key` was run elsewhere).
+ * That made the CLI announce "Already logged in" and ask "different account?"
+ * when the user actually just needed to re-enter a renewed key for the SAME
+ * account (#851). We probe the stored key's liveness and branch on the result.
+ *
+ * Pure on purpose: all I/O (the liveness probe) happens in the caller so this
+ * decision stays unit-testable.
+ */
+export type LoginPreflight =
+  | { kind: "fresh" } // no usable stored credential — prompt for a key
+  | { kind: "stale"; username: string } // stored key revoked/expired — re-auth same account
+  | { kind: "active"; username: string }; // stored key still valid — adding another account
+
+export function decideLoginPreflight(input: {
+  hasStoredKey: boolean;
+  storedKeyValid: boolean;
+  username?: string;
+}): LoginPreflight {
+  if (!input.hasStoredKey) return { kind: "fresh" };
+  const username = input.username || "unknown";
+  return input.storedKeyValid ? { kind: "active", username } : { kind: "stale", username };
+}
+
 /** Exported login action handler for use in root-level shortcuts */
 export async function loginAction(options: { key?: string } & ConfirmOptions): Promise<void> {
-  // Check for existing authentication
+  // Check for existing authentication. isAuthenticated() only proves a key
+  // STRING is on disk, not that it still works, so probe the stored key's
+  // liveness before deciding how to greet the user (#851).
   if (isAuthenticated()) {
     const cfg = getConfig();
-    console.log(chalk.yellow(`Already logged in as ${cfg.username || "unknown"}`));
-    console.log(chalk.dim("  This will add another account (use 'nemar auth switch' to switch)"));
-    const result = await confirm("Log in with a different account?", options);
-    if (result !== "confirmed") return;
+    const storedKey = cfg.apiKey;
+    let storedKeyValid = false;
+    if (storedKey) {
+      const probe = ora("Checking your saved credentials...").start();
+      try {
+        const check = await login(storedKey);
+        storedKeyValid = check.valid;
+      } catch {
+        // Revoked/expired key surfaces as 401; offline surfaces as a network
+        // error. Either way treat the stored key as unusable — a transient
+        // blip just means the real login() call below re-checks and reports.
+        storedKeyValid = false;
+      } finally {
+        probe.stop();
+      }
+    }
+
+    const preflight = decideLoginPreflight({
+      hasStoredKey: true,
+      storedKeyValid,
+      username: cfg.username,
+    });
+
+    if (preflight.kind === "active") {
+      console.log(chalk.yellow(`Already logged in as ${preflight.username}`));
+      console.log(chalk.dim("  This will add another account (use 'nemar auth switch' to switch)"));
+      const result = await confirm("Add a different account?", options);
+      if (result !== "confirmed") return;
+    } else if (preflight.kind === "stale") {
+      // Stale: SAME account, dead key. Guide a straightforward re-auth instead
+      // of the misleading "different account?" prompt the bug report hit.
+      console.log(chalk.yellow(`Your saved API key for ${preflight.username} is no longer valid.`));
+      console.log(
+        chalk.dim("  It may have expired or been revoked (e.g. via 'nemar auth regenerate-key')."),
+      );
+      console.log(chalk.dim("  Enter your new key below to re-authenticate."));
+    }
   }
 
   // Get API key from options, environment, or prompt
@@ -447,7 +510,11 @@ export async function statusAction(options: { refresh?: boolean }): Promise<void
     } catch (error) {
       spinner.fail("Could not refresh user info");
       if (error instanceof ApiError && error.statusCode === 401) {
-        console.log(chalk.dim("  Your session may have expired. Try logging in again."));
+        // The stored key is dead — don't fall through to a green "Authenticated"
+        // banner that contradicts the failed refresh (#851).
+        console.log(chalk.yellow("  Your saved API key is no longer valid (expired or revoked)."));
+        console.log(chalk.dim("  Run 'nemar auth login' with a new key to re-authenticate."));
+        return;
       }
     }
   }
