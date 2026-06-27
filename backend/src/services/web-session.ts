@@ -201,6 +201,10 @@ export async function findSessionByCookieId(
   };
 }
 
+/** How a session was established. Stored on `web_sessions.auth_method`
+ *  (0050) so /auth/me and admin tooling can distinguish the flows. */
+export type AuthMethod = "email_code" | "orcid";
+
 /** Insert a new web_sessions row and return the row id + cookie
  *  options for the response. `cookieIdRaw` is returned to the caller
  *  so it can be set as the Set-Cookie value. */
@@ -210,6 +214,7 @@ export async function issueSession(
   remember: boolean,
   userAgent: string | null,
   ip: string | null,
+  authMethod: AuthMethod = "email_code",
 ): Promise<{ cookieIdRaw: string; maxAgeSeconds: number | undefined; expiresAt: string }> {
   const cookieIdRaw = generateCookieId();
   const cookieIdHash = await hashCookieId(cookieIdRaw);
@@ -219,10 +224,10 @@ export async function issueSession(
 
   await env.DB.prepare(
     `INSERT INTO web_sessions (
-       user_id, cookie_id_hash, remember, expires_at, user_agent, ip_hash
-     ) VALUES (?, ?, ?, ?, ?, ?)`,
+       user_id, cookie_id_hash, remember, expires_at, user_agent, ip_hash, auth_method
+     ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
   )
-    .bind(userId, cookieIdHash, remember ? 1 : 0, expiresAt, userAgent, ipHash)
+    .bind(userId, cookieIdHash, remember ? 1 : 0, expiresAt, userAgent, ipHash, authMethod)
     .run();
 
   return {

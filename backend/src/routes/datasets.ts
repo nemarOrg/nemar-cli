@@ -707,7 +707,7 @@ datasetRoutes.get("/", optionalAuthMiddleware, async (c) => {
     let query = `
       SELECT d.dataset_id, d.name, d.description, d.status, d.visibility,
              d.github_repo, d.concept_doi, d.created_at, d.updated_at,
-             u.username AS owner_username, d.nemar_sync_status,
+             u.username AS owner_username,
              d.source, d.source_id,
              COALESCE(d.modalities, '') AS modalities,
              COALESCE(d.subject_count, 0) AS participants,
@@ -754,7 +754,7 @@ datasetRoutes.get("/", optionalAuthMiddleware, async (c) => {
   let query = `
     SELECT d.dataset_id, d.dataset_id AS id, d.name, d.description, d.status, d.visibility,
            d.github_repo, d.concept_doi, d.concept_doi AS doi, d.created_at, d.updated_at,
-           COALESCE(d.uploader, u.username) AS owner_username, d.nemar_sync_status,
+           COALESCE(d.uploader, u.username) AS owner_username,
            d.source, d.source_id,
            COALESCE(d.modalities, '') AS modalities,
            COALESCE(d.subject_count, 0) AS participants,

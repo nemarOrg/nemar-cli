@@ -185,7 +185,12 @@ export interface SignupRequest {
   password: string;
   github_username: string;
   description: string;
-  orcid?: string;
+  /** Required (#835): canonical source for the user's name. */
+  orcid: string;
+  affiliation?: string;
+  /** Required for export-control screening (#835). */
+  city: string;
+  country: string;
 }
 
 export interface SignupResponse {
@@ -642,8 +647,6 @@ export interface Dataset {
   file_size_formatted?: string;
   /** 'managed' = in D1 datasets table, 'catalog' = nemar.org only */
   source_type?: "managed" | "catalog";
-  /** nemar.org sync status for managed datasets */
-  nemar_sync_status?: string | null;
   /** DOI field from catalog (for catalog-only datasets) */
   doi?: string | null;
   /** Import source (e.g. "openneuro") */
@@ -1975,42 +1978,6 @@ export async function importDataset(opts: {
 }
 
 // ============================================================================
-// Admin - nemar.org Datapipeline Sync
-// ============================================================================
-
-export interface SyncDatasetResponse {
-  dataset_id: string;
-  synced: boolean;
-  errors: string[];
-}
-
-export interface SyncStatusResponse {
-  datasets: Array<{
-    dataset_id: string;
-    name: string;
-    nemar_sync_status: string | null;
-    nemar_sync_at: string | null;
-    nemar_sync_error: string | null;
-  }>;
-  total: number;
-  synced: number;
-  failed: number;
-  pending: number;
-}
-
-export async function syncDataset(datasetId: string): Promise<SyncDatasetResponse> {
-  return request<SyncDatasetResponse>(
-    `/admin/datasets/${datasetId}/sync`,
-    { method: "POST" },
-    true,
-  );
-}
-
-export async function getSyncStatus(): Promise<SyncStatusResponse> {
-  return request<SyncStatusResponse>("/admin/sync/status", {}, true);
-}
-
-// ============================================================================
 // Import jobs (issue #754)
 // ============================================================================
 
@@ -2065,7 +2032,6 @@ export interface ReindexResponse {
   enrichment: { status: "ok" | "failed" | "skipped"; ref?: string; error?: string };
   sync: {
     status: "ok" | "failed" | "skipped";
-    errors?: string[];
     metadata_columns_written?: boolean;
     metadata_columns_error?: string;
   };

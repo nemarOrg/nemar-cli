@@ -140,7 +140,7 @@ describe.skipIf(!SHOULD_RUN)("EZID Sandbox Integration", { timeout: 30000 }, () 
       const minted = await mintIdentifier(EZID_TEST_AUTH, {
         shoulder: TEST_SHOULDER,
         status: "reserved",
-        target: `https://nemar.org/dataexplorer/detail?dataset_id=${TEST_DATASET_ID}`,
+        target: `https://nemar.org/dataset/${TEST_DATASET_ID}`,
         dataciteFields: {
           creator: "Test, User",
           title: `Test Dataset - ${new Date().toISOString()}`,
@@ -238,7 +238,7 @@ describe.skipIf(!SHOULD_RUN)("EZID Sandbox Integration", { timeout: 30000 }, () 
       const minted = await mintIdentifier(EZID_TEST_AUTH, {
         shoulder: TEST_SHOULDER,
         status: "reserved",
-        target: `https://nemar.org/dataexplorer/detail?dataset_id=${TEST_DATASET_ID}`,
+        target: `https://nemar.org/dataset/${TEST_DATASET_ID}`,
         dataciteXml: xml,
       });
 
@@ -604,7 +604,7 @@ describe.skipIf(!SHOULD_RUN)("EZID Sandbox Integration", { timeout: 30000 }, () 
       const minted = await mintIdentifier(EZID_TEST_AUTH, {
         shoulder: TEST_SHOULDER,
         status: "reserved",
-        target: `https://nemar.org/dataexplorer/detail?dataset_id=${TEST_DATASET_ID}`,
+        target: `https://nemar.org/dataset/${TEST_DATASET_ID}`,
         dataciteXml: xml,
       });
       createdIdentifiers.push(minted.identifier);
@@ -628,7 +628,7 @@ describe.skipIf(!SHOULD_RUN)("EZID Sandbox Integration", { timeout: 30000 }, () 
 
       const created = await createIdentifier(EZID_TEST_AUTH, deterministicId, {
         status: "reserved",
-        target: `https://nemar.org/dataexplorer/detail?dataset_id=${TEST_DATASET_ID}`,
+        target: `https://nemar.org/dataset/${TEST_DATASET_ID}`,
         dataciteXml: xml,
       });
 
@@ -740,7 +740,7 @@ describe.skipIf(!SHOULD_RUN)("EZID Sandbox Integration", { timeout: 30000 }, () 
       const minted = await mintIdentifier(EZID_TEST_AUTH, {
         shoulder: TEST_SHOULDER,
         status: "reserved",
-        target: `https://nemar.org/dataexplorer/detail?dataset_id=${TEST_DATASET_ID}`,
+        target: `https://nemar.org/dataset/${TEST_DATASET_ID}`,
         dataciteFields: {
           creator: "Test, User",
           title: "Lifecycle Test v1.0.0",
@@ -780,7 +780,7 @@ describe.skipIf(!SHOULD_RUN)("EZID Sandbox Integration", { timeout: 30000 }, () 
       const published = await makePublic(
         EZID_TEST_AUTH,
         minted.identifier,
-        `https://nemar.org/dataexplorer/detail?dataset_id=${TEST_DATASET_ID}`,
+        `https://nemar.org/dataset/${TEST_DATASET_ID}`,
       );
       expect(published.status).toBe("public");
       console.log("   [x] Step 3: Made public");

@@ -9,6 +9,7 @@ import { Hono } from "hono";
 import { z } from "zod";
 import { adminMiddleware, authMiddleware, ownerMiddleware } from "../middleware/auth";
 
+import { datasetLandingUrl, datasetVersionLandingUrl } from "../../../shared/datacite-constants.js";
 import { LIVE_DATASETS, isLiveDataset } from "../constants";
 import { tombstoneUserStatement } from "../db/user-tombstone";
 import { SYSTEM_USER_ID } from "../lib/constants";
@@ -22,11 +23,6 @@ import {
   sendBroadcast,
 } from "../services/broadcast";
 import {
-  type NemarCatalogRecord,
-  importCatalogRecords,
-  syncCatalog,
-} from "../services/catalog-sync";
-import {
   type DataCiteEnrichment,
   bidsToDataCite,
   buildDataCiteXml,
@@ -37,7 +33,7 @@ import {
   DatasetReindexError,
   type ReindexFilter,
   buildReindexFilterQuery,
-  runDatasetSync,
+  refreshDatasetMetadata,
   runEnrichmentForDataset,
 } from "../services/dataset-reindex";
 import { reembedDatasetVector } from "../services/dataset-search";
@@ -106,7 +102,6 @@ import { revokeUserIamAccess } from "../services/iam";
 import { IMPORT_STATUSES } from "../services/import-recovery";
 import { generateManifest } from "../services/manifest";
 import { buildCoverageReport } from "../services/manifest-coverage";
-import { syncDatasetToNemar } from "../services/nemar-sync";
 import { createNotice, deleteNotice, listAllNotices } from "../services/notices";
 import {
   errorMessage,
@@ -2124,7 +2119,7 @@ adminRoutes.post("/datasets/:id/doi/update", zValidator("json", updateDoiSchema)
 
       const metadata = bidsToDataCite(datasetId, doi, bidsDesc, enrichment);
       updateOptions.dataciteXml = buildDataCiteXml(metadata);
-      updateOptions.target = `https://nemar.org/dataexplorer/detail?dataset_id=${datasetId}`;
+      updateOptions.target = datasetLandingUrl(datasetId);
       metadataRefreshed = true;
     }
 
@@ -2132,7 +2127,7 @@ adminRoutes.post("/datasets/:id/doi/update", zValidator("json", updateDoiSchema)
     if (body.status) {
       if (body.status === "public" && dataset.ezid_status === "reserved") {
         updateOptions.status = "public";
-        updateOptions.target = `https://nemar.org/dataexplorer/detail?dataset_id=${datasetId}`;
+        updateOptions.target = datasetLandingUrl(datasetId);
       } else if (body.status === "unavailable") {
         updateOptions.status = "unavailable";
       }
@@ -2197,7 +2192,7 @@ adminRoutes.post("/datasets/:id/doi/update", zValidator("json", updateDoiSchema)
           const vMetadata = bidsToDataCite(datasetId, vDoi, bidsDesc, vEnrichment);
           vMetadata.version = ver.version;
           const vXml = buildDataCiteXml(vMetadata);
-          const vTarget = `https://nemar.org/dataexplorer/detail?dataset_id=${datasetId}&version=${ver.version}`;
+          const vTarget = datasetVersionLandingUrl(datasetId, ver.version);
           await ezidUpdateIdentifier(auth, versionIdentifier, {
             dataciteXml: vXml,
             target: vTarget,
@@ -3500,7 +3495,7 @@ adminRoutes.post("/publish/:id/deny", zValidator("json", denySchema), async (c) 
  * 10. upload_to_zenodo - Upload release archive to Zenodo
  * 11. publish_doi - Publish the Zenodo DOI (permanent and irreversible!)
  * 12. s3_lock - Apply S3 Object Lock (Governance mode)
- * 13. sync_nemar - Sync metadata to nemar.org datapipeline (non-fatal)
+ * 13. sync_nemar - Disabled no-op (legacy nemar.org sync retired, #837)
  * 14. notify_user - Send publication confirmation email
  *
  * (Archive zip generation is NOT an orchestrator step -- the central
@@ -4507,7 +4502,7 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
       if (vtResult instanceof Response) return vtResult;
       const { version, tag, datasetDesc } = vtResult;
 
-      const nemarUrl = `https://nemar.org/dataexplorer/detail?dataset_id=${datasetId}`;
+      const nemarUrl = datasetLandingUrl(datasetId);
       const archiveLine = `**Download:** [${tag}.zip](https://github.com/nemarDatasets/${repoName}/archive/refs/tags/${tag}.zip)`;
       const sections = [
         `# ${dataset.name} - Version ${version}`,
@@ -4572,7 +4567,7 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
         }
 
         const auth = resolveEzidAuth(c.env, sandbox || !!dataset.is_sandbox);
-        const target = `https://nemar.org/dataexplorer/detail?dataset_id=${datasetId}`;
+        const target = datasetLandingUrl(datasetId);
         await ezidMakePublic(auth, dataset.ezid_identifier, target);
 
         // Update EZID status in D1
@@ -4964,156 +4959,13 @@ adminRoutes.post("/publish/:id/approve", zValidator("json", approveSchema), asyn
   // per publish; it was removed (run-generate-archive.yml also gained an
   // S3 skip-if-exists guard as defense-in-depth).
 
-  // Step 14: Sync metadata to nemar.org datapipeline
+  // Step 14: nemar.org datapipeline sync — disabled (epic #837 retired the legacy
+  // dataexplorer coupling). Kept in allSteps + stepsToRun so existing
+  // publication_requests step records stay valid; the step is now a logged no-op
+  // (mirrors the disabled upload_to_zenodo step above).
   if (stepsToRun.includes("sync_nemar")) {
-    try {
-      await startStep("sync_nemar");
-
-      // OpenNeuro-imported datasets need alternate_id mapping before syncing
-      if (datasetId.startsWith("on")) {
-        console.log(
-          `[publish] Skipping nemar.org sync for OpenNeuro dataset ${datasetId} (alternate_id not yet supported)`,
-        );
-        await updateProgress("sync_nemar");
-      } else if (!c.env.NEMAR_USERNAME || !c.env.NEMAR_PASSWORD) {
-        console.warn("[publish] NEMAR_USERNAME/PASSWORD not configured; skipping nemar.org sync");
-        await updateProgress("sync_nemar");
-      } else {
-        const nemarUser = c.env.NEMAR_USERNAME;
-        const nemarPass = c.env.NEMAR_PASSWORD;
-        // Gather source data
-        const s3Cfg = getS3Config(c.env);
-        const tree = await getTreeAtRef(repoName, "main", pat);
-        const bidsFile = tree.find((f) => f.path === "dataset_description.json");
-        let bidsDescription: Record<string, unknown> = {};
-        if (bidsFile) {
-          try {
-            bidsDescription = JSON.parse(await getBlobContent(repoName, bidsFile.sha, pat));
-          } catch (err) {
-            console.warn(`[publish] Failed to parse dataset_description.json: ${err}`);
-          }
-        }
-
-        const readmeFile = tree.find((f) => f.path === "README" || f.path === "README.md");
-        const readme = readmeFile ? await getBlobContent(repoName, readmeFile.sha, pat) : "";
-
-        const nemarMetaFile = tree.find((f) => f.path === ".nemar/metadata.json");
-        let nemarMeta = null;
-        if (nemarMetaFile) {
-          try {
-            const raw = JSON.parse(await getBlobContent(repoName, nemarMetaFile.sha, pat));
-            const parsed = parseNemarMetadata(raw);
-            if (parsed && parsed.version === "2.0") nemarMeta = parsed;
-          } catch (err) {
-            console.warn(`[publish] Failed to parse .nemar/metadata.json: ${err}`);
-          }
-        }
-
-        // Gather D1 data, S3 stats, repo info in parallel
-        const [latestVersion, updatedDoi, pubRequest, s3Stats, zipFileSize] = await Promise.all([
-          db
-            .prepare(
-              "SELECT version, doi, created_at FROM dataset_versions WHERE dataset_id = ? ORDER BY created_at DESC LIMIT 1",
-            )
-            .bind(datasetId)
-            .first<{ version: string; doi: string; created_at: string }>(),
-          db
-            .prepare("SELECT concept_doi, created_at FROM datasets WHERE dataset_id = ?")
-            .bind(datasetId)
-            .first<{ concept_doi: string | null; created_at: string | null }>(),
-          db
-            .prepare("SELECT approved_at FROM publication_requests WHERE id = ?")
-            .bind(requestId)
-            .first<{ approved_at: string | null }>(),
-          getDatasetS3Stats(s3Cfg, datasetId).catch((err) => {
-            console.warn(`[publish] S3 stats failed for ${datasetId}: ${err}`);
-            return { totalSize: 0, objectCount: 0 };
-          }),
-          getArchiveSize(s3Cfg, datasetId).catch((err) => {
-            console.warn(`[publish] Archive size failed for ${datasetId}: ${err}`);
-            return 0;
-          }),
-        ]);
-
-        // Try to read version manifest from S3 for accurate file sizes
-        let manifest = null;
-        if (latestVersion?.version) {
-          try {
-            const raw = await getManifest(s3Cfg, datasetId, latestVersion.version);
-            if (raw) {
-              try {
-                manifest = JSON.parse(raw);
-              } catch (parseErr) {
-                console.warn(
-                  `[publish] Manifest JSON corrupted for ${datasetId} v${latestVersion.version}: ${parseErr}`,
-                );
-              }
-            }
-          } catch (err) {
-            console.warn(`[publish] Failed to fetch manifest from S3 for ${datasetId}: ${err}`);
-          }
-        }
-
-        const syncResult = await syncDatasetToNemar(nemarUser, nemarPass, {
-          datasetId,
-          bidsDescription,
-          nemarMetadata: nemarMeta,
-          readme,
-          tree,
-          conceptDoi: updatedDoi?.concept_doi || null,
-          latestVersionDoi: latestVersion?.doi || null,
-          latestVersion: latestVersion?.version || null,
-          versionCreatedAt: latestVersion?.created_at || null,
-          ownerUsername: dataset.owner_username,
-          createdAt: updatedDoi?.created_at || null,
-          publishDate: pubRequest?.approved_at || null,
-          repoName,
-          pat,
-          manifest,
-          s3Stats,
-          zipFileSize,
-        });
-
-        // Update sync tracking
-        await db
-          .prepare(
-            `UPDATE datasets SET nemar_sync_status = ?, nemar_sync_at = CASE WHEN ? = 'synced' THEN datetime('now') ELSE nemar_sync_at END, nemar_sync_error = ?, updated_at = datetime('now') WHERE dataset_id = ?`,
-          )
-          .bind(
-            syncResult.synced ? "synced" : "failed",
-            syncResult.synced ? "synced" : "failed",
-            syncResult.errors.length ? syncResult.errors.join("; ") : null,
-            datasetId,
-          )
-          .run();
-
-        if (!syncResult.synced) {
-          console.warn(
-            `[publish] nemar.org sync partially failed for ${datasetId}: ${syncResult.errors.join("; ")}`,
-          );
-        }
-
-        await updateProgress(
-          "sync_nemar",
-          syncResult.synced ? undefined : syncResult.errors.join("; "),
-        );
-      }
-    } catch (err) {
-      const msg = errorMessage(err);
-      // Non-fatal: nemar.org sync failure should not block publication
-      console.warn(`[publish] nemar.org sync failed for ${datasetId} (non-fatal): ${msg}`);
-      try {
-        await db
-          .prepare(
-            "UPDATE datasets SET nemar_sync_status = 'failed', nemar_sync_error = ?, updated_at = datetime('now') WHERE dataset_id = ?",
-          )
-          .bind(msg, datasetId)
-          .run();
-      } catch (d1Err) {
-        console.warn(`[publish] Failed to update sync status in D1: ${d1Err}`);
-      }
-      await updateProgress("sync_nemar", msg);
-    }
+    console.log("[publish] nemar.org sync skipped (legacy datapipeline sync disabled)");
+    await updateProgress("sync_nemar");
   }
 
   // Step 15: Notify user (non-fatal — mirrors sync_nemar pattern)
@@ -6023,41 +5875,8 @@ adminRoutes.post(
 // ---------------------------------------------------------------------------
 
 /**
- * POST /admin/datasets/:id/sync - Manually sync a dataset to nemar.org
- *
- * Gathers metadata from D1/GitHub and pushes to nemar.org datapipeline API.
- * Useful for backfilling datasets published before this feature existed.
- */
-adminRoutes.post("/datasets/:id/sync", async (c) => {
-  const datasetId = c.req.param("id");
-
-  // Thin wrapper around runDatasetSync (epic #417 phase 3) so the admin
-  // and post-version-DOI sync paths share one implementation, and so this
-  // endpoint also populates the Phase 2 metadata columns.
-  try {
-    const result = await runDatasetSync(c.env, datasetId);
-    return c.json({
-      dataset_id: datasetId,
-      synced: result.synced,
-      errors: result.errors,
-      metadata_columns_written: result.metadata_columns_written,
-      ...(result.metadata_columns_error && {
-        metadata_columns_error: result.metadata_columns_error,
-      }),
-      ...(result.nemar_sync_skipped && { nemar_sync_skipped: true }),
-    });
-  } catch (err) {
-    if (err instanceof DatasetReindexError) {
-      return c.json({ error: err.message }, err.statusCode);
-    }
-    console.error(`[admin/sync] Unexpected error for ${datasetId}:`, err);
-    return c.json({ error: errorMessage(err) }, 500);
-  }
-});
-
-/**
- * POST /admin/datasets/:id/reindex - Refresh enrichment + nemar.org sync +
- * Phase 2 metadata columns for a single dataset (epic #417 phase 3).
+ * POST /admin/datasets/:id/reindex - Refresh enrichment + Phase 2 metadata
+ * columns for a single dataset (epic #417 phase 3).
  *
  * Body: { skip_enrichment?: boolean, skip_sync?: boolean, ref?: string }
  *
@@ -6087,7 +5906,6 @@ adminRoutes.post("/datasets/:id/reindex", async (c) => {
     enrichment: { status: "ok" | "failed" | "skipped"; ref?: string; error?: string };
     sync: {
       status: "ok" | "failed" | "skipped";
-      errors?: string[];
       metadata_columns_written?: boolean;
       metadata_columns_error?: string;
     };
@@ -6106,23 +5924,12 @@ adminRoutes.post("/datasets/:id/reindex", async (c) => {
 
   if (!skipSync) {
     try {
-      const sync = await runDatasetSync(c.env, datasetId);
-      // `nemar_sync_skipped` is set when the upstream push was intentionally
-      // suppressed (today: OpenNeuro datasets that have no alternate_id
-      // mapping). Map that to status="skipped" so callers can distinguish a
-      // real failure from a benign skip. Metadata columns are still written
-      // in the skip case, so we keep that field accurate.
-      const syncStatus: "ok" | "failed" | "skipped" = sync.nemar_sync_skipped
-        ? "skipped"
-        : sync.synced
-          ? "ok"
-          : "failed";
+      const refreshed = await refreshDatasetMetadata(c.env, datasetId);
       result.sync = {
-        status: syncStatus,
-        errors: sync.errors,
-        metadata_columns_written: sync.metadata_columns_written,
-        ...(sync.metadata_columns_error && {
-          metadata_columns_error: sync.metadata_columns_error,
+        status: refreshed.metadata_columns_written ? "ok" : "failed",
+        metadata_columns_written: refreshed.metadata_columns_written,
+        ...(refreshed.metadata_columns_error && {
+          metadata_columns_error: refreshed.metadata_columns_error,
         }),
       };
     } catch (err) {
@@ -6231,14 +6038,13 @@ adminRoutes.post("/datasets/reindex/bulk", async (c) => {
     enrichment: { status: "ok" | "failed" | "skipped"; error?: string };
     sync: {
       status: "ok" | "failed" | "skipped";
-      errors?: string[];
       metadata_columns_error?: string;
     };
   };
   const results: PerDataset[] = [];
 
   // Sequential to keep per-dataset failures isolated and respect upstream
-  // rate limits (nemar.org, OpenRouter, GitHub). The runtime budget for a
+  // rate limits (OpenRouter, GitHub). The runtime budget for a
   // Cloudflare Worker request is the limiting factor for very large batches;
   // operators should narrow the filter or split into multiple runs.
   for (const datasetId of datasetIds) {
@@ -6253,20 +6059,19 @@ adminRoutes.post("/datasets/reindex/bulk", async (c) => {
     }
     if (!skipSync) {
       try {
-        const sync = await runDatasetSync(c.env, datasetId);
+        const refreshed = await refreshDatasetMetadata(c.env, datasetId);
         entry.sync = {
-          status: sync.synced ? "ok" : "failed",
-          errors: sync.errors,
-          ...(sync.metadata_columns_error && {
-            metadata_columns_error: sync.metadata_columns_error,
+          status: refreshed.metadata_columns_written ? "ok" : "failed",
+          ...(refreshed.metadata_columns_error && {
+            metadata_columns_error: refreshed.metadata_columns_error,
           }),
         };
       } catch (err) {
         // Per-dataset failure must surface in server logs in addition to the
         // response body so an operator running with -i (or a CI job that
         // only checks HTTP status) still gets a trace.
-        console.error(`[admin/reindex/bulk] ${datasetId} sync threw:`, err);
-        entry.sync = { status: "failed", errors: [errorMessage(err)] };
+        console.error(`[admin/reindex/bulk] ${datasetId} reindex threw:`, err);
+        entry.sync = { status: "failed" };
       }
     }
     if (entry.enrichment.status === "failed") {
@@ -6282,36 +6087,6 @@ adminRoutes.post("/datasets/reindex/bulk", async (c) => {
     total: results.length,
     results,
     elapsed_ms: Date.now() - startedAt,
-  });
-});
-
-/**
- * GET /admin/sync/status - List sync status for all published datasets
- */
-adminRoutes.get("/sync/status", async (c) => {
-  const db = c.env.DB;
-
-  const results = await db
-    .prepare(
-      `SELECT d.dataset_id, d.name, d.nemar_sync_status, d.nemar_sync_at, d.nemar_sync_error
-       FROM datasets d
-       WHERE d.visibility = 'public' OR d.concept_doi IS NOT NULL
-       ORDER BY d.nemar_sync_status IS NULL DESC, d.nemar_sync_status = 'failed' DESC, d.dataset_id`,
-    )
-    .all<{
-      dataset_id: string;
-      name: string;
-      nemar_sync_status: string | null;
-      nemar_sync_at: string | null;
-      nemar_sync_error: string | null;
-    }>();
-
-  return c.json({
-    datasets: results.results,
-    total: results.results.length,
-    synced: results.results.filter((d) => d.nemar_sync_status === "synced").length,
-    failed: results.results.filter((d) => d.nemar_sync_status === "failed").length,
-    pending: results.results.filter((d) => d.nemar_sync_status === null).length,
   });
 });
 
@@ -6453,120 +6228,6 @@ adminRoutes.post("/imports/:id/retry", async (c) => {
     return c.json({ error: "No failed/quarantined import to retry for this dataset" }, 409);
   }
   return c.json({ ok: true, dataset_id: datasetId, status: "preparing" });
-});
-
-// ============================================================================
-// Catalog Sync (nemar.org catalog -> D1)
-// ============================================================================
-
-/**
- * POST /admin/catalog/sync - Fold pre-fetched catalog records into `datasets`
- *
- * The nemar.org API requires GET with a JSON body, which Workers' fetch()
- * rejects. The GitHub Action fetches the catalog and POSTs records here.
- * Accepts { records: NemarCatalogRecord[] } in the request body. New/changed
- * rows are marked embedding_dirty=1 for the scheduled re-embed.
- */
-adminRoutes.post("/catalog/sync", async (c) => {
-  const body = await c.req.json<{ records?: unknown[] }>();
-
-  if (body.records && Array.isArray(body.records) && body.records.length > 0) {
-    // Validate records before importing
-    const validRecords: NemarCatalogRecord[] = [];
-    const validationErrors: string[] = [];
-    for (const [i, raw] of (body.records as Array<Record<string, unknown>>).entries()) {
-      if (!raw.id || typeof raw.id !== "string") {
-        validationErrors.push(`Record ${i}: missing or invalid 'id'`);
-        continue;
-      }
-      if (!raw.name || typeof raw.name !== "string") {
-        validationErrors.push(`Record ${i} (${raw.id}): missing or invalid 'name'`);
-        continue;
-      }
-      validRecords.push(raw as unknown as NemarCatalogRecord);
-    }
-    if (validRecords.length === 0) {
-      return c.json(
-        { error: "No valid records in payload", validation_errors: validationErrors },
-        400,
-      );
-    }
-    if (validationErrors.length > 0) {
-      console.warn(
-        `[catalog-sync] ${validationErrors.length} records failed validation, importing ${validRecords.length}`,
-      );
-    }
-
-    const result = await importCatalogRecords(c.env.DB, validRecords);
-    return c.json({
-      records_synced: result.recordsSynced,
-      errors: result.errors,
-      duration_ms: result.durationMs,
-    });
-  }
-
-  // No records provided; try fetching directly (will fail in Workers due to GET+body)
-  const result = await syncCatalog(c.env.DB);
-  return c.json({
-    records_synced: result.recordsSynced,
-    errors: result.errors,
-    duration_ms: result.durationMs,
-  });
-});
-
-/**
- * GET /admin/catalog/status - Show catalog sync history
- */
-adminRoutes.get("/catalog/status", async (c) => {
-  const db = c.env.DB;
-
-  try {
-    // #646: records_indexed is no longer written (vectors are re-embedded
-    // lazily by the embedding_dirty drain cron, not counted during sync), so
-    // it's dropped from the status projection.
-    const logs = await db
-      .prepare(
-        `SELECT id, started_at, completed_at, records_synced, errors, status
-         FROM catalog_sync_log
-         ORDER BY started_at DESC
-         LIMIT 10`,
-      )
-      .all<{
-        id: number;
-        started_at: string;
-        completed_at: string | null;
-        records_synced: number;
-        errors: string | null;
-        status: string;
-      }>();
-
-    // #646: the catalog is now the folded legacy rows in `datasets` (the
-    // sentinel-owned source-of-truth rows), not the dropped nemar_catalog table.
-    const catalogCount = await db
-      .prepare(
-        "SELECT COUNT(*) AS count FROM datasets WHERE owner_user_id = ? AND status = 'active'",
-      )
-      .bind(SYSTEM_USER_ID)
-      .first<{ count: number }>();
-
-    return c.json({
-      catalog_size: catalogCount?.count ?? 0,
-      recent_syncs: logs.results,
-    });
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    // Narrow the graceful path to a missing catalog_sync_log (the only
-    // optional table here). A missing `datasets` is a real infra failure and
-    // must surface as a 500, not a misleading "not initialized" 200.
-    if (msg.includes("no such table: catalog_sync_log")) {
-      return c.json({
-        catalog_size: 0,
-        recent_syncs: [],
-        message: "catalog_sync_log not initialized",
-      });
-    }
-    return c.json({ error: "Failed to query catalog status", details: msg }, 500);
-  }
 });
 
 /**

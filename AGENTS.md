@@ -67,10 +67,9 @@ The backend code (`ORG_NAME = "nemarDatasets"` in `backend/src/services/github.t
 ### Public Browser Sites
 Two user-facing dataset browsers exist during the cutover; **prefer ww2 for new references**.
 
-- **`https://ww2.nemar.org`** — **current beta browser** (Astro SSR, lives in `nemarOrg/website`). Dataset pages at `ww2.nemar.org/dataset/<id>`. Reads `api.nemar.org` and `data.nemar.org` directly; does not depend on the legacy datapipeline.
-- **`https://nemar.org/dataexplorer/...`** — **legacy PHP site**. Backed by the `dataexplorer_*` tables on `nemar.org/api/dataexplorer/datapipeline`, which `nemar admin sync run` populates. Still public, slated for replacement by ww2.
-- **Implication for on\* datasets:** `nemar admin sync` intentionally skips on\*-prefix datasets (alternate_id mapping pending, issue #339), so they render on ww2.nemar.org but the legacy `nemar.org/dataexplorer` detail page is empty until that ships. The archive zip download link in the legacy UI is driven by `zip_file_size` on the datapipeline row, so even an existing S3 archive won't surface there for on\* datasets.
-- **Default in docs/comments:** when something says "the website," "the browser," or "the UI" without further qualification, mean ww2.nemar.org. Name `nemar.org` explicitly only when referring to the legacy dataexplorer, the datapipeline tables, or the `nemar.org` DOI landing target.
+- **`https://ww2.nemar.org`** — **current dataset browser** (Astro SSR, lives in `nemarOrg/website`). Dataset pages at `ww2.nemar.org/dataset/<id>`. Reads `api.nemar.org` and `data.nemar.org` directly. DOIs land on the canonical `https://nemar.org/dataset/<id>` (versions `?v=v<version>`), which a Cloudflare redirect on the `nemar.org` zone forwards to ww2.
+- **`https://nemar.org/dataexplorer/...`** — **legacy PHP site, being retired.** As of epic #837 NEMAR no longer syncs to or from it: the outgoing datapipeline push and the incoming 4h catalog pull are removed, our `nm`/`on` records are purged from its `dataexplorer_*` tables, and the legacy `ds######` shadow rows are dropped from our D1. It may still serve its own OpenNeuro `ds` catalog independently.
+- **Default in docs/comments:** when something says "the website," "the browser," or "the UI" without further qualification, mean ww2.nemar.org. Name `nemar.org` explicitly only when referring to the legacy dataexplorer or the `nemar.org/dataset/<id>` DOI landing target.
 
 ### S3 Bucket Structure
 ```
@@ -115,7 +114,7 @@ Datasets are synced to SDSC Hallu (`ssh hallu`) for processing pipelines and dow
 - **Zip dir:** `/data/qumulo/openneuro/zip_files/` (downloadable archives from S3)
 - **Discovery:** Queries `GET /datasets` API, filters for `nm`-prefix only
 - **Manual run:** `ssh hallu /data/qumulo/openneuro/nemar-cli/scripts/hallu-sync.sh --dataset nm000132 --verbose`
-- **Note:** This syncs data files. Legacy `nemar.org/dataexplorer` metadata is synced separately via `nemar admin sync run` or automatically on version DOI publish.
+- **Note:** This syncs data files only. (The legacy `nemar.org/dataexplorer` metadata sync was retired in epic #837.)
 
 ## Environment Setup
 ```bash
@@ -412,9 +411,7 @@ nemar admin revert            # Revert dataset to previous version
 nemar admin make-public       # Publish dataset (permanent)
 nemar admin delete-dataset    # Delete dataset and all resources
 nemar admin bulk-delete       # Delete multiple phantom/orphaned datasets (owner only)
-nemar admin sync run          # Sync dataset metadata to nemar.org (legacy dataexplorer)
-nemar admin sync status       # Show nemar.org sync status
-nemar admin reindex <id>      # Refresh enrichment + nemar.org sync + D1 metadata columns
+nemar admin reindex <id>      # Refresh enrichment + D1 metadata columns
 nemar admin reindex --all     # Bulk; also --missing-metadata, --stale [--older-than N]
 nemar admin summary           # summary.json coverage across published versions
 nemar admin email-preferences show    # Show email notification preferences

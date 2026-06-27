@@ -10,7 +10,7 @@ import { Hono } from "hono";
 
 import { MAX_ARCHIVE_RETRIES, decideArchiveRetry } from "../services/archive-retry.js";
 import { purgeCacheUrls, zarrPurgeTargets } from "../services/cloudflare.js";
-import { runDatasetSync } from "../services/dataset-reindex.js";
+import { refreshDatasetMetadata } from "../services/dataset-reindex.js";
 import { isValidDatasetId } from "../services/datasetId.js";
 import { createEzidVersionDoi, parseDoiProvider } from "../services/doi.js";
 import { enrichDataset } from "../services/enrich-dataset.js";
@@ -77,47 +77,6 @@ export function validateEnrichmentRef(ref: unknown): string | null {
     return "Invalid 'ref' parameter: contains forbidden characters";
   }
   return null;
-}
-
-/**
- * Decide whether to trigger an nemar.org sync after a version-DOI publish.
- *
- * Pure helper so the EZID and Zenodo paths share one rule and we can pin
- * the matrix in unit tests without spinning up the webhook harness.
- *
- * Rules (mirrors the prior inline EZID logic):
- *   - missing NEMAR_USERNAME or NEMAR_PASSWORD: skip with "no_credentials"
- *   - OpenNeuro dataset (`on`-prefix): skip with "openneuro" (nemar.org
- *     pipeline doesn't yet accept alternate_id; see nemarOrg/nemar-cli#339)
- *   - Sandbox dataset (`xx`-prefix): skip with "sandbox" (blocked from
- *     publishing; syncing would write a false-alarm failed row)
- *   - missing DOI string: skip with "no_doi" (Zenodo only; EZID always
- *     returns a DOI on success)
- *   - otherwise: trigger
- */
-export type NemarSyncDecision =
-  | { trigger: true }
-  | { trigger: false; reason: "no_credentials" | "openneuro" | "sandbox" | "no_doi" };
-
-export function shouldSyncToNemarAfterVersionDoi(input: {
-  datasetId: string;
-  versionDoi: string | null | undefined;
-  nemarUsername: string | null | undefined;
-  nemarPassword: string | null | undefined;
-}): NemarSyncDecision {
-  if (!input.nemarUsername || !input.nemarPassword) {
-    return { trigger: false, reason: "no_credentials" };
-  }
-  if (input.datasetId.startsWith("on")) {
-    return { trigger: false, reason: "openneuro" };
-  }
-  if (input.datasetId.startsWith("xx")) {
-    return { trigger: false, reason: "sandbox" };
-  }
-  if (!input.versionDoi) {
-    return { trigger: false, reason: "no_doi" };
-  }
-  return { trigger: true };
 }
 
 /**
@@ -1087,31 +1046,13 @@ async function handleEzidVersionDoiLegacy(
     });
 
     // Sync to nemar.org in the background (non-fatal, non-blocking).
-    // Pass the freshly-minted DOI + version through as overrides so a D1
-    // read-after-write race (background waitUntil firing before the new
-    // dataset_versions row replicates) doesn't drop the version DOI
-    // from the nemar.org payload.
-    //
-    // Under centralFlow, the manifest/summary/dataset_versions row don't
-    // exist yet at this point -- the /webhooks/manifest-ready handler
-    // owns those writes. Skip the inline sync; manifest-ready will fire
-    // sync after the row insert lands.
+    // Refresh D1 metadata columns from the new version's tree (the legacy
+    // nemar.org datapipeline sync was removed in epic #837). Background +
+    // non-fatal. Under centralFlow the dataset_versions row doesn't exist yet
+    // here -- the /webhooks/manifest-ready handler triggers the refresh after
+    // the row insert lands.
     if (!centralFlow) {
-      const ezidSyncDecision = shouldSyncToNemarAfterVersionDoi({
-        datasetId: dataset.dataset_id,
-        versionDoi: result.doi,
-        nemarUsername: c.env.NEMAR_USERNAME,
-        nemarPassword: c.env.NEMAR_PASSWORD,
-      });
-      if (ezidSyncDecision.trigger) {
-        c.executionCtx.waitUntil(syncToNemarAfterVersionDoi(c.env, dataset, version, result.doi));
-      } else if (ezidSyncDecision.reason === "no_credentials") {
-        console.warn("[webhook] NEMAR_USERNAME/PASSWORD not configured; skipping nemar.org sync");
-      } else if (ezidSyncDecision.reason === "openneuro") {
-        console.info(
-          `[webhook] Skipping nemar.org sync for OpenNeuro dataset ${dataset.dataset_id}`,
-        );
-      }
+      c.executionCtx.waitUntil(refreshMetadataAfterVersionDoi(c.env, dataset.dataset_id));
     }
 
     return c.json({
@@ -1143,57 +1084,28 @@ async function handleEzidVersionDoiLegacy(
 }
 
 /**
- * Background task: sync dataset metadata to nemar.org after a version DOI is published.
- * Non-fatal; logs errors but never throws.
+ * Background metadata-columns refresh after a version DOI is published.
+ * Non-fatal: the DOI is already minted, this is downstream cleanup. On a
+ * pre-refresh throw (e.g. a transient GitHub auth / tree-fetch failure, before
+ * refreshDatasetMetadata reaches its own metadata_columns_error write) the
+ * error is recorded to D1 so operators don't read a stale "success". (The
+ * legacy nemar.org sync this replaced was removed in epic #837.)
  */
-async function syncToNemarAfterVersionDoi(
-  env: Bindings,
-  dataset: {
-    id: number;
-    dataset_id: string;
-    name: string;
-    github_repo: string | null;
-    concept_doi: string | null;
-  },
-  version: string,
-  versionDoi: string,
-): Promise<void> {
-  // Delegated to runDatasetSync (epic #417 phase 3) so this path stays in
-  // step with the admin reindex endpoint. The helper handles tree+S3+
-  // participants gathering, syncDatasetToNemar, nemar_sync_* fields, and the
-  // Phase 2 metadata columns + metadata_columns_error.
+async function refreshMetadataAfterVersionDoi(env: Bindings, datasetId: string): Promise<void> {
   try {
-    const result = await runDatasetSync(env, dataset.dataset_id, {
-      versionOverride: version,
-      versionDoiOverride: versionDoi,
-    });
-    if (result.synced) {
-      console.log(`[webhook] nemar.org sync succeeded for ${dataset.dataset_id} v${version}`);
-    } else {
-      console.warn(
-        `[webhook] nemar.org sync failed for ${dataset.dataset_id}: ${result.errors.join("; ")}`,
-      );
-    }
-    if (result.metadata_columns_error) {
-      console.warn(
-        `[webhook] metadata_columns failed for ${dataset.dataset_id}: ${result.metadata_columns_error}`,
-      );
-    }
+    await refreshDatasetMetadata(env, datasetId);
   } catch (err) {
-    console.error(`[webhook] nemar.org sync error for ${dataset.dataset_id} (non-fatal):`, err);
-    // Record both failures together: runDatasetSync threw before reaching
-    // either the nemar_sync UPDATE or the metadata-columns UPDATE, so set
-    // both so operators querying for stale state get a consistent view.
     const msg = errorMessage(err);
+    console.error(`[webhook] metadata refresh failed for ${datasetId} (non-fatal):`, msg);
     try {
       await env.DB.prepare(
-        "UPDATE datasets SET nemar_sync_status = 'failed', nemar_sync_error = ?, metadata_columns_error = ?, updated_at = datetime('now') WHERE dataset_id = ?",
+        "UPDATE datasets SET metadata_columns_error = ?, updated_at = datetime('now') WHERE dataset_id = ?",
       )
-        .bind(msg, `runDatasetSync threw before metadata-columns write: ${msg}`, dataset.dataset_id)
+        .bind(`metadata refresh threw before columns write: ${msg}`, datasetId)
         .run();
     } catch (d1Err) {
       console.warn(
-        `[webhook] Failed to update sync status in D1 for ${dataset.dataset_id}: ${d1Err}`,
+        `[webhook] Failed to record metadata refresh error in D1 for ${datasetId}: ${d1Err}`,
       );
     }
   }
@@ -1407,44 +1319,12 @@ async function handleZenodoVersionDoi(
       }
     }
 
-    // Issue #339: keep nemar.org in step with the latest version DOI.
-    // Mirrors the EZID path: non-fatal, runs in the background via
-    // waitUntil, and skips OpenNeuro datasets (alternate_id not yet
-    // supported by the nemar.org pipeline).
-    //
-    // Under centralFlow, the manifest/summary/dataset_versions row don't
-    // exist yet at this point -- the /webhooks/manifest-ready handler
-    // owns those writes. Skip the inline sync; manifest-ready will fire
-    // sync after the row insert lands.
+    // Refresh D1 metadata columns from the new version's tree (the legacy
+    // nemar.org datapipeline sync was removed in epic #837). Background +
+    // non-fatal. Under centralFlow the dataset_versions row doesn't exist yet
+    // here -- manifest-ready triggers the refresh after the row insert lands.
     if (!centralFlow) {
-      const zenodoSyncDecision = shouldSyncToNemarAfterVersionDoi({
-        datasetId: dataset.dataset_id,
-        versionDoi: published.doi ?? null,
-        nemarUsername: c.env.NEMAR_USERNAME,
-        nemarPassword: c.env.NEMAR_PASSWORD,
-      });
-      if (zenodoSyncDecision.trigger) {
-        // trigger: true guarantees versionDoi is non-null (no_doi guard in predicate)
-        c.executionCtx.waitUntil(
-          syncToNemarAfterVersionDoi(c.env, dataset, version, published.doi!),
-        );
-      } else {
-        if (zenodoSyncDecision.reason === "no_credentials") {
-          console.warn("[webhook] NEMAR_USERNAME/PASSWORD not configured; skipping nemar.org sync");
-        } else if (zenodoSyncDecision.reason === "openneuro") {
-          console.info(
-            `[webhook] Skipping nemar.org sync for OpenNeuro dataset ${dataset.dataset_id}`,
-          );
-        } else if (zenodoSyncDecision.reason === "sandbox") {
-          console.info(
-            `[webhook] Skipping nemar.org sync for sandbox dataset ${dataset.dataset_id}`,
-          );
-        } else if (zenodoSyncDecision.reason === "no_doi") {
-          console.warn(
-            `[webhook] Skipping nemar.org sync for ${dataset.dataset_id}: Zenodo returned no DOI`,
-          );
-        }
-      }
+      c.executionCtx.waitUntil(refreshMetadataAfterVersionDoi(c.env, dataset.dataset_id));
     }
 
     return c.json({
@@ -1693,57 +1573,12 @@ webhooks.post("/manifest-ready", async (c) => {
     console.error("[manifest-ready] manifest_jobs UPDATE to 'ready' failed:", err);
   }
 
-  // Issue #557: under centralFlow the EZID/Zenodo publish handlers
-  // intentionally skip the nemar.org sync because the
-  // dataset_versions row + manifest/summary on S3 don't exist yet
-  // when the DOI is minted. Fire the sync HERE, after the row insert
-  // lands, so the nemar.org payload sees the new version DOI.
-  // Non-fatal: log + carry on (legacy behavior).
+  // Issue #557: under centralFlow the dataset_versions row + manifest/summary
+  // on S3 don't exist when the DOI is minted, so refresh the D1 metadata
+  // columns HERE, after the row insert lands. (The legacy nemar.org sync was
+  // removed in epic #837.) Background + non-fatal.
   if (job.doi) {
-    try {
-      const dataset = await c.env.DB.prepare(
-        "SELECT id, dataset_id, name, github_repo, concept_doi FROM datasets WHERE dataset_id = ?",
-      )
-        .bind(body.dataset_id)
-        .first<{
-          id: number;
-          dataset_id: string;
-          name: string;
-          github_repo: string | null;
-          concept_doi: string | null;
-        }>();
-      if (dataset) {
-        const syncDecision = shouldSyncToNemarAfterVersionDoi({
-          datasetId: dataset.dataset_id,
-          versionDoi: job.doi,
-          nemarUsername: c.env.NEMAR_USERNAME,
-          nemarPassword: c.env.NEMAR_PASSWORD,
-        });
-        if (syncDecision.trigger) {
-          c.executionCtx.waitUntil(
-            syncToNemarAfterVersionDoi(c.env, dataset, body.version, job.doi),
-          );
-        } else if (syncDecision.reason === "no_credentials") {
-          console.warn(
-            "[manifest-ready] NEMAR_USERNAME/PASSWORD not configured; skipping nemar.org sync",
-          );
-        } else if (syncDecision.reason === "openneuro") {
-          console.info(
-            `[manifest-ready] Skipping nemar.org sync for OpenNeuro dataset ${dataset.dataset_id}`,
-          );
-        } else if (syncDecision.reason === "sandbox") {
-          console.info(
-            `[manifest-ready] Skipping nemar.org sync for sandbox dataset ${dataset.dataset_id}`,
-          );
-        }
-      } else {
-        console.warn(
-          `[manifest-ready] dataset row not found for ${body.dataset_id}; skipping nemar.org sync`,
-        );
-      }
-    } catch (err) {
-      console.error("[manifest-ready] nemar.org sync scheduling failed (non-fatal):", err);
-    }
+    c.executionCtx.waitUntil(refreshMetadataAfterVersionDoi(c.env, body.dataset_id));
   }
 
   const fileCount = body.totals?.files ?? 0;
@@ -1797,7 +1632,7 @@ export function validatePrescreenCallbackBody(body: unknown): string | null {
   ) {
     return "reasons must be an array of strings";
   }
-  if (b.issue_url !== undefined && typeof b.issue_url !== "string") {
+  if (b.issue_url !== undefined && b.issue_url !== null && typeof b.issue_url !== "string") {
     return "issue_url must be a string";
   }
   return null;

@@ -337,6 +337,7 @@ authWebRoutes.post("/code/verify", zValidator("json", verifySchema), async (c) =
       remember,
       userAgent,
       ip,
+      "email_code",
     );
 
     const cookie = buildSessionCookie(cookieIdRaw, {

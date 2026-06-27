@@ -2,18 +2,18 @@
  * Unit tests for the dataset-metadata-columns helper (epic #417 phase 2).
  *
  * computeDatasetMetadataColumns is the single source of truth feeding both
- * the LLM enrichment webhook and the post-version-DOI nemar.org sync, so
+ * the LLM enrichment webhook and the post-version-DOI metadata refresh, so
  * its output shape and null semantics need to be pinned. Pure-function
  * table tests; no GitHub/D1/S3 calls.
  */
 
 import { describe, expect, test } from "bun:test";
-import { computeDatasetMetadataColumns } from "../backend/src/services/dataset-metadata-columns";
 import {
   countSessionDirs,
   countSubjectDirs,
   extractTasks,
-} from "../backend/src/services/nemar-sync";
+} from "../backend/src/services/bids-tree";
+import { computeDatasetMetadataColumns } from "../backend/src/services/dataset-metadata-columns";
 
 const TASK_PATHS = [
   "sub-01/eeg/sub-01_task-rest_eeg.set",

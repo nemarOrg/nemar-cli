@@ -75,6 +75,10 @@ describe("validatePrescreenCallbackBody", () => {
   test("rejects a non-string issue_url", () => {
     expect(validatePrescreenCallbackBody({ ...ok, issue_url: 5 })).toMatch(/issue_url/);
   });
+
+  test("accepts null issue_url (workflow sends null when advisory flag is off)", () => {
+    expect(validatePrescreenCallbackBody({ ...ok, issue_url: null })).toBeNull();
+  });
 });
 
 describe("decidePrescreenOutcome", () => {

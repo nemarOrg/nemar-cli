@@ -15,8 +15,9 @@
  * structured EnrichmentRunResult without re-implementing the matrix.
  */
 
-import type { NemarMetadataV2 } from "../../../shared/datacite-constants.js";
+import { type NemarMetadataV2, datasetLandingUrl } from "../../../shared/datacite-constants.js";
 import type { Bindings } from "../types/bindings.js";
+import { countSessionDirs } from "./bids-tree.js";
 import {
   bidsToDataCite,
   buildDataCiteXml,
@@ -55,7 +56,6 @@ import {
   validateMeshTerms,
   validateMetadata,
 } from "./llm-enrich.js";
-import { countSessionDirs } from "./nemar-sync.js";
 import { ensureParticipantsTsv } from "./participants-tsv.js";
 import { errorMessage, extractRepoName } from "./repo-metadata.js";
 import { extractExtensions, formatBytes, getDatasetS3Stats } from "./s3.js";
@@ -398,7 +398,7 @@ export async function enrichDataset(
           `[llm-enrich] Failed to update BIDS Name in D1 for ${datasetId}: ${errorMessage(dbErr)}`,
         );
       }
-      const nemarUrl = `https://nemar.org/dataexplorer/detail?dataset_id=${datasetId}`;
+      const nemarUrl = datasetLandingUrl(datasetId);
       const repoResult = await setRepoDescription(repoName, bidsName, pat, nemarUrl);
       if (!repoResult.ok) {
         console.error(
