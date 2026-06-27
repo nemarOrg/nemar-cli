@@ -647,8 +647,6 @@ export interface Dataset {
   file_size_formatted?: string;
   /** 'managed' = in D1 datasets table, 'catalog' = nemar.org only */
   source_type?: "managed" | "catalog";
-  /** nemar.org sync status for managed datasets */
-  nemar_sync_status?: string | null;
   /** DOI field from catalog (for catalog-only datasets) */
   doi?: string | null;
   /** Import source (e.g. "openneuro") */
