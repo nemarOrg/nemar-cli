@@ -1475,6 +1475,29 @@ describe("seedFromBids", () => {
     expect(nemarEntry?.relation_type).toBe("IsDescribedBy");
   });
 
+  test("re-enrichment replaces the legacy NEMAR landing URL with the canonical one (#837)", () => {
+    const existing = {
+      version: "2.0" as const,
+      related_identifiers: [
+        {
+          identifier: "https://nemar.org/dataexplorer/detail?dataset_id=nm000108",
+          identifier_type: "URL" as const,
+          relation_type: "IsDescribedBy" as const,
+        },
+      ],
+    };
+    const seeded = seedFromBids(fullBids, existing, "nm000108");
+    const nemarUrls = (seeded.related_identifiers || []).filter((r) =>
+      r.identifier.includes("nemar.org"),
+    );
+    // exactly one NEMAR landing URL, and it's the canonical one (no accumulation)
+    expect(nemarUrls).toHaveLength(1);
+    expect(nemarUrls[0]?.identifier).toBe("https://nemar.org/dataset/nm000108");
+    expect(seeded.related_identifiers?.some((r) => r.identifier.includes("dataexplorer"))).toBe(
+      false,
+    );
+  });
+
   test("does not add URLs when datasetId is not provided", () => {
     const seeded = seedFromBids(fullBids, null);
 

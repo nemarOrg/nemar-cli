@@ -283,9 +283,14 @@ export function seedFromBids(
   }
 
   // Start from existing entries, but remove any that conflict with SourceDatasets
-  // (e.g. a previous LLM run may have added IsVersionOf for a SourceDataset DOI)
+  // (e.g. a previous LLM run may have added IsVersionOf for a SourceDataset DOI),
+  // and drop the retired legacy NEMAR landing URL so re-enrichment REPLACES it
+  // with the canonical datasetLandingUrl below (epic #837) rather than letting
+  // the old `dataexplorer/detail` and new `/dataset/` IsDescribedBy URLs accumulate.
   const relatedIds: RelatedIdentifierEntry[] = (existing?.related_identifiers || []).filter(
-    (r) => !sourceDatasetDois.has(r.identifier) || r.relation_type === "IsDerivedFrom",
+    (r) =>
+      !r.identifier.includes("nemar.org/dataexplorer/") &&
+      (!sourceDatasetDois.has(r.identifier) || r.relation_type === "IsDerivedFrom"),
   );
 
   // SourceDatasets -> IsDerivedFrom
@@ -647,7 +652,7 @@ Rate each criterion from 0-100 confidence that the metadata is CORRECT:
   - References: general citation
 - Are the DOIs valid identifiers?
 - Cross-check: does dataset_description.json have SourceDatasets that should be IsDerivedFrom?
-- NOTE: GitHub repo URLs (github.com/nemarDatasets/...) and NEMAR landing page URLs (nemar.org/dataexplorer/...) with relation type IsDescribedBy are CORRECT and should NOT be flagged as issues.
+- NOTE: GitHub repo URLs (github.com/nemarDatasets/...) and NEMAR landing page URLs (nemar.org/dataset/...) with relation type IsDescribedBy are CORRECT and should NOT be flagged as issues.
 
 ### 3. Description Accuracy (weight: medium)
 - Does the abstract accurately describe the dataset content?
