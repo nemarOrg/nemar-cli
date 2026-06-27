@@ -245,9 +245,8 @@ export async function discoverOpenNeuroDatasets(opts?: {
  * stall. Only a REAL managed `on######` mirror (owner != SYSTEM_USER_ID) means a
  * dataset is actually imported; the import bootstrap (POST /admin/datasets/import
  * in admin.ts) deletes the ds shadow when it creates the managed on###### row, so
- * this never excludes a genuinely-imported dataset. Analogous to catalog-sync.ts's
- * own shadow dedup (which additionally filters status='active'; here every managed
- * mirror blocks re-import regardless of status, which is what we want).
+ * this never excludes a genuinely-imported dataset. Here every managed mirror
+ * blocks re-import regardless of status, which is what we want.
  */
 export const IMPORTED_SOURCE_IDS_QUERY = `SELECT source_id FROM datasets WHERE source = 'openneuro' AND source_id IS NOT NULL AND owner_user_id != ${SYSTEM_USER_ID}`;
 

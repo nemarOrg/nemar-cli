@@ -18,12 +18,12 @@ describe("buildReindexFilterQuery", () => {
     expect(q.params).toEqual([]);
     expect(q.sql).toContain("FROM datasets");
     expect(q.sql).toContain("github_repo IS NOT NULL");
-    // OpenNeuro datasets are NOW included (#512): runDatasetSync skips the
-    // nemar.org push for them but still refreshes D1 metadata columns +
-    // enrichment, which is what the website catalog needs.
+    // OpenNeuro datasets are NOW included (#512): refreshDatasetMetadata
+    // refreshes their D1 metadata columns + enrichment, which is what the
+    // website catalog needs.
     expect(q.sql).not.toContain("dataset_id NOT LIKE 'on%'");
     // Sandbox datasets must still be excluded — they're not eligible for
-    // nemar.org sync and pollute the live datapipeline if included.
+    // reindex.
     expect(q.sql).toContain("dataset_id NOT LIKE 'xx%'");
     expect(q.sql).toContain("ORDER BY dataset_id");
   });
@@ -99,9 +99,8 @@ describe("buildReindexFilterQuery", () => {
   });
 
   test("every filter excludes xx% datasets but includes on%", () => {
-    // Regression guard: xx% (sandbox) must stay excluded — they pollute the
-    // live datapipeline. on% (OpenNeuro) is now INCLUDED (#512): runDatasetSync
-    // skips the nemar.org push for them but still refreshes D1 metadata
+    // Regression guard: xx% (sandbox) must stay excluded. on% (OpenNeuro) is
+    // now INCLUDED (#512): refreshDatasetMetadata refreshes their D1 metadata
     // columns and triggers enrichment, which is what the catalog needs.
     for (const filter of ["all", "missing-metadata", "stale"] as const) {
       const q = buildReindexFilterQuery(filter);
