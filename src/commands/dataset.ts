@@ -2331,16 +2331,6 @@ function renderDatasetTable(
     const subjects = dataset.participants ? String(dataset.participants) : "-";
     const owner = dataset.owner_username || "-";
 
-    // Discrepancy indicators:
-    // * = managed (on GitHub) but not synced to nemar.org
-    // italic/dim = catalog-only (on nemar.org but not on GitHub)
-    let statusIndicator = "";
-    if (dataset.source_type === "managed" && !dataset.nemar_sync_status) {
-      statusIndicator = chalk.yellow("*"); // On GitHub, not synced
-    } else if (dataset.source_type === "managed" && dataset.nemar_sync_status === "failed") {
-      statusIndicator = chalk.red("!"); // Sync failed
-    }
-
     const visLabel = dataset.visibility === "public" ? chalk.green("pub") : chalk.yellow("prv");
 
     let idDisplay: string;
@@ -2361,7 +2351,7 @@ function renderDatasetTable(
       modality.padEnd(modWidth),
       subjects.padEnd(subjWidth),
       owner.padEnd(ownerWidth),
-      `${visLabel} ${statusIndicator}`.trim(),
+      visLabel,
     ].join("  ");
     console.log(row);
   }

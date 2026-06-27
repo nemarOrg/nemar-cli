@@ -118,7 +118,7 @@ CREATE TABLE datasets (
   created_at TEXT NOT NULL DEFAULT (datetime('now')), updated_at TEXT NOT NULL DEFAULT (datetime('now')),
   is_sandbox INTEGER NOT NULL DEFAULT 0,
   visibility TEXT NOT NULL DEFAULT 'private' CHECK (visibility IN ('private','public')),
-  enrichment_json TEXT, source TEXT, source_id TEXT, nemar_sync_status TEXT,
+  enrichment_json TEXT, source TEXT, source_id TEXT,
   subject_count INTEGER, modalities TEXT, age_min REAL, age_max REAL, file_size INTEGER,
   total_files INTEGER, tasks TEXT,
   FOREIGN KEY (owner_user_id) REFERENCES users(id)
