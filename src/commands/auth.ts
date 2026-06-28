@@ -21,6 +21,7 @@ import inquirer from "inquirer";
 import ora from "ora";
 import {
   ApiError,
+  MaintenanceError,
   checkGitHubUsername,
   checkUsername,
   getCurrentUser,
@@ -109,21 +110,29 @@ Examples:
  */
 export type LoginPreflight =
   | { kind: "fresh" } // no usable stored credential — prompt for a key
-  | { kind: "stale"; username: string } // stored key revoked/expired — re-auth same account
-  | { kind: "active"; username: string }; // stored key still valid — adding another account
+  | { kind: "stale"; username: string } // stored key confirmed dead — re-auth same account
+  | { kind: "active"; username: string }; // stored key valid OR unverifiable — multi-account prompt
 
-export function decideLoginPreflight(input: {
-  hasStoredKey: boolean;
-  storedKeyState: "valid" | "invalid" | "unknown";
-  username?: string;
-}): LoginPreflight {
+/** Liveness of a stored key, as determined by probing POST /auth/login. */
+export type KeyLivenessState = "valid" | "invalid" | "unknown";
+
+/**
+ * Input to {@link decideLoginPreflight}. A discriminated union so the type
+ * rejects phantom states: a key's liveness and username only exist when a key
+ * is actually stored.
+ */
+export type LoginPreflightInput =
+  | { hasStoredKey: false }
+  | { hasStoredKey: true; storedKeyState: KeyLivenessState; username?: string };
+
+export function decideLoginPreflight(input: LoginPreflightInput): LoginPreflight {
   if (!input.hasStoredKey) return { kind: "fresh" };
   const username = input.username || "unknown";
   // Only a definitive "invalid" (the server confirmed the key is revoked or
-  // expired) routes to same-account re-auth. "unknown" — an offline run or any
-  // transient failure where we never reached the server — keeps the original
-  // multi-account behavior, so a network hiccup never mislabels a good key as
-  // dead (#851).
+  // expired) routes to same-account re-auth. "valid" and "unknown" — the
+  // latter an offline run or any transient failure where we never reached the
+  // server — both keep the original multi-account behavior, so a network
+  // hiccup never mislabels a good key as dead (#851).
   return input.storedKeyState === "invalid"
     ? { kind: "stale", username }
     : { kind: "active", username };
@@ -137,21 +146,26 @@ export async function loginAction(options: { key?: string } & ConfirmOptions): P
   if (isAuthenticated()) {
     const cfg = getConfig();
     const storedKey = cfg.apiKey;
-    let storedKeyState: "valid" | "invalid" | "unknown" = "unknown";
+    let storedKeyState: KeyLivenessState = "unknown";
     if (storedKey) {
       const probe = ora("Checking your saved credentials...").start();
       try {
         const check = await login(storedKey);
         storedKeyState = check.valid ? "valid" : "invalid";
+        probe.stop();
       } catch (error) {
+        probe.stop();
+        // Maintenance mode (503) already printed its own banner inside the API
+        // layer; don't layer a contradictory "add another account?" prompt on
+        // top of it — just stop here so the user retries when service is back.
+        if (error instanceof MaintenanceError) return;
         // A definitive 401 means the key was revoked or expired server-side, so
-        // route to same-account re-auth. Anything else (offline network error,
-        // 5xx, unexpected) stays "unknown": we keep the original multi-account
-        // prompt rather than wrongly telling the user a working key is dead.
+        // mark it "invalid"; decideLoginPreflight routes that to same-account
+        // re-auth. Anything else (offline network error, 5xx, unexpected) stays
+        // "unknown": we keep the original multi-account prompt rather than
+        // wrongly telling the user a working key is dead.
         storedKeyState =
           error instanceof ApiError && error.statusCode === 401 ? "invalid" : "unknown";
-      } finally {
-        probe.stop();
       }
     }
 
@@ -523,6 +537,14 @@ export async function statusAction(options: { refresh?: boolean }): Promise<void
         // banner that contradicts the failed refresh (#851).
         console.log(chalk.yellow("  Your saved API key is no longer valid (expired or revoked)."));
         console.log(chalk.dim("  Run 'nemar auth login' with a new key to re-authenticate."));
+        return;
+      }
+      if (error instanceof ApiError && error.statusCode === 403) {
+        // Key authenticates but the account is no longer approved (pending or
+        // suspended). Same reasoning as the 401 case: don't print a green
+        // "Authenticated" banner that contradicts the failed refresh (#851).
+        console.log(chalk.yellow("  Your account is not active (pending approval or suspended)."));
+        console.log(chalk.dim("  Contact a NEMAR admin if you believe this is an error."));
         return;
       }
     }

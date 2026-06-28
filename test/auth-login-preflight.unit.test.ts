@@ -17,7 +17,7 @@ import { decideLoginPreflight } from "../src/commands/auth";
 
 describe("decideLoginPreflight (#851)", () => {
   test("no stored credential → fresh prompt", () => {
-    expect(decideLoginPreflight({ hasStoredKey: false, storedKeyState: "unknown" })).toEqual({
+    expect(decideLoginPreflight({ hasStoredKey: false })).toEqual({
       kind: "fresh",
     });
   });
@@ -40,9 +40,16 @@ describe("decideLoginPreflight (#851)", () => {
     ).toEqual({ kind: "active", username: "bru" });
   });
 
-  test("missing username falls back to 'unknown'", () => {
+  test("missing username falls back to 'unknown' (active)", () => {
     expect(decideLoginPreflight({ hasStoredKey: true, storedKeyState: "valid" })).toEqual({
       kind: "active",
+      username: "unknown",
+    });
+  });
+
+  test("missing username falls back to 'unknown' (stale)", () => {
+    expect(decideLoginPreflight({ hasStoredKey: true, storedKeyState: "invalid" })).toEqual({
+      kind: "stale",
       username: "unknown",
     });
   });
