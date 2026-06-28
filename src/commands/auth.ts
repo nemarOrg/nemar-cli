@@ -114,12 +114,19 @@ export type LoginPreflight =
 
 export function decideLoginPreflight(input: {
   hasStoredKey: boolean;
-  storedKeyValid: boolean;
+  storedKeyState: "valid" | "invalid" | "unknown";
   username?: string;
 }): LoginPreflight {
   if (!input.hasStoredKey) return { kind: "fresh" };
   const username = input.username || "unknown";
-  return input.storedKeyValid ? { kind: "active", username } : { kind: "stale", username };
+  // Only a definitive "invalid" (the server confirmed the key is revoked or
+  // expired) routes to same-account re-auth. "unknown" — an offline run or any
+  // transient failure where we never reached the server — keeps the original
+  // multi-account behavior, so a network hiccup never mislabels a good key as
+  // dead (#851).
+  return input.storedKeyState === "invalid"
+    ? { kind: "stale", username }
+    : { kind: "active", username };
 }
 
 /** Exported login action handler for use in root-level shortcuts */
@@ -130,17 +137,19 @@ export async function loginAction(options: { key?: string } & ConfirmOptions): P
   if (isAuthenticated()) {
     const cfg = getConfig();
     const storedKey = cfg.apiKey;
-    let storedKeyValid = false;
+    let storedKeyState: "valid" | "invalid" | "unknown" = "unknown";
     if (storedKey) {
       const probe = ora("Checking your saved credentials...").start();
       try {
         const check = await login(storedKey);
-        storedKeyValid = check.valid;
-      } catch {
-        // Revoked/expired key surfaces as 401; offline surfaces as a network
-        // error. Either way treat the stored key as unusable — a transient
-        // blip just means the real login() call below re-checks and reports.
-        storedKeyValid = false;
+        storedKeyState = check.valid ? "valid" : "invalid";
+      } catch (error) {
+        // A definitive 401 means the key was revoked or expired server-side, so
+        // route to same-account re-auth. Anything else (offline network error,
+        // 5xx, unexpected) stays "unknown": we keep the original multi-account
+        // prompt rather than wrongly telling the user a working key is dead.
+        storedKeyState =
+          error instanceof ApiError && error.statusCode === 401 ? "invalid" : "unknown";
       } finally {
         probe.stop();
       }
@@ -148,7 +157,7 @@ export async function loginAction(options: { key?: string } & ConfirmOptions): P
 
     const preflight = decideLoginPreflight({
       hasStoredKey: true,
-      storedKeyValid,
+      storedKeyState,
       username: cfg.username,
     });
 
