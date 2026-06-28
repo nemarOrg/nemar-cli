@@ -700,7 +700,7 @@ datasetRoutes.get("/", optionalAuthMiddleware, async (c) => {
     }
 
     const params: (string | number)[] = [status, user.id];
-    // Read managed facts from the `datasets` source of truth (#646). 22-column
+    // Read managed facts from the `datasets` source of truth (#646). 24-column
     // ?mine wire shape. latest_version is the most recently minted DOI version
     // (null when none); scripts/hallu-sync.sh reads it to skip the per-dataset
     // /manifest call, so keep the ordering in sync with /datasets/:id/manifest.
@@ -716,6 +716,10 @@ datasetRoutes.get("/", optionalAuthMiddleware, async (c) => {
              COALESCE(d.license, '') AS license,
              COALESCE(d.file_size, 0) AS file_size,
              COALESCE(d.file_size_formatted, '') AS file_size_formatted,
+             -- #854: NULL until phase 2/3 populate them; the website's channel +
+             -- montage filter reads NULL as "not classified yet".
+             d.n_channels,
+             d.electrode_system,
              'managed' AS source_type,
              (
                SELECT version FROM dataset_versions dv
@@ -747,9 +751,10 @@ datasetRoutes.get("/", optionalAuthMiddleware, async (c) => {
   // Single-table read from the `datasets` source of truth (#646). Folded legacy
   // catalog rows are first-class here, discriminated by the sentinel owner
   // (source_type='catalog'); managed datasets are source_type='managed'.
-  // 27-column wire shape: the pre-consolidation UNION path + #653 `license` +
+  // 29-column wire shape: the pre-consolidation UNION path + #653 `license` +
   // the #804 citation counts (num_citations / num_dataset_citations /
-  // num_datapaper_citations).
+  // num_datapaper_citations) + #854 channel/montage (n_channels,
+  // electrode_system).
   const params: (string | number)[] = [status];
   let query = `
     SELECT d.dataset_id, d.dataset_id AS id, d.name, d.description, d.status, d.visibility,
@@ -766,6 +771,10 @@ datasetRoutes.get("/", optionalAuthMiddleware, async (c) => {
            COALESCE(d.num_citations, 0) AS num_citations,
            COALESCE(d.num_dataset_citations, 0) AS num_dataset_citations,
            COALESCE(d.num_datapaper_citations, 0) AS num_datapaper_citations,
+           -- #854: NULL until phase 2/3 populate them; the website's channel +
+           -- montage filter reads NULL as "not classified yet".
+           d.n_channels,
+           d.electrode_system,
            CASE WHEN d.owner_user_id = ${SYSTEM_USER_ID} THEN 'catalog' ELSE 'managed' END AS source_type,
            (
              SELECT version FROM dataset_versions dv
