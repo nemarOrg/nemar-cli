@@ -21,6 +21,7 @@ import inquirer from "inquirer";
 import ora from "ora";
 import {
   ApiError,
+  MaintenanceError,
   checkGitHubUsername,
   checkUsername,
   getCurrentUser,
@@ -94,15 +95,100 @@ Examples:
 // Login
 // ============================================================================
 
+/**
+ * Decide how `nemar auth login` should treat a credential already on disk.
+ *
+ * The gate used to be `isAuthenticated()` alone, which only answers "is *a*
+ * key string stored?" — true even when that key was revoked or expired
+ * server-side (e.g. after `nemar auth regenerate-key` was run elsewhere).
+ * That made the CLI announce "Already logged in" and ask "different account?"
+ * when the user actually just needed to re-enter a renewed key for the SAME
+ * account (#851). We probe the stored key's liveness and branch on the result.
+ *
+ * Pure on purpose: all I/O (the liveness probe) happens in the caller so this
+ * decision stays unit-testable.
+ */
+export type LoginPreflight =
+  | { kind: "fresh" } // no usable stored credential — prompt for a key
+  | { kind: "stale"; username: string } // stored key confirmed dead — re-auth same account
+  | { kind: "active"; username: string }; // stored key valid OR unverifiable — multi-account prompt
+
+/** Liveness of a stored key, as determined by probing POST /auth/login. */
+export type KeyLivenessState = "valid" | "invalid" | "unknown";
+
+/**
+ * Input to {@link decideLoginPreflight}. A discriminated union so the type
+ * rejects phantom states: a key's liveness and username only exist when a key
+ * is actually stored.
+ */
+export type LoginPreflightInput =
+  | { hasStoredKey: false }
+  | { hasStoredKey: true; storedKeyState: KeyLivenessState; username?: string };
+
+export function decideLoginPreflight(input: LoginPreflightInput): LoginPreflight {
+  if (!input.hasStoredKey) return { kind: "fresh" };
+  const username = input.username || "unknown";
+  // Only a definitive "invalid" (the server confirmed the key is revoked or
+  // expired) routes to same-account re-auth. "valid" and "unknown" — the
+  // latter an offline run or any transient failure where we never reached the
+  // server — both keep the original multi-account behavior, so a network
+  // hiccup never mislabels a good key as dead (#851).
+  return input.storedKeyState === "invalid"
+    ? { kind: "stale", username }
+    : { kind: "active", username };
+}
+
 /** Exported login action handler for use in root-level shortcuts */
 export async function loginAction(options: { key?: string } & ConfirmOptions): Promise<void> {
-  // Check for existing authentication
+  // Check for existing authentication. isAuthenticated() only proves a key
+  // STRING is on disk, not that it still works, so probe the stored key's
+  // liveness before deciding how to greet the user (#851).
   if (isAuthenticated()) {
     const cfg = getConfig();
-    console.log(chalk.yellow(`Already logged in as ${cfg.username || "unknown"}`));
-    console.log(chalk.dim("  This will add another account (use 'nemar auth switch' to switch)"));
-    const result = await confirm("Log in with a different account?", options);
-    if (result !== "confirmed") return;
+    const storedKey = cfg.apiKey;
+    let storedKeyState: KeyLivenessState = "unknown";
+    if (storedKey) {
+      const probe = ora("Checking your saved credentials...").start();
+      try {
+        const check = await login(storedKey);
+        storedKeyState = check.valid ? "valid" : "invalid";
+        probe.stop();
+      } catch (error) {
+        probe.stop();
+        // Maintenance mode (503) already printed its own banner inside the API
+        // layer; don't layer a contradictory "add another account?" prompt on
+        // top of it — just stop here so the user retries when service is back.
+        if (error instanceof MaintenanceError) return;
+        // A definitive 401 means the key was revoked or expired server-side, so
+        // mark it "invalid"; decideLoginPreflight routes that to same-account
+        // re-auth. Anything else (offline network error, 5xx, unexpected) stays
+        // "unknown": we keep the original multi-account prompt rather than
+        // wrongly telling the user a working key is dead.
+        storedKeyState =
+          error instanceof ApiError && error.statusCode === 401 ? "invalid" : "unknown";
+      }
+    }
+
+    const preflight = decideLoginPreflight({
+      hasStoredKey: true,
+      storedKeyState,
+      username: cfg.username,
+    });
+
+    if (preflight.kind === "active") {
+      console.log(chalk.yellow(`Already logged in as ${preflight.username}`));
+      console.log(chalk.dim("  This will add another account (use 'nemar auth switch' to switch)"));
+      const result = await confirm("Add a different account?", options);
+      if (result !== "confirmed") return;
+    } else if (preflight.kind === "stale") {
+      // Stale: SAME account, dead key. Guide a straightforward re-auth instead
+      // of the misleading "different account?" prompt the bug report hit.
+      console.log(chalk.yellow(`Your saved API key for ${preflight.username} is no longer valid.`));
+      console.log(
+        chalk.dim("  It may have expired or been revoked (e.g. via 'nemar auth regenerate-key')."),
+      );
+      console.log(chalk.dim("  Enter your new key below to re-authenticate."));
+    }
   }
 
   // Get API key from options, environment, or prompt
@@ -447,7 +533,19 @@ export async function statusAction(options: { refresh?: boolean }): Promise<void
     } catch (error) {
       spinner.fail("Could not refresh user info");
       if (error instanceof ApiError && error.statusCode === 401) {
-        console.log(chalk.dim("  Your session may have expired. Try logging in again."));
+        // The stored key is dead — don't fall through to a green "Authenticated"
+        // banner that contradicts the failed refresh (#851).
+        console.log(chalk.yellow("  Your saved API key is no longer valid (expired or revoked)."));
+        console.log(chalk.dim("  Run 'nemar auth login' with a new key to re-authenticate."));
+        return;
+      }
+      if (error instanceof ApiError && error.statusCode === 403) {
+        // Key authenticates but the account is no longer approved (pending or
+        // suspended). Same reasoning as the 401 case: don't print a green
+        // "Authenticated" banner that contradicts the failed refresh (#851).
+        console.log(chalk.yellow("  Your account is not active (pending approval or suspended)."));
+        console.log(chalk.dim("  Contact a NEMAR admin if you believe this is an error."));
+        return;
       }
     }
   }
