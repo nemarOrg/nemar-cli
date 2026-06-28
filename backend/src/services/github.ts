@@ -6,6 +6,12 @@
  */
 
 import validatorPin from "../../../validator-version.json" with { type: "json" };
+import {
+  classifyElectrodeSystem,
+  parseChannelsTsv,
+  parseEegChannelCount,
+  resolveNChannels,
+} from "./channel-montage";
 import { BIDS_DATATYPES } from "./datacite";
 import { HttpError } from "./retry";
 
@@ -2287,6 +2293,11 @@ export interface BidsTreeStats {
   subjectCount: number;
   /** Sorted task labels. Sampled across subjects (union with tree paths upstream). */
   tasks: string[];
+  /** Representative EEG channel count from an exemplar recording (#858).
+   *  Undefined when no EEG `*_channels.tsv` / `*_eeg.json` was sampled. */
+  nChannels?: number;
+  /** Scalp montage class from the exemplar's channel labels (#858). */
+  electrodeSystem?: string;
 }
 
 /**
@@ -2346,6 +2357,11 @@ export async function getBidsTreeStats(
 
   const mods = new Set<string>();
   const tasks = new Set<string>();
+  // First EEG sidecars seen across the sampled subjects -> one exemplar probe for
+  // channel count + montage (#858). Captured as blob entries; fetched after the
+  // loop so the probe never adds latency to the modality/task walk.
+  let exemplarChannelsTsv: TreeEntry | undefined;
+  let exemplarEegJson: TreeEntry | undefined;
   for (const subj of sampleEvenly(subjectDirs, MAX_SUBJECTS_FOR_MODALITY)) {
     const subResponse = await githubFetchWithRetry(
       `${GITHUB_API()}/repos/${ORG_NAME}/${repo}/git/trees/${subj.sha}?recursive=1`,
@@ -2365,12 +2381,70 @@ export async function getBidsTreeStats(
     const paths = sub.tree.map((e) => e.path);
     for (const m of modalitiesFromSubjectSubtree(paths)) mods.add(m);
     for (const t of tasksFromSubjectSubtree(paths)) tasks.add(t);
+    // Subtree paths are relative to the subject dir, so an EEG sidecar sits at
+    // `eeg/...` or `ses-*/eeg/...`. Keep the first of each.
+    for (const e of sub.tree) {
+      if (e.type !== "blob") continue;
+      if (!exemplarChannelsTsv && /(^|\/)eeg\/[^/]*_channels\.tsv$/.test(e.path)) {
+        exemplarChannelsTsv = e;
+      } else if (!exemplarEegJson && /(^|\/)eeg\/[^/]*_eeg\.json$/.test(e.path)) {
+        exemplarEegJson = e;
+      }
+    }
   }
+
+  const { nChannels, electrodeSystem } = await probeChannelMontage(
+    repo,
+    exemplarChannelsTsv,
+    exemplarEegJson,
+    pat,
+    refreshTokenOn401,
+  );
+
   return {
     modalities: [...mods].sort(),
     subjectCount: subjectDirs.length,
     tasks: [...tasks].sort(),
+    nChannels,
+    electrodeSystem,
   };
+}
+
+/**
+ * Best-effort channel-count + montage probe for getBidsTreeStats (#858). Fetches
+ * the exemplar EEG `*_channels.tsv` (+ `*_eeg.json` sidecar) blobs and runs the
+ * pure classifiers. Channel data is secondary to the modality/subject walk, so
+ * any failure (annex pointer, fetch error, parse miss) returns empty rather than
+ * throwing -- the caller leaves the columns NULL.
+ */
+async function probeChannelMontage(
+  repo: string,
+  channelsTsv: TreeEntry | undefined,
+  eegJson: TreeEntry | undefined,
+  pat: string,
+  refreshTokenOn401?: () => Promise<string>,
+): Promise<{ nChannels?: number; electrodeSystem?: string }> {
+  if (!channelsTsv && !eegJson) return {};
+  try {
+    let tsv: ReturnType<typeof parseChannelsTsv> = null;
+    let sidecar: number | null = null;
+    if (channelsTsv) {
+      tsv = parseChannelsTsv(await getBlobContent(repo, channelsTsv.sha, pat, refreshTokenOn401));
+    }
+    if (eegJson) {
+      sidecar = parseEegChannelCount(
+        await getBlobContent(repo, eegJson.sha, pat, refreshTokenOn401),
+      );
+    }
+    const n = resolveNChannels(sidecar, tsv);
+    const sys = tsv ? classifyElectrodeSystem(tsv.labels) : null;
+    return { nChannels: n ?? undefined, electrodeSystem: sys ?? undefined };
+  } catch (err) {
+    console.warn(
+      `[getBidsTreeStats] channel/montage probe failed for ${repo}: ${err instanceof Error ? err.message : String(err)}`,
+    );
+    return {};
+  }
 }
 
 /**
