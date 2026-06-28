@@ -117,4 +117,26 @@ describe("channel-montage backfill sweep", () => {
     expect(row.channel_montage_checked_at).not.toBeNull(); // checked, so not retried
     expect(candidates(db)).not.toContain("on000302");
   });
+
+  test("?reset=1 clears probed rows so a corrected classifier can re-sweep (#865)", () => {
+    applyProbe(db, "nm000300", 20, "biosemi"); // a now-known-wrong classification
+    applyProbe(db, "on000301", 64, "10-10");
+    expect(candidates(db)).not.toContain("nm000300");
+    // The endpoint's reset branch (admin.ts).
+    const reset = db
+      .query(
+        `UPDATE datasets
+           SET channel_montage_checked_at = NULL, n_channels = NULL, electrode_system = NULL
+         WHERE channel_montage_checked_at IS NOT NULL`,
+      )
+      .run();
+    expect(reset.changes).toBe(2);
+    // Both are candidates again, with the stale values cleared.
+    expect(candidates(db)).toEqual(["nm000300", "on000301", "on000302"]);
+    const row = db
+      .query("SELECT n_channels, electrode_system FROM datasets WHERE dataset_id = 'nm000300'")
+      .get() as Record<string, unknown>;
+    expect(row.n_channels).toBeNull();
+    expect(row.electrode_system).toBeNull();
+  });
 });
