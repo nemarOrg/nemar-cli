@@ -177,11 +177,15 @@ export async function refreshDatasetMetadata(
     let modalitiesOverride: string[] | undefined;
     let subjectCountOverride: number | undefined;
     let tasksOverride: string[] | undefined;
+    let nChannelsOverride: number | undefined;
+    let electrodeSystemOverride: string | undefined;
     try {
       const stats = await getBidsTreeStats(repoName, "main", pat);
       if (stats.modalities.length) modalitiesOverride = stats.modalities;
       if (stats.subjectCount > 0) subjectCountOverride = stats.subjectCount;
       if (stats.tasks.length) tasksOverride = stats.tasks;
+      nChannelsOverride = stats.nChannels;
+      electrodeSystemOverride = stats.electrodeSystem;
     } catch (err) {
       console.warn(
         `[reindex] BIDS tree walk failed for ${datasetId}; using tree paths: ${errorMessage(err)}`,
@@ -194,6 +198,8 @@ export async function refreshDatasetMetadata(
       modalities: modalitiesOverride,
       subjectCount: subjectCountOverride,
       tasks: tasksOverride,
+      nChannels: nChannelsOverride,
+      electrodeSystem: electrodeSystemOverride,
     });
     await writeDatasetMetadataColumns(db, datasetId, cols);
     metadataColumnsWritten = true;

@@ -26,6 +26,10 @@ export interface DatasetMetadataColumns {
   file_size: number | null;
   total_files: number | null;
   tasks: string | null;
+  /** Representative EEG channel count (#854/#858). */
+  n_channels: number | null;
+  /** Scalp montage class: 10-20|10-10|10-05|biosemi|egi-geodesic|other (#854/#858). */
+  electrode_system: string | null;
 }
 
 export interface MetadataColumnInputs {
@@ -56,6 +60,15 @@ export interface MetadataColumnInputs {
    * carries derivative task labels, so union never loses one.
    */
   tasks?: string[];
+  /**
+   * Representative EEG channel count from `getBidsTreeStats` (#858, exemplar
+   * `*_channels.tsv` / `*_eeg.json`). Omit when no EEG recording was sampled.
+   */
+  nChannels?: number;
+  /**
+   * Scalp montage class from `getBidsTreeStats` (#858). Omit when undetermined.
+   */
+  electrodeSystem?: string;
 }
 
 /**
@@ -129,6 +142,8 @@ export function computeDatasetMetadataColumns(input: MetadataColumnInputs): Data
     file_size: input.s3Stats ? input.s3Stats.totalSize : null,
     total_files: input.s3Stats ? (input.s3Stats.objectCount ?? null) : null,
     tasks: tasksArr.length ? tasksArr.join(",") : null,
+    n_channels: input.nChannels ?? null,
+    electrode_system: input.electrodeSystem ?? null,
   };
 }
 
@@ -159,6 +174,8 @@ export async function writeDatasetMetadataColumns(
            file_size = COALESCE(?, file_size),
            total_files = COALESCE(?, total_files),
            tasks = COALESCE(?, tasks),
+           n_channels = COALESCE(?, n_channels),
+           electrode_system = COALESCE(?, electrode_system),
            metadata_updated_at = datetime('now'),
            updated_at = datetime('now')
        WHERE dataset_id = ?`,
@@ -171,6 +188,8 @@ export async function writeDatasetMetadataColumns(
       cols.file_size,
       cols.total_files,
       cols.tasks,
+      cols.n_channels,
+      cols.electrode_system,
       datasetId,
     )
     .run();
