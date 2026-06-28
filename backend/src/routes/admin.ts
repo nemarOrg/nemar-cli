@@ -1394,6 +1394,22 @@ adminRoutes.post("/datasets/zarr-sweep", async (c) => {
  */
 adminRoutes.post("/datasets/channel-montage-sweep", async (c) => {
   const db = c.env.DB;
+
+  // ?reset=1 clears every probed row (channel_montage_checked_at + the two
+  // columns -> NULL) so a corrected classifier can re-sweep from scratch. Used
+  // after the BioSemi-detection fix (#865) to redo the dry-run batch. Direct
+  // write, no updated_at bump. Returns the count cleared and does nothing else.
+  if (c.req.query("reset") === "1") {
+    const res = await db
+      .prepare(
+        `UPDATE datasets
+         SET channel_montage_checked_at = NULL, n_channels = NULL, electrode_system = NULL
+         WHERE channel_montage_checked_at IS NOT NULL`,
+      )
+      .run();
+    return c.json({ reset: res.meta?.changes ?? 0 });
+  }
+
   const limitRaw = Number.parseInt(c.req.query("limit") || "15", 10);
   const limit = Number.isFinite(limitRaw) ? Math.min(Math.max(limitRaw, 1), 30) : 15;
 

@@ -109,6 +109,14 @@ describe("classifyElectrodeSystem", () => {
     expect(classifyElectrodeSystem(["A1", "A17", "B5", "C20", "D32", "E1"])).toBe("biosemi");
   });
 
+  test("a 10-20 cap with an A2 ear ref is 10-20, NOT biosemi (nm000109)", () => {
+    // Real nm000109 labels: A2 matches the A-bank probe and F3/F4/C3/C4 match
+    // [A-H]\d, but the bank labels are a minority, so it must not read as BioSemi.
+    const labels =
+      "Fp1 Fp2 F3 F4 F7 F8 T3 T4 C3 C4 T5 T6 P3 P4 O1 O2 Fz Cz Pz A2".split(" ");
+    expect(classifyElectrodeSystem(labels)).toBe("10-20");
+  });
+
   test("classic 19-channel 10-20 cap", () => {
     const labels = "Fp1 Fp2 F7 F3 Fz F4 F8 T7 C3 Cz C4 T8 P7 P3 Pz P4 P8 O1 O2".split(" ");
     expect(classifyElectrodeSystem(labels)).toBe("10-20");

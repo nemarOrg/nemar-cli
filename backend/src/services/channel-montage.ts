@@ -129,8 +129,14 @@ export function classifyElectrodeSystem(labels: string[]): ElectrodeSystem | nul
   const up = labels.map((l) => l.trim().toUpperCase()).filter(Boolean);
   if (up.length < 3) return null;
 
+  // A real BioSemi cap is almost entirely bank-labeled (A1..H32). A standard
+  // 10-20/10-10 montage only has a few incidental [A-H]-letter labels (F3, F4,
+  // C3, C4) plus maybe A1/A2 ear refs, so require the bank labels to DOMINATE,
+  // not merely appear -- otherwise a plain 10-20 with an A2 ref classifies as
+  // BioSemi (the nm000109 bug).
   const hasABank = up.some((l) => /^A\d{1,2}$/.test(l));
-  if (hasABank && up.filter((l) => /^[A-H]\d{1,2}$/.test(l)).length >= 3) return "biosemi";
+  const bankCount = up.filter((l) => /^[A-H]\d{1,2}$/.test(l)).length;
+  if (hasABank && bankCount >= 3 && bankCount >= up.length * 0.6) return "biosemi";
 
   const eCount = up.filter((l) => /^E\d{1,3}$/.test(l)).length;
   if (eCount >= 3 && !hasABank) return "egi-geodesic";
