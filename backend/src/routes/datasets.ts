@@ -1238,6 +1238,17 @@ datasetRoutes.get("/:id", optionalAuthMiddleware, async (c) => {
       `
     SELECT
       d.*,
+      -- Contract parity with the list endpoints (#853): expose subject_count
+      -- under its API name and compute latest_version, which aren't raw
+      -- columns. Kept ALONGSIDE d.* so existing consumers of the raw
+      -- subject_count column are unaffected (additive, no regression).
+      COALESCE(d.subject_count, 0) AS participants,
+      (
+        SELECT version FROM dataset_versions dv
+        WHERE dv.dataset_id = d.dataset_id
+        ORDER BY created_at DESC
+        LIMIT 1
+      ) AS latest_version,
       u.username as owner_username,
       u.github_username as owner_github
     FROM datasets d
