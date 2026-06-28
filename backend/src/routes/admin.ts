@@ -85,6 +85,7 @@ import {
   deployWorkflows,
   downloadReleaseArchive,
   ensureRepoToSpec,
+  getBidsTreeStats,
   getBlobContent,
   getBranchRulesetInfo,
   getMainBranchSha,
@@ -1371,6 +1372,124 @@ adminRoutes.post("/datasets/zarr-sweep", async (c) => {
     checked: candidates.length,
     ready,
     absent,
+    errors,
+    remaining: remainingRow?.n ?? null,
+  });
+});
+
+/**
+ * POST /admin/datasets/channel-montage-sweep?limit=N — one-time backfill that
+ * seeds n_channels / electrode_system (migration 0054) for existing EEG datasets
+ * (epic #854 phase 3, #859). Going-forward writes land via the reindex/enrichment
+ * walk; this seeds the rows that predate it.
+ *
+ * Bounded per invocation (default 15, max 30): getBidsTreeStats fetches the root
+ * tree + up to 25 subject subtrees + the two exemplar sidecar blobs per dataset,
+ * so the cap keeps the run under the Worker subrequest limit. Run repeatedly until
+ * `remaining` reaches 0. Idempotent: only rows never checked
+ * (channel_montage_checked_at IS NULL) are candidates, so a re-run resumes.
+ *
+ * Writes the two columns DIRECTLY (not via writeDatasetMetadataColumns) so the
+ * backfill does not bump updated_at/metadata_updated_at across every EEG dataset.
+ */
+adminRoutes.post("/datasets/channel-montage-sweep", async (c) => {
+  const db = c.env.DB;
+  const limitRaw = Number.parseInt(c.req.query("limit") || "15", 10);
+  const limit = Number.isFinite(limitRaw) ? Math.min(Math.max(limitRaw, 1), 30) : 15;
+
+  // Candidates: datasets backed by a GitHub repo (managed nm*/on*; catalog ds*
+  // rows have none), with EEG in their modalities, not yet probed. `eeg` LIKE
+  // also matches `ieeg`, but the probe only reads the `eeg/` datatype dir, so an
+  // intracranial-only dataset simply yields no channel data and is marked checked.
+  let candidates: { dataset_id: string; github_repo: string }[];
+  try {
+    const rows = await db
+      .prepare(
+        `SELECT dataset_id, github_repo FROM datasets
+         WHERE github_repo IS NOT NULL
+           AND (is_sandbox = 0 OR is_sandbox IS NULL)
+           AND modalities LIKE '%eeg%'
+           AND channel_montage_checked_at IS NULL
+         ORDER BY dataset_id
+         LIMIT ?`,
+      )
+      .bind(limit)
+      .all<{ dataset_id: string; github_repo: string }>();
+    candidates = rows.results ?? [];
+  } catch (err) {
+    console.error("[channel-montage-sweep] candidate query failed:", err);
+    return c.json(
+      { error: "Failed to query sweep candidates (are migrations 0054/0055 applied?)" },
+      500,
+    );
+  }
+
+  let pat: string;
+  try {
+    pat = await getDatasetsToken(c.env);
+  } catch (err) {
+    console.error("[channel-montage-sweep] token fetch failed:", err);
+    return c.json({ error: "Failed to obtain GitHub token" }, 500);
+  }
+
+  let populated = 0;
+  let noData = 0;
+  const errors: { dataset_id: string; error: string }[] = [];
+
+  for (const { dataset_id, github_repo } of candidates) {
+    const repoName = github_repo.split("/")[1];
+    let nChannels: number | null = null;
+    let electrodeSystem: string | null = null;
+    if (!repoName) {
+      errors.push({ dataset_id, error: `invalid github_repo: ${github_repo}` });
+    } else {
+      try {
+        const stats = await getBidsTreeStats(repoName, "main", pat);
+        nChannels = stats.nChannels ?? null;
+        electrodeSystem = stats.electrodeSystem ?? null;
+        if (nChannels != null || electrodeSystem != null) populated++;
+        else noData++;
+      } catch (err) {
+        errors.push({
+          dataset_id,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+    // Mark checked regardless of outcome so `remaining` converges; write the two
+    // columns directly (no updated_at bump). channel_montage_checked_at advances
+    // even on a probe miss/error, so a failed dataset is not retried forever.
+    try {
+      await db
+        .prepare(
+          `UPDATE datasets
+           SET n_channels = ?, electrode_system = ?, channel_montage_checked_at = datetime('now')
+           WHERE dataset_id = ?`,
+        )
+        .bind(nChannels, electrodeSystem, dataset_id)
+        .run();
+    } catch (err) {
+      errors.push({
+        dataset_id,
+        error: `d1 write: ${err instanceof Error ? err.message : String(err)}`,
+      });
+    }
+  }
+
+  const remainingRow = await db
+    .prepare(
+      `SELECT COUNT(*) AS n FROM datasets
+       WHERE github_repo IS NOT NULL
+         AND (is_sandbox = 0 OR is_sandbox IS NULL)
+         AND modalities LIKE '%eeg%'
+         AND channel_montage_checked_at IS NULL`,
+    )
+    .first<{ n: number }>();
+
+  return c.json({
+    processed: candidates.length,
+    populated,
+    noData,
     errors,
     remaining: remainingRow?.n ?? null,
   });
