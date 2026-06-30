@@ -667,6 +667,8 @@ datasetRoutes.get("/", optionalAuthMiddleware, async (c) => {
   const author = c.req.query("author");
   const task = c.req.query("task");
   const hasDoi = c.req.query("has_doi") === "true";
+  // #869: accept the website FilterSidebar's `has_hed=1` and a `true` for parity.
+  const hasHed = c.req.query("has_hed") === "1" || c.req.query("has_hed") === "true";
   const recentParam = c.req.query("recent");
   const recent = recentParam ? Number.parseInt(recentParam, 10) : undefined;
   // #653: comma-separated license tiers, OR semantics. Invalid tokens are
@@ -742,6 +744,7 @@ datasetRoutes.get("/", optionalAuthMiddleware, async (c) => {
       author,
       task,
       hasDoi,
+      hasHed,
       recent,
       licenseTiers,
     });
@@ -809,6 +812,7 @@ datasetRoutes.get("/", optionalAuthMiddleware, async (c) => {
     author,
     task,
     hasDoi,
+    hasHed,
     recent,
     licenseTiers,
   });
@@ -860,6 +864,7 @@ export function buildDatasetFilterClauses(
     author?: string;
     task?: string;
     hasDoi?: boolean;
+    hasHed?: boolean;
     recent?: number;
     licenseTiers?: LicenseTier[];
   },
@@ -908,6 +913,11 @@ export function buildDatasetFilterClauses(
   }
   if (opts.hasDoi) {
     clauses += " AND (d.concept_doi IS NOT NULL AND d.concept_doi != '')";
+  }
+  if (opts.hasHed) {
+    // #869: has_hed is nullable (NULL = not classified yet), so `= 1` cleanly
+    // excludes both 0 (checked, no HED) and NULL. Backed by idx_datasets_has_hed.
+    clauses += " AND d.has_hed = 1";
   }
   if (opts.recent) {
     // #646: folded catalog rows carry publish_date (from nemar.org); managed
@@ -1079,6 +1089,8 @@ datasetRoutes.get("/search", optionalAuthMiddleware, async (c) => {
 
   const limit = Math.min(Number.parseInt(c.req.query("limit") || "20", 10), 100);
   const modality = c.req.query("modality");
+  // #869: same `has_hed=1`/`true` convention as the browse list filter.
+  const hasHed = c.req.query("has_hed") === "1" || c.req.query("has_hed") === "true";
   const db = c.env.DB;
   const trimmed = query.trim();
   // Match every NEMAR id shape: nm (native), on (OpenNeuro mirror), and ds
@@ -1106,6 +1118,11 @@ datasetRoutes.get("/search", optionalAuthMiddleware, async (c) => {
     return rows.filter((r) => r.modalities.toLowerCase().includes(mod));
   };
 
+  // #869: client-side HED filter (the search projection can't use the SQL clause);
+  // mirrors applyModality. `has_hed === 1` only -> excludes 0 and NULL/undefined.
+  const applyHasHed = (rows: SearchResult[]): SearchResult[] =>
+    hasHed ? rows.filter((r) => r.has_hed === 1) : rows;
+
   // FTS5/exact hits carry score=1.0, so this cosine floor only filters the
   // semantic component. Applied BEFORE RRF fusion; finalize() does not re-floor
   // the fused scores.
@@ -1114,7 +1131,7 @@ datasetRoutes.get("/search", optionalAuthMiddleware, async (c) => {
 
   // #646 hybrid path: exact-id -> (semantic id-only ∪ FTS5) fused by RRF.
   const finalize = (rows: SearchResult[], method: string) => {
-    const filtered = applyModality(rows);
+    const filtered = applyHasHed(applyModality(rows));
     return c.json({
       results: filtered.slice(0, limit),
       count: filtered.length,
