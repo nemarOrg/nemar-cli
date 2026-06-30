@@ -29,6 +29,7 @@ import {
   ApiError,
   type Dataset,
   type EmailPreferences,
+  type HedSweepBatchResponse,
   type NemarMetadataPayload,
   ORCID_REGEX,
   type PublishProgressInfo,
@@ -64,6 +65,8 @@ import {
   getFleetDrift,
   getImportStatus,
   getSummaryCoverage,
+  hedSweep,
+  hedSweepReset,
   listAdminNotices,
   listDatasets,
   listPublishRequests,
@@ -3639,6 +3642,100 @@ reindexCommand
   );
 
 adminCommand.addCommand(reindexCommand);
+
+const hedSweepCommand = new Command("hed-sweep").description(
+  "Backfill HED detection (has_hed / hed_version) for existing datasets (#869)",
+);
+
+hedSweepCommand
+  .option("--limit <n>", "Datasets per batch (server clamps to [1,30])", "15")
+  .option("--reset", "Clear every probed HED row so a corrected detector can re-sweep")
+  .option("--verbose", "Print per-batch progress")
+  .option("--json", "Output raw JSON instead of the human summary")
+  .action(
+    async (options: { limit?: string; reset?: boolean; verbose?: boolean; json?: boolean }) => {
+      if (!requireAuth()) return;
+
+      if (options.reset) {
+        const spinner = ora("Resetting HED sweep state...").start();
+        try {
+          const r = await hedSweepReset();
+          spinner.succeed(
+            `Cleared ${r.reset} probed HED row(s); eligible datasets are candidates again`,
+          );
+          if (options.json) console.log(JSON.stringify(r, null, 2));
+        } catch (err) {
+          spinner.fail("Reset failed");
+          console.error(chalk.red(errorDetail(err)));
+          process.exit(1);
+        }
+        return;
+      }
+
+      const limit = Number.parseInt(options.limit ?? "15", 10) || 15;
+      const totals = { processed: 0, withHed: 0, withoutHed: 0, unknown: 0, errors: 0 };
+      const spinner = ora("Sweeping datasets for HED...").start();
+
+      let batch = 0;
+      let remaining: number | null = null;
+      let prevRemaining: number | null = null;
+      try {
+        let res: HedSweepBatchResponse;
+        do {
+          res = await hedSweep({ limit });
+          batch++;
+          totals.processed += res.processed;
+          totals.withHed += res.withHed;
+          totals.withoutHed += res.withoutHed;
+          totals.unknown += res.unknown;
+          totals.errors += res.errors.length;
+          remaining = res.remaining;
+
+          if (options.verbose) {
+            spinner.stop();
+            console.log(
+              `  [batch ${batch}] processed=${res.processed} hed=${res.withHed} no-hed=${res.withoutHed} unknown=${res.unknown} errors=${res.errors.length} remaining=${remaining ?? "?"}`,
+            );
+            for (const e of res.errors) console.log(`    ${chalk.red(e.dataset_id)}: ${e.error}`);
+            spinner.start("Sweeping datasets for HED...");
+          } else {
+            spinner.text = `Sweeping datasets for HED... ${totals.processed} processed, ${remaining ?? "?"} remaining`;
+          }
+
+          // Progress guard: hed_checked_at is stamped for every processed row, so
+          // `remaining` must strictly decrease. If it doesn't (e.g. persistent D1
+          // write errors leave rows unstamped), bail instead of looping forever.
+          if (remaining != null && prevRemaining != null && remaining >= prevRemaining) {
+            spinner.warn(`No progress (remaining stuck at ${remaining}); stopping - see errors`);
+            break;
+          }
+          prevRemaining = remaining;
+
+          if ((remaining ?? 0) > 0) await sleep(1000); // pace the GitHub-heavy batches
+        } while ((remaining ?? 0) > 0);
+
+        spinner.stop();
+      } catch (err) {
+        spinner.fail("HED sweep failed");
+        console.error(chalk.red(errorDetail(err)));
+        process.exit(1);
+      }
+
+      if (options.json) {
+        console.log(JSON.stringify({ ...totals, batches: batch, remaining }, null, 2));
+        return;
+      }
+      console.log();
+      console.log(
+        chalk.cyan(
+          `Done in ${batch} batch(es): processed=${totals.processed} hed=${totals.withHed} no-hed=${totals.withoutHed} unknown=${totals.unknown} errors=${totals.errors} remaining=${remaining ?? 0}`,
+        ),
+      );
+      if (totals.errors > 0) process.exit(1);
+    },
+  );
+
+adminCommand.addCommand(hedSweepCommand);
 
 // ============================================================================
 // Email Notification Preferences

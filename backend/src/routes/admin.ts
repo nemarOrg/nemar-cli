@@ -29,6 +29,7 @@ import {
   nemarMetadataToEnrichment,
   parseNemarMetadata,
 } from "../services/datacite";
+import { writeVersionHed } from "../services/dataset-metadata-columns";
 import {
   DatasetReindexError,
   type ReindexFilter,
@@ -1506,6 +1507,148 @@ adminRoutes.post("/datasets/channel-montage-sweep", async (c) => {
     processed: candidates.length,
     populated,
     noData,
+    errors,
+    remaining: remainingRow?.n ?? null,
+  });
+});
+
+/**
+ * POST /admin/datasets/hed-sweep?limit=N — one-time backfill that seeds HED
+ * (has_hed / hed_version, migration 0056) for existing datasets (epic #869 phase
+ * 3, #872). Going-forward writes land via the version-DOI reindex walk (phase 2);
+ * this seeds rows that predate it.
+ *
+ * Unlike channel-montage-sweep there is NO modality filter: HED lives in
+ * *_events.{json,tsv} across eeg/meg/ieeg/beh/func, so every managed dataset is a
+ * candidate. getBidsTreeStats is subrequest-heavy, so the per-call cap (default
+ * 15, max 30) matters more here. Run repeatedly until `remaining` reaches 0.
+ * Idempotent: only rows never checked (hed_checked_at IS NULL) are candidates.
+ *
+ * Writes datasets.has_hed/hed_version DIRECTLY (no updated_at bump) and also the
+ * LATEST version's dataset_versions row via writeVersionHed (HED is per-version).
+ * Non-latest historical versions are not back-probed (would re-fetch each tagged
+ * tree); they fill going forward at publish.
+ */
+adminRoutes.post("/datasets/hed-sweep", async (c) => {
+  const db = c.env.DB;
+
+  // ?reset=1 clears every probed row (hed_checked_at + the two columns -> NULL)
+  // so a corrected detector can re-sweep from scratch. datasets-level only: the
+  // per-version dataset_versions rows are publish-time truth and get overwritten
+  // when the re-sweep re-probes each dataset's latest version.
+  if (c.req.query("reset") === "1") {
+    const res = await db
+      .prepare(
+        `UPDATE datasets
+         SET hed_checked_at = NULL, has_hed = NULL, hed_version = NULL
+         WHERE hed_checked_at IS NOT NULL`,
+      )
+      .run();
+    return c.json({ reset: res.meta?.changes ?? 0 });
+  }
+
+  const limitRaw = Number.parseInt(c.req.query("limit") || "15", 10);
+  const limit = Number.isFinite(limitRaw) ? Math.min(Math.max(limitRaw, 1), 30) : 15;
+
+  // Candidates: every managed dataset (github_repo IS NOT NULL; catalog ds* rows
+  // have none), not sandbox, not yet probed. latest_version drives the per-version
+  // write -- null for unpublished datasets, which then get only the datasets-level
+  // write (writeVersionHed is skipped, no spurious 0-row error).
+  let candidates: { dataset_id: string; github_repo: string; latest_version: string | null }[];
+  try {
+    const rows = await db
+      .prepare(
+        `SELECT d.dataset_id, d.github_repo,
+           (SELECT version FROM dataset_versions dv WHERE dv.dataset_id = d.dataset_id
+            ORDER BY created_at DESC LIMIT 1) AS latest_version
+         FROM datasets d
+         WHERE d.github_repo IS NOT NULL
+           AND (d.is_sandbox = 0 OR d.is_sandbox IS NULL)
+           AND d.hed_checked_at IS NULL
+         ORDER BY d.dataset_id
+         LIMIT ?`,
+      )
+      .bind(limit)
+      .all<{ dataset_id: string; github_repo: string; latest_version: string | null }>();
+    candidates = rows.results ?? [];
+  } catch (err) {
+    console.error("[hed-sweep] candidate query failed:", err);
+    return c.json({ error: "Failed to query sweep candidates (is migration 0056 applied?)" }, 500);
+  }
+
+  let pat: string;
+  try {
+    pat = await getDatasetsToken(c.env);
+  } catch (err) {
+    console.error("[hed-sweep] token fetch failed:", err);
+    return c.json({ error: "Failed to obtain GitHub token" }, 500);
+  }
+
+  let withHed = 0;
+  let withoutHed = 0;
+  let unknown = 0;
+  const errors: { dataset_id: string; error: string }[] = [];
+
+  for (const { dataset_id, github_repo, latest_version } of candidates) {
+    const repoName = github_repo.split("/")[1];
+    // null = unclassified (probe couldn't run); 0 = checked, no HED; 1 = HED.
+    let hasHedInt: number | null = null;
+    let hedVersion: string | null = null;
+    if (!repoName) {
+      errors.push({ dataset_id, error: `invalid github_repo: ${github_repo}` });
+      unknown++;
+    } else {
+      try {
+        const stats = await getBidsTreeStats(repoName, "main", pat);
+        hasHedInt = stats.hasHed == null ? null : stats.hasHed ? 1 : 0;
+        hedVersion = stats.hedVersion ?? null;
+        if (stats.hasHed === true) withHed++;
+        else if (stats.hasHed === false) withoutHed++;
+        else unknown++;
+      } catch (err) {
+        errors.push({ dataset_id, error: err instanceof Error ? err.message : String(err) });
+        unknown++;
+      }
+    }
+    // Mark checked regardless of outcome so `remaining` converges (hed_checked_at
+    // advances even on a miss/error -> a failing dataset is not retried forever).
+    try {
+      await db
+        .prepare(
+          `UPDATE datasets
+           SET has_hed = ?, hed_version = ?, hed_checked_at = datetime('now')
+           WHERE dataset_id = ?`,
+        )
+        .bind(hasHedInt, hedVersion, dataset_id)
+        .run();
+      // Keep the per-version row consistent with the denormalized datasets value:
+      // only when classified (hasHedInt != null) AND the dataset has a published
+      // version. writeVersionHed with an explicit version never 0-rows here.
+      if (hasHedInt != null && latest_version) {
+        await writeVersionHed(db, dataset_id, latest_version, hasHedInt, hedVersion);
+      }
+    } catch (err) {
+      errors.push({
+        dataset_id,
+        error: `d1 write: ${err instanceof Error ? err.message : String(err)}`,
+      });
+    }
+  }
+
+  const remainingRow = await db
+    .prepare(
+      `SELECT COUNT(*) AS n FROM datasets
+       WHERE github_repo IS NOT NULL
+         AND (is_sandbox = 0 OR is_sandbox IS NULL)
+         AND hed_checked_at IS NULL`,
+    )
+    .first<{ n: number }>();
+
+  return c.json({
+    processed: candidates.length,
+    withHed,
+    withoutHed,
+    unknown,
     errors,
     remaining: remainingRow?.n ?? null,
   });
