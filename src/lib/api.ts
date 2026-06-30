@@ -2088,6 +2088,44 @@ export async function reindexBulk(
   );
 }
 
+/** One batch of the HED backfill sweep (#869 phase 3, `POST /admin/datasets/hed-sweep`). */
+export interface HedSweepBatchResponse {
+  processed: number;
+  /** Classified has_hed=1 this batch. */
+  withHed: number;
+  /** Classified has_hed=0 (checked, no HED) this batch. */
+  withoutHed: number;
+  /** Could not classify (no dataset_description.json / probe error) -> NULL. */
+  unknown: number;
+  errors: { dataset_id: string; error: string }[];
+  /** Datasets still unswept (hed_checked_at IS NULL); 0 when the sweep is done. */
+  remaining: number | null;
+}
+
+/** Response of `?reset=1`: count of probed rows cleared back to unclassified. */
+export interface HedSweepResetResponse {
+  reset: number;
+}
+
+/** Run one bounded HED sweep batch (default 15, server-clamped to [1,30]). */
+export async function hedSweep(options?: { limit?: number }): Promise<HedSweepBatchResponse> {
+  const limit = options?.limit ?? 15;
+  return request<HedSweepBatchResponse>(
+    `/admin/datasets/hed-sweep?limit=${encodeURIComponent(String(limit))}`,
+    { method: "POST", headers: { "Content-Type": "application/json" } },
+    true,
+  );
+}
+
+/** Clear every probed HED row so a corrected detector can re-sweep from scratch. */
+export async function hedSweepReset(): Promise<HedSweepResetResponse> {
+  return request<HedSweepResetResponse>(
+    "/admin/datasets/hed-sweep?reset=1",
+    { method: "POST", headers: { "Content-Type": "application/json" } },
+    true,
+  );
+}
+
 // ============================================================================
 // Fleet governance (epic #713)
 // ============================================================================
