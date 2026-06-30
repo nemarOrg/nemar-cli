@@ -13,6 +13,7 @@ import {
   resolveNChannels,
 } from "./channel-montage";
 import { BIDS_DATATYPES } from "./datacite";
+import { eventsJsonHasHed, eventsTsvHasHed, parseHedVersion } from "./hed";
 import { HttpError } from "./retry";
 
 const VALIDATOR_VERSION = validatorPin.version;
@@ -2298,6 +2299,13 @@ export interface BidsTreeStats {
   nChannels?: number;
   /** Scalp montage class from the exemplar's channel labels (#858). */
   electrodeSystem?: string;
+  /** Whether this ref carries HED annotations: HEDVersion declared AND >=1 real
+   *  HED key in an events sidecar (#869). Undefined when the probe couldn't run
+   *  (no dataset_description.json) OR any fetch/parse failure inside probeHed ->
+   *  column stays NULL (vs false -> 0 = checked, no HED). */
+  hasHed?: boolean;
+  /** The `HEDVersion` string (array form comma-joined), or undefined (#869). */
+  hedVersion?: string;
 }
 
 /**
@@ -2352,6 +2360,15 @@ export async function getBidsTreeStats(
     );
   }
   const root = await rootResponse.json<{ tree: TreeEntry[] }>();
+  // HED probe inputs from the root tree (#869): dataset_description.json
+  // (HEDVersion) and the first root-level inherited `*_events.json` -- many HED
+  // datasets annotate once at the top level rather than per subject.
+  const descEntry = root.tree.find(
+    (e) => e.type === "blob" && e.path === "dataset_description.json",
+  );
+  const rootEventsJson = root.tree.find(
+    (e) => e.type === "blob" && /^[^/]*_events\.json$/.test(e.path),
+  );
   const subjectDirs = root.tree.filter((e) => e.type === "tree" && e.path.startsWith("sub-"));
   if (subjectDirs.length === 0) return { modalities: [], subjectCount: 0, tasks: [] };
 
@@ -2362,6 +2379,10 @@ export async function getBidsTreeStats(
   // loop so the probe never adds latency to the modality/task walk.
   let exemplarChannelsTsv: TreeEntry | undefined;
   let exemplarEegJson: TreeEntry | undefined;
+  // Subject-level events sidecars for HED detection (#869). Not eeg-scoped: HED
+  // can annotate any datatype's events. First of each across sampled subjects.
+  let exemplarEventsJson: TreeEntry | undefined;
+  let exemplarEventsTsv: TreeEntry | undefined;
   for (const subj of sampleEvenly(subjectDirs, MAX_SUBJECTS_FOR_MODALITY)) {
     const subResponse = await githubFetchWithRetry(
       `${GITHUB_API()}/repos/${ORG_NAME}/${repo}/git/trees/${subj.sha}?recursive=1`,
@@ -2389,6 +2410,10 @@ export async function getBidsTreeStats(
         exemplarChannelsTsv = e;
       } else if (!exemplarEegJson && /(^|\/)eeg\/[^/]*_eeg\.json$/.test(e.path)) {
         exemplarEegJson = e;
+      } else if (!exemplarEventsJson && /(^|\/)[^/]*_events\.json$/.test(e.path)) {
+        exemplarEventsJson = e;
+      } else if (!exemplarEventsTsv && /(^|\/)[^/]*_events\.tsv$/.test(e.path)) {
+        exemplarEventsTsv = e;
       }
     }
   }
@@ -2400,6 +2425,14 @@ export async function getBidsTreeStats(
     pat,
     refreshTokenOn401,
   );
+  const { hasHed, hedVersion } = await probeHed(
+    repo,
+    descEntry,
+    [rootEventsJson, exemplarEventsJson],
+    exemplarEventsTsv,
+    pat,
+    refreshTokenOn401,
+  );
 
   return {
     modalities: [...mods].sort(),
@@ -2407,6 +2440,8 @@ export async function getBidsTreeStats(
     tasks: [...tasks].sort(),
     nChannels,
     electrodeSystem,
+    hasHed,
+    hedVersion,
   };
 }
 
@@ -2442,6 +2477,51 @@ async function probeChannelMontage(
   } catch (err) {
     console.warn(
       `[getBidsTreeStats] channel/montage probe failed for ${repo}: ${err instanceof Error ? err.message : String(err)}`,
+    );
+    return {};
+  }
+}
+
+/**
+ * Best-effort HED probe for getBidsTreeStats (#869). Reads `HEDVersion` from
+ * dataset_description.json and scans candidate events sidecars for a real HED
+ * annotation; `hasHed` is true only when BOTH hold (migration 0056 rule). Like
+ * probeChannelMontage this is secondary data -- any failure returns empty so the
+ * columns stay NULL. Returns empty (not `hasHed:false`) when there's no
+ * dataset_description.json to read, since "checked, no HED" can't be asserted.
+ */
+async function probeHed(
+  repo: string,
+  descEntry: TreeEntry | undefined,
+  eventsJson: Array<TreeEntry | undefined>,
+  eventsTsv: TreeEntry | undefined,
+  pat: string,
+  refreshTokenOn401?: () => Promise<string>,
+): Promise<{ hasHed?: boolean; hedVersion?: string }> {
+  if (!descEntry) return {};
+  try {
+    const desc = JSON.parse(await getBlobContent(repo, descEntry.sha, pat, refreshTokenOn401));
+    const hedVersion = parseHedVersion(desc);
+    // No HEDVersion declared -> definitively not a HED dataset (checked => 0); no
+    // need to fetch the events blobs.
+    if (hedVersion == null) return { hasHed: false };
+    let annotation = false;
+    for (const entry of eventsJson) {
+      if (!entry) continue;
+      if (eventsJsonHasHed(await getBlobContent(repo, entry.sha, pat, refreshTokenOn401))) {
+        annotation = true;
+        break;
+      }
+    }
+    if (!annotation && eventsTsv) {
+      annotation = eventsTsvHasHed(
+        await getBlobContent(repo, eventsTsv.sha, pat, refreshTokenOn401),
+      );
+    }
+    return { hasHed: annotation, hedVersion };
+  } catch (err) {
+    console.warn(
+      `[getBidsTreeStats] HED probe failed for ${repo}: ${err instanceof Error ? err.message : String(err)}`,
     );
     return {};
   }

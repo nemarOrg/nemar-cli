@@ -437,3 +437,30 @@ describe("migration 0020 file shape", () => {
     expect(sql).toContain("json_type(enrichment_json, '$.modalities') = 'text'");
   });
 });
+
+describe("computeDatasetMetadataColumns HED mapping (#869)", () => {
+  const base = {
+    treePaths: TASK_PATHS,
+    participantsTsv: null,
+    s3Stats: null,
+  };
+
+  test("hasHed=true maps to has_hed=1 with the version string", () => {
+    const cols = computeDatasetMetadataColumns({ ...base, hasHed: true, hedVersion: "8.4.0" });
+    expect(cols.has_hed).toBe(1);
+    expect(cols.hed_version).toBe("8.4.0");
+  });
+
+  test("hasHed=false maps to has_hed=0 (checked, no HED)", () => {
+    // A declared-but-unused HEDVersion: checked=0 yet the version is still recorded.
+    const cols = computeDatasetMetadataColumns({ ...base, hasHed: false, hedVersion: "8.4.0" });
+    expect(cols.has_hed).toBe(0);
+    expect(cols.hed_version).toBe("8.4.0");
+  });
+
+  test("omitted hasHed maps to has_hed=null (not classified yet)", () => {
+    const cols = computeDatasetMetadataColumns(base);
+    expect(cols.has_hed).toBeNull();
+    expect(cols.hed_version).toBeNull();
+  });
+});

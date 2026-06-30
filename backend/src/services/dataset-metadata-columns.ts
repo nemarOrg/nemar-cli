@@ -30,6 +30,10 @@ export interface DatasetMetadataColumns {
   n_channels: number | null;
   /** Scalp montage class: 10-20|10-10|10-05|biosemi|egi-geodesic|other (#854/#858). */
   electrode_system: string | null;
+  /** HED presence as 0/1, or null when not classified yet (#869). */
+  has_hed: number | null;
+  /** Declared `HEDVersion` (array form comma-joined), or null (#869). */
+  hed_version: string | null;
 }
 
 export interface MetadataColumnInputs {
@@ -69,6 +73,15 @@ export interface MetadataColumnInputs {
    * Scalp montage class from `getBidsTreeStats` (#858). Omit when undetermined.
    */
   electrodeSystem?: string;
+  /**
+   * HED presence from `getBidsTreeStats` probeHed (#869): true/false when the ref
+   * was probed, omit when the probe couldn't run (-> column stays NULL).
+   */
+  hasHed?: boolean;
+  /**
+   * Declared `HEDVersion` string from probeHed (#869). Omit when none.
+   */
+  hedVersion?: string;
 }
 
 /**
@@ -144,6 +157,11 @@ export function computeDatasetMetadataColumns(input: MetadataColumnInputs): Data
     tasks: tasksArr.length ? tasksArr.join(",") : null,
     n_channels: input.nChannels ?? null,
     electrode_system: input.electrodeSystem ?? null,
+    // Tri-state via `== null` (intentionally catches undefined AND null): probe
+    // didn't run -> null = not classified yet; false -> 0 = checked, no HED;
+    // true -> 1 = checked, has HED.
+    has_hed: input.hasHed == null ? null : input.hasHed ? 1 : 0,
+    hed_version: input.hedVersion ?? null,
   };
 }
 
@@ -176,6 +194,8 @@ export async function writeDatasetMetadataColumns(
            tasks = COALESCE(?, tasks),
            n_channels = COALESCE(?, n_channels),
            electrode_system = COALESCE(?, electrode_system),
+           has_hed = COALESCE(?, has_hed),
+           hed_version = COALESCE(?, hed_version),
            metadata_updated_at = datetime('now'),
            updated_at = datetime('now')
        WHERE dataset_id = ?`,
@@ -190,6 +210,8 @@ export async function writeDatasetMetadataColumns(
       cols.tasks,
       cols.n_channels,
       cols.electrode_system,
+      cols.has_hed,
+      cols.hed_version,
       datasetId,
     )
     .run();
@@ -202,6 +224,53 @@ export async function writeDatasetMetadataColumns(
   if (changes === 0) {
     console.warn(
       `[metadata-columns] No rows updated for ${datasetId} - dataset may have been deleted or renamed`,
+    );
+  }
+  return { changes };
+}
+
+/**
+ * Persist HED detection to the per-version `dataset_versions` row (#869). This is
+ * the source of truth per version; the `datasets.has_hed/hed_version` columns
+ * (written by writeDatasetMetadataColumns) denormalize only the latest version.
+ *
+ * Direct assignment, NOT COALESCE: a version's content is immutable, so the
+ * freshly-probed values are authoritative for that row. No `updated_at` bump
+ * (dataset_versions has none). Callers only invoke this once they HAVE a
+ * classification (`hasHed` non-null); a probe that didn't run leaves the row
+ * NULL for the phase-3 sweep to fill.
+ *
+ * When `version` is null the latest-by-`created_at` row is targeted -- the same
+ * "latest" definition the /datasets projection and data-router use.
+ */
+export async function writeVersionHed(
+  db: D1Database,
+  datasetId: string,
+  version: string | null,
+  hasHed: number,
+  hedVersion: string | null,
+): Promise<{ changes: number }> {
+  const result = await db
+    .prepare(
+      `UPDATE dataset_versions
+       SET has_hed = ?, hed_version = ?
+       WHERE dataset_id = ?
+         AND version = COALESCE(
+           ?,
+           (SELECT version FROM dataset_versions WHERE dataset_id = ?
+            ORDER BY created_at DESC LIMIT 1)
+         )`,
+    )
+    .bind(hasHed, hedVersion, datasetId, version, datasetId)
+    .run();
+
+  const changes = result.meta?.changes ?? 0;
+  if (changes === 0) {
+    // error (not warn): dataset_versions is the per-version source of truth with
+    // no COALESCE safety net, so a 0-row write means the HED data is lost until a
+    // re-probe -- worth surfacing above warn-level noise.
+    console.error(
+      `[metadata-columns] No dataset_versions row updated for ${datasetId} version=${version ?? "latest"} - per-version HED not persisted`,
     );
   }
   return { changes };
