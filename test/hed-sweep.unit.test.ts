@@ -80,6 +80,28 @@ function applyProbe(db: Database, id: string, hasHed: number | null, hedVersion:
   ).run(hasHed, hedVersion, id);
 }
 
+/** Mirror the endpoint's per-version write (writeVersionHed, explicit-version path). */
+function applyVersionProbe(
+  db: Database,
+  id: string,
+  version: string,
+  hasHed: number,
+  hedVersion: string | null,
+) {
+  db.query(
+    "UPDATE dataset_versions SET has_hed = ?, hed_version = ? WHERE dataset_id = ? AND version = ?",
+  ).run(hasHed, hedVersion, id, version);
+}
+
+// The endpoint's `remaining` count predicate (admin.ts) -- identical scoping to
+// CANDIDATE_SQL minus the latest_version subquery. Drift here would break the CLI
+// loop's termination, so it is pinned alongside the candidate contract.
+const REMAINING_SQL = `SELECT COUNT(*) AS n FROM datasets
+   WHERE github_repo IS NOT NULL
+     AND (is_sandbox = 0 OR is_sandbox IS NULL)
+     AND hed_checked_at IS NULL`;
+const remainingCount = (db: Database) => (db.query(REMAINING_SQL).get() as { n: number }).n;
+
 describe("HED backfill sweep", () => {
   let db: Database;
   beforeEach(() => {
@@ -132,6 +154,47 @@ describe("HED backfill sweep", () => {
     expect(candidates(db)).not.toContain("nm000300"); // idempotent
   });
 
+  test("a published dataset's latest version row is stamped; older versions untouched", () => {
+    // The sweep writes datasets (denormalized) AND the latest dataset_versions row.
+    applyProbe(db, "nm000300", 1, "8.4.0");
+    applyVersionProbe(db, "nm000300", "v1.1.1", 1, "8.4.0"); // latest_version from candidate query
+    const latest = db
+      .query(
+        "SELECT has_hed, hed_version FROM dataset_versions WHERE dataset_id='nm000300' AND version='v1.1.1'",
+      )
+      .get() as Record<string, unknown>;
+    const older = db
+      .query(
+        "SELECT has_hed, hed_version FROM dataset_versions WHERE dataset_id='nm000300' AND version='v1.0.0'",
+      )
+      .get() as Record<string, unknown>;
+    expect(latest.has_hed).toBe(1);
+    expect(latest.hed_version).toBe("8.4.0");
+    // Non-latest historical versions are not back-probed -> stay NULL.
+    expect(older.has_hed).toBeNull();
+    expect(older.hed_version).toBeNull();
+  });
+
+  test("an unpublished dataset gets no per-version write (no version row to target)", () => {
+    // on000301 has no dataset_versions rows -> the handler's latest_version guard
+    // skips writeVersionHed entirely (no spurious 0-row write / console.error).
+    applyProbe(db, "on000301", 1, "8.4.0");
+    const n = (
+      db.query("SELECT COUNT(*) AS n FROM dataset_versions WHERE dataset_id='on000301'").get() as {
+        n: number;
+      }
+    ).n;
+    expect(n).toBe(0);
+  });
+
+  test("remaining count uses the same scoping and decreases as rows are stamped", () => {
+    expect(remainingCount(db)).toBe(3); // nm000300, nm000302, on000301
+    applyProbe(db, "nm000300", 1, "8.4.0");
+    applyProbe(db, "nm000302", 0, null);
+    expect(remainingCount(db)).toBe(1); // only on000301 left unchecked
+    expect(candidates(db)).toEqual(["on000301"]);
+  });
+
   test("an unknown probe (has_hed NULL) still stamps the marker and converges", () => {
     applyProbe(db, "on000301", null, null); // probe couldn't classify
     const row = db
@@ -142,10 +205,12 @@ describe("HED backfill sweep", () => {
     expect(candidates(db)).not.toContain("on000301");
   });
 
-  test("?reset=1 clears probed rows so a corrected detector can re-sweep", () => {
+  test("?reset=1 clears datasets rows but intentionally leaves dataset_versions", () => {
     applyProbe(db, "nm000300", 1, "8.4.0");
+    applyVersionProbe(db, "nm000300", "v1.1.1", 1, "8.4.0"); // per-version truth
     applyProbe(db, "nm000302", 0, null);
     expect(candidates(db)).not.toContain("nm000300");
+    // The endpoint's reset branch clears ONLY datasets-level columns.
     const reset = db
       .query(
         `UPDATE datasets
@@ -160,5 +225,14 @@ describe("HED backfill sweep", () => {
       .get() as Record<string, unknown>;
     expect(row.has_hed).toBeNull();
     expect(row.hed_version).toBeNull();
+    // Asymmetry by design: dataset_versions is publish-time truth, untouched by
+    // reset; the re-sweep overwrites the latest version's row.
+    const ver = db
+      .query(
+        "SELECT has_hed, hed_version FROM dataset_versions WHERE dataset_id='nm000300' AND version='v1.1.1'",
+      )
+      .get() as Record<string, unknown>;
+    expect(ver.has_hed).toBe(1);
+    expect(ver.hed_version).toBe("8.4.0");
   });
 });

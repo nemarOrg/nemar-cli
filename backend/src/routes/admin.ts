@@ -1610,9 +1610,20 @@ adminRoutes.post("/datasets/hed-sweep", async (c) => {
         unknown++;
       }
     }
-    // Mark checked regardless of outcome so `remaining` converges (hed_checked_at
-    // advances even on a miss/error -> a failing dataset is not retried forever).
+    // Persist HED. Order is deliberate for recoverability: write the per-version
+    // row FIRST, then stamp datasets (hed_checked_at) LAST. A failure in either
+    // write leaves the dataset UNstamped, so a plain re-run re-probes and retries
+    // both (idempotent) -- never a split state where datasets is stamped but the
+    // dataset_versions row stays NULL. The per-version write runs only when we
+    // have a classification (hasHedInt != null) for a published version
+    // (latest_version); with an explicit version it never 0-rows.
     try {
+      if (hasHedInt != null && latest_version) {
+        await writeVersionHed(db, dataset_id, latest_version, hasHedInt, hedVersion);
+      }
+      // Stamp checked regardless of probe outcome so `remaining` converges
+      // (advances even on a probe miss/error -> a failing dataset is not retried
+      // forever). A D1 write failure above skips this stamp and is retried.
       await db
         .prepare(
           `UPDATE datasets
@@ -1621,12 +1632,6 @@ adminRoutes.post("/datasets/hed-sweep", async (c) => {
         )
         .bind(hasHedInt, hedVersion, dataset_id)
         .run();
-      // Keep the per-version row consistent with the denormalized datasets value:
-      // only when classified (hasHedInt != null) AND the dataset has a published
-      // version. writeVersionHed with an explicit version never 0-rows here.
-      if (hasHedInt != null && latest_version) {
-        await writeVersionHed(db, dataset_id, latest_version, hasHedInt, hedVersion);
-      }
     } catch (err) {
       errors.push({
         dataset_id,

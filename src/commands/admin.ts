@@ -3723,15 +3723,24 @@ hedSweepCommand
 
       if (options.json) {
         console.log(JSON.stringify({ ...totals, batches: batch, remaining }, null, 2));
-        return;
+      } else {
+        console.log();
+        if (remaining === null) {
+          console.log(
+            chalk.yellow(
+              "Warning: backend returned a null remaining count; the sweep may be incomplete - check server logs.",
+            ),
+          );
+        }
+        console.log(
+          chalk.cyan(
+            `Done in ${batch} batch(es): processed=${totals.processed} hed=${totals.withHed} no-hed=${totals.withoutHed} unknown=${totals.unknown} errors=${totals.errors} remaining=${remaining ?? "unknown"}`,
+          ),
+        );
       }
-      console.log();
-      console.log(
-        chalk.cyan(
-          `Done in ${batch} batch(es): processed=${totals.processed} hed=${totals.withHed} no-hed=${totals.withoutHed} unknown=${totals.unknown} errors=${totals.errors} remaining=${remaining ?? 0}`,
-        ),
-      );
-      if (totals.errors > 0) process.exit(1);
+      // Non-zero exit on errors OR an indeterminate (null) remaining, so a caller
+      // never reads a partial/uncertain sweep as success.
+      if (totals.errors > 0 || remaining === null) process.exit(1);
     },
   );
 
