@@ -8,9 +8,13 @@
  *   1. datasets gains has_hed, hed_version, hed_checked_at.
  *   2. dataset_versions gains has_hed, hed_version.
  *   3. idx_datasets_has_hed exists.
- *   4. The columns round-trip a populated row (has_hed=1, hed_version='8.3.0').
- *   5. A row inserted WITHOUT the columns reads back NULL ("not classified yet"),
- *      so downstream queries can distinguish unclassified from really-false.
+ *   4. The columns round-trip a populated row (has_hed=1, hed_version='8.3.0',
+ *      hed_checked_at set).
+ *   5. has_hed=0 (checked, no HED) is DISTINCT from NULL (not classified yet) on
+ *      both tables -- the load-bearing not-checked vs checked-false distinction.
+ *   6. A row inserted without setting the new columns reads back NULL.
+ *   7. hed_checked_at IS NULL selects unswept datasets (phase 3 sweep predicate).
+ *   8. CHECK (has_hed IN (0,1)) rejects out-of-domain values.
  */
 
 import { Database } from "bun:sqlite";
@@ -39,8 +43,10 @@ function tableColumns(db: Database, table: string): string[] {
 }
 
 function seedDataset(db: Database, datasetId: string): void {
+  // OR IGNORE so callers can seed multiple datasets under the same owner without
+  // colliding on users.id (PK).
   db.prepare(
-    "INSERT INTO users (id, username, email, github_username, status) VALUES (1, 'alice', 'alice@nemar.org', 'alice', 'approved')",
+    "INSERT OR IGNORE INTO users (id, username, email, github_username, status) VALUES (1, 'alice', 'alice@nemar.org', 'alice', 'approved')",
   ).run();
   db.prepare(
     "INSERT INTO datasets (dataset_id, owner_user_id, name, visibility, is_sandbox) VALUES (?, 1, ?, 'public', 0)",
@@ -105,6 +111,63 @@ describe("migration 0056_hed_columns", () => {
     expect(row.has_hed).toBeNull();
     expect(row.hed_version).toBeNull();
     expect(row.hed_checked_at).toBeNull();
+    db.close();
+  });
+
+  test("has_hed=0 (checked, no HED) is distinct from NULL on both tables", () => {
+    const db = freshDb();
+    seedDataset(db, "nm000999");
+    // The phase-3 sweep stamps hed_checked_at and writes has_hed=0 when it finds
+    // no HED -- that 0 must NOT read back as NULL, or the sweep would re-check it.
+    db.prepare(
+      "UPDATE datasets SET has_hed = 0, hed_version = NULL, hed_checked_at = '2026-06-29T00:00:00Z' WHERE dataset_id = ?",
+    ).run("nm000999");
+    const row = db
+      .prepare("SELECT has_hed, hed_version FROM datasets WHERE dataset_id = ?")
+      .get("nm000999") as { has_hed: number | null; hed_version: string | null };
+    expect(row.has_hed).toBe(0);
+    expect(row.has_hed).not.toBeNull();
+    expect(row.hed_version).toBeNull();
+
+    // Same per-version: a version checked with no HED stores 0, not NULL.
+    db.prepare(
+      "INSERT INTO dataset_versions (dataset_id, version, doi, has_hed) VALUES (?, 'v1.0.0', 'doi:10.82901/NEMAR.nm000999.v1.0.0', 0)",
+    ).run("nm000999");
+    const vrow = db
+      .prepare("SELECT has_hed FROM dataset_versions WHERE dataset_id = ? AND version = 'v1.0.0'")
+      .get("nm000999") as { has_hed: number | null };
+    expect(vrow.has_hed).toBe(0);
+    expect(vrow.has_hed).not.toBeNull();
+    db.close();
+  });
+
+  test("hed_checked_at IS NULL selects unswept datasets, stamped drops out", () => {
+    const db = freshDb();
+    seedDataset(db, "nm000001"); // never swept
+    seedDataset(db, "nm000002"); // will be stamped
+    db.prepare(
+      "UPDATE datasets SET has_hed = 1, hed_checked_at = '2026-06-29T00:00:00Z' WHERE dataset_id = ?",
+    ).run("nm000002");
+    const candidates = db
+      .prepare("SELECT dataset_id FROM datasets WHERE hed_checked_at IS NULL ORDER BY dataset_id")
+      .all() as { dataset_id: string }[];
+    expect(candidates.map((r) => r.dataset_id)).toEqual(["nm000001"]);
+    db.close();
+  });
+
+  test("CHECK (has_hed IN (0,1)) rejects an out-of-domain value", () => {
+    const db = freshDb();
+    seedDataset(db, "nm000132");
+    expect(() =>
+      db.prepare("UPDATE datasets SET has_hed = 2 WHERE dataset_id = ?").run("nm000132"),
+    ).toThrow();
+    expect(() =>
+      db
+        .prepare(
+          "INSERT INTO dataset_versions (dataset_id, version, doi, has_hed) VALUES (?, 'v9.9.9', 'doi:x', 2)",
+        )
+        .run("nm000132"),
+    ).toThrow();
     db.close();
   });
 

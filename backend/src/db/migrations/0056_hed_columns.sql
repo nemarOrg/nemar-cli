@@ -17,7 +17,9 @@
 -- Detection rule (phase 2): has_hed = 1 only when dataset_description.json has a
 -- HEDVersion key AND >=1 real HED annotation exists (an *_events.json column
 -- with a "HED" key, OR an *_events.tsv with a "HED" column). hed_version is the
--- HEDVersion string (e.g. "8.3.0").
+-- HEDVersion string (e.g. "8.3.0"). BIDS allows HEDVersion to be a scalar string
+-- OR an array of schema strings when multiple HED libraries are used; phase 2
+-- stores the array form as a comma-joined string (e.g. "8.3.0,sc:score_1.0.0").
 --
 -- has_hed: 0/1, NULL = not classified yet. On datasets it reflects the latest
 --   version; on dataset_versions it is that specific version's status.
@@ -28,11 +30,14 @@
 --   sweep writes has_hed/hed_version WITHOUT bumping updated_at/metadata_updated_at,
 --   so a one-time backfill doesn't make every dataset read "updated today".
 
-ALTER TABLE datasets ADD COLUMN has_hed INTEGER;
+-- has_hed carries a CHECK so the documented 0/1 domain is enforced at the DB,
+-- not just by convention. NULL still passes (NULL IN (0,1) is NULL, not false),
+-- preserving the not-classified-yet sentinel.
+ALTER TABLE datasets ADD COLUMN has_hed INTEGER CHECK (has_hed IN (0, 1));
 ALTER TABLE datasets ADD COLUMN hed_version TEXT;
 ALTER TABLE datasets ADD COLUMN hed_checked_at TEXT;
 
-ALTER TABLE dataset_versions ADD COLUMN has_hed INTEGER;
+ALTER TABLE dataset_versions ADD COLUMN has_hed INTEGER CHECK (has_hed IN (0, 1));
 ALTER TABLE dataset_versions ADD COLUMN hed_version TEXT;
 
 CREATE INDEX IF NOT EXISTS idx_datasets_has_hed ON datasets(has_hed);
