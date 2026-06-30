@@ -2333,14 +2333,28 @@ export async function getBidsTreeStats(
     Accept: "application/vnd.github.v3+json",
     "User-Agent": "NEMAR-API",
   };
-  const refResponse = await githubFetchWithRetry(
+  let refResponse = await githubFetchWithRetry(
     `${GITHUB_API()}/repos/${ORG_NAME}/${repo}/commits/${ref}`,
     { headers: ghHeaders },
     { retryOn404: true, refreshTokenOn401 },
   );
+  // #880: the caller's ref (usually the hardcoded "main") may not exist -- some
+  // NEMAR repos default to `master`/other. On a 404, resolve the repo's actual
+  // default branch and retry once, so non-main repos still get probed (otherwise
+  // HED / channel-montage / reindex silently skip them).
+  if (refResponse.status === 404) {
+    const defaultBranch = await getRepoDefaultBranch(repo, pat);
+    if (defaultBranch !== ref) {
+      refResponse = await githubFetchWithRetry(
+        `${GITHUB_API()}/repos/${ORG_NAME}/${repo}/commits/${defaultBranch}`,
+        { headers: ghHeaders },
+        { retryOn404: true, refreshTokenOn401 },
+      );
+    }
+  }
   if (!refResponse.ok) {
     throw new HttpError(
-      `Failed to resolve ref '${ref}': HTTP ${refResponse.status}`,
+      `Failed to resolve ref '${ref}' (or the repo default branch): HTTP ${refResponse.status}`,
       refResponse.status,
     );
   }
