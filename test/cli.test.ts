@@ -646,6 +646,15 @@ describe("CLI Dataset List", () => {
     expect(stdout).toContain("--mine");
     expect(stdout).toContain("--json");
     expect(stdout).toContain("--limit");
+    expect(stdout).toContain("--hed");
+  });
+
+  test("nemar dataset search --help shows the --hed filter", async () => {
+    const { stdout, exitCode } = await runCli(["dataset", "search", "--help"]);
+    expect(exitCode).toBe(0);
+    expect(stdout).toContain("semantic");
+    expect(stdout).toContain("--hed");
+    expect(stdout).toContain("--modality");
   });
 
   test("nemar dataset list shows datasets", async () => {

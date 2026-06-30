@@ -2315,6 +2315,7 @@ function renderDatasetTable(
     "Name".padEnd(nameWidth),
     "Modality".padEnd(modWidth),
     "Subj".padEnd(subjWidth),
+    "HED".padEnd(3),
     "Owner".padEnd(ownerWidth),
     "Status",
   ].join("  ");
@@ -2350,6 +2351,8 @@ function renderDatasetTable(
       ),
       modality.padEnd(modWidth),
       subjects.padEnd(subjWidth),
+      // Pad the plain text BEFORE colorizing so ANSI codes don't break alignment.
+      dataset.has_hed === 1 ? chalk.magenta("HED".padEnd(3)) : chalk.dim("-".padEnd(3)),
       owner.padEnd(ownerWidth),
       visLabel,
     ].join("  ");
@@ -2391,6 +2394,7 @@ datasetCommand
     "Filter by license tier(s), comma-separated: public, attribution, sharealike, noncommercial, noderiv, unknown",
   )
   .option("--doi", "Show only datasets with DOIs")
+  .option("--hed", "Show only datasets with HED annotations")
   .option("--recent [days]", "Show recently published datasets")
   .option("--sort <order>", "Sort: newest, oldest, name, participants, size", "newest")
   .option("--json", "Output as JSON for scripting")
@@ -2492,6 +2496,7 @@ Examples:
         task: options.task,
         license: options.license,
         hasDoi: !!options.doi,
+        hasHed: !!options.hed,
         recent: options.recent ? Number.parseInt(options.recent, 10) || 30 : undefined,
         sort: options.sort,
         limit,
@@ -2544,7 +2549,14 @@ Examples:
         console.log(chalk.dim("Create one with: nemar dataset upload <path>"));
       } else if (options.owner) {
         console.log(chalk.yellow(`No datasets found for user '${options.owner}'.`));
-      } else if (options.search || options.modality || options.author) {
+      } else if (
+        options.search ||
+        options.modality ||
+        options.author ||
+        options.hed ||
+        options.license ||
+        options.task
+      ) {
         console.log(chalk.yellow("No datasets match your filters."));
         console.log(chalk.dim("Try broader search terms or remove filters."));
       } else {
@@ -2561,6 +2573,7 @@ datasetCommand
   .command("search <query>")
   .description("Search datasets using semantic matching")
   .option("--modality <type>", "Filter by modality (eeg, emg, meg, etc.)")
+  .option("--hed", "Show only datasets with HED annotations")
   .option("--json", "Output as JSON for scripting")
   .option("--limit <n>", "Limit results (default: 20)", "20")
   .addHelpText(
@@ -2585,6 +2598,7 @@ Examples:
     try {
       const response = await searchDatasets(query, {
         modality: options.modality,
+        hasHed: !!options.hed,
         limit: Number.parseInt(options.limit, 10),
       });
       spinner.stop();
@@ -2622,6 +2636,7 @@ Examples:
         "Name".padEnd(nameWidth),
         "Modality".padEnd(modWidth),
         "Subj".padEnd(subjWidth),
+        "HED".padEnd(3),
       ].join("  ");
       console.log(chalk.dim(header));
       console.log(chalk.dim("-".repeat(header.length)));
@@ -2640,6 +2655,7 @@ Examples:
           name.padEnd(nameWidth),
           (result.modalities || "-").substring(0, modWidth).padEnd(modWidth),
           (result.participants ? String(result.participants) : "-").padEnd(subjWidth),
+          result.has_hed === 1 ? chalk.magenta("HED") : chalk.dim("-"),
         ].join("  ");
         console.log(row);
       }
