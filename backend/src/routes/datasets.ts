@@ -700,10 +700,11 @@ datasetRoutes.get("/", optionalAuthMiddleware, async (c) => {
     }
 
     const params: (string | number)[] = [status, user.id];
-    // Read managed facts from the `datasets` source of truth (#646). 24-column
-    // ?mine wire shape. latest_version is the most recently minted DOI version
-    // (null when none); scripts/hallu-sync.sh reads it to skip the per-dataset
-    // /manifest call, so keep the ordering in sync with /datasets/:id/manifest.
+    // Read managed facts from the `datasets` source of truth (#646). 25-column
+    // ?mine wire shape (+ #869 HED has_hed/hed_version). latest_version is the
+    // most recently minted DOI version (null when none); scripts/hallu-sync.sh
+    // reads it to skip the per-dataset /manifest call, so keep the ordering in
+    // sync with /datasets/:id/manifest.
     let query = `
       SELECT d.dataset_id, d.name, d.description, d.status, d.visibility,
              d.github_repo, d.concept_doi, d.created_at, d.updated_at,
@@ -720,6 +721,10 @@ datasetRoutes.get("/", optionalAuthMiddleware, async (c) => {
              -- montage filter reads NULL as "not classified yet".
              d.n_channels,
              d.electrode_system,
+             -- #869: HED presence (0/1) + HEDVersion; NULL until phase 2/3
+             -- populate. Website reads NULL as "not classified yet".
+             d.has_hed,
+             d.hed_version,
              'managed' AS source_type,
              (
                SELECT version FROM dataset_versions dv
@@ -751,10 +756,10 @@ datasetRoutes.get("/", optionalAuthMiddleware, async (c) => {
   // Single-table read from the `datasets` source of truth (#646). Folded legacy
   // catalog rows are first-class here, discriminated by the sentinel owner
   // (source_type='catalog'); managed datasets are source_type='managed'.
-  // 29-column wire shape: the pre-consolidation UNION path + #653 `license` +
+  // 30-column wire shape: the pre-consolidation UNION path + #653 `license` +
   // the #804 citation counts (num_citations / num_dataset_citations /
   // num_datapaper_citations) + #854 channel/montage (n_channels,
-  // electrode_system).
+  // electrode_system) + #869 HED (has_hed, hed_version).
   const params: (string | number)[] = [status];
   let query = `
     SELECT d.dataset_id, d.dataset_id AS id, d.name, d.description, d.status, d.visibility,
@@ -775,6 +780,10 @@ datasetRoutes.get("/", optionalAuthMiddleware, async (c) => {
            -- montage filter reads NULL as "not classified yet".
            d.n_channels,
            d.electrode_system,
+           -- #869: HED presence (0/1) + HEDVersion; NULL until phase 2/3
+           -- populate. Website reads NULL as "not classified yet".
+           d.has_hed,
+           d.hed_version,
            CASE WHEN d.owner_user_id = ${SYSTEM_USER_ID} THEN 'catalog' ELSE 'managed' END AS source_type,
            (
              SELECT version FROM dataset_versions dv
