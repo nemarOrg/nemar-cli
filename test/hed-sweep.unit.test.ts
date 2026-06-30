@@ -71,13 +71,19 @@ const candidateRows = (db: Database) =>
   db.query(CANDIDATE_SQL).all() as { dataset_id: string; latest_version: string | null }[];
 const candidates = (db: Database) => candidateRows(db).map((r) => r.dataset_id);
 
-/** Mirror the endpoint's per-dataset datasets write: 3 fields, no updated_at. */
+/** Mirror the endpoint's per-dataset datasets write (no updated_at bump). When the
+ *  probe classified the row (hasHed != null) it writes the columns + stamp; when it
+ *  could NOT (null) it ONLY stamps, so a prior classification isn't clobbered. */
 function applyProbe(db: Database, id: string, hasHed: number | null, hedVersion: string | null) {
-  db.query(
-    `UPDATE datasets
-       SET has_hed = ?, hed_version = ?, hed_checked_at = datetime('now')
-       WHERE dataset_id = ?`,
-  ).run(hasHed, hedVersion, id);
+  if (hasHed != null) {
+    db.query(
+      `UPDATE datasets
+         SET has_hed = ?, hed_version = ?, hed_checked_at = datetime('now')
+         WHERE dataset_id = ?`,
+    ).run(hasHed, hedVersion, id);
+  } else {
+    db.query("UPDATE datasets SET hed_checked_at = datetime('now') WHERE dataset_id = ?").run(id);
+  }
 }
 
 /** Mirror the endpoint's per-version write (writeVersionHed, explicit-version path). */
@@ -203,6 +209,26 @@ describe("HED backfill sweep", () => {
     expect(row.has_hed).toBeNull();
     expect(row.hed_checked_at).not.toBeNull(); // checked, so not retried forever
     expect(candidates(db)).not.toContain("on000301");
+  });
+
+  test("a failed probe does NOT clobber a prior classification (reindex seam)", () => {
+    // The reindex/enrich path classifies has_hed but leaves hed_checked_at NULL,
+    // so the row is still a sweep candidate. A transient probe miss in the sweep
+    // must only stamp -- never overwrite the existing has_hed with NULL.
+    db.query("UPDATE datasets SET has_hed = 1, hed_version = '8.4.0' WHERE dataset_id = ?").run(
+      "nm000300",
+    );
+    expect(candidates(db)).toContain("nm000300"); // unstamped -> still a candidate
+    applyProbe(db, "nm000300", null, null); // sweep probe fails to classify
+    const row = db
+      .query(
+        "SELECT has_hed, hed_version, hed_checked_at FROM datasets WHERE dataset_id='nm000300'",
+      )
+      .get() as Record<string, unknown>;
+    expect(row.has_hed).toBe(1); // preserved, not clobbered
+    expect(row.hed_version).toBe("8.4.0");
+    expect(row.hed_checked_at).not.toBeNull(); // stamped -> converges
+    expect(candidates(db)).not.toContain("nm000300");
   });
 
   test("?reset=1 clears datasets rows but intentionally leaves dataset_versions", () => {

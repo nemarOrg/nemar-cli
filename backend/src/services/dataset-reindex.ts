@@ -213,12 +213,27 @@ export async function refreshDatasetMetadata(
       hedVersion: hedVersionOverride,
     });
     await writeDatasetMetadataColumns(db, datasetId, cols);
-    // Persist the per-version HED row (#869) only when we actually classified it.
-    // cols.has_hed is null when the probe didn't run (no dataset_description.json)
-    // or threw -> skip, so the version row stays NULL for the phase-3 sweep
-    // rather than being clobbered with a guessed value.
+    // Persist the per-version HED row (#869) only when we actually classified it
+    // (cols.has_hed != null) AND the dataset has a published version to stamp.
+    // The reindex/admin path passes no `version`, so resolve the latest here and
+    // skip an unpublished dataset (no dataset_versions row); otherwise
+    // writeVersionHed's latest-fallback would match 0 rows and log a spurious
+    // error. Mirrors the phase-3 sweep, which guards via its latest_version select.
     if (cols.has_hed != null) {
-      await writeVersionHed(db, datasetId, version ?? null, cols.has_hed, cols.hed_version);
+      const targetVersion =
+        version ??
+        (
+          await db
+            .prepare(
+              "SELECT version FROM dataset_versions WHERE dataset_id = ? ORDER BY created_at DESC LIMIT 1",
+            )
+            .bind(datasetId)
+            .first<{ version: string }>()
+        )?.version ??
+        null;
+      if (targetVersion) {
+        await writeVersionHed(db, datasetId, targetVersion, cols.has_hed, cols.hed_version);
+      }
     }
     metadataColumnsWritten = true;
     console.log(

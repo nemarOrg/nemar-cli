@@ -1624,14 +1624,26 @@ adminRoutes.post("/datasets/hed-sweep", async (c) => {
       // Stamp checked regardless of probe outcome so `remaining` converges
       // (advances even on a probe miss/error -> a failing dataset is not retried
       // forever). A D1 write failure above skips this stamp and is retried.
-      await db
-        .prepare(
-          `UPDATE datasets
-           SET has_hed = ?, hed_version = ?, hed_checked_at = datetime('now')
-           WHERE dataset_id = ?`,
-        )
-        .bind(hasHedInt, hedVersion, dataset_id)
-        .run();
+      //
+      // When the probe COULD NOT classify (hasHedInt null), only stamp -- do NOT
+      // write NULL over an existing classification. The reindex/enrich path writes
+      // has_hed without stamping hed_checked_at, so such a row is still a sweep
+      // candidate; a transient probe miss here must not clobber that value to NULL.
+      if (hasHedInt != null) {
+        await db
+          .prepare(
+            `UPDATE datasets
+             SET has_hed = ?, hed_version = ?, hed_checked_at = datetime('now')
+             WHERE dataset_id = ?`,
+          )
+          .bind(hasHedInt, hedVersion, dataset_id)
+          .run();
+      } else {
+        await db
+          .prepare("UPDATE datasets SET hed_checked_at = datetime('now') WHERE dataset_id = ?")
+          .bind(dataset_id)
+          .run();
+      }
     } catch (err) {
       errors.push({
         dataset_id,
