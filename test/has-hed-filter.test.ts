@@ -5,6 +5,11 @@
  * ONLY classified-HED rows, excluding both 0 (checked, no HED) and NULL (not
  * classified yet) -- the property that makes the website's "Has HED" filter
  * correct after this epic (no more false positives like on007058). No mocks.
+ *
+ * Scope note: this covers the SQL clause builder + execution. The query-string
+ * parse (`has_hed=1` OR `has_hed=true` -> hasHed) lives at the HTTP handler layer
+ * and is intentionally NOT exercised here (no Miniflare/HTTP-layer unit test in
+ * this repo; the project avoids mocking the Worker runtime).
  */
 
 import { Database } from "bun:sqlite";
@@ -20,7 +25,7 @@ const M0056 = readFileSync(
 
 // Minimal pre-0056 slices; dataset_versions must exist for 0056's ALTER TABLE.
 const BASE_SCHEMA = `
-CREATE TABLE datasets (dataset_id TEXT PRIMARY KEY, name TEXT);
+CREATE TABLE datasets (dataset_id TEXT PRIMARY KEY, name TEXT, concept_doi TEXT);
 CREATE TABLE dataset_versions (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   dataset_id TEXT, version TEXT, doi TEXT,
@@ -32,11 +37,13 @@ function freshDb(): Database {
   const db = new Database(":memory:");
   db.exec(BASE_SCHEMA);
   db.exec(M0056);
-  const ins = db.query("INSERT INTO datasets (dataset_id, name, has_hed) VALUES (?,?,?)");
-  ins.run("nm000001", "has hed", 1);
-  ins.run("nm000002", "has hed too", 1);
-  ins.run("nm000003", "checked, no hed", 0);
-  ins.run("nm000004", "not classified", null);
+  const ins = db.query(
+    "INSERT INTO datasets (dataset_id, name, has_hed, concept_doi) VALUES (?,?,?,?)",
+  );
+  ins.run("nm000001", "has hed + doi", 1, "doi:10.x/nm000001");
+  ins.run("nm000002", "has hed, no doi", 1, null);
+  ins.run("nm000003", "checked, no hed", 0, "doi:10.x/nm000003");
+  ins.run("nm000004", "not classified", null, null);
   return db;
 }
 
@@ -64,6 +71,15 @@ describe("?has_hed=1 filter end-to-end", () => {
     const params: (string | number)[] = [];
     const clause = buildDatasetFilterClauses(params, {});
     expect(select(db, clause, params)).toEqual(["nm000001", "nm000002", "nm000003", "nm000004"]);
+    db.close();
+  });
+
+  test("hasHed stacks with hasDoi (both literal clauses apply in real SQL)", () => {
+    const db = freshDb();
+    const params: (string | number)[] = [];
+    const clause = buildDatasetFilterClauses(params, { hasHed: true, hasDoi: true });
+    // nm000002 has HED but no DOI; nm000003 has a DOI but no HED -> both excluded.
+    expect(select(db, clause, params)).toEqual(["nm000001"]);
     db.close();
   });
 });
