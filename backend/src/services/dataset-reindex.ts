@@ -76,8 +76,8 @@ export async function refreshDatasetMetadata(
   env: Bindings,
   datasetId: string,
   // The published version this refresh reflects (#869). When provided, the
-  // per-version HED row is written for exactly that version; when omitted (admin
-  // reindex, legacy DOI flows) writeVersionHed targets the latest version.
+  // per-version HED row is written for exactly that version; when omitted (e.g.
+  // admin reindex) writeVersionHed targets the latest version.
   version?: string,
 ): Promise<RefreshMetadataResult> {
   const db = env.DB;
@@ -213,9 +213,10 @@ export async function refreshDatasetMetadata(
       hedVersion: hedVersionOverride,
     });
     await writeDatasetMetadataColumns(db, datasetId, cols);
-    // Persist the per-version HED row (#869) only when we actually classified it
-    // (probe ran). A probe failure leaves cols.has_hed null -> skip, so the
-    // version row stays NULL for the phase-3 sweep rather than being clobbered.
+    // Persist the per-version HED row (#869) only when we actually classified it.
+    // cols.has_hed is null when the probe didn't run (no dataset_description.json)
+    // or threw -> skip, so the version row stays NULL for the phase-3 sweep
+    // rather than being clobbered with a guessed value.
     if (cols.has_hed != null) {
       await writeVersionHed(db, datasetId, version ?? null, cols.has_hed, cols.hed_version);
     }

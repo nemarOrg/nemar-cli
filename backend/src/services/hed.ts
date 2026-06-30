@@ -43,16 +43,15 @@ export function parseHedVersion(desc: unknown): string | null {
  * True when a BIDS `*_events.json` sidecar carries a HED annotation: any
  * top-level column definition whose value is an object containing a `"HED"` key.
  * That covers both value-level (`"HED": "Label/#"`) and categorical
- * (`"HED": { "go": "..." }`) annotations. Returns false on parse error or when
- * no column declares HED.
+ * (`"HED": { "go": "..." }`) annotations. False when no column declares HED.
+ *
+ * THROWS on malformed JSON (deliberately does NOT swallow): a sidecar that exists
+ * but can't be parsed is "inconclusive", not "no HED". `probeHed`'s outer catch
+ * turns that into a NULL column (left for a re-sweep) rather than a wrong
+ * `has_hed = 0` that COALESCE would then make sticky.
  */
 export function eventsJsonHasHed(content: string): boolean {
-  let obj: unknown;
-  try {
-    obj = JSON.parse(content);
-  } catch {
-    return false;
-  }
+  const obj: unknown = JSON.parse(content);
   if (typeof obj !== "object" || obj === null) return false;
   for (const value of Object.values(obj as Record<string, unknown>)) {
     if (typeof value === "object" && value !== null && "HED" in value) return true;
@@ -63,7 +62,8 @@ export function eventsJsonHasHed(content: string): boolean {
 /**
  * True when a BIDS `*_events.tsv` has a literal `HED` column (assembled HED
  * strings annotated per row). Only the header row is inspected. Returns false
- * on an empty file or when no header cell is exactly `HED`.
+ * on an empty file or when no header cell equals `HED` (surrounding whitespace
+ * is stripped before the comparison).
  */
 export function eventsTsvHasHed(content: string): boolean {
   const firstLine = content.split(/\r?\n/, 1)[0];

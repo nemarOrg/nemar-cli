@@ -1052,7 +1052,7 @@ async function handleEzidVersionDoiLegacy(
     // here -- the /webhooks/manifest-ready handler triggers the refresh after
     // the row insert lands.
     if (!centralFlow) {
-      c.executionCtx.waitUntil(refreshMetadataAfterVersionDoi(c.env, dataset.dataset_id));
+      c.executionCtx.waitUntil(refreshMetadataAfterVersionDoi(c.env, dataset.dataset_id, version));
     }
 
     return c.json({
@@ -1328,7 +1328,7 @@ async function handleZenodoVersionDoi(
     // non-fatal. Under centralFlow the dataset_versions row doesn't exist yet
     // here -- manifest-ready triggers the refresh after the row insert lands.
     if (!centralFlow) {
-      c.executionCtx.waitUntil(refreshMetadataAfterVersionDoi(c.env, dataset.dataset_id));
+      c.executionCtx.waitUntil(refreshMetadataAfterVersionDoi(c.env, dataset.dataset_id, version));
     }
 
     return c.json({

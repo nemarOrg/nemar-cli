@@ -2301,7 +2301,8 @@ export interface BidsTreeStats {
   electrodeSystem?: string;
   /** Whether this ref carries HED annotations: HEDVersion declared AND >=1 real
    *  HED key in an events sidecar (#869). Undefined when the probe couldn't run
-   *  (no dataset_description.json) -> column stays NULL. */
+   *  (no dataset_description.json) OR any fetch/parse failure inside probeHed ->
+   *  column stays NULL (vs false -> 0 = checked, no HED). */
   hasHed?: boolean;
   /** The `HEDVersion` string (array form comma-joined), or undefined (#869). */
   hedVersion?: string;

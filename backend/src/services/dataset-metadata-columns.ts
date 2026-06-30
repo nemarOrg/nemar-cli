@@ -157,8 +157,9 @@ export function computeDatasetMetadataColumns(input: MetadataColumnInputs): Data
     tasks: tasksArr.length ? tasksArr.join(",") : null,
     n_channels: input.nChannels ?? null,
     electrode_system: input.electrodeSystem ?? null,
-    // Tri-state: undefined (probe didn't run) -> null = not classified yet;
-    // false -> 0 = checked, no HED; true -> 1 = checked, has HED.
+    // Tri-state via `== null` (intentionally catches undefined AND null): probe
+    // didn't run -> null = not classified yet; false -> 0 = checked, no HED;
+    // true -> 1 = checked, has HED.
     has_hed: input.hasHed == null ? null : input.hasHed ? 1 : 0,
     hed_version: input.hedVersion ?? null,
   };
@@ -265,7 +266,10 @@ export async function writeVersionHed(
 
   const changes = result.meta?.changes ?? 0;
   if (changes === 0) {
-    console.warn(
+    // error (not warn): dataset_versions is the per-version source of truth with
+    // no COALESCE safety net, so a 0-row write means the HED data is lost until a
+    // re-probe -- worth surfacing above warn-level noise.
+    console.error(
       `[metadata-columns] No dataset_versions row updated for ${datasetId} version=${version ?? "latest"} - per-version HED not persisted`,
     );
   }

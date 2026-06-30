@@ -56,6 +56,10 @@ describe("parseHedVersion", () => {
     expect(parseHedVersion({ HEDVersion: ["8.3.0", "", "  "] })).toBe("8.3.0");
   });
 
+  test("drops non-string array entries", () => {
+    expect(parseHedVersion({ HEDVersion: [8.3, "sc:score_1.0.0"] })).toBe("sc:score_1.0.0");
+  });
+
   test("returns null when HEDVersion is absent, blank, or wrong-typed", () => {
     expect(parseHedVersion({ Name: "no hed here" })).toBeNull();
     expect(parseHedVersion({ HEDVersion: "" })).toBeNull();
@@ -79,10 +83,14 @@ describe("eventsJsonHasHed", () => {
     expect(eventsJsonHasHed(EVENTS_JSON_NO_HED)).toBe(false);
   });
 
-  test("false on malformed JSON or non-object", () => {
-    expect(eventsJsonHasHed("{ not valid json")).toBe(false);
+  test("throws on malformed JSON (caller treats as inconclusive -> NULL)", () => {
+    expect(() => eventsJsonHasHed("{ not valid json")).toThrow();
+  });
+
+  test("false for valid JSON that declares no HED (array / number / plain object)", () => {
     expect(eventsJsonHasHed("[]")).toBe(false);
     expect(eventsJsonHasHed("42")).toBe(false);
+    expect(eventsJsonHasHed("null")).toBe(false);
   });
 });
 
