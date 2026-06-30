@@ -49,6 +49,21 @@ describe("buildDatasetFilterClauses search clause", () => {
     expect(params).toEqual(["%eeg%", "%ada%", "%rest%", "-30 days"]);
   });
 
+  test("hasHed adds `d.has_hed = 1` with no bind param (#869)", () => {
+    const params: (string | number)[] = [];
+    const clauses = buildDatasetFilterClauses(params, { hasHed: true });
+    expect(clauses).toContain("d.has_hed = 1");
+    expect(params).toEqual([]); // literal clause, no placeholder
+  });
+
+  test("hasHed coexists with a modality filter without consuming its param", () => {
+    const params: (string | number)[] = [];
+    const clauses = buildDatasetFilterClauses(params, { modality: "EEG", hasHed: true });
+    expect(clauses).toContain("LOWER(COALESCE(d.modalities, '')) LIKE ?");
+    expect(clauses).toContain("d.has_hed = 1");
+    expect(params).toEqual(["%eeg%"]); // only modality pushed a param
+  });
+
   test("no filters returns empty clauses (nothing pushed)", () => {
     const params: (string | number)[] = [];
     const clauses = buildDatasetFilterClauses(params, {});
