@@ -1052,7 +1052,7 @@ async function handleEzidVersionDoiLegacy(
     // here -- the /webhooks/manifest-ready handler triggers the refresh after
     // the row insert lands.
     if (!centralFlow) {
-      c.executionCtx.waitUntil(refreshMetadataAfterVersionDoi(c.env, dataset.dataset_id));
+      c.executionCtx.waitUntil(refreshMetadataAfterVersionDoi(c.env, dataset.dataset_id, version));
     }
 
     return c.json({
@@ -1091,9 +1091,13 @@ async function handleEzidVersionDoiLegacy(
  * error is recorded to D1 so operators don't read a stale "success". (The
  * legacy nemar.org sync this replaced was removed in epic #837.)
  */
-async function refreshMetadataAfterVersionDoi(env: Bindings, datasetId: string): Promise<void> {
+async function refreshMetadataAfterVersionDoi(
+  env: Bindings,
+  datasetId: string,
+  version?: string,
+): Promise<void> {
   try {
-    await refreshDatasetMetadata(env, datasetId);
+    await refreshDatasetMetadata(env, datasetId, version);
   } catch (err) {
     const msg = errorMessage(err);
     console.error(`[webhook] metadata refresh failed for ${datasetId} (non-fatal):`, msg);
@@ -1324,7 +1328,7 @@ async function handleZenodoVersionDoi(
     // non-fatal. Under centralFlow the dataset_versions row doesn't exist yet
     // here -- manifest-ready triggers the refresh after the row insert lands.
     if (!centralFlow) {
-      c.executionCtx.waitUntil(refreshMetadataAfterVersionDoi(c.env, dataset.dataset_id));
+      c.executionCtx.waitUntil(refreshMetadataAfterVersionDoi(c.env, dataset.dataset_id, version));
     }
 
     return c.json({
@@ -1578,7 +1582,9 @@ webhooks.post("/manifest-ready", async (c) => {
   // columns HERE, after the row insert lands. (The legacy nemar.org sync was
   // removed in epic #837.) Background + non-fatal.
   if (job.doi) {
-    c.executionCtx.waitUntil(refreshMetadataAfterVersionDoi(c.env, body.dataset_id));
+    // Pass body.version so the per-version HED row (#869) is written for exactly
+    // this just-published version, not just the latest-by-created_at fallback.
+    c.executionCtx.waitUntil(refreshMetadataAfterVersionDoi(c.env, body.dataset_id, body.version));
   }
 
   const fileCount = body.totals?.files ?? 0;

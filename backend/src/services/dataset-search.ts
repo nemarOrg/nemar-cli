@@ -17,6 +17,8 @@ export interface SearchResult {
   doi: string;
   tasks: string;
   authors: string;
+  /** HED presence (#869): 1 = has HED, 0 = checked/none, null = not classified. */
+  has_hed?: number | null;
   score: number;
   /** FTS5 highlight (#646). Additive-optional; ignored by existing CLI/website
    *  clients. */
@@ -227,6 +229,7 @@ interface HydrateRow {
   doi: string | null;
   tasks: string | null;
   authors: string | null;
+  has_hed: number | null;
 }
 
 const toResult = (row: HydrateRow, score: number, snippet?: string): SearchResult => ({
@@ -237,6 +240,7 @@ const toResult = (row: HydrateRow, score: number, snippet?: string): SearchResul
   doi: row.doi || "",
   tasks: row.tasks || "",
   authors: row.authors || "",
+  has_hed: row.has_hed ?? null,
   score,
   ...(snippet ? { snippet } : {}),
 });
@@ -251,7 +255,7 @@ export async function hydrateDatasetsByIds(db: D1Database, ids: string[]): Promi
   const results = await db
     .prepare(
       `SELECT d.dataset_id AS id, d.name, d.modalities, d.subject_count AS participants,
-              d.concept_doi AS doi, d.tasks, d.authors
+              d.concept_doi AS doi, d.tasks, d.authors, d.has_hed
        FROM datasets d
        WHERE d.dataset_id IN (${buildInPlaceholders(ids.length)})
          AND d.status = 'active' AND d.visibility = 'public'
@@ -280,7 +284,7 @@ export async function lookupDatasetById(
   const row = await db
     .prepare(
       `SELECT d.dataset_id AS id, d.name, d.modalities, d.subject_count AS participants,
-              d.concept_doi AS doi, d.tasks, d.authors
+              d.concept_doi AS doi, d.tasks, d.authors, d.has_hed
        FROM datasets d
        WHERE (d.dataset_id = ? OR d.source_id = ?) AND d.status = 'active'
          AND (d.is_sandbox = 0 OR d.is_sandbox IS NULL) AND d.visibility = 'public'
@@ -339,7 +343,7 @@ export async function ftsSearch(
   const results = await db
     .prepare(
       `SELECT d.dataset_id AS id, d.name, d.modalities, d.subject_count AS participants,
-              d.concept_doi AS doi, d.tasks, d.authors,
+              d.concept_doi AS doi, d.tasks, d.authors, d.has_hed,
               snippet(datasets_fts, 5, '<mark>', '</mark>', '…', 12) AS snippet
        FROM datasets_fts
        JOIN datasets d ON d.id = datasets_fts.rowid

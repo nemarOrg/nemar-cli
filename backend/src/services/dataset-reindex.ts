@@ -22,6 +22,7 @@ import {
   computeDatasetMetadataColumns,
   writeDatasetCatalogFields,
   writeDatasetMetadataColumns,
+  writeVersionHed,
 } from "./dataset-metadata-columns.js";
 import { reembedDatasetVector } from "./dataset-search.js";
 import { enrichDataset } from "./enrich-dataset.js";
@@ -74,6 +75,10 @@ function s3Cfg(env: Bindings) {
 export async function refreshDatasetMetadata(
   env: Bindings,
   datasetId: string,
+  // The published version this refresh reflects (#869). When provided, the
+  // per-version HED row is written for exactly that version; when omitted (e.g.
+  // admin reindex) writeVersionHed targets the latest version.
+  version?: string,
 ): Promise<RefreshMetadataResult> {
   const db = env.DB;
 
@@ -179,6 +184,8 @@ export async function refreshDatasetMetadata(
     let tasksOverride: string[] | undefined;
     let nChannelsOverride: number | undefined;
     let electrodeSystemOverride: string | undefined;
+    let hasHedOverride: boolean | undefined;
+    let hedVersionOverride: string | undefined;
     try {
       const stats = await getBidsTreeStats(repoName, "main", pat);
       if (stats.modalities.length) modalitiesOverride = stats.modalities;
@@ -186,6 +193,8 @@ export async function refreshDatasetMetadata(
       if (stats.tasks.length) tasksOverride = stats.tasks;
       nChannelsOverride = stats.nChannels;
       electrodeSystemOverride = stats.electrodeSystem;
+      hasHedOverride = stats.hasHed;
+      hedVersionOverride = stats.hedVersion;
     } catch (err) {
       console.warn(
         `[reindex] BIDS tree walk failed for ${datasetId}; using tree paths: ${errorMessage(err)}`,
@@ -200,8 +209,32 @@ export async function refreshDatasetMetadata(
       tasks: tasksOverride,
       nChannels: nChannelsOverride,
       electrodeSystem: electrodeSystemOverride,
+      hasHed: hasHedOverride,
+      hedVersion: hedVersionOverride,
     });
     await writeDatasetMetadataColumns(db, datasetId, cols);
+    // Persist the per-version HED row (#869) only when we actually classified it
+    // (cols.has_hed != null) AND the dataset has a published version to stamp.
+    // The reindex/admin path passes no `version`, so resolve the latest here and
+    // skip an unpublished dataset (no dataset_versions row); otherwise
+    // writeVersionHed's latest-fallback would match 0 rows and log a spurious
+    // error. Mirrors the phase-3 sweep, which guards via its latest_version select.
+    if (cols.has_hed != null) {
+      const targetVersion =
+        version ??
+        (
+          await db
+            .prepare(
+              "SELECT version FROM dataset_versions WHERE dataset_id = ? ORDER BY created_at DESC LIMIT 1",
+            )
+            .bind(datasetId)
+            .first<{ version: string }>()
+        )?.version ??
+        null;
+      if (targetVersion) {
+        await writeVersionHed(db, datasetId, targetVersion, cols.has_hed, cols.hed_version);
+      }
+    }
     metadataColumnsWritten = true;
     console.log(
       `[reindex] Metadata columns refreshed for ${datasetId}: subjects=${cols.subject_count}, modalities=${cols.modalities}, files=${cols.total_files}`,

@@ -656,6 +656,11 @@ export interface Dataset {
   /** Latest published version DOI tag (e.g. "1.0.0"), or null when no
       version has been minted yet. Added in v0.8.9; older backends omit it. */
   latest_version?: string | null;
+  /** HED presence of the latest version (#869): 1 = has HED, 0 = checked/none,
+      null = not classified yet. Older backends omit it. */
+  has_hed?: number | null;
+  /** Declared HEDVersion of the latest version (#869), or null. */
+  hed_version?: string | null;
 }
 
 export interface DatasetsListResponse {
@@ -678,6 +683,8 @@ export interface DatasetListFilters {
   author?: string;
   task?: string;
   hasDoi?: boolean;
+  /** Only datasets with HED annotations (#869). Serialized as has_hed=1. */
+  hasHed?: boolean;
   recent?: number;
   /** Comma-separated license tiers (public, attribution, sharealike,
       noncommercial, noderiv, unknown), OR semantics. #653. */
@@ -696,6 +703,8 @@ export interface DatasetSearchResult {
   doi: string;
   tasks: string;
   authors: string;
+  /** HED presence (#869): 1 = has HED, 0 = checked/none, null = not classified. */
+  has_hed?: number | null;
   score: number;
 }
 
@@ -744,6 +753,7 @@ export async function listDatasets(
   if (filters.task) params.set("task", filters.task);
   if (filters.license) params.set("license", filters.license);
   if (filters.hasDoi) params.set("has_doi", "true");
+  if (filters.hasHed) params.set("has_hed", "1");
   if (filters.recent) params.set("recent", String(filters.recent));
   if (filters.sort) params.set("sort", filters.sort);
   if (filters.limit != null) params.set("limit", String(filters.limit));
@@ -779,11 +789,12 @@ export async function resolveSourceId(sourceId: string): Promise<ResolveSourceRe
  */
 export async function searchDatasets(
   query: string,
-  filters: { modality?: string; limit?: number } = {},
+  filters: { modality?: string; limit?: number; hasHed?: boolean } = {},
 ): Promise<DatasetSearchResponse> {
   const params = new URLSearchParams({ q: query });
   if (filters.modality) params.set("modality", filters.modality);
   if (filters.limit) params.set("limit", String(filters.limit));
+  if (filters.hasHed) params.set("has_hed", "1");
   return request<DatasetSearchResponse>(`/datasets/search?${params.toString()}`, {}, "optional");
 }
 
@@ -2084,6 +2095,44 @@ export async function reindexBulk(
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ filter, ...(options ?? {}) }),
     },
+    true,
+  );
+}
+
+/** One batch of the HED backfill sweep (#869 phase 3, `POST /admin/datasets/hed-sweep`). */
+export interface HedSweepBatchResponse {
+  processed: number;
+  /** Classified has_hed=1 this batch. */
+  withHed: number;
+  /** Classified has_hed=0 (checked, no HED) this batch. */
+  withoutHed: number;
+  /** Could not classify (no dataset_description.json / probe error) -> NULL. */
+  unknown: number;
+  errors: { dataset_id: string; error: string }[];
+  /** Datasets still unswept (hed_checked_at IS NULL); 0 when the sweep is done. */
+  remaining: number | null;
+}
+
+/** Response of `?reset=1`: count of probed rows cleared back to unclassified. */
+export interface HedSweepResetResponse {
+  reset: number;
+}
+
+/** Run one bounded HED sweep batch (default 15, server-clamped to [1,30]). */
+export async function hedSweep(options?: { limit?: number }): Promise<HedSweepBatchResponse> {
+  const limit = options?.limit ?? 15;
+  return request<HedSweepBatchResponse>(
+    `/admin/datasets/hed-sweep?limit=${encodeURIComponent(String(limit))}`,
+    { method: "POST", headers: { "Content-Type": "application/json" } },
+    true,
+  );
+}
+
+/** Clear every probed HED row so a corrected detector can re-sweep from scratch. */
+export async function hedSweepReset(): Promise<HedSweepResetResponse> {
+  return request<HedSweepResetResponse>(
+    "/admin/datasets/hed-sweep?reset=1",
+    { method: "POST", headers: { "Content-Type": "application/json" } },
     true,
   );
 }
