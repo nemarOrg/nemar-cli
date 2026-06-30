@@ -720,6 +720,10 @@ datasetRoutes.get("/", optionalAuthMiddleware, async (c) => {
              -- montage filter reads NULL as "not classified yet".
              d.n_channels,
              d.electrode_system,
+             -- #869: HED presence (0/1) + HEDVersion; NULL until phase 2/3
+             -- populate. Website reads NULL as "not classified yet".
+             d.has_hed,
+             d.hed_version,
              'managed' AS source_type,
              (
                SELECT version FROM dataset_versions dv
@@ -775,6 +779,10 @@ datasetRoutes.get("/", optionalAuthMiddleware, async (c) => {
            -- montage filter reads NULL as "not classified yet".
            d.n_channels,
            d.electrode_system,
+           -- #869: HED presence (0/1) + HEDVersion; NULL until phase 2/3
+           -- populate. Website reads NULL as "not classified yet".
+           d.has_hed,
+           d.hed_version,
            CASE WHEN d.owner_user_id = ${SYSTEM_USER_ID} THEN 'catalog' ELSE 'managed' END AS source_type,
            (
              SELECT version FROM dataset_versions dv
