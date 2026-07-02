@@ -64,6 +64,19 @@ The backend code (`ORG_NAME = "nemarDatasets"` in `backend/src/services/github.t
   real snapshot:** `scripts/run-local.sh --nemar-cli <path>` (loads the backup into a local
   miniflare D1, then `wrangler dev`). Both live in `nemarOrg/nemar-db-backup`.
 
+### Secret management (self-hosted Infisical, epic #885)
+- **Single source of truth = self-hosted Infisical** at `https://infisical.nemar.org`
+  (dedicated VM on the SDSC webservices server, behind a Cloudflare Tunnel). Deployment
+  artifacts + runbook live in the **private** repo `nemarOrg/nemar-infisical` (mirrors the
+  `nemar-db-backup` pattern; the Postgres volume is the encrypted store of every secret).
+- Secrets are **pushed out** to each platform via Infisical **Secret Sync** (Cloudflare
+  Worker secrets, GitHub org secrets) or **OIDC pull** (`nemar-cli` CI). The Worker reads
+  `env.X` natively -> **Infisical is never on the request path**; its downtime cannot cause
+  an outage. Do NOT add the Infisical SDK to any runtime path.
+- **[CRITICAL] name collision:** the Infisical *instance* `ENCRYPTION_KEY`/`AUTH_SECRET`
+  (in that repo's `.env`) are NOT the NEMAR *Worker* `ENCRYPTION_KEY` secret.
+- Plan + full secret inventory: `.context/plan-secrets-infisical-migration.md`.
+
 ### Public Browser Sites
 Two user-facing dataset browsers exist during the cutover; **prefer ww2 for new references**.
 
