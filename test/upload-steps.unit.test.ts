@@ -4,10 +4,11 @@
  */
 
 import { afterAll, describe, expect, test } from "bun:test";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { initUploadProgress, readUploadProgress } from "../src/lib/upload-progress";
+import { analyzeDataset } from "../src/lib/upload/enrich";
 import { reconcileProgressWithDataset } from "../src/lib/upload/plan";
 import { ensureGitignoreHasNemar, parseRepoFullName } from "../src/lib/upload/transfer";
 
@@ -22,6 +23,34 @@ afterAll(() => {
   for (const dir of scratchDirs) {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+const FIXTURE = join(import.meta.dir, "fixtures", "bids-minimal");
+
+describe("analyzeDataset", () => {
+  test("bids-minimal: name from BIDS Name, manifest classifies files", async () => {
+    const { datasetName, manifest, bidsDescription } = await analyzeDataset(FIXTURE, {});
+    expect(datasetName).toBe("E2E Test Dataset");
+    expect(bidsDescription.Name).toBe("E2E Test Dataset");
+    expect(manifest.files.length).toBe(7);
+    expect(manifest.dataFiles).toBe(1);
+    expect(manifest.metadataFiles).toBe(6);
+  });
+
+  test("--name override wins over BIDS Name", async () => {
+    const { datasetName } = await analyzeDataset(FIXTURE, { name: "Override Name" });
+    expect(datasetName).toBe("Override Name");
+  });
+
+  test("falls back to directory basename when Name is absent", async () => {
+    const dir = join(scratchDir("nemar-analyze-"), "my-dataset-dir");
+    cpSync(FIXTURE, dir, { recursive: true });
+    const desc = JSON.parse(readFileSync(join(dir, "dataset_description.json"), "utf-8"));
+    delete desc.Name;
+    writeFileSync(join(dir, "dataset_description.json"), JSON.stringify(desc, null, 2));
+    const { datasetName } = await analyzeDataset(dir, {});
+    expect(datasetName).toBe("my-dataset-dir");
+  });
 });
 
 describe("parseRepoFullName", () => {

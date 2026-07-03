@@ -24,7 +24,7 @@ import { spawn } from "bun";
 import chalk from "chalk";
 import { Command } from "commander";
 import inquirer from "inquirer";
-import ora from "ora";
+import ora, { type Ora } from "ora";
 import {
   ApiError,
   type Dataset,
@@ -148,7 +148,18 @@ import {
   readUploadProgress,
   writeUploadProgress,
 } from "../lib/upload-progress.js";
+import {
+  analyzeDataset,
+  collectAuthorOrcids,
+  collectProvenance,
+  resolveLicenseStep,
+} from "../lib/upload/enrich.js";
 import { reconcileProgressWithDataset } from "../lib/upload/plan.js";
+import {
+  checkUploadPrerequisites,
+  validateBidsStep,
+  verifyGhCli,
+} from "../lib/upload/preflight.js";
 import { ensureGitignoreHasNemar, parseRepoFullName } from "../lib/upload/transfer.js";
 
 export const datasetCommand = new Command("dataset").description("Dataset management").addHelpText(
@@ -503,437 +514,25 @@ Examples:
     await checkPrerequisitesForCommand("upload");
 
     // Step 2: Check prerequisites
-    let spinner = ora("Checking prerequisites...").start();
-    const prereqs = await checkPrerequisites();
-
-    if (!prereqs.allPassed) {
-      spinner.fail("Prerequisites check failed");
-      console.log();
-      for (const error of prereqs.errors) {
-        console.log(chalk.red(`  - ${error}`));
-      }
-      process.exit(1);
-    }
-
-    spinner.succeed("Prerequisites check passed");
-    console.log(chalk.dim(`  git-annex ${prereqs.gitAnnex.version}`));
-    if (prereqs.githubSSH.username) {
-      console.log(chalk.dim(`  GitHub: ${prereqs.githubSSH.username}`));
-    }
-    console.log();
+    if ((await checkUploadPrerequisites()).status === "fail") process.exit(1);
 
     // Step 2b: Verify gh CLI authentication
-    spinner = ora("Verifying GitHub CLI authentication...").start();
-    const ghAuth = await verifyGitHubAuth(config.githubUsername);
-
-    if (!ghAuth.authenticated) {
-      spinner.fail("GitHub CLI not authenticated");
-      console.log(chalk.red(`  ${ghAuth.error}`));
-      console.log();
-      console.log("GitHub CLI is required for dataset uploads. Install and authenticate:");
-      console.log(chalk.cyan("  brew install gh       # or visit https://cli.github.com/"));
-      console.log(chalk.cyan("  gh auth login"));
-      process.exit(1);
-    }
-
-    if (config.githubUsername && !ghAuth.matches) {
-      spinner.warn("GitHub CLI user mismatch");
-      console.log(chalk.yellow(`  ${ghAuth.error}`));
-      console.log();
-      console.log(
-        "Your gh CLI is authenticated as a different GitHub account than your NEMAR account.",
-      );
-      console.log("This may cause issues with repository access. To fix:");
-      console.log(chalk.cyan(`  gh auth login    # Login as ${config.githubUsername}`));
-      console.log();
-      console.log(
-        chalk.yellow(
-          "WARNING: If upload fails with permission errors, this mismatch is the likely cause.",
-        ),
-      );
-      console.log();
-      // Continue with warning; don't block (user may have valid reason)
-    } else {
-      spinner.succeed(`GitHub CLI authenticated as ${ghAuth.username}`);
-    }
+    if ((await verifyGhCli(config)).status === "fail") process.exit(1);
 
     // Step 3: BIDS Validation (unless skipped)
-    if (!options.skipValidation) {
-      spinner = ora("Validating BIDS dataset...").start();
-
-      // Check for dataset_description.json
-      const descPath = resolve(absolutePath, "dataset_description.json");
-      if (!existsSync(descPath)) {
-        spinner.fail("Not a valid BIDS dataset");
-        console.log(chalk.red("Missing required file: dataset_description.json"));
-        process.exit(1);
-      }
-
-      // Check Deno for validation
-      const deno = await checkDenoInstalled();
-      if (!deno.installed) {
-        spinner.fail("Deno is required for BIDS validation");
-        console.log();
-        console.log(chalk.red("Error: Deno is not installed"));
-        console.log();
-        console.log("The BIDS validator requires Deno runtime to run.");
-        console.log("Install Deno with one of these commands:");
-        console.log();
-        console.log(chalk.cyan("  # macOS/Linux (curl)"));
-        console.log("  curl -fsSL https://deno.land/install.sh | sh");
-        console.log();
-        console.log(chalk.cyan("  # macOS (Homebrew)"));
-        console.log("  brew install deno");
-        console.log();
-        console.log(chalk.cyan("  # Windows (PowerShell)"));
-        console.log("  irm https://deno.land/install.ps1 | iex");
-        console.log();
-        console.log("Learn more: https://docs.deno.com/runtime/getting_started/installation/");
-        console.log();
-        console.log(
-          chalk.dim("To skip validation (not recommended): nemar dataset upload --skip-validation"),
-        );
-        process.exit(1);
-      }
-      try {
-        const result = await validateBidsDataset(absolutePath, { prune: true });
-        if (!result.valid) {
-          spinner.fail("Dataset has validation errors");
-          console.log();
-          console.log(formatValidationResult(result));
-          console.log();
-          console.log(chalk.yellow("Fix the errors above before uploading."));
-          console.log(chalk.dim("Or use --skip-validation to upload anyway (not recommended)."));
-          process.exit(1);
-        }
-        spinner.succeed(`Dataset is valid BIDS (${result.warningCount} warnings)`);
-      } catch (error) {
-        spinner.fail("Validation failed");
-        console.log(chalk.red((error as Error).message));
-        process.exit(1);
-      }
-      console.log();
-    }
+    if ((await validateBidsStep(absolutePath, options)).status === "fail") process.exit(1);
 
     // Step 4: Collect file manifest and show upload plan
-    spinner = ora("Analyzing dataset files...").start();
-
-    // Read dataset_description.json once (used for Name fallback and co-author ORCIDs)
-    let bidsDescription: Record<string, unknown> = {};
-    try {
-      const descPath = resolve(absolutePath, "dataset_description.json");
-      bidsDescription = JSON.parse(readFileSync(descPath, "utf-8")) as Record<string, unknown>;
-    } catch (err: unknown) {
-      if ((err as NodeJS.ErrnoException).code !== "ENOENT") {
-        console.log(
-          chalk.yellow(
-            `Warning: Could not read dataset_description.json: ${(err as Error).message}`,
-          ),
-        );
-      }
-    }
-
-    // Use explicit --name flag, then BIDS Name from dataset_description.json, then directory name
-    const datasetName =
-      options.name ||
-      (typeof bidsDescription.Name === "string" ? bidsDescription.Name : null) ||
-      basename(absolutePath);
-    const manifest = await collectFileManifest(absolutePath);
-    spinner.succeed(
-      `Found ${manifest.files.length} files (${manifest.dataFiles} data, ${manifest.metadataFiles} metadata)`,
-    );
+    const { datasetName, manifest, bidsDescription } = await analyzeDataset(absolutePath, options);
 
     // Step 4b: Collect co-author ORCIDs (skip if metadata already exists from prior run)
-    // Check v2 first (.nemar/metadata.json), fall back to v1 (nemar_metadata.json)
-    let coAuthorEnrichment: NemarMetadataPayload | undefined;
-    const existingNemarMetaV2 = resolve(absolutePath, ".nemar", "metadata.json");
-    const existingNemarMetaV1 = resolve(absolutePath, "nemar_metadata.json");
-    if (existsSync(existingNemarMetaV2)) {
-      try {
-        coAuthorEnrichment = JSON.parse(readFileSync(existingNemarMetaV2, "utf-8"));
-        console.log(
-          chalk.dim("  Using existing .nemar/metadata.json (author ORCIDs from prior run)"),
-        );
-      } catch (err) {
-        console.log(
-          chalk.yellow(
-            `  Warning: Could not read .nemar/metadata.json: ${err instanceof Error ? err.message : err}. Will re-collect author information.`,
-          ),
-        );
-      }
-    } else if (existsSync(existingNemarMetaV1)) {
-      try {
-        coAuthorEnrichment = JSON.parse(readFileSync(existingNemarMetaV1, "utf-8"));
-        console.log(
-          chalk.dim("  Using existing nemar_metadata.json (author ORCIDs from prior run)"),
-        );
-      } catch (err) {
-        console.log(
-          chalk.yellow(
-            `  Warning: Could not read nemar_metadata.json: ${err instanceof Error ? err.message : err}. Will re-collect author information.`,
-          ),
-        );
-      }
-    }
-
-    if (!coAuthorEnrichment && !options.skipOrcid && process.stdin.isTTY) {
-      const rawAuthors = bidsDescription.Authors;
-      const authorList = Array.isArray(rawAuthors)
-        ? rawAuthors.filter((a): a is string => typeof a === "string")
-        : [];
-
-      if (authorList.length > 0) {
-        try {
-          // Get uploader's ORCID from profile
-          let uploaderOrcid: string | undefined;
-          let uploaderUsername: string | undefined;
-          try {
-            const user = await getCurrentUser();
-            uploaderOrcid = user.orcid || undefined;
-            uploaderUsername = user.username;
-          } catch (userErr) {
-            console.log(chalk.dim(`  Could not fetch profile: ${errorDetail(userErr)}`));
-          }
-
-          console.log();
-          console.log(chalk.cyan("Authors found:"), authorList.join(" | "));
-
-          // Auto-match uploader ORCID (v2 format with affiliations array)
-          const authors: Record<
-            string,
-            { orcid?: string; affiliations?: Array<{ name: string }> }
-          > = {};
-          let uploaderMatchedAuthor: string | undefined;
-          if (uploaderOrcid && uploaderUsername) {
-            const lowerName = uploaderUsername.toLowerCase();
-            const match = authorList.find((a) => a.toLowerCase().includes(lowerName));
-            if (match) {
-              authors[match] = { orcid: uploaderOrcid };
-              uploaderMatchedAuthor = match;
-              console.log(
-                `  Your ORCID (from profile): ${chalk.green(uploaderOrcid)} (matched to "${match}")`,
-              );
-            }
-          }
-
-          // Auto-discover ORCIDs from referenced DOIs
-          try {
-            const { discoverOrcidsFromReferencedDois } = await import(
-              "../../backend/src/services/doi-orcid-discovery.js"
-            );
-            const spinner = ora("Looking up author ORCIDs from referenced publications...").start();
-            const orcidResult = await discoverOrcidsFromReferencedDois(bidsDescription, authors);
-            const count = Object.keys(orcidResult.discoveries).length;
-            if (count > 0) {
-              spinner.succeed(`Found ${count} ORCID(s) from referenced DOIs`);
-              for (const [name, d] of Object.entries(orcidResult.discoveries)) {
-                console.log(
-                  `  ${chalk.green(d.orcid)} -> "${name}" (from ${d.sourceDoi}, ${d.confidence} match)`,
-                );
-              }
-              const { confirmOrcids } = await inquirer.prompt([
-                {
-                  type: "confirm",
-                  name: "confirmOrcids",
-                  message: "Accept these auto-discovered ORCIDs?",
-                  default: true,
-                },
-              ]);
-              if (confirmOrcids) {
-                for (const [name, d] of Object.entries(orcidResult.discoveries)) {
-                  authors[name] = {
-                    ...authors[name],
-                    orcid: d.orcid,
-                    ...(d.affiliations && { affiliations: d.affiliations }),
-                  };
-                }
-              }
-            } else {
-              spinner.info("No ORCIDs found from referenced DOIs");
-            }
-          } catch (discoverErr) {
-            console.log(
-              chalk.yellow(`  Could not auto-discover ORCIDs: ${errorDetail(discoverErr)}`),
-            );
-          }
-
-          // Prompt for each co-author's ORCID
-          for (const author of authorList) {
-            if (author === uploaderMatchedAuthor) continue;
-            if (authors[author]?.orcid) continue; // skip auto-discovered
-
-            const { orcid } = await inquirer.prompt([
-              {
-                type: "input",
-                name: "orcid",
-                message: `ORCID for "${author}" (Enter to skip):`,
-                validate: (input: string) => {
-                  if (!input) return true;
-                  return ORCID_REGEX.test(input) || "Invalid ORCID format (XXXX-XXXX-XXXX-XXXX)";
-                },
-              },
-            ]);
-
-            if (orcid) {
-              const entry: { orcid: string; affiliations?: Array<{ name: string }> } = { orcid };
-              const { affiliation } = await inquirer.prompt([
-                {
-                  type: "input",
-                  name: "affiliation",
-                  message: `  Affiliation for "${author}" (optional):`,
-                },
-              ]);
-              if (affiliation) entry.affiliations = [{ name: affiliation }];
-              authors[author] = entry;
-            }
-          }
-
-          if (Object.keys(authors).length > 0) {
-            coAuthorEnrichment = { version: "2.0", authors };
-
-            // Write immediately so resumed uploads don't re-prompt
-            try {
-              const nemarMetaDir = resolve(absolutePath, ".nemar");
-              if (!existsSync(nemarMetaDir)) {
-                mkdirSync(nemarMetaDir, { recursive: true });
-              }
-              const nemarMetaPath = resolve(nemarMetaDir, "metadata.json");
-              writeFileSync(nemarMetaPath, JSON.stringify(coAuthorEnrichment, null, 2));
-              console.log(chalk.dim("  Saved .nemar/metadata.json with author ORCIDs"));
-            } catch (writeErr) {
-              console.log(
-                chalk.yellow(
-                  `  Warning: Could not save .nemar/metadata.json: ${errorDetail(writeErr)}`,
-                ),
-              );
-            }
-          }
-          console.log();
-        } catch (orcidErr) {
-          if (orcidErr instanceof ApiError) {
-            console.log(chalk.yellow(`  Could not fetch profile: ${orcidErr.message}`));
-          } else {
-            console.log(chalk.yellow(`  Could not collect ORCIDs: ${errorDetail(orcidErr)}`));
-          }
-          console.log(chalk.dim("  Continuing without author enrichment."));
-        }
-      }
-    }
+    const coAuthorEnrichment = await collectAuthorOrcids(absolutePath, options, bidsDescription);
 
     // Step 4c: License detection and enforcement
-    let resolvedLicense: string | undefined;
-    if (process.stdin.isTTY && !options.skipValidation /* non-interactive guard */) {
-      const detected = detectLicense(absolutePath);
-
-      if (detected.spdxId) {
-        console.log();
-        console.log(
-          chalk.cyan("License detected:"),
-          chalk.bold(detected.spdxId),
-          chalk.dim(
-            `(from ${detected.source === "dataset_description" ? "dataset_description.json" : "LICENSE file"})`,
-          ),
-        );
-
-        if (!isResearchCompatible(detected.spdxId)) {
-          console.log(
-            chalk.yellow(
-              `  Warning: "${detected.spdxId}" is not in the list of known research-compatible licenses.`,
-            ),
-          );
-        }
-
-        const { keepLicense } = await inquirer.prompt<{ keepLicense: boolean }>([
-          {
-            type: "confirm",
-            name: "keepLicense",
-            message: `Use "${detected.spdxId}" as the dataset license?`,
-            default: true,
-          },
-        ]);
-
-        if (keepLicense) {
-          resolvedLicense = detected.spdxId;
-        } else {
-          resolvedLicense = await promptForLicense(detected.spdxId);
-        }
-      } else {
-        console.log();
-        if (detected.source === "license_file") {
-          console.log(
-            chalk.yellow(
-              "A LICENSE file was found but the license could not be identified automatically.",
-            ),
-          );
-        } else {
-          console.log(chalk.yellow("No license found in this dataset."));
-        }
-        console.log(chalk.dim("A license is required to publish on NEMAR."));
-        resolvedLicense = await promptForLicense();
-      }
-
-      // Apply the resolved license back to dataset_description.json if it differs
-      try {
-        const descPath = resolve(absolutePath, "dataset_description.json");
-        if (existsSync(descPath)) {
-          const desc = JSON.parse(readFileSync(descPath, "utf-8")) as Record<string, unknown>;
-          if (desc.License !== resolvedLicense) {
-            updateLicenseInDescription(absolutePath, resolvedLicense);
-            console.log(
-              chalk.dim(`  Updated dataset_description.json License -> ${resolvedLicense}`),
-            );
-          }
-        }
-      } catch (licErr) {
-        console.log(
-          chalk.yellow(
-            `  Warning: Could not update license in dataset_description.json: ${errorDetail(licErr)}`,
-          ),
-        );
-      }
-
-      // Ensure LICENSE file exists
-      const created = ensureLicenseFile(absolutePath, resolvedLicense);
-      if (created) {
-        console.log(chalk.dim(`  Created LICENSE file (${resolvedLicense})`));
-      }
-      console.log();
-    }
+    const resolvedLicense = await resolveLicenseStep(absolutePath, options);
 
     // Step 4d: Data provenance
-    if (process.stdin.isTTY && !options.skipValidation && resolvedLicense) {
-      const provenance = await promptForProvenance(resolvedLicense);
-
-      // Update dataset_description.json SourceDatasets field for derived data
-      if (
-        provenance.isDerived &&
-        provenance.sourceDatasets &&
-        provenance.sourceDatasets.length > 0
-      ) {
-        try {
-          const descPath = resolve(absolutePath, "dataset_description.json");
-          if (existsSync(descPath)) {
-            const desc = JSON.parse(readFileSync(descPath, "utf-8")) as Record<string, unknown>;
-            const existingSources = Array.isArray(desc.SourceDatasets) ? desc.SourceDatasets : [];
-            const newSources = provenance.sourceDatasets.map((s) => s.identifier);
-            // Merge without duplicates
-            const merged = Array.from(new Set([...(existingSources as string[]), ...newSources]));
-            desc.SourceDatasets = merged;
-            writeFileSync(descPath, `${JSON.stringify(desc, null, 2)}\n`);
-            console.log(
-              chalk.dim(
-                `  Updated dataset_description.json SourceDatasets (${merged.length} source(s))`,
-              ),
-            );
-          }
-        } catch (srcErr) {
-          console.log(
-            chalk.yellow(`  Warning: Could not update SourceDatasets: ${errorDetail(srcErr)}`),
-          );
-        }
-        console.log();
-      }
-    }
+    await collectProvenance(absolutePath, options, resolvedLicense);
 
     // Check for existing local config (resume scenario)
     const existingConfig = readLocalConfig(absolutePath);
@@ -1018,6 +617,8 @@ Examples:
         public_url: string;
       };
     };
+
+    let spinner: Ora;
 
     // Check if this is a resume (existing local config was read above)
     const isResume = existingConfig !== null;

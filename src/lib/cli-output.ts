@@ -10,6 +10,8 @@
  */
 
 import chalk from "chalk";
+import type { Ora } from "ora";
+import { errorDetail } from "./api.js";
 import { isAuthenticated } from "./config.js";
 
 /**
@@ -23,4 +25,16 @@ export function requireAuth(): void {
     console.log("Run 'nemar auth login' first");
     process.exit(1);
   }
+}
+
+/**
+ * Standard step-failure print: fail the spinner with a short title, then the
+ * indented red detail line. Byte-compatible with the inline
+ * `spinner.fail(title); console.log(chalk.red(\`  \${...}\`))` pattern it
+ * replaces (errorDetail yields .message for Errors, String() otherwise).
+ * Callers keep any extra remediation lines after this call.
+ */
+export function printStepFailure(spinner: Ora, title: string, detail: unknown): void {
+  spinner.fail(title);
+  console.log(chalk.red(`  ${errorDetail(detail)}`));
 }
