@@ -14,10 +14,10 @@
  * policy) so the request/response contract is exercised end-to-end.
  */
 
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from "bun:test";
 import "./setup";
 import {
   PUBLICATION_STEPS,
@@ -57,13 +57,16 @@ describe("stepIndexFor", () => {
   });
 
   test("PUBLICATION_STEPS list is the expected 16 backend steps", () => {
-    // Locks in the contract: the CLI's list must match
-    // `allSteps` in backend/src/routes/admin/publish.ts. Update both together.
+    // Locks in the contract. Since #904 the CLI and the backend orchestrator
+    // both import shared/publication-steps.ts, so this pins the single source
+    // itself — in the TRUE execution order (s3_public_read runs before
+    // repo_public since epic #736; the old hand-mirrored CLI copy had them
+    // swapped).
     expect(PUBLICATION_STEPS).toEqual([
       "ci_check",
       "enrichment_check",
-      "repo_public",
       "s3_public_read",
+      "repo_public",
       "tag_protect",
       "doi_create",
       "update_metadata",

@@ -1954,28 +1954,32 @@ publishCommand
     "after",
     `
 Description:
-  Approve a publication request and run the automated 15-step orchestrator
+  Approve a publication request and run the automated 16-step orchestrator
   to make the dataset publicly accessible with a permanent DOI.
 
   WARNING: This action is PERMANENT. Published datasets cannot be unpublished.
   Once a DOI is assigned, it is permanent and cannot be deleted.
 
-Orchestrator Steps:
+Orchestrator Steps (execution order; shared/publication-steps.ts):
    1. CI Check          - Verify BIDS validation passes, deploy workflows if missing
    2. Enrichment Check  - Verify metadata pipeline has run (warn-only, non-blocking)
-   3. Make Public       - Change GitHub repository visibility to public
-   4. S3 Public Read    - Grant public read access to S3 data
+   3. S3 Public Read    - Grant public read access to S3 data
+   4. Make Public       - Change GitHub repository visibility to public
    5. Tag Protection    - Enable tag protection rules
    6. Create DOI        - Create concept DOI via EZID (or Zenodo if configured)
    7. Update Metadata   - Update dataset metadata from BIDS description
    8. Update README     - Add DOI badge and citation info to README
    9. Create Tag        - Create version tag (e.g., v1.0.0)
   10. Create Release    - Create GitHub release from tag
-  11. Upload to Zenodo  - Upload dataset archive to Zenodo (if Zenodo provider)
+  11. Upload to Zenodo  - Legacy Zenodo upload (no-op under EZID)
   12. Publish DOI       - Make DOI public and findable (permanent, irreversible)
-  13. S3 Lock           - Enable S3 Object Lock (prevents data deletion)
-  14. Generate Archive  - Create downloadable zip archive
-  15. Notify User       - Send publication confirmation email
+  13. Version DOI       - Mint the version DOI for this release
+  14. S3 Lock           - Enable S3 Object Lock (prevents data deletion)
+  15. Sync NEMAR        - Legacy nemar.org sync (no-op, retired)
+  16. Notify User       - Send publication confirmation email
+
+  (Archive zip generation is not an orchestrator step; the version-DOI
+  workflow dispatches it separately.)
 
 Resume Capability:
   If a step fails, the orchestrator saves progress. Use --resume to retry
@@ -2007,19 +2011,19 @@ After Approval:
         ? `Resume publication of ${datasetId}`
         : `Approve and publish ${datasetId}`;
       console.log(chalk.cyan(`\n${action}\n`));
-      console.log("This will run the following 15-step orchestrator:");
+      console.log("This will run the following 16-step orchestrator:");
       console.log("   1. Check CI              9. Create version tag");
       console.log("   2. Enrichment check     10. Create GitHub release");
-      console.log("   3. Make repo public     11. Upload to Zenodo");
-      console.log("   4. S3 public read       12. Publish DOI (irreversible)");
-      console.log("   5. Tag protection       13. S3 Object Lock");
+      console.log("   3. S3 public read       11. Upload to Zenodo (no-op)");
+      console.log("   4. Make repo public     12. Publish DOI (irreversible)");
+      console.log("   5. Tag protection       13. Mint version DOI");
       console.log(
         options.sandbox
-          ? "   6. Create DOI (SANDBOX) 14. Generate archive"
-          : "   6. Create DOI           14. Generate archive",
+          ? "   6. Create DOI (SANDBOX) 14. S3 Object Lock"
+          : "   6. Create DOI           14. S3 Object Lock",
       );
-      console.log("   7. Update metadata      15. Notify user");
-      console.log("   8. Update README");
+      console.log("   7. Update metadata      15. Sync NEMAR (no-op)");
+      console.log("   8. Update README        16. Notify user");
       console.log();
 
       // Sandbox warning

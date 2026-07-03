@@ -5,6 +5,7 @@
  * All methods throw ApiError on failure for consistent error handling.
  */
 
+import { PUBLICATION_STEPS } from "../../shared/publication-steps.js";
 import { getConfig } from "./config.js";
 import { printMaintenanceBanner } from "./maintenance-banner.js";
 import { version } from "./version.js";
@@ -1513,30 +1514,14 @@ export interface PublishProgressInfo {
 }
 
 /**
- * Ordered list of orchestrator step names, mirrored from
- * `backend/src/routes/admin/publish.ts`. Used both for `stepIndex`/`stepTotal`
- * computation in `approvePublication` and to label progress in the CLI.
- *
- * The two lists must stay in sync; backend is the source of truth.
+ * Ordered list of orchestrator step names. Single-sourced from
+ * `shared/publication-steps.ts` — the exact list the backend orchestrator
+ * executes — so the CLI's step labels/indices can no longer drift from the
+ * backend (#904; the previous hand-mirrored copy had steps 3/4 swapped).
+ * Used both for `stepIndex`/`stepTotal` computation in `approvePublication`
+ * and to label progress in the CLI.
  */
-export const PUBLICATION_STEPS = [
-  "ci_check",
-  "enrichment_check",
-  "repo_public",
-  "s3_public_read",
-  "tag_protect",
-  "doi_create",
-  "update_metadata",
-  "update_readme",
-  "create_tag",
-  "create_release",
-  "upload_to_zenodo",
-  "publish_doi",
-  "version_doi",
-  "s3_lock",
-  "sync_nemar",
-  "notify_user",
-] as const;
+export { PUBLICATION_STEPS };
 
 /**
  * Resolve a step name to its 1-based index in `PUBLICATION_STEPS`, or
