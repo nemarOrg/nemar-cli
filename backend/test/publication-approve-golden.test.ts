@@ -50,7 +50,12 @@ let db: Database;
 let app: Hono<{ Bindings: Bindings; Variables: Variables }>;
 let env: Bindings;
 
-async function seed(stepsCompleted: readonly string[]): Promise<void> {
+async function seed(
+  stepsCompleted: readonly string[],
+  opts: { datasetId?: string; githubRepo?: string | null } = {},
+): Promise<void> {
+  const datasetId = opts.datasetId ?? DATASET;
+  const githubRepo = opts.githubRepo === undefined ? `nemarDatasets/${datasetId}` : opts.githubRepo;
   db.run(
     `INSERT INTO users (username, email, password_hash, status, role, email_verified)
      VALUES ('goldadmin', 'goldadmin@example.org', 'x', 'approved', 'admin', 1)`,
@@ -66,12 +71,12 @@ async function seed(stepsCompleted: readonly string[]): Promise<void> {
   );
   db.query(
     `INSERT INTO datasets (dataset_id, name, owner_user_id, github_repo, visibility)
-     VALUES (?, 'Golden Dataset', ?, 'nemarDatasets/${DATASET}', 'private')`,
-  ).run(DATASET, userId.id);
+     VALUES (?, 'Golden Dataset', ?, ?, 'private')`,
+  ).run(datasetId, userId.id, githubRepo);
   db.query(
     `INSERT INTO publication_requests (dataset_id, status, requested_by, requested_at, steps_completed)
      VALUES (?, 'requested', ?, datetime('now'), ?)`,
-  ).run(DATASET, userId.id, JSON.stringify(stepsCompleted));
+  ).run(datasetId, userId.id, JSON.stringify(stepsCompleted));
 }
 
 function approve(body: Record<string, unknown>, id = DATASET): Promise<Response> {
@@ -218,5 +223,48 @@ describe("POST /admin/publish/:id/approve (golden characterization)", () => {
     expect(res.status).toBe(426);
     const body = (await res.json()) as Record<string, unknown>;
     expect(String(body.error)).toContain("Outdated nemar-cli");
+  });
+
+  test("warn-only enrichment_check runs for real (D1-only step) and completes", async () => {
+    // Everything done except enrichment_check + the two no-ops: exercises a
+    // REAL step body (the enrichment D1 read; dataset has no enrichment_json,
+    // which warns to logs but never fails the step) plus the finalize block.
+    const done = ALL_STEPS.filter(
+      (s) => !["enrichment_check", "upload_to_zenodo", "sync_nemar"].includes(s),
+    );
+    await seed(done);
+
+    const res = await approve({ resume: true });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as Record<string, unknown>;
+    expect(body.status).toBe("published");
+    const results = body.step_results as Array<Record<string, unknown>>;
+    expect(results.map((r) => [r.step, r.status])).toEqual([
+      ["enrichment_check", "completed"],
+      ["upload_to_zenodo", "completed"],
+      ["sync_nemar", "completed"],
+    ]);
+    expect(requestRow()?.status).toBe("published");
+  });
+
+  test("pre-loop abort: dataset without a GitHub repo gets 400 before any step", async () => {
+    await seed([], { githubRepo: null });
+    const res = await approve({ resume: false });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as Record<string, unknown>;
+    expect(body.error).toBe("Dataset has no GitHub repository");
+    // The 'approving' transition already happened (it precedes the dataset
+    // guards); no step ran and no finalize fired.
+    const row = requestRow();
+    expect(row?.status).toBe("approving");
+    expect(JSON.parse(row?.steps_completed ?? "[]")).toEqual([]);
+  });
+
+  test("pre-loop abort: xx-prefix sandbox datasets are blocked with 400", async () => {
+    await seed([], { datasetId: "xx098765" });
+    const res = await approve({ resume: false }, "xx098765");
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as Record<string, unknown>;
+    expect(body.error).toBe("Cannot publish sandbox datasets");
   });
 });
