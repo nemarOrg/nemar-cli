@@ -281,10 +281,10 @@ jobs:
 `;
 
   // generate-archive.yml relocated to nemarDatasets/.github/.github/workflows/run-generate-archive.yml
-  // and triggered via repository_dispatch from the Worker (`triggerArchiveGeneration` above
-  // now targets `nemarDatasets/.github` rather than the dataset repo). Phase 3 of epic #601 /
-  // sub-issue #608. Existing dataset repos are cleaned via scripts/strip-per-repo-workflow.ts
-  // --workflow generate-archive.yml.
+  // and triggered via repository_dispatch from the Worker (`triggerArchiveGeneration` in
+  // services/github/dispatch.ts now targets `nemarDatasets/.github` rather than the
+  // dataset repo). Phase 3 of epic #601 / sub-issue #608. Existing dataset repos are
+  // cleaned via scripts/strip-per-repo-workflow.ts --workflow generate-archive.yml.
 
   // llm-enrichment.yml relocated to nemarDatasets/.github/.github/workflows/run-enrichment.yml
   // and triggered via repository_dispatch from POST /webhooks/github. Phase 1 of
