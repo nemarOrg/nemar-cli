@@ -46,6 +46,11 @@ import {
 } from "../../services/github";
 import { getDatasetsToken } from "../../services/github-auth";
 import { generateManifest } from "../../services/manifest";
+import {
+  PUBLICATION_STEPS,
+  type PublicationStep,
+  createProgressRecorder,
+} from "../../services/publication-orchestrator";
 import { errorMessage, readRepoMetadata } from "../../services/repo-metadata";
 import { mirrorReconcileRemovals, resolveRepoCollaborators } from "../../services/repo-spec";
 import { withRetry } from "../../services/retry";
@@ -60,39 +65,6 @@ import { publishDeposition } from "../../services/zenodo";
 import { isCentralManifestWorkflowEnabled, publishEzidVersionDoiViaCentral } from "../webhooks";
 import { getS3Config } from "./shared";
 import type { AdminRouter } from "./shared";
-
-/**
- * Valid publication workflow step names.
- * Steps execute in this order; completed steps are skipped on resume.
- */
-type PublicationStep =
-  | "ci_check"
-  | "enrichment_check"
-  | "repo_public"
-  | "s3_public_read"
-  | "tag_protect"
-  | "doi_create"
-  | "update_metadata"
-  | "update_readme"
-  | "create_tag"
-  | "create_release"
-  | "upload_to_zenodo"
-  | "publish_doi"
-  | "version_doi"
-  | "s3_lock"
-  | "sync_nemar"
-  | "notify_user";
-
-/**
- * Result of a single publication step, included in the API response.
- */
-interface StepResult {
-  step: PublicationStep;
-  status: "completed" | "failed" | "skipped";
-  attempts: number;
-  duration_ms: number;
-  error?: string;
-}
 
 export function registerPublishRoutes(admin: AdminRouter): void {
   // ============================================================================
@@ -303,27 +275,7 @@ export function registerPublishRoutes(admin: AdminRouter): void {
     const stepsCompleted: PublicationStep[] = resume
       ? JSON.parse(request.steps_completed || "[]")
       : [];
-    const allSteps: readonly PublicationStep[] = [
-      "ci_check",
-      "enrichment_check",
-      // Flip S3 public as early as possible (epic #736, Phase 4 / #741): it is the
-      // first mutation after the validation gates, so the bucket-policy change has
-      // the most time to propagate before create_tag fires generate-archive.
-      "s3_public_read",
-      "repo_public",
-      "tag_protect",
-      "doi_create",
-      "update_metadata",
-      "update_readme",
-      "create_tag",
-      "create_release",
-      "upload_to_zenodo",
-      "publish_doi", // Permanent and irreversible!
-      "version_doi",
-      "s3_lock",
-      "sync_nemar",
-      "notify_user",
-    ] as const;
+    const allSteps: readonly PublicationStep[] = PUBLICATION_STEPS;
     const stepsToRun = allSteps.filter((s) => !stepsCompleted.includes(s));
 
     if (stepsToRun.length === 0) {
@@ -394,12 +346,17 @@ export function registerPublishRoutes(admin: AdminRouter): void {
     }
 
     const pat = await getDatasetsToken(c.env);
-    const completed: PublicationStep[] = [...stepsCompleted];
     const requestId = request.id;
-    const stepResults: StepResult[] = [];
 
-    // Track step start time for duration measurement
-    let currentStepStartMs = 0;
+    // Progress recorder: single writer of steps_completed/current_step/
+    // last_error for this run (#904). `completed`/`stepResults` are the
+    // recorder's own in-place-mutated arrays.
+    const { startStep, updateProgress, completed, stepResults } = createProgressRecorder(
+      db,
+      requestId,
+      datasetId,
+      stepsCompleted,
+    );
 
     // Captured at the end of the s3_lock step so the final success response
     // can include the last-batch count. The CLI accumulates `s3_lock_batch_count`
@@ -408,48 +365,6 @@ export function registerPublishRoutes(admin: AdminRouter): void {
     // counter reads short by exactly the last batch. (#284)
     let s3LockFinalTotal: number | undefined;
     let s3LockFinalBatchCount: number | undefined;
-
-    // Helper to set current step before execution. Non-fatal on failure.
-    async function startStep(step: PublicationStep) {
-      currentStepStartMs = Date.now();
-      try {
-        await db
-          .prepare(
-            "UPDATE publication_requests SET current_step = ?, updated_at = datetime('now') WHERE id = ?",
-          )
-          .bind(step, requestId)
-          .run();
-      } catch (dbErr) {
-        console.error(`[publish] Failed to set current_step to ${step}:`, dbErr);
-      }
-    }
-
-    // Helper to update progress in D1. Catches its own errors to avoid
-    // masking the original failure when called inside catch blocks.
-    async function updateProgress(step: PublicationStep, error?: string, attempts = 1) {
-      const duration_ms = currentStepStartMs > 0 ? Date.now() - currentStepStartMs : 0;
-      if (!error) {
-        completed.push(step);
-        stepResults.push({ step, status: "completed", attempts, duration_ms });
-      } else {
-        stepResults.push({ step, status: "failed", attempts, duration_ms, error });
-      }
-      try {
-        await db
-          .prepare(
-            `UPDATE publication_requests
-           SET steps_completed = ?, current_step = ?, last_error = ?, updated_at = datetime('now')
-           WHERE id = ?`,
-          )
-          .bind(JSON.stringify(completed), error ? step : null, error || null, requestId)
-          .run();
-      } catch (dbErr) {
-        console.error(
-          `[publish] CRITICAL: Failed to update progress for step ${step}, dataset ${datasetId}:`,
-          dbErr,
-        );
-      }
-    }
 
     // Step 1: CI Check
     if (stepsToRun.includes("ci_check")) {
