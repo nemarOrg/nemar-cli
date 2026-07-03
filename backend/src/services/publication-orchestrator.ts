@@ -15,11 +15,11 @@ import { PUBLICATION_STEPS, type PublicationStep } from "../../../shared/publica
 import { datasetLandingUrl } from "../../../shared/datacite-constants.js";
 import { auditLogStatement } from "../db/audit-log";
 import { getS3Config } from "../routes/admin/shared";
+import type { AuthUser, Bindings } from "../types/bindings";
 import {
   isCentralManifestWorkflowEnabled,
   publishEzidVersionDoiViaCentral,
-} from "../routes/webhooks";
-import type { AuthUser, Bindings } from "../types/bindings";
+} from "./central-manifest";
 import { type DataCiteEnrichment, nemarMetadataToEnrichment, parseNemarMetadata } from "./datacite";
 import {
   createEzidVersionDoi,
