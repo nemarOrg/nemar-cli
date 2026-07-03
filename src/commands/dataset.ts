@@ -148,6 +148,8 @@ import {
   readUploadProgress,
   writeUploadProgress,
 } from "../lib/upload-progress.js";
+import { reconcileProgressWithDataset } from "../lib/upload/plan.js";
+import { ensureGitignoreHasNemar, parseRepoFullName } from "../lib/upload/transfer.js";
 
 export const datasetCommand = new Command("dataset").description("Dataset management").addHelpText(
   "after",
@@ -1105,22 +1107,16 @@ Examples:
       }
     }
 
-    // Validate progress file matches current dataset (discard stale progress)
-    if (uploadProgress && uploadProgress.dataset_id !== datasetInfo.dataset_id) {
-      console.log(chalk.yellow("  Progress file is for a different dataset; starting fresh."));
-      clearUploadProgress(absolutePath);
-      uploadProgress = null;
-    }
+    uploadProgress = reconcileProgressWithDataset(
+      absolutePath,
+      uploadProgress,
+      datasetInfo.dataset_id,
+    );
 
     // Step 6b: Accept GitHub invitation
     spinner = ora("Accepting GitHub repository invitation...").start();
 
-    // Extract repo full name from github_url (e.g., "https://github.com/nemarDatasets/nm000123")
-    // Validate URL format: must be a valid GitHub URL with owner/repo pattern
-    const repoMatch = datasetInfo.github_url?.match(
-      /github\.com\/([a-zA-Z0-9_.-]+\/[a-zA-Z0-9_.-]+)/,
-    );
-    const repoFullName = repoMatch ? repoMatch[1].replace(/\.git$/, "") : null;
+    const repoFullName = parseRepoFullName(datasetInfo.github_url);
 
     if (!repoFullName) {
       spinner.fail("Invalid GitHub repository URL from backend");
@@ -1192,24 +1188,7 @@ Examples:
       console.log(chalk.dim('  Pushes will go to the "main" branch on GitHub automatically.'));
     }
 
-    // Ensure .nemar/ is gitignored (internal config, not dataset content)
-    try {
-      const gitignorePath = resolve(absolutePath, ".gitignore");
-      let gitignoreContent = "";
-      if (existsSync(gitignorePath)) {
-        gitignoreContent = readFileSync(gitignorePath, "utf-8");
-      }
-      if (!gitignoreContent.includes(".nemar/")) {
-        const newContent = gitignoreContent
-          ? `${gitignoreContent.trimEnd()}\n.nemar/\n`
-          : ".nemar/\n";
-        writeFileSync(gitignorePath, newContent);
-      }
-    } catch (gitignoreErr) {
-      console.log(
-        chalk.yellow(`  Warning: Could not update .gitignore: ${errorDetail(gitignoreErr)}`),
-      );
-    }
+    ensureGitignoreHasNemar(absolutePath);
 
     // Step 8: Configure GitHub remote (auto-detects best auth method)
     spinner = ora("Configuring GitHub remote...").start();
