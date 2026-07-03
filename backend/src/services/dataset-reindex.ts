@@ -326,8 +326,10 @@ export interface EnrichmentRunResult {
 /**
  * Field names that enrichDataset surfaces in a 200 response body when a
  * non-fatal sub-step (commit, D1 cache write, EZID DOI sync, ...) fails.
- * Kept in sync with the EnrichmentSuccessBody spread in enrich-dataset.ts
- * and with the warning-emitting shell loop in services/github.ts. The OpenRouter
+ * Kept in sync with the EnrichmentSuccessBody spread in enrich-dataset.ts.
+ * (The workflow-template shell loop that also consumed these fields left this
+ * repo when enrichment moved to the central nemarDatasets/.github workflow;
+ * the old services/github.ts pointer was already stale.) The OpenRouter
  * call is intentionally not in this list: it's the load-bearing Stage 2,
  * and any failure there aborts the pipeline with a 500 rather than a
  * 200-with-warning.

@@ -16,7 +16,7 @@ import { Database } from "bun:sqlite";
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { buildDatasetFilterClauses } from "../backend/src/routes/datasets";
+import { buildDatasetFilterClauses } from "../backend/src/routes/datasets/catalog";
 
 const M0056 = readFileSync(
   join(import.meta.dir, "..", "backend/src/db/migrations/0056_hed_columns.sql"),
