@@ -34,7 +34,7 @@ export type BlockedBidsAction =
 /**
  * Pure decision: given the latest BIDS validation run, what should happen to a
  * request currently blocked on validation? Mirrors the publish-request logic in
- * `routes/datasets.ts`:
+ * `routes/datasets/publication.ts`:
  *   - no runs yet                 -> still pending, keep blocked
  *   - latest conclusion 'success' -> unblock (back to 'requested')
  *   - latest conclusion 'failure' -> re-block as 'bids_validation_failed'
@@ -150,7 +150,7 @@ export async function sweepBlockedBidsValidationRequests(
 
     try {
       if (action.kind === "unblock") {
-        // Mirror the interactive re-request unblock (routes/datasets.ts): also
+        // Mirror the interactive re-request unblock (routes/datasets/publication.ts): also
         // clear stale prescreen state so a previously-screened request doesn't
         // surface a phantom advisory after the sweep moves it back to
         // 'requested'. Guard on status='blocked' so a concurrent re-request

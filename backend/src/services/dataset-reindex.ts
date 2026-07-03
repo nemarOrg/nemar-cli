@@ -281,6 +281,42 @@ export async function refreshDatasetMetadata(
   };
 }
 
+/**
+ * Background metadata-columns refresh after a version DOI is published.
+ * Non-fatal: the DOI is already minted, this is downstream cleanup. On a
+ * pre-refresh throw (e.g. a transient GitHub auth / tree-fetch failure, before
+ * refreshDatasetMetadata reaches its own metadata_columns_error write) the
+ * error is recorded to D1 so operators don't read a stale "success". (The
+ * legacy nemar.org sync this replaced was removed in epic #837.)
+ *
+ * Moved verbatim from routes/webhooks.ts (#905, epic #902); log strings keep
+ * the historical `[webhook]` prefix. Exported: called from the version-DOI
+ * handlers and the /webhooks/manifest-ready callback.
+ */
+export async function refreshMetadataAfterVersionDoi(
+  env: Bindings,
+  datasetId: string,
+  version?: string,
+): Promise<void> {
+  try {
+    await refreshDatasetMetadata(env, datasetId, version);
+  } catch (err) {
+    const msg = errorMessage(err);
+    console.error(`[webhook] metadata refresh failed for ${datasetId} (non-fatal):`, msg);
+    try {
+      await env.DB.prepare(
+        "UPDATE datasets SET metadata_columns_error = ?, updated_at = datetime('now') WHERE dataset_id = ?",
+      )
+        .bind(`metadata refresh threw before columns write: ${msg}`, datasetId)
+        .run();
+    } catch (d1Err) {
+      console.warn(
+        `[webhook] Failed to record metadata refresh error in D1 for ${datasetId}: ${d1Err}`,
+      );
+    }
+  }
+}
+
 export interface EnrichmentRunResult {
   ok: boolean;
   error?: string;
@@ -290,8 +326,10 @@ export interface EnrichmentRunResult {
 /**
  * Field names that enrichDataset surfaces in a 200 response body when a
  * non-fatal sub-step (commit, D1 cache write, EZID DOI sync, ...) fails.
- * Kept in sync with the EnrichmentSuccessBody spread in enrich-dataset.ts
- * and with the warning-emitting shell loop in services/github.ts. The OpenRouter
+ * Kept in sync with the EnrichmentSuccessBody spread in enrich-dataset.ts.
+ * (The workflow-template shell loop that also consumed these fields left this
+ * repo when enrichment moved to the central nemarDatasets/.github workflow;
+ * the old services/github.ts pointer was already stale.) The OpenRouter
  * call is intentionally not in this list: it's the load-bearing Stage 2,
  * and any failure there aborts the pipeline with a 500 rather than a
  * 200-with-warning.

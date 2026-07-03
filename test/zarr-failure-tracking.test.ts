@@ -14,7 +14,7 @@ import { Database } from "bun:sqlite";
 import { beforeEach, describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { zarrFailureColumns } from "../backend/src/routes/webhooks";
+import { zarrFailureColumns } from "../backend/src/routes/callbacks/zarr-ready";
 
 describe("zarrFailureColumns (#774)", () => {
   test("clean run: no errors -> cleared, hadErrors false", () => {

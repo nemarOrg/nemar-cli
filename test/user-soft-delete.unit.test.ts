@@ -92,7 +92,7 @@ function seed(db: Database) {
   );
 }
 
-// Mirrors the endpoint's tombstone batch (admin.ts). Uses the SHARED mask SQL so
+// Mirrors the endpoint's tombstone batch (routes/admin/users.ts). Uses the SHARED mask SQL so
 // the security-critical statement can't drift from production.
 function tombstone(db: Database, id: number, originalEmail = "real@example.com") {
   db.query(USER_TOMBSTONE_MASK_SQL).run(maskedDeletedEmail(id), id);

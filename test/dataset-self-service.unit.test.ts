@@ -8,7 +8,8 @@
  */
 
 import { describe, expect, test } from "bun:test";
-import { evaluateDraftDeletability, inviteSchema } from "../backend/src/routes/datasets";
+import { inviteSchema } from "../backend/src/routes/datasets/collaborators";
+import { evaluateDraftDeletability } from "../backend/src/routes/datasets/draft-delete";
 
 describe("evaluateDraftDeletability (#575)", () => {
   test("private, no DOI, no active pub request -> deletable", () => {

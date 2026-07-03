@@ -4,7 +4,7 @@
  * Applies the ACTUAL migration 0038 (datasets.zarr_checked_at) against an
  * in-memory SQLite seeded to mirror the managed/sandbox/catalog/private mix, and
  * asserts the sweep's candidate selection + the ready/absent state writes behave
- * exactly like the endpoint (admin.ts POST /admin/datasets/zarr-sweep), including
+ * exactly like the endpoint (routes/admin/datasets-lifecycle.ts POST /admin/datasets/zarr-sweep), including
  * idempotent convergence (an absent dataset is stamped once and never rescanned).
  */
 
@@ -33,7 +33,7 @@ CREATE TABLE datasets (
 );
 `;
 
-// The endpoint's candidate predicate (admin.ts). Kept identical here; the test
+// The endpoint's candidate predicate (routes/admin/datasets-lifecycle.ts). Kept identical here; the test
 // fails loudly if the endpoint scoping ever diverges from this contract.
 const CANDIDATE_SQL = `SELECT dataset_id FROM datasets
    WHERE owner_user_id != ${SYSTEM_USER_ID}

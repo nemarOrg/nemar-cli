@@ -8,7 +8,7 @@
  */
 
 import { describe, expect, test } from "bun:test";
-import { validateEnrichmentRef } from "../backend/src/routes/webhooks";
+import { validateEnrichmentRef } from "../backend/src/routes/callbacks/llm-enrich";
 
 describe("validateEnrichmentRef", () => {
   test("returns null when the field is absent (back-compat)", () => {

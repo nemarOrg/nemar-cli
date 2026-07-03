@@ -13,7 +13,7 @@
  */
 
 import { describe, expect, test } from "bun:test";
-import { isCentralManifestWorkflowEnabled } from "../backend/src/routes/webhooks";
+import { isCentralManifestWorkflowEnabled } from "../backend/src/services/central-manifest";
 import type { Bindings } from "../backend/src/types/bindings";
 
 const asEnv = (val: unknown): Bindings =>

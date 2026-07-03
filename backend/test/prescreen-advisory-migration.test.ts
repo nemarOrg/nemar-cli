@@ -7,7 +7,7 @@
  *   - the re-request reset that clears prescreen_reasons.
  *
  * Real in-memory SQLite via bun:sqlite (no mocks); applies every migration.
- * SQL strings mirror webhooks.ts / datasets.ts.
+ * SQL strings mirror routes/callbacks/prescreen.ts / routes/datasets/publication.ts.
  */
 
 import { Database } from "bun:sqlite";
@@ -122,7 +122,8 @@ describe("migration 0045 + advisory pre-screen SQL", () => {
   });
 });
 
-// Mirrors the prescreen_reasons parse in datasets.ts / the CLIs: malformed or
+// Mirrors the prescreen_reasons parse in routes/datasets/publication.ts / the
+// CLIs: malformed or
 // non-array JSON degrades to [] (the advisory flag still shows), never throws.
 function parseReasons(raw: string | null): string[] {
   let reasons: string[] = [];

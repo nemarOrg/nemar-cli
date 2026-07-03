@@ -16,7 +16,7 @@ import {
   isWorkingTreeDirty,
   readLocalDatasetVersion,
   resolveUpstreamRef,
-} from "../src/lib/git-annex";
+} from "../src/lib/git-annex/repo-state";
 
 function git(cwd: string, ...args: string[]): void {
   const result = spawnSync("git", args, { cwd, encoding: "utf-8" });
@@ -259,10 +259,7 @@ describe("detectImportMarker", () => {
 
       // Commit the marker (simulates a completed import)
       mkdirSync(join(repo, ".nemar"));
-      writeFileSync(
-        join(repo, ".nemar", "metadata.json"),
-        JSON.stringify({ source: "openneuro" }),
-      );
+      writeFileSync(join(repo, ".nemar", "metadata.json"), JSON.stringify({ source: "openneuro" }));
       git(repo, "add", ".nemar/metadata.json");
       git(repo, "commit", "-qm", "Add NEMAR metadata (imported from OpenNeuro ds######)");
 
