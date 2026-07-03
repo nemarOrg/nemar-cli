@@ -19,7 +19,8 @@ import {
 } from "../bids-validator.js";
 import { printStepFailure } from "../cli-output.js";
 import type { Config } from "../config.js";
-import { checkPrerequisites, verifyGitHubAuth } from "../git-annex.js";
+import { verifyGitHubAuth } from "../git-annex/github.js";
+import { checkPrerequisites } from "../git-annex/prereq.js";
 import { FAIL, type Step, ok } from "./types.js";
 
 /** Step 2: Check prerequisites (git-annex, GitHub SSH). */

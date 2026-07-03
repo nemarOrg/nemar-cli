@@ -97,14 +97,13 @@ import {
 } from "../lib/confirm.js";
 import { CLI_LIVE_DATASETS, selectRevalidateTargets } from "../lib/fleet.js";
 import {
-  checkDownloadPrerequisites,
   cloneDataset,
   commitRevert,
   createRevertBranch,
-  getVersionCommit,
-  listDatasetVersions,
   pushBranch,
-} from "../lib/git-annex.js";
+} from "../lib/git-annex/clone-push.js";
+import { checkDownloadPrerequisites } from "../lib/git-annex/prereq.js";
+import { getVersionCommit, listDatasetVersions } from "../lib/git-annex/repo-state.js";
 import { formatBytes } from "../lib/progress.js";
 
 /** Handle common error patterns in admin CLI commands */
@@ -2888,7 +2887,7 @@ adminCommand
       }
 
       // Default: dispatch GitHub Actions workflow on nemarDatasets/.github
-      const { runCommand } = await import("../lib/git-annex.js");
+      const { runCommand } = await import("../lib/git-annex/run-command.js");
 
       const idsStr = ids.join(",");
       console.log(chalk.cyan(`\nDispatching OpenNeuro import workflow for: ${idsStr}\n`));

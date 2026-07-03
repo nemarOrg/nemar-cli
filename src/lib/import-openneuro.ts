@@ -25,19 +25,16 @@ import ora from "ora";
 import { addCi, importDataset, reindexDataset } from "./api/admin.js";
 import { getUserCiStatus } from "./api/datasets.js";
 import { approvePublication, requestPublication } from "./api/publish.js";
+import { cloneDataset, pushToGitHub } from "./git-annex/clone-push.js";
+import { configureGitHubRemote } from "./git-annex/github.js";
+import { ensureLocalMainBranch } from "./git-annex/repo-state.js";
+import { runCommand } from "./git-annex/run-command.js";
 import {
   type S3Credentials,
-  batchSetKeysPresent,
-  cloneDataset,
-  configureGitHubRemote,
   configureS3Remote,
-  ensureLocalMainBranch,
-  getAnnexWhereisAll,
-  getRemoteUuid,
   markInheritedOpenNeuroRemotesIgnored,
-  pushToGitHub,
-  runCommand,
-} from "./git-annex.js";
+} from "./git-annex/s3-remote.js";
+import { batchSetKeysPresent, getAnnexWhereisAll, getRemoteUuid } from "./git-annex/transfer.js";
 import {
   type CopyItem,
   type ImportManifest,

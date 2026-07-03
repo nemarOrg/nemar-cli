@@ -18,7 +18,7 @@ import type { NemarMetadataPayload } from "../api/datasets.js";
 import { ApiError, errorDetail } from "../api/errors.js";
 import { printStepFailure } from "../cli-output.js";
 import { updateLastUpload } from "../dataset-config.js";
-import { pushToGitHub, saveDataset } from "../git-annex.js";
+import { pushToGitHub, saveDataset } from "../git-annex/clone-push.js";
 import {
   type UploadProgress,
   clearUploadProgress,

@@ -17,7 +17,7 @@ import ora from "ora";
 import { getCurrentUser } from "../api/auth.js";
 import { type NemarMetadataPayload, ORCID_REGEX } from "../api/datasets.js";
 import { ApiError, errorDetail } from "../api/errors.js";
-import { collectFileManifest } from "../git-annex.js";
+import { collectFileManifest } from "../git-annex/transfer.js";
 import {
   detectLicense,
   ensureLicenseFile,

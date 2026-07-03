@@ -9,7 +9,7 @@
  */
 
 import { describe, expect, test } from "bun:test";
-import { runCommand } from "../src/lib/git-annex";
+import { runCommand } from "../src/lib/git-annex/run-command";
 
 describe("runCommand unsetEnv (#768)", () => {
   test("deletes the named var so the child sees it as absent", async () => {

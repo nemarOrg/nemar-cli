@@ -78,44 +78,53 @@ import {
   writeLocalConfig,
 } from "../lib/dataset-config.js";
 import {
-  acceptGitHubInvitation,
-  checkDownloadPrerequisites,
-  checkPrerequisites,
-  clearAnnexCredentials,
   cloneDataset,
-  collectFileManifest,
-  configureGitHubRemote,
-  configureLargefiles,
-  configureS3Remote,
-  copyToAnnexRemote,
-  countPendingDownload,
-  detectImportMarker,
-  dropFiles,
-  dropUnusedAnnexObjects,
-  enableS3Remote,
-  ensureGitAnnexInitialized,
-  ensureLocalMainBranch,
-  getAnnexS3Remotes,
-  getCurrentBranch,
-  getDatasetData,
-  getDatasetIdFromRemote,
-  getLocalDatasetInfo,
-  gitAnnexAdd,
-  gitFetchOrigin,
-  gitMergeFastForward,
-  initDataset,
-  isGitAnnexDataset,
-  isWorkingTreeDirty,
   pushBranch,
   pushToGitHub,
+  saveDataset,
+} from "../lib/git-annex/clone-push.js";
+import {
+  acceptGitHubInvitation,
+  configureGitHubRemote,
+  verifyGitHubAuth,
+} from "../lib/git-annex/github.js";
+import {
+  configureLargefiles,
+  ensureGitAnnexInitialized,
+  gitAnnexAdd,
+  initDataset,
+  isGitAnnexDataset,
+} from "../lib/git-annex/init.js";
+import { checkDownloadPrerequisites, checkPrerequisites } from "../lib/git-annex/prereq.js";
+import {
+  detectImportMarker,
+  ensureLocalMainBranch,
+  getCurrentBranch,
+  getDatasetIdFromRemote,
+  getLocalDatasetInfo,
+  gitFetchOrigin,
+  gitMergeFastForward,
+  isWorkingTreeDirty,
   readLocalDatasetVersion,
   readRemoteHeadDatasetVersion,
   resolveUpstreamRef,
-  saveDataset,
+} from "../lib/git-annex/repo-state.js";
+import {
+  clearAnnexCredentials,
+  configureS3Remote,
+  enableS3Remote,
+  getAnnexS3Remotes,
   selectAnnexS3Remote,
   toS3Credentials,
-  verifyGitHubAuth,
-} from "../lib/git-annex.js";
+} from "../lib/git-annex/s3-remote.js";
+import {
+  collectFileManifest,
+  copyToAnnexRemote,
+  countPendingDownload,
+  dropFiles,
+  dropUnusedAnnexObjects,
+  getDatasetData,
+} from "../lib/git-annex/transfer.js";
 import {
   detectLicense,
   ensureLicenseFile,

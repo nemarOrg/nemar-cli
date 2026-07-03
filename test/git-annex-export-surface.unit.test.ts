@@ -1,31 +1,124 @@
 /**
- * Pins the runtime export surface of lib/git-annex across the #902/#908 split
- * (git-annex.ts is decomposed into lib/git-annex/* concern modules and
- * deleted; importers are re-pointed directly at the concern modules -- no
- * barrel).
+ * Pins the runtime export surface of lib/git-annex/* across the #902/#908
+ * split (git-annex.ts was decomposed into lib/git-annex/* concern modules
+ * and deleted; importers point directly at the concern modules -- no barrel).
  *
- * Why runtime keys: test/ is not typechecked, so an export dropped during the
+ * Why runtime keys: test/ is not typechecked, so an export dropped during a
  * move would otherwise only surface as a distant import failure. This test
  * fails loudly and names the missing/extra symbol instead.
+ *
+ * Two layers of pinning:
+ * - Per-module maps pin PLACEMENT (a symbol silently migrating between
+ *   modules breaks importers at runtime even when the union is intact).
+ * - The union of all modules minus INTERNAL_WIRING must equal the pre-split
+ *   monolith surface (MONOLITH_EXPORTS below, captured at #908 commit 1 and
+ *   updated by the declared removals in commits 2-3: the formatBytes
+ *   pass-through re-export and the deprecated createDataladDataset/
+ *   isDataladDataset aliases).
+ *
+ * INTERNAL_WIRING lists symbols exported ONLY so sibling git-annex/* modules
+ * can import them (declared in #908): not part of the CLI-facing surface.
  *
  * Type-only exports (S3RemoteConfig, PrerequisitesResult, LocalDatasetInfo,
  * ...) do not appear as runtime keys; those are covered by `bun run
  * typecheck`.
  *
- * The pinned list was captured from the git-annex.ts monolith as of #908
- * commit 1, BEFORE any code moved. Declared intentional removals land in
- * their own commits and update this list there: the formatBytes pass-through
- * (canonical implementation lives in lib/progress.ts) and the deprecated
- * createDataladDataset/isDataladDataset aliases. When the split lands, this
- * test becomes a per-module map whose union must equal this list plus
- * declared wiring exports. If this test fails after an intentional API
- * change, update the list in the same commit and say so in the commit
- * message.
+ * If this test fails after an intentional API change, update the lists in
+ * the same commit and say so in the commit message.
  */
 
 import { describe, expect, test } from "bun:test";
 
-const EXPECTED_EXPORTS = [
+const MODULE_EXPORTS: Record<string, string[]> = {
+  "run-command": ["runCommand"],
+  prereq: [
+    "checkAWSCredentials",
+    "checkDownloadPrerequisites",
+    "checkGitAnnexInstalled",
+    "checkGitHubSSH",
+    "checkPrerequisites",
+  ],
+  init: [
+    "configureLargefiles",
+    "ensureGitAnnexInitialized",
+    "gitAnnexAdd",
+    "initDataset",
+    "isGitAnnexDataset",
+  ],
+  "s3-remote": [
+    "ANNEX_REMOTE_EXISTS_RE",
+    "NEMAR_S3_REMOTE_NAME",
+    "annexRemoteExists",
+    "awsCredentialEnv",
+    "clearAnnexCredentials",
+    "configureS3Remote",
+    "enableS3Remote",
+    "getAnnexS3Remotes",
+    "initOrEnableSpecialRemote",
+    "markInheritedOpenNeuroRemotesIgnored",
+    "selectAnnexS3Remote",
+    "toS3Credentials",
+  ],
+  github: [
+    "acceptGitHubInvitation",
+    "configureGitHubRemote",
+    "getGitHubToken",
+    "githubTokenCredentialHelper",
+    "resolveGitHubCloneAuth",
+    "verifyGitHubAuth",
+  ],
+  "clone-push": [
+    "cloneDataset",
+    "commitRevert",
+    "createRevertBranch",
+    "isNonFastForwardPush",
+    "pushBranch",
+    "pushToGitHub",
+    "saveDataset",
+  ],
+  transfer: [
+    "batchSetKeysPresent",
+    "collectFileManifest",
+    "copyToAnnexRemote",
+    "countPendingDownload",
+    "dropFiles",
+    "dropUnusedAnnexObjects",
+    "extractWhereisKeyUrl",
+    "getAnnexWhereisAll",
+    "getDatasetData",
+    "getKeyHashDir",
+    "getKeyHashDirs",
+    "getRemoteUuid",
+    "setKeyPresent",
+  ],
+  "repo-state": [
+    "detectImportMarker",
+    "ensureLocalMainBranch",
+    "getCurrentBranch",
+    "getDatasetIdFromRemote",
+    "getDatasetStats",
+    "getLocalDatasetInfo",
+    "getVersionCommit",
+    "gitFetchOrigin",
+    "gitMergeFastForward",
+    "isWorkingTreeDirty",
+    "listDatasetVersions",
+    "readLocalDatasetVersion",
+    "readRemoteHeadDatasetVersion",
+    "resolveUpstreamRef",
+    "switchBranch",
+  ],
+};
+
+/** Exported only for sibling git-annex/* modules; never part of the CLI surface. */
+const INTERNAL_WIRING = ["getGitHubToken"];
+
+/**
+ * The git-annex.ts monolith's runtime surface: captured at #908 commit 1,
+ * minus the declared removals from commits 2-3 (formatBytes pass-through,
+ * createDataladDataset/isDataladDataset aliases).
+ */
+const MONOLITH_EXPORTS = [
   "ANNEX_REMOTE_EXISTS_RE",
   "NEMAR_S3_REMOTE_NAME",
   "acceptGitHubInvitation",
@@ -92,8 +185,16 @@ const EXPECTED_EXPORTS = [
 ];
 
 describe("lib/git-annex export surface", () => {
-  test("runtime exports match the pre-split pin exactly", async () => {
-    const gitAnnex = await import("../src/lib/git-annex");
-    expect(Object.keys(gitAnnex).sort()).toEqual(EXPECTED_EXPORTS);
+  for (const [mod, expected] of Object.entries(MODULE_EXPORTS)) {
+    test(`git-annex/${mod} runtime exports match the pin exactly`, async () => {
+      const m = await import(`../src/lib/git-annex/${mod}.ts`);
+      expect(Object.keys(m).sort()).toEqual(expected);
+    });
+  }
+
+  test("union of module exports equals the monolith surface", () => {
+    const union = new Set(Object.values(MODULE_EXPORTS).flat());
+    for (const w of INTERNAL_WIRING) union.delete(w);
+    expect([...union].sort()).toEqual(MONOLITH_EXPORTS);
   });
 });

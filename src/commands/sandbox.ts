@@ -23,21 +23,20 @@ import {
   YES_OPTION,
   confirm,
 } from "../lib/confirm.js";
+import { pushToGitHub, saveDataset } from "../lib/git-annex/clone-push.js";
 import {
   acceptGitHubInvitation,
-  checkPrerequisites,
-  clearAnnexCredentials,
   configureGitHubRemote,
-  configureLargefiles,
-  configureS3Remote,
-  copyToAnnexRemote,
-  gitAnnexAdd,
-  initDataset,
-  pushToGitHub,
-  saveDataset,
-  toS3Credentials,
   verifyGitHubAuth,
-} from "../lib/git-annex.js";
+} from "../lib/git-annex/github.js";
+import { configureLargefiles, gitAnnexAdd, initDataset } from "../lib/git-annex/init.js";
+import { checkPrerequisites } from "../lib/git-annex/prereq.js";
+import {
+  clearAnnexCredentials,
+  configureS3Remote,
+  toS3Credentials,
+} from "../lib/git-annex/s3-remote.js";
+import { copyToAnnexRemote } from "../lib/git-annex/transfer.js";
 import { formatBytes } from "../lib/progress.js";
 import {
   cleanupSandboxDataset,

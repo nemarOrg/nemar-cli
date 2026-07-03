@@ -19,7 +19,7 @@
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { runCommand } from "./git-annex.js";
+import { runCommand } from "./git-annex/run-command.js";
 
 /** A parsed S3 location. `region` is undefined when the URL didn't encode one. */
 export interface S3Ref {
