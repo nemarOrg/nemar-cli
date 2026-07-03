@@ -10,7 +10,7 @@
 
 import { describe, expect, test } from "bun:test";
 import "./setup";
-import { isZarrTriggerPath, shouldDispatchZarr } from "../backend/src/routes/webhooks";
+import { isZarrTriggerPath, shouldDispatchZarr } from "../backend/src/routes/webhooks/github";
 
 type PushPayload = Parameters<typeof shouldDispatchZarr>[0];
 

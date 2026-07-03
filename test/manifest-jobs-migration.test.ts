@@ -14,7 +14,7 @@
  * acceptance). This file pins the schema contract only.
  *
  * Pairs with `manifest-callback-token.test.ts` (HMAC contract) and the
- * webhook handler integration in `backend/src/routes/webhooks.ts`.
+ * webhook handler integration in `backend/src/routes/callbacks/manifest.ts`.
  */
 
 import { describe, expect, test } from "bun:test";
