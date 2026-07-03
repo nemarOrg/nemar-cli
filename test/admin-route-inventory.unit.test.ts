@@ -18,6 +18,7 @@
  */
 
 import { describe, expect, test } from "bun:test";
+import { adminMiddleware, authMiddleware } from "../backend/src/middleware/auth";
 import { adminRoutes } from "../backend/src/routes/admin";
 
 const EXPECTED_ENTRIES: Record<string, number> = {
@@ -106,5 +107,13 @@ describe("admin route inventory", () => {
 
   test("entry total is pinned", () => {
     expect(adminRoutes.routes.length).toBe(78);
+  });
+
+  // The count pin above can't see a SWAP of the two router-level middleware
+  // entries. Order is load-bearing: authMiddleware resolves the user that
+  // adminMiddleware's role check reads.
+  test("router-level middleware order is pinned (auth before admin)", () => {
+    const star = adminRoutes.routes.filter((r) => r.method === "ALL" && r.path === "/*");
+    expect(star.map((r) => r.handler)).toEqual([authMiddleware, adminMiddleware]);
   });
 });
