@@ -2,9 +2,12 @@
  * Upload pipeline: dataset creation and data-transfer steps.
  *
  * Moved verbatim from the upload action in commands/dataset.ts (#907,
- * epic #902); the only intentional changes are import paths and the
- * step-function wrappers. Steps print their own output and never call
- * process.exit (the command sequencer owns exits).
+ * epic #902); the only intentional changes are import paths, the
+ * step-function wrappers (process.exit -> return FAIL), printStepFailure
+ * at the resume/create/annex-init/github-remote failure sites, and the
+ * uploadProgress -> progress parameter rename in uploadDataToS3. Steps
+ * print their own output and never call process.exit (the command
+ * sequencer owns exits).
  */
 
 import { existsSync, readFileSync, writeFileSync } from "node:fs";

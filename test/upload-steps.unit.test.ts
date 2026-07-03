@@ -11,18 +11,26 @@ import {
   mkdtempSync,
   readFileSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { writeLocalConfig } from "../src/lib/dataset-config";
 import {
   initUploadProgress,
   isStepCompleted,
+  markFileUploaded,
   readUploadProgress,
+  writeUploadProgress,
 } from "../src/lib/upload-progress";
 import { analyzeDataset } from "../src/lib/upload/enrich";
 import { writeNemarMetadata } from "../src/lib/upload/finalize";
-import { reconcileProgressWithDataset, showUploadPlan } from "../src/lib/upload/plan";
+import {
+  prepareUploadProgress,
+  reconcileProgressWithDataset,
+  showUploadPlan,
+} from "../src/lib/upload/plan";
 import { ensureGitignoreHasNemar, parseRepoFullName } from "../src/lib/upload/transfer";
 
 const scratchDirs: string[] = [];
@@ -66,12 +74,123 @@ describe("analyzeDataset", () => {
   });
 });
 
+describe("prepareUploadProgress", () => {
+  const manifest = {
+    files: [
+      { path: "sub-01/eeg/a.edf", size: 100, type: "data" as const },
+      { path: "sub-01/eeg/b.edf", size: 200, type: "data" as const },
+      { path: "dataset_description.json", size: 50, type: "metadata" as const },
+    ],
+    dataFiles: 2,
+    metadataFiles: 1,
+    totalSize: 350,
+  };
+
+  test("fresh dataset: all data files need uploading, no progress", () => {
+    const dir = scratchDir("nemar-prepare-fresh-");
+    const { dataFiles, uploadProgress, filesToUpload } = prepareUploadProgress(dir, manifest, {});
+    expect(dataFiles.map((f) => f.path)).toEqual(["sub-01/eeg/a.edf", "sub-01/eeg/b.edf"]);
+    expect(uploadProgress).toBeNull();
+    expect(filesToUpload).toEqual(dataFiles);
+  });
+
+  test("persisted progress: already-uploaded files are excluded", () => {
+    const dir = scratchDir("nemar-prepare-resume-");
+    const progress = initUploadProgress(dir, "nm000001", [
+      { path: "sub-01/eeg/a.edf", size: 100 },
+      { path: "sub-01/eeg/b.edf", size: 200 },
+    ]);
+    markFileUploaded(progress, "sub-01/eeg/a.edf");
+    writeUploadProgress(dir, progress);
+    const { filesToUpload } = prepareUploadProgress(dir, manifest, {});
+    expect(filesToUpload.map((f) => f.path)).toEqual(["sub-01/eeg/b.edf"]);
+  });
+
+  test("--restart clears persisted progress and uploads everything", () => {
+    const dir = scratchDir("nemar-prepare-restart-");
+    const progress = initUploadProgress(dir, "nm000001", [{ path: "sub-01/eeg/a.edf", size: 100 }]);
+    markFileUploaded(progress, "sub-01/eeg/a.edf");
+    writeUploadProgress(dir, progress);
+    const { uploadProgress, filesToUpload } = prepareUploadProgress(dir, manifest, {
+      restart: true,
+    });
+    expect(uploadProgress).toBeNull();
+    expect(filesToUpload.length).toBe(2);
+    expect(readUploadProgress(dir)).toBeNull();
+  });
+
+  test("QUIRK PIN: stale progress for a DIFFERENT dataset still filters filesToUpload", () => {
+    // Pre-existing behavior preserved by #907 and documented in plan.ts:
+    // filesToUpload is computed from the loaded progress BEFORE
+    // reconcileProgressWithDataset discards a dataset-id mismatch, and is
+    // not recomputed. Real fix tracked for phase 5b; this test pins the
+    // current behavior so the fix is an intentional, visible change.
+    const dir = scratchDir("nemar-prepare-stale-");
+    const stale = initUploadProgress(dir, "nm999999", [{ path: "sub-01/eeg/a.edf", size: 100 }]);
+    markFileUploaded(stale, "sub-01/eeg/a.edf");
+    writeUploadProgress(dir, stale);
+    const { uploadProgress, filesToUpload } = prepareUploadProgress(dir, manifest, {});
+    expect(uploadProgress?.dataset_id).toBe("nm999999");
+    expect(filesToUpload.map((f) => f.path)).toEqual(["sub-01/eeg/b.edf"]);
+    // reconcile then discards the stale progress -- but filesToUpload above
+    // has already lost a.edf; that is the quirk.
+    expect(reconcileProgressWithDataset(dir, uploadProgress, "nm000001")).toBeNull();
+  });
+});
+
+describe("checkUploadPrerequisites", () => {
+  test("missing tools: prints the failure and returns fail (not ok)", () => {
+    // Real subprocess with a PATH containing ONLY bun, so git-annex/gh/ssh
+    // are genuinely absent (works regardless of where CI installs them).
+    // Pins the process.exit(1) -> return FAIL mapping for the failure branch
+    // (#918 review found this branch had zero coverage).
+    const binDir = scratchDir("nemar-prereq-bin-");
+    symlinkSync(Bun.which("bun") ?? "/usr/local/bin/bun", join(binDir, "bun"));
+    const harnessPath = join(scratchDir("nemar-prereq-"), "harness.ts");
+    writeFileSync(
+      harnessPath,
+      `import { checkUploadPrerequisites } from ${JSON.stringify(
+        join(import.meta.dir, "..", "src", "lib", "upload", "preflight.ts"),
+      )};\n` +
+        `const result = await checkUploadPrerequisites();\n` +
+        `console.log("STATUS:" + result.status);\n`,
+    );
+    const proc = Bun.spawnSync([join(binDir, "bun"), harnessPath], {
+      env: { ...process.env, PATH: binDir, NO_COLOR: "1" },
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const out = proc.stdout.toString() + proc.stderr.toString();
+    expect(out).toContain("Prerequisites check failed");
+    expect(out).toContain("STATUS:fail");
+    expect(out).not.toContain("STATUS:ok");
+  });
+});
+
 describe("showUploadPlan", () => {
   test("--dry-run returns STOP after printing the plan", () => {
     const dir = scratchDir("nemar-plan-");
     const manifest = { files: [], dataFiles: 0, metadataFiles: 0, totalSize: 0 };
     const result = showUploadPlan(dir, "Test DS", manifest, { jobs: "4", dryRun: true });
     expect(result.status).toBe("stop");
+  });
+
+  test("resume: returns the existing local config written by a prior upload", () => {
+    const dir = scratchDir("nemar-plan-resume-");
+    writeLocalConfig(dir, {
+      dataset_id: "nm000042",
+      github_url: "https://github.com/nemarDatasets/nm000042",
+      ssh_url: "git@github.com:nemarDatasets/nm000042.git",
+      s3_prefix: "nm000042/",
+      s3_config: { bucket: "nemar", region: "us-east-2", public_url: "https://x" },
+      created_at: new Date().toISOString(),
+    });
+    const manifest = { files: [], dataFiles: 0, metadataFiles: 0, totalSize: 0 };
+    const result = showUploadPlan(dir, "Test DS", manifest, { jobs: "4" });
+    expect(result.status).toBe("ok");
+    if (result.status === "ok") {
+      expect(result.value.existingConfig?.dataset_id).toBe("nm000042");
+    }
   });
 
   test("without --dry-run returns ok with the (null) existing config", () => {

@@ -1,8 +1,9 @@
 /**
  * Shared CLI output helpers (#907, epic #902).
  *
- * requireAuth is the standard command-entry auth guard. It is the one
- * deliberate exception to "lib code never calls process.exit": it exists
+ * requireAuth is the standard command-entry auth guard. It is a deliberate
+ * exception to "lib code never calls process.exit" (import-openneuro.ts
+ * predates that rule; new step modules must follow it): it exists
  * precisely to own the guard-and-exit so command actions don't repeat it
  * (it replaced 14 byte-identical inline copies in commands/dataset.ts).
  * Step functions and other lib code must NOT call process.exit — they

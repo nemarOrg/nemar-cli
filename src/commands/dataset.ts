@@ -24,7 +24,7 @@ import { spawn } from "bun";
 import chalk from "chalk";
 import { Command } from "commander";
 import inquirer from "inquirer";
-import ora, { type Ora } from "ora";
+import ora from "ora";
 import {
   ApiError,
   type Dataset,
