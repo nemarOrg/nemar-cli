@@ -34,8 +34,8 @@ import type { DatasetsRouter } from "./shared";
 /**
  * True when `userId` is a collaborator on the dataset identified by its public
  * string id. Centralizes the owner/admin-bypass authorization check shared by
- * GET /:id, POST /:id/upload-credentials, and POST /:id/download-credentials
- * (#190).
+ * POST /:id/upload-urls, POST /:id/upload-credentials, and
+ * POST /:id/download-credentials (#190).
  */
 async function isDatasetCollaborator(
   db: D1Database,

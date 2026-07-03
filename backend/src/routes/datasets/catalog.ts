@@ -731,7 +731,7 @@ export function registerCatalogRoutes(datasetRoutes: DatasetsRouter): void {
     // admin) — they stay no-store (the handler default). `Vary: Authorization`
     // tells intermediate caches the response key depends on the auth
     // header, so an anonymous cached response is never served to an authed
-    // caller and vice versa. See the list handler at line ~431 for the
+    // caller and vice versa. See the list handler (GET /) above for the
     // matching pattern + the Worker-egress-IP-pooling rationale (#639).
     if (!user) {
       c.header("Cache-Control", "public, max-age=30, s-maxage=300, stale-while-revalidate=600");

@@ -1,7 +1,7 @@
 /**
  * D1 glue for `ensureRepoToSpec` (epic #713, phase #717).
  *
- * `backend/src/services/github.ts` is intentionally D1-free: `ensureRepoToSpec`
+ * `backend/src/services/github/branch-protection.ts` is intentionally D1-free: `ensureRepoToSpec`
  * / `reconcileCollaborators` take the resolved owner + writer GitHub logins.
  * This helper resolves those from the D1 ledger so the routes don't duplicate
  * the query.

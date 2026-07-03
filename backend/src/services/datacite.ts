@@ -1145,7 +1145,7 @@ export function isDatatypeInBidsPosition(parts: string[], i: number): boolean {
  * so `sourcedata/`/`derivatives/`/`code/` folders don't create phantom
  * modalities (#820). Note: when `paths` comes from a truncated git tree the
  * raw `sub-*` paths may be missing entirely; callers that need
- * truncation-immune results use `getBidsTreeStats` (github.ts) instead.
+ * truncation-immune results use `getBidsTreeStats` (services/github/bids-tree.ts) instead.
  */
 export function detectModalitiesFromTree(paths: string[]): string[] {
   const found = new Set<string>();

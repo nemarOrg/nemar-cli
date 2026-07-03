@@ -1552,7 +1552,7 @@ export function registerDatasetLifecycleRoutes(admin: AdminRouter): void {
     // logs). If a future refactor flips skipCallback to false here the
     // assertion fires loudly instead of silently dispatching with empty
     // credentials. Mirrors the comment on `triggerManifestGeneration`'s
-    // `skipCallback` option in services/github.ts.
+    // `skipCallback` option in services/github/dispatch.ts.
     const skipCallback = true;
     const callbackToken = "";
     const callbackUrl = "";
