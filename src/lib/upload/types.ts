@@ -26,3 +26,17 @@ export function ok<T>(value?: T): StepOk<T> {
 
 export const FAIL: StepFail = { status: "fail" };
 export const STOP: StepStop = { status: "stop" };
+
+/** Backend dataset descriptor threaded through the transfer/finalize steps. */
+export interface DatasetInfo {
+  dataset_id: string;
+  ssh_url: string;
+  s3_prefix: string;
+  github_url: string;
+  upload_urls: Record<string, string>;
+  s3_config: {
+    bucket: string;
+    region: string;
+    public_url: string;
+  };
+}

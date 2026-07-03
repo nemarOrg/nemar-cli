@@ -4,12 +4,25 @@
  */
 
 import { afterAll, describe, expect, test } from "bun:test";
-import { cpSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  cpSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { initUploadProgress, readUploadProgress } from "../src/lib/upload-progress";
+import {
+  initUploadProgress,
+  isStepCompleted,
+  readUploadProgress,
+} from "../src/lib/upload-progress";
 import { analyzeDataset } from "../src/lib/upload/enrich";
-import { reconcileProgressWithDataset } from "../src/lib/upload/plan";
+import { writeNemarMetadata } from "../src/lib/upload/finalize";
+import { reconcileProgressWithDataset, showUploadPlan } from "../src/lib/upload/plan";
 import { ensureGitignoreHasNemar, parseRepoFullName } from "../src/lib/upload/transfer";
 
 const scratchDirs: string[] = [];
@@ -50,6 +63,75 @@ describe("analyzeDataset", () => {
     writeFileSync(join(dir, "dataset_description.json"), JSON.stringify(desc, null, 2));
     const { datasetName } = await analyzeDataset(dir, {});
     expect(datasetName).toBe("my-dataset-dir");
+  });
+});
+
+describe("showUploadPlan", () => {
+  test("--dry-run returns STOP after printing the plan", () => {
+    const dir = scratchDir("nemar-plan-");
+    const manifest = { files: [], dataFiles: 0, metadataFiles: 0, totalSize: 0 };
+    const result = showUploadPlan(dir, "Test DS", manifest, { jobs: "4", dryRun: true });
+    expect(result.status).toBe("stop");
+  });
+
+  test("without --dry-run returns ok with the (null) existing config", () => {
+    const dir = scratchDir("nemar-plan-ok-");
+    const manifest = { files: [], dataFiles: 0, metadataFiles: 0, totalSize: 0 };
+    const result = showUploadPlan(dir, "Test DS", manifest, { jobs: "4" });
+    expect(result.status).toBe("ok");
+    if (result.status === "ok") {
+      expect(result.value.existingConfig).toBeNull();
+    }
+  });
+});
+
+describe("writeNemarMetadata", () => {
+  const files = [{ path: "sub-01/eeg/sub-01_task-rest_eeg.edf", size: 1024 }];
+  const enrichment = {
+    version: "2.0" as const,
+    authors: { "A. Author": { orcid: "0000-0002-1825-0097" } },
+  };
+
+  test("writes metadata.json when missing, updates .bidsignore, marks the step", () => {
+    const dir = scratchDir("nemar-meta-write-");
+    const progress = initUploadProgress(dir, "nm000001", files);
+    writeNemarMetadata(dir, enrichment, progress);
+    expect(JSON.parse(readFileSync(join(dir, ".nemar", "metadata.json"), "utf-8")).version).toBe(
+      "2.0",
+    );
+    expect(readFileSync(join(dir, ".bidsignore"), "utf-8")).toContain(".nemar/");
+    expect(isStepCompleted(progress, "metadata_write")).toBe(true);
+  });
+
+  test("does not clobber an existing metadata.json", () => {
+    const dir = scratchDir("nemar-meta-keep-");
+    const progress = initUploadProgress(dir, "nm000001", files);
+    mkdirSync(join(dir, ".nemar"), { recursive: true });
+    writeFileSync(
+      join(dir, ".nemar", "metadata.json"),
+      JSON.stringify({ version: "2.0", marker: "original" }),
+    );
+    writeNemarMetadata(dir, enrichment, progress);
+    expect(JSON.parse(readFileSync(join(dir, ".nemar", "metadata.json"), "utf-8")).marker).toBe(
+      "original",
+    );
+  });
+
+  test("skips entirely when the step is already completed", () => {
+    const dir = scratchDir("nemar-meta-skip-");
+    const progress = initUploadProgress(dir, "nm000001", files);
+    writeNemarMetadata(dir, enrichment, progress); // completes the step
+    rmSync(join(dir, ".bidsignore"));
+    writeNemarMetadata(dir, enrichment, progress); // gated: must not rewrite
+    expect(existsSync(join(dir, ".bidsignore"))).toBe(false);
+  });
+
+  test("no enrichment: still marks the step (matches monolith)", () => {
+    const dir = scratchDir("nemar-meta-none-");
+    const progress = initUploadProgress(dir, "nm000001", files);
+    writeNemarMetadata(dir, undefined, progress);
+    expect(isStepCompleted(progress, "metadata_write")).toBe(true);
+    expect(existsSync(join(dir, ".nemar", "metadata.json"))).toBe(false);
   });
 });
 
