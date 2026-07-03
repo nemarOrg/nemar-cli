@@ -9,11 +9,11 @@
  * route handlers that stay in routes/callbacks/version-doi.ts).
  */
 
+import type { Bindings } from "../types/bindings.js";
 import { createEzidVersionDoi } from "./doi.js";
 import { getDatasetsToken } from "./github-auth.js";
 import { signManifestCallbackToken, triggerManifestGeneration } from "./github.js";
 import { errorMessage, readRepoMetadata } from "./repo-metadata.js";
-import type { Bindings } from "../types/bindings.js";
 
 /**
  * Returns true iff the central manifest workflow path (#557) is enabled

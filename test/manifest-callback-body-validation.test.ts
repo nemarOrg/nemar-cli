@@ -11,7 +11,7 @@
  */
 
 import { describe, expect, test } from "bun:test";
-import { validateManifestCallbackBody } from "../backend/src/routes/webhooks";
+import { validateManifestCallbackBody } from "../backend/src/routes/callbacks/manifest";
 
 const VALID_READY_BODY = {
   dataset_id: "nm099999",
