@@ -95,7 +95,6 @@ import {
   enableS3Remote,
   ensureGitAnnexInitialized,
   ensureLocalMainBranch,
-  formatBytes,
   getAnnexS3Remotes,
   getCurrentBranch,
   getDatasetData,
@@ -133,7 +132,7 @@ import {
   openNeuroDatasetExists,
 } from "../lib/openneuro.js";
 import { checkPrerequisitesForCommand } from "../lib/prerequisites.js";
-import { DownloadProgressTracker } from "../lib/progress.js";
+import { DownloadProgressTracker, formatBytes } from "../lib/progress.js";
 import { promptForProvenance } from "../lib/provenance.js";
 import { bumpVersion, isValidStableVersion, parseVersion } from "../lib/semver.js";
 import type { UploadProgress } from "../lib/upload-progress.js";

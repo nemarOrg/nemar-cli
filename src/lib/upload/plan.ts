@@ -9,7 +9,7 @@
 
 import chalk from "chalk";
 import { type LocalDatasetConfig, readLocalConfig } from "../dataset-config.js";
-import { formatBytes } from "../git-annex.js";
+import { formatBytes } from "../progress.js";
 import {
   type UploadProgress,
   clearUploadProgress,

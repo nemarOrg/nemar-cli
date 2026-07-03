@@ -55,7 +55,6 @@ const EXPECTED_EXPORTS = [
   "ensureGitAnnexInitialized",
   "ensureLocalMainBranch",
   "extractWhereisKeyUrl",
-  "formatBytes",
   "getAnnexS3Remotes",
   "getAnnexWhereisAll",
   "getCurrentBranch",

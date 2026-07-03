@@ -1486,9 +1486,6 @@ export async function getDatasetStats(path: string): Promise<{
   };
 }
 
-// Re-export formatBytes from progress.ts (canonical implementation)
-export { formatBytes } from "./progress.js";
-
 // =============================================================================
 // Download Functions
 // =============================================================================

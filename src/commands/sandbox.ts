@@ -36,7 +36,6 @@ import {
   configureLargefiles,
   configureS3Remote,
   copyToAnnexRemote,
-  formatBytes,
   gitAnnexAdd,
   initDataset,
   pushToGitHub,
@@ -44,6 +43,7 @@ import {
   toS3Credentials,
   verifyGitHubAuth,
 } from "../lib/git-annex.js";
+import { formatBytes } from "../lib/progress.js";
 import {
   cleanupSandboxDataset,
   generateSandboxDataset,

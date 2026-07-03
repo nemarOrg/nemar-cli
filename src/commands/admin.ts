@@ -101,11 +101,11 @@ import {
   cloneDataset,
   commitRevert,
   createRevertBranch,
-  formatBytes,
   getVersionCommit,
   listDatasetVersions,
   pushBranch,
 } from "../lib/git-annex.js";
+import { formatBytes } from "../lib/progress.js";
 
 /** Handle common error patterns in admin CLI commands */
 function handleCommandError(
