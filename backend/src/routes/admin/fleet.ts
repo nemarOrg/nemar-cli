@@ -31,10 +31,7 @@ import {
 } from "../../services/github";
 import { getDatasetsToken } from "../../services/github-auth";
 import { mirrorReconcileRemovals, resolveRepoCollaborators } from "../../services/repo-spec";
-import {
-  markDatasetPrivate,
-  markDatasetPublic,
-} from "../../services/s3";
+import { markDatasetPrivate, markDatasetPublic } from "../../services/s3";
 import { getS3Config } from "./shared";
 import type { AdminRouter } from "./shared";
 
