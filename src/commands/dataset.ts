@@ -68,6 +68,7 @@ import {
   updateValidatorCache,
   validateBidsDataset,
 } from "../lib/bids-validator.js";
+import { requireAuth } from "../lib/cli-output.js";
 import { getConfig, isAuthenticated, isSandboxCompleted } from "../lib/config.js";
 import { NO_DESCRIPTION, YES_DESCRIPTION, YES_OPTION, confirm } from "../lib/confirm.js";
 import {
@@ -475,11 +476,7 @@ Examples:
     const config = getConfig();
 
     // Step 1: Check authentication
-    if (!isAuthenticated()) {
-      console.log(chalk.red("Error: Not authenticated"));
-      console.log("Run 'nemar auth login' first");
-      process.exit(1);
-    }
+    requireAuth();
 
     // Step 1b: Check sandbox training
     if (!isSandboxCompleted()) {
@@ -2708,11 +2705,7 @@ Examples:
         yes?: boolean;
       },
     ) => {
-      if (!isAuthenticated()) {
-        console.log(chalk.red("Error: Not authenticated"));
-        console.log("Run 'nemar auth login' first");
-        process.exit(1);
-      }
+      requireAuth();
 
       await checkPrerequisitesForCommand("release");
 
@@ -3106,11 +3099,7 @@ Examples:
         yes?: boolean;
       },
     ) => {
-      if (!isAuthenticated()) {
-        console.log(chalk.red("Error: Not authenticated"));
-        console.log("Run 'nemar auth login' first");
-        process.exit(1);
-      }
+      requireAuth();
 
       await checkPrerequisitesForCommand("update");
 
@@ -3555,11 +3544,7 @@ Examples:
   $ nemar dataset request-access nm000104`,
   )
   .action(async (datasetId) => {
-    if (!isAuthenticated()) {
-      console.log(chalk.red("Error: Not authenticated"));
-      console.log("Run 'nemar auth login' first");
-      process.exit(1);
-    }
+    requireAuth();
 
     const spinner = ora(`Requesting access to ${datasetId}...`).start();
 
@@ -3614,11 +3599,7 @@ Examples:
   $ nemar dataset invite johndoe nm000104`,
   )
   .action(async (username, datasetId) => {
-    if (!isAuthenticated()) {
-      console.log(chalk.red("Error: Not authenticated"));
-      console.log("Run 'nemar auth login' first");
-      process.exit(1);
-    }
+    requireAuth();
 
     const spinner = ora(`Inviting ${username} to ${datasetId}...`).start();
 
@@ -3654,11 +3635,7 @@ Examples:
   $ nemar dataset collaborators nm000104 --json`,
   )
   .action(async (datasetId, options) => {
-    if (!isAuthenticated()) {
-      console.log(chalk.red("Error: Not authenticated"));
-      console.log("Run 'nemar auth login' first");
-      process.exit(1);
-    }
+    requireAuth();
 
     const spinner = ora(`Fetching collaborators for ${datasetId}...`).start();
 
@@ -3736,11 +3713,7 @@ Examples:
   $ nemar dataset access list nm000104 --status approved`,
   )
   .action(async (datasetId, options) => {
-    if (!isAuthenticated()) {
-      console.log(chalk.red("Error: Not authenticated"));
-      console.log("Run 'nemar auth login' first");
-      process.exit(1);
-    }
+    requireAuth();
 
     const status = options.status as string;
     if (!["pending", "approved", "denied"].includes(status)) {
@@ -3820,11 +3793,7 @@ Examples:
   $ nemar dataset access approve johndoe nm000104`,
   )
   .action(async (username, datasetId) => {
-    if (!isAuthenticated()) {
-      console.log(chalk.red("Error: Not authenticated"));
-      console.log("Run 'nemar auth login' first");
-      process.exit(1);
-    }
+    requireAuth();
 
     const spinner = ora(`Approving ${username} for ${datasetId}...`).start();
     try {
@@ -3857,11 +3826,7 @@ Examples:
   $ nemar dataset access deny johndoe nm000104`,
   )
   .action(async (username, datasetId) => {
-    if (!isAuthenticated()) {
-      console.log(chalk.red("Error: Not authenticated"));
-      console.log("Run 'nemar auth login' first");
-      process.exit(1);
-    }
+    requireAuth();
 
     const spinner = ora(`Denying ${username} for ${datasetId}...`).start();
     try {
@@ -3913,11 +3878,7 @@ Examples:
   $ nemar dataset publish status nm000104     # Check request status`,
   )
   .action(async (datasetId) => {
-    if (!isAuthenticated()) {
-      console.log(chalk.red("Error: Not authenticated"));
-      console.log("Run 'nemar auth login' first");
-      process.exit(1);
-    }
+    requireAuth();
 
     const spinner = ora(`Requesting publication for ${datasetId}...`).start();
 
@@ -3984,11 +3945,7 @@ Examples:
   $ nemar dataset publish status nm000104`,
   )
   .action(async (datasetId) => {
-    if (!isAuthenticated()) {
-      console.log(chalk.red("Error: Not authenticated"));
-      console.log("Run 'nemar auth login' first");
-      process.exit(1);
-    }
+    requireAuth();
 
     const spinner = ora(`Checking publication status for ${datasetId}...`).start();
 
@@ -4118,11 +4075,7 @@ Examples:
   $ nemar dataset publish resend nm000104`,
   )
   .action(async (datasetId) => {
-    if (!isAuthenticated()) {
-      console.log(chalk.red("Error: Not authenticated"));
-      console.log("Run 'nemar auth login' first");
-      process.exit(1);
-    }
+    requireAuth();
 
     const spinner = ora(`Resending notification for ${datasetId}...`).start();
 
@@ -4926,11 +4879,7 @@ Examples:
   $ nemar dataset ci nm000104     # Explicit dataset ID`,
   )
   .action(async (datasetId) => {
-    if (!isAuthenticated()) {
-      console.log(chalk.red("Error: Not authenticated"));
-      console.log("Run 'nemar auth login' first");
-      process.exit(1);
-    }
+    requireAuth();
 
     // Resolve dataset ID
     let resolvedId = datasetId;
@@ -5007,11 +4956,7 @@ Examples:
   $ nemar dataset manifest -d nm000104        # Explicit dataset ID`,
   )
   .action(async (version, options) => {
-    if (!isAuthenticated()) {
-      console.log(chalk.red("Error: Not authenticated"));
-      console.log("Run 'nemar auth login' first");
-      process.exit(1);
-    }
+    requireAuth();
 
     // Resolve dataset ID
     let datasetId = options.dataset;
