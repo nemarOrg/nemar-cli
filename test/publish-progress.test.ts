@@ -106,9 +106,9 @@ interface FakeApproveServer {
 
 /**
  * Bring up a tiny HTTP server that records every approve call and
- * responds with a scripted sequence. Mirrors the response contract from
- * `backend/src/routes/admin/publish.ts` so the real request/response shape is
- * exercised, not a hand-rolled mock.
+ * responds with a scripted sequence. Mirrors the response contract produced
+ * by `backend/src/services/publication-orchestrator.ts` (#904) so the real
+ * request/response shape is exercised, not a hand-rolled mock.
  */
 function startFakeApproveServer(
   datasetId: string,

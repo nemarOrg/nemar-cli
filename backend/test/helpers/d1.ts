@@ -4,7 +4,7 @@
 // database, so tests run against the production schema. `realD1()` is a
 // thin D1-shaped passthrough over that database: not a mock — no canned
 // responses; every result comes from SQLite executing the production SQL.
-// Mirrors the per-file copies in hed-write.test.ts / catalog-dual-write.test.ts
+// Mirrors the per-file copies in hed-write.test.ts and the CLI package test/catalog-dual-write.test.ts
 // (extracting those to this helper is deliberately out of scope for #904).
 
 import { Database } from "bun:sqlite";

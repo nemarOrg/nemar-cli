@@ -1971,7 +1971,7 @@ Orchestrator Steps (execution order; shared/publication-steps.ts):
    8. Update README     - Add DOI badge and citation info to README
    9. Create Tag        - Create version tag (e.g., v1.0.0)
   10. Create Release    - Create GitHub release from tag
-  11. Upload to Zenodo  - Legacy Zenodo upload (no-op under EZID)
+  11. Upload to Zenodo  - Legacy Zenodo upload (disabled; kept for step history)
   12. Publish DOI       - Make DOI public and findable (permanent, irreversible)
   13. Version DOI       - Mint the version DOI for this release
   14. S3 Lock           - Enable S3 Object Lock (prevents data deletion)

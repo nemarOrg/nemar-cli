@@ -1,11 +1,8 @@
 /**
  * Admin routes: publication workflow (list/deny/approve publication requests,
- * S3 Object Lock). The approve handler is the multi-step publication
- * orchestrator (#904 extracts it to a service in the next phase).
- *
- * Moved verbatim from routes/admin.ts in #903 (epic #902); the only
- * intentional changes are import paths, `adminRoutes` -> `admin`, and
- * audit-log INSERTs routed through auditLogStatement().
+ * S3 Object Lock). The approve route is a thin adapter over the 16-step
+ * state machine in services/publication-orchestrator.ts (#904, epic #902);
+ * list/deny/s3-lock handlers moved verbatim from routes/admin.ts in #903.
  */
 
 import { zValidator } from "@hono/zod-validator";

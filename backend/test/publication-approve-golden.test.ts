@@ -19,6 +19,7 @@
 import type { Database } from "bun:sqlite";
 import { beforeEach, describe, expect, test } from "bun:test";
 import { Hono } from "hono";
+import { PUBLICATION_STEPS } from "../../shared/publication-steps.js";
 import { adminRoutes } from "../src/routes/admin";
 import { hashApiKey } from "../src/services/token";
 import type { Bindings, Variables } from "../src/types/bindings";
@@ -27,24 +28,8 @@ import { freshDb, realD1 } from "./helpers/d1";
 const ADMIN_KEY = "golden-admin-key-0123456789abcdef0123456789abcdef";
 const DATASET = "nm098765";
 
-const ALL_STEPS = [
-  "ci_check",
-  "enrichment_check",
-  "s3_public_read",
-  "repo_public",
-  "tag_protect",
-  "doi_create",
-  "update_metadata",
-  "update_readme",
-  "create_tag",
-  "create_release",
-  "upload_to_zenodo",
-  "publish_doi",
-  "version_doi",
-  "s3_lock",
-  "sync_nemar",
-  "notify_user",
-] as const;
+// The canonical order; test/publish-progress.test.ts pins the literal content.
+const ALL_STEPS = PUBLICATION_STEPS;
 
 let db: Database;
 let app: Hono<{ Bindings: Bindings; Variables: Variables }>;
@@ -266,5 +251,48 @@ describe("POST /admin/publish/:id/approve (golden characterization)", () => {
     expect(res.status).toBe(400);
     const body = (await res.json()) as Record<string, unknown>;
     expect(body.error).toBe("Cannot publish sandbox datasets");
+  });
+
+  test("mid-loop abort: doi_create's non-production gate short-circuits the step loop", async () => {
+    // Exercises the runner's `if (out) return out` propagation through a REAL
+    // step body: doi_create aborts on D1 state alone (no concept_doi, not
+    // sandbox, ENVIRONMENT != production) before any external call.
+    const done = ALL_STEPS.filter(
+      (s) => !["doi_create", "upload_to_zenodo", "sync_nemar"].includes(s),
+    );
+    await seed(done);
+
+    const res = await approve({ resume: true });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as Record<string, unknown>;
+    expect(body.error).toBe("Production DOI creation blocked in non-production environment");
+    expect(body.step).toBe("doi_create");
+    expect(body.steps_completed).toEqual([...done]);
+
+    // The abort left the request mid-flight: 'approving', current_step parked
+    // on the failed step, failed step NOT appended to steps_completed.
+    const row = requestRow();
+    expect(row?.status).toBe("approving");
+    expect(row?.current_step).toBe("doi_create");
+    expect(row?.last_error).toBe("Production DOI blocked in non-production");
+    expect(JSON.parse(row?.steps_completed ?? "[]")).toEqual([...done]);
+  });
+
+  test("skip_ci_check completes ci_check without any CI probe", async () => {
+    const done = ALL_STEPS.filter(
+      (s) => !["ci_check", "upload_to_zenodo", "sync_nemar"].includes(s),
+    );
+    await seed(done);
+
+    const res = await approve({ resume: true, skip_ci_check: true });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as Record<string, unknown>;
+    expect(body.status).toBe("published");
+    const results = body.step_results as Array<Record<string, unknown>>;
+    expect(results.map((r) => [r.step, r.status])).toEqual([
+      ["ci_check", "completed"],
+      ["upload_to_zenodo", "completed"],
+      ["sync_nemar", "completed"],
+    ]);
   });
 });

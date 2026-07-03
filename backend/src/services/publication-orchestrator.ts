@@ -161,36 +161,34 @@ export function createProgressRecorder(
  * call shape as Hono's) so moved bodies stay verbatim; serialization happens
  * once at the route boundary, which is safe because every outcome is either
  * returned immediately or discarded.
+ *
+ * The discriminant is a unique symbol, not a string key: several helpers
+ * return `parsed-JSON | RespondOutcome` unions where the JSON side is
+ * dataset-owner-controlled (dataset_description.json), and a symbol cannot
+ * be forged by JSON.parse — matching the unforgeability the pre-extraction
+ * `instanceof Response` checks had.
  */
+const RESPOND: unique symbol = Symbol("respond");
+
 export interface RespondOutcome {
-  kind: "respond";
+  [RESPOND]: true;
   body: unknown;
   status?: number;
 }
 
+export function makeRespond(body: unknown, status?: number): RespondOutcome {
+  return { [RESPOND]: true, body, status };
+}
+
 export function isRespond(v: unknown): v is RespondOutcome {
-  return typeof v === "object" && v !== null && (v as { kind?: string }).kind === "respond";
+  return typeof v === "object" && v !== null && RESPOND in v;
 }
 /**
  * POST /admin/publish/:id/approve - Approve and run publication orchestrator
  *
- * Steps:
- *  1. ci_check - Verify CI exists and is passing (deploy if missing)
- *  2. s3_public_read - Grant public read by removing the dataset's private
- *      carve-out from the bucket policy (see services/bucket-policy.ts). Runs
- *      first among the mutations (epic #736, Phase 4) for propagation lead time.
- *  3. repo_public - Make repository public
- *  4. tag_protect - Apply tag protection rules (prevent version tag deletion)
- *  5. doi_create - Create concept DOI if not exists
- *  6. update_metadata - Update dataset_description.json with DOI
- *  7. update_readme - Generate/update README with dataset info
- *  8. create_tag - Create git tag for the version
- *  9. create_release - Create GitHub release from tag
- * 10. upload_to_zenodo - Upload release archive to Zenodo
- * 11. publish_doi - Publish the Zenodo DOI (permanent and irreversible!)
- * 12. s3_lock - Apply S3 Object Lock (Governance mode)
- * 13. sync_nemar - Disabled no-op (legacy nemar.org sync retired, #837)
- * 14. notify_user - Send publication confirmation email
+ * The step inventory and execution order live in PUBLICATION_STEPS
+ * (shared/publication-steps.ts); a hand-written enumeration here had drifted
+ * to 14 misnumbered entries — the drift class #904 removes.
  *
  * (Archive zip generation is NOT an orchestrator step -- the central
  * run-version-doi.yml workflow dispatches generate-archive after the version
@@ -289,7 +287,15 @@ export interface ApproveStepContext {
   notifyUserWarning: string | undefined;
 }
 
-function createApproveHelpers(c: ApproveStepContext): ApproveHelpers {
+function createApproveHelpers(
+  // Narrowed to what the helpers actually read: makes the one construction-
+  // time circularity (helpers close over `c` before c.helpers exists)
+  // explicit and keeps them honest about their dependencies.
+  c: Pick<
+    ApproveStepContext,
+    "db" | "datasetId" | "repoName" | "pat" | "recorder" | "json" | "env"
+  >,
+): ApproveHelpers {
   const db = c.db;
   const datasetId = c.datasetId;
   const repoName = c.repoName;
@@ -790,7 +796,7 @@ async function stepDoiCreate(c: ApproveStepContext): Promise<RespondOutcome | un
   const stepResults = c.recorder.stepResults;
   const readDatasetDescription = c.helpers.readDatasetDescription;
 
-  // Step 5: Create concept DOI (if not exists)
+  // Step 6: Create concept DOI (if not exists)
   if (stepsToRun.includes("doi_create")) {
     try {
       await startStep("doi_create");
@@ -1619,7 +1625,7 @@ async function stepS3Lock(c: ApproveStepContext): Promise<RespondOutcome | undef
   const completed = c.recorder.completed;
   const stepResults = c.recorder.stepResults;
 
-  // Step 12: S3 Object Lock — streamed via S3 ListObjectsV2 continuation
+  // Step 14: S3 Object Lock — streamed via S3 ListObjectsV2 continuation
   // tokens. Each invocation issues exactly one LIST page (capped to
   // batchSize keys via max-keys) plus up to batchSize PutObjectRetention
   // calls — bounded subrequest cost regardless of dataset size. The CLI
@@ -1739,7 +1745,7 @@ async function stepSyncNemar(c: ApproveStepContext): Promise<RespondOutcome | un
   const stepsToRun = c.stepsToRun;
   const updateProgress = c.recorder.updateProgress;
 
-  // Step 14: nemar.org datapipeline sync — disabled (epic #837 retired the legacy
+  // Step 15: nemar.org datapipeline sync — disabled (epic #837 retired the legacy
   // dataexplorer coupling). Kept in allSteps + stepsToRun so existing
   // publication_requests step records stay valid; the step is now a logged no-op
   // (mirrors the disabled upload_to_zenodo step above).
@@ -1760,7 +1766,7 @@ async function stepNotifyUser(c: ApproveStepContext): Promise<RespondOutcome | u
   const startStep = c.recorder.startStep;
   const updateProgress = c.recorder.updateProgress;
 
-  // Step 15: Notify user (non-fatal — mirrors sync_nemar pattern)
+  // Step 16: Notify user (non-fatal — mirrors sync_nemar pattern)
   if (stepsToRun.includes("notify_user")) {
     try {
       await startStep("notify_user");
@@ -1807,27 +1813,32 @@ async function stepNotifyUser(c: ApproveStepContext): Promise<RespondOutcome | u
   return undefined;
 }
 
-/** Ordered step functions; index-aligned with PUBLICATION_STEPS. */
-const STEP_FUNCTIONS: ReadonlyArray<
-  (c: ApproveStepContext) => Promise<RespondOutcome | undefined>
-> = [
-  stepCiCheck,
-  stepEnrichmentCheck,
-  stepS3PublicRead,
-  stepRepoPublic,
-  stepTagProtect,
-  stepDoiCreate,
-  stepUpdateMetadata,
-  stepUpdateReadme,
-  stepCreateTag,
-  stepCreateRelease,
-  stepUploadToZenodo,
-  stepPublishDoi,
-  stepVersionDoi,
-  stepS3Lock,
-  stepSyncNemar,
-  stepNotifyUser,
-];
+type StepFn = (c: ApproveStepContext) => Promise<RespondOutcome | undefined>;
+
+/**
+ * Step implementations keyed by step name. Execution order is driven by
+ * PUBLICATION_STEPS (the runner iterates it directly), so the shared list is
+ * the single source of both documented and actual order; Record<PublicationStep,
+ * StepFn> makes a missing or extra key a compile error.
+ */
+const STEP_FUNCTIONS: Record<PublicationStep, StepFn> = {
+  ci_check: stepCiCheck,
+  enrichment_check: stepEnrichmentCheck,
+  s3_public_read: stepS3PublicRead,
+  repo_public: stepRepoPublic,
+  tag_protect: stepTagProtect,
+  doi_create: stepDoiCreate,
+  update_metadata: stepUpdateMetadata,
+  update_readme: stepUpdateReadme,
+  create_tag: stepCreateTag,
+  create_release: stepCreateRelease,
+  upload_to_zenodo: stepUploadToZenodo,
+  publish_doi: stepPublishDoi,
+  version_doi: stepVersionDoi,
+  s3_lock: stepS3Lock,
+  sync_nemar: stepSyncNemar,
+  notify_user: stepNotifyUser,
+};
 
 export interface ApproveRunArgs {
   db: D1Database;
@@ -1851,11 +1862,7 @@ export async function runPublicationApproval(args: ApproveRunArgs): Promise<Resp
     env,
     db,
     executionCtx: { waitUntil },
-    json: (rbody: unknown, status?: number): RespondOutcome => ({
-      kind: "respond",
-      body: rbody,
-      status,
-    }),
+    json: makeRespond,
     datasetId,
     adminUser,
     body,
@@ -1985,8 +1992,8 @@ export async function runPublicationApproval(args: ApproveRunArgs): Promise<Resp
   c.recorder = recorder;
   c.helpers = createApproveHelpers(c);
 
-  for (const step of STEP_FUNCTIONS) {
-    const out = await step(c);
+  for (const step of PUBLICATION_STEPS) {
+    const out = await STEP_FUNCTIONS[step](c);
     if (out) return out;
   }
   // Final consistency check: ensure dataset visibility matches GitHub state
