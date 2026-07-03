@@ -16,7 +16,6 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { spawn } from "bun";
 import { requestUploadCredentials, resetTestDataset } from "./api.js";
 import {
   clearAnnexCredentials,
@@ -29,6 +28,7 @@ import {
   gitAnnexAdd,
   initDataset,
   pushToGitHub,
+  runCommand,
   saveDataset,
   toS3Credentials,
 } from "./git-annex.js";
@@ -83,23 +83,6 @@ async function runStepsSequentially(
     if (!step.passed) break;
   }
   return steps;
-}
-
-async function runCommand(
-  cmd: string[],
-  options: { cwd?: string; env?: Record<string, string> } = {},
-): Promise<{ stdout: string; stderr: string; exitCode: number }> {
-  const proc = spawn({
-    cmd,
-    cwd: options.cwd,
-    stdout: "pipe",
-    stderr: "pipe",
-    env: { ...process.env, ...options.env },
-  });
-  const stdout = await new Response(proc.stdout).text();
-  const stderr = await new Response(proc.stderr).text();
-  const exitCode = await proc.exited;
-  return { stdout, stderr, exitCode };
 }
 
 function assertOk(result: { success: boolean; error?: string }, msg: string) {
