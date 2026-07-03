@@ -1514,7 +1514,7 @@ export interface PublishProgressInfo {
 
 /**
  * Ordered list of orchestrator step names, mirrored from
- * `backend/src/routes/admin.ts`. Used both for `stepIndex`/`stepTotal`
+ * `backend/src/routes/admin/publish.ts`. Used both for `stepIndex`/`stepTotal`
  * computation in `approvePublication` and to label progress in the CLI.
  *
  * The two lists must stay in sync; backend is the source of truth.

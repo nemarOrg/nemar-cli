@@ -58,7 +58,7 @@ describe("stepIndexFor", () => {
 
   test("PUBLICATION_STEPS list is the expected 16 backend steps", () => {
     // Locks in the contract: the CLI's list must match
-    // `allSteps` in backend/src/routes/admin.ts. Update both together.
+    // `allSteps` in backend/src/routes/admin/publish.ts. Update both together.
     expect(PUBLICATION_STEPS).toEqual([
       "ci_check",
       "enrichment_check",
@@ -104,7 +104,7 @@ interface FakeApproveServer {
 /**
  * Bring up a tiny HTTP server that records every approve call and
  * responds with a scripted sequence. Mirrors the response contract from
- * `backend/src/routes/admin.ts` so the real request/response shape is
+ * `backend/src/routes/admin/publish.ts` so the real request/response shape is
  * exercised, not a hand-rolled mock.
  */
 function startFakeApproveServer(

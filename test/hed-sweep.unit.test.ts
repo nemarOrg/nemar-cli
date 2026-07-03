@@ -4,7 +4,7 @@
  * datasets + has_hed / hed_version on dataset_versions) against an in-memory
  * SQLite seeded to mirror the managed/catalog/sandbox/modality mix, and asserts
  * the sweep's candidate selection + direct column write behave exactly like the
- * endpoint (admin.ts POST /admin/datasets/hed-sweep).
+ * endpoint (routes/admin/datasets-lifecycle.ts POST /admin/datasets/hed-sweep).
  *
  * The defining difference from channel-montage-sweep: HED has NO modality filter,
  * so meg-only and no-modality managed datasets ARE candidates.
@@ -37,7 +37,7 @@ CREATE TABLE dataset_versions (
 );
 `;
 
-// The endpoint's candidate predicate (admin.ts), incl. the latest_version
+// The endpoint's candidate predicate (routes/admin/datasets-lifecycle.ts), incl. the latest_version
 // subquery. Kept identical here; the test fails loudly if the endpoint scoping
 // ever diverges. NOTE: no `modalities LIKE` clause -- HED is modality-agnostic.
 const CANDIDATE_SQL = `SELECT d.dataset_id, d.github_repo,
@@ -99,7 +99,7 @@ function applyVersionProbe(
   ).run(hasHed, hedVersion, id, version);
 }
 
-// The endpoint's `remaining` count predicate (admin.ts) -- identical scoping to
+// The endpoint's `remaining` count predicate (routes/admin/datasets-lifecycle.ts) -- identical scoping to
 // CANDIDATE_SQL minus the latest_version subquery. Drift here would break the CLI
 // loop's termination, so it is pinned alongside the candidate contract.
 const REMAINING_SQL = `SELECT COUNT(*) AS n FROM datasets

@@ -4,7 +4,7 @@
  * (channel_montage_checked_at) against an in-memory SQLite seeded to mirror the
  * managed/catalog/sandbox/non-eeg mix, and asserts the sweep's candidate selection
  * and its direct column write (which must NOT bump updated_at) behave exactly like
- * the endpoint (admin.ts POST /admin/datasets/channel-montage-sweep).
+ * the endpoint (routes/admin/datasets-lifecycle.ts POST /admin/datasets/channel-montage-sweep).
  */
 
 import { Database } from "bun:sqlite";
@@ -27,7 +27,7 @@ CREATE TABLE datasets (
 );
 `;
 
-// The endpoint's candidate predicate (admin.ts). Kept identical here; the test
+// The endpoint's candidate predicate (routes/admin/datasets-lifecycle.ts). Kept identical here; the test
 // fails loudly if the endpoint scoping ever diverges from this contract.
 const CANDIDATE_SQL = `SELECT dataset_id, github_repo FROM datasets
    WHERE github_repo IS NOT NULL
@@ -122,7 +122,7 @@ describe("channel-montage backfill sweep", () => {
     applyProbe(db, "nm000300", 20, "biosemi"); // a now-known-wrong classification
     applyProbe(db, "on000301", 64, "10-10");
     expect(candidates(db)).not.toContain("nm000300");
-    // The endpoint's reset branch (admin.ts).
+    // The endpoint's reset branch (routes/admin/datasets-lifecycle.ts).
     const reset = db
       .query(
         `UPDATE datasets

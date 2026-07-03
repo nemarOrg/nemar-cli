@@ -1,0 +1,1581 @@
+/**
+ * Admin routes: dataset lifecycle operations — backfill sweeps (archive,
+ * zarr, channel-montage, HED), manifest generation/dispatch and coverage,
+ * doctor scan/fix, dataset reset/delete/bulk-delete, metadata reindex, and
+ * Vectorize re-embedding.
+ *
+ * Moved verbatim from routes/admin.ts in #903 (epic #902); the only
+ * intentional changes are import paths, `adminRoutes` -> `admin`, and
+ * audit-log INSERTs routed through auditLogStatement().
+ */
+
+import { zValidator } from "@hono/zod-validator";
+import { z } from "zod";
+
+import { auditLogStatement } from "../../db/audit-log";
+import { SYSTEM_USER_ID } from "../../lib/constants";
+import { shouldSkipArchive } from "../../services/archive-policy";
+import { writeVersionHed } from "../../services/dataset-metadata-columns";
+import {
+  DatasetReindexError,
+  type ReindexFilter,
+  buildReindexFilterQuery,
+  refreshDatasetMetadata,
+  runEnrichmentForDataset,
+} from "../../services/dataset-reindex";
+import { reembedDatasetVector } from "../../services/dataset-search";
+import { deleteDatasetCascade } from "../../services/deletion";
+import { DOCTOR_CHECKS, getCheck, listChecks } from "../../services/doctor/registry";
+import type { CheckContext, Finding } from "../../services/doctor/types";
+import {
+  addCollaborator,
+  createRepository,
+  deleteRepository,
+  getBidsTreeStats,
+  triggerManifestGeneration,
+} from "../../services/github";
+import { getDatasetsToken } from "../../services/github-auth";
+import { generateManifest } from "../../services/manifest";
+import { buildCoverageReport } from "../../services/manifest-coverage";
+import { errorMessage } from "../../services/repo-metadata";
+import {
+  deleteDatasetObjects,
+  getArchiveSize,
+  getManifest,
+  getZarrIndex,
+  uploadManifest,
+} from "../../services/s3";
+import { hasRole } from "../../types/bindings";
+import { getS3Config } from "./shared";
+import type { AdminRouter } from "./shared";
+
+export function registerDatasetLifecycleRoutes(admin: AdminRouter): void {
+  /**
+   * POST /admin/datasets/archive-sweep?limit=N — one-time/periodic backfill that
+   * seeds the archive_status / archive_size columns (migration 0036) from S3 for
+   * the observability dashboard (epic #695). Going-forward writes land via
+   * /webhooks/archive-ready; this seeds historical archives that predate it.
+   *
+   * Bounded per invocation (default 50, max 200) to stay under the Worker
+   * subrequest cap — getArchiveSize LISTs `<id>/archives/` once per dataset. Run
+   * repeatedly until `remaining` reaches 0. Idempotent: only rows never checked
+   * (archive_checked_at IS NULL) are candidates, so a re-run picks up where it
+   * left off.
+   */
+  admin.post("/datasets/archive-sweep", async (c) => {
+    const db = c.env.DB;
+    const limitRaw = Number.parseInt(c.req.query("limit") || "50", 10);
+    const limit = Number.isFinite(limitRaw) ? Math.min(Math.max(limitRaw, 1), 200) : 50;
+
+    // Candidates: real (non-catalog), public, non-sandbox datasets we have never
+    // checked for an archive. Public-only because archives are a published-data
+    // concern and the data-plane download is public-only (loadPublishedDataset).
+    // A bare throw here (e.g. migration 0036 not yet applied) would surface a
+    // contextless 500, so handle it explicitly.
+    let candidates: { dataset_id: string; file_size: number | null; total_files: number | null }[];
+    try {
+      const candidateRows = await db
+        .prepare(
+          // file_size/total_files (migration 0020) let us mark an oversized dataset
+          // with no archive as 'skipped' (#752) instead of just 'absent'.
+          `SELECT dataset_id, file_size, total_files FROM datasets
+         WHERE owner_user_id != ${SYSTEM_USER_ID}
+           AND (is_sandbox = 0 OR is_sandbox IS NULL)
+           AND visibility = 'public'
+           AND archive_checked_at IS NULL
+         ORDER BY dataset_id
+         LIMIT ?`,
+        )
+        .bind(limit)
+        .all<{ dataset_id: string; file_size: number | null; total_files: number | null }>();
+      candidates = candidateRows.results ?? [];
+    } catch (err) {
+      console.error("[archive-sweep] candidate query failed:", err);
+      return c.json(
+        { error: "Failed to query sweep candidates (is migration 0036 applied?)" },
+        500,
+      );
+    }
+
+    const s3 = getS3Config(c.env);
+    let ready = 0;
+    let absent = 0;
+    let skipped = 0;
+    const errors: { dataset_id: string; error: string }[] = [];
+
+    for (const { dataset_id, file_size, total_files } of candidates) {
+      // Separate try/catch per phase so an error is attributed to the operation
+      // that failed (S3 LIST vs D1 write), not lumped together.
+      let size: number;
+      try {
+        size = await getArchiveSize(s3, dataset_id);
+      } catch (err) {
+        errors.push({
+          dataset_id,
+          error: `s3: ${err instanceof Error ? err.message : String(err)}`,
+        });
+        continue;
+      }
+      try {
+        if (size > 0) {
+          await db
+            .prepare(
+              // Clear any stale archive_skip_reason: a real zip exists (#752).
+              "UPDATE datasets SET archive_status = 'ready', archive_size = ?, archive_checked_at = datetime('now'), archive_skip_reason = NULL WHERE dataset_id = ?",
+            )
+            .bind(size, dataset_id)
+            .run();
+          ready++;
+        } else {
+          // Checked, no archive on S3. If the dataset is over the size policy
+          // (#752), record WHY no zip exists (archive_skip_reason) so the UI shows
+          // the direct-download recipe instead of "missing archive". Otherwise it's
+          // genuinely absent: stamp checked_at, leave archive_status NULL.
+          const decision = shouldSkipArchive({ totalBytes: file_size, totalFiles: total_files });
+          if (decision.skip) {
+            await db
+              .prepare(
+                "UPDATE datasets SET archive_skip_reason = ?, archive_checked_at = datetime('now') WHERE dataset_id = ?",
+              )
+              .bind(decision.reason ?? "archive skipped (size policy)", dataset_id)
+              .run();
+            skipped++;
+          } else {
+            await db
+              .prepare(
+                "UPDATE datasets SET archive_checked_at = datetime('now') WHERE dataset_id = ?",
+              )
+              .bind(dataset_id)
+              .run();
+            absent++;
+          }
+        }
+      } catch (err) {
+        // S3 confirmed the size; only the D1 write failed. Note the branch (ready
+        // vs skip/absent) + size so a re-run's duplicate entry is explicable and a
+        // dropped archive_skip_reason write is attributable, not masked as "ready".
+        errors.push({
+          dataset_id,
+          error: `d1 write [${size > 0 ? "ready" : "skip/absent"}] (s3 size=${size}): ${err instanceof Error ? err.message : String(err)}`,
+        });
+      }
+    }
+
+    const remainingRow = await db
+      .prepare(
+        `SELECT COUNT(*) as n FROM datasets
+       WHERE owner_user_id != ${SYSTEM_USER_ID}
+         AND (is_sandbox = 0 OR is_sandbox IS NULL)
+         AND visibility = 'public'
+         AND archive_checked_at IS NULL`,
+      )
+      .first<{ n: number }>()
+      .catch((err) => {
+        console.error("[archive-sweep] remaining count failed:", err);
+        return null;
+      });
+
+    // ok=false when any candidate errored so a scripted caller can gate on it
+    // instead of seeing a 200 while nothing was written.
+    if (candidates.length > 0 && errors.length === candidates.length) {
+      console.error(
+        `[archive-sweep] all ${candidates.length} candidates failed; first: ${errors[0]?.error}`,
+      );
+    }
+    return c.json({
+      ok: errors.length === 0,
+      checked: candidates.length,
+      ready,
+      absent,
+      skipped,
+      errors,
+      remaining: remainingRow?.n ?? null,
+    });
+  });
+
+  /**
+   * POST /admin/datasets/zarr-sweep?limit=N — one-time/periodic backfill that
+   * reconciles the datasets.zarr_status column (migration 0035) from S3 truth for
+   * the observability dashboard (epic #695). The Hallu backfill cron wrote zarr
+   * stores to S3 but never POSTed /webhooks/zarr-ready, so ~213 already-converted
+   * public datasets sit at zarr_status NULL while the viewer streams them fine.
+   * This is the zarr analogue of /datasets/archive-sweep; the going-forward fix is
+   * a /webhooks/zarr-ready POST from the Hallu driver.
+   *
+   * Bounded per invocation (default 50, max 200): getZarrIndex does ONE signed GET
+   * of `<id>/zarr/index.json` per dataset (cheaper than a LIST). Idempotent via
+   * the zarr_checked_at column (migration 0038): only rows never confirmed by the
+   * webhook AND never checked by the sweep are candidates, so an absent-zarr
+   * dataset is stamped once and never rescanned. Run until `remaining` reaches 0.
+   */
+  admin.post("/datasets/zarr-sweep", async (c) => {
+    const db = c.env.DB;
+    const limitRaw = Number.parseInt(c.req.query("limit") || "50", 10);
+    const limit = Number.isFinite(limitRaw) ? Math.min(Math.max(limitRaw, 1), 200) : 50;
+
+    // Candidates: real (non-catalog), public, non-sandbox datasets whose zarr
+    // state is still unknown — neither the webhook (zarr_status) nor a prior sweep
+    // (zarr_checked_at) has touched them. Public-only because zarr.nemar.org only
+    // serves public datasets (zarr-data.ts). Mirrors archive-sweep's candidacy.
+    let candidates: { dataset_id: string }[];
+    try {
+      const candidateRows = await db
+        .prepare(
+          `SELECT dataset_id FROM datasets
+         WHERE owner_user_id != ${SYSTEM_USER_ID}
+           AND (is_sandbox = 0 OR is_sandbox IS NULL)
+           AND visibility = 'public'
+           AND zarr_status IS NULL
+           AND zarr_checked_at IS NULL
+         ORDER BY dataset_id
+         LIMIT ?`,
+        )
+        .bind(limit)
+        .all<{ dataset_id: string }>();
+      candidates = candidateRows.results ?? [];
+    } catch (err) {
+      console.error("[zarr-sweep] candidate query failed:", err);
+      return c.json(
+        { error: "Failed to query sweep candidates (is migration 0038 applied?)" },
+        500,
+      );
+    }
+
+    const s3 = getS3Config(c.env);
+    let ready = 0;
+    let absent = 0;
+    const errors: { dataset_id: string; error: string }[] = [];
+
+    for (const { dataset_id } of candidates) {
+      // ONE signed GET of <id>/zarr/index.json. Returns null on 404 OR 403 (both
+      // treated as absent -> stamp checked, see getZarrIndex); only a non-2xx infra
+      // error or bad JSON throws, which is recorded below and keeps the row a
+      // candidate for the next run (not mis-stamped absent).
+      let index: Awaited<ReturnType<typeof getZarrIndex>>;
+      try {
+        index = await getZarrIndex(s3, dataset_id);
+      } catch (err) {
+        errors.push({
+          dataset_id,
+          error: `s3: ${err instanceof Error ? err.message : String(err)}`,
+        });
+        continue;
+      }
+      try {
+        if (index) {
+          // Converted: record latest-only state, mirroring /webhooks/zarr-ready.
+          // zarr_converted_at is left untouched (we don't know the true backfill
+          // time and won't fabricate one); zarr_status='ready' is the truth signal
+          // the dashboard reads. ETag + source_commit are seeded for free.
+          await db
+            .prepare(
+              `UPDATE datasets
+             SET zarr_status = 'ready',
+                 zarr_store_count = ?,
+                 zarr_index_etag = COALESCE(?, zarr_index_etag),
+                 zarr_source_commit = COALESCE(?, zarr_source_commit),
+                 zarr_checked_at = datetime('now')
+             WHERE dataset_id = ?`,
+            )
+            .bind(index.storeCount, index.etag, index.sourceCommit, dataset_id)
+            .run();
+          ready++;
+        } else {
+          // No index.json: stamp checked so the sweep won't rescan, but leave
+          // zarr_status NULL (absence is not a 'failed' conversion).
+          await db
+            .prepare("UPDATE datasets SET zarr_checked_at = datetime('now') WHERE dataset_id = ?")
+            .bind(dataset_id)
+            .run();
+          absent++;
+        }
+      } catch (err) {
+        errors.push({
+          dataset_id,
+          error: `d1${index ? ` (stores=${index.storeCount})` : ""}: ${err instanceof Error ? err.message : String(err)}`,
+        });
+      }
+    }
+
+    const remainingRow = await db
+      .prepare(
+        `SELECT COUNT(*) as n FROM datasets
+       WHERE owner_user_id != ${SYSTEM_USER_ID}
+         AND (is_sandbox = 0 OR is_sandbox IS NULL)
+         AND visibility = 'public'
+         AND zarr_status IS NULL
+         AND zarr_checked_at IS NULL`,
+      )
+      .first<{ n: number }>()
+      .catch((err) => {
+        console.error("[zarr-sweep] remaining count failed:", err);
+        return null;
+      });
+
+    if (candidates.length > 0 && errors.length === candidates.length) {
+      console.error(
+        `[zarr-sweep] all ${candidates.length} candidates failed; first: ${errors[0]?.error}`,
+      );
+    }
+    return c.json({
+      ok: errors.length === 0,
+      checked: candidates.length,
+      ready,
+      absent,
+      errors,
+      remaining: remainingRow?.n ?? null,
+    });
+  });
+
+  /**
+   * POST /admin/datasets/channel-montage-sweep?limit=N — one-time backfill that
+   * seeds n_channels / electrode_system (migration 0054) for existing EEG datasets
+   * (epic #854 phase 3, #859). Going-forward writes land via the reindex/enrichment
+   * walk; this seeds the rows that predate it.
+   *
+   * Bounded per invocation (default 15, max 30): getBidsTreeStats fetches the root
+   * tree + up to 25 subject subtrees + the two exemplar sidecar blobs per dataset,
+   * so the cap keeps the run under the Worker subrequest limit. Run repeatedly until
+   * `remaining` reaches 0. Idempotent: only rows never checked
+   * (channel_montage_checked_at IS NULL) are candidates, so a re-run resumes.
+   *
+   * Writes the two columns DIRECTLY (not via writeDatasetMetadataColumns) so the
+   * backfill does not bump updated_at/metadata_updated_at across every EEG dataset.
+   */
+  admin.post("/datasets/channel-montage-sweep", async (c) => {
+    const db = c.env.DB;
+
+    // ?reset=1 clears every probed row (channel_montage_checked_at + the two
+    // columns -> NULL) so a corrected classifier can re-sweep from scratch. Used
+    // after the BioSemi-detection fix (#865) to redo the dry-run batch. Direct
+    // write, no updated_at bump. Returns the count cleared and does nothing else.
+    if (c.req.query("reset") === "1") {
+      const res = await db
+        .prepare(
+          `UPDATE datasets
+         SET channel_montage_checked_at = NULL, n_channels = NULL, electrode_system = NULL
+         WHERE channel_montage_checked_at IS NOT NULL`,
+        )
+        .run();
+      return c.json({ reset: res.meta?.changes ?? 0 });
+    }
+
+    const limitRaw = Number.parseInt(c.req.query("limit") || "15", 10);
+    const limit = Number.isFinite(limitRaw) ? Math.min(Math.max(limitRaw, 1), 30) : 15;
+
+    // Candidates: datasets backed by a GitHub repo (managed nm*/on*; catalog ds*
+    // rows have none), with EEG in their modalities, not yet probed. `eeg` LIKE
+    // also matches `ieeg`, but the probe only reads the `eeg/` datatype dir, so an
+    // intracranial-only dataset simply yields no channel data and is marked checked.
+    let candidates: { dataset_id: string; github_repo: string }[];
+    try {
+      const rows = await db
+        .prepare(
+          `SELECT dataset_id, github_repo FROM datasets
+         WHERE github_repo IS NOT NULL
+           AND (is_sandbox = 0 OR is_sandbox IS NULL)
+           AND modalities LIKE '%eeg%'
+           AND channel_montage_checked_at IS NULL
+         ORDER BY dataset_id
+         LIMIT ?`,
+        )
+        .bind(limit)
+        .all<{ dataset_id: string; github_repo: string }>();
+      candidates = rows.results ?? [];
+    } catch (err) {
+      console.error("[channel-montage-sweep] candidate query failed:", err);
+      return c.json(
+        { error: "Failed to query sweep candidates (are migrations 0054/0055 applied?)" },
+        500,
+      );
+    }
+
+    let pat: string;
+    try {
+      pat = await getDatasetsToken(c.env);
+    } catch (err) {
+      console.error("[channel-montage-sweep] token fetch failed:", err);
+      return c.json({ error: "Failed to obtain GitHub token" }, 500);
+    }
+
+    let populated = 0;
+    let noData = 0;
+    const errors: { dataset_id: string; error: string }[] = [];
+
+    for (const { dataset_id, github_repo } of candidates) {
+      const repoName = github_repo.split("/")[1];
+      let nChannels: number | null = null;
+      let electrodeSystem: string | null = null;
+      if (!repoName) {
+        errors.push({ dataset_id, error: `invalid github_repo: ${github_repo}` });
+      } else {
+        try {
+          const stats = await getBidsTreeStats(repoName, "main", pat);
+          nChannels = stats.nChannels ?? null;
+          electrodeSystem = stats.electrodeSystem ?? null;
+          if (nChannels != null || electrodeSystem != null) populated++;
+          else noData++;
+        } catch (err) {
+          errors.push({
+            dataset_id,
+            error: err instanceof Error ? err.message : String(err),
+          });
+        }
+      }
+      // Mark checked regardless of outcome so `remaining` converges; write the two
+      // columns directly (no updated_at bump). channel_montage_checked_at advances
+      // even on a probe miss/error, so a failed dataset is not retried forever.
+      try {
+        await db
+          .prepare(
+            `UPDATE datasets
+           SET n_channels = ?, electrode_system = ?, channel_montage_checked_at = datetime('now')
+           WHERE dataset_id = ?`,
+          )
+          .bind(nChannels, electrodeSystem, dataset_id)
+          .run();
+      } catch (err) {
+        errors.push({
+          dataset_id,
+          error: `d1 write: ${err instanceof Error ? err.message : String(err)}`,
+        });
+      }
+    }
+
+    const remainingRow = await db
+      .prepare(
+        `SELECT COUNT(*) AS n FROM datasets
+       WHERE github_repo IS NOT NULL
+         AND (is_sandbox = 0 OR is_sandbox IS NULL)
+         AND modalities LIKE '%eeg%'
+         AND channel_montage_checked_at IS NULL`,
+      )
+      .first<{ n: number }>();
+
+    return c.json({
+      processed: candidates.length,
+      populated,
+      noData,
+      errors,
+      remaining: remainingRow?.n ?? null,
+    });
+  });
+
+  /**
+   * POST /admin/datasets/hed-sweep?limit=N — one-time backfill that seeds HED
+   * (has_hed / hed_version, migration 0056) for existing datasets (epic #869 phase
+   * 3, #872). Going-forward writes land via the version-DOI reindex walk (phase 2);
+   * this seeds rows that predate it.
+   *
+   * Unlike channel-montage-sweep there is NO modality filter: HED lives in
+   * *_events.{json,tsv} across eeg/meg/ieeg/beh/func, so every managed dataset is a
+   * candidate. getBidsTreeStats is subrequest-heavy, so the per-call cap (default
+   * 15, max 30) matters more here. Run repeatedly until `remaining` reaches 0.
+   * Idempotent: only rows never checked (hed_checked_at IS NULL) are candidates.
+   *
+   * Writes datasets.has_hed/hed_version DIRECTLY (no updated_at bump) and also the
+   * LATEST version's dataset_versions row via writeVersionHed (HED is per-version).
+   * Non-latest historical versions are not back-probed (would re-fetch each tagged
+   * tree); they fill going forward at publish.
+   */
+  admin.post("/datasets/hed-sweep", async (c) => {
+    const db = c.env.DB;
+
+    // ?reset=1 clears every probed row (hed_checked_at + the two columns -> NULL)
+    // so a corrected detector can re-sweep from scratch. datasets-level only: the
+    // per-version dataset_versions rows are publish-time truth and get overwritten
+    // when the re-sweep re-probes each dataset's latest version.
+    if (c.req.query("reset") === "1") {
+      const res = await db
+        .prepare(
+          `UPDATE datasets
+         SET hed_checked_at = NULL, has_hed = NULL, hed_version = NULL
+         WHERE hed_checked_at IS NOT NULL`,
+        )
+        .run();
+      return c.json({ reset: res.meta?.changes ?? 0 });
+    }
+
+    const limitRaw = Number.parseInt(c.req.query("limit") || "15", 10);
+    const limit = Number.isFinite(limitRaw) ? Math.min(Math.max(limitRaw, 1), 30) : 15;
+
+    // Candidates: every managed dataset (github_repo IS NOT NULL; catalog ds* rows
+    // have none), not sandbox, not yet probed. latest_version drives the per-version
+    // write -- null for unpublished datasets, which then get only the datasets-level
+    // write (writeVersionHed is skipped, no spurious 0-row error).
+    let candidates: { dataset_id: string; github_repo: string; latest_version: string | null }[];
+    try {
+      const rows = await db
+        .prepare(
+          `SELECT d.dataset_id, d.github_repo,
+           (SELECT version FROM dataset_versions dv WHERE dv.dataset_id = d.dataset_id
+            ORDER BY created_at DESC LIMIT 1) AS latest_version
+         FROM datasets d
+         WHERE d.github_repo IS NOT NULL
+           AND (d.is_sandbox = 0 OR d.is_sandbox IS NULL)
+           AND d.hed_checked_at IS NULL
+         ORDER BY d.dataset_id
+         LIMIT ?`,
+        )
+        .bind(limit)
+        .all<{ dataset_id: string; github_repo: string; latest_version: string | null }>();
+      candidates = rows.results ?? [];
+    } catch (err) {
+      console.error("[hed-sweep] candidate query failed:", err);
+      return c.json(
+        { error: "Failed to query sweep candidates (is migration 0056 applied?)" },
+        500,
+      );
+    }
+
+    let pat: string;
+    try {
+      pat = await getDatasetsToken(c.env);
+    } catch (err) {
+      console.error("[hed-sweep] token fetch failed:", err);
+      return c.json({ error: "Failed to obtain GitHub token" }, 500);
+    }
+
+    let withHed = 0;
+    let withoutHed = 0;
+    let unknown = 0;
+    const errors: { dataset_id: string; error: string }[] = [];
+
+    for (const { dataset_id, github_repo, latest_version } of candidates) {
+      const repoName = github_repo.split("/")[1];
+      // null = unclassified (probe couldn't run); 0 = checked, no HED; 1 = HED.
+      let hasHedInt: number | null = null;
+      let hedVersion: string | null = null;
+      if (!repoName) {
+        errors.push({ dataset_id, error: `invalid github_repo: ${github_repo}` });
+        unknown++;
+      } else {
+        try {
+          const stats = await getBidsTreeStats(repoName, "main", pat);
+          hasHedInt = stats.hasHed == null ? null : stats.hasHed ? 1 : 0;
+          hedVersion = stats.hedVersion ?? null;
+          if (stats.hasHed === true) withHed++;
+          else if (stats.hasHed === false) withoutHed++;
+          else unknown++;
+        } catch (err) {
+          errors.push({ dataset_id, error: err instanceof Error ? err.message : String(err) });
+          unknown++;
+        }
+      }
+      // Persist HED. Order is deliberate for recoverability: write the per-version
+      // row FIRST, then stamp datasets (hed_checked_at) LAST. A failure in either
+      // write leaves the dataset UNstamped, so a plain re-run re-probes and retries
+      // both (idempotent) -- never a split state where datasets is stamped but the
+      // dataset_versions row stays NULL. The per-version write runs only when we
+      // have a classification (hasHedInt != null) for a published version
+      // (latest_version); with an explicit version it never 0-rows.
+      try {
+        if (hasHedInt != null && latest_version) {
+          await writeVersionHed(db, dataset_id, latest_version, hasHedInt, hedVersion);
+        }
+        // Stamp checked regardless of probe outcome so `remaining` converges
+        // (advances even on a probe miss/error -> a failing dataset is not retried
+        // forever). A D1 write failure above skips this stamp and is retried.
+        //
+        // When the probe COULD NOT classify (hasHedInt null), only stamp -- do NOT
+        // write NULL over an existing classification. The reindex/enrich path writes
+        // has_hed without stamping hed_checked_at, so such a row is still a sweep
+        // candidate; a transient probe miss here must not clobber that value to NULL.
+        if (hasHedInt != null) {
+          await db
+            .prepare(
+              `UPDATE datasets
+             SET has_hed = ?, hed_version = ?, hed_checked_at = datetime('now')
+             WHERE dataset_id = ?`,
+            )
+            .bind(hasHedInt, hedVersion, dataset_id)
+            .run();
+        } else {
+          await db
+            .prepare("UPDATE datasets SET hed_checked_at = datetime('now') WHERE dataset_id = ?")
+            .bind(dataset_id)
+            .run();
+        }
+      } catch (err) {
+        errors.push({
+          dataset_id,
+          error: `d1 write: ${err instanceof Error ? err.message : String(err)}`,
+        });
+      }
+    }
+
+    const remainingRow = await db
+      .prepare(
+        `SELECT COUNT(*) AS n FROM datasets
+       WHERE github_repo IS NOT NULL
+         AND (is_sandbox = 0 OR is_sandbox IS NULL)
+         AND hed_checked_at IS NULL`,
+      )
+      .first<{ n: number }>();
+
+    return c.json({
+      processed: candidates.length,
+      withHed,
+      withoutHed,
+      unknown,
+      errors,
+      remaining: remainingRow?.n ?? null,
+    });
+  });
+
+  // ============================================================================
+  // Manifest Generation
+  // ============================================================================
+
+  /**
+   * POST /admin/datasets/:id/manifest/:version - Generate or regenerate a version manifest
+   *
+   * Traverses the git tree at the given version tag and generates a JSON manifest
+   * mapping file paths to their S3 annex keys.
+   *
+   * Optional body `{ doi?: string }`: explicit version DOI. If omitted, the
+   * handler tries to read the DOI from the existing manifest.json on S3. Under
+   * the central manifest workflow (`MANIFEST_VIA_CENTRAL_WORKFLOW=true`),
+   * publish-time `dataset_versions` inserts happen on the `/webhooks/manifest-ready`
+   * callback path, so admin recovery of a stranded version may need to backfill
+   * the `dataset_versions` row here. The caller must supply `doi` explicitly
+   * when no manifest.json exists on S3 (or the existing manifest carries no
+   * DOI), because there is no inline DOI minting in this admin path.
+   */
+  admin.post("/datasets/:id/manifest/:version", async (c) => {
+    const datasetId = c.req.param("id");
+    const version = c.req.param("version");
+    const db = c.env.DB;
+
+    // Accept optional DOI in request body
+    const body = await c.req.json<{ doi?: string }>().catch(() => ({}));
+
+    const dataset = await db
+      .prepare(
+        "SELECT dataset_id, github_repo, concept_doi, doi_provider FROM datasets WHERE dataset_id = ?",
+      )
+      .bind(datasetId)
+      .first<{
+        dataset_id: string;
+        github_repo: string | null;
+        concept_doi: string | null;
+        doi_provider: string | null;
+      }>();
+
+    if (!dataset) {
+      return c.json({ error: "Dataset not found" }, 404);
+    }
+
+    if (!dataset.github_repo) {
+      return c.json({ error: "Dataset has no GitHub repository" }, 400);
+    }
+
+    const repoName = dataset.github_repo.split("/")[1];
+    if (!repoName) {
+      return c.json({ error: "Invalid repository format" }, 500);
+    }
+
+    const pat = await getDatasetsToken(c.env);
+
+    // Resolve version DOI: use provided value, or try existing manifest
+    let versionDoi: string | null = "doi" in body ? (body.doi ?? null) : null;
+    if (!versionDoi) {
+      const s3Options = getS3Config(c.env);
+      const existing = await getManifest(s3Options, datasetId, version);
+      if (existing) {
+        const parsed = JSON.parse(existing) as { doi?: string | null };
+        versionDoi = parsed.doi ?? null;
+      }
+    }
+
+    try {
+      const manifest = await generateManifest(
+        repoName,
+        version,
+        pat,
+        datasetId,
+        versionDoi,
+        dataset.concept_doi,
+      );
+
+      await uploadManifest(
+        getS3Config(c.env),
+        datasetId,
+        version,
+        JSON.stringify(manifest, null, 2),
+      );
+
+      // Backfill dataset_versions row if missing. Under the central manifest
+      // workflow (#557), publish-time inserts run on /webhooks/manifest-ready;
+      // a stranded version (manifest+S3 present, D1 row absent) needs this
+      // admin path to repair the gap. OR IGNORE keeps the legacy double-write
+      // path safe.
+      const versionDoiForRow = versionDoi ?? manifest.doi ?? null;
+      let dataset_versions_backfilled = false;
+      if (versionDoiForRow) {
+        const existing = await db
+          .prepare("SELECT doi FROM dataset_versions WHERE dataset_id = ? AND version = ?")
+          .bind(datasetId, version)
+          .first<{ doi: string }>();
+        if (!existing) {
+          const provider = dataset.doi_provider === "zenodo" ? "zenodo" : "ezid";
+          try {
+            await db
+              .prepare(
+                "INSERT OR IGNORE INTO dataset_versions (dataset_id, version, doi, provider) VALUES (?, ?, ?, ?)",
+              )
+              .bind(datasetId, version, versionDoiForRow, provider)
+              .run();
+            dataset_versions_backfilled = true;
+          } catch (err) {
+            console.error(
+              `[admin manifest regen] dataset_versions backfill failed for ${datasetId}@${version}:`,
+              err,
+            );
+          }
+        }
+      } else {
+        console.warn(
+          `[admin manifest regen] no DOI resolved for ${datasetId}@${version}; skipping dataset_versions backfill (caller must pass {doi: "..."} body to repair)`,
+        );
+      }
+
+      return c.json({
+        message: "Manifest generated and uploaded",
+        dataset_id: datasetId,
+        version: manifest.version,
+        files_count: Object.keys(manifest.files).length,
+        dataset_versions_backfilled,
+      });
+    } catch (err) {
+      const msg = errorMessage(err);
+      return c.json({ error: `Manifest generation failed: ${msg}` }, 500);
+    }
+  });
+
+  // ============================================================================
+  // Admin Doctor: scan + fix stuck-dataset patterns
+  // ============================================================================
+
+  /**
+   * POST /admin/doctor/scan - Run diagnostic checks across datasets.
+   *
+   * Body (all optional):
+   *   - check: name of a single check (omit to run all)
+   *   - dataset_id: narrow the scan to one dataset
+   *
+   * Read-only. Returns findings per check.
+   */
+  admin.post("/doctor/scan", async (c) => {
+    type ScanBody = { check?: string; dataset_id?: string };
+    const body = (await c.req.json<ScanBody>().catch(() => ({}))) as ScanBody;
+
+    let checks = DOCTOR_CHECKS;
+    if (body.check) {
+      const found = getCheck(body.check);
+      if (!found) {
+        return c.json({ error: `Unknown check: ${body.check}`, available: listChecks() }, 400);
+      }
+      checks = [found];
+    }
+
+    const ctx: CheckContext = {
+      db: c.env.DB,
+      s3: getS3Config(c.env),
+      githubPat: await getDatasetsToken(c.env),
+    };
+
+    const results: Record<string, { description: string; count: number; findings: Finding[] }> = {};
+    for (const check of checks) {
+      const findings = await check.scan(ctx, body.dataset_id);
+      results[check.name] = {
+        description: check.description,
+        count: findings.length,
+        findings,
+      };
+    }
+
+    return c.json({
+      scanned: checks.map((c) => c.name),
+      results,
+    });
+  });
+
+  /**
+   * POST /admin/doctor/fix - Apply a check's remediation.
+   *
+   * Body:
+   *   - check (required): name of the check
+   *   - dataset_id (optional): narrow to one dataset
+   *   - dry_run (optional, default false): list findings without writing
+   *
+   * Returns per-dataset fix results. Fixes are serial to bound worker memory
+   * and respect downstream rate limits (GitHub, S3, EZID).
+   */
+  admin.post("/doctor/fix", async (c) => {
+    type FixBody = { check?: string; dataset_id?: string; dry_run?: boolean };
+    const body = (await c.req.json<FixBody>().catch(() => ({}))) as FixBody;
+
+    if (!body.check) {
+      return c.json({ error: "check is required", available: listChecks() }, 400);
+    }
+    const check = getCheck(body.check);
+    if (!check) {
+      return c.json({ error: `Unknown check: ${body.check}`, available: listChecks() }, 400);
+    }
+
+    const ctx: CheckContext = {
+      db: c.env.DB,
+      s3: getS3Config(c.env),
+      githubPat: await getDatasetsToken(c.env),
+    };
+
+    const findings = await check.scan(ctx, body.dataset_id);
+
+    if (body.dry_run) {
+      return c.json({
+        check: body.check,
+        dry_run: true,
+        would_fix: findings.length,
+        findings,
+      });
+    }
+
+    const results: Array<{
+      dataset_id: string;
+      version?: string;
+      status: "fixed" | "skipped" | "failed";
+      message?: string;
+      details?: Record<string, unknown>;
+    }> = [];
+    for (const finding of findings) {
+      const result = await check.fix(ctx, finding);
+      results.push({
+        dataset_id: finding.dataset_id,
+        version: finding.version,
+        ...result,
+      });
+    }
+
+    return c.json({
+      check: body.check,
+      total: findings.length,
+      fixed: results.filter((r) => r.status === "fixed").length,
+      skipped: results.filter((r) => r.status === "skipped").length,
+      failed: results.filter((r) => r.status === "failed").length,
+      results,
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // Dataset deletion
+  // ---------------------------------------------------------------------------
+
+  /**
+   * POST /admin/datasets/:id/reset - Reset a test dataset to clean state
+   *
+   * Hardcoded to nm099999 only. Deletes S3 objects, recreates GitHub repo,
+   * cleans D1 version/publication records, re-adds caller as collaborator.
+   */
+  admin.post("/datasets/:id/reset", async (c) => {
+    const datasetId = c.req.param("id");
+
+    if (datasetId !== "nm099999") {
+      return c.json({ error: "Reset is only allowed for test dataset nm099999" }, 400);
+    }
+
+    const requestingUser = c.get("user");
+    const db = c.env.DB;
+
+    // Ensure nm099999 row exists (another process may have deleted it)
+    const dataset = await db
+      .prepare("SELECT * FROM datasets WHERE dataset_id = ?")
+      .bind(datasetId)
+      .first<{ id: number; dataset_id: string; name: string; github_repo: string | null }>();
+
+    if (!dataset) {
+      await db
+        .prepare(
+          "INSERT INTO datasets (dataset_id, name, description, owner_user_id, status, github_repo, visibility, is_sandbox) VALUES (?, 'E2E Test Dataset', 'Persistent test dataset for E2E testing', ?, 'active', 'nemarDatasets/nm099999', 'private', 0)",
+        )
+        .bind(datasetId, requestingUser.id)
+        .run();
+    }
+
+    const steps: { s3_deleted: number; github_recreated: boolean; d1_cleaned: boolean } = {
+      s3_deleted: 0,
+      github_recreated: false,
+      d1_cleaned: false,
+    };
+
+    // 1. Delete S3 objects
+    try {
+      const s3Options = {
+        bucket: c.env.S3_BUCKET,
+        region: c.env.AWS_REGION,
+        accessKeyId: c.env.AWS_ACCESS_KEY_ID,
+        secretAccessKey: c.env.AWS_SECRET_ACCESS_KEY,
+      };
+      const s3Result = await deleteDatasetObjects(s3Options, datasetId, true);
+      steps.s3_deleted = s3Result.deleted;
+    } catch (err) {
+      console.error(
+        `[reset] S3 cleanup failed for ${datasetId}:`,
+        err instanceof Error ? err.message : err,
+      );
+    }
+
+    // 2. Recreate GitHub repo
+    try {
+      const pat = await getDatasetsToken(c.env);
+      const repoName = datasetId;
+      await deleteRepository(repoName, pat);
+      await createRepository(repoName, "E2E test dataset (auto-reset)", true, pat);
+      await addCollaborator(repoName, requestingUser.github_username, "push", pat);
+      steps.github_recreated = true;
+    } catch (err) {
+      console.error(
+        `[reset] GitHub recreate failed for ${datasetId}:`,
+        err instanceof Error ? err.message : err,
+      );
+    }
+
+    // 3. Clean D1 records (keep datasets row)
+    try {
+      await db.batch([
+        db.prepare("DELETE FROM dataset_versions WHERE dataset_id = ?").bind(datasetId),
+        db.prepare("DELETE FROM publication_requests WHERE dataset_id = ?").bind(datasetId),
+        db
+          .prepare(
+            "DELETE FROM dataset_collaborators WHERE dataset_id IN (SELECT id FROM datasets WHERE dataset_id = ?)",
+          )
+          .bind(datasetId),
+        db.prepare("DELETE FROM user_s3_permissions WHERE s3_prefix = ?").bind(datasetId),
+      ]);
+      // Reset DOI and Zenodo fields on the dataset
+      await db
+        .prepare(
+          "UPDATE datasets SET concept_doi = NULL, latest_version_doi = NULL, doi_provider = 'ezid', ezid_identifier = NULL, ezid_status = NULL, zenodo_concept_id = NULL, zenodo_latest_version_id = NULL, enrichment_json = NULL, enrichment_updated_at = NULL, visibility = 'private' WHERE dataset_id = ?",
+        )
+        .bind(datasetId)
+        .run();
+      steps.d1_cleaned = true;
+    } catch (err) {
+      console.error(
+        `[reset] D1 cleanup failed for ${datasetId}:`,
+        err instanceof Error ? err.message : err,
+      );
+    }
+
+    const githubRepo = `nemarDatasets/${datasetId}`;
+    const allOk = steps.s3_deleted >= 0 && steps.github_recreated && steps.d1_cleaned;
+    return c.json(
+      {
+        message: allOk ? `Dataset ${datasetId} reset` : `Dataset ${datasetId} partially reset`,
+        success: allOk,
+        github_ssh_url: `git@github.com:${githubRepo}.git`,
+        steps,
+      },
+      allOk ? 200 : 207,
+    );
+  });
+
+  const deleteDatasetSchema = z.object({
+    force: z.boolean().optional().default(false),
+  });
+
+  /**
+   * DELETE /admin/datasets/:id - Delete a dataset and all associated resources
+   *
+   * Permission:
+   * - Unpublished datasets (no DOI, private): admin or owner
+   * - Published datasets (with DOI or public visibility): owner only, requires force=true
+   */
+  admin.delete("/datasets/:id", async (c) => {
+    const datasetId = c.req.param("id");
+    const requestingUser = c.get("user");
+
+    // Parse optional JSON body (DELETE requests may have no body)
+    let force = false;
+    try {
+      const body = await c.req.json();
+      const parsed = deleteDatasetSchema.safeParse(body);
+      if (parsed.success) {
+        force = parsed.data.force;
+      }
+    } catch {
+      // No body or invalid JSON: default force=false
+    }
+    const db = c.env.DB;
+
+    // Look up dataset
+    const dataset = await db
+      .prepare("SELECT * FROM datasets WHERE dataset_id = ?")
+      .bind(datasetId)
+      .first<{
+        id: number;
+        dataset_id: string;
+        name: string;
+        owner_user_id: number;
+        status: string;
+        visibility: string;
+        concept_doi: string | null;
+        latest_version_doi: string | null;
+      }>();
+
+    if (!dataset) {
+      return c.json({ error: "Dataset not found" }, 404);
+    }
+
+    // Folded legacy catalog rows (#646) are sentinel-owned, with no GitHub repo /
+    // S3 of their own, and are re-created from the upstream nemar.org catalog on
+    // the next catalog sync, so deleting one here is futile. Refuse with a clear
+    // 400. deleteDatasetCascade also refuses (defense-in-depth for other callers).
+    if (dataset.owner_user_id === SYSTEM_USER_ID) {
+      return c.json(
+        {
+          error: `"${datasetId}" is a system catalog entry (owner=nemar-system) managed by the nemar.org catalog sync and cannot be deleted here.`,
+          dataset_id: datasetId,
+        },
+        400,
+      );
+    }
+
+    // Permission check: published datasets require owner role
+    const hasDoiOrPublished = dataset.concept_doi !== null || dataset.visibility === "public";
+    if (hasDoiOrPublished) {
+      if (!hasRole(requestingUser.role, "owner")) {
+        return c.json(
+          { error: "Published datasets with DOIs can only be deleted by the NEMAR owner" },
+          403,
+        );
+      }
+      if (!force) {
+        return c.json(
+          {
+            error: "This dataset has a DOI or is published. Set force=true to confirm deletion.",
+            dataset_id: datasetId,
+            concept_doi: dataset.concept_doi,
+            visibility: dataset.visibility,
+          },
+          400,
+        );
+      }
+    }
+
+    // Check for active publication requests
+    const activePubReq = await db
+      .prepare(
+        "SELECT COUNT(*) as count FROM publication_requests WHERE dataset_id = ? AND status NOT IN ('published', 'denied')",
+      )
+      .bind(datasetId)
+      .first<{ count: number }>();
+
+    if (activePubReq && activePubReq.count > 0) {
+      return c.json(
+        {
+          error: `Cannot delete dataset with ${activePubReq.count} active publication request(s). Deny or complete them first.`,
+        },
+        409,
+      );
+    }
+
+    // Perform cascade deletion
+    const result = await deleteDatasetCascade(db, c.env, datasetId, {
+      bypassGovernance: force,
+    });
+
+    // Audit log (best-effort; don't fail the response if audit write fails)
+    try {
+      await auditLogStatement(db, {
+        userId: requestingUser.id,
+        action: "dataset_deleted",
+        details: JSON.stringify({
+          dataset_id: datasetId,
+          dataset_name: dataset.name,
+          owner_user_id: dataset.owner_user_id,
+          had_doi: dataset.concept_doi !== null,
+          force,
+          steps: result.steps,
+          warnings: result.warnings,
+        }),
+      }).run();
+    } catch (err) {
+      console.error("Failed to write deletion audit log:", err);
+      result.warnings.push("Audit log write failed");
+    }
+
+    return c.json(result, result.deleted ? 200 : 207);
+  });
+
+  // ─── Bulk delete datasets ────────────────────────────────────────────────────
+
+  const bulkDeleteSchema = z.object({
+    dataset_ids: z
+      .array(z.string().regex(/^(nm|xx|on)\d{6}$/, "Invalid dataset ID format"))
+      .min(1)
+      .max(200)
+      .transform((ids) => [...new Set(ids)]),
+  });
+
+  /**
+   * POST /admin/datasets/bulk-delete - Delete multiple datasets at once
+   *
+   * Only works on unpublished datasets (private, no DOI, no active pub requests).
+   * Intended for cleaning up phantom/orphaned datasets.
+   * Requires owner role.
+   */
+  admin.post("/datasets/bulk-delete", zValidator("json", bulkDeleteSchema), async (c) => {
+    const requestingUser = c.get("user");
+    if (!hasRole(requestingUser.role, "owner")) {
+      return c.json({ error: "Only the NEMAR owner can bulk-delete datasets" }, 403);
+    }
+
+    const { dataset_ids } = c.req.valid("json");
+    const db = c.env.DB;
+    const results: Array<{ dataset_id: string; deleted: boolean; error?: string }> = [];
+
+    for (const datasetId of dataset_ids) {
+      try {
+        // Safety: only delete private datasets with no DOI
+        const dataset = await db
+          .prepare("SELECT visibility, concept_doi FROM datasets WHERE dataset_id = ?")
+          .bind(datasetId)
+          .first<{ visibility: string; concept_doi: string | null }>();
+
+        if (!dataset) {
+          results.push({ dataset_id: datasetId, deleted: false, error: "not found" });
+          continue;
+        }
+        if (dataset.concept_doi || dataset.visibility === "public") {
+          results.push({ dataset_id: datasetId, deleted: false, error: "has DOI or is public" });
+          continue;
+        }
+
+        const result = await deleteDatasetCascade(db, c.env, datasetId);
+        results.push({
+          dataset_id: datasetId,
+          deleted: result.deleted,
+          error: result.warnings.join("; ") || undefined,
+        });
+      } catch (err) {
+        results.push({
+          dataset_id: datasetId,
+          deleted: false,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+
+    const deletedCount = results.filter((r) => r.deleted).length;
+    const failedCount = results.filter((r) => !r.deleted).length;
+
+    // Audit log (non-fatal; don't fail the response if audit write fails)
+    try {
+      await auditLogStatement(db, {
+        userId: requestingUser.id,
+        action: "bulk_delete",
+        resourceType: "dataset",
+        resourceId: dataset_ids.join(","),
+        details: JSON.stringify({ deleted: deletedCount, failed: failedCount, ids: dataset_ids }),
+      }).run();
+    } catch (auditErr) {
+      console.error(
+        `[bulk-delete] Failed to write audit log (${deletedCount} deleted, ${failedCount} failed):`,
+        auditErr,
+      );
+    }
+
+    return c.json({ deleted: deletedCount, failed: failedCount, results });
+  });
+
+  // ---------------------------------------------------------------------------
+  // nemar.org Datapipeline Sync
+  // ---------------------------------------------------------------------------
+
+  /**
+   * POST /admin/datasets/:id/reindex - Refresh enrichment + Phase 2 metadata
+   * columns for a single dataset (epic #417 phase 3).
+   *
+   * Body: { skip_enrichment?: boolean, skip_sync?: boolean, ref?: string }
+   *
+   * Returns per-step status so a transient failure in one path does not
+   * cause the operator to repeat the entire reindex.
+   */
+  admin.post("/datasets/:id/reindex", async (c) => {
+    const datasetId = c.req.param("id");
+    // Parse body directly so chunked-transfer requests (no Content-Length
+    // header) still produce a body. An empty body is treated as defaults.
+    let body: { skip_enrichment?: boolean; skip_sync?: boolean; ref?: string } = {};
+    try {
+      const raw = await c.req.text();
+      if (raw.length > 0) body = JSON.parse(raw);
+    } catch {
+      return c.json({ error: "Invalid JSON in request body" }, 400);
+    }
+
+    const skipEnrichment = body.skip_enrichment === true;
+    const skipSync = body.skip_sync === true;
+    if (skipEnrichment && skipSync) {
+      return c.json({ error: "skip_enrichment and skip_sync cannot both be true" }, 400);
+    }
+
+    const result: {
+      dataset_id: string;
+      enrichment: { status: "ok" | "failed" | "skipped"; ref?: string; error?: string };
+      sync: {
+        status: "ok" | "failed" | "skipped";
+        metadata_columns_written?: boolean;
+        metadata_columns_error?: string;
+      };
+    } = {
+      dataset_id: datasetId,
+      enrichment: { status: "skipped" },
+      sync: { status: "skipped" },
+    };
+
+    if (!skipEnrichment) {
+      const enr = await runEnrichmentForDataset(c.env, datasetId, { ref: body.ref });
+      result.enrichment = enr.ok
+        ? { status: "ok", ref: enr.ref }
+        : { status: "failed", ref: enr.ref, error: enr.error };
+    }
+
+    if (!skipSync) {
+      try {
+        const refreshed = await refreshDatasetMetadata(c.env, datasetId);
+        result.sync = {
+          status: refreshed.metadata_columns_written ? "ok" : "failed",
+          metadata_columns_written: refreshed.metadata_columns_written,
+          ...(refreshed.metadata_columns_error && {
+            metadata_columns_error: refreshed.metadata_columns_error,
+          }),
+        };
+      } catch (err) {
+        if (err instanceof DatasetReindexError) {
+          return c.json(
+            { ...result, sync: { status: "failed", errors: [err.message] } },
+            err.statusCode,
+          );
+        }
+        console.error(`[admin/reindex] Unexpected sync error for ${datasetId}:`, err);
+        return c.json({ ...result, sync: { status: "failed", errors: [errorMessage(err)] } }, 500);
+      }
+    }
+
+    return c.json(result);
+  });
+
+  /**
+   * POST /admin/datasets/reindex/bulk - Run reindex across a filtered set of
+   * datasets. Sequential to respect upstream rate limits (epic #417 phase 3).
+   *
+   * Body: {
+   *   filter: "all" | "missing-metadata" | "stale",
+   *   older_than_days?: number,
+   *   skip_enrichment?: boolean,
+   *   skip_sync?: boolean,
+   *   dry_run?: boolean,
+   * }
+   */
+  admin.post("/datasets/reindex/bulk", async (c) => {
+    let body: {
+      filter?: string;
+      older_than_days?: number;
+      skip_enrichment?: boolean;
+      skip_sync?: boolean;
+      dry_run?: boolean;
+    } = {};
+    try {
+      body = await c.req.json();
+    } catch {
+      return c.json({ error: "Invalid JSON in request body" }, 400);
+    }
+
+    const validFilters: ReindexFilter[] = ["all", "missing-metadata", "stale"];
+    if (!body.filter || !validFilters.includes(body.filter as ReindexFilter)) {
+      return c.json({ error: `filter must be one of: ${validFilters.join(", ")}` }, 400);
+    }
+    const filter = body.filter as ReindexFilter;
+    const skipEnrichment = body.skip_enrichment === true;
+    const skipSync = body.skip_sync === true;
+    if (skipEnrichment && skipSync) {
+      return c.json({ error: "skip_enrichment and skip_sync cannot both be true" }, 400);
+    }
+
+    let query: { sql: string; params: unknown[] };
+    try {
+      query = buildReindexFilterQuery(filter, { olderThanDays: body.older_than_days });
+    } catch (err) {
+      return c.json({ error: errorMessage(err) }, 400);
+    }
+
+    // Guard against the Worker-deployed-before-migration partial-deploy window:
+    // the filter SQL references Phase 2 columns (subject_count, modalities,
+    // metadata_updated_at, etc.). If migration 0020 hasn't been applied yet,
+    // D1 returns a column-not-found error. Map that to 503 with a clear
+    // message instead of a generic 500 so operators know what to do.
+    let datasetIds: string[];
+    const startedAt = Date.now();
+    try {
+      const rows = await c.env.DB.prepare(query.sql)
+        .bind(...query.params)
+        .all<{ dataset_id: string }>();
+      datasetIds = (rows.results ?? []).map((r) => r.dataset_id);
+    } catch (err) {
+      const msg = errorMessage(err);
+      if (/no such column|undefined column/i.test(msg)) {
+        console.error(
+          "[admin/reindex/bulk] D1 query failed; migration 0020 may not be applied:",
+          err,
+        );
+        return c.json(
+          {
+            error:
+              "Bulk reindex query references columns added by migration 0020. Apply the migration (wrangler d1 migrations apply) and retry.",
+            details: msg,
+          },
+          503,
+        );
+      }
+      console.error("[admin/reindex/bulk] D1 query failed unexpectedly:", err);
+      return c.json({ error: msg }, 500);
+    }
+
+    if (body.dry_run === true) {
+      return c.json({
+        filter,
+        dry_run: true,
+        total: datasetIds.length,
+        datasets: datasetIds,
+        elapsed_ms: Date.now() - startedAt,
+      });
+    }
+
+    type PerDataset = {
+      dataset_id: string;
+      enrichment: { status: "ok" | "failed" | "skipped"; error?: string };
+      sync: {
+        status: "ok" | "failed" | "skipped";
+        metadata_columns_error?: string;
+      };
+    };
+    const results: PerDataset[] = [];
+
+    // Sequential to keep per-dataset failures isolated and respect upstream
+    // rate limits (OpenRouter, GitHub). The runtime budget for a
+    // Cloudflare Worker request is the limiting factor for very large batches;
+    // operators should narrow the filter or split into multiple runs.
+    for (const datasetId of datasetIds) {
+      const entry: PerDataset = {
+        dataset_id: datasetId,
+        enrichment: { status: "skipped" },
+        sync: { status: "skipped" },
+      };
+      if (!skipEnrichment) {
+        const enr = await runEnrichmentForDataset(c.env, datasetId);
+        entry.enrichment = enr.ok ? { status: "ok" } : { status: "failed", error: enr.error };
+      }
+      if (!skipSync) {
+        try {
+          const refreshed = await refreshDatasetMetadata(c.env, datasetId);
+          entry.sync = {
+            status: refreshed.metadata_columns_written ? "ok" : "failed",
+            ...(refreshed.metadata_columns_error && {
+              metadata_columns_error: refreshed.metadata_columns_error,
+            }),
+          };
+        } catch (err) {
+          // Per-dataset failure must surface in server logs in addition to the
+          // response body so an operator running with -i (or a CI job that
+          // only checks HTTP status) still gets a trace.
+          console.error(`[admin/reindex/bulk] ${datasetId} reindex threw:`, err);
+          entry.sync = { status: "failed" };
+        }
+      }
+      if (entry.enrichment.status === "failed") {
+        console.warn(
+          `[admin/reindex/bulk] ${datasetId} enrichment failed: ${entry.enrichment.error}`,
+        );
+      }
+      results.push(entry);
+    }
+
+    return c.json({
+      filter,
+      total: results.length,
+      results,
+      elapsed_ms: Date.now() - startedAt,
+    });
+  });
+
+  /**
+   * POST /admin/vectorize/reindex-all - Re-embed datasets' vectors from the
+   * `datasets` source of truth (#646 Phase 4). Fixes the stale-vector backlog.
+   *
+   * Keyset-paginated to stay within Worker limits: pass `after` = the previous
+   * response's `last_id` and repeat until `has_more` is false.
+   * Body: { limit?: number (1..500, default 200), after?: string, dry_run?: boolean }
+   */
+  admin.post("/vectorize/reindex-all", async (c) => {
+    if (!c.env.AI || !c.env.VECTORIZE) {
+      return c.json({ error: "AI or VECTORIZE binding not configured" }, 400);
+    }
+    let body: { limit?: number; after?: string; dry_run?: boolean } = {};
+    try {
+      body = await c.req.json();
+    } catch {
+      // empty body is fine; defaults apply
+    }
+    const limit = Math.min(Math.max(Number(body.limit) || 200, 1), 500);
+    const after = typeof body.after === "string" ? body.after : "";
+    const startedAt = Date.now();
+
+    const rows = await c.env.DB.prepare(
+      `SELECT dataset_id FROM datasets
+     WHERE status = 'active' AND visibility = 'public'
+       AND (is_sandbox = 0 OR is_sandbox IS NULL)
+       AND dataset_id > ?
+     ORDER BY dataset_id
+     LIMIT ?`,
+    )
+      .bind(after, limit)
+      .all<{ dataset_id: string }>();
+    const ids = (rows.results ?? []).map((r) => r.dataset_id);
+    const lastId = ids.at(-1) ?? after;
+    const hasMore = ids.length === limit;
+
+    if (body.dry_run === true) {
+      return c.json({
+        dry_run: true,
+        total: ids.length,
+        last_id: lastId,
+        has_more: hasMore,
+        elapsed_ms: Date.now() - startedAt,
+      });
+    }
+
+    let embedded = 0;
+    for (const id of ids) {
+      if (await reembedDatasetVector(c.env.DB, c.env.AI, c.env.VECTORIZE, id)) embedded++;
+    }
+    return c.json({
+      scanned: ids.length,
+      embedded,
+      failed: ids.length - embedded,
+      last_id: lastId,
+      has_more: hasMore,
+      elapsed_ms: Date.now() - startedAt,
+    });
+  });
+
+  /**
+   * GET /admin/summary/coverage
+   *
+   * Reports which published (dataset_id, version) pairs have summary.json
+   * at the current target schema (1.1) vs which are stale or missing.
+   * Powers `nemar admin summary check` and the weekly drift cron.
+   *
+   * Read-only: walks the version table and probes data.nemar.org for the
+   * schema string. Bounded parallelism keeps us within data.nemar.org's
+   * rate limit. No GitHub API calls.
+   *
+   * Epic #618 / phase 2 (#620).
+   */
+  admin.get("/summary/coverage", async (c) => {
+    try {
+      const report = await buildCoverageReport(c.env);
+      // no-store on every response: the weekly drift cron and on-demand
+      // operator CLI both pull this through the same Cloudflare edge POP that
+      // would otherwise apply heuristic TTL to a 200. A cached coverage report
+      // can silently mask a real drift week (cron sees yesterday's "all green"
+      // when probes failed for half the catalog). Phase 3's page-bundle is
+      // meticulous about no-store on partial failure; the coverage endpoint
+      // — which feeds page-bundle's repair loop — must match that discipline.
+      c.header("Cache-Control", "no-store, must-revalidate");
+      return c.json(report);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error("[summary/coverage] failed:", msg);
+      return c.json({ error: `Failed to build coverage report: ${msg}` }, 500);
+    }
+  });
+
+  const dispatchManifestSchema = z.object({
+    dataset_id: z.string().min(1),
+    version: z.string().min(1),
+    skip_canary: z.boolean().optional(),
+  });
+
+  /**
+   * POST /admin/manifest/dispatch
+   *
+   * Fires `repository_dispatch[generate-manifest]` at `nemarDatasets/.github`
+   * for a specific (dataset_id, version) pair WITHOUT seeding a manifest_jobs
+   * row. The workflow runs with `skip_callback: true` so it just regenerates
+   * manifest.json + summary.json on S3 without trying to phone back to a
+   * non-existent in-flight job.
+   *
+   * Use case: backfill stale summary.json schema versions, or manually
+   * re-run after a generator change. Looks up `doi` + `concept_doi` from
+   * D1 so the caller only needs (dataset_id, version).
+   *
+   * Epic #618 / phase 2 (#620). Sibling: `triggerManifestGeneration` in
+   * webhooks.ts handles the live-publish path with the full HMAC handshake.
+   */
+  admin.post("/manifest/dispatch", zValidator("json", dispatchManifestSchema), async (c) => {
+    const { dataset_id, version, skip_canary } = c.req.valid("json");
+
+    const row = await c.env.DB.prepare(
+      `SELECT v.doi, d.concept_doi
+         FROM dataset_versions v
+         JOIN datasets d ON d.dataset_id = v.dataset_id
+         WHERE v.dataset_id = ? AND v.version = ?
+         LIMIT 1`,
+    )
+      .bind(dataset_id, version)
+      .first<{ doi: string; concept_doi: string | null }>();
+
+    if (!row) {
+      return c.json({ error: `No published version row for ${dataset_id}@${version}` }, 404);
+    }
+
+    // Token fetch is intentionally OUTSIDE the try/catch below so a programming
+    // error here (e.g. renamed env var, App-auth failure) surfaces as 500 with
+    // its real message instead of being collapsed into a 502 "Dispatch failed"
+    // that points the operator at GitHub instead of at our config.
+    const pat = await getDatasetsToken(c.env);
+
+    // Hard invariant pinning the security note: callback_token / callback_url
+    // are safe to leave empty ONLY when skip_callback is true (the workflow
+    // won't validate the token, so a real secret would just leak into runner
+    // logs). If a future refactor flips skipCallback to false here the
+    // assertion fires loudly instead of silently dispatching with empty
+    // credentials. Mirrors the comment on `triggerManifestGeneration`'s
+    // `skipCallback` option in services/github.ts.
+    const skipCallback = true;
+    const callbackToken = "";
+    const callbackUrl = "";
+    if (!skipCallback && (callbackToken === "" || callbackUrl === "")) {
+      throw new Error("internal: empty callback_token/callback_url requires skipCallback=true");
+    }
+
+    try {
+      await triggerManifestGeneration(
+        dataset_id,
+        version,
+        row.doi,
+        row.concept_doi,
+        callbackToken,
+        callbackUrl,
+        pat,
+        { skipCanary: skip_canary ?? false, skipCallback },
+      );
+      return c.json({ dispatched: true, dataset_id, version });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error(`[manifest/dispatch] failed dataset=${dataset_id} version=${version}:`, msg);
+      return c.json({ error: `Dispatch failed: ${msg}` }, 502);
+    }
+  });
+}
