@@ -1,5 +1,5 @@
 /**
- * Unit tests for the pure GitHub clone-auth resolver in src/lib/git-annex.ts.
+ * Unit tests for the pure GitHub clone-auth resolver in src/lib/git-annex/github.ts.
  *
  * The finalize phase of the OpenNeuro import runs on a CI runner that has an
  * HTTPS App token (GH_TOKEN) but no SSH key. A raw `git@github.com:` clone of

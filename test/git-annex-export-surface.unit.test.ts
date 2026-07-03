@@ -28,6 +28,8 @@
  */
 
 import { describe, expect, test } from "bun:test";
+import { readdirSync } from "node:fs";
+import { join } from "node:path";
 
 const MODULE_EXPORTS: Record<string, string[]> = {
   "run-command": ["runCommand"],
@@ -196,5 +198,13 @@ describe("lib/git-annex export surface", () => {
     const union = new Set(Object.values(MODULE_EXPORTS).flat());
     for (const w of INTERNAL_WIRING) union.delete(w);
     expect([...union].sort()).toEqual(MONOLITH_EXPORTS);
+  });
+
+  test("every file in lib/git-annex/ has a pin entry (no orphan modules)", () => {
+    const files = readdirSync(join(import.meta.dir, "../src/lib/git-annex"))
+      .filter((f) => f.endsWith(".ts"))
+      .map((f) => f.replace(/\.ts$/, ""))
+      .sort();
+    expect(files).toEqual(Object.keys(MODULE_EXPORTS).sort());
   });
 });

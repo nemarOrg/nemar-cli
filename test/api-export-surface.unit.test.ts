@@ -26,6 +26,8 @@
  */
 
 import { describe, expect, test } from "bun:test";
+import { readdirSync } from "node:fs";
+import { join } from "node:path";
 
 const MODULE_EXPORTS: Record<string, string[]> = {
   errors: ["ApiError", "MaintenanceError", "errorDetail"],
@@ -231,5 +233,13 @@ describe("lib/api export surface", () => {
     const union = new Set(Object.values(MODULE_EXPORTS).flat());
     for (const w of INTERNAL_WIRING) union.delete(w);
     expect([...union].sort()).toEqual(MONOLITH_EXPORTS);
+  });
+
+  test("every file in lib/api/ has a pin entry (no orphan modules)", () => {
+    const files = readdirSync(join(import.meta.dir, "../src/lib/api"))
+      .filter((f) => f.endsWith(".ts"))
+      .map((f) => f.replace(/\.ts$/, ""))
+      .sort();
+    expect(files).toEqual(Object.keys(MODULE_EXPORTS).sort());
   });
 });

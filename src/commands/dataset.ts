@@ -3181,8 +3181,9 @@ Examples:
       }
 
       if (result.status === "approving") {
-        // Source of truth is `PUBLICATION_STEPS` in src/lib/api.ts, which
-        // mirrors the backend orchestrator. Showing fewer steps here than
+        // Source of truth is `PUBLICATION_STEPS` in shared/publication-steps.ts
+        // (re-exported by src/lib/api/publish.ts), shared with the backend
+        // orchestrator. Showing fewer steps here than
         // the backend actually runs (the legacy list missed
         // enrichment_check, version_doi, sync_nemar) made the status
         // display claim "all steps complete" while the backend was still
