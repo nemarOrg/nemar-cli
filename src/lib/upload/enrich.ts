@@ -14,14 +14,10 @@ import { basename, resolve } from "node:path";
 import chalk from "chalk";
 import inquirer from "inquirer";
 import ora from "ora";
-import {
-  ApiError,
-  type NemarMetadataPayload,
-  ORCID_REGEX,
-  errorDetail,
-  getCurrentUser,
-} from "../api.js";
-import { collectFileManifest } from "../git-annex.js";
+import { getCurrentUser } from "../api/auth.js";
+import { type NemarMetadataPayload, ORCID_REGEX } from "../api/datasets.js";
+import { ApiError, errorDetail } from "../api/errors.js";
+import { collectFileManifest } from "../git-annex/transfer.js";
 import {
   detectLicense,
   ensureLicenseFile,

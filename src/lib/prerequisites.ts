@@ -9,7 +9,7 @@
  * mid-upload.
  */
 
-import { runCommand } from "./git-annex.js";
+import { runCommand } from "./git-annex/run-command.js";
 
 export type NemarCommand =
   | "upload"

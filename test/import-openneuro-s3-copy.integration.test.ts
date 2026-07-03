@@ -9,7 +9,7 @@
  */
 
 import { afterAll, describe, expect, test } from "bun:test";
-import { runCommand } from "../src/lib/git-annex";
+import { runCommand } from "../src/lib/git-annex/run-command";
 import {
   type CopyItem,
   batchServerSideCopy,

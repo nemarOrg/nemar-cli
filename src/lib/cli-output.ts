@@ -12,7 +12,7 @@
 
 import chalk from "chalk";
 import type { Ora } from "ora";
-import { errorDetail } from "./api.js";
+import { errorDetail } from "./api/errors.js";
 import { isAuthenticated } from "./config.js";
 
 /**

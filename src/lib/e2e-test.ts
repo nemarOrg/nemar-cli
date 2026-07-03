@@ -16,22 +16,19 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { spawn } from "bun";
-import { requestUploadCredentials, resetTestDataset } from "./api.js";
+import { resetTestDataset } from "./api/admin.js";
+import { requestUploadCredentials } from "./api/data.js";
+import { cloneDataset, pushToGitHub, saveDataset } from "./git-annex/clone-push.js";
+import { configureGitHubRemote } from "./git-annex/github.js";
+import { configureLargefiles, gitAnnexAdd, initDataset } from "./git-annex/init.js";
+import { runCommand } from "./git-annex/run-command.js";
 import {
   clearAnnexCredentials,
-  cloneDataset,
-  configureGitHubRemote,
-  configureLargefiles,
   configureS3Remote,
-  copyToAnnexRemote,
   enableS3Remote,
-  gitAnnexAdd,
-  initDataset,
-  pushToGitHub,
-  saveDataset,
   toS3Credentials,
-} from "./git-annex.js";
+} from "./git-annex/s3-remote.js";
+import { copyToAnnexRemote } from "./git-annex/transfer.js";
 
 const TEST_DATASET_ID = "nm099999";
 
@@ -83,23 +80,6 @@ async function runStepsSequentially(
     if (!step.passed) break;
   }
   return steps;
-}
-
-async function runCommand(
-  cmd: string[],
-  options: { cwd?: string; env?: Record<string, string> } = {},
-): Promise<{ stdout: string; stderr: string; exitCode: number }> {
-  const proc = spawn({
-    cmd,
-    cwd: options.cwd,
-    stdout: "pipe",
-    stderr: "pipe",
-    env: { ...process.env, ...options.env },
-  });
-  const stdout = await new Response(proc.stdout).text();
-  const stderr = await new Response(proc.stderr).text();
-  const exitCode = await proc.exited;
-  return { stdout, stderr, exitCode };
 }
 
 function assertOk(result: { success: boolean; error?: string }, msg: string) {

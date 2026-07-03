@@ -20,8 +20,6 @@ import { Command } from "commander";
 import inquirer from "inquirer";
 import ora from "ora";
 import {
-  ApiError,
-  MaintenanceError,
   checkGitHubUsername,
   checkUsername,
   getCurrentUser,
@@ -30,7 +28,8 @@ import {
   resendVerification,
   retrieveKey,
   signup,
-} from "../lib/api.js";
+} from "../lib/api/auth.js";
+import { ApiError, MaintenanceError } from "../lib/api/errors.js";
 import {
   DEFAULT_API_URL,
   clearAllConfig,

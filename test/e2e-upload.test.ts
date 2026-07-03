@@ -452,7 +452,7 @@ describe("E2E Upload Tests", () => {
       writeFileSync(join(testDir, "data.txt"), "Some data");
 
       // Import initDataset and configureLargefiles
-      const { initDataset, configureLargefiles } = await import("../src/lib/git-annex.js");
+      const { initDataset, configureLargefiles } = await import("../src/lib/git-annex/init");
 
       // Call initDataset (should run git annex init)
       const result = await initDataset(testDir);

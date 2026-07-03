@@ -14,30 +14,26 @@ import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import chalk from "chalk";
 import ora, { type Ora } from "ora";
-import {
-  ApiError,
-  createDataset,
-  errorDetail,
-  getDataset,
-  requestUploadCredentials,
-} from "../api.js";
+import { requestUploadCredentials } from "../api/data.js";
+import { createDataset, getDataset } from "../api/datasets.js";
+import { ApiError, errorDetail } from "../api/errors.js";
 import { printStepFailure } from "../cli-output.js";
 import { type LocalDatasetConfig, writeLocalConfig } from "../dataset-config.js";
+import { acceptGitHubInvitation, configureGitHubRemote } from "../git-annex/github.js";
 import {
-  acceptGitHubInvitation,
-  clearAnnexCredentials,
-  configureGitHubRemote,
   configureLargefiles,
-  configureS3Remote,
-  copyToAnnexRemote,
   ensureGitAnnexInitialized,
-  ensureLocalMainBranch,
-  getCurrentBranch,
   gitAnnexAdd,
   initDataset,
   isGitAnnexDataset,
+} from "../git-annex/init.js";
+import { ensureLocalMainBranch, getCurrentBranch } from "../git-annex/repo-state.js";
+import {
+  clearAnnexCredentials,
+  configureS3Remote,
   toS3Credentials,
-} from "../git-annex.js";
+} from "../git-annex/s3-remote.js";
+import { copyToAnnexRemote } from "../git-annex/transfer.js";
 import {
   type UploadProgress,
   initUploadProgress,

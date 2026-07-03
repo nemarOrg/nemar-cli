@@ -1,5 +1,5 @@
 import chalk from "chalk";
-import type { MaintenanceError } from "./api.js";
+import type { MaintenanceError } from "./api/errors.js";
 
 let printed = false;
 

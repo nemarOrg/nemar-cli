@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { ApiError, MaintenanceError, checkHealth } from "../src/lib/api";
+import { checkHealth } from "../src/lib/api/client";
+import { ApiError, MaintenanceError } from "../src/lib/api/errors";
 
 type ServerResponse = {
   status: number;

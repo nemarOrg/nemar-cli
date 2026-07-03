@@ -25,22 +25,19 @@ import chalk from "chalk";
 import { Command } from "commander";
 import inquirer from "inquirer";
 import ora from "ora";
+import { addCi } from "../lib/api/admin.js";
+import { getCurrentUser } from "../lib/api/auth.js";
+import { requestDownloadCredentials, requestUploadCredentials } from "../lib/api/data.js";
 import {
-  ApiError,
   type Dataset,
   type DatasetsListResponse,
   type NemarMetadataPayload,
   ORCID_REGEX,
-  PUBLICATION_STEPS,
-  addCi,
   approveAccessRequest,
   createDataset,
   denyAccessRequest,
-  errorDetail,
-  getCurrentUser,
   getDataset,
   getManifest,
-  getPublishStatus,
   getUserCiStatus,
   getVersionHistory,
   inviteCollaborator,
@@ -49,13 +46,16 @@ import {
   listDatasets,
   listManifestVersions,
   requestDatasetAccess,
-  requestDownloadCredentials,
-  requestPublication,
-  requestUploadCredentials,
-  resendPublishNotification,
   resolveSourceId,
   searchDatasets,
-} from "../lib/api.js";
+} from "../lib/api/datasets.js";
+import { ApiError, errorDetail } from "../lib/api/errors.js";
+import {
+  PUBLICATION_STEPS,
+  getPublishStatus,
+  requestPublication,
+  resendPublishNotification,
+} from "../lib/api/publish.js";
 import { isAwsCliAvailable } from "../lib/aws-cli.js";
 import { buildBidsFilterArgs, chooseGetFilter } from "../lib/bids-filter.js";
 import {
@@ -78,45 +78,53 @@ import {
   writeLocalConfig,
 } from "../lib/dataset-config.js";
 import {
-  acceptGitHubInvitation,
-  checkDownloadPrerequisites,
-  checkPrerequisites,
-  clearAnnexCredentials,
   cloneDataset,
-  collectFileManifest,
-  configureGitHubRemote,
-  configureLargefiles,
-  configureS3Remote,
-  copyToAnnexRemote,
-  countPendingDownload,
-  detectImportMarker,
-  dropFiles,
-  dropUnusedAnnexObjects,
-  enableS3Remote,
-  ensureGitAnnexInitialized,
-  ensureLocalMainBranch,
-  formatBytes,
-  getAnnexS3Remotes,
-  getCurrentBranch,
-  getDatasetData,
-  getDatasetIdFromRemote,
-  getLocalDatasetInfo,
-  gitAnnexAdd,
-  gitFetchOrigin,
-  gitMergeFastForward,
-  initDataset,
-  isGitAnnexDataset,
-  isWorkingTreeDirty,
   pushBranch,
   pushToGitHub,
+  saveDataset,
+} from "../lib/git-annex/clone-push.js";
+import {
+  acceptGitHubInvitation,
+  configureGitHubRemote,
+  verifyGitHubAuth,
+} from "../lib/git-annex/github.js";
+import {
+  configureLargefiles,
+  ensureGitAnnexInitialized,
+  gitAnnexAdd,
+  initDataset,
+  isGitAnnexDataset,
+} from "../lib/git-annex/init.js";
+import { checkDownloadPrerequisites, checkPrerequisites } from "../lib/git-annex/prereq.js";
+import {
+  detectImportMarker,
+  ensureLocalMainBranch,
+  getCurrentBranch,
+  getDatasetIdFromRemote,
+  getLocalDatasetInfo,
+  gitFetchOrigin,
+  gitMergeFastForward,
+  isWorkingTreeDirty,
   readLocalDatasetVersion,
   readRemoteHeadDatasetVersion,
   resolveUpstreamRef,
-  saveDataset,
+} from "../lib/git-annex/repo-state.js";
+import {
+  clearAnnexCredentials,
+  configureS3Remote,
+  enableS3Remote,
+  getAnnexS3Remotes,
   selectAnnexS3Remote,
   toS3Credentials,
-  verifyGitHubAuth,
-} from "../lib/git-annex.js";
+} from "../lib/git-annex/s3-remote.js";
+import {
+  collectFileManifest,
+  copyToAnnexRemote,
+  countPendingDownload,
+  dropFiles,
+  dropUnusedAnnexObjects,
+  getDatasetData,
+} from "../lib/git-annex/transfer.js";
 import {
   detectLicense,
   ensureLicenseFile,
@@ -133,7 +141,7 @@ import {
   openNeuroDatasetExists,
 } from "../lib/openneuro.js";
 import { checkPrerequisitesForCommand } from "../lib/prerequisites.js";
-import { DownloadProgressTracker } from "../lib/progress.js";
+import { DownloadProgressTracker, formatBytes } from "../lib/progress.js";
 import { promptForProvenance } from "../lib/provenance.js";
 import { bumpVersion, isValidStableVersion, parseVersion } from "../lib/semver.js";
 import type { UploadProgress } from "../lib/upload-progress.js";
@@ -3173,8 +3181,9 @@ Examples:
       }
 
       if (result.status === "approving") {
-        // Source of truth is `PUBLICATION_STEPS` in src/lib/api.ts, which
-        // mirrors the backend orchestrator. Showing fewer steps here than
+        // Source of truth is `PUBLICATION_STEPS` in shared/publication-steps.ts
+        // (re-exported by src/lib/api/publish.ts), shared with the backend
+        // orchestrator. Showing fewer steps here than
         // the backend actually runs (the legacy list missed
         // enrichment_check, version_doi, sync_nemar) made the status
         // display claim "all steps complete" while the backend was still

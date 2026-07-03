@@ -1,15 +1,21 @@
 /**
- * Real subprocess tests for runCommand's `unsetEnv` option (no mocks).
+ * Real subprocess tests for runCommand's env semantics (no mocks): the
+ * `unsetEnv` option and the GIT_TERMINAL_PROMPT=0 default.
  *
- * The OpenNeuro import fetches annexed metadata from OpenNeuro's PUBLIC bucket,
- * but a request signed as the CI `nemar-actions-datasets` identity is denied by
- * that IAM user's permissions boundary. git-annex only reads anonymously when
- * the AWS_* vars are ABSENT from the environment — setting them to "" is not
- * enough. `unsetEnv` must therefore delete the keys, not blank them (#768).
+ * unsetEnv (#768): the OpenNeuro import fetches annexed metadata from
+ * OpenNeuro's PUBLIC bucket, but a request signed as the CI
+ * `nemar-actions-datasets` identity is denied by that IAM user's permissions
+ * boundary. git-annex only reads anonymously when the AWS_* vars are ABSENT
+ * from the environment — setting them to "" is not enough. `unsetEnv` must
+ * therefore delete the keys, not blank them.
+ *
+ * GIT_TERMINAL_PROMPT=0: prevents git from blocking on interactive credential
+ * prompts (a would-be hang becomes a clean failure). Every subprocess in the
+ * CLI, including e2e-test.ts since #908, relies on this default.
  */
 
 import { describe, expect, test } from "bun:test";
-import { runCommand } from "../src/lib/git-annex";
+import { runCommand } from "../src/lib/git-annex/run-command";
 
 describe("runCommand unsetEnv (#768)", () => {
   test("deletes the named var so the child sees it as absent", async () => {
@@ -50,5 +56,21 @@ describe("runCommand unsetEnv (#768)", () => {
     });
     expect(r.exitCode).toBe(0);
     expect(r.stdout.trim()).toBe("ok");
+  });
+});
+
+describe("runCommand GIT_TERMINAL_PROMPT default", () => {
+  test("sets GIT_TERMINAL_PROMPT=0 by default", async () => {
+    const r = await runCommand(["bash", "-c", 'echo "${GIT_TERMINAL_PROMPT-ABSENT}"']);
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout.trim()).toBe("0");
+  });
+
+  test("options.env can override the default", async () => {
+    const r = await runCommand(["bash", "-c", 'echo "${GIT_TERMINAL_PROMPT-ABSENT}"'], {
+      env: { GIT_TERMINAL_PROMPT: "1" },
+    });
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout.trim()).toBe("1");
   });
 });
