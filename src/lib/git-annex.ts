@@ -3128,17 +3128,3 @@ export async function batchSetKeysPresent(
   }
   return { success, failed };
 }
-
-// =============================================================================
-// Backward-compatible aliases (to be removed in future versions)
-// =============================================================================
-
-/**
- * @deprecated Use initDataset instead. Will be removed in v1.0.0.
- */
-export const createDataladDataset = initDataset;
-
-/**
- * @deprecated Use isGitAnnexDataset instead. Will be removed in v1.0.0.
- */
-export const isDataladDataset = isGitAnnexDataset;
