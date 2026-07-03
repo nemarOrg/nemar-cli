@@ -1,0 +1,339 @@
+/**
+ * Admin routes: OpenNeuro import (create import, view import jobs,
+ * rollback/retry quarantined imports; issue #754).
+ *
+ * Moved verbatim from routes/admin.ts in #903 (epic #902); the only
+ * intentional changes are import paths, `adminRoutes` -> `admin`, and
+ * audit-log INSERTs routed through auditLogStatement().
+ */
+
+import { zValidator } from "@hono/zod-validator";
+import { z } from "zod";
+import { adminMiddleware, authMiddleware } from "../../middleware/auth";
+
+import { auditLogStatement } from "../../db/audit-log";
+import { SYSTEM_USER_ID } from "../../lib/constants";
+import { deleteDatasetCascade } from "../../services/deletion";
+import {
+  type GitHubRepo,
+  createRepository,
+  deleteRepository,
+} from "../../services/github";
+import { getDatasetsToken } from "../../services/github-auth";
+import { IMPORT_STATUSES } from "../../services/import-recovery";
+import { hasRole } from "../../types/bindings";
+import type { AdminRouter } from "./shared";
+
+export function registerImportRoutes(admin: AdminRouter): void {
+  // ─── Import external dataset ────────────────────────────────────────────────
+
+  // 8 chars: 2-char prefix + 6 digits (e.g., on007262)
+  const importDatasetSchema = z.object({
+    dataset_id: z
+      .string()
+      .regex(/^on\d{6}$/, "Import only supports 'on' prefix datasets (on######)"),
+    name: z.string().min(1).max(200),
+    description: z.string().optional(),
+    source: z.enum(["openneuro"]),
+    source_id: z.string().min(1).max(50),
+  });
+
+  /**
+   * POST /admin/datasets/import
+   *
+   * Import a dataset from an external source (e.g., OpenNeuro).
+   * Creates the D1 record and GitHub repo with a caller-specified dataset ID.
+   * The calling admin becomes the dataset owner (owner_user_id).
+   * Does not set up S3 credentials or presigned URLs; the CLI handles data copy.
+   */
+  admin.post(
+    "/datasets/import",
+    authMiddleware,
+    adminMiddleware,
+    zValidator("json", importDatasetSchema),
+    async (c) => {
+      const { dataset_id, name, description, source, source_id } = c.req.valid("json");
+      const db = c.env.DB;
+      const admin = c.get("user");
+
+      // Check for duplicate
+      const existing = await db
+        .prepare("SELECT dataset_id FROM datasets WHERE dataset_id = ?")
+        .bind(dataset_id)
+        .first<{ dataset_id: string }>();
+
+      if (existing) {
+        return c.json({ error: `Dataset ${dataset_id} already exists` }, 409);
+      }
+
+      // Create GitHub repo
+      const pat = await getDatasetsToken(c.env);
+      let githubRepo: GitHubRepo;
+      try {
+        githubRepo = await createRepository(
+          dataset_id,
+          `${name} - NEMAR Dataset (imported from OpenNeuro ${source_id})`,
+          true,
+          pat,
+        );
+      } catch (error) {
+        const msg = error instanceof Error ? error.message : String(error);
+        if (msg.includes("already exists")) {
+          return c.json({ error: `GitHub repo nemarDatasets/${dataset_id} already exists` }, 409);
+        }
+        console.error("Failed to create GitHub repo for import:", error);
+        return c.json({ error: `Failed to create GitHub repository: ${msg}` }, 500);
+      }
+
+      // Insert D1 record
+      try {
+        await db
+          .prepare(
+            `INSERT INTO datasets (dataset_id, name, description, owner_user_id, github_repo, is_sandbox, visibility, source, source_id, last_activity_at)
+           VALUES (?, ?, ?, ?, ?, 0, 'private', ?, ?, datetime('now'))`,
+          )
+          .bind(
+            dataset_id,
+            name,
+            description || null,
+            admin.id,
+            githubRepo.full_name,
+            source,
+            source_id,
+          )
+          .run();
+
+        // #754: seed the import_jobs state row the moment the dataset exists, so
+        // the import has end-to-end state even if every later callback is lost.
+        // A re-import after rollback resets a prior terminal row (preparing wins).
+        // Non-fatal: a failure here only loses tracking, not the import.
+        if (source_id) {
+          try {
+            await db
+              .prepare(
+                `INSERT INTO import_jobs (dataset_id, source, source_id, stage, status, created_at, updated_at)
+               VALUES (?, ?, ?, 'prepare', 'preparing', datetime('now'), datetime('now'))
+               ON CONFLICT(dataset_id) DO UPDATE SET
+                 source = excluded.source, source_id = excluded.source_id,
+                 stage = 'prepare', status = 'preparing',
+                 last_error = NULL, completed_at = NULL, updated_at = datetime('now')`,
+              )
+              .bind(dataset_id, source || "openneuro", source_id)
+              .run();
+          } catch (importJobErr) {
+            console.error(
+              `[import] failed to seed import_jobs row for ${dataset_id}:`,
+              importJobErr,
+            );
+          }
+        }
+
+        // #646: if this on* mirror's OpenNeuro source was already folded into
+        // `datasets` as a sentinel catalog row (dataset_id = source_id), remove
+        // that shadow so it doesn't double-list next to the new managed mirror.
+        // The 0028 fold dedups shadows whose on* mirror already existed at
+        // migration time; a mirror imported AFTER the fold needs this cleanup.
+        // Non-fatal: the import already succeeded; a stale shadow only mis-lists.
+        if (source_id) {
+          try {
+            const shadow = await db
+              .prepare("DELETE FROM datasets WHERE owner_user_id = ? AND dataset_id = ?")
+              .bind(SYSTEM_USER_ID, source_id)
+              .run();
+            if ((shadow.meta?.changes ?? 0) > 0) {
+              console.log(
+                `[import] removed folded catalog shadow ${source_id} superseded by managed mirror ${dataset_id}`,
+              );
+            }
+          } catch (shadowErr) {
+            console.error(
+              `[import] failed to remove folded catalog shadow ${source_id}:`,
+              shadowErr,
+            );
+          }
+        }
+      } catch (error) {
+        console.error("Failed to insert dataset record:", error);
+        const dbMsg = error instanceof Error ? error.message : String(error);
+        // Clean up GitHub repo
+        try {
+          await deleteRepository(dataset_id, pat);
+        } catch (cleanupErr) {
+          console.error("Failed to clean up GitHub repo after D1 failure:", cleanupErr);
+          return c.json(
+            {
+              error: `Failed to create dataset record: ${dbMsg}. GitHub repo nemarDatasets/${dataset_id} was created but could not be cleaned up. Manual deletion required.`,
+            },
+            500,
+          );
+        }
+        return c.json({ error: `Failed to create dataset record: ${dbMsg}` }, 500);
+      }
+
+      // Audit log
+      try {
+        await auditLogStatement(db, {
+          userId: admin.id,
+          action: "dataset_imported",
+          details: JSON.stringify({ dataset_id, source, source_id, name }),
+        }).run();
+      } catch (err) {
+        console.error(
+          `Failed to write audit log for dataset import ${dataset_id} by admin ${admin.id}:`,
+          err,
+        );
+      }
+
+      return c.json(
+        {
+          dataset_id,
+          name,
+          github_repo: githubRepo.full_name,
+          source,
+          source_id,
+        },
+        201,
+      );
+    },
+  );
+
+  // ============================================================================
+  // Import jobs (issue #754) - import state view + rollback/retry
+  // ============================================================================
+
+  /** GET /admin/imports[?status=] - list import_jobs with by-status counts. */
+  admin.get("/imports", async (c) => {
+    const db = c.env.DB;
+    const status = c.req.query("status");
+    let query = `SELECT dataset_id, source, source_id, stage, status, last_error,
+                      workflow_run_url, created_at, updated_at, completed_at
+               FROM import_jobs`;
+    const params: string[] = [];
+    if (status) {
+      query += " WHERE status = ?";
+      params.push(status);
+    }
+    // Surface the rows that need a human first.
+    query += " ORDER BY (status = 'failed') DESC, (status = 'quarantined') DESC, updated_at DESC";
+    const rows = await db
+      .prepare(query)
+      .bind(...params)
+      .all<{ status: string }>();
+    const results = rows.results ?? [];
+    // by_status is always a FLEET-WIDE count (independent of the ?status= filter)
+    // so the CLI summary line isn't misleading when a filter is applied.
+    const counts = await db
+      .prepare("SELECT status, COUNT(*) AS n FROM import_jobs GROUP BY status")
+      .all<{ status: string; n: number }>();
+    const by_status: Record<string, number> = {};
+    for (const s of IMPORT_STATUSES) by_status[s] = 0;
+    for (const row of counts.results ?? []) by_status[row.status] = row.n;
+    return c.json({ imports: results, total: results.length, by_status });
+  });
+
+  /**
+   * POST /admin/imports/:id/rollback - operator-confirmed cleanup of a
+   * failed/quarantined import (deletes GitHub repo + S3 + D1 via the same cascade
+   * as DELETE /admin/datasets/:id), then marks the import_jobs row rolled_back.
+   */
+  admin.post("/imports/:id/rollback", async (c) => {
+    const datasetId = c.req.param("id");
+    const requestingUser = c.get("user");
+    const db = c.env.DB;
+
+    const job = await db
+      .prepare("SELECT status FROM import_jobs WHERE dataset_id = ?")
+      .bind(datasetId)
+      .first<{ status: string }>();
+    if (!job) return c.json({ error: "No import job for this dataset" }, 404);
+    if (job.status !== "failed" && job.status !== "quarantined") {
+      return c.json(
+        { error: `Import is '${job.status}', not failed/quarantined; refusing rollback` },
+        409,
+      );
+    }
+
+    // Defensive permission mirror of DELETE /datasets/:id: an import whose dataset
+    // somehow became published needs owner role (it should never be in quarantine,
+    // but never auto-delete a published dataset).
+    const dataset = await db
+      .prepare("SELECT owner_user_id, concept_doi, visibility FROM datasets WHERE dataset_id = ?")
+      .bind(datasetId)
+      .first<{ owner_user_id: number; concept_doi: string | null; visibility: string }>();
+    if (dataset) {
+      if (dataset.owner_user_id === SYSTEM_USER_ID) {
+        return c.json({ error: "System catalog entry; cannot roll back here" }, 400);
+      }
+      const hasDoiOrPublished = dataset.concept_doi !== null || dataset.visibility === "public";
+      if (hasDoiOrPublished && !hasRole(requestingUser.role, "owner")) {
+        return c.json(
+          { error: "This import's dataset is published; only the NEMAR owner can roll it back" },
+          403,
+        );
+      }
+    }
+
+    let result: Awaited<ReturnType<typeof deleteDatasetCascade>>;
+    try {
+      result = await deleteDatasetCascade(db, c.env, datasetId, { bypassGovernance: true });
+    } catch (err) {
+      return c.json(
+        { error: `Rollback cascade failed: ${err instanceof Error ? err.message : String(err)}` },
+        500,
+      );
+    }
+    if (!result.deleted) {
+      // Partial cascade: leave the row quarantined (surfaced) rather than claim a
+      // clean rollback. The operator sees the warnings and can retry.
+      await db
+        .prepare(
+          `UPDATE import_jobs SET status = 'quarantined', last_error = ?, updated_at = datetime('now')
+         WHERE dataset_id = ?`,
+        )
+        .bind(`manual rollback incomplete: ${result.warnings.join("; ")}`, datasetId)
+        .run();
+      return c.json({
+        ok: false,
+        dataset_id: datasetId,
+        rolled_back: false,
+        steps: result.steps,
+        warnings: result.warnings,
+      });
+    }
+    await db
+      .prepare(
+        `UPDATE import_jobs SET status = 'rolled_back', last_error = ?, completed_at = datetime('now'), updated_at = datetime('now')
+       WHERE dataset_id = ?`,
+      )
+      .bind(`manual rollback by user ${requestingUser.id}`, datasetId)
+      .run();
+    return c.json({
+      ok: true,
+      dataset_id: datasetId,
+      rolled_back: true,
+      steps: result.steps,
+      warnings: result.warnings,
+    });
+  });
+
+  /**
+   * POST /admin/imports/:id/retry - reset a failed/quarantined row to `preparing`
+   * so a re-dispatched import is expected. Does not itself re-run the workflow
+   * (the operator re-dispatches onboard-openneuro.yml; the prepare callback also
+   * self-heals the row).
+   */
+  admin.post("/imports/:id/retry", async (c) => {
+    const datasetId = c.req.param("id");
+    const res = await c.env.DB.prepare(
+      `UPDATE import_jobs
+       SET status = 'preparing', stage = 'prepare', last_error = NULL, completed_at = NULL, updated_at = datetime('now')
+     WHERE dataset_id = ? AND status IN ('failed', 'quarantined')`,
+    )
+      .bind(datasetId)
+      .run();
+    if (res.meta.changes === 0) {
+      return c.json({ error: "No failed/quarantined import to retry for this dataset" }, 409);
+    }
+    return c.json({ ok: true, dataset_id: datasetId, status: "preparing" });
+  });
+}
