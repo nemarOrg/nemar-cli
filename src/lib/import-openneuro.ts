@@ -22,14 +22,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import chalk from "chalk";
 import ora from "ora";
-import {
-  addCi,
-  approvePublication,
-  getUserCiStatus,
-  importDataset,
-  reindexDataset,
-  requestPublication,
-} from "./api.js";
+import { addCi, importDataset, reindexDataset } from "./api/admin.js";
+import { getUserCiStatus } from "./api/datasets.js";
+import { approvePublication, requestPublication } from "./api/publish.js";
 import {
   type S3Credentials,
   batchSetKeysPresent,

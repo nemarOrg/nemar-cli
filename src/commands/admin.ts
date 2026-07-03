@@ -26,40 +26,25 @@ import { Command } from "commander";
 import inquirer from "inquirer";
 import ora from "ora";
 import {
-  ApiError,
-  type Dataset,
   type EmailPreferences,
   type HedSweepBatchResponse,
-  type NemarMetadataPayload,
-  ORCID_REGEX,
-  type PublishProgressInfo,
   type ReindexBulkOptions,
   type ReindexBulkResponse,
   type ReindexFilter,
   type ReindexOptions,
   type ReindexResponse,
-  type StepResult,
   type SummaryVersionCoverage,
   addCi,
-  applyS3Lock,
-  approvePublication,
   approveUser,
   bulkDeleteDatasets,
   changeUserRole,
   changeVisibility,
   createConceptDoi,
-  createNotice,
   deleteDataset,
-  deleteNotice,
-  denyPublication,
   dispatchManifest,
   enforceBulk,
   enforceDataset,
-  errorDetail,
-  finalizeDataset,
   getCiStatus,
-  getDataset,
-  getDatasetFiles,
   getDoiInfo,
   getEmailPreferences,
   getFleetDrift,
@@ -67,9 +52,6 @@ import {
   getSummaryCoverage,
   hedSweep,
   hedSweepReset,
-  listAdminNotices,
-  listDatasets,
-  listPublishRequests,
   listUsers,
   publishDataset,
   reindexBulk,
@@ -79,12 +61,30 @@ import {
   revokeUser,
   rollbackImport,
   sendBroadcast,
-  submitEnrichment,
   syncCi,
   updateDoi,
   updateEmailPreferences,
   validateCi,
-} from "../lib/api.js";
+} from "../lib/api/admin.js";
+import { applyS3Lock, getDatasetFiles } from "../lib/api/data.js";
+import {
+  type Dataset,
+  type NemarMetadataPayload,
+  ORCID_REGEX,
+  finalizeDataset,
+  getDataset,
+  listDatasets,
+  submitEnrichment,
+} from "../lib/api/datasets.js";
+import { ApiError, errorDetail } from "../lib/api/errors.js";
+import { createNotice, deleteNotice, listAdminNotices } from "../lib/api/notices.js";
+import {
+  type PublishProgressInfo,
+  type StepResult,
+  approvePublication,
+  denyPublication,
+  listPublishRequests,
+} from "../lib/api/publish.js";
 import { getConfig, isAuthenticated } from "../lib/config.js";
 import {
   type ConfirmOptions,

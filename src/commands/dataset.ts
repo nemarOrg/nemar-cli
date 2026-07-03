@@ -25,22 +25,19 @@ import chalk from "chalk";
 import { Command } from "commander";
 import inquirer from "inquirer";
 import ora from "ora";
+import { addCi } from "../lib/api/admin.js";
+import { getCurrentUser } from "../lib/api/auth.js";
+import { requestDownloadCredentials, requestUploadCredentials } from "../lib/api/data.js";
 import {
-  ApiError,
   type Dataset,
   type DatasetsListResponse,
   type NemarMetadataPayload,
   ORCID_REGEX,
-  PUBLICATION_STEPS,
-  addCi,
   approveAccessRequest,
   createDataset,
   denyAccessRequest,
-  errorDetail,
-  getCurrentUser,
   getDataset,
   getManifest,
-  getPublishStatus,
   getUserCiStatus,
   getVersionHistory,
   inviteCollaborator,
@@ -49,13 +46,16 @@ import {
   listDatasets,
   listManifestVersions,
   requestDatasetAccess,
-  requestDownloadCredentials,
-  requestPublication,
-  requestUploadCredentials,
-  resendPublishNotification,
   resolveSourceId,
   searchDatasets,
-} from "../lib/api.js";
+} from "../lib/api/datasets.js";
+import { ApiError, errorDetail } from "../lib/api/errors.js";
+import {
+  PUBLICATION_STEPS,
+  getPublishStatus,
+  requestPublication,
+  resendPublishNotification,
+} from "../lib/api/publish.js";
 import { isAwsCliAvailable } from "../lib/aws-cli.js";
 import { buildBidsFilterArgs, chooseGetFilter } from "../lib/bids-filter.js";
 import {

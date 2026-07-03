@@ -24,7 +24,7 @@ import {
   type PublishProgressInfo,
   approvePublication,
   stepIndexFor,
-} from "../src/lib/api";
+} from "../src/lib/api/publish";
 import { setConfig } from "../src/lib/config";
 
 // --------------------------------------------------------------------------

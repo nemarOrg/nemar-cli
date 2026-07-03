@@ -10,15 +10,10 @@
 import chalk from "chalk";
 import { Command } from "commander";
 import ora from "ora";
-import {
-  ApiError,
-  completeSandbox,
-  createDataset,
-  finalizeDataset,
-  getSandboxStatus,
-  requestUploadCredentials,
-  resetSandbox,
-} from "../lib/api.js";
+import { completeSandbox, getSandboxStatus, resetSandbox } from "../lib/api/auth.js";
+import { requestUploadCredentials } from "../lib/api/data.js";
+import { createDataset, finalizeDataset } from "../lib/api/datasets.js";
+import { ApiError } from "../lib/api/errors.js";
 import { deleteConfig, getConfig, isAuthenticated, setConfig } from "../lib/config.js";
 import {
   type ConfirmOptions,

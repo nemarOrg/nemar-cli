@@ -16,7 +16,8 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { requestUploadCredentials, resetTestDataset } from "./api.js";
+import { resetTestDataset } from "./api/admin.js";
+import { requestUploadCredentials } from "./api/data.js";
 import {
   clearAnnexCredentials,
   cloneDataset,

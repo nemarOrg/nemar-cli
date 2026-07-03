@@ -14,13 +14,9 @@ import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import chalk from "chalk";
 import ora, { type Ora } from "ora";
-import {
-  ApiError,
-  createDataset,
-  errorDetail,
-  getDataset,
-  requestUploadCredentials,
-} from "../api.js";
+import { requestUploadCredentials } from "../api/data.js";
+import { createDataset, getDataset } from "../api/datasets.js";
+import { ApiError, errorDetail } from "../api/errors.js";
 import { printStepFailure } from "../cli-output.js";
 import { type LocalDatasetConfig, writeLocalConfig } from "../dataset-config.js";
 import {
