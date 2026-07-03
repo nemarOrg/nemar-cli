@@ -6,7 +6,9 @@ import type { Bindings, Variables } from "../../types/bindings";
 /**
  * The one admin router every domain file registers onto. A single router
  * instance (rather than mounted sub-routers) keeps routing semantics
- * identical to the pre-split monolithic admin.ts.
+ * identical to the pre-split monolithic admin.ts. Register functions must
+ * call admin.get/post/... directly; do not mount a sub-app via .route(),
+ * which has its own basePath/precedence semantics.
  */
 export type AdminRouter = Hono<{ Bindings: Bindings; Variables: Variables }>;
 

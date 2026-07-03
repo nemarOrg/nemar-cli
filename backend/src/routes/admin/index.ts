@@ -9,16 +9,16 @@
 
 import { Hono } from "hono";
 import { adminMiddleware, authMiddleware } from "../../middleware/auth";
-import type { Bindings, Variables } from "../../types/bindings";
 import { registerDatasetLifecycleRoutes } from "./datasets-lifecycle";
 import { registerDoiRoutes } from "./doi";
 import { registerFleetRoutes } from "./fleet";
 import { registerImportRoutes } from "./imports";
 import { registerNoticeRoutes } from "./notices";
 import { registerPublishRoutes } from "./publish";
+import type { AdminRouter } from "./shared";
 import { registerUsersRoutes } from "./users";
 
-export const adminRoutes = new Hono<{ Bindings: Bindings; Variables: Variables }>();
+export const adminRoutes: AdminRouter = new Hono();
 
 // All admin routes require authentication and admin role
 adminRoutes.use("*", authMiddleware);

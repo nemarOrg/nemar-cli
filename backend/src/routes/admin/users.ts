@@ -43,7 +43,7 @@ import type { AdminRouter } from "./shared";
  * but only an OWNER may manage someone else's (admins manage only themselves).
  * Pure resolution + a typed error result so the two handlers stay DRY.
  */
-async function resolveEmailPrefsTarget(
+export async function resolveEmailPrefsTarget(
   db: D1Database,
   requester: { id: number; username: string; role: string | null },
   requested: string | undefined,

@@ -86,16 +86,21 @@ describe("auditLogParams + AUDIT_LOG_INSERT_SQL", () => {
   });
 
   test("matches the legacy 3-column insert shape row-for-row", () => {
-    // The drifted pre-#903 shape used by two admin.ts call sites.
+    // The drifted pre-#903 shape used by two admin.ts call sites
+    // (dataset_deleted and dataset_imported).
     db.query("INSERT INTO audit_log (action, user_id, details) VALUES (?, ?, ?)").run(
-      "datasets_bulk_deleted",
+      "dataset_imported",
       7,
-      '{"count":3}',
+      '{"dataset_id":"on000001"}',
     );
     const legacy = lastRow("id = 1");
 
     const helper = insert(
-      auditLogParams({ userId: 7, action: "datasets_bulk_deleted", details: '{"count":3}' }),
+      auditLogParams({
+        userId: 7,
+        action: "dataset_imported",
+        details: '{"dataset_id":"on000001"}',
+      }),
     );
 
     const { id: _l, timestamp: _lt, ...legacyCols } = legacy;
