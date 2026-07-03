@@ -50,7 +50,8 @@ export function registerLlmEnrichRoutes(webhooks: WebhookRouter): void {
 
     if (!expectedToken) {
       // Diagnostic log to distinguish "operator misconfiguration" from "real
-      // token mismatch" — same rationale as /publish-version-doi above.
+      // token mismatch" — same rationale as the /publish-version-doi handler
+      // (routes/callbacks/version-doi.ts).
       console.error(
         "[llm-enrich] no webhook secret configured (NEMAR_WEBHOOK_TOKEN/GITHUB_WEBHOOK_SECRET both unset or empty)",
       );

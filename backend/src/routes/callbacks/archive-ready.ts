@@ -163,7 +163,8 @@ export function registerArchiveReadyRoutes(webhooks: WebhookRouter): void {
     }
 
     // Bounded auto-retry: re-dispatch a fresh archive build, fire-and-forget via
-    // waitUntil (like the other post-write side-effects in this file) so a slow
+    // waitUntil (the same pattern as the other callbacks' post-write side
+    // effects) so a slow
     // GitHub /dispatches call can't delay or time out the workflow's callback. The
     // retry-count increment happens HERE, only after a successful dispatch
     // (mirrors archiveRetrySweep) -- a failed dispatch (GitHub 422 / rate-limit)
