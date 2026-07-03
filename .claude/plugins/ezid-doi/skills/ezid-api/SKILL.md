@@ -89,5 +89,5 @@ Read `examples/` for working curl examples. Run `scripts/test-connectivity.sh` t
 - DataCite XML builder: `backend/src/services/datacite.ts`
 - Zenodo service (backup): `backend/src/services/zenodo.ts`
 - CLI DOI commands: `src/commands/admin.ts` (search for "doiCommand")
-- API client: `src/lib/api.ts` (search for "Doi")
-- Backend DOI routes: `backend/src/routes/admin.ts` (search for "doi")
+- API client: `src/lib/api/admin.ts` (search for "Doi")
+- Backend DOI routes: `backend/src/routes/admin/doi.ts`

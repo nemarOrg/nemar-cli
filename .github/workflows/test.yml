@@ -56,10 +56,10 @@ jobs:
               - 'backend/src/middleware/webSession.ts'
               - 'backend/src/middleware/auth.ts'
               - 'backend/src/routes/auth-web.ts'
-              # admin.ts hosts the /admin/test-fixtures/seed-web-user
+              # admin/users.ts hosts the /admin/test-fixtures/seed-web-user
               # endpoint the passwordless suite depends on; if the
               # fixture changes alone, the suite must still run.
-              - 'backend/src/routes/admin.ts'
+              - 'backend/src/routes/admin/users.ts'
               - 'backend/src/db/migrations/0026_passwordless_auth.sql'
               - 'backend/src/db/migrations/0015_email_preferences.sql'
               - 'backend/src/db/migrations/0017_broadcast_emails.sql'
