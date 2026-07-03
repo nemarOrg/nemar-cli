@@ -44,9 +44,6 @@ import { verifyGitHubWebhookSignature } from "../services/webhook-signature.js";
 import * as zenodo from "../services/zenodo.js";
 import type { Bindings } from "../types/bindings.js";
 
-export { buildEnrichmentCommitPayload } from "../services/enrich-dataset.js";
-export type { EnrichmentCommitPayload } from "../services/enrich-dataset.js";
-
 type WebhookContext = Context<{ Bindings: Bindings }>;
 
 /** Constant-time string comparison to prevent timing attacks on secret tokens. */
