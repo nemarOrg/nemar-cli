@@ -1,0 +1,128 @@
+/**
+ * Pure unit tests for the shared wire contract (epic #896, #898).
+ *
+ * No live backend: validates the schemas + version canonicalizer directly.
+ * The live-response drift guard is test/contract-live.test.ts (TEST_API_URL).
+ */
+
+import { describe, expect, test } from "bun:test";
+import {
+  NEUROSCHEMA_VERSION,
+  catalogItemSchema,
+  datasetListEnvelopeSchema,
+  isVersionTag,
+  neuroschemaDatasetSchema,
+  toBareVersion,
+  toVersionTag,
+  userMeResponseSchema,
+  versionTagSchema,
+} from "../shared/contract/index.js";
+
+describe("version canonicalizer", () => {
+  test("toVersionTag is idempotent and coerces bare -> tag", () => {
+    expect(toVersionTag("1.0.0")).toBe("v1.0.0");
+    expect(toVersionTag("v1.0.0")).toBe("v1.0.0");
+    expect(toBareVersion("v2.3.4")).toBe("2.3.4");
+    expect(isVersionTag("v1.0.0")).toBe(true);
+    expect(isVersionTag("1.0.0")).toBe(false);
+  });
+
+  test("versionTagSchema accepts bare or tagged, outputs canonical tag", () => {
+    expect(versionTagSchema.parse("1.2.3")).toBe("v1.2.3");
+    expect(versionTagSchema.parse("v1.2.3")).toBe("v1.2.3");
+    expect(versionTagSchema.parse("1.0.0-rc1")).toBe("v1.0.0-rc1");
+    expect(() => versionTagSchema.parse("latest")).toThrow();
+    expect(() => versionTagSchema.parse("1.0")).toThrow();
+  });
+});
+
+describe("catalog item schema", () => {
+  const row = {
+    dataset_id: "nm000108",
+    id: "nm000108",
+    name: "Test",
+    description: null,
+    status: "active",
+    visibility: "public",
+    concept_doi: null,
+    doi: null,
+    created_at: "2026-01-01T00:00:00Z",
+    owner_username: "someone",
+    source: "nemar",
+    modalities: "eeg",
+    participants: 12,
+    tasks: "rest",
+    authors: "Doe, J.",
+    license: "CC0",
+    file_size: 123456,
+    file_size_formatted: "120 KB",
+    latest_version: "1.0.0", // bare on the wire today; coerced to tag on parse
+  };
+
+  test("accepts a current catalog row and canonicalizes latest_version", () => {
+    const parsed = catalogItemSchema.parse(row);
+    expect(parsed.latest_version).toBe("v1.0.0");
+  });
+
+  test("tolerates additive unknown fields (passthrough)", () => {
+    const parsed = catalogItemSchema.parse({ ...row, some_future_field: 1 });
+    expect((parsed as Record<string, unknown>).some_future_field).toBe(1);
+  });
+
+  test("rejects a row missing a required field", () => {
+    const { name, ...noName } = row;
+    void name;
+    expect(() => catalogItemSchema.parse(noName)).toThrow();
+  });
+
+  test("list envelope validates", () => {
+    expect(() =>
+      datasetListEnvelopeSchema.parse({ datasets: [row], count: 1, total_count: 1 }),
+    ).not.toThrow();
+  });
+});
+
+describe("user /me envelope schema", () => {
+  test("accepts the nested {user, token} envelope", () => {
+    const env = {
+      user: { id: 1, username: "u", email: "e@x.org", github_username: "gh", role: "user" },
+      token: { prefix: "abc", created_at: "2026-01-01", last_used_at: null },
+    };
+    const parsed = userMeResponseSchema.parse(env);
+    expect(parsed.user.username).toBe("u");
+  });
+
+  test("rejects a flat user (the getCurrentUser bug shape)", () => {
+    expect(() =>
+      userMeResponseSchema.parse({ id: 1, username: "u", email: "e@x.org", role: "user" }),
+    ).toThrow();
+  });
+});
+
+describe("neuroschema dataset schema", () => {
+  test("pins the v0.3.0 envelope + required identity fields", () => {
+    expect(NEUROSCHEMA_VERSION).toBe("0.3.0");
+    const ds = {
+      schema_version: "0.3.0",
+      doc_type: "dataset",
+      dataset_id: "nm000108",
+      name: "Test",
+      source: "nemar",
+      recording_modality: ["EEG"],
+    };
+    expect(() => neuroschemaDatasetSchema.parse(ds)).not.toThrow();
+  });
+
+  test("rejects a wrong schema_version or empty modality", () => {
+    const base = {
+      schema_version: "0.3.0",
+      doc_type: "dataset",
+      dataset_id: "nm000108",
+      name: "T",
+      source: "nemar",
+      recording_modality: ["EEG"],
+    };
+    expect(() => neuroschemaDatasetSchema.parse({ ...base, schema_version: "0.2.0" })).toThrow();
+    expect(() => neuroschemaDatasetSchema.parse({ ...base, recording_modality: [] })).toThrow();
+  });
+});
