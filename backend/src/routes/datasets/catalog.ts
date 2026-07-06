@@ -753,6 +753,6 @@ export function registerCatalogRoutes(datasetRoutes: DatasetsRouter): void {
       c.header("Cache-Control", "public, max-age=30, s-maxage=300, stale-while-revalidate=600");
       c.header("Vary", "Authorization");
     }
-    return c.json({ dataset: withCanonicalLatestVersion(dataset as Record<string, unknown>) });
+    return c.json({ dataset: withCanonicalLatestVersion(dataset) });
   });
 }
