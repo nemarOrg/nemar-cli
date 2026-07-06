@@ -213,7 +213,13 @@ FRONTEND_URL = "https://nemar.org"
 # on the sandbox ORCID app; sandbox permits http/localhost.
 APP_BASE_URL = "http://localhost:4321"
 AWS_REGION = "us-east-2"
-S3_BUCKET = "nemar"
+# Dedicated dev/staging bucket (epic #923). Physically separate from prod `nemar`
+# so a dev bug can never touch real data or the prod bucket policy. Mirrors prod:
+# Object Lock + versioning enabled, same public-access-block, same
+# PublicReadExceptPrivate deny-list policy. The dev worker's IAM principal
+# (nemar-worker-dev) has full access to nemar-dev + read-only prod, and cannot
+# write/delete prod nm* data (verified via IAM policy simulation).
+S3_BUCKET = "nemar-dev"
 # Sandbox (xx) dataset-ID partition (epic #923). Dev/test allocates
 # xx090001-xx099999; prod (SANDBOX_ID_CEILING="89999") owns xx000001-xx089999.
 # The exemplar fleet pins the top sub-band (xx099900+).
@@ -228,12 +234,15 @@ ZARR_CACHE_BASE_URL = ""
 # explicit value would refuse to scope to a workers.dev hostname.
 WEB_SESSION_COOKIE_DOMAIN = ""
 # Centralized manifest workflow flag (#557, relocated to
-# nemarDatasets/.github in #564). SCCN dev is the designated soak target.
-# MANIFEST_CALLBACK_SECRET is set on both the Worker and nemarDatasets org
-# (visibility=all repos) as of 2026-05-18. Promote to prod after a week of
-# clean runs against this dev environment.
+# nemarDatasets/.github in #564). Soak on dev is COMPLETE and the flag is "true"
+# in prod. Dev now runs manifests INLINE (epic #923): the central workflow on
+# nemarDatasets/.github writes to s3://nemar (hardcoded), so with
+# S3_BUCKET=nemar-dev it would land manifests in the wrong bucket. Inline
+# generation targets env.S3_BUCKET (nemar-dev) and is fine for the small staging
+# exemplars (the file-count timeout wall does not bite). Phase 5 adds an
+# s3_bucket dispatch param that lets the central workflow follow the bucket.
 # Redeploy to change.
-MANIFEST_VIA_CENTRAL_WORKFLOW = "true"
+MANIFEST_VIA_CENTRAL_WORKFLOW = "false"
 # Auto-import flag (#775). Dev has no cron triggers, so this never runs in dev;
 # present only for binding consistency.
 AUTO_IMPORT_ENABLED = "false"
