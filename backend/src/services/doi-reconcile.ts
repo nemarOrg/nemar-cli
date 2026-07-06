@@ -7,17 +7,18 @@
  * the transition on the next mint retry; this bounded daily sweep is the
  * backstop for the case where no retry ever happens. Mirrors archiveRetrySweep.
  *
- * No new D1 column: it checks the most-recently-updated datasets carrying an
- * EZID version DOI (a fresh mint-crash bumps updated_at, so recent is the right
- * bias) and asks EZID for each DOI's status. Cheap (bounded batch of getIdentifier
- * calls) and self-correcting.
+ * No new D1 column (avoids a migration-number clash with the paused #923 epic):
+ * each run scans a bounded, day-rotated window over ALL datasets carrying an
+ * EZID version DOI and asks EZID each DOI's status, completing any stuck
+ * reserved. The rotation guarantees every row is visited within
+ * ceil(total/batch) days regardless of churn — a stuck DOI is exactly the row
+ * that stops being updated, so a recency window would starve it.
  */
 
 import { datasetVersionLandingUrl } from "../../../shared/datacite-constants.js";
 import type { Bindings } from "../types/bindings.js";
 import { resolveEzidAuth } from "./doi.js";
 import { getIdentifier, makePublic } from "./ezid.js";
-import { getDatasetsToken } from "./github-auth.js";
 
 /** Datasets inspected per sweep run. */
 export const DOI_RECONCILE_BATCH = 25;
@@ -47,15 +48,46 @@ export function isEzidNemarDoi(doi: string): boolean {
   return doi.startsWith(PROD_SHOULDER_PREFIX) || doi.startsWith(SANDBOX_SHOULDER_PREFIX);
 }
 
-export async function reconcileReservedVersionDois(env: Bindings): Promise<void> {
+const MS_PER_DAY = 86_400_000;
+
+/**
+ * Deterministic day-indexed offset that rotates a fixed-size scan window over
+ * all `total` rows, so every row is visited within `ceil(total/batch)` days
+ * regardless of ordering/churn. Pure + exported for unit testing.
+ */
+export function rotationOffset(total: number, nowMs: number, batch = DOI_RECONCILE_BATCH): number {
+  if (total <= 0) return 0;
+  const buckets = Math.ceil(total / batch);
+  return (Math.floor(nowMs / MS_PER_DAY) % buckets) * batch;
+}
+
+export async function reconcileReservedVersionDois(
+  env: Bindings,
+  nowMs = Date.now(),
+): Promise<void> {
+  const WHERE = "latest_version_doi IS NOT NULL AND latest_version_doi != ''";
   let rows: DoiRow[];
   try {
+    // Rotate through ALL datasets carrying a version DOI over successive days
+    // rather than only the recently-updated 25. A stuck-reserved DOI is exactly
+    // the row that STOPS being updated, so unrelated churn (auto-import, HED
+    // sweeps, ...) would permanently starve a recency window; a deterministic
+    // day-indexed offset guarantees every row is checked within
+    // ceil(total / batch) days regardless of churn.
+    const total =
+      (
+        await env.DB.prepare(`SELECT COUNT(*) AS n FROM datasets WHERE ${WHERE}`).first<{
+          n: number;
+        }>()
+      )?.n ?? 0;
+    if (total === 0) return;
+    const offset = rotationOffset(total, nowMs);
     const res = await env.DB.prepare(
       `SELECT dataset_id, latest_version_doi FROM datasets
-       WHERE latest_version_doi IS NOT NULL AND latest_version_doi != ''
-       ORDER BY updated_at DESC LIMIT ?`,
+       WHERE ${WHERE}
+       ORDER BY dataset_id LIMIT ? OFFSET ?`,
     )
-      .bind(DOI_RECONCILE_BATCH)
+      .bind(DOI_RECONCILE_BATCH, offset)
       .all<DoiRow>();
     rows = res.results ?? [];
   } catch (err) {
@@ -66,14 +98,6 @@ export async function reconcileReservedVersionDois(env: Bindings): Promise<void>
     return;
   }
   if (rows.length === 0) return;
-  // getDatasetsToken is unused by the reconcile itself, but its availability is
-  // a cheap proxy for "this is a fully-provisioned environment"; skip the sweep
-  // (rather than spraying EZID errors) where core secrets are absent.
-  try {
-    await getDatasetsToken(env);
-  } catch {
-    return;
-  }
 
   let checked = 0;
   let reconciled = 0;

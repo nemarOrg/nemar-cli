@@ -264,6 +264,24 @@ async function createZenodoConceptDoi(
  * immediately makes it public, and updates the concept DOI to
  * include HasVersion back-references to all versions.
  */
+/** What to do when createIdentifier reports an EZID version DOI already exists. */
+export type ExistingVersionDoiAction = "return_public" | "complete_reserved" | "error";
+
+/**
+ * Decide how to handle an already-existing version identifier (epic #896 #900).
+ * - `public`     -> the prior mint fully completed; return it (idempotent).
+ * - `reserved`   -> a prior mint crashed before makePublic; finish the transition.
+ * - anything else (`unavailable` = a deliberately tombstoned DOI, or an unknown
+ *   status) -> ERROR. Never silently makePublic a non-reserved identifier: that
+ *   would resurrect a tombstoned DOI back to resolving.
+ * Pure + exported so the three-way branch is unit-testable without EZID.
+ */
+export function classifyExistingVersionDoi(status: EzidStatus): ExistingVersionDoiAction {
+  if (status === "public") return "return_public";
+  if (status === "reserved") return "complete_reserved";
+  return "error";
+}
+
 export async function createEzidVersionDoi(
   env: EzidEnv,
   opts: {
@@ -320,7 +338,8 @@ export async function createEzidVersionDoi(
       throw error;
     }
     identifier = await getIdentifier(auth, fullIdentifier);
-    if (identifier.status === "public") {
+    const action = classifyExistingVersionDoi(identifier.status);
+    if (action === "return_public") {
       return {
         doi,
         provider: "ezid",
@@ -328,7 +347,14 @@ export async function createEzidVersionDoi(
         status: identifier.status,
       };
     }
-    // status is "reserved" (or otherwise not public): fall through to makePublic.
+    if (action === "error") {
+      // `unavailable` (deliberately tombstoned) or an unknown status: refuse to
+      // silently makePublic it back to resolving.
+      throw new Error(
+        `Version DOI ${doi} already exists with unexpected status "${identifier.status}"; refusing to makePublic`,
+      );
+    }
+    // action === "complete_reserved": fall through to makePublic below.
   }
 
   // Make the version DOI public (also runs for the resume-a-reserved path above).
