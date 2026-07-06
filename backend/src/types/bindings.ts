@@ -46,6 +46,14 @@ export interface Bindings {
    *  to app.nemar.org per nemarOrg/website#46; flip this env var at
    *  cutover without redeploying code. */
   WEB_SESSION_COOKIE_DOMAIN?: string;
+  /** Sandbox (xx) dataset-ID allocation partition, decimal strings (epic #923).
+   *  Prevents repo-name collisions in the shared nemarDatasets org between
+   *  prod- and dev/test-created sandbox datasets. Prod sets CEILING="89999"
+   *  (allocates xx000001-xx089999); dev/test sets FLOOR="90001" (allocates
+   *  xx090001-xx099999). Both optional and clamped to [start, 99999], so an
+   *  absent or bad value only widens/narrows within the valid id range. */
+  SANDBOX_ID_FLOOR?: string;
+  SANDBOX_ID_CEILING?: string;
 
   // Secrets
   GITHUB_ADMIN_PAT: string;

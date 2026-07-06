@@ -66,8 +66,13 @@ const createDatasetSchema = z.object({
   sandbox: z.boolean().optional(), // If true, creates sandbox dataset (xx000XXX)
 });
 
-// Sandbox file size limit: 10MB total
+// Sandbox file size limit: 10MB total in production (sandbox is for exercising
+// the workflow, not storing real data). Non-production staging (epic #923) needs
+// realistic exemplars, so it gets a larger cap; the exemplar clone tool bypasses
+// this path entirely via server-side S3 copy, but direct CLI staging uploads
+// still flow through here.
 const SANDBOX_MAX_TOTAL_SIZE = 10 * 1024 * 1024;
+const SANDBOX_MAX_TOTAL_SIZE_NONPROD = 500 * 1024 * 1024;
 
 /**
  * Generate presigned upload URLs for data files.
@@ -175,18 +180,21 @@ export function registerUploadRoutes(datasetRoutes: DatasetsRouter): void {
         }
       }
 
-      // Validate sandbox file size limit
+      // Validate sandbox file size limit (larger outside production, see const)
+      const sandboxMaxTotalSize = isProduction
+        ? SANDBOX_MAX_TOTAL_SIZE
+        : SANDBOX_MAX_TOTAL_SIZE_NONPROD;
       if (sandbox && files && files.length > 0) {
         const totalSize = files.reduce((sum, f) => sum + f.size, 0);
-        if (totalSize > SANDBOX_MAX_TOTAL_SIZE) {
+        if (totalSize > sandboxMaxTotalSize) {
           const sizeMB = (totalSize / (1024 * 1024)).toFixed(2);
-          const limitMB = (SANDBOX_MAX_TOTAL_SIZE / (1024 * 1024)).toFixed(0);
+          const limitMB = (sandboxMaxTotalSize / (1024 * 1024)).toFixed(0);
           return c.json(
             {
               error: "Sandbox file size limit exceeded",
               message: `Sandbox datasets are limited to ${limitMB}MB total. Your dataset is ${sizeMB}MB. Sandbox is for testing the workflow, not storing real data.`,
               total_size: totalSize,
-              limit: SANDBOX_MAX_TOTAL_SIZE,
+              limit: sandboxMaxTotalSize,
             },
             400,
           );
@@ -292,10 +300,20 @@ export function registerUploadRoutes(datasetRoutes: DatasetsRouter): void {
       // There is a TOCTOU gap between ID generation (SELECT) and the INSERT
       // below. The UNIQUE constraint on datasets.dataset_id prevents duplicates;
       // we retry on conflict to handle the rare concurrent-creation case.
+      // Sandbox ID range partition (epic #923): prod caps at SANDBOX_ID_CEILING
+      // (89999), dev/test floors at SANDBOX_ID_FLOOR (90001), so the shared
+      // nemarDatasets org never has xx repo-name collisions. Unset -> full range.
+      const parseRangeBound = (v: string | undefined): number | undefined => {
+        const n = v ? Number.parseInt(v, 10) : Number.NaN;
+        return Number.isFinite(n) ? n : undefined;
+      };
+      const sandboxIdFloor = parseRangeBound(c.env.SANDBOX_ID_FLOOR);
+      const sandboxIdCeiling = parseRangeBound(c.env.SANDBOX_ID_CEILING);
+
       let datasetId: string;
       const MAX_ID_RETRIES = 3;
       for (let attempt = 0; ; attempt++) {
-        datasetId = await generateDatasetId(db, !!sandbox);
+        datasetId = await generateDatasetId(db, !!sandbox, { sandboxIdFloor, sandboxIdCeiling });
         try {
           // Claim the ID early with a minimal INSERT to close the TOCTOU gap.
           // license/license_tier are intentionally omitted: no license is known

@@ -8,7 +8,7 @@
  * intentional changes are import paths and the register-function wrapper.
  */
 
-import { isValidDatasetId } from "../../services/datasetId.js";
+import { isDevRangeDatasetId, isValidDatasetId } from "../../services/datasetId.js";
 import { getDatasetsToken } from "../../services/github-auth.js";
 import {
   triggerEnrichmentRun,
@@ -313,6 +313,18 @@ export function registerGithubWebhookRoutes(webhooks: WebhookRouter): void {
         `[github-webhook] push delivery ${deliveryId} had unparseable JSON: ${err instanceof Error ? err.message : String(err)}`,
       );
       return c.json({ ok: true, dispatched: false, reason: "unparseable_payload" });
+    }
+
+    // Dev/test staging repos (xx09NNNN, epic #923) live in the shared
+    // nemarDatasets org but belong to the dev worker, not prod. The production
+    // worker must never dispatch enrichment/zarr/version-DOI runs against them:
+    // there is no prod D1 row, and the central workflows' callbacks would 404.
+    // Short-circuit here on prod. (Phase 5 adds a forward of the raw, still
+    // HMAC-signed delivery to the dev worker's DEV_WEBHOOK_MIRROR_URL; the dev
+    // worker, ENVIRONMENT != "production", does not take this branch and
+    // dispatches normally.)
+    if (c.env.ENVIRONMENT === "production" && isDevRangeDatasetId(payload.repository?.name ?? "")) {
+      return c.json({ ok: true, dispatched: false, reason: "dev_range_repo" });
     }
 
     // Evaluate both decision functions. A given push delivery should only
