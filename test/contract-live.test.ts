@@ -18,13 +18,15 @@
 import { describe, expect, test } from "bun:test";
 import "./setup";
 import {
-  catalogItemSchema,
   datasetDetailEnvelopeSchema,
   datasetListEnvelopeSchema,
   datasetSearchEnvelopeSchema,
   neuroschemaDatasetSchema,
+  strictVersionTagSchema,
   userMeResponseSchema,
 } from "../shared/contract/index.js";
+import { getCurrentUser } from "../src/lib/api/auth.js";
+import { setConfig } from "../src/lib/config.js";
 import {
   compileNeuroschemaDatasetValidator,
   formatAjvErrors,
@@ -54,6 +56,17 @@ d("live wire contract", () => {
     if (!r.success)
       throw new Error(`/datasets drift: ${JSON.stringify(r.error.issues.slice(0, 6))}`);
     expect(r.success).toBe(true);
+
+    // #899: the WIRE value must already be the canonical vX.Y.Z tag, not merely
+    // tag-shaped after the schema's coercion. Assert the RAW value (pre-coercion)
+    // with the non-coercing strict schema so a dropped withCanonicalLatestVersion
+    // call site fails here. (The envelope schema above coerces, so it can't.)
+    const rawRows = (body as { datasets?: Array<{ latest_version?: unknown }> }).datasets ?? [];
+    for (const row of rawRows) {
+      if (typeof row.latest_version === "string" && row.latest_version) {
+        expect(strictVersionTagSchema.safeParse(row.latest_version).success).toBe(true);
+      }
+    }
   });
 
   test("GET /datasets/:id matches the detail envelope (list/search parity)", async () => {
@@ -73,6 +86,20 @@ d("live wire contract", () => {
     if (!r.success)
       throw new Error(`/datasets/search drift: ${JSON.stringify(r.error.issues.slice(0, 6))}`);
     expect(r.success).toBe(true);
+  });
+
+  test("getCurrentUser() unwraps the envelope to a flat user (#899)", async () => {
+    if (!TEST_CONFIG.adminApiKey) return; // no key configured; skip
+    // setup.ts isolates NEMAR_CONFIG_DIR to a temp dir, so writing the key here
+    // does not touch the developer's real config.
+    setConfig("apiKey", TEST_CONFIG.adminApiKey);
+    const user = await getCurrentUser();
+    // Flat field access must work — the bug returned the {user,token} envelope,
+    // so these reads were all undefined at runtime.
+    expect(typeof user.email).toBe("string");
+    expect(user.role).toBeTruthy();
+    // And it must be the unwrapped user, not the nested envelope.
+    expect("user" in (user as Record<string, unknown>)).toBe(false);
   });
 
   test("GET /users/me matches the {user, token} envelope", async () => {

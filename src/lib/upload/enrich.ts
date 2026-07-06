@@ -118,7 +118,7 @@ export async function collectAuthorOrcids(
         try {
           const user = await getCurrentUser();
           uploaderOrcid = user.orcid || undefined;
-          uploaderUsername = user.username;
+          uploaderUsername = user.username ?? undefined;
         } catch (userErr) {
           console.log(chalk.dim(`  Could not fetch profile: ${errorDetail(userErr)}`));
         }

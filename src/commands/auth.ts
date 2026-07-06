@@ -524,9 +524,11 @@ export async function statusAction(options: { refresh?: boolean }): Promise<void
     const spinner = ora("Fetching user info...").start();
     try {
       const user = await getCurrentUser();
-      setConfig("username", user.username);
+      // username/github_username are nullable on the wire (web-signup users);
+      // config fields are string|undefined, so coerce null -> undefined.
+      setConfig("username", user.username ?? undefined);
       setConfig("email", user.email);
-      setConfig("githubUsername", user.github_username);
+      setConfig("githubUsername", user.github_username ?? undefined);
       userRole = user.role;
       spinner.stop();
     } catch (error) {
