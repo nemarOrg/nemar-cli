@@ -303,12 +303,22 @@ export function registerUploadRoutes(datasetRoutes: DatasetsRouter): void {
       // Sandbox ID range partition (epic #923): prod caps at SANDBOX_ID_CEILING
       // (89999), dev/test floors at SANDBOX_ID_FLOOR (90001), so the shared
       // nemarDatasets org never has xx repo-name collisions. Unset -> full range.
-      const parseRangeBound = (v: string | undefined): number | undefined => {
-        const n = v ? Number.parseInt(v, 10) : Number.NaN;
-        return Number.isFinite(n) ? n : undefined;
+      const parseRangeBound = (v: string | undefined, name: string): number | undefined => {
+        if (!v) return undefined;
+        const n = Number.parseInt(v, 10);
+        if (!Number.isFinite(n)) {
+          // A typo'd bound must not silently revert to the full xx range and let
+          // prod/dev collide again unnoticed; surface it (mirrors the ENVIRONMENT
+          // warning above).
+          console.warn(
+            `[datasets] ${name}="${v}" is not a valid number; ignoring (sandbox ID partition weakened for this bound)`,
+          );
+          return undefined;
+        }
+        return n;
       };
-      const sandboxIdFloor = parseRangeBound(c.env.SANDBOX_ID_FLOOR);
-      const sandboxIdCeiling = parseRangeBound(c.env.SANDBOX_ID_CEILING);
+      const sandboxIdFloor = parseRangeBound(c.env.SANDBOX_ID_FLOOR, "SANDBOX_ID_FLOOR");
+      const sandboxIdCeiling = parseRangeBound(c.env.SANDBOX_ID_CEILING, "SANDBOX_ID_CEILING");
 
       let datasetId: string;
       const MAX_ID_RETRIES = 3;

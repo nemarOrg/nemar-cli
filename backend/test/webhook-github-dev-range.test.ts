@@ -102,6 +102,15 @@ describe("POST /webhooks/github dev-range gate", () => {
     expect(body.reason).not.toBe("dev_range_repo");
   });
 
+  test("production does NOT gate a prod-range xx (sandbox) repo below the ceiling", async () => {
+    // xx012345 is a legitimate prod sandbox repo (< SANDBOX_ID_CEILING 89999);
+    // the gate must NOT swallow it — only the xx09NNNN dev band.
+    const { status, body } = await post({ ENVIRONMENT: "production" }, inertPush("xx012345"));
+    expect(status).toBe(200);
+    expect(body.dispatched).toBe(false);
+    expect(body.reason).not.toBe("dev_range_repo");
+  });
+
   test("non-production does NOT short-circuit a dev-range repo", async () => {
     // dev worker: falls through; inert payload means no dispatch, but crucially
     // the reason is the decision reason, not dev_range_repo.

@@ -39,6 +39,28 @@ export function isDevRangeDatasetId(id: string): boolean {
 const EXCLUDED_IDS = new Set(["nm099999"]);
 
 /**
+ * Resolve the effective [start, max] allocation window for a prefix.
+ *
+ * An explicit floor never drops below the prefix's natural start; an explicit
+ * ceiling never exceeds the 6-digit cap. A non-finite bound (NaN/Infinity/
+ * missing) is treated as absent, so the invariant "a bad bound can only narrow
+ * within [start, MAX_NUMBER], never mint an out-of-convention id" holds at this
+ * layer regardless of caller discipline. Single source of truth for both the
+ * allocator loop and the exhaustion error message.
+ */
+function resolveRange(
+  prefix: string,
+  opts?: { start?: number; max?: number },
+): { start: number; max: number } {
+  const natural = START_NUMBER[prefix] ?? 1;
+  const s = opts?.start;
+  const m = opts?.max;
+  const start = typeof s === "number" && Number.isFinite(s) ? Math.max(natural, s) : natural;
+  const max = typeof m === "number" && Number.isFinite(m) ? Math.min(MAX_NUMBER, m) : MAX_NUMBER;
+  return { start, max };
+}
+
+/**
  * Find the lowest unused number for a given prefix.
  *
  * Generates candidate numbers (start, plus each existing_number+1) and picks
@@ -49,11 +71,7 @@ async function findLowestUnusedNumber(
   prefix: string,
   opts?: { start?: number; max?: number },
 ): Promise<number | null> {
-  // An explicit floor never goes below the prefix's natural start; an explicit
-  // ceiling never exceeds the 6-digit cap. Both clamp so a mis-set env var can
-  // only narrow the range, never mint an out-of-convention id.
-  const start = Math.max(START_NUMBER[prefix] ?? 1, opts?.start ?? 0);
-  const max = Math.min(MAX_NUMBER, opts?.max ?? MAX_NUMBER);
+  const { start, max } = resolveRange(prefix, opts);
   const likePattern = `${prefix}%`;
 
   // Two-step approach to avoid D1 parameter binding issues with complex queries
@@ -116,8 +134,7 @@ export async function generateDatasetId(
   const n = await findLowestUnusedNumber(db, prefix, range);
 
   if (n === null) {
-    const lo = Math.max(START_NUMBER[prefix] ?? 1, range?.start ?? 0);
-    const hi = Math.min(MAX_NUMBER, range?.max ?? MAX_NUMBER);
+    const { start: lo, max: hi } = resolveRange(prefix, range);
     throw new Error(
       `Failed to generate dataset ID for prefix '${prefix}': all IDs from ${lo} to ${hi} are allocated`,
     );

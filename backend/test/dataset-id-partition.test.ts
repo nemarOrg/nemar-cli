@@ -110,4 +110,19 @@ describe("generateDatasetId sandbox partition", () => {
     const id = await generateDatasetId(db, true, {});
     expect(id).toBe("xx000001");
   });
+
+  test("non-finite bounds are treated as absent at the function layer", async () => {
+    // Pins the resolveRange guarantee independent of upload.ts's parseRangeBound:
+    // NaN/Infinity floor must NOT disable the lower bound; it falls back to the
+    // natural xx start (1), so allocation stays inside the valid id range.
+    const db1 = realD1(freshDb());
+    expect(await generateDatasetId(db1, true, { sandboxIdFloor: Number.NaN })).toBe("xx000001");
+    const db2 = realD1(freshDb());
+    expect(
+      await generateDatasetId(db2, true, {
+        sandboxIdFloor: Number.POSITIVE_INFINITY,
+        sandboxIdCeiling: Number.NaN,
+      }),
+    ).toBe("xx000001");
+  });
 });
