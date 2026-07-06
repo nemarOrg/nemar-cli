@@ -43,6 +43,8 @@ import {
   sendStalenessAdminReviewEmail,
   sendStalenessWarningEmail,
 } from "./services/email";
+import { isNonProductionEnv } from "./services/environment";
+import { resolveHostRoute } from "./services/host-routing";
 import { OPENNEURO_UPSTREAM_MARKER, runImportRecovery } from "./services/import-recovery";
 import { getActiveNotices } from "./services/notices";
 import { sweepBlockedBidsValidationRequests } from "./services/publication-sweep";
@@ -180,8 +182,11 @@ api.onError((err, c) => {
     );
   }
 
-  // Don't expose internal error details in production
-  const isDev = c.env.API_BASE_URL?.includes("dev") || c.env.API_BASE_URL?.includes("localhost");
+  // Don't expose internal error details in production. Key off ENVIRONMENT
+  // rather than sniffing API_BASE_URL for "dev"/"localhost": staging's
+  // api-test.nemar.org (epic #923) contains neither. Allow-list (fail-CLOSED):
+  // an unset/unexpected ENVIRONMENT hides details, matching prod. No-op for prod.
+  const isDev = isNonProductionEnv(c.env);
 
   return c.json(
     {
@@ -205,8 +210,13 @@ const app = new Hono<{ Bindings: Bindings; Variables: Variables }>();
 // Reading the hostname from c.req.url -- not the Host header -- prevents
 // a forged Host: from steering an api.nemar.org request into this branch.
 app.use("*", async (c, next) => {
-  const host = new URL(c.req.url).hostname.toLowerCase();
-  if (host === "data.nemar.org") {
+  // Data/zarr hostnames are env-driven (default to the prod literals) so the
+  // staging worker can answer on data-test.nemar.org / zarr-test.nemar.org
+  // without a code change (epic #923). resolveHostRoute reads the hostname from
+  // c.req.url (not the Host header) upstream, so a forged Host: can't steer an
+  // api-host request into these forks.
+  const route = resolveHostRoute(new URL(c.req.url).hostname, c.env);
+  if (route === "data") {
     const url = new URL(c.req.url);
     // Mounted-root quirk: Hono v4 sub-apps treat `/data` (no trailing
     // slash) and `/data/` (trailing) as distinct match targets for
@@ -217,12 +227,13 @@ app.use("*", async (c, next) => {
     url.pathname = url.pathname === "/" ? "/data" : `/data${url.pathname}`;
     return api.fetch(new Request(url, c.req.raw), c.env, c.executionCtx);
   }
-  // zarr.nemar.org is the authoritative browser gateway for the Zarr serving
-  // copies. It dispatches to a self-contained sub-app (its own restricted-origin
-  // CORS, Range pass-through, and edge caching) rather than the api middleware
-  // stack -- the global cors() allows *.nemar.org broadly, but the zarr host
-  // must scope CORS tightly and expose Range/ETag headers zarrita needs.
-  if (host === "zarr.nemar.org") {
+  // zarr.nemar.org (or zarr-test.nemar.org in staging) is the authoritative
+  // browser gateway for the Zarr serving copies. It dispatches to a
+  // self-contained sub-app (its own restricted-origin CORS, Range pass-through,
+  // and edge caching) rather than the api middleware stack -- the global cors()
+  // allows *.nemar.org broadly, but the zarr host must scope CORS tightly and
+  // expose Range/ETag headers zarrita needs.
+  if (route === "zarr") {
     return zarrDataRoutes.fetch(c.req.raw, c.env, c.executionCtx);
   }
   return next();
