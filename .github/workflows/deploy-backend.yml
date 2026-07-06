@@ -99,7 +99,10 @@ jobs:
 
   deploy-dev:
     needs: [detect-environment, test-gate]
-    if: needs.detect-environment.outputs.environment == 'dev'
+    # Must check test-gate.result explicitly: a job with its OWN `if:` loses the
+    # implicit "all needs succeeded" gate, so without this a FAILED test-gate
+    # would not block the deploy (the whole point of #897).
+    if: needs.detect-environment.outputs.environment == 'dev' && needs.test-gate.result == 'success'
     runs-on: ubuntu-latest
     environment: development
     steps:
@@ -136,7 +139,10 @@ jobs:
 
   deploy-production:
     needs: [detect-environment, test-gate]
-    if: needs.detect-environment.outputs.environment == 'production'
+    # Explicit test-gate.result check (see deploy-dev): a custom `if:` drops the
+    # implicit needs-success gate, so this is what actually blocks a prod deploy
+    # on a red build.
+    if: needs.detect-environment.outputs.environment == 'production' && needs.test-gate.result == 'success'
     runs-on: ubuntu-latest
     environment: production
     steps:
