@@ -37,6 +37,7 @@ import { AUTO_IMPORT_CRON, autoImportTick } from "./services/auto-import";
 import { fetchAndSyncCitationCounts } from "./services/citation-counts-sync";
 import { drainEmbeddingDirty } from "./services/dataset-search";
 import { deleteDatasetCascade } from "./services/deletion";
+import { reconcileReservedVersionDois } from "./services/doi-reconcile";
 import {
   getAdminEmailsForCategory,
   resolveEmailConfig,
@@ -614,6 +615,9 @@ export default {
     // #736 Phase 3: backstop re-dispatch of still-failed archive generations
     // whose webhook retry chain broke (e.g. a lost archive-ready callback).
     ctx.waitUntil(archiveRetrySweep(env));
+    // #900: backstop for a version-DOI mint that crashed after createIdentifier
+    // (reserved) but before makePublic, leaving a permanent non-resolving DOI.
+    ctx.waitUntil(reconcileReservedVersionDois(env));
     // #804: refresh per-dataset citation counts from the citations dashboard
     // manifest so GET /datasets?sort=citations and the listing pills reflect the
     // latest pipeline run. Best-effort; a dashboard outage just skips this tick.

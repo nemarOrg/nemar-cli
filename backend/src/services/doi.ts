@@ -309,21 +309,29 @@ export async function createEzidVersionDoi(
       dataciteXml,
     });
   } catch (error) {
-    // Idempotency: if webhook retries after a timeout, the DOI may already exist
+    // Idempotency: if a webhook retries after a timeout, the DOI may already
+    // exist. Fetch it and inspect status:
+    //  - already `public`  -> the prior attempt fully completed; return early.
+    //  - still `reserved`  -> the prior attempt created the identifier but
+    //    CRASHED before makePublic (#900). Returning early here left a
+    //    permanent, non-resolving `reserved` DOI recorded as the dataset's
+    //    latest version. Fall through to finish the transition instead.
     if (!(error instanceof Error && error.message.includes("already exists"))) {
       throw error;
     }
-    // Fetch existing identifier and return early
     identifier = await getIdentifier(auth, fullIdentifier);
-    return {
-      doi,
-      provider: "ezid",
-      providerRecordId: identifier.identifier,
-      status: identifier.status,
-    };
+    if (identifier.status === "public") {
+      return {
+        doi,
+        provider: "ezid",
+        providerRecordId: identifier.identifier,
+        status: identifier.status,
+      };
+    }
+    // status is "reserved" (or otherwise not public): fall through to makePublic.
   }
 
-  // Make the version DOI public
+  // Make the version DOI public (also runs for the resume-a-reserved path above).
   await makePublic(auth, identifier.identifier, target);
 
   // Update the concept DOI's XML to include HasVersion relation.
