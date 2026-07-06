@@ -93,6 +93,11 @@ FRONTEND_URL = "https://nemar.org"
 APP_BASE_URL = "https://app.nemar.org"
 AWS_REGION = "us-east-2"
 S3_BUCKET = "nemar"
+# Hostnames that fork to the data sub-app / zarr gateway (index.ts). Set
+# explicitly for parity with the staging worker (epic #923); these equal the
+# built-in defaults, so prod routing is unchanged.
+DATA_HOSTNAME = "data.nemar.org"
+ZARR_HOSTNAME = "zarr.nemar.org"
 # Sandbox (xx) dataset-ID partition (epic #923). Prod caps sandbox allocation at
 # xx089999 so the dev/test staging worker (SANDBOX_ID_FLOOR="90001") owns
 # xx090001-xx099999 without repo-name collisions in the shared nemarDatasets org.
@@ -171,7 +176,17 @@ AUTO_IMPORT_MIN_INTERVAL_MIN = "25"
 [env.dev]
 name = "nemar-api-dev"
 workers_dev = true
-routes = []
+# Staging custom domains (epic #923), the -test mirror of the prod api/data/zarr
+# hosts, all served by this one dev worker. workers_dev stays true so the
+# nemar-api-dev.sccn-org.workers.dev fallback keeps working. NOTE: attaching
+# these Workers Custom Domains provisions DNS + TLS on the nemar.org zone and
+# requires a token with zone edit; if the CI/cfman token is Workers-only, attach
+# them once in the CF dashboard before the first deploy that carries this config.
+routes = [
+  { pattern = "api-test.nemar.org", custom_domain = true },
+  { pattern = "data-test.nemar.org", custom_domain = true },
+  { pattern = "zarr-test.nemar.org", custom_domain = true }
+]
 
 [[env.dev.d1_databases]]
 binding = "DB"
@@ -205,13 +220,21 @@ invocation_logs = true
 
 [env.dev.vars]
 ENVIRONMENT = "development"
-API_BASE_URL = "https://nemar-api-dev.sccn-org.workers.dev"
-FRONTEND_URL = "https://nemar.org"
-# Authenticated app origin for the ORCID *sandbox* flow (#832). Set to the
-# frontend origin you run sandbox testing against (http://localhost:4321 for
-# local dev, or a *.pages.dev preview). Must equal the redirect URI registered
-# on the sandbox ORCID app; sandbox permits http/localhost.
-APP_BASE_URL = "http://localhost:4321"
+# Staging API host (epic #923). Central-workflow callbacks are built from
+# API_BASE_URL, so they round-trip back to this worker via api-test.nemar.org.
+# (The nemar-api-dev.sccn-org.workers.dev fallback still resolves.)
+API_BASE_URL = "https://api-test.nemar.org"
+FRONTEND_URL = "https://test.nemar.org"
+# Authenticated app origin. On staging this is the single-host test site
+# (epic #923). ORCID sandbox login on test.nemar.org additionally needs
+# https://test.nemar.org/auth/orcid/callback registered on the sandbox ORCID app
+# (owner action); until then use email-code login. Local ORCID dev testing needs
+# a .dev.vars override back to http://localhost:4321.
+APP_BASE_URL = "https://test.nemar.org"
+# Data/zarr hostnames this worker forks on (index.ts). The -test mirror of the
+# prod hosts; served by this same worker via the routes above.
+DATA_HOSTNAME = "data-test.nemar.org"
+ZARR_HOSTNAME = "zarr-test.nemar.org"
 AWS_REGION = "us-east-2"
 # Dedicated dev/staging bucket (epic #923). Physically separate from prod `nemar`
 # so a dev bug can never touch real data or the prod bucket policy. Mirrors prod:
@@ -226,12 +249,16 @@ S3_BUCKET = "nemar-dev"
 SANDBOX_ID_FLOOR = "90001"
 FROM_EMAIL = "NEMAR Archive <noreply@nemar.org>"
 REPLY_TO = "info@nemar.org"
-# Zarr cache host is prod-only; empty in dev so /webhooks/zarr-ready logs
-# "purge skipped" instead of purging the prod zone from a dev deploy (#684).
-ZARR_CACHE_BASE_URL = ""
-# Web-dashboard session cookie Domain (#569). Empty in dev so the
-# cookie is host-only for nemar-api-dev.sccn-org.workers.dev — any
-# explicit value would refuse to scope to a workers.dev hostname.
+# Staging zarr cache host (epic #923). URL-scoped purges of zarr-test.* can't
+# touch prod cache entries; purge stays inert until CLOUDFLARE_ZONE_ID + a purge
+# token are provisioned on dev (/webhooks/zarr-ready logs "purge skipped").
+ZARR_CACHE_BASE_URL = "https://zarr-test.nemar.org"
+# Web-dashboard session cookie Domain (#569). Kept EMPTY (host-only) on staging:
+# the test.nemar.org website serves in single-host mode and mirrors Set-Cookie
+# through its same-origin /auth proxy, so a host-only cookie scopes correctly to
+# test.nemar.org (same as *.pages.dev previews). Avoids touching the prod auth
+# cookie code paths. A Domain= value would also be rejected on the workers.dev
+# fallback host used for direct dev testing.
 WEB_SESSION_COOKIE_DOMAIN = ""
 # Centralized manifest workflow flag (#557, relocated to
 # nemarDatasets/.github in #564). Soak on dev is COMPLETE and the flag is "true"

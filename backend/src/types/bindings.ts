@@ -30,6 +30,12 @@ export interface Bindings {
   APP_BASE_URL?: string;
   AWS_REGION: string;
   S3_BUCKET: string;
+  /** Hostname that dispatches to the data sub-app / zarr gateway (epic #923).
+   *  Default to the prod literals (data.nemar.org / zarr.nemar.org) when unset,
+   *  so prod behavior is unchanged; staging sets data-test / zarr-test.nemar.org
+   *  so the one dev worker answers on the -test hosts. See index.ts host fork. */
+  DATA_HOSTNAME?: string;
+  ZARR_HOSTNAME?: string;
   /** Undefined is treated as "off". See backend/src/types/maintenance.ts. */
   MAINTENANCE_MODE?: MaintenanceMode;
   /** Sender for outbound Resend emails, e.g. "NEMAR <nemar@osc.earth>".
