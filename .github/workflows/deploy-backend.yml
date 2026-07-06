@@ -9,6 +9,18 @@ on:
       - 'backend/**'
       - '.github/workflows/deploy-backend.yml'
 
+# Serialize deploys per ref (#897). The release pipeline pushes TWO commits to
+# main that both match backend/** (the dev->main merge commit writes
+# backend/package.json's version, and auto-tag.yml's strip commit rewrites it
+# again seconds later). Without this group both fired `wrangler d1 migrations
+# apply` + `wrangler deploy` to PRODUCTION in parallel. cancel-in-progress:false
+# so a queued deploy WAITS for the in-flight one to finish its migrate+deploy
+# rather than cancelling it mid-migration (a cancelled prod migration is worse
+# than a slightly stale deploy; the queued run then deploys the newer commit).
+concurrency:
+  group: deploy-backend-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   # Detect which environment to deploy to
   detect-environment:
@@ -25,8 +37,68 @@ jobs:
             echo "environment=dev" >> $GITHUB_OUTPUT
           fi
 
-  deploy-dev:
+  # Gate (#897): the exact commit being deployed must pass the same required
+  # tier test.yml enforces for landing (typecheck + lint + pure unit tests)
+  # BEFORE it can reach dev or prod. test.yml runs on PRs/pushes, but nothing
+  # previously stopped a direct push (or an unreviewed merge) from deploying a
+  # red build straight to production. Both deploy jobs `needs:` this, so a
+  # failing gate blocks the deploy instead of racing it.
+  test-gate:
     needs: detect-environment
+    if: needs.detect-environment.outputs.environment != ''
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Setup Deno
+        uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.x
+
+      - name: Install git-annex
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y git-annex
+
+      - name: Install dependencies
+        run: bun install
+
+      - name: Install backend dependencies
+        run: cd backend && bun install
+
+      - name: Type check
+        run: bun run tsc --noEmit
+
+      - name: Lint
+        run: bun run lint
+
+      - name: Run pure unit tests (no live backend)
+        run: |
+          # Same auto-classification as test.yml's required unit-pure tier: every
+          # non-e2e test file that does NOT hit the live backend. Kept in lockstep
+          # with test.yml so the deploy gate and the PR gate assert the same set.
+          shopt -s nullglob
+          files=()
+          for f in test/*.test.ts backend/test/*.test.ts; do
+            base="$(basename "$f")"
+            case "$base" in
+              e2e-sandbox.test.ts|e2e-upload.test.ts|zenodo-sandbox.test.ts|ezid.test.ts|ezid-sandbox.test.ts|auth-passwordless.test.ts) continue;;
+            esac
+            if grep -Eq 'testRequest|TEST_API_URL|runCli\(' "$f"; then continue; fi
+            files+=("$f")
+          done
+          if [ ${#files[@]} -eq 0 ]; then echo "No pure test files matched" >&2; exit 1; fi
+          echo "Running ${#files[@]} pure test files"
+          bun test "${files[@]}"
+
+  deploy-dev:
+    needs: [detect-environment, test-gate]
     if: needs.detect-environment.outputs.environment == 'dev'
     runs-on: ubuntu-latest
     environment: development
@@ -63,13 +135,17 @@ jobs:
         run: npx wrangler deploy --env dev -c wrangler-sccn.toml
 
   deploy-production:
-    needs: detect-environment
+    needs: [detect-environment, test-gate]
     if: needs.detect-environment.outputs.environment == 'production'
     runs-on: ubuntu-latest
     environment: production
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+        with:
+          # Full history + tags so the drift check below can resolve whether the
+          # deployed commit is a tagged release.
+          fetch-depth: 0
 
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2
@@ -97,3 +173,18 @@ jobs:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
         run: npx wrangler deploy -c wrangler-sccn.toml
+
+      - name: Check release-tag drift (informational)
+        # Surfaces git-tag vs running-Worker drift (#897). The release pipeline
+        # deploys the pre-strip merge commit first (untagged) and then the
+        # auto-tag strip commit (tagged) -- serialized by the concurrency group
+        # above -- so an untagged deploy here is EXPECTED as the first of the
+        # pair and only worth attention if no tagged deploy follows. Never fails
+        # the deploy; just annotates the run so tag/worker drift is visible.
+        run: |
+          SHA="$(git rev-parse --short HEAD)"
+          if TAG="$(git describe --exact-match --tags HEAD 2>/dev/null)"; then
+            echo "::notice::Deployed production at tagged release ${TAG} (${SHA})."
+          else
+            echo "::warning::Deployed production commit ${SHA} has no matching release tag. Expected for the pre-strip merge commit (the auto-tag strip commit deploys the tagged version next). If no tagged deploy follows, prod is running an untagged build."
+          fi
