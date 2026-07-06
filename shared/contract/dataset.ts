@@ -42,7 +42,10 @@ const zeroOneNullable = z.union([z.literal(0), z.literal(1)]).nullable();
 export const catalogItemSchema = z
   .object({
     dataset_id: z.string(),
-    id: z.string(),
+    // Aliased `d.dataset_id AS id` on the public branch, but the ?mine=true
+    // branch selects dataset_id WITHOUT the alias, so `id` is not universally
+    // present. dataset_id is the reliable key; id is optional.
+    id: z.string().optional(),
     name: z.string(),
     description: z.string().nullable().optional(),
     status: z.string(),
@@ -76,22 +79,43 @@ export type CatalogItem = z.infer<typeof catalogItemSchema>;
 /**
  * GET /datasets/:id detail. Backend returns `SELECT d.* , participants,
  * latest_version, owner_username, owner_github` — a superset of the catalog row
- * (#853/#864 parity). Passthrough covers the many raw `d.*` columns.
+ * (#853/#864 parity). Unlike the list query, the detail query does NOT COALESCE
+ * the metadata columns, so file_size/modalities/tasks/authors/license come
+ * through as raw JSON `null` for an un-backfilled dataset — override them to
+ * nullable here (the list schema keeps them strict because the list COALESCEs).
+ * Passthrough covers the many other raw `d.*` columns.
  */
 export const datasetDetailSchema = catalogItemSchema
   .extend({
+    file_size: z.number().nonnegative().nullable(),
+    modalities: z.string().nullable().optional(),
+    tasks: z.string().nullable().optional(),
+    authors: z.string().nullable().optional(),
+    license: z.string().nullable().optional(),
     owner_github: z.string().nullable().optional(),
   })
   .passthrough();
 export type DatasetDetail = z.infer<typeof datasetDetailSchema>;
 
-/** GET /datasets/search hit (reduced projection). */
+/**
+ * GET /datasets/search hit (reduced projection, services/dataset-search.ts
+ * SearchResult). The id is aliased `d.dataset_id AS id` — the wire key is `id`,
+ * NOT `dataset_id` — and there is no `latest_version`. The columns are selected
+ * raw (no COALESCE), so the string fields can be null; participants (subject_count)
+ * can be null too.
+ */
 export const searchHitSchema = z
   .object({
-    dataset_id: z.string(),
+    id: z.string(),
     name: z.string(),
-    participants: z.number().int().nonnegative().optional(),
-    latest_version: versionTagSchema.nullable().optional(),
+    modalities: z.string().nullable().optional(),
+    participants: z.number().int().nullable().optional(),
+    doi: z.string().nullable().optional(),
+    tasks: z.string().nullable().optional(),
+    authors: z.string().nullable().optional(),
+    has_hed: zeroOneNullable.optional(),
+    score: z.number().optional(),
+    snippet: z.string().optional(),
   })
   .passthrough();
 export type SearchHit = z.infer<typeof searchHitSchema>;

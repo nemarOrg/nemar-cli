@@ -10,8 +10,10 @@ import {
   NEUROSCHEMA_VERSION,
   catalogItemSchema,
   datasetListEnvelopeSchema,
+  datasetSearchEnvelopeSchema,
   isVersionTag,
   neuroschemaDatasetSchema,
+  searchHitSchema,
   toBareVersion,
   toVersionTag,
   userMeResponseSchema,
@@ -78,6 +80,43 @@ describe("catalog item schema", () => {
   test("list envelope validates", () => {
     expect(() =>
       datasetListEnvelopeSchema.parse({ datasets: [row], count: 1, total_count: 1 }),
+    ).not.toThrow();
+  });
+});
+
+describe("search hit schema", () => {
+  // The real /datasets/search projection: `d.dataset_id AS id`, no latest_version.
+  const hit = {
+    id: "nm000108",
+    name: "Test",
+    modalities: "eeg",
+    participants: 12,
+    doi: null,
+    tasks: "rest",
+    authors: "Doe, J.",
+    has_hed: 1,
+    score: 0.87,
+  };
+
+  test("accepts a real search hit (keyed on id, not dataset_id)", () => {
+    expect(() => searchHitSchema.parse(hit)).not.toThrow();
+  });
+
+  test("rejects a hit missing id (regression guard for the #898 review Critical)", () => {
+    const { id, ...noId } = hit;
+    void id;
+    expect(() => searchHitSchema.parse(noId)).toThrow();
+  });
+
+  test("tolerates null raw columns (no COALESCE in the search query)", () => {
+    expect(() =>
+      searchHitSchema.parse({ id: "nm000108", name: "T", modalities: null, participants: null }),
+    ).not.toThrow();
+  });
+
+  test("search envelope validates a non-empty results array", () => {
+    expect(() =>
+      datasetSearchEnvelopeSchema.parse({ results: [hit], count: 1, method: "fts", min_score: 0 }),
     ).not.toThrow();
   });
 });
