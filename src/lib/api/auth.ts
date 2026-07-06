@@ -5,6 +5,7 @@
  * verbatim.
  */
 
+import { type ContractUser, userMeResponseSchema } from "../../../shared/contract/index.js";
 import { request } from "./client.js";
 
 // ============================================================================
@@ -151,10 +152,19 @@ export interface UserInfo {
 }
 
 /**
- * Get current user info (requires authentication)
+ * Get current user info (requires authentication).
+ *
+ * `/users/me` returns a NESTED envelope `{ user, token }`; this unwraps `.user`.
+ * Previously it declared the flat `UserInfo` and did `request<UserInfo>` on the
+ * envelope, so every field read (`.username`, `.role`, `.orcid`, ...) was
+ * `undefined` at runtime, silently writing `undefined` over stored account
+ * config on `auth status --refresh` and disabling the upload ORCID auto-match
+ * (#895 / epic #896 #899). Validated against the shared contract so a future
+ * shape drift fails loud here instead of silently.
  */
-export async function getCurrentUser(): Promise<UserInfo> {
-  return request<UserInfo>("/users/me", {}, true);
+export async function getCurrentUser(): Promise<ContractUser> {
+  const res = await request("/users/me", {}, true, userMeResponseSchema);
+  return res.user;
 }
 
 // ============================================================================

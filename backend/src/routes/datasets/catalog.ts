@@ -7,6 +7,7 @@
  * intentional changes are import paths and the register-function wrapper.
  */
 
+import { toVersionTag } from "../../../../shared/contract/index.js";
 import { SYSTEM_USER_ID } from "../../lib/constants";
 import { type LicenseTier, parseLicenseTierFilter } from "../../lib/license";
 import { optionalAuthMiddleware } from "../../middleware/auth";
@@ -21,6 +22,21 @@ import {
 import { isValidDatasetId } from "../../services/datasetId";
 import { hasRole } from "../../types/bindings";
 import type { DatasetsRouter } from "./shared";
+
+/**
+ * Emit `latest_version` in the canonical `vX.Y.Z` tag form (epic #896 #899).
+ * D1's `dataset_versions.version` stores a mix of bare (`1.0.0`) and tagged
+ * (`v1.0.0`) rows; the catalog plane historically forwarded them raw while the
+ * data plane already normalized to the tag. Consumers that build data-plane
+ * URLs from this value (hallu-sync `archives/<v>.zip`, hallu-zarr) need the tag
+ * form, and the website double-prefixed a bare value as `v1.0.0` but an
+ * already-tagged one as `vv1.0.0`. Idempotent; leaves null untouched.
+ * Exported for unit testing.
+ */
+export function withCanonicalLatestVersion<T extends Record<string, unknown>>(row: T): T {
+  const v = row.latest_version;
+  return typeof v === "string" && v ? { ...row, latest_version: toVersionTag(v) } : row;
+}
 
 // Escape SQLite LIKE wildcards in user input so a literal '%' or '_' in the
 // search term means itself rather than "match everything" / "match any
@@ -175,7 +191,7 @@ async function executeAndReturn(
     }
 
     return c.json({
-      datasets: result.results,
+      datasets: result.results.map(withCanonicalLatestVersion),
       count: result.results.length,
       total_count: totalCount,
       limit,
@@ -225,7 +241,7 @@ async function executeAndReturn(
           .bind(limit, offset)
           .all();
         return c.json({
-          datasets: fallback.results || [],
+          datasets: (fallback.results || []).map(withCanonicalLatestVersion),
           count: fallback.results?.length || 0,
           total_count: fallback.results?.length || 0,
           limit,
@@ -737,6 +753,6 @@ export function registerCatalogRoutes(datasetRoutes: DatasetsRouter): void {
       c.header("Cache-Control", "public, max-age=30, s-maxage=300, stale-while-revalidate=600");
       c.header("Vary", "Authorization");
     }
-    return c.json({ dataset });
+    return c.json({ dataset: withCanonicalLatestVersion(dataset as Record<string, unknown>) });
   });
 }
