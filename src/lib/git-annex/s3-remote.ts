@@ -17,6 +17,11 @@ export interface S3RemoteConfig {
   prefix: string;
   region: string;
   publicUrl?: string;
+  /** git-annex S3 multipart chunk size (e.g. "1GiB"). Without it git-annex does
+   *  a single-part PUT per object, which S3 caps at 5 GB — so any data file over
+   *  5 GB (common for raw iEEG/EEG) fails with 400 EntityTooLarge (#886).
+   *  Defaults to DEFAULT_S3_PARTSIZE when unset. */
+  partsize?: string;
 }
 
 /**
@@ -71,11 +76,21 @@ function filterAnnexInfoMessages(stderr: string): string {
 }
 
 /**
+ * Default git-annex S3 multipart chunk size. 1 GiB keeps each part well under
+ * S3's 5 GB single-PUT / part cap while staying under the 10,000-part limit for
+ * multi-TB objects (1 GiB * 10,000 = ~10 TiB headroom). Enables multipart PUT so
+ * files over 5 GB upload instead of failing with EntityTooLarge (#886).
+ */
+export const DEFAULT_S3_PARTSIZE = "1GiB";
+
+/**
  * Build git-annex S3 special remote key=value config arguments,
  * shared by initremote and enableremote. Normalizes the prefix to
  * always end with exactly one slash. Conditionally includes publicurl.
+ * Always sets partsize so large objects use multipart PUT (#886).
+ * Exported for unit testing; not part of the CLI-facing surface.
  */
-function buildS3RemoteArgs(config: S3RemoteConfig): string[] {
+export function buildS3RemoteArgs(config: S3RemoteConfig): string[] {
   const params = [
     "type=S3",
     "encryption=none",
@@ -85,6 +100,7 @@ function buildS3RemoteArgs(config: S3RemoteConfig): string[] {
     "signature=v4",
     "autoenable=true",
     "protocol=https",
+    `partsize=${config.partsize ?? DEFAULT_S3_PARTSIZE}`,
   ];
   if (config.publicUrl) {
     params.push(`publicurl=${config.publicUrl}`);
