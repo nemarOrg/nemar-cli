@@ -69,6 +69,12 @@ const DATA_MAX_REQUESTS = 10000;
 // path-mount forms. Deliberately anchored with `(\/|$)` so it does NOT match
 // the management API at `/datasets/*` (that keeps the standard ip/token cap).
 const DATA_PATH_RE = /^\/(nemar\/)?data(\/|$)/;
+// The zarr serving gateway (#901): `zarr.nemar.org/<id>/zarr/...` (and the dev
+// `/zarrproxy/<id>/zarr/...` mount, whose sub-app path is the same `/<id>/zarr`).
+// It is the highest-request-volume data-plane path but bypassed the middleware
+// stack, so it went unthrottled. Route it to the same generous data-plane
+// bucket as the rest of the read plane.
+const ZARR_PATH_RE = /^\/[a-z]{2}\d+\/zarr(\/|$)/;
 
 // Stricter limits for auth endpoints
 const AUTH_MAX_REQUESTS = 10;
@@ -157,7 +163,7 @@ export function __selectBucket(
   // Public read data plane gets its own generous IP bucket before the bearer
   // check: it is anonymous-by-design (no token), and even a tokened request to
   // a public file should not be charged against the tighter token bucket.
-  if (DATA_PATH_RE.test(path)) {
+  if (DATA_PATH_RE.test(path) || ZARR_PATH_RE.test(path)) {
     return { keyKind: "data-ip", rawKey: ip, maxRequests: DATA_MAX_REQUESTS };
   }
   const bearer = __readBearerTokenFromHeader(authHeader);
