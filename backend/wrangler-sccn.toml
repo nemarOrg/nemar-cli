@@ -93,6 +93,10 @@ FRONTEND_URL = "https://nemar.org"
 APP_BASE_URL = "https://app.nemar.org"
 AWS_REGION = "us-east-2"
 S3_BUCKET = "nemar"
+# Sandbox (xx) dataset-ID partition (epic #923). Prod caps sandbox allocation at
+# xx089999 so the dev/test staging worker (SANDBOX_ID_FLOOR="90001") owns
+# xx090001-xx099999 without repo-name collisions in the shared nemarDatasets org.
+SANDBOX_ID_CEILING = "89999"
 # Sender + reply-to for Resend emails. The domain in FROM_EMAIL must be
 # verified in the Resend account tied to RESEND_API_KEY; otherwise sends
 # 403 and resolveEmailConfig logs once but does not propagate the failure.
@@ -210,6 +214,10 @@ FRONTEND_URL = "https://nemar.org"
 APP_BASE_URL = "http://localhost:4321"
 AWS_REGION = "us-east-2"
 S3_BUCKET = "nemar"
+# Sandbox (xx) dataset-ID partition (epic #923). Dev/test allocates
+# xx090001-xx099999; prod (SANDBOX_ID_CEILING="89999") owns xx000001-xx089999.
+# The exemplar fleet pins the top sub-band (xx099900+).
+SANDBOX_ID_FLOOR = "90001"
 FROM_EMAIL = "NEMAR Archive <noreply@nemar.org>"
 REPLY_TO = "info@nemar.org"
 # Zarr cache host is prod-only; empty in dev so /webhooks/zarr-ready logs
