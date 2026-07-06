@@ -331,6 +331,8 @@ const COPY_ERROR_RE =
  *
  * Exported for unit testing; not part of the CLI-facing surface.
  */
+const MAX_COPY_ERROR_LINES = 20;
+
 export function extractCopyError(stdout: string, stderr: string): string {
   const err = stderr.trim();
   if (err) return err;
@@ -339,7 +341,24 @@ export function extractCopyError(stdout: string, stderr: string): string {
     .map((l) => l.trim())
     .filter(Boolean);
   const relevant = lines.filter((l) => COPY_ERROR_RE.test(l));
-  const picked = (relevant.length ? relevant : lines.slice(-8)).join("\n").trim();
+  // Cap the output: `git annex copy -J . ` fails per-file, and COPY_ERROR_RE
+  // matches generic words (fail/error), so a many-file failure could otherwise
+  // surface hundreds of lines into the CLI. Keep the last N (the tail carries
+  // git-annex's summary line), noting how many were dropped. Matches the bounded
+  // subprocess-error convention in github.ts / import-openneuro.ts.
+  let chosen: string[];
+  if (relevant.length > MAX_COPY_ERROR_LINES) {
+    const omitted = relevant.length - MAX_COPY_ERROR_LINES;
+    chosen = [
+      `...(${omitted} earlier error lines omitted)`,
+      ...relevant.slice(-MAX_COPY_ERROR_LINES),
+    ];
+  } else if (relevant.length) {
+    chosen = relevant;
+  } else {
+    chosen = lines.slice(-8);
+  }
+  const picked = chosen.join("\n").trim();
   return picked || "Failed to copy to remote";
 }
 

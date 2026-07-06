@@ -39,6 +39,21 @@ describe("extractCopyError", () => {
     expect(msg).not.toContain("progress line 11");
   });
 
+  test("caps a many-file failure to the last 20 error lines with an omitted-count note", () => {
+    // 50 files each producing a matching "... failed" line: unbounded join would
+    // surface all 50; must keep only the last 20 + a note.
+    const stdout = Array.from(
+      { length: 50 },
+      (_, i) => `copy sub-${i}/data.eeg failed: <S3 error: EntityTooLarge>`,
+    ).join("\n");
+    const msg = extractCopyError(stdout, "");
+    const lines = msg.split("\n");
+    expect(lines.length).toBe(21); // 1 note + 20 lines
+    expect(lines[0]).toContain("30 earlier error lines omitted");
+    expect(msg).toContain("sub-49"); // last file kept
+    expect(msg).not.toContain("sub-29"); // earlier file dropped
+  });
+
   test("returns the generic message only when there is nothing to surface", () => {
     expect(extractCopyError("", "")).toBe("Failed to copy to remote");
     expect(extractCopyError("   \n  \n", "   ")).toBe("Failed to copy to remote");
