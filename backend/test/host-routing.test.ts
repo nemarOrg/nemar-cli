@@ -32,6 +32,15 @@ describe("resolveHostRoute defaults (prod, vars unset)", () => {
     expect(resolveHostRoute("DATA.NEMAR.ORG", prodEnv)).toBe("data");
     expect(resolveHostRoute("Zarr.Nemar.Org", prodEnv)).toBe("zarr");
   });
+
+  test("empty-string host vars fall back to the prod defaults", () => {
+    const emptyEnv = { DATA_HOSTNAME: "", ZARR_HOSTNAME: "" } as Pick<
+      Bindings,
+      "DATA_HOSTNAME" | "ZARR_HOSTNAME"
+    >;
+    expect(resolveHostRoute("data.nemar.org", emptyEnv)).toBe("data");
+    expect(resolveHostRoute("zarr.nemar.org", emptyEnv)).toBe("zarr");
+  });
 });
 
 describe("resolveHostRoute staging (data-test/zarr-test)", () => {

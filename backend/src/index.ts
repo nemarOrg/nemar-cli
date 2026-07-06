@@ -43,6 +43,7 @@ import {
   sendStalenessAdminReviewEmail,
   sendStalenessWarningEmail,
 } from "./services/email";
+import { isNonProductionEnv } from "./services/environment";
 import { resolveHostRoute } from "./services/host-routing";
 import { OPENNEURO_UPSTREAM_MARKER, runImportRecovery } from "./services/import-recovery";
 import { getActiveNotices } from "./services/notices";
@@ -183,9 +184,9 @@ api.onError((err, c) => {
 
   // Don't expose internal error details in production. Key off ENVIRONMENT
   // rather than sniffing API_BASE_URL for "dev"/"localhost": staging's
-  // api-test.nemar.org (epic #923) contains neither, and prod stays false
-  // (ENVIRONMENT="production") so this is a no-op for prod.
-  const isDev = c.env.ENVIRONMENT !== "production";
+  // api-test.nemar.org (epic #923) contains neither. Allow-list (fail-CLOSED):
+  // an unset/unexpected ENVIRONMENT hides details, matching prod. No-op for prod.
+  const isDev = isNonProductionEnv(c.env);
 
   return c.json(
     {
