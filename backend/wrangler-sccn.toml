@@ -235,6 +235,12 @@ APP_BASE_URL = "https://test.nemar.org"
 # prod hosts; served by this same worker via the routes above.
 DATA_HOSTNAME = "data-test.nemar.org"
 ZARR_HOSTNAME = "zarr-test.nemar.org"
+# Origin embedded in served-manifest bytes_url links (epic #923). Points at the
+# -test data host so dev-bucket-only datasets embed reachable durable links.
+# Prod leaves this unset -> buildBytesUrl defaults to https://data.nemar.org, so
+# prod manifests stay byte-identical. (Landing URLs resolve from FRONTEND_URL
+# above, so DATASET_LANDING_BASE_URL is not needed here.)
+DATA_BASE_URL = "https://data-test.nemar.org"
 AWS_REGION = "us-east-2"
 # Dedicated dev/staging bucket (epic #923). Physically separate from prod `nemar`
 # so a dev bug can never touch real data or the prod bucket policy. Mirrors prod:

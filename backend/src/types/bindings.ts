@@ -28,6 +28,13 @@ export interface Bindings {
    *  redirect_uri and post-login landings must target this origin, not the
    *  apex. Defaults to https://app.nemar.org when unset. */
   APP_BASE_URL?: string;
+  /** Base origin for DOI landing URLs (epic #923), no trailing slash, e.g.
+   *  https://nemar.org. The DataCite _target resolves to `<base>/dataset/<id>`
+   *  (the doi.org/<doi> link the CLI prints redirects here). Defaults to
+   *  FRONTEND_URL, then https://nemar.org, so prod is unchanged (FRONTEND_URL is
+   *  the apex); staging points landings at the -test website. See
+   *  resolveDatasetLandingBase() in services/environment.ts. */
+  DATASET_LANDING_BASE_URL?: string;
   AWS_REGION: string;
   S3_BUCKET: string;
   /** Hostname that dispatches to the data sub-app / zarr gateway (epic #923).
@@ -36,6 +43,12 @@ export interface Bindings {
    *  so the one dev worker answers on the -test hosts. See index.ts host fork. */
   DATA_HOSTNAME?: string;
   ZARR_HOSTNAME?: string;
+  /** Base origin for data-plane bytes_url links embedded in served manifests
+   *  (epic #923), no trailing slash. Defaults to https://data.nemar.org so prod
+   *  output is byte-identical; staging sets https://data-test.nemar.org so
+   *  dev-bucket-only datasets embed reachable links. Feeds buildBytesUrl() via
+   *  resolveDataBaseOrigin() in services/environment.ts. */
+  DATA_BASE_URL?: string;
   /** Undefined is treated as "off". See backend/src/types/maintenance.ts. */
   MAINTENANCE_MODE?: MaintenanceMode;
   /** Sender for outbound Resend emails, e.g. "NEMAR <nemar@osc.earth>".

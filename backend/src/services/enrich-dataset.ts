@@ -38,6 +38,7 @@ import {
   mergeOrcidDiscoveries,
 } from "./doi-orcid-discovery.js";
 import { buildOrcidEnrichment, resolveEzidAuth } from "./doi.js";
+import { resolveDatasetLandingBase } from "./environment.js";
 import { extractDoi, updateIdentifier } from "./ezid.js";
 import { getDatasetsToken, getDatasetsTokenWithRefresher } from "./github-auth.js";
 import {
@@ -245,6 +246,8 @@ export async function enrichDataset(
 
   const datasetId = opts.datasetId;
   const forceReenrich = opts.force === true;
+  // Resolved once; reused for the repo-description link and the seed related-id.
+  const landingBase = resolveDatasetLandingBase(env);
   // When true, the caller (the central `run-enrichment.yml` Action on
   // `nemarDatasets/.github`, or the `run-version-doi.yml` pre-DOI refresh
   // step) will write the metadata commit using its own per-repo App token;
@@ -398,7 +401,7 @@ export async function enrichDataset(
           `[llm-enrich] Failed to update BIDS Name in D1 for ${datasetId}: ${errorMessage(dbErr)}`,
         );
       }
-      const nemarUrl = datasetLandingUrl(datasetId);
+      const nemarUrl = datasetLandingUrl(datasetId, landingBase);
       const repoResult = await setRepoDescription(repoName, bidsName, pat, nemarUrl);
       if (!repoResult.ok) {
         console.error(
@@ -509,7 +512,13 @@ export async function enrichDataset(
 
     // Stage 1: Seed from BIDS (deterministic, no LLM call)
     const treePaths = tree.map((f) => f.path);
-    const seeded = seedFromBids(bidsDescription, existingMetadata, datasetId, treePaths);
+    const seeded = seedFromBids(
+      bidsDescription,
+      existingMetadata,
+      datasetId,
+      treePaths,
+      landingBase,
+    );
     console.log(
       `[llm-enrich] Stage 1 (seed): ${datasetId} - ${Object.keys(seeded.authors || {}).length} authors, ${(seeded.related_identifiers || []).length} related IDs`,
     );

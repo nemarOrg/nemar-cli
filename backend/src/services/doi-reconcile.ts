@@ -18,6 +18,7 @@
 import { datasetVersionLandingUrl } from "../../../shared/datacite-constants.js";
 import type { Bindings } from "../types/bindings.js";
 import { resolveEzidAuth } from "./doi.js";
+import { resolveDatasetLandingBase } from "./environment.js";
 import { getIdentifier, makePublic } from "./ezid.js";
 
 /** Datasets inspected per sweep run. */
@@ -115,7 +116,11 @@ export async function reconcileReservedVersionDois(
       const id = await getIdentifier(auth, `doi:${doi}`);
       checked++;
       if (id.status === "reserved") {
-        await makePublic(auth, id.identifier, datasetVersionLandingUrl(dataset_id, version));
+        await makePublic(
+          auth,
+          id.identifier,
+          datasetVersionLandingUrl(dataset_id, version, resolveDatasetLandingBase(env)),
+        );
         reconciled++;
         console.log(
           `[doi-reconcile] completed stuck-reserved version DOI ${doi} for ${dataset_id}`,
