@@ -162,7 +162,7 @@ export async function dispatchCentralManifestJob(
       callbackToken,
       callbackUrl,
       pat,
-      { skipCanary: args.skipCanary ?? false },
+      { skipCanary: args.skipCanary ?? false, s3Bucket: env.S3_BUCKET },
     );
   } catch (err) {
     const msg = errorMessage(err);

@@ -40,7 +40,11 @@ async function sign(body: string, secret: string): Promise<string> {
 async function post(
   env: Partial<Bindings>,
   payload: unknown,
-): Promise<{ status: number; body: { reason?: string; dispatched?: boolean } }> {
+): Promise<{
+  status: number;
+  body: { reason?: string; dispatched?: boolean; forwarded?: boolean };
+  waitCount: number;
+}> {
   const app = new Hono<{ Bindings: Bindings }>();
   registerGithubWebhookRoutes(app);
   const body = JSON.stringify(payload);
@@ -54,11 +58,23 @@ async function post(
     },
     body,
   });
-  const res = await app.fetch(req, { GITHUB_WEBHOOK_SECRET: SECRET, ...env } as Bindings);
-  return {
-    status: res.status,
-    body: (await res.json()) as { reason?: string; dispatched?: boolean },
+  // Real (capturing) execution context — the forwarder schedules its outbound
+  // mirror via waitUntil; a dev outage / unreachable target is .catch'd.
+  const waited: Promise<unknown>[] = [];
+  const ctx = {
+    waitUntil: (p: Promise<unknown>) => {
+      waited.push(p);
+    },
+    passThroughOnException: () => {},
+  } as unknown as ExecutionContext;
+  const res = await app.fetch(req, { GITHUB_WEBHOOK_SECRET: SECRET, ...env } as Bindings, ctx);
+  const parsed = (await res.json()) as {
+    reason?: string;
+    dispatched?: boolean;
+    forwarded?: boolean;
   };
+  await Promise.allSettled(waited);
+  return { status: res.status, body: parsed, waitCount: waited.length };
 }
 
 /** A main-branch push touching README.md — WOULD dispatch enrichment (needs a
@@ -118,5 +134,39 @@ describe("POST /webhooks/github dev-range gate", () => {
     expect(status).toBe(200);
     expect(body.dispatched).toBe(false);
     expect(body.reason).not.toBe("dev_range_repo");
+  });
+});
+
+describe("POST /webhooks/github dev-range forwarder (epic #923, phase 5)", () => {
+  test("prod forwards a dev-range delivery when DEV_WEBHOOK_MIRROR_URL is set", async () => {
+    const { status, body, waitCount } = await post(
+      { ENVIRONMENT: "production", DEV_WEBHOOK_MIRROR_URL: "http://127.0.0.1:1/webhooks/github" },
+      readmePush("xx090001"),
+    );
+    expect(status).toBe(200);
+    expect(body.reason).toBe("dev_range_repo");
+    expect(body.forwarded).toBe(true);
+    expect(waitCount).toBe(1); // the mirror fetch was scheduled fire-and-forget
+  });
+
+  test("prod does NOT forward when DEV_WEBHOOK_MIRROR_URL is unset", async () => {
+    const { status, body, waitCount } = await post(
+      { ENVIRONMENT: "production" },
+      readmePush("xx090001"),
+    );
+    expect(status).toBe(200);
+    expect(body.reason).toBe("dev_range_repo");
+    expect(body.forwarded).toBeUndefined();
+    expect(waitCount).toBe(0);
+  });
+
+  test("dev worker never forwards even with the var set (falls through)", async () => {
+    const { status, body, waitCount } = await post(
+      { ENVIRONMENT: "development", DEV_WEBHOOK_MIRROR_URL: "http://127.0.0.1:1/webhooks/github" },
+      inertPush("xx090001"),
+    );
+    expect(status).toBe(200);
+    expect(body.reason).not.toBe("dev_range_repo");
+    expect(waitCount).toBe(0);
   });
 });

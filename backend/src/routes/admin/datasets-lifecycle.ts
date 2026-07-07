@@ -1569,7 +1569,7 @@ export function registerDatasetLifecycleRoutes(admin: AdminRouter): void {
         callbackToken,
         callbackUrl,
         pat,
-        { skipCanary: skip_canary ?? false, skipCallback },
+        { skipCanary: skip_canary ?? false, skipCallback, s3Bucket: c.env.S3_BUCKET },
       );
       return c.json({ dispatched: true, dataset_id, version });
     } catch (err) {

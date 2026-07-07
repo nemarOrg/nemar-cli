@@ -147,7 +147,10 @@ export async function archiveRetrySweep(env: Bindings): Promise<void> {
       // the dispatched run's archive-ready callback re-stamps the row, and the
       // cap is still enforced. The inverse order (increment then dispatch) would
       // instead drop attempts when the dispatch fails, which is worse.
-      await triggerArchiveGeneration(row.dataset_id, row.dataset_id, version, pat);
+      await triggerArchiveGeneration(row.dataset_id, row.dataset_id, version, pat, {
+        s3Bucket: env.S3_BUCKET,
+        callbackBaseUrl: env.API_BASE_URL,
+      });
       await env.DB.prepare(
         `UPDATE datasets
             SET archive_retry_count = archive_retry_count + 1,

@@ -324,6 +324,30 @@ export function registerGithubWebhookRoutes(webhooks: WebhookRouter): void {
     // worker, ENVIRONMENT != "production", does not take this branch and
     // dispatches normally.)
     if (c.env.ENVIRONMENT === "production" && isDevRangeDatasetId(payload.repository?.name ?? "")) {
+      if (c.env.DEV_WEBHOOK_MIRROR_URL) {
+        // Forward the raw, still-HMAC-signed delivery to the dev worker (epic
+        // #923) so it dispatches for staging exemplars. Outbound-only and
+        // fire-and-forget via waitUntil: cannot mutate prod, and a dev outage
+        // never affects prod latency. Dev re-verifies with its own (equal)
+        // GITHUB_WEBHOOK_SECRET.
+        c.executionCtx.waitUntil(
+          fetch(c.env.DEV_WEBHOOK_MIRROR_URL, {
+            method: "POST",
+            headers: {
+              "Content-Type": c.req.header("Content-Type") ?? "application/json",
+              "X-Hub-Signature-256": signature ?? "",
+              "X-GitHub-Event": eventType ?? "",
+              "X-GitHub-Delivery": deliveryId,
+            },
+            body: rawBody,
+          }).catch((err) => {
+            console.warn(
+              `[github-webhook] dev mirror forward failed for delivery ${deliveryId}: ${err instanceof Error ? err.message : String(err)}`,
+            );
+          }),
+        );
+        return c.json({ ok: true, dispatched: false, reason: "dev_range_repo", forwarded: true });
+      }
       return c.json({ ok: true, dispatched: false, reason: "dev_range_repo" });
     }
 
@@ -413,7 +437,10 @@ export function registerGithubWebhookRoutes(webhooks: WebhookRouter): void {
         );
       } else {
         try {
-          await triggerZarrGeneration(zarrDecision.datasetId, zarrDecision.ref, pat);
+          await triggerZarrGeneration(zarrDecision.datasetId, zarrDecision.ref, pat, {
+            s3Bucket: c.env.S3_BUCKET,
+            callbackBaseUrl: c.env.API_BASE_URL,
+          });
           console.log(
             `[github-webhook] dispatched run-generate-zarr for ${zarrDecision.datasetId}@${zarrDecision.ref} delivery=${deliveryId}`,
           );
