@@ -37,7 +37,7 @@
 # driver's --clean), so the serving copy always mirrors the current dataset.
 #
 # Crontab (sibling of hallu-sync, offset to :30):
-#   30 * * * * /path/to/nemar-cli/scripts/hallu-zarr.sh >> /data/projects/yahya/nemar/.nm-zarr-cron.log 2>&1
+#   30 * * * * /path/to/nemar-cli/scripts/hallu-zarr.sh >> /mnt/local/zarr-state/.nm-zarr-cron.log 2>&1
 #
 # Prereqs: curl, jq, git, git-annex, nemar CLI, aws, uv, python3 in PATH.
 ################################################################################
@@ -51,14 +51,23 @@ done
 export PATH
 
 # --- Config (environment-overridable) ----------------------------------------
-# WORK_DIR is the EPHEMERAL per-recording scratch and MUST be fast local disk:
-# the driver streams each annex blob here and builds the temp Zarr store before
-# upload, and N parallel workers hammer it at once. On Hallu that is a dedicated
-# NVMe (/mnt/local, ~950 GB) -- NOT the NFS /data/projects (which would serialize
-# the parallel writers). STATE_DIR (queue db, venv, driver clone) stays on the
-# persistent NFS so it survives reboots; only the hot I/O path is on NVMe.
-WORK_DIR="${ZARR_WORK_DIR:-/mnt/local/zarr-scratch}"
-STATE_DIR="${ZARR_STATE_DIR:-/data/projects/yahya/nemar}"
+# ZARR_BASE is the SINGLE local drive this pipeline lives on. Both the hot
+# per-recording scratch AND the persistent state (queue db, venv, driver clone,
+# logs) hang off it, so the whole pipeline touches exactly one filesystem and has
+# NO network (NFS) dependency: NFS made every Python import, SQLite lock, and stat
+# a network round-trip -- too much tension/traffic on the hot path, and
+# SQLite-over-NFS locking is fragile. All state here is rebuildable (venv/clone
+# via setup(); the queue via `reconcile`) and the real outputs live in S3, so
+# single-drive-local is the right durability trade. Moving to another machine is
+# a one-line change here (or set ZARR_BASE in the environment / crontab).
+#
+# WORK_DIR is the EPHEMERAL per-recording scratch: the driver streams each annex
+# blob here and N parallel workers build temp Zarr stores before upload, so it
+# MUST be fast local disk. Only this subtree is wiped between recordings; the
+# sibling STATE_DIR is never touched by the cleanup.
+ZARR_BASE="${ZARR_BASE:-/mnt/local}"
+WORK_DIR="${ZARR_WORK_DIR:-${ZARR_BASE}/zarr-scratch}"
+STATE_DIR="${ZARR_STATE_DIR:-${ZARR_BASE}/zarr-state}"
 # Recordings convert in parallel (ProcessPoolExecutor in the driver). Conversion
 # is CPU-bound (resample + zstd); Hallu has 32 cores. Cap so N concurrent
 # multi-GB recordings stay within NVMe scratch + RAM (5-10 is the sweet spot).
