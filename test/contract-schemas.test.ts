@@ -1,8 +1,12 @@
 /**
  * Pure unit tests for the shared wire contract (epic #896, #898).
  *
- * No live backend: validates the schemas + version canonicalizer directly.
- * The live-response drift guard is test/contract-live.test.ts (TEST_API_URL).
+ * No live backend: validates the schemas + version canonicalizer directly, so
+ * this is a required unit-pure test that also gates deploys. The live-response
+ * drift guard is the separate integration test test/contract-live.test.ts.
+ * (Intentionally no live-backend env-var token in this file's text: the CI tier
+ * classifier is a content grep, and a mere mention would misroute this pure test
+ * out of the required/deploy-gating tier -- see epic #896 cross-phase review.)
  */
 
 import { describe, expect, test } from "bun:test";

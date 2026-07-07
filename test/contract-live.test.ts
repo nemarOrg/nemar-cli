@@ -125,22 +125,24 @@ d("live wire contract", () => {
     const { status, body } = await getJson(`/data/${TEST_DATASET}/metadata.json`);
     if (status === 404) return; // not published; skip
     expect(status).toBe(200);
-    // WARN-only in #898: an un-classified dataset can legitimately still carry
-    // known drift (e.g. recording_modality: [] before modality classification),
-    // which the canonical schema rejects by design. Phase 4 (#899) fixes the
-    // drift and flips BOTH checks to hard asserts. We assert only that the
-    // response is a JSON object here; the shape gaps are surfaced as warnings.
+    // WARN-only: an un-classified dataset can legitimately still carry known
+    // drift (e.g. recording_modality: [] before modality classification), which
+    // the canonical schema rejects by design; and this validates the DEPLOYED
+    // backend, which lags the epic until it ships. Flip BOTH checks (this + the
+    // strict-version one above) to hard asserts in the #937 follow-up once the
+    // data-plane drift is cleaned up and the epic is live on dev. We assert only
+    // that the response is a JSON object here; shape gaps surface as warnings.
     expect(typeof body).toBe("object");
     const r = neuroschemaDatasetSchema.safeParse(body);
     if (!r.success) {
       console.warn(
-        `[contract] neuroschema envelope gaps (fix in #899): ${JSON.stringify(r.error.issues.slice(0, 6))}`,
+        `[contract] neuroschema envelope gaps (fix in #937): ${JSON.stringify(r.error.issues.slice(0, 6))}`,
       );
     }
     const validate = compileNeuroschemaDatasetValidator();
     if (!validate(body)) {
       console.warn(
-        `[contract] neuroschema conformance gaps (fix in #899): ${formatAjvErrors(validate)}`,
+        `[contract] neuroschema conformance gaps (fix in #937): ${formatAjvErrors(validate)}`,
       );
     }
   });
