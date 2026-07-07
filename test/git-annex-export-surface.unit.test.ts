@@ -49,9 +49,11 @@ const MODULE_EXPORTS: Record<string, string[]> = {
   ],
   "s3-remote": [
     "ANNEX_REMOTE_EXISTS_RE",
+    "DEFAULT_S3_PARTSIZE",
     "NEMAR_S3_REMOTE_NAME",
     "annexRemoteExists",
     "awsCredentialEnv",
+    "buildS3RemoteArgs",
     "clearAnnexCredentials",
     "configureS3Remote",
     "enableS3Remote",
@@ -85,6 +87,7 @@ const MODULE_EXPORTS: Record<string, string[]> = {
     "countPendingDownload",
     "dropFiles",
     "dropUnusedAnnexObjects",
+    "extractCopyError",
     "extractWhereisKeyUrl",
     "getAnnexWhereisAll",
     "getDatasetData",
@@ -112,8 +115,19 @@ const MODULE_EXPORTS: Record<string, string[]> = {
   ],
 };
 
-/** Exported only for sibling git-annex/* modules; never part of the CLI surface. */
-const INTERNAL_WIRING = ["getGitHubToken"];
+/**
+ * Exported only for sibling git-annex/* modules or for unit testing; never part
+ * of the CLI-facing surface, so excluded from the MONOLITH_EXPORTS union check.
+ * - getGitHubToken: imported by clone-push.ts.
+ * - buildS3RemoteArgs / DEFAULT_S3_PARTSIZE / extractCopyError: exported for
+ *   #886 unit tests (partsize + copy-error surfacing); internal otherwise.
+ */
+const INTERNAL_WIRING = [
+  "getGitHubToken",
+  "buildS3RemoteArgs",
+  "DEFAULT_S3_PARTSIZE",
+  "extractCopyError",
+];
 
 /**
  * The git-annex.ts monolith's runtime surface: captured at #908 commit 1,

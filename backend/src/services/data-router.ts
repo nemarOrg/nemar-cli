@@ -8,6 +8,10 @@
  * for the "latest" lookup.
  */
 
+// Single source of truth for the version canonicalizer + neuroschema version
+// (epic #896, #898). toVersionTag is re-exported below so existing importers
+// (routes/data.ts) keep working.
+import { NEUROSCHEMA_VERSION, toVersionTag } from "../../../shared/contract/index.js";
 import type {
   ContributorEntry,
   FundingReferenceEntry,
@@ -580,7 +584,7 @@ export interface NemarExtensionBlock {
 }
 
 export interface NeuroschemaDataset {
-  schema_version: "0.3.0";
+  schema_version: typeof NEUROSCHEMA_VERSION;
   doc_type: "dataset";
   dataset_id: string;
   name: string;
@@ -876,7 +880,7 @@ export function buildDatasetMetadata(input: {
   const latestVersionRow = versions[0] ?? null;
 
   return {
-    schema_version: "0.3.0",
+    schema_version: NEUROSCHEMA_VERSION,
     doc_type: "dataset",
     dataset_id: row.dataset_id,
     name: row.name,
@@ -987,17 +991,12 @@ export interface VersionPickerEntry {
 }
 
 /**
- * Normalize a `dataset_versions.version` field to a `v`-prefixed tag.
- *
- * Older D1 rows store the bare version (e.g. `"1.0.0"`) while newer rows
- * store the tag form (`"v1.0.0"`). Tag form is the canonical wire shape
- * for the data.nemar.org route. Always coerce to tag form before
- * routing or comparing -- a missed coercion produces malformed URLs
- * (`/<id>/1.0.0/`) and breaks the tombstone walk's `indexOf` lookup.
+ * Re-export the canonical version canonicalizer so existing importers
+ * (routes/data.ts) keep their `from "../services/data-router"` import. The
+ * implementation now lives in shared/contract/version.ts, shared by both the
+ * catalog and data planes (epic #896, #898).
  */
-export function toVersionTag(raw: string): string {
-  return raw.startsWith("v") ? raw : `v${raw}`;
-}
+export { toVersionTag };
 
 export function renderIndexHtml(args: {
   datasetId: string;

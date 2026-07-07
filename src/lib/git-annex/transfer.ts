@@ -316,6 +316,52 @@ export async function dropFiles(
   }
 }
 
+/** Lines from git-annex copy output worth surfacing as the failure cause. */
+const COPY_ERROR_RE =
+  /fail|error|denied|forbidden|entitytoolarge|too large|multipart|exceed|timed?\s*out|not\s+enough|no\s+space|access\s+key/i;
+
+/**
+ * Extract a useful error message from a failed `git annex copy`.
+ *
+ * git-annex writes the real S3 failure (e.g. 400 EntityTooLarge on a >5 GB
+ * single-part PUT) to STDOUT, not stderr, so surfacing only `stderr.trim()`
+ * left users with the generic "Failed to copy to remote" and no diagnosable
+ * cause (#886). Prefer stderr; otherwise pull the informative lines from stdout
+ * (falling back to its tail), so the actual reason reaches the CLI.
+ *
+ * Exported for unit testing; not part of the CLI-facing surface.
+ */
+const MAX_COPY_ERROR_LINES = 20;
+
+export function extractCopyError(stdout: string, stderr: string): string {
+  const err = stderr.trim();
+  if (err) return err;
+  const lines = stdout
+    .split("\n")
+    .map((l) => l.trim())
+    .filter(Boolean);
+  const relevant = lines.filter((l) => COPY_ERROR_RE.test(l));
+  // Cap the output: `git annex copy -J . ` fails per-file, and COPY_ERROR_RE
+  // matches generic words (fail/error), so a many-file failure could otherwise
+  // surface hundreds of lines into the CLI. Keep the last N (the tail carries
+  // git-annex's summary line), noting how many were dropped. Matches the bounded
+  // subprocess-error convention in github.ts / import-openneuro.ts.
+  let chosen: string[];
+  if (relevant.length > MAX_COPY_ERROR_LINES) {
+    const omitted = relevant.length - MAX_COPY_ERROR_LINES;
+    chosen = [
+      `...(${omitted} earlier error lines omitted)`,
+      ...relevant.slice(-MAX_COPY_ERROR_LINES),
+    ];
+  } else if (relevant.length) {
+    chosen = relevant;
+  } else {
+    chosen = lines.slice(-8);
+  }
+  const picked = chosen.join("\n").trim();
+  return picked || "Failed to copy to remote";
+}
+
 /**
  * Copy annexed content to a remote.
  *
@@ -336,7 +382,7 @@ export async function copyToAnnexRemote(
     const { stdout, stderr, exitCode } = await runCommand(args, { cwd: datasetPath, env });
 
     if (exitCode !== 0) {
-      return { success: false, error: stderr.trim() || "Failed to copy to remote", filesCopied: 0 };
+      return { success: false, error: extractCopyError(stdout, stderr), filesCopied: 0 };
     }
 
     const copyMatches = stdout.match(/^copy .+ ok$/gm);

@@ -34,7 +34,10 @@ type AppEnv = { Bindings: Bindings; Variables: Variables };
 // --------------------------------------------------------------------------
 
 class InMemoryCache implements Cache {
-  private store = new Map<string, { body: string; headers: Record<string, string>; expiresAt: number }>();
+  private store = new Map<
+    string,
+    { body: string; headers: Record<string, string>; expiresAt: number }
+  >();
 
   // Injected clock so tests can advance time without real sleeps.
   // Defaults to the real wall clock.
@@ -129,7 +132,11 @@ describe("__selectBucket", () => {
   });
 
   test("authenticated non-auth requests bucket on token with higher cap", () => {
-    const sel = __selectBucket("/admin/publish/nm000110/approve", `Bearer ${VALID_TOKEN}`, "10.0.0.1");
+    const sel = __selectBucket(
+      "/admin/publish/nm000110/approve",
+      `Bearer ${VALID_TOKEN}`,
+      "10.0.0.1",
+    );
     expect(sel.keyKind).toBe("token");
     expect(sel.rawKey).toBe(VALID_TOKEN);
     expect(sel.maxRequests).toBe(__limits.TOKEN_MAX_REQUESTS_AUTHED);
@@ -161,6 +168,30 @@ describe("__selectBucket", () => {
     const sel = __selectBucket("/admin/users", `Bearer ${VALID_TOKEN}`, "10.0.0.1");
     expect(sel.keyKind).toBe("token");
     expect(sel.maxRequests).toBe(__limits.TOKEN_MAX_REQUESTS_AUTHED);
+  });
+
+  test("data plane + zarr serving paths use the generous data-ip bucket (#901)", () => {
+    for (const path of [
+      "/data/nm000108/v1.0.0/foo",
+      "/nemar/data/x",
+      // Host-fork shape (zarr.nemar.org -> zarrDataRoutes.fetch, path stripped):
+      "/nm000132/zarr/0/0/0",
+      // Path-mount shape (api.nemar.org/workers.dev /zarrproxy): Hono PREPENDS the
+      // mount prefix, so c.req.path keeps /zarrproxy. Must still bucket to data-ip.
+      "/zarrproxy/nm000132/zarr/0/0/0",
+      "/zarrproxy/on000045/zarr/zarr.json",
+    ]) {
+      const sel = __selectBucket(path, undefined, "10.0.0.9");
+      expect(sel.keyKind).toBe("data-ip");
+      expect(sel.maxRequests).toBe(__limits.DATA_MAX_REQUESTS);
+    }
+    // A tokened zarr request is still charged to the data bucket, not the token one.
+    expect(__selectBucket("/nm000132/zarr/x", `Bearer ${VALID_TOKEN}`, "10.0.0.9").keyKind).toBe(
+      "data-ip",
+    );
+    // Neither the management API nor a non-zarr /zarrproxy-lookalike is the data plane.
+    expect(__selectBucket("/datasets", undefined, "10.0.0.9").keyKind).toBe("ip");
+    expect(__selectBucket("/zarrproxything/nm000132", undefined, "10.0.0.9").keyKind).toBe("ip");
   });
 });
 

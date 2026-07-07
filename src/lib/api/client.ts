@@ -11,6 +11,7 @@
  * IS_DEV_BUILD `.includes` expression exactly as they are.
  */
 
+import type { ZodType } from "zod";
 import { getConfig } from "../config.js";
 import { printMaintenanceBanner } from "../maintenance-banner.js";
 import { version } from "../version.js";
@@ -42,6 +43,12 @@ export async function request<T>(
   path: string,
   options: RequestInit = {},
   authenticated: boolean | "optional" = false,
+  // Optional wire-contract schema (epic #896, #898). When provided, the parsed
+  // response is validated against it and the VALIDATED value is returned, so a
+  // shape drift fails loudly here instead of silently casting to a malformed T
+  // (the getCurrentUser class of bug). Endpoints opt in by passing a schema from
+  // shared/contract; passthrough schemas keep additive backend fields safe.
+  schema?: ZodType<T>,
 ): Promise<T> {
   const url = `${getApiUrl()}${path}`;
   const headers: Record<string, string> = {
@@ -98,6 +105,18 @@ export async function request<T>(
       data.details,
       typeof data.step === "string" ? data.step : undefined,
     );
+  }
+
+  if (schema) {
+    const result = schema.safeParse(data);
+    if (!result.success) {
+      throw new ApiError(
+        response.status,
+        `Response for ${path} did not match the expected NEMAR contract`,
+        { issues: result.error.issues },
+      );
+    }
+    return result.data;
   }
 
   return data as T;

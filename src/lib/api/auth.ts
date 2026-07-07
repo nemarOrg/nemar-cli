@@ -5,6 +5,7 @@
  * verbatim.
  */
 
+import { type ContractUser, userMeResponseSchema } from "../../../shared/contract/index.js";
 import { request } from "./client.js";
 
 // ============================================================================
@@ -137,24 +138,21 @@ export async function requestKeyRegeneration(email: string): Promise<{ message: 
 // User
 // ============================================================================
 
-export interface UserInfo {
-  id: number;
-  username: string;
-  email: string;
-  github_username: string;
-  orcid?: string | null;
-  status: string;
-  role: "owner" | "admin" | "member";
-  created_at: string;
-  sandbox_completed: boolean;
-  sandbox_dataset_id?: string;
-}
-
 /**
- * Get current user info (requires authentication)
+ * Get current user info (requires authentication).
+ *
+ * `/users/me` returns a NESTED envelope `{ user, token }`; this unwraps `.user`
+ * (typed by the shared contract's `ContractUser`). Previously it declared a
+ * flat `UserInfo` and did `request<UserInfo>` on the envelope, so every field
+ * read (`.username`, `.role`, `.orcid`, ...) was
+ * `undefined` at runtime, silently writing `undefined` over stored account
+ * config on `auth status --refresh` and disabling the upload ORCID auto-match
+ * (#895 / epic #896 #899). Validated against the shared contract so a future
+ * shape drift fails loud here instead of silently.
  */
-export async function getCurrentUser(): Promise<UserInfo> {
-  return request<UserInfo>("/users/me", {}, true);
+export async function getCurrentUser(): Promise<ContractUser> {
+  const res = await request("/users/me", {}, true, userMeResponseSchema);
+  return res.user;
 }
 
 // ============================================================================
