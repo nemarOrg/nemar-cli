@@ -603,6 +603,9 @@ async function handleEzidVersionDoiLegacy(
         EZID_PASSWORD: c.env.EZID_PASSWORD,
         EZID_SANDBOX_USERNAME: c.env.EZID_SANDBOX_USERNAME,
         EZID_SANDBOX_PASSWORD: c.env.EZID_SANDBOX_PASSWORD,
+        // Landing-base resolution for the version DOI _target (epic #923).
+        FRONTEND_URL: c.env.FRONTEND_URL,
+        DATASET_LANDING_BASE_URL: c.env.DATASET_LANDING_BASE_URL,
       },
       {
         datasetId: dataset.dataset_id,

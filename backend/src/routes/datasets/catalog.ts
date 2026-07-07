@@ -234,7 +234,7 @@ async function executeAndReturn(
                     ) AS latest_version
              FROM datasets d
              JOIN users u ON d.owner_user_id = u.id
-             WHERE d.status = 'active' AND (d.is_sandbox = 0 OR d.is_sandbox IS NULL)
+             WHERE d.status = 'active' AND (d.is_sandbox = 0 OR d.is_sandbox IS NULL OR d.is_exemplar = 1)
                AND d.visibility = 'public'
              ORDER BY d.created_at DESC LIMIT ? OFFSET ?`,
           )
@@ -434,7 +434,7 @@ export function registerCatalogRoutes(datasetRoutes: DatasetsRouter): void {
       FROM datasets d
       LEFT JOIN users u ON d.owner_user_id = u.id
       WHERE d.status = ?
-        AND (d.is_sandbox = 0 OR d.is_sandbox IS NULL)
+        AND (d.is_sandbox = 0 OR d.is_sandbox IS NULL OR d.is_exemplar = 1)
     `;
     if (!user || !hasRole(user.role, "admin")) {
       query += " AND d.visibility = 'public'";

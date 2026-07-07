@@ -288,11 +288,11 @@ async function scheduledCleanup(env: Bindings): Promise<void> {
     }
   }
 
-  // 1. Sandbox datasets older than 14 days
+  // 1. Sandbox datasets older than 14 days (exemplars are curated, never auto-deleted; epic #923)
   try {
     const sandboxRows = await db
       .prepare(
-        "SELECT dataset_id FROM datasets WHERE dataset_id LIKE 'xx%' AND created_at < datetime('now', '-14 days') AND status = 'active' LIMIT ?",
+        "SELECT dataset_id FROM datasets WHERE dataset_id LIKE 'xx%' AND is_exemplar = 0 AND created_at < datetime('now', '-14 days') AND status = 'active' LIMIT ?",
       )
       .bind(MAX_DELETIONS_PER_RUN)
       .all<{ dataset_id: string }>();

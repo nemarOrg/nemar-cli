@@ -270,13 +270,18 @@ export function buildBytesUrl(args: {
   version: string;
   bidsPath: string;
   key: string;
+  /** Data-plane origin for annex-backed files (epic #923). Defaults to the prod
+   *  data host, so prod output stays byte-identical and in lockstep with the
+   *  build-time raw S3 manifest. Staging passes resolveDataBaseOrigin(env) =
+   *  data-test.nemar.org so dev-bucket-only datasets embed reachable links. */
+  origin?: string;
 }): string {
-  const { githubOrg, datasetId, version, bidsPath, key } = args;
+  const { githubOrg, datasetId, version, bidsPath, key, origin = DATA_NEMAR_ORIGIN } = args;
   const encoded = bidsPath.split("/").filter(Boolean).map(encodeURIComponent).join("/");
   if (key.startsWith("git:")) {
     return `https://raw.githubusercontent.com/${githubOrg}/${datasetId}/${version}/${encoded}`;
   }
-  return `${DATA_NEMAR_ORIGIN}/${datasetId}/${version}/${encoded}`;
+  return `${origin}/${datasetId}/${version}/${encoded}`;
 }
 
 // ===========================================================================
@@ -1343,6 +1348,9 @@ export interface CatalogIndexRow {
   concept_doi: string | null;
   latest_version: string | null;
   latest_published_at: string | null;
+  /** Staging exemplar flag (epic #923). Admits an xx-prefixed id through the
+   *  public-catalog gate; never 1 in production. */
+  is_exemplar?: number | null;
 }
 
 export interface CatalogIndexEntry {
@@ -1377,11 +1385,15 @@ export interface CatalogIndexBuildResult {
  * the id into URL paths and `href=` attributes — a malformed id
  * slipping through here would produce a broken link or, in theory,
  * a markup injection vector.
+ *
+ * `opts.isExemplar` (epic #923) admits a staging exemplar xx id (is_exemplar=1,
+ * never present in production) through the xx block; all other guards still
+ * apply, including the shape check and the nm099999 test-dataset exclusion.
  */
-export function isPublicCatalogId(id: string): boolean {
+export function isPublicCatalogId(id: string, opts?: { isExemplar?: boolean }): boolean {
   if (!isValidDatasetId(id)) return false;
-  if (id.startsWith("xx")) return false;
   if (id === "nm099999") return false;
+  if (id.startsWith("xx") && !opts?.isExemplar) return false;
   return true;
 }
 
@@ -1406,7 +1418,7 @@ export function buildCatalogIndexPayload(args: {
   const droppedIds: string[] = [];
   const datasets: CatalogIndexEntry[] = args.rows
     .filter((r) => {
-      if (isPublicCatalogId(r.dataset_id)) return true;
+      if (isPublicCatalogId(r.dataset_id, { isExemplar: r.is_exemplar === 1 })) return true;
       droppedIds.push(r.dataset_id);
       return false;
     })

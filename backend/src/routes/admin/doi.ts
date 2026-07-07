@@ -28,6 +28,8 @@ import {
   createConceptDoi as dispatchCreateConceptDoi,
   resolveEzidAuth,
 } from "../../services/doi";
+import { resolveDatasetLandingBase } from "../../services/environment";
+import { isExemplarPublishAllowed } from "../../services/exemplar";
 import {
   type EzidAuth,
   extractDoi,
@@ -111,6 +113,7 @@ export function registerDoiRoutes(admin: AdminRouter): void {
         owner_username: string;
         owner_orcid: string | null;
         is_sandbox: number | null;
+        is_exemplar: number | null;
         enrichment_json: string | null;
       }>();
 
@@ -118,8 +121,11 @@ export function registerDoiRoutes(admin: AdminRouter): void {
       return c.json({ error: "Dataset not found" }, 404);
     }
 
-    // Block DOI creation for sandbox datasets
-    if (dataset.is_sandbox || dataset.dataset_id.startsWith("xx")) {
+    // Block DOI creation for sandbox datasets, except staging exemplars (epic #923).
+    if (
+      (dataset.is_sandbox || dataset.dataset_id.startsWith("xx")) &&
+      !isExemplarPublishAllowed(c.env, dataset)
+    ) {
       return c.json(
         {
           error: "Cannot create DOI for sandbox datasets",
@@ -283,6 +289,9 @@ export function registerDoiRoutes(admin: AdminRouter): void {
           EZID_SANDBOX_PASSWORD: c.env.EZID_SANDBOX_PASSWORD,
           ZENODO_API_KEY: c.env.ZENODO_API_KEY,
           ZENODO_SANDBOX_API_KEY: c.env.ZENODO_SANDBOX_API_KEY,
+          // Landing-base resolution for the concept DOI _target (epic #923).
+          FRONTEND_URL: c.env.FRONTEND_URL,
+          DATASET_LANDING_BASE_URL: c.env.DATASET_LANDING_BASE_URL,
         },
       );
 
@@ -413,14 +422,18 @@ export function registerDoiRoutes(admin: AdminRouter): void {
           zenodo_latest_version_id: string | null;
           owner_username: string;
           is_sandbox: number | null;
+          is_exemplar: number | null;
         }>();
 
       if (!dataset) {
         return c.json({ error: "Dataset not found" }, 404);
       }
 
-      // Block DOI publishing for sandbox datasets
-      if (dataset.is_sandbox || dataset.dataset_id.startsWith("xx")) {
+      // Block DOI publishing for sandbox datasets, except staging exemplars (epic #923).
+      if (
+        (dataset.is_sandbox || dataset.dataset_id.startsWith("xx")) &&
+        !isExemplarPublishAllowed(c.env, dataset)
+      ) {
         return c.json(
           {
             error: "Cannot publish DOI for sandbox datasets",
@@ -756,7 +769,7 @@ export function registerDoiRoutes(admin: AdminRouter): void {
 
         const metadata = bidsToDataCite(datasetId, doi, bidsDesc, enrichment);
         updateOptions.dataciteXml = buildDataCiteXml(metadata);
-        updateOptions.target = datasetLandingUrl(datasetId);
+        updateOptions.target = datasetLandingUrl(datasetId, resolveDatasetLandingBase(c.env));
         metadataRefreshed = true;
       }
 
@@ -764,7 +777,7 @@ export function registerDoiRoutes(admin: AdminRouter): void {
       if (body.status) {
         if (body.status === "public" && dataset.ezid_status === "reserved") {
           updateOptions.status = "public";
-          updateOptions.target = datasetLandingUrl(datasetId);
+          updateOptions.target = datasetLandingUrl(datasetId, resolveDatasetLandingBase(c.env));
         } else if (body.status === "unavailable") {
           updateOptions.status = "unavailable";
         }
@@ -829,7 +842,11 @@ export function registerDoiRoutes(admin: AdminRouter): void {
             const vMetadata = bidsToDataCite(datasetId, vDoi, bidsDesc, vEnrichment);
             vMetadata.version = ver.version;
             const vXml = buildDataCiteXml(vMetadata);
-            const vTarget = datasetVersionLandingUrl(datasetId, ver.version);
+            const vTarget = datasetVersionLandingUrl(
+              datasetId,
+              ver.version,
+              resolveDatasetLandingBase(c.env),
+            );
             await ezidUpdateIdentifier(auth, versionIdentifier, {
               dataciteXml: vXml,
               target: vTarget,

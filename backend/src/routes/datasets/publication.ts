@@ -16,6 +16,7 @@ import {
   resolveEmailConfig,
   sendPublicationRequestEmail,
 } from "../../services/email";
+import { isExemplarPublishAllowed } from "../../services/exemplar";
 import {
   checkWorkflowExists,
   deployWorkflows,
@@ -62,7 +63,7 @@ export function registerPublicationRoutes(datasetRoutes: DatasetsRouter): void {
 
     const dataset = await db
       .prepare(
-        "SELECT id, dataset_id, owner_user_id, is_sandbox, github_repo, visibility FROM datasets WHERE dataset_id = ?",
+        "SELECT id, dataset_id, owner_user_id, is_sandbox, is_exemplar, github_repo, visibility FROM datasets WHERE dataset_id = ?",
       )
       .bind(datasetId)
       .first<{
@@ -70,6 +71,7 @@ export function registerPublicationRoutes(datasetRoutes: DatasetsRouter): void {
         dataset_id: string;
         owner_user_id: number;
         is_sandbox: number | null;
+        is_exemplar: number | null;
         github_repo: string | null;
         visibility: string | null;
       }>();
@@ -82,7 +84,11 @@ export function registerPublicationRoutes(datasetRoutes: DatasetsRouter): void {
       return c.json({ error: "Only the dataset owner can request publication" }, 403);
     }
 
-    if (dataset.is_sandbox || dataset.dataset_id.startsWith("xx")) {
+    // Block sandbox/xx, except staging exemplars (epic #923).
+    if (
+      (dataset.is_sandbox || dataset.dataset_id.startsWith("xx")) &&
+      !isExemplarPublishAllowed(c.env, dataset)
+    ) {
       return c.json({ error: "Cannot publish sandbox datasets" }, 400);
     }
 

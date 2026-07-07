@@ -38,6 +38,7 @@ import {
   mergeOrcidDiscoveries,
 } from "./doi-orcid-discovery.js";
 import { buildOrcidEnrichment, resolveEzidAuth } from "./doi.js";
+import { resolveDatasetLandingBase } from "./environment.js";
 import { extractDoi, updateIdentifier } from "./ezid.js";
 import { getDatasetsToken, getDatasetsTokenWithRefresher } from "./github-auth.js";
 import {
@@ -398,7 +399,7 @@ export async function enrichDataset(
           `[llm-enrich] Failed to update BIDS Name in D1 for ${datasetId}: ${errorMessage(dbErr)}`,
         );
       }
-      const nemarUrl = datasetLandingUrl(datasetId);
+      const nemarUrl = datasetLandingUrl(datasetId, resolveDatasetLandingBase(env));
       const repoResult = await setRepoDescription(repoName, bidsName, pat, nemarUrl);
       if (!repoResult.ok) {
         console.error(
@@ -509,7 +510,13 @@ export async function enrichDataset(
 
     // Stage 1: Seed from BIDS (deterministic, no LLM call)
     const treePaths = tree.map((f) => f.path);
-    const seeded = seedFromBids(bidsDescription, existingMetadata, datasetId, treePaths);
+    const seeded = seedFromBids(
+      bidsDescription,
+      existingMetadata,
+      datasetId,
+      treePaths,
+      resolveDatasetLandingBase(env),
+    );
     console.log(
       `[llm-enrich] Stage 1 (seed): ${datasetId} - ${Object.keys(seeded.authors || {}).length} authors, ${(seeded.related_identifiers || []).length} related IDs`,
     );

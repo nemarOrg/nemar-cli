@@ -8,7 +8,11 @@
  */
 
 import { describe, expect, test } from "bun:test";
-import { isNonProductionEnv } from "../src/services/environment";
+import {
+  isNonProductionEnv,
+  resolveDataBaseOrigin,
+  resolveDatasetLandingBase,
+} from "../src/services/environment";
 import type { Bindings } from "../src/types/bindings";
 
 const env = (v: unknown) => ({ ENVIRONMENT: v }) as Pick<Bindings, "ENVIRONMENT">;
@@ -34,5 +38,72 @@ describe("isNonProductionEnv", () => {
   test("case/whitespace tolerant", () => {
     expect(isNonProductionEnv(env("  Development "))).toBe(true);
     expect(isNonProductionEnv(env("PRODUCTION"))).toBe(false);
+  });
+});
+
+describe("resolveDatasetLandingBase", () => {
+  test("prefers DATASET_LANDING_BASE_URL over FRONTEND_URL", () => {
+    expect(
+      resolveDatasetLandingBase({
+        DATASET_LANDING_BASE_URL: "https://landing.example",
+        FRONTEND_URL: "https://test.nemar.org",
+      }),
+    ).toBe("https://landing.example");
+  });
+
+  test("falls back to FRONTEND_URL (dev staging host)", () => {
+    expect(resolveDatasetLandingBase({ FRONTEND_URL: "https://test.nemar.org" })).toBe(
+      "https://test.nemar.org",
+    );
+  });
+
+  test("prod default when both unset -> nemar.org", () => {
+    expect(resolveDatasetLandingBase({})).toBe("https://nemar.org");
+  });
+
+  test("empty strings fall through to the next candidate", () => {
+    expect(
+      resolveDatasetLandingBase({ DATASET_LANDING_BASE_URL: "  ", FRONTEND_URL: "https://x.test" }),
+    ).toBe("https://x.test");
+    expect(resolveDatasetLandingBase({ DATASET_LANDING_BASE_URL: "", FRONTEND_URL: "" })).toBe(
+      "https://nemar.org",
+    );
+  });
+
+  test("strips trailing slashes", () => {
+    expect(resolveDatasetLandingBase({ FRONTEND_URL: "https://test.nemar.org/" })).toBe(
+      "https://test.nemar.org",
+    );
+  });
+});
+
+describe("resolveDataBaseOrigin", () => {
+  test("prod default when unset -> data.nemar.org (byte-identical)", () => {
+    expect(resolveDataBaseOrigin({ ENVIRONMENT: "production" })).toBe("https://data.nemar.org");
+    expect(resolveDataBaseOrigin({ ENVIRONMENT: "production", DATA_BASE_URL: "" })).toBe(
+      "https://data.nemar.org",
+    );
+  });
+
+  test("staging override", () => {
+    expect(
+      resolveDataBaseOrigin({
+        ENVIRONMENT: "development",
+        DATA_BASE_URL: "https://data-test.nemar.org",
+      }),
+    ).toBe("https://data-test.nemar.org");
+  });
+
+  test("strips trailing slash", () => {
+    expect(
+      resolveDataBaseOrigin({
+        ENVIRONMENT: "development",
+        DATA_BASE_URL: "https://data-test.nemar.org/",
+      }),
+    ).toBe("https://data-test.nemar.org");
+  });
+
+  test("non-prod without override still returns the prod default (safe fallback)", () => {
+    expect(resolveDataBaseOrigin({ ENVIRONMENT: "development" })).toBe("https://data.nemar.org");
   });
 });

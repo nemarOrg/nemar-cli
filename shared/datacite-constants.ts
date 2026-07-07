@@ -191,20 +191,39 @@ export type NemarMetadata = NemarMetadataV1 | NemarMetadataV2;
 // Dataset landing URLs (DOI _target + enrichment links)
 // ---------------------------------------------------------------------------
 
+/** Default landing base (prod apex). Kept in sync with resolveDatasetLandingBase()
+ *  in backend/src/services/environment.ts. */
+const DEFAULT_LANDING_BASE = "https://nemar.org";
+
+/** Strip trailing slash(es) so `<base>/dataset/...` never doubles up. */
+function normalizeLandingBase(baseUrl: string): string {
+  return baseUrl.replace(/\/+$/, "");
+}
+
 /**
  * Canonical NEMAR dataset landing URL used as the DOI `_target` and in
  * enrichment/README links. Permanent and provider-agnostic; today
  * `nemar.org/dataset/<id>` forwards to `ww2.nemar.org/dataset/<id>`.
  * Replaces the retired legacy `nemar.org/dataexplorer/detail?dataset_id=<id>`.
+ * `baseUrl` (epic #923) overrides the origin for staging; defaults to prod so
+ * existing callers are unchanged.
  */
-export function datasetLandingUrl(datasetId: string): string {
-  return `https://nemar.org/dataset/${datasetId}`;
+export function datasetLandingUrl(
+  datasetId: string,
+  baseUrl: string = DEFAULT_LANDING_BASE,
+): string {
+  return `${normalizeLandingBase(baseUrl)}/dataset/${datasetId}`;
 }
 
 /**
  * Version-specific landing URL. `version` is the plain semver string (e.g.
  * `1.1.0`); the `?v=v<version>` form is what the ww2 dataset page honors.
+ * `baseUrl` (epic #923) overrides the origin for staging; defaults to prod.
  */
-export function datasetVersionLandingUrl(datasetId: string, version: string): string {
-  return `https://nemar.org/dataset/${datasetId}?v=v${version}`;
+export function datasetVersionLandingUrl(
+  datasetId: string,
+  version: string,
+  baseUrl: string = DEFAULT_LANDING_BASE,
+): string {
+  return `${normalizeLandingBase(baseUrl)}/dataset/${datasetId}?v=v${version}`;
 }

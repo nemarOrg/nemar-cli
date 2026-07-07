@@ -8,6 +8,7 @@
 import { datasetLandingUrl, datasetVersionLandingUrl } from "../../../shared/datacite-constants.js";
 import type { BidsDatasetDescription, DataCiteEnrichment } from "./datacite";
 import { bidsToDataCite, buildDataCiteXml } from "./datacite";
+import { resolveDatasetLandingBase } from "./environment.js";
 import {
   type EzidAuth,
   type EzidIdentifier,
@@ -71,6 +72,11 @@ export interface EzidEnv {
   EZID_PASSWORD: string;
   EZID_SANDBOX_USERNAME?: string;
   EZID_SANDBOX_PASSWORD?: string;
+  // DOI landing-URL base resolution (epic #923). Optional so partial env
+  // literals still satisfy the type; real callers pass full Bindings and the
+  // version/concept _target follows FRONTEND_URL (prod: nemar.org).
+  FRONTEND_URL?: string;
+  DATASET_LANDING_BASE_URL?: string;
 }
 
 export interface ZenodoEnv {
@@ -190,7 +196,7 @@ async function createEzidConceptDoi(
   const dataciteXml = buildDataCiteXml(metadata);
 
   // DOI landing page: always the NEMAR website (not GitHub)
-  const target = datasetLandingUrl(options.datasetId);
+  const target = datasetLandingUrl(options.datasetId, resolveDatasetLandingBase(env));
 
   let identifier: EzidIdentifier;
   try {
@@ -317,7 +323,11 @@ export async function createEzidVersionDoi(
   const dataciteXml = buildDataCiteXml(metadata);
 
   // Version DOI landing page: NEMAR website with version param (not GitHub release)
-  const target = datasetVersionLandingUrl(opts.datasetId, opts.version);
+  const target = datasetVersionLandingUrl(
+    opts.datasetId,
+    opts.version,
+    resolveDatasetLandingBase(env),
+  );
 
   let identifier: EzidIdentifier;
   try {

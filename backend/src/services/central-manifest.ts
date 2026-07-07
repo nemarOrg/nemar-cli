@@ -237,6 +237,9 @@ export async function mintEzidVersionDoi(
       EZID_PASSWORD: env.EZID_PASSWORD,
       EZID_SANDBOX_USERNAME: env.EZID_SANDBOX_USERNAME,
       EZID_SANDBOX_PASSWORD: env.EZID_SANDBOX_PASSWORD,
+      // Landing-base resolution for the version DOI _target (epic #923).
+      FRONTEND_URL: env.FRONTEND_URL,
+      DATASET_LANDING_BASE_URL: env.DATASET_LANDING_BASE_URL,
     },
     {
       datasetId: dataset.dataset_id,

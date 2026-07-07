@@ -40,6 +40,7 @@ import {
 } from "../services/data-router";
 import { parseNemarMetadata } from "../services/datacite";
 import { isValidDatasetId } from "../services/datasetId";
+import { resolveDataBaseOrigin } from "../services/environment";
 import { ORG_NAME } from "../services/github";
 import type { ManifestFile, VersionManifest } from "../services/manifest";
 import { buildPageBundle } from "../services/page-bundle";
@@ -250,6 +251,7 @@ async function manifestJsonHandler(
           version: resolved.version,
           bidsPath: path,
           key: file.key,
+          origin: resolveDataBaseOrigin(env),
         }),
       };
       try {
@@ -1196,6 +1198,7 @@ export async function catalogIndexResponse(env: Bindings, request: Request): Pro
          d.dataset_id,
          d.name,
          d.concept_doi,
+         d.is_exemplar,
          (SELECT version FROM dataset_versions dv
             WHERE dv.dataset_id = d.dataset_id
             ORDER BY dv.created_at DESC LIMIT 1) AS latest_version,
@@ -1204,7 +1207,7 @@ export async function catalogIndexResponse(env: Bindings, request: Request): Pro
             ORDER BY dv.created_at DESC LIMIT 1) AS latest_published_at
        FROM datasets d
        WHERE d.visibility = 'public'
-         AND d.dataset_id NOT LIKE 'xx%'
+         AND (d.dataset_id NOT LIKE 'xx%' OR d.is_exemplar = 1)
          AND d.dataset_id <> 'nm099999'
        ORDER BY d.dataset_id`,
     ).all<CatalogIndexRow>();
