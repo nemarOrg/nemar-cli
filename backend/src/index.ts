@@ -268,6 +268,27 @@ async function scheduledCleanup(env: Bindings): Promise<void> {
   }> = [];
   const MAX_DELETIONS_PER_RUN = 10;
 
+  // Prod-invariant guard (epic #923): the Phase 4 visibility SQL carve-outs admit
+  // is_exemplar=1 rows with NO runtime env check, relying on the invariant that
+  // production D1 never has such a row (the creation endpoint 403s in prod). If
+  // one ever appears here, a bug bypassed that gate and the row is silently
+  // public across catalog/search/data-index — surface it loudly rather than
+  // letting it hide.
+  if (env.ENVIRONMENT === "production") {
+    try {
+      const exemplarLeak = await db
+        .prepare("SELECT COUNT(*) as n FROM datasets WHERE is_exemplar = 1")
+        .first<{ n: number }>();
+      if ((exemplarLeak?.n ?? 0) > 0) {
+        console.error(
+          `[cleanup] INVARIANT VIOLATION: ${exemplarLeak?.n} is_exemplar=1 row(s) exist in PRODUCTION. These are staging-only and are now silently public via the exemplar visibility carve-outs. Investigate the exemplar creation gate immediately.`,
+        );
+      }
+    } catch (err) {
+      console.error("[cleanup] exemplar-invariant check failed:", err);
+    }
+  }
+
   /** Delete each dataset in `rows`, pushing outcomes into `results`. */
   async function deleteRows(rows: Array<{ dataset_id: string }>): Promise<void> {
     for (const row of rows) {
