@@ -29,10 +29,11 @@ export interface Bindings {
    *  apex. Defaults to https://app.nemar.org when unset. */
   APP_BASE_URL?: string;
   /** Base origin for DOI landing URLs (epic #923), no trailing slash, e.g.
-   *  https://nemar.org. DataCite _target and CLI-facing landing links resolve to
-   *  `<base>/dataset/<id>`. Defaults to FRONTEND_URL, then https://nemar.org, so
-   *  prod is unchanged (FRONTEND_URL is the apex); staging points landings at the
-   *  -test website. See resolveDatasetLandingBase() in services/environment.ts. */
+   *  https://nemar.org. The DataCite _target resolves to `<base>/dataset/<id>`
+   *  (the doi.org/<doi> link the CLI prints redirects here). Defaults to
+   *  FRONTEND_URL, then https://nemar.org, so prod is unchanged (FRONTEND_URL is
+   *  the apex); staging points landings at the -test website. See
+   *  resolveDatasetLandingBase() in services/environment.ts. */
   DATASET_LANDING_BASE_URL?: string;
   AWS_REGION: string;
   S3_BUCKET: string;

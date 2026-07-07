@@ -37,7 +37,7 @@ let env: Bindings;
 
 async function seed(
   stepsCompleted: readonly string[],
-  opts: { datasetId?: string; githubRepo?: string | null } = {},
+  opts: { datasetId?: string; githubRepo?: string | null; isExemplar?: boolean } = {},
 ): Promise<void> {
   const datasetId = opts.datasetId ?? DATASET;
   const githubRepo = opts.githubRepo === undefined ? `nemarDatasets/${datasetId}` : opts.githubRepo;
@@ -55,9 +55,9 @@ async function seed(
     ADMIN_KEY.slice(0, 8),
   );
   db.query(
-    `INSERT INTO datasets (dataset_id, name, owner_user_id, github_repo, visibility)
-     VALUES (?, 'Golden Dataset', ?, ?, 'private')`,
-  ).run(datasetId, userId.id, githubRepo);
+    `INSERT INTO datasets (dataset_id, name, owner_user_id, github_repo, visibility, is_exemplar)
+     VALUES (?, 'Golden Dataset', ?, ?, 'private', ?)`,
+  ).run(datasetId, userId.id, githubRepo, opts.isExemplar ? 1 : 0);
   db.query(
     `INSERT INTO publication_requests (dataset_id, status, requested_by, requested_at, steps_completed)
      VALUES (?, 'requested', ?, datetime('now'), ?)`,
@@ -251,6 +251,20 @@ describe("POST /admin/publish/:id/approve (golden characterization)", () => {
     expect(res.status).toBe(400);
     const body = (await res.json()) as Record<string, unknown>;
     expect(body.error).toBe("Cannot publish sandbox datasets");
+  });
+
+  test("pre-loop: an exemplar xx dataset bypasses the sandbox block (epic #923)", async () => {
+    // is_exemplar=1 under a non-production env (ENVIRONMENT='test') makes
+    // isExemplarPublishAllowed() true, so the xx block is skipped and the NEXT
+    // guard fires. Seeding no github_repo lets that next guard (400 "no GitHub
+    // repository") stand in for "got past the sandbox block" without running the
+    // full step loop or touching any external service.
+    await seed([], { datasetId: "xx099900", githubRepo: null, isExemplar: true });
+    const res = await approve({ resume: false }, "xx099900");
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as Record<string, unknown>;
+    expect(body.error).toBe("Dataset has no GitHub repository");
+    expect(body.error).not.toBe("Cannot publish sandbox datasets");
   });
 
   test("mid-loop abort: doi_create's non-production gate short-circuits the step loop", async () => {

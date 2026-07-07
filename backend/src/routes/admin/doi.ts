@@ -634,6 +634,8 @@ export function registerDoiRoutes(admin: AdminRouter): void {
     const datasetId = c.req.param("id");
     const body = c.req.valid("json");
     const db = c.env.DB;
+    // Resolved once per request; reused by every DOI _target in this handler.
+    const landingBase = resolveDatasetLandingBase(c.env);
 
     const dataset = await db
       .prepare(
@@ -769,7 +771,7 @@ export function registerDoiRoutes(admin: AdminRouter): void {
 
         const metadata = bidsToDataCite(datasetId, doi, bidsDesc, enrichment);
         updateOptions.dataciteXml = buildDataCiteXml(metadata);
-        updateOptions.target = datasetLandingUrl(datasetId, resolveDatasetLandingBase(c.env));
+        updateOptions.target = datasetLandingUrl(datasetId, landingBase);
         metadataRefreshed = true;
       }
 
@@ -777,7 +779,7 @@ export function registerDoiRoutes(admin: AdminRouter): void {
       if (body.status) {
         if (body.status === "public" && dataset.ezid_status === "reserved") {
           updateOptions.status = "public";
-          updateOptions.target = datasetLandingUrl(datasetId, resolveDatasetLandingBase(c.env));
+          updateOptions.target = datasetLandingUrl(datasetId, landingBase);
         } else if (body.status === "unavailable") {
           updateOptions.status = "unavailable";
         }
@@ -842,11 +844,7 @@ export function registerDoiRoutes(admin: AdminRouter): void {
             const vMetadata = bidsToDataCite(datasetId, vDoi, bidsDesc, vEnrichment);
             vMetadata.version = ver.version;
             const vXml = buildDataCiteXml(vMetadata);
-            const vTarget = datasetVersionLandingUrl(
-              datasetId,
-              ver.version,
-              resolveDatasetLandingBase(c.env),
-            );
+            const vTarget = datasetVersionLandingUrl(datasetId, ver.version, landingBase);
             await ezidUpdateIdentifier(auth, versionIdentifier, {
               dataciteXml: vXml,
               target: vTarget,

@@ -34,11 +34,16 @@ function normalizeOrigin(url: string): string {
  * explicit DATASET_LANDING_BASE_URL, then FRONTEND_URL, then the prod apex. Prod
  * is unchanged (FRONTEND_URL is https://nemar.org there); staging resolves to the
  * -test website. Never returns a trailing slash.
+ *
+ * Both fields are optional (Partial) so partial EzidEnv literals type-check;
+ * unlike resolveDataBaseOrigin there is no non-prod warn because FRONTEND_URL is a
+ * required, per-environment Bindings field — a real caller always has a correct
+ * intermediate, so the pure prod default is unreachable except for a literal that
+ * omits both, which the type still admits but no live call site does.
  */
-export function resolveDatasetLandingBase(env: {
-  DATASET_LANDING_BASE_URL?: string;
-  FRONTEND_URL?: string;
-}): string {
+export function resolveDatasetLandingBase(
+  env: Partial<Pick<Bindings, "DATASET_LANDING_BASE_URL" | "FRONTEND_URL">>,
+): string {
   return normalizeOrigin(
     env.DATASET_LANDING_BASE_URL?.trim() || env.FRONTEND_URL?.trim() || DEFAULT_LANDING_BASE,
   );

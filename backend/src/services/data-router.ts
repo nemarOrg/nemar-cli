@@ -250,6 +250,10 @@ export async function buildRedirectUrl(args: {
 // raw S3 manifest, which hardcodes the same host (emit_manifest.py:bytes_url_for
 // on nemarDatasets/.github). Per-host fetchability is irrelevant: the presigned
 // `url` field is what dev/CLI flows fetch; bytes_url is the durable reference.
+// NOTE (epic #923): this lockstep is prod-only. buildBytesUrl now takes an
+// `origin` override; on staging it becomes data-test.nemar.org while
+// emit_manifest.py still emits data.nemar.org, so the two disagree for exemplars
+// (Phase 5 follow-up parameterizes emit_manifest.py).
 const DATA_NEMAR_ORIGIN = "https://data.nemar.org";
 
 /**
@@ -272,8 +276,12 @@ export function buildBytesUrl(args: {
   key: string;
   /** Data-plane origin for annex-backed files (epic #923). Defaults to the prod
    *  data host, so prod output stays byte-identical and in lockstep with the
-   *  build-time raw S3 manifest. Staging passes resolveDataBaseOrigin(env) =
-   *  data-test.nemar.org so dev-bucket-only datasets embed reachable links. */
+   *  build-time raw S3 manifest. On staging, passing resolveDataBaseOrigin(env) =
+   *  data-test.nemar.org makes dev-bucket-only datasets embed reachable links, but
+   *  it BREAKS that lockstep for exemplars: emit_manifest.py (nemarDatasets/.github)
+   *  still hardcodes data.nemar.org, so the git-committed raw manifest disagrees
+   *  with the served manifest.json (the served copy is authoritative on staging).
+   *  Parameterizing emit_manifest.py is a Phase 5 follow-up. */
   origin?: string;
 }): string {
   const { githubOrg, datasetId, version, bidsPath, key, origin = DATA_NEMAR_ORIGIN } = args;

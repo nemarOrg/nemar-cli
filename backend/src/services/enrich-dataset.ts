@@ -246,6 +246,8 @@ export async function enrichDataset(
 
   const datasetId = opts.datasetId;
   const forceReenrich = opts.force === true;
+  // Resolved once; reused for the repo-description link and the seed related-id.
+  const landingBase = resolveDatasetLandingBase(env);
   // When true, the caller (the central `run-enrichment.yml` Action on
   // `nemarDatasets/.github`, or the `run-version-doi.yml` pre-DOI refresh
   // step) will write the metadata commit using its own per-repo App token;
@@ -399,7 +401,7 @@ export async function enrichDataset(
           `[llm-enrich] Failed to update BIDS Name in D1 for ${datasetId}: ${errorMessage(dbErr)}`,
         );
       }
-      const nemarUrl = datasetLandingUrl(datasetId, resolveDatasetLandingBase(env));
+      const nemarUrl = datasetLandingUrl(datasetId, landingBase);
       const repoResult = await setRepoDescription(repoName, bidsName, pat, nemarUrl);
       if (!repoResult.ok) {
         console.error(
@@ -515,7 +517,7 @@ export async function enrichDataset(
       existingMetadata,
       datasetId,
       treePaths,
-      resolveDatasetLandingBase(env),
+      landingBase,
     );
     console.log(
       `[llm-enrich] Stage 1 (seed): ${datasetId} - ${Object.keys(seeded.authors || {}).length} authors, ${(seeded.related_identifiers || []).length} related IDs`,

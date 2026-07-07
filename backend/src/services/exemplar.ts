@@ -3,13 +3,19 @@
  *
  * A small fleet of xx-prefixed "exemplar" datasets (is_exemplar=1) are curated
  * copies of real datasets that must pass through the full publish / DOI / reindex
- * pipeline on the staging environment (test.nemar.org). Every xx gate is relaxed
- * to "block unless exemplar-allowed" via isExemplarPublishAllowed(), and every
- * visibility predicate admits exemplars via exemplarOrFragment().
+ * pipeline on the staging environment (test.nemar.org). Each xx gate in the
+ * publish / DOI / reindex / visibility paths is relaxed to "block unless
+ * exemplar-allowed" via isExemplarPublishAllowed(); the visibility predicates
+ * admit exemplars with an `is_exemplar = 1` SQL fragment — canonicalized as
+ * exemplarOrFragment() (used by the programmatic reindex-filter query; the inline
+ * catalog/search/data predicates write the literal for readability). Note the
+ * `nemar admin summary` coverage query (manifest-coverage.ts) is the one xx
+ * filter deliberately left broad; it is an internal report, not a gate.
  *
  * Safety invariant (migration 0057): is_exemplar=1 rows never exist in
- * production — the creation endpoint 403s there (Phase 5) — so the SQL fragment
- * is safe to append unconditionally and the gate stays a single env-independent
+ * production. Today that holds because nothing writes the column; once Phase 5's
+ * creation endpoint ships it will 403 in production. So the SQL fragment is safe
+ * to append unconditionally and the gate stays a single env-independent
  * predicate. The runtime publish gate ALSO requires a non-production ENVIRONMENT
  * as defense in depth.
  */
