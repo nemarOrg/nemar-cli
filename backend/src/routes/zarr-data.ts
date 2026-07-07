@@ -39,7 +39,16 @@ export const zarrDataRoutes = new Hono<{ Bindings: Bindings }>();
 // Variables slot, all present at runtime on any Hono context.
 zarrDataRoutes.use("*", async (c, next) => {
   if (c.req.method === "OPTIONS") return next();
-  return rateLimiter(c as unknown as Parameters<typeof rateLimiter>[0], next);
+  const res = await rateLimiter(c as unknown as Parameters<typeof rateLimiter>[0], next);
+  // rateLimiter returns a bare 429 (no zarr CORS) when the bucket is exhausted;
+  // without ACAO the browser sees an opaque failure instead of a readable 429 +
+  // retry_after. Re-apply the zarr CORS headers so the viewer can back off.
+  if (res && res.status === 429) {
+    for (const [k, v] of Object.entries(corsHeaders(c.req.header("origin") ?? null))) {
+      res.headers.set(k, v);
+    }
+  }
+  return res;
 });
 
 /** Origins allowed to read zarr chunks cross-origin in a browser: the NEMAR

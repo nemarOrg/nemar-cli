@@ -171,7 +171,16 @@ describe("__selectBucket", () => {
   });
 
   test("data plane + zarr serving paths use the generous data-ip bucket (#901)", () => {
-    for (const path of ["/data/nm000108/v1.0.0/foo", "/nemar/data/x", "/nm000132/zarr/0/0/0"]) {
+    for (const path of [
+      "/data/nm000108/v1.0.0/foo",
+      "/nemar/data/x",
+      // Host-fork shape (zarr.nemar.org -> zarrDataRoutes.fetch, path stripped):
+      "/nm000132/zarr/0/0/0",
+      // Path-mount shape (api.nemar.org/workers.dev /zarrproxy): Hono PREPENDS the
+      // mount prefix, so c.req.path keeps /zarrproxy. Must still bucket to data-ip.
+      "/zarrproxy/nm000132/zarr/0/0/0",
+      "/zarrproxy/on000045/zarr/zarr.json",
+    ]) {
       const sel = __selectBucket(path, undefined, "10.0.0.9");
       expect(sel.keyKind).toBe("data-ip");
       expect(sel.maxRequests).toBe(__limits.DATA_MAX_REQUESTS);
@@ -180,8 +189,9 @@ describe("__selectBucket", () => {
     expect(__selectBucket("/nm000132/zarr/x", `Bearer ${VALID_TOKEN}`, "10.0.0.9").keyKind).toBe(
       "data-ip",
     );
-    // The management API at /datasets/* is NOT the data plane (keeps the ip cap).
+    // Neither the management API nor a non-zarr /zarrproxy-lookalike is the data plane.
     expect(__selectBucket("/datasets", undefined, "10.0.0.9").keyKind).toBe("ip");
+    expect(__selectBucket("/zarrproxything/nm000132", undefined, "10.0.0.9").keyKind).toBe("ip");
   });
 });
 
