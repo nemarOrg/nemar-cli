@@ -23,9 +23,9 @@ describe("resolveEmailConfig", () => {
   });
 
   test("uses FROM_EMAIL without replyTo when only FROM_EMAIL set", () => {
-    const result = resolveEmailConfig({ FROM_EMAIL: "NEMAR <nemar@osc.earth>" });
+    const result = resolveEmailConfig({ FROM_EMAIL: "NEMAR Archive <noreply@nemar.org>" });
     expect(result).toEqual({
-      fromEmail: "NEMAR <nemar@osc.earth>",
+      fromEmail: "NEMAR Archive <noreply@nemar.org>",
       replyTo: undefined,
       isDev: false,
     });
