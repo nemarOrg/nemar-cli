@@ -80,6 +80,9 @@ LOCK_FILE="${ZARR_LOCK_FILE:-${STATE_DIR}/.nm-zarr.lock}"
 # NEMAR_WEBHOOK_TOKEN may be exported by the environment; the callback is skipped
 # when it is empty (the viewer reads index.json, not D1, so the callback is only
 # D1 bookkeeping).
+# Load secrets (e.g. NEMAR_WEBHOOK_TOKEN) from a chmod-600 file beside this
+# script, so the token lives neither in crontab nor in any repo.
+[[ -f "${BASH_SOURCE%/*}/.zarr-secrets.env" ]] && source "${BASH_SOURCE%/*}/.zarr-secrets.env"
 NEMAR_WEBHOOK_TOKEN="${NEMAR_WEBHOOK_TOKEN:-}"
 
 ONLY_DATASET=""
@@ -138,7 +141,24 @@ convert_dataset() {
   local id="$1" version="${2:-}"
   local dir="$WORK_DIR/$id"
   local cb="$WORK_DIR/$id.callback.json"
+  # Reset BEFORE any early return so the drain loop never reads an unbound (set -u
+  # aborts) or stale value: a clone-failure early-return below must NOT inherit
+  # the previous dataset's `deterministic` and get mis-marked terminal. Set from
+  # the callback further down on a real conversion run.
+  LAST_DETERMINISTIC=false
   log "[$id] start (version=${version:-?})"
+
+  # In-progress signal so the observability dashboard's "Processing" tile reflects
+  # live conversions (the cron has no Actions dispatch to set zarr_status=pending;
+  # #774). Best-effort: a failed/skipped POST never blocks the conversion -- the
+  # terminal ready/failed callback below is the authoritative state.
+  if [[ -n "$NEMAR_WEBHOOK_TOKEN" ]]; then
+    curl -sS --connect-timeout 10 --max-time 30 -X POST "$CALLBACK_URL" \
+      -H "Content-Type: application/json" \
+      -H "X-Webhook-Token: ${NEMAR_WEBHOOK_TOKEN}" \
+      --data "{\"dataset_id\":\"$id\",\"status\":\"converting\"}" >>"$LOG_FILE" 2>&1 \
+      || err "[$id] converting callback failed (non-fatal)"
+  fi
 
   # Metadata-only clone (git history + annex pointers, no content -- seconds, not
   # the whole 18 GB). The driver then STREAMS each recording's annex blob from
@@ -161,11 +181,20 @@ convert_dataset() {
     --bucket "$S3_BUCKET" --region "$AWS_REGION" --clean \
     --jobs "$JOBS" --callback-out "$cb" >>"$LOG_FILE" 2>&1 || rc=$?
 
-  if [[ "$rc" -eq 0 && -f "$cb" && -n "$NEMAR_WEBHOOK_TOKEN" ]]; then
-    curl -sS --connect-timeout 10 --max-time 30 -X POST "$CALLBACK_URL" \
-      -H "Content-Type: application/json" \
-      -H "X-Webhook-Token: ${NEMAR_WEBHOOK_TOKEN}" \
-      --data @"$cb" >>"$LOG_FILE" 2>&1 || err "[$id] callback failed (non-fatal)"
+  # Read the driver's classification BEFORE the scratch is reclaimed. The
+  # converter now writes the callback on EVERY outcome (incl. a total failure),
+  # carrying `deterministic` = all failures are typed DATA failures. The drain
+  # loop only consults LAST_DETERMINISTIC in the failure (rc!=0) branch: a
+  # partial success returns rc=0 -> `done` regardless of this value (#774).
+  if [[ -f "$cb" ]]; then
+    LAST_DETERMINISTIC="$(jq -r '.deterministic // false' "$cb" 2>/dev/null || echo false)"
+    # POST on every outcome (not just rc==0) so the backend records failures too.
+    if [[ -n "$NEMAR_WEBHOOK_TOKEN" ]]; then
+      curl -sS --connect-timeout 10 --max-time 30 -X POST "$CALLBACK_URL" \
+        -H "Content-Type: application/json" \
+        -H "X-Webhook-Token: ${NEMAR_WEBHOOK_TOKEN}" \
+        --data @"$cb" >>"$LOG_FILE" 2>&1 || err "[$id] callback failed (non-fatal)"
+    fi
   fi
 
   # EPHEMERAL: always reclaim the scratch copy, success or failure.
@@ -208,6 +237,9 @@ while :; do
   id="${line%%$'\t'*}"; version="${line#*$'\t'}"
   if convert_dataset "$id" "$version"; then
     qpy done "$id" "$version"
+  elif [[ "$LAST_DETERMINISTIC" == "true" ]]; then
+    # Every recording is an unreadable DATA failure -- terminal, no retry (#774).
+    qpy fail "$id" "all recordings failed to convert (typed data failures; see ${LOG_FILE})" --deterministic
   else
     qpy fail "$id" "conversion failed (see ${LOG_FILE})"
   fi
