@@ -69,6 +69,15 @@ const DATA_MAX_REQUESTS = 10000;
 // path-mount forms. Deliberately anchored with `(\/|$)` so it does NOT match
 // the management API at `/datasets/*` (that keeps the standard ip/token cap).
 const DATA_PATH_RE = /^\/(nemar\/)?data(\/|$)/;
+// The zarr serving gateway (#901), the highest-request-volume data-plane path,
+// which bypassed the middleware stack and went unthrottled. Two reachable path
+// shapes, because Hono's `app.route("/zarrproxy", zarrDataRoutes)` PREPENDS the
+// prefix (it does not strip it before dispatch):
+//   - `/<id>/zarr/...`          — the zarr.nemar.org host fork (zarrDataRoutes.fetch)
+//   - `/zarrproxy/<id>/zarr/...` — the path mount, reachable on api.nemar.org and
+//     the workers.dev fallback. `c.req.path` keeps the /zarrproxy prefix here.
+// Match both so neither entry point is mis-bucketed to the tighter ip cap.
+const ZARR_PATH_RE = /^(?:\/zarrproxy)?\/[a-z]{2}\d+\/zarr(\/|$)/;
 
 // Stricter limits for auth endpoints
 const AUTH_MAX_REQUESTS = 10;
@@ -157,7 +166,7 @@ export function __selectBucket(
   // Public read data plane gets its own generous IP bucket before the bearer
   // check: it is anonymous-by-design (no token), and even a tokened request to
   // a public file should not be charged against the tighter token bucket.
-  if (DATA_PATH_RE.test(path)) {
+  if (DATA_PATH_RE.test(path) || ZARR_PATH_RE.test(path)) {
     return { keyKind: "data-ip", rawKey: ip, maxRequests: DATA_MAX_REQUESTS };
   }
   const bearer = __readBearerTokenFromHeader(authHeader);
