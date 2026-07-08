@@ -68,10 +68,13 @@ export PATH
 ZARR_BASE="${ZARR_BASE:-/mnt/local}"
 WORK_DIR="${ZARR_WORK_DIR:-${ZARR_BASE}/zarr-scratch}"
 STATE_DIR="${ZARR_STATE_DIR:-${ZARR_BASE}/zarr-state}"
-# Recordings convert in parallel (ProcessPoolExecutor in the driver). Conversion
-# is CPU-bound (resample + zstd); Hallu has 32 cores. Cap so N concurrent
-# multi-GB recordings stay within NVMe scratch + RAM (5-10 is the sweet spot).
-JOBS="${ZARR_JOBS:-6}"
+# Max parallel workers = the driver's ProcessPoolExecutor CPU cap. Default to all
+# cores: the driver's RAM-admission control (nemarDatasets/.github#67) dispatches a
+# recording only while the SUM of in-flight projected peaks fits usable RAM, so a
+# high worker count adds CPU parallelism WITHOUT OOM risk or shrinking the
+# per-recording budget (small EEG packs many-wide; large MEG self-limits). Override
+# with ZARR_JOBS.
+JOBS="${ZARR_JOBS:-$(nproc 2>/dev/null || echo 8)}"
 DRIVER_REPO="${ZARR_DRIVER_REPO:-${STATE_DIR}/dotgithub}"   # clone of nemarDatasets/.github
 VENV_DIR="${ZARR_VENV_DIR:-${STATE_DIR}/.zarr-venv}"
 BIOSIGIO_SPEC="${BIOSIGIO_SPEC:-biosigio[zarr,meg]>=1.1.2}"
