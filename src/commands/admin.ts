@@ -3267,10 +3267,16 @@ exemplarCommand
         console.log(
           `  ${entry.xx_id.padEnd(10)} ${entry.modality.padEnd(6)} <- ${entry.source_id.padEnd(10)} ${chalk.green(dataset.visibility)}  doi=${dataset.concept_doi ?? "none"}`,
         );
-      } catch {
-        console.log(
-          `  ${entry.xx_id.padEnd(10)} ${entry.modality.padEnd(6)} <- ${entry.source_id.padEnd(10)} ${chalk.dim("not created")}`,
-        );
+      } catch (err) {
+        if (err instanceof ApiError && err.statusCode === 404) {
+          console.log(
+            `  ${entry.xx_id.padEnd(10)} ${entry.modality.padEnd(6)} <- ${entry.source_id.padEnd(10)} ${chalk.dim("not created")}`,
+          );
+        } else {
+          console.log(
+            `  ${entry.xx_id.padEnd(10)} ${entry.modality.padEnd(6)} <- ${entry.source_id.padEnd(10)} ${chalk.red(`status check failed (${errorDetail(err)})`)}`,
+          );
+        }
       }
     }
   });

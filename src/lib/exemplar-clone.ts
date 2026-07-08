@@ -202,8 +202,10 @@ async function buildExemplarCopyItems(
 }
 
 /** Copy one sub-prefix's items (resuming past whatever's already at the
- *  destination) and report progress. Exits the process on any copy failure,
- *  matching import-openneuro.ts's copyShard convention (resumable re-run). */
+ *  destination) and report progress. Throws on any copy failure (resumable
+ *  re-run picks up where it left off, matching import-openneuro.ts's
+ *  copyShard convention) — callers decide whether that aborts the whole run
+ *  or, for `--all`, just this fleet entry. */
 async function copySubPrefix(
   sourceId: string,
   xxId: string,
@@ -233,7 +235,12 @@ async function copySubPrefix(
       console.error(chalk.red(`    ${f.key}: ${f.error}`));
     }
     console.error(chalk.red(`Re-run to resume [${label}] (already-copied objects are skipped).`));
-    process.exit(1);
+    throw new Error(
+      `[${label}] ${result.failed.length} of ${toCopy.length} files failed to copy: ${result.failed
+        .slice(0, 5)
+        .map((f) => `${f.key}: ${f.error}`)
+        .join("; ")}`,
+    );
   }
   spinner.succeed(`[${label}] copied ${result.copied}, skipped ${skipped.length}`);
   return items.map((i) => i.key);
@@ -294,8 +301,9 @@ export async function prepareExemplar(
   const sourceUrl = `https://github.com/${NEMAR_DATASETS_ORG}/${sourceId}.git`;
   const cloneResult = await cloneDataset(sourceUrl, datasetPath);
   if (!cloneResult.success) {
-    cloneSpinner.fail(`Failed to clone: ${cloneResult.error}`);
-    process.exit(1);
+    const msg = `Failed to clone: ${cloneResult.error}`;
+    cloneSpinner.fail(msg);
+    throw new Error(msg);
   }
   cloneSpinner.succeed(`Cloned ${sourceId}`);
 
@@ -315,8 +323,9 @@ export async function prepareExemplar(
     cwd: datasetPath,
   });
   if (addResult.exitCode !== 0) {
-    scrubSpinner.fail(`Failed to stage scrubbed metadata: ${addResult.stderr.trim()}`);
-    process.exit(1);
+    const msg = `Failed to stage scrubbed metadata: ${addResult.stderr.trim()}`;
+    scrubSpinner.fail(msg);
+    throw new Error(msg);
   }
   const commitResult = await runCommand(
     [
@@ -328,8 +337,9 @@ export async function prepareExemplar(
     { cwd: datasetPath },
   );
   if (commitResult.exitCode !== 0 && !commitResult.stdout.includes("nothing to commit")) {
-    scrubSpinner.fail(`Failed to commit scrubbed metadata: ${commitResult.stderr.trim()}`);
-    process.exit(1);
+    const msg = `Failed to commit scrubbed metadata: ${commitResult.stderr.trim()}`;
+    scrubSpinner.fail(msg);
+    throw new Error(msg);
   }
   scrubSpinner.succeed("Scrubbed dataset_description.json");
 
@@ -350,8 +360,9 @@ export async function prepareExemplar(
     if (msg.includes("already exists") || msg.includes("409")) {
       createSpinner.warn(`Exemplar ${xxId} already exists, continuing...`);
     } else {
-      createSpinner.fail(`Failed to create exemplar: ${msg}`);
-      process.exit(1);
+      const failMsg = `Failed to create exemplar: ${msg}`;
+      createSpinner.fail(failMsg);
+      throw new Error(failMsg);
     }
   }
 
@@ -380,13 +391,15 @@ export async function prepareExemplar(
     s3Creds,
   );
   if (!s3Result.success) {
-    s3Spinner.fail(`Failed to configure nemar-s3-dev: ${s3Result.error}`);
-    process.exit(1);
+    const msg = `Failed to configure nemar-s3-dev: ${s3Result.error}`;
+    s3Spinner.fail(msg);
+    throw new Error(msg);
   }
   const nemarS3DevUuid = await getRemoteUuid(datasetPath, "nemar-s3-dev");
   if (!nemarS3DevUuid) {
-    s3Spinner.fail("Failed to get nemar-s3-dev remote UUID");
-    process.exit(1);
+    const msg = "Failed to get nemar-s3-dev remote UUID";
+    s3Spinner.fail(msg);
+    throw new Error(msg);
   }
   s3Spinner.succeed("Configured nemar-s3-dev remote");
 
@@ -396,28 +409,30 @@ export async function prepareExemplar(
     cwd: datasetPath,
   });
   if (removeResult.exitCode !== 0 && !removeResult.stderr.includes("No such remote")) {
-    remoteSpinner.fail(`Failed to remove source remote: ${removeResult.stderr.trim()}`);
-    process.exit(1);
+    const msg = `Failed to remove source remote: ${removeResult.stderr.trim()}`;
+    remoteSpinner.fail(msg);
+    throw new Error(msg);
   }
   const exemplarRepoUrl = `git@github.com:${NEMAR_DATASETS_ORG}/${xxId}.git`;
   const remoteResult = await configureGitHubRemote(datasetPath, exemplarRepoUrl, "origin");
   if (!remoteResult.success) {
-    remoteSpinner.fail(`Failed to configure remote: ${remoteResult.error}`);
-    process.exit(1);
+    const msg = `Failed to configure remote: ${remoteResult.error}`;
+    remoteSpinner.fail(msg);
+    throw new Error(msg);
   }
   remoteSpinner.succeed("Configured NEMAR remote");
 
   const pushSpinner = ora(`Pushing to ${NEMAR_DATASETS_ORG}...`).start();
   const pushResult = await pushToGitHub(datasetPath, "origin");
   if (!pushResult.success) {
-    pushSpinner.fail(`Failed to push: ${pushResult.error}`);
-    process.exit(1);
+    const msg = `Failed to push: ${pushResult.error}`;
+    pushSpinner.fail(msg);
+    throw new Error(msg);
   }
   if (pushResult.warning) {
-    pushSpinner.fail(
-      `Pushed main but git-annex branch failed: ${pushResult.warning}. Aborting — the exemplar would be uncloneable.`,
-    );
-    process.exit(1);
+    const msg = `Pushed main but git-annex branch failed: ${pushResult.warning}. Aborting — the exemplar would be uncloneable.`;
+    pushSpinner.fail(msg);
+    throw new Error(msg);
   }
   pushSpinner.succeed(`Pushed to ${NEMAR_DATASETS_ORG}`);
 
@@ -484,10 +499,9 @@ export async function finalizeExemplar(
     const existing = await listExistingObjects(DEST_BUCKET, `${xxId}/objects/`, S3_REGION);
     const missing = copyResult.keys.filter((k) => !existing.has(k));
     if (missing.length > 0) {
-      verifySpinner.fail(
-        `${missing.length} of ${copyResult.keys.length} objects missing at s3://${DEST_BUCKET}/${xxId}/objects/. Re-run the copy phase before finalizing.`,
-      );
-      process.exit(1);
+      const msg = `${missing.length} of ${copyResult.keys.length} objects missing at s3://${DEST_BUCKET}/${xxId}/objects/. Re-run the copy phase before finalizing.`;
+      verifySpinner.fail(msg);
+      throw new Error(msg);
     }
     verifySpinner.succeed(`Verified ${copyResult.keys.length} objects present`);
 
@@ -497,33 +511,31 @@ export async function finalizeExemplar(
     // the fact this tool never re-clones — datasetPath is shared in-memory).
     const currentUuid = await getRemoteUuid(datasetPath, "nemar-s3-dev");
     if (currentUuid !== nemarS3DevUuid) {
-      console.error(
-        chalk.red(
-          `nemar-s3-dev uuid drifted (prepare=${nemarS3DevUuid} now=${currentUuid}). Aborting before registering keys against the wrong remote.`,
-        ),
-      );
-      process.exit(1);
+      const msg = `nemar-s3-dev uuid drifted (prepare=${nemarS3DevUuid} now=${currentUuid}). Aborting before registering keys against the wrong remote.`;
+      console.error(chalk.red(msg));
+      throw new Error(msg);
     }
 
     const registerSpinner = ora("Registering files in git-annex...").start();
     const regResult = await batchSetKeysPresent(datasetPath, copyResult.keys, nemarS3DevUuid);
     if (regResult.failed > 0) {
-      registerSpinner.fail(
-        `${regResult.failed} of ${copyResult.keys.length} git-annex key registrations failed. Re-run finalize to retry.`,
-      );
-      process.exit(1);
+      const msg = `${regResult.failed} of ${copyResult.keys.length} git-annex key registrations failed. Re-run finalize to retry.`;
+      registerSpinner.fail(msg);
+      throw new Error(msg);
     }
     registerSpinner.succeed(`Registered ${regResult.success} files in git-annex`);
 
     const pushSpinner = ora("Pushing git-annex branch...").start();
     const pushResult = await pushToGitHub(datasetPath, "origin");
     if (!pushResult.success) {
-      pushSpinner.fail(`Failed to push git-annex branch: ${pushResult.error}`);
-      process.exit(1);
+      const msg = `Failed to push git-annex branch: ${pushResult.error}`;
+      pushSpinner.fail(msg);
+      throw new Error(msg);
     }
     if (pushResult.warning) {
-      pushSpinner.fail(`git-annex branch push failed: ${pushResult.warning}`);
-      process.exit(1);
+      const msg = `git-annex branch push failed: ${pushResult.warning}`;
+      pushSpinner.fail(msg);
+      throw new Error(msg);
     }
     pushSpinner.succeed("Pushed git-annex branch");
   }
@@ -557,12 +569,19 @@ export async function finalizeExemplar(
     }
   }
 
+  // reindexOk gates publication below: a failed/partial reindex means
+  // .nemar/metadata.json may still carry the SOURCE dataset's real identity
+  // (title, pipeline_stage) rather than the scrubbed exemplar one, since
+  // reindex is what regenerates that file post-clone. Publishing on top of
+  // that would expose a public "exemplar" describing the real dataset.
+  let reindexOk = false;
   const reindexSpinner = ora("Refreshing metadata + LLM enrichment...").start();
   try {
     const result = await reindexDataset(xxId);
     const enrichmentOk = result.enrichment?.status === "ok";
     const colsOk = result.sync?.metadata_columns_written === true;
-    if (enrichmentOk && colsOk) {
+    reindexOk = enrichmentOk && colsOk;
+    if (reindexOk) {
       reindexSpinner.succeed("Refreshed enrichment + metadata columns");
     } else {
       reindexSpinner.warn(`Partial reindex (run 'nemar admin reindex ${xxId}' to retry)`);
@@ -579,6 +598,12 @@ export async function finalizeExemplar(
       ),
     );
     return;
+  }
+
+  if (!reindexOk) {
+    throw new Error(
+      `Refusing to publish ${xxId}: metadata reindex did not fully succeed, so .nemar/metadata.json may still carry the source dataset's real identity. Re-run 'nemar admin reindex ${xxId}' until it succeeds, then 'nemar admin publish request/approve ${xxId}' to publish manually.`,
+    );
   }
 
   // Request + approve publication with a sandbox DOI. Mirrors
@@ -599,14 +624,14 @@ export async function finalizeExemplar(
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       if (!msg.includes("BIDS validation is currently running")) {
-        pubSpinner.fail(`Failed to request publication: ${msg}`);
-        process.exit(1);
+        const failMsg = `Failed to request publication: ${msg}`;
+        pubSpinner.fail(failMsg);
+        throw new Error(failMsg);
       }
       if (attempt === REQUEST_MAX_ATTEMPTS) {
-        pubSpinner.fail(
-          `BIDS validation still running after ${REQUEST_MAX_ATTEMPTS} attempts. Re-run 'nemar admin publish request/approve ${xxId}' once validation completes.`,
-        );
-        process.exit(1);
+        const failMsg = `BIDS validation still running after ${REQUEST_MAX_ATTEMPTS} attempts. Re-run 'nemar admin publish request/approve ${xxId}' once validation completes.`;
+        pubSpinner.fail(failMsg);
+        throw new Error(failMsg);
       }
       pubSpinner.text = `Waiting for BIDS validation to complete... (attempt ${attempt}/${REQUEST_MAX_ATTEMPTS})`;
       await new Promise((r) => setTimeout(r, REQUEST_WAIT_MS));
@@ -628,10 +653,9 @@ export async function finalizeExemplar(
         approveSpinner.text = `Approving publication... (attempt ${attempt + 1}/${APPROVE_MAX_ATTEMPTS})`;
         await new Promise((r) => setTimeout(r, 3000));
       } else {
-        approveSpinner.fail(
-          `Failed to approve publication after ${APPROVE_MAX_ATTEMPTS} attempts: ${msg}`,
-        );
-        process.exit(1);
+        const failMsg = `Failed to approve publication after ${APPROVE_MAX_ATTEMPTS} attempts: ${msg}`;
+        approveSpinner.fail(failMsg);
+        throw new Error(failMsg);
       }
     }
   }

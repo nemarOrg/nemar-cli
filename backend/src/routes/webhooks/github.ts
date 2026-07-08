@@ -340,11 +340,22 @@ export function registerGithubWebhookRoutes(webhooks: WebhookRouter): void {
               "X-GitHub-Delivery": deliveryId,
             },
             body: rawBody,
-          }).catch((err) => {
-            console.warn(
-              `[github-webhook] dev mirror forward failed for delivery ${deliveryId}: ${err instanceof Error ? err.message : String(err)}`,
-            );
-          }),
+          })
+            .then((res) => {
+              // fetch only rejects on a network-level error; a non-2xx from the
+              // dev worker (secret drift, route 404, 5xx) resolves normally, so
+              // surface it here or the forward fails with no trace.
+              if (!res.ok) {
+                console.warn(
+                  `[github-webhook] dev mirror forward for delivery ${deliveryId} returned HTTP ${res.status}`,
+                );
+              }
+            })
+            .catch((err) => {
+              console.warn(
+                `[github-webhook] dev mirror forward failed for delivery ${deliveryId}: ${err instanceof Error ? err.message : String(err)}`,
+              );
+            }),
         );
         return c.json({ ok: true, dispatched: false, reason: "dev_range_repo", forwarded: true });
       }

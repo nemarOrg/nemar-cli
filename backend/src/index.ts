@@ -41,6 +41,7 @@ import { reconcileReservedVersionDois } from "./services/doi-reconcile";
 import {
   getAdminEmailsForCategory,
   resolveEmailConfig,
+  sendExemplarInvariantAlertEmail,
   sendStalenessAdminReviewEmail,
   sendStalenessWarningEmail,
 } from "./services/email";
@@ -279,10 +280,31 @@ async function scheduledCleanup(env: Bindings): Promise<void> {
       const exemplarLeak = await db
         .prepare("SELECT COUNT(*) as n FROM datasets WHERE is_exemplar = 1")
         .first<{ n: number }>();
-      if ((exemplarLeak?.n ?? 0) > 0) {
+      const leakCount = exemplarLeak?.n ?? 0;
+      if (leakCount > 0) {
         console.error(
-          `[cleanup] INVARIANT VIOLATION: ${exemplarLeak?.n} is_exemplar=1 row(s) exist in PRODUCTION. These are staging-only and are now silently public via the exemplar visibility carve-outs. Investigate the exemplar creation gate immediately.`,
+          `[cleanup] INVARIANT VIOLATION: ${leakCount} is_exemplar=1 row(s) exist in PRODUCTION. These are staging-only and are now silently public via the exemplar visibility carve-outs. Investigate the exemplar creation gate immediately.`,
         );
+        // Active escalation: a silent public data exposure must page a human, not
+        // sit in Worker Logs until someone happens to read them.
+        if (env.RESEND_API_KEY) {
+          try {
+            const emailCfg = resolveEmailConfig(env);
+            const adminEmails = await getAdminEmailsForCategory(db, "publication_request");
+            if (adminEmails.length > 0) {
+              await sendExemplarInvariantAlertEmail(
+                adminEmails,
+                leakCount,
+                env.RESEND_API_KEY,
+                emailCfg.fromEmail,
+                emailCfg.replyTo,
+                emailCfg.isDev,
+              );
+            }
+          } catch (emailErr) {
+            console.error("[cleanup] failed to send exemplar-invariant alert email:", emailErr);
+          }
+        }
       }
     } catch (err) {
       console.error("[cleanup] exemplar-invariant check failed:", err);
