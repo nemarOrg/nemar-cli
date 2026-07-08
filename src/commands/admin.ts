@@ -40,6 +40,7 @@ import {
   changeUserRole,
   changeVisibility,
   createConceptDoi,
+  createExemplar,
   deleteDataset,
   dispatchManifest,
   enforceBulk,
@@ -56,6 +57,7 @@ import {
   publishDataset,
   reindexBulk,
   reindexDataset,
+  remintExemplarDois,
   retryImport,
   revalidateDataset,
   revokeUser,
@@ -3120,6 +3122,184 @@ importCommand
   });
 
 adminCommand.addCommand(importCommand);
+
+// ============================================================================
+// Exemplar staging fleet (epic #923, Phase 5)
+// ============================================================================
+
+const EXEMPLAR_ID_RE = /^xx0999\d{2}$/;
+const EXEMPLAR_SOURCE_ID_RE = /^(nm|on)\d{6}$/;
+
+/** Default location of the curated fleet spec, resolved relative to this
+ *  source file rather than cwd. Only present in a repo checkout (not
+ *  published to npm) — `--all` is a maintainer/CI tool, not an end-user one. */
+function defaultExemplarFleetPath(): string {
+  return join(import.meta.dir, "..", "..", "scripts", "exemplar-fleet.json");
+}
+
+const exemplarCommand = new Command("exemplar").description(
+  "Clone public nm/on datasets into staging exemplars (xx099900-xx099999)",
+);
+
+exemplarCommand
+  .command("create")
+  .description("Clone a public NEMAR dataset into a staging exemplar")
+  .argument("[xx-id]", "Exemplar dataset id (e.g., xx099900); omit with --all")
+  .option("--source <id>", "Source nm/on dataset id to clone (overrides the fleet file)")
+  .option("--all", "Clone every entry in the fleet file")
+  .option("--fleet-file <path>", "Path to the fleet JSON (default: scripts/exemplar-fleet.json)")
+  .option("--publish", "Request and approve publication after data lands (mints a sandbox DOI)")
+  .option("--include-derived", "Also copy zarr/, archives/, and records.json derived artifacts")
+  .action(
+    async (
+      xxId: string | undefined,
+      options: {
+        source?: string;
+        all?: boolean;
+        fleetFile?: string;
+        publish?: boolean;
+        includeDerived?: boolean;
+      },
+    ) => {
+      if (!requireAuth()) return;
+
+      const { cloneExemplar, loadExemplarFleet } = await import("../lib/exemplar-clone.js");
+      const fleetPath = options.fleetFile || defaultExemplarFleetPath();
+      const cloneOpts = { publish: options.publish, includeDerived: options.includeDerived };
+
+      if (options.all) {
+        if (xxId || options.source) {
+          console.error(chalk.red("--all cannot be combined with an xx-id or --source"));
+          process.exit(1);
+        }
+        let entries: Awaited<ReturnType<typeof loadExemplarFleet>>;
+        try {
+          entries = loadExemplarFleet(fleetPath);
+        } catch (err) {
+          console.error(chalk.red(`Failed to load fleet file: ${errorDetail(err)}`));
+          process.exit(1);
+        }
+
+        let failures = 0;
+        for (const entry of entries) {
+          if (entry.source_id === "nm000000") {
+            console.log(
+              chalk.yellow(`Skipping ${entry.xx_id}: placeholder source_id not yet finalized`),
+            );
+            continue;
+          }
+          try {
+            await cloneExemplar({ xxId: entry.xx_id, sourceId: entry.source_id, ...cloneOpts });
+          } catch (err) {
+            failures++;
+            console.error(chalk.red(`${entry.xx_id} failed: ${errorDetail(err)}`));
+          }
+        }
+        if (failures > 0) {
+          console.error(chalk.red(`\n${failures} of ${entries.length} fleet entries failed`));
+          process.exit(1);
+        }
+        return;
+      }
+
+      if (!xxId) {
+        console.error(chalk.red("An xx-id argument is required unless --all is passed"));
+        process.exit(1);
+      }
+      if (!EXEMPLAR_ID_RE.test(xxId)) {
+        console.error(chalk.red(`Invalid exemplar id "${xxId}". Expected xx099900-xx099999.`));
+        process.exit(1);
+      }
+
+      let sourceId = options.source;
+      if (!sourceId) {
+        try {
+          const entries = loadExemplarFleet(fleetPath);
+          sourceId = entries.find((e) => e.xx_id === xxId)?.source_id;
+        } catch (err) {
+          console.error(chalk.red(`Failed to load fleet file: ${errorDetail(err)}`));
+          process.exit(1);
+        }
+      }
+      if (!sourceId) {
+        console.error(
+          chalk.red(
+            `No source dataset for ${xxId}. Pass --source <nm/on id> or add it to the fleet file.`,
+          ),
+        );
+        process.exit(1);
+      }
+      if (!EXEMPLAR_SOURCE_ID_RE.test(sourceId)) {
+        console.error(chalk.red(`Invalid source id "${sourceId}". Expected an nm/on dataset id.`));
+        process.exit(1);
+      }
+
+      try {
+        await cloneExemplar({ xxId, sourceId, ...cloneOpts });
+      } catch (error) {
+        console.error(chalk.red(`\nExemplar clone failed: ${errorDetail(error)}`));
+        process.exit(1);
+      }
+    },
+  );
+
+exemplarCommand
+  .command("status")
+  .description("Show which fleet entries have been cloned and their current state")
+  .option("--fleet-file <path>", "Path to the fleet JSON (default: scripts/exemplar-fleet.json)")
+  .action(async (options: { fleetFile?: string }) => {
+    if (!requireAuth()) return;
+
+    const { loadExemplarFleet } = await import("../lib/exemplar-clone.js");
+    const fleetPath = options.fleetFile || defaultExemplarFleetPath();
+    let entries: Awaited<ReturnType<typeof loadExemplarFleet>>;
+    try {
+      entries = loadExemplarFleet(fleetPath);
+    } catch (err) {
+      console.error(chalk.red(`Failed to load fleet file: ${errorDetail(err)}`));
+      process.exit(1);
+    }
+
+    console.log(chalk.bold(`\nExemplar Fleet (${entries.length})\n`));
+    for (const entry of entries) {
+      try {
+        const dataset = await getDataset(entry.xx_id);
+        console.log(
+          `  ${entry.xx_id.padEnd(10)} ${entry.modality.padEnd(6)} <- ${entry.source_id.padEnd(10)} ${chalk.green(dataset.visibility)}  doi=${dataset.concept_doi ?? "none"}`,
+        );
+      } catch {
+        console.log(
+          `  ${entry.xx_id.padEnd(10)} ${entry.modality.padEnd(6)} <- ${entry.source_id.padEnd(10)} ${chalk.dim("not created")}`,
+        );
+      }
+    }
+  });
+
+exemplarCommand
+  .command("remint-dois")
+  .description("Re-mint an exemplar's sandbox concept DOI (idempotent)")
+  .argument("<xx-id>", "Exemplar dataset id (e.g., xx099900)")
+  .action(async (xxId: string) => {
+    if (!requireAuth()) return;
+
+    const spinner = ora(`Re-minting DOIs for ${xxId}...`).start();
+    try {
+      const result = await remintExemplarDois(xxId);
+      spinner.succeed(`Re-minted ${result.concept_doi} (status: ${result.status})`);
+      for (const w of result.warnings ?? []) {
+        console.log(chalk.yellow(`  ${w}`));
+      }
+    } catch (err) {
+      handleCommandError(err, spinner, "Failed to re-mint exemplar DOIs", {
+        400: "Not an exemplar dataset",
+        403: "Exemplar DOI re-mint is disabled in production",
+        404: "Dataset not found",
+      });
+      process.exit(1);
+    }
+  });
+
+adminCommand.addCommand(exemplarCommand);
 
 // ============================================================================
 // Reindex (epic #417 phase 3): refresh enrichment + nemar.org sync +

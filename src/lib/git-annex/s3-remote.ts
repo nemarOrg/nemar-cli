@@ -450,19 +450,24 @@ export async function getAnnexS3Remotes(datasetPath: string): Promise<string[]> 
 }
 
 /**
- * Mark git-annex remotes inherited from upstream OpenNeuro mirrors
- * (`s3-PUBLIC`, `s3-PRIVATE`) as `annex-ignore=true` so subsequent
+ * Mark inherited git-annex remotes as `annex-ignore=true` so subsequent
  * `nemar dataset push` calls never pick them as upload targets. Skips
  * remotes that aren't configured. Returns the list of names that were
  * actually marked. Warnings (non-fatal) are written to `onWarn` if provided
  * so callers can surface them through their existing UI.
+ *
+ * Defaults to the upstream OpenNeuro mirror remotes (`s3-PUBLIC`,
+ * `s3-PRIVATE`). The exemplar clone tool (epic #923 Phase 5) reuses this
+ * with `["nemar-s3"]` to disable the inherited PRODUCTION nemar-s3 remote a
+ * cloned nm/on source carries, before configuring a fresh dev-bucket remote.
  */
 export async function markInheritedOpenNeuroRemotesIgnored(
   datasetPath: string,
   onWarn?: (remote: string, error: string) => void,
+  remoteNames: string[] = ["s3-PUBLIC", "s3-PRIVATE"],
 ): Promise<string[]> {
   const marked: string[] = [];
-  for (const inherited of ["s3-PUBLIC", "s3-PRIVATE"]) {
+  for (const inherited of remoteNames) {
     const exists = await runCommand(["git", "config", `remote.${inherited}.annex-uuid`], {
       cwd: datasetPath,
     });
