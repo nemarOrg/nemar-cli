@@ -178,7 +178,10 @@ export function registerArchiveReadyRoutes(webhooks: WebhookRouter): void {
         (async () => {
           try {
             const pat = await getDatasetsToken(c.env);
-            await triggerArchiveGeneration(retryDatasetId, retryDatasetId, retryVersion, pat);
+            await triggerArchiveGeneration(retryDatasetId, retryDatasetId, retryVersion, pat, {
+              s3Bucket: c.env.S3_BUCKET,
+              callbackBaseUrl: c.env.API_BASE_URL,
+            });
             await c.env.DB.prepare(
               "UPDATE datasets SET archive_retry_count = ? WHERE dataset_id = ?",
             )

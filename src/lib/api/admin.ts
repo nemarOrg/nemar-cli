@@ -453,6 +453,50 @@ export async function importDataset(opts: {
   );
 }
 
+// ─── Exemplar ───────────────────────────────────────────────────────────────
+// Staging exemplar datasets (epic #923, Phase 5). See
+// backend/src/routes/admin/exemplar.ts for the endpoint contract; both routes
+// 403 in production (staging-only fleet).
+
+export interface CreateExemplarResponse {
+  dataset_id: string;
+  name: string;
+  github_repo: string;
+  source: string;
+  source_id: string;
+}
+
+export async function createExemplar(opts: {
+  dataset_id: string;
+  source_id: string;
+  name?: string;
+  description?: string;
+}): Promise<CreateExemplarResponse> {
+  return request<CreateExemplarResponse>(
+    "/admin/datasets/exemplar",
+    {
+      method: "POST",
+      body: JSON.stringify(opts),
+    },
+    true,
+  );
+}
+
+export interface RemintExemplarDoisResponse {
+  dataset_id: string;
+  concept_doi: string;
+  status: "reserved" | "public" | "unavailable";
+  warnings?: string[];
+}
+
+export async function remintExemplarDois(datasetId: string): Promise<RemintExemplarDoisResponse> {
+  return request<RemintExemplarDoisResponse>(
+    `/admin/datasets/${datasetId}/exemplar/remint-dois`,
+    { method: "POST" },
+    true,
+  );
+}
+
 // ============================================================================
 // Import jobs (issue #754)
 // ============================================================================

@@ -87,6 +87,13 @@ export interface Bindings {
   EZID_SANDBOX_PASSWORD?: string;
   GITHUB_WEBHOOK_SECRET?: string; // HMAC secret for /webhooks/github signature verification (GitHub App push deliveries)
   NEMAR_WEBHOOK_TOKEN?: string; // Bearer token for /publish-version-doi and /llm-enrich (X-Webhook-Token header from dataset workflows)
+  /** Prod-only mirror target for dev-range (xx09NNNN) GitHub deliveries (epic
+   *  #923). When set on the PRODUCTION worker, a push to a dev-range repo is
+   *  re-posted verbatim (raw body + original HMAC signature/event/delivery
+   *  headers) to the dev worker's /webhooks/github here, so the dev worker
+   *  dispatches enrichment/zarr/version-DOI for staging exemplars. Outbound-only
+   *  and fire-and-forget: unset ⇒ no-op; a dev outage never affects prod. */
+  DEV_WEBHOOK_MIRROR_URL?: string;
   TEST_BYPASS_TOKEN?: string; // Optional - for CI/CD rate limit bypass
   ENCRYPTION_KEY?: string; // For encrypting stored credentials
   OPENROUTER_API_KEY?: string; // For LLM-based metadata enrichment

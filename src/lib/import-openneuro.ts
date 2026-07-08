@@ -90,7 +90,10 @@ interface ImportOptions {
  *     silently approve under this condition — that would reintroduce the
  *     trust-assumption pathology #431 is meant to remove.
  */
-type PollOutcome = { kind: "found" } | { kind: "timeout" } | { kind: "error"; lastError: unknown };
+export type PollOutcome =
+  | { kind: "found" }
+  | { kind: "timeout" }
+  | { kind: "error"; lastError: unknown };
 
 /**
  * Bounded wait for a BIDS validation workflow run to register on the freshly
@@ -101,8 +104,12 @@ type PollOutcome = { kind: "found" } | { kind: "timeout" } | { kind: "error"; la
  * (see nemarOrg/nemar-cli#431). Reviewer note: a bare `catch {}` here would
  * mask persistent 4xx/5xx and either mislead the operator on timeout or
  * silently approve a never-validated publication under `--trust-upstream`.
+ *
+ * Exported so the exemplar clone tool (epic #923 Phase 5,
+ * `lib/exemplar-clone.ts`) can reuse the same bounded-poll mechanism instead
+ * of duplicating it.
  */
-async function waitForBidsValidationRun(
+export async function waitForBidsValidationRun(
   nemarId: string,
   spinner: ReturnType<typeof ora>,
   maxWaitMs = 120_000,
