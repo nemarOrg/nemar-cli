@@ -1562,7 +1562,12 @@ export function bidsToDataCite(
     creators,
     titles: [title],
     publisher: "NEMAR (Neuroelectromagnetic Data Archive and Tools Resource)",
-    publisherIdentifier: "https://ror.org/0168r3w48",
+    // NEMAR is operated by the Swartz Center for Computational Neuroscience
+    // (SCCN, ROR 01bt2qm76), whose ROR record declares nemar.org as its domain
+    // and University of California San Diego (ROR 0168r3w48) as its parent org.
+    // Pointing the publisher at SCCN attributes the data to the center that runs
+    // NEMAR; UCSD attribution still resolves through SCCN's parent relationship.
+    publisherIdentifier: "https://ror.org/01bt2qm76",
     publisherIdentifierScheme: "ROR",
     publicationYear: new Date().getFullYear(),
     resourceTypeGeneral: "Dataset",
