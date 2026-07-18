@@ -63,3 +63,29 @@ clone tool, not OpenNeuro onboarding), but worth folding into the same pass.
 Deploy 1 + 2 before pointing the dev worker at the exemplar fleet (else dev manifests/archives/zarr
 write to the prod bucket / call back to the prod worker). 3 + 4 can follow. None affect prod: absent
 fields -> prod defaults.
+
+## CONFIRMED EMPIRICALLY (epic #923 Phase 7, 2026-07-18)
+
+The first real staging fleet run reproduced items 1, 2 and 4 above as concrete failures. They are
+no longer theoretical; staging is functional without them, but two of its surfaces are not.
+
+**Enrichment is broken on staging.** `run-enrichment.yml` hardcodes
+`https://api.nemar.org/webhooks/llm-enrich` (line 149 as of this writing), so an enrichment run
+dispatched for a staging exemplar calls the PRODUCTION worker, which correctly answers
+`404 {"error":"Dataset not found"}` because the exemplar exists only in dev D1. Every exemplar's
+`Run Enrichment` job therefore fails. This is the Phase 1 prod-safety gate behaving exactly as
+designed (prod refuses to act on a dev-range dataset), but it means the central-workflow
+enrichment path cannot be exercised on staging until `callback_base_url` lands. Note the CLI's
+INLINE reindex is a separate path and does work, which is why exemplar metadata, modalities and
+`has_hed` are populated correctly despite these failures.
+
+**Archive generation would write to the production bucket.** `run-generate-archive.yml` still
+hardcodes `s3://nemar` in its skip-check, build and cleanup steps. No staging archive has been
+dispatched yet (no `Run Generate Archive` jobs appear in the run history for the exemplars), so
+nothing has been written to prod, but this must be deployed before archive generation is enabled
+for staging. Until then `data-test.nemar.org/<id>/` reports `archive: null` for every exemplar.
+
+Deploy order is unchanged: items 1 and 2 first. Zarr serving on staging was validated separately
+by copying derived artifacts directly (`zarr-test.nemar.org/<id>/zarr/index.json` served 20 stores
+with 0 failures), so the serving gateway is proven; only the CONVERSION and ARCHIVE dispatch paths
+depend on these workflow changes.
