@@ -28,7 +28,7 @@ export async function triggerArchiveGeneration(
   datasetId: string,
   version: string,
   pat: string,
-  options?: { public?: boolean },
+  options?: { public?: boolean; s3Bucket?: string; callbackBaseUrl?: string },
 ): Promise<void> {
   // Sanity check the legacy parameter so callsites that still pass the
   // dataset's own repo name don't drift from the dataset_id payload.
@@ -51,6 +51,11 @@ export async function triggerArchiveGeneration(
         dataset_id: datasetId,
         version,
         public: options?.public ?? false,
+        // Env-awareness (epic #923): the central workflow follows the caller's
+        // bucket + callback host instead of hardcoding prod. Omitted (prod
+        // default) when unset, so existing prod deliveries are unchanged.
+        s3_bucket: options?.s3Bucket,
+        callback_base_url: options?.callbackBaseUrl,
       },
     }),
   });
@@ -83,7 +88,7 @@ export async function triggerZarrGeneration(
   datasetId: string,
   ref: string,
   pat: string,
-  options?: { full?: boolean },
+  options?: { full?: boolean; s3Bucket?: string; callbackBaseUrl?: string },
 ): Promise<void> {
   const response = await fetch(`${GITHUB_API()}/repos/${CENTRAL_WORKFLOW_REPO}/dispatches`, {
     method: "POST",
@@ -99,6 +104,9 @@ export async function triggerZarrGeneration(
         dataset_id: datasetId,
         ref,
         full: options?.full ?? false,
+        // Env-awareness (epic #923); omitted (prod default) when unset.
+        s3_bucket: options?.s3Bucket,
+        callback_base_url: options?.callbackBaseUrl,
       },
     }),
   });
@@ -141,7 +149,7 @@ export async function triggerManifestGeneration(
   callbackToken: string,
   callbackUrl: string,
   pat: string,
-  options?: { skipCanary?: boolean; skipCallback?: boolean },
+  options?: { skipCanary?: boolean; skipCallback?: boolean; s3Bucket?: string },
 ): Promise<void> {
   const response = await fetch(`${GITHUB_API()}/repos/${CENTRAL_WORKFLOW_REPO}/dispatches`, {
     method: "POST",
@@ -160,6 +168,11 @@ export async function triggerManifestGeneration(
         concept_doi: conceptDoi,
         callback_token: callbackToken,
         callback_url: callbackUrl,
+        // Env-awareness (epic #923): the central workflow writes to this bucket
+        // instead of a hardcoded s3://nemar. Omitted (prod default) when unset.
+        // callback_url is already caller-built from API_BASE_URL, so no separate
+        // callback_base_url is needed here.
+        s3_bucket: options?.s3Bucket,
         skip_canary: options?.skipCanary ?? false,
         // skip_callback=true is for manual backfill — the Worker has no
         // in-flight manifest_jobs row to validate against, so the workflow

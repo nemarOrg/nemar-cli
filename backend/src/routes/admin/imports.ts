@@ -52,6 +52,22 @@ export function registerImportRoutes(admin: AdminRouter): void {
       const db = c.env.DB;
       const admin = c.get("user");
 
+      // OpenNeuro import is production-only (epic #923). `on######` ids are
+      // deterministic (mapped from the source `ds######`), so a dev/test import
+      // of a dataset prod has already imported would collide on the repo name in
+      // the shared nemarDatasets org. Staging exemplars use the xx clone tool,
+      // not this endpoint; import-pipeline E2E stays a prod-sandbox activity.
+      if (c.env.ENVIRONMENT !== "production") {
+        return c.json(
+          {
+            error: "OpenNeuro import is disabled outside production",
+            message:
+              "on###### ids are deterministic and would collide with production imports in the shared nemarDatasets org. Use the exemplar clone tool for staging test datasets.",
+          },
+          403,
+        );
+      }
+
       // Check for duplicate
       const existing = await db
         .prepare("SELECT dataset_id FROM datasets WHERE dataset_id = ?")

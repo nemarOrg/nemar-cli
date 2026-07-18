@@ -28,6 +28,8 @@ import {
   resolveEzidAuth,
 } from "./doi";
 import { resolveEmailConfig, sendPublicationApprovedEmail } from "./email";
+import { resolveDatasetLandingBase } from "./environment";
+import { isExemplarPublishAllowed } from "./exemplar";
 import { TEST_SHOULDER, makePublic as ezidMakePublic } from "./ezid";
 import {
   checkWorkflowExists,
@@ -898,6 +900,9 @@ async function stepDoiCreate(c: ApproveStepContext): Promise<RespondOutcome | un
               EZID_SANDBOX_PASSWORD: c.env.EZID_SANDBOX_PASSWORD,
               ZENODO_API_KEY: c.env.ZENODO_API_KEY,
               ZENODO_SANDBOX_API_KEY: c.env.ZENODO_SANDBOX_API_KEY,
+              // Landing-base resolution for the concept DOI _target (epic #923).
+              FRONTEND_URL: c.env.FRONTEND_URL,
+              DATASET_LANDING_BASE_URL: c.env.DATASET_LANDING_BASE_URL,
             },
           );
         const { result: doiResult, attempts: doiAttempts } =
@@ -1234,7 +1239,7 @@ async function stepCreateRelease(c: ApproveStepContext): Promise<RespondOutcome 
       if (isRespond(vtResult)) return vtResult;
       const { version, tag, datasetDesc } = vtResult;
 
-      const nemarUrl = datasetLandingUrl(datasetId);
+      const nemarUrl = datasetLandingUrl(datasetId, resolveDatasetLandingBase(c.env));
       const archiveLine = `**Download:** [${tag}.zip](https://github.com/nemarDatasets/${repoName}/archive/refs/tags/${tag}.zip)`;
       const sections = [
         `# ${dataset.name} - Version ${version}`,
@@ -1321,7 +1326,7 @@ async function stepPublishDoi(c: ApproveStepContext): Promise<RespondOutcome | u
         }
 
         const auth = resolveEzidAuth(c.env, sandbox || !!dataset.is_sandbox);
-        const target = datasetLandingUrl(datasetId);
+        const target = datasetLandingUrl(datasetId, resolveDatasetLandingBase(c.env));
         await ezidMakePublic(auth, dataset.ezid_identifier, target);
 
         // Update EZID status in D1
@@ -1526,6 +1531,9 @@ async function stepVersionDoi(c: ApproveStepContext): Promise<RespondOutcome | u
                 EZID_PASSWORD: c.env.EZID_PASSWORD,
                 EZID_SANDBOX_USERNAME: c.env.EZID_SANDBOX_USERNAME,
                 EZID_SANDBOX_PASSWORD: c.env.EZID_SANDBOX_PASSWORD,
+                // Landing-base resolution for the version DOI _target (epic #923).
+                FRONTEND_URL: c.env.FRONTEND_URL,
+                DATASET_LANDING_BASE_URL: c.env.DATASET_LANDING_BASE_URL,
               },
               {
                 datasetId,
@@ -1945,6 +1953,7 @@ export async function runPublicationApproval(args: ApproveRunArgs): Promise<Resp
       ezid_status: string | null;
       doi_provider: string | null;
       is_sandbox: number | null;
+      is_exemplar: number | null;
       owner_username: string;
       owner_email: string;
       owner_orcid: string | null;
@@ -1954,8 +1963,8 @@ export async function runPublicationApproval(args: ApproveRunArgs): Promise<Resp
     return c.json({ error: "Dataset not found" }, 404);
   }
 
-  // Block publication of sandbox datasets
-  if (dataset.dataset_id.startsWith("xx")) {
+  // Block publication of sandbox datasets, except staging exemplars (epic #923).
+  if (dataset.dataset_id.startsWith("xx") && !isExemplarPublishAllowed(c.env, dataset)) {
     return c.json(
       {
         error: "Cannot publish sandbox datasets",

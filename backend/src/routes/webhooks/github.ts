@@ -8,7 +8,8 @@
  * intentional changes are import paths and the register-function wrapper.
  */
 
-import { isValidDatasetId } from "../../services/datasetId.js";
+import { isDevRangeDatasetId, isValidDatasetId } from "../../services/datasetId.js";
+import { isNonProductionEnv } from "../../services/environment.js";
 import { getDatasetsToken } from "../../services/github-auth.js";
 import {
   triggerEnrichmentRun,
@@ -315,6 +316,69 @@ export function registerGithubWebhookRoutes(webhooks: WebhookRouter): void {
       return c.json({ ok: true, dispatched: false, reason: "unparseable_payload" });
     }
 
+    // Dev/test staging repos (xx09NNNN, epic #923) live in the shared
+    // nemarDatasets org but belong to the dev worker, not prod. The production
+    // worker must never dispatch enrichment/zarr/version-DOI runs against them:
+    // there is no prod D1 row, and the central workflows' callbacks would 404.
+    // Short-circuit here on prod. (Phase 5 adds a forward of the raw, still
+    // HMAC-signed delivery to the dev worker's DEV_WEBHOOK_MIRROR_URL; the dev
+    // worker, ENVIRONMENT != "production", does not take this branch and
+    // dispatches normally.)
+    // !isNonProductionEnv (not ENVIRONMENT === "production") so the gate FAILS
+    // CLOSED: an unset/typo'd ENVIRONMENT must still short-circuit rather than
+    // let the prod worker dispatch against a dev-range repo it has no row for.
+    if (!isNonProductionEnv(c.env) && isDevRangeDatasetId(payload.repository?.name ?? "")) {
+      if (c.env.DEV_WEBHOOK_MIRROR_URL) {
+        // Forward the raw, still-HMAC-signed delivery to the dev worker (epic
+        // #923) so it dispatches for staging exemplars. Outbound-only and
+        // fire-and-forget via waitUntil: cannot mutate prod, and a dev outage
+        // never affects prod latency. Dev re-verifies with its own (equal)
+        // GITHUB_WEBHOOK_SECRET.
+        c.executionCtx.waitUntil(
+          fetch(c.env.DEV_WEBHOOK_MIRROR_URL, {
+            method: "POST",
+            headers: {
+              "Content-Type": c.req.header("Content-Type") ?? "application/json",
+              "X-Hub-Signature-256": signature ?? "",
+              "X-GitHub-Event": eventType ?? "",
+              "X-GitHub-Delivery": deliveryId,
+            },
+            body: rawBody,
+          })
+            .then((res) => {
+              // fetch only rejects on a network-level error; a non-2xx from the
+              // dev worker (secret drift, route 404, 5xx) resolves normally, so
+              // surface it here or the forward fails with no trace.
+              if (!res.ok) {
+                console.warn(
+                  `[github-webhook] dev mirror forward for delivery ${deliveryId} returned HTTP ${res.status}`,
+                );
+              }
+            })
+            .catch((err) => {
+              console.warn(
+                `[github-webhook] dev mirror forward failed for delivery ${deliveryId}: ${err instanceof Error ? err.message : String(err)}`,
+              );
+            }),
+        );
+        return c.json({ ok: true, dispatched: false, reason: "dev_range_repo", forwarded: true });
+      }
+      return c.json({ ok: true, dispatched: false, reason: "dev_range_repo" });
+    }
+
+    // The reciprocal fence: a NON-production worker may only act on dev-range
+    // repos. The forward above re-posts a still-valid HMAC delivery, and both
+    // workers share GITHUB_WEBHOOK_SECRET by design, so signature verification
+    // alone cannot tell the dev worker "this one is not yours". Without this,
+    // the only thing stopping the dev worker from dispatching real central
+    // workflows for a real nm* push (including a version-DOI mint, whose
+    // sandbox-vs-production EZID credentials are chosen from the DOI string
+    // rather than ENVIRONMENT) is GitHub's delivery configuration pointing at
+    // prod — an operational control, not a code one.
+    if (isNonProductionEnv(c.env) && !isDevRangeDatasetId(payload.repository?.name ?? "")) {
+      return c.json({ ok: true, dispatched: false, reason: "prod_range_repo_on_dev_worker" });
+    }
+
     // Evaluate both decision functions. A given push delivery should only
     // match one (branch pushes carry no tag ref; tag pushes carry no branch
     // ref), but evaluating both keeps the handler symmetric for future
@@ -401,7 +465,10 @@ export function registerGithubWebhookRoutes(webhooks: WebhookRouter): void {
         );
       } else {
         try {
-          await triggerZarrGeneration(zarrDecision.datasetId, zarrDecision.ref, pat);
+          await triggerZarrGeneration(zarrDecision.datasetId, zarrDecision.ref, pat, {
+            s3Bucket: c.env.S3_BUCKET,
+            callbackBaseUrl: c.env.API_BASE_URL,
+          });
           console.log(
             `[github-webhook] dispatched run-generate-zarr for ${zarrDecision.datasetId}@${zarrDecision.ref} delivery=${deliveryId}`,
           );

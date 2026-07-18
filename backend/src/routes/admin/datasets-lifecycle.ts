@@ -24,7 +24,7 @@ import {
   runEnrichmentForDataset,
 } from "../../services/dataset-reindex";
 import { reembedDatasetVector } from "../../services/dataset-search";
-import { deleteDatasetCascade } from "../../services/deletion";
+import { ProdRepoFenceError, deleteDatasetCascade } from "../../services/deletion";
 import { DOCTOR_CHECKS, getCheck, listChecks } from "../../services/doctor/registry";
 import type { CheckContext, Finding } from "../../services/doctor/types";
 import {
@@ -1080,10 +1080,20 @@ export function registerDatasetLifecycleRoutes(admin: AdminRouter): void {
       );
     }
 
-    // Perform cascade deletion
-    const result = await deleteDatasetCascade(db, c.env, datasetId, {
-      bypassGovernance: force,
-    });
+    // Perform cascade deletion. A ProdRepoFenceError is a deliberate refusal
+    // (non-production worker, non-dev-range id), not a server fault, so answer
+    // 403 with the reason rather than letting it read as an opaque 500.
+    let result: Awaited<ReturnType<typeof deleteDatasetCascade>>;
+    try {
+      result = await deleteDatasetCascade(db, c.env, datasetId, {
+        bypassGovernance: force,
+      });
+    } catch (err) {
+      if (err instanceof ProdRepoFenceError) {
+        return c.json({ error: err.message }, 403);
+      }
+      throw err;
+    }
 
     // Audit log (best-effort; don't fail the response if audit write fails)
     try {
@@ -1569,7 +1579,7 @@ export function registerDatasetLifecycleRoutes(admin: AdminRouter): void {
         callbackToken,
         callbackUrl,
         pat,
-        { skipCanary: skip_canary ?? false, skipCallback },
+        { skipCanary: skip_canary ?? false, skipCallback, s3Bucket: c.env.S3_BUCKET },
       );
       return c.json({ dispatched: true, dataset_id, version });
     } catch (err) {

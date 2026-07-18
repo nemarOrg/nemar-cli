@@ -18,6 +18,7 @@
 import { datasetVersionLandingUrl } from "../../../shared/datacite-constants.js";
 import type { Bindings } from "../types/bindings.js";
 import { resolveEzidAuth } from "./doi.js";
+import { isNonProductionEnv, resolveDatasetLandingBase } from "./environment.js";
 import { getIdentifier, makePublic } from "./ezid.js";
 
 /** Datasets inspected per sweep run. */
@@ -65,6 +66,17 @@ export async function reconcileReservedVersionDois(
   env: Bindings,
   nowMs = Date.now(),
 ): Promise<void> {
+  // Production only (epic #923 Phase 7). Sandbox-vs-production EZID auth is
+  // chosen from the DOI's own shoulder, not from ENVIRONMENT, so a real
+  // 10.82901 DOI on the prod-mirror dev D1 resolves to production credentials
+  // and makePublic is documented as permanent. The daily cron already excludes
+  // this outside production; the guard is repeated here so a future caller
+  // inherits the same safety.
+  if (isNonProductionEnv(env)) {
+    console.log("[doi-reconcile] skipped (non-production)");
+    return;
+  }
+
   const WHERE = "latest_version_doi IS NOT NULL AND latest_version_doi != ''";
   let rows: DoiRow[];
   try {
@@ -115,7 +127,11 @@ export async function reconcileReservedVersionDois(
       const id = await getIdentifier(auth, `doi:${doi}`);
       checked++;
       if (id.status === "reserved") {
-        await makePublic(auth, id.identifier, datasetVersionLandingUrl(dataset_id, version));
+        await makePublic(
+          auth,
+          id.identifier,
+          datasetVersionLandingUrl(dataset_id, version, resolveDatasetLandingBase(env)),
+        );
         reconciled++;
         console.log(
           `[doi-reconcile] completed stuck-reserved version DOI ${doi} for ${dataset_id}`,

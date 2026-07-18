@@ -26,6 +26,7 @@ import {
 } from "./dataset-metadata-columns.js";
 import { reembedDatasetVector } from "./dataset-search.js";
 import { enrichDataset } from "./enrich-dataset.js";
+import { exemplarOrFragment, isExemplarPublishAllowed } from "./exemplar.js";
 import { getDatasetsToken } from "./github-auth.js";
 import { getBidsTreeStats, getBlobContent, getTreeAtRef } from "./github.js";
 import { errorMessage } from "./repo-metadata.js";
@@ -83,9 +84,9 @@ export async function refreshDatasetMetadata(
   const db = env.DB;
 
   const dataset = await db
-    .prepare("SELECT dataset_id, github_repo FROM datasets WHERE dataset_id = ?")
+    .prepare("SELECT dataset_id, github_repo, is_exemplar FROM datasets WHERE dataset_id = ?")
     .bind(datasetId)
-    .first<{ dataset_id: string; github_repo: string | null }>();
+    .first<{ dataset_id: string; github_repo: string | null; is_exemplar: number | null }>();
 
   if (!dataset) {
     throw new DatasetReindexError(`Dataset not found: ${datasetId}`, 404);
@@ -93,7 +94,8 @@ export async function refreshDatasetMetadata(
   if (!dataset.github_repo) {
     throw new DatasetReindexError(`Dataset has no GitHub repository: ${datasetId}`, 400);
   }
-  if (datasetId.startsWith("xx")) {
+  // Sandbox xx datasets are not eligible for reindex, except staging exemplars (epic #923).
+  if (datasetId.startsWith("xx") && !isExemplarPublishAllowed(env, dataset)) {
     throw new DatasetReindexError(`Sandbox dataset ${datasetId} is not eligible for reindex`, 400);
   }
 
@@ -441,12 +443,12 @@ export function buildReindexFilterQuery(
   options?: ReindexFilterOptions,
 ): { sql: string; params: unknown[] } {
   // Excludes xx% datasets (sandbox/throwaway, not eligible for reindex — see
-  // dataset deletion/publish handlers for the same short-circuit). nm% and on%
+  // dataset deletion/publish handlers for the same short-circuit) EXCEPT staging
+  // exemplars (is_exemplar=1, epic #923; never present in prod). nm% and on%
   // datasets are both refreshed: refreshDatasetMetadata recomputes their D1
   // metadata columns + LLM enrichment, which the catalog endpoint and
   // data.nemar.org/<id>/metadata.json need (#512).
-  const base =
-    "SELECT dataset_id FROM datasets WHERE github_repo IS NOT NULL AND dataset_id NOT LIKE 'xx%'";
+  const base = `SELECT dataset_id FROM datasets WHERE github_repo IS NOT NULL AND (dataset_id NOT LIKE 'xx%' OR ${exemplarOrFragment("")})`;
   if (filter === "all") {
     return { sql: `${base} ORDER BY dataset_id`, params: [] };
   }

@@ -1083,3 +1083,61 @@ export async function sendStalenessAdminReviewEmail(
   }
   return delivered;
 }
+
+/**
+ * Alert admins that the staging-only exemplar invariant was violated: an
+ * `is_exemplar=1` row exists in PRODUCTION D1 (epic #923). Phase 4's visibility
+ * carve-outs admit such rows with no runtime env check, so one in prod is
+ * silently public across catalog/search/data-index. This is structurally
+ * impossible under normal operation (the creation endpoint 403s in prod), so if
+ * it fires a gate was bypassed — page a human, don't just log.
+ */
+export async function sendExemplarInvariantAlertEmail(
+  adminEmails: string[],
+  count: number,
+  resendApiKey: string,
+  fromEmail: string,
+  replyTo?: string,
+  isDev?: boolean,
+): Promise<number> {
+  const html = `
+<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"></head>
+<body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; line-height: 1.6; color: #333; max-width: 600px; margin: 0 auto; padding: 20px;">
+  <h1 style="color: #dc2626;">Exemplar invariant violated in production</h1>
+  <p><strong>${escapeHtml(String(count))}</strong> dataset row(s) with <code>is_exemplar = 1</code>
+  exist in the <strong>production</strong> database. Exemplars are a staging-only fleet and the
+  creation endpoint 403s in production, so this should be impossible.</p>
+  <p>These rows are <strong>silently public</strong> across the catalog, search, and data index (the
+  Phase 4 visibility carve-outs admit <code>is_exemplar = 1</code> with no runtime environment check).
+  A gate was bypassed &mdash; investigate immediately.</p>
+  <h2 style="color: #333; font-size: 18px; margin-top: 30px;">Action Required</h2>
+  <div style="background: #f4f4f5; padding: 16px; border-radius: 8px; font-family: monospace; font-size: 14px; margin: 16px 0;">
+    SELECT dataset_id FROM datasets WHERE is_exemplar = 1;
+  </div>
+  <p style="color: #666; font-size: 14px;">Confirm each row, delete it (or clear the flag), and audit the exemplar creation gate.</p>
+  <hr style="border: none; border-top: 1px solid #eee; margin: 30px 0;">
+  <p style="color: #999; font-size: 12px;"><a href="https://nemar.org" style="color: #999;">NEMAR</a> - Neuroelectromagnetic Data Archive and Tools Resource</p>
+</body>
+</html>
+  `;
+  let delivered = 0;
+  for (const adminEmail of adminEmails) {
+    try {
+      await sendEmail(
+        adminEmail,
+        `[NEMAR] ALERT: ${count} exemplar row(s) leaked into production`,
+        html,
+        resendApiKey,
+        fromEmail,
+        replyTo,
+        isDev,
+      );
+      delivered++;
+    } catch (error) {
+      console.error(`Failed to send exemplar-invariant alert to ${adminEmail}:`, error);
+    }
+  }
+  return delivered;
+}

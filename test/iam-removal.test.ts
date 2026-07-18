@@ -13,7 +13,7 @@
 
 import { beforeAll, describe, expect, test } from "bun:test";
 import { version as cliVersion } from "../package.json";
-import { TEST_CONFIG, testRequest as baseTestRequest } from "./setup";
+import { EXPECTED_S3_BUCKET, TEST_CONFIG, testRequest as baseTestRequest } from "./setup";
 
 const adminKey = TEST_CONFIG.adminApiKey;
 const userKey = TEST_CONFIG.userApiKey;
@@ -88,7 +88,10 @@ describe("IAM Removal: Upload credentials (STS tokens)", () => {
     expect(data.credentials.session_token.length).toBeGreaterThan(100);
     expect(data.credentials.expiration).toBeDefined();
     expect(data.s3.prefix).toBe("nm099999/objects");
-    expect(data.s3.bucket).toBe("nemar");
+    // Environment-derived: prod serves `nemar`, dev/staging serves `nemar-dev`
+    // (epic #923). Hardcoding "nemar" here asserted that dev shared the
+    // production bucket, which is exactly what that epic removed.
+    expect(data.s3.bucket).toBe(EXPECTED_S3_BUCKET);
   });
 
   test("STS credentials have correct expiration (within 2 hours)", async () => {
@@ -101,8 +104,7 @@ describe("IAM Removal: Upload credentials (STS tokens)", () => {
     expect(status).toBe(200);
     const expiration = new Date(data.credentials.expiration);
     const now = new Date();
-    const hoursUntilExpiry =
-      (expiration.getTime() - now.getTime()) / (1000 * 60 * 60);
+    const hoursUntilExpiry = (expiration.getTime() - now.getTime()) / (1000 * 60 * 60);
     // Default STS duration is 7200s (2h); allowing up to 2.1h for clock drift
     expect(hoursUntilExpiry).toBeGreaterThan(1);
     expect(hoursUntilExpiry).toBeLessThanOrEqual(2.1);
@@ -170,10 +172,7 @@ describe("IAM Removal: Collaborator access", () => {
 
 describe("IAM Removal: Authorization enforcement", () => {
   test("unauthenticated request gets 401", async () => {
-    const { status } = await testRequest(
-      "/datasets/nm099999/upload-credentials",
-      postJson(),
-    );
+    const { status } = await testRequest("/datasets/nm099999/upload-credentials", postJson());
 
     expect(status).toBe(401);
   });
@@ -194,11 +193,7 @@ describe("IAM Removal: Download credentials", () => {
   test("dataset owner gets download credentials for private dataset", async () => {
     const { status, data } = await testRequest<{
       credentials: StsCredentials;
-    }>(
-      "/datasets/nm099999/download-credentials",
-      postJson(),
-      adminKey,
-    );
+    }>("/datasets/nm099999/download-credentials", postJson(), adminKey);
 
     expect(status).toBe(200);
     expect(data.credentials.session_token).toBeDefined();
@@ -207,11 +202,7 @@ describe("IAM Removal: Download credentials", () => {
   test("collaborator gets download credentials", async () => {
     const { status, data } = await testRequest<{
       credentials: StsCredentials;
-    }>(
-      "/datasets/nm099999/download-credentials",
-      postJson(),
-      userKey,
-    );
+    }>("/datasets/nm099999/download-credentials", postJson(), userKey);
 
     expect(status).toBe(200);
     expect(data.credentials.session_token).toBeDefined();

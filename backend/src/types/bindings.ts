@@ -28,8 +28,27 @@ export interface Bindings {
    *  redirect_uri and post-login landings must target this origin, not the
    *  apex. Defaults to https://app.nemar.org when unset. */
   APP_BASE_URL?: string;
+  /** Base origin for DOI landing URLs (epic #923), no trailing slash, e.g.
+   *  https://nemar.org. The DataCite _target resolves to `<base>/dataset/<id>`
+   *  (the doi.org/<doi> link the CLI prints redirects here). Defaults to
+   *  FRONTEND_URL, then https://nemar.org, so prod is unchanged (FRONTEND_URL is
+   *  the apex); staging points landings at the -test website. See
+   *  resolveDatasetLandingBase() in services/environment.ts. */
+  DATASET_LANDING_BASE_URL?: string;
   AWS_REGION: string;
   S3_BUCKET: string;
+  /** Hostname that dispatches to the data sub-app / zarr gateway (epic #923).
+   *  Default to the prod literals (data.nemar.org / zarr.nemar.org) when unset,
+   *  so prod behavior is unchanged; staging sets data-test / zarr-test.nemar.org
+   *  so the one dev worker answers on the -test hosts. See index.ts host fork. */
+  DATA_HOSTNAME?: string;
+  ZARR_HOSTNAME?: string;
+  /** Base origin for data-plane bytes_url links embedded in served manifests
+   *  (epic #923), no trailing slash. Defaults to https://data.nemar.org so prod
+   *  output is byte-identical; staging sets https://data-test.nemar.org so
+   *  dev-bucket-only datasets embed reachable links. Feeds buildBytesUrl() via
+   *  resolveDataBaseOrigin() in services/environment.ts. */
+  DATA_BASE_URL?: string;
   /** Undefined is treated as "off". See backend/src/types/maintenance.ts. */
   MAINTENANCE_MODE?: MaintenanceMode;
   /** Sender for outbound Resend emails, e.g. "NEMAR Archive <noreply@nemar.org>".
@@ -46,6 +65,14 @@ export interface Bindings {
    *  to app.nemar.org per nemarOrg/website#46; flip this env var at
    *  cutover without redeploying code. */
   WEB_SESSION_COOKIE_DOMAIN?: string;
+  /** Sandbox (xx) dataset-ID allocation partition, decimal strings (epic #923).
+   *  Prevents repo-name collisions in the shared nemarDatasets org between
+   *  prod- and dev/test-created sandbox datasets. Prod sets CEILING="89999"
+   *  (allocates xx000001-xx089999); dev/test sets FLOOR="90001" (allocates
+   *  xx090001-xx099999). Both optional and clamped to [start, 99999], so an
+   *  absent or bad value only widens/narrows within the valid id range. */
+  SANDBOX_ID_FLOOR?: string;
+  SANDBOX_ID_CEILING?: string;
 
   // Secrets
   GITHUB_ADMIN_PAT: string;
@@ -60,6 +87,13 @@ export interface Bindings {
   EZID_SANDBOX_PASSWORD?: string;
   GITHUB_WEBHOOK_SECRET?: string; // HMAC secret for /webhooks/github signature verification (GitHub App push deliveries)
   NEMAR_WEBHOOK_TOKEN?: string; // Bearer token for /publish-version-doi and /llm-enrich (X-Webhook-Token header from dataset workflows)
+  /** Prod-only mirror target for dev-range (xx09NNNN) GitHub deliveries (epic
+   *  #923). When set on the PRODUCTION worker, a push to a dev-range repo is
+   *  re-posted verbatim (raw body + original HMAC signature/event/delivery
+   *  headers) to the dev worker's /webhooks/github here, so the dev worker
+   *  dispatches enrichment/zarr/version-DOI for staging exemplars. Outbound-only
+   *  and fire-and-forget: unset ⇒ no-op; a dev outage never affects prod. */
+  DEV_WEBHOOK_MIRROR_URL?: string;
   TEST_BYPASS_TOKEN?: string; // Optional - for CI/CD rate limit bypass
   ENCRYPTION_KEY?: string; // For encrypting stored credentials
   OPENROUTER_API_KEY?: string; // For LLM-based metadata enrichment

@@ -19,7 +19,7 @@
 
 import { describe, expect, test } from "bun:test";
 import "./setup";
-import { TEST_CONFIG } from "./setup";
+import { EXEMPLAR_ID_RE, IS_PRODUCTION_TARGET, TEST_CONFIG } from "./setup";
 
 const TEST_DATASET = process.env.TEST_DATA_DATASET ?? "nm099999";
 const API = TEST_CONFIG.apiUrl;
@@ -286,10 +286,9 @@ describe("data.nemar.org route (epic #449, phase 1)", async () => {
     // The bundle deliberately recovers from a typo'd version rather than
     // 404-ing the whole page; the consumer reads `version` from the body
     // and can render "version not found, showing latest" UX.
-    const r = await fetch(
-      `${API}/data/${TEST_DATASET}/page-bundle.json?v=v999.999.999`,
-      { headers },
-    );
+    const r = await fetch(`${API}/data/${TEST_DATASET}/page-bundle.json?v=v999.999.999`, {
+      headers,
+    });
     expect(r.status).toBe(200);
     const body = (await r.json()) as { version: string | null; complete: boolean };
     // landing.latest is what's served; version field is non-null and not the bogus input.
@@ -398,17 +397,23 @@ describe("data.nemar.org route (epic #449, phase 1)", async () => {
     const manResp = await fetch(`${API}/data/${TEST_DATASET}/manifest`, { headers });
     const list = (await manResp.json()) as { versions?: string[] };
     if (!list.versions || list.versions.length < 2) {
-      console.log(`[skip] tombstone E2E: ${TEST_DATASET} needs >=2 versions, has ${list.versions?.length ?? 0}`);
+      console.log(
+        `[skip] tombstone E2E: ${TEST_DATASET} needs >=2 versions, has ${list.versions?.length ?? 0}`,
+      );
       return;
     }
     // Find a path present in v[N-1] but absent in v[N] = "latest".
     const olderTag = list.versions[1].startsWith("v") ? list.versions[1] : `v${list.versions[1]}`;
-    const olderMan = await fetch(`${API}/data/${TEST_DATASET}/${olderTag}/manifest.json`, { headers });
+    const olderMan = await fetch(`${API}/data/${TEST_DATASET}/${olderTag}/manifest.json`, {
+      headers,
+    });
     if (!olderMan.ok) return;
     const olderEntries = (await olderMan.json()) as Array<{ path: string }>;
     const latestMan = await fetch(`${API}/data/${TEST_DATASET}/latest/manifest.json`, { headers });
     if (!latestMan.ok) return;
-    const latestPaths = new Set(((await latestMan.json()) as Array<{ path: string }>).map((e) => e.path));
+    const latestPaths = new Set(
+      ((await latestMan.json()) as Array<{ path: string }>).map((e) => e.path),
+    );
     const removed = olderEntries.find((e) => !latestPaths.has(e.path));
     if (!removed) {
       console.log("[skip] tombstone E2E: no path was removed between latest and prior version");
@@ -416,7 +421,12 @@ describe("data.nemar.org route (epic #449, phase 1)", async () => {
     }
     const r = await fetchNoRedirect(`/data/${TEST_DATASET}/latest/${removed.path}`);
     expect(r.status).toBe(404);
-    const body = (await r.json()) as { error: string; reason?: string; last_seen_version?: string; last_seen_url?: string };
+    const body = (await r.json()) as {
+      error: string;
+      reason?: string;
+      last_seen_version?: string;
+      last_seen_url?: string;
+    };
     expect(body.reason).toBe("removed");
     expect(body.last_seen_version).toBeTruthy();
     expect(body.last_seen_url).toContain(removed.path);
@@ -534,10 +544,8 @@ describe("data.nemar.org catalog index (#584)", async () => {
   // status code.
   const probe = await fetch(`${API}/data/`, { headers, redirect: "manual" });
   if (probe.status !== 200) {
-    test.skip(
-      `catalog endpoint returned ${probe.status}; route not deployed on ${API} yet`,
-      () => undefined,
-    );
+    test.skip(`catalog endpoint returned ${probe.status}; route not deployed on ${API} yet`, () =>
+      undefined);
     return;
   }
 
@@ -553,7 +561,15 @@ describe("data.nemar.org catalog index (#584)", async () => {
     expect(body).toContain("data.nemar.org");
     expect(body).toMatch(/href="\/nm\d+\/"/);
     expect(body).not.toContain(">nm099999/<");
-    expect(body).not.toMatch(/>xx\d+\//);
+    // Plain sandbox datasets must never appear in the data catalog. The one
+    // permitted exception is the staging exemplar fleet (xx0999NN), which is
+    // deliberately public on the dev/staging data plane and cannot exist in
+    // production at all (epic #923: is_exemplar rows are non-production only).
+    const listedXx = [...body.matchAll(/>(xx\d+)\//g)].map((m) => m[1]);
+    const unexpected = IS_PRODUCTION_TARGET
+      ? listedXx
+      : listedXx.filter((id) => !EXEMPLAR_ID_RE.test(id));
+    expect(unexpected).toEqual([]);
   });
 
   test("returns JSON via Accept: application/json with consistent shape", async () => {
@@ -580,7 +596,12 @@ describe("data.nemar.org catalog index (#584)", async () => {
     for (const d of body.datasets) {
       // Catalog lists both nm and on (OpenNeuro-imported) datasets; only
       // xx* and nm099999 are excluded. See feedback: do not tighten to nm-only.
-      expect(d.id).toMatch(/^(nm|on)\d+$/);
+      // Exception (epic #923): outside production the staging exemplar fleet
+      // (xx0999NN) is deliberately public here. Production has no is_exemplar
+      // rows at all, so the original nm|on-only rule still holds there.
+      const allowed =
+        !IS_PRODUCTION_TARGET && EXEMPLAR_ID_RE.test(d.id) ? /^xx0999\d{2}$/ : /^(nm|on)\d+$/;
+      expect(d.id).toMatch(allowed);
       expect(d.id).not.toBe("nm099999");
       expect(d.browse_url).toBe(`/${d.id}/`);
     }
