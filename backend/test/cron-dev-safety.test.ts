@@ -23,6 +23,12 @@
 
 import type { Database } from "bun:sqlite";
 import { describe, expect, test } from "bun:test";
+// The queries are imported from the production module, NOT retyped here, so a
+// change to the real SQL cannot silently leave this test asserting stale text.
+import {
+  NON_PROD_SANDBOX_CLEANUP_QUERY as NON_PROD_SANDBOX_QUERY,
+  PROD_SANDBOX_CLEANUP_QUERY as PROD_SANDBOX_QUERY,
+} from "../src/index";
 import { archiveRetrySweep } from "../src/services/archive-retry";
 import {
   DEV_EPHEMERAL_BAND_END,
@@ -30,19 +36,9 @@ import {
   isDevEphemeralSandboxId,
 } from "../src/services/datasetId";
 import { reconcileReservedVersionDois } from "../src/services/doi-reconcile";
+import { sweepBlockedBidsValidationRequests } from "../src/services/publication-sweep";
 import type { Bindings } from "../src/types/bindings";
 import { freshDb, realD1 } from "./helpers/d1";
-
-// Verbatim copy of the non-production branch of scheduledCleanup's sandbox
-// query (backend/src/index.ts, section 1). Kept in sync by hand on purpose:
-// changing the production query without changing this test should fail review.
-const NON_PROD_SANDBOX_QUERY = `SELECT dataset_id FROM datasets
-              WHERE dataset_id >= ? AND dataset_id < ?
-                AND is_exemplar = 0 AND created_at < datetime('now', '-14 days')
-                AND status = 'active' LIMIT ?`;
-
-const PROD_SANDBOX_QUERY =
-  "SELECT dataset_id FROM datasets WHERE dataset_id LIKE 'xx%' AND is_exemplar = 0 AND created_at < datetime('now', '-14 days') AND status = 'active' LIMIT ?";
 
 /** Seed an aged, active dataset row (old enough to be a cleanup candidate). */
 function seedAged(db: Database, ids: string[], isExemplar = 0): void {
@@ -170,6 +166,19 @@ describe("production-only daily jobs are environment-gated", () => {
       } as unknown as Bindings);
       expect(p.touched()).toBe(false);
     });
+
+    // Its candidate query also has no dataset-id prefix filter, so on the
+    // prod-mirror D1 it would read real repos through the shared nemarDatasets
+    // token and rewrite real publication_requests rows.
+    test(`sweepBlockedBidsValidationRequests never queries D1 when ENVIRONMENT=${environment}`, async () => {
+      const p = probe();
+      const r = await sweepBlockedBidsValidationRequests({
+        ENVIRONMENT: environment,
+        DB: p.db,
+      } as unknown as Bindings);
+      expect(p.touched()).toBe(false);
+      expect(r).toEqual({ scanned: 0, unblocked: 0, reblocked: 0, errors: 0 });
+    });
   }
 
   // isNonProductionEnv is an allow-list and fails CLOSED: production, and any
@@ -185,6 +194,15 @@ describe("production-only daily jobs are environment-gated", () => {
     test(`reconcileReservedVersionDois still runs when ENVIRONMENT=${JSON.stringify(environment)}`, async () => {
       const p = probe();
       await reconcileReservedVersionDois({
+        ENVIRONMENT: environment,
+        DB: p.db,
+      } as unknown as Bindings);
+      expect(p.touched()).toBe(true);
+    });
+
+    test(`sweepBlockedBidsValidationRequests still runs when ENVIRONMENT=${JSON.stringify(environment)}`, async () => {
+      const p = probe();
+      await sweepBlockedBidsValidationRequests({
         ENVIRONMENT: environment,
         DB: p.db,
       } as unknown as Bindings);

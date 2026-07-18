@@ -259,6 +259,22 @@ app.route("/", api);
  *   delete manually via `nemar admin delete-dataset`. Real archive data is only
  *   ever removed by a deliberate human action.
  */
+/**
+ * Sandbox-cleanup candidate queries, exported so the tests assert against the
+ * REAL SQL instead of a hand-copied duplicate that can silently drift (the
+ * pattern ARCHIVE_RETRY_SWEEP_QUERY already uses).
+ *
+ * The non-production form pins the candidate set to the dev ephemeral band via
+ * bound parameters; the production form keeps the original whole-xx sweep.
+ */
+export const NON_PROD_SANDBOX_CLEANUP_QUERY = `SELECT dataset_id FROM datasets
+   WHERE dataset_id >= ? AND dataset_id < ?
+     AND is_exemplar = 0 AND created_at < datetime('now', '-14 days')
+     AND status = 'active' LIMIT ?`;
+
+export const PROD_SANDBOX_CLEANUP_QUERY =
+  "SELECT dataset_id FROM datasets WHERE dataset_id LIKE 'xx%' AND is_exemplar = 0 AND created_at < datetime('now', '-14 days') AND status = 'active' LIMIT ?";
+
 async function scheduledCleanup(env: Bindings): Promise<void> {
   const db = env.DB;
   const now = new Date();
@@ -344,18 +360,9 @@ async function scheduledCleanup(env: Bindings): Promise<void> {
   try {
     const sandboxRows = await (isNonProductionEnv(env)
       ? db
-          .prepare(
-            `SELECT dataset_id FROM datasets
-              WHERE dataset_id >= ? AND dataset_id < ?
-                AND is_exemplar = 0 AND created_at < datetime('now', '-14 days')
-                AND status = 'active' LIMIT ?`,
-          )
+          .prepare(NON_PROD_SANDBOX_CLEANUP_QUERY)
           .bind(DEV_EPHEMERAL_BAND_START, DEV_EPHEMERAL_BAND_END, MAX_DELETIONS_PER_RUN)
-      : db
-          .prepare(
-            "SELECT dataset_id FROM datasets WHERE dataset_id LIKE 'xx%' AND is_exemplar = 0 AND created_at < datetime('now', '-14 days') AND status = 'active' LIMIT ?",
-          )
-          .bind(MAX_DELETIONS_PER_RUN)
+      : db.prepare(PROD_SANDBOX_CLEANUP_QUERY).bind(MAX_DELETIONS_PER_RUN)
     ).all<{ dataset_id: string }>();
 
     await deleteRows(sandboxRows.results);
@@ -644,11 +651,22 @@ async function scheduledCleanup(env: Bindings): Promise<void> {
   //    CI later went green, so requests sat in 'blocked' indefinitely. Re-read
   //    the latest run for each and transition: green -> 'requested', failing ->
   //    'bids_validation_failed'. Defense-in-depth; never throws.
+  //
+  //    PRODUCTION ONLY (epic #923 Phase 7). Like the archive sweep, the candidate
+  //    query has no dataset-id prefix filter, so on the prod-mirror dev D1 it
+  //    matches real datasets' publication requests. It then reads their real
+  //    repos through the shared nemarDatasets App installation (burning that
+  //    token's rate limit daily) and REWRITES publication_requests.status for
+  //    them, drifting the mirror away from prod's real state.
   let blockedSweep = { scanned: 0, unblocked: 0, reblocked: 0, errors: 0 };
-  try {
-    blockedSweep = await sweepBlockedBidsValidationRequests(env);
-  } catch (err) {
-    console.error("Scheduled cleanup: blocked publication-request sweep failed:", err);
+  if (isNonProductionEnv(env)) {
+    console.log("[publish-sweep] skipped (non-production)");
+  } else {
+    try {
+      blockedSweep = await sweepBlockedBidsValidationRequests(env);
+    } catch (err) {
+      console.error("Scheduled cleanup: blocked publication-request sweep failed:", err);
+    }
   }
 
   // Log summary to audit_log. `deleted`/`failed` cover only sandbox (xx)
@@ -713,7 +731,9 @@ export default {
     const prodOnlyJobs = !isNonProductionEnv(env);
 
     // Safe outside prod: scheduledCleanup self-narrows to the dev sandbox band
-    // and skips its email paths (see the guards inside it).
+    // and, outside production, runs ONLY its sandbox-delete, stuck-manifest
+    // logging and audit-log sections. Its staleness-email, import-recovery and
+    // blocked-publication-sweep sections are production-only (guards inside).
     ctx.waitUntil(scheduledCleanup(env));
     // #646 Phase 4: drain stale vectors (embedding_dirty=1) — the backstop for
     // changes that don't go through the inline enrich/reindex re-embed.

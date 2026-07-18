@@ -16,6 +16,7 @@
  */
 
 import type { Bindings } from "../types/bindings.js";
+import { isNonProductionEnv } from "./environment.js";
 import { getDatasetsToken } from "./github-auth.js";
 import { getWorkflowRuns } from "./github.js";
 
@@ -80,6 +81,18 @@ export async function sweepBlockedBidsValidationRequests(
 ): Promise<BlockedSweepResult> {
   const db = env.DB;
   const result: BlockedSweepResult = { scanned: 0, unblocked: 0, reblocked: 0, errors: 0 };
+
+  // Production only (epic #923 Phase 7). The candidate query filters on request
+  // status alone, with no dataset-id prefix restriction, so on the dev/staging
+  // worker (whose D1 is a partial production mirror) it selects real datasets'
+  // publication requests, reads their real repos via the shared nemarDatasets
+  // installation token, and rewrites their status. The daily cron already
+  // excludes this outside production; the guard is repeated here so a future
+  // caller inherits the same safety.
+  if (isNonProductionEnv(env)) {
+    console.log("[publish-sweep] skipped (non-production)");
+    return result;
+  }
 
   const placeholders = BIDS_VALIDATION_BLOCK_REASONS.map(() => "?").join(", ");
   // Guard the initial query so a D1 outage / schema drift surfaces as errors>0
