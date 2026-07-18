@@ -51,7 +51,7 @@ export interface Bindings {
   DATA_BASE_URL?: string;
   /** Undefined is treated as "off". See backend/src/types/maintenance.ts. */
   MAINTENANCE_MODE?: MaintenanceMode;
-  /** Sender for outbound Resend emails, e.g. "NEMAR <nemar@osc.earth>".
+  /** Sender for outbound Resend emails, e.g. "NEMAR Archive <noreply@nemar.org>".
    *  Falls back to DEFAULT_FROM_EMAIL in email.ts if unset/empty.
    *  The domain must be verified in the Resend account tied to RESEND_API_KEY,
    *  otherwise Resend rejects the send (caught and logged per-site). */

@@ -8,8 +8,9 @@
 
 import { STALENESS_LIMIT_DAYS } from "./staleness";
 
-/** Fallback sender when FROM_EMAIL env var is unset. */
-export const DEFAULT_FROM_EMAIL = "NEMAR <nemar@osc.earth>";
+/** Fallback sender when FROM_EMAIL env var is unset. Mirrors the FROM_EMAIL set
+ *  in wrangler-sccn.toml (prod + dev); the retired osc.earth address is gone. */
+export const DEFAULT_FROM_EMAIL = "NEMAR Archive <noreply@nemar.org>";
 const RESEND_API_URL = "https://api.resend.com/emails";
 
 let warnedMissingFromEmail = false;
@@ -22,9 +23,9 @@ let warnedMissingFromEmail = false;
  *
  * NOTE: The domain in FROM_EMAIL must be verified in the Resend account tied
  * to RESEND_API_KEY, otherwise Resend will reject the send. A deploy that
- * forgets FROM_EMAIL silently falls back to the legacy osc.earth address;
- * on accounts where that domain is not verified, every send fails. We log
- * once per worker instance to surface this in Workers Logs.
+ * forgets FROM_EMAIL falls back to DEFAULT_FROM_EMAIL (nemar.org); if that
+ * domain is not verified on the account, every send fails. We log once per
+ * worker instance to surface this in Workers Logs.
  */
 export function resolveEmailConfig(env: {
   FROM_EMAIL?: string;
@@ -40,7 +41,7 @@ export function resolveEmailConfig(env: {
   if (!from && !warnedMissingFromEmail) {
     warnedMissingFromEmail = true;
     console.error(
-      `FROM_EMAIL env var is unset; falling back to ${DEFAULT_FROM_EMAIL}. If the Resend account tied to this worker does not verify osc.earth, every email will fail. Set FROM_EMAIL in wrangler config.`,
+      `FROM_EMAIL env var is unset; falling back to ${DEFAULT_FROM_EMAIL}. If the Resend account tied to this worker does not verify nemar.org, every email will fail. Set FROM_EMAIL in wrangler config.`,
     );
   }
   return {
