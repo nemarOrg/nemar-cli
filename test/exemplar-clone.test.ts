@@ -9,6 +9,7 @@
 import { describe, expect, test } from "bun:test";
 import {
   type ExemplarFleetEntry,
+  isAnnexContentKey,
   parseExemplarFleet,
   rewriteObjectKeyPrefix,
   scrubDatasetDescription,
@@ -135,6 +136,17 @@ describe("parseExemplarFleet", () => {
     expect(entries.length).toBeGreaterThan(0);
     const ids = new Set(entries.map((e) => e.xx_id));
     expect(ids.size).toBe(entries.length); // no duplicate xx_id
+  });
+
+  test("excludes the S3 remote's annex-uuid marker from copy and key registration", () => {
+    // Regression: the first real fleet run failed finalize with "1 of 3
+    // git-annex key registrations failed" because listing <src>/objects/
+    // returns the remote's annex-uuid marker alongside the content blobs.
+    // It is not annexed content, and copying it would also overwrite the
+    // freshly-initremoted nemar-s3-dev's own identity.
+    expect(isAnnexContentKey("annex-uuid")).toBe(false);
+    expect(isAnnexContentKey("MD5E-s8557052--955e36bad3c90cfc4d6ebf28ea52b094.txt")).toBe(true);
+    expect(isAnnexContentKey("SHA256E-s12--abc.set")).toBe(true);
   });
 
   test("the checked-in fleet has no unfinalized placeholder sources", async () => {
