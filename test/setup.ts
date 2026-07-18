@@ -51,8 +51,12 @@ export const TEST_CONFIG = {
  * live-backend test asserting on the bucket stays correct whichever environment
  * `TEST_API_URL` points at.
  */
-export const EXPECTED_S3_BUCKET =
-  new URL(TEST_CONFIG.apiUrl).hostname === "api.nemar.org" ? "nemar" : "nemar-dev";
+export const IS_PRODUCTION_TARGET = new URL(TEST_CONFIG.apiUrl).hostname === "api.nemar.org";
+
+export const EXPECTED_S3_BUCKET = IS_PRODUCTION_TARGET ? "nemar" : "nemar-dev";
+
+/** Exemplar fleet id band (epic #923). Only ever populated outside production. */
+export const EXEMPLAR_ID_RE = /^xx0999\d{2}$/;
 
 // Validate test config
 if (!TEST_CONFIG.adminApiKey || !TEST_CONFIG.userApiKey) {
