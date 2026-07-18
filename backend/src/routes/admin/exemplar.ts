@@ -20,6 +20,7 @@ import {
 import { isNonProductionEnv } from "../../services/environment";
 import { type GitHubRepo, createRepository, deleteRepository } from "../../services/github";
 import { getDatasetsToken } from "../../services/github-auth";
+import { ORG_NAME } from "../../services/github/shared";
 import { extractRepoName, readRepoMetadata } from "../../services/repo-metadata";
 import type { AdminRouter } from "./shared";
 
@@ -113,9 +114,30 @@ export function registerExemplarRoutes(admin: AdminRouter): void {
         await deleteRepository(dataset_id, pat);
       } catch (cleanupErr) {
         console.error("Failed to clean up GitHub repo after D1 failure:", cleanupErr);
+        // Record the orphan durably. `exemplar create --all` runs unattended and
+        // continues past a failed entry, so an orphaned repo with no dataset row
+        // would otherwise be discoverable only by reading Worker logs. Writing it
+        // to audit_log makes it queryable later. Best-effort by necessity: D1 is
+        // already misbehaving on this path, so a failure here must not mask the
+        // 500 the caller needs to see.
+        try {
+          await auditLogStatement(db, {
+            userId: adminUser.id,
+            action: "exemplar_create_orphaned_repo",
+            details: JSON.stringify({
+              dataset_id,
+              source_id,
+              github_repo: `${ORG_NAME}/${dataset_id}`,
+              d1_error: dbMsg,
+              cleanup_error: cleanupErr instanceof Error ? cleanupErr.message : String(cleanupErr),
+            }),
+          }).run();
+        } catch (auditErr) {
+          console.error(`Failed to audit-log orphaned repo for ${dataset_id}:`, auditErr);
+        }
         return c.json(
           {
-            error: `Failed to create exemplar record: ${dbMsg}. GitHub repo nemarDatasets/${dataset_id} was created but could not be cleaned up. Manual deletion required.`,
+            error: `Failed to create exemplar record: ${dbMsg}. GitHub repo ${ORG_NAME}/${dataset_id} was created but could not be cleaned up. Manual deletion required.`,
           },
           500,
         );

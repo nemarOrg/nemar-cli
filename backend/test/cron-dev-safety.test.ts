@@ -39,6 +39,7 @@ import {
   DEV_EPHEMERAL_BAND_START,
   isDevEphemeralSandboxId,
 } from "../src/services/datasetId";
+import { deleteDatasetCascade } from "../src/services/deletion";
 import { reconcileReservedVersionDois } from "../src/services/doi-reconcile";
 import type { Bindings } from "../src/types/bindings";
 import { freshDb, realD1 } from "./helpers/d1";
@@ -190,6 +191,76 @@ describe("production-only daily jobs are environment-gated", () => {
       expect(p.touched()).toBe(true);
     });
   }
+});
+
+describe("prod-safety gates use the fail-closed helper, not a literal comparison", () => {
+  // `ENVIRONMENT === "production"` is true ONLY for that exact string, so an
+  // unset/blank/typo'd binding silently turns the gate off. `isNonProductionEnv`
+  // is an allow-list that treats anything unrecognized AS production, so the
+  // same drift leaves the gate on. Both files below guard something that must
+  // still happen when the env var goes missing: the exemplar-leak alarm (the
+  // only environment-aware backstop behind the env-blind visibility carve-outs)
+  // and the prod webhook dev-range short-circuit. A structural pin, matching
+  // this repo's admin-route-inventory / api-export-surface convention.
+  const FILES = ["../src/index.ts", "../src/routes/webhooks/github.ts"];
+
+  for (const rel of FILES) {
+    test(`${rel} has no raw ENVIRONMENT === "production" gate`, async () => {
+      const src = await Bun.file(new URL(rel, import.meta.url)).text();
+      const offenders = src
+        .split("\n")
+        .map((line, i) => ({ line: line.trim(), n: i + 1 }))
+        // Skip comments: the fixed sites deliberately NAME the rejected pattern
+        // in a comment explaining why the helper is used instead.
+        .filter(({ line }) => !line.startsWith("//") && !line.startsWith("*"))
+        .filter(({ line }) => /ENVIRONMENT\s*===\s*["']production["']/.test(line));
+      expect(offenders).toEqual([]);
+    });
+  }
+});
+
+describe("deleteDatasetCascade prod-repo fence", () => {
+  // The cascade's GitHub half is NOT environment-scoped: it always deletes
+  // nemarDatasets/<id>. The manual delete endpoints (admin delete-dataset,
+  // bulk-delete, draft delete, import rollback) all funnel through here, and
+  // dev's D1 is a prod mirror, so without this fence deleting a real id from
+  // the dev worker would destroy the real repository.
+  const env = (environment: string) =>
+    ({ ENVIRONMENT: environment, DB: {}, S3_BUCKET: "nemar-dev" }) as unknown as Bindings;
+
+  for (const id of ["nm000103", "nm000155", "on003805", "xx000042", "xx089999"]) {
+    test(`refuses ${id} on a non-production worker`, async () => {
+      await expect(deleteDatasetCascade({} as D1Database, env("development"), id)).rejects.toThrow(
+        /non-production worker/,
+      );
+    });
+  }
+
+  test("refuses before touching GitHub, S3 or D1", async () => {
+    // The throw must precede every side effect; a D1 that explodes on use
+    // proves nothing ran before the guard.
+    const explodes = {
+      prepare() {
+        throw new Error("must not be reached");
+      },
+    } as unknown as D1Database;
+    await expect(deleteDatasetCascade(explodes, env("development"), "nm000103")).rejects.toThrow(
+      /non-production worker/,
+    );
+  });
+
+  test("allows dev-range ids off-prod (the exemplar reset path)", async () => {
+    // Must NOT throw the fence error. It fails later on the stub D1/GitHub,
+    // which is fine: we only assert the fence let it through.
+    const explodes = {
+      prepare() {
+        throw new Error("reached-d1");
+      },
+    } as unknown as D1Database;
+    await expect(
+      deleteDatasetCascade(explodes, env("development"), "xx099900"),
+    ).rejects.not.toThrow(/non-production worker/);
+  });
 });
 
 describe("blocked publication sweep scopes by dataset range, not by skipping", () => {

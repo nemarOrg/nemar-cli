@@ -9,6 +9,7 @@
  */
 
 import { isDevRangeDatasetId, isValidDatasetId } from "../../services/datasetId.js";
+import { isNonProductionEnv } from "../../services/environment.js";
 import { getDatasetsToken } from "../../services/github-auth.js";
 import {
   triggerEnrichmentRun,
@@ -323,7 +324,10 @@ export function registerGithubWebhookRoutes(webhooks: WebhookRouter): void {
     // HMAC-signed delivery to the dev worker's DEV_WEBHOOK_MIRROR_URL; the dev
     // worker, ENVIRONMENT != "production", does not take this branch and
     // dispatches normally.)
-    if (c.env.ENVIRONMENT === "production" && isDevRangeDatasetId(payload.repository?.name ?? "")) {
+    // !isNonProductionEnv (not ENVIRONMENT === "production") so the gate FAILS
+    // CLOSED: an unset/typo'd ENVIRONMENT must still short-circuit rather than
+    // let the prod worker dispatch against a dev-range repo it has no row for.
+    if (!isNonProductionEnv(c.env) && isDevRangeDatasetId(payload.repository?.name ?? "")) {
       if (c.env.DEV_WEBHOOK_MIRROR_URL) {
         // Forward the raw, still-HMAC-signed delivery to the dev worker (epic
         // #923) so it dispatches for staging exemplars. Outbound-only and
@@ -360,6 +364,19 @@ export function registerGithubWebhookRoutes(webhooks: WebhookRouter): void {
         return c.json({ ok: true, dispatched: false, reason: "dev_range_repo", forwarded: true });
       }
       return c.json({ ok: true, dispatched: false, reason: "dev_range_repo" });
+    }
+
+    // The reciprocal fence: a NON-production worker may only act on dev-range
+    // repos. The forward above re-posts a still-valid HMAC delivery, and both
+    // workers share GITHUB_WEBHOOK_SECRET by design, so signature verification
+    // alone cannot tell the dev worker "this one is not yours". Without this,
+    // the only thing stopping the dev worker from dispatching real central
+    // workflows for a real nm* push (including a version-DOI mint, whose
+    // sandbox-vs-production EZID credentials are chosen from the DOI string
+    // rather than ENVIRONMENT) is GitHub's delivery configuration pointing at
+    // prod — an operational control, not a code one.
+    if (isNonProductionEnv(c.env) && !isDevRangeDatasetId(payload.repository?.name ?? "")) {
+      return c.json({ ok: true, dispatched: false, reason: "prod_range_repo_on_dev_worker" });
     }
 
     // Evaluate both decision functions. A given push delivery should only

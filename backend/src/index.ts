@@ -292,7 +292,13 @@ async function scheduledCleanup(env: Bindings): Promise<void> {
   // one ever appears here, a bug bypassed that gate and the row is silently
   // public across catalog/search/data-index — surface it loudly rather than
   // letting it hide.
-  if (env.ENVIRONMENT === "production") {
+  //
+  // Uses !isNonProductionEnv rather than ENVIRONMENT === "production" so it
+  // FAILS CLOSED: this is the ONLY environment-aware backstop behind the
+  // env-blind visibility carve-outs, so an unset/typo'd ENVIRONMENT on the prod
+  // worker must still run the check. A literal string comparison would silently
+  // stop alarming on exactly the config drift the alarm exists to catch.
+  if (!isNonProductionEnv(env)) {
     try {
       const exemplarLeak = await db
         .prepare("SELECT COUNT(*) as n FROM datasets WHERE is_exemplar = 1")

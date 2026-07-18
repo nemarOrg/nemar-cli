@@ -17,6 +17,7 @@ import { join } from "node:path";
 import chalk from "chalk";
 import ora from "ora";
 import { addCi, createExemplar, reindexDataset } from "./api/admin.js";
+import { ApiError } from "./api/errors.js";
 import { approvePublication, requestPublication } from "./api/publish.js";
 import { cloneDataset, pushToGitHub } from "./git-annex/clone-push.js";
 import { configureGitHubRemote } from "./git-annex/github.js";
@@ -376,8 +377,22 @@ export async function prepareExemplar(
     createSpinner.succeed(`Created ${result.dataset_id} (${result.github_repo})`);
   } catch (error) {
     const msg = error instanceof Error ? error.message : String(error);
-    if (msg.includes("already exists") || msg.includes("409")) {
+    // The backend returns 409 for two conditions that read alike but mean very
+    // different things. "Dataset <id> already exists" means the D1 row is there
+    // and resuming is safe. "GitHub repo ... already exists" is only reachable
+    // when the D1 row is ABSENT (the D1 check runs first), i.e. a previous run
+    // died between repo-create and D1-insert, or its rollback failed. Resuming
+    // on that one limps forward against a dataset that does not exist and only
+    // surfaces much later as a non-fatal reindex 404, so fail fast and name the
+    // actual problem. Keyed off ApiError.statusCode, not a substring of the
+    // message ("409" never appears in the message text).
+    const isConflict = error instanceof ApiError && error.statusCode === 409;
+    if (isConflict && msg.includes("Dataset")) {
       createSpinner.warn(`Exemplar ${xxId} already exists, continuing...`);
+    } else if (isConflict) {
+      const orphan = `GitHub repo for ${xxId} exists but has no dataset record — a previous run failed between repo creation and the D1 insert. Delete the orphan with 'nemar admin delete-dataset ${xxId}' (or remove the repo manually) and re-run. Original: ${msg}`;
+      createSpinner.fail(orphan);
+      throw new Error(orphan);
     } else {
       const failMsg = `Failed to create exemplar: ${msg}`;
       createSpinner.fail(failMsg);
@@ -485,10 +500,20 @@ export async function copyExemplarData(
       const spinner = ora(`[records.json] copying ${recordsItems.length} file(s)...`).start();
       const result = await batchServerSideCopy(recordsItems, S3_REGION, COPY_CONCURRENCY);
       if (result.failed.length > 0) {
-        spinner.fail(`[records.json] ${result.failed.length} file(s) failed`);
-      } else {
-        spinner.succeed(`[records.json] copied ${result.copied}`);
+        // Throw, matching copySubPrefix and the zarr/archives copies above.
+        // Previously this only painted a failed spinner and returned normally,
+        // so a records.json that never copied was reported as a fully
+        // successful clone and did not count toward `--all`'s exit code — the
+        // EEGDash-facing artifact would then 404 with nothing to point at it.
+        spinner.fail(`[records.json] ${result.failed.length} of ${recordsItems.length} failed`);
+        throw new Error(
+          `[records.json] ${result.failed.length} of ${recordsItems.length} file(s) failed to copy: ${result.failed
+            .slice(0, 5)
+            .map((f) => `${f.key}: ${f.error}`)
+            .join("; ")}`,
+        );
       }
+      spinner.succeed(`[records.json] copied ${result.copied}`);
     }
   }
 

@@ -14,6 +14,7 @@
 
 import type { Database } from "bun:sqlite";
 import { beforeEach, describe, expect, test } from "bun:test";
+import { PROD_SANDBOX_CLEANUP_QUERY } from "../src/index";
 import { buildReindexFilterQuery } from "../src/services/dataset-reindex";
 import { hydrateDatasetsByIds, lookupDatasetById } from "../src/services/dataset-search";
 import { seedFromBids } from "../src/services/llm-enrich";
@@ -93,9 +94,10 @@ describe("buildReindexFilterQuery base (real SQL)", () => {
 });
 
 describe("sandbox-cleanup cron predicate (real SQL, mirrors index.ts scheduledCleanup)", () => {
-  // Kept in sync with the SELECT in backend/src/index.ts (sandbox datasets > 14 days).
-  const CRON_SQL =
-    "SELECT dataset_id FROM datasets WHERE dataset_id LIKE 'xx%' AND is_exemplar = 0 AND created_at < datetime('now', '-14 days') AND status = 'active' LIMIT ?";
+  // Imported from the production module, not retyped, so a change to the real
+  // SQL cannot leave this test asserting stale text (the anti-drift pattern
+  // cron-dev-safety.test.ts established; this file predates it).
+  const CRON_SQL = PROD_SANDBOX_CLEANUP_QUERY;
 
   test("exempts an aged exemplar, still deletes an aged plain sandbox", () => {
     insertDataset(db, { id: EXEMPLAR, sandbox: 1, exemplar: 1, ageDays: 20 });
