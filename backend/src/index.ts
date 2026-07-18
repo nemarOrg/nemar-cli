@@ -652,21 +652,18 @@ async function scheduledCleanup(env: Bindings): Promise<void> {
   //    the latest run for each and transition: green -> 'requested', failing ->
   //    'bids_validation_failed'. Defense-in-depth; never throws.
   //
-  //    PRODUCTION ONLY (epic #923 Phase 7). Like the archive sweep, the candidate
-  //    query has no dataset-id prefix filter, so on the prod-mirror dev D1 it
-  //    matches real datasets' publication requests. It then reads their real
-  //    repos through the shared nemarDatasets App installation (burning that
-  //    token's rate limit daily) and REWRITES publication_requests.status for
-  //    them, drifting the mirror away from prod's real state.
+  //    Outside production this self-narrows to the dev range (xx09NNNN) inside
+  //    the service, because its unrestricted candidate query would otherwise
+  //    match REAL datasets' publication requests on the prod-mirror dev D1,
+  //    read their real repos through the shared nemarDatasets App installation,
+  //    and rewrite their status. Narrowed rather than skipped: staging needs
+  //    this sweep, since an exemplar published while BIDS validation is still
+  //    running lands in 'blocked' and would otherwise stay stuck.
   let blockedSweep = { scanned: 0, unblocked: 0, reblocked: 0, errors: 0 };
-  if (isNonProductionEnv(env)) {
-    console.log("[publish-sweep] skipped (non-production)");
-  } else {
-    try {
-      blockedSweep = await sweepBlockedBidsValidationRequests(env);
-    } catch (err) {
-      console.error("Scheduled cleanup: blocked publication-request sweep failed:", err);
-    }
+  try {
+    blockedSweep = await sweepBlockedBidsValidationRequests(env);
+  } catch (err) {
+    console.error("Scheduled cleanup: blocked publication-request sweep failed:", err);
   }
 
   // Log summary to audit_log. `deleted`/`failed` cover only sandbox (xx)

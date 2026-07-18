@@ -84,15 +84,17 @@ export async function sweepBlockedBidsValidationRequests(
 
   // Production only (epic #923 Phase 7). The candidate query filters on request
   // status alone, with no dataset-id prefix restriction, so on the dev/staging
-  // worker (whose D1 is a partial production mirror) it selects real datasets'
-  // publication requests, reads their real repos via the shared nemarDatasets
-  // installation token, and rewrites their status. The daily cron already
-  // excludes this outside production; the guard is repeated here so a future
-  // caller inherits the same safety.
-  if (isNonProductionEnv(env)) {
-    console.log("[publish-sweep] skipped (non-production)");
-    return result;
-  }
+  // worker (whose D1 is a partial production mirror) it would select REAL
+  // datasets' publication requests, read their real repos via the shared
+  // nemarDatasets installation token, and rewrite their status.
+  //
+  // Narrowed rather than disabled: staging genuinely needs this sweep, because
+  // an exemplar published while its BIDS validation is still running lands in
+  // exactly this 'blocked' state and would otherwise stay stuck forever. So
+  // outside production the candidate set is scoped to the dev range (xx09NNNN),
+  // which is the same fence the sandbox cleanup uses.
+  const devRangeOnly = isNonProductionEnv(env);
+  const scopeClause = devRangeOnly ? "AND pr.dataset_id LIKE 'xx09%'" : "";
 
   const placeholders = BIDS_VALIDATION_BLOCK_REASONS.map(() => "?").join(", ");
   // Guard the initial query so a D1 outage / schema drift surfaces as errors>0
@@ -114,6 +116,7 @@ export async function sweepBlockedBidsValidationRequests(
            JOIN datasets d ON d.dataset_id = pr.dataset_id
           WHERE pr.status = 'blocked'
             AND pr.block_reason IN (${placeholders})
+            ${scopeClause}
           ORDER BY pr.updated_at ASC
           LIMIT ?`,
       )

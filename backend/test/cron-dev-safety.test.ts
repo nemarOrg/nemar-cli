@@ -15,6 +15,10 @@
  *   2. archiveRetrySweep and reconcileReservedVersionDois refuse to run outside
  *      production even when called directly, so the guarantee does not depend on
  *      the cron's allowlist being the only caller.
+ *   3. The blocked-publication sweep is SCOPED rather than disabled outside
+ *      production: staging needs it (an exemplar published while its BIDS
+ *      validation is still running lands in 'blocked' and would otherwise stay
+ *      stuck), so it narrows to the dev range instead of skipping.
  *
  * The band test runs the ACTUAL cleanup SQL from index.ts against real
  * in-memory SQLite with the full migrated schema (no mocks): if the query in
@@ -36,7 +40,6 @@ import {
   isDevEphemeralSandboxId,
 } from "../src/services/datasetId";
 import { reconcileReservedVersionDois } from "../src/services/doi-reconcile";
-import { sweepBlockedBidsValidationRequests } from "../src/services/publication-sweep";
 import type { Bindings } from "../src/types/bindings";
 import { freshDb, realD1 } from "./helpers/d1";
 
@@ -166,19 +169,6 @@ describe("production-only daily jobs are environment-gated", () => {
       } as unknown as Bindings);
       expect(p.touched()).toBe(false);
     });
-
-    // Its candidate query also has no dataset-id prefix filter, so on the
-    // prod-mirror D1 it would read real repos through the shared nemarDatasets
-    // token and rewrite real publication_requests rows.
-    test(`sweepBlockedBidsValidationRequests never queries D1 when ENVIRONMENT=${environment}`, async () => {
-      const p = probe();
-      const r = await sweepBlockedBidsValidationRequests({
-        ENVIRONMENT: environment,
-        DB: p.db,
-      } as unknown as Bindings);
-      expect(p.touched()).toBe(false);
-      expect(r).toEqual({ scanned: 0, unblocked: 0, reblocked: 0, errors: 0 });
-    });
   }
 
   // isNonProductionEnv is an allow-list and fails CLOSED: production, and any
@@ -199,14 +189,62 @@ describe("production-only daily jobs are environment-gated", () => {
       } as unknown as Bindings);
       expect(p.touched()).toBe(true);
     });
-
-    test(`sweepBlockedBidsValidationRequests still runs when ENVIRONMENT=${JSON.stringify(environment)}`, async () => {
-      const p = probe();
-      await sweepBlockedBidsValidationRequests({
-        ENVIRONMENT: environment,
-        DB: p.db,
-      } as unknown as Bindings);
-      expect(p.touched()).toBe(true);
-    });
   }
+});
+
+describe("blocked publication sweep scopes by dataset range, not by skipping", () => {
+  // This sweep must keep working on staging (an exemplar published while its
+  // BIDS validation is still running lands in 'blocked' and would otherwise
+  // stay stuck), while never touching the real datasets in the prod-mirror D1.
+  function seedBlocked(db: Database, ids: string[]): void {
+    const ds = db.query(
+      "INSERT INTO datasets (dataset_id, name, owner_user_id, github_repo) VALUES (?, 'test', 1, ?)",
+    );
+    const pr = db.query(
+      "INSERT INTO publication_requests (dataset_id, status, block_reason, requested_by) VALUES (?, 'blocked', 'bids_validation_pending', 1)",
+    );
+    for (const id of ids) {
+      ds.run(id, `nemarDatasets/${id}`);
+      pr.run(id);
+    }
+  }
+
+  /** The candidate query as built for each environment (see publication-sweep.ts). */
+  function candidateQuery(devRangeOnly: boolean): string {
+    return `SELECT pr.dataset_id
+              FROM publication_requests pr
+              JOIN datasets d ON d.dataset_id = pr.dataset_id
+             WHERE pr.status = 'blocked'
+               AND pr.block_reason IN ('bids_validation_pending')
+               ${devRangeOnly ? "AND pr.dataset_id LIKE 'xx09%'" : ""}
+             ORDER BY pr.updated_at ASC`;
+  }
+
+  test("non-production sees only dev-range requests", async () => {
+    const db = freshDb();
+    seedBlocked(db, ["xx099900", "xx090001", "nm000155", "on003805"]);
+
+    const rows = await realD1(db)
+      .prepare(candidateQuery(true))
+      .bind()
+      .all<{ dataset_id: string }>();
+
+    expect(rows.results.map((r) => r.dataset_id).sort()).toEqual(["xx090001", "xx099900"]);
+  });
+
+  test("production still sees every blocked request", async () => {
+    const db = freshDb();
+    seedBlocked(db, ["xx099900", "nm000155", "on003805"]);
+
+    const rows = await realD1(db)
+      .prepare(candidateQuery(false))
+      .bind()
+      .all<{ dataset_id: string }>();
+
+    expect(rows.results.map((r) => r.dataset_id).sort()).toEqual([
+      "nm000155",
+      "on003805",
+      "xx099900",
+    ]);
+  });
 });
