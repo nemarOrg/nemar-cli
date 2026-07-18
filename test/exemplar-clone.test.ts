@@ -136,4 +136,21 @@ describe("parseExemplarFleet", () => {
     const ids = new Set(entries.map((e) => e.xx_id));
     expect(ids.size).toBe(entries.length); // no duplicate xx_id
   });
+
+  test("the checked-in fleet has no unfinalized placeholder sources", async () => {
+    // `nemar admin exemplar create --all` SKIPS any entry still set to the
+    // nm000000 placeholder, so a stale placeholder silently shrinks the fleet
+    // instead of failing (epic #923 Phase 7).
+    const raw = await Bun.file(`${import.meta.dir}/../scripts/exemplar-fleet.json`).json();
+    const entries: ExemplarFleetEntry[] = parseExemplarFleet(raw);
+    const placeholders = entries.filter((e) => e.source_id === "nm000000");
+    expect(placeholders).toEqual([]);
+  });
+
+  test("every fleet source is a distinct real dataset id", async () => {
+    const raw = await Bun.file(`${import.meta.dir}/../scripts/exemplar-fleet.json`).json();
+    const entries: ExemplarFleetEntry[] = parseExemplarFleet(raw);
+    const sources = new Set(entries.map((e) => e.source_id));
+    expect(sources.size).toBe(entries.length); // cloning one source twice is a spec bug
+  });
 });

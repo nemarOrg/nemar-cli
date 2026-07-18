@@ -20,6 +20,7 @@
  * records state for the observability dashboard.
  */
 import type { Bindings } from "../types/bindings.js";
+import { isNonProductionEnv } from "./environment.js";
 import { getDatasetsToken } from "./github-auth.js";
 import { triggerArchiveGeneration } from "./github.js";
 
@@ -105,6 +106,18 @@ interface SweepRow {
  * carries it forward (reset on 'ready', or the webhook's own retry on 'failed').
  */
 export async function archiveRetrySweep(env: Bindings): Promise<void> {
+  // Production only (epic #923 Phase 7). The candidate query filters on
+  // archive_status alone, with no dataset-id prefix restriction, and dispatch
+  // targets the hardcoded nemarDatasets/.github central repo. On the dev/staging
+  // worker, whose D1 is a partial production mirror, that means running real
+  // Actions against real dataset repos. The daily cron already excludes this
+  // outside production; the guard is repeated here so a future caller inherits
+  // the same safety.
+  if (isNonProductionEnv(env)) {
+    console.log("[archive-retry-sweep] skipped (non-production)");
+    return;
+  }
+
   let candidates: SweepRow[];
   try {
     const res = await env.DB.prepare(ARCHIVE_RETRY_SWEEP_QUERY)
