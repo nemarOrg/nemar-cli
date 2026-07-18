@@ -42,6 +42,18 @@ export const TEST_CONFIG = {
   bypassToken: process.env.TEST_BYPASS_TOKEN || "",
 };
 
+/**
+ * S3 bucket the backend under test issues credentials for.
+ *
+ * Production serves `nemar`; every non-production worker serves the dedicated
+ * `nemar-dev` bucket (epic #923 gave dev/staging its own bucket so a dev action
+ * can never touch real data). Derived from `apiUrl` rather than hardcoded, so a
+ * live-backend test asserting on the bucket stays correct whichever environment
+ * `TEST_API_URL` points at.
+ */
+export const EXPECTED_S3_BUCKET =
+  new URL(TEST_CONFIG.apiUrl).hostname === "api.nemar.org" ? "nemar" : "nemar-dev";
+
 // Validate test config
 if (!TEST_CONFIG.adminApiKey || !TEST_CONFIG.userApiKey) {
   console.warn("Warning: Test API keys not configured. Some tests may fail.");
