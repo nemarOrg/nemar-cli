@@ -114,6 +114,15 @@ jobs:
         with:
           bun-version: latest
 
+      # Root install first (#958). backend/src imports ../../../../shared/contract,
+      # so shared/*.ts joins the typecheck graph, and TypeScript resolves a module
+      # relative to the IMPORTING file: `zod` inside shared/ is looked up in
+      # shared/node_modules then the repo-root node_modules, never
+      # backend/node_modules. A backend-only install therefore fails typecheck with
+      # TS2307 for zod. test.yml already installs at both levels; this matches it.
+      - name: Install dependencies (root, for shared/)
+        run: bun install
+
       - name: Install dependencies
         working-directory: backend
         run: bun install
@@ -157,6 +166,15 @@ jobs:
         uses: oven-sh/setup-bun@v2
         with:
           bun-version: latest
+
+      # Root install first (#958). backend/src imports ../../../../shared/contract,
+      # so shared/*.ts joins the typecheck graph, and TypeScript resolves a module
+      # relative to the IMPORTING file: `zod` inside shared/ is looked up in
+      # shared/node_modules then the repo-root node_modules, never
+      # backend/node_modules. A backend-only install therefore fails typecheck with
+      # TS2307 for zod. test.yml already installs at both levels; this matches it.
+      - name: Install dependencies (root, for shared/)
+        run: bun install
 
       - name: Install dependencies
         working-directory: backend
