@@ -53,9 +53,12 @@ jobs:
         run: bun run build
 
       - name: Setup Node.js for npm publish
+        # Node 22 (was 20): `npm install -g npm@latest` below now requires
+        # Node ^22.22.2 || ^24.15.0 || >=26.0.0, so npm@latest EBADENGINE-fails
+        # on Node 20. Keep this at an npm@latest-compatible LTS.
         uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '22'
           registry-url: 'https://registry.npmjs.org'
 
       - name: Upgrade npm for OIDC support
