@@ -6,6 +6,7 @@
  * intentional changes are import paths and the register-function wrapper.
  */
 
+import { toVersionTag } from "../../../../shared/contract/index.js";
 import { authMiddleware, optionalAuthMiddleware } from "../../middleware/auth";
 import { getFileContent } from "../../services/github";
 import { getDatasetsToken } from "../../services/github-auth";
@@ -169,10 +170,16 @@ export function registerManifestRoutes(datasetRoutes: DatasetsRouter): void {
       .bind(datasetId)
       .all<{ version: string; doi: string; provider: string; created_at: string }>();
 
+    // Emit versions in the canonical `vX.Y.Z` tag form, matching the listing's
+    // `latest_version` and the data-plane responses (epic #896 #899). This
+    // endpoint was the one place that still returned the raw `dataset_versions`
+    // column, so `/datasets` reported `v1.0.1` while `/datasets/:id/versions`
+    // reported `1.0.1` for the same version. toVersionTag is idempotent, so
+    // rows already stored in tag form are unaffected.
     return c.json({
       dataset_id: datasetId,
-      current_version: currentVersion,
-      versions: versions.results ?? [],
+      current_version: toVersionTag(currentVersion),
+      versions: (versions.results ?? []).map((v) => ({ ...v, version: toVersionTag(v.version) })),
     });
   });
 }
