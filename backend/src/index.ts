@@ -36,6 +36,7 @@ import { archiveRetrySweep } from "./services/archive-retry";
 import { AUTO_IMPORT_CRON, autoImportTick } from "./services/auto-import";
 import { fetchAndSyncCitationCounts } from "./services/citation-counts-sync";
 import { drainEmbeddingDirty } from "./services/dataset-search";
+import { DEV_EPHEMERAL_BAND_END, DEV_EPHEMERAL_BAND_START } from "./services/datasetId";
 import { deleteDatasetCascade } from "./services/deletion";
 import { reconcileReservedVersionDois } from "./services/doi-reconcile";
 import {
@@ -258,6 +259,22 @@ app.route("/", api);
  *   delete manually via `nemar admin delete-dataset`. Real archive data is only
  *   ever removed by a deliberate human action.
  */
+/**
+ * Sandbox-cleanup candidate queries, exported so the tests assert against the
+ * REAL SQL instead of a hand-copied duplicate that can silently drift (the
+ * pattern ARCHIVE_RETRY_SWEEP_QUERY already uses).
+ *
+ * The non-production form pins the candidate set to the dev ephemeral band via
+ * bound parameters; the production form keeps the original whole-xx sweep.
+ */
+export const NON_PROD_SANDBOX_CLEANUP_QUERY = `SELECT dataset_id FROM datasets
+   WHERE dataset_id >= ? AND dataset_id < ?
+     AND is_exemplar = 0 AND created_at < datetime('now', '-14 days')
+     AND status = 'active' LIMIT ?`;
+
+export const PROD_SANDBOX_CLEANUP_QUERY =
+  "SELECT dataset_id FROM datasets WHERE dataset_id LIKE 'xx%' AND is_exemplar = 0 AND created_at < datetime('now', '-14 days') AND status = 'active' LIMIT ?";
+
 async function scheduledCleanup(env: Bindings): Promise<void> {
   const db = env.DB;
   const now = new Date();
@@ -332,13 +349,21 @@ async function scheduledCleanup(env: Bindings): Promise<void> {
   }
 
   // 1. Sandbox datasets older than 14 days (exemplars are curated, never auto-deleted; epic #923)
+  //
+  // Outside production the candidate set is additionally pinned to the dev
+  // ephemeral band (xx090001-xx099899). Two reasons: the dev D1 is a partial
+  // prod mirror, and deleteDatasetCascade's GitHub half is NOT environment
+  // scoped (it always deletes nemarDatasets/<id>), so an unexpected match here
+  // destroys a real repository. The band keeps the dev cron off the curated
+  // exemplar fleet (xx099900+), off prod's sandbox band (<= xx089999), and off
+  // any legacy row. Production behavior is unchanged.
   try {
-    const sandboxRows = await db
-      .prepare(
-        "SELECT dataset_id FROM datasets WHERE dataset_id LIKE 'xx%' AND is_exemplar = 0 AND created_at < datetime('now', '-14 days') AND status = 'active' LIMIT ?",
-      )
-      .bind(MAX_DELETIONS_PER_RUN)
-      .all<{ dataset_id: string }>();
+    const sandboxRows = await (isNonProductionEnv(env)
+      ? db
+          .prepare(NON_PROD_SANDBOX_CLEANUP_QUERY)
+          .bind(DEV_EPHEMERAL_BAND_START, DEV_EPHEMERAL_BAND_END, MAX_DELETIONS_PER_RUN)
+      : db.prepare(PROD_SANDBOX_CLEANUP_QUERY).bind(MAX_DELETIONS_PER_RUN)
+    ).all<{ dataset_id: string }>();
 
     await deleteRows(sandboxRows.results);
   } catch (err) {
@@ -354,12 +379,21 @@ async function scheduledCleanup(env: Bindings): Promise<void> {
   // Datasets become warning candidates once within FIRST_WARNING_DAYS of the
   // 90-day deadline, i.e. inactive for at least (90 - 30) days.
   const warnWindow = `-${STALENESS_LIMIT_DAYS - FIRST_WARNING_DAYS} days`;
-  try {
-    // Reset tracking for anything no longer stale (fresh activity, a DOI, a
-    // pending pub request, or made public) so a later cycle re-warns cleanly.
-    const resetRes = await db
-      .prepare(
-        `UPDATE datasets
+  // PRODUCTION ONLY (epic #923 Phase 7). The candidate query matches nm* rows
+  // directly and the dev/staging D1 is a partial prod mirror carrying real
+  // datasets and real owner addresses, while the dev worker holds a live
+  // RESEND_API_KEY. applyDevWrap only prefixes "[DEV]" on the subject; it does
+  // not suppress or redirect delivery, so running this outside production mails
+  // real researchers a "your dataset will be deleted in N days" notice.
+  if (isNonProductionEnv(env)) {
+    console.log("[cleanup] staleness warnings skipped (non-production)");
+  } else {
+    try {
+      // Reset tracking for anything no longer stale (fresh activity, a DOI, a
+      // pending pub request, or made public) so a later cycle re-warns cleanly.
+      const resetRes = await db
+        .prepare(
+          `UPDATE datasets
             SET staleness_warn_stage = NULL, staleness_admin_notified_at = NULL
           WHERE (staleness_warn_stage IS NOT NULL OR staleness_admin_notified_at IS NOT NULL)
             AND NOT (
@@ -370,20 +404,20 @@ async function scheduledCleanup(env: Bindings): Promise<void> {
                 SELECT dataset_id FROM publication_requests WHERE status NOT IN ('published','denied')
               )
             )`,
-      )
-      .bind(warnWindow)
-      .run();
-    staleness.reset = resetRes.meta.changes ?? 0;
+        )
+        .bind(warnWindow)
+        .run();
+      staleness.reset = resetRes.meta.changes ?? 0;
 
-    // Candidates inside the warning window, oldest (most urgent) first.
-    // Already-handled past-deadline rows (admins already notified) are excluded
-    // so a growing awaiting-deletion backlog can't fill the LIMIT and starve a
-    // newly-past-deadline dataset out of ever reaching an admin.
-    const MAX_STALE_EMAILS_PER_RUN = 30;
-    const staleLimit = `-${STALENESS_LIMIT_DAYS} days`;
-    const candidates = await db
-      .prepare(
-        `SELECT d.dataset_id, d.name,
+      // Candidates inside the warning window, oldest (most urgent) first.
+      // Already-handled past-deadline rows (admins already notified) are excluded
+      // so a growing awaiting-deletion backlog can't fill the LIMIT and starve a
+      // newly-past-deadline dataset out of ever reaching an admin.
+      const MAX_STALE_EMAILS_PER_RUN = 30;
+      const staleLimit = `-${STALENESS_LIMIT_DAYS} days`;
+      const candidates = await db
+        .prepare(
+          `SELECT d.dataset_id, d.name,
                 COALESCE(d.last_activity_at, d.created_at) AS effective_activity,
                 d.staleness_warn_stage AS warn_stage,
                 d.staleness_admin_notified_at AS admin_notified_at,
@@ -402,129 +436,130 @@ async function scheduledCleanup(env: Bindings): Promise<void> {
             )
           ORDER BY effective_activity ASC
           LIMIT ?`,
-      )
-      .bind(warnWindow, staleLimit, MAX_STALE_EMAILS_PER_RUN)
-      .all<{
-        dataset_id: string;
-        name: string;
-        effective_activity: string;
-        warn_stage: number | null;
-        admin_notified_at: string | null;
-        owner_email: string | null;
-      }>();
+        )
+        .bind(warnWindow, staleLimit, MAX_STALE_EMAILS_PER_RUN)
+        .all<{
+          dataset_id: string;
+          name: string;
+          effective_activity: string;
+          warn_stage: number | null;
+          admin_notified_at: string | null;
+          owner_email: string | null;
+        }>();
 
-    if (candidates.results.length > 0) {
-      const emailCfg = resolveEmailConfig(env);
-      const canEmail = Boolean(env.RESEND_API_KEY);
-      if (!canEmail) {
-        console.error(
-          "Scheduled cleanup: RESEND_API_KEY is not set — staleness notifications are skipped and will retry next run.",
-        );
-      }
-      // Fetch admin emails in its own boundary: a D1 hiccup here must not abort
-      // the per-dataset owner warnings below.
-      let adminEmails: string[] = [];
-      if (canEmail) {
-        try {
-          adminEmails = await getAdminEmailsForCategory(db, "publication_request");
-        } catch (err) {
-          console.error("Scheduled cleanup: failed to fetch admin emails:", err);
+      if (candidates.results.length > 0) {
+        const emailCfg = resolveEmailConfig(env);
+        const canEmail = Boolean(env.RESEND_API_KEY);
+        if (!canEmail) {
+          console.error(
+            "Scheduled cleanup: RESEND_API_KEY is not set — staleness notifications are skipped and will retry next run.",
+          );
         }
-      }
+        // Fetch admin emails in its own boundary: a D1 hiccup here must not abort
+        // the per-dataset owner warnings below.
+        let adminEmails: string[] = [];
+        if (canEmail) {
+          try {
+            adminEmails = await getAdminEmailsForCategory(db, "publication_request");
+          } catch (err) {
+            console.error("Scheduled cleanup: failed to fetch admin emails:", err);
+          }
+        }
 
-      for (const row of candidates.results) {
-        // Per-row boundary: a single failing row must not abandon the rest.
-        try {
-          const daysLeft = daysUntilDeletion(row.effective_activity, now);
+        for (const row of candidates.results) {
+          // Per-row boundary: a single failing row must not abandon the rest.
+          try {
+            const daysLeft = daysUntilDeletion(row.effective_activity, now);
 
-          if (daysLeft <= 0) {
-            // Past the deadline: notify admins once, then leave it for a manual
-            // `nemar admin delete-dataset`. Advance the flag ONLY when an admin
-            // was actually reached, so a transient send failure or a missing
-            // RESEND key retries next run instead of silently burying the
-            // dataset (the failure mode that lost nm000111/116/117 one step up).
-            if (!row.admin_notified_at) {
+            if (daysLeft <= 0) {
+              // Past the deadline: notify admins once, then leave it for a manual
+              // `nemar admin delete-dataset`. Advance the flag ONLY when an admin
+              // was actually reached, so a transient send failure or a missing
+              // RESEND key retries next run instead of silently burying the
+              // dataset (the failure mode that lost nm000111/116/117 one step up).
+              if (!row.admin_notified_at) {
+                let handled = false;
+                if (!canEmail) {
+                  // Infra missing — leave unflagged so the next run retries.
+                } else if (adminEmails.length === 0) {
+                  // No admins exist to notify; advance so we don't loop forever.
+                  handled = true;
+                } else {
+                  const delivered = await sendStalenessAdminReviewEmail(
+                    adminEmails,
+                    row.dataset_id,
+                    row.name,
+                    row.owner_email,
+                    row.warn_stage,
+                    env.RESEND_API_KEY,
+                    emailCfg.fromEmail,
+                    emailCfg.replyTo,
+                    emailCfg.isDev,
+                  );
+                  handled = delivered > 0;
+                }
+                if (handled) {
+                  await db
+                    .prepare(
+                      "UPDATE datasets SET staleness_admin_notified_at = datetime('now') WHERE dataset_id = ?",
+                    )
+                    .bind(row.dataset_id)
+                    .run();
+                  staleness.adminNotified++;
+                }
+              }
+              continue;
+            }
+
+            // Inside the window: email the owner once per threshold crossed.
+            // Advance the stage ONLY when the warning was actually delivered (or
+            // there is no owner address to reach), so a Resend outage retries.
+            const stage = warningStageForDaysLeft(daysLeft);
+            if (stage !== null && stage !== row.warn_stage) {
               let handled = false;
               if (!canEmail) {
-                // Infra missing — leave unflagged so the next run retries.
-              } else if (adminEmails.length === 0) {
-                // No admins exist to notify; advance so we don't loop forever.
+                // Infra missing — leave the stage so the next run retries.
+              } else if (!row.owner_email) {
+                // No address to warn; advance so we move on (admins still get the
+                // day-0 notice). Nothing to retry.
                 handled = true;
               } else {
-                const delivered = await sendStalenessAdminReviewEmail(
-                  adminEmails,
-                  row.dataset_id,
-                  row.name,
-                  row.owner_email,
-                  row.warn_stage,
-                  env.RESEND_API_KEY,
-                  emailCfg.fromEmail,
-                  emailCfg.replyTo,
-                  emailCfg.isDev,
-                );
-                handled = delivered > 0;
+                try {
+                  await sendStalenessWarningEmail(
+                    row.owner_email,
+                    row.dataset_id,
+                    row.name,
+                    daysLeft,
+                    deletionDate(row.effective_activity),
+                    env.RESEND_API_KEY,
+                    emailCfg.fromEmail,
+                    emailCfg.replyTo,
+                    emailCfg.isDev,
+                  );
+                  handled = true;
+                } catch (err) {
+                  console.error(
+                    `Scheduled cleanup: warning email failed for ${row.dataset_id}:`,
+                    err,
+                  );
+                }
               }
               if (handled) {
                 await db
-                  .prepare(
-                    "UPDATE datasets SET staleness_admin_notified_at = datetime('now') WHERE dataset_id = ?",
-                  )
-                  .bind(row.dataset_id)
+                  .prepare("UPDATE datasets SET staleness_warn_stage = ? WHERE dataset_id = ?")
+                  .bind(stage, row.dataset_id)
                   .run();
-                staleness.adminNotified++;
+                staleness.warned++;
               }
             }
-            continue;
+          } catch (err) {
+            console.error(`Scheduled cleanup: failed processing ${row.dataset_id}:`, err);
           }
-
-          // Inside the window: email the owner once per threshold crossed.
-          // Advance the stage ONLY when the warning was actually delivered (or
-          // there is no owner address to reach), so a Resend outage retries.
-          const stage = warningStageForDaysLeft(daysLeft);
-          if (stage !== null && stage !== row.warn_stage) {
-            let handled = false;
-            if (!canEmail) {
-              // Infra missing — leave the stage so the next run retries.
-            } else if (!row.owner_email) {
-              // No address to warn; advance so we move on (admins still get the
-              // day-0 notice). Nothing to retry.
-              handled = true;
-            } else {
-              try {
-                await sendStalenessWarningEmail(
-                  row.owner_email,
-                  row.dataset_id,
-                  row.name,
-                  daysLeft,
-                  deletionDate(row.effective_activity),
-                  env.RESEND_API_KEY,
-                  emailCfg.fromEmail,
-                  emailCfg.replyTo,
-                  emailCfg.isDev,
-                );
-                handled = true;
-              } catch (err) {
-                console.error(
-                  `Scheduled cleanup: warning email failed for ${row.dataset_id}:`,
-                  err,
-                );
-              }
-            }
-            if (handled) {
-              await db
-                .prepare("UPDATE datasets SET staleness_warn_stage = ? WHERE dataset_id = ?")
-                .bind(stage, row.dataset_id)
-                .run();
-              staleness.warned++;
-            }
-          }
-        } catch (err) {
-          console.error(`Scheduled cleanup: failed processing ${row.dataset_id}:`, err);
         }
       }
+    } catch (err) {
+      console.error("Scheduled cleanup: stale dataset warning failed:", err);
     }
-  } catch (err) {
-    console.error("Scheduled cleanup: stale dataset warning failed:", err);
   }
 
   // 3. Stuck manifest_jobs detection (#557). The central workflow is
@@ -559,47 +594,56 @@ async function scheduledCleanup(env: Bindings): Promise<void> {
   //    job can't cover: a whole-run operator-cancel (GitHub doesn't start a
   //    queued `if: always()` job), every callback failing, or the webhook's
   //    waitUntil recovery being dropped on Worker eviction.
+  //
+  //    PRODUCTION ONLY (epic #923 Phase 7). Admin import already 403s outside
+  //    production (Phase 1), so a dev/staging worker has no imports of its own
+  //    to recover; on the prod-mirror dev D1 the only thing this could do is
+  //    email admins a quarantine alert about a real import.
   let importsSwept = 0;
-  try {
-    const stuckImports = await db
-      .prepare(
-        `SELECT dataset_id FROM import_jobs
+  if (isNonProductionEnv(env)) {
+    console.log("[import-sweep] skipped (non-production)");
+  } else {
+    try {
+      const stuckImports = await db
+        .prepare(
+          `SELECT dataset_id FROM import_jobs
          WHERE status IN ('preparing', 'copying', 'finalizing')
            AND updated_at < datetime('now', '-6 hours')
          LIMIT ?`,
-      )
-      .bind(MAX_DELETIONS_PER_RUN)
-      .all<{ dataset_id: string }>();
-    for (const row of stuckImports.results ?? []) {
-      try {
-        const upd = await db
-          .prepare(
-            // Preserve a sticky upstream marker (#808): a row can be in-flight
-            // here yet already carry the OpenNeuro-inaccessible marker (a racing
-            // finalize POST moved it off `failed` before the webhook's dropped
-            // waitUntil recovery ran -- the very eviction case this sweep backstops).
-            // Overwriting it would make runImportRecovery below misclassify the
-            // upstream failure as a generic stuck import. [ ] are literal in LIKE.
-            `UPDATE import_jobs
+        )
+        .bind(MAX_DELETIONS_PER_RUN)
+        .all<{ dataset_id: string }>();
+      for (const row of stuckImports.results ?? []) {
+        try {
+          const upd = await db
+            .prepare(
+              // Preserve a sticky upstream marker (#808): a row can be in-flight
+              // here yet already carry the OpenNeuro-inaccessible marker (a racing
+              // finalize POST moved it off `failed` before the webhook's dropped
+              // waitUntil recovery ran -- the very eviction case this sweep backstops).
+              // Overwriting it would make runImportRecovery below misclassify the
+              // upstream failure as a generic stuck import. [ ] are literal in LIKE.
+              `UPDATE import_jobs
                SET status = 'failed',
                    last_error = CASE
                      WHEN last_error LIKE '%${OPENNEURO_UPSTREAM_MARKER}%' THEN last_error
                      ELSE 'stuck > 6h (scheduled sweep)' END,
                    completed_at = datetime('now'), updated_at = datetime('now')
              WHERE dataset_id = ? AND status IN ('preparing', 'copying', 'finalizing')`,
-          )
-          .bind(row.dataset_id)
-          .run();
-        if (upd.meta.changes > 0) {
-          await runImportRecovery(db, env, row.dataset_id);
-          importsSwept++;
+            )
+            .bind(row.dataset_id)
+            .run();
+          if (upd.meta.changes > 0) {
+            await runImportRecovery(db, env, row.dataset_id);
+            importsSwept++;
+          }
+        } catch (err) {
+          console.error(`[import-sweep] recovery for ${row.dataset_id} failed:`, err);
         }
-      } catch (err) {
-        console.error(`[import-sweep] recovery for ${row.dataset_id} failed:`, err);
       }
+    } catch (err) {
+      console.error("Scheduled cleanup: stuck import_jobs query failed:", err);
     }
-  } catch (err) {
-    console.error("Scheduled cleanup: stuck import_jobs query failed:", err);
   }
 
   // 5. Re-evaluate publication requests blocked on BIDS validation (#428). A
@@ -607,6 +651,14 @@ async function scheduledCleanup(env: Bindings): Promise<void> {
   //    CI later went green, so requests sat in 'blocked' indefinitely. Re-read
   //    the latest run for each and transition: green -> 'requested', failing ->
   //    'bids_validation_failed'. Defense-in-depth; never throws.
+  //
+  //    Outside production this self-narrows to the dev range (xx09NNNN) inside
+  //    the service, because its unrestricted candidate query would otherwise
+  //    match REAL datasets' publication requests on the prod-mirror dev D1,
+  //    read their real repos through the shared nemarDatasets App installation,
+  //    and rewrite their status. Narrowed rather than skipped: staging needs
+  //    this sweep, since an exemplar published while BIDS validation is still
+  //    running lands in 'blocked' and would otherwise stay stuck.
   let blockedSweep = { scanned: 0, unblocked: 0, reblocked: 0, errors: 0 };
   try {
     blockedSweep = await sweepBlockedBidsValidationRequests(env);
@@ -660,18 +712,45 @@ export default {
       );
       return;
     }
-    // Daily (0 3 * * *):
-    // Catalog sync runs via GitHub Action, not Worker cron
+    // Daily (prod "0 3 * * *", dev/staging "0 4 * * *"):
+    // Catalog sync runs via GitHub Action, not Worker cron.
+    //
+    // ALLOWLIST, epic #923 Phase 7. The dev/staging worker's D1 is a partial
+    // PRODUCTION MIRROR (real nm* dataset rows, real user email addresses) and
+    // the dev worker holds a real RESEND_API_KEY, so a daily job that selects
+    // rows by generic predicates acts on real production records. Only jobs
+    // proven safe against that mirror run outside production.
+    //
+    // A NEW DAILY JOB IS PRODUCTION-ONLY BY DEFAULT. Before adding one to the
+    // non-prod set below, confirm it cannot (a) email a real user, (b) dispatch
+    // GitHub work against the shared nemarDatasets org, or (c) mutate a real
+    // DOI / prod-bucket object. When in doubt, leave it in the prod-only block.
+    const prodOnlyJobs = !isNonProductionEnv(env);
+
+    // Safe outside prod: scheduledCleanup self-narrows to the dev sandbox band
+    // and, outside production, runs ONLY its sandbox-delete, stuck-manifest
+    // logging and audit-log sections. Its staleness-email, import-recovery and
+    // blocked-publication-sweep sections are production-only (guards inside).
     ctx.waitUntil(scheduledCleanup(env));
     // #646 Phase 4: drain stale vectors (embedding_dirty=1) — the backstop for
     // changes that don't go through the inline enrich/reindex re-embed.
+    // Safe outside prod: writes only to the env-bound (dev) Vectorize index.
     ctx.waitUntil(drainEmbeddingDirty(env.DB, env.AI, env.VECTORIZE));
-    // #736 Phase 3: backstop re-dispatch of still-failed archive generations
-    // whose webhook retry chain broke (e.g. a lost archive-ready callback).
-    ctx.waitUntil(archiveRetrySweep(env));
-    // #900: backstop for a version-DOI mint that crashed after createIdentifier
-    // (reserved) but before makePublic, leaving a permanent non-resolving DOI.
-    ctx.waitUntil(reconcileReservedVersionDois(env));
+
+    if (prodOnlyJobs) {
+      // #736 Phase 3: backstop re-dispatch of still-failed archive generations
+      // whose webhook retry chain broke (e.g. a lost archive-ready callback).
+      // PROD-ONLY: the candidate query has no dataset-id prefix filter, so on a
+      // mirror D1 it would repository_dispatch real Actions runs against the
+      // shared nemarDatasets org for real datasets.
+      ctx.waitUntil(archiveRetrySweep(env));
+      // #900: backstop for a version-DOI mint that crashed after createIdentifier
+      // (reserved) but before makePublic, leaving a permanent non-resolving DOI.
+      // PROD-ONLY: sandbox-vs-prod EZID auth is chosen from the DOI string, not
+      // from ENVIRONMENT, so a real 10.82901 DOI on a mirror row resolves to
+      // production EZID credentials regardless of which worker is running.
+      ctx.waitUntil(reconcileReservedVersionDois(env));
+    }
     // #804: refresh per-dataset citation counts from the citations dashboard
     // manifest so GET /datasets?sort=citations and the listing pills reflect the
     // latest pipeline run. Best-effort; a dashboard outage just skips this tick.

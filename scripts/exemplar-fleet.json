@@ -1,44 +1,44 @@
 [
   {
     "xx_id": "xx099900",
-    "source_id": "nm000000",
+    "source_id": "on003805",
     "modality": "eeg",
-    "note": "placeholder source_id; curated smallest-of-modality EEG source finalized in Phase 7"
+    "note": "Smallest public EEG source (16 MB, 1 subject, EEGLAB .set). Baseline exemplar: cheapest full publish/DOI/manifest round trip. No zarr stores built upstream, so it exercises the no-zarr rendering path."
   },
   {
     "xx_id": "xx099901",
-    "source_id": "nm000000",
+    "source_id": "on000246",
     "modality": "meg",
-    "note": "placeholder source_id; curated smallest-of-modality MEG source finalized in Phase 7"
+    "note": "Smallest MEG source that actually converts (2343 MB, 3 zarr stores, 0 failures). The smaller on004398 (1309 MB) is CTF, which biosigIO cannot read: its zarr index reports store_count 0, so it would never render in the viewer."
   },
   {
     "xx_id": "xx099902",
-    "source_id": "nm000000",
+    "source_id": "on006136",
     "modality": "ieeg",
-    "note": "placeholder source_id; curated smallest-of-modality iEEG source finalized in Phase 7"
+    "note": "Smallest iEEG source that converts (285 MB, 14 zarr stores, 0 failures). The smaller on006392 (32 MB) is a proprietary .tdat/.tidx/.tmet format with store_count 0."
   },
   {
     "xx_id": "xx099903",
-    "source_id": "nm000000",
+    "source_id": "nm000155",
     "modality": "emg",
-    "note": "placeholder source_id; curated smallest-of-modality EMG source finalized in Phase 7"
+    "note": "Smallest public EMG source (447 MB, 11 zarr stores). Native nm dataset, so it also covers the nm-sourced clone path alongside the on-sourced entries."
   },
   {
     "xx_id": "xx099904",
-    "source_id": "nm000000",
+    "source_id": "nm000189",
     "modality": "eeg",
-    "note": "placeholder source_id; curated HED-annotated source finalized in Phase 7"
+    "note": "HED-annotated exemplar (20 MB, HED 8.4.0, 20 zarr stores). Drives has_hed=1 and the ?has_hed=1 catalog filter on staging."
   },
   {
     "xx_id": "xx099905",
-    "source_id": "nm000000",
+    "source_id": "nm000135",
     "modality": "eeg",
-    "note": "placeholder source_id; curated zarr-conversion-eligible source finalized in Phase 7"
+    "note": "Second native EEG exemplar (22 MB, HED 8.4.0, 5 zarr stores). Small enough to be the default target for repeated update-cycle and re-publish testing."
   },
   {
     "xx_id": "xx099906",
-    "source_id": "nm000000",
-    "modality": "eeg",
-    "note": "placeholder source_id; curated large archive/zip-eligible source finalized in Phase 7"
+    "source_id": "on006394",
+    "modality": "beh,eeg",
+    "note": "Multi-modal exemplar (521 MB, beh+eeg, 60 zarr stores). Covers modality-array rendering and search facets, and produces a large enough archive to exercise the zip path."
   }
 ]

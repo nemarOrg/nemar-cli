@@ -9,6 +9,7 @@
 import { describe, expect, test } from "bun:test";
 import {
   type ExemplarFleetEntry,
+  isAnnexContentKey,
   parseExemplarFleet,
   rewriteObjectKeyPrefix,
   scrubDatasetDescription,
@@ -135,5 +136,33 @@ describe("parseExemplarFleet", () => {
     expect(entries.length).toBeGreaterThan(0);
     const ids = new Set(entries.map((e) => e.xx_id));
     expect(ids.size).toBe(entries.length); // no duplicate xx_id
+  });
+
+  test("excludes the S3 remote's annex-uuid marker from copy and key registration", () => {
+    // Regression: the first real fleet run failed finalize with "1 of 3
+    // git-annex key registrations failed" because listing <src>/objects/
+    // returns the remote's annex-uuid marker alongside the content blobs.
+    // It is not annexed content, and copying it would also overwrite the
+    // freshly-initremoted nemar-s3-dev's own identity.
+    expect(isAnnexContentKey("annex-uuid")).toBe(false);
+    expect(isAnnexContentKey("MD5E-s8557052--955e36bad3c90cfc4d6ebf28ea52b094.txt")).toBe(true);
+    expect(isAnnexContentKey("SHA256E-s12--abc.set")).toBe(true);
+  });
+
+  test("the checked-in fleet has no unfinalized placeholder sources", async () => {
+    // `nemar admin exemplar create --all` SKIPS any entry still set to the
+    // nm000000 placeholder, so a stale placeholder silently shrinks the fleet
+    // instead of failing (epic #923 Phase 7).
+    const raw = await Bun.file(`${import.meta.dir}/../scripts/exemplar-fleet.json`).json();
+    const entries: ExemplarFleetEntry[] = parseExemplarFleet(raw);
+    const placeholders = entries.filter((e) => e.source_id === "nm000000");
+    expect(placeholders).toEqual([]);
+  });
+
+  test("every fleet source is a distinct real dataset id", async () => {
+    const raw = await Bun.file(`${import.meta.dir}/../scripts/exemplar-fleet.json`).json();
+    const entries: ExemplarFleetEntry[] = parseExemplarFleet(raw);
+    const sources = new Set(entries.map((e) => e.source_id));
+    expect(sources.size).toBe(entries.length); // cloning one source twice is a spec bug
   });
 });

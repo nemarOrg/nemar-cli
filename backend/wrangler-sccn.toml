@@ -29,8 +29,10 @@ workers_dev = true
 # Two schedules share the scheduled() handler (it branches on event.cron):
 #   "0 3 * * *"    daily cleanup/sweeps
 #   "*/30 * * * *" auto-import tick (#775) -- self-gates to ~90 min, so the
-#                  off-ticks are a single cheap D1 query. Prod only; [env.dev]
-#                  has no [triggers], so auto-import never runs in dev.
+#                  off-ticks are a single cheap D1 query. Prod only: [env.dev]
+#                  now HAS its own [triggers] (epic #923 Phase 7) but carries
+#                  only "0 4 * * *", and auto-import fires solely on the cron
+#                  string matching AUTO_IMPORT_CRON, so it never runs in dev.
 [triggers]
 crons = ["0 3 * * *", "*/30 * * * *"]
 
@@ -139,8 +141,9 @@ ZARR_CACHE_BASE_URL = "https://zarr.nemar.org"
 # Automatic OpenNeuro import (#775). When "true" the */30 cron tick discovers new
 # OpenNeuro datasets and imports+publishes one every ~90 min; OFF = the tick
 # no-ops. ACTIVATED on prod (#775 finalize). Pinned per-env so a deploy can't
-# silently flip it (the #773 lesson). Prod-only anyway (dev has no cron triggers
-# and stays "false" below).
+# silently flip it (the #773 lesson). Prod-only anyway: dev's [triggers] carry
+# only the daily "0 4 * * *", which never matches AUTO_IMPORT_CRON, and dev
+# stays "false" below.
 AUTO_IMPORT_ENABLED = "true"
 # Pacing macro: minutes between auto-imports. 25 -> ~one import every 30 min (the
 # gate sits just under the 30-min cron tick). Tunable live (wrangler deploy or the
@@ -290,3 +293,19 @@ AUTO_IMPORT_MIN_INTERVAL_MIN = "25"
 # run-prescreen on nemarDatasets/.github. Requires the PRESCREEN_CALLBACK_SECRET
 # Worker secret (set on dev). Prod stays unset (dark) until promoted.
 PRESCREEN_ENABLED = "true"
+
+# Daily maintenance cron for dev/staging (epic #923 Phase 7). Offset an hour
+# from prod's "0 3" so the two environments never contend. "0 4 * * *" does not
+# equal AUTO_IMPORT_CRON ("*/30 * * * *"), so scheduled() takes the daily branch
+# and auto-import never fires here; AUTO_IMPORT_ENABLED="false" above remains
+# the second gate.
+#
+# The daily branch runs a REDUCED job set outside production, because this
+# worker's D1 is a partial production mirror (real nm* rows, real user email
+# addresses) and this worker holds a live RESEND_API_KEY. See the allowlist in
+# backend/src/index.ts scheduled(): archive retry and DOI reconcile are
+# production-only, and scheduledCleanup skips its staleness-email and
+# import-recovery sections while narrowing sandbox deletion to the dev
+# ephemeral band (xx090001-xx099899), which excludes the exemplar fleet.
+[env.dev.triggers]
+crons = ["0 4 * * *"]

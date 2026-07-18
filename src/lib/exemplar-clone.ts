@@ -182,6 +182,25 @@ async function stripGitTags(datasetPath: string): Promise<void> {
 /** Build the CopyItem list for one dataset sub-prefix (objects/, zarr/, ...),
  *  listing what's already at the source and rewriting each key to its
  *  exemplar destination. Returns [] when the sub-prefix has no objects. */
+/**
+ * Marker file that git-annex's S3 special remote writes at its fileprefix root
+ * to identify the remote. It sits alongside the content blobs under `objects/`
+ * but is NOT annexed content, so it must be excluded from both halves of the
+ * clone: copying the SOURCE remote's marker would overwrite the identity of the
+ * freshly-initremoted `nemar-s3-dev`, and handing it to `batchSetKeysPresent`
+ * fails because it is not a valid git-annex key.
+ */
+const ANNEX_REMOTE_MARKER = "annex-uuid";
+
+/**
+ * True when a key listed under a remote's prefix is actual annexed content
+ * rather than remote bookkeeping. Exported so the exclusion is unit-testable
+ * without reaching S3.
+ */
+export function isAnnexContentKey(relKey: string): boolean {
+  return relKey !== ANNEX_REMOTE_MARKER;
+}
+
 async function buildExemplarCopyItems(
   sourceId: string,
   xxId: string,
@@ -189,7 +208,7 @@ async function buildExemplarCopyItems(
 ): Promise<CopyItem[]> {
   const sourcePrefix = `${sourceId}/${subPrefix}`;
   const existing = await listExistingObjects(SOURCE_BUCKET, sourcePrefix, S3_REGION);
-  return [...existing.keys()].map((relKey) => {
+  return [...existing.keys()].filter(isAnnexContentKey).map((relKey) => {
     const srcKey = `${sourcePrefix}${relKey}`;
     const destKey = rewriteObjectKeyPrefix(srcKey, sourceId, xxId);
     return {

@@ -34,6 +34,25 @@ export function isDevRangeDatasetId(id: string): boolean {
   return DEV_SANDBOX_RANGE_RE.test(id);
 }
 
+// The dev partition splits again: xx090001-xx099899 is the EPHEMERAL band that
+// the dev cleanup cron may delete, and xx099900-xx099999 is the curated
+// exemplar fleet, which is never auto-deleted. Bounds are half-open
+// [START, END) and safe to compare as strings because ids are fixed-width
+// zero-padded (epic #923 Phase 7).
+export const DEV_EPHEMERAL_BAND_START = "xx090001";
+export const DEV_EPHEMERAL_BAND_END = "xx099900";
+
+/**
+ * True when a dataset id is in the dev EPHEMERAL sandbox band, i.e. the only
+ * ids the non-production cleanup cron is allowed to delete. Excludes the
+ * exemplar fleet (xx099900+) and prod's sandbox band (<= xx089999).
+ */
+export function isDevEphemeralSandboxId(id: string): boolean {
+  return (
+    DEV_SANDBOX_RANGE_RE.test(id) && id >= DEV_EPHEMERAL_BAND_START && id < DEV_EPHEMERAL_BAND_END
+  );
+}
+
 // Test dataset IDs excluded from the gap-filling candidate pool.
 // nm099999 would otherwise contribute candidate 100000 (99999+1).
 const EXCLUDED_IDS = new Set(["nm099999"]);
