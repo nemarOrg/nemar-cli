@@ -89,6 +89,9 @@ jobs:
             base="$(basename "$f")"
             case "$base" in
               e2e-sandbox.test.ts|e2e-upload.test.ts|zenodo-sandbox.test.ts|ezid.test.ts|ezid-sandbox.test.ts|auth-passwordless.test.ts) continue;;
+              # *.integration.test.ts hit external networks (live DataCite/Crossref);
+              # they are non-deterministic and must never gate the prod deploy.
+              *.integration.test.ts) continue;;
             esac
             if grep -Eq 'testRequest|TEST_API_URL|runCli\(' "$f"; then continue; fi
             files+=("$f")
