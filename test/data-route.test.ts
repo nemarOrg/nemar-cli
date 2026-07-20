@@ -549,7 +549,7 @@ describe("data.nemar.org catalog index (#584)", async () => {
     return;
   }
 
-  test("returns HTML with at least one nm dataset link", async () => {
+  test("returns HTML listing its datasets as links", async () => {
     const r = await fetch(`${API}/data/`, {
       headers: { ...headers, Accept: "text/html" },
     });
@@ -559,7 +559,13 @@ describe("data.nemar.org catalog index (#584)", async () => {
     expect(r.headers.get("vary")).toContain("Accept");
     const body = await r.text();
     expect(body).toContain("data.nemar.org");
-    expect(body).toMatch(/href="\/nm\d+\/"/);
+    // The catalog index must list its datasets as clickable links. Production is
+    // dominated by real `nm` datasets; the dev/staging catalog is purged to the
+    // exemplar fleet only (epic #923, 2026-07-20), so there it lists xx0999
+    // links instead of nm.
+    expect(body).toMatch(
+      IS_PRODUCTION_TARGET ? /href="\/nm\d+\/"/ : /href="\/xx0999\d{2}\/"/,
+    );
     expect(body).not.toContain(">nm099999/<");
     // Plain sandbox datasets must never appear in the data catalog. The one
     // permitted exception is the staging exemplar fleet (xx0999NN), which is
