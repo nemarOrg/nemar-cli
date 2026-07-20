@@ -146,6 +146,28 @@ jobs:
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
         run: npx wrangler deploy --env dev -c wrangler-sccn.toml
 
+      # Post-deploy smoke. `wrangler deploy` exiting 0 does NOT prove the new code
+      # is serving: #958 showed deploy-backend can fail EARLIER (typecheck) and,
+      # more importantly, a green deploy step with nothing asserting the running
+      # Worker let dev run 2026-07-06 code for 11 days unnoticed. /health reports
+      # pkg.version (../../package.json), so requiring it to equal the just-deployed
+      # version proves the new build is live. Fails the job (goes red) otherwise.
+      - name: Smoke test dev worker (/health version must match the deploy)
+        run: |
+          EXPECTED="$(jq -r .version package.json)"
+          URL="https://nemar-api-dev.sccn-org.workers.dev/health"
+          echo "Expecting /health version $EXPECTED at $URL"
+          GOT=""
+          for i in $(seq 1 12); do
+            BODY="$(curl -fsS --max-time 15 "$URL" 2>/dev/null || true)"
+            GOT="$(printf '%s' "$BODY" | jq -r '.version // empty' 2>/dev/null || true)"
+            [ "$GOT" = "$EXPECTED" ] && { echo "::notice::Dev worker healthy at $GOT (attempt $i)"; exit 0; }
+            echo "attempt $i: got '${GOT:-<none>}', want '$EXPECTED'; retrying in 10s"
+            sleep 10
+          done
+          echo "::error::Dev deploy smoke FAILED - /health never reported $EXPECTED (last '${GOT:-<none>}'). The deploy likely silently failed; do NOT assume dev is current."
+          exit 1
+
   deploy-production:
     needs: [detect-environment, test-gate]
     # Explicit test-gate.result check (see deploy-dev): a custom `if:` drops the
@@ -197,6 +219,28 @@ jobs:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
         run: npx wrangler deploy -c wrangler-sccn.toml
+
+      # Post-deploy smoke on PRODUCTION. This is the guard the release most needs:
+      # after the dev->main deploy, require api.nemar.org/health to report the
+      # just-deployed version so a silently-failed prod deploy goes RED instead of
+      # leaving prod on old code. The release deploys twice (pre-strip -devN, then
+      # the stripped tag), and each job checks out its own commit, so EXPECTED is
+      # always that deploy's own package.json version.
+      - name: Smoke test production worker (/health version must match the deploy)
+        run: |
+          EXPECTED="$(jq -r .version package.json)"
+          URL="https://api.nemar.org/health"
+          echo "Expecting /health version $EXPECTED at $URL"
+          GOT=""
+          for i in $(seq 1 12); do
+            BODY="$(curl -fsS --max-time 15 "$URL" 2>/dev/null || true)"
+            GOT="$(printf '%s' "$BODY" | jq -r '.version // empty' 2>/dev/null || true)"
+            [ "$GOT" = "$EXPECTED" ] && { echo "::notice::Production healthy at $GOT (attempt $i)"; exit 0; }
+            echo "attempt $i: got '${GOT:-<none>}', want '$EXPECTED'; retrying in 10s"
+            sleep 10
+          done
+          echo "::error::PRODUCTION deploy smoke FAILED - /health never reported $EXPECTED (last '${GOT:-<none>}'). Prod may be running old code; investigate and roll back immediately."
+          exit 1
 
       - name: Check release-tag drift (informational)
         # Surfaces git-tag vs running-Worker drift (#897). The release pipeline
