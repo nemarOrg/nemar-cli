@@ -24,15 +24,13 @@ import {
   getBranchRulesetInfo,
   getMainBranchSha,
   getWorkflowRuns,
-  setRepoVisibility,
   syncWorkflowTemplates,
   triggerBidsValidation,
   validateDeployedWorkflows,
 } from "../../services/github";
 import { getDatasetsToken } from "../../services/github-auth";
 import { mirrorReconcileRemovals, resolveRepoCollaborators } from "../../services/repo-spec";
-import { markDatasetPrivate, markDatasetPublic } from "../../services/s3";
-import { getS3Config } from "./shared";
+import { applyDatasetVisibility } from "../../services/visibility";
 import type { AdminRouter } from "./shared";
 
 export function registerFleetRoutes(admin: AdminRouter): void {
@@ -52,159 +50,70 @@ export function registerFleetRoutes(admin: AdminRouter): void {
     const { visibility } = c.req.valid("json");
     const db = c.env.DB;
     const adminUser = c.get("user");
-
-    const dataset = await db
-      .prepare("SELECT dataset_id, github_repo FROM datasets WHERE dataset_id = ?")
-      .bind(datasetId)
-      .first<{ dataset_id: string; github_repo: string | null }>();
-
-    if (!dataset) {
-      return c.json({ error: "Dataset not found" }, 404);
-    }
-
-    if (!dataset.github_repo) {
-      return c.json({ error: "Dataset has no GitHub repository" }, 400);
-    }
-
-    const repoName = dataset.github_repo.split("/")[1];
-    if (!repoName) {
-      return c.json({ error: "Invalid repository format" }, 500);
-    }
-
     const isPrivate = visibility === "private";
-    const pat = await getDatasetsToken(c.env);
-    const result = await setRepoVisibility(repoName, isPrivate, pat);
+
+    const result = await applyDatasetVisibility(c.env, datasetId, visibility);
 
     if (!result.ok) {
-      return c.json({ error: `Failed to set repository to ${visibility}: ${result.error}` }, 500);
-    }
-
-    // Update S3 bucket policy based on visibility
-    try {
-      if (visibility === "public") {
-        await markDatasetPublic(getS3Config(c.env), datasetId);
-      } else {
-        // Carve the dataset back out of public access when reverting to private
-        await markDatasetPrivate(getS3Config(c.env), datasetId);
+      switch (result.stage) {
+        case "not_found":
+          return c.json({ error: result.error }, 404);
+        case "no_repo":
+          return c.json({ error: result.error }, 400);
+        case "invalid_repo":
+        case "github":
+          return c.json({ error: result.error }, 500);
+        case "s3":
+          if (result.githubReverted) {
+            return c.json(
+              {
+                error: `Failed to update S3 bucket policy, reverted GitHub repository to ${isPrivate ? "public" : "private"}`,
+                details: result.error,
+                dataset_id: datasetId,
+              },
+              500,
+            );
+          }
+          return c.json(
+            {
+              error: "CRITICAL: S3 policy update failed AND GitHub revert failed",
+              details: result.error,
+              dataset_id: datasetId,
+              github_visibility: visibility,
+              s3_public: visibility === "private",
+              revert_error: result.revertError,
+              action_required: `Manually revert GitHub repo to ${isPrivate ? "public" : "private"} OR manually ${visibility === "public" ? "add" : "remove"} S3 public read policy for ${datasetId}`,
+            },
+            500,
+          );
+        case "db":
+          if (result.githubReverted && result.s3Reverted) {
+            return c.json(
+              {
+                error: "Database update failed, reverted GitHub and S3 to original state",
+                details: result.error,
+                dataset_id: datasetId,
+              },
+              500,
+            );
+          }
+          return c.json(
+            {
+              error: "CRITICAL: Database update failed AND rollback incomplete",
+              details: result.error,
+              dataset_id: datasetId,
+              github_visibility: visibility,
+              github_reverted: result.githubReverted,
+              s3_reverted: result.s3Reverted,
+              database_visibility: visibility === "public" ? "private" : "public",
+              revert_error: result.revertError,
+              action_required:
+                `Manually fix: ${!result.githubReverted ? `revert GitHub to ${!isPrivate ? "public" : "private"}` : ""} ${!result.s3Reverted ? `revert S3 policy for ${datasetId}` : ""} update database SET visibility = '${visibility}' WHERE dataset_id = '${datasetId}'`.trim(),
+            },
+            500,
+          );
       }
-    } catch (s3Error) {
-      const s3Msg = s3Error instanceof Error ? s3Error.message : String(s3Error);
-      console.error(`WARNING: Failed to update S3 policy for ${datasetId}:`, s3Msg);
-      // GitHub visibility changed but S3 policy failed - revert GitHub
-      const revertResult = await setRepoVisibility(repoName, !isPrivate, pat);
-      if (revertResult.ok) {
-        return c.json(
-          {
-            error: `Failed to update S3 bucket policy, reverted GitHub repository to ${isPrivate ? "public" : "private"}`,
-            details: s3Msg,
-            dataset_id: datasetId,
-          },
-          500,
-        );
-      }
-      return c.json(
-        {
-          error: "CRITICAL: S3 policy update failed AND GitHub revert failed",
-          details: s3Msg,
-          dataset_id: datasetId,
-          github_visibility: visibility,
-          s3_public: visibility === "private",
-          revert_error: revertResult.error,
-          action_required: `Manually revert GitHub repo to ${isPrivate ? "public" : "private"} OR manually ${visibility === "public" ? "add" : "remove"} S3 public read policy for ${datasetId}`,
-        },
-        500,
-      );
     }
-
-    // Helper to revert GitHub + S3 visibility changes on DB failure
-    async function revertVisibilityChanges(errorDetails: string): Promise<Response> {
-      const ghRevertResult = await setRepoVisibility(repoName, !isPrivate, pat);
-
-      let s3Reverted = false;
-      try {
-        const s3Opts = getS3Config(c.env);
-        if (visibility === "public") {
-          // We had granted public access; revert by re-carving it out
-          await markDatasetPrivate(s3Opts, datasetId);
-        } else {
-          await markDatasetPublic(s3Opts, datasetId);
-        }
-        s3Reverted = true;
-      } catch (s3RevertError) {
-        console.error(`S3 policy revert failed for ${datasetId}:`, s3RevertError);
-      }
-
-      if (ghRevertResult.ok && s3Reverted) {
-        return c.json(
-          {
-            error: "Database update failed, reverted GitHub and S3 to original state",
-            details: errorDetails,
-            dataset_id: datasetId,
-          },
-          500,
-        );
-      }
-
-      return c.json(
-        {
-          error: "CRITICAL: Database update failed AND rollback incomplete",
-          details: errorDetails,
-          dataset_id: datasetId,
-          github_visibility: visibility,
-          github_reverted: ghRevertResult.ok,
-          s3_reverted: s3Reverted,
-          database_visibility: visibility === "public" ? "private" : "public",
-          revert_error: ghRevertResult.ok ? undefined : ghRevertResult.error,
-          action_required:
-            `Manually fix: ${!ghRevertResult.ok ? `revert GitHub to ${!isPrivate ? "public" : "private"}` : ""} ${!s3Reverted ? `revert S3 policy for ${datasetId}` : ""} update database SET visibility = '${visibility}' WHERE dataset_id = '${datasetId}'`.trim(),
-        },
-        500,
-      );
-    }
-
-    // Update dataset visibility in database to match GitHub repo
-    let dbUpdateResult: D1Result;
-    try {
-      dbUpdateResult = await db
-        .prepare("UPDATE datasets SET visibility = ? WHERE dataset_id = ?")
-        .bind(visibility, datasetId)
-        .run();
-
-      if (!dbUpdateResult.success || dbUpdateResult.meta.changes === 0) {
-        const errorDetails =
-          dbUpdateResult.meta.changes === 0
-            ? "Dataset not found in database"
-            : "Database update did not succeed";
-
-        console.error(
-          `CRITICAL: Failed to update database visibility for ${datasetId}. GitHub is now ${visibility} but database is out of sync.`,
-        );
-
-        return revertVisibilityChanges(errorDetails);
-      }
-    } catch (dbError) {
-      const msg = dbError instanceof Error ? dbError.message : String(dbError);
-      console.error(`CRITICAL: Exception updating database visibility for ${datasetId}:`, msg);
-
-      return revertVisibilityChanges(msg);
-    }
-
-    // Enforce the target repo spec for the new visibility (epic #713): public ->
-    // lock main (branch + tag ruleset, green-gated) + reconcile collaborators;
-    // private -> remove the branch ruleset + reconcile. Non-fatal: visibility is
-    // already changed at GitHub/S3/D1.
-    let specEnforcement: Awaited<ReturnType<typeof ensureRepoToSpec>> | undefined;
-    try {
-      const { ownerLogin, approvedWriters } = await resolveRepoCollaborators(db, datasetId);
-      specEnforcement = await ensureRepoToSpec(repoName, pat, {
-        visibility,
-        collaborators: { ownerLogin, approvedWriters },
-      });
-    } catch (specError) {
-      console.error(`Repo-spec enforcement failed for ${datasetId} (non-fatal):`, specError);
-    }
-    // Mirror reconcile removals into D1 (own try/catch; flags a divergence).
-    await mirrorReconcileRemovals(db, datasetId, specEnforcement?.reconcile?.removed);
 
     // Audit log (non-fatal but warn user if fails)
     let auditLogFailed = false;
@@ -233,7 +142,7 @@ export function registerFleetRoutes(admin: AdminRouter): void {
       message: `Repository visibility set to ${visibility}`,
       dataset_id: datasetId,
       visibility,
-      spec_enforcement: specEnforcement?.steps,
+      spec_enforcement: result.specEnforcement?.steps,
       warning: auditLogFailed
         ? `Audit log write failed: ${auditLogError}. Operation succeeded but was not logged for compliance.`
         : undefined,

@@ -14,6 +14,7 @@
  * - nemar admin doi create/info/update/enrich - DOI management
  * - nemar admin publish list/deny/approve - Publication workflow
  * - nemar admin revert             - Revert dataset to a previous version
+ * - nemar admin withdraw/restore   - Withdraw/restore a published dataset (visibility + EZID DOIs)
  * - nemar admin email-preferences show/update - Email notification opt-out
  * - nemar admin notice list/set/clear - System notice management
  * - nemar admin notify              - Send broadcast email to users
@@ -27,6 +28,7 @@ import inquirer from "inquirer";
 import ora from "ora";
 import {
   type DataIntegritySweepBatchResponse,
+  type DatasetTransitionResponse,
   type EmailPreferences,
   type HedSweepBatchResponse,
   type ReindexBulkOptions,
@@ -61,6 +63,7 @@ import {
   reindexBulk,
   reindexDataset,
   remintExemplarDois,
+  restoreDataset,
   retryImport,
   revalidateDataset,
   revokeUser,
@@ -71,6 +74,7 @@ import {
   updateEmailPreferences,
   validateCi,
   verifyImport,
+  withdrawDataset,
 } from "../lib/api/admin.js";
 import { applyS3Lock, getDatasetFiles } from "../lib/api/data.js";
 import {
@@ -111,6 +115,11 @@ import {
 import { checkDownloadPrerequisites } from "../lib/git-annex/prereq.js";
 import { getVersionCommit, listDatasetVersions } from "../lib/git-annex/repo-state.js";
 import { formatBytes } from "../lib/progress.js";
+import {
+  type WithdrawnDatasetEntry,
+  loadWithdrawnDatasets,
+  resolveWithdrawTargets,
+} from "../lib/withdrawn-datasets.js";
 
 /** Handle common error patterns in admin CLI commands */
 function handleCommandError(
@@ -186,6 +195,8 @@ Dataset Management:
   make-public     - Publish a dataset (permanent, irreversible)
   delete-dataset    - Delete a dataset and all associated resources
   import-openneuro  - Import an OpenNeuro dataset into NEMAR
+  withdraw          - Withdraw a broken published dataset (private + DOI tombstone), reversible
+  restore           - Reverse a withdrawal (public + DOI restore)
 
 Examples:
   $ nemar admin users --verified           # List users awaiting approval
@@ -1304,18 +1315,29 @@ doiCommand
   .description("Update EZID DOI metadata or status")
   .argument("<dataset-id>", "Dataset ID (e.g., nm000104)")
   .option("--make-public", "Transition DOI from reserved to public (permanent)")
+  .option(
+    "--unavailable",
+    "Tombstone the concept DOI (EZID _status=unavailable); concept-only, reversible via --make-public. For a full withdrawal (visibility + every version DOI) use 'nemar admin withdraw' instead.",
+  )
   .option("--refresh", "Refresh metadata from dataset_description.json and .nemar/metadata.json")
   .option(YES_OPTION, YES_DESCRIPTION)
   .option(NO_OPTION, NO_DESCRIPTION)
   .action(
     async (
       datasetId: string,
-      options: { makePublic?: boolean; refresh?: boolean } & ConfirmOptions,
+      options: { makePublic?: boolean; unavailable?: boolean; refresh?: boolean } & ConfirmOptions,
     ) => {
       if (!requireAuth()) return;
 
-      if (!options.makePublic && !options.refresh) {
-        console.log(chalk.yellow("No action specified. Use --make-public and/or --refresh."));
+      if (options.makePublic && options.unavailable) {
+        console.log(chalk.red("Use --make-public or --unavailable, not both."));
+        return;
+      }
+
+      if (!options.makePublic && !options.unavailable && !options.refresh) {
+        console.log(
+          chalk.yellow("No action specified. Use --make-public, --unavailable, and/or --refresh."),
+        );
         return;
       }
 
@@ -1334,11 +1356,26 @@ doiCommand
         }
       }
 
+      if (options.unavailable) {
+        console.log(chalk.yellow("This tombstones the concept DOI (EZID _status=unavailable)."));
+        console.log(chalk.dim("  Reversible with --make-public. Version DOIs are untouched."));
+        console.log();
+
+        const confirmResult = await confirm(
+          `Mark DOI for ${datasetId} unavailable (tombstone)?`,
+          options,
+        );
+        if (confirmResult !== "confirmed") {
+          console.log(chalk.dim(confirmResult === "declined" ? "Skipped" : "Cancelled"));
+          return;
+        }
+      }
+
       const spinner = ora("Updating DOI...").start();
 
       try {
         const result = await updateDoi(datasetId, {
-          status: options.makePublic ? "public" : undefined,
+          status: options.makePublic ? "public" : options.unavailable ? "unavailable" : undefined,
           refresh_metadata: options.refresh,
         });
 
@@ -2765,6 +2802,268 @@ adminCommand
       process.exit(1);
     }
   });
+
+// ============================================================================
+// Dataset withdrawal / restore (epic #967 phase 4, #971)
+// ============================================================================
+
+/** Default location of the checked-in withdrawal target list, resolved
+ *  relative to this source file rather than cwd (mirrors
+ *  defaultExemplarFleetPath below). */
+function defaultWithdrawnDatasetsPath(): string {
+  return join(import.meta.dir, "..", "..", "scripts", "withdrawn-datasets.json");
+}
+
+function printTransitionResult(
+  tag: string,
+  datasetId: string,
+  result: DatasetTransitionResponse | undefined,
+  error: string | undefined,
+): void {
+  if (error) {
+    console.log(`  ${chalk.red("error".padEnd(8))} ${datasetId}: ${error}`);
+    return;
+  }
+  if (!result) return;
+  if ("skipped" in result) {
+    console.log(`  ${chalk.yellow("skipped".padEnd(8))} ${datasetId}: ${result.skipped}`);
+    return;
+  }
+
+  const resumeTag = result.resumed ? chalk.yellow(" (resumed)") : "";
+  console.log(chalk.bold(`  ${tag}${datasetId}${resumeTag}`));
+
+  const vColor = result.visibility.status === "failed" ? chalk.red : chalk.green;
+  console.log(`    visibility: ${vColor(result.visibility.status)}`);
+  if (result.visibility.status === "failed") {
+    console.log(chalk.red(`      stage=${result.visibility.stage}: ${result.visibility.error}`));
+    if ("githubReverted" in result.visibility) {
+      const s3Bit =
+        "s3Reverted" in result.visibility ? ` s3Reverted=${result.visibility.s3Reverted}` : "";
+      const revertBit = result.visibility.revertError
+        ? ` revertError=${result.visibility.revertError}`
+        : "";
+      console.log(
+        chalk.dim(`      githubReverted=${result.visibility.githubReverted}${s3Bit}${revertBit}`),
+      );
+    }
+  }
+
+  for (const d of result.dois) {
+    const color =
+      d.status === "failed" ? chalk.red : d.status === "planned" ? chalk.yellow : chalk.green;
+    const label = d.kind === "version" ? `version ${d.version}` : "concept";
+    console.log(`    ${color(d.status.padEnd(8))} ${label} -> ${d.action}  ${chalk.dim(d.doi)}`);
+    if (d.error) console.log(chalk.red(`      ${d.error}`));
+  }
+
+  if (result.warning) {
+    console.log(chalk.yellow(`    warning: ${result.warning}`));
+  }
+}
+
+adminCommand
+  .command("withdraw")
+  .description(
+    "Withdraw a broken published dataset: make it private and tombstone its EZID DOIs (concept + every version). Dry-run by default.",
+  )
+  .argument("[ids...]", "Dataset id(s) to withdraw (omit when using --all)")
+  .option("--all", "Target every entry in the checked-in withdrawn-datasets list")
+  .option("--reason <reason>", "Withdrawal reason (default: the list entry's own reason)")
+  .option("--execute", "Actually apply the withdrawal (default is a dry run)")
+  .option("--force", "Allow a dataset id that is not on the checked-in withdrawn-datasets list")
+  .option(
+    "--withdrawn-file <path>",
+    "Path to the withdrawn-datasets JSON (default: scripts/withdrawn-datasets.json)",
+  )
+  .option(YES_OPTION, YES_DESCRIPTION)
+  .option(NO_OPTION, NO_DESCRIPTION)
+  .option("--json", "Output raw JSON")
+  .action(
+    async (
+      ids: string[],
+      options: {
+        all?: boolean;
+        reason?: string;
+        execute?: boolean;
+        force?: boolean;
+        withdrawnFile?: string;
+        json?: boolean;
+      } & ConfirmOptions,
+    ) => {
+      if (!requireAuth()) return;
+
+      if (ids.length === 0 && !options.all) {
+        console.log(chalk.red("Error: provide dataset id(s) or use --all"));
+        process.exit(1);
+      }
+      if (ids.length > 0 && options.all) {
+        console.log(chalk.red("Error: provide dataset id(s) OR --all, not both"));
+        process.exit(1);
+      }
+
+      const listPath = options.withdrawnFile || defaultWithdrawnDatasetsPath();
+      let entries: WithdrawnDatasetEntry[];
+      try {
+        entries = loadWithdrawnDatasets(listPath);
+      } catch (err) {
+        console.error(chalk.red(`Failed to load withdrawn-datasets file: ${errorDetail(err)}`));
+        process.exit(1);
+      }
+
+      const resolved = options.all
+        ? {
+            targets: entries.map((e) => ({
+              datasetId: e.dataset_id,
+              reason: options.reason || e.reason,
+            })),
+          }
+        : resolveWithdrawTargets(ids, entries, { reason: options.reason, force: options.force });
+
+      if ("error" in resolved) {
+        console.error(chalk.red(resolved.error));
+        process.exit(1);
+      }
+      const targets = resolved.targets;
+
+      const dryRun = !options.execute;
+      const tag = dryRun ? "[dry-run] " : "";
+
+      if (!dryRun) {
+        console.log(
+          chalk.red(
+            `\nWARNING: this makes ${targets.length} dataset(s) private and tombstones their EZID DOIs (concept + every version).`,
+          ),
+        );
+        const confirmResult = await confirm(
+          `Execute withdrawal for ${targets.length} dataset(s)?`,
+          options,
+        );
+        if (confirmResult !== "confirmed") {
+          console.log(chalk.dim(confirmResult === "declined" ? "Skipped" : "Cancelled"));
+          return;
+        }
+      }
+
+      const results: Array<{
+        dataset_id: string;
+        result?: DatasetTransitionResponse;
+        error?: string;
+      }> = [];
+      for (const t of targets) {
+        try {
+          const result = await withdrawDataset(t.datasetId, { reason: t.reason, dryRun });
+          results.push({ dataset_id: t.datasetId, result });
+        } catch (error) {
+          results.push({ dataset_id: t.datasetId, error: errorDetail(error) });
+        }
+      }
+
+      if (options.json) {
+        console.log(JSON.stringify(results, null, 2));
+        return;
+      }
+
+      console.log();
+      for (const r of results) {
+        printTransitionResult(tag, r.dataset_id, r.result, r.error);
+      }
+    },
+  );
+
+adminCommand
+  .command("restore")
+  .description(
+    "Reverse a withdrawal: make a dataset public again and restore its EZID DOIs (concept + every version). Dry-run by default.",
+  )
+  .argument("[ids...]", "Dataset id(s) to restore (omit when using --all)")
+  .option("--all", "Target every entry in the checked-in withdrawn-datasets list")
+  .option("--execute", "Actually apply the restore (default is a dry run)")
+  .option(
+    "--withdrawn-file <path>",
+    "Path to the withdrawn-datasets JSON (default: scripts/withdrawn-datasets.json)",
+  )
+  .option(YES_OPTION, YES_DESCRIPTION)
+  .option(NO_OPTION, NO_DESCRIPTION)
+  .option("--json", "Output raw JSON")
+  .action(
+    async (
+      ids: string[],
+      options: {
+        all?: boolean;
+        execute?: boolean;
+        withdrawnFile?: string;
+        json?: boolean;
+      } & ConfirmOptions,
+    ) => {
+      if (!requireAuth()) return;
+
+      if (ids.length === 0 && !options.all) {
+        console.log(chalk.red("Error: provide dataset id(s) or use --all"));
+        process.exit(1);
+      }
+      if (ids.length > 0 && options.all) {
+        console.log(chalk.red("Error: provide dataset id(s) OR --all, not both"));
+        process.exit(1);
+      }
+
+      let targets: string[];
+      if (options.all) {
+        const listPath = options.withdrawnFile || defaultWithdrawnDatasetsPath();
+        try {
+          targets = loadWithdrawnDatasets(listPath).map((e) => e.dataset_id);
+        } catch (err) {
+          console.error(chalk.red(`Failed to load withdrawn-datasets file: ${errorDetail(err)}`));
+          process.exit(1);
+        }
+      } else {
+        targets = ids;
+      }
+
+      const dryRun = !options.execute;
+      const tag = dryRun ? "[dry-run] " : "";
+
+      if (!dryRun) {
+        console.log(
+          chalk.yellow(
+            `\nThis makes ${targets.length} dataset(s) public again and restores their EZID DOIs.`,
+          ),
+        );
+        const confirmResult = await confirm(
+          `Execute restore for ${targets.length} dataset(s)?`,
+          options,
+        );
+        if (confirmResult !== "confirmed") {
+          console.log(chalk.dim(confirmResult === "declined" ? "Skipped" : "Cancelled"));
+          return;
+        }
+      }
+
+      const results: Array<{
+        dataset_id: string;
+        result?: DatasetTransitionResponse;
+        error?: string;
+      }> = [];
+      for (const datasetId of targets) {
+        try {
+          const result = await restoreDataset(datasetId, { dryRun });
+          results.push({ dataset_id: datasetId, result });
+        } catch (error) {
+          results.push({ dataset_id: datasetId, error: errorDetail(error) });
+        }
+      }
+
+      if (options.json) {
+        console.log(JSON.stringify(results, null, 2));
+        return;
+      }
+
+      console.log();
+      for (const r of results) {
+        printTransitionResult(tag, r.dataset_id, r.result, r.error);
+      }
+    },
+  );
 
 // ============================================================================
 // Import OpenNeuro

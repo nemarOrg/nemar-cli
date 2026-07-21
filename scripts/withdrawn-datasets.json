@@ -1,0 +1,57 @@
+[
+  {
+    "dataset_id": "on004148",
+    "reason": "upstream_403",
+    "note": "OpenNeuro source returns 403 for every client, including OpenNeuro's own CLI/datalad; blocked until upstream restores access."
+  },
+  {
+    "dataset_id": "on007816",
+    "reason": "upstream_403",
+    "note": "OpenNeuro source returns 403 for every client, including OpenNeuro's own CLI/datalad; blocked until upstream restores access."
+  },
+  {
+    "dataset_id": "on007987",
+    "reason": "upstream_403",
+    "note": "OpenNeuro source returns 403 for every client, including OpenNeuro's own CLI/datalad; blocked until upstream restores access."
+  },
+  {
+    "dataset_id": "on008014",
+    "reason": "upstream_403",
+    "note": "OpenNeuro source returns 403 for every client, including OpenNeuro's own CLI/datalad; blocked until upstream restores access."
+  },
+  {
+    "dataset_id": "on008017",
+    "reason": "upstream_403",
+    "note": "OpenNeuro source returns 403 for every client, including OpenNeuro's own CLI/datalad; blocked until upstream restores access."
+  },
+  {
+    "dataset_id": "on008065",
+    "reason": "upstream_403",
+    "note": "OpenNeuro source returns 403 for every client, including OpenNeuro's own CLI/datalad; blocked until upstream restores access."
+  },
+  {
+    "dataset_id": "on008092",
+    "reason": "upstream_403",
+    "note": "OpenNeuro source returns 403 for every client, including OpenNeuro's own CLI/datalad; blocked until upstream restores access."
+  },
+  {
+    "dataset_id": "on008099",
+    "reason": "upstream_403",
+    "note": "OpenNeuro source returns 403 for every client, including OpenNeuro's own CLI/datalad; blocked until upstream restores access."
+  },
+  {
+    "dataset_id": "on008115",
+    "reason": "upstream_403",
+    "note": "OpenNeuro source returns 403 for every client, including OpenNeuro's own CLI/datalad; blocked until upstream restores access."
+  },
+  {
+    "dataset_id": "on005279",
+    "reason": "no_source",
+    "note": "No recoverable source was found for this dataset during the epic #967 forensic sweep."
+  },
+  {
+    "dataset_id": "on005516",
+    "reason": "no_source",
+    "note": "No recoverable source was found for this dataset during the epic #967 forensic sweep."
+  }
+]
