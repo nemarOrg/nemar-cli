@@ -22,6 +22,7 @@ import {
   mapModalityToResourceType,
   parseAuthorName,
 } from "../backend/src/services/datacite";
+import { reconcileReservedVersionDois } from "../backend/src/services/doi-reconcile";
 import {
   EZID_BASE_URL,
   type EzidAuth,
@@ -43,6 +44,8 @@ import {
   percentEncode,
   updateIdentifier,
 } from "../backend/src/services/ezid";
+import type { Bindings } from "../backend/src/types/bindings";
+import { freshDb, realD1 } from "../backend/test/helpers/d1";
 import { sleep } from "./setup";
 
 // Only run these tests when explicitly enabled
@@ -518,6 +521,43 @@ describe.skipIf(!SHOULD_RUN)("EZID Sandbox Integration", { timeout: 30000 }, () 
       console.log("   [x] Tombstone page will show withdrawal reason");
     }, 30000);
 
+    test("can transition unavailable -> public (restore after withdrawal, epic #967 phase 4)", async () => {
+      await sleep(500);
+
+      // Mint, publish, then tombstone -- the withdraw path.
+      const minted = await mintIdentifier(EZID_TEST_AUTH, {
+        shoulder: TEST_SHOULDER,
+        status: "reserved",
+        target: "https://nemar.org/test-restore",
+        dataciteFields: {
+          creator: "Test, User",
+          title: "Restore Transition Test",
+          publisher: "NEMAR",
+          publicationyear: "2026",
+          resourcetype: "Dataset",
+        },
+      });
+
+      await sleep(400);
+      await makePublic(EZID_TEST_AUTH, minted.identifier, "https://nemar.org/test-restore");
+
+      await sleep(400);
+      const tombstoned = await makeUnavailable(EZID_TEST_AUTH, minted.identifier, "upstream_403");
+      expect(tombstoned.raw._status).toContain("unavailable");
+
+      // The restore path: makePublic on an unavailable identifier un-tombstones it.
+      await sleep(400);
+      const restored = await makePublic(
+        EZID_TEST_AUTH,
+        minted.identifier,
+        "https://nemar.org/test-restore",
+      );
+
+      expect(restored.status).toBe("public");
+      expect(restored.target).toBe("https://nemar.org/test-restore");
+      console.log(`   [x] Restored DOI to public: ${restored.identifier}`);
+    }, 30000);
+
     test("cannot delete public DOI", async () => {
       await sleep(500);
 
@@ -548,6 +588,67 @@ describe.skipIf(!SHOULD_RUN)("EZID Sandbox Integration", { timeout: 30000 }, () 
         expect((error as Error).message).toContain("EZID delete error");
         console.log("   [x] Public DOI correctly cannot be deleted");
       }
+    }, 30000);
+  });
+
+  describe("Reconcile Stickiness (Sandbox, epic #967 phase 4)", () => {
+    test("reconcileReservedVersionDois leaves a withdrawn (unavailable) version DOI alone", async () => {
+      await sleep(500);
+
+      // Mint a deterministic version-shaped identifier, publish it, then
+      // withdraw it (tombstone) -- the exact state a withdrawn dataset's
+      // version DOI is left in.
+      const versionId = `${TEST_SHOULDER}NEMARRECONCILESTICKY${Date.now()}.V1.0.0`;
+      const doi = extractDoi(versionId);
+      const metadata = bidsToDataCite("xx099999", doi, { Name: "Reconcile Stickiness Test" });
+      const xml = buildDataCiteXml(metadata);
+
+      const created = await createIdentifier(EZID_TEST_AUTH, versionId, {
+        status: "reserved",
+        target: "https://nemar.org/dataset/xx099999?v=v1.0.0",
+        dataciteXml: xml,
+      });
+
+      await sleep(400);
+      await makePublic(
+        EZID_TEST_AUTH,
+        created.identifier,
+        "https://nemar.org/dataset/xx099999?v=v1.0.0",
+      );
+
+      await sleep(400);
+      await makeUnavailable(EZID_TEST_AUTH, created.identifier, "upstream_403");
+
+      // Seed a real in-memory D1 (no mocks) with a dataset row carrying this
+      // withdrawn DOI as its latest_version_doi -- exactly what
+      // reconcileReservedVersionDois scans.
+      const db = freshDb();
+      db.prepare(
+        "INSERT INTO users (id, username, email, github_username, status) VALUES (1, 'alice', 'alice@nemar.org', 'alice', 'approved')",
+      ).run();
+      db.prepare(
+        `INSERT INTO datasets
+           (dataset_id, owner_user_id, name, visibility, is_sandbox, latest_version_doi)
+         VALUES ('xx099999', 1, 'Reconcile Stickiness Test', 'private', 1, ?)`,
+      ).run(doi);
+
+      // No ENVIRONMENT set -> isNonProductionEnv() is false -> the sweep runs
+      // (its production-only guard reads this same field; RUN_EZID_TESTS is
+      // the actual safety gate here, same as every other test in this file).
+      const env = {
+        DB: realD1(db),
+        EZID_SANDBOX_USERNAME: EZID_TEST_AUTH.username,
+        EZID_SANDBOX_PASSWORD: EZID_TEST_AUTH.password,
+      } as unknown as Bindings;
+
+      await reconcileReservedVersionDois(env);
+
+      await sleep(400);
+      const after = await getIdentifier(EZID_TEST_AUTH, created.identifier);
+      expect(after.status).toBe("unavailable");
+      console.log(`   [x] Reconcile left withdrawn DOI alone: ${created.identifier}`);
+
+      db.close();
     }, 30000);
   });
 
