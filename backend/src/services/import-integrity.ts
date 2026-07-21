@@ -114,10 +114,30 @@ interface VersionManifestLike {
 }
 
 /**
+ * Parse a version manifest JSON string into its files map, or null when the
+ * JSON is unparseable OR parses but carries no `files` key. A manifest with
+ * no `files` key is malformed, not "zero expected files" -- returning `{}`
+ * there would make {@link compareManifestToListing} report complete:true
+ * regardless of what's actually in S3, defeating the conservative-by-default
+ * invariant this whole check exists to uphold. Pure; exported for testing.
+ */
+export function parseManifestFiles(
+  manifestJson: string,
+): Record<string, ExpectedManifestFile> | null {
+  try {
+    const parsed = JSON.parse(manifestJson) as VersionManifestLike;
+    return parsed.files ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * I/O wrapper: resolve the dataset's latest published version manifest (if
  * any) and the live `<id>/objects/` listing, then run the pure comparison.
- * No manifest (import never finalized) or an unparseable one both fall back
- * to the `expected: null` path in {@link compareManifestToListing}.
+ * No manifest (import never finalized), an unparseable one, or one missing
+ * `files` all fall back to the `expected: null` path in
+ * {@link compareManifestToListing}.
  */
 export async function verifyImportS3(
   env: Pick<
@@ -142,13 +162,12 @@ export async function verifyImportS3(
   if (version) {
     const manifestJson = await getManifest(options, datasetId, version);
     if (manifestJson) {
-      try {
-        const parsed = JSON.parse(manifestJson) as VersionManifestLike;
-        expected = parsed.files ?? {};
-      } catch (err) {
+      const parsedFiles = parseManifestFiles(manifestJson);
+      if (parsedFiles) {
+        expected = parsedFiles;
+      } else {
         console.error(
-          `[import-integrity] unparseable manifest for ${datasetId}@${version}:`,
-          err instanceof Error ? err.message : String(err),
+          `[import-integrity] manifest for ${datasetId}@${version} is unparseable or missing "files"`,
         );
       }
     }
