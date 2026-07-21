@@ -22,6 +22,7 @@ import {
   mapModalityToResourceType,
   parseAuthorName,
 } from "../backend/src/services/datacite";
+import { buildConceptIdentifier } from "../backend/src/services/doi";
 import { reconcileReservedVersionDois } from "../backend/src/services/doi-reconcile";
 import {
   EZID_BASE_URL,
@@ -44,6 +45,7 @@ import {
   percentEncode,
   updateIdentifier,
 } from "../backend/src/services/ezid";
+import { restoreDataset, withdrawDataset } from "../backend/src/services/withdraw";
 import type { Bindings } from "../backend/src/types/bindings";
 import { freshDb, realD1 } from "../backend/test/helpers/d1";
 import { sleep } from "./setup";
@@ -650,6 +652,116 @@ describe.skipIf(!SHOULD_RUN)("EZID Sandbox Integration", { timeout: 30000 }, () 
 
       db.close();
     }, 30000);
+  });
+
+  describe("Withdraw/Restore Orchestration Round Trip (Sandbox, epic #967 phase 4)", () => {
+    // Unlike every other test in this file (which only exercises
+    // ezid.ts/doi-reconcile.ts functions that need EZID credentials alone),
+    // withdrawDataset/restoreDataset ALWAYS flip GitHub repo visibility + the
+    // S3 bucket policy (services/visibility.ts's applyDatasetVisibility)
+    // BEFORE touching EZID at all, and return early if that fails -- so
+    // exercising the real orchestration (not just the D1-write half already
+    // covered in backend/test/withdraw.test.ts, or the EZID-call half
+    // exercised above) additionally needs a real GitHub PAT with write access
+    // to nemarDatasets, real AWS S3 credentials, and a disposable dataset id
+    // it's genuinely safe to flip visibility on. None of that is a CLI-test
+    // fixture (they're Worker secrets), so this is gated on its OWN env vars
+    // on top of RUN_EZID_TESTS and is SKIPPED by default -- this environment
+    // does not have them, so this specific path is UNVERIFIED here. Run it
+    // deliberately, e.g. against a disposable xx0999NN exemplar, with:
+    //   RUN_EZID_TESTS=true GITHUB_ADMIN_PAT=... AWS_ACCESS_KEY_ID=... \
+    //   AWS_SECRET_ACCESS_KEY=... S3_BUCKET=... AWS_REGION=... \
+    //   TEST_WITHDRAW_DATASET_ID=xx0999NN bun test test/ezid-sandbox.test.ts
+    // Only the concept DOI is exercised (no version DOIs are seeded): the
+    // per-version code path is identical and already covered by
+    // markVersionEzidStatus's direct D1 test plus the concept path here.
+    // Also exercises the GROUP 1 resume fix for real: after the fresh
+    // withdrawal, ezid_status is reset to simulate an interrupted run, and
+    // withdrawDataset is called again to confirm it resumes (not re-skips)
+    // and converges.
+    const canRunOrchestration =
+      !!process.env.GITHUB_ADMIN_PAT &&
+      !!process.env.AWS_ACCESS_KEY_ID &&
+      !!process.env.AWS_SECRET_ACCESS_KEY &&
+      !!process.env.S3_BUCKET &&
+      !!process.env.TEST_WITHDRAW_DATASET_ID;
+
+    test.skipIf(!canRunOrchestration)(
+      "withdrawDataset then restoreDataset round-trips a real dataset's visibility + concept DOI",
+      async () => {
+        const datasetId = process.env.TEST_WITHDRAW_DATASET_ID as string;
+        const conceptIdentifier = buildConceptIdentifier(datasetId, true);
+
+        const db = freshDb();
+        db.prepare(
+          "INSERT INTO users (id, username, email, github_username, status) VALUES (1, 'alice', 'alice@nemar.org', 'alice', 'approved')",
+        ).run();
+        db.prepare(
+          `INSERT INTO datasets
+             (dataset_id, owner_user_id, name, visibility, is_sandbox, doi_provider,
+              ezid_identifier, github_repo)
+           VALUES (?, 1, ?, 'public', 1, 'ezid', ?, ?)`,
+        ).run(datasetId, datasetId, conceptIdentifier, `nemarDatasets/${datasetId}`);
+
+        const env = {
+          DB: realD1(db),
+          GITHUB_ADMIN_PAT: process.env.GITHUB_ADMIN_PAT,
+          AWS_ACCESS_KEY_ID: process.env.AWS_ACCESS_KEY_ID,
+          AWS_SECRET_ACCESS_KEY: process.env.AWS_SECRET_ACCESS_KEY,
+          S3_BUCKET: process.env.S3_BUCKET,
+          AWS_REGION: process.env.AWS_REGION || "us-east-2",
+          EZID_SANDBOX_USERNAME: EZID_TEST_AUTH.username,
+          EZID_SANDBOX_PASSWORD: EZID_TEST_AUTH.password,
+        } as unknown as Bindings;
+
+        const withdrawResult = await withdrawDataset(env, datasetId, "upstream_403", {
+          dryRun: false,
+        });
+        if ("skipped" in withdrawResult) {
+          throw new Error(`withdraw unexpectedly skipped: ${withdrawResult.skipped}`);
+        }
+        expect(withdrawResult.resumed).toBe(false);
+        expect(withdrawResult.visibility.status).toBe("ok");
+        expect(withdrawResult.dois[0].status).toBe("ok");
+
+        await sleep(400);
+        const tombstoned = await getIdentifier(EZID_TEST_AUTH, conceptIdentifier);
+        expect(tombstoned.status).toBe("unavailable");
+
+        // Simulate the exact partial-failure state GROUP 1 fixes: intent
+        // recorded (withdrawn_at set by the run above) but the concept
+        // status write never landed -- as if the process crashed between
+        // markWithdrawalIntent and markConceptEzidStatus. Re-running
+        // withdrawDataset must be classified "resume" (not re-skipped) and
+        // converge: re-tombstoning an already-unavailable identifier is a
+        // harmless EZID no-op.
+        db.prepare("UPDATE datasets SET ezid_status = NULL WHERE dataset_id = ?").run(datasetId);
+
+        const resumeResult = await withdrawDataset(env, datasetId, "upstream_403", {
+          dryRun: false,
+        });
+        if ("skipped" in resumeResult) {
+          throw new Error(`resume unexpectedly skipped: ${resumeResult.skipped}`);
+        }
+        expect(resumeResult.resumed).toBe(true);
+        expect(resumeResult.dois[0].status).toBe("ok");
+
+        await sleep(400);
+        const restoreResult = await restoreDataset(env, datasetId, { dryRun: false });
+        if ("skipped" in restoreResult) {
+          throw new Error(`restore unexpectedly skipped: ${restoreResult.skipped}`);
+        }
+        expect(restoreResult.visibility.status).toBe("ok");
+        expect(restoreResult.dois[0].status).toBe("ok");
+
+        await sleep(400);
+        const restored = await getIdentifier(EZID_TEST_AUTH, conceptIdentifier);
+        expect(restored.status).toBe("public");
+
+        db.close();
+      },
+      90000,
+    );
   });
 
   describe("BIDS to DataCite Mapping (Sandbox)", () => {
