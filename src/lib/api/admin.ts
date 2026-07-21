@@ -357,6 +357,68 @@ export async function updateDoi(
 }
 
 // ---------------------------------------------------------------------------
+// Withdrawal / restore (epic #967 phase 4, #971)
+// ---------------------------------------------------------------------------
+
+export interface DoiStepResult {
+  doi: string;
+  kind: "concept" | "version";
+  version?: string;
+  action: "unavailable" | "public";
+  status: "planned" | "ok" | "failed";
+  error?: string;
+}
+
+export interface WithdrawResponse {
+  dataset_id: string;
+  dry_run: boolean;
+  /** Set when a precondition failed (not found / no EZID DOI / wrong
+   *  visibility or withdrawn state); every other field is then omitted. */
+  skipped?: string;
+  visibility?: { status: "planned" | "ok" | "failed"; error?: string };
+  dois?: DoiStepResult[];
+}
+
+export type RestoreResponse = WithdrawResponse;
+
+/**
+ * Withdraw a published dataset: make it private and tombstone its concept +
+ * version EZID DOIs. `dryRun` defaults to true server-side; pass `false` to
+ * execute (requires `reason`).
+ */
+export async function withdrawDataset(
+  datasetId: string,
+  opts: { reason?: string; dryRun: boolean },
+): Promise<WithdrawResponse> {
+  return request<WithdrawResponse>(
+    `/admin/datasets/${datasetId}/withdraw`,
+    {
+      method: "POST",
+      body: JSON.stringify({ reason: opts.reason, dry_run: opts.dryRun }),
+    },
+    true,
+  );
+}
+
+/**
+ * Reverse a withdrawal: make the dataset public again and restore its
+ * concept + version EZID DOIs. `dryRun` defaults to true server-side.
+ */
+export async function restoreDataset(
+  datasetId: string,
+  opts: { dryRun: boolean },
+): Promise<RestoreResponse> {
+  return request<RestoreResponse>(
+    `/admin/datasets/${datasetId}/restore`,
+    {
+      method: "POST",
+      body: JSON.stringify({ dry_run: opts.dryRun }),
+    },
+    true,
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Dataset deletion
 // ---------------------------------------------------------------------------
 
