@@ -10,6 +10,7 @@ import { describe, expect, test } from "bun:test";
 import {
   annexKeyDeclaredSize,
   compareManifestToListing,
+  computeVersionIntegrity,
   isKeyPresentAtDeclaredSize,
   parseManifestFiles,
 } from "../src/services/import-integrity";
@@ -185,5 +186,84 @@ describe("parseManifestFiles", () => {
   test("returns {} when files is explicitly an empty object (genuinely zero files, distinct from missing)", () => {
     const json = JSON.stringify({ dataset_id: "on000001", files: {} });
     expect(parseManifestFiles(json)).toEqual({});
+  });
+});
+
+describe("computeVersionIntegrity (#970, epic #967 Phase 3)", () => {
+  test("declaredBytes/declaredFiles sum EVERY manifest entry, annex AND git:-keyed", () => {
+    // The honest logical size must include git:-keyed text files too --
+    // compareManifestToListing's expectedCount excludes them (they're never
+    // copied to S3), but the size total is the full dataset content.
+    const expected = {
+      "sub-01/eeg/a.edf": { key: "SHA256E-s100--aaa.edf", size: 100 },
+      "sub-02/eeg/b.edf": { key: "SHA256E-s200--bbb.edf", size: 200 },
+      "dataset_description.json": { key: "git:deadbeef", size: 42 },
+    };
+    const existing = new Map([
+      ["SHA256E-s100--aaa.edf", 100],
+      ["SHA256E-s200--bbb.edf", 200],
+    ]);
+    const result = computeVersionIntegrity(expected, existing, "1.0.0");
+    expect(result.declaredBytes).toBe(342);
+    expect(result.declaredFiles).toBe(3);
+    expect(result.complete).toBe(true);
+    expect(result.version).toBe("1.0.0");
+  });
+
+  test("bytesPresent sums the live S3 listing regardless of declared-size match", () => {
+    const expected = { "sub-01/eeg/a.edf": { key: "SHA256E-s100--aaa.edf", size: 100 } };
+    // Present at the wrong (truncated) size -- still counted in bytesPresent,
+    // even though it fails the declared-size completeness check.
+    const existing = new Map([["SHA256E-s100--aaa.edf", 63]]);
+    const result = computeVersionIntegrity(expected, existing, "1.0.0");
+    expect(result.bytesPresent).toBe(63);
+    expect(result.complete).toBe(false);
+  });
+
+  test("a 0-byte object makes data_complete (complete) false via the declared-size mismatch", () => {
+    const expected = { "sub-01/eeg/a.edf": { key: "SHA256E-s100--aaa.edf", size: 100 } };
+    const existing = new Map([["SHA256E-s100--aaa.edf", 0]]);
+    const result = computeVersionIntegrity(expected, existing, "1.0.0");
+    expect(result.complete).toBe(false);
+    expect(result.zeroByteKeys).toEqual(["SHA256E-s100--aaa.edf"]);
+    expect(result.bytesPresent).toBe(0);
+  });
+
+  test("a declared-0 file present at 0 bytes is NOT flagged and stays complete", () => {
+    const expected = { "sub-01/eeg/empty.json": { key: "SHA256E-s0--aaa.json", size: 0 } };
+    const existing = new Map([["SHA256E-s0--aaa.json", 0]]);
+    const result = computeVersionIntegrity(expected, existing, "1.0.0");
+    expect(result.complete).toBe(true);
+    expect(result.missingKeys).toEqual([]);
+    expect(result.zeroByteKeys).toEqual([]);
+    expect(result.declaredBytes).toBe(0);
+    expect(result.declaredFiles).toBe(1);
+  });
+
+  test("no manifest (expected null) -> version:null, zero totals, so callers fall back to the S3 sum", () => {
+    const result = computeVersionIntegrity(null, new Map([["a", 100]]), "1.0.0");
+    expect(result.version).toBeNull();
+    expect(result.declaredBytes).toBe(0);
+    expect(result.declaredFiles).toBe(0);
+    // bytesPresent still reflects the real listing -- only the "honest size"
+    // half is withheld, not the presence data.
+    expect(result.bytesPresent).toBe(100);
+    expect(result.complete).toBe(false); // conservative default from compareManifestToListing
+  });
+
+  test("resolvedVersion is echoed back only when a manifest actually parsed", () => {
+    const expected = { a: { key: "git:x", size: 1 } };
+    const withManifest = computeVersionIntegrity(expected, new Map(), "2.0.0");
+    expect(withManifest.version).toBe("2.0.0");
+    const withoutManifest = computeVersionIntegrity(null, new Map(), "2.0.0");
+    expect(withoutManifest.version).toBeNull();
+  });
+
+  test("empty dataset (expected {} -- genuinely zero files) is complete with zero totals", () => {
+    const result = computeVersionIntegrity({}, new Map(), "1.0.0");
+    expect(result.complete).toBe(true);
+    expect(result.declaredBytes).toBe(0);
+    expect(result.declaredFiles).toBe(0);
+    expect(result.version).toBe("1.0.0");
   });
 });
