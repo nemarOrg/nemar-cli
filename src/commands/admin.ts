@@ -119,6 +119,7 @@ import { formatBytes } from "../lib/progress.js";
 import {
   type RecoverDatasetEntry,
   loadRecoverDatasets,
+  resolveImportSources,
   resolveRecoverTargets,
 } from "../lib/recover-datasets.js";
 import {
@@ -3539,9 +3540,15 @@ Description:
   Afterward, treat 'nemar admin recover status' (datasets.data_complete) as
   the completion oracle, not import_jobs.status.
 
-  The actual re-copy is production-only: POST /admin/datasets/import and the
-  retry engine both refuse outside ENVIRONMENT=production, so --execute
-  fails loudly against a non-prod backend. Acceptance audit: run
+  The actual re-copy is production-only IN PRACTICE: outside production the
+  target on###### ids have no import_jobs row (dev D1 is exemplars-only), so
+  source-id resolution fails loudly before any dispatch. But verifyImport
+  itself is NOT environment-gated -- --execute's reclassify step ('complete'
+  -> 'incomplete') runs against whatever backend the CLI is pointed at, so
+  only ever run --execute against production. A target already
+  quarantined/blocklisted by the Phase 2 retry engine is not un-stuck by
+  this reclassify (which only flips complete -> incomplete); trust
+  datasets.data_complete, not import_jobs.status. Acceptance audit: run
   'nemar admin data-integrity-sweep --older-than 0' after the batch lands.`,
   )
   .action(
@@ -3586,6 +3593,12 @@ Description:
       const targets = resolved.targets;
 
       if (!options.execute) {
+        // JSON first and exclusive: `recover --all --json | jq` must see pure
+        // JSON on stdout, nothing else.
+        if (options.json) {
+          console.log(JSON.stringify({ dry_run: true, targets }, null, 2));
+          return;
+        }
         console.log(chalk.cyan(`\n[dry-run] Would recover ${targets.length} dataset(s):\n`));
         for (const id of targets) {
           const note = entries.find((e) => e.dataset_id === id)?.note;
@@ -3597,23 +3610,30 @@ Description:
               "gh workflow run onboard-openneuro.yml for the whole set. Pass --execute to run.",
           ),
         );
-        if (options.json) {
-          console.log(JSON.stringify({ dry_run: true, targets }, null, 2));
-        }
         return;
       }
 
-      console.log(
-        chalk.yellow(
-          `\nThis verifies (reclassifies) and re-dispatches the OpenNeuro copy for ${targets.length} dataset(s).`,
-        ),
-      );
+      // Every human-readable console.log below is gated behind `!options.json`
+      // so `recover --execute --json | jq` sees pure JSON on stdout; the JSON
+      // result is assembled as the flow proceeds and printed once at the end
+      // (it needs the dispatch/verify results, so it can't print up front the
+      // way the dry-run branch above does). ora spinners write to stderr by
+      // default, so they're left unguarded.
+      if (!options.json) {
+        console.log(
+          chalk.yellow(
+            `\nThis verifies (reclassifies) and re-dispatches the OpenNeuro copy for ${targets.length} dataset(s).`,
+          ),
+        );
+      }
       const confirmResult = await confirm(
         `Execute recovery for ${targets.length} dataset(s)?`,
         options,
       );
       if (confirmResult !== "confirmed") {
-        console.log(chalk.dim(confirmResult === "declined" ? "Skipped" : "Cancelled"));
+        if (!options.json) {
+          console.log(chalk.dim(confirmResult === "declined" ? "Skipped" : "Cancelled"));
+        }
         return;
       }
 
@@ -3622,19 +3642,15 @@ Description:
       // front rather than after some targets have already been reclassified.
       const resolveSpinner = ora("Resolving import sources...").start();
       let sourceByTarget: Map<string, string>;
+      let missingSource: string[];
       try {
         const status = await getImportStatus();
-        sourceByTarget = new Map(
-          status.imports
-            .filter((r) => targets.includes(r.dataset_id) && r.source_id)
-            .map((r) => [r.dataset_id, r.source_id]),
-        );
+        ({ sourceByTarget, missingSource } = resolveImportSources(targets, status.imports));
       } catch (err) {
         resolveSpinner.fail("Failed to fetch import job state");
         console.error(chalk.red(errorDetail(err)));
         process.exit(1);
       }
-      const missingSource = targets.filter((id) => !sourceByTarget.has(id));
       if (missingSource.length > 0) {
         resolveSpinner.fail("Some targets have no import_jobs source to recover from");
         for (const id of missingSource) {
@@ -3672,11 +3688,13 @@ Description:
 
       // biome-ignore lint/style/noNonNullAssertion: sourceByTarget covers every id in verifiedTargets (checked above)
       const dsIds = verifiedTargets.map((id) => sourceByTarget.get(id)!);
-      console.log(
-        chalk.cyan(
-          `\nDispatching onboard-openneuro.yml for ${dsIds.length} dataset(s): ${dsIds.join(", ")}\n`,
-        ),
-      );
+      if (!options.json) {
+        console.log(
+          chalk.cyan(
+            `\nDispatching onboard-openneuro.yml for ${dsIds.length} dataset(s): ${dsIds.join(", ")}\n`,
+          ),
+        );
+      }
       const dispatch = await dispatchOpenNeuroImportWorkflow(dsIds);
       if (!dispatch.ok) {
         console.error(chalk.red(`Failed to dispatch workflow: ${dispatch.error}`));
@@ -3685,22 +3703,25 @@ Description:
         );
         process.exit(1);
       }
-      console.log(chalk.green("Workflow dispatched successfully"));
-      console.log(
-        chalk.dim(
-          "  Monitor at: https://github.com/nemarDatasets/.github/actions/workflows/onboard-openneuro.yml",
-        ),
-      );
-      console.log(chalk.dim("  Or run: gh run list --repo nemarDatasets/.github --limit 5"));
-      console.log(
-        chalk.dim(
-          "  Watch progress with: nemar admin recover status  /  nemar admin data-integrity-sweep --older-than 0",
-        ),
-      );
 
-      if (failedTargets.length > 0) {
-        console.log(chalk.yellow(`\n${failedTargets.length} target(s) skipped (verify failed):`));
-        for (const f of failedTargets) console.log(chalk.red(`  ${f.dataset_id}: ${f.error}`));
+      if (!options.json) {
+        console.log(chalk.green("Workflow dispatched successfully"));
+        console.log(
+          chalk.dim(
+            "  Monitor at: https://github.com/nemarDatasets/.github/actions/workflows/onboard-openneuro.yml",
+          ),
+        );
+        console.log(chalk.dim("  Or run: gh run list --repo nemarDatasets/.github --limit 5"));
+        console.log(
+          chalk.dim(
+            "  Watch progress with: nemar admin recover status  /  nemar admin data-integrity-sweep --older-than 0",
+          ),
+        );
+
+        if (failedTargets.length > 0) {
+          console.log(chalk.yellow(`\n${failedTargets.length} target(s) skipped (verify failed):`));
+          for (const f of failedTargets) console.log(chalk.red(`  ${f.dataset_id}: ${f.error}`));
+        }
       }
 
       if (options.json) {
@@ -3712,6 +3733,12 @@ Description:
           ),
         );
       }
+
+      // Non-zero exit on partial verify failure so shell scripts can chain
+      // safely (mirrors reindex/hed-sweep's convention); the JSON/human
+      // output above still prints either way, this only affects the exit
+      // code.
+      if (failedTargets.length > 0) process.exit(1);
     },
   );
 
