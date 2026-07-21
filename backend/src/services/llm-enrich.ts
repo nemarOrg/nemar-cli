@@ -242,6 +242,10 @@ export function seedFromBids(
   existing: NemarMetadataV2 | null,
   datasetId?: string,
   treePaths?: string[],
+  // Landing-URL base for the NEMAR IsDescribedBy related identifier (epic #923).
+  // Omitted -> prod nemar.org (via datasetLandingUrl default), so the pure seed
+  // stays env-agnostic; enrichDataset passes the resolved staging base.
+  landingBaseUrl?: string,
 ): NemarMetadataV2 {
   const seeded: NemarMetadataV2 = {
     version: "2.0",
@@ -375,7 +379,7 @@ export function seedFromBids(
         relation_type: "IsDescribedBy",
       });
     }
-    const nemarUrl = datasetLandingUrl(datasetId);
+    const nemarUrl = datasetLandingUrl(datasetId, landingBaseUrl);
     if (!relatedIds.some((r) => r.identifier === nemarUrl)) {
       relatedIds.push({
         identifier: nemarUrl,

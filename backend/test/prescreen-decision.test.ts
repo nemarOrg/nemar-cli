@@ -19,7 +19,7 @@ import {
   type PrescreenS3Presence,
   decidePrescreenOutcome,
   isDataShortageReason,
-} from "../src/routes/webhooks";
+} from "../src/routes/callbacks/prescreen";
 
 const present: PrescreenS3Presence = { totalSize: 478_659_462_060, objectCount: 642 };
 const capped: PrescreenS3Presence = { totalSize: 1_000, objectCount: undefined };

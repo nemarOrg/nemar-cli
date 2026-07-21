@@ -15,17 +15,17 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { chmodSync, existsSync, mkdirSync, readdirSync, rmSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { spawn } from "bun";
+import { isNonFastForwardPush } from "../src/lib/git-annex/clone-push";
 import {
   ANNEX_REMOTE_EXISTS_RE,
   annexRemoteExists,
   awsCredentialEnv,
-  extractWhereisKeyUrl,
   getAnnexS3Remotes,
   initOrEnableSpecialRemote,
-  isNonFastForwardPush,
   markInheritedOpenNeuroRemotesIgnored,
   selectAnnexS3Remote,
-} from "../src/lib/git-annex";
+} from "../src/lib/git-annex/s3-remote";
+import { extractWhereisKeyUrl } from "../src/lib/git-annex/transfer";
 
 describe("extractWhereisKeyUrl (#808 streaming whereis mapping)", () => {
   const run = (line: string): Map<string, string> => {

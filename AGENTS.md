@@ -80,6 +80,89 @@ s3://nemar/{datasetId}/
 s3://nemar/staging/pr-{n}/{datasetId}/objects/   # PR staging area
 ```
 
+### Staging environment (epic #923)
+
+A full parallel stack for exercising cross-cutting changes **before they touch production**.
+It is served by the existing dev worker (`nemar-api-dev`), not a new one.
+
+| Surface | Production | Staging |
+|---|---|---|
+| API | `api.nemar.org` | `api-test.nemar.org` |
+| Data plane | `data.nemar.org` | `data-test.nemar.org` |
+| Zarr | `zarr.nemar.org` | `zarr-test.nemar.org` |
+| Website | `ww2.nemar.org` (`nemar-website` Pages) | `test.nemar.org` (`nemar-website-test` Pages) |
+| S3 | `s3://nemar` | `s3://nemar-dev` |
+| D1 | `nemar-db` | `nemar-db-dev` |
+
+**Deploy:** `npx cfman wrangler --account sccn -- deploy --env dev -c backend/wrangler-sccn.toml`.
+This also provisions the custom domains and registers the dev cron. The website deploys from the
+`staging` branch of `nemarOrg/website`; note `wrangler pages deploy` REJECTS `-c <path>`, so the
+staging config must be moved into place as `wrangler.toml`.
+
+**Auth:** none of the production account keys work against dev. Use `TEST_ADMIN_API_KEY` from
+`test/.env.test` (it matches the `test-admin` token seeded by `scripts/seed-dev-db.sql`), with an
+isolated `NEMAR_CONFIG_DIR` so the real `~/.config/nemar` is never clobbered.
+
+#### DANGER: dev D1 shares production users and the GitHub org
+
+**Catalog policy (set 2026-07-20):** `nemar-db-dev` no longer mirrors production's dataset catalog.
+It was purged to the curated fixtures ONLY — the seven `xx0999NN` exemplars plus the private E2E
+dataset `nm099999` — and must stay that way. **Do NOT re-seed production `nm`/`ds` rows into dev
+D1;** the staging catalog is intentionally exemplars-only so both planes present a completely
+separate system. (Before the purge it carried ~190 real `nm` rows and ~30 legacy `ds` shadow rows
+that #837 had already dropped from prod; those were catalog-only phantoms with no data in
+`nemar-dev`.)
+
+The `users` table was NOT purged: it still holds ~609 real email addresses, and the dev worker
+holds a live `RESEND_API_KEY`. The `nemarDatasets` GitHub org is also SHARED between prod and dev
+(the org name is hardcoded, not env-scoped). So a dev-side job that selects users by a generic
+predicate can still email real people, and a cascade delete can still destroy a real repo.
+**The prod-safety fences below therefore remain load-bearing** — the dataset purge removed one
+blast-radius vector, not the reason the fences exist.
+
+The daily dev cron (`[env.dev.triggers]`, `0 4 * * *`) is governed by a fail-safe allowlist in
+`scheduled()`: **a new daily job is production-only BY DEFAULT.** Before adding one to the non-prod
+set, confirm it cannot email a real user, dispatch GitHub work against `nemarDatasets`, or mutate a
+real DOI or prod-bucket object. `scheduledCleanup` self-narrows outside production: sandbox deletion
+is pinned to the dev ephemeral band, and the staleness-email and import-recovery sections are
+production-only. `archiveRetrySweep` and `reconcileReservedVersionDois` refuse to run off-prod;
+the blocked-publication sweep is SCOPED to `xx09%` rather than disabled, because staging needs it.
+
+#### Dataset ID bands (all inside the 0-99999 cap; `xx900001` is INVALID)
+
+| Band | Range | Purpose | Cleanup |
+|---|---|---|---|
+| Prod sandbox | `xx000001`-`xx089999` | real user sandbox training | 14-day cron (prod) |
+| Dev ephemeral | `xx090001`-`xx099899` | throwaway dev/e2e | dev cron |
+| Dev exemplar fleet | `xx099900`-`xx099999` | curated persistent copies | **never** (`is_exemplar=1`) |
+
+#### Exemplar fleet
+
+Seven curated `xx0999NN` copies of real public datasets (`scripts/exemplar-fleet.json`), covering
+eeg / ieeg / emg / meg / multi-modal / HED, published with **sandbox** EZID DOIs
+(`10.5072/FK2`, never the production `10.82901` shoulder). Manage with
+`nemar admin exemplar create|status|remint-dois`.
+
+**They are permanent published fixtures, not ephemeral sandbox rows.** Their `active`/`public`
+state lives in D1 and is the source of truth for the staging catalog; it does not depend on the
+registrar. The cleanup cron never touches them (`is_exemplar=1` is filtered out AND `xx099900+`
+sits above the dev ephemeral band), and `reconcileReservedVersionDois` is prod-only, so nothing
+reverts their status. The one thing that lapses is EZID's **sandbox** shoulder, which purges DOIs
+after ~2 weeks — the D1 rows stay published regardless, so re-mint with `remint-dois` only when a
+resolvable test DOI actually matters.
+
+Two caveats when working with the clone tool: it reads `AWS_ACCESS_KEY_ID`/`SECRET` from the
+**ambient environment** (unlike `e2e-test.ts`, which fetches per-user S3 credentials from the
+backend), and local session credentials are short-lived, so export them immediately before each
+run; and creation is **not retry-safe** after a partial failure (issue #955) — recover with
+`nemar admin delete-dataset <id>` then recreate, not by re-running `create`.
+
+**Known gaps (cross-repo, `nemarDatasets/.github`):** `run-enrichment.yml` hardcodes
+`https://api.nemar.org/webhooks/llm-enrich`, so staging enrichment jobs fail against production's
+404 (the prod-safety gate working as designed; the CLI's inline reindex is a separate path and does
+work). `run-generate-archive.yml` still hardcodes `s3://nemar`, so archive generation must stay off
+for staging until it reads `s3_bucket`. See `.context/phase5-cross-repo-owner-deploys.md`.
+
 ### Core Components
 1. **Authentication System** - User registration, API tokens, admin approval workflow
 2. **Dataset Management** - BIDS validation, DataLad integration, upload/download

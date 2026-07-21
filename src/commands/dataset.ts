@@ -25,22 +25,19 @@ import chalk from "chalk";
 import { Command } from "commander";
 import inquirer from "inquirer";
 import ora from "ora";
+import { addCi } from "../lib/api/admin.js";
+import { getCurrentUser } from "../lib/api/auth.js";
+import { requestDownloadCredentials, requestUploadCredentials } from "../lib/api/data.js";
 import {
-  ApiError,
   type Dataset,
   type DatasetsListResponse,
   type NemarMetadataPayload,
   ORCID_REGEX,
-  PUBLICATION_STEPS,
-  addCi,
   approveAccessRequest,
   createDataset,
   denyAccessRequest,
-  errorDetail,
-  getCurrentUser,
   getDataset,
   getManifest,
-  getPublishStatus,
   getUserCiStatus,
   getVersionHistory,
   inviteCollaborator,
@@ -49,13 +46,16 @@ import {
   listDatasets,
   listManifestVersions,
   requestDatasetAccess,
-  requestDownloadCredentials,
-  requestPublication,
-  requestUploadCredentials,
-  resendPublishNotification,
   resolveSourceId,
   searchDatasets,
-} from "../lib/api.js";
+} from "../lib/api/datasets.js";
+import { ApiError, errorDetail } from "../lib/api/errors.js";
+import {
+  PUBLICATION_STEPS,
+  getPublishStatus,
+  requestPublication,
+  resendPublishNotification,
+} from "../lib/api/publish.js";
 import { isAwsCliAvailable } from "../lib/aws-cli.js";
 import { buildBidsFilterArgs, chooseGetFilter } from "../lib/bids-filter.js";
 import {
@@ -68,6 +68,7 @@ import {
   updateValidatorCache,
   validateBidsDataset,
 } from "../lib/bids-validator.js";
+import { requireAuth } from "../lib/cli-output.js";
 import { getConfig, isAuthenticated, isSandboxCompleted } from "../lib/config.js";
 import { NO_DESCRIPTION, YES_DESCRIPTION, YES_OPTION, confirm } from "../lib/confirm.js";
 import {
@@ -77,45 +78,53 @@ import {
   writeLocalConfig,
 } from "../lib/dataset-config.js";
 import {
-  acceptGitHubInvitation,
-  checkDownloadPrerequisites,
-  checkPrerequisites,
-  clearAnnexCredentials,
   cloneDataset,
-  collectFileManifest,
-  configureGitHubRemote,
-  configureLargefiles,
-  configureS3Remote,
-  copyToAnnexRemote,
-  countPendingDownload,
-  detectImportMarker,
-  dropFiles,
-  dropUnusedAnnexObjects,
-  enableS3Remote,
-  ensureGitAnnexInitialized,
-  ensureLocalMainBranch,
-  formatBytes,
-  getAnnexS3Remotes,
-  getCurrentBranch,
-  getDatasetData,
-  getDatasetIdFromRemote,
-  getLocalDatasetInfo,
-  gitAnnexAdd,
-  gitFetchOrigin,
-  gitMergeFastForward,
-  initDataset,
-  isGitAnnexDataset,
-  isWorkingTreeDirty,
   pushBranch,
   pushToGitHub,
+  saveDataset,
+} from "../lib/git-annex/clone-push.js";
+import {
+  acceptGitHubInvitation,
+  configureGitHubRemote,
+  verifyGitHubAuth,
+} from "../lib/git-annex/github.js";
+import {
+  configureLargefiles,
+  ensureGitAnnexInitialized,
+  gitAnnexAdd,
+  initDataset,
+  isGitAnnexDataset,
+} from "../lib/git-annex/init.js";
+import { checkDownloadPrerequisites, checkPrerequisites } from "../lib/git-annex/prereq.js";
+import {
+  detectImportMarker,
+  ensureLocalMainBranch,
+  getCurrentBranch,
+  getDatasetIdFromRemote,
+  getLocalDatasetInfo,
+  gitFetchOrigin,
+  gitMergeFastForward,
+  isWorkingTreeDirty,
   readLocalDatasetVersion,
   readRemoteHeadDatasetVersion,
   resolveUpstreamRef,
-  saveDataset,
+} from "../lib/git-annex/repo-state.js";
+import {
+  clearAnnexCredentials,
+  configureS3Remote,
+  enableS3Remote,
+  getAnnexS3Remotes,
   selectAnnexS3Remote,
   toS3Credentials,
-  verifyGitHubAuth,
-} from "../lib/git-annex.js";
+} from "../lib/git-annex/s3-remote.js";
+import {
+  collectFileManifest,
+  copyToAnnexRemote,
+  countPendingDownload,
+  dropFiles,
+  dropUnusedAnnexObjects,
+  getDatasetData,
+} from "../lib/git-annex/transfer.js";
 import {
   detectLicense,
   ensureLicenseFile,
@@ -132,7 +141,7 @@ import {
   openNeuroDatasetExists,
 } from "../lib/openneuro.js";
 import { checkPrerequisitesForCommand } from "../lib/prerequisites.js";
-import { DownloadProgressTracker } from "../lib/progress.js";
+import { DownloadProgressTracker, formatBytes } from "../lib/progress.js";
 import { promptForProvenance } from "../lib/provenance.js";
 import { bumpVersion, isValidStableVersion, parseVersion } from "../lib/semver.js";
 import type { UploadProgress } from "../lib/upload-progress.js";
@@ -147,6 +156,36 @@ import {
   readUploadProgress,
   writeUploadProgress,
 } from "../lib/upload-progress.js";
+import {
+  analyzeDataset,
+  collectAuthorOrcids,
+  collectProvenance,
+  resolveLicenseStep,
+} from "../lib/upload/enrich.js";
+import {
+  deployCiStep,
+  printUploadSuccess,
+  pushMetadata,
+  saveDatasetStep,
+  writeNemarMetadata,
+} from "../lib/upload/finalize.js";
+import {
+  prepareUploadProgress,
+  reconcileProgressWithDataset,
+  showUploadPlan,
+} from "../lib/upload/plan.js";
+import {
+  checkUploadPrerequisites,
+  validateBidsStep,
+  verifyGhCli,
+} from "../lib/upload/preflight.js";
+import {
+  acceptRepoInvitation,
+  configureRemotes,
+  createOrResumeDataset,
+  initializeAnnexDataset,
+  uploadDataToS3,
+} from "../lib/upload/transfer.js";
 
 export const datasetCommand = new Command("dataset").description("Dataset management").addHelpText(
   "after",
@@ -475,11 +514,7 @@ Examples:
     const config = getConfig();
 
     // Step 1: Check authentication
-    if (!isAuthenticated()) {
-      console.log(chalk.red("Error: Not authenticated"));
-      console.log("Run 'nemar auth login' first");
-      process.exit(1);
-    }
+    requireAuth();
 
     // Step 1b: Check sandbox training
     if (!isSandboxCompleted()) {
@@ -504,463 +539,30 @@ Examples:
     await checkPrerequisitesForCommand("upload");
 
     // Step 2: Check prerequisites
-    let spinner = ora("Checking prerequisites...").start();
-    const prereqs = await checkPrerequisites();
-
-    if (!prereqs.allPassed) {
-      spinner.fail("Prerequisites check failed");
-      console.log();
-      for (const error of prereqs.errors) {
-        console.log(chalk.red(`  - ${error}`));
-      }
-      process.exit(1);
-    }
-
-    spinner.succeed("Prerequisites check passed");
-    console.log(chalk.dim(`  git-annex ${prereqs.gitAnnex.version}`));
-    if (prereqs.githubSSH.username) {
-      console.log(chalk.dim(`  GitHub: ${prereqs.githubSSH.username}`));
-    }
-    console.log();
+    if ((await checkUploadPrerequisites()).status === "fail") process.exit(1);
 
     // Step 2b: Verify gh CLI authentication
-    spinner = ora("Verifying GitHub CLI authentication...").start();
-    const ghAuth = await verifyGitHubAuth(config.githubUsername);
-
-    if (!ghAuth.authenticated) {
-      spinner.fail("GitHub CLI not authenticated");
-      console.log(chalk.red(`  ${ghAuth.error}`));
-      console.log();
-      console.log("GitHub CLI is required for dataset uploads. Install and authenticate:");
-      console.log(chalk.cyan("  brew install gh       # or visit https://cli.github.com/"));
-      console.log(chalk.cyan("  gh auth login"));
-      process.exit(1);
-    }
-
-    if (config.githubUsername && !ghAuth.matches) {
-      spinner.warn("GitHub CLI user mismatch");
-      console.log(chalk.yellow(`  ${ghAuth.error}`));
-      console.log();
-      console.log(
-        "Your gh CLI is authenticated as a different GitHub account than your NEMAR account.",
-      );
-      console.log("This may cause issues with repository access. To fix:");
-      console.log(chalk.cyan(`  gh auth login    # Login as ${config.githubUsername}`));
-      console.log();
-      console.log(
-        chalk.yellow(
-          "WARNING: If upload fails with permission errors, this mismatch is the likely cause.",
-        ),
-      );
-      console.log();
-      // Continue with warning; don't block (user may have valid reason)
-    } else {
-      spinner.succeed(`GitHub CLI authenticated as ${ghAuth.username}`);
-    }
+    if ((await verifyGhCli(config)).status === "fail") process.exit(1);
 
     // Step 3: BIDS Validation (unless skipped)
-    if (!options.skipValidation) {
-      spinner = ora("Validating BIDS dataset...").start();
-
-      // Check for dataset_description.json
-      const descPath = resolve(absolutePath, "dataset_description.json");
-      if (!existsSync(descPath)) {
-        spinner.fail("Not a valid BIDS dataset");
-        console.log(chalk.red("Missing required file: dataset_description.json"));
-        process.exit(1);
-      }
-
-      // Check Deno for validation
-      const deno = await checkDenoInstalled();
-      if (!deno.installed) {
-        spinner.fail("Deno is required for BIDS validation");
-        console.log();
-        console.log(chalk.red("Error: Deno is not installed"));
-        console.log();
-        console.log("The BIDS validator requires Deno runtime to run.");
-        console.log("Install Deno with one of these commands:");
-        console.log();
-        console.log(chalk.cyan("  # macOS/Linux (curl)"));
-        console.log("  curl -fsSL https://deno.land/install.sh | sh");
-        console.log();
-        console.log(chalk.cyan("  # macOS (Homebrew)"));
-        console.log("  brew install deno");
-        console.log();
-        console.log(chalk.cyan("  # Windows (PowerShell)"));
-        console.log("  irm https://deno.land/install.ps1 | iex");
-        console.log();
-        console.log("Learn more: https://docs.deno.com/runtime/getting_started/installation/");
-        console.log();
-        console.log(
-          chalk.dim("To skip validation (not recommended): nemar dataset upload --skip-validation"),
-        );
-        process.exit(1);
-      }
-      try {
-        const result = await validateBidsDataset(absolutePath, { prune: true });
-        if (!result.valid) {
-          spinner.fail("Dataset has validation errors");
-          console.log();
-          console.log(formatValidationResult(result));
-          console.log();
-          console.log(chalk.yellow("Fix the errors above before uploading."));
-          console.log(chalk.dim("Or use --skip-validation to upload anyway (not recommended)."));
-          process.exit(1);
-        }
-        spinner.succeed(`Dataset is valid BIDS (${result.warningCount} warnings)`);
-      } catch (error) {
-        spinner.fail("Validation failed");
-        console.log(chalk.red((error as Error).message));
-        process.exit(1);
-      }
-      console.log();
-    }
+    if ((await validateBidsStep(absolutePath, options)).status === "fail") process.exit(1);
 
     // Step 4: Collect file manifest and show upload plan
-    spinner = ora("Analyzing dataset files...").start();
-
-    // Read dataset_description.json once (used for Name fallback and co-author ORCIDs)
-    let bidsDescription: Record<string, unknown> = {};
-    try {
-      const descPath = resolve(absolutePath, "dataset_description.json");
-      bidsDescription = JSON.parse(readFileSync(descPath, "utf-8")) as Record<string, unknown>;
-    } catch (err: unknown) {
-      if ((err as NodeJS.ErrnoException).code !== "ENOENT") {
-        console.log(
-          chalk.yellow(
-            `Warning: Could not read dataset_description.json: ${(err as Error).message}`,
-          ),
-        );
-      }
-    }
-
-    // Use explicit --name flag, then BIDS Name from dataset_description.json, then directory name
-    const datasetName =
-      options.name ||
-      (typeof bidsDescription.Name === "string" ? bidsDescription.Name : null) ||
-      basename(absolutePath);
-    const manifest = await collectFileManifest(absolutePath);
-    spinner.succeed(
-      `Found ${manifest.files.length} files (${manifest.dataFiles} data, ${manifest.metadataFiles} metadata)`,
-    );
+    const { datasetName, manifest, bidsDescription } = await analyzeDataset(absolutePath, options);
 
     // Step 4b: Collect co-author ORCIDs (skip if metadata already exists from prior run)
-    // Check v2 first (.nemar/metadata.json), fall back to v1 (nemar_metadata.json)
-    let coAuthorEnrichment: NemarMetadataPayload | undefined;
-    const existingNemarMetaV2 = resolve(absolutePath, ".nemar", "metadata.json");
-    const existingNemarMetaV1 = resolve(absolutePath, "nemar_metadata.json");
-    if (existsSync(existingNemarMetaV2)) {
-      try {
-        coAuthorEnrichment = JSON.parse(readFileSync(existingNemarMetaV2, "utf-8"));
-        console.log(
-          chalk.dim("  Using existing .nemar/metadata.json (author ORCIDs from prior run)"),
-        );
-      } catch (err) {
-        console.log(
-          chalk.yellow(
-            `  Warning: Could not read .nemar/metadata.json: ${err instanceof Error ? err.message : err}. Will re-collect author information.`,
-          ),
-        );
-      }
-    } else if (existsSync(existingNemarMetaV1)) {
-      try {
-        coAuthorEnrichment = JSON.parse(readFileSync(existingNemarMetaV1, "utf-8"));
-        console.log(
-          chalk.dim("  Using existing nemar_metadata.json (author ORCIDs from prior run)"),
-        );
-      } catch (err) {
-        console.log(
-          chalk.yellow(
-            `  Warning: Could not read nemar_metadata.json: ${err instanceof Error ? err.message : err}. Will re-collect author information.`,
-          ),
-        );
-      }
-    }
-
-    if (!coAuthorEnrichment && !options.skipOrcid && process.stdin.isTTY) {
-      const rawAuthors = bidsDescription.Authors;
-      const authorList = Array.isArray(rawAuthors)
-        ? rawAuthors.filter((a): a is string => typeof a === "string")
-        : [];
-
-      if (authorList.length > 0) {
-        try {
-          // Get uploader's ORCID from profile
-          let uploaderOrcid: string | undefined;
-          let uploaderUsername: string | undefined;
-          try {
-            const user = await getCurrentUser();
-            uploaderOrcid = user.orcid || undefined;
-            uploaderUsername = user.username;
-          } catch (userErr) {
-            console.log(chalk.dim(`  Could not fetch profile: ${errorDetail(userErr)}`));
-          }
-
-          console.log();
-          console.log(chalk.cyan("Authors found:"), authorList.join(" | "));
-
-          // Auto-match uploader ORCID (v2 format with affiliations array)
-          const authors: Record<
-            string,
-            { orcid?: string; affiliations?: Array<{ name: string }> }
-          > = {};
-          let uploaderMatchedAuthor: string | undefined;
-          if (uploaderOrcid && uploaderUsername) {
-            const lowerName = uploaderUsername.toLowerCase();
-            const match = authorList.find((a) => a.toLowerCase().includes(lowerName));
-            if (match) {
-              authors[match] = { orcid: uploaderOrcid };
-              uploaderMatchedAuthor = match;
-              console.log(
-                `  Your ORCID (from profile): ${chalk.green(uploaderOrcid)} (matched to "${match}")`,
-              );
-            }
-          }
-
-          // Auto-discover ORCIDs from referenced DOIs
-          try {
-            const { discoverOrcidsFromReferencedDois } = await import(
-              "../../backend/src/services/doi-orcid-discovery.js"
-            );
-            const spinner = ora("Looking up author ORCIDs from referenced publications...").start();
-            const orcidResult = await discoverOrcidsFromReferencedDois(bidsDescription, authors);
-            const count = Object.keys(orcidResult.discoveries).length;
-            if (count > 0) {
-              spinner.succeed(`Found ${count} ORCID(s) from referenced DOIs`);
-              for (const [name, d] of Object.entries(orcidResult.discoveries)) {
-                console.log(
-                  `  ${chalk.green(d.orcid)} -> "${name}" (from ${d.sourceDoi}, ${d.confidence} match)`,
-                );
-              }
-              const { confirmOrcids } = await inquirer.prompt([
-                {
-                  type: "confirm",
-                  name: "confirmOrcids",
-                  message: "Accept these auto-discovered ORCIDs?",
-                  default: true,
-                },
-              ]);
-              if (confirmOrcids) {
-                for (const [name, d] of Object.entries(orcidResult.discoveries)) {
-                  authors[name] = {
-                    ...authors[name],
-                    orcid: d.orcid,
-                    ...(d.affiliations && { affiliations: d.affiliations }),
-                  };
-                }
-              }
-            } else {
-              spinner.info("No ORCIDs found from referenced DOIs");
-            }
-          } catch (discoverErr) {
-            console.log(
-              chalk.yellow(`  Could not auto-discover ORCIDs: ${errorDetail(discoverErr)}`),
-            );
-          }
-
-          // Prompt for each co-author's ORCID
-          for (const author of authorList) {
-            if (author === uploaderMatchedAuthor) continue;
-            if (authors[author]?.orcid) continue; // skip auto-discovered
-
-            const { orcid } = await inquirer.prompt([
-              {
-                type: "input",
-                name: "orcid",
-                message: `ORCID for "${author}" (Enter to skip):`,
-                validate: (input: string) => {
-                  if (!input) return true;
-                  return ORCID_REGEX.test(input) || "Invalid ORCID format (XXXX-XXXX-XXXX-XXXX)";
-                },
-              },
-            ]);
-
-            if (orcid) {
-              const entry: { orcid: string; affiliations?: Array<{ name: string }> } = { orcid };
-              const { affiliation } = await inquirer.prompt([
-                {
-                  type: "input",
-                  name: "affiliation",
-                  message: `  Affiliation for "${author}" (optional):`,
-                },
-              ]);
-              if (affiliation) entry.affiliations = [{ name: affiliation }];
-              authors[author] = entry;
-            }
-          }
-
-          if (Object.keys(authors).length > 0) {
-            coAuthorEnrichment = { version: "2.0", authors };
-
-            // Write immediately so resumed uploads don't re-prompt
-            try {
-              const nemarMetaDir = resolve(absolutePath, ".nemar");
-              if (!existsSync(nemarMetaDir)) {
-                mkdirSync(nemarMetaDir, { recursive: true });
-              }
-              const nemarMetaPath = resolve(nemarMetaDir, "metadata.json");
-              writeFileSync(nemarMetaPath, JSON.stringify(coAuthorEnrichment, null, 2));
-              console.log(chalk.dim("  Saved .nemar/metadata.json with author ORCIDs"));
-            } catch (writeErr) {
-              console.log(
-                chalk.yellow(
-                  `  Warning: Could not save .nemar/metadata.json: ${errorDetail(writeErr)}`,
-                ),
-              );
-            }
-          }
-          console.log();
-        } catch (orcidErr) {
-          if (orcidErr instanceof ApiError) {
-            console.log(chalk.yellow(`  Could not fetch profile: ${orcidErr.message}`));
-          } else {
-            console.log(chalk.yellow(`  Could not collect ORCIDs: ${errorDetail(orcidErr)}`));
-          }
-          console.log(chalk.dim("  Continuing without author enrichment."));
-        }
-      }
-    }
+    const coAuthorEnrichment = await collectAuthorOrcids(absolutePath, options, bidsDescription);
 
     // Step 4c: License detection and enforcement
-    let resolvedLicense: string | undefined;
-    if (process.stdin.isTTY && !options.skipValidation /* non-interactive guard */) {
-      const detected = detectLicense(absolutePath);
-
-      if (detected.spdxId) {
-        console.log();
-        console.log(
-          chalk.cyan("License detected:"),
-          chalk.bold(detected.spdxId),
-          chalk.dim(
-            `(from ${detected.source === "dataset_description" ? "dataset_description.json" : "LICENSE file"})`,
-          ),
-        );
-
-        if (!isResearchCompatible(detected.spdxId)) {
-          console.log(
-            chalk.yellow(
-              `  Warning: "${detected.spdxId}" is not in the list of known research-compatible licenses.`,
-            ),
-          );
-        }
-
-        const { keepLicense } = await inquirer.prompt<{ keepLicense: boolean }>([
-          {
-            type: "confirm",
-            name: "keepLicense",
-            message: `Use "${detected.spdxId}" as the dataset license?`,
-            default: true,
-          },
-        ]);
-
-        if (keepLicense) {
-          resolvedLicense = detected.spdxId;
-        } else {
-          resolvedLicense = await promptForLicense(detected.spdxId);
-        }
-      } else {
-        console.log();
-        if (detected.source === "license_file") {
-          console.log(
-            chalk.yellow(
-              "A LICENSE file was found but the license could not be identified automatically.",
-            ),
-          );
-        } else {
-          console.log(chalk.yellow("No license found in this dataset."));
-        }
-        console.log(chalk.dim("A license is required to publish on NEMAR."));
-        resolvedLicense = await promptForLicense();
-      }
-
-      // Apply the resolved license back to dataset_description.json if it differs
-      try {
-        const descPath = resolve(absolutePath, "dataset_description.json");
-        if (existsSync(descPath)) {
-          const desc = JSON.parse(readFileSync(descPath, "utf-8")) as Record<string, unknown>;
-          if (desc.License !== resolvedLicense) {
-            updateLicenseInDescription(absolutePath, resolvedLicense);
-            console.log(
-              chalk.dim(`  Updated dataset_description.json License -> ${resolvedLicense}`),
-            );
-          }
-        }
-      } catch (licErr) {
-        console.log(
-          chalk.yellow(
-            `  Warning: Could not update license in dataset_description.json: ${errorDetail(licErr)}`,
-          ),
-        );
-      }
-
-      // Ensure LICENSE file exists
-      const created = ensureLicenseFile(absolutePath, resolvedLicense);
-      if (created) {
-        console.log(chalk.dim(`  Created LICENSE file (${resolvedLicense})`));
-      }
-      console.log();
-    }
+    const resolvedLicense = await resolveLicenseStep(absolutePath, options);
 
     // Step 4d: Data provenance
-    if (process.stdin.isTTY && !options.skipValidation && resolvedLicense) {
-      const provenance = await promptForProvenance(resolvedLicense);
+    await collectProvenance(absolutePath, options, resolvedLicense);
 
-      // Update dataset_description.json SourceDatasets field for derived data
-      if (
-        provenance.isDerived &&
-        provenance.sourceDatasets &&
-        provenance.sourceDatasets.length > 0
-      ) {
-        try {
-          const descPath = resolve(absolutePath, "dataset_description.json");
-          if (existsSync(descPath)) {
-            const desc = JSON.parse(readFileSync(descPath, "utf-8")) as Record<string, unknown>;
-            const existingSources = Array.isArray(desc.SourceDatasets) ? desc.SourceDatasets : [];
-            const newSources = provenance.sourceDatasets.map((s) => s.identifier);
-            // Merge without duplicates
-            const merged = Array.from(new Set([...(existingSources as string[]), ...newSources]));
-            desc.SourceDatasets = merged;
-            writeFileSync(descPath, `${JSON.stringify(desc, null, 2)}\n`);
-            console.log(
-              chalk.dim(
-                `  Updated dataset_description.json SourceDatasets (${merged.length} source(s))`,
-              ),
-            );
-          }
-        } catch (srcErr) {
-          console.log(
-            chalk.yellow(`  Warning: Could not update SourceDatasets: ${errorDetail(srcErr)}`),
-          );
-        }
-        console.log();
-      }
-    }
-
-    // Check for existing local config (resume scenario)
-    const existingConfig = readLocalConfig(absolutePath);
-
-    console.log();
-    if (existingConfig) {
-      console.log(chalk.bold.yellow("Resume Upload:"));
-      console.log(`  Dataset ID: ${chalk.cyan(existingConfig.dataset_id)}`);
-      console.log(`  Last attempt: ${existingConfig.last_upload_at || existingConfig.created_at}`);
-    } else {
-      console.log(chalk.bold("Upload Plan:"));
-    }
-    console.log(`  Name: ${datasetName}`);
-    console.log(`  Path: ${absolutePath}`);
-    console.log(`  Files: ${manifest.files.length}`);
-    console.log(`  Size: ${formatBytes(manifest.totalSize)}`);
-    console.log(`  Data files: ${manifest.dataFiles} (will be uploaded to S3)`);
-    console.log(`  Metadata files: ${manifest.metadataFiles} (will be stored in git)`);
-    console.log(`  Parallel jobs: ${options.jobs}`);
-    console.log();
-
-    // Dry run mode
-    if (options.dryRun) {
-      console.log(chalk.yellow("Dry run mode - no changes made"));
-      return;
-    }
+    // Step 4e: Show plan (resume banner or fresh) and honor --dry-run
+    const planResult = showUploadPlan(absolutePath, datasetName, manifest, options);
+    if (planResult.status === "stop") return;
+    const { existingConfig } = planResult.value;
 
     // Step 5: Confirm with user
     const confirmResult = await confirm(
@@ -975,503 +577,71 @@ Examples:
 
     console.log();
 
-    // Only request presigned URLs for data files
-    const dataFiles = manifest.files.filter((f) => f.type === "data");
+    const {
+      dataFiles,
+      uploadProgress: loadedProgress,
+      filesToUpload,
+    } = prepareUploadProgress(absolutePath, manifest, options);
 
-    // Handle --restart: clear any existing progress
-    if (options.restart) {
-      clearUploadProgress(absolutePath);
-      console.log(chalk.dim("  Upload progress cleared (--restart)"));
-      console.log();
-    }
+    // Step 6: Create new dataset or resume the existing one
+    const created = await createOrResumeDataset(
+      absolutePath,
+      options,
+      datasetName,
+      dataFiles,
+      existingConfig,
+    );
+    if (created.status === "fail") process.exit(1);
+    const datasetInfo = created.value;
 
-    // Load existing upload progress (if any)
-    let uploadProgress: UploadProgress | null = options.restart
-      ? null
-      : readUploadProgress(absolutePath);
-
-    if (uploadProgress) {
-      const summary = getProgressSummary(uploadProgress);
-      console.log(chalk.bold.cyan("Upload Progress:"));
-      console.log(
-        `  Files: ${summary.uploaded}/${summary.total} uploaded, ${summary.failed} failed, ${summary.pending} pending`,
-      );
-      if (summary.completedSteps.length > 0) {
-        console.log(`  Completed steps: ${summary.completedSteps.join(", ")}`);
-      }
-      console.log();
-    }
-
-    // Determine which files need uploading
-    const filesToUpload = uploadProgress
-      ? getFilesNeedingUpload(uploadProgress, dataFiles)
-      : dataFiles;
-
-    let datasetInfo: {
-      dataset_id: string;
-      ssh_url: string;
-      s3_prefix: string;
-      github_url: string;
-      upload_urls: Record<string, string>;
-      s3_config: {
-        bucket: string;
-        region: string;
-        public_url: string;
-      };
-    };
-
-    // Check if this is a resume (existing local config was read above)
-    const isResume = existingConfig !== null;
-
-    if (isResume) {
-      // Step 6: Resume existing dataset upload
-      spinner = ora(`Resuming upload for ${existingConfig.dataset_id}...`).start();
-
-      try {
-        // Verify dataset still exists on backend (throws ApiError if not found)
-        await getDataset(existingConfig.dataset_id);
-
-        // Presigned URLs are requested adaptively in Step 9 (not upfront)
-        datasetInfo = {
-          dataset_id: existingConfig.dataset_id,
-          ssh_url: existingConfig.ssh_url,
-          s3_prefix: existingConfig.s3_prefix,
-          github_url: existingConfig.github_url,
-          upload_urls: {},
-          s3_config: existingConfig.s3_config,
-        };
-
-        spinner.succeed(`Resuming upload: ${datasetInfo.dataset_id}`);
-      } catch (error) {
-        spinner.fail("Failed to resume upload");
-        if (error instanceof ApiError) {
-          console.log(chalk.red(`  ${error.message}`));
-          if (error.statusCode === 404) {
-            console.log(
-              chalk.yellow("  The dataset may have been deleted. Try uploading as a new dataset."),
-            );
-            console.log(chalk.dim(`  Remove ${absolutePath}/.nemar to start fresh.`));
-          }
-        } else {
-          console.log(chalk.red(`  ${(error as Error).message}`));
-        }
-        process.exit(1);
-      }
-    } else {
-      // Step 6: Create new dataset in backend with file manifest
-      spinner = ora("Creating dataset in NEMAR...").start();
-
-      try {
-        const response = await createDataset({
-          name: datasetName,
-          description: options.description,
-          files: dataFiles.map((f) => ({ path: f.path, size: f.size, type: f.type })),
-        });
-
-        datasetInfo = {
-          dataset_id: response.dataset.dataset_id,
-          ssh_url: response.dataset.ssh_url,
-          s3_prefix: response.dataset.s3_prefix,
-          github_url: response.dataset.github_url,
-          upload_urls: response.upload_urls || {},
-          s3_config: response.s3_config,
-        };
-
-        // Save local config for potential resume
-        const localConfig: LocalDatasetConfig = {
-          dataset_id: datasetInfo.dataset_id,
-          github_url: datasetInfo.github_url,
-          ssh_url: datasetInfo.ssh_url,
-          s3_prefix: datasetInfo.s3_prefix,
-          s3_config: datasetInfo.s3_config,
-          created_at: new Date().toISOString(),
-        };
-        writeLocalConfig(absolutePath, localConfig);
-
-        if (response.resumed) {
-          spinner.succeed(`Resumed existing dataset: ${datasetInfo.dataset_id}`);
-        } else {
-          spinner.succeed(`Dataset created: ${datasetInfo.dataset_id}`);
-
-          // Wait for IAM policy propagation (AWS is eventually consistent)
-          // This initial wait helps reduce retry attempts during upload
-          await new Promise((resolve) => setTimeout(resolve, 10000));
-        }
-      } catch (error) {
-        spinner.fail("Failed to create dataset");
-        if (error instanceof ApiError) {
-          console.log(chalk.red(`  ${error.message}`));
-        } else {
-          console.log(chalk.red(`  ${(error as Error).message}`));
-        }
-        process.exit(1);
-      }
-    }
-
-    // Validate progress file matches current dataset (discard stale progress)
-    if (uploadProgress && uploadProgress.dataset_id !== datasetInfo.dataset_id) {
-      console.log(chalk.yellow("  Progress file is for a different dataset; starting fresh."));
-      clearUploadProgress(absolutePath);
-      uploadProgress = null;
-    }
+    let uploadProgress = reconcileProgressWithDataset(
+      absolutePath,
+      loadedProgress,
+      datasetInfo.dataset_id,
+    );
 
     // Step 6b: Accept GitHub invitation
-    spinner = ora("Accepting GitHub repository invitation...").start();
-
-    // Extract repo full name from github_url (e.g., "https://github.com/nemarDatasets/nm000123")
-    // Validate URL format: must be a valid GitHub URL with owner/repo pattern
-    const repoMatch = datasetInfo.github_url?.match(
-      /github\.com\/([a-zA-Z0-9_.-]+\/[a-zA-Z0-9_.-]+)/,
-    );
-    const repoFullName = repoMatch ? repoMatch[1].replace(/\.git$/, "") : null;
-
-    if (!repoFullName) {
-      spinner.fail("Invalid GitHub repository URL from backend");
-      console.log(chalk.red(`  Received: ${datasetInfo.github_url || "(empty)"}`));
-      console.log(chalk.red("  Expected format: https://github.com/owner/repo"));
-      console.log();
-      console.log("This may indicate a backend issue. Please contact support.");
-      process.exit(1);
-    }
-
-    const inviteResult = await acceptGitHubInvitation(repoFullName);
-    if (inviteResult.accepted) {
-      if (inviteResult.alreadyCollaborator) {
-        spinner.succeed("Already a collaborator on this repository");
-      } else {
-        spinner.succeed("GitHub invitation accepted");
-      }
-    } else {
-      spinner.warn("Could not auto-accept invitation");
-      console.log(chalk.yellow(`  ${inviteResult.error}`));
-      console.log();
-      console.log("You may need to accept the invitation manually:");
-      console.log(chalk.cyan(`  https://github.com/${repoFullName}/invitations`));
-      console.log();
-      // Continue anyway - user can accept manually
-    }
+    if ((await acceptRepoInvitation(datasetInfo)).status === "fail") process.exit(1);
 
     // Step 7: Initialize git-annex dataset
-    spinner = ora("Initializing git-annex dataset...").start();
-
     // Use NEMAR user identity for all commits (including initial dataset creation)
     const author =
       config.username && config.email ? { name: config.username, email: config.email } : undefined;
+    if ((await initializeAnnexDataset(absolutePath, author)).status === "fail") process.exit(1);
 
-    const isExistingDataset = await isGitAnnexDataset(absolutePath);
-    if (!isExistingDataset) {
-      const createResult = await initDataset(absolutePath, { author });
-      if (!createResult.success) {
-        spinner.fail("Failed to initialize git-annex dataset");
-        console.log(chalk.red(`  ${createResult.error}`));
-        process.exit(1);
-      }
-    }
-
-    // Ensure git-annex is initialized (handles both new and existing datasets)
-    const gitAnnexResult = await ensureGitAnnexInitialized(absolutePath);
-    if (!gitAnnexResult.success) {
-      spinner.fail("Failed to initialize git-annex");
-      console.log(chalk.red(`  ${gitAnnexResult.error}`));
-      process.exit(1);
-    }
-
-    // Configure largefiles pattern
-    const largefilesResult = await configureLargefiles(absolutePath);
-    if (!largefilesResult.success) {
-      spinner.warn("Could not configure largefiles pattern");
-      console.log(chalk.dim(`  ${largefilesResult.error}`));
-    }
-
-    spinner.succeed("git-annex dataset initialized");
-
-    // Inform user that the adjusted branch name is normal
-    const postInitBranch = await getCurrentBranch(absolutePath);
-    if (postInitBranch?.startsWith("adjusted/")) {
-      console.log(chalk.dim(`  Note: Your local branch is "${postInitBranch}".`));
-      console.log(
-        chalk.dim("  This is normal; it keeps files unlocked so you can work with them directly."),
-      );
-      console.log(chalk.dim('  Pushes will go to the "main" branch on GitHub automatically.'));
-    }
-
-    // Ensure .nemar/ is gitignored (internal config, not dataset content)
-    try {
-      const gitignorePath = resolve(absolutePath, ".gitignore");
-      let gitignoreContent = "";
-      if (existsSync(gitignorePath)) {
-        gitignoreContent = readFileSync(gitignorePath, "utf-8");
-      }
-      if (!gitignoreContent.includes(".nemar/")) {
-        const newContent = gitignoreContent
-          ? `${gitignoreContent.trimEnd()}\n.nemar/\n`
-          : ".nemar/\n";
-        writeFileSync(gitignorePath, newContent);
-      }
-    } catch (gitignoreErr) {
-      console.log(
-        chalk.yellow(`  Warning: Could not update .gitignore: ${errorDetail(gitignoreErr)}`),
-      );
-    }
-
-    // Step 8: Configure GitHub remote (auto-detects best auth method)
-    spinner = ora("Configuring GitHub remote...").start();
-
-    const githubResult = await configureGitHubRemote(absolutePath, datasetInfo.ssh_url);
-    if (!githubResult.success) {
-      spinner.fail("Failed to configure GitHub remote");
-      console.log(chalk.red(`  ${githubResult.error}`));
-      process.exit(1);
-    }
-
-    spinner.succeed("GitHub remote configured");
-
-    // Step 8b: Ensure local branch is named "main"
-    const branchOk = await ensureLocalMainBranch(absolutePath, { yes: options.yes });
-    if (!branchOk) {
+    // Step 8: Configure GitHub remote + ensure local branch is "main"
+    if ((await configureRemotes(absolutePath, datasetInfo, options)).status === "fail") {
       process.exit(1);
     }
 
     // Step 9: Upload data files to S3 via git-annex S3 special remote
-    // Initialize progress tracking if not already present
-    if (!uploadProgress) {
-      uploadProgress = initUploadProgress(absolutePath, datasetInfo.dataset_id, dataFiles);
-    } else {
-      // Add any new files to progress tracking
-      for (const file of dataFiles) {
-        if (!uploadProgress.files[file.path]) {
-          uploadProgress.files[file.path] = {
-            status: "pending",
-            size: file.size,
-            updated_at: new Date().toISOString(),
-          };
-        }
-      }
-      writeUploadProgress(absolutePath, uploadProgress);
-    }
+    const uploaded = await uploadDataToS3(
+      absolutePath,
+      options,
+      dataFiles,
+      filesToUpload,
+      uploadProgress,
+      datasetInfo,
+    );
+    if (uploaded.status === "fail") process.exit(1);
+    uploadProgress = uploaded.value;
 
-    if (!isStepCompleted(uploadProgress, "s3_upload")) {
-      if (filesToUpload.length > 0) {
-        // Get STS credentials for S3 access
-        spinner = ora("Requesting upload credentials...").start();
-        let creds: Awaited<ReturnType<typeof requestUploadCredentials>>;
-        try {
-          creds = await requestUploadCredentials(datasetInfo.dataset_id);
-          spinner.succeed("Upload credentials received (2h expiry)");
-        } catch (credError) {
-          spinner.fail(`Could not get upload credentials: ${errorDetail(credError)}`);
-          console.log(chalk.red("  Upload credentials are required for S3 access."));
-          console.log(chalk.dim("  Re-run the command to retry."));
-          process.exit(1);
-        }
-
-        // Configure S3 special remote (idempotent: enables existing if already created)
-        spinner = ora("Configuring S3 remote...").start();
-        const s3Result = await configureS3Remote(
-          absolutePath,
-          {
-            name: "nemar-s3",
-            bucket: creds.s3.bucket,
-            prefix: `${datasetInfo.dataset_id}/objects`,
-            region: creds.s3.region,
-            publicUrl: datasetInfo.s3_config.public_url,
-          },
-          toS3Credentials(creds.credentials),
-        );
-
-        if (!s3Result.success) {
-          spinner.fail(`Failed to configure S3 remote: ${s3Result.error}`);
-          console.log(chalk.dim("  Re-run the command to retry."));
-          process.exit(1);
-        }
-        spinner.succeed("S3 remote configured");
-
-        // Track data files with git-annex before uploading
-        spinner = ora("Tracking data files with git-annex...").start();
-        const addResult = await gitAnnexAdd(absolutePath);
-        if (!addResult.success) {
-          spinner.fail(`Failed to track data files: ${addResult.error}`);
-          process.exit(1);
-        }
-        spinner.succeed("Data files tracked by git-annex");
-
-        // Upload via git-annex S3 remote (handles key-based layout + tracking)
-        spinner = ora(`Uploading ${filesToUpload.length} data files to S3...`).start();
-        const uploadResult = await copyToAnnexRemote(
-          absolutePath,
-          "nemar-s3",
-          Number.parseInt(options.jobs, 10),
-          toS3Credentials(creds.credentials),
-        );
-
-        // Always clear cached STS creds so downloads use publicurl
-        await clearAnnexCredentials(absolutePath);
-
-        if (!uploadResult.success) {
-          spinner.fail(`S3 upload failed: ${uploadResult.error}`);
-          console.log(chalk.yellow("Re-run the same command to resume uploading."));
-          process.exit(1);
-        }
-
-        for (const file of filesToUpload) {
-          markFileUploaded(uploadProgress, file.path);
-        }
-        writeUploadProgress(absolutePath, uploadProgress);
-        spinner.succeed(`Uploaded ${uploadResult.filesCopied} data files to S3`);
-      } else {
-        console.log(chalk.dim("No data files to upload to S3"));
-      }
-
-      markStepCompleted(uploadProgress, "s3_upload");
-      writeUploadProgress(absolutePath, uploadProgress);
-    } else {
-      console.log(chalk.dim("  S3 upload already completed (skipping)"));
-    }
-
-    // Step 10b: Ensure .bidsignore includes NEMAR-specific paths
-    // (.nemar/metadata.json is already written at Step 4b; this just updates bidsignore)
-    if (!isStepCompleted(uploadProgress, "metadata_write")) {
-      if (coAuthorEnrichment) {
-        try {
-          // Write .nemar/metadata.json if not already on disk (e.g. old CLI resume)
-          const nemarMetaDir = resolve(absolutePath, ".nemar");
-          const nemarMetaPath = resolve(nemarMetaDir, "metadata.json");
-          if (!existsSync(nemarMetaPath)) {
-            if (!existsSync(nemarMetaDir)) {
-              mkdirSync(nemarMetaDir, { recursive: true });
-            }
-            writeFileSync(nemarMetaPath, JSON.stringify(coAuthorEnrichment, null, 2));
-          }
-
-          // Ensure .bidsignore includes .nemar/ directory
-          const bidsignorePath = resolve(absolutePath, ".bidsignore");
-          let bidsignoreContent = "";
-          if (existsSync(bidsignorePath)) {
-            bidsignoreContent = readFileSync(bidsignorePath, "utf-8");
-          }
-          if (!bidsignoreContent.includes(".nemar/")) {
-            const newContent = bidsignoreContent
-              ? `${bidsignoreContent.trimEnd()}\n.nemar/\n`
-              : ".nemar/\n";
-            writeFileSync(bidsignorePath, newContent);
-          }
-          console.log(chalk.dim("  Updated .bidsignore for NEMAR metadata"));
-        } catch (writeErr) {
-          console.log(
-            chalk.yellow(`  Warning: Could not update .bidsignore: ${errorDetail(writeErr)}`),
-          );
-          console.log(chalk.dim("  Upload will continue without author enrichment."));
-        }
-      }
-
-      markStepCompleted(uploadProgress, "metadata_write");
-      writeUploadProgress(absolutePath, uploadProgress);
-    } else {
-      console.log(chalk.dim("  Metadata write already completed (skipping)"));
-    }
+    // Step 10b: Ensure .nemar metadata is on disk and .bidsignore covers it
+    writeNemarMetadata(absolutePath, coAuthorEnrichment, uploadProgress);
 
     // Step 11: Save dataset changes
-    if (!isStepCompleted(uploadProgress, "dataset_save")) {
-      spinner = ora("Saving dataset changes...").start();
-
-      const saveResult = await saveDataset(absolutePath, "Initial NEMAR dataset upload", author);
-      if (!saveResult.success) {
-        writeUploadProgress(absolutePath, uploadProgress);
-        spinner.fail("Failed to save dataset");
-        console.log(chalk.red(`  ${saveResult.error}`));
-        console.log();
-        console.log(chalk.yellow("Re-run the same command to resume from this step."));
-        process.exit(1);
-      }
-
-      spinner.succeed("Dataset changes saved");
-      markStepCompleted(uploadProgress, "dataset_save");
-      writeUploadProgress(absolutePath, uploadProgress);
-    } else {
-      console.log(chalk.dim("  Dataset save already completed (skipping)"));
+    if ((await saveDatasetStep(absolutePath, author, uploadProgress)).status === "fail") {
+      process.exit(1);
     }
 
     // Step 12: Push metadata to GitHub
-    if (!isStepCompleted(uploadProgress, "github_push")) {
-      spinner = ora("Pushing metadata to GitHub...").start();
-
-      const githubPushResult = await pushToGitHub(absolutePath);
-      if (!githubPushResult.success) {
-        writeUploadProgress(absolutePath, uploadProgress);
-        spinner.fail("Failed to push to GitHub");
-        console.log(chalk.red(`  ${githubPushResult.error}`));
-        console.log();
-        console.log(chalk.yellow("Re-run the same command to resume from this step."));
-        process.exit(1);
-      }
-
-      if (githubPushResult.warning) {
-        spinner.warn("Metadata pushed to GitHub (with warning)");
-        console.log(chalk.yellow(`  ${githubPushResult.warning}`));
-      } else {
-        spinner.succeed("Metadata pushed to GitHub");
-      }
-
-      markStepCompleted(uploadProgress, "github_push");
-      writeUploadProgress(absolutePath, uploadProgress);
-    } else {
-      console.log(chalk.dim("  GitHub push already completed (skipping)"));
-    }
+    if ((await pushMetadata(absolutePath, uploadProgress)).status === "fail") process.exit(1);
 
     // Step 12b: Deploy BIDS validation CI
-    if (!isStepCompleted(uploadProgress, "ci_deploy")) {
-      spinner = ora("Setting up BIDS validation CI...").start();
-      try {
-        await addCi(datasetInfo.dataset_id);
-        spinner.succeed("BIDS validation CI configured");
-      } catch (error) {
-        if (error instanceof ApiError && error.statusCode === 403) {
-          spinner.info("CI workflow will be configured by an admin");
-        } else {
-          const msg = error instanceof Error ? error.message : String(error);
-          spinner.warn(`Could not configure CI: ${msg}`);
-          console.log(
-            chalk.dim(
-              `  An admin can add it later with: nemar admin ci add ${datasetInfo.dataset_id}`,
-            ),
-          );
-        }
-      }
-
-      markStepCompleted(uploadProgress, "ci_deploy");
-      writeUploadProgress(absolutePath, uploadProgress);
-    } else {
-      console.log(chalk.dim("  CI deploy already completed (skipping)"));
-    }
-
-    // Note: Branch protection is NOT applied here for private datasets.
-    // Protection is applied when creating a DOI (admin doi create) or making public.
+    await deployCiStep(absolutePath, datasetInfo.dataset_id, uploadProgress);
 
     // Step 13: Success!
-    // Clear progress file and update last upload timestamp
-    clearUploadProgress(absolutePath);
-    updateLastUpload(absolutePath);
-
-    console.log();
-    console.log(chalk.green.bold("Upload complete!"));
-    console.log();
-    console.log(`  Dataset ID: ${chalk.cyan(datasetInfo.dataset_id)}`);
-    console.log(`  GitHub: ${chalk.cyan(datasetInfo.github_url)}`);
-    console.log();
-    console.log(chalk.dim("To download this dataset:"));
-    console.log(chalk.dim(`  nemar dataset download ${datasetInfo.dataset_id}`));
-    console.log();
-    console.log(
-      chalk.yellow(
-        "Note: This dataset is private. Only the owner and designated collaborators can",
-      ),
-    );
-    console.log(
-      chalk.yellow("download it, and only through the NEMAR CLI (not direct git-annex commands)."),
-    );
-    console.log(
-      chalk.yellow("After publishing, the data will be publicly available for everyone."),
-    );
+    printUploadSuccess(absolutePath, datasetInfo);
   });
 
 function formatProgressBar(
@@ -2708,11 +1878,7 @@ Examples:
         yes?: boolean;
       },
     ) => {
-      if (!isAuthenticated()) {
-        console.log(chalk.red("Error: Not authenticated"));
-        console.log("Run 'nemar auth login' first");
-        process.exit(1);
-      }
+      requireAuth();
 
       await checkPrerequisitesForCommand("release");
 
@@ -3106,11 +2272,7 @@ Examples:
         yes?: boolean;
       },
     ) => {
-      if (!isAuthenticated()) {
-        console.log(chalk.red("Error: Not authenticated"));
-        console.log("Run 'nemar auth login' first");
-        process.exit(1);
-      }
+      requireAuth();
 
       await checkPrerequisitesForCommand("update");
 
@@ -3555,11 +2717,7 @@ Examples:
   $ nemar dataset request-access nm000104`,
   )
   .action(async (datasetId) => {
-    if (!isAuthenticated()) {
-      console.log(chalk.red("Error: Not authenticated"));
-      console.log("Run 'nemar auth login' first");
-      process.exit(1);
-    }
+    requireAuth();
 
     const spinner = ora(`Requesting access to ${datasetId}...`).start();
 
@@ -3614,11 +2772,7 @@ Examples:
   $ nemar dataset invite johndoe nm000104`,
   )
   .action(async (username, datasetId) => {
-    if (!isAuthenticated()) {
-      console.log(chalk.red("Error: Not authenticated"));
-      console.log("Run 'nemar auth login' first");
-      process.exit(1);
-    }
+    requireAuth();
 
     const spinner = ora(`Inviting ${username} to ${datasetId}...`).start();
 
@@ -3654,11 +2808,7 @@ Examples:
   $ nemar dataset collaborators nm000104 --json`,
   )
   .action(async (datasetId, options) => {
-    if (!isAuthenticated()) {
-      console.log(chalk.red("Error: Not authenticated"));
-      console.log("Run 'nemar auth login' first");
-      process.exit(1);
-    }
+    requireAuth();
 
     const spinner = ora(`Fetching collaborators for ${datasetId}...`).start();
 
@@ -3736,11 +2886,7 @@ Examples:
   $ nemar dataset access list nm000104 --status approved`,
   )
   .action(async (datasetId, options) => {
-    if (!isAuthenticated()) {
-      console.log(chalk.red("Error: Not authenticated"));
-      console.log("Run 'nemar auth login' first");
-      process.exit(1);
-    }
+    requireAuth();
 
     const status = options.status as string;
     if (!["pending", "approved", "denied"].includes(status)) {
@@ -3820,11 +2966,7 @@ Examples:
   $ nemar dataset access approve johndoe nm000104`,
   )
   .action(async (username, datasetId) => {
-    if (!isAuthenticated()) {
-      console.log(chalk.red("Error: Not authenticated"));
-      console.log("Run 'nemar auth login' first");
-      process.exit(1);
-    }
+    requireAuth();
 
     const spinner = ora(`Approving ${username} for ${datasetId}...`).start();
     try {
@@ -3857,11 +2999,7 @@ Examples:
   $ nemar dataset access deny johndoe nm000104`,
   )
   .action(async (username, datasetId) => {
-    if (!isAuthenticated()) {
-      console.log(chalk.red("Error: Not authenticated"));
-      console.log("Run 'nemar auth login' first");
-      process.exit(1);
-    }
+    requireAuth();
 
     const spinner = ora(`Denying ${username} for ${datasetId}...`).start();
     try {
@@ -3913,11 +3051,7 @@ Examples:
   $ nemar dataset publish status nm000104     # Check request status`,
   )
   .action(async (datasetId) => {
-    if (!isAuthenticated()) {
-      console.log(chalk.red("Error: Not authenticated"));
-      console.log("Run 'nemar auth login' first");
-      process.exit(1);
-    }
+    requireAuth();
 
     const spinner = ora(`Requesting publication for ${datasetId}...`).start();
 
@@ -3984,11 +3118,7 @@ Examples:
   $ nemar dataset publish status nm000104`,
   )
   .action(async (datasetId) => {
-    if (!isAuthenticated()) {
-      console.log(chalk.red("Error: Not authenticated"));
-      console.log("Run 'nemar auth login' first");
-      process.exit(1);
-    }
+    requireAuth();
 
     const spinner = ora(`Checking publication status for ${datasetId}...`).start();
 
@@ -4051,8 +3181,9 @@ Examples:
       }
 
       if (result.status === "approving") {
-        // Source of truth is `PUBLICATION_STEPS` in src/lib/api.ts, which
-        // mirrors the backend orchestrator. Showing fewer steps here than
+        // Source of truth is `PUBLICATION_STEPS` in shared/publication-steps.ts
+        // (re-exported by src/lib/api/publish.ts), shared with the backend
+        // orchestrator. Showing fewer steps here than
         // the backend actually runs (the legacy list missed
         // enrichment_check, version_doi, sync_nemar) made the status
         // display claim "all steps complete" while the backend was still
@@ -4118,11 +3249,7 @@ Examples:
   $ nemar dataset publish resend nm000104`,
   )
   .action(async (datasetId) => {
-    if (!isAuthenticated()) {
-      console.log(chalk.red("Error: Not authenticated"));
-      console.log("Run 'nemar auth login' first");
-      process.exit(1);
-    }
+    requireAuth();
 
     const spinner = ora(`Resending notification for ${datasetId}...`).start();
 
@@ -4926,11 +4053,7 @@ Examples:
   $ nemar dataset ci nm000104     # Explicit dataset ID`,
   )
   .action(async (datasetId) => {
-    if (!isAuthenticated()) {
-      console.log(chalk.red("Error: Not authenticated"));
-      console.log("Run 'nemar auth login' first");
-      process.exit(1);
-    }
+    requireAuth();
 
     // Resolve dataset ID
     let resolvedId = datasetId;
@@ -5007,11 +4130,7 @@ Examples:
   $ nemar dataset manifest -d nm000104        # Explicit dataset ID`,
   )
   .action(async (version, options) => {
-    if (!isAuthenticated()) {
-      console.log(chalk.red("Error: Not authenticated"));
-      console.log("Run 'nemar auth login' first");
-      process.exit(1);
-    }
+    requireAuth();
 
     // Resolve dataset ID
     let datasetId = options.dataset;

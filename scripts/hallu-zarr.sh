@@ -37,7 +37,7 @@
 # driver's --clean), so the serving copy always mirrors the current dataset.
 #
 # Crontab (sibling of hallu-sync, offset to :30):
-#   30 * * * * /path/to/nemar-cli/scripts/hallu-zarr.sh >> /data/projects/yahya/nemar/.nm-zarr-cron.log 2>&1
+#   30 * * * * /path/to/nemar-cli/scripts/hallu-zarr.sh >> /mnt/local/zarr-state/.nm-zarr-cron.log 2>&1
 #
 # Prereqs: curl, jq, git, git-annex, nemar CLI, aws, uv, python3 in PATH.
 ################################################################################
@@ -51,18 +51,30 @@ done
 export PATH
 
 # --- Config (environment-overridable) ----------------------------------------
-# WORK_DIR is the EPHEMERAL per-recording scratch and MUST be fast local disk:
-# the driver streams each annex blob here and builds the temp Zarr store before
-# upload, and N parallel workers hammer it at once. On Hallu that is a dedicated
-# NVMe (/mnt/local, ~950 GB) -- NOT the NFS /data/projects (which would serialize
-# the parallel writers). STATE_DIR (queue db, venv, driver clone) stays on the
-# persistent NFS so it survives reboots; only the hot I/O path is on NVMe.
-WORK_DIR="${ZARR_WORK_DIR:-/mnt/local/zarr-scratch}"
-STATE_DIR="${ZARR_STATE_DIR:-/data/projects/yahya/nemar}"
-# Recordings convert in parallel (ProcessPoolExecutor in the driver). Conversion
-# is CPU-bound (resample + zstd); Hallu has 32 cores. Cap so N concurrent
-# multi-GB recordings stay within NVMe scratch + RAM (5-10 is the sweet spot).
-JOBS="${ZARR_JOBS:-6}"
+# ZARR_BASE is the SINGLE local drive this pipeline lives on. Both the hot
+# per-recording scratch AND the persistent state (queue db, venv, driver clone,
+# logs) hang off it, so the whole pipeline touches exactly one filesystem and has
+# NO network (NFS) dependency: NFS made every Python import, SQLite lock, and stat
+# a network round-trip -- too much tension/traffic on the hot path, and
+# SQLite-over-NFS locking is fragile. All state here is rebuildable (venv/clone
+# via setup(); the queue via `reconcile`) and the real outputs live in S3, so
+# single-drive-local is the right durability trade. Moving to another machine is
+# a one-line change here (or set ZARR_BASE in the environment / crontab).
+#
+# WORK_DIR is the EPHEMERAL per-recording scratch: the driver streams each annex
+# blob here and N parallel workers build temp Zarr stores before upload, so it
+# MUST be fast local disk. Only this subtree is wiped between recordings; the
+# sibling STATE_DIR is never touched by the cleanup.
+ZARR_BASE="${ZARR_BASE:-/mnt/local}"
+WORK_DIR="${ZARR_WORK_DIR:-${ZARR_BASE}/zarr-scratch}"
+STATE_DIR="${ZARR_STATE_DIR:-${ZARR_BASE}/zarr-state}"
+# Max parallel workers = the driver's ProcessPoolExecutor CPU cap. Default to all
+# cores: the driver's RAM-admission control (nemarDatasets/.github#67) dispatches a
+# recording only while the SUM of in-flight projected peaks fits usable RAM, so a
+# high worker count adds CPU parallelism WITHOUT OOM risk or shrinking the
+# per-recording budget (small EEG packs many-wide; large MEG self-limits). Override
+# with ZARR_JOBS.
+JOBS="${ZARR_JOBS:-$(nproc 2>/dev/null || echo 8)}"
 DRIVER_REPO="${ZARR_DRIVER_REPO:-${STATE_DIR}/dotgithub}"   # clone of nemarDatasets/.github
 VENV_DIR="${ZARR_VENV_DIR:-${STATE_DIR}/.zarr-venv}"
 BIOSIGIO_SPEC="${BIOSIGIO_SPEC:-biosigio[zarr,meg]>=1.1.2}"
@@ -80,6 +92,9 @@ LOCK_FILE="${ZARR_LOCK_FILE:-${STATE_DIR}/.nm-zarr.lock}"
 # NEMAR_WEBHOOK_TOKEN may be exported by the environment; the callback is skipped
 # when it is empty (the viewer reads index.json, not D1, so the callback is only
 # D1 bookkeeping).
+# Load secrets (e.g. NEMAR_WEBHOOK_TOKEN) from a chmod-600 file beside this
+# script, so the token lives neither in crontab nor in any repo.
+[[ -f "${BASH_SOURCE%/*}/.zarr-secrets.env" ]] && source "${BASH_SOURCE%/*}/.zarr-secrets.env"
 NEMAR_WEBHOOK_TOKEN="${NEMAR_WEBHOOK_TOKEN:-}"
 
 ONLY_DATASET=""
@@ -138,7 +153,24 @@ convert_dataset() {
   local id="$1" version="${2:-}"
   local dir="$WORK_DIR/$id"
   local cb="$WORK_DIR/$id.callback.json"
+  # Reset BEFORE any early return so the drain loop never reads an unbound (set -u
+  # aborts) or stale value: a clone-failure early-return below must NOT inherit
+  # the previous dataset's `deterministic` and get mis-marked terminal. Set from
+  # the callback further down on a real conversion run.
+  LAST_DETERMINISTIC=false
   log "[$id] start (version=${version:-?})"
+
+  # In-progress signal so the observability dashboard's "Processing" tile reflects
+  # live conversions (the cron has no Actions dispatch to set zarr_status=pending;
+  # #774). Best-effort: a failed/skipped POST never blocks the conversion -- the
+  # terminal ready/failed callback below is the authoritative state.
+  if [[ -n "$NEMAR_WEBHOOK_TOKEN" ]]; then
+    curl -sS --connect-timeout 10 --max-time 30 -X POST "$CALLBACK_URL" \
+      -H "Content-Type: application/json" \
+      -H "X-Webhook-Token: ${NEMAR_WEBHOOK_TOKEN}" \
+      --data "{\"dataset_id\":\"$id\",\"status\":\"converting\"}" >>"$LOG_FILE" 2>&1 \
+      || err "[$id] converting callback failed (non-fatal)"
+  fi
 
   # Metadata-only clone (git history + annex pointers, no content -- seconds, not
   # the whole 18 GB). The driver then STREAMS each recording's annex blob from
@@ -161,11 +193,20 @@ convert_dataset() {
     --bucket "$S3_BUCKET" --region "$AWS_REGION" --clean \
     --jobs "$JOBS" --callback-out "$cb" >>"$LOG_FILE" 2>&1 || rc=$?
 
-  if [[ "$rc" -eq 0 && -f "$cb" && -n "$NEMAR_WEBHOOK_TOKEN" ]]; then
-    curl -sS --connect-timeout 10 --max-time 30 -X POST "$CALLBACK_URL" \
-      -H "Content-Type: application/json" \
-      -H "X-Webhook-Token: ${NEMAR_WEBHOOK_TOKEN}" \
-      --data @"$cb" >>"$LOG_FILE" 2>&1 || err "[$id] callback failed (non-fatal)"
+  # Read the driver's classification BEFORE the scratch is reclaimed. The
+  # converter now writes the callback on EVERY outcome (incl. a total failure),
+  # carrying `deterministic` = all failures are typed DATA failures. The drain
+  # loop only consults LAST_DETERMINISTIC in the failure (rc!=0) branch: a
+  # partial success returns rc=0 -> `done` regardless of this value (#774).
+  if [[ -f "$cb" ]]; then
+    LAST_DETERMINISTIC="$(jq -r '.deterministic // false' "$cb" 2>/dev/null || echo false)"
+    # POST on every outcome (not just rc==0) so the backend records failures too.
+    if [[ -n "$NEMAR_WEBHOOK_TOKEN" ]]; then
+      curl -sS --connect-timeout 10 --max-time 30 -X POST "$CALLBACK_URL" \
+        -H "Content-Type: application/json" \
+        -H "X-Webhook-Token: ${NEMAR_WEBHOOK_TOKEN}" \
+        --data @"$cb" >>"$LOG_FILE" 2>&1 || err "[$id] callback failed (non-fatal)"
+    fi
   fi
 
   # EPHEMERAL: always reclaim the scratch copy, success or failure.
@@ -208,6 +249,9 @@ while :; do
   id="${line%%$'\t'*}"; version="${line#*$'\t'}"
   if convert_dataset "$id" "$version"; then
     qpy done "$id" "$version"
+  elif [[ "$LAST_DETERMINISTIC" == "true" ]]; then
+    # Every recording is an unreadable DATA failure -- terminal, no retry (#774).
+    qpy fail "$id" "all recordings failed to convert (typed data failures; see ${LOG_FILE})" --deterministic
   else
     qpy fail "$id" "conversion failed (see ${LOG_FILE})"
   fi

@@ -26,40 +26,26 @@ import { Command } from "commander";
 import inquirer from "inquirer";
 import ora from "ora";
 import {
-  ApiError,
-  type Dataset,
   type EmailPreferences,
   type HedSweepBatchResponse,
-  type NemarMetadataPayload,
-  ORCID_REGEX,
-  type PublishProgressInfo,
   type ReindexBulkOptions,
   type ReindexBulkResponse,
   type ReindexFilter,
   type ReindexOptions,
   type ReindexResponse,
-  type StepResult,
   type SummaryVersionCoverage,
   addCi,
-  applyS3Lock,
-  approvePublication,
   approveUser,
   bulkDeleteDatasets,
   changeUserRole,
   changeVisibility,
   createConceptDoi,
-  createNotice,
+  createExemplar,
   deleteDataset,
-  deleteNotice,
-  denyPublication,
   dispatchManifest,
   enforceBulk,
   enforceDataset,
-  errorDetail,
-  finalizeDataset,
   getCiStatus,
-  getDataset,
-  getDatasetFiles,
   getDoiInfo,
   getEmailPreferences,
   getFleetDrift,
@@ -67,24 +53,40 @@ import {
   getSummaryCoverage,
   hedSweep,
   hedSweepReset,
-  listAdminNotices,
-  listDatasets,
-  listPublishRequests,
   listUsers,
   publishDataset,
   reindexBulk,
   reindexDataset,
+  remintExemplarDois,
   retryImport,
   revalidateDataset,
   revokeUser,
   rollbackImport,
   sendBroadcast,
-  submitEnrichment,
   syncCi,
   updateDoi,
   updateEmailPreferences,
   validateCi,
-} from "../lib/api.js";
+} from "../lib/api/admin.js";
+import { applyS3Lock, getDatasetFiles } from "../lib/api/data.js";
+import {
+  type Dataset,
+  type NemarMetadataPayload,
+  ORCID_REGEX,
+  finalizeDataset,
+  getDataset,
+  listDatasets,
+  submitEnrichment,
+} from "../lib/api/datasets.js";
+import { ApiError, errorDetail } from "../lib/api/errors.js";
+import { createNotice, deleteNotice, listAdminNotices } from "../lib/api/notices.js";
+import {
+  type PublishProgressInfo,
+  type StepResult,
+  approvePublication,
+  denyPublication,
+  listPublishRequests,
+} from "../lib/api/publish.js";
 import { getConfig, isAuthenticated } from "../lib/config.js";
 import {
   type ConfirmOptions,
@@ -97,15 +99,14 @@ import {
 } from "../lib/confirm.js";
 import { CLI_LIVE_DATASETS, selectRevalidateTargets } from "../lib/fleet.js";
 import {
-  checkDownloadPrerequisites,
   cloneDataset,
   commitRevert,
   createRevertBranch,
-  formatBytes,
-  getVersionCommit,
-  listDatasetVersions,
   pushBranch,
-} from "../lib/git-annex.js";
+} from "../lib/git-annex/clone-push.js";
+import { checkDownloadPrerequisites } from "../lib/git-annex/prereq.js";
+import { getVersionCommit, listDatasetVersions } from "../lib/git-annex/repo-state.js";
+import { formatBytes } from "../lib/progress.js";
 
 /** Handle common error patterns in admin CLI commands */
 function handleCommandError(
@@ -1954,28 +1955,32 @@ publishCommand
     "after",
     `
 Description:
-  Approve a publication request and run the automated 15-step orchestrator
+  Approve a publication request and run the automated 16-step orchestrator
   to make the dataset publicly accessible with a permanent DOI.
 
   WARNING: This action is PERMANENT. Published datasets cannot be unpublished.
   Once a DOI is assigned, it is permanent and cannot be deleted.
 
-Orchestrator Steps:
+Orchestrator Steps (execution order; shared/publication-steps.ts):
    1. CI Check          - Verify BIDS validation passes, deploy workflows if missing
    2. Enrichment Check  - Verify metadata pipeline has run (warn-only, non-blocking)
-   3. Make Public       - Change GitHub repository visibility to public
-   4. S3 Public Read    - Grant public read access to S3 data
+   3. S3 Public Read    - Grant public read access to S3 data
+   4. Make Public       - Change GitHub repository visibility to public
    5. Tag Protection    - Enable tag protection rules
    6. Create DOI        - Create concept DOI via EZID (or Zenodo if configured)
    7. Update Metadata   - Update dataset metadata from BIDS description
    8. Update README     - Add DOI badge and citation info to README
    9. Create Tag        - Create version tag (e.g., v1.0.0)
   10. Create Release    - Create GitHub release from tag
-  11. Upload to Zenodo  - Upload dataset archive to Zenodo (if Zenodo provider)
+  11. Upload to Zenodo  - Legacy Zenodo upload (disabled; kept for step history)
   12. Publish DOI       - Make DOI public and findable (permanent, irreversible)
-  13. S3 Lock           - Enable S3 Object Lock (prevents data deletion)
-  14. Generate Archive  - Create downloadable zip archive
-  15. Notify User       - Send publication confirmation email
+  13. Version DOI       - Mint the version DOI for this release
+  14. S3 Lock           - Enable S3 Object Lock (prevents data deletion)
+  15. Sync NEMAR        - Legacy nemar.org sync (no-op, retired)
+  16. Notify User       - Send publication confirmation email
+
+  (Archive zip generation is not an orchestrator step; the version-DOI
+  workflow dispatches it separately.)
 
 Resume Capability:
   If a step fails, the orchestrator saves progress. Use --resume to retry
@@ -2007,19 +2012,19 @@ After Approval:
         ? `Resume publication of ${datasetId}`
         : `Approve and publish ${datasetId}`;
       console.log(chalk.cyan(`\n${action}\n`));
-      console.log("This will run the following 15-step orchestrator:");
+      console.log("This will run the following 16-step orchestrator:");
       console.log("   1. Check CI              9. Create version tag");
       console.log("   2. Enrichment check     10. Create GitHub release");
-      console.log("   3. Make repo public     11. Upload to Zenodo");
-      console.log("   4. S3 public read       12. Publish DOI (irreversible)");
-      console.log("   5. Tag protection       13. S3 Object Lock");
+      console.log("   3. S3 public read       11. Upload to Zenodo (no-op)");
+      console.log("   4. Make repo public     12. Publish DOI (irreversible)");
+      console.log("   5. Tag protection       13. Mint version DOI");
       console.log(
         options.sandbox
-          ? "   6. Create DOI (SANDBOX) 14. Generate archive"
-          : "   6. Create DOI           14. Generate archive",
+          ? "   6. Create DOI (SANDBOX) 14. S3 Object Lock"
+          : "   6. Create DOI           14. S3 Object Lock",
       );
-      console.log("   7. Update metadata      15. Notify user");
-      console.log("   8. Update README");
+      console.log("   7. Update metadata      15. Sync NEMAR (no-op)");
+      console.log("   8. Update README        16. Notify user");
       console.log();
 
       // Sandbox warning
@@ -2884,7 +2889,7 @@ adminCommand
       }
 
       // Default: dispatch GitHub Actions workflow on nemarDatasets/.github
-      const { runCommand } = await import("../lib/git-annex.js");
+      const { runCommand } = await import("../lib/git-annex/run-command.js");
 
       const idsStr = ids.join(",");
       console.log(chalk.cyan(`\nDispatching OpenNeuro import workflow for: ${idsStr}\n`));
@@ -3117,6 +3122,190 @@ importCommand
   });
 
 adminCommand.addCommand(importCommand);
+
+// ============================================================================
+// Exemplar staging fleet (epic #923, Phase 5)
+// ============================================================================
+
+const EXEMPLAR_ID_RE = /^xx0999\d{2}$/;
+const EXEMPLAR_SOURCE_ID_RE = /^(nm|on)\d{6}$/;
+
+/** Default location of the curated fleet spec, resolved relative to this
+ *  source file rather than cwd. Only present in a repo checkout (not
+ *  published to npm) — `--all` is a maintainer/CI tool, not an end-user one. */
+function defaultExemplarFleetPath(): string {
+  return join(import.meta.dir, "..", "..", "scripts", "exemplar-fleet.json");
+}
+
+const exemplarCommand = new Command("exemplar").description(
+  "Clone public nm/on datasets into staging exemplars (xx099900-xx099999)",
+);
+
+exemplarCommand
+  .command("create")
+  .description("Clone a public NEMAR dataset into a staging exemplar")
+  .argument("[xx-id]", "Exemplar dataset id (e.g., xx099900); omit with --all")
+  .option("--source <id>", "Source nm/on dataset id to clone (overrides the fleet file)")
+  .option("--all", "Clone every entry in the fleet file")
+  .option("--fleet-file <path>", "Path to the fleet JSON (default: scripts/exemplar-fleet.json)")
+  .option("--publish", "Request and approve publication after data lands (mints a sandbox DOI)")
+  .option("--include-derived", "Also copy zarr/, archives/, and records.json derived artifacts")
+  .action(
+    async (
+      xxId: string | undefined,
+      options: {
+        source?: string;
+        all?: boolean;
+        fleetFile?: string;
+        publish?: boolean;
+        includeDerived?: boolean;
+      },
+    ) => {
+      if (!requireAuth()) return;
+
+      const { cloneExemplar, loadExemplarFleet } = await import("../lib/exemplar-clone.js");
+      const fleetPath = options.fleetFile || defaultExemplarFleetPath();
+      const cloneOpts = { publish: options.publish, includeDerived: options.includeDerived };
+
+      if (options.all) {
+        if (xxId || options.source) {
+          console.error(chalk.red("--all cannot be combined with an xx-id or --source"));
+          process.exit(1);
+        }
+        let entries: Awaited<ReturnType<typeof loadExemplarFleet>>;
+        try {
+          entries = loadExemplarFleet(fleetPath);
+        } catch (err) {
+          console.error(chalk.red(`Failed to load fleet file: ${errorDetail(err)}`));
+          process.exit(1);
+        }
+
+        let failures = 0;
+        for (const entry of entries) {
+          if (entry.source_id === "nm000000") {
+            console.log(
+              chalk.yellow(`Skipping ${entry.xx_id}: placeholder source_id not yet finalized`),
+            );
+            continue;
+          }
+          try {
+            await cloneExemplar({ xxId: entry.xx_id, sourceId: entry.source_id, ...cloneOpts });
+          } catch (err) {
+            failures++;
+            console.error(chalk.red(`${entry.xx_id} failed: ${errorDetail(err)}`));
+          }
+        }
+        if (failures > 0) {
+          console.error(chalk.red(`\n${failures} of ${entries.length} fleet entries failed`));
+          process.exit(1);
+        }
+        return;
+      }
+
+      if (!xxId) {
+        console.error(chalk.red("An xx-id argument is required unless --all is passed"));
+        process.exit(1);
+      }
+      if (!EXEMPLAR_ID_RE.test(xxId)) {
+        console.error(chalk.red(`Invalid exemplar id "${xxId}". Expected xx099900-xx099999.`));
+        process.exit(1);
+      }
+
+      let sourceId = options.source;
+      if (!sourceId) {
+        try {
+          const entries = loadExemplarFleet(fleetPath);
+          sourceId = entries.find((e) => e.xx_id === xxId)?.source_id;
+        } catch (err) {
+          console.error(chalk.red(`Failed to load fleet file: ${errorDetail(err)}`));
+          process.exit(1);
+        }
+      }
+      if (!sourceId) {
+        console.error(
+          chalk.red(
+            `No source dataset for ${xxId}. Pass --source <nm/on id> or add it to the fleet file.`,
+          ),
+        );
+        process.exit(1);
+      }
+      if (!EXEMPLAR_SOURCE_ID_RE.test(sourceId)) {
+        console.error(chalk.red(`Invalid source id "${sourceId}". Expected an nm/on dataset id.`));
+        process.exit(1);
+      }
+
+      try {
+        await cloneExemplar({ xxId, sourceId, ...cloneOpts });
+      } catch (error) {
+        console.error(chalk.red(`\nExemplar clone failed: ${errorDetail(error)}`));
+        process.exit(1);
+      }
+    },
+  );
+
+exemplarCommand
+  .command("status")
+  .description("Show which fleet entries have been cloned and their current state")
+  .option("--fleet-file <path>", "Path to the fleet JSON (default: scripts/exemplar-fleet.json)")
+  .action(async (options: { fleetFile?: string }) => {
+    if (!requireAuth()) return;
+
+    const { loadExemplarFleet } = await import("../lib/exemplar-clone.js");
+    const fleetPath = options.fleetFile || defaultExemplarFleetPath();
+    let entries: Awaited<ReturnType<typeof loadExemplarFleet>>;
+    try {
+      entries = loadExemplarFleet(fleetPath);
+    } catch (err) {
+      console.error(chalk.red(`Failed to load fleet file: ${errorDetail(err)}`));
+      process.exit(1);
+    }
+
+    console.log(chalk.bold(`\nExemplar Fleet (${entries.length})\n`));
+    for (const entry of entries) {
+      try {
+        const dataset = await getDataset(entry.xx_id);
+        console.log(
+          `  ${entry.xx_id.padEnd(10)} ${entry.modality.padEnd(6)} <- ${entry.source_id.padEnd(10)} ${chalk.green(dataset.visibility)}  doi=${dataset.concept_doi ?? "none"}`,
+        );
+      } catch (err) {
+        if (err instanceof ApiError && err.statusCode === 404) {
+          console.log(
+            `  ${entry.xx_id.padEnd(10)} ${entry.modality.padEnd(6)} <- ${entry.source_id.padEnd(10)} ${chalk.dim("not created")}`,
+          );
+        } else {
+          console.log(
+            `  ${entry.xx_id.padEnd(10)} ${entry.modality.padEnd(6)} <- ${entry.source_id.padEnd(10)} ${chalk.red(`status check failed (${errorDetail(err)})`)}`,
+          );
+        }
+      }
+    }
+  });
+
+exemplarCommand
+  .command("remint-dois")
+  .description("Re-mint an exemplar's sandbox concept DOI (idempotent)")
+  .argument("<xx-id>", "Exemplar dataset id (e.g., xx099900)")
+  .action(async (xxId: string) => {
+    if (!requireAuth()) return;
+
+    const spinner = ora(`Re-minting DOIs for ${xxId}...`).start();
+    try {
+      const result = await remintExemplarDois(xxId);
+      spinner.succeed(`Re-minted ${result.concept_doi} (status: ${result.status})`);
+      for (const w of result.warnings ?? []) {
+        console.log(chalk.yellow(`  ${w}`));
+      }
+    } catch (err) {
+      handleCommandError(err, spinner, "Failed to re-mint exemplar DOIs", {
+        400: "Not an exemplar dataset",
+        403: "Exemplar DOI re-mint is disabled in production",
+        404: "Dataset not found",
+      });
+      process.exit(1);
+    }
+  });
+
+adminCommand.addCommand(exemplarCommand);
 
 // ============================================================================
 // Reindex (epic #417 phase 3): refresh enrichment + nemar.org sync +

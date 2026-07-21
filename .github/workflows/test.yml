@@ -56,10 +56,10 @@ jobs:
               - 'backend/src/middleware/webSession.ts'
               - 'backend/src/middleware/auth.ts'
               - 'backend/src/routes/auth-web.ts'
-              # admin.ts hosts the /admin/test-fixtures/seed-web-user
+              # admin/users.ts hosts the /admin/test-fixtures/seed-web-user
               # endpoint the passwordless suite depends on; if the
               # fixture changes alone, the suite must still run.
-              - 'backend/src/routes/admin.ts'
+              - 'backend/src/routes/admin/users.ts'
               - 'backend/src/db/migrations/0026_passwordless_auth.sql'
               - 'backend/src/db/migrations/0015_email_preferences.sql'
               - 'backend/src/db/migrations/0017_broadcast_emails.sql'
@@ -137,6 +137,10 @@ jobs:
             base="$(basename "$f")"
             case "$base" in
               e2e-sandbox.test.ts|e2e-upload.test.ts|zenodo-sandbox.test.ts|ezid.test.ts|ezid-sandbox.test.ts|auth-passwordless.test.ts) continue;;
+              # *.integration.test.ts hit external networks (e.g. live DataCite/
+              # Crossref) and are non-deterministic; they must NOT gate the pure
+              # (required, offline) tier or, via test-gate, the prod deploy.
+              *.integration.test.ts) continue;;
             esac
             if grep -Eq 'testRequest|TEST_API_URL|runCli\(' "$f"; then continue; fi
             files+=("$f")
@@ -195,6 +199,10 @@ jobs:
             base="$(basename "$f")"
             case "$base" in
               e2e-sandbox.test.ts|e2e-upload.test.ts|zenodo-sandbox.test.ts|ezid.test.ts|ezid-sandbox.test.ts|auth-passwordless.test.ts) continue;;
+              # *.integration.test.ts (external-network tests) run here, where
+              # --retry=2 --timeout 30000 lets a transient API hiccup retry
+              # instead of turning a required check red.
+              *.integration.test.ts) files+=("$f"); continue;;
             esac
             if grep -Eq 'testRequest|TEST_API_URL|runCli\(' "$f"; then files+=("$f"); fi
           done

@@ -244,7 +244,7 @@ export async function discoverOpenNeuroDatasets(opts?: {
  * entire un-imported backlog away (candidates -> 0, engine idle) -- the 2026-06-20
  * stall. Only a REAL managed `on######` mirror (owner != SYSTEM_USER_ID) means a
  * dataset is actually imported; the import bootstrap (POST /admin/datasets/import
- * in admin.ts) deletes the ds shadow when it creates the managed on###### row, so
+ * in routes/admin/imports.ts) deletes the ds shadow when it creates the managed on###### row, so
  * this never excludes a genuinely-imported dataset. Here every managed mirror
  * blocks re-import regardless of status, which is what we want.
  */

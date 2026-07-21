@@ -7,7 +7,7 @@
  */
 
 import { describe, expect, test } from "bun:test";
-import { validateImportStateBody } from "../src/routes/webhooks";
+import { validateImportStateBody } from "../src/routes/callbacks/import-state";
 
 const valid = {
   dataset_id: "on000001",

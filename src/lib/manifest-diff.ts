@@ -1,4 +1,4 @@
-import type { VersionManifest } from "./api.js";
+import type { VersionManifest } from "./api/datasets.js";
 
 export interface ManifestDiff {
   added: string[];

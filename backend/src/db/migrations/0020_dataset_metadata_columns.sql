@@ -3,9 +3,11 @@
 -- without parsing the enrichment_json blob, and keep D1 aligned with the
 -- nemar.org datapipeline tables that already carry these fields.
 --
--- Population happens in two places (see backend/src/routes/webhooks.ts):
---   1. /webhooks/llm-enrich  - on README/dataset_description.json/release pushes
---   2. syncToNemarAfterVersionDoi  - on version-DOI tag push
+-- Population happens in two places (paths current as of #905/#837):
+--   1. /webhooks/llm-enrich (routes/callbacks/llm-enrich.ts) - on README/
+--      dataset_description.json/release pushes
+--   2. refreshMetadataAfterVersionDoi (services/dataset-reindex.ts) - after
+--      a version DOI is published (replaced syncToNemarAfterVersionDoi, #837)
 -- Both call writeDatasetMetadataColumns() in dataset-metadata-columns.ts.
 --
 -- REAL is used for ages because BIDS allows fractional values (e.g., infants

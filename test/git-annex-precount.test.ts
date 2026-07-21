@@ -17,7 +17,7 @@ import {
 } from "node:fs";
 import { join } from "node:path";
 import { spawn } from "bun";
-import { countPendingDownload } from "../src/lib/git-annex";
+import { countPendingDownload } from "../src/lib/git-annex/transfer";
 
 const TMP_DIR = join(import.meta.dir, ".test-precount");
 

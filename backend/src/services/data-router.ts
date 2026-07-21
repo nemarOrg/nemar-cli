@@ -8,6 +8,10 @@
  * for the "latest" lookup.
  */
 
+// Single source of truth for the version canonicalizer + neuroschema version
+// (epic #896, #898). toVersionTag is re-exported below so existing importers
+// (routes/data.ts) keep working.
+import { NEUROSCHEMA_VERSION, toVersionTag } from "../../../shared/contract/index.js";
 import type {
   ContributorEntry,
   FundingReferenceEntry,
@@ -246,6 +250,10 @@ export async function buildRedirectUrl(args: {
 // raw S3 manifest, which hardcodes the same host (emit_manifest.py:bytes_url_for
 // on nemarDatasets/.github). Per-host fetchability is irrelevant: the presigned
 // `url` field is what dev/CLI flows fetch; bytes_url is the durable reference.
+// NOTE (epic #923): this lockstep is prod-only. buildBytesUrl now takes an
+// `origin` override; on staging it becomes data-test.nemar.org while
+// emit_manifest.py still emits data.nemar.org, so the two disagree for exemplars
+// (Phase 5 follow-up parameterizes emit_manifest.py).
 const DATA_NEMAR_ORIGIN = "https://data.nemar.org";
 
 /**
@@ -266,13 +274,22 @@ export function buildBytesUrl(args: {
   version: string;
   bidsPath: string;
   key: string;
+  /** Data-plane origin for annex-backed files (epic #923). Defaults to the prod
+   *  data host, so prod output stays byte-identical and in lockstep with the
+   *  build-time raw S3 manifest. On staging, passing resolveDataBaseOrigin(env) =
+   *  data-test.nemar.org makes dev-bucket-only datasets embed reachable links, but
+   *  it BREAKS that lockstep for exemplars: emit_manifest.py (nemarDatasets/.github)
+   *  still hardcodes data.nemar.org, so the git-committed raw manifest disagrees
+   *  with the served manifest.json (the served copy is authoritative on staging).
+   *  Parameterizing emit_manifest.py is a Phase 5 follow-up. */
+  origin?: string;
 }): string {
-  const { githubOrg, datasetId, version, bidsPath, key } = args;
+  const { githubOrg, datasetId, version, bidsPath, key, origin = DATA_NEMAR_ORIGIN } = args;
   const encoded = bidsPath.split("/").filter(Boolean).map(encodeURIComponent).join("/");
   if (key.startsWith("git:")) {
     return `https://raw.githubusercontent.com/${githubOrg}/${datasetId}/${version}/${encoded}`;
   }
-  return `${DATA_NEMAR_ORIGIN}/${datasetId}/${version}/${encoded}`;
+  return `${origin}/${datasetId}/${version}/${encoded}`;
 }
 
 // ===========================================================================
@@ -580,7 +597,7 @@ export interface NemarExtensionBlock {
 }
 
 export interface NeuroschemaDataset {
-  schema_version: "0.3.0";
+  schema_version: typeof NEUROSCHEMA_VERSION;
   doc_type: "dataset";
   dataset_id: string;
   name: string;
@@ -876,7 +893,7 @@ export function buildDatasetMetadata(input: {
   const latestVersionRow = versions[0] ?? null;
 
   return {
-    schema_version: "0.3.0",
+    schema_version: NEUROSCHEMA_VERSION,
     doc_type: "dataset",
     dataset_id: row.dataset_id,
     name: row.name,
@@ -987,17 +1004,12 @@ export interface VersionPickerEntry {
 }
 
 /**
- * Normalize a `dataset_versions.version` field to a `v`-prefixed tag.
- *
- * Older D1 rows store the bare version (e.g. `"1.0.0"`) while newer rows
- * store the tag form (`"v1.0.0"`). Tag form is the canonical wire shape
- * for the data.nemar.org route. Always coerce to tag form before
- * routing or comparing -- a missed coercion produces malformed URLs
- * (`/<id>/1.0.0/`) and breaks the tombstone walk's `indexOf` lookup.
+ * Re-export the canonical version canonicalizer so existing importers
+ * (routes/data.ts) keep their `from "../services/data-router"` import. The
+ * implementation now lives in shared/contract/version.ts, shared by both the
+ * catalog and data planes (epic #896, #898).
  */
-export function toVersionTag(raw: string): string {
-  return raw.startsWith("v") ? raw : `v${raw}`;
-}
+export { toVersionTag };
 
 export function renderIndexHtml(args: {
   datasetId: string;
@@ -1344,6 +1356,9 @@ export interface CatalogIndexRow {
   concept_doi: string | null;
   latest_version: string | null;
   latest_published_at: string | null;
+  /** Staging exemplar flag (epic #923). Admits an xx-prefixed id through the
+   *  public-catalog gate; never 1 in production. */
+  is_exemplar?: number | null;
 }
 
 export interface CatalogIndexEntry {
@@ -1378,11 +1393,15 @@ export interface CatalogIndexBuildResult {
  * the id into URL paths and `href=` attributes — a malformed id
  * slipping through here would produce a broken link or, in theory,
  * a markup injection vector.
+ *
+ * `opts.isExemplar` (epic #923) admits a staging exemplar xx id (is_exemplar=1,
+ * never present in production) through the xx block; all other guards still
+ * apply, including the shape check and the nm099999 test-dataset exclusion.
  */
-export function isPublicCatalogId(id: string): boolean {
+export function isPublicCatalogId(id: string, opts?: { isExemplar?: boolean }): boolean {
   if (!isValidDatasetId(id)) return false;
-  if (id.startsWith("xx")) return false;
   if (id === "nm099999") return false;
+  if (id.startsWith("xx") && !opts?.isExemplar) return false;
   return true;
 }
 
@@ -1407,7 +1426,7 @@ export function buildCatalogIndexPayload(args: {
   const droppedIds: string[] = [];
   const datasets: CatalogIndexEntry[] = args.rows
     .filter((r) => {
-      if (isPublicCatalogId(r.dataset_id)) return true;
+      if (isPublicCatalogId(r.dataset_id, { isExemplar: r.is_exemplar === 1 })) return true;
       droppedIds.push(r.dataset_id);
       return false;
     })
