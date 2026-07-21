@@ -19,9 +19,11 @@
 --   retry window.
 -- next_retry_at: earliest time the engine may re-dispatch (backoff), and also
 --   the earliest time a blocklisted row may be re-verified (slow re-check).
--- blocklisted / blocklist_reason: 1 = parked as upstream-inaccessible (or
---   undispatchable, e.g. no source_id); the engine stops dispatching and only
---   re-verifies on the slow cadence.
+-- blocklisted / blocklist_reason: 1 = parked as upstream-inaccessible (or, in
+--   principle, undispatchable for lack of a source_id -- defensive; source_id
+--   is TEXT NOT NULL and validated non-empty at every write path today, so
+--   that reason is not currently reachable); the engine stops dispatching and
+--   only re-verifies on the slow cadence.
 -- maintainer_notified_at: set when the OpenNeuro maintainer report email was
 --   actually sent (once); stays NULL while the flag-gated send is dry-run.
 -- integrity_checked_at: last time verifyImportS3 re-checked this row's S3

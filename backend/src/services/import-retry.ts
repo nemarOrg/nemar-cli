@@ -41,8 +41,12 @@ export const RETRY_WINDOW_MS = 14 * 24 * 60 * 60 * 1000;
  *  2-week window rather than falling silent. */
 const RETRY_BACKOFF_BASE_MS = 6 * 60 * 60 * 1000;
 const RETRY_BACKOFF_CAP_MS = 48 * 60 * 60 * 1000;
-/** Pace GitHub dispatches per tick -- avoids the secondary-rate-limit trap
- *  (memory: bulk_approval_rate_limit) when the backlog is large. */
+/** Pace GitHub dispatches per tick. GitHub's secondary rate limit (403) fires
+ *  on a burst of API calls in a short window regardless of the primary quota
+ *  headroom; a large retry backlog dispatching all at once would trip it
+ *  (and any red-CI fallout from that would show up as unrelated failures
+ *  elsewhere), so this caps how many onboard-openneuro dispatches one sweep
+ *  tick can fire, leaving the rest for the next tick. */
 export const MAX_RECOVERY_DISPATCHES_PER_TICK = 3;
 /** Slow re-verify cadence for blocklisted rows -- cheap (S3 listing only, no
  *  GitHub dispatch), so this can be gentler than the active retry backoff. */
@@ -68,7 +72,11 @@ export type RetryDecision =
  *   1. Verified complete now (upstream came back, a prior dispatch landed
  *      after the row was queried) -> recover, no dispatch.
  *   2. No source_id at all -> nothing can ever be dispatched -> blocklist
- *      immediately (`no_source`), independent of the window.
+ *      immediately (`no_source`), independent of the window. Defensive: not
+ *      currently reachable given import_jobs.source_id is TEXT NOT NULL
+ *      (migration 0044) and every write path validates it non-empty; kept so
+ *      the function still has a sane, terminal answer if that constraint
+ *      ever weakens instead of dispatching with an empty source_id.
  *   3. Still incomplete, inside the window, or not an upstream-inaccessible
  *      failure -> dispatch (bump recovery_attempts, backoff).
  *   4. Still incomplete, past the window, AND upstream-inaccessible -> park
@@ -297,7 +305,7 @@ export async function reclassifyCompleteRows(
       continue;
     }
 
-    await env.DB.prepare(
+    const upd = await env.DB.prepare(
       `UPDATE import_jobs
           SET status = 'incomplete',
               first_incomplete_at = COALESCE(first_incomplete_at, datetime('now')),
@@ -308,6 +316,11 @@ export async function reclassifyCompleteRows(
     )
       .bind(row.dataset_id)
       .run();
+    if ((upd.meta.changes ?? 0) === 0) {
+      console.error(
+        `[import-retry] reclassify-to-incomplete UPDATE matched 0 rows for ${row.dataset_id}`,
+      );
+    }
     await writeAudit(env.DB, "import_reclassified_incomplete", row.dataset_id, verified);
     reclassified++;
   }
@@ -317,11 +330,15 @@ export async function reclassifyCompleteRows(
 
 /**
  * Un-park a row back to healthy: clears blocklist/incomplete state, marks
- * `complete`, audits `import_recovered`. Shared by the main sweep's
- * verify-first step and the blocklist slow re-check.
+ * `complete`, audits `import_recovered`. UNCONDITIONAL -- it does not check
+ * (or preserve) the row's prior status, so it works whether the row was
+ * `incomplete`, `failed`, or a blocklisted `quarantined`/`failed` (the
+ * engine blocklists WITHOUT changing status; see decideRetryAction). Shared
+ * by the main sweep's verify-first step, the blocklist slow re-check, and
+ * the POST /admin/imports/:id/verify route's verified-complete branch.
  */
-async function recoverRow(db: D1Database, datasetId: string): Promise<void> {
-  await db
+export async function recoverRow(db: D1Database, datasetId: string): Promise<void> {
+  const upd = await db
     .prepare(
       `UPDATE import_jobs
           SET status = 'complete',
@@ -335,6 +352,9 @@ async function recoverRow(db: D1Database, datasetId: string): Promise<void> {
     )
     .bind(datasetId)
     .run();
+  if ((upd.meta.changes ?? 0) === 0) {
+    console.error(`[import-retry] recoverRow UPDATE matched 0 rows for ${datasetId}`);
+  }
   await writeAudit(db, "import_recovered", datasetId, {});
 }
 
@@ -408,7 +428,7 @@ export async function sweepImportRetries(env: Bindings): Promise<void> {
       continue;
     }
     if (item.decision.action === "blocklist") {
-      await env.DB.prepare(
+      const upd = await env.DB.prepare(
         `UPDATE import_jobs
             SET blocklisted = 1,
                 blocklist_reason = ?,
@@ -418,6 +438,9 @@ export async function sweepImportRetries(env: Bindings): Promise<void> {
       )
         .bind(item.decision.reason, nowSqlite(now + BLOCKLIST_RECHECK_MS), item.datasetId)
         .run();
+      if ((upd.meta.changes ?? 0) === 0) {
+        console.error(`[import-retry] blocklist UPDATE matched 0 rows for ${item.datasetId}`);
+      }
       await writeAudit(env.DB, "import_blocklisted", item.datasetId, {
         reason: item.decision.reason,
       });
@@ -432,7 +455,7 @@ export async function sweepImportRetries(env: Bindings): Promise<void> {
     try {
       pat ??= await getDatasetsToken(env);
       await triggerOpenNeuroOnboard(item.sourceId, pat);
-      await env.DB.prepare(
+      const upd = await env.DB.prepare(
         `UPDATE import_jobs
             SET recovery_attempts = ?,
                 first_incomplete_at = COALESCE(first_incomplete_at, datetime('now')),
@@ -446,6 +469,15 @@ export async function sweepImportRetries(env: Bindings): Promise<void> {
           item.datasetId,
         )
         .run();
+      if ((upd.meta.changes ?? 0) === 0) {
+        // The dispatch already fired (triggerOpenNeuroOnboard above), so a
+        // 0-row match here means recovery_attempts/next_retry_at won't
+        // advance even though the workflow is running -- surface it rather
+        // than silently under-counting the retry budget.
+        console.error(
+          `[import-retry] dispatch-tracking UPDATE matched 0 rows for ${item.datasetId}`,
+        );
+      }
       await writeAudit(env.DB, "import_retry_dispatched", item.datasetId, {
         attempt: item.decision.nextRecoveryAttempt,
       });
@@ -488,11 +520,14 @@ export async function sweepImportRetries(env: Bindings): Promise<void> {
       blocklistRecovered++;
       continue;
     }
-    await env.DB.prepare(
+    const upd = await env.DB.prepare(
       "UPDATE import_jobs SET next_retry_at = ?, integrity_checked_at = datetime('now') WHERE dataset_id = ?",
     )
       .bind(nowSqlite(now + BLOCKLIST_RECHECK_MS), row.dataset_id)
       .run();
+    if ((upd.meta.changes ?? 0) === 0) {
+      console.error(`[import-retry] blocklist-recheck UPDATE matched 0 rows for ${row.dataset_id}`);
+    }
   }
 
   if (newlyBlocklisted.length > 0) {
@@ -512,18 +547,18 @@ export async function sweepImportRetries(env: Bindings): Promise<void> {
  * only stamped -- and the once-per-dataset guard only satisfied -- on a real
  * send, so a dry-run tick never silently marks a dataset "notified".
  */
-async function sendMaintainerReportIfDue(
+export async function sendMaintainerReportIfDue(
   env: Bindings,
   candidates: Array<{ datasetId: string; sourceId: string | null }>,
 ): Promise<void> {
   // Re-query maintainer_notified_at fresh rather than trusting the in-memory
   // list: defensive against this function being invoked twice for the same
   // tick (it isn't, today, but the guard should hold on its own).
-  const placeholders = candidates.map(() => "?").join(",");
+  const candidatePlaceholders = candidates.map(() => "?").join(",");
   const res = await env.DB.prepare(
     `SELECT dataset_id, source_id, first_incomplete_at, recovery_attempts
        FROM import_jobs
-      WHERE dataset_id IN (${placeholders}) AND maintainer_notified_at IS NULL`,
+      WHERE dataset_id IN (${candidatePlaceholders}) AND maintainer_notified_at IS NULL`,
   )
     .bind(...candidates.map((c) => c.datasetId))
     .all<{
@@ -581,15 +616,48 @@ async function sendMaintainerReportIfDue(
       replyTo,
       isDev,
     );
-    await env.DB.prepare(
-      `UPDATE import_jobs SET maintainer_notified_at = datetime('now') WHERE dataset_id IN (${placeholders})`,
-    )
-      .bind(...due.map((d) => d.dataset_id))
-      .run();
+    await stampMaintainerNotified(
+      env.DB,
+      due.map((d) => d.dataset_id),
+    );
   } catch (err) {
     console.error(
       "[import-retry] maintainer report send failed:",
       err instanceof Error ? err.message : String(err),
+    );
+  }
+}
+
+/**
+ * Stamp `maintainer_notified_at` for exactly the dataset ids given -- called
+ * after a successful send. Extracted so its placeholder/bind count is a
+ * self-contained invariant of ITS OWN argument, not something a caller can
+ * accidentally source from a differently-sized array: `datasetIds` here is
+ * `due` (the subset of `candidates` still needing notification after the
+ * maintainer_notified_at IS NULL filter), and reusing a `candidates`-sized
+ * placeholder string for it was exactly the #969 review bug -- D1 throws
+ * "wrong number of parameter bindings" whenever the two lengths differ,
+ * which fires AFTER the email already sent, silently losing the stamp and
+ * breaking the once-per-dataset guarantee on the next tick. Exported for a
+ * direct, network-free test of this exact invariant.
+ */
+export async function stampMaintainerNotified(db: D1Database, datasetIds: string[]): Promise<void> {
+  if (datasetIds.length === 0) return;
+  const duePlaceholders = datasetIds.map(() => "?").join(",");
+  const upd = await db
+    .prepare(
+      `UPDATE import_jobs SET maintainer_notified_at = datetime('now') WHERE dataset_id IN (${duePlaceholders})`,
+    )
+    .bind(...datasetIds)
+    .run();
+  if ((upd.meta.changes ?? 0) !== datasetIds.length) {
+    // Best-effort even after this fix: a D1 error surfaces via the caller's
+    // catch, but a SUCCESSFUL write that matches fewer rows than expected
+    // (e.g. a concurrent write already touched a row) still means some
+    // recipients are unstamped -- worst case a later duplicate report, not
+    // a lost/incorrect one, so this only logs rather than retrying.
+    console.error(
+      `[import-retry] maintainer_notified_at UPDATE matched ${upd.meta.changes ?? 0} of ${datasetIds.length} expected rows`,
     );
   }
 }
