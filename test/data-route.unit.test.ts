@@ -846,6 +846,26 @@ describe("buildDatasetMetadata", () => {
     expect(out.provenance).toEqual({ latest_snapshot: null, publish_date: null });
   });
 
+  test("latestManifest:null falls back to the D1 row's file_size/total_files (#970)", () => {
+    // Every other buildDatasetMetadata test either has no size at all
+    // (emptyRow(), file_size:null) or a manifest present -- this pins the
+    // THIRD case the fallback comment documents: page-bundle.ts's perf skip
+    // and a loadManifest failure both pass latestManifest:null even for a
+    // dataset that DOES have honest D1 values, and data_summary must still
+    // surface them (not silently go null).
+    const out = buildDatasetMetadata({
+      row: { ...emptyRow(), file_size: 500, total_files: 3 },
+      parsedEnrichment: null,
+      versions: [],
+      latestManifest: null,
+      githubOrg: "nemarDatasets",
+    });
+    expect(out.data_summary).not.toBeNull();
+    expect(out.data_summary?.size_bytes).toBe(500);
+    expect(out.data_summary?.total_files).toBe(3);
+    expect(out.data_summary?.size_human).toBe("500 B");
+  });
+
   test("full v2 enrichment + versions + manifest -> populated payload", () => {
     const row: DatasetRowForMetadata = {
       ...emptyRow(),
