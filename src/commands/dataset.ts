@@ -1906,7 +1906,10 @@ Examples:
       let currentVersion: string;
       try {
         const history = await getVersionHistory(datasetId);
-        currentVersion = history.current_version;
+        // Backend returns the canonical vX.Y.Z tag; strip the leading v so the
+        // printed version and the PR body read as bare semvers (the release tag
+        // line re-adds it). Downstream bump logic strips the v regardless.
+        currentVersion = history.current_version.replace(/^v/, "");
         console.log(`  Current version: ${chalk.cyan(currentVersion)}`);
         if (history.versions.length > 0) {
           console.log(`  Version DOIs: ${history.versions.length}`);

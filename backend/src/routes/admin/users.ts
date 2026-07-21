@@ -30,6 +30,7 @@ import {
   sendRevocationEmail,
 } from "../../services/email";
 import { decrypt } from "../../services/encryption";
+import { isNonProductionEnv } from "../../services/environment";
 import { removeCollaborator } from "../../services/github";
 import { getDatasetsToken } from "../../services/github-auth";
 import { revokeUserIamAccess } from "../../services/iam";
@@ -1212,8 +1213,9 @@ export function registerUsersRoutes(admin: AdminRouter): void {
    * synthetic web-only account.
    *
    * Guarded two ways:
-   *   1. ENVIRONMENT must NOT be 'production'. The dev and SCCN-dev
-   *      Workers leave this on; api.nemar.org would 403.
+   *   1. Must be a non-production Worker. `isNonProductionEnv` is fail-closed
+   *      (an unset/typo'd ENVIRONMENT is treated as production), so
+   *      api.nemar.org 403s even if the binding is missing.
    *   2. The route inherits `adminMiddleware`, so only admin/owner tokens
    *      can call it even in dev.
    *
@@ -1222,7 +1224,7 @@ export function registerUsersRoutes(admin: AdminRouter): void {
    * the status if requested, instead of 409'ing — saves test teardown.
    */
   admin.post("/test-fixtures/seed-web-user", zValidator("json", seedWebUserSchema), async (c) => {
-    if (c.env.ENVIRONMENT === "production") {
+    if (!isNonProductionEnv(c.env)) {
       return c.json({ error: "Not available in production" }, 403);
     }
     const { email, status } = c.req.valid("json");

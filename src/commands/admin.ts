@@ -3308,7 +3308,7 @@ exemplarCommand
 adminCommand.addCommand(exemplarCommand);
 
 // ============================================================================
-// Reindex (epic #417 phase 3): refresh enrichment + nemar.org sync +
+// Reindex (epic #417 phase 3): refresh enrichment +
 // Phase 2 metadata columns for one or many datasets.
 // ============================================================================
 
@@ -3667,7 +3667,7 @@ fleetCommand
 adminCommand.addCommand(fleetCommand);
 
 const reindexCommand = new Command("reindex").description(
-  "Refresh dataset metadata: enrichment + nemar.org sync + first-class D1 columns",
+  "Refresh dataset metadata: enrichment + first-class D1 columns",
 );
 
 reindexCommand
@@ -3680,7 +3680,7 @@ reindexCommand
     "Threshold in days. Default 30 for --stale, 1 (24h) for --missing-metadata recency guard.",
   )
   .option("--skip-enrichment", "Skip the LLM enrichment step")
-  .option("--skip-sync", "Skip the nemar.org sync + D1 column refresh step")
+  .option("--skip-sync", "Skip the D1 metadata-column refresh step")
   .option("--ref <ref>", "Ref to enrich from (single-dataset only; default: main)")
   .option("--dry-run", "List matched datasets without firing the reindex (bulk only)")
   .action(
