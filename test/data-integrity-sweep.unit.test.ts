@@ -25,12 +25,16 @@ const MIGRATIONS_DIR = join(import.meta.dir, "..", "backend/src/db/migrations");
 const M0059 = readFileSync(join(MIGRATIONS_DIR, "0059_data_complete_columns.sql"), "utf8");
 
 // Minimal slices the sweep touches, pre-0059. dataset_versions must exist for
-// M0059's `ALTER TABLE dataset_versions`.
+// M0059's `ALTER TABLE dataset_versions`. file_size/total_files on datasets
+// predate 0059 (added by migration 0020, not re-added here) but the sweep's
+// verified branch writes them, so the fixture needs them present.
 const BASE_SCHEMA = `
 CREATE TABLE datasets (
   dataset_id TEXT PRIMARY KEY,
   github_repo TEXT,
   is_sandbox INTEGER DEFAULT 0,
+  file_size INTEGER,
+  total_files INTEGER,
   updated_at TEXT
 );
 CREATE TABLE dataset_versions (
@@ -83,13 +87,24 @@ const candidatesOlderThan = (db: Database, days: number) =>
     (r) => r.dataset_id,
   );
 
-/** Mirror the endpoint's per-dataset datasets write for a verified candidate. */
-function applyVerified(db: Database, id: string, dataComplete: 0 | 1, bytesPresent: number) {
+/**
+ * Mirror the endpoint's per-dataset datasets write for a verified candidate.
+ * Includes file_size/total_files (direct SET, not COALESCE) alongside
+ * data_complete/bytes_present -- the sweep backfills the honest catalog size
+ * in the SAME pass it verifies completeness, so datasets never diverges from
+ * the dataset_versions row this same pass writes via applyVersionWrite.
+ */
+function applyVerified(
+  db: Database,
+  id: string,
+  v: { dataComplete: 0 | 1; bytesPresent: number; declaredBytes: number; declaredFiles: number },
+) {
   db.query(
     `UPDATE datasets
-       SET data_complete = ?, bytes_present = ?, data_checked_at = datetime('now')
+       SET file_size = ?, total_files = ?, data_complete = ?, bytes_present = ?,
+           data_checked_at = datetime('now')
        WHERE dataset_id = ?`,
-  ).run(dataComplete, bytesPresent, id);
+  ).run(v.declaredBytes, v.declaredFiles, v.dataComplete, v.bytesPresent, id);
 }
 
 /** Mirror the endpoint's "unverifiable" branch: stamp only, keep prior classification. */
@@ -147,8 +162,13 @@ describe("data-integrity sweep", () => {
     expect(candidates(db)).toEqual(["nm000300", "on000301"]);
   });
 
-  test("a verified-complete dataset writes datasets + the latest dataset_versions row", () => {
-    applyVerified(db, "nm000300", 1, 12_000_000_000);
+  test("a verified-complete dataset writes datasets + the latest dataset_versions row, and datasets.file_size/total_files match the version row", () => {
+    applyVerified(db, "nm000300", {
+      dataComplete: 1,
+      bytesPresent: 12_000_000_000,
+      declaredBytes: 12_000_000_000,
+      declaredFiles: 400,
+    });
     applyVersionWrite(db, "nm000300", "v1.1.1", {
       file_size: 12_000_000_000,
       total_files: 400,
@@ -157,9 +177,11 @@ describe("data-integrity sweep", () => {
     });
     const row = db
       .query(
-        "SELECT data_complete, bytes_present, data_checked_at, updated_at FROM datasets WHERE dataset_id = 'nm000300'",
+        "SELECT file_size, total_files, data_complete, bytes_present, data_checked_at, updated_at FROM datasets WHERE dataset_id = 'nm000300'",
       )
       .get() as Record<string, unknown>;
+    expect(row.file_size).toBe(12_000_000_000);
+    expect(row.total_files).toBe(400);
     expect(row.data_complete).toBe(1);
     expect(row.bytes_present).toBe(12_000_000_000);
     expect(row.data_checked_at).not.toBeNull();
@@ -169,7 +191,7 @@ describe("data-integrity sweep", () => {
 
     const latest = db
       .query(
-        "SELECT data_complete, bytes_present FROM dataset_versions WHERE dataset_id='nm000300' AND version='v1.1.1'",
+        "SELECT file_size, total_files, data_complete, bytes_present FROM dataset_versions WHERE dataset_id='nm000300' AND version='v1.1.1'",
       )
       .get() as Record<string, unknown>;
     const older = db
@@ -178,12 +200,22 @@ describe("data-integrity sweep", () => {
       )
       .get() as Record<string, unknown>;
     expect(latest.data_complete).toBe(1);
+    // datasets (denormalized latest) must match the dataset_versions row this
+    // same sweep pass just wrote -- the one-pass catalog-backfill property.
+    expect(row.file_size).toBe(latest.file_size);
+    expect(row.total_files).toBe(latest.total_files);
+    expect(row.bytes_present).toBe(latest.bytes_present);
     // Non-latest historical versions are not back-verified -> stay NULL.
     expect(older.data_complete).toBeNull();
   });
 
-  test("a verified-incomplete dataset writes data_complete=0 (the #967 signature)", () => {
-    applyVerified(db, "nm000300", 0, 36);
+  test("a verified-incomplete dataset writes data_complete=0 (the #967 signature) but still backfills the honest declared size", () => {
+    applyVerified(db, "nm000300", {
+      dataComplete: 0,
+      bytesPresent: 36,
+      declaredBytes: 12_000_000_000,
+      declaredFiles: 400,
+    });
     applyVersionWrite(db, "nm000300", "v1.1.1", {
       file_size: 12_000_000_000,
       total_files: 400,
@@ -191,11 +223,23 @@ describe("data-integrity sweep", () => {
       data_complete: 0,
     });
     const row = db
-      .query("SELECT data_complete, bytes_present FROM datasets WHERE dataset_id = 'nm000300'")
-      .get() as { data_complete: number; bytes_present: number };
+      .query(
+        "SELECT file_size, total_files, data_complete, bytes_present FROM datasets WHERE dataset_id = 'nm000300'",
+      )
+      .get() as {
+      file_size: number;
+      total_files: number;
+      data_complete: number;
+      bytes_present: number;
+    };
     expect(row.data_complete).toBe(0);
     expect(row.data_complete).not.toBeNull();
     expect(row.bytes_present).toBe(36);
+    // file_size/total_files are the HONEST declared total, independent of
+    // completeness -- incomplete does not mean "unknown size", it means
+    // "present bytes don't match the declared total" (row.bytes_present=36).
+    expect(row.file_size).toBe(12_000_000_000);
+    expect(row.total_files).toBe(400);
   });
 
   test("an unpublished dataset gets no per-version write (no manifest to resolve)", () => {
@@ -242,14 +286,24 @@ describe("data-integrity sweep", () => {
 
   test("remaining count uses the same scoping and decreases as rows are stamped", () => {
     expect(remainingCount(db)).toBe(2); // nm000300, on000301
-    applyVerified(db, "nm000300", 1, 12_000_000_000);
+    applyVerified(db, "nm000300", {
+      dataComplete: 1,
+      bytesPresent: 12_000_000_000,
+      declaredBytes: 12_000_000_000,
+      declaredFiles: 400,
+    });
     applyUnverifiable(db, "on000301");
     expect(remainingCount(db)).toBe(0);
     expect(candidates(db)).toEqual([]);
   });
 
   test("?reset=1 clears datasets rows but intentionally leaves dataset_versions", () => {
-    applyVerified(db, "nm000300", 1, 12_000_000_000);
+    applyVerified(db, "nm000300", {
+      dataComplete: 1,
+      bytesPresent: 12_000_000_000,
+      declaredBytes: 12_000_000_000,
+      declaredFiles: 400,
+    });
     applyVersionWrite(db, "nm000300", "v1.1.1", {
       file_size: 12_000_000_000,
       total_files: 400,
@@ -284,12 +338,22 @@ describe("data-integrity sweep", () => {
 
   describe("?older-than=<days> periodic re-audit (#970, closes the never-revisited carry-over gap)", () => {
     test("without the flag, an already-checked row is NOT a candidate again", () => {
-      applyVerified(db, "nm000300", 1, 12_000_000_000);
+      applyVerified(db, "nm000300", {
+        dataComplete: 1,
+        bytesPresent: 12_000_000_000,
+        declaredBytes: 12_000_000_000,
+        declaredFiles: 400,
+      });
       expect(candidates(db)).toEqual(["on000301"]);
     });
 
     test("with --older-than, a stale checked row becomes a candidate again; a fresh one does not", () => {
-      applyVerified(db, "nm000300", 1, 12_000_000_000);
+      applyVerified(db, "nm000300", {
+        dataComplete: 1,
+        bytesPresent: 12_000_000_000,
+        declaredBytes: 12_000_000_000,
+        declaredFiles: 400,
+      });
       db.query(
         "UPDATE datasets SET data_checked_at = datetime('now', '-40 days') WHERE dataset_id = ?",
       ).run("nm000300");
@@ -304,8 +368,13 @@ describe("data-integrity sweep", () => {
       expect(candidatesOlderThan(db, 60)).toEqual([]);
     });
 
-    test("a re-verified row can flip data_complete (e.g. complete -> incomplete after later corruption)", () => {
-      applyVerified(db, "nm000300", 1, 12_000_000_000);
+    test("a re-verified row can flip data_complete (e.g. complete -> incomplete after later corruption) while the declared size stays the same", () => {
+      applyVerified(db, "nm000300", {
+        dataComplete: 1,
+        bytesPresent: 12_000_000_000,
+        declaredBytes: 12_000_000_000,
+        declaredFiles: 400,
+      });
       db.query(
         "UPDATE datasets SET data_checked_at = datetime('now', '-40 days') WHERE dataset_id = ?",
       ).run("nm000300");
@@ -313,13 +382,29 @@ describe("data-integrity sweep", () => {
       // the nm000300 re-audit flip.
       applyUnverifiable(db, "on000301");
       expect(candidatesOlderThan(db, 30)).toEqual(["nm000300"]);
-      // Re-audit finds the object is now missing/truncated.
-      applyVerified(db, "nm000300", 0, 0);
+      // Re-audit finds the object is now missing/truncated -- bytes_present drops
+      // to 0, but the manifest's declared content hasn't changed (immutable
+      // per-version content), so file_size/total_files stay the same.
+      applyVerified(db, "nm000300", {
+        dataComplete: 0,
+        bytesPresent: 0,
+        declaredBytes: 12_000_000_000,
+        declaredFiles: 400,
+      });
       const row = db
-        .query("SELECT data_complete, bytes_present FROM datasets WHERE dataset_id = 'nm000300'")
-        .get() as { data_complete: number; bytes_present: number };
+        .query(
+          "SELECT file_size, total_files, data_complete, bytes_present FROM datasets WHERE dataset_id = 'nm000300'",
+        )
+        .get() as {
+        file_size: number;
+        total_files: number;
+        data_complete: number;
+        bytes_present: number;
+      };
       expect(row.data_complete).toBe(0);
       expect(row.bytes_present).toBe(0);
+      expect(row.file_size).toBe(12_000_000_000);
+      expect(row.total_files).toBe(400);
     });
   });
 });

@@ -740,13 +740,26 @@ export function registerDatasetLifecycleRoutes(admin: AdminRouter): void {
             bytes_present: integrity.bytesPresent,
             data_complete: dataCompleteInt,
           });
+          // Also backfill datasets.file_size/total_files here (direct SET, not
+          // COALESCE -- integrity.declaredBytes/declaredFiles is a fresh, honest
+          // measurement just taken above): without this the catalog (which reads
+          // datasets.file_size, not dataset_versions) stays on the stale/annex-
+          // blind value until the next reindex, and datasets would silently
+          // diverge from the dataset_versions row this same pass just wrote.
           await db
             .prepare(
               `UPDATE datasets
-             SET data_complete = ?, bytes_present = ?, data_checked_at = datetime('now')
+             SET file_size = ?, total_files = ?, data_complete = ?, bytes_present = ?,
+                 data_checked_at = datetime('now')
              WHERE dataset_id = ?`,
             )
-            .bind(dataCompleteInt, integrity.bytesPresent, dataset_id)
+            .bind(
+              integrity.declaredBytes,
+              integrity.declaredFiles,
+              dataCompleteInt,
+              integrity.bytesPresent,
+              dataset_id,
+            )
             .run();
           if (integrity.complete) complete++;
           else incomplete++;
