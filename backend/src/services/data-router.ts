@@ -896,11 +896,18 @@ export function buildDatasetMetadata(input: {
   const dates: StructuredDate[] = v2?.dates ?? [];
   const funding: DatasetFunding[] = (v2?.funding_references ?? []).map(toDatasetFunding);
 
-  // Honest size (#970, epic #967 Phase 3): when the latest manifest is available,
+  // Honest size (#970, epic #967 Phase 3): when the caller supplied a manifest,
   // sum ITS declared sizes live rather than trust the D1 row -- the manifest is
-  // fetched fresh from S3 above (loadManifest), so it can't be stale between
-  // reindex/sweep runs the way row.file_size briefly can. Falls back to the D1
-  // row for a pre-manifest dataset (no version/v<X>.json yet).
+  // fetched fresh from S3 (loadManifest), so it can't be stale between
+  // reindex/sweep runs the way row.file_size briefly can. `latestManifest` is
+  // null, and this falls back to the (possibly stale) D1 row, in THREE cases,
+  // not just "pre-manifest": (1) a genuinely pre-manifest dataset (no
+  // version/v<X>.json yet); (2) page-bundle.ts deliberately passes null to skip
+  // the multi-MB manifest fetch on every page-bundle response (perf), even for
+  // a fully-manifested dataset; (3) routes/data.ts's loadManifest call failed
+  // (S3 error, corrupt JSON) for a dataset that DOES have a manifest. Cases 2
+  // and 3 mean a healthy manifested dataset can still surface a stale D1 size
+  // here -- this is a deliberate perf/availability tradeoff, not a bug.
   const manifestTotals = latestManifest
     ? Object.values(latestManifest.files).reduce(
         (acc, f) => ({ bytes: acc.bytes + f.size, files: acc.files + 1 }),

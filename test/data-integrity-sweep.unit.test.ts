@@ -11,7 +11,9 @@
  *  - No modality filter (same as HED -- not relevant here either way).
  *  - `?older-than=<days>` widens candidacy to already-checked rows past the
  *    staleness window, a periodic re-audit hed-sweep's one-shot drain doesn't
- *    have (the rv-silent carry-over gap this closes).
+ *    have -- it closes the carry-over gap where Phase 2's import_jobs
+ *    reclassification (integrity_checked_at) only ever checks a row once and
+ *    never revisits it.
  */
 
 import { Database } from "bun:sqlite";
@@ -280,7 +282,7 @@ describe("data-integrity sweep", () => {
     expect(ver.data_complete).toBe(1);
   });
 
-  describe("?older-than=<days> periodic re-audit (#970, closes the rv-silent gap)", () => {
+  describe("?older-than=<days> periodic re-audit (#970, closes the never-revisited carry-over gap)", () => {
     test("without the flag, an already-checked row is NOT a candidate again", () => {
       applyVerified(db, "nm000300", 1, 12_000_000_000);
       expect(candidates(db)).toEqual(["on000301"]);

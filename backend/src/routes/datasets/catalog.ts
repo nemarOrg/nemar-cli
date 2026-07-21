@@ -349,7 +349,7 @@ export function registerCatalogRoutes(datasetRoutes: DatasetsRouter): void {
       }
 
       const params: (string | number)[] = [status, user.id];
-      // Read managed facts from the `datasets` source of truth (#646). 27-column
+      // Read managed facts from the `datasets` source of truth (#646). 28-column
       // ?mine wire shape (+ #869 HED has_hed/hed_version + #970 total_files/
       // data_complete/bytes_present). latest_version is the most recently minted
       // DOI version (null when none); scripts/hallu-sync.sh reads it to skip the

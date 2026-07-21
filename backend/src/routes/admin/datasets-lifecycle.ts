@@ -676,10 +676,12 @@ export function registerDatasetLifecycleRoutes(admin: AdminRouter): void {
       }
     }
     // Default: one-shot drain (never-checked rows only). With ?older-than=N:
-    // widen to already-checked rows past the staleness window too -- the
-    // periodic re-audit that closes the rv-silent carry-over gap (Phase 2's
-    // one-shot reclassify never revisits a row once integrity_checked_at is
-    // stamped).
+    // widen to already-checked rows past the staleness window too -- this is
+    // the periodic re-audit that Phase 2's one-shot reclassify sweep never had:
+    // that sweep only ever checks an import_jobs row once and never revisits it
+    // after integrity_checked_at is stamped, so a later bit-rot (an object
+    // deleted or corrupted after a clean check) would otherwise go undetected
+    // forever.
     const candidacyClause =
       olderThanDays != null
         ? "(d.data_checked_at IS NULL OR d.data_checked_at < datetime('now', ?))"
