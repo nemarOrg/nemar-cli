@@ -69,6 +69,54 @@ export function isKeyPresentAtDeclaredSize(key: string, existing: Map<string, nu
   return actual === declared;
 }
 
+/**
+ * Max size (bytes) `curlStreamCopy` will buffer to the runner's local disk.
+ * The curl fallback downloads the whole object locally so it can be verified
+ * before upload (#967); this domain has recordings up to ~300GB, and GitHub
+ * runners only have ~14GB of local disk, so above this limit we refuse the
+ * fallback outright rather than risk ENOSPC. An object this large needs a
+ * large-disk/manual remediation path instead (Phase 5).
+ */
+const MAX_FALLBACK_BUFFER_BYTES = 5 * 1024 * 1024 * 1024; // 5GB
+
+/**
+ * Concurrency cap on the curl-fallback download specifically, independent of
+ * the outer batch/server-side-copy concurrency. Server-side copies never
+ * touch local disk, so they can safely run at the full `COPY_CONCURRENCY`;
+ * the curl fallback buffers a whole object to disk first, so running many of
+ * those in parallel (e.g. when OpenNeuro systematically 403s a whole shard)
+ * risks exhausting the runner's disk even with the per-object size guard
+ * above (#967).
+ */
+const CURL_FALLBACK_CONCURRENCY = 3;
+
+/**
+ * Minimal counting semaphore: `acquire()` resolves once a slot is free,
+ * `release()` frees it. Used to bound concurrent curl-fallback downloads
+ * without touching the outer batch's concurrency.
+ */
+function createSemaphore(limit: number): { acquire: () => Promise<void>; release: () => void } {
+  let active = 0;
+  const queue: Array<() => void> = [];
+  return {
+    acquire(): Promise<void> {
+      if (active < limit) {
+        active++;
+        return Promise.resolve();
+      }
+      return new Promise((resolve) => queue.push(resolve));
+    },
+    release(): void {
+      const next = queue.shift();
+      if (next) {
+        next();
+      } else {
+        active--;
+      }
+    },
+  };
+}
+
 function decodeKey(key: string): string {
   try {
     return decodeURIComponent(key);
@@ -187,7 +235,9 @@ export async function serverSideS3Copy(
  * only verified key presence, not size. Downloading to a temp file first lets
  * us verify the bytes are actually there (non-empty, and matching the size
  * declared in the annex key when the key encodes one) BEFORE anything is
- * uploaded, so a failed fetch uploads nothing at all.
+ * uploaded, so a failed fetch uploads nothing at all. Refuses up front (no
+ * download attempted) when the declared size exceeds the local-disk buffer
+ * limit -- see `MAX_FALLBACK_BUFFER_BYTES`.
  */
 export async function curlStreamCopy(
   sourceUrl: string,
@@ -195,6 +245,12 @@ export async function curlStreamCopy(
   region: string,
 ): Promise<{ success: boolean; error?: string }> {
   const declaredSize = annexKeyDeclaredSize(destUri);
+  if (declaredSize !== null && declaredSize > MAX_FALLBACK_BUFFER_BYTES) {
+    return {
+      success: false,
+      error: `declared size ${declaredSize} bytes exceeds the ${MAX_FALLBACK_BUFFER_BYTES}-byte runner-buffered-fallback limit; needs large-disk/manual copy`,
+    };
+  }
   const dir = mkdtempSync(join(tmpdir(), "nemar-curl-"));
   const tempFile = join(dir, "blob");
   try {
@@ -206,7 +262,11 @@ export async function curlStreamCopy(
       };
     }
     const actualSize = existsSync(tempFile) ? statSync(tempFile).size : 0;
-    if (actualSize === 0) {
+    // A 0-byte actual size is fine when the annex key legitimately declares 0
+    // bytes (a real empty annexed file, declaredSize === 0); any other case
+    // (no declared size, or a positive one) means curl/the source served
+    // nothing and must be rejected before the upload step.
+    if (actualSize === 0 && declaredSize !== 0) {
       return { success: false, error: "curl produced an empty file (0 bytes)" };
     }
     if (declaredSize !== null && actualSize !== declaredSize) {
@@ -257,6 +317,10 @@ export async function batchServerSideCopy(
   let copied = 0;
   let fellBack = 0;
   const failed: Array<{ key: string; error: string }> = [];
+  // Bounds concurrent curl-fallback downloads independent of `concurrency`
+  // (which governs the server-side-copy path, safe to run wide -- see
+  // CURL_FALLBACK_CONCURRENCY's doc comment).
+  const fallbackLimiter = createSemaphore(CURL_FALLBACK_CONCURRENCY);
 
   const copyOne = async (item: CopyItem): Promise<"ok" | "fallback"> => {
     let lastError = "no S3 source";
@@ -276,9 +340,14 @@ export async function batchServerSideCopy(
     }
     // No S3 source, or server-side exhausted: try the curl fallback once.
     if (item.httpUrl?.startsWith("http")) {
-      const fb = await curlStreamCopy(item.httpUrl, item.destUri, destRegion);
-      if (fb.success) return item.source ? "fallback" : "ok";
-      throw new Error(`server-side failed (${lastError}); fallback failed (${fb.error})`);
+      await fallbackLimiter.acquire();
+      try {
+        const fb = await curlStreamCopy(item.httpUrl, item.destUri, destRegion);
+        if (fb.success) return item.source ? "fallback" : "ok";
+        throw new Error(`server-side failed (${lastError}); fallback failed (${fb.error})`);
+      } finally {
+        fallbackLimiter.release();
+      }
     }
     throw new Error(lastError);
   };
