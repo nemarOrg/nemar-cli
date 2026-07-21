@@ -357,6 +357,93 @@ export async function updateDoi(
 }
 
 // ---------------------------------------------------------------------------
+// Withdrawal / restore (epic #967 phase 4, #971)
+//
+// NOTE (tracked, not fixed here -- #937): these wire types are hand-
+// duplicated against backend/src/services/withdraw.ts rather than sourced
+// from shared/contract, same as most of this file's other endpoints. The
+// @nemar/contract migration is a separate tracked follow-up.
+// ---------------------------------------------------------------------------
+
+export interface DoiStepResult {
+  doi: string;
+  kind: "concept" | "version";
+  version?: string;
+  action: "unavailable" | "public";
+  status: "planned" | "ok" | "failed";
+  error?: string;
+}
+
+/** Mirrors services/visibility.ts's VisibilityTransitionResult failure branch
+ *  (minus the `ok` discriminant) so the CLI can render exactly which surface
+ *  (GitHub/S3/D1) desynced instead of a flattened error string. */
+export type VisibilityStepResult =
+  | { status: "planned" }
+  | { status: "ok" }
+  | { status: "failed"; stage: "not_found" | "no_repo" | "invalid_repo" | "github"; error: string }
+  | { status: "failed"; stage: "s3"; error: string; githubReverted: boolean; revertError?: string }
+  | {
+      status: "failed";
+      stage: "db";
+      error: string;
+      githubReverted: boolean;
+      s3Reverted: boolean;
+      revertError?: string;
+    };
+
+/** Discriminated on `skipped`: exactly one of the two shapes, mirroring
+ *  backend/src/services/withdraw.ts's DatasetTransitionResult. withdraw and
+ *  restore share this one name (rather than separate Withdraw/Restore
+ *  aliases) since the shapes are otherwise identical. */
+export type DatasetTransitionResponse =
+  | { dataset_id: string; dry_run: boolean; skipped: string; resumed?: boolean }
+  | {
+      dataset_id: string;
+      dry_run: boolean;
+      resumed?: boolean;
+      visibility: VisibilityStepResult;
+      dois: DoiStepResult[];
+      warning?: string;
+    };
+
+/**
+ * Withdraw a published dataset: make it private and tombstone its concept +
+ * version EZID DOIs. `dryRun` defaults to true server-side; pass `false` to
+ * execute (requires `reason`).
+ */
+export async function withdrawDataset(
+  datasetId: string,
+  opts: { reason?: string; dryRun: boolean },
+): Promise<DatasetTransitionResponse> {
+  return request<DatasetTransitionResponse>(
+    `/admin/datasets/${datasetId}/withdraw`,
+    {
+      method: "POST",
+      body: JSON.stringify({ reason: opts.reason, dry_run: opts.dryRun }),
+    },
+    true,
+  );
+}
+
+/**
+ * Reverse a withdrawal: make the dataset public again and restore its
+ * concept + version EZID DOIs. `dryRun` defaults to true server-side.
+ */
+export async function restoreDataset(
+  datasetId: string,
+  opts: { dryRun: boolean },
+): Promise<DatasetTransitionResponse> {
+  return request<DatasetTransitionResponse>(
+    `/admin/datasets/${datasetId}/restore`,
+    {
+      method: "POST",
+      body: JSON.stringify({ dry_run: opts.dryRun }),
+    },
+    true,
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Dataset deletion
 // ---------------------------------------------------------------------------
 
@@ -512,6 +599,14 @@ export interface ImportJobRow {
   created_at: string;
   updated_at: string;
   completed_at: string | null;
+  // Retry engine + blocklist columns (#969, epic #967 Phase 2; migration 0058).
+  recovery_attempts: number;
+  first_incomplete_at: string | null;
+  next_retry_at: string | null;
+  blocklisted: number;
+  blocklist_reason: string | null;
+  maintainer_notified_at: string | null;
+  integrity_checked_at: string | null;
 }
 
 export interface ImportStatusResponse {
@@ -520,9 +615,15 @@ export interface ImportStatusResponse {
   by_status: Record<string, number>;
 }
 
-export async function getImportStatus(status?: string): Promise<ImportStatusResponse> {
-  const q = status ? `?status=${encodeURIComponent(status)}` : "";
-  return request<ImportStatusResponse>(`/admin/imports${q}`, {}, true);
+export async function getImportStatus(
+  status?: string,
+  blocklisted?: boolean,
+): Promise<ImportStatusResponse> {
+  const params = new URLSearchParams();
+  if (status) params.set("status", status);
+  if (blocklisted !== undefined) params.set("blocklisted", blocklisted ? "1" : "0");
+  const q = params.toString();
+  return request<ImportStatusResponse>(`/admin/imports${q ? `?${q}` : ""}`, {}, true);
 }
 
 export async function rollbackImport(
@@ -535,6 +636,19 @@ export async function retryImport(
   datasetId: string,
 ): Promise<{ ok: boolean; dataset_id: string; status: string }> {
   return request(`/admin/imports/${datasetId}/retry`, { method: "POST" }, true);
+}
+
+export interface ImportVerifyResponse {
+  dataset_id: string;
+  complete: boolean;
+  missingKeys: string[];
+  zeroByteKeys: string[];
+  expectedCount: number;
+  presentCount: number;
+}
+
+export async function verifyImport(datasetId: string): Promise<ImportVerifyResponse> {
+  return request(`/admin/imports/${datasetId}/verify`, { method: "POST" }, true);
 }
 
 // ============================================================================
@@ -641,6 +755,52 @@ export async function hedSweep(options?: { limit?: number }): Promise<HedSweepBa
 export async function hedSweepReset(): Promise<HedSweepResetResponse> {
   return request<HedSweepResetResponse>(
     "/admin/datasets/hed-sweep?reset=1",
+    { method: "POST", headers: { "Content-Type": "application/json" } },
+    true,
+  );
+}
+
+/** One batch of the data-integrity sweep (epic #967 Phase 3, #970,
+ *  `POST /admin/datasets/data-integrity-sweep`). */
+export interface DataIntegritySweepBatchResponse {
+  processed: number;
+  /** Verified complete (every annex-keyed manifest entry present at declared size). */
+  complete: number;
+  /** Verified incomplete this batch -- the #967 signature. */
+  incomplete: number;
+  /** Could not verify (no manifest / verify error) -> data_complete stays NULL. */
+  unknown: number;
+  errors: { dataset_id: string; error: string }[];
+  /** Datasets still unaudited (or stale past --older-than); 0 when the sweep is done. */
+  remaining: number | null;
+}
+
+/** Response of `?reset=1`: count of audited rows cleared back to unclassified. */
+export interface DataIntegritySweepResetResponse {
+  reset: number;
+}
+
+/** Run one bounded data-integrity sweep batch (default 15, server-clamped to
+ *  [1,30]). `olderThan` widens candidacy to already-checked rows past N days
+ *  for periodic re-audit; omit for the one-shot never-checked drain. */
+export async function dataIntegritySweep(options?: {
+  limit?: number;
+  olderThan?: number;
+}): Promise<DataIntegritySweepBatchResponse> {
+  const limit = options?.limit ?? 15;
+  const params = new URLSearchParams({ limit: String(limit) });
+  if (options?.olderThan != null) params.set("older-than", String(options.olderThan));
+  return request<DataIntegritySweepBatchResponse>(
+    `/admin/datasets/data-integrity-sweep?${params.toString()}`,
+    { method: "POST", headers: { "Content-Type": "application/json" } },
+    true,
+  );
+}
+
+/** Clear every audited row so a corrected verifier can re-sweep from scratch. */
+export async function dataIntegritySweepReset(): Promise<DataIntegritySweepResetResponse> {
+  return request<DataIntegritySweepResetResponse>(
+    "/admin/datasets/data-integrity-sweep?reset=1",
     { method: "POST", headers: { "Content-Type": "application/json" } },
     true,
   );

@@ -41,7 +41,9 @@ import {
   type ImportManifestItem,
   batchServerSideCopy,
   cleanupStaging,
+  expectedSizesFromItems,
   filterAlreadyCopied,
+  isKeyPresentAtDeclaredSize,
   keyInShard,
   listExistingObjects,
   parseS3Url,
@@ -183,6 +185,20 @@ export function decideSkipCiCheck(args: {
     abortReason:
       "BIDS validation run did not register within the bounded poll window. Re-run with --trust-upstream to bypass (OpenNeuro datasets are pre-validated upstream), or investigate why the deployed CI did not trigger.",
   };
+}
+
+/**
+ * True when a POST /admin/datasets/import failure means "the dataset record
+ * and/or GitHub repo already exist" -- the expected, non-fatal shape of a
+ * RETRIED prepare (#969, epic #967 Phase 2): the row/repo genuinely exist
+ * server-side (POST returns 409), so prepare must continue (reuse them,
+ * rebuild the manifest, ensure main is pushed) rather than abort. Matches
+ * both the D1 duplicate-dataset 409 ("Dataset ... already exists") and the
+ * GitHub-repo-exists 409 ("GitHub repo nemarDatasets/... already exists")
+ * from routes/admin/imports.ts. Exported for tests.
+ */
+export function isAlreadyExistsImportError(message: string): boolean {
+  return message.includes("already exists") || message.includes("409");
 }
 
 /**
@@ -770,7 +786,7 @@ export async function prepareImport(
     createSpinner.succeed(`Created ${result.dataset_id} (${result.github_repo})`);
   } catch (error) {
     const msg = error instanceof Error ? error.message : String(error);
-    if (msg.includes("already exists") || msg.includes("409")) {
+    if (isAlreadyExistsImportError(msg)) {
       createSpinner.warn(`Dataset ${nemarId} already exists, continuing...`);
     } else {
       createSpinner.fail(`Failed to create dataset: ${msg}`);
@@ -851,6 +867,38 @@ export async function prepareImport(
     process.exit(1);
   }
   remoteSpinner.succeed("Configured NEMAR remote");
+
+  // Step 4b: fold in any git-annex state nemarDatasets/<id> already carries
+  // from an earlier prepare attempt (#969, idempotent retry). This clone is
+  // always fresh from OpenNeuro, so its local git-annex branch has no
+  // knowledge of a nemar-s3 special remote a prior attempt already
+  // registered and pushed. Without this merge, the initremote call below
+  // (Step 5) can't see that registration and mints a SECOND, independent
+  // UUID for the same "nemar-s3" name -- finalize's re-clone then sees two
+  // repositories describing themselves as "nemar-s3", `git annex info`
+  // reports "multiple repositories with that description", and its
+  // enableremote fallback hard-errors ("Multiple remotes have that name"),
+  // permanently breaking the import (every further retry makes it worse by
+  // minting yet another UUID). Fetching + merging origin's git-annex branch
+  // FIRST means the S3-remote setup below sees the prior registration via
+  // annexRemoteExists and calls `enableremote` -- reusing the same UUID, so
+  // there is nothing to diverge and the eventual push is a plain
+  // fast-forward. Best-effort: a brand-new repo (first-ever import) has no
+  // git-annex branch to fetch yet, so this is a silent no-op on the common
+  // path.
+  const annexFetchResult = await runCommand(["git", "fetch", "origin", "git-annex"], {
+    cwd: datasetPath,
+  });
+  if (annexFetchResult.exitCode === 0) {
+    const annexMergeResult = await runCommand(["git", "annex", "merge"], { cwd: datasetPath });
+    if (annexMergeResult.exitCode !== 0) {
+      console.log(
+        chalk.yellow(
+          `  Warning: found existing NEMAR git-annex state for ${nemarId} but could not merge it (${annexMergeResult.stderr.trim()}). A retry may register the S3 remote under a new UUID; investigate before re-running finalize.`,
+        ),
+      );
+    }
+  }
 
   // Step 5: Configure the NEMAR S3 special remote. This records the nemar-s3
   // uuid in the git-annex branch so the finalize phase (a fresh clone, possibly
@@ -989,9 +1037,15 @@ export async function copyShard(
     return;
   }
 
-  // Resume: skip objects already present at the destination.
+  // Resume: skip objects already present at the destination, but only when
+  // present at their declared size -- a 0-byte leftover from a prior failed
+  // run must be re-copied, not mistaken for done (#967).
   const existing = await listExistingObjects(S3_BUCKET, `${nemarId}/objects/`, S3_REGION);
-  const { toCopy, skipped } = filterAlreadyCopied(shardItems, existing);
+  const { toCopy, skipped } = filterAlreadyCopied(
+    shardItems,
+    existing,
+    expectedSizesFromItems(shardItems),
+  );
   if (skipped.length > 0) {
     console.log(chalk.dim(`[${tag}] skipped ${skipped.length} already present`));
   }
@@ -1074,13 +1128,16 @@ export async function finalizeImport(
     guardSpinner.succeed("Confirmed metadata-only dataset (no annexed data)");
   }
   if (hasData) {
-    // Verify all data landed by re-listing the destination against the manifest.
+    // Verify all data landed at its correct size by re-listing the destination
+    // against the manifest. This is the publish gate: a key that merely exists
+    // but is 0 bytes or truncated (a corrupt leftover from a failed copy, #967)
+    // counts as missing, same as a key that's absent entirely.
     const verifySpinner = ora("Verifying copied data...").start();
     const existing = await listExistingObjects(S3_BUCKET, `${nemarId}/objects/`, S3_REGION);
-    const missing = manifest.items.filter((it) => !existing.has(it.key));
+    const missing = manifest.items.filter((it) => !isKeyPresentAtDeclaredSize(it.key, existing));
     if (missing.length > 0) {
       verifySpinner.fail(
-        `${missing.length} of ${manifest.items.length} objects missing at the destination. Re-run the copy phase (a shard likely failed or was cancelled) before finalizing.`,
+        `${missing.length} of ${manifest.items.length} objects missing or wrong size at the destination. Re-run the copy phase (a shard likely failed or was cancelled) before finalizing.`,
       );
       process.exit(1);
     }

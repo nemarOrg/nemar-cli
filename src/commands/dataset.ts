@@ -1393,6 +1393,14 @@ Examples:
       console.log(`  DOI:         https://doi.org/${datasetInfo.concept_doi}`);
     }
 
+    // #970: surface-but-visible -- only shout when data is verified incomplete;
+    // complete/not-yet-audited stay silent (mirrors the list table's Data column).
+    if (datasetInfo.data_complete === 0) {
+      console.log(
+        `  Data:        ${chalk.red("incomplete")} ${chalk.dim("(some files failed to upload; see `nemar admin data-integrity-sweep`)")}`,
+      );
+    }
+
     console.log();
     console.log(chalk.dim("To download this dataset:"));
     console.log(chalk.dim(`  nemar dataset download ${datasetId}`));
@@ -1480,12 +1488,14 @@ function renderDatasetTable(
   const subjWidth = 8;
   const ownerWidth = Math.max(8, ...datasets.map((d) => (d.owner_username || "-").length));
 
+  const dataWidth = 10;
   const header = [
     "ID".padEnd(idWidth),
     "Name".padEnd(nameWidth),
     "Modality".padEnd(modWidth),
     "Subj".padEnd(subjWidth),
     "HED".padEnd(3),
+    "Data".padEnd(dataWidth),
     "Owner".padEnd(ownerWidth),
     "Status",
   ].join("  ");
@@ -1523,6 +1533,12 @@ function renderDatasetTable(
       subjects.padEnd(subjWidth),
       // Pad the plain text BEFORE colorizing so ANSI codes don't break alignment.
       dataset.has_hed === 1 ? chalk.magenta("HED".padEnd(3)) : chalk.dim("-".padEnd(3)),
+      // #970: surface-but-visible -- only flag the broken case (incomplete);
+      // complete/not-yet-audited both render blank, mirroring the HED column's
+      // "only shout when there's something to see" convention.
+      dataset.data_complete === 0
+        ? chalk.red("incomplete".padEnd(dataWidth))
+        : "".padEnd(dataWidth),
       owner.padEnd(ownerWidth),
       visLabel,
     ].join("  ");
@@ -1565,6 +1581,7 @@ datasetCommand
   )
   .option("--doi", "Show only datasets with DOIs")
   .option("--hed", "Show only datasets with HED annotations")
+  .option("--complete", "Show only datasets verified data-complete (#970)")
   .option("--recent [days]", "Show recently published datasets")
   .option("--sort <order>", "Sort: newest, oldest, name, participants, size", "newest")
   .option("--json", "Output as JSON for scripting")
@@ -1667,6 +1684,7 @@ Examples:
         license: options.license,
         hasDoi: !!options.doi,
         hasHed: !!options.hed,
+        dataComplete: !!options.complete,
         recent: options.recent ? Number.parseInt(options.recent, 10) || 30 : undefined,
         sort: options.sort,
         limit,
@@ -1724,6 +1742,7 @@ Examples:
         options.modality ||
         options.author ||
         options.hed ||
+        options.complete ||
         options.license ||
         options.task
       ) {

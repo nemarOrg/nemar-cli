@@ -94,6 +94,8 @@ const MODULE_EXPORTS: Record<string, string[]> = {
     "changeVisibility",
     "createConceptDoi",
     "createExemplar",
+    "dataIntegritySweep",
+    "dataIntegritySweepReset",
     "deleteDataset",
     "dispatchManifest",
     "enforceBulk",
@@ -114,6 +116,7 @@ const MODULE_EXPORTS: Record<string, string[]> = {
     "reindexDataset",
     "remintExemplarDois",
     "resetTestDataset",
+    "restoreDataset",
     "retryImport",
     "revalidateDataset",
     "revokeUser",
@@ -123,6 +126,8 @@ const MODULE_EXPORTS: Record<string, string[]> = {
     "updateDoi",
     "updateEmailPreferences",
     "validateCi",
+    "verifyImport",
+    "withdrawDataset",
   ],
   notices: ["createNotice", "deleteNotice", "getNotices", "listAdminNotices"],
 };
@@ -154,6 +159,8 @@ const MONOLITH_EXPORTS = [
   "createDataset",
   "createExemplar",
   "createNotice",
+  "dataIntegritySweep",
+  "dataIntegritySweepReset",
   "deleteDataset",
   "deleteNotice",
   "denyAccessRequest",
@@ -208,6 +215,7 @@ const MONOLITH_EXPORTS = [
   "resetSandbox",
   "resetTestDataset",
   "resolveSourceId",
+  "restoreDataset",
   "retrieveKey",
   "retryImport",
   "revalidateDataset",
@@ -223,6 +231,8 @@ const MONOLITH_EXPORTS = [
   "updateEmailPreferences",
   "validateCi",
   "validateDataset",
+  "verifyImport",
+  "withdrawDataset",
 ];
 
 describe("lib/api export surface", () => {

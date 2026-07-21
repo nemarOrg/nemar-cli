@@ -18,6 +18,7 @@ import { registerNoticeRoutes } from "./notices";
 import { registerPublishRoutes } from "./publish";
 import type { AdminRouter } from "./shared";
 import { registerUsersRoutes } from "./users";
+import { registerWithdrawRoutes } from "./withdraw";
 
 export const adminRoutes: AdminRouter = new Hono();
 
@@ -33,3 +34,4 @@ registerDatasetLifecycleRoutes(adminRoutes);
 registerImportRoutes(adminRoutes);
 registerExemplarRoutes(adminRoutes);
 registerNoticeRoutes(adminRoutes);
+registerWithdrawRoutes(adminRoutes);

@@ -16,7 +16,7 @@
  * does a real cross-region server-side copy (bytes never touch the runner).
  */
 
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { runCommand } from "./git-annex/run-command.js";
@@ -36,6 +36,85 @@ export interface CopyItem {
   source: S3Ref | null;
   httpUrl: string | null;
   destUri: string;
+}
+
+/**
+ * Declared size (bytes) encoded in a git-annex key, e.g.
+ * `SHA256E-s10565888--abc123.edf` -> 10565888. Works for any backend that
+ * encodes size this way (SHA256E, MD5E, SHA1E, ...). Returns null for
+ * non-annex keys (`git:<sha>`, in-tree git blobs) or anything that doesn't
+ * match the pattern, so callers can tell "no declared size" apart from "0
+ * bytes claimed" -- load-bearing for the copy-integrity checks below, which
+ * must not silently accept an empty object as correct.
+ */
+export function annexKeyDeclaredSize(key: string): number | null {
+  const match = key.match(/-s(\d+)--/);
+  return match ? Number.parseInt(match[1], 10) : null;
+}
+
+/**
+ * True when `key` is present in `existing` (a key -> byte-size map from
+ * {@link listExistingObjects}) at its correct size. An annex key's declared
+ * size must match exactly -- a 0-byte or truncated object counts as absent
+ * even though the key exists (the #967 bug: a failed curl fallback used to
+ * leave a valid-looking 0-byte PUT behind). A non-annex `git:` key has no
+ * declared size, so presence alone is sufficient (its bytes live in GitHub,
+ * not S3).
+ */
+export function isKeyPresentAtDeclaredSize(key: string, existing: Map<string, number>): boolean {
+  const actual = existing.get(key);
+  if (actual === undefined) return false;
+  const declared = annexKeyDeclaredSize(key);
+  if (declared === null) return true;
+  return actual === declared;
+}
+
+/**
+ * Max size (bytes) `curlStreamCopy` will buffer to the runner's local disk.
+ * The curl fallback downloads the whole object locally so it can be verified
+ * before upload (#967); this domain has recordings up to ~300GB, and GitHub
+ * runners only have ~14GB of local disk, so above this limit we refuse the
+ * fallback outright rather than risk ENOSPC. An object this large needs a
+ * large-disk/manual remediation path instead (Phase 5).
+ */
+const MAX_FALLBACK_BUFFER_BYTES = 5 * 1024 * 1024 * 1024; // 5GB
+
+/**
+ * Concurrency cap on the curl-fallback download specifically, independent of
+ * the outer batch/server-side-copy concurrency. Server-side copies never
+ * touch local disk, so they can safely run at the full `COPY_CONCURRENCY`;
+ * the curl fallback buffers a whole object to disk first, so running many of
+ * those in parallel (e.g. when OpenNeuro systematically 403s a whole shard)
+ * risks exhausting the runner's disk even with the per-object size guard
+ * above (#967).
+ */
+const CURL_FALLBACK_CONCURRENCY = 3;
+
+/**
+ * Minimal counting semaphore: `acquire()` resolves once a slot is free,
+ * `release()` frees it. Used to bound concurrent curl-fallback downloads
+ * without touching the outer batch's concurrency.
+ */
+function createSemaphore(limit: number): { acquire: () => Promise<void>; release: () => void } {
+  let active = 0;
+  const queue: Array<() => void> = [];
+  return {
+    acquire(): Promise<void> {
+      if (active < limit) {
+        active++;
+        return Promise.resolve();
+      }
+      return new Promise((resolve) => queue.push(resolve));
+    },
+    release(): void {
+      const next = queue.shift();
+      if (next) {
+        next();
+      } else {
+        active--;
+      }
+    },
+  };
 }
 
 function decodeKey(key: string): string {
@@ -143,31 +222,70 @@ export async function serverSideS3Copy(
 }
 
 /**
- * Curl-stream fallback (the pre-#750 mechanism): stream from the public HTTP
- * source through this process and pipe to `aws s3 cp -`. Only used when a
- * server-side copy fails AND a raw HTTP URL is available. Routes every byte
- * through the runner, so it's a last resort.
+ * Curl-stream fallback (the pre-#750 mechanism): download from the public
+ * HTTP source to a local temp file, then `aws s3 cp` that file up. Only used
+ * when a server-side copy fails AND a raw HTTP URL is available. Routes every
+ * byte through the runner, so it's a last resort.
+ *
+ * #967: this used to pipe `curl | aws s3 cp -` directly. A curl failure mid-
+ * stream (e.g. OpenNeuro 403ing partway through) still let `aws s3 cp -` read
+ * an empty stdin and PUT a valid, successful 0-byte object -- `pipefail`
+ * caught curl's exit code and the caller correctly reported the item as
+ * failed, but the corrupt blob was already in S3 and every downstream check
+ * only verified key presence, not size. Downloading to a temp file first lets
+ * us verify the bytes are actually there (non-empty, and matching the size
+ * declared in the annex key when the key encodes one) BEFORE anything is
+ * uploaded, so a failed fetch uploads nothing at all. Refuses up front (no
+ * download attempted) when the declared size exceeds the local-disk buffer
+ * limit -- see `MAX_FALLBACK_BUFFER_BYTES`.
  */
 export async function curlStreamCopy(
   sourceUrl: string,
   destUri: string,
   region: string,
 ): Promise<{ success: boolean; error?: string }> {
-  const result = await runCommand(
-    // `set -o pipefail` so a curl failure (e.g. a 403 / empty body) fails the
-    // pipeline instead of letting `aws s3 cp -` upload a 0-byte object and exit
-    // 0 (which would register a corrupt blob as a successful copy).
-    [
-      "bash",
-      "-c",
-      `set -o pipefail; curl -sfL '${sourceUrl}' | aws s3 cp - '${destUri}' --region '${region}'`,
-    ],
-    {},
-  );
-  if (result.exitCode !== 0) {
-    return { success: false, error: result.stderr.trim() || `curl/aws exit ${result.exitCode}` };
+  const declaredSize = annexKeyDeclaredSize(destUri);
+  if (declaredSize !== null && declaredSize > MAX_FALLBACK_BUFFER_BYTES) {
+    return {
+      success: false,
+      error: `declared size ${declaredSize} bytes exceeds the ${MAX_FALLBACK_BUFFER_BYTES}-byte runner-buffered-fallback limit; needs large-disk/manual copy`,
+    };
   }
-  return { success: true };
+  const dir = mkdtempSync(join(tmpdir(), "nemar-curl-"));
+  const tempFile = join(dir, "blob");
+  try {
+    const curlResult = await runCommand(["curl", "-sfL", "-o", tempFile, sourceUrl], {});
+    if (curlResult.exitCode !== 0) {
+      return {
+        success: false,
+        error: curlResult.stderr.trim() || `curl exit ${curlResult.exitCode}`,
+      };
+    }
+    const actualSize = existsSync(tempFile) ? statSync(tempFile).size : 0;
+    // A 0-byte actual size is fine when the annex key legitimately declares 0
+    // bytes (a real empty annexed file, declaredSize === 0); any other case
+    // (no declared size, or a positive one) means curl/the source served
+    // nothing and must be rejected before the upload step.
+    if (actualSize === 0 && declaredSize !== 0) {
+      return { success: false, error: "curl produced an empty file (0 bytes)" };
+    }
+    if (declaredSize !== null && actualSize !== declaredSize) {
+      return {
+        success: false,
+        error: `downloaded ${actualSize} bytes but the annex key declares ${declaredSize}`,
+      };
+    }
+    const cpResult = await runCommand(
+      ["aws", "s3", "cp", tempFile, destUri, "--region", region, "--only-show-errors"],
+      {},
+    );
+    if (cpResult.exitCode !== 0) {
+      return { success: false, error: cpResult.stderr.trim() || `aws exit ${cpResult.exitCode}` };
+    }
+    return { success: true };
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 }
 
 /**
@@ -199,6 +317,10 @@ export async function batchServerSideCopy(
   let copied = 0;
   let fellBack = 0;
   const failed: Array<{ key: string; error: string }> = [];
+  // Bounds concurrent curl-fallback downloads independent of `concurrency`
+  // (which governs the server-side-copy path, safe to run wide -- see
+  // CURL_FALLBACK_CONCURRENCY's doc comment).
+  const fallbackLimiter = createSemaphore(CURL_FALLBACK_CONCURRENCY);
 
   const copyOne = async (item: CopyItem): Promise<"ok" | "fallback"> => {
     let lastError = "no S3 source";
@@ -218,9 +340,14 @@ export async function batchServerSideCopy(
     }
     // No S3 source, or server-side exhausted: try the curl fallback once.
     if (item.httpUrl?.startsWith("http")) {
-      const fb = await curlStreamCopy(item.httpUrl, item.destUri, destRegion);
-      if (fb.success) return item.source ? "fallback" : "ok";
-      throw new Error(`server-side failed (${lastError}); fallback failed (${fb.error})`);
+      await fallbackLimiter.acquire();
+      try {
+        const fb = await curlStreamCopy(item.httpUrl, item.destUri, destRegion);
+        if (fb.success) return item.source ? "fallback" : "ok";
+        throw new Error(`server-side failed (${lastError}); fallback failed (${fb.error})`);
+      } finally {
+        fallbackLimiter.release();
+      }
     }
     throw new Error(lastError);
   };
@@ -315,13 +442,10 @@ export async function listExistingObjects(
  * Pure resume filter: split items into those still needing a copy and those
  * already present at the destination. An item is skipped when its key is
  * present AND (no expected size map given, OR the present size matches the
- * expected size). Presence-only is correct for OpenNeuro's immutable
- * content-addressed blobs (server-side copy is atomic and the curl fallback
- * uses pipefail, so no 0-byte partials reach S3).
- *
- * NOTE: `expectedSizes` is currently NOT populated by `copyShard` (the manifest
- * carries no sizes), so the size-check path is dormant. It exists for a future
- * caller that wants to defend against partial blobs from a non-atomic source.
+ * expected size). Callers pass `expectedSizes` built from
+ * {@link annexKeyDeclaredSize} (see `expectedSizesFromItems`) so a 0-byte or
+ * truncated object left over from a prior failed run is re-copied instead of
+ * being mistaken for a completed transfer (#967).
  */
 export function filterAlreadyCopied(
   items: CopyItem[],
@@ -343,6 +467,21 @@ export function filterAlreadyCopied(
     }
   }
   return { toCopy, skipped };
+}
+
+/**
+ * Build the `expectedSizes` map `filterAlreadyCopied` needs, deriving each
+ * item's declared size from its annex key via {@link annexKeyDeclaredSize}.
+ * Keys with no declared size (non-annex `git:` keys, or malformed) are
+ * omitted so presence-only matching still applies to them.
+ */
+export function expectedSizesFromItems(items: Array<{ key: string }>): Map<string, number> {
+  const sizes = new Map<string, number>();
+  for (const item of items) {
+    const size = annexKeyDeclaredSize(item.key);
+    if (size !== null) sizes.set(item.key, size);
+  }
+  return sizes;
 }
 
 /** Stable 32-bit FNV-1a hash. Deterministic across runs/processes so a given

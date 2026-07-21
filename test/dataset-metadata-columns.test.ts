@@ -316,6 +316,95 @@ describe("computeDatasetMetadataColumns", () => {
   });
 });
 
+describe("computeDatasetMetadataColumns honest size mapping (#970, epic #967 Phase 3)", () => {
+  const base = {
+    treePaths: TASK_PATHS,
+    participantsTsv: null,
+    s3Stats: null,
+  };
+
+  // manifestVerification is ONE object (totals + bytesPresent + complete) so
+  // "complete without a declared size" -- or any other partial combination --
+  // is unrepresentable: a caller either has the full verifyDatasetVersionS3
+  // result or none of it. An earlier, split-optionals version of this type let
+  // a caller pass `dataComplete: true` alone, producing data_complete=1 while
+  // file_size stayed null; that state can no longer be constructed.
+
+  test("manifestVerification wins over s3Stats for file_size/total_files/bytes_present, and sets data_complete", () => {
+    const cols = computeDatasetMetadataColumns({
+      ...base,
+      s3Stats: { totalSize: 36, objectCount: 5 }, // the #967 lie (annex-blind S3 sum)
+      manifestVerification: {
+        totals: { bytes: 12_000_000_000, files: 400 }, // the honest declared total
+        bytesPresent: 36, // distinct from declared -- proves no transposition
+        complete: false,
+      },
+    });
+    expect(cols.file_size).toBe(12_000_000_000);
+    expect(cols.total_files).toBe(400);
+    expect(cols.bytes_present).toBe(36);
+    expect(cols.data_complete).toBe(0);
+  });
+
+  test("missing manifestVerification falls back to s3Stats for file_size/total_files/bytes_present (pre-manifest dataset), data_complete stays null", () => {
+    const cols = computeDatasetMetadataColumns({
+      ...base,
+      s3Stats: { totalSize: 1024, objectCount: 3 },
+    });
+    expect(cols.file_size).toBe(1024);
+    expect(cols.total_files).toBe(3);
+    expect(cols.bytes_present).toBe(1024);
+    expect(cols.data_complete).toBeNull();
+  });
+
+  test("missing both manifestVerification and s3Stats leaves file_size/total_files/bytes_present null", () => {
+    const cols = computeDatasetMetadataColumns(base);
+    expect(cols.file_size).toBeNull();
+    expect(cols.total_files).toBeNull();
+    expect(cols.bytes_present).toBeNull();
+    expect(cols.data_complete).toBeNull();
+  });
+
+  test("complete=true maps to data_complete=1", () => {
+    const cols = computeDatasetMetadataColumns({
+      ...base,
+      manifestVerification: {
+        totals: { bytes: 100, files: 1 },
+        bytesPresent: 100,
+        complete: true,
+      },
+    });
+    expect(cols.data_complete).toBe(1);
+  });
+
+  test("complete=false maps to data_complete=0 (checked, incomplete)", () => {
+    const cols = computeDatasetMetadataColumns({
+      ...base,
+      manifestVerification: {
+        totals: { bytes: 100, files: 1 },
+        bytesPresent: 0,
+        complete: false,
+      },
+    });
+    expect(cols.data_complete).toBe(0);
+  });
+
+  test("a genuinely empty manifest (0 bytes, 0 files) is preserved, not coerced to null", () => {
+    const cols = computeDatasetMetadataColumns({
+      ...base,
+      manifestVerification: {
+        totals: { bytes: 0, files: 0 },
+        bytesPresent: 0,
+        complete: true,
+      },
+    });
+    expect(cols.file_size).toBe(0);
+    expect(cols.total_files).toBe(0);
+    expect(cols.bytes_present).toBe(0);
+    expect(cols.data_complete).toBe(1);
+  });
+});
+
 describe("extractTasks contract (string[] input)", () => {
   // The export signature changed from TreeEntry[] to readonly string[] when
   // extractTasks became public (epic #417 phase 2). Pin the contract so a

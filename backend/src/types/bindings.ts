@@ -153,6 +153,18 @@ export interface Bindings {
   // keeps deletion a human action, mirroring the #663 stale-cron remediation.
   IMPORT_AUTO_ROLLBACK?: string; // "true" enables auto-rollback of orphaned imports
 
+  // Import retry engine + blocklist (epic #967 Phase 2, issue #969). A
+  // prod-only daily sweep re-dispatches onboard-openneuro.yml for
+  // incomplete/failed/quarantined imports; a dataset whose OpenNeuro source
+  // stays inaccessible past the retry window is parked on a blocklist and,
+  // once, reported to an OpenNeuro maintainer. OPENNEURO_SUPPORT_EMAIL is the
+  // report recipient. The actual send is gated by
+  // OPENNEURO_MAINTAINER_EMAIL_ENABLED="true" (default unset -> dry run:
+  // compute + audit-log, no send) so external mail never fires silently on
+  // deploy; the operator flips it after reviewing the first batch.
+  OPENNEURO_SUPPORT_EMAIL?: string;
+  OPENNEURO_MAINTAINER_EMAIL_ENABLED?: string;
+
   // Zarr serving copy (epic #684). The conversion runs in
   // nemarDatasets/.github run-generate-zarr.yml and POSTs back to
   // /webhooks/zarr-ready (authenticated with NEMAR_WEBHOOK_TOKEN). The browser

@@ -1,0 +1,275 @@
+/**
+ * Import S3 integrity primitive (epic #967 Phase 2, issue #969).
+ *
+ * Cheap, Worker-side per-key verification: does every annex-keyed file in a
+ * dataset's published version manifest actually exist in S3 at its declared
+ * size? This is the general check behind two callers:
+ *   - the retry engine's reclassification sweep, which walks `complete`
+ *     import_jobs rows looking for the #967 bug (a failed curl fallback left
+ *     a 0-byte object behind, so the import silently under-delivered), and
+ *   - the retry engine's "verify current state first" step before deciding
+ *     whether to blocklist or re-dispatch an incomplete/failed/quarantined row.
+ *
+ * `annexKeyDeclaredSize`/`isKeyPresentAtDeclaredSize` below are a Workers-side
+ * port of the identically-named Phase 1 helpers in `src/lib/s3-server-copy.ts`
+ * (CLI code; not importable into a Workers bundle -- it pulls in node:fs at
+ * module scope via git-annex/run-command.js). Keep the regex and null-vs-0
+ * semantics in sync if either changes.
+ */
+
+import type { Bindings } from "../types/bindings.js";
+import { versionFromDoi } from "./archive-retry.js";
+import { type PresignedUrlOptions, getManifest, listObjectSizes } from "./s3.js";
+
+/**
+ * Declared size (bytes) encoded in a git-annex key, e.g.
+ * `SHA256E-s10565888--abc123.edf` -> 10565888. Returns null for a `git:`-keyed
+ * (non-annex) manifest entry or anything that doesn't match the pattern, so
+ * callers can tell "no declared size" apart from "0 bytes claimed".
+ */
+export function annexKeyDeclaredSize(key: string): number | null {
+  const match = key.match(/-s(\d+)--/);
+  return match ? Number.parseInt(match[1], 10) : null;
+}
+
+/**
+ * True when `key` is present in `existing` (a key -> byte-size map from
+ * {@link import("./s3.js").listObjectSizes}) at its correct size. An annex
+ * key's declared size must match exactly -- a 0-byte or truncated object
+ * counts as absent even though the key exists (the #967 bug). A key with no
+ * declared size (shouldn't reach here; git:-keyed entries are filtered out
+ * before this is called) is treated as present-if-listed.
+ */
+export function isKeyPresentAtDeclaredSize(key: string, existing: Map<string, number>): boolean {
+  const actual = existing.get(key);
+  if (actual === undefined) return false;
+  const declared = annexKeyDeclaredSize(key);
+  if (declared === null) return true;
+  return actual === declared;
+}
+
+/** The subset of VersionManifest (services/manifest.ts) this check needs. */
+export interface ExpectedManifestFile {
+  key: string;
+  size: number;
+}
+
+export interface ImportIntegrityResult {
+  complete: boolean;
+  missingKeys: string[];
+  zeroByteKeys: string[];
+  expectedCount: number;
+  presentCount: number;
+}
+
+/**
+ * Pure comparison: the manifest's expected annex-keyed files vs. the live
+ * `<id>/objects/` listing. `expected` is null when there is no published
+ * manifest to compare against (the import never reached finalize/publish) --
+ * conservatively `complete: false`, since completeness cannot be claimed
+ * without an expected key set. `git:`-keyed entries (regular files stored in
+ * GitHub, never copied to S3) are excluded from the expected set entirely.
+ *
+ * `zeroByteKeys` is the subset of `missingKeys` that IS present in `existing`
+ * but at 0 bytes with a nonzero declared size -- the specific "corrupt
+ * leftover from a failed copy" signature (#967), distinct from a key that
+ * never landed at all. A key whose declared size is genuinely 0 (a real empty
+ * file) is never flagged as missing or zero-byte.
+ */
+export function compareManifestToListing(
+  expected: Record<string, ExpectedManifestFile> | null,
+  existing: Map<string, number>,
+): ImportIntegrityResult {
+  if (expected === null) {
+    return {
+      complete: false,
+      missingKeys: [],
+      zeroByteKeys: [],
+      expectedCount: 0,
+      presentCount: existing.size,
+    };
+  }
+
+  const annexEntries = Object.values(expected).filter((f) => !f.key.startsWith("git:"));
+  const missingKeys: string[] = [];
+  const zeroByteKeys: string[] = [];
+  for (const entry of annexEntries) {
+    if (isKeyPresentAtDeclaredSize(entry.key, existing)) continue;
+    missingKeys.push(entry.key);
+    const declared = annexKeyDeclaredSize(entry.key);
+    if (existing.get(entry.key) === 0 && declared !== 0) zeroByteKeys.push(entry.key);
+  }
+
+  return {
+    complete: missingKeys.length === 0,
+    missingKeys,
+    zeroByteKeys,
+    expectedCount: annexEntries.length,
+    presentCount: annexEntries.length - missingKeys.length,
+  };
+}
+
+interface VersionManifestLike {
+  files?: Record<string, ExpectedManifestFile>;
+}
+
+/**
+ * Parse a version manifest JSON string into its files map, or null when the
+ * JSON is unparseable OR parses but carries no `files` key. A manifest with
+ * no `files` key is malformed, not "zero expected files" -- returning `{}`
+ * there would make {@link compareManifestToListing} report complete:true
+ * regardless of what's actually in S3, defeating the conservative-by-default
+ * invariant this whole check exists to uphold. Pure; exported for testing.
+ */
+export function parseManifestFiles(
+  manifestJson: string,
+): Record<string, ExpectedManifestFile> | null {
+  try {
+    const parsed = JSON.parse(manifestJson) as VersionManifestLike;
+    return parsed.files ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * {@link verifyDatasetVersionS3} result: the per-key completeness comparison
+ * plus the totals needed to source an honest `file_size`/`total_files`/
+ * `bytes_present` (epic #967 Phase 3, #970) without a second S3 round-trip.
+ */
+export interface DatasetVersionIntegrityResult extends ImportIntegrityResult {
+  /** Sum of bytes actually present under `<id>/objects/` (the live S3 listing) --
+   *  the same listing used for the completeness check, regardless of whether any
+   *  given key matches its declared size. */
+  bytesPresent: number;
+  /** Sum of `ManifestFile.size` across EVERY parsed manifest entry (annex-keyed
+   *  AND `git:`-keyed) -- the honest logical dataset size. 0 when there is no
+   *  usable manifest ({@link version} is null in that case). */
+  declaredBytes: number;
+  /** Count of every parsed manifest entry (annex-keyed AND `git:`-keyed). 0 when
+   *  there is no usable manifest. */
+  declaredFiles: number;
+  /** The version this result actually reflects, or null when no manifest could
+   *  be resolved/parsed for it (caller should fall back to the pre-manifest S3
+   *  sum and leave completeness unknown, not report a bogus zero). */
+  version: string | null;
+}
+
+/** A resolved, parsed manifest -- version and files travel together so
+ *  "we have files but no version" (or vice versa) is unrepresentable. */
+export interface ResolvedManifest {
+  version: string;
+  files: Record<string, ExpectedManifestFile>;
+}
+
+/**
+ * Pure half of {@link verifyDatasetVersionS3}: given the resolved manifest
+ * (or null when none could be resolved/parsed) and the live `<id>/objects/`
+ * listing, compute the completeness comparison plus the honest-size totals.
+ * Split out from the I/O wrapper so the arithmetic -- which the S3-listing
+ * seam (`listObjectPages` hardcodes a `*.s3.*.amazonaws.com` host with no
+ * local-test override) can't exercise -- is directly unit-testable with
+ * synthetic data. `manifest` being a single nullable object (rather than
+ * separate `expected`/`resolvedVersion` params) makes the invalid combo --
+ * files present but no version, or vice versa -- unrepresentable at the type
+ * level; `version` on the result is simply `manifest?.version ?? null`.
+ * Exported for testing.
+ */
+export function computeVersionIntegrity(
+  manifest: ResolvedManifest | null,
+  existing: Map<string, number>,
+): DatasetVersionIntegrityResult {
+  const comparison = compareManifestToListing(manifest?.files ?? null, existing);
+
+  let bytesPresent = 0;
+  for (const size of existing.values()) bytesPresent += size;
+
+  let declaredBytes = 0;
+  let declaredFiles = 0;
+  if (manifest) {
+    for (const file of Object.values(manifest.files)) {
+      declaredBytes += file.size;
+      declaredFiles++;
+    }
+  }
+
+  return {
+    ...comparison,
+    bytesPresent,
+    declaredBytes,
+    declaredFiles,
+    version: manifest?.version ?? null,
+  };
+}
+
+/**
+ * I/O wrapper: resolve a dataset's version manifest (a specific `version`, or
+ * the latest published one when omitted) and the live `<id>/objects/`
+ * listing, then run the pure comparison plus the honest-size totals (#970).
+ * No manifest (import never finalized / dataset predates manifests), an
+ * unparseable one, or one missing `files` all fall back to the
+ * `expected: null` path in {@link compareManifestToListing} -- and to
+ * `version: null` here, signaling callers to keep the S3-sum fallback rather
+ * than trust a zero.
+ */
+export async function verifyDatasetVersionS3(
+  env: Pick<
+    Bindings,
+    "DB" | "S3_BUCKET" | "AWS_REGION" | "AWS_ACCESS_KEY_ID" | "AWS_SECRET_ACCESS_KEY"
+  >,
+  datasetId: string,
+  version?: string,
+): Promise<DatasetVersionIntegrityResult> {
+  const options: PresignedUrlOptions = {
+    bucket: env.S3_BUCKET,
+    region: env.AWS_REGION,
+    accessKeyId: env.AWS_ACCESS_KEY_ID,
+    secretAccessKey: env.AWS_SECRET_ACCESS_KEY,
+  };
+
+  let resolvedVersion = version ?? null;
+  if (!resolvedVersion) {
+    const row = await env.DB.prepare("SELECT latest_version_doi FROM datasets WHERE dataset_id = ?")
+      .bind(datasetId)
+      .first<{ latest_version_doi: string | null }>();
+    resolvedVersion = versionFromDoi(row?.latest_version_doi ?? null);
+  }
+
+  let expected: Record<string, ExpectedManifestFile> | null = null;
+  if (resolvedVersion) {
+    const manifestJson = await getManifest(options, datasetId, resolvedVersion);
+    if (manifestJson) {
+      const parsedFiles = parseManifestFiles(manifestJson);
+      if (parsedFiles) {
+        expected = parsedFiles;
+      } else {
+        console.error(
+          `[import-integrity] manifest for ${datasetId}@${resolvedVersion} is unparseable or missing "files"`,
+        );
+      }
+    }
+  }
+
+  const existing = await listObjectSizes(options, `${datasetId}/objects/`);
+  return computeVersionIntegrity(
+    expected && resolvedVersion ? { version: resolvedVersion, files: expected } : null,
+    existing,
+  );
+}
+
+/**
+ * I/O wrapper: resolve the dataset's latest published version manifest (if
+ * any) and the live `<id>/objects/` listing, then run the pure comparison.
+ * Thin delegate to {@link verifyDatasetVersionS3} (Phase 2's original entry
+ * point; kept so existing callers -- the retry engine's reclassification
+ * sweep and pre-dispatch check -- don't need to change).
+ */
+export async function verifyImportS3(
+  env: Pick<
+    Bindings,
+    "DB" | "S3_BUCKET" | "AWS_REGION" | "AWS_ACCESS_KEY_ID" | "AWS_SECRET_ACCESS_KEY"
+  >,
+  datasetId: string,
+): Promise<ImportIntegrityResult> {
+  return verifyDatasetVersionS3(env, datasetId);
+}

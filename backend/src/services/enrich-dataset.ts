@@ -915,15 +915,29 @@ export async function enrichDataset(
     }
 
     // Populate first-class metadata columns (epic #417 phase 2). Reuses the
-    // tree, participants.tsv and S3 stats already gathered above so no
-    // additional API calls are needed beyond the one participants.tsv blob
-    // read. Non-fatal: a failure here does not roll back the enrichment.
+    // tree and participants.tsv already gathered above so no additional API
+    // calls are needed beyond the one participants.tsv blob read. Non-fatal: a
+    // failure here does not roll back the enrichment.
+    //
+    // s3Stats (Stage 1a above) is deliberately NOT threaded into file_size/
+    // total_files here (#970, epic #967 Phase 3): it's the annex-blind
+    // S3-objects sum, the exact source of the #967 incident, and this path has
+    // no well-defined "is a version manifest available yet" point (enrichment
+    // runs both pre-publish, when no manifest exists at all, and post-publish,
+    // interleaved with the version-DOI refresh) to safely verify against one.
+    // Leaving file_size/total_files/bytes_present/data_complete unset here lets
+    // COALESCE preserve whatever refreshDatasetMetadata (dataset-reindex.ts,
+    // which runs right after every version-DOI mint and DOES verify the
+    // manifest) or the `admin data-integrity-sweep` backfill last wrote,
+    // instead of this run clobbering the honest value back to the S3 sum on
+    // every re-enrichment. s3Stats itself stays in use above for the
+    // human-readable `seeded.sizes` LLM-prompt field, unrelated to these columns.
     let metadataColumnsError: string | undefined;
     try {
       const cols = computeDatasetMetadataColumns({
         treePaths,
         participantsTsv,
-        s3Stats,
+        s3Stats: null,
       });
       await writeDatasetMetadataColumns(env.DB, datasetId, cols);
       console.log(

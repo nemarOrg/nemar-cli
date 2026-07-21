@@ -153,6 +153,12 @@ AUTO_IMPORT_ENABLED = "false"
 # gate sits just under the 30-min cron tick). Tunable live (wrangler deploy or the
 # dashboard) without a code change -- raise it to throttle back if a run misbehaves.
 AUTO_IMPORT_MIN_INTERVAL_MIN = "25"
+# Import retry engine + blocklist (epic #967 Phase 2, #969). Recipient for the
+# batched "dataset(s) appear inaccessible" report. Send stays OFF
+# (OPENNEURO_MAINTAINER_EMAIL_ENABLED unset -> dry run: compute + audit-log,
+# no send) until an operator reviews the first computed batch and flips it.
+OPENNEURO_SUPPORT_EMAIL = ""
+OPENNEURO_MAINTAINER_EMAIL_ENABLED = "false"
 
 # Secrets (set via: npx cfman wrangler --account sccn secret put <NAME> -c backend/wrangler-sccn.toml)
 # - GITHUB_ADMIN_PAT

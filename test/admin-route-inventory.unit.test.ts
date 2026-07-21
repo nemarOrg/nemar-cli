@@ -71,6 +71,7 @@ const EXPECTED_ENTRIES: Record<string, number> = {
   "POST /datasets/zarr-sweep": 1,
   "POST /datasets/channel-montage-sweep": 1,
   "POST /datasets/hed-sweep": 1,
+  "POST /datasets/data-integrity-sweep": 1,
   "POST /doctor/scan": 1,
   "POST /doctor/fix": 1,
   "POST /datasets/:id/reset": 1,
@@ -88,6 +89,7 @@ const EXPECTED_ENTRIES: Record<string, number> = {
   "GET /imports": 1,
   "POST /imports/:id/rollback": 1,
   "POST /imports/:id/retry": 1,
+  "POST /imports/:id/verify": 1,
 
   // Staging exemplars (epic #923, Phase 5)
   "POST /datasets/exemplar": 2,
@@ -97,6 +99,10 @@ const EXPECTED_ENTRIES: Record<string, number> = {
   "GET /notices": 1,
   "POST /notices": 2,
   "DELETE /notices/:id": 1,
+
+  // Withdrawal / restore (epic #967 phase 4, #971)
+  "POST /datasets/:id/withdraw": 2,
+  "POST /datasets/:id/restore": 2,
 };
 
 describe("admin route inventory", () => {
@@ -110,7 +116,7 @@ describe("admin route inventory", () => {
   });
 
   test("entry total is pinned", () => {
-    expect(adminRoutes.routes.length).toBe(81);
+    expect(adminRoutes.routes.length).toBe(87);
   });
 
   // The count pin above can't see a SWAP of the two router-level middleware
