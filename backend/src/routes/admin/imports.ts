@@ -16,6 +16,7 @@ import { SYSTEM_USER_ID } from "../../lib/constants";
 import { deleteDatasetCascade } from "../../services/deletion";
 import { type GitHubRepo, createRepository, deleteRepository } from "../../services/github";
 import { getDatasetsToken } from "../../services/github-auth";
+import { verifyImportS3 } from "../../services/import-integrity";
 import { IMPORT_STATUSES } from "../../services/import-recovery";
 import { hasRole } from "../../types/bindings";
 import type { AdminRouter } from "./shared";
@@ -213,17 +214,31 @@ export function registerImportRoutes(admin: AdminRouter): void {
   // Import jobs (issue #754) - import state view + rollback/retry
   // ============================================================================
 
-  /** GET /admin/imports[?status=] - list import_jobs with by-status counts. */
+  /** GET /admin/imports[?status=][?blocklisted=1] - list import_jobs with
+   *  by-status counts. `blocklisted` filters to (or excludes) retry-engine
+   *  blocklisted rows (#969); combinable with `status`. */
   admin.get("/imports", async (c) => {
     const db = c.env.DB;
     const status = c.req.query("status");
+    const blocklistedParam = c.req.query("blocklisted");
     let query = `SELECT dataset_id, source, source_id, stage, status, last_error,
-                      workflow_run_url, created_at, updated_at, completed_at
+                      workflow_run_url, created_at, updated_at, completed_at,
+                      recovery_attempts, first_incomplete_at, next_retry_at,
+                      blocklisted, blocklist_reason, maintainer_notified_at,
+                      integrity_checked_at
                FROM import_jobs`;
-    const params: string[] = [];
+    const conditions: string[] = [];
+    const params: (string | number)[] = [];
     if (status) {
-      query += " WHERE status = ?";
+      conditions.push("status = ?");
       params.push(status);
+    }
+    if (blocklistedParam !== undefined) {
+      conditions.push("blocklisted = ?");
+      params.push(blocklistedParam === "1" || blocklistedParam === "true" ? 1 : 0);
+    }
+    if (conditions.length > 0) {
+      query += ` WHERE ${conditions.join(" AND ")}`;
     }
     // Surface the rows that need a human first.
     query += " ORDER BY (status = 'failed') DESC, (status = 'quarantined') DESC, updated_at DESC";
@@ -232,8 +247,9 @@ export function registerImportRoutes(admin: AdminRouter): void {
       .bind(...params)
       .all<{ status: string }>();
     const results = rows.results ?? [];
-    // by_status is always a FLEET-WIDE count (independent of the ?status= filter)
-    // so the CLI summary line isn't misleading when a filter is applied.
+    // by_status is always a FLEET-WIDE count (independent of the ?status=/
+    // ?blocklisted= filters) so the CLI summary line isn't misleading when a
+    // filter is applied.
     const counts = await db
       .prepare("SELECT status, COUNT(*) AS n FROM import_jobs GROUP BY status")
       .all<{ status: string; n: number }>();
@@ -332,20 +348,87 @@ export function registerImportRoutes(admin: AdminRouter): void {
    * POST /admin/imports/:id/retry - reset a failed/quarantined row to `preparing`
    * so a re-dispatched import is expected. Does not itself re-run the workflow
    * (the operator re-dispatches onboard-openneuro.yml; the prepare callback also
-   * self-heals the row).
+   * self-heals the row). Also un-parks the row from the retry-engine blocklist
+   * (#969): a manual retry is an explicit operator decision to try again, so it
+   * clears blocklisted/blocklist_reason and resets next_retry_at so the retry
+   * sweep doesn't immediately re-park it before the re-dispatch lands.
    */
   admin.post("/imports/:id/retry", async (c) => {
     const datasetId = c.req.param("id");
     const res = await c.env.DB.prepare(
       `UPDATE import_jobs
-       SET status = 'preparing', stage = 'prepare', last_error = NULL, completed_at = NULL, updated_at = datetime('now')
-     WHERE dataset_id = ? AND status IN ('failed', 'quarantined')`,
+       SET status = 'preparing', stage = 'prepare', last_error = NULL, completed_at = NULL,
+           blocklisted = 0, blocklist_reason = NULL, next_retry_at = NULL, updated_at = datetime('now')
+     WHERE dataset_id = ? AND status IN ('failed', 'quarantined', 'incomplete')`,
     )
       .bind(datasetId)
       .run();
     if (res.meta.changes === 0) {
-      return c.json({ error: "No failed/quarantined import to retry for this dataset" }, 409);
+      return c.json(
+        { error: "No failed/quarantined/incomplete import to retry for this dataset" },
+        409,
+      );
     }
     return c.json({ ok: true, dataset_id: datasetId, status: "preparing" });
+  });
+
+  /**
+   * POST /admin/imports/:id/verify - force verifyImportS3 now (#969). Lets an
+   * operator seed a specific dataset into the retry lane without waiting for
+   * the reclassification sweep to reach it, or confirm a `complete` row is
+   * genuinely healthy. Flips `status` to `incomplete` or back to `complete`
+   * accordingly; always stamps `integrity_checked_at`.
+   */
+  admin.post("/imports/:id/verify", async (c) => {
+    const datasetId = c.req.param("id");
+    const job = await c.env.DB.prepare("SELECT status FROM import_jobs WHERE dataset_id = ?")
+      .bind(datasetId)
+      .first<{ status: string }>();
+    if (!job) return c.json({ error: "No import job for this dataset" }, 404);
+
+    const verified = await verifyImportS3(c.env, datasetId);
+
+    if (verified.complete) {
+      await c.env.DB.prepare(
+        `UPDATE import_jobs
+            SET status = CASE WHEN status = 'incomplete' THEN 'complete' ELSE status END,
+                blocklisted = CASE WHEN status = 'incomplete' THEN 0 ELSE blocklisted END,
+                blocklist_reason = CASE WHEN status = 'incomplete' THEN NULL ELSE blocklist_reason END,
+                first_incomplete_at = CASE WHEN status = 'incomplete' THEN NULL ELSE first_incomplete_at END,
+                next_retry_at = CASE WHEN status = 'incomplete' THEN NULL ELSE next_retry_at END,
+                integrity_checked_at = datetime('now'),
+                updated_at = datetime('now')
+          WHERE dataset_id = ?`,
+      )
+        .bind(datasetId)
+        .run();
+    } else if (job.status === "complete") {
+      await c.env.DB.prepare(
+        `UPDATE import_jobs
+            SET status = 'incomplete',
+                first_incomplete_at = COALESCE(first_incomplete_at, datetime('now')),
+                next_retry_at = datetime('now'),
+                integrity_checked_at = datetime('now'),
+                updated_at = datetime('now')
+          WHERE dataset_id = ?`,
+      )
+        .bind(datasetId)
+        .run();
+    } else {
+      await c.env.DB.prepare(
+        "UPDATE import_jobs SET integrity_checked_at = datetime('now') WHERE dataset_id = ?",
+      )
+        .bind(datasetId)
+        .run();
+    }
+
+    await auditLogStatement(c.env.DB, {
+      userId: c.get("user").id,
+      action: "import_verify_forced",
+      resourceId: datasetId,
+      details: JSON.stringify(verified),
+    }).run();
+
+    return c.json({ dataset_id: datasetId, ...verified });
   });
 }
