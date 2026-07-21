@@ -23,11 +23,14 @@ import {
   decideRetryAction,
   planRetryTick,
   reclassifyCompleteRows,
+  recoverRow,
   retryBackoffMs,
+  sendMaintainerReportIfDue,
+  stampMaintainerNotified,
   sweepImportRetries,
 } from "../src/services/import-retry";
 import type { Bindings } from "../src/types/bindings";
-import { freshDb } from "./helpers/d1";
+import { freshDb, realD1 } from "./helpers/d1";
 
 // ---------------------------------------------------------------------------
 // decideRetryAction
@@ -229,24 +232,31 @@ function insertJob(
     source_id?: string | null;
     status?: string;
     blocklisted?: number;
+    blocklist_reason?: string | null;
+    first_incomplete_at?: string | null;
     next_retry_at?: string | null;
     last_error?: string | null;
+    maintainer_notified_at?: string | null;
     updated_at?: string;
     integrity_checked_at?: string | null;
   },
 ): void {
   db.prepare(
     `INSERT INTO import_jobs
-       (dataset_id, source, source_id, status, blocklisted, next_retry_at, last_error,
+       (dataset_id, source, source_id, status, blocklisted, blocklist_reason,
+        first_incomplete_at, next_retry_at, last_error, maintainer_notified_at,
         integrity_checked_at, updated_at)
-     VALUES (?, 'openneuro', ?, ?, ?, ?, ?, ?, ?)`,
+     VALUES (?, 'openneuro', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(
     j.dataset_id,
     j.source_id ?? `ds${j.dataset_id}`,
     j.status ?? "preparing",
     j.blocklisted ?? 0,
+    j.blocklist_reason ?? null,
+    j.first_incomplete_at ?? null,
     j.next_retry_at ?? null,
     j.last_error ?? null,
+    j.maintainer_notified_at ?? null,
     j.integrity_checked_at ?? null,
     j.updated_at ??
       new Date()
@@ -477,3 +487,181 @@ describe("prod-only guard", () => {
 // archiveRetrySweep/reconcileReservedVersionDois (also untested at that
 // level), coverage here stops at the prod-only guard above plus the pure
 // decision functions and query text tested elsewhere in this file.
+//
+// recoverRow, stampMaintainerNotified, and sendMaintainerReportIfDue's
+// dry-run path are D1-only (no S3, no email network) -- real end-to-end
+// coverage below, no excuse to skip it.
+
+describe("recoverRow (real D1)", () => {
+  test("un-parks a blocklisted quarantined row unconditionally", async () => {
+    const db = freshDb();
+    insertJob(db, {
+      dataset_id: "on000001",
+      status: "quarantined",
+      blocklisted: 1,
+      blocklist_reason: "upstream_403_after_window",
+      first_incomplete_at: "2026-07-01 00:00:00",
+      next_retry_at: "2026-07-25 00:00:00",
+    });
+
+    await recoverRow(realD1(db), "on000001");
+
+    const row = db
+      .prepare(
+        `SELECT status, blocklisted, blocklist_reason, first_incomplete_at, next_retry_at,
+                integrity_checked_at
+           FROM import_jobs WHERE dataset_id = ?`,
+      )
+      .get("on000001") as {
+      status: string;
+      blocklisted: number;
+      blocklist_reason: string | null;
+      first_incomplete_at: string | null;
+      next_retry_at: string | null;
+      integrity_checked_at: string | null;
+    };
+    expect(row.status).toBe("complete");
+    expect(row.blocklisted).toBe(0);
+    expect(row.blocklist_reason).toBeNull();
+    expect(row.first_incomplete_at).toBeNull();
+    expect(row.next_retry_at).toBeNull();
+    expect(row.integrity_checked_at).not.toBeNull();
+  });
+
+  test("un-parks a blocklisted failed row too (blocklisting never changes status)", async () => {
+    const db = freshDb();
+    insertJob(db, {
+      dataset_id: "on000002",
+      status: "failed",
+      blocklisted: 1,
+      blocklist_reason: "upstream_403_after_window",
+    });
+
+    await recoverRow(realD1(db), "on000002");
+
+    const row = db
+      .prepare("SELECT status, blocklisted FROM import_jobs WHERE dataset_id = ?")
+      .get("on000002") as { status: string; blocklisted: number };
+    expect(row.status).toBe("complete");
+    expect(row.blocklisted).toBe(0);
+  });
+
+  test("writes an import_recovered audit row", async () => {
+    const db = freshDb();
+    insertJob(db, { dataset_id: "on000003", status: "incomplete" });
+
+    await recoverRow(realD1(db), "on000003");
+
+    const audit = db
+      .prepare("SELECT action, resource_id FROM audit_log WHERE action = 'import_recovered'")
+      .get() as { action: string; resource_id: string } | undefined;
+    expect(audit?.resource_id).toBe("on000003");
+  });
+});
+
+describe("stampMaintainerNotified (real D1) -- the #969 placeholder/bind fix", () => {
+  test("stamps exactly the given ids when they are a strict SUBSET of a larger candidate set", async () => {
+    // Reproduces the exact shape of the bug: sendMaintainerReportIfDue is
+    // called with a candidates array, but only a subset (`due`) is still
+    // eligible after the maintainer_notified_at IS NULL filter. Passing a
+    // shorter `datasetIds` than some OTHER, larger array's placeholder count
+    // is exactly what threw "wrong number of parameter bindings" before the
+    // fix; here the function's own placeholder count always matches its own
+    // argument, so this must not throw.
+    const db = freshDb();
+    insertJob(db, { dataset_id: "on000001" });
+    insertJob(db, { dataset_id: "on000002" });
+    insertJob(db, { dataset_id: "on000003" });
+
+    await expect(stampMaintainerNotified(realD1(db), ["on000002"])).resolves.toBeUndefined();
+
+    const rows = db
+      .prepare("SELECT dataset_id, maintainer_notified_at FROM import_jobs ORDER BY dataset_id")
+      .all() as { dataset_id: string; maintainer_notified_at: string | null }[];
+    expect(rows.find((r) => r.dataset_id === "on000001")?.maintainer_notified_at).toBeNull();
+    expect(rows.find((r) => r.dataset_id === "on000002")?.maintainer_notified_at).not.toBeNull();
+    expect(rows.find((r) => r.dataset_id === "on000003")?.maintainer_notified_at).toBeNull();
+  });
+
+  test("empty array is a no-op (does not run a malformed IN () query)", async () => {
+    const db = freshDb();
+    insertJob(db, { dataset_id: "on000001" });
+    await expect(stampMaintainerNotified(realD1(db), [])).resolves.toBeUndefined();
+    const row = db
+      .prepare("SELECT maintainer_notified_at FROM import_jobs WHERE dataset_id = ?")
+      .get("on000001") as { maintainer_notified_at: string | null };
+    expect(row.maintainer_notified_at).toBeNull();
+  });
+});
+
+describe("sendMaintainerReportIfDue dry-run (real D1, no email network)", () => {
+  test("mixed batch (one already-notified, one new): filters correctly, no throw, nothing stamped when the flag is unset", async () => {
+    const db = freshDb();
+    insertJob(db, {
+      dataset_id: "on000001",
+      source_id: "ds000001",
+      status: "quarantined",
+      blocklisted: 1,
+      maintainer_notified_at: null, // due
+    });
+    insertJob(db, {
+      dataset_id: "on000002",
+      source_id: "ds000002",
+      status: "quarantined",
+      blocklisted: 1,
+      maintainer_notified_at: "2026-07-01 00:00:00", // already notified -- must be excluded
+    });
+
+    const env = {
+      DB: realD1(db),
+      // OPENNEURO_MAINTAINER_EMAIL_ENABLED left unset: dry run, never reaches
+      // the network send.
+    } as unknown as Bindings;
+
+    await expect(
+      sendMaintainerReportIfDue(env, [
+        { datasetId: "on000001", sourceId: "ds000001" },
+        { datasetId: "on000002", sourceId: "ds000002" },
+      ]),
+    ).resolves.toBeUndefined();
+
+    const rows = db
+      .prepare("SELECT dataset_id, maintainer_notified_at FROM import_jobs ORDER BY dataset_id")
+      .all() as { dataset_id: string; maintainer_notified_at: string | null }[];
+    // Dry run: neither row is stamped -- on000002 was already stamped from an
+    // earlier cycle and must stay untouched (still non-null, unchanged), and
+    // on000001 must stay NULL (not silently marked "notified" without a send).
+    expect(rows.find((r) => r.dataset_id === "on000001")?.maintainer_notified_at).toBeNull();
+    expect(rows.find((r) => r.dataset_id === "on000002")?.maintainer_notified_at).toBe(
+      "2026-07-01 00:00:00",
+    );
+
+    const audit = db
+      .prepare("SELECT details FROM audit_log WHERE action = 'import_maintainer_report_computed'")
+      .get() as { details: string } | undefined;
+    expect(audit).toBeDefined();
+    const details = JSON.parse(audit?.details ?? "{}");
+    expect(details.decision).toBe("dry_run");
+    // Only the still-due dataset (on000001) is in the computed report --
+    // on000002 was already filtered out by maintainer_notified_at IS NULL.
+    expect(details.datasets).toEqual(["on000001"]);
+  });
+
+  test("all candidates already notified: no-op, no audit row", async () => {
+    const db = freshDb();
+    insertJob(db, {
+      dataset_id: "on000001",
+      maintainer_notified_at: "2026-07-01 00:00:00",
+    });
+
+    const env = { DB: realD1(db) } as unknown as Bindings;
+    await sendMaintainerReportIfDue(env, [{ datasetId: "on000001", sourceId: "ds000001" }]);
+
+    const audit = db
+      .prepare(
+        "SELECT COUNT(*) AS n FROM audit_log WHERE action = 'import_maintainer_report_computed'",
+      )
+      .get() as { n: number };
+    expect(audit.n).toBe(0);
+  });
+});

@@ -11,6 +11,7 @@ import {
   annexKeyDeclaredSize,
   compareManifestToListing,
   isKeyPresentAtDeclaredSize,
+  parseManifestFiles,
 } from "../src/services/import-integrity";
 
 describe("annexKeyDeclaredSize", () => {
@@ -149,5 +150,40 @@ describe("compareManifestToListing", () => {
     expect(result.presentCount).toBe(2);
     expect(result.missingKeys).toEqual(["SHA256E-s20--b.edf"]);
     expect(result.zeroByteKeys).toEqual(["SHA256E-s20--b.edf"]);
+  });
+});
+
+describe("parseManifestFiles", () => {
+  test("returns the files map when present", () => {
+    const json = JSON.stringify({
+      dataset_id: "on000001",
+      files: { "sub-01/eeg/a.edf": { key: "SHA256E-s10--a.edf", size: 10 } },
+    });
+    expect(parseManifestFiles(json)).toEqual({
+      "sub-01/eeg/a.edf": { key: "SHA256E-s10--a.edf", size: 10 },
+    });
+  });
+
+  test("returns null for unparseable JSON (not {})", () => {
+    expect(parseManifestFiles("not json")).toBeNull();
+    expect(parseManifestFiles("")).toBeNull();
+  });
+
+  test("returns null for a manifest that parses but has no 'files' key (not {}) -- the bug this guards", () => {
+    // Before the fix, `parsed.files ?? {}` turned this into an empty expected
+    // set, which compareManifestToListing reports as complete:true --
+    // exactly wrong for a malformed manifest.
+    const json = JSON.stringify({ dataset_id: "on000001", version: "1.0.0" });
+    expect(parseManifestFiles(json)).toBeNull();
+  });
+
+  test("returns null when files is explicitly null", () => {
+    const json = JSON.stringify({ dataset_id: "on000001", files: null });
+    expect(parseManifestFiles(json)).toBeNull();
+  });
+
+  test("returns {} when files is explicitly an empty object (genuinely zero files, distinct from missing)", () => {
+    const json = JSON.stringify({ dataset_id: "on000001", files: {} });
+    expect(parseManifestFiles(json)).toEqual({});
   });
 });
