@@ -46,8 +46,12 @@ CREATE TABLE dataset_versions (
 );
 `;
 
-// The endpoint's default (no --older-than) candidate predicate. Kept identical
-// here; the test fails loudly if the endpoint scoping ever diverges.
+// The endpoint's default (no --older-than) candidate predicate, hand-copied
+// here for pinning the exact write/candidate logic in isolation. NOTE: this
+// copy can silently drift from the real handler without failing anything --
+// the actual Hono route is exercised for real (real DB, real middleware) in
+// backend/test/data-integrity-sweep-route.test.ts, which is the guard against
+// that drift; keep the two in sync when the endpoint's SQL changes.
 const CANDIDATE_SQL = `SELECT d.dataset_id
    FROM datasets d
    WHERE d.github_repo IS NOT NULL
