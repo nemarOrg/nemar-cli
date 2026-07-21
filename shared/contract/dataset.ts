@@ -61,14 +61,27 @@ export const catalogItemSchema = z
     tasks: z.string().optional(),
     authors: z.string().optional(),
     license: z.string().optional(),
-    // #895: value is fixed in phase 4 (annex-blind sizes); the SHAPE is stable.
+    // #895: value is fixed by #970 (epic #967 Phase 3) -- file_size now sources
+    // from the version manifest's declared total, not the annex-blind S3-objects
+    // sum; the SHAPE was stable throughout and stays so here.
     file_size: z.number().nonnegative(),
     file_size_formatted: z.string().optional(),
+    // Honest total file count (manifest-first, S3-sum fallback for pre-manifest
+    // datasets), added alongside data_complete/bytes_present in #970. Absent on
+    // older backends.
+    total_files: z.number().nonnegative().nullable().optional(),
     num_citations: z.number().int().nonnegative().optional(),
     n_channels: z.number().int().nullable().optional(),
     electrode_system: z.string().nullable().optional(),
     has_hed: zeroOneNullable.optional(),
     hed_version: z.string().nullable().optional(),
+    // Data completeness of the latest version (#970): 1 = every annex-keyed
+    // manifest entry verified present at its declared size, 0 = incomplete (the
+    // #967 signature), null = not audited yet.
+    data_complete: zeroOneNullable.optional(),
+    // Actual bytes present in S3 (#970) -- distinct from file_size when
+    // data_complete=0.
+    bytes_present: z.number().nonnegative().nullable().optional(),
     // Canonical output is the vX.Y.Z tag; coercing schema keeps today's bare
     // rows valid. null when the dataset has no published version yet.
     latest_version: versionTagSchema.nullable().optional(),
