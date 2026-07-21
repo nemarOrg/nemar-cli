@@ -23,12 +23,14 @@ import {
   writeDatasetCatalogFields,
   writeDatasetMetadataColumns,
   writeVersionHed,
+  writeVersionSize,
 } from "./dataset-metadata-columns.js";
 import { reembedDatasetVector } from "./dataset-search.js";
 import { enrichDataset } from "./enrich-dataset.js";
 import { exemplarOrFragment, isExemplarPublishAllowed } from "./exemplar.js";
 import { getDatasetsToken } from "./github-auth.js";
 import { getBidsTreeStats, getBlobContent, getTreeAtRef } from "./github.js";
+import { verifyDatasetVersionS3 } from "./import-integrity.js";
 import { errorMessage } from "./repo-metadata.js";
 import { getDatasetS3Stats } from "./s3.js";
 
@@ -176,6 +178,24 @@ export async function refreshDatasetMetadata(
   let metadataColumnsError: string | undefined;
   let metadataColumnsWritten = false;
   try {
+    // Resolve the published version this refresh targets, shared by every
+    // per-version write below (HED, honest size). `version` (freshly minted by
+    // the caller) wins; otherwise fall back to the latest published version by
+    // created_at -- an unpublished dataset (no dataset_versions row) resolves to
+    // null and every per-version write below is skipped, not a spurious 0-row
+    // error.
+    const targetVersion =
+      version ??
+      (
+        await db
+          .prepare(
+            "SELECT version FROM dataset_versions WHERE dataset_id = ? ORDER BY created_at DESC LIMIT 1",
+          )
+          .bind(datasetId)
+          .first<{ version: string }>()
+      )?.version ??
+      null;
+
     // Resolve modalities/subject_count/tasks truncation-immune (#820, #827): the
     // recursive `tree` above can be truncated on large datasets (derivatives/
     // fills the cap, dropping raw sub-*/<datatype>/), which gave on006110
@@ -202,6 +222,31 @@ export async function refreshDatasetMetadata(
         `[reindex] BIDS tree walk failed for ${datasetId}; using tree paths: ${errorMessage(err)}`,
       );
     }
+
+    // Honest size/completeness from the version manifest (#970, epic #967 Phase
+    // 3): declared logical size, not the annex-blind S3-objects sum. Only
+    // meaningful for a published version; `manifestTotals`/`dataComplete` stay
+    // undefined for an unpublished dataset or when no manifest can be verified,
+    // so computeDatasetMetadataColumns falls back to `s3StatsForColumns`
+    // (pre-manifest datasets) and data_complete stays NULL (not audited).
+    let manifestTotals: { bytes: number; files: number } | undefined;
+    let bytesPresentOverride: number | undefined;
+    let dataCompleteOverride: boolean | undefined;
+    if (targetVersion) {
+      try {
+        const integrity = await verifyDatasetVersionS3(env, datasetId, targetVersion);
+        if (integrity.version) {
+          manifestTotals = { bytes: integrity.declaredBytes, files: integrity.declaredFiles };
+          bytesPresentOverride = integrity.bytesPresent;
+          dataCompleteOverride = integrity.complete;
+        }
+      } catch (err) {
+        console.warn(
+          `[reindex] Data-integrity verify failed for ${datasetId}@${targetVersion}: ${errorMessage(err)}`,
+        );
+      }
+    }
+
     const cols = computeDatasetMetadataColumns({
       treePaths: tree.map((f) => f.path),
       participantsTsv,
@@ -213,29 +258,27 @@ export async function refreshDatasetMetadata(
       electrodeSystem: electrodeSystemOverride,
       hasHed: hasHedOverride,
       hedVersion: hedVersionOverride,
+      manifestTotals,
+      bytesPresent: bytesPresentOverride,
+      dataComplete: dataCompleteOverride,
     });
     await writeDatasetMetadataColumns(db, datasetId, cols);
     // Persist the per-version HED row (#869) only when we actually classified it
     // (cols.has_hed != null) AND the dataset has a published version to stamp.
-    // The reindex/admin path passes no `version`, so resolve the latest here and
-    // skip an unpublished dataset (no dataset_versions row); otherwise
-    // writeVersionHed's latest-fallback would match 0 rows and log a spurious
-    // error. Mirrors the phase-3 sweep, which guards via its latest_version select.
-    if (cols.has_hed != null) {
-      const targetVersion =
-        version ??
-        (
-          await db
-            .prepare(
-              "SELECT version FROM dataset_versions WHERE dataset_id = ? ORDER BY created_at DESC LIMIT 1",
-            )
-            .bind(datasetId)
-            .first<{ version: string }>()
-        )?.version ??
-        null;
-      if (targetVersion) {
-        await writeVersionHed(db, datasetId, targetVersion, cols.has_hed, cols.hed_version);
-      }
+    // Mirrors the phase-3 sweep, which guards via its latest_version select.
+    if (cols.has_hed != null && targetVersion) {
+      await writeVersionHed(db, datasetId, targetVersion, cols.has_hed, cols.hed_version);
+    }
+    // Persist the per-version honest size (#970) only when the manifest verify
+    // above actually resolved a version -- same guard shape as HED, so an
+    // unpublished dataset or an unverifiable manifest never 0-rows this write.
+    if (manifestTotals && targetVersion) {
+      await writeVersionSize(db, datasetId, targetVersion, {
+        file_size: cols.file_size,
+        total_files: cols.total_files,
+        bytes_present: cols.bytes_present,
+        data_complete: cols.data_complete,
+      });
     }
     metadataColumnsWritten = true;
     console.log(
