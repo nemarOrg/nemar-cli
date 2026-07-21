@@ -225,20 +225,22 @@ export async function refreshDatasetMetadata(
 
     // Honest size/completeness from the version manifest (#970, epic #967 Phase
     // 3): declared logical size, not the annex-blind S3-objects sum. Only
-    // meaningful for a published version; `manifestTotals`/`dataComplete` stay
+    // meaningful for a published version; `manifestVerification` stays
     // undefined for an unpublished dataset or when no manifest can be verified,
     // so computeDatasetMetadataColumns falls back to `s3StatsForColumns`
     // (pre-manifest datasets) and data_complete stays NULL (not audited).
-    let manifestTotals: { bytes: number; files: number } | undefined;
-    let bytesPresentOverride: number | undefined;
-    let dataCompleteOverride: boolean | undefined;
+    let manifestVerification:
+      | { totals: { bytes: number; files: number }; bytesPresent: number; complete: boolean }
+      | undefined;
     if (targetVersion) {
       try {
         const integrity = await verifyDatasetVersionS3(env, datasetId, targetVersion);
         if (integrity.version) {
-          manifestTotals = { bytes: integrity.declaredBytes, files: integrity.declaredFiles };
-          bytesPresentOverride = integrity.bytesPresent;
-          dataCompleteOverride = integrity.complete;
+          manifestVerification = {
+            totals: { bytes: integrity.declaredBytes, files: integrity.declaredFiles },
+            bytesPresent: integrity.bytesPresent,
+            complete: integrity.complete,
+          };
         }
       } catch (err) {
         console.warn(
@@ -258,9 +260,7 @@ export async function refreshDatasetMetadata(
       electrodeSystem: electrodeSystemOverride,
       hasHed: hasHedOverride,
       hedVersion: hedVersionOverride,
-      manifestTotals,
-      bytesPresent: bytesPresentOverride,
-      dataComplete: dataCompleteOverride,
+      manifestVerification,
     });
     await writeDatasetMetadataColumns(db, datasetId, cols);
     // Persist the per-version HED row (#869) only when we actually classified it
@@ -272,7 +272,7 @@ export async function refreshDatasetMetadata(
     // Persist the per-version honest size (#970) only when the manifest verify
     // above actually resolved a version -- same guard shape as HED, so an
     // unpublished dataset or an unverifiable manifest never 0-rows this write.
-    if (manifestTotals && targetVersion) {
+    if (manifestVerification && targetVersion) {
       await writeVersionSize(db, datasetId, targetVersion, {
         file_size: cols.file_size,
         total_files: cols.total_files,

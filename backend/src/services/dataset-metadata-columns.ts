@@ -37,8 +37,8 @@ export interface DatasetMetadataColumns {
   /** Actual bytes present in S3, from the same LIST used to verify
    *  completeness -- distinct from file_size when data_complete=0 (#970). */
   bytes_present: number | null;
-  /** Data completeness as 0/1, or null when not audited yet (#970). */
-  data_complete: number | null;
+  /** Data completeness, or null when not audited yet (#970). */
+  data_complete: 0 | 1 | null;
 }
 
 export interface MetadataColumnInputs {
@@ -88,24 +88,34 @@ export interface MetadataColumnInputs {
    */
   hedVersion?: string;
   /**
-   * Honest logical totals from the version manifest -- summed `files[].size`
-   * (declared size, not what's actually in S3) and the key count -- via
-   * `verifyDatasetVersionS3` (#970). When provided this WINS over `s3Stats`
-   * for file_size/total_files; omit for a pre-manifest dataset where
-   * `s3Stats` (the S3-objects sum) is the only available signal.
+   * The full result of a `verifyDatasetVersionS3` check (#970), collapsed into
+   * ONE optional object rather than three independent optional fields --
+   * verifyDatasetVersionS3 either fully resolves a manifest and returns all
+   * three together, or it doesn't and returns none, so a caller can never
+   * legitimately have e.g. `complete` without `totals`. Splitting them back
+   * into independent optionals would make that invalid combination
+   * representable again (and it happened: an earlier version of this type let
+   * a caller pass `dataComplete` with no `manifestTotals`, producing
+   * data_complete=1 while file_size stayed null -- a state the column's own
+   * doc says shouldn't exist). Omit the whole object for a pre-manifest
+   * dataset or an unverifiable one; `s3Stats` (the S3-objects sum) is then the
+   * only available signal for file_size/total_files/bytes_present, and
+   * data_complete stays NULL (not audited).
    */
-  manifestTotals?: { bytes: number; files: number };
-  /**
-   * Actual bytes present in S3, from the same LIST `verifyDatasetVersionS3`
-   * used to check completeness (#970). Omit to fall back to `s3Stats.totalSize`.
-   */
-  bytesPresent?: number;
-  /**
-   * Whether every annex-keyed manifest entry is present at its declared size
-   * (#970, `verifyDatasetVersionS3().complete`). Omit when no manifest could
-   * be verified -> column stays NULL (not audited yet).
-   */
-  dataComplete?: boolean;
+  manifestVerification?: {
+    /** Honest declared totals: summed `files[].size` (declared size, not what's
+     *  actually in S3) and the key count. WINS over `s3Stats` for
+     *  file_size/total_files. */
+    totals: { bytes: number; files: number };
+    /** Actual bytes present in S3, from the same LIST used to check
+     *  completeness. WINS over `s3Stats.totalSize` for bytes_present. Visually
+     *  distinct from `totals.bytes` (declared) so the two are never transposed
+     *  at the call site. */
+    bytesPresent: number;
+    /** Whether every annex-keyed manifest entry is present at its declared size
+     *  (`verifyDatasetVersionS3().complete`). */
+    complete: boolean;
+  };
 }
 
 /**
@@ -123,9 +133,11 @@ export interface MetadataColumnInputs {
  * - tasks: the `tasks` override UNIONed with `extractTasks(treePaths)`
  *   (`backend/src/services/bids-tree.ts`) so neither a missed sample subject
  *   nor a truncated tree loses one; else just the tree-path tasks. Sorted, deduped.
- * - file_size / total_files: the honest version-manifest totals
- *   (`manifestTotals`, #970) when available; else `getDatasetS3Stats` output
- *   (`backend/src/services/s3.ts:251`) for pre-manifest datasets.
+ * - file_size / total_files / bytes_present / data_complete: the honest
+ *   `manifestVerification` result (#970) when available; else
+ *   `getDatasetS3Stats` output (`backend/src/services/s3.ts:251`) for
+ *   file_size/total_files/bytes_present on a pre-manifest dataset, and
+ *   data_complete stays null (not audited).
  */
 export function computeDatasetMetadataColumns(input: MetadataColumnInputs): DatasetMetadataColumns {
   // Prefer the truncation-immune walk result (#820); fall back to detecting
@@ -179,11 +191,11 @@ export function computeDatasetMetadataColumns(input: MetadataColumnInputs): Data
     age_max: ageMax,
     // Manifest-first (#970 honest size), S3-objects-sum fallback for
     // pre-manifest datasets.
-    file_size: input.manifestTotals
-      ? input.manifestTotals.bytes
+    file_size: input.manifestVerification
+      ? input.manifestVerification.totals.bytes
       : (input.s3Stats?.totalSize ?? null),
-    total_files: input.manifestTotals
-      ? input.manifestTotals.files
+    total_files: input.manifestVerification
+      ? input.manifestVerification.totals.files
       : (input.s3Stats?.objectCount ?? null),
     tasks: tasksArr.length ? tasksArr.join(",") : null,
     n_channels: input.nChannels ?? null,
@@ -193,10 +205,13 @@ export function computeDatasetMetadataColumns(input: MetadataColumnInputs): Data
     // true -> 1 = checked, has HED.
     has_hed: input.hasHed == null ? null : input.hasHed ? 1 : 0,
     hed_version: input.hedVersion ?? null,
-    bytes_present: input.bytesPresent ?? input.s3Stats?.totalSize ?? null,
+    bytes_present: input.manifestVerification
+      ? input.manifestVerification.bytesPresent
+      : (input.s3Stats?.totalSize ?? null),
     // Same tri-state idiom as has_hed: not verified -> null; verified
     // incomplete -> 0; verified complete -> 1.
-    data_complete: input.dataComplete == null ? null : input.dataComplete ? 1 : 0,
+    data_complete:
+      input.manifestVerification == null ? null : input.manifestVerification.complete ? 1 : 0,
   };
 }
 

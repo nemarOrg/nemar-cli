@@ -422,6 +422,19 @@ export function registerImportRoutes(admin: AdminRouter): void {
       details: JSON.stringify(verified),
     }).run();
 
-    return c.json({ dataset_id: datasetId, ...verified });
+    // Explicit pick, not a spread: verifyImportS3 delegates to
+    // verifyDatasetVersionS3 (#970), whose runtime result carries extra
+    // bytesPresent/declaredBytes/declaredFiles/version fields beyond the
+    // declared ImportIntegrityResult return type. A spread would silently
+    // leak those onto the wire even though the CLI's ImportVerifyResponse
+    // (src/lib/api/admin.ts) doesn't declare them.
+    return c.json({
+      dataset_id: datasetId,
+      complete: verified.complete,
+      missingKeys: verified.missingKeys,
+      zeroByteKeys: verified.zeroByteKeys,
+      expectedCount: verified.expectedCount,
+      presentCount: verified.presentCount,
+    });
   });
 }

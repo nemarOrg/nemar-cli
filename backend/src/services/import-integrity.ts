@@ -155,31 +155,39 @@ export interface DatasetVersionIntegrityResult extends ImportIntegrityResult {
   version: string | null;
 }
 
+/** A resolved, parsed manifest -- version and files travel together so
+ *  "we have files but no version" (or vice versa) is unrepresentable. */
+export interface ResolvedManifest {
+  version: string;
+  files: Record<string, ExpectedManifestFile>;
+}
+
 /**
- * Pure half of {@link verifyDatasetVersionS3}: given the parsed manifest
- * (or null) and the live `<id>/objects/` listing, compute the completeness
- * comparison plus the honest-size totals. Split out from the I/O wrapper so
- * the arithmetic -- which the S3-listing seam (`listObjectPages` hardcodes a
- * `*.s3.*.amazonaws.com` host with no local-test override) can't exercise --
- * is directly unit-testable with synthetic data. `resolvedVersion` is echoed
- * back as `version` only when `expected` is non-null, matching
- * {@link verifyDatasetVersionS3}'s "no usable manifest -> version: null"
- * contract. Exported for testing.
+ * Pure half of {@link verifyDatasetVersionS3}: given the resolved manifest
+ * (or null when none could be resolved/parsed) and the live `<id>/objects/`
+ * listing, compute the completeness comparison plus the honest-size totals.
+ * Split out from the I/O wrapper so the arithmetic -- which the S3-listing
+ * seam (`listObjectPages` hardcodes a `*.s3.*.amazonaws.com` host with no
+ * local-test override) can't exercise -- is directly unit-testable with
+ * synthetic data. `manifest` being a single nullable object (rather than
+ * separate `expected`/`resolvedVersion` params) makes the invalid combo --
+ * files present but no version, or vice versa -- unrepresentable at the type
+ * level; `version` on the result is simply `manifest?.version ?? null`.
+ * Exported for testing.
  */
 export function computeVersionIntegrity(
-  expected: Record<string, ExpectedManifestFile> | null,
+  manifest: ResolvedManifest | null,
   existing: Map<string, number>,
-  resolvedVersion: string | null,
 ): DatasetVersionIntegrityResult {
-  const comparison = compareManifestToListing(expected, existing);
+  const comparison = compareManifestToListing(manifest?.files ?? null, existing);
 
   let bytesPresent = 0;
   for (const size of existing.values()) bytesPresent += size;
 
   let declaredBytes = 0;
   let declaredFiles = 0;
-  if (expected) {
-    for (const file of Object.values(expected)) {
+  if (manifest) {
+    for (const file of Object.values(manifest.files)) {
       declaredBytes += file.size;
       declaredFiles++;
     }
@@ -190,7 +198,7 @@ export function computeVersionIntegrity(
     bytesPresent,
     declaredBytes,
     declaredFiles,
-    version: expected ? resolvedVersion : null,
+    version: manifest?.version ?? null,
   };
 }
 
@@ -243,7 +251,10 @@ export async function verifyDatasetVersionS3(
   }
 
   const existing = await listObjectSizes(options, `${datasetId}/objects/`);
-  return computeVersionIntegrity(expected, existing, resolvedVersion);
+  return computeVersionIntegrity(
+    expected && resolvedVersion ? { version: resolvedVersion, files: expected } : null,
+    existing,
+  );
 }
 
 /**
