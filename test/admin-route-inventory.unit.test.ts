@@ -71,6 +71,7 @@ const EXPECTED_ENTRIES: Record<string, number> = {
   "POST /datasets/zarr-sweep": 1,
   "POST /datasets/channel-montage-sweep": 1,
   "POST /datasets/hed-sweep": 1,
+  "POST /datasets/data-integrity-sweep": 1,
   "POST /doctor/scan": 1,
   "POST /doctor/fix": 1,
   "POST /datasets/:id/reset": 1,
@@ -111,7 +112,7 @@ describe("admin route inventory", () => {
   });
 
   test("entry total is pinned", () => {
-    expect(adminRoutes.routes.length).toBe(82);
+    expect(adminRoutes.routes.length).toBe(83);
   });
 
   // The count pin above can't see a SWAP of the two router-level middleware
