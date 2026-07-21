@@ -118,6 +118,16 @@ export interface Dataset {
   has_hed?: number | null;
   /** Declared HEDVersion of the latest version (#869), or null. */
   hed_version?: string | null;
+  /** Honest total file count (#970: manifest-first, S3-sum fallback for
+      pre-manifest datasets). Older backends omit it. */
+  total_files?: number | null;
+  /** Data completeness of the latest version (#970): 1 = every annex-keyed
+      manifest entry verified present at its declared size, 0 = incomplete
+      (the #967 signature), null = not audited yet. Older backends omit it. */
+  data_complete?: number | null;
+  /** Actual bytes present in S3 (#970) -- distinct from file_size when
+      data_complete=0. */
+  bytes_present?: number | null;
 }
 
 export interface DatasetsListResponse {
@@ -142,6 +152,8 @@ export interface DatasetListFilters {
   hasDoi?: boolean;
   /** Only datasets with HED annotations (#869). Serialized as has_hed=1. */
   hasHed?: boolean;
+  /** Only datasets verified data-complete (#970). Serialized as data_complete=1. */
+  dataComplete?: boolean;
   recent?: number;
   /** Comma-separated license tiers (public, attribution, sharealike,
       noncommercial, noderiv, unknown), OR semantics. #653. */
@@ -211,6 +223,7 @@ export async function listDatasets(
   if (filters.license) params.set("license", filters.license);
   if (filters.hasDoi) params.set("has_doi", "true");
   if (filters.hasHed) params.set("has_hed", "1");
+  if (filters.dataComplete) params.set("data_complete", "1");
   if (filters.recent) params.set("recent", String(filters.recent));
   if (filters.sort) params.set("sort", filters.sort);
   if (filters.limit != null) params.set("limit", String(filters.limit));
