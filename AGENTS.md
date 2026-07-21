@@ -510,6 +510,10 @@ nemar admin import rollback <id>      # Roll back a failed/quarantined import (d
 nemar admin import retry <id>         # Reset a failed/quarantined/incomplete import to 'preparing' for re-dispatch (also un-blocklists)
 nemar admin import verify <id>        # Force a per-key S3 integrity check now; seeds the retry lane or confirms health
 
+# Admin: recover 0-byte OpenNeuro imports (epic #967 Phase 5, #972)
+nemar admin recover [ids...]          # Re-copy imports whose upstream is accessible; dry-run by default, --execute to verify+dispatch
+nemar admin recover status [ids...]   # Report data_complete/bytes_present progress for recover targets
+
 # Admin: governance fleet (epic #713)
 nemar admin fleet drift               # Report repos off the governance spec
 nemar admin fleet enforce [id]        # Bring repos to spec (single or --all; dry-run by default)
