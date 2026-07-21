@@ -18,6 +18,7 @@ import { type GitHubRepo, createRepository, deleteRepository } from "../../servi
 import { getDatasetsToken } from "../../services/github-auth";
 import { verifyImportS3 } from "../../services/import-integrity";
 import { IMPORT_STATUSES } from "../../services/import-recovery";
+import { recoverRow } from "../../services/import-retry";
 import { hasRole } from "../../types/bindings";
 import type { AdminRouter } from "./shared";
 
@@ -375,9 +376,13 @@ export function registerImportRoutes(admin: AdminRouter): void {
   /**
    * POST /admin/imports/:id/verify - force verifyImportS3 now (#969). Lets an
    * operator seed a specific dataset into the retry lane without waiting for
-   * the reclassification sweep to reach it, or confirm a `complete` row is
-   * genuinely healthy. Flips `status` to `incomplete` or back to `complete`
-   * accordingly; always stamps `integrity_checked_at`.
+   * the reclassification sweep to reach it, or confirm a row is genuinely
+   * healthy. On verified-complete, recovers UNCONDITIONALLY (via recoverRow)
+   * regardless of prior status: the retry engine blocklists a row WITHOUT
+   * changing its status (a blocklisted row can be `quarantined` or `failed`,
+   * not just `incomplete`), so gating recovery on status='incomplete' would
+   * silently no-op for exactly the rows this endpoint exists to un-park.
+   * Always stamps `integrity_checked_at`.
    */
   admin.post("/imports/:id/verify", async (c) => {
     const datasetId = c.req.param("id");
@@ -389,19 +394,7 @@ export function registerImportRoutes(admin: AdminRouter): void {
     const verified = await verifyImportS3(c.env, datasetId);
 
     if (verified.complete) {
-      await c.env.DB.prepare(
-        `UPDATE import_jobs
-            SET status = CASE WHEN status = 'incomplete' THEN 'complete' ELSE status END,
-                blocklisted = CASE WHEN status = 'incomplete' THEN 0 ELSE blocklisted END,
-                blocklist_reason = CASE WHEN status = 'incomplete' THEN NULL ELSE blocklist_reason END,
-                first_incomplete_at = CASE WHEN status = 'incomplete' THEN NULL ELSE first_incomplete_at END,
-                next_retry_at = CASE WHEN status = 'incomplete' THEN NULL ELSE next_retry_at END,
-                integrity_checked_at = datetime('now'),
-                updated_at = datetime('now')
-          WHERE dataset_id = ?`,
-      )
-        .bind(datasetId)
-        .run();
+      await recoverRow(c.env.DB, datasetId);
     } else if (job.status === "complete") {
       await c.env.DB.prepare(
         `UPDATE import_jobs
