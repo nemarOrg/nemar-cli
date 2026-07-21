@@ -109,7 +109,12 @@ describe("writeDatasetMetadataColumns honest-size columns", () => {
       .prepare(
         "SELECT file_size, total_files, bytes_present, data_complete FROM datasets WHERE dataset_id = 'nm000132'",
       )
-      .get() as { file_size: number; total_files: number; bytes_present: number; data_complete: number };
+      .get() as {
+      file_size: number;
+      total_files: number;
+      bytes_present: number;
+      data_complete: number;
+    };
     expect(row.file_size).toBe(12_000_000_000);
     expect(row.total_files).toBe(400);
     expect(row.bytes_present).toBe(36);
@@ -150,7 +155,11 @@ describe("writeDatasetMetadataColumns honest-size columns", () => {
     const db = freshDb();
     seed(db);
     const d1 = realD1(db);
-    await writeDatasetMetadataColumns(d1, "nm000132", cols({ data_complete: 0, bytes_present: 36 }));
+    await writeDatasetMetadataColumns(
+      d1,
+      "nm000132",
+      cols({ data_complete: 0, bytes_present: 36 }),
+    );
     // A re-verify after the missing data is restored -> 1 must win over the
     // stored 0 (0/1 are both non-NULL, so COALESCE does not preserve either way).
     await writeDatasetMetadataColumns(
@@ -181,12 +190,20 @@ describe("writeVersionSize", () => {
       .prepare(
         "SELECT file_size, bytes_present, data_complete FROM dataset_versions WHERE dataset_id='nm000132' AND version='v1.1.1'",
       )
-      .get() as { file_size: number | null; bytes_present: number | null; data_complete: number | null };
+      .get() as {
+      file_size: number | null;
+      bytes_present: number | null;
+      data_complete: number | null;
+    };
     const v1 = db
       .prepare(
         "SELECT file_size, bytes_present, data_complete FROM dataset_versions WHERE dataset_id='nm000132' AND version='v1.0.0'",
       )
-      .get() as { file_size: number | null; bytes_present: number | null; data_complete: number | null };
+      .get() as {
+      file_size: number | null;
+      bytes_present: number | null;
+      data_complete: number | null;
+    };
     expect(v2.file_size).toBe(12_000_000_000);
     expect(v2.data_complete).toBe(1);
     expect(v1.file_size).toBeNull(); // older version untouched
@@ -204,10 +221,14 @@ describe("writeVersionSize", () => {
       data_complete: 0,
     });
     const v2 = db
-      .prepare("SELECT data_complete FROM dataset_versions WHERE dataset_id='nm000132' AND version='v1.1.1'")
+      .prepare(
+        "SELECT data_complete FROM dataset_versions WHERE dataset_id='nm000132' AND version='v1.1.1'",
+      )
       .get() as { data_complete: number | null };
     const v1 = db
-      .prepare("SELECT data_complete FROM dataset_versions WHERE dataset_id='nm000132' AND version='v1.0.0'")
+      .prepare(
+        "SELECT data_complete FROM dataset_versions WHERE dataset_id='nm000132' AND version='v1.0.0'",
+      )
       .get() as { data_complete: number | null };
     expect(v2.data_complete).toBe(0); // latest got the write
     expect(v1.data_complete).toBeNull(); // v1.0.0 left alone
@@ -235,7 +256,11 @@ describe("writeVersionSize", () => {
       .prepare(
         "SELECT file_size, bytes_present, data_complete FROM dataset_versions WHERE dataset_id='nm000132' AND version='v1.1.1'",
       )
-      .get() as { file_size: number | null; bytes_present: number | null; data_complete: number | null };
+      .get() as {
+      file_size: number | null;
+      bytes_present: number | null;
+      data_complete: number | null;
+    };
     expect(v2.file_size).toBe(12_000_000_000);
     expect(v2.bytes_present).toBe(12_000_000_000);
     expect(v2.data_complete).toBe(1);

@@ -85,7 +85,9 @@ describe("migration 0059_data_complete_columns", () => {
       "UPDATE datasets SET bytes_present = 1024, data_complete = 1, data_checked_at = '2026-07-21T00:00:00Z' WHERE dataset_id = ?",
     ).run("nm000132");
     const row = db
-      .prepare("SELECT bytes_present, data_complete, data_checked_at FROM datasets WHERE dataset_id = ?")
+      .prepare(
+        "SELECT bytes_present, data_complete, data_checked_at FROM datasets WHERE dataset_id = ?",
+      )
       .get("nm000132") as {
       bytes_present: number;
       data_complete: number;
@@ -101,7 +103,9 @@ describe("migration 0059_data_complete_columns", () => {
     const db = freshDb();
     seedDataset(db, "nm000999");
     const row = db
-      .prepare("SELECT bytes_present, data_complete, data_checked_at FROM datasets WHERE dataset_id = ?")
+      .prepare(
+        "SELECT bytes_present, data_complete, data_checked_at FROM datasets WHERE dataset_id = ?",
+      )
       .get("nm000999") as {
       bytes_present: number | null;
       data_complete: number | null;
@@ -134,7 +138,9 @@ describe("migration 0059_data_complete_columns", () => {
       "INSERT INTO dataset_versions (dataset_id, version, doi, data_complete) VALUES (?, 'v1.0.0', 'doi:10.82901/NEMAR.nm000999.v1.0.0', 0)",
     ).run("nm000999");
     const vrow = db
-      .prepare("SELECT data_complete FROM dataset_versions WHERE dataset_id = ? AND version = 'v1.0.0'")
+      .prepare(
+        "SELECT data_complete FROM dataset_versions WHERE dataset_id = ? AND version = 'v1.0.0'",
+      )
       .get("nm000999") as { data_complete: number | null };
     expect(vrow.data_complete).toBe(0);
     expect(vrow.data_complete).not.toBeNull();

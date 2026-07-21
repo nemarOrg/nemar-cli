@@ -77,9 +77,9 @@ const candidates = (db: Database) =>
   (db.query(CANDIDATE_SQL).all() as { dataset_id: string }[]).map((r) => r.dataset_id);
 
 const candidatesOlderThan = (db: Database, days: number) =>
-  (
-    db.query(CANDIDATE_SQL_OLDER_THAN).all(`-${days} days`) as { dataset_id: string }[]
-  ).map((r) => r.dataset_id);
+  (db.query(CANDIDATE_SQL_OLDER_THAN).all(`-${days} days`) as { dataset_id: string }[]).map(
+    (r) => r.dataset_id,
+  );
 
 /** Mirror the endpoint's per-dataset datasets write for a verified candidate. */
 function applyVerified(db: Database, id: string, dataComplete: 0 | 1, bytesPresent: number) {
@@ -222,9 +222,9 @@ describe("data-integrity sweep", () => {
     // The reindex path classifies data_complete but leaves data_checked_at NULL,
     // so the row is still a sweep candidate. A transient verify miss in the sweep
     // must only stamp -- never overwrite the existing data_complete with NULL.
-    db.query("UPDATE datasets SET data_complete = 1, bytes_present = 12000000000 WHERE dataset_id = ?").run(
-      "nm000300",
-    );
+    db.query(
+      "UPDATE datasets SET data_complete = 1, bytes_present = 12000000000 WHERE dataset_id = ?",
+    ).run("nm000300");
     expect(candidates(db)).toContain("nm000300"); // unstamped -> still a candidate
     applyUnverifiable(db, "nm000300"); // sweep verify fails (e.g. S3 error)
     const row = db
@@ -288,13 +288,13 @@ describe("data-integrity sweep", () => {
 
     test("with --older-than, a stale checked row becomes a candidate again; a fresh one does not", () => {
       applyVerified(db, "nm000300", 1, 12_000_000_000);
-      db.query("UPDATE datasets SET data_checked_at = datetime('now', '-40 days') WHERE dataset_id = ?").run(
-        "nm000300",
-      );
+      db.query(
+        "UPDATE datasets SET data_checked_at = datetime('now', '-40 days') WHERE dataset_id = ?",
+      ).run("nm000300");
       applyUnverifiable(db, "on000301");
-      db.query("UPDATE datasets SET data_checked_at = datetime('now', '-1 days') WHERE dataset_id = ?").run(
-        "on000301",
-      );
+      db.query(
+        "UPDATE datasets SET data_checked_at = datetime('now', '-1 days') WHERE dataset_id = ?",
+      ).run("on000301");
 
       // --older-than=30: nm000300 (40 days stale) re-qualifies; on000301 (1 day) does not.
       expect(candidatesOlderThan(db, 30)).toEqual(["nm000300"]);
@@ -304,9 +304,9 @@ describe("data-integrity sweep", () => {
 
     test("a re-verified row can flip data_complete (e.g. complete -> incomplete after later corruption)", () => {
       applyVerified(db, "nm000300", 1, 12_000_000_000);
-      db.query("UPDATE datasets SET data_checked_at = datetime('now', '-40 days') WHERE dataset_id = ?").run(
-        "nm000300",
-      );
+      db.query(
+        "UPDATE datasets SET data_checked_at = datetime('now', '-40 days') WHERE dataset_id = ?",
+      ).run("nm000300");
       // Take on000301 out of the picture (recently checked) so this test isolates
       // the nm000300 re-audit flip.
       applyUnverifiable(db, "on000301");

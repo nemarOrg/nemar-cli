@@ -179,7 +179,9 @@ export function computeDatasetMetadataColumns(input: MetadataColumnInputs): Data
     age_max: ageMax,
     // Manifest-first (#970 honest size), S3-objects-sum fallback for
     // pre-manifest datasets.
-    file_size: input.manifestTotals ? input.manifestTotals.bytes : (input.s3Stats?.totalSize ?? null),
+    file_size: input.manifestTotals
+      ? input.manifestTotals.bytes
+      : (input.s3Stats?.totalSize ?? null),
     total_files: input.manifestTotals
       ? input.manifestTotals.files
       : (input.s3Stats?.objectCount ?? null),
@@ -191,7 +193,7 @@ export function computeDatasetMetadataColumns(input: MetadataColumnInputs): Data
     // true -> 1 = checked, has HED.
     has_hed: input.hasHed == null ? null : input.hasHed ? 1 : 0,
     hed_version: input.hedVersion ?? null,
-    bytes_present: input.bytesPresent ?? (input.s3Stats?.totalSize ?? null),
+    bytes_present: input.bytesPresent ?? input.s3Stats?.totalSize ?? null,
     // Same tri-state idiom as has_hed: not verified -> null; verified
     // incomplete -> 0; verified complete -> 1.
     data_complete: input.dataComplete == null ? null : input.dataComplete ? 1 : 0,
