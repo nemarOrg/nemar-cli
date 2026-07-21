@@ -15,7 +15,7 @@ import { z } from "zod";
 import { auditLogStatement } from "../../db/audit-log";
 import { SYSTEM_USER_ID } from "../../lib/constants";
 import { shouldSkipArchive } from "../../services/archive-policy";
-import { writeVersionHed } from "../../services/dataset-metadata-columns";
+import { writeVersionHed, writeVersionSize } from "../../services/dataset-metadata-columns";
 import {
   DatasetReindexError,
   type ReindexFilter,
@@ -35,6 +35,7 @@ import {
   triggerManifestGeneration,
 } from "../../services/github";
 import { getDatasetsToken } from "../../services/github-auth";
+import { verifyDatasetVersionS3 } from "../../services/import-integrity";
 import { generateManifest } from "../../services/manifest";
 import { buildCoverageReport } from "../../services/manifest-coverage";
 import { errorMessage } from "../../services/repo-metadata";
@@ -617,6 +618,170 @@ export function registerDatasetLifecycleRoutes(admin: AdminRouter): void {
       processed: candidates.length,
       withHed,
       withoutHed,
+      unknown,
+      errors,
+      remaining: remainingRow?.n ?? null,
+    });
+  });
+
+  /**
+   * POST /admin/datasets/data-integrity-sweep?limit=N[&older-than=N] — audits
+   * published datasets against their version manifest (epic #967 Phase 3, #970):
+   * per-key S3 presence at declared size (verifyDatasetVersionS3), writing the
+   * honest bytes_present/data_complete tri-state (migration 0059).
+   *
+   * Unlike hed-sweep this is a GENERAL, RE-RUNNABLE audit, not a one-shot
+   * backfill: `?older-than=<days>` widens candidacy to already-checked rows
+   * older than N days, so bit-rot (an object later deleted/corrupted after a
+   * clean check) gets caught on an ongoing basis, not just once. Without the
+   * flag it behaves like hed-sweep -- drain `data_checked_at IS NULL` and stop.
+   *
+   * Only reads S3 and writes its own D1 columns -- no GitHub dispatch, no
+   * email, no DOI mutation -- so unlike the Phase 2 retry engine (prod-only,
+   * because it dispatches GitHub work and can email) this is safe to run in
+   * every environment, including dev (dev D1 is exemplars-only, so it just
+   * audits the exemplar fleet there).
+   *
+   * Bounded per invocation (default 15, max 30, mirroring hed-sweep's cap: a
+   * manifest fetch + a full `<id>/objects/` LIST is real per-dataset work even
+   * without any GitHub calls). Run repeatedly until `remaining` reaches 0.
+   */
+  admin.post("/datasets/data-integrity-sweep", async (c) => {
+    const db = c.env.DB;
+
+    // ?reset=1 clears every audited row (data_checked_at + the two columns ->
+    // NULL) so a corrected verifier can re-sweep from scratch. datasets-level
+    // only: the per-version dataset_versions rows are overwritten on re-sweep,
+    // same asymmetry hed-sweep's reset uses.
+    if (c.req.query("reset") === "1") {
+      const res = await db
+        .prepare(
+          `UPDATE datasets
+         SET data_checked_at = NULL, data_complete = NULL, bytes_present = NULL
+         WHERE data_checked_at IS NOT NULL`,
+        )
+        .run();
+      return c.json({ reset: res.meta?.changes ?? 0 });
+    }
+
+    const limitRaw = Number.parseInt(c.req.query("limit") || "15", 10);
+    const limit = Number.isFinite(limitRaw) ? Math.min(Math.max(limitRaw, 1), 30) : 15;
+
+    const olderThanRaw = c.req.query("older-than");
+    let olderThanDays: number | undefined;
+    if (olderThanRaw !== undefined) {
+      olderThanDays = Number.parseInt(olderThanRaw, 10);
+      if (!Number.isFinite(olderThanDays) || olderThanDays < 0) {
+        return c.json({ error: `Invalid older-than: ${olderThanRaw}` }, 400);
+      }
+    }
+    // Default: one-shot drain (never-checked rows only). With ?older-than=N:
+    // widen to already-checked rows past the staleness window too -- the
+    // periodic re-audit that closes the rv-silent carry-over gap (Phase 2's
+    // one-shot reclassify never revisits a row once integrity_checked_at is
+    // stamped).
+    const candidacyClause =
+      olderThanDays != null
+        ? "(d.data_checked_at IS NULL OR d.data_checked_at < datetime('now', ?))"
+        : "d.data_checked_at IS NULL";
+    const candidacyParams = olderThanDays != null ? [`-${olderThanDays} days`] : [];
+
+    // Candidates: every managed dataset (github_repo IS NOT NULL; catalog ds*
+    // rows have none), not sandbox, not yet checked (or stale past --older-than).
+    let candidates: { dataset_id: string }[];
+    try {
+      const rows = await db
+        .prepare(
+          `SELECT d.dataset_id
+         FROM datasets d
+         WHERE d.github_repo IS NOT NULL
+           AND (d.is_sandbox = 0 OR d.is_sandbox IS NULL)
+           AND ${candidacyClause}
+         ORDER BY d.dataset_id
+         LIMIT ?`,
+        )
+        .bind(...candidacyParams, limit)
+        .all<{ dataset_id: string }>();
+      candidates = rows.results ?? [];
+    } catch (err) {
+      console.error("[data-integrity-sweep] candidate query failed:", err);
+      return c.json(
+        { error: "Failed to query sweep candidates (is migration 0059 applied?)" },
+        500,
+      );
+    }
+
+    let complete = 0;
+    let incomplete = 0;
+    let unknown = 0;
+    const errors: { dataset_id: string; error: string }[] = [];
+
+    for (const { dataset_id } of candidates) {
+      let integrity: Awaited<ReturnType<typeof verifyDatasetVersionS3>> | null = null;
+      try {
+        integrity = await verifyDatasetVersionS3(c.env, dataset_id);
+      } catch (err) {
+        errors.push({ dataset_id, error: err instanceof Error ? err.message : String(err) });
+      }
+
+      // Persist. Order is deliberate for recoverability (mirrors hed-sweep):
+      // write the per-version row FIRST, then stamp datasets LAST. A failure in
+      // either write leaves the dataset UNstamped, so a plain re-run re-verifies
+      // and retries both (idempotent) -- never a split state where datasets is
+      // stamped but the dataset_versions row stays stale.
+      try {
+        if (integrity?.version) {
+          const dataCompleteInt = integrity.complete ? 1 : 0;
+          await writeVersionSize(db, dataset_id, integrity.version, {
+            file_size: integrity.declaredBytes,
+            total_files: integrity.declaredFiles,
+            bytes_present: integrity.bytesPresent,
+            data_complete: dataCompleteInt,
+          });
+          await db
+            .prepare(
+              `UPDATE datasets
+             SET data_complete = ?, bytes_present = ?, data_checked_at = datetime('now')
+             WHERE dataset_id = ?`,
+            )
+            .bind(dataCompleteInt, integrity.bytesPresent, dataset_id)
+            .run();
+          if (integrity.complete) complete++;
+          else incomplete++;
+        } else {
+          // Unverifiable (verify threw above, or no manifest could be resolved):
+          // stamp data_checked_at ONLY so `remaining` converges -- do NOT null an
+          // existing classification. The reindex path writes data_complete
+          // without stamping data_checked_at, so such a row is still a sweep
+          // candidate; a transient verify miss here must not clobber that value.
+          await db
+            .prepare("UPDATE datasets SET data_checked_at = datetime('now') WHERE dataset_id = ?")
+            .bind(dataset_id)
+            .run();
+          unknown++;
+        }
+      } catch (err) {
+        errors.push({
+          dataset_id,
+          error: `d1 write: ${err instanceof Error ? err.message : String(err)}`,
+        });
+      }
+    }
+
+    const remainingRow = await db
+      .prepare(
+        `SELECT COUNT(*) AS n FROM datasets d
+       WHERE d.github_repo IS NOT NULL
+         AND (d.is_sandbox = 0 OR d.is_sandbox IS NULL)
+         AND ${candidacyClause}`,
+      )
+      .bind(...candidacyParams)
+      .first<{ n: number }>();
+
+    return c.json({
+      processed: candidates.length,
+      complete,
+      incomplete,
       unknown,
       errors,
       remaining: remainingRow?.n ?? null,

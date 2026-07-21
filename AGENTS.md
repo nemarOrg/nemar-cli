@@ -497,6 +497,7 @@ nemar admin bulk-delete       # Delete multiple phantom/orphaned datasets (owner
 nemar admin reindex <id>      # Refresh enrichment + D1 metadata columns
 nemar admin reindex --all     # Bulk; also --missing-metadata, --stale [--older-than N]
 nemar admin hed-sweep         # Backfill HED detection (has_hed/hed_version); --reset, --verbose
+nemar admin data-integrity-sweep # Audit datasets vs. manifest -> data_complete/bytes_present (#970); --reset, --older-than N, --verbose
 nemar admin summary           # summary.json coverage across published versions
 nemar admin email-preferences show    # Show email notification preferences
 nemar admin email-preferences update  # Update email notification preferences

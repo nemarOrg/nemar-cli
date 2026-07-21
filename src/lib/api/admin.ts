@@ -673,6 +673,52 @@ export async function hedSweepReset(): Promise<HedSweepResetResponse> {
   );
 }
 
+/** One batch of the data-integrity sweep (epic #967 Phase 3, #970,
+ *  `POST /admin/datasets/data-integrity-sweep`). */
+export interface DataIntegritySweepBatchResponse {
+  processed: number;
+  /** Verified complete (every annex-keyed manifest entry present at declared size). */
+  complete: number;
+  /** Verified incomplete this batch -- the #967 signature. */
+  incomplete: number;
+  /** Could not verify (no manifest / verify error) -> data_complete stays NULL. */
+  unknown: number;
+  errors: { dataset_id: string; error: string }[];
+  /** Datasets still unaudited (or stale past --older-than); 0 when the sweep is done. */
+  remaining: number | null;
+}
+
+/** Response of `?reset=1`: count of audited rows cleared back to unclassified. */
+export interface DataIntegritySweepResetResponse {
+  reset: number;
+}
+
+/** Run one bounded data-integrity sweep batch (default 15, server-clamped to
+ *  [1,30]). `olderThan` widens candidacy to already-checked rows past N days
+ *  for periodic re-audit; omit for the one-shot never-checked drain. */
+export async function dataIntegritySweep(options?: {
+  limit?: number;
+  olderThan?: number;
+}): Promise<DataIntegritySweepBatchResponse> {
+  const limit = options?.limit ?? 15;
+  const params = new URLSearchParams({ limit: String(limit) });
+  if (options?.olderThan != null) params.set("older-than", String(options.olderThan));
+  return request<DataIntegritySweepBatchResponse>(
+    `/admin/datasets/data-integrity-sweep?${params.toString()}`,
+    { method: "POST", headers: { "Content-Type": "application/json" } },
+    true,
+  );
+}
+
+/** Clear every audited row so a corrected verifier can re-sweep from scratch. */
+export async function dataIntegritySweepReset(): Promise<DataIntegritySweepResetResponse> {
+  return request<DataIntegritySweepResetResponse>(
+    "/admin/datasets/data-integrity-sweep?reset=1",
+    { method: "POST", headers: { "Content-Type": "application/json" } },
+    true,
+  );
+}
+
 // ============================================================================
 // Fleet governance (epic #713)
 // ============================================================================

@@ -26,6 +26,7 @@ import { Command } from "commander";
 import inquirer from "inquirer";
 import ora from "ora";
 import {
+  type DataIntegritySweepBatchResponse,
   type EmailPreferences,
   type HedSweepBatchResponse,
   type ReindexBulkOptions,
@@ -41,6 +42,8 @@ import {
   changeVisibility,
   createConceptDoi,
   createExemplar,
+  dataIntegritySweep,
+  dataIntegritySweepReset,
   deleteDataset,
   dispatchManifest,
   enforceBulk,
@@ -3984,6 +3987,127 @@ hedSweepCommand
   );
 
 adminCommand.addCommand(hedSweepCommand);
+
+const dataIntegritySweepCommand = new Command("data-integrity-sweep").description(
+  "Audit datasets against their version manifest and backfill data_complete / bytes_present (epic #967 Phase 3, #970)",
+);
+
+dataIntegritySweepCommand
+  .option("--limit <n>", "Datasets per batch (server clamps to [1,30])", "15")
+  .option(
+    "--older-than <days>",
+    "Also re-audit rows checked more than N days ago (periodic re-audit, not just the one-shot drain)",
+  )
+  .option("--reset", "Clear every audited row so a corrected verifier can re-sweep")
+  .option("--verbose", "Print per-batch progress")
+  .option("--json", "Output raw JSON instead of the human summary")
+  .action(
+    async (options: {
+      limit?: string;
+      olderThan?: string;
+      reset?: boolean;
+      verbose?: boolean;
+      json?: boolean;
+    }) => {
+      if (!requireAuth()) return;
+
+      if (options.reset) {
+        const spinner = ora("Resetting data-integrity sweep state...").start();
+        try {
+          const r = await dataIntegritySweepReset();
+          spinner.succeed(
+            `Cleared ${r.reset} audited row(s); eligible datasets are candidates again`,
+          );
+          if (options.json) console.log(JSON.stringify(r, null, 2));
+        } catch (err) {
+          spinner.fail("Reset failed");
+          console.error(chalk.red(errorDetail(err)));
+          process.exit(1);
+        }
+        return;
+      }
+
+      const limit = Number.parseInt(options.limit ?? "15", 10) || 15;
+      const olderThan = options.olderThan ? Number.parseInt(options.olderThan, 10) : undefined;
+      const totals = { processed: 0, complete: 0, incomplete: 0, unknown: 0, errors: 0 };
+      const spinner = ora("Sweeping datasets for data integrity...").start();
+
+      let batch = 0;
+      let remaining: number | null = null;
+      let prevRemaining: number | null = null;
+      try {
+        let res: DataIntegritySweepBatchResponse;
+        do {
+          res = await dataIntegritySweep({ limit, olderThan });
+          batch++;
+          totals.processed += res.processed;
+          totals.complete += res.complete;
+          totals.incomplete += res.incomplete;
+          totals.unknown += res.unknown;
+          totals.errors += res.errors.length;
+          remaining = res.remaining;
+
+          if (options.verbose) {
+            spinner.stop();
+            console.log(
+              `  [batch ${batch}] processed=${res.processed} complete=${res.complete} incomplete=${res.incomplete} unknown=${res.unknown} errors=${res.errors.length} remaining=${remaining ?? "?"}`,
+            );
+            for (const e of res.errors) console.log(`    ${chalk.red(e.dataset_id)}: ${e.error}`);
+            spinner.start("Sweeping datasets for data integrity...");
+          } else {
+            spinner.text = `Sweeping datasets for data integrity... ${totals.processed} processed, ${remaining ?? "?"} remaining`;
+          }
+
+          // Progress guard: data_checked_at is stamped for every processed row, so
+          // `remaining` must strictly decrease. If it doesn't (e.g. persistent D1
+          // write errors leave rows unstamped), bail instead of looping forever.
+          if (remaining != null && prevRemaining != null && remaining >= prevRemaining) {
+            spinner.warn(`No progress (remaining stuck at ${remaining}); stopping - see errors`);
+            break;
+          }
+          prevRemaining = remaining;
+
+          if ((remaining ?? 0) > 0) await sleep(1000); // pace the S3-heavy batches
+        } while ((remaining ?? 0) > 0);
+
+        spinner.stop();
+      } catch (err) {
+        spinner.fail("Data-integrity sweep failed");
+        console.error(chalk.red(errorDetail(err)));
+        process.exit(1);
+      }
+
+      if (options.json) {
+        console.log(JSON.stringify({ ...totals, batches: batch, remaining }, null, 2));
+      } else {
+        console.log();
+        if (remaining === null) {
+          console.log(
+            chalk.yellow(
+              "Warning: backend returned a null remaining count; the sweep may be incomplete - check server logs.",
+            ),
+          );
+        }
+        console.log(
+          chalk.cyan(
+            `Done in ${batch} batch(es): processed=${totals.processed} complete=${totals.complete} incomplete=${totals.incomplete} unknown=${totals.unknown} errors=${totals.errors} remaining=${remaining ?? "unknown"}`,
+          ),
+        );
+        if (totals.incomplete > 0) {
+          console.log(
+            chalk.yellow(
+              `${totals.incomplete} dataset(s) verified incomplete -- see 'nemar dataset list --json' (data_complete=0) for details.`,
+            ),
+          );
+        }
+      }
+      // Non-zero exit on errors OR an indeterminate (null) remaining, so a caller
+      // never reads a partial/uncertain sweep as success.
+      if (totals.errors > 0 || remaining === null) process.exit(1);
+    },
+  );
+
+adminCommand.addCommand(dataIntegritySweepCommand);
 
 // ============================================================================
 // Email Notification Preferences
