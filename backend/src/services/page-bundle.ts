@@ -145,7 +145,8 @@ async function loadEnrichedMetadata(
   const row = await env.DB.prepare(
     `SELECT dataset_id, name, description, github_repo, concept_doi,
             modalities, subject_count, age_min, age_max,
-            file_size, total_files, tasks, enrichment_json
+            file_size, total_files, tasks, enrichment_json,
+            data_complete, bytes_present
        FROM datasets
        WHERE dataset_id = ?`,
   )
@@ -164,6 +165,8 @@ async function loadEnrichedMetadata(
       total_files: number | null;
       tasks: string | null;
       enrichment_json: string | null;
+      data_complete: number | null;
+      bytes_present: number | null;
     }>();
 
   if (!row) {
@@ -216,6 +219,8 @@ async function loadEnrichedMetadata(
       file_size: row.file_size,
       total_files: row.total_files,
       tasks: row.tasks,
+      data_complete: row.data_complete,
+      bytes_present: row.bytes_present,
     },
     parsedEnrichment,
     versions: versionRows,

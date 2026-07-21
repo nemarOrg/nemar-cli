@@ -623,6 +623,8 @@ function emptyRow(): DatasetRowForMetadata {
     file_size: null,
     total_files: null,
     tasks: null,
+    data_complete: null,
+    bytes_present: null,
   };
 }
 
@@ -855,9 +857,17 @@ describe("buildDatasetMetadata", () => {
       subject_count: 20,
       age_min: 18,
       age_max: 65,
+      // Deliberately stale/wrong (the pre-#970 annex-blind S3 sum) -- proves
+      // below that data_summary is sourced from the live manifest, not this
+      // row, once a manifest is available.
       file_size: 1024 * 1024 * 1024 * 2,
       total_files: 640,
       tasks: "flexion,extension",
+      data_complete: 1,
+      // Deliberately different from the manifest's declared 680 bytes total, to
+      // prove extensions.nemar.bytes_present is a straight D1 passthrough, NOT
+      // re-derived from the manifest the way data_summary is.
+      bytes_present: 679,
     };
     const enrichment: NemarMetadataV2 = {
       version: "2.0",
@@ -938,8 +948,16 @@ describe("buildDatasetMetadata", () => {
       },
     ]);
     expect(out.demographics).toEqual({ subjects_count: 20, age_min: 18, age_max: 65 });
-    expect(out.data_summary?.total_files).toBe(640);
-    expect(out.data_summary?.size_human).toBe("2.00 GB");
+    // #970: data_summary comes from the live manifest (3 files, 480+100+100=680
+    // bytes) once one is available, NOT the stale row.file_size/total_files
+    // above -- the exact honest-size fix for the #967 incident.
+    expect(out.data_summary?.total_files).toBe(3);
+    expect(out.data_summary?.size_bytes).toBe(680);
+    expect(out.data_summary?.size_human).toBe("680 B");
+    // data_complete/bytes_present (#970) live in the nemar extension namespace,
+    // sourced straight from the row (not re-derived from the manifest).
+    expect(out.extensions.nemar.data_complete).toBe(1);
+    expect(out.extensions.nemar.bytes_present).toBe(679);
     expect(out.external_links).toEqual({
       dataset_doi: "10.82901/NEMAR.nm099999",
       github_url: "https://github.com/nemarDatasets/nm099999",
