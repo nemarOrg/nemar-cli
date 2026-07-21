@@ -316,6 +316,84 @@ describe("computeDatasetMetadataColumns", () => {
   });
 });
 
+describe("computeDatasetMetadataColumns honest size mapping (#970, epic #967 Phase 3)", () => {
+  const base = {
+    treePaths: TASK_PATHS,
+    participantsTsv: null,
+    s3Stats: null,
+  };
+
+  test("manifestTotals wins over s3Stats for file_size/total_files", () => {
+    const cols = computeDatasetMetadataColumns({
+      ...base,
+      s3Stats: { totalSize: 36, objectCount: 5 }, // the #967 lie (annex-blind S3 sum)
+      manifestTotals: { bytes: 12_000_000_000, files: 400 }, // the honest declared total
+    });
+    expect(cols.file_size).toBe(12_000_000_000);
+    expect(cols.total_files).toBe(400);
+  });
+
+  test("missing manifestTotals falls back to s3Stats (pre-manifest dataset)", () => {
+    const cols = computeDatasetMetadataColumns({
+      ...base,
+      s3Stats: { totalSize: 1024, objectCount: 3 },
+    });
+    expect(cols.file_size).toBe(1024);
+    expect(cols.total_files).toBe(3);
+  });
+
+  test("missing both manifestTotals and s3Stats leaves file_size/total_files null", () => {
+    const cols = computeDatasetMetadataColumns(base);
+    expect(cols.file_size).toBeNull();
+    expect(cols.total_files).toBeNull();
+  });
+
+  test("bytesPresent wins over s3Stats.totalSize for bytes_present", () => {
+    const cols = computeDatasetMetadataColumns({
+      ...base,
+      s3Stats: { totalSize: 999, objectCount: 1 },
+      bytesPresent: 36,
+    });
+    expect(cols.bytes_present).toBe(36);
+  });
+
+  test("missing bytesPresent falls back to s3Stats.totalSize", () => {
+    const cols = computeDatasetMetadataColumns({
+      ...base,
+      s3Stats: { totalSize: 500, objectCount: 2 },
+    });
+    expect(cols.bytes_present).toBe(500);
+  });
+
+  test("dataComplete=true maps to data_complete=1", () => {
+    const cols = computeDatasetMetadataColumns({ ...base, dataComplete: true });
+    expect(cols.data_complete).toBe(1);
+  });
+
+  test("dataComplete=false maps to data_complete=0 (checked, incomplete)", () => {
+    const cols = computeDatasetMetadataColumns({ ...base, dataComplete: false });
+    expect(cols.data_complete).toBe(0);
+  });
+
+  test("omitted dataComplete maps to data_complete=null (not audited yet)", () => {
+    const cols = computeDatasetMetadataColumns(base);
+    expect(cols.data_complete).toBeNull();
+  });
+
+  test("a genuinely empty manifest (0 bytes, 0 files) is preserved, not coerced to null", () => {
+    const cols = computeDatasetMetadataColumns({
+      ...base,
+      manifestTotals: { bytes: 0, files: 0 },
+      bytesPresent: 0,
+      dataComplete: true,
+    });
+    expect(cols.file_size).toBe(0);
+    expect(cols.total_files).toBe(0);
+    expect(cols.bytes_present).toBe(0);
+    expect(cols.data_complete).toBe(1);
+  });
+});
+
 describe("extractTasks contract (string[] input)", () => {
   // The export signature changed from TreeEntry[] to readonly string[] when
   // extractTasks became public (epic #417 phase 2). Pin the contract so a
