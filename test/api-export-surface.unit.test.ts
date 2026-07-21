@@ -123,6 +123,7 @@ const MODULE_EXPORTS: Record<string, string[]> = {
     "updateDoi",
     "updateEmailPreferences",
     "validateCi",
+    "verifyImport",
   ],
   notices: ["createNotice", "deleteNotice", "getNotices", "listAdminNotices"],
 };
@@ -223,6 +224,7 @@ const MONOLITH_EXPORTS = [
   "updateEmailPreferences",
   "validateCi",
   "validateDataset",
+  "verifyImport",
 ];
 
 describe("lib/api export surface", () => {
