@@ -516,6 +516,59 @@ export async function sendImportQuarantineEmail(
 }
 
 /**
+ * Notify an OpenNeuro maintainer that one or more datasets appear inaccessible
+ * to NEMAR's anonymous import reads (public-but-403), so retry has stopped and
+ * the datasets were parked on the retry engine's blocklist (#969, epic #967
+ * Phase 2). Batches every newly-blocklisted dataset from one sweep tick into a
+ * single email rather than one send per dataset. The caller (import-retry.ts)
+ * gates the actual send behind OPENNEURO_MAINTAINER_EMAIL_ENABLED and only
+ * calls this when the flag is on; a dry-run tick never reaches sendEmail.
+ */
+export async function sendOpenNeuroMaintainerReport(
+  to: string,
+  datasets: Array<{
+    datasetId: string;
+    sourceId: string;
+    firstIncompleteAt: string | null;
+    recoveryAttempts: number;
+  }>,
+  resendApiKey: string,
+  fromEmail: string,
+  replyTo?: string,
+  isDev?: boolean,
+): Promise<void> {
+  const rows = datasets
+    .map(
+      (d) =>
+        `<tr><td style="padding:8px 12px;border:1px solid #e5e7eb;">${escapeHtml(d.sourceId)}</td><td style="padding:8px 12px;border:1px solid #e5e7eb;">${escapeHtml(d.datasetId)}</td><td style="padding:8px 12px;border:1px solid #e5e7eb;">${escapeHtml(d.firstIncompleteAt ?? "unknown")}</td><td style="padding:8px 12px;border:1px solid #e5e7eb;">${d.recoveryAttempts}</td></tr>`,
+    )
+    .join("");
+  const html = `
+<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"></head>
+<body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; line-height: 1.6; color: #333; max-width: 600px; margin: 0 auto; padding: 20px;">
+  <h1 style="color: #dc2626;">OpenNeuro dataset(s) appear inaccessible</h1>
+  <p>NEMAR mirrors OpenNeuro datasets by copying their S3 objects anonymously. The dataset(s) below returned an access-denied response on every retry within a two-week window, so NEMAR's import for them has stopped and they've been parked pending access restoration.</p>
+  <p>If these are meant to be public, restoring anonymous read access to their S3 objects will let NEMAR's next scheduled check resume the import automatically -- no action needed on the NEMAR side.</p>
+  <table style="border-collapse: collapse; width: 100%; margin: 16px 0;">
+    <tr><th style="padding:8px 12px;border:1px solid #e5e7eb;background:#f9fafb;text-align:left;">OpenNeuro ID</th><th style="padding:8px 12px;border:1px solid #e5e7eb;background:#f9fafb;text-align:left;">NEMAR ID</th><th style="padding:8px 12px;border:1px solid #e5e7eb;background:#f9fafb;text-align:left;">First seen incomplete</th><th style="padding:8px 12px;border:1px solid #e5e7eb;background:#f9fafb;text-align:left;">Retry attempts</th></tr>
+    ${rows}
+  </table>
+</body>
+</html>`;
+  await sendEmail(
+    to,
+    `NEMAR: ${datasets.length} OpenNeuro dataset(s) appear inaccessible`,
+    html,
+    resendApiKey,
+    fromEmail,
+    replyTo,
+    isDev,
+  );
+}
+
+/**
  * Send revocation notification
  */
 export async function sendRevocationEmail(

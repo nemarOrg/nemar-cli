@@ -497,16 +497,22 @@ nemar admin bulk-delete       # Delete multiple phantom/orphaned datasets (owner
 nemar admin reindex <id>      # Refresh enrichment + D1 metadata columns
 nemar admin reindex --all     # Bulk; also --missing-metadata, --stale [--older-than N]
 nemar admin hed-sweep         # Backfill HED detection (has_hed/hed_version); --reset, --verbose
+nemar admin data-integrity-sweep # Audit datasets vs. manifest -> data_complete/bytes_present (#970); --reset, --older-than N, --verbose
 nemar admin summary           # summary.json coverage across published versions
 nemar admin email-preferences show    # Show email notification preferences
 nemar admin email-preferences update  # Update email notification preferences
 nemar admin e2e-test          # Run end-to-end test against nm099999
 
-# Admin: OpenNeuro import + quarantine recovery (issue #754)
+# Admin: OpenNeuro import + quarantine recovery (issue #754; retry engine + blocklist: epic #967 Phase 2, #969)
 nemar admin import-openneuro <ids>    # Import OpenNeuro dataset(s) into NEMAR
-nemar admin import status [id]        # Show import job state (failed/quarantined first; -s to filter)
+nemar admin import status [id]        # Show import job state (failed/quarantined first; -s to filter, -b for blocklisted only)
 nemar admin import rollback <id>      # Roll back a failed/quarantined import (deletes repo + S3 + D1)
-nemar admin import retry <id>         # Reset a failed/quarantined import to 'preparing' for re-dispatch
+nemar admin import retry <id>         # Reset a failed/quarantined/incomplete import to 'preparing' for re-dispatch (also un-blocklists)
+nemar admin import verify <id>        # Force a per-key S3 integrity check now; seeds the retry lane or confirms health
+
+# Admin: recover 0-byte OpenNeuro imports (epic #967 Phase 5, #972)
+nemar admin recover [ids...]          # Re-copy imports whose upstream is accessible; dry-run by default, --execute to verify+dispatch
+nemar admin recover status [ids...]   # Report data_complete/bytes_present progress for recover targets
 
 # Admin: governance fleet (epic #713)
 nemar admin fleet drift               # Report repos off the governance spec

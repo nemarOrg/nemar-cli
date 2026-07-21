@@ -15,7 +15,7 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { chmodSync, existsSync, mkdirSync, readdirSync, rmSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { spawn } from "bun";
-import { isNonFastForwardPush } from "../src/lib/git-annex/clone-push";
+import { isNonFastForwardPush, pushToGitHub } from "../src/lib/git-annex/clone-push";
 import {
   ANNEX_REMOTE_EXISTS_RE,
   annexRemoteExists,
@@ -163,6 +163,24 @@ async function newAnnexRepo(name: string): Promise<string> {
   await runCmd(["git", "config", "user.email", "test@test.com"], dir);
   await runCmd(["git", "config", "user.name", "Test"], dir);
   const initAnnex = await runCmd(["git", "annex", "init", "-q", "src"], dir);
+  if (initAnnex.exitCode !== 0) {
+    throw new Error(`git annex init failed: ${initAnnex.stderr}`);
+  }
+  return dir;
+}
+
+/** Clone `srcDir` (a real git-annex repo, not a fresh init) and initialize the
+ *  clone's local git-annex state -- unlike newAnnexRepo, this shares history
+ *  (main + git-annex branch) with the source. */
+async function cloneAnnexRepo(srcDir: string, name: string): Promise<string> {
+  const dir = join(TMP_DIR, `${name}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`);
+  const clone = await runCmd(["git", "clone", "-q", srcDir, dir]);
+  if (clone.exitCode !== 0) {
+    throw new Error(`git clone failed: ${clone.stderr}`);
+  }
+  await runCmd(["git", "config", "user.email", "test@test.com"], dir);
+  await runCmd(["git", "config", "user.name", "Test"], dir);
+  const initAnnex = await runCmd(["git", "annex", "init", "-q", name], dir);
   if (initAnnex.exitCode !== 0) {
     throw new Error(`git annex init failed: ${initAnnex.stderr}`);
   }
@@ -507,5 +525,124 @@ describe("initOrEnableSpecialRemote (end-to-end fallback)", () => {
     expect(result.success).toBe(false);
     expect(result.error).toBeTruthy();
     expect(result.error).not.toMatch(/There is already a special remote/);
+  });
+});
+
+describe("idempotent retry: prepare reuses the existing nemar-s3 UUID (#969)", () => {
+  // Reproduces the real sequence a RETRIED `prepare` runs (import-openneuro.ts
+  // Step 4 -> Step 4b -> Step 5 -> Step 7) and pins the fix: fetch + `git
+  // annex merge` the ALREADY-PUSHED nemarDatasets git-annex branch BEFORE
+  // registering the S3 special remote, so annexRemoteExists sees the prior
+  // "nemar-s3" registration and initOrEnableSpecialRemote takes the
+  // enableremote path -- REUSING the UUID -- instead of minting a second,
+  // independent one under the same name.
+  //
+  // An earlier version of this fix instead let pushToGitHub's git-annex
+  // branch merge-on-rejection loop (clone-push.ts) reconcile two
+  // INDEPENDENTLY-minted UUIDs after the fact. That merge succeeds (git
+  // doesn't error), but it leaves BOTH uuids describing themselves as
+  // "nemar-s3" in the branch -- and finalize's re-clone then hits
+  // `git annex info nemar-s3` -> "multiple repositories with that
+  // description", whose enableremote fallback hard-errors ("Multiple remotes
+  // have that name"), permanently breaking the import. This test asserts the
+  // actual fix: reuse, not merge-after-the-fact.
+  test("a retry clone that merges origin's git-annex branch first reuses the prior UUID, not a second one", async () => {
+    // "OpenNeuro"-like upstream: a plain annex repo with one file.
+    const src = await newAnnexRepo("src-upstream");
+    await Bun.write(join(src, "data.bin"), "payload");
+    const add = await runCmd(["git", "annex", "add", "data.bin", "-q"], src);
+    expect(add.exitCode).toBe(0);
+    const commit = await runCmd(["git", "commit", "-qm", "add data"], src);
+    expect(commit.exitCode).toBe(0);
+
+    // Bare "nemarDatasets" remote.
+    const bareDir = join(TMP_DIR, `bare-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`);
+    mkdirSync(bareDir, { recursive: true });
+    const bareInit = await runCmd(["git", "init", "-q", "--bare"], bareDir);
+    expect(bareInit.exitCode).toBe(0);
+
+    // "First prepare": clone src, register nemar-s3 via the real production
+    // helper (mirrors configureS3Remote's Step 5), push main + git-annex.
+    const p1 = await cloneAnnexRepo(src, "p1");
+    const store1 = join(p1, ".store1");
+    mkdirSync(store1, { recursive: true });
+    const init1 = await initOrEnableSpecialRemote(
+      p1,
+      "nemar-s3",
+      ["type=directory", `directory=${store1}`, "encryption=none"],
+      {},
+    );
+    expect(init1.success).toBe(true);
+    const uuidAfterFirstPrepare = JSON.parse(
+      (await runCmd(["git", "annex", "info", "nemar-s3", "--json"], p1)).stdout,
+    ).uuid as string;
+    expect(uuidAfterFirstPrepare.length).toBeGreaterThan(0);
+
+    await runCmd(["git", "remote", "remove", "origin"], p1);
+    const addOrigin1 = await runCmd(["git", "remote", "add", "origin", bareDir], p1);
+    expect(addOrigin1.exitCode).toBe(0);
+    const push1 = await pushToGitHub(p1, "origin");
+    expect(push1.success).toBe(true);
+    expect(push1.warning).toBeUndefined();
+
+    // "Second prepare (retry)": an INDEPENDENT fresh clone of src, which by
+    // itself has no knowledge of p1's registration -- reproducing the real
+    // gap. Mirrors Step 4 (reconfigure origin -> nemarDatasets) then Step 4b
+    // (fetch + merge origin's git-annex branch) BEFORE Step 5 (register the
+    // S3 remote).
+    const p2 = await cloneAnnexRepo(src, "p2");
+    await runCmd(["git", "remote", "remove", "origin"], p2);
+    const addOrigin2 = await runCmd(["git", "remote", "add", "origin", bareDir], p2);
+    expect(addOrigin2.exitCode).toBe(0);
+
+    // Step 4b: the actual fix under test.
+    const annexFetch = await runCmd(["git", "fetch", "origin", "git-annex"], p2);
+    expect(annexFetch.exitCode).toBe(0);
+    const annexMerge = await runCmd(["git", "annex", "merge"], p2);
+    expect(annexMerge.exitCode).toBe(0);
+
+    // Step 5: register nemar-s3 again, through the SAME production helper. It
+    // must now see the merged-in registration and enableremote (reuse),
+    // never initremote (mint a second uuid) -- store2 is deliberately a
+    // DIFFERENT path than store1 to prove the reused params don't matter:
+    // enableremote wins on the name match, not the directory.
+    const store2 = join(p2, ".store2");
+    mkdirSync(store2, { recursive: true });
+    const init2 = await initOrEnableSpecialRemote(
+      p2,
+      "nemar-s3",
+      ["type=directory", `directory=${store2}`, "encryption=none"],
+      {},
+    );
+    expect(init2.success).toBe(true);
+    const uuidAfterRetry = JSON.parse(
+      (await runCmd(["git", "annex", "info", "nemar-s3", "--json"], p2)).stdout,
+    ).uuid as string;
+    expect(uuidAfterRetry).toBe(uuidAfterFirstPrepare);
+
+    // Step 7: with the branches already merged, the push is a plain
+    // fast-forward -- no rejection, no reliance on the safety-net loop.
+    const push2 = await pushToGitHub(p2, "origin");
+    expect(push2.success).toBe(true);
+    expect(push2.warning).toBeUndefined();
+
+    // Finalize simulation: a THIRD, fresh clone of the bare remote must see
+    // exactly one unambiguous "nemar-s3" registration at the SAME uuid --
+    // the concrete proof that finalize's `git annex info nemar-s3` /
+    // enableremote would succeed rather than hard-erroring on "multiple
+    // repositories with that description".
+    const checker = await cloneAnnexRepo(bareDir, "checker");
+    const checkerInfo = await runCmd(["git", "annex", "info", "nemar-s3", "--json"], checker);
+    expect(checkerInfo.exitCode).toBe(0);
+    const checkerParsed = JSON.parse(checkerInfo.stdout);
+    expect(checkerParsed.success).toBe(true);
+    expect(checkerParsed.uuid).toBe(uuidAfterFirstPrepare);
+    const checkerEnable = await initOrEnableSpecialRemote(
+      checker,
+      "nemar-s3",
+      ["type=directory", `directory=${store2}`, "encryption=none"],
+      {},
+    );
+    expect(checkerEnable.success).toBe(true);
   });
 });

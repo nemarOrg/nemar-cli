@@ -61,6 +61,7 @@ export function buildDatasetFilterClauses(
     task?: string;
     hasDoi?: boolean;
     hasHed?: boolean;
+    dataComplete?: boolean;
     recent?: number;
     licenseTiers?: LicenseTier[];
   },
@@ -114,6 +115,12 @@ export function buildDatasetFilterClauses(
     // #869: has_hed is nullable (NULL = not classified yet), so `= 1` cleanly
     // excludes both 0 (checked, no HED) and NULL. Backed by idx_datasets_has_hed.
     clauses += " AND d.has_hed = 1";
+  }
+  if (opts.dataComplete) {
+    // #970: same nullable-safe idiom as has_hed -- `= 1` excludes both 0
+    // (checked, incomplete) and NULL (not audited yet). Backed by
+    // idx_datasets_data_complete.
+    clauses += " AND d.data_complete = 1";
   }
   if (opts.recent) {
     // #646: folded catalog rows carry publish_date (from nemar.org); managed
@@ -306,6 +313,9 @@ export function registerCatalogRoutes(datasetRoutes: DatasetsRouter): void {
     const hasDoi = c.req.query("has_doi") === "true";
     // #869: accept the website FilterSidebar's `has_hed=1` and a `true` for parity.
     const hasHed = c.req.query("has_hed") === "1" || c.req.query("has_hed") === "true";
+    // #970: same `1`/`true` convention.
+    const dataComplete =
+      c.req.query("data_complete") === "1" || c.req.query("data_complete") === "true";
     const recentParam = c.req.query("recent");
     const recent = recentParam ? Number.parseInt(recentParam, 10) : undefined;
     // #653: comma-separated license tiers, OR semantics. Invalid tokens are
@@ -339,11 +349,12 @@ export function registerCatalogRoutes(datasetRoutes: DatasetsRouter): void {
       }
 
       const params: (string | number)[] = [status, user.id];
-      // Read managed facts from the `datasets` source of truth (#646). 25-column
-      // ?mine wire shape (+ #869 HED has_hed/hed_version). latest_version is the
-      // most recently minted DOI version (null when none); scripts/hallu-sync.sh
-      // reads it to skip the per-dataset /manifest call, so keep the ordering in
-      // sync with /datasets/:id/manifest.
+      // Read managed facts from the `datasets` source of truth (#646). 28-column
+      // ?mine wire shape (+ #869 HED has_hed/hed_version + #970 total_files/
+      // data_complete/bytes_present). latest_version is the most recently minted
+      // DOI version (null when none); scripts/hallu-sync.sh reads it to skip the
+      // per-dataset /manifest call, so keep the ordering in sync with
+      // /datasets/:id/manifest.
       let query = `
         SELECT d.dataset_id, d.name, d.description, d.status, d.visibility,
                d.github_repo, d.concept_doi, d.created_at, d.updated_at,
@@ -364,6 +375,11 @@ export function registerCatalogRoutes(datasetRoutes: DatasetsRouter): void {
                -- populate. Website reads NULL as "not classified yet".
                d.has_hed,
                d.hed_version,
+               -- #970: honest total_files + data completeness/bytes-present; NULL
+               -- until reindex/the data-integrity-sweep populate them.
+               d.total_files,
+               d.data_complete,
+               d.bytes_present,
                'managed' AS source_type,
                (
                  SELECT version FROM dataset_versions dv
@@ -382,6 +398,7 @@ export function registerCatalogRoutes(datasetRoutes: DatasetsRouter): void {
         task,
         hasDoi,
         hasHed,
+        dataComplete,
         recent,
         licenseTiers,
       });
@@ -396,10 +413,11 @@ export function registerCatalogRoutes(datasetRoutes: DatasetsRouter): void {
     // Single-table read from the `datasets` source of truth (#646). Folded legacy
     // catalog rows are first-class here, discriminated by the sentinel owner
     // (source_type='catalog'); managed datasets are source_type='managed'.
-    // 30-column wire shape: the pre-consolidation UNION path + #653 `license` +
+    // 33-column wire shape: the pre-consolidation UNION path + #653 `license` +
     // the #804 citation counts (num_citations / num_dataset_citations /
     // num_datapaper_citations) + #854 channel/montage (n_channels,
-    // electrode_system) + #869 HED (has_hed, hed_version).
+    // electrode_system) + #869 HED (has_hed, hed_version) + #970 honest size
+    // (total_files, data_complete, bytes_present).
     const params: (string | number)[] = [status];
     let query = `
       SELECT d.dataset_id, d.dataset_id AS id, d.name, d.description, d.status, d.visibility,
@@ -424,6 +442,11 @@ export function registerCatalogRoutes(datasetRoutes: DatasetsRouter): void {
              -- populate. Website reads NULL as "not classified yet".
              d.has_hed,
              d.hed_version,
+             -- #970: honest total_files + data completeness/bytes-present; NULL
+             -- until reindex/the data-integrity-sweep populate them.
+             d.total_files,
+             d.data_complete,
+             d.bytes_present,
              CASE WHEN d.owner_user_id = ${SYSTEM_USER_ID} THEN 'catalog' ELSE 'managed' END AS source_type,
              (
                SELECT version FROM dataset_versions dv
@@ -450,6 +473,7 @@ export function registerCatalogRoutes(datasetRoutes: DatasetsRouter): void {
       task,
       hasDoi,
       hasHed,
+      dataComplete,
       recent,
       licenseTiers,
     });

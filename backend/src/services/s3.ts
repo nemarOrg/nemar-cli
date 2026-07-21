@@ -366,6 +366,52 @@ export async function listObjectsWithDelimiter(
   return { contents, commonPrefixes, truncated };
 }
 
+/**
+ * Parse one ListBucketResult XML page's `<Contents>` entries into `sizes`
+ * (mutated in place): S3 key with `prefix` stripped -> size. Extracted from
+ * listObjectSizes so multi-page merging is testable without a live S3
+ * endpoint -- `listObjectPages` builds its URL from a literal
+ * `<bucket>.s3.<region>.amazonaws.com` host with no override seam to redirect
+ * it to a local fake server, so this is the seam instead: feed it two
+ * synthetic pages and assert both merge into one Map. Exported for testing.
+ */
+export function mergeObjectSizesPage(
+  xml: string,
+  prefix: string,
+  sizes: Map<string, number>,
+): void {
+  const contentMatches = xml.matchAll(
+    /<Contents>[\s\S]*?<Key>([^<]+)<\/Key>[\s\S]*?<Size>(\d+)<\/Size>[\s\S]*?<\/Contents>/g,
+  );
+  for (const match of contentMatches) {
+    const key = match[1];
+    if (!key.startsWith(prefix)) continue;
+    const stripped = key.slice(prefix.length);
+    if (stripped.length === 0) continue; // the prefix "directory" placeholder
+    sizes.set(stripped, Number.parseInt(match[2], 10));
+  }
+}
+
+/**
+ * Full paginated listing of every object under `prefix` as a key -> size map
+ * (S3 key with the prefix stripped, mirroring the CLI's listExistingObjects
+ * in src/lib/s3-server-copy.ts). Unlike listObjectsWithDelimiter (one page,
+ * directory-style), this drains every page via listObjectPages -- the
+ * retry-engine's per-key integrity check (verifyImportS3, import-integrity.ts,
+ * #969) needs the COMPLETE destination listing to detect missing/zero-byte
+ * objects, not just the first 1000.
+ */
+export async function listObjectSizes(
+  options: PresignedUrlOptions,
+  prefix: string,
+): Promise<Map<string, number>> {
+  const sizes = new Map<string, number>();
+  for await (const xml of listObjectPages(options, prefix)) {
+    mergeObjectSizesPage(xml, prefix, sizes);
+  }
+  return sizes;
+}
+
 // ---------------------------------------------------------------------------
 // Shared utilities
 // ---------------------------------------------------------------------------

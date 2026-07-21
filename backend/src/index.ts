@@ -49,6 +49,7 @@ import {
 import { isNonProductionEnv } from "./services/environment";
 import { resolveHostRoute } from "./services/host-routing";
 import { OPENNEURO_UPSTREAM_MARKER, runImportRecovery } from "./services/import-recovery";
+import { sweepImportRetries } from "./services/import-retry";
 import { getActiveNotices } from "./services/notices";
 import { sweepBlockedBidsValidationRequests } from "./services/publication-sweep";
 import {
@@ -756,6 +757,19 @@ export default {
       // from ENVIRONMENT, so a real 10.82901 DOI on a mirror row resolves to
       // production EZID credentials regardless of which worker is running.
       ctx.waitUntil(reconcileReservedVersionDois(env));
+      // #969 (epic #967 Phase 2): reclassify falsely-complete imports, retry
+      // incomplete/failed/quarantined ones, and blocklist + report ones whose
+      // OpenNeuro source stays inaccessible. PROD-ONLY: dispatches GitHub work
+      // against the shared nemarDatasets org and can email an external
+      // OpenNeuro maintainer; sweepImportRetries also self-guards internally.
+      ctx.waitUntil(
+        sweepImportRetries(env).catch((err) =>
+          console.error(
+            "[import-retry] sweep failed:",
+            err instanceof Error ? (err.stack ?? err.message) : err,
+          ),
+        ),
+      );
     }
     // #804: refresh per-dataset citation counts from the citations dashboard
     // manifest so GET /datasets?sort=citations and the listing pills reflect the

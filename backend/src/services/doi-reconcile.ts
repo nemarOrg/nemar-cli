@@ -17,7 +17,7 @@
 
 import { datasetVersionLandingUrl } from "../../../shared/datacite-constants.js";
 import type { Bindings } from "../types/bindings.js";
-import { resolveEzidAuth } from "./doi.js";
+import { classifyExistingVersionDoi, resolveEzidAuth } from "./doi.js";
 import { isNonProductionEnv, resolveDatasetLandingBase } from "./environment.js";
 import { getIdentifier, makePublic } from "./ezid.js";
 
@@ -126,7 +126,13 @@ export async function reconcileReservedVersionDois(
     try {
       const id = await getIdentifier(auth, `doi:${doi}`);
       checked++;
-      if (id.status === "reserved") {
+      // Reuse the same decision function createEzidVersionDoi's mint-retry
+      // path uses (doi.ts) so this sweep and that retry path can never
+      // silently diverge on what "safe to complete" means: only a `reserved`
+      // identifier is ever completed to public; `unavailable` (a deliberate
+      // tombstone -- see services/withdraw.ts) and `public` are both left
+      // alone (epic #967 phase 4 review fix, GROUP 3c).
+      if (classifyExistingVersionDoi(id.status) === "complete_reserved") {
         await makePublic(
           auth,
           id.identifier,

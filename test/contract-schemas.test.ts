@@ -86,6 +86,33 @@ describe("catalog item schema", () => {
       datasetListEnvelopeSchema.parse({ datasets: [row], count: 1, total_count: 1 }),
     ).not.toThrow();
   });
+
+  test("accepts the #970 honest-size fields (total_files, data_complete, bytes_present)", () => {
+    const parsed = catalogItemSchema.parse({
+      ...row,
+      total_files: 400,
+      data_complete: 0,
+      bytes_present: 36,
+    });
+    expect(parsed.total_files).toBe(400);
+    expect(parsed.data_complete).toBe(0);
+    expect(parsed.bytes_present).toBe(36);
+  });
+
+  test("#970 fields are optional and nullable (older backends / not-yet-audited rows)", () => {
+    expect(() => catalogItemSchema.parse(row)).not.toThrow();
+    const parsed = catalogItemSchema.parse({
+      ...row,
+      total_files: null,
+      data_complete: null,
+      bytes_present: null,
+    });
+    expect(parsed.data_complete).toBeNull();
+  });
+
+  test("rejects an out-of-domain data_complete value", () => {
+    expect(() => catalogItemSchema.parse({ ...row, data_complete: 2 })).toThrow();
+  });
 });
 
 describe("search hit schema", () => {
