@@ -594,6 +594,20 @@ export interface NemarExtensionBlock {
   versions: VersionEntry[];
   bids_index: BidsIndex | null;
   pipeline_stage: PipelineStage | null;
+  /**
+   * Data completeness (#970, epic #967 Phase 3): 1 = every annex-keyed manifest
+   * entry verified present at its declared size, 0 = at least one missing/
+   * truncated (the #967 signature), null = not audited yet. Lives in the
+   * `nemar` extension namespace rather than the canonical `data_summary` block
+   * because neuroschema's dataSummary.schema.json is `additionalProperties:
+   * false` -- this is a NEMAR-specific integrity fact, not part of the
+   * universal core schema.
+   */
+  data_complete: number | null;
+  /** Actual bytes present in S3 (#970) -- distinct from `data_summary.size_bytes`
+   *  (the honest declared total) when data_complete=0. Same namespace rationale
+   *  as data_complete. */
+  bytes_present: number | null;
 }
 
 export interface NeuroschemaDataset {
@@ -647,6 +661,10 @@ export interface DatasetRowForMetadata {
   file_size: number | null;
   total_files: number | null;
   tasks: string | null;
+  /** Data completeness of the latest version (#970), or null if not audited. */
+  data_complete: number | null;
+  /** Actual bytes present in S3 for the latest version (#970), or null. */
+  bytes_present: number | null;
 }
 
 /**
@@ -878,6 +896,27 @@ export function buildDatasetMetadata(input: {
   const dates: StructuredDate[] = v2?.dates ?? [];
   const funding: DatasetFunding[] = (v2?.funding_references ?? []).map(toDatasetFunding);
 
+  // Honest size (#970, epic #967 Phase 3): when the caller supplied a manifest,
+  // sum ITS declared sizes live rather than trust the D1 row -- the manifest is
+  // fetched fresh from S3 (loadManifest), so it can't be stale between
+  // reindex/sweep runs the way row.file_size briefly can. `latestManifest` is
+  // null, and this falls back to the (possibly stale) D1 row, in THREE cases,
+  // not just "pre-manifest": (1) a genuinely pre-manifest dataset (no
+  // version/v<X>.json yet); (2) page-bundle.ts deliberately passes null to skip
+  // the multi-MB manifest fetch on every page-bundle response (perf), even for
+  // a fully-manifested dataset; (3) routes/data.ts's loadManifest call failed
+  // (S3 error, corrupt JSON) for a dataset that DOES have a manifest. Cases 2
+  // and 3 mean a healthy manifested dataset can still surface a stale D1 size
+  // here -- this is a deliberate perf/availability tradeoff, not a bug.
+  const manifestTotals = latestManifest
+    ? Object.values(latestManifest.files).reduce(
+        (acc, f) => ({ bytes: acc.bytes + f.size, files: acc.files + 1 }),
+        { bytes: 0, files: 0 },
+      )
+    : null;
+  const sizeBytes = manifestTotals ? manifestTotals.bytes : row.file_size;
+  const totalFiles = manifestTotals ? manifestTotals.files : row.total_files;
+
   const sessionsList = latestManifest ? deriveSessions(latestManifest.files) : [];
   // S3 version manifests store the version field bare (e.g. "1.0.0").
   // Coerce to tag form for wire consistency with every other version
@@ -932,11 +971,11 @@ export function buildDatasetMetadata(input: {
           }
         : null,
     data_summary:
-      row.total_files !== null || row.file_size !== null
+      totalFiles !== null || sizeBytes !== null
         ? {
-            total_files: row.total_files,
-            size_bytes: row.file_size,
-            size_human: formatBytes(row.file_size),
+            total_files: totalFiles,
+            size_bytes: sizeBytes,
+            size_human: formatBytes(sizeBytes),
           }
         : null,
     provenance: {
@@ -968,6 +1007,8 @@ export function buildDatasetMetadata(input: {
         }),
         bids_index: bidsIndex,
         pipeline_stage: v2?.pipeline_stage ?? null,
+        data_complete: row.data_complete,
+        bytes_present: row.bytes_present,
       },
     },
   };

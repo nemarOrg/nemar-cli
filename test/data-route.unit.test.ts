@@ -623,6 +623,8 @@ function emptyRow(): DatasetRowForMetadata {
     file_size: null,
     total_files: null,
     tasks: null,
+    data_complete: null,
+    bytes_present: null,
   };
 }
 
@@ -844,6 +846,26 @@ describe("buildDatasetMetadata", () => {
     expect(out.provenance).toEqual({ latest_snapshot: null, publish_date: null });
   });
 
+  test("latestManifest:null falls back to the D1 row's file_size/total_files (#970)", () => {
+    // Every other buildDatasetMetadata test either has no size at all
+    // (emptyRow(), file_size:null) or a manifest present -- this pins the
+    // THIRD case the fallback comment documents: page-bundle.ts's perf skip
+    // and a loadManifest failure both pass latestManifest:null even for a
+    // dataset that DOES have honest D1 values, and data_summary must still
+    // surface them (not silently go null).
+    const out = buildDatasetMetadata({
+      row: { ...emptyRow(), file_size: 500, total_files: 3 },
+      parsedEnrichment: null,
+      versions: [],
+      latestManifest: null,
+      githubOrg: "nemarDatasets",
+    });
+    expect(out.data_summary).not.toBeNull();
+    expect(out.data_summary?.size_bytes).toBe(500);
+    expect(out.data_summary?.total_files).toBe(3);
+    expect(out.data_summary?.size_human).toBe("500 B");
+  });
+
   test("full v2 enrichment + versions + manifest -> populated payload", () => {
     const row: DatasetRowForMetadata = {
       ...emptyRow(),
@@ -855,9 +877,17 @@ describe("buildDatasetMetadata", () => {
       subject_count: 20,
       age_min: 18,
       age_max: 65,
+      // Deliberately stale/wrong (the pre-#970 annex-blind S3 sum) -- proves
+      // below that data_summary is sourced from the live manifest, not this
+      // row, once a manifest is available.
       file_size: 1024 * 1024 * 1024 * 2,
       total_files: 640,
       tasks: "flexion,extension",
+      data_complete: 1,
+      // Deliberately different from the manifest's declared 680 bytes total, to
+      // prove extensions.nemar.bytes_present is a straight D1 passthrough, NOT
+      // re-derived from the manifest the way data_summary is.
+      bytes_present: 679,
     };
     const enrichment: NemarMetadataV2 = {
       version: "2.0",
@@ -938,8 +968,16 @@ describe("buildDatasetMetadata", () => {
       },
     ]);
     expect(out.demographics).toEqual({ subjects_count: 20, age_min: 18, age_max: 65 });
-    expect(out.data_summary?.total_files).toBe(640);
-    expect(out.data_summary?.size_human).toBe("2.00 GB");
+    // #970: data_summary comes from the live manifest (3 files, 480+100+100=680
+    // bytes) once one is available, NOT the stale row.file_size/total_files
+    // above -- the exact honest-size fix for the #967 incident.
+    expect(out.data_summary?.total_files).toBe(3);
+    expect(out.data_summary?.size_bytes).toBe(680);
+    expect(out.data_summary?.size_human).toBe("680 B");
+    // data_complete/bytes_present (#970) live in the nemar extension namespace,
+    // sourced straight from the row (not re-derived from the manifest).
+    expect(out.extensions.nemar.data_complete).toBe(1);
+    expect(out.extensions.nemar.bytes_present).toBe(679);
     expect(out.external_links).toEqual({
       dataset_doi: "10.82901/NEMAR.nm099999",
       github_url: "https://github.com/nemarDatasets/nm099999",

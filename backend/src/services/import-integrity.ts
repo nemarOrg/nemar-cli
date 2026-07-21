@@ -133,11 +133,136 @@ export function parseManifestFiles(
 }
 
 /**
+ * {@link verifyDatasetVersionS3} result: the per-key completeness comparison
+ * plus the totals needed to source an honest `file_size`/`total_files`/
+ * `bytes_present` (epic #967 Phase 3, #970) without a second S3 round-trip.
+ */
+export interface DatasetVersionIntegrityResult extends ImportIntegrityResult {
+  /** Sum of bytes actually present under `<id>/objects/` (the live S3 listing) --
+   *  the same listing used for the completeness check, regardless of whether any
+   *  given key matches its declared size. */
+  bytesPresent: number;
+  /** Sum of `ManifestFile.size` across EVERY parsed manifest entry (annex-keyed
+   *  AND `git:`-keyed) -- the honest logical dataset size. 0 when there is no
+   *  usable manifest ({@link version} is null in that case). */
+  declaredBytes: number;
+  /** Count of every parsed manifest entry (annex-keyed AND `git:`-keyed). 0 when
+   *  there is no usable manifest. */
+  declaredFiles: number;
+  /** The version this result actually reflects, or null when no manifest could
+   *  be resolved/parsed for it (caller should fall back to the pre-manifest S3
+   *  sum and leave completeness unknown, not report a bogus zero). */
+  version: string | null;
+}
+
+/** A resolved, parsed manifest -- version and files travel together so
+ *  "we have files but no version" (or vice versa) is unrepresentable. */
+export interface ResolvedManifest {
+  version: string;
+  files: Record<string, ExpectedManifestFile>;
+}
+
+/**
+ * Pure half of {@link verifyDatasetVersionS3}: given the resolved manifest
+ * (or null when none could be resolved/parsed) and the live `<id>/objects/`
+ * listing, compute the completeness comparison plus the honest-size totals.
+ * Split out from the I/O wrapper so the arithmetic -- which the S3-listing
+ * seam (`listObjectPages` hardcodes a `*.s3.*.amazonaws.com` host with no
+ * local-test override) can't exercise -- is directly unit-testable with
+ * synthetic data. `manifest` being a single nullable object (rather than
+ * separate `expected`/`resolvedVersion` params) makes the invalid combo --
+ * files present but no version, or vice versa -- unrepresentable at the type
+ * level; `version` on the result is simply `manifest?.version ?? null`.
+ * Exported for testing.
+ */
+export function computeVersionIntegrity(
+  manifest: ResolvedManifest | null,
+  existing: Map<string, number>,
+): DatasetVersionIntegrityResult {
+  const comparison = compareManifestToListing(manifest?.files ?? null, existing);
+
+  let bytesPresent = 0;
+  for (const size of existing.values()) bytesPresent += size;
+
+  let declaredBytes = 0;
+  let declaredFiles = 0;
+  if (manifest) {
+    for (const file of Object.values(manifest.files)) {
+      declaredBytes += file.size;
+      declaredFiles++;
+    }
+  }
+
+  return {
+    ...comparison,
+    bytesPresent,
+    declaredBytes,
+    declaredFiles,
+    version: manifest?.version ?? null,
+  };
+}
+
+/**
+ * I/O wrapper: resolve a dataset's version manifest (a specific `version`, or
+ * the latest published one when omitted) and the live `<id>/objects/`
+ * listing, then run the pure comparison plus the honest-size totals (#970).
+ * No manifest (import never finalized / dataset predates manifests), an
+ * unparseable one, or one missing `files` all fall back to the
+ * `expected: null` path in {@link compareManifestToListing} -- and to
+ * `version: null` here, signaling callers to keep the S3-sum fallback rather
+ * than trust a zero.
+ */
+export async function verifyDatasetVersionS3(
+  env: Pick<
+    Bindings,
+    "DB" | "S3_BUCKET" | "AWS_REGION" | "AWS_ACCESS_KEY_ID" | "AWS_SECRET_ACCESS_KEY"
+  >,
+  datasetId: string,
+  version?: string,
+): Promise<DatasetVersionIntegrityResult> {
+  const options: PresignedUrlOptions = {
+    bucket: env.S3_BUCKET,
+    region: env.AWS_REGION,
+    accessKeyId: env.AWS_ACCESS_KEY_ID,
+    secretAccessKey: env.AWS_SECRET_ACCESS_KEY,
+  };
+
+  let resolvedVersion = version ?? null;
+  if (!resolvedVersion) {
+    const row = await env.DB.prepare("SELECT latest_version_doi FROM datasets WHERE dataset_id = ?")
+      .bind(datasetId)
+      .first<{ latest_version_doi: string | null }>();
+    resolvedVersion = versionFromDoi(row?.latest_version_doi ?? null);
+  }
+
+  let expected: Record<string, ExpectedManifestFile> | null = null;
+  if (resolvedVersion) {
+    const manifestJson = await getManifest(options, datasetId, resolvedVersion);
+    if (manifestJson) {
+      const parsedFiles = parseManifestFiles(manifestJson);
+      if (parsedFiles) {
+        expected = parsedFiles;
+      } else {
+        console.error(
+          `[import-integrity] manifest for ${datasetId}@${resolvedVersion} is unparseable or missing "files"`,
+        );
+      }
+    }
+  }
+
+  const existing = await listObjectSizes(options, `${datasetId}/objects/`);
+  return computeVersionIntegrity(
+    expected && resolvedVersion ? { version: resolvedVersion, files: expected } : null,
+    existing,
+  );
+}
+
+/**
  * I/O wrapper: resolve the dataset's latest published version manifest (if
  * any) and the live `<id>/objects/` listing, then run the pure comparison.
- * No manifest (import never finalized), an unparseable one, or one missing
- * `files` all fall back to the `expected: null` path in
- * {@link compareManifestToListing}.
+ * Thin delegate to {@link verifyDatasetVersionS3} (Phase 2's original entry
+ * point; kept so existing callers -- the retry engine's reclassification
+ * sweep and pre-dispatch check -- don't need to change).
  */
 export async function verifyImportS3(
   env: Pick<
@@ -146,33 +271,5 @@ export async function verifyImportS3(
   >,
   datasetId: string,
 ): Promise<ImportIntegrityResult> {
-  const options: PresignedUrlOptions = {
-    bucket: env.S3_BUCKET,
-    region: env.AWS_REGION,
-    accessKeyId: env.AWS_ACCESS_KEY_ID,
-    secretAccessKey: env.AWS_SECRET_ACCESS_KEY,
-  };
-
-  const row = await env.DB.prepare("SELECT latest_version_doi FROM datasets WHERE dataset_id = ?")
-    .bind(datasetId)
-    .first<{ latest_version_doi: string | null }>();
-  const version = versionFromDoi(row?.latest_version_doi ?? null);
-
-  let expected: Record<string, ExpectedManifestFile> | null = null;
-  if (version) {
-    const manifestJson = await getManifest(options, datasetId, version);
-    if (manifestJson) {
-      const parsedFiles = parseManifestFiles(manifestJson);
-      if (parsedFiles) {
-        expected = parsedFiles;
-      } else {
-        console.error(
-          `[import-integrity] manifest for ${datasetId}@${version} is unparseable or missing "files"`,
-        );
-      }
-    }
-  }
-
-  const existing = await listObjectSizes(options, `${datasetId}/objects/`);
-  return compareManifestToListing(expected, existing);
+  return verifyDatasetVersionS3(env, datasetId);
 }
