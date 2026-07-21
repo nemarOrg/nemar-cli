@@ -868,6 +868,38 @@ export async function prepareImport(
   }
   remoteSpinner.succeed("Configured NEMAR remote");
 
+  // Step 4b: fold in any git-annex state nemarDatasets/<id> already carries
+  // from an earlier prepare attempt (#969, idempotent retry). This clone is
+  // always fresh from OpenNeuro, so its local git-annex branch has no
+  // knowledge of a nemar-s3 special remote a prior attempt already
+  // registered and pushed. Without this merge, the initremote call below
+  // (Step 5) can't see that registration and mints a SECOND, independent
+  // UUID for the same "nemar-s3" name -- finalize's re-clone then sees two
+  // repositories describing themselves as "nemar-s3", `git annex info`
+  // reports "multiple repositories with that description", and its
+  // enableremote fallback hard-errors ("Multiple remotes have that name"),
+  // permanently breaking the import (every further retry makes it worse by
+  // minting yet another UUID). Fetching + merging origin's git-annex branch
+  // FIRST means the S3-remote setup below sees the prior registration via
+  // annexRemoteExists and calls `enableremote` -- reusing the same UUID, so
+  // there is nothing to diverge and the eventual push is a plain
+  // fast-forward. Best-effort: a brand-new repo (first-ever import) has no
+  // git-annex branch to fetch yet, so this is a silent no-op on the common
+  // path.
+  const annexFetchResult = await runCommand(["git", "fetch", "origin", "git-annex"], {
+    cwd: datasetPath,
+  });
+  if (annexFetchResult.exitCode === 0) {
+    const annexMergeResult = await runCommand(["git", "annex", "merge"], { cwd: datasetPath });
+    if (annexMergeResult.exitCode !== 0) {
+      console.log(
+        chalk.yellow(
+          `  Warning: found existing NEMAR git-annex state for ${nemarId} but could not merge it (${annexMergeResult.stderr.trim()}). A retry may register the S3 remote under a new UUID; investigate before re-running finalize.`,
+        ),
+      );
+    }
+  }
+
   // Step 5: Configure the NEMAR S3 special remote. This records the nemar-s3
   // uuid in the git-annex branch so the finalize phase (a fresh clone, possibly
   // on another runner) enables the SAME remote and registers keys against the

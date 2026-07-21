@@ -198,14 +198,24 @@ export async function pushToGitHub(
     }
 
     // Push git-annex branch (critical for cloning). On non-fast-forward
-    // rejection -- e.g. a retried `prepare` re-derives the branch fresh from a
-    // brand-new OpenNeuro clone and registers a NEW nemar-s3 special-remote
-    // UUID alongside one an earlier attempt already pushed (#969 idempotent
-    // retry: the local git-annex branch shares no lineage with the remote's in
-    // that case) -- fetch + `git annex merge` and retry. The git-annex branch
+    // rejection, fetch + `git annex merge` and retry -- the git-annex branch
     // must never be rebased (its append-only log format merges natively via
     // git-annex's own union-merge machinery); that's the one difference from
     // the main-branch retry above. Bounded so a genuine problem still surfaces.
+    //
+    // NOTE (#969): this is a LAST-RESORT SAFETY NET, not the idempotent-retry
+    // mechanism. A retried `prepare` (src/lib/import-openneuro.ts) now
+    // fetches + merges nemarDatasets' existing git-annex branch BEFORE
+    // registering the S3 special remote, so a re-dispatch reuses the prior
+    // nemar-s3 UUID via `enableremote` instead of minting a new one -- the
+    // push below is then a trivial fast-forward. Relying on THIS loop instead
+    // (merging divergent branches AFTER two independent `initremote` calls
+    // already minted two different UUIDs for the same name) does not fix
+    // that: finalize's `git annex info nemar-s3` sees "multiple repositories
+    // with that description" and its `enableremote` fallback hard-errors
+    // ("Multiple remotes have that name"), permanently breaking the import.
+    // This loop only helps for a genuine, unrelated divergence (e.g. two
+    // concurrent pushes), not the retry-created-a-second-UUID case.
     let annexStderr = "";
     let annexPushed = false;
     let annexMergeCycles = 0;
