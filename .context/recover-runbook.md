@@ -3,8 +3,17 @@
 Operational sequence for re-copying the 45 datasets in `scripts/recover-datasets.json`
 (published with 0-byte content in the #967 incident; upstream confirmed accessible).
 This is a **post-deploy, production-only, operator-gated** step -- it is not run as part
-of this PR and cannot be exercised in a dev sandbox (`POST /admin/datasets/import` and the
-retry engine both 403 outside `ENVIRONMENT=production`).
+of this PR and cannot be exercised in a dev sandbox. The proximate reason: outside
+production, the target `on######` ids have no `import_jobs` row (dev D1 is
+exemplars-only), so `recover --execute`'s source-id resolution fails loudly before any
+dispatch happens.
+
+**DANGER: `verifyImport` (the reclassify step) is NOT itself environment-gated.**
+Unlike the `import_jobs`-row check above, `POST /admin/imports/:id/verify` runs against
+whatever backend the CLI is pointed at -- it would reclassify a real `import_jobs` row
+(`complete` -> `incomplete`) on any environment that happens to have one. **Only ever run
+`nemar admin recover --execute` against production** (verify `nemar auth status` / the
+active API URL first); do not rely on an environment 403 to catch a mistaken target.
 
 ## Prerequisites
 
@@ -46,6 +55,9 @@ retry engine both 403 outside `ENVIRONMENT=production`).
    completion oracle). Re-run periodically until all 45 show `complete`. Do NOT read
    `nemar admin import status` alone as ground truth here -- treat `datasets.data_complete`
    as authoritative, not `import_jobs.status` (see the reclassify-first rationale above).
+   Note a target already `quarantined`/`blocklisted` by the Phase 2 retry engine is not
+   un-stuck by `recover`'s reclassify (which only flips `complete` -> `incomplete`); it
+   still needs `nemar admin import retry <id>` (or the retry engine's own schedule).
 
 5. **Acceptance audit.**
    ```
