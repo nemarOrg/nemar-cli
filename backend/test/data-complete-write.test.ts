@@ -5,59 +5,19 @@
  * against a real in-memory SQLite engine (every migration applied, so the schema
  * matches production) via a thin D1 adapter that forwards to bun:sqlite. No
  * mocks: the SQL and data are real, results come from SQLite executing the
- * statements. Mirrors hed-write.test.ts / the `realD1` shim in
- * test/catalog-dual-write.test.ts.
+ * statements. Mirrors hed-write.test.ts; realD1/freshDb come from the shared
+ * helper (backend/test/helpers/d1.ts) rather than a per-file copy.
  */
 
-import { Database } from "bun:sqlite";
+import type { Database } from "bun:sqlite";
 import { describe, expect, test } from "bun:test";
-import { readFileSync, readdirSync } from "node:fs";
-import { join } from "node:path";
 import {
   type DatasetMetadataColumns,
+  computeDatasetMetadataColumns,
   writeDatasetMetadataColumns,
   writeVersionSize,
 } from "../src/services/dataset-metadata-columns";
-
-const MIGRATIONS_DIR = join(import.meta.dir, "../src/db/migrations");
-
-function freshDb(): Database {
-  const db = new Database(":memory:");
-  for (const file of readdirSync(MIGRATIONS_DIR)
-    .filter((f) => f.endsWith(".sql"))
-    .sort()) {
-    db.exec(readFileSync(join(MIGRATIONS_DIR, file), "utf-8"));
-  }
-  return db;
-}
-
-// Real-engine D1 shim: forwards every call to the underlying bun:sqlite DB.
-// Not a mock -- no canned responses; every result comes from SQLite.
-function realD1(db: Database): D1Database {
-  return {
-    prepare(sql: string) {
-      const stmt = db.query(sql);
-      let bound: unknown[] = [];
-      const api = {
-        bind(...p: unknown[]) {
-          bound = p;
-          return api;
-        },
-        run() {
-          const r = stmt.run(...(bound as never[]));
-          return Promise.resolve({ success: true, meta: { changes: r.changes } });
-        },
-        first<T>() {
-          return Promise.resolve((stmt.get(...(bound as never[])) as T) ?? null);
-        },
-        all<T>() {
-          return Promise.resolve({ results: stmt.all(...(bound as never[])) as T[] });
-        },
-      };
-      return api;
-    },
-  } as unknown as D1Database;
-}
+import { freshDb, realD1 } from "./helpers/d1";
 
 /** A full DatasetMetadataColumns with everything null except the overrides. */
 function cols(partial: Partial<DatasetMetadataColumns>): DatasetMetadataColumns {
@@ -277,6 +237,63 @@ describe("writeVersionSize", () => {
       data_complete: 1,
     });
     expect(res.changes).toBe(0);
+    db.close();
+  });
+});
+
+describe("enrich-clobber regression guard (#970, epic #967 Phase 3)", () => {
+  // This is the regression test for the SAME clobber class as the #967
+  // incident: enrichDataset() (backend/src/services/enrich-dataset.ts) used to
+  // thread its own S3-objects sum (s3Stats) into computeDatasetMetadataColumns
+  // on every re-enrichment, silently overwriting an honest, manifest-derived
+  // file_size/total_files/bytes_present/data_complete back to the annex-blind
+  // S3 sum. The fix passes `s3Stats: null` from that call site instead. If a
+  // future change "restores" s3Stats there without also threading a real
+  // manifestVerification, this test trips: it reproduces the exact enrich-
+  // shaped call (treePaths + participantsTsv + s3Stats: null, no
+  // manifestVerification) against a row that was previously written with
+  // honest values, and asserts those values survive untouched.
+  test("enrich-shaped inputs (s3Stats: null, no manifestVerification) leave a prior honest row unchanged", async () => {
+    const db = freshDb();
+    seed(db);
+    const d1 = realD1(db);
+
+    // Seed the row as if reindex/the sweep had already verified it honestly.
+    await writeDatasetMetadataColumns(
+      d1,
+      "nm000132",
+      cols({
+        file_size: 12_000_000_000,
+        total_files: 400,
+        bytes_present: 12_000_000_000,
+        data_complete: 1,
+      }),
+    );
+
+    // The exact shape enrichDataset() passes to computeDatasetMetadataColumns:
+    // treePaths + participantsTsv, s3Stats explicitly null, no
+    // manifestVerification at all (enrichDataset never resolves one).
+    const enrichCols = computeDatasetMetadataColumns({
+      treePaths: ["sub-01/eeg/sub-01_task-rest_eeg.set"],
+      participantsTsv: null,
+      s3Stats: null,
+    });
+    await writeDatasetMetadataColumns(d1, "nm000132", enrichCols);
+
+    const row = db
+      .prepare(
+        "SELECT file_size, total_files, bytes_present, data_complete FROM datasets WHERE dataset_id = 'nm000132'",
+      )
+      .get() as {
+      file_size: number;
+      total_files: number;
+      bytes_present: number;
+      data_complete: number;
+    };
+    expect(row.file_size).toBe(12_000_000_000);
+    expect(row.total_files).toBe(400);
+    expect(row.bytes_present).toBe(12_000_000_000);
+    expect(row.data_complete).toBe(1);
     db.close();
   });
 });
