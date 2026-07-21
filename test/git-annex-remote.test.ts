@@ -15,7 +15,7 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { chmodSync, existsSync, mkdirSync, readdirSync, rmSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { spawn } from "bun";
-import { isNonFastForwardPush } from "../src/lib/git-annex/clone-push";
+import { isNonFastForwardPush, pushToGitHub } from "../src/lib/git-annex/clone-push";
 import {
   ANNEX_REMOTE_EXISTS_RE,
   annexRemoteExists,
@@ -163,6 +163,24 @@ async function newAnnexRepo(name: string): Promise<string> {
   await runCmd(["git", "config", "user.email", "test@test.com"], dir);
   await runCmd(["git", "config", "user.name", "Test"], dir);
   const initAnnex = await runCmd(["git", "annex", "init", "-q", "src"], dir);
+  if (initAnnex.exitCode !== 0) {
+    throw new Error(`git annex init failed: ${initAnnex.stderr}`);
+  }
+  return dir;
+}
+
+/** Clone `srcDir` (a real git-annex repo, not a fresh init) and initialize the
+ *  clone's local git-annex state -- unlike newAnnexRepo, this shares history
+ *  (main + git-annex branch) with the source. */
+async function cloneAnnexRepo(srcDir: string, name: string): Promise<string> {
+  const dir = join(TMP_DIR, `${name}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`);
+  const clone = await runCmd(["git", "clone", "-q", srcDir, dir]);
+  if (clone.exitCode !== 0) {
+    throw new Error(`git clone failed: ${clone.stderr}`);
+  }
+  await runCmd(["git", "config", "user.email", "test@test.com"], dir);
+  await runCmd(["git", "config", "user.name", "Test"], dir);
+  const initAnnex = await runCmd(["git", "annex", "init", "-q", name], dir);
   if (initAnnex.exitCode !== 0) {
     throw new Error(`git annex init failed: ${initAnnex.stderr}`);
   }
@@ -507,5 +525,114 @@ describe("initOrEnableSpecialRemote (end-to-end fallback)", () => {
     expect(result.success).toBe(false);
     expect(result.error).toBeTruthy();
     expect(result.error).not.toMatch(/There is already a special remote/);
+  });
+});
+
+describe("pushToGitHub git-annex branch merge-retry (#969 idempotent prepare)", () => {
+  // Reproduces the real failure a RETRIED `prepare` hits: it always re-clones
+  // from OpenNeuro fresh (never from nemarDatasets), so a second attempt's
+  // local git-annex branch shares a common ancestor with -- but has diverged
+  // from -- whatever an earlier attempt already pushed (e.g. a second,
+  // independently-uuid'd "nemar-s3" special-remote registration). Before this
+  // fix, `pushToGitHub` pushed the git-annex branch exactly once and returned
+  // a `warning` on rejection, which prepareImport treats as fatal. The fix:
+  // fetch + `git annex merge` + retry, mirroring the existing main-branch
+  // rebase retry (never a rebase -- the git-annex branch's append-only log
+  // format merges natively).
+  test("an independently-derived retry clone's git-annex branch push recovers via fetch+merge", async () => {
+    // "OpenNeuro"-like upstream: a plain annex repo with one file.
+    const src = await newAnnexRepo("src-upstream");
+    await Bun.write(join(src, "data.bin"), "payload");
+    const add = await runCmd(["git", "annex", "add", "data.bin", "-q"], src);
+    expect(add.exitCode).toBe(0);
+    const commit = await runCmd(["git", "commit", "-qm", "add data"], src);
+    expect(commit.exitCode).toBe(0);
+
+    // Bare "nemarDatasets" remote.
+    const bareDir = join(TMP_DIR, `bare-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`);
+    mkdirSync(bareDir, { recursive: true });
+    const bareInit = await runCmd(["git", "init", "-q", "--bare"], bareDir);
+    expect(bareInit.exitCode).toBe(0);
+
+    // "First prepare": clone src, register a nemar-s3-like remote, push main +
+    // git-annex to the bare remote.
+    const p1 = await cloneAnnexRepo(src, "p1");
+    const store1 = join(p1, ".store1");
+    mkdirSync(store1, { recursive: true });
+    const init1 = await runCmd(
+      [
+        "git",
+        "annex",
+        "initremote",
+        "nemar-s3",
+        "type=directory",
+        `directory=${store1}`,
+        "encryption=none",
+      ],
+      p1,
+    );
+    expect(init1.exitCode).toBe(0);
+    await runCmd(["git", "remote", "remove", "origin"], p1);
+    const addOrigin1 = await runCmd(["git", "remote", "add", "origin", bareDir], p1);
+    expect(addOrigin1.exitCode).toBe(0);
+    const p1AnnexTipBeforePush = (
+      await runCmd(["git", "rev-parse", "git-annex"], p1)
+    ).stdout.trim();
+
+    const push1 = await pushToGitHub(p1, "origin");
+    expect(push1.success).toBe(true);
+    expect(push1.warning).toBeUndefined();
+
+    // "Second prepare (retry)": an INDEPENDENT fresh clone of src that has
+    // never heard of p1's push, registering its OWN nemar-s3 remote (a
+    // different uuid under the same name) -- the actual divergence a retried
+    // prepare creates.
+    const p2 = await cloneAnnexRepo(src, "p2");
+    const store2 = join(p2, ".store2");
+    mkdirSync(store2, { recursive: true });
+    const init2 = await runCmd(
+      [
+        "git",
+        "annex",
+        "initremote",
+        "nemar-s3",
+        "type=directory",
+        `directory=${store2}`,
+        "encryption=none",
+      ],
+      p2,
+    );
+    // No "already exists" -- p2's local git-annex branch has no knowledge of
+    // p1's registration commit, so a plain initremote succeeds locally.
+    expect(init2.exitCode).toBe(0);
+    await runCmd(["git", "remote", "remove", "origin"], p2);
+    const addOrigin2 = await runCmd(["git", "remote", "add", "origin", bareDir], p2);
+    expect(addOrigin2.exitCode).toBe(0);
+    const p2AnnexTipBeforePush = (
+      await runCmd(["git", "rev-parse", "git-annex"], p2)
+    ).stdout.trim();
+
+    // Before the fix this push's git-annex half would be rejected
+    // non-fast-forward and pushToGitHub would return a `warning` (which
+    // prepareImport treats as a hard failure). With the fix it recovers.
+    const push2 = await pushToGitHub(p2, "origin");
+    expect(push2.success).toBe(true);
+    expect(push2.warning).toBeUndefined();
+
+    // Both lineages survive the merge -- proof this is a real merge, not one
+    // side clobbering the other.
+    const bareAnnexTipFinal = (
+      await runCmd(["git", "rev-parse", "git-annex"], bareDir)
+    ).stdout.trim();
+    const p1Ancestor = await runCmd(
+      ["git", "merge-base", "--is-ancestor", p1AnnexTipBeforePush, bareAnnexTipFinal],
+      bareDir,
+    );
+    expect(p1Ancestor.exitCode).toBe(0);
+    const p2Ancestor = await runCmd(
+      ["git", "merge-base", "--is-ancestor", p2AnnexTipBeforePush, bareAnnexTipFinal],
+      bareDir,
+    );
+    expect(p2Ancestor.exitCode).toBe(0);
   });
 });

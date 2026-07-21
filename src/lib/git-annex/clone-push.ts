@@ -197,17 +197,44 @@ export async function pushToGitHub(
       return { success: false, error: `${mainStderr.trim() || "Failed to push to GitHub"}${note}` };
     }
 
-    // Push git-annex branch (critical for cloning)
-    const { stderr: annexStderr, exitCode: annexExitCode } = await runCommand(
-      ["git", "push", remoteName, "git-annex"],
-      { cwd: path },
-    );
+    // Push git-annex branch (critical for cloning). On non-fast-forward
+    // rejection -- e.g. a retried `prepare` re-derives the branch fresh from a
+    // brand-new OpenNeuro clone and registers a NEW nemar-s3 special-remote
+    // UUID alongside one an earlier attempt already pushed (#969 idempotent
+    // retry: the local git-annex branch shares no lineage with the remote's in
+    // that case) -- fetch + `git annex merge` and retry. The git-annex branch
+    // must never be rebased (its append-only log format merges natively via
+    // git-annex's own union-merge machinery); that's the one difference from
+    // the main-branch retry above. Bounded so a genuine problem still surfaces.
+    let annexStderr = "";
+    let annexPushed = false;
+    let annexMergeCycles = 0;
+    for (let attempt = 0; attempt <= PUSH_REBASE_RETRIES; attempt++) {
+      const res = await runCommand(["git", "push", remoteName, "git-annex"], { cwd: path });
+      if (res.exitCode === 0) {
+        annexPushed = true;
+        break;
+      }
+      annexStderr = res.stderr;
+      if (attempt === PUSH_REBASE_RETRIES || !isNonFastForwardPush(res.stderr)) {
+        break;
+      }
+      const fetchRes = await runCommand(["git", "fetch", remoteName, "git-annex"], { cwd: path });
+      if (fetchRes.exitCode !== 0) break;
+      const mergeRes = await runCommand(["git", "annex", "merge"], { cwd: path });
+      if (mergeRes.exitCode !== 0) break;
+      annexMergeCycles++;
+    }
 
-    if (annexExitCode !== 0) {
+    if (!annexPushed) {
+      const note =
+        annexMergeCycles > 0
+          ? ` (still rejected after ${annexMergeCycles} fetch+merge retry cycle(s))`
+          : "";
       // Not a fatal error, but return warning so callers can inform users
       return {
         success: true,
-        warning: `Main branch pushed, but git-annex branch failed: ${annexStderr.trim()}. Clone operations may have issues.`,
+        warning: `Main branch pushed, but git-annex branch failed: ${annexStderr.trim()}${note}. Clone operations may have issues.`,
       };
     }
 

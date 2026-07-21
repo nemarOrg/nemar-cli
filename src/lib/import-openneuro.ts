@@ -188,6 +188,20 @@ export function decideSkipCiCheck(args: {
 }
 
 /**
+ * True when a POST /admin/datasets/import failure means "the dataset record
+ * and/or GitHub repo already exist" -- the expected, non-fatal shape of a
+ * RETRIED prepare (#969, epic #967 Phase 2): the row/repo genuinely exist
+ * server-side (POST returns 409), so prepare must continue (reuse them,
+ * rebuild the manifest, ensure main is pushed) rather than abort. Matches
+ * both the D1 duplicate-dataset 409 ("Dataset ... already exists") and the
+ * GitHub-repo-exists 409 ("GitHub repo nemarDatasets/... already exists")
+ * from routes/admin/imports.ts. Exported for tests.
+ */
+export function isAlreadyExistsImportError(message: string): boolean {
+  return message.includes("already exists") || message.includes("409");
+}
+
+/**
  * Map OpenNeuro dataset ID (ds######) to NEMAR ID (on######).
  */
 function mapDatasetId(openneuroId: string): string {
@@ -772,7 +786,7 @@ export async function prepareImport(
     createSpinner.succeed(`Created ${result.dataset_id} (${result.github_repo})`);
   } catch (error) {
     const msg = error instanceof Error ? error.message : String(error);
-    if (msg.includes("already exists") || msg.includes("409")) {
+    if (isAlreadyExistsImportError(msg)) {
       createSpinner.warn(`Dataset ${nemarId} already exists, continuing...`);
     } else {
       createSpinner.fail(`Failed to create dataset: ${msg}`);

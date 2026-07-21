@@ -21,6 +21,7 @@ import {
   detectModalitiesFromDataset,
   ensureReadmeMd,
   findAnnexedRootMetadata,
+  isAlreadyExistsImportError,
   isNeverAnnexedMetadata,
   openNeuroCurrentUrl,
   seedMetadata,
@@ -615,5 +616,27 @@ describe("openNeuroCurrentUrl (#808)", () => {
   test("OPENNEURO_UPSTREAM_MARKER is a stable, greppable token", () => {
     // Listing/triage greps for this exact token; keep it constant.
     expect(OPENNEURO_UPSTREAM_MARKER).toBe("[openneuro-upstream-inaccessible]");
+  });
+});
+
+describe("isAlreadyExistsImportError (#969 idempotent prepare)", () => {
+  test("matches the D1 duplicate-dataset 409 message", () => {
+    expect(isAlreadyExistsImportError("Dataset on007523 already exists")).toBe(true);
+  });
+
+  test("matches the GitHub-repo-exists 409 message", () => {
+    expect(isAlreadyExistsImportError("GitHub repo nemarDatasets/on007523 already exists")).toBe(
+      true,
+    );
+  });
+
+  test("matches a bare HTTP 409 status in the message", () => {
+    expect(isAlreadyExistsImportError("request failed: 409")).toBe(true);
+  });
+
+  test("does not match an unrelated failure", () => {
+    expect(isAlreadyExistsImportError("network timeout")).toBe(false);
+    expect(isAlreadyExistsImportError("HTTP 500 Internal Server Error")).toBe(false);
+    expect(isAlreadyExistsImportError("")).toBe(false);
   });
 });
