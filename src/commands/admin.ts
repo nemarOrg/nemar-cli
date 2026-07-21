@@ -15,6 +15,7 @@
  * - nemar admin publish list/deny/approve - Publication workflow
  * - nemar admin revert             - Revert dataset to a previous version
  * - nemar admin withdraw/restore   - Withdraw/restore a published dataset (visibility + EZID DOIs)
+ * - nemar admin recover [status]   - Re-copy epic #967 imports whose upstream is accessible
  * - nemar admin email-preferences show/update - Email notification opt-out
  * - nemar admin notice list/set/clear - System notice management
  * - nemar admin notify              - Send broadcast email to users
@@ -115,6 +116,12 @@ import {
 import { checkDownloadPrerequisites } from "../lib/git-annex/prereq.js";
 import { getVersionCommit, listDatasetVersions } from "../lib/git-annex/repo-state.js";
 import { formatBytes } from "../lib/progress.js";
+import {
+  type RecoverDatasetEntry,
+  loadRecoverDatasets,
+  resolveImportSources,
+  resolveRecoverTargets,
+} from "../lib/recover-datasets.js";
 import {
   type WithdrawnDatasetEntry,
   loadWithdrawnDatasets,
@@ -3069,6 +3076,34 @@ adminCommand
 // Import OpenNeuro
 // ============================================================================
 
+/**
+ * Dispatch the onboard-openneuro.yml workflow (nemarDatasets/.github) for a
+ * batch of OpenNeuro `ds######` ids -- the prepare/copy/finalize matrix
+ * hardened in epic #967 Phases 1-3. Shared by `import-openneuro`'s default
+ * (non---local) branch, a brand-new import, and `recover --execute` (Phase
+ * 5, #972), a re-copy of an existing import whose S3 content was found
+ * empty; both dispatch the SAME workflow, one gh run per batch.
+ */
+async function dispatchOpenNeuroImportWorkflow(
+  dsIds: string[],
+): Promise<{ ok: true } | { ok: false; error: string }> {
+  const { runCommand } = await import("../lib/git-annex/run-command.js");
+  const result = await runCommand([
+    "gh",
+    "workflow",
+    "run",
+    "onboard-openneuro.yml",
+    "--repo",
+    "nemarDatasets/.github",
+    "--field",
+    `openneuro_ids=${dsIds.join(",")}`,
+  ]);
+  if (result.exitCode !== 0) {
+    return { ok: false, error: result.stderr.trim() };
+  }
+  return { ok: true };
+}
+
 adminCommand
   .command("import-openneuro")
   .description("Import an OpenNeuro dataset into NEMAR")
@@ -3192,23 +3227,12 @@ adminCommand
       }
 
       // Default: dispatch GitHub Actions workflow on nemarDatasets/.github
-      const { runCommand } = await import("../lib/git-annex/run-command.js");
-
       const idsStr = ids.join(",");
       console.log(chalk.cyan(`\nDispatching OpenNeuro import workflow for: ${idsStr}\n`));
 
-      const dispatchResult = await runCommand([
-        "gh",
-        "workflow",
-        "run",
-        "onboard-openneuro.yml",
-        "--repo",
-        "nemarDatasets/.github",
-        "--field",
-        `openneuro_ids=${idsStr}`,
-      ]);
-      if (dispatchResult.exitCode !== 0) {
-        console.error(chalk.red(`Failed to dispatch workflow: ${dispatchResult.stderr.trim()}`));
+      const dispatch = await dispatchOpenNeuroImportWorkflow(ids);
+      if (!dispatch.ok) {
+        console.error(chalk.red(`Failed to dispatch workflow: ${dispatch.error}`));
         console.error(
           chalk.dim("Make sure gh CLI is authenticated with access to nemarDatasets org"),
         );
@@ -3474,6 +3498,352 @@ importCommand
   });
 
 adminCommand.addCommand(importCommand);
+
+// ============================================================================
+// Dataset recovery (epic #967 phase 5, #972)
+// ============================================================================
+
+/** Default location of the checked-in recovery target list, resolved
+ *  relative to this source file rather than cwd (mirrors
+ *  defaultWithdrawnDatasetsPath). */
+function defaultRecoverDatasetsPath(): string {
+  return join(import.meta.dir, "..", "..", "scripts", "recover-datasets.json");
+}
+
+const recoverCommand = new Command("recover").description(
+  "Re-copy epic #967 OpenNeuro imports published with 0-byte content, whose upstream is accessible (Phase 5, #972). Dry-run by default.",
+);
+
+recoverCommand
+  .argument("[ids...]", "Dataset id(s) to recover (omit when using --all)")
+  .option("--all", "Target every entry in the checked-in recover-datasets list")
+  .option("--execute", "Actually verify + dispatch the re-copy (default is a dry run)")
+  .option("--force", "Allow a dataset id that is not on the checked-in recover-datasets list")
+  .option(
+    "--recover-file <path>",
+    "Path to the recover-datasets JSON (default: scripts/recover-datasets.json)",
+  )
+  .option(YES_OPTION, YES_DESCRIPTION)
+  .option(NO_OPTION, NO_DESCRIPTION)
+  .option("--json", "Output raw JSON")
+  .addHelpText(
+    "after",
+    `
+Description:
+  Re-dispatches the hardened OpenNeuro copy path (epic #967 Phases 1-3) for
+  datasets published with 0-byte content whose OpenNeuro upstream is still
+  accessible today. A direct re-dispatch onto a still-'complete' import_jobs
+  row silently no-ops the status callback (only a non-terminal row accepts
+  an update), so --execute FIRST forces a per-key S3 verify on every target
+  (reclassifying a stale 'complete' row to 'incomplete'), THEN dispatches
+  ONE batch 'gh workflow run onboard-openneuro.yml' for the whole set.
+  Afterward, treat 'nemar admin recover status' (datasets.data_complete) as
+  the completion oracle, not import_jobs.status.
+
+  The actual re-copy is production-only IN PRACTICE: outside production the
+  target on###### ids have no import_jobs row (dev D1 is exemplars-only), so
+  source-id resolution fails loudly before any dispatch. But verifyImport
+  itself is NOT environment-gated -- --execute's reclassify step ('complete'
+  -> 'incomplete') runs against whatever backend the CLI is pointed at, so
+  only ever run --execute against production. A target already
+  quarantined/blocklisted by the Phase 2 retry engine is not un-stuck by
+  this reclassify (which only flips complete -> incomplete); trust
+  datasets.data_complete, not import_jobs.status. Acceptance audit: run
+  'nemar admin data-integrity-sweep --older-than 0' after the batch lands.`,
+  )
+  .action(
+    async (
+      ids: string[],
+      options: {
+        all?: boolean;
+        execute?: boolean;
+        force?: boolean;
+        recoverFile?: string;
+        json?: boolean;
+      } & ConfirmOptions,
+    ) => {
+      if (!requireAuth()) return;
+
+      if (ids.length === 0 && !options.all) {
+        console.log(chalk.red("Error: provide dataset id(s) or use --all"));
+        process.exit(1);
+      }
+      if (ids.length > 0 && options.all) {
+        console.log(chalk.red("Error: provide dataset id(s) OR --all, not both"));
+        process.exit(1);
+      }
+
+      const listPath = options.recoverFile || defaultRecoverDatasetsPath();
+      let entries: RecoverDatasetEntry[];
+      try {
+        entries = loadRecoverDatasets(listPath);
+      } catch (err) {
+        console.error(chalk.red(`Failed to load recover-datasets file: ${errorDetail(err)}`));
+        process.exit(1);
+      }
+
+      const resolved = options.all
+        ? { targets: entries.map((e) => e.dataset_id) }
+        : resolveRecoverTargets(ids, entries, { force: options.force });
+
+      if ("error" in resolved) {
+        console.error(chalk.red(resolved.error));
+        process.exit(1);
+      }
+      const targets = resolved.targets;
+
+      if (!options.execute) {
+        // JSON first and exclusive: `recover --all --json | jq` must see pure
+        // JSON on stdout, nothing else.
+        if (options.json) {
+          console.log(JSON.stringify({ dry_run: true, targets }, null, 2));
+          return;
+        }
+        console.log(chalk.cyan(`\n[dry-run] Would recover ${targets.length} dataset(s):\n`));
+        for (const id of targets) {
+          const note = entries.find((e) => e.dataset_id === id)?.note;
+          console.log(`  ${id}${note ? chalk.dim(` - ${note}`) : ""}`);
+        }
+        console.log(
+          chalk.dim(
+            "\nEach target: POST /admin/imports/:id/verify (reclassify), then one batch " +
+              "gh workflow run onboard-openneuro.yml for the whole set. Pass --execute to run.",
+          ),
+        );
+        return;
+      }
+
+      // Every human-readable console.log below is gated behind `!options.json`
+      // so `recover --execute --json | jq` sees pure JSON on stdout; the JSON
+      // result is assembled as the flow proceeds and printed once at the end
+      // (it needs the dispatch/verify results, so it can't print up front the
+      // way the dry-run branch above does). ora spinners write to stderr by
+      // default, so they're left unguarded.
+      if (!options.json) {
+        console.log(
+          chalk.yellow(
+            `\nThis verifies (reclassifies) and re-dispatches the OpenNeuro copy for ${targets.length} dataset(s).`,
+          ),
+        );
+      }
+      const confirmResult = await confirm(
+        `Execute recovery for ${targets.length} dataset(s)?`,
+        options,
+      );
+      if (confirmResult !== "confirmed") {
+        if (!options.json) {
+          console.log(chalk.dim(confirmResult === "declined" ? "Skipped" : "Cancelled"));
+        }
+        return;
+      }
+
+      // Resolve each target's OpenNeuro ds###### source id from import_jobs
+      // BEFORE any mutating call, so a target with no row fails loudly up
+      // front rather than after some targets have already been reclassified.
+      const resolveSpinner = ora("Resolving import sources...").start();
+      let sourceByTarget: Map<string, string>;
+      let missingSource: string[];
+      try {
+        const status = await getImportStatus();
+        ({ sourceByTarget, missingSource } = resolveImportSources(targets, status.imports));
+      } catch (err) {
+        resolveSpinner.fail("Failed to fetch import job state");
+        console.error(chalk.red(errorDetail(err)));
+        process.exit(1);
+      }
+      if (missingSource.length > 0) {
+        resolveSpinner.fail("Some targets have no import_jobs source to recover from");
+        for (const id of missingSource) {
+          console.error(chalk.red(`  ${id}: no import_jobs row (or empty source_id)`));
+        }
+        process.exit(1);
+      }
+      resolveSpinner.succeed(`Resolved ${targets.length} OpenNeuro source id(s)`);
+
+      const verifyResults: Array<{ dataset_id: string; ok: boolean; error?: string }> = [];
+      for (const id of targets) {
+        const verifySpinner = ora(`Verifying ${id}...`).start();
+        try {
+          const result = await verifyImport(id);
+          verifyResults.push({ dataset_id: id, ok: true });
+          verifySpinner.succeed(
+            `${id} reclassified: ${
+              result.complete
+                ? "already complete"
+                : `incomplete (${result.missingKeys.length}/${result.expectedCount} missing)`
+            }`,
+          );
+        } catch (err) {
+          verifyResults.push({ dataset_id: id, ok: false, error: errorDetail(err) });
+          verifySpinner.fail(`${id}: verify failed - ${errorDetail(err)}`);
+        }
+      }
+
+      const verifiedTargets = verifyResults.filter((r) => r.ok).map((r) => r.dataset_id);
+      const failedTargets = verifyResults.filter((r) => !r.ok);
+      if (verifiedTargets.length === 0) {
+        console.error(chalk.red("\nNo targets verified successfully; not dispatching."));
+        process.exit(1);
+      }
+
+      // biome-ignore lint/style/noNonNullAssertion: sourceByTarget covers every id in verifiedTargets (checked above)
+      const dsIds = verifiedTargets.map((id) => sourceByTarget.get(id)!);
+      if (!options.json) {
+        console.log(
+          chalk.cyan(
+            `\nDispatching onboard-openneuro.yml for ${dsIds.length} dataset(s): ${dsIds.join(", ")}\n`,
+          ),
+        );
+      }
+      const dispatch = await dispatchOpenNeuroImportWorkflow(dsIds);
+      if (!dispatch.ok) {
+        console.error(chalk.red(`Failed to dispatch workflow: ${dispatch.error}`));
+        console.error(
+          chalk.dim("Make sure gh CLI is authenticated with access to nemarDatasets org"),
+        );
+        process.exit(1);
+      }
+
+      if (!options.json) {
+        console.log(chalk.green("Workflow dispatched successfully"));
+        console.log(
+          chalk.dim(
+            "  Monitor at: https://github.com/nemarDatasets/.github/actions/workflows/onboard-openneuro.yml",
+          ),
+        );
+        console.log(chalk.dim("  Or run: gh run list --repo nemarDatasets/.github --limit 5"));
+        console.log(
+          chalk.dim(
+            "  Watch progress with: nemar admin recover status  /  nemar admin data-integrity-sweep --older-than 0",
+          ),
+        );
+
+        if (failedTargets.length > 0) {
+          console.log(chalk.yellow(`\n${failedTargets.length} target(s) skipped (verify failed):`));
+          for (const f of failedTargets) console.log(chalk.red(`  ${f.dataset_id}: ${f.error}`));
+        }
+      }
+
+      if (options.json) {
+        console.log(
+          JSON.stringify(
+            { dispatched: verifiedTargets, skipped: failedTargets, dispatch },
+            null,
+            2,
+          ),
+        );
+      }
+
+      // Non-zero exit on partial verify failure so shell scripts can chain
+      // safely (mirrors reindex/hed-sweep's convention); the JSON/human
+      // output above still prints either way, this only affects the exit
+      // code.
+      if (failedTargets.length > 0) process.exit(1);
+    },
+  );
+
+// `status` shares --all/--recover-file/--json with recoverCommand's own
+// action above. Commander does not merge parent+child option VALUES when a
+// flag of the same name is declared on both (the parent's parseOptions
+// consumes it first, regardless of whether it appears before or after
+// "status" on the command line -- the child then sees an empty value for
+// that key), so the options are redeclared here ONLY for --help visibility
+// and read back via optsWithGlobals(), which merges this command's own
+// (empty) values with its ancestors' (the parent's real, captured values).
+const recoverStatusCommand = recoverCommand
+  .command("status")
+  .description("Report data_complete/bytes_present progress for recover targets")
+  .argument("[ids...]", "Dataset id(s) to check (omit when using --all)")
+  .option("--all", "Check every entry in the checked-in recover-datasets list")
+  .option(
+    "--recover-file <path>",
+    "Path to the recover-datasets JSON (default: scripts/recover-datasets.json)",
+  )
+  .option("--json", "Output raw JSON");
+
+recoverStatusCommand.action(async (ids: string[]) => {
+  const options = recoverStatusCommand.optsWithGlobals() as {
+    all?: boolean;
+    recoverFile?: string;
+    json?: boolean;
+  };
+  if (!requireAuth()) return;
+
+  if (ids.length === 0 && !options.all) {
+    console.log(chalk.red("Error: provide dataset id(s) or use --all"));
+    process.exit(1);
+  }
+  if (ids.length > 0 && options.all) {
+    console.log(chalk.red("Error: provide dataset id(s) OR --all, not both"));
+    process.exit(1);
+  }
+
+  const listPath = options.recoverFile || defaultRecoverDatasetsPath();
+  let entries: RecoverDatasetEntry[];
+  try {
+    entries = loadRecoverDatasets(listPath);
+  } catch (err) {
+    console.error(chalk.red(`Failed to load recover-datasets file: ${errorDetail(err)}`));
+    process.exit(1);
+  }
+  const targets = options.all ? entries.map((e) => e.dataset_id) : ids;
+
+  const results: Array<{
+    dataset_id: string;
+    data_complete: number | null;
+    bytes_present: number | null;
+    file_size: number | null;
+    error?: string;
+  }> = [];
+  for (const id of targets) {
+    try {
+      const dataset = await getDataset(id);
+      results.push({
+        dataset_id: id,
+        data_complete: dataset.data_complete ?? null,
+        bytes_present: dataset.bytes_present ?? null,
+        file_size: dataset.file_size ?? null,
+      });
+    } catch (err) {
+      results.push({
+        dataset_id: id,
+        data_complete: null,
+        bytes_present: null,
+        file_size: null,
+        error: errorDetail(err),
+      });
+    }
+  }
+
+  if (options.json) {
+    console.log(JSON.stringify(results, null, 2));
+    return;
+  }
+
+  console.log(chalk.bold(`\nRecover status (${results.length})\n`));
+  let completeCount = 0;
+  for (const r of results) {
+    if (r.error) {
+      console.log(`  ${r.dataset_id.padEnd(10)} ${chalk.red(`error: ${r.error}`)}`);
+      continue;
+    }
+    if (r.data_complete === 1) completeCount++;
+    const label =
+      r.data_complete === 1
+        ? chalk.green("complete")
+        : r.data_complete === 0
+          ? chalk.red("incomplete")
+          : chalk.dim("unaudited");
+    const bytes =
+      r.bytes_present != null && r.file_size != null
+        ? ` ${formatBytes(r.bytes_present)}/${formatBytes(r.file_size)}`
+        : "";
+    console.log(`  ${r.dataset_id.padEnd(10)} ${label}${bytes}`);
+  }
+  console.log(chalk.bold(`\n${completeCount}/${results.length} data_complete`));
+});
+
+adminCommand.addCommand(recoverCommand);
 
 // ============================================================================
 // Exemplar staging fleet (epic #923, Phase 5)
