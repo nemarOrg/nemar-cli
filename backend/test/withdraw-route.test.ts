@@ -8,11 +8,20 @@
  * backend/test/data-integrity-sweep-route.test.ts.
  *
  * Deliberately scoped to paths that never reach a live GitHub/S3/EZID call:
- * the dry-run default (returns a plan and stops), and every precondition-fail
- * path (not found, no EZID DOI, wrong visibility/withdrawn state). The
- * `--execute` happy path needs a real repo + bucket + registrar and is
- * exercised by the sandbox exemplar E2E and test/ezid-sandbox.test.ts, not
- * here (same boundary documented in backend/test/withdraw.test.ts).
+ * the dry-run default (returns a plan and stops, including the resume case),
+ * every precondition-fail path (not found, no EZID DOI, wrong visibility/
+ * withdrawn state, already-fully-withdrawn), and the status-code mapping for
+ * an outright visibility failure (via a `github_repo=NULL` dataset, which
+ * fails applyDatasetVisibility's `no_repo` branch before any network call --
+ * see backend/test/visibility.test.ts). The full `--execute` happy path
+ * (visibility flip actually succeeding) and the 207-partial-DOI-failure case
+ * both need a real GitHub PAT + AWS S3 credentials this harness does not
+ * have; they are NOT exercised anywhere in the pure/CI tier today. The gated
+ * "Withdraw/Restore Orchestration Round Trip" block in
+ * test/ezid-sandbox.test.ts documents the additional env vars that would
+ * make that path runnable and attempts it when they're present; otherwise
+ * that path is only covered by a human running the sandbox exemplar E2E by
+ * hand (same boundary documented in backend/test/withdraw.test.ts).
  */
 
 import type { Database } from "bun:sqlite";
@@ -56,20 +65,28 @@ async function seedNonAdmin(): Promise<string> {
   return key;
 }
 
-function seedDataset(overrides: { visibility?: string; withdrawn_at?: string | null } = {}): void {
+function seedDataset(
+  overrides: {
+    visibility?: string;
+    withdrawn_at?: string | null;
+    ezid_status?: string | null;
+    github_repo?: string | null;
+  } = {},
+): void {
   db.prepare(
     `INSERT INTO datasets
        (dataset_id, owner_user_id, name, visibility, is_sandbox, doi_provider,
-        ezid_identifier, withdrawn_at, withdrawn_reason, github_repo)
-     VALUES (?, 1, ?, ?, 0, 'ezid', ?, ?, ?, ?)`,
+        ezid_identifier, ezid_status, withdrawn_at, withdrawn_reason, github_repo)
+     VALUES (?, 1, ?, ?, 0, 'ezid', ?, ?, ?, ?, ?)`,
   ).run(
     DATASET_ID,
     DATASET_ID,
     overrides.visibility ?? "public",
     `doi:10.82901/NEMAR.${DATASET_ID.toUpperCase()}`,
+    overrides.ezid_status ?? null,
     overrides.withdrawn_at ?? null,
     overrides.withdrawn_at ? "upstream_403" : null,
-    `nemarDatasets/${DATASET_ID}`,
+    overrides.github_repo === undefined ? `nemarDatasets/${DATASET_ID}` : overrides.github_repo,
   );
 }
 
@@ -135,7 +152,7 @@ describe("POST /admin/datasets/:id/withdraw", () => {
     expect(body.skipped).toBe("Dataset not found");
   });
 
-  test("already-private dataset -> skipped, not attempted", async () => {
+  test("already-private but never withdrawn -> skip-unrelated-private, not attempted", async () => {
     seedDataset({ visibility: "private" });
     const res = await post(`/admin/datasets/${DATASET_ID}/withdraw`, {
       dry_run: false,
@@ -143,7 +160,54 @@ describe("POST /admin/datasets/:id/withdraw", () => {
     });
     expect(res.status).toBe(200);
     const body = await res.json();
-    expect(body.skipped).toMatch(/already "private"/);
+    expect(body.skipped).toMatch(/never been withdrawn/);
+  });
+
+  test("already fully withdrawn (skip-done) -> skipped, not attempted", async () => {
+    seedDataset({
+      visibility: "private",
+      withdrawn_at: "2026-07-20T00:00:00Z",
+      ezid_status: "unavailable",
+    });
+    const res = await post(`/admin/datasets/${DATASET_ID}/withdraw`, {
+      dry_run: false,
+      reason: "upstream_403",
+    });
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.skipped).toMatch(/already fully withdrawn/);
+  });
+
+  test("dry-run on a resumable (interrupted) withdrawal reports resumed:true", async () => {
+    seedDataset({ visibility: "private", withdrawn_at: "2026-07-20T00:00:00Z" });
+    const res = await post(`/admin/datasets/${DATASET_ID}/withdraw`, {});
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.dry_run).toBe(true);
+    expect(body.resumed).toBe(true);
+  });
+
+  test("visibility-stage failure (no_repo) on --execute maps to 400, dois marked not-attempted", async () => {
+    seedDataset({ github_repo: null });
+    const res = await post(`/admin/datasets/${DATASET_ID}/withdraw`, {
+      dry_run: false,
+      reason: "upstream_403",
+    });
+    expect(res.status).toBe(400);
+    const body = await res.json();
+    expect(body.visibility).toEqual({
+      status: "failed",
+      stage: "no_repo",
+      error: "Dataset has no GitHub repository",
+    });
+    expect(body.dois).toHaveLength(1);
+    expect(body.dois[0].status).toBe("failed");
+    expect(body.dois[0].error).toMatch(/not attempted/);
+    // Top-level `error` mirrors the visibility failure so the CLI client's
+    // shared request() helper (which extracts data.error for its ApiError
+    // message on a non-2xx) surfaces the real reason, not a generic
+    // "Request failed" -- review fix GROUP 2c.
+    expect(body.error).toBe("Dataset has no GitHub repository");
   });
 
   test("non-admin cannot withdraw", async () => {
@@ -184,6 +248,24 @@ describe("POST /admin/datasets/:id/restore", () => {
     expect(res.status).toBe(200);
     const body = await res.json();
     expect(body.skipped).toMatch(/was not withdrawn/);
+  });
+
+  test("visibility-stage failure (no_repo) on --execute maps to 400, dois marked not-attempted", async () => {
+    seedDataset({
+      visibility: "private",
+      withdrawn_at: "2026-07-20T00:00:00Z",
+      github_repo: null,
+    });
+    const res = await post(`/admin/datasets/${DATASET_ID}/restore`, { dry_run: false });
+    expect(res.status).toBe(400);
+    const body = await res.json();
+    expect(body.visibility).toEqual({
+      status: "failed",
+      stage: "no_repo",
+      error: "Dataset has no GitHub repository",
+    });
+    expect(body.dois[0].status).toBe("failed");
+    expect(body.error).toBe("Dataset has no GitHub repository");
   });
 
   test("non-admin cannot restore", async () => {
