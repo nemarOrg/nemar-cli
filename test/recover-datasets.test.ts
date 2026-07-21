@@ -5,8 +5,10 @@
 
 import { describe, expect, test } from "bun:test";
 import {
+  type ImportSourceRow,
   type RecoverDatasetEntry,
   parseRecoverDatasets,
+  resolveImportSources,
   resolveRecoverTargets,
 } from "../src/lib/recover-datasets";
 import { parseWithdrawnDatasets } from "../src/lib/withdrawn-datasets";
@@ -112,5 +114,62 @@ describe("resolveRecoverTargets (not-on-list --force guard)", () => {
     const result = resolveRecoverTargets(["on002814", "on999999"], entries, {});
     expect("error" in result).toBe(true);
     expect((result as { error: string }).error).toContain("on999999");
+  });
+});
+
+describe("resolveImportSources", () => {
+  test("a target with a source_id resolves", () => {
+    const imports: ImportSourceRow[] = [{ dataset_id: "on002814", source_id: "ds002814" }];
+    const result = resolveImportSources(["on002814"], imports);
+    expect(result.sourceByTarget).toEqual(new Map([["on002814", "ds002814"]]));
+    expect(result.missingSource).toEqual([]);
+  });
+
+  test("a target with an empty/undefined source_id is missing", () => {
+    const imports: ImportSourceRow[] = [
+      { dataset_id: "on002814", source_id: "" },
+      { dataset_id: "on003190", source_id: undefined },
+    ];
+    const result = resolveImportSources(["on002814", "on003190"], imports);
+    expect(result.sourceByTarget.size).toBe(0);
+    expect(result.missingSource).toEqual(["on002814", "on003190"]);
+  });
+
+  test("a target absent from the imports listing is missing", () => {
+    const imports: ImportSourceRow[] = [{ dataset_id: "on999999", source_id: "ds999999" }];
+    const result = resolveImportSources(["on002814"], imports);
+    expect(result.sourceByTarget.size).toBe(0);
+    expect(result.missingSource).toEqual(["on002814"]);
+  });
+
+  test("a non-target row in the listing is ignored", () => {
+    const imports: ImportSourceRow[] = [
+      { dataset_id: "on002814", source_id: "ds002814" },
+      { dataset_id: "on999999", source_id: "ds999999" },
+    ];
+    const result = resolveImportSources(["on002814"], imports);
+    expect(result.sourceByTarget).toEqual(new Map([["on002814", "ds002814"]]));
+  });
+
+  test("a duplicate dataset_id row: the last matching row wins (documented, deterministic)", () => {
+    // import_jobs has UNIQUE(dataset_id), so this can't happen against a real
+    // backend; the pure function still needs defined, deterministic behavior.
+    const imports: ImportSourceRow[] = [
+      { dataset_id: "on002814", source_id: "ds002814-first" },
+      { dataset_id: "on002814", source_id: "ds002814-second" },
+    ];
+    const result = resolveImportSources(["on002814"], imports);
+    expect(result.sourceByTarget.get("on002814")).toBe("ds002814-second");
+    expect(result.missingSource).toEqual([]);
+  });
+
+  test("multiple targets, mixed resolution", () => {
+    const imports: ImportSourceRow[] = [
+      { dataset_id: "on002814", source_id: "ds002814" },
+      { dataset_id: "on003190", source_id: "" },
+    ];
+    const result = resolveImportSources(["on002814", "on003190", "on003505"], imports);
+    expect(result.sourceByTarget).toEqual(new Map([["on002814", "ds002814"]]));
+    expect(result.missingSource).toEqual(["on003190", "on003505"]);
   });
 });

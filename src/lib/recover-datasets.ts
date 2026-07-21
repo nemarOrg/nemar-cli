@@ -86,3 +86,46 @@ export function resolveRecoverTargets(
   }
   return { targets: ids };
 }
+
+/** The subset of an import_jobs row `resolveImportSources` needs (a structural
+ *  subset of `ImportJobRow` in src/lib/api/admin.ts, kept local so this file
+ *  has no dependency on the API client). */
+export interface ImportSourceRow {
+  dataset_id: string;
+  source_id?: string | null;
+}
+
+export interface ResolvedImportSources {
+  /** target dataset_id -> resolved OpenNeuro ds###### source id */
+  sourceByTarget: Map<string, string>;
+  /** targets with no import_jobs row, or a row with an empty source_id */
+  missingSource: string[];
+}
+
+/**
+ * Resolve each target dataset id's OpenNeuro `ds######` source id from a flat
+ * import_jobs listing (as returned by GET /admin/imports), so `nemar admin
+ * recover --execute` can fail loudly BEFORE any mutating call if a target
+ * has no row (or an empty source_id). Pure so it is unit-testable without a
+ * live backend; the CLI action is a thin wrapper around this.
+ *
+ * import_jobs has UNIQUE(dataset_id), so a duplicate row for the same
+ * dataset_id cannot happen against a real backend. If the input ever
+ * contains one anyway, the LAST matching row wins (a left-to-right
+ * Map.set), same as any other index-by-key reduction -- deterministic, not
+ * an error, since this function has no way to tell which row is "correct".
+ */
+export function resolveImportSources(
+  targets: string[],
+  imports: ImportSourceRow[],
+): ResolvedImportSources {
+  const targetSet = new Set(targets);
+  const sourceByTarget = new Map<string, string>();
+  for (const row of imports) {
+    if (targetSet.has(row.dataset_id) && row.source_id) {
+      sourceByTarget.set(row.dataset_id, row.source_id);
+    }
+  }
+  const missingSource = targets.filter((id) => !sourceByTarget.has(id));
+  return { sourceByTarget, missingSource };
+}
