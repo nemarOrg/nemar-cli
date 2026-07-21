@@ -366,6 +366,35 @@ export async function listObjectsWithDelimiter(
   return { contents, commonPrefixes, truncated };
 }
 
+/**
+ * Full paginated listing of every object under `prefix` as a key -> size map
+ * (S3 key with the prefix stripped, mirroring the CLI's listExistingObjects
+ * in src/lib/s3-server-copy.ts). Unlike listObjectsWithDelimiter (one page,
+ * directory-style), this drains every page via listObjectPages -- the
+ * retry-engine's per-key integrity check (verifyImportS3, import-integrity.ts,
+ * #969) needs the COMPLETE destination listing to detect missing/zero-byte
+ * objects, not just the first 1000.
+ */
+export async function listObjectSizes(
+  options: PresignedUrlOptions,
+  prefix: string,
+): Promise<Map<string, number>> {
+  const sizes = new Map<string, number>();
+  for await (const xml of listObjectPages(options, prefix)) {
+    const contentMatches = xml.matchAll(
+      /<Contents>[\s\S]*?<Key>([^<]+)<\/Key>[\s\S]*?<Size>(\d+)<\/Size>[\s\S]*?<\/Contents>/g,
+    );
+    for (const match of contentMatches) {
+      const key = match[1];
+      if (!key.startsWith(prefix)) continue;
+      const stripped = key.slice(prefix.length);
+      if (stripped.length === 0) continue; // the prefix "directory" placeholder
+      sizes.set(stripped, Number.parseInt(match[2], 10));
+    }
+  }
+  return sizes;
+}
+
 // ---------------------------------------------------------------------------
 // Shared utilities
 // ---------------------------------------------------------------------------
