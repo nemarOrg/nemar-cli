@@ -41,7 +41,9 @@ import {
   type ImportManifestItem,
   batchServerSideCopy,
   cleanupStaging,
+  expectedSizesFromItems,
   filterAlreadyCopied,
+  isKeyPresentAtDeclaredSize,
   keyInShard,
   listExistingObjects,
   parseS3Url,
@@ -989,9 +991,15 @@ export async function copyShard(
     return;
   }
 
-  // Resume: skip objects already present at the destination.
+  // Resume: skip objects already present at the destination, but only when
+  // present at their declared size -- a 0-byte leftover from a prior failed
+  // run must be re-copied, not mistaken for done (#967).
   const existing = await listExistingObjects(S3_BUCKET, `${nemarId}/objects/`, S3_REGION);
-  const { toCopy, skipped } = filterAlreadyCopied(shardItems, existing);
+  const { toCopy, skipped } = filterAlreadyCopied(
+    shardItems,
+    existing,
+    expectedSizesFromItems(shardItems),
+  );
   if (skipped.length > 0) {
     console.log(chalk.dim(`[${tag}] skipped ${skipped.length} already present`));
   }
@@ -1074,13 +1082,16 @@ export async function finalizeImport(
     guardSpinner.succeed("Confirmed metadata-only dataset (no annexed data)");
   }
   if (hasData) {
-    // Verify all data landed by re-listing the destination against the manifest.
+    // Verify all data landed at its correct size by re-listing the destination
+    // against the manifest. This is the publish gate: a key that merely exists
+    // but is 0 bytes or truncated (a corrupt leftover from a failed copy, #967)
+    // counts as missing, same as a key that's absent entirely.
     const verifySpinner = ora("Verifying copied data...").start();
     const existing = await listExistingObjects(S3_BUCKET, `${nemarId}/objects/`, S3_REGION);
-    const missing = manifest.items.filter((it) => !existing.has(it.key));
+    const missing = manifest.items.filter((it) => !isKeyPresentAtDeclaredSize(it.key, existing));
     if (missing.length > 0) {
       verifySpinner.fail(
-        `${missing.length} of ${manifest.items.length} objects missing at the destination. Re-run the copy phase (a shard likely failed or was cancelled) before finalizing.`,
+        `${missing.length} of ${manifest.items.length} objects missing or wrong size at the destination. Re-run the copy phase (a shard likely failed or was cancelled) before finalizing.`,
       );
       process.exit(1);
     }
