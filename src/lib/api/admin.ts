@@ -358,6 +358,11 @@ export async function updateDoi(
 
 // ---------------------------------------------------------------------------
 // Withdrawal / restore (epic #967 phase 4, #971)
+//
+// NOTE (tracked, not fixed here -- #937): these wire types are hand-
+// duplicated against backend/src/services/withdraw.ts rather than sourced
+// from shared/contract, same as most of this file's other endpoints. The
+// @nemar/contract migration is a separate tracked follow-up.
 // ---------------------------------------------------------------------------
 
 export interface DoiStepResult {
@@ -369,17 +374,37 @@ export interface DoiStepResult {
   error?: string;
 }
 
-export interface WithdrawResponse {
-  dataset_id: string;
-  dry_run: boolean;
-  /** Set when a precondition failed (not found / no EZID DOI / wrong
-   *  visibility or withdrawn state); every other field is then omitted. */
-  skipped?: string;
-  visibility?: { status: "planned" | "ok" | "failed"; error?: string };
-  dois?: DoiStepResult[];
-}
+/** Mirrors services/visibility.ts's VisibilityTransitionResult failure branch
+ *  (minus the `ok` discriminant) so the CLI can render exactly which surface
+ *  (GitHub/S3/D1) desynced instead of a flattened error string. */
+export type VisibilityStepResult =
+  | { status: "planned" }
+  | { status: "ok" }
+  | { status: "failed"; stage: "not_found" | "no_repo" | "invalid_repo" | "github"; error: string }
+  | { status: "failed"; stage: "s3"; error: string; githubReverted: boolean; revertError?: string }
+  | {
+      status: "failed";
+      stage: "db";
+      error: string;
+      githubReverted: boolean;
+      s3Reverted: boolean;
+      revertError?: string;
+    };
 
-export type RestoreResponse = WithdrawResponse;
+/** Discriminated on `skipped`: exactly one of the two shapes, mirroring
+ *  backend/src/services/withdraw.ts's DatasetTransitionResult. withdraw and
+ *  restore share this one name (rather than separate Withdraw/Restore
+ *  aliases) since the shapes are otherwise identical. */
+export type DatasetTransitionResponse =
+  | { dataset_id: string; dry_run: boolean; skipped: string; resumed?: boolean }
+  | {
+      dataset_id: string;
+      dry_run: boolean;
+      resumed?: boolean;
+      visibility: VisibilityStepResult;
+      dois: DoiStepResult[];
+      warning?: string;
+    };
 
 /**
  * Withdraw a published dataset: make it private and tombstone its concept +
@@ -389,8 +414,8 @@ export type RestoreResponse = WithdrawResponse;
 export async function withdrawDataset(
   datasetId: string,
   opts: { reason?: string; dryRun: boolean },
-): Promise<WithdrawResponse> {
-  return request<WithdrawResponse>(
+): Promise<DatasetTransitionResponse> {
+  return request<DatasetTransitionResponse>(
     `/admin/datasets/${datasetId}/withdraw`,
     {
       method: "POST",
@@ -407,8 +432,8 @@ export async function withdrawDataset(
 export async function restoreDataset(
   datasetId: string,
   opts: { dryRun: boolean },
-): Promise<RestoreResponse> {
-  return request<RestoreResponse>(
+): Promise<DatasetTransitionResponse> {
+  return request<DatasetTransitionResponse>(
     `/admin/datasets/${datasetId}/restore`,
     {
       method: "POST",

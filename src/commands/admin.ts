@@ -28,6 +28,7 @@ import inquirer from "inquirer";
 import ora from "ora";
 import {
   type DataIntegritySweepBatchResponse,
+  type DatasetTransitionResponse,
   type EmailPreferences,
   type HedSweepBatchResponse,
   type ReindexBulkOptions,
@@ -35,9 +36,7 @@ import {
   type ReindexFilter,
   type ReindexOptions,
   type ReindexResponse,
-  type RestoreResponse,
   type SummaryVersionCoverage,
-  type WithdrawResponse,
   addCi,
   approveUser,
   bulkDeleteDatasets,
@@ -2818,7 +2817,7 @@ function defaultWithdrawnDatasetsPath(): string {
 function printTransitionResult(
   tag: string,
   datasetId: string,
-  result: WithdrawResponse | RestoreResponse | undefined,
+  result: DatasetTransitionResponse | undefined,
   error: string | undefined,
 ): void {
   if (error) {
@@ -2826,24 +2825,40 @@ function printTransitionResult(
     return;
   }
   if (!result) return;
-  if (result.skipped) {
+  if ("skipped" in result) {
     console.log(`  ${chalk.yellow("skipped".padEnd(8))} ${datasetId}: ${result.skipped}`);
     return;
   }
 
-  console.log(chalk.bold(`  ${tag}${datasetId}`));
-  if (result.visibility) {
-    const vColor = result.visibility.status === "failed" ? chalk.red : chalk.green;
-    console.log(
-      `    visibility: ${vColor(result.visibility.status)}${result.visibility.error ? chalk.dim(` (${result.visibility.error})`) : ""}`,
-    );
+  const resumeTag = result.resumed ? chalk.yellow(" (resumed)") : "";
+  console.log(chalk.bold(`  ${tag}${datasetId}${resumeTag}`));
+
+  const vColor = result.visibility.status === "failed" ? chalk.red : chalk.green;
+  console.log(`    visibility: ${vColor(result.visibility.status)}`);
+  if (result.visibility.status === "failed") {
+    console.log(chalk.red(`      stage=${result.visibility.stage}: ${result.visibility.error}`));
+    if ("githubReverted" in result.visibility) {
+      const s3Bit =
+        "s3Reverted" in result.visibility ? ` s3Reverted=${result.visibility.s3Reverted}` : "";
+      const revertBit = result.visibility.revertError
+        ? ` revertError=${result.visibility.revertError}`
+        : "";
+      console.log(
+        chalk.dim(`      githubReverted=${result.visibility.githubReverted}${s3Bit}${revertBit}`),
+      );
+    }
   }
-  for (const d of result.dois ?? []) {
+
+  for (const d of result.dois) {
     const color =
       d.status === "failed" ? chalk.red : d.status === "planned" ? chalk.yellow : chalk.green;
     const label = d.kind === "version" ? `version ${d.version}` : "concept";
     console.log(`    ${color(d.status.padEnd(8))} ${label} -> ${d.action}  ${chalk.dim(d.doi)}`);
     if (d.error) console.log(chalk.red(`      ${d.error}`));
+  }
+
+  if (result.warning) {
+    console.log(chalk.yellow(`    warning: ${result.warning}`));
   }
 }
 
@@ -2930,7 +2945,11 @@ adminCommand
         }
       }
 
-      const results: Array<{ dataset_id: string; result?: WithdrawResponse; error?: string }> = [];
+      const results: Array<{
+        dataset_id: string;
+        result?: DatasetTransitionResponse;
+        error?: string;
+      }> = [];
       for (const t of targets) {
         try {
           const result = await withdrawDataset(t.datasetId, { reason: t.reason, dryRun });
@@ -3020,7 +3039,11 @@ adminCommand
         }
       }
 
-      const results: Array<{ dataset_id: string; result?: RestoreResponse; error?: string }> = [];
+      const results: Array<{
+        dataset_id: string;
+        result?: DatasetTransitionResponse;
+        error?: string;
+      }> = [];
       for (const datasetId of targets) {
         try {
           const result = await restoreDataset(datasetId, { dryRun });
