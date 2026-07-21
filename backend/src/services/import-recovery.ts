@@ -23,6 +23,7 @@ export type ImportStatus =
   | "copying"
   | "finalizing"
   | "complete"
+  | "incomplete"
   | "failed"
   | "quarantined"
   | "rolled_back";
@@ -33,11 +34,15 @@ export const IMPORT_STATUSES: ImportStatus[] = [
   "copying",
   "finalizing",
   "complete",
+  "incomplete",
   "failed",
   "quarantined",
   "rolled_back",
 ];
-/** Terminal statuses a monotonic state update must never regress past. */
+/** Terminal statuses a monotonic state update must never regress past.
+ *  `incomplete` (#969) is deliberately NOT terminal -- it means the import
+ *  reached `complete` once but S3 is missing keys, and the retry engine
+ *  (services/import-retry.ts) actively retries it back to `complete`. */
 export const TERMINAL_IMPORT_STATUSES: ImportStatus[] = ["complete", "rolled_back", "quarantined"];
 
 export interface ImportGuardState {

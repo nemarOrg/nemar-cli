@@ -502,11 +502,12 @@ nemar admin email-preferences show    # Show email notification preferences
 nemar admin email-preferences update  # Update email notification preferences
 nemar admin e2e-test          # Run end-to-end test against nm099999
 
-# Admin: OpenNeuro import + quarantine recovery (issue #754)
+# Admin: OpenNeuro import + quarantine recovery (issue #754; retry engine + blocklist: epic #967 Phase 2, #969)
 nemar admin import-openneuro <ids>    # Import OpenNeuro dataset(s) into NEMAR
-nemar admin import status [id]        # Show import job state (failed/quarantined first; -s to filter)
+nemar admin import status [id]        # Show import job state (failed/quarantined first; -s to filter, -b for blocklisted only)
 nemar admin import rollback <id>      # Roll back a failed/quarantined import (deletes repo + S3 + D1)
-nemar admin import retry <id>         # Reset a failed/quarantined import to 'preparing' for re-dispatch
+nemar admin import retry <id>         # Reset a failed/quarantined/incomplete import to 'preparing' for re-dispatch (also un-blocklists)
+nemar admin import verify <id>        # Force a per-key S3 integrity check now; seeds the retry lane or confirms health
 
 # Admin: governance fleet (epic #713)
 nemar admin fleet drift               # Report repos off the governance spec

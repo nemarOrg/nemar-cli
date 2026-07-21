@@ -67,6 +67,7 @@ import {
   updateDoi,
   updateEmailPreferences,
   validateCi,
+  verifyImport,
 } from "../lib/api/admin.js";
 import { applyS3Lock, getDatasetFiles } from "../lib/api/data.js";
 import {
@@ -3009,56 +3010,74 @@ importCommand
   .command("status")
   .description("Show OpenNeuro import job state (failed/quarantined first)")
   .argument("[dataset-id]", "Filter to one dataset id (e.g., on007523)")
-  .option("-s, --status <status>", "Filter by status (failed, quarantined, copying, ...)")
-  .action(async (datasetId: string | undefined, options: { status?: string }) => {
-    if (!requireAuth()) return;
+  .option("-s, --status <status>", "Filter by status (failed, quarantined, incomplete, ...)")
+  .option("-b, --blocklisted", "Only show retry-engine blocklisted rows")
+  .action(
+    async (datasetId: string | undefined, options: { status?: string; blocklisted?: boolean }) => {
+      if (!requireAuth()) return;
 
-    const spinner = ora("Fetching import status...").start();
-    try {
-      const result = await getImportStatus(options.status);
-      spinner.stop();
+      const spinner = ora("Fetching import status...").start();
+      try {
+        const result = await getImportStatus(options.status, options.blocklisted);
+        spinner.stop();
 
-      let rows = result.imports;
-      if (datasetId) rows = rows.filter((r) => r.dataset_id === datasetId);
+        let rows = result.imports;
+        if (datasetId) rows = rows.filter((r) => r.dataset_id === datasetId);
 
-      const counts = result.by_status;
-      console.log(chalk.bold(`\nImport Jobs (${result.total})\n`));
-      console.log(
-        `  ${chalk.yellow(`in-flight ${(counts.preparing ?? 0) + (counts.copying ?? 0) + (counts.finalizing ?? 0)}`)}  ${chalk.green(`complete ${counts.complete ?? 0}`)}  ${chalk.red(`failed ${counts.failed ?? 0}`)}  ${chalk.red(`quarantined ${counts.quarantined ?? 0}`)}  ${chalk.dim(`rolled_back ${counts.rolled_back ?? 0}`)}\n`,
-      );
-
-      if (rows.length === 0) {
-        console.log(chalk.dim("  No import jobs match."));
-        return;
-      }
-
-      console.log(
-        chalk.dim(
-          `  ${"ID".padEnd(12)} ${"Source".padEnd(12)} ${"Stage".padEnd(10)} ${"Status".padEnd(12)} ${"Updated".padEnd(20)}`,
-        ),
-      );
-      console.log(chalk.dim(`  ${"─".repeat(70)}`));
-      for (const r of rows) {
-        const color =
-          r.status === "complete"
-            ? chalk.green
-            : r.status === "failed" || r.status === "quarantined"
-              ? chalk.red
-              : r.status === "rolled_back"
-                ? chalk.dim
-                : chalk.yellow;
-        const updated = r.updated_at ? new Date(r.updated_at).toLocaleString() : "-";
+        const counts = result.by_status;
+        console.log(chalk.bold(`\nImport Jobs (${result.total})\n`));
         console.log(
-          `  ${r.dataset_id.padEnd(12)} ${(r.source_id || "-").padEnd(12)} ${r.stage.padEnd(10)} ${color(r.status.padEnd(12))} ${updated}`,
+          `  ${chalk.yellow(`in-flight ${(counts.preparing ?? 0) + (counts.copying ?? 0) + (counts.finalizing ?? 0)}`)}  ${chalk.green(`complete ${counts.complete ?? 0}`)}  ${chalk.magenta(`incomplete ${counts.incomplete ?? 0}`)}  ${chalk.red(`failed ${counts.failed ?? 0}`)}  ${chalk.red(`quarantined ${counts.quarantined ?? 0}`)}  ${chalk.dim(`rolled_back ${counts.rolled_back ?? 0}`)}\n`,
         );
-        if (r.last_error) console.log(chalk.red(`    ${r.last_error}`));
-        if (r.workflow_run_url) console.log(chalk.dim(`    run: ${r.workflow_run_url}`));
+
+        if (rows.length === 0) {
+          console.log(chalk.dim("  No import jobs match."));
+          return;
+        }
+
+        console.log(
+          chalk.dim(
+            `  ${"ID".padEnd(12)} ${"Source".padEnd(12)} ${"Stage".padEnd(10)} ${"Status".padEnd(12)} ${"Updated".padEnd(20)}`,
+          ),
+        );
+        console.log(chalk.dim(`  ${"─".repeat(70)}`));
+        for (const r of rows) {
+          const color =
+            r.status === "complete"
+              ? chalk.green
+              : r.status === "failed" || r.status === "quarantined"
+                ? chalk.red
+                : r.status === "rolled_back"
+                  ? chalk.dim
+                  : r.status === "incomplete"
+                    ? chalk.magenta
+                    : chalk.yellow;
+          const updated = r.updated_at ? new Date(r.updated_at).toLocaleString() : "-";
+          console.log(
+            `  ${r.dataset_id.padEnd(12)} ${(r.source_id || "-").padEnd(12)} ${r.stage.padEnd(10)} ${color(r.status.padEnd(12))} ${updated}`,
+          );
+          if (r.last_error) console.log(chalk.red(`    ${r.last_error}`));
+          if (r.workflow_run_url) console.log(chalk.dim(`    run: ${r.workflow_run_url}`));
+          if (r.blocklisted) {
+            console.log(
+              chalk.magenta(
+                `    blocklisted (${r.blocklist_reason ?? "unknown"}); recovery_attempts=${r.recovery_attempts}; next_retry=${r.next_retry_at ?? "-"}${r.maintainer_notified_at ? `; maintainer notified ${r.maintainer_notified_at}` : ""}`,
+              ),
+            );
+          } else if (r.status === "incomplete" || r.status === "failed") {
+            console.log(
+              chalk.dim(
+                `    recovery_attempts=${r.recovery_attempts}; next_retry=${r.next_retry_at ?? "-"}`,
+              ),
+            );
+          }
+        }
+      } catch (err) {
+        spinner.fail("Failed to fetch import status");
+        console.error(chalk.red(errorDetail(err)));
       }
-    } catch (err) {
-      spinner.fail("Failed to fetch import status");
-      console.error(chalk.red(errorDetail(err)));
-    }
-  });
+    },
+  );
 
 importCommand
   .command("rollback")
@@ -3117,6 +3136,37 @@ importCommand
       );
     } catch (err) {
       spinner.fail(`Failed to reset ${datasetId}`);
+      console.error(chalk.red(errorDetail(err)));
+    }
+  });
+
+importCommand
+  .command("verify")
+  .description("Force a per-key S3 integrity check now (seeds the retry lane or confirms health)")
+  .argument("<dataset-id>", "NEMAR dataset id (e.g., on007523)")
+  .action(async (datasetId: string) => {
+    if (!requireAuth()) return;
+
+    const spinner = ora(`Verifying ${datasetId} against S3...`).start();
+    try {
+      const result = await verifyImport(datasetId);
+      if (result.complete) {
+        spinner.succeed(
+          `${datasetId} verified complete (${result.presentCount}/${result.expectedCount} objects present)`,
+        );
+      } else {
+        spinner.warn(
+          `${datasetId} incomplete: ${result.missingKeys.length}/${result.expectedCount} object(s) missing${result.zeroByteKeys.length > 0 ? ` (${result.zeroByteKeys.length} zero-byte)` : ""}`,
+        );
+        for (const key of result.missingKeys.slice(0, 20)) {
+          console.log(chalk.dim(`    ${key}`));
+        }
+        if (result.missingKeys.length > 20) {
+          console.log(chalk.dim(`    ... and ${result.missingKeys.length - 20} more`));
+        }
+      }
+    } catch (err) {
+      spinner.fail(`Failed to verify ${datasetId}`);
       console.error(chalk.red(errorDetail(err)));
     }
   });

@@ -512,6 +512,14 @@ export interface ImportJobRow {
   created_at: string;
   updated_at: string;
   completed_at: string | null;
+  // Retry engine + blocklist columns (#969, epic #967 Phase 2; migration 0058).
+  recovery_attempts: number;
+  first_incomplete_at: string | null;
+  next_retry_at: string | null;
+  blocklisted: number;
+  blocklist_reason: string | null;
+  maintainer_notified_at: string | null;
+  integrity_checked_at: string | null;
 }
 
 export interface ImportStatusResponse {
@@ -520,9 +528,15 @@ export interface ImportStatusResponse {
   by_status: Record<string, number>;
 }
 
-export async function getImportStatus(status?: string): Promise<ImportStatusResponse> {
-  const q = status ? `?status=${encodeURIComponent(status)}` : "";
-  return request<ImportStatusResponse>(`/admin/imports${q}`, {}, true);
+export async function getImportStatus(
+  status?: string,
+  blocklisted?: boolean,
+): Promise<ImportStatusResponse> {
+  const params = new URLSearchParams();
+  if (status) params.set("status", status);
+  if (blocklisted !== undefined) params.set("blocklisted", blocklisted ? "1" : "0");
+  const q = params.toString();
+  return request<ImportStatusResponse>(`/admin/imports${q ? `?${q}` : ""}`, {}, true);
 }
 
 export async function rollbackImport(
@@ -535,6 +549,19 @@ export async function retryImport(
   datasetId: string,
 ): Promise<{ ok: boolean; dataset_id: string; status: string }> {
   return request(`/admin/imports/${datasetId}/retry`, { method: "POST" }, true);
+}
+
+export interface ImportVerifyResponse {
+  dataset_id: string;
+  complete: boolean;
+  missingKeys: string[];
+  zeroByteKeys: string[];
+  expectedCount: number;
+  presentCount: number;
+}
+
+export async function verifyImport(datasetId: string): Promise<ImportVerifyResponse> {
+  return request(`/admin/imports/${datasetId}/verify`, { method: "POST" }, true);
 }
 
 // ============================================================================
