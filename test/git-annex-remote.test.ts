@@ -157,7 +157,13 @@ function chmodTreeWritable(dir: string): void {
 async function newAnnexRepo(name: string): Promise<string> {
   const dir = join(TMP_DIR, `${name}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`);
   mkdirSync(dir, { recursive: true });
-  const initGit = await runCmd(["git", "init", "-q"], dir);
+  // Force the initial branch to `main` (not the runner's git default, which is
+  // `master` on GitHub Actions but `main` on many dev machines). The Step 4c
+  // re-import tests fetch/reset `origin/main` explicitly, and production
+  // nemarDatasets repos are always `main`, so pinning it here keeps the harness
+  // deterministic across environments instead of passing only where the dev's
+  // init.defaultBranch happens to be main.
+  const initGit = await runCmd(["git", "init", "-q", "-b", "main"], dir);
   if (initGit.exitCode !== 0) {
     throw new Error(`git init failed: ${initGit.stderr}`);
   }
@@ -684,7 +690,11 @@ describe("Step 4c: re-import main-reset avoids the diverging-history push failur
       `bare-step4c-${tag}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
     );
     mkdirSync(bareDir, { recursive: true });
-    expect((await runCmd(["git", "init", "-q", "--bare"], bareDir)).exitCode).toBe(0);
+    // `-b main` so the bare repo's HEAD points at main, not the runner's git
+    // default (`master` on CI). Otherwise a later `git clone` of this bare repo
+    // resolves HEAD to a nonexistent `master` and checks out nothing, so the
+    // "third clone sees both metadata commits" assertion counts 0 on CI.
+    expect((await runCmd(["git", "init", "-q", "--bare", "-b", "main"], bareDir)).exitCode).toBe(0);
     return { src, bareDir };
   }
 
