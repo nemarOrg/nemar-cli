@@ -403,6 +403,17 @@ export async function writeVersionSize(
  * dataset unstamped, so a plain re-run redoes both rather than leaving a
  * split state where `dataset_versions` is fresh but `datasets` stays stale.
  *
+ * DELIBERATE CHOICE: if `writeVersionSize` matches 0 rows (no such
+ * `dataset_versions` row -- e.g. the version was never recorded, or
+ * `datasetId`/`version` diverge from what's on file), `datasets` is stamped
+ * ANYWAY. The `integrity` result reflects a real, fresh S3 measurement
+ * independent of whether a `dataset_versions` row exists for it, so
+ * `datasets` (the catalog's source of truth for the LATEST version) is
+ * correct to update regardless; the divergence itself is logged (not
+ * silently swallowed -- `writeVersionSize` already errors on its own 0-row
+ * case, but this adds an explicit line naming the datasets/dataset_versions
+ * split so it isn't lost among per-write logs).
+ *
  * `integrity` null, or has no resolvable `version` (verify threw, or no
  * manifest could be resolved): completeness can't be classified this pass, so
  * only `data_checked_at` advances -- an existing `data_complete` value is left
@@ -416,12 +427,17 @@ export async function stampDatasetIntegrity(
 ): Promise<"complete" | "incomplete" | "unknown"> {
   if (integrity?.version) {
     const dataCompleteInt = integrity.complete ? 1 : 0;
-    await writeVersionSize(db, datasetId, integrity.version, {
+    const versionWrite = await writeVersionSize(db, datasetId, integrity.version, {
       file_size: integrity.declaredBytes,
       total_files: integrity.declaredFiles,
       bytes_present: integrity.bytesPresent,
       data_complete: dataCompleteInt,
     });
+    if (versionWrite.changes === 0) {
+      console.error(
+        `[stamp] datasets stamped but no dataset_versions row for ${datasetId}@${integrity.version} - per-version completeness absent`,
+      );
+    }
     await db
       .prepare(
         `UPDATE datasets
