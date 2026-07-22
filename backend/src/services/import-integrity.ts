@@ -256,20 +256,3 @@ export async function verifyDatasetVersionS3(
     existing,
   );
 }
-
-/**
- * I/O wrapper: resolve the dataset's latest published version manifest (if
- * any) and the live `<id>/objects/` listing, then run the pure comparison.
- * Thin delegate to {@link verifyDatasetVersionS3} (Phase 2's original entry
- * point; kept so existing callers -- the retry engine's reclassification
- * sweep and pre-dispatch check -- don't need to change).
- */
-export async function verifyImportS3(
-  env: Pick<
-    Bindings,
-    "DB" | "S3_BUCKET" | "AWS_REGION" | "AWS_ACCESS_KEY_ID" | "AWS_SECRET_ACCESS_KEY"
-  >,
-  datasetId: string,
-): Promise<ImportIntegrityResult> {
-  return verifyDatasetVersionS3(env, datasetId);
-}
