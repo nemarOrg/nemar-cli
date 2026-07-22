@@ -89,6 +89,7 @@ const MODULE_EXPORTS: Record<string, string[]> = {
   admin: [
     "addCi",
     "approveUser",
+    "availabilityReport",
     "bulkDeleteDatasets",
     "changeUserRole",
     "changeVisibility",
@@ -148,6 +149,7 @@ const MONOLITH_EXPORTS = [
   "approveAccessRequest",
   "approvePublication",
   "approveUser",
+  "availabilityReport",
   "bulkDeleteDatasets",
   "changeUserRole",
   "changeVisibility",
