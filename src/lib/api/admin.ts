@@ -651,6 +651,23 @@ export async function verifyImport(datasetId: string): Promise<ImportVerifyRespo
   return request(`/admin/imports/${datasetId}/verify`, { method: "POST" }, true);
 }
 
+/**
+ * Push `next_retry_at` forward for datasets `recover --execute` just
+ * dispatched out-of-band, so the Phase-2 retry cron doesn't re-dispatch the
+ * same onboard-openneuro.yml run on its next tick (#981).
+ */
+export async function dispatchCooldown(datasetIds: string[]): Promise<{ updated: number }> {
+  return request(
+    "/admin/imports/dispatch-cooldown",
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ dataset_ids: datasetIds }),
+    },
+    true,
+  );
+}
+
 // ============================================================================
 // Reindex (epic #417 phase 3)
 // ============================================================================
@@ -782,14 +799,20 @@ export interface DataIntegritySweepResetResponse {
 
 /** Run one bounded data-integrity sweep batch (default 15, server-clamped to
  *  [1,30]). `olderThan` widens candidacy to already-checked rows past N days
- *  for periodic re-audit; omit for the one-shot never-checked drain. */
+ *  for periodic re-audit (moving window, never converges to 0 on its own).
+ *  `before` widens candidacy to an ANCHORED ISO8601 cutoff instead (#980) --
+ *  pass the SAME timestamp on every call in a loop and `remaining` strictly
+ *  decreases to 0, unlike `olderThan`. Omit both for the one-shot
+ *  never-checked drain. */
 export async function dataIntegritySweep(options?: {
   limit?: number;
   olderThan?: number;
+  before?: string;
 }): Promise<DataIntegritySweepBatchResponse> {
   const limit = options?.limit ?? 15;
   const params = new URLSearchParams({ limit: String(limit) });
   if (options?.olderThan != null) params.set("older-than", String(options.olderThan));
+  if (options?.before != null) params.set("before", options.before);
   return request<DataIntegritySweepBatchResponse>(
     `/admin/datasets/data-integrity-sweep?${params.toString()}`,
     { method: "POST", headers: { "Content-Type": "application/json" } },

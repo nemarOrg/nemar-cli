@@ -223,6 +223,33 @@ export function decidePublicationRequestAction(
 }
 
 /**
+ * Pure decision over whether a retried `prepare` (Step 4c, #990, epic #989
+ * Phase 2) should reset the fresh clone's local `main` onto `origin/main`
+ * before Step 6 seeds a new metadata commit. Re-importing onto an
+ * already-published nemarDatasets repo (the #967 recovery case: re-copy data
+ * for a version NEMAR already imported once) makes a brand-new OpenNeuro
+ * clone whose `main` shares no history with origin's -- origin already
+ * carries the FIRST import's metadata commit on the same files
+ * (.nemar/metadata.json, README.md), so committing fresh metadata onto the
+ * new clone's own history and pushing collides, and pushToGitHub's rebase
+ * (clone-push.ts) hard-fails with "diverging commits and auto-rebase
+ * failed".
+ *
+ * `originMainSha` is null/empty when origin has no resolvable `main` yet --
+ * a genuine first import, which must NOT reset (there is nothing to reset
+ * onto). `currentBranch` excludes detached HEAD ("HEAD") and git-annex
+ * adjusted branches ("adjusted/main(unlocked)") on purpose: pushToGitHub
+ * special-cases both (HEAD:main push, no-rebase adjusted push) and neither
+ * is safe to hard-reset the same way a plain `main` is.
+ */
+export function decideReimportMainReset(args: {
+  originMainSha: string | null;
+  currentBranch: string;
+}): boolean {
+  return args.originMainSha !== null && args.originMainSha !== "" && args.currentBranch === "main";
+}
+
+/**
  * Map OpenNeuro dataset ID (ds######) to NEMAR ID (on######).
  */
 function mapDatasetId(openneuroId: string): string {
@@ -920,6 +947,65 @@ export async function prepareImport(
       );
     }
   }
+
+  // Step 4c (re-import only, #990, epic #989 Phase 2): base this fresh
+  // clone's `main` on origin's tip BEFORE Step 6 seeds a new metadata
+  // commit, if origin already carries a `main` (i.e. this is a re-import
+  // onto an already-published repo, not a first-ever import). Without this,
+  // Step 6 commits fresh metadata onto the OpenNeuro clone's own (unrelated)
+  // history, and Step 7's push collides with origin/main -- which already
+  // has the FIRST import's metadata commit on the same files
+  // (.nemar/metadata.json, README.md) -- so pushToGitHub's rebase
+  // (clone-push.ts) hard-fails with "diverging commits and auto-rebase
+  // failed". This reset only moves this worktree's `main` ref + HEAD: the
+  // git-annex branch was already merged just above (Step 4b), and the S3
+  // remote config written to .git/config plus the in-memory
+  // keyUrlMap/manifest built in Step 3 are untouched by a `main` reset, so
+  // nothing else about this prepare run changes.
+  //
+  // SAME-VERSION ASSUMPTION: this covers the recovery use case -- re-copying
+  // data for a version NEMAR already imported once (the #967 empty-import
+  // incident). A genuinely NEW OpenNeuro snapshot arriving between imports
+  // (a real new version) is explicitly OUT OF SCOPE here; that needs its own
+  // new-version flow, not a silent overwrite onto `main`, so this step does
+  // not attempt to detect or reconcile that case (drift-detection guard
+  // tracked as #993). Best-effort only: on a fetch or reset failure it falls
+  // back to the normal push path unchanged (a diverging-history rebase
+  // failure from pushToGitHub below is then the expected, pre-existing
+  // behavior).
+  const originMainFetch = await runCommand(["git", "fetch", "origin", "main"], {
+    cwd: datasetPath,
+  });
+  if (originMainFetch.exitCode === 0) {
+    const originMainRev = await runCommand(
+      ["git", "rev-parse", "--verify", "--quiet", "origin/main"],
+      { cwd: datasetPath },
+    );
+    const currentBranchResult = await runCommand(["git", "rev-parse", "--abbrev-ref", "HEAD"], {
+      cwd: datasetPath,
+    });
+    const shouldResetMain = decideReimportMainReset({
+      originMainSha: originMainRev.stdout.trim() || null,
+      currentBranch: currentBranchResult.stdout.trim(),
+    });
+    if (shouldResetMain) {
+      const resetResult = await runCommand(["git", "reset", "--hard", "origin/main"], {
+        cwd: datasetPath,
+      });
+      if (resetResult.exitCode !== 0) {
+        console.log(
+          chalk.yellow(
+            `  Warning: found origin/main for ${nemarId} (re-import) but could not reset onto it (${resetResult.stderr.trim()}). Falling back to the normal push path.`,
+          ),
+        );
+      } else {
+        console.log(
+          chalk.dim("  Re-import: based main on origin/main for an idempotent metadata commit"),
+        );
+      }
+    }
+  }
+  // else: origin has no `main` ref yet -- the normal first-import path, no-op.
 
   // Step 5: Configure the NEMAR S3 special remote. This records the nemar-s3
   // uuid in the git-annex branch so the finalize phase (a fresh clone, possibly

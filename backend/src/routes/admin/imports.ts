@@ -13,10 +13,11 @@ import { adminMiddleware, authMiddleware } from "../../middleware/auth";
 
 import { auditLogStatement } from "../../db/audit-log";
 import { SYSTEM_USER_ID } from "../../lib/constants";
+import { stampDatasetIntegrity } from "../../services/dataset-metadata-columns";
 import { deleteDatasetCascade } from "../../services/deletion";
 import { type GitHubRepo, createRepository, deleteRepository } from "../../services/github";
 import { getDatasetsToken } from "../../services/github-auth";
-import { verifyImportS3 } from "../../services/import-integrity";
+import { verifyDatasetVersionS3 } from "../../services/import-integrity";
 import { IMPORT_STATUSES } from "../../services/import-recovery";
 import { recoverRow } from "../../services/import-retry";
 import { hasRole } from "../../types/bindings";
@@ -374,15 +375,26 @@ export function registerImportRoutes(admin: AdminRouter): void {
   });
 
   /**
-   * POST /admin/imports/:id/verify - force verifyImportS3 now (#969). Lets an
-   * operator seed a specific dataset into the retry lane without waiting for
-   * the reclassification sweep to reach it, or confirm a row is genuinely
-   * healthy. On verified-complete, recovers UNCONDITIONALLY (via recoverRow)
-   * regardless of prior status: the retry engine blocklists a row WITHOUT
-   * changing its status (a blocklisted row can be `quarantined` or `failed`,
-   * not just `incomplete`), so gating recovery on status='incomplete' would
-   * silently no-op for exactly the rows this endpoint exists to un-park.
-   * Always stamps `integrity_checked_at`.
+   * POST /admin/imports/:id/verify - force verifyDatasetVersionS3 now (#969).
+   * Lets an operator seed a specific dataset into the retry lane without
+   * waiting for the reclassification sweep to reach it, or confirm a row is
+   * genuinely healthy. On verified-complete, recovers UNCONDITIONALLY (via
+   * recoverRow) regardless of prior status: the retry engine blocklists a row
+   * WITHOUT changing its status (a blocklisted row can be `quarantined` or
+   * `failed`, not just `incomplete`), so gating recovery on
+   * status='incomplete' would silently no-op for exactly the rows this
+   * endpoint exists to un-park. Always stamps `integrity_checked_at`.
+   *
+   * Also stamps the `datasets`/`dataset_versions` completeness columns via
+   * {@link stampDatasetIntegrity} (#980) for BOTH outcomes -- this is a full
+   * per-key verification either way, so a forced check that lands on
+   * incomplete is exactly as informative to the catalog as one that lands on
+   * complete, and skipping the incomplete branch would leave the column NULL
+   * (or stale) until the general sweep happens to reach the same dataset.
+   * The stamp is best-effort catalog bookkeeping, NOT the operator-facing
+   * result: a stamp failure must not 500 the response or skip the
+   * `import_verify_forced` audit-log write below, so it's caught and logged
+   * rather than left to propagate.
    */
   admin.post("/imports/:id/verify", async (c) => {
     const datasetId = c.req.param("id");
@@ -391,7 +403,7 @@ export function registerImportRoutes(admin: AdminRouter): void {
       .first<{ status: string }>();
     if (!job) return c.json({ error: "No import job for this dataset" }, 404);
 
-    const verified = await verifyImportS3(c.env, datasetId);
+    const verified = await verifyDatasetVersionS3(c.env, datasetId);
 
     if (verified.complete) {
       await recoverRow(c.env.DB, datasetId);
@@ -415,6 +427,15 @@ export function registerImportRoutes(admin: AdminRouter): void {
         .run();
     }
 
+    try {
+      await stampDatasetIntegrity(c.env.DB, datasetId, verified);
+    } catch (err) {
+      console.error(
+        `[imports] verify stamp failed for ${datasetId}:`,
+        err instanceof Error ? err.message : String(err),
+      );
+    }
+
     await auditLogStatement(c.env.DB, {
       userId: c.get("user").id,
       action: "import_verify_forced",
@@ -422,12 +443,11 @@ export function registerImportRoutes(admin: AdminRouter): void {
       details: JSON.stringify(verified),
     }).run();
 
-    // Explicit pick, not a spread: verifyImportS3 delegates to
-    // verifyDatasetVersionS3 (#970), whose runtime result carries extra
-    // bytesPresent/declaredBytes/declaredFiles/version fields beyond the
-    // declared ImportIntegrityResult return type. A spread would silently
-    // leak those onto the wire even though the CLI's ImportVerifyResponse
-    // (src/lib/api/admin.ts) doesn't declare them.
+    // Explicit pick, not a spread: verifyDatasetVersionS3's runtime result
+    // carries extra bytesPresent/declaredBytes/declaredFiles/version fields
+    // beyond the declared ImportIntegrityResult return type. A spread would
+    // silently leak those onto the wire even though the CLI's
+    // ImportVerifyResponse (src/lib/api/admin.ts) doesn't declare them.
     return c.json({
       dataset_id: datasetId,
       complete: verified.complete,
@@ -437,4 +457,72 @@ export function registerImportRoutes(admin: AdminRouter): void {
       presentCount: verified.presentCount,
     });
   });
+
+  const dispatchCooldownSchema = z.object({
+    dataset_ids: z.array(z.string().min(1)).min(1).max(200),
+  });
+
+  /**
+   * POST /admin/imports/dispatch-cooldown - push `next_retry_at` forward for
+   * datasets `recover --execute` just dispatched out-of-band (#981).
+   *
+   * The Phase-2 retry cron (services/import-retry.ts sweepImportRetries)
+   * independently scans `incomplete` rows with `next_retry_at <= now` and
+   * re-dispatches onboard-openneuro.yml for them. `recover --execute`
+   * reclassifies a row to `incomplete` with `next_retry_at = now` (see
+   * /imports/:id/verify above) and then dispatches the same workflow itself,
+   * so without this call the next cron tick can re-dispatch the very same
+   * dataset a second time. +6 hours mirrors the retry engine's base backoff
+   * (RETRY_BACKOFF_BASE_MS, services/import-retry.ts) -- long enough that
+   * recover's own dispatch is well underway before the cron would otherwise
+   * reconsider these rows.
+   *
+   * The WHERE mirrors IMPORT_RETRY_CANDIDATES_QUERY's cron-eligible status
+   * set (`incomplete`, `failed`, `quarantined`) rather than pinning to
+   * `incomplete` alone: `recover --execute`'s verify step does NOT reduce
+   * every target to a two-outcome complete/incomplete model -- that
+   * collapse only happens for a target that started `complete` (see
+   * /imports/:id/verify above). A target that was already `failed` or
+   * `quarantined` (e.g. a now-recoverable upstream-inaccessible row) stays
+   * in that status through verify and is still dispatched here, so it must
+   * be protected too or the cron can re-dispatch it a second time (the same
+   * #981 bug, just for the failed/quarantined branch). `complete` is
+   * deliberately excluded: verify already moved a genuinely-incomplete row
+   * off `complete`, so a target still `complete` has nothing for the cron
+   * to re-dispatch. `blocklisted` rows aren't added to the WHERE either --
+   * a blocklisted row isn't a cron candidate regardless of status, so its
+   * cooldown state is moot. Also deliberately does NOT touch
+   * `recovery_attempts`: a manual recover is an operator action, not a
+   * retry-engine dispatch, and must not burn the automatic retry budget.
+   */
+  admin.post(
+    "/imports/dispatch-cooldown",
+    zValidator("json", dispatchCooldownSchema),
+    async (c) => {
+      const { dataset_ids } = c.req.valid("json");
+      const db = c.env.DB;
+
+      const placeholders = dataset_ids.map(() => "?").join(", ");
+      const result = await db
+        .prepare(
+          `UPDATE import_jobs
+              SET next_retry_at = datetime('now', '+6 hours'), updated_at = datetime('now')
+            WHERE dataset_id IN (${placeholders})
+              AND status IN ('incomplete', 'failed', 'quarantined')`,
+        )
+        .bind(...dataset_ids)
+        .run();
+      const updated = result.meta.changes ?? 0;
+
+      await auditLogStatement(db, {
+        userId: c.get("user").id,
+        action: "import_dispatch_cooldown",
+        resourceType: "dataset",
+        resourceId: dataset_ids.join(","),
+        details: JSON.stringify({ dataset_ids, updated }),
+      }).run();
+
+      return c.json({ updated });
+    },
+  );
 }
