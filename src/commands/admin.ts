@@ -4660,6 +4660,96 @@ hedSweepCommand
 
 adminCommand.addCommand(hedSweepCommand);
 
+/** One data-integrity-sweep batch, as consumed by {@link runReauditLoop}. */
+export interface ReauditBatchResult {
+  processed: number;
+  complete: number;
+  incomplete: number;
+  unknown: number;
+  errors: { dataset_id: string; error: string }[];
+  remaining: number | null;
+}
+
+export interface ReauditLoopResult {
+  batches: number;
+  totals: {
+    processed: number;
+    complete: number;
+    incomplete: number;
+    unknown: number;
+    errors: number;
+  };
+  remaining: number | null;
+  /** Hit the no-progress guard (remaining didn't strictly decrease) and stopped early. */
+  stalled: boolean;
+}
+
+/**
+ * Pure convergence loop driving `nemar admin data-integrity-sweep --reaudit`
+ * (#980 review fix). `getBefore()` is called EXACTLY ONCE, before the first
+ * `fetchBatch` call, and that single captured value is threaded UNCHANGED
+ * into every subsequent `fetchBatch(before)` call -- this is the convergence
+ * property itself (an anchored cutoff, not a moving `now()`-relative one; see
+ * the `?before=` doc comment on the sweep endpoint in datasets-lifecycle.ts).
+ *
+ * No Date/network dependency of its own, so both the anchoring property (one
+ * capture, reused every call) and the termination property (stop at
+ * remaining=0, or on a stalled/non-decreasing `remaining`) are directly
+ * unit-testable with a plain callback -- a future regression that re-derives
+ * `before` inside the loop (the exact "moving cutoff never converges" bug
+ * this whole flag exists to fix) would surface as differing `before` values
+ * across `fetchBatch` calls in the test, not just as a slow production
+ * incident that's hard to reproduce.
+ *
+ * `onBatch`/`sleepBetweenBatches` are optional hooks for the CLI's own
+ * per-batch UI (spinner text, verbose printing, pacing sleep) -- kept out of
+ * the aggregation/termination logic itself so a test can omit them entirely.
+ */
+export async function runReauditLoop(
+  getBefore: () => string | undefined,
+  fetchBatch: (before: string | undefined) => Promise<ReauditBatchResult>,
+  hooks?: {
+    onBatch?: (
+      res: ReauditBatchResult,
+      totals: ReauditLoopResult["totals"],
+      batchNumber: number,
+    ) => void;
+    sleepBetweenBatches?: () => Promise<void>;
+  },
+): Promise<ReauditLoopResult> {
+  const before = getBefore();
+  const totals = { processed: 0, complete: 0, incomplete: 0, unknown: 0, errors: 0 };
+  let batches = 0;
+  let remaining: number | null = null;
+  let prevRemaining: number | null = null;
+  let stalled = false;
+
+  do {
+    const res = await fetchBatch(before);
+    batches++;
+    totals.processed += res.processed;
+    totals.complete += res.complete;
+    totals.incomplete += res.incomplete;
+    totals.unknown += res.unknown;
+    totals.errors += res.errors.length;
+    remaining = res.remaining;
+    hooks?.onBatch?.(res, totals, batches);
+
+    // Progress guard: data_checked_at is stamped for every processed row, so
+    // `remaining` must strictly decrease. If it doesn't (e.g. persistent D1
+    // write errors leave rows unstamped), stop instead of looping forever.
+    if (remaining != null && prevRemaining != null && remaining >= prevRemaining) {
+      stalled = true;
+      break;
+    }
+    prevRemaining = remaining;
+
+    if ((remaining ?? 0) > 0) await hooks?.sleepBetweenBatches?.();
+  } while ((remaining ?? 0) > 0);
+
+  return { batches, totals, remaining, stalled };
+}
+
 const dataIntegritySweepCommand = new Command("data-integrity-sweep").description(
   "Audit datasets against their version manifest and backfill data_complete / bytes_present (epic #967 Phase 3, #970)",
 );
@@ -4706,63 +4796,62 @@ dataIntegritySweepCommand
 
       const limit = Number.parseInt(options.limit ?? "15", 10) || 15;
       const olderThan = options.olderThan ? Number.parseInt(options.olderThan, 10) : undefined;
-      // Captured ONCE, before the loop starts: every call in this run passes
-      // the SAME anchor, so a row re-checked mid-run is stamped with a
-      // data_checked_at strictly AFTER `before` and never re-qualifies --
-      // `remaining` strictly decreases to 0. Re-deriving `new Date()` on each
-      // iteration would defeat this (a moving cutoff never converges, same
-      // failure mode as --older-than).
-      const before = options.reaudit ? new Date().toISOString() : undefined;
-      const totals = { processed: 0, complete: 0, incomplete: 0, unknown: 0, errors: 0 };
       const spinner = ora("Sweeping datasets for data integrity...").start();
 
-      let batch = 0;
-      let remaining: number | null = null;
-      let prevRemaining: number | null = null;
+      let loopResult: ReauditLoopResult | undefined;
       try {
-        let res: DataIntegritySweepBatchResponse;
-        do {
-          res = await dataIntegritySweep({ limit, olderThan, before });
-          batch++;
-          totals.processed += res.processed;
-          totals.complete += res.complete;
-          totals.incomplete += res.incomplete;
-          totals.unknown += res.unknown;
-          totals.errors += res.errors.length;
-          remaining = res.remaining;
+        loopResult = await runReauditLoop(
+          // Captured ONCE by runReauditLoop, before the first fetchBatch call --
+          // every call in this run passes the SAME anchor, so a row re-checked
+          // mid-run is stamped with a data_checked_at strictly AFTER `before`
+          // and never re-qualifies -- `remaining` strictly decreases to 0.
+          () => (options.reaudit ? new Date().toISOString() : undefined),
+          async (before) => {
+            const res = await dataIntegritySweep({ limit, olderThan, before });
+            return {
+              processed: res.processed,
+              complete: res.complete,
+              incomplete: res.incomplete,
+              unknown: res.unknown,
+              errors: res.errors,
+              remaining: res.remaining,
+            };
+          },
+          {
+            onBatch: (res, totals, batchNumber) => {
+              if (options.verbose) {
+                spinner.stop();
+                console.log(
+                  `  [batch ${batchNumber}] processed=${res.processed} complete=${res.complete} incomplete=${res.incomplete} unknown=${res.unknown} errors=${res.errors.length} remaining=${res.remaining ?? "?"}`,
+                );
+                for (const e of res.errors)
+                  console.log(`    ${chalk.red(e.dataset_id)}: ${e.error}`);
+                spinner.start("Sweeping datasets for data integrity...");
+              } else {
+                spinner.text = `Sweeping datasets for data integrity... ${totals.processed} processed, ${res.remaining ?? "?"} remaining`;
+              }
+            },
+            sleepBetweenBatches: () => sleep(1000), // pace the S3-heavy batches
+          },
+        );
 
-          if (options.verbose) {
-            spinner.stop();
-            console.log(
-              `  [batch ${batch}] processed=${res.processed} complete=${res.complete} incomplete=${res.incomplete} unknown=${res.unknown} errors=${res.errors.length} remaining=${remaining ?? "?"}`,
-            );
-            for (const e of res.errors) console.log(`    ${chalk.red(e.dataset_id)}: ${e.error}`);
-            spinner.start("Sweeping datasets for data integrity...");
-          } else {
-            spinner.text = `Sweeping datasets for data integrity... ${totals.processed} processed, ${remaining ?? "?"} remaining`;
-          }
-
-          // Progress guard: data_checked_at is stamped for every processed row, so
-          // `remaining` must strictly decrease. If it doesn't (e.g. persistent D1
-          // write errors leave rows unstamped), bail instead of looping forever.
-          if (remaining != null && prevRemaining != null && remaining >= prevRemaining) {
-            spinner.warn(`No progress (remaining stuck at ${remaining}); stopping - see errors`);
-            break;
-          }
-          prevRemaining = remaining;
-
-          if ((remaining ?? 0) > 0) await sleep(1000); // pace the S3-heavy batches
-        } while ((remaining ?? 0) > 0);
-
-        spinner.stop();
+        if (loopResult.stalled) {
+          spinner.warn(
+            `No progress (remaining stuck at ${loopResult.remaining}); stopping - see errors`,
+          );
+        } else {
+          spinner.stop();
+        }
       } catch (err) {
         spinner.fail("Data-integrity sweep failed");
         console.error(chalk.red(errorDetail(err)));
         process.exit(1);
       }
 
+      const { batches, totals, remaining } = loopResult;
+
       if (options.json) {
-        console.log(JSON.stringify({ ...totals, batches: batch, remaining }, null, 2));
+        console.log(JSON.stringify({ ...totals, batches, remaining }, null, 2));
       } else {
         console.log();
         if (remaining === null) {
@@ -4774,7 +4863,7 @@ dataIntegritySweepCommand
         }
         console.log(
           chalk.cyan(
-            `Done in ${batch} batch(es): processed=${totals.processed} complete=${totals.complete} incomplete=${totals.incomplete} unknown=${totals.unknown} errors=${totals.errors} remaining=${remaining ?? "unknown"}`,
+            `Done in ${batches} batch(es): processed=${totals.processed} complete=${totals.complete} incomplete=${totals.incomplete} unknown=${totals.unknown} errors=${totals.errors} remaining=${remaining ?? "unknown"}`,
           ),
         );
         if (totals.incomplete > 0) {
