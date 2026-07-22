@@ -908,8 +908,9 @@ export interface AvailabilityReportSweepResetResponse {
 }
 
 /** Run one bounded availability-report sweep batch (default 10,
- *  server-clamped to [1,25]). `missingOnly` narrows candidacy to datasets
- *  already known incomplete (data_complete = 0). */
+ *  server-clamped to [1,10] -- lower than the read-only sweeps since each
+ *  candidate does a GitHub commit). `missingOnly` narrows candidacy to
+ *  datasets already known incomplete (data_complete = 0). */
 export async function availabilityReportSweep(options?: {
   limit?: number;
   missingOnly?: boolean;

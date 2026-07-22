@@ -19,18 +19,22 @@
  *
  * The INCLUSION side (a fully-qualifying row IS selected, and missing-only
  * selects exactly the data_complete=0 row) is pinned in the second describe
- * block against the raw candidate/remaining SQL copied verbatim from
- * routes/admin/datasets-lifecycle.ts -- a plain read-only SELECT never
- * reaches writeAvailabilityReport, so it stays network-free while still
- * proving the predicate is correct. Keep that copy in sync with the route's
- * SQL if it changes; the first describe block's real-route dispatch is the
- * guard against unnoticed drift for everything it can safely cover.
+ * block against availabilityReportSweepCandidateQuery /
+ * availabilityReportSweepRemainingQuery (services/availability-report.ts) --
+ * the SAME query builders the route itself calls, not a hand-copied
+ * duplicate, so there is nothing here that can silently drift. A plain
+ * read-only SELECT never reaches writeAvailabilityReport, so it stays
+ * network-free while still proving the predicate is correct.
  */
 
 import type { Database } from "bun:sqlite";
 import { beforeEach, describe, expect, test } from "bun:test";
 import { Hono } from "hono";
 import { adminRoutes } from "../src/routes/admin";
+import {
+  availabilityReportSweepCandidateQuery,
+  availabilityReportSweepRemainingQuery,
+} from "../src/services/availability-report";
 import { hashApiKey } from "../src/services/token";
 import type { Bindings, Variables } from "../src/types/bindings";
 import { freshDb, realD1 } from "./helpers/d1";
@@ -201,12 +205,12 @@ describe("POST /admin/datasets/availability-report-sweep (real route, zero real 
     expect(row.availability_report_at).toBeNull();
   });
 
-  test("?limit=999 is clamped to 25 at the bound SQL parameter", async () => {
+  test("?limit=999 is clamped to 10 at the bound SQL parameter", async () => {
     const res = await post("/admin/datasets/availability-report-sweep?limit=999");
     expect(res.status).toBe(200);
     expect(candidateLimitCalls.length).toBe(1);
     const bound = candidateLimitCalls[0];
-    expect(bound[bound.length - 1]).toBe(25);
+    expect(bound[bound.length - 1]).toBe(10);
   });
 
   test("?limit=0 is clamped up to 1", async () => {
@@ -240,34 +244,25 @@ describe("POST /admin/datasets/availability-report-sweep (real route, zero real 
 // Pinned candidate/remaining SQL (read-only, no route dispatch)
 // ---------------------------------------------------------------------------
 
-// Copied verbatim from the candidate SELECT in
-// routes/admin/datasets-lifecycle.ts's availability-report-sweep handler.
-// Kept here ONLY to prove positive selection (a fully-qualifying row IS a
-// candidate, and missing-only selects exactly the data_complete=0 row)
-// without ever calling writeAvailabilityReport -- see the module doc comment
-// for why the real route can't safely exercise that with seeded candidates.
-const CANDIDATE_SQL = `SELECT dataset_id FROM datasets
-   WHERE github_repo IS NOT NULL
-     AND (is_sandbox = 0 OR is_sandbox IS NULL)
-     AND availability_report_at IS NULL
-   ORDER BY dataset_id`;
+// availabilityReportSweepCandidateQuery/-RemainingQuery are the SAME builders
+// the route imports (services/availability-report.ts) -- run directly here
+// ONLY to prove positive selection (a fully-qualifying row IS a candidate,
+// and missing-only selects exactly the data_complete=0 row) without ever
+// calling writeAvailabilityReport; see the module doc comment for why the
+// real route can't safely exercise that with seeded candidates. A generous
+// bound limit (well above anything seeded in these tests) stands in for the
+// route's own clamped `?limit=` value, which is exercised separately above.
+const GENEROUS_LIMIT = 1000;
 
-const CANDIDATE_SQL_MISSING_ONLY = `SELECT dataset_id FROM datasets
-   WHERE github_repo IS NOT NULL
-     AND (is_sandbox = 0 OR is_sandbox IS NULL)
-     AND availability_report_at IS NULL
-     AND data_complete = 0
-   ORDER BY dataset_id`;
+const candidates = (missingOnly: boolean) =>
+  (
+    db.query(availabilityReportSweepCandidateQuery(missingOnly)).all(GENEROUS_LIMIT) as {
+      dataset_id: string;
+    }[]
+  ).map((r) => r.dataset_id);
 
-const REMAINING_SQL = `SELECT COUNT(*) AS n FROM datasets
-   WHERE github_repo IS NOT NULL
-     AND (is_sandbox = 0 OR is_sandbox IS NULL)
-     AND availability_report_at IS NULL`;
-
-const candidates = (query: string) =>
-  (db.query(query).all() as { dataset_id: string }[]).map((r) => r.dataset_id);
-
-const remainingCount = () => (db.query(REMAINING_SQL).get() as { n: number }).n;
+const remainingCount = () =>
+  (db.query(availabilityReportSweepRemainingQuery(false)).get() as { n: number }).n;
 
 describe("availability-report-sweep candidate SQL (pinned, no route dispatch)", () => {
   test("candidate query excludes catalog-only (no repo), sandbox, and already-stamped rows", () => {
@@ -277,7 +272,7 @@ describe("availability-report-sweep candidate SQL (pinned, no route dispatch)", 
     seedDataset("xx000304", { isSandbox: 1 }); // excluded: sandbox
     seedDataset("nm000305", { stamped: true }); // excluded: already stamped
 
-    expect(candidates(CANDIDATE_SQL)).toEqual(["nm000300", "on000301"]);
+    expect(candidates(false)).toEqual(["nm000300", "on000301"]);
   });
 
   test("?missing-only candidate query selects only data_complete=0 among otherwise-qualifying rows", () => {
@@ -285,8 +280,8 @@ describe("availability-report-sweep candidate SQL (pinned, no route dispatch)", 
     seedDataset("nm000301", { dataComplete: 1 }); // excluded under missing-only
     seedDataset("nm000302", { dataComplete: null }); // excluded under missing-only (not yet audited)
 
-    expect(candidates(CANDIDATE_SQL)).toEqual(["nm000300", "nm000301", "nm000302"]);
-    expect(candidates(CANDIDATE_SQL_MISSING_ONLY)).toEqual(["nm000300"]);
+    expect(candidates(false)).toEqual(["nm000300", "nm000301", "nm000302"]);
+    expect(candidates(true)).toEqual(["nm000300"]);
   });
 
   test("remaining count uses the same scoping as the base candidate query and decreases as rows are stamped", () => {
@@ -298,6 +293,6 @@ describe("availability-report-sweep candidate SQL (pinned, no route dispatch)", 
       "UPDATE datasets SET availability_report_at = datetime('now') WHERE dataset_id = ?",
     ).run("nm000300");
     expect(remainingCount()).toBe(1);
-    expect(candidates(CANDIDATE_SQL)).toEqual(["on000301"]);
+    expect(candidates(false)).toEqual(["on000301"]);
   });
 });

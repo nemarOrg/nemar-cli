@@ -4661,7 +4661,7 @@ const availabilityReportCommand = new Command("availability-report")
     "--missing-only",
     "With --all, sweep only datasets already known incomplete (data_complete=0)",
   )
-  .option("--limit <n>", "With --all, datasets per batch (server clamps to [1,25])", "10")
+  .option("--limit <n>", "With --all, datasets per batch (server clamps to [1,10])", "10")
   .option("--reset", "With --all, clear every stamped sweep row so it re-sweeps from scratch")
   .option("--verbose", "With --all, print per-batch progress")
   .option("--json", "Output raw JSON")
@@ -4680,12 +4680,14 @@ const availabilityReportCommand = new Command("availability-report")
     ) => {
       if (!requireAuth()) return;
 
-      if (datasetId && options.all) {
-        console.error(chalk.red("Provide either a dataset-id OR --all, not both"));
-        process.exit(1);
-      }
       if (!datasetId && !options.all) {
         console.error(chalk.red("Provide a dataset-id or --all"));
+        process.exit(1);
+      }
+      if (datasetId && (options.all || options.reset || options.missingOnly)) {
+        console.error(
+          chalk.red("--all/--reset/--missing-only cannot be combined with a dataset id"),
+        );
         process.exit(1);
       }
 
