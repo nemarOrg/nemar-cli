@@ -669,6 +669,112 @@ export function registerDatasetLifecycleRoutes(admin: AdminRouter): void {
    * manifest fetch + a full `<id>/objects/` LIST is real per-dataset work even
    * without any GitHub calls). Run repeatedly until `remaining` reaches 0.
    */
+  /**
+   * POST /admin/datasets/availability-report-sweep?limit=N[&missing-only=1] —
+   * one-time backfill that generates + commits `.nemar/availability-report.json`
+   * (services/availability-report.ts, epic #999 phase 1 #1000) across every
+   * managed dataset, stamping availability_report_at (migration 0061).
+   * Mirrors hed-sweep's shape (candidate/stamp/remaining) exactly.
+   *
+   * Unlike data-integrity-sweep this WRITES to GitHub (writeAvailabilityReport
+   * -> createOrUpdateFile), so it is a separate, GitHub-writing sweep on
+   * purpose: data-integrity-sweep's "no GitHub side-effects" property (safe to
+   * run in every environment, including dev/staging D1) is load-bearing and
+   * must not be diluted by folding this in.
+   *
+   * `?missing-only=1` narrows candidacy to datasets already known incomplete
+   * (data_complete = 0, migration 0059) — for a targeted re-run once recovery
+   * work lands, without re-touching every already-complete dataset.
+   *
+   * Bounded per invocation (default 10, max 25 — writeAvailabilityReport does
+   * an S3 LIST plus a GitHub commit per dataset). Run repeatedly until
+   * `remaining` reaches 0. Idempotent: only rows never stamped
+   * (availability_report_at IS NULL) are candidates.
+   */
+  admin.post("/datasets/availability-report-sweep", async (c) => {
+    const db = c.env.DB;
+
+    // ?reset=1 clears every stamped row (availability_report_at -> NULL) so a
+    // corrected report generator can re-sweep from scratch.
+    if (c.req.query("reset") === "1") {
+      const res = await db
+        .prepare(
+          `UPDATE datasets
+         SET availability_report_at = NULL
+         WHERE availability_report_at IS NOT NULL`,
+        )
+        .run();
+      return c.json({ reset: res.meta?.changes ?? 0 });
+    }
+
+    const limitRaw = Number.parseInt(c.req.query("limit") || "10", 10);
+    const limit = Number.isFinite(limitRaw) ? Math.min(Math.max(limitRaw, 1), 25) : 10;
+    const missingOnly = c.req.query("missing-only") === "1";
+
+    // Candidates: every managed dataset (github_repo IS NOT NULL; catalog ds*
+    // rows have none), not sandbox, not yet stamped. missing-only additionally
+    // requires the dataset be known incomplete (data_complete = 0).
+    let candidates: { dataset_id: string }[];
+    try {
+      const rows = await db
+        .prepare(
+          `SELECT dataset_id FROM datasets
+         WHERE github_repo IS NOT NULL
+           AND (is_sandbox = 0 OR is_sandbox IS NULL)
+           AND availability_report_at IS NULL
+           ${missingOnly ? "AND data_complete = 0" : ""}
+         ORDER BY dataset_id
+         LIMIT ?`,
+        )
+        .bind(limit)
+        .all<{ dataset_id: string }>();
+      candidates = rows.results ?? [];
+    } catch (err) {
+      console.error("[availability-report-sweep] candidate query failed:", err);
+      return c.json(
+        { error: "Failed to query sweep candidates (is migration 0061 applied?)" },
+        500,
+      );
+    }
+
+    let written = 0;
+    const errors: { dataset_id: string; error: string }[] = [];
+
+    for (const { dataset_id } of candidates) {
+      try {
+        await writeAvailabilityReport(c.env, dataset_id);
+        // Stamp only after a successful write -- a failure above leaves the
+        // row unstamped so it stays a candidate and a plain re-run retries it.
+        await db
+          .prepare(
+            "UPDATE datasets SET availability_report_at = datetime('now') WHERE dataset_id = ?",
+          )
+          .bind(dataset_id)
+          .run();
+        written++;
+      } catch (err) {
+        errors.push({ dataset_id, error: errorMessage(err) });
+      }
+    }
+
+    const remainingRow = await db
+      .prepare(
+        `SELECT COUNT(*) AS n FROM datasets
+       WHERE github_repo IS NOT NULL
+         AND (is_sandbox = 0 OR is_sandbox IS NULL)
+         AND availability_report_at IS NULL
+         ${missingOnly ? "AND data_complete = 0" : ""}`,
+      )
+      .first<{ n: number }>();
+
+    return c.json({
+      processed: candidates.length,
+      written,
+      errors,
+      remaining: remainingRow?.n ?? null,
+    });
+  });
+
   admin.post("/datasets/data-integrity-sweep", async (c) => {
     const db = c.env.DB;
 

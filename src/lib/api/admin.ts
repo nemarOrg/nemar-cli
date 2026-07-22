@@ -891,6 +891,48 @@ export async function availabilityReport(
   );
 }
 
+/** One batch of the availability-report backfill sweep (epic #999 phase 2,
+ *  #1001, `POST /admin/datasets/availability-report-sweep`). */
+export interface AvailabilityReportSweepBatchResponse {
+  processed: number;
+  /** Successfully generated + committed this batch. */
+  written: number;
+  errors: { dataset_id: string; error: string }[];
+  /** Datasets still unswept (availability_report_at IS NULL); 0 when the sweep is done. */
+  remaining: number | null;
+}
+
+/** Response of `?reset=1`: count of stamped rows cleared back to unswept. */
+export interface AvailabilityReportSweepResetResponse {
+  reset: number;
+}
+
+/** Run one bounded availability-report sweep batch (default 10,
+ *  server-clamped to [1,25]). `missingOnly` narrows candidacy to datasets
+ *  already known incomplete (data_complete = 0). */
+export async function availabilityReportSweep(options?: {
+  limit?: number;
+  missingOnly?: boolean;
+}): Promise<AvailabilityReportSweepBatchResponse> {
+  const limit = options?.limit ?? 10;
+  const params = new URLSearchParams({ limit: String(limit) });
+  if (options?.missingOnly) params.set("missing-only", "1");
+  return request<AvailabilityReportSweepBatchResponse>(
+    `/admin/datasets/availability-report-sweep?${params.toString()}`,
+    { method: "POST", headers: { "Content-Type": "application/json" } },
+    true,
+  );
+}
+
+/** Clear every stamped row so a corrected report generator can re-sweep from scratch. */
+export async function availabilityReportSweepReset(): Promise<AvailabilityReportSweepResetResponse> {
+  return request<AvailabilityReportSweepResetResponse>(
+    "/admin/datasets/availability-report-sweep?reset=1",
+    { method: "POST", headers: { "Content-Type": "application/json" } },
+    true,
+  );
+}
+
 // ============================================================================
 // Fleet governance (epic #713)
 // ============================================================================
