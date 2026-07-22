@@ -391,6 +391,10 @@ export function registerImportRoutes(admin: AdminRouter): void {
    * incomplete is exactly as informative to the catalog as one that lands on
    * complete, and skipping the incomplete branch would leave the column NULL
    * (or stale) until the general sweep happens to reach the same dataset.
+   * The stamp is best-effort catalog bookkeeping, NOT the operator-facing
+   * result: a stamp failure must not 500 the response or skip the
+   * `import_verify_forced` audit-log write below, so it's caught and logged
+   * rather than left to propagate.
    */
   admin.post("/imports/:id/verify", async (c) => {
     const datasetId = c.req.param("id");
@@ -423,7 +427,14 @@ export function registerImportRoutes(admin: AdminRouter): void {
         .run();
     }
 
-    await stampDatasetIntegrity(c.env.DB, datasetId, verified);
+    try {
+      await stampDatasetIntegrity(c.env.DB, datasetId, verified);
+    } catch (err) {
+      console.error(
+        `[imports] verify stamp failed for ${datasetId}:`,
+        err instanceof Error ? err.message : String(err),
+      );
+    }
 
     await auditLogStatement(c.env.DB, {
       userId: c.get("user").id,
