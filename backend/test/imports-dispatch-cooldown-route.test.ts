@@ -99,12 +99,18 @@ beforeEach(async () => {
 });
 
 describe("POST /admin/imports/dispatch-cooldown (#981)", () => {
-  test("pushes next_retry_at into the future for an incomplete row, leaves a complete row untouched", async () => {
+  test("pushes next_retry_at into the future for an incomplete row, leaves complete/quarantined rows untouched", async () => {
     seedImportJob("on000001", "incomplete");
     seedImportJob("on000002", "complete");
+    // Pins the WHERE status = 'incomplete' scoping against a generic caller:
+    // IMPORT_RETRY_CANDIDATES_QUERY (import-retry.ts) DOES treat a qualifying
+    // quarantined row as cron-eligible, but this endpoint has no caller that
+    // passes one today and must not cool it down regardless.
+    seedImportJob("on000003", "quarantined");
     const completeBefore = getNextRetryAt("on000002");
+    const quarantinedBefore = getNextRetryAt("on000003");
 
-    const res = await postCooldown(["on000001", "on000002"]);
+    const res = await postCooldown(["on000001", "on000002", "on000003"]);
     expect(res.status).toBe(200);
     const body = await res.json();
     expect(body.updated).toBe(1);
@@ -114,6 +120,7 @@ describe("POST /admin/imports/dispatch-cooldown (#981)", () => {
     expect(incompleteAfter as number).toBeGreaterThan(Date.now());
 
     expect(getNextRetryAt("on000002")).toBe(completeBefore);
+    expect(getNextRetryAt("on000003")).toBe(quarantinedBefore);
   });
 
   test("ids with no import_jobs row don't count toward updated", async () => {
