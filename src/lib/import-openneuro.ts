@@ -968,10 +968,11 @@ export async function prepareImport(
   // incident). A genuinely NEW OpenNeuro snapshot arriving between imports
   // (a real new version) is explicitly OUT OF SCOPE here; that needs its own
   // new-version flow, not a silent overwrite onto `main`, so this step does
-  // not attempt to detect or reconcile that case. Best-effort only: on a
-  // fetch or reset failure it falls back to the normal push path unchanged
-  // (a diverging-history rebase failure from pushToGitHub below is then the
-  // expected, pre-existing behavior).
+  // not attempt to detect or reconcile that case (drift-detection guard
+  // tracked as #993). Best-effort only: on a fetch or reset failure it falls
+  // back to the normal push path unchanged (a diverging-history rebase
+  // failure from pushToGitHub below is then the expected, pre-existing
+  // behavior).
   const originMainFetch = await runCommand(["git", "fetch", "origin", "main"], {
     cwd: datasetPath,
   });

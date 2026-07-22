@@ -780,4 +780,110 @@ describe("Step 4c: re-import main-reset avoids the diverging-history push failur
     const metadataContent = await Bun.file(join(checker, ".nemar", "metadata.json")).text();
     expect(JSON.parse(metadataContent).version).toBe(2);
   });
+
+  test("recovery: same-version re-import with identical metadata is a no-op commit and a no-op push (#990 Gap 1, primary recovery path)", async () => {
+    // The actual #967 recovery scenario Step 4c exists for: re-copying data
+    // for a version NEMAR already imported once. seedMetadata is a pure
+    // function of (nemarId, openneuroId, bidsDesc, openNeuroDoi) with no
+    // timestamp, so a same-version recovery run writes BYTE-FOR-BYTE
+    // identical .nemar/metadata.json content to the first import -- there is
+    // nothing new to commit or push, and that must be a clean success, not
+    // an error.
+    const { src, bareDir } = await newUpstreamAndBare("c");
+
+    // First import.
+    const p1 = await cloneAnnexRepo(src, "step4c-p1-c");
+    await writeMetadata(p1, 1);
+    await commitMetadata(p1, "Add NEMAR metadata (imported from OpenNeuro ds000003)");
+    await runCmd(["git", "remote", "remove", "origin"], p1);
+    expect((await runCmd(["git", "remote", "add", "origin", bareDir], p1)).exitCode).toBe(0);
+    const push1 = await pushToGitHub(p1, "origin");
+    expect(push1.success).toBe(true);
+    const firstImportSha = (await runCmd(["git", "rev-parse", "main"], p1)).stdout.trim();
+
+    // Recovery re-import: another FRESH clone of the same upstream.
+    const p2 = await cloneAnnexRepo(src, "step4c-p2-c");
+    await runCmd(["git", "remote", "remove", "origin"], p2);
+    expect((await runCmd(["git", "remote", "add", "origin", bareDir], p2)).exitCode).toBe(0);
+
+    // Step 4c, run exactly as import-openneuro.ts's prepare() does it.
+    const originMainFetch = await runCmd(["git", "fetch", "origin", "main"], p2);
+    expect(originMainFetch.exitCode).toBe(0);
+    const originMainRev = await runCmd(
+      ["git", "rev-parse", "--verify", "--quiet", "origin/main"],
+      p2,
+    );
+    const currentBranch = await runCmd(["git", "rev-parse", "--abbrev-ref", "HEAD"], p2);
+    const shouldReset = decideReimportMainReset({
+      originMainSha: originMainRev.stdout.trim() || null,
+      currentBranch: currentBranch.stdout.trim(),
+    });
+    expect(shouldReset).toBe(true);
+    const reset = await runCmd(["git", "reset", "--hard", "origin/main"], p2);
+    expect(reset.exitCode).toBe(0);
+
+    // Step 6: re-seed IDENTICAL content (version 1, same as the first
+    // import) -- `git add` stages nothing (content unchanged), so `git
+    // commit` has nothing to commit. Matches the exact guard at
+    // import-openneuro.ts's Step 6 (`commitResult.exitCode !== 0 &&
+    // !commitResult.stdout.includes("nothing to commit")` is the ONLY
+    // failure condition), run here without `-q` to mirror the real command.
+    await writeMetadata(p2, 1);
+    const add = await runCmd(["git", "add", ".nemar/metadata.json"], p2);
+    expect(add.exitCode).toBe(0);
+    const commit = await runCmd(
+      ["git", "commit", "-m", "Add NEMAR metadata (imported from OpenNeuro ds000003)"],
+      p2,
+    );
+    expect(commit.exitCode).not.toBe(0);
+    expect(commit.stdout).toContain("nothing to commit");
+
+    // Step 7: main is already == origin/main (nothing new was committed), so
+    // the push is a trivial no-op fast-forward -- it must still report
+    // success, not fail.
+    const push2 = await pushToGitHub(p2, "origin");
+    expect(push2.success).toBe(true);
+    expect(push2.warning).toBeUndefined();
+    expect((await runCmd(["git", "rev-parse", "main"], p2)).stdout.trim()).toBe(firstImportSha);
+  });
+
+  test("first import: origin has no main ref yet, so Step 4c's fetch is skipped and the plain push still succeeds (#990 Gap 2, must-not-regress)", async () => {
+    // Codifies the single most important "must not regress" behavior: a
+    // genuine first import, where nemarDatasets/<id> is a freshly-created
+    // empty repo with no `main` ref at all, must be completely unaffected by
+    // Step 4c.
+    const src = await newAnnexRepo("step4c-upstream-d");
+    await Bun.write(join(src, "README.md"), "upstream dataset\n");
+    expect((await runCmd(["git", "add", "README.md"], src)).exitCode).toBe(0);
+    expect((await runCmd(["git", "commit", "-qm", "upstream readme"], src)).exitCode).toBe(0);
+
+    // Bare "nemarDatasets" origin, freshly init'd -- nothing has EVER been
+    // pushed to it.
+    const bareDir = join(
+      TMP_DIR,
+      `bare-step4c-d-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    );
+    mkdirSync(bareDir, { recursive: true });
+    expect((await runCmd(["git", "init", "-q", "--bare"], bareDir)).exitCode).toBe(0);
+
+    const p1 = await cloneAnnexRepo(src, "step4c-p1-d");
+    await runCmd(["git", "remote", "remove", "origin"], p1);
+    expect((await runCmd(["git", "remote", "add", "origin", bareDir], p1)).exitCode).toBe(0);
+
+    // Step 4c's exact first command: origin has no `main` ref at all, so the
+    // fetch itself fails (git's "couldn't find remote ref main") and the
+    // whole Step 4c block -- rev-parse, decideReimportMainReset, reset -- is
+    // skipped silently, exactly like the `if (originMainFetch.exitCode ===
+    // 0)` guard in import-openneuro.ts.
+    const originMainFetch = await runCmd(["git", "fetch", "origin", "main"], p1);
+    expect(originMainFetch.exitCode).not.toBe(0);
+
+    // Step 6 + Step 7: the ordinary first-import metadata commit + push,
+    // unaffected by Step 4c, must still succeed.
+    await writeMetadata(p1, 1);
+    await commitMetadata(p1, "Add NEMAR metadata (imported from OpenNeuro ds000004)");
+    const push1 = await pushToGitHub(p1, "origin");
+    expect(push1.success).toBe(true);
+    expect(push1.warning).toBeUndefined();
+  });
 });
