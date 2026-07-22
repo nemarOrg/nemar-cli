@@ -32,7 +32,9 @@ import { waitForBidsValidationRun } from "./import-openneuro.js";
 import {
   type CopyItem,
   batchServerSideCopy,
+  expectedSizesFromItems,
   filterAlreadyCopied,
+  isKeyPresentAtDeclaredSize,
   listExistingObjects,
 } from "./s3-server-copy.js";
 
@@ -239,7 +241,14 @@ async function copySubPrefix(
   }
 
   const destExisting = await listExistingObjects(DEST_BUCKET, `${xxId}/${subPrefix}`, S3_REGION);
-  const { toCopy, skipped } = filterAlreadyCopied(items, destExisting);
+  // Resume: skip objects already present at the destination, but only when
+  // present at their declared size -- a 0-byte leftover from a prior failed
+  // run must be re-copied, not mistaken for done (same #967 bug, #982).
+  const { toCopy, skipped } = filterAlreadyCopied(
+    items,
+    destExisting,
+    expectedSizesFromItems(items),
+  );
   if (toCopy.length === 0) {
     console.log(chalk.green(`  [${label}] nothing to copy (all ${skipped.length} present)`));
     return items.map((i) => i.key);
@@ -541,7 +550,10 @@ export async function finalizeExemplar(
   if (copyResult.keys.length > 0) {
     const verifySpinner = ora("Verifying copied data...").start();
     const existing = await listExistingObjects(DEST_BUCKET, `${xxId}/objects/`, S3_REGION);
-    const missing = copyResult.keys.filter((k) => !existing.has(k));
+    // Verify present at declared size, not just present -- a key that exists
+    // but is 0 bytes or truncated (a corrupt leftover from a failed copy,
+    // #967) counts as missing, same as a key that's absent entirely (#982).
+    const missing = copyResult.keys.filter((k) => !isKeyPresentAtDeclaredSize(k, existing));
     if (missing.length > 0) {
       const msg = `${missing.length} of ${copyResult.keys.length} objects missing at s3://${DEST_BUCKET}/${xxId}/objects/. Re-run the copy phase before finalizing.`;
       verifySpinner.fail(msg);
