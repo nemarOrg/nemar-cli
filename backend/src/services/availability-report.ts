@@ -253,3 +253,49 @@ export async function writeAvailabilityReport(
 
   return report;
 }
+
+// ============================================================================
+// Availability-report backfill sweep SQL (epic #999 phase 2, #1001)
+// ============================================================================
+//
+// Exported so routes/admin/datasets-lifecycle.ts's POST
+// /admin/datasets/availability-report-sweep handler and its test both build
+// from the SAME query text instead of a hand-copied duplicate that can
+// silently drift (the pattern ARCHIVE_RETRY_SWEEP_QUERY and
+// NON_PROD_SANDBOX_CLEANUP_QUERY already use). The candidate SELECT and the
+// `remaining` COUNT must stay scoped identically -- `remaining` is a promise
+// that "0 means the sweep is done" -- so both are derived from the one
+// `availabilityReportSweepWhere` builder rather than two copies of the WHERE
+// clause that could drift apart.
+
+/** Base candidacy predicate: every managed dataset (github_repo IS NOT NULL;
+ *  catalog ds* rows have none), not sandbox, not yet stamped. */
+const AVAILABILITY_REPORT_SWEEP_BASE_WHERE = `github_repo IS NOT NULL
+     AND (is_sandbox = 0 OR is_sandbox IS NULL)
+     AND availability_report_at IS NULL`;
+
+/** Appended to the base predicate when `?missing-only=1` narrows candidacy to
+ *  datasets already known incomplete (data_complete = 0, migration 0059). */
+const AVAILABILITY_REPORT_SWEEP_MISSING_ONLY_WHERE = "AND data_complete = 0";
+
+/** Single source of truth for the sweep's WHERE clause, with or without the
+ *  missing-only narrowing -- shared by the candidate query and the remaining
+ *  query below so they can never scope differently from each other. */
+export function availabilityReportSweepWhere(missingOnly: boolean): string {
+  return missingOnly
+    ? `${AVAILABILITY_REPORT_SWEEP_BASE_WHERE}\n     ${AVAILABILITY_REPORT_SWEEP_MISSING_ONLY_WHERE}`
+    : AVAILABILITY_REPORT_SWEEP_BASE_WHERE;
+}
+
+/** Candidate SELECT for the sweep. `LIMIT ?` is the only bound parameter. */
+export function availabilityReportSweepCandidateQuery(missingOnly: boolean): string {
+  return `SELECT dataset_id FROM datasets
+     WHERE ${availabilityReportSweepWhere(missingOnly)}
+     ORDER BY dataset_id
+     LIMIT ?`;
+}
+
+/** `remaining` COUNT for the sweep -- identical scoping to the candidate query. */
+export function availabilityReportSweepRemainingQuery(missingOnly: boolean): string {
+  return `SELECT COUNT(*) AS n FROM datasets WHERE ${availabilityReportSweepWhere(missingOnly)}`;
+}

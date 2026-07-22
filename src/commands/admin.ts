@@ -30,6 +30,7 @@ import ora from "ora";
 import {
   type AvailabilityReport,
   type AvailabilityReportResult,
+  type AvailabilityReportSweepBatchResponse,
   type DataIntegritySweepBatchResponse,
   type DatasetTransitionResponse,
   type EmailPreferences,
@@ -43,6 +44,8 @@ import {
   addCi,
   approveUser,
   availabilityReport,
+  availabilityReportSweep,
+  availabilityReportSweepReset,
   bulkDeleteDatasets,
   changeUserRole,
   changeVisibility,
@@ -4646,73 +4649,197 @@ adminCommand.addCommand(reindexCommand);
 
 const availabilityReportCommand = new Command("availability-report")
   .description(
-    "Report how much of a dataset's declared data is present in S3, and exactly which files are missing + why (#1000). Dry-run by default.",
+    "Report how much of a dataset's declared data is present in S3, and exactly which files are missing + why (#1000). Dry-run by default. --all backfills every managed dataset (#1001).",
   )
-  .argument("<dataset-id>", "Dataset ID (e.g., nm000103)")
+  .argument("[dataset-id]", "Dataset ID (e.g., nm000103)")
   .option(
     "--write",
     "Commit the report to .nemar/availability-report.json on main (default: preview only)",
   )
+  .option("--all", "Backfill every managed dataset instead of a single one (#1001)")
+  .option(
+    "--missing-only",
+    "With --all, sweep only datasets already known incomplete (data_complete=0)",
+  )
+  .option("--limit <n>", "With --all, datasets per batch (server clamps to [1,10])", "10")
+  .option("--reset", "With --all, clear every stamped sweep row so it re-sweeps from scratch")
+  .option("--verbose", "With --all, print per-batch progress")
   .option("--json", "Output raw JSON")
-  .action(async (datasetId: string, options: { write?: boolean; json?: boolean }) => {
-    if (!requireAuth()) return;
+  .action(
+    async (
+      datasetId: string | undefined,
+      options: {
+        write?: boolean;
+        all?: boolean;
+        missingOnly?: boolean;
+        limit?: string;
+        reset?: boolean;
+        verbose?: boolean;
+        json?: boolean;
+      },
+    ) => {
+      if (!requireAuth()) return;
 
-    const spinner = ora(
-      options.write
-        ? `Generating and writing availability report for ${datasetId}...`
-        : `Previewing availability report for ${datasetId}...`,
-    ).start();
-    let result: AvailabilityReportResult;
-    try {
-      result = await availabilityReport(datasetId, { write: options.write === true });
-    } catch (err) {
-      spinner.fail(`Failed to generate availability report for ${datasetId}`);
-      console.error(chalk.red(errorDetail(err)));
-      process.exit(1);
-    }
-
-    const report: AvailabilityReport = "report" in result ? result.report : result;
-    const written = "report" in result;
-    spinner.succeed(
-      written
-        ? `${datasetId}: availability report written to .nemar/availability-report.json`
-        : `${datasetId}: availability report (dry run, not written)`,
-    );
-
-    if (options.json) {
-      console.log(JSON.stringify(result, null, 2));
-      return;
-    }
-
-    console.log();
-    if (report.version === null) {
-      console.log(
-        chalk.yellow("  No published version manifest to compare against; completeness unknown."),
-      );
-    } else {
-      console.log(`  Version:   ${report.version}`);
-    }
-    console.log(`  Complete:  ${report.complete ? chalk.green("yes") : chalk.red("no")}`);
-    console.log(
-      `  Files:     ${report.completeness.files_present}/${report.completeness.files_declared} present`,
-    );
-    const bytesLine = `${formatBytes(report.completeness.bytes_present)}/${formatBytes(report.completeness.bytes_declared)}`;
-    const pct =
-      report.completeness.pct_bytes != null
-        ? ` (${(report.completeness.pct_bytes * 100).toFixed(1)}%)`
-        : "";
-    console.log(`  Bytes:     ${bytesLine}${pct}`);
-    if (report.blocklist_reason) {
-      console.log(chalk.yellow(`  Blocklisted: ${report.blocklist_reason}`));
-    }
-    if (report.missing.length > 0) {
-      console.log();
-      console.log(chalk.dim(`  Missing (${report.missing.length}):`));
-      for (const m of report.missing) {
-        console.log(chalk.dim(`    - ${m.path} [${m.reason}]`));
+      if (!datasetId && !options.all) {
+        console.error(chalk.red("Provide a dataset-id or --all"));
+        process.exit(1);
       }
-    }
-  });
+      if (datasetId && (options.all || options.reset || options.missingOnly)) {
+        console.error(
+          chalk.red("--all/--reset/--missing-only cannot be combined with a dataset id"),
+        );
+        process.exit(1);
+      }
+
+      // Single-dataset path (Phase 1, #1000)
+      if (datasetId) {
+        const spinner = ora(
+          options.write
+            ? `Generating and writing availability report for ${datasetId}...`
+            : `Previewing availability report for ${datasetId}...`,
+        ).start();
+        let result: AvailabilityReportResult;
+        try {
+          result = await availabilityReport(datasetId, { write: options.write === true });
+        } catch (err) {
+          spinner.fail(`Failed to generate availability report for ${datasetId}`);
+          console.error(chalk.red(errorDetail(err)));
+          process.exit(1);
+        }
+
+        const report: AvailabilityReport = "report" in result ? result.report : result;
+        const written = "report" in result;
+        spinner.succeed(
+          written
+            ? `${datasetId}: availability report written to .nemar/availability-report.json`
+            : `${datasetId}: availability report (dry run, not written)`,
+        );
+
+        if (options.json) {
+          console.log(JSON.stringify(result, null, 2));
+          return;
+        }
+
+        console.log();
+        if (report.version === null) {
+          console.log(
+            chalk.yellow(
+              "  No published version manifest to compare against; completeness unknown.",
+            ),
+          );
+        } else {
+          console.log(`  Version:   ${report.version}`);
+        }
+        console.log(`  Complete:  ${report.complete ? chalk.green("yes") : chalk.red("no")}`);
+        console.log(
+          `  Files:     ${report.completeness.files_present}/${report.completeness.files_declared} present`,
+        );
+        const bytesLine = `${formatBytes(report.completeness.bytes_present)}/${formatBytes(report.completeness.bytes_declared)}`;
+        const pct =
+          report.completeness.pct_bytes != null
+            ? ` (${(report.completeness.pct_bytes * 100).toFixed(1)}%)`
+            : "";
+        console.log(`  Bytes:     ${bytesLine}${pct}`);
+        if (report.blocklist_reason) {
+          console.log(chalk.yellow(`  Blocklisted: ${report.blocklist_reason}`));
+        }
+        if (report.missing.length > 0) {
+          console.log();
+          console.log(chalk.dim(`  Missing (${report.missing.length}):`));
+          for (const m of report.missing) {
+            console.log(chalk.dim(`    - ${m.path} [${m.reason}]`));
+          }
+        }
+        return;
+      }
+
+      // Bulk path (--all, Phase 2, #1001)
+      if (options.reset) {
+        const spinner = ora("Resetting availability-report sweep state...").start();
+        try {
+          const r = await availabilityReportSweepReset();
+          spinner.succeed(
+            `Cleared ${r.reset} stamped row(s); eligible datasets are candidates again`,
+          );
+          if (options.json) console.log(JSON.stringify(r, null, 2));
+        } catch (err) {
+          spinner.fail("Reset failed");
+          console.error(chalk.red(errorDetail(err)));
+          process.exit(1);
+        }
+        return;
+      }
+
+      const limit = Number.parseInt(options.limit ?? "10", 10) || 10;
+      const missingOnly = options.missingOnly === true;
+      const totals = { processed: 0, written: 0, errors: 0 };
+      const spinner = ora("Sweeping datasets for availability reports...").start();
+
+      let batch = 0;
+      let remaining: number | null = null;
+      let prevRemaining: number | null = null;
+      try {
+        let res: AvailabilityReportSweepBatchResponse;
+        do {
+          res = await availabilityReportSweep({ limit, missingOnly });
+          batch++;
+          totals.processed += res.processed;
+          totals.written += res.written;
+          totals.errors += res.errors.length;
+          remaining = res.remaining;
+
+          if (options.verbose) {
+            spinner.stop();
+            console.log(
+              `  [batch ${batch}] processed=${res.processed} written=${res.written} errors=${res.errors.length} remaining=${remaining ?? "?"}`,
+            );
+            for (const e of res.errors) console.log(`    ${chalk.red(e.dataset_id)}: ${e.error}`);
+            spinner.start("Sweeping datasets for availability reports...");
+          } else {
+            spinner.text = `Sweeping datasets for availability reports... ${totals.processed} processed, ${remaining ?? "?"} remaining`;
+          }
+
+          // Progress guard: availability_report_at is stamped only after a
+          // successful write, so a persistently failing batch never advances --
+          // bail instead of looping forever.
+          if (remaining != null && prevRemaining != null && remaining >= prevRemaining) {
+            spinner.warn(`No progress (remaining stuck at ${remaining}); stopping - see errors`);
+            break;
+          }
+          prevRemaining = remaining;
+
+          if ((remaining ?? 0) > 0) await sleep(1000); // pace the GitHub-heavy batches
+        } while ((remaining ?? 0) > 0);
+
+        spinner.stop();
+      } catch (err) {
+        spinner.fail("Availability-report sweep failed");
+        console.error(chalk.red(errorDetail(err)));
+        process.exit(1);
+      }
+
+      if (options.json) {
+        console.log(JSON.stringify({ ...totals, batches: batch, remaining }, null, 2));
+      } else {
+        console.log();
+        if (remaining === null) {
+          console.log(
+            chalk.yellow(
+              "Warning: backend returned a null remaining count; the sweep may be incomplete - check server logs.",
+            ),
+          );
+        }
+        console.log(
+          chalk.cyan(
+            `Done in ${batch} batch(es): processed=${totals.processed} written=${totals.written} errors=${totals.errors} remaining=${remaining ?? "unknown"}`,
+          ),
+        );
+      }
+      // Non-zero exit on errors OR an indeterminate (null) remaining, so a caller
+      // never reads a partial/uncertain sweep as success.
+      if (totals.errors > 0 || remaining === null) process.exit(1);
+    },
+  );
 
 adminCommand.addCommand(availabilityReportCommand);
 
