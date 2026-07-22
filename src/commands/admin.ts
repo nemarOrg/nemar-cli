@@ -48,6 +48,7 @@ import {
   dataIntegritySweep,
   dataIntegritySweepReset,
   deleteDataset,
+  dispatchCooldown,
   dispatchManifest,
   enforceBulk,
   enforceDataset,
@@ -3077,29 +3078,74 @@ adminCommand
 // ============================================================================
 
 /**
+ * The onboard-openneuro.yml copy phase fans each dataset out into 8 shard
+ * jobs, and GitHub caps a workflow's job matrix at 256 entries. Above 32
+ * datasets in one dispatch, the matrix silently instantiates 0 copy jobs
+ * instead of erroring, so a batch must be split before it reaches that cap.
+ * 256 / 8 = 32; this stays a bit under that for headroom.
+ */
+export const MAX_DATASETS_PER_DISPATCH = 30;
+
+/**
+ * Split `ids` into chunks of at most `size`, preserving order. Pure so the
+ * batching logic is unit-testable without a live `gh` call.
+ */
+export function chunkDatasetIds(
+  ids: string[],
+  size: number = MAX_DATASETS_PER_DISPATCH,
+): string[][] {
+  if (ids.length === 0) return [];
+  if (ids.length <= size) return [ids];
+  const chunks: string[][] = [];
+  for (let i = 0; i < ids.length; i += size) {
+    chunks.push(ids.slice(i, i + size));
+  }
+  return chunks;
+}
+
+/**
  * Dispatch the onboard-openneuro.yml workflow (nemarDatasets/.github) for a
  * batch of OpenNeuro `ds######` ids -- the prepare/copy/finalize matrix
  * hardened in epic #967 Phases 1-3. Shared by `import-openneuro`'s default
  * (non---local) branch, a brand-new import, and `recover --execute` (Phase
  * 5, #972), a re-copy of an existing import whose S3 content was found
  * empty; both dispatch the SAME workflow, one gh run per batch.
+ *
+ * Chunks `dsIds` to stay under the 256-job matrix cap (see
+ * MAX_DATASETS_PER_DISPATCH), issuing one `gh workflow run` per chunk. Fails
+ * fast on the first chunk that doesn't dispatch, naming which chunk so the
+ * operator can resume from there instead of re-running the whole batch.
  */
 async function dispatchOpenNeuroImportWorkflow(
   dsIds: string[],
 ): Promise<{ ok: true } | { ok: false; error: string }> {
   const { runCommand } = await import("../lib/git-annex/run-command.js");
-  const result = await runCommand([
-    "gh",
-    "workflow",
-    "run",
-    "onboard-openneuro.yml",
-    "--repo",
-    "nemarDatasets/.github",
-    "--field",
-    `openneuro_ids=${dsIds.join(",")}`,
-  ]);
-  if (result.exitCode !== 0) {
-    return { ok: false, error: result.stderr.trim() };
+  const chunks = chunkDatasetIds(dsIds);
+  if (chunks.length > 1) {
+    console.log(
+      chalk.dim(
+        `  Splitting ${dsIds.length} datasets into ${chunks.length} dispatches (matrix job cap).`,
+      ),
+    );
+  }
+  for (let i = 0; i < chunks.length; i++) {
+    const chunk = chunks[i];
+    const result = await runCommand([
+      "gh",
+      "workflow",
+      "run",
+      "onboard-openneuro.yml",
+      "--repo",
+      "nemarDatasets/.github",
+      "--field",
+      `openneuro_ids=${chunk.join(",")}`,
+    ]);
+    if (result.exitCode !== 0) {
+      return {
+        ok: false,
+        error: `chunk ${i + 1}/${chunks.length} (${chunk.join(",")}): ${result.stderr.trim()}`,
+      };
+    }
   }
   return { ok: true };
 }
@@ -3699,6 +3745,37 @@ Description:
         );
       }
       const dispatch = await dispatchOpenNeuroImportWorkflow(dsIds);
+
+      // Best-effort: push next_retry_at forward for the just-dispatched
+      // targets so the Phase-2 retry cron (sweepImportRetries) doesn't
+      // independently re-dispatch the same onboard-openneuro.yml run on its
+      // next tick (#981). A failure here is non-corrupting -- worst case the
+      // cron redundantly re-dispatches once -- so it must not fail the
+      // recovery itself, only warn.
+      //
+      // Runs BEFORE the dispatch.ok check below, and unconditionally on
+      // verifiedTargets (not just the ids of chunks that actually fired):
+      // verifyImport already reclassified every one of verifiedTargets to
+      // 'incomplete' with next_retry_at=now before we got here, so if a LATER
+      // chunk fails after an EARLIER chunk already ran `gh workflow run`, the
+      // already-dispatched datasets still need cooling down -- otherwise the
+      // cron re-dispatches exactly the datasets this whole mechanism exists to
+      // protect (the #981 bug, in the partial-failure case). Cooling down the
+      // ids whose dispatch never fired is harmless: the operator resumes the
+      // failed chunk manually, and any re-run of `recover` re-verifies first
+      // (resetting next_retry_at=now again), so this is overwritten either way.
+      let cooldown: { updated: number } | { error: string };
+      try {
+        cooldown = await dispatchCooldown(verifiedTargets);
+      } catch (err) {
+        cooldown = { error: errorDetail(err) };
+        console.warn(
+          chalk.yellow(
+            `\nWarning: failed to set dispatch cooldown (${errorDetail(err)}); the retry cron may briefly re-dispatch these datasets (non-corrupting).`,
+          ),
+        );
+      }
+
       if (!dispatch.ok) {
         console.error(chalk.red(`Failed to dispatch workflow: ${dispatch.error}`));
         console.error(
@@ -3730,7 +3807,7 @@ Description:
       if (options.json) {
         console.log(
           JSON.stringify(
-            { dispatched: verifiedTargets, skipped: failedTargets, dispatch },
+            { dispatched: verifiedTargets, skipped: failedTargets, dispatch, cooldown },
             null,
             2,
           ),
