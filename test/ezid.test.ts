@@ -13,6 +13,7 @@ import {
   decodeAnvl,
   getDoiUrl,
   extractDoi,
+  ensureDoiScheme,
   isTestShoulder,
   checkStatus,
   mintIdentifier,
@@ -138,6 +139,25 @@ describe("utility functions", () => {
     expect(isTestShoulder(TEST_SHOULDER)).toBe(true);
     expect(isTestShoulder("doi:10.5072/FK2")).toBe(true);
     expect(isTestShoulder(PRODUCTION_SHOULDER)).toBe(false);
+  });
+
+  // Bug #984: dataset_versions.doi is stored WITHOUT the "doi:" scheme
+  // prefix (unlike datasets.ezid_identifier, which has it), and EZID
+  // rejects an unprefixed identifier with "invalid identifier". withdraw.ts
+  // runs every identifier it hands to makeUnavailable/makePublic through
+  // ensureDoiScheme first.
+  test("ensureDoiScheme prepends doi: when missing", () => {
+    expect(ensureDoiScheme("10.82901/NEMAR.ON004148.V1.0.0")).toBe(
+      "doi:10.82901/NEMAR.ON004148.V1.0.0",
+    );
+  });
+
+  test("ensureDoiScheme is a no-op when the prefix is already present", () => {
+    expect(ensureDoiScheme("doi:10.82901/NEMAR.ON004148")).toBe("doi:10.82901/NEMAR.ON004148");
+  });
+
+  test("ensureDoiScheme matches the doi: prefix case-insensitively", () => {
+    expect(ensureDoiScheme("DOI:10.82901/NEMAR.ON004148")).toBe("DOI:10.82901/NEMAR.ON004148");
   });
 });
 

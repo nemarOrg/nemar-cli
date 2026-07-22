@@ -22,7 +22,7 @@ import {
   mapModalityToResourceType,
   parseAuthorName,
 } from "../backend/src/services/datacite";
-import { buildConceptIdentifier } from "../backend/src/services/doi";
+import { buildConceptIdentifier, buildVersionIdentifier } from "../backend/src/services/doi";
 import { reconcileReservedVersionDois } from "../backend/src/services/doi-reconcile";
 import {
   EZID_BASE_URL,
@@ -672,9 +672,15 @@ describe.skipIf(!SHOULD_RUN)("EZID Sandbox Integration", { timeout: 30000 }, () 
     //   RUN_EZID_TESTS=true GITHUB_ADMIN_PAT=... AWS_ACCESS_KEY_ID=... \
     //   AWS_SECRET_ACCESS_KEY=... S3_BUCKET=... AWS_REGION=... \
     //   TEST_WITHDRAW_DATASET_ID=xx0999NN bun test test/ezid-sandbox.test.ts
-    // Only the concept DOI is exercised (no version DOIs are seeded): the
-    // per-version code path is identical and already covered by
-    // markVersionEzidStatus's direct D1 test plus the concept path here.
+    // A version DOI is seeded alongside the concept DOI (bug #984: dataset
+    // dataset_versions.doi is stored WITHOUT the "doi:" scheme prefix, unlike
+    // datasets.ezid_identifier, and EZID rejected the unprefixed identifier
+    // with "invalid identifier" in production -- withdrawDataset/
+    // restoreDataset now run every version DOI through ensureDoiScheme
+    // before calling makeUnavailable/makePublic). This test mints the
+    // version identifier for real on the test shoulder and confirms the
+    // round trip resolves it, so the "doi:"-prefixing is exercised against
+    // the live registrar, not just asserted in isolation.
     // Also exercises the GROUP 1 resume fix for real: after the fresh
     // withdrawal, ezid_status is reset to simulate an interrupted run, and
     // withdrawDataset is called again to confirm it resumes (not re-skips)
@@ -687,10 +693,28 @@ describe.skipIf(!SHOULD_RUN)("EZID Sandbox Integration", { timeout: 30000 }, () 
       !!process.env.TEST_WITHDRAW_DATASET_ID;
 
     test.skipIf(!canRunOrchestration)(
-      "withdrawDataset then restoreDataset round-trips a real dataset's visibility + concept DOI",
+      "withdrawDataset then restoreDataset round-trips a real dataset's visibility + concept DOI + version DOI",
       async () => {
         const datasetId = process.env.TEST_WITHDRAW_DATASET_ID as string;
         const conceptIdentifier = buildConceptIdentifier(datasetId, true);
+        const versionIdentifier = buildVersionIdentifier(datasetId, "1.0.0", true);
+        // Stored WITHOUT the "doi:" prefix, matching dataset_versions.doi in
+        // production (bug #984) -- this is what withdrawDataset/
+        // restoreDataset must run through ensureDoiScheme before calling
+        // EZID, or the live registrar rejects it as "invalid identifier".
+        const versionDoi = extractDoi(versionIdentifier);
+
+        // Mint + publish the version identifier for real so makeUnavailable
+        // has something to tombstone.
+        const versionMetadata = bidsToDataCite(datasetId, versionDoi, {
+          Name: `Withdraw Round Trip Test ${datasetId}`,
+        });
+        await createIdentifier(EZID_TEST_AUTH, versionIdentifier, {
+          status: "public",
+          target: `https://nemar.org/dataset/${datasetId}?v=v1.0.0`,
+          dataciteXml: buildDataCiteXml(versionMetadata),
+        });
+        await sleep(400);
 
         const db = freshDb();
         db.prepare(
@@ -702,6 +726,9 @@ describe.skipIf(!SHOULD_RUN)("EZID Sandbox Integration", { timeout: 30000 }, () 
               ezid_identifier, github_repo)
            VALUES (?, 1, ?, 'public', 1, 'ezid', ?, ?)`,
         ).run(datasetId, datasetId, conceptIdentifier, `nemarDatasets/${datasetId}`);
+        db.prepare(
+          "INSERT INTO dataset_versions (dataset_id, version, doi, ezid_status) VALUES (?, '1.0.0', ?, 'public')",
+        ).run(datasetId, versionDoi);
 
         const env = {
           DB: realD1(db),
@@ -723,10 +750,16 @@ describe.skipIf(!SHOULD_RUN)("EZID Sandbox Integration", { timeout: 30000 }, () 
         expect(withdrawResult.resumed).toBe(false);
         expect(withdrawResult.visibility.status).toBe("ok");
         expect(withdrawResult.dois[0].status).toBe("ok");
+        // The version-DOI step is what bug #984 broke: it used to fail with
+        // "invalid identifier" because v.doi (unprefixed) was sent to EZID
+        // as-is instead of through ensureDoiScheme.
+        expect(withdrawResult.dois[1].status).toBe("ok");
 
         await sleep(400);
         const tombstoned = await getIdentifier(EZID_TEST_AUTH, conceptIdentifier);
         expect(tombstoned.status).toBe("unavailable");
+        const versionTombstoned = await getIdentifier(EZID_TEST_AUTH, versionIdentifier);
+        expect(versionTombstoned.status).toBe("unavailable");
 
         // Simulate the exact partial-failure state GROUP 1 fixes: intent
         // recorded (withdrawn_at set by the run above) but the concept
@@ -753,10 +786,13 @@ describe.skipIf(!SHOULD_RUN)("EZID Sandbox Integration", { timeout: 30000 }, () 
         }
         expect(restoreResult.visibility.status).toBe("ok");
         expect(restoreResult.dois[0].status).toBe("ok");
+        expect(restoreResult.dois[1].status).toBe("ok");
 
         await sleep(400);
         const restored = await getIdentifier(EZID_TEST_AUTH, conceptIdentifier);
         expect(restored.status).toBe("public");
+        const versionRestored = await getIdentifier(EZID_TEST_AUTH, versionIdentifier);
+        expect(versionRestored.status).toBe("public");
 
         db.close();
       },
