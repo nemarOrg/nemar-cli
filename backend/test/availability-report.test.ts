@@ -194,7 +194,11 @@ describe("buildAvailabilityReport", () => {
     expect("blocklist_reason" in report).toBe(false);
   });
 
-  test("a missing key absent from the manifest (defensive) reports path:null, declared_size:null, sorts last", () => {
+  test("a missing key absent from the manifest entirely (defensive) yields no entry for it, others still report", () => {
+    // Shouldn't happen in practice -- every key in integrity.missingKeys comes
+    // from the same manifest compareManifestToListing walked -- but the pure
+    // builder walks manifest PATHS, so a key with no matching manifest entry
+    // simply produces no row rather than a synthetic path:null placeholder.
     const manifest = {
       "sub-01/eeg/a.edf": { key: "SHA256E-s10--a.edf", size: 10 },
     };
@@ -219,7 +223,76 @@ describe("buildAvailabilityReport", () => {
     });
     expect(report.missing).toEqual([
       { path: "sub-01/eeg/a.edf", key: "SHA256E-s10--a.edf", declared_size: 10, reason: "absent" },
-      { path: null, key: "SHA256E-sUNKNOWN--x.edf", declared_size: null, reason: "absent" },
     ]);
+  });
+
+  test("two paths sharing one annex key (git-annex content-addressing, e.g. duplicate calibration files) both missing -> both reported, neither dropped nor duplicated onto one path", () => {
+    const manifest = {
+      "sub-01/eeg/calib.edf": { key: "SHA256E-s50--shared.edf", size: 50 },
+      "sub-02/eeg/calib.edf": { key: "SHA256E-s50--shared.edf", size: 50 },
+      "sub-03/eeg/data.edf": { key: "SHA256E-s90--other.edf", size: 90 },
+    };
+    const integrity: DatasetVersionIntegrityResult = {
+      complete: false,
+      // compareManifestToListing emits one missingKeys entry per manifest
+      // entry, so a shared key that's missing appears twice here.
+      missingKeys: ["SHA256E-s50--shared.edf", "SHA256E-s50--shared.edf"],
+      zeroByteKeys: [],
+      expectedCount: 3,
+      presentCount: 1,
+      bytesPresent: 90,
+      declaredBytes: 190,
+      declaredFiles: 3,
+      version: "1.0.0",
+    };
+    const report = buildAvailabilityReport({
+      datasetId: "nm000001",
+      version: "1.0.0",
+      source: null,
+      integrity,
+      manifest,
+      generatedAt: GENERATED_AT,
+    });
+    expect(report.missing).toEqual([
+      {
+        path: "sub-01/eeg/calib.edf",
+        key: "SHA256E-s50--shared.edf",
+        declared_size: 50,
+        reason: "absent",
+      },
+      {
+        path: "sub-02/eeg/calib.edf",
+        key: "SHA256E-s50--shared.edf",
+        declared_size: 50,
+        reason: "absent",
+      },
+    ]);
+  });
+
+  test("pct_bytes is null for a real (non-empty) manifest whose declared bytes are 0 -- not just the no-manifest fallback", () => {
+    const manifest = {
+      "sub-01/eeg/empty.json": { key: "SHA256E-s0--aaa.json", size: 0 },
+    };
+    const integrity: DatasetVersionIntegrityResult = {
+      complete: true,
+      missingKeys: [],
+      zeroByteKeys: [],
+      expectedCount: 1,
+      presentCount: 1,
+      bytesPresent: 0,
+      declaredBytes: 0,
+      declaredFiles: 1,
+      version: "1.0.0",
+    };
+    const report = buildAvailabilityReport({
+      datasetId: "nm000001",
+      version: "1.0.0",
+      source: null,
+      integrity,
+      manifest,
+      generatedAt: GENERATED_AT,
+    });
+    expect(report.version).toBe("1.0.0");
+    expect(report.completeness.pct_bytes).toBeNull();
   });
 });

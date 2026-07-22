@@ -833,13 +833,14 @@ export async function dataIntegritySweepReset(): Promise<DataIntegritySweepReset
 // Availability report (epic #999 Phase 1, #1000)
 // ============================================================================
 
-/** One file the version manifest declares that S3 does not have at its
- *  declared size. `path` is null when the key could not be traced back to a
- *  manifest path (defensive; shouldn't occur alongside a non-null `version`). */
+/** One manifest path whose declared annex key is not present in S3 at its
+ *  declared size. Keyed by path (not annex key): git-annex is
+ *  content-addressed, so two distinct paths can share one key (repeated
+ *  calibration/empty-room/identical-stimulus files are common in BIDS). */
 export interface AvailabilityReportMissingEntry {
-  path: string | null;
+  path: string;
   key: string;
-  declared_size: number | null;
+  declared_size: number;
   reason: "zero_byte" | "absent";
 }
 
@@ -848,8 +849,8 @@ export interface AvailabilityReportCompleteness {
   files_declared: number;
   bytes_present: number;
   bytes_declared: number;
-  /** bytes_present / bytes_declared, or null when there was no manifest to
-   *  compare against at all. */
+  /** bytes_present / bytes_declared, or null whenever bytes_declared is not
+   *  > 0 (a 0-declared-bytes dataset, with or without a manifest). */
   pct_bytes: number | null;
 }
 

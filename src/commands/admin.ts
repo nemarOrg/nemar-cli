@@ -4709,7 +4709,7 @@ const availabilityReportCommand = new Command("availability-report")
       console.log();
       console.log(chalk.dim(`  Missing (${report.missing.length}):`));
       for (const m of report.missing) {
-        console.log(chalk.dim(`    - ${m.path ?? m.key} [${m.reason}]`));
+        console.log(chalk.dim(`    - ${m.path} [${m.reason}]`));
       }
     }
   });

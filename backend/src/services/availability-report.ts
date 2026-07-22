@@ -22,14 +22,16 @@ import {
 import { errorMessage } from "./repo-metadata.js";
 import { type PresignedUrlOptions, getManifest } from "./s3.js";
 
-/** One entry the version manifest declares that S3 does not have at its
- *  declared size. `path` is null when the annex key could not be matched
- *  back to a manifest path (shouldn't happen when `manifest` is non-null,
- *  since every missing key comes from that same manifest -- defensive). */
+/** One manifest PATH whose declared annex key is not present in S3 at its
+ *  declared size. Entries are built by walking manifest PATHS (not annex
+ *  keys): git-annex is content-addressed, so two distinct paths (repeated
+ *  calibration/empty-room/identical-stimulus files are common in BIDS) can
+ *  share one key -- keying off `key` alone would collapse two genuinely
+ *  missing paths into a single (wrong, duplicated) entry. */
 export interface AvailabilityReportMissingEntry {
-  path: string | null;
+  path: string;
   key: string;
-  declared_size: number | null;
+  declared_size: number;
   reason: "zero_byte" | "absent";
 }
 
@@ -38,11 +40,9 @@ export interface AvailabilityReportCompleteness {
   files_declared: number;
   bytes_present: number;
   bytes_declared: number;
-  /** bytes_present / bytes_declared, or null when bytes_declared is 0 (no
-   *  usable manifest -- a 0-byte-declared dataset is not represented here
-   *  since that case still has a real manifest and a real, non-zero-safe
-   *  ratio; 0 declared bytes with a manifest present divides to 0, not
-   *  null -- only the no-manifest path leaves this null). */
+  /** bytes_present / bytes_declared, or null whenever bytes_declared is not
+   *  > 0 (a 0-declared-bytes dataset, with or without a manifest -- avoids a
+   *  0/0 NaN either way). */
   pct_bytes: number | null;
 }
 
@@ -102,31 +102,24 @@ export function buildAvailabilityReport(args: BuildAvailabilityReportArgs): Avai
     };
   }
 
-  // Invert the manifest (path -> {key, size}) to a key -> {path, size} map so
-  // each missing annex key can be traced back to the file path it belongs to.
-  const byKey = new Map<string, { path: string; size: number }>();
-  for (const [path, file] of Object.entries(manifest)) {
-    byKey.set(file.key, { path, size: file.size });
-  }
-
+  // Walk manifest PATHS (not integrity.missingKeys) so a key shared by
+  // multiple paths -- git-annex is content-addressed, so repeated
+  // calibration/empty-room/identical-stimulus files commonly share one key
+  // -- produces one entry per genuinely-missing path instead of collapsing
+  // them all onto whichever path last won a key->path lookup.
+  const missingKeySet = new Set(integrity.missingKeys);
   const zeroByteKeys = new Set(integrity.zeroByteKeys);
-  const missing: AvailabilityReportMissingEntry[] = integrity.missingKeys.map((key) => {
-    const entry = byKey.get(key);
-    return {
-      path: entry?.path ?? null,
-      key,
-      declared_size: entry?.size ?? null,
-      reason: zeroByteKeys.has(key) ? "zero_byte" : "absent",
-    };
-  });
-  // Sort by path; entries with no resolvable path (shouldn't occur -- see the
-  // field doc above) sort last rather than interleaving with real paths.
-  missing.sort((a, b) => {
-    if (a.path === b.path) return 0;
-    if (a.path === null) return 1;
-    if (b.path === null) return -1;
-    return a.path < b.path ? -1 : 1;
-  });
+  const missing: AvailabilityReportMissingEntry[] = [];
+  for (const [path, file] of Object.entries(manifest)) {
+    if (!missingKeySet.has(file.key)) continue;
+    missing.push({
+      path,
+      key: file.key,
+      declared_size: file.size,
+      reason: zeroByteKeys.has(file.key) ? "zero_byte" : "absent",
+    });
+  }
+  missing.sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
 
   return {
     dataset_id: datasetId,

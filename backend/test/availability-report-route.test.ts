@@ -12,10 +12,10 @@
  * minimal honest report when there is none) live in
  * availability-report.test.ts against the pure buildAvailabilityReport
  * builder instead; the actual createOrUpdateFile commit needs live GitHub
- * and is not covered by an automated test, consistent with how other
- * GitHub-writing paths in this repo are tested (see enrich-dataset tests).
- * This file covers what's left: the route's own dispatch (404 for an
- * unknown dataset, before any S3/GitHub call; admin gating).
+ * and is not covered by an automated test here, consistent with how the two
+ * sibling files above scope themselves around the same live-network
+ * constraint. This file covers what's left: the route's own dispatch (404
+ * for an unknown dataset, before any S3/GitHub call; admin gating).
  */
 
 import type { Database } from "bun:sqlite";
