@@ -830,6 +830,68 @@ export async function dataIntegritySweepReset(): Promise<DataIntegritySweepReset
 }
 
 // ============================================================================
+// Availability report (epic #999 Phase 1, #1000)
+// ============================================================================
+
+/** One manifest path whose declared annex key is not present in S3 at its
+ *  declared size. Keyed by path (not annex key): git-annex is
+ *  content-addressed, so two distinct paths can share one key (repeated
+ *  calibration/empty-room/identical-stimulus files are common in BIDS). */
+export interface AvailabilityReportMissingEntry {
+  path: string;
+  key: string;
+  declared_size: number;
+  reason: "zero_byte" | "absent";
+}
+
+export interface AvailabilityReportCompleteness {
+  files_present: number;
+  files_declared: number;
+  bytes_present: number;
+  bytes_declared: number;
+  /** bytes_present / bytes_declared, or null whenever bytes_declared is not
+   *  > 0 (a 0-declared-bytes dataset, with or without a manifest). */
+  pct_bytes: number | null;
+}
+
+/** `.nemar/availability-report.json` shape (mirrors
+ *  backend/src/services/availability-report.ts's AvailabilityReport). */
+export interface AvailabilityReport {
+  dataset_id: string;
+  version: string | null;
+  generated_at: string;
+  source: { type: string; id: string } | null;
+  complete: boolean;
+  completeness: AvailabilityReportCompleteness;
+  missing: AvailabilityReportMissingEntry[];
+  blocklist_reason?: string;
+}
+
+/** `POST /admin/datasets/:id/availability-report` response: the bare report
+ *  on a dry run, or `{ written: true, report }` once it's committed. */
+export type AvailabilityReportResult =
+  | AvailabilityReport
+  | { written: true; report: AvailabilityReport };
+
+/**
+ * Generate a dataset's availability report. Dry-run by default (server-side
+ * `?dry_run=1`, returns the report without committing it); pass
+ * `{ write: true }` to commit it to `.nemar/availability-report.json` on the
+ * repo's `main` branch.
+ */
+export async function availabilityReport(
+  datasetId: string,
+  opts?: { write?: boolean },
+): Promise<AvailabilityReportResult> {
+  const query = opts?.write ? "" : "?dry_run=1";
+  return request<AvailabilityReportResult>(
+    `/admin/datasets/${datasetId}/availability-report${query}`,
+    { method: "POST", headers: { "Content-Type": "application/json" } },
+    true,
+  );
+}
+
+// ============================================================================
 // Fleet governance (epic #713)
 // ============================================================================
 

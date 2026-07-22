@@ -15,6 +15,10 @@ import { z } from "zod";
 import { auditLogStatement } from "../../db/audit-log";
 import { SYSTEM_USER_ID } from "../../lib/constants";
 import { shouldSkipArchive } from "../../services/archive-policy";
+import {
+  AvailabilityReportError,
+  writeAvailabilityReport,
+} from "../../services/availability-report";
 import { stampDatasetIntegrity, writeVersionHed } from "../../services/dataset-metadata-columns";
 import {
   DatasetReindexError,
@@ -923,6 +927,35 @@ export function registerDatasetLifecycleRoutes(admin: AdminRouter): void {
     } catch (err) {
       const msg = errorMessage(err);
       return c.json({ error: `Manifest generation failed: ${msg}` }, 500);
+    }
+  });
+
+  /**
+   * POST /admin/datasets/:id/availability-report[?dry_run=1] — generate the
+   * per-dataset availability report (`.nemar/availability-report.json`, epic
+   * #999 Phase 1, #1000): how much of the published version manifest is
+   * actually present in S3, and exactly which files are missing + why.
+   * Reuses the completeness math from verifyDatasetVersionS3
+   * (import-integrity.ts) via services/availability-report.ts.
+   *
+   * `?dry_run=1` returns the report without committing it. Otherwise the
+   * report is committed to `.nemar/availability-report.json` on the repo's
+   * `main` branch via the admin Contents-API path (the same last-writer-wins
+   * `createOrUpdateFile` enrichment uses for `.nemar/metadata.json`).
+   */
+  admin.post("/datasets/:id/availability-report", async (c) => {
+    const datasetId = c.req.param("id");
+    const dryRun = c.req.query("dry_run") === "1";
+
+    try {
+      const report = await writeAvailabilityReport(c.env, datasetId, { dryRun });
+      return c.json(dryRun ? report : { written: true, report });
+    } catch (err) {
+      if (err instanceof AvailabilityReportError) {
+        return c.json({ error: err.message }, err.statusCode);
+      }
+      console.error(`[availability-report] Failed for ${datasetId}:`, err);
+      return c.json({ error: errorMessage(err) }, 500);
     }
   });
 

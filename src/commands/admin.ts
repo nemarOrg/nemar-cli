@@ -28,6 +28,8 @@ import { Command } from "commander";
 import inquirer from "inquirer";
 import ora from "ora";
 import {
+  type AvailabilityReport,
+  type AvailabilityReportResult,
   type DataIntegritySweepBatchResponse,
   type DatasetTransitionResponse,
   type EmailPreferences,
@@ -40,6 +42,7 @@ import {
   type SummaryVersionCoverage,
   addCi,
   approveUser,
+  availabilityReport,
   bulkDeleteDatasets,
   changeUserRole,
   changeVisibility,
@@ -4640,6 +4643,78 @@ reindexCommand
   );
 
 adminCommand.addCommand(reindexCommand);
+
+const availabilityReportCommand = new Command("availability-report")
+  .description(
+    "Report how much of a dataset's declared data is present in S3, and exactly which files are missing + why (#1000). Dry-run by default.",
+  )
+  .argument("<dataset-id>", "Dataset ID (e.g., nm000103)")
+  .option(
+    "--write",
+    "Commit the report to .nemar/availability-report.json on main (default: preview only)",
+  )
+  .option("--json", "Output raw JSON")
+  .action(async (datasetId: string, options: { write?: boolean; json?: boolean }) => {
+    if (!requireAuth()) return;
+
+    const spinner = ora(
+      options.write
+        ? `Generating and writing availability report for ${datasetId}...`
+        : `Previewing availability report for ${datasetId}...`,
+    ).start();
+    let result: AvailabilityReportResult;
+    try {
+      result = await availabilityReport(datasetId, { write: options.write === true });
+    } catch (err) {
+      spinner.fail(`Failed to generate availability report for ${datasetId}`);
+      console.error(chalk.red(errorDetail(err)));
+      process.exit(1);
+    }
+
+    const report: AvailabilityReport = "report" in result ? result.report : result;
+    const written = "report" in result;
+    spinner.succeed(
+      written
+        ? `${datasetId}: availability report written to .nemar/availability-report.json`
+        : `${datasetId}: availability report (dry run, not written)`,
+    );
+
+    if (options.json) {
+      console.log(JSON.stringify(result, null, 2));
+      return;
+    }
+
+    console.log();
+    if (report.version === null) {
+      console.log(
+        chalk.yellow("  No published version manifest to compare against; completeness unknown."),
+      );
+    } else {
+      console.log(`  Version:   ${report.version}`);
+    }
+    console.log(`  Complete:  ${report.complete ? chalk.green("yes") : chalk.red("no")}`);
+    console.log(
+      `  Files:     ${report.completeness.files_present}/${report.completeness.files_declared} present`,
+    );
+    const bytesLine = `${formatBytes(report.completeness.bytes_present)}/${formatBytes(report.completeness.bytes_declared)}`;
+    const pct =
+      report.completeness.pct_bytes != null
+        ? ` (${(report.completeness.pct_bytes * 100).toFixed(1)}%)`
+        : "";
+    console.log(`  Bytes:     ${bytesLine}${pct}`);
+    if (report.blocklist_reason) {
+      console.log(chalk.yellow(`  Blocklisted: ${report.blocklist_reason}`));
+    }
+    if (report.missing.length > 0) {
+      console.log();
+      console.log(chalk.dim(`  Missing (${report.missing.length}):`));
+      for (const m of report.missing) {
+        console.log(chalk.dim(`    - ${m.path} [${m.reason}]`));
+      }
+    }
+  });
+
+adminCommand.addCommand(availabilityReportCommand);
 
 const hedSweepCommand = new Command("hed-sweep").description(
   "Backfill HED detection (has_hed / hed_version) for existing datasets (#869)",
