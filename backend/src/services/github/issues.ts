@@ -31,8 +31,13 @@ export async function findOpenIssueByTitle(
   title: string,
   pat: string,
 ): Promise<GitHubIssue | null> {
-  let page = 1;
-  while (true) {
+  // Cap pagination: a growing backlog of open (un-triaged) labeled issues must
+  // not turn every dedup lookup into an unbounded scan -- each page is a GitHub
+  // subrequest. 20 pages x 100 = 2000 open issues of one label, far beyond any
+  // realistic backlog. If no match within the cap, treat as not-found; the
+  // worst case is a duplicate issue, which is preferable to an unbounded scan.
+  const MAX_PAGES = 20;
+  for (let page = 1; page <= MAX_PAGES; page++) {
     const response = await githubFetchWithRetry(
       `${GITHUB_API()}/repos/${repo}/issues?state=open&labels=${encodeURIComponent(label)}&per_page=100&page=${page}`,
       { headers: ghHeaders(pat) },
@@ -45,8 +50,11 @@ export async function findOpenIssueByTitle(
     const match = issues.find((issue) => issue.title === title);
     if (match) return match;
     if (issues.length < 100) return null; // last page
-    page++;
   }
+  console.warn(
+    `[github/issues] findOpenIssueByTitle hit MAX_PAGES=${MAX_PAGES} on ${repo} for "${title}"; treating as not-found (may create a duplicate)`,
+  );
+  return null;
 }
 
 /** Create an issue on `repo` with `labels`. */

@@ -158,6 +158,14 @@ export async function fileImportFailureIssueIfNeeded(
   env: Bindings,
   args: FileImportFailureIssueArgs,
 ): Promise<void> {
+  // A missing datasets row defaults is_sandbox/is_exemplar to false below, i.e.
+  // the sandbox/exemplar gate "fails open" (it WILL file). Safe today only via
+  // an invariant enforced elsewhere: OpenNeuro imports always mint on###### ids
+  // whose datasets row is inserted with is_sandbox=0 synchronously at import
+  // kickoff (routes/admin/imports.ts), and is_exemplar=1 exists only on
+  // xx-prefixed rows (migration 0057; the xx-band id check in the gate is the
+  // independent guard for those). A D1 read that THROWS instead fails closed
+  // (the whole function rejects into the caller's .catch, no issue filed).
   const row = await db
     .prepare("SELECT is_sandbox, is_exemplar FROM datasets WHERE dataset_id = ?")
     .bind(args.datasetId)
@@ -182,6 +190,14 @@ export async function fileImportFailureIssueIfNeeded(
     workflowRunUrl: args.workflowRunUrl,
   };
 
+  // Dedup is check-then-act (find open issue by title, else create) with no
+  // lock/idempotency key. Within one workflow run the report job posts
+  // status=failed exactly once per dataset, so no self-race. The only race is
+  // two near-simultaneous FIRST failures for the same dataset from two
+  // different workflow runs (e.g. overlapping manual + auto dispatch): both see
+  // "no open issue" and both create one. Worst case = a cosmetic duplicate
+  // issue, never data loss or a masked failure. Accepted; a close-on-recovery
+  // pass (see file header) would also clean these up.
   const existing = await findOpenIssueByTitle(
     IMPORT_FAILURE_ISSUES_REPO,
     IMPORT_FAILURE_ISSUE_LABEL,
