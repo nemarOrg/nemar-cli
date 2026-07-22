@@ -9,11 +9,14 @@
 import { describe, expect, test } from "bun:test";
 import {
   type ExemplarFleetEntry,
+  findMissingCopiedKeys,
   isAnnexContentKey,
   parseExemplarFleet,
+  planSubPrefixCopy,
   rewriteObjectKeyPrefix,
   scrubDatasetDescription,
 } from "../src/lib/exemplar-clone";
+import type { CopyItem } from "../src/lib/s3-server-copy";
 
 describe("scrubDatasetDescription", () => {
   test("prefixes Name with [TEST COPY] and drops DatasetDOI", () => {
@@ -164,5 +167,59 @@ describe("parseExemplarFleet", () => {
     const entries: ExemplarFleetEntry[] = parseExemplarFleet(raw);
     const sources = new Set(entries.map((e) => e.source_id));
     expect(sources.size).toBe(entries.length); // cloning one source twice is a spec bug
+  });
+});
+
+describe("planSubPrefixCopy / findMissingCopiedKeys (#982, same #967 bug)", () => {
+  // These are the exact functions copySubPrefix and finalizeExemplar call
+  // (exported from exemplar-clone.ts itself, not the raw s3-server-copy
+  // helpers), so a future revert of either call site back to presence-only
+  // matching would fail these tests. Shaped like exemplar-clone's real usage
+  // (relative keys, s3://nemar-dev/... dest URIs), mirroring
+  // test/copy-size-integrity.unit.test.ts for import-openneuro.
+  const mk = (key: string): CopyItem => ({
+    key,
+    source: { bucket: "nemar", key: `nm000132/objects/${key}`, region: "us-east-2" },
+    httpUrl: null,
+    destUri: `s3://nemar-dev/xx099900/objects/${key}`,
+  });
+
+  test("copySubPrefix's resume filter re-copies a present-but-0-byte annex key", () => {
+    const items = [mk("SHA256E-s10565888--abc123.edf")];
+    // destExisting: the key is present at the destination but 0 bytes, e.g.
+    // a corrupt leftover from a prior failed run.
+    const destExisting = new Map([["SHA256E-s10565888--abc123.edf", 0]]);
+    const { toCopy, skipped } = planSubPrefixCopy(items, destExisting);
+    expect(toCopy.map((i) => i.key)).toEqual(["SHA256E-s10565888--abc123.edf"]);
+    expect(skipped).toEqual([]);
+  });
+
+  test("copySubPrefix's resume filter skips a correctly-sized present key", () => {
+    const items = [mk("SHA256E-s10565888--abc123.edf")];
+    const destExisting = new Map([["SHA256E-s10565888--abc123.edf", 10565888]]);
+    const { toCopy, skipped } = planSubPrefixCopy(items, destExisting);
+    expect(toCopy).toEqual([]);
+    expect(skipped).toEqual(["SHA256E-s10565888--abc123.edf"]);
+  });
+
+  test("finalizeExemplar's verify gate treats a present-but-0-byte annex key as missing", () => {
+    const keys = ["SHA256E-s10565888--abc123.edf"];
+    const existing = new Map([["SHA256E-s10565888--abc123.edf", 0]]);
+    const missing = findMissingCopiedKeys(keys, existing);
+    expect(missing).toEqual(["SHA256E-s10565888--abc123.edf"]);
+  });
+
+  test("finalizeExemplar's verify gate passes a correctly-sized present key", () => {
+    const keys = ["SHA256E-s10565888--abc123.edf"];
+    const existing = new Map([["SHA256E-s10565888--abc123.edf", 10565888]]);
+    const missing = findMissingCopiedKeys(keys, existing);
+    expect(missing).toEqual([]);
+  });
+
+  test("a non-annex key (no declared size) stays presence-checked, not special-cased", () => {
+    const keys = ["git:deadbeef"];
+    const existing = new Map([["git:deadbeef", 0]]);
+    const missing = findMissingCopiedKeys(keys, existing);
+    expect(missing).toEqual([]); // present, no declared size to check -> not missing
   });
 });

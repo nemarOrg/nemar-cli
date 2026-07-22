@@ -26,11 +26,13 @@
 
 import type { Bindings } from "../types/bindings.js";
 import { parseSqliteUtc } from "./auto-import.js";
+import { stampDatasetIntegrity } from "./dataset-metadata-columns.js";
 import { resolveEmailConfig, sendOpenNeuroMaintainerReport } from "./email.js";
 import { isNonProductionEnv } from "./environment.js";
 import { getDatasetsToken } from "./github-auth.js";
 import { triggerOpenNeuroOnboard } from "./github.js";
-import { type compareManifestToListing, verifyImportS3 } from "./import-integrity.js";
+import type { DatasetVersionIntegrityResult } from "./import-integrity.js";
+import { verifyDatasetVersionS3 } from "./import-integrity.js";
 import { OPENNEURO_UPSTREAM_MARKER } from "./import-recovery.js";
 
 /** ~2 weeks: the window an incomplete/failed import is retried before an
@@ -285,15 +287,33 @@ export async function reclassifyCompleteRows(
   let reclassified = 0;
 
   for (const row of rows) {
-    let verified: ReturnType<typeof compareManifestToListing>;
+    let verified: DatasetVersionIntegrityResult;
     try {
-      verified = await verifyImportS3(env, row.dataset_id);
+      verified = await verifyDatasetVersionS3(env, row.dataset_id);
     } catch (err) {
       console.error(
         `[import-retry] reclassify verify failed for ${row.dataset_id}:`,
         err instanceof Error ? err.message : String(err),
       );
       continue; // leave integrity_checked_at NULL -- retried next tick
+    }
+
+    // Stamp datasets/dataset_versions from this same verification (#980):
+    // this is precisely where the #967 bug (a false-`complete` import_jobs
+    // row hiding a 0-byte S3 object) gets caught, so the catalog should
+    // reflect the honest result the moment it's known rather than waiting for
+    // the separate data-integrity-sweep to independently reach the dataset.
+    // A stamp failure (D1 error) must not abort the whole batch and starve
+    // sibling rows -- log and move on; the row stays a reclassify candidate
+    // for the next tick since integrity_checked_at below never gets reached.
+    try {
+      await stampDatasetIntegrity(env.DB, row.dataset_id, verified);
+    } catch (err) {
+      console.error(
+        `[import-retry] reclassify stamp failed for ${row.dataset_id}:`,
+        err instanceof Error ? err.message : String(err),
+      );
+      continue;
     }
 
     if (verified.complete) {
@@ -393,12 +413,27 @@ export async function sweepImportRetries(env: Bindings): Promise<void> {
 
   const inputs: RetryCandidateInput[] = [];
   for (const row of candidateRows) {
-    let verified: { complete: boolean };
+    let verified: DatasetVersionIntegrityResult;
     try {
-      verified = await verifyImportS3(env, row.dataset_id);
+      verified = await verifyDatasetVersionS3(env, row.dataset_id);
     } catch (err) {
       console.error(
         `[import-retry] verify failed for ${row.dataset_id}:`,
+        err instanceof Error ? err.message : String(err),
+      );
+      continue;
+    }
+    // Stamp datasets/dataset_versions HERE, for every candidate regardless of
+    // which decision it ends up with (#980 review fix): stamping only on the
+    // `recover` branch below missed `dispatch`/`blocklist` candidates -- the
+    // ones just freshly confirmed INCOMPLETE, exactly the #967 signature this
+    // whole sweep exists to catch. Per-row isolation, like the sweep route: a
+    // stamp failure must not abort the batch and starve sibling datasets.
+    try {
+      await stampDatasetIntegrity(env.DB, row.dataset_id, verified);
+    } catch (err) {
+      console.error(
+        `[import-retry] stamp failed for ${row.dataset_id}:`,
         err instanceof Error ? err.message : String(err),
       );
       continue;
@@ -423,6 +458,7 @@ export async function sweepImportRetries(env: Bindings): Promise<void> {
   let pat: string | null = null;
   for (const item of plan) {
     if (item.decision.action === "recover") {
+      // Already stamped above at verify time (#980) -- no re-stamp here.
       await recoverRow(env.DB, item.datasetId);
       recovered++;
       continue;
@@ -505,12 +541,26 @@ export async function sweepImportRetries(env: Bindings): Promise<void> {
   }
   let blocklistRecovered = 0;
   for (const row of recheckRows) {
-    let verified: { complete: boolean };
+    let verified: DatasetVersionIntegrityResult;
     try {
-      verified = await verifyImportS3(env, row.dataset_id);
+      verified = await verifyDatasetVersionS3(env, row.dataset_id);
     } catch (err) {
       console.error(
         `[import-retry] blocklist recheck verify failed for ${row.dataset_id}:`,
+        err instanceof Error ? err.message : String(err),
+      );
+      continue;
+    }
+    // Same stamp as the reclassify/recover paths above (#980): a blocklisted
+    // row un-parking here is exactly as informative as any other recover, and
+    // an access-restored dataset should not have to wait for the general
+    // sweep to reflect it. Isolated the same way -- a stamp failure must not
+    // abort the recheck batch and starve sibling rows.
+    try {
+      await stampDatasetIntegrity(env.DB, row.dataset_id, verified);
+    } catch (err) {
+      console.error(
+        `[import-retry] blocklist recheck stamp failed for ${row.dataset_id}:`,
         err instanceof Error ? err.message : String(err),
       );
       continue;

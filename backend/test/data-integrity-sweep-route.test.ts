@@ -120,6 +120,38 @@ describe("POST /admin/datasets/data-integrity-sweep (real route, empty table -> 
     expect(res.status).toBe(400);
   });
 
+  test("?before=not-a-date -> 400 before any candidate query runs (#980)", async () => {
+    const res = await post("/admin/datasets/data-integrity-sweep?before=not-a-date");
+    expect(res.status).toBe(400);
+    const body = await res.json();
+    expect(body.error).toContain("not-a-date");
+    expect(candidateLimitCalls.length).toBe(0);
+  });
+
+  test("?before=<valid ISO8601> is accepted and normalized before binding (#980)", async () => {
+    const res = await post("/admin/datasets/data-integrity-sweep?before=2026-01-01T00:00:00Z");
+    expect(res.status).toBe(200);
+    expect(candidateLimitCalls.length).toBe(1);
+    // Params are [before, limit] for the anchored clause -- the first bound
+    // value is the caller's cutoff, normalized to a full ISO string.
+    const bound = candidateLimitCalls[0];
+    expect(bound[0]).toBe("2026-01-01T00:00:00.000Z");
+    expect(bound[bound.length - 1]).toBe(15);
+  });
+
+  test("?before wins over ?older-than when both are supplied (#980)", async () => {
+    const res = await post(
+      "/admin/datasets/data-integrity-sweep?before=2026-01-01T00:00:00Z&older-than=30",
+    );
+    expect(res.status).toBe(200);
+    // The anchored clause binds exactly one date param (before), not the
+    // "-30 days" text the older-than-only clause would bind -- so a 2-param
+    // (plus limit) bind here would mean older-than won instead.
+    const bound = candidateLimitCalls[0];
+    expect(bound.length).toBe(2); // [before, limit]
+    expect(bound[0]).toBe("2026-01-01T00:00:00.000Z");
+  });
+
   test("?limit=999 is clamped to 30 at the bound SQL parameter", async () => {
     const res = await post("/admin/datasets/data-integrity-sweep?limit=999");
     expect(res.status).toBe(200);

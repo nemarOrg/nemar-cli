@@ -48,6 +48,7 @@ import {
   dataIntegritySweep,
   dataIntegritySweepReset,
   deleteDataset,
+  dispatchCooldown,
   dispatchManifest,
   enforceBulk,
   enforceDataset,
@@ -3077,29 +3078,74 @@ adminCommand
 // ============================================================================
 
 /**
+ * The onboard-openneuro.yml copy phase fans each dataset out into 8 shard
+ * jobs, and GitHub caps a workflow's job matrix at 256 entries. Above 32
+ * datasets in one dispatch, the matrix silently instantiates 0 copy jobs
+ * instead of erroring, so a batch must be split before it reaches that cap.
+ * 256 / 8 = 32; this stays a bit under that for headroom.
+ */
+export const MAX_DATASETS_PER_DISPATCH = 30;
+
+/**
+ * Split `ids` into chunks of at most `size`, preserving order. Pure so the
+ * batching logic is unit-testable without a live `gh` call.
+ */
+export function chunkDatasetIds(
+  ids: string[],
+  size: number = MAX_DATASETS_PER_DISPATCH,
+): string[][] {
+  if (ids.length === 0) return [];
+  if (ids.length <= size) return [ids];
+  const chunks: string[][] = [];
+  for (let i = 0; i < ids.length; i += size) {
+    chunks.push(ids.slice(i, i + size));
+  }
+  return chunks;
+}
+
+/**
  * Dispatch the onboard-openneuro.yml workflow (nemarDatasets/.github) for a
  * batch of OpenNeuro `ds######` ids -- the prepare/copy/finalize matrix
  * hardened in epic #967 Phases 1-3. Shared by `import-openneuro`'s default
  * (non---local) branch, a brand-new import, and `recover --execute` (Phase
  * 5, #972), a re-copy of an existing import whose S3 content was found
  * empty; both dispatch the SAME workflow, one gh run per batch.
+ *
+ * Chunks `dsIds` to stay under the 256-job matrix cap (see
+ * MAX_DATASETS_PER_DISPATCH), issuing one `gh workflow run` per chunk. Fails
+ * fast on the first chunk that doesn't dispatch, naming which chunk so the
+ * operator can resume from there instead of re-running the whole batch.
  */
 async function dispatchOpenNeuroImportWorkflow(
   dsIds: string[],
 ): Promise<{ ok: true } | { ok: false; error: string }> {
   const { runCommand } = await import("../lib/git-annex/run-command.js");
-  const result = await runCommand([
-    "gh",
-    "workflow",
-    "run",
-    "onboard-openneuro.yml",
-    "--repo",
-    "nemarDatasets/.github",
-    "--field",
-    `openneuro_ids=${dsIds.join(",")}`,
-  ]);
-  if (result.exitCode !== 0) {
-    return { ok: false, error: result.stderr.trim() };
+  const chunks = chunkDatasetIds(dsIds);
+  if (chunks.length > 1) {
+    console.log(
+      chalk.dim(
+        `  Splitting ${dsIds.length} datasets into ${chunks.length} dispatches (matrix job cap).`,
+      ),
+    );
+  }
+  for (let i = 0; i < chunks.length; i++) {
+    const chunk = chunks[i];
+    const result = await runCommand([
+      "gh",
+      "workflow",
+      "run",
+      "onboard-openneuro.yml",
+      "--repo",
+      "nemarDatasets/.github",
+      "--field",
+      `openneuro_ids=${chunk.join(",")}`,
+    ]);
+    if (result.exitCode !== 0) {
+      return {
+        ok: false,
+        error: `chunk ${i + 1}/${chunks.length} (${chunk.join(",")}): ${result.stderr.trim()}`,
+      };
+    }
   }
   return { ok: true };
 }
@@ -3549,7 +3595,10 @@ Description:
   quarantined/blocklisted by the Phase 2 retry engine is not un-stuck by
   this reclassify (which only flips complete -> incomplete); trust
   datasets.data_complete, not import_jobs.status. Acceptance audit: run
-  'nemar admin data-integrity-sweep --older-than 0' after the batch lands.`,
+  'nemar admin data-integrity-sweep --reaudit' after the batch lands
+  (--older-than 0 does NOT converge here -- its cutoff is relative to an
+  ever-advancing now(), so a just-stamped row re-qualifies on the very next
+  batch; --reaudit anchors the cutoff once so remaining reaches 0, #980).`,
   )
   .action(
     async (
@@ -3696,6 +3745,44 @@ Description:
         );
       }
       const dispatch = await dispatchOpenNeuroImportWorkflow(dsIds);
+
+      // Best-effort: push next_retry_at forward for the just-dispatched
+      // targets so the Phase-2 retry cron (sweepImportRetries) doesn't
+      // independently re-dispatch the same onboard-openneuro.yml run on its
+      // next tick (#981). A failure here is non-corrupting -- worst case the
+      // cron redundantly re-dispatches once -- so it must not fail the
+      // recovery itself, only warn.
+      //
+      // Runs BEFORE the dispatch.ok check below, and unconditionally on
+      // verifiedTargets (not just the ids of chunks that actually fired):
+      // verifyImport already reclassified every one of verifiedTargets to
+      // 'incomplete' with next_retry_at=now before we got here, so if a LATER
+      // chunk fails after an EARLIER chunk already ran `gh workflow run`, the
+      // already-dispatched datasets still need cooling down -- otherwise the
+      // cron re-dispatches exactly the datasets this whole mechanism exists to
+      // protect (the #981 bug, in the partial-failure case). Cooling down the
+      // ids whose dispatch never fired is harmless: the operator resumes the
+      // failed chunk manually, and any re-run of `recover` re-verifies first
+      // (resetting next_retry_at=now again), so this is overwritten either way.
+      let cooldown: { updated: number } | { error: string };
+      try {
+        cooldown = await dispatchCooldown(verifiedTargets);
+        if (!options.json && cooldown.updated < verifiedTargets.length) {
+          console.log(
+            chalk.dim(
+              `  (${verifiedTargets.length - cooldown.updated} of ${verifiedTargets.length} target(s) needed no cooldown: already complete, nothing for the cron to re-dispatch)`,
+            ),
+          );
+        }
+      } catch (err) {
+        cooldown = { error: errorDetail(err) };
+        console.warn(
+          chalk.yellow(
+            `\nWarning: failed to set dispatch cooldown (${errorDetail(err)}); the retry cron may briefly re-dispatch these datasets (non-corrupting).`,
+          ),
+        );
+      }
+
       if (!dispatch.ok) {
         console.error(chalk.red(`Failed to dispatch workflow: ${dispatch.error}`));
         console.error(
@@ -3714,7 +3801,7 @@ Description:
         console.log(chalk.dim("  Or run: gh run list --repo nemarDatasets/.github --limit 5"));
         console.log(
           chalk.dim(
-            "  Watch progress with: nemar admin recover status  /  nemar admin data-integrity-sweep --older-than 0",
+            "  Watch progress with: nemar admin recover status  /  nemar admin data-integrity-sweep --reaudit",
           ),
         );
 
@@ -3727,7 +3814,7 @@ Description:
       if (options.json) {
         console.log(
           JSON.stringify(
-            { dispatched: verifiedTargets, skipped: failedTargets, dispatch },
+            { dispatched: verifiedTargets, skipped: failedTargets, dispatch, cooldown },
             null,
             2,
           ),
@@ -4657,6 +4744,96 @@ hedSweepCommand
 
 adminCommand.addCommand(hedSweepCommand);
 
+/** One data-integrity-sweep batch, as consumed by {@link runReauditLoop}. */
+export interface ReauditBatchResult {
+  processed: number;
+  complete: number;
+  incomplete: number;
+  unknown: number;
+  errors: { dataset_id: string; error: string }[];
+  remaining: number | null;
+}
+
+export interface ReauditLoopResult {
+  batches: number;
+  totals: {
+    processed: number;
+    complete: number;
+    incomplete: number;
+    unknown: number;
+    errors: number;
+  };
+  remaining: number | null;
+  /** Hit the no-progress guard (remaining didn't strictly decrease) and stopped early. */
+  stalled: boolean;
+}
+
+/**
+ * Pure convergence loop driving `nemar admin data-integrity-sweep --reaudit`
+ * (#980 review fix). `getBefore()` is called EXACTLY ONCE, before the first
+ * `fetchBatch` call, and that single captured value is threaded UNCHANGED
+ * into every subsequent `fetchBatch(before)` call -- this is the convergence
+ * property itself (an anchored cutoff, not a moving `now()`-relative one; see
+ * the `?before=` doc comment on the sweep endpoint in datasets-lifecycle.ts).
+ *
+ * No Date/network dependency of its own, so both the anchoring property (one
+ * capture, reused every call) and the termination property (stop at
+ * remaining=0, or on a stalled/non-decreasing `remaining`) are directly
+ * unit-testable with a plain callback -- a future regression that re-derives
+ * `before` inside the loop (the exact "moving cutoff never converges" bug
+ * this whole flag exists to fix) would surface as differing `before` values
+ * across `fetchBatch` calls in the test, not just as a slow production
+ * incident that's hard to reproduce.
+ *
+ * `onBatch`/`sleepBetweenBatches` are optional hooks for the CLI's own
+ * per-batch UI (spinner text, verbose printing, pacing sleep) -- kept out of
+ * the aggregation/termination logic itself so a test can omit them entirely.
+ */
+export async function runReauditLoop(
+  getBefore: () => string | undefined,
+  fetchBatch: (before: string | undefined) => Promise<ReauditBatchResult>,
+  hooks?: {
+    onBatch?: (
+      res: ReauditBatchResult,
+      totals: ReauditLoopResult["totals"],
+      batchNumber: number,
+    ) => void;
+    sleepBetweenBatches?: () => Promise<void>;
+  },
+): Promise<ReauditLoopResult> {
+  const before = getBefore();
+  const totals = { processed: 0, complete: 0, incomplete: 0, unknown: 0, errors: 0 };
+  let batches = 0;
+  let remaining: number | null = null;
+  let prevRemaining: number | null = null;
+  let stalled = false;
+
+  do {
+    const res = await fetchBatch(before);
+    batches++;
+    totals.processed += res.processed;
+    totals.complete += res.complete;
+    totals.incomplete += res.incomplete;
+    totals.unknown += res.unknown;
+    totals.errors += res.errors.length;
+    remaining = res.remaining;
+    hooks?.onBatch?.(res, totals, batches);
+
+    // Progress guard: data_checked_at is stamped for every processed row, so
+    // `remaining` must strictly decrease. If it doesn't (e.g. persistent D1
+    // write errors leave rows unstamped), stop instead of looping forever.
+    if (remaining != null && prevRemaining != null && remaining >= prevRemaining) {
+      stalled = true;
+      break;
+    }
+    prevRemaining = remaining;
+
+    if ((remaining ?? 0) > 0) await hooks?.sleepBetweenBatches?.();
+  } while ((remaining ?? 0) > 0);
+
+  return { batches, totals, remaining, stalled };
+}
+
 const dataIntegritySweepCommand = new Command("data-integrity-sweep").description(
   "Audit datasets against their version manifest and backfill data_complete / bytes_present (epic #967 Phase 3, #970)",
 );
@@ -4667,6 +4844,10 @@ dataIntegritySweepCommand
     "--older-than <days>",
     "Also re-audit rows checked more than N days ago (periodic re-audit, not just the one-shot drain)",
   )
+  .option(
+    "--reaudit",
+    "Re-verify every already-checked row using an anchored cutoff so the sweep fully converges to 0 (unlike --older-than's moving now()-relative window, which never reaches 0 on its own)",
+  )
   .option("--reset", "Clear every audited row so a corrected verifier can re-sweep")
   .option("--verbose", "Print per-batch progress")
   .option("--json", "Output raw JSON instead of the human summary")
@@ -4674,6 +4855,7 @@ dataIntegritySweepCommand
     async (options: {
       limit?: string;
       olderThan?: string;
+      reaudit?: boolean;
       reset?: boolean;
       verbose?: boolean;
       json?: boolean;
@@ -4698,56 +4880,62 @@ dataIntegritySweepCommand
 
       const limit = Number.parseInt(options.limit ?? "15", 10) || 15;
       const olderThan = options.olderThan ? Number.parseInt(options.olderThan, 10) : undefined;
-      const totals = { processed: 0, complete: 0, incomplete: 0, unknown: 0, errors: 0 };
       const spinner = ora("Sweeping datasets for data integrity...").start();
 
-      let batch = 0;
-      let remaining: number | null = null;
-      let prevRemaining: number | null = null;
+      let loopResult: ReauditLoopResult | undefined;
       try {
-        let res: DataIntegritySweepBatchResponse;
-        do {
-          res = await dataIntegritySweep({ limit, olderThan });
-          batch++;
-          totals.processed += res.processed;
-          totals.complete += res.complete;
-          totals.incomplete += res.incomplete;
-          totals.unknown += res.unknown;
-          totals.errors += res.errors.length;
-          remaining = res.remaining;
+        loopResult = await runReauditLoop(
+          // Captured ONCE by runReauditLoop, before the first fetchBatch call --
+          // every call in this run passes the SAME anchor, so a row re-checked
+          // mid-run is stamped with a data_checked_at strictly AFTER `before`
+          // and never re-qualifies -- `remaining` strictly decreases to 0.
+          () => (options.reaudit ? new Date().toISOString() : undefined),
+          async (before) => {
+            const res = await dataIntegritySweep({ limit, olderThan, before });
+            return {
+              processed: res.processed,
+              complete: res.complete,
+              incomplete: res.incomplete,
+              unknown: res.unknown,
+              errors: res.errors,
+              remaining: res.remaining,
+            };
+          },
+          {
+            onBatch: (res, totals, batchNumber) => {
+              if (options.verbose) {
+                spinner.stop();
+                console.log(
+                  `  [batch ${batchNumber}] processed=${res.processed} complete=${res.complete} incomplete=${res.incomplete} unknown=${res.unknown} errors=${res.errors.length} remaining=${res.remaining ?? "?"}`,
+                );
+                for (const e of res.errors)
+                  console.log(`    ${chalk.red(e.dataset_id)}: ${e.error}`);
+                spinner.start("Sweeping datasets for data integrity...");
+              } else {
+                spinner.text = `Sweeping datasets for data integrity... ${totals.processed} processed, ${res.remaining ?? "?"} remaining`;
+              }
+            },
+            sleepBetweenBatches: () => sleep(1000), // pace the S3-heavy batches
+          },
+        );
 
-          if (options.verbose) {
-            spinner.stop();
-            console.log(
-              `  [batch ${batch}] processed=${res.processed} complete=${res.complete} incomplete=${res.incomplete} unknown=${res.unknown} errors=${res.errors.length} remaining=${remaining ?? "?"}`,
-            );
-            for (const e of res.errors) console.log(`    ${chalk.red(e.dataset_id)}: ${e.error}`);
-            spinner.start("Sweeping datasets for data integrity...");
-          } else {
-            spinner.text = `Sweeping datasets for data integrity... ${totals.processed} processed, ${remaining ?? "?"} remaining`;
-          }
-
-          // Progress guard: data_checked_at is stamped for every processed row, so
-          // `remaining` must strictly decrease. If it doesn't (e.g. persistent D1
-          // write errors leave rows unstamped), bail instead of looping forever.
-          if (remaining != null && prevRemaining != null && remaining >= prevRemaining) {
-            spinner.warn(`No progress (remaining stuck at ${remaining}); stopping - see errors`);
-            break;
-          }
-          prevRemaining = remaining;
-
-          if ((remaining ?? 0) > 0) await sleep(1000); // pace the S3-heavy batches
-        } while ((remaining ?? 0) > 0);
-
-        spinner.stop();
+        if (loopResult.stalled) {
+          spinner.warn(
+            `No progress (remaining stuck at ${loopResult.remaining}); stopping - see errors`,
+          );
+        } else {
+          spinner.stop();
+        }
       } catch (err) {
         spinner.fail("Data-integrity sweep failed");
         console.error(chalk.red(errorDetail(err)));
         process.exit(1);
       }
 
+      const { batches, totals, remaining } = loopResult;
+
       if (options.json) {
-        console.log(JSON.stringify({ ...totals, batches: batch, remaining }, null, 2));
+        console.log(JSON.stringify({ ...totals, batches, remaining }, null, 2));
       } else {
         console.log();
         if (remaining === null) {
@@ -4759,7 +4947,7 @@ dataIntegritySweepCommand
         }
         console.log(
           chalk.cyan(
-            `Done in ${batch} batch(es): processed=${totals.processed} complete=${totals.complete} incomplete=${totals.incomplete} unknown=${totals.unknown} errors=${totals.errors} remaining=${remaining ?? "unknown"}`,
+            `Done in ${batches} batch(es): processed=${totals.processed} complete=${totals.complete} incomplete=${totals.incomplete} unknown=${totals.unknown} errors=${totals.errors} remaining=${remaining ?? "unknown"}`,
           ),
         );
         if (totals.incomplete > 0) {
