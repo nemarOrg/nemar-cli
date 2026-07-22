@@ -223,6 +223,21 @@ async function buildExemplarCopyItems(
   });
 }
 
+/**
+ * Decide which of a sub-prefix's items still need copying (copySubPrefix's
+ * resume gate): an item is skipped only when it's already present at the
+ * destination AT ITS DECLARED SIZE -- a 0-byte or truncated leftover from a
+ * prior failed run must be re-copied, not mistaken for done (same #967 bug,
+ * #982). Exported and pure so the decision is unit-testable without
+ * S3/git-annex.
+ */
+export function planSubPrefixCopy(
+  items: CopyItem[],
+  destExisting: Map<string, number>,
+): { toCopy: CopyItem[]; skipped: string[] } {
+  return filterAlreadyCopied(items, destExisting, expectedSizesFromItems(items));
+}
+
 /** Copy one sub-prefix's items (resuming past whatever's already at the
  *  destination) and report progress. Throws on any copy failure (resumable
  *  re-run picks up where it left off, matching import-openneuro.ts's
@@ -241,14 +256,7 @@ async function copySubPrefix(
   }
 
   const destExisting = await listExistingObjects(DEST_BUCKET, `${xxId}/${subPrefix}`, S3_REGION);
-  // Resume: skip objects already present at the destination, but only when
-  // present at their declared size -- a 0-byte leftover from a prior failed
-  // run must be re-copied, not mistaken for done (same #967 bug, #982).
-  const { toCopy, skipped } = filterAlreadyCopied(
-    items,
-    destExisting,
-    expectedSizesFromItems(items),
-  );
+  const { toCopy, skipped } = planSubPrefixCopy(items, destExisting);
   if (toCopy.length === 0) {
     console.log(chalk.green(`  [${label}] nothing to copy (all ${skipped.length} present)`));
     return items.map((i) => i.key);
@@ -534,6 +542,16 @@ interface ExemplarFinalizeOptions {
 }
 
 /**
+ * Decide which copied keys are actually missing at the destination
+ * (finalizeExemplar's verify gate): a key present but not at its declared
+ * size counts as missing, same as an absent key -- a corrupt leftover from a
+ * failed copy must not be mistaken for done (#967, #982). Exported and pure.
+ */
+export function findMissingCopiedKeys(keys: string[], existing: Map<string, number>): string[] {
+  return keys.filter((k) => !isKeyPresentAtDeclaredSize(k, existing));
+}
+
+/**
  * Phase 3 (finalize): verify the copied objects landed, register them with
  * git-annex against nemar-s3-dev, push the git-annex branch, deploy CI,
  * refresh metadata, and (if requested) request + approve publication with a
@@ -550,10 +568,7 @@ export async function finalizeExemplar(
   if (copyResult.keys.length > 0) {
     const verifySpinner = ora("Verifying copied data...").start();
     const existing = await listExistingObjects(DEST_BUCKET, `${xxId}/objects/`, S3_REGION);
-    // Verify present at declared size, not just present -- a key that exists
-    // but is 0 bytes or truncated (a corrupt leftover from a failed copy,
-    // #967) counts as missing, same as a key that's absent entirely (#982).
-    const missing = copyResult.keys.filter((k) => !isKeyPresentAtDeclaredSize(k, existing));
+    const missing = findMissingCopiedKeys(copyResult.keys, existing);
     if (missing.length > 0) {
       const msg = `${missing.length} of ${copyResult.keys.length} objects missing at s3://${DEST_BUCKET}/${xxId}/objects/. Re-run the copy phase before finalizing.`;
       verifySpinner.fail(msg);
