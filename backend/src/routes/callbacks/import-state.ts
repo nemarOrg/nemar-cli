@@ -7,6 +7,7 @@
  */
 
 import { isValidDatasetId } from "../../services/datasetId.js";
+import { fileImportFailureIssueIfNeeded } from "../../services/import-failure-issue.js";
 import {
   IMPORT_STATUSES,
   type ImportStatus,
@@ -184,6 +185,24 @@ export function registerImportStateRoutes(webhooks: WebhookRouter): void {
         c.executionCtx.waitUntil(
           runImportRecovery(c.env.DB, c.env, body.dataset_id).catch((err) =>
             console.error(`[import-state] recovery failed for ${body.dataset_id}:`, err),
+          ),
+        );
+        // Auto-file a triage issue on nemarDatasets/.github (epic #967
+        // follow-up). fileImportFailureIssueIfNeeded re-checks its own gate
+        // (genuine failure / prod / non-sandbox / non-exemplar) against
+        // cur.status, so this call is safe even though the outer `if` above
+        // already narrows to the same condition. Best-effort: never fails
+        // the webhook, which onboard-openneuro.yml needs to succeed.
+        c.executionCtx.waitUntil(
+          fileImportFailureIssueIfNeeded(c.env.DB, c.env, {
+            datasetId: body.dataset_id,
+            sourceId: body.source_id,
+            stage,
+            errorMessage: errorMsg,
+            workflowRunUrl: runUrl,
+            resultingStatus: cur.status,
+          }).catch((err) =>
+            console.error(`[import-state] issue-filing failed for ${body.dataset_id}:`, err),
           ),
         );
       }
