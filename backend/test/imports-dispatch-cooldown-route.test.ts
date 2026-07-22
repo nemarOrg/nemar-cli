@@ -1,13 +1,17 @@
 /**
  * Real POST /admin/imports/dispatch-cooldown route tests (#981).
  *
- * `recover --execute` reclassifies a row to `incomplete` (next_retry_at =
- * now) and then dispatches onboard-openneuro.yml itself; without this route
- * the Phase-2 retry cron (sweepImportRetries, services/import-retry.ts)
- * would see the same `incomplete` + due `next_retry_at` row on its next tick
- * and re-dispatch it a second time. This route pushes next_retry_at forward
- * so the cron backs off. No S3/GitHub calls on this path, so the full route
- * (validation, the UPDATE, the audit log) is exercised against a real D1.
+ * `recover --execute` verifies each target (reclassifying a `complete` row to
+ * `incomplete` with next_retry_at = now, or leaving an already
+ * failed/quarantined row as-is) and then dispatches onboard-openneuro.yml
+ * itself; without this route the Phase-2 retry cron (sweepImportRetries,
+ * services/import-retry.ts) would see the same cron-eligible row and due
+ * next_retry_at on its next tick and re-dispatch it a second time. This
+ * route pushes next_retry_at forward for every status the cron would still
+ * consider (incomplete/failed/quarantined) so it backs off regardless of
+ * which of those a target landed on. No S3/GitHub calls on this path, so
+ * the full route (validation, the UPDATE, the audit log) is exercised
+ * against a real D1.
  */
 
 import type { Database } from "bun:sqlite";
@@ -99,28 +103,32 @@ beforeEach(async () => {
 });
 
 describe("POST /admin/imports/dispatch-cooldown (#981)", () => {
-  test("pushes next_retry_at into the future for an incomplete row, leaves complete/quarantined rows untouched", async () => {
+  test("cools down every cron-eligible status (incomplete/failed/quarantined), leaves complete rows untouched", async () => {
+    // Pins the WHERE against IMPORT_RETRY_CANDIDATES_QUERY's cron-eligible
+    // status set (import-retry.ts): a `recover --execute` target can land
+    // on any of incomplete/failed/quarantined depending on what it started
+    // as (see /imports/:id/verify), and each of those is still a candidate
+    // the retry cron could re-dispatch, so the cooldown must cover all
+    // three. Only `complete` -- nothing left for the cron to re-dispatch --
+    // is excluded.
     seedImportJob("on000001", "incomplete");
-    seedImportJob("on000002", "complete");
-    // Pins the WHERE status = 'incomplete' scoping against a generic caller:
-    // IMPORT_RETRY_CANDIDATES_QUERY (import-retry.ts) DOES treat a qualifying
-    // quarantined row as cron-eligible, but this endpoint has no caller that
-    // passes one today and must not cool it down regardless.
+    seedImportJob("on000002", "failed");
     seedImportJob("on000003", "quarantined");
-    const completeBefore = getNextRetryAt("on000002");
-    const quarantinedBefore = getNextRetryAt("on000003");
+    seedImportJob("on000004", "complete");
+    const completeBefore = getNextRetryAt("on000004");
 
-    const res = await postCooldown(["on000001", "on000002", "on000003"]);
+    const res = await postCooldown(["on000001", "on000002", "on000003", "on000004"]);
     expect(res.status).toBe(200);
     const body = await res.json();
-    expect(body.updated).toBe(1);
+    expect(body.updated).toBe(3);
 
-    const incompleteAfter = parseSqliteUtc(getNextRetryAt("on000001"));
-    expect(incompleteAfter).not.toBeNull();
-    expect(incompleteAfter as number).toBeGreaterThan(Date.now());
+    for (const id of ["on000001", "on000002", "on000003"]) {
+      const after = parseSqliteUtc(getNextRetryAt(id));
+      expect(after).not.toBeNull();
+      expect(after as number).toBeGreaterThan(Date.now());
+    }
 
-    expect(getNextRetryAt("on000002")).toBe(completeBefore);
-    expect(getNextRetryAt("on000003")).toBe(quarantinedBefore);
+    expect(getNextRetryAt("on000004")).toBe(completeBefore);
   });
 
   test("ids with no import_jobs row don't count toward updated", async () => {

@@ -3767,6 +3767,13 @@ Description:
       let cooldown: { updated: number } | { error: string };
       try {
         cooldown = await dispatchCooldown(verifiedTargets);
+        if (!options.json && cooldown.updated < verifiedTargets.length) {
+          console.log(
+            chalk.dim(
+              `  (${verifiedTargets.length - cooldown.updated} of ${verifiedTargets.length} target(s) needed no cooldown: already complete, nothing for the cron to re-dispatch)`,
+            ),
+          );
+        }
       } catch (err) {
         cooldown = { error: errorDetail(err) };
         console.warn(

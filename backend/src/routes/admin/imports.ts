@@ -477,16 +477,23 @@ export function registerImportRoutes(admin: AdminRouter): void {
    * recover's own dispatch is well underway before the cron would otherwise
    * reconsider these rows.
    *
-   * Only rows still `status = 'incomplete'` are touched. That scoping matches
-   * the caller: `recover --execute`'s verify step leaves each target row
-   * either `complete` (nothing to cool down) or `incomplete` (see
-   * /imports/:id/verify above), so this is not a claim that other statuses
-   * (`failed`, qualifying `quarantined`) are cron-ineligible -- they ARE
-   * still picked up by IMPORT_RETRY_CANDIDATES_QUERY -- just that this
-   * endpoint has no caller that produces them and deliberately does not
-   * cool them down. Also deliberately does NOT touch `recovery_attempts`: a
-   * manual recover is an operator action, not a retry-engine dispatch, and
-   * must not burn the automatic retry budget.
+   * The WHERE mirrors IMPORT_RETRY_CANDIDATES_QUERY's cron-eligible status
+   * set (`incomplete`, `failed`, `quarantined`) rather than pinning to
+   * `incomplete` alone: `recover --execute`'s verify step does NOT reduce
+   * every target to a two-outcome complete/incomplete model -- that
+   * collapse only happens for a target that started `complete` (see
+   * /imports/:id/verify above). A target that was already `failed` or
+   * `quarantined` (e.g. a now-recoverable upstream-inaccessible row) stays
+   * in that status through verify and is still dispatched here, so it must
+   * be protected too or the cron can re-dispatch it a second time (the same
+   * #981 bug, just for the failed/quarantined branch). `complete` is
+   * deliberately excluded: verify already moved a genuinely-incomplete row
+   * off `complete`, so a target still `complete` has nothing for the cron
+   * to re-dispatch. `blocklisted` rows aren't added to the WHERE either --
+   * a blocklisted row isn't a cron candidate regardless of status, so its
+   * cooldown state is moot. Also deliberately does NOT touch
+   * `recovery_attempts`: a manual recover is an operator action, not a
+   * retry-engine dispatch, and must not burn the automatic retry budget.
    */
   admin.post(
     "/imports/dispatch-cooldown",
@@ -500,7 +507,8 @@ export function registerImportRoutes(admin: AdminRouter): void {
         .prepare(
           `UPDATE import_jobs
               SET next_retry_at = datetime('now', '+6 hours'), updated_at = datetime('now')
-            WHERE dataset_id IN (${placeholders}) AND status = 'incomplete'`,
+            WHERE dataset_id IN (${placeholders})
+              AND status IN ('incomplete', 'failed', 'quarantined')`,
         )
         .bind(...dataset_ids)
         .run();
