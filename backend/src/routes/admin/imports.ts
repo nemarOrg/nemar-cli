@@ -477,11 +477,16 @@ export function registerImportRoutes(admin: AdminRouter): void {
    * recover's own dispatch is well underway before the cron would otherwise
    * reconsider these rows.
    *
-   * Only rows still `status = 'incomplete'` are touched (anything else isn't
-   * cron-eligible per IMPORT_RETRY_CANDIDATES_QUERY anyway). Deliberately
-   * does NOT touch `recovery_attempts`: a manual recover is an operator
-   * action, not a retry-engine dispatch, and must not burn the automatic
-   * retry budget.
+   * Only rows still `status = 'incomplete'` are touched. That scoping matches
+   * the caller: `recover --execute`'s verify step leaves each target row
+   * either `complete` (nothing to cool down) or `incomplete` (see
+   * /imports/:id/verify above), so this is not a claim that other statuses
+   * (`failed`, qualifying `quarantined`) are cron-ineligible -- they ARE
+   * still picked up by IMPORT_RETRY_CANDIDATES_QUERY -- just that this
+   * endpoint has no caller that produces them and deliberately does not
+   * cool them down. Also deliberately does NOT touch `recovery_attempts`: a
+   * manual recover is an operator action, not a retry-engine dispatch, and
+   * must not burn the automatic retry budget.
    */
   admin.post(
     "/imports/dispatch-cooldown",
@@ -504,6 +509,8 @@ export function registerImportRoutes(admin: AdminRouter): void {
       await auditLogStatement(db, {
         userId: c.get("user").id,
         action: "import_dispatch_cooldown",
+        resourceType: "dataset",
+        resourceId: dataset_ids.join(","),
         details: JSON.stringify({ dataset_ids, updated }),
       }).run();
 
