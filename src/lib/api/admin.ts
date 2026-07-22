@@ -651,6 +651,23 @@ export async function verifyImport(datasetId: string): Promise<ImportVerifyRespo
   return request(`/admin/imports/${datasetId}/verify`, { method: "POST" }, true);
 }
 
+/**
+ * Push `next_retry_at` forward for datasets `recover --execute` just
+ * dispatched out-of-band, so the Phase-2 retry cron doesn't re-dispatch the
+ * same onboard-openneuro.yml run on its next tick (#981).
+ */
+export async function dispatchCooldown(datasetIds: string[]): Promise<{ updated: number }> {
+  return request(
+    "/admin/imports/dispatch-cooldown",
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ dataset_ids: datasetIds }),
+    },
+    true,
+  );
+}
+
 // ============================================================================
 // Reindex (epic #417 phase 3)
 // ============================================================================

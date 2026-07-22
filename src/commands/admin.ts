@@ -48,6 +48,7 @@ import {
   dataIntegritySweep,
   dataIntegritySweepReset,
   deleteDataset,
+  dispatchCooldown,
   dispatchManifest,
   enforceBulk,
   enforceDataset,
@@ -3752,6 +3753,24 @@ Description:
         process.exit(1);
       }
 
+      // Best-effort: push next_retry_at forward for the just-dispatched
+      // targets so the Phase-2 retry cron (sweepImportRetries) doesn't
+      // independently re-dispatch the same onboard-openneuro.yml run on its
+      // next tick (#981). A failure here is non-corrupting -- worst case the
+      // cron redundantly re-dispatches once -- so it must not fail the
+      // recovery itself, only warn.
+      let cooldown: { updated: number } | { error: string };
+      try {
+        cooldown = await dispatchCooldown(verifiedTargets);
+      } catch (err) {
+        cooldown = { error: errorDetail(err) };
+        console.warn(
+          chalk.yellow(
+            `\nWarning: failed to set dispatch cooldown (${errorDetail(err)}); the retry cron may briefly re-dispatch these datasets (non-corrupting).`,
+          ),
+        );
+      }
+
       if (!options.json) {
         console.log(chalk.green("Workflow dispatched successfully"));
         console.log(
@@ -3775,7 +3794,7 @@ Description:
       if (options.json) {
         console.log(
           JSON.stringify(
-            { dispatched: verifiedTargets, skipped: failedTargets, dispatch },
+            { dispatched: verifiedTargets, skipped: failedTargets, dispatch, cooldown },
             null,
             2,
           ),

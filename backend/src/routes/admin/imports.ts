@@ -457,4 +457,57 @@ export function registerImportRoutes(admin: AdminRouter): void {
       presentCount: verified.presentCount,
     });
   });
+
+  const dispatchCooldownSchema = z.object({
+    dataset_ids: z.array(z.string().min(1)).min(1).max(200),
+  });
+
+  /**
+   * POST /admin/imports/dispatch-cooldown - push `next_retry_at` forward for
+   * datasets `recover --execute` just dispatched out-of-band (#981).
+   *
+   * The Phase-2 retry cron (services/import-retry.ts sweepImportRetries)
+   * independently scans `incomplete` rows with `next_retry_at <= now` and
+   * re-dispatches onboard-openneuro.yml for them. `recover --execute`
+   * reclassifies a row to `incomplete` with `next_retry_at = now` (see
+   * /imports/:id/verify above) and then dispatches the same workflow itself,
+   * so without this call the next cron tick can re-dispatch the very same
+   * dataset a second time. +6 hours mirrors the retry engine's base backoff
+   * (RETRY_BACKOFF_BASE_MS, services/import-retry.ts) -- long enough that
+   * recover's own dispatch is well underway before the cron would otherwise
+   * reconsider these rows.
+   *
+   * Only rows still `status = 'incomplete'` are touched (anything else isn't
+   * cron-eligible per IMPORT_RETRY_CANDIDATES_QUERY anyway). Deliberately
+   * does NOT touch `recovery_attempts`: a manual recover is an operator
+   * action, not a retry-engine dispatch, and must not burn the automatic
+   * retry budget.
+   */
+  admin.post(
+    "/imports/dispatch-cooldown",
+    zValidator("json", dispatchCooldownSchema),
+    async (c) => {
+      const { dataset_ids } = c.req.valid("json");
+      const db = c.env.DB;
+
+      const placeholders = dataset_ids.map(() => "?").join(", ");
+      const result = await db
+        .prepare(
+          `UPDATE import_jobs
+              SET next_retry_at = datetime('now', '+6 hours'), updated_at = datetime('now')
+            WHERE dataset_id IN (${placeholders}) AND status = 'incomplete'`,
+        )
+        .bind(...dataset_ids)
+        .run();
+      const updated = result.meta.changes ?? 0;
+
+      await auditLogStatement(db, {
+        userId: c.get("user").id,
+        action: "import_dispatch_cooldown",
+        details: JSON.stringify({ dataset_ids, updated }),
+      }).run();
+
+      return c.json({ updated });
+    },
+  );
 }
