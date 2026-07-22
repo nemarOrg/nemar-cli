@@ -3549,7 +3549,10 @@ Description:
   quarantined/blocklisted by the Phase 2 retry engine is not un-stuck by
   this reclassify (which only flips complete -> incomplete); trust
   datasets.data_complete, not import_jobs.status. Acceptance audit: run
-  'nemar admin data-integrity-sweep --older-than 0' after the batch lands.`,
+  'nemar admin data-integrity-sweep --reaudit' after the batch lands
+  (--older-than 0 does NOT converge here -- its cutoff is relative to an
+  ever-advancing now(), so a just-stamped row re-qualifies on the very next
+  batch; --reaudit anchors the cutoff once so remaining reaches 0, #980).`,
   )
   .action(
     async (
@@ -3714,7 +3717,7 @@ Description:
         console.log(chalk.dim("  Or run: gh run list --repo nemarDatasets/.github --limit 5"));
         console.log(
           chalk.dim(
-            "  Watch progress with: nemar admin recover status  /  nemar admin data-integrity-sweep --older-than 0",
+            "  Watch progress with: nemar admin recover status  /  nemar admin data-integrity-sweep --reaudit",
           ),
         );
 
@@ -4667,6 +4670,10 @@ dataIntegritySweepCommand
     "--older-than <days>",
     "Also re-audit rows checked more than N days ago (periodic re-audit, not just the one-shot drain)",
   )
+  .option(
+    "--reaudit",
+    "Re-verify every already-checked row using an anchored cutoff so the sweep fully converges to 0 (unlike --older-than's moving now()-relative window, which never reaches 0 on its own)",
+  )
   .option("--reset", "Clear every audited row so a corrected verifier can re-sweep")
   .option("--verbose", "Print per-batch progress")
   .option("--json", "Output raw JSON instead of the human summary")
@@ -4674,6 +4681,7 @@ dataIntegritySweepCommand
     async (options: {
       limit?: string;
       olderThan?: string;
+      reaudit?: boolean;
       reset?: boolean;
       verbose?: boolean;
       json?: boolean;
@@ -4698,6 +4706,13 @@ dataIntegritySweepCommand
 
       const limit = Number.parseInt(options.limit ?? "15", 10) || 15;
       const olderThan = options.olderThan ? Number.parseInt(options.olderThan, 10) : undefined;
+      // Captured ONCE, before the loop starts: every call in this run passes
+      // the SAME anchor, so a row re-checked mid-run is stamped with a
+      // data_checked_at strictly AFTER `before` and never re-qualifies --
+      // `remaining` strictly decreases to 0. Re-deriving `new Date()` on each
+      // iteration would defeat this (a moving cutoff never converges, same
+      // failure mode as --older-than).
+      const before = options.reaudit ? new Date().toISOString() : undefined;
       const totals = { processed: 0, complete: 0, incomplete: 0, unknown: 0, errors: 0 };
       const spinner = ora("Sweeping datasets for data integrity...").start();
 
@@ -4707,7 +4722,7 @@ dataIntegritySweepCommand
       try {
         let res: DataIntegritySweepBatchResponse;
         do {
-          res = await dataIntegritySweep({ limit, olderThan });
+          res = await dataIntegritySweep({ limit, olderThan, before });
           batch++;
           totals.processed += res.processed;
           totals.complete += res.complete;
