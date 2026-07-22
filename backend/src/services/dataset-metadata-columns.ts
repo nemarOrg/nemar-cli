@@ -17,6 +17,7 @@
 import { licenseTier } from "../lib/license.js";
 import { countSubjectDirs, extractTasks, parseParticipantsTsv } from "./bids-tree.js";
 import { detectModalitiesFromTree } from "./datacite.js";
+import type { DatasetVersionIntegrityResult } from "./import-integrity.js";
 
 export interface DatasetMetadataColumns {
   subject_count: number | null;
@@ -385,6 +386,65 @@ export async function writeVersionSize(
     );
   }
   return { changes };
+}
+
+/**
+ * Stamp a dataset's completeness columns from an already-computed
+ * {@link DatasetVersionIntegrityResult} (or null when no verification could be
+ * attempted). Shared source of truth for every caller that resolves a
+ * completeness result -- the data-integrity-sweep, the forced-verify route,
+ * and the retry engine's recover/reclassify paths (epic #967 Phase 3
+ * follow-up, issue #980) -- so they all stamp identically instead of each
+ * hand-rolling the write order.
+ *
+ * `integrity.version` set: writes the per-version `dataset_versions` row
+ * FIRST via {@link writeVersionSize}, then the `datasets` row LAST. Order is
+ * deliberate for recoverability -- a failure between the two leaves the
+ * dataset unstamped, so a plain re-run redoes both rather than leaving a
+ * split state where `dataset_versions` is fresh but `datasets` stays stale.
+ *
+ * `integrity` null, or has no resolvable `version` (verify threw, or no
+ * manifest could be resolved): completeness can't be classified this pass, so
+ * only `data_checked_at` advances -- an existing `data_complete` value is left
+ * untouched (never nulled), since a transient verify miss must not clobber a
+ * classification a prior pass (or the reindex/enrichment path) already wrote.
+ */
+export async function stampDatasetIntegrity(
+  db: D1Database,
+  datasetId: string,
+  integrity: DatasetVersionIntegrityResult | null,
+): Promise<"complete" | "incomplete" | "unknown"> {
+  if (integrity?.version) {
+    const dataCompleteInt = integrity.complete ? 1 : 0;
+    await writeVersionSize(db, datasetId, integrity.version, {
+      file_size: integrity.declaredBytes,
+      total_files: integrity.declaredFiles,
+      bytes_present: integrity.bytesPresent,
+      data_complete: dataCompleteInt,
+    });
+    await db
+      .prepare(
+        `UPDATE datasets
+         SET file_size = ?, total_files = ?, data_complete = ?, bytes_present = ?,
+             data_checked_at = datetime('now')
+         WHERE dataset_id = ?`,
+      )
+      .bind(
+        integrity.declaredBytes,
+        integrity.declaredFiles,
+        dataCompleteInt,
+        integrity.bytesPresent,
+        datasetId,
+      )
+      .run();
+    return integrity.complete ? "complete" : "incomplete";
+  }
+
+  await db
+    .prepare("UPDATE datasets SET data_checked_at = datetime('now') WHERE dataset_id = ?")
+    .bind(datasetId)
+    .run();
+  return "unknown";
 }
 
 /** Max readme length stored on `datasets.readme` (matches the 0028 fold's substr). */
