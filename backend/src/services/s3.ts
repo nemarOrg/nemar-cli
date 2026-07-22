@@ -397,9 +397,9 @@ export function mergeObjectSizesPage(
  * (S3 key with the prefix stripped, mirroring the CLI's listExistingObjects
  * in src/lib/s3-server-copy.ts). Unlike listObjectsWithDelimiter (one page,
  * directory-style), this drains every page via listObjectPages -- the
- * retry-engine's per-key integrity check (verifyImportS3, import-integrity.ts,
- * #969) needs the COMPLETE destination listing to detect missing/zero-byte
- * objects, not just the first 1000.
+ * retry-engine's per-key integrity check (verifyDatasetVersionS3,
+ * import-integrity.ts, #969) needs the COMPLETE destination listing to
+ * detect missing/zero-byte objects, not just the first 1000.
  */
 export async function listObjectSizes(
   options: PresignedUrlOptions,

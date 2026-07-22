@@ -481,8 +481,8 @@ describe("prod-only guard", () => {
 });
 
 // NOTE: sweepImportRetries/reclassifyCompleteRows' on-prod bodies call
-// verifyImportS3, which does real S3 network I/O (listObjectSizes) even on
-// the "no manifest" fallback path -- there is no way to exercise them
+// verifyDatasetVersionS3, which does real S3 network I/O (listObjectSizes)
+// even on the "no manifest" fallback path -- there is no way to exercise them
 // end-to-end without live AWS credentials. Consistent with
 // archiveRetrySweep/reconcileReservedVersionDois (also untested at that
 // level), coverage here stops at the prod-only guard above plus the pure

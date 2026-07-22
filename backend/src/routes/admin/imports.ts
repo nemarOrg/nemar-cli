@@ -13,10 +13,11 @@ import { adminMiddleware, authMiddleware } from "../../middleware/auth";
 
 import { auditLogStatement } from "../../db/audit-log";
 import { SYSTEM_USER_ID } from "../../lib/constants";
+import { stampDatasetIntegrity } from "../../services/dataset-metadata-columns";
 import { deleteDatasetCascade } from "../../services/deletion";
 import { type GitHubRepo, createRepository, deleteRepository } from "../../services/github";
 import { getDatasetsToken } from "../../services/github-auth";
-import { verifyImportS3 } from "../../services/import-integrity";
+import { verifyDatasetVersionS3 } from "../../services/import-integrity";
 import { IMPORT_STATUSES } from "../../services/import-recovery";
 import { recoverRow } from "../../services/import-retry";
 import { hasRole } from "../../types/bindings";
@@ -374,15 +375,26 @@ export function registerImportRoutes(admin: AdminRouter): void {
   });
 
   /**
-   * POST /admin/imports/:id/verify - force verifyImportS3 now (#969). Lets an
-   * operator seed a specific dataset into the retry lane without waiting for
-   * the reclassification sweep to reach it, or confirm a row is genuinely
-   * healthy. On verified-complete, recovers UNCONDITIONALLY (via recoverRow)
-   * regardless of prior status: the retry engine blocklists a row WITHOUT
-   * changing its status (a blocklisted row can be `quarantined` or `failed`,
-   * not just `incomplete`), so gating recovery on status='incomplete' would
-   * silently no-op for exactly the rows this endpoint exists to un-park.
-   * Always stamps `integrity_checked_at`.
+   * POST /admin/imports/:id/verify - force verifyDatasetVersionS3 now (#969).
+   * Lets an operator seed a specific dataset into the retry lane without
+   * waiting for the reclassification sweep to reach it, or confirm a row is
+   * genuinely healthy. On verified-complete, recovers UNCONDITIONALLY (via
+   * recoverRow) regardless of prior status: the retry engine blocklists a row
+   * WITHOUT changing its status (a blocklisted row can be `quarantined` or
+   * `failed`, not just `incomplete`), so gating recovery on
+   * status='incomplete' would silently no-op for exactly the rows this
+   * endpoint exists to un-park. Always stamps `integrity_checked_at`.
+   *
+   * Also stamps the `datasets`/`dataset_versions` completeness columns via
+   * {@link stampDatasetIntegrity} (#980) for BOTH outcomes -- this is a full
+   * per-key verification either way, so a forced check that lands on
+   * incomplete is exactly as informative to the catalog as one that lands on
+   * complete, and skipping the incomplete branch would leave the column NULL
+   * (or stale) until the general sweep happens to reach the same dataset.
+   * The stamp is best-effort catalog bookkeeping, NOT the operator-facing
+   * result: a stamp failure must not 500 the response or skip the
+   * `import_verify_forced` audit-log write below, so it's caught and logged
+   * rather than left to propagate.
    */
   admin.post("/imports/:id/verify", async (c) => {
     const datasetId = c.req.param("id");
@@ -391,7 +403,7 @@ export function registerImportRoutes(admin: AdminRouter): void {
       .first<{ status: string }>();
     if (!job) return c.json({ error: "No import job for this dataset" }, 404);
 
-    const verified = await verifyImportS3(c.env, datasetId);
+    const verified = await verifyDatasetVersionS3(c.env, datasetId);
 
     if (verified.complete) {
       await recoverRow(c.env.DB, datasetId);
@@ -415,6 +427,15 @@ export function registerImportRoutes(admin: AdminRouter): void {
         .run();
     }
 
+    try {
+      await stampDatasetIntegrity(c.env.DB, datasetId, verified);
+    } catch (err) {
+      console.error(
+        `[imports] verify stamp failed for ${datasetId}:`,
+        err instanceof Error ? err.message : String(err),
+      );
+    }
+
     await auditLogStatement(c.env.DB, {
       userId: c.get("user").id,
       action: "import_verify_forced",
@@ -422,12 +443,11 @@ export function registerImportRoutes(admin: AdminRouter): void {
       details: JSON.stringify(verified),
     }).run();
 
-    // Explicit pick, not a spread: verifyImportS3 delegates to
-    // verifyDatasetVersionS3 (#970), whose runtime result carries extra
-    // bytesPresent/declaredBytes/declaredFiles/version fields beyond the
-    // declared ImportIntegrityResult return type. A spread would silently
-    // leak those onto the wire even though the CLI's ImportVerifyResponse
-    // (src/lib/api/admin.ts) doesn't declare them.
+    // Explicit pick, not a spread: verifyDatasetVersionS3's runtime result
+    // carries extra bytesPresent/declaredBytes/declaredFiles/version fields
+    // beyond the declared ImportIntegrityResult return type. A spread would
+    // silently leak those onto the wire even though the CLI's
+    // ImportVerifyResponse (src/lib/api/admin.ts) doesn't declare them.
     return c.json({
       dataset_id: datasetId,
       complete: verified.complete,

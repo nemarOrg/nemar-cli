@@ -15,7 +15,7 @@ import { z } from "zod";
 import { auditLogStatement } from "../../db/audit-log";
 import { SYSTEM_USER_ID } from "../../lib/constants";
 import { shouldSkipArchive } from "../../services/archive-policy";
-import { writeVersionHed, writeVersionSize } from "../../services/dataset-metadata-columns";
+import { stampDatasetIntegrity, writeVersionHed } from "../../services/dataset-metadata-columns";
 import {
   DatasetReindexError,
   type ReindexFilter,
@@ -625,16 +625,35 @@ export function registerDatasetLifecycleRoutes(admin: AdminRouter): void {
   });
 
   /**
-   * POST /admin/datasets/data-integrity-sweep?limit=N[&older-than=N] — audits
-   * published datasets against their version manifest (epic #967 Phase 3, #970):
-   * per-key S3 presence at declared size (verifyDatasetVersionS3), writing the
-   * honest bytes_present/data_complete tri-state (migration 0059).
+   * POST /admin/datasets/data-integrity-sweep?limit=N[&older-than=N|&before=<ISO8601>]
+   * — audits published datasets against their version manifest (epic #967
+   * Phase 3, #970): per-key S3 presence at declared size
+   * (verifyDatasetVersionS3), writing the honest bytes_present/data_complete
+   * tri-state (migration 0059).
    *
    * Unlike hed-sweep this is a GENERAL, RE-RUNNABLE audit, not a one-shot
    * backfill: `?older-than=<days>` widens candidacy to already-checked rows
    * older than N days, so bit-rot (an object later deleted/corrupted after a
-   * clean check) gets caught on an ongoing basis, not just once. Without the
-   * flag it behaves like hed-sweep -- drain `data_checked_at IS NULL` and stop.
+   * clean check) gets caught on an ongoing basis, not just once -- this is the
+   * cron's moving re-audit window and must keep behaving that way. Without
+   * either flag it behaves like hed-sweep -- drain `data_checked_at IS NULL`
+   * and stop.
+   *
+   * `?before=<ISO8601>` (#980) is a DIFFERENT shape of widening: an ANCHORED
+   * cutoff rather than a `now()`-relative one. A caller-driven convergence
+   * loop (the CLI's `--reaudit`) captures ONE timestamp before its first call
+   * and passes it on every call, so `remaining` strictly decreases to 0 as
+   * each pass stamps `data_checked_at` to the current (later) time -- a row
+   * just re-checked never re-qualifies against the fixed anchor. `older-than`
+   * cannot converge this way: its window is relative to the ever-advancing
+   * `now()`, so a row stamped mid-sweep can still be "more than N days old"
+   * relative to a later tick's `now()` if the sweep runs long enough, and
+   * `remaining` never reaches 0. `before` wins when both are supplied (it is
+   * strictly more specific); bound through SQL's own `datetime()` so the
+   * comparison normalizes the caller's ISO string to the same space-separated
+   * `datetime('now')` format `data_checked_at` is always stamped with --
+   * naive string comparison against a raw `T...Z` ISO literal would sort
+   * incorrectly against that format for same-day timestamps.
    *
    * Only reads S3 and writes its own D1 columns -- no GitHub dispatch, no
    * email, no DOI mutation -- so unlike the Phase 2 retry engine (prod-only,
@@ -675,18 +694,32 @@ export function registerDatasetLifecycleRoutes(admin: AdminRouter): void {
         return c.json({ error: `Invalid older-than: ${olderThanRaw}` }, 400);
       }
     }
-    // Default: one-shot drain (never-checked rows only). With ?older-than=N:
-    // widen to already-checked rows past the staleness window too -- this is
-    // the periodic re-audit that Phase 2's one-shot reclassify sweep never had:
-    // that sweep only ever checks an import_jobs row once and never revisits it
-    // after integrity_checked_at is stamped, so a later bit-rot (an object
-    // deleted or corrupted after a clean check) would otherwise go undetected
-    // forever.
-    const candidacyClause =
-      olderThanDays != null
-        ? "(d.data_checked_at IS NULL OR d.data_checked_at < datetime('now', ?))"
-        : "d.data_checked_at IS NULL";
-    const candidacyParams = olderThanDays != null ? [`-${olderThanDays} days`] : [];
+
+    const beforeRaw = c.req.query("before");
+    let beforeIso: string | undefined;
+    if (beforeRaw !== undefined) {
+      const beforeDate = new Date(beforeRaw);
+      if (Number.isNaN(beforeDate.getTime())) {
+        return c.json({ error: `Invalid before: ${beforeRaw}` }, 400);
+      }
+      beforeIso = beforeDate.toISOString();
+    }
+
+    // Default: one-shot drain (never-checked rows only). `before` (anchored,
+    // convergent) wins over `older-than` (moving window, non-convergent) when
+    // both are supplied -- see the doc comment above.
+    let candidacyClause: string;
+    let candidacyParams: (string | number)[];
+    if (beforeIso != null) {
+      candidacyClause = "(d.data_checked_at IS NULL OR d.data_checked_at < datetime(?))";
+      candidacyParams = [beforeIso];
+    } else if (olderThanDays != null) {
+      candidacyClause = "(d.data_checked_at IS NULL OR d.data_checked_at < datetime('now', ?))";
+      candidacyParams = [`-${olderThanDays} days`];
+    } else {
+      candidacyClause = "d.data_checked_at IS NULL";
+      candidacyParams = [];
+    }
 
     // Candidates: every managed dataset (github_repo IS NOT NULL; catalog ds*
     // rows have none), not sandbox, not yet checked (or stale past --older-than).
@@ -726,55 +759,15 @@ export function registerDatasetLifecycleRoutes(admin: AdminRouter): void {
         errors.push({ dataset_id, error: err instanceof Error ? err.message : String(err) });
       }
 
-      // Persist. Order is deliberate for recoverability (mirrors hed-sweep):
-      // write the per-version row FIRST, then stamp datasets LAST. A failure in
-      // either write leaves the dataset UNstamped, so a plain re-run re-verifies
-      // and retries both (idempotent) -- never a split state where datasets is
-      // stamped but the dataset_versions row stays stale.
+      // Persist via the shared helper (#980) -- it mirrors the write order
+      // that used to be inlined here: per-version row FIRST, then datasets
+      // LAST, so a failure between the two leaves the dataset UNstamped and a
+      // plain re-run redoes both (idempotent) rather than a split state.
       try {
-        if (integrity?.version) {
-          const dataCompleteInt = integrity.complete ? 1 : 0;
-          await writeVersionSize(db, dataset_id, integrity.version, {
-            file_size: integrity.declaredBytes,
-            total_files: integrity.declaredFiles,
-            bytes_present: integrity.bytesPresent,
-            data_complete: dataCompleteInt,
-          });
-          // Also backfill datasets.file_size/total_files here (direct SET, not
-          // COALESCE -- integrity.declaredBytes/declaredFiles is a fresh, honest
-          // measurement just taken above): without this the catalog (which reads
-          // datasets.file_size, not dataset_versions) stays on the stale/annex-
-          // blind value until the next reindex, and datasets would silently
-          // diverge from the dataset_versions row this same pass just wrote.
-          await db
-            .prepare(
-              `UPDATE datasets
-             SET file_size = ?, total_files = ?, data_complete = ?, bytes_present = ?,
-                 data_checked_at = datetime('now')
-             WHERE dataset_id = ?`,
-            )
-            .bind(
-              integrity.declaredBytes,
-              integrity.declaredFiles,
-              dataCompleteInt,
-              integrity.bytesPresent,
-              dataset_id,
-            )
-            .run();
-          if (integrity.complete) complete++;
-          else incomplete++;
-        } else {
-          // Unverifiable (verify threw above, or no manifest could be resolved):
-          // stamp data_checked_at ONLY so `remaining` converges -- do NOT null an
-          // existing classification. The reindex path writes data_complete
-          // without stamping data_checked_at, so such a row is still a sweep
-          // candidate; a transient verify miss here must not clobber that value.
-          await db
-            .prepare("UPDATE datasets SET data_checked_at = datetime('now') WHERE dataset_id = ?")
-            .bind(dataset_id)
-            .run();
-          unknown++;
-        }
+        const outcome = await stampDatasetIntegrity(db, dataset_id, integrity);
+        if (outcome === "complete") complete++;
+        else if (outcome === "incomplete") incomplete++;
+        else unknown++;
       } catch (err) {
         errors.push({
           dataset_id,

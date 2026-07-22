@@ -14,6 +14,12 @@
  *    have -- it closes the carry-over gap where Phase 2's import_jobs
  *    reclassification (integrity_checked_at) only ever checks a row once and
  *    never revisits it.
+ *  - `?before=<ISO8601>` (#980) is a SECOND, different way to widen candidacy:
+ *    an ANCHORED cutoff rather than `older-than`'s `now()`-relative one, so a
+ *    caller-driven convergence loop (`--reaudit`) can actually drive
+ *    `remaining` to 0 -- see the dedicated describe block below, and the
+ *    regression guard nested in the `?older-than` block proving THAT flag
+ *    alone cannot converge.
  */
 
 import { Database } from "bun:sqlite";
@@ -67,6 +73,18 @@ const CANDIDATE_SQL_OLDER_THAN = `SELECT d.dataset_id
      AND (d.data_checked_at IS NULL OR d.data_checked_at < datetime('now', ?))
    ORDER BY d.dataset_id`;
 
+// The --before=<ISO8601> variant (#980): an ANCHORED cutoff bound through
+// SQL's own datetime() so it normalizes to the same space-separated format
+// data_checked_at is always stamped with (`datetime('now')`) -- a naive
+// string compare against a raw `T...Z` literal would sort incorrectly
+// against that format for same-day timestamps.
+const CANDIDATE_SQL_BEFORE = `SELECT d.dataset_id
+   FROM datasets d
+   WHERE d.github_repo IS NOT NULL
+     AND (d.is_sandbox = 0 OR d.is_sandbox IS NULL)
+     AND (d.data_checked_at IS NULL OR d.data_checked_at < datetime(?))
+   ORDER BY d.dataset_id`;
+
 function seed(db: Database) {
   const ins = db.query(
     "INSERT INTO datasets (dataset_id, github_repo, is_sandbox, updated_at) VALUES (?, ?, ?, ?)",
@@ -88,6 +106,11 @@ const candidates = (db: Database) =>
 
 const candidatesOlderThan = (db: Database, days: number) =>
   (db.query(CANDIDATE_SQL_OLDER_THAN).all(`-${days} days`) as { dataset_id: string }[]).map(
+    (r) => r.dataset_id,
+  );
+
+const candidatesBefore = (db: Database, beforeIso: string) =>
+  (db.query(CANDIDATE_SQL_BEFORE).all(beforeIso) as { dataset_id: string }[]).map(
     (r) => r.dataset_id,
   );
 
@@ -409,6 +432,74 @@ describe("data-integrity sweep", () => {
       expect(row.bytes_present).toBe(0);
       expect(row.file_size).toBe(12_000_000_000);
       expect(row.total_files).toBe(400);
+    });
+
+    // Regression guard (#980): `--older-than` alone can never drive a
+    // convergence LOOP to remaining=0, because its cutoff is relative to
+    // datetime('now') AT EACH QUERY -- it moves forward on every call. Any
+    // row, no matter how recently stamped, is "older than 0 days ago" the
+    // instant real time elapses past the exact stamping instant, so at
+    // --older-than=0 EVERY previously-checked row re-qualifies forever. This
+    // is exactly why #980 adds the anchored `before` flag instead of trying
+    // to make `--older-than 0` do the job.
+    test("--older-than 0 never converges: a just-stamped row still matches the ever-advancing now()", () => {
+      applyVerified(db, "nm000300", {
+        dataComplete: 1,
+        bytesPresent: 12_000_000_000,
+        declaredBytes: 12_000_000_000,
+        declaredFiles: 400,
+      });
+      applyUnverifiable(db, "on000301");
+      expect(candidatesOlderThan(db, 0)).toEqual([]); // just stamped, same instant
+
+      // Simulate a re-check a moment later -- SQL-computed "1 second ago", as
+      // fresh as a real re-stamp can get without landing in the exact same
+      // instant as the query below.
+      db.query(
+        "UPDATE datasets SET data_checked_at = datetime('now', '-1 second') WHERE dataset_id = ?",
+      ).run("nm000300");
+      // The moving window recomputes datetime('now') at THIS query, later
+      // than the write above -- the just-stamped row is a candidate again.
+      expect(candidatesOlderThan(db, 0)).toEqual(["nm000300"]);
+    });
+  });
+
+  describe("?before=<ISO8601> anchored re-audit convergence (#980)", () => {
+    test("a fixed anchor stops re-matching a row stamped after it was captured", () => {
+      // The anchor is captured once, "before the loop starts".
+      const before = new Date("2025-01-01T00:00:00.000Z").toISOString();
+      // Both seeded rows predate the anchor (2020-01-01) -> both candidates.
+      expect(candidatesBefore(db, before)).toEqual(["nm000300", "on000301"]);
+
+      // Simulate the sweep stamping both during its run -- any time AFTER the
+      // anchor was captured, however long the run takes.
+      applyVerified(db, "nm000300", {
+        dataComplete: 1,
+        bytesPresent: 12_000_000_000,
+        declaredBytes: 12_000_000_000,
+        declaredFiles: 400,
+      });
+      applyUnverifiable(db, "on000301");
+
+      // Re-querying with the SAME anchor: neither qualifies anymore --
+      // unlike --older-than, this converges to 0 by construction.
+      expect(candidatesBefore(db, before)).toEqual([]);
+    });
+
+    test("`before` wins for candidacy regardless of how much older-than a row already is", () => {
+      // A row checked 40 days ago (older-than=30 would still flag it) but
+      // AFTER the anchor must not re-qualify under `before`.
+      applyVerified(db, "nm000300", {
+        dataComplete: 1,
+        bytesPresent: 12_000_000_000,
+        declaredBytes: 12_000_000_000,
+        declaredFiles: 400,
+      });
+      db.query(
+        "UPDATE datasets SET data_checked_at = datetime('now', '-40 days') WHERE dataset_id = ?",
+      ).run("nm000300");
+      const before = new Date("2025-01-01T00:00:00.000Z").toISOString();
+      expect(candidatesBefore(db, before)).toEqual(["on000301"]); // nm000300 excluded
     });
   });
 });
