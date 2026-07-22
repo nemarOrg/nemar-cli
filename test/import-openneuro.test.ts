@@ -17,6 +17,7 @@ import { join } from "node:path";
 import {
   OPENNEURO_UPSTREAM_MARKER,
   coerceFunding,
+  decidePublicationRequestAction,
   decideSkipCiCheck,
   detectModalitiesFromDataset,
   ensureReadmeMd,
@@ -638,5 +639,19 @@ describe("isAlreadyExistsImportError (#969 idempotent prepare)", () => {
     expect(isAlreadyExistsImportError("network timeout")).toBe(false);
     expect(isAlreadyExistsImportError("HTTP 500 Internal Server Error")).toBe(false);
     expect(isAlreadyExistsImportError("")).toBe(false);
+  });
+});
+
+describe("decidePublicationRequestAction (#985 recover idempotency)", () => {
+  test("requests publication for a private (not yet published) dataset", () => {
+    expect(decidePublicationRequestAction("private")).toBe("request");
+  });
+
+  test("skips publication for an already-public dataset", () => {
+    // The #967 recover case: finalize re-runs against a dataset whose data
+    // was silently under-delivered the first time but which already
+    // completed publish/approve (visibility flipped to 'public'). Must not
+    // re-request/re-approve.
+    expect(decidePublicationRequestAction("public")).toBe("skip-already-published");
   });
 });
