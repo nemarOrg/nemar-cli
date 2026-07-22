@@ -474,6 +474,19 @@ export function extractDoi(identifier: string): string {
 }
 
 /**
+ * Ensure an identifier carries the "doi:" scheme prefix EZID requires on
+ * every `/id/{identifier}` call. Idempotent: a no-op when the prefix is
+ * already there (checked case-insensitively, since EZID's own scheme match
+ * is not case-sensitive), otherwise prepends it. `datasets.ezid_identifier`
+ * is stored WITH the prefix; `dataset_versions.doi` is stored WITHOUT it
+ * (see extractDoi) -- callers that build an EZID request from a version DOI
+ * must run it through here first (bug #984).
+ */
+export function ensureDoiScheme(identifier: string): string {
+  return /^doi:/i.test(identifier) ? identifier : `doi:${identifier}`;
+}
+
+/**
  * Check if a shoulder is a test shoulder.
  */
 export function isTestShoulder(shoulder: string): boolean {

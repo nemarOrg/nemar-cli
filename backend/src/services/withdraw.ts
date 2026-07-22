@@ -50,7 +50,7 @@ import { auditLogStatement } from "../db/audit-log.js";
 import type { Bindings } from "../types/bindings.js";
 import { resolveEzidAuth } from "./doi.js";
 import { resolveDatasetLandingBase } from "./environment.js";
-import { makePublic, makeUnavailable } from "./ezid.js";
+import { ensureDoiScheme, makePublic, makeUnavailable } from "./ezid.js";
 import { applyDatasetVisibility } from "./visibility.js";
 import type { VisibilityTransitionResult } from "./visibility.js";
 
@@ -423,7 +423,7 @@ export async function withdrawDataset(
 
   let conceptOk = false;
   try {
-    await makeUnavailable(auth, dataset.ezid_identifier, reason);
+    await makeUnavailable(auth, ensureDoiScheme(dataset.ezid_identifier), reason);
     conceptOk = true;
     dois.push({
       doi: dataset.ezid_identifier,
@@ -443,7 +443,10 @@ export async function withdrawDataset(
 
   for (const v of versions) {
     try {
-      await makeUnavailable(auth, v.doi, reason);
+      // dataset_versions.doi is stored WITHOUT the "doi:" scheme prefix
+      // (unlike datasets.ezid_identifier); EZID rejects an unprefixed
+      // identifier as "invalid identifier" (bug #984).
+      await makeUnavailable(auth, ensureDoiScheme(v.doi), reason);
       await markVersionEzidStatus(db, datasetId, v.version, "unavailable");
       dois.push({
         doi: v.doi,
@@ -563,7 +566,11 @@ export async function restoreDataset(
 
   let conceptOk = false;
   try {
-    await makePublic(auth, dataset.ezid_identifier, datasetLandingUrl(datasetId, landingBase));
+    await makePublic(
+      auth,
+      ensureDoiScheme(dataset.ezid_identifier),
+      datasetLandingUrl(datasetId, landingBase),
+    );
     conceptOk = true;
     dois.push({ doi: dataset.ezid_identifier, kind: "concept", action: "public", status: "ok" });
   } catch (err) {
@@ -578,7 +585,13 @@ export async function restoreDataset(
 
   for (const v of versions) {
     try {
-      await makePublic(auth, v.doi, datasetVersionLandingUrl(datasetId, v.version, landingBase));
+      // See the makeUnavailable loop above: dataset_versions.doi has no
+      // "doi:" prefix, EZID needs one (bug #984).
+      await makePublic(
+        auth,
+        ensureDoiScheme(v.doi),
+        datasetVersionLandingUrl(datasetId, v.version, landingBase),
+      );
       await markVersionEzidStatus(db, datasetId, v.version, "public");
       dois.push({
         doi: v.doi,

@@ -23,7 +23,7 @@ import { join } from "node:path";
 import chalk from "chalk";
 import ora from "ora";
 import { addCi, importDataset, reindexDataset } from "./api/admin.js";
-import { getUserCiStatus } from "./api/datasets.js";
+import { getDataset, getUserCiStatus } from "./api/datasets.js";
 import { approvePublication, requestPublication } from "./api/publish.js";
 import { cloneDataset, pushToGitHub } from "./git-annex/clone-push.js";
 import { configureGitHubRemote } from "./git-annex/github.js";
@@ -199,6 +199,27 @@ export function decideSkipCiCheck(args: {
  */
 export function isAlreadyExistsImportError(message: string): boolean {
   return message.includes("already exists") || message.includes("409");
+}
+
+/**
+ * Pure decision over whether finalize should (re-)request publication for a
+ * dataset it just re-copied (#985, epic #967 recover). `publish/request`
+ * 409s with "Dataset is already published" once `datasets.visibility` is
+ * 'public' (routes/datasets/publication.ts), which is exactly the state the
+ * #967 recover workflow re-runs finalize against: prepare -> copy -> finalize
+ * on a dataset that was ALREADY published, to repair data that got silently
+ * under-delivered the first time. That re-copy must not trip a fatal exit on
+ * a 409 that just means "nothing to do here" -- but it must also NOT
+ * re-approve or re-mint anything (approvePublication is what actually flips
+ * a DOI/S3-lock/etc, and none of that is safe to re-run against a dataset
+ * that's already live). Keyed on the dataset's live `visibility` (a status
+ * READ, not a string match on the request's own error) so a 409 for any
+ * other reason still surfaces as the fatal error it always has.
+ */
+export function decidePublicationRequestAction(
+  visibility: "public" | "private",
+): "request" | "skip-already-published" {
+  return visibility === "public" ? "skip-already-published" : "request";
 }
 
 /**
@@ -1271,24 +1292,68 @@ export async function finalizeImport(
 
   // Step 10: Request and approve publication.
   //
-  // The backend's /publish/request rejects with HTTP 422 + a "BIDS
-  // validation is currently running" message while the just-deployed
-  // validation workflow_run is still in flight. The bounded poll in
-  // step 9 only waits for a run to REGISTER, not COMPLETE — so for
-  // larger datasets we land here while validation is still running.
-  // Retry the request up to 5 times with 5-minute waits (25 min total
-  // budget) before giving up. Any other error fails fast.
+  // Idempotency (#985, epic #967 recover): finalize also runs as the last
+  // leg of the recover workflow, which re-runs prepare -> copy -> finalize
+  // against a dataset that is ALREADY published, to repair data the first
+  // import silently under-delivered (the #967 bug the per-key size check
+  // above just re-verified). That re-copy must not attempt to
+  // (re-)request/approve publication -- doing so is at best a guaranteed
+  // 409 and at worst re-runs approve's DOI-mint/S3-lock side effects
+  // against a dataset that must stay untouched. Decide via a live read of
+  // the dataset's visibility (decidePublicationRequestAction), not by
+  // waiting to catch the request's own 409 -- a positive check that also
+  // skips the approve call the 409-catch alone could not prevent.
+  let currentVisibility: "public" | "private" | null = null;
+  try {
+    currentVisibility = (await getDataset(nemarId)).visibility;
+  } catch {
+    // Status read failed (e.g. transient network blip) -- fall through to
+    // the normal request/approve flow below, which has its own fatal-error
+    // handling if the backend is genuinely unreachable. The exact-message
+    // catch in the request loop below remains a fallback safety net for
+    // this specific case.
+  }
+  // Mutable: the primary signal is the live status read above, but a 409
+  // caught below (status read failed, or the dataset was published by
+  // something else between the read and the request) sets this too, so
+  // every gate downstream (approve, spinner text) sees the same answer.
+  let alreadyPublished =
+    currentVisibility !== null &&
+    decidePublicationRequestAction(currentVisibility) === "skip-already-published";
+
   const PUBLICATION_REQUEST_MAX_ATTEMPTS = 5;
   const PUBLICATION_REQUEST_WAIT_MS = 5 * 60_000;
   const pubSpinner = ora("Requesting publication...").start();
   let publicationRequested = false;
-  for (let attempt = 1; attempt <= PUBLICATION_REQUEST_MAX_ATTEMPTS; attempt++) {
+  if (alreadyPublished) {
+    publicationRequested = true;
+    pubSpinner.succeed(
+      `${nemarId} is already published; skipping publish/request (data re-copy only)`,
+    );
+  }
+  for (
+    let attempt = 1;
+    !alreadyPublished && attempt <= PUBLICATION_REQUEST_MAX_ATTEMPTS;
+    attempt++
+  ) {
     try {
       await requestPublication(nemarId);
       publicationRequested = true;
       break;
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
+      // Exact match against routes/datasets/publication.ts's 409 body --
+      // the fallback safety net for when the live status read above
+      // couldn't run (see the try/catch); a genuinely already-published
+      // dataset is success here, not a fatal error (#985).
+      if (msg === "Dataset is already published") {
+        alreadyPublished = true;
+        publicationRequested = true;
+        pubSpinner.succeed(
+          `${nemarId} is already published; skipping publish/request (data re-copy only)`,
+        );
+        break;
+      }
       const isValidationInProgress = msg.includes("BIDS validation is currently running");
       if (!isValidationInProgress) {
         pubSpinner.fail(`Failed to request publication: ${msg}`);
@@ -1304,14 +1369,20 @@ export async function finalizeImport(
       await new Promise((r) => setTimeout(r, PUBLICATION_REQUEST_WAIT_MS));
     }
   }
-  if (publicationRequested) {
+  if (publicationRequested && !alreadyPublished) {
     pubSpinner.succeed("Publication requested");
   }
 
   const approveSpinner = ora("Approving publication...").start();
   const maxRetries = 10;
   let approved = false;
-  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+  if (alreadyPublished) {
+    approved = true;
+    approveSpinner.succeed(
+      `${nemarId} is already published; skipping publish/approve (data re-copy only)`,
+    );
+  }
+  for (let attempt = 1; !alreadyPublished && attempt <= maxRetries; attempt++) {
     try {
       // skipCiCheck is set in step 9 — true only when the bounded
       // workflow_run poll timed out AND --trust-upstream was passed.
@@ -1329,7 +1400,7 @@ export async function finalizeImport(
       }
     }
   }
-  if (approved) {
+  if (approved && !alreadyPublished) {
     approveSpinner.succeed("Publication approved");
   }
 
