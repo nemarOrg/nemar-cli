@@ -26,6 +26,7 @@ import {
   selectAnnexS3Remote,
 } from "../src/lib/git-annex/s3-remote";
 import { extractWhereisKeyUrl } from "../src/lib/git-annex/transfer";
+import { decideReimportMainReset } from "../src/lib/import-openneuro";
 
 describe("extractWhereisKeyUrl (#808 streaming whereis mapping)", () => {
   const run = (line: string): Map<string, string> => {
@@ -644,5 +645,139 @@ describe("idempotent retry: prepare reuses the existing nemar-s3 UUID (#969)", (
       {},
     );
     expect(checkerEnable.success).toBe(true);
+  });
+});
+
+describe("Step 4c: re-import main-reset avoids the diverging-history push failure (#990)", () => {
+  // Reproduces the real re-import sequence: `prepare` (import-openneuro.ts)
+  // clones FRESH from OpenNeuro every time, so a re-import's clone shares
+  // only the pre-NEMAR upstream history with whatever nemarDatasets/<id>
+  // already carries -- it knows nothing about a PRIOR import's metadata
+  // commit already sitting on origin's `main`. Step 6 (seedMetadata +
+  // commit) then creates the same .nemar/metadata.json path again with
+  // different content, and Step 7's push (pushToGitHub, clone-push.ts) tries
+  // to reconcile via fetch+rebase -- which hits a real "both added"
+  // conflict and hard-fails ("diverging commits and auto-rebase failed").
+  // Step 4c fixes this by resetting the fresh clone's `main` onto
+  // origin/main BEFORE the metadata commit, so there is nothing to diverge.
+
+  async function writeMetadata(dir: string, version: number): Promise<void> {
+    mkdirSync(join(dir, ".nemar"), { recursive: true });
+    await Bun.write(join(dir, ".nemar", "metadata.json"), JSON.stringify({ version }));
+  }
+
+  async function commitMetadata(dir: string, message: string): Promise<void> {
+    const add = await runCmd(["git", "add", ".nemar/metadata.json"], dir);
+    expect(add.exitCode).toBe(0);
+    const commit = await runCmd(["git", "commit", "-qm", message], dir);
+    expect(commit.exitCode).toBe(0);
+  }
+
+  async function newUpstreamAndBare(tag: string): Promise<{ src: string; bareDir: string }> {
+    const src = await newAnnexRepo(`step4c-upstream-${tag}`);
+    await Bun.write(join(src, "README.md"), "upstream dataset\n");
+    expect((await runCmd(["git", "add", "README.md"], src)).exitCode).toBe(0);
+    expect((await runCmd(["git", "commit", "-qm", "upstream readme"], src)).exitCode).toBe(0);
+
+    const bareDir = join(
+      TMP_DIR,
+      `bare-step4c-${tag}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    );
+    mkdirSync(bareDir, { recursive: true });
+    expect((await runCmd(["git", "init", "-q", "--bare"], bareDir)).exitCode).toBe(0);
+    return { src, bareDir };
+  }
+
+  test("regression guard: a fresh re-import clone's metadata commit collides and pushToGitHub fails", async () => {
+    const { src, bareDir } = await newUpstreamAndBare("a");
+
+    // First import.
+    const p1 = await cloneAnnexRepo(src, "step4c-p1-a");
+    await writeMetadata(p1, 1);
+    await commitMetadata(p1, "Add NEMAR metadata (imported from OpenNeuro ds000001)");
+    await runCmd(["git", "remote", "remove", "origin"], p1);
+    expect((await runCmd(["git", "remote", "add", "origin", bareDir], p1)).exitCode).toBe(0);
+    const push1 = await pushToGitHub(p1, "origin");
+    expect(push1.success).toBe(true);
+
+    // Re-import: a FRESH clone of the upstream (not of bareDir), exactly
+    // like a retried `prepare` -- it shares only the upstream readme commit
+    // with origin, not the metadata commit.
+    const p2 = await cloneAnnexRepo(src, "step4c-p2-a");
+    await runCmd(["git", "remote", "remove", "origin"], p2);
+    expect((await runCmd(["git", "remote", "add", "origin", bareDir], p2)).exitCode).toBe(0);
+    await writeMetadata(p2, 2);
+    await commitMetadata(p2, "Add NEMAR metadata (imported from OpenNeuro ds000001)");
+
+    // Without Step 4c: pushToGitHub's fetch+rebase hits a real "both added"
+    // conflict on .nemar/metadata.json and hard-fails.
+    const pushResult = await pushToGitHub(p2, "origin");
+    expect(pushResult.success).toBe(false);
+    expect(pushResult.error).toMatch(/diverging commits and auto-rebase failed/i);
+  });
+
+  test("fix: Step 4c resets main onto origin/main first, so the same re-import push succeeds", async () => {
+    const { src, bareDir } = await newUpstreamAndBare("b");
+
+    // First import.
+    const p1 = await cloneAnnexRepo(src, "step4c-p1-b");
+    await writeMetadata(p1, 1);
+    await commitMetadata(p1, "Add NEMAR metadata (imported from OpenNeuro ds000002)");
+    await runCmd(["git", "remote", "remove", "origin"], p1);
+    expect((await runCmd(["git", "remote", "add", "origin", bareDir], p1)).exitCode).toBe(0);
+    const push1 = await pushToGitHub(p1, "origin");
+    expect(push1.success).toBe(true);
+    const firstImportSha = (await runCmd(["git", "rev-parse", "main"], p1)).stdout.trim();
+
+    // Re-import: another FRESH clone of the same upstream.
+    const p2 = await cloneAnnexRepo(src, "step4c-p2-b");
+    await runCmd(["git", "remote", "remove", "origin"], p2);
+    expect((await runCmd(["git", "remote", "add", "origin", bareDir], p2)).exitCode).toBe(0);
+
+    // Step 4c, run exactly as import-openneuro.ts's prepare() does it.
+    const originMainFetch = await runCmd(["git", "fetch", "origin", "main"], p2);
+    expect(originMainFetch.exitCode).toBe(0);
+    const originMainRev = await runCmd(
+      ["git", "rev-parse", "--verify", "--quiet", "origin/main"],
+      p2,
+    );
+    const currentBranch = await runCmd(["git", "rev-parse", "--abbrev-ref", "HEAD"], p2);
+    const shouldReset = decideReimportMainReset({
+      originMainSha: originMainRev.stdout.trim() || null,
+      currentBranch: currentBranch.stdout.trim(),
+    });
+    expect(shouldReset).toBe(true);
+    const reset = await runCmd(["git", "reset", "--hard", "origin/main"], p2);
+    expect(reset.exitCode).toBe(0);
+
+    // Step 6, AFTER the reset: the metadata commit now lands on TOP of
+    // origin/main (the first import's tip), not on the clone's own
+    // unrelated history.
+    await writeMetadata(p2, 2);
+    await commitMetadata(p2, "Add NEMAR metadata (imported from OpenNeuro ds000002)");
+
+    // Step 7: plain fast-forward, no rebase needed.
+    const push2 = await pushToGitHub(p2, "origin");
+    expect(push2.success).toBe(true);
+    expect(push2.warning).toBeUndefined();
+
+    // Confirm it's a genuine fast-forward: the first import's commit is an
+    // ancestor of the pushed tip.
+    const isAncestor = await runCmd(
+      ["git", "merge-base", "--is-ancestor", firstImportSha, "HEAD"],
+      p2,
+    );
+    expect(isAncestor.exitCode).toBe(0);
+
+    // A third, independent clone of the remote sees BOTH metadata commits
+    // and the latest content -- nothing was squashed or rebased away.
+    const checker = await cloneAnnexRepo(bareDir, "step4c-checker-b");
+    const log = await runCmd(["git", "log", "--oneline"], checker);
+    const metadataCommitCount = log.stdout
+      .split("\n")
+      .filter((line) => line.includes("Add NEMAR metadata")).length;
+    expect(metadataCommitCount).toBe(2);
+    const metadataContent = await Bun.file(join(checker, ".nemar", "metadata.json")).text();
+    expect(JSON.parse(metadataContent).version).toBe(2);
   });
 });

@@ -18,6 +18,7 @@ import {
   OPENNEURO_UPSTREAM_MARKER,
   coerceFunding,
   decidePublicationRequestAction,
+  decideReimportMainReset,
   decideSkipCiCheck,
   detectModalitiesFromDataset,
   ensureReadmeMd,
@@ -653,5 +654,38 @@ describe("decidePublicationRequestAction (#985 recover idempotency)", () => {
     // completed publish/approve (visibility flipped to 'public'). Must not
     // re-request/re-approve.
     expect(decidePublicationRequestAction("public")).toBe("skip-already-published");
+  });
+});
+
+describe("decideReimportMainReset (#990, Step 4c re-import divergence)", () => {
+  test("resets on plain main when origin already has a main tip (re-import)", () => {
+    expect(decideReimportMainReset({ originMainSha: "abc123", currentBranch: "main" })).toBe(true);
+  });
+
+  test("no reset when origin has no main ref yet (genuine first import)", () => {
+    expect(decideReimportMainReset({ originMainSha: null, currentBranch: "main" })).toBe(false);
+  });
+
+  test("no reset when origin/main rev-parse resolved to an empty string", () => {
+    // `git rev-parse --verify --quiet` on a nonexistent ref exits non-zero
+    // with empty stdout; the caller passes that through as "" rather than
+    // null, so the decider must treat both the same way.
+    expect(decideReimportMainReset({ originMainSha: "", currentBranch: "main" })).toBe(false);
+  });
+
+  test("no reset on a git-annex adjusted branch, even with an origin main tip", () => {
+    // DataLad adjusted branches ("adjusted/main(unlocked)") are rebased
+    // never; pushToGitHub special-cases them, and a hard reset here would
+    // fight that.
+    expect(
+      decideReimportMainReset({
+        originMainSha: "abc123",
+        currentBranch: "adjusted/main(unlocked)",
+      }),
+    ).toBe(false);
+  });
+
+  test("no reset in detached HEAD, even with an origin main tip", () => {
+    expect(decideReimportMainReset({ originMainSha: "abc123", currentBranch: "HEAD" })).toBe(false);
   });
 });
