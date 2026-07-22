@@ -3745,13 +3745,6 @@ Description:
         );
       }
       const dispatch = await dispatchOpenNeuroImportWorkflow(dsIds);
-      if (!dispatch.ok) {
-        console.error(chalk.red(`Failed to dispatch workflow: ${dispatch.error}`));
-        console.error(
-          chalk.dim("Make sure gh CLI is authenticated with access to nemarDatasets org"),
-        );
-        process.exit(1);
-      }
 
       // Best-effort: push next_retry_at forward for the just-dispatched
       // targets so the Phase-2 retry cron (sweepImportRetries) doesn't
@@ -3759,6 +3752,18 @@ Description:
       // next tick (#981). A failure here is non-corrupting -- worst case the
       // cron redundantly re-dispatches once -- so it must not fail the
       // recovery itself, only warn.
+      //
+      // Runs BEFORE the dispatch.ok check below, and unconditionally on
+      // verifiedTargets (not just the ids of chunks that actually fired):
+      // verifyImport already reclassified every one of verifiedTargets to
+      // 'incomplete' with next_retry_at=now before we got here, so if a LATER
+      // chunk fails after an EARLIER chunk already ran `gh workflow run`, the
+      // already-dispatched datasets still need cooling down -- otherwise the
+      // cron re-dispatches exactly the datasets this whole mechanism exists to
+      // protect (the #981 bug, in the partial-failure case). Cooling down the
+      // ids whose dispatch never fired is harmless: the operator resumes the
+      // failed chunk manually, and any re-run of `recover` re-verifies first
+      // (resetting next_retry_at=now again), so this is overwritten either way.
       let cooldown: { updated: number } | { error: string };
       try {
         cooldown = await dispatchCooldown(verifiedTargets);
@@ -3769,6 +3774,14 @@ Description:
             `\nWarning: failed to set dispatch cooldown (${errorDetail(err)}); the retry cron may briefly re-dispatch these datasets (non-corrupting).`,
           ),
         );
+      }
+
+      if (!dispatch.ok) {
+        console.error(chalk.red(`Failed to dispatch workflow: ${dispatch.error}`));
+        console.error(
+          chalk.dim("Make sure gh CLI is authenticated with access to nemarDatasets org"),
+        );
+        process.exit(1);
       }
 
       if (!options.json) {
