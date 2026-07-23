@@ -45,10 +45,27 @@ local value as a *candidate* for the prod value until verified.
 
 ## Classification (prod Worker)
 
-### VERBATIM-ONLY, blocking
+### VERBATIM-ONLY — RESOLVED 2026-07-23, recoverable
 | Secret | Local candidate | Note |
 |---|---|---|
-| `ENCRYPTION_KEY` | `.dev.vars` | Must verify local == prod before Phase 1. Cannot be rotated. |
+| `ENCRYPTION_KEY` | `.dev.vars` | **VERIFIED to match production.** Cannot be rotated, but is recoverable. |
+
+**Verification result (2026-07-23):** ran the decrypt test below against a live production
+ciphertext from `users.aws_access_key_id_encrypted`. The AES-GCM auth tag **validated** and
+the plaintext matched `/^AKIA[0-9A-Z]{16}$/`. The `ENCRYPTION_KEY` in `backend/.dev.vars` is
+therefore byte-identical to the production Worker's value.
+
+**Consequence: Phase 1 is a copy, not a migration.** The one secret that could have forced a
+user-visible credential-rotation event is recoverable, so every secret in this inventory is
+now either recoverable or re-issuable. Nothing blocks the import.
+
+**But it exists in exactly two places** — inside Cloudflare, and in one gitignored file on one
+laptop. Until it is in Infisical and in the sealed offline backup, a lost laptop plus any
+Cloudflare mishap is unrecoverable. Record it offline now; do not wait for Phase 1.
+
+Note this cuts against the `.dev.vars`-is-stale finding below: the file is a *mixture* of
+current and legacy values, which is worse than uniformly stale, because names alone tell you
+nothing. Each value must be proven individually, as done here.
 
 ### Coordinated rotation (re-issuable, but ≥2 consumers must change together)
 | Secret | Matching consumer | Note |
