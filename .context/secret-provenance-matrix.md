@@ -95,6 +95,38 @@ required. Do not import any `.dev.vars` value into Infisical on the strength of 
 Recovery for `RESEND_API_KEY`: not recoverable locally, but freely re-issuable. Mint a new
 key in whichever Resend team owns `nemar.org`.
 
+### Live verification sweep of `backend/.dev.vars` (2026-07-23)
+
+Every candidate tested against its real service. **Most of the file is dead.**
+
+| Secret | Live test | Result |
+|---|---|---|
+| `ENCRYPTION_KEY` | AES-GCM decrypt of prod ciphertext | **VALID, byte-identical to prod** |
+| `OPENROUTER_API_KEY` | `GET /api/v1/key` | **VALID** (usage $106.98, real NEMAR account) |
+| `EZID_USERNAME` / `EZID_PASSWORD` | `GET /login` basic auth | **VALID** (`nemar-admin`, session cookie returned) |
+| `GITHUB_ADMIN_PAT` | `GET /user` | **EXPIRED — HTTP 401** |
+| `AWS_ACCESS_KEY_ID` / `SECRET` | `sts get-caller-identity` | **INVALID — `InvalidClientTokenId`** |
+| `RESEND_API_KEY` | `GET /domains` | **STALE** — `osc.earth` team, cannot send as `nemar.org` |
+| `ZENODO_API_KEY` | `GET /deposit/depositions` | valid, but **Zenodo is retired** (EZID is sole provider) → cruft |
+
+Method note: EZID's `/status` needs no auth and returns success regardless, so it proves
+nothing. `/login` is the real credential test. Pick an endpoint that actually authenticates.
+
+**Conclusion: 4 of 17 entries in `.dev.vars` are current and worth importing.** Three are
+confirmed dead credentials, one is valid for a retired service, and the rest were already
+known cruft. This is why name-matching was never sufficient, and it is the strongest argument
+for the whole epic: a file this stale was the de-facto local source of truth.
+
+### Imported to Infisical `prod/backend` (2026-07-23)
+`ENCRYPTION_KEY` (byte-verified), `OPENROUTER_API_KEY`, `EZID_USERNAME`, `EZID_PASSWORD`.
+Each import prints a sha256 prefix; `ENCRYPTION_KEY` matched its source exactly
+(`e9b0bb4193fc`), which is the byte-diff evidence Phase 1 requires.
+
+**Distinction worth keeping:** `ENCRYPTION_KEY` is *byte-verified* against production.
+The others are *live-validated* — proven to work against the right account, but not proven
+byte-identical to what the prod Worker holds, because Cloudflare will not reveal it. For
+interchangeable credentials that is sufficient; for `ENCRYPTION_KEY` it would not have been.
+
 ### Freely re-issuable at source (single consumer)
 `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` (IAM supports a two-key window, so rotation is
 zero-downtime), `RESEND_API_KEY`, `OPENROUTER_API_KEY`, `ZENODO_API_KEY`,
