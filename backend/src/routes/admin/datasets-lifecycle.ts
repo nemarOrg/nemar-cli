@@ -15,6 +15,12 @@ import { z } from "zod";
 import { auditLogStatement } from "../../db/audit-log";
 import { SYSTEM_USER_ID } from "../../lib/constants";
 import { shouldSkipArchive } from "../../services/archive-policy";
+import {
+  AvailabilityReportError,
+  availabilityReportSweepCandidateQuery,
+  availabilityReportSweepRemainingQuery,
+  writeAvailabilityReport,
+} from "../../services/availability-report";
 import { stampDatasetIntegrity, writeVersionHed } from "../../services/dataset-metadata-columns";
 import {
   DatasetReindexError,
@@ -796,6 +802,110 @@ export function registerDatasetLifecycleRoutes(admin: AdminRouter): void {
     });
   });
 
+  /**
+   * POST /admin/datasets/availability-report-sweep?limit=N[&missing-only=1] —
+   * one-time backfill that generates + commits `.nemar/availability-report.json`
+   * (services/availability-report.ts, epic #999 phase 1 #1000) across every
+   * managed dataset, stamping availability_report_at (migration 0061).
+   * Mirrors hed-sweep's shape (candidate/stamp/remaining) exactly. Candidate/
+   * remaining SQL is built from availabilityReportSweepCandidateQuery /
+   * availabilityReportSweepRemainingQuery (services/availability-report.ts) so
+   * this handler and its test share one source of truth instead of a
+   * hand-copied duplicate that can drift.
+   *
+   * Unlike data-integrity-sweep this WRITES to GitHub (writeAvailabilityReport
+   * -> createOrUpdateFile), so it is a separate, GitHub-writing sweep on
+   * purpose: data-integrity-sweep's "no GitHub side-effects" property (safe to
+   * run in every environment, including dev/staging D1) is load-bearing and
+   * must not be diluted by folding this in.
+   *
+   * `?missing-only=1` narrows candidacy to datasets already known incomplete
+   * (data_complete = 0, migration 0059) — for a targeted re-run once recovery
+   * work lands, without re-touching every already-complete dataset.
+   *
+   * Bounded per invocation (default 10, max 10 -- deliberately lower than a
+   * read-only sweep like hed-sweep/data-integrity-sweep (max 30): each
+   * candidate here does a GitHub commit (createOrUpdateFile, 2 API calls), and
+   * a burst of write calls can trip GitHub's secondary rate limit (the same
+   * failure mode the bulk-approval-rate-limit precedent hit). No in-Worker
+   * sleep between writes (that would eat into the Worker's request duration
+   * budget) -- createOrUpdateFile itself has no 403 backoff either (its retry
+   * loop only covers a stale-SHA conflict, not rate limiting), so a
+   * rate-limited candidate just throws, lands in `errors`, and stays
+   * unstamped. The pacing strategy is entirely external to this handler: the
+   * small per-batch cap plus the CLI's inter-batch sleep between calls, and
+   * an unstamped candidate is simply retried on the next sweep invocation
+   * once GitHub's limit window has passed. Run repeatedly until `remaining`
+   * reaches 0. Idempotent: only rows never stamped (availability_report_at IS
+   * NULL) are candidates.
+   */
+  admin.post("/datasets/availability-report-sweep", async (c) => {
+    const db = c.env.DB;
+
+    // ?reset=1 clears every stamped row (availability_report_at -> NULL) so a
+    // corrected report generator can re-sweep from scratch.
+    if (c.req.query("reset") === "1") {
+      const res = await db
+        .prepare(
+          `UPDATE datasets
+         SET availability_report_at = NULL
+         WHERE availability_report_at IS NOT NULL`,
+        )
+        .run();
+      return c.json({ reset: res.meta?.changes ?? 0 });
+    }
+
+    const limitRaw = Number.parseInt(c.req.query("limit") || "10", 10);
+    const limit = Number.isFinite(limitRaw) ? Math.min(Math.max(limitRaw, 1), 10) : 10;
+    const missingOnly = c.req.query("missing-only") === "1";
+
+    let candidates: { dataset_id: string }[];
+    try {
+      const rows = await db
+        .prepare(availabilityReportSweepCandidateQuery(missingOnly))
+        .bind(limit)
+        .all<{ dataset_id: string }>();
+      candidates = rows.results ?? [];
+    } catch (err) {
+      console.error("[availability-report-sweep] candidate query failed:", err);
+      return c.json(
+        { error: "Failed to query sweep candidates (is migration 0061 applied?)" },
+        500,
+      );
+    }
+
+    let written = 0;
+    const errors: { dataset_id: string; error: string }[] = [];
+
+    for (const { dataset_id } of candidates) {
+      try {
+        await writeAvailabilityReport(c.env, dataset_id);
+        // Stamp only after a successful write -- a failure above leaves the
+        // row unstamped so it stays a candidate and a plain re-run retries it.
+        await db
+          .prepare(
+            "UPDATE datasets SET availability_report_at = datetime('now') WHERE dataset_id = ?",
+          )
+          .bind(dataset_id)
+          .run();
+        written++;
+      } catch (err) {
+        errors.push({ dataset_id, error: errorMessage(err) });
+      }
+    }
+
+    const remainingRow = await db
+      .prepare(availabilityReportSweepRemainingQuery(missingOnly))
+      .first<{ n: number }>();
+
+    return c.json({
+      processed: candidates.length,
+      written,
+      errors,
+      remaining: remainingRow?.n ?? null,
+    });
+  });
+
   // ============================================================================
   // Manifest Generation
   // ============================================================================
@@ -923,6 +1033,35 @@ export function registerDatasetLifecycleRoutes(admin: AdminRouter): void {
     } catch (err) {
       const msg = errorMessage(err);
       return c.json({ error: `Manifest generation failed: ${msg}` }, 500);
+    }
+  });
+
+  /**
+   * POST /admin/datasets/:id/availability-report[?dry_run=1] — generate the
+   * per-dataset availability report (`.nemar/availability-report.json`, epic
+   * #999 Phase 1, #1000): how much of the published version manifest is
+   * actually present in S3, and exactly which files are missing + why.
+   * Reuses the completeness math from verifyDatasetVersionS3
+   * (import-integrity.ts) via services/availability-report.ts.
+   *
+   * `?dry_run=1` returns the report without committing it. Otherwise the
+   * report is committed to `.nemar/availability-report.json` on the repo's
+   * `main` branch via the admin Contents-API path (the same last-writer-wins
+   * `createOrUpdateFile` enrichment uses for `.nemar/metadata.json`).
+   */
+  admin.post("/datasets/:id/availability-report", async (c) => {
+    const datasetId = c.req.param("id");
+    const dryRun = c.req.query("dry_run") === "1";
+
+    try {
+      const report = await writeAvailabilityReport(c.env, datasetId, { dryRun });
+      return c.json(dryRun ? report : { written: true, report });
+    } catch (err) {
+      if (err instanceof AvailabilityReportError) {
+        return c.json({ error: err.message }, err.statusCode);
+      }
+      console.error(`[availability-report] Failed for ${datasetId}:`, err);
+      return c.json({ error: errorMessage(err) }, 500);
     }
   });
 

@@ -830,6 +830,111 @@ export async function dataIntegritySweepReset(): Promise<DataIntegritySweepReset
 }
 
 // ============================================================================
+// Availability report (epic #999 Phase 1, #1000)
+// ============================================================================
+
+/** One manifest path whose declared annex key is not present in S3 at its
+ *  declared size. Keyed by path (not annex key): git-annex is
+ *  content-addressed, so two distinct paths can share one key (repeated
+ *  calibration/empty-room/identical-stimulus files are common in BIDS). */
+export interface AvailabilityReportMissingEntry {
+  path: string;
+  key: string;
+  declared_size: number;
+  reason: "zero_byte" | "absent";
+}
+
+export interface AvailabilityReportCompleteness {
+  files_present: number;
+  files_declared: number;
+  bytes_present: number;
+  bytes_declared: number;
+  /** bytes_present / bytes_declared, or null whenever bytes_declared is not
+   *  > 0 (a 0-declared-bytes dataset, with or without a manifest). */
+  pct_bytes: number | null;
+}
+
+/** `.nemar/availability-report.json` shape (mirrors
+ *  backend/src/services/availability-report.ts's AvailabilityReport). */
+export interface AvailabilityReport {
+  dataset_id: string;
+  version: string | null;
+  generated_at: string;
+  source: { type: string; id: string } | null;
+  complete: boolean;
+  completeness: AvailabilityReportCompleteness;
+  missing: AvailabilityReportMissingEntry[];
+  blocklist_reason?: string;
+}
+
+/** `POST /admin/datasets/:id/availability-report` response: the bare report
+ *  on a dry run, or `{ written: true, report }` once it's committed. */
+export type AvailabilityReportResult =
+  | AvailabilityReport
+  | { written: true; report: AvailabilityReport };
+
+/**
+ * Generate a dataset's availability report. Dry-run by default (server-side
+ * `?dry_run=1`, returns the report without committing it); pass
+ * `{ write: true }` to commit it to `.nemar/availability-report.json` on the
+ * repo's `main` branch.
+ */
+export async function availabilityReport(
+  datasetId: string,
+  opts?: { write?: boolean },
+): Promise<AvailabilityReportResult> {
+  const query = opts?.write ? "" : "?dry_run=1";
+  return request<AvailabilityReportResult>(
+    `/admin/datasets/${datasetId}/availability-report${query}`,
+    { method: "POST", headers: { "Content-Type": "application/json" } },
+    true,
+  );
+}
+
+/** One batch of the availability-report backfill sweep (epic #999 phase 2,
+ *  #1001, `POST /admin/datasets/availability-report-sweep`). */
+export interface AvailabilityReportSweepBatchResponse {
+  processed: number;
+  /** Successfully generated + committed this batch. */
+  written: number;
+  errors: { dataset_id: string; error: string }[];
+  /** Datasets still unswept (availability_report_at IS NULL); 0 when the sweep is done. */
+  remaining: number | null;
+}
+
+/** Response of `?reset=1`: count of stamped rows cleared back to unswept. */
+export interface AvailabilityReportSweepResetResponse {
+  reset: number;
+}
+
+/** Run one bounded availability-report sweep batch (default 10,
+ *  server-clamped to [1,10] -- lower than the read-only sweeps since each
+ *  candidate does a GitHub commit). `missingOnly` narrows candidacy to
+ *  datasets already known incomplete (data_complete = 0). */
+export async function availabilityReportSweep(options?: {
+  limit?: number;
+  missingOnly?: boolean;
+}): Promise<AvailabilityReportSweepBatchResponse> {
+  const limit = options?.limit ?? 10;
+  const params = new URLSearchParams({ limit: String(limit) });
+  if (options?.missingOnly) params.set("missing-only", "1");
+  return request<AvailabilityReportSweepBatchResponse>(
+    `/admin/datasets/availability-report-sweep?${params.toString()}`,
+    { method: "POST", headers: { "Content-Type": "application/json" } },
+    true,
+  );
+}
+
+/** Clear every stamped row so a corrected report generator can re-sweep from scratch. */
+export async function availabilityReportSweepReset(): Promise<AvailabilityReportSweepResetResponse> {
+  return request<AvailabilityReportSweepResetResponse>(
+    "/admin/datasets/availability-report-sweep?reset=1",
+    { method: "POST", headers: { "Content-Type": "application/json" } },
+    true,
+  );
+}
+
+// ============================================================================
 // Fleet governance (epic #713)
 // ============================================================================
 
