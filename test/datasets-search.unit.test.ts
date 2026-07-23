@@ -8,7 +8,7 @@
  */
 
 import { describe, expect, test } from "bun:test";
-import { buildDatasetFilterClauses, escapeLikePattern } from "../backend/src/routes/datasets";
+import { buildDatasetFilterClauses, escapeLikePattern } from "../backend/src/routes/datasets/catalog";
 
 describe("buildDatasetFilterClauses search clause", () => {
   test("search includes dataset_id + source_id LIKE and routes free-text through FTS5", () => {

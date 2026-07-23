@@ -29,7 +29,8 @@ import {
 import { datasetCommand } from "./commands/dataset.js";
 import { doctorCommand } from "./commands/doctor.js";
 import { sandboxCommand } from "./commands/sandbox.js";
-import { IS_DEV_BUILD, MaintenanceError, errorDetail } from "./lib/api.js";
+import { IS_DEV_BUILD } from "./lib/api/client.js";
+import { MaintenanceError, errorDetail } from "./lib/api/errors.js";
 import { NO_DESCRIPTION, NO_OPTION, YES_DESCRIPTION, YES_OPTION } from "./lib/confirm.js";
 import { printMaintenanceBanner } from "./lib/maintenance-banner.js";
 import { fetchAndDisplayNotices } from "./lib/notices.js";

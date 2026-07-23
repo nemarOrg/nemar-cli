@@ -17,7 +17,7 @@ import "./setup";
 import {
   shouldDispatchEnrichment,
   shouldDispatchVersionDoi,
-} from "../backend/src/routes/webhooks";
+} from "../backend/src/routes/webhooks/github";
 
 type PushPayload = Parameters<typeof shouldDispatchEnrichment>[0];
 

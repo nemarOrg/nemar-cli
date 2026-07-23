@@ -1,6 +1,6 @@
 import { Database } from "bun:sqlite";
 import { beforeEach, describe, expect, test } from "bun:test";
-import { resolveEmailPrefsTarget } from "../src/routes/admin";
+import { resolveEmailPrefsTarget } from "../src/routes/admin/users";
 
 // Thin real-SQLite -> D1 passthrough so the production code runs its exact
 // .prepare().bind().first() against a real database (no mocks; bun:sqlite

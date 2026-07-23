@@ -21,12 +21,35 @@
 
 import type { Context } from "hono";
 import { Hono } from "hono";
+import { rateLimiter } from "../middleware/rateLimit.js";
 import { recordAccess, zarrObjectType } from "../services/access-metrics";
 import { normalizeBidsPath } from "../services/data-router";
 import { isValidDatasetId } from "../services/datasetId";
 import type { Bindings } from "../types/bindings.js";
 
 export const zarrDataRoutes = new Hono<{ Bindings: Bindings }>();
+
+// #901: the zarr host fork in index.ts dispatches straight here, bypassing the
+// api middleware stack (and its rate limiter). As the highest-volume data-plane
+// path this ran unthrottled. Apply the shared data-plane rate-limit bucket
+// (__selectBucket routes /<id>/zarr/* to the generous DATA bucket), but let CORS
+// preflights through un-throttled so a 429 never strips the preflight's headers.
+// The cast bridges this sub-app's Bindings-only generic to rateLimiter's
+// Bindings+Variables context; rateLimiter only touches env/req/header + its own
+// Variables slot, all present at runtime on any Hono context.
+zarrDataRoutes.use("*", async (c, next) => {
+  if (c.req.method === "OPTIONS") return next();
+  const res = await rateLimiter(c as unknown as Parameters<typeof rateLimiter>[0], next);
+  // rateLimiter returns a bare 429 (no zarr CORS) when the bucket is exhausted;
+  // without ACAO the browser sees an opaque failure instead of a readable 429 +
+  // retry_after. Re-apply the zarr CORS headers so the viewer can back off.
+  if (res && res.status === 429) {
+    for (const [k, v] of Object.entries(corsHeaders(c.req.header("origin") ?? null))) {
+      res.headers.set(k, v);
+    }
+  }
+  return res;
+});
 
 /** Origins allowed to read zarr chunks cross-origin in a browser: the NEMAR
  *  web properties (+ localhost for dev). Anything else gets no

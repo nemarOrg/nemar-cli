@@ -134,7 +134,7 @@ export async function drainEmbeddingDirty(
         `SELECT dataset_id FROM datasets
          WHERE embedding_dirty = 1
            AND status = 'active' AND visibility = 'public'
-           AND (is_sandbox = 0 OR is_sandbox IS NULL)
+           AND (is_sandbox = 0 OR is_sandbox IS NULL OR is_exemplar = 1)
          ORDER BY updated_at LIMIT ?`,
       )
       .bind(limit)
@@ -259,7 +259,7 @@ export async function hydrateDatasetsByIds(db: D1Database, ids: string[]): Promi
        FROM datasets d
        WHERE d.dataset_id IN (${buildInPlaceholders(ids.length)})
          AND d.status = 'active' AND d.visibility = 'public'
-         AND (d.is_sandbox = 0 OR d.is_sandbox IS NULL)`,
+         AND (d.is_sandbox = 0 OR d.is_sandbox IS NULL OR d.is_exemplar = 1)`,
     )
     .bind(...ids)
     .all<HydrateRow>();
@@ -287,7 +287,7 @@ export async function lookupDatasetById(
               d.concept_doi AS doi, d.tasks, d.authors, d.has_hed
        FROM datasets d
        WHERE (d.dataset_id = ? OR d.source_id = ?) AND d.status = 'active'
-         AND (d.is_sandbox = 0 OR d.is_sandbox IS NULL) AND d.visibility = 'public'
+         AND (d.is_sandbox = 0 OR d.is_sandbox IS NULL OR d.is_exemplar = 1) AND d.visibility = 'public'
        ORDER BY (d.owner_user_id != -1) DESC
        LIMIT 1`,
     )
@@ -348,7 +348,7 @@ export async function ftsSearch(
        FROM datasets_fts
        JOIN datasets d ON d.id = datasets_fts.rowid
        WHERE datasets_fts MATCH ?
-         AND d.status = 'active' AND (d.is_sandbox = 0 OR d.is_sandbox IS NULL)
+         AND d.status = 'active' AND (d.is_sandbox = 0 OR d.is_sandbox IS NULL OR d.is_exemplar = 1)
          AND d.visibility = 'public'
        ORDER BY bm25(datasets_fts)
        LIMIT ?`,

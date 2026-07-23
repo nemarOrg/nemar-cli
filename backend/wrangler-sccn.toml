@@ -29,8 +29,10 @@ workers_dev = true
 # Two schedules share the scheduled() handler (it branches on event.cron):
 #   "0 3 * * *"    daily cleanup/sweeps
 #   "*/30 * * * *" auto-import tick (#775) -- self-gates to ~90 min, so the
-#                  off-ticks are a single cheap D1 query. Prod only; [env.dev]
-#                  has no [triggers], so auto-import never runs in dev.
+#                  off-ticks are a single cheap D1 query. Prod only: [env.dev]
+#                  now HAS its own [triggers] (epic #923 Phase 7) but carries
+#                  only "0 4 * * *", and auto-import fires solely on the cron
+#                  string matching AUTO_IMPORT_CRON, so it never runs in dev.
 [triggers]
 crons = ["0 3 * * *", "*/30 * * * *"]
 
@@ -93,6 +95,15 @@ FRONTEND_URL = "https://nemar.org"
 APP_BASE_URL = "https://app.nemar.org"
 AWS_REGION = "us-east-2"
 S3_BUCKET = "nemar"
+# Hostnames that fork to the data sub-app / zarr gateway (index.ts). Set
+# explicitly for parity with the staging worker (epic #923); these equal the
+# built-in defaults, so prod routing is unchanged.
+DATA_HOSTNAME = "data.nemar.org"
+ZARR_HOSTNAME = "zarr.nemar.org"
+# Sandbox (xx) dataset-ID partition (epic #923). Prod caps sandbox allocation at
+# xx089999 so the dev/test staging worker (SANDBOX_ID_FLOOR="90001") owns
+# xx090001-xx099999 without repo-name collisions in the shared nemarDatasets org.
+SANDBOX_ID_CEILING = "89999"
 # Sender + reply-to for Resend emails. The domain in FROM_EMAIL must be
 # verified in the Resend account tied to RESEND_API_KEY; otherwise sends
 # 403 and resolveEmailConfig logs once but does not propagate the failure.
@@ -115,6 +126,11 @@ WEB_SESSION_COOKIE_DOMAIN = "app.nemar.org"
 # on005385/on005752 (#751); kept here (not just on the live Worker) so a
 # dev->main backend deploy can't silently revert it. Redeploy to change.
 MANIFEST_VIA_CENTRAL_WORKFLOW = "true"
+# Dev-range webhook mirror (epic #923). On prod only: a GitHub push to a dev-range
+# (xx09NNNN) repo is re-posted verbatim to the dev worker so it dispatches for
+# staging exemplars. Outbound-only + fire-and-forget; a dev outage cannot affect
+# prod. Absent from [env.dev.vars] so the dev worker never mirrors.
+DEV_WEBHOOK_MIRROR_URL = "https://api-test.nemar.org/webhooks/github"
 # Zarr serving copy (epic #684). Base URL of the Cloudflare-cached zarr host the
 # browser viewer reads and /webhooks/zarr-ready purges. Inert (purge no-ops, with
 # a logged "skipped" detail) until CLOUDFLARE_ZONE_ID + the CLOUDFLARE_API_TOKEN
@@ -125,13 +141,24 @@ ZARR_CACHE_BASE_URL = "https://zarr.nemar.org"
 # Automatic OpenNeuro import (#775). When "true" the */30 cron tick discovers new
 # OpenNeuro datasets and imports+publishes one every ~90 min; OFF = the tick
 # no-ops. ACTIVATED on prod (#775 finalize). Pinned per-env so a deploy can't
-# silently flip it (the #773 lesson). Prod-only anyway (dev has no cron triggers
-# and stays "false" below).
-AUTO_IMPORT_ENABLED = "true"
+# silently flip it (the #773 lesson). Prod-only anyway: dev's [triggers] carry
+# only the daily "0 4 * * *", which never matches AUTO_IMPORT_CRON, and dev
+# stays "false" below.
+# DISABLED 2026-07-21: the OpenNeuro import silently published datasets with
+# 0-byte S3 objects (curl|aws-cp empty PUT on OpenNeuro 403; presence-only
+# verification passed it). 56 datasets / ~680GB affected. Keep OFF until the
+# content-copy contract + per-key size verification land. See the incident issue.
+AUTO_IMPORT_ENABLED = "false"
 # Pacing macro: minutes between auto-imports. 25 -> ~one import every 30 min (the
 # gate sits just under the 30-min cron tick). Tunable live (wrangler deploy or the
 # dashboard) without a code change -- raise it to throttle back if a run misbehaves.
 AUTO_IMPORT_MIN_INTERVAL_MIN = "25"
+# Import retry engine + blocklist (epic #967 Phase 2, #969). Recipient for the
+# batched "dataset(s) appear inaccessible" report. Send stays OFF
+# (OPENNEURO_MAINTAINER_EMAIL_ENABLED unset -> dry run: compute + audit-log,
+# no send) until an operator reviews the first computed batch and flips it.
+OPENNEURO_SUPPORT_EMAIL = ""
+OPENNEURO_MAINTAINER_EMAIL_ENABLED = "false"
 
 # Secrets (set via: npx cfman wrangler --account sccn secret put <NAME> -c backend/wrangler-sccn.toml)
 # - GITHUB_ADMIN_PAT
@@ -167,7 +194,17 @@ AUTO_IMPORT_MIN_INTERVAL_MIN = "25"
 [env.dev]
 name = "nemar-api-dev"
 workers_dev = true
-routes = []
+# Staging custom domains (epic #923), the -test mirror of the prod api/data/zarr
+# hosts, all served by this one dev worker. workers_dev stays true so the
+# nemar-api-dev.sccn-org.workers.dev fallback keeps working. NOTE: attaching
+# these Workers Custom Domains provisions DNS + TLS on the nemar.org zone and
+# requires a token with zone edit; if the CI/cfman token is Workers-only, attach
+# them once in the CF dashboard before the first deploy that carries this config.
+routes = [
+  { pattern = "api-test.nemar.org", custom_domain = true },
+  { pattern = "data-test.nemar.org", custom_domain = true },
+  { pattern = "zarr-test.nemar.org", custom_domain = true }
+]
 
 [[env.dev.d1_databases]]
 binding = "DB"
@@ -201,31 +238,62 @@ invocation_logs = true
 
 [env.dev.vars]
 ENVIRONMENT = "development"
-API_BASE_URL = "https://nemar-api-dev.sccn-org.workers.dev"
-FRONTEND_URL = "https://nemar.org"
-# Authenticated app origin for the ORCID *sandbox* flow (#832). Set to the
-# frontend origin you run sandbox testing against (http://localhost:4321 for
-# local dev, or a *.pages.dev preview). Must equal the redirect URI registered
-# on the sandbox ORCID app; sandbox permits http/localhost.
-APP_BASE_URL = "http://localhost:4321"
+# Staging API host (epic #923). Central-workflow callbacks are built from
+# API_BASE_URL, so they round-trip back to this worker via api-test.nemar.org.
+# (The nemar-api-dev.sccn-org.workers.dev fallback still resolves.)
+API_BASE_URL = "https://api-test.nemar.org"
+FRONTEND_URL = "https://test.nemar.org"
+# Authenticated app origin. On staging this is the single-host test site
+# (epic #923). ORCID sandbox login on test.nemar.org additionally needs
+# https://test.nemar.org/auth/orcid/callback registered on the sandbox ORCID app
+# (owner action); until then use email-code login. Local ORCID dev testing needs
+# a .dev.vars override back to http://localhost:4321.
+APP_BASE_URL = "https://test.nemar.org"
+# Data/zarr hostnames this worker forks on (index.ts). The -test mirror of the
+# prod hosts; served by this same worker via the routes above.
+DATA_HOSTNAME = "data-test.nemar.org"
+ZARR_HOSTNAME = "zarr-test.nemar.org"
+# Origin embedded in served-manifest bytes_url links (epic #923). Points at the
+# -test data host so dev-bucket-only datasets embed reachable durable links.
+# Prod leaves this unset -> buildBytesUrl defaults to https://data.nemar.org, so
+# prod manifests stay byte-identical. (Landing URLs resolve from FRONTEND_URL
+# above, so DATASET_LANDING_BASE_URL is not needed here.)
+DATA_BASE_URL = "https://data-test.nemar.org"
 AWS_REGION = "us-east-2"
-S3_BUCKET = "nemar"
+# Dedicated dev/staging bucket (epic #923). Physically separate from prod `nemar`
+# so a dev bug can never touch real data or the prod bucket policy. Mirrors prod:
+# Object Lock + versioning enabled, same public-access-block, same
+# PublicReadExceptPrivate deny-list policy. The dev worker's IAM principal
+# (nemar-worker-dev) has full access to nemar-dev + read-only prod, and cannot
+# write/delete prod nm* data (verified via IAM policy simulation).
+S3_BUCKET = "nemar-dev"
+# Sandbox (xx) dataset-ID partition (epic #923). Dev/test allocates
+# xx090001-xx099999; prod (SANDBOX_ID_CEILING="89999") owns xx000001-xx089999.
+# The exemplar fleet pins the top sub-band (xx099900+).
+SANDBOX_ID_FLOOR = "90001"
 FROM_EMAIL = "NEMAR Archive <noreply@nemar.org>"
 REPLY_TO = "info@nemar.org"
-# Zarr cache host is prod-only; empty in dev so /webhooks/zarr-ready logs
-# "purge skipped" instead of purging the prod zone from a dev deploy (#684).
-ZARR_CACHE_BASE_URL = ""
-# Web-dashboard session cookie Domain (#569). Empty in dev so the
-# cookie is host-only for nemar-api-dev.sccn-org.workers.dev — any
-# explicit value would refuse to scope to a workers.dev hostname.
+# Staging zarr cache host (epic #923). URL-scoped purges of zarr-test.* can't
+# touch prod cache entries; purge stays inert until CLOUDFLARE_ZONE_ID + a purge
+# token are provisioned on dev (/webhooks/zarr-ready logs "purge skipped").
+ZARR_CACHE_BASE_URL = "https://zarr-test.nemar.org"
+# Web-dashboard session cookie Domain (#569). Kept EMPTY (host-only) on staging:
+# the test.nemar.org website serves in single-host mode and mirrors Set-Cookie
+# through its same-origin /auth proxy, so a host-only cookie scopes correctly to
+# test.nemar.org (same as *.pages.dev previews). Avoids touching the prod auth
+# cookie code paths. A Domain= value would also be rejected on the workers.dev
+# fallback host used for direct dev testing.
 WEB_SESSION_COOKIE_DOMAIN = ""
 # Centralized manifest workflow flag (#557, relocated to
-# nemarDatasets/.github in #564). SCCN dev is the designated soak target.
-# MANIFEST_CALLBACK_SECRET is set on both the Worker and nemarDatasets org
-# (visibility=all repos) as of 2026-05-18. Promote to prod after a week of
-# clean runs against this dev environment.
+# nemarDatasets/.github in #564). Soak on dev is COMPLETE and the flag is "true"
+# in prod. Dev now runs manifests INLINE (epic #923): the central workflow on
+# nemarDatasets/.github writes to s3://nemar (hardcoded), so with
+# S3_BUCKET=nemar-dev it would land manifests in the wrong bucket. Inline
+# generation targets env.S3_BUCKET (nemar-dev) and is fine for the small staging
+# exemplars (the file-count timeout wall does not bite). Phase 5 adds an
+# s3_bucket dispatch param that lets the central workflow follow the bucket.
 # Redeploy to change.
-MANIFEST_VIA_CENTRAL_WORKFLOW = "true"
+MANIFEST_VIA_CENTRAL_WORKFLOW = "false"
 # Auto-import flag (#775). Dev has no cron triggers, so this never runs in dev;
 # present only for binding consistency.
 AUTO_IMPORT_ENABLED = "false"
@@ -235,3 +303,19 @@ AUTO_IMPORT_MIN_INTERVAL_MIN = "25"
 # run-prescreen on nemarDatasets/.github. Requires the PRESCREEN_CALLBACK_SECRET
 # Worker secret (set on dev). Prod stays unset (dark) until promoted.
 PRESCREEN_ENABLED = "true"
+
+# Daily maintenance cron for dev/staging (epic #923 Phase 7). Offset an hour
+# from prod's "0 3" so the two environments never contend. "0 4 * * *" does not
+# equal AUTO_IMPORT_CRON ("*/30 * * * *"), so scheduled() takes the daily branch
+# and auto-import never fires here; AUTO_IMPORT_ENABLED="false" above remains
+# the second gate.
+#
+# The daily branch runs a REDUCED job set outside production, because this
+# worker's D1 is a partial production mirror (real nm* rows, real user email
+# addresses) and this worker holds a live RESEND_API_KEY. See the allowlist in
+# backend/src/index.ts scheduled(): archive retry and DOI reconcile are
+# production-only, and scheduledCleanup skips its staleness-email and
+# import-recovery sections while narrowing sandbox deletion to the dev
+# ephemeral band (xx090001-xx099899), which excludes the exemplar fleet.
+[env.dev.triggers]
+crons = ["0 4 * * *"]

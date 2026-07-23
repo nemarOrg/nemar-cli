@@ -20,6 +20,7 @@
  * records state for the observability dashboard.
  */
 import type { Bindings } from "../types/bindings.js";
+import { isNonProductionEnv } from "./environment.js";
 import { getDatasetsToken } from "./github-auth.js";
 import { triggerArchiveGeneration } from "./github.js";
 
@@ -105,6 +106,18 @@ interface SweepRow {
  * carries it forward (reset on 'ready', or the webhook's own retry on 'failed').
  */
 export async function archiveRetrySweep(env: Bindings): Promise<void> {
+  // Production only (epic #923 Phase 7). The candidate query filters on
+  // archive_status alone, with no dataset-id prefix restriction, and dispatch
+  // targets the hardcoded nemarDatasets/.github central repo. On the dev/staging
+  // worker, whose D1 is a partial production mirror, that means running real
+  // Actions against real dataset repos. The daily cron already excludes this
+  // outside production; the guard is repeated here so a future caller inherits
+  // the same safety.
+  if (isNonProductionEnv(env)) {
+    console.log("[archive-retry-sweep] skipped (non-production)");
+    return;
+  }
+
   let candidates: SweepRow[];
   try {
     const res = await env.DB.prepare(ARCHIVE_RETRY_SWEEP_QUERY)
@@ -147,7 +160,10 @@ export async function archiveRetrySweep(env: Bindings): Promise<void> {
       // the dispatched run's archive-ready callback re-stamps the row, and the
       // cap is still enforced. The inverse order (increment then dispatch) would
       // instead drop attempts when the dispatch fails, which is worse.
-      await triggerArchiveGeneration(row.dataset_id, row.dataset_id, version, pat);
+      await triggerArchiveGeneration(row.dataset_id, row.dataset_id, version, pat, {
+        s3Bucket: env.S3_BUCKET,
+        callbackBaseUrl: env.API_BASE_URL,
+      });
       await env.DB.prepare(
         `UPDATE datasets
             SET archive_retry_count = archive_retry_count + 1,

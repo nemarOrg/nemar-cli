@@ -22,34 +22,28 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import chalk from "chalk";
 import ora from "ora";
-import {
-  addCi,
-  approvePublication,
-  getUserCiStatus,
-  importDataset,
-  reindexDataset,
-  requestPublication,
-} from "./api.js";
+import { addCi, importDataset, reindexDataset } from "./api/admin.js";
+import { getDataset, getUserCiStatus } from "./api/datasets.js";
+import { approvePublication, requestPublication } from "./api/publish.js";
+import { cloneDataset, pushToGitHub } from "./git-annex/clone-push.js";
+import { configureGitHubRemote } from "./git-annex/github.js";
+import { ensureLocalMainBranch } from "./git-annex/repo-state.js";
+import { runCommand } from "./git-annex/run-command.js";
 import {
   type S3Credentials,
-  batchSetKeysPresent,
-  cloneDataset,
-  configureGitHubRemote,
   configureS3Remote,
-  ensureLocalMainBranch,
-  getAnnexWhereisAll,
-  getRemoteUuid,
   markInheritedOpenNeuroRemotesIgnored,
-  pushToGitHub,
-  runCommand,
-} from "./git-annex.js";
+} from "./git-annex/s3-remote.js";
+import { batchSetKeysPresent, getAnnexWhereisAll, getRemoteUuid } from "./git-annex/transfer.js";
 import {
   type CopyItem,
   type ImportManifest,
   type ImportManifestItem,
   batchServerSideCopy,
   cleanupStaging,
+  expectedSizesFromItems,
   filterAlreadyCopied,
+  isKeyPresentAtDeclaredSize,
   keyInShard,
   listExistingObjects,
   parseS3Url,
@@ -98,7 +92,10 @@ interface ImportOptions {
  *     silently approve under this condition — that would reintroduce the
  *     trust-assumption pathology #431 is meant to remove.
  */
-type PollOutcome = { kind: "found" } | { kind: "timeout" } | { kind: "error"; lastError: unknown };
+export type PollOutcome =
+  | { kind: "found" }
+  | { kind: "timeout" }
+  | { kind: "error"; lastError: unknown };
 
 /**
  * Bounded wait for a BIDS validation workflow run to register on the freshly
@@ -109,8 +106,12 @@ type PollOutcome = { kind: "found" } | { kind: "timeout" } | { kind: "error"; la
  * (see nemarOrg/nemar-cli#431). Reviewer note: a bare `catch {}` here would
  * mask persistent 4xx/5xx and either mislead the operator on timeout or
  * silently approve a never-validated publication under `--trust-upstream`.
+ *
+ * Exported so the exemplar clone tool (epic #923 Phase 5,
+ * `lib/exemplar-clone.ts`) can reuse the same bounded-poll mechanism instead
+ * of duplicating it.
  */
-async function waitForBidsValidationRun(
+export async function waitForBidsValidationRun(
   nemarId: string,
   spinner: ReturnType<typeof ora>,
   maxWaitMs = 120_000,
@@ -184,6 +185,68 @@ export function decideSkipCiCheck(args: {
     abortReason:
       "BIDS validation run did not register within the bounded poll window. Re-run with --trust-upstream to bypass (OpenNeuro datasets are pre-validated upstream), or investigate why the deployed CI did not trigger.",
   };
+}
+
+/**
+ * True when a POST /admin/datasets/import failure means "the dataset record
+ * and/or GitHub repo already exist" -- the expected, non-fatal shape of a
+ * RETRIED prepare (#969, epic #967 Phase 2): the row/repo genuinely exist
+ * server-side (POST returns 409), so prepare must continue (reuse them,
+ * rebuild the manifest, ensure main is pushed) rather than abort. Matches
+ * both the D1 duplicate-dataset 409 ("Dataset ... already exists") and the
+ * GitHub-repo-exists 409 ("GitHub repo nemarDatasets/... already exists")
+ * from routes/admin/imports.ts. Exported for tests.
+ */
+export function isAlreadyExistsImportError(message: string): boolean {
+  return message.includes("already exists") || message.includes("409");
+}
+
+/**
+ * Pure decision over whether finalize should (re-)request publication for a
+ * dataset it just re-copied (#985, epic #967 recover). `publish/request`
+ * 409s with "Dataset is already published" once `datasets.visibility` is
+ * 'public' (routes/datasets/publication.ts), which is exactly the state the
+ * #967 recover workflow re-runs finalize against: prepare -> copy -> finalize
+ * on a dataset that was ALREADY published, to repair data that got silently
+ * under-delivered the first time. That re-copy must not trip a fatal exit on
+ * a 409 that just means "nothing to do here" -- but it must also NOT
+ * re-approve or re-mint anything (approvePublication is what actually flips
+ * a DOI/S3-lock/etc, and none of that is safe to re-run against a dataset
+ * that's already live). Keyed on the dataset's live `visibility` (a status
+ * READ, not a string match on the request's own error) so a 409 for any
+ * other reason still surfaces as the fatal error it always has.
+ */
+export function decidePublicationRequestAction(
+  visibility: "public" | "private",
+): "request" | "skip-already-published" {
+  return visibility === "public" ? "skip-already-published" : "request";
+}
+
+/**
+ * Pure decision over whether a retried `prepare` (Step 4c, #990, epic #989
+ * Phase 2) should reset the fresh clone's local `main` onto `origin/main`
+ * before Step 6 seeds a new metadata commit. Re-importing onto an
+ * already-published nemarDatasets repo (the #967 recovery case: re-copy data
+ * for a version NEMAR already imported once) makes a brand-new OpenNeuro
+ * clone whose `main` shares no history with origin's -- origin already
+ * carries the FIRST import's metadata commit on the same files
+ * (.nemar/metadata.json, README.md), so committing fresh metadata onto the
+ * new clone's own history and pushing collides, and pushToGitHub's rebase
+ * (clone-push.ts) hard-fails with "diverging commits and auto-rebase
+ * failed".
+ *
+ * `originMainSha` is null/empty when origin has no resolvable `main` yet --
+ * a genuine first import, which must NOT reset (there is nothing to reset
+ * onto). `currentBranch` excludes detached HEAD ("HEAD") and git-annex
+ * adjusted branches ("adjusted/main(unlocked)") on purpose: pushToGitHub
+ * special-cases both (HEAD:main push, no-rebase adjusted push) and neither
+ * is safe to hard-reset the same way a plain `main` is.
+ */
+export function decideReimportMainReset(args: {
+  originMainSha: string | null;
+  currentBranch: string;
+}): boolean {
+  return args.originMainSha !== null && args.originMainSha !== "" && args.currentBranch === "main";
 }
 
 /**
@@ -771,7 +834,7 @@ export async function prepareImport(
     createSpinner.succeed(`Created ${result.dataset_id} (${result.github_repo})`);
   } catch (error) {
     const msg = error instanceof Error ? error.message : String(error);
-    if (msg.includes("already exists") || msg.includes("409")) {
+    if (isAlreadyExistsImportError(msg)) {
       createSpinner.warn(`Dataset ${nemarId} already exists, continuing...`);
     } else {
       createSpinner.fail(`Failed to create dataset: ${msg}`);
@@ -852,6 +915,97 @@ export async function prepareImport(
     process.exit(1);
   }
   remoteSpinner.succeed("Configured NEMAR remote");
+
+  // Step 4b: fold in any git-annex state nemarDatasets/<id> already carries
+  // from an earlier prepare attempt (#969, idempotent retry). This clone is
+  // always fresh from OpenNeuro, so its local git-annex branch has no
+  // knowledge of a nemar-s3 special remote a prior attempt already
+  // registered and pushed. Without this merge, the initremote call below
+  // (Step 5) can't see that registration and mints a SECOND, independent
+  // UUID for the same "nemar-s3" name -- finalize's re-clone then sees two
+  // repositories describing themselves as "nemar-s3", `git annex info`
+  // reports "multiple repositories with that description", and its
+  // enableremote fallback hard-errors ("Multiple remotes have that name"),
+  // permanently breaking the import (every further retry makes it worse by
+  // minting yet another UUID). Fetching + merging origin's git-annex branch
+  // FIRST means the S3-remote setup below sees the prior registration via
+  // annexRemoteExists and calls `enableremote` -- reusing the same UUID, so
+  // there is nothing to diverge and the eventual push is a plain
+  // fast-forward. Best-effort: a brand-new repo (first-ever import) has no
+  // git-annex branch to fetch yet, so this is a silent no-op on the common
+  // path.
+  const annexFetchResult = await runCommand(["git", "fetch", "origin", "git-annex"], {
+    cwd: datasetPath,
+  });
+  if (annexFetchResult.exitCode === 0) {
+    const annexMergeResult = await runCommand(["git", "annex", "merge"], { cwd: datasetPath });
+    if (annexMergeResult.exitCode !== 0) {
+      console.log(
+        chalk.yellow(
+          `  Warning: found existing NEMAR git-annex state for ${nemarId} but could not merge it (${annexMergeResult.stderr.trim()}). A retry may register the S3 remote under a new UUID; investigate before re-running finalize.`,
+        ),
+      );
+    }
+  }
+
+  // Step 4c (re-import only, #990, epic #989 Phase 2): base this fresh
+  // clone's `main` on origin's tip BEFORE Step 6 seeds a new metadata
+  // commit, if origin already carries a `main` (i.e. this is a re-import
+  // onto an already-published repo, not a first-ever import). Without this,
+  // Step 6 commits fresh metadata onto the OpenNeuro clone's own (unrelated)
+  // history, and Step 7's push collides with origin/main -- which already
+  // has the FIRST import's metadata commit on the same files
+  // (.nemar/metadata.json, README.md) -- so pushToGitHub's rebase
+  // (clone-push.ts) hard-fails with "diverging commits and auto-rebase
+  // failed". This reset only moves this worktree's `main` ref + HEAD: the
+  // git-annex branch was already merged just above (Step 4b), and the S3
+  // remote config written to .git/config plus the in-memory
+  // keyUrlMap/manifest built in Step 3 are untouched by a `main` reset, so
+  // nothing else about this prepare run changes.
+  //
+  // SAME-VERSION ASSUMPTION: this covers the recovery use case -- re-copying
+  // data for a version NEMAR already imported once (the #967 empty-import
+  // incident). A genuinely NEW OpenNeuro snapshot arriving between imports
+  // (a real new version) is explicitly OUT OF SCOPE here; that needs its own
+  // new-version flow, not a silent overwrite onto `main`, so this step does
+  // not attempt to detect or reconcile that case (drift-detection guard
+  // tracked as #993). Best-effort only: on a fetch or reset failure it falls
+  // back to the normal push path unchanged (a diverging-history rebase
+  // failure from pushToGitHub below is then the expected, pre-existing
+  // behavior).
+  const originMainFetch = await runCommand(["git", "fetch", "origin", "main"], {
+    cwd: datasetPath,
+  });
+  if (originMainFetch.exitCode === 0) {
+    const originMainRev = await runCommand(
+      ["git", "rev-parse", "--verify", "--quiet", "origin/main"],
+      { cwd: datasetPath },
+    );
+    const currentBranchResult = await runCommand(["git", "rev-parse", "--abbrev-ref", "HEAD"], {
+      cwd: datasetPath,
+    });
+    const shouldResetMain = decideReimportMainReset({
+      originMainSha: originMainRev.stdout.trim() || null,
+      currentBranch: currentBranchResult.stdout.trim(),
+    });
+    if (shouldResetMain) {
+      const resetResult = await runCommand(["git", "reset", "--hard", "origin/main"], {
+        cwd: datasetPath,
+      });
+      if (resetResult.exitCode !== 0) {
+        console.log(
+          chalk.yellow(
+            `  Warning: found origin/main for ${nemarId} (re-import) but could not reset onto it (${resetResult.stderr.trim()}). Falling back to the normal push path.`,
+          ),
+        );
+      } else {
+        console.log(
+          chalk.dim("  Re-import: based main on origin/main for an idempotent metadata commit"),
+        );
+      }
+    }
+  }
+  // else: origin has no `main` ref yet -- the normal first-import path, no-op.
 
   // Step 5: Configure the NEMAR S3 special remote. This records the nemar-s3
   // uuid in the git-annex branch so the finalize phase (a fresh clone, possibly
@@ -990,9 +1144,15 @@ export async function copyShard(
     return;
   }
 
-  // Resume: skip objects already present at the destination.
+  // Resume: skip objects already present at the destination, but only when
+  // present at their declared size -- a 0-byte leftover from a prior failed
+  // run must be re-copied, not mistaken for done (#967).
   const existing = await listExistingObjects(S3_BUCKET, `${nemarId}/objects/`, S3_REGION);
-  const { toCopy, skipped } = filterAlreadyCopied(shardItems, existing);
+  const { toCopy, skipped } = filterAlreadyCopied(
+    shardItems,
+    existing,
+    expectedSizesFromItems(shardItems),
+  );
   if (skipped.length > 0) {
     console.log(chalk.dim(`[${tag}] skipped ${skipped.length} already present`));
   }
@@ -1075,13 +1235,16 @@ export async function finalizeImport(
     guardSpinner.succeed("Confirmed metadata-only dataset (no annexed data)");
   }
   if (hasData) {
-    // Verify all data landed by re-listing the destination against the manifest.
+    // Verify all data landed at its correct size by re-listing the destination
+    // against the manifest. This is the publish gate: a key that merely exists
+    // but is 0 bytes or truncated (a corrupt leftover from a failed copy, #967)
+    // counts as missing, same as a key that's absent entirely.
     const verifySpinner = ora("Verifying copied data...").start();
     const existing = await listExistingObjects(S3_BUCKET, `${nemarId}/objects/`, S3_REGION);
-    const missing = manifest.items.filter((it) => !existing.has(it.key));
+    const missing = manifest.items.filter((it) => !isKeyPresentAtDeclaredSize(it.key, existing));
     if (missing.length > 0) {
       verifySpinner.fail(
-        `${missing.length} of ${manifest.items.length} objects missing at the destination. Re-run the copy phase (a shard likely failed or was cancelled) before finalizing.`,
+        `${missing.length} of ${manifest.items.length} objects missing or wrong size at the destination. Re-run the copy phase (a shard likely failed or was cancelled) before finalizing.`,
       );
       process.exit(1);
     }
@@ -1215,24 +1378,68 @@ export async function finalizeImport(
 
   // Step 10: Request and approve publication.
   //
-  // The backend's /publish/request rejects with HTTP 422 + a "BIDS
-  // validation is currently running" message while the just-deployed
-  // validation workflow_run is still in flight. The bounded poll in
-  // step 9 only waits for a run to REGISTER, not COMPLETE — so for
-  // larger datasets we land here while validation is still running.
-  // Retry the request up to 5 times with 5-minute waits (25 min total
-  // budget) before giving up. Any other error fails fast.
+  // Idempotency (#985, epic #967 recover): finalize also runs as the last
+  // leg of the recover workflow, which re-runs prepare -> copy -> finalize
+  // against a dataset that is ALREADY published, to repair data the first
+  // import silently under-delivered (the #967 bug the per-key size check
+  // above just re-verified). That re-copy must not attempt to
+  // (re-)request/approve publication -- doing so is at best a guaranteed
+  // 409 and at worst re-runs approve's DOI-mint/S3-lock side effects
+  // against a dataset that must stay untouched. Decide via a live read of
+  // the dataset's visibility (decidePublicationRequestAction), not by
+  // waiting to catch the request's own 409 -- a positive check that also
+  // skips the approve call the 409-catch alone could not prevent.
+  let currentVisibility: "public" | "private" | null = null;
+  try {
+    currentVisibility = (await getDataset(nemarId)).visibility;
+  } catch {
+    // Status read failed (e.g. transient network blip) -- fall through to
+    // the normal request/approve flow below, which has its own fatal-error
+    // handling if the backend is genuinely unreachable. The exact-message
+    // catch in the request loop below remains a fallback safety net for
+    // this specific case.
+  }
+  // Mutable: the primary signal is the live status read above, but a 409
+  // caught below (status read failed, or the dataset was published by
+  // something else between the read and the request) sets this too, so
+  // every gate downstream (approve, spinner text) sees the same answer.
+  let alreadyPublished =
+    currentVisibility !== null &&
+    decidePublicationRequestAction(currentVisibility) === "skip-already-published";
+
   const PUBLICATION_REQUEST_MAX_ATTEMPTS = 5;
   const PUBLICATION_REQUEST_WAIT_MS = 5 * 60_000;
   const pubSpinner = ora("Requesting publication...").start();
   let publicationRequested = false;
-  for (let attempt = 1; attempt <= PUBLICATION_REQUEST_MAX_ATTEMPTS; attempt++) {
+  if (alreadyPublished) {
+    publicationRequested = true;
+    pubSpinner.succeed(
+      `${nemarId} is already published; skipping publish/request (data re-copy only)`,
+    );
+  }
+  for (
+    let attempt = 1;
+    !alreadyPublished && attempt <= PUBLICATION_REQUEST_MAX_ATTEMPTS;
+    attempt++
+  ) {
     try {
       await requestPublication(nemarId);
       publicationRequested = true;
       break;
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
+      // Exact match against routes/datasets/publication.ts's 409 body --
+      // the fallback safety net for when the live status read above
+      // couldn't run (see the try/catch); a genuinely already-published
+      // dataset is success here, not a fatal error (#985).
+      if (msg === "Dataset is already published") {
+        alreadyPublished = true;
+        publicationRequested = true;
+        pubSpinner.succeed(
+          `${nemarId} is already published; skipping publish/request (data re-copy only)`,
+        );
+        break;
+      }
       const isValidationInProgress = msg.includes("BIDS validation is currently running");
       if (!isValidationInProgress) {
         pubSpinner.fail(`Failed to request publication: ${msg}`);
@@ -1248,14 +1455,20 @@ export async function finalizeImport(
       await new Promise((r) => setTimeout(r, PUBLICATION_REQUEST_WAIT_MS));
     }
   }
-  if (publicationRequested) {
+  if (publicationRequested && !alreadyPublished) {
     pubSpinner.succeed("Publication requested");
   }
 
   const approveSpinner = ora("Approving publication...").start();
   const maxRetries = 10;
   let approved = false;
-  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+  if (alreadyPublished) {
+    approved = true;
+    approveSpinner.succeed(
+      `${nemarId} is already published; skipping publish/approve (data re-copy only)`,
+    );
+  }
+  for (let attempt = 1; !alreadyPublished && attempt <= maxRetries; attempt++) {
     try {
       // skipCiCheck is set in step 9 — true only when the bounded
       // workflow_run poll timed out AND --trust-upstream was passed.
@@ -1273,7 +1486,7 @@ export async function finalizeImport(
       }
     }
   }
-  if (approved) {
+  if (approved && !alreadyPublished) {
     approveSpinner.succeed("Publication approved");
   }
 

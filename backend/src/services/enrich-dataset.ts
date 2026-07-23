@@ -38,6 +38,7 @@ import {
   mergeOrcidDiscoveries,
 } from "./doi-orcid-discovery.js";
 import { buildOrcidEnrichment, resolveEzidAuth } from "./doi.js";
+import { resolveDatasetLandingBase } from "./environment.js";
 import { extractDoi, updateIdentifier } from "./ezid.js";
 import { getDatasetsToken, getDatasetsTokenWithRefresher } from "./github-auth.js";
 import {
@@ -245,6 +246,8 @@ export async function enrichDataset(
 
   const datasetId = opts.datasetId;
   const forceReenrich = opts.force === true;
+  // Resolved once; reused for the repo-description link and the seed related-id.
+  const landingBase = resolveDatasetLandingBase(env);
   // When true, the caller (the central `run-enrichment.yml` Action on
   // `nemarDatasets/.github`, or the `run-version-doi.yml` pre-DOI refresh
   // step) will write the metadata commit using its own per-repo App token;
@@ -398,7 +401,7 @@ export async function enrichDataset(
           `[llm-enrich] Failed to update BIDS Name in D1 for ${datasetId}: ${errorMessage(dbErr)}`,
         );
       }
-      const nemarUrl = datasetLandingUrl(datasetId);
+      const nemarUrl = datasetLandingUrl(datasetId, landingBase);
       const repoResult = await setRepoDescription(repoName, bidsName, pat, nemarUrl);
       if (!repoResult.ok) {
         console.error(
@@ -509,7 +512,13 @@ export async function enrichDataset(
 
     // Stage 1: Seed from BIDS (deterministic, no LLM call)
     const treePaths = tree.map((f) => f.path);
-    const seeded = seedFromBids(bidsDescription, existingMetadata, datasetId, treePaths);
+    const seeded = seedFromBids(
+      bidsDescription,
+      existingMetadata,
+      datasetId,
+      treePaths,
+      landingBase,
+    );
     console.log(
       `[llm-enrich] Stage 1 (seed): ${datasetId} - ${Object.keys(seeded.authors || {}).length} authors, ${(seeded.related_identifiers || []).length} related IDs`,
     );
@@ -906,15 +915,29 @@ export async function enrichDataset(
     }
 
     // Populate first-class metadata columns (epic #417 phase 2). Reuses the
-    // tree, participants.tsv and S3 stats already gathered above so no
-    // additional API calls are needed beyond the one participants.tsv blob
-    // read. Non-fatal: a failure here does not roll back the enrichment.
+    // tree and participants.tsv already gathered above so no additional API
+    // calls are needed beyond the one participants.tsv blob read. Non-fatal: a
+    // failure here does not roll back the enrichment.
+    //
+    // s3Stats (Stage 1a above) is deliberately NOT threaded into file_size/
+    // total_files here (#970, epic #967 Phase 3): it's the annex-blind
+    // S3-objects sum, the exact source of the #967 incident, and this path has
+    // no well-defined "is a version manifest available yet" point (enrichment
+    // runs both pre-publish, when no manifest exists at all, and post-publish,
+    // interleaved with the version-DOI refresh) to safely verify against one.
+    // Leaving file_size/total_files/bytes_present/data_complete unset here lets
+    // COALESCE preserve whatever refreshDatasetMetadata (dataset-reindex.ts,
+    // which runs right after every version-DOI mint and DOES verify the
+    // manifest) or the `admin data-integrity-sweep` backfill last wrote,
+    // instead of this run clobbering the honest value back to the S3 sum on
+    // every re-enrichment. s3Stats itself stays in use above for the
+    // human-readable `seeded.sizes` LLM-prompt field, unrelated to these columns.
     let metadataColumnsError: string | undefined;
     try {
       const cols = computeDatasetMetadataColumns({
         treePaths,
         participantsTsv,
-        s3Stats,
+        s3Stats: null,
       });
       await writeDatasetMetadataColumns(env.DB, datasetId, cols);
       console.log(

@@ -23,11 +23,14 @@ import {
   writeDatasetCatalogFields,
   writeDatasetMetadataColumns,
   writeVersionHed,
+  writeVersionSize,
 } from "./dataset-metadata-columns.js";
 import { reembedDatasetVector } from "./dataset-search.js";
 import { enrichDataset } from "./enrich-dataset.js";
+import { exemplarOrFragment, isExemplarPublishAllowed } from "./exemplar.js";
 import { getDatasetsToken } from "./github-auth.js";
 import { getBidsTreeStats, getBlobContent, getTreeAtRef } from "./github.js";
+import { verifyDatasetVersionS3 } from "./import-integrity.js";
 import { errorMessage } from "./repo-metadata.js";
 import { getDatasetS3Stats } from "./s3.js";
 
@@ -83,9 +86,9 @@ export async function refreshDatasetMetadata(
   const db = env.DB;
 
   const dataset = await db
-    .prepare("SELECT dataset_id, github_repo FROM datasets WHERE dataset_id = ?")
+    .prepare("SELECT dataset_id, github_repo, is_exemplar FROM datasets WHERE dataset_id = ?")
     .bind(datasetId)
-    .first<{ dataset_id: string; github_repo: string | null }>();
+    .first<{ dataset_id: string; github_repo: string | null; is_exemplar: number | null }>();
 
   if (!dataset) {
     throw new DatasetReindexError(`Dataset not found: ${datasetId}`, 404);
@@ -93,7 +96,8 @@ export async function refreshDatasetMetadata(
   if (!dataset.github_repo) {
     throw new DatasetReindexError(`Dataset has no GitHub repository: ${datasetId}`, 400);
   }
-  if (datasetId.startsWith("xx")) {
+  // Sandbox xx datasets are not eligible for reindex, except staging exemplars (epic #923).
+  if (datasetId.startsWith("xx") && !isExemplarPublishAllowed(env, dataset)) {
     throw new DatasetReindexError(`Sandbox dataset ${datasetId} is not eligible for reindex`, 400);
   }
 
@@ -174,6 +178,24 @@ export async function refreshDatasetMetadata(
   let metadataColumnsError: string | undefined;
   let metadataColumnsWritten = false;
   try {
+    // Resolve the published version this refresh targets, shared by every
+    // per-version write below (HED, honest size). `version` (freshly minted by
+    // the caller) wins; otherwise fall back to the latest published version by
+    // created_at -- an unpublished dataset (no dataset_versions row) resolves to
+    // null and every per-version write below is skipped, not a spurious 0-row
+    // error.
+    const targetVersion =
+      version ??
+      (
+        await db
+          .prepare(
+            "SELECT version FROM dataset_versions WHERE dataset_id = ? ORDER BY created_at DESC LIMIT 1",
+          )
+          .bind(datasetId)
+          .first<{ version: string }>()
+      )?.version ??
+      null;
+
     // Resolve modalities/subject_count/tasks truncation-immune (#820, #827): the
     // recursive `tree` above can be truncated on large datasets (derivatives/
     // fills the cap, dropping raw sub-*/<datatype>/), which gave on006110
@@ -200,6 +222,33 @@ export async function refreshDatasetMetadata(
         `[reindex] BIDS tree walk failed for ${datasetId}; using tree paths: ${errorMessage(err)}`,
       );
     }
+
+    // Honest size/completeness from the version manifest (#970, epic #967 Phase
+    // 3): declared logical size, not the annex-blind S3-objects sum. Only
+    // meaningful for a published version; `manifestVerification` stays
+    // undefined for an unpublished dataset or when no manifest can be verified,
+    // so computeDatasetMetadataColumns falls back to `s3StatsForColumns`
+    // (pre-manifest datasets) and data_complete stays NULL (not audited).
+    let manifestVerification:
+      | { totals: { bytes: number; files: number }; bytesPresent: number; complete: boolean }
+      | undefined;
+    if (targetVersion) {
+      try {
+        const integrity = await verifyDatasetVersionS3(env, datasetId, targetVersion);
+        if (integrity.version) {
+          manifestVerification = {
+            totals: { bytes: integrity.declaredBytes, files: integrity.declaredFiles },
+            bytesPresent: integrity.bytesPresent,
+            complete: integrity.complete,
+          };
+        }
+      } catch (err) {
+        console.warn(
+          `[reindex] Data-integrity verify failed for ${datasetId}@${targetVersion}: ${errorMessage(err)}`,
+        );
+      }
+    }
+
     const cols = computeDatasetMetadataColumns({
       treePaths: tree.map((f) => f.path),
       participantsTsv,
@@ -211,29 +260,25 @@ export async function refreshDatasetMetadata(
       electrodeSystem: electrodeSystemOverride,
       hasHed: hasHedOverride,
       hedVersion: hedVersionOverride,
+      manifestVerification,
     });
     await writeDatasetMetadataColumns(db, datasetId, cols);
     // Persist the per-version HED row (#869) only when we actually classified it
     // (cols.has_hed != null) AND the dataset has a published version to stamp.
-    // The reindex/admin path passes no `version`, so resolve the latest here and
-    // skip an unpublished dataset (no dataset_versions row); otherwise
-    // writeVersionHed's latest-fallback would match 0 rows and log a spurious
-    // error. Mirrors the phase-3 sweep, which guards via its latest_version select.
-    if (cols.has_hed != null) {
-      const targetVersion =
-        version ??
-        (
-          await db
-            .prepare(
-              "SELECT version FROM dataset_versions WHERE dataset_id = ? ORDER BY created_at DESC LIMIT 1",
-            )
-            .bind(datasetId)
-            .first<{ version: string }>()
-        )?.version ??
-        null;
-      if (targetVersion) {
-        await writeVersionHed(db, datasetId, targetVersion, cols.has_hed, cols.hed_version);
-      }
+    // Mirrors the phase-3 sweep, which guards via its latest_version select.
+    if (cols.has_hed != null && targetVersion) {
+      await writeVersionHed(db, datasetId, targetVersion, cols.has_hed, cols.hed_version);
+    }
+    // Persist the per-version honest size (#970) only when the manifest verify
+    // above actually resolved a version -- same guard shape as HED, so an
+    // unpublished dataset or an unverifiable manifest never 0-rows this write.
+    if (manifestVerification && targetVersion) {
+      await writeVersionSize(db, datasetId, targetVersion, {
+        file_size: cols.file_size,
+        total_files: cols.total_files,
+        bytes_present: cols.bytes_present,
+        data_complete: cols.data_complete,
+      });
     }
     metadataColumnsWritten = true;
     console.log(
@@ -281,6 +326,42 @@ export async function refreshDatasetMetadata(
   };
 }
 
+/**
+ * Background metadata-columns refresh after a version DOI is published.
+ * Non-fatal: the DOI is already minted, this is downstream cleanup. On a
+ * pre-refresh throw (e.g. a transient GitHub auth / tree-fetch failure, before
+ * refreshDatasetMetadata reaches its own metadata_columns_error write) the
+ * error is recorded to D1 so operators don't read a stale "success". (The
+ * legacy nemar.org sync this replaced was removed in epic #837.)
+ *
+ * Moved verbatim from routes/webhooks.ts (#905, epic #902); log strings keep
+ * the historical `[webhook]` prefix. Exported: called from the version-DOI
+ * handlers and the /webhooks/manifest-ready callback.
+ */
+export async function refreshMetadataAfterVersionDoi(
+  env: Bindings,
+  datasetId: string,
+  version?: string,
+): Promise<void> {
+  try {
+    await refreshDatasetMetadata(env, datasetId, version);
+  } catch (err) {
+    const msg = errorMessage(err);
+    console.error(`[webhook] metadata refresh failed for ${datasetId} (non-fatal):`, msg);
+    try {
+      await env.DB.prepare(
+        "UPDATE datasets SET metadata_columns_error = ?, updated_at = datetime('now') WHERE dataset_id = ?",
+      )
+        .bind(`metadata refresh threw before columns write: ${msg}`, datasetId)
+        .run();
+    } catch (d1Err) {
+      console.warn(
+        `[webhook] Failed to record metadata refresh error in D1 for ${datasetId}: ${d1Err}`,
+      );
+    }
+  }
+}
+
 export interface EnrichmentRunResult {
   ok: boolean;
   error?: string;
@@ -290,8 +371,10 @@ export interface EnrichmentRunResult {
 /**
  * Field names that enrichDataset surfaces in a 200 response body when a
  * non-fatal sub-step (commit, D1 cache write, EZID DOI sync, ...) fails.
- * Kept in sync with the EnrichmentSuccessBody spread in enrich-dataset.ts
- * and with the warning-emitting shell loop in services/github.ts. The OpenRouter
+ * Kept in sync with the EnrichmentSuccessBody spread in enrich-dataset.ts.
+ * (The workflow-template shell loop that also consumed these fields left this
+ * repo when enrichment moved to the central nemarDatasets/.github workflow;
+ * the old services/github.ts pointer was already stale.) The OpenRouter
  * call is intentionally not in this list: it's the load-bearing Stage 2,
  * and any failure there aborts the pipeline with a 500 rather than a
  * 200-with-warning.
@@ -403,12 +486,12 @@ export function buildReindexFilterQuery(
   options?: ReindexFilterOptions,
 ): { sql: string; params: unknown[] } {
   // Excludes xx% datasets (sandbox/throwaway, not eligible for reindex — see
-  // dataset deletion/publish handlers for the same short-circuit). nm% and on%
+  // dataset deletion/publish handlers for the same short-circuit) EXCEPT staging
+  // exemplars (is_exemplar=1, epic #923; never present in prod). nm% and on%
   // datasets are both refreshed: refreshDatasetMetadata recomputes their D1
   // metadata columns + LLM enrichment, which the catalog endpoint and
   // data.nemar.org/<id>/metadata.json need (#512).
-  const base =
-    "SELECT dataset_id FROM datasets WHERE github_repo IS NOT NULL AND dataset_id NOT LIKE 'xx%'";
+  const base = `SELECT dataset_id FROM datasets WHERE github_repo IS NOT NULL AND (dataset_id NOT LIKE 'xx%' OR ${exemplarOrFragment("")})`;
   if (filter === "all") {
     return { sql: `${base} ORDER BY dataset_id`, params: [] };
   }

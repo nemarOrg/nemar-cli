@@ -7,7 +7,7 @@
  */
 
 import chalk from "chalk";
-import { type Notice, getNotices } from "./api.js";
+import { type Notice, getNotices } from "./api/notices.js";
 import { getConfig, isAuthenticated, setConfig } from "./config.js";
 
 const MAX_DISMISSED = 100;

@@ -40,6 +40,7 @@ import {
 } from "../services/data-router";
 import { parseNemarMetadata } from "../services/datacite";
 import { isValidDatasetId } from "../services/datasetId";
+import { resolveDataBaseOrigin } from "../services/environment";
 import { ORG_NAME } from "../services/github";
 import type { ManifestFile, VersionManifest } from "../services/manifest";
 import { buildPageBundle } from "../services/page-bundle";
@@ -250,6 +251,7 @@ async function manifestJsonHandler(
           version: resolved.version,
           bidsPath: path,
           key: file.key,
+          origin: resolveDataBaseOrigin(env),
         }),
       };
       try {
@@ -711,7 +713,8 @@ async function metadataJsonHandler(env: Bindings, datasetId: string): Promise<Re
   const row = await env.DB.prepare(
     `SELECT dataset_id, name, description, github_repo, concept_doi,
             modalities, subject_count, age_min, age_max,
-            file_size, total_files, tasks, enrichment_json
+            file_size, total_files, tasks, enrichment_json,
+            data_complete, bytes_present
      FROM datasets
      WHERE dataset_id = ?`,
   )
@@ -776,6 +779,8 @@ async function metadataJsonHandler(env: Bindings, datasetId: string): Promise<Re
       file_size: row.file_size,
       total_files: row.total_files,
       tasks: row.tasks,
+      data_complete: row.data_complete,
+      bytes_present: row.bytes_present,
     },
     parsedEnrichment,
     versions,
@@ -1196,6 +1201,7 @@ export async function catalogIndexResponse(env: Bindings, request: Request): Pro
          d.dataset_id,
          d.name,
          d.concept_doi,
+         d.is_exemplar,
          (SELECT version FROM dataset_versions dv
             WHERE dv.dataset_id = d.dataset_id
             ORDER BY dv.created_at DESC LIMIT 1) AS latest_version,
@@ -1204,7 +1210,7 @@ export async function catalogIndexResponse(env: Bindings, request: Request): Pro
             ORDER BY dv.created_at DESC LIMIT 1) AS latest_published_at
        FROM datasets d
        WHERE d.visibility = 'public'
-         AND d.dataset_id NOT LIKE 'xx%'
+         AND (d.dataset_id NOT LIKE 'xx%' OR d.is_exemplar = 1)
          AND d.dataset_id <> 'nm099999'
        ORDER BY d.dataset_id`,
     ).all<CatalogIndexRow>();

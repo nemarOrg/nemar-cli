@@ -12,7 +12,7 @@ import { describe, expect, test } from "bun:test";
 import {
   decidePrescreenOutcome,
   validatePrescreenCallbackBody,
-} from "../backend/src/routes/webhooks";
+} from "../backend/src/routes/callbacks/prescreen";
 
 describe("validatePrescreenCallbackBody", () => {
   const ok = { dataset_id: "nm099999", request_id: 7, verdict: "pass" as const };

@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import type { VersionManifest } from "../src/lib/api";
+import type { VersionManifest } from "../src/lib/api/datasets";
 import { diffManifests } from "../src/lib/manifest-diff";
 
 function manifest(version: string, files: Record<string, string>): VersionManifest {

@@ -22,7 +22,7 @@ import {
   licenseTier,
   parseLicenseTierFilter,
 } from "../backend/src/lib/license";
-import { buildDatasetFilterClauses } from "../backend/src/routes/datasets";
+import { buildDatasetFilterClauses } from "../backend/src/routes/datasets/catalog";
 import { writeDatasetCatalogFields } from "../backend/src/services/dataset-metadata-columns";
 
 const MIG = join(import.meta.dir, "..", "backend/src/db/migrations");

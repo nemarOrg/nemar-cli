@@ -14,6 +14,8 @@
  * - nemar admin doi create/info/update/enrich - DOI management
  * - nemar admin publish list/deny/approve - Publication workflow
  * - nemar admin revert             - Revert dataset to a previous version
+ * - nemar admin withdraw/restore   - Withdraw/restore a published dataset (visibility + EZID DOIs)
+ * - nemar admin recover [status]   - Re-copy epic #967 imports whose upstream is accessible
  * - nemar admin email-preferences show/update - Email notification opt-out
  * - nemar admin notice list/set/clear - System notice management
  * - nemar admin notify              - Send broadcast email to users
@@ -26,40 +28,37 @@ import { Command } from "commander";
 import inquirer from "inquirer";
 import ora from "ora";
 import {
-  ApiError,
-  type Dataset,
+  type AvailabilityReport,
+  type AvailabilityReportResult,
+  type AvailabilityReportSweepBatchResponse,
+  type DataIntegritySweepBatchResponse,
+  type DatasetTransitionResponse,
   type EmailPreferences,
   type HedSweepBatchResponse,
-  type NemarMetadataPayload,
-  ORCID_REGEX,
-  type PublishProgressInfo,
   type ReindexBulkOptions,
   type ReindexBulkResponse,
   type ReindexFilter,
   type ReindexOptions,
   type ReindexResponse,
-  type StepResult,
   type SummaryVersionCoverage,
   addCi,
-  applyS3Lock,
-  approvePublication,
   approveUser,
+  availabilityReport,
+  availabilityReportSweep,
+  availabilityReportSweepReset,
   bulkDeleteDatasets,
   changeUserRole,
   changeVisibility,
   createConceptDoi,
-  createNotice,
+  createExemplar,
+  dataIntegritySweep,
+  dataIntegritySweepReset,
   deleteDataset,
-  deleteNotice,
-  denyPublication,
+  dispatchCooldown,
   dispatchManifest,
   enforceBulk,
   enforceDataset,
-  errorDetail,
-  finalizeDataset,
   getCiStatus,
-  getDataset,
-  getDatasetFiles,
   getDoiInfo,
   getEmailPreferences,
   getFleetDrift,
@@ -67,24 +66,43 @@ import {
   getSummaryCoverage,
   hedSweep,
   hedSweepReset,
-  listAdminNotices,
-  listDatasets,
-  listPublishRequests,
   listUsers,
   publishDataset,
   reindexBulk,
   reindexDataset,
+  remintExemplarDois,
+  restoreDataset,
   retryImport,
   revalidateDataset,
   revokeUser,
   rollbackImport,
   sendBroadcast,
-  submitEnrichment,
   syncCi,
   updateDoi,
   updateEmailPreferences,
   validateCi,
-} from "../lib/api.js";
+  verifyImport,
+  withdrawDataset,
+} from "../lib/api/admin.js";
+import { applyS3Lock, getDatasetFiles } from "../lib/api/data.js";
+import {
+  type Dataset,
+  type NemarMetadataPayload,
+  ORCID_REGEX,
+  finalizeDataset,
+  getDataset,
+  listDatasets,
+  submitEnrichment,
+} from "../lib/api/datasets.js";
+import { ApiError, errorDetail } from "../lib/api/errors.js";
+import { createNotice, deleteNotice, listAdminNotices } from "../lib/api/notices.js";
+import {
+  type PublishProgressInfo,
+  type StepResult,
+  approvePublication,
+  denyPublication,
+  listPublishRequests,
+} from "../lib/api/publish.js";
 import { getConfig, isAuthenticated } from "../lib/config.js";
 import {
   type ConfirmOptions,
@@ -97,15 +115,25 @@ import {
 } from "../lib/confirm.js";
 import { CLI_LIVE_DATASETS, selectRevalidateTargets } from "../lib/fleet.js";
 import {
-  checkDownloadPrerequisites,
   cloneDataset,
   commitRevert,
   createRevertBranch,
-  formatBytes,
-  getVersionCommit,
-  listDatasetVersions,
   pushBranch,
-} from "../lib/git-annex.js";
+} from "../lib/git-annex/clone-push.js";
+import { checkDownloadPrerequisites } from "../lib/git-annex/prereq.js";
+import { getVersionCommit, listDatasetVersions } from "../lib/git-annex/repo-state.js";
+import { formatBytes } from "../lib/progress.js";
+import {
+  type RecoverDatasetEntry,
+  loadRecoverDatasets,
+  resolveImportSources,
+  resolveRecoverTargets,
+} from "../lib/recover-datasets.js";
+import {
+  type WithdrawnDatasetEntry,
+  loadWithdrawnDatasets,
+  resolveWithdrawTargets,
+} from "../lib/withdrawn-datasets.js";
 
 /** Handle common error patterns in admin CLI commands */
 function handleCommandError(
@@ -181,6 +209,8 @@ Dataset Management:
   make-public     - Publish a dataset (permanent, irreversible)
   delete-dataset    - Delete a dataset and all associated resources
   import-openneuro  - Import an OpenNeuro dataset into NEMAR
+  withdraw          - Withdraw a broken published dataset (private + DOI tombstone), reversible
+  restore           - Reverse a withdrawal (public + DOI restore)
 
 Examples:
   $ nemar admin users --verified           # List users awaiting approval
@@ -1299,18 +1329,29 @@ doiCommand
   .description("Update EZID DOI metadata or status")
   .argument("<dataset-id>", "Dataset ID (e.g., nm000104)")
   .option("--make-public", "Transition DOI from reserved to public (permanent)")
+  .option(
+    "--unavailable",
+    "Tombstone the concept DOI (EZID _status=unavailable); concept-only, reversible via --make-public. For a full withdrawal (visibility + every version DOI) use 'nemar admin withdraw' instead.",
+  )
   .option("--refresh", "Refresh metadata from dataset_description.json and .nemar/metadata.json")
   .option(YES_OPTION, YES_DESCRIPTION)
   .option(NO_OPTION, NO_DESCRIPTION)
   .action(
     async (
       datasetId: string,
-      options: { makePublic?: boolean; refresh?: boolean } & ConfirmOptions,
+      options: { makePublic?: boolean; unavailable?: boolean; refresh?: boolean } & ConfirmOptions,
     ) => {
       if (!requireAuth()) return;
 
-      if (!options.makePublic && !options.refresh) {
-        console.log(chalk.yellow("No action specified. Use --make-public and/or --refresh."));
+      if (options.makePublic && options.unavailable) {
+        console.log(chalk.red("Use --make-public or --unavailable, not both."));
+        return;
+      }
+
+      if (!options.makePublic && !options.unavailable && !options.refresh) {
+        console.log(
+          chalk.yellow("No action specified. Use --make-public, --unavailable, and/or --refresh."),
+        );
         return;
       }
 
@@ -1329,11 +1370,26 @@ doiCommand
         }
       }
 
+      if (options.unavailable) {
+        console.log(chalk.yellow("This tombstones the concept DOI (EZID _status=unavailable)."));
+        console.log(chalk.dim("  Reversible with --make-public. Version DOIs are untouched."));
+        console.log();
+
+        const confirmResult = await confirm(
+          `Mark DOI for ${datasetId} unavailable (tombstone)?`,
+          options,
+        );
+        if (confirmResult !== "confirmed") {
+          console.log(chalk.dim(confirmResult === "declined" ? "Skipped" : "Cancelled"));
+          return;
+        }
+      }
+
       const spinner = ora("Updating DOI...").start();
 
       try {
         const result = await updateDoi(datasetId, {
-          status: options.makePublic ? "public" : undefined,
+          status: options.makePublic ? "public" : options.unavailable ? "unavailable" : undefined,
           refresh_metadata: options.refresh,
         });
 
@@ -1954,28 +2010,32 @@ publishCommand
     "after",
     `
 Description:
-  Approve a publication request and run the automated 15-step orchestrator
+  Approve a publication request and run the automated 16-step orchestrator
   to make the dataset publicly accessible with a permanent DOI.
 
   WARNING: This action is PERMANENT. Published datasets cannot be unpublished.
   Once a DOI is assigned, it is permanent and cannot be deleted.
 
-Orchestrator Steps:
+Orchestrator Steps (execution order; shared/publication-steps.ts):
    1. CI Check          - Verify BIDS validation passes, deploy workflows if missing
    2. Enrichment Check  - Verify metadata pipeline has run (warn-only, non-blocking)
-   3. Make Public       - Change GitHub repository visibility to public
-   4. S3 Public Read    - Grant public read access to S3 data
+   3. S3 Public Read    - Grant public read access to S3 data
+   4. Make Public       - Change GitHub repository visibility to public
    5. Tag Protection    - Enable tag protection rules
    6. Create DOI        - Create concept DOI via EZID (or Zenodo if configured)
    7. Update Metadata   - Update dataset metadata from BIDS description
    8. Update README     - Add DOI badge and citation info to README
    9. Create Tag        - Create version tag (e.g., v1.0.0)
   10. Create Release    - Create GitHub release from tag
-  11. Upload to Zenodo  - Upload dataset archive to Zenodo (if Zenodo provider)
+  11. Upload to Zenodo  - Legacy Zenodo upload (disabled; kept for step history)
   12. Publish DOI       - Make DOI public and findable (permanent, irreversible)
-  13. S3 Lock           - Enable S3 Object Lock (prevents data deletion)
-  14. Generate Archive  - Create downloadable zip archive
-  15. Notify User       - Send publication confirmation email
+  13. Version DOI       - Mint the version DOI for this release
+  14. S3 Lock           - Enable S3 Object Lock (prevents data deletion)
+  15. Sync NEMAR        - Legacy nemar.org sync (no-op, retired)
+  16. Notify User       - Send publication confirmation email
+
+  (Archive zip generation is not an orchestrator step; the version-DOI
+  workflow dispatches it separately.)
 
 Resume Capability:
   If a step fails, the orchestrator saves progress. Use --resume to retry
@@ -2007,19 +2067,19 @@ After Approval:
         ? `Resume publication of ${datasetId}`
         : `Approve and publish ${datasetId}`;
       console.log(chalk.cyan(`\n${action}\n`));
-      console.log("This will run the following 15-step orchestrator:");
+      console.log("This will run the following 16-step orchestrator:");
       console.log("   1. Check CI              9. Create version tag");
       console.log("   2. Enrichment check     10. Create GitHub release");
-      console.log("   3. Make repo public     11. Upload to Zenodo");
-      console.log("   4. S3 public read       12. Publish DOI (irreversible)");
-      console.log("   5. Tag protection       13. S3 Object Lock");
+      console.log("   3. S3 public read       11. Upload to Zenodo (no-op)");
+      console.log("   4. Make repo public     12. Publish DOI (irreversible)");
+      console.log("   5. Tag protection       13. Mint version DOI");
       console.log(
         options.sandbox
-          ? "   6. Create DOI (SANDBOX) 14. Generate archive"
-          : "   6. Create DOI           14. Generate archive",
+          ? "   6. Create DOI (SANDBOX) 14. S3 Object Lock"
+          : "   6. Create DOI           14. S3 Object Lock",
       );
-      console.log("   7. Update metadata      15. Notify user");
-      console.log("   8. Update README");
+      console.log("   7. Update metadata      15. Sync NEMAR (no-op)");
+      console.log("   8. Update README        16. Notify user");
       console.log();
 
       // Sandbox warning
@@ -2758,8 +2818,343 @@ adminCommand
   });
 
 // ============================================================================
+// Dataset withdrawal / restore (epic #967 phase 4, #971)
+// ============================================================================
+
+/** Default location of the checked-in withdrawal target list, resolved
+ *  relative to this source file rather than cwd (mirrors
+ *  defaultExemplarFleetPath below). */
+function defaultWithdrawnDatasetsPath(): string {
+  return join(import.meta.dir, "..", "..", "scripts", "withdrawn-datasets.json");
+}
+
+function printTransitionResult(
+  tag: string,
+  datasetId: string,
+  result: DatasetTransitionResponse | undefined,
+  error: string | undefined,
+): void {
+  if (error) {
+    console.log(`  ${chalk.red("error".padEnd(8))} ${datasetId}: ${error}`);
+    return;
+  }
+  if (!result) return;
+  if ("skipped" in result) {
+    console.log(`  ${chalk.yellow("skipped".padEnd(8))} ${datasetId}: ${result.skipped}`);
+    return;
+  }
+
+  const resumeTag = result.resumed ? chalk.yellow(" (resumed)") : "";
+  console.log(chalk.bold(`  ${tag}${datasetId}${resumeTag}`));
+
+  const vColor = result.visibility.status === "failed" ? chalk.red : chalk.green;
+  console.log(`    visibility: ${vColor(result.visibility.status)}`);
+  if (result.visibility.status === "failed") {
+    console.log(chalk.red(`      stage=${result.visibility.stage}: ${result.visibility.error}`));
+    if ("githubReverted" in result.visibility) {
+      const s3Bit =
+        "s3Reverted" in result.visibility ? ` s3Reverted=${result.visibility.s3Reverted}` : "";
+      const revertBit = result.visibility.revertError
+        ? ` revertError=${result.visibility.revertError}`
+        : "";
+      console.log(
+        chalk.dim(`      githubReverted=${result.visibility.githubReverted}${s3Bit}${revertBit}`),
+      );
+    }
+  }
+
+  for (const d of result.dois) {
+    const color =
+      d.status === "failed" ? chalk.red : d.status === "planned" ? chalk.yellow : chalk.green;
+    const label = d.kind === "version" ? `version ${d.version}` : "concept";
+    console.log(`    ${color(d.status.padEnd(8))} ${label} -> ${d.action}  ${chalk.dim(d.doi)}`);
+    if (d.error) console.log(chalk.red(`      ${d.error}`));
+  }
+
+  if (result.warning) {
+    console.log(chalk.yellow(`    warning: ${result.warning}`));
+  }
+}
+
+adminCommand
+  .command("withdraw")
+  .description(
+    "Withdraw a broken published dataset: make it private and tombstone its EZID DOIs (concept + every version). Dry-run by default.",
+  )
+  .argument("[ids...]", "Dataset id(s) to withdraw (omit when using --all)")
+  .option("--all", "Target every entry in the checked-in withdrawn-datasets list")
+  .option("--reason <reason>", "Withdrawal reason (default: the list entry's own reason)")
+  .option("--execute", "Actually apply the withdrawal (default is a dry run)")
+  .option("--force", "Allow a dataset id that is not on the checked-in withdrawn-datasets list")
+  .option(
+    "--withdrawn-file <path>",
+    "Path to the withdrawn-datasets JSON (default: scripts/withdrawn-datasets.json)",
+  )
+  .option(YES_OPTION, YES_DESCRIPTION)
+  .option(NO_OPTION, NO_DESCRIPTION)
+  .option("--json", "Output raw JSON")
+  .action(
+    async (
+      ids: string[],
+      options: {
+        all?: boolean;
+        reason?: string;
+        execute?: boolean;
+        force?: boolean;
+        withdrawnFile?: string;
+        json?: boolean;
+      } & ConfirmOptions,
+    ) => {
+      if (!requireAuth()) return;
+
+      if (ids.length === 0 && !options.all) {
+        console.log(chalk.red("Error: provide dataset id(s) or use --all"));
+        process.exit(1);
+      }
+      if (ids.length > 0 && options.all) {
+        console.log(chalk.red("Error: provide dataset id(s) OR --all, not both"));
+        process.exit(1);
+      }
+
+      const listPath = options.withdrawnFile || defaultWithdrawnDatasetsPath();
+      let entries: WithdrawnDatasetEntry[];
+      try {
+        entries = loadWithdrawnDatasets(listPath);
+      } catch (err) {
+        console.error(chalk.red(`Failed to load withdrawn-datasets file: ${errorDetail(err)}`));
+        process.exit(1);
+      }
+
+      const resolved = options.all
+        ? {
+            targets: entries.map((e) => ({
+              datasetId: e.dataset_id,
+              reason: options.reason || e.reason,
+            })),
+          }
+        : resolveWithdrawTargets(ids, entries, { reason: options.reason, force: options.force });
+
+      if ("error" in resolved) {
+        console.error(chalk.red(resolved.error));
+        process.exit(1);
+      }
+      const targets = resolved.targets;
+
+      const dryRun = !options.execute;
+      const tag = dryRun ? "[dry-run] " : "";
+
+      if (!dryRun) {
+        console.log(
+          chalk.red(
+            `\nWARNING: this makes ${targets.length} dataset(s) private and tombstones their EZID DOIs (concept + every version).`,
+          ),
+        );
+        const confirmResult = await confirm(
+          `Execute withdrawal for ${targets.length} dataset(s)?`,
+          options,
+        );
+        if (confirmResult !== "confirmed") {
+          console.log(chalk.dim(confirmResult === "declined" ? "Skipped" : "Cancelled"));
+          return;
+        }
+      }
+
+      const results: Array<{
+        dataset_id: string;
+        result?: DatasetTransitionResponse;
+        error?: string;
+      }> = [];
+      for (const t of targets) {
+        try {
+          const result = await withdrawDataset(t.datasetId, { reason: t.reason, dryRun });
+          results.push({ dataset_id: t.datasetId, result });
+        } catch (error) {
+          results.push({ dataset_id: t.datasetId, error: errorDetail(error) });
+        }
+      }
+
+      if (options.json) {
+        console.log(JSON.stringify(results, null, 2));
+        return;
+      }
+
+      console.log();
+      for (const r of results) {
+        printTransitionResult(tag, r.dataset_id, r.result, r.error);
+      }
+    },
+  );
+
+adminCommand
+  .command("restore")
+  .description(
+    "Reverse a withdrawal: make a dataset public again and restore its EZID DOIs (concept + every version). Dry-run by default.",
+  )
+  .argument("[ids...]", "Dataset id(s) to restore (omit when using --all)")
+  .option("--all", "Target every entry in the checked-in withdrawn-datasets list")
+  .option("--execute", "Actually apply the restore (default is a dry run)")
+  .option(
+    "--withdrawn-file <path>",
+    "Path to the withdrawn-datasets JSON (default: scripts/withdrawn-datasets.json)",
+  )
+  .option(YES_OPTION, YES_DESCRIPTION)
+  .option(NO_OPTION, NO_DESCRIPTION)
+  .option("--json", "Output raw JSON")
+  .action(
+    async (
+      ids: string[],
+      options: {
+        all?: boolean;
+        execute?: boolean;
+        withdrawnFile?: string;
+        json?: boolean;
+      } & ConfirmOptions,
+    ) => {
+      if (!requireAuth()) return;
+
+      if (ids.length === 0 && !options.all) {
+        console.log(chalk.red("Error: provide dataset id(s) or use --all"));
+        process.exit(1);
+      }
+      if (ids.length > 0 && options.all) {
+        console.log(chalk.red("Error: provide dataset id(s) OR --all, not both"));
+        process.exit(1);
+      }
+
+      let targets: string[];
+      if (options.all) {
+        const listPath = options.withdrawnFile || defaultWithdrawnDatasetsPath();
+        try {
+          targets = loadWithdrawnDatasets(listPath).map((e) => e.dataset_id);
+        } catch (err) {
+          console.error(chalk.red(`Failed to load withdrawn-datasets file: ${errorDetail(err)}`));
+          process.exit(1);
+        }
+      } else {
+        targets = ids;
+      }
+
+      const dryRun = !options.execute;
+      const tag = dryRun ? "[dry-run] " : "";
+
+      if (!dryRun) {
+        console.log(
+          chalk.yellow(
+            `\nThis makes ${targets.length} dataset(s) public again and restores their EZID DOIs.`,
+          ),
+        );
+        const confirmResult = await confirm(
+          `Execute restore for ${targets.length} dataset(s)?`,
+          options,
+        );
+        if (confirmResult !== "confirmed") {
+          console.log(chalk.dim(confirmResult === "declined" ? "Skipped" : "Cancelled"));
+          return;
+        }
+      }
+
+      const results: Array<{
+        dataset_id: string;
+        result?: DatasetTransitionResponse;
+        error?: string;
+      }> = [];
+      for (const datasetId of targets) {
+        try {
+          const result = await restoreDataset(datasetId, { dryRun });
+          results.push({ dataset_id: datasetId, result });
+        } catch (error) {
+          results.push({ dataset_id: datasetId, error: errorDetail(error) });
+        }
+      }
+
+      if (options.json) {
+        console.log(JSON.stringify(results, null, 2));
+        return;
+      }
+
+      console.log();
+      for (const r of results) {
+        printTransitionResult(tag, r.dataset_id, r.result, r.error);
+      }
+    },
+  );
+
+// ============================================================================
 // Import OpenNeuro
 // ============================================================================
+
+/**
+ * The onboard-openneuro.yml copy phase fans each dataset out into 8 shard
+ * jobs, and GitHub caps a workflow's job matrix at 256 entries. Above 32
+ * datasets in one dispatch, the matrix silently instantiates 0 copy jobs
+ * instead of erroring, so a batch must be split before it reaches that cap.
+ * 256 / 8 = 32; this stays a bit under that for headroom.
+ */
+export const MAX_DATASETS_PER_DISPATCH = 30;
+
+/**
+ * Split `ids` into chunks of at most `size`, preserving order. Pure so the
+ * batching logic is unit-testable without a live `gh` call.
+ */
+export function chunkDatasetIds(
+  ids: string[],
+  size: number = MAX_DATASETS_PER_DISPATCH,
+): string[][] {
+  if (ids.length === 0) return [];
+  if (ids.length <= size) return [ids];
+  const chunks: string[][] = [];
+  for (let i = 0; i < ids.length; i += size) {
+    chunks.push(ids.slice(i, i + size));
+  }
+  return chunks;
+}
+
+/**
+ * Dispatch the onboard-openneuro.yml workflow (nemarDatasets/.github) for a
+ * batch of OpenNeuro `ds######` ids -- the prepare/copy/finalize matrix
+ * hardened in epic #967 Phases 1-3. Shared by `import-openneuro`'s default
+ * (non---local) branch, a brand-new import, and `recover --execute` (Phase
+ * 5, #972), a re-copy of an existing import whose S3 content was found
+ * empty; both dispatch the SAME workflow, one gh run per batch.
+ *
+ * Chunks `dsIds` to stay under the 256-job matrix cap (see
+ * MAX_DATASETS_PER_DISPATCH), issuing one `gh workflow run` per chunk. Fails
+ * fast on the first chunk that doesn't dispatch, naming which chunk so the
+ * operator can resume from there instead of re-running the whole batch.
+ */
+async function dispatchOpenNeuroImportWorkflow(
+  dsIds: string[],
+): Promise<{ ok: true } | { ok: false; error: string }> {
+  const { runCommand } = await import("../lib/git-annex/run-command.js");
+  const chunks = chunkDatasetIds(dsIds);
+  if (chunks.length > 1) {
+    console.log(
+      chalk.dim(
+        `  Splitting ${dsIds.length} datasets into ${chunks.length} dispatches (matrix job cap).`,
+      ),
+    );
+  }
+  for (let i = 0; i < chunks.length; i++) {
+    const chunk = chunks[i];
+    const result = await runCommand([
+      "gh",
+      "workflow",
+      "run",
+      "onboard-openneuro.yml",
+      "--repo",
+      "nemarDatasets/.github",
+      "--field",
+      `openneuro_ids=${chunk.join(",")}`,
+    ]);
+    if (result.exitCode !== 0) {
+      return {
+        ok: false,
+        error: `chunk ${i + 1}/${chunks.length} (${chunk.join(",")}): ${result.stderr.trim()}`,
+      };
+    }
+  }
+  return { ok: true };
+}
 
 adminCommand
   .command("import-openneuro")
@@ -2884,23 +3279,12 @@ adminCommand
       }
 
       // Default: dispatch GitHub Actions workflow on nemarDatasets/.github
-      const { runCommand } = await import("../lib/git-annex.js");
-
       const idsStr = ids.join(",");
       console.log(chalk.cyan(`\nDispatching OpenNeuro import workflow for: ${idsStr}\n`));
 
-      const dispatchResult = await runCommand([
-        "gh",
-        "workflow",
-        "run",
-        "onboard-openneuro.yml",
-        "--repo",
-        "nemarDatasets/.github",
-        "--field",
-        `openneuro_ids=${idsStr}`,
-      ]);
-      if (dispatchResult.exitCode !== 0) {
-        console.error(chalk.red(`Failed to dispatch workflow: ${dispatchResult.stderr.trim()}`));
+      const dispatch = await dispatchOpenNeuroImportWorkflow(ids);
+      if (!dispatch.ok) {
+        console.error(chalk.red(`Failed to dispatch workflow: ${dispatch.error}`));
         console.error(
           chalk.dim("Make sure gh CLI is authenticated with access to nemarDatasets org"),
         );
@@ -3004,56 +3388,74 @@ importCommand
   .command("status")
   .description("Show OpenNeuro import job state (failed/quarantined first)")
   .argument("[dataset-id]", "Filter to one dataset id (e.g., on007523)")
-  .option("-s, --status <status>", "Filter by status (failed, quarantined, copying, ...)")
-  .action(async (datasetId: string | undefined, options: { status?: string }) => {
-    if (!requireAuth()) return;
+  .option("-s, --status <status>", "Filter by status (failed, quarantined, incomplete, ...)")
+  .option("-b, --blocklisted", "Only show retry-engine blocklisted rows")
+  .action(
+    async (datasetId: string | undefined, options: { status?: string; blocklisted?: boolean }) => {
+      if (!requireAuth()) return;
 
-    const spinner = ora("Fetching import status...").start();
-    try {
-      const result = await getImportStatus(options.status);
-      spinner.stop();
+      const spinner = ora("Fetching import status...").start();
+      try {
+        const result = await getImportStatus(options.status, options.blocklisted);
+        spinner.stop();
 
-      let rows = result.imports;
-      if (datasetId) rows = rows.filter((r) => r.dataset_id === datasetId);
+        let rows = result.imports;
+        if (datasetId) rows = rows.filter((r) => r.dataset_id === datasetId);
 
-      const counts = result.by_status;
-      console.log(chalk.bold(`\nImport Jobs (${result.total})\n`));
-      console.log(
-        `  ${chalk.yellow(`in-flight ${(counts.preparing ?? 0) + (counts.copying ?? 0) + (counts.finalizing ?? 0)}`)}  ${chalk.green(`complete ${counts.complete ?? 0}`)}  ${chalk.red(`failed ${counts.failed ?? 0}`)}  ${chalk.red(`quarantined ${counts.quarantined ?? 0}`)}  ${chalk.dim(`rolled_back ${counts.rolled_back ?? 0}`)}\n`,
-      );
-
-      if (rows.length === 0) {
-        console.log(chalk.dim("  No import jobs match."));
-        return;
-      }
-
-      console.log(
-        chalk.dim(
-          `  ${"ID".padEnd(12)} ${"Source".padEnd(12)} ${"Stage".padEnd(10)} ${"Status".padEnd(12)} ${"Updated".padEnd(20)}`,
-        ),
-      );
-      console.log(chalk.dim(`  ${"─".repeat(70)}`));
-      for (const r of rows) {
-        const color =
-          r.status === "complete"
-            ? chalk.green
-            : r.status === "failed" || r.status === "quarantined"
-              ? chalk.red
-              : r.status === "rolled_back"
-                ? chalk.dim
-                : chalk.yellow;
-        const updated = r.updated_at ? new Date(r.updated_at).toLocaleString() : "-";
+        const counts = result.by_status;
+        console.log(chalk.bold(`\nImport Jobs (${result.total})\n`));
         console.log(
-          `  ${r.dataset_id.padEnd(12)} ${(r.source_id || "-").padEnd(12)} ${r.stage.padEnd(10)} ${color(r.status.padEnd(12))} ${updated}`,
+          `  ${chalk.yellow(`in-flight ${(counts.preparing ?? 0) + (counts.copying ?? 0) + (counts.finalizing ?? 0)}`)}  ${chalk.green(`complete ${counts.complete ?? 0}`)}  ${chalk.magenta(`incomplete ${counts.incomplete ?? 0}`)}  ${chalk.red(`failed ${counts.failed ?? 0}`)}  ${chalk.red(`quarantined ${counts.quarantined ?? 0}`)}  ${chalk.dim(`rolled_back ${counts.rolled_back ?? 0}`)}\n`,
         );
-        if (r.last_error) console.log(chalk.red(`    ${r.last_error}`));
-        if (r.workflow_run_url) console.log(chalk.dim(`    run: ${r.workflow_run_url}`));
+
+        if (rows.length === 0) {
+          console.log(chalk.dim("  No import jobs match."));
+          return;
+        }
+
+        console.log(
+          chalk.dim(
+            `  ${"ID".padEnd(12)} ${"Source".padEnd(12)} ${"Stage".padEnd(10)} ${"Status".padEnd(12)} ${"Updated".padEnd(20)}`,
+          ),
+        );
+        console.log(chalk.dim(`  ${"─".repeat(70)}`));
+        for (const r of rows) {
+          const color =
+            r.status === "complete"
+              ? chalk.green
+              : r.status === "failed" || r.status === "quarantined"
+                ? chalk.red
+                : r.status === "rolled_back"
+                  ? chalk.dim
+                  : r.status === "incomplete"
+                    ? chalk.magenta
+                    : chalk.yellow;
+          const updated = r.updated_at ? new Date(r.updated_at).toLocaleString() : "-";
+          console.log(
+            `  ${r.dataset_id.padEnd(12)} ${(r.source_id || "-").padEnd(12)} ${r.stage.padEnd(10)} ${color(r.status.padEnd(12))} ${updated}`,
+          );
+          if (r.last_error) console.log(chalk.red(`    ${r.last_error}`));
+          if (r.workflow_run_url) console.log(chalk.dim(`    run: ${r.workflow_run_url}`));
+          if (r.blocklisted) {
+            console.log(
+              chalk.magenta(
+                `    blocklisted (${r.blocklist_reason ?? "unknown"}); recovery_attempts=${r.recovery_attempts}; next_retry=${r.next_retry_at ?? "-"}${r.maintainer_notified_at ? `; maintainer notified ${r.maintainer_notified_at}` : ""}`,
+              ),
+            );
+          } else if (r.status === "incomplete" || r.status === "failed") {
+            console.log(
+              chalk.dim(
+                `    recovery_attempts=${r.recovery_attempts}; next_retry=${r.next_retry_at ?? "-"}`,
+              ),
+            );
+          }
+        }
+      } catch (err) {
+        spinner.fail("Failed to fetch import status");
+        console.error(chalk.red(errorDetail(err)));
       }
-    } catch (err) {
-      spinner.fail("Failed to fetch import status");
-      console.error(chalk.red(errorDetail(err)));
-    }
-  });
+    },
+  );
 
 importCommand
   .command("rollback")
@@ -3116,7 +3518,609 @@ importCommand
     }
   });
 
+importCommand
+  .command("verify")
+  .description("Force a per-key S3 integrity check now (seeds the retry lane or confirms health)")
+  .argument("<dataset-id>", "NEMAR dataset id (e.g., on007523)")
+  .action(async (datasetId: string) => {
+    if (!requireAuth()) return;
+
+    const spinner = ora(`Verifying ${datasetId} against S3...`).start();
+    try {
+      const result = await verifyImport(datasetId);
+      if (result.complete) {
+        spinner.succeed(
+          `${datasetId} verified complete (${result.presentCount}/${result.expectedCount} objects present)`,
+        );
+      } else {
+        spinner.warn(
+          `${datasetId} incomplete: ${result.missingKeys.length}/${result.expectedCount} object(s) missing${result.zeroByteKeys.length > 0 ? ` (${result.zeroByteKeys.length} zero-byte)` : ""}`,
+        );
+        for (const key of result.missingKeys.slice(0, 20)) {
+          console.log(chalk.dim(`    ${key}`));
+        }
+        if (result.missingKeys.length > 20) {
+          console.log(chalk.dim(`    ... and ${result.missingKeys.length - 20} more`));
+        }
+      }
+    } catch (err) {
+      spinner.fail(`Failed to verify ${datasetId}`);
+      console.error(chalk.red(errorDetail(err)));
+    }
+  });
+
 adminCommand.addCommand(importCommand);
+
+// ============================================================================
+// Dataset recovery (epic #967 phase 5, #972)
+// ============================================================================
+
+/** Default location of the checked-in recovery target list, resolved
+ *  relative to this source file rather than cwd (mirrors
+ *  defaultWithdrawnDatasetsPath). */
+function defaultRecoverDatasetsPath(): string {
+  return join(import.meta.dir, "..", "..", "scripts", "recover-datasets.json");
+}
+
+const recoverCommand = new Command("recover").description(
+  "Re-copy epic #967 OpenNeuro imports published with 0-byte content, whose upstream is accessible (Phase 5, #972). Dry-run by default.",
+);
+
+recoverCommand
+  .argument("[ids...]", "Dataset id(s) to recover (omit when using --all)")
+  .option("--all", "Target every entry in the checked-in recover-datasets list")
+  .option("--execute", "Actually verify + dispatch the re-copy (default is a dry run)")
+  .option("--force", "Allow a dataset id that is not on the checked-in recover-datasets list")
+  .option(
+    "--recover-file <path>",
+    "Path to the recover-datasets JSON (default: scripts/recover-datasets.json)",
+  )
+  .option(YES_OPTION, YES_DESCRIPTION)
+  .option(NO_OPTION, NO_DESCRIPTION)
+  .option("--json", "Output raw JSON")
+  .addHelpText(
+    "after",
+    `
+Description:
+  Re-dispatches the hardened OpenNeuro copy path (epic #967 Phases 1-3) for
+  datasets published with 0-byte content whose OpenNeuro upstream is still
+  accessible today. A direct re-dispatch onto a still-'complete' import_jobs
+  row silently no-ops the status callback (only a non-terminal row accepts
+  an update), so --execute FIRST forces a per-key S3 verify on every target
+  (reclassifying a stale 'complete' row to 'incomplete'), THEN dispatches
+  ONE batch 'gh workflow run onboard-openneuro.yml' for the whole set.
+  Afterward, treat 'nemar admin recover status' (datasets.data_complete) as
+  the completion oracle, not import_jobs.status.
+
+  The actual re-copy is production-only IN PRACTICE: outside production the
+  target on###### ids have no import_jobs row (dev D1 is exemplars-only), so
+  source-id resolution fails loudly before any dispatch. But verifyImport
+  itself is NOT environment-gated -- --execute's reclassify step ('complete'
+  -> 'incomplete') runs against whatever backend the CLI is pointed at, so
+  only ever run --execute against production. A target already
+  quarantined/blocklisted by the Phase 2 retry engine is not un-stuck by
+  this reclassify (which only flips complete -> incomplete); trust
+  datasets.data_complete, not import_jobs.status. Acceptance audit: run
+  'nemar admin data-integrity-sweep --reaudit' after the batch lands
+  (--older-than 0 does NOT converge here -- its cutoff is relative to an
+  ever-advancing now(), so a just-stamped row re-qualifies on the very next
+  batch; --reaudit anchors the cutoff once so remaining reaches 0, #980).`,
+  )
+  .action(
+    async (
+      ids: string[],
+      options: {
+        all?: boolean;
+        execute?: boolean;
+        force?: boolean;
+        recoverFile?: string;
+        json?: boolean;
+      } & ConfirmOptions,
+    ) => {
+      if (!requireAuth()) return;
+
+      if (ids.length === 0 && !options.all) {
+        console.log(chalk.red("Error: provide dataset id(s) or use --all"));
+        process.exit(1);
+      }
+      if (ids.length > 0 && options.all) {
+        console.log(chalk.red("Error: provide dataset id(s) OR --all, not both"));
+        process.exit(1);
+      }
+
+      const listPath = options.recoverFile || defaultRecoverDatasetsPath();
+      let entries: RecoverDatasetEntry[];
+      try {
+        entries = loadRecoverDatasets(listPath);
+      } catch (err) {
+        console.error(chalk.red(`Failed to load recover-datasets file: ${errorDetail(err)}`));
+        process.exit(1);
+      }
+
+      const resolved = options.all
+        ? { targets: entries.map((e) => e.dataset_id) }
+        : resolveRecoverTargets(ids, entries, { force: options.force });
+
+      if ("error" in resolved) {
+        console.error(chalk.red(resolved.error));
+        process.exit(1);
+      }
+      const targets = resolved.targets;
+
+      if (!options.execute) {
+        // JSON first and exclusive: `recover --all --json | jq` must see pure
+        // JSON on stdout, nothing else.
+        if (options.json) {
+          console.log(JSON.stringify({ dry_run: true, targets }, null, 2));
+          return;
+        }
+        console.log(chalk.cyan(`\n[dry-run] Would recover ${targets.length} dataset(s):\n`));
+        for (const id of targets) {
+          const note = entries.find((e) => e.dataset_id === id)?.note;
+          console.log(`  ${id}${note ? chalk.dim(` - ${note}`) : ""}`);
+        }
+        console.log(
+          chalk.dim(
+            "\nEach target: POST /admin/imports/:id/verify (reclassify), then one batch " +
+              "gh workflow run onboard-openneuro.yml for the whole set. Pass --execute to run.",
+          ),
+        );
+        return;
+      }
+
+      // Every human-readable console.log below is gated behind `!options.json`
+      // so `recover --execute --json | jq` sees pure JSON on stdout; the JSON
+      // result is assembled as the flow proceeds and printed once at the end
+      // (it needs the dispatch/verify results, so it can't print up front the
+      // way the dry-run branch above does). ora spinners write to stderr by
+      // default, so they're left unguarded.
+      if (!options.json) {
+        console.log(
+          chalk.yellow(
+            `\nThis verifies (reclassifies) and re-dispatches the OpenNeuro copy for ${targets.length} dataset(s).`,
+          ),
+        );
+      }
+      const confirmResult = await confirm(
+        `Execute recovery for ${targets.length} dataset(s)?`,
+        options,
+      );
+      if (confirmResult !== "confirmed") {
+        if (!options.json) {
+          console.log(chalk.dim(confirmResult === "declined" ? "Skipped" : "Cancelled"));
+        }
+        return;
+      }
+
+      // Resolve each target's OpenNeuro ds###### source id from import_jobs
+      // BEFORE any mutating call, so a target with no row fails loudly up
+      // front rather than after some targets have already been reclassified.
+      const resolveSpinner = ora("Resolving import sources...").start();
+      let sourceByTarget: Map<string, string>;
+      let missingSource: string[];
+      try {
+        const status = await getImportStatus();
+        ({ sourceByTarget, missingSource } = resolveImportSources(targets, status.imports));
+      } catch (err) {
+        resolveSpinner.fail("Failed to fetch import job state");
+        console.error(chalk.red(errorDetail(err)));
+        process.exit(1);
+      }
+      if (missingSource.length > 0) {
+        resolveSpinner.fail("Some targets have no import_jobs source to recover from");
+        for (const id of missingSource) {
+          console.error(chalk.red(`  ${id}: no import_jobs row (or empty source_id)`));
+        }
+        process.exit(1);
+      }
+      resolveSpinner.succeed(`Resolved ${targets.length} OpenNeuro source id(s)`);
+
+      const verifyResults: Array<{ dataset_id: string; ok: boolean; error?: string }> = [];
+      for (const id of targets) {
+        const verifySpinner = ora(`Verifying ${id}...`).start();
+        try {
+          const result = await verifyImport(id);
+          verifyResults.push({ dataset_id: id, ok: true });
+          verifySpinner.succeed(
+            `${id} reclassified: ${
+              result.complete
+                ? "already complete"
+                : `incomplete (${result.missingKeys.length}/${result.expectedCount} missing)`
+            }`,
+          );
+        } catch (err) {
+          verifyResults.push({ dataset_id: id, ok: false, error: errorDetail(err) });
+          verifySpinner.fail(`${id}: verify failed - ${errorDetail(err)}`);
+        }
+      }
+
+      const verifiedTargets = verifyResults.filter((r) => r.ok).map((r) => r.dataset_id);
+      const failedTargets = verifyResults.filter((r) => !r.ok);
+      if (verifiedTargets.length === 0) {
+        console.error(chalk.red("\nNo targets verified successfully; not dispatching."));
+        process.exit(1);
+      }
+
+      // biome-ignore lint/style/noNonNullAssertion: sourceByTarget covers every id in verifiedTargets (checked above)
+      const dsIds = verifiedTargets.map((id) => sourceByTarget.get(id)!);
+      if (!options.json) {
+        console.log(
+          chalk.cyan(
+            `\nDispatching onboard-openneuro.yml for ${dsIds.length} dataset(s): ${dsIds.join(", ")}\n`,
+          ),
+        );
+      }
+      const dispatch = await dispatchOpenNeuroImportWorkflow(dsIds);
+
+      // Best-effort: push next_retry_at forward for the just-dispatched
+      // targets so the Phase-2 retry cron (sweepImportRetries) doesn't
+      // independently re-dispatch the same onboard-openneuro.yml run on its
+      // next tick (#981). A failure here is non-corrupting -- worst case the
+      // cron redundantly re-dispatches once -- so it must not fail the
+      // recovery itself, only warn.
+      //
+      // Runs BEFORE the dispatch.ok check below, and unconditionally on
+      // verifiedTargets (not just the ids of chunks that actually fired):
+      // verifyImport already reclassified every one of verifiedTargets to
+      // 'incomplete' with next_retry_at=now before we got here, so if a LATER
+      // chunk fails after an EARLIER chunk already ran `gh workflow run`, the
+      // already-dispatched datasets still need cooling down -- otherwise the
+      // cron re-dispatches exactly the datasets this whole mechanism exists to
+      // protect (the #981 bug, in the partial-failure case). Cooling down the
+      // ids whose dispatch never fired is harmless: the operator resumes the
+      // failed chunk manually, and any re-run of `recover` re-verifies first
+      // (resetting next_retry_at=now again), so this is overwritten either way.
+      let cooldown: { updated: number } | { error: string };
+      try {
+        cooldown = await dispatchCooldown(verifiedTargets);
+        if (!options.json && cooldown.updated < verifiedTargets.length) {
+          console.log(
+            chalk.dim(
+              `  (${verifiedTargets.length - cooldown.updated} of ${verifiedTargets.length} target(s) needed no cooldown: already complete, nothing for the cron to re-dispatch)`,
+            ),
+          );
+        }
+      } catch (err) {
+        cooldown = { error: errorDetail(err) };
+        console.warn(
+          chalk.yellow(
+            `\nWarning: failed to set dispatch cooldown (${errorDetail(err)}); the retry cron may briefly re-dispatch these datasets (non-corrupting).`,
+          ),
+        );
+      }
+
+      if (!dispatch.ok) {
+        console.error(chalk.red(`Failed to dispatch workflow: ${dispatch.error}`));
+        console.error(
+          chalk.dim("Make sure gh CLI is authenticated with access to nemarDatasets org"),
+        );
+        process.exit(1);
+      }
+
+      if (!options.json) {
+        console.log(chalk.green("Workflow dispatched successfully"));
+        console.log(
+          chalk.dim(
+            "  Monitor at: https://github.com/nemarDatasets/.github/actions/workflows/onboard-openneuro.yml",
+          ),
+        );
+        console.log(chalk.dim("  Or run: gh run list --repo nemarDatasets/.github --limit 5"));
+        console.log(
+          chalk.dim(
+            "  Watch progress with: nemar admin recover status  /  nemar admin data-integrity-sweep --reaudit",
+          ),
+        );
+
+        if (failedTargets.length > 0) {
+          console.log(chalk.yellow(`\n${failedTargets.length} target(s) skipped (verify failed):`));
+          for (const f of failedTargets) console.log(chalk.red(`  ${f.dataset_id}: ${f.error}`));
+        }
+      }
+
+      if (options.json) {
+        console.log(
+          JSON.stringify(
+            { dispatched: verifiedTargets, skipped: failedTargets, dispatch, cooldown },
+            null,
+            2,
+          ),
+        );
+      }
+
+      // Non-zero exit on partial verify failure so shell scripts can chain
+      // safely (mirrors reindex/hed-sweep's convention); the JSON/human
+      // output above still prints either way, this only affects the exit
+      // code.
+      if (failedTargets.length > 0) process.exit(1);
+    },
+  );
+
+// `status` shares --all/--recover-file/--json with recoverCommand's own
+// action above. Commander does not merge parent+child option VALUES when a
+// flag of the same name is declared on both (the parent's parseOptions
+// consumes it first, regardless of whether it appears before or after
+// "status" on the command line -- the child then sees an empty value for
+// that key), so the options are redeclared here ONLY for --help visibility
+// and read back via optsWithGlobals(), which merges this command's own
+// (empty) values with its ancestors' (the parent's real, captured values).
+const recoverStatusCommand = recoverCommand
+  .command("status")
+  .description("Report data_complete/bytes_present progress for recover targets")
+  .argument("[ids...]", "Dataset id(s) to check (omit when using --all)")
+  .option("--all", "Check every entry in the checked-in recover-datasets list")
+  .option(
+    "--recover-file <path>",
+    "Path to the recover-datasets JSON (default: scripts/recover-datasets.json)",
+  )
+  .option("--json", "Output raw JSON");
+
+recoverStatusCommand.action(async (ids: string[]) => {
+  const options = recoverStatusCommand.optsWithGlobals() as {
+    all?: boolean;
+    recoverFile?: string;
+    json?: boolean;
+  };
+  if (!requireAuth()) return;
+
+  if (ids.length === 0 && !options.all) {
+    console.log(chalk.red("Error: provide dataset id(s) or use --all"));
+    process.exit(1);
+  }
+  if (ids.length > 0 && options.all) {
+    console.log(chalk.red("Error: provide dataset id(s) OR --all, not both"));
+    process.exit(1);
+  }
+
+  const listPath = options.recoverFile || defaultRecoverDatasetsPath();
+  let entries: RecoverDatasetEntry[];
+  try {
+    entries = loadRecoverDatasets(listPath);
+  } catch (err) {
+    console.error(chalk.red(`Failed to load recover-datasets file: ${errorDetail(err)}`));
+    process.exit(1);
+  }
+  const targets = options.all ? entries.map((e) => e.dataset_id) : ids;
+
+  const results: Array<{
+    dataset_id: string;
+    data_complete: number | null;
+    bytes_present: number | null;
+    file_size: number | null;
+    error?: string;
+  }> = [];
+  for (const id of targets) {
+    try {
+      const dataset = await getDataset(id);
+      results.push({
+        dataset_id: id,
+        data_complete: dataset.data_complete ?? null,
+        bytes_present: dataset.bytes_present ?? null,
+        file_size: dataset.file_size ?? null,
+      });
+    } catch (err) {
+      results.push({
+        dataset_id: id,
+        data_complete: null,
+        bytes_present: null,
+        file_size: null,
+        error: errorDetail(err),
+      });
+    }
+  }
+
+  if (options.json) {
+    console.log(JSON.stringify(results, null, 2));
+    return;
+  }
+
+  console.log(chalk.bold(`\nRecover status (${results.length})\n`));
+  let completeCount = 0;
+  for (const r of results) {
+    if (r.error) {
+      console.log(`  ${r.dataset_id.padEnd(10)} ${chalk.red(`error: ${r.error}`)}`);
+      continue;
+    }
+    if (r.data_complete === 1) completeCount++;
+    const label =
+      r.data_complete === 1
+        ? chalk.green("complete")
+        : r.data_complete === 0
+          ? chalk.red("incomplete")
+          : chalk.dim("unaudited");
+    const bytes =
+      r.bytes_present != null && r.file_size != null
+        ? ` ${formatBytes(r.bytes_present)}/${formatBytes(r.file_size)}`
+        : "";
+    console.log(`  ${r.dataset_id.padEnd(10)} ${label}${bytes}`);
+  }
+  console.log(chalk.bold(`\n${completeCount}/${results.length} data_complete`));
+});
+
+adminCommand.addCommand(recoverCommand);
+
+// ============================================================================
+// Exemplar staging fleet (epic #923, Phase 5)
+// ============================================================================
+
+const EXEMPLAR_ID_RE = /^xx0999\d{2}$/;
+const EXEMPLAR_SOURCE_ID_RE = /^(nm|on)\d{6}$/;
+
+/** Default location of the curated fleet spec, resolved relative to this
+ *  source file rather than cwd. Only present in a repo checkout (not
+ *  published to npm) — `--all` is a maintainer/CI tool, not an end-user one. */
+function defaultExemplarFleetPath(): string {
+  return join(import.meta.dir, "..", "..", "scripts", "exemplar-fleet.json");
+}
+
+const exemplarCommand = new Command("exemplar").description(
+  "Clone public nm/on datasets into staging exemplars (xx099900-xx099999)",
+);
+
+exemplarCommand
+  .command("create")
+  .description("Clone a public NEMAR dataset into a staging exemplar")
+  .argument("[xx-id]", "Exemplar dataset id (e.g., xx099900); omit with --all")
+  .option("--source <id>", "Source nm/on dataset id to clone (overrides the fleet file)")
+  .option("--all", "Clone every entry in the fleet file")
+  .option("--fleet-file <path>", "Path to the fleet JSON (default: scripts/exemplar-fleet.json)")
+  .option("--publish", "Request and approve publication after data lands (mints a sandbox DOI)")
+  .option("--include-derived", "Also copy zarr/, archives/, and records.json derived artifacts")
+  .action(
+    async (
+      xxId: string | undefined,
+      options: {
+        source?: string;
+        all?: boolean;
+        fleetFile?: string;
+        publish?: boolean;
+        includeDerived?: boolean;
+      },
+    ) => {
+      if (!requireAuth()) return;
+
+      const { cloneExemplar, loadExemplarFleet } = await import("../lib/exemplar-clone.js");
+      const fleetPath = options.fleetFile || defaultExemplarFleetPath();
+      const cloneOpts = { publish: options.publish, includeDerived: options.includeDerived };
+
+      if (options.all) {
+        if (xxId || options.source) {
+          console.error(chalk.red("--all cannot be combined with an xx-id or --source"));
+          process.exit(1);
+        }
+        let entries: Awaited<ReturnType<typeof loadExemplarFleet>>;
+        try {
+          entries = loadExemplarFleet(fleetPath);
+        } catch (err) {
+          console.error(chalk.red(`Failed to load fleet file: ${errorDetail(err)}`));
+          process.exit(1);
+        }
+
+        let failures = 0;
+        for (const entry of entries) {
+          if (entry.source_id === "nm000000") {
+            console.log(
+              chalk.yellow(`Skipping ${entry.xx_id}: placeholder source_id not yet finalized`),
+            );
+            continue;
+          }
+          try {
+            await cloneExemplar({ xxId: entry.xx_id, sourceId: entry.source_id, ...cloneOpts });
+          } catch (err) {
+            failures++;
+            console.error(chalk.red(`${entry.xx_id} failed: ${errorDetail(err)}`));
+          }
+        }
+        if (failures > 0) {
+          console.error(chalk.red(`\n${failures} of ${entries.length} fleet entries failed`));
+          process.exit(1);
+        }
+        return;
+      }
+
+      if (!xxId) {
+        console.error(chalk.red("An xx-id argument is required unless --all is passed"));
+        process.exit(1);
+      }
+      if (!EXEMPLAR_ID_RE.test(xxId)) {
+        console.error(chalk.red(`Invalid exemplar id "${xxId}". Expected xx099900-xx099999.`));
+        process.exit(1);
+      }
+
+      let sourceId = options.source;
+      if (!sourceId) {
+        try {
+          const entries = loadExemplarFleet(fleetPath);
+          sourceId = entries.find((e) => e.xx_id === xxId)?.source_id;
+        } catch (err) {
+          console.error(chalk.red(`Failed to load fleet file: ${errorDetail(err)}`));
+          process.exit(1);
+        }
+      }
+      if (!sourceId) {
+        console.error(
+          chalk.red(
+            `No source dataset for ${xxId}. Pass --source <nm/on id> or add it to the fleet file.`,
+          ),
+        );
+        process.exit(1);
+      }
+      if (!EXEMPLAR_SOURCE_ID_RE.test(sourceId)) {
+        console.error(chalk.red(`Invalid source id "${sourceId}". Expected an nm/on dataset id.`));
+        process.exit(1);
+      }
+
+      try {
+        await cloneExemplar({ xxId, sourceId, ...cloneOpts });
+      } catch (error) {
+        console.error(chalk.red(`\nExemplar clone failed: ${errorDetail(error)}`));
+        process.exit(1);
+      }
+    },
+  );
+
+exemplarCommand
+  .command("status")
+  .description("Show which fleet entries have been cloned and their current state")
+  .option("--fleet-file <path>", "Path to the fleet JSON (default: scripts/exemplar-fleet.json)")
+  .action(async (options: { fleetFile?: string }) => {
+    if (!requireAuth()) return;
+
+    const { loadExemplarFleet } = await import("../lib/exemplar-clone.js");
+    const fleetPath = options.fleetFile || defaultExemplarFleetPath();
+    let entries: Awaited<ReturnType<typeof loadExemplarFleet>>;
+    try {
+      entries = loadExemplarFleet(fleetPath);
+    } catch (err) {
+      console.error(chalk.red(`Failed to load fleet file: ${errorDetail(err)}`));
+      process.exit(1);
+    }
+
+    console.log(chalk.bold(`\nExemplar Fleet (${entries.length})\n`));
+    for (const entry of entries) {
+      try {
+        const dataset = await getDataset(entry.xx_id);
+        console.log(
+          `  ${entry.xx_id.padEnd(10)} ${entry.modality.padEnd(6)} <- ${entry.source_id.padEnd(10)} ${chalk.green(dataset.visibility)}  doi=${dataset.concept_doi ?? "none"}`,
+        );
+      } catch (err) {
+        if (err instanceof ApiError && err.statusCode === 404) {
+          console.log(
+            `  ${entry.xx_id.padEnd(10)} ${entry.modality.padEnd(6)} <- ${entry.source_id.padEnd(10)} ${chalk.dim("not created")}`,
+          );
+        } else {
+          console.log(
+            `  ${entry.xx_id.padEnd(10)} ${entry.modality.padEnd(6)} <- ${entry.source_id.padEnd(10)} ${chalk.red(`status check failed (${errorDetail(err)})`)}`,
+          );
+        }
+      }
+    }
+  });
+
+exemplarCommand
+  .command("remint-dois")
+  .description("Re-mint an exemplar's sandbox concept DOI (idempotent)")
+  .argument("<xx-id>", "Exemplar dataset id (e.g., xx099900)")
+  .action(async (xxId: string) => {
+    if (!requireAuth()) return;
+
+    const spinner = ora(`Re-minting DOIs for ${xxId}...`).start();
+    try {
+      const result = await remintExemplarDois(xxId);
+      spinner.succeed(`Re-minted ${result.concept_doi} (status: ${result.status})`);
+      for (const w of result.warnings ?? []) {
+        console.log(chalk.yellow(`  ${w}`));
+      }
+    } catch (err) {
+      handleCommandError(err, spinner, "Failed to re-mint exemplar DOIs", {
+        400: "Not an exemplar dataset",
+        403: "Exemplar DOI re-mint is disabled in production",
+        404: "Dataset not found",
+      });
+      process.exit(1);
+    }
+  });
+
+adminCommand.addCommand(exemplarCommand);
 
 // ============================================================================
 // Reindex (epic #417 phase 3): refresh enrichment + nemar.org sync +
@@ -3643,6 +4647,202 @@ reindexCommand
 
 adminCommand.addCommand(reindexCommand);
 
+const availabilityReportCommand = new Command("availability-report")
+  .description(
+    "Report how much of a dataset's declared data is present in S3, and exactly which files are missing + why (#1000). Dry-run by default. --all backfills every managed dataset (#1001).",
+  )
+  .argument("[dataset-id]", "Dataset ID (e.g., nm000103)")
+  .option(
+    "--write",
+    "Commit the report to .nemar/availability-report.json on main (default: preview only)",
+  )
+  .option("--all", "Backfill every managed dataset instead of a single one (#1001)")
+  .option(
+    "--missing-only",
+    "With --all, sweep only datasets already known incomplete (data_complete=0)",
+  )
+  .option("--limit <n>", "With --all, datasets per batch (server clamps to [1,10])", "10")
+  .option("--reset", "With --all, clear every stamped sweep row so it re-sweeps from scratch")
+  .option("--verbose", "With --all, print per-batch progress")
+  .option("--json", "Output raw JSON")
+  .action(
+    async (
+      datasetId: string | undefined,
+      options: {
+        write?: boolean;
+        all?: boolean;
+        missingOnly?: boolean;
+        limit?: string;
+        reset?: boolean;
+        verbose?: boolean;
+        json?: boolean;
+      },
+    ) => {
+      if (!requireAuth()) return;
+
+      if (!datasetId && !options.all) {
+        console.error(chalk.red("Provide a dataset-id or --all"));
+        process.exit(1);
+      }
+      if (datasetId && (options.all || options.reset || options.missingOnly)) {
+        console.error(
+          chalk.red("--all/--reset/--missing-only cannot be combined with a dataset id"),
+        );
+        process.exit(1);
+      }
+
+      // Single-dataset path (Phase 1, #1000)
+      if (datasetId) {
+        const spinner = ora(
+          options.write
+            ? `Generating and writing availability report for ${datasetId}...`
+            : `Previewing availability report for ${datasetId}...`,
+        ).start();
+        let result: AvailabilityReportResult;
+        try {
+          result = await availabilityReport(datasetId, { write: options.write === true });
+        } catch (err) {
+          spinner.fail(`Failed to generate availability report for ${datasetId}`);
+          console.error(chalk.red(errorDetail(err)));
+          process.exit(1);
+        }
+
+        const report: AvailabilityReport = "report" in result ? result.report : result;
+        const written = "report" in result;
+        spinner.succeed(
+          written
+            ? `${datasetId}: availability report written to .nemar/availability-report.json`
+            : `${datasetId}: availability report (dry run, not written)`,
+        );
+
+        if (options.json) {
+          console.log(JSON.stringify(result, null, 2));
+          return;
+        }
+
+        console.log();
+        if (report.version === null) {
+          console.log(
+            chalk.yellow(
+              "  No published version manifest to compare against; completeness unknown.",
+            ),
+          );
+        } else {
+          console.log(`  Version:   ${report.version}`);
+        }
+        console.log(`  Complete:  ${report.complete ? chalk.green("yes") : chalk.red("no")}`);
+        console.log(
+          `  Files:     ${report.completeness.files_present}/${report.completeness.files_declared} present`,
+        );
+        const bytesLine = `${formatBytes(report.completeness.bytes_present)}/${formatBytes(report.completeness.bytes_declared)}`;
+        const pct =
+          report.completeness.pct_bytes != null
+            ? ` (${(report.completeness.pct_bytes * 100).toFixed(1)}%)`
+            : "";
+        console.log(`  Bytes:     ${bytesLine}${pct}`);
+        if (report.blocklist_reason) {
+          console.log(chalk.yellow(`  Blocklisted: ${report.blocklist_reason}`));
+        }
+        if (report.missing.length > 0) {
+          console.log();
+          console.log(chalk.dim(`  Missing (${report.missing.length}):`));
+          for (const m of report.missing) {
+            console.log(chalk.dim(`    - ${m.path} [${m.reason}]`));
+          }
+        }
+        return;
+      }
+
+      // Bulk path (--all, Phase 2, #1001)
+      if (options.reset) {
+        const spinner = ora("Resetting availability-report sweep state...").start();
+        try {
+          const r = await availabilityReportSweepReset();
+          spinner.succeed(
+            `Cleared ${r.reset} stamped row(s); eligible datasets are candidates again`,
+          );
+          if (options.json) console.log(JSON.stringify(r, null, 2));
+        } catch (err) {
+          spinner.fail("Reset failed");
+          console.error(chalk.red(errorDetail(err)));
+          process.exit(1);
+        }
+        return;
+      }
+
+      const limit = Number.parseInt(options.limit ?? "10", 10) || 10;
+      const missingOnly = options.missingOnly === true;
+      const totals = { processed: 0, written: 0, errors: 0 };
+      const spinner = ora("Sweeping datasets for availability reports...").start();
+
+      let batch = 0;
+      let remaining: number | null = null;
+      let prevRemaining: number | null = null;
+      try {
+        let res: AvailabilityReportSweepBatchResponse;
+        do {
+          res = await availabilityReportSweep({ limit, missingOnly });
+          batch++;
+          totals.processed += res.processed;
+          totals.written += res.written;
+          totals.errors += res.errors.length;
+          remaining = res.remaining;
+
+          if (options.verbose) {
+            spinner.stop();
+            console.log(
+              `  [batch ${batch}] processed=${res.processed} written=${res.written} errors=${res.errors.length} remaining=${remaining ?? "?"}`,
+            );
+            for (const e of res.errors) console.log(`    ${chalk.red(e.dataset_id)}: ${e.error}`);
+            spinner.start("Sweeping datasets for availability reports...");
+          } else {
+            spinner.text = `Sweeping datasets for availability reports... ${totals.processed} processed, ${remaining ?? "?"} remaining`;
+          }
+
+          // Progress guard: availability_report_at is stamped only after a
+          // successful write, so a persistently failing batch never advances --
+          // bail instead of looping forever.
+          if (remaining != null && prevRemaining != null && remaining >= prevRemaining) {
+            spinner.warn(`No progress (remaining stuck at ${remaining}); stopping - see errors`);
+            break;
+          }
+          prevRemaining = remaining;
+
+          if ((remaining ?? 0) > 0) await sleep(1000); // pace the GitHub-heavy batches
+        } while ((remaining ?? 0) > 0);
+
+        spinner.stop();
+      } catch (err) {
+        spinner.fail("Availability-report sweep failed");
+        console.error(chalk.red(errorDetail(err)));
+        process.exit(1);
+      }
+
+      if (options.json) {
+        console.log(JSON.stringify({ ...totals, batches: batch, remaining }, null, 2));
+      } else {
+        console.log();
+        if (remaining === null) {
+          console.log(
+            chalk.yellow(
+              "Warning: backend returned a null remaining count; the sweep may be incomplete - check server logs.",
+            ),
+          );
+        }
+        console.log(
+          chalk.cyan(
+            `Done in ${batch} batch(es): processed=${totals.processed} written=${totals.written} errors=${totals.errors} remaining=${remaining ?? "unknown"}`,
+          ),
+        );
+      }
+      // Non-zero exit on errors OR an indeterminate (null) remaining, so a caller
+      // never reads a partial/uncertain sweep as success.
+      if (totals.errors > 0 || remaining === null) process.exit(1);
+    },
+  );
+
+adminCommand.addCommand(availabilityReportCommand);
+
 const hedSweepCommand = new Command("hed-sweep").description(
   "Backfill HED detection (has_hed / hed_version) for existing datasets (#869)",
 );
@@ -3745,6 +4945,228 @@ hedSweepCommand
   );
 
 adminCommand.addCommand(hedSweepCommand);
+
+/** One data-integrity-sweep batch, as consumed by {@link runReauditLoop}. */
+export interface ReauditBatchResult {
+  processed: number;
+  complete: number;
+  incomplete: number;
+  unknown: number;
+  errors: { dataset_id: string; error: string }[];
+  remaining: number | null;
+}
+
+export interface ReauditLoopResult {
+  batches: number;
+  totals: {
+    processed: number;
+    complete: number;
+    incomplete: number;
+    unknown: number;
+    errors: number;
+  };
+  remaining: number | null;
+  /** Hit the no-progress guard (remaining didn't strictly decrease) and stopped early. */
+  stalled: boolean;
+}
+
+/**
+ * Pure convergence loop driving `nemar admin data-integrity-sweep --reaudit`
+ * (#980 review fix). `getBefore()` is called EXACTLY ONCE, before the first
+ * `fetchBatch` call, and that single captured value is threaded UNCHANGED
+ * into every subsequent `fetchBatch(before)` call -- this is the convergence
+ * property itself (an anchored cutoff, not a moving `now()`-relative one; see
+ * the `?before=` doc comment on the sweep endpoint in datasets-lifecycle.ts).
+ *
+ * No Date/network dependency of its own, so both the anchoring property (one
+ * capture, reused every call) and the termination property (stop at
+ * remaining=0, or on a stalled/non-decreasing `remaining`) are directly
+ * unit-testable with a plain callback -- a future regression that re-derives
+ * `before` inside the loop (the exact "moving cutoff never converges" bug
+ * this whole flag exists to fix) would surface as differing `before` values
+ * across `fetchBatch` calls in the test, not just as a slow production
+ * incident that's hard to reproduce.
+ *
+ * `onBatch`/`sleepBetweenBatches` are optional hooks for the CLI's own
+ * per-batch UI (spinner text, verbose printing, pacing sleep) -- kept out of
+ * the aggregation/termination logic itself so a test can omit them entirely.
+ */
+export async function runReauditLoop(
+  getBefore: () => string | undefined,
+  fetchBatch: (before: string | undefined) => Promise<ReauditBatchResult>,
+  hooks?: {
+    onBatch?: (
+      res: ReauditBatchResult,
+      totals: ReauditLoopResult["totals"],
+      batchNumber: number,
+    ) => void;
+    sleepBetweenBatches?: () => Promise<void>;
+  },
+): Promise<ReauditLoopResult> {
+  const before = getBefore();
+  const totals = { processed: 0, complete: 0, incomplete: 0, unknown: 0, errors: 0 };
+  let batches = 0;
+  let remaining: number | null = null;
+  let prevRemaining: number | null = null;
+  let stalled = false;
+
+  do {
+    const res = await fetchBatch(before);
+    batches++;
+    totals.processed += res.processed;
+    totals.complete += res.complete;
+    totals.incomplete += res.incomplete;
+    totals.unknown += res.unknown;
+    totals.errors += res.errors.length;
+    remaining = res.remaining;
+    hooks?.onBatch?.(res, totals, batches);
+
+    // Progress guard: data_checked_at is stamped for every processed row, so
+    // `remaining` must strictly decrease. If it doesn't (e.g. persistent D1
+    // write errors leave rows unstamped), stop instead of looping forever.
+    if (remaining != null && prevRemaining != null && remaining >= prevRemaining) {
+      stalled = true;
+      break;
+    }
+    prevRemaining = remaining;
+
+    if ((remaining ?? 0) > 0) await hooks?.sleepBetweenBatches?.();
+  } while ((remaining ?? 0) > 0);
+
+  return { batches, totals, remaining, stalled };
+}
+
+const dataIntegritySweepCommand = new Command("data-integrity-sweep").description(
+  "Audit datasets against their version manifest and backfill data_complete / bytes_present (epic #967 Phase 3, #970)",
+);
+
+dataIntegritySweepCommand
+  .option("--limit <n>", "Datasets per batch (server clamps to [1,30])", "15")
+  .option(
+    "--older-than <days>",
+    "Also re-audit rows checked more than N days ago (periodic re-audit, not just the one-shot drain)",
+  )
+  .option(
+    "--reaudit",
+    "Re-verify every already-checked row using an anchored cutoff so the sweep fully converges to 0 (unlike --older-than's moving now()-relative window, which never reaches 0 on its own)",
+  )
+  .option("--reset", "Clear every audited row so a corrected verifier can re-sweep")
+  .option("--verbose", "Print per-batch progress")
+  .option("--json", "Output raw JSON instead of the human summary")
+  .action(
+    async (options: {
+      limit?: string;
+      olderThan?: string;
+      reaudit?: boolean;
+      reset?: boolean;
+      verbose?: boolean;
+      json?: boolean;
+    }) => {
+      if (!requireAuth()) return;
+
+      if (options.reset) {
+        const spinner = ora("Resetting data-integrity sweep state...").start();
+        try {
+          const r = await dataIntegritySweepReset();
+          spinner.succeed(
+            `Cleared ${r.reset} audited row(s); eligible datasets are candidates again`,
+          );
+          if (options.json) console.log(JSON.stringify(r, null, 2));
+        } catch (err) {
+          spinner.fail("Reset failed");
+          console.error(chalk.red(errorDetail(err)));
+          process.exit(1);
+        }
+        return;
+      }
+
+      const limit = Number.parseInt(options.limit ?? "15", 10) || 15;
+      const olderThan = options.olderThan ? Number.parseInt(options.olderThan, 10) : undefined;
+      const spinner = ora("Sweeping datasets for data integrity...").start();
+
+      let loopResult: ReauditLoopResult | undefined;
+      try {
+        loopResult = await runReauditLoop(
+          // Captured ONCE by runReauditLoop, before the first fetchBatch call --
+          // every call in this run passes the SAME anchor, so a row re-checked
+          // mid-run is stamped with a data_checked_at strictly AFTER `before`
+          // and never re-qualifies -- `remaining` strictly decreases to 0.
+          () => (options.reaudit ? new Date().toISOString() : undefined),
+          async (before) => {
+            const res = await dataIntegritySweep({ limit, olderThan, before });
+            return {
+              processed: res.processed,
+              complete: res.complete,
+              incomplete: res.incomplete,
+              unknown: res.unknown,
+              errors: res.errors,
+              remaining: res.remaining,
+            };
+          },
+          {
+            onBatch: (res, totals, batchNumber) => {
+              if (options.verbose) {
+                spinner.stop();
+                console.log(
+                  `  [batch ${batchNumber}] processed=${res.processed} complete=${res.complete} incomplete=${res.incomplete} unknown=${res.unknown} errors=${res.errors.length} remaining=${res.remaining ?? "?"}`,
+                );
+                for (const e of res.errors)
+                  console.log(`    ${chalk.red(e.dataset_id)}: ${e.error}`);
+                spinner.start("Sweeping datasets for data integrity...");
+              } else {
+                spinner.text = `Sweeping datasets for data integrity... ${totals.processed} processed, ${res.remaining ?? "?"} remaining`;
+              }
+            },
+            sleepBetweenBatches: () => sleep(1000), // pace the S3-heavy batches
+          },
+        );
+
+        if (loopResult.stalled) {
+          spinner.warn(
+            `No progress (remaining stuck at ${loopResult.remaining}); stopping - see errors`,
+          );
+        } else {
+          spinner.stop();
+        }
+      } catch (err) {
+        spinner.fail("Data-integrity sweep failed");
+        console.error(chalk.red(errorDetail(err)));
+        process.exit(1);
+      }
+
+      const { batches, totals, remaining } = loopResult;
+
+      if (options.json) {
+        console.log(JSON.stringify({ ...totals, batches, remaining }, null, 2));
+      } else {
+        console.log();
+        if (remaining === null) {
+          console.log(
+            chalk.yellow(
+              "Warning: backend returned a null remaining count; the sweep may be incomplete - check server logs.",
+            ),
+          );
+        }
+        console.log(
+          chalk.cyan(
+            `Done in ${batches} batch(es): processed=${totals.processed} complete=${totals.complete} incomplete=${totals.incomplete} unknown=${totals.unknown} errors=${totals.errors} remaining=${remaining ?? "unknown"}`,
+          ),
+        );
+        if (totals.incomplete > 0) {
+          console.log(
+            chalk.yellow(
+              `${totals.incomplete} dataset(s) verified incomplete -- see 'nemar dataset list --json' (data_complete=0) for details.`,
+            ),
+          );
+        }
+      }
+      // Non-zero exit on errors OR an indeterminate (null) remaining, so a caller
+      // never reads a partial/uncertain sweep as success.
+      if (totals.errors > 0 || remaining === null) process.exit(1);
+    },
+  );
+
+adminCommand.addCommand(dataIntegritySweepCommand);
 
 // ============================================================================
 // Email Notification Preferences

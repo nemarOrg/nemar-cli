@@ -8,7 +8,8 @@
 
 import { SYSTEM_USER_ID } from "../lib/constants.js";
 import type { Bindings } from "../types/bindings.js";
-import { isValidDatasetId } from "./datasetId.js";
+import { isDevRangeDatasetId, isValidDatasetId } from "./datasetId.js";
+import { isNonProductionEnv } from "./environment.js";
 import { getDatasetsToken } from "./github-auth.js";
 import { deleteRepository } from "./github.js";
 import { type DeleteResult, deleteDatasetObjects, markDatasetPublic } from "./s3.js";
@@ -43,6 +44,18 @@ export interface DeletionResult {
  * 3. Delete D1 records (dataset_versions, publication_requests,
  *    dataset_collaborators, datasets) in a single atomic batch
  */
+/**
+ * Thrown when a non-production worker attempts to cascade-delete a dataset
+ * outside the dev id band. Typed so routes can answer 403 (a deliberate refusal
+ * the caller can act on) instead of letting it surface as a generic 500.
+ */
+export class ProdRepoFenceError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "ProdRepoFenceError";
+  }
+}
+
 export async function deleteDatasetCascade(
   db: D1Database,
   env: Bindings,
@@ -51,6 +64,28 @@ export async function deleteDatasetCascade(
 ): Promise<DeletionResult> {
   if (!isValidDatasetId(datasetId)) {
     throw new Error(`Invalid dataset ID: "${datasetId}"`);
+  }
+
+  // Prod-repo fence for non-production workers (epic #923).
+  //
+  // Step 1 below deletes `nemarDatasets/<datasetId>` and that half is NOT
+  // environment-scoped: the org name is hardcoded and getDatasetsToken resolves
+  // the same org-wide credential everywhere. The S3 and D1 halves ARE scoped
+  // (env.S3_BUCKET, env.DB), so on the dev/staging worker only the GitHub
+  // deletion can reach production — and dev's D1 is a partial PRODUCTION MIRROR,
+  // so a real id like nm000103 resolves to a real row there. Worse, the manual
+  // delete endpoints skip their extra confirmations for private/no-DOI datasets,
+  // which is exactly how the LIVE nm000103-nm000107 datasets are kept.
+  //
+  // scheduledCleanup already fences its automated path by ID band; this is the
+  // same fence at the single choke point every manual caller shares
+  // (admin delete-dataset, admin bulk-delete, draft delete, import rollback).
+  // Non-production may only cascade ids it could have created itself, i.e. the
+  // dev sandbox partition (xx09NNNN, SANDBOX_ID_FLOOR=90001).
+  if (isNonProductionEnv(env) && !isDevRangeDatasetId(datasetId)) {
+    throw new ProdRepoFenceError(
+      `Refusing to delete "${datasetId}" from a non-production worker: cascade deletion removes the GitHub repository nemarDatasets/${datasetId}, which is shared with production. Non-production may only delete dev-range ids (xx090000-xx099999).`,
+    );
   }
 
   // Refuse folded legacy catalog rows (#646): they are sentinel-owned with no

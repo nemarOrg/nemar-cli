@@ -12,7 +12,7 @@ import { describe, expect, test } from "bun:test";
 import {
   shouldShortCircuitInflightPublish,
   versionDoiPollOutcome,
-} from "../src/routes/webhooks";
+} from "../src/routes/callbacks/version-doi";
 
 describe("shouldShortCircuitInflightPublish", () => {
   test("no existing row -> start a fresh publish", () => {

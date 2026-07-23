@@ -10,15 +10,10 @@
 import chalk from "chalk";
 import { Command } from "commander";
 import ora from "ora";
-import {
-  ApiError,
-  completeSandbox,
-  createDataset,
-  finalizeDataset,
-  getSandboxStatus,
-  requestUploadCredentials,
-  resetSandbox,
-} from "../lib/api.js";
+import { completeSandbox, getSandboxStatus, resetSandbox } from "../lib/api/auth.js";
+import { requestUploadCredentials } from "../lib/api/data.js";
+import { createDataset, finalizeDataset } from "../lib/api/datasets.js";
+import { ApiError } from "../lib/api/errors.js";
 import { deleteConfig, getConfig, isAuthenticated, setConfig } from "../lib/config.js";
 import {
   type ConfirmOptions,
@@ -28,22 +23,21 @@ import {
   YES_OPTION,
   confirm,
 } from "../lib/confirm.js";
+import { pushToGitHub, saveDataset } from "../lib/git-annex/clone-push.js";
 import {
   acceptGitHubInvitation,
-  checkPrerequisites,
-  clearAnnexCredentials,
   configureGitHubRemote,
-  configureLargefiles,
-  configureS3Remote,
-  copyToAnnexRemote,
-  formatBytes,
-  gitAnnexAdd,
-  initDataset,
-  pushToGitHub,
-  saveDataset,
-  toS3Credentials,
   verifyGitHubAuth,
-} from "../lib/git-annex.js";
+} from "../lib/git-annex/github.js";
+import { configureLargefiles, gitAnnexAdd, initDataset } from "../lib/git-annex/init.js";
+import { checkPrerequisites } from "../lib/git-annex/prereq.js";
+import {
+  clearAnnexCredentials,
+  configureS3Remote,
+  toS3Credentials,
+} from "../lib/git-annex/s3-remote.js";
+import { copyToAnnexRemote } from "../lib/git-annex/transfer.js";
+import { formatBytes } from "../lib/progress.js";
 import {
   cleanupSandboxDataset,
   generateSandboxDataset,
