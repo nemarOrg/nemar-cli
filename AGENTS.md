@@ -65,10 +65,16 @@ The backend code (`ORG_NAME = "nemarDatasets"` in `backend/src/services/github.t
   miniflare D1, then `wrangler dev`). Both live in `nemarOrg/nemar-db-backup`.
 
 ### Secret management (self-hosted Infisical, epic #885)
-- **Single source of truth = self-hosted Infisical** at `https://infisical.nemar.org`
-  (dedicated VM on the SDSC webservices server, behind a Cloudflare Tunnel). Deployment
-  artifacts + runbook live in the **private** repo `nemarOrg/nemar-infisical` (mirrors the
-  `nemar-db-backup` pattern; the Postgres volume is the encrypted store of every secret).
+- **Single source of truth = self-hosted Infisical** at `https://infisical.nemar.org`,
+  hosted on **`nemaring`**, a SCCN-owned VM at SDSC, behind a Cloudflare Tunnel. Deployment
+  artifacts, host access, and the runbook live in the **private** repo
+  `nemarOrg/nemar-infisical` (mirrors the `nemar-db-backup` pattern; the Postgres volume is
+  the encrypted store of every secret).
+- **About `nemaring`:** Ubuntu 24.04, 1 vCPU / 3.8 GB RAM, ~31 GB free; reachable from the
+  SCCN network only, and `sudo` requires a password. It is small on purpose, so never plan
+  data-plane or batch work on it. Because the host exposes no inbound listener, `cloudflared`
+  is the only way to serve `infisical.nemar.org`; treat the tunnel as mandatory rather than a
+  preference.
 - Secrets are **pushed out** to each platform via Infisical **Secret Sync** (Cloudflare
   Worker secrets, GitHub org secrets) or **OIDC pull** (`nemar-cli` CI). The Worker reads
   `env.X` natively -> **Infisical is never on the request path**; its downtime cannot cause
