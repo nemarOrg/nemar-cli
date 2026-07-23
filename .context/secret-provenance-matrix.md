@@ -60,6 +60,24 @@ local value as a *candidate* for the prod value until verified.
 | `GITHUB_APP_PRIVATE_KEY` | org `NEMAR_APP_PRIVATE_KEY` | Same identity under two names. GitHub allows multiple App keys, so this rotates with zero downtime; collapse to one `/shared` value. |
 | `TEST_BYPASS_TOKEN` | `test/.env.test`, `nemar-cli` CI | Recoverable locally. |
 
+### CONFIRMED STALE: `.dev.vars` is not a mirror of production
+
+Checked 2026-07-23 against the live Resend API. The `RESEND_API_KEY` in `backend/.dev.vars`
+authenticates to a Resend team whose **only** verified domain is `osc.earth`, the retired
+legacy domain. `nemar.org` is not in that team at all. Production sends as
+`NEMAR Archive <noreply@nemar.org>`, so the local value is **definitively not** the
+production value; it is a leftover from the pre-SCCN personal setup. It is also a restricted
+sending-only key (`GET /api-keys` returns nothing).
+
+**This is the matrix's central warning confirmed on the first secret tested.** Treat
+`backend/.dev.vars` as an archive of legacy values, not as a production mirror. Every
+same-named local value is now suspect until individually proven, and that includes
+`ENCRYPTION_KEY` — which raises the priority of the verification below from prudent to
+required. Do not import any `.dev.vars` value into Infisical on the strength of its name.
+
+Recovery for `RESEND_API_KEY`: not recoverable locally, but freely re-issuable. Mint a new
+key in whichever Resend team owns `nemar.org`.
+
 ### Freely re-issuable at source (single consumer)
 `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` (IAM supports a two-key window, so rotation is
 zero-downtime), `RESEND_API_KEY`, `OPENROUTER_API_KEY`, `ZENODO_API_KEY`,
