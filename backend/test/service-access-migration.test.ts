@@ -62,6 +62,14 @@ function seed(db: Database, rows: SeedRow[]): void {
   }
 }
 
+function statusByEmail(db: Database, email: string): string {
+  const row = db.prepare("SELECT status FROM users WHERE email = ?").get(email) as {
+    status: string;
+  } | null;
+  if (!row) throw new Error(`no user ${email}`);
+  return row.status;
+}
+
 function serviceAccessByEmail(db: Database, email: string): number {
   const row = db.prepare("SELECT service_access FROM users WHERE email = ?").get(email) as {
     service_access: number;
@@ -118,5 +126,33 @@ describe("migration 0062_service_access", () => {
     expect(serviceAccessByEmail(db, "base@x.test")).toBe(0);
     expect(serviceAccessByEmail(db, "pending@x.test")).toBe(0);
     expect(serviceAccessByEmail(db, "deleted-uploader@x.test")).toBe(0);
+  });
+
+  test("unstick flips only pending verified-ORCID web signups to approved", () => {
+    const db = dbBeforeTarget();
+    // Insert with the columns the unstick UPDATE keys on. signup_source
+    // defaults to 'cli' (migration 0026), so set 'web' explicitly where needed.
+    const stmt = db.prepare(
+      `INSERT INTO users (email, status, signup_source, orcid, orcid_verified, deleted_at)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+    );
+    // Target: pending + web + verified ORCID -> should become approved.
+    stmt.run("orcid-web@x.test", "pending", "web", "0000-0001-2345-6789", 1, null);
+    // Untouched: CLI-origin pending (no ORCID).
+    stmt.run("cli-pending@x.test", "pending", "cli", null, 0, null);
+    // Untouched: web pending but ORCID not verified.
+    stmt.run("web-unverified@x.test", "pending", "web", "0000-0001-2345-6780", 0, null);
+    // Untouched: soft-deleted, even though it otherwise matches.
+    stmt.run("orcid-web-deleted@x.test", "pending", "web", "0000-0001-2345-6781", 1, "2026-01-01");
+
+    applyTarget(db);
+
+    expect(statusByEmail(db, "orcid-web@x.test")).toBe("approved");
+    expect(statusByEmail(db, "cli-pending@x.test")).toBe("pending");
+    expect(statusByEmail(db, "web-unverified@x.test")).toBe("pending");
+    expect(statusByEmail(db, "orcid-web-deleted@x.test")).toBe("pending");
+
+    // Unstick grants base access only — never service (upload) access.
+    expect(serviceAccessByEmail(db, "orcid-web@x.test")).toBe(0);
   });
 });
