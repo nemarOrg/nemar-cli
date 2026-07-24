@@ -161,12 +161,28 @@ export function registerUploadRoutes(datasetRoutes: DatasetsRouter): void {
         );
       }
 
-      // Check if non-sandbox upload requires sandbox training
+      // Non-sandbox (real) uploads are gated on service access (ADR 0010,
+      // #1013) and then sandbox training. Service access is the admin-granted
+      // permission to consume compute/storage, issued only after export-control
+      // review of the person's GitHub + location/affiliation; base-access
+      // accounts (auto-approved ORCID sign-ins) never have it. Checked before
+      // sandbox training because it is the authorization gate, not a how-to gate.
       if (!sandbox) {
         const userStatus = await db
-          .prepare("SELECT sandbox_completed FROM users WHERE id = ?")
+          .prepare("SELECT service_access, sandbox_completed FROM users WHERE id = ?")
           .bind(user.id)
-          .first<{ sandbox_completed: number }>();
+          .first<{ service_access: number; sandbox_completed: number }>();
+
+        if (!userStatus?.service_access) {
+          return c.json(
+            {
+              error: "Service access required",
+              message:
+                "Uploading requires service access. Request upload access from your account settings; an admin reviews it before granting.",
+            },
+            403,
+          );
+        }
 
         if (!userStatus?.sandbox_completed) {
           return c.json(
