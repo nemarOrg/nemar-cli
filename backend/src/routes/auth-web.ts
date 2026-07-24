@@ -35,6 +35,8 @@ import {
   generateAuthCode,
   hashAuthCode,
   maskEmail,
+  nonProdCodeEchoAllowed,
+  nonProdCodeRequestAllowed,
 } from "../services/auth-code";
 import { resolveEmailConfig, sendPasswordlessCodeEmail } from "../services/email";
 import {
@@ -92,14 +94,41 @@ function userStatusForDashboard(internal: string): "active" | "pending" | null {
  * Shape the public user payload returned by /verify and /me. `role`
  * is the validated `UserRole` from the DB; null falls back to
  * 'member' for the dashboard payload so the frontend always sees a
- * value it can switch on.
+ * value it can switch on. Profile fields (#910) are nullable
+ * passthroughs — the website treats each as optional and renders its
+ * "not set" state on null.
  */
-function publicUser(row: { id: number; email: string; role: UserRole | null; status: string }) {
+function publicUser(row: {
+  id: number;
+  email: string;
+  role: UserRole | null;
+  status: string;
+  given_name: string | null;
+  family_name: string | null;
+  orcid: string | null;
+  orcid_verified: boolean;
+  github_username: string | null;
+  city: string | null;
+  country: string | null;
+  affiliation: string | null;
+  service_access: boolean;
+}) {
   return {
     id: row.id,
     email: row.email,
     role: row.role ?? "member",
     status: userStatusForDashboard(row.status) ?? row.status,
+    given_name: row.given_name,
+    family_name: row.family_name,
+    orcid: row.orcid,
+    orcid_verified: row.orcid_verified,
+    github_username: row.github_username,
+    city: row.city,
+    country: row.country,
+    affiliation: row.affiliation,
+    // Tiered access (ADR 0010): base accounts are false until an admin
+    // grants service (upload + compute) access.
+    service_access: row.service_access,
   };
 }
 
@@ -130,9 +159,9 @@ authWebRoutes.post("/code/request", zValidator("json", emailSchema), async (c) =
     // file, you'll get a code shortly" copy and a CTA pointing typo'd
     // users at the CLI sign-up (companion issue on nemarOrg/website).
     const existing = await db
-      .prepare("SELECT status FROM users WHERE email = ? AND deleted_at IS NULL LIMIT 1")
+      .prepare("SELECT status, role FROM users WHERE email = ? AND deleted_at IS NULL LIMIT 1")
       .bind(email)
-      .first<{ status: string }>();
+      .first<{ status: string; role: string | null }>();
 
     if (!existing) {
       return c.json(
@@ -150,6 +179,15 @@ authWebRoutes.post("/code/request", zValidator("json", emailSchema), async (c) =
           ? { ok: true, masked_email: maskEmail(email), dev_skip: "revoked" }
           : { ok: true, masked_email: maskEmail(email) },
       );
+    }
+
+    // #1008: the non-production D1 mirrors real production users, and
+    // non-production responses echo `dev_code` below. Only issue codes
+    // for admins/owners and the synthetic test accounts; everyone else
+    // gets the same silent-ok shape as an unregistered address. Exits
+    // BEFORE code generation and the Resend send, like the #595 paths.
+    if (isDevOrTest(c.env) && !nonProdCodeRequestAllowed(existing.role, email)) {
+      return c.json({ ok: true, masked_email: maskEmail(email), dev_skip: "not_allowlisted" });
     }
 
     const code = generateAuthCode();
@@ -215,7 +253,10 @@ authWebRoutes.post("/code/request", zValidator("json", emailSchema), async (c) =
       ok: true,
       masked_email: maskEmail(email),
     };
-    if (isDevOrTest(c.env)) body.dev_code = code;
+    // #1008: echo only for synthetic accounts. Admins/owners passed the
+    // allowlist above but must read their code from the actual email —
+    // the response body is readable by whoever sent the request.
+    if (isDevOrTest(c.env) && nonProdCodeEchoAllowed(email)) body.dev_code = code;
 
     // Final belt-and-braces: never leak the code in production. If
     // ENVIRONMENT is misconfigured at deploy time, this assertion
@@ -294,10 +335,29 @@ authWebRoutes.post("/code/verify", zValidator("json", verifySchema), async (c) =
 
     const userRow = await db
       .prepare(
-        "SELECT id, email, role, status FROM users WHERE email = ? AND deleted_at IS NULL LIMIT 1",
+        `SELECT id, email, role, status,
+                given_name, family_name, orcid, orcid_verified,
+                github_username, city, country, affiliation, service_access
+           FROM users WHERE email = ? AND deleted_at IS NULL LIMIT 1`,
       )
       .bind(email)
-      .first<{ id: number; email: string; role: string | null; status: string }>();
+      .first<{
+        id: number;
+        email: string;
+        role: string | null;
+        status: string;
+        given_name: string | null;
+        family_name: string | null;
+        orcid: string | null;
+        // NOT NULL DEFAULT 0 in D1 (0050), so plain number.
+        orcid_verified: number;
+        github_username: string | null;
+        city: string | null;
+        country: string | null;
+        affiliation: string | null;
+        // NOT NULL DEFAULT 0 in D1 (0062), so plain number.
+        service_access: number;
+      }>();
     if (!userRow) {
       // No live users row for a matched code. Normally impossible
       // (/code/request creates the row), but it now happens cleanly when the
@@ -314,6 +374,15 @@ authWebRoutes.post("/code/verify", zValidator("json", verifySchema), async (c) =
       email: userRow.email,
       role: parseRole(userRow.role, userRow.email),
       status: userRow.status,
+      given_name: userRow.given_name,
+      family_name: userRow.family_name,
+      orcid: userRow.orcid,
+      orcid_verified: userRow.orcid_verified === 1,
+      github_username: userRow.github_username,
+      city: userRow.city,
+      country: userRow.country,
+      affiliation: userRow.affiliation,
+      service_access: userRow.service_access === 1,
     };
 
     // Mark email as verified — the user just proved they control the

@@ -8,7 +8,15 @@
  * The config is backed up and restored after tests.
  */
 
-import { afterAll, beforeAll, beforeEach, describe, expect, setDefaultTimeout, test } from "bun:test";
+import {
+  afterAll,
+  beforeAll,
+  beforeEach,
+  describe,
+  expect,
+  setDefaultTimeout,
+  test,
+} from "bun:test";
 
 // CLI tests spawn subprocesses that make network calls to Cloudflare Workers;
 // CI runners may experience cold starts and higher latency
@@ -351,21 +359,43 @@ describe("CLI Error Handling", () => {
   });
 });
 
+/**
+ * Write a genuinely VALID minimal BIDS dataset (one subject with a behavioral
+ * TSV), not just dataset_description.json + README. The bids-validator fetches
+ * the BIDS schema live at run time, and an empty dataset (no subjects) is a
+ * warning under some schema versions but an ERROR under others -- that
+ * non-determinism made the "succeeds" tests flaky in CI (exit 1) while passing
+ * locally (#1010). A valid dataset produces zero error-severity issues under any
+ * schema, so `exitCode === 0` is stable.
+ */
+function writeValidBidsFixture(dir: string): void {
+  mkdirSync(join(dir, "sub-01", "beh"), { recursive: true });
+  writeFileSync(
+    join(dir, "dataset_description.json"),
+    JSON.stringify({
+      Name: "Test Dataset",
+      BIDSVersion: "1.9.0",
+      Authors: ["Test Author", "Second Author"],
+      License: "CC0",
+      DatasetType: "raw",
+    }),
+  );
+  writeFileSync(
+    join(dir, "README"),
+    "# Test Dataset\n\nA behavioral test dataset used by the CLI validate integration tests. It contains a single subject so the BIDS validator reports it as a valid dataset with zero errors.\n",
+  );
+  writeFileSync(join(dir, "participants.tsv"), "participant_id\nsub-01\n");
+  writeFileSync(
+    join(dir, "sub-01", "beh", "sub-01_task-rest_beh.tsv"),
+    "onset\tduration\ttrial_type\n0.0\t1.0\tgo\n1.5\t1.0\tstop\n",
+  );
+}
+
 describe("CLI Dataset Validate", () => {
   const testDatasetDir = join(import.meta.dir, ".test-bids-dataset");
 
   beforeAll(() => {
-    // Create minimal test BIDS dataset
-    mkdirSync(testDatasetDir, { recursive: true });
-    writeFileSync(
-      join(testDatasetDir, "dataset_description.json"),
-      JSON.stringify({
-        Name: "Test Dataset",
-        BIDSVersion: "1.9.0",
-        Authors: ["Test Author"],
-      }),
-    );
-    writeFileSync(join(testDatasetDir, "README"), "# Test Dataset\n\nThis is a test.");
+    writeValidBidsFixture(testDatasetDir);
   });
 
   afterAll(() => {
@@ -425,7 +455,7 @@ describe("CLI Dataset Validate", () => {
   });
 
   test("nemar dataset validate with non-BIDS directory fails", async () => {
-    const { stdout, exitCode} = await runCli(["dataset", "validate", "/tmp"]);
+    const { stdout, exitCode } = await runCli(["dataset", "validate", "/tmp"]);
 
     expect(exitCode).toBe(1);
     expect(stdout).toContain("Not a valid BIDS dataset");
@@ -434,20 +464,27 @@ describe("CLI Dataset Validate", () => {
 
   test("nemar dataset validate accepts pass-through flags", async () => {
     const testDir = "/tmp/test-bids-passthrough";
-    const { existsSync, mkdirSync, writeFileSync, rmSync } = await import("node:fs");
+    const { existsSync, rmSync } = await import("node:fs");
 
     if (existsSync(testDir)) {
       rmSync(testDir, { recursive: true, force: true });
     }
-    mkdirSync(testDir, { recursive: true });
-    writeFileSync(
-      `${testDir}/dataset_description.json`,
-      JSON.stringify({ Name: "Test Dataset", BIDSVersion: "1.6.0" }),
-    );
+    // Valid fixture so exitCode 0 is stable across schema versions (#1010).
+    writeValidBidsFixture(testDir);
 
     try {
-      // --max-rows is a valid bids-validator flag passed through directly
-      const { stdout, exitCode } = await runCli(["dataset", "validate", testDir, "--max-rows", "0"]);
+      // --max-rows is a valid bids-validator flag passed through directly.
+      // Use a large value (not 0): 0 tells the validator to read no TSV rows,
+      // which fails column validation on this fixture's participants/beh TSVs.
+      // The point of the test is that the flag reaches the validator and the
+      // valid dataset still passes.
+      const { stdout, exitCode } = await runCli([
+        "dataset",
+        "validate",
+        testDir,
+        "--max-rows",
+        "1000",
+      ]);
 
       expect(exitCode).toBe(0);
       expect(stdout).toContain("Summary:");
@@ -473,7 +510,13 @@ describe("CLI Dataset Validate", () => {
 
     try {
       // Unknown flags are passed through; deno/bids-validator will reject them
-      const { stdout, stderr, exitCode } = await runCli(["dataset", "validate", testDir, "--unknownFlag", "value"]);
+      const { stdout, stderr, exitCode } = await runCli([
+        "dataset",
+        "validate",
+        testDir,
+        "--unknownFlag",
+        "value",
+      ]);
 
       // Validator exits with non-zero for unknown options
       expect(exitCode).not.toBe(0);
@@ -622,10 +665,7 @@ describe("CLI Dataset Status", () => {
       username: "test-admin",
     });
 
-    const { stdout, exitCode } = await runCli(
-      ["dataset", "status", "nm099999", "--json"],
-      ctx,
-    );
+    const { stdout, exitCode } = await runCli(["dataset", "status", "nm099999", "--json"], ctx);
 
     if (exitCode !== 0) {
       // Backend may not be reachable or dataset may not exist

@@ -244,11 +244,26 @@ ENVIRONMENT = "development"
 API_BASE_URL = "https://api-test.nemar.org"
 FRONTEND_URL = "https://test.nemar.org"
 # Authenticated app origin. On staging this is the single-host test site
-# (epic #923). ORCID sandbox login on test.nemar.org additionally needs
-# https://test.nemar.org/auth/orcid/callback registered on the sandbox ORCID app
-# (owner action); until then use email-code login. Local ORCID dev testing needs
-# a .dev.vars override back to http://localhost:4321.
+# (epic #923). Local ORCID dev testing needs a .dev.vars override back to
+# http://localhost:4321.
 APP_BASE_URL = "https://test.nemar.org"
+# ORCID SSO on staging uses the PRODUCTION ORCID app, not sandbox: sandbox
+# accounts are too synthetic to exercise real integration. The dev worker
+# therefore carries the same prod ORCID app credentials, set as worker secrets
+# (mirroring how prod stores them, not committed here):
+#   ORCID_CLIENT_ID     = APP-0CJZZ8A35CR0TCLL   (public; rides in the OAuth URL)
+#   ORCID_CLIENT_SECRET = <prod app secret>       (out-of-band; only holder can set)
+#   ORCID_API_BASE      = https://orcid.org        (override: forces
+#       getOrcidConfig()/orcidPubBase() to prod orcid.org + pub.orcid.org even
+#       though ENVIRONMENT=development)
+# Set them with:
+#   wrangler secret put ORCID_CLIENT_ID --env dev -c backend/wrangler-sccn.toml
+#   wrangler secret put ORCID_API_BASE  --env dev -c backend/wrangler-sccn.toml
+#   wrangler secret put ORCID_CLIENT_SECRET --env dev -c backend/wrangler-sccn.toml
+# The prod ORCID app has https://test.nemar.org/auth/orcid/callback added to its
+# redirect-URI allowlist alongside app.nemar.org. Until all three secrets are set,
+# getOrcidConfig() returns null and /auth/orcid/* degrades to an "unavailable"
+# redirect (email-code login still works).
 # Data/zarr hostnames this worker forks on (index.ts). The -test mirror of the
 # prod hosts; served by this same worker via the routes above.
 DATA_HOSTNAME = "data-test.nemar.org"

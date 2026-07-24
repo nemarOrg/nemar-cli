@@ -12,6 +12,14 @@ VALUES ('test-admin', 'testAdmin@nemar.org', '$2b$10$JmaHDE03Q2pjaBgWB4jeN.mgLCp
 INSERT OR IGNORE INTO users (username, email, password_hash, github_username, status, role, email_verified, approved_at, revoked_at)
 VALUES ('test-user', 'test-user@nemar.test', '$2b$10$JmaHDE03Q2pjaBgWB4jeN.mgLCp9WdSWRpicN4J5gAiJ/YZBRPWIi', 'test-user-gh', 'approved', 'member', 1, datetime('now'), NULL);
 
+-- Shared web-QA account (#1008): a normal member used to exercise upload and
+-- other researcher flows on test.nemar.org. It is on the non-production
+-- email-code allowlist and gets dev_code echoed, so anyone on the team can
+-- sign in without an inbox. Distinct from 'test-user' on purpose:
+-- test/api.test.ts authenticates with test-user@nemar.test and must not change.
+INSERT OR IGNORE INTO users (username, email, password_hash, github_username, status, role, email_verified, approved_at, revoked_at)
+VALUES ('test-web', 'test@nemar.org', '$2b$10$JmaHDE03Q2pjaBgWB4jeN.mgLCp9WdSWRpicN4J5gAiJ/YZBRPWIi', 'test-web-gh', 'approved', 'member', 1, datetime('now'), NULL);
+
 INSERT OR IGNORE INTO users (username, email, password_hash, github_username, status, role, email_verified, approved_at, revoked_at)
 VALUES ('test-pending', 'test-pending@nemar.test', '$2b$10$JmaHDE03Q2pjaBgWB4jeN.mgLCp9WdSWRpicN4J5gAiJ/YZBRPWIi', 'test-pending-gh', 'pending', 'member', 0, NULL, NULL);
 
@@ -52,6 +60,19 @@ FROM datasets d
 JOIN users u ON u.username = 'test-user'
 JOIN users owner ON owner.username = 'test-admin'
 WHERE d.dataset_id = 'nm099999';
+
+-- Service access (ADR 0010 / #1013): grant the upload-capable test users
+-- service access + sandbox completion so E2E upload flows keep working after the
+-- upload gate lands. Idempotent UPDATE so re-running fixes pre-existing rows
+-- (INSERT OR IGNORE above never updates an existing row). test-web (the shared
+-- base-access QA account) is intentionally left WITHOUT service access so it
+-- exercises the base tier.
+UPDATE users
+   SET service_access = 1,
+       service_access_granted_at = COALESCE(service_access_granted_at, datetime('now')),
+       sandbox_completed = 1,
+       sandbox_completed_at = COALESCE(sandbox_completed_at, datetime('now'))
+ WHERE username IN ('test-owner', 'test-admin', 'test-user');
 
 -- Verification: confirm seed data exists (check counts manually if unexpected)
 SELECT 'users' AS tbl, COUNT(*) AS n FROM users WHERE username LIKE 'test-%';

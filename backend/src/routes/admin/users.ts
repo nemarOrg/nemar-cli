@@ -30,6 +30,7 @@ import {
   sendRevocationEmail,
 } from "../../services/email";
 import { decrypt } from "../../services/encryption";
+import { isNonProductionEnv } from "../../services/environment";
 import { removeCollaborator } from "../../services/github";
 import { getDatasetsToken } from "../../services/github-auth";
 import { revokeUserIamAccess } from "../../services/iam";
@@ -1197,6 +1198,22 @@ export function registerUsersRoutes(admin: AdminRouter): void {
     // directly as 'approved' because the cookie path in authMiddleware
     // gates on status='approved'.
     status: z.enum(["pending", "verified", "approved", "revoked"]).optional(),
+    // Optional profile columns (#910) so the passwordless suite can
+    // assert a populated /auth/me payload, not just the all-null
+    // default. Applied via UPDATE after the insert, so they also stick
+    // on a pre-existing fixture row.
+    profile: z
+      .object({
+        given_name: z.string().max(200).optional(),
+        family_name: z.string().max(200).optional(),
+        orcid: z.string().max(19).optional(),
+        orcid_verified: z.boolean().optional(),
+        github_username: z.string().max(39).optional(),
+        city: z.string().max(200).optional(),
+        country: z.string().max(200).optional(),
+        affiliation: z.string().max(300).optional(),
+      })
+      .optional(),
   });
 
   /**
@@ -1212,8 +1229,9 @@ export function registerUsersRoutes(admin: AdminRouter): void {
    * synthetic web-only account.
    *
    * Guarded two ways:
-   *   1. ENVIRONMENT must NOT be 'production'. The dev and SCCN-dev
-   *      Workers leave this on; api.nemar.org would 403.
+   *   1. Must be a non-production Worker. `isNonProductionEnv` is fail-closed
+   *      (an unset/typo'd ENVIRONMENT is treated as production), so
+   *      api.nemar.org 403s even if the binding is missing.
    *   2. The route inherits `adminMiddleware`, so only admin/owner tokens
    *      can call it even in dev.
    *
@@ -1222,10 +1240,10 @@ export function registerUsersRoutes(admin: AdminRouter): void {
    * the status if requested, instead of 409'ing — saves test teardown.
    */
   admin.post("/test-fixtures/seed-web-user", zValidator("json", seedWebUserSchema), async (c) => {
-    if (c.env.ENVIRONMENT === "production") {
+    if (!isNonProductionEnv(c.env)) {
       return c.json({ error: "Not available in production" }, 403);
     }
-    const { email, status } = c.req.valid("json");
+    const { email, status, profile } = c.req.valid("json");
     const desiredStatus = status ?? "pending";
     const db = c.env.DB;
 
@@ -1253,6 +1271,43 @@ export function registerUsersRoutes(admin: AdminRouter): void {
         if ((upd.meta?.changes ?? 0) === 0) {
           console.error("[seed-web-user] UPDATE matched 0 rows for email", email);
           return c.json({ error: "Failed to set requested status; row missing post-insert" }, 500);
+        }
+      }
+
+      // Profile columns (#910): applied as a separate UPDATE so they land
+      // whether the row was just inserted or pre-existed. Only the keys
+      // the caller sent are written; omitted keys keep their value.
+      if (profile) {
+        const sets: string[] = [];
+        const binds: (string | number)[] = [];
+        for (const key of [
+          "given_name",
+          "family_name",
+          "orcid",
+          "github_username",
+          "city",
+          "country",
+          "affiliation",
+        ] as const) {
+          const v = profile[key];
+          if (typeof v === "string") {
+            sets.push(`${key} = ?`);
+            binds.push(v);
+          }
+        }
+        if (typeof profile.orcid_verified === "boolean") {
+          sets.push("orcid_verified = ?");
+          binds.push(profile.orcid_verified ? 1 : 0);
+        }
+        if (sets.length > 0) {
+          const upd = await db
+            .prepare(`UPDATE users SET ${sets.join(", ")} WHERE email = ?`)
+            .bind(...binds, email)
+            .run();
+          if ((upd.meta?.changes ?? 0) === 0) {
+            console.error("[seed-web-user] profile UPDATE matched 0 rows for email", email);
+            return c.json({ error: "Failed to set profile; row missing post-insert" }, 500);
+          }
         }
       }
 

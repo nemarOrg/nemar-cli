@@ -39,7 +39,11 @@ const baseHeaders: Record<string, string> = TEST_CONFIG.bypassToken
 async function seedWebUser(
   email: string,
   status?: "pending" | "verified" | "approved" | "revoked",
+  profile?: Partial<PublicUserProfile>,
 ): Promise<void> {
+  const body: Record<string, unknown> = { email };
+  if (status) body.status = status;
+  if (profile) body.profile = profile;
   const r = await fetch(`${API}/admin/test-fixtures/seed-web-user`, {
     method: "POST",
     headers: {
@@ -47,7 +51,7 @@ async function seedWebUser(
       Authorization: `Bearer ${TEST_CONFIG.adminApiKey}`,
       ...baseHeaders,
     },
-    body: JSON.stringify(status ? { email, status } : { email }),
+    body: JSON.stringify(body),
   });
   if (r.status !== 200) {
     throw new Error(`seedWebUser failed (${r.status}): ${await r.text()}`);
@@ -81,13 +85,27 @@ interface RequestResponse {
   error?: string;
 }
 
+/** Nullable profile fields exposed on /verify and /me since #910. */
+interface PublicUserProfile {
+  given_name: string | null;
+  family_name: string | null;
+  orcid: string | null;
+  orcid_verified: boolean;
+  github_username: string | null;
+  city: string | null;
+  country: string | null;
+  affiliation: string | null;
+}
+
 interface VerifyResponse {
-  user?: { id: number; email: string; role: string; status: string };
+  user?: { id: number; email: string; role: string; status: string } & Partial<PublicUserProfile>;
   error?: string;
 }
 
 interface MeResponse {
-  user: { id: number; email: string; role: string; status: string } | null;
+  user:
+    | ({ id: number; email: string; role: string; status: string } & Partial<PublicUserProfile>)
+    | null;
 }
 
 async function requestCode(email: string): Promise<{ status: number; body: RequestResponse }> {
@@ -146,6 +164,23 @@ describe.skipIf(PROD_GUARD_ACTIVE)("passwordless email-code auth (#569)", () => 
     const meBody = (await me.json()) as MeResponse;
     expect(meBody.user?.email).toBe(email);
 
+    // #910: profile fields ride along on /me. A fresh fixture user has
+    // no profile, so every field is null and orcid_verified is a real
+    // boolean false (not the 0/1 D1 stores).
+    const profile = meBody.user as MeResponse["user"] & PublicUserProfile;
+    expect(profile.orcid_verified).toBe(false);
+    for (const key of [
+      "given_name",
+      "family_name",
+      "orcid",
+      "github_username",
+      "city",
+      "country",
+      "affiliation",
+    ] as const) {
+      expect(profile[key]).toBeNull();
+    }
+
     const logout = await fetch(`${API}/auth/logout`, {
       method: "POST",
       headers: { ...baseHeaders, Origin: ORIGIN, Cookie: `nemar_session=${cookieValue}` },
@@ -157,6 +192,81 @@ describe.skipIf(PROD_GUARD_ACTIVE)("passwordless email-code auth (#569)", () => 
     });
     const meAfterBody = (await meAfter.json()) as MeResponse;
     expect(meAfterBody.user).toBeNull();
+  });
+
+  test("non-allowlisted member gets silent-ok without dev_code (#1008)", async () => {
+    // A registered member whose email is NOT synthetic (@nemar.test /
+    // test@nemar.org) models the mirrored production users in the dev
+    // D1. The gate must refuse to issue a code — same 200 shape as an
+    // unregistered address, no dev_code, dev_skip explains why.
+    const email = `pl-gate-${Date.now()}-${Math.random().toString(36).slice(2, 8)}@example.com`;
+    await seedWebUser(email);
+    const req = await requestCode(email);
+    expect(req.status).toBe(200);
+    expect(req.body.ok).toBe(true);
+    expect(req.body.dev_code).toBeUndefined();
+    expect(req.body.dev_skip).toBe("not_allowlisted");
+  });
+
+  test("populated profile fields pass through /verify and /me (#910)", async () => {
+    const email = freshEmail("profile");
+    // github_username is case-insensitively UNIQUE (0012); derive a
+    // per-run value so reruns (which mint a fresh email each time)
+    // don't collide with an earlier run's fixture row.
+    const profile = {
+      given_name: "Grace",
+      family_name: "Hopper",
+      orcid: "0000-0002-1825-0097",
+      orcid_verified: true,
+      github_username: `gh-${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`,
+      city: "Arlington",
+      country: "United States",
+      affiliation: "United States Navy",
+    };
+    await seedWebUser(email, "approved", profile);
+
+    const req = await requestCode(email);
+    expect(req.status).toBe(200);
+    const code = req.body.dev_code as string;
+    const v = await verifyCode(email, code, false);
+    expect(v.status).toBe(200);
+
+    // /verify carries the profile (same publicUser shaping as /me).
+    const vUser = v.body.user as NonNullable<VerifyResponse["user"]> & PublicUserProfile;
+    expect(vUser.orcid_verified).toBe(true);
+    for (const key of [
+      "given_name",
+      "family_name",
+      "orcid",
+      "github_username",
+      "city",
+      "country",
+      "affiliation",
+    ] as const) {
+      expect(vUser[key]).toBe(profile[key]);
+    }
+
+    // /me returns the same populated payload.
+    const m = v.setCookie?.match(/nemar_session=([^;]+)/);
+    expect(m).toBeTruthy();
+    const me = await fetch(`${API}/auth/me`, {
+      headers: { ...baseHeaders, Cookie: `nemar_session=${m?.[1] as string}` },
+    });
+    expect(me.status).toBe(200);
+    const meBody = (await me.json()) as MeResponse;
+    const meUser = meBody.user as NonNullable<MeResponse["user"]> & PublicUserProfile;
+    expect(meUser.orcid_verified).toBe(true);
+    for (const key of [
+      "given_name",
+      "family_name",
+      "orcid",
+      "github_username",
+      "city",
+      "country",
+      "affiliation",
+    ] as const) {
+      expect(meUser[key]).toBe(profile[key]);
+    }
   });
 
   test("re-request rotates: first code stops working, second works", async () => {
