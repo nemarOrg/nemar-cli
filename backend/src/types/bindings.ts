@@ -1,3 +1,4 @@
+import type { WebSessionUser } from "../services/web-session";
 import type { MaintenanceMode } from "./maintenance";
 
 /**
@@ -254,13 +255,8 @@ export interface Variables {
    *  though in practice the dashboard never sends a bearer header.
    *  `role` is validated against the `UserRole` union at the DB
    *  boundary; `null` means the row's role column held an unknown
-   *  value. */
-  webUser?: {
-    id: number;
-    email: string;
-    role: UserRole | null;
-    status: string;
-  };
+   *  value. Carries the nullable profile fields for /auth/me (#910). */
+  webUser?: WebSessionUser;
   /** Internal: the matched web_sessions row. Used by `/auth/me` to
    *  decide whether to slide the expiry, and by `/auth/logout` to
    *  revoke the row. */

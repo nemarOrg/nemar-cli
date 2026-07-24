@@ -81,13 +81,27 @@ interface RequestResponse {
   error?: string;
 }
 
+/** Nullable profile fields exposed on /verify and /me since #910. */
+interface PublicUserProfile {
+  given_name: string | null;
+  family_name: string | null;
+  orcid: string | null;
+  orcid_verified: boolean;
+  github_username: string | null;
+  city: string | null;
+  country: string | null;
+  affiliation: string | null;
+}
+
 interface VerifyResponse {
-  user?: { id: number; email: string; role: string; status: string };
+  user?: { id: number; email: string; role: string; status: string } & Partial<PublicUserProfile>;
   error?: string;
 }
 
 interface MeResponse {
-  user: { id: number; email: string; role: string; status: string } | null;
+  user:
+    | ({ id: number; email: string; role: string; status: string } & Partial<PublicUserProfile>)
+    | null;
 }
 
 async function requestCode(email: string): Promise<{ status: number; body: RequestResponse }> {
@@ -145,6 +159,23 @@ describe.skipIf(PROD_GUARD_ACTIVE)("passwordless email-code auth (#569)", () => 
     expect(me.status).toBe(200);
     const meBody = (await me.json()) as MeResponse;
     expect(meBody.user?.email).toBe(email);
+
+    // #910: profile fields ride along on /me. A fresh fixture user has
+    // no profile, so every field is null and orcid_verified is a real
+    // boolean false (not the 0/1 D1 stores).
+    const profile = meBody.user as MeResponse["user"] & PublicUserProfile;
+    expect(profile.orcid_verified).toBe(false);
+    for (const key of [
+      "given_name",
+      "family_name",
+      "orcid",
+      "github_username",
+      "city",
+      "country",
+      "affiliation",
+    ] as const) {
+      expect(profile[key]).toBeNull();
+    }
 
     const logout = await fetch(`${API}/auth/logout`, {
       method: "POST",
