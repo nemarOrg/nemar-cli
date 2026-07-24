@@ -61,6 +61,19 @@ JOIN users u ON u.username = 'test-user'
 JOIN users owner ON owner.username = 'test-admin'
 WHERE d.dataset_id = 'nm099999';
 
+-- Service access (ADR 0010 / #1013): grant the upload-capable test users
+-- service access + sandbox completion so E2E upload flows keep working after the
+-- upload gate lands. Idempotent UPDATE so re-running fixes pre-existing rows
+-- (INSERT OR IGNORE above never updates an existing row). test-web (the shared
+-- base-access QA account) is intentionally left WITHOUT service access so it
+-- exercises the base tier.
+UPDATE users
+   SET service_access = 1,
+       service_access_granted_at = COALESCE(service_access_granted_at, datetime('now')),
+       sandbox_completed = 1,
+       sandbox_completed_at = COALESCE(sandbox_completed_at, datetime('now'))
+ WHERE username IN ('test-owner', 'test-admin', 'test-user');
+
 -- Verification: confirm seed data exists (check counts manually if unexpected)
 SELECT 'users' AS tbl, COUNT(*) AS n FROM users WHERE username LIKE 'test-%';
 SELECT 'tokens' AS tbl, COUNT(*) AS n FROM tokens WHERE api_key_prefix LIKE 'nemar_test_%';

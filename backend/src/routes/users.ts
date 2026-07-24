@@ -30,6 +30,7 @@ userRoutes.get("/me", async (c) => {
       sandbox_completed,
       sandbox_completed_at,
       sandbox_dataset_id,
+      service_access,
       (SELECT COUNT(*) FROM datasets WHERE owner_user_id = ? AND is_sandbox = 0) as dataset_count
     FROM users
     WHERE id = ?
@@ -42,6 +43,7 @@ userRoutes.get("/me", async (c) => {
       sandbox_completed: number;
       sandbox_completed_at: string | null;
       sandbox_dataset_id: string | null;
+      service_access: number;
       dataset_count: number;
     }>();
 
@@ -77,6 +79,8 @@ userRoutes.get("/me", async (c) => {
       sandbox_completed: !!userDetails?.sandbox_completed,
       sandbox_completed_at: userDetails?.sandbox_completed_at,
       sandbox_dataset_id: userDetails?.sandbox_dataset_id,
+      // Tiered access (ADR 0010): admin-granted permission to upload/compute.
+      service_access: !!userDetails?.service_access,
     },
     token: tokenInfo
       ? {

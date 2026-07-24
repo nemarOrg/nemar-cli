@@ -149,6 +149,10 @@ export interface WebSessionUser {
   city: string | null;
   country: string | null;
   affiliation: string | null;
+  /** Tiered access (ADR 0010, #1013): true once an admin grants service
+   *  access (upload + compute). Base-access accounts are false. Converted
+   *  from the 0/1 D1 column at the read boundary like `orcid_verified`. */
+  service_access: boolean;
 }
 
 /** Look up an active session by cookie value, returning the joined
@@ -168,7 +172,7 @@ export async function findSessionByCookieId(
     `SELECT ws.id, ws.user_id, ws.remember, ws.expires_at, ws.last_used_at,
             u.email, u.role, u.status,
             u.given_name, u.family_name, u.orcid, u.orcid_verified,
-            u.github_username, u.city, u.country, u.affiliation
+            u.github_username, u.city, u.country, u.affiliation, u.service_access
        FROM web_sessions ws
        JOIN users u ON u.id = ws.user_id
       WHERE ws.cookie_id_hash = ?
@@ -197,6 +201,8 @@ export async function findSessionByCookieId(
       city: string | null;
       country: string | null;
       affiliation: string | null;
+      // NOT NULL DEFAULT 0 in D1 (0062), so plain number.
+      service_access: number;
     }>();
   if (!row) return null;
 
@@ -229,6 +235,7 @@ export async function findSessionByCookieId(
       city: row.city,
       country: row.country,
       affiliation: row.affiliation,
+      service_access: row.service_access === 1,
     },
   };
 }

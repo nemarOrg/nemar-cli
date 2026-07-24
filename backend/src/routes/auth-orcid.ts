@@ -407,17 +407,19 @@ authOrcidRoutes.post("/orcid/finalize", zValidator("json", finalizeSchema), asyn
     }
 
     // New web account: username/github_username/password_hash stay NULL
-    // (allowed since 0026). Brand-new signups enter the admin-review queue
-    // like the CLI/web signup path (#44); name lives on the identity row.
+    // (allowed since 0026); name lives on the identity row.
     //
-    // NOTE: the email is collected, not verified -- ORCID proves the iD, not
-    // the inbox. The row lands status='pending'/email_verified=0 and admin
-    // review is the email-ownership gate before approval. A dedicated
-    // email-verification step for ORCID-first signups is tracked in #44.
+    // Tiered access (ADR 0010, #1013): ORCID sign-in auto-approves to BASE
+    // access (status='approved') -- view/dashboard only. This is safe because
+    // 'approved' no longer implies upload: uploading additionally requires
+    // `service_access` (granted 0 here), so a base user cannot consume compute
+    // until an admin grants service access after export-control review. The
+    // email is collected, not verified -- ORCID proves the iD, not the inbox;
+    // email_verified stays 0 (the account can still receive PIN codes).
     const insert = await c.env.DB.prepare(
       `INSERT INTO users (email, orcid, orcid_verified, status, email_verified, signup_source,
-         affiliation, city, country)
-       VALUES (?, ?, 1, 'pending', 0, 'web', ?, ?, ?)`,
+         affiliation, city, country, approved_at, service_access)
+       VALUES (?, ?, 1, 'approved', 0, 'web', ?, ?, ?, datetime('now'), 0)`,
     )
       .bind(email, pending.orcid, affiliation || null, city, country)
       .run();
@@ -465,8 +467,10 @@ authOrcidRoutes.post("/orcid/finalize", zValidator("json", finalizeSchema), asyn
     });
     // Canonical name from ORCID, after the response (best-effort; never blocks signup).
     afterResponse(c, refreshUserName(c.env, userId, pending.orcid));
+    // status "active" mirrors userStatusForDashboard('approved') used by
+    // /auth/me — the account has base access immediately (ADR 0010).
     return c.json({
-      user: { id: userId, email, role: "member", status: "pending" },
+      user: { id: userId, email, role: "member", status: "active" },
     });
   } catch (err) {
     console.error("[auth-orcid] finalize failed", err);

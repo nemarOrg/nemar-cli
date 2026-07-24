@@ -28,6 +28,7 @@ import {
   generateUploadPolicy,
   getFederationToken,
 } from "../../services/sts";
+import { realDatasetCreateGate, realDatasetServiceGate } from "../../services/upload-gate";
 import { type Bindings, hasRole } from "../../types/bindings";
 import type { DatasetsRouter } from "./shared";
 
@@ -161,23 +162,19 @@ export function registerUploadRoutes(datasetRoutes: DatasetsRouter): void {
         );
       }
 
-      // Check if non-sandbox upload requires sandbox training
+      // Non-sandbox (real) dataset creation is gated on service access then
+      // sandbox training (ADR 0010, #1013). See services/upload-gate.ts.
       if (!sandbox) {
         const userStatus = await db
-          .prepare("SELECT sandbox_completed FROM users WHERE id = ?")
+          .prepare("SELECT service_access, sandbox_completed FROM users WHERE id = ?")
           .bind(user.id)
-          .first<{ sandbox_completed: number }>();
+          .first<{ service_access: number; sandbox_completed: number }>();
 
-        if (!userStatus?.sandbox_completed) {
-          return c.json(
-            {
-              error: "Sandbox training required",
-              message:
-                "You must complete sandbox training before uploading real datasets. Run 'nemar sandbox' to complete training.",
-            },
-            403,
-          );
-        }
+        const gate = realDatasetCreateGate({
+          service_access: userStatus?.service_access ?? 0,
+          sandbox_completed: userStatus?.sandbox_completed ?? 0,
+        });
+        if (gate) return c.json(gate, 403);
       }
 
       // Validate sandbox file size limit (larger outside production, see const)
@@ -501,9 +498,9 @@ export function registerUploadRoutes(datasetRoutes: DatasetsRouter): void {
 
       // Verify dataset exists and user is owner or collaborator
       const dataset = await db
-        .prepare("SELECT owner_user_id FROM datasets WHERE dataset_id = ?")
+        .prepare("SELECT owner_user_id, is_sandbox FROM datasets WHERE dataset_id = ?")
         .bind(datasetId)
-        .first<{ owner_user_id: number }>();
+        .first<{ owner_user_id: number; is_sandbox: number }>();
 
       if (!dataset) {
         return c.json({ error: "Dataset not found" }, 404);
@@ -536,6 +533,19 @@ export function registerUploadRoutes(datasetRoutes: DatasetsRouter): void {
             },
             403,
           );
+        }
+
+        // Pushing bytes to a real dataset requires service access (ADR 0010,
+        // #1013), even for collaborators: a collaborator keeps download but
+        // cannot upload without passing export-control review. Sandbox datasets
+        // are exempt (capped training playground).
+        if (!dataset.is_sandbox) {
+          const su = await db
+            .prepare("SELECT service_access FROM users WHERE id = ?")
+            .bind(user.id)
+            .first<{ service_access: number }>();
+          const gate = realDatasetServiceGate({ service_access: su?.service_access ?? 0 });
+          if (gate) return c.json(gate, 403);
         }
       }
 
@@ -593,9 +603,9 @@ export function registerUploadRoutes(datasetRoutes: DatasetsRouter): void {
 
       // Verify dataset exists and user is owner or collaborator
       const dataset = await db
-        .prepare("SELECT owner_user_id FROM datasets WHERE dataset_id = ?")
+        .prepare("SELECT owner_user_id, is_sandbox FROM datasets WHERE dataset_id = ?")
         .bind(datasetId)
-        .first<{ owner_user_id: number }>();
+        .first<{ owner_user_id: number; is_sandbox: number }>();
 
       if (!dataset) {
         return c.json({ error: "Dataset not found" }, 404);
@@ -627,6 +637,18 @@ export function registerUploadRoutes(datasetRoutes: DatasetsRouter): void {
             },
             403,
           );
+        }
+
+        // Real-dataset uploads require service access (ADR 0010, #1013).
+        // Collaborators keep download but cannot push bytes without passing
+        // export-control review. Sandbox datasets are exempt.
+        if (!dataset.is_sandbox) {
+          const su = await db
+            .prepare("SELECT service_access FROM users WHERE id = ?")
+            .bind(user.id)
+            .first<{ service_access: number }>();
+          const gate = realDatasetServiceGate({ service_access: su?.service_access ?? 0 });
+          if (gate) return c.json(gate, 403);
         }
       }
 
