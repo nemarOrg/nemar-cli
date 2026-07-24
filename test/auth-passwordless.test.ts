@@ -159,6 +159,20 @@ describe.skipIf(PROD_GUARD_ACTIVE)("passwordless email-code auth (#569)", () => 
     expect(meAfterBody.user).toBeNull();
   });
 
+  test("non-allowlisted member gets silent-ok without dev_code (#1008)", async () => {
+    // A registered member whose email is NOT synthetic (@nemar.test /
+    // test@nemar.org) models the mirrored production users in the dev
+    // D1. The gate must refuse to issue a code — same 200 shape as an
+    // unregistered address, no dev_code, dev_skip explains why.
+    const email = `pl-gate-${Date.now()}-${Math.random().toString(36).slice(2, 8)}@example.com`;
+    await seedWebUser(email);
+    const req = await requestCode(email);
+    expect(req.status).toBe(200);
+    expect(req.body.ok).toBe(true);
+    expect(req.body.dev_code).toBeUndefined();
+    expect(req.body.dev_skip).toBe("not_allowlisted");
+  });
+
   test("re-request rotates: first code stops working, second works", async () => {
     const email = freshEmail("rotate");
     await seedWebUser(email);

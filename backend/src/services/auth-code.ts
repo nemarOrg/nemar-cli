@@ -121,3 +121,36 @@ export function maskEmail(email: string): string {
   if (local.length === 1) return `*${domain}`;
   return `${local[0]}${"*".repeat(Math.max(1, local.length - 1))}${domain}`;
 }
+
+/**
+ * Shared web-QA account for staging (#1008). A normal member-role user
+ * seeded by scripts/seed-dev-db.sql, used to exercise upload and other
+ * researcher flows on test.nemar.org before promoting dev to main.
+ */
+export const NONPROD_TEST_ACCOUNT = "test@nemar.org";
+
+/**
+ * Non-production sign-in allowlist (#1008). The dev/staging D1 is a
+ * partial production mirror with real user emails, and non-production
+ * `/auth/code/request` responses echo `dev_code`; without this gate
+ * anyone who knows a mirrored address could sign in as that user on
+ * staging. Codes are only issued for admins/owners (delivered by real
+ * email) and the synthetic accounts. Callers must apply this in
+ * non-production environments only — production keeps the #595
+ * behavior for every registered user.
+ */
+export function nonProdCodeRequestAllowed(role: string | null, email: string): boolean {
+  if (role === "admin" || role === "owner") return true;
+  return nonProdCodeEchoAllowed(email);
+}
+
+/**
+ * Whether `dev_code` may be echoed in the response (#1008). Synthetic
+ * accounts only: the shared QA account and the `@nemar.test` fixtures
+ * the live test suite seeds. Never echo for admins/owners — the echo
+ * is readable by whoever sent the request, so echoing a real account's
+ * code would let anyone sign in as that account.
+ */
+export function nonProdCodeEchoAllowed(email: string): boolean {
+  return email === NONPROD_TEST_ACCOUNT || email.endsWith("@nemar.test");
+}

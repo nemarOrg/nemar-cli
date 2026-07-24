@@ -12,6 +12,14 @@ VALUES ('test-admin', 'testAdmin@nemar.org', '$2b$10$JmaHDE03Q2pjaBgWB4jeN.mgLCp
 INSERT OR IGNORE INTO users (username, email, password_hash, github_username, status, role, email_verified, approved_at, revoked_at)
 VALUES ('test-user', 'test-user@nemar.test', '$2b$10$JmaHDE03Q2pjaBgWB4jeN.mgLCp9WdSWRpicN4J5gAiJ/YZBRPWIi', 'test-user-gh', 'approved', 'member', 1, datetime('now'), NULL);
 
+-- Shared web-QA account (#1008): a normal member used to exercise upload and
+-- other researcher flows on test.nemar.org. It is on the non-production
+-- email-code allowlist and gets dev_code echoed, so anyone on the team can
+-- sign in without an inbox. Distinct from 'test-user' on purpose:
+-- test/api.test.ts authenticates with test-user@nemar.test and must not change.
+INSERT OR IGNORE INTO users (username, email, password_hash, github_username, status, role, email_verified, approved_at, revoked_at)
+VALUES ('test-web', 'test@nemar.org', '$2b$10$JmaHDE03Q2pjaBgWB4jeN.mgLCp9WdSWRpicN4J5gAiJ/YZBRPWIi', 'test-web-gh', 'approved', 'member', 1, datetime('now'), NULL);
+
 INSERT OR IGNORE INTO users (username, email, password_hash, github_username, status, role, email_verified, approved_at, revoked_at)
 VALUES ('test-pending', 'test-pending@nemar.test', '$2b$10$JmaHDE03Q2pjaBgWB4jeN.mgLCp9WdSWRpicN4J5gAiJ/YZBRPWIi', 'test-pending-gh', 'pending', 'member', 0, NULL, NULL);
 

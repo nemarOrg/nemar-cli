@@ -35,6 +35,8 @@ import {
   generateAuthCode,
   hashAuthCode,
   maskEmail,
+  nonProdCodeEchoAllowed,
+  nonProdCodeRequestAllowed,
 } from "../services/auth-code";
 import { resolveEmailConfig, sendPasswordlessCodeEmail } from "../services/email";
 import {
@@ -130,9 +132,9 @@ authWebRoutes.post("/code/request", zValidator("json", emailSchema), async (c) =
     // file, you'll get a code shortly" copy and a CTA pointing typo'd
     // users at the CLI sign-up (companion issue on nemarOrg/website).
     const existing = await db
-      .prepare("SELECT status FROM users WHERE email = ? AND deleted_at IS NULL LIMIT 1")
+      .prepare("SELECT status, role FROM users WHERE email = ? AND deleted_at IS NULL LIMIT 1")
       .bind(email)
-      .first<{ status: string }>();
+      .first<{ status: string; role: string | null }>();
 
     if (!existing) {
       return c.json(
@@ -150,6 +152,15 @@ authWebRoutes.post("/code/request", zValidator("json", emailSchema), async (c) =
           ? { ok: true, masked_email: maskEmail(email), dev_skip: "revoked" }
           : { ok: true, masked_email: maskEmail(email) },
       );
+    }
+
+    // #1008: the non-production D1 mirrors real production users, and
+    // non-production responses echo `dev_code` below. Only issue codes
+    // for admins/owners and the synthetic test accounts; everyone else
+    // gets the same silent-ok shape as an unregistered address. Exits
+    // BEFORE code generation and the Resend send, like the #595 paths.
+    if (isDevOrTest(c.env) && !nonProdCodeRequestAllowed(existing.role, email)) {
+      return c.json({ ok: true, masked_email: maskEmail(email), dev_skip: "not_allowlisted" });
     }
 
     const code = generateAuthCode();
@@ -215,7 +226,10 @@ authWebRoutes.post("/code/request", zValidator("json", emailSchema), async (c) =
       ok: true,
       masked_email: maskEmail(email),
     };
-    if (isDevOrTest(c.env)) body.dev_code = code;
+    // #1008: echo only for synthetic accounts. Admins/owners passed the
+    // allowlist above but must read their code from the actual email —
+    // the response body is readable by whoever sent the request.
+    if (isDevOrTest(c.env) && nonProdCodeEchoAllowed(email)) body.dev_code = code;
 
     // Final belt-and-braces: never leak the code in production. If
     // ENVIRONMENT is misconfigured at deploy time, this assertion
