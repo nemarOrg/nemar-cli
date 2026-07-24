@@ -163,7 +163,14 @@ export async function updateValidatorCache(): Promise<string | null> {
 export async function getValidatorVersion(): Promise<string | null> {
   try {
     const proc = spawn({
-      cmd: ["deno", "run", "-ERWN", VALIDATOR_JSR_SPECIFIER, "--version"],
+      cmd: [
+        "deno",
+        "run",
+        "--node-modules-dir=none",
+        "-ERWN",
+        VALIDATOR_JSR_SPECIFIER,
+        "--version",
+      ],
       stdout: "pipe",
       stderr: "pipe",
     });
@@ -186,7 +193,14 @@ function buildValidatorArgs(
   datasetPath: string,
   options: ValidateOptions & { json?: boolean; extraArgs?: string[]; forceReload?: boolean } = {},
 ): string[] {
-  const args = ["run"];
+  // --node-modules-dir=none forces Deno to resolve the validator's npm
+  // dependency (npm:hash-wasm, used during hashing) from its own global cache
+  // rather than an ambient project node_modules. Without it, running from a
+  // directory that HAS a node_modules but lacks hash-wasm (e.g. nemar-cli's own
+  // tree, or any Node project a user validates from) makes Deno switch to local
+  // node_modules resolution and crash with "Could not find a matching package
+  // for 'npm:hash-wasm'" -- validation fails with empty output (#1010).
+  const args = ["run", "--node-modules-dir=none"];
   if (options.forceReload) {
     args.push(`--reload=${VALIDATOR_JSR_SPECIFIER}`);
   }

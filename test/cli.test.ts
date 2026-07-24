@@ -428,15 +428,7 @@ describe("CLI Dataset Validate", () => {
   });
 
   test("nemar dataset validate with valid dataset succeeds", async () => {
-    const { stdout, stderr, exitCode } = await runCli(["dataset", "validate", testDatasetDir]);
-
-    // TEMP DIAGNOSTIC (#1010): surface the validator output when CI disagrees
-    // with local so we can see the actual error/schema rather than guess.
-    if (exitCode !== 0) {
-      console.log("[diag] validate exitCode", exitCode);
-      console.log("[diag] stdout:\n", stdout);
-      console.log("[diag] stderr:\n", stderr);
-    }
+    const { stdout, exitCode } = await runCli(["dataset", "validate", testDatasetDir]);
 
     expect(exitCode).toBe(0);
     // Native bids-validator text output includes a Summary table
