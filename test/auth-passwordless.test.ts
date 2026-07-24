@@ -39,7 +39,11 @@ const baseHeaders: Record<string, string> = TEST_CONFIG.bypassToken
 async function seedWebUser(
   email: string,
   status?: "pending" | "verified" | "approved" | "revoked",
+  profile?: Partial<PublicUserProfile>,
 ): Promise<void> {
+  const body: Record<string, unknown> = { email };
+  if (status) body.status = status;
+  if (profile) body.profile = profile;
   const r = await fetch(`${API}/admin/test-fixtures/seed-web-user`, {
     method: "POST",
     headers: {
@@ -47,7 +51,7 @@ async function seedWebUser(
       Authorization: `Bearer ${TEST_CONFIG.adminApiKey}`,
       ...baseHeaders,
     },
-    body: JSON.stringify(status ? { email, status } : { email }),
+    body: JSON.stringify(body),
   });
   if (r.status !== 200) {
     throw new Error(`seedWebUser failed (${r.status}): ${await r.text()}`);
@@ -202,6 +206,67 @@ describe.skipIf(PROD_GUARD_ACTIVE)("passwordless email-code auth (#569)", () => 
     expect(req.body.ok).toBe(true);
     expect(req.body.dev_code).toBeUndefined();
     expect(req.body.dev_skip).toBe("not_allowlisted");
+  });
+
+  test("populated profile fields pass through /verify and /me (#910)", async () => {
+    const email = freshEmail("profile");
+    // github_username is case-insensitively UNIQUE (0012); derive a
+    // per-run value so reruns (which mint a fresh email each time)
+    // don't collide with an earlier run's fixture row.
+    const profile = {
+      given_name: "Grace",
+      family_name: "Hopper",
+      orcid: "0000-0002-1825-0097",
+      orcid_verified: true,
+      github_username: `gh-${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`,
+      city: "Arlington",
+      country: "United States",
+      affiliation: "United States Navy",
+    };
+    await seedWebUser(email, "approved", profile);
+
+    const req = await requestCode(email);
+    expect(req.status).toBe(200);
+    const code = req.body.dev_code as string;
+    const v = await verifyCode(email, code, false);
+    expect(v.status).toBe(200);
+
+    // /verify carries the profile (same publicUser shaping as /me).
+    const vUser = v.body.user as NonNullable<VerifyResponse["user"]> & PublicUserProfile;
+    expect(vUser.orcid_verified).toBe(true);
+    for (const key of [
+      "given_name",
+      "family_name",
+      "orcid",
+      "github_username",
+      "city",
+      "country",
+      "affiliation",
+    ] as const) {
+      expect(vUser[key]).toBe(profile[key]);
+    }
+
+    // /me returns the same populated payload.
+    const m = v.setCookie?.match(/nemar_session=([^;]+)/);
+    expect(m).toBeTruthy();
+    const me = await fetch(`${API}/auth/me`, {
+      headers: { ...baseHeaders, Cookie: `nemar_session=${m?.[1] as string}` },
+    });
+    expect(me.status).toBe(200);
+    const meBody = (await me.json()) as MeResponse;
+    const meUser = meBody.user as NonNullable<MeResponse["user"]> & PublicUserProfile;
+    expect(meUser.orcid_verified).toBe(true);
+    for (const key of [
+      "given_name",
+      "family_name",
+      "orcid",
+      "github_username",
+      "city",
+      "country",
+      "affiliation",
+    ] as const) {
+      expect(meUser[key]).toBe(profile[key]);
+    }
   });
 
   test("re-request rotates: first code stops working, second works", async () => {

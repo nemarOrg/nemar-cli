@@ -345,7 +345,8 @@ authWebRoutes.post("/code/verify", zValidator("json", verifySchema), async (c) =
         given_name: string | null;
         family_name: string | null;
         orcid: string | null;
-        orcid_verified: number | null;
+        // NOT NULL DEFAULT 0 in D1 (0050), so plain number.
+        orcid_verified: number;
         github_username: string | null;
         city: string | null;
         country: string | null;
