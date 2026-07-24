@@ -136,6 +136,19 @@ export interface WebSessionUser {
    *  role rather than guess. */
   role: UserRole | null;
   status: string;
+  /** Profile fields surfaced on /auth/me for the website Settings page
+   *  (#910). All nullable in D1 (migrations 0051/0052); `null` here means
+   *  the column is unset, and the website renders its fallback state. */
+  given_name: string | null;
+  family_name: string | null;
+  orcid: string | null;
+  /** Boolean here, even though D1 stores 0/1 — converted at the read
+   *  boundary like `WebSessionRow.remember`. */
+  orcid_verified: boolean;
+  github_username: string | null;
+  city: string | null;
+  country: string | null;
+  affiliation: string | null;
 }
 
 /** Look up an active session by cookie value, returning the joined
@@ -153,7 +166,9 @@ export async function findSessionByCookieId(
   // lands.
   const row = await env.DB.prepare(
     `SELECT ws.id, ws.user_id, ws.remember, ws.expires_at, ws.last_used_at,
-            u.email, u.role, u.status
+            u.email, u.role, u.status,
+            u.given_name, u.family_name, u.orcid, u.orcid_verified,
+            u.github_username, u.city, u.country, u.affiliation
        FROM web_sessions ws
        JOIN users u ON u.id = ws.user_id
       WHERE ws.cookie_id_hash = ?
@@ -173,6 +188,15 @@ export async function findSessionByCookieId(
       email: string;
       role: string | null;
       status: string;
+      given_name: string | null;
+      family_name: string | null;
+      orcid: string | null;
+      // NOT NULL DEFAULT 0 in D1 (0050), so plain number.
+      orcid_verified: number;
+      github_username: string | null;
+      city: string | null;
+      country: string | null;
+      affiliation: string | null;
     }>();
   if (!row) return null;
 
@@ -197,6 +221,14 @@ export async function findSessionByCookieId(
       email: row.email,
       role: parseRole(row.role, row.email),
       status: row.status,
+      given_name: row.given_name,
+      family_name: row.family_name,
+      orcid: row.orcid,
+      orcid_verified: row.orcid_verified === 1,
+      github_username: row.github_username,
+      city: row.city,
+      country: row.country,
+      affiliation: row.affiliation,
     },
   };
 }
