@@ -111,6 +111,7 @@ function publicUser(row: {
   city: string | null;
   country: string | null;
   affiliation: string | null;
+  service_access: boolean;
 }) {
   return {
     id: row.id,
@@ -125,6 +126,9 @@ function publicUser(row: {
     city: row.city,
     country: row.country,
     affiliation: row.affiliation,
+    // Tiered access (ADR 0010): base accounts are false until an admin
+    // grants service (upload + compute) access.
+    service_access: row.service_access,
   };
 }
 
@@ -333,7 +337,7 @@ authWebRoutes.post("/code/verify", zValidator("json", verifySchema), async (c) =
       .prepare(
         `SELECT id, email, role, status,
                 given_name, family_name, orcid, orcid_verified,
-                github_username, city, country, affiliation
+                github_username, city, country, affiliation, service_access
            FROM users WHERE email = ? AND deleted_at IS NULL LIMIT 1`,
       )
       .bind(email)
@@ -351,6 +355,8 @@ authWebRoutes.post("/code/verify", zValidator("json", verifySchema), async (c) =
         city: string | null;
         country: string | null;
         affiliation: string | null;
+        // NOT NULL DEFAULT 0 in D1 (0062), so plain number.
+        service_access: number;
       }>();
     if (!userRow) {
       // No live users row for a matched code. Normally impossible
@@ -376,6 +382,7 @@ authWebRoutes.post("/code/verify", zValidator("json", verifySchema), async (c) =
       city: userRow.city,
       country: userRow.country,
       affiliation: userRow.affiliation,
+      service_access: userRow.service_access === 1,
     };
 
     // Mark email as verified — the user just proved they control the
