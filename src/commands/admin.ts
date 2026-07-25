@@ -95,7 +95,13 @@ import {
   submitEnrichment,
 } from "../lib/api/datasets.js";
 import { ApiError, errorDetail } from "../lib/api/errors.js";
-import { createNotice, deleteNotice, listAdminNotices } from "../lib/api/notices.js";
+import {
+  NOTICE_LEVELS,
+  type NoticeLevel,
+  createNotice,
+  deleteNotice,
+  listAdminNotices,
+} from "../lib/api/notices.js";
 import {
   type PublishProgressInfo,
   type StepResult,
@@ -5324,9 +5330,15 @@ noticeCommand
       console.log();
 
       for (const notice of notices) {
+        // Mirrors the website's banner tones (#1025) so a level reads the
+        // same in the terminal as it does on the site. `info` is retained
+        // only so pre-0063 rows in a stale local cache still colourize.
         const levelColors: Record<string, (s: string) => string> = {
           critical: chalk.red.bold,
           warning: chalk.yellow,
+          maintenance: chalk.magenta,
+          announcement: chalk.green,
+          tip: chalk.blue,
           info: chalk.blue,
         };
         const colorFn = levelColors[notice.level] || chalk.white;
@@ -5354,7 +5366,11 @@ noticeCommand
   .command("set")
   .description("Create a new system notice")
   .requiredOption("-m, --message <text>", "Notice message text")
-  .option("-l, --level <level>", "Notice level: info, warning, critical", "info")
+  .option(
+    "-l, --level <level>",
+    "Notice level: tip, announcement, maintenance, warning, critical",
+    "tip",
+  )
   .option("-s, --scope <scope>", "Target scope: all, admins, members", "all")
   .option("-e, --expires <datetime>", "Expiry datetime (ISO 8601)")
   .action(
@@ -5369,9 +5385,11 @@ noticeCommand
         process.exit(1);
       }
 
-      if (!["info", "warning", "critical"].includes(options.level)) {
+      // `info` stays accepted (the API normalizes it to `tip`, #1025) so
+      // existing scripts don't break, but it isn't advertised in --help.
+      if (![...NOTICE_LEVELS, "info"].includes(options.level as NoticeLevel)) {
         console.error(
-          chalk.red(`Invalid level: ${options.level}. Use info, warning, or critical.`),
+          chalk.red(`Invalid level: ${options.level}. Use ${NOTICE_LEVELS.join(", ")}.`),
         );
         process.exit(1);
       }

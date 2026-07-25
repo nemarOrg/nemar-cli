@@ -7,7 +7,7 @@
  */
 
 import chalk from "chalk";
-import { type Notice, getNotices } from "./api/notices.js";
+import { type Notice, type NoticeLevel, getNotices } from "./api/notices.js";
 import { getConfig, isAuthenticated, setConfig } from "./config.js";
 
 const MAX_DISMISSED = 100;
@@ -31,11 +31,17 @@ export async function fetchAndDisplayNotices(): Promise<void> {
       printNotice(notice);
     }
 
-    // Auto-dismiss info-level notices after first display (only if authenticated)
+    // Auto-dismiss the low-urgency levels after first display (only if
+    // authenticated). `tip` replaced `info` in #1025; `announcement` joins it
+    // because good news is a read-once thing too. Anything describing live or
+    // imminent operational state (warning/maintenance/critical) deliberately
+    // keeps reappearing until it expires — the same split the website uses
+    // for banner dismissal persistence.
     if (isAuthenticated()) {
-      const infoDismissals = visible.filter((n) => n.level === "info").map((n) => n.id);
-      if (infoDismissals.length > 0) {
-        dismissNotices(infoDismissals);
+      const readOnce: NoticeLevel[] = ["tip", "announcement"];
+      const autoDismissed = visible.filter((n) => readOnce.includes(n.level)).map((n) => n.id);
+      if (autoDismissed.length > 0) {
+        dismissNotices(autoDismissed);
       }
     }
   } catch (err) {
@@ -50,6 +56,9 @@ function printNotice(notice: Notice): void {
   let prefix: string;
   let color: (text: string) => string;
 
+  // Mirrors the website's banner tones (#1025) so a level reads the same in
+  // the terminal as on the site. `default` also catches a level added
+  // upstream before this client learns about it, rather than dropping it.
   switch (notice.level) {
     case "critical":
       prefix = "CRITICAL";
@@ -58,6 +67,14 @@ function printNotice(notice: Notice): void {
     case "warning":
       prefix = "WARNING";
       color = chalk.yellow;
+      break;
+    case "maintenance":
+      prefix = "MAINTENANCE";
+      color = chalk.magenta;
+      break;
+    case "announcement":
+      prefix = "NEWS";
+      color = chalk.green;
       break;
     default:
       prefix = "NOTICE";

@@ -13,10 +13,26 @@ import { request } from "./client.js";
 // Notices
 // ============================================================================
 
+/**
+ * Notice severity (#1025), most urgent first — also the stacking order the
+ * website renders. `info` was renamed to `tip` by migration 0063; the API
+ * still accepts `info` on write and normalizes it, so this union covers what
+ * can be *read back*, which never includes `info`.
+ */
+export type NoticeLevel = "critical" | "warning" | "maintenance" | "announcement" | "tip";
+
+export const NOTICE_LEVELS: NoticeLevel[] = [
+  "critical",
+  "warning",
+  "maintenance",
+  "announcement",
+  "tip",
+];
+
 export interface Notice {
   id: number;
   message: string;
-  level: "info" | "warning" | "critical";
+  level: NoticeLevel;
   scope: "all" | "admins" | "members";
   created_at: string;
   expires_at: string | null;

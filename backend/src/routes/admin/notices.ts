@@ -8,7 +8,13 @@
 import { zValidator } from "@hono/zod-validator";
 import { z } from "zod";
 
-import { createNotice, deleteNotice, listAllNotices } from "../../services/notices";
+import {
+  type NoticeLevel,
+  createNotice,
+  deleteNotice,
+  listAllNotices,
+  normalizeLevel,
+} from "../../services/notices";
 import type { AdminRouter } from "./shared";
 
 export function registerNoticeRoutes(admin: AdminRouter): void {
@@ -25,9 +31,19 @@ export function registerNoticeRoutes(admin: AdminRouter): void {
     return c.json({ notices });
   });
 
+  /**
+   * `info` is accepted but is NOT part of the stored vocabulary (#1025,
+   * migration 0063 renamed it to `tip`). Keeping it on the input enum means
+   * existing `nemar admin notice set --level info` invocations and any
+   * scripts built on them keep working; `normalizeLevel` maps it to `tip`
+   * before the insert, so nothing reaches the widened CHECK constraint that
+   * would violate it.
+   */
   const createNoticeSchema = z.object({
     message: z.string().min(1).max(1000),
-    level: z.enum(["info", "warning", "critical"]).default("info"),
+    level: z
+      .enum(["tip", "announcement", "maintenance", "warning", "critical", "info"])
+      .default("tip"),
     scope: z.enum(["all", "admins", "members"]).default("all"),
     expires_at: z.string().datetime({ offset: true }).optional(),
   });
@@ -40,7 +56,11 @@ export function registerNoticeRoutes(admin: AdminRouter): void {
     const db = c.env.DB;
     const body = c.req.valid("json");
 
-    const notice = await createNotice(db, body, user.id);
+    const notice = await createNotice(
+      db,
+      { ...body, level: normalizeLevel(body.level) as NoticeLevel },
+      user.id,
+    );
     return c.json(notice, 201);
   });
 
