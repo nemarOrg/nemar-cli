@@ -66,6 +66,39 @@ const NOTICE_LEVEL_ORDER = `CASE level ${NOTICE_LEVELS.map(
 ).join(" ")} ELSE ${NOTICE_LEVELS.length} END`;
 
 /**
+ * Timestamp columns, projected as explicit-UTC RFC3339 (#1024).
+ *
+ * Storage is SQLite's `YYYY-MM-DD HH:MM:SS` so that comparisons against
+ * `datetime('now')` are byte-comparable (that mismatch WAS the bug). But
+ * that format is a trap on the wire: `Date.parse("2026-07-25 14:30:00")` is
+ * not ISO-8601, and both V8 and JavaScriptCore interpret it as *local* time,
+ * so every JS consumer would silently shift it by the viewer's own UTC
+ * offset. Appending the `Z` makes the instant unambiguous for the website,
+ * the CLI, and anything else reading these endpoints.
+ *
+ * Applied to `created_at` as well as `expires_at`: they come back in the
+ * same object, and returning one unambiguous field beside one that parses
+ * as local time is exactly the kind of inconsistency that produces a
+ * timezone bug six months from now.
+ */
+export const NOTICE_COLUMNS = `id, message, level, scope,
+       strftime('%Y-%m-%dT%H:%M:%SZ', created_at) AS created_at,
+       strftime('%Y-%m-%dT%H:%M:%SZ', expires_at) AS expires_at`;
+
+/**
+ * Predicate for "not expired" (#1024).
+ *
+ * Correct only because `expires_at` is stored in SQLite's own
+ * `YYYY-MM-DD HH:MM:SS` format, so this is a like-for-like byte comparison.
+ * Storing RFC3339 here instead is what made same-day expiries compare as
+ * active — see migration 0064.
+ *
+ * Exported so the test suite asserts against the real predicate rather than
+ * a copy that could drift away from it.
+ */
+export const NOTICE_ACTIVE_FILTER = "expires_at IS NULL OR expires_at > datetime('now')";
+
+/**
  * Get active (non-expired) notices visible to a given role.
  * Unauthenticated callers only see "all"-scoped notices.
  */
@@ -77,9 +110,9 @@ export async function getActiveNotices(db: D1Database, userRole?: UserRole): Pro
   const placeholders = scopes.map(() => "?").join(", ");
   const result = await db
     .prepare(
-      `SELECT id, message, level, scope, created_at, expires_at
+      `SELECT ${NOTICE_COLUMNS}
        FROM notices
-       WHERE (expires_at IS NULL OR expires_at > datetime('now'))
+       WHERE (${NOTICE_ACTIVE_FILTER})
          AND scope IN (${placeholders})
        ORDER BY ${NOTICE_LEVEL_ORDER}, created_at DESC`,
     )
@@ -95,7 +128,7 @@ export async function getActiveNotices(db: D1Database, userRole?: UserRole): Pro
 export async function listAllNotices(db: D1Database): Promise<Notice[]> {
   const result = await db
     .prepare(
-      `SELECT id, message, level, scope, created_at, expires_at
+      `SELECT ${NOTICE_COLUMNS}
        FROM notices
        ORDER BY created_at DESC`,
     )
@@ -119,9 +152,13 @@ export async function createNotice(
 ): Promise<Notice> {
   const result = await db
     .prepare(
+      // datetime(?) normalizes the RFC3339 input (any offset, or a Z) to
+      // the storage format the expiry comparison uses. Without it the value
+      // keeps its `T` separator and never compares correctly against
+      // datetime('now') on the same date -- issue #1024.
       `INSERT INTO notices (message, level, scope, created_by, expires_at)
-       VALUES (?, ?, ?, ?, ?)
-       RETURNING id, message, level, scope, created_at, expires_at`,
+       VALUES (?, ?, ?, ?, datetime(?))
+       RETURNING ${NOTICE_COLUMNS}`,
     )
     .bind(data.message, data.level, data.scope, createdById, data.expires_at || null)
     .first<Notice>();
