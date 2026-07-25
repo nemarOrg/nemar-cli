@@ -45,11 +45,10 @@ import type { AdminRouter } from "./shared";
  * on the strength of this contract, and that target is also where the DOI
  * `10.82901/nemar.on007964` lands. A violating row would not 404 — it would
  * route a *cited* URL to the *wrong dataset*, silently.
- */
-/**
+ *
  * A `Map`, not a plain object: an object literal inherits from
  * `Object.prototype`, so a lookup keyed on `"constructor"` or `"toString"`
- * resolves to an inherited function and then gets *called* — returning a
+ * resolves to an inherited function and then gets *called*, returning a
  * truthy value instead of rejecting an unknown source. The unit test pins
  * that case.
  */
