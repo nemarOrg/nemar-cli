@@ -99,6 +99,65 @@ describe("#1024 — insert normalization", () => {
   test("is idempotent on a value already in storage format", () => {
     expect(insert("2026-07-25 14:30:00").expires_at).toBe("2026-07-25 14:30:00");
   });
+
+  // The gap that shipped un-caught in the first cut of this fix: zod's
+  // `.datetime({offset: true})` checks the offset's digit COUNT, not its
+  // range, so `+15:00` passes validation — but SQLite has no such offset and
+  // datetime() returns NULL. Because expires_at is nullable, the INSERT then
+  // "succeeds" into the worst possible state: a notice that never expires,
+  // returned as a 201 with nothing logged.
+  test("datetime() yields NULL for an offset zod accepts but SQLite rejects", () => {
+    expect(insert("2026-07-25T14:30:00+15:00").expires_at).toBeNull();
+  });
+
+  // Documents the boundary, so a future tightening doesn't over-reject:
+  // +14:00 is a real offset (Line Islands) and must keep working.
+  test("accepts the real extremes of the UTC offset range", () => {
+    expect(insert("2026-07-25T14:30:00+14:00").expires_at).toBe("2026-07-25 00:30:00");
+    expect(insert("2026-07-25T14:30:00-12:00").expires_at).toBe("2026-07-26 02:30:00");
+  });
+});
+
+describe("#1024 — offset validation (the round-trip guard's counterpart)", () => {
+  // Mirrors hasRealUtcOffset in routes/admin/notices.ts. Kept as a table so
+  // the boundary cases are visible rather than implied.
+  const REAL_OFFSET = /([+-])(\d{2}):(\d{2})$/;
+  function hasRealUtcOffset(value: string): boolean {
+    const match = REAL_OFFSET.exec(value);
+    if (!match) return true;
+    const [, sign, hours, minutes] = match;
+    const total = Number(hours) * 60 + Number(minutes);
+    if (Number(minutes) > 59) return false;
+    return sign === "-" ? total <= 12 * 60 : total <= 14 * 60;
+  }
+
+  test.each([
+    ["2026-07-25T14:30:00Z", true],
+    ["2026-07-25T14:30:00+00:00", true],
+    ["2026-07-25T14:30:00+14:00", true],
+    ["2026-07-25T14:30:00-12:00", true],
+    ["2026-07-25T14:30:00+15:00", false],
+    ["2026-07-25T14:30:00-13:00", false],
+    ["2026-07-25T14:30:00+99:99", false],
+  ])("%s -> %s", (value, expected) => {
+    expect(hasRealUtcOffset(value)).toBe(expected);
+  });
+
+  // Every offset the validator accepts must also be one SQLite can parse —
+  // that agreement is the whole point, and its absence was the bug.
+  test("every accepted offset round-trips through datetime() without NULL", () => {
+    const db = freshDb();
+    for (const value of [
+      "2026-07-25T14:30:00Z",
+      "2026-07-25T14:30:00+00:00",
+      "2026-07-25T14:30:00+14:00",
+      "2026-07-25T14:30:00-12:00",
+    ]) {
+      expect(hasRealUtcOffset(value)).toBe(true);
+      const row = db.prepare("SELECT datetime(?) AS d").get(value) as { d: string | null };
+      expect(row.d).not.toBeNull();
+    }
+  });
 });
 
 describe("#1024 — the active filter", () => {
