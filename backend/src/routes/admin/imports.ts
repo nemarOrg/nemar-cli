@@ -23,19 +23,81 @@ import { recoverRow } from "../../services/import-retry";
 import { hasRole } from "../../types/bindings";
 import type { AdminRouter } from "./shared";
 
+/**
+ * Per-source rule tying a NEMAR `dataset_id` to the upstream `source_id`
+ * it was imported from (#1030).
+ *
+ * Registered per source rather than expressed as one global rule, because
+ * the correspondence is a property of the *source*, not of datasets:
+ *
+ * - `openneuro` mirrors share their six digits with the upstream id —
+ *   `on007964` IS `ds007964`. That is a contract, not a coincidence.
+ * - `nm######` datasets are NEMAR-native uploads with `source` and
+ *   `source_id` both NULL. They have nothing to correspond to, and never
+ *   reach this endpoint.
+ * - Further prefixes are expected, and there is no reason to assume they
+ *   will share OpenNeuro's shape. An unregistered source is rejected
+ *   outright below, so adding one is a deliberate decision rather than a
+ *   silent inheritance of the wrong rule.
+ *
+ * Why enforce it at all: nemarOrg/website#190 rewrites legacy citation
+ * URLs (`/dataexplorer/detail?dataset_id=ds007964` → `/dataset/on007964`)
+ * on the strength of this contract, and that target is also where the DOI
+ * `10.82901/nemar.on007964` lands. A violating row would not 404 — it would
+ * route a *cited* URL to the *wrong dataset*, silently.
+ */
+/**
+ * A `Map`, not a plain object: an object literal inherits from
+ * `Object.prototype`, so a lookup keyed on `"constructor"` or `"toString"`
+ * resolves to an inherited function and then gets *called* — returning a
+ * truthy value instead of rejecting an unknown source. The unit test pins
+ * that case.
+ */
+const SOURCE_ID_RULES = new Map<string, (datasetId: string, sourceId: string) => boolean>([
+  [
+    "openneuro",
+    (datasetId, sourceId) => /^ds\d{6}$/.test(sourceId) && datasetId.slice(2) === sourceId.slice(2),
+  ],
+]);
+
+/**
+ * True when `source_id` is a legal upstream id for `dataset_id` under the
+ * rule registered for `source`. An unregistered source is never legal —
+ * failing closed keeps a new source from inheriting a correspondence that
+ * may not hold for it.
+ */
+export function isValidSourceIdForDataset(
+  source: string,
+  datasetId: string,
+  sourceId: string,
+): boolean {
+  const rule = SOURCE_ID_RULES.get(source);
+  return rule ? rule(datasetId, sourceId) === true : false;
+}
+
 export function registerImportRoutes(admin: AdminRouter): void {
   // ─── Import external dataset ────────────────────────────────────────────────
 
   // 8 chars: 2-char prefix + 6 digits (e.g., on007262)
-  const importDatasetSchema = z.object({
-    dataset_id: z
-      .string()
-      .regex(/^on\d{6}$/, "Import only supports 'on' prefix datasets (on######)"),
-    name: z.string().min(1).max(200),
-    description: z.string().optional(),
-    source: z.enum(["openneuro"]),
-    source_id: z.string().min(1).max(50),
-  });
+  const importDatasetSchema = z
+    .object({
+      dataset_id: z
+        .string()
+        .regex(/^on\d{6}$/, "Import only supports 'on' prefix datasets (on######)"),
+      name: z.string().min(1).max(200),
+      description: z.string().optional(),
+      source: z.enum(["openneuro"]),
+      source_id: z.string().min(1).max(50),
+    })
+    // Cross-field: the two ids are individually well-formed but must also
+    // correspond (#1030). Rejected here rather than left to convention,
+    // because a mismatch is invisible after the fact and misroutes cited
+    // URLs once website#190 ships.
+    .refine((v) => isValidSourceIdForDataset(v.source, v.dataset_id, v.source_id), {
+      path: ["source_id"],
+      message:
+        "source_id does not correspond to dataset_id for this source (openneuro: on###### must match ds###### digit-for-digit)",
+    });
 
   /**
    * POST /admin/datasets/import
