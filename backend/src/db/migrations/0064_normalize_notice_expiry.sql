@@ -25,10 +25,27 @@
 -- format, so re-running this is safe.
 --
 -- The `datetime(expires_at) IS NOT NULL` guard matters: `datetime()` returns
--- NULL for an unparseable string, and NULL in this column means "never
+-- NULL for a string it can't parse, and NULL in this column means "never
 -- expires". Without the guard a malformed timestamp would be silently
 -- promoted from "expired" to "permanent", which is the worst possible
 -- direction for a banner. Such a row is left untouched for a human to see.
+--
+-- That guard is NOT a general "is this a valid timestamp" check, and the
+-- next person to write against this table shouldn't read it as one. SQLite
+-- reinterprets a bare numeric string as a Julian Day Number rather than
+-- rejecting it -- `datetime('12345')` is '-4679-09-12 12:00:00', not NULL --
+-- so a value like that would pass the guard and be rewritten to an ancient
+-- date. Not reachable from the app (every write is zod-validated RFC3339),
+-- but it is reachable from an out-of-band `wrangler d1 execute` or a seed
+-- script.
+--
+-- Rows this skips are silent by construction. To see them after applying:
+--
+--   SELECT id, expires_at FROM notices
+--    WHERE expires_at IS NOT NULL AND datetime(expires_at) IS NULL;
+--
+-- Any hit is a row still carrying the #1024 one-day-late expiry behaviour,
+-- and wants a human decision rather than an automatic rewrite.
 --
 -- Cloudflare D1 forbids explicit BEGIN/COMMIT (error 7500); the runtime wraps
 -- each migration in a transaction already.

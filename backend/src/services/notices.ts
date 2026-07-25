@@ -164,6 +164,24 @@ export async function createNotice(
     .first<Notice>();
 
   if (!result) throw new Error("Failed to create notice");
+
+  // `datetime()` returns NULL for input it can't parse, and NULL in this
+  // column means "never expires" — so a value that survives validation but
+  // not SQLite would be written as a PERMANENT notice, with a 201 and no
+  // error anywhere. Nothing throws; the write simply succeeds into the
+  // wrong state.
+  //
+  // Reachable because the two validators disagree: zod's
+  // `.datetime({ offset: true })` checks the offset's digit COUNT, not its
+  // range, so `+15:00` (no such UTC offset) passes zod and yields NULL from
+  // datetime(). Checking the round-trip rather than the offset specifically
+  // is deliberate — it also covers any future divergence between what zod
+  // accepts and what SQLite parses, which is the part likely to drift.
+  if (data.expires_at && result.expires_at === null) {
+    throw new Error(
+      `expires_at ${JSON.stringify(data.expires_at)} passed validation but SQLite could not parse it; refusing to create a notice that would silently never expire`,
+    );
+  }
   return result;
 }
 
