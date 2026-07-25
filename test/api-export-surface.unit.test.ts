@@ -133,11 +133,29 @@ const MODULE_EXPORTS: Record<string, string[]> = {
     "verifyImport",
     "withdrawDataset",
   ],
-  notices: ["createNotice", "deleteNotice", "getNotices", "listAdminNotices"],
+  notices: ["NOTICE_LEVELS", "createNotice", "deleteNotice", "getNotices", "listAdminNotices"],
 };
 
 /** Exported only for sibling api/* modules; never part of the CLI surface. */
 const INTERNAL_WIRING = ["request"];
+
+/**
+ * CLI-facing symbols added to lib/api/* AFTER the #908 split.
+ *
+ * Subtracted from the union like INTERNAL_WIRING, but for the opposite
+ * reason: these ARE part of the CLI surface, they simply post-date the
+ * monolith. Keeping them in their own list means MONOLITH_EXPORTS stays a
+ * faithful capture of what api.ts exported at #908 commit 1, rather than
+ * being retro-edited to claim it exported names that never existed there —
+ * which would quietly destroy the "nothing invented" guarantee for every
+ * future reviewer.
+ *
+ * Per-module placement is still pinned above, so these get the same
+ * protection every other symbol has.
+ */
+const POST_SPLIT_ADDITIONS = [
+  "NOTICE_LEVELS", // #1025, notice level vocabulary
+];
 
 /** The api.ts monolith's runtime surface, captured at #908 commit 1. */
 const MONOLITH_EXPORTS = [
@@ -254,6 +272,7 @@ describe("lib/api export surface", () => {
   test("union of module exports equals the monolith surface", () => {
     const union = new Set(Object.values(MODULE_EXPORTS).flat());
     for (const w of INTERNAL_WIRING) union.delete(w);
+    for (const a of POST_SPLIT_ADDITIONS) union.delete(a);
     expect([...union].sort()).toEqual(MONOLITH_EXPORTS);
   });
 
