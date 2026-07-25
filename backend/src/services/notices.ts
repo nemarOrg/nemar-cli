@@ -7,14 +7,63 @@
 
 import type { UserRole } from "../types/bindings";
 
+/**
+ * Notice severity (#1025). Ordered here most urgent first, which is also the
+ * stacking order the website renders and {@link NOTICE_LEVEL_ORDER} encodes.
+ *
+ * - `critical`     live outage, data at risk
+ * - `warning`      degraded right now
+ * - `maintenance`  planned or in-progress work window
+ * - `announcement` good news: a conference, a release, a milestone
+ * - `tip`          low-key hint or standing note (was `info` before 0063)
+ *
+ * `info` is no longer a stored value, but the admin create route still
+ * accepts it and normalizes it to `tip` so existing CLI invocations and
+ * scripts keep working.
+ */
+export type NoticeLevel = "critical" | "warning" | "maintenance" | "announcement" | "tip";
+
+export const NOTICE_LEVELS: NoticeLevel[] = [
+  "critical",
+  "warning",
+  "maintenance",
+  "announcement",
+  "tip",
+];
+
+/**
+ * Legacy level accepted on write and normalized away. Kept as its own
+ * constant so the compatibility shim has exactly one definition.
+ */
+export const LEGACY_LEVEL_ALIASES: Record<string, NoticeLevel> = { info: "tip" };
+
+/** Maps a caller-supplied level onto the stored vocabulary. */
+export function normalizeLevel(level: string): string {
+  return LEGACY_LEVEL_ALIASES[level] ?? level;
+}
+
 export interface Notice {
   id: number;
   message: string;
-  level: "info" | "warning" | "critical";
+  level: NoticeLevel;
   scope: "all" | "admins" | "members";
   created_at: string;
   expires_at: string | null;
 }
+
+/**
+ * SQL `CASE` fragment ranking levels by urgency for ORDER BY. Generated from
+ * {@link NOTICE_LEVELS} rather than hand-written so a level added to the
+ * union can never silently fall to the bottom of the stack: adding it to the
+ * array is all that's required.
+ *
+ * Interpolated into SQL rather than bound as parameters because these are
+ * compile-time constants from this module, never caller input — and a CASE's
+ * WHEN values can't be parameterized positionally in a useful way here.
+ */
+const NOTICE_LEVEL_ORDER = `CASE level ${NOTICE_LEVELS.map(
+  (level, index) => `WHEN '${level}' THEN ${index}`,
+).join(" ")} ELSE ${NOTICE_LEVELS.length} END`;
 
 /**
  * Get active (non-expired) notices visible to a given role.
@@ -32,9 +81,7 @@ export async function getActiveNotices(db: D1Database, userRole?: UserRole): Pro
        FROM notices
        WHERE (expires_at IS NULL OR expires_at > datetime('now'))
          AND scope IN (${placeholders})
-       ORDER BY
-         CASE level WHEN 'critical' THEN 0 WHEN 'warning' THEN 1 ELSE 2 END,
-         created_at DESC`,
+       ORDER BY ${NOTICE_LEVEL_ORDER}, created_at DESC`,
     )
     .bind(...scopes)
     .all<Notice>();
@@ -64,7 +111,7 @@ export async function createNotice(
   db: D1Database,
   data: {
     message: string;
-    level: "info" | "warning" | "critical";
+    level: NoticeLevel;
     scope: "all" | "admins" | "members";
     expires_at?: string;
   },
