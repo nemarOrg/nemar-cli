@@ -393,8 +393,13 @@ export async function getDatasetData(
       return {
         success: outcome !== "failed",
         outcome,
+        // On failure keep git-annex's own stderr: it carries the actionable
+        // detail (no remotes configured, credentials rejected, host unreachable)
+        // that a count alone throws away.
         ...(outcome === "failed" && {
-          error: `${filesUnavailable} file(s) unavailable from every configured remote`,
+          error:
+            stderrOutput.trim() ||
+            `${filesUnavailable} file(s) unavailable from every configured remote`,
         }),
         filesDownloaded,
         filesUnavailable,
@@ -442,8 +447,10 @@ export async function getDatasetData(
     return {
       success: outcome !== "failed",
       outcome,
+      // As above: git-annex's stderr is the actionable detail on failure.
       ...(outcome === "failed" && {
-        error: `${filesUnavailable} file(s) unavailable from every configured remote`,
+        error:
+          stderr.trim() || `${filesUnavailable} file(s) unavailable from every configured remote`,
       }),
       filesDownloaded,
       filesUnavailable,
