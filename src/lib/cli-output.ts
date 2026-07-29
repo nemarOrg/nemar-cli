@@ -64,9 +64,13 @@ export function printPartialRetrieval(result: GetDataResult): void {
   if (filesUnavailable > shown && shown > 0) {
     console.log(chalk.dim(`    ... and ${filesUnavailable - shown} more`));
   }
-  // Safe to say this: classifyGetOutcome only returns "partial" when git-annex
-  // showed no credential/permission/connectivity fault, so the content really
-  // is absent from the archive rather than unreachable from here.
-  console.log(chalk.dim("  These files are missing upstream, not on your end. Full breakdown:"));
+  // classifyGetOutcome only reaches "partial" when git-annex showed no
+  // credential/permission/connectivity fault, so pointing away from the user's
+  // own setup is right. It does not prove every miss is an upstream deletion
+  // (a checksum-verification failure would land here too), so this says where
+  // the gap is rather than asserting a single cause; the per-file report from
+  // epic #999 is the authority on why.
+  console.log(chalk.dim("  This is not a problem with your connection or credentials."));
+  console.log(chalk.dim("  Per-file detail, including why each file is missing:"));
   console.log(chalk.dim("    .nemar/availability-report.json"));
 }

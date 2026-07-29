@@ -140,22 +140,17 @@ interface GetDataCounts {
   filesDownloaded: number;
   /** Files whose content no configured remote could supply. */
   filesUnavailable: number;
-  /**
-   * Bounded sample of unavailable paths, for user-facing reporting. Always
-   * empty on the non-JSON fallback: git-annex's plain output interleaves the
-   * per-file header and its result across several lines, so associating a path
-   * with its outcome there needs a parser far more brittle than the `--json`
-   * completion events. Callers render the count alone in that case.
-   */
+  /** Bounded sample of unavailable paths, for user-facing reporting. */
   unavailablePaths: string[];
 }
 
 /**
  * Result of a retrieval. Discriminated on `success` so callers narrow to a
- * guaranteed `error` on the failure arm, matching the two-arm result convention
- * used across lib/git-annex (github.ts, init.ts, clone-push.ts). Keeping the
- * counts required on BOTH arms means callers never need `?? 0` defaults, and
- * `success` can never disagree with `outcome`.
+ * guaranteed `error` on the failure arm -- a step up from the flat
+ * `{ success: boolean; error?: string }` shape used elsewhere in lib/git-annex,
+ * where `error` is optional on both arms. Keeping the counts required on BOTH
+ * arms means callers never need `?? 0` defaults, and `success` can never
+ * disagree with `outcome`.
  */
 export type GetDataResult =
   | ({ success: true; outcome: "complete" | "partial"; error?: undefined } & GetDataCounts)
@@ -268,27 +263,17 @@ export function classifyGetOutcome(input: {
 }
 
 /**
- * Read git-annex's authoritative failure tally from a non-JSON run.
- *
- * git-annex ends a run that had per-file failures with a `get: N failed`
- * summary line. Under `-J` that line (and all per-file output) goes to STDERR
- * while stdout stays empty, so callers must search both streams. Returns null
- * when no summary line is present.
- *
- * Exported for unit testing; not part of the CLI-facing surface.
- */
-export function parseFailedSummary(text: string): number | null {
-  const m = text.match(/^\s*(?:git-annex: )?get: (\d+) failed\s*$/m);
-  if (!m) return null;
-  const n = Number.parseInt(m[1], 10);
-  return Number.isFinite(n) ? n : null;
-}
-
-/**
  * Get data files from remote (S3) for a cloned dataset.
  *
- * When onProgress is provided, uses --json-progress to stream progress
- * events. Falls back to regular output if --json-progress is not supported.
+ * Always runs with `--json --json-progress` and tallies the per-file completion
+ * events; `onProgress`, when supplied, just observes the same stream. There is
+ * deliberately no plain-text path: under `-J` git-annex's human output is not
+ * stable enough to parse. On 10.20240129 (what Ubuntu, and therefore CI, ships)
+ * a parallel run interleaves the per-file headers onto one line and emits bare
+ * `ok` lines afterwards, so a `get <file> ok` scan matches nothing; on
+ * 10.20260717 the same run emits one clean line per file. The stream a line
+ * lands on also shifts with whether stdout is a TTY. `--json` is identical on
+ * both versions -- verified by running each in turn.
  *
  * Partial retrieval is reported, not treated as failure -- see
  * {@link classifyGetOutcome}.
@@ -313,7 +298,6 @@ export async function getDatasetData(
   const jobs = options.jobs || 4;
   const paths = options.paths && options.paths.length > 0 ? options.paths : ["."];
   const extraArgs = options.extraArgs ?? [];
-  const useProgress = Boolean(options.onProgress);
 
   const env = awsCredentialEnv(options.credentials) ?? {};
 
@@ -322,184 +306,139 @@ export async function getDatasetData(
   );
 
   try {
-    if (useProgress) {
-      // Streaming mode: parse --json-progress lines as they arrive
-      const args = [
-        "git",
-        "annex",
-        "get",
-        "--json",
-        "--json-progress",
-        "-J",
-        jobs.toString(),
-        ...extraArgs,
-        ...paths,
-      ];
+    // Streaming mode: parse --json-progress lines as they arrive
+    const args = [
+      "git",
+      "annex",
+      "get",
+      "--json",
+      "--json-progress",
+      "-J",
+      jobs.toString(),
+      ...extraArgs,
+      ...paths,
+    ];
 
-      const proc = spawn({
-        cmd: args,
-        cwd: datasetPath,
-        stdout: "pipe",
-        stderr: "pipe",
-        env: mergedEnv,
-      });
+    const proc = spawn({
+      cmd: args,
+      cwd: datasetPath,
+      stdout: "pipe",
+      stderr: "pipe",
+      env: mergedEnv,
+    });
 
-      let filesDownloaded = 0;
-      let filesUnavailable = 0;
-      const unavailablePaths: string[] = [];
-      // Per-file failure notes, joined with stderr for the classifier tie-break.
-      const failureNotes: string[] = [];
-      let stderrOutput = "";
-      const stderrChunks: Uint8Array[] = [];
+    let filesDownloaded = 0;
+    let filesUnavailable = 0;
+    const unavailablePaths: string[] = [];
+    // Per-file failure notes, joined with stderr for the classifier tie-break.
+    const failureNotes: string[] = [];
+    let stderrOutput = "";
+    const stderrChunks: Uint8Array[] = [];
 
-      // Tally a completion line. Byte-progress lines carry neither `ok` nor
-      // `success`, so they fall through both branches and are only forwarded to
-      // onProgress. A per-file failure (`success:false`) is content git-annex
-      // could not source from any remote -- recorded, not fatal (#1038).
-      const recordLine = (parsed: GitAnnexProgressLine): void => {
-        options.onProgress?.(parsed);
-        if (parsed.ok === true || parsed.success === true) {
-          filesDownloaded++;
-        } else if (parsed.ok === false || parsed.success === false) {
-          filesUnavailable++;
-          const file = parsed.file ?? parsed.action?.file;
-          if (file && unavailablePaths.length < MAX_UNAVAILABLE_SAMPLE) {
-            unavailablePaths.push(file);
-          }
-          // Real `-J --json-progress` failure events carry the cause in `note`
-          // ("from s3-PUBLIC...\nUnable to access these remotes: ...") alongside
-          // an `error-messages` array; the scalar `error` is belt-and-braces.
-          if (parsed.note) failureNotes.push(parsed.note);
-          if (parsed["error-messages"]?.length) failureNotes.push(...parsed["error-messages"]);
-          if (parsed.error) failureNotes.push(parsed.error);
+    // Tally a completion line. Byte-progress lines carry neither `ok` nor
+    // `success`, so they fall through both branches and are only forwarded to
+    // onProgress. A per-file failure (`success:false`) is content git-annex
+    // could not source from any remote -- recorded, not fatal (#1038).
+    const recordLine = (parsed: GitAnnexProgressLine): void => {
+      options.onProgress?.(parsed);
+      if (parsed.ok === true || parsed.success === true) {
+        filesDownloaded++;
+      } else if (parsed.ok === false || parsed.success === false) {
+        filesUnavailable++;
+        const file = parsed.file ?? parsed.action?.file;
+        if (file && unavailablePaths.length < MAX_UNAVAILABLE_SAMPLE) {
+          unavailablePaths.push(file);
         }
-      };
+        // Real `-J --json-progress` failure events carry the cause in `note`
+        // ("from s3-PUBLIC...\nUnable to access these remotes: ...") alongside
+        // an `error-messages` array; the scalar `error` is belt-and-braces.
+        if (parsed.note) failureNotes.push(parsed.note);
+        if (parsed["error-messages"]?.length) failureNotes.push(...parsed["error-messages"]);
+        if (parsed.error) failureNotes.push(parsed.error);
+      }
+    };
 
-      // Collect stderr in background
-      const stderrPromise = (async () => {
-        const reader = proc.stderr.getReader();
-        const decoder = new TextDecoder();
-        for (;;) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          stderrChunks.push(value);
-        }
-        stderrOutput = decoder.decode(
-          stderrChunks.reduce((acc, chunk) => {
-            const merged = new Uint8Array(acc.length + chunk.length);
-            merged.set(acc);
-            merged.set(chunk, acc.length);
-            return merged;
-          }, new Uint8Array()),
-        );
-      })();
-
-      // Stream and parse stdout JSON lines
-      const reader = proc.stdout.getReader();
+    // Collect stderr in background
+    const stderrPromise = (async () => {
+      const reader = proc.stderr.getReader();
       const decoder = new TextDecoder();
-      let buffer = "";
-
       for (;;) {
         const { done, value } = await reader.read();
         if (done) break;
-        buffer += decoder.decode(value, { stream: true });
-
-        // Process complete lines
-        const lines = buffer.split("\n");
-        buffer = lines.pop() ?? ""; // Keep partial last line in buffer
-
-        for (const line of lines) {
-          const trimmed = line.trim();
-          if (!trimmed || !trimmed.startsWith("{")) continue;
-          try {
-            recordLine(JSON.parse(trimmed) as GitAnnexProgressLine);
-          } catch {
-            // Non-JSON lines are ignored
-          }
-        }
+        stderrChunks.push(value);
       }
-
-      // Process any remaining buffer content
-      if (buffer.trim().startsWith("{")) {
-        try {
-          recordLine(JSON.parse(buffer.trim()) as GitAnnexProgressLine);
-        } catch {
-          // Ignore partial lines
-        }
-      }
-
-      await stderrPromise;
-      const exitCode = await proc.exited;
-
-      // A non-zero exit with no per-file failure lines is a whole-run error
-      // (bad repo, unusable remote, git-annex itself failed) rather than
-      // missing content -- keep those fatal and surface stderr.
-      if (exitCode !== 0 && filesUnavailable === 0) {
-        return {
-          success: false,
-          outcome: "failed",
-          error: stderrOutput.trim() || "Failed to get dataset data",
-          filesDownloaded,
-          filesUnavailable,
-          unavailablePaths,
-        };
-      }
-
-      const failureText = `${stderrOutput}\n${failureNotes.join("\n")}`;
-      const outcome = classifyGetOutcome({
-        retrieved: filesDownloaded,
-        unavailable: filesUnavailable,
-        requireComplete: options.requireComplete,
-        failureText,
-      });
-      return toGetDataResult(
-        outcome,
-        { filesDownloaded, filesUnavailable, unavailablePaths },
-        stderrOutput,
+      stderrOutput = decoder.decode(
+        stderrChunks.reduce((acc, chunk) => {
+          const merged = new Uint8Array(acc.length + chunk.length);
+          merged.set(acc);
+          merged.set(chunk, acc.length);
+          return merged;
+        }, new Uint8Array()),
       );
+    })();
+
+    // Stream and parse stdout JSON lines
+    const reader = proc.stdout.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+
+      // Process complete lines
+      const lines = buffer.split("\n");
+      buffer = lines.pop() ?? ""; // Keep partial last line in buffer
+
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (!trimmed || !trimmed.startsWith("{")) continue;
+        try {
+          recordLine(JSON.parse(trimmed) as GitAnnexProgressLine);
+        } catch {
+          // Non-JSON lines are ignored
+        }
+      }
     }
 
-    // Non-streaming fallback (no onProgress callback)
-    const args = ["git", "annex", "get", "-J", jobs.toString(), ...extraArgs, ...paths];
-    const { stdout, stderr, exitCode } = await runCommand(args, {
-      cwd: datasetPath,
-      ...(Object.keys(env).length > 0 && { env: mergedEnv }),
-    });
+    // Process any remaining buffer content
+    if (buffer.trim().startsWith("{")) {
+      try {
+        recordLine(JSON.parse(buffer.trim()) as GitAnnexProgressLine);
+      } catch {
+        // Ignore partial lines
+      }
+    }
 
-    // Count files downloaded from output (git annex get outputs lines like
-    // "get file ok"). Under `-J` git-annex writes ALL per-file output and the
-    // trailing `get: N failed` summary to STDERR and leaves stdout empty, so
-    // both streams are scanned here -- searching stdout alone tallied zero on
-    // every parallel run (#1038).
-    const combined = `${stdout}\n${stderr}`;
-    const getMatches = combined.match(/^get .+ ok$/gm);
-    const filesDownloaded = getMatches ? getMatches.length : 0;
-    const failedSummary = parseFailedSummary(combined);
+    await stderrPromise;
+    const exitCode = await proc.exited;
 
-    // No `get: N failed` summary on a non-zero exit means the run failed as a
-    // whole (bad repo, unusable remote) rather than on specific missing content.
-    if (exitCode !== 0 && failedSummary === null) {
+    // A non-zero exit with no per-file failure lines is a whole-run error
+    // (bad repo, unusable remote, git-annex itself failed) rather than
+    // missing content -- keep those fatal and surface stderr.
+    if (exitCode !== 0 && filesUnavailable === 0) {
       return {
         success: false,
         outcome: "failed",
-        error: stderr.trim() || "Failed to get dataset data",
+        error: stderrOutput.trim() || "Failed to get dataset data",
         filesDownloaded,
-        filesUnavailable: 0,
-        unavailablePaths: [],
+        filesUnavailable,
+        unavailablePaths,
       };
     }
 
-    const filesUnavailable = failedSummary ?? 0;
+    const failureText = `${stderrOutput}\n${failureNotes.join("\n")}`;
     const outcome = classifyGetOutcome({
       retrieved: filesDownloaded,
       unavailable: filesUnavailable,
       requireComplete: options.requireComplete,
-      failureText: combined,
+      failureText,
     });
     return toGetDataResult(
       outcome,
-      { filesDownloaded, filesUnavailable, unavailablePaths: [] },
-      stderr,
+      { filesDownloaded, filesUnavailable, unavailablePaths },
+      stderrOutput,
     );
   } catch (e) {
     return {

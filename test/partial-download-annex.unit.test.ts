@@ -2,10 +2,9 @@
  * Real git-annex coverage for getDatasetData's partial-retrieval handling (#1038).
  *
  * The pure classifier is covered in partial-download.unit.test.ts; this file
- * exercises the wiring around it, which is where the original bug actually
- * lived: the non-JSON fallback scanned only stdout for `get ... ok`, but under
- * `-J` git-annex writes every per-file line to stderr, so it tallied zero on
- * every parallel run.
+ * exercises the wiring around it: the JSON tally, the failure-note collection
+ * feeding the classifier, and the sample cap. It also pins that a run without
+ * an onProgress callback tallies identically, since both share one code path.
  *
  * No mocks and no network: a local "remote" annex repo is cloned, and content
  * is dropped from the remote so the clone genuinely cannot fetch it. That
@@ -116,10 +115,11 @@ describe("getDatasetData partial retrieval", () => {
     expect(result.unavailablePaths.length).toBe(3);
   }, 120_000);
 
-  test("non-streaming fallback tallies from stderr, not just stdout", async () => {
+  test("a run without onProgress tallies the same way", async () => {
     if (!annexAvailable) return;
-    // Regression guard for #1038: under -J git-annex leaves stdout empty, so a
-    // stdout-only scan reported 0 downloaded and no failure summary.
+    // onProgress only observes the stream; it must not change the tally. Guards
+    // against reintroducing a separate text-parsing path, whose output git-annex
+    // formats differently across versions under -J.
     const repo = await makeClone("nostream-mixed", 2, 3);
 
     const result = await getDatasetData(repo);
@@ -128,6 +128,8 @@ describe("getDatasetData partial retrieval", () => {
     expect(result.filesUnavailable).toBe(3);
     expect(result.outcome).toBe("partial");
     expect(result.success).toBe(true);
+    // Paths are captured regardless of the callback: one path, one behavior.
+    expect(result.unavailablePaths.length).toBe(3);
   }, 120_000);
 
   test("a fully retrievable dataset is complete", async () => {

@@ -4,8 +4,7 @@
  * A dataset imported from an upstream archive can legitimately be missing a
  * fraction of the files it declares -- on004624 is 65,062 of 65,063 files. The
  * download must still succeed. These tests pin the decision rule and the
- * parsing of git-annex's failure summary; both are pure, so no git-annex, no
- * network, no fixtures.
+ * user-facing report; both are pure, so no git-annex, no network, no fixtures.
  *
  * The literal git-annex output strings below were captured from real runs
  * against on003574 (11 anat files absent upstream), not hand-written.
@@ -15,7 +14,7 @@ import { describe, expect, test } from "bun:test";
 import chalk from "chalk";
 import { printPartialRetrieval } from "../src/lib/cli-output.js";
 import type { GetDataResult } from "../src/lib/git-annex/transfer.js";
-import { classifyGetOutcome, parseFailedSummary } from "../src/lib/git-annex/transfer.js";
+import { classifyGetOutcome } from "../src/lib/git-annex/transfer.js";
 
 /**
  * Run fn with console.log captured, returning the joined output.
@@ -161,34 +160,6 @@ describe("classifyGetOutcome", () => {
     expect(classifyGetOutcome({ retrieved: 90, unavailable: 0, requireComplete: true })).toBe(
       "complete",
     );
-  });
-});
-
-describe("parseFailedSummary", () => {
-  test("reads the trailing summary git-annex writes to stderr under -J", () => {
-    const stderr = [
-      "get sub-05/anat/sub-05_T1w.nii.gz (from s3-PUBLIC...) ",
-      "  download failed: Not Found",
-      "",
-      "  Unable to access these remotes: s3-PUBLIC",
-      "failed",
-      "get: 2 failed",
-    ].join("\n");
-    expect(parseFailedSummary(stderr)).toBe(2);
-  });
-
-  test("reads the git-annex: prefixed form", () => {
-    expect(parseFailedSummary("git-annex: get: 11 failed")).toBe(11);
-  });
-
-  test("returns null when the run had no failure summary", () => {
-    // A clean run: absence of the summary is what separates "content missing"
-    // from "the whole invocation failed".
-    expect(parseFailedSummary("get sub-01/eeg/sub-01_task-rest_eeg.edf ok\n")).toBeNull();
-  });
-
-  test("does not match a path that merely contains the phrase", () => {
-    expect(parseFailedSummary("get sub-01/derivatives/get: 3 failed/x.set ok")).toBeNull();
   });
 });
 
