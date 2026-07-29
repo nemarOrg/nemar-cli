@@ -14,6 +14,7 @@ import chalk from "chalk";
 import type { Ora } from "ora";
 import { errorDetail } from "./api/errors.js";
 import { isAuthenticated } from "./config.js";
+import type { GetDataResult } from "./git-annex/transfer.js";
 
 /**
  * Exit with the standard two-line not-authenticated error unless the active
@@ -38,4 +39,32 @@ export function requireAuth(): void {
 export function printStepFailure(spinner: Ora, title: string, detail: unknown): void {
   spinner.fail(title);
   console.log(chalk.red(`  ${errorDetail(detail)}`));
+}
+
+/**
+ * Report the result of a partially-successful data retrieval (#1038).
+ *
+ * Some NEMAR datasets are imported from upstream archives that no longer hold
+ * every file they declare, so a retrieval can legitimately deliver 99.998% of a
+ * dataset. That is reported plainly -- what arrived, what did not, and where the
+ * authoritative per-file breakdown lives -- rather than presented as a failure.
+ * Call only when `result.outcome === "partial"`.
+ */
+export function printPartialRetrieval(result: GetDataResult): void {
+  const got = result.filesDownloaded ?? 0;
+  const missing = result.filesUnavailable ?? 0;
+  console.log(
+    chalk.yellow(
+      `Downloaded ${got} file(s); ${missing} file(s) are not available from the archive.`,
+    ),
+  );
+  for (const path of result.unavailablePaths ?? []) {
+    console.log(chalk.dim(`    ${path}`));
+  }
+  const shown = (result.unavailablePaths ?? []).length;
+  if (missing > shown && shown > 0) {
+    console.log(chalk.dim(`    ... and ${missing - shown} more`));
+  }
+  console.log(chalk.dim("  These files are missing upstream, not on your end. Full breakdown:"));
+  console.log(chalk.dim("    .nemar/availability-report.json"));
 }

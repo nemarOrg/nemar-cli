@@ -68,7 +68,7 @@ import {
   updateValidatorCache,
   validateBidsDataset,
 } from "../lib/bids-validator.js";
-import { requireAuth } from "../lib/cli-output.js";
+import { printPartialRetrieval, requireAuth } from "../lib/cli-output.js";
 import { getConfig, isAuthenticated, isSandboxCompleted } from "../lib/config.js";
 import { NO_DESCRIPTION, YES_DESCRIPTION, YES_OPTION, confirm } from "../lib/confirm.js";
 import {
@@ -866,6 +866,10 @@ datasetCommand
     "--skip-port-check",
     "Skip the porting-in-progress check (use if falsely blocked on an OpenNeuro-sourced dataset)",
   )
+  .option(
+    "--require-complete",
+    "Exit non-zero if any file is unavailable from the archive (for strict pipelines)",
+  )
   .addHelpText(
     "after",
     `
@@ -1260,6 +1264,7 @@ Examples:
         credentials: s3Creds,
         paths: updatePaths,
         extraArgs: matchArgs,
+        requireComplete: Boolean(options.requireComplete),
         onProgress: (line) => tracker.processLine(line),
       });
 
@@ -1275,7 +1280,11 @@ Examples:
       }
 
       tracker.finish(getResult.filesDownloaded || 0);
-      console.log(chalk.green(`Data downloaded (${getResult.filesDownloaded || 0} files)`));
+      if (getResult.outcome === "partial") {
+        printPartialRetrieval(getResult);
+      } else {
+        console.log(chalk.green(`Data downloaded (${getResult.filesDownloaded || 0} files)`));
+      }
     }
 
     // --prune: drop annex objects that are no longer referenced by any branch
@@ -3425,6 +3434,10 @@ datasetCommand
     "--skip-port-check",
     "Skip the porting-in-progress check (use if falsely blocked on an OpenNeuro-sourced dataset)",
   )
+  .option(
+    "--require-complete",
+    "Exit non-zero if any file is unavailable from the archive (for strict pipelines)",
+  )
   .addHelpText(
     "after",
     `
@@ -3599,6 +3612,7 @@ Examples:
       paths,
       credentials: getS3Creds,
       extraArgs: matchArgs,
+      requireComplete: Boolean(options.requireComplete),
       onProgress: (line) => tracker.processLine(line),
     });
     if (!result.success) {
@@ -3617,7 +3631,9 @@ Examples:
       await clearAnnexCredentials(cwd);
     }
 
-    if (result.filesDownloaded === 0) {
+    if (result.outcome === "partial") {
+      printPartialRetrieval(result);
+    } else if (result.filesDownloaded === 0) {
       console.log(chalk.green("All data files already present"));
     } else {
       console.log(chalk.green(`Downloaded ${result.filesDownloaded} file(s)`));

@@ -129,11 +129,112 @@ export async function countPendingDownload(
   }
 }
 
+/** Outcome of a `git annex get` run. See {@link classifyGetOutcome}. */
+export type GetOutcome = "complete" | "partial" | "failed";
+
+/** Most unavailable paths to retain for reporting; the rest are counted only. */
+export const MAX_UNAVAILABLE_SAMPLE = 10;
+
+export interface GetDataResult {
+  /** False only when the run delivered nothing (see {@link classifyGetOutcome}). */
+  success: boolean;
+  error?: string;
+  filesDownloaded?: number;
+  /** Files whose content no configured remote could supply. */
+  filesUnavailable?: number;
+  /** Bounded sample of unavailable paths, for user-facing reporting. */
+  unavailablePaths?: string[];
+  outcome?: GetOutcome;
+}
+
+/**
+ * Signals that the object is genuinely absent from the remote: the request was
+ * answered, and the answer was "no such object".
+ */
+const CONTENT_ABSENT_RE = /not found|404|nosuchkey|no such key/i;
+
+/**
+ * Signals that point at credentials, permissions, or connectivity rather than
+ * missing content. Checked FIRST, so a run that shows any of these is fatal
+ * even if it also reported some 404s.
+ */
+const TRANSPORT_FAIL_RE =
+  /access ?denied|forbidden|\b40[13]\b|\b50[0-4]\b|invalid[^\n]*(key|token|credential)|expired|signature|could ?n[o']?t connect|connection (refused|reset|timed ?out)|network is unreachable|(?:could not |unable to )?resolve host|timed ?out/i;
+
+/**
+ * Decide the outcome of a `git annex get` run.
+ *
+ * git-annex retrieves every key it can and reports the rest as individual file
+ * failures, so a non-zero exit means "something was unavailable", not "the
+ * download did not happen". Availability is a property NEMAR reports, not a
+ * precondition for serving (#1038): a dataset that is 99.998% present -- one
+ * stray upstream temp file out of 65,063 -- must still download.
+ *
+ *   - Nothing unavailable         -> `complete`. Zero retrieved just means every
+ *                                    requested file was already local.
+ *   - Some retrieved, some not    -> `partial`. The transport demonstrably
+ *                                    works, so the failures are missing content.
+ *   - Nothing retrieved, some not -> ambiguous, and `failureText` breaks the
+ *                                    tie. This is the ordinary re-run case: on a
+ *                                    partially-downloaded dataset git-annex
+ *                                    silently skips the files already present,
+ *                                    so a second `get` retrieves nothing and
+ *                                    re-reports the same absent files. Treating
+ *                                    that as fatal would make every repeat run
+ *                                    of a partial dataset exit 1.
+ *
+ * The tie-break reads git-annex's failure output because that is the only place
+ * the distinction survives: a 404 means the archive answered and does not have
+ * the object, while 403/expired-signature/connection errors mean we never got a
+ * usable answer. Transport signals are checked first and an unrecognised
+ * failure stays `failed`, so the ambiguous path can only ever downgrade to
+ * `partial` on positive evidence of absence.
+ *
+ * `requireComplete` (the CLI's --require-complete) collapses `partial` into
+ * `failed` for pipelines that need all-or-nothing semantics.
+ *
+ * Pure -- no I/O; unit-tested without git-annex.
+ */
+export function classifyGetOutcome(input: {
+  retrieved: number;
+  unavailable: number;
+  requireComplete?: boolean;
+  /** git-annex stderr plus any per-file failure notes, for the tie-break. */
+  failureText?: string;
+}): GetOutcome {
+  const { retrieved, unavailable, requireComplete = false, failureText = "" } = input;
+  if (unavailable <= 0) return "complete";
+  if (requireComplete) return "failed";
+  if (retrieved > 0) return "partial";
+  if (TRANSPORT_FAIL_RE.test(failureText)) return "failed";
+  return CONTENT_ABSENT_RE.test(failureText) ? "partial" : "failed";
+}
+
+/**
+ * Read git-annex's authoritative failure tally from a non-JSON run.
+ *
+ * git-annex ends a run that had per-file failures with a `get: N failed`
+ * summary line. Under `-J` that line (and all per-file output) goes to STDERR
+ * while stdout stays empty, so callers must search both streams. Returns null
+ * when no summary line is present.
+ *
+ * Exported for unit testing; not part of the CLI-facing surface.
+ */
+export function parseFailedSummary(text: string): number | null {
+  const m = text.match(/^\s*(?:git-annex: )?get: (\d+) failed\s*$/m);
+  if (!m) return null;
+  const n = Number.parseInt(m[1], 10);
+  return Number.isFinite(n) ? n : null;
+}
+
 /**
  * Get data files from remote (S3) for a cloned dataset.
  *
  * When onProgress is provided, uses --json-progress to stream progress
  * events. Falls back to regular output if --json-progress is not supported.
+ *
+ * Partial retrieval is reported, not treated as failure -- see
+ * {@link classifyGetOutcome}.
  */
 export async function getDatasetData(
   datasetPath: string,
@@ -148,8 +249,10 @@ export async function getDatasetData(
     extraArgs?: string[];
     credentials?: S3Credentials;
     onProgress?: DownloadProgressCallback;
+    /** Treat any unavailable file as a failure (CLI --require-complete). */
+    requireComplete?: boolean;
   } = {},
-): Promise<{ success: boolean; error?: string; filesDownloaded?: number }> {
+): Promise<GetDataResult> {
   const jobs = options.jobs || 4;
   const paths = options.paths && options.paths.length > 0 ? options.paths : ["."];
   const extraArgs = options.extraArgs ?? [];
@@ -185,8 +288,31 @@ export async function getDatasetData(
       });
 
       let filesDownloaded = 0;
+      let filesUnavailable = 0;
+      const unavailablePaths: string[] = [];
+      // Per-file failure notes, joined with stderr for the classifier tie-break.
+      const failureNotes: string[] = [];
       let stderrOutput = "";
       const stderrChunks: Uint8Array[] = [];
+
+      // Tally a completion line. Byte-progress lines carry neither `ok` nor
+      // `success`, so they fall through both branches and are only forwarded to
+      // onProgress. A per-file failure (`success:false`) is content git-annex
+      // could not source from any remote -- recorded, not fatal (#1038).
+      const recordLine = (parsed: GitAnnexProgressLine): void => {
+        options.onProgress?.(parsed);
+        if (parsed.ok === true || parsed.success === true) {
+          filesDownloaded++;
+        } else if (parsed.ok === false || parsed.success === false) {
+          filesUnavailable++;
+          const file = parsed.file ?? parsed.action?.file;
+          if (file && unavailablePaths.length < MAX_UNAVAILABLE_SAMPLE) {
+            unavailablePaths.push(file);
+          }
+          if (parsed.note) failureNotes.push(parsed.note);
+          if (parsed.error) failureNotes.push(parsed.error);
+        }
+      };
 
       // Collect stderr in background
       const stderrPromise = (async () => {
@@ -225,11 +351,7 @@ export async function getDatasetData(
           const trimmed = line.trim();
           if (!trimmed || !trimmed.startsWith("{")) continue;
           try {
-            const parsed = JSON.parse(trimmed) as GitAnnexProgressLine;
-            options.onProgress?.(parsed);
-            if (parsed.ok === true || parsed.success === true) {
-              filesDownloaded++;
-            }
+            recordLine(JSON.parse(trimmed) as GitAnnexProgressLine);
           } catch {
             // Non-JSON lines are ignored
           }
@@ -239,11 +361,7 @@ export async function getDatasetData(
       // Process any remaining buffer content
       if (buffer.trim().startsWith("{")) {
         try {
-          const parsed = JSON.parse(buffer.trim()) as GitAnnexProgressLine;
-          options.onProgress?.(parsed);
-          if (parsed.ok === true || parsed.success === true) {
-            filesDownloaded++;
-          }
+          recordLine(JSON.parse(buffer.trim()) as GitAnnexProgressLine);
         } catch {
           // Ignore partial lines
         }
@@ -252,11 +370,36 @@ export async function getDatasetData(
       await stderrPromise;
       const exitCode = await proc.exited;
 
-      if (exitCode !== 0) {
-        return { success: false, error: stderrOutput.trim() || "Failed to get dataset data" };
+      // A non-zero exit with no per-file failure lines is a whole-run error
+      // (bad repo, unusable remote, git-annex itself failed) rather than
+      // missing content -- keep those fatal and surface stderr.
+      if (exitCode !== 0 && filesUnavailable === 0) {
+        return {
+          success: false,
+          outcome: "failed",
+          error: stderrOutput.trim() || "Failed to get dataset data",
+          filesDownloaded,
+          filesUnavailable,
+          unavailablePaths,
+        };
       }
 
-      return { success: true, filesDownloaded };
+      const outcome = classifyGetOutcome({
+        retrieved: filesDownloaded,
+        unavailable: filesUnavailable,
+        requireComplete: options.requireComplete,
+        failureText: `${stderrOutput}\n${failureNotes.join("\n")}`,
+      });
+      return {
+        success: outcome !== "failed",
+        outcome,
+        ...(outcome === "failed" && {
+          error: `${filesUnavailable} file(s) unavailable from every configured remote`,
+        }),
+        filesDownloaded,
+        filesUnavailable,
+        unavailablePaths,
+      };
     }
 
     // Non-streaming fallback (no onProgress callback)
@@ -266,17 +409,48 @@ export async function getDatasetData(
       ...(Object.keys(env).length > 0 && { env: mergedEnv }),
     });
 
-    if (exitCode !== 0) {
-      return { success: false, error: stderr.trim() || "Failed to get dataset data" };
+    // Count files downloaded from output (git annex get outputs lines like
+    // "get file ok"). Under `-J` git-annex writes ALL per-file output and the
+    // trailing `get: N failed` summary to STDERR and leaves stdout empty, so
+    // both streams are scanned here -- searching stdout alone tallied zero on
+    // every parallel run (#1038).
+    const combined = `${stdout}\n${stderr}`;
+    const getMatches = combined.match(/^get .+ ok$/gm);
+    const filesDownloaded = getMatches ? getMatches.length : 0;
+    const failedSummary = parseFailedSummary(combined);
+
+    // No `get: N failed` summary on a non-zero exit means the run failed as a
+    // whole (bad repo, unusable remote) rather than on specific missing content.
+    if (exitCode !== 0 && failedSummary === null) {
+      return {
+        success: false,
+        outcome: "failed",
+        error: stderr.trim() || "Failed to get dataset data",
+        filesDownloaded,
+        filesUnavailable: 0,
+        unavailablePaths: [],
+      };
     }
 
-    // Count files downloaded from output (git annex get outputs lines like "get file ok")
-    const getMatches = stdout.match(/^get .+ ok$/gm);
-    const filesDownloaded = getMatches ? getMatches.length : 0;
-
-    return { success: true, filesDownloaded };
+    const filesUnavailable = failedSummary ?? 0;
+    const outcome = classifyGetOutcome({
+      retrieved: filesDownloaded,
+      unavailable: filesUnavailable,
+      requireComplete: options.requireComplete,
+      failureText: combined,
+    });
+    return {
+      success: outcome !== "failed",
+      outcome,
+      ...(outcome === "failed" && {
+        error: `${filesUnavailable} file(s) unavailable from every configured remote`,
+      }),
+      filesDownloaded,
+      filesUnavailable,
+      unavailablePaths: [],
+    };
   } catch (e) {
-    return { success: false, error: (e as Error).message };
+    return { success: false, outcome: "failed", error: (e as Error).message };
   }
 }
 

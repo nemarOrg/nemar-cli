@@ -81,7 +81,9 @@ const MODULE_EXPORTS: Record<string, string[]> = {
     "saveDataset",
   ],
   transfer: [
+    "MAX_UNAVAILABLE_SAMPLE",
     "batchSetKeysPresent",
+    "classifyGetOutcome",
     "collectFileManifest",
     "copyToAnnexRemote",
     "countPendingDownload",
@@ -94,6 +96,7 @@ const MODULE_EXPORTS: Record<string, string[]> = {
     "getKeyHashDir",
     "getKeyHashDirs",
     "getRemoteUuid",
+    "parseFailedSummary",
     "setKeyPresent",
   ],
   "repo-state": [
@@ -121,12 +124,17 @@ const MODULE_EXPORTS: Record<string, string[]> = {
  * - getGitHubToken: imported by clone-push.ts.
  * - buildS3RemoteArgs / DEFAULT_S3_PARTSIZE / extractCopyError: exported for
  *   #886 unit tests (partsize + copy-error surfacing); internal otherwise.
+ * - classifyGetOutcome / parseFailedSummary / MAX_UNAVAILABLE_SAMPLE: exported
+ *   for #1038 unit tests (partial-retrieval classification); internal otherwise.
  */
 const INTERNAL_WIRING = [
   "getGitHubToken",
   "buildS3RemoteArgs",
   "DEFAULT_S3_PARTSIZE",
   "extractCopyError",
+  "classifyGetOutcome",
+  "parseFailedSummary",
+  "MAX_UNAVAILABLE_SAMPLE",
 ];
 
 /**
