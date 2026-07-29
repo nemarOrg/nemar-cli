@@ -51,20 +51,22 @@ export function printStepFailure(spinner: Ora, title: string, detail: unknown): 
  * Call only when `result.outcome === "partial"`.
  */
 export function printPartialRetrieval(result: GetDataResult): void {
-  const got = result.filesDownloaded ?? 0;
-  const missing = result.filesUnavailable ?? 0;
+  const { filesDownloaded, filesUnavailable, unavailablePaths } = result;
   console.log(
     chalk.yellow(
-      `Downloaded ${got} file(s); ${missing} file(s) are not available from the archive.`,
+      `Downloaded ${filesDownloaded} file(s); ${filesUnavailable} file(s) are not available from the archive.`,
     ),
   );
-  for (const path of result.unavailablePaths ?? []) {
+  for (const path of unavailablePaths) {
     console.log(chalk.dim(`    ${path}`));
   }
-  const shown = (result.unavailablePaths ?? []).length;
-  if (missing > shown && shown > 0) {
-    console.log(chalk.dim(`    ... and ${missing - shown} more`));
+  const shown = unavailablePaths.length;
+  if (filesUnavailable > shown && shown > 0) {
+    console.log(chalk.dim(`    ... and ${filesUnavailable - shown} more`));
   }
+  // Safe to say this: classifyGetOutcome only returns "partial" when git-annex
+  // showed no credential/permission/connectivity fault, so the content really
+  // is absent from the archive rather than unreachable from here.
   console.log(chalk.dim("  These files are missing upstream, not on your end. Full breakdown:"));
   console.log(chalk.dim("    .nemar/availability-report.json"));
 }

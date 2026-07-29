@@ -12,7 +12,45 @@
  */
 
 import { describe, expect, test } from "bun:test";
+import chalk from "chalk";
+import { printPartialRetrieval } from "../src/lib/cli-output.js";
+import type { GetDataResult } from "../src/lib/git-annex/transfer.js";
 import { classifyGetOutcome, parseFailedSummary } from "../src/lib/git-annex/transfer.js";
+
+/**
+ * Run fn with console.log captured, returning the joined output.
+ *
+ * Styling is disabled via chalk.level rather than stripped afterwards, so the
+ * assertions read on text without needing an ANSI regex. cli-output.ts shares
+ * this chalk instance.
+ */
+function capture(fn: () => void): string {
+  const original = console.log;
+  const originalLevel = chalk.level;
+  const lines: string[] = [];
+  chalk.level = 0;
+  console.log = (...args: unknown[]) => {
+    lines.push(args.map(String).join(" "));
+  };
+  try {
+    fn();
+  } finally {
+    console.log = original;
+    chalk.level = originalLevel;
+  }
+  return lines.join("\n");
+}
+
+function partial(over: Partial<GetDataResult> = {}): GetDataResult {
+  return {
+    success: true,
+    outcome: "partial",
+    filesDownloaded: 7,
+    filesUnavailable: 11,
+    unavailablePaths: ["sub-01/anat/sub-01_T1w.nii.gz"],
+    ...over,
+  } as GetDataResult;
+}
 
 describe("classifyGetOutcome", () => {
   test("nothing unavailable is complete", () => {
@@ -70,6 +108,42 @@ describe("classifyGetOutcome", () => {
     );
   });
 
+  test("a transport fault is fatal even when some files already succeeded", () => {
+    // STS credentials are short-lived, so a parallel run over a large dataset
+    // can land a few files and then 403 on every remaining one. Classifying
+    // that as partial would exit 0 and tell the user the data is missing
+    // upstream, when a retry would in fact fetch all of it.
+    const stderr = "download failed: AccessDenied\nget: 200 failed";
+    expect(classifyGetOutcome({ retrieved: 3, unavailable: 200, failureText: stderr })).toBe(
+      "failed",
+    );
+  });
+
+  test("expired credentials mid-run are fatal, not partial", () => {
+    const stderr = "download failed: ExpiredToken: The provided token has expired\nget: 88 failed";
+    expect(classifyGetOutcome({ retrieved: 12, unavailable: 88, failureText: stderr })).toBe(
+      "failed",
+    );
+  });
+
+  test("BIDS subject labels that look like HTTP codes are not transport faults", () => {
+    // A bare /\b40[13]\b/ matches `sub-403`, so a participant label alone would
+    // have failed an otherwise healthy partial run. Real capture shape.
+    const stderr = [
+      "get sub-403/eeg/sub-403_task-rest_eeg.set ok",
+      "get sub-501/anat/sub-501_T1w.nii.gz ok",
+      "get sub-404/anat/sub-404_T1w.nii.gz (from s3-PUBLIC...) ",
+      "  download failed: Not Found",
+      "get: 1 failed",
+    ].join("\n");
+    expect(classifyGetOutcome({ retrieved: 2, unavailable: 1, failureText: stderr })).toBe(
+      "partial",
+    );
+    expect(classifyGetOutcome({ retrieved: 0, unavailable: 1, failureText: stderr })).toBe(
+      "partial",
+    );
+  });
+
   test("a dead network stays fatal", () => {
     const stderr = "  could not connect to host\nget: 90 failed";
     expect(classifyGetOutcome({ retrieved: 0, unavailable: 90, failureText: stderr })).toBe(
@@ -115,5 +189,42 @@ describe("parseFailedSummary", () => {
 
   test("does not match a path that merely contains the phrase", () => {
     expect(parseFailedSummary("get sub-01/derivatives/get: 3 failed/x.set ok")).toBeNull();
+  });
+});
+
+describe("printPartialRetrieval", () => {
+  test("states what arrived and what did not", () => {
+    const out = capture(() => printPartialRetrieval(partial()));
+    expect(out).toContain("Downloaded 7 file(s)");
+    expect(out).toContain("11 file(s) are not available");
+    expect(out).toContain("sub-01/anat/sub-01_T1w.nii.gz");
+    expect(out).toContain(".nemar/availability-report.json");
+  });
+
+  test("summarises the remainder when the sample is truncated", () => {
+    const paths = Array.from({ length: 10 }, (_, i) => `sub-${i}/anat/x.nii.gz`);
+    const out = capture(() =>
+      printPartialRetrieval(partial({ filesUnavailable: 222, unavailablePaths: paths })),
+    );
+    expect(out).toContain("... and 212 more");
+  });
+
+  test("omits the remainder line when every unavailable path is listed", () => {
+    const out = capture(() =>
+      printPartialRetrieval(
+        partial({ filesUnavailable: 1, unavailablePaths: ["sub-01/anat/x.nii.gz"] }),
+      ),
+    );
+    expect(out).not.toContain("more");
+  });
+
+  test("reports the count alone when no paths were captured", () => {
+    // The non-JSON fallback cannot attribute paths, so it returns an empty
+    // sample; the count must still reach the user, with no dangling "and N more".
+    const out = capture(() =>
+      printPartialRetrieval(partial({ filesUnavailable: 3, unavailablePaths: [] })),
+    );
+    expect(out).toContain("3 file(s) are not available");
+    expect(out).not.toContain("... and");
   });
 });

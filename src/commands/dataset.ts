@@ -1279,11 +1279,11 @@ Examples:
         process.exit(1);
       }
 
-      tracker.finish(getResult.filesDownloaded || 0);
+      tracker.finish(getResult.filesDownloaded);
       if (getResult.outcome === "partial") {
         printPartialRetrieval(getResult);
       } else {
-        console.log(chalk.green(`Data downloaded (${getResult.filesDownloaded || 0} files)`));
+        console.log(chalk.green(`Data downloaded (${getResult.filesDownloaded} files)`));
       }
     }
 
@@ -3624,7 +3624,7 @@ Examples:
       process.exit(1);
     }
 
-    tracker.finish(result.filesDownloaded || 0);
+    tracker.finish(result.filesDownloaded);
 
     // Clear cached S3 credentials so future operations request fresh tokens
     if (getCreds) {

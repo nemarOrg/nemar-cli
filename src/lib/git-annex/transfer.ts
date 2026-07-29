@@ -52,6 +52,7 @@ interface GitAnnexProgressLine {
   ok?: boolean;
   success?: boolean;
   note?: string;
+  "error-messages"?: string[];
   error?: string;
 }
 
@@ -135,31 +136,80 @@ export type GetOutcome = "complete" | "partial" | "failed";
 /** Most unavailable paths to retain for reporting; the rest are counted only. */
 export const MAX_UNAVAILABLE_SAMPLE = 10;
 
-export interface GetDataResult {
-  /** False only when the run delivered nothing (see {@link classifyGetOutcome}). */
-  success: boolean;
-  error?: string;
-  filesDownloaded?: number;
+interface GetDataCounts {
+  filesDownloaded: number;
   /** Files whose content no configured remote could supply. */
-  filesUnavailable?: number;
-  /** Bounded sample of unavailable paths, for user-facing reporting. */
-  unavailablePaths?: string[];
-  outcome?: GetOutcome;
+  filesUnavailable: number;
+  /**
+   * Bounded sample of unavailable paths, for user-facing reporting. Always
+   * empty on the non-JSON fallback: git-annex's plain output interleaves the
+   * per-file header and its result across several lines, so associating a path
+   * with its outcome there needs a parser far more brittle than the `--json`
+   * completion events. Callers render the count alone in that case.
+   */
+  unavailablePaths: string[];
+}
+
+/**
+ * Result of a retrieval. Discriminated on `success` so callers narrow to a
+ * guaranteed `error` on the failure arm, matching the two-arm result convention
+ * used across lib/git-annex (github.ts, init.ts, clone-push.ts). Keeping the
+ * counts required on BOTH arms means callers never need `?? 0` defaults, and
+ * `success` can never disagree with `outcome`.
+ */
+export type GetDataResult =
+  | ({ success: true; outcome: "complete" | "partial"; error?: undefined } & GetDataCounts)
+  | ({ success: false; outcome: "failed"; error: string } & GetDataCounts);
+
+/**
+ * Build the result for a run that reached classification, keeping `success` and
+ * `outcome` in lockstep in ONE place rather than at each return site.
+ * `errorText` is git-annex's own output, which carries the actionable detail
+ * (no remotes configured, credentials rejected, host unreachable) that a bare
+ * count throws away; the generic fallback fires only when it produced nothing.
+ */
+function toGetDataResult(
+  outcome: GetOutcome,
+  counts: GetDataCounts,
+  errorText: string,
+): GetDataResult {
+  if (outcome === "failed") {
+    return {
+      success: false,
+      outcome,
+      error:
+        errorText.trim() ||
+        `${counts.filesUnavailable} file(s) unavailable from every configured remote`,
+      ...counts,
+    };
+  }
+  return { success: true, outcome, ...counts };
 }
 
 /**
  * Signals that the object is genuinely absent from the remote: the request was
  * answered, and the answer was "no such object".
  */
-const CONTENT_ABSENT_RE = /not found|404|nosuchkey|no such key/i;
+const CONTENT_ABSENT_RE = /not found|nosuchkey|no such key|does not exist/i;
 
 /**
  * Signals that point at credentials, permissions, or connectivity rather than
- * missing content. Checked FIRST, so a run that shows any of these is fatal
- * even if it also reported some 404s.
+ * missing content.
+ *
+ * Deliberately matches only TEXTUAL signals, never bare HTTP status numbers.
+ * `\b40[13]\b` looked equivalent but matches BIDS subject directories: a run
+ * over `sub-403/eeg/...` or `sub-501/anat/...` would be read as a permissions
+ * or server failure purely because of a participant label. git-annex spells the
+ * real causes out in words ("download failed: AccessDenied"), so the words are
+ * both safer and sufficient.
+ *
+ * Note that git-annex's generic "Unable to access these remotes: <name>"
+ * summary is intentionally NOT here: it is printed for plain 404s too (it
+ * appears verbatim in the on003574 capture), so treating it as a transport
+ * signal would misread every legitimately-absent file as a transport fault.
  */
 const TRANSPORT_FAIL_RE =
-  /access ?denied|forbidden|\b40[13]\b|\b50[0-4]\b|invalid[^\n]*(key|token|credential)|expired|signature|could ?n[o']?t connect|connection (refused|reset|timed ?out)|network is unreachable|(?:could not |unable to )?resolve host|timed ?out/i;
+  /access ?denied|forbidden|unauthori[sz]ed|invalid[^\n]*(key|token|credential)|expired|signaturedoesnotmatch|requesttimetooskewed|slow ?down|serviceunavailable|internalerror|throttl|could ?n[o']?t connect|connection (refused|reset|timed ?out)|network is unreachable|(?:could not |unable to )?resolve host|timed ?out/i;
 
 /**
  * Decide the outcome of a `git annex get` run.
@@ -172,23 +222,30 @@ const TRANSPORT_FAIL_RE =
  *
  *   - Nothing unavailable         -> `complete`. Zero retrieved just means every
  *                                    requested file was already local.
- *   - Some retrieved, some not    -> `partial`. The transport demonstrably
- *                                    works, so the failures are missing content.
- *   - Nothing retrieved, some not -> ambiguous, and `failureText` breaks the
- *                                    tie. This is the ordinary re-run case: on a
- *                                    partially-downloaded dataset git-annex
- *                                    silently skips the files already present,
- *                                    so a second `get` retrieves nothing and
- *                                    re-reports the same absent files. Treating
- *                                    that as fatal would make every repeat run
- *                                    of a partial dataset exit 1.
+ *   - Transport fault in output   -> `failed`, whatever the tallies. Checked
+ *                                    BEFORE the retrieved count, because a
+ *                                    fault can develop mid-run: STS credentials
+ *                                    are short-lived (see s3-remote.ts), so a
+ *                                    parallel `-J` run over a large dataset can
+ *                                    easily land a few files and then 403 on
+ *                                    every remaining one. Reading that as
+ *                                    `partial` would exit 0 and tell the user
+ *                                    the data is missing upstream when in fact
+ *                                    a retry would fetch all of it.
+ *   - Some retrieved, some not    -> `partial`.
+ *   - Nothing retrieved, some not -> `failureText` breaks the tie. This is the
+ *                                    ordinary re-run case: on a partially
+ *                                    downloaded dataset git-annex silently skips
+ *                                    the files already present, so a second
+ *                                    `get` retrieves nothing and re-reports the
+ *                                    same absent files. Treating that as fatal
+ *                                    would make every repeat run exit 1.
  *
  * The tie-break reads git-annex's failure output because that is the only place
- * the distinction survives: a 404 means the archive answered and does not have
- * the object, while 403/expired-signature/connection errors mean we never got a
- * usable answer. Transport signals are checked first and an unrecognised
- * failure stays `failed`, so the ambiguous path can only ever downgrade to
- * `partial` on positive evidence of absence.
+ * the distinction survives: "not found" means the archive answered and does not
+ * have the object, while denied/expired/connection errors mean we never got a
+ * usable answer. An unrecognised failure stays `failed`, so the ambiguous path
+ * only ever downgrades to `partial` on positive evidence of absence.
  *
  * `requireComplete` (the CLI's --require-complete) collapses `partial` into
  * `failed` for pipelines that need all-or-nothing semantics.
@@ -205,8 +262,8 @@ export function classifyGetOutcome(input: {
   const { retrieved, unavailable, requireComplete = false, failureText = "" } = input;
   if (unavailable <= 0) return "complete";
   if (requireComplete) return "failed";
-  if (retrieved > 0) return "partial";
   if (TRANSPORT_FAIL_RE.test(failureText)) return "failed";
+  if (retrieved > 0) return "partial";
   return CONTENT_ABSENT_RE.test(failureText) ? "partial" : "failed";
 }
 
@@ -309,7 +366,11 @@ export async function getDatasetData(
           if (file && unavailablePaths.length < MAX_UNAVAILABLE_SAMPLE) {
             unavailablePaths.push(file);
           }
+          // Real `-J --json-progress` failure events carry the cause in `note`
+          // ("from s3-PUBLIC...\nUnable to access these remotes: ...") alongside
+          // an `error-messages` array; the scalar `error` is belt-and-braces.
           if (parsed.note) failureNotes.push(parsed.note);
+          if (parsed["error-messages"]?.length) failureNotes.push(...parsed["error-messages"]);
           if (parsed.error) failureNotes.push(parsed.error);
         }
       };
@@ -384,27 +445,18 @@ export async function getDatasetData(
         };
       }
 
+      const failureText = `${stderrOutput}\n${failureNotes.join("\n")}`;
       const outcome = classifyGetOutcome({
         retrieved: filesDownloaded,
         unavailable: filesUnavailable,
         requireComplete: options.requireComplete,
-        failureText: `${stderrOutput}\n${failureNotes.join("\n")}`,
+        failureText,
       });
-      return {
-        success: outcome !== "failed",
+      return toGetDataResult(
         outcome,
-        // On failure keep git-annex's own stderr: it carries the actionable
-        // detail (no remotes configured, credentials rejected, host unreachable)
-        // that a count alone throws away.
-        ...(outcome === "failed" && {
-          error:
-            stderrOutput.trim() ||
-            `${filesUnavailable} file(s) unavailable from every configured remote`,
-        }),
-        filesDownloaded,
-        filesUnavailable,
-        unavailablePaths,
-      };
+        { filesDownloaded, filesUnavailable, unavailablePaths },
+        stderrOutput,
+      );
     }
 
     // Non-streaming fallback (no onProgress callback)
@@ -444,20 +496,20 @@ export async function getDatasetData(
       requireComplete: options.requireComplete,
       failureText: combined,
     });
-    return {
-      success: outcome !== "failed",
+    return toGetDataResult(
       outcome,
-      // As above: git-annex's stderr is the actionable detail on failure.
-      ...(outcome === "failed" && {
-        error:
-          stderr.trim() || `${filesUnavailable} file(s) unavailable from every configured remote`,
-      }),
-      filesDownloaded,
-      filesUnavailable,
+      { filesDownloaded, filesUnavailable, unavailablePaths: [] },
+      stderr,
+    );
+  } catch (e) {
+    return {
+      success: false,
+      outcome: "failed",
+      error: (e as Error).message,
+      filesDownloaded: 0,
+      filesUnavailable: 0,
       unavailablePaths: [],
     };
-  } catch (e) {
-    return { success: false, outcome: "failed", error: (e as Error).message };
   }
 }
 
