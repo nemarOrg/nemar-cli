@@ -78,6 +78,12 @@ async function makeClone(name: string, keep: number, drop: number): Promise<stri
 
   const local = join(TMP_DIR, `${name}-clone`);
   await runCmd(["git", "clone", "-q", remote, local]);
+  // The clone needs its own identity: `git annex get` commits the updated
+  // location log to the git-annex branch, and with no identity configured that
+  // commit dies with "Author identity unknown", failing the whole run. Local
+  // dev machines have a global identity and hide this; CI runners do not.
+  await runCmd(["git", "config", "user.email", "test@test.com"], local);
+  await runCmd(["git", "config", "user.name", "Test"], local);
   await runCmd(["git", "annex", "init", "-q", "local"], local);
 
   // Drop content from the remote AFTER cloning, so the clone's location log
