@@ -8,6 +8,7 @@
  */
 
 import { MAX_ARCHIVE_RETRIES, decideArchiveRetry } from "../../services/archive-retry.js";
+import { writeAvailabilityReport } from "../../services/availability-report.js";
 import { isValidDatasetId } from "../../services/datasetId.js";
 import { getDatasetsToken } from "../../services/github-auth.js";
 import { triggerArchiveGeneration } from "../../services/github.js";
@@ -44,6 +45,71 @@ interface ArchiveReadyBody {
    *  datasets.archive_skip_reason; its presence is what marks a dataset
    *  "archive skipped" (archive_status stays NULL). */
   reason?: string;
+  /** Completeness tally from the build (#1041). Sent by
+   *  nemarDatasets/.github run-generate-archive.yml on 'ready'. All optional:
+   *  archives built before that shipped, and the idempotent skip path where the
+   *  stream script never ran, send none of them and leave the columns NULL
+   *  ("not assessed"), which must NOT be read as "incomplete". */
+  /** True when every declared file made it into the zip. */
+  complete?: boolean;
+  /** Annexed objects S3 reported missing, or that failed the size check. */
+  absent?: number;
+  /** Objects that could not be read for any other reason (403/5xx/throttle).
+   *  A 'ready' callback should always carry 0 here -- the build fails and the
+   *  zip is deleted otherwise -- so a non-zero value is logged as an anomaly. */
+  unreadable?: number;
+  /** Total files the version manifest declared. */
+  declared?: number;
+  /** Annexed objects successfully streamed into the zip. */
+  annexed?: number;
+}
+
+/** Non-negative integer or null; anything else (string, NaN, negative, float)
+ *  is rejected so a malformed payload leaves the column NULL rather than
+ *  poisoning it with a value the dashboard would render as fact. */
+function countOrNull(value: unknown): number | null {
+  return typeof value === "number" && Number.isInteger(value) && value >= 0 ? value : null;
+}
+
+/** What the 'ready' branch writes to the completeness columns (#1041). */
+export interface ArchiveCompleteness {
+  /** 1 complete, 0 partial, null not assessed. */
+  complete: number | null;
+  absent: number | null;
+  declared: number | null;
+  /** Surfaced so the caller can flag the should-be-impossible ready+unreadable
+   *  combination; not persisted (a 'ready' build has none by construction). */
+  unreadable: number | null;
+}
+
+/**
+ * Derive the completeness columns from an archive-ready payload.
+ *
+ * `complete` is computed from the counts rather than taken from the payload's
+ * own `complete` flag whenever both counts are present: the counts are the
+ * primitive facts and the flag is a convenience the workflow computes from
+ * them, so deriving keeps the column consistent with the numbers stored beside
+ * it. The flag is the fallback for a payload that carries only it.
+ *
+ * Everything null means "not assessed": an archive built before #1041 shipped,
+ * or the idempotent skip path where the stream script never ran. Callers must
+ * persist that as leave-alone, not as overwrite-with-null.
+ */
+export function deriveArchiveCompleteness(body: ArchiveReadyBody): ArchiveCompleteness {
+  const absent = countOrNull(body.absent);
+  const unreadable = countOrNull(body.unreadable);
+  const declared = countOrNull(body.declared);
+  const complete =
+    absent !== null && unreadable !== null
+      ? absent + unreadable === 0
+        ? 1
+        : 0
+      : typeof body.complete === "boolean"
+        ? body.complete
+          ? 1
+          : 0
+        : null;
+  return { complete, absent, declared, unreadable };
 }
 
 export function registerArchiveReadyRoutes(webhooks: WebhookRouter): void {
@@ -90,19 +156,45 @@ export function registerArchiveReadyRoutes(webhooks: WebhookRouter): void {
     let retry: ReturnType<typeof decideArchiveRetry> | null = null;
     try {
       if (status === "ready") {
+        const { complete, absent, declared, unreadable } = deriveArchiveCompleteness(body);
+        // A 'ready' callback carrying unreadable>0 should be impossible: the
+        // build exits non-zero and the wrapper deletes the zip in that case. If
+        // it happens the classification logic has drifted, so say so loudly
+        // rather than silently recording the archive as merely partial.
+        if (unreadable !== null && unreadable > 0) {
+          console.error(
+            `[archive-ready] ANOMALY dataset=${body.dataset_id}: status=ready with unreadable=${unreadable}; the build should have failed and deleted the zip`,
+          );
+        }
         const result = await c.env.DB.prepare(
           // Clear archive_skip_reason: a real zip now exists, so a stale skip from
           // an earlier (larger) version must not keep the UI on the direct-download
           // recipe (#752).
+          //
+          // COALESCE on the completeness columns so a callback that carries no
+          // tally leaves prior values intact instead of blanking them. That is
+          // the idempotent skip path (archive already existed, stream script
+          // never ran): the existing archive's completeness is still true of it,
+          // and overwriting with NULL would downgrade a known state to "not
+          // assessed".
           `UPDATE datasets
            SET archive_status = 'ready',
                archive_checked_at = datetime('now'),
                archive_size = ?,
                archive_retry_count = 0,
-               archive_skip_reason = NULL
+               archive_skip_reason = NULL,
+               archive_complete = COALESCE(?, archive_complete),
+               archive_absent_files = COALESCE(?, archive_absent_files),
+               archive_declared_files = COALESCE(?, archive_declared_files)
            WHERE dataset_id = ?`,
         )
-          .bind(typeof body.size === "number" ? body.size : null, body.dataset_id)
+          .bind(
+            typeof body.size === "number" ? body.size : null,
+            complete,
+            absent,
+            declared,
+            body.dataset_id,
+          )
           .run();
         changed = result.meta.changes ?? 0;
       } else if (status === "skipped") {
@@ -200,8 +292,39 @@ export function registerArchiveReadyRoutes(webhooks: WebhookRouter): void {
       );
     }
 
+    // Refresh the per-dataset availability report whenever an archive lands
+    // (#1041). Before this, writeAvailabilityReport ran only from the admin
+    // sweep and the single-dataset admin route, so the report could be stale --
+    // or absent entirely -- for the very version whose archive just flipped to
+    // 'ready'. That report is the per-file breakdown behind the counts stored
+    // above, and the only place a user can see WHICH files are missing, so the
+    // two must not drift.
+    //
+    // Fire-and-forget via waitUntil, matching the auto-retry dispatch: it walks
+    // the manifest and writes to GitHub, which must not delay or time out the
+    // workflow's callback. A failure is logged and left for the next sweep;
+    // the archive state itself is already committed above.
+    if (status === "ready") {
+      const reportDatasetId = body.dataset_id;
+      c.executionCtx.waitUntil(
+        (async () => {
+          try {
+            const report = await writeAvailabilityReport(c.env, reportDatasetId);
+            console.log(
+              `[archive-ready] availability report refreshed dataset=${reportDatasetId} missing=${report.missing.length}`,
+            );
+          } catch (err) {
+            console.error(
+              `[archive-ready] availability report refresh failed dataset=${reportDatasetId} (left for the next sweep):`,
+              err instanceof Error ? err.message : String(err),
+            );
+          }
+        })(),
+      );
+    }
+
     console.log(
-      `[archive-ready] dataset=${body.dataset_id} status=${status} size=${body.size ?? "?"} version=${body.version ?? "?"}${retry ? ` retry=${retry.reason} count=${retry.nextCount}` : ""}`,
+      `[archive-ready] dataset=${body.dataset_id} status=${status} size=${body.size ?? "?"} version=${body.version ?? "?"} complete=${body.complete ?? "?"} absent=${body.absent ?? "?"}${retry ? ` retry=${retry.reason} count=${retry.nextCount}` : ""}`,
     );
 
     return c.json({ ok: true, dataset_id: body.dataset_id, status });
