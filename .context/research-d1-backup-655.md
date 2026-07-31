@@ -1,5 +1,8 @@
 # Research: D1 backup, restore & local-run harness (#655)
 
+> **Decision recorded:** [ADR 0004 - Back up production D1 hourly to a private git repo](decisions/0004-d1-backup-to-a-private-repo-hourly.md).
+> This document keeps the empirical findings the decision rests on.
+
 Origin: issue #655 (Arnaud) — "Cloudflare database could be hacked or corrupted. We should
 back it up regularly." Expanded scope per user: a **private** repo that backs up the CF D1
 database hourly via a **GitHub Actions cron**, restorable, and good enough to **run the

@@ -1,5 +1,7 @@
 # Blast-radius audit — folding catalog-only rows into `datasets` (#646 Phase 1)
 
+> **Related decision:** [ADR 0003 - `datasets` is the single table of record](decisions/0003-datasets-is-the-single-table-of-record.md).
+
 > Companion to `.context/research-catalog-consolidation.md`. Records every
 > place that touches the `datasets` (or `users`) table and how it behaves once
 > migration 0028 folds ~180 legacy catalog-only rows into `datasets` under the

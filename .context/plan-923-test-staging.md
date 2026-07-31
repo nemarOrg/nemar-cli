@@ -1,5 +1,8 @@
 # Staging Environment: test.nemar.org + Exemplar Test-Dataset Fleet
 
+> **Decision recorded:** [ADR 0009 - Non-production D1 is a fixture set, not a production mirror](decisions/0009-non-production-d1-is-not-a-production-mirror.md).
+> This document keeps the staging build-out plan.
+
 ## Context
 
 `dev` currently carries a large, unreleased code change, and several other epics

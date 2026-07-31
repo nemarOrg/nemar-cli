@@ -1,5 +1,8 @@
 # NEMAR Pull Request Architecture
 
+> **Decision recorded:** [ADR 0001 - Dataset changes go through pull requests; main is sacred](decisions/0001-dataset-changes-go-through-pull-requests.md).
+> This document keeps the mechanics and the worked examples; the ADR is the record of what was decided and why.
+
 ## Novel Design: PR-Mandatory Versioning
 
 Unlike OpenNeuro which allows direct pushes, NEMAR enforces **all changes through pull requests**. This provides:

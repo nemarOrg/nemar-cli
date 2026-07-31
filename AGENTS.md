@@ -342,8 +342,14 @@ If build fails, the script restores the original version.
 - `.rules/ci_cd.md` - GitHub Actions setup
 
 ## Context Files
+- **`.context/decisions/` - Architecture Decision Records. Read these first.** One file per
+  significant decision, with the alternatives that lost and why. `decisions/README.md` is the
+  index and the convention (numbering, statuses, when to write one). Where a design doc below
+  and an ADR disagree, **the ADR wins** — the docs keep the analysis, the ADR records the verdict.
+  Write a new ADR when a decision is expensive to reverse, closes off other reasonable paths, has
+  been argued more than once, or encodes a non-obvious constraint. Never delete one; supersede it.
 - `.context/plan.md` - Development phases and tasks
-- `.context/ideas.md` - Design decisions and alternatives
+- `.context/ideas.md` - Design decisions and alternatives (exploratory; promote settled ones to an ADR)
 - `.context/research.md` - Technical investigations
 - `.context/validated_workflows.md` - **Tested and proven workflows** (use these!)
 - `.context/prototyping_plan.md` - Prototypes to validate assumptions
