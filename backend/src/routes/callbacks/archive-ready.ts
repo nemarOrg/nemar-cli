@@ -8,7 +8,6 @@
  */
 
 import { MAX_ARCHIVE_RETRIES, decideArchiveRetry } from "../../services/archive-retry.js";
-import { writeAvailabilityReport } from "../../services/availability-report.js";
 import { isValidDatasetId } from "../../services/datasetId.js";
 import { getDatasetsToken } from "../../services/github-auth.js";
 import { triggerArchiveGeneration } from "../../services/github.js";
@@ -177,6 +176,19 @@ export function registerArchiveReadyRoutes(webhooks: WebhookRouter): void {
           // never ran): the existing archive's completeness is still true of it,
           // and overwriting with NULL would downgrade a known state to "not
           // assessed".
+          //
+          // Clearing availability_report_at marks the per-file report stale so
+          // the availability-report sweep regenerates it: that column IS the
+          // sweep's candidacy predicate (availabilityReportSweepWhere ->
+          // `availability_report_at IS NULL`), so nulling it here is the whole
+          // enqueue. Deliberately a column write and NOT a direct
+          // writeAvailabilityReport call: that helper does a GitHub commit
+          // (createOrUpdateFile = a GET-sha + PUT pair on raw fetch, with no
+          // rate-limit retry), and the sweep caps itself at 10 per invocation
+          // precisely because a burst of those trips GitHub's secondary rate
+          // limit. Calling it per callback would fan out unbounded writes on the
+          // shared GITHUB_ADMIN_PAT and defeat the cap the sweep exists to
+          // enforce -- #1040's rebuild of 630 archives would do exactly that.
           `UPDATE datasets
            SET archive_status = 'ready',
                archive_checked_at = datetime('now'),
@@ -185,7 +197,8 @@ export function registerArchiveReadyRoutes(webhooks: WebhookRouter): void {
                archive_skip_reason = NULL,
                archive_complete = COALESCE(?, archive_complete),
                archive_absent_files = COALESCE(?, archive_absent_files),
-               archive_declared_files = COALESCE(?, archive_declared_files)
+               archive_declared_files = COALESCE(?, archive_declared_files),
+               availability_report_at = NULL
            WHERE dataset_id = ?`,
         )
           .bind(
@@ -285,37 +298,6 @@ export function registerArchiveReadyRoutes(webhooks: WebhookRouter): void {
           } catch (err) {
             console.error(
               `[archive-ready] auto-retry dispatch failed dataset=${retryDatasetId} (retry slot not consumed):`,
-              err instanceof Error ? err.message : String(err),
-            );
-          }
-        })(),
-      );
-    }
-
-    // Refresh the per-dataset availability report whenever an archive lands
-    // (#1041). Before this, writeAvailabilityReport ran only from the admin
-    // sweep and the single-dataset admin route, so the report could be stale --
-    // or absent entirely -- for the very version whose archive just flipped to
-    // 'ready'. That report is the per-file breakdown behind the counts stored
-    // above, and the only place a user can see WHICH files are missing, so the
-    // two must not drift.
-    //
-    // Fire-and-forget via waitUntil, matching the auto-retry dispatch: it walks
-    // the manifest and writes to GitHub, which must not delay or time out the
-    // workflow's callback. A failure is logged and left for the next sweep;
-    // the archive state itself is already committed above.
-    if (status === "ready") {
-      const reportDatasetId = body.dataset_id;
-      c.executionCtx.waitUntil(
-        (async () => {
-          try {
-            const report = await writeAvailabilityReport(c.env, reportDatasetId);
-            console.log(
-              `[archive-ready] availability report refreshed dataset=${reportDatasetId} missing=${report.missing.length}`,
-            );
-          } catch (err) {
-            console.error(
-              `[archive-ready] availability report refresh failed dataset=${reportDatasetId} (left for the next sweep):`,
               err instanceof Error ? err.message : String(err),
             );
           }

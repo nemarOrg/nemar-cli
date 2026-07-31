@@ -48,7 +48,8 @@ const READY_SQL = `UPDATE datasets
        archive_skip_reason = NULL,
        archive_complete = COALESCE(?, archive_complete),
        archive_absent_files = COALESCE(?, archive_absent_files),
-       archive_declared_files = COALESCE(?, archive_declared_files)
+       archive_declared_files = COALESCE(?, archive_declared_files),
+       availability_report_at = NULL
    WHERE dataset_id = ?`;
 
 interface CompletenessRow {
@@ -237,6 +238,38 @@ describe("archive-ready 'ready' UPDATE persists completeness", () => {
     // COALESCE takes the new 0 because 0 is not NULL -- the guard is against
     // NULL specifically, not against falsy values.
     expect(row.archive_absent_files).toBe(0);
+  });
+
+  test("'ready' marks the availability report stale so the sweep regenerates it", () => {
+    // availability_report_at IS NULL is the sweep's candidacy predicate
+    // (availabilityReportSweepWhere), so nulling it here is the entire enqueue.
+    // Verified against that predicate below rather than just asserting NULL, so
+    // this breaks if the sweep ever changes how it selects candidates.
+    db.prepare("UPDATE datasets SET availability_report_at = ? WHERE dataset_id = ?").run(
+      "2026-07-23 00:00:00",
+      "on004624",
+    );
+    db.prepare(READY_SQL).run(1024, 0, 3, 100, "on004624");
+
+    const stamp = db
+      .prepare("SELECT availability_report_at FROM datasets WHERE dataset_id = ?")
+      .get("on004624") as { availability_report_at: string | null };
+    expect(stamp.availability_report_at).toBeNull();
+
+    // The dataset must now actually be selected by the sweep's own predicate.
+    db.prepare("UPDATE datasets SET github_repo = ? WHERE dataset_id = ?").run(
+      "nemarDatasets/on004624",
+      "on004624",
+    );
+    const candidate = db
+      .prepare(
+        `SELECT dataset_id FROM datasets
+         WHERE github_repo IS NOT NULL
+           AND (is_sandbox = 0 OR is_sandbox IS NULL)
+           AND availability_report_at IS NULL`,
+      )
+      .all() as Array<{ dataset_id: string }>;
+    expect(candidate.map((r) => r.dataset_id)).toContain("on004624");
   });
 
   test("'ready' still clears a stale skip reason and resets the retry count", () => {
