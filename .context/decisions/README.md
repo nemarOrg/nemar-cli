@@ -22,7 +22,14 @@ Do not write one for routine choices that are obvious from reading the code.
 
 ## Index
 
-Add new entries here as you create ADRs:
+Add new entries here as you create ADRs. **This list is enforced, not decorative:**
+`test/adr-index.unit.test.ts` fails the build if an ADR on disk is missing from it, if an entry
+points at a file that no longer exists, if the numbering has a gap or duplicate, or if an ADR
+carries a `Status` outside `proposed | accepted | superseded by ADR-NNNN`. A superseded ADR must
+name a target that exists.
+
+The index is the entry point AGENTS.md tells readers to start from, so an unlisted ADR is an
+invisible one — which is why it is checked rather than trusted.
 
 - ADR 0000 - template (do not edit)
 - [ADR 0001](0001-dataset-changes-go-through-pull-requests.md) - Published datasets are PR-only; private datasets stay open
