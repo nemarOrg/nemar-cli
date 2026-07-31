@@ -65,11 +65,23 @@ The backend code (`ORG_NAME = "nemarDatasets"` in `backend/src/services/github.t
   miniflare D1, then `wrangler dev`). Both live in `nemarOrg/nemar-db-backup`.
 
 ### Public Browser Sites
-Two user-facing dataset browsers exist during the cutover; **prefer ww2 for new references**.
 
-- **`https://ww2.nemar.org`** — **current dataset browser** (Astro SSR, lives in `nemarOrg/website`). Dataset pages at `ww2.nemar.org/dataset/<id>`. Reads `api.nemar.org` and `data.nemar.org` directly. DOIs land on the canonical `https://nemar.org/dataset/<id>` (versions `?v=v<version>`), which a Cloudflare redirect on the `nemar.org` zone forwards to ww2.
-- **`https://nemar.org/dataexplorer/...`** — **legacy PHP site, being retired.** As of epic #837 NEMAR no longer syncs to or from it: the outgoing datapipeline push and the incoming 4h catalog pull are removed, our `nm`/`on` records are purged from its `dataexplorer_*` tables, and the legacy `ds######` shadow rows are dropped from our D1. It may still serve its own OpenNeuro `ds` catalog independently.
-- **Default in docs/comments:** when something says "the website," "the browser," or "the UI" without further qualification, mean ww2.nemar.org. Name `nemar.org` explicitly only when referring to the legacy dataexplorer or the `nemar.org/dataset/<id>` DOI landing target.
+**The cutover is done: `https://nemar.org` IS the dataset browser** (Astro SSR, lives in
+`nemarOrg/website`). Dataset pages at `nemar.org/dataset/<id>`, versions `?v=v<version>`. Reads
+`api.nemar.org` and `data.nemar.org` directly. This is also the canonical DOI landing target
+(`datasetLandingUrl` / `datasetVersionLandingUrl` in `shared/datacite-constants.ts`), so DOIs now
+resolve straight to the site they name instead of being forwarded.
+
+- **`https://ww2.nemar.org`** — the pre-cutover hostname for the same Astro site. Still resolves;
+  treat it as a legacy alias, not a deployment target. Do not use it in new code, docs, or comments.
+- **`https://nemar.org/dataexplorer/...`** — **the legacy PHP site is gone.** Its URLs now 301 to
+  `nemar.org/dataset/<id>`. Epic #837 had already severed the data coupling (outgoing datapipeline
+  push and the incoming 4h catalog pull removed, our `nm`/`on` records purged from its
+  `dataexplorer_*` tables, legacy `ds######` shadow rows dropped from our D1); the hostname handover
+  completed it.
+- **Default in docs/comments:** "the website," "the browser," or "the UI" unqualified means
+  `nemar.org`. There is no longer a distinction to draw — if you find a comment contrasting
+  ww2 with nemar.org, or calling nemar.org "legacy," it predates the cutover and is wrong.
 
 ### S3 Bucket Structure
 ```
@@ -90,7 +102,7 @@ It is served by the existing dev worker (`nemar-api-dev`), not a new one.
 | API | `api.nemar.org` | `api-test.nemar.org` |
 | Data plane | `data.nemar.org` | `data-test.nemar.org` |
 | Zarr | `zarr.nemar.org` | `zarr-test.nemar.org` |
-| Website | `ww2.nemar.org` (`nemar-website` Pages) | `test.nemar.org` (`nemar-website-test` Pages) |
+| Website | `nemar.org` (`nemar-website` Pages) | `test.nemar.org` (`nemar-website-test` Pages) |
 | S3 | `s3://nemar` | `s3://nemar-dev` |
 | D1 | `nemar-db` | `nemar-db-dev` |
 
