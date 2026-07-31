@@ -907,15 +907,16 @@ export interface AvailabilityReportSweepResetResponse {
   reset: number;
 }
 
-/** Run one bounded availability-report sweep batch (default 10,
- *  server-clamped to [1,10] -- lower than the read-only sweeps since each
- *  candidate does a GitHub commit). `missingOnly` narrows candidacy to
- *  datasets already known incomplete (data_complete = 0). */
+/** Run one bounded availability-report sweep batch (default 30,
+ *  server-clamped to [1,30]). Each candidate does a GitHub commit, so the
+ *  server clamp is the real bound -- asking for more just gets 30.
+ *  `missingOnly` narrows candidacy to datasets already known incomplete
+ *  (data_complete = 0). */
 export async function availabilityReportSweep(options?: {
   limit?: number;
   missingOnly?: boolean;
 }): Promise<AvailabilityReportSweepBatchResponse> {
-  const limit = options?.limit ?? 10;
+  const limit = options?.limit ?? 30;
   const params = new URLSearchParams({ limit: String(limit) });
   if (options?.missingOnly) params.set("missing-only", "1");
   return request<AvailabilityReportSweepBatchResponse>(

@@ -347,11 +347,14 @@ describe("archive-ready 'ready' UPDATE persists completeness", () => {
     expect(candidates()).not.toContain("on004624");
   });
 
-  test("the sweep cap stays low because each candidate is a GitHub commit", () => {
-    // Read-only sweeps (hed, data-integrity) go to 30; this one writes to
-    // GitHub per candidate, so it is deliberately lower. A silent bump here
-    // would reintroduce the secondary-rate-limit burst this cap prevents.
-    expect(AVAILABILITY_REPORT_SWEEP_MAX).toBe(10);
+  test("the sweep stays bounded per invocation", () => {
+    // 30 is safe only because the loop is sequential and each iteration is
+    // dominated by an S3 LIST plus a manifest walk, which paces the two GitHub
+    // writes per candidate. If the loop is ever parallelised, or given a fast
+    // path that skips the S3 verify, that pacing disappears and this has to
+    // come back down -- the bound is what stops a secondary-rate-limit burst
+    // on the shared PAT.
+    expect(AVAILABILITY_REPORT_SWEEP_MAX).toBe(30);
   });
 
   test("'ready' still clears a stale skip reason and resets the retry count", () => {

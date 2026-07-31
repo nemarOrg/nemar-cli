@@ -300,14 +300,23 @@ export function availabilityReportSweepRemainingQuery(missingOnly: boolean): str
   return `SELECT COUNT(*) AS n FROM datasets WHERE ${availabilityReportSweepWhere(missingOnly)}`;
 }
 
-/** Hard ceiling on candidates per sweep invocation. Deliberately lower than a
- *  read-only sweep like hed-sweep/data-integrity-sweep (max 30): each candidate
- *  here does a GitHub commit (createOrUpdateFile = a GET-sha + PUT pair on raw
- *  fetch, with no rate-limit retry), and a burst of write calls trips GitHub's
- *  secondary rate limit — the same failure mode the bulk-approval-rate-limit
- *  precedent hit, on the same shared GITHUB_ADMIN_PAT that also does repo
- *  creation, publication and DOI work. */
-export const AVAILABILITY_REPORT_SWEEP_MAX = 10;
+/** Hard ceiling on candidates per sweep invocation, matching the read-only
+ *  sweeps (hed-sweep, data-integrity-sweep).
+ *
+ *  This one is not read-only: each candidate does a GitHub commit
+ *  (createOrUpdateFile = a GET-sha + PUT pair on raw fetch, with NO rate-limit
+ *  retry) on the shared GITHUB_ADMIN_PAT that also drives repo creation,
+ *  publication and DOI work. It was 10 for that reason, citing the
+ *  bulk-approval-rate-limit precedent.
+ *
+ *  30 is still comfortable because the loop is sequential and each iteration is
+ *  dominated by an S3 LIST plus a manifest walk (verifyDatasetVersionS3), not by
+ *  the two GitHub calls. 30 candidates is 60 content-generating requests spread
+ *  across the seconds-per-dataset those S3 passes take, so it does not resemble
+ *  the tight burst the precedent hit. If that ever changes -- a fast path that
+ *  skips the S3 verify, or parallelising the loop -- this number has to come
+ *  back down, because the pacing is incidental to the work, not enforced. */
+export const AVAILABILITY_REPORT_SWEEP_MAX = 30;
 
 export interface AvailabilityReportSweepResult {
   processed: number;

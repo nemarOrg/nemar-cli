@@ -823,11 +823,14 @@ export function registerDatasetLifecycleRoutes(admin: AdminRouter): void {
    * (data_complete = 0, migration 0059) — for a targeted re-run once recovery
    * work lands, without re-touching every already-complete dataset.
    *
-   * Bounded per invocation (default 10, max 10 -- deliberately lower than a
-   * read-only sweep like hed-sweep/data-integrity-sweep (max 30): each
-   * candidate here does a GitHub commit (createOrUpdateFile, 2 API calls), and
-   * a burst of write calls can trip GitHub's secondary rate limit (the same
-   * failure mode the bulk-approval-rate-limit precedent hit). No in-Worker
+   * Bounded per invocation by AVAILABILITY_REPORT_SWEEP_MAX (30, matching the
+   * read-only sweeps; see the rationale on that constant). Each candidate here
+   * still does a GitHub commit (createOrUpdateFile, 2 API calls) unlike
+   * hed-sweep/data-integrity-sweep, and a burst of write calls can trip
+   * GitHub's secondary rate limit (the same failure mode the
+   * bulk-approval-rate-limit precedent hit); what keeps 30 safe is that the
+   * loop is sequential and each iteration is dominated by an S3 LIST plus a
+   * manifest walk, so the writes are naturally spread. No in-Worker
    * sleep between writes (that would eat into the Worker's request duration
    * budget) -- createOrUpdateFile itself has no 403 backoff either (its retry
    * loop only covers a stale-SHA conflict, not rate limiting), so a
