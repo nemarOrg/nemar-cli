@@ -299,3 +299,71 @@ export function availabilityReportSweepCandidateQuery(missingOnly: boolean): str
 export function availabilityReportSweepRemainingQuery(missingOnly: boolean): string {
   return `SELECT COUNT(*) AS n FROM datasets WHERE ${availabilityReportSweepWhere(missingOnly)}`;
 }
+
+/** Hard ceiling on candidates per sweep invocation. Deliberately lower than a
+ *  read-only sweep like hed-sweep/data-integrity-sweep (max 30): each candidate
+ *  here does a GitHub commit (createOrUpdateFile = a GET-sha + PUT pair on raw
+ *  fetch, with no rate-limit retry), and a burst of write calls trips GitHub's
+ *  secondary rate limit — the same failure mode the bulk-approval-rate-limit
+ *  precedent hit, on the same shared GITHUB_ADMIN_PAT that also does repo
+ *  creation, publication and DOI work. */
+export const AVAILABILITY_REPORT_SWEEP_MAX = 10;
+
+export interface AvailabilityReportSweepResult {
+  processed: number;
+  written: number;
+  errors: { dataset_id: string; error: string }[];
+  /** Candidates still unstamped after this run; null if the count query failed. */
+  remaining: number | null;
+}
+
+/**
+ * Run one bounded pass of the availability-report sweep: take up to `limit`
+ * unstamped candidates, regenerate each one's `.nemar/availability-report.json`,
+ * and stamp `availability_report_at` on success.
+ *
+ * Shared by the admin route and the daily cron so the two can never drift.
+ * The stamp is written ONLY after a successful commit — a failure leaves the
+ * row unstamped, so it stays a candidate and the next pass simply retries it.
+ * That is also what makes this safe to run repeatedly: it is self-limiting,
+ * draining `limit` per pass until nothing is stale.
+ *
+ * Throws only if the candidate query itself fails (e.g. migration 0061 not
+ * applied). Per-dataset failures are collected into `errors`, never thrown, so
+ * one broken repo cannot stop the rest of the pass.
+ */
+export async function runAvailabilityReportSweep(
+  env: Bindings,
+  opts?: { limit?: number; missingOnly?: boolean },
+): Promise<AvailabilityReportSweepResult> {
+  const missingOnly = opts?.missingOnly ?? false;
+  const requested = opts?.limit ?? AVAILABILITY_REPORT_SWEEP_MAX;
+  const limit = Math.min(Math.max(requested, 1), AVAILABILITY_REPORT_SWEEP_MAX);
+
+  const rows = await env.DB.prepare(availabilityReportSweepCandidateQuery(missingOnly))
+    .bind(limit)
+    .all<{ dataset_id: string }>();
+  const candidates = rows.results ?? [];
+
+  let written = 0;
+  const errors: { dataset_id: string; error: string }[] = [];
+  for (const { dataset_id } of candidates) {
+    try {
+      await writeAvailabilityReport(env, dataset_id);
+      await env.DB.prepare(
+        "UPDATE datasets SET availability_report_at = datetime('now') WHERE dataset_id = ?",
+      )
+        .bind(dataset_id)
+        .run();
+      written++;
+    } catch (err) {
+      errors.push({ dataset_id, error: errorMessage(err) });
+    }
+  }
+
+  const remainingRow = await env.DB.prepare(availabilityReportSweepRemainingQuery(missingOnly))
+    .first<{ n: number }>()
+    .catch(() => null);
+
+  return { processed: candidates.length, written, errors, remaining: remainingRow?.n ?? null };
+}

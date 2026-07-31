@@ -15,6 +15,11 @@ import { beforeEach, describe, expect, test } from "bun:test";
 import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { deriveArchiveCompleteness } from "../src/routes/callbacks/archive-ready.js";
+import {
+  AVAILABILITY_REPORT_SWEEP_MAX,
+  availabilityReportSweepCandidateQuery,
+  availabilityReportSweepRemainingQuery,
+} from "../src/services/availability-report.js";
 
 const MIGRATIONS_DIR = join(import.meta.dir, "../src/db/migrations");
 
@@ -305,6 +310,48 @@ describe("archive-ready 'ready' UPDATE persists completeness", () => {
       )
       .all() as Array<{ dataset_id: string }>;
     expect(candidate.map((r) => r.dataset_id)).toContain("on004624");
+  });
+
+  test("enqueue and drain close the loop: stale -> candidate -> stamped -> not a candidate", () => {
+    // The whole point of clearing the stamp is that the daily sweep picks the
+    // row up and eventually puts it back. Exercise both halves against the
+    // sweep's own exported SQL so this breaks if either side changes.
+    db.prepare("UPDATE datasets SET github_repo = ? WHERE dataset_id = ?").run(
+      "nemarDatasets/on004624",
+      "on004624",
+    );
+    // Already reported at some point in the past -> not a candidate.
+    db.prepare("UPDATE datasets SET availability_report_at = ? WHERE dataset_id = ?").run(
+      "2026-07-23 00:00:00",
+      "on004624",
+    );
+    const candidates = () =>
+      (
+        db.prepare(availabilityReportSweepCandidateQuery(false)).all(50) as Array<{
+          dataset_id: string;
+        }>
+      ).map((r) => r.dataset_id);
+    expect(candidates()).not.toContain("on004624");
+
+    // A new archive lands -> enqueued.
+    db.prepare(READY_SQL).run(1024, 0, 2, 50, "on004624");
+    expect(candidates()).toContain("on004624");
+    expect(
+      (db.prepare(availabilityReportSweepRemainingQuery(false)).get() as { n: number }).n,
+    ).toBeGreaterThan(0);
+
+    // The sweep stamps on success -> drained, and it does not come back.
+    db.prepare(
+      "UPDATE datasets SET availability_report_at = datetime('now') WHERE dataset_id = ?",
+    ).run("on004624");
+    expect(candidates()).not.toContain("on004624");
+  });
+
+  test("the sweep cap stays low because each candidate is a GitHub commit", () => {
+    // Read-only sweeps (hed, data-integrity) go to 30; this one writes to
+    // GitHub per candidate, so it is deliberately lower. A silent bump here
+    // would reintroduce the secondary-rate-limit burst this cap prevents.
+    expect(AVAILABILITY_REPORT_SWEEP_MAX).toBe(10);
   });
 
   test("'ready' still clears a stale skip reason and resets the retry count", () => {
