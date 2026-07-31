@@ -79,16 +79,26 @@ export interface ArchiveCompleteness {
   /** Surfaced so the caller can flag the should-be-impossible ready+unreadable
    *  combination; not persisted (a 'ready' build has none by construction). */
   unreadable: number | null;
+  /** Names of count fields the payload SENT but that failed validation. Empty
+   *  when they were simply absent. The two look identical in the columns (both
+   *  end up null and COALESCE-preserve the prior verdict) but are completely
+   *  different events: absent is the expected skip path, unparseable means the
+   *  producer is broken. */
+  malformed: string[];
 }
 
 /**
  * Derive the completeness columns from an archive-ready payload.
  *
- * `complete` is computed from the counts rather than taken from the payload's
- * own `complete` flag whenever both counts are present: the counts are the
- * primitive facts and the flag is a convenience the workflow computes from
- * them, so deriving keeps the column consistent with the numbers stored beside
- * it. The flag is the fallback for a payload that carries only it.
+ * `complete` is derived STRICTLY from the counts. The payload's own `complete`
+ * boolean is deliberately not a fallback: `archive_absent_files` and
+ * `archive_declared_files` are COALESCE-preserved from the previous build when
+ * absent, so honouring a lone flag would write a fresh `archive_complete = 1`
+ * next to a stale `archive_absent_files = 5` and produce a row that
+ * contradicts itself depending on which column a consumer reads. A verdict is
+ * only as trustworthy as the counts standing beside it, so with no counts the
+ * honest answer is "not assessed". The producer always emits the counts and the
+ * flag together from one stats file, so this costs nothing in practice.
  *
  * Everything null means "not assessed": an archive built before #1041 shipped,
  * or the idempotent skip path where the stream script never ran. Callers must
@@ -98,17 +108,17 @@ export function deriveArchiveCompleteness(body: ArchiveReadyBody): ArchiveComple
   const absent = countOrNull(body.absent);
   const unreadable = countOrNull(body.unreadable);
   const declared = countOrNull(body.declared);
+  const malformed: string[] = [];
+  for (const [name, raw] of [
+    ["absent", body.absent],
+    ["unreadable", body.unreadable],
+    ["declared", body.declared],
+  ] as const) {
+    if (raw !== undefined && countOrNull(raw) === null) malformed.push(name);
+  }
   const complete =
-    absent !== null && unreadable !== null
-      ? absent + unreadable === 0
-        ? 1
-        : 0
-      : typeof body.complete === "boolean"
-        ? body.complete
-          ? 1
-          : 0
-        : null;
-  return { complete, absent, declared, unreadable };
+    absent !== null && unreadable !== null ? (absent + unreadable === 0 ? 1 : 0) : null;
+  return { complete, absent, declared, unreadable, malformed };
 }
 
 export function registerArchiveReadyRoutes(webhooks: WebhookRouter): void {
@@ -155,7 +165,20 @@ export function registerArchiveReadyRoutes(webhooks: WebhookRouter): void {
     let retry: ReturnType<typeof decideArchiveRetry> | null = null;
     try {
       if (status === "ready") {
-        const { complete, absent, declared, unreadable } = deriveArchiveCompleteness(body);
+        const { complete, absent, declared, unreadable, malformed } =
+          deriveArchiveCompleteness(body);
+        // A real build whose tally arrived unparseable is NOT the same event as
+        // the skip path that sends no tally, but the persisted row cannot tell
+        // you apart: both leave the completeness columns COALESCE-preserved
+        // while archive_size and archive_checked_at are overwritten
+        // unconditionally. So the row ends up advertising a brand-new
+        // "checked just now" timestamp beside a verdict from an older build.
+        // Nothing else would ever surface that, so say it here.
+        if (malformed.length > 0) {
+          console.error(
+            `[archive-ready] ANOMALY dataset=${body.dataset_id}: completeness fields present but unparseable (${malformed.join(", ")}); columns keep the PREVIOUS build's verdict while archive_size/archive_checked_at advance`,
+          );
+        }
         // A 'ready' callback carrying unreadable>0 should be impossible: the
         // build exits non-zero and the wrapper deletes the zip in that case. If
         // it happens the classification logic has drifted, so say so loudly

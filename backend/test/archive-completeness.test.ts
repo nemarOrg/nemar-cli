@@ -119,7 +119,7 @@ describe("deriveArchiveCompleteness", () => {
         unreadable: 0,
         declared: 66427,
       }),
-    ).toEqual({ complete: 1, absent: 0, declared: 66427, unreadable: 0 });
+    ).toEqual({ complete: 1, absent: 0, declared: 66427, unreadable: 0, malformed: [] });
   });
 
   test("one absent file of 66k -> partial, not complete", () => {
@@ -145,17 +145,25 @@ describe("deriveArchiveCompleteness", () => {
     expect(got.complete).toBe(0);
   });
 
-  test("flag alone is honoured when the counts are absent", () => {
-    expect(deriveArchiveCompleteness({ dataset_id: "on004624", complete: false }).complete).toBe(0);
-    expect(deriveArchiveCompleteness({ dataset_id: "on004624", complete: true }).complete).toBe(1);
+  test("a lone `complete` flag is NOT honoured without counts", () => {
+    // Honouring it would write a fresh archive_complete=1 next to
+    // COALESCE-preserved absent/declared counts from an older build, producing
+    // a row that contradicts itself. No counts means no verdict.
+    expect(
+      deriveArchiveCompleteness({ dataset_id: "on004624", complete: true }).complete,
+    ).toBeNull();
+    expect(
+      deriveArchiveCompleteness({ dataset_id: "on004624", complete: false }).complete,
+    ).toBeNull();
   });
 
-  test("an empty payload is 'not assessed', all null", () => {
+  test("an empty payload is 'not assessed', all null, nothing malformed", () => {
     expect(deriveArchiveCompleteness({ dataset_id: "on004624" })).toEqual({
       complete: null,
       absent: null,
       declared: null,
       unreadable: null,
+      malformed: [],
     });
   });
 
@@ -170,8 +178,35 @@ describe("deriveArchiveCompleteness", () => {
     expect(got.absent).toBeNull();
     expect(got.unreadable).toBeNull();
     expect(got.declared).toBeNull();
-    // With no usable counts and no flag, the verdict is "not assessed".
     expect(got.complete).toBeNull();
+  });
+
+  test("present-but-unparseable is reported distinctly from simply absent", () => {
+    // Both leave the columns null and COALESCE-preserved, so the persisted row
+    // cannot distinguish them. This is the only signal that a real build's
+    // tally arrived broken rather than never being sent.
+    const broken = deriveArchiveCompleteness({
+      dataset_id: "on004624",
+      absent: "3" as unknown as number,
+      unreadable: -1,
+      declared: 1.5,
+    });
+    expect(broken.malformed.sort()).toEqual(["absent", "declared", "unreadable"]);
+
+    const skipped = deriveArchiveCompleteness({ dataset_id: "on004624" });
+    expect(skipped.malformed).toEqual([]);
+
+    // A partially broken payload names only the offending field.
+    const partial = deriveArchiveCompleteness({
+      dataset_id: "on004624",
+      absent: 0,
+      unreadable: 0,
+      declared: Number.NaN,
+    });
+    expect(partial.malformed).toEqual(["declared"]);
+    // The two good counts still yield a verdict; only `declared` is lost.
+    expect(partial.complete).toBe(1);
+    expect(partial.declared).toBeNull();
   });
 
   test("unreadable>0 counts as not complete", () => {
