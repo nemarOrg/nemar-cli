@@ -3,6 +3,10 @@
 > **Decision recorded:** [ADR 0010 - Imports use server-side S3 copy](decisions/0010-imports-use-server-side-s3-copy.md).
 > This document keeps the verified facts and the phase plan.
 
+
+> **STATUS: HISTORICAL.** Plan behind epic #967, now shipped.
+> Current decisions live in [`.context/decisions/`](decisions/README.md); where this document and an ADR disagree, the ADR wins.
+
 Companion to `research-openneuro-import-forensics.md`. Goal: imports of arbitrarily large
 OpenNeuro datasets complete **unattended, idempotently, with no orphaned state, no archive
 blowups, and downloadable output** — all inside CI (no external server, per decision 2026-06-15).

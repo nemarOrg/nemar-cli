@@ -7,6 +7,10 @@
 > migration 0028 folds ~180 legacy catalog-only rows into `datasets` under the
 > sentinel system owner.
 
+
+> **STATUS: HISTORICAL.** Migration-time blast-radius audit for #646 Phase 1, now shipped.
+> Current decisions live in [`.context/decisions/`](decisions/README.md); where this document and an ADR disagree, the ADR wins.
+
 ## The discriminator
 
 Folded rows are inserted with `owner_user_id = SYSTEM_USER_ID` (**-1**, see

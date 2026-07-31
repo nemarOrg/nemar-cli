@@ -3,6 +3,10 @@
 > **Related decisions:** [ADR 0007 - EZID is the sole DOI provider](decisions/0007-ezid-is-the-sole-doi-provider.md).
 > Note: the `ww2.nemar.org` forwarding described below is superseded — nemar.org now serves the browser directly (cutover 2026-07-31).
 
+
+> **STATUS: HISTORICAL.** Epic plan for #837, now shipped. The ww2 forwarding it describes was superseded by the nemar.org cutover.
+> Current decisions live in [`.context/decisions/`](decisions/README.md); where this document and an ADR disagree, the ADR wins.
+
 Issue: #793 (blocks #748). Drafted 2026-06-26.
 
 ## Goal / end state

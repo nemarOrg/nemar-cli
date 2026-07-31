@@ -32,35 +32,22 @@ Direct push to main: BLOCKED (even for owner)
 
 ## GitHub Branch Protection Configuration
 
-When NEMAR creates a dataset repository, it automatically configures strict branch protection:
-
-```bash
-# API call to set branch protection
-gh api -X PUT /repos/nemarDatasets/{dataset_id}/branches/main/protection \
-  -f required_pull_request_reviews.required_approving_review_count=1 \
-  -f required_pull_request_reviews.dismiss_stale_reviews=true \
-  -f required_pull_request_reviews.require_last_push_approval=true \
-  -f enforce_admins=true \
-  -f required_status_checks.strict=true \
-  -f required_status_checks.contexts[]="bids-validation" \
-  -f restrictions=null \
-  -f allow_force_pushes=false \
-  -f allow_deletions=false
-```
-
-### Protection Rules Explained
-
-| Rule | Setting | Purpose |
-|------|---------|---------|
-| `required_approving_review_count` | 1 | At least one approval required |
-| `dismiss_stale_reviews` | true | New commits invalidate old approvals |
-| `require_last_push_approval` | true | Pusher cannot self-approve |
-| `enforce_admins` | true | Even admins must use PRs |
-| `required_status_checks` | "bids-validation" | BIDS validation must pass |
-| `allow_force_pushes` | false | Cannot rewrite history |
-| `allow_deletions` | false | Cannot delete branches |
-
----
+> **SUPERSEDED — do not copy the command that used to be here.** This section described the
+> original January 2026 protection (`enforce_admins=true`, one required approval,
+> `require_last_push_approval=true`, applied at repo creation). None of that is what runs today.
+>
+> Current behaviour, per [ADR 0001](decisions/0001-dataset-changes-go-through-pull-requests.md)
+> and `backend/src/services/github/branch-protection.ts`:
+>
+> | | today |
+> |---|---|
+> | private (unpublished) | **no ruleset at all** |
+> | public (published) | branch ruleset: PRs required, `required_approving_review_count: 0` (owner self-merges), required status checks pinned per check by `integration_id`, `non_fast_forward`, `deletion` |
+> | admins | explicit `bypass_actors` (break-glass), NOT bound |
+> | applied | at **publish**, not at repo creation |
+>
+> The mechanics below (staging flow, Actions, roles) are still broadly accurate; the protection
+> payload is not. Read the code for the payload.
 
 ## Roles and Permissions
 

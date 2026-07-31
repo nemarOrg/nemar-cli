@@ -1,5 +1,9 @@
 # Incident: 53 published dataset repos deleted (nemarDatasets) — 2026-06
 
+
+> **STATUS: HISTORICAL.** Incident record (2026-06). Retained as forensics; see ADR 0008.
+> Current decisions live in [`.context/decisions/`](decisions/README.md); where this document and an ADR disagree, the ADR wins.
+
 Tracked in nemarOrg/nemar-cli#883. Surfaced during the #869 HED backfill.
 
 ## What happened

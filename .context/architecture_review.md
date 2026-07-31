@@ -3,6 +3,10 @@
 > **Decisions recorded:** [ADR 0019 - Every user gets push to every repo](decisions/0019-every-user-gets-push-to-every-repo.md) (**superseded**), [ADR 0001 - Published datasets are PR-only](decisions/0001-dataset-changes-go-through-pull-requests.md).
 > The rest of this document is an early risk register. Items marked "Recommendation" were not all adopted; verify against code before relying on one.
 
+
+> **STATUS: HISTORICAL.** Early risk register. Items marked "Recommendation" were not all adopted, and item 2's RESOLVED decision was later reversed (see ADR 0019).
+> Current decisions live in [`.context/decisions/`](decisions/README.md); where this document and an ADR disagree, the ADR wins.
+
 This document identifies potential failure scenarios, edge cases, and architectural gaps that need to be addressed.
 
 ---

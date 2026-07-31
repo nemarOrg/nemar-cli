@@ -3,6 +3,10 @@
 > **Decisions recorded:** [ADR 0021 - The API token is the master credential](decisions/0021-the-api-token-is-the-master-credential.md), [ADR 0001 - Published datasets are PR-only](decisions/0001-dataset-changes-go-through-pull-requests.md).
 > Note: the "Storage Strategy" section below still lists Zenodo for DOIs — superseded by [ADR 0007](decisions/0007-ezid-is-the-sole-doi-provider.md).
 
+
+> **STATUS: HISTORICAL.** Development phases through Phase 7. Phase status is a record of what was done, not a to-do list, and several sections (Storage Strategy, Open Questions) name choices later reversed.
+> Current decisions live in [`.context/decisions/`](decisions/README.md); where this document and an ADR disagree, the ADR wins.
+
 ## Project Overview
 **Goal:** Build a comprehensive CLI for NEMAR (Neuroelectromagnetic Data Archive and Tools Resource) dataset management; similar to OpenNeuro CLI but with **PR-mandatory versioning**, enhanced authentication, admin workflows, and DataLad/S3 integration
 **Stack:** TypeScript, Bun, Commander.js, Cloudflare Workers/D1, DataLad, AWS S3, GitHub API

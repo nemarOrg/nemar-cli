@@ -362,6 +362,7 @@ If build fails, the script restores the original version.
 - `.rules/ci_cd.md` - GitHub Actions setup
 
 ## Context Files
+- **[`.context/README.md`](.context/README.md) - map of this directory** (current vs research vs historical)
 - **`.context/decisions/` - Architecture Decision Records. Read these first.** One file per
   significant decision, with the alternatives that lost and why. `decisions/README.md` is the
   index and the convention (numbering, statuses, when to write one). Where a design doc below

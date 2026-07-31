@@ -3,6 +3,10 @@
 > **Related decisions:** [ADR 0015 - git-annex takes data files only](decisions/0015-git-annex-annexes-data-only-metadata-stays-in-git.md), [ADR 0001 - Published datasets are PR-only](decisions/0001-dataset-changes-go-through-pull-requests.md).
 > Outcomes of these prototypes live in `validated_workflows.md`.
 
+
+> **STATUS: HISTORICAL.** Prototype scripts from the January 2026 design spike. Their *outcomes* are in `validated_workflows.md`; the protection payloads shown here are the pre-#713 ones and are wrong today.
+> Current decisions live in [`.context/decisions/`](decisions/README.md); where this document and an ADR disagree, the ADR wins.
+
 Before full implementation, we need to validate key assumptions through prototypes.
 
 ---

@@ -28,7 +28,7 @@ CREATE TABLE dataset_registry (
   name TEXT NOT NULL,                   -- human-readable name
   owner_user_id INTEGER NOT NULL,
   status TEXT DEFAULT 'active',         -- active, archived, pending
-  concept_doi TEXT,                     -- Zenodo concept DOI
+  concept_doi TEXT,                     -- concept DOI (EZID; see ADR 0007)
   created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
   FOREIGN KEY (owner_user_id) REFERENCES users(id)
 );
