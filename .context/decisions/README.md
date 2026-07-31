@@ -25,7 +25,7 @@ Do not write one for routine choices that are obvious from reading the code.
 Add new entries here as you create ADRs:
 
 - ADR 0000 - template (do not edit)
-- [ADR 0001](0001-dataset-changes-go-through-pull-requests.md) - Dataset changes go through pull requests; main is sacred
+- [ADR 0001](0001-dataset-changes-go-through-pull-requests.md) - Published datasets are PR-only; private datasets stay open
 - [ADR 0002](0002-access-control-via-github-collaboration.md) - Access control rides on GitHub collaboration, not a NEMAR permission layer
 - [ADR 0003](0003-datasets-is-the-single-table-of-record.md) - `datasets` is the single table of record; FTS5 for lexical, id-only Vectorize
 - [ADR 0004](0004-d1-backup-to-a-private-repo-hourly.md) - Back up production D1 hourly to a private git repo, in plaintext
@@ -45,9 +45,13 @@ Add new entries here as you create ADRs:
 - [ADR 0017](0017-dataset-visibility-is-filtered-server-side.md) - Dataset visibility is enforced server-side
 - [ADR 0018](0018-metadata-must-be-validated-before-a-doi-is-minted.md) - Metadata must reach `validated` before a DOI is minted
 
+- [ADR 0019](0019-every-user-gets-push-to-every-repo.md) - Every approved user gets push to every repo (**superseded**)
+- [ADR 0020](0020-dataset-automation-runs-from-central-shared-workflows.md) - Dataset automation runs from central shared workflows
+- [ADR 0021](0021-the-api-token-is-the-master-credential.md) - The API token is the master credential; revocation cascades
+
 ## Backfill note (2026-07-31)
 
-ADRs 0001-0018 were written retroactively from decisions that had accumulated across
+ADRs 0001-0021 were written retroactively from decisions that had accumulated across
 `.context/` design docs, plans, and research notes. Where a decision now lives in an ADR,
 the originating document keeps its analysis and points here rather than restating the
 choice, so there is exactly one place that says what was decided.

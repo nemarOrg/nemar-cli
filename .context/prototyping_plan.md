@@ -1,5 +1,8 @@
 # NEMAR Prototyping Plan
 
+> **Related decisions:** [ADR 0015 - git-annex takes data files only](decisions/0015-git-annex-annexes-data-only-metadata-stays-in-git.md), [ADR 0001 - Published datasets are PR-only](decisions/0001-dataset-changes-go-through-pull-requests.md).
+> Outcomes of these prototypes live in `validated_workflows.md`.
+
 Before full implementation, we need to validate key assumptions through prototypes.
 
 ---
