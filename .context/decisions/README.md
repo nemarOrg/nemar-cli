@@ -36,9 +36,18 @@ Add new entries here as you create ADRs:
 - [ADR 0009](0009-non-production-d1-is-not-a-production-mirror.md) - Non-production D1 is a fixture set, not a production mirror
 - [ADR 0010](0010-imports-use-server-side-s3-copy.md) - Imports use server-side S3 copy, never a client stream
 
+- [ADR 0011](0011-dataset-ids-are-backend-assigned-in-reserved-bands.md) - Dataset IDs are assigned by the backend, in reserved bands
+- [ADR 0012](0012-oversized-datasets-skip-the-zip-and-use-direct-download.md) - Oversized datasets skip the zip and steer users to direct download
+- [ADR 0013](0013-the-importer-stays-in-nemar-cli-with-registry-plus-family-adapters.md) - The multi-archive importer stays in nemar-cli (proposed)
+- [ADR 0014](0014-submission-minimums-are-llm-judged-not-regex-gated.md) - Submission minimums are LLM-judged and advisory; regexes do not gate
+- [ADR 0015](0015-git-annex-annexes-data-only-metadata-stays-in-git.md) - git-annex takes data files only; metadata stays in plain git
+- [ADR 0016](0016-release-versioning-is-owned-by-ci.md) - CI owns version bumping and tagging
+- [ADR 0017](0017-dataset-visibility-is-filtered-server-side.md) - Dataset visibility is enforced server-side
+- [ADR 0018](0018-metadata-must-be-validated-before-a-doi-is-minted.md) - Metadata must reach `validated` before a DOI is minted
+
 ## Backfill note (2026-07-31)
 
-ADRs 0001-0010 were written retroactively from decisions that had accumulated across
+ADRs 0001-0018 were written retroactively from decisions that had accumulated across
 `.context/` design docs, plans, and research notes. Where a decision now lives in an ADR,
 the originating document keeps its analysis and points here rather than restating the
 choice, so there is exactly one place that says what was decided.

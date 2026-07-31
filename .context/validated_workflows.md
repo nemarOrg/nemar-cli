@@ -1,5 +1,7 @@
 # Validated Workflows
 
+> **Decisions recorded:** [ADR 0015 - git-annex takes data files only](decisions/0015-git-annex-annexes-data-only-metadata-stays-in-git.md), [ADR 0001 - Changes go through pull requests](decisions/0001-dataset-changes-go-through-pull-requests.md).
+
 This document contains workflows that have been **tested and validated** through prototyping. These are proven to work and should be used as reference during implementation.
 
 > **Important:** Only add workflows here after successful prototyping. Each workflow should include the validation date and test conditions.
