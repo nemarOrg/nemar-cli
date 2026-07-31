@@ -44,6 +44,81 @@ interface ArchiveReadyBody {
    *  datasets.archive_skip_reason; its presence is what marks a dataset
    *  "archive skipped" (archive_status stays NULL). */
   reason?: string;
+  /** Completeness tally from the build (#1041). Sent by
+   *  nemarDatasets/.github run-generate-archive.yml on 'ready'. All optional:
+   *  archives built before that shipped, and the idempotent skip path where the
+   *  stream script never ran, send none of them and leave the columns NULL
+   *  ("not assessed"), which must NOT be read as "incomplete". */
+  /** True when every declared file made it into the zip. */
+  complete?: boolean;
+  /** Annexed objects S3 reported missing, or that failed the size check. */
+  absent?: number;
+  /** Objects that could not be read for any other reason (403/5xx/throttle).
+   *  A 'ready' callback should always carry 0 here -- the build fails and the
+   *  zip is deleted otherwise -- so a non-zero value is logged as an anomaly. */
+  unreadable?: number;
+  /** Total files the version manifest declared. */
+  declared?: number;
+  /** Annexed objects successfully streamed into the zip. */
+  annexed?: number;
+}
+
+/** Non-negative integer or null; anything else (string, NaN, negative, float)
+ *  is rejected so a malformed payload leaves the column NULL rather than
+ *  poisoning it with a value the dashboard would render as fact. */
+function countOrNull(value: unknown): number | null {
+  return typeof value === "number" && Number.isInteger(value) && value >= 0 ? value : null;
+}
+
+/** What the 'ready' branch writes to the completeness columns (#1041). */
+export interface ArchiveCompleteness {
+  /** 1 complete, 0 partial, null not assessed. */
+  complete: number | null;
+  absent: number | null;
+  declared: number | null;
+  /** Surfaced so the caller can flag the should-be-impossible ready+unreadable
+   *  combination; not persisted (a 'ready' build has none by construction). */
+  unreadable: number | null;
+  /** Names of count fields the payload SENT but that failed validation. Empty
+   *  when they were simply absent. The two look identical in the columns (both
+   *  end up null and COALESCE-preserve the prior verdict) but are completely
+   *  different events: absent is the expected skip path, unparseable means the
+   *  producer is broken. */
+  malformed: string[];
+}
+
+/**
+ * Derive the completeness columns from an archive-ready payload.
+ *
+ * `complete` is derived STRICTLY from the counts. The payload's own `complete`
+ * boolean is deliberately not a fallback: `archive_absent_files` and
+ * `archive_declared_files` are COALESCE-preserved from the previous build when
+ * absent, so honouring a lone flag would write a fresh `archive_complete = 1`
+ * next to a stale `archive_absent_files = 5` and produce a row that
+ * contradicts itself depending on which column a consumer reads. A verdict is
+ * only as trustworthy as the counts standing beside it, so with no counts the
+ * honest answer is "not assessed". The producer always emits the counts and the
+ * flag together from one stats file, so this costs nothing in practice.
+ *
+ * Everything null means "not assessed": an archive built before #1041 shipped,
+ * or the idempotent skip path where the stream script never ran. Callers must
+ * persist that as leave-alone, not as overwrite-with-null.
+ */
+export function deriveArchiveCompleteness(body: ArchiveReadyBody): ArchiveCompleteness {
+  const absent = countOrNull(body.absent);
+  const unreadable = countOrNull(body.unreadable);
+  const declared = countOrNull(body.declared);
+  const malformed: string[] = [];
+  for (const [name, raw] of [
+    ["absent", body.absent],
+    ["unreadable", body.unreadable],
+    ["declared", body.declared],
+  ] as const) {
+    if (raw !== undefined && countOrNull(raw) === null) malformed.push(name);
+  }
+  const complete =
+    absent !== null && unreadable !== null ? (absent + unreadable === 0 ? 1 : 0) : null;
+  return { complete, absent, declared, unreadable, malformed };
 }
 
 export function registerArchiveReadyRoutes(webhooks: WebhookRouter): void {
@@ -90,19 +165,72 @@ export function registerArchiveReadyRoutes(webhooks: WebhookRouter): void {
     let retry: ReturnType<typeof decideArchiveRetry> | null = null;
     try {
       if (status === "ready") {
+        const { complete, absent, declared, unreadable, malformed } =
+          deriveArchiveCompleteness(body);
+        // A real build whose tally arrived unparseable is NOT the same event as
+        // the skip path that sends no tally, but the persisted row cannot tell
+        // you apart: both leave the completeness columns COALESCE-preserved
+        // while archive_size and archive_checked_at are overwritten
+        // unconditionally. So the row ends up advertising a brand-new
+        // "checked just now" timestamp beside a verdict from an older build.
+        // Nothing else would ever surface that, so say it here.
+        if (malformed.length > 0) {
+          console.error(
+            `[archive-ready] ANOMALY dataset=${body.dataset_id}: completeness fields present but unparseable (${malformed.join(", ")}); columns keep the PREVIOUS build's verdict while archive_size/archive_checked_at advance`,
+          );
+        }
+        // A 'ready' callback carrying unreadable>0 should be impossible: the
+        // build exits non-zero and the wrapper deletes the zip in that case. If
+        // it happens the classification logic has drifted, so say so loudly
+        // rather than silently recording the archive as merely partial.
+        if (unreadable !== null && unreadable > 0) {
+          console.error(
+            `[archive-ready] ANOMALY dataset=${body.dataset_id}: status=ready with unreadable=${unreadable}; the build should have failed and deleted the zip`,
+          );
+        }
         const result = await c.env.DB.prepare(
           // Clear archive_skip_reason: a real zip now exists, so a stale skip from
           // an earlier (larger) version must not keep the UI on the direct-download
           // recipe (#752).
+          //
+          // COALESCE on the completeness columns so a callback that carries no
+          // tally leaves prior values intact instead of blanking them. That is
+          // the idempotent skip path (archive already existed, stream script
+          // never ran): the existing archive's completeness is still true of it,
+          // and overwriting with NULL would downgrade a known state to "not
+          // assessed".
+          //
+          // Clearing availability_report_at marks the per-file report stale so
+          // the availability-report sweep regenerates it: that column IS the
+          // sweep's candidacy predicate (availabilityReportSweepWhere ->
+          // `availability_report_at IS NULL`), so nulling it here is the whole
+          // enqueue. Deliberately a column write and NOT a direct
+          // writeAvailabilityReport call: that helper does a GitHub commit
+          // (createOrUpdateFile = a GET-sha + PUT pair on raw fetch, with no
+          // rate-limit retry), and the sweep caps itself at 10 per invocation
+          // precisely because a burst of those trips GitHub's secondary rate
+          // limit. Calling it per callback would fan out unbounded writes on the
+          // shared GITHUB_ADMIN_PAT and defeat the cap the sweep exists to
+          // enforce -- #1040's rebuild of 630 archives would do exactly that.
           `UPDATE datasets
            SET archive_status = 'ready',
                archive_checked_at = datetime('now'),
                archive_size = ?,
                archive_retry_count = 0,
-               archive_skip_reason = NULL
+               archive_skip_reason = NULL,
+               archive_complete = COALESCE(?, archive_complete),
+               archive_absent_files = COALESCE(?, archive_absent_files),
+               archive_declared_files = COALESCE(?, archive_declared_files),
+               availability_report_at = NULL
            WHERE dataset_id = ?`,
         )
-          .bind(typeof body.size === "number" ? body.size : null, body.dataset_id)
+          .bind(
+            typeof body.size === "number" ? body.size : null,
+            complete,
+            absent,
+            declared,
+            body.dataset_id,
+          )
           .run();
         changed = result.meta.changes ?? 0;
       } else if (status === "skipped") {
@@ -201,7 +329,7 @@ export function registerArchiveReadyRoutes(webhooks: WebhookRouter): void {
     }
 
     console.log(
-      `[archive-ready] dataset=${body.dataset_id} status=${status} size=${body.size ?? "?"} version=${body.version ?? "?"}${retry ? ` retry=${retry.reason} count=${retry.nextCount}` : ""}`,
+      `[archive-ready] dataset=${body.dataset_id} status=${status} size=${body.size ?? "?"} version=${body.version ?? "?"} complete=${body.complete ?? "?"} absent=${body.absent ?? "?"}${retry ? ` retry=${retry.reason} count=${retry.nextCount}` : ""}`,
     );
 
     return c.json({ ok: true, dataset_id: body.dataset_id, status });

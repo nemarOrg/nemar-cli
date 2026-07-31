@@ -32,6 +32,7 @@ import { beforeEach, describe, expect, test } from "bun:test";
 import { Hono } from "hono";
 import { adminRoutes } from "../src/routes/admin";
 import {
+  AVAILABILITY_REPORT_SWEEP_MAX,
   availabilityReportSweepCandidateQuery,
   availabilityReportSweepRemainingQuery,
 } from "../src/services/availability-report";
@@ -205,12 +206,14 @@ describe("POST /admin/datasets/availability-report-sweep (real route, zero real 
     expect(row.availability_report_at).toBeNull();
   });
 
-  test("?limit=999 is clamped to 10 at the bound SQL parameter", async () => {
+  test("?limit=999 is clamped to AVAILABILITY_REPORT_SWEEP_MAX at the bound SQL parameter", async () => {
     const res = await post("/admin/datasets/availability-report-sweep?limit=999");
     expect(res.status).toBe(200);
     expect(candidateLimitCalls.length).toBe(1);
     const bound = candidateLimitCalls[0];
-    expect(bound[bound.length - 1]).toBe(10);
+    // Asserted against the constant rather than a literal so the clamp and the
+    // cap can never disagree; the constant carries the rationale for its value.
+    expect(bound[bound.length - 1]).toBe(AVAILABILITY_REPORT_SWEEP_MAX);
   });
 
   test("?limit=0 is clamped up to 1", async () => {

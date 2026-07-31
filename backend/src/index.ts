@@ -34,6 +34,7 @@ import webhooks from "./routes/webhooks";
 import { zarrDataRoutes } from "./routes/zarr-data";
 import { archiveRetrySweep } from "./services/archive-retry";
 import { AUTO_IMPORT_CRON, autoImportTick } from "./services/auto-import";
+import { runAvailabilityReportSweep } from "./services/availability-report";
 import { fetchAndSyncCitationCounts } from "./services/citation-counts-sync";
 import { drainEmbeddingDirty } from "./services/dataset-search";
 import { DEV_EPHEMERAL_BAND_END, DEV_EPHEMERAL_BAND_START } from "./services/datasetId";
@@ -769,6 +770,41 @@ export default {
             err instanceof Error ? (err.stack ?? err.message) : err,
           ),
         ),
+      );
+      // #1041 (epic #1044): drain datasets whose per-file availability report is
+      // stale. The archive-ready callback clears availability_report_at on every
+      // 'ready' build, which is the enqueue; without a drain those rows would
+      // stay stale forever, since nothing else stamps that column.
+      //
+      // PROD-ONLY: each candidate commits `.nemar/availability-report.json` to a
+      // real repo in the shared nemarDatasets org via createOrUpdateFile, so on
+      // a mirror D1 this would write to production dataset repos. It also has no
+      // dataset-id prefix filter, exactly like archiveRetrySweep above.
+      //
+      // Self-limiting rather than exhaustive: capped at 10 GitHub commits per
+      // run (AVAILABILITY_REPORT_SWEEP_MAX) because a burst of writes trips
+      // GitHub's secondary rate limit on the shared PAT. It drains ~10/day and
+      // stamps only on success, so failures are retried on the next pass. A
+      // large backlog is meant to be cleared with `nemar admin
+      // availability-report --all`, not by waiting on this.
+      ctx.waitUntil(
+        runAvailabilityReportSweep(env)
+          .then((r) => {
+            if (r.processed > 0 || (r.remaining ?? 0) > 0) {
+              console.log(
+                `[availability-report-sweep] processed=${r.processed} written=${r.written} errors=${r.errors.length} remaining=${r.remaining ?? "?"}`,
+              );
+            }
+            for (const e of r.errors) {
+              console.error(`[availability-report-sweep] ${e.dataset_id}: ${e.error}`);
+            }
+          })
+          .catch((err) =>
+            console.error(
+              "[availability-report-sweep] sweep failed:",
+              err instanceof Error ? (err.stack ?? err.message) : err,
+            ),
+          ),
       );
     }
     // #804: refresh per-dataset citation counts from the citations dashboard

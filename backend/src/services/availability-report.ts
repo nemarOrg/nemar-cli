@@ -299,3 +299,80 @@ export function availabilityReportSweepCandidateQuery(missingOnly: boolean): str
 export function availabilityReportSweepRemainingQuery(missingOnly: boolean): string {
   return `SELECT COUNT(*) AS n FROM datasets WHERE ${availabilityReportSweepWhere(missingOnly)}`;
 }
+
+/** Hard ceiling on candidates per sweep invocation, matching the read-only
+ *  sweeps (hed-sweep, data-integrity-sweep).
+ *
+ *  This one is not read-only: each candidate does a GitHub commit
+ *  (createOrUpdateFile = a GET-sha + PUT pair on raw fetch, with NO rate-limit
+ *  retry) on the shared GITHUB_ADMIN_PAT that also drives repo creation,
+ *  publication and DOI work. It was 10 for that reason, citing the
+ *  bulk-approval-rate-limit precedent.
+ *
+ *  30 is still comfortable because the loop is sequential and each iteration is
+ *  dominated by an S3 LIST plus a manifest walk (verifyDatasetVersionS3), not by
+ *  the two GitHub calls. 30 candidates is 60 content-generating requests spread
+ *  across the seconds-per-dataset those S3 passes take, so it does not resemble
+ *  the tight burst the precedent hit. If that ever changes -- a fast path that
+ *  skips the S3 verify, or parallelising the loop -- this number has to come
+ *  back down, because the pacing is incidental to the work, not enforced. */
+export const AVAILABILITY_REPORT_SWEEP_MAX = 30;
+
+export interface AvailabilityReportSweepResult {
+  processed: number;
+  written: number;
+  errors: { dataset_id: string; error: string }[];
+  /** Candidates still unstamped after this run; null if the count query failed. */
+  remaining: number | null;
+}
+
+/**
+ * Run one bounded pass of the availability-report sweep: take up to `limit`
+ * unstamped candidates, regenerate each one's `.nemar/availability-report.json`,
+ * and stamp `availability_report_at` on success.
+ *
+ * Shared by the admin route and the daily cron so the two can never drift.
+ * The stamp is written ONLY after a successful commit — a failure leaves the
+ * row unstamped, so it stays a candidate and the next pass simply retries it.
+ * That is also what makes this safe to run repeatedly: it is self-limiting,
+ * draining `limit` per pass until nothing is stale.
+ *
+ * Throws only if the candidate query itself fails (e.g. migration 0061 not
+ * applied). Per-dataset failures are collected into `errors`, never thrown, so
+ * one broken repo cannot stop the rest of the pass.
+ */
+export async function runAvailabilityReportSweep(
+  env: Bindings,
+  opts?: { limit?: number; missingOnly?: boolean },
+): Promise<AvailabilityReportSweepResult> {
+  const missingOnly = opts?.missingOnly ?? false;
+  const requested = opts?.limit ?? AVAILABILITY_REPORT_SWEEP_MAX;
+  const limit = Math.min(Math.max(requested, 1), AVAILABILITY_REPORT_SWEEP_MAX);
+
+  const rows = await env.DB.prepare(availabilityReportSweepCandidateQuery(missingOnly))
+    .bind(limit)
+    .all<{ dataset_id: string }>();
+  const candidates = rows.results ?? [];
+
+  let written = 0;
+  const errors: { dataset_id: string; error: string }[] = [];
+  for (const { dataset_id } of candidates) {
+    try {
+      await writeAvailabilityReport(env, dataset_id);
+      await env.DB.prepare(
+        "UPDATE datasets SET availability_report_at = datetime('now') WHERE dataset_id = ?",
+      )
+        .bind(dataset_id)
+        .run();
+      written++;
+    } catch (err) {
+      errors.push({ dataset_id, error: errorMessage(err) });
+    }
+  }
+
+  const remainingRow = await env.DB.prepare(availabilityReportSweepRemainingQuery(missingOnly))
+    .first<{ n: number }>()
+    .catch(() => null);
+
+  return { processed: candidates.length, written, errors, remaining: remainingRow?.n ?? null };
+}
