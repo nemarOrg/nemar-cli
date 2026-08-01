@@ -1,5 +1,8 @@
 # NEMAR CLI Technical Research
 
+> **Note:** the `register_zenodo_doi.py` flow described below is the **pre-NEMAR** `nemar-tools` prior art.
+> NEMAR mints through EZID — see [ADR 0007](decisions/0007-ezid-is-the-sole-doi-provider.md).
+
 ## Existing Infrastructure Analysis
 
 ### Current Tools (EMG-2-BIDS/tools)

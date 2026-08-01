@@ -1,5 +1,9 @@
 # Phase 2 — Consistent retry engine + blocklist + OpenNeuro maintainer report
 
+
+> **STATUS: HISTORICAL.** Phase plan for #975, now shipped.
+> Current decisions live in [`.context/decisions/`](decisions/README.md); where this document and an ADR disagree, the ADR wins.
+
 Epic #967 (OpenNeuro import integrity & recovery). Phase issue #969. Branch
 `feature/issue-969-phase2-retry-engine` off the epic branch.
 

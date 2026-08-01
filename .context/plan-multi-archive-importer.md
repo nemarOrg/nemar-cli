@@ -1,5 +1,8 @@
 # Architecture RFC: Multi-Archive Importer for NEMAR
 
+> **Decision recorded:** [ADR 0013 - The importer stays in nemar-cli, registry plus family adapters](decisions/0013-the-importer-stays-in-nemar-cli-with-registry-plus-family-adapters.md) (status: proposed).
+> This document is the full RFC behind that choice.
+
 **Date:** 2026-07-24
 **Input:** `.context/research-archive-import-candidates.md` (~90 external EEG/iEEG/MEG/EMG/motion archives beyond OpenNeuro)
 **Question:** Separate `nemar-importer` service, or extend `nemar-cli`'s existing import machinery?

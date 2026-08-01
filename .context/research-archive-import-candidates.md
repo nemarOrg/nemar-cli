@@ -1,5 +1,7 @@
 # Import Source Research: BIDS EEG/iEEG/MEG/EMG/Motion Archives Beyond OpenNeuro
 
+> **Related decision:** [ADR 0013 - The importer stays in nemar-cli](decisions/0013-the-importer-stays-in-nemar-cli-with-registry-plus-family-adapters.md).
+
 **Date:** 2026-07-23
 **Scope:** Grant-funded expansion of NEMAR imports beyond OpenNeuro. 12 parallel research passes (EEG/iEEG, MEG, EMG/motion-capture, general-purpose repos, Germany/NL/Nordics, UK/Ireland, France/Benelux/CH/IT/ES, EU meta-infrastructure, Japan, China, Korea/Taiwan/Singapore/HK, BCI-competition/pan-Asian) covering roughly 90 named archives/datasets.
 

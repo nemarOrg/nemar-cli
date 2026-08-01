@@ -1,5 +1,7 @@
 # NEMAR Dataset Workflow Architecture
 
+> **Decisions recorded:** [ADR 0011 - Dataset IDs are backend-assigned in reserved bands](decisions/0011-dataset-ids-are-backend-assigned-in-reserved-bands.md), [ADR 0002 - Access control via GitHub collaboration](decisions/0002-access-control-via-github-collaboration.md).
+
 > **Related Documents:**
 > - `.context/pr_architecture.md` - Detailed PR workflow design
 > - `.context/access_control.md` - GitHub/S3 access control
@@ -26,7 +28,7 @@ CREATE TABLE dataset_registry (
   name TEXT NOT NULL,                   -- human-readable name
   owner_user_id INTEGER NOT NULL,
   status TEXT DEFAULT 'active',         -- active, archived, pending
-  concept_doi TEXT,                     -- Zenodo concept DOI
+  concept_doi TEXT,                     -- concept DOI (EZID; see ADR 0007)
   created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
   FOREIGN KEY (owner_user_id) REFERENCES users(id)
 );

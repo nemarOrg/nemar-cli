@@ -2,6 +2,24 @@
 
 > Tool-agnostic project instructions for any coding agent (Codex, Cursor, Copilot, Windsurf, Claude Code, ...). Claude Code reads this via `@AGENTS.md` in `CLAUDE.md`.
 
+## START HERE: Architecture Decision Records
+
+**[`.context/decisions/`](.context/decisions/README.md) records what was decided and why.** Read the
+index before designing anything, and before "fixing" something that looks wrong — several of the
+oddities in this codebase are deliberate, and the ADR says which.
+
+- **Where an ADR and any other doc disagree, the ADR wins.** Design docs under `.context/` keep the
+  analysis; the ADR is the verdict.
+- **Never delete an ADR. Supersede it** (see ADR 0019 for what a superseded one looks like).
+- **Write a new one** when a decision is expensive to reverse, closes off other reasonable paths, has
+  been argued more than once, or encodes a constraint that is not obvious from the code. Copy
+  `0000-template.md`, number sequentially, and add it to the index in `README.md` — a test enforces
+  that the index and the files on disk agree.
+
+Load-bearing ones to know before touching the relevant area: 0005 (partial data still serves),
+0009 (dev D1 is not a prod mirror), 0010 (never client-stream an import), 0012 (archive size policy),
+0016 (never hand-bump versions), 0020 (workflow edits hit ~785 repos at once).
+
 ## CRITICAL: Live Datasets
 
 **nm000103-nm000107 are LIVE datasets.** Do NOT modify their visibility, S3 data, DOIs, or repo settings during development/testing. They are kept private during dev for maximum control but contain real data.
@@ -241,12 +259,14 @@ ssh mcm "zsh -i -c 'nemar admin users'"
 ```
 
 ## Development Workflow
-1. **Check context:** Review .context/plan.md for current tasks
-2. **Branch:** `git checkout -b feature/short-description`
-3. **Code:** Follow patterns in .rules/javascript.md
-4. **Test:** Real tests only with `bun test`
-5. **Commit:** Atomic, <50 chars, no emojis, no co-author tags
-6. **PR:** Reference context and issue
+1. **Check decisions:** Skim `.context/decisions/README.md` for anything binding on the area you are about to change
+2. **Check context:** Review .context/plan.md for current tasks
+3. **Branch:** `git checkout -b feature/short-description`
+4. **Code:** Follow patterns in .rules/javascript.md
+5. **Test:** Real tests only with `bun test`
+6. **Commit:** Atomic, <50 chars, no emojis, no co-author tags
+7. **PR:** Reference context and issue
+8. **Record the decision:** if the change settled something an ADR should own, add one (or supersede the ADR it contradicts) in the same PR
 
 ### Epic / multi-phase development (REQUIRED)
 For any multi-phase feature (an epic with sub-issues, phased delivery, or anything spanning more than one PR), you MUST drive it with the **`/project:epic-dev`** skill (`project:epic-dev`). Do not hand-roll the epic/sprint flow. The skill owns: epic + sub-issue creation and linking (`gh sub-issue`), the epic/phase git-worktree structure, per-phase plan -> implement -> PR -> `/review-pr` -> squash-merge cycle, and the `.claude/epic.local.md` state file that tracks `current_phase`.
@@ -342,8 +362,15 @@ If build fails, the script restores the original version.
 - `.rules/ci_cd.md` - GitHub Actions setup
 
 ## Context Files
+- **[`.context/README.md`](.context/README.md) - map of this directory** (current vs research vs historical)
+- **`.context/decisions/` - Architecture Decision Records. Read these first.** One file per
+  significant decision, with the alternatives that lost and why. `decisions/README.md` is the
+  index and the convention (numbering, statuses, when to write one). Where a design doc below
+  and an ADR disagree, **the ADR wins** — the docs keep the analysis, the ADR records the verdict.
+  Write a new ADR when a decision is expensive to reverse, closes off other reasonable paths, has
+  been argued more than once, or encodes a non-obvious constraint. Never delete one; supersede it.
 - `.context/plan.md` - Development phases and tasks
-- `.context/ideas.md` - Design decisions and alternatives
+- `.context/ideas.md` - Design decisions and alternatives (exploratory; promote settled ones to an ADR)
 - `.context/research.md` - Technical investigations
 - `.context/validated_workflows.md` - **Tested and proven workflows** (use these!)
 - `.context/prototyping_plan.md` - Prototypes to validate assumptions

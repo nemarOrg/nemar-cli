@@ -1,5 +1,8 @@
 # NEMAR Access Control Implementation
 
+> **Decision recorded:** [ADR 0002 - Access control rides on GitHub collaboration](decisions/0002-access-control-via-github-collaboration.md).
+> This document keeps the implementation detail; the ADR is the record of what was decided and why.
+
 ## Core Principle: Controlled Access via GitHub Collaboration
 
 Users provide their **GitHub username** during signup. The NEMAR backend:
