@@ -14,10 +14,15 @@
  * issue's sketch -- the callback covers it. Noted here so the divergence from
  * the issue's 4-route list is intentional, not an omission.
  *
- * Re-linking (#913) works the same way: Settings starts the flow with
- * `mode=relink` (behind a confirm step) and the callback swaps the linked
- * identity when the finished iD is unclaimed. Without that mode a second,
- * different iD is refused (`orcid_already_have`), as before.
+ * Re-linking (#913): Settings' confirm step submits a form POST to
+ * `/auth/orcid/start?mode=relink` — POST is the ONLY entry that can mint
+ * relink intent, because it carries an Origin header the route verifies and
+ * requires a live session (the same gate as /orcid/unlink). A GET with
+ * mode=relink quietly degrades to login: a bare cross-site link rides the
+ * victim's ambient cookies, and an unauthenticated GET must never be able
+ * to arm an identity swap. The callback then swaps the linked identity when
+ * the finished iD is unclaimed; without relink mode a second, different iD
+ * is refused (`orcid_already_have`), as before.
  *
  * Host/cookie model: these routes run on api.nemar.org but the browser reaches
  * them through the app.nemar.org same-origin proxy (like /auth/code/*), which
@@ -262,13 +267,9 @@ function clientIp(c: { req: { header: (k: string) => string | undefined } }): st
 
 // ------------------------------- routes --------------------------------
 
-authOrcidRoutes.get("/orcid/start", (c) => {
+/** Shared start body: mint the CSRF state cookie, bounce to ORCID authorize. */
+function startOrcidFlow(c: { env: Bindings }, mode: OauthMode, next: string): Response {
   const frontend = appBase(c.env);
-  const url = new URL(c.req.url);
-  const rawMode = url.searchParams.get("mode");
-  const mode: OauthMode = rawMode === "link" || rawMode === "relink" ? rawMode : "login";
-  const next = safeNextPath(url.searchParams.get("next"));
-
   const config = getOrcidConfig(c.env);
   if (!config) {
     return redirect(`${frontend}/login?error=orcid_unavailable`);
@@ -285,6 +286,39 @@ authOrcidRoutes.get("/orcid/start", (c) => {
     state: csrf,
   });
   return redirect(authorizeUrl, [stateCookie]);
+}
+
+authOrcidRoutes.get("/orcid/start", (c) => {
+  const url = new URL(c.req.url);
+  const rawMode = url.searchParams.get("mode");
+  // A GET can be forged by a bare cross-site link riding the victim's
+  // ambient cookies, so it may never mint relink intent (#913). mode=relink
+  // here degrades to login: for an account that already has a linked iD the
+  // callback then refuses with orcid_already_have — the pre-#913 behavior.
+  const mode: OauthMode = rawMode === "link" ? "link" : "login";
+  return startOrcidFlow(c, mode, safeNextPath(url.searchParams.get("next")));
+});
+
+/**
+ * POST variant (#913) — the only entry that can mint mode=relink. The
+ * Settings confirm step submits a real form here, so the browser attaches
+ * an Origin header; the same-origin check plus the session requirement make
+ * relink intent unforgeable by a link click (the /orcid/unlink gate).
+ * Without them, a crafted GET link plus an ambient ORCID session could
+ * silently swap which iD backs the account — see PR #1051's review.
+ */
+authOrcidRoutes.post("/orcid/start", webSessionMiddleware, (c) => {
+  const frontend = appBase(c.env);
+  if (!isAllowedOrigin(c.req.header("Origin"))) {
+    return c.json({ error: "Origin not allowed" }, 403);
+  }
+  if (!c.var.webUser) {
+    return redirect(`${frontend}/login?error=session_required`);
+  }
+  const url = new URL(c.req.url);
+  const rawMode = url.searchParams.get("mode");
+  const mode: OauthMode = rawMode === "link" || rawMode === "relink" ? rawMode : "login";
+  return startOrcidFlow(c, mode, safeNextPath(url.searchParams.get("next")));
 });
 
 authOrcidRoutes.get("/orcid/callback", webSessionMiddleware, async (c) => {
@@ -366,6 +400,15 @@ authOrcidRoutes.get("/orcid/callback", webSessionMiddleware, async (c) => {
       return redirect(`${frontend}${state.next}`, [clearState]);
     }
 
+    // No session, but a relink intent in the state: the session that minted
+    // it (POST /orcid/start) expired during the ORCID roundtrip. Refuse
+    // loudly rather than degrading into sign-in/signup — silently signing
+    // the browser into whichever account owns the finished iD would discard
+    // the user's "fix MY account's link" intent (#913 review).
+    if (state.mode === "relink") {
+      return fail("orcid_relink_session");
+    }
+
     // No session: sign in the linked account, or hand a brand-new ORCID off to
     // email collection (ORCID returns no email; users.email is NOT NULL).
     if (ident) {
@@ -404,7 +447,9 @@ authOrcidRoutes.get("/orcid/callback", webSessionMiddleware, async (c) => {
     return redirect(`${frontend}/auth/orcid/complete`, [clearState, pendingCookie]);
   } catch (err) {
     console.error("[auth-orcid] callback failed after token exchange", err);
-    return fail("orcid_error");
+    // Carry state.next so an authenticated user who started from Settings
+    // lands back there with the error, not on /login while signed in.
+    return fail("orcid_error", state.next);
   }
 });
 

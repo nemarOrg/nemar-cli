@@ -55,6 +55,7 @@ invisible one — which is why it is checked rather than trusted.
 - [ADR 0019](0019-every-user-gets-push-to-every-repo.md) - Every approved user gets push to every repo (**superseded**)
 - [ADR 0020](0020-dataset-automation-runs-from-central-shared-workflows.md) - Dataset automation runs from central shared workflows
 - [ADR 0021](0021-the-api-token-is-the-master-credential.md) - The API token is the master credential; revocation cascades
+- [ADR 0022](0022-orcid-relink-requires-post-minted-intent.md) - ORCID relink intent is minted only by an authenticated same-origin POST
 
 ## Backfill note (2026-07-31)
 

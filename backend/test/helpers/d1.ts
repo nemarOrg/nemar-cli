@@ -35,7 +35,10 @@ export function realD1(db: Database): D1Database {
         },
         run() {
           const r = stmt.run(...(bound as never[]));
-          return Promise.resolve({ success: true, meta: { changes: r.changes } });
+          return Promise.resolve({
+            success: true,
+            meta: { changes: r.changes, last_row_id: Number(r.lastInsertRowid) },
+          });
         },
         first<T>() {
           return Promise.resolve((stmt.get(...(bound as never[])) as T) ?? null);
@@ -45,6 +48,21 @@ export function realD1(db: Database): D1Database {
         },
       };
       return api;
+    },
+    // D1 batch = one implicit transaction; mirror that so route code using
+    // db.batch() (e.g. relinkIdentity, #913) keeps its all-or-nothing
+    // semantics under this passthrough too.
+    async batch(stmts: { run(): Promise<unknown> }[]) {
+      db.exec("BEGIN");
+      try {
+        const results = [];
+        for (const s of stmts) results.push(await s.run());
+        db.exec("COMMIT");
+        return results;
+      } catch (err) {
+        db.exec("ROLLBACK");
+        throw err;
+      }
     },
   } as unknown as D1Database;
 }
