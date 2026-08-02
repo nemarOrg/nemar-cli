@@ -158,7 +158,9 @@ export type GetDataResult =
 
 /**
  * Build the result for a run that reached classification, keeping `success` and
- * `outcome` in lockstep in ONE place rather than at each return site.
+ * `outcome` in lockstep. The two pre-classification failure returns (whole-run
+ * non-zero exit, thrown exception) build the failed shape directly; every
+ * classified outcome must route through here.
  * `errorText` is git-annex's own output, which carries the actionable detail
  * (no remotes configured, credentials rejected, host unreachable) that a bare
  * count throws away; the generic fallback fires only when it produced nothing.

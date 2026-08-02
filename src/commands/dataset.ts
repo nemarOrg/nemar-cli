@@ -1269,7 +1269,9 @@ Examples:
       });
 
       if (!getResult.success) {
-        tracker.finish(0);
+        // Counts are honest on the failure arm too: --require-complete can
+        // fail a run that still landed files, and the tracker should say so.
+        tracker.finish(getResult.filesDownloaded);
         console.log(chalk.red(`Failed to download data files: ${getResult.error}`));
         console.log(chalk.dim("The dataset was cloned but data files are not available locally."));
         console.log(chalk.dim(`You can try again with: cd ${absoluteOutput} && nemar dataset get`));
@@ -3616,7 +3618,9 @@ Examples:
       onProgress: (line) => tracker.processLine(line),
     });
     if (!result.success) {
-      tracker.finish(0);
+      // Counts are honest on the failure arm too: --require-complete can fail
+      // a run that still landed files, and the tracker should say so.
+      tracker.finish(result.filesDownloaded);
       console.log(chalk.red(`  ${result.error}`));
       if (getCreds) {
         await clearAnnexCredentials(cwd);
