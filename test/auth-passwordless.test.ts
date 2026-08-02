@@ -623,14 +623,24 @@ describe.skipIf(PROD_GUARD_ACTIVE)("PATCH /auth/profile (#912)", () => {
     // Clear first so the set below is a *changed* handle every run — a
     // same-handle re-save deliberately skips the GitHub existence call,
     // and rerun N+1 would otherwise test nothing.
+    //
+    // NOT "octocat": test/api.test.ts asserts /auth/check-github reports
+    // octocat as UNregistered, so parking it on this fixture row turns the
+    // api-test CI job red. "mojombo" is equally real and unasserted-on.
     const cleared = await patchProfile(cookie, { github_username: "" });
     expect(cleared.status).toBe(200);
     expect(cleared.body.user?.github_username).toBeNull();
 
-    const set = await patchProfile(cookie, { github_username: "@Octocat" });
+    const set = await patchProfile(cookie, { github_username: "@Mojombo" });
     expect(set.status).toBe(200);
     // "@" stripped, and GitHub's canonical casing stored, not what was typed.
-    expect(set.body.user?.github_username).toBe("octocat");
+    expect(set.body.user?.github_username).toBe("mojombo");
+
+    // Leave the fixture row with no handle: a real handle parked on a
+    // persistent dev-DB row is exactly how the octocat incident broke CI.
+    const teardown = await patchProfile(cookie, { github_username: "" });
+    expect(teardown.status).toBe(200);
+    expect(teardown.body.user?.github_username).toBeNull();
   });
 
   test("nonexistent github handle is a 400 from the live existence check", async () => {
