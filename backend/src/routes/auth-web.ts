@@ -24,9 +24,12 @@
  *     `signup_source='web'`. Admin approval (out of scope here) lifts
  *     them to `'approved'`. Until then the dashboard sees
  *     `status: 'pending'` and can render an onboarding screen.
- *   - Per-email rate limit is enforced inline by counting
- *     `auth_codes` rows in the relevant window. No KV / new table —
- *     `idx_auth_codes_email_active` covers the lookup.
+ *   - Rate limits are enforced inline by counting `auth_codes` rows
+ *     in the relevant window: per-email buckets on both request
+ *     endpoints, plus a per-account bucket on /email/change/request
+ *     (keyed on the 0066 user_id column). No KV / new table —
+ *     `idx_auth_codes_email_active` covers the email lookups; the
+ *     user_id count is unindexed, which is fine at auth_codes' size.
  */
 
 import { zValidator } from "@hono/zod-validator";
@@ -49,7 +52,11 @@ import {
 } from "../services/email";
 import { validateGitHubUsername } from "../services/github";
 import { getDatasetsToken } from "../services/github-auth";
-import { githubHandleChanged, normalizeProfilePatch } from "../services/profile";
+import {
+  type ProfilePatchInput,
+  githubHandleChanged,
+  normalizeProfilePatch,
+} from "../services/profile";
 import {
   buildClearedSessionCookie,
   buildSessionCookie,
@@ -64,8 +71,10 @@ export const authWebRoutes = new Hono<{ Bindings: Bindings; Variables: Variables
 
 const CODE_TTL_MINUTES = 10;
 const MAX_CODE_ATTEMPTS = 5;
-const PER_MINUTE_LIMIT = 1;
-const PER_HOUR_LIMIT = 5;
+// Exported (with the SQL consts below) for the engine-level rate-bucket and
+// code-binding tests, which run the production SQL against real SQLite.
+export const PER_MINUTE_LIMIT = 1;
+export const PER_HOUR_LIMIT = 5;
 
 const emailSchema = z.object({
   email: z
@@ -137,8 +146,9 @@ function publicUser(row: {
     city: row.city,
     country: row.country,
     affiliation: row.affiliation,
-    // Tiered access (ADR 0010): base accounts are false until an admin
-    // grants service (upload + compute) access.
+    // Tiered access (website ADR 0010, epic #1013 — NOT this repo's ADR
+    // 0010): base accounts are false until an admin grants service
+    // (upload + compute) access.
     service_access: row.service_access,
   };
 }
@@ -290,6 +300,16 @@ authWebRoutes.post("/code/request", zValidator("json", emailSchema), async (c) =
 // POST /auth/code/verify
 // ---------------------------------------------------------------
 
+/** The sign-in code lookup. user_id IS NULL: sign-in codes are the
+ *  unauthenticated kind (0066). Email-change codes carry the requester's
+ *  user_id and are consumed only by /email/change/verify — this filter keeps
+ *  the two flows from ever redeeming each other's codes. Exported so the
+ *  code-binding test runs the production SQL, not a copy. */
+export const SIGNIN_CODE_LOOKUP_SQL = `SELECT id, code_hash, attempts FROM auth_codes
+          WHERE email = ? AND user_id IS NULL
+            AND used_at IS NULL AND expires_at > datetime('now')
+          ORDER BY created_at DESC LIMIT 1`;
+
 authWebRoutes.post("/code/verify", zValidator("json", verifySchema), async (c) => {
   const origin = c.req.header("Origin");
   if (!isAllowedOrigin(origin)) {
@@ -300,17 +320,8 @@ authWebRoutes.post("/code/verify", zValidator("json", verifySchema), async (c) =
   const db = c.env.DB;
 
   try {
-    // user_id IS NULL: sign-in codes are the unauthenticated kind (0066).
-    // Email-change codes carry the requester's user_id and are consumed only
-    // by /email/change/verify — this filter keeps the two flows from ever
-    // redeeming each other's codes.
     const row = await db
-      .prepare(
-        `SELECT id, code_hash, attempts FROM auth_codes
-          WHERE email = ? AND user_id IS NULL
-            AND used_at IS NULL AND expires_at > datetime('now')
-          ORDER BY created_at DESC LIMIT 1`,
-      )
+      .prepare(SIGNIN_CODE_LOOKUP_SQL)
       .bind(email)
       .first<{ id: number; code_hash: string; attempts: number }>();
     if (!row) {
@@ -508,6 +519,18 @@ const profilePatchSchema = z.object({
   affiliation: z.string().max(200).optional(),
 });
 
+// The schema above and ProfilePatchInput in profile.ts describe the same
+// body from two sides (runtime bounds here, field semantics there). They
+// cannot share a declaration without the service importing this route, so
+// lock them together structurally: the assignment below fails to compile
+// (the alias resolves to never) if either side gains, loses, or retypes a
+// field the other does not.
+type MutuallyAssignable<A, B> = [A] extends [B] ? ([B] extends [A] ? true : never) : never;
+export const _profilePatchShapesAgree: MutuallyAssignable<
+  z.infer<typeof profilePatchSchema>,
+  ProfilePatchInput
+> = true;
+
 /**
  * Self-service profile edit (#912; nemarOrg/website#135). Accepts any subset
  * of github_username / city / country / affiliation — see profile.ts for the
@@ -634,54 +657,13 @@ authWebRoutes.patch(
 
       // Re-read so the response reflects what actually landed (the website
       // also re-reads /auth/me on reload; this keeps both in agreement).
-      const row = await db
-        .prepare(
-          `SELECT id, email, role, status,
-                  given_name, family_name, orcid, orcid_verified,
-                  github_username, city, country, affiliation, service_access
-             FROM users WHERE id = ? AND deleted_at IS NULL LIMIT 1`,
-        )
-        .bind(webUser.id)
-        .first<{
-          id: number;
-          email: string;
-          role: string | null;
-          status: string;
-          given_name: string | null;
-          family_name: string | null;
-          orcid: string | null;
-          // NOT NULL DEFAULT 0 in D1 (0050), so plain number.
-          orcid_verified: number;
-          github_username: string | null;
-          city: string | null;
-          country: string | null;
-          affiliation: string | null;
-          // NOT NULL DEFAULT 0 in D1 (0062), so plain number.
-          service_access: number;
-        }>();
-      if (!row) {
+      const user = await fetchPublicUserById(db, webUser.id);
+      if (!user) {
         // Session resolved but the row is gone (tombstoned mid-request).
         return c.json({ error: "Account not found" }, 403);
       }
 
-      return c.json({
-        ok: true,
-        user: publicUser({
-          id: row.id,
-          email: row.email,
-          role: parseRole(row.role, row.email),
-          status: row.status,
-          given_name: row.given_name,
-          family_name: row.family_name,
-          orcid: row.orcid,
-          orcid_verified: row.orcid_verified === 1,
-          github_username: row.github_username,
-          city: row.city,
-          country: row.country,
-          affiliation: row.affiliation,
-          service_access: row.service_access === 1,
-        }),
-      });
+      return c.json({ ok: true, user });
     } catch (err) {
       // Safety net for the TOCTOU window past the dedup SELECTs: two
       // concurrent PATCHes claiming the same free handle both pass the
@@ -769,11 +751,43 @@ async function fetchPublicUserById(
  * auth_codes table and the /code/request mechanics (atomic rate-limited
  * insert, rotation, rollback-on-send-failure, dev_code echo rules).
  *
- * Purpose-mixing with sign-in codes is structurally impossible: a change
- * code is only ever issued for an address with NO users row (collisions are
- * refused here), while /code/verify requires a users row for the address —
- * so a change code can never complete a sign-in, and vice versa.
+ * Purpose-mixing with sign-in codes is structurally impossible, twice over:
+ * a change code is only ever issued for an address with NO users row
+ * (collisions are refused here), while /code/verify requires a users row for
+ * the address; and since 0066 the queries themselves are disjoint — change
+ * codes carry the requester's user_id, /code/verify filters user_id IS NULL,
+ * and /email/change/verify filters user_id = <session user>.
  */
+/** Atomic rate-limited insert for email-change codes. Keyed by the TARGET
+ *  address (same shape and limits as /code/request; see that route for the
+ *  race reasoning), binding the code to the requesting session's user via
+ *  user_id (0066). The third guard caps one ACCOUNT's change requests per
+ *  hour across ALL targets (the per-email guards only throttle repeats to
+ *  one address) — without it a single session could cycle distinct
+ *  addresses to spray codes or enumerate faster than the per-IP floor.
+ *  Binds: email, code_hash, expires_at, user_id, email, PER_MINUTE_LIMIT,
+ *  email, PER_HOUR_LIMIT, user_id, PER_HOUR_LIMIT. Exported so the
+ *  rate-bucket test runs the production SQL, not a copy. */
+export const EMAIL_CHANGE_CODE_INSERT_SQL = `INSERT INTO auth_codes (email, code_hash, expires_at, user_id)
+           SELECT ?, ?, ?, ?
+           WHERE (SELECT COUNT(*) FROM auth_codes
+                   WHERE email = ?
+                     AND created_at > datetime('now','-1 minute')) < ?
+             AND (SELECT COUNT(*) FROM auth_codes
+                   WHERE email = ?
+                     AND created_at > datetime('now','-1 hour')) < ?
+             AND (SELECT COUNT(*) FROM auth_codes
+                   WHERE user_id = ?
+                     AND created_at > datetime('now','-1 hour')) < ?`;
+
+/** The change-code lookup: user_id = the redeeming session's user (0066), so
+ *  the code must have been requested by the SAME account. A code read from a
+ *  shared inbox by a different signed-in user finds no row here. */
+export const EMAIL_CHANGE_CODE_LOOKUP_SQL = `SELECT id, code_hash, attempts FROM auth_codes
+            WHERE email = ? AND user_id = ?
+              AND used_at IS NULL AND expires_at > datetime('now')
+            ORDER BY created_at DESC LIMIT 1`;
+
 authWebRoutes.post(
   "/email/change/request",
   webSessionMiddleware,
@@ -823,30 +837,12 @@ authWebRoutes.post(
       const codeHash = await hashAuthCode(code, c.env);
       const expiresAt = new Date(Date.now() + CODE_TTL_MINUTES * 60 * 1000).toISOString();
 
-      // Atomic rate-limited INSERT, keyed by the TARGET address (same shape
-      // and limits as /code/request; see that route for the race reasoning).
-      // user_id binds the code to THIS session's user (0066): only the
-      // account that asked for the change can redeem it, so a second person
-      // reading a shared inbox cannot attach the address to their own
-      // account by pasting the code first.
-      // The third guard caps one ACCOUNT's change requests per hour across
-      // ALL targets (the per-email guards only throttle repeats to one
-      // address) — without it a single session could cycle distinct
-      // addresses to spray codes or enumerate faster than the per-IP floor.
+      // Atomic rate-limited INSERT binding the code to THIS session's user:
+      // only the account that asked for the change can redeem it, so a second
+      // person reading a shared inbox cannot attach the address to their own
+      // account by pasting the code first. See EMAIL_CHANGE_CODE_INSERT_SQL.
       const insertResult = await db
-        .prepare(
-          `INSERT INTO auth_codes (email, code_hash, expires_at, user_id)
-           SELECT ?, ?, ?, ?
-           WHERE (SELECT COUNT(*) FROM auth_codes
-                   WHERE email = ?
-                     AND created_at > datetime('now','-1 minute')) < ?
-             AND (SELECT COUNT(*) FROM auth_codes
-                   WHERE email = ?
-                     AND created_at > datetime('now','-1 hour')) < ?
-             AND (SELECT COUNT(*) FROM auth_codes
-                   WHERE user_id = ?
-                     AND created_at > datetime('now','-1 hour')) < ?`,
-        )
+        .prepare(EMAIL_CHANGE_CODE_INSERT_SQL)
         .bind(
           email,
           codeHash,
@@ -955,16 +951,8 @@ authWebRoutes.post(
         return c.json({ error: "email_in_use" }, 409);
       }
 
-      // user_id = this session's user (0066): the code must have been
-      // requested by the SAME account that is redeeming it. A code read from
-      // a shared inbox by a different signed-in user finds no row here.
       const row = await db
-        .prepare(
-          `SELECT id, code_hash, attempts FROM auth_codes
-            WHERE email = ? AND user_id = ?
-              AND used_at IS NULL AND expires_at > datetime('now')
-            ORDER BY created_at DESC LIMIT 1`,
-        )
+        .prepare(EMAIL_CHANGE_CODE_LOOKUP_SQL)
         .bind(email, webUser.id)
         .first<{ id: number; code_hash: string; attempts: number }>();
       if (!row) {

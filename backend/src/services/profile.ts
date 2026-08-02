@@ -9,7 +9,7 @@
  *     only *required* at publish time, not here. A leading "@" is stripped
  *     because people paste their handle that way.
  *   - city / country: required non-empty once submitted (US export-control
- *     screening, ADR 0010). The columns are nullable in D1 (migration 0052)
+ *     screening, #835). The columns are nullable in D1 (migration 0052)
  *     for pre-existing rows; the non-empty rule lives here, at the write.
  *   - affiliation: optional free text; empty string clears it (NULL).
  *
@@ -42,9 +42,17 @@ export interface ProfilePatchInput {
   affiliation?: string;
 }
 
+/** The closed error vocabulary of normalizeProfilePatch; the website's error
+ *  mapping switches on these strings (nemarOrg/website PR #144). */
+export type ProfilePatchError =
+  | "invalid_github_username"
+  | "city_required"
+  | "country_required"
+  | "empty_patch";
+
 export type NormalizeResult =
   | { ok: true; patch: ProfilePatch }
-  | { ok: false; error: string; message: string };
+  | { ok: false; error: ProfilePatchError; message: string };
 
 /**
  * Normalize a raw PATCH body into a sparse, validated update. Keys absent

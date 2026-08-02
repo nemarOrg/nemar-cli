@@ -59,7 +59,9 @@ interface ArchiveReadyBody {
   unreadable?: number;
   /** Total files the version manifest declared. */
   declared?: number;
-  /** Annexed objects successfully streamed into the zip. */
+  /** Annexed objects successfully streamed into the zip. Not persisted
+   *  (completeness is derived from absent+unreadable) but validated with its
+   *  siblings, so a producer that mangles it is flagged, not ignored. */
   annexed?: number;
 }
 
@@ -79,11 +81,13 @@ export interface ArchiveCompleteness {
   /** Surfaced so the caller can flag the should-be-impossible ready+unreadable
    *  combination; not persisted (a 'ready' build has none by construction). */
   unreadable: number | null;
-  /** Names of count fields the payload SENT but that failed validation. Empty
-   *  when they were simply absent. The two look identical in the columns (both
-   *  end up null and COALESCE-preserve the prior verdict) but are completely
-   *  different events: absent is the expected skip path, unparseable means the
-   *  producer is broken. */
+  /** Count fields that violate the producer's all-or-nothing contract: a bare
+   *  name means the field was SENT but failed validation; "<name> missing"
+   *  means it was omitted while sibling counts arrived. Empty when the payload
+   *  carried a full tally or none at all. Either violation looks identical in
+   *  the columns (null, COALESCE-preserving the prior verdict) but is a
+   *  completely different event from the expected no-tally skip path: it means
+   *  the producer is broken, and this array is the only signal. */
   malformed: string[];
 }
 
@@ -109,17 +113,72 @@ export function deriveArchiveCompleteness(body: ArchiveReadyBody): ArchiveComple
   const unreadable = countOrNull(body.unreadable);
   const declared = countOrNull(body.declared);
   const malformed: string[] = [];
-  for (const [name, raw] of [
+  // annexed rides along in the same stats file; validated so a producer that
+  // mangles it is flagged, but not load-bearing (completeness derives from
+  // the three below) and so not part of the all-or-nothing set.
+  const counts = [
     ["absent", body.absent],
     ["unreadable", body.unreadable],
     ["declared", body.declared],
-  ] as const) {
+  ] as const;
+  for (const [name, raw] of [...counts, ["annexed", body.annexed] as const]) {
     if (raw !== undefined && countOrNull(raw) === null) malformed.push(name);
+  }
+  // The producer writes the three counts from one stats file, so they arrive
+  // all together or (on the skip path) not at all. Some-but-not-all means a
+  // workflow edit dropped fields; without this check that regression would be
+  // indistinguishable from the legitimate no-tally path and go unnoticed
+  // forever, since the columns silently stay "not assessed" either way.
+  const present = counts.filter(([, raw]) => raw !== undefined).length;
+  if (present > 0 && present < counts.length) {
+    for (const [name, raw] of counts) {
+      if (raw === undefined) malformed.push(`${name} missing`);
+    }
   }
   const complete =
     absent !== null && unreadable !== null ? (absent + unreadable === 0 ? 1 : 0) : null;
   return { complete, absent, declared, unreadable, malformed };
 }
+
+/**
+ * What the 'ready' branch persists. Exported so the completeness tests run
+ * the production SQL, not a copy.
+ *
+ * Clear archive_skip_reason: a real zip now exists, so a stale skip from
+ * an earlier (larger) version must not keep the UI on the direct-download
+ * recipe (#752).
+ *
+ * COALESCE on the completeness columns so a callback that carries no
+ * tally leaves prior values intact instead of blanking them. That is
+ * the idempotent skip path (archive already existed, stream script
+ * never ran): the existing archive's completeness is still true of it,
+ * and overwriting with NULL would downgrade a known state to "not
+ * assessed".
+ *
+ * Clearing availability_report_at marks the per-file report stale so
+ * the availability-report sweep regenerates it: that column IS the
+ * sweep's candidacy predicate (availabilityReportSweepWhere ->
+ * `availability_report_at IS NULL`), so nulling it here is the whole
+ * enqueue. Deliberately a column write and NOT a direct
+ * writeAvailabilityReport call: that helper does a GitHub commit
+ * (createOrUpdateFile = a GET-sha + PUT pair on raw fetch, with no
+ * rate-limit retry), and the sweep caps itself at 10 per invocation
+ * precisely because a burst of those trips GitHub's secondary rate
+ * limit. Calling it per callback would fan out unbounded writes on the
+ * shared GITHUB_ADMIN_PAT and defeat the cap the sweep exists to
+ * enforce -- #1040's rebuild of 630 archives would do exactly that.
+ */
+export const ARCHIVE_READY_UPDATE_SQL = `UPDATE datasets
+           SET archive_status = 'ready',
+               archive_checked_at = datetime('now'),
+               archive_size = ?,
+               archive_retry_count = 0,
+               archive_skip_reason = NULL,
+               archive_complete = COALESCE(?, archive_complete),
+               archive_absent_files = COALESCE(?, archive_absent_files),
+               archive_declared_files = COALESCE(?, archive_declared_files),
+               availability_report_at = NULL
+           WHERE dataset_id = ?`;
 
 export function registerArchiveReadyRoutes(webhooks: WebhookRouter): void {
   webhooks.post("/archive-ready", async (c) => {
@@ -176,7 +235,7 @@ export function registerArchiveReadyRoutes(webhooks: WebhookRouter): void {
         // Nothing else would ever surface that, so say it here.
         if (malformed.length > 0) {
           console.error(
-            `[archive-ready] ANOMALY dataset=${body.dataset_id}: completeness fields present but unparseable (${malformed.join(", ")}); columns keep the PREVIOUS build's verdict while archive_size/archive_checked_at advance`,
+            `[archive-ready] ANOMALY dataset=${body.dataset_id}: completeness tally violates the all-or-nothing contract (${malformed.join(", ")}); columns keep the PREVIOUS build's verdict while archive_size/archive_checked_at advance`,
           );
         }
         // A 'ready' callback carrying unreadable>0 should be impossible: the
@@ -188,42 +247,7 @@ export function registerArchiveReadyRoutes(webhooks: WebhookRouter): void {
             `[archive-ready] ANOMALY dataset=${body.dataset_id}: status=ready with unreadable=${unreadable}; the build should have failed and deleted the zip`,
           );
         }
-        const result = await c.env.DB.prepare(
-          // Clear archive_skip_reason: a real zip now exists, so a stale skip from
-          // an earlier (larger) version must not keep the UI on the direct-download
-          // recipe (#752).
-          //
-          // COALESCE on the completeness columns so a callback that carries no
-          // tally leaves prior values intact instead of blanking them. That is
-          // the idempotent skip path (archive already existed, stream script
-          // never ran): the existing archive's completeness is still true of it,
-          // and overwriting with NULL would downgrade a known state to "not
-          // assessed".
-          //
-          // Clearing availability_report_at marks the per-file report stale so
-          // the availability-report sweep regenerates it: that column IS the
-          // sweep's candidacy predicate (availabilityReportSweepWhere ->
-          // `availability_report_at IS NULL`), so nulling it here is the whole
-          // enqueue. Deliberately a column write and NOT a direct
-          // writeAvailabilityReport call: that helper does a GitHub commit
-          // (createOrUpdateFile = a GET-sha + PUT pair on raw fetch, with no
-          // rate-limit retry), and the sweep caps itself at 10 per invocation
-          // precisely because a burst of those trips GitHub's secondary rate
-          // limit. Calling it per callback would fan out unbounded writes on the
-          // shared GITHUB_ADMIN_PAT and defeat the cap the sweep exists to
-          // enforce -- #1040's rebuild of 630 archives would do exactly that.
-          `UPDATE datasets
-           SET archive_status = 'ready',
-               archive_checked_at = datetime('now'),
-               archive_size = ?,
-               archive_retry_count = 0,
-               archive_skip_reason = NULL,
-               archive_complete = COALESCE(?, archive_complete),
-               archive_absent_files = COALESCE(?, archive_absent_files),
-               archive_declared_files = COALESCE(?, archive_declared_files),
-               availability_report_at = NULL
-           WHERE dataset_id = ?`,
-        )
+        const result = await c.env.DB.prepare(ARCHIVE_READY_UPDATE_SQL)
           .bind(
             typeof body.size === "number" ? body.size : null,
             complete,

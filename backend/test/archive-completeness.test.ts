@@ -14,7 +14,10 @@ import { Database } from "bun:sqlite";
 import { beforeEach, describe, expect, test } from "bun:test";
 import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
-import { deriveArchiveCompleteness } from "../src/routes/callbacks/archive-ready.js";
+import {
+  ARCHIVE_READY_UPDATE_SQL,
+  deriveArchiveCompleteness,
+} from "../src/routes/callbacks/archive-ready.js";
 import {
   AVAILABILITY_REPORT_SWEEP_MAX,
   availabilityReportSweepCandidateQuery,
@@ -44,18 +47,9 @@ function insertDataset(db: Database, datasetId: string): void {
   ).run(datasetId, datasetId);
 }
 
-/** The exact UPDATE the 'ready' branch of archive-ready.ts runs. */
-const READY_SQL = `UPDATE datasets
-   SET archive_status = 'ready',
-       archive_checked_at = datetime('now'),
-       archive_size = ?,
-       archive_retry_count = 0,
-       archive_skip_reason = NULL,
-       archive_complete = COALESCE(?, archive_complete),
-       archive_absent_files = COALESCE(?, archive_absent_files),
-       archive_declared_files = COALESCE(?, archive_declared_files),
-       availability_report_at = NULL
-   WHERE dataset_id = ?`;
+// The route's own UPDATE (ARCHIVE_READY_UPDATE_SQL), imported rather than
+// copied so the test cannot drift from what production runs.
+const READY_SQL = ARCHIVE_READY_UPDATE_SQL;
 
 interface CompletenessRow {
   archive_complete: number | null;
@@ -212,6 +206,34 @@ describe("deriveArchiveCompleteness", () => {
     // The two good counts still yield a verdict; only `declared` is lost.
     expect(partial.complete).toBe(1);
     expect(partial.declared).toBeNull();
+  });
+
+  test("a partial tally (some counts missing) is flagged, not mistaken for no-tally", () => {
+    // The producer emits the three counts together from one stats file, so
+    // some-but-not-all means a workflow edit dropped a field. Without this
+    // signal that regression reads exactly like the legitimate no-tally skip
+    // path and the feature silently reports "not assessed" forever.
+    const got = deriveArchiveCompleteness({
+      dataset_id: "on004624",
+      absent: 0,
+      declared: 10,
+    });
+    expect(got.complete).toBeNull();
+    expect(got.malformed).toEqual(["unreadable missing"]);
+  });
+
+  test("a mangled annexed count is flagged but does not block the verdict", () => {
+    // annexed is validated with its siblings but not load-bearing: the
+    // verdict derives from absent+unreadable alone.
+    const got = deriveArchiveCompleteness({
+      dataset_id: "on004624",
+      absent: 0,
+      unreadable: 0,
+      declared: 10,
+      annexed: -5,
+    });
+    expect(got.complete).toBe(1);
+    expect(got.malformed).toEqual(["annexed"]);
   });
 
   test("unreadable>0 counts as not complete", () => {
