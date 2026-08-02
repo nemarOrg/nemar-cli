@@ -14,6 +14,11 @@
  * issue's sketch -- the callback covers it. Noted here so the divergence from
  * the issue's 4-route list is intentional, not an omission.
  *
+ * Re-linking (#913) works the same way: Settings starts the flow with
+ * `mode=relink` (behind a confirm step) and the callback swaps the linked
+ * identity when the finished iD is unclaimed. Without that mode a second,
+ * different iD is refused (`orcid_already_have`), as before.
+ *
  * Host/cookie model: these routes run on api.nemar.org but the browser reaches
  * them through the app.nemar.org same-origin proxy (like /auth/code/*), which
  * mirrors our Set-Cookie. Cookies therefore carry Domain=WEB_SESSION_COOKIE_DOMAIN
@@ -23,14 +28,19 @@
 import { zValidator } from "@hono/zod-validator";
 import { Hono } from "hono";
 import { z } from "zod";
+import { auditLogStatement } from "../db/audit-log";
 import { webSessionMiddleware } from "../middleware/webSession";
 import { constantTimeEqualHex } from "../services/auth-code";
 import {
   type OauthMode,
   PENDING_COOKIE_NAME,
+  RELINK_DELETE_IDENTITY_SQL,
+  RELINK_INSERT_IDENTITY_SQL,
+  RELINK_UPDATE_USER_SQL,
   STATE_COOKIE_NAME,
   buildAuthorizeUrl,
   decideLinkOutcome,
+  decideSecondOrcidOutcome,
   decideVerifiedFlag,
   decodeState,
   encodeState,
@@ -39,6 +49,7 @@ import {
   generateCsrf,
   getOrcidConfig,
   orcidPubBase,
+  relinkParams,
   safeNextPath,
   signPending,
   verifyPending,
@@ -185,6 +196,35 @@ function afterResponse(
   }
 }
 
+/**
+ * Swap the linked ORCID identity for an explicit relink (#913). One D1 batch
+ * == one implicit transaction: the identity swap, the users reconcile, and
+ * the audit row land together. Statement semantics (DELETE+INSERT rather
+ * than UPDATE, users.orcid overwritten) are documented on the SQL constants
+ * in orcid-auth.ts, where the behavioral test exercises them.
+ */
+async function relinkIdentity(
+  env: Bindings,
+  userId: number,
+  fromOrcid: string,
+  toOrcid: string,
+  name: string | null,
+): Promise<void> {
+  const params = relinkParams(userId, toOrcid, name);
+  await env.DB.batch([
+    env.DB.prepare(RELINK_DELETE_IDENTITY_SQL).bind(...params.deleteIdentity),
+    env.DB.prepare(RELINK_INSERT_IDENTITY_SQL).bind(...params.insertIdentity),
+    env.DB.prepare(RELINK_UPDATE_USER_SQL).bind(...params.updateUser),
+    auditLogStatement(env.DB, {
+      userId,
+      action: "orcid_relinked",
+      resourceType: "user",
+      resourceId: String(userId),
+      details: JSON.stringify({ from: fromOrcid, to: toOrcid }),
+    }),
+  ]);
+}
+
 async function touchIdentityLogin(env: Bindings, orcid: string): Promise<void> {
   await env.DB.prepare(
     "UPDATE oauth_identities SET last_login_at = datetime('now') WHERE provider = 'orcid' AND provider_subject = ?",
@@ -225,7 +265,8 @@ function clientIp(c: { req: { header: (k: string) => string | undefined } }): st
 authOrcidRoutes.get("/orcid/start", (c) => {
   const frontend = appBase(c.env);
   const url = new URL(c.req.url);
-  const mode: OauthMode = url.searchParams.get("mode") === "link" ? "link" : "login";
+  const rawMode = url.searchParams.get("mode");
+  const mode: OauthMode = rawMode === "link" || rawMode === "relink" ? rawMode : "login";
   const next = safeNextPath(url.searchParams.get("next"));
 
   const config = getOrcidConfig(c.env);
@@ -304,14 +345,21 @@ authOrcidRoutes.get("/orcid/callback", webSessionMiddleware, async (c) => {
         afterResponse(c, refreshUserName(c.env, webUser.id, orcid));
         return redirect(`${frontend}${state.next}`, [clearState]);
       }
-      // link_new: refuse a second, different ORCID on one account.
+      // link_new: the finished iD is unclaimed. If this account already has a
+      // *different* iD, only an explicit relink flow may swap it (#913);
+      // any other mode keeps the historical refusal.
       const mine = await c.env.DB.prepare(
         "SELECT provider_subject FROM oauth_identities WHERE user_id = ? AND provider = 'orcid' LIMIT 1",
       )
         .bind(webUser.id)
         .first<{ provider_subject: string }>();
       if (mine && mine.provider_subject !== orcid) {
-        return fail("orcid_already_have", state.next);
+        if (decideSecondOrcidOutcome(state.mode) === "refuse") {
+          return fail("orcid_already_have", state.next);
+        }
+        await relinkIdentity(c.env, webUser.id, mine.provider_subject, orcid, name);
+        afterResponse(c, refreshUserName(c.env, webUser.id, orcid));
+        return redirect(`${frontend}${state.next}`, [clearState]);
       }
       await linkIdentity(c.env, webUser.id, orcid, name);
       afterResponse(c, refreshUserName(c.env, webUser.id, orcid));
