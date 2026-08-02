@@ -815,7 +815,7 @@ describe.skipIf(PROD_GUARD_ACTIVE)("email change flow (#911)", () => {
     expect(r.body.dev_skip).toBe("not_allowlisted");
   });
 
-  test("happy path: request -> wrong code 401 -> verify -> email moved, session survives", async () => {
+  test("happy path: request -> wrong code -> cross-user attempt -> verify -> email moved", async () => {
     const req = await post("/auth/email/change/request", cookie, { email: newEmail });
     expect(req.status).toBe(200);
     expect(req.body.ok).toBe(true);
@@ -828,6 +828,20 @@ describe.skipIf(PROD_GUARD_ACTIVE)("email change flow (#911)", () => {
     });
     expect(wrong.status).toBe(401);
     expect(wrong.body.error).toBe("code_incorrect");
+
+    // Session binding (migration 0066): a DIFFERENT signed-in user holding
+    // the correct code — the shared-inbox scenario — cannot redeem it. The
+    // per-user lookup finds no row for them, and the code stays live for
+    // the legitimate requester below.
+    const bystanderEmail = freshEmail("emailchange-bystander");
+    await seedWebUser(bystanderEmail, "approved");
+    const bystanderCookie = await signIn(bystanderEmail);
+    const hijack = await post("/auth/email/change/verify", bystanderCookie, {
+      email: newEmail,
+      code,
+    });
+    expect(hijack.status).toBe(401);
+    expect(hijack.body.error).toBe("code_incorrect");
 
     const ok = await post("/auth/email/change/verify", cookie, { email: newEmail, code });
     expect(ok.status).toBe(200);
@@ -842,8 +856,12 @@ describe.skipIf(PROD_GUARD_ACTIVE)("email change flow (#911)", () => {
     const meBody = (await me.json()) as MeResponse;
     expect(meBody.user?.email).toBe(newEmail);
 
-    // Replaying is refused: the session user's email now IS the target, so
-    // the same_email guard fires before the (consumed) code is even read.
+    // A repeat submit is short-circuited by the same_email guard (the
+    // session user's email now IS the target) — this asserts the guard
+    // ordering, NOT single-use consumption. The consume-once conditional
+    // UPDATE mirrors /code/verify verbatim and only matters for concurrent
+    // double-submits, which an E2E suite can't force deterministically; the
+    // cross-user attempt above covers the security-relevant redemption path.
     const replay = await post("/auth/email/change/verify", cookie, { email: newEmail, code });
     expect(replay.status).toBe(409);
     expect(replay.body.error).toBe("same_email");

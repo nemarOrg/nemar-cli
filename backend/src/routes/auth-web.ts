@@ -300,10 +300,15 @@ authWebRoutes.post("/code/verify", zValidator("json", verifySchema), async (c) =
   const db = c.env.DB;
 
   try {
+    // user_id IS NULL: sign-in codes are the unauthenticated kind (0066).
+    // Email-change codes carry the requester's user_id and are consumed only
+    // by /email/change/verify — this filter keeps the two flows from ever
+    // redeeming each other's codes.
     const row = await db
       .prepare(
         `SELECT id, code_hash, attempts FROM auth_codes
-          WHERE email = ? AND used_at IS NULL AND expires_at > datetime('now')
+          WHERE email = ? AND user_id IS NULL
+            AND used_at IS NULL AND expires_at > datetime('now')
           ORDER BY created_at DESC LIMIT 1`,
       )
       .bind(email)
@@ -813,10 +818,14 @@ authWebRoutes.post(
 
       // Atomic rate-limited INSERT, keyed by the TARGET address (same shape
       // and limits as /code/request; see that route for the race reasoning).
+      // user_id binds the code to THIS session's user (0066): only the
+      // account that asked for the change can redeem it, so a second person
+      // reading a shared inbox cannot attach the address to their own
+      // account by pasting the code first.
       const insertResult = await db
         .prepare(
-          `INSERT INTO auth_codes (email, code_hash, expires_at)
-           SELECT ?, ?, ?
+          `INSERT INTO auth_codes (email, code_hash, expires_at, user_id)
+           SELECT ?, ?, ?, ?
            WHERE (SELECT COUNT(*) FROM auth_codes
                    WHERE email = ?
                      AND created_at > datetime('now','-1 minute')) < ?
@@ -824,19 +833,31 @@ authWebRoutes.post(
                    WHERE email = ?
                      AND created_at > datetime('now','-1 hour')) < ?`,
         )
-        .bind(email, codeHash, expiresAt, email, PER_MINUTE_LIMIT, email, PER_HOUR_LIMIT)
+        .bind(
+          email,
+          codeHash,
+          expiresAt,
+          webUser.id,
+          email,
+          PER_MINUTE_LIMIT,
+          email,
+          PER_HOUR_LIMIT,
+        )
         .run();
       if ((insertResult.meta?.changes ?? 0) === 0) {
         return c.json({ error: "Too many requests. Try again later." }, 429);
       }
       const newCodeId = insertResult.meta?.last_row_id ?? 0;
 
+      // Rotate only THIS user's earlier change codes for the address; another
+      // user's pending request must not be silently invalidated (their code
+      // is unusable by anyone else anyway, per the user_id binding).
       await db
         .prepare(
           `UPDATE auth_codes SET used_at = datetime('now')
-            WHERE email = ? AND used_at IS NULL AND id != ?`,
+            WHERE email = ? AND user_id = ? AND used_at IS NULL AND id != ?`,
         )
-        .bind(email, newCodeId)
+        .bind(email, webUser.id, newCodeId)
         .run();
 
       try {
@@ -918,13 +939,17 @@ authWebRoutes.post(
         return c.json({ error: "email_in_use" }, 409);
       }
 
+      // user_id = this session's user (0066): the code must have been
+      // requested by the SAME account that is redeeming it. A code read from
+      // a shared inbox by a different signed-in user finds no row here.
       const row = await db
         .prepare(
           `SELECT id, code_hash, attempts FROM auth_codes
-            WHERE email = ? AND used_at IS NULL AND expires_at > datetime('now')
+            WHERE email = ? AND user_id = ?
+              AND used_at IS NULL AND expires_at > datetime('now')
             ORDER BY created_at DESC LIMIT 1`,
         )
-        .bind(email)
+        .bind(email, webUser.id)
         .first<{ id: number; code_hash: string; attempts: number }>();
       if (!row) {
         return c.json({ error: "code_incorrect" }, 401);
@@ -974,7 +999,11 @@ authWebRoutes.post(
           }),
         ]);
       } catch (writeErr) {
-        if (String(writeErr).includes("UNIQUE")) {
+        // Column-scoped, matching the profile PATCH and signup precedents: a
+        // UNIQUE hit on anything OTHER than users.email must not be
+        // mislabeled as an address collision — rethrow to the generic 500.
+        const msg = String(writeErr);
+        if (msg.includes("UNIQUE constraint failed") && msg.includes("users.email")) {
           return c.json({ error: "email_in_use" }, 409);
         }
         throw writeErr;
