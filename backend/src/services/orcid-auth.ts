@@ -134,7 +134,7 @@ export async function exchangeCodeForOrcid(
 // so neither is exposed or tamperable in the redirect URL)
 // ---------------------------------------------------------------------
 
-export type OauthMode = "login" | "link";
+export type OauthMode = "login" | "link" | "relink";
 
 export interface OauthState {
   csrf: string;
@@ -161,7 +161,8 @@ export function decodeState(raw: string | null | undefined): OauthState | null {
   try {
     const parsed = JSON.parse(b64urlDecode(raw)) as Partial<OauthState>;
     if (typeof parsed.csrf !== "string" || parsed.csrf.length === 0) return null;
-    const mode: OauthMode = parsed.mode === "link" ? "link" : "login";
+    const mode: OauthMode =
+      parsed.mode === "link" || parsed.mode === "relink" ? parsed.mode : "login";
     const next = safeNextPath(typeof parsed.next === "string" ? parsed.next : "/");
     return { csrf: parsed.csrf, mode, next };
   } catch {
@@ -212,6 +213,58 @@ export function decideLinkOutcome(
   if (existingIdentityUserId === null) return "link_new";
   if (existingIdentityUserId === currentUserId) return "already_linked";
   return "conflict";
+}
+
+export type SecondOrcidOutcome = "replace" | "refuse";
+
+/**
+ * Decide what happens when an authenticated user completes a flow with an iD
+ * that is linked to NO account, while already having a *different* linked iD
+ * (#913). Only an explicit relink flow (Settings' "Change / re-link", which
+ * starts with mode=relink behind a confirm step) may swap the identity; a
+ * login- or link-mode completion keeps the historical refusal so a stray
+ * second sign-in can never silently rewrite which iD backs the account.
+ * The conflict case (new iD backs a DIFFERENT account) never reaches this
+ * decision — decideLinkOutcome refuses it first, in every mode.
+ */
+export function decideSecondOrcidOutcome(mode: OauthMode): SecondOrcidOutcome {
+  return mode === "relink" ? "replace" : "refuse";
+}
+
+/**
+ * The identity-swap statement set for an explicit relink (#913), exported as
+ * SQL + params so the behavioral test can run the real statements against a
+ * real SQLite (the audit-log.ts pattern). DELETE + INSERT rather than UPDATE:
+ * if a concurrent unlink already removed the row, the DELETE matches nothing
+ * and the INSERT still lands, so the final state honours the user's expressed
+ * intent either way. UNIQUE(provider, provider_subject) remains the backstop
+ * against a concurrent claim of the new iD by another account.
+ *
+ * users.orcid is deliberately overwritten here, unlike decideVerifiedFlag's
+ * keep-the-citation-value rule for first links: a relink is the user
+ * explicitly correcting which iD is theirs, so the citation value follows it
+ * and orcid_verified=1 records that the two agree (0050's invariant).
+ */
+export const RELINK_DELETE_IDENTITY_SQL =
+  "DELETE FROM oauth_identities WHERE user_id = ? AND provider = 'orcid'";
+export const RELINK_INSERT_IDENTITY_SQL = `INSERT INTO oauth_identities (user_id, provider, provider_subject, provider_email, display_name, last_login_at)
+   VALUES (?, 'orcid', ?, NULL, ?, datetime('now'))`;
+export const RELINK_UPDATE_USER_SQL = "UPDATE users SET orcid = ?, orcid_verified = 1 WHERE id = ?";
+
+export function relinkParams(
+  userId: number,
+  newOrcid: string,
+  displayName: string | null,
+): {
+  deleteIdentity: [number];
+  insertIdentity: [number, string, string | null];
+  updateUser: [string, number];
+} {
+  return {
+    deleteIdentity: [userId],
+    insertIdentity: [userId, newOrcid, displayName],
+    updateUser: [newOrcid, userId],
+  };
 }
 
 export interface VerifiedFlagDecision {

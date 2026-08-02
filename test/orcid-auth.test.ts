@@ -10,6 +10,7 @@ import {
   type OrcidConfig,
   buildAuthorizeUrl,
   decideLinkOutcome,
+  decideSecondOrcidOutcome,
   decideVerifiedFlag,
   decodeState,
   encodeState,
@@ -67,6 +68,10 @@ describe("encodeState / decodeState", () => {
     const dec = decodeState(enc);
     expect(dec).toEqual({ csrf: "abc", mode: "link", next: "/welcome" });
   });
+  test("round-trips the relink mode (#913)", () => {
+    const enc = encodeState({ csrf: "abc", mode: "relink", next: "/settings" });
+    expect(decodeState(enc)).toEqual({ csrf: "abc", mode: "relink", next: "/settings" });
+  });
   test("defaults an unknown mode to login and strips open-redirect next", () => {
     const enc = encodeState({
       csrf: "abc",
@@ -110,6 +115,14 @@ describe("decideLinkOutcome", () => {
     expect(decideLinkOutcome(null, 7)).toBe("link_new");
     expect(decideLinkOutcome(7, 7)).toBe("already_linked");
     expect(decideLinkOutcome(9, 7)).toBe("conflict");
+  });
+});
+
+describe("decideSecondOrcidOutcome (#913)", () => {
+  test("only an explicit relink flow may replace an existing linked iD", () => {
+    expect(decideSecondOrcidOutcome("relink")).toBe("replace");
+    expect(decideSecondOrcidOutcome("link")).toBe("refuse");
+    expect(decideSecondOrcidOutcome("login")).toBe("refuse");
   });
 });
 
