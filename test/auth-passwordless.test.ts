@@ -536,3 +536,162 @@ describe.skipIf(PROD_GUARD_ACTIVE)("passwordless email-code auth (#569)", () => 
     expect(meBody.user.email).not.toBe(cookieEmail);
   });
 });
+
+describe.skipIf(PROD_GUARD_ACTIVE)("PATCH /auth/profile (#912)", () => {
+  interface PatchResponse {
+    ok?: boolean;
+    user?: { id: number; email: string } & Partial<PublicUserProfile>;
+    error?: string;
+  }
+
+  async function patchProfile(
+    cookieValue: string | null,
+    body: unknown,
+    origin: string | null = ORIGIN,
+  ): Promise<{ status: number; body: PatchResponse }> {
+    const headers: Record<string, string> = {
+      "Content-Type": "application/json",
+      ...baseHeaders,
+    };
+    if (origin) headers.Origin = origin;
+    if (cookieValue) headers.Cookie = `nemar_session=${cookieValue}`;
+    const r = await fetch(`${API}/auth/profile`, {
+      method: "PATCH",
+      headers,
+      body: JSON.stringify(body),
+    });
+    return { status: r.status, body: (await r.json()) as PatchResponse };
+  }
+
+  async function signIn(email: string): Promise<string> {
+    const req = await requestCode(email);
+    expect(req.status).toBe(200);
+    const code = req.body.dev_code as string;
+    const v = await verifyCode(email, code, false);
+    expect(v.status).toBe(200);
+    const m = v.setCookie?.match(/nemar_session=([^;]+)/);
+    expect(m).toBeTruthy();
+    return m?.[1] as string;
+  }
+
+  // FIXED email, deliberately not freshEmail(): the GitHub-handle test below
+  // stores a real handle ("octocat"), and github_username is unique across
+  // users (COLLATE NOCASE dedup). With a fresh email each run, run N's row
+  // would keep the handle and 409 every later run. A fixed email means the
+  // handle only ever lives on this one row, and the dedup check excludes
+  // self — so the suite is rerun-safe with no cleanup step. Costs one
+  // /code/request per run on this address (per-email limit is 5/hour, so
+  // more than ~5 local runs in an hour will see a 429 here).
+  const PROFILE_EMAIL = "pl-profile-patch@nemar.test";
+  let cookie: string;
+
+  test("setup: seed + sign in the fixture user", async () => {
+    await seedWebUser(PROFILE_EMAIL, "approved");
+    cookie = await signIn(PROFILE_EMAIL);
+  });
+
+  test("happy path: city/country/affiliation land and ride /auth/me", async () => {
+    const r = await patchProfile(cookie, {
+      city: " San Diego ",
+      country: "USA",
+      affiliation: "UCSD",
+    });
+    expect(r.status).toBe(200);
+    expect(r.body.ok).toBe(true);
+    expect(r.body.user?.city).toBe("San Diego"); // trimmed
+    expect(r.body.user?.country).toBe("USA");
+    expect(r.body.user?.affiliation).toBe("UCSD");
+
+    const me = await fetch(`${API}/auth/me`, {
+      headers: { ...baseHeaders, Cookie: `nemar_session=${cookie}` },
+    });
+    const meBody = (await me.json()) as MeResponse;
+    expect(meBody.user?.city).toBe("San Diego");
+    expect(meBody.user?.country).toBe("USA");
+    expect(meBody.user?.affiliation).toBe("UCSD");
+  });
+
+  test("empty affiliation clears to null; city/country untouched", async () => {
+    const r = await patchProfile(cookie, { affiliation: "" });
+    expect(r.status).toBe(200);
+    expect(r.body.user?.affiliation).toBeNull();
+    expect(r.body.user?.city).toBe("San Diego");
+    expect(r.body.user?.country).toBe("USA");
+  });
+
+  test("github handle: clear, then set a real handle via the live GitHub check", async () => {
+    // Clear first so the set below is a *changed* handle every run — a
+    // same-handle re-save deliberately skips the GitHub existence call,
+    // and rerun N+1 would otherwise test nothing.
+    const cleared = await patchProfile(cookie, { github_username: "" });
+    expect(cleared.status).toBe(200);
+    expect(cleared.body.user?.github_username).toBeNull();
+
+    const set = await patchProfile(cookie, { github_username: "@Octocat" });
+    expect(set.status).toBe(200);
+    // "@" stripped, and GitHub's canonical casing stored, not what was typed.
+    expect(set.body.user?.github_username).toBe("octocat");
+  });
+
+  test("nonexistent github handle is a 400 from the live existence check", async () => {
+    const nope = `nemar-e2e-nope-${Date.now().toString(36)}`;
+    const r = await patchProfile(cookie, { github_username: nope });
+    expect(r.status).toBe(400);
+    expect(r.body.error).toBe("invalid_github_username");
+  });
+
+  test("github handle held by another user is a 409, case-insensitively", async () => {
+    // The victim is seeded with a per-run unique handle (fixture write, no
+    // GitHub call) and never signs in.
+    const otherEmail = freshEmail("profile-dup");
+    const handle = `gh-dup-${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
+    await seedWebUser(otherEmail, "approved", { github_username: handle });
+
+    const exact = await patchProfile(cookie, { github_username: handle });
+    expect(exact.status).toBe(409);
+    expect(exact.body.error).toBe("github_in_use");
+
+    const upper = await patchProfile(cookie, { github_username: handle.toUpperCase() });
+    expect(upper.status).toBe(409);
+    expect(upper.body.error).toBe("github_in_use");
+  });
+
+  test("validation errors: bad handle, empty city, empty country, empty body", async () => {
+    const badHandle = await patchProfile(cookie, { github_username: "-bad-" });
+    expect(badHandle.status).toBe(400);
+    expect(badHandle.body.error).toBe("invalid_github_username");
+
+    const emptyCity = await patchProfile(cookie, { city: "  ", country: "USA" });
+    expect(emptyCity.status).toBe(400);
+    expect(emptyCity.body.error).toBe("city_required");
+
+    const emptyCountry = await patchProfile(cookie, { city: "San Diego", country: "" });
+    expect(emptyCountry.status).toBe(400);
+    expect(emptyCountry.body.error).toBe("country_required");
+
+    const empty = await patchProfile(cookie, {});
+    expect(empty.status).toBe(400);
+    expect(empty.body.error).toBe("empty_patch");
+  });
+
+  test("no session is 401; wrong Origin is 403", async () => {
+    const anon = await patchProfile(null, { city: "San Diego", country: "USA" });
+    expect(anon.status).toBe(401);
+
+    const badOrigin = await patchProfile(
+      cookie,
+      { city: "San Diego", country: "USA" },
+      "https://evil.example",
+    );
+    expect(badOrigin.status).toBe(403);
+  });
+
+  test("name fields are not editable here (ORCID-canonical)", async () => {
+    // Unknown keys are not part of the schema; a body carrying ONLY name
+    // fields normalizes to an empty patch and is refused — proving the
+    // endpoint cannot be used to overwrite the ORCID-canonical name.
+    const r = await patchProfile(cookie, { given_name: "X", family_name: "Y" });
+    expect(r.status).toBe(400);
+    expect(r.body.error).toBe("empty_patch");
+  });
+});
