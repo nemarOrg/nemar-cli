@@ -23,7 +23,7 @@
  * to produce, so the rest of the assertions are unchanged.
  */
 
-import { describe, expect, test } from "bun:test";
+import { beforeAll, describe, expect, test } from "bun:test";
 import "./setup";
 import { TEST_CONFIG } from "./setup";
 
@@ -585,7 +585,7 @@ describe.skipIf(PROD_GUARD_ACTIVE)("PATCH /auth/profile (#912)", () => {
   const PROFILE_EMAIL = "pl-profile-patch@nemar.test";
   let cookie: string;
 
-  test("setup: seed + sign in the fixture user", async () => {
+  beforeAll(async () => {
     await seedWebUser(PROFILE_EMAIL, "approved");
     cookie = await signIn(PROFILE_EMAIL);
   });
@@ -609,6 +609,32 @@ describe.skipIf(PROD_GUARD_ACTIVE)("PATCH /auth/profile (#912)", () => {
     expect(meBody.user?.city).toBe("San Diego");
     expect(meBody.user?.country).toBe("USA");
     expect(meBody.user?.affiliation).toBe("UCSD");
+
+    // The write and its audit row land in one batch; read the row back via
+    // the admin surface to prove the batch really carried both.
+    const audit = await fetch(`${API}/admin/audit?limit=10`, {
+      headers: {
+        ...baseHeaders,
+        Authorization: `Bearer ${TEST_CONFIG.adminApiKey}`,
+      },
+    });
+    expect(audit.status).toBe(200);
+    const auditBody = (await audit.json()) as {
+      logs: { action: string; details: string | null }[];
+    };
+    const row = auditBody.logs.find(
+      (l) =>
+        l.action === "profile_updated" &&
+        l.details != null &&
+        l.details.includes('"San Diego"') &&
+        l.details.includes('"UCSD"'),
+    );
+    expect(row).toBeTruthy();
+    expect(JSON.parse(row?.details ?? "{}")).toEqual({
+      city: "San Diego",
+      country: "USA",
+      affiliation: "UCSD",
+    });
   });
 
   test("empty affiliation clears to null; city/country untouched", async () => {
@@ -635,6 +661,12 @@ describe.skipIf(PROD_GUARD_ACTIVE)("PATCH /auth/profile (#912)", () => {
     expect(set.status).toBe(200);
     // "@" stripped, and GitHub's canonical casing stored, not what was typed.
     expect(set.body.user?.github_username).toBe("mojombo");
+
+    // Re-saving the stored handle takes the unchanged-skip path (no GitHub
+    // call, no dedup) and must still 200 with the value intact.
+    const resave = await patchProfile(cookie, { github_username: "mojombo" });
+    expect(resave.status).toBe(200);
+    expect(resave.body.user?.github_username).toBe("mojombo");
 
     // Leave the fixture row with no handle: a real handle parked on a
     // persistent dev-DB row is exactly how the octocat incident broke CI.
@@ -682,6 +714,12 @@ describe.skipIf(PROD_GUARD_ACTIVE)("PATCH /auth/profile (#912)", () => {
     const empty = await patchProfile(cookie, {});
     expect(empty.status).toBe(400);
     expect(empty.body.error).toBe("empty_patch");
+
+    // Over the zod bound (affiliation max 200): rejected at the schema
+    // layer. That 400 is zod-shaped, not {error, message} — the website
+    // shows its generic copy for it, which is the accepted contract.
+    const oversize = await patchProfile(cookie, { affiliation: "x".repeat(201) });
+    expect(oversize.status).toBe(400);
   });
 
   test("no session is 401; wrong Origin is 403", async () => {

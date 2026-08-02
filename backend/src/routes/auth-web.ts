@@ -609,7 +609,9 @@ authWebRoutes.patch(
       // row land together. Details carry the new values — profile fields,
       // not secrets — so an admin can reconstruct what changed.
       await db.batch([
-        db.prepare(`UPDATE users SET ${sets.join(", ")} WHERE id = ?`).bind(...binds, webUser.id),
+        db
+          .prepare(`UPDATE users SET ${sets.join(", ")} WHERE id = ? AND deleted_at IS NULL`)
+          .bind(...binds, webUser.id),
         auditLogStatement(db, {
           userId: webUser.id,
           action: "profile_updated",
@@ -670,6 +672,17 @@ authWebRoutes.patch(
         }),
       });
     } catch (err) {
+      // Safety net for the TOCTOU window past the dedup SELECTs: two
+      // concurrent PATCHes claiming the same free handle both pass the
+      // pre-check, and the loser's UPDATE hits idx_users_github (0012,
+      // COLLATE NOCASE). Same net CLI signup carries in auth.ts.
+      const msg = String(err);
+      if (msg.includes("UNIQUE constraint failed") && msg.includes("users.github_username")) {
+        return c.json(
+          { error: "github_in_use", message: "GitHub account already linked to another user" },
+          409,
+        );
+      }
       console.error("[auth-web] /profile PATCH failed", err);
       return c.json({ error: "Failed to update profile" }, 500);
     }
