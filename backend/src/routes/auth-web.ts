@@ -793,6 +793,13 @@ authWebRoutes.post(
       if (email === webUser.email.toLowerCase()) {
         return c.json({ error: "same_email" }, 409);
       }
+      // Deliberate, bounded enumeration tradeoff (PR #1053 review): unlike
+      // /code/request's #595 silent skip, this DOES tell the caller whether
+      // an address is registered — without it, a legitimate rename to a
+      // taken address dead-ends on a code that can never verify. The oracle
+      // is bounded: caller must hold a session, the route sits in the
+      // auth-ip bucket (10/min/IP, rateLimit.ts), and the per-user cap
+      // below throttles how fast one account can cycle targets.
       const collision = await db
         .prepare("SELECT id FROM users WHERE email = ? AND deleted_at IS NULL LIMIT 1")
         .bind(email)
@@ -802,13 +809,13 @@ authWebRoutes.post(
       }
 
       // #1008 analogue: the non-production D1 mirrors real production users,
-      // so a staging QA session must not be able to mail an arbitrary real
-      // address. Outside production, only send when the requester is an
-      // admin/owner (testing with an address they control) or the target is
-      // a synthetic test address. Same silent-ok shape as /code/request so
-      // the flow dead-ends quietly rather than leaking which gate fired.
-      const privilegedRequester = webUser.role === "admin" || webUser.role === "owner";
-      if (isDevOrTest(c.env) && !privilegedRequester && !nonProdCodeEchoAllowed(email)) {
+      // so a staging session must not be able to mail an arbitrary real
+      // address — this endpoint targets addresses precisely because they're
+      // NOT registered, so /code/request's registered-user allowlist can't
+      // apply. Outside production only synthetic test targets get a send,
+      // with no role bypass (an admin session must not be a mail-anyone
+      // primitive either). Same silent-ok shape as /code/request.
+      if (isDevOrTest(c.env) && !nonProdCodeEchoAllowed(email)) {
         return c.json({ ok: true, masked_email: maskEmail(email), dev_skip: "not_allowlisted" });
       }
 
@@ -822,6 +829,10 @@ authWebRoutes.post(
       // account that asked for the change can redeem it, so a second person
       // reading a shared inbox cannot attach the address to their own
       // account by pasting the code first.
+      // The third guard caps one ACCOUNT's change requests per hour across
+      // ALL targets (the per-email guards only throttle repeats to one
+      // address) — without it a single session could cycle distinct
+      // addresses to spray codes or enumerate faster than the per-IP floor.
       const insertResult = await db
         .prepare(
           `INSERT INTO auth_codes (email, code_hash, expires_at, user_id)
@@ -831,6 +842,9 @@ authWebRoutes.post(
                      AND created_at > datetime('now','-1 minute')) < ?
              AND (SELECT COUNT(*) FROM auth_codes
                    WHERE email = ?
+                     AND created_at > datetime('now','-1 hour')) < ?
+             AND (SELECT COUNT(*) FROM auth_codes
+                   WHERE user_id = ?
                      AND created_at > datetime('now','-1 hour')) < ?`,
         )
         .bind(
@@ -841,6 +855,8 @@ authWebRoutes.post(
           email,
           PER_MINUTE_LIMIT,
           email,
+          PER_HOUR_LIMIT,
+          webUser.id,
           PER_HOUR_LIMIT,
         )
         .run();
